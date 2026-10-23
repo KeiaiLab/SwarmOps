@@ -47,6 +47,7 @@ fn in_class(class: &str, b: u8) -> bool {
 ///
 /// The agent name always follows the grammar below, also in an identity read from JSON.
 #[derive(Serialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Identity {
     /// `<family>/<instance>`, exactly as the schema's `pattern` and `maxLength` give it.
     #[schemars(pattern(agent_pattern()), length(max = MAX_AGENT_LEN))]

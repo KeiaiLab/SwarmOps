@@ -76,30 +76,19 @@ fn a_land_request_takes_its_defaults() {
         (8, 32, 32_768)
     );
     let req: LandReq = serde_json::from_value(json!({"head": "x"})).unwrap();
-    assert_eq!(
-        req,
-        LandReq {
-            head: Rev::from("x"),
-            base: None,
-            target: "main".to_owned(),
-            message: None,
-            idempotency_key: None,
-            max_attempts: 8,
-            max_conflict_bytes: 32_768,
-            expect_target: None,
-            resolutions: None,
-        }
-    );
+    let mut expected = LandReq::new("x");
+    expected.target = "main".to_owned();
+    expected.max_attempts = 8;
+    expected.max_conflict_bytes = 32_768;
+    assert_eq!(req, expected);
     assert_eq!(
         serde_json::to_string(&req).unwrap(),
         r#"{"head":"x","target":"main","max_attempts":8,"max_conflict_bytes":32768}"#
     );
-    let full = LandReq {
-        base: Some(Rev::from("b1")),
-        message: Some("land it".to_owned()),
-        idempotency_key: Some("0192f0c4-7a1b-7c3d-8e4f-5a6b7c8d9e0f".to_owned()),
-        ..req
-    };
+    let mut full = req;
+    full.base = Some(Rev::from("b1"));
+    full.message = Some("land it".to_owned());
+    full.idempotency_key = Some("0192f0c4-7a1b-7c3d-8e4f-5a6b7c8d9e0f".to_owned());
     assert_eq!(
         round_trip(&full),
         concat!(
@@ -141,15 +130,17 @@ fn a_land_request_carries_its_resolutions() {
         r#""c":{"content":{"inline":"c\n"},"mode":"exec"},"d":{"delete":true}}}}"#
     );
     let req: LandReq = serde_json::from_str(text).unwrap();
-    let only = |take, content, mode, delete| ResolutionInput {
-        take,
-        content,
-        mode,
-        delete,
+    let only = |take, content, mode, delete| {
+        let mut resolution = ResolutionInput::default();
+        resolution.take = take;
+        resolution.content = content;
+        resolution.mode = mode;
+        resolution.delete = delete;
+        resolution
     };
-    let expected = ResolutionsInput {
-        against: Rev::from("m9"),
-        files: BTreeMap::from([
+    let expected = ResolutionsInput::new(
+        Rev::from("m9"),
+        BTreeMap::from([
             ("a".to_owned(), only(Some(Side::Ours), None, None, false)),
             ("b".to_owned(), only(Some(Side::Theirs), None, None, false)),
             (
@@ -163,7 +154,7 @@ fn a_land_request_carries_its_resolutions() {
             ),
             ("d".to_owned(), only(None, None, None, true)),
         ]),
-    };
+    );
     assert_eq!(req.resolutions.as_ref(), Some(&expected));
     assert_eq!(round_trip(&req), text);
     let plain: LandReq = serde_json::from_value(json!({"head": "h7"})).unwrap();
@@ -184,16 +175,8 @@ fn a_land_request_carries_its_resolutions() {
     assert_eq!(resolution.get("required"), None, "every field is optional");
     assert!(all["ConflictReport"]["properties"].get("stale").is_some());
 
-    let report = ConflictReport {
-        base: "b1".to_owned(),
-        ours: "h7".to_owned(),
-        theirs: "m9".to_owned(),
-        files: Vec::new(),
-        kinds: Vec::new(),
-        auto_merged: Vec::new(),
-        stale: vec!["src/lib.rs".to_owned()],
-        truncated: false,
-    };
+    let mut report = ConflictReport::new("b1", "h7", "m9", Vec::new(), Vec::new(), false);
+    report.stale = vec!["src/lib.rs".to_owned()];
     assert_eq!(
         round_trip(&report),
         r#"{"base":"b1","ours":"h7","theirs":"m9","files":[],"kinds":[],"stale":["src/lib.rs"],"truncated":false}"#
@@ -205,19 +188,17 @@ fn a_land_request_carries_its_resolutions() {
 #[test]
 fn an_op_log_request_takes_its_defaults() {
     assert_eq!((DEFAULT_OP_LOG_LIMIT, DEFAULT_MAX_CHANGESETS), (50, 20));
+    let mut expected = OpLogReq::default();
+    expected.limit = 50;
+    expected.max_changesets = 20;
     assert_eq!(
         serde_json::from_value::<OpLogReq>(json!({})).unwrap(),
-        OpLogReq {
-            before: None,
-            limit: 50,
-            max_changesets: 20,
-        }
+        expected
     );
-    let page = OpLogReq {
-        before: Some(31),
-        limit: 5,
-        max_changesets: 0,
-    };
+    let mut page = OpLogReq::default();
+    page.before = Some(31);
+    page.limit = 5;
+    page.max_changesets = 0;
     assert_eq!(
         round_trip(&page),
         r#"{"before":31,"limit":5,"max_changesets":0}"#
@@ -228,7 +209,7 @@ fn an_op_log_request_takes_its_defaults() {
 
     assert_eq!(all["UndoReq"]["required"], json!(["op"]));
     assert!(serde_json::from_value::<UndoReq>(json!({})).is_err());
-    assert_eq!(round_trip(&UndoReq { op: 41 }), r#"{"op":41}"#);
+    assert_eq!(round_trip(&UndoReq::new(41)), r#"{"op":41}"#);
 }
 
 /// Requests and responses alike read as before with a field they do not know (operations spec
@@ -298,11 +279,9 @@ fn a_commit_response_without_replayed_reads_as_false() {
     );
     assert_eq!(round_trip(&read), now);
 
-    let replayed = CommitResp {
-        replayed: true,
-        warnings: vec!["the commit is durable".to_owned()],
-        ..read
-    };
+    let mut replayed = read;
+    replayed.replayed = true;
+    replayed.warnings = vec!["the commit is durable".to_owned()];
     assert!(
         round_trip(&replayed).ends_with(r#""warnings":["the commit is durable"],"replayed":true}"#)
     );
@@ -315,34 +294,29 @@ fn a_commit_response_without_replayed_reads_as_false() {
 #[test]
 fn a_commit_request_carries_its_key_after_advance() {
     let key = "0192f0c4-7a1b-7c3d-8e4f-5a6b7c8d9e0f";
-    let keyed = CommitReq {
-        parent: Some(Rev::from("c9f0")),
-        changes: Vec::new(),
-        message: "m".to_owned(),
-        advance: Some("main".to_owned()),
-        idempotency_key: Some(key.to_owned()),
-        allow_empty: true,
-    };
+    let mut keyed = CommitReq::new(Vec::new(), "m");
+    keyed.parent = Some(Rev::from("c9f0"));
+    keyed.advance = Some("main".to_owned());
+    keyed.idempotency_key = Some(key.to_owned());
+    keyed.allow_empty = true;
     assert_eq!(
         round_trip(&keyed),
         format!(
             r#"{{"parent":"c9f0","changes":[],"message":"m","advance":"main","idempotency_key":"{key}","allow_empty":true}}"#
         )
     );
-    let plain = CommitReq {
-        idempotency_key: None,
-        ..keyed
-    };
+    let mut plain = keyed;
+    plain.idempotency_key = None;
     assert!(!round_trip(&plain).contains("idempotency_key"));
 }
 
 fn signature() -> SignatureOut {
-    SignatureOut {
-        name: "agent/worker-17".to_owned(),
-        email: "worker-17@agent.swarmops.local".to_owned(),
-        secs: 1_760_000_000,
-        offset_secs: 0,
-    }
+    SignatureOut::new(
+        "agent/worker-17",
+        "worker-17@agent.swarmops.local",
+        1_760_000_000,
+        0,
+    )
 }
 
 /// `show` names who landed a changeset, the land's key and the changesets it squashed only for a
@@ -350,40 +324,28 @@ fn signature() -> SignatureOut {
 /// spec's row puts them: `lander` after `author`, `land_key` and `squashed_from` after `message`.
 #[test]
 fn show_names_a_land_only_for_a_changeset_a_land_made() {
-    let mut detail = ChangesetDetail {
-        id: "c9f1".to_owned(),
-        seq: 7,
-        parents: vec!["m9".to_owned()],
-        root: "7a0b".to_owned(),
-        author: Attribution {
-            agent: "agent/worker-17".to_owned(),
-            run_id: None,
-            on_behalf_of: None,
-        },
-        lander: None,
-        created_at: 0,
-        message: "m".to_owned(),
-        land_key: None,
-        squashed_from: Vec::new(),
-        changes: Vec::new(),
-        files_changed: 0,
-        changes_truncated: false,
-        metadata: BTreeMap::new(),
-        signatures: Signatures {
-            author: signature(),
-            committer: signature(),
-        },
-    };
+    let mut detail = ChangesetDetail::new(
+        "c9f1",
+        7,
+        vec!["m9".to_owned()],
+        "7a0b",
+        Attribution::new("agent/worker-17"),
+        0,
+        "m",
+        Vec::new(),
+        0,
+        false,
+        BTreeMap::new(),
+        Signatures::new(signature(), signature()),
+    );
     let plain = round_trip(&detail);
     for key in ["lander", "land_key", "squashed_from"] {
         assert!(!plain.contains(key), "{key}: {plain}");
     }
 
-    detail.lander = Some(Attribution {
-        agent: "agent/lander-1".to_owned(),
-        run_id: Some("run-9".to_owned()),
-        on_behalf_of: None,
-    });
+    let mut by = Attribution::new("agent/lander-1");
+    by.run_id = Some("run-9".to_owned());
+    detail.lander = Some(by);
     detail.land_key = Some("k-1".to_owned());
     detail.squashed_from = vec!["h6".to_owned(), "h7".to_owned()];
     let landed = round_trip(&detail);
@@ -400,19 +362,17 @@ fn show_names_a_land_only_for_a_changeset_a_land_made() {
 /// when empty, everything else is written; `status` is `landed` or `replayed`.
 #[test]
 fn a_land_response_has_the_spec_shape() {
-    let mut resp = LandResp {
-        status: LandStatus::Landed,
-        landed: "l1".to_owned(),
-        rebased_onto: "m9".to_owned(),
-        target: "main".to_owned(),
-        base: "b1".to_owned(),
-        attempts: 1,
-        relocated: false,
-        files_changed: 2,
-        squashed_from: vec!["h6".to_owned(), "h7".to_owned()],
-        auto_merged: Vec::new(),
-        warnings: Vec::new(),
-    };
+    let mut resp = LandResp::new(
+        LandStatus::Landed,
+        "l1",
+        "m9",
+        "main",
+        "b1",
+        1,
+        false,
+        2,
+        vec!["h6".to_owned(), "h7".to_owned()],
+    );
     assert_eq!(
         round_trip(&resp),
         concat!(
@@ -435,11 +395,9 @@ fn a_land_response_has_the_spec_shape() {
 
 /// A side of a hunk: lines `first` to `last`, numbered from 1, both included.
 fn lines(first: u64, last: u64, text: &str) -> LinesOut {
-    LinesOut {
-        first,
-        last,
-        text: Some(text.to_owned()),
-    }
+    let mut lines = LinesOut::new(first, last);
+    lines.text = Some(text.to_owned());
+    lines
 }
 
 /// The report `E_CONFLICT` carries in `details.report` (operations spec §3): each file with its
@@ -449,41 +407,30 @@ fn lines(first: u64, last: u64, text: &str) -> LinesOut {
 /// positions kept. Absent blobs, attribution and hunks are omitted.
 #[test]
 fn a_conflict_report_has_the_spec_shape() {
-    let content = FileConflictOut {
-        path: "src/lib.rs".to_owned(),
-        kind: ConflictKindOut::Content,
-        base_blob: Some("e1".to_owned()),
-        ours_blob: Some("e2".to_owned()),
-        theirs_blob: Some("e3".to_owned()),
-        hunks: vec![HunkOut {
-            id: 0,
-            base: lines(11, 12, "a\nb\n"),
-            ours: lines(11, 13, "a\nB\nc\n"),
-            theirs: lines(11, 10, ""),
-        }],
-        theirs_changeset: Some("m9".to_owned()),
-        theirs_agent: Some("agent/worker-3".to_owned()),
-    };
-    let deleted = FileConflictOut {
-        path: "docs/x.md".to_owned(),
-        kind: ConflictKindOut::DeleteModify,
-        base_blob: Some("e4".to_owned()),
-        ours_blob: None,
-        theirs_blob: Some("e5".to_owned()),
-        hunks: Vec::new(),
-        theirs_changeset: None,
-        theirs_agent: None,
-    };
-    let mut report = ConflictReport {
-        base: "b1".to_owned(),
-        ours: "h7".to_owned(),
-        theirs: "m9".to_owned(),
-        files: vec![content, deleted],
-        kinds: vec![ConflictKindOut::Content, ConflictKindOut::DeleteModify],
-        auto_merged: vec!["src/other.rs".to_owned()],
-        stale: Vec::new(),
-        truncated: false,
-    };
+    let mut content = FileConflictOut::new("src/lib.rs", ConflictKindOut::Content);
+    content.base_blob = Some("e1".to_owned());
+    content.ours_blob = Some("e2".to_owned());
+    content.theirs_blob = Some("e3".to_owned());
+    content.hunks = vec![HunkOut::new(
+        0,
+        lines(11, 12, "a\nb\n"),
+        lines(11, 13, "a\nB\nc\n"),
+        lines(11, 10, ""),
+    )];
+    content.theirs_changeset = Some("m9".to_owned());
+    content.theirs_agent = Some("agent/worker-3".to_owned());
+    let mut deleted = FileConflictOut::new("docs/x.md", ConflictKindOut::DeleteModify);
+    deleted.base_blob = Some("e4".to_owned());
+    deleted.theirs_blob = Some("e5".to_owned());
+    let mut report = ConflictReport::new(
+        "b1",
+        "h7",
+        "m9",
+        vec![content, deleted],
+        vec![ConflictKindOut::Content, ConflictKindOut::DeleteModify],
+        false,
+    );
+    report.auto_merged = vec!["src/other.rs".to_owned()];
     let hunk = concat!(
         r#"{"id":0,"base":{"first":11,"last":12,"text":"a\nb\n"},"#,
         r#""ours":{"first":11,"last":13,"text":"a\nB\nc\n"},"#,
@@ -546,29 +493,25 @@ fn a_conflict_report_has_the_spec_shape() {
 /// restored already wrote nothing, so it has no `op`.
 #[test]
 fn an_op_log_page_and_an_undo_have_the_spec_shape() {
-    let moved = |old: Option<&str>, new: Option<&str>| RefMoveOut {
-        name: "main".to_owned(),
-        old: old.map(str::to_owned),
-        new: new.map(str::to_owned),
-        actor: "agent/worker-17".to_owned(),
-        at: 1_760_000_000,
+    let moved = |old: Option<&str>, new: Option<&str>| {
+        let mut moved = RefMoveOut::new("main", "agent/worker-17", 1_760_000_000);
+        moved.old = old.map(str::to_owned);
+        moved.new = new.map(str::to_owned);
+        moved
     };
-    let page = OpLogPage {
-        ops: vec![OperationOut {
-            op: 41,
-            kind: OperationKind::Land,
-            changesets: vec![OpChangesetOut {
-                id: "l1".to_owned(),
-                agent: "agent/worker-3".to_owned(),
-                created_at: 1_760_000_000_000,
-                title: "fix the parser".to_owned(),
-                land_key: Some("k-1".to_owned()),
-            }],
-            changesets_total: 1,
-            ref_moves: vec![moved(Some("m9"), Some("l1"))],
-        }],
-        truncated: true,
-    };
+    let mut landed =
+        OpChangesetOut::new("l1", "agent/worker-3", 1_760_000_000_000, "fix the parser");
+    landed.land_key = Some("k-1".to_owned());
+    let page = OpLogPage::new(
+        vec![OperationOut::new(
+            41,
+            OperationKind::Land,
+            vec![landed],
+            1,
+            vec![moved(Some("m9"), Some("l1"))],
+        )],
+        true,
+    );
     let actor = r#""actor":"agent/worker-17","at":1760000000"#;
     assert_eq!(
         round_trip(&page),
@@ -611,26 +554,16 @@ fn an_op_log_page_and_an_undo_have_the_spec_shape() {
         ])
     );
 
-    let undo = UndoResp {
-        undone: 41,
-        op: Some(42),
-        ref_moves: vec![moved(Some("l1"), Some("m9"))],
-        already_applied: false,
-        warnings: vec!["the undo is durable".to_owned()],
-    };
+    let mut undo = UndoResp::new(41, vec![moved(Some("l1"), Some("m9"))], false);
+    undo.op = Some(42);
+    undo.warnings = vec!["the undo is durable".to_owned()];
     assert_eq!(
         round_trip(&undo),
         format!(
             r#"{{"undone":41,"op":42,"ref_moves":[{{"name":"main","old":"l1","new":"m9",{actor}}}],"already_applied":false,"warnings":["the undo is durable"]}}"#
         )
     );
-    let replay = UndoResp {
-        undone: 41,
-        op: None,
-        ref_moves: Vec::new(),
-        already_applied: true,
-        warnings: Vec::new(),
-    };
+    let replay = UndoResp::new(41, Vec::new(), true);
     assert_eq!(
         round_trip(&replay),
         r#"{"undone":41,"ref_moves":[],"already_applied":true}"#

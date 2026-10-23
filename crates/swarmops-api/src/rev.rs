@@ -10,9 +10,15 @@ use serde::{Deserialize, Serialize};
 /// optionally followed by `~N` for the N-th first-parent ancestor.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 #[serde(transparent)]
+#[non_exhaustive]
 pub struct Rev(pub String);
 
 impl Rev {
+    /// The revision `rev`, as written.
+    pub fn new(rev: impl Into<String>) -> Self {
+        Self(rev.into())
+    }
+
     /// The revision as written.
     pub fn as_str(&self) -> &str {
         &self.0

@@ -294,61 +294,84 @@ fn every_operation_takes_a_request_and_returns_a_response() {
 /// `E_INTERNAL`, from the M4 plan for `E_NOTHING_TO_UNDO` and `E_OP_NOT_FOUND`, from the M13
 /// plan for the four `E_REMOTE_*` codes, from the M5 plan for `E_WS_UNPORTABLE` and
 /// `E_CHECK_FAILED` (the other seven M5 codes are the operations spec's), and by the `E_<NAME>` convention for `E_TYPE_CONFLICT`,
-/// `E_UNKNOWN_PARENT` and `E_IO`. A new variant does not compile here until its row is added.
-fn spec_row(code: ErrorCode) -> (&'static str, i32, bool) {
-    match code {
-        ErrorCode::ExistsAlready => ("E_EXISTS", 1, false),
-        ErrorCode::NotARepo => ("E_NOT_A_REPO", 6, false),
-        ErrorCode::IdentityRequired => ("E_IDENTITY_REQUIRED", 5, false),
-        ErrorCode::RevNotFound => ("E_REV_NOT_FOUND", 6, false),
-        ErrorCode::AmbiguousId => ("E_AMBIGUOUS_ID", 1, false),
-        ErrorCode::PathNotFound => ("E_PATH_NOT_FOUND", 6, false),
-        ErrorCode::IsDir => ("E_IS_DIR", 1, false),
-        ErrorCode::TooLarge => ("E_TOO_LARGE", 1, false),
-        ErrorCode::EmptyCommit => ("E_EMPTY_COMMIT", 1, false),
-        ErrorCode::TypeConflict => ("E_TYPE_CONFLICT", 1, false),
-        ErrorCode::UnknownParent => ("E_UNKNOWN_PARENT", 6, false),
-        ErrorCode::CasMismatch => ("E_CAS_MISMATCH", 4, true),
-        ErrorCode::RefNotFound => ("E_REF_NOT_FOUND", 6, false),
-        ErrorCode::RefNameInvalid => ("E_REF_NAME_INVALID", 1, false),
-        ErrorCode::StoreCorrupt => ("E_STORE_CORRUPT", 1, false),
-        ErrorCode::InvalidArg => ("E_INVALID_ARG", 2, false),
-        ErrorCode::UnsupportedFs => ("E_UNSUPPORTED_FS", 1, false),
-        ErrorCode::Io => ("E_IO", 1, false),
-        ErrorCode::IoTransient => ("E_IO_TRANSIENT", 4, true),
-        ErrorCode::Busy => ("E_BUSY", 4, true),
-        ErrorCode::Internal => ("E_INTERNAL", 1, false),
-        ErrorCode::Conflict => ("E_CONFLICT", 3, false),
-        ErrorCode::CasRetryExhausted => ("E_CAS_RETRY_EXHAUSTED", 4, true),
-        ErrorCode::NothingToLand => ("E_NOTHING_TO_LAND", 1, false),
-        ErrorCode::NothingToUndo => ("E_NOTHING_TO_UNDO", 1, false),
-        ErrorCode::OpNotFound => ("E_OP_NOT_FOUND", 6, false),
-        ErrorCode::Auth => ("E_AUTH", 5, false),
-        ErrorCode::PolicyDenied => ("E_POLICY_DENIED", 5, false),
-        ErrorCode::MaintenanceBusy => ("E_MAINTENANCE_BUSY", 4, true),
-        ErrorCode::GitNotARepo => ("E_GIT_NOT_A_REPO", 6, false),
-        ErrorCode::GitRefNotFound => ("E_GIT_REF_NOT_FOUND", 6, false),
-        ErrorCode::GitImportDiverged => ("E_GIT_IMPORT_DIVERGED", 3, false),
-        ErrorCode::GitImportLossy => ("E_GIT_IMPORT_LOSSY", 1, false),
-        ErrorCode::GitUnsupported => ("E_GIT_UNSUPPORTED", 1, false),
-        ErrorCode::GitRead => ("E_GIT_READ", 1, false),
-        ErrorCode::GitExportDiverged => ("E_GIT_EXPORT_DIVERGED", 3, false),
-        ErrorCode::GitWrite => ("E_GIT_WRITE", 1, false),
-        ErrorCode::RemoteDiverged => ("E_REMOTE_DIVERGED", 3, false),
-        ErrorCode::RemoteRejected => ("E_REMOTE_REJECTED", 5, false),
-        ErrorCode::RemoteUnreachable => ("E_REMOTE_UNREACHABLE", 4, true),
-        ErrorCode::RemoteNotFound => ("E_REMOTE_NOT_FOUND", 6, false),
-        ErrorCode::WsExists => ("E_WS_EXISTS", 1, false),
-        ErrorCode::WsNotFound => ("E_WS_NOT_FOUND", 6, false),
-        ErrorCode::WsLocked => ("E_WS_LOCKED", 4, true),
-        ErrorCode::WsDirty => ("E_WS_DIRTY", 1, false),
-        ErrorCode::PathNotEmpty => ("E_PATH_NOT_EMPTY", 1, false),
-        ErrorCode::UnresolvedConflicts => ("E_UNRESOLVED_CONFLICTS", 1, false),
-        ErrorCode::MarkersPresent => ("E_MARKERS_PRESENT", 1, false),
-        ErrorCode::WsUnportable => ("E_WS_UNPORTABLE", 1, false),
-        ErrorCode::CheckFailed => ("E_CHECK_FAILED", 1, false),
-    }
-}
+/// `E_UNKNOWN_PARENT` and `E_IO`. A new variant fails the test below until its row is added.
+const ROWS: &[(ErrorCode, &str, i32, bool)] = &[
+    (ErrorCode::ExistsAlready, "E_EXISTS", 1, false),
+    (ErrorCode::NotARepo, "E_NOT_A_REPO", 6, false),
+    (ErrorCode::IdentityRequired, "E_IDENTITY_REQUIRED", 5, false),
+    (ErrorCode::RevNotFound, "E_REV_NOT_FOUND", 6, false),
+    (ErrorCode::AmbiguousId, "E_AMBIGUOUS_ID", 1, false),
+    (ErrorCode::PathNotFound, "E_PATH_NOT_FOUND", 6, false),
+    (ErrorCode::IsDir, "E_IS_DIR", 1, false),
+    (ErrorCode::TooLarge, "E_TOO_LARGE", 1, false),
+    (ErrorCode::EmptyCommit, "E_EMPTY_COMMIT", 1, false),
+    (ErrorCode::TypeConflict, "E_TYPE_CONFLICT", 1, false),
+    (ErrorCode::UnknownParent, "E_UNKNOWN_PARENT", 6, false),
+    (ErrorCode::CasMismatch, "E_CAS_MISMATCH", 4, true),
+    (ErrorCode::RefNotFound, "E_REF_NOT_FOUND", 6, false),
+    (ErrorCode::RefNameInvalid, "E_REF_NAME_INVALID", 1, false),
+    (ErrorCode::StoreCorrupt, "E_STORE_CORRUPT", 1, false),
+    (ErrorCode::InvalidArg, "E_INVALID_ARG", 2, false),
+    (ErrorCode::UnsupportedFs, "E_UNSUPPORTED_FS", 1, false),
+    (ErrorCode::Io, "E_IO", 1, false),
+    (ErrorCode::IoTransient, "E_IO_TRANSIENT", 4, true),
+    (ErrorCode::Busy, "E_BUSY", 4, true),
+    (ErrorCode::Internal, "E_INTERNAL", 1, false),
+    (ErrorCode::Conflict, "E_CONFLICT", 3, false),
+    (
+        ErrorCode::CasRetryExhausted,
+        "E_CAS_RETRY_EXHAUSTED",
+        4,
+        true,
+    ),
+    (ErrorCode::NothingToLand, "E_NOTHING_TO_LAND", 1, false),
+    (ErrorCode::NothingToUndo, "E_NOTHING_TO_UNDO", 1, false),
+    (ErrorCode::OpNotFound, "E_OP_NOT_FOUND", 6, false),
+    (ErrorCode::Auth, "E_AUTH", 5, false),
+    (ErrorCode::PolicyDenied, "E_POLICY_DENIED", 5, false),
+    (ErrorCode::MaintenanceBusy, "E_MAINTENANCE_BUSY", 4, true),
+    (ErrorCode::GitNotARepo, "E_GIT_NOT_A_REPO", 6, false),
+    (ErrorCode::GitRefNotFound, "E_GIT_REF_NOT_FOUND", 6, false),
+    (
+        ErrorCode::GitImportDiverged,
+        "E_GIT_IMPORT_DIVERGED",
+        3,
+        false,
+    ),
+    (ErrorCode::GitImportLossy, "E_GIT_IMPORT_LOSSY", 1, false),
+    (ErrorCode::GitUnsupported, "E_GIT_UNSUPPORTED", 1, false),
+    (ErrorCode::GitRead, "E_GIT_READ", 1, false),
+    (
+        ErrorCode::GitExportDiverged,
+        "E_GIT_EXPORT_DIVERGED",
+        3,
+        false,
+    ),
+    (ErrorCode::GitWrite, "E_GIT_WRITE", 1, false),
+    (ErrorCode::RemoteDiverged, "E_REMOTE_DIVERGED", 3, false),
+    (ErrorCode::RemoteRejected, "E_REMOTE_REJECTED", 5, false),
+    (
+        ErrorCode::RemoteUnreachable,
+        "E_REMOTE_UNREACHABLE",
+        4,
+        true,
+    ),
+    (ErrorCode::RemoteNotFound, "E_REMOTE_NOT_FOUND", 6, false),
+    (ErrorCode::WsExists, "E_WS_EXISTS", 1, false),
+    (ErrorCode::WsNotFound, "E_WS_NOT_FOUND", 6, false),
+    (ErrorCode::WsLocked, "E_WS_LOCKED", 4, true),
+    (ErrorCode::WsDirty, "E_WS_DIRTY", 1, false),
+    (ErrorCode::PathNotEmpty, "E_PATH_NOT_EMPTY", 1, false),
+    (
+        ErrorCode::UnresolvedConflicts,
+        "E_UNRESOLVED_CONFLICTS",
+        1,
+        false,
+    ),
+    (ErrorCode::MarkersPresent, "E_MARKERS_PRESENT", 1, false),
+    (ErrorCode::WsUnportable, "E_WS_UNPORTABLE", 1, false),
+    (ErrorCode::CheckFailed, "E_CHECK_FAILED", 1, false),
+];
 
 #[test]
 fn error_codes_map_to_spec_strings_and_exits() {
@@ -362,9 +385,14 @@ fn error_codes_map_to_spec_strings_and_exits() {
     assert_eq!(ErrorCode::Internal.exit(), 1);
     assert!(!ErrorCode::Internal.retryable());
 
+    // ROWS holds one row for each code: none missing, none extra.
+    assert_eq!(ROWS.len(), ErrorCode::ALL.len(), "ROWS and ErrorCode::ALL");
     let mut listed = BTreeSet::new();
     for &code in ErrorCode::ALL {
-        let (name, exit, retryable) = spec_row(code);
+        let &(_, name, exit, retryable) = ROWS
+            .iter()
+            .find(|row| row.0 == code)
+            .unwrap_or_else(|| panic!("{code:?} has no row in ROWS"));
         assert_eq!(
             (code.as_str(), code.exit(), code.retryable()),
             (name, exit, retryable),
@@ -375,17 +403,13 @@ fn error_codes_map_to_spec_strings_and_exits() {
             serde_json::from_value::<ErrorCode>(json!(name)).unwrap(),
             code
         );
+        let error = OpError::new(code, "boom");
         assert_eq!(
-            OpError::new(code, "boom"),
-            OpError {
-                code: name.to_owned(),
-                message: "boom".to_owned(),
-                retryable,
-                exit,
-                details: Map::new(),
-                hint: None,
-            }
+            (error.code.as_str(), error.message.as_str()),
+            (name, "boom")
         );
+        assert_eq!((error.retryable, error.exit), (retryable, exit));
+        assert_eq!((error.details, error.hint), (Map::new(), None));
         assert!(listed.insert(name), "{name} is listed twice");
     }
 
@@ -413,27 +437,16 @@ fn error_codes_map_to_spec_strings_and_exits() {
 }
 
 fn meta() -> Meta {
-    Meta {
-        repo: None,
-        elapsed_ms: 12,
-        resolved: BTreeMap::from([("main".to_owned(), "c9f1".to_owned())]),
-        auth: "trust".to_owned(),
-        recovered: None,
-    }
+    Meta::new(
+        12,
+        BTreeMap::from([("main".to_owned(), "c9f1".to_owned())]),
+        "trust",
+    )
 }
 
 #[test]
 fn envelope_serializes_without_nulls_for_success() {
-    let result = CommitResp {
-        changeset: "c9f1".to_owned(),
-        parent: None,
-        root: "7a0b".to_owned(),
-        files_changed: 2,
-        blobs_written: 1,
-        advanced: None,
-        warnings: Vec::new(),
-        replayed: false,
-    };
+    let result = CommitResp::new("c9f1", "7a0b", 2, 1);
     let envelope = Envelope::ok("commit", result, meta());
     assert_eq!(envelope.api, API_VERSION);
     assert_eq!(API_VERSION, 1);
@@ -475,21 +488,19 @@ fn meta_reports_a_recovery_only_when_a_write_made_one() {
         r#"{"elapsed_ms":12,"resolved":{"main":"c9f1"},"auth":"trust"}"#
     );
     let counts = r#""frames_rewritten":0,"off_bytes_dropped":0,"index_records_dropped":0,"views_rebuilt":false"#;
-    meta.recovered = Some(RecoveredOut {
-        frames_listed: 1,
-        records_replayed: 1,
-        ..RecoveredOut::default()
-    });
+    let mut listing = RecoveredOut::default();
+    listing.frames_listed = 1;
+    listing.records_replayed = 1;
+    meta.recovered = Some(listing);
     let listed = serde_json::to_string(&meta).unwrap();
     let want = format!(
         r#"{{"elapsed_ms":12,"resolved":{{"main":"c9f1"}},"auth":"trust","recovered":{{"frames_listed":1,{counts},"records_replayed":1,"refs_replayed":0}}}}"#
     );
     assert_eq!(listed, want);
     assert_eq!(serde_json::from_str::<Meta>(&listed).unwrap(), meta);
-    meta.recovered = Some(RecoveredOut {
-        log_cut: Some(LogCutOut { at: 257, bytes: 18 }),
-        ..RecoveredOut::default()
-    });
+    let mut cutting = RecoveredOut::default();
+    cutting.log_cut = Some(LogCutOut::new(257, 18));
+    meta.recovered = Some(cutting);
     let cut = serde_json::to_string(&meta).unwrap();
     assert!(
         cut.ends_with(&format!(
@@ -803,55 +814,32 @@ fn omitted_request_fields_take_their_defaults() {
     assert_eq!(DEFAULT_LOG_LIMIT, 50);
     assert_eq!(
         serde_json::from_value::<InfoReq>(json!({})).unwrap(),
-        InfoReq {}
+        InfoReq::default()
     );
     assert_eq!(
         serde_json::from_value::<RefListReq>(json!({})).unwrap(),
-        RefListReq {}
+        RefListReq::default()
     );
     assert_eq!(
         serde_json::from_value::<VerifyReq>(json!({})).unwrap(),
-        VerifyReq { deep: false }
+        VerifyReq::default()
     );
     assert_eq!(
         serde_json::from_value::<ReadFileReq>(json!({"rev": "main", "path": "src/lib.rs"}))
             .unwrap(),
-        ReadFileReq {
-            rev: Rev("main".to_owned()),
-            path: "src/lib.rs".to_owned(),
-            offset: 0,
-            lines: None,
-            max_bytes: DEFAULT_MAX_BYTES,
-        }
+        ReadFileReq::new(Rev::from("main"), "src/lib.rs")
     );
     assert_eq!(
         serde_json::from_value::<LogReq>(json!({})).unwrap(),
-        LogReq {
-            rev: None,
-            limit: DEFAULT_LOG_LIMIT,
-            cursor: None,
-            paths: Vec::new(),
-        }
+        LogReq::default()
     );
     assert_eq!(
         serde_json::from_value::<RefSetReq>(json!({"name": "main", "new": "c9f1"})).unwrap(),
-        RefSetReq {
-            name: "main".to_owned(),
-            new: Rev("c9f1".to_owned()),
-            expected_old: None,
-            create: false,
-        }
+        RefSetReq::new("main", Rev::from("c9f1"))
     );
     assert_eq!(
         serde_json::from_value::<CommitReq>(json!({"message": "m", "changes": []})).unwrap(),
-        CommitReq {
-            parent: None,
-            message: "m".to_owned(),
-            changes: Vec::new(),
-            allow_empty: false,
-            advance: None,
-            idempotency_key: None,
-        }
+        CommitReq::new(Vec::new(), "m")
     );
 }
 
@@ -867,18 +855,16 @@ fn change_lists_and_enums_use_their_wire_forms() {
         ],
     });
     let commit: CommitReq = serde_json::from_value(wire).unwrap();
-    let put = |path: &str, content: ContentInput, mode: Option<ModeInput>| ChangeInput {
-        path: path.to_owned(),
-        op: ChangeOp::Put,
-        content: Some(content),
-        mode,
+    let put = |path: &str, content: ContentInput, mode: Option<ModeInput>| {
+        let mut change = ChangeInput::new(path, ChangeOp::Put);
+        change.content = Some(content);
+        change.mode = mode;
+        change
     };
     assert_eq!(
         commit,
-        CommitReq {
-            parent: None,
-            message: "add files".to_owned(),
-            changes: vec![
+        CommitReq::new(
+            vec![
                 put("a.txt", ContentInput::Inline("hi\n".to_owned()), None),
                 put(
                     "bin/run",
@@ -890,37 +876,22 @@ fn change_lists_and_enums_use_their_wire_forms() {
                     ContentInput::File("./target.txt".to_owned()),
                     Some(ModeInput::Symlink)
                 ),
-                ChangeInput {
-                    path: "old.txt".to_owned(),
-                    op: ChangeOp::Delete,
-                    content: None,
-                    mode: None,
-                },
+                ChangeInput::new("old.txt", ChangeOp::Delete),
             ],
-            allow_empty: false,
-            advance: None,
-            idempotency_key: None,
-        }
+            "add files"
+        )
     );
     // Serializing writes no nulls for the options left out, and keeps the spec's field order
     // (`{parent, changes}, message, allow_empty`).
-    let rooted = CommitReq {
-        parent: Some(Rev("main".to_owned())),
-        changes: vec![commit.changes[3].clone()],
-        message: "m".to_owned(),
-        allow_empty: true,
-        advance: None,
-        idempotency_key: None,
-    };
+    let mut rooted = CommitReq::new(vec![commit.changes[3].clone()], "m");
+    rooted.parent = Some(Rev::from("main"));
+    rooted.allow_empty = true;
     assert_eq!(
         serde_json::to_string(&rooted).unwrap(),
         r#"{"parent":"main","changes":[{"path":"old.txt","op":"delete"}],"message":"m","allow_empty":true}"#
     );
 
-    assert_eq!(
-        serde_json::to_value(Rev("main~2".to_owned())).unwrap(),
-        "main~2"
-    );
+    assert_eq!(serde_json::to_value(Rev::from("main~2")).unwrap(), "main~2");
     assert_eq!(
         serde_json::to_value([ModeInput::File, ModeInput::Exec, ModeInput::Symlink]).unwrap(),
         json!(["file", "exec", "symlink"])
@@ -963,33 +934,24 @@ fn change_lists_and_enums_use_their_wire_forms() {
 /// commit's move, which created the ref; a commit that advanced none omits `advanced` (no null).
 #[test]
 fn a_commit_that_advances_a_ref_says_so() {
-    let advancing = CommitReq {
-        parent: Some(Rev("c9f0".to_owned())),
-        changes: Vec::new(),
-        message: "m".to_owned(),
-        advance: Some("main".to_owned()),
-        idempotency_key: None,
-        allow_empty: true,
-    };
+    let mut advancing = CommitReq::new(Vec::new(), "m");
+    advancing.parent = Some(Rev::from("c9f0"));
+    advancing.advance = Some("main".to_owned());
+    advancing.allow_empty = true;
     assert_eq!(
         serde_json::to_string(&advancing).unwrap(),
         r#"{"parent":"c9f0","changes":[],"message":"m","advance":"main","allow_empty":true}"#
     );
-    let moved = |old: Option<&str>| swarmops_api::Advanced {
-        name: "main".to_owned(),
-        old: old.map(str::to_owned),
-        new: "c9f1".to_owned(),
-        already_applied: false,
+    let moved = |old: Option<&str>| {
+        let mut moved = swarmops_api::Advanced::new("main", "c9f1", false);
+        moved.old = old.map(str::to_owned);
+        moved
     };
-    let resp = |parent: Option<&str>, advanced| CommitResp {
-        changeset: "c9f1".to_owned(),
-        parent: parent.map(str::to_owned),
-        root: "7a0b".to_owned(),
-        files_changed: 1,
-        blobs_written: 1,
-        advanced,
-        warnings: Vec::new(),
-        replayed: false,
+    let resp = |parent: Option<&str>, advanced| {
+        let mut resp = CommitResp::new("c9f1", "7a0b", 1, 1);
+        resp.parent = parent.map(str::to_owned);
+        resp.advanced = advanced;
+        resp
     };
     let cases = [
         (
@@ -1011,69 +973,45 @@ fn a_commit_that_advances_a_ref_says_so() {
 }
 
 fn signature() -> SignatureOut {
-    SignatureOut {
-        name: "agent/worker-17".to_owned(),
-        email: "worker-17@agent.swarmops.local".to_owned(),
-        secs: 1_760_000_000,
-        offset_secs: 0,
-    }
+    SignatureOut::new(
+        "agent/worker-17",
+        "worker-17@agent.swarmops.local",
+        1_760_000_000,
+        0,
+    )
 }
 
 #[test]
 fn responses_follow_the_spec_shape_and_field_order() {
-    let info = RepoInfo {
-        repo_id: "r1".to_owned(),
-        name: "acme".to_owned(),
-        main: Some("c9f1".to_owned()),
-        store_version: 1,
-        changesets: 3,
-        refs: 1,
-    };
+    let mut info = RepoInfo::new("r1", "acme", 1, 3, 1);
+    info.main = Some("c9f1".to_owned());
     assert_eq!(
         serde_json::to_string(&info).unwrap(),
         r#"{"repo_id":"r1","name":"acme","main":"c9f1","store_version":1,"changesets":3,"refs":1}"#
     );
 
-    let detail = ChangesetDetail {
-        id: "c9f1".to_owned(),
-        seq: 7,
-        parents: vec!["b0b0".to_owned()],
-        root: "7a0b".to_owned(),
-        author: Attribution {
-            agent: "agent/worker-17".to_owned(),
-            run_id: Some("run-3".to_owned()),
-            on_behalf_of: None,
-        },
-        lander: None,
-        created_at: 1_760_000_000_000,
-        message: "add files".to_owned(),
-        land_key: None,
-        squashed_from: Vec::new(),
-        changes: vec![
-            ChangeOut {
-                path: "a.txt".to_owned(),
-                op: ChangeOp::Put,
-                kind: Some(FileKind::File),
-                blob: Some("b1".to_owned()),
-            },
-            ChangeOut {
-                path: "old.txt".to_owned(),
-                op: ChangeOp::Delete,
-                kind: None,
-                blob: None,
-            },
-        ],
-        files_changed: 3,
-        changes_truncated: true,
-        metadata: BTreeMap::from([
+    let mut author = Attribution::new("agent/worker-17");
+    author.run_id = Some("run-3".to_owned());
+    let mut added = ChangeOut::new("a.txt", ChangeOp::Put);
+    added.kind = Some(FileKind::File);
+    added.blob = Some("b1".to_owned());
+    let detail = ChangesetDetail::new(
+        "c9f1",
+        7,
+        vec!["b0b0".to_owned()],
+        "7a0b",
+        author,
+        1_760_000_000_000,
+        "add files",
+        vec![added, ChangeOut::new("old.txt", ChangeOp::Delete)],
+        3,
+        true,
+        BTreeMap::from([
             ("agent".to_owned(), "agent/worker-17".to_owned()),
             ("run_id".to_owned(), "run-3".to_owned()),
         ]),
-        signatures: Signatures {
-            author: signature(),
-            committer: signature(),
-        },
-    };
+        Signatures::new(signature(), signature()),
+    );
     let text = serde_json::to_string(&detail).unwrap();
     let git = r#"{"name":"agent/worker-17","email":"worker-17@agent.swarmops.local","secs":1760000000,"offset_secs":0}"#;
     assert_eq!(
@@ -1102,17 +1040,14 @@ fn responses_follow_the_spec_shape_and_field_order() {
         );
     }
 
-    let file = FileContent {
-        blob: "b1".to_owned(),
-        size: 3,
-        kind: FileKind::Exec,
-        encoding: ContentEncoding::Utf8,
-        content: "hi\n".to_owned(),
-        truncated: false,
-        offset: None,
-        lines: None,
-        next_offset: None,
-    };
+    let file = FileContent::new(
+        "b1",
+        3,
+        FileKind::Exec,
+        ContentEncoding::Utf8,
+        "hi\n",
+        false,
+    );
     assert_eq!(
         serde_json::to_string(&file).unwrap(),
         r#"{"blob":"b1","size":3,"kind":"exec","encoding":"utf8","content":"hi\n","truncated":false}"#
@@ -1121,13 +1056,9 @@ fn responses_follow_the_spec_shape_and_field_order() {
 
 #[test]
 fn ref_moves_carry_warnings_only_when_there_are_some() {
-    let mut moved = RefSetResp {
-        name: "main".to_owned(),
-        old: Some("b0b0".to_owned()),
-        new: Some("c9f1".to_owned()),
-        already_applied: false,
-        warnings: Vec::new(),
-    };
+    let mut moved = RefSetResp::new("main", false);
+    moved.old = Some("b0b0".to_owned());
+    moved.new = Some("c9f1".to_owned());
     assert_eq!(
         serde_json::to_string(&moved).unwrap(),
         r#"{"name":"main","old":"b0b0","new":"c9f1","already_applied":false}"#
@@ -1243,36 +1174,23 @@ fn verify_report_carries_findings_beside_problems() {
     )
     .unwrap();
     assert_eq!(before.findings, []);
-    let dangling = VerifyFinding {
-        kind: "dangling_ref".to_owned(),
-        object: None,
-        changeset: None,
-        parent: None,
-        seq: None,
-        offset: None,
-        ref_name: Some("main".to_owned()),
-        cause: None,
-        system: None,
-        key: None,
-        derivation: None,
-    };
-    let report = VerifyReport {
-        objects_checked: 3,
-        changesets_checked: 1,
-        problems: vec!["ref main names no changeset in the store".to_owned()],
-        findings: vec![dangling],
-    };
+    let mut dangling = VerifyFinding::new("dangling_ref");
+    dangling.ref_name = Some("main".to_owned());
+    let mut report = VerifyReport::new(
+        3,
+        1,
+        vec!["ref main names no changeset in the store".to_owned()],
+    );
+    report.findings = vec![dangling];
     let text = serde_json::to_string(&report).unwrap();
     assert_eq!(
         text,
         r#"{"objects_checked":3,"changesets_checked":1,"problems":["ref main names no changeset in the store"],"findings":[{"kind":"dangling_ref","ref":"main"}]}"#
     );
     assert_eq!(serde_json::from_str::<VerifyReport>(&text).unwrap(), report);
-    let clean = VerifyReport {
-        problems: Vec::new(),
-        findings: Vec::new(),
-        ..report
-    };
+    let mut clean = report;
+    clean.problems = Vec::new();
+    clean.findings = Vec::new();
     assert_eq!(
         serde_json::to_string(&clean).unwrap(),
         r#"{"objects_checked":3,"changesets_checked":1,"problems":[],"findings":[]}"#
@@ -1299,81 +1217,56 @@ fn listings_page_with_truncated_and_cursor() {
     }
     assert_eq!(
         serde_json::from_value::<ReadTreeReq>(json!({"rev": "main"})).unwrap(),
-        ReadTreeReq {
-            rev: Rev("main".to_owned()),
-            path: None,
-            depth: 1,
-            limit: DEFAULT_READ_TREE_LIMIT,
-            cursor: None,
-        }
+        ReadTreeReq::new(Rev::from("main"))
     );
+    let mut paged = ReadTreeReq::new("main");
+    paged.path = Some("src".to_owned());
+    paged.depth = 1;
+    paged.limit = 2;
+    paged.cursor = Some("b.rs".to_owned());
     assert_eq!(
         serde_json::from_value::<ReadTreeReq>(
             json!({"rev": "main", "path": "src", "limit": 2, "cursor": "b.rs"})
         )
         .unwrap(),
-        ReadTreeReq {
-            rev: Rev("main".to_owned()),
-            path: Some("src".to_owned()),
-            depth: 1,
-            limit: 2,
-            cursor: Some("b.rs".to_owned()),
-        }
+        paged
     );
     assert_eq!(
         serde_json::from_value::<ShowReq>(json!({"rev": "main"})).unwrap(),
-        ShowReq {
-            rev: Rev("main".to_owned()),
-            max_changes: DEFAULT_MAX_CHANGES,
-        }
+        ShowReq::new(Rev::from("main"))
     );
+    let mut resumed = LogReq::default();
+    resumed.limit = DEFAULT_LOG_LIMIT;
+    resumed.cursor = Some("c9f1".to_owned());
     assert_eq!(
         serde_json::from_value::<LogReq>(json!({"cursor": "c9f1"})).unwrap(),
-        LogReq {
-            rev: None,
-            limit: DEFAULT_LOG_LIMIT,
-            cursor: Some("c9f1".to_owned()),
-            paths: Vec::new(),
-        }
+        resumed
     );
 
-    let entry = |name: &str| TreeEntryOut {
-        name: name.to_owned(),
-        path: None,
-        kind: EntryKindOut::File,
-        size: None,
-        id: "b1".to_owned(),
-    };
-    let page = TreeListing {
-        entries: vec![entry("a.rs"), entry("b.rs")],
-        truncated: true,
-        cursor: Some("b.rs".to_owned()),
-    };
+    let entry = |name: &str| TreeEntryOut::new(name.to_owned(), EntryKindOut::File, "b1");
+    let mut page = TreeListing::new(vec![entry("a.rs"), entry("b.rs")], true);
+    page.cursor = Some("b.rs".to_owned());
     assert_eq!(
         serde_json::to_string(&page).unwrap(),
         r#"{"entries":[{"name":"a.rs","kind":"file","id":"b1"},{"name":"b.rs","kind":"file","id":"b1"}],"truncated":true,"cursor":"b.rs"}"#
     );
-    let last = TreeListing {
-        entries: vec![entry("c.rs")],
-        truncated: false,
-        cursor: None,
-    };
+    let last = TreeListing::new(vec![entry("c.rs")], false);
     assert_eq!(
         serde_json::to_string(&last).unwrap(),
         r#"{"entries":[{"name":"c.rs","kind":"file","id":"b1"}],"truncated":false}"#
     );
 
-    let log = LogPage {
-        entries: vec![ChangesetSummary {
-            id: "c9f1".to_owned(),
-            parents: vec!["b0b0".to_owned()],
-            author_agent: "human/purple".to_owned(),
-            created_at: 1_760_000_000_000,
-            title: "add files".to_owned(),
-        }],
-        truncated: true,
-        cursor: Some("c9f1".to_owned()),
-    };
+    let mut log = LogPage::new(
+        vec![ChangesetSummary::new(
+            "c9f1",
+            vec!["b0b0".to_owned()],
+            "human/purple",
+            1_760_000_000_000,
+            "add files",
+        )],
+        true,
+    );
+    log.cursor = Some("c9f1".to_owned());
     assert_eq!(
         serde_json::to_string(&log).unwrap(),
         r#"{"entries":[{"id":"c9f1","parents":["b0b0"],"author_agent":"human/purple","created_at":1760000000000,"title":"add files"}],"truncated":true,"cursor":"c9f1"}"#
@@ -1417,19 +1310,12 @@ mod path_history {
         assert_eq!(all["PathHistoryReq"]["required"], json!(["path"]));
         assert_eq!(
             serde_json::from_value::<PathHistoryReq>(json!({"path": "src"})).unwrap(),
-            PathHistoryReq {
-                rev: None,
-                path: "src".to_owned(),
-                limit: DEFAULT_PATH_HISTORY_LIMIT,
-                cursor: None,
-            }
+            PathHistoryReq::new("src")
         );
-        let req = PathHistoryReq {
-            rev: Some(Rev("main~1".to_owned())),
-            path: "src/".to_owned(),
-            limit: 2,
-            cursor: Some("c9f1".to_owned()),
-        };
+        let mut req = PathHistoryReq::new("src/");
+        req.rev = Some(Rev::from("main~1"));
+        req.limit = 2;
+        req.cursor = Some("c9f1".to_owned());
         assert_eq!(
             serde_json::to_string(&req).unwrap(),
             r#"{"rev":"main~1","path":"src/","limit":2,"cursor":"c9f1"}"#
@@ -1438,11 +1324,9 @@ mod path_history {
 
         let log = serde_json::from_value::<LogReq>(json!({"paths": ["src", "README.md"]})).unwrap();
         assert_eq!(log.paths, ["src", "README.md"]);
-        let every = serde_json::to_value(LogReq {
-            paths: Vec::new(),
-            ..log.clone()
-        })
-        .unwrap();
+        let mut every = log.clone();
+        every.paths = Vec::new();
+        let every = serde_json::to_value(every).unwrap();
         assert!(every.get("paths").is_none(), "{every}");
         assert_eq!(
             serde_json::to_value(&log).unwrap()["paths"],
@@ -1454,21 +1338,17 @@ mod path_history {
                 .is_none_or(|required| !required.contains(&json!("paths")))
         );
 
-        let entry = |changeset: &str, put: bool| PathHistoryEntry {
-            changeset: changeset.to_owned(),
-            op: if put { ChangeOp::Put } else { ChangeOp::Delete },
-            kind: put.then_some(EntryKindOut::Dir),
-            id: put.then(|| "7a0b".to_owned()),
-            author_agent: "human/purple".to_owned(),
-            created_at: 1_760_000_000_000,
-            title: "t".to_owned(),
+        let entry = |changeset: &str, put: bool| {
+            let op = if put { ChangeOp::Put } else { ChangeOp::Delete };
+            let mut entry =
+                PathHistoryEntry::new(changeset, op, "human/purple", 1_760_000_000_000, "t");
+            entry.kind = put.then_some(EntryKindOut::Dir);
+            entry.id = put.then(|| "7a0b".to_owned());
+            entry
         };
-        let page = PathHistoryPage {
-            path: "src".to_owned(),
-            entries: vec![entry("c9f1", false), entry("b0b0", true)],
-            truncated: true,
-            cursor: Some("b0b0".to_owned()),
-        };
+        let mut page =
+            PathHistoryPage::new("src", vec![entry("c9f1", false), entry("b0b0", true)], true);
+        page.cursor = Some("b0b0".to_owned());
         let text = serde_json::to_string(&page).unwrap();
         assert_eq!(
             text,
@@ -1514,20 +1394,14 @@ fn blobs_by_id_use_their_wire_forms() {
     );
     let put: BlobPutReq = serde_json::from_value(json!({"content": {"base64": "AAE="}})).unwrap();
     assert_eq!(put.content, ContentInput::Base64("AAE=".to_owned()));
-    let stored = BlobPutResp {
-        blob: id.clone(),
-        size: 2,
-        written: false,
-    };
+    let stored = BlobPutResp::new(id.clone(), 2, false);
     assert_eq!(
         serde_json::to_string(&stored).unwrap(),
         format!(r#"{{"blob":"{id}","size":2,"written":false}}"#)
     );
     let has: BlobHasReq = serde_json::from_value(json!({"ids": [id]})).unwrap();
     assert_eq!(has.ids, vec![id.clone()]);
-    let present = BlobHasResp {
-        present: vec![id.clone()],
-    };
+    let present = BlobHasResp::new(vec![id.clone()]);
     assert_eq!(
         serde_json::to_string(&present).unwrap(),
         format!(r#"{{"present":["{id}"]}}"#)
@@ -1559,38 +1433,25 @@ mod spans {
         }
         let by_lines = json!({"rev": "main", "path": "a", "lines": {"first": 3, "last": 5}});
         let req: ReadFileReq = serde_json::from_value(by_lines).unwrap();
-        assert_eq!(
-            (req.offset, req.lines),
-            (0, Some(LineRange { first: 3, last: 5 }))
-        );
+        assert_eq!((req.offset, req.lines), (0, Some(LineRange::new(3, 5))));
         let req: ReadTreeReq = serde_json::from_value(json!({"rev": "main"})).unwrap();
         assert_eq!(req.depth, 1);
     }
 
     #[test]
     fn a_part_of_a_file_and_an_entry_below_say_where_they_are() {
-        let part = FileContent {
-            blob: "b1".to_owned(),
-            size: 30,
-            kind: FileKind::File,
-            encoding: ContentEncoding::Utf8,
-            content: "x\n".to_owned(),
-            truncated: true,
-            offset: Some(10),
-            lines: Some(LineRange { first: 3, last: 5 }),
-            next_offset: Some(12),
-        };
+        let mut part =
+            FileContent::new("b1", 30, FileKind::File, ContentEncoding::Utf8, "x\n", true);
+        part.offset = Some(10);
+        part.lines = Some(LineRange::new(3, 5));
+        part.next_offset = Some(12);
         assert_eq!(
             serde_json::to_string(&part).unwrap(),
             r#"{"blob":"b1","size":30,"kind":"file","encoding":"utf8","content":"x\n","truncated":true,"offset":10,"lines":{"first":3,"last":5},"next_offset":12}"#
         );
-        let below = TreeEntryOut {
-            name: "b.rs".to_owned(),
-            path: Some("a/b.rs".to_owned()),
-            kind: EntryKindOut::File,
-            size: Some(10),
-            id: "b1".to_owned(),
-        };
+        let mut below = TreeEntryOut::new("b.rs", EntryKindOut::File, "b1");
+        below.path = Some("a/b.rs".to_owned());
+        below.size = Some(10);
         assert_eq!(
             serde_json::to_string(&below).unwrap(),
             r#"{"name":"b.rs","path":"a/b.rs","kind":"file","size":10,"id":"b1"}"#
@@ -1609,23 +1470,18 @@ mod derive {
     fn derive_takes_after_and_limit_and_gives_counts_and_next() {
         assert_eq!(DEFAULT_DERIVE_LIMIT, 1000);
         let defaults: DeriveReq = serde_json::from_value(json!({})).unwrap();
-        let limit = DEFAULT_DERIVE_LIMIT;
-        assert_eq!(defaults, DeriveReq { after: None, limit });
+        let mut expected = DeriveReq::default();
+        expected.limit = DEFAULT_DERIVE_LIMIT;
+        assert_eq!(defaults, expected);
         assert_ignores_unknown_fields::<DeriveReq>("DeriveReq", json!({"after": 7}));
         assert_ignores_unknown_fields::<DeriveResp>(
             "DeriveResp",
             json!({"derived": 1, "cached": 2, "next": 7}),
         );
-        let req = DeriveReq {
-            after: None,
-            limit: 5,
-        };
+        let mut req = DeriveReq::default();
+        req.limit = 5;
         assert_eq!(serde_json::to_value(&req).unwrap(), json!({"limit": 5}));
-        let resp = DeriveResp {
-            derived: 1,
-            cached: 2,
-            next: None,
-        };
+        let resp = DeriveResp::new(1, 2);
         let printed = serde_json::to_string(&resp).unwrap();
         assert_eq!(
             printed, r#"{"derived":1,"cached":2}"#,
@@ -1659,30 +1515,21 @@ mod diff {
         );
         let minimal = json!({"from": "main~1", "to": "main"});
         let req: DiffReq = serde_json::from_value(minimal.clone()).unwrap();
-        assert_eq!(
-            req,
-            DiffReq {
-                from: Rev::from("main~1"),
-                to: Rev::from("main"),
-                paths: Vec::new(),
-                format: DiffFormat::Names,
-                context: DEFAULT_DIFF_CONTEXT,
-                limit: DEFAULT_DIFF_LIMIT,
-                cursor: None,
-                max_bytes: DEFAULT_DIFF_MAX_BYTES,
-            }
-        );
+        let mut expected = DiffReq::new("main~1", "main");
+        expected.format = DiffFormat::Names;
+        expected.context = DEFAULT_DIFF_CONTEXT;
+        expected.limit = DEFAULT_DIFF_LIMIT;
+        expected.max_bytes = DEFAULT_DIFF_MAX_BYTES;
+        assert_eq!(req, expected);
         assert_ignores_unknown_fields::<DiffReq>("DiffReq", minimal);
         assert_eq!(
             serde_json::to_string(&req).unwrap(),
             r#"{"from":"main~1","to":"main","format":"names","context":3,"limit":500,"max_bytes":32768}"#
         );
-        let full = DiffReq {
-            paths: vec!["src".to_owned()],
-            format: DiffFormat::Unified,
-            cursor: Some("src/a.rs".to_owned()),
-            ..req
-        };
+        let mut full = req;
+        full.paths = vec!["src".to_owned()];
+        full.format = DiffFormat::Unified;
+        full.cursor = Some("src/a.rs".to_owned());
         assert_eq!(
             serde_json::to_string(&full).unwrap(),
             r#"{"from":"main~1","to":"main","paths":["src"],"format":"unified","context":3,"limit":500,"cursor":"src/a.rs","max_bytes":32768}"#
@@ -1720,49 +1567,26 @@ mod diff {
     /// back as written, and ignores fields it does not know, a file's too.
     #[test]
     fn diff_pages_write_what_each_format_gives() {
-        let named = FileDiff {
-            path: "a.txt".to_owned(),
-            status: DiffStatus::Deleted,
-            old_kind: None,
-            new_kind: None,
-            old_blob: None,
-            new_blob: None,
-            binary: None,
-            insertions: None,
-            deletions: None,
-            hunks: None,
-            hunks_truncated: None,
-        };
-        let line = |op, text: &str| DiffLineOut {
-            op,
-            text: text.to_owned(),
-        };
-        let unified = FileDiff {
-            path: "b.txt".to_owned(),
-            status: DiffStatus::Modified,
-            old_kind: Some(FileKind::File),
-            new_kind: Some(FileKind::Exec),
-            old_blob: Some("b0".to_owned()),
-            new_blob: Some("b1".to_owned()),
-            binary: Some(false),
-            insertions: Some(1),
-            deletions: Some(1),
-            hunks: Some(vec![DiffHunk {
-                old_start: 1,
-                old_lines: 1,
-                new_start: 1,
-                new_lines: 1,
-                lines: vec![line(LineOp::Remove, "x\n"), line(LineOp::Add, "y")],
-            }]),
-            hunks_truncated: Some(true),
-        };
-        let page = Diff {
-            from: "c0".to_owned(),
-            to: "c1".to_owned(),
-            files: vec![named, unified],
-            truncated: true,
-            cursor: Some("b.txt".to_owned()),
-        };
+        let named = FileDiff::new("a.txt", DiffStatus::Deleted);
+        let line = |op, text: &str| DiffLineOut::new(op, text.to_owned());
+        let mut unified = FileDiff::new("b.txt", DiffStatus::Modified);
+        unified.old_kind = Some(FileKind::File);
+        unified.new_kind = Some(FileKind::Exec);
+        unified.old_blob = Some("b0".to_owned());
+        unified.new_blob = Some("b1".to_owned());
+        unified.binary = Some(false);
+        unified.insertions = Some(1);
+        unified.deletions = Some(1);
+        unified.hunks = Some(vec![DiffHunk::new(
+            1,
+            1,
+            1,
+            1,
+            vec![line(LineOp::Remove, "x\n"), line(LineOp::Add, "y")],
+        )]);
+        unified.hunks_truncated = Some(true);
+        let mut page = Diff::new("c0", "c1", vec![named, unified], true);
+        page.cursor = Some("b.txt".to_owned());
         let text = serde_json::to_string(&page).unwrap();
         assert_eq!(
             text,
@@ -1793,10 +1617,7 @@ fn resolve_rev_uses_its_wire_forms() {
 
     assert_ignores_unknown_fields::<ResolveRevReq>("ResolveRevReq", json!({"rev": "main~1"}));
     assert_ignores_unknown_fields::<ResolvedRev>("ResolvedRev", json!({"id": "c", "kind": "ref"}));
-    let resolved = ResolvedRev {
-        id: "c".to_owned(),
-        kind: RevKind::Changeset,
-    };
+    let resolved = ResolvedRev::new("c", RevKind::Changeset);
     assert_eq!(
         serde_json::to_value(&resolved).unwrap(),
         json!({"id": "c", "kind": "changeset"})
@@ -1822,12 +1643,7 @@ mod git_import {
     fn a_git_import_request_takes_its_defaults() {
         assert_eq!(
             serde_json::from_value::<GitImportReq>(json!({"git_path": "x"})).unwrap(),
-            GitImportReq {
-                git_path: "x".to_owned(),
-                git_ref: "HEAD".to_owned(),
-                target_ref: "main".to_owned(),
-                lossy: Vec::new(),
-            }
+            GitImportReq::new("x")
         );
         assert!(serde_json::from_value::<GitImportReq>(json!({"git_ref": "HEAD"})).is_err());
         let schema = &schema_for_all()["GitImportReq"];
@@ -1843,15 +1659,11 @@ mod git_import {
 
         let wire = r#"{"git_path":"../example","git_ref":"refs/heads/stable","target_ref":"release/example","lossy":["gitlinks","tree_order"]}"#;
         let req: GitImportReq = serde_json::from_str(wire).unwrap();
-        assert_eq!(
-            req,
-            GitImportReq {
-                git_path: "../example".to_owned(),
-                git_ref: "refs/heads/stable".to_owned(),
-                target_ref: "release/example".to_owned(),
-                lossy: vec![LossyClass::Gitlinks, LossyClass::TreeOrder],
-            }
-        );
+        let mut expected = GitImportReq::new("../example");
+        expected.git_ref = "refs/heads/stable".to_owned();
+        expected.target_ref = "release/example".to_owned();
+        expected.lossy = vec![LossyClass::Gitlinks, LossyClass::TreeOrder];
+        assert_eq!(req, expected);
         assert_eq!(serde_json::to_string(&req).unwrap(), wire);
         assert_ignores_unknown_fields::<GitImportReq>("GitImportReq", json!({"git_path": "x"}));
     }
@@ -1937,35 +1749,22 @@ mod git_import {
     /// its classes.
     #[test]
     fn a_git_import_response_follows_the_spec_shape() {
-        let created = GitImportResp {
-            imported: 5,
-            skipped: 0,
-            head_changeset: "c9f1".to_owned(),
-            git_head_sha: "4b82".to_owned(),
-            target_ref: "main".to_owned(),
-            ref_moved: true,
-            old_head: None,
-            lossy: Vec::new(),
-            lossy_total: 0,
-            warnings: Vec::new(),
-        };
+        let created = GitImportResp::new(5, 0, "c9f1", "4b82", "main", true, Vec::new(), 0);
         assert_eq!(
             serde_json::to_string(&created).unwrap(),
             r#"{"imported":5,"skipped":0,"head_changeset":"c9f1","git_head_sha":"4b82","target_ref":"main","ref_moved":true,"lossy":[],"lossy_total":0}"#
         );
-        let again = GitImportResp {
-            imported: 3,
-            skipped: 1,
-            old_head: Some("b0b0".to_owned()),
-            lossy: vec![LossyCommitOut {
-                commit: "4b82".to_owned(),
-                changeset: "c9f1".to_owned(),
-                classes: vec![LossyClass::EmptyTrees, LossyClass::Gitlinks],
-            }],
-            lossy_total: 1,
-            warnings: vec!["the ref move is committed".to_owned()],
-            ..created
-        };
+        let mut again = created;
+        again.imported = 3;
+        again.skipped = 1;
+        again.old_head = Some("b0b0".to_owned());
+        again.lossy = vec![LossyCommitOut::new(
+            "4b82",
+            "c9f1",
+            vec![LossyClass::EmptyTrees, LossyClass::Gitlinks],
+        )];
+        again.lossy_total = 1;
+        again.warnings = vec!["the ref move is committed".to_owned()];
         let text = serde_json::to_string(&again).unwrap();
         assert_eq!(
             text,
@@ -2030,12 +1829,7 @@ mod git_export {
     fn a_git_export_request_takes_its_defaults() {
         assert_eq!(
             serde_json::from_value::<GitExportReq>(json!({"git_path": "x"})).unwrap(),
-            GitExportReq {
-                git_path: "x".to_owned(),
-                source_ref: "main".to_owned(),
-                branch: "main".to_owned(),
-                force: false,
-            }
+            GitExportReq::new("x")
         );
         assert!(serde_json::from_value::<GitExportReq>(json!({"branch": "main"})).is_err());
         let schema = &schema_for_all()["GitExportReq"];
@@ -2049,15 +1843,11 @@ mod git_export {
 
         let wire = r#"{"git_path":"../example","source_ref":"release/example","branch":"stable","force":true}"#;
         let req: GitExportReq = serde_json::from_str(wire).unwrap();
-        assert_eq!(
-            req,
-            GitExportReq {
-                git_path: "../example".to_owned(),
-                source_ref: "release/example".to_owned(),
-                branch: "stable".to_owned(),
-                force: true,
-            }
-        );
+        let mut expected = GitExportReq::new("../example");
+        expected.source_ref = "release/example".to_owned();
+        expected.branch = "stable".to_owned();
+        expected.force = true;
+        assert_eq!(req, expected);
         assert_eq!(serde_json::to_string(&req).unwrap(), wire);
         assert_ignores_unknown_fields::<GitExportReq>("GitExportReq", json!({"git_path": "x"}));
     }
@@ -2095,18 +1885,7 @@ mod git_export {
     /// flags are always written.
     #[test]
     fn a_git_export_response_omits_what_it_lacks() {
-        let created = GitExportResp {
-            exported: 5,
-            objects_written: 17,
-            head_changeset: "c9f1".to_owned(),
-            head_sha: "4b82".to_owned(),
-            branch: "main".to_owned(),
-            old_sha: None,
-            branch_moved: true,
-            incremental: false,
-            rewritten: 0,
-            warnings: Vec::new(),
-        };
+        let created = GitExportResp::new(5, 17, "c9f1", "4b82", "main", true, false, 0);
         let value = serde_json::to_value(&created).unwrap();
         assert!(value.get("old_sha").is_none(), "{value}");
         assert!(value.get("warnings").is_none(), "{value}");
@@ -2119,15 +1898,13 @@ mod git_export {
             ]
             .concat()
         );
-        let again = GitExportResp {
-            exported: 1,
-            objects_written: 3,
-            old_sha: Some("b0b0".to_owned()),
-            incremental: true,
-            rewritten: 2,
-            warnings: vec!["2 exported commits are new commits".to_owned()],
-            ..created
-        };
+        let mut again = created;
+        again.exported = 1;
+        again.objects_written = 3;
+        again.old_sha = Some("b0b0".to_owned());
+        again.incremental = true;
+        again.rewritten = 2;
+        again.warnings = vec!["2 exported commits are new commits".to_owned()];
         let text = serde_json::to_string(&again).unwrap();
         assert_eq!(
             text,

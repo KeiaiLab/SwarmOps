@@ -115,6 +115,7 @@ fn default_diff_context() -> u32 {
 
 /// `init`: create a store.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct InitReq {
     /// The directory to create the store in.
     pub path: String,
@@ -122,12 +123,24 @@ pub struct InitReq {
     pub name: String,
 }
 
+impl InitReq {
+    /// Takes every field.
+    pub fn new(path: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            name: name.into(),
+        }
+    }
+}
+
 /// `info`: describe the store. It has no options yet.
-#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct InfoReq {}
 
 /// `init` and `info`: what the store is and holds.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RepoInfo {
     /// The store's id, fixed at `init`.
     pub repo_id: String,
@@ -144,8 +157,29 @@ pub struct RepoInfo {
     pub refs: u64,
 }
 
+impl RepoInfo {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(
+        repo_id: impl Into<String>,
+        name: impl Into<String>,
+        store_version: u32,
+        changesets: u64,
+        refs: u64,
+    ) -> Self {
+        Self {
+            repo_id: repo_id.into(),
+            name: name.into(),
+            main: None,
+            store_version,
+            changesets,
+            refs,
+        }
+    }
+}
+
 /// `whoami`: the identity the caller's mutations carry.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct IdentityInfo {
     /// `<family>/<instance>`; omitted for an anonymous caller.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -158,9 +192,21 @@ pub struct IdentityInfo {
     pub auth: String,
 }
 
+impl IdentityInfo {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(auth: impl Into<String>) -> Self {
+        Self {
+            agent: None,
+            run_id: None,
+            auth: auth.into(),
+        }
+    }
+}
+
 /// `commit`: record a changeset from an explicit change list. It moves no ref, unless
 /// `advance` names one.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CommitReq {
     /// The changeset to commit on top of. An explicit `parent` always wins; when it is omitted,
     /// the current head of the ref `advance` names is used, else of `main`, if that ref exists,
@@ -203,8 +249,23 @@ pub struct CommitReq {
     pub allow_empty: bool,
 }
 
+impl CommitReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(changes: Vec<ChangeInput>, message: impl Into<String>) -> Self {
+        Self {
+            parent: None,
+            changes,
+            message: message.into(),
+            advance: None,
+            idempotency_key: None,
+            allow_empty: false,
+        }
+    }
+}
+
 /// One change of a commit.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ChangeInput {
     /// The repository path: `/`-separated, relative to the root.
     pub path: String,
@@ -219,9 +280,22 @@ pub struct ChangeInput {
     pub mode: Option<ModeInput>,
 }
 
+impl ChangeInput {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(path: impl Into<String>, op: ChangeOp) -> Self {
+        Self {
+            path: path.into(),
+            op,
+            content: None,
+            mode: None,
+        }
+    }
+}
+
 /// What a change does to its path, in a commit's change list and a changeset's changes alike.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ChangeOp {
     /// Write the content at the path, creating or replacing the entry.
     Put,
@@ -232,6 +306,7 @@ pub enum ChangeOp {
 /// A `put`'s content, as an object with one key.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ContentInput {
     /// UTF-8 text, verbatim.
     Inline(String),
@@ -250,6 +325,7 @@ pub enum ContentInput {
 /// The kind of entry a `put` writes.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ModeInput {
     /// A regular file (git mode 100644).
     File,
@@ -261,6 +337,7 @@ pub enum ModeInput {
 
 /// `commit`: the changeset that was recorded.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CommitResp {
     /// The new changeset's id.
     pub changeset: String,
@@ -291,8 +368,30 @@ pub struct CommitResp {
     pub replayed: bool,
 }
 
+impl CommitResp {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(
+        changeset: impl Into<String>,
+        root: impl Into<String>,
+        files_changed: u64,
+        blobs_written: u64,
+    ) -> Self {
+        Self {
+            changeset: changeset.into(),
+            parent: None,
+            root: root.into(),
+            files_changed,
+            blobs_written,
+            advanced: None,
+            warnings: Vec::new(),
+            replayed: false,
+        }
+    }
+}
+
 /// `commit` with `advance`: the ref's move, made in the commit's own transaction.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Advanced {
     /// The ref.
     pub name: String,
@@ -307,10 +406,23 @@ pub struct Advanced {
     pub already_applied: bool,
 }
 
+impl Advanced {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(name: impl Into<String>, new: impl Into<String>, already_applied: bool) -> Self {
+        Self {
+            name: name.into(),
+            old: None,
+            new: new.into(),
+            already_applied,
+        }
+    }
+}
+
 /// `blob_put` (CLI `blob put`): store content as a blob, outside any commit, so that a commit's
 /// change list can name it by its id (`{"blob": id}`) instead of carrying its bytes. The blob is
 /// durable once the call returns; until a commit names it, nothing references it.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BlobPutReq {
     /// The content: inline, base64 or a client file, at most 512 MiB (more is `E_TOO_LARGE` with
     /// `scope` `put`). A `blob` names content the store holds already, and is `E_INVALID_ARG`
@@ -318,8 +430,16 @@ pub struct BlobPutReq {
     pub content: ContentInput,
 }
 
+impl BlobPutReq {
+    /// Takes every field.
+    pub fn new(content: ContentInput) -> Self {
+        Self { content }
+    }
+}
+
 /// `blob_put`: the blob stored.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BlobPutResp {
     /// The blob's id, which a change names it by: `{"blob": id}`.
     pub blob: String,
@@ -330,30 +450,66 @@ pub struct BlobPutResp {
     pub written: bool,
 }
 
+impl BlobPutResp {
+    /// Takes every field.
+    pub fn new(blob: impl Into<String>, size: u64, written: bool) -> Self {
+        Self {
+            blob: blob.into(),
+            size,
+            written,
+        }
+    }
+}
+
 /// `blob_has` (CLI `blob has`): which of some blobs the store holds.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BlobHasReq {
     /// The blob ids, 64 hex digits each; one that is not is `E_INVALID_ARG`.
     pub ids: Vec<String>,
 }
 
+impl BlobHasReq {
+    /// Takes every field.
+    pub fn new(ids: Vec<String>) -> Self {
+        Self { ids }
+    }
+}
+
 /// `blob_has`: the blobs the store holds, of those asked for.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BlobHasResp {
     /// The ids of `ids` that the store holds a blob under, in lowercase hex, in the order first
     /// given, each once; an id of another kind of object (a tree, a changeset) is not among them.
     pub present: Vec<String>,
 }
 
+impl BlobHasResp {
+    /// Takes every field.
+    pub fn new(present: Vec<String>) -> Self {
+        Self { present }
+    }
+}
+
 /// `resolve_rev` (CLI `resolve`): the changeset a revision names, as every operation resolves it.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ResolveRevReq {
     /// The revision to resolve.
     pub rev: Rev,
 }
 
+impl ResolveRevReq {
+    /// Takes every field.
+    pub fn new(rev: impl Into<Rev>) -> Self {
+        Self { rev: rev.into() }
+    }
+}
+
 /// `resolve_rev` (CLI `resolve`): the changeset a revision names, and what kind of revision it is.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ResolvedRev {
     /// The full id of the changeset the revision names.
     pub id: String,
@@ -361,10 +517,21 @@ pub struct ResolvedRev {
     pub kind: RevKind,
 }
 
+impl ResolvedRev {
+    /// Takes every field.
+    pub fn new(id: impl Into<String>, kind: RevKind) -> Self {
+        Self {
+            id: id.into(),
+            kind,
+        }
+    }
+}
+
 /// What kind of revision `resolve_rev` resolved. M5 adds `workspace`, for a workspace's head and
 /// the edits not committed yet (`ws:<name>`).
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum RevKind {
     /// Exactly a ref's name (`main`, `release/<name>`): `id` is what the ref names now, and moves
     /// when the ref does.
@@ -377,6 +544,7 @@ pub enum RevKind {
 /// `read_file` (CLI `cat`): read one file at a revision, without a checkout: from an offset, or
 /// a range of its lines.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ReadFileReq {
     /// The revision to read at.
     pub rev: Rev,
@@ -398,8 +566,22 @@ pub struct ReadFileReq {
     pub max_bytes: u64,
 }
 
+impl ReadFileReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(rev: impl Into<Rev>, path: impl Into<String>) -> Self {
+        Self {
+            rev: rev.into(),
+            path: path.into(),
+            offset: 0,
+            lines: None,
+            max_bytes: default_max_bytes(),
+        }
+    }
+}
+
 /// A range of a file's lines, numbered from 1: `first` to `last`, both included.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct LineRange {
     /// The range's first line: at least 1.
     #[schemars(range(min = 1))]
@@ -409,8 +591,17 @@ pub struct LineRange {
     pub last: u64,
 }
 
+impl LineRange {
+    /// Lines `first` through `last`, unchecked: the store refuses `first > last` or a 0 with
+    /// `E_INVALID_ARG`.
+    pub fn new(first: u64, last: u64) -> Self {
+        Self { first, last }
+    }
+}
+
 /// `read_file` (CLI `cat`): a file's content, or the part of it the request names.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FileContent {
     /// The blob's id.
     pub blob: String,
@@ -444,9 +635,34 @@ pub struct FileContent {
     pub next_offset: Option<u64>,
 }
 
+impl FileContent {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(
+        blob: impl Into<String>,
+        size: u64,
+        kind: FileKind,
+        encoding: ContentEncoding,
+        content: impl Into<String>,
+        truncated: bool,
+    ) -> Self {
+        Self {
+            blob: blob.into(),
+            size,
+            kind,
+            encoding,
+            content: content.into(),
+            truncated,
+            offset: None,
+            lines: None,
+            next_offset: None,
+        }
+    }
+}
+
 /// How `FileContent.content` encodes bytes.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ContentEncoding {
     /// The bytes are UTF-8 text, and `content` is that text.
     Utf8,
@@ -457,6 +673,7 @@ pub enum ContentEncoding {
 /// What a file is; never a directory.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum FileKind {
     /// A regular file.
     File,
@@ -469,6 +686,7 @@ pub enum FileKind {
 /// What a tree entry is.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum EntryKindOut {
     /// A regular file.
     File,
@@ -483,6 +701,7 @@ pub enum EntryKindOut {
 /// `read_tree` (CLI `ls`): list one directory at a revision, without a checkout, a page at a
 /// time; with `depth`, the directories below it too.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ReadTreeReq {
     /// The revision to read at.
     pub rev: Rev,
@@ -504,10 +723,24 @@ pub struct ReadTreeReq {
     pub cursor: Option<String>,
 }
 
+impl ReadTreeReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(rev: impl Into<Rev>) -> Self {
+        Self {
+            rev: rev.into(),
+            path: None,
+            depth: default_read_tree_depth(),
+            limit: default_read_tree_limit(),
+            cursor: None,
+        }
+    }
+}
+
 /// `read_tree` (CLI `ls`): a page of a directory's entries, in pre-order: a directory, then the
 /// entries below it to the request's `depth`, each directory's entries by name bytes (at `depth`
 /// 1, the tree's order).
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TreeListing {
     /// The entries.
     pub entries: Vec<TreeEntryOut>,
@@ -519,8 +752,20 @@ pub struct TreeListing {
     pub cursor: Option<String>,
 }
 
+impl TreeListing {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(entries: Vec<TreeEntryOut>, truncated: bool) -> Self {
+        Self {
+            entries,
+            truncated,
+            cursor: None,
+        }
+    }
+}
+
 /// One entry of a listing.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TreeEntryOut {
     /// The entry's name: one path component.
     pub name: String,
@@ -538,8 +783,22 @@ pub struct TreeEntryOut {
     pub id: String,
 }
 
+impl TreeEntryOut {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(name: impl Into<String>, kind: EntryKindOut, id: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            path: None,
+            kind,
+            size: None,
+            id: id.into(),
+        }
+    }
+}
+
 /// `show`: one changeset in full.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ShowReq {
     /// The changeset to show.
     pub rev: Rev,
@@ -549,9 +808,20 @@ pub struct ShowReq {
     pub max_changes: usize,
 }
 
+impl ShowReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(rev: impl Into<Rev>) -> Self {
+        Self {
+            rev: rev.into(),
+            max_changes: default_max_changes(),
+        }
+    }
+}
+
 /// `show`: a changeset's header, changes and metadata. Byte strings are decoded as UTF-8, with
 /// invalid bytes replaced, except metadata values (see `metadata`).
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ChangesetDetail {
     /// The changeset's id.
     pub id: String,
@@ -594,8 +864,47 @@ pub struct ChangesetDetail {
     pub signatures: Signatures,
 }
 
+impl ChangesetDetail {
+    /// Takes the required fields; the others get their serde defaults.
+    // Every argument is a required field of the response: no default can stand in.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        id: impl Into<String>,
+        seq: u64,
+        parents: Vec<String>,
+        root: impl Into<String>,
+        author: Attribution,
+        created_at: u64,
+        message: impl Into<String>,
+        changes: Vec<ChangeOut>,
+        files_changed: u64,
+        changes_truncated: bool,
+        metadata: BTreeMap<String, String>,
+        signatures: Signatures,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            seq,
+            parents,
+            root: root.into(),
+            author,
+            lander: None,
+            created_at,
+            message: message.into(),
+            land_key: None,
+            squashed_from: Vec::new(),
+            changes,
+            files_changed,
+            changes_truncated,
+            metadata,
+            signatures,
+        }
+    }
+}
+
 /// Whom a changeset is attributed to (operations spec §5).
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Attribution {
     /// The agent that wrote it: the changeset's `agent` metadata, or `unknown/unknown` for a
     /// changeset that records none.
@@ -608,8 +917,20 @@ pub struct Attribution {
     pub on_behalf_of: Option<String>,
 }
 
+impl Attribution {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(agent: impl Into<String>) -> Self {
+        Self {
+            agent: agent.into(),
+            run_id: None,
+            on_behalf_of: None,
+        }
+    }
+}
+
 /// A changeset's git signatures: git-fidelity data for import and export.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Signatures {
     /// The git author.
     pub author: SignatureOut,
@@ -617,8 +938,16 @@ pub struct Signatures {
     pub committer: SignatureOut,
 }
 
+impl Signatures {
+    /// Takes every field.
+    pub fn new(author: SignatureOut, committer: SignatureOut) -> Self {
+        Self { author, committer }
+    }
+}
+
 /// A git signature: who, and when.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SignatureOut {
     /// The name; the agent name for a native changeset.
     pub name: String,
@@ -630,8 +959,26 @@ pub struct SignatureOut {
     pub offset_secs: i32,
 }
 
+impl SignatureOut {
+    /// Takes every field.
+    pub fn new(
+        name: impl Into<String>,
+        email: impl Into<String>,
+        secs: i64,
+        offset_secs: i32,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            email: email.into(),
+            secs,
+            offset_secs,
+        }
+    }
+}
+
 /// One entry of a changeset's changes.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ChangeOut {
     /// The repository path.
     pub path: String,
@@ -645,8 +992,21 @@ pub struct ChangeOut {
     pub blob: Option<String>,
 }
 
+impl ChangeOut {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(path: impl Into<String>, op: ChangeOp) -> Self {
+        Self {
+            path: path.into(),
+            op,
+            kind: None,
+            blob: None,
+        }
+    }
+}
+
 /// `log`: history along first parents, a page at a time.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LogReq {
     /// Where to start; `main` when omitted.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -667,8 +1027,21 @@ pub struct LogReq {
     pub paths: Vec<String>,
 }
 
+impl Default for LogReq {
+    /// The request a JSON object without fields reads.
+    fn default() -> Self {
+        Self {
+            rev: None,
+            limit: default_log_limit(),
+            cursor: None,
+            paths: Vec::new(),
+        }
+    }
+}
+
 /// `log`: a page of changesets, newest first, following first parents.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LogPage {
     /// The changesets.
     pub entries: Vec<ChangesetSummary>,
@@ -680,8 +1053,20 @@ pub struct LogPage {
     pub cursor: Option<String>,
 }
 
+impl LogPage {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(entries: Vec<ChangesetSummary>, truncated: bool) -> Self {
+        Self {
+            entries,
+            truncated,
+            cursor: None,
+        }
+    }
+}
+
 /// One changeset of a log.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ChangesetSummary {
     /// The changeset's id.
     pub id: String,
@@ -695,9 +1080,29 @@ pub struct ChangesetSummary {
     pub title: String,
 }
 
+impl ChangesetSummary {
+    /// Takes every field.
+    pub fn new(
+        id: impl Into<String>,
+        parents: Vec<String>,
+        author_agent: impl Into<String>,
+        created_at: u64,
+        title: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            parents,
+            author_agent: author_agent.into(),
+            created_at,
+            title: title.into(),
+        }
+    }
+}
+
 /// `path_history` (CLI `history`): the changesets that changed what a path holds, newest first,
 /// following first parents, a page at a time.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PathHistoryReq {
     /// Where to start; `main` when omitted.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -716,8 +1121,21 @@ pub struct PathHistoryReq {
     pub cursor: Option<String>,
 }
 
+impl PathHistoryReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(path: impl Into<String>) -> Self {
+        Self {
+            rev: None,
+            path: path.into(),
+            limit: default_path_history_limit(),
+            cursor: None,
+        }
+    }
+}
+
 /// `path_history` (CLI `history`): a page of a path's history, newest first.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PathHistoryPage {
     /// The path, without a trailing `/`.
     pub path: String,
@@ -731,8 +1149,21 @@ pub struct PathHistoryPage {
     pub cursor: Option<String>,
 }
 
+impl PathHistoryPage {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(path: impl Into<String>, entries: Vec<PathHistoryEntry>, truncated: bool) -> Self {
+        Self {
+            path: path.into(),
+            entries,
+            truncated,
+            cursor: None,
+        }
+    }
+}
+
 /// One changeset of a path's history, and what the path holds after it.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PathHistoryEntry {
     /// The changeset's id.
     pub changeset: String,
@@ -753,8 +1184,30 @@ pub struct PathHistoryEntry {
     pub title: String,
 }
 
+impl PathHistoryEntry {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(
+        changeset: impl Into<String>,
+        op: ChangeOp,
+        author_agent: impl Into<String>,
+        created_at: u64,
+        title: impl Into<String>,
+    ) -> Self {
+        Self {
+            changeset: changeset.into(),
+            op,
+            kind: None,
+            id: None,
+            author_agent: author_agent.into(),
+            created_at,
+            title: title.into(),
+        }
+    }
+}
+
 /// `diff`: the files that differ between two revisions, in path order, a page at a time.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DiffReq {
     /// The revision to diff from: the old side.
     pub from: Rev,
@@ -790,9 +1243,26 @@ pub struct DiffReq {
     pub max_bytes: u64,
 }
 
+impl DiffReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(from: impl Into<Rev>, to: impl Into<Rev>) -> Self {
+        Self {
+            from: from.into(),
+            to: to.into(),
+            paths: Vec::new(),
+            format: DiffFormat::default(),
+            context: default_diff_context(),
+            limit: default_diff_limit(),
+            cursor: None,
+            max_bytes: default_diff_max_bytes(),
+        }
+    }
+}
+
 /// What `diff` says of each file.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum DiffFormat {
     /// Its path and status.
     #[default]
@@ -805,6 +1275,7 @@ pub enum DiffFormat {
 
 /// `diff`: a page of the files that differ between two revisions, in path order (by bytes).
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Diff {
     /// The changeset `from` named.
     pub from: String,
@@ -820,12 +1291,31 @@ pub struct Diff {
     pub cursor: Option<String>,
 }
 
+impl Diff {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(
+        from: impl Into<String>,
+        to: impl Into<String>,
+        files: Vec<FileDiff>,
+        truncated: bool,
+    ) -> Self {
+        Self {
+            from: from.into(),
+            to: to.into(),
+            files,
+            truncated,
+            cursor: None,
+        }
+    }
+}
+
 /// One file that differs: a file, an executable or a symlink whose content or kind changed, or
 /// that is on one side only. A directory never is one: a file that becomes a directory is that
 /// file deleted and the directory's files added. No rename is detected: a file that moved is
 /// one deleted and one added. Which fields follow `status` depends on the request's `format`,
 /// and a field that says nothing is omitted.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FileDiff {
     /// The repository path.
     pub path: String,
@@ -864,9 +1354,29 @@ pub struct FileDiff {
     pub hunks_truncated: Option<bool>,
 }
 
+impl FileDiff {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(path: impl Into<String>, status: DiffStatus) -> Self {
+        Self {
+            path: path.into(),
+            status,
+            old_kind: None,
+            new_kind: None,
+            old_blob: None,
+            new_blob: None,
+            binary: None,
+            insertions: None,
+            deletions: None,
+            hunks: None,
+            hunks_truncated: None,
+        }
+    }
+}
+
 /// What happened to a file between the two revisions.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum DiffStatus {
     /// It is in `to` only: in `from`, nothing or a directory is there.
     Added,
@@ -882,6 +1392,7 @@ pub enum DiffStatus {
 /// A hunk of a unified diff: one or more changes and the unchanged lines around them, with the
 /// numbers of its header, `@@ -old_start,old_lines +new_start,new_lines @@`.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DiffHunk {
     /// The first old line it holds, counted from 1; when it holds none, the line before where
     /// they would be (0 at the top), as git prints it.
@@ -896,8 +1407,28 @@ pub struct DiffHunk {
     pub lines: Vec<DiffLineOut>,
 }
 
+impl DiffHunk {
+    /// Takes every field.
+    pub fn new(
+        old_start: u64,
+        old_lines: u64,
+        new_start: u64,
+        new_lines: u64,
+        lines: Vec<DiffLineOut>,
+    ) -> Self {
+        Self {
+            old_start,
+            old_lines,
+            new_start,
+            new_lines,
+            lines,
+        }
+    }
+}
+
 /// One line of a hunk.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DiffLineOut {
     /// Whether both sides have it, only the new one, or only the old one.
     pub op: LineOp,
@@ -906,9 +1437,20 @@ pub struct DiffLineOut {
     pub text: String,
 }
 
+impl DiffLineOut {
+    /// Takes every field.
+    pub fn new(op: LineOp, text: impl Into<String>) -> Self {
+        Self {
+            op,
+            text: text.into(),
+        }
+    }
+}
+
 /// Which side of a diff a hunk's line is on.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum LineOp {
     /// Both: an unchanged line around a change.
     Context,
@@ -919,18 +1461,28 @@ pub enum LineOp {
 }
 
 /// `ref list`: list every ref. It has no options yet.
-#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RefListReq {}
 
 /// `ref list`: every ref.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RefListResp {
     /// The refs.
     pub refs: Vec<RefOut>,
 }
 
+impl RefListResp {
+    /// Takes every field.
+    pub fn new(refs: Vec<RefOut>) -> Self {
+        Self { refs }
+    }
+}
+
 /// One ref.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RefOut {
     /// `main` or `release/<name>`.
     pub name: String,
@@ -940,10 +1492,22 @@ pub struct RefOut {
     pub version: u64,
 }
 
+impl RefOut {
+    /// Takes every field.
+    pub fn new(name: impl Into<String>, target: impl Into<String>, version: u64) -> Self {
+        Self {
+            name: name.into(),
+            target: target.into(),
+            version,
+        }
+    }
+}
+
 /// `ref set`: move a ref, or create one, by compare-and-swap. Give exactly one of
 /// `expected_old` and `create`; both or neither is `E_INVALID_ARG`.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 #[schemars(transform = one_of_expected_old_and_create)]
+#[non_exhaustive]
 pub struct RefSetReq {
     /// The ref: `main` or `release/<name>`.
     pub name: String,
@@ -966,6 +1530,18 @@ pub struct RefSetReq {
     pub create: bool,
 }
 
+impl RefSetReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(name: impl Into<String>, new: impl Into<Rev>) -> Self {
+        Self {
+            name: name.into(),
+            new: new.into(),
+            expected_old: None,
+            create: false,
+        }
+    }
+}
+
 /// States in `RefSetReq`'s schema what `ref set` checks: exactly one of `expected_old` (a
 /// string) and `create` (`true`). Both, and neither, meet no branch, as the operation refuses
 /// them; an `expected_old` of null is no expectation, so with `create: true` it meets the second
@@ -984,6 +1560,7 @@ fn one_of_expected_old_and_create(schema: &mut schemars::Schema) {
 
 /// `ref set` and `ref delete`: the move that was made.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RefSetResp {
     /// The ref.
     pub name: String,
@@ -1004,8 +1581,22 @@ pub struct RefSetResp {
     pub warnings: Vec<String>,
 }
 
+impl RefSetResp {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(name: impl Into<String>, already_applied: bool) -> Self {
+        Self {
+            name: name.into(),
+            old: None,
+            new: None,
+            already_applied,
+            warnings: Vec::new(),
+        }
+    }
+}
+
 /// `ref delete`: remove a ref by compare-and-swap.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RefDeleteReq {
     /// The ref.
     pub name: String,
@@ -1019,8 +1610,19 @@ pub struct RefDeleteReq {
     pub expected_old: Rev,
 }
 
+impl RefDeleteReq {
+    /// Takes every field.
+    pub fn new(name: impl Into<String>, expected_old: impl Into<Rev>) -> Self {
+        Self {
+            name: name.into(),
+            expected_old: expected_old.into(),
+        }
+    }
+}
+
 /// `verify`: check the whole store's consistency.
-#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct VerifyReq {
     /// Re-hash every object, and check every derived value of the built-in derivations (the
     /// first-parent skip lists, the last touches of paths) against the objects. When `false`,
@@ -1032,6 +1634,7 @@ pub struct VerifyReq {
 
 /// `verify`: what the consistency check found.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct VerifyReport {
     /// How many objects were checked.
     pub objects_checked: u64,
@@ -1047,10 +1650,23 @@ pub struct VerifyReport {
     pub findings: Vec<VerifyFinding>,
 }
 
+impl VerifyReport {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(objects_checked: u64, changesets_checked: u64, problems: Vec<String>) -> Self {
+        Self {
+            objects_checked,
+            changesets_checked,
+            problems,
+            findings: Vec::new(),
+        }
+    }
+}
+
 /// One problem `verify` found, as a program reads it: what kind of damage it is, and what it
 /// names. The keys its kind does not use are omitted; the line at the same index of `problems`
 /// says the same for a reader. Ids are lowercase hex.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct VerifyFinding {
     /// What is damaged: `corrupt_object`, `missing_object`, `missing_parent`, `root_mismatch`,
     /// `dangling_ref`, `corrupt_ref`, `index_mismatch`, `journal_corrupt`, `meta_corrupt`,
@@ -1111,6 +1727,25 @@ pub struct VerifyFinding {
     pub derivation: Option<String>,
 }
 
+impl VerifyFinding {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(kind: impl Into<String>) -> Self {
+        Self {
+            kind: kind.into(),
+            object: None,
+            changeset: None,
+            parent: None,
+            seq: None,
+            offset: None,
+            ref_name: None,
+            cause: None,
+            system: None,
+            key: None,
+            derivation: None,
+        }
+    }
+}
+
 fn default_git_ref() -> String {
     "HEAD".to_owned()
 }
@@ -1124,6 +1759,7 @@ fn default_target_ref() -> String {
 /// `target_ref` moves to the changeset of `git_ref`'s commit. It runs on the caller's host, as
 /// `init` does: no server receives this request, and it is no MCP tool.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct GitImportReq {
     /// The git repository to read, on the caller's host: its directory, absolute or relative to
     /// the caller's working directory (a bare repository, or a work tree with its `.git`). The
@@ -1149,6 +1785,18 @@ pub struct GitImportReq {
     pub lossy: Vec<LossyClass>,
 }
 
+impl GitImportReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(git_path: impl Into<String>) -> Self {
+        Self {
+            git_path: git_path.into(),
+            git_ref: default_git_ref(),
+            target_ref: default_target_ref(),
+            lossy: Vec::new(),
+        }
+    }
+}
+
 /// A class of git content that a changeset cannot hold as git has it (storage spec §7). A
 /// commit holding one is refused unless the import's `lossy` allows its class; an allowed class
 /// is dropped or normalized, a directory a drop leaves empty is dropped with it, and the
@@ -1156,6 +1804,7 @@ pub struct GitImportReq {
 /// commit's own git id.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum LossyClass {
     /// A submodule's entry (git mode 160000): dropped.
     Gitlinks,
@@ -1203,6 +1852,7 @@ impl LossyClass {
 
 /// `git import`: what the import brought in, and where the target ref stands.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct GitImportResp {
     /// How many commits became changesets in this import.
     pub imported: u64,
@@ -1234,8 +1884,38 @@ pub struct GitImportResp {
     pub warnings: Vec<String>,
 }
 
+impl GitImportResp {
+    /// Takes the required fields; the others get their serde defaults.
+    // Every argument is a required field of the response: no default can stand in.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        imported: u64,
+        skipped: u64,
+        head_changeset: impl Into<String>,
+        git_head_sha: impl Into<String>,
+        target_ref: impl Into<String>,
+        ref_moved: bool,
+        lossy: Vec<LossyCommitOut>,
+        lossy_total: u64,
+    ) -> Self {
+        Self {
+            imported,
+            skipped,
+            head_changeset: head_changeset.into(),
+            git_head_sha: git_head_sha.into(),
+            target_ref: target_ref.into(),
+            ref_moved,
+            old_head: None,
+            lossy,
+            lossy_total,
+            warnings: Vec::new(),
+        }
+    }
+}
+
 /// `git import`: a commit taken lossily, and what it lost.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LossyCommitOut {
     /// The git commit: its id, 40 lowercase hex digits.
     pub commit: String,
@@ -1243,6 +1923,21 @@ pub struct LossyCommitOut {
     pub changeset: String,
     /// The classes dropped or normalized in it, ordered by name, as `git.lossy` lists them.
     pub classes: Vec<LossyClass>,
+}
+
+impl LossyCommitOut {
+    /// Takes every field.
+    pub fn new(
+        commit: impl Into<String>,
+        changeset: impl Into<String>,
+        classes: Vec<LossyClass>,
+    ) -> Self {
+        Self {
+            commit: commit.into(),
+            changeset: changeset.into(),
+            classes,
+        }
+    }
 }
 
 fn default_source_ref() -> String {
@@ -1261,6 +1956,7 @@ fn default_branch() -> String {
 /// on the caller's host, as `git import` does: no server receives this request, and it is no MCP
 /// tool.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct GitExportReq {
     /// The git repository to write, on the caller's host: its directory, absolute or relative to
     /// the caller's working directory (a bare repository, or a work tree with its `.git`). It
@@ -1287,8 +1983,21 @@ pub struct GitExportReq {
     pub force: bool,
 }
 
+impl GitExportReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(git_path: impl Into<String>) -> Self {
+        Self {
+            git_path: git_path.into(),
+            source_ref: default_source_ref(),
+            branch: default_branch(),
+            force: false,
+        }
+    }
+}
+
 /// `git export`: what the export wrote, and where the branch stands.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct GitExportResp {
     /// How many commits this export wrote to the repository: the commits of the ref's history
     /// that the branch's last export did not reach and the repository did not hold. A branch that
@@ -1326,11 +2035,41 @@ pub struct GitExportResp {
     pub warnings: Vec<String>,
 }
 
+impl GitExportResp {
+    /// Takes the required fields; the others get their serde defaults.
+    // Every argument is a required field of the response: no default can stand in.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        exported: u64,
+        objects_written: u64,
+        head_changeset: impl Into<String>,
+        head_sha: impl Into<String>,
+        branch: impl Into<String>,
+        branch_moved: bool,
+        incremental: bool,
+        rewritten: u64,
+    ) -> Self {
+        Self {
+            exported,
+            objects_written,
+            head_changeset: head_changeset.into(),
+            head_sha: head_sha.into(),
+            branch: branch.into(),
+            old_sha: None,
+            branch_moved,
+            incremental,
+            rewritten,
+            warnings: Vec::new(),
+        }
+    }
+}
+
 /// `derive`: derive ahead of any reader the eager derived values (storage spec §5: each
 /// changeset's first-parent skip list) of the changesets the journal records after a frame, so
 /// that reads find them stored. It writes only the store's cache of derived values, so it takes
 /// no identity.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DeriveReq {
     /// Go on after this journal frame: a previous call's `next`. From the journal's first frame
     /// when omitted.
@@ -1343,9 +2082,20 @@ pub struct DeriveReq {
     pub limit: usize,
 }
 
+impl Default for DeriveReq {
+    /// The request a JSON object without fields reads.
+    fn default() -> Self {
+        Self {
+            after: None,
+            limit: default_derive_limit(),
+        }
+    }
+}
+
 /// `derive`: how many values one call derived, how many the store held already, and where to
 /// go on.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DeriveResp {
     /// How many values it derived: of each eager derivation, one for each changeset its frames
     /// record whose value the store lacked. Values those needed on the way, an older
@@ -1359,6 +2109,17 @@ pub struct DeriveResp {
     /// last frame, omitted while the journal holds none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next: Option<u64>,
+}
+
+impl DeriveResp {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(derived: u64, cached: u64) -> Self {
+        Self {
+            derived,
+            cached,
+            next: None,
+        }
+    }
 }
 
 /// The default [`LandReq::max_attempts`]: 8 (operations spec §3).
@@ -1403,6 +2164,7 @@ fn default_max_changesets() -> usize {
 /// head, so the target stays linear. A conflict is the error `E_CONFLICT`, with the report in
 /// `details.report`; nothing is recorded then.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LandReq {
     /// The changeset to land: the change's head.
     pub head: Rev,
@@ -1448,9 +2210,27 @@ pub struct LandReq {
     pub resolutions: Option<ResolutionsInput>,
 }
 
+impl LandReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(head: impl Into<Rev>) -> Self {
+        Self {
+            head: head.into(),
+            base: None,
+            target: default_target(),
+            message: None,
+            idempotency_key: None,
+            max_attempts: default_max_attempts(),
+            max_conflict_bytes: default_max_conflict_bytes(),
+            expect_target: None,
+            resolutions: None,
+        }
+    }
+}
+
 /// A land's resolutions (`land --resolve`): what to make of some paths of the merge of the change
 /// onto the target, decided against one of the target's heads.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ResolutionsInput {
     /// The target's head the resolutions were decided against: the conflict report's `theirs`,
     /// by its full 64-hex id. A resolution applies while the target holds its path as this
@@ -1460,10 +2240,21 @@ pub struct ResolutionsInput {
     pub files: BTreeMap<String, ResolutionInput>,
 }
 
+impl ResolutionsInput {
+    /// Takes every field.
+    pub fn new(against: impl Into<Rev>, files: BTreeMap<String, ResolutionInput>) -> Self {
+        Self {
+            against: against.into(),
+            files,
+        }
+    }
+}
+
 /// What a land makes of one path, and of every path below it: exactly one of `take`, `content`
 /// and `delete` (anything else is `E_INVALID_ARG`, a rule the server checks), the rest of the
 /// merge as it merged.
-#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ResolutionInput {
     /// What one side holds there: `ours`, the change's head, or `theirs`, the target's head.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1484,6 +2275,7 @@ pub struct ResolutionInput {
 /// One side of a land's merge.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Side {
     /// The change: its head.
     Ours,
@@ -1493,6 +2285,7 @@ pub enum Side {
 
 /// `land`: where the change landed. Ids are full.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LandResp {
     /// `landed`, or `replayed` when a land with the same `idempotency_key` had landed the change
     /// already.
@@ -1525,9 +2318,41 @@ pub struct LandResp {
     pub warnings: Vec<String>,
 }
 
+impl LandResp {
+    /// Takes the required fields; the others get their serde defaults.
+    // Every argument is a required field of the response: no default can stand in.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        status: LandStatus,
+        landed: impl Into<String>,
+        rebased_onto: impl Into<String>,
+        target: impl Into<String>,
+        base: impl Into<String>,
+        attempts: u32,
+        relocated: bool,
+        files_changed: u64,
+        squashed_from: Vec<String>,
+    ) -> Self {
+        Self {
+            status,
+            landed: landed.into(),
+            rebased_onto: rebased_onto.into(),
+            target: target.into(),
+            base: base.into(),
+            attempts,
+            relocated,
+            files_changed,
+            squashed_from,
+            auto_merged: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+}
+
 /// How a land ended.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum LandStatus {
     /// This request landed the change.
     Landed,
@@ -1539,6 +2364,7 @@ pub enum LandStatus {
 /// resolutions to it (operations spec §3): the report `E_CONFLICT` carries in `details.report`.
 /// `ours` is the change, `theirs` the target. Ids are full.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ConflictReport {
     /// The merge base: the changeset the change starts from.
     pub base: String,
@@ -1563,10 +2389,34 @@ pub struct ConflictReport {
     pub truncated: bool,
 }
 
+impl ConflictReport {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(
+        base: impl Into<String>,
+        ours: impl Into<String>,
+        theirs: impl Into<String>,
+        files: Vec<FileConflictOut>,
+        kinds: Vec<ConflictKindOut>,
+        truncated: bool,
+    ) -> Self {
+        Self {
+            base: base.into(),
+            ours: ours.into(),
+            theirs: theirs.into(),
+            files,
+            kinds,
+            auto_merged: Vec::new(),
+            stale: Vec::new(),
+            truncated,
+        }
+    }
+}
+
 /// One conflicting file. Its blobs are the file's content on each side, which `read_file` reads
 /// at that side's changeset; a side without a file at the path (deleted, never added, or a
 /// directory there) has none.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FileConflictOut {
     /// The file's repository path.
     pub path: String,
@@ -1594,9 +2444,26 @@ pub struct FileConflictOut {
     pub theirs_agent: Option<String>,
 }
 
+impl FileConflictOut {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(path: impl Into<String>, kind: ConflictKindOut) -> Self {
+        Self {
+            path: path.into(),
+            kind,
+            base_blob: None,
+            ours_blob: None,
+            theirs_blob: None,
+            hunks: Vec::new(),
+            theirs_changeset: None,
+            theirs_agent: None,
+        }
+    }
+}
+
 /// What kind of conflict a file has. `ours` is the change, `theirs` the target.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ConflictKindOut {
     /// Both sides edited the same lines of a text file, or lines next to each other.
     Content,
@@ -1618,6 +2485,7 @@ pub enum ConflictKindOut {
 /// are numbered from 1, and each side's range includes both ends, as `read_file` takes a range
 /// of lines.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct HunkOut {
     /// Its number in the file, from 0.
     pub id: u32,
@@ -1629,9 +2497,22 @@ pub struct HunkOut {
     pub theirs: LinesOut,
 }
 
+impl HunkOut {
+    /// Takes every field.
+    pub fn new(id: u32, base: LinesOut, ours: LinesOut, theirs: LinesOut) -> Self {
+        Self {
+            id,
+            base,
+            ours,
+            theirs,
+        }
+    }
+}
+
 /// One side's lines of a hunk: `first` to `last`, numbered from 1, both included. A side without
 /// lines there has `last` one less than `first`: its place is before line `first`.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LinesOut {
     /// The first line.
     pub first: u64,
@@ -1643,9 +2524,21 @@ pub struct LinesOut {
     pub text: Option<String>,
 }
 
+impl LinesOut {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(first: u64, last: u64) -> Self {
+        Self {
+            first,
+            last,
+            text: None,
+        }
+    }
+}
+
 /// `op_log` (CLI `op log`): the store's operations, newest first, a page at a time. An operation
 /// is one write transaction: a frame of the journal, numbered from 0 in commit order.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct OpLogReq {
     /// Start below this operation: the page holds the ones numbered less than it, so the last
     /// `op` of a page reads on from there. When omitted, from the newest.
@@ -1660,8 +2553,20 @@ pub struct OpLogReq {
     pub max_changesets: usize,
 }
 
+impl Default for OpLogReq {
+    /// The request a JSON object without fields reads.
+    fn default() -> Self {
+        Self {
+            before: None,
+            limit: default_op_log_limit(),
+            max_changesets: default_max_changesets(),
+        }
+    }
+}
+
 /// `op_log` (CLI `op log`): a page of operations, newest first.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct OpLogPage {
     /// The operations.
     pub ops: Vec<OperationOut>,
@@ -1670,8 +2575,16 @@ pub struct OpLogPage {
     pub truncated: bool,
 }
 
+impl OpLogPage {
+    /// Takes every field.
+    pub fn new(ops: Vec<OperationOut>, truncated: bool) -> Self {
+        Self { ops, truncated }
+    }
+}
+
 /// One operation: a write transaction, as the journal recorded it.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct OperationOut {
     /// Its number: its journal frame's, from 0 in commit order. `undo` takes it.
     pub op: u64,
@@ -1685,9 +2598,29 @@ pub struct OperationOut {
     pub ref_moves: Vec<RefMoveOut>,
 }
 
+impl OperationOut {
+    /// Takes every field.
+    pub fn new(
+        op: u64,
+        kind: OperationKind,
+        changesets: Vec<OpChangesetOut>,
+        changesets_total: u64,
+        ref_moves: Vec<RefMoveOut>,
+    ) -> Self {
+        Self {
+            op,
+            kind,
+            changesets,
+            changesets_total,
+            ref_moves,
+        }
+    }
+}
+
 /// What an operation did, read from what it recorded.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum OperationKind {
     /// It recorded changesets and moved no ref (`commit`).
     Commit,
@@ -1705,6 +2638,7 @@ pub enum OperationKind {
 
 /// A changeset an operation recorded.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct OpChangesetOut {
     /// Its id.
     pub id: String,
@@ -1719,8 +2653,27 @@ pub struct OpChangesetOut {
     pub land_key: Option<String>,
 }
 
+impl OpChangesetOut {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(
+        id: impl Into<String>,
+        agent: impl Into<String>,
+        created_at: u64,
+        title: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            agent: agent.into(),
+            created_at,
+            title: title.into(),
+            land_key: None,
+        }
+    }
+}
+
 /// A move of a ref, as the journal recorded it.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RefMoveOut {
     /// The ref.
     pub name: String,
@@ -1736,16 +2689,38 @@ pub struct RefMoveOut {
     pub at: i64,
 }
 
+impl RefMoveOut {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(name: impl Into<String>, actor: impl Into<String>, at: i64) -> Self {
+        Self {
+            name: name.into(),
+            old: None,
+            new: None,
+            actor: actor.into(),
+            at,
+        }
+    }
+}
+
 /// `undo` (CLI `op undo`): restore every ref an operation moved to what it named before, by
 /// compare-and-swap, in one transaction: all of them or none. Changesets are never removed.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct UndoReq {
     /// The operation to undo: its `op` in the operation log.
     pub op: u64,
 }
 
+impl UndoReq {
+    /// Takes every field.
+    pub fn new(op: u64) -> Self {
+        Self { op }
+    }
+}
+
 /// `undo` (CLI `op undo`): the moves that restored the refs.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct UndoResp {
     /// The operation undone.
     pub undone: u64,
@@ -1762,6 +2737,19 @@ pub struct UndoResp {
     /// itself succeeded. Omitted when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+}
+
+impl UndoResp {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(undone: u64, ref_moves: Vec<RefMoveOut>, already_applied: bool) -> Self {
+        Self {
+            undone,
+            op: None,
+            ref_moves,
+            already_applied,
+            warnings: Vec::new(),
+        }
+    }
 }
 
 /// The default [`BlobGetReq::max_bytes`]: 64 MiB of blob content, the batch a workspace's
@@ -1799,6 +2787,7 @@ fn default_check_timeout_s() -> u64 {
 /// resolutions are a land's (operations spec §3): a conflict is the error `E_CONFLICT`, with the
 /// report in `details.report`, and nothing is recorded then.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RebaseReq {
     /// The changeset to rebase: the change's head.
     pub head: Rev,
@@ -1824,8 +2813,24 @@ pub struct RebaseReq {
     pub resolutions: Option<ResolutionsInput>,
 }
 
+impl RebaseReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(head: impl Into<Rev>) -> Self {
+        Self {
+            head: head.into(),
+            base: None,
+            onto: default_onto(),
+            message: None,
+            idempotency_key: None,
+            max_conflict_bytes: default_max_conflict_bytes(),
+            resolutions: None,
+        }
+    }
+}
+
 /// `rebase`: the changeset that holds the change merged onto the ref's head. Ids are full.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RebaseResp {
     /// How the rebase ended.
     pub status: RebaseStatus,
@@ -1845,9 +2850,32 @@ pub struct RebaseResp {
     pub auto_merged: Vec<String>,
 }
 
+impl RebaseResp {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(
+        status: RebaseStatus,
+        changeset: impl Into<String>,
+        root: impl Into<String>,
+        onto: impl Into<String>,
+        base: impl Into<String>,
+        files_changed: u64,
+    ) -> Self {
+        Self {
+            status,
+            changeset: changeset.into(),
+            root: root.into(),
+            onto: onto.into(),
+            base: base.into(),
+            files_changed,
+            auto_merged: Vec::new(),
+        }
+    }
+}
+
 /// How a rebase ended.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum RebaseStatus {
     /// This request recorded the merged changeset.
     Rebased,
@@ -1862,6 +2890,7 @@ pub enum RebaseStatus {
 /// `blob_get` (M5): blobs by id, for a client that writes them out (a workspace's
 /// materialisation). Not an MCP tool.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BlobGetReq {
     /// The blob ids, 64 hex digits each; one that is not is `E_INVALID_ARG`.
     pub ids: Vec<String>,
@@ -1871,8 +2900,19 @@ pub struct BlobGetReq {
     pub max_bytes: u64,
 }
 
+impl BlobGetReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(ids: Vec<String>) -> Self {
+        Self {
+            ids,
+            max_bytes: default_blob_get_max_bytes(),
+        }
+    }
+}
+
 /// `blob_get`: the blobs found, in the order asked, and the ids the store holds no blob under.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BlobGetResp {
     /// The blobs, each whole.
     pub blobs: Vec<BlobOut>,
@@ -1882,8 +2922,20 @@ pub struct BlobGetResp {
     pub truncated: bool,
 }
 
+impl BlobGetResp {
+    /// Takes every field.
+    pub fn new(blobs: Vec<BlobOut>, missing: Vec<String>, truncated: bool) -> Self {
+        Self {
+            blobs,
+            missing,
+            truncated,
+        }
+    }
+}
+
 /// One blob's content, encoded as a file's is.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BlobOut {
     /// The blob's id.
     pub id: String,
@@ -1895,9 +2947,27 @@ pub struct BlobOut {
     pub content: String,
 }
 
+impl BlobOut {
+    /// Takes every field.
+    pub fn new(
+        id: impl Into<String>,
+        size: u64,
+        encoding: ContentEncoding,
+        content: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            size,
+            encoding,
+            content: content.into(),
+        }
+    }
+}
+
 /// Whether a workspace mutation's response carries the workspace's status after it.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum StatusAfter {
     /// The first page of the status, up to 100 changes.
     #[default]
@@ -1909,6 +2979,7 @@ pub enum StatusAfter {
 /// What a workspace's rebase does.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum WsRebaseAction {
     /// Rebase the workspace's chain onto the target's head.
     #[default]
@@ -1922,6 +2993,7 @@ pub enum WsRebaseAction {
 /// How a workspace lands.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum LandMode {
     /// Merge onto the target's head, wherever it has moved.
     Merge,
@@ -1933,6 +3005,7 @@ pub enum LandMode {
 /// `ws_create` (M5, client-side): make a workspace, a directory holding a sparse copy of a
 /// changeset's tree. The same request again is the same workspace (`created` false).
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsCreateReq {
     /// The workspace's name: 1 to 64 of `a-z`, `0-9`, `.`, `_` and `-`, not starting with `.`.
     pub name: String,
@@ -1960,8 +3033,25 @@ pub struct WsCreateReq {
     pub status_after: StatusAfter,
 }
 
+impl WsCreateReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            path: None,
+            base: default_main_rev(),
+            prefixes: Vec::new(),
+            all: false,
+            from: None,
+            session: None,
+            status_after: StatusAfter::default(),
+        }
+    }
+}
+
 /// A workspace: where it is and what it holds.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsInfo {
     /// Its name.
     pub name: String,
@@ -1988,8 +3078,31 @@ pub struct WsInfo {
     pub status_after: Option<WsStatus>,
 }
 
+impl WsInfo {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(
+        name: impl Into<String>,
+        path: impl Into<String>,
+        base: impl Into<String>,
+        head: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            path: path.into(),
+            base: base.into(),
+            head: head.into(),
+            prefixes: Vec::new(),
+            all: false,
+            created: false,
+            orphan: false,
+            status_after: None,
+        }
+    }
+}
+
 /// `ws_status` (client-side): what changed in a workspace against its head.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsStatusReq {
     /// The workspace, by name.
     pub workspace: String,
@@ -2008,9 +3121,23 @@ pub struct WsStatusReq {
     pub cursor: Option<String>,
 }
 
+impl WsStatusReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(workspace: impl Into<String>) -> Self {
+        Self {
+            workspace: workspace.into(),
+            paths: Vec::new(),
+            full: false,
+            limit: default_ws_status_limit(),
+            cursor: None,
+        }
+    }
+}
+
 /// A workspace's status: its changes against its head, a page at a time, and how far its target
 /// has moved since its base.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsStatus {
     /// The workspace's name.
     pub name: String,
@@ -2036,9 +3163,39 @@ pub struct WsStatus {
     pub cursor: Option<String>,
 }
 
+impl WsStatus {
+    /// Takes the required fields; the others get their serde defaults.
+    // Every argument is a required field of the response: no default can stand in.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        name: impl Into<String>,
+        base: impl Into<String>,
+        head: impl Into<String>,
+        main: impl Into<String>,
+        behind_by: u64,
+        state: WsState,
+        changes: Vec<WsChange>,
+        truncated: bool,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            base: base.into(),
+            head: head.into(),
+            main: main.into(),
+            behind_by,
+            state,
+            changes,
+            rebasing: None,
+            truncated,
+            cursor: None,
+        }
+    }
+}
+
 /// A workspace's state.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum WsState {
     /// No rebase in progress.
     Clean,
@@ -2048,6 +3205,7 @@ pub enum WsState {
 
 /// One changed path of a workspace.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsChange {
     /// The repository path.
     pub path: String,
@@ -2058,9 +3216,21 @@ pub struct WsChange {
     pub size: Option<u64>,
 }
 
+impl WsChange {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(path: impl Into<String>, kind: WsChangeKind) -> Self {
+        Self {
+            path: path.into(),
+            kind,
+            size: None,
+        }
+    }
+}
+
 /// What changed at a workspace path.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum WsChangeKind {
     /// A file the head does not hold.
     Added,
@@ -2076,6 +3246,7 @@ pub enum WsChangeKind {
 
 /// A workspace's rebase in progress.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsRebasing {
     /// The target's head it rebases onto.
     pub onto: String,
@@ -2083,9 +3254,20 @@ pub struct WsRebasing {
     pub conflicts: Vec<String>,
 }
 
+impl WsRebasing {
+    /// Takes every field.
+    pub fn new(onto: impl Into<String>, conflicts: Vec<String>) -> Self {
+        Self {
+            onto: onto.into(),
+            conflicts,
+        }
+    }
+}
+
 /// `ws_diff` (client-side): a workspace's edits against its head, as the store's diff gives a
 /// diff (`from` the head, `to` `ws:<name>`).
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsDiffReq {
     /// The workspace, by name.
     pub workspace: String,
@@ -2110,8 +3292,24 @@ pub struct WsDiffReq {
     pub max_bytes: u64,
 }
 
+impl WsDiffReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(workspace: impl Into<String>) -> Self {
+        Self {
+            workspace: workspace.into(),
+            paths: Vec::new(),
+            format: DiffFormat::default(),
+            context: default_diff_context(),
+            limit: default_diff_limit(),
+            cursor: None,
+            max_bytes: default_diff_max_bytes(),
+        }
+    }
+}
+
 /// `ws_commit` (client-side): record a workspace's edits as one changeset on its head.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsCommitReq {
     /// The workspace, by name.
     pub workspace: String,
@@ -2128,8 +3326,22 @@ pub struct WsCommitReq {
     pub status_after: StatusAfter,
 }
 
+impl WsCommitReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(workspace: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            workspace: workspace.into(),
+            message: message.into(),
+            paths: Vec::new(),
+            modes: BTreeMap::new(),
+            status_after: StatusAfter::default(),
+        }
+    }
+}
+
 /// `ws_commit`: the changeset recorded.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsCommitResp {
     /// The new changeset: the workspace's head now.
     pub changeset: String,
@@ -2146,9 +3358,30 @@ pub struct WsCommitResp {
     pub status_after: Option<WsStatus>,
 }
 
+impl WsCommitResp {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(
+        changeset: impl Into<String>,
+        parent: impl Into<String>,
+        files_changed: u64,
+        blobs_written: u64,
+        replayed: bool,
+    ) -> Self {
+        Self {
+            changeset: changeset.into(),
+            parent: parent.into(),
+            files_changed,
+            blobs_written,
+            replayed,
+            status_after: None,
+        }
+    }
+}
+
 /// `ws_rebase` (client-side): move a workspace's chain onto its target's head, as `rebase`
 /// records it, and its files with it.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsRebaseReq {
     /// The workspace, by name.
     pub workspace: String,
@@ -2167,8 +3400,22 @@ pub struct WsRebaseReq {
     pub status_after: StatusAfter,
 }
 
+impl WsRebaseReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(workspace: impl Into<String>) -> Self {
+        Self {
+            workspace: workspace.into(),
+            onto: default_onto(),
+            action: WsRebaseAction::default(),
+            message: None,
+            status_after: StatusAfter::default(),
+        }
+    }
+}
+
 /// `ws_rebase`: where the workspace stands now.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsRebaseResp {
     /// How the rebase ended; `None` after an abort.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2182,8 +3429,21 @@ pub struct WsRebaseResp {
     pub status_after: Option<WsStatus>,
 }
 
+impl WsRebaseResp {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(changeset: impl Into<String>, onto: impl Into<String>) -> Self {
+        Self {
+            status: None,
+            changeset: changeset.into(),
+            onto: onto.into(),
+            status_after: None,
+        }
+    }
+}
+
 /// `ws_resolve` (client-side): mark conflicting paths of a rebase resolved.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsResolveReq {
     /// The workspace, by name.
     pub workspace: String,
@@ -2204,8 +3464,23 @@ pub struct WsResolveReq {
     pub status_after: StatusAfter,
 }
 
+impl WsResolveReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(workspace: impl Into<String>) -> Self {
+        Self {
+            workspace: workspace.into(),
+            paths: Vec::new(),
+            all: false,
+            take: None,
+            force: false,
+            status_after: StatusAfter::default(),
+        }
+    }
+}
+
 /// `ws_resolve`: the paths resolved and those left.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsResolveResp {
     /// The paths this request resolved.
     pub resolved: Vec<String>,
@@ -2216,8 +3491,20 @@ pub struct WsResolveResp {
     pub status_after: Option<WsStatus>,
 }
 
+impl WsResolveResp {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(resolved: Vec<String>, remaining: Vec<String>) -> Self {
+        Self {
+            resolved,
+            remaining,
+            status_after: None,
+        }
+    }
+}
+
 /// The check a workspace's land runs.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsCheckInput {
     /// The command and its arguments, run without a shell in the workspace; when omitted, the
     /// repository's `.swarmops/workspaces.json` `check.argv`.
@@ -2228,9 +3515,20 @@ pub struct WsCheckInput {
     pub timeout_s: u64,
 }
 
+impl Default for WsCheckInput {
+    /// The request a JSON object without fields reads.
+    fn default() -> Self {
+        Self {
+            argv: None,
+            timeout_s: default_check_timeout_s(),
+        }
+    }
+}
+
 /// `ws_land` (client-side): land a workspace's chain on its target; with a check, rebase, run
 /// the check there, and publish only the tree the check ran on.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsLandReq {
     /// The workspace, by name.
     pub workspace: String,
@@ -2258,8 +3556,25 @@ pub struct WsLandReq {
     pub status_after: StatusAfter,
 }
 
+impl WsLandReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(workspace: impl Into<String>) -> Self {
+        Self {
+            workspace: workspace.into(),
+            message: None,
+            idempotency_key: None,
+            target: None,
+            check: None,
+            mode: None,
+            max_attempts: default_max_attempts(),
+            status_after: StatusAfter::default(),
+        }
+    }
+}
+
 /// `ws_land`: the land, and how many attempts it took.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsLandResp {
     /// The store's land.
     pub land: LandResp,
@@ -2270,8 +3585,20 @@ pub struct WsLandResp {
     pub status_after: Option<WsStatus>,
 }
 
+impl WsLandResp {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(land: LandResp, attempts: u32) -> Self {
+        Self {
+            land,
+            attempts,
+            status_after: None,
+        }
+    }
+}
+
 /// `ws_materialize` (client-side): write out more of the tree.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsMaterializeReq {
     /// The workspace, by name.
     pub workspace: String,
@@ -2282,8 +3609,20 @@ pub struct WsMaterializeReq {
     pub status_after: StatusAfter,
 }
 
+impl WsMaterializeReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(workspace: impl Into<String>, paths: Vec<String>) -> Self {
+        Self {
+            workspace: workspace.into(),
+            paths,
+            status_after: StatusAfter::default(),
+        }
+    }
+}
+
 /// `ws_materialize`: what was written.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsMaterializeResp {
     /// The prefixes added.
     pub materialized: Vec<String>,
@@ -2294,8 +3633,20 @@ pub struct WsMaterializeResp {
     pub status_after: Option<WsStatus>,
 }
 
+impl WsMaterializeResp {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(materialized: Vec<String>, bytes: u64) -> Self {
+        Self {
+            materialized,
+            bytes,
+            status_after: None,
+        }
+    }
+}
+
 /// `ws_discard` (client-side): restore paths from the workspace's head.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsDiscardReq {
     /// The workspace, by name.
     pub workspace: String,
@@ -2307,8 +3658,20 @@ pub struct WsDiscardReq {
     pub status_after: StatusAfter,
 }
 
+impl WsDiscardReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(workspace: impl Into<String>) -> Self {
+        Self {
+            workspace: workspace.into(),
+            paths: Vec::new(),
+            status_after: StatusAfter::default(),
+        }
+    }
+}
+
 /// `ws_discard`: the paths restored.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsDiscardResp {
     /// The paths restored.
     pub discarded: Vec<String>,
@@ -2317,8 +3680,19 @@ pub struct WsDiscardResp {
     pub status_after: Option<WsStatus>,
 }
 
+impl WsDiscardResp {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(discarded: Vec<String>) -> Self {
+        Self {
+            discarded,
+            status_after: None,
+        }
+    }
+}
+
 /// `ws_list` (client-side): the store's workspaces, from its registry.
-#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsListReq {
     /// Also open each workspace, and report one whose directory is gone as an orphan.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -2327,20 +3701,39 @@ pub struct WsListReq {
 
 /// `ws_list`: the workspaces, by name.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsList {
     /// The workspaces.
     pub workspaces: Vec<WsInfo>,
 }
 
+impl WsList {
+    /// Takes every field.
+    pub fn new(workspaces: Vec<WsInfo>) -> Self {
+        Self { workspaces }
+    }
+}
+
 /// `ws_info` (client-side): one workspace.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsInfoReq {
     /// The workspace, by name.
     pub workspace: String,
 }
 
+impl WsInfoReq {
+    /// Takes every field.
+    pub fn new(workspace: impl Into<String>) -> Self {
+        Self {
+            workspace: workspace.into(),
+        }
+    }
+}
+
 /// `ws_delete` (client-side, CLI only): remove a workspace's directory, then its entry.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsDeleteReq {
     /// The workspace, by name.
     pub workspace: String,
@@ -2352,8 +3745,20 @@ pub struct WsDeleteReq {
     pub rescue: bool,
 }
 
+impl WsDeleteReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(workspace: impl Into<String>) -> Self {
+        Self {
+            workspace: workspace.into(),
+            force: false,
+            rescue: false,
+        }
+    }
+}
+
 /// `ws_delete`: what the deleted workspace left in the store.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsDeleteResp {
     /// The workspace's name.
     pub deleted: String,
@@ -2362,6 +3767,17 @@ pub struct WsDeleteResp {
     /// The rescue changeset of its edits, when there were some.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rescued: Option<String>,
+}
+
+impl WsDeleteResp {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(deleted: impl Into<String>, head: impl Into<String>) -> Self {
+        Self {
+            deleted: deleted.into(),
+            head: head.into(),
+            rescued: None,
+        }
+    }
 }
 
 /// One store's operations, implemented over a local store now and by a remote client later

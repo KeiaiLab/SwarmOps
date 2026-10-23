@@ -3,6 +3,7 @@
 //! target from `tests/` (`autotests = false` in `Cargo.toml`): a new test file is a `mod` line
 //! here.
 
+mod constructors;
 mod identity;
 mod m4;
 mod schema;
