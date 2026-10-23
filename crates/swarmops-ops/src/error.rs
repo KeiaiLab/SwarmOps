@@ -1,7 +1,8 @@
 //! The error table (operations spec §0): every repository and store failure mapped to the
 //! operations spec's code, with its `details` and, where there is an obvious next step, a
 //! command as its hint. [`crate::LocalOps`]'s documentation gives the table. Every message is
-//! one line: control characters in it are escaped.
+//! one line: control characters in it are escaped. The mapped enums are `#[non_exhaustive]`:
+//! each `match` ends in a wildcard arm, `E_INTERNAL`, so a new variant compiles unmapped.
 
 use std::io;
 
@@ -138,8 +139,9 @@ pub(crate) fn repo_error(e: RepoError, during: During<'_>) -> OpError {
             corrupt(message, during, "swarmops verify").with_details(object(id))
         }
         RepoError::Codec(_) => corrupt(message, during, "swarmops verify"),
-        // A derivation that fails on immutable inputs fails again on every call: a bug.
-        RepoError::Derived { .. } => error(ErrorCode::Internal, message),
+        // A derivation that fails on immutable inputs fails again on every call: a bug. So is
+        // a variant of another crate's enum this build does not know.
+        RepoError::Derived { .. } | RepoError::Internal(_) => error(ErrorCode::Internal, message),
         // A cache file someone placed, or a faulty build wrote: a deep verify names them all.
         RepoError::DerivedCorrupt {
             name, changeset, ..
@@ -147,6 +149,7 @@ pub(crate) fn repo_error(e: RepoError, during: During<'_>) -> OpError {
             ("derivation", name.into()),
             ("changeset", changeset.to_string().into()),
         ])),
+        _ => unmapped(message),
     }
 }
 
@@ -264,6 +267,7 @@ fn store_error(e: StoreError, message: String, during: During<'_>) -> OpError {
                 | LimitKind::RefNameBytes
                 | LimitKind::Records
                 | LimitKind::RepoNameBytes => ErrorCode::InvalidArg,
+                _ => return unmapped(message),
             };
             error(code, message).with_details(details([
                 ("store_limit", what.as_str().into()),
@@ -292,6 +296,8 @@ fn store_error(e: StoreError, message: String, during: During<'_>) -> OpError {
                     .with_hint("run the same command again: nothing of this one was committed"),
             }
         }
+        StoreError::Internal(_) => error(ErrorCode::Internal, message),
+        _ => unmapped(message),
     }
 }
 
@@ -343,6 +349,24 @@ pub(crate) fn created_but_unread(at: &Utf8Path, e: OpError) -> OpError {
 /// An error of `code` with `message`, its control characters escaped so that it is one line.
 pub(crate) fn error(code: ErrorCode, message: impl Into<String>) -> OpError {
     OpError::new(code, one_line(message.into()))
+}
+
+/// The hint of an error of another crate that this build maps to no code of its own.
+const UNMAPPED_HINT: &str = "an error this build does not map: report it";
+
+/// `E_INTERNAL` with `message`, for an error variant of another crate that this build does not
+/// know (the enums are `#[non_exhaustive]`).
+fn unmapped(message: String) -> OpError {
+    error(ErrorCode::Internal, message).with_hint(UNMAPPED_HINT)
+}
+
+/// `E_INTERNAL` for a value of `ty`, an enum of another crate, of a variant this build does not
+/// know, met where the operation projects it onto the API (the enums are `#[non_exhaustive]`).
+pub(crate) fn unknown_variant(ty: &str) -> OpError {
+    OpError::new(
+        ErrorCode::Internal,
+        format!("{ty}: a variant this build does not know"),
+    )
 }
 
 /// `text` with each control character (a line break, a tab, a NUL…) escaped, so that it is
@@ -583,6 +607,7 @@ pub(crate) fn git_import_error(e: ImportError, git_path: &str, git_ref: &str) ->
             let stopped = error(ErrorCode::Io, message).with_details(found);
             progress(stopped, imported, last)
         }
+        _ => unmapped(message),
     }
 }
 
@@ -614,6 +639,7 @@ fn source_error(e: SourceError, message: String, git_path: &str, git_ref: &str) 
             error(ErrorCode::TooLarge, message).with_details(found)
         }
         SourceError::Io { .. } => unreadable(message, None, "io", git_path),
+        _ => unmapped(message),
     }
 }
 
@@ -648,6 +674,7 @@ fn unsupported(why: Unsupported, message: String, git_path: &str) -> OpError {
                     shell_word(git_path)
                 )));
         }
+        _ => return unmapped(message),
     };
     error(ErrorCode::GitUnsupported, message).with_details(found)
 }
@@ -701,6 +728,7 @@ fn convert_error(e: ConvertError, message: String, git_path: &str, git_ref: &str
         ConvertError::Bug { commit } => {
             error(ErrorCode::Internal, message).with_details(commit_of(commit))
         }
+        _ => unmapped(message),
     }
 }
 
@@ -768,6 +796,7 @@ pub(crate) fn git_export_error(
         ExportError::Sink(e) => sink_error(e, message, git_path, branch),
         ExportError::Repo(e) => op(e),
         ExportError::Bug { .. } => error(ErrorCode::Internal, message),
+        _ => unmapped(message),
     }
 }
 
@@ -843,6 +872,7 @@ impl Diverged<'_> {
                 }
                 "run the same git export again".to_owned()
             }
+            _ => return unmapped(message),
         };
         error(ErrorCode::GitExportDiverged, message)
             .with_details(found)
@@ -901,6 +931,7 @@ fn sink_error(e: SinkError, message: String, git_path: &str, branch: &str) -> Op
                 "run the same git export again once the cause is gone: it writes only what is \
                  still missing",
             ),
+        _ => unmapped(message),
     }
 }
 
@@ -999,6 +1030,9 @@ pub(crate) fn url_refused(why: UrlRefused) -> OpError {
             "a remote's URL or host does not start with -",
             "give the remote's https:// or ssh:// URL",
         ),
+        _ => {
+            return unmapped(format!("a remote's URL is refused ({})", why.as_str()));
+        }
     };
     error(ErrorCode::InvalidArg, message)
         .with_details(details([("reason", why.as_str().into())]))
@@ -1080,6 +1114,7 @@ pub(crate) fn transport_error(e: TransportError, remote: &str, phase: Phase) -> 
             format!("the remote {remote:?} is a SHA-256 repository"),
         )
         .with_details(details([("reason", "sha256".into())])),
+        _ => unmapped(format!("git failed on the remote {remote:?}")),
     }
 }
 
@@ -1132,6 +1167,10 @@ fn rejected(reason: RejectReason, said: Said, remote: &str) -> OpError {
             "details.refs and details.remote_messages give the remote's reason"
         }
         RejectReason::Unclassified => "details.stderr_tail gives what git said",
+        _ => {
+            let message = format!("the remote {remote:?} refused ({})", reason.as_str());
+            return unmapped(message).with_details(found);
+        }
     };
     error(
         ErrorCode::RemoteRejected,
@@ -1162,6 +1201,7 @@ pub(crate) fn mirror_error(e: MirrorError) -> OpError {
         MirrorError::Source(_) => error(ErrorCode::GitRead, message)
             .with_details(details([("reason", "mirror".into())]))
             .with_hint(again),
+        _ => unmapped(message),
     }
 }
 
@@ -1212,6 +1252,7 @@ pub(crate) fn sync_error(e: SyncError, remote: &str, branch: &str) -> OpError {
             .with_details(details([("changeset", id.to_string().into())]))
             .with_hint("push a merge changeset with git: the sync relocates single changes only"),
         SyncError::Repo(e) => land_error(e, message),
+        _ => unmapped(message),
     }
 }
 

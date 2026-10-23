@@ -274,8 +274,11 @@ const MAX_LAND_KEY: usize = 64;
 ///
 /// Every error's message and hint is one line (control characters in it are escaped), and the
 /// hint, where there is an obvious next step, is a command, each word a shell would split or
-/// expand in single quotes. Repository failures map to codes as follows, `details` keys in
-/// braces:
+/// expand in single quotes.
+///
+/// The error enums are `#[non_exhaustive]`, so the compiler no longer checks that every variant
+/// has a row: a variant this build does not know is `E_INTERNAL`, its hint says to report it.
+/// Repository failures map to codes as follows, `details` keys in braces:
 ///
 /// - `E_REV_NOT_FOUND` `{rev}`: `NotFound`, and the store's `UnknownRefTarget`. The hint is
 ///   `swarmops ref list` for a ref name, `swarmops log` for an id or a `~N` walk.
@@ -371,7 +374,8 @@ const MAX_LAND_KEY: usize = 64;
 ///   never reaches here; the store's `BadCall`, a call its API does not take, which only a bug
 ///   makes; and `Derived`, a derived value that cannot be made (a cycle among the values it
 ///   needs, a key or a value that does not encode or decode, a derivation not registered),
-///   which only a bug of the derivation makes, as its inputs are immutable.
+///   which only a bug of the derivation makes, as its inputs are immutable. And `Internal` and the
+///   store's `Internal`, a variant of another crate's enum this build does not know, a bug.
 ///
 /// The operations raise their own errors besides:
 ///
