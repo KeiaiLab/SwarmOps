@@ -845,7 +845,7 @@ mod tests {
         let mut file = MAGIC.to_vec();
         file.extend([kind_byte(ObjectKind::Blob), ENC_ZSTD, 0, 0]);
         file.extend(size.to_le_bytes());
-        file.extend([0x28, 0xB5, 0x2F, 0xFD, 0xC0, 0x00]); // magic, FHD (8-byte FCS), window 1 KiB
+        file.extend([0x28, 0xb5, 0x2f, 0xfd, 0xc0, 0x00]); // magic, FHD (8-byte FCS), window 1 KiB
         file.extend(size.to_le_bytes()); // frame content size
         file.extend([0x01, 0x00, 0x00]); // last block, raw, 0 bytes
         file
