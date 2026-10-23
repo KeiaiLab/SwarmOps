@@ -105,7 +105,7 @@ struct Crashed {
 /// How many whole frames the `journal.log` of `store` holds that its `journal.off` does not list:
 /// what a crash between a frame's two appends leaves, which the next write lists.
 fn unlisted_frames(store: &Store) -> u64 {
-    let journal = Journal::open(&store.layout(), Arc::new(RealFs)).unwrap();
+    let journal = Journal::open(&store.layout(), Arc::new(RealFs::new())).unwrap();
     let whole = u64::try_from(journal.tail_frames_from(0).unwrap().len()).unwrap();
     whole - journal.frame_count().unwrap()
 }

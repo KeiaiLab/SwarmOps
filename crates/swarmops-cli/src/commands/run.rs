@@ -115,7 +115,7 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
             let (repo, resolved, recovered) = ctx.used.meta();
             ctx.finish(op, (repo, resolved, recovered), result)
         }
-        Command::Info => ctx.on_store(op, || Ok(InfoReq {}), |ops, req| ops.repo_info(req)),
+        Command::Info => ctx.on_store(op, || Ok(InfoReq::default()), |ops, req| ops.repo_info(req)),
         Command::Whoami => whoami(ctx, op),
         Command::Schema { name } => {
             ctx.finish(op, (None, BTreeMap::new(), None), schema(name.as_deref()))
@@ -131,14 +131,11 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
             op,
             || {
                 let who = context::mutator(agent, ctx.env)?;
-                let req = CommitReq {
-                    parent: parent.map(Rev::from),
-                    changes: read_changes(&changes)?,
-                    message,
-                    advance,
-                    idempotency_key: key,
-                    allow_empty,
-                };
+                let mut req = CommitReq::new(read_changes(&changes)?, message);
+                req.parent = parent.map(Rev::from);
+                req.advance = advance;
+                req.idempotency_key = key;
+                req.allow_empty = allow_empty;
                 Ok((who, req))
             },
             |ops, (who, req)| ops.commit(&who, req),
@@ -167,13 +164,12 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
             op,
             || {
                 let (rev, path) = split_target(&target);
-                Ok(ReadTreeReq {
-                    rev: rev.into(),
-                    path: path.map(str::to_owned),
-                    depth,
-                    limit,
-                    cursor,
-                })
+                let mut req = ReadTreeReq::new(rev);
+                req.path = path.map(str::to_owned);
+                req.depth = depth;
+                req.limit = limit;
+                req.cursor = cursor;
+                Ok(req)
             },
             |ops, req| ops.read_tree(req),
         ),
@@ -194,7 +190,11 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
         Command::Op(command) => run_op(ctx, op, command),
         Command::Verify { deep } => ctx.on_store(
             op,
-            || Ok(VerifyReq { deep }),
+            || {
+                let mut req = VerifyReq::default();
+                req.deep = deep;
+                Ok(req)
+            },
             |ops, req| {
                 ops.verify(req)
                     .and_then(|report| clean(report, Depth::of(deep)))
@@ -219,10 +219,8 @@ fn whoami(ctx: &Ctx<'_>, op: &'static str) -> Printed {
 /// Runs `show`, which names operation `op`: the changeset `rev` names, with at most
 /// `max_changes` of its changes.
 fn show(ctx: &Ctx<'_>, op: &'static str, rev: String, max_changes: usize) -> Printed {
-    let req = ShowReq {
-        rev: rev.into(),
-        max_changes,
-    };
+    let mut req = ShowReq::new(rev);
+    req.max_changes = max_changes;
     ctx.on_store(op, || Ok(req), |ops, req| ops.show(req))
 }
 
@@ -236,12 +234,11 @@ fn log(
     cursor: Option<String>,
     paths: Vec<String>,
 ) -> Printed {
-    let req = LogReq {
-        rev: rev.map(Rev::from),
-        limit,
-        cursor,
-        paths,
-    };
+    let mut req = LogReq::default();
+    req.rev = rev.map(Rev::from);
+    req.limit = limit;
+    req.cursor = cursor;
+    req.paths = paths;
     ctx.on_store(op, || Ok(req), |ops, req| ops.log(req))
 }
 
@@ -258,12 +255,11 @@ fn history(
         op,
         || {
             let (rev, path) = history_target(target)?;
-            Ok(PathHistoryReq {
-                rev: Some(rev.into()),
-                path: path.to_owned(),
-                limit,
-                cursor,
-            })
+            let mut req = PathHistoryReq::new(path);
+            req.rev = Some(rev.into());
+            req.limit = limit;
+            req.cursor = cursor;
+            Ok(req)
         },
         |ops, req| ops.path_history(req),
     )
@@ -289,17 +285,15 @@ fn run_land(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
         op,
         || {
             let who = context::mutator(ctx.global.agent.as_deref(), ctx.env)?;
-            let req = LandReq {
-                head: head.into(),
-                base: base.map(Rev::from),
-                target,
-                message,
-                idempotency_key: key,
-                max_attempts,
-                max_conflict_bytes,
-                expect_target: expect_target.map(Rev::from),
-                resolutions: resolve.as_deref().map(read_resolutions).transpose()?,
-            };
+            let mut req = LandReq::new(head);
+            req.base = base.map(Rev::from);
+            req.target = target;
+            req.message = message;
+            req.idempotency_key = key;
+            req.max_attempts = max_attempts;
+            req.max_conflict_bytes = max_conflict_bytes;
+            req.expect_target = expect_target.map(Rev::from);
+            req.resolutions = resolve.as_deref().map(read_resolutions).transpose()?;
             Ok((who, req))
         },
         |ops, (who, req)| ops.land(&who, req),
@@ -324,15 +318,13 @@ fn run_rebase(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
         op,
         || {
             let who = context::mutator(ctx.global.agent.as_deref(), ctx.env)?;
-            let req = RebaseReq {
-                head: head.into(),
-                base: base.map(Rev::from),
-                onto,
-                message,
-                idempotency_key: key,
-                max_conflict_bytes,
-                resolutions: resolve.as_deref().map(read_resolutions).transpose()?,
-            };
+            let mut req = RebaseReq::new(head);
+            req.base = base.map(Rev::from);
+            req.onto = onto;
+            req.message = message;
+            req.idempotency_key = key;
+            req.max_conflict_bytes = max_conflict_bytes;
+            req.resolutions = resolve.as_deref().map(read_resolutions).transpose()?;
             Ok((who, req))
         },
         |ops, (who, req)| ops.rebase(&who, req),
@@ -348,19 +340,23 @@ fn run_blob(ctx: &Ctx<'_>, op: &'static str, command: BlobCommand) -> Printed {
             || {
                 let who = context::mutator(agent, ctx.env)?;
                 let file = if file == "-" { STDIN.to_owned() } else { file };
-                let req = BlobPutReq {
-                    content: ContentInput::File(file),
-                };
+                let req = BlobPutReq::new(ContentInput::File(file));
                 Ok((who, req))
             },
             |ops, (who, req)| ops.blob_put(&who, req),
         ),
-        BlobCommand::Has { ids } => {
-            ctx.on_store(op, || Ok(BlobHasReq { ids }), |ops, req| ops.blob_has(req))
-        }
+        BlobCommand::Has { ids } => ctx.on_store(
+            op,
+            || Ok(BlobHasReq::new(ids)),
+            |ops, req| ops.blob_has(req),
+        ),
         BlobCommand::Get { ids, max_bytes } => ctx.on_store(
             op,
-            || Ok(BlobGetReq { ids, max_bytes }),
+            || {
+                let mut req = BlobGetReq::new(ids);
+                req.max_bytes = max_bytes;
+                Ok(req)
+            },
             |ops, req| ops.blob_get(req),
         ),
     }
@@ -383,12 +379,7 @@ fn run_derive(ctx: &Ctx<'_>, op: &'static str, command: &Command) -> Printed {
     }
     ctx.on_store(
         op,
-        || {
-            Ok(DeriveReq {
-                after,
-                limit: DEFAULT_DERIVE_LIMIT,
-            })
-        },
+        || Ok(derive_req(after, DEFAULT_DERIVE_LIMIT)),
         |ops, req| ops.derive(req),
     )
 }
@@ -432,7 +423,7 @@ fn follow_journal(
     if after.is_none() && !from_start {
         // A run of no frame gives where the journal ends: what it holds is left to readers.
         let started = Instant::now();
-        match ops.derive(DeriveReq { after, limit: 0 }) {
+        match ops.derive(derive_req(after, 0)) {
             Ok(end) => after = end.next,
             Err(error) => return failed(error, started),
         }
@@ -440,7 +431,7 @@ fn follow_journal(
     loop {
         let started = Instant::now();
         let limit = DEFAULT_DERIVE_LIMIT;
-        let run = match ops.derive(DeriveReq { after, limit }) {
+        let run = match ops.derive(derive_req(after, limit)) {
             Ok(run) => run,
             Err(error) => return failed(error, started),
         };
@@ -461,6 +452,14 @@ fn follow_journal(
             thread::sleep(interval);
         }
     }
+}
+
+/// `derive`'s request: at most `limit` frames after frame `after`, from the first if `None`.
+fn derive_req(after: Option<u64>, limit: usize) -> DeriveReq {
+    let mut req = DeriveReq::default();
+    req.after = after;
+    req.limit = limit;
+    req
 }
 
 /// Writes `text` to stdout and flushes it, so that a reader has it at once: one envelope of
@@ -484,26 +483,23 @@ fn diff(ctx: &Ctx<'_>, op: &'static str, args: DiffArgs) -> Printed {
         cursor,
         max_bytes,
     } = args;
-    let req = DiffReq {
-        from: from.into(),
-        to: to.into(),
-        paths,
-        format: match format {
-            DiffFormatArg::Names => DiffFormat::Names,
-            DiffFormatArg::Stat => DiffFormat::Stat,
-            DiffFormatArg::Unified => DiffFormat::Unified,
-        },
-        context,
-        limit,
-        cursor,
-        max_bytes,
+    let mut req = DiffReq::new(from, to);
+    req.paths = paths;
+    req.format = match format {
+        DiffFormatArg::Names => DiffFormat::Names,
+        DiffFormatArg::Stat => DiffFormat::Stat,
+        DiffFormatArg::Unified => DiffFormat::Unified,
     };
+    req.context = context;
+    req.limit = limit;
+    req.cursor = cursor;
+    req.max_bytes = max_bytes;
     ctx.on_store(op, || Ok(req), |ops, req| ops.diff(req))
 }
 
 /// Runs `resolve`, which names operation `op`: the changeset `rev` names, and its kind.
 fn resolve_rev(ctx: &Ctx<'_>, op: &'static str, rev: String) -> Printed {
-    let req = ResolveRevReq { rev: rev.into() };
+    let req = ResolveRevReq::new(rev);
     ctx.on_store(op, || Ok(req), |ops, req| ops.resolve_rev(req))
 }
 
@@ -511,7 +507,11 @@ fn resolve_rev(ctx: &Ctx<'_>, op: &'static str, rev: String) -> Printed {
 fn run_ref(ctx: &Ctx<'_>, op: &'static str, command: RefCommand) -> Printed {
     let agent = ctx.global.agent.as_deref();
     match command {
-        RefCommand::List => ctx.on_store(op, || Ok(RefListReq {}), |ops, req| ops.ref_list(req)),
+        RefCommand::List => ctx.on_store(
+            op,
+            || Ok(RefListReq::default()),
+            |ops, req| ops.ref_list(req),
+        ),
         RefCommand::Set {
             name,
             rev,
@@ -520,12 +520,9 @@ fn run_ref(ctx: &Ctx<'_>, op: &'static str, command: RefCommand) -> Printed {
         } => ctx.on_store(
             op,
             || {
-                let req = RefSetReq {
-                    name,
-                    new: rev.into(),
-                    expected_old: expect.map(Rev::from),
-                    create,
-                };
+                let mut req = RefSetReq::new(name, rev);
+                req.expected_old = expect.map(Rev::from);
+                req.create = create;
                 Ok((context::mutator(agent, ctx.env)?, req))
             },
             |ops, (who, req)| ops.ref_set(&who, req),
@@ -533,10 +530,7 @@ fn run_ref(ctx: &Ctx<'_>, op: &'static str, command: RefCommand) -> Printed {
         RefCommand::Delete { name, expect } => ctx.on_store(
             op,
             || {
-                let req = RefDeleteReq {
-                    name,
-                    expected_old: expect.into(),
-                };
+                let req = RefDeleteReq::new(name, expect);
                 Ok((context::mutator(agent, ctx.env)?, req))
             },
             |ops, (who, req)| ops.ref_delete(&who, req),
@@ -554,11 +548,11 @@ fn run_op(ctx: &Ctx<'_>, op: &'static str, command: OpCommand) -> Printed {
         } => ctx.on_store(
             op,
             || {
-                Ok(OpLogReq {
-                    before,
-                    limit,
-                    max_changesets,
-                })
+                let mut req = OpLogReq::default();
+                req.before = before;
+                req.limit = limit;
+                req.max_changesets = max_changesets;
+                Ok(req)
             },
             |ops, req| ops.op_log(req),
         ),
@@ -566,7 +560,7 @@ fn run_op(ctx: &Ctx<'_>, op: &'static str, command: OpCommand) -> Printed {
             op,
             || {
                 let who = context::mutator(ctx.global.agent.as_deref(), ctx.env)?;
-                Ok((who, UndoReq { op: number }))
+                Ok((who, UndoReq::new(number)))
             },
             |ops, (who, req)| ops.undo(&who, req),
         ),
@@ -770,13 +764,13 @@ fn envelope<T>(
     result: Result<T, OpError>,
     started: Instant,
 ) -> Envelope<T> {
-    let meta = Meta {
-        repo,
-        elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+    let mut meta = Meta::new(
+        u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         resolved,
-        auth: AUTH_TRUST.to_owned(),
-        recovered,
-    };
+        AUTH_TRUST,
+    );
+    meta.repo = repo;
+    meta.recovered = recovered;
     match result {
         Ok(result) => Envelope::ok(op, result, meta),
         Err(error) => Envelope::err(op, error, meta),
@@ -798,12 +792,10 @@ fn run_git(ctx: &Ctx<'_>, op: &'static str, command: GitCommand) -> Printed {
         } => ctx.on_local(
             op,
             || {
-                let req = GitImportReq {
-                    git_path: path,
-                    git_ref,
-                    target_ref: into,
-                    lossy: cli::lossy_classes(&lossy, gitlinks),
-                };
+                let mut req = GitImportReq::new(path);
+                req.git_ref = git_ref;
+                req.target_ref = into;
+                req.lossy = cli::lossy_classes(&lossy, gitlinks);
                 Ok((context::mutator(agent, ctx.env)?, req))
             },
             |ops, (who, req)| ops.git_import(&who, req),
@@ -816,12 +808,11 @@ fn run_git(ctx: &Ctx<'_>, op: &'static str, command: GitCommand) -> Printed {
         } => ctx.on_local(
             op,
             || {
-                Ok(GitExportReq {
-                    git_path: path,
-                    source_ref,
-                    branch,
-                    force,
-                })
+                let mut req = GitExportReq::new(path);
+                req.source_ref = source_ref;
+                req.branch = branch;
+                req.force = force;
+                Ok(req)
             },
             |ops, req| ops.git_export(req),
         ),
@@ -862,15 +853,12 @@ fn run_clone(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
 
     // The identity first: nothing is made without one.
     let result = context::mutator(ctx.global.agent.as_deref(), ctx.env).and_then(|who| {
-        let req = CloneReq {
-            url,
-            path: into,
-            name,
-            branch,
-            remote,
-            token_env,
-            lossy: cli::lossy_classes(&lossy, None),
-        };
+        let mut req = CloneReq::new(url, into);
+        req.name = name;
+        req.branch = branch;
+        req.remote = remote;
+        req.token_env = token_env;
+        req.lossy = cli::lossy_classes(&lossy, None);
         clone(req, &who, &ctx.used.resolved)
     });
     ctx.finish(op, ctx.used.meta(), result)
@@ -896,31 +884,31 @@ fn run_remote(ctx: &Ctx<'_>, op: &'static str, command: RemoteCommand) -> Printe
         } => ctx.on_local(
             op,
             || {
-                Ok(RemoteAddReq {
-                    name,
-                    url,
-                    branch,
-                    token_env,
-                    lossy: cli::lossy_classes(&lossy, None),
-                })
+                let mut req = RemoteAddReq::new(name, url);
+                req.branch = branch;
+                req.token_env = token_env;
+                req.lossy = cli::lossy_classes(&lossy, None);
+                Ok(req)
             },
             |ops, req| ops.remote_add(req),
         ),
         RemoteCommand::Remove { name } => ctx.on_local(
             op,
-            || Ok(RemoteRemoveReq { name }),
+            || Ok(RemoteRemoveReq::new(name)),
             |ops, req| ops.remote_remove(req),
         ),
-        RemoteCommand::List => {
-            ctx.on_local(op, || Ok(RemoteListReq {}), |ops, req| ops.remote_list(req))
-        }
+        RemoteCommand::List => ctx.on_local(
+            op,
+            || Ok(RemoteListReq::default()),
+            |ops, req| ops.remote_list(req),
+        ),
     }
 }
 
 /// Runs `fetch`, which names operation `op`: `remote`'s history into the store's mirror and its
 /// followed branch into the store. It needs no identity.
 fn fetch(ctx: &Ctx<'_>, op: &'static str, remote: String) -> Printed {
-    ctx.on_local(op, || Ok(FetchReq { remote }), |ops, req| ops.fetch(req))
+    ctx.on_local(op, || Ok(FetchReq::new(remote)), |ops, req| ops.fetch(req))
 }
 
 /// Runs `push`, which names operation `op`: `target` sent to `remote`. It needs no identity.
@@ -940,11 +928,10 @@ fn push_request(remote: String, target: Option<&str>) -> PushReq {
         Some((source_ref, branch)) => (source_ref, Some(branch.to_owned())),
         None => (target, None),
     };
-    PushReq {
-        remote,
-        source_ref: source_ref.to_owned(),
-        branch,
-    }
+    let mut req = PushReq::new(remote);
+    req.source_ref = String::from(source_ref);
+    req.branch = branch;
+    req
 }
 
 /// Runs `sync` or `sync status`, which names operation `op`: `command` is the sync's arguments.
@@ -964,7 +951,11 @@ fn run_sync(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
     if let Some(SyncCommand::Status { remote, limit }) = status {
         return ctx.on_local(
             op,
-            || Ok(SyncStatusReq { remote, limit }),
+            || {
+                let mut req = SyncStatusReq::new(remote);
+                req.limit = limit;
+                Ok(req)
+            },
             |ops, req| ops.sync_status(req),
         );
     }
@@ -981,11 +972,9 @@ fn run_sync(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
             let remote = remote.ok_or_else(|| {
                 OpError::new(ErrorCode::InvalidArg, "sync needs the remote to sync with")
             })?;
-            let req = SyncReq {
-                remote,
-                mode,
-                max_attempts,
-            };
+            let mut req = SyncReq::new(remote);
+            req.mode = mode;
+            req.max_attempts = max_attempts;
             Ok((context::mutator(ctx.global.agent.as_deref(), ctx.env)?, req))
         },
         |ops, (who, req)| ops.sync(&who, req),
@@ -1258,13 +1247,11 @@ fn cat_request(
     max_bytes: u64,
 ) -> Result<ReadFileReq, OpError> {
     let (rev, path) = file_target(target)?;
-    Ok(ReadFileReq {
-        rev: rev.into(),
-        path: path.to_owned(),
-        offset,
-        lines,
-        max_bytes,
-    })
+    let mut req = ReadFileReq::new(rev, path);
+    req.offset = offset;
+    req.lines = lines;
+    req.max_bytes = max_bytes;
+    Ok(req)
 }
 
 /// `cat`'s `<rev>:<path>`, as [`split_target`] splits it; a target without a path is
@@ -1445,11 +1432,8 @@ mod tests {
 
     #[test]
     fn verify_problems_are_store_corruption() {
-        let report = |problems: &[&str]| VerifyReport {
-            objects_checked: 5,
-            changesets_checked: 2,
-            problems: problems.iter().map(|p| (*p).to_owned()).collect(),
-            findings: Vec::new(),
+        let report = |problems: &[&str]| {
+            VerifyReport::new(5, 2, problems.iter().map(|p| (*p).to_owned()).collect())
         };
         assert_eq!(clean(report(&[]), Depth::Shallow).unwrap(), report(&[]));
         let one = clean(report(&["object x is missing"]), Depth::Shallow).unwrap_err();
@@ -1572,26 +1556,14 @@ mod tests {
         let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
         let (ops, _) = LocalOps::init(&root, "acme").unwrap();
         let who = Identity::parse("agent/worker-17").unwrap();
-        let commit = |content: &str| CommitReq {
-            parent: None,
-            changes: vec![ChangeInput {
-                path: "f".to_owned(),
-                op: ChangeOp::Put,
-                content: Some(ContentInput::Inline(content.to_owned())),
-                mode: None,
-            }],
-            message: "m".to_owned(),
-            advance: None,
-            idempotency_key: None,
-            allow_empty: false,
+        let commit = |content: &str| {
+            let mut change = ChangeInput::new("f", ChangeOp::Put);
+            change.content = Some(ContentInput::Inline(content.to_owned()));
+            CommitReq::new(vec![change], "m")
         };
         let c1 = ops.commit(&who, commit("1")).unwrap().changeset;
-        let main = RefSetReq {
-            name: "main".to_owned(),
-            new: c1.as_str().into(),
-            expected_old: None,
-            create: true,
-        };
+        let mut main = RefSetReq::new("main", c1.as_str());
+        main.create = true;
         ops.ref_set(&who, main).unwrap();
         drop(ops);
         // main's frame stays whole in journal.log, its entry gone from journal.off, as when its
@@ -1605,10 +1577,8 @@ mod tests {
             .commit(&who, commit("2"))
             .unwrap();
         let envelope = failed_envelope("commit", panicked(&"boom"), &used, Instant::now());
-        let listed = RecoveredOut {
-            frames_listed: 1,
-            ..RecoveredOut::default()
-        };
+        let mut listed = RecoveredOut::default();
+        listed.frames_listed = 1;
         assert_eq!(envelope.meta.recovered, Some(listed));
     }
 }

@@ -93,7 +93,7 @@ fn eight_processes_land_concurrently_none_lost() {
         Stats::from(&records, wall).summary(),
         wall.as_millis()
     );
-    let base_id = ChangesetId(ObjectId::from_hex(&base).expect("a changeset id"));
+    let base_id = ChangesetId::new(ObjectId::from_hex(&base).expect("a changeset id"));
     if let Err(rule) = check_invariants(Utf8Path::new(store.path()), "main", base_id, &records) {
         panic!("{rule}\n{records:#?}");
     }

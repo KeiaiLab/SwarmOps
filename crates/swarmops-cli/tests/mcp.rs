@@ -910,6 +910,13 @@ fn mcp_tool_errors_carry_the_error_envelope() {
     server.finish_clean();
 }
 
+/// `show`'s request for `rev`'s changeset with one change at most.
+fn show_req(rev: &str) -> ShowReq {
+    let mut req = ShowReq::new(rev);
+    req.max_changes = 1;
+    req
+}
+
 /// What a call resolved is that call's alone: through the server, each tool result's
 /// `meta.resolved` holds its own revisions only, a failed call's too; and two threads that
 /// share one `LocalOps` never see each other's.
@@ -930,10 +937,7 @@ fn mcp_calls_do_not_share_resolution() {
             scope.spawn(move || {
                 start.wait();
                 for _ in 0..300 {
-                    let req = ShowReq {
-                        rev: rev.into(),
-                        max_changes: 1,
-                    };
+                    let req = show_req(rev);
                     let resolved = Resolved::default();
                     assert_eq!(ops.recording(&resolved).show(req).unwrap().id, *id);
                     let resolved = resolved.take();
@@ -947,17 +951,8 @@ fn mcp_calls_do_not_share_resolution() {
     // An operation called on the shared handle itself records into no request.
     let resolved = Resolved::default();
     let request = ops.recording(&resolved);
-    ops.show(ShowReq {
-        rev: c2[..12].into(),
-        max_changes: 1,
-    })
-    .unwrap();
-    request
-        .show(ShowReq {
-            rev: c1[..12].into(),
-            max_changes: 1,
-        })
-        .unwrap();
+    ops.show(show_req(&c2[..12])).unwrap();
+    request.show(show_req(&c1[..12])).unwrap();
     assert_eq!(
         resolved.take(),
         BTreeMap::from([(c1[..12].to_owned(), c1.clone())])

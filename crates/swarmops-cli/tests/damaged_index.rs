@@ -35,7 +35,7 @@ fn chain() -> (Store, [String; 5]) {
     MetaStore::open(&root).unwrap().flush().unwrap();
     let layout = Layout::new(&root);
     let _lock = MetaLock::acquire(&layout, Duration::from_secs(10)).unwrap();
-    let mut index = Index::open(&layout, Arc::new(RealFs)).unwrap();
+    let mut index = Index::open(&layout, Arc::new(RealFs::new())).unwrap();
     assert_eq!(index.compact().unwrap(), 5);
     (store, ids.try_into().unwrap())
 }
