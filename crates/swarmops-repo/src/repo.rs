@@ -74,7 +74,7 @@ use swarmops_core::{Changeset, ChangesetId, ObjectId, ObjectKind, Tree, TreeId};
 use swarmops_store::{
     CasResult, DerivedStore, ExternalEntry, ExternalIds, ExternalPut, FileOp, FsObjectStore, FsOps,
     HookedFs, IoFailure, Layout, LinkOutcome, MetaStore, ObjectStore, RealFs, Recovered, RefState,
-    StoreError, StoreFs, is_native_linux_fs,
+    StoreError, StoreFs,
 };
 
 use crate::derive::Registry;
@@ -306,7 +306,7 @@ impl LocalRepo {
         // the kernel takes it), as `create` resolves it: a store that leads under /mnt/ is
         // refused on open as on create, whether it was moved, copied or linked there.
         let (target, _) = resolve(&root)?;
-        if !is_native_linux_fs(&target) {
+        if !swarmops_store::is_native_linux_fs(&target) {
             return Err(StoreError::UnsupportedFs(target).into());
         }
         let layout = Layout::new(root.clone());
@@ -687,7 +687,7 @@ enum Threads {
 /// store; one of working out where the path leads is [`FileOp::Resolve`], with no file.
 fn native_root(store: &Utf8Path, fs: &Arc<dyn FsOps>) -> Result<Utf8PathBuf, RepoError> {
     let (target, missing) = resolve(&absolute(store)?)?;
-    if !is_native_linux_fs(&target) {
+    if !swarmops_store::is_native_linux_fs(&target) {
         return Err(StoreError::UnsupportedFs(target).into());
     }
     let fs = StoreFs::new(Arc::clone(fs), &target);
@@ -705,7 +705,7 @@ fn native_root(store: &Utf8Path, fs: &Arc<dyn FsOps>) -> Result<Utf8PathBuf, Rep
         }
     }
     let canonical = target.canonicalize_utf8().map_err(resolving)?;
-    if !is_native_linux_fs(&canonical) {
+    if !swarmops_store::is_native_linux_fs(&canonical) {
         return Err(StoreError::UnsupportedFs(canonical).into());
     }
     Ok(canonical)

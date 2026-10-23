@@ -9,9 +9,9 @@ use swarmops_core::{
 };
 use swarmops_store::{CasResult, ChangesetMeta, InsertOutcome, MetaWrite, ObjectStore, StoreError};
 
-use crate::commit::{Change, ChangeOp, Empty, candidate_delta, sorted_changes};
+use crate::commit::{self, Change, ChangeOp, Empty};
 use crate::error::RepoError;
-use crate::repo::{Repo, ref_error};
+use crate::repo::{self, Repo};
 use crate::tree_edit::{Encoded, TreeEdit};
 
 use super::relocate::{self, Overlaps, Relocation};
@@ -152,7 +152,7 @@ impl<O: ObjectStore> Repo<O> {
         actor: &str,
         mut metadata: Vec<(String, Vec<u8>)>,
     ) -> Result<Publication, RepoError> {
-        swarmops_store::check_ref_name(target).map_err(ref_error)?;
+        swarmops_store::check_ref_name(target).map_err(repo::ref_error)?;
         let changes = puts
             .into_iter()
             .map(|(path, kind, content)| Change {
@@ -164,7 +164,8 @@ impl<O: ObjectStore> Repo<O> {
                 op: ChangeOp::Delete,
             }))
             .collect();
-        let (candidates, mut contents) = candidate_delta(sorted_changes(changes, Empty::Refuse)?);
+        let (candidates, mut contents) =
+            commit::candidate_delta(commit::sorted_changes(changes, Empty::Refuse)?);
         let mut edit = TreeEdit::new(&self.objects, self.changeset_object(onto)?.root)?;
         let effective = edit.apply(&candidates)?;
         let delta: Vec<DeltaEntry> = candidates
@@ -269,7 +270,7 @@ impl<O: ObjectStore> Repo<O> {
     ) -> Result<(Published, bool), RepoError> {
         let actual = write
             .get_ref(&p.target)
-            .map_err(ref_error)?
+            .map_err(repo::ref_error)?
             .ok_or_else(|| missing_target(&p.target))?;
         if actual == p.onto {
             return publish_cas(write, p);
@@ -304,7 +305,7 @@ impl<O: ObjectStore> Repo<O> {
         insert(write, &p.changeset, p.id)?;
         move_ref(write, &op_head, None, Some(p.id), &p.actor)?;
         let conflicted = conflicted_name(&op_head);
-        if let Some(old) = write.get_ref(&conflicted).map_err(ref_error)? {
+        if let Some(old) = write.get_ref(&conflicted).map_err(repo::ref_error)? {
             move_ref(write, &conflicted, Some(old), None, &p.actor)?;
         }
         Ok((Published::Pending { op_head }, true))
@@ -336,7 +337,7 @@ impl<O: ObjectStore> Repo<O> {
                 .ok_or_else(|| RepoError::NotFound(format!("the parent of op head {name}")))?;
             let head = write
                 .get_ref(OP_HEADS_TARGET)
-                .map_err(ref_error)?
+                .map_err(repo::ref_error)?
                 .ok_or_else(|| missing_target(OP_HEADS_TARGET))?;
             let settled = if head == onto {
                 Some(*id)
@@ -359,7 +360,7 @@ impl<O: ObjectStore> Repo<O> {
             } else {
                 move_ref(write, name, Some(*id), None, SETTLER)?;
                 let conflicted = conflicted_name(name);
-                let old = write.get_ref(&conflicted).map_err(ref_error)?;
+                let old = write.get_ref(&conflicted).map_err(repo::ref_error)?;
                 move_ref(write, &conflicted, old, Some(*id), SETTLER)?;
             }
         }
@@ -374,7 +375,7 @@ fn publish_cas(write: &mut MetaWrite<'_>, p: &Publication) -> Result<(Published,
     insert(write, &p.changeset, p.id)?;
     match write
         .cas_ref(&p.target, Some(p.onto), Some(p.id), &p.actor)
-        .map_err(ref_error)?
+        .map_err(repo::ref_error)?
     {
         CasResult::Applied { .. } => {
             let landed = Published::Landed {
@@ -422,7 +423,7 @@ fn move_ref(
 ) -> Result<(), RepoError> {
     match write
         .cas_ref(name, expected, new, actor)
-        .map_err(ref_error)?
+        .map_err(repo::ref_error)?
     {
         CasResult::Applied { .. } => Ok(()),
         CasResult::Mismatch { actual } => Err(RepoError::RefMoved {

@@ -78,10 +78,7 @@ mod publish;
 mod resolve;
 
 pub use detached::{DetachedLand, DetachedOutcome};
-use landing::{
-    LAND_KEY, Recorded, SQUASHED_FROM, Sides, Squash, chain, conflict_report, merge_chain,
-    metadata, stored, write_squash,
-};
+use landing::{LAND_KEY, SQUASHED_FROM};
 pub use landing::{
     LandOutcome, LandRequest, LandStatus, MergeConflicts, NothingToLandReason, backoff,
 };

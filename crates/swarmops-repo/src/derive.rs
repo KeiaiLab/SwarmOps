@@ -50,7 +50,6 @@ mod engine;
 mod last_modified;
 mod skiplist;
 
-use self::derivation::derivation_error;
 pub use self::derivation::{
     Derivation, DeriveCtx, DeriveError, DeriveRun, Need, Registry, Subject,
 };

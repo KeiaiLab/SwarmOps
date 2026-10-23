@@ -19,12 +19,10 @@
 use swarmops_core::{ChangesetId, Signature};
 use swarmops_store::{InsertOutcome, ObjectStore, StoreError};
 
+use super::NothingToLandReason;
 use super::key::TargetWalk;
-use super::{
-    NothingToLandReason, Recorded, Sides, Squash, chain, conflict_report, merge_chain, metadata,
-    stored, write_squash,
-};
-use crate::commit::{WrittenChangeset, check_metadata};
+use super::landing::{self, Recorded, Sides, Squash};
+use crate::commit::{self, WrittenChangeset};
 use crate::error::RepoError;
 use crate::repo::Repo;
 
@@ -76,11 +74,11 @@ impl<O: ObjectStore> Repo<O> {
     pub fn land_detached(&self, req: DetachedLand) -> Result<DetachedOutcome, RepoError> {
         // 1. The request, in one snapshot: three changesets the store holds, the base on the
         // head's first-parent chain, the caller's keys no reserved ones.
-        check_metadata(&req.extra_metadata)?;
+        commit::check_metadata(&req.extra_metadata)?;
         let read = self.snapshot()?;
-        let head = stored(&read, req.head)?;
-        let base = stored(&read, req.base)?;
-        let onto = stored(&read, req.onto)?;
+        let head = landing::stored(&read, req.head)?;
+        let base = landing::stored(&read, req.base)?;
+        let onto = landing::stored(&read, req.onto)?;
         if !read.is_ancestor(req.base, req.head)? {
             return Err(RepoError::BaseNotAncestor {
                 base: req.base,
@@ -89,10 +87,10 @@ impl<O: ObjectStore> Repo<O> {
         }
 
         // 2. The chain L squashes, which holds no merge.
-        let squashed = chain(self, base.id, head.id)?;
+        let squashed = landing::chain(self, base.id, head.id)?;
 
         // 3. The merge onto `onto`: a conflict is the land's report, `onto` its `theirs`.
-        let merged = merge_chain(self, &base, &head, &onto)?;
+        let merged = landing::merge_chain(self, &base, &head, &onto)?;
         if !merged.conflicts.is_empty() {
             let sides = Sides {
                 base: base.id,
@@ -100,7 +98,7 @@ impl<O: ObjectStore> Repo<O> {
                 theirs: &onto,
             };
             let mut walk = TargetWalk::new(base.generation);
-            return Err(conflict_report(
+            return Err(landing::conflict_report(
                 &mut walk,
                 &read,
                 sides,
@@ -122,7 +120,7 @@ impl<O: ObjectStore> Repo<O> {
             extra: &req.extra_metadata,
             squashed: req.squashed_from.as_deref().unwrap_or(&squashed),
         };
-        let metadata = metadata(&head.changeset, recorded);
+        let metadata = landing::metadata(&head.changeset, recorded);
         let squash = Squash {
             theirs: &onto,
             head: &head.changeset,
@@ -132,7 +130,7 @@ impl<O: ObjectStore> Repo<O> {
             message: req.message,
             metadata,
         };
-        let written = match write_squash(self, squash) {
+        let written = match landing::write_squash(self, squash) {
             Ok(written) => written,
             Err(RepoError::NothingToLand(NothingToLandReason::NoChanges)) => {
                 return Ok(DetachedOutcome::NoChanges);

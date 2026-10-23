@@ -9,7 +9,7 @@ use swarmops_core::{Changeset, ChangesetId, RepoPath};
 use swarmops_store::{CasResult, ChangesetMeta, ObjectStore, Recovered, StoreError};
 
 use crate::error::RepoError;
-use crate::repo::{Repo, post_commit_warning, ref_error};
+use crate::repo::{self, Repo};
 
 /// A land's changeset, written and flushed, to publish.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,7 +81,7 @@ impl<O: ObjectStore> Repo<O> {
         })?;
         match write
             .cas_ref(&p.target, Some(p.onto), Some(p.id), &p.actor)
-            .map_err(ref_error)?
+            .map_err(repo::ref_error)?
         {
             CasResult::Applied { .. } => {}
             // Returning drops the write: the queued insert with it, no frame, the lock released.
@@ -103,7 +103,7 @@ impl<O: ObjectStore> Repo<O> {
                     "the landed changeset {} and the move of ref {}",
                     p.id, p.target
                 );
-                warnings.push(post_commit_warning(&what, frame_seq, &source));
+                warnings.push(repo::post_commit_warning(&what, frame_seq, &source));
             }
             Err(e) => return Err(e.into()),
         }

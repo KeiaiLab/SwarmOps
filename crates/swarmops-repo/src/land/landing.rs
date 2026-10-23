@@ -18,7 +18,7 @@ use crate::commit::{Draft, WrittenChangeset};
 use crate::error::RepoError;
 use crate::merge::MergeOutcome;
 use crate::read::{RepoRead, StoredChangeset};
-use crate::repo::{Repo, ref_error};
+use crate::repo::{self, Repo};
 
 use super::key::{KeyFound, TargetWalk};
 use super::resolve::Resolving;
@@ -274,7 +274,7 @@ impl<O: ObjectStore> Repo<O> {
     /// a snapshot of its own, in which it reads the target's head, the change's head and base, and
     /// the resolutions. A rebase starts so too ([`crate::rebase`]).
     pub(crate) fn start(&self, mut req: LandRequest) -> Result<Started<'_, O>, RepoError> {
-        swarmops_store::check_ref_name(&req.target).map_err(ref_error)?;
+        swarmops_store::check_ref_name(&req.target).map_err(repo::ref_error)?;
         let read = self.snapshot()?;
         let theirs = target_head(&read, &req.target)?;
         let head = stored(&read, req.head)?;
@@ -321,7 +321,7 @@ impl<O: ObjectStore> Repo<O> {
     /// the ref does not exist.
     fn target_under_lock(&self, target: &str) -> Result<ChangesetId, RepoError> {
         let write = self.meta.write()?;
-        let named = write.get_ref(target).map_err(ref_error)?;
+        let named = write.get_ref(target).map_err(repo::ref_error)?;
         named.ok_or_else(|| RepoError::NotFound(target.to_owned()))
     }
 }

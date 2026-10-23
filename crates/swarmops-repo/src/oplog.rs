@@ -35,7 +35,7 @@ use swarmops_core::ChangesetId;
 use swarmops_store::{CasResult, Frame, ObjectStore, Record, Recovered, StoreError};
 
 use crate::error::RepoError;
-use crate::repo::{Repo, post_commit_warning, ref_error};
+use crate::repo::{self, Repo};
 
 /// One operation: a write transaction, as the journal holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,7 +142,10 @@ impl<O: ObjectStore> Repo<O> {
             return Err(RepoError::NothingToUndo(op));
         }
         for (name, old, new) in moves {
-            match write.cas_ref(&name, new, old, actor).map_err(ref_error)? {
+            match write
+                .cas_ref(&name, new, old, actor)
+                .map_err(repo::ref_error)?
+            {
                 CasResult::Applied { .. } => {}
                 // Back where the operation found it already: nothing to move.
                 CasResult::Mismatch { actual } if actual == old => {}
@@ -185,7 +188,7 @@ impl<O: ObjectStore> Repo<O> {
             Ok(info) => info.frame_seq,
             Err(StoreError::PostCommit { frame_seq, source }) => {
                 let what = format!("the undo of operation {op}");
-                warnings.push(post_commit_warning(&what, frame_seq, &source));
+                warnings.push(repo::post_commit_warning(&what, frame_seq, &source));
                 frame_seq
             }
             Err(e) => return Err(e.into()),

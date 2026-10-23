@@ -75,7 +75,7 @@ use std::sync::Arc;
 
 use swarmops_core::bytes;
 use swarmops_core::{Changeset, ChangesetId, EntryTarget, ObjectId, ObjectKind, Tree, TreeId};
-use swarmops_store::external_ids::lower_hex;
+use swarmops_store::external_ids;
 use swarmops_store::{
     ChangesetMeta, ExternalEntry, Frame, Index, Journal, ListedEntry, ObjectStore, Record, RefFile,
     SYSTEM_GIT, SortedView, StoreError,
@@ -310,7 +310,7 @@ fn key_text(name: &str, key: &[u8]) -> String {
     {
         return format!(" under path {path}");
     }
-    format!(" under key {}", lower_hex(key))
+    format!(" under key {}", external_ids::lower_hex(key))
 }
 
 /// How much of a store [`Repo::verify`] reads.
@@ -836,7 +836,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
     fn external_entries(&mut self) -> Result<(), RepoError> {
         for (system, entries) in std::mem::take(&mut self.external) {
             for (key, entry) in entries {
-                let key = lower_hex(&key);
+                let key = external_ids::lower_hex(&key);
                 let problem = match entry {
                     Err(StoreError::ExternalIdCorrupt { .. }) => VerifyProblem::ExternalIdCorrupt {
                         system: system.clone(),

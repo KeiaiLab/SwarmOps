@@ -70,7 +70,7 @@ use swarmops_store::{
 
 use crate::error::RepoError;
 use crate::read::RepoRead;
-use crate::repo::{Repo, post_commit_warning, ref_error};
+use crate::repo::{self, Repo};
 use crate::tree_edit::{Encoded, TreeEdit};
 
 /// The most parents a changeset may have: what a journal record holds (its count is a byte).
@@ -302,7 +302,7 @@ impl<O: ObjectStore> Repo<O> {
             advance,
         } = req;
         if let Some(Advance { name, .. }) = &advance {
-            swarmops_store::check_ref_name(name).map_err(ref_error)?;
+            swarmops_store::check_ref_name(name).map_err(repo::ref_error)?;
         }
         check_metadata(&metadata)?;
         let empty = if allow_empty {
@@ -523,7 +523,7 @@ impl<O: ObjectStore> Repo<O> {
             Some(Advance { name, actor }) => {
                 let moved = write
                     .cas_ref(&name, expected, Some(id), &actor)
-                    .map_err(ref_error)?;
+                    .map_err(repo::ref_error)?;
                 let already_applied = match moved {
                     CasResult::Applied { .. } => false,
                     // The ref names the changeset already: an identical request committed it,
@@ -564,7 +564,7 @@ impl<O: ObjectStore> Repo<O> {
                         Some(moved) => format!("the move of ref {}", moved.name),
                         None => "the changeset".to_owned(),
                     };
-                    warnings.push(post_commit_warning(&what, frame_seq, &source));
+                    warnings.push(repo::post_commit_warning(&what, frame_seq, &source));
                 }
                 Err(e) => return Err(e.into()),
             }

@@ -21,7 +21,8 @@ use std::sync::Arc;
 use swarmops_core::{Changeset, ChangesetId, ObjectKind};
 use swarmops_store::{DerivedSlot, DerivedStore, ObjectStore, StoreError};
 
-use super::{DeriveCtx, DeriveError, Need, Registry, Subject, derivation_error};
+use super::derivation;
+use super::{DeriveCtx, DeriveError, Need, Registry, Subject};
 use crate::error::RepoError;
 use crate::repo;
 
@@ -292,7 +293,7 @@ impl Engine<'_> {
     fn wait_for(&mut self, need: Need) -> Result<(), RepoError> {
         let Need { name, cs, key } = need;
         let deriv = self.registry.position(name).ok_or_else(|| {
-            derivation_error(name, "not registered: Repo::register adds a derivation")
+            derivation::derivation_error(name, "not registered: Repo::register adds a derivation")
         })?;
         let node = Node { deriv, cs, key };
         if self.on_stack.contains(&node) {
@@ -301,7 +302,7 @@ impl Engine<'_> {
         if self.memo.get(&node).is_some() {
             let top = self.stack.last().expect("a frame waits");
             let asker = top.chain.last().expect("a chain is never empty");
-            return Err(derivation_error(
+            return Err(derivation::derivation_error(
                 self.registry.entry(asker.deriv).name,
                 format!(
                     "returned Missing for {name}'s value of changeset {cs}, which it was given"
@@ -389,7 +390,7 @@ impl Engine<'_> {
     /// The error of meeting `node` again while it is on the stack: its value would need itself.
     fn cycle(&self, node: &Node) -> RepoError {
         let name = self.registry.entry(node.deriv).name;
-        derivation_error(
+        derivation::derivation_error(
             name,
             format!(
                 "a cycle: its value of changeset {} is needed while it is being derived",

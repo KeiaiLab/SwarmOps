@@ -21,7 +21,7 @@
 //! `land_key`, so a changeset that has `lander` is one a land made.
 
 use swarmops_core::{ChangesetId, DeltaOp, RepoPath, Signature, TreeId};
-use swarmops_merge::tree_diff::{PathFilter, delta_of, diff_trees};
+use swarmops_merge::tree_diff::{self, PathFilter};
 use swarmops_store::{InsertOutcome, ObjectStore, Recovered};
 
 use crate::commit::{Change, ChangeOp, CommitRequest};
@@ -145,9 +145,10 @@ impl<O: ObjectStore> Repo<O> {
                 .root;
             let onto_root = self.changeset_object(theirs)?.root;
             let paths = PathFilter::all();
-            let changes = diff_trees(started.read(), Some(onto_root), Some(root), &paths)?;
+            let changes =
+                tree_diff::diff_trees(started.read(), Some(onto_root), Some(root), &paths)?;
             return Ok(RebaseOutcome {
-                files_changed: delta_of(&changes).len(),
+                files_changed: tree_diff::delta_of(&changes).len(),
                 ..unwritten(RebaseStatus::UpToDate, head, root, theirs, base)
             });
         }
