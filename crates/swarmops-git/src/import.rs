@@ -414,10 +414,10 @@ pub fn import(
                     recovered: Recovered::default(),
                 });
             }
-            Some(Leads::Met(commit)) => seeds = commit.seeds.then_some((commit.oid, true)),
+            Some(Leads::Met(commit)) => seeds = commit.seeds.then_some((commit.oid, Meeting::Met)),
             Some(Leads::Reached) => {
                 let first = base.commits[0];
-                seeds = first.seeds.then_some((first.oid, false));
+                seeds = first.seeds.then_some((first.oid, Meeting::Unmet));
             }
         }
     }
@@ -814,23 +814,36 @@ fn malformed(oid: GitOid, error: &RawError) -> ImportError {
     }
 }
 
+/// Whether the import's walk met the commit that seeds the conversion: one it did not meet
+/// may be missing from the source.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Meeting {
+    /// The walk met it.
+    Met,
+    /// The walk did not reach it.
+    Unmet,
+}
+
 /// Step 4 of [the module documentation](self): the trees and blobs of `base`'s head, taken by
 /// `converter` as converted already, by walking the git tree of `commit`, a commit the head
 /// stands for whose tree its root holds without loss, and the root together, entries matched by
 /// name and kind, each pair taken only where the store's own bytes render to the git object's oid
 /// ([`Oids`]): whatever the store says of the head, no git object is taken for a store object of
-/// other bytes. A commit the walk did not meet (`met` false) that `source` lacks seeds nothing.
+/// other bytes. A commit the walk did not meet ([`Meeting::Unmet`]) that `source` lacks seeds
+/// nothing.
 fn seed(
     oids: &Oids<'_>,
     source: &dyn GitSource,
     converter: &mut Converter<'_>,
     base: &Base,
     commit: GitOid,
-    met: bool,
+    met: Meeting,
 ) -> Result<(), ImportError> {
     let git_root = match read_commit(source, commit) {
         Ok(commit) => commit.tree,
-        Err(ImportError::Source(SourceError::Missing { .. })) if !met => return Ok(()),
+        Err(ImportError::Source(SourceError::Missing { .. })) if met == Meeting::Unmet => {
+            return Ok(());
+        }
         Err(error) => return Err(error),
     };
     if oids.tree_oid(base.root)? == git_root {
