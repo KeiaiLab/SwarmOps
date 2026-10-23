@@ -1358,6 +1358,7 @@ fn quoted(arg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::output::Layout;
 
     #[test]
     fn cat_splits_its_target_at_the_first_colon() {
@@ -1495,7 +1496,9 @@ mod tests {
         else {
             panic!("a usage error");
         };
-        let format = Format::Json { pretty: false };
+        let format = Format::Json {
+            layout: Layout::Compact,
+        };
         let printed = usage(&error, bin.as_deref(), &path, format, Instant::now());
         let envelope: Value = serde_json::from_str(&printed.stdout).unwrap();
         let hint = envelope["error"]["hint"].as_str().unwrap();
@@ -1530,7 +1533,9 @@ mod tests {
             else {
                 panic!("{line:?}: a usage error");
             };
-            let format = Format::Json { pretty: false };
+            let format = Format::Json {
+                layout: Layout::Compact,
+            };
             let printed = usage(&error, bin.as_deref(), &path, format, Instant::now());
             let envelope: Value = serde_json::from_str(&printed.stdout).unwrap();
             let reply = &envelope["error"];

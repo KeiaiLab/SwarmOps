@@ -174,7 +174,7 @@ use swarmops_ops::content::MAX_REQUEST_BYTES;
 use crate::cli::Global;
 use crate::commands::{self, Ctx, Used};
 use crate::context::{self, Env};
-use crate::output::{self, Format, Printed};
+use crate::output::{self, Format, Layout, Printed};
 
 use self::mcp_ws::{WS_TOOLS, operate_ws};
 use swarmops_ws::hook::Bootstrap;
@@ -1456,7 +1456,9 @@ impl Operate for Call<'_, '_> {
         let ctx = Ctx {
             global: server.global,
             env: server.env,
-            format: Format::Json { pretty: false },
+            format: Format::Json {
+                layout: Layout::Compact,
+            },
             started: Instant::now(),
             used: Used::default(),
         };
@@ -1500,7 +1502,9 @@ fn run<P, T: Serialize>(
     let ctx = Ctx {
         global: server.global,
         env: server.env,
-        format: Format::Json { pretty: false },
+        format: Format::Json {
+            layout: Layout::Compact,
+        },
         started: Instant::now(),
         used: Used::default(),
     };
@@ -1531,7 +1535,9 @@ fn run_local<P, T: Serialize>(
     let ctx = Ctx {
         global: server.global,
         env: server.env,
-        format: Format::Json { pretty: false },
+        format: Format::Json {
+            layout: Layout::Compact,
+        },
         started: Instant::now(),
         used: Used::default(),
     };

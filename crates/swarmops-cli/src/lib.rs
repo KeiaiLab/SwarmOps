@@ -44,21 +44,27 @@ use std::time::Instant;
 
 use crate::cli::Parsed;
 use crate::commands::{Ctx, Used};
-use crate::output::{Format, Printed};
+use crate::output::{Format, Printed, Stdout};
 
 /// Runs the command line the process was started with, and gives the code to exit with: the
 /// whole program, which `swarmops` and `so` both run.
 pub fn run() -> ExitCode {
     let started = Instant::now();
-    let terminal = io::stdout().is_terminal();
+    let stdout = if io::stdout().is_terminal() {
+        Stdout::Terminal
+    } else {
+        Stdout::Other
+    };
     // This guard catches a panic before the operation is known, while the line is read; the
     // one in `respond` a panic while the operation runs, and names it.
     let printed = guarded(
         cli::NO_OP,
-        Format::Json { pretty: terminal },
+        Format::Json {
+            layout: stdout.layout(),
+        },
         started,
         None,
-        || respond(started, terminal),
+        || respond(started, stdout),
     );
     emit(&printed)
 }
@@ -66,18 +72,18 @@ pub fn run() -> ExitCode {
 /// What the command line asks for, done: the envelope to print, or nothing more for help or
 /// the version, which clap has printed. For a line that runs `mcp`, the envelope has gone to
 /// stderr ([`on_stderr`]).
-fn respond(started: Instant, terminal: bool) -> Printed {
+fn respond(started: Instant, stdout: Stdout) -> Printed {
     let args: Vec<OsString> = std::env::args_os().collect();
     let parsed = cli::parse(&args);
     if parsed.runs_mcp() {
-        on_stderr(answer(parsed, started, terminal))
+        on_stderr(answer(parsed, started, stdout))
     } else {
-        answer(parsed, started, terminal)
+        answer(parsed, started, stdout)
     }
 }
 
 /// What `parsed` asks for, done: [`respond`] before it says where the envelope goes.
-fn answer(parsed: Parsed, started: Instant, terminal: bool) -> Printed {
+fn answer(parsed: Parsed, started: Instant, stdout: Stdout) -> Printed {
     let env = |name: &str| std::env::var_os(name);
     match parsed {
         Parsed::Text(text) => {
@@ -94,11 +100,11 @@ fn answer(parsed: Parsed, started: Instant, terminal: bool) -> Printed {
             path,
             global,
         } => {
-            let format = context::format(&global, &env, terminal)
-                .unwrap_or_else(|_| context::json_format(&global, terminal));
+            let format = context::format(&global, &env, stdout)
+                .unwrap_or_else(|_| context::json_format(&global, stdout));
             commands::usage(&error, bin.as_deref(), &path, format, started)
         }
-        Parsed::Run(cli, op) => match context::format(&cli.global, &env, terminal) {
+        Parsed::Run(cli, op) => match context::format(&cli.global, &env, stdout) {
             Ok(format) => {
                 // Made outside the guard, so that a panic's envelope can read what it used.
                 let ctx = Ctx {
@@ -113,7 +119,7 @@ fn answer(parsed: Parsed, started: Instant, terminal: bool) -> Printed {
                 })
             }
             Err(error) => {
-                let format = context::json_format(&cli.global, terminal);
+                let format = context::json_format(&cli.global, stdout);
                 commands::failed(op, error, format, started)
             }
         },
@@ -187,6 +193,7 @@ mod tests {
 
     use super::*;
     use crate::cli::Global;
+    use crate::output::Layout;
 
     fn envelope(printed: &Printed) -> Value {
         serde_json::from_str(&printed.stdout).expect("one JSON document")
@@ -194,7 +201,9 @@ mod tests {
 
     #[test]
     fn a_panic_is_e_internal_with_its_message() {
-        let format = Format::Json { pretty: false };
+        let format = Format::Json {
+            layout: Layout::Compact,
+        };
         let printed = guarded("commit", format, Instant::now(), None, || panic!("boom"));
         assert_eq!(printed.exit, 1);
         let json = envelope(&printed);
@@ -251,7 +260,9 @@ mod tests {
             ..Global::default()
         };
         let env = |_: &str| -> Option<OsString> { None };
-        let format = Format::Json { pretty: false };
+        let format = Format::Json {
+            layout: Layout::Compact,
+        };
         let ctx = Ctx {
             global: &global,
             env: &env,
