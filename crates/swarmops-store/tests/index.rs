@@ -88,7 +88,7 @@ fn open_len(layout: &Layout) -> Result<u64, StoreError> {
 }
 
 fn cs(bytes: [u8; 32]) -> ChangesetId {
-    ChangesetId(ObjectId(bytes))
+    ChangesetId::new(ObjectId::new(bytes))
 }
 
 fn id_of(byte: u8) -> ChangesetId {
@@ -129,7 +129,7 @@ fn spread_meta(n: u64) -> ChangesetMeta {
 }
 
 fn hex(bytes: &[u8; 32]) -> String {
-    ObjectId(*bytes).to_hex()
+    ObjectId::new(*bytes).to_hex()
 }
 
 /// The lengths of the [`COLUMNS`] files, in that order.

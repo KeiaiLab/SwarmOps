@@ -35,7 +35,7 @@ const CRASH_ROOT: &str = "SWARMOPS_TEST_EXTERNAL_IDS_CRASH_ROOT";
 
 /// Changeset `n` of these tests: a real hash, so that the ids look like a store's.
 fn changeset(n: u8) -> ChangesetId {
-    ChangesetId(hash_object(ObjectKind::Changeset, &[n]))
+    ChangesetId::new(hash_object(ObjectKind::Changeset, &[n]))
 }
 
 /// A 20-byte key, as a git oid is: `fanout`, then `n` 19 times.

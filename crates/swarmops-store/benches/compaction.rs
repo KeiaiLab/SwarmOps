@@ -57,7 +57,7 @@ const VIEW_BYTES_PER_RECORD: u64 = 2 * (32 + 8);
 
 /// The id of changeset `n`: a real hash, so the ids are spread as a store's are.
 fn id(n: u64) -> ChangesetId {
-    ChangesetId(hash_object(ObjectKind::Changeset, &n.to_le_bytes()))
+    ChangesetId::new(hash_object(ObjectKind::Changeset, &n.to_le_bytes()))
 }
 
 /// Changeset `n` of the chain: the child of changeset `n - 1`, with a delta hash of its own.

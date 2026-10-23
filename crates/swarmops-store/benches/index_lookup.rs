@@ -44,7 +44,7 @@ const TARGETS: u64 = 1_024;
 
 /// The id of changeset `n`.
 fn id(n: u64) -> ChangesetId {
-    ChangesetId(hash_object(ObjectKind::Changeset, &n.to_le_bytes()))
+    ChangesetId::new(hash_object(ObjectKind::Changeset, &n.to_le_bytes()))
 }
 
 /// The delta hash of changeset `n`.

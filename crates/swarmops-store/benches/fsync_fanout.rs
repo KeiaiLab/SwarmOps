@@ -177,7 +177,7 @@ fn fsync_fanout(c: &mut Criterion) {
 
 /// Changeset `n` of a chain: the child of changeset `n - 1`.
 fn changeset(n: u64) -> ChangesetMeta {
-    let id = |n: u64| ChangesetId(hash_object(ObjectKind::Changeset, &n.to_le_bytes()));
+    let id = |n: u64| ChangesetId::new(hash_object(ObjectKind::Changeset, &n.to_le_bytes()));
     ChangesetMeta::new(
         id(n),
         0,

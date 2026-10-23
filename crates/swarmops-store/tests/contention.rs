@@ -171,7 +171,7 @@ fn key(chain: u64, j: u64) -> [u8; 16] {
 
 /// The id of changeset `j` of chain `chain`.
 fn id(chain: u64, j: u64) -> ChangesetId {
-    ChangesetId(hash_object(ObjectKind::Changeset, &key(chain, j)))
+    ChangesetId::new(hash_object(ObjectKind::Changeset, &key(chain, j)))
 }
 
 /// The delta hash of changeset `j` of chain `chain`.
