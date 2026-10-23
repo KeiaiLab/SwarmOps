@@ -20,7 +20,7 @@
 //! No retry loop: no ref is published, so no race can be lost. `H'` never carries `lander` or
 //! `land_key`, so a changeset that has `lander` is one a land made.
 
-use swarmops_core::{ChangesetId, DeltaOp, RepoPath, Signature, TreeId};
+use swarmops_core::{ChangesetId, RepoPath, Signature, TreeId};
 use swarmops_merge::tree_diff::{self, PathFilter};
 use swarmops_store::{InsertOutcome, ObjectStore, Recovered};
 
@@ -185,12 +185,12 @@ impl<O: ObjectStore> Repo<O> {
         let mut new_blobs = draft.new_blobs;
         let changes: Vec<Change> = (draft.delta.into_iter())
             .map(|entry| Change {
-                op: match entry.op {
-                    DeltaOp::Put { kind, id } => match new_blobs.remove(&id) {
+                op: match entry.op.put() {
+                    Some((kind, id)) => match new_blobs.remove(&id) {
                         Some(content) => ChangeOp::Put { kind, content },
                         None => ChangeOp::PutBlob { kind, id },
                     },
-                    DeltaOp::Delete => ChangeOp::Delete,
+                    None => ChangeOp::Delete,
                 },
                 path: entry.path,
             })
@@ -211,6 +211,7 @@ impl<O: ObjectStore> Repo<O> {
         let status = match committed.insert {
             InsertOutcome::AlreadyPresent => RebaseStatus::Replayed,
             InsertOutcome::Inserted { .. } => RebaseStatus::Rebased,
+            _ => return Err(RepoError::unknown_variant("InsertOutcome")),
         };
         Ok(RebaseOutcome {
             status,

@@ -95,7 +95,7 @@ pub(super) fn relocate<O: ObjectStore>(
         let merged = Hashed::new(ObjectKind::Blob, merged);
         entry.op = DeltaOp::Put {
             kind: LeafKind::File,
-            id: BlobId(merged.id()),
+            id: BlobId::new(merged.id()),
         };
         blobs.push(merged);
     }
@@ -111,14 +111,18 @@ pub(super) fn relocate<O: ObjectStore>(
         return Ok(Relocation::Overlap);
     }
     let Encoded { root, changed } = edit.finish()?;
-    let changeset = Changeset {
-        parents: vec![actual],
+    let changeset = Changeset::new(
+        vec![actual],
         root,
         delta,
-        ..l.clone()
-    };
+        l.author.clone(),
+        l.committer.clone(),
+        l.message.clone(),
+        l.extra_headers.clone(),
+        l.metadata.clone(),
+    )?;
     let object = Hashed::new(ObjectKind::Changeset, changeset.encode()?);
-    let id = ChangesetId(object.id());
+    let id = ChangesetId::new(object.id());
     let mut batch = blobs;
     batch.extend(changed);
     batch.push(object);

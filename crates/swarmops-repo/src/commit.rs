@@ -330,13 +330,13 @@ impl WrittenChangeset {
     /// The index record the changeset's insert queues: its seq and generation are the store's to
     /// number.
     pub(crate) fn meta(&self) -> ChangesetMeta {
-        ChangesetMeta {
-            id: self.id,
-            seq: 0,
-            generation: 0,
-            delta_hash: self.delta_hash,
-            parents: self.changeset.parents.clone(),
-        }
+        ChangesetMeta::new(
+            self.id,
+            0,
+            0,
+            self.delta_hash,
+            self.changeset.parents.clone(),
+        )
     }
 }
 
@@ -388,7 +388,7 @@ impl<O: ObjectStore> Repo<O> {
         let changes = sorted_changes(changes, empty)?;
         self.check_parents(&parents, seen)?;
         self.retain_named(&changes)?;
-        let (candidates, contents) = candidate_delta(changes);
+        let (candidates, contents) = candidate_delta(changes)?;
         let onto = match parents.first() {
             Some(&first) => Some(self.changeset_object(first)?.root),
             None => None,
@@ -460,24 +460,22 @@ impl<O: ObjectStore> Repo<O> {
         } = edit.finish()?;
         let put: BTreeSet<ObjectId> = delta
             .iter()
-            .filter_map(|entry| match entry.op {
-                DeltaOp::Put { id, .. } => Some(id.0),
-                DeltaOp::Delete => None,
-            })
+            .filter_map(|entry| entry.op.put())
+            .map(|(_, id)| id.0)
             .collect();
         contents.retain(|id, _| put.contains(id));
-        let changeset = Changeset {
+        let changeset = Changeset::new(
             parents,
             root,
             delta,
             author,
             committer,
             message,
-            extra_headers: Vec::new(),
+            Vec::new(),
             metadata,
-        };
+        )?;
         let (object, delta_hash) = changeset.encode_hashed()?;
-        let id = ChangesetId(object.id());
+        let id = ChangesetId::new(object.id());
 
         let (blob_count, tree_count) = (contents.len(), trees.len());
         let mut batch = Vec::with_capacity(blob_count + tree_count + 1);
@@ -505,7 +503,7 @@ impl<O: ObjectStore> Repo<O> {
     pub fn put_blob(&self, content: Vec<u8>) -> Result<BlobPut, RepoError> {
         let size = bytes::to_u64(content.len());
         let blob = Hashed::new(ObjectKind::Blob, content);
-        let id = BlobId(blob.id());
+        let id = BlobId::new(blob.id());
         let outcomes = self.objects.put_hashed_batch(vec![blob])?;
         let written = outcomes.iter().any(|outcome| outcome.written);
         self.objects.flush()?;
@@ -613,6 +611,8 @@ impl<O: ObjectStore> Repo<O> {
                             recovered: Box::new(recovered),
                         });
                     }
+                    // Fail closed: an outcome this build cannot read moves nothing it records.
+                    _ => return Err(RepoError::unknown_variant("CasResult")),
                 };
                 Some(Advanced {
                     name,
@@ -713,7 +713,7 @@ pub(crate) fn sorted_changes(
 /// the blob it names by id), with the contents as blob objects by id: each content hashed once.
 pub(crate) fn candidate_delta(
     changes: Vec<Change>,
-) -> (Vec<DeltaEntry>, BTreeMap<ObjectId, Hashed>) {
+) -> Result<(Vec<DeltaEntry>, BTreeMap<ObjectId, Hashed>), RepoError> {
     let mut contents = BTreeMap::new();
     let delta = changes
         .into_iter()
@@ -725,18 +725,14 @@ pub(crate) fn candidate_delta(
                     contents.entry(id).or_insert(blob);
                     DeltaOp::Put {
                         kind,
-                        id: BlobId(id),
+                        id: BlobId::new(id),
                     }
                 }
                 ChangeOp::PutBlob { kind, id } => DeltaOp::Put { kind, id },
                 ChangeOp::Delete => DeltaOp::Delete,
             };
-            DeltaEntry {
-                path,
-                op,
-                renamed_from: None,
-            }
+            DeltaEntry::new(path, op, None)
         })
-        .collect();
-    (delta, contents)
+        .collect::<Result<_, _>>()?;
+    Ok((delta, contents))
 }

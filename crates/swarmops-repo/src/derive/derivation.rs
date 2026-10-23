@@ -131,12 +131,7 @@ impl DeriveCtx<'_> {
         if let Some(value) = self.memo.get(&node) {
             return Ok(value_of::<D>(value)?);
         }
-        let slot = DerivedSlot {
-            name: D::NAME,
-            version: D::VERSION,
-            subject: cs.0,
-            key: &node.key,
-        };
+        let slot = DerivedSlot::new(D::NAME, D::VERSION, cs.0, &node.key);
         match self.store.get(&slot)? {
             Some(value) => Ok(value_of::<D>(&value)?),
             None => Err(DeriveError::Missing(Need {
@@ -481,12 +476,7 @@ impl<O: ObjectStore> Repo<O> {
         }
         for cs in entries.iter().filter_map(recorded_changeset) {
             for (deriv, entry, key) in &eager {
-                let slot = DerivedSlot {
-                    name: entry.name,
-                    version: entry.version,
-                    subject: cs.0,
-                    key,
-                };
+                let slot = DerivedSlot::new(entry.name, entry.version, cs.0, key);
                 if self.derived.get(&slot)?.is_some() {
                     run.cached += 1;
                     continue;
@@ -511,7 +501,7 @@ fn recorded_changeset(entry: &JournalEntry) -> Option<ChangesetId> {
     }
     // A changeset record's key is the id's 32 bytes, as the journal holds them.
     let id: [u8; 32] = entry.key.as_slice().try_into().ok()?;
-    Some(ChangesetId(ObjectId(id)))
+    Some(ChangesetId::new(ObjectId::new(id)))
 }
 
 /// The error of derivation `name`: [`RepoError::Derived`].

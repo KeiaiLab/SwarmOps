@@ -340,12 +340,7 @@ impl Engine<'_> {
     /// changeset, its key.
     fn slot<'n>(&self, node: &'n Node) -> DerivedSlot<'n> {
         let entry = self.registry.entry(node.deriv);
-        DerivedSlot {
-            name: entry.name,
-            version: entry.version,
-            subject: node.cs.0,
-            key: &node.key,
-        }
+        DerivedSlot::new(entry.name, entry.version, node.cs.0, &node.key)
     }
 
     /// Changeset `cs`, decoded from its object: the subject of the node worked on.

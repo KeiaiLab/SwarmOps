@@ -72,7 +72,7 @@ impl Derived {
         let mut touches = Vec::new();
         let mut paths: HashMap<String, usize> = HashMap::new();
         for listed in store.list(name, version)? {
-            let Some(StoredValue { key, value }) = store.read_listed(name, version, &listed)?
+            let Some(StoredValue { key, value, .. }) = store.read_listed(name, version, &listed)?
             else {
                 continue;
             };
@@ -82,7 +82,7 @@ impl Derived {
             let next = paths.len();
             let path = *paths.entry(path.as_str().to_owned()).or_insert(next);
             touches.push(Touch {
-                subject: ChangesetId(listed.subject),
+                subject: ChangesetId::new(listed.subject),
                 key,
                 path,
                 value: decoded(&value),
@@ -143,14 +143,14 @@ impl Derived {
         let mut wrong: Vec<(&str, ChangesetId, Vec<u8>)> = Vec::new();
         let (name, version) = (FirstParentSkipList::NAME, FirstParentSkipList::VERSION);
         for listed in &self.skip_lists {
-            let subject = ChangesetId(listed.subject);
+            let subject = ChangesetId::new(listed.subject);
             let Some(&node) = self.at.get(&subject) else {
                 continue;
             };
             if forest.depth[node].is_none() {
                 continue;
             }
-            let Some(StoredValue { key, value }) =
+            let Some(StoredValue { key, value, .. }) =
                 repo.derived.read_listed(name, version, listed)?
             else {
                 continue;

@@ -96,7 +96,7 @@ impl Serialize for LastTouch {
 impl<'de> Deserialize<'de> for LastTouch {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<LastTouch, D::Error> {
         let id = Option::<[u8; 32]>::deserialize(deserializer)?;
-        Ok(LastTouch(id.map(|id| ChangesetId(ObjectId(id)))))
+        Ok(LastTouch(id.map(|id| ChangesetId::new(ObjectId::new(id)))))
     }
 }
 

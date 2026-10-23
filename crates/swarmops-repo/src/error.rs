@@ -276,6 +276,14 @@ pub enum RepoError {
     Internal(String),
 }
 
+impl RepoError {
+    /// The [`RepoError::Internal`] a wildcard arm over the foreign enum `ty` returns, e.g.
+    /// `unknown_variant("CasResult")`.
+    pub(crate) fn unknown_variant(ty: &str) -> Self {
+        Self::Internal(format!("{ty}: a variant this build does not know"))
+    }
+}
+
 /// [`RepoError::Conflict`]'s message: how many paths conflict with the target's head, and how
 /// many resolutions are stale.
 fn conflict_message(conflicts: &MergeConflicts) -> String {
@@ -329,5 +337,16 @@ mod tests {
             error.to_string(),
             "internal error, a bug of this build: EntryTarget: an unknown variant"
         );
+    }
+
+    /// A wildcard arm's error names the enum it did not know.
+    #[test]
+    fn unknown_variant_names_the_enum() {
+        let error = RepoError::unknown_variant("CasResult");
+
+        assert!(matches!(
+            &error,
+            RepoError::Internal(what) if what == "CasResult: a variant this build does not know"
+        ));
     }
 }

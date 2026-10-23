@@ -135,7 +135,7 @@ impl<'o, O: ObjectStore> TreeEdit<'o, O> {
                         Slot::Edited(child) => EntryTarget::Dir(ids[child]?),
                     };
                     let name = name.clone();
-                    Some(TreeEntry { name, target })
+                    Some(TreeEntry::new(name, target))
                 })
                 .collect();
             let tree = match (entries.is_empty(), at) {
@@ -144,7 +144,7 @@ impl<'o, O: ObjectStore> TreeEdit<'o, O> {
                 (false, _) => Tree::new(entries)?,
             };
             let object = Hashed::new(ObjectKind::Tree, tree.encode());
-            let id = TreeId(object.id());
+            let id = TreeId::new(object.id());
             if dir.read_from != Some(id) && seen.insert(id) {
                 changed.push(object);
             }
@@ -251,10 +251,11 @@ impl Dir {
                 let slot = match entry.target {
                     EntryTarget::Leaf(kind, id) => Slot::Leaf { kind, id },
                     EntryTarget::Dir(tree) => Slot::Unread(tree),
+                    _ => return Err(RepoError::unknown_variant("EntryTarget")),
                 };
-                (entry.name.clone(), slot)
+                Ok((entry.name.clone(), slot))
             })
-            .collect();
+            .collect::<Result<_, RepoError>>()?;
         Ok(Self {
             entries,
             read_from: Some(tree),
