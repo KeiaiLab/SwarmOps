@@ -51,6 +51,28 @@ pub struct DetachedLand {
     pub extra_metadata: Vec<(String, Vec<u8>)>,
 }
 
+impl DetachedLand {
+    /// A detached land of `(base, head]` onto `onto` by `lander`: no key, the chain as
+    /// `squashed_from`, the head's message, and no more metadata.
+    pub fn new(
+        base: ChangesetId,
+        head: ChangesetId,
+        onto: ChangesetId,
+        lander: Signature,
+    ) -> DetachedLand {
+        DetachedLand {
+            base,
+            head,
+            onto,
+            lander,
+            key: None,
+            squashed_from: None,
+            message: None,
+            extra_metadata: Vec::new(),
+        }
+    }
+}
+
 /// What a detached land did ([`Repo::land_detached`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DetachedOutcome {

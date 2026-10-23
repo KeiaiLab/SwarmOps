@@ -129,6 +129,39 @@ pub struct LandOutcome {
     pub warnings: Vec<String>,
 }
 
+impl LandOutcome {
+    /// Makes one of the fields given.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "every field is required (the non-exhaustive design, decision 2)"
+    )]
+    pub fn new(
+        status: LandStatus,
+        landed: ChangesetId,
+        rebased_onto: ChangesetId,
+        base: ChangesetId,
+        attempts: u32,
+        relocated: bool,
+        squashed_from: Vec<ChangesetId>,
+        files_changed: usize,
+        auto_merged: Vec<RepoPath>,
+        warnings: Vec<String>,
+    ) -> LandOutcome {
+        LandOutcome {
+            status,
+            landed,
+            rebased_onto,
+            base,
+            attempts,
+            relocated,
+            squashed_from,
+            files_changed,
+            auto_merged,
+            warnings,
+        }
+    }
+}
+
 /// Whether a land landed its change ([`LandOutcome::status`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LandStatus {
@@ -191,6 +224,29 @@ pub struct MergeConflicts {
     /// The paths whose resolutions did not apply, sorted: the target's head holds there what the
     /// resolutions' `against` does not ([`Resolutions`]). Empty for a land without resolutions.
     pub stale: Vec<RepoPath>,
+}
+
+impl MergeConflicts {
+    /// Makes one of the fields given.
+    pub fn new(
+        base: ChangesetId,
+        ours: ChangesetId,
+        theirs: ChangesetId,
+        conflicts: Vec<FileConflict>,
+        auto_merged: Vec<RepoPath>,
+        last_touched: BTreeMap<RepoPath, (ChangesetId, String)>,
+        stale: Vec<RepoPath>,
+    ) -> MergeConflicts {
+        MergeConflicts {
+            base,
+            ours,
+            theirs,
+            conflicts,
+            auto_merged,
+            last_touched,
+            stale,
+        }
+    }
 }
 
 /// How long a land waits before its attempt `attempt`, counted from 1 (operations spec §3 step

@@ -54,6 +54,17 @@ pub struct Resolutions {
     pub files: BTreeMap<RepoPath, Resolution>,
 }
 
+impl Resolutions {
+    /// Makes resolutions decided against `against`.
+    ///
+    /// Invariant: `against` is a head of the target. `new` does not check it: the land re-checks
+    /// each resolution against the target's head it merges onto, and fails on a stale one
+    /// ([`RepoError::Conflict`]).
+    pub fn new(against: ChangesetId, files: BTreeMap<RepoPath, Resolution>) -> Resolutions {
+        Resolutions { against, files }
+    }
+}
+
 /// What a land makes of a path, and of every path below it ([`Resolutions`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolution {

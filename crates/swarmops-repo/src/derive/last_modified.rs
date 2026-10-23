@@ -33,6 +33,13 @@ pub struct LastModified;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PathKey(pub RepoPath);
 
+impl PathKey {
+    /// The key of `path`.
+    pub fn new(path: RepoPath) -> PathKey {
+        PathKey(path)
+    }
+}
+
 impl From<RepoPath> for PathKey {
     fn from(path: RepoPath) -> PathKey {
         PathKey(path)
@@ -61,6 +68,19 @@ impl<'de> Deserialize<'de> for PathKey {
 /// [`LastModified`] reads back, so any other layout takes a new version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LastTouch(pub Option<ChangesetId>);
+
+impl LastTouch {
+    /// The value naming `toucher`, `None` for no changeset.
+    pub fn new(toucher: Option<ChangesetId>) -> LastTouch {
+        LastTouch(toucher)
+    }
+}
+
+impl From<Option<ChangesetId>> for LastTouch {
+    fn from(toucher: Option<ChangesetId>) -> LastTouch {
+        LastTouch(toucher)
+    }
+}
 
 /// An option of the id's 32 bytes.
 impl Serialize for LastTouch {

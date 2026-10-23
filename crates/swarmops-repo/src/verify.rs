@@ -106,6 +106,21 @@ pub struct VerifyReport {
     pub problems: Vec<VerifyProblem>,
 }
 
+impl VerifyReport {
+    /// Makes one of the fields given.
+    pub fn new(
+        objects_checked: u64,
+        changesets_checked: u64,
+        problems: Vec<VerifyProblem>,
+    ) -> VerifyReport {
+        VerifyReport {
+            objects_checked,
+            changesets_checked,
+            problems,
+        }
+    }
+}
+
 /// One thing [`Repo::verify`] found damaged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifyProblem {

@@ -90,6 +90,13 @@ pub struct Change {
     pub op: ChangeOp,
 }
 
+impl Change {
+    /// Makes one of the fields given.
+    pub fn new(path: RepoPath, op: ChangeOp) -> Change {
+        Change { path, op }
+    }
+}
+
 /// What a [`Change`] does at its path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChangeOp {
@@ -142,6 +149,39 @@ pub struct CommitRequest {
     pub advance: Option<Advance>,
 }
 
+impl CommitRequest {
+    /// Makes a commit request of its fields.
+    ///
+    /// Invariant: metadata keys strictly ascending, none ending in `:b64`, each path changed at
+    /// most once. `new` does not check it: [`Repo::commit`] does, before anything is written, with
+    /// [`check_metadata`] and [`RepoError::DuplicatePath`], as for a request built field by field.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "every field is required (the non-exhaustive design, decision 2)"
+    )]
+    pub fn new(
+        parents: Vec<ChangesetId>,
+        changes: Vec<Change>,
+        author: Signature,
+        committer: Signature,
+        message: Vec<u8>,
+        metadata: Vec<(String, Vec<u8>)>,
+        allow_empty: bool,
+        advance: Option<Advance>,
+    ) -> CommitRequest {
+        CommitRequest {
+            parents,
+            changes,
+            author,
+            committer,
+            message,
+            metadata,
+            allow_empty,
+            advance,
+        }
+    }
+}
+
 /// The ref a commit publishes its changeset on ([`CommitRequest::advance`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Advance {
@@ -150,6 +190,16 @@ pub struct Advance {
     /// Who moves it, as the journal's record of the move (the reflog) names them: at most 255
     /// bytes.
     pub actor: String,
+}
+
+impl Advance {
+    /// Makes one of the fields given.
+    pub fn new(name: &str, actor: &str) -> Advance {
+        Advance {
+            name: name.to_owned(),
+            actor: actor.to_owned(),
+        }
+    }
 }
 
 /// The move of the ref a commit advanced ([`CommitOutcome::advanced`]).
@@ -165,6 +215,17 @@ pub struct Advanced {
     pub already_applied: bool,
 }
 
+impl Advanced {
+    /// Makes one of the fields given.
+    pub fn new(name: &str, old: Option<ChangesetId>, already_applied: bool) -> Advanced {
+        Advanced {
+            name: name.to_owned(),
+            old,
+            already_applied,
+        }
+    }
+}
+
 /// What [`Repo::put_blob`] stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlobPut {
@@ -175,6 +236,13 @@ pub struct BlobPut {
     /// Whether this call placed the blob's file ([`PutOutcome::written`]): not when the store
     /// held it already, nor when a writer racing this one placed it first.
     pub written: bool,
+}
+
+impl BlobPut {
+    /// Makes one of the fields given.
+    pub fn new(id: BlobId, size: u64, written: bool) -> BlobPut {
+        BlobPut { id, size, written }
+    }
 }
 
 /// What [`Repo::commit`] did.

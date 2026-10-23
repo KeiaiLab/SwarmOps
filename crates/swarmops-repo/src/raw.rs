@@ -86,6 +86,29 @@ pub struct RawChangeset {
     pub metadata: Vec<(String, Vec<u8>)>,
 }
 
+impl RawChangeset {
+    /// Makes one of the fields given.
+    pub fn new(
+        parents: Vec<ChangesetId>,
+        root: TreeId,
+        author: Signature,
+        committer: Signature,
+        message: Vec<u8>,
+        extra_headers: Vec<(Vec<u8>, Vec<u8>)>,
+        metadata: Vec<(String, Vec<u8>)>,
+    ) -> RawChangeset {
+        RawChangeset {
+            parents,
+            root,
+            author,
+            committer,
+            message,
+            extra_headers,
+            metadata,
+        }
+    }
+}
+
 /// What a raw batch did with one of its changesets ([`RawBatchOutcome::outcomes`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RawOutcome {
@@ -96,6 +119,17 @@ pub struct RawOutcome {
     pub insert: InsertOutcome,
     /// How many paths the changeset changes: the length of its delta.
     pub files_changed: usize,
+}
+
+impl RawOutcome {
+    /// Makes one of the fields given.
+    pub fn new(id: ChangesetId, insert: InsertOutcome, files_changed: usize) -> RawOutcome {
+        RawOutcome {
+            id,
+            insert,
+            files_changed,
+        }
+    }
 }
 
 /// What [`Repo::commit_raw_batch`] (or [`RawBatch::commit`]) did.

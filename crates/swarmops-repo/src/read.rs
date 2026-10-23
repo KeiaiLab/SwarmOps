@@ -113,6 +113,27 @@ pub struct FileSpanRead {
     pub lines: Option<(u64, u64)>,
 }
 
+impl FileSpanRead {
+    /// Makes one of the fields given.
+    pub fn new(
+        kind: LeafKind,
+        blob: BlobId,
+        size: u64,
+        start: u64,
+        bytes: Vec<u8>,
+        lines: Option<(u64, u64)>,
+    ) -> FileSpanRead {
+        FileSpanRead {
+            kind,
+            blob,
+            size,
+            start,
+            bytes,
+            lines,
+        }
+    }
+}
+
 /// One entry of a listing below a directory ([`RepoRead::list_tree_depth`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListedEntry {
@@ -123,6 +144,13 @@ pub struct ListedEntry {
     /// For a leaf, its size in bytes: its blob's length, as the blob's object header records it;
     /// `None` for a directory.
     pub size: Option<u64>,
+}
+
+impl ListedEntry {
+    /// Makes one of the fields given.
+    pub fn new(path: RepoPath, target: EntryTarget, size: Option<u64>) -> ListedEntry {
+        ListedEntry { path, target, size }
+    }
 }
 
 /// A page of a listing below a directory ([`RepoRead::list_tree_depth`]).

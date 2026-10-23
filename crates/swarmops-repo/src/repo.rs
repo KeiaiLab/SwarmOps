@@ -133,6 +133,27 @@ pub struct RepoInfo {
     pub main: Option<ChangesetId>,
 }
 
+impl RepoInfo {
+    /// Makes one of the fields given.
+    pub fn new(
+        repo_id: String,
+        name: String,
+        store_version: u32,
+        changesets: u64,
+        refs: u64,
+        main: Option<ChangesetId>,
+    ) -> RepoInfo {
+        RepoInfo {
+            repo_id,
+            name,
+            store_version,
+            changesets,
+            refs,
+            main,
+        }
+    }
+}
+
 /// What [`Repo::cas_ref`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CasOutcome {
@@ -148,6 +169,17 @@ pub struct CasOutcome {
     /// [`CasResult::Mismatch`] included. It is no warning, and it is lost when the call fails
     /// after the repair.
     pub recovered: Recovered,
+}
+
+impl CasOutcome {
+    /// Makes one of the fields given.
+    pub fn new(result: CasResult, warnings: Vec<String>, recovered: Recovered) -> CasOutcome {
+        CasOutcome {
+            result,
+            warnings,
+            recovered,
+        }
+    }
 }
 
 /// What `REPO` holds.
