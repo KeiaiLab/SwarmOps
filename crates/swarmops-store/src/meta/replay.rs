@@ -23,8 +23,9 @@ use swarmops_core::{ChangesetId, bytes};
 
 use super::frame::{Frame, Record};
 use super::index::{ChangesetMeta, Index};
-use super::refs::{self, RefState};
+use super::refs::{self, RefFiles, RefState};
 use crate::error::StoreError;
+use crate::format::StoreFormat;
 use crate::fs_ops::StoreFs;
 use crate::layout::Layout;
 
@@ -49,7 +50,7 @@ pub(crate) fn replay(
     frames: &[Frame],
 ) -> Result<Replayed, StoreError> {
     // The ref names first: frames this version cannot apply change nothing at all.
-    let targets = ref_targets(frames)?;
+    let targets = ref_targets(layout.format(), frames)?;
     let changesets = changesets(frames);
     let held = held(index, &changesets)?;
     // Those past `held`, a frame at a time.
@@ -107,8 +108,12 @@ impl Overlay {
     pub(crate) fn new(
         index: &Index,
         frames: &[Frame],
-        mut files: BTreeMap<String, RefState>,
+        files: RefFiles,
     ) -> Result<Overlay, StoreError> {
+        let RefFiles {
+            format,
+            states: mut files,
+        } = files;
         let changesets = changesets(frames);
         let extras: Vec<ChangesetMeta> = changesets[held(index, &changesets)?..]
             .iter()
@@ -120,7 +125,7 @@ impl Overlay {
             .enumerate()
             .map(|(at, meta)| (meta.id, at))
             .collect();
-        for (name, target) in ref_targets(frames)? {
+        for (name, target) in ref_targets(format, frames)? {
             match refs::moved(files.get(name).copied(), target) {
                 Some(state) => files.insert(name.to_owned(), state),
                 None => files.remove(name),
@@ -222,14 +227,17 @@ fn held(index: &Index, changesets: &[ChangesetRecord<'_>]) -> Result<usize, Stor
 }
 
 /// The target each ref that `frames` move is left at: its last move's. A name that is not
-/// a ref name is no record this version writes: [`StoreError::JournalCorrupt`] at its
-/// frame, before anything reaches the filesystem.
-fn ref_targets(frames: &[Frame]) -> Result<BTreeMap<&str, Option<ChangesetId>>, StoreError> {
+/// a ref name of `format` (the store's) is no record this version writes there:
+/// [`StoreError::JournalCorrupt`] at its frame, before anything reaches the filesystem.
+fn ref_targets(
+    format: StoreFormat,
+    frames: &[Frame],
+) -> Result<BTreeMap<&str, Option<ChangesetId>>, StoreError> {
     let mut targets = BTreeMap::new();
     for frame in frames {
         for record in &frame.records {
             if let Record::RefMove { name, new, .. } = record {
-                refs::check_ref_name(name).map_err(|_| StoreError::JournalCorrupt {
+                refs::check_ref_name_in(format, name).map_err(|_| StoreError::JournalCorrupt {
                     offset: frame.offset,
                 })?;
                 targets.insert(name.as_str(), *new);
@@ -237,4 +245,77 @@ fn ref_targets(frames: &[Frame]) -> Result<BTreeMap<&str, Option<ChangesetId>>, 
         }
     }
     Ok(targets)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use camino::Utf8Path;
+    use swarmops_core::ObjectId;
+
+    use super::*;
+
+    /// A store of `format` in a temp dir, with an index: what replay needs.
+    fn store(format: StoreFormat) -> (tempfile::TempDir, Layout, StoreFs, Index) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(dir.path()).unwrap();
+        let layout = Layout::with_format(root, format);
+        std::fs::create_dir_all(layout.meta_dir()).unwrap();
+        let fs = StoreFs::new(Arc::new(crate::RealFs), root);
+        let index = Index::create_in(&layout, &fs).unwrap();
+        (dir, layout, fs, index)
+    }
+
+    /// A frame moving ref `name` to a changeset.
+    fn moving(name: &str) -> (Frame, ChangesetId) {
+        let target = ChangesetId::new(ObjectId::new([7; 32]));
+        let record = Record::RefMove {
+            name: name.to_owned(),
+            old: None,
+            new: Some(target),
+            actor: "a".to_owned(),
+            ts: 0,
+        };
+        (Frame::new(0, 40, vec![record]), target)
+    }
+
+    /// A `RefMove` naming a free-form branch applies on a FORMAT 2 store, for a writer and for
+    /// a reader's overlay.
+    #[test]
+    fn v2_replays_a_branch_move() {
+        let (_dir, layout, fs, mut index) = store(StoreFormat::V2);
+        let (frame, target) = moving("feature/x");
+
+        let files = refs::read_all(&layout, &fs).unwrap();
+        let overlay = Overlay::new(&index, slice::from_ref(&frame), files).unwrap();
+        assert_eq!(overlay.refs()["feature/x"], RefState::new(target, 1));
+
+        let replayed = replay(&mut index, &layout, &fs, slice::from_ref(&frame)).unwrap();
+        assert_eq!(replayed.refs, 1);
+        let state = refs::read(&layout, &fs, "feature/x").unwrap();
+        assert_eq!(state, Some(RefState::new(target, 1)));
+    }
+
+    /// The same frame on a FORMAT 1 store is no record that store writes: `JournalCorrupt` at
+    /// the frame, for the writer and the reader, and no file written.
+    #[test]
+    fn v1_refuses_a_branch_move() {
+        let (_dir, layout, fs, mut index) = store(StoreFormat::V1);
+        let (frame, _) = moving("feature/x");
+
+        let files = refs::read_all(&layout, &fs).unwrap();
+        let overlay = Overlay::new(&index, slice::from_ref(&frame), files);
+        assert!(matches!(
+            overlay,
+            Err(StoreError::JournalCorrupt { offset: 40 })
+        ));
+
+        let replayed = replay(&mut index, &layout, &fs, slice::from_ref(&frame));
+        assert!(matches!(
+            replayed,
+            Err(StoreError::JournalCorrupt { offset: 40 })
+        ));
+        assert!(!layout.refs_dir().join("feature").exists());
+    }
 }

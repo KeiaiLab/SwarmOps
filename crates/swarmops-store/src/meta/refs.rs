@@ -4,6 +4,12 @@
 //! `sync_all`, rename, directory fsync, all in [`FsOps::atomic_replace`]) and removes it when
 //! the ref is deleted, then fsyncs the directory.
 //!
+//! A FORMAT 2 store (the M6 design §2.5) names a ref's file by its name's hash instead,
+//! `meta/refs2/<32 hex digits of blake3(b"swarmops:refname:v1\0" ‖ name)>`, and the file holds
+//! the name first, `<name>\n<64 hex digits>\n<version>\n`, so that names that clash as paths
+//! (`a` and `a/b`) or on a volume that folds case (`Main` and `main`) are files of their own. A
+//! read checks the name against the grammar and the file's name against its hash.
+//!
 //! Ref files are read through [`FsOps::read`] too, the way the object store reads its files,
 //! so that tests can step in between a reader's look at the journal and at the refs.
 //!
@@ -48,6 +54,10 @@ const MAX_NAME_LEN: usize = 255;
 /// The most bytes a ref file holds: 64 hex digits, a line break, a version of at most 20
 /// decimal digits (a `u64`), a line break.
 const MAX_FILE_LEN: u64 = 64 + 1 + 20 + 1;
+
+/// The most bytes a FORMAT 2 ref file holds: the name (at most [`MAX_NAME_LEN`]) and a line
+/// break, then what a FORMAT 1 file holds. 342.
+const MAX_FILE_LEN_V2: u64 = MAX_NAME_LEN as u64 + 1 + MAX_FILE_LEN;
 
 /// The most bytes a remote's name may take, as `remote add` takes them.
 const MAX_REMOTE_LEN: usize = 63;
@@ -261,16 +271,33 @@ pub(crate) fn read(
     fs: &StoreFs,
     name: &str,
 ) -> Result<Option<RefState>, StoreError> {
-    read_file(fs, &path(layout, name))
+    let file = read_file(layout.format(), fs, &path(layout, name))?;
+    Ok(file.map(|(_, state)| state))
+}
+
+/// The ref files of a store, by name, with the format they were read under: what a reader's
+/// overlay applies the frames past the checkpoint to, by that format's grammar.
+#[derive(Debug, Clone)]
+pub(crate) struct RefFiles {
+    /// The store's format.
+    pub(crate) format: StoreFormat,
+    /// Every ref that has a file, by name.
+    pub(crate) states: BTreeMap<String, RefState>,
 }
 
 /// Every ref that has a file, by name. Entries of `meta/refs/` that are not refs (temp
 /// files, anything this version does not name) are skipped.
-pub(crate) fn read_all(
-    layout: &Layout,
-    fs: &StoreFs,
-) -> Result<BTreeMap<String, RefState>, StoreError> {
+pub(crate) fn read_all(layout: &Layout, fs: &StoreFs) -> Result<RefFiles, StoreError> {
     let mut refs = BTreeMap::new();
+    if layout.format() == StoreFormat::V2 {
+        for file in read_each(layout, fs)? {
+            refs.insert(file.name, file.state?);
+        }
+        return Ok(RefFiles {
+            format: layout.format(),
+            states: refs,
+        });
+    }
     if let Some(state) = read(layout, fs, "main")? {
         refs.insert("main".to_owned(), state);
     }
@@ -280,13 +307,19 @@ pub(crate) fn read_all(
             refs.insert(name, state);
         }
     }
-    Ok(refs)
+    Ok(RefFiles {
+        format: layout.format(),
+        states: refs,
+    })
 }
 
 /// Every ref that has a file, by name, each with its state or the error reading its file
 /// gave: [`read_all`], except that a damaged file does not fail the rest. The names are the
 /// ones [`read_all`] reads, and a file removed since the listing is skipped the same way.
 pub(crate) fn read_each(layout: &Layout, fs: &StoreFs) -> Result<Vec<RefFile>, StoreError> {
+    if layout.format() == StoreFormat::V2 {
+        return read_each_v2(layout, fs);
+    }
     let mut names = vec!["main".to_owned()];
     names.extend(release_names(layout, fs)?);
     let mut refs = Vec::with_capacity(names.len());
@@ -299,6 +332,59 @@ pub(crate) fn read_each(layout: &Layout, fs: &StoreFs) -> Result<Vec<RefFile>, S
         refs.push(RefFile { name, state });
     }
     Ok(refs)
+}
+
+/// [`read_each`] of a FORMAT 2 store: every file of `refs2/` named by 32 lowercase hex digits,
+/// sorted by the name it holds. A file that does not read is listed under its file name, the
+/// only name it has.
+fn read_each_v2(layout: &Layout, fs: &StoreFs) -> Result<Vec<RefFile>, StoreError> {
+    let dir = layout.refs_dir();
+    let mut refs = Vec::new();
+    for stem in file_stems(fs, &dir)? {
+        // A file removed since the listing is a ref deleted meanwhile.
+        let file = match read_file(StoreFormat::V2, fs, &dir.join(&stem)) {
+            Ok(Some((name, state))) => RefFile {
+                name: name.unwrap_or(stem),
+                state: Ok(state),
+            },
+            Ok(None) => continue,
+            Err(e) => RefFile {
+                name: stem,
+                state: Err(e),
+            },
+        };
+        refs.push(file);
+    }
+    refs.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+    Ok(refs)
+}
+
+/// The entries of `dir` that name a FORMAT 2 ref file: 32 lowercase hex digits. Temp files and
+/// anything else are skipped. A failure to list the directory is located by `fs`.
+fn file_stems(fs: &StoreFs, dir: &Utf8Path) -> Result<Vec<String>, StoreError> {
+    let listing_failed = |e| fs.locate(FileOp::ReadDir, dir, e);
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(listing_failed(e).into()),
+    };
+    let mut stems = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(listing_failed)?;
+        let Some(file_name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue; // not UTF-8, so not a ref file
+        };
+        if is_stem(&file_name) {
+            stems.push(file_name);
+        }
+    }
+    Ok(stems)
+}
+
+/// Whether `file_name` is 32 lowercase hex digits, as [`file_stem`] gives.
+fn is_stem(file_name: &str) -> bool {
+    file_name.len() == STEM_LEN
+        && (file_name.bytes()).all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
 }
 
 /// The names of the `release/<x>` refs that `meta/refs/release/` holds a file for, sorted.
@@ -354,7 +440,7 @@ pub(crate) fn write(
     target: Option<ChangesetId>,
 ) -> Result<bool, StoreError> {
     let path = path(layout, name);
-    let current = read_file(fs, &path)?;
+    let current = read_file(layout.format(), fs, &path)?.map(|(_, state)| state);
     match moved(current, target) {
         // It says that already: see above for why that is enough (rule 5).
         next if next == current => return Ok(false),
@@ -366,7 +452,11 @@ pub(crate) fn write(
             {
                 make_dir(fs, dir, &refs)?;
             }
-            let bytes = format!("{}\n{}\n", state.target, state.version);
+            // FORMAT 2 files hold their name: their own is its hash.
+            let bytes = match layout.format() {
+                StoreFormat::V1 => format!("{}\n{}\n", state.target, state.version),
+                StoreFormat::V2 => format!("{name}\n{}\n{}\n", state.target, state.version),
+            };
             fs.atomic_replace(path.as_std_path(), bytes.as_bytes())?;
         }
         None => {
@@ -378,9 +468,29 @@ pub(crate) fn write(
     Ok(true)
 }
 
-/// The file of ref `name`.
+/// The file of ref `name`: `refs/<name>`, or in FORMAT 2 `refs2/<file_stem(name)>`.
 fn path(layout: &Layout, name: &str) -> Utf8PathBuf {
-    layout.refs_dir().join(name)
+    match layout.format() {
+        StoreFormat::V1 => layout.refs_dir().join(name),
+        StoreFormat::V2 => layout.refs_dir().join(file_stem(name)),
+    }
+}
+
+/// The domain the FORMAT 2 file name of a ref is hashed under (the M6 design §2.5): a disk
+/// contract of FORMAT 2, not the object hash contract.
+const NAME_HASH_DOMAIN: &[u8] = b"swarmops:refname:v1\0";
+
+/// How many hex digits of the name's hash name a FORMAT 2 ref file: 16 bytes.
+const STEM_LEN: usize = 32;
+
+/// The FORMAT 2 file name of ref `name`: `hex(blake3(NAME_HASH_DOMAIN ‖ name)[0..16])`, 32
+/// lowercase hex digits.
+fn file_stem(name: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(NAME_HASH_DOMAIN);
+    hasher.update(name.as_bytes());
+    let hex = hasher.finalize().to_hex();
+    hex[..STEM_LEN].to_owned()
 }
 
 /// Creates `dir` if it is missing, and makes its entry in `parent` durable.
@@ -392,20 +502,30 @@ fn make_dir(fs: &StoreFs, dir: &Utf8Path, parent: &Utf8Path) -> Result<(), Store
     Ok(())
 }
 
-/// The state the ref file at `path` holds; `None` if there is no file. Anything but
+/// The state the ref file at `path` holds, with the name it holds (FORMAT 2's files hold one;
+/// FORMAT 1's are named by it, so `None`); `None` if there is no file. Anything but
 /// `<64 hex digits>\n<version>\n`, the version a decimal of at least 1, is `InvalidData`, a
 /// failed read of the file, which `fs` names by its place in the store, `meta/refs/<name>`
-/// (never by the store's root, a host path). A file longer than [`MAX_FILE_LEN`] is refused by
-/// its length, measured before it is read (through `std::fs`, no [`crate::FsOps`] call), so
-/// that a crafted file of huge length is never read into memory; a missing file reaches the
-/// read, which reports it.
-fn read_file(fs: &StoreFs, path: &Utf8Path) -> Result<Option<RefState>, StoreError> {
+/// (never by the store's root, a host path). A FORMAT 2 file holds `<name>\n` first, a name of
+/// the FORMAT 2 grammar whose [`file_stem`] is the file's name, or it is `InvalidData` too. A
+/// file longer than [`MAX_FILE_LEN`] ([`MAX_FILE_LEN_V2`]) is refused by its length, measured
+/// before it is read (through `std::fs`, no [`crate::FsOps`] call), so that a crafted file of
+/// huge length is never read into memory; a missing file reaches the read, which reports it.
+fn read_file(
+    format: StoreFormat,
+    fs: &StoreFs,
+    path: &Utf8Path,
+) -> Result<Option<(Option<String>, RefState)>, StoreError> {
     let refused = |why: String| {
         let e = io::Error::new(io::ErrorKind::InvalidData, why);
         StoreError::from(fs.locate(FileOp::Fs(FsMethod::Read), path, e))
     };
+    let (max_len, layout) = match format {
+        StoreFormat::V1 => (MAX_FILE_LEN, r#""<64 hex digits>\n<version>\n""#),
+        StoreFormat::V2 => (MAX_FILE_LEN_V2, r#""<name>\n<64 hex digits>\n<version>\n""#),
+    };
     if let Ok(meta) = std::fs::metadata(path)
-        && meta.len() > MAX_FILE_LEN
+        && meta.len() > max_len
     {
         return Err(refused(format!(
             "is {} bytes long, not a ref file",
@@ -416,19 +536,31 @@ fn read_file(fs: &StoreFs, path: &Utf8Path) -> Result<Option<RefState>, StoreErr
         return Ok(None);
     };
     let parsed = std::str::from_utf8(&bytes).ok().and_then(|text| {
+        // 1. FORMAT 2: the name, which the file's own name must be the hash of.
+        let (name, text) = match format {
+            StoreFormat::V1 => (None, text),
+            StoreFormat::V2 => {
+                let (name, rest) = text.split_once('\n')?;
+                let named = ref_kind(name).is_some() && path.file_name() == Some(&file_stem(name));
+                (Some(named.then(|| name.to_owned())?), rest)
+            }
+        };
+
+        // 2. The target and the version.
         let (hex, rest) = text.split_once('\n')?;
         let version = rest.strip_suffix('\n')?;
         if !version.bytes().all(|b| b.is_ascii_digit()) {
             return None;
         }
-        Some(RefState {
+        let state = RefState {
             target: ChangesetId::new(ObjectId::from_hex(hex).ok()?),
             version: version.parse().ok().filter(|&version| version > 0)?,
-        })
+        };
+        Some((name, state))
     });
     parsed
         .map(Some)
-        .ok_or_else(|| refused(r#"not a ref file: "<64 hex digits>\n<version>\n""#.to_owned()))
+        .ok_or_else(|| refused(format!("not a ref file: {layout}")))
 }
 
 #[cfg(test)]
@@ -511,5 +643,159 @@ mod tests {
         for bad in ["", "Origin", "-x", ".x", "x.", "a/b", &"a".repeat(64)] {
             assert!(check_remote_segment(bad).is_err(), "{bad:?}");
         }
+    }
+
+    /// A FORMAT 2 store in a temp dir: its layout and its `fs`, `meta/` made.
+    fn v2_store() -> (tempfile::TempDir, Layout, StoreFs) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(dir.path()).unwrap();
+        let layout = Layout::with_format(root, StoreFormat::V2);
+        std::fs::create_dir_all(layout.meta_dir()).unwrap();
+        let fs = StoreFs::new(std::sync::Arc::new(crate::RealFs), root);
+        (dir, layout, fs)
+    }
+
+    /// A changeset id made of `byte`.
+    fn cs(byte: u8) -> ChangesetId {
+        ChangesetId::new(ObjectId::new([byte; 32]))
+    }
+
+    /// Whether `result` is the `InvalidData` failure of a file that is no ref file.
+    fn is_invalid<T: std::fmt::Debug>(result: &Result<T, StoreError>) -> bool {
+        matches!(result, Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::InvalidData)
+    }
+
+    /// A FORMAT 2 ref file is `refs2/<hex(H[0..16])>` holding the name, the target and the
+    /// version; it moves, versions and goes away as a FORMAT 1 file does.
+    #[test]
+    fn v2_ref_files_round_trip() {
+        let (_dir, layout, fs) = v2_store();
+        assert!(write(&layout, &fs, "feature/x", Some(cs(1))).unwrap());
+
+        // 1. The file: named by the name's hash, holding the name first.
+        let file = layout.refs_dir().join(file_stem("feature/x"));
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(text, format!("feature/x\n{}\n1\n", cs(1)));
+        assert_eq!(
+            read(&layout, &fs, "feature/x").unwrap(),
+            Some(RefState::new(cs(1), 1))
+        );
+
+        // 2. A move bumps the version, a repeat changes nothing, a delete removes the file.
+        assert!(write(&layout, &fs, "feature/x", Some(cs(2))).unwrap());
+        assert!(!write(&layout, &fs, "feature/x", Some(cs(2))).unwrap());
+        let all = read_all(&layout, &fs).unwrap();
+        assert_eq!(all.states.get("feature/x"), Some(&RefState::new(cs(2), 2)));
+        assert!(write(&layout, &fs, "feature/x", None).unwrap());
+        assert_eq!(read(&layout, &fs, "feature/x").unwrap(), None);
+        assert!(!file.exists());
+    }
+
+    /// The file name recipe is FORMAT 2's disk contract: pinned.
+    #[test]
+    fn v2_file_names_are_the_name_hash() {
+        assert_eq!(file_stem("main"), PINNED_MAIN_STEM);
+        assert_eq!(file_stem("main").len(), 32);
+        assert_ne!(file_stem("main"), file_stem("Main"));
+    }
+
+    /// `blake3(b"swarmops:refname:v1\0" ‖ b"main")[0..16]`, in lowercase hex.
+    const PINNED_MAIN_STEM: &str = "72e8984deb3122ae48ce1eb128fae1d6";
+
+    /// A file whose name is not the hash of the name it holds is no ref file: reading it is
+    /// `InvalidData`, and the listing reports it under its file name.
+    #[test]
+    fn v2_misnamed_file_is_invalid_data() {
+        let (_dir, layout, fs) = v2_store();
+        write(&layout, &fs, "feature/x", Some(cs(1))).unwrap();
+        let refs = layout.refs_dir();
+        let stem = file_stem("feature/y");
+        std::fs::rename(refs.join(file_stem("feature/x")), refs.join(&stem)).unwrap();
+
+        assert!(is_invalid(&read(&layout, &fs, "feature/y")));
+        assert!(is_invalid(&read_all(&layout, &fs)));
+        let each = read_each(&layout, &fs).unwrap();
+        assert_eq!(each.len(), 1);
+        assert_eq!(each[0].name, stem);
+        assert!(is_invalid(&each[0].state));
+
+        // A file named by the hash of the name it holds, but a name no FORMAT 2 store takes.
+        let bad = "main/x";
+        let file = refs.join(file_stem(bad));
+        std::fs::write(&file, format!("{bad}\n{}\n1\n", cs(1))).unwrap();
+        let each = read_each(&layout, &fs).unwrap();
+        assert!(each.iter().all(|file| is_invalid(&file.state)), "{each:?}");
+    }
+
+    /// The longest ref file, 342 bytes, reads; one byte more is refused by its length, even
+    /// though it would parse (a version with a leading zero).
+    #[test]
+    fn v2_file_length_is_checked_before_reading() {
+        let (_dir, layout, fs) = v2_store();
+        let name = format!("feature/{}", "x".repeat(MAX_NAME_LEN - "feature/".len()));
+        let file = layout.refs_dir().join(file_stem(&name));
+        std::fs::create_dir_all(layout.refs_dir()).unwrap();
+
+        let longest = format!("{name}\n{}\n{}\n", cs(1), u64::MAX);
+        assert_eq!(longest.len(), 342);
+        std::fs::write(&file, &longest).unwrap();
+        assert_eq!(
+            read(&layout, &fs, &name).unwrap(),
+            Some(RefState::new(cs(1), u64::MAX))
+        );
+
+        std::fs::write(&file, format!("{name}\n{}\n0{}\n", cs(1), u64::MAX)).unwrap();
+        let refused = read(&layout, &fs, &name);
+        assert!(is_invalid(&refused), "{refused:?}");
+        assert!(
+            format!("{refused:?}").contains("343 bytes long"),
+            "{refused:?}"
+        );
+    }
+
+    /// Entries of `refs2/` that are not 32 lowercase hex digits (temp files, anything else)
+    /// are passed over by the listings.
+    #[test]
+    fn v2_listing_skips_what_is_no_ref_file() {
+        let (_dir, layout, fs) = v2_store();
+        write(&layout, &fs, "main", Some(cs(1))).unwrap();
+        let refs = layout.refs_dir();
+        let upper = file_stem("feature/x").to_ascii_uppercase();
+        let short = &file_stem("feature/y")[..31];
+        let long = format!("{}0", file_stem("feature/z"));
+        for junk in [".tmp1234", upper.as_str(), short, long.as_str(), "main"] {
+            std::fs::write(refs.join(junk), "junk").unwrap();
+        }
+
+        let all = read_all(&layout, &fs).unwrap();
+        assert_eq!(all.states.keys().collect::<Vec<_>>(), ["main"]);
+        let each = read_each(&layout, &fs).unwrap();
+        assert_eq!(each.len(), 1);
+        assert_eq!(each[0].name, "main");
+    }
+
+    /// Names that would clash as paths (`a` and `a/b`) or on a volume that folds case (`Main`
+    /// and `main`) are files of their own.
+    #[test]
+    fn v2_names_clashing_as_paths_coexist() {
+        let (_dir, layout, fs) = v2_store();
+        let names = ["a", "a/b", "Main", "main"];
+        for (byte, name) in (1..).zip(names) {
+            write(&layout, &fs, name, Some(cs(byte))).unwrap();
+        }
+        let all = read_all(&layout, &fs).unwrap();
+        for (byte, name) in (1..).zip(names) {
+            assert_eq!(
+                all.states.get(name),
+                Some(&RefState::new(cs(byte), 1)),
+                "{name}"
+            );
+        }
+        let listed: Vec<String> = read_each(&layout, &fs)
+            .unwrap()
+            .into_iter()
+            .map(|file| file.name)
+            .collect();
+        assert_eq!(listed, ["Main", "a", "a/b", "main"]);
     }
 }
