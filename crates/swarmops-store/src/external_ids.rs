@@ -83,6 +83,16 @@ pub struct ExternalEntry {
     pub faithful: bool,
 }
 
+impl ExternalEntry {
+    /// The entry naming `changeset`, faithful or not.
+    pub fn new(changeset: ChangesetId, faithful: bool) -> ExternalEntry {
+        ExternalEntry {
+            changeset,
+            faithful,
+        }
+    }
+}
+
 /// One name [`ExternalIds::list`] found: the key it spells, with the entry its file holds, or
 /// [`StoreError::ExternalIdCorrupt`] when what is there is no entry.
 pub type ListedEntry = (Vec<u8>, Result<ExternalEntry, StoreError>);

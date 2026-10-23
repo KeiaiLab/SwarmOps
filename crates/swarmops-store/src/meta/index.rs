@@ -74,6 +74,31 @@ pub struct ChangesetMeta {
     pub parents: Vec<ChangesetId>,
 }
 
+impl ChangesetMeta {
+    /// The changeset `id` at record `seq`, of `generation`, with `delta_hash` and `parents`.
+    ///
+    /// Invariant: at most 255 parents, and `seq` is the index's to give. Nothing checks either
+    /// here: [`Index::append_batch`] (and [`MetaWrite::insert_changeset`]) refuse more parents
+    /// as [`StoreError::Limit`] and assign `seq` themselves.
+    ///
+    /// [`MetaWrite::insert_changeset`]: crate::MetaWrite::insert_changeset
+    pub fn new(
+        id: ChangesetId,
+        seq: u64,
+        generation: u64,
+        delta_hash: [u8; 32],
+        parents: Vec<ChangesetId>,
+    ) -> ChangesetMeta {
+        ChangesetMeta {
+            id,
+            seq,
+            generation,
+            delta_hash,
+            parents,
+        }
+    }
+}
+
 /// What [`Index::repair_tail_with`] repaired.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct IndexRepair {

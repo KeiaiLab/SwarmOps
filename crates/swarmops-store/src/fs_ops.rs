@@ -343,6 +343,13 @@ pub trait FsOps: Send + Sync {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RealFs;
 
+impl RealFs {
+    /// The real filesystem.
+    pub const fn new() -> RealFs {
+        RealFs
+    }
+}
+
 impl FsOps for RealFs {
     fn create_dir_all(&self, p: &Path) -> io::Result<()> {
         fs::create_dir_all(p)
@@ -1046,6 +1053,11 @@ impl InjectedError {
 
 #[cfg(feature = "test-hooks")]
 impl FailAt {
+    /// Fail call `at`, as `mode` says, with `error`.
+    pub fn new(at: u64, mode: FailMode, error: InjectedError) -> FailAt {
+        FailAt { at, mode, error }
+    }
+
     /// The failure `spec` names: `<k>[:<mode>[:<errno>]]`, k positive, `<mode>` `once` (the
     /// default) or `persistent`, `<errno>` `eio` (the default) or `enospc`, each of either case.
     /// `Ok(None)` for an empty spec or k = 0, which fail nothing; an error for anything else.

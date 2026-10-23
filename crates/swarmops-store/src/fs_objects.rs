@@ -138,6 +138,13 @@ pub struct PutOutcome {
     pub written: bool,
 }
 
+impl PutOutcome {
+    /// The outcome for object `id`, whether this call placed its file or not.
+    pub fn new(id: ObjectId, written: bool) -> PutOutcome {
+        PutOutcome { id, written }
+    }
+}
+
 /// An object's kind and payload length, as its file's header records them
 /// ([`ObjectStore::stat`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,6 +154,13 @@ pub struct ObjectStat {
     /// The length of its payload, decoded: of what [`ObjectStore::get`] returns, if the file is
     /// whole.
     pub size: u64,
+}
+
+impl ObjectStat {
+    /// The stat of an object of `kind` with a payload of `size` bytes.
+    pub fn new(kind: ObjectKind, size: u64) -> ObjectStat {
+        ObjectStat { kind, size }
+    }
 }
 
 /// `objects/tmp`, made at most once a batch: by the batch's first put that writes a file, and not

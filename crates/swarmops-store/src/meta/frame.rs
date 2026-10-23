@@ -86,6 +86,22 @@ pub struct Frame {
     pub records: Vec<Record>,
 }
 
+impl Frame {
+    /// The frame `seq` at `offset`, holding `records`.
+    ///
+    /// Invariant: `seq` and `offset` are the frame's own in `journal.off` and `journal.log`.
+    /// Nothing checks it here, and nothing needs to: no store call takes a frame, and the
+    /// journal's reads take both from `journal.off` (see [`crate::Journal`]). A frame built
+    /// here is a value to compare with what the journal returns.
+    pub fn new(seq: u64, offset: u64, records: Vec<Record>) -> Frame {
+        Frame {
+            seq,
+            offset,
+            records,
+        }
+    }
+}
+
 impl Record {
     /// Decodes the record at the start of `buf`, returning it and how many bytes it took;
     /// the bytes after it are left alone.

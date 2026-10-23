@@ -127,6 +127,19 @@ pub struct CommitInfo {
     pub checkpointed: bool,
 }
 
+impl CommitInfo {
+    /// What a commit at frame `frame_seq` did: `inserted` changesets, `moved_refs` ref moves,
+    /// and whether it `checkpointed`.
+    pub fn new(frame_seq: u64, inserted: u64, moved_refs: u64, checkpointed: bool) -> CommitInfo {
+        CommitInfo {
+            frame_seq,
+            inserted,
+            moved_refs,
+            checkpointed,
+        }
+    }
+}
+
 /// What a write transaction's recovery repaired before the transaction's own work
 /// ([`MetaWrite::recovered`]): what the writers before it left when they crashed, or failed after
 /// their commit point. All zero ([`Recovered::is_empty`]) when they finished cleanly: frames past
@@ -224,6 +237,13 @@ pub struct JournalEntry {
     pub ts: i64,
 }
 
+impl JournalEntry {
+    /// A record of `kind` in frame `seq`, about `key`, at `ts`.
+    pub fn new(seq: u64, kind: &'static str, key: Vec<u8>, ts: i64) -> JournalEntry {
+        JournalEntry { seq, kind, key, ts }
+    }
+}
+
 /// One move of a ref, as [`MetaRead::reflog`] lists them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefMoveEntry {
@@ -237,6 +257,25 @@ pub struct RefMoveEntry {
     pub actor: String,
     /// When it moved, in Unix seconds, as its writer recorded it.
     pub ts: i64,
+}
+
+impl RefMoveEntry {
+    /// A move in frame `seq` from `old` to `new`, by `actor` at `ts`.
+    pub fn new(
+        seq: u64,
+        old: Option<ChangesetId>,
+        new: Option<ChangesetId>,
+        actor: String,
+        ts: i64,
+    ) -> RefMoveEntry {
+        RefMoveEntry {
+            seq,
+            old,
+            new,
+            actor,
+            ts,
+        }
+    }
 }
 
 impl MetaStore {

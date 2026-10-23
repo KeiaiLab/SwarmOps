@@ -86,6 +86,20 @@ pub struct DerivedSlot<'a> {
     pub key: &'a [u8],
 }
 
+impl<'a> DerivedSlot<'a> {
+    /// The slot of derivation `name` at `version`, about `subject`, under `key`. Takes any
+    /// value: a store call given a slot it does not take (see the fields) refuses it as
+    /// [`StoreError::BadCall`].
+    pub fn new(name: &'a str, version: u32, subject: ObjectId, key: &'a [u8]) -> DerivedSlot<'a> {
+        DerivedSlot {
+            name,
+            version,
+            subject,
+            key,
+        }
+    }
+}
+
 impl DerivedSlot<'_> {
     /// The key's length, as the file records it, if the slot is one a store takes (see
     /// [`DerivedSlot`]'s fields); [`StoreError::BadCall`] otherwise.
@@ -148,6 +162,13 @@ pub struct ListedValue {
     pub key_hash: Option<[u8; 8]>,
 }
 
+impl ListedValue {
+    /// The value file about `subject` whose name ends in `key_hash`, if any.
+    pub fn new(subject: ObjectId, key_hash: Option<[u8; 8]>) -> ListedValue {
+        ListedValue { subject, key_hash }
+    }
+}
+
 /// What a whole value file holds, as [`DerivedStore::read_listed`] reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredValue {
@@ -155,6 +176,13 @@ pub struct StoredValue {
     pub key: Vec<u8>,
     /// The value.
     pub value: Vec<u8>,
+}
+
+impl StoredValue {
+    /// A file holding `value` under `key`.
+    pub fn new(key: Vec<u8>, value: Vec<u8>) -> StoredValue {
+        StoredValue { key, value }
+    }
 }
 
 /// Whether `name` is one a derivation takes: 1 to 64 bytes of `[a-z0-9_]`, and not `tmp`, which

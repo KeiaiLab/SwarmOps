@@ -47,6 +47,17 @@ pub struct RefState {
     pub version: u64,
 }
 
+impl RefState {
+    /// A ref naming `target` at `version`.
+    ///
+    /// Invariant: `version` is at least 1. Nothing checks it here, and nothing needs to: no
+    /// store call takes a state, and a ref file whose version is 0 reads as `InvalidData`. A
+    /// state built here is a value to compare with what the store returns.
+    pub fn new(target: ChangesetId, version: u64) -> RefState {
+        RefState { target, version }
+    }
+}
+
 /// One ref file, as [`crate::MetaStore::ref_files`] reads it.
 #[derive(Debug)]
 pub struct RefFile {

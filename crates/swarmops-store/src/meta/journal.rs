@@ -107,6 +107,13 @@ pub struct LogCut {
     pub bytes: u64,
 }
 
+impl LogCut {
+    /// A cut at `at` of `bytes` bytes.
+    pub fn new(at: u64, bytes: u64) -> LogCut {
+        LogCut { at, bytes }
+    }
+}
+
 /// What [`Journal::repair_tail`] changed to bring the journal to a clean end; all zero when it
 /// ended cleanly.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
