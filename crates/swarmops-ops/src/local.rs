@@ -33,7 +33,7 @@ use swarmops_core::{
 };
 use swarmops_repo::LandRequest;
 use swarmops_repo::merge::line_diff::{self, DiffLine, UnifiedHunk};
-use swarmops_repo::merge::tree_diff::{ChangeKind, PathFilter, TreeChange};
+use swarmops_repo::merge::tree_diff::{ChangeKind, Leaf, PathFilter, TreeChange};
 use swarmops_repo::{
     CasResult, CommitRequest, Depth, FileSpan, ListedEntry, LocalRepo, MismatchCause, OpRecord,
     Operation, PathEvent, RepoError, RepoRead, StoredChangeset, VerifyProblem,
@@ -802,6 +802,15 @@ fn file_diff(
     let shared = before
         .zip(after)
         .is_some_and(|(old, new)| old.blob == new.blob);
+    if !shared && let Some(binary) = past_the_bound(read, before, after)? {
+        file.binary = Some(binary);
+        if !binary {
+            // Past the line diff's bound (`TooLarge`): no line counts, and no hunk, cut.
+            file.hunks_truncated = Some(true);
+            file.hunks = (format == DiffFormat::Unified).then(Vec::new);
+        }
+        return Ok(file);
+    }
     let old = before
         .map(|leaf| read.blob(leaf.blob))
         .transpose()
@@ -839,6 +848,39 @@ fn file_diff(
         file.hunks = Some(shown.iter().map(diff_hunk).collect::<Result<_, _>>()?);
     }
     Ok(file)
+}
+
+/// For two sides that do not share a blob, whether the file is binary, decided without reading a
+/// blob longer than the line diff's bound ([`line_diff::MAX_DIFF_BYTES`], its length from the blob's
+/// header): `Some(true)` if a side within the bound is not text, `Some(false)` if one is past the
+/// bound and the others are text, which a line diff would have refused (`TooLarge`). A side past
+/// the bound is taken for text: its bytes are not read to tell. `None` if no side is past the
+/// bound, so that both are read.
+fn past_the_bound(
+    read: &Snapshot<'_>,
+    before: Option<Leaf>,
+    after: Option<Leaf>,
+) -> Result<Option<bool>, OpError> {
+    let limit = bytes::to_u64(line_diff::MAX_DIFF_BYTES);
+    let mut small = Vec::new();
+    let mut past = false;
+    for leaf in [before, after].into_iter().flatten() {
+        if read.blob_len(leaf.blob).map_err(error::op)? > limit {
+            past = true;
+        } else {
+            small.push(leaf.blob);
+        }
+    }
+    if !past {
+        return Ok(None);
+    }
+    for blob in small {
+        let bytes = read.blob(blob).map_err(error::op)?;
+        if !line_diff::is_text(&bytes) {
+            return Ok(Some(true));
+        }
+    }
+    Ok(Some(false))
 }
 
 /// What happened to a file, as `diff` names it. `E_INTERNAL` for a change this build does not
@@ -3864,6 +3906,117 @@ mod tests {
                 ])
             );
             assert_eq!((page.from, page.to, page.files.len()), (c1, c2, 1));
+        }
+    }
+
+    /// A diff reads no blob past the line diff's bound (`MAX_DIFF_BYTES`).
+    mod bounded_diff {
+        use swarmops_repo::merge::line_diff::MAX_DIFF_BYTES;
+        use swarmops_store::Layout;
+        use swarmops_testkit::fs::RecordingFs;
+        use swarmops_testkit::repo::blob;
+
+        use super::*;
+
+        /// Text of `MAX_DIFF_BYTES` and a line more, whose first line is `head`.
+        fn big_text(head: &str) -> String {
+            let line = "0123456789abcde\n";
+            let mut text = format!("{head}\n");
+            text.extend(std::iter::repeat_n(line, MAX_DIFF_BYTES / line.len() + 1));
+            text
+        }
+
+        /// A store with `main` at the changeset of `old` (its first) and `new` (its second), the
+        /// two put at `f`; reopened on a recorder.
+        fn two(
+            old: &[u8],
+            new: &[u8],
+        ) -> (
+            tempfile::TempDir,
+            Utf8PathBuf,
+            impl Fn() -> Vec<String>,
+            LocalOps,
+        ) {
+            let dir = tempfile::tempdir().unwrap();
+            let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+            let (setup, _) = LocalOps::init(&root, "acme").unwrap();
+            let who = Identity::parse("agent/worker-17").unwrap();
+            let commit = |parent: Option<&str>, content: &[u8]| {
+                let mut change_input = ChangeInput::new("f".to_owned(), ChangeOp::Put);
+                let content = String::from_utf8_lossy(content).into_owned();
+                change_input.content = Some(ContentInput::Inline(content));
+                let mut req = CommitReq::new(vec![change_input], "m".to_owned());
+                req.parent = parent.map(Rev::from);
+                req.advance = Some("main".to_owned());
+                setup.commit(&who, req).unwrap().changeset
+            };
+            let c1 = commit(None, old);
+            commit(Some(&c1), new);
+            drop(setup);
+            let (fs, calls) = RecordingFs::new();
+            let ops = ops_on(&root, fs.naming_paths_in(root.clone().into_std_path_buf()));
+            (dir, root, calls, ops)
+        }
+
+        /// The reads of the object files of `contents` among `calls`.
+        fn reads_of(calls: &[String], contents: &[&[u8]]) -> usize {
+            let wanted: Vec<String> = (contents.iter())
+                .map(|content| format!("read {}", Layout::new("").object_path(blob(content).0)))
+                .collect();
+            calls.iter().filter(|call| wanted.contains(call)).count()
+        }
+
+        fn diff_of(ops: &LocalOps, format: DiffFormat) -> Diff {
+            let mut req = DiffReq::new("main~1", "main");
+            req.format = format;
+            req.context = 3;
+            req.limit = 500;
+            req.max_bytes = 32_768;
+            ops.diff(req).unwrap()
+        }
+
+        /// Both sides past the bound: `stat` and `unified` give the page they gave when the blobs
+        /// were read (text, no line counts, hunks cut), and read neither blob, only its header.
+        #[test]
+        fn blobs_past_the_bound_are_not_read() {
+            let (old, new) = (big_text("a"), big_text("b"));
+            let (_dir, _root, calls, ops) = two(old.as_bytes(), new.as_bytes());
+            calls();
+            for format in [DiffFormat::Stat, DiffFormat::Unified] {
+                let page = diff_of(&ops, format);
+                let file = &page.files[0];
+                assert_eq!(
+                    (
+                        file.binary,
+                        file.insertions,
+                        file.deletions,
+                        file.hunks_truncated
+                    ),
+                    (Some(false), None, None, Some(true)),
+                    "{format:?}"
+                );
+                let hunks = file.hunks.as_ref().map(Vec::len);
+                assert_eq!(hunks, (format == DiffFormat::Unified).then_some(0));
+            }
+            let calls = calls();
+            assert_eq!(
+                reads_of(&calls, &[old.as_bytes(), new.as_bytes()]),
+                0,
+                "{calls:?}"
+            );
+        }
+
+        /// A small side that is not text settles the file as binary, as it did: the big side is
+        /// still not read.
+        #[test]
+        fn a_small_binary_side_settles_it_without_the_big_one() {
+            let big = big_text("a");
+            let (_dir, _root, calls, ops) = two(big.as_bytes(), b"nul\0here");
+            calls();
+            let page = diff_of(&ops, DiffFormat::Stat);
+            assert_eq!(page.files[0].binary, Some(true));
+            assert_eq!(page.files[0].hunks_truncated, None);
+            assert_eq!(reads_of(&calls(), &[big.as_bytes()]), 0);
         }
     }
 
