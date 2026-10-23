@@ -61,6 +61,15 @@ struct Check {
     timeout: Duration,
 }
 
+/// Whether a land's pending record is on disk before its store land.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Record {
+    /// Not yet: the land writes it.
+    Due,
+    /// Already, by a run cut short.
+    Written,
+}
+
 /// One `ws land`: the workspace under its lock and what the request fixed.
 struct Landing<'c, 'a> {
     /// What the operation runs with.
@@ -143,9 +152,14 @@ pub fn land(ctx: &Ctx<'_>, req: WsLandReq) -> Result<WsLandResp, OpError> {
         mode,
         max_attempts,
     };
+    let record = if cut.is_some() {
+        Record::Written
+    } else {
+        Record::Due
+    };
     let (land, attempts) = match check {
         Some(check) => landing.checked(&check, cut)?,
-        None => (landing.once(cut.is_some())?, 1),
+        None => (landing.once(record)?, 1),
     };
     Ok(WsLandResp {
         land,
@@ -156,8 +170,8 @@ pub fn land(ctx: &Ctx<'_>, req: WsLandReq) -> Result<WsLandResp, OpError> {
 
 impl Landing<'_, '_> {
     /// The land without a check: one store land, exact onto the recorded `onto` or merged.
-    /// `resumed`: its pending record is there already.
-    fn once(&mut self, resumed: bool) -> Result<LandResp, OpError> {
+    /// `record`: whether its pending record is there already.
+    fn once(&mut self, record: Record) -> Result<LandResp, OpError> {
         // 1. Exact: onto the target's head the last rebase merged onto, which a commit clears.
         let exact = self.mode == LandMode::Exact && self.ws.file.target == self.target;
         let expect = self.ws.file.onto.clone().filter(|_| exact);
@@ -166,7 +180,7 @@ impl Landing<'_, '_> {
         }
 
         // 2. The pending record (WS1), the land, the workspace on what landed.
-        if !resumed {
+        if record == Record::Due {
             self.write(None, 1, LANDING)?;
         }
         self.publish(expect)

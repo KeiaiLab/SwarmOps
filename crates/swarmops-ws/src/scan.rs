@@ -22,7 +22,7 @@ use swarmops_api::{FileKind, OpError, StoreOps, WsChangeKind};
 use swarmops_core::{ObjectId, ObjectKind};
 
 use crate::hostfs::{HostFs, HostKind, HostMeta};
-use crate::index::{self, Index, Row, UNCONFIRMED};
+use crate::index::{self, Extent, Index, Row, UNCONFIRMED};
 use crate::materialize::{self, Tree};
 use crate::state::{SWARMWS_DIR, Volume};
 use crate::volume::EXEC_BITS;
@@ -240,7 +240,12 @@ pub(crate) fn scan(ctx: &Ctx<'_>, ws: &Workspace, want: &Want) -> Result<Scanned
 
 /// What an index of workspace `ws` stands for.
 pub(crate) fn binding_of(ws: &Workspace) -> String {
-    index::binding(&ws.file.head, &ws.file.prefixes, ws.file.all)
+    let extent = if ws.file.all {
+        Extent::Whole
+    } else {
+        Extent::Prefixes
+    };
+    index::binding(&ws.file.head, &ws.file.prefixes, extent)
 }
 
 /// What a tracked row's stat said.
