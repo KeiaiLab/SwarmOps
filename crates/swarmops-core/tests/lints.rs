@@ -1,7 +1,8 @@
 //! The workspace's lint policy stays in force. Nothing else notices if it goes: a crate whose
 //! manifest drops `[lints] workspace = true` is no longer linted by the table, a table without
-//! `missing_docs` stops the documentation gate, and one without `unsafe_code = "forbid"` lets
-//! `unsafe` in, while `just check` stays green. These tests read the manifests as text (no TOML
+//! `missing_docs` stops the documentation gate, one without `unsafe_code = "forbid"` lets
+//! `unsafe` in, and one without the two `exhaustive_*` denials lets a public type be exhaustive,
+//! while `just check` stays green. These tests read the manifests as text (no TOML
 //! parser, no new dependency) and fail instead.
 //! `fuzz/` and `bench/compare/` are workspaces of their own: they cannot inherit this table, and
 //! are not read here (`bench/compare/` keeps a lint table of its own; `fuzz/` has none).
@@ -55,6 +56,14 @@ fn forbids_unsafe_code(root_manifest: &str) -> bool {
     )
 }
 
+/// The root manifest denies exported enums and structs without `#[non_exhaustive]`: adding a
+/// variant or a field then breaks no code outside the crate.
+fn denies_exhaustive_types(root_manifest: &str) -> bool {
+    let table = "workspace.lints.clippy";
+    table_holds(root_manifest, table, r#"exhaustive_enums = "deny""#)
+        && table_holds(root_manifest, table, r#"exhaustive_structs = "deny""#)
+}
+
 /// A crate's manifest takes the workspace's lints.
 fn inherits_workspace_lints(crate_manifest: &str) -> bool {
     table_holds(crate_manifest, "lints", "workspace = true")
@@ -75,6 +84,16 @@ fn the_workspace_table_forbids_unsafe_code() {
     assert!(
         forbids_unsafe_code(&root),
         "Cargo.toml: [workspace.lints.rust] must hold `unsafe_code = \"forbid\"`"
+    );
+}
+
+#[test]
+fn the_workspace_table_denies_exhaustive_types() {
+    let root = fs::read_to_string(workspace_root().join("Cargo.toml")).unwrap();
+    assert!(
+        denies_exhaustive_types(&root),
+        "Cargo.toml: [workspace.lints.clippy] must hold `exhaustive_enums = \"deny\"` and \
+         `exhaustive_structs = \"deny\"`"
     );
 }
 
@@ -100,7 +119,7 @@ fn every_crate_inherits_the_workspace_lints() {
     );
 }
 
-/// The three checks above read the table they name: a manifest that lacks what they look for
+/// The checks above read the table they name: a manifest that lacks what they look for
 /// fails them, however nearly it is spelt, and one that has it passes.
 #[test]
 fn the_checks_read_the_table_they_name() {
@@ -124,6 +143,16 @@ fn the_checks_read_the_table_they_name() {
     ] {
         assert!(!forbids_unsafe_code(root), "{root:?}");
     }
+    for root in [
+        "",
+        "[workspace.lints.clippy]\nexhaustive_enums = \"deny\"\n",
+        "[workspace.lints.clippy]\nexhaustive_structs = \"deny\"\n",
+        "[workspace.lints.clippy]\nexhaustive_enums = \"warn\"\nexhaustive_structs = \"deny\"\n",
+        "[workspace.lints.clippy]\n# exhaustive_enums = \"deny\"\nexhaustive_structs = \"deny\"\n",
+        "[workspace.lints.rust]\nexhaustive_enums = \"deny\"\nexhaustive_structs = \"deny\"\n",
+    ] {
+        assert!(!denies_exhaustive_types(root), "{root:?}");
+    }
     for krate in [
         "[package]\nname = \"x\"\n",
         "[lints]\n",
@@ -138,6 +167,9 @@ fn the_checks_read_the_table_they_name() {
                 missing_docs=\"warn\"  # a warning\n\n[workspace.lints.clippy]\nall = \"deny\"\n";
     assert!(keeps_missing_docs(root));
     assert!(forbids_unsafe_code(root));
+    let root = "[workspace.lints.clippy]\nall = \"deny\"\nexhaustive_enums = \"deny\" # why\n\
+                exhaustive_structs=\"deny\"\n";
+    assert!(denies_exhaustive_types(root));
     let krate = "[package]\nname = \"x\"\n\n[lints]\n# the workspace's\nworkspace = true\n\n\
                  [[test]]\nname = \"all\"\n";
     assert!(inherits_workspace_lints(krate));
