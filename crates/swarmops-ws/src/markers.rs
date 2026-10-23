@@ -73,7 +73,7 @@ pub(crate) fn write(
         .filter_map(|blob| blob.as_deref())
         .collect();
     let contents = materialize::fetch(ctx.store, ids.into_iter().collect())?;
-    let blob = |id: &Option<String>| id.as_ref().map_or(&[][..], |id| contents[id].as_slice());
+    let blob = |id: Option<&str>| id.map_or(&[][..], |id| contents[id].as_slice());
 
     // 3. Each file merged again and written with its markers, its executable bit kept.
     let label = format!(
@@ -82,9 +82,9 @@ pub(crate) fn write(
     );
     let mut written = Vec::new();
     for file in files {
-        let ours = blob(&file.ours_blob);
-        let theirs = blob(&file.theirs_blob);
-        let Some(bytes) = render(blob(&file.base_blob), ours, theirs, &label) else {
+        let ours = blob(file.ours_blob.as_deref());
+        let theirs = blob(file.theirs_blob.as_deref());
+        let Some(bytes) = render(blob(file.base_blob.as_deref()), ours, theirs, &label) else {
             continue;
         };
         put(ctx, ws, &file.path, &bytes)?;
