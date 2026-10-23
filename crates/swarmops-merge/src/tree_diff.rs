@@ -36,6 +36,13 @@ pub struct Leaf {
     pub blob: BlobId,
 }
 
+impl Leaf {
+    /// The leaf of this kind and blob.
+    pub fn new(kind: LeafKind, blob: BlobId) -> Self {
+        Self { kind, blob }
+    }
+}
+
 /// What happened to the leaf at one path, from one tree to the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ChangeKind {
@@ -95,6 +102,13 @@ pub struct TreeChange {
     pub path: RepoPath,
     /// What happened to it.
     pub kind: ChangeKind,
+}
+
+impl TreeChange {
+    /// The change `kind` of the leaf at `path`.
+    pub fn new(path: RepoPath, kind: ChangeKind) -> Self {
+        Self { path, kind }
+    }
 }
 
 /// The paths a diff looks at: every path ([`PathFilter::all`]), or those that equal or lie below
@@ -429,6 +443,23 @@ pub struct PathTriple {
     pub ours: Option<Leaf>,
     /// Theirs' leaf there; `None` for none.
     pub theirs: Option<Leaf>,
+}
+
+impl PathTriple {
+    /// The path and the leaf each of the three trees holds there.
+    pub fn new(
+        path: RepoPath,
+        base: Option<Leaf>,
+        ours: Option<Leaf>,
+        theirs: Option<Leaf>,
+    ) -> Self {
+        Self {
+            path,
+            base,
+            ours,
+            theirs,
+        }
+    }
 }
 
 /// Every leaf path, within `filter`, that `base` → `ours` or `base` → `theirs` changes, with the

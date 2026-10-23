@@ -290,10 +290,7 @@ fn a_last_line_without_a_newline_is_a_line() {
     assert_eq!(split_lines(b""), none);
     assert_eq!(
         line_hunks(b"a\nb", b"a\nb\n").unwrap(),
-        [Hunk {
-            before: 1..2,
-            after: 1..2
-        }]
+        [Hunk::new(1..2, 1..2)]
     );
 }
 
@@ -304,28 +301,13 @@ fn hunks_sit_where_git_places_them() {
     // --histogram -U0`, with its indent heuristic or without), and so does `line_hunks`.
     assert_eq!(
         line_hunks(b"a\na", b"x\na\na\n").unwrap(),
-        [
-            Hunk {
-                before: 0..0,
-                after: 0..2
-            },
-            Hunk {
-                before: 1..2,
-                after: 3..3
-            }
-        ]
+        [Hunk::new(0..0, 0..2), Hunk::new(1..2, 3..3)]
     );
     // Of two equal lines, the lower one goes: git's placement without its indent heuristic, which
     // `git merge-file` uses (`git diff`'s indent heuristic takes the upper one).
     let before = b"    x += 1;\nb\n}\n}\n    x += 1;\nif x {\n";
     let after = b"    x += 1;\nb\n}\n    x += 1;\nif x {\n";
-    assert_eq!(
-        line_hunks(before, after).unwrap(),
-        [Hunk {
-            before: 3..4,
-            after: 3..3
-        }]
-    );
+    assert_eq!(line_hunks(before, after).unwrap(), [Hunk::new(3..4, 3..3)]);
 }
 
 fn headers(hunks: &[UnifiedHunk<'_>]) -> Vec<Header> {
@@ -478,32 +460,11 @@ fn is_text_refuses_nul_and_invalid_utf8() {
 #[test]
 fn line_stats_count_removed_and_added_lines() {
     assert_eq!(line_stats(&[]), LineStats::default());
-    let hunks = [
-        Hunk {
-            before: 0..2,
-            after: 0..1,
-        },
-        Hunk {
-            before: 5..5,
-            after: 4..7,
-        },
-    ];
-    assert_eq!(
-        line_stats(&hunks),
-        LineStats {
-            insertions: 4,
-            deletions: 2
-        }
-    );
+    let hunks = [Hunk::new(0..2, 0..1), Hunk::new(5..5, 4..7)];
+    assert_eq!(line_stats(&hunks), LineStats::new(4, 2));
     // b and c become x, y and z; e goes.
     let hunks = line_hunks(b"a\nb\nc\nd\ne\n", b"a\nx\ny\nz\nd\n").unwrap();
-    assert_eq!(
-        line_stats(&hunks),
-        LineStats {
-            insertions: 3,
-            deletions: 3
-        }
-    );
+    assert_eq!(line_stats(&hunks), LineStats::new(3, 3));
 }
 
 /// The line diff's bound: a side of more than `MAX_DIFF_LINES` lines or `MAX_DIFF_BYTES` bytes
@@ -528,10 +489,7 @@ mod bound {
 
     /// The one hunk of an edit of line `at`.
     fn edit_of(at: u32) -> Vec<Hunk> {
-        vec![Hunk {
-            before: at..at + 1,
-            after: at..at + 1,
-        }]
+        vec![Hunk::new(at..at + 1, at..at + 1)]
     }
 
     /// `MAX_DIFF_LINES` lines a side get their hunks; one line more, on either side, gets none,

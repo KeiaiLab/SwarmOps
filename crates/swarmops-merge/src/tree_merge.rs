@@ -164,3 +164,22 @@ pub struct FileConflict {
     /// Theirs' leaf there; `None` for none.
     pub theirs: Option<Leaf>,
 }
+
+impl FileConflict {
+    /// The conflict at `path`, why, and the three leaves there.
+    pub fn new(
+        path: RepoPath,
+        kind: ConflictKind,
+        base: Option<Leaf>,
+        ours: Option<Leaf>,
+        theirs: Option<Leaf>,
+    ) -> Self {
+        Self {
+            path,
+            kind,
+            base,
+            ours,
+            theirs,
+        }
+    }
+}

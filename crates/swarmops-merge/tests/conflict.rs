@@ -46,13 +46,15 @@ fn ops_spec_kinds(spec: &str) -> Vec<&str> {
 /// One conflict of each kind, in the order operations spec §3 lists them. The `match` has no
 /// wildcard: a kind added to `ConflictKind` fails to compile here until it is listed.
 fn one_of_each() -> Vec<ConflictKind> {
-    let hunk = || ConflictHunk {
-        base: 2..4,
-        ours: 2..3,
-        theirs: 2..2,
-        base_text: b"c\nd\n".to_vec(),
-        ours_text: b"x\n".to_vec(),
-        theirs_text: Vec::new(),
+    let hunk = || {
+        ConflictHunk::new(
+            2..4,
+            2..3,
+            2..2,
+            b"c\nd\n".to_vec(),
+            b"x\n".to_vec(),
+            Vec::new(),
+        )
     };
     let kinds = vec![
         ConflictKind::Content {

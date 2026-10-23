@@ -35,7 +35,7 @@ pub const MAX_DIFF_BYTES: usize = 8 << 20;
 
 /// What [`line_hunks`] gives for a side past the line diff's bound, more than [`MAX_DIFF_LINES`]
 /// lines or [`MAX_DIFF_BYTES`] bytes: no hunks.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TooLarge;
 
 /// The lines of `bytes`: each ends after its `\n` and keeps it, a last line without one is a line,
@@ -57,6 +57,16 @@ pub struct Hunk {
     pub before: Range<u32>,
     /// The new side's lines that come in their place.
     pub after: Range<u32>,
+}
+
+impl Hunk {
+    /// The hunk where the old side's lines `before` give way to the new side's `after`.
+    ///
+    /// Invariant: `before` and `after` are never both empty. No validation exists: `new` checks
+    /// nothing, and only [`line_hunks`] makes hunks outside tests.
+    pub fn new(before: Range<u32>, after: Range<u32>) -> Self {
+        Self { before, after }
+    }
 }
 
 /// The changes that turn `before` into `after`, line by line ([`split_lines`]): the histogram
@@ -104,6 +114,16 @@ pub struct LineStats {
     pub deletions: u64,
 }
 
+impl LineStats {
+    /// The counts of `insertions` and `deletions`.
+    pub fn new(insertions: u64, deletions: u64) -> Self {
+        Self {
+            insertions,
+            deletions,
+        }
+    }
+}
+
 /// The lines `hunks` insert and delete: the sums of their `after` and their `before` lengths.
 pub fn line_stats(hunks: &[Hunk]) -> LineStats {
     let lines = |range: &Range<u32>| u64::from(range.end.saturating_sub(range.start));
@@ -141,6 +161,29 @@ pub struct UnifiedHunk<'a> {
     pub after_lines: u32,
     /// The lines in order; each change's removed lines come before its added lines.
     pub lines: Vec<DiffLine<'a>>,
+}
+
+impl<'a> UnifiedHunk<'a> {
+    /// The hunk with this header and these lines, as they are.
+    ///
+    /// Invariant: `before_lines` counts the context and removed lines of `lines`, `after_lines`
+    /// the context and added ones. No validation exists: `new` checks nothing, and only
+    /// [`unified`] makes hunks outside tests.
+    pub fn new(
+        before_start: u32,
+        before_lines: u32,
+        after_start: u32,
+        after_lines: u32,
+        lines: Vec<DiffLine<'a>>,
+    ) -> Self {
+        Self {
+            before_start,
+            before_lines,
+            after_start,
+            after_lines,
+            lines,
+        }
+    }
 }
 
 /// The unified hunks of `hunks`, which are `line_hunks(before, after)`'s, with `context`

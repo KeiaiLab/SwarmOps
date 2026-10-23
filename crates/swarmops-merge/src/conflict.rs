@@ -33,6 +33,30 @@ pub struct ConflictHunk {
     pub theirs_text: Vec<u8>,
 }
 
+impl ConflictHunk {
+    /// The hunk with these ranges and texts, as they are.
+    ///
+    /// Invariant: each text is the bytes of its side's lines in its range. No validation exists:
+    /// `new` checks nothing, and the caller keeps the invariant.
+    pub fn new(
+        base: Range<u32>,
+        ours: Range<u32>,
+        theirs: Range<u32>,
+        base_text: Vec<u8>,
+        ours_text: Vec<u8>,
+        theirs_text: Vec<u8>,
+    ) -> Self {
+        Self {
+            base,
+            ours,
+            theirs,
+            base_text,
+            ours_text,
+            theirs_text,
+        }
+    }
+}
+
 /// What one file's content merges to.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ContentMerge {
