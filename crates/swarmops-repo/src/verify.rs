@@ -73,9 +73,9 @@ use std::fmt;
 use std::io;
 use std::sync::Arc;
 
-use swarmops_core::bytes::to_u64;
+use swarmops_core::bytes;
 use swarmops_core::{Changeset, ChangesetId, EntryTarget, ObjectId, ObjectKind, Tree, TreeId};
-use swarmops_store::external_ids::lower_hex;
+use swarmops_store::external_ids;
 use swarmops_store::{
     ChangesetMeta, ExternalEntry, Frame, Index, Journal, ListedEntry, ObjectStore, Record, RefFile,
     SYSTEM_GIT, SortedView, StoreError,
@@ -310,19 +310,29 @@ fn key_text(name: &str, key: &[u8]) -> String {
     {
         return format!(" under path {path}");
     }
-    format!(" under key {}", lower_hex(key))
+    format!(" under key {}", external_ids::lower_hex(key))
+}
+
+/// How much of a store [`Repo::verify`] reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Depth {
+    /// The structure only: the changeset and tree objects, with every blob looked for, its
+    /// bytes unread, and no derived value read.
+    Shallow,
+    /// The structure, every object file re-hashed, and the built-in derived values checked.
+    Deep,
 }
 
 impl<O: ObjectStore> Repo<O> {
     /// Checks the whole store, as [the module documentation](self) says, and reports what is
-    /// damaged: a sound store gives no problems. `deep` re-hashes every object file as well;
-    /// without it, the check covers the structure, and looks for blobs without reading them.
+    /// damaged: a sound store gives no problems. [`Depth::Deep`] re-hashes every object file as
+    /// well; [`Depth::Shallow`] covers the structure, and looks for blobs without reading them.
     /// Errors only where it cannot read on.
-    pub fn verify(&self, deep: bool) -> Result<VerifyReport, RepoError> {
-        let mut check = Check::new(self, deep);
+    pub fn verify(&self, depth: Depth) -> Result<VerifyReport, RepoError> {
+        let mut check = Check::new(self, depth);
         check.lock_file();
         let changesets = check.metadata()?;
-        if deep {
+        if depth == Depth::Deep {
             check.derived = derived::Derived::read(self)?;
         }
         for meta in &changesets {
@@ -341,7 +351,7 @@ impl<O: ObjectStore> Repo<O> {
 struct Check<'r, O: ObjectStore> {
     repo: &'r Repo<O>,
     /// Whether every object file is re-hashed.
-    deep: bool,
+    depth: Depth,
     /// Metadata files that do not read.
     meta: Vec<VerifyProblem>,
     journal_corrupt: Option<u64>,
@@ -385,10 +395,10 @@ struct Check<'r, O: ObjectStore> {
 }
 
 impl<'r, O: ObjectStore> Check<'r, O> {
-    fn new(repo: &'r Repo<O>, deep: bool) -> Self {
+    fn new(repo: &'r Repo<O>, depth: Depth) -> Self {
         Self {
             repo,
-            deep,
+            depth,
             meta: Vec::new(),
             journal_corrupt: None,
             mismatches: BTreeSet::new(),
@@ -486,15 +496,21 @@ impl<'r, O: ObjectStore> Check<'r, O> {
         let mut records = Vec::new();
         if let Some(index) = &index {
             records = self.index_records(index)?;
-            self.compare(&journaled, &records, ckpt, whole);
+            let frames = if whole { Frames::Whole } else { Frames::Cut };
+            self.compare(&journaled, &records, ckpt, frames);
             // A record past the journal's last changeset, which no frame holds, whether the index
             // counts it or not.
-            if whole && held > to_u64(journaled.len()) {
+            if whole && held > bytes::to_u64(journaled.len()) {
                 self.mismatches
-                    .insert((to_u64(journaled.len()), MismatchCause::Journal));
+                    .insert((bytes::to_u64(journaled.len()), MismatchCause::Journal));
             }
-            self.check_view(index.ids_view(), &records, |meta| meta.id.0.0, true)?;
-            self.check_view(index.dh_view(), &records, |meta| meta.delta_hash, false)?;
+            self.check_view(index.ids_view(), &records, |meta| meta.id.0.0, Keys::One)?;
+            self.check_view(
+                index.dh_view(),
+                &records,
+                |meta| meta.delta_hash,
+                Keys::Many,
+            )?;
         }
 
         let journaled_count = journaled.len();
@@ -637,7 +653,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
         journaled: &[(ChangesetMeta, u64)],
         records: &[Option<ChangesetMeta>],
         ckpt: Option<u64>,
-        whole: bool,
+        frames: Frames,
     ) {
         for (rec, record) in records.iter().enumerate() {
             let Some(record) = record else { continue };
@@ -645,11 +661,11 @@ impl<'r, O: ObjectStore> Check<'r, O> {
                 Some((want, _)) => want != record,
                 // A record no committed transaction holds; past damage in the journal, or with
                 // no journal, there is no telling.
-                None => whole,
+                None => frames == Frames::Whole,
             };
             if wrong {
                 self.mismatches
-                    .insert((to_u64(rec), MismatchCause::Journal));
+                    .insert((bytes::to_u64(rec), MismatchCause::Journal));
             }
         }
         // The checkpoint passes a record only once the index holds it durably.
@@ -657,7 +673,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
         for (seq, (_, offset)) in journaled.iter().enumerate().skip(records.len()) {
             if *offset < ckpt {
                 self.mismatches
-                    .insert((to_u64(seq), MismatchCause::Journal));
+                    .insert((bytes::to_u64(seq), MismatchCause::Journal));
             }
         }
     }
@@ -671,7 +687,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
         view: &SortedView<32>,
         records: &[Option<ChangesetMeta>],
         key_of: impl Fn(&ChangesetMeta) -> [u8; 32],
-        unique_keys: bool,
+        keys: Keys,
     ) -> Result<(), RepoError> {
         // The index opened only views that cover no more records than it holds.
         let mut named = vec![false; to_usize(view.len())];
@@ -686,12 +702,9 @@ impl<'r, O: ObjectStore> Check<'r, O> {
                     .as_ref()
                     .is_some_and(|meta| key_of(meta) == key)
             });
-            let ordered = previous.is_none_or(|before| {
-                if unique_keys {
-                    before.0 < key
-                } else {
-                    before < (key, rec)
-                }
+            let ordered = previous.is_none_or(|before| match keys {
+                Keys::One => before.0 < key,
+                Keys::Many => before < (key, rec),
             });
             if let Some(slot) = slot {
                 named[slot] = true;
@@ -704,7 +717,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
         for (rec, named) in named.iter().enumerate() {
             if !named {
                 self.mismatches
-                    .insert((to_u64(rec), MismatchCause::SortedView));
+                    .insert((bytes::to_u64(rec), MismatchCause::SortedView));
             }
         }
         Ok(())
@@ -823,7 +836,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
     fn external_entries(&mut self) -> Result<(), RepoError> {
         for (system, entries) in std::mem::take(&mut self.external) {
             for (key, entry) in entries {
-                let key = lower_hex(&key);
+                let key = external_ids::lower_hex(&key);
                 let problem = match entry {
                     Err(StoreError::ExternalIdCorrupt { .. }) => VerifyProblem::ExternalIdCorrupt {
                         system: system.clone(),
@@ -863,7 +876,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
     fn objects(&mut self) -> Result<(), RepoError> {
         let listed = self.repo.objects.list()?;
         // Deep: the blobs, as their files' headers say. Shallow: whatever has a file.
-        let present = if self.deep {
+        let present = if self.depth == Depth::Deep {
             self.rehash(listed)?
         } else {
             listed.into_iter().collect()
@@ -949,7 +962,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
 
     fn report(self) -> VerifyReport {
         // Shallow, the blobs were looked for, not read.
-        let looked_for = if self.deep {
+        let looked_for = if self.depth == Depth::Deep {
             0
         } else {
             let unread = self.blobs.keys().filter(|id| !self.hashed.contains(*id));
@@ -970,7 +983,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
         problems.extend(self.external_problems);
         problems.extend(self.derived_problems);
         VerifyReport {
-            objects_checked: to_u64(self.hashed.len() + looked_for),
+            objects_checked: bytes::to_u64(self.hashed.len() + looked_for),
             changesets_checked: self.changesets_checked,
             problems,
         }
@@ -985,7 +998,7 @@ fn read_frames(journal: &Journal) -> Result<(Vec<Frame>, Option<u64>), RepoError
     let mut frames: Vec<Frame> = Vec::new();
     let mut batch = FRAME_BATCH;
     loop {
-        match journal.frames_from(to_u64(frames.len()), batch) {
+        match journal.frames_from(bytes::to_u64(frames.len()), batch) {
             Ok(read) if read.is_empty() => break,
             Ok(read) => frames.extend(read),
             Err(StoreError::JournalCorrupt { offset }) if batch == 1 => {
@@ -1025,7 +1038,7 @@ fn journal_changesets(frames: &[Frame]) -> Vec<(ChangesetMeta, u64)> {
             {
                 let meta = ChangesetMeta {
                     id: *id,
-                    seq: to_u64(changesets.len()),
+                    seq: bytes::to_u64(changesets.len()),
                     generation: *generation,
                     delta_hash: *delta_hash,
                     parents: parents.clone(),
@@ -1035,6 +1048,22 @@ fn journal_changesets(frames: &[Frame]) -> Vec<(ChangesetMeta, u64)> {
         }
     }
     changesets
+}
+
+/// The journal's frames verify read: all of them, or only up to damage (or none, with no
+/// journal).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Frames {
+    Whole,
+    Cut,
+}
+
+/// The records a sorted view's key names: one (the id view), or many, which then ascend by
+/// record (the delta-hash view).
+#[derive(Debug, Clone, Copy)]
+enum Keys {
+    One,
+    Many,
 }
 
 /// `n` as a `usize`; the counts verify converts are lengths of files it has open.

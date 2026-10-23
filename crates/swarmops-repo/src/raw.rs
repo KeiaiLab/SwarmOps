@@ -37,22 +37,25 @@
 //!    error, the frame cut back off the journal, and the same batch made again records it, as for
 //!    [`Repo::commit`]. What the transaction's recovery repaired first, of what earlier writers
 //!    left, comes back in [`RawBatchOutcome::recovered`].
+//!
+//! [`delta_of`]: tree_diff::delta_of
+//! [`check_metadata`]: commit::check_metadata
 
 use std::collections::HashMap;
 
-use swarmops_core::bytes::to_u64;
+use swarmops_core::bytes;
 use swarmops_core::{
     Changeset, ChangesetId, CodecError, Hashed, ObjectKind, Signature, Tree, TreeId,
 };
-use swarmops_merge::tree_diff::{PathFilter, TreeRead, delta_of, diff_trees};
+use swarmops_merge::tree_diff::{self, PathFilter, TreeRead};
 use swarmops_store::{
     ChangesetMeta, InsertOutcome, LimitKind, MetaRead, ObjectStat, ObjectStore, Recovered,
     StoreError,
 };
 
-use crate::commit::{check_metadata, check_parent_list};
+use crate::commit;
 use crate::error::RepoError;
-use crate::repo::{Repo, post_commit_warning};
+use crate::repo::{self, Repo};
 
 /// The most changesets a raw batch holds: the records of one journal frame (65,535), which holds
 /// nothing else.
@@ -79,7 +82,7 @@ pub struct RawChangeset {
     /// `gpgsig`, `mergetag`, …), in their order, verbatim.
     pub extra_headers: Vec<(Vec<u8>, Vec<u8>)>,
     /// SwarmOps-owned key/value pairs: keys strictly ascending, none ending in `:b64`
-    /// ([`check_metadata`]).
+    /// ([`check_metadata`](commit::check_metadata)).
     pub metadata: Vec<(String, Vec<u8>)>,
 }
 
@@ -172,8 +175,8 @@ impl<O: ObjectStore> Repo<O> {
     /// read for it. Its root joins the next flush ([`ObjectStore::retain`]): the changeset will
     /// name it, so its name must be durable before the frame, whoever stored it.
     fn check_raw(&self, raw: &RawChangeset) -> Result<(), RepoError> {
-        check_parent_list(&raw.parents)?;
-        check_metadata(&raw.metadata)?;
+        commit::check_parent_list(&raw.parents)?;
+        commit::check_metadata(&raw.metadata)?;
         if raw.metadata.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
             return Err(CodecError::UnsortedMetadata.into());
         }
@@ -251,7 +254,7 @@ impl<O: ObjectStore> RawBatch<'_, O> {
                 Ok(info) => info.frame_seq,
                 Err(StoreError::PostCommit { frame_seq, source }) => {
                     let what = "the batch of changesets";
-                    warnings.push(post_commit_warning(what, frame_seq, &source));
+                    warnings.push(repo::post_commit_warning(what, frame_seq, &source));
                     frame_seq
                 }
                 Err(e) => return Err(e.into()),
@@ -293,7 +296,12 @@ impl<O: ObjectStore> RawBatch<'_, O> {
             None => None,
         };
         let trees = StoredTrees(&self.repo.objects);
-        let delta = delta_of(&diff_trees(&trees, first, Some(root), &PathFilter::all())?);
+        let delta = tree_diff::delta_of(&tree_diff::diff_trees(
+            &trees,
+            first,
+            Some(root),
+            &PathFilter::all(),
+        )?);
         let changeset = Changeset {
             parents,
             root,
@@ -364,8 +372,8 @@ impl<O: ObjectStore> TreeRead for StoredTrees<'_, O> {
 fn too_many(got: usize) -> RepoError {
     StoreError::Limit {
         what: LimitKind::Records,
-        max: to_u64(MAX_RAW_BATCH),
-        got: to_u64(got),
+        max: bytes::to_u64(MAX_RAW_BATCH),
+        got: bytes::to_u64(got),
     }
     .into()
 }

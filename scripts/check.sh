@@ -6,6 +6,7 @@ cd "$(dirname "$0")/.."
 cargo fmt --all --check
 cargo fmt --manifest-path fuzz/Cargo.toml --check
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo clippy --locked --workspace --lib --bins --all-features -- -D warnings -D clippy::unwrap_used -D clippy::missing_assert_message -D clippy::mod_module_files -D clippy::rc_buffer
 # `test_hooks` exists only without the feature, so the all-features run above compiles it to
 # nothing: this step lints it, and the library crates it builds, without the feature.
 cargo clippy --locked -p swarmops-cli --test test_hooks -- -D warnings

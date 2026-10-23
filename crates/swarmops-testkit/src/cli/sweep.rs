@@ -21,7 +21,7 @@ use std::thread;
 
 use swarmops_store::FS_CALLS_ENV;
 
-use super::{Program, Run, Store, agent, run};
+use super::{Program, Run, Store};
 
 /// How many runs of a sweep go at once, each with a store of its own.
 pub const AT_ONCE: usize = 8;
@@ -86,12 +86,21 @@ pub fn calls_file<P: Program>(store: &Store<P>) -> PathBuf {
 /// commit on it are the same in every run.
 pub fn commit_template<P: Program>() -> Store<P> {
     let store = Store::<P>::init().with_env(&[(P::NOW_ENV, &NOW.to_string())]);
-    let first = store.commit(&agent(0), "README.md", "# a sweep's template\n", None);
-    let create = store.run_as(&agent(0), &["ref", "set", "main", &first, "--create"], &[]);
+    let first = store.commit(
+        &super::agent(0),
+        "README.md",
+        "# a sweep's template\n",
+        None,
+    );
+    let create = store.run_as(
+        &super::agent(0),
+        &["ref", "set", "main", &first, "--create"],
+        &[],
+    );
     create.ok();
     for n in 2..TEMPLATE_FRAMES {
         store.commit(
-            &agent(0),
+            &super::agent(0),
             &format!("history/{n}.txt"),
             &format!("{n}\n"),
             None,
@@ -106,7 +115,7 @@ pub fn commit_template<P: Program>() -> Store<P> {
 pub fn swept_commit<P: Program>(store: &Store<P>, env: &[(&str, &str)]) -> Run {
     let changes = store.changes_of("swept", &SWEPT_PUTS);
     store.run_as(
-        &agent(1),
+        &super::agent(1),
         &["commit", "-m", "swept", "--changes", &changes],
         env,
     )
@@ -146,7 +155,7 @@ pub fn dry_commit<P: Program>(template: &Store<P>) -> DryRun {
 pub fn dry_init<P: Program>() -> u64 {
     let store = Store::<P>::empty();
     let file = calls_file(&store);
-    run::<P, _>(
+    super::run::<P, _>(
         &["init", store.path()],
         &[(FS_CALLS_ENV, file.to_str().unwrap())],
     )
@@ -168,10 +177,10 @@ pub fn init_again<P: Program>(store: &Store<P>, what: &str) -> bool {
     let info = store.read(&["info"]);
     let whole = info.exit() == 0;
     if whole {
-        run::<P, _>(&["init", store.path()], &[]).err("E_EXISTS");
+        super::run::<P, _>(&["init", store.path()], &[]).err("E_EXISTS");
     } else {
         info.err("E_NOT_A_REPO");
-        run::<P, _>(&["init", store.path()], &[]).ok();
+        super::run::<P, _>(&["init", store.path()], &[]).ok();
     }
     let info = store.info();
     let fresh = (info["name"].as_str(), info["changesets"].as_u64());

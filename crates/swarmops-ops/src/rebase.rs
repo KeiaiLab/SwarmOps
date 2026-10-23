@@ -9,10 +9,10 @@
 //! `base` and `resolutions.against`.
 
 use swarmops_api::{Identity, OpError, RebaseReq, RebaseResp, RebaseStatus};
-use swarmops_core::bytes::to_u64;
+use swarmops_core::bytes;
 use swarmops_repo::RepoError;
 
-use crate::error::op;
+use crate::error;
 use crate::local::Recording;
 
 /// `rebase` as `who`, on the store `ops` reads.
@@ -22,7 +22,7 @@ pub(crate) fn run(
     req: RebaseReq,
 ) -> Result<RebaseResp, OpError> {
     // 1. The ref it rebases onto, by the store's grammar, before anything is read.
-    swarmops_store::check_ref_name(&req.onto).map_err(|e| op(RepoError::from(e)))?;
+    swarmops_store::check_ref_name(&req.onto).map_err(|e| error::op(RepoError::from(e)))?;
 
     // 2. The rebase.
     let outcome = ops.rebase_change(who, req)?;
@@ -40,7 +40,7 @@ pub(crate) fn run(
         root: outcome.root.to_string(),
         onto: outcome.onto.to_string(),
         base: outcome.base.to_string(),
-        files_changed: to_u64(outcome.files_changed),
+        files_changed: bytes::to_u64(outcome.files_changed),
         auto_merged: (outcome.auto_merged.iter())
             .map(ToString::to_string)
             .collect(),

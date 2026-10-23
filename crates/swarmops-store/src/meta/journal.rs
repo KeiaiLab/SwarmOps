@@ -48,11 +48,11 @@ use std::os::unix::fs::FileExt;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use camino::Utf8PathBuf;
+use swarmops_core::bytes;
 
-use super::frame::{Frame, HEADER_LEN, Parsed, Record, encode_frame, parse_frame};
-use super::to_u64;
+use super::frame::{self, Frame, HEADER_LEN, Parsed, Record};
 use crate::error::{FileOp, IoFailure, StoreError};
-use crate::fs_ops::{FsMethod, FsOps, StoreFs, open_regular};
+use crate::fs_ops::{self, FsMethod, FsOps, StoreFs};
 use crate::layout::Layout;
 
 /// The size of one `journal.off` entry.
@@ -183,9 +183,9 @@ impl Journal {
     /// [`Journal::open`], through `fs`, whose root may be another than `layout`'s (see
     /// [`Journal::create_in`]).
     pub(crate) fn open_in(layout: &Layout, fs: StoreFs) -> Result<Journal, StoreError> {
-        let log = open_regular(layout.journal_log())
+        let log = fs_ops::open_regular(layout.journal_log())
             .map_err(|e| fs.locate(FileOp::Open, layout.journal_log(), e))?;
-        let off = open_regular(layout.journal_off())
+        let off = fs_ops::open_regular(layout.journal_off())
             .map_err(|e| fs.locate(FileOp::Open, layout.journal_off(), e))?;
         let tail = Tail {
             len: (log.metadata())
@@ -238,7 +238,7 @@ impl Journal {
     /// durable after it, a hole a power loss would leave among the listed frames. A cut that
     /// fails too is reported beside the append's error.
     pub fn append_frame(&self, records: &[Record]) -> Result<Frame, StoreError> {
-        let bytes = encode_frame(records)?;
+        let bytes = frame::encode_frame(records)?;
         let mut tail = self.tail();
         if !self.still_ends_at(&tail)? {
             tail.checked = false;
@@ -264,7 +264,7 @@ impl Journal {
         };
         let seq = entry_at / ENTRY_LEN;
         *tail = Tail {
-            len: offset + to_u64(bytes.len()),
+            len: offset + bytes::to_u64(bytes.len()),
             frames: seq + 1,
             checked: true,
         };
@@ -325,7 +325,7 @@ impl Journal {
         let count = u64::from(previous.is_some()) + wanted + u64::from(first + wanted < listed);
         let entries = self.entries(previous.unwrap_or(first), count)?;
         let skip = usize::from(previous.is_some());
-        if to_u64(entries.len()) != count {
+        if bytes::to_u64(entries.len()) != count {
             // journal.off was cut since it was measured: entries of the snapshot are gone.
             let offset = entries.get(skip).copied().unwrap_or(0);
             return Ok(Attempt::Shrunk { offset });
@@ -348,10 +348,10 @@ impl Journal {
         let mut frames = Vec::with_capacity(wanted);
         let mut at = 0;
         for (frame_seq, &offset) in (first..).zip(&offsets[..wanted]) {
-            if offset != start + to_u64(at) {
+            if offset != start + bytes::to_u64(at) {
                 return Err(StoreError::JournalCorrupt { offset });
             }
-            match parse_frame(&buf[at..]) {
+            match frame::parse_frame(&buf[at..]) {
                 Parsed::Whole { records, size } => {
                     frames.push(Frame {
                         seq: frame_seq,
@@ -364,7 +364,7 @@ impl Journal {
             }
         }
         if let Some(&next) = offsets.get(wanted)
-            && next != start + to_u64(at)
+            && next != start + bytes::to_u64(at)
         {
             return Err(StoreError::JournalCorrupt { offset: next });
         }
@@ -431,7 +431,7 @@ impl Journal {
         // Where each listed frame from `first` on starts, and where the listed frame just
         // before the read and the one before that start.
         let entries = self.entries(first, listed - first)?;
-        if to_u64(entries.len()) != listed - first {
+        if bytes::to_u64(entries.len()) != listed - first {
             return shrunk();
         }
         let before = match first.checked_sub(1) {
@@ -478,8 +478,8 @@ impl Journal {
         let mut seq = first;
         let mut at = 0;
         while at < buf.len() {
-            let frame_offset = offset + to_u64(at);
-            match parse_frame(&buf[at..]) {
+            let frame_offset = offset + bytes::to_u64(at);
+            match frame::parse_frame(&buf[at..]) {
                 Parsed::Whole { records, size } => {
                     if let Some(entry) = listed_at(seq)
                         && entry != frame_offset
@@ -606,7 +606,7 @@ impl Journal {
                 .locate(FileOp::Fs(FsMethod::Read), &self.ckpt_path, e)
         };
         let mut bytes = Vec::with_capacity(9);
-        match open_regular(&self.ckpt_path) {
+        match fs_ops::open_regular(&self.ckpt_path) {
             Ok(file) => {
                 io::Read::read_to_end(&mut io::Read::take(file, 9), &mut bytes).map_err(failed)?
             }
@@ -769,7 +769,7 @@ impl Journal {
         // since it was measured fails the check.
         let whole = off_len / ENTRY_LEN;
         let (from, entries) = self.last_entries(whole)?;
-        if to_u64(entries.len()) < whole - from {
+        if bytes::to_u64(entries.len()) < whole - from {
             let gone = io::Error::from(io::ErrorKind::UnexpectedEof);
             return Err(self.off_failed(FileOp::ReadAt, gone).into());
         }
@@ -797,7 +797,7 @@ impl Journal {
             }
             // It was whole and durable before it was listed: cut short, missing, failing its
             // CRC or not decoding, it is damage, and nothing is cut.
-            match parse_frame(&buf) {
+            match frame::parse_frame(&buf) {
                 Parsed::Whole { size, .. } => at = size,
                 _ => return Err(StoreError::JournalCorrupt { offset: start }),
             }
@@ -806,8 +806,8 @@ impl Journal {
         let mut unlisted = Vec::new();
         let mut cut = None;
         while at < buf.len() {
-            let offset = start + to_u64(at);
-            match parse_frame(&buf[at..]) {
+            let offset = start + bytes::to_u64(at);
+            match frame::parse_frame(&buf[at..]) {
                 Parsed::Whole { size, .. } => {
                     unlisted.push(offset);
                     at += size;
@@ -836,7 +836,7 @@ impl Journal {
             // may still be only in the page cache: a listed frame must be durable. If the sync
             // fails, no later one can vouch for them: they are written afresh.
             if let Err(e) = self.fs.sync_data(self.log_path.as_std_path()) {
-                let seqs = listed..=listed + to_u64(unlisted.len()) - 1;
+                let seqs = listed..=listed + bytes::to_u64(unlisted.len()) - 1;
                 self.write_afresh(from, seqs, &buf[unlisted_at..at], &e)?;
                 rewritten = true;
             }
@@ -860,11 +860,11 @@ impl Journal {
             self.fs.truncate(self.log_path.as_std_path(), cut)?;
         }
         let tail = Tail {
-            len: start + to_u64(at),
-            frames: listed + to_u64(unlisted.len()),
+            len: start + bytes::to_u64(at),
+            frames: listed + bytes::to_u64(unlisted.len()),
             checked: true,
         };
-        let frames_listed = to_u64(unlisted.len());
+        let frames_listed = bytes::to_u64(unlisted.len());
         let repair = TailRepair {
             cut: cut.map(|cut| LogCut {
                 at: cut,
@@ -891,7 +891,8 @@ impl Journal {
                 return Err(StoreError::JournalCorrupt { offset: start });
             };
             let bytes = self.read_log(start, end - start)?;
-            if !matches!(parse_frame(&bytes), Parsed::Whole { size, .. } if size == bytes.len()) {
+            if !matches!(frame::parse_frame(&bytes), Parsed::Whole { size, .. } if size == bytes.len())
+            {
                 return Err(StoreError::JournalCorrupt { offset: start });
             }
             next = end;
@@ -910,7 +911,7 @@ impl Journal {
     fn listed(&self) -> Result<Option<u64>, StoreError> {
         let whole = self.fs.file_len(self.off_path.as_std_path())? / ENTRY_LEN;
         let (from, entries) = self.last_entries(whole)?;
-        if to_u64(entries.len()) < whole - from {
+        if bytes::to_u64(entries.len()) < whole - from {
             return Ok(None);
         }
         listing(whole, from, &entries).map(Some)
@@ -975,7 +976,7 @@ impl Journal {
     /// Where the frame at `offset` ends, judged by its header alone; `None` if the header,
     /// or the payload it announces, runs past `log_len`.
     fn frame_end(&self, offset: u64, log_len: u64) -> Result<Option<u64>, StoreError> {
-        let header_end = offset.checked_add(to_u64(HEADER_LEN));
+        let header_end = offset.checked_add(bytes::to_u64(HEADER_LEN));
         if header_end.is_none_or(|header_end| header_end > log_len) {
             return Ok(None);
         }
@@ -986,7 +987,7 @@ impl Journal {
         if len == 0 {
             return Err(StoreError::JournalCorrupt { offset });
         }
-        let end = offset + to_u64(HEADER_LEN) + u64::from(len);
+        let end = offset + bytes::to_u64(HEADER_LEN) + u64::from(len);
         Ok((end <= log_len).then_some(end))
     }
 
@@ -1029,7 +1030,7 @@ impl Journal {
 /// [`MAX_ZEROED`] of them is [`StoreError::JournalCorrupt`] at 0.
 fn listing(whole: u64, from: u64, entries: &[u64]) -> Result<u64, StoreError> {
     match entries.iter().rposition(|&entry| entry != 0) {
-        Some(last) => Ok(from + to_u64(last) + 1),
+        Some(last) => Ok(from + bytes::to_u64(last) + 1),
         None if whole - from <= MAX_ZEROED => Ok(from),
         None => Err(StoreError::JournalCorrupt { offset: 0 }),
     }
@@ -1098,7 +1099,7 @@ fn read_upto(file: &File, offset: u64, len: u64) -> io::Result<Vec<u8>> {
     let mut buf = vec![0; len];
     let mut filled = 0;
     while filled < len {
-        match file.read_at(&mut buf[filled..], offset + to_u64(filled)) {
+        match file.read_at(&mut buf[filled..], offset + bytes::to_u64(filled)) {
             Ok(0) => break,
             Ok(n) => filled += n,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}

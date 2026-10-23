@@ -17,7 +17,7 @@ use swarmops_api::{
 };
 use swarmops_api::{DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_CONFLICT_BYTES};
 
-use crate::output::printable;
+use crate::output;
 
 /// The envelope's `op` for a command line that names no operation.
 pub const NO_OP: &str = "swarmops";
@@ -1287,7 +1287,7 @@ fn shown(args: &[OsString], error: clap::Error) -> clap::Error {
     }
     let escaped = args.iter().map(|arg| {
         if holds_control(arg) {
-            OsString::from(printable(&arg.to_string_lossy()))
+            OsString::from(output::printable(&arg.to_string_lossy()))
         } else {
             arg.clone()
         }

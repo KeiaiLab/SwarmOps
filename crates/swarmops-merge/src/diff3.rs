@@ -6,15 +6,16 @@
 //! each block to the lines where the two sides differ, which can split it, and joins blocks that
 //! only three lines or fewer, or lines without a letter or digit, keep apart). Equal sides, or one
 //! side equal to the base, decide at once: that side, whatever its bytes. Otherwise contents that
-//! are not all text ([`is_text`]), or not all within the line diff's bound
-//! ([`MAX_DIFF_LINES`](crate::line_diff::MAX_DIFF_LINES) lines and
+//! are not all text ([`is_text`](crate::line_diff::is_text)), or not all within the line
+//! diff's bound ([`MAX_DIFF_LINES`](crate::line_diff::MAX_DIFF_LINES) lines and
 //! [`MAX_DIFF_BYTES`](crate::line_diff::MAX_DIFF_BYTES) bytes each), are not merged by lines, and
 //! the merge is [`ContentMerge::Binary`]. Text is merged by lines: a line is the bytes up to and
 //! including a `\n`, a last line may have none, and `\r` is a byte of its line
 //! ([`split_lines`](crate::line_diff::split_lines)). The two sides' hunks against the base
-//! ([`line_hunks`]: the histogram diff, placed as git places its hunks) are walked in lockstep over
-//! the base's lines, in chunks: a chunk starts at the next hunk of either side and grows while a
-//! hunk of either side overlaps it or touches it (starts at the line where the chunk ends). A chunk
+//! ([`line_hunks`](crate::line_diff::line_hunks): the histogram diff, placed as git places its
+//! hunks) are walked in lockstep over the base's lines, in chunks: a chunk starts at the next
+//! hunk of either side and grows while a hunk of either side overlaps it or touches it (starts
+//! at the line where the chunk ends). A chunk
 //! only one side changed takes that side's lines; one both sides changed takes their lines when
 //! those are the same (the same change made twice) and is a [`ConflictHunk`] otherwise; the base's
 //! lines between chunks stay. So two edits merge only with at least one unchanged line between
@@ -23,7 +24,7 @@
 use std::ops::Range;
 
 use crate::conflict::{ConflictHunk, ContentMerge};
-use crate::line_diff::{Hunk, diffable, is_text, line_hunks};
+use crate::line_diff::{self, Hunk};
 
 /// Merges what ours and theirs made of `base` (module doc): the merged bytes, the hunks where the
 /// two sides' edits conflict (in file order, their ranges 0-based and half-open over each side's
@@ -35,11 +36,11 @@ pub fn merge_content(base: &[u8], ours: &[u8], theirs: &[u8]) -> ContentMerge {
     if ours == base {
         return ContentMerge::Clean(theirs.to_vec());
     }
-    if !(is_text(base) && is_text(ours) && is_text(theirs)) {
+    if !(line_diff::is_text(base) && line_diff::is_text(ours) && line_diff::is_text(theirs)) {
         return ContentMerge::Binary;
     }
     // The line diff's bound, checked for all three before either diff runs.
-    if !(diffable(base) && diffable(ours) && diffable(theirs)) {
+    if !(line_diff::diffable(base) && line_diff::diffable(ours) && line_diff::diffable(theirs)) {
         return ContentMerge::Binary;
     }
     merge_lines(base, ours, theirs)
@@ -48,8 +49,10 @@ pub fn merge_content(base: &[u8], ours: &[u8], theirs: &[u8]) -> ContentMerge {
 /// The lockstep walk of the module doc over two sides that both changed `base`, all three text;
 /// `Binary` if one is past the line diff's bound.
 fn merge_lines(base: &[u8], ours: &[u8], theirs: &[u8]) -> ContentMerge {
-    let (Ok(ours_hunks), Ok(theirs_hunks)) = (line_hunks(base, ours), line_hunks(base, theirs))
-    else {
+    let (Ok(ours_hunks), Ok(theirs_hunks)) = (
+        line_diff::line_hunks(base, ours),
+        line_diff::line_hunks(base, theirs),
+    ) else {
         return ContentMerge::Binary;
     };
     let base_lines = Lines::new(base);

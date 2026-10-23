@@ -14,7 +14,7 @@
 
 use swarmops_core::{Changeset, ChangesetId};
 
-use crate::render::commit_bytes;
+use crate::render;
 use crate::{GIT_OID, GitOid};
 
 /// The metadata keys whose values a native changeset's commit carries as trailers, each with its
@@ -70,8 +70,10 @@ pub fn export_message(id: ChangesetId, cs: &Changeset) -> Vec<u8> {
 /// the changeset's author, committer and extra headers verbatim, and its [`export_message`].
 /// `tree` is the git oid of the changeset's root ([`tree_oid`](crate::tree_oid)), and `parents`
 /// are its parents' export oids ([`ExportOid`](crate::ExportOid)).
+///
+/// [`commit_bytes`]: render::commit_bytes
 pub fn render_commit(id: ChangesetId, cs: &Changeset, parents: &[GitOid], tree: GitOid) -> Vec<u8> {
-    commit_bytes(
+    render::commit_bytes(
         tree,
         parents,
         &cs.author,

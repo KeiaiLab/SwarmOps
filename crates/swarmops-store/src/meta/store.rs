@@ -53,7 +53,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use camino::Utf8Path;
-use swarmops_core::ChangesetId;
+use swarmops_core::{ChangesetId, bytes};
 
 use super::frame::{Frame, MAX_RECORDS, Record};
 use super::index::{ChangesetMeta, Index};
@@ -62,7 +62,6 @@ use super::lock::MetaLock;
 use super::parents::MAX_PARENTS;
 use super::refs::{self, RefFile, RefState};
 use super::replay::{self, Overlay};
-use super::to_u64;
 use crate::error::{FileOp, LimitKind, StoreError};
 use crate::fs_ops::{FsOps, RealFs, StoreFs};
 use crate::layout::Layout;
@@ -78,6 +77,15 @@ const DEFAULT_PARALLELISM: usize = 5;
 /// How many frames past the checkpoint a commit leaves before it syncs the index and moves
 /// the checkpoint.
 const CHECKPOINT_EVERY: u64 = 32;
+
+/// When a write transaction makes the projections durable: at [`CHECKPOINT_EVERY`] frames
+/// ([`Settle::Batched`], a commit) or now, if any frame lies past the checkpoint
+/// ([`Settle::Flush`], [`MetaStore::flush`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Settle {
+    Batched,
+    Flush,
+}
 
 /// How many frames [`MetaRead::reflog`] and [`MetaRead::frames_before`] read with one call as
 /// they walk back.
@@ -437,9 +445,9 @@ impl MetaStore {
             .count();
         Ok(MetaWrite {
             store: self,
-            checkpointed_records: index.len().saturating_sub(to_u64(past)),
+            checkpointed_records: index.len().saturating_sub(bytes::to_u64(past)),
             index,
-            uncheckpointed: to_u64(frames.len()),
+            uncheckpointed: bytes::to_u64(frames.len()),
             records: Vec::new(),
             queued: HashMap::new(),
             moved: HashMap::new(),
@@ -472,7 +480,7 @@ impl MetaStore {
     /// lies past the checkpoint, syncs the index and moves the checkpoint to the end of the
     /// journal. For callers that need the projections durable at once (tests, closing).
     pub fn flush(&self) -> Result<(), StoreError> {
-        self.write()?.finish(true).map(drop)
+        self.write()?.finish(Settle::Flush).map(drop)
     }
 
     fn from_parts(layout: Layout, fs: StoreFs, journal: Journal) -> MetaStore {
@@ -703,7 +711,7 @@ impl MetaRead<'_> {
 
     /// How many changesets the store holds.
     pub fn count_changesets(&self) -> Result<u64, StoreError> {
-        Ok(self.index.len() + to_u64(self.overlay.extras().len()))
+        Ok(self.index.len() + bytes::to_u64(self.overlay.extras().len()))
     }
 
     /// The ids of index records `recs`: one `ids.col` read each ([`Index::id`]).
@@ -785,7 +793,7 @@ impl MetaWrite<'_> {
                 if *queued_id == id {
                     return Ok(Some(ChangesetMeta {
                         id,
-                        seq: self.index.len() + to_u64(at),
+                        seq: self.index.len() + bytes::to_u64(at),
                         generation: *generation,
                         delta_hash: *delta_hash,
                         parents: parents.clone(),
@@ -844,8 +852,8 @@ impl MetaWrite<'_> {
         if meta.parents.len() > MAX_PARENTS {
             return Err(StoreError::Limit {
                 what: LimitKind::Parents,
-                max: to_u64(MAX_PARENTS),
-                got: to_u64(meta.parents.len()),
+                max: bytes::to_u64(MAX_PARENTS),
+                got: bytes::to_u64(meta.parents.len()),
             });
         }
         if staged.generations.contains_key(&meta.id)
@@ -866,7 +874,7 @@ impl MetaWrite<'_> {
                 .ok_or(StoreError::MissingParent(parent))?;
             generation = generation.max(parent_generation.saturating_add(1));
         }
-        let seq = self.index.len() + to_u64(self.queued.len() + staged.generations.len());
+        let seq = self.index.len() + bytes::to_u64(self.queued.len() + staged.generations.len());
         staged.generations.insert(meta.id, generation);
         staged.records.push(Record::Changeset {
             id: meta.id,
@@ -884,8 +892,8 @@ impl MetaWrite<'_> {
         if records > MAX_RECORDS {
             return Err(StoreError::Limit {
                 what: LimitKind::Records,
-                max: to_u64(MAX_RECORDS),
-                got: to_u64(records),
+                max: bytes::to_u64(MAX_RECORDS),
+                got: bytes::to_u64(records),
             });
         }
         self.queued.extend(staged.generations);
@@ -912,8 +920,8 @@ impl MetaWrite<'_> {
         if actor.len() > MAX_ACTOR_LEN {
             return Err(StoreError::Limit {
                 what: LimitKind::ActorBytes,
-                max: to_u64(MAX_ACTOR_LEN),
-                got: to_u64(actor.len()),
+                max: bytes::to_u64(MAX_ACTOR_LEN),
+                got: bytes::to_u64(actor.len()),
             });
         }
         if let Some(target) = new
@@ -954,12 +962,12 @@ impl MetaWrite<'_> {
     /// the frame cut back off the journal; any other error before it means the transaction did
     /// not commit either. With nothing queued, errors are the housekeeping's own.
     pub fn commit(self) -> Result<CommitInfo, StoreError> {
-        self.finish(false)
+        self.finish(Settle::Batched)
     }
 
-    /// [`MetaWrite::commit`]; `flush` also syncs and checkpoints any frame past the
+    /// [`MetaWrite::commit`]; [`Settle::Flush`] also syncs and checkpoints any frame past the
     /// checkpoint.
-    fn finish(mut self, flush: bool) -> Result<CommitInfo, StoreError> {
+    fn finish(mut self, settle: Settle) -> Result<CommitInfo, StoreError> {
         let store = self.store;
         if self.records.is_empty() {
             let info = CommitInfo {
@@ -968,18 +976,18 @@ impl MetaWrite<'_> {
                 moved_refs: 0,
                 checkpointed: false,
             };
-            return self.settle(info, flush);
+            return self.settle(info, settle);
         }
         let frame = store.journal.append_frame(&self.records)?; // the commit point
         self.uncheckpointed += 1;
         let info = CommitInfo {
             frame_seq: frame.seq,
-            inserted: to_u64(self.queued.len()),
-            moved_refs: to_u64(self.records.len() - self.queued.len()),
+            inserted: bytes::to_u64(self.queued.len()),
+            moved_refs: bytes::to_u64(self.records.len() - self.queued.len()),
             checkpointed: false,
         };
         replay::materialize(&mut self.index, &store.layout, &store.fs, &frame)
-            .and_then(|()| self.settle(info, flush))
+            .and_then(|()| self.settle(info, settle))
             .map_err(|source| StoreError::PostCommit {
                 frame_seq: frame.seq,
                 source: Box::new(source),
@@ -992,8 +1000,9 @@ impl MetaWrite<'_> {
     /// Then the checkpoint moves to the end of the journal; a failed sync or compaction
     /// returns first, so it never moves past what is not durable, and a failed sync cuts the
     /// index back to the checkpoint first ([`MetaWrite::sync_index`]).
-    fn settle(&mut self, mut info: CommitInfo, flush: bool) -> Result<CommitInfo, StoreError> {
+    fn settle(&mut self, mut info: CommitInfo, settle: Settle) -> Result<CommitInfo, StoreError> {
         let compact = self.index.tail_len() > Index::COMPACT_THRESHOLD;
+        let flush = settle == Settle::Flush;
         let due = self.uncheckpointed >= CHECKPOINT_EVERY || (flush && self.uncheckpointed > 0);
         if !compact && !due {
             return Ok(info);
@@ -1047,8 +1056,8 @@ impl MetaWrite<'_> {
         } else {
             Err(StoreError::Limit {
                 what: LimitKind::Records,
-                max: to_u64(MAX_RECORDS),
-                got: to_u64(self.records.len()) + 1,
+                max: bytes::to_u64(MAX_RECORDS),
+                got: bytes::to_u64(self.records.len()) + 1,
             })
         }
     }

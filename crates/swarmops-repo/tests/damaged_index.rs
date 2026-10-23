@@ -21,7 +21,7 @@ use std::time::Duration;
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, Signature};
 use swarmops_repo::{
-    LandRequest, LandStatus, LocalRepo, MismatchCause, RepoError, StoreError, VerifyProblem,
+    Depth, LandRequest, LandStatus, LocalRepo, MismatchCause, RepoError, StoreError, VerifyProblem,
 };
 use swarmops_store::Layout;
 use swarmops_testkit::repo::{new_repo, path, put, request, signature};
@@ -147,7 +147,7 @@ fn land_from(base: ChangesetId, head: ChangesetId) -> LandRequest {
 
 /// What verify finds, deep.
 fn problems(repo: &LocalRepo) -> Vec<VerifyProblem> {
-    repo.verify(true).unwrap().problems
+    repo.verify(Depth::Deep).unwrap().problems
 }
 
 #[test]

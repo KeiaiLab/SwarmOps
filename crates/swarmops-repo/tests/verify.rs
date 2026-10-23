@@ -20,7 +20,9 @@ use swarmops_core::{
     Changeset, ChangesetId, DeltaEntry, DeltaOp, LeafKind, ObjectId, ObjectKind, Tree, TreeId,
     hash_object,
 };
-use swarmops_repo::{LocalRepo, MismatchCause, RepoError, StoreError, VerifyProblem, VerifyReport};
+use swarmops_repo::{
+    Depth, LocalRepo, MismatchCause, RepoError, StoreError, VerifyProblem, VerifyReport,
+};
 use swarmops_store::{
     ChangesetMeta, FsObjectStore, FsOps, Index, Journal, Layout, MetaLock, MetaStore, ObjectStore,
     RealFs, Record,
@@ -128,20 +130,19 @@ fn first_two_recs(root: &Utf8Path) -> [u64; 2] {
     [view.rec_at(0).unwrap(), view.rec_at(1).unwrap()]
 }
 
-/// Asserts that verify finds exactly `want`, in any order, deep (`deep`) or shallow; returns
-/// its report.
+/// Asserts that verify finds exactly `want`, in any order, at `depth`; returns its report.
 #[track_caller]
 fn assert_problems_when(
     repo: &LocalRepo,
-    deep: bool,
+    depth: Depth,
     mut want: Vec<VerifyProblem>,
 ) -> VerifyReport {
-    let report = repo.verify(deep).unwrap();
+    let report = repo.verify(depth).unwrap();
     let mut got = report.problems.clone();
     let key = |p: &VerifyProblem| format!("{p:?}");
     got.sort_by_key(key);
     want.sort_by_key(key);
-    assert_eq!(got, want, "deep: {deep}");
+    assert_eq!(got, want, "{depth:?}");
     report
 }
 
@@ -149,16 +150,16 @@ fn assert_problems_when(
 /// which a shallow check covers too. Returns the deep check's report.
 #[track_caller]
 fn assert_problems(repo: &LocalRepo, want: Vec<VerifyProblem>) -> VerifyReport {
-    assert_problems_when(repo, false, want.clone());
-    assert_problems_when(repo, true, want)
+    assert_problems_when(repo, Depth::Shallow, want.clone());
+    assert_problems_when(repo, Depth::Deep, want)
 }
 
 #[test]
 fn verify_clean_store_zero_problems() {
     let (_dir, root, repo) = new_repo();
-    for deep in [true, false] {
+    for depth in [Depth::Deep, Depth::Shallow] {
         assert_eq!(
-            repo.verify(deep).unwrap(),
+            repo.verify(depth).unwrap(),
             VerifyReport {
                 objects_checked: 0,
                 changesets_checked: 0,
@@ -207,12 +208,12 @@ fn verify_clean_store_zero_problems() {
     fs::write(root.join("objects/stray"), b"junk").unwrap();
     fs::create_dir(root.join("objects/zz")).unwrap();
 
-    let deep = repo.verify(true).unwrap();
+    let deep = repo.verify(Depth::Deep).unwrap();
     assert_eq!(deep.problems, []);
     assert_eq!(deep.changesets_checked, 5);
     assert_eq!(deep.objects_checked, object_count(&root));
     // Every object here is referenced, so a shallow check examines them all as well.
-    assert_eq!(repo.verify(false).unwrap(), deep);
+    assert_eq!(repo.verify(Depth::Shallow).unwrap(), deep);
 }
 
 #[test]
@@ -237,7 +238,7 @@ fn verify_detects_corrupt_blob_and_missing_object() {
 
     let report = assert_problems_when(
         &repo,
-        true,
+        Depth::Deep,
         vec![
             VerifyProblem::CorruptObject(corrupt),
             VerifyProblem::MissingObject {
@@ -250,7 +251,7 @@ fn verify_detects_corrupt_blob_and_missing_object() {
     // A shallow check reads no blob: the corrupt one goes unseen, the missing one does not.
     let shallow = assert_problems_when(
         &repo,
-        false,
+        Depth::Shallow,
         vec![VerifyProblem::MissingObject {
             referenced_by: c1,
             id: missing,
@@ -274,10 +275,10 @@ fn verify_detects_corrupt_blob_and_missing_object() {
         referenced_by: c1,
         id: b_tree,
     };
-    assert_problems_when(&repo, false, vec![lost_b.clone()]);
+    assert_problems_when(&repo, Depth::Shallow, vec![lost_b.clone()]);
     assert_problems_when(
         &repo,
-        true,
+        Depth::Deep,
         vec![VerifyProblem::CorruptObject(corrupt), lost_b.clone()],
     );
 
@@ -287,10 +288,10 @@ fn verify_detects_corrupt_blob_and_missing_object() {
         referenced_by: c2,
         id: c2.0,
     };
-    assert_problems_when(&repo, false, vec![lost_b.clone(), lost_c2.clone()]);
+    assert_problems_when(&repo, Depth::Shallow, vec![lost_b.clone(), lost_c2.clone()]);
     assert_problems_when(
         &repo,
-        true,
+        Depth::Deep,
         vec![VerifyProblem::CorruptObject(corrupt), lost_b, lost_c2],
     );
 }
@@ -314,9 +315,13 @@ fn verify_deep_lists_an_object_whose_zstd_frame_lies_about_its_size() {
     lie_about_its_size(&root, lying, 1 << 40);
 
     // Read whole, the file would claim a TiB: the deep check lists it as corrupt and goes on.
-    assert_problems_when(&repo, true, vec![VerifyProblem::CorruptObject(lying)]);
+    assert_problems_when(
+        &repo,
+        Depth::Deep,
+        vec![VerifyProblem::CorruptObject(lying)],
+    );
     // A shallow check reads no blob.
-    assert_problems_when(&repo, false, Vec::new());
+    assert_problems_when(&repo, Depth::Shallow, Vec::new());
 }
 
 /// A blob's file grown to 2 GiB, sparse behind its header (no disk; that much memory, were it
@@ -341,8 +346,8 @@ fn verify_deep_lists_an_object_file_of_huge_length_without_reading_it() {
         .failing()
         .set(Box::leak(read.clone().into_boxed_str()));
     let repo = LocalRepo::open_with_fs(&root, Arc::new(recording)).unwrap();
-    assert_problems_when(&repo, true, vec![VerifyProblem::CorruptObject(huge)]);
-    assert_problems_when(&repo, false, Vec::new());
+    assert_problems_when(&repo, Depth::Deep, vec![VerifyProblem::CorruptObject(huge)]);
+    assert_problems_when(&repo, Depth::Shallow, Vec::new());
     assert!(!calls().contains(&read), "the blob's file is never read");
 }
 
@@ -364,9 +369,13 @@ fn verify_deep_lists_an_object_held_in_a_legacy_zstd_frame() {
     zstd_object(&mut bytes, to_u64(content.len()), &zstd_v07_frame(content));
     fs::write(&file, bytes).unwrap();
 
-    assert_problems_when(&repo, true, vec![VerifyProblem::CorruptObject(legacy)]);
+    assert_problems_when(
+        &repo,
+        Depth::Deep,
+        vec![VerifyProblem::CorruptObject(legacy)],
+    );
     // A shallow check reads no blob.
-    assert_problems_when(&repo, false, Vec::new());
+    assert_problems_when(&repo, Depth::Shallow, Vec::new());
 }
 
 #[test]
@@ -524,7 +533,7 @@ fn verify_racing_the_cut_of_a_failed_index_sync_fails_with_an_io_error() {
     ));
     let racing = LocalRepo::open_with_fs(&root, Arc::new(verify_fs)).unwrap();
 
-    match racing.verify(false) {
+    match racing.verify(Depth::Shallow) {
         Err(RepoError::Store(StoreError::Io(e))) => {
             assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof, "{e}");
         }
@@ -585,7 +594,7 @@ fn verify_reads_journal_off_again_when_a_writer_cuts_an_entry_it_measured() {
             RealFs,
         ));
         let racing = LocalRepo::open_with_fs(&root, Arc::clone(&cutting) as Arc<dyn FsOps>);
-        let report = racing.unwrap().verify(false).unwrap();
+        let report = racing.unwrap().verify(Depth::Shallow).unwrap();
         let calls = std::mem::take(&mut *cutting.calls.lock().unwrap());
         (report, calls)
     };
@@ -707,8 +716,8 @@ fn verify_fails_on_a_ref_file_it_cannot_read() {
     );
     fs::remove_dir(&b).unwrap();
     std::os::unix::fs::symlink("b", &b).unwrap(); // a loop: a read of it fails with ELOOP
-    for deep in [true, false] {
-        match repo.verify(deep) {
+    for depth in [Depth::Deep, Depth::Shallow] {
+        match repo.verify(depth) {
             Err(RepoError::Store(StoreError::Io(e))) => {
                 assert_eq!(e.raw_os_error(), Some(40), "ELOOP: {e}");
                 assert_eq!(
@@ -720,7 +729,7 @@ fn verify_fails_on_a_ref_file_it_cannot_read() {
                     "{e}"
                 );
             }
-            other => panic!("deep: {deep}: expected an I/O error, got {other:?}"),
+            other => panic!("{depth:?}: expected an I/O error, got {other:?}"),
         }
     }
 }
@@ -774,7 +783,7 @@ fn verify_reports_damaged_metadata_files_and_checks_on() {
     for (damage, what) in cases {
         let (_dir, root, repo) = store_with_refs_and_a_corrupt_blob();
         damage_meta(&root, damage);
-        let report = repo.verify(true).unwrap();
+        let report = repo.verify(Depth::Deep).unwrap();
         assert_eq!(
             report.problems,
             [meta(&what), dangling.clone(), corrupt.clone()],
@@ -788,7 +797,7 @@ fn verify_reports_damaged_metadata_files_and_checks_on() {
     let (_dir, root, repo) = store_with_refs_and_a_corrupt_blob();
     damage_meta(&root, "journal.log");
     damage_meta(&root, "sorted/ids.rec");
-    let report = repo.verify(true).unwrap();
+    let report = repo.verify(Depth::Deep).unwrap();
     assert_eq!(
         report.problems,
         [
@@ -824,7 +833,7 @@ fn verify_reports_a_checkpoint_that_is_not_a_frame_boundary() {
     for boundary in [0, frames[1].offset, frames[2].offset, end] {
         journal.set_ckpt(boundary).unwrap();
         MetaStore::open(&root).unwrap().read().unwrap();
-        let report = repo.verify(true).unwrap();
+        let report = repo.verify(Depth::Deep).unwrap();
         assert_eq!(
             report.problems,
             [dangling.clone(), corrupt.clone()],
@@ -839,7 +848,7 @@ fn verify_reports_a_checkpoint_that_is_not_a_frame_boundary() {
             matches!(read, Err(StoreError::JournalCorrupt { offset }) if offset == bogus),
             "ckpt {bogus}: {read:?}"
         );
-        let report = repo.verify(true).unwrap();
+        let report = repo.verify(Depth::Deep).unwrap();
         assert_eq!(
             report.problems,
             [
@@ -886,7 +895,7 @@ fn verify_reports_a_lock_file_that_is_not_a_regular_file() {
             }
             _ => fs::create_dir(&lock).unwrap(),
         }
-        let report = repo.verify(true).unwrap();
+        let report = repo.verify(Depth::Deep).unwrap();
         assert_eq!(
             report.problems,
             [
@@ -901,7 +910,7 @@ fn verify_reports_a_lock_file_that_is_not_a_regular_file() {
 
     let (_dir, root, repo) = store_with_refs_and_a_corrupt_blob();
     fs::remove_file(Layout::new(&root).meta_lock()).unwrap();
-    let report = repo.verify(true).unwrap();
+    let report = repo.verify(Depth::Deep).unwrap();
     assert_eq!(report.problems, [dangling, corrupt], "a missing lock file");
 }
 
@@ -1407,11 +1416,11 @@ mod derived_values {
             })
             .collect();
         assert_eq!(
-            h.repo.verify(true).unwrap().problems,
+            h.repo.verify(Depth::Deep).unwrap().problems,
             want,
             "in their order"
         );
-        assert_problems_when(&h.repo, false, Vec::new());
+        assert_problems_when(&h.repo, Depth::Shallow, Vec::new());
         for (slot, _) in &wrong {
             assert!(layout.derived_path(slot).exists(), "verify removes nothing");
         }

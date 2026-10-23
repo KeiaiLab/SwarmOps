@@ -39,6 +39,10 @@
 //! [`repo`] and [`landing`] (and `swarmops-repo`): without them, as the fuzz crate takes it, the
 //! rest depends on nothing above `swarmops-store`.
 
+// Test support: the guide lets test code panic on assertions, so the two lints `just check`
+// turns on for library code stay off here.
+#![allow(clippy::unwrap_used, clippy::missing_assert_message)]
+
 pub mod child;
 #[cfg(feature = "cli")]
 pub mod cli;

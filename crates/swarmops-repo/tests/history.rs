@@ -21,7 +21,9 @@ use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{
     BlobId, Changeset, ChangesetId, LeafKind, ObjectKind, Tree, TreeEntry, hash_object,
 };
-use swarmops_repo::{Derivation, FirstParentSkipList, LocalRepo, RepoError, RepoRead, SKIP_AFTER};
+use swarmops_repo::{
+    Depth, Derivation, FirstParentSkipList, LocalRepo, RepoError, RepoRead, SKIP_AFTER,
+};
 use swarmops_store::{ChangesetMeta, FsObjectStore, FsOps, Layout, MetaStore, ObjectStore};
 use swarmops_testkit::fs::{NoSyncFs, RecordingFs};
 use swarmops_testkit::measure;
@@ -770,7 +772,7 @@ mod crafted_skip_lists {
             changeset: cs,
             key: Vec::new(),
         });
-        assert_eq!(lists.repo.verify(true).unwrap().problems, want);
+        assert_eq!(lists.repo.verify(Depth::Deep).unwrap().problems, want);
 
         fs::write(lists.file(c[40]), head_list).unwrap();
         fs::remove_file(lists.file(c[36])).unwrap();
@@ -779,6 +781,6 @@ mod crafted_skip_lists {
             read.ancestor_with_skip_after(c[40], 8, 0).unwrap(),
             Some(c[32])
         );
-        assert_eq!(lists.repo.verify(true).unwrap().problems, Vec::new());
+        assert_eq!(lists.repo.verify(Depth::Deep).unwrap().problems, Vec::new());
     }
 }

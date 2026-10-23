@@ -18,7 +18,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, Signature};
 use swarmops_repo::land::LandRequest;
 use swarmops_repo::rebase::{RebaseOutcome, RebaseRequest, RebaseStatus};
-use swarmops_repo::{Advance, Change, CommitRequest, LocalRepo, RepoError};
+use swarmops_repo::{Advance, Change, CommitRequest, Depth, LocalRepo, RepoError};
 use swarmops_store::{Journal, Layout, MetaStore, RealFs};
 use swarmops_testkit::faults::checked;
 use swarmops_testkit::repo::{put, request};
@@ -404,7 +404,7 @@ fn rebase_crashing_at(template: &Utf8Path, swept: &Swept, k: u64) -> (bool, bool
         "{what}: the rebase returned, H' is not recorded"
     );
     assert_eq!(main_head(&repo), swept.t1, "{what}");
-    assert_eq!(repo.verify(true).unwrap().problems, [], "{what}");
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, [], "{what}");
 
     // 3. The same rebase again.
     let again: RebaseOutcome = repo.rebase(rebasing(swept.head)).unwrap();

@@ -33,10 +33,9 @@ use std::collections::BTreeMap;
 
 use swarmops_core::{
     BlobId, ChangesetId, DeltaEntry, DeltaOp, EntryTarget, LeafKind, ObjectKind, RepoPath, TreeId,
-    hash_object,
 };
-use swarmops_merge::tree_diff::{Leaf, PathFilter, delta_of, diff_trees};
-use swarmops_merge::tree_merge::entry_in;
+use swarmops_merge::tree_diff::{self, Leaf, PathFilter};
+use swarmops_merge::tree_merge;
 use swarmops_store::{ObjectStat, ObjectStore};
 
 use crate::error::RepoError;
@@ -149,7 +148,7 @@ impl Resolving {
                 Resolution::Take(side) => Makes::Take(side),
                 Resolution::Put { kind, content } => Makes::Put {
                     kind,
-                    blob: BlobId(hash_object(ObjectKind::Blob, &content)),
+                    blob: BlobId(swarmops_core::hash_object(ObjectKind::Blob, &content)),
                     bytes: Some(content),
                 },
                 Resolution::PutBlob { kind, id } => {
@@ -163,8 +162,8 @@ impl Resolving {
                 Resolution::Delete => Makes::Delete,
             };
             paths.push(Prepared {
-                against: entry_in(read, against, &path)?,
-                ours: leaf(entry_in(read, ours, &path)?),
+                against: tree_merge::entry_in(read, against, &path)?,
+                ours: leaf(tree_merge::entry_in(read, ours, &path)?),
                 path,
                 makes,
             });
@@ -196,7 +195,7 @@ impl Resolving {
             let held = if theirs == self.against {
                 at.against
             } else {
-                entry_in(read, theirs, &at.path)?
+                tree_merge::entry_in(read, theirs, &at.path)?
             };
             if held != at.against {
                 stale.push(at.path.clone());
@@ -208,10 +207,15 @@ impl Resolving {
             // theirs' own (nothing to change), ours', one leaf, or nothing.
             let entries = match &at.makes {
                 Makes::Take(Side::Theirs) => Vec::new(),
-                Makes::Take(Side::Ours) => {
-                    delta_of(&diff_trees(read, Some(theirs), Some(self.ours), &under)?)
+                Makes::Take(Side::Ours) => tree_diff::delta_of(&tree_diff::diff_trees(
+                    read,
+                    Some(theirs),
+                    Some(self.ours),
+                    &under,
+                )?),
+                Makes::Delete => {
+                    tree_diff::delta_of(&tree_diff::diff_trees(read, Some(theirs), None, &under)?)
                 }
-                Makes::Delete => delta_of(&diff_trees(read, Some(theirs), None, &under)?),
                 Makes::Put { kind, blob, bytes } => {
                     let held = leaf(held);
                     let kind = (kind.or(at.ours.map(|leaf| leaf.kind)))
@@ -219,11 +223,15 @@ impl Resolving {
                         .unwrap_or(LeafKind::File);
                     // Theirs' leaves below the path go; the leaf at it is replaced, unless it is
                     // the one the resolution puts.
-                    let mut entries: Vec<DeltaEntry> =
-                        delta_of(&diff_trees(read, Some(theirs), None, &under)?)
-                            .into_iter()
-                            .filter(|entry| entry.path != at.path)
-                            .collect();
+                    let mut entries: Vec<DeltaEntry> = tree_diff::delta_of(&tree_diff::diff_trees(
+                        read,
+                        Some(theirs),
+                        None,
+                        &under,
+                    )?)
+                    .into_iter()
+                    .filter(|entry| entry.path != at.path)
+                    .collect();
                     let put = Leaf { kind, blob: *blob };
                     if held != Some(put) {
                         entries.push(DeltaEntry {

@@ -10,17 +10,16 @@ use std::process::Output;
 use std::sync::Arc;
 
 use camino::{Utf8Path, Utf8PathBuf};
-use swarmops_core::{ChangesetId, ObjectKind, hash_object};
+use swarmops_core::{ChangesetId, ObjectKind};
 use swarmops_store::{
     ChangesetMeta, CommitInfo, CrashAtFs, FailAt, FailAtFs, FailMode, FsOps, Index, InjectedError,
     InsertOutcome, Journal, Layout, MetaStore, MetaWrite, RealFs, StoreError,
 };
 use tempfile::TempDir;
 
-use crate::child::{SIGABRT, run, this_test};
-use crate::faults::checked;
-use crate::fs::{NoSyncFs, copy_dir};
-use crate::store::{file_len, temp_dir};
+use crate::child::{self, SIGABRT};
+use crate::faults;
+use crate::fs::{self, NoSyncFs};
 
 /// How a child reports what its transaction said, among the test harness's output.
 const REPORT: &str = "sweep-child: ";
@@ -33,7 +32,10 @@ const ACTOR: &str = "test/1";
 
 /// The id of the sweeps' changeset `n`: a real hash, so the ids look like a store's.
 pub fn id(n: u64) -> ChangesetId {
-    ChangesetId(hash_object(ObjectKind::Changeset, &n.to_le_bytes()))
+    ChangesetId(swarmops_core::hash_object(
+        ObjectKind::Changeset,
+        &n.to_le_bytes(),
+    ))
 }
 
 /// The sweeps' changeset `n`, a root, as a caller hands it to `insert_changeset`: seq and
@@ -43,7 +45,7 @@ pub fn changeset(n: u64) -> ChangesetMeta {
         id: id(n),
         seq: 0,
         generation: 0,
-        delta_hash: hash_object(ObjectKind::Blob, &n.to_le_bytes()).0,
+        delta_hash: swarmops_core::hash_object(ObjectKind::Blob, &n.to_le_bytes()).0,
         parents: Vec::new(),
     }
 }
@@ -69,7 +71,7 @@ fn ckpt(root: &Utf8Path) -> u64 {
 
 /// The length of the journal of the store at `root`.
 fn log_len(root: &Utf8Path) -> u64 {
-    file_len(Layout::new(root).journal_log())
+    super::file_len(Layout::new(root).journal_log())
 }
 
 /// An index handle of its own on the store at `root`.
@@ -129,25 +131,37 @@ pub fn said(outcome: &Result<CommitInfo, StoreError>) -> Said {
     }
 }
 
+/// What the swept transaction on a [`sweep_template`] store does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Template {
+    /// It moves the checkpoint: 31 frames of one changeset each, the 32nd swept.
+    Checkpoint,
+    /// It compacts: 1,024 changesets in one frame, the swept one takes the tail past the
+    /// threshold.
+    Compaction,
+}
+
 /// A store for the error sweeps, on a filesystem that never syncs (durability is not their
 /// subject): changesets `0..n` past the checkpoint, `n` returned, so that the swept transaction
-/// `n` moves the checkpoint (31 frames of one changeset each, the 32nd swept) or, `compacting`,
-/// compacts (1,024 changesets in one frame: the swept one takes the tail past the threshold).
-pub fn sweep_template(compacting: bool) -> (TempDir, Utf8PathBuf, u64) {
-    let (dir, root) = temp_dir();
+/// `n` does what `template` names.
+pub fn sweep_template(template: Template) -> (TempDir, Utf8PathBuf, u64) {
+    let (dir, root) = super::temp_dir();
     let store = MetaStore::create_with_fs(&root, Arc::new(NoSyncFs)).unwrap();
-    let n = if compacting {
-        let mut write = store.write().unwrap();
-        for m in 0..Index::COMPACT_THRESHOLD {
-            write.insert_changeset(changeset(m)).unwrap();
+    let n = match template {
+        Template::Compaction => {
+            let mut write = store.write().unwrap();
+            for m in 0..Index::COMPACT_THRESHOLD {
+                write.insert_changeset(changeset(m)).unwrap();
+            }
+            write.commit().unwrap();
+            Index::COMPACT_THRESHOLD
         }
-        write.commit().unwrap();
-        Index::COMPACT_THRESHOLD
-    } else {
-        for m in 0..31 {
-            insert(&store, m);
+        Template::Checkpoint => {
+            for m in 0..31 {
+                insert(&store, m);
+            }
+            31
         }
-        31
     };
     assert_eq!(ckpt(&root), 0);
     (dir, root, n)
@@ -155,8 +169,8 @@ pub fn sweep_template(compacting: bool) -> (TempDir, Utf8PathBuf, u64) {
 
 /// A copy of the store at `template`, in a temp dir of its own.
 pub fn copy_of(template: &Utf8Path) -> (TempDir, Utf8PathBuf) {
-    let (dir, root) = temp_dir();
-    copy_dir(template.as_std_path(), root.as_std_path());
+    let (dir, root) = super::temp_dir();
+    fs::copy_dir(template.as_std_path(), root.as_std_path());
     (dir, root)
 }
 
@@ -180,7 +194,7 @@ pub fn calls_of(template: &Utf8Path, run: impl FnOnce(&MetaStore)) -> u64 {
 /// changeset once, the checkpoint at the journal's end.
 #[track_caller]
 pub fn assert_recovers(root: &Utf8Path, template: u64, outcomes: &[(u64, Said)], what: &str) {
-    let store = MetaStore::open_with_fs(root, checked(NoSyncFs))
+    let store = MetaStore::open_with_fs(root, faults::checked(NoSyncFs))
         .unwrap_or_else(|e| panic!("{what}: the store does not open: {e}"));
     store
         .write()
@@ -242,12 +256,12 @@ pub fn sweep_child(root: &Utf8Path, plan: &str) {
                 error,
             };
             (
-                checked(FailAtFs::new(NoSyncFs, fail)),
+                faults::checked(FailAtFs::new(NoSyncFs, fail)),
                 parts[3].parse().unwrap(),
             )
         }
         _ => (
-            checked(CrashAtFs::new(NoSyncFs, k)),
+            faults::checked(CrashAtFs::new(NoSyncFs, k)),
             parts[2].parse().unwrap(),
         ),
     };
@@ -263,7 +277,11 @@ pub fn sweep_child(root: &Utf8Path, plan: &str) {
 /// aborted only by the documented abort (a cut after a failed journal append that fails too),
 /// which says why on stderr, or by a planned crash.
 pub fn run_sweep_child(test: &str, root: &Utf8Path, plan: &str) -> Said {
-    let child = run(this_test(test).env(SWEEP_ROOT, root).env(SWEEP_PLAN, plan));
+    let child = child::run(
+        child::this_test(test)
+            .env(SWEEP_ROOT, root)
+            .env(SWEEP_PLAN, plan),
+    );
     let stderr = String::from_utf8_lossy(&child.stderr);
     if child.status.signal() == Some(SIGABRT) {
         assert!(

@@ -30,8 +30,8 @@ use swarmops_testkit::faults::checked;
 use swarmops_testkit::fs::{Call, Failing, NoSyncFs, RecordingFs, Watch, Watched, When, copy_dir};
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::store::sweep::{
-    SWEEP_PLAN, SWEEP_ROOT, Said, assert_recovers, calls_of, changeset, copy_of, run_sweep_child,
-    said, sweep_child, sweep_template, swept,
+    SWEEP_PLAN, SWEEP_ROOT, Said, Template, assert_recovers, calls_of, changeset, copy_of,
+    run_sweep_child, said, sweep_child, sweep_template, swept,
 };
 use swarmops_testkit::store::temp_dir as new_root;
 use swarmops_testkit::store::{append_bytes, file_len, set_len};
@@ -3774,16 +3774,15 @@ fn io_failure(e: &StoreError) -> Option<&swarmops_store::IoFailure> {
 #[test]
 #[cfg(feature = "test-hooks")]
 fn fail_at_every_store_call_reports_honestly() {
-    for compacting in [false, true] {
-        let (_dir, template, n) = sweep_template(compacting);
+    for shape in [Template::Checkpoint, Template::Compaction] {
+        let (_dir, template, n) = sweep_template(shape);
         let calls = calls_of(&template, |store| {
             swept(store, n).unwrap();
         });
         assert!(calls > 20, "{calls}");
-        let kind = if compacting {
-            "a compaction"
-        } else {
-            "a checkpoint"
+        let kind = match shape {
+            Template::Checkpoint => "a checkpoint",
+            Template::Compaction => "a compaction",
         };
         let mut post_commit = 0;
         for error in [InjectedError::Eio, InjectedError::Enospc] {
@@ -3850,15 +3849,14 @@ fn persistent_failures_at_every_store_call_report_honestly() {
         return;
     }
     let mut aborted = 0;
-    for compacting in [false, true] {
-        let (_dir, template, n) = sweep_template(compacting);
+    for shape in [Template::Checkpoint, Template::Compaction] {
+        let (_dir, template, n) = sweep_template(shape);
         let calls = calls_of(&template, |store| {
             swept(store, n).unwrap();
         });
-        let kind = if compacting {
-            "a compaction"
-        } else {
-            "a checkpoint"
+        let kind = match shape {
+            Template::Checkpoint => "a checkpoint",
+            Template::Compaction => "a compaction",
         };
         for errno in ["eio", "enospc"] {
             for k in 1..=calls {
@@ -3899,7 +3897,7 @@ fn errors_during_recovery_leave_the_store_openable() {
         write.insert_changeset(changeset(NEXT))?;
         write.commit()
     };
-    let (_dir, template, n) = sweep_template(false);
+    let (_dir, template, n) = sweep_template(Template::Checkpoint);
     let calls = calls_of(&template, |store| {
         swept(store, n).unwrap();
     });

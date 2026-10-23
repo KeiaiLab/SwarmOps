@@ -87,7 +87,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::{fmt, io};
 
 use crate::fs_ops::{FsMethod, FsOps, LinkOutcome};
-use crate::meta::frame::{Parsed, Record, parse_frame};
+use crate::meta::frame::{self, Parsed, Record};
 
 /// The size of one `journal.off` entry.
 const ENTRY_LEN: u64 = 8;
@@ -143,6 +143,27 @@ struct State {
     dirs: HashMap<PathBuf, Vec<Pending>>,
     /// Counts the changes recorded, so that an fsync covers those made before it began.
     generation: u64,
+}
+
+/// How a cut of a file ended: [`Cut::Done`] syncs it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Cut {
+    Done,
+    Failed,
+}
+
+/// What happened to a path's entry in its directory.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Entry {
+    Added,
+    Removed,
+}
+
+/// What a path names on disk.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Node {
+    File,
+    Dir,
 }
 
 /// What the checker knows of one file.
@@ -251,10 +272,10 @@ impl State {
     }
 
     /// A cut of `path`, synced if it succeeded.
-    fn cut(&mut self, path: &Path, ok: bool) {
+    fn cut(&mut self, path: &Path, cut: Cut) {
         let len = real_len(path);
         let file = self.track(path);
-        if ok {
+        if cut == Cut::Done {
             file.lost_from = file.lost_from.filter(|&lost| lost < len);
             file.durable_to = file.lost_from.unwrap_or(len);
             file.dirty = false;
@@ -275,7 +296,7 @@ impl State {
     }
 
     /// A change of `path`'s entry in its directory, waiting for the directory's fsync.
-    fn pend(&mut self, path: &Path, added: bool) {
+    fn pend(&mut self, path: &Path, entry: Entry) {
         let Some(dir) = path.parent() else {
             return;
         };
@@ -286,7 +307,7 @@ impl State {
             .or_default()
             .push(Pending {
                 path: path.to_path_buf(),
-                added,
+                added: entry == Entry::Added,
                 generation,
             });
     }
@@ -444,7 +465,7 @@ impl State {
                 ),
             ));
         }
-        let Parsed::Whole { records, .. } = parse_frame(frame) else {
+        let Parsed::Whole { records, .. } = frame::parse_frame(frame) else {
             return None;
         };
         if !records
@@ -581,8 +602,8 @@ impl State {
     }
 
     /// W6 for a rename of `from`, a directory or else a file.
-    fn rename(&self, from: &Path, from_is_dir: bool) -> Option<String> {
-        if !from_is_dir {
+    fn rename(&self, from: &Path, node: Node) -> Option<String> {
+        if node == Node::File {
             return match self.files.get(from) {
                 Some(file) if file.lost_from.is_some() => {
                     Some("a failed sync left some of its data not durable".to_owned())
@@ -844,7 +865,7 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
         let result = self.inner.create_dir_all(p);
         let mut state = self.state();
         for dir in missing.iter().filter(|dir| dir.exists()) {
-            state.pend(dir, true);
+            state.pend(dir, Entry::Added);
         }
         result
     }
@@ -856,7 +877,7 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
             state
                 .files
                 .insert(path.clone(), FileState::durable(real_len(path)));
-            state.pend(path, true);
+            state.pend(path, Entry::Added);
         }
         result
     }
@@ -900,10 +921,10 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
         if to.exists() {
             // Placed, or found there: either way its name waits for the fsync that makes it
             // durable, as the object store's flush does for both.
-            state.pend(to, true);
+            state.pend(to, Entry::Added);
         }
         if !from.exists() {
-            state.pend(from, false);
+            state.pend(from, Entry::Removed);
         }
         result
     }
@@ -932,7 +953,7 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
         if result.is_ok() {
             let mut state = self.state();
             state.files.remove(p);
-            state.pend(p, false);
+            state.pend(p, Entry::Removed);
         }
         result
     }
@@ -961,7 +982,7 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
             state.sync_failed(path);
         }
         if !existed && path.exists() {
-            state.pend(path, true);
+            state.pend(path, Entry::Added);
         }
         result
     }
@@ -978,7 +999,12 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
         };
         verdict(Rule::W1, FsMethod::Truncate, &[path], violation);
         let result = self.inner.truncate(path, len);
-        self.state().cut(path, result.is_ok());
+        let cut = if result.is_ok() {
+            Cut::Done
+        } else {
+            Cut::Failed
+        };
+        self.state().cut(path, cut);
         result
     }
 
@@ -1013,7 +1039,7 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
                 state
                     .files
                     .insert(path.to_path_buf(), FileState::durable(real_len(path)));
-                state.pend(path, true);
+                state.pend(path, Entry::Added);
             }
             Err(_) => {}
         }
@@ -1042,17 +1068,17 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
         let mut state = self.state();
         state.written(path, before);
         if !existed && path.exists() {
-            state.pend(path, true);
+            state.pend(path, Entry::Added);
         }
         result
     }
 
     fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
-        let from_is_dir = from.is_dir();
+        let node = if from.is_dir() { Node::Dir } else { Node::File };
         let view = view_meta(to);
         let violation = {
             let state = self.state();
-            match state.rename(from, from_is_dir) {
+            match state.rename(from, node) {
                 Some(why) => Some((Rule::W6, why)),
                 None => view.and_then(|meta| state.index_unsynced(meta)).map(|why| {
                     (
@@ -1076,12 +1102,12 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
             if moved {
                 state.moved(from, to);
                 if from.parent() != to.parent() {
-                    state.pend(from, false);
+                    state.pend(from, Entry::Removed);
                 }
             }
             match (&result, to.parent()) {
                 (Ok(()), Some(dir)) => state.dir_synced(dir, upto),
-                (Err(_), _) if moved => state.pend(to, true),
+                (Err(_), _) if moved => state.pend(to, Entry::Added),
                 _ => {}
             }
         }

@@ -69,8 +69,19 @@ pub(crate) struct Index {
     pub(crate) rows: Vec<Row>,
 }
 
+/// What an index's rows describe: the workspace's prefixes or the whole tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Extent {
+    /// The prefixes alone.
+    Prefixes,
+    /// The whole tree.
+    Whole,
+}
+
 /// What an index stands for: the head and the prefixes (or the whole tree) its rows describe.
-pub(crate) fn binding(head: &str, prefixes: &[String], all: bool) -> String {
+pub(crate) fn binding(head: &str, prefixes: &[String], extent: Extent) -> String {
+    // The bytes predate `Extent`: the whole tree still reads "true", the prefixes "false".
+    let all = extent == Extent::Whole;
     format!("{head}\n{all}\n{}", prefixes.join("\n"))
 }
 

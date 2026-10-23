@@ -10,7 +10,6 @@ use std::collections::{BTreeSet, HashMap};
 
 use serde_json::{Map, Value};
 use swarmops_api::{ErrorCode, OpError};
-use swarmops_core::portable::check_component;
 
 use crate::state::SWARMWS_DIR;
 
@@ -60,7 +59,10 @@ pub(crate) fn check(
     // 2. Names Windows cannot hold.
     if platform == Platform::Windows {
         let refused_names: Vec<&String> = (added.iter())
-            .filter(|path| path.split('/').any(|c| check_component(c).is_err()))
+            .filter(|path| {
+                path.split('/')
+                    .any(|c| swarmops_core::portable::check_component(c).is_err())
+            })
             .collect();
         if !refused_names.is_empty() {
             return Err(refused("windows_name", paths_value(&refused_names)));

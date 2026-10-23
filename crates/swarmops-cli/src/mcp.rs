@@ -162,7 +162,7 @@ use swarmops_api::{BlobHasReq, BlobPutReq};
 use swarmops_api::{
     CommitReq, ContentInput, DiffReq, Envelope, ErrorCode, Identity, InfoReq, LogReq, OpError,
     OpLogReq, PathHistoryReq, ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq, RefSetReq, Rev,
-    ShowReq, StoreOps, UndoReq, VerifyReq, schema_for_all,
+    ShowReq, StoreOps, UndoReq, VerifyReq,
 };
 use swarmops_api::{
     FetchReq, FetchResp, PushReq, PushResp, RemoteList, RemoteListReq, SyncReq, SyncResp,
@@ -174,7 +174,7 @@ use swarmops_ops::content::MAX_REQUEST_BYTES;
 use crate::cli::Global;
 use crate::commands::{self, Ctx, Used};
 use crate::context::{self, Env};
-use crate::output::{self, Format, Printed};
+use crate::output::{self, Format, Layout, Printed};
 
 use self::mcp_ws::{WS_TOOLS, operate_ws};
 use swarmops_ws::hook::Bootstrap;
@@ -626,7 +626,7 @@ impl<'a> Server<'a> {
 
     /// [`Server::new`], whose message lines hold at most `max_line` bytes.
     fn with_max_line(global: &'a Global, env: Env<'a>, max_line: u64) -> Server<'a> {
-        let all = schema_for_all();
+        let all = swarmops_api::schema_for_all();
 
         // The store's tools, then the workspaces' (M5).
         let store_tools = TOOLS.iter().map(|spec| ToolDef {
@@ -1317,9 +1317,9 @@ fn operate<O: Operate>(tool: Tool, how: O) -> O::Done {
         Tool::BlobPut => how.mutate(|ops, who, req| ops.blob_put(who, req)),
         Tool::BlobHas => how.read(|ops, req| ops.blob_has(req)),
         Tool::Verify => how.read(|ops, req: VerifyReq| {
-            let deep = req.deep;
+            let depth = commands::Depth::of(req.deep);
             ops.verify(req)
-                .and_then(|report| commands::clean(report, deep))
+                .and_then(|report| commands::clean(report, depth))
         }),
         Tool::Local(tool) => operate_local(tool, how),
     }
@@ -1456,7 +1456,9 @@ impl Operate for Call<'_, '_> {
         let ctx = Ctx {
             global: server.global,
             env: server.env,
-            format: Format::Json { pretty: false },
+            format: Format::Json {
+                layout: Layout::Compact,
+            },
             started: Instant::now(),
             used: Used::default(),
         };
@@ -1500,7 +1502,9 @@ fn run<P, T: Serialize>(
     let ctx = Ctx {
         global: server.global,
         env: server.env,
-        format: Format::Json { pretty: false },
+        format: Format::Json {
+            layout: Layout::Compact,
+        },
         started: Instant::now(),
         used: Used::default(),
     };
@@ -1531,7 +1535,9 @@ fn run_local<P, T: Serialize>(
     let ctx = Ctx {
         global: server.global,
         env: server.env,
-        format: Format::Json { pretty: false },
+        format: Format::Json {
+            layout: Layout::Compact,
+        },
         started: Instant::now(),
         used: Used::default(),
     };
@@ -2651,7 +2657,7 @@ mod tests {
             "RemoteRemoveReq",
         ];
         let no_tool = ["DeriveReq", "BlobGetReq"];
-        let all = schema_for_all();
+        let all = swarmops_api::schema_for_all();
         let requests: Vec<&str> = all
             .as_object()
             .unwrap()
@@ -2848,7 +2854,7 @@ mod tests {
     /// which compare the top's `properties`, would not see it go.
     #[test]
     fn the_strip_to_a_plain_object_drops_no_field() {
-        let all = schema_for_all();
+        let all = swarmops_api::schema_for_all();
         let mut dropped = BTreeSet::new();
         for spec in &TOOLS {
             let schema = standalone(&all[spec.request]);
@@ -2892,7 +2898,7 @@ mod tests {
     /// keeps the revision's, since a move may name its target any way.
     #[test]
     fn a_compare_and_swap_asks_for_a_full_id_in_its_schema() {
-        let all = schema_for_all();
+        let all = swarmops_api::schema_for_all();
         let revision = all["Rev"]["description"].as_str().unwrap();
         let tools = listed();
         let schema = |name: &str| {

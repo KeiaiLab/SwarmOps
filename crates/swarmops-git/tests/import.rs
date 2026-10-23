@@ -18,7 +18,7 @@ use swarmops_git::{
     ImportRequest, LossyClass, LossySet, ObjectFormat, RawKind, RawTree, SourceError, Unsupported,
     import,
 };
-use swarmops_repo::{CasResult, LocalRepo, RepoError, StoreError};
+use swarmops_repo::{CasResult, Depth, LocalRepo, RepoError, StoreError};
 use swarmops_store::{
     ExternalEntry, ExternalIds, Frame, FsMethod, Journal, Layout, RealFs, Record, SYSTEM_GIT,
 };
@@ -306,7 +306,7 @@ fn every_faithful_fixture_imports_whole() {
             assert!(entry.faithful, "{name}: {commit}");
             assert_eq!(git_oid(&repo, entry.changeset), oid(commit), "{name}");
         }
-        assert_eq!(repo.verify(true).unwrap().problems, [], "{name}");
+        assert_eq!(repo.verify(Depth::Deep).unwrap().problems, [], "{name}");
         assert_eq!(main_log(&repo), first_parents(manifest, &tip), "{name}");
     }
 }
@@ -356,7 +356,7 @@ fn an_incremental_import_takes_only_the_new_commits() {
         main_log(&repo),
         first_parents(manifest, &tip(manifest, "newer"))
     );
-    assert_eq!(repo.verify(true).unwrap().problems, []);
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
 }
 
 /// The base is the commit the target's head holds, known whatever the external id index holds:
@@ -375,7 +375,7 @@ fn the_base_is_known_without_the_index() {
         (3, 1, true)
     );
     assert_eq!(newer.old_head, Some(older.head));
-    assert_eq!(repo.verify(true).unwrap().problems, []);
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
 }
 
 /// A base the tip reaches only through a merge's second parent is no divergence: `merged` forks
@@ -400,7 +400,7 @@ fn a_base_reached_through_a_second_parent_is_not_diverged() {
         git_oid(&repo, main_head(&repo)),
         oid(&tip(manifest, "merged"))
     );
-    assert_eq!(repo.verify(true).unwrap().problems, []);
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
 }
 
 /// A tip the external id index names already, brought in by an import into another ref, stops
@@ -715,7 +715,7 @@ fn an_import_after_an_export_takes_only_the_git_side_commits() {
     assert_eq!(main_head(&repo), report.head);
     assert_eq!(parents(&repo, report.head), [native]);
     assert_eq!(git_oid(&repo, report.head), made);
-    assert_eq!(repo.verify(true).unwrap().problems, []);
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
 
     let again = export(&repo, &mut GixSink::open(&dir).unwrap(), &to_main).unwrap();
     assert_eq!((again.head_oid, again.old), (made, Some(made)));
@@ -1036,7 +1036,7 @@ fn a_crashed_import_resumes_past_its_committed_frames() {
     let whole = import(&fresh, &source, &req).unwrap();
     assert_eq!(resumed.head, whole.head);
     assert_eq!(state(&root), state(&other));
-    assert_eq!(repo.verify(true).unwrap().problems, []);
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
 }
 
 /// A frame that commits but whose listing in `journal.off` fails, a failure after its commit
@@ -1080,7 +1080,7 @@ fn a_frame_failing_after_its_commit_point_stops_the_import() {
     let (_other_dir, other, fresh) = new_repo();
     import(&fresh, &source, &req).unwrap();
     assert_eq!(state(&root), state(&other));
-    assert_eq!(repo.verify(true).unwrap().problems, []);
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
 }
 
 /// An incremental import reads the new commits' trees and blobs alone: a blob of a file the
@@ -1167,7 +1167,7 @@ fn lossy_commits_are_listed_in_the_report() {
         assert_eq!(entry.changeset, lossy.changeset);
         assert!(!entry.faithful);
     }
-    assert_eq!(repo.verify(true).unwrap().problems, []);
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
 }
 
 /// The report lists the first hundred lossy commits, in the order recorded, and counts them all.
@@ -1310,7 +1310,7 @@ fn two_imports_racing_end_at_the_same_head() {
         git_oid(&repo, main_head(&repo)),
         oid(&tip(manifest, "HEAD"))
     );
-    assert_eq!(repo.verify(true).unwrap().problems, []);
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
 }
 
 /// What the import does not read is refused before anything is written: a SHA-256 repository and
@@ -1734,7 +1734,7 @@ mod crafted_memos {
             (two, false, (0, 0, 0))
         );
         assert_eq!(verify_export_oids(&repo).expect("verify"), []);
-        assert_eq!(repo.verify(true).unwrap().problems, []);
+        assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
 
         fs::remove_dir_all(root.join("meta/derived")).unwrap();
         let history = repo.log_first_parent(main_head(&repo), usize::MAX).unwrap();
@@ -2082,7 +2082,7 @@ mod crafted_entries {
         let to_main = ExportRequest::new("main", "main");
         export(&repo, &mut GixSink::open(&dir).unwrap(), &to_main).unwrap();
         assert_eq!(verify_external_ids(&repo).unwrap(), []);
-        assert_eq!(repo.verify(true).unwrap().problems, []);
+        assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
 
         let (_, x, c) = x_and_c();
         let nowhere = ChangesetId(hash_object(ObjectKind::Changeset, b"nowhere"));
@@ -2109,7 +2109,7 @@ mod crafted_entries {
                 changeset: nowhere,
             },
         ];
-        let mut problems = repo.verify(true).unwrap().problems;
+        let mut problems = repo.verify(Depth::Deep).unwrap().problems;
         let key = |problem: &VerifyProblem| format!("{problem:?}");
         theirs.sort_by_key(key);
         problems.sort_by_key(key);
@@ -2253,7 +2253,7 @@ mod objects_only {
             let entry = entry.unwrap_or_else(|| panic!("no entry for {commit}"));
             assert_eq!(git_oid(&repo, entry.changeset), oid(&commit));
         }
-        assert_eq!(repo.verify(true).unwrap().problems, []);
+        assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
     }
 
     /// An import into `main` after an objects-only import of the same tip converts nothing: it

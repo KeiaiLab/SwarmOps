@@ -23,14 +23,14 @@ use swarmops_api::{
     ErrorCode, GitExportReq, GitExportResp, GitImportReq, GitImportResp, Identity, LossyClass,
     LossyCommitOut, OpError,
 };
-use swarmops_git::mirror::inside_store_git;
+use swarmops_git::mirror;
 use swarmops_git::{
     ExportError, ExportReport, ExportRequest, GixSink, GixSource, ImportError, ImportReport,
     ImportRequest,
 };
-use swarmops_store::{Recovered, TailRepair, check_ref_name};
+use swarmops_store::{Recovered, TailRepair};
 
-use crate::error::{details, error, git_export_error, git_import_error};
+use crate::error;
 use crate::local::{LocalOps, Recording, Resolved};
 
 impl LocalOps {
@@ -65,8 +65,8 @@ impl Recording<'_> {
             target_ref,
             lossy,
         } = req;
-        let failed = |e: ImportError| git_import_error(e, &git_path, &git_ref);
-        if check_ref_name(&target_ref).is_err() {
+        let failed = |e: ImportError| error::git_import_error(e, &git_path, &git_ref);
+        if swarmops_store::check_ref_name(&target_ref).is_err() {
             return Err(failed(ImportError::RefName(target_ref)));
         }
         refuse_mirror(&git_path)?;
@@ -98,8 +98,8 @@ impl Recording<'_> {
             branch,
             force,
         } = req;
-        let failed = |e: ExportError| git_export_error(e, &git_path, &source_ref, &branch);
-        if check_ref_name(&source_ref).is_err() {
+        let failed = |e: ExportError| error::git_export_error(e, &git_path, &source_ref, &branch);
+        if swarmops_store::check_ref_name(&source_ref).is_err() {
             return Err(failed(ExportError::RefName(source_ref.clone())));
         }
         refuse_mirror(&git_path)?;
@@ -125,12 +125,12 @@ impl Recording<'_> {
 /// its lock (storage spec §2, M13): `E_INVALID_ARG` `reason: "store_mirror"`, so that a person's
 /// command never races the mirror's lock.
 fn refuse_mirror(git_path: &str) -> Result<(), OpError> {
-    if !inside_store_git(Path::new(git_path)) {
+    if !mirror::inside_store_git(Path::new(git_path)) {
         return Ok(());
     }
     let message = "the repository is a store's git mirror, which only the remote commands write";
-    let refused = error(ErrorCode::InvalidArg, message)
-        .with_details(details([("reason", "store_mirror".into())]))
+    let refused = error::error(ErrorCode::InvalidArg, message)
+        .with_details(error::details([("reason", "store_mirror".into())]))
         .with_hint(
             "so fetch, so push and so sync read and write the mirror; give another repository",
         );

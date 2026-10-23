@@ -29,13 +29,41 @@ use swarmops_api::Envelope;
 /// How a command prints its envelope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
-    /// The envelope as JSON, indented when `pretty`.
+    /// The envelope as JSON, laid out as `layout` says.
     Json {
-        /// Indent the document over several lines.
-        pretty: bool,
+        /// One line, or indented over several.
+        layout: Layout,
     },
     /// A short text rendering, not JSON.
     Human,
+}
+
+/// How a JSON envelope is laid out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    /// The document on one line.
+    Compact,
+    /// The document indented over several lines.
+    Pretty,
+}
+
+/// What stdout is, which decides the JSON layout when no flag does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stdout {
+    /// A terminal: a person reads it, so JSON is pretty.
+    Terminal,
+    /// A pipe or a file: a program reads it, so JSON is compact.
+    Other,
+}
+
+impl Stdout {
+    /// The JSON layout for this stdout when no flag picks one.
+    pub fn layout(self) -> Layout {
+        match self {
+            Self::Terminal => Layout::Pretty,
+            Self::Other => Layout::Compact,
+        }
+    }
 }
 
 /// What a command prints on stdout, and the code it exits with.
@@ -50,7 +78,7 @@ pub struct Printed {
 /// `envelope` printed in `format`, and its exit code.
 pub fn render<T: Serialize>(envelope: &Envelope<T>, format: Format) -> Printed {
     let stdout = match format {
-        Format::Json { pretty } => json(envelope, pretty),
+        Format::Json { layout } => json(envelope, layout),
         Format::Human => human(envelope),
     };
     Printed {
@@ -71,11 +99,10 @@ fn exit_code(exit: i32) -> u8 {
         .unwrap_or(1)
 }
 
-fn json<T: Serialize>(envelope: &Envelope<T>, pretty: bool) -> String {
-    let text = if pretty {
-        serde_json::to_string_pretty(envelope)
-    } else {
-        serde_json::to_string(envelope)
+fn json<T: Serialize>(envelope: &Envelope<T>, layout: Layout) -> String {
+    let text = match layout {
+        Layout::Pretty => serde_json::to_string_pretty(envelope),
+        Layout::Compact => serde_json::to_string(envelope),
     };
     // Every API type serializes: their maps have string keys, their impls never fail.
     let mut text = text.expect("an envelope serializes");
@@ -374,7 +401,12 @@ mod tests {
     #[test]
     fn json_keeps_the_spec_field_order() {
         let ok = Envelope::ok("show", json!({"z": 1, "a": 2}), meta());
-        let compact = render(&ok, Format::Json { pretty: false });
+        let compact = render(
+            &ok,
+            Format::Json {
+                layout: Layout::Compact,
+            },
+        );
         assert_eq!(compact.exit, 0);
         assert!(
             compact
@@ -384,7 +416,12 @@ mod tests {
             compact.stdout
         );
         assert!(compact.stdout.ends_with("\"auth\":\"trust\"}}\n"));
-        let pretty = render(&ok, Format::Json { pretty: true });
+        let pretty = render(
+            &ok,
+            Format::Json {
+                layout: Layout::Pretty,
+            },
+        );
         assert!(
             pretty
                 .stdout
@@ -400,7 +437,12 @@ mod tests {
             OpError::new(ErrorCode::CasMismatch, "moved"),
             meta(),
         );
-        let printed = render(&failed, Format::Json { pretty: false });
+        let printed = render(
+            &failed,
+            Format::Json {
+                layout: Layout::Compact,
+            },
+        );
         assert_eq!(printed.exit, 4);
         assert!(printed.stdout.starts_with(
             r#"{"ok":false,"op":"show","api":1,"error":{"code":"E_CAS_MISMATCH","message":"moved","retryable":true,"exit":4,"details":{},"hint":null},"meta":"#

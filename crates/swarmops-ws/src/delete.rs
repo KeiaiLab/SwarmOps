@@ -21,13 +21,13 @@ use swarmops_store::FsMethod;
 
 use crate::hostfs::{HostFs, HostKind};
 use crate::lock::LOCK_FILE;
-use crate::materialize::{dirty, host_failed};
+use crate::materialize;
 use crate::registry::Registry;
 use crate::scan::Want;
 use crate::state::{self, SWARMWS_DIR, WORKSPACE_JSON};
-use crate::status::changes_of;
-use crate::workspace::{Locate, open_locked};
-use crate::{Ctx, commit, io_failed};
+use crate::status;
+use crate::workspace::{self, Locate};
+use crate::{Ctx, commit, io_error};
 
 /// The message of a rescue changeset of workspace `name`.
 pub(crate) fn rescue_message(name: &str) -> String {
@@ -46,7 +46,7 @@ pub fn delete(ctx: &Ctx<'_>, req: WsDeleteReq) -> Result<WsDeleteResp, OpError> 
 
     // 2. The workspace under its lock; one whose state is gone is an orphan of its entry.
     let at = Locate::Name(name.clone());
-    let (ws, held) = match open_locked(ctx, &at) {
+    let (ws, held) = match workspace::open_locked(ctx, &at) {
         Ok(opened) => opened,
         Err(e) if e.code == ErrorCode::WsNotFound.as_str() && force => {
             return orphan(ctx, &name, e);
@@ -61,10 +61,10 @@ pub fn delete(ctx: &Ctx<'_>, req: WsDeleteReq) -> Result<WsDeleteResp, OpError> 
             full: false,
             extra: Vec::new(),
         };
-        let changed = changes_of(ctx, &ws, &want)?;
+        let changed = status::changes_of(ctx, &ws, &want)?;
         if !changed.is_empty() {
             let paths = changed.into_iter().map(|change| change.path).collect();
-            return Err(dirty(paths).with_hint(format!(
+            return Err(materialize::dirty(paths).with_hint(format!(
                 "swarmops ws commit -m <message>, or swarmops ws delete {name} --rescue"
             )));
         }
@@ -81,9 +81,9 @@ pub fn delete(ctx: &Ctx<'_>, req: WsDeleteReq) -> Result<WsDeleteResp, OpError> 
     remove_below(host, &swarmws, &[WORKSPACE_JSON, LOCK_FILE])?;
     let state_file = state::path_in(&ws.dir);
     (ctx.fs.remove(state_file.as_std_path()))
-        .map_err(|e| io_failed(FsMethod::Remove, &shown(WORKSPACE_JSON), &e))?;
+        .map_err(|e| io_error::io_failed(FsMethod::Remove, &shown(WORKSPACE_JSON), &e))?;
     (ctx.fs.fsync_dir(swarmws.as_std_path()))
-        .map_err(|e| io_failed(FsMethod::FsyncDir, SWARMWS_DIR, &e))?;
+        .map_err(|e| io_error::io_failed(FsMethod::FsyncDir, SWARMWS_DIR, &e))?;
 
     // 5. The lock dropped, then what is left of the directory, then the entry (WS4).
     drop(held);
@@ -107,7 +107,7 @@ fn rescued(ctx: &Ctx<'_>, name: &str) -> Result<Option<String>, OpError> {
         modes: std::collections::BTreeMap::new(),
         status_after: StatusAfter::None,
     };
-    match commit(ctx, req) {
+    match commit::commit(ctx, req) {
         Ok(done) => Ok(Some(done.changeset)),
         Err(e) if e.code == ErrorCode::EmptyCommit.as_str() => Ok(None),
         Err(e) => Err(e),
@@ -134,7 +134,7 @@ fn orphan(ctx: &Ctx<'_>, name: &str, gone: OpError) -> Result<WsDeleteResp, OpEr
         }
         Ok(_) => return Err(gone),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(host_failed(".", &e)),
+        Err(e) => return Err(materialize::host_failed(".", &e)),
     }
 
     // 3. The entry, after the directory (WS4).
@@ -152,7 +152,7 @@ fn remove_below(host: &dyn HostFs, dir: &Utf8Path, keep: &[&str]) -> Result<(), 
     let names = match host.read_dir(dir) {
         Ok(names) => names,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(host_failed(dir.as_str(), &e)),
+        Err(e) => return Err(materialize::host_failed(dir.as_str(), &e)),
     };
     for name in names {
         if keep.contains(&name.as_str()) {
@@ -165,12 +165,13 @@ fn remove_below(host: &dyn HostFs, dir: &Utf8Path, keep: &[&str]) -> Result<(), 
 
 /// Removes `path` and, when it is a directory (not a symlink to one), everything below it.
 fn remove_all(host: &dyn HostFs, path: &Utf8Path) -> Result<(), OpError> {
-    let meta = (host.symlink_metadata(path)).map_err(|e| host_failed(path.as_str(), &e))?;
+    let meta =
+        (host.symlink_metadata(path)).map_err(|e| materialize::host_failed(path.as_str(), &e))?;
     let Some(meta) = meta else {
         return Ok(());
     };
     if meta.kind != HostKind::Dir {
-        return (host.remove_file(path)).map_err(|e| host_failed(path.as_str(), &e));
+        return (host.remove_file(path)).map_err(|e| materialize::host_failed(path.as_str(), &e));
     }
     remove_below(host, path, &[])?;
     remove_dir(host, path)
@@ -186,7 +187,7 @@ fn remove_dir(host: &dyn HostFs, path: &Utf8Path) -> Result<(), OpError> {
             format!("{path} was written to while it was deleted"),
         )),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(host_failed(path.as_str(), &e)),
+        Err(e) => Err(materialize::host_failed(path.as_str(), &e)),
     }
 }
 

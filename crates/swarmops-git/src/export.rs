@@ -56,19 +56,17 @@
 
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
-use swarmops_core::bytes::to_u64;
+use swarmops_core::bytes;
 use swarmops_core::{BlobId, Changeset, ChangesetId, EntryTarget, Tree, TreeEntry, TreeId};
 use swarmops_repo::{LocalRepo, RepoError, RepoRead, StoreError};
-use swarmops_store::{ExternalEntry, FsObjectStore, SYSTEM_GIT, TailRepair, check_ref_name};
+use swarmops_store::{ExternalEntry, FsObjectStore, SYSTEM_GIT, TailRepair};
 
-use crate::ancestry;
 use crate::export_oid::{ExportOids, OnMemo};
-use crate::native::{metadata, render_commit};
-use crate::render::tree_bytes;
 use crate::{
     BranchUpdate, ExportReader, ExportedOid, GIT_OID, GitOid, GitSink, ObjectFormat, OidCache,
-    RawCommit, RawKind, SinkError, Stored, Unsupported, git_hash, real_blob_oid, real_tree_oid,
+    RawCommit, RawKind, SinkError, Stored, Unsupported,
 };
+use crate::{ancestry, export_oid, native, oid, render};
 
 /// How many first parents of the branch's commit step 4 reads in the repository, looking for the
 /// export of the head or of an ancestor of it, before it says the branch moved.
@@ -269,7 +267,7 @@ pub fn export(
     sink: &mut dyn GitSink,
     req: &ExportRequest,
 ) -> Result<ExportReport, ExportError> {
-    if check_ref_name(&req.source_ref).is_err() {
+    if swarmops_store::check_ref_name(&req.source_ref).is_err() {
         return Err(ExportError::RefName(req.source_ref.clone()));
     }
     let format = sink.object_format();
@@ -340,7 +338,7 @@ pub fn export(
     let rewritten = (commits.iter())
         .filter(|commit| run.nodes[&commit.id].imported && !commit.exported.kept)
         .count();
-    report.rewritten = to_u64(rewritten);
+    report.rewritten = bytes::to_u64(rewritten);
     if report.rewritten > 0 {
         run.warnings.push(format!(
             "{} of the commits exported were imported from git and export to new commits: a \
@@ -475,8 +473,10 @@ impl<'a, 'r> Run<'a, 'r> {
     /// The real git oid of tree `tree`, from the store's own bytes, the memo checked against it
     /// ([`real_tree_oid`]): what the export reuses, writes or renders for the tree, never a memo
     /// alone. Cached for the run.
+    ///
+    /// [`real_tree_oid`]: export_oid::real_tree_oid
     fn tree_git_oid(&self, tree: TreeId) -> Result<GitOid, ExportError> {
-        Ok(real_tree_oid(
+        Ok(export_oid::real_tree_oid(
             &self.reader(),
             &self.cache,
             self.current,
@@ -486,8 +486,10 @@ impl<'a, 'r> Run<'a, 'r> {
 
     /// The real git oid of blob `blob`, from the store's own bytes, the memo checked against it
     /// ([`real_blob_oid`]). Cached for the run.
+    ///
+    /// [`real_blob_oid`]: export_oid::real_blob_oid
     fn blob_git_oid(&self, blob: BlobId) -> Result<GitOid, ExportError> {
-        Ok(real_blob_oid(
+        Ok(export_oid::real_blob_oid(
             &self.reader(),
             &self.cache,
             self.current,
@@ -519,7 +521,7 @@ impl<'a, 'r> Run<'a, 'r> {
         let Some(stored) = self.read.changeset(id)? else {
             return Ok(false);
         };
-        let imported = metadata(&stored.changeset, GIT_OID).is_some();
+        let imported = native::metadata(&stored.changeset, GIT_OID).is_some();
         let Changeset { parents, root, .. } = stored.changeset;
         let node = Node {
             generation: stored.generation,
@@ -854,6 +856,8 @@ impl<'a, 'r> Run<'a, 'r> {
     /// The bytes of `tree` as git holds it ([`tree_bytes`]), each entry's oid the real git oid of
     /// its object, from the store's own bytes ([`Run::tree_git_oid`], [`Run::blob_git_oid`]), so a
     /// tree the export writes never names a memo a store file could have placed.
+    ///
+    /// [`tree_bytes`]: render::tree_bytes
     fn rendered_tree(&self, tree: &Tree) -> Result<Vec<u8>, ExportError> {
         let mut oids = Vec::with_capacity(tree.entries().len());
         for entry in tree.entries() {
@@ -862,7 +866,7 @@ impl<'a, 'r> Run<'a, 'r> {
                 EntryTarget::Dir(dir) => self.tree_git_oid(dir)?,
             });
         }
-        Ok(tree_bytes(tree, |entry| {
+        Ok(render::tree_bytes(tree, |entry| {
             let at = (tree.entries())
                 .binary_search_by(|other| other.name.as_bytes().cmp(entry.name.as_bytes()))
                 .expect("tree_bytes gives the tree's own entries");
@@ -876,6 +880,8 @@ impl<'a, 'r> Run<'a, 'r> {
     /// (5)'s check. A native changeset's export oid is that rendering's hash already; an unchanged
     /// import's is its `git.oid`, taken without a tree read, which a changeset that does not
     /// render to it fails: [`ExportError::Bug`], before anything of it is written.
+    ///
+    /// [`render_commit`]: native::render_commit
     fn rendered_commit(&mut self, commit: &Commit) -> Result<Vec<u8>, ExportError> {
         let stored = (self.read.changeset(commit.id)?)
             .ok_or_else(|| RepoError::NotFound(commit.id.to_string()))?;
@@ -885,8 +891,8 @@ impl<'a, 'r> Run<'a, 'r> {
             parents.push(self.export_of(parent)?.git_oid());
         }
         let tree = self.tree_git_oid(cs.root)?;
-        let bytes = render_commit(commit.id, &cs, &parents, tree);
-        let rendered = git_hash(RawKind::Commit, &bytes);
+        let bytes = native::render_commit(commit.id, &cs, &parents, tree);
+        let rendered = oid::git_hash(RawKind::Commit, &bytes);
         let expected = commit.exported.git_oid();
         if rendered != expected {
             return Err(ExportError::Bug {

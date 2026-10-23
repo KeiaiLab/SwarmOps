@@ -14,7 +14,7 @@ use swarmops_api::{
 };
 
 use crate::Ctx;
-use crate::materialize::normalize;
+use crate::materialize;
 use crate::scan::{self, Change, Keep, Want};
 use crate::state::{SWARMWS_DIR, State};
 use crate::workspace::{Locate, Workspace};
@@ -44,7 +44,7 @@ pub fn status(ctx: &Ctx<'_>, req: WsStatusReq) -> Result<WsStatus, OpError> {
                 .with_details(Map::from_iter([("limit".to_owned(), Value::from(0))])),
         );
     }
-    let paths = normalize(paths)?;
+    let paths = materialize::normalize(paths)?;
 
     // 2. The workspace, without its lock: a read.
     let ws = Workspace::open(ctx, Locate::Name(workspace))?;

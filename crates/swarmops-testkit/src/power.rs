@@ -38,7 +38,6 @@ use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
-use swarmops_core::bytes::to_u64;
 use swarmops_store::{FsMethod, FsOps, LinkOutcome, RealFs};
 
 /// The sector a power loss tears writes at.
@@ -511,7 +510,9 @@ impl Timeline {
             .effects
             .iter()
             .filter_map(|effect| match effect {
-                Effect::Write { at, bytes, .. } => Some((*at, to_u64(bytes.len()))),
+                Effect::Write { at, bytes, .. } => {
+                    Some((*at, swarmops_core::bytes::to_u64(bytes.len())))
+                }
                 _ => None,
             })
             .collect()
@@ -766,7 +767,7 @@ impl Builder<'_> {
     /// A new file at `path` holding `bytes`, made by a call of `method` in one step; its inode.
     fn new_file(&mut self, method: FsMethod, path: &Path, bytes: &[u8]) -> usize {
         let inode = self.lens.len();
-        self.lens.push(to_u64(bytes.len()));
+        self.lens.push(swarmops_core::bytes::to_u64(bytes.len()));
         let (dir, name) = self.place(path);
         let add = self.add(dir, name, Node::File(inode));
         let write = Effect::Write {
@@ -795,7 +796,7 @@ impl Builder<'_> {
             }
         };
         let at = self.lens[inode];
-        self.lens[inode] += to_u64(bytes.len());
+        self.lens[inode] += swarmops_core::bytes::to_u64(bytes.len());
         effects.push(Effect::Write {
             inode,
             at,
@@ -1018,7 +1019,9 @@ impl Seeded {
     pub fn new(seed: u64, cut: usize) -> Seeded {
         Seeded {
             seed,
-            rng: SplitMix64(seed ^ to_u64(cut).wrapping_mul(0xa076_1d64_78bd_642f)),
+            rng: SplitMix64(
+                seed ^ swarmops_core::bytes::to_u64(cut).wrapping_mul(0xa076_1d64_78bd_642f),
+            ),
         }
     }
 }
@@ -1028,7 +1031,7 @@ impl Chooser for Seeded {
         match self.seed {
             0 => 0,
             1 => uncovered,
-            _ => to_usize(self.rng.below(to_u64(uncovered) + 1)),
+            _ => to_usize(self.rng.below(swarmops_core::bytes::to_u64(uncovered) + 1)),
         }
     }
 

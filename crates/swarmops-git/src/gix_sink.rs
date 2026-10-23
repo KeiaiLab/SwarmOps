@@ -1,5 +1,5 @@
 //! [`GixSink`], the [`GitSink`] of a repository on disk, written through gix: with
-//! [`gix_source`](crate::gix_source), the crate's contact with gix (umbrella decision 3).
+//! [`gix_source`], the crate's contact with gix (umbrella decision 3).
 //!
 //! gix writes the loose objects. This module makes them durable, which gix does not (its loose
 //! writer renames a temporary file into place and syncs nothing), and moves a branch by git's own
@@ -20,10 +20,8 @@ use gix::objs::{Exists as _, Find as _};
 use gix::prelude::Write as _;
 use rayon::prelude::*;
 
-use crate::gix_source::{from_gix, not_the_object, open_repository, raw_kind, reason, to_gix};
-use crate::{
-    BranchUpdate, GitOid, GitSink, ObjectFormat, RawKind, SinkError, SourceError, Stored, git_hash,
-};
+use crate::{BranchUpdate, GitOid, GitSink, ObjectFormat, RawKind, SinkError, SourceError, Stored};
+use crate::{gix_source, oid};
 
 /// How long the export tries a branch's lock before the branch is [`SinkError::RefLocked`]:
 /// git's `core.filesRefLockTimeout` default, so that two exports racing to one branch take turns.
@@ -95,7 +93,7 @@ impl GixSink {
     /// [`GixSource::open`](crate::GixSource::open) does: [`SinkError::NotARepo`] when gix opens no
     /// repository there, [`SinkError::Unsupported`] for one the import would not read.
     pub fn open(path: &Path) -> Result<GixSink, SinkError> {
-        let repo = open_repository(path).map_err(opening)?;
+        let repo = gix_source::open_repository(path).map_err(opening)?;
         let git_dir = repo.common_dir().to_owned();
         let objects = repo.objects.store_ref().path().to_owned();
         let loose = gix::odb::loose::Store::at(objects.clone(), gix::hash::Kind::Sha1);
@@ -151,7 +149,7 @@ impl GixSink {
     /// Whether the repository holds `oid` in a pack or an alternate (or as a loose file): what
     /// gix finds, without its answer for the empty tree.
     fn has(&self, oid: GitOid) -> bool {
-        self.repo.objects.exists(&to_gix(oid))
+        self.repo.objects.exists(&gix_source::to_gix(oid))
     }
 
     /// The loose file of `oid`, read and checked against its id; `None` when there is no such
@@ -162,8 +160,10 @@ impl GixSink {
             return Ok(None);
         }
         let mut buffer = Vec::new();
-        match self.loose.try_find(&to_gix(oid), &mut buffer) {
-            Ok(Some(data)) => checked(oid, raw_kind(data.kind), data.data.to_vec()).map(Some),
+        match self.loose.try_find(&gix_source::to_gix(oid), &mut buffer) {
+            Ok(Some(data)) => {
+                checked(oid, gix_source::raw_kind(data.kind), data.data.to_vec()).map(Some)
+            }
             Ok(None) => Ok(None),
             Err(error) => Err(damaged(
                 oid,
@@ -184,12 +184,12 @@ impl GixSink {
             Err(error) => {
                 return Err(SinkError::Read {
                     what: full.to_owned(),
-                    reason: reason(&error),
+                    reason: gix_source::reason(&error),
                 });
             }
         };
         match reference.target() {
-            gix::refs::TargetRef::Object(id) => Ok(Some(from_gix(&id.to_owned()))),
+            gix::refs::TargetRef::Object(id) => Ok(Some(gix_source::from_gix(&id.to_owned()))),
             gix::refs::TargetRef::Symbolic(_) => Err(SinkError::RefConflict {
                 name: full.to_owned(),
             }),
@@ -213,7 +213,7 @@ impl GixSink {
         let under = format!("{full}/");
         let listing = |error: gix::Error| SinkError::Read {
             what: under.clone(),
-            reason: reason(&error),
+            reason: gix_source::reason(&error),
         };
         let platform = self.repo.references().map_err(listing)?;
         let mut refs = platform.prefixed(under.as_str()).map_err(listing)?;
@@ -319,14 +319,17 @@ impl GitSink for GixSink {
             return Ok(found);
         }
         let mut buffer = Vec::new();
-        let data = (self.repo.objects.try_find(&to_gix(oid), &mut buffer))
-            .map_err(|error| damaged(oid, &error, format!("object {oid}")))?
-            .ok_or(SinkError::Missing { oid })?;
-        checked(oid, raw_kind(data.kind), data.data.to_vec())
+        let data = (self
+            .repo
+            .objects
+            .try_find(&gix_source::to_gix(oid), &mut buffer))
+        .map_err(|error| damaged(oid, &error, format!("object {oid}")))?
+        .ok_or(SinkError::Missing { oid })?;
+        checked(oid, gix_source::raw_kind(data.kind), data.data.to_vec())
     }
 
     fn write_object(&mut self, kind: RawKind, bytes: &[u8]) -> Result<GitOid, SinkError> {
-        let oid = git_hash(kind, bytes);
+        let oid = oid::git_hash(kind, bytes);
         let path = self.files.loose(oid);
         // gix writes nothing for an id it finds, a loose file of that name among them, so one
         // that does not read back as the object goes first. One that does is the object.
@@ -349,12 +352,12 @@ impl GitSink for GixSink {
         let written =
             (self.repo.write_buf(gix_kind(kind), bytes)).map_err(|error| SinkError::Write {
                 what: self.files.named(&path),
-                reason: reason(&error),
+                reason: gix_source::reason(&error),
             })?;
         if fresh && fan_out.is_dir() {
             self.made.insert(oid.0[0]);
         }
-        let written = from_gix(&written);
+        let written = gix_source::from_gix(&written);
         if written != oid {
             return Err(SinkError::Write {
                 what: self.files.named(&path),
@@ -400,7 +403,7 @@ impl GitSink for GixSink {
         }
         let head = self.repo.head_name().map_err(|error| SinkError::Read {
             what: "HEAD".to_owned(),
-            reason: reason(&error),
+            reason: gix_source::reason(&error),
         })?;
         Ok(head.and_then(|name| {
             let branch = name.as_bstr().strip_prefix(b"refs/heads/".as_slice())?;
@@ -566,6 +569,8 @@ fn branch_ref(name: &str) -> Result<String, SinkError> {
 }
 
 /// What [`open_repository`] refused, as a sink says it.
+///
+/// [`open_repository`]: gix_source::open_repository
 fn opening(error: SourceError) -> SinkError {
     match error {
         SourceError::NotARepo { reason } => SinkError::NotARepo { reason },
@@ -584,7 +589,7 @@ fn opening(error: SourceError) -> SinkError {
 /// `bytes`, read as the object `oid` of `kind`, when they hash to `oid`; [`SinkError::Corrupt`]
 /// otherwise.
 fn checked(oid: GitOid, kind: RawKind, bytes: Vec<u8>) -> Result<(RawKind, Vec<u8>), SinkError> {
-    match not_the_object(oid, kind, &bytes) {
+    match gix_source::not_the_object(oid, kind, &bytes) {
         None => Ok((kind, bytes)),
         Some(reason) => Err(SinkError::Corrupt { oid, reason }),
     }
@@ -596,12 +601,12 @@ fn damaged(oid: GitOid, error: &gix::Error, what: String) -> SinkError {
     if error.is_corrupted() {
         SinkError::Corrupt {
             oid,
-            reason: reason(error),
+            reason: gix_source::reason(error),
         }
     } else {
         SinkError::Read {
             what,
-            reason: reason(error),
+            reason: gix_source::reason(error),
         }
     }
 }
@@ -714,7 +719,7 @@ impl GixSink {
     ) -> Result<Vec<(String, GitOid)>, SinkError> {
         let listing = |error: gix::Error| SinkError::Read {
             what: prefix.to_owned(),
-            reason: reason(&error),
+            reason: gix_source::reason(&error),
         };
         let platform = self.repo.references().map_err(listing)?;
         let refs = platform.prefixed(prefix).map_err(listing)?;
@@ -731,7 +736,7 @@ impl GixSink {
                 continue;
             }
             if let gix::refs::TargetRef::Object(id) = reference.target() {
-                found.push((name, from_gix(&id.to_owned())));
+                found.push((name, gix_source::from_gix(&id.to_owned())));
             }
         }
         Ok(found)
@@ -945,7 +950,7 @@ fn unpathed(error: &gix::Error, path: &Path, name: &str) -> String {
     if let Some(io) = error.downcast_any_ref::<io::Error>() {
         return io.to_string();
     }
-    reason(error).replace(&path.display().to_string(), name)
+    gix_source::reason(error).replace(&path.display().to_string(), name)
 }
 
 /// Checks that git takes `full` as a ref name; [`SinkError::BadBranch`] names it otherwise.

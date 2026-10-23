@@ -28,8 +28,9 @@
 //! [`plan_path`]: tree_merge::plan_path
 //! [`entry_in`]: tree_merge::entry_in
 //! [`ContentMerger`]: conflict::ContentMerger
+//! [`merge_content`]: diff3::merge_content
 
-pub use swarmops_merge::*;
+pub use swarmops_merge::{conflict, diff3, line_diff, tree_diff, tree_merge};
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -37,12 +38,11 @@ use std::ops::Range;
 
 use swarmops_core::{
     BlobId, ChangesetId, DeltaEntry, DeltaOp, EntryTarget, LeafKind, ObjectKind, RepoPath, Tree,
-    TreeId, hash_object,
+    TreeId,
 };
 use swarmops_merge::conflict::{ConflictHunk, ConflictKind, ContentMerge, ContentMerger};
-use swarmops_merge::diff3::merge_content;
-use swarmops_merge::tree_diff::{Leaf, PathFilter, PathTriple, TreeRead, diff_trees, three_way};
-use swarmops_merge::tree_merge::{FileConflict, PathPlan, entry_in, plan_path};
+use swarmops_merge::tree_diff::{Leaf, PathFilter, PathTriple, TreeRead};
+use swarmops_merge::tree_merge::{FileConflict, PathPlan};
 use swarmops_store::ObjectStore;
 
 use crate::error::RepoError;
@@ -79,6 +79,8 @@ impl<O: ObjectStore> Repo<O> {
     /// in a snapshot of its own, [`RepoError::NotFound`] if it does not hold one of them; then
     /// the trees on the paths ours changed, each tree once, and the blobs of the paths both
     /// sides changed. It writes nothing.
+    ///
+    /// [`diff_trees`]: tree_diff::diff_trees
     pub fn merge_with(
         &self,
         base: ChangesetId,
@@ -116,18 +118,22 @@ impl<O: ObjectStore> Repo<O> {
 
     /// [`Repo::merge_with`] with the three-way text merge, [`merge_content`] (diff3): the merge a
     /// land makes of its change onto the target's head ([`crate::land`]).
+    ///
+    /// [`merge_content`]: diff3::merge_content
     pub fn merge(
         &self,
         base: ChangesetId,
         ours: ChangesetId,
         theirs: ChangesetId,
     ) -> Result<MergeOutcome, RepoError> {
-        self.merge_with(base, ours, theirs, &merge_content)
+        self.merge_with(base, ours, theirs, &diff3::merge_content)
     }
 
     /// [`Repo::merge_trees_with`] with the three-way text merge, [`merge_content`] (diff3): a
     /// land's incremental re-merge, after the target moved, of what it merged onto what the target
     /// gained ([`crate::land`]).
+    ///
+    /// [`merge_content`]: diff3::merge_content
     pub fn merge_trees(
         &self,
         base: TreeId,
@@ -135,7 +141,7 @@ impl<O: ObjectStore> Repo<O> {
         theirs: TreeId,
         paths: &[RepoPath],
     ) -> Result<MergeOutcome, RepoError> {
-        self.merge_trees_with(base, ours, theirs, paths, &merge_content)
+        self.merge_trees_with(base, ours, theirs, paths, &diff3::merge_content)
     }
 
     /// [`Repo::merge_with`] of the three roots `[base, ours, theirs]`, read by the caller already:
@@ -147,7 +153,8 @@ impl<O: ObjectStore> Repo<O> {
         content: ContentMerger<'_>,
     ) -> Result<MergeOutcome, RepoError> {
         let reads = Reads::new(&self.objects);
-        let changed = diff_trees(&reads, Some(roots[0]), Some(roots[1]), &PathFilter::all())?;
+        let changed =
+            tree_diff::diff_trees(&reads, Some(roots[0]), Some(roots[1]), &PathFilter::all())?;
         let paths = changed.into_iter().map(|change| change.path).collect();
         merge_trees(&reads, roots, paths, content)
     }
@@ -163,8 +170,8 @@ fn merge_trees<O: ObjectStore>(
 ) -> Result<MergeOutcome, RepoError> {
     let [base, ours, theirs] = roots;
     let filter = PathFilter::under(paths);
-    let triples = three_way(reads, Some(base), Some(ours), Some(theirs), &filter)?;
-    let plans: Vec<PathPlan> = triples.iter().map(plan_path).collect();
+    let triples = tree_diff::three_way(reads, Some(base), Some(ours), Some(theirs), &filter)?;
+    let plans: Vec<PathPlan> = triples.iter().map(tree_merge::plan_path).collect();
     let type_changes = (0..triples.len())
         .map(|at| type_change(reads, theirs, &triples, &plans, at))
         .collect::<Result<Vec<bool>, RepoError>>()?;
@@ -229,7 +236,7 @@ fn type_change<O: ObjectStore>(
     }
     let mut above = triple.path.parent();
     while let Some(dir) = above {
-        match entry_in(reads, theirs, &dir)? {
+        match tree_merge::entry_in(reads, theirs, &dir)? {
             Some(EntryTarget::Dir(_)) => return Ok(false),
             Some(EntryTarget::Leaf(..)) => {
                 let deleted = triples
@@ -273,7 +280,7 @@ fn merge_contents<O: ObjectStore>(
     let (base, ours, theirs) = (read(triple.base)?, read(triple.ours)?, read(triple.theirs)?);
     match content(&base, &ours, &theirs) {
         ContentMerge::Clean(merged) => {
-            let blob = BlobId(hash_object(ObjectKind::Blob, &merged));
+            let blob = BlobId(swarmops_core::hash_object(ObjectKind::Blob, &merged));
             let leaf = Leaf { kind, blob };
             if Some(leaf) == triple.theirs {
                 return Ok(());
@@ -390,6 +397,8 @@ fn conflict(triple: &PathTriple, kind: ConflictKind) -> FileConflict {
 /// The objects one merge reads: each tree once, however often its walks pass it (the second diff
 /// of ours in [`three_way`], the walks up theirs' paths), each verified against its id as every
 /// object read is; and the blobs of the paths both sides changed.
+///
+/// [`three_way`]: tree_diff::three_way
 struct Reads<'o, O: ObjectStore> {
     objects: &'o O,
     trees: RefCell<HashMap<TreeId, Tree>>,

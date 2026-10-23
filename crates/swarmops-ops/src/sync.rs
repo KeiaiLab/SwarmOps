@@ -39,9 +39,7 @@ use swarmops_git::{ExportOid, GitOid};
 use swarmops_repo::{CasResult, RepoError};
 use swarmops_store::SYSTEM_GIT;
 
-use crate::error::{
-    details, error, hint, mirror_error, op, remote_not_found, shell_word, sync_error,
-};
+use crate::error;
 use crate::local::{LocalOps, Recording, Resolved};
 
 /// The store ref a sync lands onto the remote's head and publishes.
@@ -82,8 +80,8 @@ impl Recording<'_> {
         let lander = self.ops.native_signature(who, None)?;
 
         // 2. The mirror's lock, once, held by every attempt.
-        let mirror = Mirror::open(self.ops.store_path()).map_err(mirror_error)?;
-        let lock = mirror.lock().map_err(mirror_error)?;
+        let mirror = Mirror::open(self.ops.store_path()).map_err(error::mirror_error)?;
+        let lock = mirror.lock().map_err(error::mirror_error)?;
         let mut syncing = Syncing {
             rec: self,
             lock: &lock,
@@ -178,30 +176,34 @@ impl Recording<'_> {
             .remotes
             .into_iter()
             .find(|remote| remote.name == name);
-        found.ok_or_else(|| remote_not_found(name))
+        found.ok_or_else(|| error::remote_not_found(name))
     }
 
     /// What the mirror's tracking ref of `remote`'s followed branch names: none before the
     /// first fetch made the mirror, or saw the branch. Read without the lock.
     fn seen(&self, remote: &RemoteInfo) -> Result<Option<GitOid>, OpError> {
-        let mirror = Mirror::open(self.ops.store_path()).map_err(mirror_error)?;
+        let mirror = Mirror::open(self.ops.store_path()).map_err(error::mirror_error)?;
         if !mirror.git_dir().exists() {
             return Ok(None);
         }
         mirror
             .tracking(&remote.name, &remote.branch)
-            .map_err(mirror_error)
+            .map_err(error::mirror_error)
     }
 
     /// The changeset the store imported the commit `oid` as, if it did.
     fn known(&self, oid: GitOid) -> Result<Option<ChangesetId>, OpError> {
-        let entry = self.ops.repo.external_id(SYSTEM_GIT, &oid.0).map_err(op)?;
+        let entry = self
+            .ops
+            .repo
+            .external_id(SYSTEM_GIT, &oid.0)
+            .map_err(error::op)?;
         Ok(entry.map(|entry| entry.changeset))
     }
 
     /// What `main` names now, if it exists.
     fn main_now(&self) -> Result<Option<ChangesetId>, OpError> {
-        let state = self.ops.repo.get_ref(MAIN).map_err(op)?;
+        let state = self.ops.repo.get_ref(MAIN).map_err(error::op)?;
         Ok(state.map(|state| state.target))
     }
 
@@ -230,7 +232,7 @@ impl Recording<'_> {
                     truncated: ahead_cut || behind_cut,
                 })
             }
-            Err(e) => Err(sync_error(e, &remote.name, &remote.branch)),
+            Err(e) => Err(error::sync_error(e, &remote.name, &remote.branch)),
         }
     }
 
@@ -244,8 +246,8 @@ impl Recording<'_> {
                 return Ok((to_u64(count), true));
             }
             count += 1;
-            let meta = self.ops.repo.changeset_meta(id).map_err(op)?;
-            let meta = meta.ok_or_else(|| op(RepoError::NotFound(id.to_string())))?;
+            let meta = self.ops.repo.changeset_meta(id).map_err(error::op)?;
+            let meta = meta.ok_or_else(|| error::op(RepoError::NotFound(id.to_string())))?;
             at = meta.parents.first().copied();
         }
         Ok((to_u64(count), false))
@@ -360,12 +362,12 @@ impl Syncing<'_, '_> {
         let seen = self
             .mirror
             .tracking(&self.remote.name, &self.remote.branch)
-            .map_err(mirror_error)?;
+            .map_err(error::mirror_error)?;
         let Some(oid) = seen else {
             return Ok(None);
         };
         let changeset = self.rec.known(oid)?.ok_or_else(|| {
-            error(
+            error::error(
                 ErrorCode::Internal,
                 format!("the fetch left {oid}, which the store did not import"),
             )
@@ -452,21 +454,23 @@ impl Syncing<'_, '_> {
     /// branch; there is nothing to land onto, so no push is nothing to do.
     fn onto_nothing(&mut self, attempt: u32, main: Option<ChangesetId>) -> Result<Step, OpError> {
         let branch = &self.remote.branch;
-        let remote = shell_word(&self.remote.name);
+        let remote = error::shell_word(&self.remote.name);
         let Some(main) = main else {
-            return Err(error(
+            return Err(error::error(
                 ErrorCode::RevNotFound,
                 format!("neither main nor {branch} on the remote exists: nothing to sync"),
             )
-            .with_details(details([("rev", MAIN.into())])));
+            .with_details(error::details([("rev", MAIN.into())])));
         };
         if self.mode == SyncMode::Local {
-            return Err(error(
+            return Err(error::error(
                 ErrorCode::RevNotFound,
                 format!("the remote has no branch {branch} to land main onto"),
             )
-            .with_details(details([("rev", branch.as_str().into())]))
-            .with_hint(hint(format!("swarmops push {remote} main creates it"))));
+            .with_details(error::details([("rev", branch.as_str().into())]))
+            .with_hint(error::hint(format!(
+                "swarmops push {remote} main creates it"
+            ))));
         }
 
         // The push creates the branch.
@@ -513,7 +517,7 @@ impl Syncing<'_, '_> {
             .ops
             .repo
             .cas_ref(MAIN, old, Some(new), self.who.agent())
-            .map_err(op)?;
+            .map_err(error::op)?;
         self.rec.resolved.record_recovered(outcome.recovered);
         self.warnings.extend(outcome.warnings);
 
@@ -541,7 +545,7 @@ impl Syncing<'_, '_> {
         pushed
             .new
             .parse()
-            .map_err(|_| error(ErrorCode::Internal, "the push gave no commit id"))
+            .map_err(|_| error::error(ErrorCode::Internal, "the push gave no commit id"))
     }
 
     /// Each change of `landed` with what it landed as and the commit that exports to.
@@ -552,7 +556,9 @@ impl Syncing<'_, '_> {
         let repo = &self.rec.ops.repo;
         let mut published = Vec::with_capacity(landed.len());
         for &(change, landed_as) in landed {
-            let exported = repo.derived::<ExportOid>(landed_as, &()).map_err(op)?;
+            let exported = repo
+                .derived::<ExportOid>(landed_as, &())
+                .map_err(error::op)?;
             published.push(PublishedChange {
                 changeset: change.to_string(),
                 landed_as: landed_as.to_string(),
@@ -593,7 +599,7 @@ impl Syncing<'_, '_> {
 
     /// The engine's failure `e` as the sync's error.
     fn engine(&self, e: SyncError) -> OpError {
-        sync_error(e, &self.remote.name, &self.remote.branch)
+        error::sync_error(e, &self.remote.name, &self.remote.branch)
     }
 
     /// `e`, an error after this sync moved `main`, saying so; a refusal of the push hints at a
@@ -604,8 +610,8 @@ impl Syncing<'_, '_> {
         }
         e.details.insert(MAIN_MOVED.to_owned(), Value::Bool(true));
         if e.code == ErrorCode::RemoteRejected.as_str() {
-            let remote = shell_word(&self.remote.name);
-            e.hint = Some(hint(format!(
+            let remote = error::shell_word(&self.remote.name);
+            e.hint = Some(error::hint(format!(
                 "main holds the landed changes: swarmops push {remote} main:<a branch of yours>, \
                  then open a pull request; swarmops op undo takes main back"
             )));
@@ -619,18 +625,18 @@ impl Syncing<'_, '_> {
         let moved = self.landed.is_some() && self.rec.main_now()? == self.landed;
         let mut e = match lost {
             Some(e) => e,
-            None => error(
+            None => error::error(
                 ErrorCode::CasRetryExhausted,
                 format!("main moved under the sync in each of its {attempts} attempts"),
             )
-            .with_details(details([
+            .with_details(error::details([
                 ("remote", self.remote.name.as_str().into()),
                 ("branch", self.remote.branch.as_str().into()),
                 ("attempts", attempts.into()),
             ]))
-            .with_hint(hint(format!(
+            .with_hint(error::hint(format!(
                 "swarmops sync {} again",
-                shell_word(&self.remote.name)
+                error::shell_word(&self.remote.name)
             ))),
         };
         e.details.insert(MAIN_MOVED.to_owned(), Value::Bool(moved));
@@ -643,11 +649,11 @@ fn attempts_in_range(max_attempts: u32) -> Result<(), OpError> {
     if (1..=MAX_LAND_ATTEMPTS).contains(&max_attempts) {
         return Ok(());
     }
-    Err(error(
+    Err(error::error(
         ErrorCode::InvalidArg,
         format!("max_attempts is {max_attempts}, not 1 to {MAX_LAND_ATTEMPTS}"),
     )
-    .with_details(details([("max_attempts", max_attempts.into())])))
+    .with_details(error::details([("max_attempts", max_attempts.into())])))
 }
 
 /// Whether `e` is a push whose lease failed: the remote moved since the fetch.

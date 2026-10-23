@@ -16,7 +16,7 @@ use std::thread;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, EntryKind, LeafKind, ObjectId, ObjectKind, hash_object};
-use swarmops_repo::{CasOutcome, CasResult, LocalRepo, RefState, RepoError, RepoInfo};
+use swarmops_repo::{CasOutcome, CasResult, Depth, LocalRepo, RefState, RepoError, RepoInfo};
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, ORDER_CHECK_ENV, RealFs};
 use swarmops_store::{ChangesetMeta, MetaStore, Recovered, StoreError};
@@ -1118,7 +1118,7 @@ fn create_crashing_at(k: u64, total: u64) {
     let info = repo.info().unwrap();
     assert_eq!((info.name.as_str(), info.changesets), ("demo", 0), "k={k}");
     let id = commit(&repo, &[], vec![put("f", b"after the crash")]);
-    assert_eq!(repo.verify(true).unwrap().problems, [], "k={k}");
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, [], "k={k}");
     let reopened = LocalRepo::open_with_fs(&root, checked(RealFs)).unwrap();
     assert_eq!(reopened.info().unwrap(), repo.info().unwrap(), "k={k}");
     assert!(reopened.changeset(id).unwrap().is_some(), "k={k}");

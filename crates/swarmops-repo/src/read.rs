@@ -16,7 +16,7 @@
 //! of `~N` suffixes, each walking `N` first parents back (`main~2`, `main~1~1`), as
 //! [`RepoRead::ancestor`] walks them.
 
-use swarmops_core::bytes::to_u64;
+use swarmops_core::bytes;
 use swarmops_core::{
     BlobId, Changeset, ChangesetId, EntryTarget, LeafKind, ObjectId, ObjectKind, RepoPath, Tree,
     TreeEntry, TreeId,
@@ -652,7 +652,7 @@ impl Kept {
     /// Takes the payload's next piece, keeping what of it is in the span while there is room.
     fn take(&mut self, piece: &[u8]) {
         let at = self.seen;
-        self.seen += to_u64(piece.len());
+        self.seen += bytes::to_u64(piece.len());
         match self.span {
             FileSpan::Bytes { start } => {
                 // Where the span starts in this piece: at its start once the span has begun.
@@ -676,7 +676,7 @@ impl Kept {
                         self.lines = Some((from, self.line));
                         self.keep(part);
                     }
-                    offset += to_u64(part.len());
+                    offset += bytes::to_u64(part.len());
                     if part.ends_with(b"\n") {
                         self.line += 1;
                     }

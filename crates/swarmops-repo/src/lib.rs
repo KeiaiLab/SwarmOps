@@ -76,4 +76,4 @@ pub use read::{FileSpan, FileSpanRead, ListedEntry, RepoRead, StoredChangeset, T
 pub use rebase::{RebaseOutcome, RebaseRequest, RebaseStatus};
 pub use repo::{CasOutcome, LocalRepo, Repo, RepoInfo};
 pub use swarmops_store::{CasResult, InsertOutcome, RefState, StoreError};
-pub use verify::{MismatchCause, VerifyProblem, VerifyReport};
+pub use verify::{Depth, MismatchCause, VerifyProblem, VerifyReport};

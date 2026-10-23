@@ -6,11 +6,11 @@
 //! the ones that do not fit in `max_bytes` are left for the next request, `truncated`.
 
 use swarmops_api::{BlobGetReq, BlobGetResp, BlobOut, ErrorCode, OpError};
-use swarmops_core::bytes::to_u64;
+use swarmops_core::bytes;
 use swarmops_core::{BlobId, ObjectId};
 
 use crate::content;
-use crate::error::op;
+use crate::error;
 use crate::local::Recording;
 
 /// `blob_get` on the store `ops` reads.
@@ -24,8 +24,8 @@ pub(crate) fn run(ops: &Recording<'_>, req: BlobGetReq) -> Result<BlobGetResp, O
         .collect::<Result<Vec<_>, _>>()?;
 
     // 2. One snapshot for the whole batch.
-    let read = ops.ops.repo.snapshot().map_err(op)?;
-    let got = read.blobs(&ids, max_bytes).map_err(op)?;
+    let read = ops.ops.repo.snapshot().map_err(error::op)?;
+    let got = read.blobs(&ids, max_bytes).map_err(error::op)?;
 
     // 3. Each blob encoded as a whole file is.
     let blobs = got
@@ -35,7 +35,7 @@ pub(crate) fn run(ops: &Recording<'_>, req: BlobGetReq) -> Result<BlobGetResp, O
             let encoded = content::encode(&bytes, bytes.len());
             BlobOut {
                 id: id.to_string(),
-                size: to_u64(bytes.len()),
+                size: bytes::to_u64(bytes.len()),
                 encoding: encoded.encoding,
                 content: encoded.content,
             }

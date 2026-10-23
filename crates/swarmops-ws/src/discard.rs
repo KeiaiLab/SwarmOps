@@ -11,11 +11,9 @@ use std::collections::BTreeSet;
 use swarmops_api::{ErrorCode, OpError, WsDiscardReq, WsDiscardResp};
 
 use crate::hostfs::{HostFs, HostKind};
-use crate::materialize::{
-    self, Item, Put, Tree, covered, dirty, holds, host_failed, items_under, normalize,
-};
+use crate::materialize::{self, Item, Put, Tree};
 use crate::scan::Want;
-use crate::workspace::{Locate, Workspace, open_locked};
+use crate::workspace::{self, Locate, Workspace};
 use crate::{Ctx, after, status};
 
 /// `ws_discard` in the workspace `req` names.
@@ -29,15 +27,15 @@ pub fn discard(ctx: &Ctx<'_>, req: WsDiscardReq) -> Result<WsDiscardResp, OpErro
     let asked = if paths.is_empty() {
         None
     } else {
-        Some(normalize(paths)?)
+        Some(materialize::normalize(paths)?)
     };
-    let (ws, _held) = open_locked(ctx, &Locate::Name(workspace))?;
+    let (ws, _held) = workspace::open_locked(ctx, &Locate::Name(workspace))?;
     let named = match asked {
         Some(named) => named,
         None => changed(ctx, &ws)?,
     };
     if let Some(outside) =
-        (named.iter()).find(|path| !ws.file.all && !covered(path, &ws.file.prefixes))
+        (named.iter()).find(|path| !ws.file.all && !materialize::covered(path, &ws.file.prefixes))
     {
         return Err(OpError::new(
             ErrorCode::InvalidArg,
@@ -68,7 +66,7 @@ pub(crate) fn restore(
     let mut restore = Vec::new();
     let mut discarded = BTreeSet::new();
     for path in named {
-        let items = items_under(ctx.store, &tree, Some(path))?.unwrap_or_default();
+        let items = materialize::items_under(ctx.store, &tree, Some(path))?.unwrap_or_default();
         if items.is_empty() {
             discard_added(ctx.host.as_ref(), ws, path, &mut discarded)?;
         }
@@ -90,7 +88,7 @@ pub(crate) fn restore(
 /// Every path workspace `ws`'s status finds changed, as discard takes paths.
 fn changed(ctx: &Ctx<'_>, ws: &Workspace) -> Result<Vec<String>, OpError> {
     let changes = status::changes_of(ctx, ws, &Want::default())?;
-    normalize(changes.into_iter().map(|change| change.path).collect())
+    materialize::normalize(changes.into_iter().map(|change| change.path).collect())
 }
 
 /// Removes the file or symlink the agent added at `path`, which the head lacks; a directory is
@@ -108,11 +106,11 @@ fn discard_added(
         let ancestor = parts[..n].join("/");
         let there = host
             .symlink_metadata(&ws.dir.join(&ancestor))
-            .map_err(|e| host_failed(&ancestor, &e))?;
+            .map_err(|e| materialize::host_failed(&ancestor, &e))?;
         match there.map(|meta| meta.kind) {
             None => return Ok(()),
             Some(HostKind::Dir) => {}
-            Some(_) => return Err(dirty(vec![ancestor])),
+            Some(_) => return Err(materialize::dirty(vec![ancestor])),
         }
     }
 
@@ -120,9 +118,9 @@ fn discard_added(
     let abs = ws.dir.join(path);
     let there = host
         .symlink_metadata(&abs)
-        .map_err(|e| host_failed(path, &e))?;
+        .map_err(|e| materialize::host_failed(path, &e))?;
     if there.is_some_and(|meta| meta.kind != HostKind::Dir) {
-        (host.remove_file(&abs)).map_err(|e| host_failed(path, &e))?;
+        (host.remove_file(&abs)).map_err(|e| materialize::host_failed(path, &e))?;
         discarded.insert(path.to_owned());
     }
     Ok(())
@@ -145,18 +143,18 @@ fn clear_way(
         let abs = ws.dir.join(&ancestor);
         let there = host
             .symlink_metadata(&abs)
-            .map_err(|e| host_failed(&ancestor, &e))?;
+            .map_err(|e| materialize::host_failed(&ancestor, &e))?;
 
         // 2. Missing or a directory: fine. Else removed, if it is the caller's to discard.
         match there.map(|meta| meta.kind) {
             None => return Ok(()),
             Some(HostKind::Dir) => {}
-            Some(_) if covered(&ancestor, &[named.to_owned()]) => {
-                (host.remove_file(&abs)).map_err(|e| host_failed(&ancestor, &e))?;
+            Some(_) if materialize::covered(&ancestor, &[named.to_owned()]) => {
+                (host.remove_file(&abs)).map_err(|e| materialize::host_failed(&ancestor, &e))?;
                 discarded.insert(ancestor);
                 return Ok(());
             }
-            Some(_) => return Err(dirty(vec![ancestor])),
+            Some(_) => return Err(materialize::dirty(vec![ancestor])),
         }
     }
     Ok(())
@@ -169,14 +167,14 @@ fn unrestored(host: &dyn HostFs, ws: &Workspace, item: Item) -> Result<Option<Pu
     let abs = ws.dir.join(&item.path);
     let there = host
         .symlink_metadata(&abs)
-        .map_err(|e| host_failed(&item.path, &e))?;
+        .map_err(|e| materialize::host_failed(&item.path, &e))?;
     let Some(meta) = there else {
         return Ok(Some(Put { item, there: None }));
     };
 
     // 2. Something else: written over it.
-    let held =
-        holds(host, &abs, meta, &item, ws.file.volume).map_err(|e| host_failed(&item.path, &e))?;
+    let held = materialize::holds(host, &abs, meta, &item, ws.file.volume)
+        .map_err(|e| materialize::host_failed(&item.path, &e))?;
     let there = Some(meta.kind);
     Ok((!held).then_some(Put { item, there }))
 }

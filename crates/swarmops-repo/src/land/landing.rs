@@ -1,80 +1,5 @@
-//! Landing (operations spec §3, the store-only block): [`Repo::land`] merges a change, the
-//! first-parent chain from a base to a head, three-way onto a ref's head, and publishes the result
-//! as one new changeset, `L`, the change squashed, in one write transaction with the ref's move to
-//! it.
-//!
-//! A land makes attempts, at most [`LandRequest::max_attempts`], each reading in a snapshot of
-//! its own ([`Repo::snapshot`]):
-//!
-//! 1. Before the first, the request: the target is `main` or `release/<x>`
-//!    ([`RepoError::RefName`]) and exists ([`RepoError::NotFound`]); a base it gives is a
-//!    first-parent ancestor of the head ([`RepoError::BaseNotAncestor`]), on the target or not (a
-//!    base off the target is M11's form); without one, the base is the merge base of the head and
-//!    the target's head, along first parents ([`RepoError::NoMergeBase`] when they share none).
-//! 2. An attempt reads the target's head, `theirs`. A head on the target's first-parent chain has
-//!    nothing to land ([`NothingToLandReason::OnTarget`]). The chain from the base (exclusive) to
-//!    the head, which `L` squashes, holds no changeset of two parents or more
-//!    ([`RepoError::MergeChangeset`]).
-//! 3. A keyed land walks the target's first parents from `theirs` down to the base, or, for a
-//!    base off the target, down to the first changeset at or below the base's generation (a land of
-//!    the change lands above its base), for a changeset whose `land_key` metadata is the key: one
-//!    whose `squashed_from` ends at the head is the land, made before, and the land is a replay
-//!    ([`LandStatus::Replayed`]); any other means the key landed another change
-//!    ([`RepoError::KeyReused`]). The walk reads each changeset once per land, so a later attempt
-//!    reads only what the target gained.
-//! 4. It merges three-way (storage spec §4): the first attempt what the chain changed onto
-//!    `theirs` ([`Repo::merge`] of the base, the head and `theirs`, over the paths the chain
-//!    touches); a later one what it merged before, `L`, onto what the target gained since, over
-//!    `L`'s delta paths alone ([`Repo::merge_trees`] of the head `L` was made on, `L` and the head
-//!    now: the incremental re-merge), and, if that conflicts, the whole merge again, whose result
-//!    stands. The request's resolutions apply to the merge before its conflicts are counted
-//!    ([`Resolutions`]): each, while `theirs` holds its path as the resolutions' `against` does,
-//!    replaces what the merge made at and below its path, conflicts included; a path `theirs`
-//!    holds otherwise is stale. Conflicts left, or a stale path, end the land, recording nothing
-//!    ([`RepoError::Conflict`], with who last touched each conflicting path on the target since
-//!    the base, found on the same walk, and the stale paths). A merge that leaves `theirs`' tree
-//!    as it is has nothing to land ([`NothingToLandReason::NoChanges`]).
-//! 5. It writes `L` outside the lock: its one parent `theirs`, its delta the merge's, its message
-//!    the request's or the head's, its author the head's, its committer the lander; its metadata
-//!    the head's `agent` and `run_id`, the key as `land_key`, the lander's name as `lander`, the
-//!    request's `lander_metadata`, and `squashed_from`, the chain's ids, oldest first, in hex, a
-//!    space between each two. Its blobs, trees and object are written and flushed before anything
-//!    names them (I1).
-//! 6. It publishes `L`: its insert and the target's move from `theirs` to it, by
-//!    compare-and-swap, in one write transaction, the frame a commit with `advance` writes. A
-//!    target that moved since drops the write, and the next attempt starts from what it names,
-//!    after a wait from the fourth attempt on ([`backoff`]). A failure after the commit point is a
-//!    warning; a journal append that fails (`NotCommitted`), a lock wait that times out (`Busy`)
-//!    and any other error end the land as they are.
-//!
-//! A land that finds its change on the target, landed by a land with its key or there in any
-//! other way, decides so under the store's lock, as a keyed commit's replay is decided: it takes a
-//! write transaction, whose tail check makes durable the frames its snapshot saw (or takes back
-//! those a failed sync left), reads the target there, and drops the transaction without a frame.
-//! A target that names something else then makes another attempt. So a land never answers that it
-//! landed, or had nothing to land, on the strength of a frame a failed sync could still take back.
-//!
-//! When the last attempt lost its race, the land fails with [`RepoError::RetryExhausted`]. A lost
-//! attempt leaves nothing in the journal: the objects it flushed stay, unreferenced, for GC.
-//!
-//! A land with [`LandRequest::expect_target`] (M5) makes one attempt. After step 3, a target that
-//! does not name the expected changeset ends it with [`RepoError::CasMismatch`], before the
-//! merge; so does a publish that loses its race, which never merges again. Its replay check
-//! runs first, so a land whose key landed its change replays it whatever the target names.
-//!
-//! Steps 1 to 4 are the land's preparation, which a rebase shares ([`crate::rebase`]): step 1
-//! starts a land (`Repo::start`), and steps 2 to 4 prepare an attempt's merge
-//! (`Started::prepare`, `Prepared`). A land writes and publishes what they prepared (steps 5
-//! and 6); a rebase commits it.
-//!
-//! The detached land ([`Repo::land_detached`], operations spec §3, the detached form) is the
-//! first attempt without the key walk and the publication: the same chain walk (step 2), merge
-//! (step 4), conflict report and writer of `L` (step 5), then `L`'s insert alone, moving no ref.
-
-mod detached;
-mod key;
-mod publish;
-mod resolve;
+//! The land itself: [`Repo::land`], its request and outcome, and the merge and publication
+//! steps the detached land and the rebase share.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -85,7 +10,7 @@ use swarmops_core::{
     BlobId, Changeset, ChangesetId, DeltaEntry, Hashed, ObjectId, ObjectKind, RepoPath, Signature,
     TreeId,
 };
-use swarmops_merge::diff3::merge_content;
+use swarmops_merge::diff3;
 use swarmops_merge::tree_merge::FileConflict;
 use swarmops_store::{ObjectStore, Recovered};
 
@@ -93,22 +18,20 @@ use crate::commit::{Draft, WrittenChangeset};
 use crate::error::RepoError;
 use crate::merge::MergeOutcome;
 use crate::read::{RepoRead, StoredChangeset};
-use crate::repo::{Repo, ref_error};
+use crate::repo::{self, Repo};
 
-pub use detached::{DetachedLand, DetachedOutcome};
-use key::{KeyFound, TargetWalk};
-pub use publish::{Publication, Published};
-use resolve::Resolving;
-pub use resolve::{Resolution, Resolutions, Side};
+use super::key::{KeyFound, TargetWalk};
+use super::resolve::Resolving;
+use super::{Publication, Published, Resolutions};
 
 /// The metadata key of a landed changeset's idempotency key.
-const LAND_KEY: &str = "land_key";
+pub(super) const LAND_KEY: &str = "land_key";
 
 /// The metadata key that names who landed a changeset: every changeset a land makes carries it.
 const LANDER: &str = "lander";
 
 /// The metadata key of the chain a landed changeset squashed.
-const SQUASHED_FROM: &str = "squashed_from";
+pub(super) const SQUASHED_FROM: &str = "squashed_from";
 
 /// The keys of a head's metadata that a land copies to the changeset it makes: who made the change.
 const COPIED: [&str; 2] = ["agent", "run_id"];
@@ -291,7 +214,7 @@ pub fn backoff(attempt: u32, seed: &[u8]) -> Duration {
 
 impl<O: ObjectStore> Repo<O> {
     /// Lands `req`: merges its change three-way onto the target's head and publishes the result
-    /// as one changeset in one write transaction, by the steps [the module documentation](self)
+    /// as one changeset in one write transaction, by the steps [the module documentation](super)
     /// gives, with their errors. Nothing is recorded unless it lands; a replay writes nothing.
     /// Its resolutions are read before the first attempt: [`RepoError::NotFound`] for an
     /// `against` the store does not hold, [`RepoError::MissingBlob`] for a blob one names by id
@@ -347,11 +270,11 @@ impl<O: ObjectStore> Repo<O> {
         })
     }
 
-    /// Starts a land of `req` (step 1 of [the module documentation](self)): checks the request in
+    /// Starts a land of `req` (step 1 of [the module documentation](super)): checks the request in
     /// a snapshot of its own, in which it reads the target's head, the change's head and base, and
     /// the resolutions. A rebase starts so too ([`crate::rebase`]).
     pub(crate) fn start(&self, mut req: LandRequest) -> Result<Started<'_, O>, RepoError> {
-        swarmops_store::check_ref_name(&req.target).map_err(ref_error)?;
+        swarmops_store::check_ref_name(&req.target).map_err(repo::ref_error)?;
         let read = self.snapshot()?;
         let theirs = target_head(&read, &req.target)?;
         let head = stored(&read, req.head)?;
@@ -398,7 +321,7 @@ impl<O: ObjectStore> Repo<O> {
     /// the ref does not exist.
     fn target_under_lock(&self, target: &str) -> Result<ChangesetId, RepoError> {
         let write = self.meta.write()?;
-        let named = write.get_ref(target).map_err(ref_error)?;
+        let named = write.get_ref(target).map_err(repo::ref_error)?;
         named.ok_or_else(|| RepoError::NotFound(target.to_owned()))
     }
 }
@@ -415,7 +338,7 @@ fn target_head<O: ObjectStore>(
 }
 
 /// Changeset `id` as `read` holds it; [`RepoError::NotFound`] if it does not.
-fn stored<O: ObjectStore>(
+pub(super) fn stored<O: ObjectStore>(
     read: &RepoRead<'_, O>,
     id: ChangesetId,
 ) -> Result<StoredChangeset, RepoError> {
@@ -464,14 +387,14 @@ impl<'r, O: ObjectStore> Started<'r, O> {
     }
 
     /// One attempt's preparation onto the target's head in the snapshot (steps 2 to 4 of [the
-    /// module documentation](self)), with the snapshot, for a caller that records the merge.
+    /// module documentation](super)), with the snapshot, for a caller that records the merge.
     pub(crate) fn prepare(mut self) -> Result<(RepoRead<'r, O>, Prep), RepoError> {
         let prep = self.landing.prepare(&self.read, self.theirs)?;
         Ok((self.read, prep))
     }
 }
 
-/// What an attempt's preparation came to (steps 2 to 4 of [the module documentation](self)).
+/// What an attempt's preparation came to (steps 2 to 4 of [the module documentation](super)).
 pub(crate) enum Prep {
     /// The key's walk found the land made before, on the target's head `.0`: a replay, its
     /// `attempts` not yet counted.
@@ -528,7 +451,7 @@ struct Landing<'r, O: ObjectStore> {
 }
 
 impl<O: ObjectStore> Landing<'_, O> {
-    /// One attempt (steps 2 to 6 of [the module documentation](self)), in `read`, whose target
+    /// One attempt (steps 2 to 6 of [the module documentation](super)), in `read`, whose target
     /// names `theirs`: its preparation, then the write and the publish of what it merged.
     fn attempt(
         &mut self,
@@ -556,7 +479,7 @@ impl<O: ObjectStore> Landing<'_, O> {
         self.publish(prepared, attempt)
     }
 
-    /// Steps 2 to 4 of [the module documentation](self), in `read`, whose target names
+    /// Steps 2 to 4 of [the module documentation](super), in `read`, whose target names
     /// `theirs`: what the land has to do there, or the merge to record.
     fn prepare(&mut self, read: &RepoRead<'_, O>, theirs: ChangesetId) -> Result<Prep, RepoError> {
         // 1. A head on the target's chain.
@@ -626,7 +549,7 @@ impl<O: ObjectStore> Landing<'_, O> {
         })))
     }
 
-    /// Steps 5 and 6 of [the module documentation](self): writes `L` from `prepared`, then
+    /// Steps 5 and 6 of [the module documentation](super): writes `L` from `prepared`, then
     /// publishes it.
     fn publish(&mut self, prepared: Prepared, attempt: u32) -> Result<Attempt, RepoError> {
         let Prepared {
@@ -773,21 +696,21 @@ impl<O: ObjectStore> Landing<'_, O> {
 
 /// What a land records of itself in the changeset it makes, beside what it copies from the head.
 #[derive(Clone, Copy)]
-struct Recorded<'a> {
+pub(super) struct Recorded<'a> {
     /// The land's key, recorded as `land_key`.
-    key: Option<&'a str>,
+    pub(super) key: Option<&'a str>,
     /// Who lands, whose name is recorded as `lander`.
-    lander: &'a Signature,
+    pub(super) lander: &'a Signature,
     /// The lander's own metadata.
-    extra: &'a [(String, Vec<u8>)],
+    pub(super) extra: &'a [(String, Vec<u8>)],
     /// The chain recorded as `squashed_from`, oldest first.
-    squashed: &'a [ChangesetId],
+    pub(super) squashed: &'a [ChangesetId],
 }
 
 /// The metadata of the changeset a land makes of the change whose head is `head`, sorted by key:
 /// the head's `agent` and `run_id`, the land's key, the lander, the lander's own metadata and the
 /// chain, as `recorded` gives them.
-fn metadata(head: &Changeset, recorded: Recorded<'_>) -> Vec<(String, Vec<u8>)> {
+pub(super) fn metadata(head: &Changeset, recorded: Recorded<'_>) -> Vec<(String, Vec<u8>)> {
     let mut metadata: Vec<(String, Vec<u8>)> = (head.metadata.iter())
         .filter(|(key, _)| COPIED.contains(&key.as_str()))
         .cloned()
@@ -810,7 +733,7 @@ fn metadata(head: &Changeset, recorded: Recorded<'_>) -> Vec<(String, Vec<u8>)> 
 /// what a damaged index says: a first-parent walk never takes them, [`RepoRead::walk_step`]):
 /// [`RepoError::MergeChangeset`] for a changeset of it with two parents or more. The land's step
 /// 2 and the detached land's.
-fn chain<O: ObjectStore>(
+pub(super) fn chain<O: ObjectStore>(
     repo: &Repo<O>,
     base: ChangesetId,
     head: ChangesetId,
@@ -834,7 +757,7 @@ fn chain<O: ObjectStore>(
 
 /// The whole merge of a change, `base` to `head`, onto `theirs` (step 4's first attempt): the
 /// one merge the land and the detached land make.
-fn merge_chain<O: ObjectStore>(
+pub(super) fn merge_chain<O: ObjectStore>(
     repo: &Repo<O>,
     base: &StoredChangeset,
     head: &StoredChangeset,
@@ -845,24 +768,24 @@ fn merge_chain<O: ObjectStore>(
         head.changeset.root,
         theirs.changeset.root,
     ];
-    repo.merge_roots(roots, &merge_content)
+    repo.merge_roots(roots, &diff3::merge_content)
 }
 
 /// The three sides of a merge a conflict report names.
 #[derive(Clone, Copy)]
-struct Sides<'a> {
+pub(super) struct Sides<'a> {
     /// The base the change was taken from.
-    base: ChangesetId,
+    pub(super) base: ChangesetId,
     /// The change's head.
-    ours: ChangesetId,
+    pub(super) ours: ChangesetId,
     /// The changeset the change was merged onto.
-    theirs: &'a StoredChangeset,
+    pub(super) theirs: &'a StoredChangeset,
 }
 
 /// The error of a merge onto `sides.theirs` that conflicts, or whose resolutions of `stale` did
 /// not apply: its conflicts, with who last touched each path on `theirs`' first-parent chain since
 /// the base, from `walk`, and the stale paths.
-fn conflict_report<O: ObjectStore>(
+pub(super) fn conflict_report<O: ObjectStore>(
     walk: &mut TargetWalk,
     read: &RepoRead<'_, O>,
     sides: Sides<'_>,
@@ -885,27 +808,27 @@ fn conflict_report<O: ObjectStore>(
 }
 
 /// The changeset a land makes, `L`, to write (step 5).
-struct Squash<'a> {
+pub(super) struct Squash<'a> {
     /// The changeset `L` is made on, its one parent.
-    theirs: &'a StoredChangeset,
+    pub(super) theirs: &'a StoredChangeset,
     /// The change's head, whose author and message `L` takes.
-    head: &'a Changeset,
+    pub(super) head: &'a Changeset,
     /// The merge's delta, applied to `theirs`' tree.
-    delta: Vec<DeltaEntry>,
+    pub(super) delta: Vec<DeltaEntry>,
     /// The merged contents among `L`'s blobs.
-    new_blobs: BTreeMap<BlobId, Vec<u8>>,
+    pub(super) new_blobs: BTreeMap<BlobId, Vec<u8>>,
     /// Who lands: `L`'s committer.
-    lander: Signature,
+    pub(super) lander: Signature,
     /// `L`'s message; `None`: the head's.
-    message: Option<Vec<u8>>,
+    pub(super) message: Option<Vec<u8>>,
     /// `L`'s metadata, sorted ([`metadata`]).
-    metadata: Vec<(String, Vec<u8>)>,
+    pub(super) metadata: Vec<(String, Vec<u8>)>,
 }
 
 /// Writes `L` and flushes it (step 5): its blobs, trees and object are durable on return, before
 /// anything names them (I1). A delta that changes nothing is [`NothingToLandReason::NoChanges`].
 /// The one writer of `L`, the land's and the detached land's.
-fn write_squash<O: ObjectStore>(
+pub(super) fn write_squash<O: ObjectStore>(
     repo: &Repo<O>,
     squash: Squash<'_>,
 ) -> Result<WrittenChangeset, RepoError> {
