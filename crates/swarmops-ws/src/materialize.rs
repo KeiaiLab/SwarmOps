@@ -808,7 +808,7 @@ pub(crate) struct Tree<'a> {
     /// The changeset, a full id.
     rev: String,
     /// The directories read so far, by path ("" the root); none for one the tree lacks.
-    dirs: std::sync::Mutex<HashMap<String, Option<Arc<Vec<TreeEntryOut>>>>>,
+    dirs: std::sync::Mutex<HashMap<String, Option<Arc<[TreeEntryOut]>>>>,
 }
 
 impl<'a> Tree<'a> {
@@ -823,7 +823,7 @@ impl<'a> Tree<'a> {
 
     /// The entries of directory `dir` ("" the root), every page; none when the tree has no
     /// directory there.
-    fn listing(&self, dir: &str) -> Result<Option<Arc<Vec<TreeEntryOut>>>, OpError> {
+    fn listing(&self, dir: &str) -> Result<Option<Arc<[TreeEntryOut]>>, OpError> {
         // 1. Read before.
         if let Some(known) = self.dirs.lock().expect("no reader panicked").get(dir) {
             return Ok(known.clone());
@@ -847,7 +847,7 @@ impl<'a> Tree<'a> {
             };
             entries.extend(page.entries);
             if !page.truncated {
-                break Some(Arc::new(entries));
+                break Some(Arc::from(entries));
             }
             cursor = page.cursor;
         };
