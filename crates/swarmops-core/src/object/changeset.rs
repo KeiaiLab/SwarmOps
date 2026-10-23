@@ -1,10 +1,8 @@
 //! One write-ahead-log entry (storage-core spec §1 layout "SWCS").
 
-use super::codec::{
-    CodecError, Reader, check_strictly_sorted, put_count, put_len_prefixed, reader,
-};
+use super::codec::{self, CodecError, Reader};
 use super::tree::LeafKind;
-use crate::id::{BlobId, ChangesetId, Hashed, ObjectId, ObjectKind, TreeId, hash_object};
+use crate::id::{self, BlobId, ChangesetId, Hashed, ObjectId, ObjectKind, TreeId};
 use crate::path::RepoPath;
 
 const MAGIC: &[u8; 4] = b"SWCS";
@@ -82,8 +80,8 @@ impl Signature {
     }
 
     fn encode(&self, out: &mut Vec<u8>) {
-        put_len_prefixed(out, &self.name);
-        put_len_prefixed(out, &self.email);
+        codec::put_len_prefixed(out, &self.name);
+        codec::put_len_prefixed(out, &self.email);
         out.extend_from_slice(&self.secs.to_le_bytes());
         out.extend_from_slice(&self.offset_secs.to_le_bytes());
         out.push(u8::from(self.negative_zero));
@@ -113,7 +111,7 @@ impl DeltaEntry {
     }
 
     fn encode(&self, out: &mut Vec<u8>) {
-        put_len_prefixed(out, self.path.as_str().as_bytes());
+        codec::put_len_prefixed(out, self.path.as_str().as_bytes());
         match &self.op {
             DeltaOp::Put { kind, id } => {
                 out.push(0);
@@ -125,7 +123,7 @@ impl DeltaEntry {
         match &self.renamed_from {
             Some(from) => {
                 out.push(1);
-                put_len_prefixed(out, from.as_str().as_bytes());
+                codec::put_len_prefixed(out, from.as_str().as_bytes());
             }
             None => out.push(0),
         }
@@ -165,10 +163,10 @@ impl Changeset {
         for d in &self.delta {
             d.validate()?;
         }
-        check_strictly_sorted(&self.delta, |d| d.path.as_str().as_bytes())?;
+        codec::check_strictly_sorted(&self.delta, |d| d.path.as_str().as_bytes())?;
         self.author.validate()?;
         self.committer.validate()?;
-        check_strictly_sorted(&self.metadata, |(k, _)| k.as_bytes())
+        codec::check_strictly_sorted(&self.metadata, |(k, _)| k.as_bytes())
             .map_err(|_| CodecError::UnsortedMetadata)
     }
 
@@ -178,29 +176,29 @@ impl Changeset {
         let mut out = Vec::new();
         out.extend_from_slice(MAGIC);
         out.push(VERSION);
-        put_count(&mut out, self.parents.len());
+        codec::put_count(&mut out, self.parents.len());
         for p in &self.parents {
             out.extend_from_slice(&p.0.0);
         }
         out.extend_from_slice(&self.root.0.0);
         let delta_start = out.len();
-        put_count(&mut out, self.delta.len());
+        codec::put_count(&mut out, self.delta.len());
         for d in &self.delta {
             d.encode(&mut out);
         }
         let delta_end = out.len();
         self.author.encode(&mut out);
         self.committer.encode(&mut out);
-        put_len_prefixed(&mut out, &self.message);
-        put_count(&mut out, self.extra_headers.len());
+        codec::put_len_prefixed(&mut out, &self.message);
+        codec::put_count(&mut out, self.extra_headers.len());
         for (k, v) in &self.extra_headers {
-            put_len_prefixed(&mut out, k);
-            put_len_prefixed(&mut out, v);
+            codec::put_len_prefixed(&mut out, k);
+            codec::put_len_prefixed(&mut out, v);
         }
-        put_count(&mut out, self.metadata.len());
+        codec::put_count(&mut out, self.metadata.len());
         for (k, v) in &self.metadata {
-            put_len_prefixed(&mut out, k.as_bytes());
-            put_len_prefixed(&mut out, v);
+            codec::put_len_prefixed(&mut out, k.as_bytes());
+            codec::put_len_prefixed(&mut out, v);
         }
         Ok((out, delta_start..delta_end))
     }
@@ -212,7 +210,7 @@ impl Changeset {
 
     /// Parses canonical bytes.
     pub fn decode(buf: &[u8]) -> Result<Self, CodecError> {
-        let mut r = reader(buf);
+        let mut r = codec::reader(buf);
         r.magic(*MAGIC, VERSION)?;
         let np = r.count()?;
         let mut parents = Vec::with_capacity(np.min(16));
@@ -255,7 +253,7 @@ impl Changeset {
 
     /// `hash_object(Changeset, encode())`.
     pub fn id(&self) -> Result<ChangesetId, CodecError> {
-        Ok(ChangesetId(hash_object(
+        Ok(ChangesetId(id::hash_object(
             ObjectKind::Changeset,
             &self.encode()?,
         )))
