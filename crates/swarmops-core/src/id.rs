@@ -8,6 +8,7 @@ use crate::error::IdError;
 
 /// A 32-byte BLAKE3 digest identifying one immutable object.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
 pub struct ObjectId(pub [u8; 32]);
 
 impl ObjectId {
@@ -64,6 +65,7 @@ impl FromStr for ObjectId {
 
 /// The three hashed object kinds. The kind is part of the hash input, not of the id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ObjectKind {
     /// Raw file (or symlink target) bytes.
     Blob,
@@ -120,6 +122,7 @@ pub fn hash_object(kind: ObjectKind, payload: &[u8]) -> ObjectId {
 /// computed, and no caller can hand it an id of other bytes. There is no other constructor, and no
 /// way to change the payload in place.
 #[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Hashed {
     kind: ObjectKind,
     id: ObjectId,
@@ -170,6 +173,7 @@ macro_rules! typed_id {
         $(#[$doc])*
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
         #[repr(transparent)]
+        #[non_exhaustive]
         pub struct $name(pub ObjectId);
 
         impl $name {

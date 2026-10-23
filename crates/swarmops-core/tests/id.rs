@@ -45,7 +45,7 @@ fn object_id_hex_parse_cases() {
 }
 
 /// `Display` and `Debug` print what they printed before they wrote from a stack buffer: the
-/// lowercase hex, inside `ObjectId(…)` for `Debug`, with formatting flags such as a width
+/// lowercase hex, inside `ObjectId::new(…)` for `Debug`, with formatting flags such as a width
 /// ignored; the typed ids print the same. A guard: it passes before and after.
 #[test]
 fn display_and_debug_are_unchanged() {
@@ -53,8 +53,8 @@ fn display_and_debug_are_unchanged() {
 
     for id in [
         hash_object(ObjectKind::Blob, b"x"),
-        ObjectId([0; 32]),
-        ObjectId([0xff; 32]),
+        ObjectId::new([0; 32]),
+        ObjectId::new([0xff; 32]),
     ] {
         let hex = id.to_hex();
         assert_eq!(format!("{id}"), hex);
@@ -62,11 +62,11 @@ fn display_and_debug_are_unchanged() {
         assert_eq!(format!("{id:>70}"), hex, "no padding");
         assert_eq!(format!("{id:<70}|"), format!("{hex}|"), "no padding");
         assert_eq!(format!("{id:.8}"), hex, "no truncation");
-        assert_eq!(format!("{}", BlobId(id)), hex);
-        assert_eq!(format!("{}", TreeId(id)), hex);
-        assert_eq!(format!("{}", ChangesetId(id)), hex);
+        assert_eq!(format!("{}", BlobId::new(id)), hex);
+        assert_eq!(format!("{}", TreeId::new(id)), hex);
+        assert_eq!(format!("{}", ChangesetId::new(id)), hex);
         assert_eq!(
-            format!("{:?}", BlobId(id)),
+            format!("{:?}", BlobId::new(id)),
             format!("BlobId(ObjectId({hex}))")
         );
     }

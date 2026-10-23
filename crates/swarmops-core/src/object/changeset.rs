@@ -10,6 +10,7 @@ const VERSION: u8 = 1;
 
 /// Author or committer identity with a git-faithful timestamp.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Signature {
     /// Name bytes, verbatim.
     pub name: Vec<u8>,
@@ -25,6 +26,7 @@ pub struct Signature {
 
 /// What happened to one path relative to the first parent.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DeltaOp {
     /// The path now holds this leaf: a file, an executable or a symlink, never a directory
     /// (a directory follows from the paths of the leaves below it).
@@ -40,6 +42,7 @@ pub enum DeltaOp {
 
 /// One line of a changeset's delta.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DeltaEntry {
     /// Full path from the root.
     pub path: RepoPath,
@@ -52,6 +55,7 @@ pub struct DeltaEntry {
 
 /// A changeset: the unit of work and the WAL entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Changeset {
     /// Parents; index 0 is the mainline parent the delta is relative to.
     pub parents: Vec<ChangesetId>,

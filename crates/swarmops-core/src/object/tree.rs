@@ -11,6 +11,7 @@ const VERSION: u8 = 1;
 /// entry names its target with an [`EntryTarget`], whose [`EntryTarget::kind`] gives this byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum EntryKind {
     /// Regular file, mode 100644.
     File = 0,
@@ -45,6 +46,7 @@ impl EntryKind {
 /// [`EntryKind`] byte of the same name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum LeafKind {
     /// Regular file, mode 100644.
     File = 0,
@@ -85,6 +87,7 @@ impl LeafKind {
 /// canonical layout writes it as the entry's kind byte ([`EntryTarget::kind`]) and id
 /// ([`EntryTarget::id`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum EntryTarget {
     /// A file, an executable or a symlink, and the blob that holds its content (a symlink's:
     /// its target).
@@ -139,6 +142,7 @@ impl EntryTarget {
 
 /// One entry of a tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TreeEntry {
     /// A single path component.
     pub name: String,
@@ -175,6 +179,7 @@ impl TreeEntry {
 
 /// A directory with entries sorted by raw name bytes and unique names.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Tree {
     entries: Vec<TreeEntry>,
 }

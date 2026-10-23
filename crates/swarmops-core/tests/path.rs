@@ -51,7 +51,7 @@ fn one_file_tree_bytes(name: &str, id: [u8; 32]) -> Vec<u8> {
 fn a_tree_name_with_a_slash_is_refused_as_a_slash() {
     use swarmops_core::{BlobId, CodecError, LeafKind, ObjectKind, Tree, TreeEntry, hash_object};
 
-    let blob = BlobId(hash_object(ObjectKind::Blob, b"x"));
+    let blob = BlobId::new(hash_object(ObjectKind::Blob, b"x"));
     let slash = Err(CodecError::BadPath(PathError::Slash));
     for name in ["a/b", "/", "a/", "/a"] {
         let made = Tree::new(vec![TreeEntry::leaf(name, LeafKind::File, blob)]);
@@ -67,7 +67,7 @@ fn a_tree_name_with_a_slash_is_refused_as_a_slash() {
 fn tree_names_are_checked_as_before() {
     use swarmops_core::{BlobId, CodecError, LeafKind, ObjectKind, Tree, TreeEntry, hash_object};
 
-    let blob = BlobId(hash_object(ObjectKind::Blob, b"x"));
+    let blob = BlobId::new(hash_object(ObjectKind::Blob, b"x"));
     for (name, want) in [
         ("", Err(CodecError::BadPath(PathError::Empty))),
         (".", Err(CodecError::BadPath(PathError::DotComponent))),
