@@ -21,18 +21,28 @@ use swarmops_core::{ChangesetId, ObjectId};
 use thiserror::Error;
 
 use crate::error::{LimitKind, StoreError};
-use crate::format::{self, StoreFormat};
+use crate::format::StoreFormat;
 
 /// A frame header: `u32le len | u32le crc32(payload)`.
 pub(crate) const HEADER_LEN: usize = 8;
 
 /// A FORMAT 2 frame header: `u32le len | u32le crc32(payload) | u64le seq | u32le prev_crc |
 /// u32le hcrc`, `hcrc` the CRC of the 20 bytes before it.
-#[allow(dead_code, reason = "the FORMAT 2 journal (the M6 plan's A2) uses it")]
 pub(crate) const HEADER_LEN_V2: usize = 24;
+
+/// The bytes of a FORMAT 2 header that its own CRC covers.
+const HCRC_AT: usize = 20;
 
 /// The most records a frame holds: its record count is a `u16le`.
 pub(crate) const MAX_RECORDS: usize = 65_535;
+
+/// The longest record: a changeset with 255 parents (74 bytes and 32 per parent).
+const MAX_RECORD_LEN: usize = 74 + 32 * 255;
+
+/// The largest payload this build decodes, 539,615,192 bytes: its count, then 65,535 records of
+/// the longest kind. A FORMAT 2 header that checks and announces more (or 0) is no frame a
+/// writer wrote.
+pub(crate) const MAX_PAYLOAD_LEN: usize = 2 + MAX_RECORDS * MAX_RECORD_LEN;
 
 const KIND_CHANGESET: u8 = 1;
 const KIND_REF_MOVE: u8 = 2;
@@ -217,6 +227,12 @@ fn put_optional_id(out: &mut Vec<u8>, id: Option<ChangesetId>) {
 /// whose lengths do not fit the layout, with [`StoreError::Limit`]; no records, which no
 /// transaction appends, with [`StoreError::BadCall`].
 pub(crate) fn encode_frame(records: &[Record]) -> Result<Vec<u8>, StoreError> {
+    encode_behind(HEADER_LEN, records)
+}
+
+/// The bytes of a frame holding `records` behind a header of `header_len` bytes, of which the
+/// first 8 (`len`, `crc`) are written and the rest left 0: [`encode_frame`]'s checks.
+fn encode_behind(header_len: usize, records: &[Record]) -> Result<Vec<u8>, StoreError> {
     if records.is_empty() {
         return Err(StoreError::BadCall(
             "a frame holds at least one record".to_owned(),
@@ -227,22 +243,35 @@ pub(crate) fn encode_frame(records: &[Record]) -> Result<Vec<u8>, StoreError> {
         max: bytes::to_u64(MAX_RECORDS),
         got: bytes::to_u64(records.len()),
     })?;
-    let mut frame = vec![0; HEADER_LEN];
+    let mut frame = vec![0; header_len];
     frame.extend_from_slice(&count.to_le_bytes());
     for record in records {
         record.encode(&mut frame)?;
     }
-    let payload = &frame[HEADER_LEN..];
+    let payload = &frame[header_len..];
     // At most 65,535 records of at most 8,234 bytes (a changeset with 255 parents).
     let len = u32::try_from(payload.len()).expect("a frame payload fits in u32");
     let crc = crc32fast::hash(payload);
     frame[..4].copy_from_slice(&len.to_le_bytes());
-    frame[4..HEADER_LEN].copy_from_slice(&crc.to_le_bytes());
+    frame[4..8].copy_from_slice(&crc.to_le_bytes());
     Ok(frame)
 }
 
+/// The payload CRC a frame's header holds, in either format: its bytes 4 to 8.
+pub(crate) fn payload_crc(frame: &[u8]) -> u32 {
+    u32::from_le_bytes([frame[4], frame[5], frame[6], frame[7]])
+}
+
+/// Writes the place of `frame`, the bytes of a FORMAT 2 frame, into its header: its `seq`, the
+/// payload CRC `prev_crc` of the frame before it, and the header's own CRC over them.
+pub(crate) fn set_place(frame: &mut [u8], seq: u64, prev_crc: u32) {
+    frame[8..16].copy_from_slice(&seq.to_le_bytes());
+    frame[16..HCRC_AT].copy_from_slice(&prev_crc.to_le_bytes());
+    let hcrc = crc32fast::hash(&frame[..HCRC_AT]);
+    frame[HCRC_AT..HEADER_LEN_V2].copy_from_slice(&hcrc.to_le_bytes());
+}
+
 /// A frame header, as [`decode_header_in`] reads it.
-#[allow(dead_code, reason = "the FORMAT 2 journal (the M6 plan's A2) reads it")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FrameHeader {
     /// The payload's length in bytes.
@@ -257,7 +286,6 @@ pub(crate) struct FrameHeader {
 }
 
 /// The size of a frame header in `format`.
-#[allow(dead_code, reason = "the FORMAT 2 journal (the M6 plan's A2) uses it")]
 pub(crate) fn header_len(format: StoreFormat) -> usize {
     match format {
         StoreFormat::V1 => HEADER_LEN,
@@ -267,28 +295,41 @@ pub(crate) fn header_len(format: StoreFormat) -> usize {
 
 /// The bytes of a frame of `format` holding `records`: [`encode_frame`] in FORMAT 1, where
 /// `seq` and `prev_crc` are not written; in FORMAT 2 the frame's seq and the payload CRC of the
-/// frame before it go in its header.
-#[allow(dead_code, reason = "the FORMAT 2 journal (the M6 plan's A2) uses it")]
+/// frame before it go in its header ([`set_place`]).
 pub(crate) fn encode_frame_in(
     format: StoreFormat,
     records: &[Record],
     seq: u64,
     prev_crc: u32,
 ) -> Result<Vec<u8>, StoreError> {
-    let _ = (seq, prev_crc);
     match format {
         StoreFormat::V1 => encode_frame(records),
-        StoreFormat::V2 => Err(format::not_built("FORMAT 2 journal")),
+        StoreFormat::V2 => {
+            let mut frame = encode_behind(HEADER_LEN_V2, records)?;
+            set_place(&mut frame, seq, prev_crc);
+            Ok(frame)
+        }
     }
 }
 
+/// Why the bytes at a FORMAT 2 frame boundary are no header to trust.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BadHeader {
+    /// Its CRC does not match the 20 bytes before it: a torn write, unlisted at the tail; damage
+    /// elsewhere.
+    Crc,
+    /// Its CRC matches, but its length is 0 or more than [`MAX_PAYLOAD_LEN`]: no writer writes
+    /// that, so it is damage wherever it lies.
+    Len,
+}
+
 /// The header at the start of `buf`, a frame boundary, in `format`; `None` if `buf` ends
-/// before the header does. FORMAT 2 checks the header's own CRC before it trusts `len`.
-#[allow(dead_code, reason = "the FORMAT 2 journal (the M6 plan's A2) uses it")]
+/// before the header does. FORMAT 2 checks the header's own CRC before it trusts `len`
+/// ([`BadHeader::Crc`]), then `len` ([`BadHeader::Len`]); FORMAT 1 has no check to make.
 pub(crate) fn decode_header_in(
     format: StoreFormat,
     buf: &[u8],
-) -> Result<Option<FrameHeader>, StoreError> {
+) -> Result<Option<FrameHeader>, BadHeader> {
     match format {
         StoreFormat::V1 => {
             let Some((header, _)) = buf.split_first_chunk::<HEADER_LEN>() else {
@@ -302,7 +343,50 @@ pub(crate) fn decode_header_in(
                 prev_crc: None,
             }))
         }
-        StoreFormat::V2 => Err(format::not_built("FORMAT 2 journal")),
+        StoreFormat::V2 => {
+            let Some((header, _)) = buf.split_first_chunk::<HEADER_LEN_V2>() else {
+                return Ok(None);
+            };
+
+            // 1. The header's own CRC first: nothing in it is trusted before.
+            let u32_at = |at: usize| {
+                u32::from_le_bytes([header[at], header[at + 1], header[at + 2], header[at + 3]])
+            };
+            if crc32fast::hash(&header[..HCRC_AT]) != u32_at(HCRC_AT) {
+                return Err(BadHeader::Crc);
+            }
+
+            // 2. Then its length, against what this build decodes.
+            let len = u32_at(0);
+            if len == 0 || usize::try_from(len).is_ok_and(|len| len > MAX_PAYLOAD_LEN) {
+                return Err(BadHeader::Len);
+            }
+            let (seq, _) = header[8..].split_first_chunk::<8>().expect("24 bytes");
+            Ok(Some(FrameHeader {
+                len,
+                crc: u32_at(4),
+                seq: Some(u64::from_le_bytes(*seq)),
+                prev_crc: Some(u32_at(16)),
+            }))
+        }
+    }
+}
+
+/// Where a frame must sit, which a FORMAT 2 header names: its seq, and the payload CRC of the
+/// frame before it (0 before frame 0). FORMAT 1 headers name neither, and nothing checks it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Place {
+    /// The frame's seq: its index in the journal.
+    pub(crate) seq: u64,
+    /// The payload CRC of the frame before it; 0 for frame 0.
+    pub(crate) prev_crc: u32,
+}
+
+impl FrameHeader {
+    /// Whether the header names `place` as its own: always, in FORMAT 1.
+    pub(crate) fn sits_at(&self, place: Place) -> bool {
+        self.seq.is_none_or(|seq| seq == place.seq)
+            && self.prev_crc.is_none_or(|prev| prev == place.prev_crc)
     }
 }
 
@@ -313,17 +397,29 @@ pub(crate) enum Parsed {
         records: Vec<Record>,
         /// The frame's size in bytes, header included.
         size: usize,
+        /// Its payload's CRC.
+        crc: u32,
     },
     /// The bytes end before the frame does: its header, or the payload the header
     /// announces, is cut short.
     Short,
-    /// The frame is all there, but its payload does not match its CRC.
+    /// The frame is all there, but its payload does not match its CRC; or a FORMAT 2 header
+    /// does not match its own ([`BadHeader::Crc`]).
     BadCrc,
-    /// A header announcing an empty payload (a length of 0), or a payload that matches its
-    /// CRC but does not decode. Listed, either is damage. Unlisted, the second is a frame a
-    /// writer wrote, and the first a header that never reached the disk, a torn write (see
-    /// [`crate::Journal::truncate_torn_tail`]).
-    Invalid,
+    /// A header announcing an empty payload (a length of 0, `zero_len`), or a payload that
+    /// matches its CRC but does not decode. Listed, either is damage. Unlisted, the second is a
+    /// frame a writer wrote, and the first a header that never reached the disk, a torn write
+    /// (see [`crate::Journal::truncate_torn_tail`]). FORMAT 2 has no such header: see
+    /// [`Parsed::Corrupt`].
+    Invalid {
+        /// Whether the header announced a length of 0.
+        zero_len: bool,
+    },
+    /// A FORMAT 2 header that matches its CRC but announces a length no writer writes
+    /// ([`BadHeader::Len`]), or a place that is not its own (a seq other than its position, a
+    /// previous CRC other than the payload CRC of the frame before it): a misplaced, stale or
+    /// lost frame, damage wherever it lies.
+    Corrupt,
 }
 
 /// Parses the frame at the start of `buf`, which runs from a frame boundary to (at most)
@@ -335,20 +431,54 @@ pub(crate) fn parse_frame(buf: &[u8]) -> Parsed {
     let len = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
     let crc = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
     if len == 0 {
-        return Parsed::Invalid;
+        return Parsed::Invalid { zero_len: true };
     }
     let Some(payload) = usize::try_from(len).ok().and_then(|len| rest.get(..len)) else {
         return Parsed::Short;
     };
+    parse_payload(HEADER_LEN, crc, payload)
+}
+
+/// Parses the frame of `format` at the start of `buf`, which runs from a frame boundary to (at
+/// most) the end of the journal, and must sit at `place` (FORMAT 2 checks its header names it).
+/// The journal reads a FORMAT 2 frame header first, from the disk; this parses one at hand, for
+/// the codec's tests.
+#[cfg(test)]
+pub(crate) fn parse_frame_in(format: StoreFormat, buf: &[u8], place: Place) -> Parsed {
+    if format == StoreFormat::V1 {
+        return parse_frame(buf);
+    }
+    let header = match decode_header_in(format, buf) {
+        Ok(Some(header)) => header,
+        Ok(None) => return Parsed::Short,
+        Err(BadHeader::Crc) => return Parsed::BadCrc,
+        Err(BadHeader::Len) => return Parsed::Corrupt,
+    };
+    if !header.sits_at(place) {
+        return Parsed::Corrupt;
+    }
+    let payload = usize::try_from(header.len)
+        .ok()
+        .and_then(|len| buf[HEADER_LEN_V2..].get(..len));
+    match payload {
+        Some(payload) => parse_payload(HEADER_LEN_V2, header.crc, payload),
+        None => Parsed::Short,
+    }
+}
+
+/// Parses `payload`, all of it there, behind a header of `header_len` bytes that gives its CRC
+/// as `crc`.
+pub(crate) fn parse_payload(header_len: usize, crc: u32, payload: &[u8]) -> Parsed {
     if crc32fast::hash(payload) != crc {
         return Parsed::BadCrc;
     }
     match decode_payload(payload) {
         Some(records) => Parsed::Whole {
             records,
-            size: HEADER_LEN + payload.len(),
+            size: header_len + payload.len(),
+            crc,
         },
-        None => Parsed::Invalid,
+        None => Parsed::Invalid { zero_len: false },
     }
 }
 
@@ -410,5 +540,136 @@ impl RecordReader for Reader<'_, BadRecord> {
         let bytes = self.bytes(len)?;
         let text = std::str::from_utf8(bytes).map_err(|_| self.error_at(start))?;
         Ok(text.to_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn compacted(sorted_count: u64) -> Record {
+        Record::Compacted { sorted_count }
+    }
+
+    /// The frame bound is the umbrella design's 539,615,192 bytes, and the longest record is
+    /// a changeset with 255 parents.
+    #[test]
+    fn the_largest_payload_is_65535_of_the_longest_record() {
+        assert_eq!(MAX_PAYLOAD_LEN, 539_615_192);
+        let longest = Record::Changeset {
+            id: ChangesetId::new(ObjectId::new([1; 32])),
+            generation: 2,
+            delta_hash: [3; 32],
+            parents: vec![ChangesetId::new(ObjectId::new([4; 32])); 255],
+        };
+        let mut bytes = Vec::new();
+        longest.encode(&mut bytes).unwrap();
+        assert_eq!(bytes.len(), MAX_RECORD_LEN);
+    }
+
+    /// A FORMAT 2 frame round-trips with its place; FORMAT 1's bytes do not change.
+    #[test]
+    fn frame2_round_trips_with_its_place() {
+        let records = [compacted(1), compacted(2)];
+        let v1 = encode_frame(&records).unwrap();
+        assert_eq!(
+            encode_frame_in(StoreFormat::V1, &records, 9, 9).unwrap(),
+            v1
+        );
+        let v2 = encode_frame_in(StoreFormat::V2, &records, 7, 0xdead_beef).unwrap();
+        assert_eq!(v2[..8], v1[..8], "len and crc as in FORMAT 1");
+        assert_eq!(v2[HEADER_LEN_V2..], v1[HEADER_LEN..], "the same payload");
+        assert_eq!(v2.len(), HEADER_LEN_V2 + v1.len() - HEADER_LEN);
+
+        let header = decode_header_in(StoreFormat::V2, &v2).unwrap().unwrap();
+        assert_eq!(header.seq, Some(7));
+        assert_eq!(header.prev_crc, Some(0xdead_beef));
+        assert_eq!(header.crc, payload_crc(&v1));
+        let place = Place {
+            seq: 7,
+            prev_crc: 0xdead_beef,
+        };
+        let Parsed::Whole {
+            records: got,
+            size,
+            crc,
+        } = parse_frame_in(StoreFormat::V2, &v2, place)
+        else {
+            panic!("a whole frame");
+        };
+        assert_eq!(
+            (got.as_slice(), size, crc),
+            (&records[..], v2.len(), header.crc)
+        );
+
+        // Anywhere else, it is damage, not a torn write.
+        for place in [
+            Place { seq: 8, ..place },
+            Place {
+                prev_crc: 0,
+                ..place
+            },
+        ] {
+            assert!(matches!(
+                parse_frame_in(StoreFormat::V2, &v2, place),
+                Parsed::Corrupt
+            ));
+        }
+
+        // Short of its header or payload it is short; a flipped header byte fails its CRC.
+        assert!(matches!(
+            parse_frame_in(StoreFormat::V2, &v2[..23], place),
+            Parsed::Short
+        ));
+        let cut = &v2[..v2.len() - 1];
+        assert!(matches!(
+            parse_frame_in(StoreFormat::V2, cut, place),
+            Parsed::Short
+        ));
+        assert_eq!(decode_header_in(StoreFormat::V2, &v2[..23]), Ok(None));
+        for at in 0..HEADER_LEN_V2 {
+            let mut bad = v2.clone();
+            bad[at] ^= 0x10;
+            assert_eq!(
+                decode_header_in(StoreFormat::V2, &bad),
+                Err(BadHeader::Crc),
+                "{at}"
+            );
+            assert!(matches!(
+                parse_frame_in(StoreFormat::V2, &bad, place),
+                Parsed::BadCrc
+            ));
+        }
+    }
+
+    /// A header that checks but announces 0 or more than the bound is refused from the header.
+    #[test]
+    fn a_checked_header_past_the_bound_is_refused() {
+        for (len, bad) in [
+            (0, true),
+            (1, false),
+            (MAX_PAYLOAD_LEN, false),
+            (MAX_PAYLOAD_LEN + 1, true),
+        ] {
+            let mut header = encode_frame_in(StoreFormat::V2, &[compacted(0)], 0, 0).unwrap();
+            header.truncate(HEADER_LEN_V2);
+            header[..4].copy_from_slice(&u32::try_from(len).unwrap().to_le_bytes());
+            set_place(&mut header, 0, 0);
+            let decoded = decode_header_in(StoreFormat::V2, &header);
+            assert_eq!(
+                decoded.is_err_and(|e| e == BadHeader::Len),
+                bad,
+                "len {len}"
+            );
+            let parsed = parse_frame_in(
+                StoreFormat::V2,
+                &header,
+                Place {
+                    seq: 0,
+                    prev_crc: 0,
+                },
+            );
+            assert_eq!(matches!(parsed, Parsed::Corrupt), bad, "len {len}");
+        }
     }
 }

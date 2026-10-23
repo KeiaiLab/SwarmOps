@@ -39,7 +39,20 @@
 //! found with one read, and a longer run of zeros is damage. They read
 //! with `read_at` on read-only handles, except that `journal.ckpt`, which
 //! [`Journal::set_ckpt`] replaces by rename, is read by path.
+//!
+//! A FORMAT 2 store keeps the same protocol in `journal2.log`, `journal2.off` and
+//! `journal2.ckpt` (the M6 design §2.2 to §2.4). Each frame's header names its place, its seq and
+//! the payload CRC of the frame before it, behind a CRC of its own; each entry carries the
+//! frame's payload CRC and a CRC of its seq, its offset and that; the checkpoint holds the seq of
+//! the frame at its offset too. So a header that checks but announces a length no writer writes,
+//! or a place not its own (a misplaced, stale or lost frame), is [`StoreError::JournalCorrupt`]
+//! wherever it lies, never a torn tail; an entry that does not check, or names a payload CRC its
+//! frame does not have, is too; and recovery checks the listed frames from the checkpoint's seq
+//! on, not from frame 0. FORMAT 2 reads a frame header first, and refuses a bad one before it
+//! reads a byte of its payload. The calls through [`FsOps`], the syncs among them, are FORMAT
+//! 1's.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Write};
@@ -50,9 +63,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use camino::Utf8PathBuf;
 use swarmops_core::bytes;
 
-use super::frame::{self, Frame, HEADER_LEN, Parsed, Record};
+use super::frame::{self, BadHeader, Frame, HEADER_LEN_V2, Parsed, Place, Record};
 use crate::error::{FileOp, IoFailure, StoreError};
-use crate::format::{self, StoreFormat};
+use crate::format::StoreFormat;
 use crate::fs_ops::{self, FsMethod, FsOps, StoreFs};
 use crate::layout::Layout;
 
@@ -61,8 +74,11 @@ const ENTRY_LEN: u64 = 8;
 
 /// The size of one `journal2.off` entry (FORMAT 2, the M6 design §2.4): `u64le offset | u32le
 /// payload_crc | u32le crc32(seq, offset, payload_crc)`.
-#[allow(dead_code, reason = "the FORMAT 2 journal (the M6 plan's A2) uses it")]
 pub(crate) const ENTRY_LEN_V2: u64 = 16;
+
+/// The size of `journal2.ckpt` (FORMAT 2, the M6 design §2.2): `u64le offset | u64le seq |
+/// u32le crc32(the 16 bytes before)`.
+const CKPT_LEN_V2: usize = 20;
 
 /// How many times [`Journal::frames_from`] and [`Journal::tail_frames_from`] start over when
 /// `journal.off` holds fewer entries when they read them than when they measured it. Only a
@@ -93,6 +109,9 @@ pub struct Journal {
     log: File,
     /// Read-only handle on `journal.off`.
     off: File,
+    /// The store's format: what the files are named, and how frames, entries and the
+    /// checkpoint are laid out.
+    format: StoreFormat,
     tail: Mutex<Tail>,
 }
 
@@ -152,6 +171,42 @@ struct Tail {
     /// torn tail: set by a tail check and by each append, cleared before anything that
     /// could leave it wrong.
     checked: bool,
+    /// The payload CRC of the last frame (0 for none), which the next FORMAT 2 frame's header
+    /// names: right while `checked` is.
+    last_crc: u32,
+}
+
+/// One entry of `journal.off` as a reader takes it: where its frame starts, and in FORMAT 2 the
+/// frame's payload CRC (`None` in FORMAT 1, and for a zeroed entry, whose offset reads 0).
+#[derive(Debug, Clone, Copy)]
+struct Entry {
+    offset: u64,
+    crc: Option<u32>,
+}
+
+/// What a listed frame's header alone says: where the frame ends, and its payload CRC (0 in
+/// FORMAT 1, where only the length is read).
+#[derive(Debug, Clone, Copy)]
+struct Head {
+    end: u64,
+    crc: u32,
+}
+
+/// The bytes of `journal.log` from `start` to `end` that a read parses frames in (see
+/// [`Journal::parse_at`]): read with one `read_at` in FORMAT 1, as its pinned reads are; in
+/// FORMAT 2 frame by frame.
+struct Span {
+    start: u64,
+    end: u64,
+    bytes: Option<Vec<u8>>,
+}
+
+/// A FORMAT 2 checkpoint: an offset, and the seq of the frame that starts there (the number of
+/// frames before it).
+#[derive(Debug, Clone, Copy)]
+struct Ckpt {
+    offset: u64,
+    seq: u64,
 }
 
 /// What one read of the frames ([`Journal::frames_from`], [`Journal::tail_frames_from`]) gives
@@ -178,7 +233,6 @@ impl Journal {
     /// [`Journal::create`], through `fs`, whose root may be another than `layout`'s: a staged
     /// create's files are named where they are, under `meta.tmp/`.
     pub(crate) fn create_in(layout: &Layout, fs: &StoreFs) -> Result<Journal, StoreError> {
-        check_built(layout)?;
         let meta = layout.meta_dir();
         fs.create_dir_all(meta.as_std_path())?;
         for path in [layout.journal_log(), layout.journal_off()] {
@@ -200,7 +254,6 @@ impl Journal {
     /// [`Journal::open`], through `fs`, whose root may be another than `layout`'s (see
     /// [`Journal::create_in`]).
     pub(crate) fn open_in(layout: &Layout, fs: StoreFs) -> Result<Journal, StoreError> {
-        check_built(layout)?;
         let log = fs_ops::open_regular(layout.journal_log())
             .map_err(|e| fs.locate(FileOp::Open, layout.journal_log(), e))?;
         let off = fs_ops::open_regular(layout.journal_off())
@@ -212,8 +265,9 @@ impl Journal {
             frames: (off.metadata())
                 .map_err(|e| fs.locate(FileOp::Stat, layout.journal_off(), e))?
                 .len()
-                / ENTRY_LEN,
+                / entry_len(layout.format()),
             checked: false,
+            last_crc: 0,
         };
         Ok(Self {
             log_path: layout.journal_log(),
@@ -222,6 +276,7 @@ impl Journal {
             fs,
             log,
             off,
+            format: layout.format(),
             tail: Mutex::new(tail),
         })
     }
@@ -256,7 +311,7 @@ impl Journal {
     /// durable after it, a hole a power loss would leave among the listed frames. A cut that
     /// fails too is reported beside the append's error.
     pub fn append_frame(&self, records: &[Record]) -> Result<Frame, StoreError> {
-        let bytes = frame::encode_frame(records)?;
+        let mut bytes = frame::encode_frame_in(self.format, records, 0, 0)?;
         let mut tail = self.tail();
         if !self.still_ends_at(&tail)? {
             tail.checked = false;
@@ -264,12 +319,18 @@ impl Journal {
             (*tail, _) = self.check_tail()?;
         }
         tail.checked = false; // a failed append can leave part of a frame or an entry behind
+
+        // FORMAT 2: the header names the frame's place, which the tail check has found.
+        if self.format == StoreFormat::V2 {
+            frame::set_place(&mut bytes, tail.frames, tail.last_crc);
+        }
+        let crc = frame::payload_crc(&bytes);
         let offset = match self.fs.append_durable(self.log_path.as_std_path(), &bytes) {
             Ok(offset) => offset,
             Err(e) => return Err(self.cut_failed_frame(tail.len, e)),
         };
         // The commit point: the frame is whole and durable.
-        let entry = offset.to_le_bytes();
+        let entry = self.entry_bytes(tail.frames, offset, crc);
         let entry_at = match self.fs.append_durable(self.off_path.as_std_path(), &entry) {
             Ok(entry_at) => entry_at,
             Err(e) => {
@@ -280,11 +341,12 @@ impl Journal {
                 });
             }
         };
-        let seq = entry_at / ENTRY_LEN;
+        let seq = entry_at / self.entry_len();
         *tail = Tail {
             len: offset + bytes::to_u64(bytes.len()),
             frames: seq + 1,
             checked: true,
+            last_crc: crc,
         };
         Ok(Frame {
             seq,
@@ -307,7 +369,8 @@ impl Journal {
     /// Up to `limit` frames in journal order from frame `first` on: the frames `journal.off`
     /// lists whose seq is `first` or greater. Reads the entries (the previous frame's, the
     /// wanted frames', and the next one) with one `read_at`, the previous frame's header with
-    /// another (frame 0 has none: it starts at 0), and the frames' bytes with a third.
+    /// another (frame 0 has none: it starts at 0), and the frames' bytes with a third (FORMAT 2:
+    /// a frame at a time, its header first).
     ///
     /// `journal.off` is measured, and the entries read, before `journal.log`: every frame
     /// listed then was whole and durable before its entry was written, so it is whole in
@@ -341,55 +404,66 @@ impl Journal {
         // the wanted frames' entries, and the next one (where the last wanted frame ends).
         let previous = first.checked_sub(1);
         let count = u64::from(previous.is_some()) + wanted + u64::from(first + wanted < listed);
-        let entries = self.entries(previous.unwrap_or(first), count)?;
+        let entries = self.entries_of(previous.unwrap_or(first), count)?;
         let skip = usize::from(previous.is_some());
         if bytes::to_u64(entries.len()) != count {
             // journal.off was cut since it was measured: entries of the snapshot are gone.
-            let offset = entries.get(skip).copied().unwrap_or(0);
+            let offset = entries.get(skip).map_or(0, |entry| entry.offset);
             return Ok(Attempt::Shrunk { offset });
         }
-        let previous = previous.map(|_| entries[0]);
-        let offsets = &entries[skip..];
-        let wanted = usize::try_from(wanted).map_or(offsets.len(), |n| n.min(offsets.len()));
-        let start = offsets[0];
+        let previous = previous.map(|_| entries[0].offset);
+        let listing = &entries[skip..];
+        let wanted = usize::try_from(wanted).map_or(listing.len(), |n| n.min(listing.len()));
+        let start = listing[0].offset;
         // Only now journal.log, which holds whole every frame listed above.
         let log_len = self.fs.file_len(self.log_path.as_std_path())?;
-        self.check_starts_after(previous, start, log_len)?;
-        let end = offsets
+        let mut prev_crc = self.check_starts_after(previous, start, log_len)?;
+        let end = listing
             .get(wanted)
-            .map_or(log_len, |&next| next.min(log_len));
+            .map_or(log_len, |next| next.offset.min(log_len));
         if start > end {
             return Err(StoreError::JournalCorrupt { offset: start });
         }
-        let buf = self.read_log(start, end - start)?;
+        let span = self.span(start, end)?;
 
+        // Each listed frame where the one before it ends, whole, at its own place, with the
+        // payload CRC its entry names.
         let mut frames = Vec::with_capacity(wanted);
-        let mut at = 0;
-        for (frame_seq, &offset) in (first..).zip(&offsets[..wanted]) {
-            if offset != start + bytes::to_u64(at) {
+        let mut at = start;
+        for (frame_seq, entry) in (first..).zip(&listing[..wanted]) {
+            let offset = entry.offset;
+            if offset != at {
                 return Err(StoreError::JournalCorrupt { offset });
             }
-            match frame::parse_frame(&buf[at..]) {
-                Parsed::Whole { records, size } => {
+            let place = Place {
+                seq: frame_seq,
+                prev_crc,
+            };
+            match self.parse_at(&span, offset, place)? {
+                Parsed::Whole { records, size, crc } if entry.lists(crc) => {
                     frames.push(Frame {
                         seq: frame_seq,
                         offset,
                         records,
                     });
-                    at += size;
+                    at += bytes::to_u64(size);
+                    prev_crc = crc;
                 }
                 _ => return Err(StoreError::JournalCorrupt { offset }),
             }
         }
-        if let Some(&next) = offsets.get(wanted)
-            && next != start + bytes::to_u64(at)
+        if let Some(next) = listing.get(wanted)
+            && next.offset != at
         {
-            return Err(StoreError::JournalCorrupt { offset: next });
+            return Err(StoreError::JournalCorrupt {
+                offset: next.offset,
+            });
         }
         Ok(Attempt::Read(frames))
     }
 
-    /// Every frame from `offset` to the end of `journal.log`, read with one `read_at`: what
+    /// Every frame from `offset` to the end of `journal.log`, read with one `read_at` (FORMAT 2:
+    /// a frame at a time, its header first): what
     /// a reader applies past [`Journal::ckpt`]. `offset` must be a frame boundary: 0, a
     /// listed frame's start, or the end of the last listed frame. Zeroed entries at the end of
     /// `journal.off`, past frame 0, are not listings: a power loss between an entry's append
@@ -448,7 +522,7 @@ impl Journal {
         };
         // Where each listed frame from `first` on starts, and where the listed frame just
         // before the read and the one before that start.
-        let entries = self.entries(first, listed - first)?;
+        let entries = self.entries_of(first, listed - first)?;
         if bytes::to_u64(entries.len()) != listed - first {
             return shrunk();
         }
@@ -471,17 +545,20 @@ impl Journal {
         // The listed frame just before the read (the last listed one, if the read starts past
         // them all) starts where the one listed before it ends, which a zeroed or stale entry
         // does not, and ends where the read starts. With none before it, the read starts at
-        // frame 0, at 0.
-        let follows = if let Some((previous, before)) = before {
+        // frame 0, at 0. Its payload CRC is what the first frame read names as the one before.
+        let (follows, mut prev_crc) = if let Some((previous, before)) = before {
             self.check_starts_after(previous, before, log_len)?;
-            self.frame_end(before, log_len)? == Some(offset)
-        } else {
-            if let Some(&start) = entries.first() {
-                self.check_starts_after(None, start, log_len)?;
+            match self.frame_head(before, log_len)? {
+                Some(head) => (head.end == offset, head.crc),
+                None => (false, 0),
             }
-            offset == 0
+        } else {
+            if let Some(entry) = entries.first() {
+                self.check_starts_after(None, entry.offset, log_len)?;
+            }
+            (offset == 0, 0)
         };
-        let is_boundary = follows && entries.first().is_none_or(|&start| start == offset);
+        let is_boundary = follows && entries.first().is_none_or(|entry| entry.offset == offset);
         if !is_boundary {
             return Err(StoreError::JournalCorrupt { offset });
         }
@@ -490,39 +567,39 @@ impl Journal {
                 .ok()
                 .and_then(|i| entries.get(i).copied())
         };
-        let buf = self.read_log(offset, log_len - offset)?;
+        let span = self.span(offset, log_len)?;
 
         let mut frames = Vec::new();
         let mut seq = first;
-        let mut at = 0;
-        while at < buf.len() {
-            let frame_offset = offset + bytes::to_u64(at);
-            match frame::parse_frame(&buf[at..]) {
-                Parsed::Whole { records, size } => {
+        let mut at = offset;
+        while at < span.end {
+            match self.parse_at(&span, at, Place { seq, prev_crc })? {
+                Parsed::Whole { records, size, crc } => {
                     if let Some(entry) = listed_at(seq)
-                        && entry != frame_offset
+                        && (entry.offset != at || !entry.lists(crc))
                     {
-                        return Err(StoreError::JournalCorrupt { offset: entry });
+                        return Err(StoreError::JournalCorrupt {
+                            offset: entry.offset,
+                        });
                     }
                     frames.push(Frame {
                         seq,
-                        offset: frame_offset,
+                        offset: at,
                         records,
                     });
                     seq += 1;
-                    at += size;
+                    at += bytes::to_u64(size);
+                    prev_crc = crc;
                 }
-                parsed if may_be_torn(&parsed, seq, listed, &buf[at..]) => break,
-                _ => {
-                    return Err(StoreError::JournalCorrupt {
-                        offset: frame_offset,
-                    });
-                }
+                parsed if may_be_torn(&parsed, seq, listed) => break,
+                _ => return Err(StoreError::JournalCorrupt { offset: at }),
             }
         }
         // journal.log ended before a listed frame: that frame is missing.
         if let Some(entry) = listed_at(seq) {
-            return Err(StoreError::JournalCorrupt { offset: entry });
+            return Err(StoreError::JournalCorrupt {
+                offset: entry.offset,
+            });
         }
         Ok(Attempt::Read(frames))
     }
@@ -608,7 +685,7 @@ impl Journal {
             .off
             .metadata()
             .map_err(|e| self.off_failed(FileOp::Stat, e))?;
-        let whole = off_len.len() / ENTRY_LEN;
+        let whole = off_len.len() / self.entry_len();
         let (from, entries) = self.last_entries(whole)?;
         listing(whole, from, &entries)
     }
@@ -618,18 +695,22 @@ impl Journal {
     /// of `meta/journal.ckpt` (named by its place in the store, never by the store's root, a
     /// host path), as is every other failure to read it; the read is capped at 9 bytes, so a
     /// crafted file of huge length is never read into memory.
+    ///
+    /// FORMAT 2's `journal2.ckpt` holds the seq of the frame at that offset too, and a CRC of
+    /// both: a file of any length but 20, or failing its CRC, is `InvalidData`; an offset that
+    /// the seq's entry of `journal2.off` does not hold (nor, for the seq past the last entry,
+    /// the end of the last listed frame) is [`StoreError::JournalCorrupt`] at the offset.
     pub fn ckpt(&self) -> Result<u64, StoreError> {
-        let failed = |e| {
-            self.fs
-                .locate(FileOp::Fs(FsMethod::Read), &self.ckpt_path, e)
-        };
-        let mut bytes = Vec::with_capacity(9);
-        match fs_ops::open_regular(&self.ckpt_path) {
-            Ok(file) => {
-                io::Read::read_to_end(&mut io::Read::take(file, 9), &mut bytes).map_err(failed)?
-            }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
-            Err(e) => return Err(failed(e).into()),
+        match self.format {
+            StoreFormat::V1 => self.ckpt_v1(),
+            StoreFormat::V2 => Ok(self.ckpt_v2()?.offset),
+        }
+    }
+
+    /// [`Journal::ckpt`] in FORMAT 1.
+    fn ckpt_v1(&self) -> Result<u64, StoreError> {
+        let Some(bytes) = self.read_ckpt(9)? else {
+            return Ok(0);
         };
         let offset = <[u8; 8]>::try_from(bytes.as_slice()).map_err(|_| {
             let length = if bytes.len() > 8 {
@@ -637,19 +718,128 @@ impl Journal {
             } else {
                 bytes.len().to_string()
             };
-            failed(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("holds {length} bytes, not a u64le"),
-            ))
+            self.ckpt_malformed(format!("holds {length} bytes, not a u64le"))
         })?;
         Ok(u64::from_le_bytes(offset))
     }
 
-    /// Stores `offset` as the checkpoint, replacing the old one atomically and durably.
-    pub fn set_ckpt(&self, offset: u64) -> Result<(), StoreError> {
+    /// The FORMAT 2 checkpoint, checked against `journal2.off` (see [`Journal::ckpt`]).
+    fn ckpt_v2(&self) -> Result<Ckpt, StoreError> {
+        let Some(bytes) = self.read_ckpt(bytes::to_u64(CKPT_LEN_V2 + 1))? else {
+            return Ok(Ckpt { offset: 0, seq: 0 });
+        };
+        let Ok(bytes) = <[u8; CKPT_LEN_V2]>::try_from(bytes.as_slice()) else {
+            let length = if bytes.len() > CKPT_LEN_V2 {
+                format!("more than {CKPT_LEN_V2}")
+            } else {
+                bytes.len().to_string()
+            };
+            let why = format!("holds {length} bytes, not an offset, a seq and their CRC");
+            return Err(self.ckpt_malformed(why).into());
+        };
+        let (fields, crc) = bytes.split_at(16);
+        if crc32fast::hash(fields) != u32::from_le_bytes(crc.try_into().expect("4 bytes")) {
+            return Err(self.ckpt_malformed("fails its CRC".to_owned()).into());
+        }
+        let (offset, seq) = fields.split_at(8);
+        let ckpt = Ckpt {
+            offset: u64::from_le_bytes(offset.try_into().expect("8 bytes")),
+            seq: u64::from_le_bytes(seq.try_into().expect("8 bytes")),
+        };
+
+        // The entry of the checkpoint's seq holds its offset; past the last listed one, the
+        // last listed frame ends there. The zeroed entries a power loss leaves at the end of
+        // journal2.off list nothing ([`Journal::frame_count`]): the next frame's, never synced,
+        // may be one. Measured on the handles: no FsOps call.
+        let listed = self.frame_count()?;
+        let agrees = match ckpt.seq.checked_sub(1) {
+            None => ckpt.offset == 0,
+            Some(_) if ckpt.seq < listed => self.entry(ckpt.seq)? == ckpt.offset,
+            Some(last) if ckpt.seq == listed => {
+                let log_len = (self.log.metadata())
+                    .map_err(|e| self.log_failed(FileOp::Stat, e))?
+                    .len();
+                self.frame_end(self.entry(last)?, log_len)? == Some(ckpt.offset)
+            }
+            Some(_) => false,
+        };
+        if !agrees {
+            return Err(StoreError::JournalCorrupt {
+                offset: ckpt.offset,
+            });
+        }
+        Ok(ckpt)
+    }
+
+    /// The bytes of the checkpoint file, at most `cap` of them; `None` if there is none.
+    fn read_ckpt(&self, cap: u64) -> Result<Option<Vec<u8>>, IoFailure> {
+        let failed = |e| {
+            self.fs
+                .locate(FileOp::Fs(FsMethod::Read), &self.ckpt_path, e)
+        };
+        let mut bytes = Vec::new();
+        match fs_ops::open_regular(&self.ckpt_path) {
+            Ok(file) => {
+                io::Read::read_to_end(&mut io::Read::take(file, cap), &mut bytes).map_err(failed)?
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(failed(e)),
+        };
+        Ok(Some(bytes))
+    }
+
+    /// The checkpoint file is no checkpoint, for the reason `why`: `InvalidData`, a failed read.
+    fn ckpt_malformed(&self, why: String) -> IoFailure {
+        let e = io::Error::new(io::ErrorKind::InvalidData, why);
         self.fs
-            .atomic_replace(self.ckpt_path.as_std_path(), &offset.to_le_bytes())?;
+            .locate(FileOp::Fs(FsMethod::Read), &self.ckpt_path, e)
+    }
+
+    /// Stores `offset` as the checkpoint, replacing the old one atomically and durably.
+    ///
+    /// FORMAT 2 stores the seq of the frame at `offset` with it: the one past the last frame
+    /// this handle appended or listed, when `offset` is where it saw the journal end; else the
+    /// frame `journal2.off` lists there. An offset that is no frame boundary it lists (where a
+    /// listed frame starts, or where the last one ends) is [`StoreError::BadCall`].
+    pub fn set_ckpt(&self, offset: u64) -> Result<(), StoreError> {
+        let bytes = match self.format {
+            StoreFormat::V1 => offset.to_le_bytes().to_vec(),
+            StoreFormat::V2 => ckpt_bytes(offset, self.seq_at(offset)?),
+        };
+        self.fs
+            .atomic_replace(self.ckpt_path.as_std_path(), &bytes)?;
         Ok(())
+    }
+
+    /// The seq of the frame at `offset`, a frame boundary: see [`Journal::set_ckpt`].
+    fn seq_at(&self, offset: u64) -> Result<u64, StoreError> {
+        if offset == 0 {
+            return Ok(0);
+        }
+        let tail = *self.tail();
+        if tail.checked && tail.len == offset {
+            return Ok(tail.frames);
+        }
+
+        // By journal.off: the listed frame that starts at `offset`, or the end of the last one.
+        let listed = self.frame_count()?;
+        let seq = self.first_at_or_after(offset, listed)?;
+        let at_boundary = match listed.checked_sub(1) {
+            _ if seq < listed => self.entry(seq)? == offset,
+            Some(last) => {
+                let log_len = (self.log.metadata())
+                    .map_err(|e| self.log_failed(FileOp::Stat, e))?
+                    .len();
+                self.frame_end(self.entry(last)?, log_len)? == Some(offset)
+            }
+            None => false,
+        };
+        if !at_boundary {
+            return Err(StoreError::BadCall(format!(
+                "a checkpoint at {offset}, where no frame the journal lists starts or ends"
+            )));
+        }
+        Ok(seq)
     }
 
     /// What [`Journal::append_frame`] returns when the append of its frame to `journal.log`,
@@ -680,7 +870,7 @@ impl Journal {
     /// failed must not stay listed while later entries are made durable after it. A cut that
     /// fails too is told beside `e`, as what else failed.
     fn cut_failed_entries(&self, listed: u64, e: IoFailure) -> IoFailure {
-        let end = listed * ENTRY_LEN;
+        let end = listed * self.entry_len();
         let untouched = matches!(self.off.metadata(), Ok(meta) if meta.len() == end);
         let cut = if untouched {
             Ok(())
@@ -773,7 +963,9 @@ impl Journal {
                 .metadata()
                 .map_err(|e| self.off_failed(FileOp::Stat, e))
         };
-        Ok(tail.checked && log()?.len() == tail.len && off()?.len() == tail.frames * ENTRY_LEN)
+        Ok(tail.checked
+            && log()?.len() == tail.len
+            && off()?.len() == tail.frames * self.entry_len())
     }
 
     /// The work of [`Journal::repair_tail`]: returns the journal's new end and what it changed.
@@ -785,7 +977,8 @@ impl Journal {
         // MAX_ZEROED of them (more is damage, and nothing changes), and the frame left last is
         // checked as the last listed one. Under the lock nothing cuts journal.off: an entry gone
         // since it was measured fails the check.
-        let whole = off_len / ENTRY_LEN;
+        let entry_len = self.entry_len();
+        let whole = off_len / entry_len;
         let (from, entries) = self.last_entries(whole)?;
         if bytes::to_u64(entries.len()) < whole - from {
             let gone = io::Error::from(io::ErrorKind::UnexpectedEof);
@@ -794,78 +987,76 @@ impl Journal {
         let listed = listing(whole, from, &entries)?;
         // Read from the last listed frame's start: that frame is checked again, and the
         // frames `journal.off` does not list yet follow it.
-        let start = match listed.checked_sub(1) {
-            Some(last) => self.entry(last)?,
-            None => 0,
+        let last_entry = match listed.checked_sub(1) {
+            Some(last) => self.entry_of(last)?,
+            None => Entry {
+                offset: 0,
+                crc: None,
+            },
         };
+        let start = last_entry.offset;
         if start > log_len {
             return Err(StoreError::JournalCorrupt { offset: start });
         }
-        let buf = self.read_log(start, log_len - start)?;
-        let mut at = 0; // where in `buf` the unlisted frames begin
-        if let Some(last) = listed.checked_sub(1) {
-            let previous_start = self.entry_before(last)?;
-            self.check_starts_after(previous_start, start, log_len)?;
-            // And the frame before it starts where the one listed before that ends (frame 0
-            // at 0), as readers check the frame just before where they read: a zeroed or
-            // stale entry there would otherwise wait, behind a clean tail, for a repair to walk
-            // journal.off whole.
-            if let Some(previous_start) = previous_start {
-                self.check_starts_after(self.entry_before(last - 1)?, previous_start, log_len)?;
-            }
-            // It was whole and durable before it was listed: cut short, missing, failing its
-            // CRC or not decoding, it is damage, and nothing is cut.
-            match frame::parse_frame(&buf) {
-                Parsed::Whole { size, .. } => at = size,
-                _ => return Err(StoreError::JournalCorrupt { offset: start }),
-            }
-        }
+        let span = self.span(start, log_len)?;
+        // Where the unlisted frames begin, and the payload CRC of the frame before them.
+        let (mut at, mut prev_crc) = match listed.checked_sub(1) {
+            Some(last) => self.check_last_listed(last, last_entry, &span, log_len)?,
+            None => (0, 0),
+        };
         let unlisted_at = at;
-        let mut unlisted = Vec::new();
+        let mut unlisted = Vec::new(); // each unlisted frame's offset and payload CRC
         let mut cut = None;
-        while at < buf.len() {
-            let offset = start + bytes::to_u64(at);
-            match frame::parse_frame(&buf[at..]) {
-                Parsed::Whole { size, .. } => {
-                    unlisted.push(offset);
-                    at += size;
+        while at < span.end {
+            let place = Place {
+                seq: listed + bytes::to_u64(unlisted.len()),
+                prev_crc,
+            };
+            match self.parse_at(&span, at, place)? {
+                Parsed::Whole { size, crc, .. } => {
+                    unlisted.push((at, crc));
+                    at += bytes::to_u64(size);
+                    prev_crc = crc;
                 }
-                parsed if is_torn_unlisted(&parsed, &buf[at..]) => {
-                    cut = Some(offset);
+                parsed if is_torn_unlisted(&parsed) => {
+                    cut = Some(at);
                     break;
                 }
-                _ => return Err(StoreError::JournalCorrupt { offset }),
+                _ => return Err(StoreError::JournalCorrupt { offset: at }),
             }
         }
 
         if cut.is_some() || !unlisted.is_empty() {
             // About to cut journal.log or list frames: garbage in journal.off could make that
             // destroy a committed frame or list one under a wrong seq, so first every listed
-            // frame is checked. Only a crash's repair pays for this.
+            // frame is checked (in FORMAT 2, from the checkpoint's on). Only a crash's repair
+            // pays for this.
             self.check_listed_chain(listed, log_len)?;
         }
-        if off_len != listed * ENTRY_LEN {
+        if off_len != listed * entry_len {
             self.fs
-                .truncate(self.off_path.as_std_path(), listed * ENTRY_LEN)?;
+                .truncate(self.off_path.as_std_path(), listed * entry_len)?;
         }
         let mut rewritten = false;
-        if let Some(&from) = unlisted.first() {
+        if let Some(&(from, _)) = unlisted.first() {
+            // The frames' bytes, read before the sync: a failed one may drop the pages.
+            let frames = self.span_bytes(&span, unlisted_at, at)?;
             // Their writer may have died after its write and before its sync, so their bytes
             // may still be only in the page cache: a listed frame must be durable. If the sync
             // fails, no later one can vouch for them: they are written afresh.
             if let Err(e) = self.fs.sync_data(self.log_path.as_std_path()) {
                 let seqs = listed..=listed + bytes::to_u64(unlisted.len()) - 1;
-                self.write_afresh(from, seqs, &buf[unlisted_at..at], &e)?;
+                self.write_afresh(from, seqs, &frames, &e)?;
                 rewritten = true;
             }
         }
-        for (at, offset) in (listed..).zip(&unlisted) {
-            let entry = offset.to_le_bytes();
+        for (seq, &(offset, crc)) in (listed..).zip(&unlisted) {
+            let entry = self.entry_bytes(seq, offset, crc);
             if let Err(e) = self.fs.append_durable(self.off_path.as_std_path(), &entry) {
                 // The caller's own transaction never began: nothing of it is committed, and the
                 // next tail check lists the frame (storage spec §2 rule 3 (b)).
                 return Err(StoreError::NotCommitted {
-                    source: self.cut_failed_entries(at, e),
+                    source: self.cut_failed_entries(seq, e),
                 });
             }
         }
@@ -878,9 +1069,10 @@ impl Journal {
             self.fs.truncate(self.log_path.as_std_path(), cut)?;
         }
         let tail = Tail {
-            len: start + bytes::to_u64(at),
+            len: at,
             frames: listed + bytes::to_u64(unlisted.len()),
             checked: true,
+            last_crc: prev_crc,
         };
         let frames_listed = bytes::to_u64(unlisted.len());
         let repair = TailRepair {
@@ -890,28 +1082,83 @@ impl Journal {
             }),
             frames_listed,
             frames_rewritten: if rewritten { frames_listed } else { 0 },
-            off_bytes_dropped: off_len - listed * ENTRY_LEN,
+            off_bytes_dropped: off_len - listed * entry_len,
         };
         Ok((tail, repair))
     }
 
+    /// The tail check's check of the last listed frame, `last`, listed by `entry`, at the start
+    /// of `span`: it starts where the frame listed before it ends, and that one where the one
+    /// before ends; it reads whole. Returns where it ends, and its payload CRC.
+    fn check_last_listed(
+        &self,
+        last: u64,
+        entry: Entry,
+        span: &Span,
+        log_len: u64,
+    ) -> Result<(u64, u32), StoreError> {
+        let start = entry.offset;
+        let previous_start = self.entry_before(last)?;
+        let prev_crc = self.check_starts_after(previous_start, start, log_len)?;
+
+        // And the frame before it starts where the one listed before that ends (frame 0 at 0),
+        // as readers check the frame just before where they read: a zeroed or stale entry there
+        // would otherwise wait, behind a clean tail, for a repair to walk journal.off whole.
+        if let Some(previous_start) = previous_start {
+            self.check_starts_after(self.entry_before(last - 1)?, previous_start, log_len)?;
+        }
+
+        // It was whole and durable before it was listed: cut short, missing, failing its CRC,
+        // not decoding or away from its place, it is damage, and nothing is cut.
+        let place = Place {
+            seq: last,
+            prev_crc,
+        };
+        match self.parse_at(span, start, place)? {
+            Parsed::Whole { size, crc, .. } if entry.lists(crc) => {
+                Ok((start + bytes::to_u64(size), crc))
+            }
+            _ => Err(StoreError::JournalCorrupt { offset: start }),
+        }
+    }
+
     /// Checks that the first `listed` entries list sound frames: each starts where the one
-    /// listed before it ends (frame 0 at 0) and reads whole, its CRC included. A failure is
+    /// listed before it ends (frame 0 at 0) and reads whole, its CRC included (in FORMAT 2, at
+    /// its own place, with the payload CRC its entry names). A failure is
     /// [`StoreError::JournalCorrupt`] at that entry's offset. Reads every listed frame, one
-    /// `read_at` each (and its header with another).
+    /// `read_at` each (and its header with another); FORMAT 2, whose entries carry checksums of
+    /// their own, only those from the checkpoint's seq on.
     fn check_listed_chain(&self, listed: u64, log_len: u64) -> Result<(), StoreError> {
-        let mut next = 0;
-        for start in self.entries(0, listed)? {
+        let from = match self.format {
+            StoreFormat::V1 => 0,
+            StoreFormat::V2 => self.ckpt_v2()?.seq.min(listed),
+        };
+        let (mut next, mut prev_crc) = match from.checked_sub(1) {
+            None => (0, 0),
+            Some(before) => {
+                let start = self.entry(before)?;
+                match self.frame_head(start, log_len)? {
+                    Some(head) => (head.end, head.crc),
+                    None => return Err(StoreError::JournalCorrupt { offset: start }),
+                }
+            }
+        };
+        for (seq, entry) in (from..).zip(self.entries_of(from, listed - from)?) {
+            let start = entry.offset;
             if start != next {
                 return Err(StoreError::JournalCorrupt { offset: start });
             }
             let Some(end) = self.frame_end(start, log_len)? else {
                 return Err(StoreError::JournalCorrupt { offset: start });
             };
-            let bytes = self.read_log(start, end - start)?;
-            if !matches!(frame::parse_frame(&bytes), Parsed::Whole { size, .. } if size == bytes.len())
-            {
-                return Err(StoreError::JournalCorrupt { offset: start });
+            let span = self.span(start, end)?;
+            match self.parse_at(&span, start, Place { seq, prev_crc })? {
+                Parsed::Whole { size, crc, .. }
+                    if bytes::to_u64(size) == end - start && entry.lists(crc) =>
+                {
+                    prev_crc = crc;
+                }
+                _ => return Err(StoreError::JournalCorrupt { offset: start }),
             }
             next = end;
         }
@@ -927,7 +1174,7 @@ impl Journal {
     /// at 0. One `read_at` of at most the last 513 entries; `None` where it finds fewer than
     /// were measured: a writer cut the file since.
     fn listed(&self) -> Result<Option<u64>, StoreError> {
-        let whole = self.fs.file_len(self.off_path.as_std_path())? / ENTRY_LEN;
+        let whole = self.fs.file_len(self.off_path.as_std_path())? / self.entry_len();
         let (from, entries) = self.last_entries(whole)?;
         if bytes::to_u64(entries.len()) < whole - from {
             return Ok(None);
@@ -952,61 +1199,189 @@ impl Journal {
     }
 
     /// Checks that the listed frame at `start` starts where the frame listed before it, at
-    /// `previous_start`, ends (frame 0, with none before it, at 0). An entry that does not
-    /// (zeroed, stale, or pointing into a frame) is garbage: frames listed or numbered after
-    /// it would be wrong, and cutting at it could destroy a whole frame.
+    /// `previous_start`, ends (frame 0, with none before it, at 0), and returns that frame's
+    /// payload CRC (0 for none, and in FORMAT 1). An entry that does not (zeroed, stale, or
+    /// pointing into a frame) is garbage: frames listed or numbered after it would be wrong, and
+    /// cutting at it could destroy a whole frame.
     fn check_starts_after(
         &self,
         previous_start: Option<u64>,
         start: u64,
         log_len: u64,
-    ) -> Result<(), StoreError> {
-        let previous_end = match previous_start {
-            Some(previous_start) => self.frame_end(previous_start, log_len)?,
-            None => Some(0),
+    ) -> Result<u32, StoreError> {
+        let previous = match previous_start {
+            Some(previous_start) => self.frame_head(previous_start, log_len)?,
+            None => Some(Head { end: 0, crc: 0 }),
         };
-        if previous_end == Some(start) {
-            Ok(())
-        } else {
-            Err(StoreError::JournalCorrupt { offset: start })
+        match previous {
+            Some(head) if head.end == start => Ok(head.crc),
+            _ => Err(StoreError::JournalCorrupt { offset: start }),
         }
+    }
+
+    /// The size of one entry of `journal.off` in this store's format.
+    fn entry_len(&self) -> u64 {
+        entry_len(self.format)
+    }
+
+    /// The bytes of the entry listing frame `seq` at `offset`, whose payload CRC is `crc` (which
+    /// FORMAT 1 does not hold).
+    fn entry_bytes(&self, seq: u64, offset: u64, crc: u32) -> Vec<u8> {
+        let mut entry = offset.to_le_bytes().to_vec();
+        if self.format == StoreFormat::V2 {
+            entry.extend_from_slice(&crc.to_le_bytes());
+            entry.extend_from_slice(&entry_crc(seq, offset, crc).to_le_bytes());
+        }
+        entry
     }
 
     /// Entry `index` of `journal.off`: where frame `index` starts.
     fn entry(&self, index: u64) -> Result<u64, StoreError> {
-        let mut bytes = [0; 8];
-        (self.off.read_exact_at(&mut bytes, index * ENTRY_LEN))
+        Ok(self.entry_of(index)?.offset)
+    }
+
+    /// Entry `index` of `journal.off`, as [`Journal::entries_of`] decodes it.
+    fn entry_of(&self, index: u64) -> Result<Entry, StoreError> {
+        let mut bytes = vec![0; usize::try_from(self.entry_len()).expect("8 or 16")];
+        (self.off.read_exact_at(&mut bytes, index * self.entry_len()))
             .map_err(|e| self.off_failed(FileOp::ReadAt, e))?;
-        Ok(u64::from_le_bytes(bytes))
+        decode_entry(self.format, index, &bytes)
     }
 
     /// Up to `count` entries of `journal.off` from entry `first`, in one `read_at`.
     fn entries(&self, first: u64, count: u64) -> Result<Vec<u64>, StoreError> {
-        let bytes = read_upto(&self.off, first * ENTRY_LEN, count * ENTRY_LEN)
+        let entries = self.entries_of(first, count)?;
+        Ok(entries.iter().map(|entry| entry.offset).collect())
+    }
+
+    /// [`Journal::entries`], with each entry's payload CRC (FORMAT 2). An entry that does not
+    /// match its own checksum is [`StoreError::JournalCorrupt`] at the offset it holds; a zeroed
+    /// one reads as offset 0, as in FORMAT 1.
+    fn entries_of(&self, first: u64, count: u64) -> Result<Vec<Entry>, StoreError> {
+        let len = self.entry_len();
+        let bytes = read_upto(&self.off, first * len, count * len)
             .map_err(|e| self.off_failed(FileOp::ReadAt, e))?;
-        let (entries, _partial) = bytes.as_chunks::<8>();
-        Ok(entries
-            .iter()
-            .map(|entry| u64::from_le_bytes(*entry))
-            .collect())
+        let len = usize::try_from(len).expect("8 or 16");
+        (first..)
+            .zip(bytes.chunks_exact(len))
+            .map(|(seq, entry)| decode_entry(self.format, seq, entry))
+            .collect()
     }
 
     /// Where the frame at `offset` ends, judged by its header alone; `None` if the header,
     /// or the payload it announces, runs past `log_len`.
     fn frame_end(&self, offset: u64, log_len: u64) -> Result<Option<u64>, StoreError> {
-        let header_end = offset.checked_add(bytes::to_u64(HEADER_LEN));
+        Ok(self.frame_head(offset, log_len)?.map(|head| head.end))
+    }
+
+    /// [`Journal::frame_end`], with the frame's payload CRC (FORMAT 2; 0 in FORMAT 1, which
+    /// reads only the length). A listed frame's header, so one with a length of 0 is
+    /// [`StoreError::JournalCorrupt`], and in FORMAT 2 one that fails its CRC or announces a
+    /// length no writer writes.
+    fn frame_head(&self, offset: u64, log_len: u64) -> Result<Option<Head>, StoreError> {
+        let header_len = bytes::to_u64(frame::header_len(self.format));
+        let header_end = offset.checked_add(header_len);
         if header_end.is_none_or(|header_end| header_end > log_len) {
             return Ok(None);
         }
-        let mut len = [0; 4];
-        (self.log.read_exact_at(&mut len, offset))
-            .map_err(|e| self.log_failed(FileOp::ReadAt, e))?;
-        let len = u32::from_le_bytes(len);
+        let corrupt = StoreError::JournalCorrupt { offset };
+        let (len, crc) = match self.format {
+            StoreFormat::V1 => {
+                let mut len = [0; 4];
+                (self.log.read_exact_at(&mut len, offset))
+                    .map_err(|e| self.log_failed(FileOp::ReadAt, e))?;
+                (u32::from_le_bytes(len), 0)
+            }
+            StoreFormat::V2 => {
+                let mut header = [0; HEADER_LEN_V2];
+                (self.log.read_exact_at(&mut header, offset))
+                    .map_err(|e| self.log_failed(FileOp::ReadAt, e))?;
+                match frame::decode_header_in(self.format, &header) {
+                    Ok(Some(header)) => (header.len, header.crc),
+                    _ => return Err(corrupt),
+                }
+            }
+        };
         if len == 0 {
-            return Err(StoreError::JournalCorrupt { offset });
+            return Err(corrupt);
         }
-        let end = offset + bytes::to_u64(HEADER_LEN) + u64::from(len);
-        Ok((end <= log_len).then_some(end))
+        let end = offset + header_len + u64::from(len);
+        Ok((end <= log_len).then_some(Head { end, crc }))
+    }
+
+    /// The bytes of `journal.log` from `start` to `end` to parse frames in: read now in FORMAT 1,
+    /// with one `read_at` (fewer if the file ends first); frame by frame in FORMAT 2.
+    fn span(&self, start: u64, end: u64) -> Result<Span, IoFailure> {
+        match self.format {
+            StoreFormat::V1 => {
+                let bytes = self.read_log(start, end - start)?;
+                Ok(Span {
+                    start,
+                    end: start + bytes::to_u64(bytes.len()),
+                    bytes: Some(bytes),
+                })
+            }
+            StoreFormat::V2 => Ok(Span {
+                start,
+                end,
+                bytes: None,
+            }),
+        }
+    }
+
+    /// The bytes of `span` from `from` to `to`, read again if the span holds none (FORMAT 2).
+    fn span_bytes<'a>(
+        &self,
+        span: &'a Span,
+        from: u64,
+        to: u64,
+    ) -> Result<Cow<'a, [u8]>, IoFailure> {
+        match &span.bytes {
+            Some(bytes) => {
+                let at = |offset: u64| usize::try_from(offset - span.start).expect("in the span");
+                Ok(Cow::Borrowed(&bytes[at(from)..at(to)]))
+            }
+            None => Ok(Cow::Owned(self.read_log(from, to - from)?)),
+        }
+    }
+
+    /// Parses the frame at `offset`, a frame boundary within `span`, which must sit at `place`.
+    /// FORMAT 1 parses the bytes the span read. FORMAT 2 reads the frame itself, its header
+    /// first: a header that fails its CRC, or announces a length no writer writes or a place not
+    /// its own, is judged before a byte of the payload is read, and a payload that runs past the
+    /// span's end is never read.
+    fn parse_at(&self, span: &Span, offset: u64, place: Place) -> Result<Parsed, IoFailure> {
+        if let Some(bytes) = &span.bytes {
+            let at = usize::try_from(offset - span.start).unwrap_or(usize::MAX);
+            return Ok(frame::parse_frame(bytes.get(at..).unwrap_or_default()));
+        }
+
+        // 1. The header, which says how long the payload is and where the frame belongs.
+        let header_len = bytes::to_u64(HEADER_LEN_V2);
+        if offset.saturating_add(header_len) > span.end {
+            return Ok(Parsed::Short);
+        }
+        let header = self.read_log(offset, header_len)?;
+        let header = match frame::decode_header_in(self.format, &header) {
+            Ok(Some(header)) => header,
+            Ok(None) => return Ok(Parsed::Short),
+            Err(BadHeader::Crc) => return Ok(Parsed::BadCrc),
+            Err(BadHeader::Len) => return Ok(Parsed::Corrupt),
+        };
+        if !header.sits_at(place) {
+            return Ok(Parsed::Corrupt);
+        }
+
+        // 2. The payload, if the span holds it all.
+        let (payload_at, len) = (offset + header_len, u64::from(header.len));
+        if payload_at + len > span.end {
+            return Ok(Parsed::Short);
+        }
+        let payload = self.read_log(payload_at, len)?;
+        if bytes::to_u64(payload.len()) < len {
+            return Ok(Parsed::Short);
+        }
+        Ok(frame::parse_payload(HEADER_LEN_V2, header.crc, &payload))
     }
 
     /// The index of the first of the `listed` entries that is `offset` or more (`listed` if
@@ -1086,8 +1461,8 @@ fn unless_cut<T>(read: Result<T, StoreError>) -> Result<Option<T>, StoreError> {
 /// and `rest`, the bytes from its start to the end of `journal.log`. Only a frame not listed
 /// then may: a listed one was whole and durable before its entry was written, so it is whole
 /// in any `journal.log` measured after.
-fn may_be_torn(parsed: &Parsed, seq: u64, listed: u64, rest: &[u8]) -> bool {
-    seq >= listed && is_torn_unlisted(parsed, rest)
+fn may_be_torn(parsed: &Parsed, seq: u64, listed: u64) -> bool {
+    seq >= listed && is_torn_unlisted(parsed)
 }
 
 /// Whether unlisted bytes that do not parse as a whole frame are a torn tail: a frame cut
@@ -1099,14 +1474,16 @@ fn may_be_torn(parsed: &Parsed, seq: u64, listed: u64, rest: &[u8]) -> bool {
 /// (to the end of the file) read so, and so does the first sector of an append that a power
 /// loss lost while it kept a later one (bytes that are not zero after the header). A frame that
 /// matches its CRC but does not decode is no torn write: a writer wrote it, a newer version
-/// perhaps. `rest` runs from where the frame would start to the end of `journal.log`.
-fn is_torn_unlisted(parsed: &Parsed, rest: &[u8]) -> bool {
+/// perhaps. In FORMAT 2 a header that fails its own CRC is torn too (zeros among them), and one
+/// that matches it is never torn: FORMAT 2 has no header of length 0, and a header that checks
+/// cannot carry a seq or a previous CRC a torn write gave it ([`Parsed::Corrupt`]).
+fn is_torn_unlisted(parsed: &Parsed) -> bool {
     match parsed {
         Parsed::Short | Parsed::BadCrc => true,
         // With its header whole: a length of 0, or a payload that matches its CRC and does not
         // decode.
-        Parsed::Invalid => rest.starts_with(&[0; 4]),
-        Parsed::Whole { .. } => false,
+        Parsed::Invalid { zero_len } => *zero_len,
+        Parsed::Whole { .. } | Parsed::Corrupt => false,
     }
 }
 
@@ -1128,11 +1505,56 @@ fn read_upto(file: &File, offset: u64, len: u64) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// Refuses a journal of a format whose reader this build does not have yet: FORMAT 2's frames,
-/// offsets and checkpoint are the M6 plan's A2.
-fn check_built(layout: &Layout) -> Result<(), StoreError> {
-    match layout.format() {
-        StoreFormat::V1 => Ok(()),
-        StoreFormat::V2 => Err(format::not_built("FORMAT 2 journal")),
+/// The size of one entry of `journal.off` in `format`.
+fn entry_len(format: StoreFormat) -> u64 {
+    match format {
+        StoreFormat::V1 => ENTRY_LEN,
+        StoreFormat::V2 => ENTRY_LEN_V2,
+    }
+}
+
+/// The checksum of a FORMAT 2 entry: the CRC of `u64le seq | u64le offset | u32le crc`.
+fn entry_crc(seq: u64, offset: u64, crc: u32) -> u32 {
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&seq.to_le_bytes());
+    hasher.update(&offset.to_le_bytes());
+    hasher.update(&crc.to_le_bytes());
+    hasher.finalize()
+}
+
+/// Entry `seq` of a `journal.off` of `format`, its bytes `bytes` (8 or 16 of them). A FORMAT 2
+/// entry of zeros reads as offset 0, a zeroed entry; one that does not match its checksum is
+/// [`StoreError::JournalCorrupt`] at the offset it holds.
+fn decode_entry(format: StoreFormat, seq: u64, bytes: &[u8]) -> Result<Entry, StoreError> {
+    let u64_at = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().expect("8 bytes"));
+    let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().expect("4 bytes"));
+    let offset = u64_at(0);
+    if format == StoreFormat::V1 || bytes.iter().all(|&b| b == 0) {
+        return Ok(Entry { offset, crc: None });
+    }
+    let crc = u32_at(8);
+    if entry_crc(seq, offset, crc) != u32_at(12) {
+        return Err(StoreError::JournalCorrupt { offset });
+    }
+    Ok(Entry {
+        offset,
+        crc: Some(crc),
+    })
+}
+
+/// The bytes of a FORMAT 2 checkpoint at `offset`, the start of frame `seq`.
+fn ckpt_bytes(offset: u64, seq: u64) -> Vec<u8> {
+    let mut bytes = offset.to_le_bytes().to_vec();
+    bytes.extend_from_slice(&seq.to_le_bytes());
+    let crc = crc32fast::hash(&bytes);
+    bytes.extend_from_slice(&crc.to_le_bytes());
+    bytes
+}
+
+impl Entry {
+    /// Whether the entry lists a frame whose payload CRC is `crc`: always in FORMAT 1, and for a
+    /// zeroed entry, whose offset is checked instead.
+    fn lists(&self, crc: u32) -> bool {
+        self.crc.is_none_or(|listed| listed == crc)
     }
 }
