@@ -467,7 +467,7 @@ impl Index {
     /// [`Index::first_parent`] read one field of it.
     pub fn get(&self, rec: u64) -> Result<ChangesetMeta, StoreError> {
         self.check_counted(rec)?;
-        let id = ChangesetId(ObjectId(self.ids.entry(rec)?));
+        let id = ChangesetId::new(ObjectId::new(self.ids.entry(rec)?));
         let at = ParentsAt::from_entry(u64::from_le_bytes(self.pars.entry(rec)?));
         self.record(rec, id, at)
     }
@@ -508,7 +508,7 @@ impl Index {
     /// does not count is [`StoreError::BadCall`], as for [`Index::get`].
     pub fn id(&self, rec: u64) -> Result<ChangesetId, StoreError> {
         self.check_counted(rec)?;
-        Ok(ChangesetId(ObjectId(self.ids.entry(rec)?)))
+        Ok(ChangesetId::new(ObjectId::new(self.ids.entry(rec)?)))
     }
 
     /// The generation of record `rec`: one `read_at` of `gen.col`, and nothing else. A rec this

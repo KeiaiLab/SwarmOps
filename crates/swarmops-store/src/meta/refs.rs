@@ -256,7 +256,7 @@ fn read_file(fs: &StoreFs, path: &Utf8Path) -> Result<Option<RefState>, StoreErr
             return None;
         }
         Some(RefState {
-            target: ChangesetId(ObjectId::from_hex(hex).ok()?),
+            target: ChangesetId::new(ObjectId::from_hex(hex).ok()?),
             version: version.parse().ok().filter(|&version| version > 0)?,
         })
     });
