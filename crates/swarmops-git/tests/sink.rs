@@ -655,34 +655,32 @@ fn the_sink_refuses_what_the_source_refuses() {
 
 /// A root commit of `tree`, written as git writes one.
 fn commit_of(tree: GitOid) -> Vec<u8> {
-    let ident = RawIdent {
-        name: b"Mem Sink".to_vec(),
-        email: b"mem@sink.invalid".to_vec(),
-        secs: 1_700_000_000,
-        offset_secs: 0,
-        negative_zero: false,
-    };
-    let commit = RawCommit {
+    let ident = RawIdent::new(
+        b"Mem Sink".to_vec(),
+        b"mem@sink.invalid".to_vec(),
+        1_700_000_000,
+        0,
+        false,
+    );
+    let commit = RawCommit::new(
         tree,
-        parents: Vec::new(),
-        author: ident.clone(),
-        committer: ident,
-        extra_headers: Vec::new(),
-        message: b"one file\n".to_vec(),
-    };
+        Vec::new(),
+        ident.clone(),
+        ident,
+        Vec::new(),
+        b"one file\n".to_vec(),
+    );
     commit.render()
 }
 
 /// A blob, a tree of it and a commit of that tree: `[(kind, bytes); 3]`, the commit last.
 fn one_commit() -> [(RawKind, Vec<u8>); 3] {
     let blob = b"a\n".to_vec();
-    let tree = RawTree {
-        entries: vec![RawTreeEntry {
-            mode: b"100644".to_vec(),
-            name: b"a".to_vec(),
-            oid: git_hash(RawKind::Blob, &blob),
-        }],
-    }
+    let tree = RawTree::new(vec![RawTreeEntry::new(
+        b"100644".to_vec(),
+        b"a".to_vec(),
+        git_hash(RawKind::Blob, &blob),
+    )])
     .render();
     let commit = commit_of(git_hash(RawKind::Tree, &tree));
     [

@@ -66,6 +66,7 @@ const EXPORT_MEMO_LEN: usize = 21;
 /// [`Derivation::deps`]). Not eager, so that no export oid is derived for a changeset no one
 /// exports. [`register`] registers it.
 #[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
 pub struct ExportOid;
 
 /// [`ExportOid`]'s value: the oid of the git commit a changeset exports to, and whether that
@@ -74,6 +75,7 @@ pub struct ExportOid;
 /// Stored as postcard encodes it, the oid's 20 bytes, then one byte for `kept` (21 bytes): what
 /// version 1 of [`ExportOid`] reads back, so any other layout takes a new version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ExportedOid {
     /// The commit's git oid.
     pub oid: [u8; 20],
@@ -85,6 +87,11 @@ pub struct ExportedOid {
 }
 
 impl ExportedOid {
+    /// The value naming `oid`, the changeset's own commit when `kept`.
+    pub fn new(oid: [u8; 20], kept: bool) -> ExportedOid {
+        ExportedOid { oid, kept }
+    }
+
     /// The commit's git oid, as a [`GitOid`].
     pub fn git_oid(&self) -> GitOid {
         GitOid(self.oid)
@@ -175,11 +182,19 @@ impl ExportObjects for DeriveCtx<'_> {
 /// The trees and blobs of a snapshot, and a derived store to memoize their oids in: what a reader
 /// outside a derivation reads through, such as the export, which reads the snapshot it exports
 /// from and memoizes in its repository's derived store ([`Repo::derived_store`]).
+#[non_exhaustive]
 pub struct ExportReader<'a, O: ObjectStore> {
     /// The snapshot the trees and blobs are read in.
     pub read: &'a RepoRead<'a, O>,
     /// The derived store the oids are memoized in.
     pub store: &'a DerivedStore,
+}
+
+impl<'a, O: ObjectStore> ExportReader<'a, O> {
+    /// A reader of `read`'s trees and blobs that memoizes their oids in `store`.
+    pub fn new(read: &'a RepoRead<'a, O>, store: &'a DerivedStore) -> ExportReader<'a, O> {
+        ExportReader { read, store }
+    }
 }
 
 impl<O: ObjectStore> ExportObjects for ExportReader<'_, O> {
@@ -267,6 +282,7 @@ pub fn blob_oid(objects: &dyn ExportObjects, blob: BlobId) -> Result<GitOid, Rep
 /// [`real_blob_oid`] recompute from the store's bytes and only ever check a memo against what they
 /// compute, so a memo a store file names cannot stand in for an object's content.
 #[derive(Default)]
+#[non_exhaustive]
 pub struct OidCache(RefCell<HashMap<ObjectId, GitOid>>);
 
 impl OidCache {
@@ -554,6 +570,7 @@ fn repo_error(e: DeriveError) -> RepoError {
 /// a file someone placed in the store, or a cache a faulty build wrote. Removing the file, or all
 /// of `meta/derived/`, has it derived again.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct GitMemoMismatch {
     /// The memo's derivation name: `git_tree_oid`, `git_blob_oid` or `git_oid`.
     pub memo: String,

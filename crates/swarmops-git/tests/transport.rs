@@ -285,10 +285,10 @@ fn real_git(server: &GitServer) -> PathBuf {
 
 /// The fetch refspec of every branch, into `refs/remotes/origin/*`.
 fn branches() -> RefSpec {
-    RefSpec {
-        src: "refs/heads/*".to_owned(),
-        dst: "refs/remotes/origin/*".to_owned(),
-    }
+    RefSpec::new(
+        "refs/heads/*".to_owned(),
+        "refs/remotes/origin/*".to_owned(),
+    )
 }
 
 /// `hex` as an oid.
@@ -325,9 +325,9 @@ fn basic(token: &str) -> String {
 
 /// The credential that names [`TOKEN_VAR`].
 fn token_cred() -> Credential {
-    Credential {
-        token_env: Some(TOKEN_VAR.to_owned()),
-    }
+    let mut cred = Credential::default();
+    cred.token_env = Some(TOKEN_VAR.to_owned());
+    cred
 }
 
 /// The server's Basic authentication with [`TOKEN`].
@@ -373,11 +373,7 @@ fn stale_lease_is_stale() {
         .commit_on(REPO, "main", "theirs", &[("b.txt", "b\n")]);
     let ours = setup.commit(Some(setup.first), "ours", &[("c.txt", b"c\n")]);
     let url = RemoteUrl::parse(&http.url(REPO)).expect("a URL");
-    let update = PushUpdate {
-        new: ours,
-        branch: "main".to_owned(),
-        expect: Some(setup.first),
-    };
+    let update = PushUpdate::new(ours, "main".to_owned(), Some(setup.first));
     let result = cli.push(&setup.mirror(), &url, &Credential::default(), &update);
     assert_eq!(
         result,
@@ -402,11 +398,7 @@ fn up_to_date_flag_is_success() {
     let url = RemoteUrl::parse(&http.url(REPO)).expect("a URL");
 
     // 1. The remote holds the commit already: git's `=`, nothing sent.
-    let same = PushUpdate {
-        new: setup.first,
-        branch: "main".to_owned(),
-        expect: Some(setup.first),
-    };
+    let same = PushUpdate::new(setup.first, "main".to_owned(), Some(setup.first));
     assert_eq!(
         cli.push(&setup.mirror(), &url, &cred, &same),
         Ok(PushOutcome::AlreadyThere)
@@ -414,11 +406,7 @@ fn up_to_date_flag_is_success() {
 
     // 2. A fast-forward moves it.
     let next = setup.commit(Some(setup.first), "next", &[("c.txt", b"c\n")]);
-    let forward = PushUpdate {
-        new: next,
-        branch: "main".to_owned(),
-        expect: Some(setup.first),
-    };
+    let forward = PushUpdate::new(next, "main".to_owned(), Some(setup.first));
     assert_eq!(
         cli.push(&setup.mirror(), &url, &cred, &forward),
         Ok(PushOutcome::Sent)
@@ -426,11 +414,7 @@ fn up_to_date_flag_is_success() {
     assert_eq!(setup.remote("main"), Some(next));
 
     // 3. A branch the remote lacks is made, expected absent.
-    let new_branch = PushUpdate {
-        new: next,
-        branch: "topic".to_owned(),
-        expect: None,
-    };
+    let new_branch = PushUpdate::new(next, "topic".to_owned(), None);
     assert_eq!(
         cli.push(&setup.mirror(), &url, &cred, &new_branch),
         Ok(PushOutcome::Sent)
@@ -438,11 +422,7 @@ fn up_to_date_flag_is_success() {
     assert_eq!(setup.remote("topic"), Some(next));
 
     // 4. Expected absent but present: the lease fails.
-    let again = PushUpdate {
-        new: setup.first,
-        branch: "topic".to_owned(),
-        expect: None,
-    };
+    let again = PushUpdate::new(setup.first, "topic".to_owned(), None);
     assert_eq!(
         cli.push(&setup.mirror(), &url, &cred, &again),
         Err(TransportError::Stale {
@@ -465,11 +445,7 @@ fn declined_push_is_rejected_with_the_message() {
     // The hook declines: the ref, git's reason and the remote's own line are reported.
     let next = setup.commit(Some(setup.first), "next", &[("c.txt", b"c\n")]);
     let url = RemoteUrl::parse(&http.url(REPO)).expect("a URL");
-    let update = PushUpdate {
-        new: next,
-        branch: "main".to_owned(),
-        expect: Some(setup.first),
-    };
+    let update = PushUpdate::new(next, "main".to_owned(), Some(setup.first));
     let (reason, error) = rejected(cli.push(&setup.mirror(), &url, &cred, &update));
     assert_eq!(reason, RejectReason::Declined);
     let TransportError::Rejected {
@@ -778,11 +754,7 @@ fn token_is_never_in_arguments_or_output() {
         .expect("fetch");
     let next = setup.commit(Some(setup.first), "next", &[("c.txt", b"c\n")]);
     let url = RemoteUrl::parse(&http.url(REPO)).expect("a URL");
-    let update = PushUpdate {
-        new: next,
-        branch: "main".to_owned(),
-        expect: Some(setup.first),
-    };
+    let update = PushUpdate::new(next, "main".to_owned(), Some(setup.first));
     assert_eq!(
         cli.push(&setup.mirror(), &url, &token_cred(), &update),
         Ok(PushOutcome::Sent)
@@ -1016,21 +988,9 @@ fn push_never_has_a_plus_or_force() {
 
     // Every kind of push the module builds: expected present, expected absent, a stale lease.
     for update in [
-        PushUpdate {
-            new: next,
-            branch: "main".to_owned(),
-            expect: Some(setup.first),
-        },
-        PushUpdate {
-            new: next,
-            branch: "topic".to_owned(),
-            expect: None,
-        },
-        PushUpdate {
-            new: setup.first,
-            branch: "main".to_owned(),
-            expect: Some(setup.first),
-        },
+        PushUpdate::new(next, "main".to_owned(), Some(setup.first)),
+        PushUpdate::new(next, "topic".to_owned(), None),
+        PushUpdate::new(setup.first, "main".to_owned(), Some(setup.first)),
     ] {
         let _ = cli.push(&setup.mirror(), &url, &cred, &update);
     }
@@ -1195,11 +1155,7 @@ fn stdin_is_null_for_every_child_but_cat_file() {
         .expect("new objects");
     cli.is_ancestor(&mirror, setup.first, next)
         .expect("is ancestor");
-    let update = PushUpdate {
-        new: next,
-        branch: "main".to_owned(),
-        expect: Some(setup.first),
-    };
+    let update = PushUpdate::new(next, "main".to_owned(), Some(setup.first));
     cli.push(&mirror, &url, &cred, &update).expect("push");
     cli.gc_auto(&mirror).expect("gc");
 

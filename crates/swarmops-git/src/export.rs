@@ -74,6 +74,7 @@ const BRANCH_WALK: usize = 1_000;
 
 /// What to export, and into which branch ([`export()`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ExportRequest {
     /// The store ref whose history is exported, `main` or `release/<x>`: its head is the commit
     /// the branch ends at.
@@ -100,6 +101,7 @@ impl ExportRequest {
 
 /// What an export did ([`export()`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ExportReport {
     /// The changeset the source ref named in the committed snapshot the export read: the head.
     pub head: ChangesetId,
@@ -141,8 +143,46 @@ pub struct ExportReport {
     pub warnings: Vec<String>,
 }
 
+impl ExportReport {
+    /// A report of every field, in their order.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one argument per field: a report has no field to default"
+    )]
+    pub fn new(
+        head: ChangesetId,
+        head_oid: GitOid,
+        branch: String,
+        old: Option<GitOid>,
+        base: Option<ChangesetId>,
+        branch_moved: bool,
+        commits_written: u64,
+        objects_written: u64,
+        objects_checked: u64,
+        rewritten: u64,
+        recovered: TailRepair,
+        warnings: Vec<String>,
+    ) -> ExportReport {
+        ExportReport {
+            head,
+            head_oid,
+            branch,
+            old,
+            base,
+            branch_moved,
+            commits_written,
+            objects_written,
+            objects_checked,
+            rewritten,
+            recovered,
+            warnings,
+        }
+    }
+}
+
 /// Why an export failed. Nothing is written but where a variant says otherwise.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ExportError {
     /// The source ref does not exist. Nothing was read but the ref.
     #[error("the store has no ref {0}")]
@@ -203,6 +243,7 @@ pub enum ExportError {
 
 /// Why a branch is no export the source's head goes on from ([`ExportError::Diverged`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DivergedReason {
     /// Commits were made in git on top of the export of the head itself: `git import` brings them
     /// into the store, and the export after it goes on.

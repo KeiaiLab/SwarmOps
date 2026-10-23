@@ -87,13 +87,13 @@ fn lander() -> Signature {
 
 /// `sig` as git's commit header holds it.
 fn ident(sig: &Signature) -> RawIdent {
-    RawIdent {
-        name: sig.name.clone(),
-        email: sig.email.clone(),
-        secs: sig.secs,
-        offset_secs: sig.offset_secs,
-        negative_zero: sig.negative_zero,
-    }
+    RawIdent::new(
+        sig.name.clone(),
+        sig.email.clone(),
+        sig.secs,
+        sig.offset_secs,
+        sig.negative_zero,
+    )
 }
 
 fn oid(hex: &str) -> GitOid {
@@ -293,6 +293,7 @@ fn reachable(dir: &Path, tip: GitOid) -> BTreeMap<GitOid, (RawKind, Vec<u8>)> {
                 stack.extend(tree.entries.iter().map(|entry| entry.oid));
             }
             RawKind::Blob | RawKind::Tag => {}
+            _ => panic!("a variant this test does not know"),
         }
         objects.insert(oid, (kind, bytes));
     }
@@ -561,10 +562,8 @@ fn an_undone_land_after_an_export_is_source_moved_back() {
     assert_eq!(object_files(dir), before, "nothing written");
     assert_eq!(branch(dir), Some(report.head_oid));
 
-    let forced = ExportRequest {
-        force: true,
-        ..main_branch()
-    };
+    let mut forced = main_branch();
+    forced.force = true;
     let back = exported(repo, &mut gix(dir), &forced);
     let first_oid = export_oid(repo, first.landed);
     assert_eq!((back.head, back.head_oid), (first.landed, first_oid));

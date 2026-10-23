@@ -584,11 +584,11 @@ fn commit_in_git(dir: &std::path::Path, parent: GitOid, file: &str) -> GitOid {
     let (_, bytes) = sink.read(RawCommit::parse(&bytes).unwrap().tree).unwrap();
     let mut tree = RawTree::parse(&bytes).unwrap();
     let blob = sink.write_object(RawKind::Blob, file.as_bytes()).unwrap();
-    tree.entries.push(RawTreeEntry {
-        mode: b"100644".to_vec(),
-        name: file.as_bytes().to_vec(),
-        oid: blob,
-    });
+    tree.entries.push(RawTreeEntry::new(
+        b"100644".to_vec(),
+        file.as_bytes().to_vec(),
+        blob,
+    ));
     // git's order: the names' bytes, a directory's as if it ended in `/`.
     tree.entries.sort_by_key(|entry| {
         let mut key = entry.name.clone();
@@ -1240,8 +1240,8 @@ fn a_commit_or_a_tree_past_the_object_limit_stops_the_import_before_it_is_read()
     let mut source = MemSource::default();
     let file = source.blob(b"file\n");
     let tree = source.tree(&[("100644", b"file.txt", file)]);
-    let huge_commit = GitOid([0x5c; 20]);
-    let huge_tree = GitOid([0x5d; 20]);
+    let huge_commit = GitOid::new([0x5c; 20]);
+    let huge_tree = GitOid::new([0x5d; 20]);
     source.claim(huge_commit, RawKind::Commit, MAX_OBJECT_LEN + 1);
     source.claim(huge_tree, RawKind::Tree, MAX_OBJECT_LEN + 1);
     let first = source.commit(tree, &[], "first\n");
@@ -1941,10 +1941,7 @@ mod crafted_entries {
             };
             let found = (*target_head, *base, *git_head);
             assert_eq!(found, (head, Some(stands_for), c), "{kind}");
-            let passed_over = ExternalIdMismatch {
-                commit: x,
-                changeset: head,
-            };
+            let passed_over = ExternalIdMismatch::new(x, head);
             assert_eq!(external_id.as_deref(), Some(&passed_over), "{kind}");
             let message = error.to_string();
             assert!(message.contains(&x.to_string()), "{kind}: {message}");
@@ -2086,15 +2083,12 @@ mod crafted_entries {
 
         let (_, x, c) = x_and_c();
         let nowhere = ChangesetId(hash_object(ObjectKind::Changeset, b"nowhere"));
-        let y = GitOid([0x5a; 20]);
+        let y = GitOid::new([0x5a; 20]);
         record(&repo, x, native);
         record(&repo, c, imported.head);
         record(&repo, y, nowhere);
         let found = verify_external_ids(&repo).unwrap();
-        let mismatch = ExternalIdMismatch {
-            commit: x,
-            changeset: native,
-        };
+        let mismatch = ExternalIdMismatch::new(x, native);
         assert_eq!(found, [mismatch]);
         let git = || SYSTEM_GIT.to_owned();
         let mut theirs = vec![

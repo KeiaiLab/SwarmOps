@@ -15,10 +15,13 @@ fn objects(blobs: &[(u64, &str)], disk_usage: u64) -> NewObjects {
         .enumerate()
         .map(|(n, (size, path))| {
             let byte = u8::try_from(n).expect("a few blobs");
-            (GitOid([byte; 20]), *size, (*path).to_owned())
+            (GitOid::new([byte; 20]), *size, (*path).to_owned())
         })
         .collect();
-    NewObjects { blobs, disk_usage }
+    let mut objects = NewObjects::default();
+    objects.blobs = blobs;
+    objects.disk_usage = disk_usage;
+    objects
 }
 
 /// The values are GitHub's, as its pages give them: 100 MiB and 50 MiB for a file, binary, and
@@ -88,12 +91,12 @@ fn limits_refuse_a_large_blob_with_its_path() {
         &[(1, "small.txt"), (GITHUB_FILE_REFUSED + 1, "data/huge.bin")],
         1 << 20,
     );
-    let refused = LimitExceeded {
-        scope: LimitScope::RemoteFile,
-        path: Some("data/huge.bin".to_owned()),
-        size: GITHUB_FILE_REFUSED + 1,
-        limit: GITHUB_FILE_REFUSED,
-    };
+    let refused = LimitExceeded::new(
+        LimitScope::RemoteFile,
+        Some("data/huge.bin".to_owned()),
+        GITHUB_FILE_REFUSED + 1,
+        GITHUB_FILE_REFUSED,
+    );
     assert_eq!(check(&over), Err(refused));
 }
 
@@ -105,12 +108,12 @@ fn limits_refuse_a_push_over_2_gb() {
     assert_eq!(at, Ok(Vec::new()));
 
     let over = check(&objects(&[(1, "a.txt")], GITHUB_PUSH_REFUSED + 1));
-    let refused = LimitExceeded {
-        scope: LimitScope::RemotePush,
-        path: None,
-        size: GITHUB_PUSH_REFUSED + 1,
-        limit: GITHUB_PUSH_REFUSED,
-    };
+    let refused = LimitExceeded::new(
+        LimitScope::RemotePush,
+        None,
+        GITHUB_PUSH_REFUSED + 1,
+        GITHUB_PUSH_REFUSED,
+    );
     assert_eq!(over, Err(refused));
 }
 

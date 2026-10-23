@@ -28,6 +28,7 @@ use crate::{GitOid, GitSource, ObjectFormat, RawKind, SourceError, Unsupported};
 /// its id.
 ///
 /// [`read`]: GitSource::read
+#[non_exhaustive]
 pub struct GixSource {
     repo: gix::Repository,
 }

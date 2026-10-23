@@ -1018,6 +1018,7 @@ mod export {
                     stack.extend(tree.entries.iter().map(|entry| entry.oid));
                 }
                 RawKind::Blob | RawKind::Tag => {}
+                _ => panic!("a variant this test does not know"),
             }
             objects.insert(oid, (kind, bytes));
         }

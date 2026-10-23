@@ -67,6 +67,7 @@ pub trait GitSink {
 
 /// Where a [`GitSink`] holds an object.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Stored {
     /// The repository lacks it.
     Absent,
@@ -79,6 +80,7 @@ pub enum Stored {
 
 /// What a [`GitSink::cas_branch`] did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum BranchUpdate {
     /// The branch named what was expected and now names the new object, durably.
     Applied,
@@ -94,6 +96,7 @@ pub enum BranchUpdate {
 /// A sink runs on the caller's host (`git export` is a client-side operation), so its errors may
 /// name the repository's own files: relative to its git directory, and objects by their ids.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum SinkError {
     /// There is no git repository it can open at the path it was given.
     #[error("no git repository it can open there: {reason}")]

@@ -70,6 +70,7 @@ const DIR_MODE: &[u8] = b"40000";
 /// The changeset's delta and its parents' changeset ids are the import's to make; the trees and
 /// blobs its root names are in the `out` of [`Converter::commit`], or were made before.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Converted {
     /// The commit's git id.
     pub oid: GitOid,
@@ -95,6 +96,7 @@ pub struct Converted {
 
 /// Why a commit was not converted.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum ConvertError {
     /// The source could not read an object the commit needs: it lacks it, its bytes are damaged,
     /// or reading failed; or the commit, or a tree it needs, is longer than an object holds
@@ -184,6 +186,7 @@ pub enum ConvertError {
 /// conversion reads only the trees and blobs no commit before it named, and appends to its
 /// `out` only the trees and blobs not made before. It refuses what the classes it allows do not
 /// cover (the [module](crate::convert) says how).
+#[non_exhaustive]
 pub struct Converter<'s> {
     source: &'s dyn GitSource,
     allowed: LossySet,

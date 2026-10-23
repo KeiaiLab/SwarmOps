@@ -343,6 +343,7 @@ pub fn reaches_only_kept(image: &MemImage, branch: &str) -> Result<(), String> {
                 );
             }
             RawKind::Blob | RawKind::Tag => {}
+            _ => panic!("a variant this test does not know"),
         }
     }
     Ok(())

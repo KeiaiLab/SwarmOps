@@ -203,6 +203,7 @@ fn reachable(dir: &Path, tip: GitOid) -> BTreeMap<GitOid, (RawKind, Vec<u8>)> {
                 stack.extend(entries.filter(|e| e.mode != b"160000").map(|e| e.oid));
             }
             RawKind::Blob | RawKind::Tag => {}
+            _ => panic!("a variant this test does not know"),
         }
         objects.insert(oid, (kind, bytes));
     }
@@ -471,6 +472,7 @@ fn an_export_of_an_imported_fixture_reproduces_it_byte_for_byte() {
                     assert_eq!(manifest.blobs.get(&hex), Some(&size), "{name}: blob {id}");
                 }
                 RawKind::Tag => panic!("{name}: a tag {id}"),
+                _ => panic!("a variant this test does not know"),
             }
         }
         let written = u64::try_from(objects.len()).unwrap();
@@ -962,10 +964,8 @@ fn a_source_moved_back_is_diverged() {
 fn force_moves_a_diverged_branch() {
     let (store, first, exported_second, destination) = moved_back();
     let repo = &store.repo;
-    let forced = ExportRequest {
-        force: true,
-        ..main_branch()
-    };
+    let mut forced = main_branch();
+    forced.force = true;
     let report = exported(repo, &mut gix(&destination.dir), &forced);
     assert_eq!(
         (report.head, report.head_oid),
@@ -1509,13 +1509,11 @@ mod crafted_memos {
         let second = commit_on_main(&store.repo, vec![put("app.sh", two)], "Change app.sh\n");
         let mut sink = gix(&destination.dir);
         let evil = sink.write_object(RawKind::Blob, b"echo EVIL\n").unwrap();
-        let tree = RawTree {
-            entries: vec![RawTreeEntry {
-                mode: b"100644".to_vec(),
-                name: b"app.sh".to_vec(),
-                oid: evil,
-            }],
-        };
+        let tree = RawTree::new(vec![RawTreeEntry::new(
+            b"100644".to_vec(),
+            b"app.sh".to_vec(),
+            evil,
+        )]);
         let tree = sink.write_object(RawKind::Tree, &tree.render()).unwrap();
         let parents = [first.head_oid];
         let bytes = commit_bytes(tree, &parents, &signature(), &signature(), &[], b"two\n");
@@ -1658,13 +1656,11 @@ mod crafted_memos {
     /// root holding one file, made durable. Its oid.
     fn placed_commit(sink: &mut dyn GitSink) -> GitOid {
         let blob = sink.write_object(RawKind::Blob, b"placed\n").unwrap();
-        let tree = RawTree {
-            entries: vec![RawTreeEntry {
-                mode: b"100644".to_vec(),
-                name: b"f.txt".to_vec(),
-                oid: blob,
-            }],
-        };
+        let tree = RawTree::new(vec![RawTreeEntry::new(
+            b"100644".to_vec(),
+            b"f.txt".to_vec(),
+            blob,
+        )]);
         let tree = sink.write_object(RawKind::Tree, &tree.render()).unwrap();
         let sig = signature();
         let bytes = commit_bytes(tree, &[], &sig, &sig, &[], b"Placed\n");
@@ -1700,13 +1696,11 @@ mod crafted_memos {
 
     /// The git oid of the tree that holds the file `a` of `content` alone.
     fn tree_of_a(content: &[u8]) -> GitOid {
-        let tree = RawTree {
-            entries: vec![RawTreeEntry {
-                mode: b"100644".to_vec(),
-                name: b"a".to_vec(),
-                oid: git_hash(RawKind::Blob, content),
-            }],
-        };
+        let tree = RawTree::new(vec![RawTreeEntry::new(
+            b"100644".to_vec(),
+            b"a".to_vec(),
+            git_hash(RawKind::Blob, content),
+        )]);
         git_hash(RawKind::Tree, &tree.render())
     }
 
@@ -1802,10 +1796,7 @@ mod crafted_memos {
         // The merge's commit over the memo, as the derivation reads the memos: packed.
         let spliced = export_oid(repo, h);
         let read = repo.snapshot().unwrap();
-        let reader = ExportReader {
-            read: &read,
-            store: repo.derived_store(),
-        };
+        let reader = ExportReader::new(&read, repo.derived_store());
         let cs = repo.changeset(h).unwrap().unwrap().changeset;
         let tree = tree_oid(&reader, cs.root).unwrap();
         let parents = [export_oid(repo, b), export_oid(repo, c)];

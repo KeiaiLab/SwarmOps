@@ -59,6 +59,7 @@ pub const STALE_LOCK_AGE: Duration = Duration::from_mins(10);
 
 /// A store's mirror: `<store>/git/`.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct Mirror {
     /// `<store>/git/mirror.git`.
     git_dir: PathBuf,
@@ -66,6 +67,7 @@ pub struct Mirror {
 
 /// The mirror's lock, `git/lock`, held until dropped: the proof a step runs under it.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct MirrorLock {
     /// The open lock file, which holds the lock.
     _file: File,
@@ -73,6 +75,7 @@ pub struct MirrorLock {
 
 /// What [`Mirror::ensure`] found.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Rebuilt {
     /// The mirror was there and sound.
     Kept,
@@ -87,6 +90,7 @@ pub enum Rebuilt {
 
 /// Why the mirror failed.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum MirrorError {
     /// Another command holds the mirror's lock (`E_BUSY`, `lock: "git_mirror"`).
     #[error("another command holds the mirror's lock")]

@@ -112,6 +112,7 @@ pub const MAX_LOSSY_LISTED: usize = 100;
 
 /// What to import, and into which ref ([`import()`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ImportRequest {
     /// The source ref: `HEAD`, a ref's name, or 40 hex digits ([`GitSource::resolve`]).
     pub git_ref: String,
@@ -180,6 +181,7 @@ impl ImportRequest {
 
 /// What an import did ([`import()`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ImportReport {
     /// The commits it recorded: each one the walk did not know, its changeset made (or found in
     /// the store already, as after a crash before its external id was written) and its external
@@ -212,8 +214,44 @@ pub struct ImportReport {
     pub recovered: Recovered,
 }
 
+impl ImportReport {
+    /// A report of every field, in their order.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one argument per field: a report has no field to default"
+    )]
+    pub fn new(
+        imported: u64,
+        skipped: u64,
+        head: ChangesetId,
+        git_head: GitOid,
+        target_ref: String,
+        old_head: Option<ChangesetId>,
+        ref_moved: bool,
+        lossy: Vec<LossyCommit>,
+        lossy_total: u64,
+        warnings: Vec<String>,
+        recovered: Recovered,
+    ) -> ImportReport {
+        ImportReport {
+            imported,
+            skipped,
+            head,
+            git_head,
+            target_ref,
+            old_head,
+            ref_moved,
+            lossy,
+            lossy_total,
+            warnings,
+            recovered,
+        }
+    }
+}
+
 /// A commit an import recorded with a loss.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LossyCommit {
     /// The commit.
     pub commit: GitOid,
@@ -223,8 +261,20 @@ pub struct LossyCommit {
     pub classes: LossySet,
 }
 
+impl LossyCommit {
+    /// `commit`, recorded as `changeset` with the loss of `classes`.
+    pub fn new(commit: GitOid, changeset: ChangesetId, classes: LossySet) -> LossyCommit {
+        LossyCommit {
+            commit,
+            changeset,
+            classes,
+        }
+    }
+}
+
 /// Why an import failed. Each says how far it got where it wrote anything.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ImportError {
     /// The source could not open, resolve or read what the import needs: the ref names nothing,
     /// the repository is one the import does not read, an object is missing or damaged.
@@ -338,11 +388,19 @@ fn passed_over(entry: Option<&ExternalIdMismatch>) -> String {
 /// entry's: it neither holds the commit as its `git.oid` nor exports to it. No import or export
 /// writes one; the import passes over one it meets ([`ImportError::Diverged::external_id`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ExternalIdMismatch {
     /// The commit whose entry it is: the entry's key.
     pub commit: GitOid,
     /// The changeset the entry names.
     pub changeset: ChangesetId,
+}
+
+impl ExternalIdMismatch {
+    /// The entry of `commit` that names `changeset`.
+    pub fn new(commit: GitOid, changeset: ChangesetId) -> ExternalIdMismatch {
+        ExternalIdMismatch { commit, changeset }
+    }
 }
 
 /// How many times a store call that found the writer lock held for its whole wait
