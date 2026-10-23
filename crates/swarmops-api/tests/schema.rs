@@ -294,61 +294,84 @@ fn every_operation_takes_a_request_and_returns_a_response() {
 /// `E_INTERNAL`, from the M4 plan for `E_NOTHING_TO_UNDO` and `E_OP_NOT_FOUND`, from the M13
 /// plan for the four `E_REMOTE_*` codes, from the M5 plan for `E_WS_UNPORTABLE` and
 /// `E_CHECK_FAILED` (the other seven M5 codes are the operations spec's), and by the `E_<NAME>` convention for `E_TYPE_CONFLICT`,
-/// `E_UNKNOWN_PARENT` and `E_IO`. A new variant does not compile here until its row is added.
-fn spec_row(code: ErrorCode) -> (&'static str, i32, bool) {
-    match code {
-        ErrorCode::ExistsAlready => ("E_EXISTS", 1, false),
-        ErrorCode::NotARepo => ("E_NOT_A_REPO", 6, false),
-        ErrorCode::IdentityRequired => ("E_IDENTITY_REQUIRED", 5, false),
-        ErrorCode::RevNotFound => ("E_REV_NOT_FOUND", 6, false),
-        ErrorCode::AmbiguousId => ("E_AMBIGUOUS_ID", 1, false),
-        ErrorCode::PathNotFound => ("E_PATH_NOT_FOUND", 6, false),
-        ErrorCode::IsDir => ("E_IS_DIR", 1, false),
-        ErrorCode::TooLarge => ("E_TOO_LARGE", 1, false),
-        ErrorCode::EmptyCommit => ("E_EMPTY_COMMIT", 1, false),
-        ErrorCode::TypeConflict => ("E_TYPE_CONFLICT", 1, false),
-        ErrorCode::UnknownParent => ("E_UNKNOWN_PARENT", 6, false),
-        ErrorCode::CasMismatch => ("E_CAS_MISMATCH", 4, true),
-        ErrorCode::RefNotFound => ("E_REF_NOT_FOUND", 6, false),
-        ErrorCode::RefNameInvalid => ("E_REF_NAME_INVALID", 1, false),
-        ErrorCode::StoreCorrupt => ("E_STORE_CORRUPT", 1, false),
-        ErrorCode::InvalidArg => ("E_INVALID_ARG", 2, false),
-        ErrorCode::UnsupportedFs => ("E_UNSUPPORTED_FS", 1, false),
-        ErrorCode::Io => ("E_IO", 1, false),
-        ErrorCode::IoTransient => ("E_IO_TRANSIENT", 4, true),
-        ErrorCode::Busy => ("E_BUSY", 4, true),
-        ErrorCode::Internal => ("E_INTERNAL", 1, false),
-        ErrorCode::Conflict => ("E_CONFLICT", 3, false),
-        ErrorCode::CasRetryExhausted => ("E_CAS_RETRY_EXHAUSTED", 4, true),
-        ErrorCode::NothingToLand => ("E_NOTHING_TO_LAND", 1, false),
-        ErrorCode::NothingToUndo => ("E_NOTHING_TO_UNDO", 1, false),
-        ErrorCode::OpNotFound => ("E_OP_NOT_FOUND", 6, false),
-        ErrorCode::Auth => ("E_AUTH", 5, false),
-        ErrorCode::PolicyDenied => ("E_POLICY_DENIED", 5, false),
-        ErrorCode::MaintenanceBusy => ("E_MAINTENANCE_BUSY", 4, true),
-        ErrorCode::GitNotARepo => ("E_GIT_NOT_A_REPO", 6, false),
-        ErrorCode::GitRefNotFound => ("E_GIT_REF_NOT_FOUND", 6, false),
-        ErrorCode::GitImportDiverged => ("E_GIT_IMPORT_DIVERGED", 3, false),
-        ErrorCode::GitImportLossy => ("E_GIT_IMPORT_LOSSY", 1, false),
-        ErrorCode::GitUnsupported => ("E_GIT_UNSUPPORTED", 1, false),
-        ErrorCode::GitRead => ("E_GIT_READ", 1, false),
-        ErrorCode::GitExportDiverged => ("E_GIT_EXPORT_DIVERGED", 3, false),
-        ErrorCode::GitWrite => ("E_GIT_WRITE", 1, false),
-        ErrorCode::RemoteDiverged => ("E_REMOTE_DIVERGED", 3, false),
-        ErrorCode::RemoteRejected => ("E_REMOTE_REJECTED", 5, false),
-        ErrorCode::RemoteUnreachable => ("E_REMOTE_UNREACHABLE", 4, true),
-        ErrorCode::RemoteNotFound => ("E_REMOTE_NOT_FOUND", 6, false),
-        ErrorCode::WsExists => ("E_WS_EXISTS", 1, false),
-        ErrorCode::WsNotFound => ("E_WS_NOT_FOUND", 6, false),
-        ErrorCode::WsLocked => ("E_WS_LOCKED", 4, true),
-        ErrorCode::WsDirty => ("E_WS_DIRTY", 1, false),
-        ErrorCode::PathNotEmpty => ("E_PATH_NOT_EMPTY", 1, false),
-        ErrorCode::UnresolvedConflicts => ("E_UNRESOLVED_CONFLICTS", 1, false),
-        ErrorCode::MarkersPresent => ("E_MARKERS_PRESENT", 1, false),
-        ErrorCode::WsUnportable => ("E_WS_UNPORTABLE", 1, false),
-        ErrorCode::CheckFailed => ("E_CHECK_FAILED", 1, false),
-    }
-}
+/// `E_UNKNOWN_PARENT` and `E_IO`. A new variant fails the test below until its row is added.
+const ROWS: &[(ErrorCode, &str, i32, bool)] = &[
+    (ErrorCode::ExistsAlready, "E_EXISTS", 1, false),
+    (ErrorCode::NotARepo, "E_NOT_A_REPO", 6, false),
+    (ErrorCode::IdentityRequired, "E_IDENTITY_REQUIRED", 5, false),
+    (ErrorCode::RevNotFound, "E_REV_NOT_FOUND", 6, false),
+    (ErrorCode::AmbiguousId, "E_AMBIGUOUS_ID", 1, false),
+    (ErrorCode::PathNotFound, "E_PATH_NOT_FOUND", 6, false),
+    (ErrorCode::IsDir, "E_IS_DIR", 1, false),
+    (ErrorCode::TooLarge, "E_TOO_LARGE", 1, false),
+    (ErrorCode::EmptyCommit, "E_EMPTY_COMMIT", 1, false),
+    (ErrorCode::TypeConflict, "E_TYPE_CONFLICT", 1, false),
+    (ErrorCode::UnknownParent, "E_UNKNOWN_PARENT", 6, false),
+    (ErrorCode::CasMismatch, "E_CAS_MISMATCH", 4, true),
+    (ErrorCode::RefNotFound, "E_REF_NOT_FOUND", 6, false),
+    (ErrorCode::RefNameInvalid, "E_REF_NAME_INVALID", 1, false),
+    (ErrorCode::StoreCorrupt, "E_STORE_CORRUPT", 1, false),
+    (ErrorCode::InvalidArg, "E_INVALID_ARG", 2, false),
+    (ErrorCode::UnsupportedFs, "E_UNSUPPORTED_FS", 1, false),
+    (ErrorCode::Io, "E_IO", 1, false),
+    (ErrorCode::IoTransient, "E_IO_TRANSIENT", 4, true),
+    (ErrorCode::Busy, "E_BUSY", 4, true),
+    (ErrorCode::Internal, "E_INTERNAL", 1, false),
+    (ErrorCode::Conflict, "E_CONFLICT", 3, false),
+    (
+        ErrorCode::CasRetryExhausted,
+        "E_CAS_RETRY_EXHAUSTED",
+        4,
+        true,
+    ),
+    (ErrorCode::NothingToLand, "E_NOTHING_TO_LAND", 1, false),
+    (ErrorCode::NothingToUndo, "E_NOTHING_TO_UNDO", 1, false),
+    (ErrorCode::OpNotFound, "E_OP_NOT_FOUND", 6, false),
+    (ErrorCode::Auth, "E_AUTH", 5, false),
+    (ErrorCode::PolicyDenied, "E_POLICY_DENIED", 5, false),
+    (ErrorCode::MaintenanceBusy, "E_MAINTENANCE_BUSY", 4, true),
+    (ErrorCode::GitNotARepo, "E_GIT_NOT_A_REPO", 6, false),
+    (ErrorCode::GitRefNotFound, "E_GIT_REF_NOT_FOUND", 6, false),
+    (
+        ErrorCode::GitImportDiverged,
+        "E_GIT_IMPORT_DIVERGED",
+        3,
+        false,
+    ),
+    (ErrorCode::GitImportLossy, "E_GIT_IMPORT_LOSSY", 1, false),
+    (ErrorCode::GitUnsupported, "E_GIT_UNSUPPORTED", 1, false),
+    (ErrorCode::GitRead, "E_GIT_READ", 1, false),
+    (
+        ErrorCode::GitExportDiverged,
+        "E_GIT_EXPORT_DIVERGED",
+        3,
+        false,
+    ),
+    (ErrorCode::GitWrite, "E_GIT_WRITE", 1, false),
+    (ErrorCode::RemoteDiverged, "E_REMOTE_DIVERGED", 3, false),
+    (ErrorCode::RemoteRejected, "E_REMOTE_REJECTED", 5, false),
+    (
+        ErrorCode::RemoteUnreachable,
+        "E_REMOTE_UNREACHABLE",
+        4,
+        true,
+    ),
+    (ErrorCode::RemoteNotFound, "E_REMOTE_NOT_FOUND", 6, false),
+    (ErrorCode::WsExists, "E_WS_EXISTS", 1, false),
+    (ErrorCode::WsNotFound, "E_WS_NOT_FOUND", 6, false),
+    (ErrorCode::WsLocked, "E_WS_LOCKED", 4, true),
+    (ErrorCode::WsDirty, "E_WS_DIRTY", 1, false),
+    (ErrorCode::PathNotEmpty, "E_PATH_NOT_EMPTY", 1, false),
+    (
+        ErrorCode::UnresolvedConflicts,
+        "E_UNRESOLVED_CONFLICTS",
+        1,
+        false,
+    ),
+    (ErrorCode::MarkersPresent, "E_MARKERS_PRESENT", 1, false),
+    (ErrorCode::WsUnportable, "E_WS_UNPORTABLE", 1, false),
+    (ErrorCode::CheckFailed, "E_CHECK_FAILED", 1, false),
+];
 
 #[test]
 fn error_codes_map_to_spec_strings_and_exits() {
@@ -362,9 +385,14 @@ fn error_codes_map_to_spec_strings_and_exits() {
     assert_eq!(ErrorCode::Internal.exit(), 1);
     assert!(!ErrorCode::Internal.retryable());
 
+    // ROWS holds one row for each code: none missing, none extra.
+    assert_eq!(ROWS.len(), ErrorCode::ALL.len(), "ROWS and ErrorCode::ALL");
     let mut listed = BTreeSet::new();
     for &code in ErrorCode::ALL {
-        let (name, exit, retryable) = spec_row(code);
+        let &(_, name, exit, retryable) = ROWS
+            .iter()
+            .find(|row| row.0 == code)
+            .unwrap_or_else(|| panic!("{code:?} has no row in ROWS"));
         assert_eq!(
             (code.as_str(), code.exit(), code.retryable()),
             (name, exit, retryable),
@@ -375,17 +403,13 @@ fn error_codes_map_to_spec_strings_and_exits() {
             serde_json::from_value::<ErrorCode>(json!(name)).unwrap(),
             code
         );
+        let error = OpError::new(code, "boom");
         assert_eq!(
-            OpError::new(code, "boom"),
-            OpError {
-                code: name.to_owned(),
-                message: "boom".to_owned(),
-                retryable,
-                exit,
-                details: Map::new(),
-                hint: None,
-            }
+            (error.code.as_str(), error.message.as_str()),
+            (name, "boom")
         );
+        assert_eq!((error.retryable, error.exit), (retryable, exit));
+        assert_eq!((error.details, error.hint), (Map::new(), None));
         assert!(listed.insert(name), "{name} is listed twice");
     }
 
