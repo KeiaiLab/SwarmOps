@@ -23,6 +23,7 @@ use crate::{Ctx, materialize, pending};
 
 /// Where to look for a workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Locate {
     /// By its name, through the registry.
     Name(String),
@@ -34,6 +35,7 @@ pub enum Locate {
 
 /// A workspace found: its root and its state.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Found {
     /// The workspace's root directory.
     pub dir: Utf8PathBuf,
@@ -43,6 +45,7 @@ pub struct Found {
 
 /// A workspace opened against its store, which its mutations act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Workspace {
     /// The workspace's root directory.
     pub dir: Utf8PathBuf,

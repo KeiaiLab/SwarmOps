@@ -39,6 +39,7 @@ const TMP_DIR: &str = "tmp";
 /// One workspace's entry: who made it, where, and when. No `base` or `head`: those change on
 /// every commit and live in the workspace's `workspace.json`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Entry {
     /// The entry's format: [`ENTRY_FORMAT`].
     pub format: u32,
@@ -73,6 +74,7 @@ impl Entry {
 
 /// What [`Registry::create`] found.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Linked {
     /// It linked the entry.
     New,
@@ -82,6 +84,7 @@ pub enum Linked {
 }
 
 /// A store's registry, at the store's root the caller names.
+#[non_exhaustive]
 pub struct Registry {
     /// `<store>/workspaces`.
     dir: Utf8PathBuf,

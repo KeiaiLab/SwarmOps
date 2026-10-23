@@ -117,7 +117,7 @@ fn rebase_moves_the_workspace_to_h_prime_incrementally() {
     );
 
     // 3. The rebase, over a recording host.
-    let host = Arc::new(RecordingHost::new(RealHost));
+    let host = Arc::new(RecordingHost::new(RealHost::default()));
     let ctx = f.ctx_on(host.clone());
     let done = swarmops_ws::rebase(&ctx, rebase_of("w", WsRebaseAction::Start)).unwrap();
     assert_eq!(done.onto, main);

@@ -38,6 +38,7 @@ pub const MAX_HOOK_INPUT: usize = 64 * 1024;
 
 /// The `WorktreeCreate` hook's input: the fields a workspace is made from.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct HookCreate {
     /// The slug Claude Code suggests.
     pub name: String,
@@ -60,6 +61,7 @@ impl HookCreate {
 
 /// The `WorktreeRemove` hook's input.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct HookRemove {
     /// The directory to remove: the path the create hook printed.
     pub worktree_path: Utf8PathBuf,
@@ -75,6 +77,7 @@ impl HookRemove {
 /// Whether a new workspace's bootstrap runs: `SWARMOPS_WS_BOOTSTRAP=skip`, as the CLI read it,
 /// is [`Bootstrap::Skip`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Bootstrap {
     /// Copy the `.worktreeinclude` files and run the repository's bootstrap command.
     Run,
@@ -85,6 +88,7 @@ pub enum Bootstrap {
 /// What the remove hook left in the store: the workspace's head, and the rescue changeset of its
 /// uncommitted edits, when it had some.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct RemoveReport {
     /// The workspace's head when it was removed.
     pub head: ChangesetId,

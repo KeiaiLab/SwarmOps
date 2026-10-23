@@ -25,6 +25,7 @@ pub const WORKSPACE_FORMAT: u32 = 1;
 
 /// A workspace's durable state.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WorkspaceFile {
     /// The file's format: [`WORKSPACE_FORMAT`].
     pub format: u32,
@@ -106,6 +107,7 @@ impl WorkspaceFile {
 /// A workspace's state: clean, or stopped in a rebase on conflicts.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum State {
     /// No rebase in progress. A land in flight is the pending record, not a state.
     Clean,
@@ -124,6 +126,7 @@ pub enum State {
     clippy::struct_excessive_bools,
     reason = "three independent facts of the volume, as workspace.json spells them"
 )]
+#[non_exhaustive]
 pub struct Volume {
     /// Two names that differ only in case name one file.
     pub case_insensitive: bool,

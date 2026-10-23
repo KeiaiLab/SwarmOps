@@ -32,6 +32,7 @@ pub const MATERIALIZE_JSON: &str = "materialize.json";
 /// The store call a pending record names.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum PendingOp {
     /// `ws commit`'s `commit`.
     Commit,
@@ -44,6 +45,7 @@ pub enum PendingOp {
 /// A mutation's store call in flight: written before the call, with the key the call uses, so
 /// that a relaunch makes the same call with the same key and the store replays it (WS1).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Pending {
     /// The store call.
     pub op: PendingOp,
@@ -67,6 +69,7 @@ pub struct Pending {
 /// (WS3). `from` none writes the whole tree of `to` under `prefixes`; otherwise only what
 /// differs from `from`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Intent {
     /// The changeset the files stood for, or none for a tree written whole.
     #[serde(default, skip_serializing_if = "Option::is_none")]

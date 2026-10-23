@@ -25,10 +25,9 @@ const REMOVE_JSON: &[u8] = include_bytes!("fixtures/hooks/worktree_remove.json")
 
 /// The fixture's context without an identity, as the hook runs without `--as`.
 fn anonymous(f: &Fixture) -> Ctx<'_> {
-    Ctx {
-        who: None,
-        ..f.ctx()
-    }
+    let mut ctx = f.ctx();
+    ctx.who = None;
+    ctx
 }
 
 /// A fresh directory beside the store, made: a session's working directory, or the root of the
@@ -41,11 +40,7 @@ fn made(f: &Fixture, name: &str) -> Utf8PathBuf {
 
 /// The create input of session `session` asking for `name`, standing in `cwd`.
 fn asking(session: &str, name: &str, cwd: &Utf8Path) -> HookCreate {
-    HookCreate {
-        name: name.to_owned(),
-        session_id: session.to_owned(),
-        cwd: cwd.to_owned(),
-    }
+    HookCreate::new(name.to_owned(), session.to_owned(), cwd.to_owned())
 }
 
 /// The registry's entries of the fixture's store.
@@ -109,11 +104,11 @@ fn the_parsers_refuse_more_than_64_kib_and_a_missing_field() {
     let create = hook::read_create(CREATE_JSON).unwrap();
     assert_eq!(
         create,
-        HookCreate {
-            name: "feature-auth".to_owned(),
-            session_id: "abc123".to_owned(),
-            cwd: Utf8PathBuf::from("/home/user/acme"),
-        }
+        HookCreate::new(
+            "feature-auth".to_owned(),
+            "abc123".to_owned(),
+            Utf8PathBuf::from("/home/user/acme"),
+        )
     );
     let remove = hook::read_remove(REMOVE_JSON).unwrap();
     assert_eq!(
@@ -317,9 +312,7 @@ fn remove_commits_uncommitted_edits_as_a_rescue_and_reports_it() {
     write(&path, "src/a.txt", "edited\n");
 
     // 2. Removed: the directory gone, then its entry.
-    let remove = HookRemove {
-        worktree_path: path.clone(),
-    };
+    let remove = HookRemove::new(path.clone());
     let report = hook::worktree_remove(&ctx, &remove).unwrap();
     assert!(!path.exists());
     assert_eq!(entries(&f), []);
@@ -351,13 +344,7 @@ fn remove_commits_uncommitted_edits_as_a_rescue_and_reports_it() {
     // 4. A clean workspace leaves no rescue.
     let input = asking("abc123", "clean", &cwd);
     let path = hook::worktree_create(&ctx, &input, &ws_root, Bootstrap::Skip).unwrap();
-    let report = hook::worktree_remove(
-        &ctx,
-        &HookRemove {
-            worktree_path: path,
-        },
-    )
-    .unwrap();
+    let report = hook::worktree_remove(&ctx, &HookRemove::new(path)).unwrap();
     assert_eq!((report.head.to_string(), report.rescued), (base, None));
 }
 
@@ -370,9 +357,7 @@ fn remove_of_a_directory_that_is_not_a_workspace_exits_zero() {
     f.commit(None, &[Put::File("a.txt", "a\n")]);
     let dir = made(&f, "plain");
     write(&dir, "keep.txt", "keep\n");
-    let input = HookRemove {
-        worktree_path: dir.clone(),
-    };
+    let input = HookRemove::new(dir.clone());
 
     // 2. Not ours, and left as it was.
     assert_eq!(hook::ours(&input, &RealFs).unwrap(), None);
@@ -381,9 +366,8 @@ fn remove_of_a_directory_that_is_not_a_workspace_exits_zero() {
     assert_eq!(tree_of(&dir), [file("keep.txt", "keep\n")]);
 
     // 3. A gone directory is none either.
-    let gone = HookRemove {
-        worktree_path: f.beside("gone"),
-    };
+    let gone = HookRemove::new(f.beside("gone"));
+
     assert_eq!(hook::ours(&gone, &RealFs).unwrap(), None);
 }
 

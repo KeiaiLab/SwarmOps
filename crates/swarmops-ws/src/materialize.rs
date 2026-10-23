@@ -54,6 +54,7 @@ const MAX_DIRTY: usize = 20;
 
 /// What a materialisation did on the host.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Written {
     /// The files written.
     pub files: u64,

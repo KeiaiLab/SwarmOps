@@ -28,6 +28,7 @@ pub(crate) const LOCK_FILE: &str = "lock";
 
 /// The exclusive lock of one workspace, held until dropped.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct WsLock {
     /// The open lock file the lock belongs to.
     file: File,

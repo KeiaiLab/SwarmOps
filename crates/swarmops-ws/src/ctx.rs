@@ -11,6 +11,7 @@ use crate::hostfs::HostFs;
 /// What every workspace operation runs with: the store, where it is, who acts, and the two file
 /// layers. The CLI builds it from `--repo` / `SWARMOPS_REPO` or the workspace's `repo` and the
 /// caller's identity, if any; the MCP server from its own store and identity.
+#[non_exhaustive]
 pub struct Ctx<'a> {
     /// The store's operations.
     pub store: &'a dyn StoreOps,
