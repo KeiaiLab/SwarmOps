@@ -90,7 +90,7 @@ impl Trees {
 }
 
 fn blob(n: u8) -> BlobId {
-    BlobId(hash_object(ObjectKind::Blob, &[n]))
+    BlobId::new(hash_object(ObjectKind::Blob, &[n]))
 }
 
 fn file(n: u8) -> Leaf {
@@ -135,22 +135,15 @@ fn type_changed(p: &str, old: Leaf, new: Leaf) -> TreeChange {
 }
 
 fn put(p: &str, leaf: Leaf) -> DeltaEntry {
-    DeltaEntry {
-        path: path(p),
-        op: DeltaOp::Put {
-            kind: leaf.kind,
-            id: leaf.blob,
-        },
-        renamed_from: None,
-    }
+    let op = DeltaOp::Put {
+        kind: leaf.kind,
+        id: leaf.blob,
+    };
+    DeltaEntry::new(path(p), op, None).unwrap()
 }
 
 fn delete(p: &str) -> DeltaEntry {
-    DeltaEntry {
-        path: path(p),
-        op: DeltaOp::Delete,
-        renamed_from: None,
-    }
+    DeltaEntry::new(path(p), DeltaOp::Delete, None).unwrap()
 }
 
 /// The two trees stored, and their diff under `filter`.
@@ -197,13 +190,13 @@ fn is_under(path: &RepoPath, prefixes: &[RepoPath]) -> bool {
 fn applied(mut files: Files, delta: &[DeltaEntry]) -> Files {
     for entry in delta {
         assert_eq!(entry.renamed_from, None, "{entry:?}");
-        match entry.op {
-            DeltaOp::Put { kind, id } => {
+        match entry.op.put() {
+            Some((kind, id)) => {
                 let leaf = Leaf::new(kind, id);
                 let old = files.insert(entry.path.clone(), leaf);
                 assert_ne!(old, Some(leaf), "a put that changes nothing: {entry:?}");
             }
-            DeltaOp::Delete => {
+            None => {
                 assert!(
                     files.remove(&entry.path).is_some(),
                     "a delete of no leaf: {entry:?}"
@@ -576,23 +569,25 @@ fn delta_of_a_diff_is_canonical() {
     );
 
     // A changeset whose delta it is encodes: the codec's order rules accept it.
-    let signature = Signature {
-        name: b"agent".to_vec(),
-        email: b"agent@example.com".to_vec(),
-        secs: 0,
-        offset_secs: 0,
-        negative_zero: false,
-    };
-    let changeset = Changeset {
-        parents: vec![],
-        root: trees.add(&to).unwrap(),
+    let signature = Signature::new(
+        b"agent".to_vec(),
+        b"agent@example.com".to_vec(),
+        0,
+        0,
+        false,
+    )
+    .unwrap();
+    let changeset = Changeset::new(
+        vec![],
+        trees.add(&to).unwrap(),
         delta,
-        author: signature.clone(),
-        committer: signature,
-        message: b"m".to_vec(),
-        extra_headers: vec![],
-        metadata: vec![],
-    };
+        signature.clone(),
+        signature,
+        b"m".to_vec(),
+        vec![],
+        vec![],
+    )
+    .unwrap();
     let bytes = changeset.encode().unwrap();
     assert_eq!(Changeset::decode(&bytes).unwrap(), changeset);
 }
