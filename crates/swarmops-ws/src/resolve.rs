@@ -16,11 +16,11 @@ use serde_json::{Map, Value};
 use swarmops_api::{ConflictReport, ErrorCode, OpError, Side, WsResolveReq, WsResolveResp};
 
 use crate::hostfs::HostKind;
-use crate::materialize::{covered, host_failed, normalize};
+use crate::materialize;
 use crate::rebase;
 use crate::state::State;
 use crate::status::CONFLICTS_JSON;
-use crate::workspace::{Locate, Workspace, open_locked};
+use crate::workspace::{self, Locate, Workspace};
 use crate::{Ctx, after, discard, markers};
 
 /// The paths of a rebase in progress resolved so far, in `.swarmws/`.
@@ -44,7 +44,7 @@ pub fn resolve(ctx: &Ctx<'_>, req: WsResolveReq) -> Result<WsResolveResp, OpErro
         force,
         status_after,
     } = req;
-    let (ws, _held) = open_locked(ctx, &Locate::Name(workspace))?;
+    let (ws, _held) = workspace::open_locked(ctx, &Locate::Name(workspace))?;
     let State::Rebasing { against, .. } = &ws.file.state else {
         return Err(OpError::new(
             ErrorCode::InvalidArg,
@@ -59,7 +59,7 @@ pub fn resolve(ctx: &Ctx<'_>, req: WsResolveReq) -> Result<WsResolveResp, OpErro
     let asked = if all {
         report.files.iter().map(|file| file.path.clone()).collect()
     } else {
-        normalize(paths)?
+        materialize::normalize(paths)?
     };
     if asked.is_empty() {
         return Err(OpError::new(
@@ -117,7 +117,7 @@ fn refuse_markers(
     let mut marked = Vec::new();
     for path in paths {
         // 1. A file the workspace holds.
-        if !ws.file.all && !covered(path, &ws.file.prefixes) {
+        if !ws.file.all && !materialize::covered(path, &ws.file.prefixes) {
             return Err(OpError::new(
                 ErrorCode::InvalidArg,
                 format!("{path:?} is outside the workspace's prefixes: resolve it with --take"),
@@ -127,11 +127,12 @@ fn refuse_markers(
 
         // 2. Its lines, looked at unless forced; a removed file holds none.
         let abs = ws.dir.join(path);
-        let meta = (ctx.host.symlink_metadata(&abs)).map_err(|e| host_failed(path, &e))?;
+        let meta =
+            (ctx.host.symlink_metadata(&abs)).map_err(|e| materialize::host_failed(path, &e))?;
         if force || !meta.is_some_and(|meta| meta.kind == HostKind::File) {
             continue;
         }
-        let bytes = (ctx.host.read_file(&abs)).map_err(|e| host_failed(path, &e))?;
+        let bytes = (ctx.host.read_file(&abs)).map_err(|e| materialize::host_failed(path, &e))?;
         if markers::marked(&bytes) {
             marked.push(Value::from(path.as_str()));
         }

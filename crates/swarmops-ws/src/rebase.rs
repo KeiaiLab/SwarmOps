@@ -31,14 +31,14 @@ use swarmops_api::{
 use swarmops_store::FsMethod;
 
 use crate::hostfs::HostKind;
-use crate::materialize::{self, covered, dirty, host_failed};
+use crate::materialize;
 use crate::pending::{self, Pending, PendingOp};
 use crate::resolve::{self, RESOLVED_JSON, Resolved};
 use crate::scan::Want;
 use crate::state::{self, SWARMWS_DIR, State};
 use crate::status::{self, CONFLICTS_JSON};
 use crate::volume::EXEC_BITS;
-use crate::workspace::{Locate, Workspace, open_locked};
+use crate::workspace::{self, Locate, Workspace};
 use crate::{Ctx, after, commit, discard, io_error, markers};
 
 /// The pending record's state of a rebase that starts.
@@ -57,7 +57,7 @@ pub fn rebase(ctx: &Ctx<'_>, req: WsRebaseReq) -> Result<WsRebaseResp, OpError> 
         message,
         status_after,
     } = req;
-    let (mut ws, _held) = open_locked(ctx, &Locate::Name(workspace))?;
+    let (mut ws, _held) = workspace::open_locked(ctx, &Locate::Name(workspace))?;
 
     // 2. The action; then the status after it.
     let mut done = match action {
@@ -301,7 +301,7 @@ fn enter(
     if continued {
         let back: BTreeSet<String> = (earlier.into_iter().chain(again))
             .filter(|path| !kept.files.contains_key(path))
-            .filter(|path| ws.file.all || covered(path, &ws.file.prefixes))
+            .filter(|path| ws.file.all || materialize::covered(path, &ws.file.prefixes))
             .collect();
         let back: Vec<String> = back.into_iter().collect();
         let head = ws.file.head.clone();
@@ -318,7 +318,7 @@ fn conflicted(ctx: &Ctx<'_>, ws: &Workspace) -> Result<Vec<String>, OpError> {
     let paths: BTreeSet<String> = (report.iter())
         .flat_map(|report| report.files.iter().map(|file| file.path.clone()))
         .chain(resolved.files.into_keys())
-        .filter(|path| ws.file.all || covered(path, &ws.file.prefixes))
+        .filter(|path| ws.file.all || materialize::covered(path, &ws.file.prefixes))
         .collect();
     Ok(paths.into_iter().collect())
 }
@@ -361,7 +361,7 @@ fn content_of(ctx: &Ctx<'_>, ws: &Workspace, path: &str) -> Result<ResolutionInp
     // 1. What is there: nothing is a removal; a directory is no file.
     let abs = ws.dir.join(path);
     let host = ctx.host.as_ref();
-    let meta = (host.symlink_metadata(&abs)).map_err(|e| host_failed(path, &e))?;
+    let meta = (host.symlink_metadata(&abs)).map_err(|e| materialize::host_failed(path, &e))?;
     let Some(meta) = meta else {
         return Ok(ResolutionInput {
             take: None,
@@ -374,11 +374,11 @@ fn content_of(ctx: &Ctx<'_>, ws: &Workspace, path: &str) -> Result<ResolutionInp
     // 2. Its bytes and kind: a symlink's target, or a file's bytes and bit.
     let (bytes, mode) = match meta.kind {
         HostKind::Symlink => {
-            let target = (host.read_link(&abs)).map_err(|e| host_failed(path, &e))?;
+            let target = (host.read_link(&abs)).map_err(|e| materialize::host_failed(path, &e))?;
             (target.into_bytes(), Some(ModeInput::Symlink))
         }
         HostKind::File => {
-            let bytes = (host.read_file(&abs)).map_err(|e| host_failed(path, &e))?;
+            let bytes = (host.read_file(&abs)).map_err(|e| materialize::host_failed(path, &e))?;
             let kind = if meta.mode & EXEC_BITS == 0 {
                 ModeInput::File
             } else {
@@ -437,7 +437,7 @@ pub(crate) fn settle_edits(
         Some(message) if except.is_empty() => {
             commit::commit_in(ctx, ws, message, &[], &BTreeMap::new()).map(|_| ())
         }
-        _ => Err(dirty(paths)),
+        _ => Err(materialize::dirty(paths)),
     }
 }
 

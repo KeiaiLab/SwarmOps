@@ -25,7 +25,7 @@ use serde_json::{Map, Value};
 use swarmops_api::{ContentEncoding, ErrorCode, OpError, ReadFileReq, StoreOps};
 
 use crate::hostfs::{HostFs, HostKind};
-use crate::materialize::{Tree, host_failed};
+use crate::materialize::{self, Tree};
 use crate::state::SWARMWS_DIR;
 use crate::workspace::Workspace;
 use crate::{Ctx, run as runner};
@@ -149,7 +149,8 @@ fn copy_included(ctx: &Ctx<'_>, ws: &Workspace, from: &Utf8Path) -> Result<(), O
     for found in listed(from, &include)? {
         let (rel, size, mode) = found;
         let dest = ws.dir.join(&rel);
-        let held = (host.symlink_metadata(&dest)).map_err(|e| host_failed(&rel, &e))?;
+        let held =
+            (host.symlink_metadata(&dest)).map_err(|e| materialize::host_failed(&rel, &e))?;
         if held.is_some() || tree.entry(&rel)?.is_some() {
             continue;
         }
@@ -167,12 +168,12 @@ fn copy_included(ctx: &Ctx<'_>, ws: &Workspace, from: &Utf8Path) -> Result<(), O
     for copy in copies {
         let dest = ws.dir.join(&copy.rel);
         if let Some(parent) = dest.parent() {
-            (host.create_dir_all(parent)).map_err(|e| host_failed(&copy.rel, &e))?;
+            (host.create_dir_all(parent)).map_err(|e| materialize::host_failed(&copy.rel, &e))?;
         }
-        let content =
-            (host.read_file(&from.join(&copy.rel))).map_err(|e| host_failed(&copy.rel, &e))?;
-        (host.write_file(&dest, &content)).map_err(|e| host_failed(&copy.rel, &e))?;
-        (host.set_mode(&dest, copy.mode)).map_err(|e| host_failed(&copy.rel, &e))?;
+        let content = (host.read_file(&from.join(&copy.rel)))
+            .map_err(|e| materialize::host_failed(&copy.rel, &e))?;
+        (host.write_file(&dest, &content)).map_err(|e| materialize::host_failed(&copy.rel, &e))?;
+        (host.set_mode(&dest, copy.mode)).map_err(|e| materialize::host_failed(&copy.rel, &e))?;
     }
     Ok(())
 }
@@ -181,13 +182,15 @@ fn copy_included(ctx: &Ctx<'_>, ws: &Workspace, from: &Utf8Path) -> Result<(), O
 fn included(host: &dyn HostFs, from: &Utf8Path) -> Result<Option<Gitignore>, OpError> {
     // 1. A regular file, never a link.
     let path = from.join(WORKTREEINCLUDE);
-    let meta = (host.symlink_metadata(&path)).map_err(|e| host_failed(WORKTREEINCLUDE, &e))?;
+    let meta = (host.symlink_metadata(&path))
+        .map_err(|e| materialize::host_failed(WORKTREEINCLUDE, &e))?;
     if meta.is_none_or(|meta| meta.kind != HostKind::File) {
         return Ok(None);
     }
 
     // 2. Its lines, in gitignore syntax.
-    let bytes = (host.read_file(&path)).map_err(|e| host_failed(WORKTREEINCLUDE, &e))?;
+    let bytes =
+        (host.read_file(&path)).map_err(|e| materialize::host_failed(WORKTREEINCLUDE, &e))?;
     let text = String::from_utf8_lossy(&bytes);
     let mut builder = GitignoreBuilder::new(from);
     for line in text.lines() {
@@ -217,7 +220,8 @@ fn listed(from: &Utf8Path, include: &Gitignore) -> Result<Vec<(String, u64, u32)
     });
 
     // 2. The regular files the list matches, inside `from` once resolved.
-    let resolved_root = std::fs::canonicalize(from).map_err(|e| host_failed(".", &e))?;
+    let resolved_root =
+        std::fs::canonicalize(from).map_err(|e| materialize::host_failed(".", &e))?;
     let mut found = Vec::new();
     for entry in builder.build() {
         let entry = entry.map_err(|e| walk_failed(&e))?;
@@ -230,7 +234,8 @@ fn listed(from: &Utf8Path, include: &Gitignore) -> Result<Vec<(String, u64, u32)
         if !include.matched_path_or_any_parents(&rel, false).is_ignore() {
             continue;
         }
-        let resolved = std::fs::canonicalize(entry.path()).map_err(|e| host_failed(&rel, &e))?;
+        let resolved =
+            std::fs::canonicalize(entry.path()).map_err(|e| materialize::host_failed(&rel, &e))?;
         if !resolved.starts_with(&resolved_root) {
             continue;
         }
@@ -323,5 +328,5 @@ fn bad_include(e: &ignore::Error) -> OpError {
 
 /// `E_IO` for a walk of the source directory that failed with `e`.
 fn walk_failed(e: &dyn std::fmt::Display) -> OpError {
-    host_failed(".", &io::Error::other(e.to_string()))
+    materialize::host_failed(".", &io::Error::other(e.to_string()))
 }

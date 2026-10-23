@@ -24,13 +24,13 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 use swarmops_api::{ErrorCode, Identity, InfoReq, OpError, StatusAfter, WsCreateReq, WsDeleteReq};
-use swarmops_core::portable::check_component;
+use swarmops_core::portable;
 use swarmops_core::{ChangesetId, ObjectId};
 use swarmops_store::FsOps;
 
-use crate::bootstrap::{self, repo_config};
+use crate::bootstrap;
 use crate::registry::Registry;
-use crate::workspace::{Found, Locate, Workspace, find, host_path};
+use crate::workspace::{self, Found, Locate, Workspace};
 use crate::{Ctx, create, delete};
 
 /// The most bytes of hook input the parsers read.
@@ -121,7 +121,7 @@ pub fn read_create(stdin: &[u8]) -> Result<HookCreate, OpError> {
     Ok(HookCreate {
         name: input.name,
         session_id: input.session_id,
-        cwd: host_path(Path::new(&input.cwd))?,
+        cwd: workspace::host_path(Path::new(&input.cwd))?,
     })
 }
 
@@ -130,7 +130,7 @@ pub fn read_create(stdin: &[u8]) -> Result<HookCreate, OpError> {
 pub fn read_remove(stdin: &[u8]) -> Result<HookRemove, OpError> {
     let input: RemoveInput = parse(stdin, "WorktreeRemove")?;
     Ok(HookRemove {
-        worktree_path: host_path(Path::new(&input.worktree_path))?,
+        worktree_path: workspace::host_path(Path::new(&input.worktree_path))?,
     })
 }
 
@@ -148,7 +148,7 @@ pub fn worktree_create(
     let (base, prefixes, all) = if let Some(parent) = parent_of(ctx, &input.cwd)? {
         (parent.file.head, parent.file.prefixes, parent.file.all)
     } else {
-        let config = repo_config(ctx.store, DEFAULT_BASE)?.unwrap_or_default();
+        let config = bootstrap::repo_config(ctx.store, DEFAULT_BASE)?.unwrap_or_default();
         let all = config.prefixes.is_empty();
         (DEFAULT_BASE.to_owned(), config.prefixes, all)
     };
@@ -194,7 +194,7 @@ pub fn worktree_create(
         session: Some(session),
         status_after: StatusAfter::None,
     };
-    let made = create(&ctx, req)?;
+    let made = create::create(&ctx, req)?;
     if made.created && bootstrap == Bootstrap::Run {
         let ws = Workspace::open(&ctx, Locate::Path(dir.clone()))?;
         bootstrap::run(&ctx, &ws, Some(&input.cwd))?;
@@ -205,7 +205,7 @@ pub fn worktree_create(
 /// The workspace at the directory the remove hook names, if there is one: none is a directory
 /// that is not ours, which the CLI leaves alone and exits 0 on. No store is needed.
 pub fn ours(input: &HookRemove, fs: &dyn FsOps) -> Result<Option<Found>, OpError> {
-    match find(&Locate::Path(input.worktree_path.clone()), None, fs) {
+    match workspace::find(&Locate::Path(input.worktree_path.clone()), None, fs) {
         Ok(found) => Ok(Some(found)),
         Err(e) if e.code == ErrorCode::WsNotFound.as_str() => Ok(None),
         Err(e) => Err(e),
@@ -238,7 +238,7 @@ pub fn worktree_remove(ctx: &Ctx<'_>, input: &HookRemove) -> Result<RemoveReport
         force: false,
         rescue: true,
     };
-    let done = delete(ctx, req)?;
+    let done = delete::delete(ctx, req)?;
     let rescued = done.rescued.as_deref().map(changeset_id).transpose()?;
     Ok(RemoveReport {
         head: changeset_id(&done.head)?,
@@ -317,7 +317,7 @@ fn slug(text: &str) -> String {
     }
 
     // 3. The prefix where the slug is no name, cut again.
-    if name.is_empty() || name.starts_with('.') || check_component(&name).is_err() {
+    if name.is_empty() || name.starts_with('.') || portable::check_component(&name).is_err() {
         name = format!("{NAME_PREFIX}{name}");
         name.truncate(MAX_SLUG);
     }

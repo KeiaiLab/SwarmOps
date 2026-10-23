@@ -22,11 +22,11 @@ use std::collections::BTreeSet;
 
 use swarmops_api::{ConflictKindOut, ConflictReport, FileConflictOut, OpError};
 use swarmops_merge::conflict::{ConflictHunk, ContentMerge};
-use swarmops_merge::diff3::merge_content;
-use swarmops_merge::line_diff::split_lines;
+use swarmops_merge::diff3;
+use swarmops_merge::line_diff;
 
 use crate::Ctx;
-use crate::materialize::{covered, fetch, host_failed};
+use crate::materialize;
 use crate::volume::{EXEC_BITS, EXEC_MODE};
 use crate::workspace::Workspace;
 
@@ -61,7 +61,7 @@ pub(crate) fn write(
             )
         })
         .filter(|file| file.ours_blob.is_some() && file.theirs_blob.is_some())
-        .filter(|file| ws.file.all || covered(&file.path, &ws.file.prefixes))
+        .filter(|file| ws.file.all || materialize::covered(&file.path, &ws.file.prefixes))
         .collect();
     if files.is_empty() {
         return Ok(Vec::new());
@@ -72,7 +72,7 @@ pub(crate) fn write(
         .flat_map(|file| [&file.base_blob, &file.ours_blob, &file.theirs_blob])
         .filter_map(|blob| blob.as_deref())
         .collect();
-    let contents = fetch(ctx.store, ids.into_iter().collect())?;
+    let contents = materialize::fetch(ctx.store, ids.into_iter().collect())?;
     let blob = |id: &Option<String>| id.as_ref().map_or(&[][..], |id| contents[id].as_slice());
 
     // 3. Each file merged again and written with its markers, its executable bit kept.
@@ -97,14 +97,18 @@ pub(crate) fn write(
 /// markers, `label` closing each; none when the contents do not merge by lines.
 pub(crate) fn render(base: &[u8], ours: &[u8], theirs: &[u8], label: &str) -> Option<Vec<u8>> {
     // 1. The merge's hunks, in file order; a clean merge is its bytes.
-    let hunks = match merge_content(base, ours, theirs) {
+    let hunks = match diff3::merge_content(base, ours, theirs) {
         ContentMerge::Clean(bytes) => return Some(bytes),
         ContentMerge::Binary => return None,
         ContentMerge::Conflicted(hunks) => hunks,
     };
 
     // 2. Between the hunks, the three sides' lines merged as they merge; each hunk a block.
-    let sides = [split_lines(base), split_lines(ours), split_lines(theirs)];
+    let sides = [
+        line_diff::split_lines(base),
+        line_diff::split_lines(ours),
+        line_diff::split_lines(theirs),
+    ];
     let mut out = Vec::with_capacity(ours.len().max(theirs.len()));
     let mut from = [0; 3];
     for hunk in &hunks {
@@ -122,7 +126,7 @@ pub(crate) fn render(base: &[u8], ours: &[u8], theirs: &[u8], label: &str) -> Op
 
 /// Whether `bytes` hold a line that opens, divides or closes a block of markers.
 pub(crate) fn marked(bytes: &[u8]) -> bool {
-    split_lines(bytes).into_iter().any(|line| {
+    line_diff::split_lines(bytes).into_iter().any(|line| {
         let line = line.strip_suffix(b"\n").unwrap_or(line);
         let line = line.strip_suffix(b"\r").unwrap_or(line);
         line.starts_with(OURS_MARKER.as_bytes())
@@ -151,7 +155,7 @@ fn index(line: u32) -> usize {
 /// are a block too, so that nothing is lost.
 fn between(sides: &[Vec<&[u8]>; 3], from: [usize; 3], to: [usize; 3], label: &str) -> Vec<u8> {
     let [base, ours, theirs] = [0, 1, 2].map(|side| sides[side][from[side]..to[side]].concat());
-    match merge_content(&base, &ours, &theirs) {
+    match diff3::merge_content(&base, &ours, &theirs) {
         ContentMerge::Clean(bytes) => bytes,
         ContentMerge::Binary | ContentMerge::Conflicted(_) => {
             let mut out = Vec::new();
@@ -195,16 +199,17 @@ fn put(ctx: &Ctx<'_>, ws: &Workspace, path: &str, bytes: &[u8]) -> Result<(), Op
     let host = ctx.host.as_ref();
     let meta = host
         .symlink_metadata(&abs)
-        .map_err(|e| host_failed(path, &e))?;
+        .map_err(|e| materialize::host_failed(path, &e))?;
     let exec = ws.file.volume.exec_bit && meta.is_some_and(|meta| meta.mode & EXEC_BITS != 0);
 
     // 2. The file, its directory made if the head had none there (an add/add).
     if let Some((parent, _)) = path.rsplit_once('/') {
-        (host.create_dir_all(&ws.dir.join(parent))).map_err(|e| host_failed(parent, &e))?;
+        (host.create_dir_all(&ws.dir.join(parent)))
+            .map_err(|e| materialize::host_failed(parent, &e))?;
     }
-    (host.write_file(&abs, bytes)).map_err(|e| host_failed(path, &e))?;
+    (host.write_file(&abs, bytes)).map_err(|e| materialize::host_failed(path, &e))?;
     if exec {
-        (host.set_mode(&abs, EXEC_MODE)).map_err(|e| host_failed(path, &e))?;
+        (host.set_mode(&abs, EXEC_MODE)).map_err(|e| materialize::host_failed(path, &e))?;
     }
     Ok(())
 }

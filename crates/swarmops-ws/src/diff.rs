@@ -14,12 +14,12 @@ use swarmops_api::{
     WsDiffReq,
 };
 use swarmops_core::ObjectId;
-use swarmops_merge::line_diff::{DiffLine, UnifiedHunk, is_text, line_hunks, line_stats, unified};
+use swarmops_merge::line_diff::{self, DiffLine, UnifiedHunk};
 
 use crate::Ctx;
-use crate::materialize::{host_failed, normalize};
+use crate::materialize;
 use crate::scan::{self, Change, Want};
-use crate::status::changes_of;
+use crate::status;
 use crate::workspace::{Locate, Workspace};
 
 /// `ws_diff` in the workspace `req` names.
@@ -36,7 +36,7 @@ pub fn diff(ctx: &Ctx<'_>, req: WsDiffReq) -> Result<Diff, OpError> {
     } = req;
     at_least_one("limit", u64::try_from(limit).unwrap_or(u64::MAX))?;
     at_least_one("max_bytes", max_bytes)?;
-    let paths = normalize(paths)?;
+    let paths = materialize::normalize(paths)?;
 
     // 2. The changes after the cursor, by a scan without the lock: a read.
     let ws = Workspace::open(ctx, Locate::Name(workspace))?;
@@ -45,7 +45,7 @@ pub fn diff(ctx: &Ctx<'_>, req: WsDiffReq) -> Result<Diff, OpError> {
         full: false,
         extra: Vec::new(),
     };
-    let changes = changes_of(ctx, &ws, &want)?;
+    let changes = status::changes_of(ctx, &ws, &want)?;
     let rest: Vec<&Change> = (changes.iter())
         .filter(|change| {
             cursor
@@ -124,7 +124,7 @@ fn file_diff(
         Some(host) => {
             let abs = ws.dir.join(&change.path);
             let bytes = scan::content(ctx.host.as_ref(), &abs, host.meta.kind)
-                .map_err(|e| host_failed(&change.path, &e))?;
+                .map_err(|e| materialize::host_failed(&change.path, &e))?;
             Some((host.kind, bytes))
         }
         None => None,
@@ -143,14 +143,14 @@ fn file_diff(
     let shared = change.old.map(|(_, blob)| blob) == new_blob && new_blob.is_some();
     let old = old.as_deref().unwrap_or_default();
     let new = new.as_ref().map_or(&[][..], |(_, bytes)| bytes.as_slice());
-    let text = is_text(old) && is_text(new);
+    let text = line_diff::is_text(old) && line_diff::is_text(new);
     file.binary = Some(!text);
     if !text {
         return Ok(file);
     }
     let hunks = if shared {
         Vec::new()
-    } else if let Ok(hunks) = line_hunks(old, new) {
+    } else if let Ok(hunks) = line_diff::line_hunks(old, new) {
         hunks
     } else {
         file.hunks_truncated = Some(true);
@@ -159,11 +159,11 @@ fn file_diff(
     };
 
     // 5. The counts, and for `unified` the hunks.
-    let stats = line_stats(&hunks);
+    let stats = line_diff::line_stats(&hunks);
     file.insertions = Some(stats.insertions);
     file.deletions = Some(stats.deletions);
     if format == DiffFormat::Unified {
-        let shown = unified(old, new, &hunks, context);
+        let shown = line_diff::unified(old, new, &hunks, context);
         file.hunks = Some(shown.iter().map(diff_hunk).collect());
     }
     Ok(file)

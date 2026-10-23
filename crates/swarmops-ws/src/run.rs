@@ -269,8 +269,8 @@ fn own_group(_command: &mut Command) {}
 /// should it have left the group. One already gone is killed.
 #[cfg(unix)]
 fn kill(child: &mut Child) {
-    use rustix::process::{Pid, Signal, kill_process_group};
-    let _ = kill_process_group(Pid::from_child(child), Signal::KILL);
+    use rustix::process::{Pid, Signal};
+    let _ = rustix::process::kill_process_group(Pid::from_child(child), Signal::KILL);
     let _ = child.kill();
 }
 

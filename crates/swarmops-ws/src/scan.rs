@@ -19,11 +19,11 @@ use camino::Utf8Path;
 use ignore::{WalkBuilder, WalkState};
 use rayon::prelude::*;
 use swarmops_api::{FileKind, OpError, StoreOps, WsChangeKind};
-use swarmops_core::{ObjectId, ObjectKind, hash_object};
+use swarmops_core::{ObjectId, ObjectKind};
 
 use crate::hostfs::{HostFs, HostKind, HostMeta};
 use crate::index::{self, Index, Row, UNCONFIRMED};
-use crate::materialize::{Tree, covered, host_failed, items_under};
+use crate::materialize::{self, Tree};
 use crate::state::{SWARMWS_DIR, Volume};
 use crate::volume::EXEC_BITS;
 use crate::workspace::Workspace;
@@ -148,7 +148,7 @@ pub fn walker(root: &Utf8Path, prefixes: &[String]) -> WalkBuilder {
         if rel == SWARMWS_DIR || (is_dir && entry.file_name() == ".git") {
             return false;
         }
-        prefixes.is_empty() || covered(&rel, &prefixes) || leads_to(&rel, &prefixes)
+        prefixes.is_empty() || materialize::covered(&rel, &prefixes) || leads_to(&rel, &prefixes)
     });
     builder
 }
@@ -180,7 +180,7 @@ pub(crate) fn scan(ctx: &Ctx<'_>, ws: &Workspace, want: &Want) -> Result<Scanned
     index.written_ns = written_ns;
 
     // 3. The tracked rows, stat'd in parallel; those whose stat says nothing, hashed.
-    let wanted = |path: &str| want.paths.is_empty() || covered(path, &want.paths);
+    let wanted = |path: &str| want.paths.is_empty() || materialize::covered(path, &want.paths);
     let host = ctx.host.as_ref();
     let looks: Vec<Look> = (index.rows.par_iter().enumerate())
         .filter(|(_, row)| wanted(&row.path))
@@ -271,7 +271,7 @@ fn look(
     // 1. The stat; nothing, a directory or no file at all reads as gone.
     let meta = host
         .symlink_metadata(&ws.dir.join(&row.path))
-        .map_err(|e| host_failed(&row.path, &e))?;
+        .map_err(|e| materialize::host_failed(&row.path, &e))?;
     let Some(meta) = meta.filter(|meta| matches!(meta.kind, HostKind::File | HostKind::Symlink))
     else {
         return Ok(Look {
@@ -379,10 +379,10 @@ fn rebuild(store: &dyn StoreOps, ws: &Workspace) -> Result<Index, OpError> {
     let tree = Tree::new(store, &ws.file.head);
     let mut items = Vec::new();
     if ws.file.all {
-        items.extend(items_under(store, &tree, None)?.unwrap_or_default());
+        items.extend(materialize::items_under(store, &tree, None)?.unwrap_or_default());
     } else {
         for prefix in &ws.file.prefixes {
-            items.extend(items_under(store, &tree, Some(prefix))?.unwrap_or_default());
+            items.extend(materialize::items_under(store, &tree, Some(prefix))?.unwrap_or_default());
         }
     }
 
@@ -409,7 +409,7 @@ fn join_rows(
 ) -> Result<bool, OpError> {
     let tree = Tree::new(store, &ws.file.head);
     let mut joined = false;
-    for item in items_under(store, &tree, Some(path))?.unwrap_or_default() {
+    for item in materialize::items_under(store, &tree, Some(path))?.unwrap_or_default() {
         let Err(at) = index
             .rows
             .binary_search_by(|row| row.path.as_str().cmp(&item.path))
@@ -501,7 +501,7 @@ fn untracked(
     for path in found {
         let meta = host
             .symlink_metadata(&ws.dir.join(&path))
-            .map_err(|e| host_failed(&path, &e))?;
+            .map_err(|e| materialize::host_failed(&path, &e))?;
         if let Some(meta) = meta.filter(|m| matches!(m.kind, HostKind::File | HostKind::Symlink)) {
             out.push((path, meta));
         }
@@ -554,7 +554,7 @@ pub(crate) fn hash_all(
             match blob {
                 Ok(blob) => Ok(Some(blob)),
                 Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-                Err(e) => Err(host_failed(path, &e)),
+                Err(e) => Err(materialize::host_failed(path, &e)),
             }
         })
         .collect()
@@ -568,7 +568,7 @@ fn hash_one(host: &dyn HostFs, abs: &Utf8Path, kind: HostKind) -> io::Result<Blo
 
 /// The id of the blob holding `bytes`.
 pub(crate) fn blob_id(bytes: &[u8]) -> Blob {
-    hash_object(ObjectKind::Blob, bytes).0
+    swarmops_core::hash_object(ObjectKind::Blob, bytes).0
 }
 
 /// What the host holds at `abs`, as a blob holds it: a file's bytes, or a symlink's target.
@@ -712,7 +712,10 @@ mod tests {
         // 3. Each blob is its file's.
         for ((path, _), blob) in files.iter().zip(blobs) {
             let bytes = std::fs::read(dir.join(path)).unwrap();
-            assert_eq!(blob, Some(hash_object(ObjectKind::Blob, &bytes).0));
+            assert_eq!(
+                blob,
+                Some(swarmops_core::hash_object(ObjectKind::Blob, &bytes).0)
+            );
         }
     }
 }

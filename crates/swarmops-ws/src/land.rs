@@ -33,9 +33,9 @@ use swarmops_api::{
 
 use crate::check::{self, Subject};
 use crate::pending::{self, Pending, PendingOp};
-use crate::rebase::{cut_short, finish_call, move_to, new_key, rebase_in, record, settle_edits};
+use crate::rebase;
 use crate::state::State;
-use crate::workspace::{Locate, Workspace, open_locked};
+use crate::workspace::{self, Locate, Workspace};
 use crate::{Ctx, after};
 
 /// The pending record's state before an attempt's rebase.
@@ -109,7 +109,7 @@ pub fn land(ctx: &Ctx<'_>, req: WsLandReq) -> Result<WsLandResp, OpError> {
         .transpose()?;
 
     // 2. The workspace under its lock, not rebasing.
-    let (mut ws, _held) = open_locked(ctx, &Locate::Name(workspace))?;
+    let (mut ws, _held) = workspace::open_locked(ctx, &Locate::Name(workspace))?;
     if let State::Rebasing { .. } = ws.file.state {
         return Err(OpError::new(
             ErrorCode::UnresolvedConflicts,
@@ -121,7 +121,7 @@ pub fn land(ctx: &Ctx<'_>, req: WsLandReq) -> Result<WsLandResp, OpError> {
     // 3. A land cut short: its keys; else the edits settled and something to land.
     let cut = cut_land(ctx, &ws)?;
     if cut.is_none() {
-        settle_edits(ctx, &mut ws, message.clone(), &BTreeSet::new())?;
+        rebase::settle_edits(ctx, &mut ws, message.clone(), &BTreeSet::new())?;
         if ws.file.head == ws.file.base {
             return Err(OpError::new(
                 ErrorCode::NothingToLand,
@@ -133,7 +133,7 @@ pub fn land(ctx: &Ctx<'_>, req: WsLandReq) -> Result<WsLandResp, OpError> {
     // 4. The land, checked or not; then the status after it.
     let key = (cut.as_ref().map(|cut| cut.key.clone()))
         .or(idempotency_key)
-        .unwrap_or_else(new_key);
+        .unwrap_or_else(rebase::new_key);
     let mut landing = Landing {
         ctx,
         ws,
@@ -188,8 +188,8 @@ impl Landing<'_, '_> {
             let landing = (cut.as_ref()).is_some_and(|cut| cut.state == LANDING)
                 && self.ws.file.onto.is_some();
             if !landing {
-                let rebase_key =
-                    (cut.as_ref().and_then(|cut| cut.rebase_key.clone())).unwrap_or_else(new_key);
+                let rebase_key = (cut.as_ref().and_then(|cut| cut.rebase_key.clone()))
+                    .unwrap_or_else(rebase::new_key);
                 self.rebase_and_check(check, &rebase_key, attempt)?;
             }
             cut = None;
@@ -222,8 +222,8 @@ impl Landing<'_, '_> {
         let ctx = self.ctx;
         self.write(Some(rebase_key), attempt, REBASING)?;
         let target = self.target.clone();
-        let done = rebase_in(ctx, &mut self.ws, &target, rebase_key, None);
-        let done = finish_call(ctx, &self.ws, done)?;
+        let done = rebase::rebase_in(ctx, &mut self.ws, &target, rebase_key, None);
+        let done = rebase::finish_call(ctx, &self.ws, done)?;
 
         // 2. The check on it: the request's command, else the repository's there.
         let argv = match &check.argv {
@@ -236,7 +236,7 @@ impl Landing<'_, '_> {
             attempt,
         };
         let ran = argv.and_then(|argv| check::run(&self.ws, &argv, &subject, check.timeout));
-        finish_call(ctx, &self.ws, ran)?;
+        rebase::finish_call(ctx, &self.ws, ran)?;
 
         // 3. The land next, from the rebased head.
         self.write(Some(rebase_key), attempt, LANDING)
@@ -259,7 +259,7 @@ impl Landing<'_, '_> {
             resolutions: None,
         };
         let done = ctx.store.land(&self.ws.who, req);
-        let done = finish_call(ctx, &self.ws, done)?;
+        let done = rebase::finish_call(ctx, &self.ws, done)?;
 
         // 2. The workspace on it: files, then workspace.json (WS2); the record goes.
         let ws = &mut self.ws;
@@ -267,14 +267,14 @@ impl Landing<'_, '_> {
         ws.file.base.clone_from(&done.landed);
         ws.file.onto = None;
         ws.file.target.clone_from(&self.target);
-        move_to(ctx, ws, &done.landed)?;
+        rebase::move_to(ctx, ws, &done.landed)?;
         pending::remove_pending(ctx.fs.as_ref(), &ws.dir)?;
         Ok(done)
     }
 
     /// Makes the pending record durable: the land key, the attempt's rebase key, in `state`.
     fn write(&self, rebase_key: Option<&str>, attempt: u32, state: &str) -> Result<(), OpError> {
-        let mut record = record(
+        let mut record = rebase::record(
             PendingOp::Land,
             &self.key,
             rebase_key,
@@ -299,7 +299,7 @@ fn cut_land(ctx: &Ctx<'_>, ws: &Workspace) -> Result<Option<Pending>, OpError> {
         Some(cut) if cut.op == PendingOp::Land => cut.state.clone(),
         _ => LANDING.to_owned(),
     };
-    cut_short(ctx, ws, PendingOp::Land, &state)
+    rebase::cut_short(ctx, ws, PendingOp::Land, &state)
 }
 
 /// The check `input` asks for, of workspace `seen` landing on `target`: its command, or the

@@ -19,7 +19,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use swarmops_api::{ErrorCode, OpError};
-use swarmops_core::portable::check_component;
+use swarmops_core::portable;
 use swarmops_store::{FsMethod, FsOps, LinkOutcome};
 
 use crate::io_error;
@@ -280,7 +280,7 @@ fn check_name(name: &str) -> Result<(), OpError> {
     }
 
     // 2. The portable names' rule, as refs follow it.
-    check_component(name).map_err(|why| {
+    portable::check_component(name).map_err(|why| {
         OpError::new(
             ErrorCode::InvalidArg,
             format!("{name:?} is not a workspace name every platform can hold: {why}"),
