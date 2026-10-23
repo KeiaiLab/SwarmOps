@@ -1296,7 +1296,7 @@ fn source(path: &str) -> String {
 
 /// Where each result type is returned: the file, and the function whose signature names it.
 const RETURN_SITES: [(&str, &str, &str); 45] = [
-    ("init", "src/commands.rs", "fn init("),
+    ("init", "src/commands/run.rs", "fn init("),
     ("info", "../swarmops-api/src/ops.rs", "fn repo_info("),
     (
         "whoami",
@@ -1368,7 +1368,7 @@ const RETURN_SITES: [(&str, &str, &str); 45] = [
     ("verify", "../swarmops-api/src/ops.rs", "fn verify("),
     ("git import", "../swarmops-ops/src/git.rs", "fn git_import("),
     ("git export", "../swarmops-ops/src/git.rs", "fn git_export("),
-    ("clone", "src/commands.rs", "fn clone("),
+    ("clone", "src/commands/run.rs", "fn clone("),
     (
         "remote add",
         "../swarmops-ops/src/remote.rs",
@@ -1469,7 +1469,7 @@ const WORKSPACE_ACTS_SOURCE: (&str, &str) = (
 );
 
 /// The command that makes a store, so changes it with no identity, and where its code says so.
-const STORE_MAKER: (&str, &str, &str) = ("init", "src/commands.rs", "`init`: a store in");
+const STORE_MAKER: (&str, &str, &str) = ("init", "src/commands/run.rs", "`init`: a store in");
 
 /// The command that serves the MCP tools: it mutates when one of them does.
 const SERVER: &str = "mcp";
@@ -1495,7 +1495,7 @@ fn meta_matches_the_code() {
 
     // 3. The identity column: one mutator call per command that needs one, and every
     //    command a step shows refused for want of one.
-    let calls = source("src/commands.rs").matches(IDENTITY_CALL).count()
+    let calls = source("src/commands/run.rs").matches(IDENTITY_CALL).count()
         + source("src/commands/ws.rs").matches(IDENTITY_CALL).count();
     let needs = META.iter().filter(|meta| meta.identity).count();
     assert_eq!(calls, needs, "{IDENTITY_CALL} calls against identity rows");
