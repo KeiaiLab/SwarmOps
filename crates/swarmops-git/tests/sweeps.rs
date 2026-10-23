@@ -48,7 +48,7 @@ use swarmops_core::ChangesetId;
 use swarmops_core::bytes::to_u64;
 use swarmops_git::import::DEFAULT_FRAME_CHANGESETS;
 use swarmops_git::{GitOid, GixSource, ImportError, ImportReport, ImportRequest, import};
-use swarmops_repo::LocalRepo;
+use swarmops_repo::{Depth, LocalRepo};
 use swarmops_store::external_ids::lower_hex;
 use swarmops_store::{
     CRASH_AT_ENV, ExternalEntry, ExternalIds, FAIL_AT_ENV, FS_CALLS_ENV, Frame, Journal, Layout,
@@ -423,13 +423,13 @@ impl Sweep {
     fn resume(&self, root: &Utf8Path, what: &str) -> ImportReport {
         let repo = LocalRepo::open_with_fs(root, checked(NoSyncFs))
             .unwrap_or_else(|error| panic!("{what}: open: {error}"));
-        let verified = repo.verify(true).expect("verify");
+        let verified = repo.verify(Depth::Deep).expect("verify");
         assert_eq!(verified.problems, [], "{what}: as the run left it");
         let report = import(&repo, &open(&self.source), &request())
             .unwrap_or_else(|error| panic!("{what}: the import again: {error}"));
         assert_eq!(Some(report.head), self.whole.main, "{what}");
         assert_eq!(State::of(root), self.whole, "{what}");
-        let verified = repo.verify(true).expect("verify");
+        let verified = repo.verify(Depth::Deep).expect("verify");
         assert_eq!(verified.problems, [], "{what}: after the import again");
         report
     }
@@ -859,7 +859,7 @@ mod export {
         GixSink, GixSource, ImportRequest, ObjectFormat, RawCommit, RawKind, RawTree, SinkError,
         Stored, export, import, register,
     };
-    use swarmops_repo::{Advance, Change, LocalRepo};
+    use swarmops_repo::{Advance, Change, Depth, LocalRepo};
     use swarmops_testkit::child::{SIGABRT, run, this_test};
     use swarmops_testkit::faults::checked;
     use swarmops_testkit::fs::{NoSyncFs, copy_dir};
@@ -1449,7 +1449,7 @@ mod export {
         assert_eq!(loose_files(destination), sweep.whole.files, "{what}");
         assert_eq!(reachable(destination, head), sweep.whole.objects, "{what}");
         assert_eq!(State::of(root), sweep.whole.state, "{what}");
-        let verified = repo.verify(true).expect("verify");
+        let verified = repo.verify(Depth::Deep).expect("verify");
         assert_eq!(verified.problems, [], "{what}: after the export again");
     }
 

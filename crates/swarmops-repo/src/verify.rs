@@ -313,16 +313,26 @@ fn key_text(name: &str, key: &[u8]) -> String {
     format!(" under key {}", lower_hex(key))
 }
 
+/// How much of a store [`Repo::verify`] reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Depth {
+    /// The structure only: the changeset and tree objects, with every blob looked for, its
+    /// bytes unread, and no derived value read.
+    Shallow,
+    /// The structure, every object file re-hashed, and the built-in derived values checked.
+    Deep,
+}
+
 impl<O: ObjectStore> Repo<O> {
     /// Checks the whole store, as [the module documentation](self) says, and reports what is
-    /// damaged: a sound store gives no problems. `deep` re-hashes every object file as well;
-    /// without it, the check covers the structure, and looks for blobs without reading them.
+    /// damaged: a sound store gives no problems. [`Depth::Deep`] re-hashes every object file as
+    /// well; [`Depth::Shallow`] covers the structure, and looks for blobs without reading them.
     /// Errors only where it cannot read on.
-    pub fn verify(&self, deep: bool) -> Result<VerifyReport, RepoError> {
-        let mut check = Check::new(self, deep);
+    pub fn verify(&self, depth: Depth) -> Result<VerifyReport, RepoError> {
+        let mut check = Check::new(self, depth);
         check.lock_file();
         let changesets = check.metadata()?;
-        if deep {
+        if depth == Depth::Deep {
             check.derived = derived::Derived::read(self)?;
         }
         for meta in &changesets {
@@ -341,7 +351,7 @@ impl<O: ObjectStore> Repo<O> {
 struct Check<'r, O: ObjectStore> {
     repo: &'r Repo<O>,
     /// Whether every object file is re-hashed.
-    deep: bool,
+    depth: Depth,
     /// Metadata files that do not read.
     meta: Vec<VerifyProblem>,
     journal_corrupt: Option<u64>,
@@ -385,10 +395,10 @@ struct Check<'r, O: ObjectStore> {
 }
 
 impl<'r, O: ObjectStore> Check<'r, O> {
-    fn new(repo: &'r Repo<O>, deep: bool) -> Self {
+    fn new(repo: &'r Repo<O>, depth: Depth) -> Self {
         Self {
             repo,
-            deep,
+            depth,
             meta: Vec::new(),
             journal_corrupt: None,
             mismatches: BTreeSet::new(),
@@ -866,7 +876,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
     fn objects(&mut self) -> Result<(), RepoError> {
         let listed = self.repo.objects.list()?;
         // Deep: the blobs, as their files' headers say. Shallow: whatever has a file.
-        let present = if self.deep {
+        let present = if self.depth == Depth::Deep {
             self.rehash(listed)?
         } else {
             listed.into_iter().collect()
@@ -952,7 +962,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
 
     fn report(self) -> VerifyReport {
         // Shallow, the blobs were looked for, not read.
-        let looked_for = if self.deep {
+        let looked_for = if self.depth == Depth::Deep {
             0
         } else {
             let unread = self.blobs.keys().filter(|id| !self.hashed.contains(*id));

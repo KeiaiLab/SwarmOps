@@ -18,7 +18,7 @@ use swarmops_core::{
     Changeset, ChangesetId, CodecError, DeltaEntry, DeltaOp, LeafKind, ObjectKind, Signature, Tree,
     TreeEntry, TreeId, hash_object,
 };
-use swarmops_repo::{InsertOutcome, LocalRepo, RawChangeset, RawOutcome, RepoError};
+use swarmops_repo::{Depth, InsertOutcome, LocalRepo, RawChangeset, RawOutcome, RepoError};
 use swarmops_store::{
     Frame, FsObjectStore, Journal, Layout, LimitKind, ObjectStore, RealFs, Record, StoreError,
 };
@@ -187,7 +187,7 @@ fn commit_raw_makes_a_root_changeset_while_main_exists() {
     let main = repo.get_ref("main").unwrap().map(|state| state.target);
     assert_eq!(main, Some(first), "main stays where it was");
     assert_eq!(repo.info().unwrap().changesets, 2);
-    assert_eq!(repo.verify(true).unwrap().problems, []);
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
 }
 
 /// Parents in their own order (not their seqs'), signatures (a time before 1970, an odd offset,
@@ -287,7 +287,7 @@ fn commit_raw_delta_is_the_tree_diff_from_the_first_parent() {
         .unwrap();
     let same = same.outcomes[0];
     assert_eq!((delta(&repo, same.id), same.files_changed), (Vec::new(), 0));
-    assert_eq!(repo.verify(true).unwrap().problems, []);
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
 }
 
 /// Three chained raw changesets in one call are one journal frame of three changeset records,
@@ -338,7 +338,7 @@ fn commit_raw_batch_is_one_frame_with_parents_from_the_batch() {
         ids.iter().map(|&id| generation(id)).collect::<Vec<_>>(),
         [1, 2, 3]
     );
-    assert_eq!(repo.verify(true).unwrap().problems, []);
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
 }
 
 /// The same raw changeset again is the changeset the store holds: `AlreadyPresent`, and no frame
@@ -521,7 +521,7 @@ fn a_raw_batch_names_each_changeset_before_it_writes_anything() {
     let committed: Vec<ChangesetId> = outcome.outcomes.iter().map(|made| made.id).collect();
     assert_eq!(committed, ids);
     assert_eq!(frames(&root_dir).len(), 1);
-    assert_eq!(repo.verify(true).unwrap().problems, []);
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
 
     let before = on_disk(&root_dir);
     let empty = repo.raw_batch();

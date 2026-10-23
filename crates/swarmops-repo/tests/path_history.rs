@@ -18,7 +18,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{BlobId, ChangesetId, EntryTarget, LeafKind, ObjectKind, hash_object};
 use swarmops_repo::merge::tree_diff::PathFilter;
 use swarmops_repo::{
-    Change, Derivation, LastModified, LastTouch, LocalRepo, PathEvent, PathKey, RepoError,
+    Change, Depth, Derivation, LastModified, LastTouch, LocalRepo, PathEvent, PathKey, RepoError,
 };
 use swarmops_store::FsOps;
 use swarmops_testkit::fs::{Call, NoSyncFs, Watch, Watched};
@@ -701,7 +701,7 @@ fn a_crafted_last_touch_is_refused_where_a_reader_can_tell() {
     place(head, Some(c[0]));
     let read = repo.snapshot().unwrap();
     assert_eq!(read.last_modified(head, &path("a")).unwrap(), Some(c[0]));
-    let problems = repo.verify(true).unwrap().problems;
+    let problems = repo.verify(Depth::Deep).unwrap().problems;
     let mismatch = swarmops_repo::VerifyProblem::DerivedMismatch {
         name: "last_modified".to_owned(),
         changeset: head,
@@ -719,5 +719,5 @@ fn a_crafted_last_touch_is_refused_where_a_reader_can_tell() {
             (0, Held::Leaf(LeafKind::File, blob(b"0")))
         ]
     );
-    assert_eq!(repo.verify(true).unwrap().problems, Vec::new());
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, Vec::new());
 }

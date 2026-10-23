@@ -72,7 +72,7 @@ use swarmops_core::{ChangesetId, LeafKind, RepoPath};
 use swarmops_repo::land_models::{
     CONFLICTED_PREFIX, Model, OP_HEAD_KEY, OP_HEAD_PREFIX, Publication, Published, Timed, toy_merge,
 };
-use swarmops_repo::{Advance, Change, LocalRepo, RepoError, StoreError};
+use swarmops_repo::{Advance, Change, Depth, LocalRepo, RepoError, StoreError};
 use swarmops_store::{FsOps, MetaStore, RealFs};
 use swarmops_testkit::child::{CHILD_TIMEOUT, Child, this_test};
 use swarmops_testkit::faults::checked;
@@ -184,7 +184,7 @@ fn registry_with(l: usize, text: &str) -> Vec<u8> {
 /// Asserts that the store at `root` verifies clean, objects re-hashed.
 #[track_caller]
 fn assert_verifies(repo: &LocalRepo) {
-    let report = repo.verify(true).unwrap();
+    let report = repo.verify(Depth::Deep).unwrap();
     assert!(report.problems.is_empty(), "{:?}", report.problems);
 }
 

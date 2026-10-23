@@ -34,8 +34,8 @@ use swarmops_repo::LandRequest;
 use swarmops_repo::merge::line_diff::{self, DiffLine, UnifiedHunk};
 use swarmops_repo::merge::tree_diff::{ChangeKind, PathFilter, TreeChange};
 use swarmops_repo::{
-    CasResult, CommitRequest, FileSpan, ListedEntry, LocalRepo, MismatchCause, OpRecord, Operation,
-    PathEvent, RepoError, RepoRead, StoredChangeset, VerifyProblem,
+    CasResult, CommitRequest, Depth, FileSpan, ListedEntry, LocalRepo, MismatchCause, OpRecord,
+    Operation, PathEvent, RepoError, RepoRead, StoredChangeset, VerifyProblem,
 };
 use swarmops_repo::{Resolution, Resolutions};
 use swarmops_store::external_ids;
@@ -1872,7 +1872,12 @@ impl StoreOps for Recording<'_> {
     }
 
     fn verify(&self, req: VerifyReq) -> Result<VerifyReport, OpError> {
-        let report = self.ops.repo.verify(req.deep).map_err(error::op)?;
+        let depth = if req.deep {
+            Depth::Deep
+        } else {
+            Depth::Shallow
+        };
+        let report = self.ops.repo.verify(depth).map_err(error::op)?;
         let mut problems: Vec<String> = (report.problems.iter())
             .map(|problem| error::one_line(problem.to_string()))
             .collect();

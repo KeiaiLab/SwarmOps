@@ -20,7 +20,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, ObjectKind, hash_object};
 use swarmops_repo::{
-    Advance, CasResult, CommitRequest, LocalRepo, OpRecord, Operation, RepoError, UndoOutcome,
+    Advance, CasResult, CommitRequest, Depth, LocalRepo, OpRecord, Operation, RepoError,
+    UndoOutcome,
 };
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, ORDER_CHECK_ENV};
@@ -305,7 +306,7 @@ fn undo_restores_a_moved_ref_in_one_frame() {
         changesets,
         "the changesets stay"
     );
-    assert_eq!(repo.verify(true).unwrap().problems, []);
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
 }
 
 /// `undo` of a ref's creation deletes the ref.
@@ -433,7 +434,7 @@ fn undo_of_a_frame_with_two_refs_is_all_or_nothing() {
     ];
     assert_eq!(moves_of(&undone), restored, "both, in one frame");
     assert_eq!(both(), (Some(c1), Some(c1)));
-    assert_eq!(repo.verify(true).unwrap().problems, []);
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
 }
 
 /// A frame that moved a ref twice is undone by one move, from its last target back to its
@@ -657,12 +658,12 @@ fn undo_crashing_at(template: &Utf8Path, k: u64, c1: ChangesetId, c2: ChangesetI
         undone || !finished,
         "k={k}: the undo returned but is not in the store"
     );
-    assert_eq!(repo.verify(true).unwrap().problems, [], "k={k}");
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, [], "k={k}");
 
     let again = repo.undo(SWEPT_OP, UNDOER).unwrap();
     assert_eq!(again.already_applied, undone, "k={k}");
     assert_eq!(both(), (Some(c1), Some(c1)), "k={k}");
-    assert_eq!(repo.verify(true).unwrap().problems, [], "k={k}");
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, [], "k={k}");
     (finished, undone)
 }
 

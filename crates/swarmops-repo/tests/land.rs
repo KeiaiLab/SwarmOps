@@ -26,7 +26,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, ObjectId, RepoPath, Signature};
 use swarmops_repo::land::{LandOutcome, LandRequest, LandStatus, NothingToLandReason, backoff};
 use swarmops_repo::merge::tree_diff::{PathFilter, delta_of};
-use swarmops_repo::{Advance, Change, CommitRequest, LocalRepo, RepoError};
+use swarmops_repo::{Advance, Change, CommitRequest, Depth, LocalRepo, RepoError};
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, FAIL_AT_ENV, FS_CALLS_ENV, ORDER_CHECK_ENV};
 use swarmops_store::{FsOps, Journal, Layout, MetaStore, RealFs};
@@ -876,7 +876,7 @@ fn a_land_that_loses_a_race_re_merges_and_lands_on_the_next_attempt() {
         Some(b"theirs\n".to_vec())
     );
     assert_eq!(main_head(&repo), out.landed);
-    assert_eq!(repo.verify(true).unwrap().problems, []);
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
 }
 
 /// A re-merge after a lost race that conflicts reports the whole three-way merge: the change
@@ -1089,7 +1089,7 @@ mod resolutions {
         assert_eq!(paths, ["a", "c", "d"], "b keeps theirs");
         assert_eq!(out.files_changed, 3);
         assert_eq!(out.auto_merged, Vec::<RepoPath>::new());
-        assert_eq!(repo.verify(true).unwrap().problems, []);
+        assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
     }
 
     /// A content resolution's leaf is of the kind it gives; else of the kind of the leaf ours holds
@@ -1360,7 +1360,7 @@ mod resolutions {
                 d_x.map(|_| b"y\n".to_vec())
             );
             assert_eq!(content(&repo, out.landed, "a"), Some(b"a 2\n".to_vec()));
-            assert_eq!(repo.verify(true).unwrap().problems, [], "{what}");
+            assert_eq!(repo.verify(Depth::Deep).unwrap().problems, [], "{what}");
         }
     }
 
@@ -1457,7 +1457,7 @@ mod resolutions {
             content(&repo, out.landed, "race/0"),
             Some(b"theirs\n".to_vec())
         );
-        assert_eq!(repo.verify(true).unwrap().problems, []);
+        assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
     }
 }
 
@@ -1616,7 +1616,7 @@ fn land_again(repo: &LocalRepo, swept: &Swept, landed: bool, what: &str) {
     };
     assert_eq!((again.status, again.landed), (status, swept.want), "{what}");
     assert!(swept_landed(repo, swept, what), "{what}: landed again");
-    assert_eq!(repo.verify(true).unwrap().problems, [], "{what}");
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, [], "{what}");
 }
 
 /// How many runs of a sweep go at once: each has a child process and a store of its own.
@@ -1693,7 +1693,7 @@ fn land_crashing_at(template: &Utf8Path, swept: &Swept, k: u64) -> (bool, bool) 
         landed || !finished,
         "{what}: the land returned but is not on main"
     );
-    assert_eq!(repo.verify(true).unwrap().problems, [], "{what}");
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, [], "{what}");
     land_again(&repo, swept, landed, &what);
     (finished, landed)
 }
@@ -1811,7 +1811,7 @@ fn land_failing_at(template: &Utf8Path, swept: &Swept, k: u64, failure: &str) ->
         Ended::Failed(error) => assert!(!landed, "{what}: on main behind an error: {error}"),
         Ended::Aborted => {}
     }
-    assert_eq!(repo.verify(true).unwrap().problems, [], "{what}");
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, [], "{what}");
     land_again(&repo, swept, landed, &what);
     ended
 }

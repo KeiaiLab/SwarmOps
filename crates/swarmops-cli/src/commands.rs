@@ -29,4 +29,4 @@ mod run;
 pub(crate) mod ws;
 
 pub use self::run::{Ctx, Used, failed, failed_after, failed_envelope, panicked, run, usage};
-pub(crate) use self::run::{clean, is_own_stdio};
+pub(crate) use self::run::{Depth, clean, is_own_stdio};

@@ -25,7 +25,8 @@ use swarmops_core::{
     ObjectKind, Tree, TreeEntry, hash_object,
 };
 use swarmops_repo::{
-    CasResult, Change, ChangeOp, CommitOutcome, CommitRequest, InsertOutcome, LocalRepo, RepoError,
+    CasResult, Change, ChangeOp, CommitOutcome, CommitRequest, Depth, InsertOutcome, LocalRepo,
+    RepoError,
 };
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, FailAt, FailAtFs, FailMode, InjectedError, ORDER_CHECK_ENV};
@@ -459,7 +460,7 @@ fn allow_empty_commits_a_changeset_with_the_parent_root() {
     assert_eq!(first.root, Tree::empty_root().id());
     assert_eq!(first.trees_written, 1, "the empty tree was not stored yet");
     assert_eq!(listing(&repo, first.id, None), Some(Vec::new()));
-    assert_eq!(repo.verify(true).unwrap().problems, []);
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
 }
 
 #[test]
@@ -668,7 +669,7 @@ fn commit_crashing_at(template: &Utf8Path, want: ChangesetId, k: u64) -> (bool, 
             );
         }
     }
-    assert_eq!(repo.verify(true).unwrap().problems, [], "k={k}");
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, [], "k={k}");
 
     // The next commit takes the store as the crash left it.
     let again = repo.commit(crash_request()).unwrap();
@@ -679,7 +680,7 @@ fn commit_crashing_at(template: &Utf8Path, want: ChangesetId, k: u64) -> (bool, 
         InsertOutcome::Inserted { seq: 0 }
     };
     assert_eq!(again.insert, expected, "k={k}");
-    assert_eq!(repo.verify(true).unwrap().problems, [], "k={k}");
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, [], "k={k}");
     (finished, committed)
 }
 
@@ -900,7 +901,7 @@ mod advance {
             repo.get_ref("main").unwrap(),
         );
         assert_eq!(after, before, "nothing recorded");
-        assert_eq!(repo.verify(true).unwrap().problems, []);
+        assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
     }
 
     /// The same request made again, the ref at its changeset already, is a replay: the insert
@@ -1063,7 +1064,7 @@ mod advance {
         if main != Some(expected) {
             return Err(format!("committed {committed}, main at {main:?}"));
         }
-        let problems = repo.verify(true).unwrap().problems;
+        let problems = repo.verify(Depth::Deep).unwrap().problems;
         if problems.is_empty() {
             Ok(committed)
         } else {
@@ -1144,7 +1145,7 @@ mod advance {
         );
         let main = repo.get_ref("main").unwrap().map(|state| state.target);
         assert_eq!(main, Some(want), "k={k}");
-        assert_eq!(repo.verify(true).unwrap().problems, [], "k={k}");
+        assert_eq!(repo.verify(Depth::Deep).unwrap().problems, [], "k={k}");
         (finished, committed)
     }
 
@@ -1333,7 +1334,7 @@ fn a_failed_object_flush_fails_the_commit_and_inserts_nothing() {
     assert_eq!(journal_frames(&root), 0, "no transaction");
     let fresh = LocalRepo::open(&root).unwrap();
     assert_eq!(fresh.info().unwrap().changesets, 0);
-    assert_eq!(fresh.verify(true).unwrap().problems, []);
+    assert_eq!(fresh.verify(Depth::Deep).unwrap().problems, []);
 }
 
 /// `flush_metadata` makes the metadata's projections durable at once: a commit moves the
@@ -1608,7 +1609,7 @@ fn a_failed_fanout_fsync_fails_the_commit_and_a_later_flush_syncs_the_directory(
     assert_called_before(&made, &fsync, frame);
 
     // 4. Every call ran under the order checker, which judged W5 at both frames.
-    assert_eq!(repo.verify(true).unwrap().problems, []);
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
 }
 
 /// A fan-out directory whose fsync fails every time fails every later commit on the handle,
@@ -1642,7 +1643,7 @@ fn a_persistent_eio_on_a_fanout_fsync_fails_every_later_commit_on_the_handle() {
     assert_eq!(journal_frames(&root), 0, "no transaction");
     let fresh = LocalRepo::open(&root).unwrap();
     assert_eq!(fresh.info().unwrap().changesets, 0);
-    assert_eq!(fresh.verify(true).unwrap().problems, []);
+    assert_eq!(fresh.verify(Depth::Deep).unwrap().problems, []);
 }
 
 #[test]
@@ -1670,7 +1671,7 @@ fn a_failure_after_the_commit_point_is_a_warning() {
         .unwrap();
     assert_eq!(next.insert, InsertOutcome::Inserted { seq: 1 });
     assert_eq!(next.warnings, Vec::<String>::new());
-    assert_eq!(fresh.verify(true).unwrap().problems, []);
+    assert_eq!(fresh.verify(Depth::Deep).unwrap().problems, []);
 }
 
 #[test]
@@ -1704,7 +1705,7 @@ fn a_ref_move_whose_file_write_fails_is_applied_with_a_warning() {
         fs::read_to_string(&ref_file).unwrap(),
         format!("{}\n1\n", base.id)
     );
-    assert_eq!(fresh.verify(true).unwrap().problems, []);
+    assert_eq!(fresh.verify(Depth::Deep).unwrap().problems, []);
 }
 
 /// The repository at `root`, its listings in `journal.off` failing: a commit or a ref move made
@@ -1888,7 +1889,7 @@ fn commits_from_many_processes_all_land() {
             Some(b"the same bytes in every process".to_vec())
         );
     }
-    assert_eq!(repo.verify(true).unwrap().problems, []);
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
 }
 
 /// A commit hashes, encodes and checks each of its objects once, handing the store its objects
@@ -2001,7 +2002,7 @@ mod objects_once {
             "the other writer placed the blob, the commit only the root"
         );
         assert_eq!(content(&repo, c.id, "raced.txt"), Some(RACED.to_vec()));
-        assert_eq!(repo.verify(true).unwrap().problems, []);
+        assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
     }
 }
 
@@ -2162,7 +2163,7 @@ mod blob_by_id {
         };
         let (_dir2, _root2, twin) = new_repo();
         assert_eq!(twin.commit(by_content).unwrap().id, out.id);
-        assert_eq!(repo.verify(true).unwrap().problems, []);
+        assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
     }
 
     /// A change that names by id a blob the store lacks, a tree, or a changeset is
@@ -2204,7 +2205,7 @@ mod blob_by_id {
             assert_eq!(object_files(&root), objects, "{what}");
             assert_eq!(journal_frames(&root), frames, "{what}");
         }
-        assert_eq!(repo.verify(true).unwrap().problems, []);
+        assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
     }
 
     /// `Repo::has_blob` says whether the store holds a blob of an id, by the object's header: a

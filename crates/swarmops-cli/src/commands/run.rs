@@ -195,7 +195,10 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
         Command::Verify { deep } => ctx.on_store(
             op,
             || Ok(VerifyReq { deep }),
-            |ops, req| ops.verify(req).and_then(|report| clean(report, deep)),
+            |ops, req| {
+                ops.verify(req)
+                    .and_then(|report| clean(report, Depth::of(deep)))
+            },
         ),
         Command::Git(command) => run_git(ctx, op, command),
         Command::Mcp => mcp::serve(ctx.global, ctx.env),
@@ -1292,11 +1295,28 @@ fn history_target(target: &str) -> Result<(&str, &str), OpError> {
     })
 }
 
+/// Which `verify` ran: the structural one, or the deep one that re-hashes every object.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Depth {
+    Shallow,
+    Deep,
+}
+
+impl Depth {
+    /// The depth that `--deep` (or the request's `deep`) asks for.
+    pub(crate) fn of(deep: bool) -> Self {
+        if deep {
+            return Self::Deep;
+        }
+        Self::Shallow
+    }
+}
+
 /// `verify`'s report as the command's outcome: a success for a clean store, else
 /// `E_STORE_CORRUPT` (exit 1) with the whole report in `details`. The hint is a deep
 /// verify after a structural one, which finds damaged bytes too, and after a deep one the
 /// restore that remains.
-pub(crate) fn clean(report: VerifyReport, deep: bool) -> Result<VerifyReport, OpError> {
+pub(crate) fn clean(report: VerifyReport, depth: Depth) -> Result<VerifyReport, OpError> {
     let Some(first) = report.problems.first() else {
         return Ok(report);
     };
@@ -1308,7 +1328,7 @@ pub(crate) fn clean(report: VerifyReport, deep: bool) -> Result<VerifyReport, Op
         Ok(Value::Object(details)) => details,
         _ => Map::new(),
     };
-    let hint = if deep {
+    let hint = if depth == Depth::Deep {
         RESTORE_HINT
     } else {
         "swarmops verify --deep"
@@ -1431,8 +1451,8 @@ mod tests {
             problems: problems.iter().map(|p| (*p).to_owned()).collect(),
             findings: Vec::new(),
         };
-        assert_eq!(clean(report(&[]), false).unwrap(), report(&[]));
-        let one = clean(report(&["object x is missing"]), false).unwrap_err();
+        assert_eq!(clean(report(&[]), Depth::Shallow).unwrap(), report(&[]));
+        let one = clean(report(&["object x is missing"]), Depth::Shallow).unwrap_err();
         assert_eq!((one.code.as_str(), one.exit), ("E_STORE_CORRUPT", 1));
         assert_eq!(one.message, "verify found a problem: object x is missing");
         assert_eq!(one.hint.as_deref(), Some("swarmops verify --deep"));
@@ -1440,7 +1460,7 @@ mod tests {
             Value::Object(one.details),
             serde_json::to_value(report(&["object x is missing"])).unwrap()
         );
-        let two = clean(report(&["a", "b"]), true).unwrap_err();
+        let two = clean(report(&["a", "b"]), Depth::Deep).unwrap_err();
         assert_eq!(two.message, "verify found 2 problems, the first: a");
         assert_eq!(two.hint.as_deref(), Some(RESTORE_HINT));
     }

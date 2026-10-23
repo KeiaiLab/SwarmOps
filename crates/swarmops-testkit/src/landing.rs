@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 
 use camino::Utf8Path;
 use swarmops_core::{ChangesetId, ObjectId, bytes};
-use swarmops_repo::LocalRepo;
+use swarmops_repo::{Depth, LocalRepo};
 use swarmops_store::{FsMethod, MetaStore};
 
 use crate::fs::{Call, Watch};
@@ -604,7 +604,9 @@ pub fn check_invariants(
     {
         return Err(format!("op-head ref left: {name}"));
     }
-    let report = repo.verify(true).map_err(|e| format!("verify: {e}"))?;
+    let report = repo
+        .verify(Depth::Deep)
+        .map_err(|e| format!("verify: {e}"))?;
     if !report.problems.is_empty() {
         return Err(format!("verify: {:?}", report.problems));
     }

@@ -1317,9 +1317,9 @@ fn operate<O: Operate>(tool: Tool, how: O) -> O::Done {
         Tool::BlobPut => how.mutate(|ops, who, req| ops.blob_put(who, req)),
         Tool::BlobHas => how.read(|ops, req| ops.blob_has(req)),
         Tool::Verify => how.read(|ops, req: VerifyReq| {
-            let deep = req.deep;
+            let depth = commands::Depth::of(req.deep);
             ops.verify(req)
-                .and_then(|report| commands::clean(report, deep))
+                .and_then(|report| commands::clean(report, depth))
         }),
         Tool::Local(tool) => operate_local(tool, how),
     }
