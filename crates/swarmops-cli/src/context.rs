@@ -21,10 +21,9 @@ use std::ffi::OsString;
 use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::{Map, Value};
 use swarmops_api::{ErrorCode, Identity, OpError};
-use swarmops_ops::identity::{require_identity, resolve_identity_from};
 use swarmops_ws::RealFs;
 use swarmops_ws::hook::Bootstrap;
-use swarmops_ws::workspace::{Locate, find};
+use swarmops_ws::workspace::{self, Locate};
 
 use crate::cli::Global;
 use crate::output::Format;
@@ -80,7 +79,7 @@ pub fn store_for(
 /// The store the workspace `at` names, if there is one: its `workspace.json`'s `repo`. None for
 /// a place with no workspace; a `workspace.json` that cannot be read is its error.
 pub fn discovered(at: &Locate) -> Result<Option<String>, OpError> {
-    match find(at, None, &RealFs) {
+    match workspace::find(at, None, &RealFs) {
         Ok(found) => Ok(Some(found.file.repo)),
         Err(e) if e.code == ErrorCode::WsNotFound.as_str() => Ok(None),
         Err(e) => Err(e),
@@ -157,12 +156,12 @@ pub fn no_store_named(flag: Option<&str>) -> OpError {
 
 /// The caller's identity, if any: `flag` (`--as`), else the environment.
 pub fn identity(flag: Option<&str>, env: Env<'_>) -> Result<Option<Identity>, OpError> {
-    resolve_identity_from(flag, env)
+    swarmops_ops::identity::resolve_identity_from(flag, env)
 }
 
 /// The identity a mutation acts as: [`identity`], or `E_IDENTITY_REQUIRED` (exit 5).
 pub fn mutator(flag: Option<&str>, env: Env<'_>) -> Result<Identity, OpError> {
-    require_identity(identity(flag, env)?)
+    swarmops_ops::identity::require_identity(identity(flag, env)?)
 }
 
 /// The format `global`'s flags and the environment ask for, given whether stdout is a

@@ -35,14 +35,14 @@ use clap::Arg;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::value::RawValue;
-use swarmops_api::{ErrorCode, schema_for_all};
+use swarmops_api::ErrorCode;
 
 use super::{
     BIN, EXAMPLES, EXITS, GENERATED, Leaf, Page, all_leaves, arg_help, cell, code_descriptions,
     default_cell, first_sentence, is_builtin, option_form, paragraphs, reference_dir, sentence,
     slug, trim_end, value_names, yes_no,
 };
-use crate::cli::{op_name, usage};
+use crate::cli;
 
 /// The command pages' folder in `docs/reference/`.
 pub(super) const DIR: &str = "commands";
@@ -805,7 +805,7 @@ impl<'a> Entry<'a> {
     /// The command of `leaf`, with what the golden steps show of it.
     fn new(leaf: &'a Leaf, golden: &'a Golden) -> Self {
         let name = leaf.path.join(" ");
-        let op = op_name(&leaf.path).unwrap_or_default();
+        let op = cli::op_name(&leaf.path).unwrap_or_default();
         let codes = golden.codes_of(op);
 
         // Success, then the exits of the errors its steps show.
@@ -814,7 +814,7 @@ impl<'a> Entry<'a> {
         exits.sort_unstable();
         exits.dedup();
 
-        let line = usage(Some(BIN), &leaf.path);
+        let line = cli::usage(Some(BIN), &leaf.path);
         let tool = golden
             .tools
             .get_key_value(op)
@@ -1149,7 +1149,7 @@ fn returns(out: &mut String, command: &Entry<'_>) {
 
 /// `result`'s type, and a table of its fields from the type's JSON Schema.
 fn result_fields(out: &mut String, name: &str) {
-    let all = schema_for_all();
+    let all = swarmops_api::schema_for_all();
     let schema = &all[name];
     let _ = writeln!(
         out,
@@ -1487,7 +1487,7 @@ fn meta_matches_the_code() {
 
     // 2. A command with a tool mutates exactly when the tool does not only read.
     for meta in &META {
-        let op = op_name(&meta.path.split(' ').collect::<Vec<_>>()).unwrap();
+        let op = cli::op_name(&meta.path.split(' ').collect::<Vec<_>>()).unwrap();
         if let Some(reads) = golden.tools.get(op) {
             assert_eq!(meta.mutates, !reads, "{}: mutates", meta.path);
         }
@@ -1506,7 +1506,7 @@ fn meta_matches_the_code() {
         let meta = META
             .iter()
             .find(|meta| {
-                op_name(&meta.path.split(' ').collect::<Vec<_>>()) == Some(step.op.as_str())
+                cli::op_name(&meta.path.split(' ').collect::<Vec<_>>()) == Some(step.op.as_str())
             })
             .unwrap();
         assert!(meta.identity, "{}: refused without an identity", meta.path);
@@ -1561,7 +1561,7 @@ fn meta_matches_the_code() {
 /// Each result type is the one its operation's signature returns, and in the schema.
 #[test]
 fn result_types_match_the_code() {
-    let all = schema_for_all();
+    let all = swarmops_api::schema_for_all();
     for meta in &META {
         let Returns::Type(name) = meta.returns else {
             continue;

@@ -51,15 +51,14 @@ use swarmops_api::{
     DiffReq, Envelope, ErrorCode, GitExportReq, GitImportReq, InfoReq, LineRange, LogReq, Meta,
     OpError, OpLogReq, PathHistoryReq, ReadFileReq, ReadTreeReq, RecoveredOut, RefDeleteReq,
     RefListReq, RefSetReq, RepoInfo, Rev, ShowReq, StoreOps, UndoReq, VerifyReport, VerifyReq,
-    schema_for_all,
 };
 use swarmops_api::{
     CloneReq, CloneResp, FetchReq, Identity, PushReq, RemoteAddReq, RemoteListReq, RemoteRemoveReq,
     SyncMode, SyncReq, SyncStatusReq,
 };
 use swarmops_ops::content::MAX_REQUEST_BYTES;
-use swarmops_ops::identity::{AUTH_TRUST, identity_info};
-use swarmops_ops::{LocalOps, Recording, Resolved, shell_word};
+use swarmops_ops::identity::{self, AUTH_TRUST};
+use swarmops_ops::{LocalOps, Recording, Resolved};
 use swarmops_ws::workspace::Locate;
 
 use crate::cli::{
@@ -141,10 +140,7 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
             ctx.finish(op, (repo, resolved, recovered), result)
         }
         Command::Info => ctx.on_store(op, || Ok(InfoReq {}), |ops, req| ops.repo_info(req)),
-        Command::Whoami => {
-            let result = context::identity(agent, ctx.env).map(|who| identity_info(who.as_ref()));
-            ctx.finish(op, (None, BTreeMap::new(), None), result)
-        }
+        Command::Whoami => whoami(ctx, op),
         Command::Schema { name } => {
             ctx.finish(op, (None, BTreeMap::new(), None), schema(name.as_deref()))
         }
@@ -231,6 +227,14 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
         // The rest: the git remotes' commands (M13).
         remotes => run_remotes(ctx, op, remotes),
     }
+}
+
+/// Runs `whoami`, which names operation `op`: the caller's identity, if any, as the API writes
+/// it.
+fn whoami(ctx: &Ctx<'_>, op: &'static str) -> Printed {
+    let agent = ctx.global.agent.as_deref();
+    let result = context::identity(agent, ctx.env).map(|who| identity::identity_info(who.as_ref()));
+    ctx.finish(op, (None, BTreeMap::new(), None), result)
 }
 
 /// Runs `show`, which names operation `op`: the changeset `rev` names, with at most
@@ -1049,7 +1053,7 @@ fn default_name(dir: &str) -> Result<String, OpError> {
 
 /// `schema`: every type's JSON Schema, or `name`'s alone, keyed by type name either way.
 fn schema(name: Option<&str>) -> Result<Value, OpError> {
-    let all = schema_for_all();
+    let all = swarmops_api::schema_for_all();
     let Some(name) = name else {
         return Ok(all);
     };
@@ -1345,10 +1349,10 @@ fn details<const N: usize>(entries: [(&str, Value); N]) -> Map<String, Value> {
         .collect()
 }
 
-/// `arg` as one shell word in a hint ([`shell_word`]), control characters escaped so that the
-/// hint stays one line (the rule of the ops crate's hints).
+/// `arg` as one shell word in a hint ([`swarmops_ops::shell_word`]), control characters escaped
+/// so that the hint stays one line (the rule of the ops crate's hints).
 fn quoted(arg: &str) -> String {
-    output::printable(&shell_word(arg))
+    output::printable(&swarmops_ops::shell_word(arg))
 }
 
 #[cfg(test)]
@@ -1468,7 +1472,7 @@ mod tests {
     fn schema_gives_one_type_by_name() {
         let one = schema(Some("Rev")).unwrap();
         assert_eq!(one.as_object().unwrap().len(), 1);
-        assert_eq!(one["Rev"], schema_for_all()["Rev"]);
+        assert_eq!(one["Rev"], swarmops_api::schema_for_all()["Rev"]);
         let unknown = schema(Some("rev")).unwrap_err();
         assert_eq!((unknown.code.as_str(), unknown.exit), ("E_INVALID_ARG", 2));
         assert!(

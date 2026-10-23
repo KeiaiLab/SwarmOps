@@ -23,9 +23,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use clap::{Arg, ArgAction, CommandFactory};
-use swarmops_api::{ErrorCode, schema_for_all};
+use swarmops_api::ErrorCode;
 
-use crate::cli::{Cli, op_name};
+use crate::cli::{self, Cli};
 
 mod cli_page;
 mod command_page;
@@ -216,7 +216,7 @@ fn leaves(cmd: &clap::Command, prefix: &[String], out: &mut Vec<Leaf>) {
 
         // A command that names an operation, before its own subcommands: `sync`, then
         // `sync status`. A group (`ref`, `git`, …) and clap's own `help` name none.
-        if op_name(&path).is_some() {
+        if cli::op_name(&path).is_some() {
             out.push(Leaf {
                 path: path.clone(),
                 cmd: sub.clone(),
@@ -467,7 +467,7 @@ fn errors_page() -> String {
 
 /// Each code's description, from `ErrorCode`'s JSON Schema: its variants' doc comments.
 fn code_descriptions() -> std::collections::BTreeMap<String, String> {
-    let all = schema_for_all();
+    let all = swarmops_api::schema_for_all();
     let variants = all["ErrorCode"]["oneOf"]
         .as_array()
         .cloned()

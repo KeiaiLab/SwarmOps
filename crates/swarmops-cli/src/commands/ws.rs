@@ -26,7 +26,7 @@ use swarmops_api::{
 };
 use swarmops_ops::LocalOps;
 use swarmops_ws::hook::{self, Bootstrap, MAX_HOOK_INPUT};
-use swarmops_ws::workspace::{Locate, Workspace, find, host_path};
+use swarmops_ws::workspace::{self, Locate, Workspace};
 use swarmops_ws::{Ctx as WsCtx, RealFs, RealHost, bootstrap};
 
 use super::Ctx;
@@ -303,7 +303,7 @@ pub(crate) fn create_bootstrapped(
     let from = req
         .from
         .as_deref()
-        .map(|from| host_path(Path::new(from)))
+        .map(|from| workspace::host_path(Path::new(from)))
         .transpose()?;
 
     // 2. The workspace.
@@ -449,7 +449,7 @@ fn name_at(ctx: &WsCtx<'_>, at: Option<Locate>) -> Result<String, OpError> {
 fn absolute(path: &str) -> Result<Utf8PathBuf, OpError> {
     let given = Path::new(path);
     if given.is_absolute() {
-        return host_path(given);
+        return workspace::host_path(given);
     }
     let Some(here) = context::here() else {
         return Err(OpError::new(
@@ -457,7 +457,7 @@ fn absolute(path: &str) -> Result<Utf8PathBuf, OpError> {
             format!("{path:?} is relative and the working directory is not UTF-8"),
         ));
     };
-    host_path(here.join(path).as_std_path())
+    workspace::host_path(here.join(path).as_std_path())
 }
 
 /// `--status-after`, as the request has it.
@@ -541,7 +541,7 @@ fn read_stdin() -> Result<Vec<u8>, OpError> {
 fn hook_create(ctx: &Ctx<'_>) -> Result<Said, OpError> {
     // 1. The input, and the two places a store can come from.
     let input = hook::read_create(&read_stdin()?)?;
-    let parent = match find(&Locate::Cwd(input.cwd.clone()), None, &RealFs) {
+    let parent = match workspace::find(&Locate::Cwd(input.cwd.clone()), None, &RealFs) {
         Ok(found) => Some(found.file),
         Err(e) if e.code == ErrorCode::WsNotFound.as_str() => None,
         Err(e) => return Err(e),
