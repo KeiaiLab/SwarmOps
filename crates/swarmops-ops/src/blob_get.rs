@@ -15,7 +15,7 @@ use crate::local::Recording;
 
 /// `blob_get` on the store `ops` reads.
 pub(crate) fn run(ops: &Recording<'_>, req: BlobGetReq) -> Result<BlobGetResp, OpError> {
-    let BlobGetReq { ids, max_bytes } = req;
+    let BlobGetReq { ids, max_bytes, .. } = req;
 
     // 1. Every id is checked before the store is read.
     let ids = ids
@@ -33,25 +33,25 @@ pub(crate) fn run(ops: &Recording<'_>, req: BlobGetReq) -> Result<BlobGetResp, O
         .into_iter()
         .map(|(id, bytes)| {
             let encoded = content::encode(&bytes, bytes.len());
-            BlobOut {
-                id: id.to_string(),
-                size: bytes::to_u64(bytes.len()),
-                encoding: encoded.encoding,
-                content: encoded.content,
-            }
+            BlobOut::new(
+                id.to_string(),
+                bytes::to_u64(bytes.len()),
+                encoded.encoding,
+                encoded.content,
+            )
         })
         .collect();
 
-    Ok(BlobGetResp {
+    Ok(BlobGetResp::new(
         blobs,
-        missing: got.missing.iter().map(ToString::to_string).collect(),
-        truncated: got.truncated,
-    })
+        got.missing.iter().map(ToString::to_string).collect(),
+        got.truncated,
+    ))
 }
 
 /// A blob id from its 64 hex digits; `E_INVALID_ARG` naming the id otherwise.
 fn blob_id(id: &str) -> Result<BlobId, OpError> {
-    ObjectId::from_hex(id).map(BlobId).map_err(|e| {
+    ObjectId::from_hex(id).map(BlobId::new).map_err(|e| {
         OpError::new(
             ErrorCode::InvalidArg,
             format!("blob id {id:?} is not 64 hex digits: {e}"),

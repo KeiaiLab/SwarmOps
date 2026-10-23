@@ -107,14 +107,15 @@ struct Versioned {
 impl Entry {
     /// The remote as the API gives it, with `warnings`.
     fn info(&self, warnings: Option<Vec<String>>) -> RemoteInfo {
-        RemoteInfo {
-            name: self.name.clone(),
-            url: self.url.clone(),
-            branch: self.branch.clone(),
-            token_env: self.token_env.clone(),
-            lossy: self.lossy.clone(),
-            warnings,
-        }
+        let mut out = RemoteInfo::new(
+            self.name.clone(),
+            self.url.clone(),
+            self.branch.clone(),
+            self.lossy.clone(),
+        );
+        out.token_env.clone_from(&self.token_env);
+        out.warnings = warnings;
+        out
     }
 
     /// The entry that records `info`.
@@ -161,6 +162,7 @@ impl LocalOps {
             remote,
             token_env,
             lossy,
+            ..
         } = req;
         let at = Utf8Path::new(&path);
 
@@ -171,13 +173,10 @@ impl LocalOps {
         if let Some(branch) = &branch {
             check_branch(branch)?;
         }
-        let add = RemoteAddReq {
-            name: remote,
-            url,
-            branch,
-            token_env,
-            lossy,
-        };
+        let mut add = RemoteAddReq::new(remote, url);
+        add.branch = branch;
+        add.token_env = token_env;
+        add.lossy = lossy;
 
         // 2. The store: made, or the one an interrupted clone left, opened.
         let (ops, made) = match place(at)? {
@@ -231,7 +230,7 @@ impl Recording<'_> {
     /// lock, which it takes. It needs no identity: it writes remotes.toml and the mirror, no
     /// store object.
     pub fn remote_remove(&self, req: RemoteRemoveReq) -> Result<RemoteRemoveResp, OpError> {
-        let RemoteRemoveReq { name } = req;
+        let RemoteRemoveReq { name, .. } = req;
         let mirror = self.mirror()?;
         let lock = mirror.lock().map_err(error::mirror_error)?;
 
@@ -249,21 +248,21 @@ impl Recording<'_> {
         // 3. Its line.
         file.remotes.remove(at);
         self.write_remotes(&file)?;
-        Ok(RemoteRemoveResp { name, removed_refs })
+        Ok(RemoteRemoveResp::new(name, removed_refs))
     }
 
     /// `remote list`: the remotes `remotes.toml` records, read without the lock.
     pub fn remote_list(&self, _req: RemoteListReq) -> Result<RemoteList, OpError> {
         let file = self.read_remotes()?;
         let remotes = file.remotes.iter().map(|entry| entry.info(None)).collect();
-        Ok(RemoteList { remotes })
+        Ok(RemoteList::new(remotes))
     }
 
     /// `fetch`: the remote's branches and tags into the mirror, and its followed branch's
     /// commits into the store, under the mirror's lock, which it takes. It needs no identity:
     /// it moves no ref and records no agent.
     pub fn fetch(&self, req: FetchReq) -> Result<FetchResp, OpError> {
-        let FetchReq { remote } = req;
+        let FetchReq { remote, .. } = req;
         let remote = self.remote(&remote)?;
         let mirror = self.mirror()?;
         let lock = mirror.lock().map_err(error::mirror_error)?;
@@ -282,6 +281,7 @@ impl Recording<'_> {
             branch,
             token_env,
             lossy,
+            ..
         } = req;
 
         // 1. The arguments, then the name's uniqueness.
@@ -302,23 +302,17 @@ impl Recording<'_> {
         let branch = if let Some(branch) = branch {
             branch
         } else {
-            let cred = Credential {
-                token_env: token_env.clone(),
-            };
+            let mut cred = Credential::default();
+            cred.token_env.clone_from(&token_env);
             let (branch, unknown) = default_branch(&parsed, &cred, &name)?;
             warnings.extend(unknown);
             branch
         };
 
         // 3. Recorded.
-        let info = RemoteInfo {
-            name,
-            url,
-            branch,
-            token_env,
-            lossy,
-            warnings: (!warnings.is_empty()).then_some(warnings),
-        };
+        let mut info = RemoteInfo::new(name, url, branch, lossy);
+        info.token_env = token_env;
+        info.warnings = (!warnings.is_empty()).then_some(warnings);
         file.remotes.push(Entry::of(&info));
         self.write_remotes(&file)?;
         Ok(info)
@@ -336,9 +330,8 @@ impl Recording<'_> {
         // 1. The mirror, made or rebuilt, its stale git lock files removed.
         let (mirror, mut warnings) = ready(self.mirror()?, lock)?;
         let url = RemoteUrl::parse(&remote.url).map_err(error::url_refused)?;
-        let cred = Credential {
-            token_env: remote.token_env.clone(),
-        };
+        let mut cred = Credential::default();
+        cred.token_env.clone_from(&remote.token_env);
         let git = GitCli::find().map_err(failed)?;
 
         // 2. git fetch, between two readings of the remote's refs in the mirror.
@@ -380,17 +373,18 @@ impl Recording<'_> {
             warnings.extend(report.warnings);
         }
         let (moved, branches_truncated) = moved_branches(&branches, &branches_now);
-        Ok(FetchResp {
-            remote: name.to_owned(),
-            branch: remote.branch.clone(),
-            head,
-            old_head,
+        let mut out = FetchResp::new(
+            name.to_owned(),
+            remote.branch.clone(),
             imported,
-            branches: moved,
+            moved,
             branches_truncated,
-            tags_fetched: changed(&tags, &tags_now),
-            warnings: (!warnings.is_empty()).then_some(warnings),
-        })
+            changed(&tags, &tags_now),
+        );
+        out.head = head;
+        out.old_head = old_head;
+        out.warnings = (!warnings.is_empty()).then_some(warnings);
+        Ok(out)
     }
 
     /// A clone's steps on its store, under one mirror lock: `add`'s remote recorded (unless a
@@ -422,14 +416,10 @@ impl Recording<'_> {
         }
 
         // 3. The response.
-        let repo = self.repo_info(InfoReq {})?;
-        Ok(CloneResp {
-            repo,
-            remote,
-            fetch: fetched,
-            imported,
-            main,
-        })
+        let repo = self.repo_info(InfoReq::default())?;
+        let mut out = CloneResp::new(repo, remote, fetched, imported);
+        out.main = main;
+        Ok(out)
     }
 
     /// Imports `git_ref` of `mirror` as `request` says, with the classes `lossy` allows; the
@@ -637,18 +627,14 @@ fn not_empty(at: &Utf8Path) -> OpError {
 
 /// `e`, from a clone that made its store at `at` first: it says the store is there
 /// (`details.created: true`), and that the same clone run again resumes.
-fn created(at: &Utf8Path, e: OpError) -> OpError {
-    let mut found = e.details;
-    found.insert("created".to_owned(), true.into());
+fn created(at: &Utf8Path, mut e: OpError) -> OpError {
+    e.details.insert("created".to_owned(), true.into());
     let again = format!(
         "the store at {} is made: run the same clone again to resume it",
         error::shell_word(at.as_str())
     );
-    OpError {
-        details: found,
-        hint: Some(e.hint.unwrap_or(again)),
-        ..e
-    }
+    e.hint = Some(e.hint.take().unwrap_or(again));
+    e
 }
 
 /// The repository's name in `url`: its last path component, without `.git`.
@@ -759,14 +745,14 @@ fn io(e: IoFailure) -> OpError {
 /// place in the mirror.
 fn refspecs(remote: &str) -> [RefSpec; 2] {
     [
-        RefSpec {
-            src: "refs/heads/*".to_owned(),
-            dst: format!("refs/remotes/{remote}/*"),
-        },
-        RefSpec {
-            src: "refs/tags/*".to_owned(),
-            dst: format!("refs/remote-tags/{remote}/*"),
-        },
+        RefSpec::new(
+            "refs/heads/*".to_owned(),
+            format!("refs/remotes/{remote}/*"),
+        ),
+        RefSpec::new(
+            "refs/tags/*".to_owned(),
+            format!("refs/remote-tags/{remote}/*"),
+        ),
     ]
 }
 
@@ -777,10 +763,7 @@ fn tracking_ref(remote: &str, branch: &str) -> String {
 
 /// A head as a fetch reports it: the commit and its changeset.
 fn remote_head(oid: GitOid, changeset: ChangesetId) -> RemoteHead {
-    RemoteHead {
-        sha: oid.to_string(),
-        changeset: changeset.to_string(),
-    }
+    RemoteHead::new(oid.to_string(), changeset.to_string())
 }
 
 /// Each branch that moved, appeared or went between `before` and `after`, by name, at most
@@ -797,10 +780,11 @@ fn moved_branches(
     let updates = names.into_iter().filter_map(|branch| {
         let old = before.get(branch);
         let new = after.get(branch);
-        (old != new).then(|| BranchUpdate {
-            branch: branch.clone(),
-            old: old.map(GitOid::to_string),
-            new: new.map(GitOid::to_string),
+        (old != new).then(|| {
+            let mut update = BranchUpdate::new(branch.clone());
+            update.old = old.map(GitOid::to_string);
+            update.new = new.map(GitOid::to_string);
+            update
         })
     });
     let mut moved: Vec<BranchUpdate> = updates.collect();

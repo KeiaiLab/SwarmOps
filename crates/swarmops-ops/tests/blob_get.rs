@@ -22,21 +22,13 @@ fn commit(ops: &LocalOps, files: &[(&str, ContentInput)]) -> String {
     let who = Identity::parse("agent/worker-17").expect("a valid agent name");
     let changes = files
         .iter()
-        .map(|(path, content)| ChangeInput {
-            path: (*path).to_owned(),
-            op: ChangeOp::Put,
-            content: Some(content.clone()),
-            mode: None,
+        .map(|(path, content)| {
+            let mut change_input = ChangeInput::new((*path).to_owned(), ChangeOp::Put);
+            change_input.content = Some(content.clone());
+            change_input
         })
         .collect();
-    let req = CommitReq {
-        parent: None,
-        changes,
-        message: "a test commit".to_owned(),
-        allow_empty: false,
-        advance: None,
-        idempotency_key: None,
-    };
+    let req = CommitReq::new(changes, "a test commit".to_owned());
 
     ops.commit(&who, req).expect("commit").changeset
 }
@@ -47,10 +39,9 @@ fn blob_id(bytes: &[u8]) -> String {
 }
 
 fn get(ids: &[String], max_bytes: u64) -> BlobGetReq {
-    BlobGetReq {
-        ids: ids.to_vec(),
-        max_bytes,
-    }
+    let mut blob_get_req = BlobGetReq::new(ids.to_vec());
+    blob_get_req.max_bytes = max_bytes;
+    blob_get_req
 }
 
 #[test]
@@ -124,13 +115,9 @@ fn blob_get_stops_at_max_bytes_and_says_truncated() {
 fn blob_get_of_a_tree_id_is_missing_not_a_blob() {
     let (_dir, ops) = new_store();
     let cs = commit(&ops, &[("a", ContentInput::Inline("x".to_owned()))]);
-    let root = ops
-        .show(ShowReq {
-            rev: cs.as_str().into(),
-            max_changes: 10,
-        })
-        .expect("show")
-        .root;
+    let mut show_req = ShowReq::new(cs.as_str());
+    show_req.max_changes = 10;
+    let root = ops.show(show_req).expect("show").root;
 
     let got = ops
         .blob_get(get(std::slice::from_ref(&root), DEFAULT_BLOB_GET_MAX_BYTES))

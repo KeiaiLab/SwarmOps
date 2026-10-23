@@ -133,14 +133,9 @@ impl Recording<'_> {
         }
 
         // 8. The compare-and-swap: the remote moves only from `seen`, to `new`.
-        let cred = Credential {
-            token_env: remote.token_env.clone(),
-        };
-        let update = PushUpdate {
-            new,
-            branch: branch.clone(),
-            expect: seen,
-        };
+        let mut cred = Credential::default();
+        cred.token_env.clone_from(&remote.token_env);
+        let update = PushUpdate::new(new, branch.clone(), seen);
         let outcome = git
             .push(mirror.git_dir(), &url, &cred, &update)
             .map_err(failed)?;
@@ -156,13 +151,14 @@ impl Recording<'_> {
             (PushOutcome::AlreadyThere, _) => PushStatus::UpToDate,
             (PushOutcome::Sent, None) => PushStatus::Created,
             (PushOutcome::Sent, Some(_)) => PushStatus::Pushed,
+            _ => return Err(error::unknown_variant("PushOutcome")),
         };
         Ok(response(remote, &branch, status, seen, &report, warnings))
     }
 
     /// The remote named `name`, as `remote list` reads it, or `E_REMOTE_NOT_FOUND`.
     fn named_remote(&self, name: &str) -> Result<RemoteInfo, OpError> {
-        let listed = self.remote_list(RemoteListReq {})?;
+        let listed = self.remote_list(RemoteListReq::default())?;
         let found = listed
             .remotes
             .into_iter()
@@ -270,6 +266,7 @@ impl Recording<'_> {
                     "the staging branch moved during the export, under the mirror's lock",
                 ));
             }
+            _ => return Err(error::unknown_variant("DivergedReason")),
         };
         let message = format!(
             "{branch} on {remote:?} is no ancestor of what the push would send ({why}): nothing \
@@ -346,17 +343,18 @@ fn response(
     report: &ExportReport,
     warnings: Vec<String>,
 ) -> PushResp {
-    PushResp {
-        remote: remote.name.clone(),
-        branch: branch.to_owned(),
+    let mut out = PushResp::new(
+        remote.name.clone(),
+        branch.to_owned(),
         status,
-        old: old.map(|oid| oid.to_string()),
-        new: report.head_oid.to_string(),
-        head_changeset: report.head.to_string(),
-        objects_written: report.objects_written,
-        rewritten: report.rewritten,
-        warnings: (!warnings.is_empty()).then_some(warnings),
-    }
+        report.head_oid.to_string(),
+        report.head.to_string(),
+        report.objects_written,
+        report.rewritten,
+    );
+    out.old = old.map(|oid| oid.to_string());
+    out.warnings = (!warnings.is_empty()).then_some(warnings);
+    out
 }
 
 /// The import's set of the wire's `classes`, by name.
@@ -372,11 +370,10 @@ fn lossy_set(classes: &[LossyClass]) -> LossySet {
 /// What a committed snapshot's tail check repaired, as `meta.recovered` gives it: its journal
 /// fields.
 fn recovered(repair: TailRepair) -> Recovered {
-    Recovered {
-        log_cut: repair.cut,
-        frames_listed: repair.frames_listed,
-        frames_rewritten: repair.frames_rewritten,
-        off_bytes_dropped: repair.off_bytes_dropped,
-        ..Recovered::default()
-    }
+    let mut out = Recovered::default();
+    out.log_cut = repair.cut;
+    out.frames_listed = repair.frames_listed;
+    out.frames_rewritten = repair.frames_rewritten;
+    out.off_bytes_dropped = repair.off_bytes_dropped;
+    out
 }

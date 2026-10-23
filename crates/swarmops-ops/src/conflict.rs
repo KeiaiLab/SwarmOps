@@ -31,13 +31,14 @@
 use std::io;
 use std::ops::Range;
 
-use swarmops_api::{ConflictKindOut, ConflictReport, FileConflictOut, HunkOut, LinesOut};
+use swarmops_api::{ConflictKindOut, ConflictReport, FileConflictOut, HunkOut, LinesOut, OpError};
 use swarmops_core::bytes;
 use swarmops_repo::MergeConflicts;
 use swarmops_repo::merge::conflict::{ConflictHunk, ConflictKind};
 use swarmops_repo::merge::tree_diff::Leaf;
 use swarmops_repo::merge::tree_merge::FileConflict;
 
+use crate::error;
 use crate::local::UNKNOWN_AGENT;
 
 /// The kinds of conflict, in the order the report's `kinds` lists them: the operations spec's
@@ -62,8 +63,11 @@ const MAX_ENTRY_BYTES: u64 = 24 * 1024;
 const HUNKS_KEY_BYTES: u64 = 11;
 
 /// `conflicts` as the report `E_CONFLICT` carries ([the module documentation](self)), its hunk
-/// texts within `max_bytes`.
-pub(crate) fn report(conflicts: &MergeConflicts, max_bytes: u64) -> ConflictReport {
+/// texts within `max_bytes`. `E_INTERNAL` for a conflict kind this build does not know.
+pub(crate) fn report(
+    conflicts: &MergeConflicts,
+    max_bytes: u64,
+) -> Result<ConflictReport, OpError> {
     let mut budgets = Budgets {
         texts: Budget::new(max_bytes),
         entries: Budget::new(MAX_ENTRY_BYTES),
@@ -75,7 +79,7 @@ pub(crate) fn report(conflicts: &MergeConflicts, max_bytes: u64) -> ConflictRepo
         } else {
             Place::Later
         };
-        let Some(out) = file_out(file, conflicts, place, &mut budgets) else {
+        let Some(out) = file_out(file, conflicts, place, &mut budgets)? else {
             break;
         };
         files.push(out);
@@ -87,18 +91,19 @@ pub(crate) fn report(conflicts: &MergeConflicts, max_bytes: u64) -> ConflictRepo
     let kinds = (KINDS.into_iter())
         .filter(|kind| files.iter().any(|file| file.kind == *kind))
         .collect();
-    ConflictReport {
-        base: conflicts.base.to_string(),
-        ours: conflicts.ours.to_string(),
-        theirs: conflicts.theirs.to_string(),
+    let mut out = ConflictReport::new(
+        conflicts.base.to_string(),
+        conflicts.ours.to_string(),
+        conflicts.theirs.to_string(),
         files,
         kinds,
-        auto_merged: (conflicts.auto_merged.iter())
-            .map(ToString::to_string)
-            .collect(),
-        stale: conflicts.stale.iter().map(ToString::to_string).collect(),
-        truncated: budgets.texts.cut || budgets.entries.cut,
-    }
+        budgets.texts.cut || budgets.entries.cut,
+    );
+    out.auto_merged = (conflicts.auto_merged.iter())
+        .map(ToString::to_string)
+        .collect();
+    out.stale = conflicts.stale.iter().map(ToString::to_string).collect();
+    Ok(out)
 }
 
 /// What a report may still take: of its hunks' texts, and of its files' and hunks' entries.
@@ -154,13 +159,14 @@ enum Place {
 
 /// One conflicting file of `conflicts`, as the report gives it at `place`, if it goes in
 /// ([the module documentation](self)): its entry from `budgets.entries`, its hunk texts from
-/// `budgets.texts`. `None` leaves it out, and every file after it.
+/// `budgets.texts`. `None` leaves it out, and every file after it. `E_INTERNAL` for a conflict
+/// kind this build does not know.
 fn file_out(
     file: &FileConflict,
     conflicts: &MergeConflicts,
     place: Place,
     budgets: &mut Budgets,
-) -> Option<FileConflictOut> {
+) -> Result<Option<FileConflictOut>, OpError> {
     let blob = |leaf: Option<Leaf>| leaf.map(|leaf| leaf.blob.to_string());
     let (kind, hunks): (ConflictKindOut, &[ConflictHunk]) = match &file.kind {
         ConflictKind::Content { hunks } => (ConflictKindOut::Content, hunks),
@@ -170,6 +176,7 @@ fn file_out(
         ConflictKind::AddAdd { hunks } => (ConflictKindOut::AddAdd, hunks),
         ConflictKind::Mode { .. } => (ConflictKindOut::Mode, &[]),
         ConflictKind::TypeChange => (ConflictKindOut::TypeChange, &[]),
+        _ => return Err(error::unknown_variant("ConflictKind")),
     };
     // Who changed the path on the target since the base: none where the walk did not reach it (a
     // base off the target can leave the change below it). An agent the changeset does not name
@@ -179,16 +186,12 @@ fn file_out(
         "" => UNKNOWN_AGENT.to_owned(),
         named => named.to_owned(),
     };
-    let mut out = FileConflictOut {
-        path: file.path.to_string(),
-        kind,
-        base_blob: blob(file.base),
-        ours_blob: blob(file.ours),
-        theirs_blob: blob(file.theirs),
-        hunks: Vec::new(),
-        theirs_changeset: touched.map(|(changeset, _)| changeset.to_string()),
-        theirs_agent: touched.map(|(_, named)| agent(named)),
-    };
+    let mut out = FileConflictOut::new(file.path.to_string(), kind);
+    out.base_blob = blob(file.base);
+    out.ours_blob = blob(file.ours);
+    out.theirs_blob = blob(file.theirs);
+    out.theirs_changeset = touched.map(|(changeset, _)| changeset.to_string());
+    out.theirs_agent = touched.map(|(_, named)| agent(named));
 
     // The file's entry as JSON, then each hunk's, made one at a time: a hunk past the budget is
     // never made, nor its texts taken.
@@ -227,11 +230,11 @@ fn file_out(
                 out.hunks.push(entry);
             }
             if !entries.take(whole) {
-                return None;
+                return Ok(None);
             }
         }
     }
-    Some(out)
+    Ok(Some(out))
 }
 
 /// The entry of one hunk that spans `hunks`, a file's from its `id`-th on, in file order: each
@@ -239,17 +242,15 @@ fn file_out(
 /// conflicts hold only for the lines of each hunk. `None` for no hunks.
 fn spanning(hunks: &[ConflictHunk], id: u32) -> Option<HunkOut> {
     let (first, last) = (hunks.first()?, hunks.last()?);
-    let side = |from: &Range<u32>, to: &Range<u32>| LinesOut {
-        first: u64::from(from.start) + 1,
-        last: u64::from(to.end),
-        text: None,
+    let side = |from: &Range<u32>, to: &Range<u32>| {
+        LinesOut::new(u64::from(from.start) + 1, u64::from(to.end))
     };
-    Some(HunkOut {
+    Some(HunkOut::new(
         id,
-        base: side(&first.base, &last.base),
-        ours: side(&first.ours, &last.ours),
-        theirs: side(&first.theirs, &last.theirs),
-    })
+        side(&first.base, &last.base),
+        side(&first.ours, &last.ours),
+        side(&first.theirs, &last.theirs),
+    ))
 }
 
 /// An entry's length in a report's list: its JSON's `json` bytes, the `,` before it, and
@@ -299,17 +300,17 @@ fn hunk_out(hunk: &ConflictHunk, id: u32, texts: &mut Budget) -> HunkOut {
         .iter()
         .sum();
     let with_texts = texts.take(bytes);
-    let side = |lines: &Range<u32>, text: &[u8]| LinesOut {
-        first: u64::from(lines.start) + 1,
-        last: u64::from(lines.end),
-        text: with_texts.then(|| String::from_utf8_lossy(text).into_owned()),
+    let side = |lines: &Range<u32>, text: &[u8]| {
+        let mut out = LinesOut::new(u64::from(lines.start) + 1, u64::from(lines.end));
+        out.text = with_texts.then(|| String::from_utf8_lossy(text).into_owned());
+        out
     };
-    HunkOut {
+    HunkOut::new(
         id,
-        base: side(&hunk.base, &hunk.base_text),
-        ours: side(&hunk.ours, &hunk.ours_text),
-        theirs: side(&hunk.theirs, &hunk.theirs_text),
-    }
+        side(&hunk.base, &hunk.base_text),
+        side(&hunk.ours, &hunk.ours_text),
+        side(&hunk.theirs, &hunk.theirs_text),
+    )
 }
 
 #[cfg(test)]
@@ -321,24 +322,21 @@ mod tests {
     use super::*;
 
     fn id(n: u8) -> ChangesetId {
-        ChangesetId(ObjectId([n; 32]))
+        ChangesetId::new(ObjectId::new([n; 32]))
     }
 
     fn leaf(n: u8) -> Leaf {
-        Leaf {
-            kind: LeafKind::File,
-            blob: BlobId(ObjectId([n; 32])),
-        }
+        Leaf::new(LeafKind::File, BlobId::new(ObjectId::new([n; 32])))
     }
 
     fn conflict(path: &str, kind: ConflictKind) -> FileConflict {
-        FileConflict {
-            path: RepoPath::new(path).unwrap(),
+        FileConflict::new(
+            RepoPath::new(path).unwrap(),
             kind,
-            base: Some(leaf(1)),
-            ours: None,
-            theirs: Some(leaf(3)),
-        }
+            Some(leaf(1)),
+            None,
+            Some(leaf(3)),
+        )
     }
 
     /// The kinds map one to one, each listed once in the operations spec's order whatever the
@@ -347,23 +345,23 @@ mod tests {
     /// changeset names no agent is `unknown/unknown`'s.
     #[test]
     fn every_kind_is_reported_and_listed_once() {
-        let added = ConflictHunk {
-            base: 0..0,
-            ours: 0..1,
-            theirs: 0..2,
-            base_text: Vec::new(),
-            ours_text: b"a\n".to_vec(),
-            theirs_text: b"b\nc\n".to_vec(),
-        };
+        let added = ConflictHunk::new(
+            0..0,
+            0..1,
+            0..2,
+            Vec::new(),
+            b"a\n".to_vec(),
+            b"b\nc\n".to_vec(),
+        );
         let mode = ConflictKind::Mode {
             ours: LeafKind::Exec,
             theirs: LeafKind::Symlink,
         };
-        let conflicts = MergeConflicts {
-            base: id(1),
-            ours: id(2),
-            theirs: id(3),
-            conflicts: vec![
+        let conflicts = MergeConflicts::new(
+            id(1),
+            id(2),
+            id(3),
+            vec![
                 conflict("a", ConflictKind::TypeChange),
                 conflict("b", mode),
                 conflict("c", ConflictKind::AddAdd { hunks: vec![added] }),
@@ -371,14 +369,14 @@ mod tests {
                 conflict("e", ConflictKind::Binary),
                 conflict("f", ConflictKind::TypeChange),
             ],
-            auto_merged: vec![RepoPath::new("g").unwrap()],
-            last_touched: BTreeMap::from([
+            vec![RepoPath::new("g").unwrap()],
+            BTreeMap::from([
                 (RepoPath::new("a").unwrap(), (id(4), String::new())),
                 (RepoPath::new("b").unwrap(), (id(5), "agent/w-5".to_owned())),
             ]),
-            stale: vec![RepoPath::new("e").unwrap(), RepoPath::new("h").unwrap()],
-        };
-        let report = report(&conflicts, 3);
+            vec![RepoPath::new("e").unwrap(), RepoPath::new("h").unwrap()],
+        );
+        let report = report(&conflicts, 3).unwrap();
         assert_eq!(
             report.kinds,
             [
@@ -415,11 +413,7 @@ mod tests {
         let [hunk] = &report.files[2].hunks[..] else {
             panic!("one hunk: {report:?}");
         };
-        let lines = |first, last| LinesOut {
-            first,
-            last,
-            text: None,
-        };
+        let lines = |first, last| LinesOut::new(first, last);
         assert_eq!(
             (&hunk.base, &hunk.ours, &hunk.theirs),
             (&lines(1, 0), &lines(1, 1), &lines(1, 2)),
@@ -446,25 +440,29 @@ mod tests {
     /// says `truncated`, though it carries every text it holds.
     #[test]
     fn a_later_file_goes_in_whole_or_not_at_all() {
-        let hunk = |i: u32| ConflictHunk {
-            base: i..i + 1,
-            ours: i..i + 1,
-            theirs: i..i + 1,
-            base_text: Vec::new(),
-            ours_text: b"o\n".to_vec(),
-            theirs_text: b"t\n".to_vec(),
+        let hunk = |i: u32| {
+            ConflictHunk::new(
+                i..i + 1,
+                i..i + 1,
+                i..i + 1,
+                Vec::new(),
+                b"o\n".to_vec(),
+                b"t\n".to_vec(),
+            )
         };
         let content = |hunks: u32| ConflictKind::Content {
             hunks: (0..hunks).map(hunk).collect(),
         };
-        let of = |files: Vec<FileConflict>| MergeConflicts {
-            base: id(1),
-            ours: id(2),
-            theirs: id(3),
-            conflicts: files,
-            auto_merged: Vec::new(),
-            last_touched: BTreeMap::new(),
-            stale: Vec::new(),
+        let of = |files: Vec<FileConflict>| {
+            MergeConflicts::new(
+                id(1),
+                id(2),
+                id(3),
+                files,
+                Vec::new(),
+                BTreeMap::new(),
+                Vec::new(),
+            )
         };
         let listed = |report: &ConflictReport| -> Vec<(String, usize)> {
             (report.files.iter())
@@ -474,7 +472,7 @@ mod tests {
 
         let every_text = u64::MAX;
         let two = vec![conflict("a", content(1)), conflict("b", content(50))];
-        let fits = report(&of(two), every_text);
+        let fits = report(&of(two), every_text).unwrap();
         assert_eq!(listed(&fits), [("a".to_owned(), 1), ("b".to_owned(), 50)]);
         assert!(!fits.truncated, "nothing left out");
 
@@ -483,7 +481,7 @@ mod tests {
             conflict("b", content(1_000)),
             conflict("c", content(1)),
         ];
-        let cut = report(&of(files), every_text);
+        let cut = report(&of(files), every_text).unwrap();
         assert_eq!(listed(&cut), [("a".to_owned(), 1)]);
         assert!(cut.truncated);
     }
@@ -497,31 +495,33 @@ mod tests {
     fn a_report_of_very_many_hunks_and_files_is_bounded() {
         use std::time::{Duration, Instant};
 
-        let hunk = |i: u32| ConflictHunk {
-            base: 2 * i..2 * i + 1,
-            ours: 2 * i..2 * i + 1,
-            theirs: 2 * i..2 * i + 1,
-            base_text: format!("l{i}\n").into_bytes(),
-            ours_text: format!("o{i}\n").into_bytes(),
-            theirs_text: format!("t{i}\n").into_bytes(),
+        let hunk = |i: u32| {
+            ConflictHunk::new(
+                2 * i..2 * i + 1,
+                2 * i..2 * i + 1,
+                2 * i..2 * i + 1,
+                format!("l{i}\n").into_bytes(),
+                format!("o{i}\n").into_bytes(),
+                format!("t{i}\n").into_bytes(),
+            )
         };
         let content = |hunks: u32| ConflictKind::Content {
             hunks: (0..hunks).map(hunk).collect(),
         };
         let mut files = vec![conflict("a", content(100_000))];
         files.extend((0..10_000).map(|i| conflict(&format!("b/{i:05}"), content(1))));
-        let conflicts = MergeConflicts {
-            base: id(1),
-            ours: id(2),
-            theirs: id(3),
-            conflicts: files,
-            auto_merged: Vec::new(),
-            last_touched: BTreeMap::new(),
-            stale: Vec::new(),
-        };
+        let conflicts = MergeConflicts::new(
+            id(1),
+            id(2),
+            id(3),
+            files,
+            Vec::new(),
+            BTreeMap::new(),
+            Vec::new(),
+        );
 
         let started = Instant::now();
-        let report = report(&conflicts, 0);
+        let report = report(&conflicts, 0).unwrap();
         let took = started.elapsed();
         let json = serde_json::to_vec(&report).expect("a report serializes");
         assert!(json.len() < 64 * 1024, "{} bytes", json.len());
@@ -529,11 +529,7 @@ mod tests {
         assert!(report.truncated);
         let first = &report.files[0];
         assert_eq!(first.path, "a");
-        let lines = |first, last| LinesOut {
-            first,
-            last,
-            text: None,
-        };
+        let lines = |first, last| LinesOut::new(first, last);
         let sides = (
             &first.hunks[0].base,
             &first.hunks[0].ours,
