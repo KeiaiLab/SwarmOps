@@ -2843,4 +2843,30 @@ mod tests {
         is(&stub, ErrorCode::Internal, &json!({}));
         assert_eq!(stub.message, "planned in M13 (C6)");
     }
+
+    /// The repository's and the store's internal errors, the values of their callers' wildcard
+    /// arms, are `E_INTERNAL` with their message and no hint; a projection's unknown variant is
+    /// `E_INTERNAL` naming its enum.
+    #[test]
+    fn internal_errors_map_to_e_internal() {
+        let what = "EntryTarget: a variant this build does not know";
+        let internal = [
+            RepoError::Internal(what.to_owned()),
+            RepoError::Store(StoreError::Internal(what.to_owned())),
+        ];
+        for e in internal {
+            let error = op(e);
+            assert_eq!(error.code, ErrorCode::Internal.as_str(), "{error:?}");
+            assert!(error.message.contains(what), "{error:?}");
+            assert_eq!(error.hint, None, "{error:?}");
+        }
+
+        let error = unknown_variant("LandStatus");
+        assert_eq!(error.code, ErrorCode::Internal.as_str());
+        assert_eq!(
+            error.message,
+            "LandStatus: a variant this build does not know"
+        );
+        assert!(!error.retryable);
+    }
 }
