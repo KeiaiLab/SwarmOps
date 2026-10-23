@@ -167,6 +167,13 @@ pub enum StoreError {
         /// The append's failure: of the write, or of the fdatasync after it.
         source: IoFailure,
     },
+    /// A case the caller cannot handle: the fail-closed value a crate outside the store returns
+    /// from the wildcard arm of a `match` over a store enum, all of which are
+    /// `#[non_exhaustive]`, when it meets a variant this build does not know. The store itself
+    /// never returns it. The text names the enum and what the caller was doing; the API layer
+    /// reports it as `E_INTERNAL`.
+    #[error("internal error: {0}")]
+    Internal(String),
 }
 
 /// Which limit of the store's layout a request went past ([`StoreError::Limit`]; storage spec
