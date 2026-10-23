@@ -19,12 +19,11 @@
 use std::collections::{BTreeMap, HashMap};
 use std::slice;
 
-use swarmops_core::ChangesetId;
+use swarmops_core::{ChangesetId, bytes};
 
 use super::frame::{Frame, Record};
 use super::index::{ChangesetMeta, Index};
 use super::refs::{self, RefState};
-use super::to_u64;
 use crate::error::StoreError;
 use crate::fs_ops::StoreFs;
 use crate::layout::Layout;
@@ -73,7 +72,7 @@ pub(crate) fn replay(
         }
     }
     Ok(Replayed {
-        records: to_u64(changesets.len() - held),
+        records: bytes::to_u64(changesets.len() - held),
         refs: files,
     })
 }

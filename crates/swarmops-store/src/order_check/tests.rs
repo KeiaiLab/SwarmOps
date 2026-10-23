@@ -7,7 +7,6 @@ use swarmops_core::{ChangesetId, ObjectId};
 
 use super::*;
 use crate::fs_ops::{FailAt, FailAtFs, FailMode, InjectedError, RealFs};
-use crate::meta::frame::encode_frame;
 
 /// A store root in a temp dir, with `meta/`, empty journal files, `meta/refs/` and an
 /// `objects/` fan-out directory, all durable.
@@ -30,7 +29,7 @@ fn root() -> (tempfile::TempDir, PathBuf) {
 }
 
 fn frame(records: &[Record]) -> Vec<u8> {
-    encode_frame(records).unwrap()
+    frame::encode_frame(records).unwrap()
 }
 
 fn compacted() -> Vec<u8> {

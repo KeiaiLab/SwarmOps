@@ -35,13 +35,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use camino::Utf8Path;
 use swarmops_core::ObjectId;
-use swarmops_core::bytes::{Reader, to_u64};
+use swarmops_core::bytes::{self, Reader};
 
 use crate::error::{FileOp, StoreError};
-use crate::external_ids::from_hex;
+use crate::external_ids;
 use crate::fs_objects::MAX_OBJECT_LEN;
 use crate::fs_ops::{FsOps, LinkOutcome, StoreFs};
-use crate::layout::{Layout, derived_key_hash};
+use crate::layout::{self, Layout};
 
 const MAGIC: [u8; 4] = *b"SWDV";
 /// The version of the file layout: its fifth byte.
@@ -113,7 +113,7 @@ impl DerivedSlot<'_> {
         hasher.update(&self.subject.0);
         hasher.update(&key_len.to_le_bytes());
         hasher.update(self.key);
-        hasher.update(&to_u64(value.len()).to_le_bytes());
+        hasher.update(&bytes::to_u64(value.len()).to_le_bytes());
         hasher.update(value);
         *hasher.finalize().as_bytes()
     }
@@ -227,7 +227,7 @@ impl DerivedStore {
     /// is written; a failed filesystem call is [`StoreError::Io`], naming the file.
     pub fn put(&self, slot: &DerivedSlot<'_>, value: &[u8]) -> Result<bool, StoreError> {
         let key_len = slot.key_len()?;
-        if to_u64(value.len()) > MAX_OBJECT_LEN {
+        if bytes::to_u64(value.len()) > MAX_OBJECT_LEN {
             return Err(StoreError::BadCall(format!(
                 "a derived value of {} bytes: at most {MAX_OBJECT_LEN}",
                 value.len()
@@ -283,7 +283,8 @@ impl DerivedStore {
             .join(version.to_string());
         let mut listed = Vec::new();
         for fanout in self.names_in(&dir)? {
-            let Some(first) = from_hex(&fanout).filter(|first| first.len() == 1) else {
+            let Some(first) = external_ids::from_hex(&fanout).filter(|first| first.len() == 1)
+            else {
                 continue;
             };
             for file in self.names_in(&dir.join(&fanout))? {
@@ -326,7 +327,7 @@ impl DerivedStore {
         let Some(key) = recorded_key(&file).map(<[u8]>::to_vec) else {
             return Ok(None);
         };
-        if derived_key_hash(&key) != listed.key_hash {
+        if layout::derived_key_hash(&key) != listed.key_hash {
             return Ok(None);
         }
         let slot = DerivedSlot {
@@ -371,12 +372,12 @@ impl DerivedStore {
 fn listed_value(first: &[u8], file: &str) -> Option<ListedValue> {
     let (rest, key_hash) = match file.split_once('.') {
         Some((rest, hash)) => {
-            let hash: [u8; 8] = from_hex(hash)?.try_into().ok()?;
+            let hash: [u8; 8] = external_ids::from_hex(hash)?.try_into().ok()?;
             (rest, Some(hash))
         }
         None => (file, None),
     };
-    let rest = from_hex(rest).filter(|rest| rest.len() == 31)?;
+    let rest = external_ids::from_hex(rest).filter(|rest| rest.len() == 31)?;
     let subject: [u8; 32] = [first, &rest].concat().try_into().ok()?;
     Some(ListedValue {
         subject: ObjectId(subject),
@@ -425,7 +426,7 @@ fn encode(slot: &DerivedSlot<'_>, key_len: u32, value: &[u8]) -> io::Result<Vec<
     file.push(enc);
     file.extend_from_slice(&0_u16.to_le_bytes());
     file.extend_from_slice(&key_len.to_le_bytes());
-    file.extend_from_slice(&to_u64(value.len()).to_le_bytes());
+    file.extend_from_slice(&bytes::to_u64(value.len()).to_le_bytes());
     file.extend_from_slice(slot.key);
     file.extend_from_slice(&payload);
     file.extend_from_slice(&slot.trailer(key_len, value));
@@ -496,7 +497,7 @@ fn decompress(payload: &[u8], len: usize) -> Option<Vec<u8>> {
     let mut value = Vec::with_capacity(len.min(PREALLOC_MAX));
     zstd::stream::read::Decoder::with_buffer(payload)
         .ok()?
-        .take(to_u64(len).saturating_add(1))
+        .take(bytes::to_u64(len).saturating_add(1))
         .read_to_end(&mut value)
         .ok()?;
     (value.len() == len).then_some(value)

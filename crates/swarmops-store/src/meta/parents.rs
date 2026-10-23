@@ -42,7 +42,10 @@ impl ParentsAt {
 
     /// The `par.col` entry; `offset` must be at most [`ParentsAt::MAX_OFFSET`].
     pub(crate) fn entry(self) -> u64 {
-        debug_assert!(self.offset <= Self::MAX_OFFSET);
+        debug_assert!(
+            self.offset <= Self::MAX_OFFSET,
+            "Index::append_batch refuses a parents.log offset past 56 bits"
+        );
         (self.offset << 8) | u64::from(self.count)
     }
 

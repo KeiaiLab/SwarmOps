@@ -50,6 +50,3 @@ pub use store::{
     CasResult, CommitInfo, InsertOutcome, JournalEntry, MetaRead, MetaStore, MetaWrite, Recovered,
     RefMoveEntry,
 };
-
-// The submodules convert their offsets and counts with it, as `use super::to_u64;`.
-use swarmops_core::bytes::to_u64;

@@ -14,11 +14,10 @@
 //! length against the bytes at hand before it slices, so garbage gives an error, never a
 //! panic.
 
-use swarmops_core::bytes::Reader;
+use swarmops_core::bytes::{self, Reader};
 use swarmops_core::{ChangesetId, ObjectId};
 use thiserror::Error;
 
-use super::to_u64;
 use crate::error::{LimitKind, StoreError};
 
 /// A frame header: `u32le len | u32le crc32(payload)`.
@@ -173,7 +172,7 @@ fn fits_u8(what: LimitKind, len: usize) -> Result<u8, StoreError> {
     u8::try_from(len).map_err(|_| StoreError::Limit {
         what,
         max: u64::from(u8::MAX),
-        got: to_u64(len),
+        got: bytes::to_u64(len),
     })
 }
 
@@ -198,8 +197,8 @@ pub(crate) fn encode_frame(records: &[Record]) -> Result<Vec<u8>, StoreError> {
     }
     let count = u16::try_from(records.len()).map_err(|_| StoreError::Limit {
         what: LimitKind::Records,
-        max: to_u64(MAX_RECORDS),
-        got: to_u64(records.len()),
+        max: bytes::to_u64(MAX_RECORDS),
+        got: bytes::to_u64(records.len()),
     })?;
     let mut frame = vec![0; HEADER_LEN];
     frame.extend_from_slice(&count.to_le_bytes());

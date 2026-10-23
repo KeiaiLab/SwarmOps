@@ -45,15 +45,14 @@ use std::thread;
 use std::{fmt, io};
 
 use camino::{Utf8Path, Utf8PathBuf};
-use swarmops_core::{ChangesetId, ObjectId};
+use swarmops_core::{ChangesetId, ObjectId, bytes};
 
 use super::column::AppendOnlyColumn;
 use super::frame::{Frame, Record};
 use super::journal::Journal;
 use super::parents::{self, MAX_PARENTS, MAX_PARENTS_LEN, PARENT_LEN, ParentsAt};
-use super::replay::{ChangesetRecord, changesets};
+use super::replay::{self, ChangesetRecord};
 use super::sorted::{self, Rebuild, SortedView, VIEW_FILES, ViewName, Views};
-use super::to_u64;
 use crate::error::{FileOp, IoFailure, LimitKind, StoreError};
 use crate::fs_ops::{FsMethod, FsOps, RealFs, StoreFs};
 use crate::layout::Layout;
@@ -324,8 +323,8 @@ impl Index {
             .map(|meta| {
                 u8::try_from(meta.parents.len()).map_err(|_| StoreError::Limit {
                     what: LimitKind::Parents,
-                    max: to_u64(MAX_PARENTS),
-                    got: to_u64(meta.parents.len()),
+                    max: bytes::to_u64(MAX_PARENTS),
+                    got: bytes::to_u64(meta.parents.len()),
                 })
             })
             .collect::<Result<Vec<u8>, StoreError>>()?;
@@ -367,7 +366,7 @@ impl Index {
         self.gens.append(&gen_col, first)?;
         self.dhs.append(&dh_col, first)?;
         self.ids.append(&ids_col, first)?;
-        self.len = first + to_u64(metas.len());
+        self.len = first + bytes::to_u64(metas.len());
         self.parents_len = offset;
         Ok(first)
     }
@@ -569,7 +568,7 @@ impl Index {
             .0
             .iter()
             .position(|probe| *probe == key)
-            .map(|i| from + to_u64(i)))
+            .map(|i| from + bytes::to_u64(i)))
     }
 
     /// The recs, ascending, of the changesets whose ids start with `prefix_nibbles`, 1 to 64
@@ -959,7 +958,7 @@ impl Index {
         if records <= self.views.covered() {
             return Ok(records);
         }
-        let past = changesets(frames);
+        let past = replay::changesets(frames);
         let Some(first_frame) = frames.first().filter(|_| !past.is_empty()) else {
             return Ok(records); // no changeset past the checkpoint: no record past it either
         };
@@ -999,7 +998,7 @@ impl Index {
         let first = match last {
             None => 0,
             Some(last) => {
-                let from = records.saturating_sub(to_u64(past.len()) + 1);
+                let from = records.saturating_sub(bytes::to_u64(past.len()) + 1);
                 let window = held_entries(&self.ids, from, records)?;
                 let at = window
                     .as_chunks::<32>()
@@ -1007,7 +1006,7 @@ impl Index {
                     .iter()
                     .position(|id| *id == last.0.0);
                 match at {
-                    Some(at) => from + to_u64(at) + 1,
+                    Some(at) => from + bytes::to_u64(at) + 1,
                     // The index lacks records the checkpoint passed: damage, which verify
                     // reports against the journal.
                     None => return self.by_length(records),
@@ -1028,12 +1027,12 @@ impl Index {
         past: &[ChangesetRecord<'_>],
         records: u64,
     ) -> Result<Option<u64>, StoreError> {
-        let from = records.saturating_sub(to_u64(past.len()));
+        let from = records.saturating_sub(bytes::to_u64(past.len()));
         let window = held_entries(&self.ids, from, records)?;
         let window = window.as_chunks::<32>().0;
         for (place, changeset) in past.iter().enumerate() {
             if let Some(at) = window.iter().position(|probe| *probe == changeset.id.0.0) {
-                return Ok((from + to_u64(at)).checked_sub(to_u64(place)));
+                return Ok((from + bytes::to_u64(at)).checked_sub(bytes::to_u64(place)));
             }
         }
         Ok(None)
@@ -1050,7 +1049,7 @@ impl Index {
         past: &[ChangesetRecord<'_>],
         parents_file_len: u64,
     ) -> Result<u64, StoreError> {
-        let end = records.min(first + to_u64(past.len()));
+        let end = records.min(first + bytes::to_u64(past.len()));
         let columns = (
             read_or_cut(&self.ids, first, end)?,
             read_or_cut(&self.gens, first, end)?,
@@ -1073,7 +1072,7 @@ impl Index {
         // of them as parents.log holds.
         let wanted: u64 = past
             .iter()
-            .map(|changeset| PARENT_LEN * to_u64(changeset.parents.len()))
+            .map(|changeset| PARENT_LEN * bytes::to_u64(changeset.parents.len()))
             .sum();
         let held = parents_file_len.saturating_sub(start).min(wanted);
         let logged = read_or_cut(&self.parents, start, start + held)?.unwrap_or_default();
@@ -1081,8 +1080,8 @@ impl Index {
         for (i, want) in past.iter().enumerate() {
             let at = ParentsAt::from_entry(u64::from_le_bytes(pars[i]));
             let from = usize::try_from(next - start).unwrap_or(usize::MAX);
-            let len =
-                usize::try_from(PARENT_LEN * to_u64(want.parents.len())).unwrap_or(usize::MAX);
+            let len = usize::try_from(PARENT_LEN * bytes::to_u64(want.parents.len()))
+                .unwrap_or(usize::MAX);
             let parents_there = logged.get(from..).and_then(|rest| rest.get(..len));
             let vouched = ids[i] == want.id.0.0
                 && u64::from_le_bytes(gens[i]) == want.generation
@@ -1095,7 +1094,7 @@ impl Index {
                         .all(|(there, parent)| *there == parent.0.0)
                 });
             if !vouched {
-                return Ok(first + to_u64(i));
+                return Ok(first + bytes::to_u64(i));
             }
             next = at.end();
         }
@@ -1134,7 +1133,7 @@ impl Index {
         let entries = entries.as_chunks::<8>().0;
         // What the cut keeps: the records par.col holds, bounded by ids.col measured after it.
         let ids = AppendOnlyColumn::<32>::whole(self.ids.len()?);
-        let held = (from + to_u64(entries.len())).min(ids);
+        let held = (from + bytes::to_u64(entries.len())).min(ids);
         let checked = usize::try_from(held.saturating_sub(from)).unwrap_or(usize::MAX);
         let mut ats = (entries.iter().take(checked))
             .map(|entry| ParentsAt::from_entry(u64::from_le_bytes(*entry)));
