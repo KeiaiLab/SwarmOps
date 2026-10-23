@@ -75,3 +75,7 @@ module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 must_use_candidate = "allow"
+# Public surfaces are designed for extension: every exported enum and struct is `#[non_exhaustive]`;
+# other crates build them through constructors and match them with a wildcard that fails closed.
+exhaustive_enums = "deny"
+exhaustive_structs = "deny"
