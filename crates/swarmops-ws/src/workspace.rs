@@ -219,7 +219,7 @@ mod tests {
     fn make(dir: &Utf8Path, name: &str) -> WorkspaceFile {
         std::fs::create_dir_all(dir.join(SWARMWS_DIR)).unwrap();
         let file = sample(name, State::Clean);
-        state::replace(&RealFs, dir, &file).unwrap();
+        state::replace(&RealFs::new(), dir, &file).unwrap();
         file
     }
 
@@ -239,7 +239,7 @@ mod tests {
         let inner_file = make(&inner, "inner");
         std::fs::create_dir_all(&deep).unwrap();
         std::fs::create_dir_all(&beside).unwrap();
-        let fs = RealFs;
+        let fs = RealFs::new();
         let found = |at: Locate| find(&at, None, &fs);
 
         // 2. Upwards from a directory: the nearest one, at it or above it.
@@ -279,7 +279,7 @@ mod tests {
         };
         let entry_path = store.join(REGISTRY_DIR).join("inner.json");
         std::fs::write(entry_path, serde_json::to_vec(&entry).unwrap()).unwrap();
-        let registry = Registry::open(&store, Arc::new(RealFs));
+        let registry = Registry::open(&store, Arc::new(RealFs::new()));
         let by_name = find(&Locate::Name("inner".to_owned()), Some(&registry), &fs).unwrap();
         assert_eq!((by_name.dir, by_name.file), (inner, inner_file));
         let missing = find(&Locate::Name("gone".to_owned()), Some(&registry), &fs).unwrap_err();
