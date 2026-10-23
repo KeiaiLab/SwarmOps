@@ -22,7 +22,7 @@ use swarmops_git::{
 use swarmops_repo::{MergeConflicts, RepoError, StoreError};
 use swarmops_store::{IoFailure, Layout, LimitKind, MAX_OBJECT_LEN};
 
-use crate::local::cas_mismatch;
+use crate::local;
 
 /// What was being done when a repository error arose: a few errors mean something else while
 /// a store is created or opened.
@@ -412,7 +412,7 @@ fn ref_moved(name: &str, actual: Option<ChangesetId>) -> OpError {
              recorded nothing"
         ),
     };
-    let mut error = cas_mismatch(name, actual, message);
+    let mut error = local::cas_mismatch(name, actual, message);
     error.details.insert("committed".to_owned(), false.into());
     error
 }
@@ -425,7 +425,7 @@ fn target_moved(name: &str, actual: ChangesetId, expected: ChangesetId) -> OpErr
         "ref {name} names {actual}, not {expected}, so this land landed nothing: rebase the \
          change onto {actual}, check it, and land it again with --expect-target {actual}"
     );
-    let mut error = cas_mismatch(name, Some(actual), message);
+    let mut error = local::cas_mismatch(name, Some(actual), message);
     error
         .details
         .insert("expected".to_owned(), expected.to_string().into());
@@ -454,7 +454,7 @@ fn undo_blocked(
         shown(expected),
         shown(actual)
     );
-    let mut error = cas_mismatch(name, actual, message).with_hint("swarmops op log");
+    let mut error = local::cas_mismatch(name, actual, message).with_hint("swarmops op log");
     error.details.insert("op".to_owned(), op.into());
     error
 }
@@ -549,7 +549,7 @@ pub(crate) fn git_import_error(e: ImportError, git_path: &str, git_ref: &str) ->
                 "{message}; every commit is recorded, and the same git import run again moves the \
                  ref if what it names leads to the tip, or fails with E_GIT_IMPORT_DIVERGED"
             );
-            cas_mismatch(&target_ref, actual, one_line(message))
+            local::cas_mismatch(&target_ref, actual, one_line(message))
         }
         ImportError::Store {
             source,

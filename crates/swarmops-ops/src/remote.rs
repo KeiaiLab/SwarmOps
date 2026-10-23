@@ -43,10 +43,7 @@ use swarmops_git::{GitOid, GixSource, ImportError, ImportReport, ImportRequest, 
 use swarmops_repo::RepoError;
 use swarmops_store::{IoFailure, SYSTEM_GIT, StoreError};
 
-use crate::error::{
-    Phase, details, error, git_import_error, hint, mirror_error, op, remote_not_found, shell_word,
-    transport_error, url_refused,
-};
+use crate::error::{self, Phase};
 use crate::local::{LocalOps, Recording, Resolved};
 
 /// The store's file of remotes, in its root; the `store_file` its errors name.
@@ -168,7 +165,7 @@ impl LocalOps {
         let at = Utf8Path::new(&path);
 
         // 1. Every argument checked before anything is made.
-        RemoteUrl::parse(&url).map_err(url_refused)?;
+        RemoteUrl::parse(&url).map_err(error::url_refused)?;
         check_name(&remote)?;
         check_token_env(token_env.as_deref())?;
         if let Some(branch) = &branch {
@@ -226,7 +223,7 @@ impl Recording<'_> {
     /// object.
     pub fn remote_add(&self, req: RemoteAddReq) -> Result<RemoteInfo, OpError> {
         let mirror = self.mirror()?;
-        let lock = mirror.lock().map_err(mirror_error)?;
+        let lock = mirror.lock().map_err(error::mirror_error)?;
         self.remote_add_locked(&lock, req)
     }
 
@@ -236,18 +233,18 @@ impl Recording<'_> {
     pub fn remote_remove(&self, req: RemoteRemoveReq) -> Result<RemoteRemoveResp, OpError> {
         let RemoteRemoveReq { name } = req;
         let mirror = self.mirror()?;
-        let lock = mirror.lock().map_err(mirror_error)?;
+        let lock = mirror.lock().map_err(error::mirror_error)?;
 
         // 1. The remote, which must be there.
         let mut file = self.read_remotes()?;
         let Some(at) = file.remotes.iter().position(|entry| entry.name == name) else {
-            return Err(remote_not_found(&name));
+            return Err(error::remote_not_found(&name));
         };
 
         // 2. Its mirror refs first: a crash before the file's write leaves the remote, which
         // the next fetch fills again.
         let (mirror, _) = ready(mirror, &lock)?;
-        let removed_refs = mirror.remove_remote(&name).map_err(mirror_error)?;
+        let removed_refs = mirror.remove_remote(&name).map_err(error::mirror_error)?;
 
         // 3. Its line.
         file.remotes.remove(at);
@@ -269,7 +266,7 @@ impl Recording<'_> {
         let FetchReq { remote } = req;
         let remote = self.remote(&remote)?;
         let mirror = self.mirror()?;
-        let lock = mirror.lock().map_err(mirror_error)?;
+        let lock = mirror.lock().map_err(error::mirror_error)?;
         self.fetch_locked(&lock, &remote)
     }
 
@@ -289,7 +286,7 @@ impl Recording<'_> {
 
         // 1. The arguments, then the name's uniqueness.
         check_name(&name)?;
-        let parsed = RemoteUrl::parse(&url).map_err(url_refused)?;
+        let parsed = RemoteUrl::parse(&url).map_err(error::url_refused)?;
         check_token_env(token_env.as_deref())?;
         if let Some(branch) = &branch {
             check_branch(branch)?;
@@ -334,23 +331,23 @@ impl Recording<'_> {
         remote: &RemoteInfo,
     ) -> Result<FetchResp, OpError> {
         let name = remote.name.as_str();
-        let failed = |e| transport_error(e, name, Phase::Fetch);
+        let failed = |e| error::transport_error(e, name, Phase::Fetch);
 
         // 1. The mirror, made or rebuilt, its stale git lock files removed.
         let (mirror, mut warnings) = ready(self.mirror()?, lock)?;
-        let url = RemoteUrl::parse(&remote.url).map_err(url_refused)?;
+        let url = RemoteUrl::parse(&remote.url).map_err(error::url_refused)?;
         let cred = Credential {
             token_env: remote.token_env.clone(),
         };
         let git = GitCli::find().map_err(failed)?;
 
         // 2. git fetch, between two readings of the remote's refs in the mirror.
-        let branches = mirror.branches(name).map_err(mirror_error)?;
-        let tags = mirror.tags(name).map_err(mirror_error)?;
+        let branches = mirror.branches(name).map_err(error::mirror_error)?;
+        let tags = mirror.tags(name).map_err(error::mirror_error)?;
         git.fetch(mirror.git_dir(), &url, &cred, &refspecs(name))
             .map_err(failed)?;
-        let branches_now = mirror.branches(name).map_err(mirror_error)?;
-        let tags_now = mirror.tags(name).map_err(mirror_error)?;
+        let branches_now = mirror.branches(name).map_err(error::mirror_error)?;
+        let tags_now = mirror.tags(name).map_err(error::mirror_error)?;
 
         // 3. The followed branch's commits into the store, no ref moved.
         let old = branches.get(&remote.branch).copied();
@@ -401,7 +398,7 @@ impl Recording<'_> {
     /// `who`.
     fn clone_into(&self, add: RemoteAddReq, who: &Identity) -> Result<CloneResp, OpError> {
         let mirror = self.mirror()?;
-        let lock = mirror.lock().map_err(mirror_error)?;
+        let lock = mirror.lock().map_err(error::mirror_error)?;
 
         // 1. The remote, and its fetch.
         let recorded = self.find(&add.name)?;
@@ -444,7 +441,7 @@ impl Recording<'_> {
         lossy: &[LossyClass],
         git_ref: &str,
     ) -> Result<ImportReport, OpError> {
-        let failed = |e: ImportError| git_import_error(e, MIRROR_GIT, git_ref);
+        let failed = |e: ImportError| error::git_import_error(e, MIRROR_GIT, git_ref);
         let source = GixSource::open(mirror.git_dir()).map_err(|e| failed(e.into()))?;
         request.lossy = lossy_set(lossy);
         let report = swarmops_git::import(&self.ops.repo, &source, &request).map_err(failed)?;
@@ -454,13 +451,17 @@ impl Recording<'_> {
 
     /// The head `oid` as a fetch reports it, if the store knows its changeset.
     fn known_head(&self, oid: GitOid) -> Result<Option<RemoteHead>, OpError> {
-        let entry = self.ops.repo.external_id(SYSTEM_GIT, &oid.0).map_err(op)?;
+        let entry = self
+            .ops
+            .repo
+            .external_id(SYSTEM_GIT, &oid.0)
+            .map_err(error::op)?;
         Ok(entry.map(|entry| remote_head(oid, entry.changeset)))
     }
 
     /// The store's mirror: `git/` and its lock made, `mirror.git` not yet.
     fn mirror(&self) -> Result<Mirror, OpError> {
-        Mirror::open(self.ops.store_path()).map_err(mirror_error)
+        Mirror::open(self.ops.store_path()).map_err(error::mirror_error)
     }
 
     /// The remote named `name`, or `E_REMOTE_NOT_FOUND`.
@@ -468,7 +469,7 @@ impl Recording<'_> {
         let found = self.find(name)?;
         found
             .map(|entry| entry.info(None))
-            .ok_or_else(|| remote_not_found(name))
+            .ok_or_else(|| error::remote_not_found(name))
     }
 
     /// The entry of the remote named `name`, if the store records one.
@@ -510,7 +511,7 @@ impl Recording<'_> {
     /// Writes `file` whole, durably, through the store's filesystem seam.
     fn write_remotes(&self, file: &RemotesFile) -> Result<(), OpError> {
         let body = toml::to_string(file).map_err(|e| {
-            error(
+            error::error(
                 ErrorCode::Internal,
                 format!("{REMOTES_TOML} cannot be written: {e}"),
             )
@@ -528,13 +529,13 @@ fn ready(mirror: Mirror, lock: &MirrorLock) -> Result<(Mirror, Vec<String>), OpE
     let mut warnings = Vec::new();
 
     // 1. Made, kept, or set aside and made again.
-    let rebuilt = mirror.ensure(lock).map_err(mirror_error)?;
+    let rebuilt = mirror.ensure(lock).map_err(error::mirror_error)?;
     if let Rebuilt::SetAside { name } = rebuilt {
         warnings.push(format!("mirror_set_aside: git/{name}"));
     }
 
     // 2. A dead process's git lock files.
-    let removed = mirror.sweep_git_locks(lock).map_err(mirror_error)?;
+    let removed = mirror.sweep_git_locks(lock).map_err(error::mirror_error)?;
     let removed = removed
         .into_iter()
         .map(|file| format!("stale_git_lock_removed: {file}"));
@@ -550,7 +551,7 @@ fn default_branch(
     name: &str,
 ) -> Result<(String, Option<String>), OpError> {
     let failed = |e| {
-        let refused = transport_error(e, name, Phase::LsRemote);
+        let refused = error::transport_error(e, name, Phase::LsRemote);
         if refused.code != ErrorCode::RemoteUnreachable.as_str() {
             return refused;
         }
@@ -572,7 +573,10 @@ fn place(at: &Utf8Path) -> Result<Place, OpError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Place::Free),
         Err(e) if e.kind() == std::io::ErrorKind::NotADirectory => return Ok(Place::Taken),
         Err(e) => {
-            return Err(error(ErrorCode::Io, format!("{at} cannot be read: {e}")));
+            return Err(error::error(
+                ErrorCode::Io,
+                format!("{at} cannot be read: {e}"),
+            ));
         }
     };
     let taken = entries.count() > 0;
@@ -583,9 +587,11 @@ fn place(at: &Utf8Path) -> Result<Place, OpError> {
 fn made_store(at: &Utf8Path, name: &str) -> Result<LocalOps, OpError> {
     let with_name = "give the repository's name with --name <name>";
     if name.is_empty() {
-        return Err(error(ErrorCode::InvalidArg, "the URL names no repository")
-            .with_details(details([("reason", "name".into())]))
-            .with_hint(with_name));
+        return Err(
+            error::error(ErrorCode::InvalidArg, "the URL names no repository")
+                .with_details(error::details([("reason", "name".into())]))
+                .with_hint(with_name),
+        );
     }
     let made = LocalOps::init(at, name).map_err(|e| {
         if e.code == ErrorCode::InvalidArg.as_str() {
@@ -610,7 +616,7 @@ fn resumable(at: &Utf8Path, add: &RemoteAddReq) -> Result<LocalOps, OpError> {
     let own = remotes
         .iter()
         .any(|entry| entry.name == add.name && entry.url == add.url);
-    let blank = remotes.is_empty() && ops.repo.list_refs().map_err(op)?.is_empty();
+    let blank = remotes.is_empty() && ops.repo.list_refs().map_err(error::op)?.is_empty();
     if own || blank {
         return Ok(ops);
     }
@@ -619,13 +625,13 @@ fn resumable(at: &Utf8Path, add: &RemoteAddReq) -> Result<LocalOps, OpError> {
 
 /// `E_EXISTS`: the clone's directory `at` holds something a clone does not resume into.
 fn not_empty(at: &Utf8Path) -> OpError {
-    error(
+    error::error(
         ErrorCode::ExistsAlready,
         format!("{at} is not empty, and holds no clone of this remote to resume"),
     )
-    .with_hint(hint(format!(
+    .with_hint(error::hint(format!(
         "swarmops clone <url> --into <an empty or new directory>, or swarmops --repo {} info",
-        shell_word(at.as_str())
+        error::shell_word(at.as_str())
     )))
 }
 
@@ -636,7 +642,7 @@ fn created(at: &Utf8Path, e: OpError) -> OpError {
     found.insert("created".to_owned(), true.into());
     let again = format!(
         "the store at {} is made: run the same clone again to resume it",
-        shell_word(at.as_str())
+        error::shell_word(at.as_str())
     );
     OpError {
         details: found,
@@ -665,14 +671,17 @@ fn check_name(name: &str) -> Result<(), OpError> {
     if grammar && portable && name != SUBCOMMAND {
         return Ok(());
     }
-    let refused = error(
+    let refused = error::error(
         ErrorCode::InvalidArg,
         format!(
             "{name:?} is no remote name: [a-z0-9][a-z0-9._-]{{0,62}}, not ending in ., not status"
         ),
     );
     Err(refused
-        .with_details(details([("reason", "name".into()), ("name", name.into())]))
+        .with_details(error::details([
+            ("reason", "name".into()),
+            ("name", name.into()),
+        ]))
         .with_hint("name the remote origin, upstream or another lower-case word"))
 }
 
@@ -693,12 +702,12 @@ fn check_branch(branch: &str) -> Result<(), OpError> {
     if !bad {
         return Ok(());
     }
-    let refused = error(
+    let refused = error::error(
         ErrorCode::InvalidArg,
         format!("{branch:?} is no branch name git takes"),
     );
     Err(refused
-        .with_details(details([("reason", "branch".into())]))
+        .with_details(error::details([("reason", "branch".into())]))
         .with_hint("give the remote branch by its short name, such as main"))
 }
 
@@ -714,36 +723,36 @@ fn check_token_env(var: Option<&str>) -> Result<(), OpError> {
     if starts && rest && var.len() <= MAX_LEN {
         return Ok(());
     }
-    let refused = error(
+    let refused = error::error(
         ErrorCode::InvalidArg,
         "--token-env names an environment variable, such as GH_TOKEN, never the token",
     );
-    Err(refused.with_details(details([("reason", "token_env".into())])))
+    Err(refused.with_details(error::details([("reason", "token_env".into())])))
 }
 
 /// `E_EXISTS`: the store records a remote named `name` already.
 fn remote_exists(name: &str) -> OpError {
-    error(
+    error::error(
         ErrorCode::ExistsAlready,
         format!("the store records a remote {name:?} already"),
     )
-    .with_details(details([("remote", name.into())]))
-    .with_hint(hint(format!(
+    .with_details(error::details([("remote", name.into())]))
+    .with_hint(error::hint(format!(
         "swarmops remote remove {} first, or give another name",
-        shell_word(name)
+        error::shell_word(name)
     )))
 }
 
 /// `E_STORE_CORRUPT` for `remotes.toml`, which `what`.
 fn corrupt(what: &str) -> OpError {
-    error(ErrorCode::StoreCorrupt, format!("{REMOTES_TOML} {what}"))
-        .with_details(details([("store_file", REMOTES_TOML.into())]))
+    error::error(ErrorCode::StoreCorrupt, format!("{REMOTES_TOML} {what}"))
+        .with_details(error::details([("store_file", REMOTES_TOML.into())]))
         .with_hint("fix or remove remotes.toml, then swarmops remote add the remotes again")
 }
 
 /// The operations-spec error for a filesystem failure on `remotes.toml`.
 fn io(e: IoFailure) -> OpError {
-    op(RepoError::from(StoreError::from(e)))
+    error::op(RepoError::from(StoreError::from(e)))
 }
 
 /// The two refspecs of a fetch of `remote`: its branches and its tags, each into its own

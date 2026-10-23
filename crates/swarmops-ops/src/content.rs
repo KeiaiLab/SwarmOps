@@ -60,7 +60,7 @@ use serde_json::{Map, Value};
 use swarmops_api::{
     ChangeInput, ChangeOp, ContentEncoding, ContentInput, ErrorCode, ModeInput, OpError,
 };
-use swarmops_core::bytes::to_u64;
+use swarmops_core::bytes;
 use swarmops_core::{BlobId, LeafKind, ObjectId, RepoPath};
 use swarmops_repo::Change;
 
@@ -156,7 +156,7 @@ pub fn bytes(content: ContentInput) -> Result<Vec<u8>, OpError> {
     bytes_within(content, MAX_CONTENT_BYTES)
 }
 
-/// [`bytes`], with at most `limit` bytes.
+/// [`bytes()`], with at most `limit` bytes.
 fn bytes_within(content: ContentInput, limit: u64) -> Result<Vec<u8>, OpError> {
     convert(content, Room::alone(limit))
 }
@@ -165,7 +165,7 @@ fn bytes_within(content: ContentInput, limit: u64) -> Result<Vec<u8>, OpError> {
 fn convert(content: ContentInput, room: Room) -> Result<Vec<u8>, OpError> {
     match content {
         ContentInput::Inline(text) => {
-            room.check(to_u64(text.len()))?;
+            room.check(bytes::to_u64(text.len()))?;
             Ok(text.into_bytes())
         }
         ContentInput::Base64(encoded) => {
@@ -220,7 +220,7 @@ fn read_within(file: &str, room: Room) -> Result<Vec<u8>, OpError> {
         .take(room.read_cap())
         .read_to_end(&mut bytes)
         .map_err(unreadable)?;
-    room.check(to_u64(bytes.len()))?;
+    room.check(bytes::to_u64(bytes.len()))?;
     Ok(bytes)
 }
 
@@ -233,7 +233,7 @@ fn decoded_len(encoded: &str) -> u64 {
         .take(2)
         .take_while(|&b| b == b'=')
         .count();
-    to_u64((encoded.len() / 4 * 3).saturating_sub(padding))
+    bytes::to_u64((encoded.len() / 4 * 3).saturating_sub(padding))
 }
 
 /// How many bytes `content` declares before it is converted: inline text's length, the bytes
@@ -241,7 +241,7 @@ fn decoded_len(encoded: &str) -> u64 {
 /// stat'ed, whose read then says why), and nothing for a blob named by id.
 fn declared(content: &ContentInput) -> u64 {
     match content {
-        ContentInput::Inline(text) => to_u64(text.len()),
+        ContentInput::Inline(text) => bytes::to_u64(text.len()),
         ContentInput::Base64(encoded) => decoded_len(encoded),
         ContentInput::File(file) => fs::metadata(file).map_or(0, |meta| meta.len()),
         ContentInput::Blob(_) => 0,
@@ -340,7 +340,7 @@ fn changes_within(
                     };
                     let content =
                         convert(content, room).map_err(|e| in_change(e, index, path.as_str()))?;
-                    used = used.saturating_add(to_u64(content.len()));
+                    used = used.saturating_add(bytes::to_u64(content.len()));
                     swarmops_repo::ChangeOp::Put { kind, content }
                 }
                 Some((kind, Content::Blob(id))) => swarmops_repo::ChangeOp::PutBlob { kind, id },
@@ -381,7 +381,7 @@ pub(crate) fn resolution_bytes(
                 used,
             };
             let bytes = convert(content, room).map_err(|e| in_resolution(e, path.as_str()))?;
-            used = used.saturating_add(to_u64(bytes.len()));
+            used = used.saturating_add(bytes::to_u64(bytes.len()));
             Ok((path, bytes))
         })
         .collect()

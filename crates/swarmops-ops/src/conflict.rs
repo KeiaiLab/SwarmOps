@@ -32,7 +32,7 @@ use std::io;
 use std::ops::Range;
 
 use swarmops_api::{ConflictKindOut, ConflictReport, FileConflictOut, HunkOut, LinesOut};
-use swarmops_core::bytes::to_u64;
+use swarmops_core::bytes;
 use swarmops_repo::MergeConflicts;
 use swarmops_repo::merge::conflict::{ConflictHunk, ConflictKind};
 use swarmops_repo::merge::tree_diff::Leaf;
@@ -260,7 +260,11 @@ fn entry_len(json: u64, keyed: u64) -> u64 {
 
 /// The bytes of `hunk`'s texts, those it carries: the texts' budget counts them.
 fn text_len(hunk: &HunkOut) -> u64 {
-    let text = |side: &LinesOut| side.text.as_ref().map_or(0, |text| to_u64(text.len()));
+    let text = |side: &LinesOut| {
+        side.text
+            .as_ref()
+            .map_or(0, |text| bytes::to_u64(text.len()))
+    };
     text(&hunk.base) + text(&hunk.ours) + text(&hunk.theirs)
 }
 
@@ -279,7 +283,7 @@ struct Counted(u64);
 
 impl io::Write for Counted {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0 = self.0.saturating_add(to_u64(bytes.len()));
+        self.0 = self.0.saturating_add(bytes::to_u64(bytes.len()));
         Ok(bytes.len())
     }
 
@@ -291,7 +295,7 @@ impl io::Write for Counted {
 /// `hunk`, the `id`-th of its file, with its three texts if they go in ([`Budget::take`]).
 fn hunk_out(hunk: &ConflictHunk, id: u32, texts: &mut Budget) -> HunkOut {
     let bytes = [&hunk.base_text, &hunk.ours_text, &hunk.theirs_text]
-        .map(|text| to_u64(text.len()))
+        .map(|text| bytes::to_u64(text.len()))
         .iter()
         .sum();
     let with_texts = texts.take(bytes);

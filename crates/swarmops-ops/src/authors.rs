@@ -12,7 +12,7 @@ use camino::Utf8Path;
 use serde::Deserialize;
 use swarmops_api::{ErrorCode, OpError};
 
-use crate::error::{details, error};
+use crate::error;
 
 /// The file's name in the store's root, and the `store_file` its errors name.
 const FILE: &str = "authors.toml";
@@ -61,8 +61,10 @@ pub(crate) fn author_of(store: &Utf8Path, family: &str) -> Result<Option<Author>
             return Err(corrupt("is not UTF-8"));
         }
         Err(e) => {
-            return Err(error(ErrorCode::Io, format!("{FILE} cannot be read: {e}"))
-                .with_details(details([("store_file", FILE.into())])));
+            return Err(
+                error::error(ErrorCode::Io, format!("{FILE} cannot be read: {e}"))
+                    .with_details(error::details([("store_file", FILE.into())])),
+            );
         }
     };
 
@@ -106,6 +108,6 @@ pub(crate) fn author_of(store: &Utf8Path, family: &str) -> Result<Option<Author>
 }
 
 fn corrupt(what: &str) -> OpError {
-    error(ErrorCode::StoreCorrupt, format!("{FILE} {what}"))
-        .with_details(details([("store_file", FILE.into())]))
+    error::error(ErrorCode::StoreCorrupt, format!("{FILE} {what}"))
+        .with_details(error::details([("store_file", FILE.into())]))
 }
