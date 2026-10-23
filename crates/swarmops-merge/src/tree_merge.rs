@@ -18,6 +18,7 @@ use crate::tree_diff::{Leaf, PathTriple, TreeRead};
 
 /// What a three-way merge makes of one path, from its three leaves ([`plan_path`]).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum PathPlan {
     /// The path keeps what theirs holds there, a leaf or nothing: ours left it as the base had
     /// it, or made the same change as theirs.
@@ -128,7 +129,7 @@ pub fn entry_in<R: TreeRead>(
 ) -> Result<Option<EntryTarget>, R::Error> {
     let mut at = EntryTarget::Dir(root);
     for name in path.components() {
-        let EntryTarget::Dir(dir) = at else {
+        let Some(dir) = at.dir() else {
             // Below a file.
             return Ok(None);
         };
@@ -152,6 +153,7 @@ fn find(tree: &Tree, name: &str) -> Option<EntryTarget> {
 
 /// A path whose merge conflicts: why, and the leaf the base, ours and theirs each hold there.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct FileConflict {
     /// The path.
     pub path: RepoPath,
@@ -163,4 +165,23 @@ pub struct FileConflict {
     pub ours: Option<Leaf>,
     /// Theirs' leaf there; `None` for none.
     pub theirs: Option<Leaf>,
+}
+
+impl FileConflict {
+    /// The conflict at `path`, why, and the three leaves there.
+    pub fn new(
+        path: RepoPath,
+        kind: ConflictKind,
+        base: Option<Leaf>,
+        ours: Option<Leaf>,
+        theirs: Option<Leaf>,
+    ) -> Self {
+        Self {
+            path,
+            kind,
+            base,
+            ours,
+            theirs,
+        }
+    }
 }

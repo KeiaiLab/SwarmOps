@@ -107,6 +107,7 @@ pub const ORDER_CHECK_ENV: &str = "SWARMOPS_TEST_ORDER_CHECK";
 
 /// What [`FsOps::link_noclobber`] found at its target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LinkOutcome {
     /// The target did not exist; it now names the source file.
     Placed,
@@ -124,6 +125,7 @@ macro_rules! fs_methods {
         /// the 14 methods. It compares equal to the method's name ([`FsMethod::as_str`]), so a
         /// test's `call.method == "append"` reads as before.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        #[non_exhaustive]
         pub enum FsMethod {
             $($(#[$attr])* $method,)+
         }
@@ -341,7 +343,15 @@ pub trait FsOps: Send + Sync {
 
 /// The real filesystem.
 #[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
 pub struct RealFs;
+
+impl RealFs {
+    /// The real filesystem.
+    pub const fn new() -> RealFs {
+        RealFs
+    }
+}
 
 impl FsOps for RealFs {
     fn create_dir_all(&self, p: &Path) -> io::Result<()> {
@@ -470,6 +480,7 @@ fn parent_dir(path: &Path) -> &Path {
 /// A store makes one on its real root, and its handles keep clones of it (two reference counts
 /// each): a create's staged files are named under `meta.tmp/`, where they are.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct StoreFs {
     fs: Arc<dyn FsOps>,
     root: Arc<Utf8Path>,
@@ -762,6 +773,7 @@ impl<F: FsOps + ?Sized> FsOps for Box<F> {
 /// counts every call ([`CrashAtFs::calls`]), and can write the count to a file when it is
 /// dropped ([`CrashAtFs::reporting_calls_to`]).
 #[cfg(feature = "test-hooks")]
+#[non_exhaustive]
 pub struct CrashAtFs<F: FsOps> {
     inner: F,
     /// Calls left until the abort, the fatal one included; 0 never aborts.
@@ -773,6 +785,7 @@ pub struct CrashAtFs<F: FsOps> {
 }
 
 /// The filesystem the test hooks ask a store to open on: see [`HookedFs::from_env`].
+#[non_exhaustive]
 pub struct HookedFs {
     fs: Box<dyn FsOps>,
     counts_calls: bool,
@@ -997,6 +1010,7 @@ fn crash_at_from_env() -> Option<u64> {
 /// What [`FailAtFs`] fails, as `SWARMOPS_TEST_FAIL_AT=<k>[:<mode>[:<errno>]]` says it.
 #[cfg(feature = "test-hooks")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FailAt {
     /// The call that fails (or fails first), counting every [`FsOps`] call from 1.
     pub at: u64,
@@ -1009,6 +1023,7 @@ pub struct FailAt {
 /// Which calls a [`FailAtFs`] fails.
 #[cfg(feature = "test-hooks")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FailMode {
     /// Call k, and no other: a transient error (`once`).
     Once,
@@ -1021,6 +1036,7 @@ pub enum FailMode {
 /// The error a [`FailAtFs`] injects, and where in the call it strikes.
 #[cfg(feature = "test-hooks")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum InjectedError {
     /// `EIO` (`eio`). A call that flushes to stable storage (`append_durable`, `truncate`,
     /// `sync_data`, `fsync_dir`, `atomic_replace`, `write_durable_temp`, `rename_durable`) runs,
@@ -1046,6 +1062,11 @@ impl InjectedError {
 
 #[cfg(feature = "test-hooks")]
 impl FailAt {
+    /// Fail call `at`, as `mode` says, with `error`.
+    pub fn new(at: u64, mode: FailMode, error: InjectedError) -> FailAt {
+        FailAt { at, mode, error }
+    }
+
     /// The failure `spec` names: `<k>[:<mode>[:<errno>]]`, k positive, `<mode>` `once` (the
     /// default) or `persistent`, `<errno>` `eio` (the default) or `enospc`, each of either case.
     /// `Ok(None)` for an empty spec or k = 0, which fail nothing; an error for anything else.
@@ -1084,6 +1105,7 @@ impl FailAt {
 /// ([`FailAtFs::calls`]) and every failure ([`FailAtFs::failures`]), and keeps which calls it
 /// failed ([`FailAtFs::failed_calls`]).
 #[cfg(feature = "test-hooks")]
+#[non_exhaustive]
 pub struct FailAtFs<F: FsOps> {
     inner: F,
     fail: FailAt,

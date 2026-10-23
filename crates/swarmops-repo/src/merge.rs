@@ -54,6 +54,7 @@ const MAX_HELD_HUNKS: usize = 128;
 
 /// What a three-way merge made ([`Repo::merge_with`]), for its caller to commit, or to report.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MergeOutcome {
     /// What turns theirs' root into the merged tree, sorted by path: a put of each leaf the
     /// merge holds that theirs does not, a delete of each leaf of theirs it drops. A path that
@@ -187,16 +188,16 @@ fn merge_trees<O: ObjectStore>(
         };
         match plan {
             PathPlan::Theirs => {}
-            PathPlan::Put(leaf) => outcome.delta.push(put(&triple.path, leaf)),
-            PathPlan::Delete => outcome.delta.push(DeltaEntry {
-                path: triple.path.clone(),
-                op: DeltaOp::Delete,
-                renamed_from: None,
-            }),
+            PathPlan::Put(leaf) => outcome.delta.push(put(&triple.path, leaf)?),
+            PathPlan::Delete => {
+                let delete = DeltaEntry::new(triple.path.clone(), DeltaOp::Delete, None)?;
+                outcome.delta.push(delete);
+            }
             PathPlan::MergeContent { kind } => {
                 merge_contents(reads, triple, kind, content, &mut held, &mut outcome)?;
             }
             PathPlan::Conflict(kind) => outcome.conflicts.push(conflict(triple, kind)),
+            _ => return Err(RepoError::unknown_variant("PathPlan")),
         }
     }
     Ok(outcome)
@@ -246,6 +247,7 @@ fn type_change<O: ObjectStore>(
             }
             // Nothing there: a directory to make, or a file higher up.
             None => above = dir.parent(),
+            Some(_) => return Err(RepoError::unknown_variant("EntryTarget")),
         }
     }
     Ok(false)
@@ -280,12 +282,12 @@ fn merge_contents<O: ObjectStore>(
     let (base, ours, theirs) = (read(triple.base)?, read(triple.ours)?, read(triple.theirs)?);
     match content(&base, &ours, &theirs) {
         ContentMerge::Clean(merged) => {
-            let blob = BlobId(swarmops_core::hash_object(ObjectKind::Blob, &merged));
-            let leaf = Leaf { kind, blob };
+            let blob = BlobId::new(swarmops_core::hash_object(ObjectKind::Blob, &merged));
+            let leaf = Leaf::new(kind, blob);
             if Some(leaf) == triple.theirs {
                 return Ok(());
             }
-            outcome.delta.push(put(&triple.path, leaf));
+            outcome.delta.push(put(&triple.path, leaf)?);
             let sides = [triple.ours, triple.theirs].map(|side| side.map(|leaf| leaf.blob));
             if !sides.contains(&Some(blob)) {
                 outcome.new_blobs.insert(blob, merged);
@@ -304,6 +306,7 @@ fn merge_contents<O: ObjectStore>(
         ContentMerge::Binary => outcome
             .conflicts
             .push(conflict(triple, ConflictKind::Binary)),
+        _ => return Err(RepoError::unknown_variant("ContentMerge")),
     }
     Ok(())
 }
@@ -349,14 +352,10 @@ fn span(first: &ConflictHunk, last: &ConflictHunk, sides: [&[u8]; 3]) -> Conflic
         first.theirs.start..last.theirs.end,
     ];
     let [base_bytes, ours_bytes, theirs_bytes] = sides;
-    ConflictHunk {
-        base_text: lines_text(base_bytes, &base),
-        ours_text: lines_text(ours_bytes, &ours),
-        theirs_text: lines_text(theirs_bytes, &theirs),
-        base,
-        ours,
-        theirs,
-    }
+    let base_text = lines_text(base_bytes, &base);
+    let ours_text = lines_text(ours_bytes, &ours);
+    let theirs_text = lines_text(theirs_bytes, &theirs);
+    ConflictHunk::new(base, ours, theirs, base_text, ours_text, theirs_text)
 }
 
 /// The bytes of `content`'s lines `lines`, numbered from 0, each up to and including its `\n` (a
@@ -372,26 +371,23 @@ fn lines_text(content: &[u8], lines: &Range<u32>) -> Vec<u8> {
 }
 
 /// The delta entry that puts `leaf` at `path`.
-fn put(path: &RepoPath, leaf: Leaf) -> DeltaEntry {
-    DeltaEntry {
-        path: path.clone(),
-        op: DeltaOp::Put {
-            kind: leaf.kind,
-            id: leaf.blob,
-        },
-        renamed_from: None,
-    }
+fn put(path: &RepoPath, leaf: Leaf) -> Result<DeltaEntry, RepoError> {
+    let op = DeltaOp::Put {
+        kind: leaf.kind,
+        id: leaf.blob,
+    };
+    DeltaEntry::new(path.clone(), op, None).map_err(RepoError::from)
 }
 
 /// The conflict of `kind` at `triple`'s path, with its three leaves.
 fn conflict(triple: &PathTriple, kind: ConflictKind) -> FileConflict {
-    FileConflict {
-        path: triple.path.clone(),
+    FileConflict::new(
+        triple.path.clone(),
         kind,
-        base: triple.base,
-        ours: triple.ours,
-        theirs: triple.theirs,
-    }
+        triple.base,
+        triple.ours,
+        triple.theirs,
+    )
 }
 
 /// The objects one merge reads: each tree once, however often its walks pass it (the second diff
@@ -442,14 +438,14 @@ mod tests {
     /// One hunk at line `at` of each side, its texts `side` and `at` on a line.
     fn hunk(at: u32) -> ConflictHunk {
         let text = |side: &str| format!("{side}{at}\n").into_bytes();
-        ConflictHunk {
-            base: at..at + 1,
-            ours: at..at + 1,
-            theirs: at..at + 1,
-            base_text: text("l"),
-            ours_text: text("o"),
-            theirs_text: text("t"),
-        }
+        ConflictHunk::new(
+            at..at + 1,
+            at..at + 1,
+            at..at + 1,
+            text("l"),
+            text("o"),
+            text("t"),
+        )
     }
 
     /// `n` lines of `side`, each `side` and its number.
@@ -472,14 +468,14 @@ mod tests {
         };
 
         let first = held.hold((0..n).map(hunk).collect(), sides);
-        let spanned = ConflictHunk {
-            base: n - 2..n,
-            ours: n - 2..n,
-            theirs: n - 2..n,
-            base_text: lines_text(&base, &(n - 2..n)),
-            ours_text: lines_text(&ours, &(n - 2..n)),
-            theirs_text: lines_text(&theirs, &(n - 2..n)),
-        };
+        let spanned = ConflictHunk::new(
+            n - 2..n,
+            n - 2..n,
+            n - 2..n,
+            lines_text(&base, &(n - 2..n)),
+            lines_text(&ours, &(n - 2..n)),
+            lines_text(&theirs, &(n - 2..n)),
+        );
         let mut expected: Vec<ConflictHunk> = (0..n - 2).map(hunk).collect();
         expected.push(spanned);
         assert_eq!(first, expected);

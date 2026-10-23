@@ -59,10 +59,9 @@ const PER_CHILD: u64 = 4;
 /// A request for `changes` on `parents` with the message "a test commit", recording the agent
 /// in its metadata.
 fn request(parents: &[ChangesetId], changes: Vec<Change>) -> CommitRequest {
-    CommitRequest {
-        metadata: vec![("agent".to_owned(), b"test/agent".to_vec())],
-        ..swarmops_testkit::repo::request(parents, changes, "a test commit")
-    }
+    let mut req = swarmops_testkit::repo::request(parents, changes, "a test commit");
+    req.metadata = vec![("agent".to_owned(), b"test/agent".to_vec())];
+    req
 }
 
 #[track_caller]
@@ -145,7 +144,7 @@ fn object_files(root: &Utf8Path) -> Vec<PathBuf> {
 
 /// How many frames the journal of the store at `root` lists.
 fn journal_frames(root: &Utf8Path) -> u64 {
-    Journal::open(&Layout::new(root), Arc::new(RealFs))
+    Journal::open(&Layout::new(root), Arc::new(RealFs::new()))
         .unwrap()
         .frame_count()
         .unwrap()
@@ -430,10 +429,11 @@ fn commit_refuses_a_reserved_metadata_key_too() {
 fn allow_empty_commits_a_changeset_with_the_parent_root() {
     let (_dir, _root, repo) = new_repo();
     let base = commit(&repo, &[], vec![put("a", b"a")]);
-    let empty = |parents: &[ChangesetId], changes| CommitRequest {
-        allow_empty: true,
-        message: b"nothing changes".to_vec(),
-        ..request(parents, changes)
+    let empty = |parents: &[ChangesetId], changes| {
+        let mut req = request(parents, changes);
+        req.allow_empty = true;
+        req.message = b"nothing changes".to_vec();
+        req
     };
 
     // No changes: the changeset keeps its parent's root, with an empty delta.
@@ -470,18 +470,12 @@ fn commit_refuses_more_than_255_parents_before_writing() {
     // 255 more changesets for parents, recorded straight in the metadata (no objects): a
     // journal record holds at most 255 parents, so 256 cannot be recorded.
     let others: Vec<ChangesetId> = (0..255_u32)
-        .map(|n| ChangesetId(hash_object(ObjectKind::Changeset, &n.to_le_bytes())))
+        .map(|n| ChangesetId::new(hash_object(ObjectKind::Changeset, &n.to_le_bytes())))
         .collect();
     let meta = MetaStore::open(&root).unwrap();
     let mut write = meta.write().unwrap();
     for (n, &id) in others.iter().enumerate() {
-        let record = ChangesetMeta {
-            id,
-            seq: 0,
-            generation: 0,
-            delta_hash: [u8::try_from(n).unwrap(); 32],
-            parents: Vec::new(),
-        };
+        let record = ChangesetMeta::new(id, 0, 0, [u8::try_from(n).unwrap(); 32], Vec::new());
         write.insert_changeset(record).unwrap();
     }
     write.commit().unwrap();
@@ -543,7 +537,7 @@ fn commit_rejects_unknown_parent() {
     let (_dir, root, repo) = new_repo();
     let base = commit(&repo, &[], vec![put("a", b"a")]);
     let objects = object_files(&root);
-    let unknown = ChangesetId(hash_object(ObjectKind::Changeset, b"never committed"));
+    let unknown = ChangesetId::new(hash_object(ObjectKind::Changeset, b"never committed"));
     for parents in [vec![unknown], vec![base.id, unknown]] {
         match repo.commit(request(&parents, vec![put("b", b"b")])) {
             Err(RepoError::UnknownParent(parent)) => assert_eq!(parent, unknown),
@@ -645,7 +639,7 @@ fn commit_crashing_at(template: &Utf8Path, want: ChangesetId, k: u64) -> (bool, 
     );
 
     // Either nothing is committed, or all of it is, every object there.
-    let repo = LocalRepo::open_with_fs(&root, checked(RealFs)).unwrap();
+    let repo = LocalRepo::open_with_fs(&root, checked(RealFs::new())).unwrap();
     let committed = match repo.info().unwrap().changesets {
         0 => false,
         1 => true,
@@ -763,22 +757,14 @@ mod advance {
 
     /// A request for `changes` on `parents` ([`request`]) that advances ref `name`.
     fn advancing(parents: &[ChangesetId], changes: Vec<Change>, name: &str) -> CommitRequest {
-        CommitRequest {
-            advance: Some(Advance {
-                name: name.to_owned(),
-                actor: ACTOR.to_owned(),
-            }),
-            ..request(parents, changes)
-        }
+        let mut req = request(parents, changes);
+        req.advance = Some(Advance::new(name, ACTOR));
+        req
     }
 
     /// The move `advancing(.., name)` reports: from `old`, made now or before.
     fn moved(name: &str, old: Option<ChangesetId>, already_applied: bool) -> Advanced {
-        Advanced {
-            name: name.to_owned(),
-            old,
-            already_applied,
-        }
+        Advanced::new(name, old, already_applied)
     }
 
     /// A store with changeset `c0` (a file `a`) and main at it.
@@ -847,10 +833,7 @@ mod advance {
         assert_eq!(out.insert, InsertOutcome::Inserted { seq: 1 });
         assert_eq!(out.advanced, Some(moved("main", Some(c0), false)));
         assert_eq!(out.warnings, Vec::<String>::new());
-        let main = RefState {
-            target: out.id,
-            version: version + 1,
-        };
+        let main = RefState::new(out.id, version + 1);
         assert_eq!(repo.get_ref("main").unwrap(), Some(main));
         assert_eq!(
             records_past(&root, frames),
@@ -934,10 +917,7 @@ mod advance {
             .unwrap();
         assert_eq!(out.insert, InsertOutcome::Inserted { seq: 0 });
         assert_eq!(out.advanced, Some(moved("main", None, false)));
-        let main = RefState {
-            target: out.id,
-            version: 1,
-        };
+        let main = RefState::new(out.id, 1);
         assert_eq!(repo.get_ref("main").unwrap(), Some(main));
         assert_eq!(journal_frames(&root), 1, "one frame for both");
 
@@ -958,7 +938,9 @@ mod advance {
         let frames = journal_frames(&root);
 
         let advance = advancing(&[c0], vec![put("b", b"b")], "main").advance;
-        let out = repo.commit(CommitRequest { advance, ..plain }).unwrap();
+        let mut req = plain;
+        req.advance = advance;
+        let out = repo.commit(req).unwrap();
         assert_eq!(out.id, c1);
         assert_eq!(out.insert, InsertOutcome::AlreadyPresent);
         assert_eq!(out.advanced, Some(moved("main", Some(c0), false)));
@@ -1038,9 +1020,9 @@ mod advance {
         repo.commit(plain.clone()).unwrap();
         drop(repo);
         let advance = advancing(&[c0], vec![put("b", b"b")], "main").advance;
-        let out = listing_fails(&root)
-            .commit(CommitRequest { advance, ..plain })
-            .unwrap();
+        let mut req = plain;
+        req.advance = advance;
+        let out = listing_fails(&root).commit(req).unwrap();
         assert_eq!(out.insert, InsertOutcome::AlreadyPresent);
         let [warning] = &out.warnings[..] else {
             panic!("expected one warning, got {:?}", out.warnings);
@@ -1345,7 +1327,7 @@ fn a_failed_object_flush_fails_the_commit_and_inserts_nothing() {
 fn flush_metadata_moves_the_checkpoint_to_the_journal_end() {
     let (_dir, root, repo) = new_repo();
     let ckpt = || {
-        Journal::open(&Layout::new(&root), Arc::new(RealFs))
+        Journal::open(&Layout::new(&root), Arc::new(RealFs::new()))
             .unwrap()
             .ckpt()
             .unwrap()
@@ -1426,6 +1408,7 @@ fn root_commit_objects(req: &CommitRequest) -> [ObjectId; 3] {
         Change {
             path: file,
             op: ChangeOp::Put { kind, content },
+            ..
         },
     ] = &req.changes[..]
     else {
@@ -1433,23 +1416,27 @@ fn root_commit_objects(req: &CommitRequest) -> [ObjectId; 3] {
     };
     let blob = blob(content);
     let root = tree(vec![TreeEntry::leaf(file.as_str(), *kind, blob)]).id();
-    let changeset = Changeset {
-        parents: Vec::new(),
+    let changeset = Changeset::new(
+        Vec::new(),
         root,
-        delta: vec![DeltaEntry {
-            path: file.clone(),
-            op: DeltaOp::Put {
-                kind: *kind,
-                id: blob,
-            },
-            renamed_from: None,
-        }],
-        author: req.author.clone(),
-        committer: req.committer.clone(),
-        message: req.message.clone(),
-        extra_headers: Vec::new(),
-        metadata: req.metadata.clone(),
-    };
+        vec![
+            DeltaEntry::new(
+                file.clone(),
+                DeltaOp::Put {
+                    kind: *kind,
+                    id: blob,
+                },
+                None,
+            )
+            .unwrap(),
+        ],
+        req.author.clone(),
+        req.committer.clone(),
+        req.message.clone(),
+        Vec::new(),
+        req.metadata.clone(),
+    )
+    .unwrap();
     [blob.0, root.0, changeset.id().unwrap().0]
 }
 
@@ -1472,9 +1459,10 @@ fn a_commit_in_one_fanout_dir() -> (CommitRequest, String) {
         .find(|req| share_a_dir(req, 0, 1))
         .expect("about one content in 256 fits");
     let req = (0..10_000_u32)
-        .map(|i| CommitRequest {
-            message: format!("a test commit, take {i}").into_bytes(),
-            ..base.clone()
+        .map(|i| {
+            let mut req = base.clone();
+            req.message = format!("a test commit, take {i}").into_bytes();
+            req
         })
         .find(|req| share_a_dir(req, 0, 2))
         .expect("about one message in 256 fits");
@@ -1548,11 +1536,7 @@ fn a_failed_fanout_fsync_fails_the_commit_and_a_later_flush_syncs_the_directory(
     let (_dir, root, repo) = new_repo();
     drop(repo);
     let (recording, calls) = recording_in(&root);
-    let enospc = FailAt {
-        at: k,
-        mode: FailMode::Once,
-        error: InjectedError::Enospc,
-    };
+    let enospc = FailAt::new(k, FailMode::Once, InjectedError::Enospc);
     let repo = LocalRepo::open_with_fs(&root, checked(FailAtFs::new(recording, enospc))).unwrap();
     let journal = || {
         let len = |file: &str| fs::metadata(root.join("meta").join(file)).unwrap().len();
@@ -1724,11 +1708,9 @@ fn listing_fails(root: &Utf8Path) -> LocalRepo {
 /// a move to the target it expects, which commits nothing; none of them warns.
 #[test]
 fn commit_and_cas_outcomes_carry_their_write_s_recovery() {
-    let listed_and_replayed = Recovered {
-        frames_listed: 1,
-        records_replayed: 1,
-        ..Recovered::default()
-    };
+    let mut listed_and_replayed = Recovered::default();
+    listed_and_replayed.frames_listed = 1;
+    listed_and_replayed.records_replayed = 1;
     for again in [false, true] {
         let (_dir, root, repo) = new_repo();
         drop(repo);
@@ -1754,11 +1736,9 @@ fn commit_and_cas_outcomes_carry_their_write_s_recovery() {
 
     // main created at c1 through a move whose listing failed (its ref file never written), then
     // a move whose write lists that frame and writes the file.
-    let listed_and_written = Recovered {
-        frames_listed: 1,
-        refs_replayed: 1,
-        ..Recovered::default()
-    };
+    let mut listed_and_written = Recovered::default();
+    listed_and_written.frames_listed = 1;
+    listed_and_written.refs_replayed = 1;
     let moves = |c1: ChangesetId, c2: ChangesetId| {
         [
             (Some(c1), Some(c2), CasResult::Applied { old: Some(c1) }),
@@ -1865,7 +1845,7 @@ fn commits_from_many_processes_all_land() {
                 .lines()
                 .find_map(|line| line.strip_prefix(REPORT))
                 .expect("the child reports its head");
-            ChangesetId(ObjectId::from_hex(head).unwrap())
+            ChangesetId::new(ObjectId::from_hex(head).unwrap())
         })
         .collect();
 
@@ -1956,7 +1936,7 @@ mod objects_once {
         drop(repo);
         let other = root.clone();
         let place = move || {
-            let store = FsObjectStore::open(Layout::new(other), Box::new(RealFs));
+            let store = FsObjectStore::open(Layout::new(other), Box::new(RealFs::new()));
             store.put(ObjectKind::Blob, RACED).unwrap();
             store.flush().unwrap();
         };
@@ -2030,29 +2010,34 @@ mod blob_by_id {
             Change {
                 path: file,
                 op: ChangeOp::PutBlob { kind, id },
+                ..
             },
         ] = &req.changes[..]
         else {
             panic!("a request of one blob named by id: {:?}", req.changes);
         };
         let root = tree(vec![TreeEntry::leaf(file.as_str(), *kind, *id)]).id();
-        let changeset = Changeset {
-            parents: Vec::new(),
+        let changeset = Changeset::new(
+            Vec::new(),
             root,
-            delta: vec![DeltaEntry {
-                path: file.clone(),
-                op: DeltaOp::Put {
-                    kind: *kind,
-                    id: *id,
-                },
-                renamed_from: None,
-            }],
-            author: req.author.clone(),
-            committer: req.committer.clone(),
-            message: req.message.clone(),
-            extra_headers: Vec::new(),
-            metadata: req.metadata.clone(),
-        };
+            vec![
+                DeltaEntry::new(
+                    file.clone(),
+                    DeltaOp::Put {
+                        kind: *kind,
+                        id: *id,
+                    },
+                    None,
+                )
+                .unwrap(),
+            ],
+            req.author.clone(),
+            req.committer.clone(),
+            req.message.clone(),
+            Vec::new(),
+            req.metadata.clone(),
+        )
+        .unwrap();
         [id.0, root.0, changeset.id().unwrap().0]
     }
 
@@ -2110,21 +2095,11 @@ mod blob_by_id {
         let size = u64::try_from(content.len()).unwrap();
         let stored = repo.put_blob(content.clone()).unwrap();
         let id = blob(&content);
-        assert_eq!(
-            stored,
-            BlobPut {
-                id,
-                size,
-                written: true
-            }
-        );
+        assert_eq!(stored, BlobPut::new(id, size, true));
         let again = repo.put_blob(content.clone()).unwrap();
         assert_eq!(
             again,
-            BlobPut {
-                written: false,
-                ..stored
-            },
+            BlobPut::new(stored.id, stored.size, false),
             "stored already"
         );
         drop(repo);
@@ -2157,10 +2132,8 @@ mod blob_by_id {
             Some((LeafKind::File, id, content.clone()))
         );
         // The same request with the content itself makes the same changeset.
-        let by_content = CommitRequest {
-            changes: vec![put("named.bin", &content)],
-            ..req
-        };
+        let mut by_content = req;
+        by_content.changes = vec![put("named.bin", &content)];
         let (_dir2, _root2, twin) = new_repo();
         assert_eq!(twin.commit(by_content).unwrap().id, out.id);
         assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
@@ -2181,8 +2154,8 @@ mod blob_by_id {
         let (objects, frames) = (object_files(&root), journal_frames(&root));
         let named = [
             (blob(b"never stored"), "a blob the store lacks"),
-            (BlobId(c1.root.0), "a tree"),
-            (BlobId(c1.id.0), "a changeset"),
+            (BlobId::new(c1.root.0), "a tree"),
+            (BlobId::new(c1.id.0), "a changeset"),
         ];
         for (id, what) in named {
             calls();
@@ -2217,7 +2190,11 @@ mod blob_by_id {
         let stored = repo.put_blob(b"stored".to_vec()).unwrap().id;
         assert!(repo.has_blob(stored).unwrap());
         assert!(repo.has_blob(blob(b"a")).unwrap(), "the commit's blob");
-        for id in [blob(b"never stored"), BlobId(c1.root.0), BlobId(c1.id.0)] {
+        for id in [
+            blob(b"never stored"),
+            BlobId::new(c1.root.0),
+            BlobId::new(c1.id.0),
+        ] {
             assert!(!repo.has_blob(id).unwrap(), "{id}");
         }
     }

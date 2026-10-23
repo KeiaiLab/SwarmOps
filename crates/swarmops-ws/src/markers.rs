@@ -26,6 +26,7 @@ use swarmops_merge::diff3;
 use swarmops_merge::line_diff;
 
 use crate::Ctx;
+use crate::io_error::unknown_variant;
 use crate::materialize;
 use crate::volume::{EXEC_BITS, EXEC_MODE};
 use crate::workspace::Workspace;
@@ -84,7 +85,7 @@ pub(crate) fn write(
     for file in files {
         let ours = blob(file.ours_blob.as_deref());
         let theirs = blob(file.theirs_blob.as_deref());
-        let Some(bytes) = render(blob(file.base_blob.as_deref()), ours, theirs, &label) else {
+        let Some(bytes) = render(blob(file.base_blob.as_deref()), ours, theirs, &label)? else {
             continue;
         };
         put(ctx, ws, &file.path, &bytes)?;
@@ -94,13 +95,20 @@ pub(crate) fn write(
 }
 
 /// The merge of `ours` and `theirs` from `base` with each conflicting hunk as a block of
-/// markers, `label` closing each; none when the contents do not merge by lines.
-pub(crate) fn render(base: &[u8], ours: &[u8], theirs: &[u8], label: &str) -> Option<Vec<u8>> {
+/// markers, `label` closing each; none when the contents do not merge by lines. `E_INTERNAL` for
+/// a merge this build does not know.
+pub(crate) fn render(
+    base: &[u8],
+    ours: &[u8],
+    theirs: &[u8],
+    label: &str,
+) -> Result<Option<Vec<u8>>, OpError> {
     // 1. The merge's hunks, in file order; a clean merge is its bytes.
     let hunks = match diff3::merge_content(base, ours, theirs) {
-        ContentMerge::Clean(bytes) => return Some(bytes),
-        ContentMerge::Binary => return None,
+        ContentMerge::Clean(bytes) => return Ok(Some(bytes)),
+        ContentMerge::Binary => return Ok(None),
         ContentMerge::Conflicted(hunks) => hunks,
+        _ => return Err(unknown_variant("ContentMerge")),
     };
 
     // 2. Between the hunks, the three sides' lines merged as they merge; each hunk a block.
@@ -113,15 +121,15 @@ pub(crate) fn render(base: &[u8], ours: &[u8], theirs: &[u8], label: &str) -> Op
     let mut from = [0; 3];
     for hunk in &hunks {
         let to = starts(hunk);
-        out.extend(between(&sides, from, to, label));
+        out.extend(between(&sides, from, to, label)?);
         block(&mut out, hunk, label);
         from = ends(hunk);
     }
 
     // 3. The lines after the last hunk.
     let lens = sides.each_ref().map(Vec::len);
-    out.extend(between(&sides, from, lens, label));
-    Some(out)
+    out.extend(between(&sides, from, lens, label)?);
+    Ok(Some(out))
 }
 
 /// Whether `bytes` hold a line that opens, divides or closes a block of markers.
@@ -152,16 +160,22 @@ fn index(line: u32) -> usize {
 
 /// The three sides' lines `from..to` (base, ours, theirs), which no hunk touches, merged: the
 /// side that changed them, as the whole merge took it. Should they not merge cleanly alone, they
-/// are a block too, so that nothing is lost.
-fn between(sides: &[Vec<&[u8]>; 3], from: [usize; 3], to: [usize; 3], label: &str) -> Vec<u8> {
+/// are a block too, so that nothing is lost. `E_INTERNAL` for a merge this build does not know.
+fn between(
+    sides: &[Vec<&[u8]>; 3],
+    from: [usize; 3],
+    to: [usize; 3],
+    label: &str,
+) -> Result<Vec<u8>, OpError> {
     let [base, ours, theirs] = [0, 1, 2].map(|side| sides[side][from[side]..to[side]].concat());
     match diff3::merge_content(&base, &ours, &theirs) {
-        ContentMerge::Clean(bytes) => bytes,
+        ContentMerge::Clean(bytes) => Ok(bytes),
         ContentMerge::Binary | ContentMerge::Conflicted(_) => {
             let mut out = Vec::new();
             push_block(&mut out, [&base, &ours, &theirs], label);
-            out
+            Ok(out)
         }
+        _ => Err(unknown_variant("ContentMerge")),
     }
 }
 
@@ -224,7 +238,7 @@ mod tests {
     /// One hunk in the middle: the merged lines around it, the block in its place.
     #[test]
     fn one_hunk_is_one_block_between_the_merged_lines() {
-        let out = render(b"a\nb\nc\n", b"a\nO\nc\n", b"a\nT\nc\n", LABEL).unwrap();
+        let out = (render(b"a\nb\nc\n", b"a\nO\nc\n", b"a\nT\nc\n", LABEL).unwrap()).unwrap();
         let expected =
             format!("a\n{OURS_MARKER}\nO\n{BASE_MARKER}\nb\n{SPLIT_MARKER}\nT\n{LABEL}\nc\n");
         assert_eq!(String::from_utf8(out).unwrap(), expected);
@@ -233,7 +247,7 @@ mod tests {
     /// A last line without a newline still ends before the next marker.
     #[test]
     fn a_text_without_its_newline_gets_one_before_the_marker() {
-        let out = render(b"a\nb", b"a\nO", b"a\nT", LABEL).unwrap();
+        let out = (render(b"a\nb", b"a\nO", b"a\nT", LABEL).unwrap()).unwrap();
         let expected =
             format!("a\n{OURS_MARKER}\nO\n{BASE_MARKER}\nb\n{SPLIT_MARKER}\nT\n{LABEL}\n");
         assert_eq!(String::from_utf8(out).unwrap(), expected);
@@ -242,9 +256,9 @@ mod tests {
     /// Binary content gets no markers; a clean merge is its bytes.
     #[test]
     fn binary_gets_none_and_clean_is_the_merge() {
-        assert_eq!(render(b"x\0a", b"x\0b", b"x\0c", LABEL), None);
+        assert_eq!(render(b"x\0a", b"x\0b", b"x\0c", LABEL).unwrap(), None);
         assert_eq!(
-            render(b"a\n", b"b\n", b"a\n", LABEL).as_deref(),
+            render(b"a\n", b"b\n", b"a\n", LABEL).unwrap().as_deref(),
             Some(&b"b\n"[..])
         );
     }

@@ -2,7 +2,6 @@
 //! check and an exact land, again when the target moved, under one land key that a killed run
 //! replays.
 
-use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -173,19 +172,16 @@ impl StoreOps for Hooked<'_> {
 
 /// The request of `ws land` of workspace `name`, with the check `argv` if any.
 fn land_of(name: &str, argv: Option<&[String]>) -> WsLandReq {
-    WsLandReq {
-        workspace: name.to_owned(),
-        message: None,
-        idempotency_key: None,
-        target: None,
-        check: argv.map(|argv| WsCheckInput {
-            argv: Some(argv.to_vec()),
-            timeout_s: 900,
-        }),
-        mode: None,
-        max_attempts: 8,
-        status_after: StatusAfter::Page,
-    }
+    let mut out = WsLandReq::new(name.to_owned());
+    out.check = argv.map(|argv| {
+        let mut check = WsCheckInput::default();
+        check.argv = Some(argv.to_vec());
+        check.timeout_s = 900;
+        check
+    });
+    out.max_attempts = 8;
+    out.status_after = StatusAfter::Page;
+    out
 }
 
 /// A shell command: `sh -c script sh args…`.
@@ -216,16 +212,14 @@ fn seen_lines(seen: &Utf8Path) -> Vec<Vec<String>> {
 
 /// The head of `main`.
 fn main_of(f: &Fixture) -> String {
-    let req = ResolveRevReq { rev: "main".into() };
+    let req = ResolveRevReq::new("main");
     f.ops.resolve_rev(req).unwrap().id
 }
 
 /// Changeset `id`, shown.
 fn show(f: &Fixture, id: &str) -> ChangesetDetail {
-    let req = ShowReq {
-        rev: id.into(),
-        max_changes: 1,
-    };
+    let mut req = ShowReq::new(id);
+    req.max_changes = 1;
     f.ops.show(req).unwrap()
 }
 
@@ -236,13 +230,8 @@ fn behind(f: &Fixture) -> (String, String) {
     let base = f.commit(None, &[Put::File("src/a.txt", "a\n")]);
     f.create("w", &base, &[]);
     write(&f.beside("w"), "src/a.txt", "mine\n");
-    let req = WsCommitReq {
-        workspace: "w".to_owned(),
-        message: "mine".to_owned(),
-        paths: Vec::new(),
-        modes: BTreeMap::new(),
-        status_after: StatusAfter::None,
-    };
+    let mut req = WsCommitReq::new("w".to_owned(), "mine".to_owned());
+    req.status_after = StatusAfter::None;
     let head = swarmops_ws::commit(&f.ctx(), req).unwrap().changeset;
 
     // 2. Main moves.
@@ -282,7 +271,7 @@ fn ws_land_check_lands_the_tree_the_check_ran_on() {
 
     // 4. The workspace stands on L, its files main's and its own, the check's log kept.
     let dir = f.beside("w");
-    let saved = state::read(&RealFs, &dir).unwrap();
+    let saved = state::read(&RealFs::new(), &dir).unwrap();
     assert_eq!(
         (&saved.base, &saved.head),
         (&done.land.landed, &done.land.landed)
@@ -364,7 +353,7 @@ fn a_failed_check_lands_nothing_and_leaves_the_workspace_rebased() {
     // 3. Main did not move; the workspace stands on H', rebased onto main.
     assert_eq!(main_of(&f), main);
     let dir = f.beside("w");
-    let saved = state::read(&RealFs, &dir).unwrap();
+    let saved = state::read(&RealFs::new(), &dir).unwrap();
     assert_eq!(details["changeset"], saved.head.as_str());
     assert_ne!(saved.head, head);
     assert_eq!(show(&f, &saved.head).parents, std::slice::from_ref(&main));
@@ -429,7 +418,7 @@ fn a_killed_ws_land_resumes_by_its_key() {
         (main_of(&f), show(&f, &first).parents),
         (first.clone(), vec![main])
     );
-    assert_eq!(state::read(&RealFs, &dir).unwrap().head, first);
+    assert_eq!(state::read(&RealFs::new(), &dir).unwrap().head, first);
     assert!(!pending_in(&dir).exists());
 
     // 2. Killed after the rebase: the re-run replays the same H', then lands it once.
@@ -441,7 +430,7 @@ fn a_killed_ws_land_resumes_by_its_key() {
     let check = recording(&g.beside("seen"));
     swarmops_ws::land(&ctx, land_of("w", Some(&check))).unwrap_err();
     let dir = g.beside("w");
-    assert_eq!(state::read(&RealFs, &dir).unwrap().head, head);
+    assert_eq!(state::read(&RealFs::new(), &dir).unwrap().head, head);
     let done = swarmops_ws::land(&ctx, land_of("w", Some(&check))).unwrap();
     let rebases = store.rebases();
     assert_eq!(rebases.len(), 2, "{rebases:?}");
@@ -470,7 +459,7 @@ fn ws_land_without_check_merges_as_land_does() {
 
     // 3. The workspace stands on it, main's file written in, clean.
     let dir = f.beside("w");
-    let saved = state::read(&RealFs, &dir).unwrap();
+    let saved = state::read(&RealFs::new(), &dir).unwrap();
     assert_eq!(
         (&saved.base, &saved.head),
         (&done.land.landed, &done.land.landed)
@@ -504,13 +493,10 @@ fn exact_land_without_a_rebase_is_refused() {
     assert_eq!(main_of(&f), main);
 
     // 3. Rebased, then landed exactly: L's root is H''s.
-    let rebase = WsRebaseReq {
-        workspace: "w".to_owned(),
-        onto: "main".to_owned(),
-        action: WsRebaseAction::Start,
-        message: None,
-        status_after: StatusAfter::None,
-    };
+    let mut rebase = WsRebaseReq::new("w".to_owned());
+    rebase.onto = "main".to_owned();
+    rebase.action = WsRebaseAction::Start;
+    rebase.status_after = StatusAfter::None;
     let rebased = swarmops_ws::rebase(&f.ctx(), rebase).unwrap();
     let done = swarmops_ws::land(&f.ctx(), exact).unwrap();
     assert_eq!(done.land.rebased_onto, main);
@@ -529,10 +515,9 @@ fn a_check_land_without_a_check_command_is_refused() {
     let f = Fixture::new();
     let (head, main) = behind(&f);
     let mut req = land_of("w", None);
-    req.check = Some(WsCheckInput {
-        argv: None,
-        timeout_s: 900,
-    });
+    let mut check = WsCheckInput::default();
+    check.timeout_s = 900;
+    req.check = Some(check);
 
     // 2. Refused, naming the check; nothing rebased or landed.
     let store = Hooked::new(&f.ops);
@@ -540,7 +525,10 @@ fn a_check_land_without_a_check_command_is_refused() {
     assert_eq!(refused.code, "E_INVALID_ARG", "{refused:?}");
     assert_eq!(refused.details["missing"], "check");
     assert_eq!((store.rebases().len(), store.lands().len()), (0, 0));
-    assert_eq!(state::read(&RealFs, &f.beside("w")).unwrap().head, head);
+    assert_eq!(
+        state::read(&RealFs::new(), &f.beside("w")).unwrap().head,
+        head
+    );
 
     // 3. The repository names one: it runs, and the land goes through.
     let seen = f.beside("seen");

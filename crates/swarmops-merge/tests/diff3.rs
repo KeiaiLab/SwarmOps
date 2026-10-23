@@ -205,14 +205,14 @@ fn overlapping() -> impl Strategy<Value = Sides> {
 
 /// `hunk` with its two sides swapped, as a merge with them swapped reports it.
 fn swapped(hunk: &ConflictHunk) -> ConflictHunk {
-    ConflictHunk {
-        base: hunk.base.clone(),
-        ours: hunk.theirs.clone(),
-        theirs: hunk.ours.clone(),
-        base_text: hunk.base_text.clone(),
-        ours_text: hunk.theirs_text.clone(),
-        theirs_text: hunk.ours_text.clone(),
-    }
+    ConflictHunk::new(
+        hunk.base.clone(),
+        hunk.theirs.clone(),
+        hunk.ours.clone(),
+        hunk.base_text.clone(),
+        hunk.theirs_text.clone(),
+        hunk.ours_text.clone(),
+    )
 }
 
 /// The bytes of the lines `at` of `bytes`.
@@ -336,14 +336,7 @@ fn clean(text: &str) -> ContentMerge {
 fn hunk(ranges: [Range<u32>; 3], texts: [&str; 3]) -> ConflictHunk {
     let [base, ours, theirs] = ranges;
     let [base_text, ours_text, theirs_text] = texts.map(|text| text.as_bytes().to_vec());
-    ConflictHunk {
-        base,
-        ours,
-        theirs,
-        base_text,
-        ours_text,
-        theirs_text,
-    }
+    ConflictHunk::new(base, ours, theirs, base_text, ours_text, theirs_text)
 }
 
 /// Edits of lines 3 and 4, one on each side, touch: one side's edit ends at the line where the
@@ -669,6 +662,7 @@ fn agrees_with_the_git_merge_file_corpus() {
                 );
             }
             ContentMerge::Binary => panic!("{name}: binary here, git merges it as text"),
+            _ => panic!("a variant this test does not know"),
         }
     }
 }
@@ -694,6 +688,7 @@ mod past_the_line_diff_bound {
             ContentMerge::Clean(bytes) => format!("Clean, {} bytes", bytes.len()),
             ContentMerge::Conflicted(hunks) => format!("Conflicted, {} hunks", hunks.len()),
             ContentMerge::Binary => "Binary".to_owned(),
+            _ => panic!("a variant this test does not know"),
         }
     }
 

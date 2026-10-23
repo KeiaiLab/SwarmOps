@@ -16,7 +16,7 @@ use swarmops_git::{
     ExportOid, ExportReader, ExportedOid, GitOid, RawKind, TRAILERS, blob_oid, commit_bytes,
     export_message, git_hash, register, render_commit, tree_oid,
 };
-use swarmops_repo::{Change, CommitRequest, LocalRepo, RepoError};
+use swarmops_repo::{Change, LocalRepo, RepoError};
 use swarmops_store::DerivedSlot;
 use swarmops_testkit::fs::{NoSyncFs, RecordingFs};
 use swarmops_testkit::repo::{blob, new_repo, put, put_as, request, signature};
@@ -84,10 +84,8 @@ fn commit(
     let metadata = (metadata.iter())
         .map(|&(key, value)| (key.to_owned(), value.as_bytes().to_vec()))
         .collect();
-    let req = CommitRequest {
-        metadata,
-        ..request(parents, changes, message)
-    };
+    let mut req = request(parents, changes, message);
+    req.metadata = metadata;
     repo.commit(req).unwrap().id
 }
 
@@ -103,18 +101,19 @@ fn value(repo: &LocalRepo, id: ChangesetId) -> ExportedOid {
 
 /// A changeset no store holds, with `message` and `metadata` (its keys ascending), and its id.
 fn unstored(message: &[u8], metadata: &[(&str, &[u8])]) -> (ChangesetId, Changeset) {
-    let cs = Changeset {
-        parents: Vec::new(),
-        root: Tree::empty_root().id(),
-        delta: Vec::new(),
-        author: signature(),
-        committer: signature(),
-        message: message.to_vec(),
-        extra_headers: Vec::new(),
-        metadata: (metadata.iter())
+    let cs = Changeset::new(
+        Vec::new(),
+        Tree::empty_root().id(),
+        Vec::new(),
+        signature(),
+        signature(),
+        message.to_vec(),
+        Vec::new(),
+        (metadata.iter())
             .map(|&(key, value)| (key.to_owned(), value.to_vec()))
             .collect(),
-    };
+    )
+    .unwrap();
     (cs.id().unwrap(), cs)
 }
 
@@ -153,32 +152,28 @@ fn derived_path(name: &str, subject: ObjectId) -> String {
 #[test]
 fn a_native_changeset_renders_to_pinned_bytes() {
     let (_dir, repo) = registered();
-    let worker = Signature {
-        name: b"claude-code/worker-17".to_vec(),
-        email: b"worker-17@claude-code.swarmops.local".to_vec(),
-        secs: 1_700_000_000,
-        offset_secs: 0,
-        negative_zero: false,
-    };
+    let worker = Signature::new(
+        b"claude-code/worker-17".to_vec(),
+        b"worker-17@claude-code.swarmops.local".to_vec(),
+        1_700_000_000,
+        0,
+        false,
+    )
+    .unwrap();
     let squashed = "c".repeat(64);
-    let req = CommitRequest {
-        author: worker.clone(),
-        committer: worker,
-        metadata: vec![
-            ("agent".to_owned(), b"claude-code/worker-17".to_vec()),
-            ("land_key".to_owned(), b"k-1".to_vec()),
-            ("run_id".to_owned(), b"r1".to_vec()),
-            ("squashed_from".to_owned(), squashed.clone().into_bytes()),
-        ],
-        ..request(&[], vec![put("a", b"a\n")], "Add a\n")
-    };
+    let mut req = request(&[], vec![put("a", b"a\n")], "Add a\n");
+    req.author = worker.clone();
+    req.committer = worker;
+    req.metadata = vec![
+        ("agent".to_owned(), b"claude-code/worker-17".to_vec()),
+        ("land_key".to_owned(), b"k-1".to_vec()),
+        ("run_id".to_owned(), b"r1".to_vec()),
+        ("squashed_from".to_owned(), squashed.clone().into_bytes()),
+    ];
     let id = repo.commit(req).unwrap().id;
     let cs = changeset(&repo, id);
     let read = repo.snapshot().unwrap();
-    let reader = ExportReader {
-        read: &read,
-        store: repo.derived_store(),
-    };
+    let reader = ExportReader::new(&read, repo.derived_store());
     // git's oids of the file `a\n` and of the tree of that one file.
     let a = blob_oid(&reader, blob(b"a\n")).unwrap();
     assert_eq!(a, oid("78981922613b2afb6025042ff6bd878ac1994e85"));
@@ -202,13 +197,7 @@ fn a_native_changeset_renders_to_pinned_bytes() {
     assert_eq!(String::from_utf8(rendered.clone()).unwrap(), expected);
     let exported = value(&repo, id);
     let commit = git_hash(RawKind::Commit, &rendered);
-    assert_eq!(
-        exported,
-        ExportedOid {
-            oid: commit.0,
-            kept: true
-        }
-    );
+    assert_eq!(exported, ExportedOid::new(commit.0, true));
     assert_eq!(exported.git_oid(), commit);
     // Pinned: the changeset's id, which the hash contract fixes, and the oid git gives these
     // bytes (git 2.43.0's `hash-object -t commit`, which `fsck --strict` accepts).
@@ -216,12 +205,7 @@ fn a_native_changeset_renders_to_pinned_bytes() {
     assert_eq!(id.0.to_hex(), pinned);
     assert_eq!(commit, oid("289054922b69c2600fa2e17c8990bfaaa2654b1b"));
     // Stored as version 1 reads it back: the oid's 20 bytes, then `kept`.
-    let slot = DerivedSlot {
-        name: "git_oid",
-        version: 1,
-        subject: id.0,
-        key: &[],
-    };
+    let slot = DerivedSlot::new("git_oid", 1, id.0, &[]);
     let stored = repo.derived_store().get(&slot).unwrap().unwrap();
     assert_eq!(stored, [&commit.0[..], &[1]].concat());
 }
@@ -245,10 +229,7 @@ fn a_merge_exports_its_parents_in_order() {
     );
     let (left, right) = (left.git_oid(), right.git_oid());
     let read = repo.snapshot().unwrap();
-    let reader = ExportReader {
-        read: &read,
-        store: repo.derived_store(),
-    };
+    let reader = ExportReader::new(&read, repo.derived_store());
     let tree = tree_oid(&reader, cs.root).unwrap();
     let rendered = render_commit(merge, &cs, &[right, left], tree);
     let head = format!("tree {tree}\nparent {right}\nparent {left}\nauthor ");
@@ -356,7 +337,10 @@ fn an_imported_changeset_keeps_its_message() {
     ];
     cs.author.offset_secs = 19_800;
     let id = cs.id().unwrap();
-    let (tree, parents) = (GitOid([7; 20]), [GitOid([1; 20]), GitOid([2; 20])]);
+    let (tree, parents) = (
+        GitOid::new([7; 20]),
+        [GitOid::new([1; 20]), GitOid::new([2; 20])],
+    );
     let headers = &cs.extra_headers;
     let commit = commit_bytes(tree, &parents, &cs.author, &cs.committer, headers, b"Add a");
     assert_eq!(render_commit(id, &cs, &parents, tree), commit);
@@ -381,10 +365,7 @@ fn an_unchanged_import_takes_its_git_oid_without_reading_a_tree() {
     }
     store.forget();
     let head = *chain.last().unwrap();
-    let expected = ExportedOid {
-        oid: oid(&format!("{:040x}", 5)).0,
-        kept: true,
-    };
+    let expected = ExportedOid::new(oid(&format!("{:040x}", 5)).0, true);
     assert_eq!(value(&store.repo, head), expected);
     // The five changesets, and no tree or blob.
     let read: BTreeSet<String> = store.object_reads().into_iter().collect();
@@ -402,20 +383,14 @@ fn a_git_oid_not_in_lowercase_hex_is_rendered() {
     // As the import records it: its own commit, without a tree read.
     let faithful = [("git.oid", made.as_str())];
     let faithful = commit(&repo, &[], vec![put("a", b"a\n")], "a\n", &faithful);
-    let kept = ExportedOid {
-        oid: oid(&made).0,
-        kept: true,
-    };
+    let kept = ExportedOid::new(oid(&made).0, true);
     assert_eq!(value(&repo, faithful), kept);
     // Upper case, 39 digits, or no hex: rendered, to the same commit, which is not its `git.oid`.
     let others = [made.to_uppercase(), made[1..].to_owned(), "g".repeat(40)];
     for other in others {
         let metadata = [("git.oid", other.as_str())];
         let id = commit(&repo, &[], vec![put("a", b"a\n")], "a\n", &metadata);
-        let expected = ExportedOid {
-            oid: oid(&made).0,
-            kept: false,
-        };
+        let expected = ExportedOid::new(oid(&made).0, false);
         assert_eq!(value(&repo, id), expected, "{other}");
     }
 }
@@ -484,10 +459,7 @@ fn rendered_on_a_native_parent(store: &Recorded, above: ChangesetId, above_oid: 
     let built = commit(repo, &[native], vec![put("b", b"5\n")], "five\n", &built);
     let root = object_path(changeset(repo, built).root.0);
     store.forget();
-    let expected = ExportedOid {
-        oid: made.0,
-        kept: true,
-    };
+    let expected = ExportedOid::new(made.0, true);
     assert_eq!(value(repo, built), expected);
     let reads = store.object_reads();
     assert_eq!(
@@ -502,10 +474,7 @@ fn rendered_on_a_native_parent(store: &Recorded, above: ChangesetId, above_oid: 
     let six = "6".repeat(40);
     let other = [("git.oid", six.as_str())];
     let other = commit(repo, &[native], vec![put("b", b"5\n")], "five\n", &other);
-    let expected = ExportedOid {
-        oid: made.0,
-        kept: false,
-    };
+    let expected = ExportedOid::new(made.0, false);
     assert_eq!(value(repo, other), expected);
 }
 
@@ -519,10 +488,7 @@ fn tree_and_blob_oids_are_memoized_per_object_id() {
     let (one, two) = (changeset(repo, first).root, changeset(repo, second).root);
     let dir = Tree::new(vec![TreeEntry::leaf("b", LeafKind::File, blob(b"b\n"))]).unwrap();
     let read = repo.snapshot().unwrap();
-    let reader = ExportReader {
-        read: &read,
-        store: repo.derived_store(),
-    };
+    let reader = ExportReader::new(&read, repo.derived_store());
     store.forget();
     let dir_oid = git_tree(&[("100644", "b", git_blob(b"b\n"))]);
     let expected = git_tree(&[("100644", "a", git_blob(b"a\n")), ("40000", "d", dir_oid)]);
@@ -539,12 +505,7 @@ fn tree_and_blob_oids_are_memoized_per_object_id() {
         let link = format!("link_noclobber {}", derived_path(name, subject));
         assert!(calls.contains(&link), "no {link} in {calls:#?}");
     }
-    let slot = DerivedSlot {
-        name: "git_tree_oid",
-        version: 1,
-        subject: one.0,
-        key: &[],
-    };
+    let slot = DerivedSlot::new("git_tree_oid", 1, one.0, &[]);
     assert_eq!(
         repo.derived_store().get(&slot).unwrap(),
         Some(expected.0.to_vec())
@@ -573,10 +534,7 @@ fn exec_and_symlink_entries_render_as_git_does() {
     let link = put_as("link", LeafKind::Symlink, b"a");
     let link = changeset(&repo, commit(&repo, &[], vec![link], "link\n", &[])).root;
     let read = repo.snapshot().unwrap();
-    let reader = ExportReader {
-        read: &read,
-        store: repo.derived_store(),
-    };
+    let reader = ExportReader::new(&read, repo.derived_store());
     // git's oid of a tree of one executable file, `100755 run`.
     let run = tree_oid(&reader, run).unwrap();
     assert_eq!(run, oid("6f2c44ec570e49318e3d2f293795575fcf8c1f01"));
@@ -613,10 +571,7 @@ fn a_deep_tree_renders_without_recursion() {
             .stack_size(256 * 1024)
             .spawn_scoped(scope, || {
                 let read = repo.snapshot().unwrap();
-                let reader = ExportReader {
-                    read: &read,
-                    store: repo.derived_store(),
-                };
+                let reader = ExportReader::new(&read, repo.derived_store());
                 tree_oid(&reader, top)
             })
             .unwrap()

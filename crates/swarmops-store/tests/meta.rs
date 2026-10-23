@@ -111,17 +111,17 @@ fn new_store() -> (TempDir, Utf8PathBuf, MetaStore) {
 /// [`MetaStore::create`], the store's writes checked against its ordering rules
 /// ([`checked`]): every test here runs under the order checker, but where it says otherwise.
 fn create_checked(root: &Utf8Path) -> Result<MetaStore, StoreError> {
-    MetaStore::create_with_fs(root, checked(RealFs))
+    MetaStore::create_with_fs(root, checked(RealFs::new()))
 }
 
 /// [`MetaStore::open`], the store's writes checked against its ordering rules ([`checked`]).
 fn open_checked(root: &Utf8Path) -> Result<MetaStore, StoreError> {
-    MetaStore::open_with_fs(root, checked(RealFs))
+    MetaStore::open_with_fs(root, checked(RealFs::new()))
 }
 
 /// The id of changeset `n`: a real hash, so the ids look like a store's.
 fn id(n: u64) -> ChangesetId {
-    ChangesetId(hash_object(ObjectKind::Changeset, &n.to_le_bytes()))
+    ChangesetId::new(hash_object(ObjectKind::Changeset, &n.to_le_bytes()))
 }
 
 /// The delta hash of changeset `n`.
@@ -132,22 +132,21 @@ fn delta(n: u64) -> [u8; 32] {
 /// Changeset `n` with parents `parents`, as a caller hands it to `insert_changeset`: seq and
 /// generation 0, since the store assigns both.
 fn cs(n: u64, parents: &[u64]) -> ChangesetMeta {
-    ChangesetMeta {
-        id: id(n),
-        seq: 0,
-        generation: 0,
-        delta_hash: delta(n),
-        parents: parents.iter().map(|&parent| id(parent)).collect(),
-    }
+    ChangesetMeta::new(
+        id(n),
+        0,
+        0,
+        delta(n),
+        parents.iter().map(|&parent| id(parent)).collect(),
+    )
 }
 
 /// `cs(n, parents)` as the store holds it: at `seq`, with `generation`.
 fn stored(n: u64, parents: &[u64], seq: u64, generation: u64) -> ChangesetMeta {
-    ChangesetMeta {
-        seq,
-        generation,
-        ..cs(n, parents)
-    }
+    let mut meta = cs(n, parents);
+    meta.seq = seq;
+    meta.generation = generation;
+    meta
 }
 
 /// Inserts `changesets`, each new, in one write transaction, and commits it.
@@ -174,20 +173,17 @@ fn cas(store: &MetaStore, name: &str, expected: Option<u64>, new: Option<u64>) -
 }
 
 fn ref_state(target: u64, version: u64) -> RefState {
-    RefState {
-        target: id(target),
-        version,
-    }
+    RefState::new(id(target), version)
 }
 
 /// A journal handle of its own on the store at `root`, as another process would open it.
 fn journal(root: &Utf8Path) -> Journal {
-    Journal::open(&Layout::new(root), Arc::new(RealFs)).unwrap()
+    Journal::open(&Layout::new(root), Arc::new(RealFs::new())).unwrap()
 }
 
 /// An index handle of its own on the store at `root`.
 fn index(root: &Utf8Path) -> Index {
-    Index::open(&Layout::new(root), Arc::new(RealFs)).unwrap()
+    Index::open(&Layout::new(root), Arc::new(RealFs::new())).unwrap()
 }
 
 /// Every frame of the journal at `root`.
@@ -244,7 +240,7 @@ fn ref_move(name: &str, old: Option<u64>, new: Option<u64>, actor: &str, ts: i64
 fn append_unmaterialized(root: &Utf8Path, records: &[Record]) -> Frame {
     let layout = Layout::new(root);
     let _lock = MetaLock::acquire(&layout, Duration::from_secs(10)).unwrap();
-    let journal = Journal::open(&layout, Arc::new(RealFs)).unwrap();
+    let journal = Journal::open(&layout, Arc::new(RealFs::new())).unwrap();
     journal.truncate_torn_tail().unwrap();
     journal.append_frame(records).unwrap()
 }
@@ -365,12 +361,7 @@ fn insert_is_idempotent() {
     let again = write.insert_changeset(cs(1, &[])).unwrap();
     assert_eq!(again, InsertOutcome::AlreadyPresent);
     let info = write.commit().unwrap();
-    let nothing = CommitInfo {
-        frame_seq: 1,
-        inserted: 0,
-        moved_refs: 0,
-        checkpointed: false,
-    };
+    let nothing = CommitInfo::new(1, 0, 0, false);
     assert_eq!(
         info, nothing,
         "a write with nothing queued appends no frame"
@@ -407,12 +398,7 @@ fn insert_changesets_batch_is_one_frame() {
         .insert_changesets_batch(vec![first, cs(2, &[1]), cs(3, &[2])])
         .unwrap();
     assert_eq!(outcomes, [inserted(0), inserted(1), inserted(2)]);
-    let want = CommitInfo {
-        frame_seq: 0,
-        inserted: 3,
-        moved_refs: 0,
-        checkpointed: false,
-    };
+    let want = CommitInfo::new(0, 3, 0, false);
     assert_eq!(write.commit().unwrap(), want);
     let records = [
         changeset_record(&cs(1, &[]), 1),
@@ -422,12 +408,7 @@ fn insert_changesets_batch_is_one_frame() {
     let frames = frames(&root);
     assert_eq!(frames.len(), 1, "one frame for the batch");
     assert_eq!(frames[0].records, records, "generations 1 to 3");
-    let entry = |n| JournalEntry {
-        seq: 0,
-        kind: "changeset",
-        key: id(n).0.0.to_vec(),
-        ts: 0,
-    };
+    let entry = |n| JournalEntry::new(0, "changeset", id(n).0.0.to_vec(), 0);
     let entries = store.read().unwrap().journal_after(None, 10).unwrap();
     assert_eq!(entries, [entry(1), entry(2), entry(3)]);
 
@@ -459,12 +440,7 @@ fn insert_changesets_batch_is_one_frame() {
 fn insert_changesets_batch_queues_nothing_on_an_error() {
     let (_dir, root, store) = new_store();
     insert(&store, &[cs(1, &[])]);
-    let nothing = CommitInfo {
-        frame_seq: 1,
-        inserted: 0,
-        moved_refs: 0,
-        checkpointed: false,
-    };
+    let nothing = CommitInfo::new(1, 0, 0, false);
     // The third changeset's parent is nowhere: the two valid ones before it are not queued
     // either.
     let mut write = store.write().unwrap();
@@ -620,7 +596,7 @@ fn replay_appends_what_each_frame_lacks_with_one_append_batch() {
     let chained = |n: u64| changeset_record(&cs(n, &[n - 1]), n);
     append_unmaterialized(&root, &[chained(2), chained(3), chained(4)]);
     append_unmaterialized(&root, &[chained(5), chained(6)]);
-    let mut crashed = Index::open(&Layout::new(&root), Arc::new(RealFs)).unwrap();
+    let mut crashed = Index::open(&Layout::new(&root), Arc::new(RealFs::new())).unwrap();
     crashed.append(&stored(2, &[1], 1, 2)).unwrap();
     drop(crashed);
 
@@ -973,13 +949,13 @@ fn a_malformed_checkpoint_or_ref_file_is_reported_without_the_store_path() {
 fn with_prefix(prefix: &[u8], fill: u8) -> ChangesetMeta {
     let mut bytes = [fill; 32];
     bytes[..prefix.len()].copy_from_slice(prefix);
-    ChangesetMeta {
-        id: ChangesetId(ObjectId(bytes)),
-        seq: 0,
-        generation: 0,
-        delta_hash: [fill; 32],
-        parents: vec![],
-    }
+    ChangesetMeta::new(
+        ChangesetId::new(ObjectId::new(bytes)),
+        0,
+        0,
+        [fill; 32],
+        vec![],
+    )
 }
 
 #[test]
@@ -1043,7 +1019,7 @@ mod damaged_index {
         store.flush().unwrap();
         let layout = Layout::new(root);
         let _lock = MetaLock::acquire(&layout, Duration::from_secs(10)).unwrap();
-        let mut index = Index::open(&layout, Arc::new(RealFs)).unwrap();
+        let mut index = Index::open(&layout, Arc::new(RealFs::new())).unwrap();
         assert_eq!(index.compact().unwrap(), 4);
     }
 
@@ -1338,12 +1314,7 @@ fn write_is_one_frame_for_insert_plus_cas() {
     let applied = write.cas_ref("main", None, Some(id(1)), ACTOR).unwrap();
     assert_eq!(applied, CasResult::Applied { old: None });
     let info = write.commit().unwrap();
-    let want = CommitInfo {
-        frame_seq: 0,
-        inserted: 1,
-        moved_refs: 1,
-        checkpointed: false,
-    };
+    let want = CommitInfo::new(0, 1, 1, false);
     assert_eq!(info, want);
 
     let frames = frames(&root);
@@ -1423,13 +1394,7 @@ fn reader_sees_frames_past_ckpt() {
     assert_eq!(read.get_ref("main").unwrap(), Some(ref_state(2, 1)));
     let main = ("main".to_owned(), ref_state(2, 1));
     assert_eq!(read.list_refs().unwrap(), [main]);
-    let moved = RefMoveEntry {
-        seq: 1,
-        old: None,
-        new: Some(id(2)),
-        actor: "crashed/1".into(),
-        ts: 7,
-    };
+    let moved = RefMoveEntry::new(1, None, Some(id(2)), "crashed/1".into(), 7);
     assert_eq!(read.reflog("main", 10).unwrap(), [moved]);
     drop(read);
 
@@ -1670,6 +1635,7 @@ fn cas_child(root: &Utf8Path, child: u64) {
         CasResult::Mismatch { actual } => {
             println!("{REPORT}mismatch {}", actual.expect("main exists"));
         }
+        _ => panic!("a variant this test does not know"),
     }
 }
 
@@ -1709,7 +1675,7 @@ fn multi_process_cas_exactly_one_wins() {
 
     let reopened = open_checked(&root).unwrap();
     let read = reopened.read().unwrap();
-    let main = RefState { target, version: 2 };
+    let main = RefState::new(target, 2);
     assert_eq!(read.get_ref("main").unwrap(), Some(main));
     let log = read.reflog("main", 10).unwrap();
     let moves: Vec<_> = log.iter().map(|entry| (entry.old, entry.new)).collect();
@@ -1842,14 +1808,10 @@ fn index_records_a_power_loss_zero_filled_are_not_counted_and_replay_replaces_th
             )
         };
         for n in 0..checkpointed + 3 {
-            insert(
-                &store,
-                &[ChangesetMeta {
-                    seq: 0,
-                    generation: 0,
-                    ..chain(n)
-                }],
-            );
+            let mut meta = chain(n);
+            meta.seq = 0;
+            meta.generation = 0;
+            insert(&store, &[meta]);
         }
         assert_eq!(
             ckpt(&template) > 0,
@@ -2071,7 +2033,7 @@ fn an_index_open_counts_by_length_past_a_malformed_checkpoint_and_fails_on_an_un
     fs::remove_file(layout.journal_ckpt()).unwrap();
     // A symlink to itself: a read of it fails with ELOOP.
     std::os::unix::fs::symlink("journal.ckpt", layout.journal_ckpt()).unwrap();
-    match Index::open(&layout, Arc::new(RealFs)) {
+    match Index::open(&layout, Arc::new(RealFs::new())) {
         Err(StoreError::Io(e)) => assert_eq!(e.raw_os_error(), Some(40), "ELOOP: {e}"),
         other => panic!("an unreadable checkpoint: expected its I/O error, got {other:?}"),
     }
@@ -2149,7 +2111,7 @@ fn counting_by_length_never_lets_a_zeroed_par_col_entry_end_parents_log() {
     column[2 * 8..].fill(0);
     fs::write(&pars, column).unwrap();
     fs::write(layout.journal_ckpt(), b"bad").unwrap();
-    match Index::open(&layout, Arc::new(RealFs)) {
+    match Index::open(&layout, Arc::new(RealFs::new())) {
         Err(StoreError::IndexCorrupt { .. }) => {}
         other => panic!("a malformed checkpoint: expected IndexCorrupt, got {other:?}"),
     }
@@ -2300,11 +2262,10 @@ fn chained(n: u64) -> ChangesetMeta {
 
 /// [`chained`]`(n)` as the store holds it: at seq `n`, generation `n + 1`.
 fn chained_stored(n: u64) -> ChangesetMeta {
-    ChangesetMeta {
-        seq: n,
-        generation: n + 1,
-        ..chained(n)
-    }
+    let mut meta = chained(n);
+    meta.seq = n;
+    meta.generation = n + 1;
+    meta
 }
 
 /// The lengths of the index columns and `parents.log` at `root`.
@@ -2947,7 +2908,7 @@ const ABORT_ROOT: &str = "SWARMOPS_TEST_META_ABORT_ROOT";
 fn cut_fails_child(root: &Utf8Path) {
     let mut fails = Fails::new("append_durable journal.log", Strike::After);
     fails.cut = Some("truncate journal.log");
-    let fails = Arc::new(Watched(fails, RealFs));
+    let fails = Arc::new(Watched(fails, RealFs::new()));
     let store = MetaStore::create_with_fs(root, Arc::clone(&fails) as Arc<dyn FsOps>).unwrap();
     insert(&store, &[cs(0, &[])]);
     fails.arm();
@@ -2977,7 +2938,7 @@ fn a_failed_log_sync_cuts_the_frame_and_reports_not_committed() {
         let (_dir, root) = new_root();
         let fails = Arc::new(Watched(
             Fails::new("append_durable journal.log", strike),
-            RealFs,
+            RealFs::new(),
         ));
         let store = store_on(&root, &fails);
         insert(&store, &[cs(0, &[])]); // frame 0
@@ -3065,7 +3026,7 @@ fn a_failed_off_append_after_the_log_sync_is_post_commit() {
         let (_dir, root) = new_root();
         let fails = Arc::new(Watched(
             Fails::new("append_durable journal.off", strike),
-            RealFs,
+            RealFs::new(),
         ));
         let store = store_on(&root, &fails);
         insert(&store, &[cs(0, &[])]); // frame 0
@@ -3140,7 +3101,7 @@ fn a_failed_listing_whose_cut_fails_too_tells_both() {
     let (_dir, root) = new_root();
     let mut fails = Fails::new("append_durable journal.off", Strike::After);
     fails.cut = Some("truncate journal.off");
-    let fails = Arc::new(Watched(fails, RealFs));
+    let fails = Arc::new(Watched(fails, RealFs::new()));
     let store = MetaStore::create_with_fs(&root, Arc::clone(&fails) as Arc<dyn FsOps>).unwrap();
     insert(&store, &[cs(0, &[])]);
     fails.arm();
@@ -3232,7 +3193,7 @@ fn a_failed_listing_in_the_tail_check_is_not_committed() {
         let (_dir, root) = new_root();
         let fails = Arc::new(Watched(
             Fails::new("append_durable journal.off", strike),
-            RealFs,
+            RealFs::new(),
         ));
         let store = store_on(&root, &fails);
         insert(&store, &[cs(0, &[])]); // frame 0
@@ -3274,6 +3235,13 @@ fn a_failed_listing_in_the_tail_check_is_not_committed() {
 /// What a write transaction on `store` repaired, as it reports it once open; the write is dropped
 /// uncommitted (its repairs stay made). Then the next write repairs nothing.
 #[track_caller]
+/// The empty [`Recovered`] with `set` applied: `recovery(|r| r.views_rebuilt = true)`.
+fn recovery(set: impl FnOnce(&mut Recovered)) -> Recovered {
+    let mut r = Recovered::default();
+    set(&mut r);
+    r
+}
+
 fn recovered_by_a_write(store: &MetaStore) -> Recovered {
     let recovered = store.write().unwrap().recovered();
     assert_eq!(
@@ -3327,14 +3295,10 @@ fn a_write_reports_each_repair_it_makes() {
     let clean = log_len(&root);
     let torn = [&100_u32.to_le_bytes()[..], &[0; 4], &[0xee; 10]].concat();
     append_bytes(Layout::new(&root).journal_log(), &torn);
-    let cut = Some(LogCut {
-        at: clean,
-        bytes: 18,
+    let cut = Some(LogCut::new(clean, 18));
+    let want = recovery(|r| {
+        r.log_cut = cut;
     });
-    let want = Recovered {
-        log_cut: cut,
-        ..none
-    };
     assert_eq!(recovered_by_a_write(&store), want, "a torn tail");
 
     // A step after the commit point that failed (PostCommit), in a transaction that inserts
@@ -3346,28 +3310,25 @@ fn a_write_reports_each_repair_it_makes() {
         (
             "append_durable journal.off",
             false,
-            Recovered {
-                frames_listed: 1,
-                records_replayed: 1,
-                ..none
-            },
+            recovery(|r| {
+                r.frames_listed = 1;
+                r.records_replayed = 1;
+            }),
         ),
         (
             "append ids.col",
             false,
-            Recovered {
-                index_records_dropped: 1,
-                records_replayed: 1,
-                ..none
-            },
+            recovery(|r| {
+                r.index_records_dropped = 1;
+                r.records_replayed = 1;
+            }),
         ),
         (
             "atomic_replace main",
             true,
-            Recovered {
-                refs_replayed: 1,
-                ..none
-            },
+            recovery(|r| {
+                r.refs_replayed = 1;
+            }),
         ),
     ];
     for (failing, moves, want) in failed_after_the_commit_point {
@@ -3386,10 +3347,9 @@ fn a_write_reports_each_repair_it_makes() {
     let sorted = Layout::new(&root).meta_path("sorted");
     fs::write(sorted.join("dh.key"), []).unwrap();
     fs::write(sorted.join("dh.rec"), []).unwrap();
-    let want = Recovered {
-        views_rebuilt: true,
-        ..none
-    };
+    let want = recovery(|r| {
+        r.views_rebuilt = true;
+    });
     assert_eq!(recovered_by_a_write(&store), want, "a compaction cut short");
 
     // The tail check's sync of a frame whose listing failed fails too (storage spec §2 rule 3
@@ -3398,12 +3358,11 @@ fn a_write_reports_each_repair_it_makes() {
     fail.set("sync_data journal.log");
     let recovered = store.write().unwrap().recovered();
     fail.clear();
-    let want = Recovered {
-        frames_listed: 1,
-        frames_rewritten: 1,
-        records_replayed: 1,
-        ..none
-    };
+    let want = recovery(|r| {
+        r.frames_listed = 1;
+        r.frames_rewritten = 1;
+        r.records_replayed = 1;
+    });
     assert_eq!(recovered, want, "a failed sync in the tail check");
     assert_eq!(recovered_by_a_write(&store), none, "after the rewrite");
 
@@ -3421,11 +3380,10 @@ fn a_write_reports_each_repair_it_makes() {
     entries[8..].fill(0);
     fs::write(&off, entries).unwrap();
     let after_power_loss = open_checked(&root).unwrap();
-    let want = Recovered {
-        frames_listed: 2,
-        off_bytes_dropped: 16,
-        ..none
-    };
+    let want = recovery(|r| {
+        r.frames_listed = 2;
+        r.off_bytes_dropped = 16;
+    });
     assert_eq!(
         recovered_by_a_write(&after_power_loss),
         want,
@@ -3481,7 +3439,7 @@ fn steady_writes_report_no_recovery() {
 #[test]
 #[ignore = "slow, ~20 s: 1,100 fsync'd commits; just check-slow runs it"]
 fn steady_writes_on_the_real_filesystem_report_no_recovery() {
-    steady_writes(|| checked(RealFs));
+    steady_writes(|| checked(RealFs::new()));
 }
 
 /// An injected failure is named by the call it struck, its file relative to the store's root:
@@ -3516,7 +3474,7 @@ fn an_injected_failure_names_the_call_it_struck() {
     ];
     for (call, method, file, before) in cases {
         let (_dir, root) = new_root();
-        let fails = Arc::new(Watched(Fails::new(call, Strike::After), RealFs));
+        let fails = Arc::new(Watched(Fails::new(call, Strike::After), RealFs::new()));
         let store = store_on(&root, &fails);
         for n in 0..before {
             insert(&store, &[cs(n, &[])]);
@@ -3667,7 +3625,7 @@ fn a_direct_read_that_fails_names_its_file() {
         "sorted/dh.rec",
     ] {
         let (_dir, root) = damaged(&|meta| fs::remove_file(meta.join(file)).unwrap());
-        match Index::open(&Layout::new(&root), Arc::new(RealFs)) {
+        match Index::open(&Layout::new(&root), Arc::new(RealFs::new())) {
             Err(StoreError::IndexCorrupt { what }) => {
                 assert_eq!(what, format!("meta/{file} is missing"));
             }
@@ -3691,7 +3649,7 @@ fn a_listing_or_an_open_that_fails_names_its_file() {
     insert(&store, &[cs(0, &[])]);
     drop(store);
     let index: fn(&Utf8Path) -> Result<(), StoreError> =
-        |root| Index::open(&Layout::new(root), Arc::new(RealFs)).map(drop);
+        |root| Index::open(&Layout::new(root), Arc::new(RealFs::new())).map(drop);
     let cases = [
         DirectRead {
             what: "refs/release a regular file",
@@ -3789,11 +3747,7 @@ fn fail_at_every_store_call_reports_honestly() {
             for k in 1..=calls + 1 {
                 let what = format!("{kind}, call {k} of {calls} failing once with {error:?}");
                 let (_dir, root) = copy_of(&template);
-                let fail = FailAt {
-                    at: k,
-                    mode: FailMode::Once,
-                    error,
-                };
+                let fail = FailAt::new(k, FailMode::Once, error);
                 let failing = Arc::new(FailAtFs::new(NoSyncFs, fail));
                 let mut store =
                     MetaStore::open_with_fs(&root, checked(Arc::clone(&failing))).unwrap();
@@ -3913,11 +3867,7 @@ fn errors_during_recovery_leave_the_store_openable() {
         for k2 in 1..=recovery {
             let what = format!("crash at {k1}, then recovery call {k2} of {recovery} failing");
             let (_dir, root) = copy_of(&crashed);
-            let fail = FailAt {
-                at: k2,
-                mode: FailMode::Once,
-                error: InjectedError::Eio,
-            };
+            let fail = FailAt::new(k2, FailMode::Once, InjectedError::Eio);
             let mut store =
                 MetaStore::open_with_fs(&root, checked(FailAtFs::new(NoSyncFs, fail))).unwrap();
             store.set_parallelism(1);
@@ -4157,7 +4107,7 @@ fn the_test_hooks_build_the_filesystem_they_name() {
 fn crash_at_any_create_call_leaves_a_store_open_or_create_takes() {
     if let Ok(root) = std::env::var(CREATE_CRASH_ROOT) {
         let k = std::env::var(CRASH_AT_ENV).unwrap().parse().unwrap();
-        let fs = checked(CrashAtFs::new(RealFs, k));
+        let fs = checked(CrashAtFs::new(RealFs::new(), k));
         MetaStore::create_with_fs(Utf8Path::new(&root), fs).unwrap();
         return;
     }
@@ -4448,7 +4398,7 @@ fn read_committed_never_returns_a_frame_its_writer_cuts() {
     insert(&store, &[cs(0, &[])]);
     cas(&store, "main", None, Some(0));
     let before = log_len(&root);
-    let (fs, held) = HoldThenFail::new(Layout::new(&root).journal_log(), RealFs);
+    let (fs, held) = HoldThenFail::new(Layout::new(&root).journal_log(), RealFs::new());
     let writer = MetaStore::open_with_fs(&root, checked(fs)).unwrap();
     let root = &root;
     thread::scope(|scope| {
@@ -4574,10 +4524,8 @@ fn assert_read_committed_lists_it(store: &MetaStore, root: &Utf8Path, what: &str
     );
     drop(read);
     assert_eq!(listed(root), 2, "{what}: journal.off lists the frame");
-    let listed_one = TailRepair {
-        frames_listed: 1,
-        ..TailRepair::default()
-    };
+    let mut listed_one = TailRepair::default();
+    listed_one.frames_listed = 1;
     assert_eq!(repair, listed_one, "{what}");
 }
 
@@ -4592,7 +4540,7 @@ fn read_committed_lists_and_returns_a_frame_committed_but_not_listed() {
 
     if let Ok(root) = std::env::var(COMMITTED_CRASH_ROOT) {
         let k = std::env::var(CRASH_AT_ENV).unwrap().parse().unwrap();
-        let fs = checked(CrashAtFs::new(RealFs, k));
+        let fs = checked(CrashAtFs::new(RealFs::new(), k));
         let store = MetaStore::open_with_fs(Utf8Path::new(&root), fs).unwrap();
         // Call k is the listing: the process aborts there.
         let _ = commit_one_on_zero(&store);
@@ -4603,12 +4551,12 @@ fn read_committed_lists_and_returns_a_frame_committed_but_not_listed() {
     // cuts the entry back off journal.off.
     let (_dir, root, store) = new_store();
     insert(&store, &[cs(0, &[])]);
-    let fail = FailAt {
-        at: calls_to_the_listing(&root),
-        mode: FailMode::Once,
-        error: InjectedError::Eio,
-    };
-    let failing = Arc::new(FailAtFs::new(RealFs, fail));
+    let fail = FailAt::new(
+        calls_to_the_listing(&root),
+        FailMode::Once,
+        InjectedError::Eio,
+    );
+    let failing = Arc::new(FailAtFs::new(RealFs::new(), fail));
     let writer = MetaStore::open_with_fs(&root, checked(Arc::clone(&failing))).unwrap();
     let committed = commit_one_on_zero(&writer);
     assert!(
@@ -4748,7 +4696,7 @@ fn read_committed_takes_its_snapshot_under_the_lock() {
         layout: Layout::new(&root),
         calls: Mutex::new(Vec::new()),
     };
-    let probe = Arc::new(Watched(probe, RealFs));
+    let probe = Arc::new(Watched(probe, RealFs::new()));
     let reader = MetaStore::open_with_fs(&root, checked(Arc::clone(&probe))).unwrap();
     probe.calls.lock().unwrap().clear();
     let (read, _) = reader.read_committed().unwrap();
@@ -4933,7 +4881,7 @@ fn reader_racing_commits(commits: u32) -> (TempDir, Utf8PathBuf, MetaStore) {
         left: AtomicU32::new(commits),
         next: AtomicU64::new(2),
     };
-    let reader = MetaStore::open_with_fs(&root, checked(Watched(racing, RealFs))).unwrap();
+    let reader = MetaStore::open_with_fs(&root, checked(Watched(racing, RealFs::new()))).unwrap();
     (dir, root, reader)
 }
 
@@ -5031,7 +4979,8 @@ fn a_snapshot_racing_a_journal_off_cut_reads_again_and_reports_no_damage() {
         listed: listed_tx,
         measured: Mutex::new(measured_rx),
     };
-    let writer = MetaStore::open_with_fs(&root, checked(Watched(listing_fails, RealFs))).unwrap();
+    let writer =
+        MetaStore::open_with_fs(&root, checked(Watched(listing_fails, RealFs::new()))).unwrap();
     // Right after the reader first measures journal.off, the writer's listing fails, and the
     // reader reads on once the writer has cut the entry back.
     let (fs, calls) = RecordingFs::new();
@@ -5133,7 +5082,7 @@ fn a_snapshot_whose_second_read_of_the_frames_meets_a_cut_takes_another_round() 
         seen: AtomicU32::new(0),
         calls: Arc::clone(&calls),
     };
-    let reader = MetaStore::open_with_fs(&root, checked(Watched(cutting, RealFs))).unwrap();
+    let reader = MetaStore::open_with_fs(&root, checked(Watched(cutting, RealFs::new()))).unwrap();
     let read = match reader.read() {
         Ok(read) => read,
         Err(e) => panic!("expected a snapshot, got {e:?}"),
@@ -5313,13 +5262,7 @@ fn a_snapshot_drops_a_ref_whose_delete_is_not_materialized() {
     assert_eq!(read.get_ref("release/v1").unwrap(), None);
     let main = ("main".to_owned(), ref_state(1, 1));
     assert_eq!(read.list_refs().unwrap(), std::slice::from_ref(&main));
-    let deleted = RefMoveEntry {
-        seq: frame.seq,
-        old: Some(id(1)),
-        new: None,
-        actor: "crashed/1".into(),
-        ts: 7,
-    };
+    let deleted = RefMoveEntry::new(frame.seq, Some(id(1)), None, "crashed/1".into(), 7);
     assert_eq!(read.reflog("release/v1", 1).unwrap(), [deleted]);
     drop(read);
     // The files alone, as verify reads them, still show it.
@@ -5467,7 +5410,7 @@ fn assert_replayed(read: &MetaRead<'_>, what: &str) {
 fn crash_at_any_replay_call_recovers_to_the_journal() {
     if let Ok(root) = std::env::var(REPLAY_CRASH_ROOT) {
         let k = std::env::var(CRASH_AT_ENV).unwrap().parse().unwrap();
-        let fs = checked(CrashAtFs::new(RealFs, k));
+        let fs = checked(CrashAtFs::new(RealFs::new(), k));
         let mut store = MetaStore::open_with_fs(Utf8Path::new(&root), fs).unwrap();
         // One file at a time, in write order, as the dry run: call k is the same call.
         store.set_parallelism(1);
@@ -5706,10 +5649,10 @@ const FSIZE_DIR: &str = "SWARMOPS_TEST_META_FSIZE_DIR";
 fn temp_write_failures(dir: &Utf8Path) {
     let bytes = vec![0; 64 * 1024];
     let reported = [
-        RealFs
+        RealFs::new()
             .write_durable_temp(dir.as_std_path(), &bytes)
             .map(drop),
-        RealFs.atomic_replace(dir.join("f").as_std_path(), &bytes),
+        RealFs::new().atomic_replace(dir.join("f").as_std_path(), &bytes),
     ]
     .map(|result| match result {
         Ok(()) => "written".to_owned(),

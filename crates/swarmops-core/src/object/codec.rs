@@ -8,6 +8,7 @@ use crate::error::PathError;
 
 /// Why bytes are not a canonical object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum CodecError {
     /// The four magic bytes did not match the object kind.
     #[error("bad magic")]

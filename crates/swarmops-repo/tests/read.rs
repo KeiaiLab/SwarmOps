@@ -34,7 +34,7 @@ use swarmops_testkit::test_name;
 const CHILD_ROOT: &str = "SWARMOPS_TEST_REPO_READ_CHILD_ROOT";
 
 fn unknown_id() -> ChangesetId {
-    ChangesetId(hash_object(ObjectKind::Changeset, b"never committed"))
+    ChangesetId::new(hash_object(ObjectKind::Changeset, b"never committed"))
 }
 
 /// The names, kinds and ids of directory `dir`'s entries at changeset `id`.
@@ -152,19 +152,13 @@ fn insert_prefix_twins(root: &Utf8Path) -> [ChangesetId; 2] {
     let twins = [1u8, 2].map(|last| {
         let mut id = [0xab; 32];
         id[31] = last;
-        ChangesetId(ObjectId(id))
+        ChangesetId::new(ObjectId::new(id))
     });
     let meta = MetaStore::open(root).unwrap();
     let mut write = meta.write().unwrap();
     for (n, id) in (0u8..).zip(twins) {
         write
-            .insert_changeset(ChangesetMeta {
-                id,
-                seq: 0,
-                generation: 0,
-                delta_hash: [n; 32],
-                parents: Vec::new(),
-            })
+            .insert_changeset(ChangesetMeta::new(id, 0, 0, [n; 32], Vec::new()))
             .unwrap();
     }
     write.commit().unwrap();
@@ -329,13 +323,13 @@ fn changeset_meta_reads_the_index_record() {
             .changeset(id)
             .unwrap()
             .expect("the changeset is stored");
-        ChangesetMeta {
+        ChangesetMeta::new(
             id,
             seq,
             generation,
-            delta_hash: stored.changeset.delta_hash().unwrap(),
-            parents: parents.to_vec(),
-        }
+            stored.changeset.delta_hash().unwrap(),
+            parents.to_vec(),
+        )
     };
     let meta = |id: ChangesetId| repo.changeset_meta(id).unwrap();
     assert_eq!(meta(c1), Some(record(c1, 0, 1, &[])));
@@ -373,7 +367,7 @@ fn put_objects_then_contains_object() {
     let ids = repo.put_objects(objects.clone()).unwrap();
     assert_eq!(ids, [file.0, tree.id().0]);
 
-    let store = FsObjectStore::open(Layout::new(&root), Box::new(RealFs));
+    let store = FsObjectStore::open(Layout::new(&root), Box::new(RealFs::new()));
     for (&id, object) in ids.iter().zip(&objects) {
         assert!(repo.contains_object(id).unwrap(), "{id}");
         assert_eq!(store.get(id).unwrap().as_ref(), Some(object), "{id}");
@@ -393,11 +387,11 @@ fn cas_ref_through_repo_records_reflog() {
     assert_eq!(repo.get_ref("main").unwrap(), None);
     assert_eq!(
         repo.cas_ref("main", None, Some(c1), "agent/one").unwrap(),
-        CasOutcome {
-            result: CasResult::Applied { old: None },
-            warnings: Vec::new(),
-            recovered: Recovered::default(),
-        },
+        CasOutcome::new(
+            CasResult::Applied { old: None },
+            Vec::new(),
+            Recovered::default()
+        ),
         "a move whose every step succeeds has no warnings, and repaired nothing first"
     );
     assert_eq!(
@@ -420,10 +414,7 @@ fn cas_ref_through_repo_records_reflog() {
         CasResult::Mismatch { actual: Some(c2) },
         "a stale expectation moves nothing"
     );
-    let main = RefState {
-        target: c2,
-        version: 2,
-    };
+    let main = RefState::new(c2, 2);
     assert_eq!(repo.get_ref("main").unwrap(), Some(main));
     assert_eq!(repo.list_refs().unwrap(), [("main".to_owned(), main)]);
 
@@ -487,14 +478,7 @@ fn create_open_and_info() {
     );
     assert_eq!(
         info,
-        RepoInfo {
-            repo_id: info.repo_id.clone(),
-            name: "demo".to_owned(),
-            store_version: 1,
-            changesets: 0,
-            refs: 0,
-            main: None,
-        }
+        RepoInfo::new(info.repo_id.clone(), "demo".to_owned(), 1, 0, 0, None)
     );
     assert_eq!(
         fs::read(root.join("FORMAT")).unwrap(),
@@ -1104,14 +1088,14 @@ fn create_crashing_at(k: u64, total: u64) {
     assert!(finished || child.status.signal() == Some(SIGABRT), "k={k}");
 
     // The crash at the last call (the store root's sync) comes after FORMAT's link.
-    let repo = match LocalRepo::open_with_fs(&root, checked(RealFs)) {
+    let repo = match LocalRepo::open_with_fs(&root, checked(RealFs::new())) {
         Ok(repo) => {
             assert!(k >= total, "k={k}: a store opened before FORMAT was linked");
             repo
         }
         Err(RepoError::Store(StoreError::Format(_))) => {
             assert!(k < total, "k={k}");
-            LocalRepo::create_with_fs(&root, "demo", checked(RealFs)).unwrap()
+            LocalRepo::create_with_fs(&root, "demo", checked(RealFs::new())).unwrap()
         }
         Err(e) => panic!("k={k}: {e}"),
     };
@@ -1119,7 +1103,7 @@ fn create_crashing_at(k: u64, total: u64) {
     assert_eq!((info.name.as_str(), info.changesets), ("demo", 0), "k={k}");
     let id = commit(&repo, &[], vec![put("f", b"after the crash")]);
     assert_eq!(repo.verify(Depth::Deep).unwrap().problems, [], "k={k}");
-    let reopened = LocalRepo::open_with_fs(&root, checked(RealFs)).unwrap();
+    let reopened = LocalRepo::open_with_fs(&root, checked(RealFs::new())).unwrap();
     assert_eq!(reopened.info().unwrap(), repo.info().unwrap(), "k={k}");
     assert!(reopened.changeset(id).unwrap().is_some(), "k={k}");
 }
@@ -1204,10 +1188,7 @@ mod snapshot {
             "main as the snapshot saw it"
         );
         assert_eq!(snap.resolve("main~1").unwrap(), c1);
-        let main = RefState {
-            target: c2,
-            version: 1,
-        };
+        let main = RefState::new(c2, 1);
         assert_eq!(snap.get_ref("main").unwrap(), Some(main));
         assert_eq!(snap.list_refs().unwrap(), [("main".to_owned(), main)]);
         let info = snap.info().unwrap();
@@ -1285,20 +1266,20 @@ mod snapshot {
         let lib = blob(b"pub fn f() {}\n");
         assert_eq!(snap.blob(lib).unwrap(), b"pub fn f() {}\n");
 
-        match snap.blob(BlobId(src.0)) {
+        match snap.blob(BlobId::new(src.0)) {
             Err(RepoError::MissingObject { id, kind }) => {
                 assert_eq!((id, kind), (src.0, ObjectKind::Blob));
             }
             other => panic!("expected MissingObject, got {other:?}"),
         }
-        match snap.tree(TreeId(lib.0)) {
+        match snap.tree(TreeId::new(lib.0)) {
             Err(RepoError::MissingObject { id, kind }) => {
                 assert_eq!((id, kind), (lib.0, ObjectKind::Tree));
             }
             other => panic!("expected MissingObject, got {other:?}"),
         }
         let absent = hash_object(ObjectKind::Blob, b"never stored");
-        match snap.blob(BlobId(absent)) {
+        match snap.blob(BlobId::new(absent)) {
             Err(RepoError::MissingObject { id, .. }) => assert_eq!(id, absent),
             other => panic!("expected MissingObject, got {other:?}"),
         }
@@ -1377,14 +1358,8 @@ mod span {
             calls();
             let span = FileSpan::Bytes { start: 1000 };
             let got = snap.read_file_span(cs, &path(name), span, 100).unwrap();
-            let want = FileSpanRead {
-                kind: LeafKind::File,
-                blob: id,
-                size: 1 << 20,
-                start: 1000,
-                bytes: content[1000..1100].to_vec(),
-                lines: None,
-            };
+            let bytes = content[1000..1100].to_vec();
+            let want = FileSpanRead::new(LeafKind::File, id, 1 << 20, 1000, bytes, None);
             assert_eq!(got, Some(want), "{name}");
             assert_eq!(
                 calls(),
@@ -1537,21 +1512,17 @@ mod span {
         assert_eq!(
             page.entries,
             [
-                ListedEntry {
-                    path: path("b.rs"),
-                    target: EntryTarget::Leaf(LeafKind::File, blob(b"fn b() {}\n")),
-                    size: Some(10),
-                },
-                ListedEntry {
-                    path: path("c"),
-                    target: EntryTarget::Dir(c),
-                    size: None,
-                },
-                ListedEntry {
-                    path: path("c/d.md"),
-                    target: EntryTarget::Leaf(LeafKind::File, blob(b"# d\n")),
-                    size: Some(4),
-                },
+                ListedEntry::new(
+                    path("b.rs"),
+                    EntryTarget::Leaf(LeafKind::File, blob(b"fn b() {}\n")),
+                    Some(10),
+                ),
+                ListedEntry::new(path("c"), EntryTarget::Dir(c), None),
+                ListedEntry::new(
+                    path("c/d.md"),
+                    EntryTarget::Leaf(LeafKind::File, blob(b"# d\n")),
+                    Some(4),
+                ),
             ]
         );
         // A file, or nothing, at the listed path.

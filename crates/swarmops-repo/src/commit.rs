@@ -83,6 +83,7 @@ pub const RESERVED_METADATA_KEY_SUFFIX: &str = ":b64";
 
 /// One change of a [`CommitRequest`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Change {
     /// The path it changes.
     pub path: RepoPath,
@@ -90,8 +91,16 @@ pub struct Change {
     pub op: ChangeOp,
 }
 
+impl Change {
+    /// Makes one of the fields given.
+    pub fn new(path: RepoPath, op: ChangeOp) -> Change {
+        Change { path, op }
+    }
+}
+
 /// What a [`Change`] does at its path.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ChangeOp {
     /// The path holds `content` as a `kind` leaf afterwards: a file, an executable or a symlink
     /// (whose content is its target), never a directory. Missing directories on the way are
@@ -119,6 +128,7 @@ pub enum ChangeOp {
 
 /// A commit to make: changes to the first parent's tree, and the changeset's other fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CommitRequest {
     /// The parents, the mainline parent first: the changes apply to its tree. None for a root
     /// changeset, whose changes apply to the empty tree.
@@ -142,8 +152,42 @@ pub struct CommitRequest {
     pub advance: Option<Advance>,
 }
 
+impl CommitRequest {
+    /// Makes a commit request of its fields.
+    ///
+    /// Invariant: metadata keys strictly ascending, none ending in `:b64`, each path changed at
+    /// most once. `new` does not check it: [`Repo::commit`] does, before anything is written, with
+    /// [`check_metadata`] and [`RepoError::DuplicatePath`], as for a request built field by field.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "every field is required (the non-exhaustive design, decision 2)"
+    )]
+    pub fn new(
+        parents: Vec<ChangesetId>,
+        changes: Vec<Change>,
+        author: Signature,
+        committer: Signature,
+        message: Vec<u8>,
+        metadata: Vec<(String, Vec<u8>)>,
+        allow_empty: bool,
+        advance: Option<Advance>,
+    ) -> CommitRequest {
+        CommitRequest {
+            parents,
+            changes,
+            author,
+            committer,
+            message,
+            metadata,
+            allow_empty,
+            advance,
+        }
+    }
+}
+
 /// The ref a commit publishes its changeset on ([`CommitRequest::advance`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Advance {
     /// The ref: `main` or `release/<x>`.
     pub name: String,
@@ -152,8 +196,19 @@ pub struct Advance {
     pub actor: String,
 }
 
+impl Advance {
+    /// Makes one of the fields given.
+    pub fn new(name: &str, actor: &str) -> Advance {
+        Advance {
+            name: name.to_owned(),
+            actor: actor.to_owned(),
+        }
+    }
+}
+
 /// The move of the ref a commit advanced ([`CommitOutcome::advanced`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Advanced {
     /// The ref.
     pub name: String,
@@ -165,8 +220,20 @@ pub struct Advanced {
     pub already_applied: bool,
 }
 
+impl Advanced {
+    /// Makes one of the fields given.
+    pub fn new(name: &str, old: Option<ChangesetId>, already_applied: bool) -> Advanced {
+        Advanced {
+            name: name.to_owned(),
+            old,
+            already_applied,
+        }
+    }
+}
+
 /// What [`Repo::put_blob`] stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BlobPut {
     /// The blob's id, which a [`ChangeOp::PutBlob`] names it by.
     pub id: BlobId,
@@ -177,8 +244,16 @@ pub struct BlobPut {
     pub written: bool,
 }
 
+impl BlobPut {
+    /// Makes one of the fields given.
+    pub fn new(id: BlobId, size: u64, written: bool) -> BlobPut {
+        BlobPut { id, size, written }
+    }
+}
+
 /// What [`Repo::commit`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CommitOutcome {
     /// The changeset's id.
     pub id: ChangesetId,
@@ -255,13 +330,13 @@ impl WrittenChangeset {
     /// The index record the changeset's insert queues: its seq and generation are the store's to
     /// number.
     pub(crate) fn meta(&self) -> ChangesetMeta {
-        ChangesetMeta {
-            id: self.id,
-            seq: 0,
-            generation: 0,
-            delta_hash: self.delta_hash,
-            parents: self.changeset.parents.clone(),
-        }
+        ChangesetMeta::new(
+            self.id,
+            0,
+            0,
+            self.delta_hash,
+            self.changeset.parents.clone(),
+        )
     }
 }
 
@@ -313,7 +388,7 @@ impl<O: ObjectStore> Repo<O> {
         let changes = sorted_changes(changes, empty)?;
         self.check_parents(&parents, seen)?;
         self.retain_named(&changes)?;
-        let (candidates, contents) = candidate_delta(changes);
+        let (candidates, contents) = candidate_delta(changes)?;
         let onto = match parents.first() {
             Some(&first) => Some(self.changeset_object(first)?.root),
             None => None,
@@ -385,24 +460,22 @@ impl<O: ObjectStore> Repo<O> {
         } = edit.finish()?;
         let put: BTreeSet<ObjectId> = delta
             .iter()
-            .filter_map(|entry| match entry.op {
-                DeltaOp::Put { id, .. } => Some(id.0),
-                DeltaOp::Delete => None,
-            })
+            .filter_map(|entry| entry.op.put())
+            .map(|(_, id)| id.0)
             .collect();
         contents.retain(|id, _| put.contains(id));
-        let changeset = Changeset {
+        let changeset = Changeset::new(
             parents,
             root,
             delta,
             author,
             committer,
             message,
-            extra_headers: Vec::new(),
+            Vec::new(),
             metadata,
-        };
+        )?;
         let (object, delta_hash) = changeset.encode_hashed()?;
-        let id = ChangesetId(object.id());
+        let id = ChangesetId::new(object.id());
 
         let (blob_count, tree_count) = (contents.len(), trees.len());
         let mut batch = Vec::with_capacity(blob_count + tree_count + 1);
@@ -430,7 +503,7 @@ impl<O: ObjectStore> Repo<O> {
     pub fn put_blob(&self, content: Vec<u8>) -> Result<BlobPut, RepoError> {
         let size = bytes::to_u64(content.len());
         let blob = Hashed::new(ObjectKind::Blob, content);
-        let id = BlobId(blob.id());
+        let id = BlobId::new(blob.id());
         let outcomes = self.objects.put_hashed_batch(vec![blob])?;
         let written = outcomes.iter().any(|outcome| outcome.written);
         self.objects.flush()?;
@@ -538,6 +611,8 @@ impl<O: ObjectStore> Repo<O> {
                             recovered: Box::new(recovered),
                         });
                     }
+                    // Fail closed: an outcome this build cannot read moves nothing it records.
+                    _ => return Err(RepoError::unknown_variant("CasResult")),
                 };
                 Some(Advanced {
                     name,
@@ -638,7 +713,7 @@ pub(crate) fn sorted_changes(
 /// the blob it names by id), with the contents as blob objects by id: each content hashed once.
 pub(crate) fn candidate_delta(
     changes: Vec<Change>,
-) -> (Vec<DeltaEntry>, BTreeMap<ObjectId, Hashed>) {
+) -> Result<(Vec<DeltaEntry>, BTreeMap<ObjectId, Hashed>), RepoError> {
     let mut contents = BTreeMap::new();
     let delta = changes
         .into_iter()
@@ -650,18 +725,14 @@ pub(crate) fn candidate_delta(
                     contents.entry(id).or_insert(blob);
                     DeltaOp::Put {
                         kind,
-                        id: BlobId(id),
+                        id: BlobId::new(id),
                     }
                 }
                 ChangeOp::PutBlob { kind, id } => DeltaOp::Put { kind, id },
                 ChangeOp::Delete => DeltaOp::Delete,
             };
-            DeltaEntry {
-                path,
-                op,
-                renamed_from: None,
-            }
+            DeltaEntry::new(path, op, None)
         })
-        .collect();
-    (delta, contents)
+        .collect::<Result<_, _>>()?;
+    Ok((delta, contents))
 }

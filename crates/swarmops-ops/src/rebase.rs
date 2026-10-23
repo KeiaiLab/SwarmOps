@@ -33,16 +33,18 @@ pub(crate) fn run(
         swarmops_repo::RebaseStatus::Replayed => RebaseStatus::Replayed,
         swarmops_repo::RebaseStatus::UpToDate => RebaseStatus::UpToDate,
         swarmops_repo::RebaseStatus::Absorbed => RebaseStatus::Absorbed,
+        _ => return Err(error::unknown_variant("RebaseStatus")),
     };
-    Ok(RebaseResp {
+    let mut out = RebaseResp::new(
         status,
-        changeset: outcome.changeset.to_string(),
-        root: outcome.root.to_string(),
-        onto: outcome.onto.to_string(),
-        base: outcome.base.to_string(),
-        files_changed: bytes::to_u64(outcome.files_changed),
-        auto_merged: (outcome.auto_merged.iter())
-            .map(ToString::to_string)
-            .collect(),
-    })
+        outcome.changeset.to_string(),
+        outcome.root.to_string(),
+        outcome.onto.to_string(),
+        outcome.base.to_string(),
+        bytes::to_u64(outcome.files_changed),
+    );
+    out.auto_merged = (outcome.auto_merged.iter())
+        .map(ToString::to_string)
+        .collect();
+    Ok(out)
 }

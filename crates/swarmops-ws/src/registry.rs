@@ -39,6 +39,7 @@ const TMP_DIR: &str = "tmp";
 /// One workspace's entry: who made it, where, and when. No `base` or `head`: those change on
 /// every commit and live in the workspace's `workspace.json`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Entry {
     /// The entry's format: [`ENTRY_FORMAT`].
     pub format: u32,
@@ -56,8 +57,24 @@ pub struct Entry {
     pub session: Option<String>,
 }
 
+impl Entry {
+    /// The entry of workspace `name` at `path`, made by `created_by` at `created_at` (Unix
+    /// milliseconds), in [`ENTRY_FORMAT`], which a read checks again; no hook session.
+    pub fn new(name: String, path: String, created_by: String, created_at: u64) -> Entry {
+        Entry {
+            format: ENTRY_FORMAT,
+            name,
+            path,
+            created_by,
+            created_at,
+            session: None,
+        }
+    }
+}
+
 /// What [`Registry::create`] found.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Linked {
     /// It linked the entry.
     New,
@@ -67,6 +84,7 @@ pub enum Linked {
 }
 
 /// A store's registry, at the store's root the caller names.
+#[non_exhaustive]
 pub struct Registry {
     /// `<store>/workspaces`.
     dir: Utf8PathBuf,

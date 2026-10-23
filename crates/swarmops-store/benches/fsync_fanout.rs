@@ -150,7 +150,8 @@ fn fsync_fanout(c: &mut Criterion) {
     for threads in [1, 5] {
         let dir = tempfile::tempdir_in(&base).expect("create variant dir");
         let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("UTF-8 dir");
-        let mut index = Index::create(&Layout::new(root), Arc::new(RealFs)).expect("create index");
+        let mut index =
+            Index::create(&Layout::new(root), Arc::new(RealFs::new())).expect("create index");
         index.set_parallelism(threads);
         let mut next = 0;
         group.bench_function(BenchmarkId::new("index_sync", threads), |b| {
@@ -176,14 +177,14 @@ fn fsync_fanout(c: &mut Criterion) {
 
 /// Changeset `n` of a chain: the child of changeset `n - 1`.
 fn changeset(n: u64) -> ChangesetMeta {
-    let id = |n: u64| ChangesetId(hash_object(ObjectKind::Changeset, &n.to_le_bytes()));
-    ChangesetMeta {
-        id: id(n),
-        seq: 0,
-        generation: n + 1,
-        delta_hash: hash_object(ObjectKind::Blob, &n.to_le_bytes()).0,
-        parents: n.checked_sub(1).map(id).into_iter().collect(),
-    }
+    let id = |n: u64| ChangesetId::new(hash_object(ObjectKind::Changeset, &n.to_le_bytes()));
+    ChangesetMeta::new(
+        id(n),
+        0,
+        n + 1,
+        hash_object(ObjectKind::Blob, &n.to_le_bytes()).0,
+        n.checked_sub(1).map(id).into_iter().collect(),
+    )
 }
 
 criterion_group!(benches, fsync_fanout);

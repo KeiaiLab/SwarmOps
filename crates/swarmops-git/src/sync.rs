@@ -52,6 +52,7 @@ const MAX_BEHIND: u64 = MAX_SYNC_WALK as u64;
 
 /// Where `main` and the remote's head stand against each other.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SyncPlan {
     /// The newest changeset on `main`'s first-parent chain that the remote's head reaches.
     pub base: ChangesetId,
@@ -63,8 +64,27 @@ pub struct SyncPlan {
     pub behind_truncated: bool,
 }
 
+impl SyncPlan {
+    /// The plan of `unpublished` above `base`, the remote `behind` by that many (stopped at
+    /// [`MAX_SYNC_WALK`] when `behind_truncated`).
+    pub fn new(
+        base: ChangesetId,
+        unpublished: Vec<ChangesetId>,
+        behind: u64,
+        behind_truncated: bool,
+    ) -> SyncPlan {
+        SyncPlan {
+            base,
+            unpublished,
+            behind,
+            behind_truncated,
+        }
+    }
+}
+
 /// Which unpublished changes the remote holds already, and which are left to land.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Recognised {
     /// The changes the remote holds, and how that was found.
     pub dropped: Vec<(ChangesetId, DropReason)>,
@@ -74,6 +94,7 @@ pub struct Recognised {
 
 /// How the remote was found to hold a change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DropReason {
     /// A commit the remote's head reaches names it in a trailer line.
     Trailer,
@@ -83,6 +104,7 @@ pub enum DropReason {
 
 /// What [`relocate`] landed.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Relocated {
     /// The last changeset landed, or the remote's head when none was.
     pub head: ChangesetId,
@@ -94,6 +116,7 @@ pub struct Relocated {
 
 /// Why the sync engine stopped.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum SyncError {
     /// `main` and the remote share no changeset within [`MAX_SYNC_WALK`].
     #[error("main and the remote's head share no changeset")]
@@ -258,22 +281,21 @@ pub fn relocate(
         no_ops: Vec::new(),
     };
     for (id, parent, cs) in changes {
-        let land = DetachedLand {
-            base: parent,
-            head: id,
-            onto: relocated.head,
-            lander: lander.clone(),
-            key: value(&cs, LAND_KEY).and_then(|key| String::from_utf8(key.to_vec()).ok()),
-            squashed_from: value(&cs, SQUASHED_FROM).and_then(chain),
-            message: None,
-            extra_metadata: vec![(SYNCED_FROM.to_owned(), id.to_string().into_bytes())],
-        };
+        let mut land = DetachedLand::new(parent, id, relocated.head, lander.clone());
+        land.key = value(&cs, LAND_KEY).and_then(|key| String::from_utf8(key.to_vec()).ok());
+        land.squashed_from = value(&cs, SQUASHED_FROM).and_then(chain);
+        land.extra_metadata = vec![(SYNCED_FROM.to_owned(), id.to_string().into_bytes())];
         match repo.land_detached(land) {
             Ok(DetachedOutcome::Landed(made)) => {
                 relocated.landed.push((id, made));
                 relocated.head = made;
             }
             Ok(DetachedOutcome::NoChanges) => relocated.no_ops.push(id),
+            // An outcome newer than this build: where the change stands is not known.
+            Ok(_) => {
+                let what = format!("DetachedOutcome: {}", crate::UNKNOWN_VARIANT);
+                return Err(SyncError::Repo(RepoError::Internal(what)));
+            }
             Err(RepoError::Conflict(conflicts)) => {
                 return Err(SyncError::Conflict {
                     change: id,
@@ -378,7 +400,7 @@ fn token(key: &str) -> &'static str {
 /// A changeset id from its 64 hex digits; `None` for anything else.
 fn parse_id(hex: &[u8]) -> Option<ChangesetId> {
     let hex = std::str::from_utf8(hex).ok()?;
-    ObjectId::from_hex(hex).ok().map(ChangesetId)
+    ObjectId::from_hex(hex).ok().map(ChangesetId::new)
 }
 
 /// A `squashed_from` value as ids, oldest first; `None` when one is not an id.

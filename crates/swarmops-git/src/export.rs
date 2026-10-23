@@ -74,6 +74,7 @@ const BRANCH_WALK: usize = 1_000;
 
 /// What to export, and into which branch ([`export()`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ExportRequest {
     /// The store ref whose history is exported, `main` or `release/<x>`: its head is the commit
     /// the branch ends at.
@@ -100,6 +101,7 @@ impl ExportRequest {
 
 /// What an export did ([`export()`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ExportReport {
     /// The changeset the source ref named in the committed snapshot the export read: the head.
     pub head: ChangesetId,
@@ -141,8 +143,46 @@ pub struct ExportReport {
     pub warnings: Vec<String>,
 }
 
+impl ExportReport {
+    /// A report of every field, in their order.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one argument per field: a report has no field to default"
+    )]
+    pub fn new(
+        head: ChangesetId,
+        head_oid: GitOid,
+        branch: String,
+        old: Option<GitOid>,
+        base: Option<ChangesetId>,
+        branch_moved: bool,
+        commits_written: u64,
+        objects_written: u64,
+        objects_checked: u64,
+        rewritten: u64,
+        recovered: TailRepair,
+        warnings: Vec<String>,
+    ) -> ExportReport {
+        ExportReport {
+            head,
+            head_oid,
+            branch,
+            old,
+            base,
+            branch_moved,
+            commits_written,
+            objects_written,
+            objects_checked,
+            rewritten,
+            recovered,
+            warnings,
+        }
+    }
+}
+
 /// Why an export failed. Nothing is written but where a variant says otherwise.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ExportError {
     /// The source ref does not exist. Nothing was read but the ref.
     #[error("the store has no ref {0}")]
@@ -192,8 +232,8 @@ pub enum ExportError {
     Repo(#[from] RepoError),
     /// What can only be a bug: a commit whose rendering does not hash to its export oid, an
     /// object the repository wrote under another oid, an external id entry naming another
-    /// changeset for a commit the export wrote. Nothing more is written, and the branch is not
-    /// moved.
+    /// changeset for a commit the export wrote, a variant of another crate's enum newer than this
+    /// build. Nothing more is written, and the branch is not moved.
     #[error("an export bug: {reason}; the branch was not moved")]
     Bug {
         /// What was found.
@@ -201,8 +241,17 @@ pub enum ExportError {
     },
 }
 
+/// The [`ExportError::Bug`] of a `match` on enum `ty` of another crate that found a variant
+/// newer than this build.
+fn unknown_variant(ty: &str) -> ExportError {
+    ExportError::Bug {
+        reason: format!("{ty}: {}", crate::UNKNOWN_VARIANT),
+    }
+}
+
 /// Why a branch is no export the source's head goes on from ([`ExportError::Diverged`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DivergedReason {
     /// Commits were made in git on top of the export of the head itself: `git import` brings them
     /// into the store, and the export after it goes on.
@@ -808,6 +857,7 @@ impl<'a, 'r> Run<'a, 'r> {
                         stack.push((sub, sub_against));
                     }
                     EntryTarget::Leaf(_, blob) => self.blob(blob)?,
+                    _ => return Err(unknown_variant("EntryTarget")),
                 }
             }
         }
@@ -864,14 +914,16 @@ impl<'a, 'r> Run<'a, 'r> {
             oids.push(match entry.target {
                 EntryTarget::Leaf(_, blob) => self.blob_git_oid(blob)?,
                 EntryTarget::Dir(dir) => self.tree_git_oid(dir)?,
+                _ => return Err(unknown_variant("EntryTarget")),
             });
         }
-        Ok(render::tree_bytes(tree, |entry| {
+        let bytes = render::tree_bytes(tree, |entry| {
             let at = (tree.entries())
                 .binary_search_by(|other| other.name.as_bytes().cmp(entry.name.as_bytes()))
                 .expect("tree_bytes gives the tree's own entries");
             oids[at]
-        }))
+        });
+        bytes.ok_or_else(|| unknown_variant("EntryTarget"))
     }
 
     /// The bytes of `commit`'s git commit ([`render_commit`]) over its parents' export oids,
@@ -956,10 +1008,7 @@ impl<'a, 'r> Run<'a, 'r> {
         let entries: Vec<(Vec<u8>, ExternalEntry)> = (commits.iter())
             .filter(|commit| !self.nodes[&commit.id].imported)
             .map(|commit| {
-                let entry = ExternalEntry {
-                    changeset: commit.id,
-                    faithful: true,
-                };
+                let entry = ExternalEntry::new(commit.id, true);
                 (commit.exported.oid.to_vec(), entry)
             })
             .collect();

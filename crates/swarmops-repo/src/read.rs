@@ -37,6 +37,7 @@ use crate::repo::{self, Repo};
 /// 2. Never hold it across requests. Besides going stale, a snapshot that counted index records
 ///    which a writer then cut back after a failed sync fails its lookups with an I/O error until
 ///    a new one is taken (storage spec §3).
+#[non_exhaustive]
 pub struct RepoRead<'r, O: ObjectStore> {
     pub(crate) repo: &'r Repo<O>,
     pub(crate) meta: MetaRead<'r>,
@@ -44,6 +45,7 @@ pub struct RepoRead<'r, O: ObjectStore> {
 
 /// What [`RepoRead::blobs`] read.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BlobsRead {
     /// The blobs found, each with its bytes, in the order asked.
     pub found: Vec<(BlobId, Vec<u8>)>,
@@ -63,6 +65,7 @@ impl<O: ObjectStore> std::fmt::Debug for RepoRead<'_, O> {
 
 /// A changeset as the store holds it: its record in the index, and its object.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct StoredChangeset {
     /// Its id.
     pub id: ChangesetId,
@@ -76,6 +79,7 @@ pub struct StoredChangeset {
 
 /// Which part of a file [`RepoRead::read_file_span`] reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FileSpan {
     /// The bytes from offset `start` to the file's end: none when `start` is at or past the end.
     Bytes {
@@ -95,6 +99,7 @@ pub enum FileSpan {
 
 /// What [`RepoRead::read_file_span`] read of a file.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FileSpanRead {
     /// The file's kind.
     pub kind: LeafKind,
@@ -113,8 +118,30 @@ pub struct FileSpanRead {
     pub lines: Option<(u64, u64)>,
 }
 
+impl FileSpanRead {
+    /// Makes one of the fields given.
+    pub fn new(
+        kind: LeafKind,
+        blob: BlobId,
+        size: u64,
+        start: u64,
+        bytes: Vec<u8>,
+        lines: Option<(u64, u64)>,
+    ) -> FileSpanRead {
+        FileSpanRead {
+            kind,
+            blob,
+            size,
+            start,
+            bytes,
+            lines,
+        }
+    }
+}
+
 /// One entry of a listing below a directory ([`RepoRead::list_tree_depth`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ListedEntry {
     /// Its path below the listed directory: its name, for one of the directory's own entries.
     pub path: RepoPath,
@@ -125,8 +152,16 @@ pub struct ListedEntry {
     pub size: Option<u64>,
 }
 
+impl ListedEntry {
+    /// Makes one of the fields given.
+    pub fn new(path: RepoPath, target: EntryTarget, size: Option<u64>) -> ListedEntry {
+        ListedEntry { path, target, size }
+    }
+}
+
 /// A page of a listing below a directory ([`RepoRead::list_tree_depth`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TreePage {
     /// The page's entries, in pre-order.
     pub entries: Vec<ListedEntry>,
@@ -215,10 +250,10 @@ impl<O: ObjectStore> Repo<O> {
         let mut at = root;
         for &dir in dirs {
             let tree = repo::tree(&self.objects, at)?;
-            match find(&tree, dir).map(|entry| entry.target) {
-                Some(EntryTarget::Dir(tree)) => at = tree,
-                Some(EntryTarget::Leaf(..)) | None => return Ok(None),
-            }
+            let Some(tree) = find(&tree, dir).and_then(|entry| entry.target.dir()) else {
+                return Ok(None);
+            };
+            at = tree;
         }
         Ok(Some(at))
     }
@@ -268,10 +303,10 @@ impl<O: ObjectStore> RepoRead<'_, O> {
         cs: ChangesetId,
         path: &RepoPath,
     ) -> Result<Option<(LeafKind, BlobId, Vec<u8>)>, RepoError> {
-        match self.entry_at(cs, path)? {
-            Some(EntryTarget::Leaf(kind, blob)) => Ok(Some((kind, blob, self.blob(blob)?))),
-            Some(EntryTarget::Dir(_)) | None => Ok(None),
-        }
+        let Some((kind, blob)) = self.entry_at(cs, path)?.and_then(EntryTarget::leaf) else {
+            return Ok(None);
+        };
+        Ok(Some((kind, blob, self.blob(blob)?)))
     }
 
     /// What `path` holds in changeset `cs`'s tree: a leaf (its kind and blob), a directory (its
@@ -322,6 +357,7 @@ impl<O: ObjectStore> RepoRead<'_, O> {
             let Some(ObjectStat {
                 kind: ObjectKind::Blob,
                 size,
+                ..
             }) = self.repo.objects.stat(id.0)?
             else {
                 read.missing.push(id);
@@ -386,6 +422,7 @@ impl<O: ObjectStore> RepoRead<'_, O> {
             Some(ObjectStat {
                 kind: ObjectKind::Blob,
                 size,
+                ..
             }) => Ok(Some(kept.read(kind, blob, size))),
             _ => Err(RepoError::MissingObject {
                 id: blob.0,
@@ -507,15 +544,13 @@ impl<O: ObjectStore> RepoRead<'_, O> {
                 return Ok(());
             };
             level.next = at + 1;
-            match target {
-                EntryTarget::Dir(tree) if level.depth < depth => {
-                    let path = below(level.path.as_ref(), name);
-                    let next = self.level(Some(path), level.depth + 1, tree)?;
-                    levels.push(next);
-                }
-                // A leaf, or a directory the listing does not enter: nothing below it is listed.
-                EntryTarget::Dir(_) | EntryTarget::Leaf(..) => return Ok(()),
-            }
+            // A leaf, or a directory the listing does not enter: nothing below it is listed.
+            let Some(tree) = target.dir().filter(|_| level.depth < depth) else {
+                return Ok(());
+            };
+            let path = below(level.path.as_ref(), name);
+            let next = self.level(Some(path), level.depth + 1, tree)?;
+            levels.push(next);
         }
         Ok(())
     }
@@ -529,6 +564,7 @@ impl<O: ObjectStore> RepoRead<'_, O> {
             Some(ObjectStat {
                 kind: ObjectKind::Blob,
                 size,
+                ..
             }) => Ok(size),
             _ => Err(RepoError::MissingObject {
                 id: id.0,
@@ -568,7 +604,7 @@ impl<O: ObjectStore> RepoRead<'_, O> {
         }
         match base.len() {
             64 => {
-                let id = ChangesetId(ObjectId::from_hex(base).expect("64 hex digits"));
+                let id = ChangesetId::new(ObjectId::from_hex(base).expect("64 hex digits"));
                 match read.changeset(id)? {
                     Some(_) => Ok(id),
                     None => Err(not_found()),

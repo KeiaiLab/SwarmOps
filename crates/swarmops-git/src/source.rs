@@ -74,6 +74,7 @@ pub(crate) fn read_bounded(
 /// A source runs on the caller's host (`git import` is a client-side operation), so its reasons
 /// may name the repository's own files.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum SourceError {
     /// There is no git repository it can open at the path it was given.
     #[error("no git repository it can open there: {reason}")]
@@ -138,6 +139,7 @@ pub enum SourceError {
 
 /// A repository a [`GitSource`] does not read as it is.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum Unsupported {
     /// Its objects are named by a hash other than SHA-1 (`extensions.objectFormat`), as written.
     #[error("its objects are named by {0} (extensions.objectFormat), not SHA-1")]

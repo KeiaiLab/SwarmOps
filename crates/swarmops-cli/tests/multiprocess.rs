@@ -506,7 +506,7 @@ impl FailFirstSync {
                 name,
                 failed: AtomicBool::new(false),
             },
-            RealFs,
+            RealFs::new(),
         )
     }
 }
@@ -530,29 +530,30 @@ impl Watch for FailFirstSync {
 /// A commit of one file, as the CLI makes it.
 fn one_file_commit(path: &str, content: &str) -> CommitRequest {
     let who = agent(3);
-    let signature = Signature {
-        name: who.clone().into_bytes(),
-        email: b"worker-3@test-swarm.swarmops.local".to_vec(),
-        secs: 1_700_000_000,
-        offset_secs: 0,
-        negative_zero: false,
-    };
-    CommitRequest {
-        parents: Vec::new(),
-        changes: vec![Change {
-            path: RepoPath::new(path).unwrap(),
-            op: ChangeOp::Put {
+    let signature = Signature::new(
+        who.clone().into_bytes(),
+        b"worker-3@test-swarm.swarmops.local".to_vec(),
+        1_700_000_000,
+        0,
+        false,
+    )
+    .unwrap();
+    CommitRequest::new(
+        Vec::new(),
+        vec![Change::new(
+            RepoPath::new(path).unwrap(),
+            ChangeOp::Put {
                 kind: LeafKind::File,
                 content: content.as_bytes().to_vec(),
             },
-        }],
-        author: signature.clone(),
-        committer: signature,
-        message: b"in process".to_vec(),
-        metadata: vec![("agent".to_owned(), who.into_bytes())],
-        allow_empty: false,
-        advance: None,
-    }
+        )],
+        signature.clone(),
+        signature,
+        b"in process".to_vec(),
+        vec![("agent".to_owned(), who.into_bytes())],
+        false,
+        None,
+    )
 }
 
 /// The 32nd commit past the checkpoint fails its batched index sync (made in this process

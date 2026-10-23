@@ -53,6 +53,7 @@ use crate::layout::Layout;
 /// one process. Dropping the value unlocks the file and closes it; the kernel releases the
 /// lock too when the process dies, so a crashed writer leaves no stale lock behind.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct MetaLock {
     file: File,
 }

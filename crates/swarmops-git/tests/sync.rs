@@ -17,7 +17,7 @@ use camino::Utf8Path;
 use swarmops_core::{ChangesetId, Signature};
 use swarmops_git::sync::{self, DropReason, Recognised, SyncError, SyncPlan};
 use swarmops_git::{ExportOid, ExportReader, RawKind, git_hash, register, render_commit, tree_oid};
-use swarmops_repo::{Change, CommitRequest, LocalRepo};
+use swarmops_repo::{Change, LocalRepo};
 use swarmops_store::{Journal, Layout, RealFs};
 use swarmops_testkit::repo::{new_repo, path, put, request};
 
@@ -29,13 +29,14 @@ const SYNCED_FROM: &str = "synced_from";
 
 /// The lander's signature: fixed, so that the same relocation makes the same changesets.
 fn lander() -> Signature {
-    Signature {
-        name: LANDER.as_bytes().to_vec(),
-        email: b"lander@test.swarmops.local".to_vec(),
-        secs: 1_760_000_100,
-        offset_secs: 0,
-        negative_zero: false,
-    }
+    Signature::new(
+        LANDER.as_bytes().to_vec(),
+        b"lander@test.swarmops.local".to_vec(),
+        1_760_000_100,
+        0,
+        false,
+    )
+    .unwrap()
 }
 
 /// Commits `changes` on `parents` with `message` and `metadata` (keys ascending): its id.
@@ -51,10 +52,8 @@ fn commit(
         .iter()
         .map(|(key, value)| ((*key).to_owned(), value.as_bytes().to_vec()))
         .collect();
-    let req = CommitRequest {
-        metadata,
-        ..request(parents, changes, message)
-    };
+    let mut req = request(parents, changes, message);
+    req.metadata = metadata;
     repo.commit(req).unwrap().id
 }
 
@@ -84,7 +83,7 @@ fn file(repo: &LocalRepo, id: ChangesetId, file: &str) -> Vec<u8> {
 
 /// How many frames the journal of the store at `root` lists.
 fn frame_count(root: &Utf8Path) -> u64 {
-    Journal::open(&Layout::new(root), Arc::new(RealFs))
+    Journal::open(&Layout::new(root), Arc::new(RealFs::new()))
         .unwrap()
         .frame_count()
         .unwrap()
@@ -112,12 +111,7 @@ fn base_is_the_newest_main_changeset_the_remote_reaches() {
     let r2 = plain(&repo, &[r1], vec![put("r2", b"2\n")]);
 
     // 1. Both moved: the base is B, the two lands above it unpublished, two behind.
-    let expected = SyncPlan {
-        base: b,
-        unpublished: vec![u1, u2],
-        behind: 2,
-        behind_truncated: false,
-    };
+    let expected = SyncPlan::new(b, vec![u1, u2], 2, false);
     assert_eq!(sync::plan(&repo, u2, r2).unwrap(), expected);
 
     // 2. The remote holds main: nothing unpublished.
@@ -142,12 +136,7 @@ fn merge_commit_on_the_remote_publishes_its_second_parent() {
     let merge = plain(&repo, &[r1, u1], vec![put("u1", b"1\n")]);
 
     // U1 is published through the merge's second parent; R1 and the merge are behind.
-    let expected = SyncPlan {
-        base: u1,
-        unpublished: vec![u2],
-        behind: 2,
-        behind_truncated: false,
-    };
+    let expected = SyncPlan::new(u1, vec![u2], 2, false);
     assert_eq!(sync::plan(&repo, u2, merge).unwrap(), expected);
 }
 
@@ -431,10 +420,7 @@ fn synced_from_is_not_rendered_by_the_export() {
 
     // 2. Its export oid is the hash of the rendering without the key: version 1 holds.
     let read = repo.snapshot().unwrap();
-    let reader = ExportReader {
-        read: &read,
-        store: repo.derived_store(),
-    };
+    let reader = ExportReader::new(&read, repo.derived_store());
     let tree = tree_oid(&reader, cs.root).unwrap();
     let parent = repo.derived::<ExportOid>(r1, &()).unwrap().git_oid();
     let rendered = render_commit(landed, &without, &[parent], tree);

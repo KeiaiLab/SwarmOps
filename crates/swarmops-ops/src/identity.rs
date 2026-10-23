@@ -74,16 +74,13 @@ pub fn require_identity(identity: Option<Identity>) -> Result<Identity, OpError>
 /// `whoami`: how the caller with `identity` (`None`: without one) is identified.
 pub fn identity_info(identity: Option<&Identity>) -> IdentityInfo {
     match identity {
-        Some(identity) => IdentityInfo {
-            agent: Some(identity.agent().to_owned()),
-            run_id: identity.run_id().map(str::to_owned),
-            auth: AUTH_TRUST.to_owned(),
-        },
-        None => IdentityInfo {
-            agent: None,
-            run_id: None,
-            auth: AUTH_ANONYMOUS.to_owned(),
-        },
+        Some(identity) => {
+            let mut out = IdentityInfo::new(AUTH_TRUST.to_owned());
+            out.agent = Some(identity.agent().to_owned());
+            out.run_id = identity.run_id().map(str::to_owned);
+            out
+        }
+        None => IdentityInfo::new(AUTH_ANONYMOUS.to_owned()),
     }
 }
 

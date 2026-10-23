@@ -59,6 +59,7 @@ use crate::layout::Layout;
 
 /// One changeset as the index holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ChangesetMeta {
     /// The changeset's id.
     pub id: ChangesetId,
@@ -72,6 +73,31 @@ pub struct ChangesetMeta {
     pub delta_hash: [u8; 32],
     /// The parents in order, the mainline parent first; at most 255.
     pub parents: Vec<ChangesetId>,
+}
+
+impl ChangesetMeta {
+    /// The changeset `id` at record `seq`, of `generation`, with `delta_hash` and `parents`.
+    ///
+    /// Invariant: at most 255 parents, and `seq` is the index's to give. Nothing checks either
+    /// here: [`Index::append_batch`] (and [`MetaWrite::insert_changeset`]) refuse more parents
+    /// as [`StoreError::Limit`] and assign `seq` themselves.
+    ///
+    /// [`MetaWrite::insert_changeset`]: crate::MetaWrite::insert_changeset
+    pub fn new(
+        id: ChangesetId,
+        seq: u64,
+        generation: u64,
+        delta_hash: [u8; 32],
+        parents: Vec<ChangesetId>,
+    ) -> ChangesetMeta {
+        ChangesetMeta {
+            id,
+            seq,
+            generation,
+            delta_hash,
+            parents,
+        }
+    }
 }
 
 /// What [`Index::repair_tail_with`] repaired.
@@ -99,6 +125,7 @@ const PARENTS: &str = "parents.log";
 /// what this handle counts.
 /// Lookups take `&self` and read with `read_at` on read-only handles; changes take
 /// `&mut self`, go through [`FsOps`], and need [`crate::MetaLock`].
+#[non_exhaustive]
 pub struct Index {
     /// What changes go through, and what locates a failure in the store.
     fs: StoreFs,
@@ -440,7 +467,7 @@ impl Index {
     /// [`Index::first_parent`] read one field of it.
     pub fn get(&self, rec: u64) -> Result<ChangesetMeta, StoreError> {
         self.check_counted(rec)?;
-        let id = ChangesetId(ObjectId(self.ids.entry(rec)?));
+        let id = ChangesetId::new(ObjectId::new(self.ids.entry(rec)?));
         let at = ParentsAt::from_entry(u64::from_le_bytes(self.pars.entry(rec)?));
         self.record(rec, id, at)
     }
@@ -481,7 +508,7 @@ impl Index {
     /// does not count is [`StoreError::BadCall`], as for [`Index::get`].
     pub fn id(&self, rec: u64) -> Result<ChangesetId, StoreError> {
         self.check_counted(rec)?;
-        Ok(ChangesetId(ObjectId(self.ids.entry(rec)?)))
+        Ok(ChangesetId::new(ObjectId::new(self.ids.entry(rec)?)))
     }
 
     /// The generation of record `rec`: one `read_at` of `gen.col`, and nothing else. A rec this

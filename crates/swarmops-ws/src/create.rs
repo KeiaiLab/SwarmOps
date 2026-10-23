@@ -60,14 +60,15 @@ pub fn create(ctx: &Ctx<'_>, req: WsCreateReq) -> Result<WsInfo, OpError> {
     let prefixes = materialize::normalize(req.prefixes)?;
 
     // 2. The store's side: the base's changeset, the ref it lands on, the store's id.
-    let resolved = ctx.store.resolve_rev(ResolveRevReq {
-        rev: req.base.clone(),
-    })?;
+    let resolved = ctx
+        .store
+        .resolve_rev(ResolveRevReq::new(req.base.clone()))?;
     let target = match resolved.kind {
         RevKind::Ref => req.base.to_string(),
         RevKind::Changeset => DEFAULT_TARGET.to_owned(),
+        _ => return Err(io_error::unknown_variant("RevKind")),
     };
-    let repo_id = ctx.store.repo_info(InfoReq {})?.repo_id;
+    let repo_id = ctx.store.repo_info(InfoReq::default())?.repo_id;
 
     // 3. A workspace of this name there already: the same one, its entry made sure of.
     let entry = Entry {
@@ -149,11 +150,10 @@ fn answer(
     created: bool,
     status_after: swarmops_api::StatusAfter,
 ) -> WsInfo {
-    WsInfo {
-        created,
-        status_after: after::attach(ctx, ws, status_after),
-        ..list::described(&ws.file.name, &ws.dir, &ws.file)
-    }
+    let mut out = list::described(&ws.file.name, &ws.dir, &ws.file);
+    out.created = created;
+    out.status_after = after::attach(ctx, ws, status_after);
+    out
 }
 
 /// The state of the workspace at `dir`, if one is there.

@@ -15,11 +15,10 @@ use crate::rebase::{
 
 /// [`landing`] of `head` from `base`, published only while `main` names `expected`.
 fn expecting(head: ChangesetId, base: ChangesetId, expected: ChangesetId) -> LandRequest {
-    LandRequest {
-        base: Some(base),
-        expect_target: Some(expected),
-        ..landing(head)
-    }
+    let mut land = landing(head);
+    land.base = Some(base);
+    land.expect_target = Some(expected);
+    land
 }
 
 /// Changeset `id`'s root tree.
@@ -82,9 +81,10 @@ fn land_with_expect_target_replays_a_landed_key_first() {
     let (_dir, root, repo) = new_store();
     let t0 = advance(&repo, ACTOR, &[], vec![put("a", b"a\n")]);
     let head = commit_by(&repo, ACTOR, &[t0], vec![put("b", b"b\n")]);
-    let keyed = || LandRequest {
-        key: Some("key-1".to_owned()),
-        ..expecting(head, t0, t0)
+    let keyed = || {
+        let mut land = expecting(head, t0, t0);
+        land.key = Some("key-1".to_owned());
+        land
     };
     let first = repo.land(keyed()).unwrap();
     let later = advance(&repo, OTHER, &[first.landed], vec![put("c", b"c\n")]);

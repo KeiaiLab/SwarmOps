@@ -17,6 +17,7 @@ use crate::repo::{self, Repo};
 
 /// What a value is about: a changeset, by id, and its object, decoded.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct Subject<'a> {
     /// The changeset's id.
     pub id: ChangesetId,
@@ -87,6 +88,7 @@ pub trait Derivation: Send + Sync + 'static {
 
 /// What [`Derivation::canonical`] and [`Derivation::derive`] read: the store's objects, and derived
 /// values. Nothing else, so that a value depends on immutable inputs alone.
+#[non_exhaustive]
 pub struct DeriveCtx<'r> {
     pub(super) objects: &'r dyn ObjectStore,
     pub(super) store: &'r DerivedStore,
@@ -129,12 +131,7 @@ impl DeriveCtx<'_> {
         if let Some(value) = self.memo.get(&node) {
             return Ok(value_of::<D>(value)?);
         }
-        let slot = DerivedSlot {
-            name: D::NAME,
-            version: D::VERSION,
-            subject: cs.0,
-            key: &node.key,
-        };
+        let slot = DerivedSlot::new(D::NAME, D::VERSION, cs.0, &node.key);
         match self.store.get(&slot)? {
             Some(value) => Ok(value_of::<D>(&value)?),
             None => Err(DeriveError::Missing(Need {
@@ -156,6 +153,7 @@ impl DeriveCtx<'_> {
 
 /// Why [`Derivation::canonical`] or [`Derivation::derive`] gave no value.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum DeriveError {
     /// A value it reads is not derived yet ([`DeriveCtx::value`]). Returned as it is, it has the
     /// engine derive that value, then call again.
@@ -177,6 +175,7 @@ impl From<StoreError> for DeriveError {
 /// The value a [`DeriveError::Missing`] waits for: a derivation's value of a changeset under a key.
 /// Opaque: only the engine reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Need {
     /// The derivation's name.
     pub(super) name: &'static str,
@@ -199,6 +198,7 @@ impl fmt::Display for Need {
 /// The derivations a repository makes values of, by name: the built-ins ([`Registry::builtins`]),
 /// and the ones registered since ([`Registry::register`], [`Repo::register`]).
 #[derive(Default)]
+#[non_exhaustive]
 pub struct Registry {
     entries: Vec<Entry>,
 }
@@ -417,6 +417,7 @@ impl<O: ObjectStore> Repo<O> {
 /// What one [`Repo::derive_eager`] call did: how many of the values it was asked for it derived
 /// and how many the store held, and where it leaves the journal.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DeriveRun {
     /// How many of the values it was asked for (each eager derivation's, of each changeset of the
     /// frames it read) the store lacked: it derived them, and stored them unless a put failed. A
@@ -475,12 +476,7 @@ impl<O: ObjectStore> Repo<O> {
         }
         for cs in entries.iter().filter_map(recorded_changeset) {
             for (deriv, entry, key) in &eager {
-                let slot = DerivedSlot {
-                    name: entry.name,
-                    version: entry.version,
-                    subject: cs.0,
-                    key,
-                };
+                let slot = DerivedSlot::new(entry.name, entry.version, cs.0, key);
                 if self.derived.get(&slot)?.is_some() {
                     run.cached += 1;
                     continue;
@@ -505,7 +501,7 @@ fn recorded_changeset(entry: &JournalEntry) -> Option<ChangesetId> {
     }
     // A changeset record's key is the id's 32 bytes, as the journal holds them.
     let id: [u8; 32] = entry.key.as_slice().try_into().ok()?;
-    Some(ChangesetId(ObjectId(id)))
+    Some(ChangesetId::new(ObjectId::new(id)))
 }
 
 /// The error of derivation `name`: [`RepoError::Derived`].

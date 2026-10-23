@@ -35,7 +35,8 @@ pub const MAX_DIFF_BYTES: usize = 8 << 20;
 
 /// What [`line_hunks`] gives for a side past the line diff's bound, more than [`MAX_DIFF_LINES`]
 /// lines or [`MAX_DIFF_BYTES`] bytes: no hunks.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TooLarge;
 
 /// The lines of `bytes`: each ends after its `\n` and keeps it, a last line without one is a line,
@@ -52,11 +53,22 @@ fn lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
 /// side's lines `after`. Both are 0-based, half-open ranges of line numbers; one of them is empty
 /// for a pure insertion or deletion (at that position), never both.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct Hunk {
     /// The old side's lines that go.
     pub before: Range<u32>,
     /// The new side's lines that come in their place.
     pub after: Range<u32>,
+}
+
+impl Hunk {
+    /// The hunk where the old side's lines `before` give way to the new side's `after`.
+    ///
+    /// Invariant: `before` and `after` are never both empty. No validation exists: `new` checks
+    /// nothing, and only [`line_hunks`] makes hunks outside tests.
+    pub fn new(before: Range<u32>, after: Range<u32>) -> Self {
+        Self { before, after }
+    }
 }
 
 /// The changes that turn `before` into `after`, line by line ([`split_lines`]): the histogram
@@ -97,11 +109,22 @@ pub fn is_text(bytes: &[u8]) -> bool {
 
 /// The lines a diff inserts and deletes, as `git diff --stat` counts them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LineStats {
     /// The new side's lines the hunks bring in.
     pub insertions: u64,
     /// The old side's lines the hunks take out.
     pub deletions: u64,
+}
+
+impl LineStats {
+    /// The counts of `insertions` and `deletions`.
+    pub fn new(insertions: u64, deletions: u64) -> Self {
+        Self {
+            insertions,
+            deletions,
+        }
+    }
 }
 
 /// The lines `hunks` insert and delete: the sums of their `after` and their `before` lengths.
@@ -117,6 +140,7 @@ pub fn line_stats(hunks: &[Hunk]) -> LineStats {
 
 /// One line of a unified hunk, with its `\n` if it has one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DiffLine<'a> {
     /// A line both sides have, around a change.
     Context(&'a [u8]),
@@ -129,6 +153,7 @@ pub enum DiffLine<'a> {
 /// A hunk as a unified diff prints it: one or more changes, the unchanged lines around them, and
 /// its header `@@ -before_start,before_lines +after_start,after_lines @@`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct UnifiedHunk<'a> {
     /// The old side's first line in the hunk, 1-based; when the hunk has none of the old side's
     /// lines, the line before where they would be (0 at the top), as git prints it.
@@ -141,6 +166,29 @@ pub struct UnifiedHunk<'a> {
     pub after_lines: u32,
     /// The lines in order; each change's removed lines come before its added lines.
     pub lines: Vec<DiffLine<'a>>,
+}
+
+impl<'a> UnifiedHunk<'a> {
+    /// The hunk with this header and these lines, as they are.
+    ///
+    /// Invariant: `before_lines` counts the context and removed lines of `lines`, `after_lines`
+    /// the context and added ones. No validation exists: `new` checks nothing, and only
+    /// [`unified`] makes hunks outside tests.
+    pub fn new(
+        before_start: u32,
+        before_lines: u32,
+        after_start: u32,
+        after_lines: u32,
+        lines: Vec<DiffLine<'a>>,
+    ) -> Self {
+        Self {
+            before_start,
+            before_lines,
+            after_start,
+            after_lines,
+            lines,
+        }
+    }
 }
 
 /// The unified hunks of `hunks`, which are `line_hunks(before, after)`'s, with `context`

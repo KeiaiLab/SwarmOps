@@ -20,7 +20,7 @@
 //! No retry loop: no ref is published, so no race can be lost. `H'` never carries `lander` or
 //! `land_key`, so a changeset that has `lander` is one a land made.
 
-use swarmops_core::{ChangesetId, DeltaOp, RepoPath, Signature, TreeId};
+use swarmops_core::{ChangesetId, RepoPath, Signature, TreeId};
 use swarmops_merge::tree_diff::{self, PathFilter};
 use swarmops_store::{InsertOutcome, ObjectStore, Recovered};
 
@@ -35,6 +35,7 @@ const SQUASHED_FROM: &str = "squashed_from";
 /// A rebase to make ([`Repo::rebase`]): the change, the first-parent chain from `base` to `head`,
 /// onto the head of the ref `onto`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RebaseRequest {
     /// The change's head: the last changeset of the chain.
     pub head: ChangesetId,
@@ -73,6 +74,7 @@ impl RebaseRequest {
 
 /// What a rebase did ([`Repo::rebase`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RebaseOutcome {
     /// How it ended.
     pub status: RebaseStatus,
@@ -99,6 +101,7 @@ pub struct RebaseOutcome {
 
 /// How a rebase ended ([`RebaseOutcome::status`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum RebaseStatus {
     /// It recorded `H'` now.
     Rebased,
@@ -182,12 +185,12 @@ impl<O: ObjectStore> Repo<O> {
         let mut new_blobs = draft.new_blobs;
         let changes: Vec<Change> = (draft.delta.into_iter())
             .map(|entry| Change {
-                op: match entry.op {
-                    DeltaOp::Put { kind, id } => match new_blobs.remove(&id) {
+                op: match entry.op.put() {
+                    Some((kind, id)) => match new_blobs.remove(&id) {
                         Some(content) => ChangeOp::Put { kind, content },
                         None => ChangeOp::PutBlob { kind, id },
                     },
-                    DeltaOp::Delete => ChangeOp::Delete,
+                    None => ChangeOp::Delete,
                 },
                 path: entry.path,
             })
@@ -208,6 +211,7 @@ impl<O: ObjectStore> Repo<O> {
         let status = match committed.insert {
             InsertOutcome::AlreadyPresent => RebaseStatus::Replayed,
             InsertOutcome::Inserted { .. } => RebaseStatus::Rebased,
+            _ => return Err(RepoError::unknown_variant("InsertOutcome")),
         };
         Ok(RebaseOutcome {
             status,

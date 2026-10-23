@@ -8,9 +8,15 @@ use crate::error::IdError;
 
 /// A 32-byte BLAKE3 digest identifying one immutable object.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
 pub struct ObjectId(pub [u8; 32]);
 
 impl ObjectId {
+    /// The id whose digest is `bytes`.
+    pub fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     /// Parses 64 hex characters (either case).
     pub fn from_hex(s: &str) -> Result<Self, IdError> {
         if s.len() != 64 {
@@ -37,6 +43,12 @@ impl fmt::Display for ObjectId {
     }
 }
 
+impl From<[u8; 32]> for ObjectId {
+    fn from(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+}
+
 impl fmt::Debug for ObjectId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "ObjectId({self})")
@@ -53,6 +65,7 @@ impl FromStr for ObjectId {
 
 /// The three hashed object kinds. The kind is part of the hash input, not of the id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ObjectKind {
     /// Raw file (or symlink target) bytes.
     Blob,
@@ -69,6 +82,26 @@ impl ObjectKind {
             Self::Blob => b"swarmops:blob:v1\0",
             Self::Tree => b"swarmops:tree:v1\0",
             Self::Changeset => b"swarmops:changeset:v1\0",
+        }
+    }
+
+    /// The kind's byte in a stored object file's header (storage spec §2): 0 blob, 1 tree,
+    /// 2 changeset. Part of the on-disk layout, so it never changes in place.
+    pub fn tag(self) -> u8 {
+        match self {
+            Self::Blob => 0,
+            Self::Tree => 1,
+            Self::Changeset => 2,
+        }
+    }
+
+    /// The kind whose [`ObjectKind::tag`] is `tag`, or `None` for a byte no kind has.
+    pub fn from_tag(tag: u8) -> Option<Self> {
+        match tag {
+            0 => Some(Self::Blob),
+            1 => Some(Self::Tree),
+            2 => Some(Self::Changeset),
+            _ => None,
         }
     }
 }
@@ -89,6 +122,7 @@ pub fn hash_object(kind: ObjectKind, payload: &[u8]) -> ObjectId {
 /// computed, and no caller can hand it an id of other bytes. There is no other constructor, and no
 /// way to change the payload in place.
 #[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Hashed {
     kind: ObjectKind,
     id: ObjectId,
@@ -139,9 +173,15 @@ macro_rules! typed_id {
         $(#[$doc])*
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
         #[repr(transparent)]
+        #[non_exhaustive]
         pub struct $name(pub ObjectId);
 
         impl $name {
+            /// The typed id of `id`.
+            pub fn new(id: ObjectId) -> Self {
+                Self(id)
+            }
+
             /// The untyped id.
             pub fn as_object_id(&self) -> ObjectId {
                 self.0

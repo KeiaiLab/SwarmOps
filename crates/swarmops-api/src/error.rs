@@ -33,6 +33,7 @@ macro_rules! error_codes {
         /// Serialized as its `E_*` string, which `OpError.code` carries too, so a client can read
         /// codes newer than its copy of this enum.
         #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        #[non_exhaustive]
         pub enum ErrorCode {
             $($(#[$doc])* #[serde(rename = $code)] $variant,)+
         }
@@ -259,6 +260,7 @@ impl ErrorCode {
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq, Error)]
 #[error("{code}: {message}")]
 #[schemars(transform = require_always_written)]
+#[non_exhaustive]
 pub struct OpError {
     /// The `E_*` code.
     pub code: String,
@@ -303,6 +305,13 @@ impl OpError {
             details: Map::new(),
             hint: None,
         }
+    }
+
+    /// Replaces the message, keeping the code, details and hint.
+    #[must_use]
+    pub fn with_message(mut self, message: impl Into<String>) -> Self {
+        self.message = message.into();
+        self
     }
 
     /// Replaces the details.

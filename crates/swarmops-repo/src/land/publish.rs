@@ -13,6 +13,7 @@ use crate::repo::{self, Repo};
 
 /// A land's changeset, written and flushed, to publish.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Publication {
     /// The ref it lands on.
     pub target: String,
@@ -29,6 +30,7 @@ pub struct Publication {
 
 /// What a publish did.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Published {
     /// The target names `id` now, on `onto`: the changeset and the target's move to it are
     /// committed in one frame.
@@ -67,13 +69,13 @@ impl<O: ObjectStore> Repo<O> {
     /// journal append that fails ([`StoreError::NotCommitted`]) is returned as it is.
     pub(crate) fn publish(&self, p: &Publication) -> Result<Published, RepoError> {
         // Encoded outside the lock, as everything but the frame is.
-        let meta = ChangesetMeta {
-            id: p.id,
-            seq: 0,
-            generation: 0,
-            delta_hash: p.changeset.delta_hash()?,
-            parents: p.changeset.parents.clone(),
-        };
+        let meta = ChangesetMeta::new(
+            p.id,
+            0,
+            0,
+            p.changeset.delta_hash()?,
+            p.changeset.parents.clone(),
+        );
         let mut write = self.meta.write()?;
         write.insert_changeset(meta).map_err(|e| match e {
             StoreError::MissingParent(parent) => RepoError::UnknownParent(parent),
@@ -94,6 +96,7 @@ impl<O: ObjectStore> Repo<O> {
             CasResult::Mismatch { actual: None } => {
                 return Err(RepoError::NotFound(p.target.clone()));
             }
+            _ => return Err(RepoError::unknown_variant("CasResult")),
         }
         let mut warnings = Vec::new();
         match write.commit() {

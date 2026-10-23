@@ -1,7 +1,8 @@
 //! The error table (operations spec §0): every repository and store failure mapped to the
 //! operations spec's code, with its `details` and, where there is an obvious next step, a
 //! command as its hint. [`crate::LocalOps`]'s documentation gives the table. Every message is
-//! one line: control characters in it are escaped.
+//! one line: control characters in it are escaped. The mapped enums are `#[non_exhaustive]`:
+//! each `match` ends in a wildcard arm, `E_INTERNAL`, so a new variant compiles unmapped.
 
 use std::io;
 
@@ -138,8 +139,9 @@ pub(crate) fn repo_error(e: RepoError, during: During<'_>) -> OpError {
             corrupt(message, during, "swarmops verify").with_details(object(id))
         }
         RepoError::Codec(_) => corrupt(message, during, "swarmops verify"),
-        // A derivation that fails on immutable inputs fails again on every call: a bug.
-        RepoError::Derived { .. } => error(ErrorCode::Internal, message),
+        // A derivation that fails on immutable inputs fails again on every call: a bug. So is
+        // a variant of another crate's enum this build does not know.
+        RepoError::Derived { .. } | RepoError::Internal(_) => error(ErrorCode::Internal, message),
         // A cache file someone placed, or a faulty build wrote: a deep verify names them all.
         RepoError::DerivedCorrupt {
             name, changeset, ..
@@ -147,6 +149,7 @@ pub(crate) fn repo_error(e: RepoError, during: During<'_>) -> OpError {
             ("derivation", name.into()),
             ("changeset", changeset.to_string().into()),
         ])),
+        _ => unmapped(message),
     }
 }
 
@@ -197,7 +200,10 @@ fn land_error(e: RepoError, message: String) -> OpError {
 /// conflicting path, then names the land again with its resolutions, against the target's head
 /// the report names (`land --resolve`).
 pub(crate) fn conflict(conflicts: &MergeConflicts, message: String, max_bytes: u64) -> OpError {
-    let report = crate::conflict::report(conflicts, max_bytes);
+    let report = match crate::conflict::report(conflicts, max_bytes) {
+        Ok(report) => report,
+        Err(e) => return e,
+    };
     let side = match report.files.first() {
         Some(file) => shell_word(&format!("{}:{}", report.theirs, file.path)),
         None => format!("{}:<path>", report.theirs),
@@ -264,6 +270,7 @@ fn store_error(e: StoreError, message: String, during: During<'_>) -> OpError {
                 | LimitKind::RefNameBytes
                 | LimitKind::Records
                 | LimitKind::RepoNameBytes => ErrorCode::InvalidArg,
+                _ => return unmapped(message),
             };
             error(code, message).with_details(details([
                 ("store_limit", what.as_str().into()),
@@ -292,6 +299,8 @@ fn store_error(e: StoreError, message: String, during: During<'_>) -> OpError {
                     .with_hint("run the same command again: nothing of this one was committed"),
             }
         }
+        StoreError::Internal(_) => error(ErrorCode::Internal, message),
+        _ => unmapped(message),
     }
 }
 
@@ -323,26 +332,40 @@ fn located(io: &IoFailure) -> Map<String, Value> {
 /// `e` to read it back for its report: `e`, saying that the store is there
 /// (`details.created: true`, and a hint to read it), so that a client that retries does not
 /// find out only from `E_EXISTS`.
-pub(crate) fn created_but_unread(at: &Utf8Path, e: OpError) -> OpError {
-    let mut details = e.details;
-    details.insert("created".to_owned(), true.into());
-    OpError {
-        message: one_line(format!(
-            "the store at {at} is made, but reading it back failed: {}",
-            e.message
-        )),
-        details,
-        hint: Some(hint(format!(
-            "swarmops --repo {} info",
-            shell_word(at.as_str())
-        ))),
-        ..e
-    }
+pub(crate) fn created_but_unread(at: &Utf8Path, mut e: OpError) -> OpError {
+    e.details.insert("created".to_owned(), true.into());
+    e.message = one_line(format!(
+        "the store at {at} is made, but reading it back failed: {}",
+        e.message
+    ));
+    e.hint = Some(hint(format!(
+        "swarmops --repo {} info",
+        shell_word(at.as_str())
+    )));
+    e
 }
 
 /// An error of `code` with `message`, its control characters escaped so that it is one line.
 pub(crate) fn error(code: ErrorCode, message: impl Into<String>) -> OpError {
     OpError::new(code, one_line(message.into()))
+}
+
+/// The hint of an error of another crate that this build maps to no code of its own.
+const UNMAPPED_HINT: &str = "an error this build does not map: report it";
+
+/// `E_INTERNAL` with `message`, for an error variant of another crate that this build does not
+/// know (the enums are `#[non_exhaustive]`).
+fn unmapped(message: String) -> OpError {
+    error(ErrorCode::Internal, message).with_hint(UNMAPPED_HINT)
+}
+
+/// `E_INTERNAL` for a value of `ty`, an enum of another crate, of a variant this build does not
+/// know, met where the operation projects it onto the API (the enums are `#[non_exhaustive]`).
+pub(crate) fn unknown_variant(ty: &str) -> OpError {
+    OpError::new(
+        ErrorCode::Internal,
+        format!("{ty}: a variant this build does not know"),
+    )
 }
 
 /// `text` with each control character (a line break, a tab, a NUL…) escaped, so that it is
@@ -562,10 +585,7 @@ pub(crate) fn git_import_error(e: ImportError, git_path: &str, git_ref: &str) ->
                 RepoError::Store(StoreError::NotCommitted { source }) => lasting_refusal(source),
                 _ => None,
             };
-            let stopped = OpError {
-                message: one_line(message),
-                ..op(*source)
-            };
+            let stopped = op(*source).with_message(one_line(message));
             let mut stopped = progress(stopped, imported, last);
             if let Some(fix) = fix {
                 stopped.hint = Some(format!("{fix}, then {RESUME_HINT}"));
@@ -583,6 +603,7 @@ pub(crate) fn git_import_error(e: ImportError, git_path: &str, git_ref: &str) ->
             let stopped = error(ErrorCode::Io, message).with_details(found);
             progress(stopped, imported, last)
         }
+        _ => unmapped(message),
     }
 }
 
@@ -614,6 +635,7 @@ fn source_error(e: SourceError, message: String, git_path: &str, git_ref: &str) 
             error(ErrorCode::TooLarge, message).with_details(found)
         }
         SourceError::Io { .. } => unreadable(message, None, "io", git_path),
+        _ => unmapped(message),
     }
 }
 
@@ -648,6 +670,7 @@ fn unsupported(why: Unsupported, message: String, git_path: &str) -> OpError {
                     shell_word(git_path)
                 )));
         }
+        _ => return unmapped(message),
     };
     error(ErrorCode::GitUnsupported, message).with_details(found)
 }
@@ -701,6 +724,7 @@ fn convert_error(e: ConvertError, message: String, git_path: &str, git_ref: &str
         ConvertError::Bug { commit } => {
             error(ErrorCode::Internal, message).with_details(commit_of(commit))
         }
+        _ => unmapped(message),
     }
 }
 
@@ -731,10 +755,9 @@ pub(crate) fn git_export_error(
 ) -> OpError {
     let message = e.to_string();
     match e {
-        ExportError::SourceRef(name) => OpError {
-            message: one_line(message),
-            ..op(RepoError::NotFound(name))
-        },
+        ExportError::SourceRef(name) => {
+            op(RepoError::NotFound(name)).with_message(one_line(message))
+        }
         ExportError::RefName(name) => ref_name_invalid(name, message),
         ExportError::CheckedOut {
             branch: checked_out,
@@ -768,6 +791,7 @@ pub(crate) fn git_export_error(
         ExportError::Sink(e) => sink_error(e, message, git_path, branch),
         ExportError::Repo(e) => op(e),
         ExportError::Bug { .. } => error(ErrorCode::Internal, message),
+        _ => unmapped(message),
     }
 }
 
@@ -843,6 +867,7 @@ impl Diverged<'_> {
                 }
                 "run the same git export again".to_owned()
             }
+            _ => return unmapped(message),
         };
         error(ErrorCode::GitExportDiverged, message)
             .with_details(found)
@@ -901,6 +926,7 @@ fn sink_error(e: SinkError, message: String, git_path: &str, branch: &str) -> Op
                 "run the same git export again once the cause is gone: it writes only what is \
                  still missing",
             ),
+        _ => unmapped(message),
     }
 }
 
@@ -999,6 +1025,9 @@ pub(crate) fn url_refused(why: UrlRefused) -> OpError {
             "a remote's URL or host does not start with -",
             "give the remote's https:// or ssh:// URL",
         ),
+        _ => {
+            return unmapped(format!("a remote's URL is refused ({})", why.as_str()));
+        }
     };
     error(ErrorCode::InvalidArg, message)
         .with_details(details([("reason", why.as_str().into())]))
@@ -1080,6 +1109,7 @@ pub(crate) fn transport_error(e: TransportError, remote: &str, phase: Phase) -> 
             format!("the remote {remote:?} is a SHA-256 repository"),
         )
         .with_details(details([("reason", "sha256".into())])),
+        _ => unmapped(format!("git failed on the remote {remote:?}")),
     }
 }
 
@@ -1132,6 +1162,10 @@ fn rejected(reason: RejectReason, said: Said, remote: &str) -> OpError {
             "details.refs and details.remote_messages give the remote's reason"
         }
         RejectReason::Unclassified => "details.stderr_tail gives what git said",
+        _ => {
+            let message = format!("the remote {remote:?} refused ({})", reason.as_str());
+            return unmapped(message).with_details(found);
+        }
     };
     error(
         ErrorCode::RemoteRejected,
@@ -1162,6 +1196,7 @@ pub(crate) fn mirror_error(e: MirrorError) -> OpError {
         MirrorError::Source(_) => error(ErrorCode::GitRead, message)
             .with_details(details([("reason", "mirror".into())]))
             .with_hint(again),
+        _ => unmapped(message),
     }
 }
 
@@ -1212,6 +1247,7 @@ pub(crate) fn sync_error(e: SyncError, remote: &str, branch: &str) -> OpError {
             .with_details(details([("changeset", id.to_string().into())]))
             .with_hint("push a merge changeset with git: the sync relocates single changes only"),
         SyncError::Repo(e) => land_error(e, message),
+        _ => unmapped(message),
     }
 }
 
@@ -1223,6 +1259,7 @@ pub(crate) fn limit_error(e: LimitExceeded, remote: &str) -> OpError {
         path,
         size,
         limit,
+        ..
     } = e;
     let (message, next) = match &path {
         Some(path) => (
@@ -1279,7 +1316,7 @@ mod tests {
     }
 
     fn id() -> ChangesetId {
-        ChangesetId(ObjectId([7; 32]))
+        ChangesetId::new(ObjectId::new([7; 32]))
     }
 
     fn path() -> RepoPath {
@@ -1328,7 +1365,7 @@ mod tests {
         );
         let missing_blob = RepoError::MissingBlob {
             path: path(),
-            id: swarmops_core::BlobId(id().0),
+            id: swarmops_core::BlobId::new(id().0),
         };
         maps(missing_blob, op, ErrorCode::InvalidArg);
         maps(
@@ -1404,15 +1441,15 @@ mod tests {
     /// One of each error a land raises.
     fn land_errors() -> [RepoError; 8] {
         use swarmops_repo::{MergeConflicts, NothingToLandReason};
-        let conflicts = MergeConflicts {
-            base: id(),
-            ours: id(),
-            theirs: id(),
-            conflicts: Vec::new(),
-            auto_merged: Vec::new(),
-            last_touched: std::collections::BTreeMap::new(),
-            stale: Vec::new(),
-        };
+        let conflicts = MergeConflicts::new(
+            id(),
+            id(),
+            id(),
+            Vec::new(),
+            Vec::new(),
+            std::collections::BTreeMap::new(),
+            Vec::new(),
+        );
         [
             RepoError::Conflict(Box::new(conflicts)),
             RepoError::NothingToLand(NothingToLandReason::OnTarget),
@@ -1557,7 +1594,7 @@ mod tests {
     /// read-only hint; its details add what the land expected.
     #[test]
     fn cas_mismatch_and_ref_moved_map_to_one_code() {
-        let other = ChangesetId(swarmops_core::ObjectId([9; 32]));
+        let other = ChangesetId::new(swarmops_core::ObjectId::new([9; 32]));
 
         // 1. Both errors, one code.
         let moved = repo_error(
@@ -2048,8 +2085,8 @@ mod tests {
     /// The source repository and git ids the `git import` mapping tests name.
     const GIT_PATH: &str = "/nonexistent/swarmops-test/repo.git";
     const GIT_REF: &str = "stable";
-    const COMMIT: GitOid = GitOid([0x11; 20]);
-    const OBJECT: GitOid = GitOid([0x22; 20]);
+    const COMMIT: GitOid = GitOid::new([0x11; 20]);
+    const OBJECT: GitOid = GitOid::new([0x22; 20]);
 
     /// `e`, a `git import` of [`GIT_REF`] from [`GIT_PATH`] that failed, maps to `code`: its
     /// string, exit code and retry advice, and `details` as `want`; the error.
@@ -2242,7 +2279,7 @@ mod tests {
             ErrorCode::RefNameInvalid,
             &json!({"name": "feature/x"}),
         );
-        let head = ChangesetId(ObjectId([7; 32]));
+        let head = ChangesetId::new(ObjectId::new([7; 32]));
         let diverged = |base| ImportError::Diverged {
             target_ref: "main".into(),
             target_head: head,
@@ -2265,10 +2302,7 @@ mod tests {
             "git_head": COMMIT.to_string(),
         });
         git_maps(diverged(None), ErrorCode::GitImportDiverged, &want);
-        let entry = swarmops_git::ExternalIdMismatch {
-            commit: OBJECT,
-            changeset: head,
-        };
+        let entry = swarmops_git::ExternalIdMismatch::new(OBJECT, head);
         let passed_over = ImportError::Diverged {
             target_ref: "main".into(),
             target_head: head,
@@ -2285,7 +2319,7 @@ mod tests {
         });
         let error = git_maps(passed_over, ErrorCode::GitImportDiverged, &want);
         assert_eq!(error.hint.as_deref(), Some("swarmops verify --deep"));
-        let actual = ChangesetId(ObjectId([8; 32]));
+        let actual = ChangesetId::new(ObjectId::new([8; 32]));
         let moved = ImportError::CasMismatch {
             target_ref: "main".into(),
             actual: Some(actual),
@@ -2344,10 +2378,10 @@ mod tests {
             format!("make the store's files writable for this user, then {RESUME_HINT}");
         assert_eq!(error.hint.as_deref(), Some(fix_first.as_str()));
         let damaged = StoreError::Corrupt {
-            id: ObjectId([9; 32]),
+            id: ObjectId::new([9; 32]),
         };
         let want = json!({
-            "object": ObjectId([9; 32]).to_hex(),
+            "object": ObjectId::new([9; 32]).to_hex(),
             "imported": 1,
             "last_commit": commit,
         });
@@ -2392,8 +2426,8 @@ mod tests {
     fn git_export_divergences_map_to_their_reasons() {
         use serde_json::json;
 
-        let head = ChangesetId(ObjectId([7; 32]));
-        let exported = ChangesetId(ObjectId([8; 32]));
+        let head = ChangesetId::new(ObjectId::new([7; 32]));
+        let exported = ChangesetId::new(ObjectId::new([8; 32]));
         let diverged = |git_head, reason| ExportError::Diverged {
             branch: "main".into(),
             git_head,
@@ -2728,15 +2762,15 @@ mod tests {
         let want = json!({"remote": "origin", "branch": "main", "reason": "no_common_base"});
         is(&unrelated, ErrorCode::RemoteDiverged, &want);
 
-        let conflicts = MergeConflicts {
-            base: id(),
-            ours: id(),
-            theirs: id(),
-            conflicts: Vec::new(),
-            auto_merged: Vec::new(),
-            last_touched: std::collections::BTreeMap::new(),
-            stale: Vec::new(),
-        };
+        let conflicts = MergeConflicts::new(
+            id(),
+            id(),
+            id(),
+            Vec::new(),
+            Vec::new(),
+            std::collections::BTreeMap::new(),
+            Vec::new(),
+        );
         let conflicted = SyncError::Conflict {
             change: id(),
             onto: id(),
@@ -2770,22 +2804,17 @@ mod tests {
         use serde_json::json;
         use swarmops_git::limits::LimitScope;
 
-        let file = LimitExceeded {
-            scope: LimitScope::RemoteFile,
-            path: Some("assets/big.bin".into()),
-            size: 104_857_601,
-            limit: 104_857_600,
-        };
+        let file = LimitExceeded::new(
+            LimitScope::RemoteFile,
+            Some("assets/big.bin".into()),
+            104_857_601,
+            104_857_600,
+        );
         let file = limit_error(file, "origin");
         let want = json!({"scope": "remote_file", "path": "assets/big.bin", "size": 104_857_601_u64,
                           "limit": 104_857_600_u64, "remote": "origin"});
         is(&file, ErrorCode::TooLarge, &want);
-        let push = LimitExceeded {
-            scope: LimitScope::RemotePush,
-            path: None,
-            size: 2_000_000_001,
-            limit: 2_000_000_000,
-        };
+        let push = LimitExceeded::new(LimitScope::RemotePush, None, 2_000_000_001, 2_000_000_000);
         let push = limit_error(push, "origin");
         let want = json!({"scope": "remote_push", "size": 2_000_000_001_u64,
                           "limit": 2_000_000_000_u64, "remote": "origin"});
@@ -2813,5 +2842,31 @@ mod tests {
         let stub = planned("C6");
         is(&stub, ErrorCode::Internal, &json!({}));
         assert_eq!(stub.message, "planned in M13 (C6)");
+    }
+
+    /// The repository's and the store's internal errors, the values of their callers' wildcard
+    /// arms, are `E_INTERNAL` with their message and no hint; a projection's unknown variant is
+    /// `E_INTERNAL` naming its enum.
+    #[test]
+    fn internal_errors_map_to_e_internal() {
+        let what = "EntryTarget: a variant this build does not know";
+        let internal = [
+            RepoError::Internal(what.to_owned()),
+            RepoError::Store(StoreError::Internal(what.to_owned())),
+        ];
+        for e in internal {
+            let error = op(e);
+            assert_eq!(error.code, ErrorCode::Internal.as_str(), "{error:?}");
+            assert!(error.message.contains(what), "{error:?}");
+            assert_eq!(error.hint, None, "{error:?}");
+        }
+
+        let error = unknown_variant("LandStatus");
+        assert_eq!(error.code, ErrorCode::Internal.as_str());
+        assert_eq!(
+            error.message,
+            "LandStatus: a variant this build does not know"
+        );
+        assert!(!error.retryable);
     }
 }

@@ -534,7 +534,7 @@ pub fn check_invariants(
     for (lander, records) in reported.iter().enumerate() {
         for (land, record) in records.iter().enumerate() {
             let Some(hex) = &record.id else { continue };
-            let id = ObjectId::from_hex(hex).map(ChangesetId).map_err(|e| {
+            let id = ObjectId::from_hex(hex).map(ChangesetId::new).map_err(|e| {
                 format!("bad record: lander {lander}'s land {land} reports {hex:?}: {e}")
             })?;
             if let Some((other, other_land)) = landed.insert(id, (lander, land)) {
@@ -582,7 +582,7 @@ pub fn check_invariants(
             else {
                 continue;
             };
-            let place = at[&ChangesetId(id)];
+            let place = at[&ChangesetId::new(id)];
             if let Some((before, before_place)) = last
                 && place >= before_place
             {

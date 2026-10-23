@@ -27,6 +27,7 @@ use crate::read::{RepoRead, StoredChangeset};
 /// One changeset of a path's history ([`RepoRead::path_history`]): one that touched the path, and
 /// what the path holds after it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PathEvent {
     /// The changeset.
     pub changeset: ChangesetId,

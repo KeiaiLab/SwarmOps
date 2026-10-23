@@ -3554,7 +3554,7 @@ mod crafted_derived_values {
 
     /// Changeset `hex`, by its id.
     fn id(hex: &str) -> ChangesetId {
-        ChangesetId(ObjectId::from_hex(hex).expect("a changeset id"))
+        ChangesetId::new(ObjectId::from_hex(hex).expect("a changeset id"))
     }
 
     /// Places `value` in `slot` of `store`'s derived values in place of whatever file is there,
@@ -3566,7 +3566,7 @@ mod crafted_derived_values {
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => panic!("remove the value file: {e}"),
         }
-        let derived = DerivedStore::open(layout, Arc::new(RealFs));
+        let derived = DerivedStore::open(layout, Arc::new(RealFs::new()));
         assert!(derived.put(slot, value).expect("plant a value"), "planted");
     }
 
@@ -3616,12 +3616,7 @@ mod crafted_derived_values {
 
         // The path key `a`, as postcard writes a string; the value `Some(c2)`.
         let key = [&[1_u8][..], b"a"].concat();
-        let slot = DerivedSlot {
-            name: "last_modified",
-            version: 1,
-            subject: id(&c2).0,
-            key: &key,
-        };
+        let slot = DerivedSlot::new("last_modified", 1, id(&c2).0, &key);
         plant(&store, &slot, &[&[1_u8][..], &id(&c2).0.0].concat());
 
         let finding = json!({
@@ -3695,12 +3690,7 @@ mod crafted_derived_values {
         for entry in &list {
             value.extend(entry.0.0);
         }
-        let slot = DerivedSlot {
-            name: "first_parent_skip_list",
-            version: 1,
-            subject: head.0,
-            key: &[],
-        };
+        let slot = DerivedSlot::new("first_parent_skip_list", 1, head.0, &[]);
         plant(&store, &slot, &value);
 
         let finding = json!({

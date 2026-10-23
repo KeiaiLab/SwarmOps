@@ -1,8 +1,6 @@
 //! `ws rebase`: the workspace moved onto the rebased changeset, only what changed written; a
 //! conflict's markers and report; `ws resolve`, `--continue` and `--abort`.
 
-use std::collections::BTreeMap;
-
 use swarmops_api::{
     ConflictReport, ShowReq, Side, StatusAfter, StoreOps, WsCommitReq, WsRebaseAction, WsRebaseReq,
     WsResolveReq, WsState,
@@ -15,45 +13,33 @@ use crate::fixture::{Fixture, Put, changes, file, tree_of, write};
 
 /// The request of `ws rebase` of workspace `name` onto `main`, doing `action`.
 fn rebase_of(name: &str, action: WsRebaseAction) -> WsRebaseReq {
-    WsRebaseReq {
-        workspace: name.to_owned(),
-        onto: "main".to_owned(),
-        action,
-        message: None,
-        status_after: StatusAfter::Page,
-    }
+    let mut out = WsRebaseReq::new(name.to_owned());
+    out.action = action;
+    out.status_after = StatusAfter::Page;
+    out
 }
 
 /// The request resolving `paths` of workspace `name`, taking `take`, forced or not.
 fn resolve_of(name: &str, paths: &[&str], take: Option<Side>, force: bool) -> WsResolveReq {
-    WsResolveReq {
-        workspace: name.to_owned(),
-        paths: paths.iter().map(|p| (*p).to_owned()).collect(),
-        all: false,
-        take,
-        force,
-        status_after: StatusAfter::Page,
-    }
+    let mut out = WsResolveReq::new(name.to_owned());
+    out.paths = paths.iter().map(|p| (*p).to_owned()).collect();
+    out.take = take;
+    out.force = force;
+    out.status_after = StatusAfter::Page;
+    out
 }
 
 /// Commits every edit of workspace `name` with `message`; the new head.
 fn commit_all(f: &Fixture, name: &str, message: &str) -> String {
-    let req = WsCommitReq {
-        workspace: name.to_owned(),
-        message: message.to_owned(),
-        paths: Vec::new(),
-        modes: BTreeMap::new(),
-        status_after: StatusAfter::None,
-    };
+    let mut req = WsCommitReq::new(name.to_owned(), message.to_owned());
+    req.status_after = StatusAfter::None;
     swarmops_ws::commit(&f.ctx(), req).unwrap().changeset
 }
 
 /// The parents of changeset `id`.
 fn parents_of(f: &Fixture, id: &str) -> Vec<String> {
-    let req = ShowReq {
-        rev: id.into(),
-        max_changes: 1,
-    };
+    let mut req = ShowReq::new(id);
+    req.max_changes = 1;
     f.ops.show(req).unwrap().parents
 }
 
@@ -117,7 +103,7 @@ fn rebase_moves_the_workspace_to_h_prime_incrementally() {
     );
 
     // 3. The rebase, over a recording host.
-    let host = Arc::new(RecordingHost::new(RealHost));
+    let host = Arc::new(RecordingHost::new(RealHost::default()));
     let ctx = f.ctx_on(host.clone());
     let done = swarmops_ws::rebase(&ctx, rebase_of("w", WsRebaseAction::Start)).unwrap();
     assert_eq!(done.onto, main);
@@ -134,7 +120,7 @@ fn rebase_moves_the_workspace_to_h_prime_incrementally() {
     assert_eq!(host.calls_of(HostMethod::RemoveFile).len(), 0);
 
     // 5. The workspace stands on H', rebased onto main, its edit kept and main's in.
-    let saved = state::read(&RealFs, &dir).unwrap();
+    let saved = state::read(&RealFs::new(), &dir).unwrap();
     assert_eq!(saved.head, done.changeset);
     assert_eq!(saved.materialized, done.changeset);
     assert_eq!(
@@ -158,7 +144,7 @@ fn a_conflict_writes_markers_and_conflicts_json_and_moves_nothing_else() {
     let f = Fixture::new();
     let (base, main) = conflicting(&f);
     let dir = f.beside("w");
-    let before = state::read(&RealFs, &dir).unwrap();
+    let before = state::read(&RealFs::new(), &dir).unwrap();
 
     // 2. The rebase stops on the conflict, with the store's report.
     let ctx = f.ctx();
@@ -187,7 +173,7 @@ fn a_conflict_writes_markers_and_conflicts_json_and_moves_nothing_else() {
     assert_eq!(report.theirs, main);
     let paths: Vec<&str> = report.files.iter().map(|f| f.path.as_str()).collect();
     assert_eq!(paths, ["src/a.txt", "src/bin"]);
-    let saved = state::read(&RealFs, &dir).unwrap();
+    let saved = state::read(&RealFs::new(), &dir).unwrap();
     assert_eq!(
         saved.state,
         State::Rebasing {
@@ -199,13 +185,8 @@ fn a_conflict_writes_markers_and_conflicts_json_and_moves_nothing_else() {
     assert_eq!(saved.materialized, before.materialized);
 
     // 5. Status says so; no pending record is left.
-    let status = swarmops_api::WsStatusReq {
-        workspace: "w".to_owned(),
-        paths: Vec::new(),
-        full: false,
-        limit: 100,
-        cursor: None,
-    };
+    let mut status = swarmops_api::WsStatusReq::new("w".to_owned());
+    status.limit = 100;
     let status = swarmops_ws::status(&ctx, status).unwrap();
     assert_eq!(status.state, WsState::Rebasing);
     assert_eq!(status.rebasing.unwrap().conflicts, ["src/a.txt", "src/bin"]);
@@ -288,7 +269,7 @@ fn continue_with_resolutions_records_h_prime() {
             file("src/c.txt", "c\n"),
         ]
     );
-    let saved = state::read(&RealFs, &dir).unwrap();
+    let saved = state::read(&RealFs::new(), &dir).unwrap();
     assert_eq!(saved.state, State::Clean);
     assert_eq!(
         (&saved.head, &saved.materialized),
@@ -311,7 +292,7 @@ fn abort_restores_the_conflicting_paths() {
     conflicting(&f);
     let ctx = f.ctx();
     let dir = f.beside("w");
-    let before = state::read(&RealFs, &dir).unwrap();
+    let before = state::read(&RealFs::new(), &dir).unwrap();
     swarmops_ws::rebase(&ctx, rebase_of("w", WsRebaseAction::Start)).unwrap_err();
     swarmops_ws::resolve(
         &ctx,
@@ -331,7 +312,7 @@ fn abort_restores_the_conflicting_paths() {
             file("src/bin", "x\0b"),
         ]
     );
-    let saved = state::read(&RealFs, &dir).unwrap();
+    let saved = state::read(&RealFs::new(), &dir).unwrap();
     assert_eq!(saved.state, State::Clean);
     assert_eq!(saved.head, before.head);
     assert!(!dir.join(SWARMWS_DIR).join(CONFLICTS_JSON).exists());

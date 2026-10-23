@@ -64,6 +64,7 @@ pub const MAX_RAW_BATCH: usize = 65_535;
 /// A changeset to record with the fields its caller gives ([`Repo::commit_raw_batch`]); the
 /// delta is the one field it does not give, as the module documentation says.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RawChangeset {
     /// The parents in their order, the mainline parent first: the delta is against its root.
     /// None for a root changeset, made whatever refs exist. At most 255, each once, each in the
@@ -86,8 +87,32 @@ pub struct RawChangeset {
     pub metadata: Vec<(String, Vec<u8>)>,
 }
 
+impl RawChangeset {
+    /// Makes one of the fields given.
+    pub fn new(
+        parents: Vec<ChangesetId>,
+        root: TreeId,
+        author: Signature,
+        committer: Signature,
+        message: Vec<u8>,
+        extra_headers: Vec<(Vec<u8>, Vec<u8>)>,
+        metadata: Vec<(String, Vec<u8>)>,
+    ) -> RawChangeset {
+        RawChangeset {
+            parents,
+            root,
+            author,
+            committer,
+            message,
+            extra_headers,
+            metadata,
+        }
+    }
+}
+
 /// What a raw batch did with one of its changesets ([`RawBatchOutcome::outcomes`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RawOutcome {
     /// The changeset's id.
     pub id: ChangesetId,
@@ -98,8 +123,20 @@ pub struct RawOutcome {
     pub files_changed: usize,
 }
 
+impl RawOutcome {
+    /// Makes one of the fields given.
+    pub fn new(id: ChangesetId, insert: InsertOutcome, files_changed: usize) -> RawOutcome {
+        RawOutcome {
+            id,
+            insert,
+            files_changed,
+        }
+    }
+}
+
 /// What [`Repo::commit_raw_batch`] (or [`RawBatch::commit`]) did.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RawBatchOutcome {
     /// One per changeset of the batch, in its order.
     pub outcomes: Vec<RawOutcome>,
@@ -120,6 +157,7 @@ pub struct RawBatchOutcome {
 /// its raw and makes its changeset at once, as [`Repo::commit_raw_batch`] does, and gives its id,
 /// which a raw pushed later can name as a parent; nothing is written until [`RawBatch::commit`]
 /// writes them all, in one frame. Dropped uncommitted, it writes nothing.
+#[non_exhaustive]
 pub struct RawBatch<'r, O: ObjectStore> {
     repo: &'r Repo<O>,
     /// A snapshot of the metadata, taken at the first parent the batch does not hold.
@@ -302,7 +340,7 @@ impl<O: ObjectStore> RawBatch<'_, O> {
             Some(root),
             &PathFilter::all(),
         )?);
-        let changeset = Changeset {
+        let changeset = Changeset::new(
             parents,
             root,
             delta,
@@ -311,21 +349,16 @@ impl<O: ObjectStore> RawBatch<'_, O> {
             message,
             extra_headers,
             metadata,
-        };
+        )?;
         let (object, delta_hash) = changeset.encode_hashed()?;
-        let id = ChangesetId(object.id());
+        let id = ChangesetId::new(object.id());
         // A changeset pushed twice is put once; the insert finds it the second time.
         if self.roots.insert(id, root).is_none() {
             self.objects.push(object);
         }
         self.changed.push(changeset.delta.len());
-        self.metas.push(ChangesetMeta {
-            id,
-            seq: 0,
-            generation: 0,
-            delta_hash,
-            parents: changeset.parents,
-        });
+        self.metas
+            .push(ChangesetMeta::new(id, 0, 0, delta_hash, changeset.parents));
         Ok(id)
     }
 

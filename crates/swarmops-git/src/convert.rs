@@ -70,6 +70,7 @@ const DIR_MODE: &[u8] = b"40000";
 /// The changeset's delta and its parents' changeset ids are the import's to make; the trees and
 /// blobs its root names are in the `out` of [`Converter::commit`], or were made before.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Converted {
     /// The commit's git id.
     pub oid: GitOid,
@@ -95,6 +96,7 @@ pub struct Converted {
 
 /// Why a commit was not converted.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum ConvertError {
     /// The source could not read an object the commit needs: it lacks it, its bytes are damaged,
     /// or reading failed; or the commit, or a tree it needs, is longer than an object holds
@@ -184,6 +186,7 @@ pub enum ConvertError {
 /// conversion reads only the trees and blobs no commit before it named, and appends to its
 /// `out` only the trees and blobs not made before. It refuses what the classes it allows do not
 /// cover (the [module](crate::convert) says how).
+#[non_exhaustive]
 pub struct Converter<'s> {
     source: &'s dyn GitSource,
     allowed: LossySet,
@@ -370,7 +373,7 @@ impl<'s> Converter<'s> {
             message,
             ..
         } = commit;
-        let (author, committer) = (signature(author), signature(committer));
+        let (author, committer) = (signature(oid, author)?, signature(oid, committer)?);
         let bytes = render::commit_bytes(
             tree.rendered,
             &parents,
@@ -558,9 +561,10 @@ impl<'s> Converter<'s> {
                 // should, which the commit's check reports as the bug it is.
                 at.map_or(GitOid::NULL, |at| git[at])
             };
-            let rendered = oid::git_hash(RawKind::Tree, &render::tree_bytes(&tree, child));
+            let rendered = render::tree_bytes(&tree, child).ok_or(ConvertError::Bug { commit })?;
+            let rendered = oid::git_hash(RawKind::Tree, &rendered);
             let bytes = tree.encode();
-            let id = TreeId(swarmops_core::hash_object(ObjectKind::Tree, &bytes));
+            let id = TreeId::new(swarmops_core::hash_object(ObjectKind::Tree, &bytes));
             self.add_tree(pending, id, bytes);
             TreeMemo {
                 tree: Some(id),
@@ -631,7 +635,7 @@ impl<'s> Converter<'s> {
         if bytes::to_u64(bytes.len()) > MAX_OBJECT_LEN {
             return Err(too_large(bytes::to_u64(bytes.len())));
         }
-        let id = BlobId(swarmops_core::hash_object(ObjectKind::Blob, &bytes));
+        let id = BlobId::new(swarmops_core::hash_object(ObjectKind::Blob, &bytes));
         pending.blobs.insert(oid, id);
         pending.objects.push((ObjectKind::Blob, bytes));
         Ok(id)
@@ -737,6 +741,14 @@ fn odd_mode(mode: &[u8], kind: Kind) -> String {
         Kind::Leaf(LeafKind::Symlink) => "120000",
         Kind::Dir => "40000",
         Kind::Gitlink => "160000",
+        // A leaf kind newer than this build: the refusal stands, without git's digits.
+        Kind::Leaf(_) => {
+            return format!(
+                "the mode {}, of a kind {}",
+                mode.escape_ascii(),
+                crate::UNKNOWN_VARIANT
+            );
+        }
     };
     format!(
         "the mode {}, which git writes {written}",
@@ -798,15 +810,20 @@ fn each_once(ids: &[GitOid]) -> Vec<GitOid> {
     ids.iter().copied().filter(|&id| seen.insert(id)).collect()
 }
 
-/// An ident as a changeset holds it: the same fields.
-fn signature(ident: RawIdent) -> Signature {
-    Signature {
-        name: ident.name,
-        email: ident.email,
-        secs: ident.secs,
-        offset_secs: ident.offset_secs,
-        negative_zero: ident.negative_zero,
-    }
+/// An ident of commit `oid` as a changeset holds it: the same fields. One written `-0000` with
+/// another offset than zero, which git's parse never gives, is [`ConvertError::Malformed`].
+fn signature(oid: GitOid, ident: RawIdent) -> Result<Signature, ConvertError> {
+    let signature = Signature::new(
+        ident.name,
+        ident.email,
+        ident.secs,
+        ident.offset_secs,
+        ident.negative_zero,
+    );
+    signature.map_err(|_| ConvertError::Malformed {
+        oid,
+        what: "an ident written -0000 with an offset other than zero",
+    })
 }
 
 /// What in a commit's `raw` bytes git writes otherwise: the first line that `rendered`, what its
@@ -898,7 +915,7 @@ mod tests {
             assert_eq!(component(name.as_bytes()), Ok(name));
             Tree::new(vec![TreeEntry::dir(
                 name,
-                TreeId(swarmops_core::ObjectId([0; 32])),
+                TreeId::new(swarmops_core::ObjectId::new([0; 32])),
             )])
             .unwrap_or_else(|error| panic!("{name}: {error}"));
         }
@@ -949,5 +966,22 @@ mod tests {
         let mut whole = headers.to_vec();
         whole.push(b'\n');
         assert_eq!(unlike(headers, &whole), "no blank line after its headers");
+    }
+
+    /// An ident written `-0000` with a nonzero offset, which git's parse never gives, is
+    /// refused as malformed; a `-0000` of offset zero is a signature.
+    #[test]
+    fn a_negative_zero_ident_with_an_offset_is_malformed() {
+        let ident = |offset_secs| RawIdent::new(b"A".to_vec(), b"a".to_vec(), 1, offset_secs, true);
+
+        // 1. Offset zero: the signature keeps the `-0000`.
+        let kept = signature(GitOid::NULL, ident(0)).unwrap();
+        assert!(kept.negative_zero);
+
+        // 2. Another offset: malformed, naming the commit.
+        assert!(matches!(
+            signature(GitOid::NULL, ident(3_600)),
+            Err(ConvertError::Malformed { oid, .. }) if oid == GitOid::NULL
+        ));
     }
 }

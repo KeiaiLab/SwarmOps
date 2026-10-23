@@ -38,7 +38,7 @@ fn compacted() -> Vec<u8> {
 
 fn changeset() -> Vec<u8> {
     frame(&[Record::Changeset {
-        id: ChangesetId(ObjectId([1; 32])),
+        id: ChangesetId::new(ObjectId::new([1; 32])),
         generation: 1,
         delta_hash: [2; 32],
         parents: Vec::new(),

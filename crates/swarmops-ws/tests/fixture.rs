@@ -18,7 +18,7 @@ use swarmops_api::{
 };
 use swarmops_ops::LocalOps;
 use swarmops_store::{FsOps, RealFs};
-use swarmops_ws::state::{self, Volume, WorkspaceFile};
+use swarmops_ws::state::{self, Volume};
 use swarmops_ws::workspace::{Locate, Workspace};
 use swarmops_ws::{Ctx, HostFs, RealHost};
 
@@ -62,32 +62,31 @@ impl Fixture {
 
     /// What the workspace operations run with, over the host `host`, as the fixture's agent.
     pub fn ctx_on(&self, host: Arc<dyn HostFs>) -> Ctx<'_> {
-        self.ctx_with(host, Arc::new(RealFs))
+        self.ctx_with(host, Arc::new(RealFs::new()))
     }
 
     /// What the workspace operations run with, over the host `host` and the durable files' `fs`.
     pub fn ctx_with(&self, host: Arc<dyn HostFs>, fs: Arc<dyn FsOps>) -> Ctx<'_> {
-        Ctx {
-            store: &self.ops,
-            store_root: self.root.clone(),
-            who: Some(Identity::parse(AGENT).unwrap()),
+        Ctx::new(
+            &self.ops,
+            self.root.clone(),
+            Some(Identity::parse(AGENT).unwrap()),
             fs,
             host,
-        }
+        )
     }
 
     /// What the workspace operations run with, over the real host, with `store` in place of the
     /// fixture's own (a [`Watched`] one over it).
     pub fn ctx_over<'s>(&'s self, store: &'s dyn StoreOps) -> Ctx<'s> {
-        Ctx {
-            store,
-            ..self.ctx()
-        }
+        let mut ctx = self.ctx();
+        ctx.store = store;
+        ctx
     }
 
     /// What the workspace operations run with, over the real host.
     pub fn ctx(&self) -> Ctx<'_> {
-        self.ctx_on(Arc::new(RealHost))
+        self.ctx_on(Arc::new(RealHost::default()))
     }
 
     /// A directory beside the store, not made.
@@ -105,32 +104,20 @@ impl Fixture {
                     Put::Exec(path, text) => (path, text, ModeInput::Exec),
                     Put::Link(path, target) => (path, target, ModeInput::Symlink),
                     Put::Gone(path) => {
-                        return ChangeInput {
-                            path: path.to_owned(),
-                            op: ChangeOp::Delete,
-                            content: None,
-                            mode: None,
-                        };
+                        return ChangeInput::new(path.to_owned(), ChangeOp::Delete);
                     }
                 };
-                ChangeInput {
-                    path: path.to_owned(),
-                    op: ChangeOp::Put,
-                    content: Some(ContentInput::Inline(text.to_owned())),
-                    mode: Some(mode),
-                }
+                let mut out = ChangeInput::new(path.to_owned(), ChangeOp::Put);
+                out.content = Some(ContentInput::Inline(text.to_owned()));
+                out.mode = Some(mode);
+                out
             })
             .collect();
 
         // 2. Recorded on the parent, `main` moved along.
-        let req = CommitReq {
-            parent: parent.map(Into::into),
-            changes,
-            message: "fixture".to_owned(),
-            advance: Some("main".to_owned()),
-            idempotency_key: None,
-            allow_empty: false,
-        };
+        let mut req = CommitReq::new(changes, "fixture".to_owned());
+        req.parent = parent.map(Into::into);
+        req.advance = Some("main".to_owned());
         let who = Identity::parse(AGENT).unwrap();
         self.ops.commit(&who, req).unwrap().changeset
     }
@@ -144,16 +131,12 @@ impl Fixture {
         base: &str,
         prefixes: &[&str],
     ) -> Result<WsInfo, OpError> {
-        let req = WsCreateReq {
-            name: name.to_owned(),
-            path: Some(self.beside(name).to_string()),
-            base: base.into(),
-            prefixes: prefixes.iter().map(|p| (*p).to_owned()).collect(),
-            all: prefixes.is_empty(),
-            from: None,
-            session: None,
-            status_after: StatusAfter::None,
-        };
+        let mut req = WsCreateReq::new(name.to_owned());
+        req.path = Some(self.beside(name).to_string());
+        req.base = base.into();
+        req.prefixes = prefixes.iter().map(|p| (*p).to_owned()).collect();
+        req.all = prefixes.is_empty();
+        req.status_after = StatusAfter::None;
         swarmops_ws::create(ctx, req)
     }
 
@@ -171,11 +154,9 @@ impl Fixture {
     /// probed: how the tests simulate a volume this host has none of.
     pub fn simulate(&self, name: &str, volume: Volume) {
         let dir = self.beside(name);
-        let file = WorkspaceFile {
-            volume,
-            ..state::read(&RealFs, &dir).unwrap()
-        };
-        state::replace(&RealFs, &dir, &file).unwrap();
+        let mut file = state::read(&RealFs::new(), &dir).unwrap();
+        file.volume = volume;
+        state::replace(&RealFs::new(), &dir, &file).unwrap();
     }
 }
 
@@ -280,13 +261,10 @@ pub fn changes(ctx: &Ctx<'_>, name: &str, full: bool) -> Vec<(String, WsChangeKi
     let mut cursor = None;
     loop {
         // 1. A page.
-        let req = WsStatusReq {
-            workspace: name.to_owned(),
-            paths: Vec::new(),
-            full,
-            limit: 500,
-            cursor: cursor.take(),
-        };
+        let mut req = WsStatusReq::new(name.to_owned());
+        req.full = full;
+        req.limit = 500;
+        req.cursor = cursor.take();
         let page = swarmops_ws::status(ctx, req).unwrap();
 
         // 2. Its changes; the next one, if any.
@@ -376,19 +354,19 @@ impl<'a> Watched<'a> {
         // 2. Its entries, and a cursor when more follow.
         let id = |n: u64| format!("{n:064x}");
         let entries = (start..end)
-            .map(|n| ChangesetSummary {
-                id: id(n),
-                parents: vec![id(n + 1)],
-                author_agent: "agent/made-up".to_owned(),
-                created_at: 0,
-                title: String::new(),
+            .map(|n| {
+                ChangesetSummary::new(
+                    id(n),
+                    vec![id(n + 1)],
+                    "agent/made-up".to_owned(),
+                    0,
+                    String::new(),
+                )
             })
             .collect();
-        LogPage {
-            entries,
-            truncated: end < total,
-            cursor: (end < total).then(|| id(end - 1)),
-        }
+        let mut out = LogPage::new(entries, end < total);
+        out.cursor = (end < total).then(|| id(end - 1));
+        out
     }
 }
 
@@ -955,13 +933,8 @@ pub mod sweep {
                 // makes the same calls.
                 write(&dir, "src/a.rs", "mine\n");
                 std::thread::sleep(PAST_THE_CLOCK_TICK);
-                let req = WsCommitReq {
-                    workspace: WS.to_owned(),
-                    message: "mine".to_owned(),
-                    paths: Vec::new(),
-                    modes: std::collections::BTreeMap::new(),
-                    status_after: StatusAfter::None,
-                };
+                let mut req = WsCommitReq::new(WS.to_owned(), "mine".to_owned());
+                req.status_after = StatusAfter::None;
                 swarmops_ws::commit(&f.ctx(), req).unwrap();
                 f.commit(Some(&base), &[Put::File("docs/y.md", "y2\n")]);
                 if scenario != Scenario::Rebase {
@@ -978,16 +951,25 @@ pub mod sweep {
         // 1. The update, its host failing at the first `set_mode`.
         let f = Fixture::new();
         prepare(&f, Scenario::Update);
-        let host = TraceHost::new(Arc::new(RealHost), Trace::default()).failing("set_mode");
+        let host =
+            TraceHost::new(Arc::new(RealHost::default()), Trace::default()).failing("set_mode");
         let ctx = f.ctx_on(Arc::new(host));
         assert!(act(&ctx, Scenario::Update).is_err());
         let dir = f.beside(WS);
-        assert!(pending::read_intent(&RealFs, &dir).unwrap().is_some());
+        assert!(
+            pending::read_intent(&RealFs::new(), &dir)
+                .unwrap()
+                .is_some()
+        );
 
         // 2. The next open finishes it.
         let ctx = f.ctx();
         Fixture::open(&ctx, WS);
-        assert!(pending::read_intent(&RealFs, &dir).unwrap().is_none());
+        assert!(
+            pending::read_intent(&RealFs::new(), &dir)
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(outcome(&f, &ctx), reference(Scenario::Update).outcome);
     }
 
@@ -999,7 +981,8 @@ pub mod sweep {
         // 1. The update, its host failing at the first `set_mode`.
         let f = Fixture::new();
         prepare(&f, Scenario::Update);
-        let host = TraceHost::new(Arc::new(RealHost), Trace::default()).failing("set_mode");
+        let host =
+            TraceHost::new(Arc::new(RealHost::default()), Trace::default()).failing("set_mode");
         let ctx = f.ctx_on(Arc::new(host));
         assert!(act(&ctx, Scenario::Update).is_err());
         let dir = f.beside(WS);
@@ -1017,10 +1000,7 @@ pub mod sweep {
 
     /// The scenario's operation, once, through `ctx`.
     fn act(ctx: &Ctx<'_>, scenario: Scenario) -> Result<(), OpError> {
-        let main = ctx
-            .store
-            .resolve_rev(ResolveRevReq { rev: "main".into() })?
-            .id;
+        let main = ctx.store.resolve_rev(ResolveRevReq::new("main"))?.id;
         match scenario {
             Scenario::Update => {
                 let mut ws = Fixture::open(ctx, WS);
@@ -1028,40 +1008,28 @@ pub mod sweep {
                 materialize::update(ctx, &mut ws, &main).map(|_| ())
             }
             Scenario::Commit => {
-                let req = WsCommitReq {
-                    workspace: WS.to_owned(),
-                    message: "sweep".to_owned(),
-                    paths: Vec::new(),
-                    modes: std::collections::BTreeMap::new(),
-                    status_after: StatusAfter::None,
-                };
+                let mut req = WsCommitReq::new(WS.to_owned(), "sweep".to_owned());
+                req.status_after = StatusAfter::None;
                 swarmops_ws::commit(ctx, req).map(|_| ())
             }
             Scenario::Rebase => {
-                let req = WsRebaseReq {
-                    workspace: WS.to_owned(),
-                    onto: "main".to_owned(),
-                    action: WsRebaseAction::Start,
-                    message: None,
-                    status_after: StatusAfter::None,
-                };
+                let mut req = WsRebaseReq::new(WS.to_owned());
+                req.action = WsRebaseAction::Start;
+                req.status_after = StatusAfter::None;
                 swarmops_ws::rebase(ctx, req).map(|_| ())
             }
             Scenario::Land | Scenario::LandChecked => {
-                let check = (scenario == Scenario::LandChecked).then(|| WsCheckInput {
-                    argv: Some(vec!["true".to_owned()]),
-                    timeout_s: 60,
+                let check = (scenario == Scenario::LandChecked).then(|| {
+                    let mut check = WsCheckInput::default();
+                    check.argv = Some(vec!["true".to_owned()]);
+                    check.timeout_s = 60;
+                    check
                 });
-                let req = WsLandReq {
-                    workspace: WS.to_owned(),
-                    message: Some("sweep land".to_owned()),
-                    idempotency_key: None,
-                    target: None,
-                    check,
-                    mode: None,
-                    max_attempts: 4,
-                    status_after: StatusAfter::None,
-                };
+                let mut req = WsLandReq::new(WS.to_owned());
+                req.message = Some("sweep land".to_owned());
+                req.check = check;
+                req.max_attempts = 4;
+                req.status_after = StatusAfter::None;
                 swarmops_ws::land(ctx, req).map(|_| ())
             }
         }
@@ -1069,12 +1037,9 @@ pub mod sweep {
 
     /// How many changesets `rev` reaches along first parents.
     fn chain(f: &Fixture, rev: &str) -> usize {
-        let req = LogReq {
-            rev: Some(rev.into()),
-            limit: 1000,
-            cursor: None,
-            paths: Vec::new(),
-        };
+        let mut req = LogReq::default();
+        req.rev = Some(rev.into());
+        req.limit = 1000;
         f.ops.log(req).unwrap().entries.len()
     }
 
@@ -1099,13 +1064,13 @@ pub mod sweep {
         host: Arc<dyn HostFs>,
         fs: Arc<dyn FsOps>,
     ) -> Ctx<'a> {
-        Ctx {
-            store: ops,
-            store_root: root.into(),
-            who: Some(Identity::parse(AGENT).unwrap()),
+        Ctx::new(
+            ops,
+            root.into(),
+            Some(Identity::parse(AGENT).unwrap()),
             fs,
             host,
-        }
+        )
     }
 
     /// What a run that never crashes shows: its calls on each layer, its events, its outcome.
@@ -1130,19 +1095,17 @@ pub mod sweep {
         watched.trace = Some(trace.clone());
 
         // 2. Run over counting doubles under the trace.
-        let counting_host = Arc::new(CrashAtHost::new(RealHost, 0));
-        let counting_fs = Arc::new(CrashAtFs::new(RealFs, 0));
+        let counting_host = Arc::new(CrashAtHost::new(RealHost::default(), 0));
+        let counting_fs = Arc::new(CrashAtFs::new(RealFs::new(), 0));
         let host = TraceHost::new(counting_host.clone(), trace.clone());
         let fs = TraceFs {
             inner: counting_fs.clone(),
             trace: trace.clone(),
         };
-        let ctx = f.ctx_over(&watched);
-        let ctx = Ctx {
-            host: Arc::new(host),
-            fs: Arc::new(fs),
-            ..ctx
-        };
+        let mut ctx = f.ctx_over(&watched);
+        ctx.host = Arc::new(host);
+        ctx.fs = Arc::new(fs);
+
         act(&ctx, scenario).unwrap();
 
         // 3. The outcome through the plain context.
@@ -1205,8 +1168,14 @@ pub mod sweep {
         // 2. The scenario over the layer that aborts.
         let ops = LocalOps::open(Utf8Path::new(root)).unwrap();
         let (host, fs): (Arc<dyn HostFs>, Arc<dyn FsOps>) = match layer {
-            "host" => (Arc::new(CrashAtHost::new(RealHost, k)), Arc::new(RealFs)),
-            _ => (Arc::new(RealHost), Arc::new(CrashAtFs::new(RealFs, k))),
+            "host" => (
+                Arc::new(CrashAtHost::new(RealHost::default(), k)),
+                Arc::new(RealFs::new()),
+            ),
+            _ => (
+                Arc::new(RealHost::default()),
+                Arc::new(CrashAtFs::new(RealFs::new(), k)),
+            ),
         };
         let ctx = ctx_on(&ops, root, host, fs);
         let _ = act(&ctx, scenario);
@@ -1229,13 +1198,15 @@ pub mod sweep {
 
         // 2. Opened: a materialisation it left is finished.
         let ctx = f.ctx_with(
-            Arc::new(RealHost),
-            swarmops_testkit::faults::checked(RealFs),
+            Arc::new(RealHost::default()),
+            swarmops_testkit::faults::checked(RealFs::new()),
         );
         let dir = f.beside(WS);
         let head = Fixture::open(&ctx, WS).file.head;
         assert!(
-            pending::read_intent(&RealFs, &dir).unwrap().is_none(),
+            pending::read_intent(&RealFs::new(), &dir)
+                .unwrap()
+                .is_none(),
             "{name}: an intent is left after the open"
         );
 
@@ -1243,7 +1214,7 @@ pub mod sweep {
         //    commit of the edits, when the child was cut inside it. Then the operation again:
         //    it finishes; where it was done already, only the refusal that says so is allowed,
         //    and not with a record of this head to resume.
-        let record = pending::read_pending(&RealFs, &dir).unwrap();
+        let record = pending::read_pending(&RealFs::new(), &dir).unwrap();
         let live = record.as_ref().filter(|r| r.head == head);
         if live.is_some_and(|r| r.op == PendingOp::Commit) && scenario != Scenario::Commit {
             commit_edits(&ctx, "sweep land").unwrap_or_else(|e| panic!("{name}: {e:?}"));
@@ -1257,13 +1228,17 @@ pub mod sweep {
         // 4. Nothing half done (a record left is of an older head, which the next call drops),
         //    and the store and the workspace as the uncut run left them.
         let head = Fixture::open(&ctx, WS).file.head;
-        let left = pending::read_pending(&RealFs, &dir).unwrap();
+        let left = pending::read_pending(&RealFs::new(), &dir).unwrap();
         assert!(left.is_none_or(|r| r.head != head), "{name}: pending");
         assert!(
-            pending::read_intent(&RealFs, &dir).unwrap().is_none(),
+            pending::read_intent(&RealFs::new(), &dir)
+                .unwrap()
+                .is_none(),
             "{name}: intent"
         );
-        let report = f.ops.verify(VerifyReq { deep: true }).unwrap();
+        let mut req = VerifyReq::default();
+        req.deep = true;
+        let report = f.ops.verify(req).unwrap();
         assert!(report.problems.is_empty(), "{name}: {:?}", report.problems);
         assert_eq!(changes(&ctx, WS, false), changes(&ctx, WS, true), "{name}");
         registry_is_consistent(&f, &ctx, &name);
@@ -1272,13 +1247,8 @@ pub mod sweep {
 
     /// `ws commit` of every edit of the sweeps' workspace.
     fn commit_edits(ctx: &Ctx<'_>, message: &str) -> Result<(), OpError> {
-        let req = WsCommitReq {
-            workspace: WS.to_owned(),
-            message: message.to_owned(),
-            paths: Vec::new(),
-            modes: std::collections::BTreeMap::new(),
-            status_after: StatusAfter::None,
-        };
+        let mut req = WsCommitReq::new(WS.to_owned(), message.to_owned());
+        req.status_after = StatusAfter::None;
         swarmops_ws::commit(ctx, req).map(|_| ())
     }
 
@@ -1289,12 +1259,16 @@ pub mod sweep {
 
     /// The registry holds the one workspace, listed and not an orphan, and no file but its entry.
     fn registry_is_consistent(f: &Fixture, ctx: &Ctx<'_>, name: &str) {
-        let listed = swarmops_ws::list(ctx, WsListReq { check: true }).unwrap();
+        let mut req = WsListReq::default();
+        req.check = true;
+        let listed = swarmops_ws::list(ctx, req).unwrap();
         let names: Vec<(&str, bool)> = (listed.workspaces.iter())
             .map(|w| (w.name.as_str(), w.orphan))
             .collect();
         assert_eq!(names, [(WS, false)], "{name}");
-        let entries = Registry::open(&f.root, Arc::new(RealFs)).list().unwrap();
+        let entries = Registry::open(&f.root, Arc::new(RealFs::new()))
+            .list()
+            .unwrap();
         assert_eq!(entries.len(), 1, "{name}");
     }
 }

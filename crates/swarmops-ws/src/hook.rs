@@ -38,6 +38,7 @@ pub const MAX_HOOK_INPUT: usize = 64 * 1024;
 
 /// The `WorktreeCreate` hook's input: the fields a workspace is made from.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct HookCreate {
     /// The slug Claude Code suggests.
     pub name: String,
@@ -47,16 +48,36 @@ pub struct HookCreate {
     pub cwd: Utf8PathBuf,
 }
 
+impl HookCreate {
+    /// The input of session `session_id`, standing in `cwd`, that asks for a workspace `name`.
+    pub fn new(name: String, session_id: String, cwd: Utf8PathBuf) -> HookCreate {
+        HookCreate {
+            name,
+            session_id,
+            cwd,
+        }
+    }
+}
+
 /// The `WorktreeRemove` hook's input.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct HookRemove {
     /// The directory to remove: the path the create hook printed.
     pub worktree_path: Utf8PathBuf,
 }
 
+impl HookRemove {
+    /// The input that removes the workspace at `worktree_path`.
+    pub fn new(worktree_path: Utf8PathBuf) -> HookRemove {
+        HookRemove { worktree_path }
+    }
+}
+
 /// Whether a new workspace's bootstrap runs: `SWARMOPS_WS_BOOTSTRAP=skip`, as the CLI read it,
 /// is [`Bootstrap::Skip`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Bootstrap {
     /// Copy the `.worktreeinclude` files and run the repository's bootstrap command.
     Run,
@@ -67,6 +88,7 @@ pub enum Bootstrap {
 /// What the remove hook left in the store: the workspace's head, and the rescue changeset of its
 /// uncommitted edits, when it had some.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct RemoveReport {
     /// The workspace's head when it was removed.
     pub head: ChangesetId,
@@ -167,7 +189,7 @@ pub fn worktree_create(
     }
 
     // 3. Where, and as whom: `<ws_root>/<repo>/<name>`, the caller or `claude-code/<name>`.
-    let info = ctx.store.repo_info(InfoReq {})?;
+    let info = ctx.store.repo_info(InfoReq::default())?;
     let dir = ws_root
         .join(repo_dir(&info.name, &info.repo_id))
         .join(&name);
@@ -184,16 +206,14 @@ pub fn worktree_create(
     };
 
     // 4. Made, then bootstrapped when this create made it.
-    let req = WsCreateReq {
-        name,
-        path: Some(dir.to_string()),
-        base: base.as_str().into(),
-        prefixes,
-        all,
-        from: Some(input.cwd.to_string()),
-        session: Some(session),
-        status_after: StatusAfter::None,
-    };
+    let mut req = WsCreateReq::new(name);
+    req.path = Some(dir.to_string());
+    req.base = base.as_str().into();
+    req.prefixes = prefixes;
+    req.all = all;
+    req.from = Some(input.cwd.to_string());
+    req.session = Some(session);
+    req.status_after = StatusAfter::None;
     let made = create::create(&ctx, req)?;
     if made.created && bootstrap == Bootstrap::Run {
         let ws = Workspace::open(&ctx, Locate::Path(dir.clone()))?;
@@ -233,11 +253,8 @@ pub fn worktree_remove(ctx: &Ctx<'_>, input: &HookRemove) -> Result<RemoveReport
     }
 
     // 2. Rescued and deleted.
-    let req = WsDeleteReq {
-        workspace: name,
-        force: false,
-        rescue: true,
-    };
+    let mut req = WsDeleteReq::new(name);
+    req.rescue = true;
     let done = delete::delete(ctx, req)?;
     let rescued = done.rescued.as_deref().map(changeset_id).transpose()?;
     Ok(RemoveReport {
@@ -350,7 +367,7 @@ fn digest(parts: &[&[u8]], len: usize) -> String {
 
 /// The changeset id `hex`, as the store gave it: `E_INTERNAL` for one that is not an id.
 fn changeset_id(hex: &str) -> Result<ChangesetId, OpError> {
-    ObjectId::from_hex(hex).map(ChangesetId).map_err(|e| {
+    ObjectId::from_hex(hex).map(ChangesetId::new).map_err(|e| {
         OpError::new(
             ErrorCode::Internal,
             format!("the store gave {hex:?} as a changeset id: {e}"),

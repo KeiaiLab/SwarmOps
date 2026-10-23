@@ -8,6 +8,7 @@ use crate::error::PathError;
 /// components, no leading or trailing slash, no NUL. Ordered by bytes, never
 /// normalized.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
 pub struct RepoPath(String);
 
 impl RepoPath {

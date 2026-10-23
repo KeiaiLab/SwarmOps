@@ -29,6 +29,7 @@ pub trait TreeRead {
 
 /// A leaf as a tree entry names it: a file, an executable or a symlink, and its blob.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct Leaf {
     /// File, executable or symlink.
     pub kind: LeafKind,
@@ -36,8 +37,16 @@ pub struct Leaf {
     pub blob: BlobId,
 }
 
+impl Leaf {
+    /// The leaf of this kind and blob.
+    pub fn new(kind: LeafKind, blob: BlobId) -> Self {
+        Self { kind, blob }
+    }
+}
+
 /// What happened to the leaf at one path, from one tree to the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ChangeKind {
     /// No leaf was there before (nothing, or a directory); `new` is there now.
     Added {
@@ -90,6 +99,7 @@ impl ChangeKind {
 
 /// The change of the leaf at one path.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct TreeChange {
     /// The leaf's full path from the root.
     pub path: RepoPath,
@@ -97,9 +107,17 @@ pub struct TreeChange {
     pub kind: ChangeKind,
 }
 
+impl TreeChange {
+    /// The change `kind` of the leaf at `path`.
+    pub fn new(path: RepoPath, kind: ChangeKind) -> Self {
+        Self { path, kind }
+    }
+}
+
 /// The paths a diff looks at: every path ([`PathFilter::all`]), or those that equal or lie below
 /// one of some prefixes ([`PathFilter::under`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PathFilter {
     /// `None` for every path; else the prefixes, sorted by bytes, each once.
     prefixes: Option<Vec<RepoPath>>,
@@ -348,18 +366,13 @@ impl<'t> Iterator for Pairs<'t> {
 
 /// The leaf an entry names, if it names one.
 fn leaf(target: Option<EntryTarget>) -> Option<Leaf> {
-    match target? {
-        EntryTarget::Leaf(kind, blob) => Some(Leaf { kind, blob }),
-        EntryTarget::Dir(_) => None,
-    }
+    let (kind, blob) = target?.leaf()?;
+    Some(Leaf { kind, blob })
 }
 
 /// The tree an entry names, if it names a directory.
 fn subtree(target: Option<EntryTarget>) -> Option<TreeId> {
-    match target? {
-        EntryTarget::Dir(tree) => Some(tree),
-        EntryTarget::Leaf(..) => None,
-    }
+    target?.dir()
 }
 
 /// The change from the leaf `before` to the leaf `after` at one path; `None` if they are the
@@ -404,22 +417,25 @@ fn repo_path(path: String) -> RepoPath {
 pub fn delta_of(changes: &[TreeChange]) -> Vec<DeltaEntry> {
     changes
         .iter()
-        .map(|change| DeltaEntry {
-            path: change.path.clone(),
-            op: match change.kind.after() {
+        .map(|change| {
+            let op = match change.kind.after() {
                 Some(new) => DeltaOp::Put {
                     kind: new.kind,
                     id: new.blob,
                 },
                 None => DeltaOp::Delete,
-            },
-            renamed_from: None,
+            };
+
+            // Only a rename source can make an entry invalid, and none is given.
+            DeltaEntry::new(change.path.clone(), op, None)
+                .expect("an entry without a rename source is valid")
         })
         .collect()
 }
 
 /// A path that a three-way merge decides: the leaf each of the three trees holds there.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct PathTriple {
     /// The leaf's full path from the root.
     pub path: RepoPath,
@@ -429,6 +445,23 @@ pub struct PathTriple {
     pub ours: Option<Leaf>,
     /// Theirs' leaf there; `None` for none.
     pub theirs: Option<Leaf>,
+}
+
+impl PathTriple {
+    /// The path and the leaf each of the three trees holds there.
+    pub fn new(
+        path: RepoPath,
+        base: Option<Leaf>,
+        ours: Option<Leaf>,
+        theirs: Option<Leaf>,
+    ) -> Self {
+        Self {
+            path,
+            base,
+            ours,
+            theirs,
+        }
+    }
 }
 
 /// Every leaf path, within `filter`, that `base` → `ours` or `base` → `theirs` changes, with the

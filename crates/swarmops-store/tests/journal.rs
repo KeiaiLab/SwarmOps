@@ -61,11 +61,11 @@ fn reopen(layout: &Layout) -> Journal {
 /// of their recovery checked against the write-ordering rules.
 #[cfg(feature = "test-hooks")]
 fn reopen_checked(layout: &Layout) -> Journal {
-    Journal::open(layout, checked(RealFs)).unwrap()
+    Journal::open(layout, checked(RealFs::new())).unwrap()
 }
 
 fn id(byte: u8) -> ChangesetId {
-    ChangesetId(ObjectId([byte; 32]))
+    ChangesetId::new(ObjectId::new([byte; 32]))
 }
 
 /// 74 bytes encoded, so a frame of it alone is 84.
@@ -243,11 +243,7 @@ fn frame_roundtrip_all_record_kinds() {
     let journal = new_journal(&layout);
     journal.append_frame(&[compacted(0)]).unwrap(); // frame 0, 19 bytes
     let frame = journal.append_frame(&records).unwrap();
-    let want = Frame {
-        seq: 1,
-        offset: 19,
-        records: records.to_vec(),
-    };
+    let want = Frame::new(1, 19, records.to_vec());
     assert_eq!(frame, want);
     assert_eq!(file_len(layout.journal_log()), 19 + 8 + 2 + 555);
     let reader = reopen(&layout);
@@ -325,7 +321,7 @@ fn record_decode_rejects_truncations_unknown_kinds_and_bad_flags() {
         for cut in 0..bytes.len() {
             let got = Record::decode(&bytes[..cut]);
             assert!(
-                matches!(got, Err(BadRecord { at }) if at <= cut),
+                matches!(got, Err(BadRecord { at, .. }) if at <= cut),
                 "{record:?} cut to {cut} bytes: {got:?}"
             );
         }
@@ -333,7 +329,7 @@ fn record_decode_rejects_truncations_unknown_kinds_and_bad_flags() {
     for kind in [0, 3, 5, 0xff] {
         let got = Record::decode(&[kind; 80]);
         assert!(
-            matches!(got, Err(BadRecord { at: 0 })),
+            matches!(got, Err(BadRecord { at: 0, .. })),
             "kind {kind}: {got:?}"
         );
     }
@@ -341,16 +337,16 @@ fn record_decode_rejects_truncations_unknown_kinds_and_bad_flags() {
     let mut bad_flag = encoded(&main_created());
     bad_flag[6] = 2;
     let got = Record::decode(&bad_flag);
-    assert!(matches!(got, Err(BadRecord { at: 6 })), "{got:?}");
+    assert!(matches!(got, Err(BadRecord { at: 6, .. })), "{got:?}");
     // A ref name that is not UTF-8: decoding stops where the name starts.
     let mut not_utf8 = encoded(&main_created());
     not_utf8[2] = 0xff;
     let got = Record::decode(&not_utf8);
-    assert!(matches!(got, Err(BadRecord { at: 2 })), "{got:?}");
+    assert!(matches!(got, Err(BadRecord { at: 2, .. })), "{got:?}");
 }
 
 fn arb_id() -> impl Strategy<Value = ChangesetId> {
-    any::<[u8; 32]>().prop_map(|bytes| ChangesetId(ObjectId(bytes)))
+    any::<[u8; 32]>().prop_map(|bytes| ChangesetId::new(ObjectId::new(bytes)))
 }
 
 fn arb_record() -> impl Strategy<Value = Record> {
@@ -931,11 +927,7 @@ fn readers_measure_off_before_log() {
         (call.to_owned(), When::Before, Box::new(append))
     };
     let racing = || racing_at("file_len journal.log");
-    let raced = Frame {
-        seq: 1,
-        offset: 84,
-        records: vec![compacted(2)],
-    };
+    let raced = Frame::new(1, 84, vec![compacted(2)]);
     let (reader, calls) = racing_journal(&layout, Some(racing()));
     assert_eq!(
         reader.tail_frames_from(0).unwrap(),
@@ -1029,7 +1021,7 @@ fn journal_off_cut_after_a_reader_measured_it_is_read_again() {
             entries,
             calls: Mutex::new(Vec::new()),
         },
-        RealFs,
+        RealFs::new(),
     ));
     let reader = Journal::open(&layout, Arc::clone(&cutting) as Arc<dyn FsOps>).unwrap();
     for (what, read, _, _) in reads {
@@ -1484,8 +1476,8 @@ fn recovery_checks_every_listed_frame_before_it_writes() {
             generation: 1,
             delta_hash: [0xdd; 32],
             parents: vec![
-                ChangesetId(ObjectId(fake_header)),
-                ChangesetId(ObjectId(embedded)),
+                ChangesetId::new(ObjectId::new(fake_header)),
+                ChangesetId::new(ObjectId::new(embedded)),
             ],
         }])
         .unwrap(); // bytes 0..148, its parents at 84..148
@@ -1911,37 +1903,37 @@ fn real_fs_appends_truncates_and_replaces_durably() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("f");
     assert_eq!(
-        RealFs.file_len(&file).unwrap(),
+        RealFs::new().file_len(&file).unwrap(),
         0,
         "a missing file has length 0"
     );
     assert_eq!(
-        RealFs.append_durable(&file, b"abc").unwrap(),
+        RealFs::new().append_durable(&file, b"abc").unwrap(),
         0,
         "creates the file"
     );
     assert_eq!(
-        RealFs.append_durable(&file, b"de").unwrap(),
+        RealFs::new().append_durable(&file, b"de").unwrap(),
         3,
         "where the bytes start"
     );
-    assert_eq!(RealFs.append_durable(&file, b"").unwrap(), 5);
+    assert_eq!(RealFs::new().append_durable(&file, b"").unwrap(), 5);
     assert_eq!(fs::read(&file).unwrap(), b"abcde");
-    assert_eq!(RealFs.file_len(&file).unwrap(), 5);
+    assert_eq!(RealFs::new().file_len(&file).unwrap(), 5);
 
-    RealFs.truncate(&file, 2).unwrap();
+    RealFs::new().truncate(&file, 2).unwrap();
     assert_eq!(fs::read(&file).unwrap(), b"ab");
-    RealFs.sync_data(&file).unwrap();
-    let missing = RealFs.sync_data(&dir.path().join("missing"));
+    RealFs::new().sync_data(&file).unwrap();
+    let missing = RealFs::new().sync_data(&dir.path().join("missing"));
     assert!(
         matches!(&missing, Err(e) if e.kind() == io::ErrorKind::NotFound),
         "{missing:?}"
     );
 
-    RealFs.atomic_replace(&file, b"replaced").unwrap();
+    RealFs::new().atomic_replace(&file, b"replaced").unwrap();
     assert_eq!(fs::read(&file).unwrap(), b"replaced");
     let created = dir.path().join("g");
-    RealFs.atomic_replace(&created, b"new").unwrap();
+    RealFs::new().atomic_replace(&created, b"new").unwrap();
     assert_eq!(fs::read(&created).unwrap(), b"new");
     assert_eq!(
         names_in(dir.path()),
@@ -1957,7 +1949,7 @@ fn real_fs_appends_truncates_and_replaces_durably() {
 fn crash_child(root: OsString) {
     let k = std::env::var(CRASH_AT_ENV).unwrap().parse().unwrap();
     let layout = Layout::new(Utf8PathBuf::from_path_buf(root.into()).unwrap());
-    let journal = Journal::open(&layout, checked(CrashAtFs::new(RealFs, k))).unwrap();
+    let journal = Journal::open(&layout, checked(CrashAtFs::new(RealFs::new(), k))).unwrap();
     journal.truncate_torn_tail().unwrap();
     journal.append_frame(&[compacted(7)]).unwrap();
     journal.set_ckpt(journal.len()).unwrap();
@@ -2037,11 +2029,7 @@ fn crash_at_any_journal_write_recovers_to_whole_frames() {
         assert_eq!(journal.truncate_torn_tail().unwrap(), cut, "k={k}");
         let mut want = vec![first.clone()];
         if k >= 5 {
-            want.push(Frame {
-                seq: 1,
-                offset: 84,
-                records: vec![compacted(7)],
-            });
+            want.push(Frame::new(1, 84, vec![compacted(7)]));
         }
         assert_eq!(journal.frames_after(0, 10).unwrap(), want[1..], "k={k}");
         assert_eq!(journal.tail_frames_from(0).unwrap(), want, "k={k}");
@@ -2093,11 +2081,7 @@ fn crash_while_recovery_lists_a_frame_recovers_to_whole_frames() {
         let mut want = vec![first.clone(), second.clone()];
         let mut offsets = vec![0, 84];
         if k >= 6 {
-            want.push(Frame {
-                seq: 2,
-                offset: 103,
-                records: vec![compacted(7)],
-            });
+            want.push(Frame::new(2, 103, vec![compacted(7)]));
             offsets.push(103);
         }
         assert_eq!(journal.tail_frames_from(0).unwrap(), want, "k={k}");
@@ -2423,18 +2407,7 @@ fn a_rewrite_after_a_failed_tail_sync_cuts_the_torn_tail_once() {
     let torn_at = file_len(layout.journal_log()) - 18;
     calls();
     let repair = journal.repair_tail().unwrap();
-    assert_eq!(
-        repair,
-        TailRepair {
-            cut: Some(LogCut {
-                at: torn_at,
-                bytes: 18
-            }),
-            frames_listed: 1,
-            frames_rewritten: 1,
-            off_bytes_dropped: 0,
-        }
-    );
+    assert_eq!(repair, tail_repair(Some(LogCut::new(torn_at, 18)), 1, 1, 0));
     assert!(first < torn_at, "frame 1 lies before the torn tail");
     assert_eq!(
         file_len(layout.journal_log()),
@@ -2518,7 +2491,7 @@ fn a_rewrite_that_lands_elsewhere_is_cut_back_and_reported_corrupt() {
             armed: std::sync::atomic::AtomicBool::new(false),
             junk: vec![0xab; 7],
         },
-        RealFs,
+        RealFs::new(),
     ));
     let log_syncs = AtomicU64::new(0);
     let model_fs = Arc::new(
@@ -2583,7 +2556,7 @@ fn landing_cut_fails_child(layout: &Layout) {
             armed: std::sync::atomic::AtomicBool::new(false),
             intruded: std::sync::atomic::AtomicBool::new(false),
         },
-        RealFs,
+        RealFs::new(),
     ));
     let log_syncs = AtomicU64::new(0);
     let model_fs = Arc::new(FsyncModelFs::over(Arc::clone(&watch)).failing(move |call| {
@@ -2643,6 +2616,17 @@ fn journal_lens(layout: &Layout) -> (u64, u64) {
 /// listed; only listed frames are written afresh; and a second call repairs nothing. Returns the
 /// report.
 #[track_caller]
+/// What `repair_tail` reports: the `cut`, and the frames `listed`, `rewritten` and the
+/// `journal.off` bytes `dropped`.
+fn tail_repair(cut: Option<LogCut>, listed: u64, rewritten: u64, dropped: u64) -> TailRepair {
+    let mut repair = TailRepair::default();
+    repair.cut = cut;
+    repair.frames_listed = listed;
+    repair.frames_rewritten = rewritten;
+    repair.off_bytes_dropped = dropped;
+    repair
+}
+
 fn repaired(layout: &Layout, journal: &Journal) -> TailRepair {
     let (log, off) = journal_lens(layout);
     let repair = journal.repair_tail().unwrap();
@@ -2697,12 +2681,9 @@ fn repair_tail_reports_exactly_what_it_changed() {
             .unwrap();
         journal
     };
-    let torn_at_257 = Some(LogCut { at: 257, bytes: 18 });
-    let report = |cut, frames_listed, off_bytes_dropped| TailRepair {
-        cut,
-        frames_listed,
-        frames_rewritten: 0,
-        off_bytes_dropped,
+    let torn_at_257 = Some(LogCut::new(257, 18));
+    let report = |cut, frames_listed, off_bytes_dropped| {
+        tail_repair(cut, frames_listed, 0, off_bytes_dropped)
     };
     let cases: [(&str, Damage, TailRepair); 7] = [
         ("a clean journal", |_| {}, TailRepair::default()),
@@ -2775,11 +2756,9 @@ fn repair_tail_reports_exactly_what_it_changed() {
         if torn_tail {
             model.append(&log, &torn()).unwrap();
         }
-        let cut = torn_tail.then_some(LogCut { at: 257, bytes: 18 });
-        let want = TailRepair {
-            frames_rewritten: 1,
-            ..report(cut, 1, 0)
-        };
+        let cut = torn_tail.then_some(LogCut::new(257, 18));
+        let mut want = report(cut, 1, 0);
+        want.frames_rewritten = 1;
         assert_eq!(repaired(&layout, &journal), want, "torn tail: {torn_tail}");
         assert_eq!(model.failed().len(), 1, "{:?}", model.failed());
         assert_eq!(offsets_on_disk(&layout), [0, 84], "torn tail: {torn_tail}");

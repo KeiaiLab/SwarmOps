@@ -96,17 +96,14 @@ const ACTOR: &str = "test/lander";
 fn new_store() -> (TempDir, camino::Utf8PathBuf, LocalRepo) {
     let (dir, root) = temp_dir();
     let root = root.join("store");
-    let repo = LocalRepo::create_with_fs(&root, "test", checked(RealFs)).unwrap();
+    let repo = LocalRepo::create_with_fs(&root, "test", checked(RealFs::new())).unwrap();
     (dir, root, repo)
 }
 
 /// Commits `changes` on `parents`, moving `main` to the new changeset.
 fn advance(repo: &LocalRepo, parents: &[ChangesetId], changes: Vec<Change>) -> ChangesetId {
     let mut req = request(parents, changes, "a test commit");
-    req.advance = Some(Advance {
-        name: "main".to_owned(),
-        actor: ACTOR.to_owned(),
-    });
+    req.advance = Some(Advance::new("main", ACTOR));
     repo.commit(req).unwrap().id
 }
 
@@ -343,10 +340,7 @@ fn pushrebase_relocates_a_disjoint_change_onto_the_moved_head() {
         // Its tree is its delta applied to the moved head's: what a commit of the same changes
         // on that head makes.
         let same = vec![
-            Change {
-                path: path("a.txt"),
-                op: swarmops_repo::ChangeOp::Delete,
-            },
+            Change::new(path("a.txt"), swarmops_repo::ChangeOp::Delete),
             put("b.txt", b"b\n"),
             put("docs/y", b"y\n"),
         ];
@@ -706,7 +700,7 @@ fn as_lander(mode: Mode) -> bool {
     let timer = Arc::new(SyncTimer::new(&root));
     let fs: Arc<dyn FsOps> = match mode {
         Mode::Smoke => checked(Watched(Arc::clone(&timer), NoSyncFs)),
-        Mode::Measure => Arc::new(Watched(Arc::clone(&timer), RealFs)),
+        Mode::Measure => Arc::new(Watched(Arc::clone(&timer), RealFs::new())),
     };
     let lander = Lander {
         repo: LocalRepo::open_with_fs(&root, fs).expect("open the store"),
@@ -792,6 +786,7 @@ impl Lander {
                         None => self.head(),
                     }
                 }
+                _ => panic!("a variant this test does not know"),
             };
             // As the land loop does (ops spec §3 step 7): out of attempts, the land ends before
             // it would re-merge for another.
@@ -889,7 +884,9 @@ impl Lander {
         let mut in_a_row = 0;
         loop {
             match transaction() {
-                Ok(Timed { value, lock_hold }) => {
+                Ok(Timed {
+                    value, lock_hold, ..
+                }) => {
                     record.lock_hold_us.push(micros(lock_hold));
                     return value;
                 }
@@ -1048,10 +1045,7 @@ fn commit_base(repo: &LocalRepo, cell: &Cell) -> ChangesetId {
         .map(|(p, content)| put(&p, &content))
         .collect();
     let mut req = request(&[], changes, "the landing base");
-    req.advance = Some(Advance {
-        name: TARGET.to_owned(),
-        actor: "landing/base".to_owned(),
-    });
+    req.advance = Some(Advance::new(TARGET, "landing/base"));
     repo.commit(req).expect("commit the base").id
 }
 
@@ -1086,7 +1080,7 @@ fn run(
     let root = store_root(&work);
     let fs: Arc<dyn FsOps> = match mode {
         Mode::Smoke => checked(NoSyncFs),
-        Mode::Measure => Arc::new(RealFs),
+        Mode::Measure => Arc::new(RealFs::new()),
     };
     let repo = LocalRepo::create_with_fs(&root, "landing", fs).expect("create the store");
     let base = commit_base(&repo, &spec.cell);
@@ -1397,7 +1391,8 @@ fn a_land_that_does_not_merge_ends_conflicted_and_leaves_no_ref() {
 
     let timer = Arc::new(SyncTimer::new(&root));
     let lander = Lander {
-        repo: LocalRepo::open_with_fs(&root, checked(Watched(Arc::clone(&timer), RealFs))).unwrap(),
+        repo: LocalRepo::open_with_fs(&root, checked(Watched(Arc::clone(&timer), RealFs::new())))
+            .unwrap(),
         timer,
         spec,
         number: 1,

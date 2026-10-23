@@ -21,7 +21,7 @@ pub fn path(s: &str) -> RepoPath {
 
 /// The id of the blob that holds `content`.
 pub fn blob(content: &[u8]) -> BlobId {
-    BlobId(swarmops_core::hash_object(ObjectKind::Blob, content))
+    BlobId::new(swarmops_core::hash_object(ObjectKind::Blob, content))
 }
 
 /// A change that puts a regular file holding `content` at `p`.
@@ -31,59 +31,57 @@ pub fn put(p: &str, content: &[u8]) -> Change {
 
 /// A change that puts a leaf of `kind` holding `content` at `p`.
 pub fn put_as(p: &str, kind: LeafKind, content: &[u8]) -> Change {
-    Change {
-        path: path(p),
-        op: ChangeOp::Put {
+    Change::new(
+        path(p),
+        ChangeOp::Put {
             kind,
             content: content.to_vec(),
         },
-    }
+    )
 }
 
 /// A change that puts blob `id`, which the store must hold already, as a regular file at `p`:
 /// named by its id, so that the commit neither reads its content nor writes it again
 /// ([`ChangeOp::PutBlob`]).
 pub fn put_blob(p: &str, id: BlobId) -> Change {
-    Change {
-        path: path(p),
-        op: ChangeOp::PutBlob {
+    Change::new(
+        path(p),
+        ChangeOp::PutBlob {
             kind: LeafKind::File,
             id,
         },
-    }
+    )
 }
 
 /// A change that deletes `p`.
 pub fn delete(p: &str) -> Change {
-    Change {
-        path: path(p),
-        op: ChangeOp::Delete,
-    }
+    Change::new(path(p), ChangeOp::Delete)
 }
 
 /// A fixed signature, so that the same request always makes the same changeset.
 pub fn signature() -> Signature {
-    Signature {
-        name: b"test/agent".to_vec(),
-        email: b"agent@test.swarmops.local".to_vec(),
-        secs: 1_760_000_000,
-        offset_secs: 0,
-        negative_zero: false,
-    }
+    Signature::new(
+        b"test/agent".to_vec(),
+        b"agent@test.swarmops.local".to_vec(),
+        1_760_000_000,
+        0,
+        false,
+    )
+    .expect("a zero offset is a valid signature")
 }
 
 /// A request for `changes` on `parents` by [`signature`], with `message` and no metadata.
 pub fn request(parents: &[ChangesetId], changes: Vec<Change>, message: &str) -> CommitRequest {
-    CommitRequest {
-        parents: parents.to_vec(),
+    CommitRequest::new(
+        parents.to_vec(),
         changes,
-        author: signature(),
-        committer: signature(),
-        message: message.as_bytes().to_vec(),
-        metadata: Vec::new(),
-        allow_empty: false,
-        advance: None,
-    }
+        signature(),
+        signature(),
+        message.as_bytes().to_vec(),
+        Vec::new(),
+        false,
+        None,
+    )
 }
 
 /// Commits `changes` on `parents` ([`request`], with the message "a test commit"); the new

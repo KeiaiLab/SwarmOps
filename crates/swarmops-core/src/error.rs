@@ -4,6 +4,7 @@ use thiserror::Error;
 
 /// Why a hex string is not an [`crate::ObjectId`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum IdError {
     /// The string did not have exactly 64 hex characters; carries the length seen.
     #[error("object id must be 64 hex characters, got {0}")]
@@ -15,6 +16,7 @@ pub enum IdError {
 
 /// Why a string is not a valid [`crate::RepoPath`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum PathError {
     /// The path was the empty string.
     #[error("path is empty")]

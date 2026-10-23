@@ -60,7 +60,7 @@ fn chain_on(repo: &LocalRepo, base: Option<ChangesetId>, n: usize, name: &str) -
 
 /// The id of a changeset no store holds.
 fn unknown_id() -> ChangesetId {
-    ChangesetId(hash_object(ObjectKind::Changeset, b"never committed"))
+    ChangesetId::new(hash_object(ObjectKind::Changeset, b"never committed"))
 }
 
 #[track_caller]
@@ -400,7 +400,7 @@ fn bulk_chain(root: &Utf8Path, n: usize, files: &[(&str, &[u8])]) -> Vec<Changes
     let mut entries = Vec::new();
     for &(name, content) in files {
         objects.put(ObjectKind::Blob, content).unwrap();
-        let blob = BlobId(hash_object(ObjectKind::Blob, content));
+        let blob = BlobId::new(hash_object(ObjectKind::Blob, content));
         entries.push(TreeEntry::leaf(name, LeafKind::File, blob));
     }
     let tree = if entries.is_empty() {
@@ -416,24 +416,25 @@ fn bulk_chain(root: &Utf8Path, n: usize, files: &[(&str, &[u8])]) -> Vec<Changes
         let mut items = Vec::new();
         let mut records = Vec::new();
         for i in start..end {
-            let changeset = Changeset {
-                parents: ids.last().copied().into_iter().collect(),
-                root: tree.id(),
-                delta: Vec::new(),
-                author: signature(),
-                committer: signature(),
-                message: i.to_string().into_bytes(),
-                extra_headers: Vec::new(),
-                metadata: Vec::new(),
-            };
+            let changeset = Changeset::new(
+                ids.last().copied().into_iter().collect(),
+                tree.id(),
+                Vec::new(),
+                signature(),
+                signature(),
+                i.to_string().into_bytes(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap();
             let id = changeset.id().unwrap();
-            records.push(ChangesetMeta {
+            records.push(ChangesetMeta::new(
                 id,
-                seq: 0,
-                generation: 0,
-                delta_hash: changeset.delta_hash().unwrap(),
-                parents: changeset.parents.clone(),
-            });
+                0,
+                0,
+                changeset.delta_hash().unwrap(),
+                changeset.parents.clone(),
+            ));
             items.push((ObjectKind::Changeset, changeset.encode().unwrap()));
             ids.push(id);
         }
@@ -637,12 +638,12 @@ mod crafted_skip_lists {
 
         /// The file of `cs`'s list.
         fn file(&self, cs: ChangesetId) -> Utf8PathBuf {
-            let slot = DerivedSlot {
-                name: FirstParentSkipList::NAME,
-                version: FirstParentSkipList::VERSION,
-                subject: cs.0,
-                key: &[],
-            };
+            let slot = DerivedSlot::new(
+                FirstParentSkipList::NAME,
+                FirstParentSkipList::VERSION,
+                cs.0,
+                &[],
+            );
             Layout::new(&self.root).derived_path(&slot)
         }
 
@@ -656,12 +657,12 @@ mod crafted_skip_lists {
             let file = self.file(cs);
             let kept = fs::read(&file).unwrap();
             fs::remove_file(&file).unwrap();
-            let slot = DerivedSlot {
-                name: FirstParentSkipList::NAME,
-                version: FirstParentSkipList::VERSION,
-                subject: cs.0,
-                key: &[],
-            };
+            let slot = DerivedSlot::new(
+                FirstParentSkipList::NAME,
+                FirstParentSkipList::VERSION,
+                cs.0,
+                &[],
+            );
             assert!(self.repo.derived_store().put(&slot, &value).unwrap());
             kept
         }

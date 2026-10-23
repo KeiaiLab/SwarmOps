@@ -16,7 +16,9 @@ use crate::{GitOid, RawCommit, RawIdent};
 ///
 /// `child` gives the git id of an entry's object: a leaf's blob, whose bytes git hashes as they
 /// are, and a subdirectory's own rendering.
-pub fn tree_bytes(tree: &Tree, child: impl Fn(&TreeEntry) -> GitOid) -> Vec<u8> {
+///
+/// `None` if an entry is of a kind newer than this build, which it has no git mode for.
+pub fn tree_bytes(tree: &Tree, child: impl Fn(&TreeEntry) -> GitOid) -> Option<Vec<u8>> {
     let mut entries: Vec<&TreeEntry> = tree.entries().iter().collect();
     // A tree's names are unique, so no two of its entries compare equal.
     entries.sort_unstable_by(|a, b| {
@@ -27,13 +29,13 @@ pub fn tree_bytes(tree: &Tree, child: impl Fn(&TreeEntry) -> GitOid) -> Vec<u8> 
     });
     let mut out = Vec::new();
     for entry in entries {
-        out.extend_from_slice(git_mode(entry.target));
+        out.extend_from_slice(git_mode(entry.target)?);
         out.push(b' ');
         out.extend_from_slice(entry.name.as_bytes());
         out.push(0);
         out.extend_from_slice(&child(entry).0);
     }
-    out
+    Some(out)
 }
 
 /// The bytes of the git commit a changeset renders to, without git's `commit <len>\0` header:
@@ -75,13 +77,14 @@ fn is_dir(target: EntryTarget) -> bool {
     matches!(target, EntryTarget::Dir(_))
 }
 
-/// The mode git writes for an entry of `target`'s kind.
-fn git_mode(target: EntryTarget) -> &'static [u8] {
+/// The mode git writes for an entry of `target`'s kind; `None` for a kind newer than this build.
+fn git_mode(target: EntryTarget) -> Option<&'static [u8]> {
     match target {
-        EntryTarget::Leaf(LeafKind::File, _) => b"100644",
-        EntryTarget::Leaf(LeafKind::Exec, _) => b"100755",
-        EntryTarget::Leaf(LeafKind::Symlink, _) => b"120000",
-        EntryTarget::Dir(_) => b"40000",
+        EntryTarget::Leaf(LeafKind::File, _) => Some(b"100644"),
+        EntryTarget::Leaf(LeafKind::Exec, _) => Some(b"100755"),
+        EntryTarget::Leaf(LeafKind::Symlink, _) => Some(b"120000"),
+        EntryTarget::Dir(_) => Some(b"40000"),
+        _ => None,
     }
 }
 
@@ -119,16 +122,16 @@ mod tests {
 
     #[test]
     fn a_tree_renders_in_git_order_with_git_modes() {
-        let blob = BlobId(ObjectId([1; 32]));
+        let blob = BlobId::new(ObjectId::new([1; 32]));
         let tree = Tree::new(vec![
-            TreeEntry::dir("a", TreeId(ObjectId([2; 32]))),
+            TreeEntry::dir("a", TreeId::new(ObjectId::new([2; 32]))),
             TreeEntry::leaf("a.b", LeafKind::File, blob),
             TreeEntry::leaf("link", LeafKind::Symlink, blob),
             TreeEntry::leaf("run", LeafKind::Exec, blob),
         ])
         .unwrap();
         let child = |entry: &TreeEntry| GitOid([entry.name.as_bytes()[0]; 20]);
-        let rendered = RawTree::parse(&tree_bytes(&tree, child)).unwrap();
+        let rendered = RawTree::parse(&tree_bytes(&tree, child).unwrap()).unwrap();
         let entries: Vec<(&[u8], &[u8])> = (rendered.entries.iter())
             .map(|entry| (entry.mode.as_slice(), entry.name.as_slice()))
             .collect();
@@ -144,7 +147,11 @@ mod tests {
         assert_eq!(rendered.entries[1].oid, GitOid([b'a'; 20]));
         // The empty root renders to git's empty tree.
         assert_eq!(
-            git_hash(RawKind::Tree, &tree_bytes(&Tree::empty_root(), child)).to_string(),
+            git_hash(
+                RawKind::Tree,
+                &tree_bytes(&Tree::empty_root(), child).unwrap()
+            )
+            .to_string(),
             "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
         );
     }

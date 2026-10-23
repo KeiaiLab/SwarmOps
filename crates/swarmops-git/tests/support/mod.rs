@@ -48,37 +48,35 @@ impl MemSource {
     /// A tree of `entries`, each its mode's digits, its name and the id it names, in the order
     /// given, which need not be git's.
     pub fn tree(&mut self, entries: &[(&str, &[u8], GitOid)]) -> GitOid {
-        let tree = RawTree {
-            entries: entries
+        let tree = RawTree::new(
+            entries
                 .iter()
-                .map(|&(mode, name, oid)| RawTreeEntry {
-                    mode: mode.as_bytes().to_vec(),
-                    name: name.to_vec(),
-                    oid,
+                .map(|&(mode, name, oid)| {
+                    RawTreeEntry::new(mode.as_bytes().to_vec(), name.to_vec(), oid)
                 })
                 .collect(),
-        };
+        );
         self.put(RawKind::Tree, tree.render())
     }
 
     /// A commit of `tree` and `parents`, written as git writes it, by one author and committer
     /// at one time, with `message`.
     pub fn commit(&mut self, tree: GitOid, parents: &[GitOid], message: &str) -> GitOid {
-        let ident = RawIdent {
-            name: b"Mem Source".to_vec(),
-            email: b"mem@source.invalid".to_vec(),
-            secs: 1_700_000_000,
-            offset_secs: 0,
-            negative_zero: false,
-        };
-        let commit = RawCommit {
+        let ident = RawIdent::new(
+            b"Mem Source".to_vec(),
+            b"mem@source.invalid".to_vec(),
+            1_700_000_000,
+            0,
+            false,
+        );
+        let commit = RawCommit::new(
             tree,
-            parents: parents.to_vec(),
-            author: ident.clone(),
-            committer: ident,
-            extra_headers: Vec::new(),
-            message: message.as_bytes().to_vec(),
-        };
+            parents.to_vec(),
+            ident.clone(),
+            ident,
+            Vec::new(),
+            message.as_bytes().to_vec(),
+        );
         self.put(RawKind::Commit, commit.render())
     }
 

@@ -59,12 +59,13 @@ pub(super) fn run(ctx: &Ctx<'_>, op: &'static str, command: WsCommand) -> Printe
             ctx,
             op,
             at,
-            |workspace| WsStatusReq {
-                workspace,
-                paths,
-                full,
-                limit,
-                cursor,
+            |workspace| {
+                let mut req = WsStatusReq::new(workspace);
+                req.paths = paths;
+                req.full = full;
+                req.limit = limit;
+                req.cursor = cursor;
+                req
             },
             swarmops_ws::status,
         ),
@@ -80,18 +81,19 @@ pub(super) fn run(ctx: &Ctx<'_>, op: &'static str, command: WsCommand) -> Printe
             ctx,
             op,
             at,
-            |workspace| WsDiffReq {
-                workspace,
-                paths,
-                format: match format {
+            |workspace| {
+                let mut req = WsDiffReq::new(workspace);
+                req.paths = paths;
+                req.format = match format {
                     DiffFormatArg::Names => DiffFormat::Names,
                     DiffFormatArg::Stat => DiffFormat::Stat,
                     DiffFormatArg::Unified => DiffFormat::Unified,
-                },
-                context,
-                limit,
-                cursor,
-                max_bytes,
+                };
+                req.context = context;
+                req.limit = limit;
+                req.cursor = cursor;
+                req.max_bytes = max_bytes;
+                req
             },
             swarmops_ws::diff,
         ),
@@ -99,16 +101,14 @@ pub(super) fn run(ctx: &Ctx<'_>, op: &'static str, command: WsCommand) -> Printe
             ctx,
             op,
             Ok(here_lookup()),
-            || Ok(WsListReq { check }),
+            || {
+                let mut req = WsListReq::default();
+                req.check = check;
+                Ok(req)
+            },
             swarmops_ws::list,
         ),
-        WsCommand::Info { at } => on_named(
-            ctx,
-            op,
-            at,
-            |workspace| WsInfoReq { workspace },
-            swarmops_ws::info,
-        ),
+        WsCommand::Info { at } => on_named(ctx, op, at, WsInfoReq::new, swarmops_ws::info),
         WsCommand::Delete {
             name,
             force,
@@ -118,11 +118,10 @@ pub(super) fn run(ctx: &Ctx<'_>, op: &'static str, command: WsCommand) -> Printe
             op,
             Ok(here_lookup()),
             || {
-                Ok(WsDeleteReq {
-                    workspace: name,
-                    force,
-                    rescue,
-                })
+                let mut req = WsDeleteReq::new(name);
+                req.force = force;
+                req.rescue = rescue;
+                Ok(req)
             },
             swarmops_ws::delete,
         ),
@@ -144,15 +143,15 @@ fn run_edit(ctx: &Ctx<'_>, op: &'static str, command: WsCommand) -> Printed {
             ctx,
             op,
             at,
-            |workspace| WsCommitReq {
-                workspace,
-                message,
-                paths,
-                modes: modes
+            |workspace| {
+                let mut req = WsCommitReq::new(workspace, message);
+                req.paths = paths;
+                req.modes = modes
                     .into_iter()
                     .map(|(path, kind)| (path, mode_input(kind)))
-                    .collect::<BTreeMap<_, _>>(),
-                status_after: status_after(after),
+                    .collect::<BTreeMap<_, _>>();
+                req.status_after = status_after(after);
+                req
             },
             swarmops_ws::commit,
         ),
@@ -167,16 +166,17 @@ fn run_edit(ctx: &Ctx<'_>, op: &'static str, command: WsCommand) -> Printed {
             ctx,
             op,
             at,
-            |workspace| WsRebaseReq {
-                workspace,
-                onto,
-                action: match (resume, abort) {
+            |workspace| {
+                let mut req = WsRebaseReq::new(workspace);
+                req.onto = onto;
+                req.action = match (resume, abort) {
                     (true, _) => WsRebaseAction::Continue,
                     (_, true) => WsRebaseAction::Abort,
                     _ => WsRebaseAction::Start,
-                },
-                message,
-                status_after: status_after(after),
+                };
+                req.message = message;
+                req.status_after = status_after(after);
+                req
             },
             swarmops_ws::rebase,
         ),
@@ -191,16 +191,17 @@ fn run_edit(ctx: &Ctx<'_>, op: &'static str, command: WsCommand) -> Printed {
             ctx,
             op,
             at,
-            |workspace| WsResolveReq {
-                workspace,
-                paths,
-                all,
-                take: take.map(|side| match side {
+            |workspace| {
+                let mut req = WsResolveReq::new(workspace);
+                req.paths = paths;
+                req.all = all;
+                req.take = take.map(|side| match side {
                     SideArg::Ours => Side::Ours,
                     SideArg::Theirs => Side::Theirs,
-                }),
-                force,
-                status_after: status_after(after),
+                });
+                req.force = force;
+                req.status_after = status_after(after);
+                req
             },
             swarmops_ws::resolve,
         ),
@@ -226,21 +227,24 @@ fn run_tree(ctx: &Ctx<'_>, op: &'static str, command: WsCommand) -> Printed {
             ctx,
             op,
             at,
-            |workspace| WsLandReq {
-                workspace,
-                message,
-                idempotency_key: key,
-                target,
-                check: check.then(|| WsCheckInput {
-                    argv: (!argv.is_empty()).then_some(argv),
-                    timeout_s: check_timeout,
-                }),
-                mode: mode.map(|mode| match mode {
+            |workspace| {
+                let mut req = WsLandReq::new(workspace);
+                req.message = message;
+                req.idempotency_key = key;
+                req.target = target;
+                req.check = check.then(|| {
+                    let mut input = WsCheckInput::default();
+                    input.argv = (!argv.is_empty()).then_some(argv);
+                    input.timeout_s = check_timeout;
+                    input
+                });
+                req.mode = mode.map(|mode| match mode {
                     LandModeArg::Merge => LandMode::Merge,
                     LandModeArg::Exact => LandMode::Exact,
-                }),
-                max_attempts,
-                status_after: status_after(after),
+                });
+                req.max_attempts = max_attempts;
+                req.status_after = status_after(after);
+                req
             },
             swarmops_ws::land,
         ),
@@ -248,10 +252,10 @@ fn run_tree(ctx: &Ctx<'_>, op: &'static str, command: WsCommand) -> Printed {
             ctx,
             op,
             at,
-            |workspace| WsMaterializeReq {
-                workspace,
-                paths,
-                status_after: status_after(after),
+            |workspace| {
+                let mut req = WsMaterializeReq::new(workspace, paths);
+                req.status_after = status_after(after);
+                req
             },
             swarmops_ws::materialize,
         ),
@@ -259,10 +263,11 @@ fn run_tree(ctx: &Ctx<'_>, op: &'static str, command: WsCommand) -> Printed {
             ctx,
             op,
             at,
-            |workspace| WsDiscardReq {
-                workspace,
-                paths,
-                status_after: status_after(after),
+            |workspace| {
+                let mut req = WsDiscardReq::new(workspace);
+                req.paths = paths;
+                req.status_after = status_after(after);
+                req
             },
             swarmops_ws::discard,
         ),
@@ -282,13 +287,13 @@ pub(crate) fn context<'a>(
         .ok()
         .and_then(|path| Utf8PathBuf::from_path_buf(path).ok())
         .unwrap_or_else(|| root.to_owned());
-    WsCtx {
+    WsCtx::new(
         store,
-        store_root: absolute,
-        who: who.cloned(),
-        fs: Arc::new(RealFs),
-        host: Arc::new(RealHost),
-    }
+        absolute,
+        who.cloned(),
+        Arc::new(RealFs::new()),
+        Arc::new(RealHost::default()),
+    )
 }
 
 /// Makes the workspace `req` names, then bootstraps it when this call made it and `how` runs
@@ -348,16 +353,13 @@ fn create(
             };
             let from = from.map(|from| absolute(&from)).transpose()?;
             let how = context::bootstrap(ctx.env)?;
-            let req = WsCreateReq {
-                name,
-                path: Some(dir.into_string()),
-                base: base.into(),
-                prefixes,
-                all,
-                from: from.map(Utf8PathBuf::into_string),
-                session: None,
-                status_after: status_after(after),
-            };
+            let mut req = WsCreateReq::new(name);
+            req.path = Some(dir.into_string());
+            req.base = base.into();
+            req.prefixes = prefixes;
+            req.all = all;
+            req.from = from.map(Utf8PathBuf::into_string);
+            req.status_after = status_after(after);
             Ok((req, how))
         },
         |wctx, (req, how)| create_bootstrapped(wctx, req, how),
@@ -541,7 +543,7 @@ fn read_stdin() -> Result<Vec<u8>, OpError> {
 fn hook_create(ctx: &Ctx<'_>) -> Result<Said, OpError> {
     // 1. The input, and the two places a store can come from.
     let input = hook::read_create(&read_stdin()?)?;
-    let parent = match workspace::find(&Locate::Cwd(input.cwd.clone()), None, &RealFs) {
+    let parent = match workspace::find(&Locate::Cwd(input.cwd.clone()), None, &RealFs::new()) {
         Ok(found) => Some(found.file),
         Err(e) if e.code == ErrorCode::WsNotFound.as_str() => None,
         Err(e) => return Err(e),
@@ -574,7 +576,7 @@ fn hook_create(ctx: &Ctx<'_>) -> Result<Said, OpError> {
 fn hook_remove(ctx: &Ctx<'_>) -> Result<Said, OpError> {
     // 1. The input, and whether the directory is ours; no store is opened to ask.
     let input = hook::read_remove(&read_stdin()?)?;
-    let Some(found) = hook::ours(&input, &RealFs)? else {
+    let Some(found) = hook::ours(&input, &RealFs::new())? else {
         let note = format!(
             "swarmops: {} is not a SwarmOps workspace; left alone",
             input.worktree_path
@@ -606,7 +608,7 @@ fn refuse_other_store(repo_id: &str, repo: &str, named: &str) -> Result<(), OpEr
         return Ok(());
     }
     let ops = LocalOps::open(Utf8Path::new(named))?;
-    let store_repo_id = ops.repo_info(InfoReq {})?.repo_id;
+    let store_repo_id = ops.repo_info(InfoReq::default())?.repo_id;
     if store_repo_id == repo_id {
         return Ok(());
     }

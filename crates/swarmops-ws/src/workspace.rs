@@ -23,6 +23,7 @@ use crate::{Ctx, materialize, pending};
 
 /// Where to look for a workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Locate {
     /// By its name, through the registry.
     Name(String),
@@ -34,6 +35,7 @@ pub enum Locate {
 
 /// A workspace found: its root and its state.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Found {
     /// The workspace's root directory.
     pub dir: Utf8PathBuf,
@@ -43,6 +45,7 @@ pub struct Found {
 
 /// A workspace opened against its store, which its mutations act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Workspace {
     /// The workspace's root directory.
     pub dir: Utf8PathBuf,
@@ -94,7 +97,7 @@ pub(crate) fn open_locked(ctx: &Ctx<'_>, at: &Locate) -> Result<(Workspace, WsLo
 fn settle(ctx: &Ctx<'_>, dir: Utf8PathBuf) -> Result<Workspace, OpError> {
     // 1. The state, of this store.
     let file = state::read(ctx.fs.as_ref(), &dir)?;
-    let store_repo_id = ctx.store.repo_info(InfoReq {})?.repo_id;
+    let store_repo_id = ctx.store.repo_info(InfoReq::default())?.repo_id;
     if file.repo_id != store_repo_id {
         return Err(OpError::new(
             ErrorCode::InvalidArg,
@@ -216,7 +219,7 @@ mod tests {
     fn make(dir: &Utf8Path, name: &str) -> WorkspaceFile {
         std::fs::create_dir_all(dir.join(SWARMWS_DIR)).unwrap();
         let file = sample(name, State::Clean);
-        state::replace(&RealFs, dir, &file).unwrap();
+        state::replace(&RealFs::new(), dir, &file).unwrap();
         file
     }
 
@@ -236,7 +239,7 @@ mod tests {
         let inner_file = make(&inner, "inner");
         std::fs::create_dir_all(&deep).unwrap();
         std::fs::create_dir_all(&beside).unwrap();
-        let fs = RealFs;
+        let fs = RealFs::new();
         let found = |at: Locate| find(&at, None, &fs);
 
         // 2. Upwards from a directory: the nearest one, at it or above it.
@@ -276,7 +279,7 @@ mod tests {
         };
         let entry_path = store.join(REGISTRY_DIR).join("inner.json");
         std::fs::write(entry_path, serde_json::to_vec(&entry).unwrap()).unwrap();
-        let registry = Registry::open(&store, Arc::new(RealFs));
+        let registry = Registry::open(&store, Arc::new(RealFs::new()));
         let by_name = find(&Locate::Name("inner".to_owned()), Some(&registry), &fs).unwrap();
         assert_eq!((by_name.dir, by_name.file), (inner, inner_file));
         let missing = find(&Locate::Name("gone".to_owned()), Some(&registry), &fs).unwrap_err();

@@ -93,6 +93,7 @@ const FRAME_BATCH: usize = 4096;
 
 /// What [`Repo::verify`] found.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct VerifyReport {
     /// How many objects it examined. Deep: every object file, re-hashed. Shallow: the
     /// changeset and tree objects it read, and the blobs their trees name, looked for.
@@ -106,8 +107,24 @@ pub struct VerifyReport {
     pub problems: Vec<VerifyProblem>,
 }
 
+impl VerifyReport {
+    /// Makes one of the fields given.
+    pub fn new(
+        objects_checked: u64,
+        changesets_checked: u64,
+        problems: Vec<VerifyProblem>,
+    ) -> VerifyReport {
+        VerifyReport {
+            objects_checked,
+            changesets_checked,
+            problems,
+        }
+    }
+}
+
 /// One thing [`Repo::verify`] found damaged.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum VerifyProblem {
     /// An object file whose content does not hash to its id or whose header is malformed, or a
     /// changeset or tree object whose bytes do not decode.
@@ -201,6 +218,7 @@ pub enum VerifyProblem {
 
 /// What an [`VerifyProblem::IndexMismatch`] found disagreeing, which says what can mend it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum MismatchCause {
     /// The index's record is not the journal's at that place, the index holds a record the
     /// journal does not, or it lacks one the checkpoint has passed. The journal is the source
@@ -315,6 +333,7 @@ fn key_text(name: &str, key: &[u8]) -> String {
 
 /// How much of a store [`Repo::verify`] reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Depth {
     /// The structure only: the changeset and tree objects, with every blob looked for, its
     /// bytes unread, and no derived value read.
@@ -525,7 +544,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
             .iter()
             .map(|meta| (meta.id, meta.generation))
             .collect();
-        for RefFile { name, state } in ref_files {
+        for RefFile { name, state, .. } in ref_files {
             match state {
                 Ok(state) if targets_known && !self.generations.contains_key(&state.target) => {
                     self.refs.push(VerifyProblem::DanglingRef(name));
@@ -790,6 +809,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
                     EntryTarget::Leaf(_, blob) => {
                         self.blobs.entry(blob.0).or_insert(by);
                     }
+                    _ => return Err(RepoError::unknown_variant("EntryTarget")),
                 }
             }
         }
@@ -1036,13 +1056,13 @@ fn journal_changesets(frames: &[Frame]) -> Vec<(ChangesetMeta, u64)> {
                 parents,
             } = record
             {
-                let meta = ChangesetMeta {
-                    id: *id,
-                    seq: bytes::to_u64(changesets.len()),
-                    generation: *generation,
-                    delta_hash: *delta_hash,
-                    parents: parents.clone(),
-                };
+                let meta = ChangesetMeta::new(
+                    *id,
+                    bytes::to_u64(changesets.len()),
+                    *generation,
+                    *delta_hash,
+                    parents.clone(),
+                );
                 changesets.push((meta, frame.offset));
             }
         }

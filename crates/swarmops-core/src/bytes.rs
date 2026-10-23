@@ -11,6 +11,7 @@
 /// being where the read starts: each decoder says what that error is (the object codec's is
 /// [`crate::CodecError::Truncated`] wherever it happens, a journal record's names the
 /// position).
+#[non_exhaustive]
 pub struct Reader<'a, E> {
     buf: &'a [u8],
     pos: usize,

@@ -30,17 +30,26 @@ fn read_golden(name: &str) -> (Vec<u8>, ObjectId, Option<[u8; 32]>) {
 }
 
 fn blob_id(content: &[u8]) -> BlobId {
-    BlobId(hash_object(ObjectKind::Blob, content))
+    BlobId::new(hash_object(ObjectKind::Blob, content))
 }
 
+/// A valid signature: `negative_zero` only with `offset_secs == 0`.
 fn sig(name: &[u8], email: &[u8], secs: i64, offset_secs: i32, negative_zero: bool) -> Signature {
-    Signature {
-        name: name.to_vec(),
-        email: email.to_vec(),
+    Signature::new(
+        name.to_vec(),
+        email.to_vec(),
         secs,
         offset_secs,
         negative_zero,
-    }
+    )
+    .unwrap()
+}
+
+/// The delta entry for `path`, which must be canonical.
+fn delta(path: &str, op: DeltaOp, renamed_from: Option<&str>) -> DeltaEntry {
+    let path = RepoPath::new(path).unwrap();
+    let renamed_from = renamed_from.map(|from| RepoPath::new(from).unwrap());
+    DeltaEntry::new(path, op, renamed_from).unwrap()
 }
 
 fn one_file_tree() -> Tree {
@@ -48,59 +57,57 @@ fn one_file_tree() -> Tree {
 }
 
 fn minimal_changeset() -> Changeset {
-    Changeset {
-        parents: vec![],
-        root: Tree::empty_root().id(),
-        delta: vec![],
-        author: sig(b"a", b"a@b", 0, 0, false),
-        committer: sig(b"a", b"a@b", 0, 0, false),
-        message: b"m".to_vec(),
-        extra_headers: vec![],
-        metadata: vec![],
-    }
+    Changeset::new(
+        vec![],
+        Tree::empty_root().id(),
+        vec![],
+        sig(b"a", b"a@b", 0, 0, false),
+        sig(b"a", b"a@b", 0, 0, false),
+        b"m".to_vec(),
+        vec![],
+        vec![],
+    )
+    .unwrap()
 }
 
 fn full_changeset() -> Changeset {
-    let p1 = ChangesetId(hash_object(ObjectKind::Changeset, b"p1"));
-    let p2 = ChangesetId(hash_object(ObjectKind::Changeset, b"p2"));
-    Changeset {
-        parents: vec![p1, p2],
-        root: one_file_tree().id(),
-        delta: vec![
-            DeltaEntry {
-                path: RepoPath::new("a.rs").unwrap(),
-                op: DeltaOp::Put {
+    let p1 = ChangesetId::new(hash_object(ObjectKind::Changeset, b"p1"));
+    let p2 = ChangesetId::new(hash_object(ObjectKind::Changeset, b"p2"));
+    Changeset::new(
+        vec![p1, p2],
+        one_file_tree().id(),
+        vec![
+            delta(
+                "a.rs",
+                DeltaOp::Put {
                     kind: LeafKind::File,
                     id: blob_id(b"x"),
                 },
-                renamed_from: None,
-            },
-            DeltaEntry {
-                path: RepoPath::new("bin/run").unwrap(),
-                op: DeltaOp::Put {
+                None,
+            ),
+            delta(
+                "bin/run",
+                DeltaOp::Put {
                     kind: LeafKind::Exec,
                     id: blob_id(b"#!/bin/sh\n"),
                 },
-                renamed_from: Some(RepoPath::new("run.sh").unwrap()),
-            },
-            DeltaEntry {
-                path: RepoPath::new("old.txt").unwrap(),
-                op: DeltaOp::Delete,
-                renamed_from: None,
-            },
+                Some("run.sh"),
+            ),
+            delta("old.txt", DeltaOp::Delete, None),
         ],
-        author: sig(b"Ada", b"ada@example.com", 1_700_000_000, -32_400, false),
-        committer: sig(
+        sig(b"Ada", b"ada@example.com", 1_700_000_000, -32_400, false),
+        sig(
             b"claude-code/w1",
             b"w1@swarmops.local",
             1_700_000_001,
             0,
             true,
         ),
-        message: b"feat: full\n\nbody\n".to_vec(),
-        extra_headers: vec![(b"gpgsig".to_vec(), b"sig".to_vec())],
-        metadata: vec![("agent".to_owned(), b"claude-code/w1".to_vec())],
-    }
+        b"feat: full\n\nbody\n".to_vec(),
+        vec![(b"gpgsig".to_vec(), b"sig".to_vec())],
+        vec![("agent".to_owned(), b"claude-code/w1".to_vec())],
+    )
+    .unwrap()
 }
 
 #[test]
@@ -136,7 +143,7 @@ fn tree_encode_matches_spec_layout() {
     let mut want = b"SWTR\x01\x01\x00\x04a.rs".to_vec();
     want.extend_from_slice(&id.0);
     assert_eq!(t.encode(), want);
-    assert_eq!(t.id(), TreeId(hash_object(ObjectKind::Tree, &want)));
+    assert_eq!(t.id(), TreeId::new(hash_object(ObjectKind::Tree, &want)));
 }
 
 /// An entry's target is laid out as the `(kind, id)` pair it replaced: the kind byte, then the
@@ -158,16 +165,13 @@ fn a_tree_entry_target_round_trips_through_the_byte_layout() {
         (EntryTarget::Dir(dir), EntryKind::Dir, 3),
     ] {
         assert_eq!((target.kind(), target.kind().as_u8()), (kind, byte));
-        let entry = TreeEntry {
-            name: "a".into(),
-            target,
-        };
+        let entry = TreeEntry::new("a", target);
         let tree = Tree::new(vec![entry.clone()]).unwrap();
         let mut want = b"SWTR\x01\x01".to_vec();
         want.extend_from_slice(&[byte, 1, b'a']);
         want.extend_from_slice(&target.id().0);
         assert_eq!(tree.encode(), want, "{kind:?}");
-        let id = TreeId(hash_object(ObjectKind::Tree, &want));
+        let id = TreeId::new(hash_object(ObjectKind::Tree, &want));
         assert_eq!(tree.id(), id, "{kind:?}");
         assert_eq!(Tree::decode(&want).unwrap().entries(), [entry], "{kind:?}");
     }
@@ -193,6 +197,90 @@ fn a_tree_entry_target_round_trips_through_the_byte_layout() {
     );
     let (bytes, _, _) = read_golden("empty_tree");
     assert_eq!(Tree::decode(&bytes).unwrap(), Tree::empty_root());
+}
+
+/// Each accessor names the one variant it asks for and `None` for the other.
+#[test]
+fn the_accessors_name_one_variant() {
+    let blob = blob_id(b"x");
+    let dir = one_file_tree().id();
+
+    // A tree entry's target: a leaf or a subdirectory.
+    let leaf = EntryTarget::Leaf(LeafKind::Exec, blob);
+    assert_eq!(leaf.leaf(), Some((LeafKind::Exec, blob)));
+    assert_eq!(leaf.dir(), None);
+    assert_eq!(EntryTarget::Dir(dir).leaf(), None);
+    assert_eq!(EntryTarget::Dir(dir).dir(), Some(dir));
+
+    // A delta's op: a put or a delete.
+    let put = DeltaOp::Put {
+        kind: LeafKind::Symlink,
+        id: blob,
+    };
+    assert_eq!(put.put(), Some((LeafKind::Symlink, blob)));
+    assert_eq!(DeltaOp::Delete.put(), None);
+}
+
+/// The constructors refuse what `encode` refuses, with the same error, and keep what they are
+/// given.
+#[test]
+fn the_constructors_check_what_encode_checks() {
+    let path = |p: &str| RepoPath::new(p).unwrap();
+    let put = DeltaOp::Put {
+        kind: LeafKind::File,
+        id: blob_id(b"x"),
+    };
+
+    // A signature: `-0000` only with offset zero.
+    assert_eq!(
+        Signature::new(b"n".to_vec(), b"e".to_vec(), 0, 60, true).unwrap_err(),
+        CodecError::BadSignature
+    );
+    let ok = Signature::new(b"n".to_vec(), b"e".to_vec(), 5, 0, true).unwrap();
+    assert_eq!((ok.secs, ok.offset_secs, ok.negative_zero), (5, 0, true));
+
+    // A delta entry: a rename only on a put, never from its own path.
+    let refused = [
+        DeltaEntry::new(path("a"), DeltaOp::Delete, Some(path("b"))),
+        DeltaEntry::new(path("a"), put.clone(), Some(path("a"))),
+    ];
+    for entry in refused {
+        assert_eq!(entry.unwrap_err(), CodecError::BadRename);
+    }
+    let renamed = DeltaEntry::new(path("a"), put.clone(), Some(path("b"))).unwrap();
+    assert_eq!(renamed.renamed_from, Some(path("b")));
+
+    // A changeset: what `validate` checks, here a delta out of order.
+    let cs = minimal_changeset();
+    let entry = |p: &str| DeltaEntry::new(path(p), put.clone(), None).unwrap();
+    let unsorted = Changeset::new(
+        cs.parents.clone(),
+        cs.root,
+        vec![entry("b"), entry("a")],
+        cs.author.clone(),
+        cs.committer.clone(),
+        cs.message.clone(),
+        cs.extra_headers.clone(),
+        cs.metadata.clone(),
+    );
+    assert_eq!(unsorted.unwrap_err(), CodecError::Unsorted);
+    let same = Changeset::new(
+        cs.parents.clone(),
+        cs.root,
+        cs.delta.clone(),
+        cs.author.clone(),
+        cs.committer.clone(),
+        cs.message.clone(),
+        cs.extra_headers.clone(),
+        cs.metadata.clone(),
+    );
+    assert_eq!(same.unwrap(), cs);
+
+    // A tree entry: its name is checked where it becomes a tree.
+    let target = EntryTarget::Leaf(LeafKind::File, blob_id(b"x"));
+    let entry = TreeEntry::new("a/b", target);
+    assert_eq!((entry.name.as_str(), entry.target), ("a/b", target));
+    assert!(Tree::new(vec![entry]).is_err());
 }
 
 #[test]
@@ -331,8 +419,10 @@ fn signature_roundtrip_negative_zero() {
         assert_eq!(back.author.negative_zero, neg);
         assert_eq!(back, cs);
     }
+    // `sig` makes only valid signatures: give a valid `-0000` an offset.
     let mut bad = minimal_changeset();
-    bad.author = sig(b"n", b"e", 0, 60, true);
+    bad.author = sig(b"n", b"e", 0, 0, true);
+    bad.author.offset_secs = 60;
     assert_eq!(bad.encode().unwrap_err(), CodecError::BadSignature);
 }
 
@@ -352,14 +442,14 @@ fn changeset_rejects_unsorted_delta_and_metadata() {
 #[test]
 fn a_delta_put_of_a_directory_does_not_decode() {
     let mut cs = minimal_changeset();
-    cs.delta = vec![DeltaEntry {
-        path: RepoPath::new("a.rs").unwrap(),
-        op: DeltaOp::Put {
+    cs.delta = vec![delta(
+        "a.rs",
+        DeltaOp::Put {
             kind: LeafKind::File,
             id: blob_id(b"x"),
         },
-        renamed_from: None,
-    }];
+        None,
+    )];
     // Control: the put of a file is canonical and round-trips.
     let valid = cs.encode().unwrap();
     assert_eq!(Changeset::decode(&valid).unwrap(), cs);
@@ -401,11 +491,7 @@ fn splice_once(bytes: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
 #[test]
 fn changeset_rejects_delete_with_renamed_from() {
     let mut cs = minimal_changeset();
-    cs.delta = vec![DeltaEntry {
-        path: RepoPath::new("old.txt").unwrap(),
-        op: DeltaOp::Delete,
-        renamed_from: None,
-    }];
+    cs.delta = vec![delta("old.txt", DeltaOp::Delete, None)];
     // Control: the plain delete is canonical and round-trips.
     let valid = cs.encode().unwrap();
     assert_eq!(Changeset::decode(&valid).unwrap(), cs);
@@ -430,14 +516,14 @@ fn changeset_rejects_delete_with_renamed_from() {
 fn changeset_rejects_rename_from_self() {
     let path = RepoPath::new("a.rs").unwrap();
     let mut cs = minimal_changeset();
-    cs.delta = vec![DeltaEntry {
-        path: path.clone(),
-        op: DeltaOp::Put {
+    cs.delta = vec![delta(
+        path.as_str(),
+        DeltaOp::Put {
             kind: LeafKind::File,
             id: blob_id(b"x"),
         },
-        renamed_from: Some(RepoPath::new("b.rs").unwrap()),
-    }];
+        Some("b.rs"),
+    )];
     // Control: a rename from a different path is canonical and round-trips.
     let valid = cs.encode().unwrap();
     assert_eq!(Changeset::decode(&valid).unwrap(), cs);
@@ -474,22 +560,22 @@ fn arb_name() -> impl Strategy<Value = String> {
 /// One of the four targets an entry can name, each as likely as the others.
 fn arb_target() -> impl Strategy<Value = EntryTarget> {
     prop_oneof![
-        arb_id().prop_map(|id| EntryTarget::Leaf(LeafKind::File, BlobId(id))),
-        arb_id().prop_map(|id| EntryTarget::Leaf(LeafKind::Exec, BlobId(id))),
-        arb_id().prop_map(|id| EntryTarget::Leaf(LeafKind::Symlink, BlobId(id))),
-        arb_id().prop_map(|id| EntryTarget::Dir(TreeId(id)))
+        arb_id().prop_map(|id| EntryTarget::Leaf(LeafKind::File, BlobId::new(id))),
+        arb_id().prop_map(|id| EntryTarget::Leaf(LeafKind::Exec, BlobId::new(id))),
+        arb_id().prop_map(|id| EntryTarget::Leaf(LeafKind::Symlink, BlobId::new(id))),
+        arb_id().prop_map(|id| EntryTarget::Dir(TreeId::new(id)))
     ]
 }
 
 fn arb_id() -> impl Strategy<Value = ObjectId> {
-    any::<[u8; 32]>().prop_map(ObjectId)
+    any::<[u8; 32]>().prop_map(ObjectId::new)
 }
 
 fn arb_sorted_entries() -> impl Strategy<Value = Vec<TreeEntry>> {
     proptest::collection::vec((arb_name(), arb_target()), 1..6).prop_map(|v| {
         let mut entries: Vec<TreeEntry> = v
             .into_iter()
-            .map(|(name, target)| TreeEntry { name, target })
+            .map(|(name, target)| TreeEntry::new(name, target))
             .collect();
         entries.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
         entries.dedup_by(|a, b| a.name == b.name);
@@ -509,12 +595,9 @@ fn arb_signature() -> impl Strategy<Value = Signature> {
         -50_400i32..=50_400,
         any::<bool>(),
     )
-        .prop_map(|(name, email, secs, offset_secs, neg)| Signature {
-            name,
-            email,
-            secs,
-            offset_secs,
-            negative_zero: offset_secs == 0 && neg,
+        .prop_map(|(name, email, secs, offset_secs, neg)| {
+            let negative_zero = offset_secs == 0 && neg;
+            Signature::new(name, email, secs, offset_secs, negative_zero).unwrap()
         })
 }
 
@@ -527,7 +610,7 @@ fn arb_delta() -> impl Strategy<Value = Vec<DeltaEntry>> {
     let op = prop_oneof![
         (leaf_kind, arb_id()).prop_map(|(kind, id)| DeltaOp::Put {
             kind,
-            id: BlobId(id)
+            id: BlobId::new(id)
         }),
         Just(DeltaOp::Delete)
     ];
@@ -540,15 +623,9 @@ fn arb_delta() -> impl Strategy<Value = Vec<DeltaEntry>> {
             .into_iter()
             .map(|(path, op, from)| {
                 // Canonical renames only: a `Put`, and never from its own path.
-                let renamed_from = match op {
-                    DeltaOp::Put { .. } => from.filter(|source| *source != path),
-                    DeltaOp::Delete => None,
-                };
-                DeltaEntry {
-                    path,
-                    op,
-                    renamed_from,
-                }
+                let is_put = op.put().is_some();
+                let renamed_from = from.filter(|source| is_put && *source != path);
+                DeltaEntry::new(path, op, renamed_from).unwrap()
             })
             .collect();
         delta.sort_by(|a, b| a.path.as_str().as_bytes().cmp(b.path.as_str().as_bytes()));
@@ -559,8 +636,8 @@ fn arb_delta() -> impl Strategy<Value = Vec<DeltaEntry>> {
 
 fn arb_changeset() -> impl Strategy<Value = Changeset> {
     (
-        proptest::collection::vec(arb_id().prop_map(ChangesetId), 0..3),
-        arb_id().prop_map(TreeId),
+        proptest::collection::vec(arb_id().prop_map(ChangesetId::new), 0..3),
+        arb_id().prop_map(TreeId::new),
         arb_delta(),
         arb_signature(),
         arb_signature(),
@@ -580,7 +657,8 @@ fn arb_changeset() -> impl Strategy<Value = Changeset> {
     )
         .prop_map(
             |(parents, root, delta, author, committer, message, extra_headers, metadata)| {
-                Changeset {
+                let metadata = metadata.into_iter().collect();
+                Changeset::new(
                     parents,
                     root,
                     delta,
@@ -588,8 +666,9 @@ fn arb_changeset() -> impl Strategy<Value = Changeset> {
                     committer,
                     message,
                     extra_headers,
-                    metadata: metadata.into_iter().collect(),
-                }
+                    metadata,
+                )
+                .unwrap()
             },
         )
 }
@@ -619,11 +698,12 @@ proptest! {
 /// (`BadSignature`), or metadata keys out of order (`UnsortedMetadata`).
 fn made_invalid(mut cs: Changeset, how: usize) -> Changeset {
     match how % 4 {
-        0 => cs.delta.push(DeltaEntry {
-            path: RepoPath::new("zz/deleted").unwrap(),
-            op: DeltaOp::Delete,
-            renamed_from: Some(RepoPath::new("zz/source").unwrap()),
-        }),
+        // `delta` makes only canonical entries: give a delete a rename source.
+        0 => {
+            let mut deleted = delta("zz/deleted", DeltaOp::Delete, None);
+            deleted.renamed_from = Some(RepoPath::new("zz/source").unwrap());
+            cs.delta.push(deleted);
+        }
         1 => {
             cs.author.negative_zero = true;
             cs.author.offset_secs = 60;

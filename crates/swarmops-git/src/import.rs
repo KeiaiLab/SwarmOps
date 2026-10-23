@@ -112,6 +112,7 @@ pub const MAX_LOSSY_LISTED: usize = 100;
 
 /// What to import, and into which ref ([`import()`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ImportRequest {
     /// The source ref: `HEAD`, a ref's name, or 40 hex digits ([`GitSource::resolve`]).
     pub git_ref: String,
@@ -180,6 +181,7 @@ impl ImportRequest {
 
 /// What an import did ([`import()`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ImportReport {
     /// The commits it recorded: each one the walk did not know, its changeset made (or found in
     /// the store already, as after a crash before its external id was written) and its external
@@ -212,8 +214,44 @@ pub struct ImportReport {
     pub recovered: Recovered,
 }
 
+impl ImportReport {
+    /// A report of every field, in their order.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one argument per field: a report has no field to default"
+    )]
+    pub fn new(
+        imported: u64,
+        skipped: u64,
+        head: ChangesetId,
+        git_head: GitOid,
+        target_ref: String,
+        old_head: Option<ChangesetId>,
+        ref_moved: bool,
+        lossy: Vec<LossyCommit>,
+        lossy_total: u64,
+        warnings: Vec<String>,
+        recovered: Recovered,
+    ) -> ImportReport {
+        ImportReport {
+            imported,
+            skipped,
+            head,
+            git_head,
+            target_ref,
+            old_head,
+            ref_moved,
+            lossy,
+            lossy_total,
+            warnings,
+            recovered,
+        }
+    }
+}
+
 /// A commit an import recorded with a loss.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LossyCommit {
     /// The commit.
     pub commit: GitOid,
@@ -223,8 +261,20 @@ pub struct LossyCommit {
     pub classes: LossySet,
 }
 
+impl LossyCommit {
+    /// `commit`, recorded as `changeset` with the loss of `classes`.
+    pub fn new(commit: GitOid, changeset: ChangesetId, classes: LossySet) -> LossyCommit {
+        LossyCommit {
+            commit,
+            changeset,
+            classes,
+        }
+    }
+}
+
 /// Why an import failed. Each says how far it got where it wrote anything.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ImportError {
     /// The source could not open, resolve or read what the import needs: the ref names nothing,
     /// the repository is one the import does not read, an object is missing or damaged.
@@ -338,11 +388,19 @@ fn passed_over(entry: Option<&ExternalIdMismatch>) -> String {
 /// entry's: it neither holds the commit as its `git.oid` nor exports to it. No import or export
 /// writes one; the import passes over one it meets ([`ImportError::Diverged::external_id`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ExternalIdMismatch {
     /// The commit whose entry it is: the entry's key.
     pub commit: GitOid,
     /// The changeset the entry names.
     pub changeset: ChangesetId,
+}
+
+impl ExternalIdMismatch {
+    /// The entry of `commit` that names `changeset`.
+    pub fn new(commit: GitOid, changeset: ChangesetId) -> ExternalIdMismatch {
+        ExternalIdMismatch { commit, changeset }
+    }
 }
 
 /// How many times a store call that found the writer lock held for its whole wait
@@ -980,25 +1038,22 @@ impl<'a, 's> Run<'a, 's> {
                 lossy,
                 metadata,
             } = commit;
-            let raw = RawChangeset {
-                parents: self.changesets(oid, &parents)?,
+            let raw = RawChangeset::new(
+                self.changesets(oid, &parents)?,
                 root,
                 author,
                 committer,
                 message,
                 extra_headers,
                 metadata,
-            };
+            );
             let id = batch
                 .push(raw.clone())
                 .map_err(|source| self.stopped(source))?;
             self.ids.insert(oid, id);
             self.note_lossy(oid, id, lossy);
             let faithful = lossy.is_empty();
-            let entry = ExternalEntry {
-                changeset: id,
-                faithful,
-            };
+            let entry = ExternalEntry::new(id, faithful);
             entries.push((oid.0.to_vec(), entry));
             raws.push(raw);
         }
@@ -1130,6 +1185,11 @@ impl<'a, 's> Run<'a, 's> {
                 let target_ref = req.target_ref.clone();
                 return Err(ImportError::CasMismatch { target_ref, actual });
             }
+            // A result newer than this build: the move is not known to have happened.
+            _ => {
+                let what = format!("CasResult: {}", crate::UNKNOWN_VARIANT);
+                return Err(self.stopped(RepoError::Internal(what)));
+            }
         };
         // A move whose step after its commit point failed is not followed by another write.
         let flush_again = ref_moved && moved.warnings.is_empty();
@@ -1200,6 +1260,7 @@ fn absorb(total: &mut Recovered, more: Recovered) {
         views_rebuilt,
         records_replayed,
         refs_replayed,
+        ..
     } = more;
     total.log_cut = total.log_cut.or(log_cut);
     total.frames_listed += frames_listed;
@@ -1255,40 +1316,33 @@ mod tests {
     /// any rebuilt them, the first journal cut kept.
     #[test]
     fn what_the_transactions_repaired_adds_up() {
-        let first = LogCut { at: 10, bytes: 3 };
+        let first = LogCut::new(10, 3);
         let mut total = Recovered::default();
-        absorb(
-            &mut total,
-            Recovered {
-                log_cut: Some(first),
-                frames_listed: 1,
-                records_replayed: 2,
-                ..Recovered::default()
-            },
-        );
-        absorb(
-            &mut total,
-            Recovered {
-                log_cut: Some(LogCut { at: 20, bytes: 1 }),
-                frames_listed: 2,
-                frames_rewritten: 1,
-                off_bytes_dropped: 8,
-                index_records_dropped: 4,
-                views_rebuilt: true,
-                refs_replayed: 1,
-                ..Recovered::default()
-            },
-        );
-        let expected = Recovered {
-            log_cut: Some(first),
-            frames_listed: 3,
-            frames_rewritten: 1,
-            off_bytes_dropped: 8,
-            index_records_dropped: 4,
-            views_rebuilt: true,
-            records_replayed: 2,
-            refs_replayed: 1,
-        };
+        let mut one = Recovered::default();
+        one.log_cut = Some(first);
+        one.frames_listed = 1;
+        one.records_replayed = 2;
+        absorb(&mut total, one);
+
+        let mut two = Recovered::default();
+        two.log_cut = Some(LogCut::new(20, 1));
+        two.frames_listed = 2;
+        two.frames_rewritten = 1;
+        two.off_bytes_dropped = 8;
+        two.index_records_dropped = 4;
+        two.views_rebuilt = true;
+        two.refs_replayed = 1;
+        absorb(&mut total, two);
+
+        let mut expected = Recovered::default();
+        expected.log_cut = Some(first);
+        expected.frames_listed = 3;
+        expected.frames_rewritten = 1;
+        expected.off_bytes_dropped = 8;
+        expected.index_records_dropped = 4;
+        expected.views_rebuilt = true;
+        expected.records_replayed = 2;
+        expected.refs_replayed = 1;
         assert_eq!(total, expected);
     }
 }

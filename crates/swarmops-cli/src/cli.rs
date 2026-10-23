@@ -1363,12 +1363,9 @@ fn line_range(text: &str) -> Result<LineRange, String> {
         let decimal = !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit());
         decimal.then(|| digits.parse().ok()).flatten()
     };
-    let range = text.split_once('-').and_then(|(first, last)| {
-        Some(LineRange {
-            first: number(first)?,
-            last: number(last)?,
-        })
-    });
+    let range = text
+        .split_once('-')
+        .and_then(|(first, last)| Some(LineRange::new(number(first)?, number(last)?)));
     range.ok_or_else(|| "expected two line numbers, A-B, such as 10-20".to_owned())
 }
 

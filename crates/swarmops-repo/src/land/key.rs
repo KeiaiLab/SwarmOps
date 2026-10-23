@@ -67,7 +67,7 @@ impl Walked {
     fn squashed(&self) -> Vec<ChangesetId> {
         let listed = self.squashed_from.as_deref().unwrap_or_default();
         (String::from_utf8_lossy(listed).split(' '))
-            .filter_map(|hex| ObjectId::from_hex(hex).ok().map(ChangesetId))
+            .filter_map(|hex| ObjectId::from_hex(hex).ok().map(ChangesetId::new))
             .collect()
     }
 

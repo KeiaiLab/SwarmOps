@@ -418,11 +418,7 @@ fn listed_frames(files: &Files) -> Option<Result<Vec<Frame>, u64>> {
         }
         match files.frame_at(entry) {
             Model::Whole { records, size } => {
-                frames.push(Frame {
-                    seq,
-                    offset: entry,
-                    records,
-                });
+                frames.push(Frame::new(seq, entry, records));
                 next = entry + to_u64(size);
             }
             _ => return Some(Err(entry)),
@@ -444,11 +440,7 @@ fn read_from_start(files: &Files, listed: &[Frame]) -> Result<Vec<Frame>, u64> {
     while at < log_len {
         match files.frame_at(at) {
             Model::Whole { records, size } => {
-                frames.push(Frame {
-                    seq: to_u64(frames.len()),
-                    offset: at,
-                    records,
-                });
+                frames.push(Frame::new(to_u64(frames.len()), at, records));
                 at += to_u64(size);
             }
             Model::Invalid if !zero_length(&files.log[to_usize(at)..]) => return Err(at),
@@ -1171,7 +1163,7 @@ impl ArbRecord {
 }
 
 fn changeset_id(bytes: [u8; 32]) -> ChangesetId {
-    ChangesetId(ObjectId(bytes))
+    ChangesetId::new(ObjectId::new(bytes))
 }
 
 /// `s` cut to at most 255 bytes, at a character boundary.

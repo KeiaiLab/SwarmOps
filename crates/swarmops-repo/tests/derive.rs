@@ -422,24 +422,25 @@ fn bulk_chain(root: &Utf8Path, n: u64) -> ChangesetId {
         let mut items = Vec::new();
         let mut records = Vec::new();
         for i in start..n.min(start + BATCH) {
-            let changeset = Changeset {
-                parents: head.into_iter().collect(),
-                root: tree.id(),
-                delta: Vec::new(),
-                author: signature(),
-                committer: signature(),
-                message: i.to_string().into_bytes(),
-                extra_headers: Vec::new(),
-                metadata: Vec::new(),
-            };
+            let changeset = Changeset::new(
+                head.into_iter().collect(),
+                tree.id(),
+                Vec::new(),
+                signature(),
+                signature(),
+                i.to_string().into_bytes(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap();
             let id = changeset.id().unwrap();
-            records.push(ChangesetMeta {
+            records.push(ChangesetMeta::new(
                 id,
-                seq: 0,
-                generation: 0,
-                delta_hash: changeset.delta_hash().unwrap(),
-                parents: changeset.parents.clone(),
-            });
+                0,
+                0,
+                changeset.delta_hash().unwrap(),
+                changeset.parents.clone(),
+            ));
             items.push((ObjectKind::Changeset, changeset.encode().unwrap()));
             head = Some(id);
         }
@@ -1206,7 +1207,7 @@ mod skip_list {
         let (_dir, root, mut repo) = new_repo();
         let c = chain(&repo, 3);
         assert_eq!(list(&repo, c[2]), [c[1], c[0]]);
-        match repo.register(FirstParentSkipList) {
+        match repo.register(FirstParentSkipList::default()) {
             Err(RepoError::Derived { name, why }) => {
                 assert_eq!(name, "first_parent_skip_list", "{why}");
                 assert!(why.contains("registered already"), "{why}");
@@ -1218,7 +1219,7 @@ mod skip_list {
         assert_eq!(stored(&root, "first_parent_skip_list", 1), files_of(&c));
 
         let mut registry = Registry::new();
-        registry.register(FirstParentSkipList).unwrap();
+        registry.register(FirstParentSkipList::default()).unwrap();
     }
 
     /// A skip list is stored as postcard encodes it: the number of ids, then each id's 32 bytes,
@@ -1230,14 +1231,9 @@ mod skip_list {
         let c = chain(&repo, 5);
         assert_eq!(list(&repo, c[4]), [c[3], c[2], c[0]]);
 
-        let store = DerivedStore::open(Layout::new(&root), Arc::new(RealFs));
+        let store = DerivedStore::open(Layout::new(&root), Arc::new(RealFs::new()));
         let value = |cs: ChangesetId| {
-            let slot = DerivedSlot {
-                name: "first_parent_skip_list",
-                version: 1,
-                subject: cs.0,
-                key: &[],
-            };
+            let slot = DerivedSlot::new("first_parent_skip_list", 1, cs.0, &[]);
             store.get(&slot).unwrap().expect("a stored value")
         };
         let mut want = vec![3_u8];
@@ -1309,11 +1305,11 @@ mod eager {
     /// What a call reports: the values it derived, those it found stored, and the frame it
     /// leaves the journal at.
     fn run(derived: u64, cached: u64, last_frame: Option<u64>) -> DeriveRun {
-        DeriveRun {
-            derived,
-            cached,
-            last_frame,
-        }
+        let mut run = DeriveRun::default();
+        run.derived = derived;
+        run.cached = cached;
+        run.last_frame = last_frame;
+        run
     }
 
     /// The changesets whose skip lists the store holds, as [`stored`] lists them.

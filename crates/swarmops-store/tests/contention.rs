@@ -171,7 +171,7 @@ fn key(chain: u64, j: u64) -> [u8; 16] {
 
 /// The id of changeset `j` of chain `chain`.
 fn id(chain: u64, j: u64) -> ChangesetId {
-    ChangesetId(hash_object(ObjectKind::Changeset, &key(chain, j)))
+    ChangesetId::new(hash_object(ObjectKind::Changeset, &key(chain, j)))
 }
 
 /// The delta hash of changeset `j` of chain `chain`.
@@ -186,13 +186,7 @@ fn parents(chain: u64, j: u64) -> Vec<ChangesetId> {
 
 /// Changeset `j` of chain `chain`, as a writer hands it to `insert_changeset`.
 fn changeset(chain: u64, j: u64) -> ChangesetMeta {
-    ChangesetMeta {
-        id: id(chain, j),
-        seq: 0,
-        generation: 0,
-        delta_hash: delta(chain, j),
-        parents: parents(chain, j),
-    }
+    ChangesetMeta::new(id(chain, j), 0, 0, delta(chain, j), parents(chain, j))
 }
 
 /// `d` in milliseconds, with two decimals.
@@ -351,7 +345,7 @@ fn child(work: &Path, number: u64, per_child: u64) {
     let root = store_root(work);
     let store = MetaStore::open(&root).expect("open the store");
     let prelude = Prelude {
-        objects: FsObjectStore::open(Layout::new(root), Box::new(RealFs)),
+        objects: FsObjectStore::open(Layout::new(root), Box::new(RealFs::new())),
         blobs: object_syncs(),
     };
     fs::write(work.join(format!("ready-{number}")), b"").expect("say ready");
@@ -629,7 +623,7 @@ impl JournalShape {
     /// Reads the journal of the store at `root` and prints its shape.
     fn read(root: &Utf8Path) -> JournalShape {
         let layout = Layout::new(root);
-        let journal = Journal::open(&layout, Arc::new(RealFs)).expect("open the journal");
+        let journal = Journal::open(&layout, Arc::new(RealFs::new())).expect("open the journal");
         let frames = journal
             .frames_from(0, usize::MAX)
             .expect("read the journal");
@@ -696,7 +690,7 @@ fn check_object_syncs(root: &Utf8Path, shape: Shape, objects: u64, lines: &[Stri
             "child {number} was handed {objects} objects a transaction: {line}"
         );
     }
-    let stored = FsObjectStore::open(Layout::new(root), Box::new(RealFs))
+    let stored = FsObjectStore::open(Layout::new(root), Box::new(RealFs::new()))
         .list()
         .expect("list the objects");
     assert_eq!(
@@ -884,7 +878,7 @@ fn object_syncs_prelude_writes_new_objects_and_flushes_them() {
             "{id:?} is stored whole, uncompressed"
         );
     }
-    let journal = Journal::open(&layout, Arc::new(RealFs)).expect("open the journal");
+    let journal = Journal::open(&layout, Arc::new(RealFs::new())).expect("open the journal");
     let frames = journal
         .frames_from(0, usize::MAX)
         .expect("read the journal");

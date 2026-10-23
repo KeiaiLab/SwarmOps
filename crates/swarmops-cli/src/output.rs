@@ -389,13 +389,13 @@ mod tests {
     use super::*;
 
     fn meta() -> Meta {
-        Meta {
-            repo: Some("/s".to_owned()),
-            elapsed_ms: 3,
-            resolved: BTreeMap::from([("main".to_owned(), "ab".repeat(32))]),
-            auth: "trust".to_owned(),
-            recovered: None,
-        }
+        let mut meta = Meta::new(
+            3,
+            BTreeMap::from([("main".to_owned(), "ab".repeat(32))]),
+            "trust",
+        );
+        meta.repo = Some("/s".to_owned());
+        meta
     }
 
     #[test]

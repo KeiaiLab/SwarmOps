@@ -37,19 +37,20 @@ pub(crate) const REBASER: &str = "test/rebaser";
 pub(crate) fn new_store() -> (TempDir, Utf8PathBuf, LocalRepo) {
     let dir = tempfile::tempdir().unwrap();
     let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
-    let repo = LocalRepo::create_with_fs(&root, "test", checked(RealFs)).unwrap();
+    let repo = LocalRepo::create_with_fs(&root, "test", checked(RealFs::new())).unwrap();
     (dir, root, repo)
 }
 
 /// The rebaser's signature: fixed, so that the same rebase makes the same changeset.
 pub(crate) fn rebaser() -> Signature {
-    Signature {
-        name: REBASER.as_bytes().to_vec(),
-        email: b"rebaser@test.swarmops.local".to_vec(),
-        secs: 1_760_000_200,
-        offset_secs: 0,
-        negative_zero: false,
-    }
+    Signature::new(
+        REBASER.as_bytes().to_vec(),
+        b"rebaser@test.swarmops.local".to_vec(),
+        1_760_000_200,
+        0,
+        false,
+    )
+    .unwrap()
 }
 
 /// A rebase of `head` onto `main` by [`rebaser`], with the defaults ([`RebaseRequest::new`]).
@@ -64,10 +65,9 @@ pub(crate) fn landing(head: ChangesetId) -> LandRequest {
 
 /// A request for `changes` on `parents`, recording `agent` in its metadata.
 fn by(agent: &str, parents: &[ChangesetId], changes: Vec<Change>) -> CommitRequest {
-    CommitRequest {
-        metadata: vec![("agent".to_owned(), agent.as_bytes().to_vec())],
-        ..request(parents, changes, "a test commit")
-    }
+    let mut req = request(parents, changes, "a test commit");
+    req.metadata = vec![("agent".to_owned(), agent.as_bytes().to_vec())];
+    req
 }
 
 /// Commits `changes` on `parents` by `agent`; the new changeset's id.
@@ -90,13 +90,8 @@ pub(crate) fn advance(
     parents: &[ChangesetId],
     changes: Vec<Change>,
 ) -> ChangesetId {
-    let req = CommitRequest {
-        advance: Some(Advance {
-            name: "main".to_owned(),
-            actor: agent.to_owned(),
-        }),
-        ..by(agent, parents, changes)
-    };
+    let mut req = by(agent, parents, changes);
+    req.advance = Some(Advance::new("main", agent));
     repo.commit(req).unwrap().id
 }
 
@@ -107,7 +102,7 @@ pub(crate) fn main_head(repo: &LocalRepo) -> ChangesetId {
 
 /// How many frames the journal of the store at `root` lists.
 pub(crate) fn frame_count(root: &Utf8Path) -> u64 {
-    Journal::open(&Layout::new(root), Arc::new(RealFs))
+    Journal::open(&Layout::new(root), Arc::new(RealFs::new()))
         .unwrap()
         .frame_count()
         .unwrap()
@@ -158,10 +153,8 @@ fn rebase_records_one_changeset_on_the_target_head_and_moves_no_ref() {
     let frames = frame_count(&root);
 
     // 1. Rebase the change onto main's head, with metadata of the caller's.
-    let req = RebaseRequest {
-        metadata: vec![("agent".to_owned(), REBASER.as_bytes().to_vec())],
-        ..rebasing(head)
-    };
+    let mut req = rebasing(head);
+    req.metadata = vec![("agent".to_owned(), REBASER.as_bytes().to_vec())];
     let out = repo.rebase(req).unwrap();
 
     // 2. What it says: recorded, on t1, from t0, one path changed.
@@ -239,12 +232,13 @@ fn rebase_conflicts_report_as_land_does_and_record_nothing() {
 #[test]
 fn a_keyed_rebase_replays_without_a_frame() {
     let (_dir, root, repo, [_, head, t1]) = moved_on();
-    let keyed = || RebaseRequest {
-        metadata: vec![(
+    let keyed = || {
+        let mut rebase = rebasing(head);
+        rebase.metadata = vec![(
             "commit_key".to_owned(),
             b"01890a5d-ac96-774b-bcce-b302099a8057".to_vec(),
-        )],
-        ..rebasing(head)
+        )];
+        rebase
     };
     let first = repo.rebase(keyed()).unwrap();
     let frames = frame_count(&root);
@@ -351,7 +345,7 @@ fn swept_template() -> (TempDir, Utf8PathBuf, Swept) {
     let (dir, template, repo, [_, head, t1]) = moved_on();
     drop(repo);
     let (_copy, root) = copy_of(&template);
-    let repo = LocalRepo::open_with_fs(&root, checked(RealFs)).unwrap();
+    let repo = LocalRepo::open_with_fs(&root, checked(RealFs::new())).unwrap();
     let want = repo.rebase(rebasing(head)).unwrap().changeset;
     (dir, template, Swept { t1, head, want })
 }
@@ -397,7 +391,7 @@ fn rebase_crashing_at(template: &Utf8Path, swept: &Swept, k: u64) -> (bool, bool
 
     // 2. What it left: H' or nothing, main unmoved, a clean store.
     let what = format!("k={k}");
-    let repo = LocalRepo::open_with_fs(&root, checked(RealFs)).unwrap();
+    let repo = LocalRepo::open_with_fs(&root, checked(RealFs::new())).unwrap();
     let recorded = repo.changeset(swept.want).unwrap().is_some();
     assert!(
         recorded || !finished,
@@ -433,7 +427,7 @@ fn a_rebase_crashing_at_any_call_records_once() {
     // 1. A child: rebase, then report nothing (its exit says how it ended).
     if let Ok(root) = std::env::var(CHILD_ROOT) {
         let head = std::env::var(CHILD_HEAD).expect("the head to rebase");
-        let head = ChangesetId(ObjectId::from_hex(&head).expect("a full id"));
+        let head = ChangesetId::new(ObjectId::from_hex(&head).expect("a full id"));
         let repo = LocalRepo::open(Utf8Path::new(&root)).unwrap();
         repo.rebase(rebasing(head)).unwrap();
         return;

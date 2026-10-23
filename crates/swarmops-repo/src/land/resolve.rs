@@ -46,6 +46,7 @@ use crate::repo::Repo;
 /// A land's resolutions ([`LandRequest::resolutions`](super::LandRequest::resolutions)): what to
 /// make of some paths of the merge, decided against a changeset.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Resolutions {
     /// The changeset they were decided against: the conflict report's `theirs`, a head of the
     /// target. A resolution applies while the target's head holds its path as this does.
@@ -54,8 +55,20 @@ pub struct Resolutions {
     pub files: BTreeMap<RepoPath, Resolution>,
 }
 
+impl Resolutions {
+    /// Makes resolutions decided against `against`.
+    ///
+    /// Invariant: `against` is a head of the target. `new` does not check it: the land re-checks
+    /// each resolution against the target's head it merges onto, and fails on a stale one
+    /// ([`RepoError::Conflict`]).
+    pub fn new(against: ChangesetId, files: BTreeMap<RepoPath, Resolution>) -> Resolutions {
+        Resolutions { against, files }
+    }
+}
+
 /// What a land makes of a path, and of every path below it ([`Resolutions`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Resolution {
     /// What this side holds there: a leaf, a directory, or nothing.
     Take(Side),
@@ -82,6 +95,7 @@ pub enum Resolution {
 
 /// One side of a land's merge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Side {
     /// The change: its head.
     Ours,
@@ -148,7 +162,7 @@ impl Resolving {
                 Resolution::Take(side) => Makes::Take(side),
                 Resolution::Put { kind, content } => Makes::Put {
                     kind,
-                    blob: BlobId(swarmops_core::hash_object(ObjectKind::Blob, &content)),
+                    blob: BlobId::new(swarmops_core::hash_object(ObjectKind::Blob, &content)),
                     bytes: Some(content),
                 },
                 Resolution::PutBlob { kind, id } => {
@@ -232,13 +246,10 @@ impl Resolving {
                     .into_iter()
                     .filter(|entry| entry.path != at.path)
                     .collect();
-                    let put = Leaf { kind, blob: *blob };
+                    let put = Leaf::new(kind, *blob);
                     if held != Some(put) {
-                        entries.push(DeltaEntry {
-                            path: at.path.clone(),
-                            op: DeltaOp::Put { kind, id: *blob },
-                            renamed_from: None,
-                        });
+                        let op = DeltaOp::Put { kind, id: *blob };
+                        entries.push(DeltaEntry::new(at.path.clone(), op, None)?);
                         if let Some(bytes) = bytes {
                             merged.new_blobs.insert(*blob, bytes.clone());
                         }
@@ -261,10 +272,8 @@ impl Resolving {
 
 /// The leaf `entry` names, if it names one: not a directory, nor nothing.
 fn leaf(entry: Option<EntryTarget>) -> Option<Leaf> {
-    match entry {
-        Some(EntryTarget::Leaf(kind, blob)) => Some(Leaf { kind, blob }),
-        Some(EntryTarget::Dir(_)) | None => None,
-    }
+    let (kind, blob) = entry?.leaf()?;
+    Some(Leaf::new(kind, blob))
 }
 
 /// Whether `path` is `at` or a path below it.

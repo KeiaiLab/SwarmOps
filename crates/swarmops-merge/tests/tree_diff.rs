@@ -90,28 +90,19 @@ impl Trees {
 }
 
 fn blob(n: u8) -> BlobId {
-    BlobId(hash_object(ObjectKind::Blob, &[n]))
+    BlobId::new(hash_object(ObjectKind::Blob, &[n]))
 }
 
 fn file(n: u8) -> Leaf {
-    Leaf {
-        kind: LeafKind::File,
-        blob: blob(n),
-    }
+    Leaf::new(LeafKind::File, blob(n))
 }
 
 fn exec(n: u8) -> Leaf {
-    Leaf {
-        kind: LeafKind::Exec,
-        blob: blob(n),
-    }
+    Leaf::new(LeafKind::Exec, blob(n))
 }
 
 fn symlink(n: u8) -> Leaf {
-    Leaf {
-        kind: LeafKind::Symlink,
-        blob: blob(n),
-    }
+    Leaf::new(LeafKind::Symlink, blob(n))
 }
 
 fn path(s: &str) -> RepoPath {
@@ -128,50 +119,31 @@ fn sorted(mut ids: Vec<TreeId>) -> Vec<TreeId> {
 }
 
 fn added(p: &str, new: Leaf) -> TreeChange {
-    TreeChange {
-        path: path(p),
-        kind: ChangeKind::Added { new },
-    }
+    TreeChange::new(path(p), ChangeKind::Added { new })
 }
 
 fn deleted(p: &str, old: Leaf) -> TreeChange {
-    TreeChange {
-        path: path(p),
-        kind: ChangeKind::Deleted { old },
-    }
+    TreeChange::new(path(p), ChangeKind::Deleted { old })
 }
 
 fn modified(p: &str, old: Leaf, new: Leaf) -> TreeChange {
-    TreeChange {
-        path: path(p),
-        kind: ChangeKind::Modified { old, new },
-    }
+    TreeChange::new(path(p), ChangeKind::Modified { old, new })
 }
 
 fn type_changed(p: &str, old: Leaf, new: Leaf) -> TreeChange {
-    TreeChange {
-        path: path(p),
-        kind: ChangeKind::TypeChanged { old, new },
-    }
+    TreeChange::new(path(p), ChangeKind::TypeChanged { old, new })
 }
 
 fn put(p: &str, leaf: Leaf) -> DeltaEntry {
-    DeltaEntry {
-        path: path(p),
-        op: DeltaOp::Put {
-            kind: leaf.kind,
-            id: leaf.blob,
-        },
-        renamed_from: None,
-    }
+    let op = DeltaOp::Put {
+        kind: leaf.kind,
+        id: leaf.blob,
+    };
+    DeltaEntry::new(path(p), op, None).unwrap()
 }
 
 fn delete(p: &str) -> DeltaEntry {
-    DeltaEntry {
-        path: path(p),
-        op: DeltaOp::Delete,
-        renamed_from: None,
-    }
+    DeltaEntry::new(path(p), DeltaOp::Delete, None).unwrap()
 }
 
 /// The two trees stored, and their diff under `filter`.
@@ -199,10 +171,7 @@ fn expected(from: &Files, to: &Files) -> Vec<TreeChange> {
                 (None, Some(new)) => ChangeKind::Added { new },
                 (None, None) => unreachable!("the path is a key of one of the maps"),
             };
-            Some(TreeChange {
-                path: p.clone(),
-                kind,
-            })
+            Some(TreeChange::new(p.clone(), kind))
         })
         .collect()
 }
@@ -221,13 +190,13 @@ fn is_under(path: &RepoPath, prefixes: &[RepoPath]) -> bool {
 fn applied(mut files: Files, delta: &[DeltaEntry]) -> Files {
     for entry in delta {
         assert_eq!(entry.renamed_from, None, "{entry:?}");
-        match entry.op {
-            DeltaOp::Put { kind, id } => {
-                let leaf = Leaf { kind, blob: id };
+        match entry.op.put() {
+            Some((kind, id)) => {
+                let leaf = Leaf::new(kind, id);
                 let old = files.insert(entry.path.clone(), leaf);
                 assert_ne!(old, Some(leaf), "a put that changes nothing: {entry:?}");
             }
-            DeltaOp::Delete => {
+            None => {
                 assert!(
                     files.remove(&entry.path).is_some(),
                     "a delete of no leaf: {entry:?}"
@@ -245,19 +214,14 @@ fn reversed(change: &TreeChange) -> TreeChange {
         ChangeKind::Deleted { old } => ChangeKind::Added { new: old },
         ChangeKind::Modified { old, new } => ChangeKind::Modified { old: new, new: old },
         ChangeKind::TypeChanged { old, new } => ChangeKind::TypeChanged { old: new, new: old },
+        _ => panic!("a variant this test does not know"),
     };
-    TreeChange {
-        path: change.path.clone(),
-        kind,
-    }
+    TreeChange::new(change.path.clone(), kind)
 }
 
 fn leaf() -> impl Strategy<Value = Leaf> {
     let kinds = prop::sample::select(vec![LeafKind::File, LeafKind::Exec, LeafKind::Symlink]);
-    (kinds, 0..3_u8).prop_map(|(kind, n)| Leaf {
-        kind,
-        blob: blob(n),
-    })
+    (kinds, 0..3_u8).prop_map(|(kind, n)| Leaf::new(kind, blob(n)))
 }
 
 /// A path of one to three components from a few names, among them names that sort between a
@@ -373,7 +337,7 @@ proptest! {
             .filter_map(|p| {
                 let at = |files: &Files| files.get(p).copied();
                 let (base, ours, theirs) = (at(&base), at(&ours), at(&theirs));
-                let triple = PathTriple { path: p.clone(), base, ours, theirs };
+                let triple = PathTriple::new(p.clone(), base, ours, theirs);
                 (ours != base || theirs != base).then_some(triple)
             })
             .collect();
@@ -605,23 +569,25 @@ fn delta_of_a_diff_is_canonical() {
     );
 
     // A changeset whose delta it is encodes: the codec's order rules accept it.
-    let signature = Signature {
-        name: b"agent".to_vec(),
-        email: b"agent@example.com".to_vec(),
-        secs: 0,
-        offset_secs: 0,
-        negative_zero: false,
-    };
-    let changeset = Changeset {
-        parents: vec![],
-        root: trees.add(&to).unwrap(),
+    let signature = Signature::new(
+        b"agent".to_vec(),
+        b"agent@example.com".to_vec(),
+        0,
+        0,
+        false,
+    )
+    .unwrap();
+    let changeset = Changeset::new(
+        vec![],
+        trees.add(&to).unwrap(),
         delta,
-        author: signature.clone(),
-        committer: signature,
-        message: b"m".to_vec(),
-        extra_headers: vec![],
-        metadata: vec![],
-    };
+        signature.clone(),
+        signature,
+        b"m".to_vec(),
+        vec![],
+        vec![],
+    )
+    .unwrap();
     let bytes = changeset.encode().unwrap();
     assert_eq!(Changeset::decode(&bytes).unwrap(), changeset);
 }
@@ -639,13 +605,9 @@ fn three_way_lists_each_side_at_each_changed_path() {
     let mut trees = Trees::default();
     let (b, o, t) = (trees.add(&base), trees.add(&ours), trees.add(&theirs));
 
-    let triple =
-        |p: &str, base: Option<Leaf>, ours: Option<Leaf>, theirs: Option<Leaf>| PathTriple {
-            path: path(p),
-            base,
-            ours,
-            theirs,
-        };
+    let triple = |p: &str, base: Option<Leaf>, ours: Option<Leaf>, theirs: Option<Leaf>| {
+        PathTriple::new(path(p), base, ours, theirs)
+    };
     assert_eq!(
         three_way(&trees, b, o, t, &PathFilter::all()).unwrap(),
         [

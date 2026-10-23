@@ -64,6 +64,7 @@ impl Recording<'_> {
             git_ref,
             target_ref,
             lossy,
+            ..
         } = req;
         let failed = |e: ImportError| error::git_import_error(e, &git_path, &git_ref);
         if swarmops_store::check_ref_name(&target_ref).is_err() {
@@ -97,6 +98,7 @@ impl Recording<'_> {
             source_ref,
             branch,
             force,
+            ..
         } = req;
         let failed = |e: ExportError| error::git_export_error(e, &git_path, &source_ref, &branch);
         if swarmops_store::check_ref_name(&source_ref).is_err() {
@@ -104,11 +106,8 @@ impl Recording<'_> {
         }
         refuse_mirror(&git_path)?;
         let mut sink = GixSink::open(Path::new(&git_path)).map_err(|e| failed(e.into()))?;
-        let request = ExportRequest {
-            source_ref: source_ref.clone(),
-            branch: branch.clone(),
-            force,
-        };
+        let mut request = ExportRequest::new(&source_ref, &branch);
+        request.force = force;
         let report = swarmops_git::export(&self.ops.repo, &mut sink, &request).map_err(|e| {
             if let ExportError::Diverged { head, .. } = &e {
                 self.resolved.record(&source_ref, *head);
@@ -146,14 +145,14 @@ fn recovered(repair: TailRepair) -> Recovered {
         frames_listed,
         frames_rewritten,
         off_bytes_dropped,
+        ..
     } = repair;
-    Recovered {
-        log_cut: cut,
-        frames_listed,
-        frames_rewritten,
-        off_bytes_dropped,
-        ..Recovered::default()
-    }
+    let mut out = Recovered::default();
+    out.log_cut = cut;
+    out.frames_listed = frames_listed;
+    out.frames_rewritten = frames_rewritten;
+    out.off_bytes_dropped = off_bytes_dropped;
+    out
 }
 
 /// The response that gives what `report` says: ids as hex, `exported` the commits written, and
@@ -172,19 +171,21 @@ fn export_response(report: ExportReport) -> GitExportResp {
         rewritten,
         recovered: _,
         warnings,
+        ..
     } = report;
-    GitExportResp {
-        exported: commits_written,
+    let mut out = GitExportResp::new(
+        commits_written,
         objects_written,
-        head_changeset: head.to_string(),
-        head_sha: head_oid.to_string(),
+        head.to_string(),
+        head_oid.to_string(),
         branch,
-        old_sha: old.map(|oid| oid.to_string()),
         branch_moved,
-        incremental: base.is_some(),
+        base.is_some(),
         rewritten,
-        warnings,
-    }
+    );
+    out.old_sha = old.map(|oid| oid.to_string());
+    out.warnings = warnings;
+    out
 }
 
 /// The conversion's class of the wire's `class`: the one of the same name.
@@ -215,28 +216,31 @@ fn response(report: ImportReport) -> GitImportResp {
         lossy,
         lossy_total,
         warnings,
-        recovered: _,
+        ..
     } = report;
     let lossy = lossy
         .iter()
-        .map(|commit| LossyCommitOut {
-            commit: commit.commit.to_string(),
-            changeset: commit.changeset.to_string(),
-            classes: commit.classes.iter().map(wire_class).collect(),
+        .map(|commit| {
+            LossyCommitOut::new(
+                commit.commit.to_string(),
+                commit.changeset.to_string(),
+                commit.classes.iter().map(wire_class).collect(),
+            )
         })
         .collect();
-    GitImportResp {
+    let mut out = GitImportResp::new(
         imported,
         skipped,
-        head_changeset: head.to_string(),
-        git_head_sha: git_head.to_string(),
+        head.to_string(),
+        git_head.to_string(),
         target_ref,
         ref_moved,
-        old_head: old_head.map(|id| id.to_string()),
         lossy,
         lossy_total,
-        warnings,
-    }
+    );
+    out.old_head = old_head.map(|id| id.to_string());
+    out.warnings = warnings;
+    out
 }
 
 #[cfg(test)]
@@ -266,49 +270,45 @@ mod tests {
     #[test]
     fn a_report_becomes_its_response() {
         let (head, old) = (
-            ChangesetId(ObjectId([1; 32])),
-            ChangesetId(ObjectId([2; 32])),
+            ChangesetId::new(ObjectId::new([1; 32])),
+            ChangesetId::new(ObjectId::new([2; 32])),
         );
-        let (commit, tip) = (GitOid([0xab; 20]), GitOid([0xcd; 20]));
+        let (commit, tip) = (GitOid::new([0xab; 20]), GitOid::new([0xcd; 20]));
         let classes: LossySet = [
             swarmops_git::LossyClass::TreeOrder,
             swarmops_git::LossyClass::Gitlinks,
         ]
         .into_iter()
         .collect();
-        let report = ImportReport {
-            imported: 3,
-            skipped: 1,
+        let report = ImportReport::new(
+            3,
+            1,
             head,
-            git_head: tip,
-            target_ref: "release/git".to_owned(),
-            old_head: Some(old),
-            ref_moved: true,
-            lossy: vec![LossyCommit {
-                commit,
-                changeset: head,
-                classes,
-            }],
-            lossy_total: 7,
-            warnings: vec!["a warning".to_owned()],
-            recovered: Recovered::default(),
-        };
-        let expected = GitImportResp {
-            imported: 3,
-            skipped: 1,
-            head_changeset: head.to_string(),
-            git_head_sha: "cd".repeat(20),
-            target_ref: "release/git".to_owned(),
-            ref_moved: true,
-            old_head: Some(old.to_string()),
-            lossy: vec![LossyCommitOut {
-                commit: "ab".repeat(20),
-                changeset: head.to_string(),
-                classes: vec![LossyClass::Gitlinks, LossyClass::TreeOrder],
-            }],
-            lossy_total: 7,
-            warnings: vec!["a warning".to_owned()],
-        };
+            tip,
+            "release/git".to_owned(),
+            Some(old),
+            true,
+            vec![LossyCommit::new(commit, head, classes)],
+            7,
+            vec!["a warning".to_owned()],
+            Recovered::default(),
+        );
+        let mut expected = GitImportResp::new(
+            3,
+            1,
+            head.to_string(),
+            "cd".repeat(20),
+            "release/git".to_owned(),
+            true,
+            vec![LossyCommitOut::new(
+                "ab".repeat(20),
+                head.to_string(),
+                vec![LossyClass::Gitlinks, LossyClass::TreeOrder],
+            )],
+            7,
+        );
+        expected.old_head = Some(old.to_string());
+        expected.warnings = vec!["a warning".to_owned()];
         assert_eq!(response(report), expected);
     }
 
@@ -318,41 +318,40 @@ mod tests {
     #[test]
     fn an_export_report_becomes_its_response() {
         let (head, base) = (
-            ChangesetId(ObjectId([1; 32])),
-            ChangesetId(ObjectId([2; 32])),
+            ChangesetId::new(ObjectId::new([1; 32])),
+            ChangesetId::new(ObjectId::new([2; 32])),
         );
-        let report = ExportReport {
+        let report = ExportReport::new(
             head,
-            head_oid: GitOid([0xcd; 20]),
-            branch: "stable".to_owned(),
-            old: Some(GitOid([0xab; 20])),
-            base: Some(base),
-            branch_moved: true,
-            commits_written: 3,
-            objects_written: 9,
-            objects_checked: 4,
-            rewritten: 1,
-            recovered: TailRepair::default(),
-            warnings: vec!["a warning".to_owned()],
-        };
-        let expected = GitExportResp {
-            exported: 3,
-            objects_written: 9,
-            head_changeset: head.to_string(),
-            head_sha: "cd".repeat(20),
-            branch: "stable".to_owned(),
-            old_sha: Some("ab".repeat(20)),
-            branch_moved: true,
-            incremental: true,
-            rewritten: 1,
-            warnings: vec!["a warning".to_owned()],
-        };
+            GitOid::new([0xcd; 20]),
+            "stable".to_owned(),
+            Some(GitOid::new([0xab; 20])),
+            Some(base),
+            true,
+            3,
+            9,
+            4,
+            1,
+            TailRepair::default(),
+            vec!["a warning".to_owned()],
+        );
+        let mut expected = GitExportResp::new(
+            3,
+            9,
+            head.to_string(),
+            "cd".repeat(20),
+            "stable".to_owned(),
+            true,
+            true,
+            1,
+        );
+        expected.old_sha = Some("ab".repeat(20));
+        expected.warnings = vec!["a warning".to_owned()];
         assert_eq!(export_response(report.clone()), expected);
-        let created = export_response(ExportReport {
-            old: None,
-            base: None,
-            ..report
-        });
+        let mut export_report = report;
+        export_report.old = None;
+        export_report.base = None;
+        let created = export_response(export_report);
         assert_eq!((created.old_sha, created.incremental), (None, false));
     }
 
@@ -362,20 +361,17 @@ mod tests {
     fn a_tail_repair_becomes_its_recovered_record() {
         use swarmops_store::LogCut;
 
-        let cut = Some(LogCut { at: 96, bytes: 7 });
-        let repair = TailRepair {
-            cut,
-            frames_listed: 2,
-            frames_rewritten: 1,
-            off_bytes_dropped: 16,
-        };
-        let expected = Recovered {
-            log_cut: cut,
-            frames_listed: 2,
-            frames_rewritten: 1,
-            off_bytes_dropped: 16,
-            ..Recovered::default()
-        };
+        let cut = Some(LogCut::new(96, 7));
+        let mut repair = TailRepair::default();
+        repair.cut = cut;
+        repair.frames_listed = 2;
+        repair.frames_rewritten = 1;
+        repair.off_bytes_dropped = 16;
+        let mut expected = Recovered::default();
+        expected.log_cut = cut;
+        expected.frames_listed = 2;
+        expected.frames_rewritten = 1;
+        expected.off_bytes_dropped = 16;
         assert_eq!(recovered(repair), expected);
         assert!(recovered(TailRepair::default()).is_empty());
     }

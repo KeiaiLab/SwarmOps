@@ -32,7 +32,7 @@ const ACTOR: &str = "test/1";
 
 /// The id of the sweeps' changeset `n`: a real hash, so the ids look like a store's.
 pub fn id(n: u64) -> ChangesetId {
-    ChangesetId(swarmops_core::hash_object(
+    ChangesetId::new(swarmops_core::hash_object(
         ObjectKind::Changeset,
         &n.to_le_bytes(),
     ))
@@ -41,13 +41,8 @@ pub fn id(n: u64) -> ChangesetId {
 /// The sweeps' changeset `n`, a root, as a caller hands it to `insert_changeset`: seq and
 /// generation 0, since the store assigns both.
 pub fn changeset(n: u64) -> ChangesetMeta {
-    ChangesetMeta {
-        id: id(n),
-        seq: 0,
-        generation: 0,
-        delta_hash: swarmops_core::hash_object(ObjectKind::Blob, &n.to_le_bytes()).0,
-        parents: Vec::new(),
-    }
+    let delta_hash = swarmops_core::hash_object(ObjectKind::Blob, &n.to_le_bytes()).0;
+    ChangesetMeta::new(id(n), 0, 0, delta_hash, Vec::new())
 }
 
 /// Inserts changeset `n` in a write transaction of its own.
@@ -63,7 +58,7 @@ fn insert(store: &MetaStore, n: u64) {
 
 /// The checkpoint of the store at `root`.
 fn ckpt(root: &Utf8Path) -> u64 {
-    Journal::open(&Layout::new(root), Arc::new(RealFs))
+    Journal::open(&Layout::new(root), Arc::new(RealFs::new()))
         .unwrap()
         .ckpt()
         .unwrap()
@@ -76,7 +71,7 @@ fn log_len(root: &Utf8Path) -> u64 {
 
 /// An index handle of its own on the store at `root`.
 fn index(root: &Utf8Path) -> Index {
-    Index::open(&Layout::new(root), Arc::new(RealFs)).unwrap()
+    Index::open(&Layout::new(root), Arc::new(RealFs::new())).unwrap()
 }
 
 /// What a child that ended normally reported (the line it printed after [`REPORT`]).
@@ -250,11 +245,7 @@ pub fn sweep_child(root: &Utf8Path, plan: &str) {
                 "eio" => InjectedError::Eio,
                 _ => InjectedError::Enospc,
             };
-            let fail = FailAt {
-                at: k,
-                mode: FailMode::Persistent,
-                error,
-            };
+            let fail = FailAt::new(k, FailMode::Persistent, error);
             (
                 faults::checked(FailAtFs::new(NoSyncFs, fail)),
                 parts[3].parse().unwrap(),

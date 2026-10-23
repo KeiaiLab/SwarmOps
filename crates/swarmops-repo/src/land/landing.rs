@@ -42,6 +42,7 @@ const MAX_ATTEMPTS: u32 = 8;
 /// A land to make ([`Repo::land`]): the change, the first-parent chain from `base` to `head`, onto
 /// the ref `target`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LandRequest {
     /// The change's head: the last changeset of the chain the land squashes.
     pub head: ChangesetId,
@@ -101,6 +102,7 @@ impl LandRequest {
 
 /// What a land did ([`Repo::land`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LandOutcome {
     /// Whether it landed the change now, or found it landed by a land with its key.
     pub status: LandStatus,
@@ -129,8 +131,42 @@ pub struct LandOutcome {
     pub warnings: Vec<String>,
 }
 
+impl LandOutcome {
+    /// Makes one of the fields given.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "every field is required (the non-exhaustive design, decision 2)"
+    )]
+    pub fn new(
+        status: LandStatus,
+        landed: ChangesetId,
+        rebased_onto: ChangesetId,
+        base: ChangesetId,
+        attempts: u32,
+        relocated: bool,
+        squashed_from: Vec<ChangesetId>,
+        files_changed: usize,
+        auto_merged: Vec<RepoPath>,
+        warnings: Vec<String>,
+    ) -> LandOutcome {
+        LandOutcome {
+            status,
+            landed,
+            rebased_onto,
+            base,
+            attempts,
+            relocated,
+            squashed_from,
+            files_changed,
+            auto_merged,
+            warnings,
+        }
+    }
+}
+
 /// Whether a land landed its change ([`LandOutcome::status`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum LandStatus {
     /// It landed the change now.
     Landed,
@@ -140,6 +176,7 @@ pub enum LandStatus {
 
 /// Why a land has nothing to land ([`RepoError::NothingToLand`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum NothingToLandReason {
     /// The head is on the target's first-parent chain.
     OnTarget,
@@ -170,6 +207,7 @@ impl fmt::Display for NothingToLandReason {
 /// Why a land conflicts ([`RepoError::Conflict`]): the three-way merge of the change onto the
 /// target's head, and what a report of it needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MergeConflicts {
     /// The base the change was taken from.
     pub base: ChangesetId,
@@ -191,6 +229,29 @@ pub struct MergeConflicts {
     /// The paths whose resolutions did not apply, sorted: the target's head holds there what the
     /// resolutions' `against` does not ([`Resolutions`]). Empty for a land without resolutions.
     pub stale: Vec<RepoPath>,
+}
+
+impl MergeConflicts {
+    /// Makes one of the fields given.
+    pub fn new(
+        base: ChangesetId,
+        ours: ChangesetId,
+        theirs: ChangesetId,
+        conflicts: Vec<FileConflict>,
+        auto_merged: Vec<RepoPath>,
+        last_touched: BTreeMap<RepoPath, (ChangesetId, String)>,
+        stale: Vec<RepoPath>,
+    ) -> MergeConflicts {
+        MergeConflicts {
+            base,
+            ours,
+            theirs,
+            conflicts,
+            auto_merged,
+            last_touched,
+            stale,
+        }
+    }
 }
 
 /// How long a land waits before its attempt `attempt`, counted from 1 (operations spec §3 step

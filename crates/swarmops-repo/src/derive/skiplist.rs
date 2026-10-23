@@ -19,6 +19,7 @@ use super::{Derivation, DeriveCtx, DeriveError, Subject};
 /// back, that is entry `i - 1` of the list of entry `i - 1`. The engine's depth-first order has
 /// derived that list by then; one the store has lost since is `Missing`, and derived on the way.
 #[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
 pub struct FirstParentSkipList;
 
 impl Derivation for FirstParentSkipList {
@@ -64,6 +65,7 @@ impl Derivation for FirstParentSkipList {
 /// Stored, as postcard encodes it, as the number of ids, then each id's 32 bytes in order: what
 /// version 1 of [`FirstParentSkipList`] reads back, so any other layout takes a new version.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct SkipList(Vec<ChangesetId>);
 
 impl SkipList {
@@ -93,7 +95,9 @@ impl Serialize for SkipList {
 impl<'de> Deserialize<'de> for SkipList {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let ids = Vec::<[u8; 32]>::deserialize(deserializer)?;
-        let ids = ids.into_iter().map(|id| ChangesetId(ObjectId(id)));
+        let ids = ids
+            .into_iter()
+            .map(|id| ChangesetId::new(ObjectId::new(id)));
         Ok(SkipList(ids.collect()))
     }
 }

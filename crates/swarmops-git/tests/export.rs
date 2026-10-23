@@ -26,9 +26,7 @@ use swarmops_git::{
     GitSink, GitSource, GixSink, GixSource, ImportReport, ImportRequest, LossyClass, RawCommit,
     RawKind, RawTree, commit_bytes, export, git_hash, import, register,
 };
-use swarmops_repo::{
-    Advance, CasResult, Change, CommitRequest, LocalRepo, RawChangeset, RepoError, StoreError,
-};
+use swarmops_repo::{Advance, CasResult, Change, LocalRepo, RawChangeset, RepoError, StoreError};
 use swarmops_store::{ExternalEntry, ExternalIds, Layout, RealFs, SYSTEM_GIT};
 use swarmops_testkit::fs::{HoldThenFail, NoSyncFs};
 use swarmops_testkit::git::{self, GitFixture, Manifest};
@@ -203,6 +201,7 @@ fn reachable(dir: &Path, tip: GitOid) -> BTreeMap<GitOid, (RawKind, Vec<u8>)> {
                 stack.extend(entries.filter(|e| e.mode != b"160000").map(|e| e.oid));
             }
             RawKind::Blob | RawKind::Tag => {}
+            _ => panic!("a variant this test does not know"),
         }
         objects.insert(oid, (kind, bytes));
     }
@@ -307,15 +306,15 @@ fn tree_of(files: &[(&str, &[u8])], objects: &mut Vec<(ObjectKind, Vec<u8>)>) ->
 /// A raw changeset of `root` on `parents`, by the test kit's signature, with `message` and no
 /// extra headers or metadata: a native changeset.
 fn raw(parents: &[ChangesetId], root: TreeId, message: &str) -> RawChangeset {
-    RawChangeset {
-        parents: parents.to_vec(),
+    RawChangeset::new(
+        parents.to_vec(),
         root,
-        author: signature(),
-        committer: signature(),
-        message: message.as_bytes().to_vec(),
-        extra_headers: Vec::new(),
-        metadata: Vec::new(),
-    }
+        signature(),
+        signature(),
+        message.as_bytes().to_vec(),
+        Vec::new(),
+        Vec::new(),
+    )
 }
 
 /// On top of `main` (an imported head): a second root made natively, holding `other.txt`, and a
@@ -398,6 +397,7 @@ fn same_tree(source: &GixSource, tree: GitOid, repo: &LocalRepo, cs: ChangesetId
                         LeafKind::File => b"100644",
                         LeafKind::Exec => b"100755",
                         LeafKind::Symlink => b"120000",
+                        _ => panic!("a variant this test does not know"),
                     };
                     assert_eq!(entry.mode, mode, "{path}");
                     let (_, _, content) = read.read_blob_at(cs, &path).unwrap().unwrap();
@@ -407,6 +407,7 @@ fn same_tree(source: &GixSource, tree: GitOid, repo: &LocalRepo, cs: ChangesetId
                         "{path}"
                     );
                 }
+                _ => panic!("a variant this test does not know"),
             }
         }
     }
@@ -471,6 +472,7 @@ fn an_export_of_an_imported_fixture_reproduces_it_byte_for_byte() {
                     assert_eq!(manifest.blobs.get(&hex), Some(&size), "{name}: blob {id}");
                 }
                 RawKind::Tag => panic!("{name}: a tag {id}"),
+                _ => panic!("a variant this test does not know"),
             }
         }
         let written = u64::try_from(objects.len()).unwrap();
@@ -765,12 +767,7 @@ fn objects_are_durable_before_the_branch_moves() {
         }
     }
     let entries: Vec<Option<ExternalEntry>> = (natives.iter())
-        .map(|&changeset| {
-            Some(ExternalEntry {
-                changeset,
-                faithful: true,
-            })
-        })
+        .map(|&changeset| Some(ExternalEntry::new(changeset, true)))
         .collect();
     assert_eq!(*at_cas.lock().unwrap(), entries);
 }
@@ -962,10 +959,8 @@ fn a_source_moved_back_is_diverged() {
 fn force_moves_a_diverged_branch() {
     let (store, first, exported_second, destination) = moved_back();
     let repo = &store.repo;
-    let forced = ExportRequest {
-        force: true,
-        ..main_branch()
-    };
+    let mut forced = main_branch();
+    forced.force = true;
     let report = exported(repo, &mut gix(&destination.dir), &forced);
     assert_eq!(
         (report.head, report.head_oid),
@@ -1155,7 +1150,7 @@ fn exported_native_commits_are_recorded_as_external_ids() {
     let repo = &fx.store.repo;
     let natives = three_natives(repo);
     let entries = || -> BTreeMap<Vec<u8>, ExternalEntry> {
-        let ids = ExternalIds::new(Layout::new(&fx.store.root), Arc::new(RealFs));
+        let ids = ExternalIds::new(Layout::new(&fx.store.root), Arc::new(RealFs::new()));
         (ids.list(SYSTEM_GIT).unwrap().into_iter())
             .map(|(key, entry)| (key, entry.expect("a whole entry")))
             .collect()
@@ -1165,10 +1160,7 @@ fn exported_native_commits_are_recorded_as_external_ids() {
     let mut after = entries();
     for native in natives {
         let entry = after.remove(export_oid(repo, native).0.as_slice());
-        let expected = ExternalEntry {
-            changeset: native,
-            faithful: true,
-        };
+        let expected = ExternalEntry::new(native, true);
         assert_eq!(entry, Some(expected), "{native}");
     }
     assert_eq!(after, before, "the import's entries, and no other");
@@ -1181,7 +1173,8 @@ fn exported_native_commits_are_recorded_as_external_ids() {
 fn an_export_taken_while_a_writer_is_mid_commit_excludes_it() {
     let store = store();
     let head = commit_on_main(&store.repo, vec![put("a.txt", b"one\n")], "Add a.txt\n");
-    let (fs, writer_held) = HoldThenFail::new(Layout::new(&store.root).journal_log(), RealFs);
+    let (fs, writer_held) =
+        HoldThenFail::new(Layout::new(&store.root).journal_log(), RealFs::new());
     let writer = LocalRepo::open_with_fs(&store.root, Arc::new(fs)).unwrap();
     let mut exporter = LocalRepo::open(&store.root).unwrap();
     register(&mut exporter).unwrap();
@@ -1189,13 +1182,8 @@ fn an_export_taken_while_a_writer_is_mid_commit_excludes_it() {
     thread::scope(|scope| {
         // One frame records the changeset and moves `main` to it (`advance`).
         let writing = scope.spawn(|| {
-            let req = CommitRequest {
-                advance: Some(Advance {
-                    name: "main".to_owned(),
-                    actor: ACTOR.to_owned(),
-                }),
-                ..request(&[head], vec![put("a.txt", b"two\n")], "Change a.txt\n")
-            };
+            let mut req = request(&[head], vec![put("a.txt", b"two\n")], "Change a.txt\n");
+            req.advance = Some(Advance::new("main", ACTOR));
             writer.commit(req)
         });
         writer_held.wait();
@@ -1309,12 +1297,7 @@ mod crafted_memos {
     /// Places `value` as the memo `name` (version 1, no key) of `subject` in `store`'s derived
     /// store, its file whole and its trailer right, in place of any there. The file's path.
     fn plant(store: &Store, name: &str, subject: ObjectId, value: &[u8]) -> Utf8PathBuf {
-        let slot = DerivedSlot {
-            name,
-            version: 1,
-            subject,
-            key: &[],
-        };
+        let slot = DerivedSlot::new(name, 1, subject, &[]);
         let file = Layout::new(&store.root).derived_path(&slot);
         match fs::remove_file(&file) {
             Ok(()) => {}
@@ -1509,13 +1492,11 @@ mod crafted_memos {
         let second = commit_on_main(&store.repo, vec![put("app.sh", two)], "Change app.sh\n");
         let mut sink = gix(&destination.dir);
         let evil = sink.write_object(RawKind::Blob, b"echo EVIL\n").unwrap();
-        let tree = RawTree {
-            entries: vec![RawTreeEntry {
-                mode: b"100644".to_vec(),
-                name: b"app.sh".to_vec(),
-                oid: evil,
-            }],
-        };
+        let tree = RawTree::new(vec![RawTreeEntry::new(
+            b"100644".to_vec(),
+            b"app.sh".to_vec(),
+            evil,
+        )]);
         let tree = sink.write_object(RawKind::Tree, &tree.render()).unwrap();
         let parents = [first.head_oid];
         let bytes = commit_bytes(tree, &parents, &signature(), &signature(), &[], b"two\n");
@@ -1658,13 +1639,11 @@ mod crafted_memos {
     /// root holding one file, made durable. Its oid.
     fn placed_commit(sink: &mut dyn GitSink) -> GitOid {
         let blob = sink.write_object(RawKind::Blob, b"placed\n").unwrap();
-        let tree = RawTree {
-            entries: vec![RawTreeEntry {
-                mode: b"100644".to_vec(),
-                name: b"f.txt".to_vec(),
-                oid: blob,
-            }],
-        };
+        let tree = RawTree::new(vec![RawTreeEntry::new(
+            b"100644".to_vec(),
+            b"f.txt".to_vec(),
+            blob,
+        )]);
         let tree = sink.write_object(RawKind::Tree, &tree.render()).unwrap();
         let sig = signature();
         let bytes = commit_bytes(tree, &[], &sig, &sig, &[], b"Placed\n");
@@ -1700,13 +1679,11 @@ mod crafted_memos {
 
     /// The git oid of the tree that holds the file `a` of `content` alone.
     fn tree_of_a(content: &[u8]) -> GitOid {
-        let tree = RawTree {
-            entries: vec![RawTreeEntry {
-                mode: b"100644".to_vec(),
-                name: b"a".to_vec(),
-                oid: git_hash(RawKind::Blob, content),
-            }],
-        };
+        let tree = RawTree::new(vec![RawTreeEntry::new(
+            b"100644".to_vec(),
+            b"a".to_vec(),
+            git_hash(RawKind::Blob, content),
+        )]);
         git_hash(RawKind::Tree, &tree.render())
     }
 
@@ -1802,10 +1779,7 @@ mod crafted_memos {
         // The merge's commit over the memo, as the derivation reads the memos: packed.
         let spliced = export_oid(repo, h);
         let read = repo.snapshot().unwrap();
-        let reader = ExportReader {
-            read: &read,
-            store: repo.derived_store(),
-        };
+        let reader = ExportReader::new(&read, repo.derived_store());
         let cs = repo.changeset(h).unwrap().unwrap().changeset;
         let tree = tree_oid(&reader, cs.root).unwrap();
         let parents = [export_oid(repo, b), export_oid(repo, c)];
@@ -1857,10 +1831,7 @@ mod crafted_memos {
         assert_eq!(object_files(&destination.dir), before, "nothing written");
 
         // An external id entry names the ancestor for the branch's commit too.
-        let entry = ExternalEntry {
-            changeset: a,
-            faithful: true,
-        };
+        let entry = ExternalEntry::new(a, true);
         let key = placed.0.to_vec();
         repo.record_external_ids(SYSTEM_GIT, &[(key, entry)])
             .unwrap();
@@ -1948,12 +1919,7 @@ mod crafted_memos {
         let report = exported(repo, &mut gix(&destination.dir), &main_branch());
         assert_eq!(report.commits_written, 7);
         let memo = |id: ChangesetId| {
-            let slot = DerivedSlot {
-                name: "git_oid",
-                version: 1,
-                subject: id.0,
-                key: &[],
-            };
+            let slot = DerivedSlot::new("git_oid", 1, id.0, &[]);
             repo.derived_store().get(&slot).unwrap().expect("a memo")
         };
         let written: Vec<Vec<u8>> = all.iter().map(|&id| memo(id)).collect();

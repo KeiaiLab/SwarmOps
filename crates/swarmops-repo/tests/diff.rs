@@ -11,10 +11,7 @@ use tempfile::TempDir;
 
 /// The leaf of `kind` that holds `content`.
 fn leaf(kind: LeafKind, content: &[u8]) -> Leaf {
-    Leaf {
-        kind,
-        blob: blob(content),
-    }
+    Leaf::new(kind, blob(content))
 }
 
 /// The regular file that holds `content`.
@@ -24,10 +21,7 @@ fn file(content: &[u8]) -> Leaf {
 
 /// The change of the leaf at `p`.
 fn change(p: &str, kind: ChangeKind) -> TreeChange {
-    TreeChange {
-        path: path(p),
-        kind,
-    }
+    TreeChange::new(path(p), kind)
 }
 
 /// Three changesets in a row on a fresh store, c1 ← c2 ← c3: c2 changes a file's content and
@@ -150,7 +144,7 @@ fn diff_between_two_changesets_is_their_roots_diff() {
     assert_eq!(read.diff(c3, c3, &all).unwrap(), Vec::<TreeChange>::new());
 
     // A changeset the snapshot does not hold, on either side.
-    let unknown = ChangesetId(hash_object(ObjectKind::Changeset, b"never committed"));
+    let unknown = ChangesetId::new(hash_object(ObjectKind::Changeset, b"never committed"));
     for (from, to) in [(unknown, c2), (c1, unknown)] {
         match read.diff(from, to, &all) {
             Err(RepoError::NotFound(missing)) => assert_eq!(missing, unknown.to_string()),
@@ -163,7 +157,7 @@ fn diff_between_two_changesets_is_their_roots_diff() {
         TreeRead::tree(&read, root(c1)).unwrap(),
         read.tree(root(c1)).unwrap()
     );
-    let missing = TreeId(hash_object(ObjectKind::Tree, b"never stored"));
+    let missing = TreeId::new(hash_object(ObjectKind::Tree, b"never stored"));
     match TreeRead::tree(&read, missing) {
         Err(RepoError::MissingObject { id, kind }) => {
             assert_eq!((id, kind), (missing.0, ObjectKind::Tree));

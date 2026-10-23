@@ -10,6 +10,7 @@ use crate::land::{MergeConflicts, NothingToLandReason};
 
 /// Why a repository operation failed.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum RepoError {
     /// The store failed: I/O, a corrupt object file, damaged metadata, a writer lock held for
     /// the whole wait ([`StoreError::Busy`], retryable), commits landing during every round of a
@@ -267,6 +268,20 @@ pub enum RepoError {
         /// The target's head.
         theirs: ChangesetId,
     },
+    /// A value of a non-exhaustive enum of the store's, the core's or the merge's that this
+    /// build does not handle: the fail-closed value of a wildcard arm, which a variant added
+    /// to that enum without a match of its own reaches. A bug of this build, never a state of
+    /// the store; the string names the enum and the value.
+    #[error("internal error, a bug of this build: {0}")]
+    Internal(String),
+}
+
+impl RepoError {
+    /// The [`RepoError::Internal`] a wildcard arm over the foreign enum `ty` returns, e.g.
+    /// `unknown_variant("CasResult")`.
+    pub(crate) fn unknown_variant(ty: &str) -> Self {
+        Self::Internal(format!("{ty}: a variant this build does not know"))
+    }
 }
 
 /// [`RepoError::Conflict`]'s message: how many paths conflict with the target's head, and how
@@ -308,3 +323,30 @@ const _: fn() = || {
     impl<T: From<io::Error>> FromIoError<u8> for T {}
     let _ = <RepoError as FromIoError<_>>::check;
 };
+
+#[cfg(test)]
+mod tests {
+    use super::RepoError;
+
+    /// `Internal` names itself a bug of this build, and keeps what the arm that made it says.
+    #[test]
+    fn internal_names_a_bug() {
+        let error = RepoError::Internal("EntryTarget: an unknown variant".into());
+
+        assert_eq!(
+            error.to_string(),
+            "internal error, a bug of this build: EntryTarget: an unknown variant"
+        );
+    }
+
+    /// A wildcard arm's error names the enum it did not know.
+    #[test]
+    fn unknown_variant_names_the_enum() {
+        let error = RepoError::unknown_variant("CasResult");
+
+        assert!(matches!(
+            &error,
+            RepoError::Internal(what) if what == "CasResult: a variant this build does not know"
+        ));
+    }
+}

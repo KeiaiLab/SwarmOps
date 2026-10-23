@@ -14,7 +14,9 @@ use crate::{Ctx, after};
 /// registry does not hold, or a workspace whose state is gone.
 pub fn info(ctx: &Ctx<'_>, req: WsInfoReq) -> Result<WsInfo, OpError> {
     // 1. The entry's directory, and the state there.
-    let WsInfoReq { workspace: name } = req;
+    let WsInfoReq {
+        workspace: name, ..
+    } = req;
     let registry = Registry::open(&ctx.store_root, Arc::clone(&ctx.fs));
     let at = Locate::Name(name.clone());
     let found = workspace::find(&at, Some(&registry), ctx.fs.as_ref())?;

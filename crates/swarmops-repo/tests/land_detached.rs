@@ -29,42 +29,33 @@ const LANDER: &str = "test/lander";
 fn new_store() -> (TempDir, Utf8PathBuf, LocalRepo) {
     let dir = tempfile::tempdir().unwrap();
     let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
-    let repo = LocalRepo::create_with_fs(&root, "test", checked(RealFs)).unwrap();
+    let repo = LocalRepo::create_with_fs(&root, "test", checked(RealFs::new())).unwrap();
     (dir, root, repo)
 }
 
 /// The lander's signature: fixed, so that the same land makes the same changeset.
 fn lander() -> Signature {
-    Signature {
-        name: LANDER.as_bytes().to_vec(),
-        email: b"lander@test.swarmops.local".to_vec(),
-        secs: 1_760_000_100,
-        offset_secs: 0,
-        negative_zero: false,
-    }
+    Signature::new(
+        LANDER.as_bytes().to_vec(),
+        b"lander@test.swarmops.local".to_vec(),
+        1_760_000_100,
+        0,
+        false,
+    )
+    .unwrap()
 }
 
 /// A detached land of the chain `(base, head]` onto `onto` by [`lander`]: no key, no chain given,
 /// the head's message, no metadata of the lander's.
 fn detached(base: ChangesetId, head: ChangesetId, onto: ChangesetId) -> DetachedLand {
-    DetachedLand {
-        base,
-        head,
-        onto,
-        lander: lander(),
-        key: None,
-        squashed_from: None,
-        message: None,
-        extra_metadata: Vec::new(),
-    }
+    DetachedLand::new(base, head, onto, lander())
 }
 
 /// A request for `changes` on `parents`, recording `agent` in its metadata.
 fn by(agent: &str, parents: &[ChangesetId], changes: Vec<Change>) -> CommitRequest {
-    CommitRequest {
-        metadata: vec![("agent".to_owned(), agent.as_bytes().to_vec())],
-        ..request(parents, changes, "a test commit")
-    }
+    let mut req = request(parents, changes, "a test commit");
+    req.metadata = vec![("agent".to_owned(), agent.as_bytes().to_vec())];
+    req
 }
 
 /// Commits `changes` on `parents` by `agent`; the new changeset's id.
@@ -86,13 +77,8 @@ fn advance(
     parents: &[ChangesetId],
     changes: Vec<Change>,
 ) -> ChangesetId {
-    let req = CommitRequest {
-        advance: Some(Advance {
-            name: "main".to_owned(),
-            actor: agent.to_owned(),
-        }),
-        ..by(agent, parents, changes)
-    };
+    let mut req = by(agent, parents, changes);
+    req.advance = Some(Advance::new("main", agent));
     repo.commit(req).unwrap().id
 }
 
@@ -103,7 +89,7 @@ fn main_head(repo: &LocalRepo) -> ChangesetId {
 
 /// How many frames the journal of the store at `root` lists.
 fn frame_count(root: &Utf8Path) -> u64 {
-    Journal::open(&Layout::new(root), Arc::new(RealFs))
+    Journal::open(&Layout::new(root), Arc::new(RealFs::new()))
         .unwrap()
         .frame_count()
         .unwrap()
@@ -251,19 +237,15 @@ fn detached_land_copies_key_and_squashed_from() {
     let c1 = commit_by(&repo, ACTOR, &[t0], vec![put("b", b"b\n")]);
     let c2 = commit_by(&repo, ACTOR, &[c1], vec![put("c", b"c\n")]);
     let other = commit_by(&repo, OTHER, &[t0], vec![put("o", b"o\n")]);
-    let keyed = LandRequest {
-        key: Some("key-1".to_owned()),
-        ..LandRequest::new(other, "main", lander())
-    };
+    let mut keyed = LandRequest::new(other, "main", lander());
+    keyed.key = Some("key-1".to_owned());
     let onto = repo.land(keyed).unwrap().landed;
 
     // 2. Given a key and a chain: both copied, no walk.
     let given = [other, c1, c2];
-    let copy = DetachedLand {
-        key: Some("key-1".to_owned()),
-        squashed_from: Some(given.to_vec()),
-        ..detached(t0, c2, onto)
-    };
+    let mut copy = detached(t0, c2, onto);
+    copy.key = Some("key-1".to_owned());
+    copy.squashed_from = Some(given.to_vec());
     let id = landed(repo.land_detached(copy));
     let metadata = metadata_of(&repo, id);
     let value = |key: &str| {
@@ -301,11 +283,9 @@ fn detached_land_records_extra_metadata() {
 
     // 2. The land, with the sync's key.
     let synced = head.to_string();
-    let land = DetachedLand {
-        message: Some(b"moved\n".to_vec()),
-        extra_metadata: vec![("synced_from".to_owned(), synced.clone().into_bytes())],
-        ..detached(t0, head, x)
-    };
+    let mut land = detached(t0, head, x);
+    land.message = Some(b"moved\n".to_vec());
+    land.extra_metadata = vec![("synced_from".to_owned(), synced.clone().into_bytes())];
     let id = landed(repo.land_detached(land));
 
     // 3. Every key, sorted.
@@ -342,10 +322,8 @@ fn land_after_the_refactor_is_byte_identical() {
 
     // 2. Detached first, onto main's head; then the land itself, onto the same head.
     let id = landed(repo.land_detached(detached(t0, c2, x)));
-    let land = LandRequest {
-        base: Some(t0),
-        ..LandRequest::new(c2, "main", lander())
-    };
+    let mut land = LandRequest::new(c2, "main", lander());
+    land.base = Some(t0);
     let out = repo.land(land).unwrap();
 
     // 3. One changeset: the same id, parent and tree.

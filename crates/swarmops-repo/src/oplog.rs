@@ -39,6 +39,7 @@ use crate::repo::{self, Repo};
 
 /// One operation: a write transaction, as the journal holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Operation {
     /// Its number: its frame's seq, from 0 in commit order.
     pub seq: u64,
@@ -48,6 +49,7 @@ pub struct Operation {
 
 /// One record of an [`Operation`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OpRecord {
     /// A changeset joined the store.
     Changeset {
@@ -75,6 +77,7 @@ pub enum OpRecord {
 
 /// What [`Repo::undo`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct UndoOutcome {
     /// The operation undone.
     pub undone: u64,
@@ -114,7 +117,11 @@ impl<O: ObjectStore> Repo<O> {
             .frames_before(before, limit.saturating_add(1))?;
         let older = frames.len() > limit;
         frames.truncate(limit);
-        Ok((frames.into_iter().map(operation).collect(), older))
+        let ops = frames
+            .into_iter()
+            .map(operation)
+            .collect::<Result<_, _>>()?;
+        Ok((ops, older))
     }
 
     /// Undoes operation `op` for `actor`: moves every ref it moved back to what the ref named
@@ -160,6 +167,7 @@ impl<O: ObjectStore> Repo<O> {
                         recovered: Box::new(recovered),
                     });
                 }
+                _ => return Err(RepoError::unknown_variant("CasResult")),
             }
         }
         let made: Vec<(String, Option<ChangesetId>, Option<ChangesetId>, i64)> = write
@@ -168,10 +176,11 @@ impl<O: ObjectStore> Repo<O> {
             .filter_map(|record| match record {
                 Record::RefMove {
                     name, old, new, ts, ..
-                } => Some((name.clone(), *old, *new, *ts)),
+                } => Some(Ok((name.clone(), *old, *new, *ts))),
                 Record::Changeset { .. } | Record::Compacted { .. } => None,
+                _ => Some(Err(RepoError::unknown_variant("Record"))),
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
         if made.is_empty() {
             // Every ref was back already: dropping the write appends nothing.
             return Ok(UndoOutcome {
@@ -205,28 +214,30 @@ impl<O: ObjectStore> Repo<O> {
 }
 
 /// `frame` as an operation.
-fn operation(frame: Frame) -> Operation {
+fn operation(frame: Frame) -> Result<Operation, RepoError> {
     let records = frame.records.into_iter().map(|record| match record {
-        Record::Changeset { id, parents, .. } => OpRecord::Changeset { id, parents },
+        Record::Changeset { id, parents, .. } => Ok(OpRecord::Changeset { id, parents }),
         Record::RefMove {
             name,
             old,
             new,
             actor,
             ts,
-        } => OpRecord::RefMove {
+        } => Ok(OpRecord::RefMove {
             name,
             old,
             new,
             actor,
             ts,
-        },
-        Record::Compacted { .. } => OpRecord::Compacted,
+        }),
+        Record::Compacted { .. } => Ok(OpRecord::Compacted),
+        _ => Err(RepoError::unknown_variant("Record")),
     });
-    Operation {
+    let records = records.collect::<Result<_, RepoError>>()?;
+    Ok(Operation {
         seq: frame.seq,
-        records: records.collect(),
-    }
+        records,
+    })
 }
 
 /// The net move of each ref `frame` moved, in the order of its first move: the ref, the first

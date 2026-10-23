@@ -204,7 +204,8 @@ fn journal_len(root: &Utf8Path) -> u64 {
 
 /// The journal's frames, as a reader reads them.
 fn frames(root: &Utf8Path) -> Vec<Frame> {
-    let journal = Journal::open(&Layout::new(root), Arc::new(RealFs)).expect("open the journal");
+    let journal =
+        Journal::open(&Layout::new(root), Arc::new(RealFs::new())).expect("open the journal");
     journal.tail_frames_from(0).expect("read the journal")
 }
 
@@ -238,7 +239,7 @@ fn objects(root: &Utf8Path) -> usize {
 /// every git entry of the external id index.
 fn state(root: &Utf8Path) -> (u64, ChangesetId, Vec<(Vec<u8>, ExternalEntry)>) {
     let repo = LocalRepo::open(root).unwrap();
-    let ids = ExternalIds::new(Layout::new(root), Arc::new(RealFs));
+    let ids = ExternalIds::new(Layout::new(root), Arc::new(RealFs::new()));
     let entries = (ids.list(SYSTEM_GIT).unwrap().into_iter())
         .map(|(key, entry)| (key, entry.expect("a whole entry")))
         .collect();
@@ -468,12 +469,9 @@ fn a_damaged_or_dangling_external_id_is_a_miss_and_a_warning() {
             fs::write(&entry, b"no entry").unwrap();
         } else {
             fs::remove_file(&entry).unwrap();
-            let nowhere = ChangesetId(hash_object(ObjectKind::Changeset, b"nowhere"));
-            let dangling = ExternalEntry {
-                changeset: nowhere,
-                faithful: true,
-            };
-            let ids = ExternalIds::new(Layout::new(&root), Arc::new(RealFs));
+            let nowhere = ChangesetId::new(hash_object(ObjectKind::Changeset, b"nowhere"));
+            let dangling = ExternalEntry::new(nowhere, true);
+            let ids = ExternalIds::new(Layout::new(&root), Arc::new(RealFs::new()));
             ids.put_batch(SYSTEM_GIT, &[(fork.0.to_vec(), dangling)])
                 .unwrap();
         }
@@ -558,13 +556,14 @@ fn git_commit(dir: &std::path::Path, tree: GitOid, parent: GitOid, message: &str
     use swarmops_git::{BranchUpdate, GitSink, GixSink, commit_bytes};
 
     let mut sink = GixSink::open(dir).unwrap_or_else(|error| panic!("open: {error}"));
-    let author = Signature {
-        name: b"A Git User".to_vec(),
-        email: b"git@example.com".to_vec(),
-        secs: 1_760_000_100,
-        offset_secs: 3_600,
-        negative_zero: false,
-    };
+    let author = Signature::new(
+        b"A Git User".to_vec(),
+        b"git@example.com".to_vec(),
+        1_760_000_100,
+        3_600,
+        false,
+    )
+    .unwrap();
     let bytes = commit_bytes(tree, &[parent], &author, &author, &[], message.as_bytes());
     let commit = sink.write_object(RawKind::Commit, &bytes).unwrap();
     sink.sync(&[commit]).unwrap();
@@ -584,11 +583,11 @@ fn commit_in_git(dir: &std::path::Path, parent: GitOid, file: &str) -> GitOid {
     let (_, bytes) = sink.read(RawCommit::parse(&bytes).unwrap().tree).unwrap();
     let mut tree = RawTree::parse(&bytes).unwrap();
     let blob = sink.write_object(RawKind::Blob, file.as_bytes()).unwrap();
-    tree.entries.push(RawTreeEntry {
-        mode: b"100644".to_vec(),
-        name: file.as_bytes().to_vec(),
-        oid: blob,
-    });
+    tree.entries.push(RawTreeEntry::new(
+        b"100644".to_vec(),
+        file.as_bytes().to_vec(),
+        blob,
+    ));
     // git's order: the names' bytes, a directory's as if it ended in `/`.
     tree.entries.sort_by_key(|entry| {
         let mut key = entry.name.clone();
@@ -949,7 +948,7 @@ fn the_import_leaves_no_frame_past_the_checkpoint() {
     let fixture = git::fixture("linear");
     let (_dir, root, repo) = new_repo();
     import(&repo, &open(&fixture), &request("HEAD")).unwrap();
-    let journal = Journal::open(&Layout::new(&root), Arc::new(RealFs)).unwrap();
+    let journal = Journal::open(&Layout::new(&root), Arc::new(RealFs::new())).unwrap();
     assert!(
         frames(&root).len() >= 2,
         "a frame of changesets and the target's move"
@@ -1240,8 +1239,8 @@ fn a_commit_or_a_tree_past_the_object_limit_stops_the_import_before_it_is_read()
     let mut source = MemSource::default();
     let file = source.blob(b"file\n");
     let tree = source.tree(&[("100644", b"file.txt", file)]);
-    let huge_commit = GitOid([0x5c; 20]);
-    let huge_tree = GitOid([0x5d; 20]);
+    let huge_commit = GitOid::new([0x5c; 20]);
+    let huge_tree = GitOid::new([0x5d; 20]);
     source.claim(huge_commit, RawKind::Commit, MAX_OBJECT_LEN + 1);
     source.claim(huge_tree, RawKind::Tree, MAX_OBJECT_LEN + 1);
     let first = source.commit(tree, &[], "first\n");
@@ -1445,12 +1444,7 @@ mod crafted_memos {
         subject: ObjectId,
         value: &[u8],
     ) -> Utf8PathBuf {
-        let slot = DerivedSlot {
-            name,
-            version: 1,
-            subject,
-            key: &[],
-        };
+        let slot = DerivedSlot::new(name, 1, subject, &[]);
         let file = Layout::new(root).derived_path(&slot);
         match fs::remove_file(&file) {
             Ok(()) => {}
@@ -1779,15 +1773,15 @@ mod crafted_memos {
         let mut batch = repo.raw_batch();
         let mut chain: Vec<ChangesetId> = Vec::with_capacity(DEPTH);
         for i in 0..DEPTH {
-            let raw = RawChangeset {
-                parents: chain.last().copied().into_iter().collect(),
-                root: tree.id(),
-                author: signature(),
-                committer: signature(),
-                message: format!("{i}\n").into_bytes(),
-                extra_headers: Vec::new(),
-                metadata: Vec::new(),
-            };
+            let raw = RawChangeset::new(
+                chain.last().copied().into_iter().collect(),
+                tree.id(),
+                signature(),
+                signature(),
+                format!("{i}\n").into_bytes(),
+                Vec::new(),
+                Vec::new(),
+            );
             chain.push(batch.push(raw).unwrap());
         }
         batch.commit().unwrap();
@@ -1869,10 +1863,7 @@ mod crafted_entries {
     /// Records in `repo`'s external id index, with the store's own writer, an entry for commit
     /// `commit` that names `changeset`: whole, its checksum right.
     fn record(repo: &LocalRepo, commit: GitOid, changeset: ChangesetId) {
-        let entry = ExternalEntry {
-            changeset,
-            faithful: true,
-        };
+        let entry = ExternalEntry::new(changeset, true);
         let put = repo.record_external_ids(SYSTEM_GIT, &[(commit.0.to_vec(), entry)]);
         assert_eq!(put.unwrap().written, 1, "{commit}: an entry is in the way");
     }
@@ -1941,10 +1932,7 @@ mod crafted_entries {
             };
             let found = (*target_head, *base, *git_head);
             assert_eq!(found, (head, Some(stands_for), c), "{kind}");
-            let passed_over = ExternalIdMismatch {
-                commit: x,
-                changeset: head,
-            };
+            let passed_over = ExternalIdMismatch::new(x, head);
             assert_eq!(external_id.as_deref(), Some(&passed_over), "{kind}");
             let message = error.to_string();
             assert!(message.contains(&x.to_string()), "{kind}: {message}");
@@ -2085,16 +2073,13 @@ mod crafted_entries {
         assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
 
         let (_, x, c) = x_and_c();
-        let nowhere = ChangesetId(hash_object(ObjectKind::Changeset, b"nowhere"));
-        let y = GitOid([0x5a; 20]);
+        let nowhere = ChangesetId::new(hash_object(ObjectKind::Changeset, b"nowhere"));
+        let y = GitOid::new([0x5a; 20]);
         record(&repo, x, native);
         record(&repo, c, imported.head);
         record(&repo, y, nowhere);
         let found = verify_external_ids(&repo).unwrap();
-        let mismatch = ExternalIdMismatch {
-            commit: x,
-            changeset: native,
-        };
+        let mismatch = ExternalIdMismatch::new(x, native);
         assert_eq!(found, [mismatch]);
         let git = || SYSTEM_GIT.to_owned();
         let mut theirs = vec![
@@ -2140,15 +2125,15 @@ mod crafted_entries {
         let mut batch = repo.raw_batch();
         let mut chain: Vec<ChangesetId> = Vec::with_capacity(DEPTH);
         for i in 0..DEPTH {
-            let raw = RawChangeset {
-                parents: chain.last().copied().into_iter().collect(),
-                root: tree.id(),
-                author: signature(),
-                committer: signature(),
-                message: format!("{i}\n").into_bytes(),
-                extra_headers: Vec::new(),
-                metadata: Vec::new(),
-            };
+            let raw = RawChangeset::new(
+                chain.last().copied().into_iter().collect(),
+                tree.id(),
+                signature(),
+                signature(),
+                format!("{i}\n").into_bytes(),
+                Vec::new(),
+                Vec::new(),
+            );
             chain.push(batch.push(raw).unwrap());
         }
         batch.commit().unwrap();
