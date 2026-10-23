@@ -16,9 +16,10 @@
 use std::fmt::Write as _;
 
 use serde_json::{Map, Value};
-use swarmops_api::schema_for_all;
 
-use super::{BIN, GENERATED, Page, cell, first_sentence, paragraphs, slug, trim_end, yes_no};
+use super::pages::{
+    BIN, GENERATED, Page, cell, first_sentence, paragraphs, slug, trim_end, yes_no,
+};
 
 /// The page's name in `docs/reference/`.
 pub(super) const FILE: &str = "schema-types.md";
@@ -78,7 +79,7 @@ pub(super) fn page() -> Page {
 
 /// The page's text.
 fn render() -> String {
-    let all = schema_for_all();
+    let all = swarmops_api::schema_for_all();
     let types = all.as_object().cloned().unwrap_or_default();
     let mut out = String::new();
 
@@ -408,7 +409,7 @@ fn closing(text: &str, open: usize) -> usize {
 #[test]
 fn every_type_is_on_the_page() {
     let text = render();
-    let all = schema_for_all();
+    let all = swarmops_api::schema_for_all();
     let types = all.as_object().unwrap();
     for name in types.keys() {
         assert!(
@@ -428,7 +429,7 @@ fn every_type_is_on_the_page() {
 #[test]
 fn type_links_resolve() {
     let text = render();
-    let all = schema_for_all();
+    let all = swarmops_api::schema_for_all();
     let anchors: Vec<String> = all
         .as_object()
         .unwrap()

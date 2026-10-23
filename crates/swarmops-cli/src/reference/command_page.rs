@@ -35,14 +35,14 @@ use clap::Arg;
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::value::RawValue;
-use swarmops_api::{ErrorCode, schema_for_all};
+use swarmops_api::ErrorCode;
 
-use super::{
+use super::pages::{
     BIN, EXAMPLES, EXITS, GENERATED, Leaf, Page, all_leaves, arg_help, cell, code_descriptions,
     default_cell, first_sentence, is_builtin, option_form, paragraphs, reference_dir, sentence,
     slug, trim_end, value_names, yes_no,
 };
-use crate::cli::{op_name, usage};
+use crate::cli;
 
 /// The command pages' folder in `docs/reference/`.
 pub(super) const DIR: &str = "commands";
@@ -805,7 +805,7 @@ impl<'a> Entry<'a> {
     /// The command of `leaf`, with what the golden steps show of it.
     fn new(leaf: &'a Leaf, golden: &'a Golden) -> Self {
         let name = leaf.path.join(" ");
-        let op = op_name(&leaf.path).unwrap_or_default();
+        let op = cli::op_name(&leaf.path).unwrap_or_default();
         let codes = golden.codes_of(op);
 
         // Success, then the exits of the errors its steps show.
@@ -814,7 +814,7 @@ impl<'a> Entry<'a> {
         exits.sort_unstable();
         exits.dedup();
 
-        let line = usage(Some(BIN), &leaf.path);
+        let line = cli::usage(Some(BIN), &leaf.path);
         let tool = golden
             .tools
             .get_key_value(op)
@@ -1149,7 +1149,7 @@ fn returns(out: &mut String, command: &Entry<'_>) {
 
 /// `result`'s type, and a table of its fields from the type's JSON Schema.
 fn result_fields(out: &mut String, name: &str) {
-    let all = schema_for_all();
+    let all = swarmops_api::schema_for_all();
     let schema = &all[name];
     let _ = writeln!(
         out,
@@ -1296,7 +1296,7 @@ fn source(path: &str) -> String {
 
 /// Where each result type is returned: the file, and the function whose signature names it.
 const RETURN_SITES: [(&str, &str, &str); 45] = [
-    ("init", "src/commands.rs", "fn init("),
+    ("init", "src/commands/run.rs", "fn init("),
     ("info", "../swarmops-api/src/ops.rs", "fn repo_info("),
     (
         "whoami",
@@ -1368,7 +1368,7 @@ const RETURN_SITES: [(&str, &str, &str); 45] = [
     ("verify", "../swarmops-api/src/ops.rs", "fn verify("),
     ("git import", "../swarmops-ops/src/git.rs", "fn git_import("),
     ("git export", "../swarmops-ops/src/git.rs", "fn git_export("),
-    ("clone", "src/commands.rs", "fn clone("),
+    ("clone", "src/commands/run.rs", "fn clone("),
     (
         "remote add",
         "../swarmops-ops/src/remote.rs",
@@ -1469,7 +1469,7 @@ const WORKSPACE_ACTS_SOURCE: (&str, &str) = (
 );
 
 /// The command that makes a store, so changes it with no identity, and where its code says so.
-const STORE_MAKER: (&str, &str, &str) = ("init", "src/commands.rs", "`init`: a store in");
+const STORE_MAKER: (&str, &str, &str) = ("init", "src/commands/run.rs", "`init`: a store in");
 
 /// The command that serves the MCP tools: it mutates when one of them does.
 const SERVER: &str = "mcp";
@@ -1487,7 +1487,7 @@ fn meta_matches_the_code() {
 
     // 2. A command with a tool mutates exactly when the tool does not only read.
     for meta in &META {
-        let op = op_name(&meta.path.split(' ').collect::<Vec<_>>()).unwrap();
+        let op = cli::op_name(&meta.path.split(' ').collect::<Vec<_>>()).unwrap();
         if let Some(reads) = golden.tools.get(op) {
             assert_eq!(meta.mutates, !reads, "{}: mutates", meta.path);
         }
@@ -1495,7 +1495,7 @@ fn meta_matches_the_code() {
 
     // 3. The identity column: one mutator call per command that needs one, and every
     //    command a step shows refused for want of one.
-    let calls = source("src/commands.rs").matches(IDENTITY_CALL).count()
+    let calls = source("src/commands/run.rs").matches(IDENTITY_CALL).count()
         + source("src/commands/ws.rs").matches(IDENTITY_CALL).count();
     let needs = META.iter().filter(|meta| meta.identity).count();
     assert_eq!(calls, needs, "{IDENTITY_CALL} calls against identity rows");
@@ -1506,7 +1506,7 @@ fn meta_matches_the_code() {
         let meta = META
             .iter()
             .find(|meta| {
-                op_name(&meta.path.split(' ').collect::<Vec<_>>()) == Some(step.op.as_str())
+                cli::op_name(&meta.path.split(' ').collect::<Vec<_>>()) == Some(step.op.as_str())
             })
             .unwrap();
         assert!(meta.identity, "{}: refused without an identity", meta.path);
@@ -1561,7 +1561,7 @@ fn meta_matches_the_code() {
 /// Each result type is the one its operation's signature returns, and in the schema.
 #[test]
 fn result_types_match_the_code() {
-    let all = schema_for_all();
+    let all = swarmops_api::schema_for_all();
     for meta in &META {
         let Returns::Type(name) = meta.returns else {
             continue;

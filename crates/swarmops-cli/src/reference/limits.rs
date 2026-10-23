@@ -19,11 +19,11 @@ use std::fmt::Write as _;
 use std::fs;
 
 use serde_json::Value;
-use swarmops_api::{ErrorCode, schema_for_all};
-use swarmops_core::bytes::to_u64;
+use swarmops_api::ErrorCode;
+use swarmops_core::bytes;
 
 use super::command_page::{self, file_name};
-use super::{GENERATED, Page, all_leaves, cell, paragraphs, reference_dir, slug, trim_end};
+use super::pages::{GENERATED, Page, all_leaves, cell, paragraphs, reference_dir, slug, trim_end};
 
 /// The page's name in `docs/reference/`.
 pub(super) const FILE: &str = "limits.md";
@@ -354,7 +354,7 @@ static BOUNDS: [Limit; 5] = [
             "swarmops_git::import::MAX_LOSSY_LISTED",
             "crates/swarmops-git/src/import.rs",
             "pub const MAX_LOSSY_LISTED: usize = 100;",
-            || to_u64(swarmops_git::import::MAX_LOSSY_LISTED),
+            || bytes::to_u64(swarmops_git::import::MAX_LOSSY_LISTED),
         ),
         unit: Unit::Count("commits"),
         commands: &["git import"],
@@ -368,7 +368,7 @@ static BOUNDS: [Limit; 5] = [
             "swarmops_merge::line_diff::MAX_DIFF_LINES",
             "crates/swarmops-merge/src/line_diff.rs",
             "pub const MAX_DIFF_LINES: usize = 48 << 10;",
-            || to_u64(swarmops_repo::merge::line_diff::MAX_DIFF_LINES),
+            || bytes::to_u64(swarmops_repo::merge::line_diff::MAX_DIFF_LINES),
         ),
         unit: Unit::Count("lines"),
         commands: &["diff", "land"],
@@ -383,7 +383,7 @@ static BOUNDS: [Limit; 5] = [
             "swarmops_merge::line_diff::MAX_DIFF_BYTES",
             "crates/swarmops-merge/src/line_diff.rs",
             "pub const MAX_DIFF_BYTES: usize = 8 << 20;",
-            || to_u64(swarmops_repo::merge::line_diff::MAX_DIFF_BYTES),
+            || bytes::to_u64(swarmops_repo::merge::line_diff::MAX_DIFF_BYTES),
         ),
         unit: Unit::Bytes,
         commands: &["diff", "land"],
@@ -446,7 +446,7 @@ static DEFAULTS: [DefaultRow; 13] = [
             "swarmops_api::DEFAULT_READ_TREE_LIMIT",
             API,
             "pub const DEFAULT_READ_TREE_LIMIT: usize = 250;",
-            || to_u64(swarmops_api::DEFAULT_READ_TREE_LIMIT),
+            || bytes::to_u64(swarmops_api::DEFAULT_READ_TREE_LIMIT),
         ),
         Unit::Count("entries"),
         "ls",
@@ -459,7 +459,7 @@ static DEFAULTS: [DefaultRow; 13] = [
             "swarmops_api::DEFAULT_MAX_CHANGES",
             API,
             "pub const DEFAULT_MAX_CHANGES: usize = 400;",
-            || to_u64(swarmops_api::DEFAULT_MAX_CHANGES),
+            || bytes::to_u64(swarmops_api::DEFAULT_MAX_CHANGES),
         ),
         Unit::Count("changes"),
         "show",
@@ -472,7 +472,7 @@ static DEFAULTS: [DefaultRow; 13] = [
             "swarmops_api::DEFAULT_LOG_LIMIT",
             API,
             "pub const DEFAULT_LOG_LIMIT: usize = 50;",
-            || to_u64(swarmops_api::DEFAULT_LOG_LIMIT),
+            || bytes::to_u64(swarmops_api::DEFAULT_LOG_LIMIT),
         ),
         Unit::Count("changesets"),
         "log",
@@ -485,7 +485,7 @@ static DEFAULTS: [DefaultRow; 13] = [
             "swarmops_api::DEFAULT_PATH_HISTORY_LIMIT",
             API,
             "pub const DEFAULT_PATH_HISTORY_LIMIT: usize = 50;",
-            || to_u64(swarmops_api::DEFAULT_PATH_HISTORY_LIMIT),
+            || bytes::to_u64(swarmops_api::DEFAULT_PATH_HISTORY_LIMIT),
         ),
         Unit::Count("changesets"),
         "history",
@@ -498,7 +498,7 @@ static DEFAULTS: [DefaultRow; 13] = [
             "swarmops_api::DEFAULT_DIFF_LIMIT",
             API,
             "pub const DEFAULT_DIFF_LIMIT: usize = 500;",
-            || to_u64(swarmops_api::DEFAULT_DIFF_LIMIT),
+            || bytes::to_u64(swarmops_api::DEFAULT_DIFF_LIMIT),
         ),
         Unit::Count("files"),
         "diff",
@@ -563,7 +563,7 @@ static DEFAULTS: [DefaultRow; 13] = [
             "swarmops_api::DEFAULT_OP_LOG_LIMIT",
             API,
             "pub const DEFAULT_OP_LOG_LIMIT: usize = 50;",
-            || to_u64(swarmops_api::DEFAULT_OP_LOG_LIMIT),
+            || bytes::to_u64(swarmops_api::DEFAULT_OP_LOG_LIMIT),
         ),
         Unit::Count("operations"),
         "op log",
@@ -576,7 +576,7 @@ static DEFAULTS: [DefaultRow; 13] = [
             "swarmops_api::DEFAULT_MAX_CHANGESETS",
             API,
             "pub const DEFAULT_MAX_CHANGESETS: usize = 20;",
-            || to_u64(swarmops_api::DEFAULT_MAX_CHANGESETS),
+            || bytes::to_u64(swarmops_api::DEFAULT_MAX_CHANGESETS),
         ),
         Unit::Count("changesets"),
         "op log",
@@ -589,7 +589,7 @@ static DEFAULTS: [DefaultRow; 13] = [
             "swarmops_api::DEFAULT_DERIVE_LIMIT",
             API,
             "pub const DEFAULT_DERIVE_LIMIT: usize = 1000;",
-            || to_u64(swarmops_api::DEFAULT_DERIVE_LIMIT),
+            || bytes::to_u64(swarmops_api::DEFAULT_DERIVE_LIMIT),
         ),
         Unit::Count("frames"),
         "derive",
@@ -629,7 +629,7 @@ static INTERNAL: [Limit; 14] = [
             "swarmops_git::import::DEFAULT_FRAME_CHANGESETS",
             "crates/swarmops-git/src/import.rs",
             "pub const DEFAULT_FRAME_CHANGESETS: usize = 8_192;",
-            || to_u64(swarmops_git::import::DEFAULT_FRAME_CHANGESETS),
+            || bytes::to_u64(swarmops_git::import::DEFAULT_FRAME_CHANGESETS),
         ),
         Unit::Count("changesets"),
         "How many changesets a journal frame of `git import` holds.",
@@ -640,7 +640,7 @@ static INTERNAL: [Limit; 14] = [
             "swarmops_git::import::DEFAULT_OBJECT_BATCH_BYTES",
             "crates/swarmops-git/src/import.rs",
             "pub const DEFAULT_OBJECT_BATCH_BYTES: usize = 64 << 20;",
-            || to_u64(swarmops_git::import::DEFAULT_OBJECT_BATCH_BYTES),
+            || bytes::to_u64(swarmops_git::import::DEFAULT_OBJECT_BATCH_BYTES),
         ),
         Unit::Bytes,
         "How many bytes of new trees and blobs `git import` gathers before it stores \
@@ -664,7 +664,7 @@ static INTERNAL: [Limit; 14] = [
             "swarmops_repo::MAX_RAW_BATCH",
             "crates/swarmops-repo/src/raw.rs",
             "pub const MAX_RAW_BATCH: usize = 65_535;",
-            || to_u64(swarmops_repo::MAX_RAW_BATCH),
+            || bytes::to_u64(swarmops_repo::MAX_RAW_BATCH),
         ),
         Unit::Count("changesets"),
         "The most changesets one journal frame of `git import` holds, whatever its frame \
@@ -927,7 +927,7 @@ fn schema_bounds(out: &mut String) {
 
 /// The bounds the schema states, by type and field in name order: `(type, field, bound)`.
 fn stated_bounds() -> Vec<(String, String, String)> {
-    let all = schema_for_all();
+    let all = swarmops_api::schema_for_all();
     let mut rows = Vec::new();
     let Some(types) = all.as_object() else {
         return rows;
@@ -1181,7 +1181,7 @@ fn defaults_and_commands_match() {
     }
 
     // 2. A default is the flag's and the schema's.
-    let all = schema_for_all();
+    let all = swarmops_api::schema_for_all();
     for row in &DEFAULTS {
         let field = &all[row.request]["properties"][row.field];
         assert_eq!(

@@ -39,9 +39,9 @@ use super::{
     CAPABILITIES_KEY, Effect, HANDSHAKE, INSTRUCTIONS, INTERNAL_ERROR, INVALID_PARAMS,
     INVALID_REQUEST, LATEST, MAX_REQUEST_BYTES, METHOD_NOT_FOUND, PARSE_ERROR, PREVIOUS,
     RESULT_CHARS_KEY, SUPPORTED, Spec, TOOLS, TTL_MS, Tool, UNSUPPORTED_PROTOCOL_VERSION,
-    VERSION_KEY, schema_for_all, tool_input_schema,
+    VERSION_KEY, tool_input_schema,
 };
-use crate::cli::{Cli, op_name};
+use crate::cli::{self, Cli};
 
 /// The variable that makes `regen_reference_mcp_tools` write the pages.
 const REGEN_VAR: &str = "SWARMOPS_REGEN_REFERENCE";
@@ -159,7 +159,7 @@ fn file_name(tool: &str) -> String {
 fn pages() -> Vec<Page> {
     let golden = Golden::read();
     let commands = commands();
-    let all = schema_for_all();
+    let all = swarmops_api::schema_for_all();
 
     // 1. The index.
     let mut pages = vec![Page {
@@ -196,7 +196,7 @@ fn leaves(cmd: &clap::Command, prefix: &[String], out: &mut Vec<Vec<String>>) {
 
         // A command that names an operation, before its own subcommands: `sync`, then
         // `sync status`. A group (`ref`, `op`, …) and clap's own `help` name none.
-        if op_name(&path).is_some() {
+        if cli::op_name(&path).is_some() {
             out.push(path.clone());
         }
         if sub.has_subcommands() {
@@ -209,7 +209,7 @@ fn leaves(cmd: &clap::Command, prefix: &[String], out: &mut Vec<Vec<String>>) {
 fn command_of<'a>(name: &str, commands: &'a [Vec<String>]) -> &'a [String] {
     commands
         .iter()
-        .find(|path| op_name(path) == Some(name))
+        .find(|path| cli::op_name(path) == Some(name))
         .unwrap_or_else(|| panic!("{name}: no command runs it"))
 }
 
@@ -374,7 +374,7 @@ fn tools_table(out: &mut String, commands: &[Vec<String>]) {
     let without: Vec<String> = commands
         .iter()
         .filter(|path| {
-            let op = op_name(path).unwrap_or_default();
+            let op = cli::op_name(path).unwrap_or_default();
             let stored = TOOLS.iter().any(|spec| spec.name == op);
             let in_workspace = WS_TOOLS.iter().any(|spec| spec.name == op);
             !stored && !in_workspace
@@ -1193,7 +1193,7 @@ fn every_tool_has_a_command_an_example_and_its_hints() {
         // 1. One command.
         let runs = commands
             .iter()
-            .filter(|path| op_name(path) == Some(spec.name))
+            .filter(|path| cli::op_name(path) == Some(spec.name))
             .count();
         assert_eq!(runs, 1, "{}: commands that run it", spec.name);
 

@@ -21,13 +21,12 @@ use std::ffi::OsString;
 use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::{Map, Value};
 use swarmops_api::{ErrorCode, Identity, OpError};
-use swarmops_ops::identity::{require_identity, resolve_identity_from};
 use swarmops_ws::RealFs;
 use swarmops_ws::hook::Bootstrap;
-use swarmops_ws::workspace::{Locate, find};
+use swarmops_ws::workspace::{self, Locate};
 
 use crate::cli::Global;
-use crate::output::Format;
+use crate::output::{Format, Layout, Stdout};
 
 /// The environment variable that names the store when `--repo` is not given.
 pub const REPO_ENV: &str = "SWARMOPS_REPO";
@@ -80,7 +79,7 @@ pub fn store_for(
 /// The store the workspace `at` names, if there is one: its `workspace.json`'s `repo`. None for
 /// a place with no workspace; a `workspace.json` that cannot be read is its error.
 pub fn discovered(at: &Locate) -> Result<Option<String>, OpError> {
-    match find(at, None, &RealFs) {
+    match workspace::find(at, None, &RealFs) {
         Ok(found) => Ok(Some(found.file.repo)),
         Err(e) if e.code == ErrorCode::WsNotFound.as_str() => Ok(None),
         Err(e) => Err(e),
@@ -157,18 +156,18 @@ pub fn no_store_named(flag: Option<&str>) -> OpError {
 
 /// The caller's identity, if any: `flag` (`--as`), else the environment.
 pub fn identity(flag: Option<&str>, env: Env<'_>) -> Result<Option<Identity>, OpError> {
-    resolve_identity_from(flag, env)
+    swarmops_ops::identity::resolve_identity_from(flag, env)
 }
 
 /// The identity a mutation acts as: [`identity`], or `E_IDENTITY_REQUIRED` (exit 5).
 pub fn mutator(flag: Option<&str>, env: Env<'_>) -> Result<Identity, OpError> {
-    require_identity(identity(flag, env)?)
+    swarmops_ops::identity::require_identity(identity(flag, env)?)
 }
 
-/// The format `global`'s flags and the environment ask for, given whether stdout is a
-/// terminal. `E_INVALID_ARG` for a `SWARMOPS_FORMAT` that is neither `json` nor `human`; the
-/// error is then printed as [`json_format`] gives.
-pub fn format(global: &Global, env: Env<'_>, terminal: bool) -> Result<Format, OpError> {
+/// The format `global`'s flags and the environment ask for, given what `stdout` is.
+/// `E_INVALID_ARG` for a `SWARMOPS_FORMAT` that is neither `json` nor `human`; the error is
+/// then printed as [`json_format`] gives.
+pub fn format(global: &Global, env: Env<'_>, stdout: Stdout) -> Result<Format, OpError> {
     let human = if global.human || global.json {
         global.human
     } else {
@@ -190,15 +189,18 @@ pub fn format(global: &Global, env: Env<'_>, terminal: bool) -> Result<Format, O
     Ok(if human {
         Format::Human
     } else {
-        json_format(global, terminal)
+        json_format(global, stdout)
     })
 }
 
 /// JSON, pretty as `--pretty` says, else when stdout is a terminal.
-pub fn json_format(global: &Global, terminal: bool) -> Format {
-    Format::Json {
-        pretty: global.pretty.unwrap_or(terminal),
-    }
+pub fn json_format(global: &Global, stdout: Stdout) -> Format {
+    let layout = match global.pretty {
+        Some(true) => Layout::Pretty,
+        Some(false) => Layout::Compact,
+        None => stdout.layout(),
+    };
+    Format::Json { layout }
 }
 
 /// Environment variable `name` as `env` gives it: `None` when it is unset or empty,
@@ -303,44 +305,48 @@ mod tests {
         };
         let none = env_of(&[]);
         let human = env_of(&[(FORMAT_ENV, b"human")]);
-        let json = Format::Json { pretty: false };
+        let json = Format::Json {
+            layout: Layout::Compact,
+        };
         assert_eq!(
-            format(&flags(false, false, None), &none, false).unwrap(),
+            format(&flags(false, false, None), &none, Stdout::Other).unwrap(),
             json
         );
         assert_eq!(
-            format(&flags(false, false, None), &none, true).unwrap(),
-            Format::Json { pretty: true },
+            format(&flags(false, false, None), &none, Stdout::Terminal).unwrap(),
+            Format::Json {
+                layout: Layout::Pretty
+            },
             "pretty on a terminal"
         );
         assert_eq!(
-            format(&flags(false, false, Some(false)), &none, true).unwrap(),
+            format(&flags(false, false, Some(false)), &none, Stdout::Terminal).unwrap(),
             json
         );
         assert_eq!(
-            format(&flags(false, false, None), &human, false).unwrap(),
+            format(&flags(false, false, None), &human, Stdout::Other).unwrap(),
             Format::Human
         );
         assert_eq!(
-            format(&flags(true, false, None), &human, false).unwrap(),
+            format(&flags(true, false, None), &human, Stdout::Other).unwrap(),
             json
         );
         assert_eq!(
-            format(&flags(false, true, None), &none, false).unwrap(),
+            format(&flags(false, true, None), &none, Stdout::Other).unwrap(),
             Format::Human
         );
         let explicit = env_of(&[(FORMAT_ENV, b"json")]);
         assert_eq!(
-            format(&flags(false, false, None), &explicit, false).unwrap(),
+            format(&flags(false, false, None), &explicit, Stdout::Other).unwrap(),
             json
         );
         let yaml = env_of(&[(FORMAT_ENV, b"yaml")]);
-        let bad = format(&flags(false, false, None), &yaml, false).unwrap_err();
+        let bad = format(&flags(false, false, None), &yaml, Stdout::Other).unwrap_err();
         assert_eq!((bad.code.as_str(), bad.exit), ("E_INVALID_ARG", 2));
         assert_eq!(bad.details["source"], FORMAT_ENV);
         // A flag means the variable is not read at all.
         assert_eq!(
-            format(&flags(true, false, None), &yaml, false).unwrap(),
+            format(&flags(true, false, None), &yaml, Stdout::Other).unwrap(),
             json
         );
     }

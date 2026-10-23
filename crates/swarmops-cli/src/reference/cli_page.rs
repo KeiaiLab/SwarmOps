@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 use clap::Arg;
 
 use super::command_page::{DIR, Group, file_name, group_of};
-use super::{
+use super::pages::{
     BIN, GENERATED, Leaf, about_short, all_leaves, cell, grammar, long_helps, options_table,
     sentence, trim_end,
 };

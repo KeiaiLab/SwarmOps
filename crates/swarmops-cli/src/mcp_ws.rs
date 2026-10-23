@@ -27,7 +27,7 @@ use swarmops_api::{
 use swarmops_ws::Ctx as WsCtx;
 
 use super::{Named, Operate, Refuse};
-use crate::commands::ws::{context, create_bootstrapped};
+use crate::commands::ws;
 
 /// The workspace tools, in the order `tools/list` gives them, after the store's.
 pub(super) static WS_TOOLS: [WsSpec; 11] = [
@@ -197,7 +197,7 @@ impl WsTool {
 pub(super) fn operate_ws<O: Operate>(tool: WsTool, how: O) -> O::Done {
     match tool {
         WsTool::Create => how.workspace(|store, root, who, bootstrap, req| {
-            create_bootstrapped(&ws_ctx(store, root, who), req, bootstrap)
+            ws::create_bootstrapped(&ws_ctx(store, root, who), req, bootstrap)
         }),
         WsTool::Status => how.workspace(|store, root, who, _, req| {
             swarmops_ws::status(&ws_ctx(store, root, who), req)
@@ -235,7 +235,7 @@ pub(super) fn operate_ws<O: Operate>(tool: WsTool, how: O) -> O::Done {
 /// The workspace context of one call: the store opened for it, the root it was opened at, the
 /// server's identity if it has one, and the host's two file layers.
 fn ws_ctx<'a>(store: &'a dyn StoreOps, root: &Utf8Path, who: Option<&Identity>) -> WsCtx<'a> {
-    context(store, root, who)
+    ws::context(store, root, who)
 }
 
 // The workspace requests have no rules of this server's beyond their types: the workspace
