@@ -1531,4 +1531,57 @@ mod span {
             assert_eq!(got.unwrap(), None, "{nothing}");
         }
     }
+
+    /// `blob_len` says a blob's length from its object's header: no read of the object file, so
+    /// not the payload; a blob the store lacks is `MissingObject`.
+    #[test]
+    fn blob_len_reads_the_header_only() {
+        let (_dir, root, _) = new_repo();
+        let (repo, calls) = recorded(&root);
+        let text = numbered_lines();
+        commit(&repo, &[], vec![put("text.txt", &text)]);
+        let snap = repo.snapshot().unwrap();
+        let id = blob(&text);
+        calls();
+        assert_eq!(snap.blob_len(id).unwrap(), 1 << 20);
+        assert!(!calls().contains(&read_of(id.0)), "the payload was read");
+        let missing = blob(b"never stored");
+        assert!(matches!(
+            snap.blob_len(missing),
+            Err(RepoError::MissingObject { .. })
+        ));
+    }
+
+    /// A window of a 64 MiB blob: the object file is read once, its payload goes by in pieces,
+    /// and what comes back is the window, whatever the blob's size (no copy of the payload).
+    #[test]
+    fn a_window_of_a_big_blob_keeps_only_the_window() {
+        let (_dir, root, _) = new_repo();
+        let (repo, calls) = recorded(&root);
+        let line = "line 0123456789\n";
+        let big: Vec<u8> = line.bytes().cycle().take(64 << 20).collect();
+        let cs = commit(&repo, &[], vec![put("big.txt", &big)]);
+        let snap = repo.snapshot().unwrap();
+        let id = blob(&big);
+        calls();
+        for (span, want_start) in [
+            (FileSpan::Bytes { start: 1 << 25 }, 1_u64 << 25),
+            (
+                FileSpan::Lines {
+                    first: 1_000_001,
+                    last: 1_000_003,
+                },
+                16_000_000,
+            ),
+        ] {
+            let got = snap
+                .read_file_span(cs, &path("big.txt"), span, 4096)
+                .unwrap();
+            let got = got.expect("a file");
+            assert_eq!((got.size, got.start), (64 << 20, want_start));
+            assert!(got.bytes.len() <= 4096, "kept {} bytes", got.bytes.len());
+        }
+        let reads = calls().into_iter().filter(|c| *c == read_of(id.0)).count();
+        assert_eq!(reads, 2, "one read of the object file per window");
+    }
 }

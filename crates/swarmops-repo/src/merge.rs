@@ -36,6 +36,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 
+use swarmops_core::bytes;
 use swarmops_core::{
     BlobId, ChangesetId, DeltaEntry, DeltaOp, EntryTarget, LeafKind, ObjectKind, RepoPath, Tree,
     TreeId,
@@ -43,7 +44,7 @@ use swarmops_core::{
 use swarmops_merge::conflict::{ConflictHunk, ConflictKind, ContentMerge, ContentMerger};
 use swarmops_merge::tree_diff::{Leaf, PathFilter, PathTriple, TreeRead};
 use swarmops_merge::tree_merge::{FileConflict, PathPlan};
-use swarmops_store::ObjectStore;
+use swarmops_store::{ObjectStat, ObjectStore};
 
 use crate::error::RepoError;
 use crate::repo::{self, Repo};
@@ -89,6 +90,18 @@ impl<O: ObjectStore> Repo<O> {
         theirs: ChangesetId,
         content: ContentMerger<'_>,
     ) -> Result<MergeOutcome, RepoError> {
+        self.merge_changesets(base, ours, theirs, content, Bound::None)
+    }
+
+    /// [`Repo::merge_with`], the merge of the changesets' trees bounded as `bound` says.
+    fn merge_changesets(
+        &self,
+        base: ChangesetId,
+        ours: ChangesetId,
+        theirs: ChangesetId,
+        content: ContentMerger<'_>,
+        bound: Bound,
+    ) -> Result<MergeOutcome, RepoError> {
         let read = self.snapshot()?;
         let root = |cs: ChangesetId| -> Result<TreeId, RepoError> {
             match read.changeset(cs)? {
@@ -97,7 +110,7 @@ impl<O: ObjectStore> Repo<O> {
             }
         };
         let roots = [root(base)?, root(ours)?, root(theirs)?];
-        self.merge_roots(roots, content)
+        self.merge_in(roots, content, bound)
     }
 
     /// [`Repo::merge_with`] of three trees, the merge of what `ours` changed since `base` onto
@@ -114,7 +127,8 @@ impl<O: ObjectStore> Repo<O> {
         content: ContentMerger<'_>,
     ) -> Result<MergeOutcome, RepoError> {
         let reads = Reads::new(&self.objects);
-        merge_trees(&reads, [base, ours, theirs], paths.to_vec(), content)
+        let roots = [base, ours, theirs];
+        merge_trees(&reads, roots, paths.to_vec(), content, Bound::None)
     }
 
     /// [`Repo::merge_with`] with the three-way text merge, [`merge_content`] (diff3): the merge a
@@ -127,7 +141,7 @@ impl<O: ObjectStore> Repo<O> {
         ours: ChangesetId,
         theirs: ChangesetId,
     ) -> Result<MergeOutcome, RepoError> {
-        self.merge_with(base, ours, theirs, &diff3::merge_content)
+        self.merge_changesets(base, ours, theirs, &diff3::merge_content, Bound::Diff3)
     }
 
     /// [`Repo::merge_trees_with`] with the three-way text merge, [`merge_content`] (diff3): a
@@ -142,23 +156,49 @@ impl<O: ObjectStore> Repo<O> {
         theirs: TreeId,
         paths: &[RepoPath],
     ) -> Result<MergeOutcome, RepoError> {
-        self.merge_trees_with(base, ours, theirs, paths, &diff3::merge_content)
+        let reads = Reads::new(&self.objects);
+        let roots = [base, ours, theirs];
+        let content = &diff3::merge_content;
+        merge_trees(&reads, roots, paths.to_vec(), content, Bound::Diff3)
     }
 
-    /// [`Repo::merge_with`] of the three roots `[base, ours, theirs]`, read by the caller already:
-    /// over the paths of the diff from `base` to `ours`, each tree read once, the diff's and the
+    /// [`Repo::merge_with`] of the three roots `[base, ours, theirs]`, read by the caller already,
+    /// for the land: `content` is diff3, so contents past its bound are not read ([`Bound`]).
+    /// Over the paths of the diff from `base` to `ours`, each tree read once, the diff's and the
     /// merge's alike. Nothing is written.
     pub(crate) fn merge_roots(
         &self,
         roots: [TreeId; 3],
         content: ContentMerger<'_>,
     ) -> Result<MergeOutcome, RepoError> {
+        self.merge_in(roots, content, Bound::Diff3)
+    }
+
+    /// The merge of `roots` with `content`, `bound` saying whether blobs past diff3's bound are
+    /// left unread.
+    fn merge_in(
+        &self,
+        roots: [TreeId; 3],
+        content: ContentMerger<'_>,
+        bound: Bound,
+    ) -> Result<MergeOutcome, RepoError> {
         let reads = Reads::new(&self.objects);
         let changed =
             tree_diff::diff_trees(&reads, Some(roots[0]), Some(roots[1]), &PathFilter::all())?;
         let paths = changed.into_iter().map(|change| change.path).collect();
-        merge_trees(&reads, roots, paths, content)
+        merge_trees(&reads, roots, paths, content, bound)
     }
+}
+
+/// Whether a merge may decide a path from its blobs' headers alone.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Bound {
+    /// The content merger is arbitrary: every blob is read and handed to it.
+    None,
+    /// The content merger is diff3: where the three contents differ pairwise, a blob past the
+    /// line diff's bound ([`line_diff::MAX_DIFF_BYTES`]) makes the path `Binary` whatever the
+    /// bytes, so none of the three is read.
+    Diff3,
 }
 
 /// The merge of what the second of `roots` (ours) changed since the first (the base) onto the
@@ -168,6 +208,7 @@ fn merge_trees<O: ObjectStore>(
     roots: [TreeId; 3],
     paths: Vec<RepoPath>,
     content: ContentMerger<'_>,
+    bound: Bound,
 ) -> Result<MergeOutcome, RepoError> {
     let [base, ours, theirs] = roots;
     let filter = PathFilter::under(paths);
@@ -194,7 +235,14 @@ fn merge_trees<O: ObjectStore>(
                 outcome.delta.push(delete);
             }
             PathPlan::MergeContent { kind } => {
-                merge_contents(reads, triple, kind, content, &mut held, &mut outcome)?;
+                merge_contents(
+                    reads,
+                    triple,
+                    kind,
+                    (content, bound),
+                    &mut held,
+                    &mut outcome,
+                )?;
             }
             PathPlan::Conflict(kind) => outcome.conflicts.push(conflict(triple, kind)),
             _ => return Err(RepoError::unknown_variant("PathPlan")),
@@ -273,10 +321,19 @@ fn merge_contents<O: ObjectStore>(
     reads: &Reads<'_, O>,
     triple: &PathTriple,
     kind: LeafKind,
-    content: ContentMerger<'_>,
+    (content, bound): (ContentMerger<'_>, Bound),
     held: &mut Held,
     outcome: &mut MergeOutcome,
 ) -> Result<(), RepoError> {
+    // 1. Diff3 gives `Binary` for contents past its bound that differ pairwise: the headers say.
+    if bound == Bound::Diff3 && past_the_bound(reads, triple) {
+        outcome
+            .conflicts
+            .push(conflict(triple, ConflictKind::Binary));
+        return Ok(());
+    }
+
+    // 2. Otherwise the contents are read and merged.
     let read =
         |leaf: Option<Leaf>| leaf.map_or_else(|| Ok(Vec::new()), |leaf| reads.blob(leaf.blob));
     let (base, ours, theirs) = (read(triple.base)?, read(triple.ours)?, read(triple.theirs)?);
@@ -309,6 +366,23 @@ fn merge_contents<O: ObjectStore>(
         _ => return Err(RepoError::unknown_variant("ContentMerge")),
     }
     Ok(())
+}
+
+/// Whether diff3 would call `triple`'s contents `Binary` for their size alone: no two of the
+/// three are equal (an absent base is empty), and one is longer than the line diff's bound
+/// ([`line_diff::MAX_DIFF_BYTES`]), as its blob's header records. A blob the headers cannot size
+/// (missing, damaged) is left to the read, which names the fault.
+fn past_the_bound<O: ObjectStore>(reads: &Reads<'_, O>, triple: &PathTriple) -> bool {
+    let empty = BlobId::new(swarmops_core::hash_object(ObjectKind::Blob, &[]));
+    let [base, ours, theirs] =
+        [triple.base, triple.ours, triple.theirs].map(|side| side.map_or(empty, |leaf| leaf.blob));
+    if base == ours || base == theirs || ours == theirs {
+        return false;
+    }
+    [base, ours, theirs].into_iter().any(|id| {
+        let len = reads.len(id);
+        len.is_some_and(|len| len > bytes::to_u64(line_diff::MAX_DIFF_BYTES))
+    })
 }
 
 /// How many more conflict hunks a merge holds as they are made ([`MAX_HELD_HUNKS`] at first).
@@ -406,6 +480,19 @@ impl<'o, O: ObjectStore> Reads<'o, O> {
         Self {
             objects,
             trees: RefCell::new(HashMap::new()),
+        }
+    }
+
+    /// The length of blob `id` by its object's header; `None` if it cannot be had (the store
+    /// lacks the object, or holds another kind or a bad header).
+    fn len(&self, id: BlobId) -> Option<u64> {
+        match self.objects.stat(id.0) {
+            Ok(Some(ObjectStat {
+                kind: ObjectKind::Blob,
+                size,
+                ..
+            })) => Some(size),
+            _ => None,
         }
     }
 

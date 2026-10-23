@@ -341,6 +341,13 @@ impl<O: ObjectStore> RepoRead<'_, O> {
         repo::object(&self.repo.objects, id.0, ObjectKind::Blob)
     }
 
+    /// The length of blob `id` in bytes, from its object's header ([`ObjectStore::stat`]): the
+    /// payload is neither read nor verified. [`RepoError::MissingObject`] if the store lacks it,
+    /// or holds an object of another kind under that id.
+    pub fn blob_len(&self, id: BlobId) -> Result<u64, RepoError> {
+        self.blob_size(id)
+    }
+
     /// Blobs `ids`, in the order given, up to `max_bytes` of content: each blob's size comes
     /// from its object's header ([`ObjectStore::stat`]) before its payload is read, so a blob
     /// that does not fit is never read. The first blob found is returned whole even if it alone

@@ -904,6 +904,135 @@ fn a_text_file_past_the_line_diff_bound_is_binary() {
     );
 }
 
+/// Counts the reads of the object files of some blobs.
+struct BlobReads {
+    /// The blobs' object paths below the store.
+    paths: Vec<std::path::PathBuf>,
+    /// The reads of them so far.
+    reads: AtomicUsize,
+}
+
+impl Watch for BlobReads {
+    fn before(&self, call: &Call<'_>) -> io::Result<()> {
+        let hit = self.paths.iter().any(|p| call.path().ends_with(p));
+        if call.method == "read" && hit {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+}
+
+/// A file past the line diff's bound (`MAX_DIFF_BYTES`) on every side that differs is a `binary`
+/// conflict as before, found from the blobs' headers: none of the three blobs is read.
+#[test]
+fn blobs_past_the_diff_bound_are_not_read_by_a_merge() {
+    use swarmops_repo::merge::line_diff::MAX_DIFF_BYTES;
+
+    let (_dir, root, repo) = unsynced_repo();
+    let text = |head: &str| -> Vec<u8> {
+        let line = "0123456789abcde\n";
+        let mut text = format!("{head}\n");
+        text.extend(std::iter::repeat_n(line, MAX_DIFF_BYTES / line.len() + 1));
+        text.into_bytes()
+    };
+    let (b, o, t) = (text("base"), text("ours"), text("theirs"));
+    let [base, ours, theirs] = three(
+        &repo,
+        vec![put("big.txt", &b)],
+        vec![put("big.txt", &o)],
+        vec![put("big.txt", &t)],
+    );
+    let paths = [&b, &o, &t]
+        .iter()
+        .map(|c| {
+            let id = blob(c).0;
+            swarmops_store::Layout::new("")
+                .object_path(id)
+                .into_std_path_buf()
+        })
+        .collect();
+    let watch = Arc::new(BlobReads {
+        paths,
+        reads: AtomicUsize::new(0),
+    });
+    let fs: Arc<dyn FsOps> = Arc::new(Watched(Arc::clone(&watch), NoSyncFs));
+    let watched = LocalRepo::open_with_fs(&root, fs).unwrap();
+
+    let outcome = watched.merge(base, ours, theirs).unwrap();
+    let sides = (Some(file(&b)), Some(file(&o)), Some(file(&t)));
+    assert_eq!(
+        outcome.conflicts,
+        [conflict("big.txt", ConflictKind::Binary, sides)]
+    );
+    assert_eq!(
+        (outcome.delta.len(), outcome.new_blobs.len()),
+        (0, 0),
+        "nothing merged"
+    );
+    assert_eq!(watch.reads.load(Ordering::SeqCst), 0, "blob reads");
+}
+
+/// A land of a file past the line diff's bound, changed on both sides, reports the `binary`
+/// conflict it reported when it read the blobs, and reads none of them.
+#[test]
+fn a_land_of_blobs_past_the_diff_bound_reads_none() {
+    use swarmops_core::Signature;
+    use swarmops_repo::land::LandRequest;
+    use swarmops_repo::merge::line_diff::MAX_DIFF_BYTES;
+    use swarmops_repo::{Advance, RepoError};
+
+    let (_dir, root, repo) = unsynced_repo();
+    let text = |head: &str| -> Vec<u8> {
+        let line = "0123456789abcde\n";
+        let mut text = format!("{head}\n");
+        text.extend(std::iter::repeat_n(line, MAX_DIFF_BYTES / line.len() + 1));
+        text.into_bytes()
+    };
+    let (b, o, t) = (text("base"), text("ours"), text("theirs"));
+    let mut start = request(&[], vec![put("big.txt", &b)], "base");
+    start.allow_empty = true;
+    start.advance = Some(Advance::new("main", "test/agent"));
+    let base = repo.commit(start).unwrap().id;
+    let ours = commit_on(&repo, &[base], vec![put("big.txt", &o)]);
+    let mut other = request(&[base], vec![put("big.txt", &t)], "theirs");
+    other.advance = Some(Advance::new("main", "test/other"));
+    repo.commit(other).unwrap();
+
+    let paths = [&b, &o, &t]
+        .iter()
+        .map(|c| {
+            let id = blob(c).0;
+            swarmops_store::Layout::new("")
+                .object_path(id)
+                .into_std_path_buf()
+        })
+        .collect();
+    let watch = Arc::new(BlobReads {
+        paths,
+        reads: AtomicUsize::new(0),
+    });
+    let fs: Arc<dyn FsOps> = Arc::new(Watched(Arc::clone(&watch), NoSyncFs));
+    let watched = LocalRepo::open_with_fs(&root, fs).unwrap();
+    let signer = Signature::new(
+        b"lander".to_vec(),
+        b"l@test.local".to_vec(),
+        1_760_000_100,
+        0,
+        false,
+    )
+    .unwrap();
+
+    let landed = watched.land(LandRequest::new(ours, "main", signer));
+    let Err(RepoError::Conflict(conflicts)) = landed else {
+        panic!("expected Conflict, got {landed:?}");
+    };
+    let kinds: Vec<_> = (conflicts.conflicts.iter())
+        .map(|c| (c.path.as_str(), c.kind.name()))
+        .collect();
+    assert_eq!(kinds, [("big.txt", "binary")]);
+    assert_eq!(watch.reads.load(Ordering::SeqCst), 0, "blob reads");
+}
+
 /// Ours deleted the only file of the directory `d`, theirs added another file to it: no conflict,
 /// the delta deletes ours' file, and `d` keeps theirs' file.
 #[test]
