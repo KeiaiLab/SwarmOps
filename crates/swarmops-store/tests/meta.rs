@@ -121,7 +121,7 @@ fn open_checked(root: &Utf8Path) -> Result<MetaStore, StoreError> {
 
 /// The id of changeset `n`: a real hash, so the ids look like a store's.
 fn id(n: u64) -> ChangesetId {
-    ChangesetId(hash_object(ObjectKind::Changeset, &n.to_le_bytes()))
+    ChangesetId::new(hash_object(ObjectKind::Changeset, &n.to_le_bytes()))
 }
 
 /// The delta hash of changeset `n`.
@@ -949,7 +949,13 @@ fn a_malformed_checkpoint_or_ref_file_is_reported_without_the_store_path() {
 fn with_prefix(prefix: &[u8], fill: u8) -> ChangesetMeta {
     let mut bytes = [fill; 32];
     bytes[..prefix.len()].copy_from_slice(prefix);
-    ChangesetMeta::new(ChangesetId(ObjectId(bytes)), 0, 0, [fill; 32], vec![])
+    ChangesetMeta::new(
+        ChangesetId::new(ObjectId::new(bytes)),
+        0,
+        0,
+        [fill; 32],
+        vec![],
+    )
 }
 
 #[test]

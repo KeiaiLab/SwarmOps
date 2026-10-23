@@ -91,7 +91,7 @@ const ACTOR: &str = "bench/history";
 
 /// The id of changeset `n`: a real hash, so the ids are spread as a store's are.
 fn id(n: u64) -> ChangesetId {
-    ChangesetId(hash_object(ObjectKind::Changeset, &n.to_le_bytes()))
+    ChangesetId::new(hash_object(ObjectKind::Changeset, &n.to_le_bytes()))
 }
 
 /// Changeset `n`, the child of changeset `n - 1` (`parent` for the ones `insert_*` queues).

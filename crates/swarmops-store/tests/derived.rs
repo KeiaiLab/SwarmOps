@@ -754,7 +754,7 @@ fn derived_writes_pass_the_order_checker() {
         assert!(derived.put(&zstd, &value(5 << 10, n)).unwrap());
         objects.flush().unwrap();
 
-        let id = ChangesetId(hash_object(ObjectKind::Changeset, blob.0.as_slice()));
+        let id = ChangesetId::new(hash_object(ObjectKind::Changeset, blob.0.as_slice()));
         let mut write = meta.write().unwrap();
         let changeset = ChangesetMeta::new(id, 0, 0, blob.0, parent.into_iter().collect());
         assert!(matches!(

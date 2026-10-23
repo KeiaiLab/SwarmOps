@@ -65,7 +65,7 @@ fn reopen_checked(layout: &Layout) -> Journal {
 }
 
 fn id(byte: u8) -> ChangesetId {
-    ChangesetId(ObjectId([byte; 32]))
+    ChangesetId::new(ObjectId::new([byte; 32]))
 }
 
 /// 74 bytes encoded, so a frame of it alone is 84.
@@ -346,7 +346,7 @@ fn record_decode_rejects_truncations_unknown_kinds_and_bad_flags() {
 }
 
 fn arb_id() -> impl Strategy<Value = ChangesetId> {
-    any::<[u8; 32]>().prop_map(|bytes| ChangesetId(ObjectId(bytes)))
+    any::<[u8; 32]>().prop_map(|bytes| ChangesetId::new(ObjectId::new(bytes)))
 }
 
 fn arb_record() -> impl Strategy<Value = Record> {
@@ -1476,8 +1476,8 @@ fn recovery_checks_every_listed_frame_before_it_writes() {
             generation: 1,
             delta_hash: [0xdd; 32],
             parents: vec![
-                ChangesetId(ObjectId(fake_header)),
-                ChangesetId(ObjectId(embedded)),
+                ChangesetId::new(ObjectId::new(fake_header)),
+                ChangesetId::new(ObjectId::new(embedded)),
             ],
         }])
         .unwrap(); // bytes 0..148, its parents at 84..148
