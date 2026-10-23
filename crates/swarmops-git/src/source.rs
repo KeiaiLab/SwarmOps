@@ -1,6 +1,6 @@
 //! What the git import reads from a repository: refs resolved to commits, and objects' raw bytes.
 
-use swarmops_core::bytes::to_u64;
+use swarmops_core::bytes;
 use swarmops_store::MAX_OBJECT_LEN;
 
 use crate::{GitOid, ObjectFormat, RawKind};
@@ -61,7 +61,7 @@ pub(crate) fn read_bounded(
         return Err(SourceError::TooLarge { oid, kind, size });
     }
     let (kind, bytes) = source.read(oid)?;
-    let size = to_u64(bytes.len());
+    let size = bytes::to_u64(bytes.len());
     if size > MAX_OBJECT_LEN {
         return Err(SourceError::TooLarge { oid, kind, size });
     }

@@ -81,23 +81,22 @@
 
 use std::collections::{HashMap, HashSet};
 
-use swarmops_core::bytes::to_u64;
+use swarmops_core::bytes;
 use swarmops_core::{
     BlobId, ChangesetId, EntryTarget, LeafKind, ObjectKind, RepoPath, TreeEntry, TreeId,
 };
 use swarmops_repo::{
     CasResult, LocalRepo, MAX_RAW_BATCH, RawChangeset, RepoError, RepoRead, StoreError,
 };
-use swarmops_store::{ExternalEntry, FsObjectStore, Recovered, SYSTEM_GIT, check_ref_name};
+use swarmops_store::{ExternalEntry, FsObjectStore, Recovered, SYSTEM_GIT};
 
-use crate::ancestry;
-use crate::export_oid::{ExportOids, OnMemo, rendered_blob_oid, rendered_tree_oid};
-use crate::source::read_bounded;
+use crate::export_oid::{ExportOids, OnMemo};
 use crate::{
     ConvertError, Converted, Converter, ExportReader, GIT_LOSSY, GIT_OID, GitOid, GitSource,
     LossySet, ObjectFormat, OidCache, RawCommit, RawError, RawKind, RawTree, SourceError,
     Unsupported,
 };
+use crate::{ancestry, export_oid, source};
 
 /// How many changesets a frame of the import holds unless asked otherwise: issue 6 Stage 1's
 /// N, past the index's compaction threshold, so that a compaction runs once a frame at most.
@@ -367,7 +366,7 @@ pub fn import(
     source: &dyn GitSource,
     req: &ImportRequest,
 ) -> Result<ImportReport, ImportError> {
-    if req.moves_ref() && check_ref_name(&req.target_ref).is_err() {
+    if req.moves_ref() && swarmops_store::check_ref_name(&req.target_ref).is_err() {
         return Err(ImportError::RefName(req.target_ref.clone()));
     }
     let format = source.object_format();
@@ -403,7 +402,7 @@ pub fn import(
             Some(Leads::Tip) => {
                 return Ok(ImportReport {
                     imported: 0,
-                    skipped: to_u64(walk.known.len()),
+                    skipped: bytes::to_u64(walk.known.len()),
                     head: base.head,
                     git_head: tip,
                     target_ref: req.target_ref.clone(),
@@ -423,7 +422,7 @@ pub fn import(
         }
     }
     let mut run = Run::new(repo, source, req, walk.known);
-    run.skipped = to_u64(run.ids.len());
+    run.skipped = bytes::to_u64(run.ids.len());
     run.warnings = walk.warnings;
     run.flagged = walk.flagged;
     if let Some(base) = &base
@@ -572,6 +571,9 @@ impl Base {
 /// trees and blobs render to, from their bytes alone ([`rendered_tree_oid`],
 /// [`rendered_blob_oid`]): no memo of the derived store is taken for a value. Each object's git
 /// oid is computed once ([`OidCache`]).
+///
+/// [`rendered_tree_oid`]: export_oid::rendered_tree_oid
+/// [`rendered_blob_oid`]: export_oid::rendered_blob_oid
 struct Oids<'r> {
     repo: &'r LocalRepo,
     /// The snapshot the target, its head's history and its objects are read in.
@@ -628,13 +630,13 @@ impl<'r> Oids<'r> {
 
     /// The git oid that tree `tree` renders to, from the store's own bytes.
     fn tree_oid(&self, tree: TreeId) -> Result<GitOid, ImportError> {
-        let oid = rendered_tree_oid(&self.reader(), &self.cache, tree);
+        let oid = export_oid::rendered_tree_oid(&self.reader(), &self.cache, tree);
         oid.map_err(|source| stopped(source, 0, None))
     }
 
     /// The git oid of blob `blob`, the hash of the store's own bytes.
     fn blob_oid(&self, blob: BlobId) -> Result<GitOid, ImportError> {
-        let oid = rendered_blob_oid(&self.reader(), &self.cache, blob);
+        let oid = export_oid::rendered_blob_oid(&self.reader(), &self.cache, blob);
         oid.map_err(|source| stopped(source, 0, None))
     }
 }
@@ -794,8 +796,10 @@ impl Walk {
 
 /// The commit `oid`'s fields, read from `source` once its header lets it through the size gate
 /// ([`read_bounded`]).
+///
+/// [`read_bounded`]: source::read_bounded
 fn read_commit(source: &dyn GitSource, oid: GitOid) -> Result<RawCommit, ImportError> {
-    let (kind, bytes) = read_bounded(source, oid)?;
+    let (kind, bytes) = source::read_bounded(source, oid)?;
     if kind != RawKind::Commit {
         let what = "named as a commit, but it is no commit";
         return Err(ConvertError::Malformed { oid, what }.into());
@@ -837,7 +841,7 @@ fn seed(
     // The git trees walked or about to be: a tree held at several paths is walked once.
     let mut walked = HashSet::from([git_root]);
     while let Some((dir, git)) = dirs.pop() {
-        let (kind, bytes) = read_bounded(source, git)?;
+        let (kind, bytes) = source::read_bounded(source, git)?;
         if kind != RawKind::Tree {
             let what = "named as a tree, but it is no tree";
             return Err(ConvertError::Malformed { oid: git, what }.into());
@@ -993,7 +997,7 @@ impl<'a, 's> Run<'a, 's> {
         })
         .map_err(|source| self.stopped(source))?;
         absorb(&mut self.recovered, outcome.recovered);
-        self.imported += to_u64(commits.len());
+        self.imported += bytes::to_u64(commits.len());
         self.last = commits.last().copied();
         if !outcome.warnings.is_empty() {
             return Err(ImportError::PostCommit {
