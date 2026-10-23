@@ -30,6 +30,12 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   mode), and a `-0000` identity with a nonzero offset is refused at conversion
   (`ConvertError::Malformed`) instead of later at commit.
 
+### Fixed
+
+- `ws status` could miss a same-size edit made in the filesystem tick a status had confirmed the
+  file in: once a later status rewrote the index for another file, the racy row was trusted. A
+  row a scan does not confirm keeps no stat at or after its index's time (it is hashed again).
+
 ## [0.3.0] - 2026-10-22
 
 ### Added

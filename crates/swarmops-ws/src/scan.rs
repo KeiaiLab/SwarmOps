@@ -192,7 +192,8 @@ pub(crate) fn scan(ctx: &Ctx<'_>, ws: &Workspace, want: &Want) -> Result<Scanned
         .collect();
     let blobs = hash_all(host, dir, &to_hash, HASH_BYTES_IN_FLIGHT)?;
 
-    // 4. Each tracked row's change, if any; a row found unchanged by its hash refreshed.
+    // 4. Each tracked row's change, if any; a row found unchanged by its hash refreshed, a
+    //    changed racy one smudged.
     let mut changes = BTreeMap::new();
     let mut next_blob = blobs.into_iter();
     for look in looks {
@@ -202,12 +203,19 @@ pub(crate) fn scan(ctx: &Ctx<'_>, ws: &Workspace, want: &Want) -> Result<Scanned
             None
         };
         let row = &mut index.rows[look.at];
-        if let Some(change) = settle(row, look, blob, &mut refreshed) {
-            changes.insert(change.path.clone(), change);
-        }
+        let Some(change) = settle(row, look, blob, &mut refreshed) else {
+            continue;
+        };
+        smudge(row, stale_ns);
+        changes.insert(change.path.clone(), change);
     }
 
-    // 5. The untracked additions under the prefixes.
+    // 5. The rows not looked at keep their stat; a racy one must stay racy under `written_ns`.
+    for row in index.rows.iter_mut().filter(|row| !wanted(&row.path)) {
+        smudge(row, stale_ns);
+    }
+
+    // 6. The untracked additions under the prefixes.
     let tracked: HashSet<&str> = index.rows.iter().map(|row| row.path.as_str()).collect();
     for (path, meta) in untracked(ctx.host.as_ref(), ws, &want.extra, &tracked)? {
         if !wanted(&path) {
@@ -309,6 +317,16 @@ fn look(
         same_kind,
         hash,
     })
+}
+
+/// Forgets the stat of `row`, unconfirmed by this scan, when it is at or after `stale_ns`, the
+/// time the index it came from was written: the file may have changed within that tick, and the
+/// index written now, later, would trust it (racy-git's smudge). Rows hashed unchanged here are
+/// confirmed, and rows before `stale_ns` stay trusted.
+fn smudge(row: &mut Row, stale_ns: i64) {
+    if row.mtime_ns >= stale_ns {
+        row.mtime_ns = UNCONFIRMED;
+    }
 }
 
 /// The change at `row` that `look` and its `blob` (when hashed) show, if any; the row's stat

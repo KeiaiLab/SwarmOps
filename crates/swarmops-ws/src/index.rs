@@ -13,7 +13,9 @@
 //! The checksum covers what the rows stand for: an index written for another head or other
 //! prefixes fails it, as a torn one does, and is rebuilt. `written_ns` is the filesystem's clock
 //! when the scan that wrote it started (a temp file's mtime): a row whose mtime is at or after it
-//! may have changed within the same tick, and is hashed (the racy rule).
+//! may have changed within the same tick, and is hashed (the racy rule). Such a row its scan does
+//! not confirm by hashing goes into the next index unconfirmed: that index's later time would
+//! trust it.
 
 use std::io::Write as _;
 

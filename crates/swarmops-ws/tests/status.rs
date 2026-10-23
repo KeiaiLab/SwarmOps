@@ -151,6 +151,202 @@ fn a_same_size_edit_within_the_racy_window_is_found() {
     assert_eq!(changes(&ctx, "w", true), [change("src/a.txt", Modified)]);
 }
 
+/// A file whose bytes a status confirmed in the tick its index was written, then rewritten in
+/// place with as many bytes in that same tick, is found by every later status: an index written
+/// later, by a status that refreshed another row, does not turn its racy row into a trusted one.
+#[test]
+fn a_racy_row_stays_racy_in_a_later_index() {
+    use std::time::{Duration, SystemTime};
+
+    // 1. A workspace of two files; `src/e.txt` stat'd as written in each scan's starting tick.
+    let f = Fixture::new();
+    let puts = [
+        Put::File("src/a.txt", "0123\n"),
+        Put::File("src/e.txt", "0123\n"),
+    ];
+    let base = f.commit(None, &puts);
+    f.create("w", &base, &["src"]);
+    let dir = f.beside("w");
+    let host = std::sync::Arc::new(same_tick::SameTick::new(&dir, "src/e.txt"));
+    let ctx = f.ctx_on(host.clone());
+
+    // 2. A status confirms its bytes and writes an index at that very tick: a racy row.
+    assert_eq!(changes(&ctx, "w", false), []);
+    let tick = host.pinned().unwrap();
+    assert_eq!(written_ns(&dir), tick);
+
+    // 3. The same size written in place within the tick (the same stat), then the clock past it.
+    std::fs::write(dir.join("src/e.txt"), "1032\n").unwrap();
+    same_tick::wait_past(&dir, tick);
+
+    // 4. A status that refreshes another row writes a later index; the edit is still found.
+    let file = std::fs::File::options()
+        .write(true)
+        .open(dir.join("src/a.txt"))
+        .unwrap();
+    file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(changes(&ctx, "w", false), [change("src/e.txt", Modified)]);
+    assert!(written_ns(&dir) > tick);
+    assert_eq!(changes(&ctx, "w", false), [change("src/e.txt", Modified)]);
+    assert_eq!(changes(&ctx, "w", true), [change("src/e.txt", Modified)]);
+
+    // 5. A status of another path alone writes a later index: the edit is still found.
+    std::fs::write(dir.join("src/e.txt"), "0123\n").unwrap();
+    host.unpin();
+    assert_eq!(changes(&ctx, "w", false), []);
+    let tick = host.pinned().unwrap();
+    assert_eq!(written_ns(&dir), tick);
+    std::fs::write(dir.join("src/e.txt"), "1032\n").unwrap();
+    same_tick::wait_past(&dir, tick);
+    file.set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(2))
+        .unwrap();
+    let mut req = page_of("w");
+    req.paths = vec!["src/a.txt".to_owned()];
+    assert_eq!(swarmops_ws::status(&ctx, req).unwrap().changes, []);
+    assert!(written_ns(&dir) > tick);
+    assert_eq!(changes(&ctx, "w", false), [change("src/e.txt", Modified)]);
+}
+
+/// A host that reports one file as last written in the tick the first scan that stats it
+/// started: the filesystem's coarse clock, made certain.
+mod same_tick {
+    use std::io;
+    use std::sync::{Arc, Mutex};
+
+    use camino::{Utf8Path, Utf8PathBuf};
+    use swarmops_ws::hostfs::HostMeta;
+    use swarmops_ws::state::SWARMWS_DIR;
+    use swarmops_ws::{HostFs, RealHost};
+
+    /// The real host, but for the mtime of `path`.
+    pub struct SameTick {
+        /// The host under it.
+        inner: Arc<dyn HostFs>,
+        /// The workspace's root.
+        dir: Utf8PathBuf,
+        /// The file whose mtime is pinned.
+        path: Utf8PathBuf,
+        /// The pinned mtime, once a scan stat'd the file.
+        pinned: Mutex<Option<i64>>,
+    }
+
+    impl SameTick {
+        /// A host pinning the mtime of `path` in the workspace at `dir`.
+        pub fn new(dir: &Utf8Path, path: &str) -> SameTick {
+            SameTick {
+                inner: Arc::new(RealHost::default()),
+                dir: dir.to_owned(),
+                path: dir.join(path),
+                pinned: Mutex::new(None),
+            }
+        }
+
+        /// Pins the file's mtime again, at the tick of the next scan that stats it.
+        pub fn unpin(&self) {
+            *self.pinned.lock().unwrap() = None;
+        }
+
+        /// The pinned mtime, if a scan stat'd the file yet.
+        pub fn pinned(&self) -> Option<i64> {
+            *self.pinned.lock().unwrap()
+        }
+    }
+
+    /// The mtime of the scan's temp index in `.swarmws/`: the tick the scan started at.
+    fn scan_tick(dir: &Utf8Path) -> i64 {
+        let found = std::fs::read_dir(dir.join(SWARMWS_DIR))
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .filter(|entry| entry.file_name().to_str().is_some_and(is_temp))
+            .map(|entry| mtime_ns(&entry.metadata().unwrap()))
+            .max();
+        found.unwrap()
+    }
+
+    /// Whether `name` is a scan's temp index.
+    fn is_temp(name: &str) -> bool {
+        name.starts_with("index.") && name != "index.bin"
+    }
+
+    /// The mtime of `meta`, in Unix nanoseconds.
+    fn mtime_ns(meta: &std::fs::Metadata) -> i64 {
+        let since = meta
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        i64::try_from(since.as_nanos()).unwrap()
+    }
+
+    /// Returns once a file made in workspace `dir`'s `.swarmws/` has an mtime past `tick`.
+    pub fn wait_past(dir: &Utf8Path, tick: i64) {
+        loop {
+            let probe = tempfile::NamedTempFile::new_in(dir.join(SWARMWS_DIR)).unwrap();
+            if mtime_ns(&probe.as_file().metadata().unwrap()) > tick {
+                return;
+            }
+            std::thread::yield_now();
+        }
+    }
+
+    impl HostFs for SameTick {
+        fn write_file(&self, path: &Utf8Path, bytes: &[u8]) -> io::Result<()> {
+            self.inner.write_file(path, bytes)
+        }
+
+        fn symlink(&self, target: &str, path: &Utf8Path) -> io::Result<()> {
+            self.inner.symlink(target, path)
+        }
+
+        fn symlink_metadata(&self, path: &Utf8Path) -> io::Result<Option<HostMeta>> {
+            // The real stat; the pinned file's mtime the first scan's tick from then on.
+            let meta = self.inner.symlink_metadata(path)?;
+            if path != self.path {
+                return Ok(meta);
+            }
+            let mut pinned = self.pinned.lock().unwrap();
+            let tick = *pinned.get_or_insert_with(|| scan_tick(&self.dir));
+            Ok(meta.map(|mut meta| {
+                meta.mtime_ns = tick;
+                meta
+            }))
+        }
+
+        fn read_file(&self, path: &Utf8Path) -> io::Result<Vec<u8>> {
+            self.inner.read_file(path)
+        }
+
+        fn read_dir(&self, path: &Utf8Path) -> io::Result<Vec<String>> {
+            self.inner.read_dir(path)
+        }
+
+        fn remove_file(&self, path: &Utf8Path) -> io::Result<()> {
+            self.inner.remove_file(path)
+        }
+
+        fn remove_dir_if_empty(&self, path: &Utf8Path) -> io::Result<bool> {
+            self.inner.remove_dir_if_empty(path)
+        }
+
+        fn create_dir_all(&self, path: &Utf8Path) -> io::Result<()> {
+            self.inner.create_dir_all(path)
+        }
+
+        fn rename(&self, from: &Utf8Path, to: &Utf8Path) -> io::Result<()> {
+            self.inner.rename(from, to)
+        }
+
+        fn read_link(&self, path: &Utf8Path) -> io::Result<String> {
+            self.inner.read_link(path)
+        }
+
+        fn set_mode(&self, path: &Utf8Path, mode: u32) -> io::Result<()> {
+            self.inner.set_mode(path, mode)
+        }
+    }
+}
+
 /// The untracked walk reads the tree's `.gitignore` and `.swarmignore` files with no `.git`
 /// anywhere, lists dotfiles the agent adds, never lists a `.git` directory's files, and reads
 /// nothing above the workspace's root and no `.ignore` file.
