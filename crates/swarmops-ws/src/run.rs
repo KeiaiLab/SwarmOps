@@ -239,7 +239,7 @@ fn text(tail: &Tail) -> String {
     let bytes = tail.lock().unwrap_or_else(PoisonError::into_inner);
     let start = if bytes.len() == TAIL_BYTES {
         // A cut can fall inside a character: its continuation bytes (0b10xx_xxxx) go.
-        bytes.iter().take_while(|&&b| b & 0xC0 == 0x80).count()
+        bytes.iter().take_while(|&&b| b & 0xc0 == 0x80).count()
     } else {
         0
     };
