@@ -17,6 +17,7 @@ use swarmops_core::ObjectId;
 use swarmops_merge::line_diff::{self, DiffLine, UnifiedHunk};
 
 use crate::Ctx;
+use crate::io_error::unknown_variant;
 use crate::materialize;
 use crate::scan::{self, Change, Want};
 use crate::status;
@@ -33,6 +34,7 @@ pub fn diff(ctx: &Ctx<'_>, req: WsDiffReq) -> Result<Diff, OpError> {
         limit,
         cursor,
         max_bytes,
+        ..
     } = req;
     at_least_one("limit", u64::try_from(limit).unwrap_or(u64::MAX))?;
     at_least_one("max_bytes", max_bytes)?;
@@ -78,13 +80,14 @@ pub fn diff(ctx: &Ctx<'_>, req: WsDiffReq) -> Result<Diff, OpError> {
     let cursor = (files.last())
         .filter(|_| truncated)
         .map(|last| last.path.clone());
-    Ok(Diff {
-        from: ws.file.head.clone(),
-        to: format!("ws:{}", ws.file.name),
+    let mut out = Diff::new(
+        ws.file.head.clone(),
+        format!("ws:{}", ws.file.name),
         files,
         truncated,
-        cursor,
-    })
+    );
+    out.cursor = cursor;
+    Ok(out)
 }
 
 /// What a page says of `change` in `format`, as the store's `diff` says it of a file: its path
@@ -98,19 +101,7 @@ fn file_diff(
     context: u32,
 ) -> Result<FileDiff, OpError> {
     // 1. The path and the status.
-    let mut file = FileDiff {
-        path: change.path.clone(),
-        status: status_of(change.kind),
-        old_kind: None,
-        new_kind: None,
-        old_blob: None,
-        new_blob: None,
-        binary: None,
-        insertions: None,
-        deletions: None,
-        hunks: None,
-        hunks_truncated: None,
-    };
+    let mut file = FileDiff::new(change.path.clone(), status_of(change.kind)?);
     if format == DiffFormat::Names {
         return Ok(file);
     }
@@ -164,43 +155,46 @@ fn file_diff(
     file.deletions = Some(stats.deletions);
     if format == DiffFormat::Unified {
         let shown = line_diff::unified(old, new, &hunks, context);
-        file.hunks = Some(shown.iter().map(diff_hunk).collect());
+        file.hunks = Some(shown.iter().map(diff_hunk).collect::<Result<_, _>>()?);
     }
     Ok(file)
 }
 
-/// The store's status of a workspace change: a mode change is a modification.
-fn status_of(kind: WsChangeKind) -> DiffStatus {
+/// The store's status of a workspace change: a mode change is a modification. `E_INTERNAL` for
+/// a kind this build does not know.
+fn status_of(kind: WsChangeKind) -> Result<DiffStatus, OpError> {
     match kind {
-        WsChangeKind::Added => DiffStatus::Added,
-        WsChangeKind::Deleted => DiffStatus::Deleted,
-        WsChangeKind::Modified | WsChangeKind::ModeChanged => DiffStatus::Modified,
-        WsChangeKind::TypeChanged => DiffStatus::TypeChanged,
+        WsChangeKind::Added => Ok(DiffStatus::Added),
+        WsChangeKind::Deleted => Ok(DiffStatus::Deleted),
+        WsChangeKind::Modified | WsChangeKind::ModeChanged => Ok(DiffStatus::Modified),
+        WsChangeKind::TypeChanged => Ok(DiffStatus::TypeChanged),
+        _ => Err(unknown_variant("WsChangeKind")),
     }
 }
 
-/// `hunk` as a `unified` page gives it.
-fn diff_hunk(hunk: &UnifiedHunk<'_>) -> DiffHunk {
+/// `hunk` as a `unified` page gives it; `E_INTERNAL` for a line this build does not know.
+fn diff_hunk(hunk: &UnifiedHunk<'_>) -> Result<DiffHunk, OpError> {
     let lines = (hunk.lines.iter())
         .map(|line| {
             let (op, text) = match *line {
                 DiffLine::Context(text) => (LineOp::Context, text),
                 DiffLine::Removed(text) => (LineOp::Remove, text),
                 DiffLine::Added(text) => (LineOp::Add, text),
+                _ => return Err(unknown_variant("DiffLine")),
             };
-            DiffLineOut {
+            Ok(DiffLineOut::new(
                 op,
-                text: String::from_utf8_lossy(text).into_owned(),
-            }
+                String::from_utf8_lossy(text).into_owned(),
+            ))
         })
-        .collect();
-    DiffHunk {
-        old_start: u64::from(hunk.before_start),
-        old_lines: u64::from(hunk.before_lines),
-        new_start: u64::from(hunk.after_start),
-        new_lines: u64::from(hunk.after_lines),
+        .collect::<Result<_, _>>()?;
+    Ok(DiffHunk::new(
+        u64::from(hunk.before_start),
+        u64::from(hunk.before_lines),
+        u64::from(hunk.after_start),
+        u64::from(hunk.after_lines),
         lines,
-    }
+    ))
 }
 
 /// Cuts `file`'s hunks to the first ones that fit with it in `room` bytes of JSON, as the
@@ -234,10 +228,9 @@ fn cut_hunks(file: &mut FileDiff, room: u64) {
 /// The bytes of blob `id`, by `blob_get`.
 fn blob_bytes(store: &dyn StoreOps, id: &str) -> Result<Vec<u8>, OpError> {
     // 1. Asked for alone, with room for the largest object.
-    let got = store.blob_get(BlobGetReq {
-        ids: vec![id.to_owned()],
-        max_bytes: DEFAULT_BLOB_GET_MAX_BYTES.max(swarmops_store::MAX_OBJECT_LEN),
-    })?;
+    let mut req = BlobGetReq::new(vec![id.to_owned()]);
+    req.max_bytes = DEFAULT_BLOB_GET_MAX_BYTES.max(swarmops_store::MAX_OBJECT_LEN);
+    let got = store.blob_get(req)?;
     let Some(blob) = got.blobs.into_iter().next() else {
         return Err(OpError::new(
             ErrorCode::StoreCorrupt,
@@ -254,12 +247,13 @@ fn blob_bytes(store: &dyn StoreOps, id: &str) -> Result<Vec<u8>, OpError> {
                 format!("blob_get gave blob {id} in bad base64: {e}"),
             )
         }),
+        _ => Err(unknown_variant("ContentEncoding")),
     }
 }
 
 /// Blob id `blob` in hex.
 fn hex(blob: scan::Blob) -> String {
-    ObjectId(blob).to_hex()
+    ObjectId::new(blob).to_hex()
 }
 
 /// `E_INVALID_ARG` when `value`, the request's `name`, is 0.

@@ -25,6 +25,7 @@ use swarmops_store::MAX_OBJECT_LEN;
 
 use crate::hostfs::HostKind;
 use crate::index::{Index, Row, UNCONFIRMED};
+use crate::io_error::unknown_variant;
 use crate::materialize;
 use crate::pending::{self, Pending, PendingOp};
 use crate::scan::{self, Blob, Change, HASH_BYTES_IN_FLIGHT, HostFile, Keep, Want};
@@ -54,6 +55,7 @@ pub fn commit(ctx: &Ctx<'_>, req: WsCommitReq) -> Result<WsCommitResp, OpError> 
         paths,
         modes,
         status_after,
+        ..
     } = req;
     let named = materialize::normalize(paths)?;
     let modes = modes_of(modes)?;
@@ -133,15 +135,10 @@ pub(crate) fn commit_in(
     let blobs_written = upload(ctx, ws, &entries)?;
 
     // 8. The commit, by blob id, on the head's full id.
-    let changes = entries.iter().map(change_input).collect();
-    let req = CommitReq {
-        parent: Some(ws.file.head.as_str().into()),
-        changes,
-        message,
-        advance: None,
-        idempotency_key: Some(key),
-        allow_empty: false,
-    };
+    let changes = entries.iter().map(change_input).collect::<Result<_, _>>()?;
+    let mut req = CommitReq::new(changes, message);
+    req.parent = Some(ws.file.head.as_str().into());
+    req.idempotency_key = Some(key);
     let done = ctx.store.commit(&ws.who, req)?;
 
     // 9. The workspace stands on it (WS2); the index learns it; the record goes.
@@ -161,14 +158,13 @@ pub(crate) fn commit_in(
     scanned.keep(&ws.dir, &scan::binding_of(ws), Keep::Always);
     pending::remove_pending(ctx.fs.as_ref(), &ws.dir)?;
 
-    Ok(WsCommitResp {
-        changeset: done.changeset,
+    Ok(WsCommitResp::new(
+        done.changeset,
         parent,
-        files_changed: done.files_changed,
+        done.files_changed,
         blobs_written,
-        replayed: done.replayed,
-        status_after: None,
-    })
+        done.replayed,
+    ))
 }
 
 /// The modes asked for, by repository path: `exec` or `file` only.
@@ -184,6 +180,7 @@ fn modes_of(modes: BTreeMap<String, ModeInput>) -> Result<BTreeMap<String, FileK
                     format!("{path:?}: a mode is exec or file; a symlink is made on the host"),
                 ));
             }
+            _ => return Err(unknown_variant("ModeInput")),
         };
         let [path] = materialize::normalize(vec![path])?
             .try_into()
@@ -320,7 +317,7 @@ fn upload(ctx: &Ctx<'_>, ws: &Workspace, entries: &[Entry]) -> Result<u64, OpErr
     let mut wanted: HashMap<String, &Entry> = HashMap::new();
     for entry in entries {
         if let (Some((_, blob)), Some(_)) = (entry.put, entry.host) {
-            wanted.entry(ObjectId(blob).to_hex()).or_insert(entry);
+            wanted.entry(ObjectId::new(blob).to_hex()).or_insert(entry);
         }
     }
     let ids: Vec<String> = wanted.keys().cloned().collect();
@@ -328,9 +325,7 @@ fn upload(ctx: &Ctx<'_>, ws: &Workspace, entries: &[Entry]) -> Result<u64, OpErr
     // 2. Those the store lacks, asked in batches.
     let mut missing = Vec::new();
     for batch in ids.chunks(HAS_BATCH) {
-        let present = ctx.store.blob_has(BlobHasReq {
-            ids: batch.to_vec(),
-        })?;
+        let present = ctx.store.blob_has(BlobHasReq::new(batch.to_vec()))?;
         let present: BTreeSet<String> = present.present.into_iter().collect();
         missing.extend(batch.iter().filter(|id| !present.contains(*id)).cloned());
     }
@@ -345,40 +340,35 @@ fn upload(ctx: &Ctx<'_>, ws: &Workspace, entries: &[Entry]) -> Result<u64, OpErr
         let abs = ws.dir.join(&entry.path);
         let bytes = scan::content(ctx.host.as_ref(), &abs, host.meta.kind)
             .map_err(|e| materialize::host_failed(&entry.path, &e))?;
-        if ObjectId(scan::blob_id(&bytes)).to_hex() != id {
+        if ObjectId::new(scan::blob_id(&bytes)).to_hex() != id {
             return Err(changed_meanwhile(&entry.path));
         }
         let content = match String::from_utf8(bytes) {
             Ok(text) => ContentInput::Inline(text),
             Err(e) => ContentInput::Base64(STANDARD.encode(e.into_bytes())),
         };
-        let put = ctx.store.blob_put(&ws.who, BlobPutReq { content })?;
+        let put = ctx.store.blob_put(&ws.who, BlobPutReq::new(content))?;
         written += u64::from(put.written);
     }
     Ok(written)
 }
 
-/// The change list's line of `entry`: a put by blob id in its kind, or a delete.
-fn change_input(entry: &Entry) -> ChangeInput {
+/// The change list's line of `entry`: a put by blob id in its kind, or a delete. `E_INTERNAL`
+/// for a kind this build does not know.
+fn change_input(entry: &Entry) -> Result<ChangeInput, OpError> {
     let Some((kind, blob)) = entry.put else {
-        return ChangeInput {
-            path: entry.path.clone(),
-            op: ChangeOp::Delete,
-            content: None,
-            mode: None,
-        };
+        return Ok(ChangeInput::new(entry.path.clone(), ChangeOp::Delete));
     };
     let mode = match kind {
         FileKind::File => ModeInput::File,
         FileKind::Exec => ModeInput::Exec,
         FileKind::Symlink => ModeInput::Symlink,
+        _ => return Err(unknown_variant("FileKind")),
     };
-    ChangeInput {
-        path: entry.path.clone(),
-        op: ChangeOp::Put,
-        content: Some(ContentInput::Blob(ObjectId(blob).to_hex())),
-        mode: Some(mode),
-    }
+    let mut out = ChangeInput::new(entry.path.clone(), ChangeOp::Put);
+    out.content = Some(ContentInput::Blob(ObjectId::new(blob).to_hex()));
+    out.mode = Some(mode);
+    Ok(out)
 }
 
 /// The index's rows after the commit of `entries`: a removal's row gone, a put's row its kind

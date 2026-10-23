@@ -97,7 +97,7 @@ pub(crate) fn open_locked(ctx: &Ctx<'_>, at: &Locate) -> Result<(Workspace, WsLo
 fn settle(ctx: &Ctx<'_>, dir: Utf8PathBuf) -> Result<Workspace, OpError> {
     // 1. The state, of this store.
     let file = state::read(ctx.fs.as_ref(), &dir)?;
-    let store_repo_id = ctx.store.repo_info(InfoReq {})?.repo_id;
+    let store_repo_id = ctx.store.repo_info(InfoReq::default())?.repo_id;
     if file.repo_id != store_repo_id {
         return Err(OpError::new(
             ErrorCode::InvalidArg,

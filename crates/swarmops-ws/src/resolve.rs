@@ -21,7 +21,7 @@ use crate::rebase;
 use crate::state::State;
 use crate::status::CONFLICTS_JSON;
 use crate::workspace::{self, Locate, Workspace};
-use crate::{Ctx, after, discard, markers};
+use crate::{Ctx, after, discard, io_error, markers};
 
 /// The paths of a rebase in progress resolved so far, in `.swarmws/`.
 pub const RESOLVED_JSON: &str = "resolved.json";
@@ -43,6 +43,7 @@ pub fn resolve(ctx: &Ctx<'_>, req: WsResolveReq) -> Result<WsResolveResp, OpErro
         take,
         force,
         status_after,
+        ..
     } = req;
     let (ws, _held) = workspace::open_locked(ctx, &Locate::Name(workspace))?;
     let State::Rebasing { against, .. } = &ws.file.state else {
@@ -85,6 +86,7 @@ pub fn resolve(ctx: &Ctx<'_>, req: WsResolveReq) -> Result<WsResolveResp, OpErro
             let rev = match side {
                 Side::Ours => ws.file.head.clone(),
                 Side::Theirs => against,
+                _ => return Err(io_error::unknown_variant("Side")),
             };
             discard::restore(ctx, &ws, &rev, &asked)?;
         }
@@ -98,11 +100,12 @@ pub fn resolve(ctx: &Ctx<'_>, req: WsResolveReq) -> Result<WsResolveResp, OpErro
     write(ctx, &ws, &resolved)?;
     report.files.retain(|file| !asked.contains(&file.path));
     rebase::write_record(ctx, &ws, CONFLICTS_JSON, &report)?;
-    Ok(WsResolveResp {
-        resolved: asked,
-        remaining: report.files.into_iter().map(|file| file.path).collect(),
-        status_after: after::attach(ctx, &ws, status_after),
-    })
+    let mut out = WsResolveResp::new(
+        asked,
+        report.files.into_iter().map(|file| file.path).collect(),
+    );
+    out.status_after = after::attach(ctx, &ws, status_after);
+    Ok(out)
 }
 
 /// `E_MARKERS_PRESENT` naming each of `paths` whose file still holds a marker line, unless

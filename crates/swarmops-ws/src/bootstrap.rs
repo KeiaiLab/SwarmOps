@@ -110,13 +110,8 @@ pub fn run(ctx: &Ctx<'_>, ws: &Workspace, from: Option<&Utf8Path>) -> Result<(),
 /// The repository's workspace settings at `rev`; none when it holds no [`REPO_CONFIG`].
 pub(crate) fn repo_config(store: &dyn StoreOps, rev: &str) -> Result<Option<RepoConfig>, OpError> {
     // 1. The file, read from the store, never from a host tree.
-    let req = ReadFileReq {
-        rev: rev.into(),
-        path: REPO_CONFIG.to_owned(),
-        offset: 0,
-        lines: None,
-        max_bytes: CONFIG_MAX_BYTES,
-    };
+    let mut req = ReadFileReq::new(rev, REPO_CONFIG);
+    req.max_bytes = CONFIG_MAX_BYTES;
     let read = match store.read_file(req) {
         Ok(read) => read,
         Err(e) if e.code == ErrorCode::PathNotFound.as_str() => return Ok(None),

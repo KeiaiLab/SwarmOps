@@ -189,7 +189,7 @@ pub fn worktree_create(
     }
 
     // 3. Where, and as whom: `<ws_root>/<repo>/<name>`, the caller or `claude-code/<name>`.
-    let info = ctx.store.repo_info(InfoReq {})?;
+    let info = ctx.store.repo_info(InfoReq::default())?;
     let dir = ws_root
         .join(repo_dir(&info.name, &info.repo_id))
         .join(&name);
@@ -206,16 +206,14 @@ pub fn worktree_create(
     };
 
     // 4. Made, then bootstrapped when this create made it.
-    let req = WsCreateReq {
-        name,
-        path: Some(dir.to_string()),
-        base: base.as_str().into(),
-        prefixes,
-        all,
-        from: Some(input.cwd.to_string()),
-        session: Some(session),
-        status_after: StatusAfter::None,
-    };
+    let mut req = WsCreateReq::new(name);
+    req.path = Some(dir.to_string());
+    req.base = base.as_str().into();
+    req.prefixes = prefixes;
+    req.all = all;
+    req.from = Some(input.cwd.to_string());
+    req.session = Some(session);
+    req.status_after = StatusAfter::None;
     let made = create::create(&ctx, req)?;
     if made.created && bootstrap == Bootstrap::Run {
         let ws = Workspace::open(&ctx, Locate::Path(dir.clone()))?;
@@ -255,11 +253,8 @@ pub fn worktree_remove(ctx: &Ctx<'_>, input: &HookRemove) -> Result<RemoveReport
     }
 
     // 2. Rescued and deleted.
-    let req = WsDeleteReq {
-        workspace: name,
-        force: false,
-        rescue: true,
-    };
+    let mut req = WsDeleteReq::new(name);
+    req.rescue = true;
     let done = delete::delete(ctx, req)?;
     let rescued = done.rescued.as_deref().map(changeset_id).transpose()?;
     Ok(RemoveReport {
@@ -372,7 +367,7 @@ fn digest(parts: &[&[u8]], len: usize) -> String {
 
 /// The changeset id `hex`, as the store gave it: `E_INTERNAL` for one that is not an id.
 fn changeset_id(hex: &str) -> Result<ChangesetId, OpError> {
-    ObjectId::from_hex(hex).map(ChangesetId).map_err(|e| {
+    ObjectId::from_hex(hex).map(ChangesetId::new).map_err(|e| {
         OpError::new(
             ErrorCode::Internal,
             format!("the store gave {hex:?} as a changeset id: {e}"),

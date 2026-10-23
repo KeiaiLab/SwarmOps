@@ -94,7 +94,8 @@ pub(crate) fn read(dir: &Utf8Path, binding: &str) -> Option<Index> {
 
 /// Writes `index`, standing for `binding`, as the index of the workspace at `dir`, through the
 /// temp file `temp` (made in `.swarmws/` when the scan started): its bytes, then a rename over
-/// the index. No sync: a torn index fails its checksum.
+/// the index. No sync: a torn index fails its checksum. An index with a row of a kind this build
+/// does not know is not written.
 pub(crate) fn write(
     dir: &Utf8Path,
     temp: tempfile::NamedTempFile,
@@ -102,14 +103,17 @@ pub(crate) fn write(
     index: &Index,
 ) -> std::io::Result<()> {
     let mut temp = temp;
-    temp.write_all(&encode(index, binding))?;
+    let bytes = encode(index, binding)
+        .ok_or_else(|| std::io::Error::other("a file kind this build does not know"))?;
+    temp.write_all(&bytes)?;
     temp.persist(dir.join(SWARMWS_DIR).join(INDEX_BIN))
         .map(|_| ())
         .map_err(|e| e.error)
 }
 
-/// `index`'s bytes, its checksum bound to `binding`.
-pub(crate) fn encode(index: &Index, binding: &str) -> Vec<u8> {
+/// `index`'s bytes, its checksum bound to `binding`; none when a row's kind is one this build
+/// does not know.
+pub(crate) fn encode(index: &Index, binding: &str) -> Option<Vec<u8>> {
     // 1. The header.
     let rows = &index.rows;
     let mut out = Vec::with_capacity(HEADER + rows.len() * 96 + CHECK);
@@ -140,7 +144,7 @@ pub(crate) fn encode(index: &Index, binding: &str) -> Vec<u8> {
         out.extend_from_slice(&row.inode.to_le_bytes());
     }
     for row in rows {
-        out.push(mode_byte(row.mode));
+        out.push(mode_byte(row.mode)?);
     }
     for row in rows {
         out.extend_from_slice(&row.blob);
@@ -149,7 +153,7 @@ pub(crate) fn encode(index: &Index, binding: &str) -> Vec<u8> {
     // 4. The checksum of the binding and all of it.
     let check = checksum(binding, &out);
     out.extend_from_slice(&check);
-    out
+    Some(out)
 }
 
 /// The index `bytes` hold, if they are one this build writes, standing for `binding`.
@@ -227,12 +231,13 @@ fn checksum(binding: &str, body: &[u8]) -> [u8; CHECK] {
     *hasher.finalize().as_bytes()
 }
 
-/// The `mode` column's byte of `kind`.
-fn mode_byte(kind: FileKind) -> u8 {
+/// The `mode` column's byte of `kind`; none for a kind this build does not know.
+fn mode_byte(kind: FileKind) -> Option<u8> {
     match kind {
-        FileKind::File => 0,
-        FileKind::Exec => 1,
-        FileKind::Symlink => 2,
+        FileKind::File => Some(0),
+        FileKind::Exec => Some(1),
+        FileKind::Symlink => Some(2),
+        _ => None,
     }
 }
 
@@ -308,11 +313,11 @@ mod tests {
     fn an_index_round_trips_for_its_binding_only() {
         // 1. Written and read back.
         let index = sample();
-        let bytes = encode(&index, "head");
+        let bytes = encode(&index, "head").unwrap();
         assert_eq!(&bytes[..4], MAGIC);
         assert_eq!(decode(&bytes, "head"), Some(index.clone()));
         assert_eq!(
-            decode(&encode(&Index::default(), "h"), "h"),
+            decode(&encode(&Index::default(), "h").unwrap(), "h"),
             Some(Index::default())
         );
 
@@ -329,6 +334,6 @@ mod tests {
         // 3. Rows out of order, checksummed all the same: none.
         let mut swapped = index;
         swapped.rows.reverse();
-        assert_eq!(decode(&encode(&swapped, "head"), "head"), None);
+        assert_eq!(decode(&encode(&swapped, "head").unwrap(), "head"), None);
     }
 }

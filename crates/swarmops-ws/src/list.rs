@@ -26,7 +26,7 @@ pub fn list(ctx: &Ctx<'_>, req: WsListReq) -> Result<WsList, OpError> {
     // 2. The registry alone, unless asked to check.
     if !req.check {
         let workspaces = entries.into_iter().map(listed).collect();
-        return Ok(WsList { workspaces });
+        return Ok(WsList::new(workspaces));
     }
 
     // 3. Each workspace's state, or an orphan.
@@ -35,43 +35,32 @@ pub fn list(ctx: &Ctx<'_>, req: WsListReq) -> Result<WsList, OpError> {
         let dir = Utf8Path::new(&entry.path);
         match state::read(ctx.fs.as_ref(), dir) {
             Ok(file) => workspaces.push(described(&entry.name, dir, &file)),
-            Err(e) if e.code == ErrorCode::WsNotFound.as_str() => workspaces.push(WsInfo {
-                orphan: true,
-                ..listed(entry)
-            }),
+            Err(e) if e.code == ErrorCode::WsNotFound.as_str() => {
+                let mut out = listed(entry);
+                out.orphan = true;
+                workspaces.push(out);
+            }
             Err(e) => return Err(e),
         }
     }
-    Ok(WsList { workspaces })
+    Ok(WsList::new(workspaces))
 }
 
 /// Workspace `name` at `dir`, as its `workspace.json` describes it: what `ws info` answers and
 /// `ws list --check` lists.
 pub(crate) fn described(name: &str, dir: &Utf8Path, file: &WorkspaceFile) -> WsInfo {
-    WsInfo {
-        name: name.to_owned(),
-        path: dir.to_string(),
-        base: file.base.clone(),
-        head: file.head.clone(),
-        prefixes: file.prefixes.clone(),
-        all: file.all,
-        created: false,
-        orphan: false,
-        status_after: None,
-    }
+    let mut out = WsInfo::new(
+        name.to_owned(),
+        dir.to_string(),
+        file.base.clone(),
+        file.head.clone(),
+    );
+    out.prefixes.clone_from(&file.prefixes);
+    out.all = file.all;
+    out
 }
 
 /// A workspace as its registry entry alone tells: its name and directory.
 fn listed(entry: Entry) -> WsInfo {
-    WsInfo {
-        name: entry.name,
-        path: entry.path,
-        base: String::new(),
-        head: String::new(),
-        prefixes: Vec::new(),
-        all: false,
-        created: false,
-        orphan: false,
-        status_after: None,
-    }
+    WsInfo::new(entry.name, entry.path, String::new(), String::new())
 }

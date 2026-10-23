@@ -23,6 +23,7 @@ pub fn discard(ctx: &Ctx<'_>, req: WsDiscardReq) -> Result<WsDiscardResp, OpErro
         workspace,
         paths,
         status_after,
+        ..
     } = req;
     let asked = if paths.is_empty() {
         None
@@ -45,10 +46,9 @@ pub fn discard(ctx: &Ctx<'_>, req: WsDiscardReq) -> Result<WsDiscardResp, OpErro
 
     // 2. The head's files written back.
     let discarded = restore(ctx, &ws, &ws.file.head, &named)?;
-    Ok(WsDiscardResp {
-        discarded: discarded.into_iter().collect(),
-        status_after: after::attach(ctx, &ws, status_after),
-    })
+    let mut out = WsDiscardResp::new(discarded.into_iter().collect());
+    out.status_after = after::attach(ctx, &ws, status_after);
+    Ok(out)
 }
 
 /// Makes each of the `named` paths of workspace `ws` (whose lock the caller holds) what

@@ -41,6 +41,7 @@ pub fn delete(ctx: &Ctx<'_>, req: WsDeleteReq) -> Result<WsDeleteResp, OpError> 
         workspace: name,
         force,
         rescue,
+        ..
     } = req;
     let rescued = if rescue { rescued(ctx, &name)? } else { None };
 
@@ -90,23 +91,16 @@ pub fn delete(ctx: &Ctx<'_>, req: WsDeleteReq) -> Result<WsDeleteResp, OpError> 
     remove_below(host, &ws.dir, &[])?;
     remove_dir(host, &ws.dir)?;
     Registry::open(&ctx.store_root, Arc::clone(&ctx.fs)).delete(&name)?;
-    Ok(WsDeleteResp {
-        deleted: name,
-        head: ws.file.head,
-        rescued,
-    })
+    let mut out = WsDeleteResp::new(name, ws.file.head);
+    out.rescued = rescued;
+    Ok(out)
 }
 
 /// The rescue changeset of workspace `name`'s edits, committed on its head; none when it has
 /// no edit.
 fn rescued(ctx: &Ctx<'_>, name: &str) -> Result<Option<String>, OpError> {
-    let req = WsCommitReq {
-        workspace: name.to_owned(),
-        message: rescue_message(name),
-        paths: Vec::new(),
-        modes: std::collections::BTreeMap::new(),
-        status_after: StatusAfter::None,
-    };
+    let mut req = WsCommitReq::new(name.to_owned(), rescue_message(name));
+    req.status_after = StatusAfter::None;
     match commit::commit(ctx, req) {
         Ok(done) => Ok(Some(done.changeset)),
         Err(e) if e.code == ErrorCode::EmptyCommit.as_str() => Ok(None),
@@ -139,11 +133,7 @@ fn orphan(ctx: &Ctx<'_>, name: &str, gone: OpError) -> Result<WsDeleteResp, OpEr
 
     // 3. The entry, after the directory (WS4).
     registry.delete(name)?;
-    Ok(WsDeleteResp {
-        deleted: name.to_owned(),
-        head: String::new(),
-        rescued: None,
-    })
+    Ok(WsDeleteResp::new(name.to_owned(), String::new()))
 }
 
 /// Removes everything below directory `dir` but the names `keep` directly in it; a symlink is

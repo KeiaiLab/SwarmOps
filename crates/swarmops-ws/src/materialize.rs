@@ -44,7 +44,7 @@ use crate::portable::{self, HOST};
 use crate::state::{self, Volume};
 use crate::volume::{EXEC_BITS, EXEC_MODE};
 use crate::workspace::{self, Locate, Workspace};
-use crate::{Ctx, after};
+use crate::{Ctx, after, io_error};
 
 /// The entries one `read_tree` or `diff` page asks for.
 const PAGE: usize = 1000;
@@ -121,6 +121,7 @@ pub fn materialize(ctx: &Ctx<'_>, req: WsMaterializeReq) -> Result<WsMaterialize
         workspace,
         paths,
         status_after,
+        ..
     } = req;
     if paths.is_empty() {
         return Err(OpError::new(
@@ -166,11 +167,9 @@ pub fn materialize(ctx: &Ctx<'_>, req: WsMaterializeReq) -> Result<WsMaterialize
         written = apply(ctx, &mut ws, &intent, prepared)?;
     }
 
-    Ok(WsMaterializeResp {
-        materialized: added,
-        bytes: written.bytes,
-        status_after: after::attach(ctx, &ws, status_after),
-    })
+    let mut out = WsMaterializeResp::new(added, written.bytes);
+    out.status_after = after::attach(ctx, &ws, status_after);
+    Ok(out)
 }
 
 /// Moves the files of workspace `ws` to changeset `to`: only what differs between the tree they
@@ -649,16 +648,14 @@ fn between(
     let mut cursor = None;
     loop {
         // 1. A page of the files that differ.
-        let page = store.diff(DiffReq {
-            from: from.into(),
-            to: intent.to.as_str().into(),
-            paths: intent.prefixes.clone(),
-            format: DiffFormat::Names,
-            context: DEFAULT_DIFF_CONTEXT,
-            limit: PAGE,
-            cursor: cursor.take(),
-            max_bytes: DEFAULT_DIFF_MAX_BYTES,
-        })?;
+        let mut req = DiffReq::new(from, intent.to.as_str());
+        req.paths.clone_from(&intent.prefixes);
+        req.format = DiffFormat::Names;
+        req.context = DEFAULT_DIFF_CONTEXT;
+        req.limit = PAGE;
+        req.cursor = cursor.take();
+        req.max_bytes = DEFAULT_DIFF_MAX_BYTES;
+        let page = store.diff(req)?;
 
         // 2. Each one's old and new file.
         for file in page.files {
@@ -678,6 +675,7 @@ fn between(
                     new: new.file(&path)?,
                     old: Some(old.file(&path)?),
                 },
+                _ => return Err(io_error::unknown_variant("DiffStatus")),
             };
             changes.push(change);
         }
@@ -746,7 +744,7 @@ pub(crate) fn items_under(
         match tree.entry(prefix)? {
             None => return Ok(None),
             Some(entry) if entry.kind != EntryKindOut::Dir => {
-                return Ok(Some(vec![item(prefix, &entry)]));
+                return Ok(Some(vec![item(prefix, &entry)?]));
             }
             Some(_) => {}
         }
@@ -758,20 +756,19 @@ pub(crate) fn items_under(
     while let Some(dir) = todo.pop() {
         let mut cursor = None;
         loop {
-            let page = store.read_tree(ReadTreeReq {
-                rev: tree.rev.as_str().into(),
-                path: dir.clone(),
-                depth: MAX_TREE_DEPTH,
-                limit: PAGE,
-                cursor: cursor.take(),
-            })?;
+            let mut req = ReadTreeReq::new(tree.rev.as_str());
+            req.path.clone_from(&dir);
+            req.depth = MAX_TREE_DEPTH;
+            req.limit = PAGE;
+            req.cursor = cursor.take();
+            let page = store.read_tree(req)?;
 
             // 3. Its files; a directory as deep as the listing reaches is listed again.
             for entry in &page.entries {
                 let below = entry.path.as_deref().unwrap_or(&entry.name);
                 let path = join(dir.as_deref().unwrap_or(""), below);
                 if entry.kind != EntryKindOut::Dir {
-                    items.push(item(&path, entry));
+                    items.push(item(&path, entry)?);
                 } else if below.split('/').count() >= usize::try_from(MAX_TREE_DEPTH).unwrap_or(64)
                 {
                     todo.push(Some(path));
@@ -786,19 +783,21 @@ pub(crate) fn items_under(
     Ok(Some(items))
 }
 
-/// The [`Item`] of `entry`, a file of a listing, at `path`.
-fn item(path: &str, entry: &TreeEntryOut) -> Item {
+/// The [`Item`] of `entry`, a file of a listing, at `path`; `E_INTERNAL` for a kind this build
+/// does not know.
+fn item(path: &str, entry: &TreeEntryOut) -> Result<Item, OpError> {
     let kind = match entry.kind {
         EntryKindOut::Exec => FileKind::Exec,
         EntryKindOut::Symlink => FileKind::Symlink,
         EntryKindOut::File | EntryKindOut::Dir => FileKind::File,
+        _ => return Err(io_error::unknown_variant("EntryKindOut")),
     };
-    Item {
+    Ok(Item {
         path: path.to_owned(),
         kind,
         blob: entry.id.clone(),
         size: entry.size.unwrap_or(0),
-    }
+    })
 }
 
 /// A changeset's tree, read a directory at a time and kept: what a materialisation asks of one
@@ -834,13 +833,12 @@ impl<'a> Tree<'a> {
         let mut entries = Vec::new();
         let mut cursor = None;
         let listed = loop {
-            let page = self.store.read_tree(ReadTreeReq {
-                rev: self.rev.as_str().into(),
-                path: (!dir.is_empty()).then(|| dir.to_owned()),
-                depth: 1,
-                limit: PAGE,
-                cursor: cursor.take(),
-            });
+            let mut req = ReadTreeReq::new(self.rev.as_str());
+            req.path = (!dir.is_empty()).then(|| dir.to_owned());
+            req.depth = 1;
+            req.limit = PAGE;
+            req.cursor = cursor.take();
+            let page = self.store.read_tree(req);
             let page = match page {
                 Ok(page) => page,
                 Err(e) if e.code == ErrorCode::PathNotFound.as_str() => break None,
@@ -868,7 +866,7 @@ impl<'a> Tree<'a> {
     /// The file at `path`, which a `diff` named: `E_INTERNAL` when the tree has none.
     fn file(&self, path: &str) -> Result<Item, OpError> {
         match self.entry(path)? {
-            Some(entry) if entry.kind != EntryKindOut::Dir => Ok(item(path, &entry)),
+            Some(entry) if entry.kind != EntryKindOut::Dir => item(path, &entry),
             _ => Err(OpError::new(
                 ErrorCode::Internal,
                 format!(
@@ -907,10 +905,9 @@ pub(crate) fn fetch(
     let mut contents = HashMap::with_capacity(ids.len());
     while !ids.is_empty() {
         // 1. As many as fit in one answer.
-        let got = store.blob_get(BlobGetReq {
-            ids: ids.iter().map(|id| (*id).to_owned()).collect(),
-            max_bytes: DEFAULT_BLOB_GET_MAX_BYTES,
-        })?;
+        let mut req = BlobGetReq::new(ids.iter().map(|id| (*id).to_owned()).collect());
+        req.max_bytes = DEFAULT_BLOB_GET_MAX_BYTES;
+        let got = store.blob_get(req)?;
         if let Some(missing) = got.missing.first() {
             return Err(OpError::new(
                 ErrorCode::StoreCorrupt,
@@ -928,6 +925,7 @@ pub(crate) fn fetch(
                         format!("blob_get gave blob {} in bad base64: {e}", blob.id),
                     )
                 })?,
+                _ => return Err(io_error::unknown_variant("ContentEncoding")),
             };
             contents.insert(blob.id, bytes);
         }
