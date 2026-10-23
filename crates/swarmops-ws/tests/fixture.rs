@@ -18,7 +18,7 @@ use swarmops_api::{
 };
 use swarmops_ops::LocalOps;
 use swarmops_store::{FsOps, RealFs};
-use swarmops_ws::state::{self, Volume, WorkspaceFile};
+use swarmops_ws::state::{self, Volume};
 use swarmops_ws::workspace::{Locate, Workspace};
 use swarmops_ws::{Ctx, HostFs, RealHost};
 
@@ -67,27 +67,26 @@ impl Fixture {
 
     /// What the workspace operations run with, over the host `host` and the durable files' `fs`.
     pub fn ctx_with(&self, host: Arc<dyn HostFs>, fs: Arc<dyn FsOps>) -> Ctx<'_> {
-        Ctx {
-            store: &self.ops,
-            store_root: self.root.clone(),
-            who: Some(Identity::parse(AGENT).unwrap()),
+        Ctx::new(
+            &self.ops,
+            self.root.clone(),
+            Some(Identity::parse(AGENT).unwrap()),
             fs,
             host,
-        }
+        )
     }
 
     /// What the workspace operations run with, over the real host, with `store` in place of the
     /// fixture's own (a [`Watched`] one over it).
     pub fn ctx_over<'s>(&'s self, store: &'s dyn StoreOps) -> Ctx<'s> {
-        Ctx {
-            store,
-            ..self.ctx()
-        }
+        let mut ctx = self.ctx();
+        ctx.store = store;
+        ctx
     }
 
     /// What the workspace operations run with, over the real host.
     pub fn ctx(&self) -> Ctx<'_> {
-        self.ctx_on(Arc::new(RealHost))
+        self.ctx_on(Arc::new(RealHost::default()))
     }
 
     /// A directory beside the store, not made.
@@ -171,10 +170,8 @@ impl Fixture {
     /// probed: how the tests simulate a volume this host has none of.
     pub fn simulate(&self, name: &str, volume: Volume) {
         let dir = self.beside(name);
-        let file = WorkspaceFile {
-            volume,
-            ..state::read(&RealFs, &dir).unwrap()
-        };
+        let mut file = state::read(&RealFs, &dir).unwrap();
+        file.volume = volume;
         state::replace(&RealFs, &dir, &file).unwrap();
     }
 }
@@ -978,7 +975,8 @@ pub mod sweep {
         // 1. The update, its host failing at the first `set_mode`.
         let f = Fixture::new();
         prepare(&f, Scenario::Update);
-        let host = TraceHost::new(Arc::new(RealHost), Trace::default()).failing("set_mode");
+        let host =
+            TraceHost::new(Arc::new(RealHost::default()), Trace::default()).failing("set_mode");
         let ctx = f.ctx_on(Arc::new(host));
         assert!(act(&ctx, Scenario::Update).is_err());
         let dir = f.beside(WS);
@@ -999,7 +997,8 @@ pub mod sweep {
         // 1. The update, its host failing at the first `set_mode`.
         let f = Fixture::new();
         prepare(&f, Scenario::Update);
-        let host = TraceHost::new(Arc::new(RealHost), Trace::default()).failing("set_mode");
+        let host =
+            TraceHost::new(Arc::new(RealHost::default()), Trace::default()).failing("set_mode");
         let ctx = f.ctx_on(Arc::new(host));
         assert!(act(&ctx, Scenario::Update).is_err());
         let dir = f.beside(WS);
@@ -1099,13 +1098,13 @@ pub mod sweep {
         host: Arc<dyn HostFs>,
         fs: Arc<dyn FsOps>,
     ) -> Ctx<'a> {
-        Ctx {
-            store: ops,
-            store_root: root.into(),
-            who: Some(Identity::parse(AGENT).unwrap()),
+        Ctx::new(
+            ops,
+            root.into(),
+            Some(Identity::parse(AGENT).unwrap()),
             fs,
             host,
-        }
+        )
     }
 
     /// What a run that never crashes shows: its calls on each layer, its events, its outcome.
@@ -1130,19 +1129,17 @@ pub mod sweep {
         watched.trace = Some(trace.clone());
 
         // 2. Run over counting doubles under the trace.
-        let counting_host = Arc::new(CrashAtHost::new(RealHost, 0));
+        let counting_host = Arc::new(CrashAtHost::new(RealHost::default(), 0));
         let counting_fs = Arc::new(CrashAtFs::new(RealFs, 0));
         let host = TraceHost::new(counting_host.clone(), trace.clone());
         let fs = TraceFs {
             inner: counting_fs.clone(),
             trace: trace.clone(),
         };
-        let ctx = f.ctx_over(&watched);
-        let ctx = Ctx {
-            host: Arc::new(host),
-            fs: Arc::new(fs),
-            ..ctx
-        };
+        let mut ctx = f.ctx_over(&watched);
+        ctx.host = Arc::new(host);
+        ctx.fs = Arc::new(fs);
+
         act(&ctx, scenario).unwrap();
 
         // 3. The outcome through the plain context.
@@ -1205,8 +1202,14 @@ pub mod sweep {
         // 2. The scenario over the layer that aborts.
         let ops = LocalOps::open(Utf8Path::new(root)).unwrap();
         let (host, fs): (Arc<dyn HostFs>, Arc<dyn FsOps>) = match layer {
-            "host" => (Arc::new(CrashAtHost::new(RealHost, k)), Arc::new(RealFs)),
-            _ => (Arc::new(RealHost), Arc::new(CrashAtFs::new(RealFs, k))),
+            "host" => (
+                Arc::new(CrashAtHost::new(RealHost::default(), k)),
+                Arc::new(RealFs),
+            ),
+            _ => (
+                Arc::new(RealHost::default()),
+                Arc::new(CrashAtFs::new(RealFs, k)),
+            ),
         };
         let ctx = ctx_on(&ops, root, host, fs);
         let _ = act(&ctx, scenario);
@@ -1229,7 +1232,7 @@ pub mod sweep {
 
         // 2. Opened: a materialisation it left is finished.
         let ctx = f.ctx_with(
-            Arc::new(RealHost),
+            Arc::new(RealHost::default()),
             swarmops_testkit::faults::checked(RealFs),
         );
         let dir = f.beside(WS);

@@ -11,6 +11,7 @@ use crate::hostfs::HostFs;
 /// What every workspace operation runs with: the store, where it is, who acts, and the two file
 /// layers. The CLI builds it from `--repo` / `SWARMOPS_REPO` or the workspace's `repo` and the
 /// caller's identity, if any; the MCP server from its own store and identity.
+#[non_exhaustive]
 pub struct Ctx<'a> {
     /// The store's operations.
     pub store: &'a dyn StoreOps,
@@ -23,4 +24,24 @@ pub struct Ctx<'a> {
     pub fs: Arc<dyn FsOps>,
     /// The host layer of the materialised tree.
     pub host: Arc<dyn HostFs>,
+}
+
+impl<'a> Ctx<'a> {
+    /// A context on `store`, whose root on the host is `store_root`, acting as `who`, over the
+    /// durable files' `fs` and the materialised tree's `host`.
+    pub fn new(
+        store: &'a dyn StoreOps,
+        store_root: Utf8PathBuf,
+        who: Option<Identity>,
+        fs: Arc<dyn FsOps>,
+        host: Arc<dyn HostFs>,
+    ) -> Ctx<'a> {
+        Ctx {
+            store,
+            store_root,
+            who,
+            fs,
+            host,
+        }
+    }
 }

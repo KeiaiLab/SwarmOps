@@ -7,11 +7,7 @@ use swarmops_ws::{RealFs, lock, materialize};
 use crate::fixture::{Fixture, Put, exec, file, link, tree_of};
 
 /// A volume as this host's, which holds all three.
-const LINUX: Volume = Volume {
-    case_insensitive: false,
-    exec_bit: true,
-    symlinks: true,
-};
+const LINUX: Volume = Volume::new(false, true, true);
 
 /// The request of `ws materialize` adding `paths` to workspace `name`.
 fn expand(name: &str, paths: &[&str]) -> WsMaterializeReq {
@@ -110,7 +106,7 @@ fn an_update_writes_only_what_changed() {
     );
 
     // 3. The update over a recording host.
-    let host = Arc::new(RecordingHost::new(RealHost));
+    let host = Arc::new(RecordingHost::new(RealHost::default()));
     let ctx = f.ctx_on(host.clone());
     update(&ctx, "w", &next).unwrap();
 
@@ -275,13 +271,9 @@ fn a_case_collision_is_refused_on_a_case_insensitive_volume_naming_both_paths() 
         ],
     );
     f.create("w", &base, &["src"]);
-    f.simulate(
-        "w",
-        Volume {
-            case_insensitive: true,
-            ..LINUX
-        },
-    );
+    let mut volume = LINUX;
+    volume.case_insensitive = true;
+    f.simulate("w", volume);
     let dir = f.beside("w");
     let before = tree_of(&dir);
 
@@ -348,13 +340,9 @@ fn a_symlink_is_a_plain_file_on_a_volume_without_links() {
         &[Put::File("src/a", "a\n"), Put::Link("lib/l", "../src/a")],
     );
     f.create("w", &base, &["src"]);
-    f.simulate(
-        "w",
-        Volume {
-            symlinks: false,
-            ..LINUX
-        },
-    );
+    let mut volume = LINUX;
+    volume.symlinks = false;
+    f.simulate("w", volume);
 
     // 2. `lib` added: its link is a file holding the target.
     swarmops_ws::materialize(&f.ctx(), expand("w", &["lib"])).unwrap();
@@ -386,13 +374,9 @@ fn exec_mode_lives_in_the_index_on_a_volume_without_the_bit() {
         ],
     );
     f.create("w", &base, &["src"]);
-    f.simulate(
-        "w",
-        Volume {
-            exec_bit: false,
-            ..LINUX
-        },
-    );
+    let mut volume = LINUX;
+    volume.exec_bit = false;
+    f.simulate("w", volume);
 
     // 2. `tools` added: the executable is a plain file there.
     swarmops_ws::materialize(&f.ctx(), expand("w", &["tools"])).unwrap();
@@ -509,7 +493,7 @@ mod killed {
         let expected = tree_of(&f.beside("probe"));
 
         // 3. How many calls a create makes on each layer, counted by the doubles with no cut.
-        let counting_host = Arc::new(CrashAtHost::new(RealHost, 0));
+        let counting_host = Arc::new(CrashAtHost::new(RealHost::default(), 0));
         let counting_fs = Arc::new(CrashAtFs::new(RealFs, 0));
         let ctx = f.ctx_with(counting_host.clone(), counting_fs.clone());
         swarmops_ws::create(&ctx, request(f.root.as_str(), "count")).unwrap();
@@ -528,7 +512,12 @@ mod killed {
             for _ in 0..PARALLEL {
                 scope.spawn(|| {
                     let ops = LocalOps::open(&f.root).unwrap();
-                    let ctx = ctx_on(&ops, f.root.as_str(), Arc::new(RealHost), Arc::new(RealFs));
+                    let ctx = ctx_on(
+                        &ops,
+                        f.root.as_str(),
+                        Arc::new(RealHost::default()),
+                        Arc::new(RealFs),
+                    );
                     while let Some(&(layer, k)) = cuts.get(next.fetch_add(1, Ordering::SeqCst)) {
                         cut_and_recover(test, &f, &ctx, (layer, k), &expected);
                     }
@@ -549,8 +538,14 @@ mod killed {
         // 2. The create over the layer that aborts.
         let ops = LocalOps::open(Utf8Path::new(root)).unwrap();
         let (host, fs): (Arc<dyn HostFs>, Arc<dyn FsOps>) = match layer {
-            "host" => (Arc::new(CrashAtHost::new(RealHost, k)), Arc::new(RealFs)),
-            _ => (Arc::new(RealHost), Arc::new(CrashAtFs::new(RealFs, k))),
+            "host" => (
+                Arc::new(CrashAtHost::new(RealHost::default(), k)),
+                Arc::new(RealFs),
+            ),
+            _ => (
+                Arc::new(RealHost::default()),
+                Arc::new(CrashAtFs::new(RealFs, k)),
+            ),
         };
         let ctx = ctx_on(&ops, root, host, fs);
         let _ = swarmops_ws::create(&ctx, request(root, name));
@@ -588,13 +583,13 @@ mod killed {
         host: Arc<dyn HostFs>,
         fs: Arc<dyn FsOps>,
     ) -> Ctx<'a> {
-        Ctx {
-            store: ops,
-            store_root: root.into(),
-            who: Some(Identity::parse(AGENT).unwrap()),
+        Ctx::new(
+            ops,
+            root.into(),
+            Some(Identity::parse(AGENT).unwrap()),
             fs,
             host,
-        }
+        )
     }
 
     /// The create of workspace `name` beside the store at `root`, of the whole of `main`.

@@ -30,6 +30,7 @@ use camino::Utf8PathBuf;
 
 /// What a path is on the host, as `symlink_metadata` sees it: a symlink is never followed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum HostKind {
     /// A regular file.
     File,
@@ -43,6 +44,7 @@ pub enum HostKind {
 
 /// A path's metadata, as status compares it with the index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct HostMeta {
     /// What the path is.
     pub kind: HostKind,
@@ -101,6 +103,7 @@ const TEMP_SUFFIX: &str = ".swarmws-tmp";
 
 /// The host's own filesystem.
 #[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
 pub struct RealHost;
 
 impl HostFs for RealHost {
@@ -281,6 +284,7 @@ fn inode_and_mode(_meta: &std::fs::Metadata) -> (u64, u32) {
 /// A [`HostFs`] method, as [`RecordingHost`] records it (feature `test-hooks`).
 #[cfg(feature = "test-hooks")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum HostMethod {
     /// [`HostFs::write_file`].
     WriteFile,
@@ -309,6 +313,7 @@ pub enum HostMethod {
 /// One call [`RecordingHost`] saw: the method and the path it named (`from` for a rename).
 #[cfg(feature = "test-hooks")]
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct HostCall {
     /// The method.
     pub method: HostMethod,
@@ -319,6 +324,7 @@ pub struct HostCall {
 /// A host that forwards every call to `inner` and records it, in order: what a test counts to
 /// see that an update writes only what changed (feature `test-hooks`).
 #[cfg(feature = "test-hooks")]
+#[non_exhaustive]
 pub struct RecordingHost<H: HostFs = RealHost> {
     /// The host the calls go to.
     inner: H,
@@ -427,6 +433,7 @@ impl<H: HostFs> HostFs for RecordingHost<H> {
 /// process with [`std::process::abort`] instead of running, as a crash at that exact point
 /// would. It counts every call ([`CrashAtHost::calls`]).
 #[cfg(feature = "test-hooks")]
+#[non_exhaustive]
 pub struct CrashAtHost<H: HostFs = RealHost> {
     /// The host the calls go to.
     inner: H,

@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use swarmops_api::{Identity, OpError, StoreOps, WsListReq};
 use swarmops_ops::LocalOps;
 use swarmops_store::{FsOps, RealFs};
-use swarmops_ws::registry::{ENTRY_FORMAT, Entry, Linked, REGISTRY_DIR, Registry};
+use swarmops_ws::registry::{Entry, Linked, REGISTRY_DIR, Registry};
 use swarmops_ws::state::{self, SWARMWS_DIR, State, Volume, WorkspaceFile};
 use swarmops_ws::{Ctx, RealHost};
 
@@ -40,13 +40,13 @@ impl Store {
 
     /// What the workspace operations run with, on this store.
     fn ctx(&self) -> Ctx<'_> {
-        Ctx {
-            store: &self.ops,
-            store_root: self.root.clone(),
-            who: None,
-            fs: Arc::new(RealFs),
-            host: Arc::new(RealHost),
-        }
+        Ctx::new(
+            &self.ops,
+            self.root.clone(),
+            None,
+            Arc::new(RealFs),
+            Arc::new(RealHost::default()),
+        )
     }
 
     /// A directory beside the store, not made.
@@ -57,14 +57,12 @@ impl Store {
 
 /// The entry of workspace `name` at `path`, made by `claude-code/<name>`.
 fn entry(name: &str, path: &Utf8Path) -> Entry {
-    Entry {
-        format: ENTRY_FORMAT,
-        name: name.to_owned(),
-        path: path.to_string(),
-        created_by: format!("claude-code/{name}"),
-        created_at: 1_792_630_000_000,
-        session: None,
-    }
+    Entry::new(
+        name.to_owned(),
+        path.to_string(),
+        format!("claude-code/{name}"),
+        1_792_630_000_000,
+    )
 }
 
 /// A request or a response from its JSON form.
@@ -142,10 +140,8 @@ fn a_create_with_the_same_arguments_is_the_same_workspace() {
     assert_eq!(registry.create(&first).unwrap(), Linked::New);
 
     // 2. The same arguments later: the existing entry, nothing written.
-    let again = Entry {
-        created_at: first.created_at + 5_000,
-        ..first.clone()
-    };
+    let mut again = first.clone();
+    again.created_at += 5_000;
     assert_eq!(
         registry.create(&again).unwrap(),
         Linked::Existing(first.clone())
@@ -153,11 +149,9 @@ fn a_create_with_the_same_arguments_is_the_same_workspace() {
     assert_eq!(registry.read("worker").unwrap(), Some(first.clone()));
 
     // 3. So with a session, the same one on both.
-    let hooked = Entry {
-        name: "hooked".to_owned(),
-        session: Some("0123456789abcdef".to_owned()),
-        ..first.clone()
-    };
+    let mut hooked = first.clone();
+    hooked.name = "hooked".to_owned();
+    hooked.session = Some("0123456789abcdef".to_owned());
     assert_eq!(registry.create(&hooked).unwrap(), Linked::New);
     assert_eq!(
         registry.create(&hooked).unwrap(),
@@ -165,15 +159,11 @@ fn a_create_with_the_same_arguments_is_the_same_workspace() {
     );
 
     // 4. Another path or another creator is another workspace: E_WS_EXISTS.
-    let elsewhere = Entry {
-        path: store.beside("other").to_string(),
-        ..first.clone()
-    };
+    let mut elsewhere = first.clone();
+    elsewhere.path = store.beside("other").to_string();
     assert_eq!(registry.create(&elsewhere).unwrap_err().code, "E_WS_EXISTS");
-    let someone = Entry {
-        created_by: "claude-code/other".to_owned(),
-        ..first.clone()
-    };
+    let mut someone = first.clone();
+    someone.created_by = "claude-code/other".to_owned();
     assert_eq!(registry.create(&someone).unwrap_err().code, "E_WS_EXISTS");
     assert_eq!(registry.read("worker").unwrap(), Some(first));
 }
@@ -185,18 +175,14 @@ fn a_create_with_another_session_is_ws_exists() {
     // 1. A hook-made entry, with its session.
     let store = Store::new();
     let registry = store.registry();
-    let hooked = Entry {
-        session: Some("0123456789abcdef".to_owned()),
-        ..entry("worker", &store.beside("w"))
-    };
+    let mut hooked = entry("worker", &store.beside("w"));
+    hooked.session = Some("0123456789abcdef".to_owned());
     assert_eq!(registry.create(&hooked).unwrap(), Linked::New);
 
     // 2. Another session, and none, are refused, naming the entry there.
     for session in [Some("fedcba9876543210".to_owned()), None] {
-        let other = Entry {
-            session,
-            ..hooked.clone()
-        };
+        let mut other = hooked.clone();
+        other.session = session;
         let refused = registry.create(&other).unwrap_err();
         assert_eq!(refused.code, "E_WS_EXISTS", "{refused:?}");
         assert_eq!(refused.details["path"], hooked.path.as_str());
@@ -205,10 +191,8 @@ fn a_create_with_another_session_is_ws_exists() {
     // 3. A hand-made entry is refused to a hook's create of the same name.
     let hand = entry("manual", &store.beside("m"));
     assert_eq!(registry.create(&hand).unwrap(), Linked::New);
-    let by_hook = Entry {
-        session: Some("0123456789abcdef".to_owned()),
-        ..hand.clone()
-    };
+    let mut by_hook = hand.clone();
+    by_hook.session = Some("0123456789abcdef".to_owned());
     assert_eq!(registry.create(&by_hook).unwrap_err().code, "E_WS_EXISTS");
     assert_eq!(registry.read("manual").unwrap(), Some(hand));
 }
@@ -393,27 +377,21 @@ fn list_check_reports_a_missing_directory_as_orphan() {
 
 /// A workspace's state, as `ws create` records one for `name`.
 fn workspace(name: &str) -> WorkspaceFile {
-    WorkspaceFile {
-        format: state::WORKSPACE_FORMAT,
-        name: name.to_owned(),
-        repo: "/stores/acme".to_owned(),
-        repo_id: "0".repeat(32),
-        base: "b".repeat(64),
-        head: "c".repeat(64),
-        prefixes: vec!["src".to_owned()],
-        all: false,
-        created_by: format!("claude-code/{name}"),
-        created_at: 1_792_630_000_000,
-        target: "main".to_owned(),
-        state: State::Clean,
-        onto: None,
-        volume: Volume {
-            case_insensitive: false,
-            exec_bit: true,
-            symlinks: true,
-        },
-        materialized: "c".repeat(64),
-    }
+    WorkspaceFile::new(
+        name.to_owned(),
+        "/stores/acme".to_owned(),
+        "0".repeat(32),
+        "b".repeat(64),
+        "c".repeat(64),
+        vec!["src".to_owned()],
+        false,
+        format!("claude-code/{name}"),
+        1_792_630_000_000,
+        "main".to_owned(),
+        State::Clean,
+        Volume::new(false, true, true),
+        "c".repeat(64),
+    )
 }
 
 /// A create and a delete of an entry, cut at each of their filesystem calls in turn (every

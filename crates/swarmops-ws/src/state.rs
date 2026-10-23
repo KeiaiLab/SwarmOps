@@ -25,6 +25,7 @@ pub const WORKSPACE_FORMAT: u32 = 1;
 
 /// A workspace's durable state.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WorkspaceFile {
     /// The file's format: [`WORKSPACE_FORMAT`].
     pub format: u32,
@@ -61,9 +62,52 @@ pub struct WorkspaceFile {
     pub materialized: String,
 }
 
+impl WorkspaceFile {
+    /// The state of workspace `name` in [`WORKSPACE_FORMAT`], which a read checks again; no
+    /// `onto`. The fields are those of the struct, in its order.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "every field but `onto` is required; a `Default` would need a made-up state"
+    )]
+    pub fn new(
+        name: String,
+        repo: String,
+        repo_id: String,
+        base: String,
+        head: String,
+        prefixes: Vec<String>,
+        all: bool,
+        created_by: String,
+        created_at: u64,
+        target: String,
+        state: State,
+        volume: Volume,
+        materialized: String,
+    ) -> WorkspaceFile {
+        WorkspaceFile {
+            format: WORKSPACE_FORMAT,
+            name,
+            repo,
+            repo_id,
+            base,
+            head,
+            prefixes,
+            all,
+            created_by,
+            created_at,
+            target,
+            state,
+            onto: None,
+            volume,
+            materialized,
+        }
+    }
+}
+
 /// A workspace's state: clean, or stopped in a rebase on conflicts.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum State {
     /// No rebase in progress. A land in flight is the pending record, not a state.
     Clean,
@@ -82,6 +126,7 @@ pub enum State {
     clippy::struct_excessive_bools,
     reason = "three independent facts of the volume, as workspace.json spells them"
 )]
+#[non_exhaustive]
 pub struct Volume {
     /// Two names that differ only in case name one file.
     pub case_insensitive: bool,
@@ -89,6 +134,17 @@ pub struct Volume {
     pub exec_bit: bool,
     /// A symlink can be made.
     pub symlinks: bool,
+}
+
+impl Volume {
+    /// A volume that holds what the three facts say: `const`, so that a test can name one.
+    pub const fn new(case_insensitive: bool, exec_bit: bool, symlinks: bool) -> Volume {
+        Volume {
+            case_insensitive,
+            exec_bit,
+            symlinks,
+        }
+    }
 }
 
 /// The path of `workspace.json` in the workspace at `dir`.

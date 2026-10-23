@@ -45,6 +45,7 @@ const CHUNK: usize = 64 * 1024;
 
 /// What a command did.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Run {
     /// Its exit code; none when it was killed (by its timeout, or by a signal).
     pub exit_code: Option<i32>,
