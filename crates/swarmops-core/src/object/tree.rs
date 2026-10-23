@@ -110,6 +110,22 @@ impl EntryTarget {
         }
     }
 
+    /// The leaf's kind and blob; `None` for a subdirectory.
+    pub fn leaf(self) -> Option<(LeafKind, BlobId)> {
+        match self {
+            Self::Leaf(kind, blob) => Some((kind, blob)),
+            Self::Dir(_) => None,
+        }
+    }
+
+    /// The subdirectory's tree; `None` for a leaf.
+    pub fn dir(self) -> Option<TreeId> {
+        match self {
+            Self::Leaf(..) => None,
+            Self::Dir(tree) => Some(tree),
+        }
+    }
+
     /// The target that the layout's kind byte, parsed into `kind`, and `id` name.
     pub(crate) fn from_parts(kind: EntryKind, id: ObjectId) -> Self {
         match kind {
@@ -131,6 +147,15 @@ pub struct TreeEntry {
 }
 
 impl TreeEntry {
+    /// The entry `name` naming `target`. The name is checked where entries become a tree
+    /// ([`Tree::new`]).
+    pub fn new(name: impl Into<String>, target: EntryTarget) -> Self {
+        Self {
+            name: name.into(),
+            target,
+        }
+    }
+
     /// The entry `name` of a leaf of `kind` whose content is blob `blob`.
     pub fn leaf(name: impl Into<String>, kind: LeafKind, blob: BlobId) -> Self {
         Self {

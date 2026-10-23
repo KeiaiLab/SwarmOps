@@ -72,6 +72,27 @@ pub struct Changeset {
 }
 
 impl Signature {
+    /// The signature of `name` and `email` at `secs` with UTC offset `offset_secs`;
+    /// `negative_zero` writes the offset as git's `-0000`. Fails with
+    /// [`CodecError::BadSignature`] if `negative_zero` is set with a nonzero offset.
+    pub fn new(
+        name: Vec<u8>,
+        email: Vec<u8>,
+        secs: i64,
+        offset_secs: i32,
+        negative_zero: bool,
+    ) -> Result<Self, CodecError> {
+        let sig = Self {
+            name,
+            email,
+            secs,
+            offset_secs,
+            negative_zero,
+        };
+        sig.validate()?;
+        Ok(sig)
+    }
+
     fn validate(&self) -> Result<(), CodecError> {
         if self.negative_zero && self.offset_secs != 0 {
             return Err(CodecError::BadSignature);
@@ -100,7 +121,33 @@ impl Signature {
     }
 }
 
+impl DeltaOp {
+    /// The leaf's kind and blob of a put; `None` for a delete.
+    pub fn put(&self) -> Option<(LeafKind, BlobId)> {
+        match self {
+            Self::Put { kind, id } => Some((*kind, *id)),
+            Self::Delete => None,
+        }
+    }
+}
+
 impl DeltaEntry {
+    /// The entry for `path`, with the rename source `renamed_from` if any. Fails with
+    /// [`CodecError::BadRename`] if a delete carries a rename source or the source is `path`.
+    pub fn new(
+        path: RepoPath,
+        op: DeltaOp,
+        renamed_from: Option<RepoPath>,
+    ) -> Result<Self, CodecError> {
+        let entry = Self {
+            path,
+            op,
+            renamed_from,
+        };
+        entry.validate()?;
+        Ok(entry)
+    }
+
     fn validate(&self) -> Result<(), CodecError> {
         if let Some(from) = &self.renamed_from
             && (matches!(self.op, DeltaOp::Delete) || *from == self.path)
@@ -156,6 +203,34 @@ impl DeltaEntry {
 }
 
 impl Changeset {
+    /// The changeset of these fields, checked by [`Changeset::validate`]; the field docs say
+    /// what each holds.
+    // Every field is required: a changeset has no default author, root or parent list.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        parents: Vec<ChangesetId>,
+        root: TreeId,
+        delta: Vec<DeltaEntry>,
+        author: Signature,
+        committer: Signature,
+        message: Vec<u8>,
+        extra_headers: Vec<(Vec<u8>, Vec<u8>)>,
+        metadata: Vec<(String, Vec<u8>)>,
+    ) -> Result<Self, CodecError> {
+        let cs = Self {
+            parents,
+            root,
+            delta,
+            author,
+            committer,
+            message,
+            extra_headers,
+            metadata,
+        };
+        cs.validate()?;
+        Ok(cs)
+    }
+
     /// Checks the invariants neither the layout nor the types express: sorted unique delta
     /// paths, renames only on puts and never from the entry's own path, sorted unique metadata
     /// keys, consistent signatures. (That a put names a leaf, the type says: [`LeafKind`].)

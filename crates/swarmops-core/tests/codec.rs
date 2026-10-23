@@ -195,6 +195,90 @@ fn a_tree_entry_target_round_trips_through_the_byte_layout() {
     assert_eq!(Tree::decode(&bytes).unwrap(), Tree::empty_root());
 }
 
+/// Each accessor names the one variant it asks for and `None` for the other.
+#[test]
+fn the_accessors_name_one_variant() {
+    let blob = blob_id(b"x");
+    let dir = one_file_tree().id();
+
+    // A tree entry's target: a leaf or a subdirectory.
+    let leaf = EntryTarget::Leaf(LeafKind::Exec, blob);
+    assert_eq!(leaf.leaf(), Some((LeafKind::Exec, blob)));
+    assert_eq!(leaf.dir(), None);
+    assert_eq!(EntryTarget::Dir(dir).leaf(), None);
+    assert_eq!(EntryTarget::Dir(dir).dir(), Some(dir));
+
+    // A delta's op: a put or a delete.
+    let put = DeltaOp::Put {
+        kind: LeafKind::Symlink,
+        id: blob,
+    };
+    assert_eq!(put.put(), Some((LeafKind::Symlink, blob)));
+    assert_eq!(DeltaOp::Delete.put(), None);
+}
+
+/// The constructors refuse what `encode` refuses, with the same error, and keep what they are
+/// given.
+#[test]
+fn the_constructors_check_what_encode_checks() {
+    let path = |p: &str| RepoPath::new(p).unwrap();
+    let put = DeltaOp::Put {
+        kind: LeafKind::File,
+        id: blob_id(b"x"),
+    };
+
+    // A signature: `-0000` only with offset zero.
+    assert_eq!(
+        Signature::new(b"n".to_vec(), b"e".to_vec(), 0, 60, true).unwrap_err(),
+        CodecError::BadSignature
+    );
+    let ok = Signature::new(b"n".to_vec(), b"e".to_vec(), 5, 0, true).unwrap();
+    assert_eq!((ok.secs, ok.offset_secs, ok.negative_zero), (5, 0, true));
+
+    // A delta entry: a rename only on a put, never from its own path.
+    let refused = [
+        DeltaEntry::new(path("a"), DeltaOp::Delete, Some(path("b"))),
+        DeltaEntry::new(path("a"), put.clone(), Some(path("a"))),
+    ];
+    for entry in refused {
+        assert_eq!(entry.unwrap_err(), CodecError::BadRename);
+    }
+    let renamed = DeltaEntry::new(path("a"), put.clone(), Some(path("b"))).unwrap();
+    assert_eq!(renamed.renamed_from, Some(path("b")));
+
+    // A changeset: what `validate` checks, here a delta out of order.
+    let cs = minimal_changeset();
+    let entry = |p: &str| DeltaEntry::new(path(p), put.clone(), None).unwrap();
+    let unsorted = Changeset::new(
+        cs.parents.clone(),
+        cs.root,
+        vec![entry("b"), entry("a")],
+        cs.author.clone(),
+        cs.committer.clone(),
+        cs.message.clone(),
+        cs.extra_headers.clone(),
+        cs.metadata.clone(),
+    );
+    assert_eq!(unsorted.unwrap_err(), CodecError::Unsorted);
+    let same = Changeset::new(
+        cs.parents.clone(),
+        cs.root,
+        cs.delta.clone(),
+        cs.author.clone(),
+        cs.committer.clone(),
+        cs.message.clone(),
+        cs.extra_headers.clone(),
+        cs.metadata.clone(),
+    );
+    assert_eq!(same.unwrap(), cs);
+
+    // A tree entry: its name is checked where it becomes a tree.
+    let target = EntryTarget::Leaf(LeafKind::File, blob_id(b"x"));
+    let entry = TreeEntry::new("a/b", target);
+    assert_eq!((entry.name.as_str(), entry.target), ("a/b", target));
+    assert!(Tree::new(vec![entry]).is_err());
+}
+
 #[test]
 fn tree_new_rejects_unsorted_duplicate_and_empty() {
     let e = |name: &str| TreeEntry::leaf(name, LeafKind::File, blob_id(b"x"));

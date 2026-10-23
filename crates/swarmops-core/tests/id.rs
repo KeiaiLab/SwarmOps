@@ -97,3 +97,36 @@ fn hashed_new_is_hash_object() {
         assert_eq!(kept, [7; 4096]);
     }
 }
+
+/// An object file's header writes a kind as the byte `tag` gives: 0 blob, 1 tree, 2 changeset,
+/// the bytes the store wrote before the tag moved here. `from_tag` reads them back and no other.
+#[test]
+fn object_kind_tag_round_trips() {
+    let kinds = [
+        (ObjectKind::Blob, 0),
+        (ObjectKind::Tree, 1),
+        (ObjectKind::Changeset, 2),
+    ];
+    for (kind, byte) in kinds {
+        assert_eq!(kind.tag(), byte, "{kind:?}");
+        assert_eq!(ObjectKind::from_tag(byte), Some(kind));
+    }
+
+    // Every other byte names no kind.
+    for byte in 3..=u8::MAX {
+        assert_eq!(ObjectKind::from_tag(byte), None, "{byte}");
+    }
+}
+
+/// The constructors wrap what they are given: an id's digest, a typed id's untyped one.
+#[test]
+fn id_constructors_wrap_their_input() {
+    use swarmops_core::{BlobId, ChangesetId, TreeId};
+
+    let id = ObjectId::new([7; 32]);
+    assert_eq!(id.0, [7; 32]);
+    assert_eq!(ObjectId::from([7; 32]), id);
+    assert_eq!(BlobId::new(id).as_object_id(), id);
+    assert_eq!(TreeId::new(id).as_object_id(), id);
+    assert_eq!(ChangesetId::new(id).as_object_id(), id);
+}

@@ -11,6 +11,11 @@ use crate::error::IdError;
 pub struct ObjectId(pub [u8; 32]);
 
 impl ObjectId {
+    /// The id whose digest is `bytes`.
+    pub fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     /// Parses 64 hex characters (either case).
     pub fn from_hex(s: &str) -> Result<Self, IdError> {
         if s.len() != 64 {
@@ -34,6 +39,12 @@ impl fmt::Display for ObjectId {
         let mut buf = [0u8; 64];
         hex::encode_to_slice(self.0, &mut buf).map_err(|_| fmt::Error)?;
         f.write_str(std::str::from_utf8(&buf).map_err(|_| fmt::Error)?)
+    }
+}
+
+impl From<[u8; 32]> for ObjectId {
+    fn from(bytes: [u8; 32]) -> Self {
+        Self(bytes)
     }
 }
 
@@ -69,6 +80,26 @@ impl ObjectKind {
             Self::Blob => b"swarmops:blob:v1\0",
             Self::Tree => b"swarmops:tree:v1\0",
             Self::Changeset => b"swarmops:changeset:v1\0",
+        }
+    }
+
+    /// The kind's byte in a stored object file's header (storage spec §2): 0 blob, 1 tree,
+    /// 2 changeset. Part of the on-disk layout, so it never changes in place.
+    pub fn tag(self) -> u8 {
+        match self {
+            Self::Blob => 0,
+            Self::Tree => 1,
+            Self::Changeset => 2,
+        }
+    }
+
+    /// The kind whose [`ObjectKind::tag`] is `tag`, or `None` for a byte no kind has.
+    pub fn from_tag(tag: u8) -> Option<Self> {
+        match tag {
+            0 => Some(Self::Blob),
+            1 => Some(Self::Tree),
+            2 => Some(Self::Changeset),
+            _ => None,
         }
     }
 }
@@ -142,6 +173,11 @@ macro_rules! typed_id {
         pub struct $name(pub ObjectId);
 
         impl $name {
+            /// The typed id of `id`.
+            pub fn new(id: ObjectId) -> Self {
+                Self(id)
+            }
+
             /// The untyped id.
             pub fn as_object_id(&self) -> ObjectId {
                 self.0
