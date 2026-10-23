@@ -26,11 +26,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use camino::{Utf8Path, Utf8PathBuf};
 use rayon::ThreadPool;
 use rayon::prelude::*;
-use swarmops_core::bytes::to_u64;
-use swarmops_core::{Hashed, ObjectId, ObjectKind, hash_object};
+use swarmops_core::{Hashed, ObjectId, ObjectKind, bytes};
 
 use crate::error::{FileOp, IoFailure, LimitKind, StoreError};
-use crate::fs_ops::{FsMethod, FsOps, HookedFs, LinkOutcome, RealFs, StoreFs, open_regular};
+use crate::fs_ops::{self, FsMethod, FsOps, HookedFs, LinkOutcome, RealFs, StoreFs};
 use crate::layout::Layout;
 
 const MAGIC: [u8; 4] = *b"SOB1";
@@ -347,7 +346,7 @@ impl FsObjectStore {
     /// into memory. Anything else, a missing file among it, reaches the read, which reports it.
     fn read_file(&self, id: ObjectId) -> Result<Option<Vec<u8>>, StoreError> {
         let path = self.layout.object_path(id);
-        let longest = to_u64(HEADER_LEN) + MAX_OBJECT_LEN;
+        let longest = bytes::to_u64(HEADER_LEN) + MAX_OBJECT_LEN;
         if std::fs::metadata(&path).is_ok_and(|meta| meta.is_file() && meta.len() > longest) {
             return Err(StoreError::BadHeader { id });
         }
@@ -373,7 +372,7 @@ impl FsObjectStore {
 impl ObjectStore for FsObjectStore {
     fn put(&self, kind: ObjectKind, payload: &[u8]) -> Result<ObjectId, StoreError> {
         within_object_limit(payload)?;
-        let id = hash_object(kind, payload);
+        let id = swarmops_core::hash_object(kind, payload);
         self.put_object(kind, id, payload, &TmpOnce::default())?;
         Ok(id)
     }
@@ -427,7 +426,7 @@ impl ObjectStore for FsObjectStore {
     /// [`ObjectStore::get`] refuses it), and reads its first 16 bytes.
     fn stat(&self, id: ObjectId) -> Result<Option<ObjectStat>, StoreError> {
         let path = self.layout.object_path(id);
-        let file = match open_regular(&path) {
+        let file = match fs_ops::open_regular(&path) {
             Ok(file) => file,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(self.fs.locate(FileOp::Open, &path, e).into()),
@@ -526,7 +525,7 @@ impl ObjectStore for FsObjectStore {
 /// Refuses `payload` if it is longer than an object holds ([`MAX_OBJECT_LEN`]): a
 /// [`StoreError::Limit`] of [`LimitKind::ObjectBytes`], with the payload's length.
 fn within_object_limit(payload: &[u8]) -> Result<(), StoreError> {
-    let got = to_u64(payload.len());
+    let got = bytes::to_u64(payload.len());
     if got > MAX_OBJECT_LEN {
         return Err(StoreError::Limit {
             what: LimitKind::ObjectBytes,
@@ -631,7 +630,7 @@ fn encode(kind: ObjectKind, payload: &[u8]) -> io::Result<Vec<u8>> {
         Some(c) => (ENC_ZSTD, c.as_slice()),
         None => (ENC_RAW, payload),
     };
-    let ulen = to_u64(payload.len());
+    let ulen = bytes::to_u64(payload.len());
     let mut file = Vec::with_capacity(HEADER_LEN + body.len());
     file.extend_from_slice(&MAGIC);
     file.push(kind_byte(kind));
@@ -704,7 +703,7 @@ fn decode_capped(
         }
         _ => return Err(bad_header()),
     };
-    if hash_object(kind, &payload) != id {
+    if swarmops_core::hash_object(kind, &payload) != id {
         return Err(corrupt());
     }
     Ok((kind, payload))
@@ -752,7 +751,7 @@ fn visit_payload(
         visit(bytes);
     };
     match enc {
-        ENC_RAW if to_u64(body.len()) == size => {
+        ENC_RAW if bytes::to_u64(body.len()) == size => {
             if !body.is_empty() {
                 piece(body);
             }
@@ -761,7 +760,7 @@ fn visit_payload(
             // Every frame this store writes records its decompressed size, which must equal the
             // header's (storage spec §2 rule 1).
             let frame_len = zstd::bulk::Decompressor::upper_bound(body).ok_or_else(corrupt)?;
-            if to_u64(frame_len) != size {
+            if bytes::to_u64(frame_len) != size {
                 return Err(bad_header());
             }
             let mut decoder = zstd::stream::read::Decoder::with_buffer(body)
@@ -775,7 +774,7 @@ fn visit_payload(
                     Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                     Err(e) => return Err(stream_failure(id, e)),
                 };
-                made += to_u64(len);
+                made += bytes::to_u64(len);
                 // A frame that produces more than it records is zstd damage.
                 if made > size {
                     return Err(corrupt());
@@ -795,9 +794,9 @@ fn visit_payload(
     Ok(ObjectStat { kind, size })
 }
 
-/// [`hash_object`]'s recipe, `blake3(domain(kind) ++ u64le(len) ++ payload)`, fed the payload in
-/// pieces: `len` is the length the object's header records, which the caller checks the pieces
-/// add up to. A unit test holds it to `hash_object`.
+/// [`swarmops_core::hash_object`]'s recipe, `blake3(domain(kind) ++ u64le(len) ++ payload)`,
+/// fed the payload in pieces: `len` is the length the object's header records, which the caller
+/// checks the pieces add up to. A unit test holds it to `hash_object`.
 struct PayloadHash(blake3::Hasher);
 
 impl PayloadHash {
@@ -831,7 +830,7 @@ impl PayloadHash {
 fn stream_decode(body: &[u8], ulen: usize, start: usize) -> io::Result<Vec<u8>> {
     let mut payload = Vec::with_capacity(start);
     zstd::stream::read::Decoder::with_buffer(body)?
-        .take(to_u64(ulen).saturating_add(1))
+        .take(bytes::to_u64(ulen).saturating_add(1))
         .read_to_end(&mut payload)?;
     Ok(payload)
 }
@@ -859,11 +858,11 @@ mod tests {
             for len in [0, 1, 15, 16, 16 << 10] {
                 let payload = &text[..len];
                 for piece in [1, 7, 4096, 16 << 10] {
-                    let mut hash = PayloadHash::new(kind, to_u64(len));
+                    let mut hash = PayloadHash::new(kind, bytes::to_u64(len));
                     payload.chunks(piece).for_each(|bytes| hash.update(bytes));
                     assert_eq!(
                         hash.finish(),
-                        hash_object(kind, payload),
+                        swarmops_core::hash_object(kind, payload),
                         "{kind:?}, {len} bytes in pieces of {piece}"
                     );
                 }
@@ -874,7 +873,7 @@ mod tests {
     #[test]
     fn decode_streams_past_the_cap_and_gives_the_same_payload() {
         let payload = b"sixteen bytes, \n".repeat(256);
-        let id = hash_object(ObjectKind::Blob, &payload);
+        let id = swarmops_core::hash_object(ObjectKind::Blob, &payload);
         let file = encode(ObjectKind::Blob, &payload).unwrap();
         assert_eq!(file[5], ENC_ZSTD, "4 KiB of one line compresses");
         let corrupt = |got: Result<(ObjectKind, Vec<u8>), StoreError>| match got {
@@ -909,7 +908,7 @@ mod tests {
     /// stream is zstd damage.
     #[test]
     fn a_stream_the_host_cannot_hold_is_a_failed_read_not_damage() {
-        let id = hash_object(ObjectKind::Blob, b"a payload");
+        let id = swarmops_core::hash_object(ObjectKind::Blob, b"a payload");
         let hex = id.to_hex();
         let file = Utf8PathBuf::from(format!("objects/{}/{}", &hex[..2], &hex[2..]));
         match stream_failure(id, io::Error::from(io::ErrorKind::OutOfMemory)) {

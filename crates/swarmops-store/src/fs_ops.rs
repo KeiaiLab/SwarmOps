@@ -1495,15 +1495,13 @@ mod store_fs_tests {
 
     use camino::Utf8Path;
 
-    use super::store_relative;
-
     /// A store-relative path is worked out from the path's text alone, with no system call: `.`
     /// for the root; nothing for a path outside the root, or one that leaves it with `..`, or
     /// one that is not UTF-8.
     #[test]
     fn store_relative_is_lexical_and_stays_in_the_root() {
         let root = Utf8Path::new("/r");
-        let relative = |path: &str| store_relative(root, Path::new(path));
+        let relative = |path: &str| super::store_relative(root, Path::new(path));
         assert_eq!(relative("/r").as_deref(), Some(Utf8Path::new(".")));
         assert_eq!(
             relative("/r/meta/journal.off").as_deref(),
@@ -1523,6 +1521,6 @@ mod store_fs_tests {
             "a relative path under an absolute root"
         );
         let not_utf8 = Path::new(OsStr::from_bytes(b"/r/meta/\xff"));
-        assert_eq!(store_relative(root, not_utf8), None);
+        assert_eq!(super::store_relative(root, not_utf8), None);
     }
 }

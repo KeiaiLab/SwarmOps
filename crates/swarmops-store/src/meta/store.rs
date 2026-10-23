@@ -53,7 +53,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use camino::Utf8Path;
-use swarmops_core::ChangesetId;
+use swarmops_core::{ChangesetId, bytes};
 
 use super::frame::{Frame, MAX_RECORDS, Record};
 use super::index::{ChangesetMeta, Index};
@@ -62,7 +62,6 @@ use super::lock::MetaLock;
 use super::parents::MAX_PARENTS;
 use super::refs::{self, RefFile, RefState};
 use super::replay::{self, Overlay};
-use super::to_u64;
 use crate::error::{FileOp, LimitKind, StoreError};
 use crate::fs_ops::{FsOps, RealFs, StoreFs};
 use crate::layout::Layout;
@@ -437,9 +436,9 @@ impl MetaStore {
             .count();
         Ok(MetaWrite {
             store: self,
-            checkpointed_records: index.len().saturating_sub(to_u64(past)),
+            checkpointed_records: index.len().saturating_sub(bytes::to_u64(past)),
             index,
-            uncheckpointed: to_u64(frames.len()),
+            uncheckpointed: bytes::to_u64(frames.len()),
             records: Vec::new(),
             queued: HashMap::new(),
             moved: HashMap::new(),
@@ -703,7 +702,7 @@ impl MetaRead<'_> {
 
     /// How many changesets the store holds.
     pub fn count_changesets(&self) -> Result<u64, StoreError> {
-        Ok(self.index.len() + to_u64(self.overlay.extras().len()))
+        Ok(self.index.len() + bytes::to_u64(self.overlay.extras().len()))
     }
 
     /// The ids of index records `recs`: one `ids.col` read each ([`Index::id`]).
@@ -785,7 +784,7 @@ impl MetaWrite<'_> {
                 if *queued_id == id {
                     return Ok(Some(ChangesetMeta {
                         id,
-                        seq: self.index.len() + to_u64(at),
+                        seq: self.index.len() + bytes::to_u64(at),
                         generation: *generation,
                         delta_hash: *delta_hash,
                         parents: parents.clone(),
@@ -844,8 +843,8 @@ impl MetaWrite<'_> {
         if meta.parents.len() > MAX_PARENTS {
             return Err(StoreError::Limit {
                 what: LimitKind::Parents,
-                max: to_u64(MAX_PARENTS),
-                got: to_u64(meta.parents.len()),
+                max: bytes::to_u64(MAX_PARENTS),
+                got: bytes::to_u64(meta.parents.len()),
             });
         }
         if staged.generations.contains_key(&meta.id)
@@ -866,7 +865,7 @@ impl MetaWrite<'_> {
                 .ok_or(StoreError::MissingParent(parent))?;
             generation = generation.max(parent_generation.saturating_add(1));
         }
-        let seq = self.index.len() + to_u64(self.queued.len() + staged.generations.len());
+        let seq = self.index.len() + bytes::to_u64(self.queued.len() + staged.generations.len());
         staged.generations.insert(meta.id, generation);
         staged.records.push(Record::Changeset {
             id: meta.id,
@@ -884,8 +883,8 @@ impl MetaWrite<'_> {
         if records > MAX_RECORDS {
             return Err(StoreError::Limit {
                 what: LimitKind::Records,
-                max: to_u64(MAX_RECORDS),
-                got: to_u64(records),
+                max: bytes::to_u64(MAX_RECORDS),
+                got: bytes::to_u64(records),
             });
         }
         self.queued.extend(staged.generations);
@@ -912,8 +911,8 @@ impl MetaWrite<'_> {
         if actor.len() > MAX_ACTOR_LEN {
             return Err(StoreError::Limit {
                 what: LimitKind::ActorBytes,
-                max: to_u64(MAX_ACTOR_LEN),
-                got: to_u64(actor.len()),
+                max: bytes::to_u64(MAX_ACTOR_LEN),
+                got: bytes::to_u64(actor.len()),
             });
         }
         if let Some(target) = new
@@ -974,8 +973,8 @@ impl MetaWrite<'_> {
         self.uncheckpointed += 1;
         let info = CommitInfo {
             frame_seq: frame.seq,
-            inserted: to_u64(self.queued.len()),
-            moved_refs: to_u64(self.records.len() - self.queued.len()),
+            inserted: bytes::to_u64(self.queued.len()),
+            moved_refs: bytes::to_u64(self.records.len() - self.queued.len()),
             checkpointed: false,
         };
         replay::materialize(&mut self.index, &store.layout, &store.fs, &frame)
@@ -1047,8 +1046,8 @@ impl MetaWrite<'_> {
         } else {
             Err(StoreError::Limit {
                 what: LimitKind::Records,
-                max: to_u64(MAX_RECORDS),
-                got: to_u64(self.records.len()) + 1,
+                max: bytes::to_u64(MAX_RECORDS),
+                got: bytes::to_u64(self.records.len()) + 1,
             })
         }
     }

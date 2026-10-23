@@ -24,10 +24,10 @@ use std::os::unix::fs::FileExt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use camino::{Utf8Path, Utf8PathBuf};
+use swarmops_core::bytes;
 
-use super::to_u64;
 use crate::error::{FileOp, IoFailure, StoreError};
-use crate::fs_ops::{StoreFs, open_regular};
+use crate::fs_ops::{self, StoreFs};
 
 /// How many entries a compaction reads, and writes, with one call.
 const BLOCK: usize = 4096;
@@ -231,9 +231,9 @@ impl<const K: usize> SortedView<K> {
             buf.resize(count * K, 0);
             self.read_keys(at, &mut buf)?;
             if let Some(stop) = buf.as_chunks::<K>().0.iter().position(|key| !matches(key)) {
-                return Ok(at + to_u64(stop));
+                return Ok(at + bytes::to_u64(stop));
             }
-            at += to_u64(count);
+            at += bytes::to_u64(count);
         }
         Ok(at)
     }
@@ -267,7 +267,8 @@ impl<const K: usize> SortedView<K> {
     fn read_keys(&self, first: u64, buf: &mut [u8]) -> Result<(), StoreError> {
         let files = self.files_for(first, buf.len() / K)?;
         self.probes.fetch_add(1, Ordering::Relaxed);
-        (files.keys.read_exact_at(buf, first * to_u64(K))).map_err(|e| files.keys_failed(e))?;
+        (files.keys.read_exact_at(buf, first * bytes::to_u64(K)))
+            .map_err(|e| files.keys_failed(e))?;
         Ok(())
     }
 
@@ -276,15 +277,17 @@ impl<const K: usize> SortedView<K> {
     fn read_recs(&self, first: u64, buf: &mut [u8]) -> Result<(), StoreError> {
         let files = self.files_for(first, buf.len() / REC_LEN)?;
         self.rec_reads.fetch_add(1, Ordering::Relaxed);
-        (files.recs.read_exact_at(buf, first * to_u64(REC_LEN)))
-            .map_err(|e| files.recs_failed(e))?;
+        (files
+            .recs
+            .read_exact_at(buf, first * bytes::to_u64(REC_LEN)))
+        .map_err(|e| files.recs_failed(e))?;
         Ok(())
     }
 
     /// The files, if `count` entries from entry `first` on exist and `count` is not 0;
     /// otherwise [`StoreError::BadCall`]: no lookup asks for entries past the view's end.
     fn files_for(&self, first: u64, count: usize) -> Result<&ViewFiles, StoreError> {
-        let end = first.checked_add(to_u64(count));
+        let end = first.checked_add(bytes::to_u64(count));
         match &self.files {
             Some(files) if count > 0 && end.is_some_and(|end| end <= self.len) => Ok(files),
             _ => Err(StoreError::BadCall(format!(
@@ -519,7 +522,7 @@ impl<'a, const K: usize> Entries<'a, K> {
     /// The next entry, reading the next block if need be; `None` past the last.
     fn peek(&mut self) -> Result<Option<([u8; K], u64)>, StoreError> {
         if self.next == self.buffered {
-            let start = self.first + to_u64(self.buffered);
+            let start = self.first + bytes::to_u64(self.buffered);
             let count = entries_from(start, self.view.len, BLOCK);
             if count == 0 {
                 return Ok(None);
@@ -620,12 +623,12 @@ fn open_entries(
     width: usize,
     missing: &'static str,
 ) -> Result<ViewFile, StoreError> {
-    let file = open_regular(&path).map_err(|e| index_file_error(fs, &path, e, missing))?;
+    let file = fs_ops::open_regular(&path).map_err(|e| index_file_error(fs, &path, e, missing))?;
     let len = file
         .metadata()
         .map_err(|e| fs.locate(FileOp::Stat, &path, e))?
         .len();
-    let width = to_u64(width);
+    let width = bytes::to_u64(width);
     if !len.is_multiple_of(width) {
         return Err(StoreError::IndexCorrupt {
             what: "a sorted view file ends in a partial entry",

@@ -19,7 +19,7 @@
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::ObjectId;
 
-use crate::meta::derived::{DerivedSlot, is_derived_name};
+use crate::meta::derived::{self, DerivedSlot};
 
 /// The paths of one store, all derived from its root. Computes paths only; touches nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,7 +121,7 @@ impl Layout {
         key_hash: Option<[u8; 8]>,
     ) -> Utf8PathBuf {
         debug_assert!(
-            is_derived_name(name),
+            derived::is_derived_name(name),
             "derived value name {name:?} is not one a store takes"
         );
         let hex = subject.to_hex();

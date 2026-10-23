@@ -44,7 +44,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::error::{FileOp, IoFailure, StoreError};
-use crate::fs_ops::{not_a_regular_file, store_relative};
+use crate::fs_ops;
 use crate::layout::Layout;
 
 /// The exclusive lock on `meta/lock`, held until dropped.
@@ -66,8 +66,13 @@ impl MetaLock {
     /// fails its open at once, as damage (kind `InvalidData`; see the module documentation).
     pub fn acquire(layout: &Layout, timeout: Duration) -> Result<MetaLock, StoreError> {
         let lock = layout.meta_lock();
-        let failed =
-            |op, e| IoFailure::new(op, store_relative(layout.root(), lock.as_std_path()), e);
+        let failed = |op, e| {
+            IoFailure::new(
+                op,
+                fs_ops::store_relative(layout.root(), lock.as_std_path()),
+                e,
+            )
+        };
         let file = open_lock_file(lock.as_std_path()).map_err(|e| failed(FileOp::Open, e))?;
         match file.try_lock() {
             Ok(()) => return Ok(Self { file }),
@@ -123,7 +128,7 @@ fn refuses(path: &Path) -> bool {
 /// regular file is refused before it is opened, then [`open_unfollowed`] opens it.
 fn open_lock_file(path: &Path) -> io::Result<File> {
     if refuses(path) {
-        return Err(not_a_regular_file(path));
+        return Err(fs_ops::not_a_regular_file(path));
     }
     open_unfollowed(path)
 }
@@ -143,7 +148,7 @@ fn open_unfollowed(path: &Path) -> io::Result<File> {
     if file.metadata()?.is_file() {
         Ok(file)
     } else {
-        Err(not_a_regular_file(path))
+        Err(fs_ops::not_a_regular_file(path))
     }
 }
 
@@ -178,15 +183,14 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use super::open_unfollowed;
-
-    /// What [`open_unfollowed`] returned for `path` within 5 s, run on a thread of its own so
-    /// that an open that blocks fails the test instead of hanging it: `None` if it blocked.
+    /// What [`super::open_unfollowed`] returned for `path` within 5 s, run on a thread of its
+    /// own so that an open that blocks fails the test instead of hanging it: `None` if it
+    /// blocked.
     fn opened_within(path: &Path) -> Option<io::Result<File>> {
         let (tx, rx) = mpsc::channel();
         let path = PathBuf::from(path);
         thread::spawn(move || {
-            let _ = tx.send(open_unfollowed(&path));
+            let _ = tx.send(super::open_unfollowed(&path));
         });
         rx.recv_timeout(Duration::from_secs(5)).ok()
     }

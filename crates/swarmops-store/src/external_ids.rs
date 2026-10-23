@@ -38,12 +38,11 @@ use std::sync::Arc;
 use camino::{Utf8Path, Utf8PathBuf};
 use rayon::ThreadPool;
 use rayon::prelude::*;
-use swarmops_core::bytes::to_u64;
-use swarmops_core::{ChangesetId, ObjectId};
+use swarmops_core::{ChangesetId, ObjectId, bytes};
 
 use crate::error::{FileOp, StoreError};
-use crate::fs_objects::{fsync_dirs, link_new_file};
-use crate::fs_ops::{FsMethod, FsOps, LinkOutcome, StoreFs, open_regular};
+use crate::fs_objects;
+use crate::fs_ops::{self, FsMethod, FsOps, LinkOutcome, StoreFs};
 use crate::layout::Layout;
 
 /// The system of git commits: its keys are their SHA-1 oids, 20 bytes.
@@ -239,7 +238,7 @@ impl ExternalIds {
             touched.insert(parent(path).to_owned());
         }
         let dirs: Vec<Utf8PathBuf> = touched.into_iter().collect();
-        if let Some(Err(e)) = fsync_dirs(&self.fs, self.pool.as_ref(), &dirs)
+        if let Some(Err(e)) = fs_objects::fsync_dirs(&self.fs, self.pool.as_ref(), &dirs)
             .into_iter()
             .find(Result::is_err)
         {
@@ -344,7 +343,7 @@ impl ExternalIds {
             return Ok(Placed::found(Some(there.as_slice()), bytes));
         }
         self.fs.create_dir_all(tmp_dir.as_std_path())?;
-        match link_new_file(&self.fs, tmp_dir, bytes, path)? {
+        match fs_objects::link_new_file(&self.fs, tmp_dir, bytes, path)? {
             LinkOutcome::Placed => Ok(Placed::Written),
             // Another writer linked the name since the read: what it linked decides.
             LinkOutcome::AlreadyExists => {
@@ -362,13 +361,13 @@ impl ExternalIds {
     /// is that of a `read` of the file, named by its place in the store, as [`FsOps::read`]'s is.
     fn read_entry(&self, path: &Utf8Path) -> Result<Option<Vec<u8>>, StoreError> {
         let failed = |e| self.fs.locate(FileOp::Fs(FsMethod::Read), path, e);
-        let file = match open_regular(path) {
+        let file = match fs_ops::open_regular(path) {
             Ok(file) => file,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(failed(e).into()),
         };
         let mut bytes = Vec::with_capacity(ENTRY_LEN + 1);
-        let mut capped = io::Read::take(file, to_u64(ENTRY_LEN + 1));
+        let mut capped = io::Read::take(file, bytes::to_u64(ENTRY_LEN + 1));
         io::Read::read_to_end(&mut capped, &mut bytes).map_err(failed)?;
         Ok(Some(bytes))
     }

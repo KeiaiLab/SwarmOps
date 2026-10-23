@@ -87,7 +87,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::{fmt, io};
 
 use crate::fs_ops::{FsMethod, FsOps, LinkOutcome};
-use crate::meta::frame::{Parsed, Record, parse_frame};
+use crate::meta::frame::{self, Parsed, Record};
 
 /// The size of one `journal.off` entry.
 const ENTRY_LEN: u64 = 8;
@@ -444,7 +444,7 @@ impl State {
                 ),
             ));
         }
-        let Parsed::Whole { records, .. } = parse_frame(frame) else {
+        let Parsed::Whole { records, .. } = frame::parse_frame(frame) else {
             return None;
         };
         if !records
