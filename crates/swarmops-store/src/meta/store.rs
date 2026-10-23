@@ -78,6 +78,15 @@ const DEFAULT_PARALLELISM: usize = 5;
 /// the checkpoint.
 const CHECKPOINT_EVERY: u64 = 32;
 
+/// When a write transaction makes the projections durable: at [`CHECKPOINT_EVERY`] frames
+/// ([`Settle::Batched`], a commit) or now, if any frame lies past the checkpoint
+/// ([`Settle::Flush`], [`MetaStore::flush`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Settle {
+    Batched,
+    Flush,
+}
+
 /// How many frames [`MetaRead::reflog`] and [`MetaRead::frames_before`] read with one call as
 /// they walk back.
 const REFLOG_BATCH: u64 = 256;
@@ -471,7 +480,7 @@ impl MetaStore {
     /// lies past the checkpoint, syncs the index and moves the checkpoint to the end of the
     /// journal. For callers that need the projections durable at once (tests, closing).
     pub fn flush(&self) -> Result<(), StoreError> {
-        self.write()?.finish(true).map(drop)
+        self.write()?.finish(Settle::Flush).map(drop)
     }
 
     fn from_parts(layout: Layout, fs: StoreFs, journal: Journal) -> MetaStore {
@@ -953,12 +962,12 @@ impl MetaWrite<'_> {
     /// the frame cut back off the journal; any other error before it means the transaction did
     /// not commit either. With nothing queued, errors are the housekeeping's own.
     pub fn commit(self) -> Result<CommitInfo, StoreError> {
-        self.finish(false)
+        self.finish(Settle::Batched)
     }
 
-    /// [`MetaWrite::commit`]; `flush` also syncs and checkpoints any frame past the
+    /// [`MetaWrite::commit`]; [`Settle::Flush`] also syncs and checkpoints any frame past the
     /// checkpoint.
-    fn finish(mut self, flush: bool) -> Result<CommitInfo, StoreError> {
+    fn finish(mut self, settle: Settle) -> Result<CommitInfo, StoreError> {
         let store = self.store;
         if self.records.is_empty() {
             let info = CommitInfo {
@@ -967,7 +976,7 @@ impl MetaWrite<'_> {
                 moved_refs: 0,
                 checkpointed: false,
             };
-            return self.settle(info, flush);
+            return self.settle(info, settle);
         }
         let frame = store.journal.append_frame(&self.records)?; // the commit point
         self.uncheckpointed += 1;
@@ -978,7 +987,7 @@ impl MetaWrite<'_> {
             checkpointed: false,
         };
         replay::materialize(&mut self.index, &store.layout, &store.fs, &frame)
-            .and_then(|()| self.settle(info, flush))
+            .and_then(|()| self.settle(info, settle))
             .map_err(|source| StoreError::PostCommit {
                 frame_seq: frame.seq,
                 source: Box::new(source),
@@ -991,8 +1000,9 @@ impl MetaWrite<'_> {
     /// Then the checkpoint moves to the end of the journal; a failed sync or compaction
     /// returns first, so it never moves past what is not durable, and a failed sync cuts the
     /// index back to the checkpoint first ([`MetaWrite::sync_index`]).
-    fn settle(&mut self, mut info: CommitInfo, flush: bool) -> Result<CommitInfo, StoreError> {
+    fn settle(&mut self, mut info: CommitInfo, settle: Settle) -> Result<CommitInfo, StoreError> {
         let compact = self.index.tail_len() > Index::COMPACT_THRESHOLD;
+        let flush = settle == Settle::Flush;
         let due = self.uncheckpointed >= CHECKPOINT_EVERY || (flush && self.uncheckpointed > 0);
         if !compact && !due {
             return Ok(info);
