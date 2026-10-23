@@ -151,6 +151,7 @@ impl Recording<'_> {
             (PushOutcome::AlreadyThere, _) => PushStatus::UpToDate,
             (PushOutcome::Sent, None) => PushStatus::Created,
             (PushOutcome::Sent, Some(_)) => PushStatus::Pushed,
+            _ => return Err(error::unknown_variant("PushOutcome")),
         };
         Ok(response(remote, &branch, status, seen, &report, warnings))
     }
@@ -265,6 +266,7 @@ impl Recording<'_> {
                     "the staging branch moved during the export, under the mirror's lock",
                 ));
             }
+            _ => return Err(error::unknown_variant("DivergedReason")),
         };
         let message = format!(
             "{branch} on {remote:?} is no ancestor of what the push would send ({why}): nothing \

@@ -200,7 +200,10 @@ fn land_error(e: RepoError, message: String) -> OpError {
 /// conflicting path, then names the land again with its resolutions, against the target's head
 /// the report names (`land --resolve`).
 pub(crate) fn conflict(conflicts: &MergeConflicts, message: String, max_bytes: u64) -> OpError {
-    let report = crate::conflict::report(conflicts, max_bytes);
+    let report = match crate::conflict::report(conflicts, max_bytes) {
+        Ok(report) => report,
+        Err(e) => return e,
+    };
     let side = match report.files.first() {
         Some(file) => shell_word(&format!("{}:{}", report.theirs, file.path)),
         None => format!("{}:<path>", report.theirs),

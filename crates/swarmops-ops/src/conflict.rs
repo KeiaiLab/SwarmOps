@@ -63,8 +63,11 @@ const MAX_ENTRY_BYTES: u64 = 24 * 1024;
 const HUNKS_KEY_BYTES: u64 = 11;
 
 /// `conflicts` as the report `E_CONFLICT` carries ([the module documentation](self)), its hunk
-/// texts within `max_bytes`.
-pub(crate) fn report(conflicts: &MergeConflicts, max_bytes: u64) -> ConflictReport {
+/// texts within `max_bytes`. `E_INTERNAL` for a conflict kind this build does not know.
+pub(crate) fn report(
+    conflicts: &MergeConflicts,
+    max_bytes: u64,
+) -> Result<ConflictReport, OpError> {
     let mut budgets = Budgets {
         texts: Budget::new(max_bytes),
         entries: Budget::new(MAX_ENTRY_BYTES),
@@ -76,7 +79,7 @@ pub(crate) fn report(conflicts: &MergeConflicts, max_bytes: u64) -> ConflictRepo
         } else {
             Place::Later
         };
-        let Some(out) = file_out(file, conflicts, place, &mut budgets) else {
+        let Some(out) = file_out(file, conflicts, place, &mut budgets)? else {
             break;
         };
         files.push(out);
@@ -156,13 +159,14 @@ enum Place {
 
 /// One conflicting file of `conflicts`, as the report gives it at `place`, if it goes in
 /// ([the module documentation](self)): its entry from `budgets.entries`, its hunk texts from
-/// `budgets.texts`. `None` leaves it out, and every file after it.
+/// `budgets.texts`. `None` leaves it out, and every file after it. `E_INTERNAL` for a conflict
+/// kind this build does not know.
 fn file_out(
     file: &FileConflict,
     conflicts: &MergeConflicts,
     place: Place,
     budgets: &mut Budgets,
-) -> Option<FileConflictOut> {
+) -> Result<Option<FileConflictOut>, OpError> {
     let blob = |leaf: Option<Leaf>| leaf.map(|leaf| leaf.blob.to_string());
     let (kind, hunks): (ConflictKindOut, &[ConflictHunk]) = match &file.kind {
         ConflictKind::Content { hunks } => (ConflictKindOut::Content, hunks),
@@ -172,6 +176,7 @@ fn file_out(
         ConflictKind::AddAdd { hunks } => (ConflictKindOut::AddAdd, hunks),
         ConflictKind::Mode { .. } => (ConflictKindOut::Mode, &[]),
         ConflictKind::TypeChange => (ConflictKindOut::TypeChange, &[]),
+        _ => return Err(error::unknown_variant("ConflictKind")),
     };
     // Who changed the path on the target since the base: none where the walk did not reach it (a
     // base off the target can leave the change below it). An agent the changeset does not name
@@ -225,11 +230,11 @@ fn file_out(
                 out.hunks.push(entry);
             }
             if !entries.take(whole) {
-                return None;
+                return Ok(None);
             }
         }
     }
-    Some(out)
+    Ok(Some(out))
 }
 
 /// The entry of one hunk that spans `hunks`, a file's from its `id`-th on, in file order: each

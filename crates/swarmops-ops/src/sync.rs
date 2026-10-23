@@ -494,8 +494,8 @@ impl Syncing<'_, '_> {
         // 1. What the remote holds.
         let recognised = engine::recognise(repo, plan, theirs).map_err(|e| self.engine(e))?;
         let mut dropped: Vec<DroppedChange> = (recognised.dropped.iter())
-            .map(|&(id, by)| held(id, drop_reason(by)))
-            .collect();
+            .map(|&(id, by)| Ok(held(id, drop_reason(by)?)))
+            .collect::<Result<_, OpError>>()?;
 
         // 2. The rest, landed in order; a change that merges as none is dropped too.
         let relocated = engine::relocate(repo, &recognised.to_land, theirs, &self.lander)
@@ -525,6 +525,7 @@ impl Syncing<'_, '_> {
         let moved = match outcome.result {
             CasResult::Applied { .. } => true,
             CasResult::Mismatch { actual } => actual == Some(new),
+            _ => return Err(error::unknown_variant("CasResult")),
         };
         if moved {
             self.landed = Some(new);
@@ -660,17 +661,16 @@ fn remote_moved(e: &OpError) -> bool {
 
 /// A change the remote held, found `by`.
 fn held(id: ChangesetId, by: DropReason) -> DroppedChange {
-    DroppedChange {
-        changeset: id.to_string(),
-        by,
-    }
+    DroppedChange::new(id.to_string(), by)
 }
 
-/// The engine's reason as the wire gives it.
-fn drop_reason(by: engine::DropReason) -> DropReason {
+/// The engine's reason as the wire gives it. `E_INTERNAL` for a reason this build does not
+/// know.
+fn drop_reason(by: engine::DropReason) -> Result<DropReason, OpError> {
     match by {
-        engine::DropReason::Trailer => DropReason::Trailer,
-        engine::DropReason::NoOp => DropReason::NoOp,
+        engine::DropReason::Trailer => Ok(DropReason::Trailer),
+        engine::DropReason::NoOp => Ok(DropReason::NoOp),
+        _ => Err(error::unknown_variant("DropReason")),
     }
 }
 

@@ -189,6 +189,7 @@ fn convert(content: ContentInput, room: Room) -> Result<Vec<u8>, OpError> {
              base64 or as a file",
         )
         .with_details(Map::from_iter([("blob".to_owned(), Value::from(id))]))),
+        _ => Err(error::unknown_variant("ContentInput")),
     }
 }
 
@@ -240,13 +241,15 @@ fn decoded_len(encoded: &str) -> u64 {
 
 /// How many bytes `content` declares before it is converted: inline text's length, the bytes
 /// base64 decodes to, a client file's length (a `stat`, not a read: 0 for one that cannot be
-/// stat'ed, whose read then says why), and nothing for a blob named by id.
-fn declared(content: &ContentInput) -> u64 {
+/// stat'ed, whose read then says why), and nothing for a blob named by id. `E_INTERNAL` for a
+/// content this build does not know.
+fn declared(content: &ContentInput) -> Result<u64, OpError> {
     match content {
-        ContentInput::Inline(text) => bytes::to_u64(text.len()),
-        ContentInput::Base64(encoded) => decoded_len(encoded),
-        ContentInput::File(file) => fs::metadata(file).map_or(0, |meta| meta.len()),
-        ContentInput::Blob(_) => 0,
+        ContentInput::Inline(text) => Ok(bytes::to_u64(text.len())),
+        ContentInput::Base64(encoded) => Ok(decoded_len(encoded)),
+        ContentInput::File(file) => Ok(fs::metadata(file).map_or(0, |meta| meta.len())),
+        ContentInput::Blob(_) => Ok(0),
+        _ => Err(error::unknown_variant("ContentInput")),
     }
 }
 
@@ -303,21 +306,22 @@ fn changes_within(
         let content = match (op, content, mode) {
             (ChangeOp::Put, Some(ContentInput::Blob(id)), mode) => {
                 let id = blob_id(&id).map_err(|e| in_change(e, index, &path))?;
-                Some((leaf_kind(mode), Content::Blob(id)))
+                Some((leaf_kind(mode)?, Content::Blob(id)))
             }
             (ChangeOp::Put, Some(content), mode) => {
-                Some((leaf_kind(mode), Content::Bytes(content)))
+                Some((leaf_kind(mode)?, Content::Bytes(content)))
             }
             (ChangeOp::Put, None, _) => return Err(refuse("a put needs content")),
             (ChangeOp::Delete, None, None) => None,
             (ChangeOp::Delete, Some(_), _) => return Err(refuse("a delete takes no content")),
             (ChangeOp::Delete, None, Some(_)) => return Err(refuse("a delete takes no mode")),
+            _ => return Err(error::unknown_variant("ChangeOp")),
         };
         if !named.insert(repo_path.clone()) {
             return Err(refuse("an earlier change names this path too"));
         }
         if let Some((_, Content::Bytes(content))) = &content {
-            declared_total = declared_total.saturating_add(declared(content));
+            declared_total = declared_total.saturating_add(declared(content)?);
             if declared_total > total_limit {
                 let mut error = too_large_for(declared_total, total_limit, Scope::Commit);
                 if let ContentInput::File(file) = content {
@@ -366,7 +370,7 @@ pub(crate) fn resolution_bytes(
 ) -> Result<Vec<(RepoPath, Vec<u8>)>, OpError> {
     let mut declared_total: u64 = 0;
     for (path, content) in &contents {
-        declared_total = declared_total.saturating_add(declared(content));
+        declared_total = declared_total.saturating_add(declared(content)?);
         if declared_total > MAX_COMMIT_CONTENT_BYTES {
             let mut error = too_large_for(declared_total, MAX_COMMIT_CONTENT_BYTES, Scope::Commit);
             if let ContentInput::File(file) = content {
@@ -482,12 +486,13 @@ pub(crate) fn metadata_entry(key: &str, value: &[u8]) -> (String, String) {
 }
 
 /// The kind of leaf a put of `mode` writes: a regular file when it names none. Every mode is a
-/// leaf's, so no put is a directory's.
-pub(crate) fn leaf_kind(mode: Option<ModeInput>) -> LeafKind {
+/// leaf's, so no put is a directory's. `E_INTERNAL` for a mode this build does not know.
+pub(crate) fn leaf_kind(mode: Option<ModeInput>) -> Result<LeafKind, OpError> {
     match mode {
-        None | Some(ModeInput::File) => LeafKind::File,
-        Some(ModeInput::Exec) => LeafKind::Exec,
-        Some(ModeInput::Symlink) => LeafKind::Symlink,
+        None | Some(ModeInput::File) => Ok(LeafKind::File),
+        Some(ModeInput::Exec) => Ok(LeafKind::Exec),
+        Some(ModeInput::Symlink) => Ok(LeafKind::Symlink),
+        Some(_) => Err(error::unknown_variant("ModeInput")),
     }
 }
 

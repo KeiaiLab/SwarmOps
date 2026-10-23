@@ -774,25 +774,13 @@ fn file_diff(
     context: u32,
 ) -> Result<FileDiff, OpError> {
     let (before, after) = (change.kind.before(), change.kind.after());
-    let mut file = FileDiff {
-        path: change.path.to_string(),
-        status: diff_status(change.kind),
-        old_kind: None,
-        new_kind: None,
-        old_blob: None,
-        new_blob: None,
-        binary: None,
-        insertions: None,
-        deletions: None,
-        hunks: None,
-        hunks_truncated: None,
-    };
+    let mut file = FileDiff::new(change.path.to_string(), diff_status(change.kind)?);
     if format == DiffFormat::Names {
         return Ok(file);
     }
     if format == DiffFormat::Unified {
-        file.old_kind = before.map(|leaf| file_kind(leaf.kind));
-        file.new_kind = after.map(|leaf| file_kind(leaf.kind));
+        file.old_kind = before.map(|leaf| file_kind(leaf.kind)).transpose()?;
+        file.new_kind = after.map(|leaf| file_kind(leaf.kind)).transpose()?;
         file.old_blob = before.map(|leaf| leaf.blob.to_string());
         file.new_blob = after.map(|leaf| leaf.blob.to_string());
     }
@@ -835,45 +823,45 @@ fn file_diff(
     file.deletions = Some(stats.deletions);
     if format == DiffFormat::Unified {
         let shown = line_diff::unified(old, new, &hunks, context);
-        file.hunks = Some(shown.iter().map(diff_hunk).collect());
+        file.hunks = Some(shown.iter().map(diff_hunk).collect::<Result<_, _>>()?);
     }
     Ok(file)
 }
 
-/// What happened to a file, as `diff` names it.
-fn diff_status(kind: ChangeKind) -> DiffStatus {
+/// What happened to a file, as `diff` names it. `E_INTERNAL` for a change this build does not
+/// know.
+fn diff_status(kind: ChangeKind) -> Result<DiffStatus, OpError> {
     match kind {
-        ChangeKind::Added { .. } => DiffStatus::Added,
-        ChangeKind::Deleted { .. } => DiffStatus::Deleted,
-        ChangeKind::Modified { .. } => DiffStatus::Modified,
-        ChangeKind::TypeChanged { .. } => DiffStatus::TypeChanged,
+        ChangeKind::Added { .. } => Ok(DiffStatus::Added),
+        ChangeKind::Deleted { .. } => Ok(DiffStatus::Deleted),
+        ChangeKind::Modified { .. } => Ok(DiffStatus::Modified),
+        ChangeKind::TypeChanged { .. } => Ok(DiffStatus::TypeChanged),
+        _ => Err(error::unknown_variant("ChangeKind")),
     }
 }
 
 /// `hunk` as a `unified` page gives it. Its lines are UTF-8: a file gets hunks only when both
 /// its sides are text, and a line ends after a `\n`, a byte no other character holds.
-fn diff_hunk(hunk: &UnifiedHunk<'_>) -> DiffHunk {
-    DiffHunk {
-        old_start: u64::from(hunk.before_start),
-        old_lines: u64::from(hunk.before_lines),
-        new_start: u64::from(hunk.after_start),
-        new_lines: u64::from(hunk.after_lines),
-        lines: hunk
-            .lines
-            .iter()
-            .map(|line| {
-                let (op, text) = match *line {
-                    DiffLine::Context(text) => (LineOp::Context, text),
-                    DiffLine::Removed(text) => (LineOp::Remove, text),
-                    DiffLine::Added(text) => (LineOp::Add, text),
-                };
-                DiffLineOut {
-                    op,
-                    text: lossy(text),
-                }
-            })
-            .collect(),
-    }
+/// `E_INTERNAL` for a line this build does not know.
+fn diff_hunk(hunk: &UnifiedHunk<'_>) -> Result<DiffHunk, OpError> {
+    let lines = (hunk.lines.iter())
+        .map(|line| {
+            let (op, text) = match *line {
+                DiffLine::Context(text) => (LineOp::Context, text),
+                DiffLine::Removed(text) => (LineOp::Remove, text),
+                DiffLine::Added(text) => (LineOp::Add, text),
+                _ => return Err(error::unknown_variant("DiffLine")),
+            };
+            Ok(DiffLineOut::new(op, lossy(text)))
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(DiffHunk::new(
+        u64::from(hunk.before_start),
+        u64::from(hunk.before_lines),
+        u64::from(hunk.after_start),
+        u64::from(hunk.after_lines),
+        lines,
+    ))
 }
 
 /// Cuts `file`'s hunks to the first ones that fit with it in `room` bytes of JSON, and marks it
@@ -1183,17 +1171,19 @@ impl<'a> Recording<'a> {
                     recovered: Box::new(confirmed.recovered),
                 }));
             }
+            (Some(_), _) => return Err(error::unknown_variant("CasResult")),
         };
-        Ok(Some(CommitResp {
-            changeset: parent.to_string(),
-            parent: old.map(|id| id.to_string()),
-            root: changeset.root.to_string(),
-            files_changed: bytes::to_u64(changeset.delta.len()),
-            blobs_written: 0,
-            advanced,
-            warnings: confirmed.warnings,
-            replayed: true,
-        }))
+        let mut out = CommitResp::new(
+            parent.to_string(),
+            changeset.root.to_string(),
+            bytes::to_u64(changeset.delta.len()),
+            0,
+        );
+        out.parent = old.map(|id| id.to_string());
+        out.advanced = advanced;
+        out.warnings = confirmed.warnings;
+        out.replayed = true;
+        Ok(Some(out))
     }
 }
 
@@ -1378,38 +1368,41 @@ impl StoreOps for Recording<'_> {
             }
             merge_error(e, max_conflict_bytes)
         })?;
-        Ok(LandResp {
-            status: match outcome.status {
-                swarmops_repo::LandStatus::Landed => LandStatus::Landed,
-                swarmops_repo::LandStatus::Replayed => LandStatus::Replayed,
-            },
-            landed: outcome.landed.to_string(),
-            rebased_onto: outcome.rebased_onto.to_string(),
+        let status = match outcome.status {
+            swarmops_repo::LandStatus::Landed => LandStatus::Landed,
+            swarmops_repo::LandStatus::Replayed => LandStatus::Replayed,
+            _ => return Err(error::unknown_variant("LandStatus")),
+        };
+        let mut out = LandResp::new(
+            status,
+            outcome.landed.to_string(),
+            outcome.rebased_onto.to_string(),
             target,
-            base: outcome.base.to_string(),
-            attempts: outcome.attempts,
-            relocated: outcome.relocated,
-            files_changed: bytes::to_u64(outcome.files_changed),
-            squashed_from: (outcome.squashed_from.iter())
+            outcome.base.to_string(),
+            outcome.attempts,
+            outcome.relocated,
+            bytes::to_u64(outcome.files_changed),
+            (outcome.squashed_from.iter())
                 .map(ToString::to_string)
                 .collect(),
-            auto_merged: (outcome.auto_merged.iter())
-                .map(ToString::to_string)
-                .collect(),
-            warnings: outcome.warnings,
-        })
+        );
+        out.auto_merged = (outcome.auto_merged.iter())
+            .map(ToString::to_string)
+            .collect();
+        out.warnings = outcome.warnings;
+        Ok(out)
     }
 
     fn blob_put(&self, _who: &Identity, req: BlobPutReq) -> Result<BlobPutResp, OpError> {
-        let BlobPutReq { content } = req;
+        let BlobPutReq { content, .. } = req;
         let stored = (self.ops.repo)
             .put_blob(content::bytes(content)?)
             .map_err(error::op)?;
-        Ok(BlobPutResp {
-            blob: stored.id.to_string(),
-            size: stored.size,
-            written: stored.written,
-        })
+        Ok(BlobPutResp::new(
+            stored.id.to_string(),
+            stored.size,
+            stored.written,
+        ))
     }
 
     fn rebase(&self, who: &Identity, req: RebaseReq) -> Result<RebaseResp, OpError> {
@@ -1482,17 +1475,18 @@ impl StoreOps for Recording<'_> {
         let encoded = content::encode(&got.bytes, keep);
         // The span runs on past the bytes returned exactly when it is longer than max_bytes.
         let truncated = keep < got.bytes.len();
-        Ok(FileContent {
-            blob: got.blob.to_string(),
-            size: got.size,
-            kind: file_kind(got.kind),
-            encoding: encoded.encoding,
-            content: encoded.content,
+        let mut out = FileContent::new(
+            got.blob.to_string(),
+            got.size,
+            file_kind(got.kind)?,
+            encoded.encoding,
+            encoded.content,
             truncated,
-            offset: (got.start > 0).then_some(got.start),
-            lines: got.lines.map(|(first, last)| LineRange { first, last }),
-            next_offset: truncated.then(|| got.start + bytes::to_u64(encoded.len)),
-        })
+        );
+        out.offset = (got.start > 0).then_some(got.start);
+        out.lines = got.lines.map(|(first, last)| LineRange::new(first, last));
+        out.next_offset = truncated.then(|| got.start + bytes::to_u64(encoded.len));
+        Ok(out)
     }
 
     fn read_tree(&self, req: ReadTreeReq) -> Result<TreeListing, OpError> {
@@ -1525,55 +1519,56 @@ impl StoreOps for Recording<'_> {
         let Some(page) = listed.map_err(error::op)? else {
             return Err(no_directory(&read, cs, &rev, dir.as_ref()));
         };
-        Ok(TreeListing {
-            entries: (page.entries.iter())
-                .map(|entry| tree_entry_out(entry, EntryPath::when_deep(depth)))
-                .collect(),
-            truncated: page.truncated,
-            cursor: (page.entries.last())
-                .filter(|_| page.truncated)
-                .map(|last| last.path.to_string()),
-        })
+        let entries = (page.entries.iter())
+            .map(|entry| tree_entry_out(entry, EntryPath::when_deep(depth)))
+            .collect::<Result<_, _>>()?;
+        let mut out = TreeListing::new(entries, page.truncated);
+        out.cursor = (page.entries.last())
+            .filter(|_| page.truncated)
+            .map(|last| last.path.to_string());
+        Ok(out)
     }
 
     fn show(&self, req: ShowReq) -> Result<ChangesetDetail, OpError> {
-        let ShowReq { rev, max_changes } = req;
+        let ShowReq {
+            rev, max_changes, ..
+        } = req;
         at_least_one("max_changes", max_changes)?;
         let read = self.snapshot()?;
         let StoredChangeset {
             id, seq, changeset, ..
         } = stored(&read, self.resolve(&read, &rev)?)?;
-        Ok(ChangesetDetail {
-            id: id.to_string(),
+        let changes = (changeset.delta.iter())
+            .take(max_changes)
+            .map(change_out)
+            .collect::<Result<_, _>>()?;
+        let metadata = (changeset.metadata.iter())
+            .map(|(key, value)| content::metadata_entry(key, value))
+            .collect();
+        let signatures = Signatures::new(
+            signature_out(&changeset.author),
+            signature_out(&changeset.committer),
+        );
+        let mut out = ChangesetDetail::new(
+            id.to_string(),
             seq,
-            parents: changeset.parents.iter().map(ToString::to_string).collect(),
-            root: changeset.root.to_string(),
-            author: attribution(&changeset.metadata),
-            lander: lander(&changeset.metadata),
-            created_at: created_at(&changeset.committer),
-            message: lossy(&changeset.message),
-            land_key: metadata_text(&changeset.metadata, LAND_KEY_KEY),
-            squashed_from: (metadata_text(&changeset.metadata, SQUASHED_FROM_KEY))
-                .map(|chain| chain.split_whitespace().map(str::to_owned).collect())
-                .unwrap_or_default(),
-            changes: changeset
-                .delta
-                .iter()
-                .take(max_changes)
-                .map(change_out)
-                .collect(),
-            files_changed: bytes::to_u64(changeset.delta.len()),
-            changes_truncated: changeset.delta.len() > max_changes,
-            metadata: changeset
-                .metadata
-                .iter()
-                .map(|(key, value)| content::metadata_entry(key, value))
-                .collect(),
-            signatures: Signatures {
-                author: signature_out(&changeset.author),
-                committer: signature_out(&changeset.committer),
-            },
-        })
+            changeset.parents.iter().map(ToString::to_string).collect(),
+            changeset.root.to_string(),
+            attribution(&changeset.metadata),
+            created_at(&changeset.committer),
+            lossy(&changeset.message),
+            changes,
+            bytes::to_u64(changeset.delta.len()),
+            changeset.delta.len() > max_changes,
+            metadata,
+            signatures,
+        );
+        out.lander = lander(&changeset.metadata);
+        out.land_key = metadata_text(&changeset.metadata, LAND_KEY_KEY);
+        out.squashed_from = (metadata_text(&changeset.metadata, SQUASHED_FROM_KEY))
+            .map(|chain| chain.split_whitespace().map(str::to_owned).collect())
+            .unwrap_or_default();
+        Ok(out)
     }
 
     fn log(&self, req: LogReq) -> Result<LogPage, OpError> {
@@ -1761,18 +1756,19 @@ impl StoreOps for Recording<'_> {
                 };
                 return Err(cas_mismatch(&name, actual, message));
             }
+            _ => return Err(error::unknown_variant("CasResult")),
         };
-        Ok(RefSetResp {
-            name,
-            old: expected.map(|id| id.to_string()),
-            new: Some(new.to_string()),
-            already_applied: replay,
-            warnings: outcome.warnings,
-        })
+        let mut out = RefSetResp::new(name, replay);
+        out.old = expected.map(|id| id.to_string());
+        out.new = Some(new.to_string());
+        out.warnings = outcome.warnings;
+        Ok(out)
     }
 
     fn ref_delete(&self, who: &Identity, req: RefDeleteReq) -> Result<RefSetResp, OpError> {
-        let RefDeleteReq { name, expected_old } = req;
+        let RefDeleteReq {
+            name, expected_old, ..
+        } = req;
         let expected = self.resolve(&self.snapshot()?, &expected_old)?;
         let outcome = self
             .ops
@@ -1791,14 +1787,12 @@ impl StoreOps for Recording<'_> {
                     format!("ref {name} now points at {actual}; re-check before deleting");
                 return Err(cas_mismatch(&name, Some(actual), message));
             }
+            _ => return Err(error::unknown_variant("CasResult")),
         };
-        Ok(RefSetResp {
-            name,
-            old: Some(expected.to_string()),
-            new: None,
-            already_applied: replay,
-            warnings: outcome.warnings,
-        })
+        let mut out = RefSetResp::new(name, replay);
+        out.old = Some(expected.to_string());
+        out.warnings = outcome.warnings;
+        Ok(out)
     }
 
     fn op_log(&self, req: OpLogReq) -> Result<OpLogPage, OpError> {
@@ -1855,7 +1849,9 @@ impl StoreOps for Recording<'_> {
         let mut problems: Vec<String> = (report.problems.iter())
             .map(|problem| error::one_line(problem.to_string()))
             .collect();
-        let mut findings: Vec<VerifyFinding> = report.problems.iter().map(finding).collect();
+        let mut findings: Vec<VerifyFinding> = (report.problems.iter())
+            .map(finding)
+            .collect::<Result<_, _>>()?;
         // A deep verify also re-derives the git export's oid memos against the objects, which the
         // store-core verify cannot (rendering git objects lives in swarmops-git): a crafted or
         // torn git_tree_oid, git_blob_oid or git_oid is reported as the other derived values are.
@@ -2046,20 +2042,15 @@ fn history_entry(read: &Snapshot<'_>, event: &PathEvent) -> Result<PathHistoryEn
     let (op, kind, id_after) = match event.entry {
         Some(target) => (
             ChangeOp::Put,
-            Some(entry_kind_out(target.kind())),
+            Some(entry_kind_out(target.kind())?),
             Some(target.id().to_hex()),
         ),
         None => (ChangeOp::Delete, None, None),
     };
-    Ok(PathHistoryEntry {
-        changeset: id,
-        op,
-        kind,
-        id: id_after,
-        author_agent,
-        created_at,
-        title,
-    })
+    let mut out = PathHistoryEntry::new(id, op, author_agent, created_at, title);
+    out.kind = kind;
+    out.id = id_after;
+    Ok(out)
 }
 
 /// The message of a `ref_set` that lost to another move, which left the ref at `actual`
@@ -2363,8 +2354,9 @@ impl ShapedResolutions {
                 Shaped::Take(swarmops_api::Side::Theirs) => {
                     Resolution::Take(swarmops_repo::Side::Theirs)
                 }
+                Shaped::Take(_) => return Err(error::unknown_variant("Side")),
                 Shaped::Blob(id, mode) => Resolution::PutBlob {
-                    kind: kind(mode),
+                    kind: kind(mode)?,
                     id,
                 },
                 Shaped::Delete => Resolution::Delete,
@@ -2378,10 +2370,10 @@ impl ShapedResolutions {
         }
         let converted = content::resolution_bytes(contents)?;
         for ((path, content), mode) in converted.into_iter().zip(modes) {
-            let kind = kind(mode);
+            let kind = kind(mode)?;
             files.insert(path, Resolution::Put { kind, content });
         }
-        Ok(Resolutions { against, files })
+        Ok(Resolutions::new(against, files))
     }
 }
 
@@ -2415,14 +2407,15 @@ fn operation_out(
     operation: Operation,
     max_changesets: usize,
 ) -> Result<OperationOut, OpError> {
-    let Operation { seq, records } = operation;
+    let Operation { seq, records, .. } = operation;
     let ids: Vec<ChangesetId> = records
         .iter()
         .filter_map(|record| match record {
-            OpRecord::Changeset { id, .. } => Some(*id),
+            OpRecord::Changeset { id, .. } => Some(Ok(*id)),
             OpRecord::RefMove { .. } | OpRecord::Compacted => None,
+            _ => Some(Err(error::unknown_variant("OpRecord"))),
         })
-        .collect();
+        .collect::<Result<_, _>>()?;
     let listed = ids
         .iter()
         .take(max_changesets)
@@ -2444,23 +2437,23 @@ fn operation_out(
                 new,
                 actor,
                 ts,
-            } => Some(RefMoveOut {
-                name,
-                old: old.map(|id| id.to_string()),
-                new: new.map(|id| id.to_string()),
-                actor,
-                at: ts,
-            }),
+            } => {
+                let mut moved = RefMoveOut::new(name, actor, ts);
+                moved.old = old.map(|id| id.to_string());
+                moved.new = new.map(|id| id.to_string());
+                Some(Ok(moved))
+            }
             OpRecord::Changeset { .. } | OpRecord::Compacted => None,
+            _ => Some(Err(error::unknown_variant("OpRecord"))),
         })
-        .collect();
-    Ok(OperationOut {
-        op: seq,
+        .collect::<Result<_, _>>()?;
+    Ok(OperationOut::new(
+        seq,
         kind,
-        changesets: listed.iter().map(op_changeset_out).collect(),
-        changesets_total: bytes::to_u64(ids.len()),
+        listed.iter().map(op_changeset_out).collect(),
+        bytes::to_u64(ids.len()),
         ref_moves,
-    })
+    ))
 }
 
 /// What an operation that recorded `records` did: one changeset and a move of a ref to it is a
@@ -2480,6 +2473,7 @@ fn operation_kind(
             OpRecord::Changeset { id, .. } => changesets.push(*id),
             OpRecord::RefMove { new, .. } => moved_to.push(*new),
             OpRecord::Compacted => compactions += 1,
+            _ => return Err(error::unknown_variant("OpRecord")),
         }
     }
     Ok(match (&changesets[..], &moved_to[..], compactions) {
@@ -2520,27 +2514,21 @@ fn metadata_value<'s>(stored: &'s StoredChangeset, key: &str) -> Option<&'s [u8]
         .map(|(_, value)| value.as_slice())
 }
 
-fn change_out(entry: &DeltaEntry) -> ChangeOut {
+/// A delta entry as `show` lists it. `E_INTERNAL` for an op this build does not know.
+fn change_out(entry: &DeltaEntry) -> Result<ChangeOut, OpError> {
     let path = entry.path.to_string();
     match &entry.op {
-        DeltaOp::Put { kind, id } => ChangeOut {
-            path,
-            op: ChangeOp::Put,
-            kind: Some(file_kind(*kind)),
-            blob: Some(id.to_string()),
-        },
-        DeltaOp::Delete => ChangeOut {
-            path,
-            op: ChangeOp::Delete,
-            kind: None,
-            blob: None,
-        },
+        DeltaOp::Put { kind, id } => {
+            let mut out = ChangeOut::new(path, ChangeOp::Put);
+            out.kind = Some(file_kind(*kind)?);
+            out.blob = Some(id.to_string());
+            Ok(out)
+        }
+        DeltaOp::Delete => Ok(ChangeOut::new(path, ChangeOp::Delete)),
+        _ => Err(error::unknown_variant("DeltaOp")),
     }
 }
 
-/// `problem` as a program reads it (operations spec §1, `verify`): its kind, a string of its
-/// own for each variant, and what it names, ids in lowercase hex. The match has no catch-all,
-/// so a new kind of problem does not compile until it has a finding.
 /// A git-export oid memo a deep verify found wrong ([`swarmops_git::GitMemoMismatch`]) as a
 /// `derived_mismatch` line and finding: `git_oid` names its changeset, `git_tree_oid` and
 /// `git_blob_oid` their object. No store path, only ids (storage subspec §5, §7).
@@ -2575,117 +2563,115 @@ fn external_id_finding(entry: &swarmops_git::ExternalIdMismatch) -> (String, Ver
          exports to another commit",
         entry.changeset
     ));
-    let found = VerifyFinding {
-        kind: "external_id_mismatch".to_owned(),
-        object: None,
-        changeset: Some(entry.changeset.to_string()),
-        parent: None,
-        seq: None,
-        offset: None,
-        ref_name: None,
-        cause: None,
-        system: Some("git".to_owned()),
-        key: Some(key),
-        derivation: None,
-    };
+    let mut found = VerifyFinding::new("external_id_mismatch".to_owned());
+    found.changeset = Some(entry.changeset.to_string());
+    found.system = Some("git".to_owned());
+    found.key = Some(key);
     (line, found)
 }
 
-fn finding(problem: &VerifyProblem) -> VerifyFinding {
-    let of = |kind: &str| VerifyFinding {
-        kind: kind.to_owned(),
-        object: None,
-        changeset: None,
-        parent: None,
-        seq: None,
-        offset: None,
-        ref_name: None,
-        cause: None,
-        system: None,
-        key: None,
-        derivation: None,
-    };
-    match problem {
-        VerifyProblem::CorruptObject(id) => VerifyFinding {
-            object: Some(id.to_hex()),
-            ..of("corrupt_object")
-        },
-        VerifyProblem::MissingObject { referenced_by, id } => VerifyFinding {
-            object: Some(id.to_hex()),
-            changeset: Some(referenced_by.to_string()),
-            ..of("missing_object")
-        },
-        VerifyProblem::MissingParent { child, parent } => VerifyFinding {
-            changeset: Some(child.to_string()),
-            parent: Some(parent.to_string()),
-            ..of("missing_parent")
-        },
-        VerifyProblem::RootMismatch(id) => VerifyFinding {
-            changeset: Some(id.to_string()),
-            ..of("root_mismatch")
-        },
-        VerifyProblem::DanglingRef(name) => VerifyFinding {
-            ref_name: Some(name.clone()),
-            ..of("dangling_ref")
-        },
-        VerifyProblem::CorruptRef(name) => VerifyFinding {
-            ref_name: Some(name.clone()),
-            ..of("corrupt_ref")
-        },
-        VerifyProblem::IndexMismatch { seq, cause } => VerifyFinding {
-            seq: Some(*seq),
-            cause: Some(mismatch_cause(*cause).to_owned()),
-            ..of("index_mismatch")
-        },
-        VerifyProblem::JournalCorrupt { offset } => VerifyFinding {
-            offset: Some(*offset),
-            ..of("journal_corrupt")
-        },
+/// `problem` as a program reads it (operations spec §1, `verify`): its kind, a string of its
+/// own for each variant, and what it names, ids in lowercase hex. `E_INTERNAL` for a kind of
+/// problem this build does not know.
+fn finding(problem: &VerifyProblem) -> Result<VerifyFinding, OpError> {
+    let of = |kind: &str| VerifyFinding::new(kind.to_owned());
+    let found = match problem {
+        VerifyProblem::CorruptObject(id) => {
+            let mut found = of("corrupt_object");
+            found.object = Some(id.to_hex());
+            found
+        }
+        VerifyProblem::MissingObject { referenced_by, id } => {
+            let mut found = of("missing_object");
+            found.object = Some(id.to_hex());
+            found.changeset = Some(referenced_by.to_string());
+            found
+        }
+        VerifyProblem::MissingParent { child, parent } => {
+            let mut found = of("missing_parent");
+            found.changeset = Some(child.to_string());
+            found.parent = Some(parent.to_string());
+            found
+        }
+        VerifyProblem::RootMismatch(id) => {
+            let mut found = of("root_mismatch");
+            found.changeset = Some(id.to_string());
+            found
+        }
+        VerifyProblem::DanglingRef(name) => {
+            let mut found = of("dangling_ref");
+            found.ref_name = Some(name.clone());
+            found
+        }
+        VerifyProblem::CorruptRef(name) => {
+            let mut found = of("corrupt_ref");
+            found.ref_name = Some(name.clone());
+            found
+        }
+        VerifyProblem::IndexMismatch { seq, cause } => {
+            let mut found = of("index_mismatch");
+            found.seq = Some(*seq);
+            found.cause = Some(mismatch_cause(*cause)?.to_owned());
+            found
+        }
+        VerifyProblem::JournalCorrupt { offset } => {
+            let mut found = of("journal_corrupt");
+            found.offset = Some(*offset);
+            found
+        }
         VerifyProblem::MetaCorrupt(_) => of("meta_corrupt"),
-        VerifyProblem::ExternalIdCorrupt { system, key } => VerifyFinding {
-            system: Some(system.clone()),
-            key: Some(key.clone()),
-            ..of("external_id_corrupt")
-        },
+        VerifyProblem::ExternalIdCorrupt { system, key } => {
+            let mut found = of("external_id_corrupt");
+            found.system = Some(system.clone());
+            found.key = Some(key.clone());
+            found
+        }
         VerifyProblem::ExternalIdDangling {
             system,
             key,
             changeset,
-        } => VerifyFinding {
-            changeset: Some(changeset.to_string()),
-            system: Some(system.clone()),
-            key: Some(key.clone()),
-            ..of("external_id_dangling")
-        },
+        } => {
+            let mut found = of("external_id_dangling");
+            found.changeset = Some(changeset.to_string());
+            found.system = Some(system.clone());
+            found.key = Some(key.clone());
+            found
+        }
         VerifyProblem::ExternalIdMismatch {
             system,
             key,
             changeset,
-        } => VerifyFinding {
-            changeset: Some(changeset.to_string()),
-            system: Some(system.clone()),
-            key: Some(key.clone()),
-            ..of("external_id_mismatch")
-        },
+        } => {
+            let mut found = of("external_id_mismatch");
+            found.changeset = Some(changeset.to_string());
+            found.system = Some(system.clone());
+            found.key = Some(key.clone());
+            found
+        }
         VerifyProblem::DerivedMismatch {
             name,
             changeset,
             key,
-        } => VerifyFinding {
-            changeset: Some(changeset.to_string()),
-            key: (!key.is_empty()).then(|| external_ids::lower_hex(key)),
-            derivation: Some(name.clone()),
-            ..of("derived_mismatch")
-        },
-    }
+        } => {
+            let mut found = of("derived_mismatch");
+            found.changeset = Some(changeset.to_string());
+            found.key = (!key.is_empty()).then(|| external_ids::lower_hex(key));
+            found.derivation = Some(name.clone());
+            found
+        }
+        _ => return Err(error::unknown_variant("VerifyProblem")),
+    };
+    Ok(found)
 }
 
-/// What a finding's `cause` says disagrees, which names what mends it.
-fn mismatch_cause(cause: MismatchCause) -> &'static str {
+/// What a finding's `cause` says disagrees, which names what mends it. `E_INTERNAL` for a
+/// cause this build does not know.
+fn mismatch_cause(cause: MismatchCause) -> Result<&'static str, OpError> {
     match cause {
-        MismatchCause::Journal => "journal",
-        MismatchCause::SortedView => "sorted_view",
-        MismatchCause::Object => "object",
+        MismatchCause::Journal => Ok("journal"),
+        MismatchCause::SortedView => Ok("sorted_view"),
+        MismatchCause::Object => Ok("object"),
+        _ => Err(error::unknown_variant("MismatchCause")),
     }
 }
 
@@ -2709,42 +2695,47 @@ impl EntryPath {
 }
 
 /// `entry` of a listing as `read_tree` gives it, with its `path` as `path` says.
-fn tree_entry_out(entry: &ListedEntry, path: EntryPath) -> TreeEntryOut {
-    TreeEntryOut {
-        name: entry.path.file_name().to_owned(),
-        path: (path == EntryPath::Included).then(|| entry.path.to_string()),
-        kind: entry_kind_out(entry.target.kind()),
-        size: entry.size,
-        id: entry.target.id().to_hex(),
+fn tree_entry_out(entry: &ListedEntry, path: EntryPath) -> Result<TreeEntryOut, OpError> {
+    let mut out = TreeEntryOut::new(
+        entry.path.file_name().to_owned(),
+        entry_kind_out(entry.target.kind())?,
+        entry.target.id().to_hex(),
+    );
+    out.path = (path == EntryPath::Included).then(|| entry.path.to_string());
+    out.size = entry.size;
+    Ok(out)
+}
+
+/// What a tree entry of `kind` is, as the API names it. `E_INTERNAL` for a kind this build does
+/// not know.
+fn entry_kind_out(kind: EntryKind) -> Result<EntryKindOut, OpError> {
+    match kind {
+        EntryKind::File => Ok(EntryKindOut::File),
+        EntryKind::Exec => Ok(EntryKindOut::Exec),
+        EntryKind::Symlink => Ok(EntryKindOut::Symlink),
+        EntryKind::Dir => Ok(EntryKindOut::Dir),
+        _ => Err(error::unknown_variant("EntryKind")),
     }
 }
 
-/// What a tree entry of `kind` is, as the API names it.
-fn entry_kind_out(kind: EntryKind) -> EntryKindOut {
+/// The kind of a file: a leaf, which a file entry and a delta put always are. `E_INTERNAL` for
+/// a kind this build does not know.
+fn file_kind(kind: LeafKind) -> Result<FileKind, OpError> {
     match kind {
-        EntryKind::File => EntryKindOut::File,
-        EntryKind::Exec => EntryKindOut::Exec,
-        EntryKind::Symlink => EntryKindOut::Symlink,
-        EntryKind::Dir => EntryKindOut::Dir,
-    }
-}
-
-/// The kind of a file: a leaf, which a file entry and a delta put always are.
-fn file_kind(kind: LeafKind) -> FileKind {
-    match kind {
-        LeafKind::File => FileKind::File,
-        LeafKind::Exec => FileKind::Exec,
-        LeafKind::Symlink => FileKind::Symlink,
+        LeafKind::File => Ok(FileKind::File),
+        LeafKind::Exec => Ok(FileKind::Exec),
+        LeafKind::Symlink => Ok(FileKind::Symlink),
+        _ => Err(error::unknown_variant("LeafKind")),
     }
 }
 
 fn signature_out(signature: &Signature) -> SignatureOut {
-    SignatureOut {
-        name: lossy(&signature.name),
-        email: lossy(&signature.email),
-        secs: signature.secs,
-        offset_secs: signature.offset_secs,
-    }
+    SignatureOut::new(
+        lossy(&signature.name),
+        lossy(&signature.email),
+        signature.secs,
+        signature.offset_secs,
+    )
 }
 
 /// `bytes` as UTF-8, with invalid bytes replaced.
