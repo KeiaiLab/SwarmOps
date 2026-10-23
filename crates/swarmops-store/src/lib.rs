@@ -13,18 +13,28 @@
 //! metadata store's writes and the derived values' reads and writes go through [`FsOps`], so tests
 //! can count calls and, in a build with the `test-hooks` feature, crash the process mid-write
 //! (`CrashAtFs`), fail calls (`FailAtFs`) or check the order of the writes (`OrderCheckFs`).
+//!
+//! A store has a format ([`StoreFormat`], its `FORMAT` file), which [`Layout`] carries: it names
+//! the journal and ref files. [`gc`], [`meta::fsck`], [`meta::upgrade`] and [`MaintLease`] are
+//! the maintenance a gc, a repair and an upgrade do.
 
 pub mod error;
 pub mod external_ids;
+pub mod format;
+pub mod fs_kind;
 pub mod fs_objects;
 pub mod fs_ops;
+pub mod gc;
 pub mod layout;
+pub mod maint;
 pub mod meta;
 #[cfg(feature = "test-hooks")]
 pub mod order_check;
 
 pub use error::{FileOp, IoFailure, LimitKind, StoreError};
 pub use external_ids::{ExternalEntry, ExternalIds, ExternalPut, ListedEntry, SYSTEM_GIT};
+pub use format::{DEFAULT_INIT_FORMAT, INIT_FORMATS, StoreFormat, UPGRADE_POISON, read_format};
+pub use fs_kind::check_supported_fs;
 pub use fs_objects::{FsObjectStore, MAX_OBJECT_LEN, ObjectStat, ObjectStore, PutOutcome};
 pub use fs_ops::{
     CRASH_AT_ENV, FAIL_AT_ENV, FS_CALLS_ENV, FsMethod, FsOps, HookedFs, LinkOutcome,
@@ -32,13 +42,18 @@ pub use fs_ops::{
 };
 #[cfg(feature = "test-hooks")]
 pub use fs_ops::{CrashAtFs, FailAt, FailAtFs, FailMode, InjectedError};
+pub use gc::{GC_TEMP_GRACE, Leftover, LeftoverKind};
 pub use layout::{Layout, is_native_linux_fs};
-pub use meta::refs::check_ref_name;
+pub use maint::MaintLease;
+pub use meta::refs::{
+    RefKind, check_move, check_ref_name, check_ref_name_in, check_remote_segment, ref_kind,
+};
 pub use meta::{
     BadRecord, CasResult, ChangesetMeta, CommitInfo, DerivedSlot, DerivedStore, Frame, Index,
     InsertOutcome, Journal, JournalEntry, ListedValue, LogCut, MetaLock, MetaRead, MetaStore,
     MetaWrite, Record, Recovered, RefFile, RefMoveEntry, RefState, SortedView, StoredValue,
     TailRepair,
 };
+pub use meta::{MetaCheck, Rebuilt, Upgraded};
 #[cfg(feature = "test-hooks")]
 pub use order_check::OrderCheckFs;

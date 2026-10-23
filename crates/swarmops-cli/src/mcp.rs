@@ -66,8 +66,8 @@
 //!
 //! One tool per [`StoreOps`] operation, named as the envelope's `op` is: `repo_info`,
 //! `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `path_history`, `diff`, `op_log`,
-//! `ref_list`, `ref_set`, `ref_delete`, `undo`, `commit`, `land`, `blob_put`, `blob_has` and
-//! `verify`, in `tools/list`'s order; then the git remotes' client-side operations (M13), which
+//! `ref_list`, `ref_set`, `ref_delete`, `undo`, `commit`, `land`, `blob_put`, `blob_has`,
+//! `verify` and the maintenance's `gc`, `repair` and `upgrade` (M6), in `tools/list`'s order; then the git remotes' client-side operations (M13), which
 //! no [`StoreOps`] has: `remote_list`, `fetch`, `push`, `sync` and `sync_status`, run on the
 //! store's own operations ([`operate_local`]) and taking a remote by its name only, never a URL
 //! or a path. `clone` and `remote add|remove` have no tool, so that an agent cannot point the
@@ -265,7 +265,7 @@ const READ_FILE_RESULT_CHARS: u32 = 200_000;
 const RESULT_CHARS_KEY: &str = "anthropic/maxResultSizeChars";
 
 /// The tools, in the order `tools/list` gives them.
-static TOOLS: [Spec; 24] = [
+static TOOLS: [Spec; 27] = [
     Spec {
         tool: Tool::RepoInfo,
         name: "repo_info",
@@ -498,6 +498,40 @@ static TOOLS: [Spec; 24] = [
         description: "Checks the whole store's consistency; deep re-hashes every object and \
                       checks the derived values against the objects too.",
         effect: Effect::Reads,
+        result_chars: None,
+    },
+    Spec {
+        tool: Tool::Gc,
+        name: "gc",
+        request: "GcReq",
+        title: "Remove leftovers",
+        description: "Removes the store's leftovers (temp files past a day, a crashed create's \
+                      staging, derived values of older versions, what an upgrade left) and never \
+                      an object or a changeset; dry_run lists them only. E_MAINTENANCE_BUSY \
+                      while another gc, repair or upgrade runs: retry.",
+        effect: Effect::Maintains,
+        result_chars: None,
+    },
+    Spec {
+        tool: Tool::Repair,
+        name: "repair",
+        request: "RepairReq",
+        title: "Repair the store",
+        description: "Rebuilds what the journal can rebuild (its offsets, the index, the ref \
+                      files), quarantines damaged objects and drops damaged cache entries, then \
+                      verifies; the journal itself is never cut. dry_run lists the actions only.",
+        effect: Effect::Maintains,
+        result_chars: None,
+    },
+    Spec {
+        tool: Tool::Upgrade,
+        name: "upgrade",
+        request: "UpgradeReq",
+        title: "Upgrade the store format",
+        description: "Moves the store to the latest format this build writes, which takes \
+                      free-form branches and tags; irreversible, older releases do not open it \
+                      afterwards. On a store of that format already it changes nothing.",
+        effect: Effect::Maintains,
         result_chars: None,
     },
     Spec {
@@ -1321,6 +1355,9 @@ fn operate<O: Operate>(tool: Tool, how: O) -> O::Done {
             ops.verify(req)
                 .and_then(|report| commands::clean(report, depth))
         }),
+        Tool::Gc => how.read(|ops, req| ops.gc(req)),
+        Tool::Repair => how.read(|ops, req| ops.repair(req)),
+        Tool::Upgrade => how.read(|ops, req| ops.upgrade(req)),
         Tool::Local(tool) => operate_local(tool, how),
     }
 }
@@ -1611,6 +1648,9 @@ impl Refuse for OpLogReq {}
 impl Refuse for RefListReq {}
 impl Refuse for UndoReq {}
 impl Refuse for VerifyReq {}
+impl Refuse for swarmops_api::GcReq {}
+impl Refuse for swarmops_api::RepairReq {}
+impl Refuse for swarmops_api::UpgradeReq {}
 impl Refuse for BlobHasReq {}
 impl Refuse for RemoteListReq {}
 impl Refuse for FetchReq {}
@@ -2171,6 +2211,9 @@ enum Tool {
     BlobPut,
     BlobHas,
     Verify,
+    Gc,
+    Repair,
+    Upgrade,
     /// A client-side operation, on the store's own operations ([`operate_local`]).
     Local(LocalTool),
 }
@@ -2212,6 +2255,9 @@ enum Effect {
     /// It lands onto a git remote's head, moves `main` and pushes (`sync`): run again after the
     /// remote moved, it lands again. It reaches a remote, an open world.
     Syncs,
+    /// It removes or rewrites store files that the journal and the objects stand for, moving no
+    /// ref and recording nothing (`gc`, `repair`, `upgrade`): run again, it finds its work done.
+    Maintains,
 }
 
 impl Effect {
@@ -2226,7 +2272,9 @@ impl Effect {
             // (E_CAS_MISMATCH). The ref's own name would match anew at every call and move the
             // ref again. An undo compares against what its operation's frame recorded, the same at
             // every call: run again, it finds the refs restored and writes nothing.
-            Effect::Moves => (false, true, true, false),
+            // gc removes files and repair replaces them: destructive, but run again they find
+            // their work done, as an upgrade of an upgraded store does.
+            Effect::Moves | Effect::Maintains => (false, true, true, false),
             // A land merges onto the ref's head and moves the ref to a changeset whose parent is
             // that head, so it only adds; run again, it finds its change there (a replay with its
             // key, E_NOTHING_TO_LAND without one) and writes nothing.
@@ -2618,6 +2666,21 @@ pub(crate) mod probe {
 
         fn derive(&self, _: DeriveReq) -> Result<DeriveResp, OpError> {
             self.called("derive", "DeriveReq")
+        }
+
+        fn gc(&self, _: swarmops_api::GcReq) -> Result<swarmops_api::GcResp, OpError> {
+            self.called("gc", "GcReq")
+        }
+
+        fn repair(&self, _: swarmops_api::RepairReq) -> Result<swarmops_api::RepairResp, OpError> {
+            self.called("repair", "RepairReq")
+        }
+
+        fn upgrade(
+            &self,
+            _: swarmops_api::UpgradeReq,
+        ) -> Result<swarmops_api::UpgradeResp, OpError> {
+            self.called("upgrade", "UpgradeReq")
         }
     }
 }

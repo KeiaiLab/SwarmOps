@@ -69,9 +69,6 @@ const BRANCH_UNKNOWN: &str = "default_branch_unknown";
 /// A name `so sync status` takes as its subcommand, so no remote may have it.
 const SUBCOMMAND: &str = "status";
 
-/// The longest remote name: one character then up to 62 more.
-const MAX_NAME_LEN: usize = 63;
-
 /// The longest branch or variable name accepted, in bytes.
 const MAX_LEN: usize = 255;
 
@@ -647,12 +644,8 @@ fn repo_name(url: &str) -> String {
 /// Refuses a remote name the rules do not take (`E_INVALID_ARG` `reason: "name"`):
 /// `[a-z0-9][a-z0-9._-]{0,62}`, not ending in `.`, not `status`, and portable.
 fn check_name(name: &str) -> Result<(), OpError> {
-    let first = name.bytes().next();
-    let starts = first.is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
-    let rest = name
-        .bytes()
-        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-'));
-    let grammar = starts && rest && name.len() <= MAX_NAME_LEN && !name.ends_with('.');
+    // The grammar is the store's for the remote segment of `remote/<remote>/<path>`.
+    let grammar = swarmops_store::check_remote_segment(name).is_ok();
     let portable = swarmops_core::portable::check_component(name).is_ok();
     if grammar && portable && name != SUBCOMMAND {
         return Ok(());
@@ -851,6 +844,25 @@ mod tests {
             long.as_str(),
         ] {
             assert!(check_name(name).is_err(), "{name:?}");
+        }
+    }
+
+    /// `remote add` refuses every name the store refuses as the remote of a remote-tracking
+    /// ref, and takes every one it takes but `status` and the unportable ones: one grammar.
+    #[test]
+    fn remote_segment_rule_is_shared() {
+        let long = "a".repeat(63);
+        let names = [
+            "origin", "a", "0.x_y", "Origin", "-a", ".a", "a.", "a/b", "", "status", "con",
+        ];
+        for name in names.into_iter().chain([long.as_str()]) {
+            let grammar = swarmops_store::check_remote_segment(name).is_ok();
+            // Refused by `remote add` beyond the grammar: the subcommand, an unportable name.
+            let beyond = matches!(name, "status" | "con");
+            assert_eq!(check_name(name).is_ok(), grammar && !beyond, "{name:?}");
+        }
+        for name in ["status", "con"] {
+            assert!(swarmops_store::check_remote_segment(name).is_ok(), "{name}");
         }
     }
 

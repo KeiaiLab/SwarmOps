@@ -7,9 +7,19 @@
 //! Ref files are read through [`FsOps::read`] too, the way the object store reads its files,
 //! so that tests can step in between a reader's look at the journal and at the refs.
 //!
-//! A name is `main` or `release/<x>`, where `x` is one or more of `[A-Za-z0-9._-]` and does
-//! not start with `.`, so that `.`, `..` and the store's own temp files (`.tmp…`) are never
-//! refs; at most 255 bytes, what a `RefMove` record holds.
+//! A FORMAT 1 name is `main` or `release/<x>`, where `x` is one or more of `[A-Za-z0-9._-]` and
+//! does not start with `.`, so that `.`, `..` and the store's own temp files (`.tmp…`) are never
+//! refs; at most 255 bytes, what a `RefMove` record holds. FORMAT 2 (the M6 design §2.5) also
+//! takes free-form branches, tags and remote-tracking refs; [`ref_kind`] classifies a name by
+//! that grammar, and [`check_ref_name_in`] checks a name against a store's format:
+//!
+//! ```text
+//! seg     = [A-Za-z0-9._-]+, not starting with '.', not ending in '.' or ".lock", no ".."
+//! path    = seg ("/" seg)*
+//! remote  = [a-z0-9][a-z0-9._-]{0,62}, not ending in '.'
+//! name    = "main" | "release/" x | "tags/" path | "remote/" remote "/" path
+//!         | path, whose first seg is not main, release, tags or remote
+//! ```
 //!
 //! A ref's version counts the writes of its file since the ref was created, from 1. A
 //! transaction writes the file of each ref it moves once, with the target its last move
@@ -28,6 +38,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, ObjectId};
 
 use crate::error::{FileOp, StoreError};
+use crate::format::{self, StoreFormat};
 use crate::fs_ops::{FsMethod, StoreFs};
 use crate::layout::Layout;
 
@@ -37,6 +48,159 @@ const MAX_NAME_LEN: usize = 255;
 /// The most bytes a ref file holds: 64 hex digits, a line break, a version of at most 20
 /// decimal digits (a `u64`), a line break.
 const MAX_FILE_LEN: u64 = 64 + 1 + 20 + 1;
+
+/// The most bytes a remote's name may take, as `remote add` takes them.
+const MAX_REMOTE_LEN: usize = 63;
+
+/// The suffix a segment of a FORMAT 2 name may not end in: git's lock files end in it.
+const LOCK_SUFFIX: &str = ".lock";
+
+/// What a ref name names, by the FORMAT 2 grammar ([`ref_kind`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum RefKind {
+    /// `main`.
+    Main,
+    /// `release/<x>`.
+    Release,
+    /// A free-form branch: a path whose first segment is none of the reserved ones (FORMAT 2).
+    Branch,
+    /// `tags/<path>`: created and deleted, never moved (FORMAT 2).
+    Tag,
+    /// `remote/<remote>/<path>`: what a remote's ref names, as a fetch last saw it (FORMAT 2).
+    RemoteTracking,
+}
+
+impl RefKind {
+    /// Its name in the API: `main`, `release`, `branch`, `tag` or `remote_tracking`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::Release => "release",
+            Self::Branch => "branch",
+            Self::Tag => "tag",
+            Self::RemoteTracking => "remote_tracking",
+        }
+    }
+
+    /// The first format version that takes names of this kind.
+    pub fn needs(self) -> StoreFormat {
+        match self {
+            Self::Main | Self::Release => StoreFormat::V1,
+            Self::Branch | Self::Tag | Self::RemoteTracking => StoreFormat::V2,
+        }
+    }
+}
+
+/// What `name` names by the FORMAT 2 grammar (see [the module documentation](self)); `None`
+/// for a name no format takes. Examples: `main` is [`RefKind::Main`], `release/1.0`
+/// [`RefKind::Release`], `feature/x` [`RefKind::Branch`], `tags/v1` [`RefKind::Tag`],
+/// `remote/origin/main` [`RefKind::RemoteTracking`]; `tags` alone and `main/x` are `None`.
+pub fn ref_kind(name: &str) -> Option<RefKind> {
+    if name.len() > MAX_NAME_LEN {
+        return None;
+    }
+    if name == "main" {
+        return Some(RefKind::Main);
+    }
+
+    // 1. The reserved first segments, each with its own rule for the rest.
+    if let Some(x) = name.strip_prefix("release/") {
+        return is_release_name(x).then_some(RefKind::Release);
+    }
+    if let Some(path) = name.strip_prefix("tags/") {
+        return is_path(path).then_some(RefKind::Tag);
+    }
+    if let Some(rest) = name.strip_prefix("remote/") {
+        let (remote, path) = rest.split_once('/')?;
+        let tracked = check_remote_segment(remote).is_ok() && is_path(path);
+        return tracked.then_some(RefKind::RemoteTracking);
+    }
+
+    // 2. Any other path is a branch, unless it starts with a reserved segment on its own.
+    let first = name.split('/').next().unwrap_or_default();
+    let reserved = matches!(first, "main" | "release" | "tags" | "remote");
+    (!reserved && is_path(name)).then_some(RefKind::Branch)
+}
+
+/// Refuses a remote's name that is not `[a-z0-9][a-z0-9._-]{0,62}` or ends in `.`, with
+/// [`StoreError::RefName`]: the segment after `remote/` in a remote-tracking ref, and the
+/// grammar of a remote's name in `remote add`, one rule for both.
+pub fn check_remote_segment(remote: &str) -> Result<(), StoreError> {
+    let starts = remote
+        .bytes()
+        .next()
+        .is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+    let rest = remote
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-'));
+    if starts && rest && remote.len() <= MAX_REMOTE_LEN && !remote.ends_with('.') {
+        Ok(())
+    } else {
+        Err(StoreError::RefName(remote.to_owned()))
+    }
+}
+
+/// Refuses a name a store of `format` does not take. FORMAT 1 takes what [`check_ref_name`]
+/// takes; a name only a later format takes is [`StoreError::FormatRequired`], one no format
+/// takes [`StoreError::RefName`].
+pub fn check_ref_name_in(format: StoreFormat, name: &str) -> Result<(), StoreError> {
+    match format {
+        StoreFormat::V1 => {
+            if check_ref_name(name).is_ok() {
+                return Ok(());
+            }
+            match ref_kind(name) {
+                Some(kind) => Err(StoreError::FormatRequired {
+                    name: name.to_owned(),
+                    needs: kind.needs().version(),
+                    store: format.version(),
+                }),
+                None => Err(StoreError::RefName(name.to_owned())),
+            }
+        }
+        StoreFormat::V2 => Err(format::not_built("FORMAT 2 refs")),
+    }
+}
+
+/// Refuses a move of ref `name` (a name `format` takes) from `old` to `new` that its kind
+/// does not allow: a tag is created and deleted, never moved ([`StoreError::TagImmutable`]).
+/// FORMAT 1 has no tags, so every move is allowed there.
+pub fn check_move(
+    format: StoreFormat,
+    name: &str,
+    old: Option<ChangesetId>,
+    new: Option<ChangesetId>,
+) -> Result<(), StoreError> {
+    let _ = (name, old, new);
+    match format {
+        StoreFormat::V1 => Ok(()),
+        StoreFormat::V2 => Err(format::not_built("FORMAT 2 refs")),
+    }
+}
+
+/// The FORMAT 1 rule for `x` in `release/<x>`: one or more of `[A-Za-z0-9._-]`, not starting
+/// with `.`.
+fn is_release_name(x: &str) -> bool {
+    !x.is_empty()
+        && !x.starts_with('.')
+        && x.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// Whether `path` is one or more segments joined by `/`, each one of [`is_segment`].
+fn is_path(path: &str) -> bool {
+    path.split('/').all(is_segment)
+}
+
+/// A segment: one or more of `[A-Za-z0-9._-]`, not starting with `.`, not ending in `.` or
+/// `.lock`, not holding `..`.
+fn is_segment(seg: &str) -> bool {
+    is_release_name(seg)
+        && !seg.ends_with('.')
+        && !seg.ends_with(LOCK_SUFFIX)
+        && !seg.contains("..")
+}
 
 /// Where a ref points, as its file (or the journal past the checkpoint) says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,13 +239,7 @@ pub struct RefFile {
 /// its name so first; a caller that must refuse a bad name before it writes anything else, as
 /// a commit that advances a ref does before it puts its objects, calls it itself.
 pub fn check_ref_name(name: &str) -> Result<(), StoreError> {
-    let release = |x: &str| {
-        !x.is_empty()
-            && !x.starts_with('.')
-            && x.bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-    };
-    let valid = name == "main" || name.strip_prefix("release/").is_some_and(release);
+    let valid = name == "main" || name.strip_prefix("release/").is_some_and(is_release_name);
     if valid && name.len() <= MAX_NAME_LEN {
         Ok(())
     } else {
@@ -139,7 +297,7 @@ pub(crate) fn read_each(layout: &Layout, fs: &StoreFs) -> Result<Vec<RefFile>, S
 /// Entries that are not refs (temp files, anything this version does not name) are skipped. A
 /// failure to list the directory is located by `fs`.
 fn release_names(layout: &Layout, fs: &StoreFs) -> Result<Vec<String>, StoreError> {
-    let dir = layout.meta_path("refs/release");
+    let dir = layout.refs_dir().join("release");
     let listing_failed = |e| fs.locate(FileOp::ReadDir, &dir, e);
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
@@ -193,7 +351,7 @@ pub(crate) fn write(
         // It says that already: see above for why that is enough (rule 5).
         next if next == current => return Ok(false),
         Some(state) => {
-            let refs = layout.meta_path("refs");
+            let refs = layout.refs_dir();
             make_dir(fs, &refs, &layout.meta_dir())?;
             if let Some(dir) = path.parent()
                 && dir != refs
@@ -214,7 +372,7 @@ pub(crate) fn write(
 
 /// The file of ref `name`.
 fn path(layout: &Layout, name: &str) -> Utf8PathBuf {
-    layout.meta_path(&format!("refs/{name}"))
+    layout.refs_dir().join(name)
 }
 
 /// Creates `dir` if it is missing, and makes its entry in `parent` durable.
@@ -263,4 +421,87 @@ fn read_file(fs: &StoreFs, path: &Utf8Path) -> Result<Option<RefState>, StoreErr
     parsed
         .map(Some)
         .ok_or_else(|| refused(r#"not a ref file: "<64 hex digits>\n<version>\n""#.to_owned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each reserved first segment has its own rule, any other path is a branch, and a name
+    /// no rule takes is `None`.
+    #[test]
+    fn ref_kind_classifies_every_prefix() {
+        let cases: [(&str, Option<RefKind>); 22] = [
+            ("main", Some(RefKind::Main)),
+            ("release/x", Some(RefKind::Release)),
+            ("release/1.0.0", Some(RefKind::Release)),
+            ("tags/x", Some(RefKind::Tag)),
+            ("tags/v1/rc.1", Some(RefKind::Tag)),
+            ("remote/r/x", Some(RefKind::RemoteTracking)),
+            ("remote/origin/feature/a", Some(RefKind::RemoteTracking)),
+            ("feature/x", Some(RefKind::Branch)),
+            ("x", Some(RefKind::Branch)),
+            ("mainline", Some(RefKind::Branch)),
+            ("tags", None),
+            ("release", None),
+            ("remote/r", None),
+            ("remote/Origin/x", None),
+            ("main/x", None),
+            ("release/a/b", None),
+            ("release/.x", None),
+            ("feature/x.lock", None),
+            ("feature/.x", None),
+            ("a..b", None),
+            ("a//b", None),
+            ("", None),
+        ];
+        for (name, kind) in cases {
+            assert_eq!(ref_kind(name), kind, "{name:?}");
+        }
+        let long = format!("feature/{}", "x".repeat(MAX_NAME_LEN - "feature/".len()));
+        assert_eq!(ref_kind(&long), Some(RefKind::Branch));
+        assert_eq!(ref_kind(&format!("{long}x")), None);
+    }
+
+    /// FORMAT 1 takes its own names; a name only FORMAT 2 takes is `FormatRequired`, naming
+    /// format 2 and the store's 1; a name neither takes is `RefName`.
+    #[test]
+    fn v1_checks_names_by_format() {
+        for name in ["main", "release/x"] {
+            check_ref_name_in(StoreFormat::V1, name).unwrap();
+        }
+        for name in ["feature/x", "tags/v1", "remote/origin/main"] {
+            let Err(StoreError::FormatRequired {
+                name: refused,
+                needs,
+                store,
+            }) = check_ref_name_in(StoreFormat::V1, name)
+            else {
+                panic!("{name}: not FormatRequired");
+            };
+            assert_eq!((refused.as_str(), needs, store), (name, 2, 1));
+        }
+        for name in ["tags", "main/x", ".x"] {
+            assert!(
+                matches!(
+                    check_ref_name_in(StoreFormat::V1, name),
+                    Err(StoreError::RefName(_))
+                ),
+                "{name}"
+            );
+        }
+        check_move(StoreFormat::V1, "main", None, None).unwrap();
+    }
+
+    /// A remote's name: lowercase letters and digits first, then `.`, `_` and `-` too, at
+    /// most 63 bytes, not ending in `.`.
+    #[test]
+    fn remote_segments_follow_the_remote_grammar() {
+        for good in ["origin", "up-stream", "a", "0.x_y", &"a".repeat(63)] {
+            check_remote_segment(good).unwrap();
+        }
+        for bad in ["", "Origin", "-x", ".x", "x.", "a/b", &"a".repeat(64)] {
+            assert!(check_remote_segment(bad).is_err(), "{bad:?}");
+        }
+    }
 }

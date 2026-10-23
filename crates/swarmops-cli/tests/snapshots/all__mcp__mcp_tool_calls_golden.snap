@@ -1164,7 +1164,7 @@ expression: transcript
         "result": {
           "content": [
             {
-              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"ref_list\",\"result\":{\"refs\":[{\"name\":\"main\",\"target\":\"[landed]\",\"version\":3},{\"name\":\"release/v1\",\"target\":\"[c1]\",\"version\":1}]}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"ref_list\",\"result\":{\"refs\":[{\"kind\":\"main\",\"name\":\"main\",\"target\":\"[landed]\",\"version\":3},{\"kind\":\"release\",\"name\":\"release/v1\",\"target\":\"[c1]\",\"version\":1}]}}",
               "type": "text"
             }
           ],
@@ -1182,11 +1182,13 @@ expression: transcript
             "result": {
               "refs": [
                 {
+                  "kind": "main",
                   "name": "main",
                   "target": "[landed]",
                   "version": 3
                 },
                 {
+                  "kind": "release",
                   "name": "release/v1",
                   "target": "[c1]",
                   "version": 1
@@ -2028,7 +2030,7 @@ expression: transcript
         "result": {
           "content": [
             {
-              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"verify\",\"result\":{\"changesets_checked\":9,\"findings\":[],\"objects_checked\":28,\"problems\":[]}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"verify\",\"result\":{\"changesets_checked\":9,\"findings\":[],\"found\":0,\"objects_checked\":28,\"problems\":[],\"truncated\":false}}",
               "type": "text"
             }
           ],
@@ -2046,8 +2048,10 @@ expression: transcript
             "result": {
               "changesets_checked": 9,
               "findings": [],
+              "found": 0,
               "objects_checked": 28,
-              "problems": []
+              "problems": [],
+              "truncated": false
             }
           }
         }

@@ -257,6 +257,20 @@ fn store_error(e: StoreError, message: String, during: During<'_>) -> OpError {
         | StoreError::MissingParent(_)
         | StoreError::ExternalIdCorrupt { .. } => corrupt(message, during, "swarmops verify"),
         StoreError::RefName(name) => ref_name_invalid(name, message),
+        StoreError::FormatRequired { name, needs, store } => {
+            error(ErrorCode::FormatRequired, message)
+                .with_details(details([
+                    ("name", name.into()),
+                    ("needs", needs.into()),
+                    ("store", store.into()),
+                ]))
+                .with_hint("swarmops upgrade")
+        }
+        StoreError::TagImmutable(name) => error(ErrorCode::TagImmutable, message)
+            .with_details(details([("name", name.into())]))
+            .with_hint("delete the tag with swarmops ref delete, then create it again"),
+        StoreError::MaintenanceBusy => error(ErrorCode::MaintenanceBusy, message)
+            .with_hint("retry once the other gc, repair or upgrade is done"),
         StoreError::UnknownRefTarget(id) => repo_error(RepoError::NotFound(id.to_string()), during),
         StoreError::DuplicateParent(id) => error(ErrorCode::InvalidArg, message)
             .with_details(details([("parent", id.to_string().into())])),

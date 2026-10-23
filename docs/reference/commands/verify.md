@@ -38,6 +38,12 @@ Syntax: `--deep`.
 
 Re-hash every object, and check the derived values against the objects, too.
 
+### `--max-findings`
+
+Syntax: `--max-findings <N>`.
+
+List at most N problems, 1 to 1,000 (default: 1,000); found counts them all.
+
 ## Examples
 
 ### CLI
@@ -55,7 +61,9 @@ swarmops --repo [tmp]/store verify
     "objects_checked": 3,
     "changesets_checked": 1,
     "problems": [],
-    "findings": []
+    "findings": [],
+    "truncated": false,
+    "found": 0
   },
   "meta": {
     "repo": "[tmp]/store",
@@ -198,8 +206,10 @@ SwarmOps' own history, shallow and deep.
 | --- | --- | --- | --- |
 | `changesets_checked` | `integer` | yes | How many changesets were checked. |
 | `findings` | `array of VerifyFinding` | no | One finding per problem found, for a program to act on: `findings[i]` is the problem that the line `problems[i]` describes. Empty for a clean store; a report without it reads as having none. |
+| `found` | `integer` | no | How many problems were found, listed or not; 0 from a store older than this field. |
 | `objects_checked` | `integer` | yes | How many objects were checked. |
 | `problems` | `array of string` | yes | One line per problem found, for a reader of lines; empty for a clean store. `findings` holds the same problems, at the same indexes, for a program. |
+| `truncated` | `boolean` | no | The report lists the first `max_findings` problems only; `found` counts them all. |
 
 Envelope `op`: `verify`.
 
@@ -217,5 +227,7 @@ Any command that opens a store may also fail with a store error, such as [`E_NOT
 ## See also
 
 - [Operating SwarmOps: Checking a store](../../operations.md#checking-a-store)
+- [`swarmops gc`](gc.md)
+- [`swarmops repair`](repair.md)
 - [CLI reference](../cli.md)
 - [Error codes](../errors.md)

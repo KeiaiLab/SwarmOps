@@ -8,6 +8,8 @@
 //! changesets whose every field the caller gives, many in one journal frame
 //! ([`Repo::commit_raw_batch`]). It reads the journal back as the store's operations
 //! ([`Repo::op_log`]), and undoes an operation's ref moves by compare-and-swap ([`Repo::undo`]).
+//! Maintenance removes leftovers ([`Repo::gc`]), mends what the journal can mend
+//! ([`Repo::repair`]) and moves a store to a later format ([`Repo::upgrade`]).
 //!
 //! A request reads in one snapshot of the metadata ([`Repo::snapshot`], a [`RepoRead`]), which
 //! resolves every revision and ref it names in the same view, and commits on the parents it
@@ -39,6 +41,7 @@ pub mod commit;
 pub mod derive;
 pub mod diff;
 pub mod error;
+pub mod gc;
 pub mod history;
 pub mod land;
 #[cfg(feature = "test-hooks")]
@@ -50,8 +53,10 @@ pub mod path_history;
 pub mod raw;
 pub mod read;
 pub mod rebase;
+pub mod repair;
 pub mod repo;
 mod tree_edit;
+pub mod upgrade;
 pub mod verify;
 
 pub use commit::{
@@ -63,6 +68,7 @@ pub use derive::{
     PathKey, Registry, SkipList, Subject,
 };
 pub use error::RepoError;
+pub use gc::{GcReport, GcRequest};
 pub use history::{FirstParents, SKIP_AFTER};
 pub use land::{
     LandOutcome, LandRequest, LandStatus, MergeConflicts, NothingToLandReason, Resolution,
@@ -74,6 +80,8 @@ pub use path_history::PathEvent;
 pub use raw::{MAX_RAW_BATCH, RawBatch, RawBatchOutcome, RawChangeset, RawOutcome};
 pub use read::{FileSpan, FileSpanRead, ListedEntry, RepoRead, StoredChangeset, TreePage};
 pub use rebase::{RebaseOutcome, RebaseRequest, RebaseStatus};
+pub use repair::{RepairAction, RepairKind, RepairReport, RepairRequest};
 pub use repo::{CasOutcome, LocalRepo, Repo, RepoInfo};
-pub use swarmops_store::{CasResult, InsertOutcome, RefState, StoreError};
+pub use swarmops_store::{CasResult, InsertOutcome, RefKind, RefState, StoreError, StoreFormat};
+pub use upgrade::UpgradeReport;
 pub use verify::{Depth, MismatchCause, VerifyProblem, VerifyReport};

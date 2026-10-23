@@ -9,7 +9,7 @@ A failed command prints an envelope whose `error` names a stable `E_*` code, the
 | Exit | Meaning | Codes |
 | --- | --- | --- |
 | 0 | Success. |  |
-| 1 | The operation failed. | [`E_EXISTS`](#e_exists), [`E_AMBIGUOUS_ID`](#e_ambiguous_id), [`E_IS_DIR`](#e_is_dir), [`E_TOO_LARGE`](#e_too_large), [`E_EMPTY_COMMIT`](#e_empty_commit), [`E_TYPE_CONFLICT`](#e_type_conflict), [`E_REF_NAME_INVALID`](#e_ref_name_invalid), [`E_STORE_CORRUPT`](#e_store_corrupt), [`E_UNSUPPORTED_FS`](#e_unsupported_fs), [`E_IO`](#e_io), [`E_INTERNAL`](#e_internal), [`E_NOTHING_TO_LAND`](#e_nothing_to_land), [`E_NOTHING_TO_UNDO`](#e_nothing_to_undo), [`E_GIT_IMPORT_LOSSY`](#e_git_import_lossy), [`E_GIT_UNSUPPORTED`](#e_git_unsupported), [`E_GIT_READ`](#e_git_read), [`E_GIT_WRITE`](#e_git_write), [`E_WS_EXISTS`](#e_ws_exists), [`E_WS_DIRTY`](#e_ws_dirty), [`E_PATH_NOT_EMPTY`](#e_path_not_empty), [`E_UNRESOLVED_CONFLICTS`](#e_unresolved_conflicts), [`E_MARKERS_PRESENT`](#e_markers_present), [`E_WS_UNPORTABLE`](#e_ws_unportable), [`E_CHECK_FAILED`](#e_check_failed) |
+| 1 | The operation failed. | [`E_EXISTS`](#e_exists), [`E_AMBIGUOUS_ID`](#e_ambiguous_id), [`E_IS_DIR`](#e_is_dir), [`E_TOO_LARGE`](#e_too_large), [`E_EMPTY_COMMIT`](#e_empty_commit), [`E_TYPE_CONFLICT`](#e_type_conflict), [`E_REF_NAME_INVALID`](#e_ref_name_invalid), [`E_STORE_CORRUPT`](#e_store_corrupt), [`E_UNSUPPORTED_FS`](#e_unsupported_fs), [`E_IO`](#e_io), [`E_INTERNAL`](#e_internal), [`E_NOTHING_TO_LAND`](#e_nothing_to_land), [`E_NOTHING_TO_UNDO`](#e_nothing_to_undo), [`E_FORMAT_REQUIRED`](#e_format_required), [`E_TAG_IMMUTABLE`](#e_tag_immutable), [`E_GIT_IMPORT_LOSSY`](#e_git_import_lossy), [`E_GIT_UNSUPPORTED`](#e_git_unsupported), [`E_GIT_READ`](#e_git_read), [`E_GIT_WRITE`](#e_git_write), [`E_WS_EXISTS`](#e_ws_exists), [`E_WS_DIRTY`](#e_ws_dirty), [`E_PATH_NOT_EMPTY`](#e_path_not_empty), [`E_UNRESOLVED_CONFLICTS`](#e_unresolved_conflicts), [`E_MARKERS_PRESENT`](#e_markers_present), [`E_WS_UNPORTABLE`](#e_ws_unportable), [`E_CHECK_FAILED`](#e_check_failed) |
 | 2 | The request or the command line is malformed. | [`E_INVALID_ARG`](#e_invalid_arg) |
 | 3 | The change conflicts with what it lands on: resolve it, then run the operation again. | [`E_CONFLICT`](#e_conflict), [`E_GIT_IMPORT_DIVERGED`](#e_git_import_diverged), [`E_GIT_EXPORT_DIVERGED`](#e_git_export_diverged), [`E_REMOTE_DIVERGED`](#e_remote_diverged) |
 | 4 | The operation can succeed when it is run again. | [`E_CAS_MISMATCH`](#e_cas_mismatch), [`E_IO_TRANSIENT`](#e_io_transient), [`E_BUSY`](#e_busy), [`E_CAS_RETRY_EXHAUSTED`](#e_cas_retry_exhausted), [`E_MAINTENANCE_BUSY`](#e_maintenance_busy), [`E_REMOTE_UNREACHABLE`](#e_remote_unreachable), [`E_WS_LOCKED`](#e_ws_locked) |
@@ -33,7 +33,7 @@ A failed command prints an envelope whose `error` names a stable `E_*` code, the
 | [`E_UNKNOWN_PARENT`](#e_unknown_parent) | 6 | no | The parent changeset is not in the store. |
 | [`E_CAS_MISMATCH`](#e_cas_mismatch) | 4 | yes | The ref no longer holds the expected target (or, with `create`, exists at another one); `details.actual` holds what it does, `null` when the ref does not exist. |
 | [`E_REF_NOT_FOUND`](#e_ref_not_found) | 6 | no | No ref by that name. |
-| [`E_REF_NAME_INVALID`](#e_ref_name_invalid) | 1 | no | The ref name is not `main` or `release/<name>`. |
+| [`E_REF_NAME_INVALID`](#e_ref_name_invalid) | 1 | no | The ref name is one no store format takes, or one the operation does not move: `details.reason` is `reserved` for a `remote/` name, which only a fetch writes, and `tag` for a tag named as the target of a land or a commit's `advance`. |
 | [`E_STORE_CORRUPT`](#e_store_corrupt) | 1 | no | Stored data failed verification. |
 | [`E_INVALID_ARG`](#e_invalid_arg) | 2 | no | A malformed argument or request, including a command-line usage error. |
 | [`E_UNSUPPORTED_FS`](#e_unsupported_fs) | 1 | no | The store path is not on a native Linux filesystem (for example WSL's `/mnt/*`). |
@@ -48,7 +48,9 @@ A failed command prints an envelope whose `error` names a stable `E_*` code, the
 | [`E_OP_NOT_FOUND`](#e_op_not_found) | 6 | no | The store has no operation by that number. |
 | [`E_AUTH`](#e_auth) | 5 | no | The caller's token failed verification. |
 | [`E_POLICY_DENIED`](#e_policy_denied) | 5 | no | A policy refused the operation for this identity. |
-| [`E_MAINTENANCE_BUSY`](#e_maintenance_busy) | 4 | yes | Maintenance (gc or verify) holds the store's maintenance lease. |
+| [`E_MAINTENANCE_BUSY`](#e_maintenance_busy) | 4 | yes | Another gc, repair or upgrade holds the store's maintenance lease; nothing was done, and running the operation again once it is done can succeed. |
+| [`E_FORMAT_REQUIRED`](#e_format_required) | 1 | no | The ref name is one the store's format does not take but a later one does: `details` names `name`, `needs` (the format that takes it) and `store` (the store's); `swarmops upgrade` moves the store to it. |
+| [`E_TAG_IMMUTABLE`](#e_tag_immutable) | 1 | no | A tag was asked to move from one target to another: a tag is created and deleted, never moved (`details.name`). |
 | [`E_GIT_NOT_A_REPO`](#e_git_not_a_repo) | 6 | no | `git import` found no git repository it can open at `git_path` (`details.git_path`). |
 | [`E_GIT_REF_NOT_FOUND`](#e_git_ref_not_found) | 6 | no | `git import`: the source repository has no `git_ref`, or it names no commit (`details.git_ref`; `details.kind` the object it names instead, such as a tree). |
 | [`E_GIT_IMPORT_DIVERGED`](#e_git_import_diverged) | 3 | no | `git import`: the target ref's head is not the import of `git_ref`'s commit or of an ancestor of it, because the source was rewritten or a native changeset was committed on the target, so nothing was written; there is no silent merge. |
@@ -153,7 +155,7 @@ No ref by that name.
 
 Exit 1. Retryable: no.
 
-The ref name is not `main` or `release/<name>`.
+The ref name is one no store format takes, or one the operation does not move: `details.reason` is `reserved` for a `remote/` name, which only a fetch writes, and `tag` for a tag named as the target of a land or a commit's `advance`.
 
 ## E_STORE_CORRUPT
 
@@ -243,7 +245,19 @@ A policy refused the operation for this identity.
 
 Exit 4. Retryable: yes.
 
-Maintenance (gc or verify) holds the store's maintenance lease.
+Another gc, repair or upgrade holds the store's maintenance lease; nothing was done, and running the operation again once it is done can succeed.
+
+## E_FORMAT_REQUIRED
+
+Exit 1. Retryable: no.
+
+The ref name is one the store's format does not take but a later one does: `details` names `name`, `needs` (the format that takes it) and `store` (the store's); `swarmops upgrade` moves the store to it.
+
+## E_TAG_IMMUTABLE
+
+Exit 1. Retryable: no.
+
+A tag was asked to move from one target to another: a tag is created and deleted, never moved (`details.name`). Nothing was written.
 
 ## E_GIT_NOT_A_REPO
 

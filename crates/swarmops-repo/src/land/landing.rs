@@ -335,7 +335,7 @@ impl<O: ObjectStore> Repo<O> {
     /// a snapshot of its own, in which it reads the target's head, the change's head and base, and
     /// the resolutions. A rebase starts so too ([`crate::rebase`]).
     pub(crate) fn start(&self, mut req: LandRequest) -> Result<Started<'_, O>, RepoError> {
-        swarmops_store::check_ref_name(&req.target).map_err(repo::ref_error)?;
+        self.check_ref_name(&req.target)?;
         let read = self.snapshot()?;
         let theirs = target_head(&read, &req.target)?;
         let head = stored(&read, req.head)?;

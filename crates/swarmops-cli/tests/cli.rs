@@ -593,8 +593,8 @@ fn ref_set_expect_mismatch_exits_4() {
     assert_eq!(
         list["result"]["refs"],
         json!([
-            {"name": "main", "target": c2, "version": 2},
-            {"name": "release/1.0", "target": c1, "version": 1},
+            {"name": "main", "kind": "main", "target": c2, "version": 2},
+            {"name": "release/1.0", "kind": "release", "target": c1, "version": 1},
         ])
     );
 
@@ -721,7 +721,7 @@ fn commit_advance_publishes_the_changeset_and_moves_the_ref() {
     let list = s.run(&["--repo", &store, "ref", "list"]);
     assert_eq!(
         list["result"]["refs"],
-        json!([{"name": "main", "target": c2, "version": 2}])
+        json!([{"name": "main", "kind": "main", "target": c2, "version": 2}])
     );
 
     let stale = publish(&mut s, "c3", Some(&c1));
@@ -1594,7 +1594,11 @@ const NOT_RAISED: &[(&str, &str)] = &[
     ("E_POLICY_DENIED", "policies arrive after M1"),
     (
         "E_MAINTENANCE_BUSY",
-        "the maintenance lease arrives after M1",
+        "needs a gc, repair or upgrade running: their suites raise it",
+    ),
+    (
+        "E_TAG_IMMUTABLE",
+        "needs a FORMAT 2 store, which init does not make yet",
     ),
     (
         "E_REMOTE_DIVERGED",
@@ -1793,6 +1797,11 @@ fn error_cases(s: &Session, store: &str, c2: &str) -> Vec<(&'static str, Vec<Str
         ),
         (
             "E_REF_NAME_INVALID",
+            on(&["ref", "set", "main/x", "main", "--create"]),
+        ),
+        // A branch, which only a FORMAT 2 store takes.
+        (
+            "E_FORMAT_REQUIRED",
             on(&["ref", "set", "feature/x", "main", "--create"]),
         ),
         ("E_INVALID_ARG", on(&["show", "not a rev"])),

@@ -23,7 +23,7 @@ use swarmops_store::{CRASH_AT_ENV, CrashAtFs, FailAt, FailAtFs, FailMode, Inject
 use swarmops_store::{
     CasResult, ChangesetMeta, CommitInfo, Frame, FsOps, Index, InsertOutcome, Journal,
     JournalEntry, Layout, LimitKind, LogCut, MetaLock, MetaRead, MetaStore, RealFs, Record,
-    Recovered, RefMoveEntry, RefState, StoreError,
+    Recovered, RefMoveEntry, RefState, StoreError, StoreFormat,
 };
 use swarmops_testkit::child::{CHILD_TIMEOUT, Child, SIGABRT, run, test_args, this_test};
 use swarmops_testkit::faults::checked;
@@ -272,6 +272,18 @@ fn assert_ref_name<T: std::fmt::Debug>(got: Result<T, StoreError>, name: &str) {
     match got {
         Err(StoreError::RefName(refused)) => assert_eq!(refused, name),
         other => panic!("expected RefName({name:?}), got {other:?}"),
+    }
+}
+
+#[track_caller]
+fn assert_format_required<T: std::fmt::Debug>(got: Result<T, StoreError>, name: &str) {
+    match got {
+        Err(StoreError::FormatRequired {
+            name: refused,
+            needs: 2,
+            store: 1,
+        }) => assert_eq!(refused, name),
+        other => panic!("expected FormatRequired({name:?}), got {other:?}"),
     }
 }
 
@@ -696,8 +708,6 @@ fn cas_ref_rejects_unknown_target_and_bad_name() {
     let too_long = format!("release/{}", "x".repeat(248));
     let bad = [
         "",
-        "master",
-        "Main",
         "main/x",
         "release",
         "release/",
@@ -707,7 +717,6 @@ fn cas_ref_rejects_unknown_target_and_bad_name() {
         "release/.hidden",
         "release/a b",
         "release/é",
-        "refs/heads/main",
         "../main",
         "release/../main",
         &too_long,
@@ -717,6 +726,12 @@ fn cas_ref_rejects_unknown_target_and_bad_name() {
         assert_ref_name(write.cas_ref(name, None, Some(id(1)), ACTOR), name);
         assert_ref_name(read.get_ref(name), name);
         assert_ref_name(read.reflog(name, 1), name);
+    }
+    // Names only FORMAT 2 takes: refused as needing it.
+    for name in ["master", "Main", "refs/heads/main", "tags/v1"] {
+        assert_format_required(write.cas_ref(name, None, Some(id(1)), ACTOR), name);
+        assert_format_required(read.get_ref(name), name);
+        assert_format_required(read.reflog(name, 1), name);
     }
     let longest = format!("release/{}", "x".repeat(247));
     let good = ["main", "release/v1.0", "release/2026-10_rc.1", &longest];
@@ -826,21 +841,16 @@ fn a_write_reads_a_changeset_from_the_index_or_its_queue() {
     assert_eq!(store.read().unwrap().changeset(id(4)).unwrap(), queued);
 }
 
-/// `get_ref` refuses a name that is not `main` or `release/<x>`, as `cas_ref` does.
+/// `get_ref` refuses a name that is not `main` or `release/<x>`, as `cas_ref` does: one only
+/// FORMAT 2 takes as needing it.
 #[test]
 fn a_write_refuses_to_read_a_bad_ref_name() {
     let (_dir, _root, store) = new_store();
     let write = store.write().unwrap();
-    for name in [
-        "",
-        "master",
-        "release/",
-        "release/a/b",
-        "release/.x",
-        "../main",
-    ] {
+    for name in ["", "release/", "release/a/b", "release/.x", "../main"] {
         assert_ref_name(write.get_ref(name), name);
     }
+    assert_format_required(write.get_ref("master"), "master");
 }
 
 #[test]
@@ -5781,4 +5791,38 @@ fn the_index_syncs_its_five_files_at_once_and_the_checkpoint_waits_for_them() {
     assert_eq!(ckpt(&root), ckpt_before);
     store.flush().unwrap();
     assert_eq!(ckpt(&root), log_len(&root));
+}
+
+/// An open reads `<root>/FORMAT` for the store's format: none is FORMAT 1, as a metadata store
+/// made on its own has always been, and so is FORMAT 1's marker; FORMAT 2's opens the FORMAT 2
+/// journal (missing in this FORMAT 1 store); any other marker is no format.
+#[test]
+fn meta_open_reads_the_format_file() {
+    let (_dir, root, store) = new_store();
+    drop(store);
+    let format_file = Layout::new(root.clone()).format_file();
+
+    // 1. No FORMAT, and FORMAT 1's marker: FORMAT 1.
+    assert_eq!(open_checked(&root).unwrap().format(), StoreFormat::V1);
+    fs::write(&format_file, StoreFormat::V1.marker()).unwrap();
+    assert_eq!(open_checked(&root).unwrap().format(), StoreFormat::V1);
+
+    // 2. FORMAT 2's marker: the FORMAT 2 journal, which this FORMAT 1 store does not have.
+    fs::write(&format_file, StoreFormat::V2.marker()).unwrap();
+    let Err(StoreError::Format(what)) = open_checked(&root) else {
+        panic!("FORMAT 2 opened");
+    };
+    assert!(what.contains("journal2.log"), "{what}");
+
+    // 3. Any other marker: no format this build reads.
+    fs::write(&format_file, b"swarmops-store 9\n").unwrap();
+    let Err(StoreError::Format(what)) = open_checked(&root) else {
+        panic!("an unknown format opened");
+    };
+    assert!(what.contains("does not read"), "{what}");
+
+    // 4. `open_in` takes the caller's layout, whatever FORMAT says.
+    let layout = Layout::with_format(root.clone(), StoreFormat::V1);
+    let opened = MetaStore::open_in(layout, checked(RealFs::new())).unwrap();
+    assert_eq!(opened.format(), StoreFormat::V1);
 }

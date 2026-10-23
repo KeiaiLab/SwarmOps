@@ -58,7 +58,9 @@ expression: s.transcript()
         "objects_checked": 3,
         "changesets_checked": 1,
         "problems": [],
-        "findings": []
+        "findings": [],
+        "truncated": false,
+        "found": 0
       },
       "meta": {
         "repo": "[tmp]/store",
@@ -79,7 +81,9 @@ expression: s.transcript()
         "objects_checked": 3,
         "changesets_checked": 1,
         "problems": [],
-        "findings": []
+        "findings": [],
+        "truncated": false,
+        "found": 0
       },
       "meta": {
         "repo": "[tmp]/store",
@@ -110,10 +114,12 @@ expression: s.transcript()
               "object": "[id3]"
             }
           ],
+          "found": 1,
           "objects_checked": 3,
           "problems": [
             "object [id3] is missing; changeset [c1] references it"
-          ]
+          ],
+          "truncated": false
         },
         "hint": "swarmops verify --deep"
       },
@@ -146,10 +152,12 @@ expression: s.transcript()
               "object": "[id3]"
             }
           ],
+          "found": 1,
           "objects_checked": 2,
           "problems": [
             "object [id3] is missing; changeset [c1] references it"
-          ]
+          ],
+          "truncated": false
         },
         "hint": "details.findings names each damaged object, record or ref by kind and id: restore them from a backup of the store"
       },

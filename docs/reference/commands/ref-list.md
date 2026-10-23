@@ -2,11 +2,11 @@
 
 # swarmops ref list
 
-List every ref.
+List every ref, or those whose names start with --prefix, each with its kind.
 
 ```yaml
 title: "swarmops ref list"
-description: "List every ref."
+description: "List every ref, or those whose names start with --prefix, each with its kind."
 group: "refs"
 since: "0.1.0"
 mutates: false
@@ -32,6 +32,12 @@ None.
 
 The command also takes the [global options](../cli.md#global-options).
 
+### `--prefix`
+
+Syntax: `--prefix <TEXT>`.
+
+Only the refs whose names start with this, such as release/ or tags/.
+
 ## Examples
 
 ### CLI
@@ -50,12 +56,14 @@ swarmops --repo [tmp]/store ref list
       {
         "name": "main",
         "target": "[c2]",
-        "version": 2
+        "version": 2,
+        "kind": "main"
       },
       {
         "name": "release/1.0",
         "target": "[c1]",
-        "version": 1
+        "version": 1,
+        "kind": "release"
       }
     ]
   },

@@ -155,7 +155,7 @@ impl<O: ObjectStore> Repo<O> {
         actor: &str,
         mut metadata: Vec<(String, Vec<u8>)>,
     ) -> Result<Publication, RepoError> {
-        swarmops_store::check_ref_name(target).map_err(repo::ref_error)?;
+        self.check_ref_name(target)?;
         let changes = puts
             .into_iter()
             .map(|(path, kind, content)| Change {

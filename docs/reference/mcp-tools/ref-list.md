@@ -21,7 +21,9 @@ max_result_chars: null
 
 `arguments` is a `RefListReq`: `swarmops schema RefListReq` prints the type. A field the type does not know is ignored.
 
-It takes no fields: pass `{}`.
+| Field | Type | Required | Default | Description |
+| --- | --- | --- | --- | --- |
+| `prefix` | string or null | no |  | Only the refs whose names start with these bytes (`release/`, `tags/`); omitted for every ref. |
 
 ### JSON Schema
 
@@ -30,7 +32,16 @@ As `tools/list` gives it: each `$ref` replaced by its definition, so that it sta
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "`ref list`: list every ref. It has no options yet.",
+  "description": "`ref list`: list every ref, or those whose names start with a prefix.",
+  "properties": {
+    "prefix": {
+      "description": "Only the refs whose names start with these bytes (`release/`, `tags/`); omitted for\nevery ref.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
   "title": "RefListReq",
   "type": "object"
 }
@@ -76,7 +87,7 @@ Its entry in `tools/list` carries no `_meta`.
   "result": {
     "content": [
       {
-        "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"ref_list\",\"result\":{\"refs\":[{\"name\":\"main\",\"target\":\"[landed]\",\"version\":3},{\"name\":\"release/v1\",\"target\":\"[c1]\",\"version\":1}]}}",
+        "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"ref_list\",\"result\":{\"refs\":[{\"kind\":\"main\",\"name\":\"main\",\"target\":\"[landed]\",\"version\":3},{\"kind\":\"release\",\"name\":\"release/v1\",\"target\":\"[c1]\",\"version\":1}]}}",
         "type": "text"
       }
     ],
@@ -94,11 +105,13 @@ Its entry in `tools/list` carries no `_meta`.
       "result": {
         "refs": [
           {
+            "kind": "main",
             "name": "main",
             "target": "[landed]",
             "version": 3
           },
           {
+            "kind": "release",
             "name": "release/v1",
             "target": "[c1]",
             "version": 1

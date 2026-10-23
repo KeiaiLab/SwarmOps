@@ -63,6 +63,7 @@ use super::parents::MAX_PARENTS;
 use super::refs::{self, RefFile, RefState};
 use super::replay::{self, Overlay};
 use crate::error::{FileOp, LimitKind, StoreError};
+use crate::format::{self, StoreFormat};
 use crate::fs_ops::{FsOps, RealFs, StoreFs};
 use crate::layout::Layout;
 
@@ -315,9 +316,15 @@ impl MetaStore {
     /// through `std::fs`: [`FsOps`] removes no directories. Two creates of one store at once
     /// are not supported.
     pub fn create_with_fs(dir: &Utf8Path, fs: Arc<dyn FsOps>) -> Result<MetaStore, StoreError> {
+        Self::create_in(Layout::new(dir), fs)
+    }
+
+    /// [`MetaStore::create_with_fs`] of a store of `layout`'s format, rooted at its root.
+    pub fn create_in(layout: Layout, fs: Arc<dyn FsOps>) -> Result<MetaStore, StoreError> {
         // One on the real root, so that a failure on a staged file names it under meta.tmp/.
-        let fs = StoreFs::new(fs, dir);
-        let meta = Layout::new(dir).meta_dir();
+        let dir = layout.root().to_owned();
+        let fs = StoreFs::new(fs, &dir);
+        let meta = layout.meta_dir();
         if std::fs::exists(&meta).map_err(|e| fs.locate(FileOp::Stat, &meta, e))? {
             return Err(StoreError::Format(format!("{meta} exists already")));
         }
@@ -327,11 +334,11 @@ impl MetaStore {
             std::fs::remove_dir_all(&staging)
                 .map_err(|e| fs.locate(FileOp::RemoveDirAll, &staging, e))?;
         }
-        let staged = Layout::new(staging.as_path());
+        let staged = Layout::with_format(staging.as_path(), layout.format());
         Journal::create_in(&staged, &fs)?.set_ckpt(0)?;
         Index::create_in(&staged, &fs)?;
         let staged_meta = staged.meta_dir();
-        fs.create_dir_all(staged.meta_path("refs").as_std_path())?;
+        fs.create_dir_all(staged.refs_dir().as_std_path())?;
         fs.append(staged.meta_lock().as_std_path(), &[])?;
         // The journal and the index made their own entries durable; this makes the last two
         // durable before the rename publishes them.
@@ -339,7 +346,7 @@ impl MetaStore {
         fs.rename_durable(staged_meta.as_std_path(), meta.as_std_path())?;
         // Best effort: the staging directory is empty now, and harmless if it stays.
         let _ = std::fs::remove_dir(&staging);
-        Self::open_on(dir, fs)
+        Self::open_on(layout, fs)
     }
 
     /// Opens the metadata store of the store rooted at `dir` on the real filesystem: see
@@ -349,15 +356,25 @@ impl MetaStore {
     }
 
     /// Opens the existing metadata store under `dir`, every change going through `fs` (a
-    /// `CrashAtFs` in crash tests). Reads only that `meta/journal.log` is there:
-    /// [`StoreError::Format`] if it is not.
+    /// `CrashAtFs` in crash tests), in the format `<dir>/FORMAT` names (FORMAT 1 if there is no
+    /// `FORMAT`: a metadata store made on its own, without a repository around it). Reads only
+    /// that the format's journal (`meta/journal.log`) is there: [`StoreError::Format`] if it is
+    /// not, or if `FORMAT` names no format this build reads.
     pub fn open_with_fs(dir: &Utf8Path, fs: Arc<dyn FsOps>) -> Result<MetaStore, StoreError> {
-        Self::open_on(dir, StoreFs::new(fs, dir))
+        let store_fs = StoreFs::new(fs, dir);
+        let format = format::read_format_or_v1(&Layout::new(dir), &store_fs)?;
+        Self::open_on(Layout::with_format(dir, format), store_fs)
     }
 
-    /// [`MetaStore::open_with_fs`] through `fs`, rooted at `dir`.
-    fn open_on(dir: &Utf8Path, fs: StoreFs) -> Result<MetaStore, StoreError> {
-        let layout = Layout::new(dir);
+    /// [`MetaStore::open_with_fs`] in `layout`'s format, whatever `FORMAT` says: for a caller
+    /// that read `FORMAT` itself, as a repository's open does.
+    pub fn open_in(layout: Layout, fs: Arc<dyn FsOps>) -> Result<MetaStore, StoreError> {
+        let store_fs = StoreFs::new(fs, layout.root());
+        Self::open_on(layout, store_fs)
+    }
+
+    /// [`MetaStore::open_in`] through `fs`.
+    fn open_on(layout: Layout, fs: StoreFs) -> Result<MetaStore, StoreError> {
         let log = layout.journal_log();
         if !std::fs::exists(&log).map_err(|e| fs.locate(FileOp::Stat, &log, e))? {
             return Err(StoreError::Format(format!(
@@ -529,6 +546,16 @@ impl MetaStore {
         self.write()?.finish(Settle::Flush).map(drop)
     }
 
+    /// The store's format.
+    pub fn format(&self) -> StoreFormat {
+        self.layout.format()
+    }
+
+    /// Refuses a ref name this store's format does not take ([`refs::check_ref_name_in`]).
+    pub fn check_ref_name(&self, name: &str) -> Result<(), StoreError> {
+        refs::check_ref_name_in(self.layout.format(), name)
+    }
+
     fn from_parts(layout: Layout, fs: StoreFs, journal: Journal) -> MetaStore {
         Self {
             layout,
@@ -623,10 +650,10 @@ impl MetaRead<'_> {
         Ok(ids)
     }
 
-    /// Ref `name`; `None` if it does not exist. [`StoreError::RefName`] for a name that is
-    /// not `main` or `release/<x>`.
+    /// Ref `name`; `None` if it does not exist. [`StoreError::RefName`] for a name no format
+    /// takes, [`StoreError::FormatRequired`] for one only a later format takes.
     pub fn get_ref(&self, name: &str) -> Result<Option<RefState>, StoreError> {
-        refs::check_ref_name(name)?;
+        self.store.check_ref_name(name)?;
         Ok(self.overlay.refs().get(name).copied())
     }
 
@@ -643,7 +670,7 @@ impl MetaRead<'_> {
     /// The last `limit` moves of ref `name`, newest first: the journal's `RefMove` records
     /// for it, read back from the end of the snapshot (`O(frames)` until `limit` are found).
     pub fn reflog(&self, name: &str, limit: usize) -> Result<Vec<RefMoveEntry>, StoreError> {
-        refs::check_ref_name(name)?;
+        self.store.check_ref_name(name)?;
         let mut log = Vec::new();
         collect_moves(self.frames.iter().rev(), name, limit, &mut log);
         // Then the frames before the checkpoint, a batch at a time; with no frames past the
@@ -812,10 +839,10 @@ impl MetaWrite<'_> {
     /// this transaction's last queued move of it leaves, or else what its file says, every
     /// committed frame replayed into it by [`MetaStore::write`]; `None` if the ref does not
     /// exist. Read under the lock, so no other writer moves the ref before this transaction is
-    /// committed or dropped. [`StoreError::RefName`] for a name that is not `main` or
-    /// `release/<x>`.
+    /// committed or dropped. [`StoreError::RefName`] for a name no format takes,
+    /// [`StoreError::FormatRequired`] for one only a later format takes.
     pub fn get_ref(&self, name: &str) -> Result<Option<ChangesetId>, StoreError> {
-        refs::check_ref_name(name)?;
+        self.store.check_ref_name(name)?;
         self.current(name)
     }
 
@@ -953,10 +980,11 @@ impl MetaWrite<'_> {
     /// if the ref names `expected` now: as its file says, or the last move this transaction
     /// queued. Otherwise [`CasResult::Mismatch`], and nothing is queued.
     ///
-    /// A name that is not `main` or `release/<x>` is [`StoreError::RefName`]; a `new` that is
-    /// neither in the store nor queued, [`StoreError::UnknownRefTarget`]; an actor longer than
-    /// 255 bytes, or a move that would not fit in the transaction's frame (65,535 records),
-    /// [`StoreError::Limit`].
+    /// A name no format takes is [`StoreError::RefName`], one only a later format takes
+    /// [`StoreError::FormatRequired`]; a move its kind does not allow (a tag's from one target to
+    /// another), [`StoreError::TagImmutable`]; a `new` that is neither in the store nor queued,
+    /// [`StoreError::UnknownRefTarget`]; an actor longer than 255 bytes, or a move that would
+    /// not fit in the transaction's frame (65,535 records), [`StoreError::Limit`].
     pub fn cas_ref(
         &mut self,
         name: &str,
@@ -964,7 +992,7 @@ impl MetaWrite<'_> {
         new: Option<ChangesetId>,
         actor: &str,
     ) -> Result<CasResult, StoreError> {
-        refs::check_ref_name(name)?;
+        self.store.check_ref_name(name)?;
         if actor.len() > MAX_ACTOR_LEN {
             return Err(StoreError::Limit {
                 what: LimitKind::ActorBytes,
@@ -981,6 +1009,7 @@ impl MetaWrite<'_> {
         if current != expected {
             return Ok(CasResult::Mismatch { actual: current });
         }
+        refs::check_move(self.store.layout.format(), name, current, new)?;
         self.check_room()?;
         self.records.push(Record::RefMove {
             name: name.to_owned(),

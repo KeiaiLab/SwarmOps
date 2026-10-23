@@ -25,6 +25,7 @@ const REQUESTS: &[&str] = &[
     "CloneReq",
     "CommitReq",
     "DeriveReq",
+    "GcReq",
     "DiffReq",
     "FetchReq",
     "GitExportReq",
@@ -47,6 +48,7 @@ const REQUESTS: &[&str] = &[
     "RemoteAddReq",
     "RemoteListReq",
     "RemoteRemoveReq",
+    "RepairReq",
     "ResolutionInput",
     "ResolutionsInput",
     "ResolveRevReq",
@@ -54,6 +56,7 @@ const REQUESTS: &[&str] = &[
     "SyncReq",
     "SyncStatusReq",
     "UndoReq",
+    "UpgradeReq",
     "VerifyReq",
     "WsCheckInput",
     "WsCommitReq",
@@ -86,6 +89,8 @@ const RESPONSES: &[&str] = &[
     "CommitResp",
     "ConflictReport",
     "DeriveResp",
+    "GcCount",
+    "GcResp",
     "Diff",
     "DiffHunk",
     "DiffLineOut",
@@ -124,6 +129,8 @@ const RESPONSES: &[&str] = &[
     "RemoteInfo",
     "RemoteList",
     "RemoteRemoveResp",
+    "RepairAction",
+    "RepairResp",
     "RepoInfo",
     "ResolvedRev",
     "SignatureOut",
@@ -134,7 +141,9 @@ const RESPONSES: &[&str] = &[
     "TreeListing",
     "UndoResp",
     "VerifyFinding",
+    "UpgradeResp",
     "VerifyReport",
+    "VerifySummary",
     "WsChange",
     "WsCommitResp",
     "WsDeleteResp",
@@ -170,6 +179,7 @@ const SCALARS: &[&str] = &[
     "PushStatus",
     "RebaseStatus",
     "Rev",
+    "RefKind",
     "RevKind",
     "Side",
     "StatusAfter",
@@ -330,6 +340,8 @@ const ROWS: &[(ErrorCode, &str, i32, bool)] = &[
     (ErrorCode::Auth, "E_AUTH", 5, false),
     (ErrorCode::PolicyDenied, "E_POLICY_DENIED", 5, false),
     (ErrorCode::MaintenanceBusy, "E_MAINTENANCE_BUSY", 4, true),
+    (ErrorCode::FormatRequired, "E_FORMAT_REQUIRED", 1, false),
+    (ErrorCode::TagImmutable, "E_TAG_IMMUTABLE", 1, false),
     (ErrorCode::GitNotARepo, "E_GIT_NOT_A_REPO", 6, false),
     (ErrorCode::GitRefNotFound, "E_GIT_REF_NOT_FOUND", 6, false),
     (
@@ -1185,15 +1197,16 @@ fn verify_report_carries_findings_beside_problems() {
     let text = serde_json::to_string(&report).unwrap();
     assert_eq!(
         text,
-        r#"{"objects_checked":3,"changesets_checked":1,"problems":["ref main names no changeset in the store"],"findings":[{"kind":"dangling_ref","ref":"main"}]}"#
+        r#"{"objects_checked":3,"changesets_checked":1,"problems":["ref main names no changeset in the store"],"findings":[{"kind":"dangling_ref","ref":"main"}],"truncated":false,"found":1}"#
     );
     assert_eq!(serde_json::from_str::<VerifyReport>(&text).unwrap(), report);
     let mut clean = report;
     clean.problems = Vec::new();
     clean.findings = Vec::new();
+    clean.found = 0;
     assert_eq!(
         serde_json::to_string(&clean).unwrap(),
-        r#"{"objects_checked":3,"changesets_checked":1,"problems":[],"findings":[]}"#
+        r#"{"objects_checked":3,"changesets_checked":1,"problems":[],"findings":[],"truncated":false,"found":0}"#
     );
 }
 

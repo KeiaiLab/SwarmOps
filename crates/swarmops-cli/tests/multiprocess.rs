@@ -248,7 +248,8 @@ fn sixteen_processes_race_ref_set_exactly_one_wins_per_round() {
             assert_eq!(error["details"], details, "round {round}, racer {racer}");
         }
         let refs = store.read(&["ref", "list"]).ok();
-        let main_ref = json!([{"name": "main", "target": new, "version": round + 1}]);
+        let main_ref =
+            json!([{"name": "main", "kind": "main", "target": new, "version": round + 1}]);
         assert_eq!(refs["refs"], main_ref, "round {round}");
         winners.push(new.to_owned());
         main = Some(new.to_owned());
@@ -365,7 +366,8 @@ fn sixteen_processes_race_commit_advance_exactly_one_wins_per_round() {
             "round {round}: the losers recorded nothing"
         );
         let refs = store.read(&["ref", "list"]).ok();
-        let main_ref = json!([{"name": "main", "target": new, "version": round + 2}]);
+        let main_ref =
+            json!([{"name": "main", "kind": "main", "target": new, "version": round + 2}]);
         assert_eq!(refs["refs"], main_ref, "round {round}");
         winners.push(new.clone());
         main = new;

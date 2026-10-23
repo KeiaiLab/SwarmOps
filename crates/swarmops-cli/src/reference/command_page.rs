@@ -87,6 +87,10 @@ const WORKSPACE_COMMANDS: [&str; 15] = [
 ];
 const WORKSPACE_SINCE: &str = "0.3.0";
 
+/// The maintenance's commands (M6), and the release they first ship in.
+const MAINTENANCE_COMMANDS: [&str; 3] = ["gc", "repair", "upgrade"];
+const MAINTENANCE_SINCE: &str = "0.4.0";
+
 /// The release the command at `path` first shipped in.
 fn since(path: &str) -> &'static str {
     if REMOTE_COMMANDS.contains(&path) {
@@ -94,6 +98,9 @@ fn since(path: &str) -> &'static str {
     }
     if WORKSPACE_COMMANDS.contains(&path) {
         return WORKSPACE_SINCE;
+    }
+    if MAINTENANCE_COMMANDS.contains(&path) {
+        return MAINTENANCE_SINCE;
     }
     SINCE
 }
@@ -206,7 +213,7 @@ struct Meta {
 
 /// Every command, in the grammar's order. `meta_matches_the_code` checks each column it can
 /// against the code.
-const META: [Meta; 48] = [
+const META: [Meta; 51] = [
     meta("init", Group::Store, true, false, Returns::Type("RepoInfo")),
     meta(
         "info",
@@ -422,6 +429,21 @@ const META: [Meta; 48] = [
         false,
         false,
         Returns::Type("VerifyReport"),
+    ),
+    meta("gc", Group::Integrity, true, false, Returns::Type("GcResp")),
+    meta(
+        "repair",
+        Group::Integrity,
+        true,
+        false,
+        Returns::Type("RepairResp"),
+    ),
+    meta(
+        "upgrade",
+        Group::Store,
+        true,
+        false,
+        Returns::Type("UpgradeResp"),
     ),
     meta(
         "git import",
@@ -1295,7 +1317,7 @@ fn source(path: &str) -> String {
 }
 
 /// Where each result type is returned: the file, and the function whose signature names it.
-const RETURN_SITES: [(&str, &str, &str); 45] = [
+const RETURN_SITES: [(&str, &str, &str); 48] = [
     ("init", "src/commands/run.rs", "fn init("),
     ("info", "../swarmops-api/src/ops.rs", "fn repo_info("),
     (
@@ -1366,6 +1388,9 @@ const RETURN_SITES: [(&str, &str, &str); 45] = [
     ("op log", "../swarmops-api/src/ops.rs", "fn op_log("),
     ("op undo", "../swarmops-api/src/ops.rs", "fn undo("),
     ("verify", "../swarmops-api/src/ops.rs", "fn verify("),
+    ("gc", "../swarmops-api/src/ops.rs", "fn gc("),
+    ("repair", "../swarmops-api/src/ops.rs", "fn repair("),
+    ("upgrade", "../swarmops-api/src/ops.rs", "fn upgrade("),
     ("git import", "../swarmops-ops/src/git.rs", "fn git_import("),
     ("git export", "../swarmops-ops/src/git.rs", "fn git_export("),
     ("clone", "src/commands/run.rs", "fn clone("),
@@ -1423,8 +1448,9 @@ const CACHE_ONLY_SOURCE: &str = "../swarmops-ops/src/local.rs";
 /// The git remotes' commands that change the store's files with no identity (M13): each, the
 /// operation's file, and the phrase of its doc comment that says why it needs none. They are
 /// exceptions to [`CHANGE_RULE`]: a fetch's import moves no ref and records no agent, a push is
-/// an export, and `remote add|remove` write the remote configuration and the mirror.
-const NO_IDENTITY: [(&str, &str, &str); 4] = [
+/// an export, and `remote add|remove` write the remote configuration and the mirror. The
+/// maintenance (M6) is too: `gc`, `repair` and `upgrade` record no journal frame.
+const NO_IDENTITY: [(&str, &str, &str); 7] = [
     (
         "fetch",
         "../swarmops-ops/src/remote.rs",
@@ -1444,6 +1470,21 @@ const NO_IDENTITY: [(&str, &str, &str); 4] = [
         "remote remove",
         "../swarmops-ops/src/remote.rs",
         "it writes remotes.toml and the mirror",
+    ),
+    (
+        "gc",
+        "../swarmops-ops/src/gc.rs",
+        "It needs no identity: it records nothing",
+    ),
+    (
+        "repair",
+        "../swarmops-ops/src/repair.rs",
+        "It needs no identity: it records nothing",
+    ),
+    (
+        "upgrade",
+        "../swarmops-ops/src/upgrade.rs",
+        "It needs no identity: it records nothing",
     ),
 ];
 

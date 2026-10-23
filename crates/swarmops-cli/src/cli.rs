@@ -301,6 +301,10 @@ pub enum Command {
         /// The repository's name, at most 255 bytes (default: the directory's name).
         #[arg(long)]
         name: Option<String>,
+        /// The store format, 1 or 2 (default: this build's). Format 2 takes free-form branches
+        /// and tags; older releases open only format 1.
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=2))]
+        format: Option<u32>,
     },
     /// Describe the store.
     Info,
@@ -499,7 +503,27 @@ pub enum Command {
         /// Re-hash every object, and check the derived values against the objects, too.
         #[arg(long)]
         deep: bool,
+        /// List at most N problems, 1 to 1,000 (default: 1,000); found counts them all.
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=1000))]
+        max_findings: Option<u32>,
     },
+    /// Remove the store's leftovers: temp files past a day, a crashed create's staging,
+    /// derived values of older versions, what an upgrade left. Never an object or a changeset.
+    Gc {
+        /// List what it would remove, and remove nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Rebuild what the journal can rebuild, quarantine damaged objects, drop damaged cache
+    /// entries, then verify; the journal itself is never cut.
+    Repair {
+        /// List what it would do, and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Move the store to the latest format this build writes. Irreversible: older releases do
+    /// not open it afterwards.
+    Upgrade,
     /// Bring history in from git, or send it back.
     #[command(subcommand)]
     Git(GitCommand),
@@ -577,10 +601,10 @@ pub enum Command {
     ///
     /// One tool per operation (repo_info, resolve_rev, read_file, read_tree, show, log,
     /// path_history, diff, op_log, ref_list, ref_set, ref_delete, undo, commit, land, blob_put,
-    /// blob_has, verify, and the git remotes' remote_list, fetch, push, sync and sync_status),
-    /// each taking the operation's request as its arguments and returning the envelope the other
-    /// commands print. The store and the identity are the server's, --repo and
-    /// --as or their variables, never a call's. Speaks MCP 2026-07-28, and 2025-11-25 and
+    /// blob_has, verify, the maintenance's gc, repair and upgrade, and the git remotes'
+    /// remote_list, fetch, push, sync and sync_status), each taking the operation's request as
+    /// its arguments and returning the envelope the other commands print. The store and the
+    /// identity are the server's, --repo and --as or their variables, never a call's. Speaks MCP 2026-07-28, and 2025-11-25 and
     /// 2025-06-18 to clients that open with initialize. Prints no envelope: stdout carries the
     /// protocol until stdin ends, and a command line it refuses has its envelope on stderr. The
     /// derive command has no tool: it is maintenance, no agent's work; nor have clone and remote
@@ -992,8 +1016,12 @@ pub enum DiffFormatArg {
 /// `ref`'s operations.
 #[derive(Subcommand, Debug)]
 pub enum RefCommand {
-    /// List every ref.
-    List,
+    /// List every ref, or those whose names start with --prefix, each with its kind.
+    List {
+        /// Only the refs whose names start with this, such as release/ or tags/.
+        #[arg(long, value_name = "TEXT")]
+        prefix: Option<String>,
+    },
     /// Point ref NAME at REV: move it from --expect, or --create it.
     #[command(group(ArgGroup::new("from").required(true).args(["expect", "create"])))]
     Set {
@@ -1340,6 +1368,9 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["op", "log"] => "op_log",
         ["op", "undo"] => "undo",
         ["verify"] => "verify",
+        ["gc"] => "gc",
+        ["repair"] => "repair",
+        ["upgrade"] => "upgrade",
         ["git", "import"] => "git_import",
         ["git", "export"] => "git_export",
         ["clone"] => "clone_repo",
@@ -1479,10 +1510,10 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 48);
+        assert_eq!(ops.len(), 51);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 48, "two subcommands name one op");
+        assert_eq!(ops.len(), 51, "two subcommands name one op");
         assert_eq!(op_name(&["ref"]), None);
         assert_eq!(op_name(&["blob"]), None);
         assert_eq!(op_name(&["ws"]), None);

@@ -35,6 +35,7 @@ $ swarmops --human --repo [tmp]/store ref list
 refs[0].name: main
 refs[0].target: [c1]
 refs[0].version: 1
+refs[0].kind: main
 
 $ swarmops --human whoami
 [exit 0]

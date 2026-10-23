@@ -23,6 +23,7 @@ use swarmops_api::{
 use swarmops_api::{BlobGetReq, BlobGetResp, RebaseReq, RebaseResp};
 use swarmops_api::{BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp};
 use swarmops_api::{ContentInput, ModeInput, ResolutionInput, ResolutionsInput};
+use swarmops_api::{GcReq, GcResp, RepairReq, RepairResp, UpgradeReq, UpgradeResp};
 use swarmops_api::{LandReq, LandResp, LandStatus, MAX_LAND_ATTEMPTS};
 use swarmops_api::{ResolveRevReq, ResolvedRev, RevKind};
 use swarmops_core::bytes;
@@ -39,7 +40,7 @@ use swarmops_repo::{
 };
 use swarmops_repo::{Resolution, Resolutions};
 use swarmops_store::external_ids;
-use swarmops_store::{FsObjectStore, LogCut, Recovered};
+use swarmops_store::{FsObjectStore, LogCut, Recovered, RefKind, StoreError, StoreFormat};
 
 use crate::authors;
 use crate::content;
@@ -495,8 +496,20 @@ impl LocalOps {
     /// whole whose reading back for the report fails is that read's error, saying the store is
     /// made (`details.created`).
     pub fn init(path: &Utf8Path, name: &str) -> Result<(LocalOps, RepoInfo), OpError> {
-        let repo =
-            LocalRepo::create(path, name).map_err(|e| error::repo_error(e, During::Init(path)))?;
+        Self::init_as(path, name, None)
+    }
+
+    /// [`LocalOps::init`] of a store of format `format` (`InitReq.format`): this build's default
+    /// when `None`. A format this build does not create is `E_INVALID_ARG`
+    /// (`details.format`, `details.formats` the ones it does), before anything is created.
+    pub fn init_as(
+        path: &Utf8Path,
+        name: &str,
+        format: Option<u32>,
+    ) -> Result<(LocalOps, RepoInfo), OpError> {
+        let format = init_format(format)?;
+        let repo = LocalRepo::create_as(path, name, format)
+            .map_err(|e| error::repo_error(e, During::Init(path)))?;
         let ops = Self::with_repo(repo, path);
         let info = ops
             .repo_info(InfoReq::default())
@@ -1211,7 +1224,11 @@ impl StoreOps for Recording<'_> {
             allow_empty,
             ..
         } = req;
-        // A key that is not a uuid v7 is refused before anything is resolved or read.
+        // A ref a commit cannot publish on, and a key that is not a uuid v7, are refused before
+        // anything is resolved or read.
+        if let Some(name) = &advance {
+            check_ref_use(name, RefUse::Publish)?;
+        }
         let key = idempotency_key
             .as_deref()
             .map(CommitKey::parse)
@@ -1321,6 +1338,7 @@ impl StoreOps for Recording<'_> {
             ..
         } = req;
         // The request's own rules are checked before anything is resolved or read.
+        check_ref_use(&target, RefUse::Publish)?;
         if let Some(key) = &idempotency_key {
             land_key(key)?;
         }
@@ -1443,7 +1461,10 @@ impl StoreOps for Recording<'_> {
         // and the lookup refuses it.
         let kind = match read.get_ref(rev.as_str()) {
             Ok(Some(_)) => RevKind::Ref,
-            Ok(None) | Err(RepoError::RefName(_)) => RevKind::Changeset,
+            Ok(None)
+            | Err(RepoError::RefName(_) | RepoError::Store(StoreError::FormatRequired { .. })) => {
+                RevKind::Changeset
+            }
             Err(e) => return Err(error::op(e)),
         };
         Ok(ResolvedRev::new(id.to_string(), kind))
@@ -1692,13 +1713,22 @@ impl StoreOps for Recording<'_> {
         Ok(out)
     }
 
-    fn ref_list(&self, _req: RefListReq) -> Result<RefListResp, OpError> {
+    fn ref_list(&self, req: RefListReq) -> Result<RefListResp, OpError> {
+        let prefix = req.prefix.unwrap_or_default();
         let refs = self.ops.repo.list_refs().map_err(error::op)?;
-        Ok(RefListResp::new(
-            refs.into_iter()
-                .map(|(name, state)| RefOut::new(name, state.target.to_string(), state.version))
-                .collect(),
-        ))
+
+        // 1. The refs whose names start with the prefix, each with its kind.
+        let listed = refs
+            .into_iter()
+            .filter(|(name, _)| name.starts_with(&prefix))
+            .map(|(name, state)| {
+                let kind = swarmops_store::ref_kind(&name).and_then(kind_out);
+                let mut out = RefOut::new(name, state.target.to_string(), state.version);
+                out.kind = kind;
+                out
+            })
+            .collect();
+        Ok(RefListResp::new(listed))
     }
 
     fn ref_set(&self, who: &Identity, req: RefSetReq) -> Result<RefSetResp, OpError> {
@@ -1709,6 +1739,7 @@ impl StoreOps for Recording<'_> {
             create,
             ..
         } = req;
+        check_ref_use(&name, RefUse::Move)?;
         if create == expected_old.is_some() {
             return Err(error::error(
                 ErrorCode::InvalidArg,
@@ -1769,6 +1800,7 @@ impl StoreOps for Recording<'_> {
         let RefDeleteReq {
             name, expected_old, ..
         } = req;
+        check_ref_use(&name, RefUse::Move)?;
         let expected = self.resolve(&self.snapshot()?, &expected_old)?;
         let outcome = self
             .ops
@@ -1886,6 +1918,18 @@ impl StoreOps for Recording<'_> {
         out.next = run.last_frame;
         Ok(out)
     }
+
+    fn gc(&self, req: GcReq) -> Result<GcResp, OpError> {
+        crate::gc::run(self, req)
+    }
+
+    fn repair(&self, req: RepairReq) -> Result<RepairResp, OpError> {
+        crate::repair::run(self, req)
+    }
+
+    fn upgrade(&self, req: UpgradeReq) -> Result<UpgradeResp, OpError> {
+        crate::upgrade::run(self, req)
+    }
 }
 
 /// Each operation as a request of its own, whose resolved revisions go unrecorded: to report
@@ -1973,6 +2017,88 @@ impl StoreOps for LocalOps {
 
     fn derive(&self, req: DeriveReq) -> Result<DeriveResp, OpError> {
         self.recording(&Resolved::default()).derive(req)
+    }
+
+    fn gc(&self, req: GcReq) -> Result<GcResp, OpError> {
+        self.recording(&Resolved::default()).gc(req)
+    }
+
+    fn repair(&self, req: RepairReq) -> Result<RepairResp, OpError> {
+        self.recording(&Resolved::default()).repair(req)
+    }
+
+    fn upgrade(&self, req: UpgradeReq) -> Result<UpgradeResp, OpError> {
+        self.recording(&Resolved::default()).upgrade(req)
+    }
+}
+
+/// What an operation does with the ref it names, which [`check_ref_use`] checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RefUse {
+    /// `ref set` and `ref delete` move it.
+    Move,
+    /// `land` and `commit --advance` publish a changeset on it.
+    Publish,
+    /// `rebase --onto` builds on its head.
+    Onto,
+}
+
+/// Refuses a ref the operation may not use as `purpose` says, before anything is resolved or
+/// read: `E_REF_NAME_INVALID` with `details.reason` `reserved` for a remote-tracking ref, which
+/// only a fetch moves, and `tag` for a tag named to publish on, which never moves. Any other
+/// name, valid or not, is the store's to check.
+pub(crate) fn check_ref_use(name: &str, purpose: RefUse) -> Result<(), OpError> {
+    let (reason, message) = match (swarmops_store::ref_kind(name), purpose) {
+        (Some(RefKind::RemoteTracking), _) => (
+            "reserved",
+            format!("{name} is a remote-tracking ref, which only a fetch moves"),
+        ),
+        (Some(RefKind::Tag), RefUse::Publish) => (
+            "tag",
+            format!("{name} is a tag, which never moves: land or advance a branch instead"),
+        ),
+        _ => return Ok(()),
+    };
+    Err(error::error(ErrorCode::RefNameInvalid, message)
+        .with_details(error::details([
+            ("name", name.into()),
+            ("reason", reason.into()),
+        ]))
+        .with_hint("swarmops ref list"))
+}
+
+/// The format a create of `InitReq.format` makes: this build's default for `None`;
+/// `E_INVALID_ARG` for a format this build does not create.
+fn init_format(format: Option<u32>) -> Result<StoreFormat, OpError> {
+    let Some(version) = format else {
+        return Ok(swarmops_store::DEFAULT_INIT_FORMAT);
+    };
+    let creatable = swarmops_store::INIT_FORMATS;
+    if let Some(format) = StoreFormat::from_version(version)
+        && creatable.contains(&format)
+    {
+        return Ok(format);
+    }
+    let formats: Vec<Value> = creatable.iter().map(|f| f.version().into()).collect();
+    Err(error::error(
+        ErrorCode::InvalidArg,
+        format!("this build does not create stores of format {version}"),
+    )
+    .with_details(error::details([
+        ("format", version.into()),
+        ("formats", formats.into()),
+    ])))
+}
+
+/// The API's name for ref kind `kind`; `None` for a kind this build does not name.
+fn kind_out(kind: RefKind) -> Option<swarmops_api::RefKind> {
+    match kind {
+        RefKind::Main => Some(swarmops_api::RefKind::Main),
+        RefKind::Release => Some(swarmops_api::RefKind::Release),
+        RefKind::Branch => Some(swarmops_api::RefKind::Branch),
+        RefKind::Tag => Some(swarmops_api::RefKind::Tag),
+        RefKind::RemoteTracking => Some(swarmops_api::RefKind::RemoteTracking),
+        _ => None,
     }
 }
 
@@ -4055,7 +4181,7 @@ mod tests {
             let (_dir, _root, ops, who, [_, head, _]) = moved_on();
             let refused = |fields| ops.rebase(&who, rebase(fields)).unwrap_err();
 
-            let onto = refused(json!({"head": head, "onto": "feature"}));
+            let onto = refused(json!({"head": head, "onto": "main/x"}));
             assert_eq!(onto.code.as_str(), "E_REF_NAME_INVALID", "{onto:?}");
             let key = refused(json!({"head": head, "idempotency_key": "key-1"}));
             assert_eq!(key.code.as_str(), "E_INVALID_ARG", "{key:?}");

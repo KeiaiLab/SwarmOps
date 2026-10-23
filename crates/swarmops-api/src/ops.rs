@@ -73,6 +73,10 @@ pub const DEFAULT_DIFF_MAX_BYTES: u64 = 32_768;
 /// The default [`DiffReq::context`]: 3 unchanged lines around each change, as git's.
 pub const DEFAULT_DIFF_CONTEXT: u32 = 3;
 
+/// The default and the most [`VerifyReq::max_findings`]: 1,000 problems, a report of about
+/// 300 KB at most.
+pub const VERIFY_MAX_FINDINGS: u32 = 1_000;
+
 fn default_max_bytes() -> u64 {
     DEFAULT_MAX_BYTES
 }
@@ -121,14 +125,19 @@ pub struct InitReq {
     pub path: String,
     /// The repository's name: at most 255 bytes of UTF-8.
     pub name: String,
+    /// The store format to create, 1 or 2; omitted for this build's default. A format this
+    /// build does not create is `E_INVALID_ARG`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<u32>,
 }
 
 impl InitReq {
-    /// Takes every field.
+    /// Takes the required fields; the others get their serde defaults.
     pub fn new(path: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             path: path.into(),
             name: name.into(),
+            format: None,
         }
     }
 }
@@ -1460,10 +1469,39 @@ pub enum LineOp {
     Remove,
 }
 
-/// `ref list`: list every ref. It has no options yet.
+/// `ref list`: list every ref, or those whose names start with a prefix.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct RefListReq {}
+pub struct RefListReq {
+    /// Only the refs whose names start with these bytes (`release/`, `tags/`); omitted for
+    /// every ref.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
+}
+
+impl RefListReq {
+    /// Every ref, with `prefix` the ones whose names start with it.
+    pub fn new(prefix: Option<String>) -> Self {
+        Self { prefix }
+    }
+}
+
+/// What a ref's name names.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RefKind {
+    /// `main`.
+    Main,
+    /// `release/<name>`.
+    Release,
+    /// A free-form branch (FORMAT 2).
+    Branch,
+    /// `tags/<path>`: created and deleted, never moved (FORMAT 2).
+    Tag,
+    /// `remote/<remote>/<path>`: a remote's ref as a fetch last saw it (FORMAT 2).
+    RemoteTracking,
+}
 
 /// `ref list`: every ref.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
@@ -1484,21 +1522,26 @@ impl RefListResp {
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RefOut {
-    /// `main` or `release/<name>`.
+    /// Its name: `main`, `release/<name>`, or in a FORMAT 2 store a branch, `tags/<path>` or
+    /// `remote/<remote>/<path>`.
     pub name: String,
     /// The changeset it points at.
     pub target: String,
     /// How many committed moves changed its target.
     pub version: u64,
+    /// What its name names; omitted by stores older than this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<RefKind>,
 }
 
 impl RefOut {
-    /// Takes every field.
+    /// Takes the required fields; the others get their serde defaults.
     pub fn new(name: impl Into<String>, target: impl Into<String>, version: u64) -> Self {
         Self {
             name: name.into(),
             target: target.into(),
             version,
+            kind: None,
         }
     }
 }
@@ -1630,6 +1673,20 @@ pub struct VerifyReq {
     /// the journal, and refs.
     #[serde(default)]
     pub deep: bool,
+    /// The most problems the report lists, 1 to 1,000, also the default; `found` counts them
+    /// all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_findings: Option<u32>,
+}
+
+impl VerifyReq {
+    /// A verify, `deep` or of structure only; the others get their serde defaults.
+    pub fn new(deep: bool) -> Self {
+        Self {
+            deep,
+            max_findings: None,
+        }
+    }
 }
 
 /// `verify`: what the consistency check found.
@@ -1648,17 +1705,201 @@ pub struct VerifyReport {
     /// reads as having none.
     #[serde(default)]
     pub findings: Vec<VerifyFinding>,
+    /// The report lists the first `max_findings` problems only; `found` counts them all.
+    #[serde(default)]
+    pub truncated: bool,
+    /// How many problems were found, listed or not; 0 from a store older than this field.
+    #[serde(default)]
+    pub found: u64,
 }
 
 impl VerifyReport {
-    /// Takes the required fields; the others get their serde defaults.
+    /// Takes the required fields; `findings` is empty, `truncated` false and `found` the
+    /// problems' count.
     pub fn new(objects_checked: u64, changesets_checked: u64, problems: Vec<String>) -> Self {
         Self {
             objects_checked,
             changesets_checked,
+            found: u64::try_from(problems.len()).unwrap_or(u64::MAX),
             problems,
             findings: Vec::new(),
+            truncated: false,
         }
+    }
+}
+
+/// `gc`: remove the store's leftovers (temp files past a day, a crashed create's staging,
+/// derived values of older versions, what an upgrade left of the format before). It removes no
+/// object and no changeset.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct GcReq {
+    /// List what it would remove, and remove nothing.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+impl GcReq {
+    /// A gc that removes, or with `dry_run` only lists.
+    pub fn new(dry_run: bool) -> Self {
+        Self { dry_run }
+    }
+}
+
+/// `gc`: what it removed, or would remove for a dry run.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct GcResp {
+    /// How many leftovers of each kind; kinds with none are omitted.
+    pub removed: Vec<GcCount>,
+    /// The bytes of their files.
+    pub bytes: u64,
+    /// How many object files no changeset of the store reaches: counted, never removed.
+    pub orphan_objects: u64,
+}
+
+impl GcResp {
+    /// Takes every field.
+    pub fn new(removed: Vec<GcCount>, bytes: u64, orphan_objects: u64) -> Self {
+        Self {
+            removed,
+            bytes,
+            orphan_objects,
+        }
+    }
+}
+
+/// `gc`: how many leftovers of one kind.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct GcCount {
+    /// `object_temp`, `derived_temp`, `meta_staging`, `derived_version` or `upgrade_residue`.
+    /// A string, as `OpError.code` is, so that a client can read kinds newer than its own list.
+    pub kind: String,
+    /// How many.
+    pub count: u64,
+}
+
+impl GcCount {
+    /// Takes every field.
+    pub fn new(kind: impl Into<String>, count: u64) -> Self {
+        Self {
+            kind: kind.into(),
+            count,
+        }
+    }
+}
+
+/// `repair`: rebuild what the journal can rebuild (`journal.off`, the index, the ref files),
+/// quarantine damaged objects and drop damaged cache entries. It never cuts the journal.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RepairReq {
+    /// List what it would do, each with `done: false`, and write nothing.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+impl RepairReq {
+    /// A repair that mends, or with `dry_run` only lists.
+    pub fn new(dry_run: bool) -> Self {
+        Self { dry_run }
+    }
+}
+
+/// `repair`: what it did, and what a verify after it found.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RepairResp {
+    /// What it did, or would do, in order.
+    pub actions: Vec<RepairAction>,
+    /// The verify after it.
+    pub after: VerifySummary,
+}
+
+impl RepairResp {
+    /// Takes every field.
+    pub fn new(actions: Vec<RepairAction>, after: VerifySummary) -> Self {
+        Self { actions, after }
+    }
+}
+
+/// `repair`: one thing it did, or would do.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RepairAction {
+    /// `rebuild_offsets`, `rebuild_index`, `rebuild_ref`, `quarantine_object`, `drop_derived`
+    /// or `drop_external_id`. A string, so that a client can read kinds newer than its own list.
+    pub kind: String,
+    /// On what: an object id, a ref name or a file class; never a path.
+    pub target: String,
+    /// Whether it was done: `false` for a dry run.
+    pub done: bool,
+}
+
+impl RepairAction {
+    /// Takes every field.
+    pub fn new(kind: impl Into<String>, target: impl Into<String>, done: bool) -> Self {
+        Self {
+            kind: kind.into(),
+            target: target.into(),
+            done,
+        }
+    }
+}
+
+/// What a verify found, in counts: `repair`'s `after`.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct VerifySummary {
+    /// How many objects were checked.
+    pub objects_checked: u64,
+    /// How many changesets were checked.
+    pub changesets_checked: u64,
+    /// How many problems were found; 0 for a sound store.
+    pub found: u64,
+}
+
+impl VerifySummary {
+    /// Takes every field.
+    pub fn new(objects_checked: u64, changesets_checked: u64, found: u64) -> Self {
+        Self {
+            objects_checked,
+            changesets_checked,
+            found,
+        }
+    }
+}
+
+/// `upgrade`: move the store to the latest format this build writes. It cannot be undone:
+/// older releases do not open the store afterwards.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct UpgradeReq {}
+
+impl UpgradeReq {
+    /// An upgrade: it has no options.
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+/// `upgrade`: the formats before and after.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct UpgradeResp {
+    /// The format the store had.
+    pub from: u32,
+    /// The format it has now.
+    pub to: u32,
+    /// Whether it changed: `false` for a store of the latest format already.
+    pub upgraded: bool,
+}
+
+impl UpgradeResp {
+    /// Takes every field.
+    pub fn new(from: u32, to: u32, upgraded: bool) -> Self {
+        Self { from, to, upgraded }
     }
 }
 
@@ -3845,7 +4086,7 @@ pub trait StoreOps {
     /// The files that differ between two revisions, a page at a time (CLI `diff`).
     fn diff(&self, req: DiffReq) -> Result<Diff, OpError>;
 
-    /// Every ref (CLI `ref list`).
+    /// Every ref, or those whose names start with a prefix (CLI `ref list`).
     fn ref_list(&self, req: RefListReq) -> Result<RefListResp, OpError>;
 
     /// Moves a ref, or creates one, by compare-and-swap (CLI `ref set`).
@@ -3868,6 +4109,36 @@ pub trait StoreOps {
     /// records after a frame, and says where to go on (CLI `derive`). It writes only the store's
     /// cache of derived values, so it takes no identity.
     fn derive(&self, req: DeriveReq) -> Result<DeriveResp, OpError>;
+
+    /// Removes the store's leftovers, and no object or changeset (CLI `gc`). Maintenance: it
+    /// records nothing, so it takes no identity. A store that does not have it answers
+    /// `E_INVALID_ARG`.
+    fn gc(&self, req: GcReq) -> Result<GcResp, OpError> {
+        let _ = req;
+        Err(not_built("gc"))
+    }
+
+    /// Rebuilds what the journal can rebuild and quarantines damaged objects (CLI `repair`).
+    /// Maintenance, as `gc` is. A store that does not have it answers `E_INVALID_ARG`.
+    fn repair(&self, req: RepairReq) -> Result<RepairResp, OpError> {
+        let _ = req;
+        Err(not_built("repair"))
+    }
+
+    /// Moves the store to the latest format this build writes (CLI `upgrade`); irreversible.
+    /// Maintenance, as `gc` is. A store that does not have it answers `E_INVALID_ARG`.
+    fn upgrade(&self, req: UpgradeReq) -> Result<UpgradeResp, OpError> {
+        let _ = req;
+        Err(not_built("upgrade"))
+    }
+}
+
+/// `E_INVALID_ARG`: operation `op`, which this store does not have.
+fn not_built(op: &str) -> OpError {
+    OpError::new(
+        crate::error::ErrorCode::InvalidArg,
+        format!("this store does not have the {op} operation"),
+    )
 }
 
 // The CLI holds a `dyn StoreOps` (operations spec §7); this stops compiling if the trait stops

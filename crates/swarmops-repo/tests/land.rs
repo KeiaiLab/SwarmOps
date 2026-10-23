@@ -755,8 +755,8 @@ fn a_land_onto_a_missing_target_is_not_found() {
         Err(RepoError::NotFound(what)) => assert_eq!(what, "release/none"),
         other => panic!("expected NotFound, got {other:?}"),
     }
-    match repo.land(LandRequest::new(head, "feature/x", lander())) {
-        Err(RepoError::RefName(name)) => assert_eq!(name, "feature/x"),
+    match repo.land(LandRequest::new(head, "main/x", lander())) {
+        Err(RepoError::RefName(name)) => assert_eq!(name, "main/x"),
         other => panic!("expected RefName, got {other:?}"),
     }
     assert_eq!(frame_count(&root), frames);

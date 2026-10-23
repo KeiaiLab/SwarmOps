@@ -105,10 +105,14 @@ pub struct VerifyReport {
     /// entries, by system and key, and last (deep only) the derived values, by derivation,
     /// changeset and key. Empty for a sound store.
     pub problems: Vec<VerifyProblem>,
+    /// Whether `problems` stops short of what was found: it holds the first problems only.
+    pub truncated: bool,
+    /// How many problems were found, `problems` and the ones past its cap together.
+    pub found: u64,
 }
 
 impl VerifyReport {
-    /// Makes one of the fields given.
+    /// Makes one of the fields given; `truncated` is false and `found` the problems' count.
     pub fn new(
         objects_checked: u64,
         changesets_checked: u64,
@@ -117,6 +121,8 @@ impl VerifyReport {
         VerifyReport {
             objects_checked,
             changesets_checked,
+            found: bytes::to_u64(problems.len()),
+            truncated: false,
             problems,
         }
     }
@@ -1005,6 +1011,8 @@ impl<'r, O: ObjectStore> Check<'r, O> {
         VerifyReport {
             objects_checked: bytes::to_u64(self.hashed.len() + looked_for),
             changesets_checked: self.changesets_checked,
+            found: bytes::to_u64(problems.len()),
+            truncated: false,
             problems,
         }
     }

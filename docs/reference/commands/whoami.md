@@ -137,6 +137,7 @@ Any command that opens a store may also fail with a store error, such as [`E_NOT
 - [`swarmops init`](init.md)
 - [`swarmops info`](info.md)
 - [`swarmops schema`](schema.md)
+- [`swarmops upgrade`](upgrade.md)
 - [`swarmops derive`](derive.md)
 - [CLI reference](../cli.md)
 - [Error codes](../errors.md)

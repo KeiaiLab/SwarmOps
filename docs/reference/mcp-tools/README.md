@@ -29,6 +29,9 @@ In `tools/list`'s order.
 | [`blob_put`](blob-put.md) | Store a blob | [`swarmops blob put`](../commands/blob-put.md) | adds to it | yes |
 | [`blob_has`](blob-has.md) | Find stored blobs | [`swarmops blob has`](../commands/blob-has.md) | no | no |
 | [`verify`](verify.md) | Verify the store | [`swarmops verify`](../commands/verify.md) | no | no |
+| [`gc`](gc.md) | Remove leftovers | [`swarmops gc`](../commands/gc.md) | removes or rewrites files the journal and the objects stand for | no |
+| [`repair`](repair.md) | Repair the store | [`swarmops repair`](../commands/repair.md) | removes or rewrites files the journal and the objects stand for | no |
+| [`upgrade`](upgrade.md) | Upgrade the store format | [`swarmops upgrade`](../commands/upgrade.md) | removes or rewrites files the journal and the objects stand for | no |
 | [`remote_list`](remote-list.md) | List git remotes | [`swarmops remote list`](../commands/remote-list.md) | no | no |
 | [`fetch`](fetch.md) | Fetch a git remote | [`swarmops fetch`](../commands/fetch.md) | adds what a git remote holds, or sends it there | no |
 | [`push`](push.md) | Push to a git remote | [`swarmops push`](../commands/push.md) | adds what a git remote holds, or sends it there | no |
@@ -102,7 +105,7 @@ Both are the server's, never a call's; no tool argument names either.
 - The store is `--repo`, else `SWARMOPS_REPO`, opened anew for each call, so that a call sees what other processes committed. A store that is not there is each call's `E_NOT_A_REPO`, and the server serves on.
 - The identity is `--as`, else `SWARMOPS_AGENT`, with `SWARMOPS_RUN_ID`, as for the CLI. Every change is recorded for it.
 - These tools need it, and without one fail with `E_IDENTITY_REQUIRED`: `ref_set`, `ref_delete`, `undo`, `commit`, `land`, `rebase`, `blob_put`, `sync`.
-- These need none: `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `path_history`, `diff`, `op_log`, `ref_list`, `blob_has`, `verify`, `remote_list`, `fetch`, `push`, `sync_status`.
+- These need none: `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `path_history`, `diff`, `op_log`, `ref_list`, `blob_has`, `verify`, `gc`, `repair`, `upgrade`, `remote_list`, `fetch`, `push`, `sync_status`.
 - The output flags (`--json`, `--human`, `--pretty`) do not apply.
 
 ## Result size limits

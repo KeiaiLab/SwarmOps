@@ -42,6 +42,12 @@ Syntax: `--name <NAME>`.
 
 The repository's name, at most 255 bytes (default: the directory's name).
 
+### `--format`
+
+Syntax: `--format <N>`.
+
+The store format, 1 or 2 (default: this build's). Format 2 takes free-form branches and tags; older releases open only format 1.
+
 ## Examples
 
 ### CLI
@@ -168,6 +174,7 @@ Any command that opens a store may also fail with a store error, such as [`E_NOT
 - [`swarmops info`](info.md)
 - [`swarmops whoami`](whoami.md)
 - [`swarmops schema`](schema.md)
+- [`swarmops upgrade`](upgrade.md)
 - [`swarmops derive`](derive.md)
 - [CLI reference](../cli.md)
 - [Error codes](../errors.md)

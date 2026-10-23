@@ -120,6 +120,7 @@ A response past these leaves the rest out, and says so in its fields; nothing fa
 | [Line diff bytes](#line-diff-bytes) | 8,388,608 bytes (8 MiB) | `swarmops_merge::line_diff::MAX_DIFF_BYTES` | [`diff`](commands/diff.md), [`land`](commands/land.md) |
 | [Text probe](#text-probe) | 8,000 bytes | `swarmops_merge::line_diff::TEXT_PROBE` | [`diff`](commands/diff.md), [`land`](commands/land.md) |
 | [Conflict report entries](#conflict-report-entries) | 24,576 bytes (24 KiB) | `swarmops_ops::conflict::MAX_ENTRY_BYTES` | [`land`](commands/land.md) |
+| [Verify findings](#verify-findings) | 1,000 problems | `swarmops_api::VERIFY_MAX_FINDINGS` | [`verify`](commands/verify.md) |
 
 ### Lossy commits listed
 
@@ -160,6 +161,14 @@ The most bytes an `E_CONFLICT` report's files and hunks take as JSON, their text
 - Value: 24,576 bytes (24 KiB).
 - Constant: `swarmops_ops::conflict::MAX_ENTRY_BYTES`, in `crates/swarmops-ops/src/conflict.rs`.
 - Commands: [`land`](commands/land.md).
+
+### Verify findings
+
+The most problems a `verify` report lists, and `--max-findings` (`max_findings`) its default: the first ones found, with `truncated`; `found` counts them all.
+
+- Value: 1,000 problems.
+- Constant: `swarmops_api::VERIFY_MAX_FINDINGS`, in `crates/swarmops-api/src/ops.rs`.
+- Commands: [`verify`](commands/verify.md).
 
 ## Defaults
 
@@ -224,6 +233,9 @@ Not part of the contract: these tune the implementation, or bound the store's la
 | Parents | 255 parents | `swarmops_store::meta::parents::MAX_PARENTS` | The most parents a changeset's record holds (`details.store_limit` `parents`): a commit has one parent. |
 | Actor | 255 bytes | `swarmops_store::meta::store::MAX_ACTOR_LEN` | The most bytes a ref move's actor takes (`details.store_limit` `actor_bytes`): the agent name's limit keeps a request within it. |
 | Records | 65,535 records | `swarmops_store::meta::frame::MAX_RECORDS` | The most records one journal frame holds (`details.store_limit` `records`). |
+| Temp file grace | 86,400 s | `swarmops_store::GC_TEMP_GRACE` | How old a temp file in `objects/tmp/` or `meta/derived/tmp/` must be before `gc` removes it: a write in progress holds a younger one. |
+| Read window | 4,096 entries | `swarmops_store::meta::READ_WINDOW` | How many entries of `journal.off`, an index column or a sorted view one read of the store takes, so that no read allocates by a file's length. |
+| Lookup hits | 4,096 changesets | `swarmops_store::meta::MAX_LOOKUP_HITS` | The most changesets a lookup by id prefix or by delta hash gathers before it says its answer was cut. |
 
 ## Details
 

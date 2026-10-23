@@ -19,9 +19,10 @@ macro_rules! schemas {
 /// [`Envelope`](crate::Envelope) is listed as `Envelope<serde_json::Value>`: its `result` is an operation's
 /// response, whose type has its own entry.
 pub fn schema_for_all() -> serde_json::Value {
-    // The store's operations' types, then the git remotes', then the workspaces'.
+    // The store's operations' types, then the maintenance's, the git remotes' and the
+    // workspaces'.
     let mut all = store_schemas();
-    for more in [remote_schemas(), workspace_schemas()] {
+    for more in [maintenance_schemas(), remote_schemas(), workspace_schemas()] {
         if let (serde_json::Value::Object(all), serde_json::Value::Object(more)) = (&mut all, more)
         {
             all.extend(more);
@@ -101,6 +102,7 @@ fn store_schemas() -> serde_json::Value {
         RefListReq,
         RefListResp,
         RefOut,
+        RefKind,
         RefSetReq,
         RefSetResp,
         RefDeleteReq,
@@ -145,6 +147,21 @@ fn store_schemas() -> serde_json::Value {
         BlobGetReq,
         BlobGetResp,
         BlobOut,
+    ]
+}
+
+/// The schemas of the maintenance's types (M6): gc, repair and upgrade.
+fn maintenance_schemas() -> serde_json::Value {
+    schemas![
+        GcReq,
+        GcResp,
+        GcCount,
+        RepairReq,
+        RepairResp,
+        RepairAction,
+        VerifySummary,
+        UpgradeReq,
+        UpgradeResp,
     ]
 }
 

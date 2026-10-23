@@ -843,7 +843,7 @@ fn ref_set_create_update_mismatch_and_already_applied() {
     assert_eq!(moved, resp(Some(&c2), Some(&c3), false));
     assert_eq!(
         ops.ref_list(RefListReq::default()).unwrap().refs,
-        [RefOut::new("main".to_owned(), c3.clone(), 3)]
+        [main_ref(c3.clone(), 3)]
     );
 
     // Exactly one of `expected_old` and `create`.
@@ -853,12 +853,12 @@ fn ref_set_create_update_mismatch_and_already_applied() {
     ] {
         expect_err(ops.ref_set(&who, req), ErrorCode::InvalidArg);
     }
-    // Ref names are `main` or `release/<name>`.
+    // Ref names are `main` or `release/<name>` in a FORMAT 1 store.
     let err = expect_err(
-        ops.ref_set(&who, set("feature/x", &c1, None, true)),
+        ops.ref_set(&who, set("main/x", &c1, None, true)),
         ErrorCode::RefNameInvalid,
     );
-    assert_eq!(err.details["name"], "feature/x");
+    assert_eq!(err.details["name"], "main/x");
     delete_refs_by_compare_and_swap(&ops, &who, [c1.as_str(), c3.as_str()]);
 }
 
@@ -926,8 +926,8 @@ fn delete_refs_by_compare_and_swap(ops: &LocalOps, who: &Identity, [c1, c3]: [&s
         deleted("release/never", c1, true)
     );
     // A name that cannot be a ref's is refused, not taken for a ref that is gone.
-    let err = expect_err(delete("feature/x", c1), ErrorCode::RefNameInvalid);
-    assert_eq!(err.details["name"], "feature/x");
+    let err = expect_err(delete("main/x", c1), ErrorCode::RefNameInvalid);
+    assert_eq!(err.details["name"], "main/x");
     assert!(
         ops.ref_list(RefListReq::default()).unwrap().refs.is_empty(),
         "nothing was created"
@@ -1033,8 +1033,7 @@ mod advance {
         assert_eq!(resp.advanced, Some(moved));
         assert_eq!(resp.warnings, Vec::<String>::new());
         let refs = ops.ref_list(RefListReq::default()).unwrap().refs;
-        let main = RefOut::new("main".to_owned(), c2, 2);
-        assert_eq!(refs, [main]);
+        assert_eq!(refs, [main_ref(c2, 2)]);
         let after = frames(&root);
         assert_eq!(after[..before.len()], before[..]);
         assert_eq!(
@@ -1138,9 +1137,9 @@ mod advance {
         );
 
         // A bad ref name is refused before anything is resolved or written.
-        let bad = request.commit(&who, advancing(None, vec![text("x", "1")], "feature/x"));
+        let bad = request.commit(&who, advancing(None, vec![text("x", "1")], "main/x"));
         let err = expect_err(bad, ErrorCode::RefNameInvalid);
-        assert_eq!(err.details["name"], "feature/x");
+        assert_eq!(err.details["name"], "main/x");
         assert_eq!(ops.repo_info(InfoReq::default()).unwrap().changesets, 4);
     }
 
@@ -5198,5 +5197,123 @@ mod authors {
 
         let emails: Vec<String> = [&c1, &c2, &c3, &c4].map(|c| email_of(&ops, c)).into();
         assert_eq!(emails, [NATIVE, LINKED, "second@x.org", NATIVE]);
+    }
+}
+
+/// `main` as `ref list` reports it: pointing at `target`, at `version`.
+fn main_ref(target: String, version: u64) -> RefOut {
+    let mut main = RefOut::new("main", target, version);
+    main.kind = Some(swarmops_api::RefKind::Main);
+    main
+}
+
+/// The store formats (the M6 design §2.5, §4): what a FORMAT 1 store does with the names only
+/// FORMAT 2 takes, the kinds `ref list` shows, and the format `init` makes.
+mod formats {
+    use super::*;
+    use swarmops_api::RefKind;
+
+    /// A branch or a tag on a FORMAT 1 store is `E_FORMAT_REQUIRED`, naming the format that
+    /// takes it and the store's, with the upgrade as the hint; a name no format takes is
+    /// `E_REF_NAME_INVALID` as before. Nothing moves.
+    #[test]
+    fn v2_names_on_a_v1_store_are_format_required() {
+        let (_dir, _root, ops) = new_store();
+        let who = agent();
+        let c1 = commit(&ops, None, vec![text("f", "1")]);
+
+        for name in ["feature/x", "tags/v1"] {
+            let err = expect_err(
+                ops.ref_set(&who, set(name, &c1, None, true)),
+                ErrorCode::FormatRequired,
+            );
+            assert_eq!(
+                Value::Object(err.details.clone()),
+                json!({"name": name, "needs": 2, "store": 1}),
+                "{name}"
+            );
+            assert_eq!(err.hint.as_deref(), Some("swarmops upgrade"), "{name}");
+        }
+        expect_err(
+            ops.ref_set(&who, set("main/x", &c1, None, true)),
+            ErrorCode::RefNameInvalid,
+        );
+        assert_eq!(ops.ref_list(RefListReq::default()).unwrap().refs, []);
+    }
+
+    /// A remote-tracking ref is refused to `ref set`, whatever the store's format: only a fetch
+    /// moves one (`reason: "reserved"`).
+    #[test]
+    fn remote_tracking_refs_are_reserved() {
+        let (_dir, _root, ops) = new_store();
+        let c1 = commit(&ops, None, vec![text("f", "1")]);
+        let err = expect_err(
+            ops.ref_set(&agent(), set("remote/origin/main", &c1, None, true)),
+            ErrorCode::RefNameInvalid,
+        );
+        assert_eq!(err.details["reason"], json!("reserved"));
+    }
+
+    /// `ref list --prefix` lists the refs whose names start with it, each with its kind.
+    #[test]
+    fn ref_list_prefix_filters_and_kinds_show() {
+        let (_dir, _root, ops) = new_store();
+        let who = agent();
+        let c1 = commit(&ops, None, vec![text("f", "1")]);
+        for name in ["main", "release/1.0", "release/2.0"] {
+            ops.ref_set(&who, set(name, &c1, None, true)).unwrap();
+        }
+        let listed = |prefix: Option<&str>| -> Vec<(String, Option<RefKind>)> {
+            let req = RefListReq::new(prefix.map(str::to_owned));
+            (ops.ref_list(req).unwrap().refs.into_iter())
+                .map(|out| (out.name, out.kind))
+                .collect()
+        };
+
+        let release = Some(RefKind::Release);
+        assert_eq!(
+            listed(Some("release/")),
+            [
+                ("release/1.0".to_owned(), release),
+                ("release/2.0".to_owned(), release)
+            ]
+        );
+        assert_eq!(listed(Some("tags/")), []);
+        let all = listed(None);
+        assert_eq!(all.len(), 3, "{all:?}");
+        assert_eq!(all[0], ("main".to_owned(), Some(RefKind::Main)));
+        assert_eq!(listed(Some("")), all);
+    }
+
+    /// `info` reports the format the store has, which `init` chose.
+    #[test]
+    fn info_reports_the_store_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = utf8(dir.path().join("store"));
+        let (ops, info) = LocalOps::init_as(&root, "acme", Some(1)).unwrap();
+        assert_eq!(info.store_version, 1);
+        assert_eq!(ops.repo_info(InfoReq::default()).unwrap().store_version, 1);
+        let format = fs::read(root.join("FORMAT")).unwrap();
+        assert_eq!(format, b"swarmops-store 1\n");
+    }
+
+    /// A format this build does not create is `E_INVALID_ARG`, naming the ones it does, and
+    /// nothing is made; FORMAT 2 is among them only once its journal is built.
+    #[test]
+    fn init_format_2_is_refused_until_built() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = utf8(dir.path().join("store"));
+        for format in [2, 3, 0] {
+            let err = expect_err(
+                LocalOps::init_as(&root, "acme", Some(format)),
+                ErrorCode::InvalidArg,
+            );
+            assert_eq!(
+                Value::Object(err.details.clone()),
+                json!({"format": format, "formats": [1]}),
+                "{format}"
+            );
+            assert!(!fs::exists(&root).unwrap(), "{format}: nothing was made");
+        }
     }
 }

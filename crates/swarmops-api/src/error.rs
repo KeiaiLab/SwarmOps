@@ -81,7 +81,9 @@ error_codes! {
     CasMismatch => "E_CAS_MISMATCH", EXIT_RETRYABLE, true;
     /// No ref by that name.
     RefNotFound => "E_REF_NOT_FOUND", EXIT_NOT_FOUND, false;
-    /// The ref name is not `main` or `release/<name>`.
+    /// The ref name is one no store format takes, or one the operation does not move:
+    /// `details.reason` is `reserved` for a `remote/` name, which only a fetch writes, and `tag`
+    /// for a tag named as the target of a land or a commit's `advance`.
     RefNameInvalid => "E_REF_NAME_INVALID", EXIT_ERROR, false;
     /// Stored data failed verification. A metadata file that does not parse also names
     /// `details.fs_op` and `details.store_file`.
@@ -122,13 +124,22 @@ error_codes! {
     NothingToUndo => "E_NOTHING_TO_UNDO", EXIT_ERROR, false;
     /// The store has no operation by that number.
     OpNotFound => "E_OP_NOT_FOUND", EXIT_NOT_FOUND, false;
-    // Not raised in M1: token checks, `policy.toml` and the maintenance lease arrive later.
+    // Not raised in M1: token checks and `policy.toml` arrive later.
     /// The caller's token failed verification.
     Auth => "E_AUTH", EXIT_AUTH, false;
     /// A policy refused the operation for this identity.
     PolicyDenied => "E_POLICY_DENIED", EXIT_AUTH, false;
-    /// Maintenance (gc or verify) holds the store's maintenance lease.
+    /// Another gc, repair or upgrade holds the store's maintenance lease; nothing was done, and
+    /// running the operation again once it is done can succeed.
     MaintenanceBusy => "E_MAINTENANCE_BUSY", EXIT_RETRYABLE, true;
+    // The store formats (M6).
+    /// The ref name is one the store's format does not take but a later one does: `details`
+    /// names `name`, `needs` (the format that takes it) and `store` (the store's); `swarmops
+    /// upgrade` moves the store to it.
+    FormatRequired => "E_FORMAT_REQUIRED", EXIT_ERROR, false;
+    /// A tag was asked to move from one target to another: a tag is created and deleted, never
+    /// moved (`details.name`). Nothing was written.
+    TagImmutable => "E_TAG_IMMUTABLE", EXIT_ERROR, false;
     // `git import` (M3): the source repository and its history.
     /// `git import` found no git repository it can open at `git_path` (`details.git_path`).
     GitNotARepo => "E_GIT_NOT_A_REPO", EXIT_NOT_FOUND, false;

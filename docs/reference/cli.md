@@ -28,6 +28,7 @@ Every command takes these, before or after its subcommand.
 - [`swarmops info`](commands/info.md): Describe the store.
 - [`swarmops whoami`](commands/whoami.md): Show the identity this caller's changes carry.
 - [`swarmops schema`](commands/schema.md): Print the JSON Schema of every request and response type, or of TYPE's.
+- [`swarmops upgrade`](commands/upgrade.md): Move the store to the latest format this build writes. Irreversible: older releases do not open it afterwards.
 - [`swarmops derive`](commands/derive.md): Derive the eager derived values of new changesets, ahead of any reader.
 
 ## Write
@@ -65,7 +66,7 @@ Store content as a blob for a commit to name by its id, or ask which blobs the s
 
 List refs, or move one by compare-and-swap.
 
-- [`swarmops ref list`](commands/ref-list.md): List every ref.
+- [`swarmops ref list`](commands/ref-list.md): List every ref, or those whose names start with --prefix, each with its kind.
 - [`swarmops ref set`](commands/ref-set.md): Point ref NAME at REV: move it from --expect, or --create it.
 - [`swarmops ref delete`](commands/ref-delete.md): Delete ref NAME.
 
@@ -81,6 +82,8 @@ List the store's operations, or undo one.
 ## Integrity
 
 - [`swarmops verify`](commands/verify.md): Check the store's consistency.
+- [`swarmops gc`](commands/gc.md): Remove the store's leftovers: temp files past a day, a crashed create's staging, derived values of older versions, what an upgrade left. Never an object or a changeset.
+- [`swarmops repair`](commands/repair.md): Rebuild what the journal can rebuild, quarantine damaged objects, drop damaged cache entries, then verify; the journal itself is never cut.
 
 ## Git
 

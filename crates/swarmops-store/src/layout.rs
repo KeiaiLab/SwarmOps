@@ -1,13 +1,15 @@
 //! Where each piece of a store lives on disk (storage spec §2).
 //!
 //! ```text
-//! <root>/FORMAT                 "swarmops-store 1\n", written last by a create
+//! <root>/FORMAT                 "swarmops-store 1\n" or "…2\n", written last by a create
 //! <root>/REPO                   the repository's identity: its id, then its name
 //! <root>/meta/                  metadata store files (storage spec §3), among them:
 //! <root>/meta/lock              the flock that serializes metadata writers
 //! <root>/meta/journal.log       append-only journal frames, the metadata's source of truth
 //! <root>/meta/journal.off       each frame's start offset in journal.log, u64le
 //! <root>/meta/journal.ckpt      how far the journal is materialized, a u64le offset
+//! <root>/meta/refs/<name>       one file per ref
+//!                               (FORMAT 2: journal2.log, journal2.off, journal2.ckpt, refs2/)
 //! <root>/meta/derived/<name>/<version>/<2hex>/<62hex>[.<16hex>]
 //!                               one derived value: a cache, outside the journal, never synced
 //! <root>/meta/derived/tmp/      temp files of derived values, written before they are linked
@@ -19,24 +21,40 @@
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::ObjectId;
 
+use crate::format::StoreFormat;
 use crate::meta::derived::{self, DerivedSlot};
 
-/// The paths of one store, all derived from its root. Computes paths only; touches nothing.
+/// The paths of one store, all derived from its root and its format. Computes paths only;
+/// touches nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Layout {
     root: Utf8PathBuf,
+    format: StoreFormat,
 }
 
 impl Layout {
-    /// The layout of the store rooted at `root`.
+    /// The layout of the FORMAT 1 store rooted at `root`.
     pub fn new(root: impl Into<Utf8PathBuf>) -> Self {
-        Self { root: root.into() }
+        Self::with_format(root, StoreFormat::V1)
+    }
+
+    /// The layout of the store of `format` rooted at `root`.
+    pub fn with_format(root: impl Into<Utf8PathBuf>, format: StoreFormat) -> Self {
+        Self {
+            root: root.into(),
+            format,
+        }
     }
 
     /// The store root.
     pub fn root(&self) -> &Utf8Path {
         &self.root
+    }
+
+    /// The store's format, which names its journal and ref files.
+    pub fn format(&self) -> StoreFormat {
+        self.format
     }
 
     /// `<root>/FORMAT`, the store version marker.
@@ -69,20 +87,39 @@ impl Layout {
         self.meta_path("lock")
     }
 
-    /// `<root>/meta/journal.log`, the append-only journal of metadata frames.
+    /// `<root>/meta/journal.log` (FORMAT 2: `journal2.log`), the append-only journal of
+    /// metadata frames.
     pub fn journal_log(&self) -> Utf8PathBuf {
-        self.meta_path("journal.log")
+        self.journal_file("log")
     }
 
-    /// `<root>/meta/journal.off`, the start offset of each journal frame (`u64le` each).
+    /// `<root>/meta/journal.off` (FORMAT 2: `journal2.off`), an entry per journal frame: its
+    /// start offset (`u64le`; FORMAT 2 adds checksums).
     pub fn journal_off(&self) -> Utf8PathBuf {
-        self.meta_path("journal.off")
+        self.journal_file("off")
     }
 
-    /// `<root>/meta/journal.ckpt`, the journal offset up to which the metadata files are
-    /// materialized (`u64le`).
+    /// `<root>/meta/journal.ckpt` (FORMAT 2: `journal2.ckpt`), how far the metadata files are
+    /// materialized: a `u64le` journal offset (FORMAT 2 adds the frame count and a CRC).
     pub fn journal_ckpt(&self) -> Utf8PathBuf {
-        self.meta_path("journal.ckpt")
+        self.journal_file("ckpt")
+    }
+
+    /// `<root>/meta/refs` (FORMAT 2: `refs2`), the directory of the ref files.
+    pub fn refs_dir(&self) -> Utf8PathBuf {
+        match self.format {
+            StoreFormat::V1 => self.meta_path("refs"),
+            StoreFormat::V2 => self.meta_path("refs2"),
+        }
+    }
+
+    /// The journal file of the store's format whose extension is `ext`.
+    fn journal_file(&self, ext: &str) -> Utf8PathBuf {
+        let stem = match self.format {
+            StoreFormat::V1 => "journal",
+            StoreFormat::V2 => "journal2",
+        };
+        self.meta_path(&format!("{stem}.{ext}"))
     }
 
     /// `<root>/meta/derived`, the directory of the derived values (storage spec §3, §5).

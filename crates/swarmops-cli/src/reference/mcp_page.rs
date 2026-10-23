@@ -76,9 +76,23 @@ const REMOTE_SINCE: &str = "0.2.0";
 const WORKSPACE_TOOLS: [&str; 1] = ["rebase"];
 const WORKSPACE_SINCE: &str = "0.3.0";
 
+/// The maintenance's tools (M6), and the release they first ship in.
+const MAINTENANCE_TOOLS: [&str; 3] = ["gc", "repair", "upgrade"];
+const MAINTENANCE_SINCE: &str = "0.4.0";
+
 /// The tools with no recorded call yet: the git remotes' (M13), whose operations answer
-/// `E_INTERNAL` until their tasks land; the M13 plan's task C10 records their calls.
-const UNRECORDED: [&str; 5] = ["remote_list", "fetch", "push", "sync", "sync_status"];
+/// `E_INTERNAL` until their tasks land, the M13 plan's task C10 recording their calls; and the
+/// maintenance's (M6), which answer `E_INVALID_ARG` until the M6 plan's tasks build them.
+const UNRECORDED: [&str; 8] = [
+    "remote_list",
+    "fetch",
+    "push",
+    "sync",
+    "sync_status",
+    "gc",
+    "repair",
+    "upgrade",
+];
 
 /// The release tool `name` first shipped in.
 fn since(name: &str) -> &'static str {
@@ -87,6 +101,9 @@ fn since(name: &str) -> &'static str {
     }
     if WORKSPACE_TOOLS.contains(&name) {
         return WORKSPACE_SINCE;
+    }
+    if MAINTENANCE_TOOLS.contains(&name) {
+        return MAINTENANCE_SINCE;
     }
     SINCE
 }
@@ -398,13 +415,15 @@ fn changes(effect: Effect) -> &'static str {
         Effect::Lands => "adds a changeset and moves the target",
         Effect::Fetches => "adds what a git remote holds, or sends it there",
         Effect::Syncs => "lands onto a git remote's head, moves main and pushes",
+        Effect::Maintains => "removes or rewrites files the journal and the objects stand for",
     }
 }
 
 /// Whether a tool of `effect` needs the server's identity: every tool but those that only read,
-/// and `fetch` and `push`, which move no ref of the store and record no agent.
+/// `fetch` and `push`, which move no ref of the store and record no agent, and the maintenance,
+/// which records nothing.
 fn needs_identity(effect: Effect) -> bool {
-    !matches!(effect, Effect::Reads | Effect::Fetches)
+    !matches!(effect, Effect::Reads | Effect::Fetches | Effect::Maintains)
 }
 
 /// The protocol revisions, and how a client opens each.
@@ -861,6 +880,10 @@ fn effect_text(effect: Effect) -> &'static str {
             "It lands main's unpublished changes onto a git remote's head, moves main there and \
              pushes. Run again after the remote moved, it lands again. It reaches the remote, \
              beyond the store."
+        }
+        Effect::Maintains => {
+            "It removes or rewrites store files that the journal and the objects stand for, and \
+             moves no ref and records nothing. Run again, it finds its work done."
         }
     }
 }

@@ -513,7 +513,16 @@ expression: golden.transcript()
               "description": "Every ref, the changeset it points at, and how many moves it has had.",
               "inputSchema": {
                 "$schema": "https://json-schema.org/draft/2020-12/schema",
-                "description": "`ref list`: list every ref. It has no options yet.",
+                "description": "`ref list`: list every ref, or those whose names start with a prefix.",
+                "properties": {
+                  "prefix": {
+                    "description": "Only the refs whose names start with these bytes (`release/`, `tags/`); omitted for\nevery ref.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
                 "title": "RefListReq",
                 "type": "object"
               },
@@ -1388,6 +1397,15 @@ expression: golden.transcript()
                     "default": false,
                     "description": "Re-hash every object, and check every derived value of the built-in derivations (the\nfirst-parent skip lists, the last touches of paths) against the objects. When `false`,\nverify checks structure only: parents, that referenced objects exist, the index against\nthe journal, and refs.",
                     "type": "boolean"
+                  },
+                  "max_findings": {
+                    "description": "The most problems the report lists, 1 to 1,000, also the default; `found` counts them\nall.",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
                   }
                 },
                 "title": "VerifyReq",
@@ -1395,6 +1413,71 @@ expression: golden.transcript()
               },
               "name": "verify",
               "title": "Verify the store"
+            },
+            {
+              "annotations": {
+                "destructiveHint": true,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": false
+              },
+              "description": "Removes the store's leftovers (temp files past a day, a crashed create's staging, derived values of older versions, what an upgrade left) and never an object or a changeset; dry_run lists them only. E_MAINTENANCE_BUSY while another gc, repair or upgrade runs: retry.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`gc`: remove the store's leftovers (temp files past a day, a crashed create's staging,\nderived values of older versions, what an upgrade left of the format before). It removes no\nobject and no changeset.",
+                "properties": {
+                  "dry_run": {
+                    "default": false,
+                    "description": "List what it would remove, and remove nothing.",
+                    "type": "boolean"
+                  }
+                },
+                "title": "GcReq",
+                "type": "object"
+              },
+              "name": "gc",
+              "title": "Remove leftovers"
+            },
+            {
+              "annotations": {
+                "destructiveHint": true,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": false
+              },
+              "description": "Rebuilds what the journal can rebuild (its offsets, the index, the ref files), quarantines damaged objects and drops damaged cache entries, then verifies; the journal itself is never cut. dry_run lists the actions only.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`repair`: rebuild what the journal can rebuild (`journal.off`, the index, the ref files),\nquarantine damaged objects and drop damaged cache entries. It never cuts the journal.",
+                "properties": {
+                  "dry_run": {
+                    "default": false,
+                    "description": "List what it would do, each with `done: false`, and write nothing.",
+                    "type": "boolean"
+                  }
+                },
+                "title": "RepairReq",
+                "type": "object"
+              },
+              "name": "repair",
+              "title": "Repair the store"
+            },
+            {
+              "annotations": {
+                "destructiveHint": true,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": false
+              },
+              "description": "Moves the store to the latest format this build writes, which takes free-form branches and tags; irreversible, older releases do not open it afterwards. On a store of that format already it changes nothing.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`upgrade`: move the store to the latest format this build writes. It cannot be undone:\nolder releases do not open the store afterwards.",
+                "title": "UpgradeReq",
+                "type": "object"
+              },
+              "name": "upgrade",
+              "title": "Upgrade the store format"
             },
             {
               "annotations": {

@@ -4,7 +4,7 @@
 //! # A store's files (storage spec §2)
 //!
 //! ```text
-//! <store>/FORMAT    "swarmops-store 1\n": written last by create, checked first by open
+//! <store>/FORMAT    "swarmops-store 1\n" or "…2\n": written last by create, checked first by open
 //! <store>/REPO      the repository's identity: its id (32 hex digits), then its name
 //! <store>/meta/     the native metadata store (swarmops_store::MetaStore)
 //! <store>/objects/  the 256 fan-out directories of the loose objects, and tmp/
@@ -71,21 +71,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
 use swarmops_core::bytes;
 use swarmops_core::{Changeset, ChangesetId, ObjectId, ObjectKind, Tree, TreeId};
+use swarmops_store::format::{self, MAX_MARKER_LEN};
 use swarmops_store::{
     CasResult, DerivedStore, ExternalEntry, ExternalIds, ExternalPut, FileOp, FsObjectStore, FsOps,
     HookedFs, IoFailure, Layout, LinkOutcome, MetaStore, ObjectStore, RealFs, Recovered, RefState,
-    StoreError, StoreFs,
+    StoreError, StoreFormat, StoreFs,
 };
 
 use crate::derive::Registry;
 use crate::error::RepoError;
 use crate::read::RepoRead;
-
-/// What a store's `FORMAT` file holds: the store layout this build writes and reads.
-const FORMAT: &[u8] = b"swarmops-store 1\n";
-
-/// The version number `FORMAT` names.
-const STORE_VERSION: u32 = 1;
 
 /// The most bytes a repository's name may have: create refuses a longer one
 /// ([`swarmops_store::LimitKind::RepoNameBytes`]).
@@ -125,7 +120,7 @@ pub struct RepoInfo {
     pub repo_id: String,
     /// The name the repository was created with.
     pub name: String,
-    /// The store layout version, `FORMAT`'s number: 1.
+    /// The store layout version, `FORMAT`'s number: 1 or 2.
     pub store_version: u32,
     /// How many changesets the store holds.
     pub changesets: u64,
@@ -212,8 +207,18 @@ impl LocalRepo {
     /// stores' writes ([`HookedFs::from_env`]). A build without the feature ignores the
     /// variables.
     pub fn create(store: &Utf8Path, name: &str) -> Result<LocalRepo, RepoError> {
+        Self::create_as(store, name, format::DEFAULT_INIT_FORMAT)
+    }
+
+    /// [`LocalRepo::create`] of a store of `format`, one of [`format::INIT_FORMATS`]; another
+    /// is refused with [`StoreError::Format`] before anything is created.
+    pub fn create_as(
+        store: &Utf8Path,
+        name: &str,
+        format: StoreFormat,
+    ) -> Result<LocalRepo, RepoError> {
         let (fs, threads) = default_fs();
-        Self::create_on(store, name, fs, threads)
+        Self::create_on(store, name, format, fs, threads)
     }
 
     /// [`LocalRepo::create`] with every filesystem change going through `fs` (fault injection in
@@ -223,7 +228,7 @@ impl LocalRepo {
         name: &str,
         fs: Arc<dyn FsOps>,
     ) -> Result<LocalRepo, RepoError> {
-        Self::create_on(store, name, fs, Threads::Pool)
+        Self::create_on(store, name, format::DEFAULT_INIT_FORMAT, fs, Threads::Pool)
     }
 
     /// Opens the store at `store`. Checks `FORMAT` first, then reads `REPO`:
@@ -250,11 +255,20 @@ impl LocalRepo {
     fn create_on(
         store: &Utf8Path,
         name: &str,
+        format: StoreFormat,
         fs: Arc<dyn FsOps>,
         threads: Threads,
     ) -> Result<LocalRepo, RepoError> {
-        // A name longer than open reads back from REPO is refused before anything is made, and
-        // before the directory is checked for a store already there.
+        // A format this build does not create, and a name longer than open reads back from
+        // REPO, are refused before anything is made, and before the directory is checked for a
+        // store already there.
+        if !format::INIT_FORMATS.contains(&format) {
+            return Err(StoreError::Format(format!(
+                "this build does not create stores of format {}",
+                format.version()
+            ))
+            .into());
+        }
         if name.len() > MAX_NAME_LEN {
             return Err(StoreError::Limit {
                 what: swarmops_store::LimitKind::RepoNameBytes,
@@ -264,7 +278,7 @@ impl LocalRepo {
             .into());
         }
         let root = native_root(store, &fs)?;
-        let layout = Layout::new(root.clone());
+        let layout = Layout::with_format(root.clone(), format);
         // Each call below names the file of the store it failed on.
         let fs = StoreFs::new(fs, &root);
         if fs.exists(layout.format_file().as_std_path())? {
@@ -307,13 +321,13 @@ impl LocalRepo {
 
         // 4. MetaStore::create renames a whole meta/ into place, so one that exists is whole.
         let meta = if fs.exists(layout.meta_dir().as_std_path())? {
-            MetaStore::open_with_fs(&root, Arc::clone(fs.ops()))?
+            MetaStore::open_in(layout.clone(), Arc::clone(fs.ops()))?
         } else {
-            MetaStore::create_with_fs(&root, Arc::clone(fs.ops()))?
+            MetaStore::create_in(layout.clone(), Arc::clone(fs.ops()))?
         };
 
         // 5. FORMAT, last: the store is complete.
-        let temp = fs.write_durable_temp(layout.objects_tmp().as_std_path(), FORMAT)?;
+        let temp = fs.write_durable_temp(layout.objects_tmp().as_std_path(), format.marker())?;
         let format_file = layout.format_file();
         // Another create that finished first.
         if fs.link_noclobber(&temp, format_file.as_std_path())? == LinkOutcome::AlreadyExists {
@@ -345,15 +359,16 @@ impl LocalRepo {
         if !swarmops_store::is_native_linux_fs(&target) {
             return Err(StoreError::UnsupportedFs(target).into());
         }
-        let layout = Layout::new(root.clone());
+        swarmops_store::check_supported_fs(&target)?;
+        let unread = Layout::new(root.clone());
         // A FORMAT longer than the layout's names no layout this build reads, however long it
         // is: measured before it is read (through `std::fs`, no `FsOps` call), so that a
         // crafted file of huge length is never read into memory. A missing one, and one that is
         // no regular file (whose size says nothing of its content), reach the read, which
         // refuses the latter as such.
-        if let Ok(meta) = std::fs::metadata(layout.format_file().as_std_path())
+        if let Ok(meta) = std::fs::metadata(unread.format_file().as_std_path())
             && meta.is_file()
-            && meta.len() > bytes::to_u64(FORMAT.len())
+            && meta.len() > bytes::to_u64(MAX_MARKER_LEN)
         {
             return Err(StoreError::Format(format!(
                 "{root}/FORMAT is {} bytes long, not a store layout this build reads",
@@ -363,22 +378,29 @@ impl LocalRepo {
         }
         // Each call below names the file of the store it failed on.
         let store_fs = StoreFs::new(Arc::clone(&fs), &root);
-        match store_fs.read(layout.format_file().as_std_path())? {
-            Some(format) if format == FORMAT => {}
-            Some(_) => {
-                return Err(StoreError::Format(format!(
-                    "{root}/FORMAT names a store layout this build does not read"
-                ))
-                .into());
-            }
+        let format = match store_fs.read(unread.format_file().as_std_path())? {
+            Some(marker) => StoreFormat::from_marker(&marker),
             None => {
                 return Err(
                     StoreError::Format(format!("{root} is not a store: no FORMAT file")).into(),
                 );
             }
-        }
+        };
+        let Some(format) = format else {
+            return Err(StoreError::Format(format!(
+                "{root}/FORMAT names a store layout this build does not read"
+            ))
+            .into());
+        };
+        let layout = Layout::with_format(root.clone(), format);
         let identity = read_identity(&layout, &store_fs)?;
-        let meta = MetaStore::open_with_fs(&root, Arc::clone(&fs))?;
+        // An upgrade that stopped between its poison and its commit point is finished first.
+        if format == StoreFormat::V1
+            && swarmops_store::meta::upgrade::finish_if_poisoned(&layout, Arc::clone(&fs))?
+        {
+            return Self::open_on(store, fs, threads);
+        }
+        let meta = MetaStore::open_in(layout.clone(), Arc::clone(&fs))?;
         Ok(Self::assemble(layout, fs, meta, identity, threads))
     }
 
@@ -417,7 +439,7 @@ impl RepoRead<'_, FsObjectStore> {
         Ok(RepoInfo {
             repo_id: identity.repo_id.clone(),
             name: identity.name.clone(),
-            store_version: STORE_VERSION,
+            store_version: self.repo.layout.format().version(),
             changesets: self.meta.count_changesets()?,
             refs: bytes::to_u64(self.meta.list_refs()?.len()),
             main: self.meta.get_ref("main")?.map(|state| state.target),
@@ -488,6 +510,19 @@ impl<O: ObjectStore> Repo<O> {
     /// checkpoint passes its frames, every snapshot reads them again.
     pub fn flush_metadata(&self) -> Result<(), RepoError> {
         Ok(self.meta.flush()?)
+    }
+
+    /// Refuses a ref name this store's format does not take: [`RepoError::RefName`] for one no
+    /// format takes, [`StoreError::FormatRequired`] for one only a later format takes. A caller
+    /// that must refuse a bad name before it writes anything else, as a commit that advances a
+    /// ref does before it puts its objects, calls it itself.
+    pub fn check_ref_name(&self, name: &str) -> Result<(), RepoError> {
+        self.meta.check_ref_name(name).map_err(ref_error)
+    }
+
+    /// The store's format.
+    pub fn format(&self) -> StoreFormat {
+        self.layout.format()
     }
 
     /// Ref `name`, in a snapshot of its own ([`RepoRead::get_ref`]).
@@ -726,6 +761,7 @@ fn native_root(store: &Utf8Path, fs: &Arc<dyn FsOps>) -> Result<Utf8PathBuf, Rep
     if !swarmops_store::is_native_linux_fs(&target) {
         return Err(StoreError::UnsupportedFs(target).into());
     }
+    swarmops_store::check_supported_fs(&target)?;
     let fs = StoreFs::new(Arc::clone(fs), &target);
     fs.create_dir_all(target.as_std_path())?;
     // A directory's entry lives in its parent: sync the parent of each directory just made,
@@ -744,6 +780,7 @@ fn native_root(store: &Utf8Path, fs: &Arc<dyn FsOps>) -> Result<Utf8PathBuf, Rep
     if !swarmops_store::is_native_linux_fs(&canonical) {
         return Err(StoreError::UnsupportedFs(canonical).into());
     }
+    swarmops_store::check_supported_fs(&canonical)?;
     Ok(canonical)
 }
 

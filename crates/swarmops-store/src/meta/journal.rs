@@ -52,11 +52,17 @@ use swarmops_core::bytes;
 
 use super::frame::{self, Frame, HEADER_LEN, Parsed, Record};
 use crate::error::{FileOp, IoFailure, StoreError};
+use crate::format::{self, StoreFormat};
 use crate::fs_ops::{self, FsMethod, FsOps, StoreFs};
 use crate::layout::Layout;
 
 /// The size of one `journal.off` entry.
 const ENTRY_LEN: u64 = 8;
+
+/// The size of one `journal2.off` entry (FORMAT 2, the M6 design §2.4): `u64le offset | u32le
+/// payload_crc | u32le crc32(seq, offset, payload_crc)`.
+#[allow(dead_code, reason = "the FORMAT 2 journal (the M6 plan's A2) uses it")]
+pub(crate) const ENTRY_LEN_V2: u64 = 16;
 
 /// How many times [`Journal::frames_from`] and [`Journal::tail_frames_from`] start over when
 /// `journal.off` holds fewer entries when they read them than when they measured it. Only a
@@ -172,6 +178,7 @@ impl Journal {
     /// [`Journal::create`], through `fs`, whose root may be another than `layout`'s: a staged
     /// create's files are named where they are, under `meta.tmp/`.
     pub(crate) fn create_in(layout: &Layout, fs: &StoreFs) -> Result<Journal, StoreError> {
+        check_built(layout)?;
         let meta = layout.meta_dir();
         fs.create_dir_all(meta.as_std_path())?;
         for path in [layout.journal_log(), layout.journal_off()] {
@@ -193,6 +200,7 @@ impl Journal {
     /// [`Journal::open`], through `fs`, whose root may be another than `layout`'s (see
     /// [`Journal::create_in`]).
     pub(crate) fn open_in(layout: &Layout, fs: StoreFs) -> Result<Journal, StoreError> {
+        check_built(layout)?;
         let log = fs_ops::open_regular(layout.journal_log())
             .map_err(|e| fs.locate(FileOp::Open, layout.journal_log(), e))?;
         let off = fs_ops::open_regular(layout.journal_off())
@@ -1118,4 +1126,13 @@ fn read_upto(file: &File, offset: u64, len: u64) -> io::Result<Vec<u8>> {
     }
     buf.truncate(filled);
     Ok(buf)
+}
+
+/// Refuses a journal of a format whose reader this build does not have yet: FORMAT 2's frames,
+/// offsets and checkpoint are the M6 plan's A2.
+fn check_built(layout: &Layout) -> Result<(), StoreError> {
+    match layout.format() {
+        StoreFormat::V1 => Ok(()),
+        StoreFormat::V2 => Err(format::not_built("FORMAT 2 journal")),
+    }
 }

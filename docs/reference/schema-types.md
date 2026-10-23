@@ -2,7 +2,7 @@
 
 # Schema types
 
-The 152 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
+The 162 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
 
 ## Index
 
@@ -50,6 +50,9 @@ The 152 request, response and value types of the API, as `swarmops schema` print
 | [`FileContent`](#filecontent) | object | `read_file` (CLI `cat`): a file's content, or the part of it the request names. |
 | [`FileDiff`](#filediff) | object | One file that differs: a file, an executable or a symlink whose content or kind changed, or that is on one side only. |
 | [`FileKind`](#filekind) | enumeration | What a file is; never a directory. |
+| [`GcCount`](#gccount) | object | `gc`: how many leftovers of one kind. |
+| [`GcReq`](#gcreq) | object | `gc`: remove the store's leftovers (temp files past a day, a crashed create's staging, derived values of older versions, what an upgrade left of the format before). |
+| [`GcResp`](#gcresp) | object | `gc`: what it removed, or would remove for a dry run. |
 | [`GitExportReq`](#gitexportreq) | object | `git export`: write the history behind a store ref into a branch of a git repository. |
 | [`GitExportResp`](#gitexportresp) | object | `git export`: what the export wrote, and where the branch stands. |
 | [`GitImportReq`](#gitimportreq) | object | `git import`: bring a git repository's history into the store. |
@@ -94,7 +97,8 @@ The 152 request, response and value types of the API, as `swarmops schema` print
 | [`RebaseStatus`](#rebasestatus) | enumeration | How a rebase ended. |
 | [`RecoveredOut`](#recoveredout) | object | What a write's recovery repaired (`meta.recovered`), as offsets and counts in the store's metadata files, with no paths. |
 | [`RefDeleteReq`](#refdeletereq) | object | `ref delete`: remove a ref by compare-and-swap. |
-| [`RefListReq`](#reflistreq) | object | `ref list`: list every ref. |
+| [`RefKind`](#refkind) | enumeration | What a ref's name names. |
+| [`RefListReq`](#reflistreq) | object | `ref list`: list every ref, or those whose names start with a prefix. |
 | [`RefListResp`](#reflistresp) | object | `ref list`: every ref. |
 | [`RefMoveOut`](#refmoveout) | object | A move of a ref, as the journal recorded it. |
 | [`RefOut`](#refout) | object | One ref. |
@@ -107,6 +111,9 @@ The 152 request, response and value types of the API, as `swarmops schema` print
 | [`RemoteListReq`](#remotelistreq) | object | `remote list`: the remotes the store records. |
 | [`RemoteRemoveReq`](#remoteremovereq) | object | `remote remove`: forget a remote, and the mirror's refs of it. |
 | [`RemoteRemoveResp`](#remoteremoveresp) | object | `remote remove`: the remote forgotten. |
+| [`RepairAction`](#repairaction) | object | `repair`: one thing it did, or would do. |
+| [`RepairReq`](#repairreq) | object | `repair`: rebuild what the journal can rebuild (`journal.off`, the index, the ref files), quarantine damaged objects and drop damaged cache entries. |
+| [`RepairResp`](#repairresp) | object | `repair`: what it did, and what a verify after it found. |
 | [`RepoInfo`](#repoinfo) | object | `init` and `info`: what the store is and holds. |
 | [`ResolutionInput`](#resolutioninput) | object | What a land makes of one path, and of every path below it: exactly one of `take`, `content` and `delete` (anything else is `E_INVALID_ARG`, a rule the server checks), the rest of the merge as it merged. |
 | [`ResolutionsInput`](#resolutionsinput) | object | A land's resolutions (`land --resolve`): what to make of some paths of the merge of the change onto the target, decided against one of the target's heads. |
@@ -129,9 +136,12 @@ The 152 request, response and value types of the API, as `swarmops schema` print
 | [`TreeListing`](#treelisting) | object | `read_tree` (CLI `ls`): a page of a directory's entries, in pre-order: a directory, then the entries below it to the request's `depth`, each directory's entries by name bytes (at `depth` 1, the tree's order). |
 | [`UndoReq`](#undoreq) | object | `undo` (CLI `op undo`): restore every ref an operation moved to what it named before, by compare-and-swap, in one transaction: all of them or none. |
 | [`UndoResp`](#undoresp) | object | `undo` (CLI `op undo`): the moves that restored the refs. |
+| [`UpgradeReq`](#upgradereq) | object | `upgrade`: move the store to the latest format this build writes. |
+| [`UpgradeResp`](#upgraderesp) | object | `upgrade`: the formats before and after. |
 | [`VerifyFinding`](#verifyfinding) | object | One problem `verify` found, as a program reads it: what kind of damage it is, and what it names. |
 | [`VerifyReport`](#verifyreport) | object | `verify`: what the consistency check found. |
 | [`VerifyReq`](#verifyreq) | object | `verify`: check the whole store's consistency. |
+| [`VerifySummary`](#verifysummary) | object | What a verify found, in counts: `repair`'s `after`. |
 | [`WsChange`](#wschange) | object | One changed path of a workspace. |
 | [`WsChangeKind`](#wschangekind) | enumeration | What changed at a workspace path. |
 | [`WsCheckInput`](#wscheckinput) | object | The check a workspace's land runs. |
@@ -654,7 +664,7 @@ Kind: enumeration. `swarmops schema ErrorCode` prints its JSON Schema.
 | `"E_UNKNOWN_PARENT"` | The parent changeset is not in the store. |
 | `"E_CAS_MISMATCH"` | The ref no longer holds the expected target (or, with `create`, exists at another one); `details.actual` holds what it does, `null` when the ref does not exist. |
 | `"E_REF_NOT_FOUND"` | No ref by that name. |
-| `"E_REF_NAME_INVALID"` | The ref name is not `main` or `release/<name>`. |
+| `"E_REF_NAME_INVALID"` | The ref name is one no store format takes, or one the operation does not move: `details.reason` is `reserved` for a `remote/` name, which only a fetch writes, and `tag` for a tag named as the target of a land or a commit's `advance`. |
 | `"E_STORE_CORRUPT"` | Stored data failed verification. A metadata file that does not parse also names `details.fs_op` and `details.store_file`. |
 | `"E_INVALID_ARG"` | A malformed argument or request, including a command-line usage error. |
 | `"E_UNSUPPORTED_FS"` | The store path is not on a native Linux filesystem (for example WSL's `/mnt/*`). |
@@ -669,7 +679,9 @@ Kind: enumeration. `swarmops schema ErrorCode` prints its JSON Schema.
 | `"E_OP_NOT_FOUND"` | The store has no operation by that number. |
 | `"E_AUTH"` | The caller's token failed verification. |
 | `"E_POLICY_DENIED"` | A policy refused the operation for this identity. |
-| `"E_MAINTENANCE_BUSY"` | Maintenance (gc or verify) holds the store's maintenance lease. |
+| `"E_MAINTENANCE_BUSY"` | Another gc, repair or upgrade holds the store's maintenance lease; nothing was done, and running the operation again once it is done can succeed. |
+| `"E_FORMAT_REQUIRED"` | The ref name is one the store's format does not take but a later one does: `details` names `name`, `needs` (the format that takes it) and `store` (the store's); `swarmops upgrade` moves the store to it. |
+| `"E_TAG_IMMUTABLE"` | A tag was asked to move from one target to another: a tag is created and deleted, never moved (`details.name`). Nothing was written. |
 | `"E_GIT_NOT_A_REPO"` | `git import` found no git repository it can open at `git_path` (`details.git_path`). |
 | `"E_GIT_REF_NOT_FOUND"` | `git import`: the source repository has no `git_ref`, or it names no commit (`details.git_ref`; `details.kind` the object it names instead, such as a tree). |
 | `"E_GIT_IMPORT_DIVERGED"` | `git import`: the target ref's head is not the import of `git_ref`'s commit or of an ancestor of it, because the source was rewritten or a native changeset was committed on the target, so nothing was written; there is no silent merge. `details` names `target_ref`, `target_head`, `git_head` and `base`, the git commit the head stands for (the one it holds, or for a native head the one it exports to); and `external_id` (`commit`, `changeset`) where the import passed over an external id entry whose changeset stands for another commit, which `verify --deep` reports. |
@@ -786,6 +798,39 @@ Kind: enumeration. `swarmops schema FileKind` prints its JSON Schema.
 | `"file"` | A regular file. |
 | `"exec"` | An executable file. |
 | `"symlink"` | A symlink. |
+
+## GcCount
+
+`gc`: how many leftovers of one kind.
+
+Kind: object. `swarmops schema GcCount` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `count` | `integer` (uint64) | yes | How many. |
+| `kind` | `string` | yes | `object_temp`, `derived_temp`, `meta_staging`, `derived_version` or `upgrade_residue`. A string, as `OpError.code` is, so that a client can read kinds newer than its own list. |
+
+## GcReq
+
+`gc`: remove the store's leftovers (temp files past a day, a crashed create's staging, derived values of older versions, what an upgrade left of the format before). It removes no object and no changeset.
+
+Kind: object. `swarmops schema GcReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `dry_run` | `boolean` | no | List what it would remove, and remove nothing. Default: `false`. |
+
+## GcResp
+
+`gc`: what it removed, or would remove for a dry run.
+
+Kind: object. `swarmops schema GcResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `bytes` | `integer` (uint64) | yes | The bytes of their files. |
+| `orphan_objects` | `integer` (uint64) | yes | How many object files no changeset of the store reaches: counted, never removed. |
+| `removed` | array of [`GcCount`](#gccount) | yes | How many leftovers of each kind; kinds with none are omitted. |
 
 ## GitExportReq
 
@@ -916,6 +961,7 @@ Kind: object. `swarmops schema InitReq` prints its JSON Schema.
 
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
+| `format` | `integer` (uint32) or `null` | no | The store format to create, 1 or 2; omitted for this build's default. A format this build does not create is `E_INVALID_ARG`. |
 | `name` | `string` | yes | The repository's name: at most 255 bytes of UTF-8. |
 | `path` | `string` | yes | The directory to create the store in. |
 
@@ -1383,13 +1429,29 @@ Kind: object. `swarmops schema RefDeleteReq` prints its JSON Schema.
 | `expected_old` | [`Rev`](#rev) | yes | The target the caller last saw, by its full changeset id; if the ref holds another, the delete fails with `E_CAS_MISMATCH`. A ref name or a relative revision is read from the store when the delete runs instead of pinning the id the caller read: the ref's own name always matches, so the compare-and-swap protects nothing, and `main~1` on `main` never matches. An id prefix pins the id the caller read only until another changeset shares it; then it is `E_AMBIGUOUS_ID`. `swarmops mcp` refuses all three (`E_INVALID_ARG`), and the CLI's `--expect` help warns against them. |
 | `name` | `string` | yes | The ref. |
 
+## RefKind
+
+What a ref's name names.
+
+Kind: enumeration. `swarmops schema RefKind` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"main"` | `main`. |
+| `"release"` | `release/<name>`. |
+| `"branch"` | A free-form branch (FORMAT 2). |
+| `"tag"` | `tags/<path>`: created and deleted, never moved (FORMAT 2). |
+| `"remote_tracking"` | `remote/<remote>/<path>`: a remote's ref as a fetch last saw it (FORMAT 2). |
+
 ## RefListReq
 
-`ref list`: list every ref. It has no options yet.
+`ref list`: list every ref, or those whose names start with a prefix.
 
 Kind: object. `swarmops schema RefListReq` prints its JSON Schema.
 
-It has no properties.
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `prefix` | `string` or `null` | no | Only the refs whose names start with these bytes (`release/`, `tags/`); omitted for every ref. |
 
 ## RefListResp
 
@@ -1423,7 +1485,8 @@ Kind: object. `swarmops schema RefOut` prints its JSON Schema.
 
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
-| `name` | `string` | yes | `main` or `release/<name>`. |
+| `kind` | [`RefKind`](#refkind) or `null` | no | What its name names; omitted by stores older than this field. |
+| `name` | `string` | yes | Its name: `main`, `release/<name>`, or in a FORMAT 2 store a branch, `tags/<path>` or `remote/<remote>/<path>`. |
 | `target` | `string` | yes | The changeset it points at. |
 | `version` | `integer` (uint64) | yes | How many committed moves changed its target. |
 
@@ -1537,6 +1600,39 @@ Kind: object. `swarmops schema RemoteRemoveResp` prints its JSON Schema.
 | --- | --- | --- | --- |
 | `name` | `string` | yes | The remote's name. |
 | `removed_refs` | `integer` (uint64) | yes | How many of the mirror's refs of the remote were removed. |
+
+## RepairAction
+
+`repair`: one thing it did, or would do.
+
+Kind: object. `swarmops schema RepairAction` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `done` | `boolean` | yes | Whether it was done: `false` for a dry run. |
+| `kind` | `string` | yes | `rebuild_offsets`, `rebuild_index`, `rebuild_ref`, `quarantine_object`, `drop_derived` or `drop_external_id`. A string, so that a client can read kinds newer than its own list. |
+| `target` | `string` | yes | On what: an object id, a ref name or a file class; never a path. |
+
+## RepairReq
+
+`repair`: rebuild what the journal can rebuild (`journal.off`, the index, the ref files), quarantine damaged objects and drop damaged cache entries. It never cuts the journal.
+
+Kind: object. `swarmops schema RepairReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `dry_run` | `boolean` | no | List what it would do, each with `done: false`, and write nothing. Default: `false`. |
+
+## RepairResp
+
+`repair`: what it did, and what a verify after it found.
+
+Kind: object. `swarmops schema RepairResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `actions` | array of [`RepairAction`](#repairaction) | yes | What it did, or would do, in order. |
+| `after` | [`VerifySummary`](#verifysummary) | yes | The verify after it. |
 
 ## RepoInfo
 
@@ -1805,6 +1901,26 @@ Kind: object. `swarmops schema UndoResp` prints its JSON Schema.
 | `undone` | `integer` (uint64) | yes | The operation undone. |
 | `warnings` | array of `string` | no | Problems found after the undo became durable, such as failed housekeeping; the undo itself succeeded. Omitted when empty. |
 
+## UpgradeReq
+
+`upgrade`: move the store to the latest format this build writes. It cannot be undone: older releases do not open the store afterwards.
+
+Kind: object. `swarmops schema UpgradeReq` prints its JSON Schema.
+
+It has no properties.
+
+## UpgradeResp
+
+`upgrade`: the formats before and after.
+
+Kind: object. `swarmops schema UpgradeResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `from` | `integer` (uint32) | yes | The format the store had. |
+| `to` | `integer` (uint32) | yes | The format it has now. |
+| `upgraded` | `boolean` | yes | Whether it changed: `false` for a store of the latest format already. |
+
 ## VerifyFinding
 
 One problem `verify` found, as a program reads it: what kind of damage it is, and what it names. The keys its kind does not use are omitted; the line at the same index of `problems` says the same for a reader. Ids are lowercase hex.
@@ -1835,8 +1951,10 @@ Kind: object. `swarmops schema VerifyReport` prints its JSON Schema.
 | --- | --- | --- | --- |
 | `changesets_checked` | `integer` (uint64) | yes | How many changesets were checked. |
 | `findings` | array of [`VerifyFinding`](#verifyfinding) | no | One finding per problem found, for a program to act on: `findings[i]` is the problem that the line `problems[i]` describes. Empty for a clean store; a report without it reads as having none. Default: `[]`. |
+| `found` | `integer` (uint64) | no | How many problems were found, listed or not; 0 from a store older than this field. Default: `0`. |
 | `objects_checked` | `integer` (uint64) | yes | How many objects were checked. |
 | `problems` | array of `string` | yes | One line per problem found, for a reader of lines; empty for a clean store. `findings` holds the same problems, at the same indexes, for a program. |
+| `truncated` | `boolean` | no | The report lists the first `max_findings` problems only; `found` counts them all. Default: `false`. |
 
 ## VerifyReq
 
@@ -1847,6 +1965,19 @@ Kind: object. `swarmops schema VerifyReq` prints its JSON Schema.
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
 | `deep` | `boolean` | no | Re-hash every object, and check every derived value of the built-in derivations (the first-parent skip lists, the last touches of paths) against the objects. When `false`, verify checks structure only: parents, that referenced objects exist, the index against the journal, and refs. Default: `false`. |
+| `max_findings` | `integer` (uint32) or `null` | no | The most problems the report lists, 1 to 1,000, also the default; `found` counts them all. |
+
+## VerifySummary
+
+What a verify found, in counts: `repair`'s `after`.
+
+Kind: object. `swarmops schema VerifySummary` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `changesets_checked` | `integer` (uint64) | yes | How many changesets were checked. |
+| `found` | `integer` (uint64) | yes | How many problems were found; 0 for a sound store. |
+| `objects_checked` | `integer` (uint64) | yes | How many objects were checked. |
 
 ## WsChange
 

@@ -10,10 +10,9 @@
 
 use swarmops_api::{Identity, OpError, RebaseReq, RebaseResp, RebaseStatus};
 use swarmops_core::bytes;
-use swarmops_repo::RepoError;
 
 use crate::error;
-use crate::local::Recording;
+use crate::local::{Recording, RefUse, check_ref_use};
 
 /// `rebase` as `who`, on the store `ops` reads.
 pub(crate) fn run(
@@ -22,7 +21,8 @@ pub(crate) fn run(
     req: RebaseReq,
 ) -> Result<RebaseResp, OpError> {
     // 1. The ref it rebases onto, by the store's grammar, before anything is read.
-    swarmops_store::check_ref_name(&req.onto).map_err(|e| error::op(RepoError::from(e)))?;
+    check_ref_use(&req.onto, RefUse::Onto)?;
+    ops.ops.repo.check_ref_name(&req.onto).map_err(error::op)?;
 
     // 2. The rebase.
     let outcome = ops.rebase_change(who, req)?;

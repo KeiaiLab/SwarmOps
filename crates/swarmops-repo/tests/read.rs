@@ -434,12 +434,12 @@ fn cas_ref_through_repo_records_reflog() {
         ]
     );
 
-    match repo.cas_ref("feature/x", None, Some(c1), "agent/one") {
-        Err(RepoError::RefName(name)) => assert_eq!(name, "feature/x"),
+    match repo.cas_ref("main/x", None, Some(c1), "agent/one") {
+        Err(RepoError::RefName(name)) => assert_eq!(name, "main/x"),
         other => panic!("expected RefName, got {other:?}"),
     }
-    match repo.get_ref("HEAD") {
-        Err(RepoError::RefName(name)) => assert_eq!(name, "HEAD"),
+    match repo.get_ref("HEAD/") {
+        Err(RepoError::RefName(name)) => assert_eq!(name, "HEAD/"),
         other => panic!("expected RefName, got {other:?}"),
     }
     let unknown = unknown_id();
@@ -527,7 +527,7 @@ fn create_open_and_info() {
             ),
         }
     }
-    fs::write(root.join("FORMAT"), b"swarmops-store 2\n").unwrap();
+    fs::write(root.join("FORMAT"), b"swarmops-store 3\n").unwrap();
     match LocalRepo::open(&root) {
         Err(RepoError::Store(StoreError::Format(_))) => {}
         other => panic!("expected Format, got {:?}", other.map(|r| r.info())),
@@ -627,7 +627,7 @@ fn a_format_file_one_byte_too_long_is_refused_by_its_length() {
         Err(RepoError::Store(StoreError::Format(said))) => assert_eq!(said, what),
         other => panic!("{what}: expected Format, got {:?}", other.map(|r| r.info())),
     };
-    fs::write(&format, b"swarmops-store 2\n").unwrap();
+    fs::write(&format, b"swarmops-store 3\n").unwrap();
     refused(format!(
         "{root}/FORMAT names a store layout this build does not read"
     ));

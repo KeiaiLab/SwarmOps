@@ -952,8 +952,8 @@ mod advance {
         );
     }
 
-    /// A ref name that is not `main` or `release/<x>` (at most 255 bytes) is refused before
-    /// anything is written: no object file, no frame.
+    /// A ref name no store format takes (at most 255 bytes) is refused before anything is
+    /// written: no object file, no frame.
     #[test]
     fn an_advance_with_a_bad_ref_name_writes_nothing() {
         let (_dir, root, repo, c0) = with_main();
@@ -961,10 +961,10 @@ mod advance {
         let frames = journal_frames(&root);
         let long = format!("release/{}", "x".repeat(248));
         for name in [
-            "feature/x",
+            "main/x",
             "release/",
             "release/.x",
-            "Main",
+            "tags",
             "",
             long.as_str(),
         ] {

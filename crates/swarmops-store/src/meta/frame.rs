@@ -2,6 +2,8 @@
 //!
 //! ```text
 //! frame     = u32le len | u32le crc32(payload) | payload      len = payload bytes, never 0
+//! frame2    = u32le len | u32le crc32(payload) | u64le seq | u32le prev_crc
+//!             | u32le crc32(the 20 bytes before) | payload    (FORMAT 2, the M6 design §2.3)
 //! payload   = u16le record count (1 to 65,535) | records
 //! Changeset = u8 1 | id[32] | u64le generation | delta_hash[32] | u8 n | parents[n][32]
 //! RefMove   = u8 2 | u8 name_len | name | u8 has_old | old[32]? | u8 has_new | new[32]?
@@ -19,9 +21,15 @@ use swarmops_core::{ChangesetId, ObjectId};
 use thiserror::Error;
 
 use crate::error::{LimitKind, StoreError};
+use crate::format::{self, StoreFormat};
 
 /// A frame header: `u32le len | u32le crc32(payload)`.
 pub(crate) const HEADER_LEN: usize = 8;
+
+/// A FORMAT 2 frame header: `u32le len | u32le crc32(payload) | u64le seq | u32le prev_crc |
+/// u32le hcrc`, `hcrc` the CRC of the 20 bytes before it.
+#[allow(dead_code, reason = "the FORMAT 2 journal (the M6 plan's A2) uses it")]
+pub(crate) const HEADER_LEN_V2: usize = 24;
 
 /// The most records a frame holds: its record count is a `u16le`.
 pub(crate) const MAX_RECORDS: usize = 65_535;
@@ -231,6 +239,71 @@ pub(crate) fn encode_frame(records: &[Record]) -> Result<Vec<u8>, StoreError> {
     frame[..4].copy_from_slice(&len.to_le_bytes());
     frame[4..HEADER_LEN].copy_from_slice(&crc.to_le_bytes());
     Ok(frame)
+}
+
+/// A frame header, as [`decode_header_in`] reads it.
+#[allow(dead_code, reason = "the FORMAT 2 journal (the M6 plan's A2) reads it")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FrameHeader {
+    /// The payload's length in bytes.
+    pub(crate) len: u32,
+    /// The payload's CRC.
+    pub(crate) crc: u32,
+    /// The frame's seq, which FORMAT 2 headers hold; `None` in FORMAT 1.
+    pub(crate) seq: Option<u64>,
+    /// The CRC of the payload of the frame before, which FORMAT 2 headers hold (0 for seq 0);
+    /// `None` in FORMAT 1.
+    pub(crate) prev_crc: Option<u32>,
+}
+
+/// The size of a frame header in `format`.
+#[allow(dead_code, reason = "the FORMAT 2 journal (the M6 plan's A2) uses it")]
+pub(crate) fn header_len(format: StoreFormat) -> usize {
+    match format {
+        StoreFormat::V1 => HEADER_LEN,
+        StoreFormat::V2 => HEADER_LEN_V2,
+    }
+}
+
+/// The bytes of a frame of `format` holding `records`: [`encode_frame`] in FORMAT 1, where
+/// `seq` and `prev_crc` are not written; in FORMAT 2 the frame's seq and the payload CRC of the
+/// frame before it go in its header.
+#[allow(dead_code, reason = "the FORMAT 2 journal (the M6 plan's A2) uses it")]
+pub(crate) fn encode_frame_in(
+    format: StoreFormat,
+    records: &[Record],
+    seq: u64,
+    prev_crc: u32,
+) -> Result<Vec<u8>, StoreError> {
+    let _ = (seq, prev_crc);
+    match format {
+        StoreFormat::V1 => encode_frame(records),
+        StoreFormat::V2 => Err(format::not_built("FORMAT 2 journal")),
+    }
+}
+
+/// The header at the start of `buf`, a frame boundary, in `format`; `None` if `buf` ends
+/// before the header does. FORMAT 2 checks the header's own CRC before it trusts `len`.
+#[allow(dead_code, reason = "the FORMAT 2 journal (the M6 plan's A2) uses it")]
+pub(crate) fn decode_header_in(
+    format: StoreFormat,
+    buf: &[u8],
+) -> Result<Option<FrameHeader>, StoreError> {
+    match format {
+        StoreFormat::V1 => {
+            let Some((header, _)) = buf.split_first_chunk::<HEADER_LEN>() else {
+                return Ok(None);
+            };
+            let (len, crc) = header.split_at(4);
+            Ok(Some(FrameHeader {
+                len: u32::from_le_bytes(len.try_into().expect("4 bytes")),
+                crc: u32::from_le_bytes(crc.try_into().expect("4 bytes")),
+                seq: None,
+                prev_crc: None,
+            }))
+        }
+        StoreFormat::V2 => Err(format::not_built("FORMAT 2 journal")),
+    }
 }
 
 /// What the bytes at a frame boundary hold.

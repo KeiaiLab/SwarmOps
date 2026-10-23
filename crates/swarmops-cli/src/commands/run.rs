@@ -33,6 +33,7 @@ use swarmops_api::{
     CloneReq, CloneResp, FetchReq, Identity, PushReq, RemoteAddReq, RemoteListReq, RemoteRemoveReq,
     SyncMode, SyncReq, SyncStatusReq,
 };
+use swarmops_api::{GcReq, RepairReq, UpgradeReq};
 use swarmops_ops::content::MAX_REQUEST_BYTES;
 use swarmops_ops::identity::{self, AUTH_TRUST};
 use swarmops_ops::{LocalOps, Recording, Resolved};
@@ -107,11 +108,11 @@ impl Used {
 pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
     let agent = ctx.global.agent.as_deref();
     match command {
-        Command::Init { dir, name } => {
+        Command::Init { dir, name, format } => {
             if !dir.is_empty() {
                 ctx.used.repo.replace(Some(dir.clone()));
             }
-            let result = init(&dir, name.as_deref());
+            let result = init(&dir, name.as_deref(), format);
             let (repo, resolved, recovered) = ctx.used.meta();
             ctx.finish(op, (repo, resolved, recovered), result)
         }
@@ -188,11 +189,26 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
         Command::Diff(args) => diff(ctx, op, args),
         Command::Ref(command) => run_ref(ctx, op, command),
         Command::Op(command) => run_op(ctx, op, command),
-        Command::Verify { deep } => ctx.on_store(
+        integrity @ (Command::Verify { .. }
+        | Command::Gc { .. }
+        | Command::Repair { .. }
+        | Command::Upgrade) => run_integrity(ctx, op, integrity),
+        Command::Git(command) => run_git(ctx, op, command),
+        Command::Mcp => mcp::serve(ctx.global, ctx.env),
+        derive @ Command::Derive { .. } => run_derive(ctx, op, &derive),
+        // The rest: the git remotes' commands (M13).
+        remotes => run_remotes(ctx, op, remotes),
+    }
+}
+
+/// Runs `verify` and the maintenance, `gc`, `repair` and `upgrade`, which name operation `op`.
+fn run_integrity(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
+    match command {
+        Command::Verify { deep, max_findings } => ctx.on_store(
             op,
             || {
-                let mut req = VerifyReq::default();
-                req.deep = deep;
+                let mut req = VerifyReq::new(deep);
+                req.max_findings = max_findings;
                 Ok(req)
             },
             |ops, req| {
@@ -200,11 +216,16 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
                     .and_then(|report| clean(report, Depth::of(deep)))
             },
         ),
-        Command::Git(command) => run_git(ctx, op, command),
-        Command::Mcp => mcp::serve(ctx.global, ctx.env),
-        derive @ Command::Derive { .. } => run_derive(ctx, op, &derive),
-        // The rest: the git remotes' commands (M13).
-        remotes => run_remotes(ctx, op, remotes),
+        Command::Gc { dry_run } => {
+            ctx.on_store(op, || Ok(GcReq::new(dry_run)), |ops, req| ops.gc(req))
+        }
+        Command::Repair { dry_run } => ctx.on_store(
+            op,
+            || Ok(RepairReq::new(dry_run)),
+            |ops, req| ops.repair(req),
+        ),
+        Command::Upgrade => ctx.on_store(op, || Ok(UpgradeReq::new()), |ops, req| ops.upgrade(req)),
+        other => unreachable!("run passes the integrity commands alone, not {other:?}"),
     }
 }
 
@@ -507,9 +528,9 @@ fn resolve_rev(ctx: &Ctx<'_>, op: &'static str, rev: String) -> Printed {
 fn run_ref(ctx: &Ctx<'_>, op: &'static str, command: RefCommand) -> Printed {
     let agent = ctx.global.agent.as_deref();
     match command {
-        RefCommand::List => ctx.on_store(
+        RefCommand::List { prefix } => ctx.on_store(
             op,
-            || Ok(RefListReq::default()),
+            || Ok(RefListReq::new(prefix)),
             |ops, req| ops.ref_list(req),
         ),
         RefCommand::Set {
@@ -981,8 +1002,9 @@ fn run_sync(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
     )
 }
 
-/// `init`: a store in `dir` for a repository named `name`, by default the directory's name.
-fn init(dir: &str, name: Option<&str>) -> Result<RepoInfo, OpError> {
+/// `init`: a store in `dir` for a repository named `name`, by default the directory's name, of
+/// store format `format`, by default this build's.
+fn init(dir: &str, name: Option<&str>, format: Option<u32>) -> Result<RepoInfo, OpError> {
     if dir.is_empty() {
         return Err(OpError::new(
             ErrorCode::InvalidArg,
@@ -993,7 +1015,7 @@ fn init(dir: &str, name: Option<&str>) -> Result<RepoInfo, OpError> {
         Some(name) => name.to_owned(),
         None => default_name(dir)?,
     };
-    let (_, info) = LocalOps::init(Utf8Path::new(dir), &name)?;
+    let (_, info) = LocalOps::init_as(Utf8Path::new(dir), &name, format)?;
     Ok(info)
 }
 
@@ -1378,7 +1400,7 @@ mod tests {
         let root = default_name("/").unwrap_err();
         assert_eq!(root.code, "E_INVALID_ARG");
         assert_eq!(root.hint.as_deref(), Some("swarmops init / --name <name>"));
-        assert_eq!(init("", None).unwrap_err().code, "E_INVALID_ARG");
+        assert_eq!(init("", None, None).unwrap_err().code, "E_INVALID_ARG");
     }
 
     #[test]

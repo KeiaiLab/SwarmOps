@@ -377,7 +377,7 @@ impl<O: ObjectStore> Repo<O> {
             advance,
         } = req;
         if let Some(Advance { name, .. }) = &advance {
-            swarmops_store::check_ref_name(name).map_err(repo::ref_error)?;
+            self.check_ref_name(name)?;
         }
         check_metadata(&metadata)?;
         let empty = if allow_empty {

@@ -24,6 +24,7 @@ max_result_chars: null
 | Field | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
 | `deep` | boolean | no | `false` | Re-hash every object, and check every derived value of the built-in derivations (the first-parent skip lists, the last touches of paths) against the objects. When `false`, verify checks structure only: parents, that referenced objects exist, the index against the journal, and refs. |
+| `max_findings` | integer or null | no |  | The most problems the report lists, 1 to 1,000, also the default; `found` counts them all. |
 
 ### JSON Schema
 
@@ -38,6 +39,15 @@ As `tools/list` gives it: each `$ref` replaced by its definition, so that it sta
       "default": false,
       "description": "Re-hash every object, and check every derived value of the built-in derivations (the\nfirst-parent skip lists, the last touches of paths) against the objects. When `false`,\nverify checks structure only: parents, that referenced objects exist, the index against\nthe journal, and refs.",
       "type": "boolean"
+    },
+    "max_findings": {
+      "description": "The most problems the report lists, 1 to 1,000, also the default; `found` counts them\nall.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
     }
   },
   "title": "VerifyReq",
@@ -85,7 +95,7 @@ Its entry in `tools/list` carries no `_meta`.
   "result": {
     "content": [
       {
-        "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"verify\",\"result\":{\"changesets_checked\":9,\"findings\":[],\"objects_checked\":28,\"problems\":[]}}",
+        "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"verify\",\"result\":{\"changesets_checked\":9,\"findings\":[],\"found\":0,\"objects_checked\":28,\"problems\":[],\"truncated\":false}}",
         "type": "text"
       }
     ],
@@ -103,8 +113,10 @@ Its entry in `tools/list` carries no `_meta`.
       "result": {
         "changesets_checked": 9,
         "findings": [],
+        "found": 0,
         "objects_checked": 28,
-        "problems": []
+        "problems": [],
+        "truncated": false
       }
     }
   }

@@ -2909,7 +2909,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_REF_NAME_INVALID",
-          "description": "The ref name is not `main` or `release/<name>`.",
+          "description": "The ref name is one no store format takes, or one the operation does not move:\n`details.reason` is `reserved` for a `remote/` name, which only a fetch writes, and `tag`\nfor a tag named as the target of a land or a commit's `advance`.",
           "type": "string"
         },
         {
@@ -2984,7 +2984,17 @@ expression: s.redact(&all)
         },
         {
           "const": "E_MAINTENANCE_BUSY",
-          "description": "Maintenance (gc or verify) holds the store's maintenance lease.",
+          "description": "Another gc, repair or upgrade holds the store's maintenance lease; nothing was done, and\nrunning the operation again once it is done can succeed.",
+          "type": "string"
+        },
+        {
+          "const": "E_FORMAT_REQUIRED",
+          "description": "The ref name is one the store's format does not take but a later one does: `details`\nnames `name`, `needs` (the format that takes it) and `store` (the store's); `swarmops\nupgrade` moves the store to it.",
+          "type": "string"
+        },
+        {
+          "const": "E_TAG_IMMUTABLE",
+          "description": "A tag was asked to move from one target to another: a tag is created and deleted, never\nmoved (`details.name`). Nothing was written.",
           "type": "string"
         },
         {
@@ -3778,6 +3788,95 @@ expression: s.redact(&all)
       ],
       "title": "FileKind"
     },
+    "GcCount": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`gc`: how many leftovers of one kind.",
+      "properties": {
+        "count": {
+          "description": "How many.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "description": "`object_temp`, `derived_temp`, `meta_staging`, `derived_version` or `upgrade_residue`.\nA string, as `OpError.code` is, so that a client can read kinds newer than its own list.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "count"
+      ],
+      "title": "GcCount",
+      "type": "object"
+    },
+    "GcReq": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`gc`: remove the store's leftovers (temp files past a day, a crashed create's staging,\nderived values of older versions, what an upgrade left of the format before). It removes no\nobject and no changeset.",
+      "properties": {
+        "dry_run": {
+          "default": false,
+          "description": "List what it would remove, and remove nothing.",
+          "type": "boolean"
+        }
+      },
+      "title": "GcReq",
+      "type": "object"
+    },
+    "GcResp": {
+      "$defs": {
+        "GcCount": {
+          "description": "`gc`: how many leftovers of one kind.",
+          "properties": {
+            "count": {
+              "description": "How many.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "description": "`object_temp`, `derived_temp`, `meta_staging`, `derived_version` or `upgrade_residue`.\nA string, as `OpError.code` is, so that a client can read kinds newer than its own list.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "count"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`gc`: what it removed, or would remove for a dry run.",
+      "properties": {
+        "bytes": {
+          "description": "The bytes of their files.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "orphan_objects": {
+          "description": "How many object files no changeset of the store reaches: counted, never removed.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "removed": {
+          "description": "How many leftovers of each kind; kinds with none are omitted.",
+          "items": {
+            "$ref": "#/$defs/GcCount"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "removed",
+        "bytes",
+        "orphan_objects"
+      ],
+      "title": "GcResp",
+      "type": "object"
+    },
     "GitExportReq": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "`git export`: write the history behind a store ref into a branch of a git repository. Every\ncommit that the branch's last export does not reach is written, parents first: a changeset\nthat was imported from git keeps the commit it came from, and one made in the store becomes a\ncommit with its own signatures and `SwarmOps-*` trailers. The branch moves to the export of\nthe ref's head by compare-and-swap, and only once everything it reaches is durable. It runs\non the caller's host, as `git import` does: no server receives this request, and it is no MCP\ntool.",
@@ -4232,6 +4331,15 @@ expression: s.redact(&all)
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "`init`: create a store.",
       "properties": {
+        "format": {
+          "description": "The store format to create, 1 or 2; omitted for this build's default. A format this\nbuild does not create is `E_INVALID_ARG`.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "name": {
           "description": "The repository's name: at most 255 bytes of UTF-8.",
           "type": "string"
@@ -6590,19 +6698,101 @@ expression: s.redact(&all)
       "title": "RefDeleteReq",
       "type": "object"
     },
+    "RefKind": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "What a ref's name names.",
+      "oneOf": [
+        {
+          "const": "main",
+          "description": "`main`.",
+          "type": "string"
+        },
+        {
+          "const": "release",
+          "description": "`release/<name>`.",
+          "type": "string"
+        },
+        {
+          "const": "branch",
+          "description": "A free-form branch (FORMAT 2).",
+          "type": "string"
+        },
+        {
+          "const": "tag",
+          "description": "`tags/<path>`: created and deleted, never moved (FORMAT 2).",
+          "type": "string"
+        },
+        {
+          "const": "remote_tracking",
+          "description": "`remote/<remote>/<path>`: a remote's ref as a fetch last saw it (FORMAT 2).",
+          "type": "string"
+        }
+      ],
+      "title": "RefKind"
+    },
     "RefListReq": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "`ref list`: list every ref. It has no options yet.",
+      "description": "`ref list`: list every ref, or those whose names start with a prefix.",
+      "properties": {
+        "prefix": {
+          "description": "Only the refs whose names start with these bytes (`release/`, `tags/`); omitted for\nevery ref.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
       "title": "RefListReq",
       "type": "object"
     },
     "RefListResp": {
       "$defs": {
+        "RefKind": {
+          "description": "What a ref's name names.",
+          "oneOf": [
+            {
+              "const": "main",
+              "description": "`main`.",
+              "type": "string"
+            },
+            {
+              "const": "release",
+              "description": "`release/<name>`.",
+              "type": "string"
+            },
+            {
+              "const": "branch",
+              "description": "A free-form branch (FORMAT 2).",
+              "type": "string"
+            },
+            {
+              "const": "tag",
+              "description": "`tags/<path>`: created and deleted, never moved (FORMAT 2).",
+              "type": "string"
+            },
+            {
+              "const": "remote_tracking",
+              "description": "`remote/<remote>/<path>`: a remote's ref as a fetch last saw it (FORMAT 2).",
+              "type": "string"
+            }
+          ]
+        },
         "RefOut": {
           "description": "One ref.",
           "properties": {
+            "kind": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RefKind"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What its name names; omitted by stores older than this field."
+            },
             "name": {
-              "description": "`main` or `release/<name>`.",
+              "description": "Its name: `main`, `release/<name>`, or in a FORMAT 2 store a branch, `tags/<path>` or\n`remote/<remote>/<path>`.",
               "type": "string"
             },
             "target": {
@@ -6682,11 +6872,54 @@ expression: s.redact(&all)
       "type": "object"
     },
     "RefOut": {
+      "$defs": {
+        "RefKind": {
+          "description": "What a ref's name names.",
+          "oneOf": [
+            {
+              "const": "main",
+              "description": "`main`.",
+              "type": "string"
+            },
+            {
+              "const": "release",
+              "description": "`release/<name>`.",
+              "type": "string"
+            },
+            {
+              "const": "branch",
+              "description": "A free-form branch (FORMAT 2).",
+              "type": "string"
+            },
+            {
+              "const": "tag",
+              "description": "`tags/<path>`: created and deleted, never moved (FORMAT 2).",
+              "type": "string"
+            },
+            {
+              "const": "remote_tracking",
+              "description": "`remote/<remote>/<path>`: a remote's ref as a fetch last saw it (FORMAT 2).",
+              "type": "string"
+            }
+          ]
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "One ref.",
       "properties": {
+        "kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RefKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What its name names; omitted by stores older than this field."
+        },
         "name": {
-          "description": "`main` or `release/<name>`.",
+          "description": "Its name: `main`, `release/<name>`, or in a FORMAT 2 store a branch, `tags/<path>` or\n`remote/<remote>/<path>`.",
           "type": "string"
         },
         "target": {
@@ -7149,6 +7382,121 @@ expression: s.redact(&all)
         "removed_refs"
       ],
       "title": "RemoteRemoveResp",
+      "type": "object"
+    },
+    "RepairAction": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`repair`: one thing it did, or would do.",
+      "properties": {
+        "done": {
+          "description": "Whether it was done: `false` for a dry run.",
+          "type": "boolean"
+        },
+        "kind": {
+          "description": "`rebuild_offsets`, `rebuild_index`, `rebuild_ref`, `quarantine_object`, `drop_derived`\nor `drop_external_id`. A string, so that a client can read kinds newer than its own list.",
+          "type": "string"
+        },
+        "target": {
+          "description": "On what: an object id, a ref name or a file class; never a path.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "target",
+        "done"
+      ],
+      "title": "RepairAction",
+      "type": "object"
+    },
+    "RepairReq": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`repair`: rebuild what the journal can rebuild (`journal.off`, the index, the ref files),\nquarantine damaged objects and drop damaged cache entries. It never cuts the journal.",
+      "properties": {
+        "dry_run": {
+          "default": false,
+          "description": "List what it would do, each with `done: false`, and write nothing.",
+          "type": "boolean"
+        }
+      },
+      "title": "RepairReq",
+      "type": "object"
+    },
+    "RepairResp": {
+      "$defs": {
+        "RepairAction": {
+          "description": "`repair`: one thing it did, or would do.",
+          "properties": {
+            "done": {
+              "description": "Whether it was done: `false` for a dry run.",
+              "type": "boolean"
+            },
+            "kind": {
+              "description": "`rebuild_offsets`, `rebuild_index`, `rebuild_ref`, `quarantine_object`, `drop_derived`\nor `drop_external_id`. A string, so that a client can read kinds newer than its own list.",
+              "type": "string"
+            },
+            "target": {
+              "description": "On what: an object id, a ref name or a file class; never a path.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "target",
+            "done"
+          ],
+          "type": "object"
+        },
+        "VerifySummary": {
+          "description": "What a verify found, in counts: `repair`'s `after`.",
+          "properties": {
+            "changesets_checked": {
+              "description": "How many changesets were checked.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "found": {
+              "description": "How many problems were found; 0 for a sound store.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "objects_checked": {
+              "description": "How many objects were checked.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "objects_checked",
+            "changesets_checked",
+            "found"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`repair`: what it did, and what a verify after it found.",
+      "properties": {
+        "actions": {
+          "description": "What it did, or would do, in order.",
+          "items": {
+            "$ref": "#/$defs/RepairAction"
+          },
+          "type": "array"
+        },
+        "after": {
+          "$ref": "#/$defs/VerifySummary",
+          "description": "The verify after it."
+        }
+      },
+      "required": [
+        "actions",
+        "after"
+      ],
+      "title": "RepairResp",
       "type": "object"
     },
     "RepoInfo": {
@@ -8406,6 +8754,41 @@ expression: s.redact(&all)
       "title": "UndoResp",
       "type": "object"
     },
+    "UpgradeReq": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`upgrade`: move the store to the latest format this build writes. It cannot be undone:\nolder releases do not open the store afterwards.",
+      "title": "UpgradeReq",
+      "type": "object"
+    },
+    "UpgradeResp": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`upgrade`: the formats before and after.",
+      "properties": {
+        "from": {
+          "description": "The format the store had.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "to": {
+          "description": "The format it has now.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "upgraded": {
+          "description": "Whether it changed: `false` for a store of the latest format already.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "from",
+        "to",
+        "upgraded"
+      ],
+      "title": "UpgradeResp",
+      "type": "object"
+    },
     "VerifyFinding": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "One problem `verify` found, as a program reads it: what kind of damage it is, and what it\nnames. The keys its kind does not use are omitted; the line at the same index of `problems`\nsays the same for a reader. Ids are lowercase hex.",
@@ -8602,6 +8985,13 @@ expression: s.redact(&all)
           },
           "type": "array"
         },
+        "found": {
+          "default": 0,
+          "description": "How many problems were found, listed or not; 0 from a store older than this field.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
         "objects_checked": {
           "description": "How many objects were checked.",
           "format": "uint64",
@@ -8614,6 +9004,11 @@ expression: s.redact(&all)
             "type": "string"
           },
           "type": "array"
+        },
+        "truncated": {
+          "default": false,
+          "description": "The report lists the first `max_findings` problems only; `found` counts them all.",
+          "type": "boolean"
         }
       },
       "required": [
@@ -8632,9 +9027,49 @@ expression: s.redact(&all)
           "default": false,
           "description": "Re-hash every object, and check every derived value of the built-in derivations (the\nfirst-parent skip lists, the last touches of paths) against the objects. When `false`,\nverify checks structure only: parents, that referenced objects exist, the index against\nthe journal, and refs.",
           "type": "boolean"
+        },
+        "max_findings": {
+          "description": "The most problems the report lists, 1 to 1,000, also the default; `found` counts them\nall.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "title": "VerifyReq",
+      "type": "object"
+    },
+    "VerifySummary": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "What a verify found, in counts: `repair`'s `after`.",
+      "properties": {
+        "changesets_checked": {
+          "description": "How many changesets were checked.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "found": {
+          "description": "How many problems were found; 0 for a sound store.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "objects_checked": {
+          "description": "How many objects were checked.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "objects_checked",
+        "changesets_checked",
+        "found"
+      ],
+      "title": "VerifySummary",
       "type": "object"
     },
     "WsChange": {

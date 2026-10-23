@@ -386,7 +386,7 @@ expression: s.transcript()
     }
   },
   {
-    "args": "--repo [tmp]/store --as agent/worker-17 ref set feature/x main --create",
+    "args": "--repo [tmp]/store --as agent/worker-17 ref set main/x main --create",
     "exit": 1,
     "stdout": {
       "ok": false,
@@ -394,13 +394,42 @@ expression: s.transcript()
       "api": 1,
       "error": {
         "code": "E_REF_NAME_INVALID",
-        "message": "invalid ref name \"feature/x\"",
+        "message": "invalid ref name \"main/x\"",
         "retryable": false,
         "exit": 1,
         "details": {
-          "name": "feature/x"
+          "name": "main/x"
         },
         "hint": "a ref name is main or release/<name>, the name of letters, digits, '.', '_' and '-', not starting with '.'"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ref set feature/x main --create",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "ref_set",
+      "api": 1,
+      "error": {
+        "code": "E_FORMAT_REQUIRED",
+        "message": "ref name \"feature/x\" needs store format 2; this store is format 1",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "name": "feature/x",
+          "needs": 2,
+          "store": 1
+        },
+        "hint": "swarmops upgrade"
       },
       "meta": {
         "repo": "[tmp]/store",
@@ -1590,10 +1619,12 @@ expression: s.transcript()
               "object": "[id10]"
             }
           ],
+          "found": 1,
           "objects_checked": 31,
           "problems": [
             "object [id10] is missing; changeset [c1] references it"
-          ]
+          ],
+          "truncated": false
         },
         "hint": "swarmops verify --deep"
       },

@@ -347,7 +347,7 @@ static CONTRACT: [Limit; 10] = [
 ];
 
 /// The bounds a response keeps without an error: what it leaves out, and how it says so.
-static BOUNDS: [Limit; 5] = [
+static BOUNDS: [Limit; 6] = [
     Limit {
         name: "Lossy commits listed",
         constant: code(
@@ -421,6 +421,21 @@ static BOUNDS: [Limit; 5] = [
                    texts aside (`--max-conflict-bytes` bounds those). The first file always \
                    goes in; from the first file left out none follows, and `truncated` says \
                    so.",
+    },
+    Limit {
+        name: "Verify findings",
+        constant: code(
+            "swarmops_api::VERIFY_MAX_FINDINGS",
+            API,
+            "pub const VERIFY_MAX_FINDINGS: u32 = 1_000;",
+            || u64::from(swarmops_api::VERIFY_MAX_FINDINGS),
+        ),
+        unit: Unit::Count("problems"),
+        commands: &["verify"],
+        errors: &[],
+        what: "The most problems a `verify` report lists, and `--max-findings` \
+                   (`max_findings`) its default: the first ones found, with `truncated`; \
+                   `found` counts them all.",
     },
 ];
 
@@ -599,7 +614,7 @@ static DEFAULTS: [DefaultRow; 13] = [
 
 /// Values that tune the implementation, or bound the store's layout where no request reaches:
 /// no option sets them, and they are not part of the contract.
-static INTERNAL: [Limit; 14] = [
+static INTERNAL: [Limit; 17] = [
     internal_value(
         "Writer lock wait",
         declared(
@@ -764,6 +779,42 @@ static INTERNAL: [Limit; 14] = [
         ),
         Unit::Count("records"),
         "The most records one journal frame holds (`details.store_limit` `records`).",
+    ),
+    internal_value(
+        "Temp file grace",
+        code(
+            "swarmops_store::GC_TEMP_GRACE",
+            "crates/swarmops-store/src/gc.rs",
+            "pub const GC_TEMP_GRACE: Duration = Duration::from_hours(24);",
+            || swarmops_store::GC_TEMP_GRACE.as_secs(),
+        ),
+        Unit::Seconds,
+        "How old a temp file in `objects/tmp/` or `meta/derived/tmp/` must be before `gc` \
+             removes it: a write in progress holds a younger one.",
+    ),
+    internal_value(
+        "Read window",
+        declared(
+            "swarmops_store::meta::READ_WINDOW",
+            "crates/swarmops-store/src/meta.rs",
+            "pub(crate) const READ_WINDOW: u64 = 4_096;",
+            || 4_096,
+        ),
+        Unit::Count("entries"),
+        "How many entries of `journal.off`, an index column or a sorted view one read of the \
+             store takes, so that no read allocates by a file's length.",
+    ),
+    internal_value(
+        "Lookup hits",
+        declared(
+            "swarmops_store::meta::MAX_LOOKUP_HITS",
+            "crates/swarmops-store/src/meta.rs",
+            "pub(crate) const MAX_LOOKUP_HITS: usize = 4_096;",
+            || 4_096,
+        ),
+        Unit::Count("changesets"),
+        "The most changesets a lookup by id prefix or by delta hash gathers before it says \
+             its answer was cut.",
     ),
 ];
 

@@ -17,6 +17,9 @@
 //!   `fetch`, `push`, `sync` and `sync status` ([`Recording::fetch`], [`Recording::push`],
 //!   [`Recording::sync`], …), client-side operations that spawn git against the store's mirror.
 //!
+//! - Maintenance (M6): `gc`, `repair` and `upgrade`, [`StoreOps`](swarmops_api::StoreOps) methods
+//!   that record nothing, so they take no identity.
+//!
 //! The CLI calls these and prints each result in one envelope. A remote client will implement
 //! `StoreOps` over the same types later, resolving identities and file contents the same way.
 
@@ -25,13 +28,16 @@ mod blob_get;
 mod conflict;
 pub mod content;
 mod error;
+mod gc;
 mod git;
 pub mod identity;
 mod local;
 mod push;
 mod rebase;
 mod remote;
+mod repair;
 mod sync;
+mod upgrade;
 
 pub use error::shell_word;
 pub use local::{LocalOps, NOW_ENV, Recording, Resolved};

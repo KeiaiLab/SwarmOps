@@ -56,7 +56,7 @@ type Startup<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)]);
 /// The tools, one per `StoreOps` operation and then one per client-side operation of the git
 /// remotes (M13), in the order `tools/list` gives them, each with the request type its arguments
 /// are.
-const TOOLS: [(&str, &str); 35] = [
+const TOOLS: [(&str, &str); 38] = [
     ("repo_info", "InfoReq"),
     ("resolve_rev", "ResolveRevReq"),
     ("read_file", "ReadFileReq"),
@@ -76,6 +76,9 @@ const TOOLS: [(&str, &str); 35] = [
     ("blob_put", "BlobPutReq"),
     ("blob_has", "BlobHasReq"),
     ("verify", "VerifyReq"),
+    ("gc", "GcReq"),
+    ("repair", "RepairReq"),
+    ("upgrade", "UpgradeReq"),
     ("remote_list", "RemoteListReq"),
     ("fetch", "FetchReq"),
     ("push", "PushReq"),
@@ -95,9 +98,19 @@ const TOOLS: [(&str, &str); 35] = [
 ];
 
 /// The tools [`mcp_tool_calls_golden`] does not call: the git remotes' (M13), whose operations
-/// answer `E_INTERNAL` until their tasks land. The M13 plan's task C10 records their calls, and
-/// empties this list.
-const UNCALLED: [&str; 5] = ["remote_list", "fetch", "push", "sync", "sync_status"];
+/// answer `E_INTERNAL` until their tasks land, the M13 plan's task C10 recording their calls;
+/// and the maintenance's (M6), which answer `E_INVALID_ARG` until the M6 plan's tasks build
+/// them.
+const UNCALLED: [&str; 8] = [
+    "remote_list",
+    "fetch",
+    "push",
+    "sync",
+    "sync_status",
+    "gc",
+    "repair",
+    "upgrade",
+];
 
 /// How long a test waits for one reply, or for the server to exit once its stdin is closed.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(60);
@@ -562,7 +575,7 @@ fn commit_and_move_main(server: &mut Server, c1: &str) -> String {
     let refs = server.ok("ref_list", json!({}));
     assert_eq!(
         refs["result"]["refs"],
-        json!([{"name": "main", "target": c2, "version": 2}])
+        json!([{"name": "main", "kind": "main", "target": c2, "version": 2}])
     );
     let info = server.ok("repo_info", json!({}));
     assert_eq!(
@@ -1091,7 +1104,7 @@ fn mcp_undo_is_compare_and_swap_guarded() {
     assert_eq!(undone["result"]["ref_moves"][0]["actor"], AGENT, "{undone}");
     assert_eq!(
         refs_of(&mut server),
-        json!([{"name": "main", "target": c1, "version": 3}])
+        json!([{"name": "main", "kind": "main", "target": c1, "version": 3}])
     );
     let again = server.ok("undo", json!({"op": op}));
     assert_eq!(again["result"]["already_applied"], true, "{again}");
@@ -1111,7 +1124,7 @@ fn mcp_undo_is_compare_and_swap_guarded() {
     assert_eq!(refused["error"]["exit"], 4, "{refused}");
     assert_eq!(
         refs_of(&mut server),
-        json!([{"name": "main", "target": c3, "version": 4}])
+        json!([{"name": "main", "kind": "main", "target": c3, "version": 4}])
     );
     let after = server.ok("op_log", json!({"limit": 1}));
     assert_eq!(
@@ -1168,7 +1181,7 @@ fn mcp_land_publishes_and_reports() {
     assert_eq!(landed["meta"]["resolved"], json!(resolved));
     assert_eq!(
         refs_of(&mut server),
-        json!([{"name": "main", "target": id, "version": 2}])
+        json!([{"name": "main", "kind": "main", "target": id, "version": 2}])
     );
 
     let again = server.ok("land", arguments);
@@ -1183,7 +1196,7 @@ fn mcp_land_publishes_and_reports() {
     assert_eq!(op["changesets"][0]["land_key"], "mcp-land-1", "{newest}");
     assert_eq!(
         refs_of(&mut server),
-        json!([{"name": "main", "target": id, "version": 2}]),
+        json!([{"name": "main", "kind": "main", "target": id, "version": 2}]),
         "the replay wrote nothing"
     );
     server.finish_clean();
@@ -1255,7 +1268,7 @@ fn mcp_land_conflict_is_an_error_with_the_report() {
     );
     assert_eq!(
         refs_of(&mut server),
-        json!([{"name": "main", "target": theirs, "version": 2}]),
+        json!([{"name": "main", "kind": "main", "target": theirs, "version": 2}]),
         "nothing recorded"
     );
 
@@ -1347,7 +1360,7 @@ fn mcp_land_refuses_a_symbolic_against() {
     );
     assert_eq!(
         refs_of(&mut server),
-        json!([{"name": "main", "target": theirs, "version": 2}]),
+        json!([{"name": "main", "kind": "main", "target": theirs, "version": 2}]),
         "nothing recorded"
     );
 
@@ -1442,7 +1455,7 @@ fn commit_and_advance_main(server: &mut Server, c1: &str) -> String {
     assert_eq!(ids, [c2.as_str(), c1]);
     assert_eq!(
         refs_of(server),
-        json!([{"name": "main", "target": c2, "version": 2}])
+        json!([{"name": "main", "kind": "main", "target": c2, "version": 2}])
     );
 
     let stale = json!({
@@ -1639,7 +1652,7 @@ fn refs_of(server: &mut Server) -> Value {
 /// id with ~N is resolved when the call runs too. Each is refused, nothing is resolved, and
 /// main stays at `c2`.
 fn vague_expectations_are_refused(server: &mut Server, c2: &str, c3: &str) {
-    let held = json!([{"name": "main", "target": c2, "version": 2}]);
+    let held = json!([{"name": "main", "kind": "main", "target": c2, "version": 2}]);
     let refused = [
         (
             "ref_set",
@@ -1722,14 +1735,14 @@ fn concrete_expectations_compare_and_swap(server: &mut Server, c1: &str, c2: &st
     );
     assert_eq!(
         refs_of(server),
-        json!([{"name": "main", "target": c4, "version": 3}])
+        json!([{"name": "main", "kind": "main", "target": c4, "version": 3}])
     );
     let back = json!({"name": "main", "new": "main~1", "expected_old": c4});
     server.ok("ref_set", back.clone());
     server.err("ref_set", back, "E_CAS_MISMATCH");
     assert_eq!(
         refs_of(server),
-        json!([{"name": "main", "target": c2, "version": 4}])
+        json!([{"name": "main", "kind": "main", "target": c2, "version": 4}])
     );
     server.ok(
         "ref_set",
@@ -2495,8 +2508,11 @@ fn check_tool(name: &str, request: &str, tool: &Value, all: &Value) {
         "land" | "ws_create" | "ws_rebase" | "ws_resolve" | "ws_land" | "ws_materialize" => {
             (false, false, true, false)
         }
-        // A workspace's discard (M5) overwrites edits as these overwrite refs.
-        "ref_set" | "ref_delete" | "undo" | "ws_discard" => (false, true, true, false),
+        // A workspace's discard (M5) overwrites edits as these overwrite refs, and the
+        // maintenance (M6) removes or replaces store files; run again, each finds its work done.
+        "ref_set" | "ref_delete" | "undo" | "ws_discard" | "gc" | "repair" | "upgrade" => {
+            (false, true, true, false)
+        }
         // The git remotes' (M13): a fetch or a push run again moves nothing new; a sync run
         // again after the remote moved lands again; all three reach the remote.
         "fetch" | "push" => (false, false, true, true),

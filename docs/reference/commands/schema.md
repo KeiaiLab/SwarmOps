@@ -101,6 +101,9 @@ swarmops schema NoSuchType
         "FileContent",
         "FileDiff",
         "FileKind",
+        "GcCount",
+        "GcReq",
+        "GcResp",
         "GitExportReq",
         "GitExportResp",
         "GitImportReq",
@@ -145,6 +148,7 @@ swarmops schema NoSuchType
         "RebaseStatus",
         "RecoveredOut",
         "RefDeleteReq",
+        "RefKind",
         "RefListReq",
         "RefListResp",
         "RefMoveOut",
@@ -158,6 +162,9 @@ swarmops schema NoSuchType
         "RemoteListReq",
         "RemoteRemoveReq",
         "RemoteRemoveResp",
+        "RepairAction",
+        "RepairReq",
+        "RepairResp",
         "RepoInfo",
         "ResolutionInput",
         "ResolutionsInput",
@@ -180,9 +187,12 @@ swarmops schema NoSuchType
         "TreeListing",
         "UndoReq",
         "UndoResp",
+        "UpgradeReq",
+        "UpgradeResp",
         "VerifyFinding",
         "VerifyReport",
         "VerifyReq",
+        "VerifySummary",
         "WsChange",
         "WsChangeKind",
         "WsCheckInput",
@@ -293,6 +303,7 @@ Any command that opens a store may also fail with a store error, such as [`E_NOT
 - [`swarmops init`](init.md)
 - [`swarmops info`](info.md)
 - [`swarmops whoami`](whoami.md)
+- [`swarmops upgrade`](upgrade.md)
 - [`swarmops derive`](derive.md)
 - [CLI reference](../cli.md)
 - [Error codes](../errors.md)

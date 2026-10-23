@@ -44,6 +44,10 @@ pub use ops::{
     WsRebasing, WsResolveReq, WsResolveResp, WsState, WsStatus, WsStatusReq,
 };
 pub use ops::{BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp};
+pub use ops::{
+    GcCount, GcReq, GcResp, RefKind, RepairAction, RepairReq, RepairResp, UpgradeReq, UpgradeResp,
+    VERIFY_MAX_FINDINGS, VerifySummary,
+};
 pub use ops::{ResolutionInput, ResolutionsInput, Side};
 pub use ops::{ResolveRevReq, ResolvedRev, RevKind};
 pub use remote::{

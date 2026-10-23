@@ -14,7 +14,7 @@ identity_required: true
 mcp_tool: "ref_set"
 envelope_op: "ref_set"
 exit_codes: [0, 1, 2, 4, 5]
-errors: [E_IDENTITY_REQUIRED, E_CAS_MISMATCH, E_REF_NAME_INVALID, E_INVALID_ARG]
+errors: [E_IDENTITY_REQUIRED, E_CAS_MISMATCH, E_REF_NAME_INVALID, E_INVALID_ARG, E_FORMAT_REQUIRED]
 syntax: "swarmops ref set [OPTIONS] <--expect <REV>|--create> <NAME> <REV>"
 ```
 
@@ -240,8 +240,9 @@ Exit codes:
 
 - [`E_IDENTITY_REQUIRED`](../errors.md#e_identity_required) (exit 5): A mutation was asked for without an identity.
 - [`E_CAS_MISMATCH`](../errors.md#e_cas_mismatch) (exit 4): The ref no longer holds the expected target (or, with `create`, exists at another one); `details.actual` holds what it does, `null` when the ref does not exist.
-- [`E_REF_NAME_INVALID`](../errors.md#e_ref_name_invalid) (exit 1): The ref name is not `main` or `release/<name>`.
+- [`E_REF_NAME_INVALID`](../errors.md#e_ref_name_invalid) (exit 1): The ref name is one no store format takes, or one the operation does not move: `details.reason` is `reserved` for a `remote/` name, which only a fetch writes, and `tag` for a tag named as the target of a land or a commit's `advance`.
 - [`E_INVALID_ARG`](../errors.md#e_invalid_arg) (exit 2): A malformed argument or request, including a command-line usage error.
+- [`E_FORMAT_REQUIRED`](../errors.md#e_format_required) (exit 1): The ref name is one the store's format does not take but a later one does: `details` names `name`, `needs` (the format that takes it) and `store` (the store's); `swarmops upgrade` moves the store to it.
 
 Any command that opens a store may also fail with a store error, such as [`E_NOT_A_REPO`](../errors.md#e_not_a_repo), [`E_IO`](../errors.md#e_io) or [`E_STORE_CORRUPT`](../errors.md#e_store_corrupt); a command line the grammar refuses is [`E_INVALID_ARG`](../errors.md#e_invalid_arg) (exit 2).
 

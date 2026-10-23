@@ -232,12 +232,14 @@ expression: s.transcript()
           {
             "name": "main",
             "target": "[c2]",
-            "version": 2
+            "version": 2,
+            "kind": "main"
           },
           {
             "name": "release/1.0",
             "target": "[c1]",
-            "version": 1
+            "version": 1,
+            "kind": "release"
           }
         ]
       },

@@ -2,7 +2,7 @@
 
 use camino::Utf8Path;
 use swarmops_core::{ObjectKind, hash_object};
-use swarmops_store::{Layout, is_native_linux_fs};
+use swarmops_store::{Layout, StoreFormat, is_native_linux_fs};
 
 #[test]
 fn layout_paths_follow_the_store_spec() {
@@ -41,5 +41,36 @@ fn mnt_paths_are_not_native_linux_fs() {
         "/srv/mnt/c",
     ] {
         assert!(is_native_linux_fs(Utf8Path::new(native)), "{native}");
+    }
+}
+
+/// The files that differ between the formats are named by the layout's format: FORMAT 1's are
+/// as they always were, and `Layout::new` is FORMAT 1; FORMAT 2's have names of their own.
+#[test]
+fn layout_names_files_per_format() {
+    let v1 = Layout::new("/srv/store");
+    assert_eq!(v1.format(), StoreFormat::V1);
+    assert_eq!(v1, Layout::with_format("/srv/store", StoreFormat::V1));
+    assert_eq!(v1.journal_log(), "/srv/store/meta/journal.log");
+    assert_eq!(v1.journal_off(), "/srv/store/meta/journal.off");
+    assert_eq!(v1.journal_ckpt(), "/srv/store/meta/journal.ckpt");
+    assert_eq!(v1.refs_dir(), "/srv/store/meta/refs");
+
+    let v2 = Layout::with_format("/srv/store", StoreFormat::V2);
+    assert_eq!(v2.format(), StoreFormat::V2);
+    assert_eq!(v2.journal_log(), "/srv/store/meta/journal2.log");
+    assert_eq!(v2.journal_off(), "/srv/store/meta/journal2.off");
+    assert_eq!(v2.journal_ckpt(), "/srv/store/meta/journal2.ckpt");
+    assert_eq!(v2.refs_dir(), "/srv/store/meta/refs2");
+
+    // Everything else is where FORMAT 1 has it.
+    for (a, b) in [
+        (v1.format_file(), v2.format_file()),
+        (v1.meta_lock(), v2.meta_lock()),
+        (v1.derived_dir(), v2.derived_dir()),
+        (v1.external_ids_dir(), v2.external_ids_dir()),
+        (v1.objects_tmp(), v2.objects_tmp()),
+    ] {
+        assert_eq!(a, b);
     }
 }

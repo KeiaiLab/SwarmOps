@@ -598,7 +598,10 @@ impl<O: ObjectStore> RepoRead<'_, O> {
                     state.target
                 ))),
                 Ok(None) => Err(not_found()),
-                Err(StoreError::RefName(_)) => Err(RepoError::BadRev(rev.to_owned())),
+                // A name the store's format does not take names no ref of it.
+                Err(StoreError::RefName(_) | StoreError::FormatRequired { .. }) => {
+                    Err(RepoError::BadRev(rev.to_owned()))
+                }
                 Err(e) => Err(e.into()),
             };
         }

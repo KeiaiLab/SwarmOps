@@ -69,9 +69,29 @@ pub enum StoreError {
     /// A changeset names the same parent twice.
     #[error("parent changeset {0} is listed twice")]
     DuplicateParent(ChangesetId),
-    /// A ref name is not `main` or `release/<name>`.
+    /// A ref name the store's format does not take, nor any later one (FORMAT 1: not `main`
+    /// or `release/<name>`).
     #[error("invalid ref name {0:?}")]
     RefName(String),
+    /// A ref name the store's format does not take, but a later format does: `needs` is the
+    /// first format version that takes it, `store` the store's. An upgrade makes it valid.
+    #[error("ref name {name:?} needs store format {needs}; this store is format {store}")]
+    FormatRequired {
+        /// The name.
+        name: String,
+        /// The first format version that takes it.
+        needs: u32,
+        /// The store's format version.
+        store: u32,
+    },
+    /// A move of a tag from one target to another: a tag is created and deleted, never moved.
+    /// Refused before anything is queued or written.
+    #[error("tag {0:?} cannot move: delete it and create it again")]
+    TagImmutable(String),
+    /// Another gc, repair or upgrade holds the store's maintenance lease (`meta/maint.lock`).
+    /// Nothing was done. Retryable.
+    #[error("the store is under maintenance: another gc, repair or upgrade holds the lease")]
+    MaintenanceBusy,
     /// A ref would point at a changeset that is not in the index.
     #[error("ref target {0} is not a changeset in the store")]
     UnknownRefTarget(ChangesetId),
