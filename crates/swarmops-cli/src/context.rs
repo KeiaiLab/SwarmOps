@@ -79,7 +79,7 @@ pub fn store_for(
 /// The store the workspace `at` names, if there is one: its `workspace.json`'s `repo`. None for
 /// a place with no workspace; a `workspace.json` that cannot be read is its error.
 pub fn discovered(at: &Locate) -> Result<Option<String>, OpError> {
-    match workspace::find(at, None, &RealFs) {
+    match workspace::find(at, None, &RealFs::new()) {
         Ok(found) => Ok(Some(found.file.repo)),
         Err(e) if e.code == ErrorCode::WsNotFound.as_str() => Ok(None),
         Err(e) => Err(e),

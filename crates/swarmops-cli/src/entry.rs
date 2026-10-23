@@ -208,20 +208,9 @@ mod tests {
         let store = format!("{}/store", dir.path().to_str().unwrap());
         let (ops, _) = LocalOps::init(Utf8Path::new(&store), "acme").unwrap();
         let who = Identity::parse("agent/worker-1").unwrap();
-        let change = ChangeInput {
-            path: "a.txt".to_owned(),
-            op: ChangeOp::Put,
-            content: Some(ContentInput::Inline("a".to_owned())),
-            mode: None,
-        };
-        let req = CommitReq {
-            parent: None,
-            changes: vec![change],
-            message: "m".to_owned(),
-            allow_empty: false,
-            advance: None,
-            idempotency_key: None,
-        };
+        let mut change = ChangeInput::new("a.txt", ChangeOp::Put);
+        change.content = Some(ContentInput::Inline("a".to_owned()));
+        let req = CommitReq::new(vec![change], "m");
         let id = ops.commit(&who, req).unwrap().changeset;
         drop(ops);
 
@@ -245,11 +234,9 @@ mod tests {
                 "show",
                 || Ok(()),
                 |ops, ()| -> Result<(), OpError> {
-                    let rev = id.as_str().into();
-                    ops.show(ShowReq {
-                        rev,
-                        max_changes: 1,
-                    })?;
+                    let mut req = ShowReq::new(id.as_str());
+                    req.max_changes = 1;
+                    ops.show(req)?;
                     panic!("boom after a read")
                 },
             )

@@ -2719,19 +2719,16 @@ mod tests {
             assert!(!error.message.contains('\n'), "{}", error.message);
         }
         // The request types that carry one check it, and a create carries none.
-        let set = |expected: Option<&str>| RefSetReq {
-            name: "main".to_owned(),
-            new: "main".into(),
-            expected_old: expected.map(Rev::from),
-            create: expected.is_none(),
+        let set = |expected: Option<&str>| {
+            let mut req = RefSetReq::new("main", "main");
+            req.expected_old = expected.map(Rev::from);
+            req.create = expected.is_none();
+            req
         };
         assert!(set(None).refuse().is_ok());
         assert!(set(Some(&id)).refuse().is_ok());
         assert!(set(Some("main")).refuse().is_err());
-        let delete = |expected: &str| RefDeleteReq {
-            name: "main".to_owned(),
-            expected_old: expected.into(),
-        };
+        let delete = |expected: &str| RefDeleteReq::new("main", expected);
         assert!(delete(&id).refuse().is_ok());
         assert!(delete("main~1").refuse().is_err());
     }
@@ -2959,27 +2956,11 @@ mod tests {
 
     /// A commit of two puts, the second of whose content is the client file `file`.
     fn naming(file: &str) -> CommitReq {
-        CommitReq {
-            parent: None,
-            changes: vec![
-                ChangeInput {
-                    path: "README.md".to_owned(),
-                    op: ChangeOp::Put,
-                    content: Some(ContentInput::Inline("# acme\n".to_owned())),
-                    mode: None,
-                },
-                ChangeInput {
-                    path: "src/lib.rs".to_owned(),
-                    op: ChangeOp::Put,
-                    content: Some(ContentInput::File(file.to_owned())),
-                    mode: None,
-                },
-            ],
-            message: "x".to_owned(),
-            allow_empty: false,
-            advance: None,
-            idempotency_key: None,
-        }
+        let mut readme = ChangeInput::new("README.md", ChangeOp::Put);
+        readme.content = Some(ContentInput::Inline("# acme\n".to_owned()));
+        let mut lib = ChangeInput::new("src/lib.rs", ChangeOp::Put);
+        lib.content = Some(ContentInput::File(file.to_owned()));
+        CommitReq::new(vec![readme, lib], "x")
     }
 
     /// How each refusal of a client file ends: what to send instead.
@@ -3080,27 +3061,12 @@ mod tests {
         let store = format!("{}/store", dir.path().to_str().unwrap());
         let (ops, _) = LocalOps::init(Utf8Path::new(&store), "acme").unwrap();
         let who = Identity::parse("agent/worker-1").unwrap();
-        let change = ChangeInput {
-            path: "a.txt".to_owned(),
-            op: ChangeOp::Put,
-            content: Some(ContentInput::Inline("a".to_owned())),
-            mode: None,
-        };
-        let req = CommitReq {
-            parent: None,
-            changes: vec![change],
-            message: "m".to_owned(),
-            allow_empty: false,
-            advance: None,
-            idempotency_key: None,
-        };
+        let mut change = ChangeInput::new("a.txt".to_owned(), ChangeOp::Put);
+        change.content = Some(ContentInput::Inline("a".to_owned()));
+        let req = CommitReq::new(vec![change], "m".to_owned());
         let c1 = ops.commit(&who, req).unwrap().changeset;
-        let main = RefSetReq {
-            name: "main".to_owned(),
-            new: c1.as_str().into(),
-            expected_old: None,
-            create: true,
-        };
+        let mut main = RefSetReq::new("main", c1.as_str());
+        main.create = true;
         ops.ref_set(&who, main).unwrap();
         drop(ops);
 
@@ -3122,11 +3088,9 @@ mod tests {
             reply,
             || Ok(()),
             |ops, ()| -> Result<(), OpError> {
-                let rev = "main".into();
-                ops.show(ShowReq {
-                    rev,
-                    max_changes: 1,
-                })?;
+                let mut req = ShowReq::new("main");
+                req.max_changes = 1;
+                ops.show(req)?;
                 panic!("boom after a read")
             },
         );
