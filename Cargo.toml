@@ -23,7 +23,7 @@ tempfile = "3.27.0"
 tar = { version = "0.4.46", default-features = false }
 # The git import's reader (swarmops-git only, behind its `GitSource`): pinned exactly, SHA-1
 # only, no default features (umbrella decision 3).
-gix = { version = "=0.89.0", default-features = false, features = ["sha1"] }
+gix = { version = "=0.90.0", default-features = false, features = ["sha1"] }
 # Without the default features: none of the legacy-format (v0.1-v0.7) decoders, which an object
 # file could reach, and no dictionary builder. The store writes and reads frames of the current
 # format only (storage spec §2 rule 1).
