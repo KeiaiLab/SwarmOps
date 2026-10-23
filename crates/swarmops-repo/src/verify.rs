@@ -128,6 +128,17 @@ impl VerifyReport {
     }
 }
 
+impl VerifyReport {
+    /// This report with `problems` cut to the first `max`; `found` stays the whole count.
+    fn capped(mut self, max: usize) -> VerifyReport {
+        if self.problems.len() > max {
+            self.problems.truncate(max);
+            self.truncated = true;
+        }
+        self
+    }
+}
+
 /// One thing [`Repo::verify`] found damaged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -354,6 +365,17 @@ impl<O: ObjectStore> Repo<O> {
     /// well; [`Depth::Shallow`] covers the structure, and looks for blobs without reading them.
     /// Errors only where it cannot read on.
     pub fn verify(&self, depth: Depth) -> Result<VerifyReport, RepoError> {
+        self.verify_capped(depth, usize::MAX)
+    }
+
+    /// [`Repo::verify`], with `problems` cut to the first `max_findings`: `found` counts them
+    /// all and `truncated` says some were left out. The checks and their order are the same,
+    /// so the problems listed are the first ones `verify` lists.
+    pub fn verify_capped(
+        &self,
+        depth: Depth,
+        max_findings: usize,
+    ) -> Result<VerifyReport, RepoError> {
         let mut check = Check::new(self, depth);
         check.lock_file();
         let changesets = check.metadata()?;
@@ -368,7 +390,7 @@ impl<O: ObjectStore> Repo<O> {
         if let Some(derived) = check.derived.take() {
             check.derived_problems = derived.check(self)?;
         }
-        Ok(check.report())
+        Ok(check.report().capped(max_findings))
     }
 }
 

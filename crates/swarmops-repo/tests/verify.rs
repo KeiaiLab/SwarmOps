@@ -1449,3 +1449,82 @@ mod derived_values {
         assert!(line("other", &[0xab, 0x01]).contains(" under key ab01 "));
     }
 }
+
+/// A store whose `release/` holds `count` ref files that name no changeset, so that verify
+/// finds `count` dangling refs, in the order of their names.
+fn store_with_dangling_refs(count: usize) -> (TempDir, LocalRepo) {
+    let (dir, root, repo) = new_repo();
+    let c1 = commit(&repo, &[], vec![put("f", b"1")]);
+    repo.cas_ref("release/ok", None, Some(c1), "test/agent")
+        .unwrap();
+
+    // Every file is a well-formed ref file that names a changeset nobody committed.
+    let refs = Layout::new(&root).meta_path("refs/release");
+    let nowhere = ChangesetId::new(hash_object(ObjectKind::Changeset, b"never committed"));
+    for n in 0..count {
+        fs::write(refs.join(format!("gone{n:05}")), format!("{nowhere}\n1\n")).unwrap();
+    }
+    (dir, repo)
+}
+
+#[test]
+fn verify_capped_lists_the_first_problems_and_counts_them_all() {
+    let (_dir, repo) = store_with_dangling_refs(1_500);
+
+    let all = repo.verify(Depth::Shallow).unwrap();
+    assert_eq!(
+        (all.problems.len(), all.found, all.truncated),
+        (1_500, 1_500, false)
+    );
+
+    let cut = repo.verify_capped(Depth::Shallow, 1_000).unwrap();
+    assert_eq!(
+        (cut.problems.len(), cut.found, cut.truncated),
+        (1_000, 1_500, true)
+    );
+    assert_eq!(
+        cut.problems[..],
+        all.problems[..1_000],
+        "the first ones, in order"
+    );
+    assert_eq!(
+        (cut.objects_checked, cut.changesets_checked),
+        (all.objects_checked, all.changesets_checked)
+    );
+
+    let ten = repo.verify_capped(Depth::Shallow, 10).unwrap();
+    assert_eq!(
+        (ten.problems.len(), ten.found, ten.truncated),
+        (10, 1_500, true)
+    );
+    assert_eq!(ten.problems[..], all.problems[..10]);
+}
+
+#[test]
+fn verify_capped_at_exactly_the_count_is_not_truncated() {
+    let (_dir, repo) = store_with_dangling_refs(20);
+
+    let report = repo.verify_capped(Depth::Shallow, 20).unwrap();
+    assert_eq!(
+        (report.problems.len(), report.found, report.truncated),
+        (20, 20, false)
+    );
+
+    let report = repo.verify_capped(Depth::Shallow, 19).unwrap();
+    assert_eq!(
+        (report.problems.len(), report.found, report.truncated),
+        (19, 20, true)
+    );
+}
+
+#[test]
+fn verify_capped_clean_store_is_not_truncated() {
+    let (_dir, _root, repo) = new_repo();
+    commit(&repo, &[], vec![put("f", b"1")]);
+
+    let report = repo.verify_capped(Depth::Deep, 1).unwrap();
+    assert_eq!(
+        (report.problems.len(), report.found, report.truncated),
+        (0, 0, false)
+    );
+}
