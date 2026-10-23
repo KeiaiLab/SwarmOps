@@ -61,6 +61,18 @@ pub struct LimitExceeded {
     pub limit: u64,
 }
 
+impl LimitExceeded {
+    /// A `size` past `limit` of `scope`, at `path` for a file.
+    pub fn new(scope: LimitScope, path: Option<String>, size: u64, limit: u64) -> LimitExceeded {
+        LimitExceeded {
+            scope,
+            path,
+            size,
+            limit,
+        }
+    }
+}
+
 /// Whether the limits apply to a remote on `host` (without user or port): `github.com` and
 /// its subdomains, in any case. Under the `test-hooks` feature, also each host
 /// `SWARMOPS_TEST_GITHUB_HOSTS` names (its port, if any, is not compared).

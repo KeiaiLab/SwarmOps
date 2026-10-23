@@ -69,6 +69,13 @@ pub struct RawTreeEntry {
     pub oid: GitOid,
 }
 
+impl RawTreeEntry {
+    /// An entry of mode digits `mode`, `name` and `oid`.
+    pub fn new(mode: Vec<u8>, name: Vec<u8>, oid: GitOid) -> RawTreeEntry {
+        RawTreeEntry { mode, name, oid }
+    }
+}
+
 /// Bytes that are no commit or tree the fields can hold.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum RawError {
@@ -90,6 +97,26 @@ fn malformed(what: &'static str) -> RawError {
 const IDENT_SPACE: &[u8] = b" \t\n\r";
 
 impl RawCommit {
+    /// A commit of these fields: `tree`, `parents` in order, `author`, `committer`, the
+    /// `extra_headers` after the committer, and `message`.
+    pub fn new(
+        tree: GitOid,
+        parents: Vec<GitOid>,
+        author: RawIdent,
+        committer: RawIdent,
+        extra_headers: Vec<(Vec<u8>, Vec<u8>)>,
+        message: Vec<u8>,
+    ) -> RawCommit {
+        RawCommit {
+            tree,
+            parents,
+            author,
+            committer,
+            extra_headers,
+            message,
+        }
+    }
+
     /// The fields of the commit whose bytes, without git's `commit <len>\0` header, are `bytes`.
     ///
     /// Lenient where the fields can still hold something, as [`render`](RawCommit::render) then
@@ -208,6 +235,24 @@ fn split_headers(bytes: &[u8]) -> (Headers<'_>, &[u8]) {
 }
 
 impl RawIdent {
+    /// An ident of `name` and `email` at `secs`, `offset_secs` from UTC; `negative_zero` writes
+    /// offset zero as `-0000`.
+    pub fn new(
+        name: Vec<u8>,
+        email: Vec<u8>,
+        secs: i64,
+        offset_secs: i32,
+        negative_zero: bool,
+    ) -> RawIdent {
+        RawIdent {
+            name,
+            email,
+            secs,
+            offset_secs,
+            negative_zero,
+        }
+    }
+
     /// The ident an `author` or `committer` header's value writes, read as git reads it: the name
     /// is everything before the first `<`, its trailing white space trimmed, and the e-mail runs
     /// to the first `>` after it. The date must be exactly ` secs (+|-)HHMM`, the seconds an
@@ -299,6 +344,11 @@ fn parse_date(date: &[u8]) -> Option<(i64, i32, bool)> {
 }
 
 impl RawTree {
+    /// A tree of `entries`, in their stored order.
+    pub fn new(entries: Vec<RawTreeEntry>) -> RawTree {
+        RawTree { entries }
+    }
+
     /// The entries of the tree whose bytes, without git's `tree <len>\0` header, are `bytes`, as
     /// stored: each a mode of octal digits, a space, a name ended by NUL, and 20 bytes of id.
     pub fn parse(bytes: &[u8]) -> Result<RawTree, RawError> {

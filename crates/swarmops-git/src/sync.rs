@@ -63,6 +63,24 @@ pub struct SyncPlan {
     pub behind_truncated: bool,
 }
 
+impl SyncPlan {
+    /// The plan of `unpublished` above `base`, the remote `behind` by that many (stopped at
+    /// [`MAX_SYNC_WALK`] when `behind_truncated`).
+    pub fn new(
+        base: ChangesetId,
+        unpublished: Vec<ChangesetId>,
+        behind: u64,
+        behind_truncated: bool,
+    ) -> SyncPlan {
+        SyncPlan {
+            base,
+            unpublished,
+            behind,
+            behind_truncated,
+        }
+    }
+}
+
 /// Which unpublished changes the remote holds already, and which are left to land.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recognised {

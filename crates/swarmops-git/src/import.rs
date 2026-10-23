@@ -212,6 +212,41 @@ pub struct ImportReport {
     pub recovered: Recovered,
 }
 
+impl ImportReport {
+    /// A report of every field, in their order.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one argument per field: a report has no field to default"
+    )]
+    pub fn new(
+        imported: u64,
+        skipped: u64,
+        head: ChangesetId,
+        git_head: GitOid,
+        target_ref: String,
+        old_head: Option<ChangesetId>,
+        ref_moved: bool,
+        lossy: Vec<LossyCommit>,
+        lossy_total: u64,
+        warnings: Vec<String>,
+        recovered: Recovered,
+    ) -> ImportReport {
+        ImportReport {
+            imported,
+            skipped,
+            head,
+            git_head,
+            target_ref,
+            old_head,
+            ref_moved,
+            lossy,
+            lossy_total,
+            warnings,
+            recovered,
+        }
+    }
+}
+
 /// A commit an import recorded with a loss.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LossyCommit {
@@ -221,6 +256,17 @@ pub struct LossyCommit {
     pub changeset: ChangesetId,
     /// The classes of what it lost.
     pub classes: LossySet,
+}
+
+impl LossyCommit {
+    /// `commit`, recorded as `changeset` with the loss of `classes`.
+    pub fn new(commit: GitOid, changeset: ChangesetId, classes: LossySet) -> LossyCommit {
+        LossyCommit {
+            commit,
+            changeset,
+            classes,
+        }
+    }
 }
 
 /// Why an import failed. Each says how far it got where it wrote anything.
@@ -343,6 +389,13 @@ pub struct ExternalIdMismatch {
     pub commit: GitOid,
     /// The changeset the entry names.
     pub changeset: ChangesetId,
+}
+
+impl ExternalIdMismatch {
+    /// The entry of `commit` that names `changeset`.
+    pub fn new(commit: GitOid, changeset: ChangesetId) -> ExternalIdMismatch {
+        ExternalIdMismatch { commit, changeset }
+    }
 }
 
 /// How many times a store call that found the writer lock held for its whole wait

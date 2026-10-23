@@ -12,6 +12,11 @@ impl GitOid {
     /// The id no object has, forty zeros: git's "no object".
     pub const NULL: GitOid = GitOid([0; 20]);
 
+    /// The id whose 20 bytes are `bytes`.
+    pub const fn new(bytes: [u8; 20]) -> GitOid {
+        GitOid(bytes)
+    }
+
     /// The id `hex` writes: exactly 40 hex digits, of either case; `None` for anything else.
     pub fn from_hex(hex: &[u8]) -> Option<GitOid> {
         let digits: &[u8; 40] = hex.try_into().ok()?;
@@ -20,6 +25,13 @@ impl GitOid {
             *byte = (nibble(pair[0])? << 4) | nibble(pair[1])?;
         }
         Some(GitOid(id))
+    }
+}
+
+impl From<[u8; 20]> for GitOid {
+    /// The id whose 20 bytes are `bytes` ([`GitOid::new`]).
+    fn from(bytes: [u8; 20]) -> GitOid {
+        GitOid::new(bytes)
     }
 }
 

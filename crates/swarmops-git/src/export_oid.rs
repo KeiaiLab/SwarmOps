@@ -85,6 +85,11 @@ pub struct ExportedOid {
 }
 
 impl ExportedOid {
+    /// The value naming `oid`, the changeset's own commit when `kept`.
+    pub fn new(oid: [u8; 20], kept: bool) -> ExportedOid {
+        ExportedOid { oid, kept }
+    }
+
     /// The commit's git oid, as a [`GitOid`].
     pub fn git_oid(&self) -> GitOid {
         GitOid(self.oid)
@@ -180,6 +185,13 @@ pub struct ExportReader<'a, O: ObjectStore> {
     pub read: &'a RepoRead<'a, O>,
     /// The derived store the oids are memoized in.
     pub store: &'a DerivedStore,
+}
+
+impl<'a, O: ObjectStore> ExportReader<'a, O> {
+    /// A reader of `read`'s trees and blobs that memoizes their oids in `store`.
+    pub fn new(read: &'a RepoRead<'a, O>, store: &'a DerivedStore) -> ExportReader<'a, O> {
+        ExportReader { read, store }
+    }
 }
 
 impl<O: ObjectStore> ExportObjects for ExportReader<'_, O> {

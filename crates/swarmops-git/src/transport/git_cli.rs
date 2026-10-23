@@ -551,6 +551,13 @@ pub struct RefSpec {
     pub dst: String,
 }
 
+impl RefSpec {
+    /// The refspec storing the remote's `src` refs as `dst`.
+    pub fn new(src: String, dst: String) -> RefSpec {
+        RefSpec { src, dst }
+    }
+}
+
 /// One branch update of a push.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushUpdate {
@@ -560,6 +567,17 @@ pub struct PushUpdate {
     pub branch: String,
     /// The commit the branch must name now; `None`: it must not exist.
     pub expect: Option<GitOid>,
+}
+
+impl PushUpdate {
+    /// The update moving `branch` to `new` when it names `expect` now.
+    pub fn new(new: GitOid, branch: String, expect: Option<GitOid>) -> PushUpdate {
+        PushUpdate {
+            new,
+            branch,
+            expect,
+        }
+    }
 }
 
 /// What a push that succeeded did.

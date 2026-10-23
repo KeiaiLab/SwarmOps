@@ -141,6 +141,43 @@ pub struct ExportReport {
     pub warnings: Vec<String>,
 }
 
+impl ExportReport {
+    /// A report of every field, in their order.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one argument per field: a report has no field to default"
+    )]
+    pub fn new(
+        head: ChangesetId,
+        head_oid: GitOid,
+        branch: String,
+        old: Option<GitOid>,
+        base: Option<ChangesetId>,
+        branch_moved: bool,
+        commits_written: u64,
+        objects_written: u64,
+        objects_checked: u64,
+        rewritten: u64,
+        recovered: TailRepair,
+        warnings: Vec<String>,
+    ) -> ExportReport {
+        ExportReport {
+            head,
+            head_oid,
+            branch,
+            old,
+            base,
+            branch_moved,
+            commits_written,
+            objects_written,
+            objects_checked,
+            rewritten,
+            recovered,
+            warnings,
+        }
+    }
+}
+
 /// Why an export failed. Nothing is written but where a variant says otherwise.
 #[derive(Debug, thiserror::Error)]
 pub enum ExportError {
