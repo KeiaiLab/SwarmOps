@@ -54,9 +54,10 @@ ignore = "0.4.33"
 # The keys a workspace gives its store calls (swarmops-ws only): uuid v7, as `--key` takes;
 # "Apache-2.0 OR MIT".
 uuid = { version = "1.28.0", features = ["v7"] }
-# A check's process group, killed when it runs past its time (swarmops-ws only, Unix): `kill(2)`
-# with a negative pid through a safe API. The version tempfile already brings in; no new package.
-rustix = { version = "1.1.5", default-features = false, features = ["std", "process"] }
+# A check's process group, killed when it runs past its time (swarmops-ws, Unix): `kill(2)` with a
+# negative pid through a safe API; and the store's `statfs` of the filesystem a store lives on
+# (swarmops-store, Linux). The version tempfile already brings in; no new package.
+rustix = { version = "1.1.5", default-features = false, features = ["std", "process", "fs"] }
 insta = { version = "1.49.0", features = ["json"] }
 assert_cmd = "2.2.2"
 

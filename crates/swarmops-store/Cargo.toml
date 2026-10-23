@@ -33,6 +33,10 @@ tempfile.workspace = true
 thiserror.workspace = true
 zstd.workspace = true
 
+# The filesystem check reads `statfs` through a safe API.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix.workspace = true
+
 [dev-dependencies]
 # The integration tests' and benches' support; no unit test uses it (it depends on this crate).
 swarmops-testkit = { path = "../swarmops-testkit", version = "0.3.0" }
