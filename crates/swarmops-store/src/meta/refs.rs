@@ -40,6 +40,7 @@ const MAX_FILE_LEN: u64 = 64 + 1 + 20 + 1;
 
 /// Where a ref points, as its file (or the journal past the checkpoint) says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RefState {
     /// The changeset the ref names.
     pub target: ChangesetId,
@@ -47,8 +48,20 @@ pub struct RefState {
     pub version: u64,
 }
 
+impl RefState {
+    /// A ref naming `target` at `version`.
+    ///
+    /// Invariant: `version` is at least 1. Nothing checks it here, and nothing needs to: no
+    /// store call takes a state, and a ref file whose version is 0 reads as `InvalidData`. A
+    /// state built here is a value to compare with what the store returns.
+    pub fn new(target: ChangesetId, version: u64) -> RefState {
+        RefState { target, version }
+    }
+}
+
 /// One ref file, as [`crate::MetaStore::ref_files`] reads it.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct RefFile {
     /// The ref's name.
     pub name: String,

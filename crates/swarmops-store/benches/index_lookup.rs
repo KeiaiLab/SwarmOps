@@ -54,13 +54,13 @@ fn delta(n: u64) -> [u8; 32] {
 
 /// Changeset `n` of the chain: the child of changeset `n - 1`.
 fn changeset(n: u64) -> ChangesetMeta {
-    ChangesetMeta {
-        id: id(n),
-        seq: 0,
-        generation: n + 1,
-        delta_hash: delta(n),
-        parents: n.checked_sub(1).map(id).into_iter().collect(),
-    }
+    ChangesetMeta::new(
+        id(n),
+        0,
+        n + 1,
+        delta(n),
+        n.checked_sub(1).map(id).into_iter().collect(),
+    )
 }
 
 /// An index of changesets `0..size` in a fresh directory under `base`: the first
@@ -70,7 +70,8 @@ fn changeset(n: u64) -> ChangesetMeta {
 fn build(base: &Path, size: u64) -> (TempDir, Index) {
     let dir = tempfile::tempdir_in(base).expect("create store dir");
     let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("UTF-8 store dir");
-    let mut index = Index::create(&Layout::new(root), Arc::new(RealFs)).expect("create index");
+    let mut index =
+        Index::create(&Layout::new(root), Arc::new(RealFs::new())).expect("create index");
     for n in 0..size - TAIL {
         index.append(&changeset(n)).expect("append");
     }

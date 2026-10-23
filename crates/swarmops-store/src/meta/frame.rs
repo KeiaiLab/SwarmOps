@@ -32,6 +32,7 @@ const KIND_COMPACTED: u8 = 4;
 
 /// One change to the metadata, as the journal records it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Record {
     /// A changeset joined the index.
     Changeset {
@@ -69,6 +70,7 @@ pub enum Record {
 /// records do not decode as [`StoreError::JournalCorrupt`] at the frame's own offset there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 #[error("not a journal record: it does not decode at byte {at}")]
+#[non_exhaustive]
 pub struct BadRecord {
     /// Where in the bytes decoding stopped: the start of the field it could not read, or of
     /// the record for a kind it does not know.
@@ -77,6 +79,7 @@ pub struct BadRecord {
 
 /// One transaction as the journal holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Frame {
     /// The frame's index in `journal.off`, from 0: its place in the journal's total order.
     pub seq: u64,
@@ -84,6 +87,22 @@ pub struct Frame {
     pub offset: u64,
     /// Its records, in the order they were appended.
     pub records: Vec<Record>,
+}
+
+impl Frame {
+    /// The frame `seq` at `offset`, holding `records`.
+    ///
+    /// Invariant: `seq` and `offset` are the frame's own in `journal.off` and `journal.log`.
+    /// Nothing checks it here, and nothing needs to: no store call takes a frame, and the
+    /// journal's reads take both from `journal.off` (see [`crate::Journal`]). A frame built
+    /// here is a value to compare with what the journal returns.
+    pub fn new(seq: u64, offset: u64, records: Vec<Record>) -> Frame {
+        Frame {
+            seq,
+            offset,
+            records,
+        }
+    }
 }
 
 impl Record {

@@ -62,13 +62,13 @@ fn id(n: u64) -> ChangesetId {
 
 /// Changeset `n` of the chain: the child of changeset `n - 1`, with a delta hash of its own.
 fn changeset(n: u64) -> ChangesetMeta {
-    ChangesetMeta {
-        id: id(n),
-        seq: 0,
-        generation: n + 1,
-        delta_hash: hash_object(ObjectKind::Blob, &n.to_le_bytes()).0,
-        parents: n.checked_sub(1).map(id).into_iter().collect(),
-    }
+    ChangesetMeta::new(
+        id(n),
+        0,
+        n + 1,
+        hash_object(ObjectKind::Blob, &n.to_le_bytes()).0,
+        n.checked_sub(1).map(id).into_iter().collect(),
+    )
 }
 
 /// `records` as the bench names a size: `100k`, `1M`.
@@ -112,10 +112,10 @@ fn sync_tree(dir: &Path) {
         if entry.file_type().expect("a file type").is_dir() {
             sync_tree(&path);
         } else {
-            RealFs.sync_data(&path).expect("sync a file");
+            RealFs::new().sync_data(&path).expect("sync a file");
         }
     }
-    RealFs.fsync_dir(dir).expect("sync a directory");
+    RealFs::new().fsync_dir(dir).expect("sync a directory");
 }
 
 /// An index of `records` records as a writer finds it when it compacts, its views kept aside:
@@ -173,10 +173,10 @@ impl Fixture {
             fs::remove_file(&view).expect("remove a view file");
             fs::hard_link(self.kept.join(name), &view).expect("put a kept view file back");
         }
-        RealFs
+        RealFs::new()
             .fsync_dir(self.sorted.as_std_path())
             .expect("sync sorted/");
-        let index = Index::open(&self.layout, Arc::new(RealFs)).expect("open the index");
+        let index = Index::open(&self.layout, Arc::new(RealFs::new())).expect("open the index");
         assert_eq!((index.len(), index.tail_len()), (self.records, TAIL));
         index
     }

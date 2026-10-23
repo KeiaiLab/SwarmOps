@@ -83,13 +83,13 @@ fn id(n: u64) -> ChangesetId {
 
 /// Changeset `n`, the child of changeset `n - 1`.
 fn changeset(n: u64) -> ChangesetMeta {
-    ChangesetMeta {
-        id: id(n),
-        seq: 0,
-        generation: 0,
-        delta_hash: hash_object(ObjectKind::Blob, &n.to_le_bytes()).0,
-        parents: n.checked_sub(1).map(id).into_iter().collect(),
-    }
+    ChangesetMeta::new(
+        id(n),
+        0,
+        0,
+        hash_object(ObjectKind::Blob, &n.to_le_bytes()).0,
+        n.checked_sub(1).map(id).into_iter().collect(),
+    )
 }
 
 /// Inserts changesets `from..to`, one write transaction each.
@@ -169,7 +169,7 @@ impl<'a> Snapshot<'a> {
     fn open(name: String, root: &'a Utf8Path, count: u64, tail: u64) -> Snapshot<'a> {
         let layout = Layout::new(root);
         let store = MetaStore::open(root).expect("open the store");
-        let journal = Journal::open(&layout, Arc::new(RealFs)).expect("open the journal");
+        let journal = Journal::open(&layout, Arc::new(RealFs::new())).expect("open the journal");
         let ckpt = journal.ckpt().expect("journal.ckpt");
         let frames = journal.tail_frames_from(ckpt).expect("the frames past it");
         assert_eq!(frames.len(), usize::try_from(tail).expect("fits"), "{name}");

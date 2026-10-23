@@ -129,6 +129,7 @@ pub trait ObjectStore: Send + Sync {
 
 /// What [`ObjectStore::put_hashed_batch`] did with one object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PutOutcome {
     /// The object's id.
     pub id: ObjectId,
@@ -138,15 +139,30 @@ pub struct PutOutcome {
     pub written: bool,
 }
 
+impl PutOutcome {
+    /// The outcome for object `id`, whether this call placed its file or not.
+    pub fn new(id: ObjectId, written: bool) -> PutOutcome {
+        PutOutcome { id, written }
+    }
+}
+
 /// An object's kind and payload length, as its file's header records them
 /// ([`ObjectStore::stat`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ObjectStat {
     /// The object's kind.
     pub kind: ObjectKind,
     /// The length of its payload, decoded: of what [`ObjectStore::get`] returns, if the file is
     /// whole.
     pub size: u64,
+}
+
+impl ObjectStat {
+    /// The stat of an object of `kind` with a payload of `size` bytes.
+    pub fn new(kind: ObjectKind, size: u64) -> ObjectStat {
+        ObjectStat { kind, size }
+    }
 }
 
 /// `objects/tmp`, made at most once a batch: by the batch's first put that writes a file, and not
@@ -185,6 +201,7 @@ impl TmpOnce {
 /// may run other tasks of the pool meanwhile. So never call `flush` (or anything that
 /// flushes, such as a commit) from a task on that same pool: if such a task flushed the same
 /// store while another flush waited, the two would deadlock.
+#[non_exhaustive]
 pub struct FsObjectStore {
     layout: Layout,
     /// Every filesystem call goes through it, its failure located in the store, but those of

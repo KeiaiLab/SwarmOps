@@ -96,13 +96,13 @@ fn id(n: u64) -> ChangesetId {
 
 /// Changeset `n`, the child of changeset `n - 1` (`parent` for the ones `insert_*` queues).
 fn changeset(n: u64, parent: Option<ChangesetId>) -> ChangesetMeta {
-    ChangesetMeta {
-        id: id(n),
-        seq: 0,
-        generation: 0,
-        delta_hash: hash_object(ObjectKind::Blob, &n.to_le_bytes()).0,
-        parents: parent.into_iter().collect(),
-    }
+    ChangesetMeta::new(
+        id(n),
+        0,
+        0,
+        hash_object(ObjectKind::Blob, &n.to_le_bytes()).0,
+        parent.into_iter().collect(),
+    )
 }
 
 /// Appends changesets `from..to` to the chain in one write transaction that moves `main` from
@@ -293,7 +293,8 @@ impl Chain<'_> {
 
     /// The lookups by id, by the index's search and by the bisection copy.
     fn bench_finds(&self, group: &mut BenchmarkGroup<'_, WallTime>) {
-        let index = Index::open(&Layout::new(self.root), Arc::new(RealFs)).expect("the index");
+        let index =
+            Index::open(&Layout::new(self.root), Arc::new(RealFs::new())).expect("the index");
         assert_eq!(index.tail_len(), 0, "every record in the sorted views");
         let view = index.ids_view();
         let hits: Vec<ChangesetId> = scattered(0, self.len).into_iter().map(id).collect();
@@ -360,7 +361,8 @@ impl Chain<'_> {
 
     /// How many frames lie past the checkpoint.
     fn past_checkpoint(&self) -> u64 {
-        let journal = Journal::open(&Layout::new(self.root), Arc::new(RealFs)).expect("a journal");
+        let journal =
+            Journal::open(&Layout::new(self.root), Arc::new(RealFs::new())).expect("a journal");
         let ckpt = journal.ckpt().expect("journal.ckpt");
         let frames = journal.tail_frames_from(ckpt).expect("the frames past it");
         u64::try_from(frames.len()).expect("fits")

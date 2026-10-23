@@ -39,12 +39,7 @@ fn subject(n: u64) -> ObjectId {
 
 /// The slot of derivation `name` at `version`, about subject `n`, under `key`.
 fn slot<'a>(name: &'a str, version: u32, n: u64, key: &'a [u8]) -> DerivedSlot<'a> {
-    DerivedSlot {
-        name,
-        version,
-        subject: subject(n),
-        key,
-    }
+    DerivedSlot::new(name, version, subject(n), key)
 }
 
 /// `len` bytes of a value that starts at `seed`: a pattern that repeats, so that one over 4 KiB
@@ -58,7 +53,7 @@ fn value(len: usize, seed: u8) -> Vec<u8> {
 /// A derived store on the real filesystem, at a fresh root that lives as long as the `TempDir`.
 fn new_store() -> (TempDir, Layout, DerivedStore) {
     let (dir, layout) = new_root();
-    let store = DerivedStore::open(layout.clone(), Arc::new(RealFs));
+    let store = DerivedStore::open(layout.clone(), Arc::new(RealFs::new()));
     (dir, layout, store)
 }
 
@@ -241,10 +236,8 @@ fn a_damaged_value_file_reads_as_missing_and_is_removed() {
     for (n, len) in [(1, 10), (3, 5 << 10)] {
         let value = value(len, 3);
         let slot = slot("depth", 1, n, b"key");
-        let other = DerivedSlot {
-            subject: subject(n + 1),
-            ..slot
-        };
+        let mut other = slot;
+        other.subject = subject(n + 1);
         let file = layout.derived_path(&slot);
         assert!(store.put(&other, &value).unwrap());
         let other_file = fs::read(layout.derived_path(&other)).unwrap();
@@ -401,10 +394,7 @@ fn a_check_lists_value_files_and_reads_them_without_removing_any() {
     let hash = |key: &[u8]| -> Option<[u8; 8]> {
         (!key.is_empty()).then(|| blake3::hash(key).as_bytes()[..8].try_into().unwrap())
     };
-    let listed = |slot: &DerivedSlot<'_>| ListedValue {
-        subject: slot.subject,
-        key_hash: hash(slot.key),
-    };
+    let listed = |slot: &DerivedSlot<'_>| ListedValue::new(slot.subject, hash(slot.key));
     let mut want: Vec<ListedValue> = [
         &empty,
         &keyed,
@@ -421,10 +411,7 @@ fn a_check_lists_value_files_and_reads_them_without_removing_any() {
     assert_eq!(store.list("depth", 1).unwrap(), want);
 
     let read = |slot: &DerivedSlot<'_>| store.read_listed("depth", 1, &listed(slot)).unwrap();
-    let stored = |slot: &DerivedSlot<'_>, len| StoredValue {
-        key: slot.key.to_vec(),
-        value: value(len, 1),
-    };
+    let stored = |slot: &DerivedSlot<'_>, len| StoredValue::new(slot.key.to_vec(), value(len, 1));
     for (slot, len) in [(&empty, 10), (&keyed, 10), (&zstd, 5 << 10), (&linked, 10)] {
         assert_eq!(read(slot), Some(stored(slot, len)), "{slot:?}");
     }
@@ -458,7 +445,7 @@ fn a_failed_read_of_a_listed_value_names_its_file() {
     let (_dir, layout) = new_root();
     let slot = slot("depth", 1, 1, b"key");
     assert!(
-        DerivedStore::open(layout.clone(), Arc::new(RealFs))
+        DerivedStore::open(layout.clone(), Arc::new(RealFs::new()))
             .put(&slot, b"value")
             .unwrap()
     );
@@ -469,10 +456,10 @@ fn a_failed_read_of_a_listed_value_names_its_file() {
     };
     assert_eq!(
         listed,
-        ListedValue {
-            subject: slot.subject,
-            key_hash: Some(blake3::hash(b"key").as_bytes()[..8].try_into().unwrap()),
-        }
+        ListedValue::new(
+            slot.subject,
+            Some(blake3::hash(b"key").as_bytes()[..8].try_into().unwrap())
+        )
     );
     match store.read_listed("depth", 1, &listed) {
         Err(StoreError::Io(read)) => {
@@ -513,7 +500,7 @@ impl Watch for LinkTogether {
 fn racing_puts_place_one_file() {
     const RACERS: usize = 8;
     let (_dir, layout) = new_root();
-    let fs = Watched(LinkTogether(Barrier::new(RACERS)), RealFs);
+    let fs = Watched(LinkTogether(Barrier::new(RACERS)), RealFs::new());
     let store = DerivedStore::open(layout.clone(), Arc::new(fs));
     let slot = slot("depth", 1, 1, b"");
     let value = value(5 << 10, 9);
@@ -689,7 +676,7 @@ fn a_failure_names_the_derived_file() {
         "no temp file left"
     );
 
-    let store = DerivedStore::open(layout.clone(), Arc::new(RealFs));
+    let store = DerivedStore::open(layout.clone(), Arc::new(RealFs::new()));
     assert!(store.put(&slot, b"value").unwrap());
     match failing(FsMethod::Read).get(&slot) {
         Err(StoreError::Io(read)) => {
@@ -754,7 +741,7 @@ fn a_value_file_holds_the_documented_layout() {
 #[test]
 fn derived_writes_pass_the_order_checker() {
     let (_dir, layout) = new_root();
-    let fs = checked(RealFs);
+    let fs = checked(RealFs::new());
     let meta = MetaStore::create_with_fs(layout.root(), Arc::clone(&fs)).unwrap();
     let objects = FsObjectStore::open_shared(layout.clone(), Arc::clone(&fs));
     let derived = DerivedStore::open(layout.clone(), Arc::clone(&fs));
@@ -769,13 +756,7 @@ fn derived_writes_pass_the_order_checker() {
 
         let id = ChangesetId(hash_object(ObjectKind::Changeset, blob.0.as_slice()));
         let mut write = meta.write().unwrap();
-        let changeset = ChangesetMeta {
-            id,
-            seq: 0,
-            generation: 0,
-            delta_hash: blob.0,
-            parents: parent.into_iter().collect(),
-        };
+        let changeset = ChangesetMeta::new(id, 0, 0, blob.0, parent.into_iter().collect());
         assert!(matches!(
             write.insert_changeset(changeset).unwrap(),
             InsertOutcome::Inserted { .. }

@@ -99,6 +99,7 @@ const STAGING: &str = "meta.tmp";
 
 /// One store's metadata (`meta/`): a handle that many threads may share, and many processes
 /// may hold at once.
+#[non_exhaustive]
 pub struct MetaStore {
     layout: Layout,
     /// What every change goes through, and what locates a failure in the store.
@@ -111,6 +112,7 @@ pub struct MetaStore {
 
 /// What a write transaction's [`MetaWrite::commit`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CommitInfo {
     /// The seq of the frame that holds the transaction's records. A transaction with nothing
     /// queued appends no frame of its own: `frame_seq` is then the seq the next frame takes,
@@ -127,6 +129,19 @@ pub struct CommitInfo {
     pub checkpointed: bool,
 }
 
+impl CommitInfo {
+    /// What a commit at frame `frame_seq` did: `inserted` changesets, `moved_refs` ref moves,
+    /// and whether it `checkpointed`.
+    pub fn new(frame_seq: u64, inserted: u64, moved_refs: u64, checkpointed: bool) -> CommitInfo {
+        CommitInfo {
+            frame_seq,
+            inserted,
+            moved_refs,
+            checkpointed,
+        }
+    }
+}
+
 /// What a write transaction's recovery repaired before the transaction's own work
 /// ([`MetaWrite::recovered`]): what the writers before it left when they crashed, or failed after
 /// their commit point. All zero ([`Recovered::is_empty`]) when they finished cleanly: frames past
@@ -135,6 +150,7 @@ pub struct CommitInfo {
 /// It is made of what the recovery knows already, with no filesystem call of its own, and kept
 /// nowhere: a recovery that fails part way leaves its repairs made and the report lost.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Recovered {
     /// The torn tail cut off `journal.log`, if any: a transaction that never reached its commit
     /// point.
@@ -168,6 +184,7 @@ impl Recovered {
 
 /// What [`MetaWrite::insert_changeset`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum InsertOutcome {
     /// The changeset is queued; once committed it is index record `seq`.
     Inserted {
@@ -180,6 +197,7 @@ pub enum InsertOutcome {
 
 /// What [`MetaWrite::cas_ref`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CasResult {
     /// The ref named what the caller expected, and the move is queued.
     Applied {
@@ -211,6 +229,7 @@ impl From<StoreError> for NotOpened {
 
 /// One journal record, as [`MetaRead::journal_after`] lists them.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct JournalEntry {
     /// The seq of the frame (the transaction) that holds the record.
     pub seq: u64,
@@ -224,8 +243,16 @@ pub struct JournalEntry {
     pub ts: i64,
 }
 
+impl JournalEntry {
+    /// A record of `kind` in frame `seq`, about `key`, at `ts`.
+    pub fn new(seq: u64, kind: &'static str, key: Vec<u8>, ts: i64) -> JournalEntry {
+        JournalEntry { seq, kind, key, ts }
+    }
+}
+
 /// One move of a ref, as [`MetaRead::reflog`] lists them.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RefMoveEntry {
     /// The seq of the frame that recorded the move.
     pub seq: u64,
@@ -237,6 +264,25 @@ pub struct RefMoveEntry {
     pub actor: String,
     /// When it moved, in Unix seconds, as its writer recorded it.
     pub ts: i64,
+}
+
+impl RefMoveEntry {
+    /// A move in frame `seq` from `old` to `new`, by `actor` at `ts`.
+    pub fn new(
+        seq: u64,
+        old: Option<ChangesetId>,
+        new: Option<ChangesetId>,
+        actor: String,
+        ts: i64,
+    ) -> RefMoveEntry {
+        RefMoveEntry {
+            seq,
+            old,
+            new,
+            actor,
+            ts,
+        }
+    }
 }
 
 impl MetaStore {
@@ -507,6 +553,7 @@ impl fmt::Debug for MetaStore {
 
 /// A snapshot of the metadata, from [`MetaStore::read`]: the index and the ref files as they
 /// were, with the frames past the checkpoint applied on top. Later commits do not show.
+#[non_exhaustive]
 pub struct MetaRead<'a> {
     store: &'a MetaStore,
     /// The checkpoint the snapshot was taken at: `frames` start there.
@@ -732,6 +779,7 @@ impl fmt::Debug for MetaRead<'_> {
 
 /// A write transaction, from [`MetaStore::write`]: it holds [`MetaLock`] until it is
 /// committed or dropped. Dropping it without [`MetaWrite::commit`] discards what it queued.
+#[non_exhaustive]
 pub struct MetaWrite<'a> {
     store: &'a MetaStore,
     /// Up to date with every committed frame: [`MetaStore::write`] replayed them.

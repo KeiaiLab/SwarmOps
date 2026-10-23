@@ -23,6 +23,7 @@ use crate::meta::derived::{self, DerivedSlot};
 
 /// The paths of one store, all derived from its root. Computes paths only; touches nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Layout {
     root: Utf8PathBuf,
 }

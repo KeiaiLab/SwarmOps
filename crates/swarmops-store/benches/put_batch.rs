@@ -82,7 +82,7 @@ fn fresh_store(base: &Path, threads: usize) -> (TempDir, FsObjectStore) {
     File::open(layout.objects_dir())
         .and_then(|objects| objects.sync_all())
         .expect("sync objects/");
-    let mut store = FsObjectStore::open(layout, Box::new(RealFs));
+    let mut store = FsObjectStore::open(layout, Box::new(RealFs::new()));
     store.set_parallelism(threads);
     (dir, store)
 }
