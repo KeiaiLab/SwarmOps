@@ -96,7 +96,7 @@ const ACTOR: &str = "test/lander";
 fn new_store() -> (TempDir, camino::Utf8PathBuf, LocalRepo) {
     let (dir, root) = temp_dir();
     let root = root.join("store");
-    let repo = LocalRepo::create_with_fs(&root, "test", checked(RealFs)).unwrap();
+    let repo = LocalRepo::create_with_fs(&root, "test", checked(RealFs::new())).unwrap();
     (dir, root, repo)
 }
 
@@ -700,7 +700,7 @@ fn as_lander(mode: Mode) -> bool {
     let timer = Arc::new(SyncTimer::new(&root));
     let fs: Arc<dyn FsOps> = match mode {
         Mode::Smoke => checked(Watched(Arc::clone(&timer), NoSyncFs)),
-        Mode::Measure => Arc::new(Watched(Arc::clone(&timer), RealFs)),
+        Mode::Measure => Arc::new(Watched(Arc::clone(&timer), RealFs::new())),
     };
     let lander = Lander {
         repo: LocalRepo::open_with_fs(&root, fs).expect("open the store"),
@@ -1080,7 +1080,7 @@ fn run(
     let root = store_root(&work);
     let fs: Arc<dyn FsOps> = match mode {
         Mode::Smoke => checked(NoSyncFs),
-        Mode::Measure => Arc::new(RealFs),
+        Mode::Measure => Arc::new(RealFs::new()),
     };
     let repo = LocalRepo::create_with_fs(&root, "landing", fs).expect("create the store");
     let base = commit_base(&repo, &spec.cell);
@@ -1391,7 +1391,8 @@ fn a_land_that_does_not_merge_ends_conflicted_and_leaves_no_ref() {
 
     let timer = Arc::new(SyncTimer::new(&root));
     let lander = Lander {
-        repo: LocalRepo::open_with_fs(&root, checked(Watched(Arc::clone(&timer), RealFs))).unwrap(),
+        repo: LocalRepo::open_with_fs(&root, checked(Watched(Arc::clone(&timer), RealFs::new())))
+            .unwrap(),
         timer,
         spec,
         number: 1,

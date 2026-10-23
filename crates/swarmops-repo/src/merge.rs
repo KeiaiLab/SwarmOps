@@ -438,14 +438,14 @@ mod tests {
     /// One hunk at line `at` of each side, its texts `side` and `at` on a line.
     fn hunk(at: u32) -> ConflictHunk {
         let text = |side: &str| format!("{side}{at}\n").into_bytes();
-        ConflictHunk {
-            base: at..at + 1,
-            ours: at..at + 1,
-            theirs: at..at + 1,
-            base_text: text("l"),
-            ours_text: text("o"),
-            theirs_text: text("t"),
-        }
+        ConflictHunk::new(
+            at..at + 1,
+            at..at + 1,
+            at..at + 1,
+            text("l"),
+            text("o"),
+            text("t"),
+        )
     }
 
     /// `n` lines of `side`, each `side` and its number.
@@ -468,14 +468,14 @@ mod tests {
         };
 
         let first = held.hold((0..n).map(hunk).collect(), sides);
-        let spanned = ConflictHunk {
-            base: n - 2..n,
-            ours: n - 2..n,
-            theirs: n - 2..n,
-            base_text: lines_text(&base, &(n - 2..n)),
-            ours_text: lines_text(&ours, &(n - 2..n)),
-            theirs_text: lines_text(&theirs, &(n - 2..n)),
-        };
+        let spanned = ConflictHunk::new(
+            n - 2..n,
+            n - 2..n,
+            n - 2..n,
+            lines_text(&base, &(n - 2..n)),
+            lines_text(&ours, &(n - 2..n)),
+            lines_text(&theirs, &(n - 2..n)),
+        );
         let mut expected: Vec<ConflictHunk> = (0..n - 2).map(hunk).collect();
         expected.push(spanned);
         assert_eq!(first, expected);

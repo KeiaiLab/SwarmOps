@@ -37,19 +37,20 @@ pub(crate) const REBASER: &str = "test/rebaser";
 pub(crate) fn new_store() -> (TempDir, Utf8PathBuf, LocalRepo) {
     let dir = tempfile::tempdir().unwrap();
     let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
-    let repo = LocalRepo::create_with_fs(&root, "test", checked(RealFs)).unwrap();
+    let repo = LocalRepo::create_with_fs(&root, "test", checked(RealFs::new())).unwrap();
     (dir, root, repo)
 }
 
 /// The rebaser's signature: fixed, so that the same rebase makes the same changeset.
 pub(crate) fn rebaser() -> Signature {
-    Signature {
-        name: REBASER.as_bytes().to_vec(),
-        email: b"rebaser@test.swarmops.local".to_vec(),
-        secs: 1_760_000_200,
-        offset_secs: 0,
-        negative_zero: false,
-    }
+    Signature::new(
+        REBASER.as_bytes().to_vec(),
+        b"rebaser@test.swarmops.local".to_vec(),
+        1_760_000_200,
+        0,
+        false,
+    )
+    .unwrap()
 }
 
 /// A rebase of `head` onto `main` by [`rebaser`], with the defaults ([`RebaseRequest::new`]).
@@ -101,7 +102,7 @@ pub(crate) fn main_head(repo: &LocalRepo) -> ChangesetId {
 
 /// How many frames the journal of the store at `root` lists.
 pub(crate) fn frame_count(root: &Utf8Path) -> u64 {
-    Journal::open(&Layout::new(root), Arc::new(RealFs))
+    Journal::open(&Layout::new(root), Arc::new(RealFs::new()))
         .unwrap()
         .frame_count()
         .unwrap()
@@ -344,7 +345,7 @@ fn swept_template() -> (TempDir, Utf8PathBuf, Swept) {
     let (dir, template, repo, [_, head, t1]) = moved_on();
     drop(repo);
     let (_copy, root) = copy_of(&template);
-    let repo = LocalRepo::open_with_fs(&root, checked(RealFs)).unwrap();
+    let repo = LocalRepo::open_with_fs(&root, checked(RealFs::new())).unwrap();
     let want = repo.rebase(rebasing(head)).unwrap().changeset;
     (dir, template, Swept { t1, head, want })
 }
@@ -390,7 +391,7 @@ fn rebase_crashing_at(template: &Utf8Path, swept: &Swept, k: u64) -> (bool, bool
 
     // 2. What it left: H' or nothing, main unmoved, a clean store.
     let what = format!("k={k}");
-    let repo = LocalRepo::open_with_fs(&root, checked(RealFs)).unwrap();
+    let repo = LocalRepo::open_with_fs(&root, checked(RealFs::new())).unwrap();
     let recorded = repo.changeset(swept.want).unwrap().is_some();
     assert!(
         recorded || !finished,
@@ -426,7 +427,7 @@ fn a_rebase_crashing_at_any_call_records_once() {
     // 1. A child: rebase, then report nothing (its exit says how it ended).
     if let Ok(root) = std::env::var(CHILD_ROOT) {
         let head = std::env::var(CHILD_HEAD).expect("the head to rebase");
-        let head = ChangesetId(ObjectId::from_hex(&head).expect("a full id"));
+        let head = ChangesetId::new(ObjectId::from_hex(&head).expect("a full id"));
         let repo = LocalRepo::open(Utf8Path::new(&root)).unwrap();
         repo.rebase(rebasing(head)).unwrap();
         return;

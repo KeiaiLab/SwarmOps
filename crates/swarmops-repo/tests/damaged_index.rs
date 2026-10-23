@@ -19,7 +19,7 @@ use std::thread;
 use std::time::Duration;
 
 use camino::{Utf8Path, Utf8PathBuf};
-use swarmops_core::{ChangesetId, Signature};
+use swarmops_core::ChangesetId;
 use swarmops_repo::{
     Depth, LandRequest, LandStatus, LocalRepo, MismatchCause, RepoError, StoreError, VerifyProblem,
 };
@@ -135,10 +135,8 @@ fn history_of_f(repo: &LocalRepo, from: ChangesetId) -> Result<Vec<ChangesetId>,
 
 /// A land of `head` from `base` onto `main` by a fixed lander.
 fn land_from(base: ChangesetId, head: ChangesetId) -> LandRequest {
-    let lander = Signature {
-        name: b"test/lander".to_vec(),
-        ..signature()
-    };
+    let mut lander = signature();
+    lander.name = b"test/lander".to_vec();
     let mut land = LandRequest::new(head, "main", lander);
     land.base = Some(base);
     land

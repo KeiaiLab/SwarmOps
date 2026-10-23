@@ -31,7 +31,7 @@ use tempfile::TempDir;
 fn new_repo() -> (TempDir, Utf8PathBuf, LocalRepo) {
     let dir = tempfile::tempdir().expect("a temp dir");
     let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).expect("UTF-8 temp paths");
-    let repo = LocalRepo::create_with_fs(&root, "test", checked(RealFs)).expect("create");
+    let repo = LocalRepo::create_with_fs(&root, "test", checked(RealFs::new())).expect("create");
     (dir, root, repo)
 }
 
@@ -82,29 +82,31 @@ fn raw(parents: &[ChangesetId], root: TreeId, message: &str) -> RawChangeset {
 
 /// The id of the changeset `raw` makes if its delta is `delta`: the test's own oracle.
 fn expected_id(raw: &RawChangeset, delta: Vec<DeltaEntry>) -> ChangesetId {
-    let changeset = Changeset {
-        parents: raw.parents.clone(),
-        root: raw.root,
+    let changeset = Changeset::new(
+        raw.parents.clone(),
+        raw.root,
         delta,
-        author: raw.author.clone(),
-        committer: raw.committer.clone(),
-        message: raw.message.clone(),
-        extra_headers: raw.extra_headers.clone(),
-        metadata: raw.metadata.clone(),
-    };
+        raw.author.clone(),
+        raw.committer.clone(),
+        raw.message.clone(),
+        raw.extra_headers.clone(),
+        raw.metadata.clone(),
+    )
+    .unwrap();
     changeset.id().expect("a canonical changeset")
 }
 
 /// The delta entry that puts a file holding `content` at `p`.
 fn put_file(p: &str, content: &[u8]) -> DeltaEntry {
-    DeltaEntry {
-        path: path(p),
-        op: DeltaOp::Put {
+    DeltaEntry::new(
+        path(p),
+        DeltaOp::Put {
             kind: LeafKind::File,
             id: blob(content),
         },
-        renamed_from: None,
-    }
+        None,
+    )
+    .unwrap()
 }
 
 /// The delta of changeset `id`, as the store holds it.
@@ -118,7 +120,8 @@ fn delta(repo: &LocalRepo, id: ChangesetId) -> Vec<DeltaEntry> {
 
 /// The journal's frames, as a reader reads them.
 fn frames(root: &Utf8Path) -> Vec<Frame> {
-    let journal = Journal::open(&Layout::new(root), Arc::new(RealFs)).expect("open the journal");
+    let journal =
+        Journal::open(&Layout::new(root), Arc::new(RealFs::new())).expect("open the journal");
     journal.tail_frames_from(0).expect("read the journal")
 }
 
@@ -151,7 +154,7 @@ fn refused(repo: &LocalRepo, root: &Utf8Path, raws: Vec<RawChangeset>) -> RepoEr
 
 /// A changeset id no store holds, made from `seed`.
 fn unknown(seed: &[u8]) -> ChangesetId {
-    ChangesetId(hash_object(ObjectKind::Changeset, seed))
+    ChangesetId::new(hash_object(ObjectKind::Changeset, seed))
 }
 
 /// A raw changeset without parents is a root changeset whatever refs exist: `main` names another
@@ -196,20 +199,22 @@ fn commit_raw_keeps_parents_signatures_headers_and_message_verbatim() {
     let newer = commit(&repo, &[], vec![put("a", b"newer")]);
     let root = store_tree(&repo, &[("a", b"merged")]);
     let gpgsig = b"-----BEGIN PGP SIGNATURE-----\n\nwsBcBAABCAAQBQJ\n-----END PGP SIGNATURE-----";
-    let author = Signature {
-        name: b"Ren\xe9 Fixture".to_vec(),
-        email: b"rene@fixture.example".to_vec(),
-        secs: -86_400,
-        offset_secs: 19_800,
-        negative_zero: false,
-    };
-    let committer = Signature {
-        name: b"Committer".to_vec(),
-        email: b"committer@fixture.example".to_vec(),
-        secs: 1_700_000_060,
-        offset_secs: 0,
-        negative_zero: true,
-    };
+    let author = Signature::new(
+        b"Ren\xe9 Fixture".to_vec(),
+        b"rene@fixture.example".to_vec(),
+        -86_400,
+        19_800,
+        false,
+    )
+    .unwrap();
+    let committer = Signature::new(
+        b"Committer".to_vec(),
+        b"committer@fixture.example".to_vec(),
+        1_700_000_060,
+        0,
+        true,
+    )
+    .unwrap();
     let message = b"merge newer into older\n\nno line break at the end".to_vec();
     let extra_headers = vec![
         (b"encoding".to_vec(), b"ISO-8859-1".to_vec()),
@@ -232,20 +237,21 @@ fn commit_raw_keeps_parents_signatures_headers_and_message_verbatim() {
 
     let outcome = repo.commit_raw(raw.clone()).expect("commit_raw");
     let id = outcome.outcomes[0].id;
-    let objects = FsObjectStore::open(Layout::new(&root_dir), Box::new(RealFs));
+    let objects = FsObjectStore::open(Layout::new(&root_dir), Box::new(RealFs::new()));
     let (kind, payload) = objects.get(id.0).unwrap().expect("the changeset's object");
     assert_eq!(kind, ObjectKind::Changeset);
     let stored = Changeset::decode(&payload).expect("a canonical changeset");
-    let want = Changeset {
-        parents: raw.parents,
+    let want = Changeset::new(
+        raw.parents,
         root,
-        delta: vec![put_file("a", b"merged")],
-        author: raw.author,
-        committer: raw.committer,
-        message: raw.message,
-        extra_headers: raw.extra_headers,
-        metadata: raw.metadata,
-    };
+        vec![put_file("a", b"merged")],
+        raw.author,
+        raw.committer,
+        raw.message,
+        raw.extra_headers,
+        raw.metadata,
+    )
+    .unwrap();
     assert_eq!(stored, want);
     let record = repo.changeset_meta(id).unwrap().expect("recorded");
     assert_eq!(record.parents, [newer, older]);
@@ -272,11 +278,7 @@ fn commit_raw_delta_is_the_tree_diff_from_the_first_parent() {
     let later = store_tree(&repo, &[("b", b"b"), ("dir/x", b"x, later")]);
     let next = repo.commit_raw(raw(&[merge.id], later, "later")).unwrap();
     let next = next.outcomes[0];
-    let deleted = DeltaEntry {
-        path: path("a"),
-        op: DeltaOp::Delete,
-        renamed_from: None,
-    };
+    let deleted = DeltaEntry::new(path("a"), DeltaOp::Delete, None).unwrap();
     assert_eq!(
         delta(&repo, next.id),
         [deleted, put_file("dir/x", b"x, later")]
@@ -408,7 +410,7 @@ fn commit_raw_refuses_before_writing() {
         matches!(err, RepoError::Codec(CodecError::UnsortedMetadata)),
         "{err:?}"
     );
-    let unstored = TreeId(hash_object(ObjectKind::Tree, b"never stored"));
+    let unstored = TreeId::new(hash_object(ObjectKind::Tree, b"never stored"));
     let mut raw = good();
     raw.root = unstored;
     let err = refuse(raw);
@@ -422,7 +424,7 @@ fn commit_raw_refuses_before_writing() {
         "{err:?}"
     );
     // A blob the store holds, named as the root.
-    let not_a_tree = TreeId(blob(b"b").0);
+    let not_a_tree = TreeId::new(blob(b"b").0);
     let mut raw = good();
     raw.root = not_a_tree;
     let err = refuse(raw);

@@ -168,13 +168,16 @@ mod tests {
     fn delta(paths: &[&str]) -> Vec<DeltaEntry> {
         paths
             .iter()
-            .map(|p| DeltaEntry {
-                path: RepoPath::new(*p).unwrap(),
-                op: DeltaOp::Put {
-                    kind: LeafKind::File,
-                    id: BlobId(ObjectId([0; 32])),
-                },
-                renamed_from: None,
+            .map(|p| {
+                DeltaEntry::new(
+                    RepoPath::new(*p).unwrap(),
+                    DeltaOp::Put {
+                        kind: LeafKind::File,
+                        id: BlobId::new(ObjectId::new([0; 32])),
+                    },
+                    None,
+                )
+                .unwrap()
             })
             .collect()
     }
@@ -211,7 +214,7 @@ mod tests {
         let not_a_path = postcard::to_stdvec("a//b").unwrap();
         assert!(postcard::from_bytes::<PathKey>(&not_a_path).is_err());
 
-        let touch = LastTouch(Some(ChangesetId(ObjectId([7; 32]))));
+        let touch = LastTouch(Some(ChangesetId::new(ObjectId::new([7; 32]))));
         let bytes = postcard::to_stdvec(&touch).unwrap();
         assert_eq!(bytes, [&[1_u8][..], &[7; 32]].concat());
         assert_eq!(postcard::from_bytes::<LastTouch>(&bytes).unwrap(), touch);
