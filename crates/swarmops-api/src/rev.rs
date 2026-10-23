@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 /// optionally followed by `~N` for the N-th first-parent ancestor.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 #[serde(transparent)]
+#[non_exhaustive]
 pub struct Rev(pub String);
 
 impl Rev {

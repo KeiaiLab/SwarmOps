@@ -115,6 +115,7 @@ fn default_diff_context() -> u32 {
 
 /// `init`: create a store.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct InitReq {
     /// The directory to create the store in.
     pub path: String,
@@ -134,10 +135,12 @@ impl InitReq {
 
 /// `info`: describe the store. It has no options yet.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct InfoReq {}
 
 /// `init` and `info`: what the store is and holds.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RepoInfo {
     /// The store's id, fixed at `init`.
     pub repo_id: String,
@@ -176,6 +179,7 @@ impl RepoInfo {
 
 /// `whoami`: the identity the caller's mutations carry.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct IdentityInfo {
     /// `<family>/<instance>`; omitted for an anonymous caller.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -202,6 +206,7 @@ impl IdentityInfo {
 /// `commit`: record a changeset from an explicit change list. It moves no ref, unless
 /// `advance` names one.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CommitReq {
     /// The changeset to commit on top of. An explicit `parent` always wins; when it is omitted,
     /// the current head of the ref `advance` names is used, else of `main`, if that ref exists,
@@ -260,6 +265,7 @@ impl CommitReq {
 
 /// One change of a commit.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ChangeInput {
     /// The repository path: `/`-separated, relative to the root.
     pub path: String,
@@ -289,6 +295,7 @@ impl ChangeInput {
 /// What a change does to its path, in a commit's change list and a changeset's changes alike.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ChangeOp {
     /// Write the content at the path, creating or replacing the entry.
     Put,
@@ -299,6 +306,7 @@ pub enum ChangeOp {
 /// A `put`'s content, as an object with one key.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ContentInput {
     /// UTF-8 text, verbatim.
     Inline(String),
@@ -317,6 +325,7 @@ pub enum ContentInput {
 /// The kind of entry a `put` writes.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ModeInput {
     /// A regular file (git mode 100644).
     File,
@@ -328,6 +337,7 @@ pub enum ModeInput {
 
 /// `commit`: the changeset that was recorded.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CommitResp {
     /// The new changeset's id.
     pub changeset: String,
@@ -381,6 +391,7 @@ impl CommitResp {
 
 /// `commit` with `advance`: the ref's move, made in the commit's own transaction.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Advanced {
     /// The ref.
     pub name: String,
@@ -411,6 +422,7 @@ impl Advanced {
 /// change list can name it by its id (`{"blob": id}`) instead of carrying its bytes. The blob is
 /// durable once the call returns; until a commit names it, nothing references it.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BlobPutReq {
     /// The content: inline, base64 or a client file, at most 512 MiB (more is `E_TOO_LARGE` with
     /// `scope` `put`). A `blob` names content the store holds already, and is `E_INVALID_ARG`
@@ -427,6 +439,7 @@ impl BlobPutReq {
 
 /// `blob_put`: the blob stored.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BlobPutResp {
     /// The blob's id, which a change names it by: `{"blob": id}`.
     pub blob: String,
@@ -450,6 +463,7 @@ impl BlobPutResp {
 
 /// `blob_has` (CLI `blob has`): which of some blobs the store holds.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BlobHasReq {
     /// The blob ids, 64 hex digits each; one that is not is `E_INVALID_ARG`.
     pub ids: Vec<String>,
@@ -464,6 +478,7 @@ impl BlobHasReq {
 
 /// `blob_has`: the blobs the store holds, of those asked for.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BlobHasResp {
     /// The ids of `ids` that the store holds a blob under, in lowercase hex, in the order first
     /// given, each once; an id of another kind of object (a tree, a changeset) is not among them.
@@ -479,6 +494,7 @@ impl BlobHasResp {
 
 /// `resolve_rev` (CLI `resolve`): the changeset a revision names, as every operation resolves it.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ResolveRevReq {
     /// The revision to resolve.
     pub rev: Rev,
@@ -493,6 +509,7 @@ impl ResolveRevReq {
 
 /// `resolve_rev` (CLI `resolve`): the changeset a revision names, and what kind of revision it is.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ResolvedRev {
     /// The full id of the changeset the revision names.
     pub id: String,
@@ -514,6 +531,7 @@ impl ResolvedRev {
 /// the edits not committed yet (`ws:<name>`).
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum RevKind {
     /// Exactly a ref's name (`main`, `release/<name>`): `id` is what the ref names now, and moves
     /// when the ref does.
@@ -526,6 +544,7 @@ pub enum RevKind {
 /// `read_file` (CLI `cat`): read one file at a revision, without a checkout: from an offset, or
 /// a range of its lines.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ReadFileReq {
     /// The revision to read at.
     pub rev: Rev,
@@ -562,6 +581,7 @@ impl ReadFileReq {
 
 /// A range of a file's lines, numbered from 1: `first` to `last`, both included.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct LineRange {
     /// The range's first line: at least 1.
     #[schemars(range(min = 1))]
@@ -581,6 +601,7 @@ impl LineRange {
 
 /// `read_file` (CLI `cat`): a file's content, or the part of it the request names.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FileContent {
     /// The blob's id.
     pub blob: String,
@@ -641,6 +662,7 @@ impl FileContent {
 /// How `FileContent.content` encodes bytes.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ContentEncoding {
     /// The bytes are UTF-8 text, and `content` is that text.
     Utf8,
@@ -651,6 +673,7 @@ pub enum ContentEncoding {
 /// What a file is; never a directory.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum FileKind {
     /// A regular file.
     File,
@@ -663,6 +686,7 @@ pub enum FileKind {
 /// What a tree entry is.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum EntryKindOut {
     /// A regular file.
     File,
@@ -677,6 +701,7 @@ pub enum EntryKindOut {
 /// `read_tree` (CLI `ls`): list one directory at a revision, without a checkout, a page at a
 /// time; with `depth`, the directories below it too.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ReadTreeReq {
     /// The revision to read at.
     pub rev: Rev,
@@ -715,6 +740,7 @@ impl ReadTreeReq {
 /// entries below it to the request's `depth`, each directory's entries by name bytes (at `depth`
 /// 1, the tree's order).
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TreeListing {
     /// The entries.
     pub entries: Vec<TreeEntryOut>,
@@ -739,6 +765,7 @@ impl TreeListing {
 
 /// One entry of a listing.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TreeEntryOut {
     /// The entry's name: one path component.
     pub name: String,
@@ -771,6 +798,7 @@ impl TreeEntryOut {
 
 /// `show`: one changeset in full.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ShowReq {
     /// The changeset to show.
     pub rev: Rev,
@@ -793,6 +821,7 @@ impl ShowReq {
 /// `show`: a changeset's header, changes and metadata. Byte strings are decoded as UTF-8, with
 /// invalid bytes replaced, except metadata values (see `metadata`).
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ChangesetDetail {
     /// The changeset's id.
     pub id: String,
@@ -875,6 +904,7 @@ impl ChangesetDetail {
 
 /// Whom a changeset is attributed to (operations spec §5).
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Attribution {
     /// The agent that wrote it: the changeset's `agent` metadata, or `unknown/unknown` for a
     /// changeset that records none.
@@ -900,6 +930,7 @@ impl Attribution {
 
 /// A changeset's git signatures: git-fidelity data for import and export.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Signatures {
     /// The git author.
     pub author: SignatureOut,
@@ -916,6 +947,7 @@ impl Signatures {
 
 /// A git signature: who, and when.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SignatureOut {
     /// The name; the agent name for a native changeset.
     pub name: String,
@@ -946,6 +978,7 @@ impl SignatureOut {
 
 /// One entry of a changeset's changes.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ChangeOut {
     /// The repository path.
     pub path: String,
@@ -973,6 +1006,7 @@ impl ChangeOut {
 
 /// `log`: history along first parents, a page at a time.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LogReq {
     /// Where to start; `main` when omitted.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1007,6 +1041,7 @@ impl Default for LogReq {
 
 /// `log`: a page of changesets, newest first, following first parents.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LogPage {
     /// The changesets.
     pub entries: Vec<ChangesetSummary>,
@@ -1031,6 +1066,7 @@ impl LogPage {
 
 /// One changeset of a log.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ChangesetSummary {
     /// The changeset's id.
     pub id: String,
@@ -1066,6 +1102,7 @@ impl ChangesetSummary {
 /// `path_history` (CLI `history`): the changesets that changed what a path holds, newest first,
 /// following first parents, a page at a time.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PathHistoryReq {
     /// Where to start; `main` when omitted.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1098,6 +1135,7 @@ impl PathHistoryReq {
 
 /// `path_history` (CLI `history`): a page of a path's history, newest first.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PathHistoryPage {
     /// The path, without a trailing `/`.
     pub path: String,
@@ -1125,6 +1163,7 @@ impl PathHistoryPage {
 
 /// One changeset of a path's history, and what the path holds after it.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PathHistoryEntry {
     /// The changeset's id.
     pub changeset: String,
@@ -1168,6 +1207,7 @@ impl PathHistoryEntry {
 
 /// `diff`: the files that differ between two revisions, in path order, a page at a time.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DiffReq {
     /// The revision to diff from: the old side.
     pub from: Rev,
@@ -1222,6 +1262,7 @@ impl DiffReq {
 /// What `diff` says of each file.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum DiffFormat {
     /// Its path and status.
     #[default]
@@ -1234,6 +1275,7 @@ pub enum DiffFormat {
 
 /// `diff`: a page of the files that differ between two revisions, in path order (by bytes).
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Diff {
     /// The changeset `from` named.
     pub from: String,
@@ -1273,6 +1315,7 @@ impl Diff {
 /// one deleted and one added. Which fields follow `status` depends on the request's `format`,
 /// and a field that says nothing is omitted.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FileDiff {
     /// The repository path.
     pub path: String,
@@ -1333,6 +1376,7 @@ impl FileDiff {
 /// What happened to a file between the two revisions.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum DiffStatus {
     /// It is in `to` only: in `from`, nothing or a directory is there.
     Added,
@@ -1348,6 +1392,7 @@ pub enum DiffStatus {
 /// A hunk of a unified diff: one or more changes and the unchanged lines around them, with the
 /// numbers of its header, `@@ -old_start,old_lines +new_start,new_lines @@`.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DiffHunk {
     /// The first old line it holds, counted from 1; when it holds none, the line before where
     /// they would be (0 at the top), as git prints it.
@@ -1383,6 +1428,7 @@ impl DiffHunk {
 
 /// One line of a hunk.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DiffLineOut {
     /// Whether both sides have it, only the new one, or only the old one.
     pub op: LineOp,
@@ -1404,6 +1450,7 @@ impl DiffLineOut {
 /// Which side of a diff a hunk's line is on.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum LineOp {
     /// Both: an unchanged line around a change.
     Context,
@@ -1415,10 +1462,12 @@ pub enum LineOp {
 
 /// `ref list`: list every ref. It has no options yet.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RefListReq {}
 
 /// `ref list`: every ref.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RefListResp {
     /// The refs.
     pub refs: Vec<RefOut>,
@@ -1433,6 +1482,7 @@ impl RefListResp {
 
 /// One ref.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RefOut {
     /// `main` or `release/<name>`.
     pub name: String,
@@ -1457,6 +1507,7 @@ impl RefOut {
 /// `expected_old` and `create`; both or neither is `E_INVALID_ARG`.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 #[schemars(transform = one_of_expected_old_and_create)]
+#[non_exhaustive]
 pub struct RefSetReq {
     /// The ref: `main` or `release/<name>`.
     pub name: String,
@@ -1509,6 +1560,7 @@ fn one_of_expected_old_and_create(schema: &mut schemars::Schema) {
 
 /// `ref set` and `ref delete`: the move that was made.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RefSetResp {
     /// The ref.
     pub name: String,
@@ -1544,6 +1596,7 @@ impl RefSetResp {
 
 /// `ref delete`: remove a ref by compare-and-swap.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RefDeleteReq {
     /// The ref.
     pub name: String,
@@ -1569,6 +1622,7 @@ impl RefDeleteReq {
 
 /// `verify`: check the whole store's consistency.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct VerifyReq {
     /// Re-hash every object, and check every derived value of the built-in derivations (the
     /// first-parent skip lists, the last touches of paths) against the objects. When `false`,
@@ -1580,6 +1634,7 @@ pub struct VerifyReq {
 
 /// `verify`: what the consistency check found.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct VerifyReport {
     /// How many objects were checked.
     pub objects_checked: u64,
@@ -1611,6 +1666,7 @@ impl VerifyReport {
 /// names. The keys its kind does not use are omitted; the line at the same index of `problems`
 /// says the same for a reader. Ids are lowercase hex.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct VerifyFinding {
     /// What is damaged: `corrupt_object`, `missing_object`, `missing_parent`, `root_mismatch`,
     /// `dangling_ref`, `corrupt_ref`, `index_mismatch`, `journal_corrupt`, `meta_corrupt`,
@@ -1703,6 +1759,7 @@ fn default_target_ref() -> String {
 /// `target_ref` moves to the changeset of `git_ref`'s commit. It runs on the caller's host, as
 /// `init` does: no server receives this request, and it is no MCP tool.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct GitImportReq {
     /// The git repository to read, on the caller's host: its directory, absolute or relative to
     /// the caller's working directory (a bare repository, or a work tree with its `.git`). The
@@ -1747,6 +1804,7 @@ impl GitImportReq {
 /// commit's own git id.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum LossyClass {
     /// A submodule's entry (git mode 160000): dropped.
     Gitlinks,
@@ -1794,6 +1852,7 @@ impl LossyClass {
 
 /// `git import`: what the import brought in, and where the target ref stands.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct GitImportResp {
     /// How many commits became changesets in this import.
     pub imported: u64,
@@ -1856,6 +1915,7 @@ impl GitImportResp {
 
 /// `git import`: a commit taken lossily, and what it lost.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LossyCommitOut {
     /// The git commit: its id, 40 lowercase hex digits.
     pub commit: String,
@@ -1896,6 +1956,7 @@ fn default_branch() -> String {
 /// on the caller's host, as `git import` does: no server receives this request, and it is no MCP
 /// tool.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct GitExportReq {
     /// The git repository to write, on the caller's host: its directory, absolute or relative to
     /// the caller's working directory (a bare repository, or a work tree with its `.git`). It
@@ -1936,6 +1997,7 @@ impl GitExportReq {
 
 /// `git export`: what the export wrote, and where the branch stands.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct GitExportResp {
     /// How many commits this export wrote to the repository: the commits of the ref's history
     /// that the branch's last export did not reach and the repository did not hold. A branch that
@@ -2007,6 +2069,7 @@ impl GitExportResp {
 /// that reads find them stored. It writes only the store's cache of derived values, so it takes
 /// no identity.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DeriveReq {
     /// Go on after this journal frame: a previous call's `next`. From the journal's first frame
     /// when omitted.
@@ -2032,6 +2095,7 @@ impl Default for DeriveReq {
 /// `derive`: how many values one call derived, how many the store held already, and where to
 /// go on.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DeriveResp {
     /// How many values it derived: of each eager derivation, one for each changeset its frames
     /// record whose value the store lacked. Values those needed on the way, an older
@@ -2100,6 +2164,7 @@ fn default_max_changesets() -> usize {
 /// head, so the target stays linear. A conflict is the error `E_CONFLICT`, with the report in
 /// `details.report`; nothing is recorded then.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LandReq {
     /// The changeset to land: the change's head.
     pub head: Rev,
@@ -2165,6 +2230,7 @@ impl LandReq {
 /// A land's resolutions (`land --resolve`): what to make of some paths of the merge of the change
 /// onto the target, decided against one of the target's heads.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ResolutionsInput {
     /// The target's head the resolutions were decided against: the conflict report's `theirs`,
     /// by its full 64-hex id. A resolution applies while the target holds its path as this
@@ -2188,6 +2254,7 @@ impl ResolutionsInput {
 /// and `delete` (anything else is `E_INVALID_ARG`, a rule the server checks), the rest of the
 /// merge as it merged.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ResolutionInput {
     /// What one side holds there: `ours`, the change's head, or `theirs`, the target's head.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2208,6 +2275,7 @@ pub struct ResolutionInput {
 /// One side of a land's merge.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Side {
     /// The change: its head.
     Ours,
@@ -2217,6 +2285,7 @@ pub enum Side {
 
 /// `land`: where the change landed. Ids are full.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LandResp {
     /// `landed`, or `replayed` when a land with the same `idempotency_key` had landed the change
     /// already.
@@ -2283,6 +2352,7 @@ impl LandResp {
 /// How a land ended.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum LandStatus {
     /// This request landed the change.
     Landed,
@@ -2294,6 +2364,7 @@ pub enum LandStatus {
 /// resolutions to it (operations spec §3): the report `E_CONFLICT` carries in `details.report`.
 /// `ours` is the change, `theirs` the target. Ids are full.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ConflictReport {
     /// The merge base: the changeset the change starts from.
     pub base: String,
@@ -2345,6 +2416,7 @@ impl ConflictReport {
 /// at that side's changeset; a side without a file at the path (deleted, never added, or a
 /// directory there) has none.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FileConflictOut {
     /// The file's repository path.
     pub path: String,
@@ -2391,6 +2463,7 @@ impl FileConflictOut {
 /// What kind of conflict a file has. `ours` is the change, `theirs` the target.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ConflictKindOut {
     /// Both sides edited the same lines of a text file, or lines next to each other.
     Content,
@@ -2412,6 +2485,7 @@ pub enum ConflictKindOut {
 /// are numbered from 1, and each side's range includes both ends, as `read_file` takes a range
 /// of lines.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct HunkOut {
     /// Its number in the file, from 0.
     pub id: u32,
@@ -2438,6 +2512,7 @@ impl HunkOut {
 /// One side's lines of a hunk: `first` to `last`, numbered from 1, both included. A side without
 /// lines there has `last` one less than `first`: its place is before line `first`.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LinesOut {
     /// The first line.
     pub first: u64,
@@ -2463,6 +2538,7 @@ impl LinesOut {
 /// `op_log` (CLI `op log`): the store's operations, newest first, a page at a time. An operation
 /// is one write transaction: a frame of the journal, numbered from 0 in commit order.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct OpLogReq {
     /// Start below this operation: the page holds the ones numbered less than it, so the last
     /// `op` of a page reads on from there. When omitted, from the newest.
@@ -2490,6 +2566,7 @@ impl Default for OpLogReq {
 
 /// `op_log` (CLI `op log`): a page of operations, newest first.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct OpLogPage {
     /// The operations.
     pub ops: Vec<OperationOut>,
@@ -2507,6 +2584,7 @@ impl OpLogPage {
 
 /// One operation: a write transaction, as the journal recorded it.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct OperationOut {
     /// Its number: its journal frame's, from 0 in commit order. `undo` takes it.
     pub op: u64,
@@ -2542,6 +2620,7 @@ impl OperationOut {
 /// What an operation did, read from what it recorded.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum OperationKind {
     /// It recorded changesets and moved no ref (`commit`).
     Commit,
@@ -2559,6 +2638,7 @@ pub enum OperationKind {
 
 /// A changeset an operation recorded.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct OpChangesetOut {
     /// Its id.
     pub id: String,
@@ -2593,6 +2673,7 @@ impl OpChangesetOut {
 
 /// A move of a ref, as the journal recorded it.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RefMoveOut {
     /// The ref.
     pub name: String,
@@ -2624,6 +2705,7 @@ impl RefMoveOut {
 /// `undo` (CLI `op undo`): restore every ref an operation moved to what it named before, by
 /// compare-and-swap, in one transaction: all of them or none. Changesets are never removed.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct UndoReq {
     /// The operation to undo: its `op` in the operation log.
     pub op: u64,
@@ -2638,6 +2720,7 @@ impl UndoReq {
 
 /// `undo` (CLI `op undo`): the moves that restored the refs.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct UndoResp {
     /// The operation undone.
     pub undone: u64,
@@ -2704,6 +2787,7 @@ fn default_check_timeout_s() -> u64 {
 /// resolutions are a land's (operations spec §3): a conflict is the error `E_CONFLICT`, with the
 /// report in `details.report`, and nothing is recorded then.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RebaseReq {
     /// The changeset to rebase: the change's head.
     pub head: Rev,
@@ -2746,6 +2830,7 @@ impl RebaseReq {
 
 /// `rebase`: the changeset that holds the change merged onto the ref's head. Ids are full.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RebaseResp {
     /// How the rebase ended.
     pub status: RebaseStatus,
@@ -2790,6 +2875,7 @@ impl RebaseResp {
 /// How a rebase ended.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum RebaseStatus {
     /// This request recorded the merged changeset.
     Rebased,
@@ -2804,6 +2890,7 @@ pub enum RebaseStatus {
 /// `blob_get` (M5): blobs by id, for a client that writes them out (a workspace's
 /// materialisation). Not an MCP tool.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BlobGetReq {
     /// The blob ids, 64 hex digits each; one that is not is `E_INVALID_ARG`.
     pub ids: Vec<String>,
@@ -2825,6 +2912,7 @@ impl BlobGetReq {
 
 /// `blob_get`: the blobs found, in the order asked, and the ids the store holds no blob under.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BlobGetResp {
     /// The blobs, each whole.
     pub blobs: Vec<BlobOut>,
@@ -2847,6 +2935,7 @@ impl BlobGetResp {
 
 /// One blob's content, encoded as a file's is.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BlobOut {
     /// The blob's id.
     pub id: String,
@@ -2878,6 +2967,7 @@ impl BlobOut {
 /// Whether a workspace mutation's response carries the workspace's status after it.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum StatusAfter {
     /// The first page of the status, up to 100 changes.
     #[default]
@@ -2889,6 +2979,7 @@ pub enum StatusAfter {
 /// What a workspace's rebase does.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum WsRebaseAction {
     /// Rebase the workspace's chain onto the target's head.
     #[default]
@@ -2902,6 +2993,7 @@ pub enum WsRebaseAction {
 /// How a workspace lands.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum LandMode {
     /// Merge onto the target's head, wherever it has moved.
     Merge,
@@ -2913,6 +3005,7 @@ pub enum LandMode {
 /// `ws_create` (M5, client-side): make a workspace, a directory holding a sparse copy of a
 /// changeset's tree. The same request again is the same workspace (`created` false).
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsCreateReq {
     /// The workspace's name: 1 to 64 of `a-z`, `0-9`, `.`, `_` and `-`, not starting with `.`.
     pub name: String,
@@ -2958,6 +3051,7 @@ impl WsCreateReq {
 
 /// A workspace: where it is and what it holds.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsInfo {
     /// Its name.
     pub name: String,
@@ -3008,6 +3102,7 @@ impl WsInfo {
 
 /// `ws_status` (client-side): what changed in a workspace against its head.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsStatusReq {
     /// The workspace, by name.
     pub workspace: String,
@@ -3042,6 +3137,7 @@ impl WsStatusReq {
 /// A workspace's status: its changes against its head, a page at a time, and how far its target
 /// has moved since its base.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsStatus {
     /// The workspace's name.
     pub name: String,
@@ -3099,6 +3195,7 @@ impl WsStatus {
 /// A workspace's state.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum WsState {
     /// No rebase in progress.
     Clean,
@@ -3108,6 +3205,7 @@ pub enum WsState {
 
 /// One changed path of a workspace.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsChange {
     /// The repository path.
     pub path: String,
@@ -3132,6 +3230,7 @@ impl WsChange {
 /// What changed at a workspace path.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum WsChangeKind {
     /// A file the head does not hold.
     Added,
@@ -3147,6 +3246,7 @@ pub enum WsChangeKind {
 
 /// A workspace's rebase in progress.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsRebasing {
     /// The target's head it rebases onto.
     pub onto: String,
@@ -3167,6 +3267,7 @@ impl WsRebasing {
 /// `ws_diff` (client-side): a workspace's edits against its head, as the store's diff gives a
 /// diff (`from` the head, `to` `ws:<name>`).
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsDiffReq {
     /// The workspace, by name.
     pub workspace: String,
@@ -3208,6 +3309,7 @@ impl WsDiffReq {
 
 /// `ws_commit` (client-side): record a workspace's edits as one changeset on its head.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsCommitReq {
     /// The workspace, by name.
     pub workspace: String,
@@ -3239,6 +3341,7 @@ impl WsCommitReq {
 
 /// `ws_commit`: the changeset recorded.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsCommitResp {
     /// The new changeset: the workspace's head now.
     pub changeset: String,
@@ -3278,6 +3381,7 @@ impl WsCommitResp {
 /// `ws_rebase` (client-side): move a workspace's chain onto its target's head, as `rebase`
 /// records it, and its files with it.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsRebaseReq {
     /// The workspace, by name.
     pub workspace: String,
@@ -3311,6 +3415,7 @@ impl WsRebaseReq {
 
 /// `ws_rebase`: where the workspace stands now.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsRebaseResp {
     /// How the rebase ended; `None` after an abort.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3338,6 +3443,7 @@ impl WsRebaseResp {
 
 /// `ws_resolve` (client-side): mark conflicting paths of a rebase resolved.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsResolveReq {
     /// The workspace, by name.
     pub workspace: String,
@@ -3374,6 +3480,7 @@ impl WsResolveReq {
 
 /// `ws_resolve`: the paths resolved and those left.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsResolveResp {
     /// The paths this request resolved.
     pub resolved: Vec<String>,
@@ -3397,6 +3504,7 @@ impl WsResolveResp {
 
 /// The check a workspace's land runs.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsCheckInput {
     /// The command and its arguments, run without a shell in the workspace; when omitted, the
     /// repository's `.swarmops/workspaces.json` `check.argv`.
@@ -3420,6 +3528,7 @@ impl Default for WsCheckInput {
 /// `ws_land` (client-side): land a workspace's chain on its target; with a check, rebase, run
 /// the check there, and publish only the tree the check ran on.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsLandReq {
     /// The workspace, by name.
     pub workspace: String,
@@ -3465,6 +3574,7 @@ impl WsLandReq {
 
 /// `ws_land`: the land, and how many attempts it took.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsLandResp {
     /// The store's land.
     pub land: LandResp,
@@ -3488,6 +3598,7 @@ impl WsLandResp {
 
 /// `ws_materialize` (client-side): write out more of the tree.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsMaterializeReq {
     /// The workspace, by name.
     pub workspace: String,
@@ -3511,6 +3622,7 @@ impl WsMaterializeReq {
 
 /// `ws_materialize`: what was written.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsMaterializeResp {
     /// The prefixes added.
     pub materialized: Vec<String>,
@@ -3534,6 +3646,7 @@ impl WsMaterializeResp {
 
 /// `ws_discard` (client-side): restore paths from the workspace's head.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsDiscardReq {
     /// The workspace, by name.
     pub workspace: String,
@@ -3558,6 +3671,7 @@ impl WsDiscardReq {
 
 /// `ws_discard`: the paths restored.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsDiscardResp {
     /// The paths restored.
     pub discarded: Vec<String>,
@@ -3578,6 +3692,7 @@ impl WsDiscardResp {
 
 /// `ws_list` (client-side): the store's workspaces, from its registry.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsListReq {
     /// Also open each workspace, and report one whose directory is gone as an orphan.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -3586,6 +3701,7 @@ pub struct WsListReq {
 
 /// `ws_list`: the workspaces, by name.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsList {
     /// The workspaces.
     pub workspaces: Vec<WsInfo>,
@@ -3600,6 +3716,7 @@ impl WsList {
 
 /// `ws_info` (client-side): one workspace.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsInfoReq {
     /// The workspace, by name.
     pub workspace: String,
@@ -3616,6 +3733,7 @@ impl WsInfoReq {
 
 /// `ws_delete` (client-side, CLI only): remove a workspace's directory, then its entry.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsDeleteReq {
     /// The workspace, by name.
     pub workspace: String,
@@ -3640,6 +3758,7 @@ impl WsDeleteReq {
 
 /// `ws_delete`: what the deleted workspace left in the store.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct WsDeleteResp {
     /// The workspace's name.
     pub deleted: String,

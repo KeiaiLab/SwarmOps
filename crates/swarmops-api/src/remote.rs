@@ -48,6 +48,7 @@ fn default_sync_status_limit() -> usize {
 /// with the remote recorded and its followed branch imported into `main`. It needs an
 /// identity, as `git import` does: it moves `main`.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CloneReq {
     /// The remote's URL: `https://host/path`, `ssh://[user@]host/path` or the scp form
     /// `user@host:path`. A URL with a password, another scheme, or one that starts with `-` is
@@ -92,6 +93,7 @@ impl CloneReq {
 
 /// `clone`: the store made, the remote recorded, its fetch, and where `main` stands.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CloneResp {
     /// The new store.
     pub repo: RepoInfo,
@@ -124,6 +126,7 @@ impl CloneResp {
 /// `remote add`: record a git remote in the store. It needs no identity: it writes the store's
 /// remote configuration and its mirror, no store object.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RemoteAddReq {
     /// The remote's name: lowercase letters, digits, `.`, `_` and `-`, 1 to 63 of them,
     /// starting with a letter or a digit, not ending in `.`, and not `status`.
@@ -157,6 +160,7 @@ impl RemoteAddReq {
 
 /// A remote the store records.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RemoteInfo {
     /// The remote's name.
     pub name: String,
@@ -198,6 +202,7 @@ impl RemoteInfo {
 
 /// `remote remove`: forget a remote, and the mirror's refs of it. No changeset is removed.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RemoteRemoveReq {
     /// The remote's name.
     pub name: String,
@@ -212,6 +217,7 @@ impl RemoteRemoveReq {
 
 /// `remote remove`: the remote forgotten.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RemoteRemoveResp {
     /// The remote's name.
     pub name: String,
@@ -231,10 +237,12 @@ impl RemoteRemoveResp {
 
 /// `remote list`: the remotes the store records.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RemoteListReq {}
 
 /// `remote list`: every remote, in the order they were added.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RemoteList {
     /// The remotes; empty when the store has none.
     pub remotes: Vec<RemoteInfo>,
@@ -253,6 +261,7 @@ impl RemoteList {
 /// branch's commits into the store as changesets. No ref of the store moves, so it needs no
 /// identity.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FetchReq {
     /// The remote, by its name.
     pub remote: String,
@@ -269,6 +278,7 @@ impl FetchReq {
 
 /// A remote branch's head: its commit, and the changeset that commit is in the store.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RemoteHead {
     /// The commit's git id, 40 lowercase hex digits.
     pub sha: String,
@@ -288,6 +298,7 @@ impl RemoteHead {
 
 /// A remote branch a fetch saw move, appear or go.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BranchUpdate {
     /// The branch, by its short name.
     pub branch: String,
@@ -312,6 +323,7 @@ impl BranchUpdate {
 
 /// `fetch`: where the followed branch stands, and what moved.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FetchResp {
     /// The remote, by its name.
     pub remote: String,
@@ -366,6 +378,7 @@ impl FetchResp {
 /// moves only from the head the last fetch saw to a descendant of it. A push is an export, so
 /// it needs no identity.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PushReq {
     /// The remote, by its name.
     pub remote: String,
@@ -392,6 +405,7 @@ impl PushReq {
 /// What a push did to the remote branch.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum PushStatus {
     /// The branch moved to the export of the ref's head.
     Pushed,
@@ -403,6 +417,7 @@ pub enum PushStatus {
 
 /// `push`: where the remote branch stands.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PushResp {
     /// The remote, by its name.
     pub remote: String,
@@ -457,6 +472,7 @@ impl PushResp {
 /// Whether `sync` sends what it landed.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum SyncMode {
     /// Land onto the remote's head, move `main`, and push it.
     #[default]
@@ -468,6 +484,7 @@ pub enum SyncMode {
 /// `sync`: fetch a remote, land `main`'s unpublished changes onto the remote's head, move
 /// `main` there and push it. It moves `main`, so it needs an identity.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SyncReq {
     /// The remote, by its name.
     pub remote: String,
@@ -495,6 +512,7 @@ impl SyncReq {
 /// What a sync did.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum SyncStatusKind {
     /// `main` and the remote held the same: nothing moved.
     UpToDate,
@@ -508,6 +526,7 @@ pub enum SyncStatusKind {
 
 /// An unpublished change a sync landed onto the remote's head.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PublishedChange {
     /// The change as `main` held it.
     pub changeset: String,
@@ -535,6 +554,7 @@ impl PublishedChange {
 /// How a sync found that the remote holds a change already.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum DropReason {
     /// A commit the remote's head reaches names it in a `SwarmOps-Changeset`,
     /// `SwarmOps-Squashed-From` or `SwarmOps-Land-Key` line.
@@ -546,6 +566,7 @@ pub enum DropReason {
 /// An unpublished change a sync dropped, since the remote holds it already. It stays in the
 /// store, and an undo of the sync's ref move brings it back on `main`.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DroppedChange {
     /// The change.
     pub changeset: String,
@@ -565,6 +586,7 @@ impl DroppedChange {
 
 /// A head before and after a sync.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct HeadMove {
     /// What it named before; omitted when it did not exist.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -585,6 +607,7 @@ impl HeadMove {
 
 /// `sync`: what it landed, dropped and sent, and where `main` and the remote stand.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SyncResp {
     /// The remote, by its name.
     pub remote: String,
@@ -640,6 +663,7 @@ impl SyncResp {
 /// `sync status`: how `main` and a remote's followed branch stand, as the last fetch saw the
 /// remote. It reads only the store and its mirror: no network, no lock.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SyncStatusReq {
     /// The remote, by its name.
     pub remote: String,
@@ -660,6 +684,7 @@ impl SyncStatusReq {
 
 /// `sync status`: what is unpublished, and how far behind `main` is.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SyncStatus {
     /// The remote, by its name.
     pub remote: String,

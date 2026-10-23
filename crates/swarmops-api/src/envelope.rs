@@ -16,6 +16,7 @@ pub const API_VERSION: u32 = 1;
 /// Exactly one of `result` and `error` is present; the other is omitted, never written as null.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 #[schemars(rename = "Envelope", transform = exactly_one_outcome)]
+#[non_exhaustive]
 pub struct Envelope<T> {
     /// Whether the operation succeeded.
     pub ok: bool,
@@ -90,6 +91,7 @@ fn exactly_one_outcome(schema: &mut schemars::Schema) {
 
 /// What the envelope reports besides the outcome.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Meta {
     /// The store as the user named it, for display; omitted when the command used no store.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -130,6 +132,7 @@ impl Meta {
 /// What a write's recovery repaired (`meta.recovered`), as offsets and counts in the store's
 /// metadata files, with no paths: the storage spec (§2 rule 3, §3) says what each repair is.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RecoveredOut {
     /// The torn tail cut off the end of the journal, if there was one: the bytes of a transaction
     /// that never reached its commit point; omitted when nothing was cut.
@@ -158,6 +161,7 @@ pub struct RecoveredOut {
 
 /// Where the journal was cut (`meta.recovered.log_cut`).
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LogCutOut {
     /// The journal's byte offset where the torn tail started, and where the journal ends now.
     pub at: u64,
