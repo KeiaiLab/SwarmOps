@@ -544,7 +544,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
             .iter()
             .map(|meta| (meta.id, meta.generation))
             .collect();
-        for RefFile { name, state } in ref_files {
+        for RefFile { name, state, .. } in ref_files {
             match state {
                 Ok(state) if targets_known && !self.generations.contains_key(&state.target) => {
                     self.refs.push(VerifyProblem::DanglingRef(name));
@@ -809,6 +809,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
                     EntryTarget::Leaf(_, blob) => {
                         self.blobs.entry(blob.0).or_insert(by);
                     }
+                    _ => return Err(RepoError::unknown_variant("EntryTarget")),
                 }
             }
         }
@@ -1055,13 +1056,13 @@ fn journal_changesets(frames: &[Frame]) -> Vec<(ChangesetMeta, u64)> {
                 parents,
             } = record
             {
-                let meta = ChangesetMeta {
-                    id: *id,
-                    seq: bytes::to_u64(changesets.len()),
-                    generation: *generation,
-                    delta_hash: *delta_hash,
-                    parents: parents.clone(),
-                };
+                let meta = ChangesetMeta::new(
+                    *id,
+                    bytes::to_u64(changesets.len()),
+                    *generation,
+                    *delta_hash,
+                    parents.clone(),
+                );
                 changesets.push((meta, frame.offset));
             }
         }

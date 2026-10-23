@@ -340,7 +340,7 @@ impl<O: ObjectStore> RawBatch<'_, O> {
             Some(root),
             &PathFilter::all(),
         )?);
-        let changeset = Changeset {
+        let changeset = Changeset::new(
             parents,
             root,
             delta,
@@ -349,21 +349,16 @@ impl<O: ObjectStore> RawBatch<'_, O> {
             message,
             extra_headers,
             metadata,
-        };
+        )?;
         let (object, delta_hash) = changeset.encode_hashed()?;
-        let id = ChangesetId(object.id());
+        let id = ChangesetId::new(object.id());
         // A changeset pushed twice is put once; the insert finds it the second time.
         if self.roots.insert(id, root).is_none() {
             self.objects.push(object);
         }
         self.changed.push(changeset.delta.len());
-        self.metas.push(ChangesetMeta {
-            id,
-            seq: 0,
-            generation: 0,
-            delta_hash,
-            parents: changeset.parents,
-        });
+        self.metas
+            .push(ChangesetMeta::new(id, 0, 0, delta_hash, changeset.parents));
         Ok(id)
     }
 

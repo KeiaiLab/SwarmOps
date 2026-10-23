@@ -250,10 +250,10 @@ impl<O: ObjectStore> Repo<O> {
         let mut at = root;
         for &dir in dirs {
             let tree = repo::tree(&self.objects, at)?;
-            match find(&tree, dir).map(|entry| entry.target) {
-                Some(EntryTarget::Dir(tree)) => at = tree,
-                Some(EntryTarget::Leaf(..)) | None => return Ok(None),
-            }
+            let Some(tree) = find(&tree, dir).and_then(|entry| entry.target.dir()) else {
+                return Ok(None);
+            };
+            at = tree;
         }
         Ok(Some(at))
     }
@@ -303,10 +303,10 @@ impl<O: ObjectStore> RepoRead<'_, O> {
         cs: ChangesetId,
         path: &RepoPath,
     ) -> Result<Option<(LeafKind, BlobId, Vec<u8>)>, RepoError> {
-        match self.entry_at(cs, path)? {
-            Some(EntryTarget::Leaf(kind, blob)) => Ok(Some((kind, blob, self.blob(blob)?))),
-            Some(EntryTarget::Dir(_)) | None => Ok(None),
-        }
+        let Some((kind, blob)) = self.entry_at(cs, path)?.and_then(EntryTarget::leaf) else {
+            return Ok(None);
+        };
+        Ok(Some((kind, blob, self.blob(blob)?)))
     }
 
     /// What `path` holds in changeset `cs`'s tree: a leaf (its kind and blob), a directory (its
@@ -357,6 +357,7 @@ impl<O: ObjectStore> RepoRead<'_, O> {
             let Some(ObjectStat {
                 kind: ObjectKind::Blob,
                 size,
+                ..
             }) = self.repo.objects.stat(id.0)?
             else {
                 read.missing.push(id);
@@ -421,6 +422,7 @@ impl<O: ObjectStore> RepoRead<'_, O> {
             Some(ObjectStat {
                 kind: ObjectKind::Blob,
                 size,
+                ..
             }) => Ok(Some(kept.read(kind, blob, size))),
             _ => Err(RepoError::MissingObject {
                 id: blob.0,
@@ -542,15 +544,13 @@ impl<O: ObjectStore> RepoRead<'_, O> {
                 return Ok(());
             };
             level.next = at + 1;
-            match target {
-                EntryTarget::Dir(tree) if level.depth < depth => {
-                    let path = below(level.path.as_ref(), name);
-                    let next = self.level(Some(path), level.depth + 1, tree)?;
-                    levels.push(next);
-                }
-                // A leaf, or a directory the listing does not enter: nothing below it is listed.
-                EntryTarget::Dir(_) | EntryTarget::Leaf(..) => return Ok(()),
-            }
+            // A leaf, or a directory the listing does not enter: nothing below it is listed.
+            let Some(tree) = target.dir().filter(|_| level.depth < depth) else {
+                return Ok(());
+            };
+            let path = below(level.path.as_ref(), name);
+            let next = self.level(Some(path), level.depth + 1, tree)?;
+            levels.push(next);
         }
         Ok(())
     }
@@ -564,6 +564,7 @@ impl<O: ObjectStore> RepoRead<'_, O> {
             Some(ObjectStat {
                 kind: ObjectKind::Blob,
                 size,
+                ..
             }) => Ok(size),
             _ => Err(RepoError::MissingObject {
                 id: id.0,
@@ -603,7 +604,7 @@ impl<O: ObjectStore> RepoRead<'_, O> {
         }
         match base.len() {
             64 => {
-                let id = ChangesetId(ObjectId::from_hex(base).expect("64 hex digits"));
+                let id = ChangesetId::new(ObjectId::from_hex(base).expect("64 hex digits"));
                 match read.changeset(id)? {
                     Some(_) => Ok(id),
                     None => Err(not_found()),

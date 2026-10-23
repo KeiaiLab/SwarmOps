@@ -95,7 +95,9 @@ impl Serialize for SkipList {
 impl<'de> Deserialize<'de> for SkipList {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let ids = Vec::<[u8; 32]>::deserialize(deserializer)?;
-        let ids = ids.into_iter().map(|id| ChangesetId(ObjectId(id)));
+        let ids = ids
+            .into_iter()
+            .map(|id| ChangesetId::new(ObjectId::new(id)));
         Ok(SkipList(ids.collect()))
     }
 }

@@ -295,6 +295,7 @@ impl LocalRepo {
         let identity = match claimed {
             LinkOutcome::Placed => identity,
             LinkOutcome::AlreadyExists => read_identity(&layout, &fs)?,
+            _ => return Err(RepoError::unknown_variant("LinkOutcome")),
         };
 
         // 3. One create at a time from here; one that waited finds FORMAT, linked by the
@@ -691,7 +692,7 @@ fn default_fs() -> (Arc<dyn FsOps>, Threads) {
             };
             (Arc::from(hooked.into_fs()), threads)
         }
-        None => (Arc::new(RealFs), Threads::Pool),
+        None => (Arc::new(RealFs::new()), Threads::Pool),
     }
 }
 

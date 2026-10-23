@@ -73,6 +73,7 @@ impl From<Option<EntryTarget>> for Held {
             Some(EntryTarget::Leaf(kind, blob)) => Held::Leaf(kind, blob),
             Some(EntryTarget::Dir(_)) => Held::Dir,
             None => Held::Nothing,
+            Some(_) => panic!("a variant this test does not know"),
         }
     }
 }
@@ -287,7 +288,7 @@ fn a_path_that_never_existed_has_no_history() {
         let logged = read.log_paths(from, &filter, 10).unwrap();
         assert_eq!(logged.len(), 0, "{p}: {logged:?}");
     }
-    let missing = ChangesetId(hash_object(ObjectKind::Changeset, b"never committed"));
+    let missing = ChangesetId::new(hash_object(ObjectKind::Changeset, b"never committed"));
     for got in [
         read.last_modified(missing, &path("README")).map(|_| ()),
         read.path_history(missing, &path("README"), 1).map(|_| ()),
@@ -654,12 +655,8 @@ fn a_crafted_last_touch_is_refused_where_a_reader_can_tell() {
     );
     let head = c[3];
     let key = postcard::to_stdvec(&PathKey::new(path("a"))).unwrap();
-    let slot = |cs: ChangesetId| DerivedSlot {
-        name: LastModified::NAME,
-        version: LastModified::VERSION,
-        subject: cs.0,
-        key: &key,
-    };
+    let slot =
+        |cs: ChangesetId| DerivedSlot::new(LastModified::NAME, LastModified::VERSION, cs.0, &key);
     let layout = Layout::new(&root);
     let place = |cs: ChangesetId, toucher: Option<ChangesetId>| {
         let file = layout.derived_path(&slot(cs));
@@ -669,7 +666,7 @@ fn a_crafted_last_touch_is_refused_where_a_reader_can_tell() {
         let value = postcard::to_stdvec(&LastTouch::new(toucher)).unwrap();
         assert!(repo.derived_store().put(&slot(cs), &value).unwrap());
     };
-    let unknown = ChangesetId(hash_object(ObjectKind::Changeset, b"in no store"));
+    let unknown = ChangesetId::new(hash_object(ObjectKind::Changeset, b"in no store"));
     let a_filter = || PathFilter::under(vec![path("a")]);
 
     for (at, toucher, what) in [

@@ -54,19 +54,20 @@ const LANDER: &str = "test/lander";
 fn new_store() -> (TempDir, Utf8PathBuf, LocalRepo) {
     let dir = tempfile::tempdir().unwrap();
     let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
-    let repo = LocalRepo::create_with_fs(&root, "test", checked(RealFs)).unwrap();
+    let repo = LocalRepo::create_with_fs(&root, "test", checked(RealFs::new())).unwrap();
     (dir, root, repo)
 }
 
 /// The lander's signature: fixed, so that the same land makes the same changeset.
 fn lander() -> Signature {
-    Signature {
-        name: LANDER.as_bytes().to_vec(),
-        email: b"lander@test.swarmops.local".to_vec(),
-        secs: 1_760_000_100,
-        offset_secs: 0,
-        negative_zero: false,
-    }
+    Signature::new(
+        LANDER.as_bytes().to_vec(),
+        b"lander@test.swarmops.local".to_vec(),
+        1_760_000_100,
+        0,
+        false,
+    )
+    .unwrap()
 }
 
 /// A land of `head` onto `main` by [`lander`], with the defaults ([`LandRequest::new`]).
@@ -120,7 +121,7 @@ fn main_head(repo: &LocalRepo) -> ChangesetId {
 
 /// How many frames the journal of the store at `root` lists.
 fn frame_count(root: &Utf8Path) -> u64 {
-    Journal::open(&Layout::new(root), Arc::new(RealFs))
+    Journal::open(&Layout::new(root), Arc::new(RealFs::new()))
         .unwrap()
         .frame_count()
         .unwrap()
@@ -800,14 +801,18 @@ impl Racer {
         if landed.len() >= self.races {
             return;
         }
-        let other = LocalRepo::open_with_fs(&self.root, checked(RealFs)).unwrap();
+        let other = LocalRepo::open_with_fs(&self.root, checked(RealFs::new())).unwrap();
         let (head, n) = (main_head(&other), landed.len());
         landed.push(advance(&other, OTHER, &[head], (self.change)(n)));
     }
 
     /// A handle on the store whose lands this racer races, under the order checker.
     fn open(self: &Arc<Self>) -> LocalRepo {
-        LocalRepo::open_with_fs(&self.root, checked(Watched(Arc::clone(self), RealFs))).unwrap()
+        LocalRepo::open_with_fs(
+            &self.root,
+            checked(Watched(Arc::clone(self), RealFs::new())),
+        )
+        .unwrap()
     }
 }
 
@@ -1384,7 +1389,7 @@ mod resolutions {
 
         let never = blob(b"never stored\n");
         let tree = repo.changeset(x).unwrap().unwrap().changeset.root;
-        for id in [never, BlobId(tree.0)] {
+        for id in [never, BlobId::new(tree.0)] {
             match repo.land(named(id)) {
                 Err(RepoError::MissingBlob {
                     path: at,
@@ -1455,7 +1460,7 @@ fn a_replay_is_decided_under_the_lock_after_the_tail_check() {
     drop(repo);
     let listed = frame_count(&root);
 
-    let repo = LocalRepo::open_with_fs(&root, checked(RealFs)).unwrap();
+    let repo = LocalRepo::open_with_fs(&root, checked(RealFs::new())).unwrap();
     let again = repo.land(keyed(head, "key-1")).unwrap();
     assert_eq!(
         (again.status, again.landed),
@@ -1499,7 +1504,7 @@ const REPORT: &str = "land-child: ";
 fn child() -> Option<(Utf8PathBuf, ChangesetId)> {
     let root = std::env::var(CHILD_ROOT).ok()?;
     let head = std::env::var(CHILD_HEAD).expect("the head to land");
-    let head = ChangesetId(ObjectId::from_hex(&head).expect("a full id"));
+    let head = ChangesetId::new(ObjectId::from_hex(&head).expect("a full id"));
     Some((Utf8PathBuf::from(root), head))
 }
 
@@ -1540,7 +1545,7 @@ fn swept_template() -> (TempDir, Utf8PathBuf, Swept) {
     let copy = tempfile::tempdir().unwrap();
     let root = Utf8PathBuf::from_path_buf(copy.path().join("store")).unwrap();
     copy_dir(template.as_std_path(), root.as_std_path());
-    let repo = LocalRepo::open_with_fs(&root, checked(RealFs)).unwrap();
+    let repo = LocalRepo::open_with_fs(&root, checked(RealFs::new())).unwrap();
     let want = repo.land(keyed(head, SWEPT_KEY)).unwrap().landed;
     (dir, template, Swept { t0, head, want })
 }
@@ -1661,7 +1666,7 @@ fn land_crashing_at(template: &Utf8Path, swept: &Swept, k: u64) -> (bool, bool) 
         String::from_utf8_lossy(&child.stderr)
     );
     let what = format!("k={k}");
-    let repo = LocalRepo::open_with_fs(&root, checked(RealFs)).unwrap();
+    let repo = LocalRepo::open_with_fs(&root, checked(RealFs::new())).unwrap();
     let landed = swept_landed(&repo, swept, &what);
     assert!(
         landed || !finished,
@@ -1778,7 +1783,7 @@ fn land_failing_at(template: &Utf8Path, swept: &Swept, k: u64, failure: &str) ->
             None => Ended::Failed(report.strip_prefix("failed ").unwrap().to_owned()),
         }
     };
-    let repo = LocalRepo::open_with_fs(&root, checked(RealFs)).unwrap();
+    let repo = LocalRepo::open_with_fs(&root, checked(RealFs::new())).unwrap();
     let landed = swept_landed(&repo, swept, &what);
     match &ended {
         Ended::Landed(_) => assert!(landed, "{what}: landed, but not on main"),

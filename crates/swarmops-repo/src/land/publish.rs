@@ -69,13 +69,13 @@ impl<O: ObjectStore> Repo<O> {
     /// journal append that fails ([`StoreError::NotCommitted`]) is returned as it is.
     pub(crate) fn publish(&self, p: &Publication) -> Result<Published, RepoError> {
         // Encoded outside the lock, as everything but the frame is.
-        let meta = ChangesetMeta {
-            id: p.id,
-            seq: 0,
-            generation: 0,
-            delta_hash: p.changeset.delta_hash()?,
-            parents: p.changeset.parents.clone(),
-        };
+        let meta = ChangesetMeta::new(
+            p.id,
+            0,
+            0,
+            p.changeset.delta_hash()?,
+            p.changeset.parents.clone(),
+        );
         let mut write = self.meta.write()?;
         write.insert_changeset(meta).map_err(|e| match e {
             StoreError::MissingParent(parent) => RepoError::UnknownParent(parent),
@@ -96,6 +96,7 @@ impl<O: ObjectStore> Repo<O> {
             CasResult::Mismatch { actual: None } => {
                 return Err(RepoError::NotFound(p.target.clone()));
             }
+            _ => return Err(RepoError::unknown_variant("CasResult")),
         }
         let mut warnings = Vec::new();
         match write.commit() {

@@ -162,7 +162,7 @@ impl Resolving {
                 Resolution::Take(side) => Makes::Take(side),
                 Resolution::Put { kind, content } => Makes::Put {
                     kind,
-                    blob: BlobId(swarmops_core::hash_object(ObjectKind::Blob, &content)),
+                    blob: BlobId::new(swarmops_core::hash_object(ObjectKind::Blob, &content)),
                     bytes: Some(content),
                 },
                 Resolution::PutBlob { kind, id } => {
@@ -246,13 +246,10 @@ impl Resolving {
                     .into_iter()
                     .filter(|entry| entry.path != at.path)
                     .collect();
-                    let put = Leaf { kind, blob: *blob };
+                    let put = Leaf::new(kind, *blob);
                     if held != Some(put) {
-                        entries.push(DeltaEntry {
-                            path: at.path.clone(),
-                            op: DeltaOp::Put { kind, id: *blob },
-                            renamed_from: None,
-                        });
+                        let op = DeltaOp::Put { kind, id: *blob };
+                        entries.push(DeltaEntry::new(at.path.clone(), op, None)?);
                         if let Some(bytes) = bytes {
                             merged.new_blobs.insert(*blob, bytes.clone());
                         }
@@ -275,10 +272,8 @@ impl Resolving {
 
 /// The leaf `entry` names, if it names one: not a directory, nor nothing.
 fn leaf(entry: Option<EntryTarget>) -> Option<Leaf> {
-    match entry {
-        Some(EntryTarget::Leaf(kind, blob)) => Some(Leaf { kind, blob }),
-        Some(EntryTarget::Dir(_)) | None => None,
-    }
+    let (kind, blob) = entry?.leaf()?;
+    Some(Leaf::new(kind, blob))
 }
 
 /// Whether `path` is `at` or a path below it.

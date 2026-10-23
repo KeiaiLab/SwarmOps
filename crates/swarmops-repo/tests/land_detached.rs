@@ -29,19 +29,20 @@ const LANDER: &str = "test/lander";
 fn new_store() -> (TempDir, Utf8PathBuf, LocalRepo) {
     let dir = tempfile::tempdir().unwrap();
     let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
-    let repo = LocalRepo::create_with_fs(&root, "test", checked(RealFs)).unwrap();
+    let repo = LocalRepo::create_with_fs(&root, "test", checked(RealFs::new())).unwrap();
     (dir, root, repo)
 }
 
 /// The lander's signature: fixed, so that the same land makes the same changeset.
 fn lander() -> Signature {
-    Signature {
-        name: LANDER.as_bytes().to_vec(),
-        email: b"lander@test.swarmops.local".to_vec(),
-        secs: 1_760_000_100,
-        offset_secs: 0,
-        negative_zero: false,
-    }
+    Signature::new(
+        LANDER.as_bytes().to_vec(),
+        b"lander@test.swarmops.local".to_vec(),
+        1_760_000_100,
+        0,
+        false,
+    )
+    .unwrap()
 }
 
 /// A detached land of the chain `(base, head]` onto `onto` by [`lander`]: no key, no chain given,
@@ -88,7 +89,7 @@ fn main_head(repo: &LocalRepo) -> ChangesetId {
 
 /// How many frames the journal of the store at `root` lists.
 fn frame_count(root: &Utf8Path) -> u64 {
-    Journal::open(&Layout::new(root), Arc::new(RealFs))
+    Journal::open(&Layout::new(root), Arc::new(RealFs::new()))
         .unwrap()
         .frame_count()
         .unwrap()

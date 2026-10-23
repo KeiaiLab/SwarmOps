@@ -80,9 +80,9 @@ fn applied(repo: &LocalRepo, theirs: ChangesetId, outcome: &MergeOutcome) -> Cha
         .delta
         .iter()
         .map(|entry| {
-            let op = match entry.op {
-                DeltaOp::Put { kind, id } => ChangeOp::PutBlob { kind, id },
-                DeltaOp::Delete => ChangeOp::Delete,
+            let op = match entry.op.put() {
+                Some((kind, id)) => ChangeOp::PutBlob { kind, id },
+                None => ChangeOp::Delete,
             };
             Change::new(entry.path.clone(), op)
         })
@@ -99,11 +99,9 @@ fn files_of(repo: &LocalRepo, cs: ChangesetId) -> BTreeMap<String, (LeafKind, Ve
         .unwrap();
     page.entries
         .into_iter()
-        .filter_map(|entry| match entry.target {
-            EntryTarget::Leaf(kind, id) => {
-                Some((entry.path.to_string(), (kind, read.blob(id).unwrap())))
-            }
-            EntryTarget::Dir(_) => None,
+        .filter_map(|entry| {
+            let (kind, id) = entry.target.leaf()?;
+            Some((entry.path.to_string(), (kind, read.blob(id).unwrap())))
         })
         .collect()
 }
@@ -118,10 +116,7 @@ fn files(entries: &[(&str, &[u8])]) -> BTreeMap<String, (LeafKind, Vec<u8>)> {
 
 /// The leaf of `kind` that holds `content`.
 fn leaf(kind: LeafKind, content: &[u8]) -> Leaf {
-    Leaf {
-        kind,
-        blob: blob(content),
-    }
+    Leaf::new(kind, blob(content))
 }
 
 /// The regular file that holds `content`.
@@ -131,14 +126,15 @@ fn file(content: &[u8]) -> Leaf {
 
 /// The delta entry that puts `leaf` at `p`.
 fn put_entry(p: &str, leaf: Leaf) -> DeltaEntry {
-    DeltaEntry {
-        path: path(p),
-        op: DeltaOp::Put {
+    DeltaEntry::new(
+        path(p),
+        DeltaOp::Put {
             kind: leaf.kind,
             id: leaf.blob,
         },
-        renamed_from: None,
-    }
+        None,
+    )
+    .unwrap()
 }
 
 /// A merge's outcome of `delta` and `conflicts`, with no new blob and no path auto-merged.
@@ -151,11 +147,7 @@ fn outcome_of(delta: Vec<DeltaEntry>, conflicts: Vec<FileConflict>) -> MergeOutc
 
 /// The delta entry that deletes `p`.
 fn delete_entry(p: &str) -> DeltaEntry {
-    DeltaEntry {
-        path: path(p),
-        op: DeltaOp::Delete,
-        renamed_from: None,
-    }
+    DeltaEntry::new(path(p), DeltaOp::Delete, None).unwrap()
 }
 
 /// The conflict at `p`, of `kind`, with the base's, ours' and theirs' leaves there.
@@ -164,13 +156,7 @@ fn conflict(
     kind: ConflictKind,
     (base, ours, theirs): (Option<Leaf>, Option<Leaf>, Option<Leaf>),
 ) -> FileConflict {
-    FileConflict {
-        path: path(p),
-        kind,
-        base,
-        ours,
-        theirs,
-    }
+    FileConflict::new(path(p), kind, base, ours, theirs)
 }
 
 /// A content merger for the merges that must not call one.
@@ -312,14 +298,14 @@ fn a_content_conflict_carries_its_hunks() {
         vec![put("src/lib.rs", b"a\nX\nc\n")],
     );
     let outcome = repo.merge_with(base, ours, theirs, &merge_content).unwrap();
-    let hunk = ConflictHunk {
-        base: 1..2,
-        ours: 1..2,
-        theirs: 1..2,
-        base_text: b"b\n".to_vec(),
-        ours_text: b"B\n".to_vec(),
-        theirs_text: b"X\n".to_vec(),
-    };
+    let hunk = ConflictHunk::new(
+        1..2,
+        1..2,
+        1..2,
+        b"b\n".to_vec(),
+        b"B\n".to_vec(),
+        b"X\n".to_vec(),
+    );
     let sides = (
         Some(file(b"a\nb\nc\n")),
         Some(file(b"a\nB\nc\n")),
@@ -379,14 +365,14 @@ fn add_add_conflicts_unless_identical() {
         vec![put("both", b"theirs\n"), put("same", b"x\n")],
     );
     let outcome = repo.merge_with(base, ours, theirs, &merge_content).unwrap();
-    let hunk = ConflictHunk {
-        base: 0..0,
-        ours: 0..1,
-        theirs: 0..1,
-        base_text: Vec::new(),
-        ours_text: b"ours\n".to_vec(),
-        theirs_text: b"theirs\n".to_vec(),
-    };
+    let hunk = ConflictHunk::new(
+        0..0,
+        0..1,
+        0..1,
+        Vec::new(),
+        b"ours\n".to_vec(),
+        b"theirs\n".to_vec(),
+    );
     let sides = (None, Some(file(b"ours\n")), Some(file(b"theirs\n")));
     assert_eq!(
         outcome,
@@ -436,14 +422,14 @@ mod held_hunks {
     fn hunks_of(n: usize) -> Vec<ConflictHunk> {
         let hunk = |i: usize| {
             let line = u32::try_from(2 * i).expect("a line number");
-            ConflictHunk {
-                base: line..line + 1,
-                ours: line..line + 1,
-                theirs: line..line + 1,
-                base_text: format!("l{i}\n").into_bytes(),
-                ours_text: format!("o{i}\n").into_bytes(),
-                theirs_text: format!("t{i}\n").into_bytes(),
-            }
+            ConflictHunk::new(
+                line..line + 1,
+                line..line + 1,
+                line..line + 1,
+                format!("l{i}\n").into_bytes(),
+                format!("o{i}\n").into_bytes(),
+                format!("t{i}\n").into_bytes(),
+            )
         };
         (0..n).map(hunk).collect()
     }
@@ -468,14 +454,10 @@ mod held_hunks {
             first.ours.start..last.ours.end,
             first.theirs.start..last.theirs.end,
         ];
-        ConflictHunk {
-            base_text: lines_of(sides[0], &base),
-            ours_text: lines_of(sides[1], &ours),
-            theirs_text: lines_of(sides[2], &theirs),
-            base,
-            ours,
-            theirs,
-        }
+        let base_text = lines_of(sides[0], &base);
+        let ours_text = lines_of(sides[1], &ours);
+        let theirs_text = lines_of(sides[2], &theirs);
+        ConflictHunk::new(base, ours, theirs, base_text, ours_text, theirs_text)
     }
 
     /// The hunks a conflict holds: a content conflict's.
@@ -618,12 +600,12 @@ fn a_kind_change_on_one_side_keeps_the_others_content() {
         outcome,
         outcome_of(vec![put_entry("run.sh", exec_v2)], Vec::new())
     );
-    let triple = PathTriple {
-        path: path("run.sh"),
-        base: Some(file(b"v1\n")),
-        ours: Some(leaf(LeafKind::Exec, b"v1\n")),
-        theirs: Some(file(b"v2\n")),
-    };
+    let triple = PathTriple::new(
+        path("run.sh"),
+        Some(file(b"v1\n")),
+        Some(leaf(LeafKind::Exec, b"v1\n")),
+        Some(file(b"v2\n")),
+    );
     assert_eq!(plan_path(&triple), PathPlan::Put(exec_v2));
     // Ours changed the content, theirs the kind.
     let swapped = repo
@@ -841,12 +823,7 @@ fn a_symlink_against_a_file_changed_on_both_sides_is_binary() {
     ];
     let triple = |p: &str, sides: &Sides| {
         let [base, ours, theirs] = sides.map(|(kind, bytes)| Some(leaf(kind, bytes)));
-        PathTriple {
-            path: path(p),
-            base,
-            ours,
-            theirs,
-        }
+        PathTriple::new(path(p), base, ours, theirs)
     };
     let mut wrong = Vec::new();
     let mut want = MergeOutcome::default();
@@ -1044,7 +1021,7 @@ fn merge_trees_with_merges_only_the_paths_it_is_given() {
         .unwrap();
     assert_eq!(nothing, MergeOutcome::default());
 
-    let unknown = ChangesetId(hash_object(ObjectKind::Changeset, b"never committed"));
+    let unknown = ChangesetId::new(hash_object(ObjectKind::Changeset, b"never committed"));
     for (b, o, t) in [
         (unknown, ours, theirs),
         (base, unknown, theirs),

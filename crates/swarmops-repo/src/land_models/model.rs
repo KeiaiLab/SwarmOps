@@ -4,8 +4,7 @@ use std::collections::BTreeSet;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use swarmops_core::{
-    Changeset, ChangesetId, DeltaEntry, DeltaOp, Hashed, LeafKind, ObjectId, ObjectKind, RepoPath,
-    Signature,
+    Changeset, ChangesetId, DeltaEntry, Hashed, LeafKind, ObjectId, ObjectKind, RepoPath, Signature,
 };
 use swarmops_store::{CasResult, ChangesetMeta, InsertOutcome, MetaWrite, ObjectStore, StoreError};
 
@@ -169,7 +168,7 @@ impl<O: ObjectStore> Repo<O> {
             }))
             .collect();
         let (candidates, mut contents) =
-            commit::candidate_delta(commit::sorted_changes(changes, Empty::Refuse)?);
+            commit::candidate_delta(commit::sorted_changes(changes, Empty::Refuse)?)?;
         let mut edit = TreeEdit::new(&self.objects, self.changeset_object(onto)?.root)?;
         let effective = edit.apply(&candidates)?;
         let delta: Vec<DeltaEntry> = candidates
@@ -186,26 +185,24 @@ impl<O: ObjectStore> Repo<O> {
         } = edit.finish()?;
         let put: BTreeSet<ObjectId> = delta
             .iter()
-            .filter_map(|entry| match entry.op {
-                DeltaOp::Put { id, .. } => Some(id.0),
-                DeltaOp::Delete => None,
-            })
+            .filter_map(|entry| entry.op.put())
+            .map(|(_, id)| id.0)
             .collect();
         contents.retain(|id, _| put.contains(id));
         metadata.sort_by(|a, b| a.0.cmp(&b.0));
-        let signature = signature(actor);
-        let changeset = Changeset {
-            parents: vec![onto],
+        let signature = signature(actor)?;
+        let changeset = Changeset::new(
+            vec![onto],
             root,
             delta,
-            author: signature.clone(),
-            committer: signature,
-            message: format!("land by {actor}").into_bytes(),
-            extra_headers: Vec::new(),
+            signature.clone(),
+            signature,
+            format!("land by {actor}").into_bytes(),
+            Vec::new(),
             metadata,
-        };
+        )?;
         let object = Hashed::new(ObjectKind::Changeset, changeset.encode()?);
-        let id = ChangesetId(object.id());
+        let id = ChangesetId::new(object.id());
         let mut batch: Vec<Hashed> = contents.into_values().collect();
         batch.extend(trees);
         batch.push(object);
@@ -394,6 +391,7 @@ fn publish_cas(write: &mut MetaWrite<'_>, p: &Publication) -> Result<(Published,
             actual: Some(actual),
         } => Ok((Published::Moved { actual }, false)),
         CasResult::Mismatch { actual: None } => Err(missing_target(&p.target)),
+        _ => Err(RepoError::unknown_variant("CasResult")),
     }
 }
 
@@ -403,13 +401,7 @@ fn insert(
     changeset: &Changeset,
     id: ChangesetId,
 ) -> Result<InsertOutcome, RepoError> {
-    let meta = ChangesetMeta {
-        id,
-        seq: 0,
-        generation: 0,
-        delta_hash: changeset.delta_hash()?,
-        parents: changeset.parents.clone(),
-    };
+    let meta = ChangesetMeta::new(id, 0, 0, changeset.delta_hash()?, changeset.parents.clone());
     write.insert_changeset(meta).map_err(|e| match e {
         StoreError::MissingParent(parent) => RepoError::UnknownParent(parent),
         other => other.into(),
@@ -435,6 +427,7 @@ fn move_ref(
             actual,
             recovered: Box::new(write.recovered()),
         }),
+        _ => Err(RepoError::unknown_variant("CasResult")),
     }
 }
 
@@ -466,17 +459,12 @@ fn missing_target(target: &str) -> RepoError {
 }
 
 /// A prepared changeset's author and committer: `actor`, now.
-fn signature(actor: &str) -> Signature {
+fn signature(actor: &str) -> Result<Signature, RepoError> {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| {
             i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
         });
-    Signature {
-        name: actor.as_bytes().to_vec(),
-        email: EMAIL.to_vec(),
-        secs,
-        offset_secs: 0,
-        negative_zero: false,
-    }
+    Signature::new(actor.as_bytes().to_vec(), EMAIL.to_vec(), secs, 0, false)
+        .map_err(RepoError::from)
 }

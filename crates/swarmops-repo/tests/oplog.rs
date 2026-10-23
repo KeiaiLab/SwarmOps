@@ -70,7 +70,7 @@ fn target(repo: &LocalRepo, name: &str) -> Option<ChangesetId> {
 
 /// How many frames the journal of the store at `root` lists.
 fn frame_count(root: &Utf8Path) -> u64 {
-    Journal::open(&Layout::new(root), Arc::new(RealFs))
+    Journal::open(&Layout::new(root), Arc::new(RealFs::new()))
         .unwrap()
         .frame_count()
         .unwrap()
@@ -193,7 +193,7 @@ fn publish(repo: &LocalRepo, parent: ChangesetId, metadata: &[(&str, &[u8])]) ->
 /// transaction of the metadata store's own (no operation of the repository's moves two refs
 /// at once); the frame's seq.
 fn two_ref_move(root: &Utf8Path, from: ChangesetId, to: ChangesetId) -> u64 {
-    let meta = MetaStore::open_with_fs(root, checked(RealFs)).unwrap();
+    let meta = MetaStore::open_with_fs(root, checked(RealFs::new())).unwrap();
     let mut write = meta.write().unwrap();
     for name in ["main", "release/r"] {
         let moved = write.cas_ref(name, Some(from), Some(to), ACTOR).unwrap();
@@ -229,18 +229,12 @@ fn op_log_lists_each_transaction_newest_first() {
     // Op 4 puts more changesets in the index's tail than it compacts at, so its commit compacts
     // the index, and appends op 5, the Compacted marker.
     let roots: Vec<ChangesetId> = (0..1025_u64)
-        .map(|n| ChangesetId(hash_object(ObjectKind::Changeset, &n.to_le_bytes())))
+        .map(|n| ChangesetId::new(hash_object(ObjectKind::Changeset, &n.to_le_bytes())))
         .collect();
-    let meta = MetaStore::open_with_fs(&root, checked(RealFs)).unwrap();
+    let meta = MetaStore::open_with_fs(&root, checked(RealFs::new())).unwrap();
     let mut write = meta.write().unwrap();
     for &id in &roots {
-        let root_changeset = ChangesetMeta {
-            id,
-            seq: 0,
-            generation: 0,
-            delta_hash: [0; 32],
-            parents: Vec::new(),
-        };
+        let root_changeset = ChangesetMeta::new(id, 0, 0, [0; 32], Vec::new());
         write.insert_changeset(root_changeset).unwrap();
     }
     assert!(write.commit().unwrap().checkpointed, "it compacted");
@@ -438,7 +432,7 @@ fn undo_of_a_frame_that_moved_a_ref_twice_restores_its_first_old() {
     let (_dir, root, repo) = new_repo();
     let [c1, c2, c3] = chain(&repo);
     cas(&repo, "main", None, Some(c1)); // op 3
-    let meta = MetaStore::open_with_fs(&root, checked(RealFs)).unwrap();
+    let meta = MetaStore::open_with_fs(&root, checked(RealFs::new())).unwrap();
     let mut write = meta.write().unwrap();
     write.cas_ref("main", Some(c1), Some(c2), ACTOR).unwrap();
     write.cas_ref("main", Some(c2), Some(c3), ACTOR).unwrap();
@@ -455,7 +449,7 @@ fn undo_of_a_frame_that_moved_a_ref_twice_restores_its_first_old() {
 fn undo_of_an_op_that_moved_no_ref_is_nothing_to_undo() {
     let (_dir, root, repo) = new_repo();
     let [c1, ..] = chain(&repo);
-    let meta = MetaStore::open_with_fs(&root, checked(RealFs)).unwrap();
+    let meta = MetaStore::open_with_fs(&root, checked(RealFs::new())).unwrap();
     let mut write = meta.write().unwrap();
     write.cas_ref("main", None, Some(c1), ACTOR).unwrap();
     write.cas_ref("main", Some(c1), None, ACTOR).unwrap();
@@ -537,11 +531,9 @@ fn an_undo_that_fails_after_its_commit_point_warns() {
 /// frame whose listing failed): when it restores, and with the error that blocks it.
 #[test]
 fn undo_reports_what_its_write_repaired() {
-    let listed_and_replayed = Recovered {
-        frames_listed: 1,
-        refs_replayed: 1,
-        ..Recovered::default()
-    };
+    let mut listed_and_replayed = Recovered::default();
+    listed_and_replayed.frames_listed = 1;
+    listed_and_replayed.refs_replayed = 1;
     let (_dir, root, repo) = new_repo();
     let [c1, c2, c3] = chain(&repo);
     cas(&repo, "main", None, Some(c1)); // op 3
@@ -641,7 +633,7 @@ fn undo_crashing_at(template: &Utf8Path, k: u64, c1: ChangesetId, c2: ChangesetI
         String::from_utf8_lossy(&child.stderr)
     );
 
-    let repo = LocalRepo::open_with_fs(&root, checked(RealFs)).unwrap();
+    let repo = LocalRepo::open_with_fs(&root, checked(RealFs::new())).unwrap();
     let both = || (target(&repo, "main"), target(&repo, "release/r"));
     let undone = match both() {
         (Some(main), Some(r)) if (main, r) == (c2, c2) => false,
