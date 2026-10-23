@@ -45,7 +45,9 @@ fn asking(session: &str, name: &str, cwd: &Utf8Path) -> HookCreate {
 
 /// The registry's entries of the fixture's store.
 fn entries(f: &Fixture) -> Vec<Entry> {
-    Registry::open(&f.root, Arc::new(RealFs)).list().unwrap()
+    Registry::open(&f.root, Arc::new(RealFs::new()))
+        .list()
+        .unwrap()
 }
 
 /// 16 hex digits of the BLAKE3 hash of `session`: what an entry the hook made records.
@@ -55,7 +57,7 @@ fn session_hash(session: &str) -> String {
 
 /// The workspace name of the directory `dir`.
 fn name_of(dir: &Utf8Path) -> String {
-    state::read(&RealFs, dir).unwrap().name
+    state::read(&RealFs::new(), dir).unwrap().name
 }
 
 /// Commits `.swarmops/workspaces.json` holding `json` on `parent`, `main` moved to it.
@@ -202,13 +204,8 @@ fn create_inside_a_workspace_starts_from_its_head_and_prefixes() {
     f.create("parent", &base, &["src"]);
     let parent = f.beside("parent");
     write(&parent, "src/a.txt", "committed\n");
-    let req = WsCommitReq {
-        workspace: "parent".to_owned(),
-        message: "parent's work".to_owned(),
-        paths: Vec::new(),
-        modes: std::collections::BTreeMap::new(),
-        status_after: StatusAfter::None,
-    };
+    let mut req = WsCommitReq::new("parent".to_owned(), "parent's work".to_owned());
+    req.status_after = StatusAfter::None;
     let head = swarmops_ws::commit(&f.ctx(), req).unwrap().changeset;
     write(&parent, "src/a.txt", "uncommitted\n");
 
@@ -219,7 +216,7 @@ fn create_inside_a_workspace_starts_from_its_head_and_prefixes() {
     let path = hook::worktree_create(&ctx, &input, &ws_root, Bootstrap::Skip).unwrap();
 
     // 3. The parent's head and prefixes, its committed content.
-    let child = state::read(&RealFs, &path).unwrap();
+    let child = state::read(&RealFs::new(), &path).unwrap();
     assert_eq!(
         (child.base.as_str(), child.head.as_str()),
         (head.as_str(), head.as_str())
@@ -247,7 +244,10 @@ fn create_outside_a_workspace_takes_the_repository_s_prefixes() {
     let ctx = anonymous(&f);
     let input = asking("abc123", "w", &cwd);
     let path = hook::worktree_create(&ctx, &input, &ws_root, Bootstrap::Skip).unwrap();
-    assert_eq!(state::read(&RealFs, &path).unwrap().prefixes, ["src"]);
+    assert_eq!(
+        state::read(&RealFs::new(), &path).unwrap().prefixes,
+        ["src"]
+    );
     assert_eq!(tree_of(&path), [file("src/a.txt", "a\n")]);
 }
 
@@ -322,9 +322,10 @@ fn remove_commits_uncommitted_edits_as_a_rescue_and_reports_it() {
     assert_eq!(report.head.to_string(), rescued);
     let shown = f
         .ops
-        .show(ShowReq {
-            rev: rescued.as_str().into(),
-            max_changes: 10,
+        .show({
+            let mut req = ShowReq::new(rescued.as_str());
+            req.max_changes = 10;
+            req
         })
         .unwrap();
     assert_eq!(shown.parents, std::slice::from_ref(&base));
@@ -332,13 +333,8 @@ fn remove_commits_uncommitted_edits_as_a_rescue_and_reports_it() {
         shown.message,
         "rescue: workspace feature-auth removed with uncommitted edits"
     );
-    let read = ReadFileReq {
-        rev: rescued.as_str().into(),
-        path: "src/a.txt".to_owned(),
-        offset: 0,
-        lines: None,
-        max_bytes: 1024,
-    };
+    let mut read = ReadFileReq::new(rescued.as_str(), "src/a.txt");
+    read.max_bytes = 1024;
     assert_eq!(f.ops.read_file(read).unwrap().content, "edited\n");
 
     // 4. A clean workspace leaves no rescue.
@@ -360,7 +356,7 @@ fn remove_of_a_directory_that_is_not_a_workspace_exits_zero() {
     let input = HookRemove::new(dir.clone());
 
     // 2. Not ours, and left as it was.
-    assert_eq!(hook::ours(&input, &RealFs).unwrap(), None);
+    assert_eq!(hook::ours(&input, &RealFs::new()).unwrap(), None);
     let refused = hook::worktree_remove(&anonymous(&f), &input).unwrap_err();
     assert_eq!(refused.code, "E_WS_NOT_FOUND", "{refused:?}");
     assert_eq!(tree_of(&dir), [file("keep.txt", "keep\n")]);
@@ -368,7 +364,7 @@ fn remove_of_a_directory_that_is_not_a_workspace_exits_zero() {
     // 3. A gone directory is none either.
     let gone = HookRemove::new(f.beside("gone"));
 
-    assert_eq!(hook::ours(&gone, &RealFs).unwrap(), None);
+    assert_eq!(hook::ours(&gone, &RealFs::new()).unwrap(), None);
 }
 
 /// The bootstrap copies the regular files `.worktreeinclude` matches into the new workspace;
@@ -495,11 +491,9 @@ fn delete_refuses_dirty_or_unlanded_work_without_force_or_rescue() {
     let dir = f.beside("w");
     write(&dir, "a.txt", "edited\n");
     let delete = |name: &str, force: bool, rescue: bool| {
-        let req = WsDeleteReq {
-            workspace: name.to_owned(),
-            force,
-            rescue,
-        };
+        let mut req = WsDeleteReq::new(name.to_owned());
+        req.force = force;
+        req.rescue = rescue;
         swarmops_ws::delete(&ctx, req)
     };
 
@@ -510,13 +504,8 @@ fn delete_refuses_dirty_or_unlanded_work_without_force_or_rescue() {
     assert!(dir.join("a.txt").exists());
 
     // 3. Committed but not landed: refused.
-    let req = WsCommitReq {
-        workspace: "w".to_owned(),
-        message: "work".to_owned(),
-        paths: Vec::new(),
-        modes: std::collections::BTreeMap::new(),
-        status_after: StatusAfter::None,
-    };
+    let mut req = WsCommitReq::new("w".to_owned(), "work".to_owned());
+    req.status_after = StatusAfter::None;
     let head = swarmops_ws::commit(&ctx, req).unwrap().changeset;
     let refused = delete("w", false, false).unwrap_err();
     assert_eq!(refused.code, "E_WS_DIRTY", "{refused:?}");

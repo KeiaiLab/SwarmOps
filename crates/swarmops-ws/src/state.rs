@@ -252,7 +252,7 @@ pub(crate) mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = Utf8Path::from_path(tmp.path()).unwrap();
         std::fs::create_dir(dir.join(SWARMWS_DIR)).unwrap();
-        let fs = RealFs;
+        let fs = RealFs::new();
 
         // 2. A clean workspace, then a rebasing one, each read back as written.
         let clean = sample("worker-3", State::Clean);

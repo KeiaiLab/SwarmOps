@@ -56,6 +56,7 @@ pub fn rebase(ctx: &Ctx<'_>, req: WsRebaseReq) -> Result<WsRebaseResp, OpError> 
         action,
         message,
         status_after,
+        ..
     } = req;
     let (mut ws, _held) = workspace::open_locked(ctx, &Locate::Name(workspace))?;
 
@@ -64,6 +65,7 @@ pub fn rebase(ctx: &Ctx<'_>, req: WsRebaseReq) -> Result<WsRebaseResp, OpError> 
         WsRebaseAction::Start => start(ctx, &mut ws, &onto, message)?,
         WsRebaseAction::Continue => resume(ctx, &mut ws)?,
         WsRebaseAction::Abort => abort(ctx, &mut ws)?,
+        _ => return Err(io_error::unknown_variant("WsRebaseAction")),
     };
     done.status_after = after::attach(ctx, &ws, status_after);
     Ok(done)
@@ -164,12 +166,7 @@ fn abort(ctx: &Ctx<'_>, ws: &mut Workspace) -> Result<WsRebaseResp, OpError> {
         pending::remove_pending(ctx.fs.as_ref(), &ws.dir)?;
     }
 
-    Ok(WsRebaseResp {
-        status: None,
-        changeset: head,
-        onto,
-        status_after: None,
-    })
+    Ok(WsRebaseResp::new(head, onto))
 }
 
 /// Rebases workspace `ws`'s chain onto the head of ref `onto` with `key` and `resolutions`, and
@@ -184,15 +181,12 @@ pub(crate) fn rebase_in(
     resolutions: Option<ResolutionsInput>,
 ) -> Result<RebaseResp, OpError> {
     // 1. The store's rebase of the chain from the base.
-    let req = RebaseReq {
-        head: ws.file.head.as_str().into(),
-        base: Some(ws.file.base.as_str().into()),
-        onto: onto.to_owned(),
-        message: None,
-        idempotency_key: Some(key.to_owned()),
-        max_conflict_bytes: DEFAULT_MAX_CONFLICT_BYTES,
-        resolutions,
-    };
+    let mut req = RebaseReq::new(ws.file.head.as_str());
+    req.base = Some(ws.file.base.as_str().into());
+    onto.clone_into(&mut req.onto);
+    req.idempotency_key = Some(key.to_owned());
+    req.max_conflict_bytes = DEFAULT_MAX_CONFLICT_BYTES;
+    req.resolutions = resolutions;
     let done = match ctx.store.rebase(&ws.who, req) {
         Ok(done) => done,
         Err(e) if e.code == ErrorCode::Conflict.as_str() => {
@@ -339,20 +333,14 @@ fn resolutions(
         };
         files.insert(path.clone(), resolution);
     }
-    Ok(ResolutionsInput {
-        against: against.into(),
-        files,
-    })
+    Ok(ResolutionsInput::new(against, files))
 }
 
 /// The resolution that takes `side`.
 fn taken(side: Side) -> ResolutionInput {
-    ResolutionInput {
-        take: Some(side),
-        content: None,
-        mode: None,
-        delete: false,
-    }
+    let mut out = ResolutionInput::default();
+    out.take = Some(side);
+    out
 }
 
 /// The resolution of `path` by what workspace `ws` holds there: its content, in its kind where
@@ -363,12 +351,9 @@ fn content_of(ctx: &Ctx<'_>, ws: &Workspace, path: &str) -> Result<ResolutionInp
     let host = ctx.host.as_ref();
     let meta = (host.symlink_metadata(&abs)).map_err(|e| materialize::host_failed(path, &e))?;
     let Some(meta) = meta else {
-        return Ok(ResolutionInput {
-            take: None,
-            content: None,
-            mode: None,
-            delete: true,
-        });
+        let mut out = ResolutionInput::default();
+        out.delete = true;
+        return Ok(out);
     };
 
     // 2. Its bytes and kind: a symlink's target, or a file's bytes and bit.
@@ -400,13 +385,11 @@ fn content_of(ctx: &Ctx<'_>, ws: &Workspace, path: &str) -> Result<ResolutionInp
         Ok(text) => ContentInput::Inline(text),
         Err(e) => ContentInput::Base64(STANDARD.encode(e.into_bytes())),
     };
-    let put = ctx.store.blob_put(&ws.who, BlobPutReq { content })?;
-    Ok(ResolutionInput {
-        take: None,
-        content: Some(ContentInput::Blob(put.blob)),
-        mode,
-        delete: false,
-    })
+    let put = ctx.store.blob_put(&ws.who, BlobPutReq::new(content))?;
+    let mut out = ResolutionInput::default();
+    out.content = Some(ContentInput::Blob(put.blob));
+    out.mode = mode;
+    Ok(out)
 }
 
 /// Settles the edits of workspace `ws` before a rebase or a land: none (but at `except`, the
@@ -508,12 +491,9 @@ fn report_of(e: &OpError) -> Result<ConflictReport, OpError> {
 
 /// The response of a rebase that ended with `done`.
 fn response(done: &RebaseResp) -> WsRebaseResp {
-    WsRebaseResp {
-        status: Some(done.status),
-        changeset: done.changeset.clone(),
-        onto: done.onto.clone(),
-        status_after: None,
-    }
+    let mut out = WsRebaseResp::new(done.changeset.clone(), done.onto.clone());
+    out.status = Some(done.status);
+    out
 }
 
 /// `E_INVALID_ARG` for a continue or an abort with no rebase in progress.

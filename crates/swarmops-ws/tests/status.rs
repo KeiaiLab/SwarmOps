@@ -22,13 +22,9 @@ fn written_ns(dir: &camino::Utf8Path) -> i64 {
 
 /// The status request of workspace `name`'s first page.
 fn page_of(name: &str) -> WsStatusReq {
-    WsStatusReq {
-        workspace: name.to_owned(),
-        paths: Vec::new(),
-        full: false,
-        limit: 500,
-        cursor: None,
-    }
+    let mut out = WsStatusReq::new(name.to_owned());
+    out.limit = 500;
+    out
 }
 
 /// Every kind of change is found, by the index and by hashing alike: a file added, one edited,
@@ -97,11 +93,9 @@ fn status_finds_added_modified_deleted_type_and_mode_changes() {
     let mut paged = Vec::new();
     let mut cursor = None;
     loop {
-        let req = WsStatusReq {
-            limit: 2,
-            cursor: cursor.take(),
-            ..page_of("w")
-        };
+        let mut req = page_of("w");
+        req.limit = 2;
+        req.cursor = cursor.take();
         let page = swarmops_ws::status(&ctx, req).unwrap();
         assert!(page.changes.len() <= 2);
         paged.extend(page.changes.into_iter().map(|c| (c.path, c.kind)));
@@ -113,10 +107,8 @@ fn status_finds_added_modified_deleted_type_and_mode_changes() {
     assert_eq!(paged, expected);
 
     // 6. Only the paths asked for.
-    let req = WsStatusReq {
-        paths: vec!["src/a.txt".to_owned(), "src/new.txt".to_owned()],
-        ..page_of("w")
-    };
+    let mut req = page_of("w");
+    req.paths = vec!["src/a.txt".to_owned(), "src/new.txt".to_owned()];
     let only: Vec<_> = (swarmops_ws::status(&ctx, req).unwrap().changes.into_iter())
         .map(|c| (c.path, c.kind))
         .collect();
@@ -339,11 +331,8 @@ fn discard_without_paths_restores_every_change() {
     write(&dir, "build.log", "kept\n");
 
     // 3. Discarded, each named; the tree is as created but for the ignored file.
-    let req = WsDiscardReq {
-        workspace: "w".to_owned(),
-        paths: Vec::new(),
-        status_after: StatusAfter::Page,
-    };
+    let mut req = WsDiscardReq::new("w".to_owned());
+    req.status_after = StatusAfter::Page;
     let done = swarmops_ws::discard(&ctx, req).unwrap();
     assert_eq!(
         done.discarded,

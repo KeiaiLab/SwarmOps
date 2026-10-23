@@ -32,6 +32,7 @@ use swarmops_api::{
 };
 
 use crate::check::{self, Subject};
+use crate::io_error::unknown_variant;
 use crate::pending::{self, Pending, PendingOp};
 use crate::rebase;
 use crate::state::State;
@@ -100,6 +101,7 @@ pub fn land(ctx: &Ctx<'_>, req: WsLandReq) -> Result<WsLandResp, OpError> {
         mode,
         max_attempts,
         status_after,
+        ..
     } = req;
     if !(1..=MAX_LAND_ATTEMPTS).contains(&max_attempts) {
         return Err(OpError::new(
@@ -161,11 +163,9 @@ pub fn land(ctx: &Ctx<'_>, req: WsLandReq) -> Result<WsLandResp, OpError> {
         Some(check) => landing.checked(&check, cut)?,
         None => (landing.once(record)?, 1),
     };
-    Ok(WsLandResp {
-        land,
-        attempts,
-        status_after: attached(&landing, status_after),
-    })
+    let mut out = WsLandResp::new(land, attempts);
+    out.status_after = attached(&landing, status_after);
+    Ok(out)
 }
 
 impl Landing<'_, '_> {
@@ -212,6 +212,7 @@ impl Landing<'_, '_> {
             let expect = match self.mode {
                 LandMode::Exact => self.ws.file.onto.clone(),
                 LandMode::Merge => None,
+                _ => return Err(unknown_variant("LandMode")),
             };
             match self.publish(expect) {
                 Ok(done) => return Ok((done, attempt)),
@@ -261,17 +262,14 @@ impl Landing<'_, '_> {
     fn publish(&mut self, expect: Option<String>) -> Result<LandResp, OpError> {
         // 1. The land.
         let ctx = self.ctx;
-        let req = LandReq {
-            head: self.ws.file.head.as_str().into(),
-            base: Some(self.ws.file.base.as_str().into()),
-            target: self.target.clone(),
-            message: self.message.clone(),
-            idempotency_key: Some(self.key.clone()),
-            max_attempts: self.max_attempts,
-            max_conflict_bytes: DEFAULT_MAX_CONFLICT_BYTES,
-            expect_target: expect.map(Into::into),
-            resolutions: None,
-        };
+        let mut req = LandReq::new(self.ws.file.head.as_str());
+        req.base = Some(self.ws.file.base.as_str().into());
+        req.target.clone_from(&self.target);
+        req.message.clone_from(&self.message);
+        req.idempotency_key = Some(self.key.clone());
+        req.max_attempts = self.max_attempts;
+        req.max_conflict_bytes = DEFAULT_MAX_CONFLICT_BYTES;
+        req.expect_target = expect.map(Into::into);
         let done = ctx.store.land(&self.ws.who, req);
         let done = rebase::finish_call(ctx, &self.ws, done)?;
 

@@ -1,4 +1,5 @@
-//! `E_IO` for the workspace's and the store's durable files.
+//! `E_IO` for the workspace's and the store's durable files; `E_INTERNAL` for a variant this
+//! build does not know.
 
 use std::io;
 
@@ -13,4 +14,13 @@ pub(crate) fn io_failed(method: FsMethod, file: &str, e: &io::Error) -> OpError 
         ("fs_op".to_owned(), Value::from(method.as_str())),
         ("file".to_owned(), Value::from(file)),
     ]))
+}
+
+/// `E_INTERNAL` for a value of `ty`, an enum of another crate, of a variant this build does not
+/// know, met where the workspace projects it (the enums are `#[non_exhaustive]`).
+pub(crate) fn unknown_variant(ty: &str) -> OpError {
+    OpError::new(
+        ErrorCode::Internal,
+        format!("{ty}: a variant this build does not know"),
+    )
 }

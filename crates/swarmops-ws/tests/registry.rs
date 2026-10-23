@@ -35,7 +35,7 @@ impl Store {
 
     /// The store's registry, over the real filesystem.
     fn registry(&self) -> Registry {
-        Registry::open(&self.root, Arc::new(RealFs))
+        Registry::open(&self.root, Arc::new(RealFs::new()))
     }
 
     /// What the workspace operations run with, on this store.
@@ -44,7 +44,7 @@ impl Store {
             &self.ops,
             self.root.clone(),
             None,
-            Arc::new(RealFs),
+            Arc::new(RealFs::new()),
             Arc::new(RealHost::default()),
         )
     }
@@ -339,20 +339,22 @@ fn list_check_reports_a_missing_directory_as_orphan() {
     for name in ["kept", "gone"] {
         let dir = store.beside(name);
         std::fs::create_dir_all(dir.join(SWARMWS_DIR)).unwrap();
-        state::replace(&RealFs, &dir, &workspace(name)).unwrap();
+        state::replace(&RealFs::new(), &dir, &workspace(name)).unwrap();
         registry.create(&entry(name, &dir)).unwrap();
     }
     std::fs::remove_dir_all(store.beside("gone")).unwrap();
     let ctx = store.ctx();
 
     // 2. Without check: both, by name, neither an orphan, no directory read.
-    let listed = swarmops_ws::list(&ctx, WsListReq { check: false }).unwrap();
+    let listed = swarmops_ws::list(&ctx, WsListReq::default()).unwrap();
     let names: Vec<&str> = listed.workspaces.iter().map(|w| w.name.as_str()).collect();
     assert_eq!(names, ["gone", "kept"]);
     assert!(listed.workspaces.iter().all(|w| !w.orphan));
 
     // 3. With check: `gone` is an orphan; `kept` carries its state.
-    let checked = swarmops_ws::list(&ctx, WsListReq { check: true }).unwrap();
+    let mut req = WsListReq::default();
+    req.check = true;
+    let checked = swarmops_ws::list(&ctx, req).unwrap();
     let [gone, kept] = checked.workspaces.as_slice() else {
         panic!("{checked:?}");
     };
@@ -366,10 +368,8 @@ fn list_check_reports_a_missing_directory_as_orphan() {
     // 4. `ws info` of the kept one reads the same, with its status; of an unknown one, not
     //    found.
     let info = swarmops_ws::info(&ctx, from(json!({"workspace": "kept"}))).unwrap();
-    let without_status = swarmops_api::WsInfo {
-        status_after: None,
-        ..info
-    };
+    let mut without_status = info;
+    without_status.status_after = None;
     assert_eq!(&without_status, kept);
     let unknown = swarmops_ws::info(&ctx, from(json!({"workspace": "nobody"}))).unwrap_err();
     assert_eq!(unknown.code, "E_WS_NOT_FOUND");
@@ -411,12 +411,15 @@ fn a_crash_during_create_or_delete_leaves_the_entry_or_nothing() {
     /// The registry of `root` failing every mutating call from the k-th on.
     fn cut_at(root: &Utf8Path, k: u64) -> Registry {
         let fail = FailAt::parse(&format!("{k}:persistent")).unwrap().unwrap();
-        over(root, Arc::new(swarmops_store::FailAtFs::new(RealFs, fail)))
+        over(
+            root,
+            Arc::new(swarmops_store::FailAtFs::new(RealFs::new(), fail)),
+        )
     }
 
     // 1. How many calls a create and a delete make, counted on a store of their own.
     let probe = Store::new();
-    let counter = Arc::new(CrashAtFs::new(RealFs, 0));
+    let counter = Arc::new(CrashAtFs::new(RealFs::new(), 0));
     let mine = entry("worker", &probe.beside("w"));
     over(&probe.root, counter.clone()).create(&mine).unwrap();
     let creates = counter.calls();

@@ -13,13 +13,9 @@ use crate::fixture::{Fixture, Put, Watched, changes, remove, write};
 
 /// The request committing every change of workspace `name` with `message`.
 fn commit_of(name: &str, message: &str) -> WsCommitReq {
-    WsCommitReq {
-        workspace: name.to_owned(),
-        message: message.to_owned(),
-        paths: Vec::new(),
-        modes: std::collections::BTreeMap::new(),
-        status_after: StatusAfter::Page,
-    }
+    let mut out = WsCommitReq::new(name.to_owned(), message.to_owned());
+    out.status_after = StatusAfter::Page;
+    out
 }
 
 /// The pending record's path in workspace `dir`.
@@ -84,7 +80,7 @@ fn commit_uploads_only_missing_blobs_and_commits_blob_refs() {
     );
 
     // 4. The workspace stands on it, its pending record gone; nothing more to commit.
-    let saved = state::read(&RealFs, &dir).unwrap();
+    let saved = state::read(&RealFs::new(), &dir).unwrap();
     assert_eq!(
         (saved.head.as_str(), saved.materialized.as_str()),
         (&*done.changeset, &*done.changeset)
@@ -112,7 +108,7 @@ fn a_crash_between_store_commit_and_workspace_update_replays_the_same_changeset(
     let ctx = f.ctx_over(&watched);
     swarmops_ws::commit(&ctx, commit_of("w", "edit")).unwrap_err();
     let first = watched.commits()[0].1.clone().unwrap();
-    assert_eq!(state::read(&RealFs, &dir).unwrap().head, base);
+    assert_eq!(state::read(&RealFs::new(), &dir).unwrap().head, base);
     assert!(pending_of(&dir).exists());
 
     // 3. Run again: the same key, the same changeset, replayed.
@@ -121,7 +117,7 @@ fn a_crash_between_store_commit_and_workspace_update_replays_the_same_changeset(
     assert_eq!(done.changeset, first);
     let commits = watched.commits();
     assert_eq!(commits[0].0.idempotency_key, commits[1].0.idempotency_key);
-    assert_eq!(state::read(&RealFs, &dir).unwrap().head, first);
+    assert_eq!(state::read(&RealFs::new(), &dir).unwrap().head, first);
     assert!(!pending_of(&dir).exists());
     assert_eq!(changes(&f.ctx(), "w", true), []);
 }
@@ -191,15 +187,12 @@ fn ws_diff_matches_store_diff_after_commit() {
 
     // 2. The workspace's diffs, in each format, one page and pages of two files.
     let ws_diff = |format, limit, cursor| {
-        let req = WsDiffReq {
-            workspace: "w".to_owned(),
-            paths: Vec::new(),
-            format,
-            context: 3,
-            limit,
-            cursor,
-            max_bytes: 32_768,
-        };
+        let mut req = WsDiffReq::new("w".to_owned());
+        req.format = format;
+        req.context = 3;
+        req.limit = limit;
+        req.cursor = cursor;
+        req.max_bytes = 32_768;
         swarmops_ws::diff(&ctx, req).unwrap()
     };
     let formats = [DiffFormat::Names, DiffFormat::Stat, DiffFormat::Unified];
@@ -212,16 +205,12 @@ fn ws_diff_matches_store_diff_after_commit() {
 
     // 4. The store's diff of it says the same of each file, page for page.
     let store_diff = |format, limit, cursor| {
-        let req = DiffReq {
-            from: base.as_str().into(),
-            to: done.changeset.as_str().into(),
-            paths: Vec::new(),
-            format,
-            context: 3,
-            limit,
-            cursor,
-            max_bytes: 32_768,
-        };
+        let mut req = DiffReq::new(base.as_str(), done.changeset.as_str());
+        req.format = format;
+        req.context = 3;
+        req.limit = limit;
+        req.cursor = cursor;
+        req.max_bytes = 32_768;
         f.ops.diff(req).unwrap()
     };
     for (fmt, ws) in formats.iter().zip(&before) {

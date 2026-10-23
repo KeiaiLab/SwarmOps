@@ -37,6 +37,7 @@ pub fn status(ctx: &Ctx<'_>, req: WsStatusReq) -> Result<WsStatus, OpError> {
         full,
         limit,
         cursor,
+        ..
     } = req;
     if limit == 0 {
         return Err(
@@ -76,10 +77,10 @@ pub(crate) fn page(
         .collect();
     let truncated = rest.len() > limit;
     let shown: Vec<WsChange> = (rest.into_iter().take(limit))
-        .map(|change| WsChange {
-            path: change.path.clone(),
-            kind: change.kind,
-            size: change.new.map(|file| file.meta.size),
+        .map(|change| {
+            let mut out = WsChange::new(change.path.clone(), change.kind);
+            out.size = change.new.map(|file| file.meta.size);
+            out
         })
         .collect();
     let cursor = (shown.last())
@@ -90,25 +91,23 @@ pub(crate) fn page(
     let (state, rebasing) = match &ws.file.state {
         State::Clean => (WsState::Clean, None),
         State::Rebasing { onto, .. } => {
-            let rebasing = WsRebasing {
-                onto: onto.clone(),
-                conflicts: conflicts(ws),
-            };
+            let rebasing = WsRebasing::new(onto.clone(), conflicts(ws));
             (WsState::Rebasing, Some(rebasing))
         }
     };
-    Ok(WsStatus {
-        name: ws.file.name.clone(),
-        base: ws.file.base.clone(),
-        head: ws.file.head.clone(),
+    let mut out = WsStatus::new(
+        ws.file.name.clone(),
+        ws.file.base.clone(),
+        ws.file.head.clone(),
         main,
         behind_by,
         state,
-        changes: shown,
-        rebasing,
+        shown,
         truncated,
-        cursor,
-    })
+    );
+    out.rebasing = rebasing;
+    out.cursor = cursor;
+    Ok(out)
 }
 
 /// Every change of workspace `ws` that `want` asks for, by path; its index kept.
@@ -125,7 +124,7 @@ pub(crate) fn changes_of(
 /// at most [`BEHIND_CAP`]: one ref read, then `log` a page at a time until `base`.
 fn behind(store: &dyn StoreOps, target: &str, base: &str) -> Result<(String, u64), OpError> {
     // 1. The head, a ref read; at the base, nothing to count.
-    let main = store.resolve_rev(ResolveRevReq { rev: target.into() })?.id;
+    let main = store.resolve_rev(ResolveRevReq::new(target))?.id;
     if main == base {
         return Ok((main, 0));
     }
@@ -134,12 +133,11 @@ fn behind(store: &dyn StoreOps, target: &str, base: &str) -> Result<(String, u64
     let mut count = 0;
     let mut cursor = None;
     loop {
-        let page = store.log(LogReq {
-            rev: Some(main.as_str().into()),
-            limit: LOG_PAGE,
-            cursor: cursor.take(),
-            paths: Vec::new(),
-        })?;
+        let mut req = LogReq::default();
+        req.rev = Some(main.as_str().into());
+        req.limit = LOG_PAGE;
+        req.cursor = cursor.take();
+        let page = store.log(req)?;
         for entry in &page.entries {
             if entry.id == base || count == BEHIND_CAP {
                 return Ok((main, count));

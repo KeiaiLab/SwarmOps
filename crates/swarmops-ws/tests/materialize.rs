@@ -11,11 +11,12 @@ const LINUX: Volume = Volume::new(false, true, true);
 
 /// The request of `ws materialize` adding `paths` to workspace `name`.
 fn expand(name: &str, paths: &[&str]) -> WsMaterializeReq {
-    WsMaterializeReq {
-        workspace: name.to_owned(),
-        paths: paths.iter().map(|p| (*p).to_owned()).collect(),
-        status_after: StatusAfter::None,
-    }
+    let mut out = WsMaterializeReq::new(
+        name.to_owned(),
+        paths.iter().map(|p| (*p).to_owned()).collect(),
+    );
+    out.status_after = StatusAfter::None;
+    out
 }
 
 /// Moves workspace `name` to changeset `to`, under its lock, as a rebase or a land does.
@@ -64,7 +65,7 @@ fn create_materialises_the_prefixes_and_nothing_else() {
     );
 
     // 4. Its state names the base as what the files stand for, and no intent is left.
-    let saved = state::read(&RealFs, &dir).unwrap();
+    let saved = state::read(&RealFs::new(), &dir).unwrap();
     assert_eq!(saved.materialized, base);
     assert_eq!(saved.target, "main");
     assert!(
@@ -131,7 +132,10 @@ fn an_update_writes_only_what_changed() {
     assert_eq!(tree.len(), 50);
     assert!(tree.contains(&file("src/m07.rs", "changed\n")));
     assert!(tree.contains(&file("src/new/added.rs", "new\n")));
-    assert_eq!(state::read(&RealFs, &dir).unwrap().materialized, next);
+    assert_eq!(
+        state::read(&RealFs::new(), &dir).unwrap().materialized,
+        next
+    );
 }
 
 /// An update that would overwrite or remove a file the agent edited, or replace a file the agent
@@ -173,7 +177,10 @@ fn an_update_never_overwrites_an_edit() {
     }
     assert!(!refused.contains("\"k\""), "{refused}");
     assert_eq!(tree_of(&dir), before);
-    assert_eq!(state::read(&RealFs, &dir).unwrap().materialized, base);
+    assert_eq!(
+        state::read(&RealFs::new(), &dir).unwrap().materialized,
+        base
+    );
     assert!(
         !dir.join(SWARMWS_DIR)
             .join("journal/materialize.json")
@@ -286,7 +293,7 @@ fn a_case_collision_is_refused_on_a_case_insensitive_volume_naming_both_paths() 
         serde_json::json!([["lib/Makefile", "lib/makefile"]])
     );
     assert_eq!(tree_of(&dir), before);
-    assert_eq!(state::read(&RealFs, &dir).unwrap().prefixes, ["src"]);
+    assert_eq!(state::read(&RealFs::new(), &dir).unwrap().prefixes, ["src"]);
 
     // 3. An update that adds `src/README` beside `src/readme`: refused the same way.
     let next = f.commit(Some(&base), &[Put::File("src/README", "R\n")]);
@@ -494,7 +501,7 @@ mod killed {
 
         // 3. How many calls a create makes on each layer, counted by the doubles with no cut.
         let counting_host = Arc::new(CrashAtHost::new(RealHost::default(), 0));
-        let counting_fs = Arc::new(CrashAtFs::new(RealFs, 0));
+        let counting_fs = Arc::new(CrashAtFs::new(RealFs::new(), 0));
         let ctx = f.ctx_with(counting_host.clone(), counting_fs.clone());
         swarmops_ws::create(&ctx, request(f.root.as_str(), "count")).unwrap();
         let (host_calls, fs_calls) = (counting_host.calls(), counting_fs.calls());
@@ -516,7 +523,7 @@ mod killed {
                         &ops,
                         f.root.as_str(),
                         Arc::new(RealHost::default()),
-                        Arc::new(RealFs),
+                        Arc::new(RealFs::new()),
                     );
                     while let Some(&(layer, k)) = cuts.get(next.fetch_add(1, Ordering::SeqCst)) {
                         cut_and_recover(test, &f, &ctx, (layer, k), &expected);
@@ -540,11 +547,11 @@ mod killed {
         let (host, fs): (Arc<dyn HostFs>, Arc<dyn FsOps>) = match layer {
             "host" => (
                 Arc::new(CrashAtHost::new(RealHost::default(), k)),
-                Arc::new(RealFs),
+                Arc::new(RealFs::new()),
             ),
             _ => (
                 Arc::new(RealHost::default()),
-                Arc::new(CrashAtFs::new(RealFs, k)),
+                Arc::new(CrashAtFs::new(RealFs::new(), k)),
             ),
         };
         let ctx = ctx_on(&ops, root, host, fs);
@@ -595,16 +602,12 @@ mod killed {
     /// The create of workspace `name` beside the store at `root`, of the whole of `main`.
     fn request(root: &str, name: &str) -> WsCreateReq {
         let dir = Utf8Path::new(root).parent().unwrap().join(name);
-        WsCreateReq {
-            name: name.to_owned(),
-            path: Some(dir.to_string()),
-            base: "main".into(),
-            prefixes: Vec::new(),
-            all: true,
-            from: None,
-            session: None,
-            status_after: StatusAfter::None,
-        }
+        let mut out = WsCreateReq::new(name.to_owned());
+        out.path = Some(dir.to_string());
+        out.base = "main".into();
+        out.all = true;
+        out.status_after = StatusAfter::None;
+        out
     }
 }
 
@@ -622,11 +625,9 @@ fn the_lock_refuses_a_second_mutation_with_ws_locked() {
 
     // 2. A discard meanwhile: locked out, the edit kept.
     let started = std::time::Instant::now();
-    let req = WsDiscardReq {
-        workspace: "w".to_owned(),
-        paths: vec!["a".to_owned()],
-        status_after: StatusAfter::None,
-    };
+    let mut req = WsDiscardReq::new("w".to_owned());
+    req.paths = vec!["a".to_owned()];
+    req.status_after = StatusAfter::None;
     let refused = swarmops_ws::discard(&f.ctx(), req.clone()).unwrap_err();
     assert_eq!(refused.code, "E_WS_LOCKED", "{refused:?}");
     assert!(refused.retryable);
@@ -670,11 +671,9 @@ fn discard_restores_a_path_from_head() {
     std::fs::write(dir.join("keep"), "kept edit\n").unwrap();
 
     // 2. Discarded by name: each restored, `keep` not named and left.
-    let req = WsDiscardReq {
-        workspace: "w".to_owned(),
-        paths: ["a", "b", "x", "d", "new"].map(str::to_owned).to_vec(),
-        status_after: StatusAfter::None,
-    };
+    let mut req = WsDiscardReq::new("w".to_owned());
+    req.paths = ["a", "b", "x", "d", "new"].map(str::to_owned).to_vec();
+    req.status_after = StatusAfter::None;
     let resp = swarmops_ws::discard(&f.ctx(), req).unwrap();
     assert_eq!(resp.discarded, ["a", "b", "d", "d/e", "new", "x"]);
     assert_eq!(
@@ -689,11 +688,9 @@ fn discard_restores_a_path_from_head() {
     );
 
     // 3. Nothing to restore: nothing discarded.
-    let req = WsDiscardReq {
-        workspace: "w".to_owned(),
-        paths: vec!["a".to_owned()],
-        status_after: StatusAfter::None,
-    };
+    let mut req = WsDiscardReq::new("w".to_owned());
+    req.paths = vec!["a".to_owned()];
+    req.status_after = StatusAfter::None;
     let again = swarmops_ws::discard(&f.ctx(), req).unwrap();
     assert_eq!(again.discarded, Vec::<String>::new());
 }
@@ -717,11 +714,9 @@ fn discard_follows_no_symlink_the_agent_made() {
     std::os::unix::fs::symlink(&outside, dir.join("src/a")).unwrap();
 
     // 3. A discard of `src/a/precious`: refused, the outside file kept.
-    let req = WsDiscardReq {
-        workspace: "w".to_owned(),
-        paths: vec!["src/a/precious".to_owned()],
-        status_after: StatusAfter::None,
-    };
+    let mut req = WsDiscardReq::new("w".to_owned());
+    req.paths = vec!["src/a/precious".to_owned()];
+    req.status_after = StatusAfter::None;
     let refused = swarmops_ws::discard(&f.ctx(), req).unwrap_err();
     assert_eq!(refused.code, "E_WS_DIRTY", "{refused:?}");
     assert_eq!(refused.details["paths"], serde_json::json!(["src/a"]));
