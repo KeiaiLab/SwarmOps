@@ -111,6 +111,6 @@ pub(crate) fn read(
         .as_chunks::<32>()
         .0
         .iter()
-        .map(|id| ChangesetId(ObjectId(*id)))
+        .map(|id| ChangesetId::new(ObjectId::new(*id)))
         .collect())
 }

@@ -412,7 +412,7 @@ fn listed_value(first: &[u8], file: &str) -> Option<ListedValue> {
     let rest = external_ids::from_hex(rest).filter(|rest| rest.len() == 31)?;
     let subject: [u8; 32] = [first, &rest].concat().try_into().ok()?;
     Some(ListedValue {
-        subject: ObjectId(subject),
+        subject: ObjectId::new(subject),
         key_hash,
     })
 }

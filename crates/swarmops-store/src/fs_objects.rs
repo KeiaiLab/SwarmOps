@@ -606,23 +606,6 @@ fn is_object_name(name: &str) -> bool {
     name.len() == 62 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-fn kind_byte(kind: ObjectKind) -> u8 {
-    match kind {
-        ObjectKind::Blob => 0,
-        ObjectKind::Tree => 1,
-        ObjectKind::Changeset => 2,
-    }
-}
-
-fn kind_from_byte(byte: u8) -> Option<ObjectKind> {
-    match byte {
-        0 => Some(ObjectKind::Blob),
-        1 => Some(ObjectKind::Tree),
-        2 => Some(ObjectKind::Changeset),
-        _ => None,
-    }
-}
-
 /// The kind, the encoding and the payload length an object file's header records; `None` if its
 /// magic, kind, encoding or reserved bytes are not ones this store writes.
 fn header_fields(header: &[u8; HEADER_LEN]) -> Option<(ObjectKind, u8, u64)> {
@@ -630,7 +613,7 @@ fn header_fields(header: &[u8; HEADER_LEN]) -> Option<(ObjectKind, u8, u64)> {
     if header[..4] != MAGIC || header[6..8] != [0, 0] || !matches!(enc, ENC_RAW | ENC_ZSTD) {
         return None;
     }
-    let kind = kind_from_byte(header[4])?;
+    let kind = ObjectKind::from_tag(header[4])?;
     let ulen = u64::from_le_bytes(header[8..].try_into().expect("8 bytes"));
     Some((kind, enc, ulen))
 }
@@ -650,7 +633,7 @@ fn encode(kind: ObjectKind, payload: &[u8]) -> io::Result<Vec<u8>> {
     let ulen = bytes::to_u64(payload.len());
     let mut file = Vec::with_capacity(HEADER_LEN + body.len());
     file.extend_from_slice(&MAGIC);
-    file.push(kind_byte(kind));
+    file.push(kind.tag());
     file.push(enc);
     file.extend_from_slice(&0u16.to_le_bytes());
     file.extend_from_slice(&ulen.to_le_bytes());
@@ -832,7 +815,7 @@ impl PayloadHash {
 
     /// The object's id, once every piece is fed.
     fn finish(&self) -> ObjectId {
-        ObjectId(*self.0.finalize().as_bytes())
+        ObjectId::new(*self.0.finalize().as_bytes())
     }
 }
 
@@ -860,7 +843,7 @@ mod tests {
     /// one empty raw block: a lie that agrees with itself.
     fn lying_zstd(size: u64) -> Vec<u8> {
         let mut file = MAGIC.to_vec();
-        file.extend([kind_byte(ObjectKind::Blob), ENC_ZSTD, 0, 0]);
+        file.extend([ObjectKind::Blob.tag(), ENC_ZSTD, 0, 0]);
         file.extend(size.to_le_bytes());
         file.extend([0x28, 0xb5, 0x2f, 0xfd, 0xc0, 0x00]); // magic, FHD (8-byte FCS), window 1 KiB
         file.extend(size.to_le_bytes()); // frame content size

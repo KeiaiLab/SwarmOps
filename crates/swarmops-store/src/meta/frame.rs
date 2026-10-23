@@ -318,7 +318,8 @@ trait RecordReader {
 
 impl RecordReader for Reader<'_, BadRecord> {
     fn id(&mut self) -> Result<ChangesetId, BadRecord> {
-        self.array().map(|bytes| ChangesetId(ObjectId(bytes)))
+        self.array()
+            .map(|bytes| ChangesetId::new(ObjectId::new(bytes)))
     }
 
     fn optional_id(&mut self) -> Result<Option<ChangesetId>, BadRecord> {

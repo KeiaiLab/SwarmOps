@@ -480,7 +480,7 @@ fn decode(bytes: &[u8]) -> Option<ExternalEntry> {
         && crc32fast::hash(head).to_le_bytes() == crc;
     let id: [u8; 32] = head[8..].try_into().ok()?;
     whole.then_some(ExternalEntry {
-        changeset: ChangesetId(ObjectId(id)),
+        changeset: ChangesetId::new(ObjectId::new(id)),
         faithful: head[5] & FAITHFUL != 0,
     })
 }
@@ -529,7 +529,7 @@ mod tests {
     #[test]
     fn an_entry_is_44_bytes_and_reads_back() {
         let entry = ExternalEntry {
-            changeset: ChangesetId(ObjectId([7; 32])),
+            changeset: ChangesetId::new(ObjectId::new([7; 32])),
             faithful: true,
         };
         let bytes = encode(&entry);
