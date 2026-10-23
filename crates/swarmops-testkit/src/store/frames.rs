@@ -8,7 +8,7 @@ pub fn lying_zstd(file: &mut Vec<u8>, size: u64) {
     file.truncate(16); // "SOB1" | kind u8 | enc u8 | u16 rsvd | u64le ulen
     file[5] = 1; // zstd
     file[8..16].copy_from_slice(&size.to_le_bytes());
-    file.extend([0x28, 0xB5, 0x2F, 0xFD, 0xC0, 0x00]); // magic, FHD (8-byte FCS), window 1 KiB
+    file.extend([0x28, 0xb5, 0x2f, 0xfd, 0xc0, 0x00]); // magic, FHD (8-byte FCS), window 1 KiB
     file.extend(size.to_le_bytes()); // frame content size
     file.extend([0x01, 0x00, 0x00]); // last block, raw, 0 bytes
 }
@@ -20,12 +20,12 @@ pub fn lying_zstd(file: &mut Vec<u8>, size: u64) {
 /// `payload` holds less than 64 KiB.
 pub fn zstd_v07_frame(payload: &[u8]) -> Vec<u8> {
     let len = u16::try_from(payload.len()).expect("a payload of less than 64 KiB");
-    let mut frame = vec![0x27, 0xB5, 0x2F, 0xFD, 0xA0]; // v0.7 magic, FHD (single segment, 4-byte FCS)
+    let mut frame = vec![0x27, 0xb5, 0x2f, 0xfd, 0xa0]; // v0.7 magic, FHD (single segment, 4-byte FCS)
     frame.extend(u32::from(len).to_le_bytes()); // frame content size
     frame.push(0x40); // a raw block, of
     frame.extend(len.to_be_bytes()); // `len` bytes
     frame.extend_from_slice(payload);
-    frame.extend([0xC0, 0x00, 0x00]); // the end block
+    frame.extend([0xc0, 0x00, 0x00]); // the end block
     frame
 }
 
