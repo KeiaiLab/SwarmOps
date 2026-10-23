@@ -110,6 +110,23 @@ pub struct Meta {
     pub recovered: Option<RecoveredOut>,
 }
 
+impl Meta {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(
+        elapsed_ms: u64,
+        resolved: BTreeMap<String, String>,
+        auth: impl Into<String>,
+    ) -> Self {
+        Self {
+            repo: None,
+            elapsed_ms,
+            resolved,
+            auth: auth.into(),
+            recovered: None,
+        }
+    }
+}
+
 /// What a write's recovery repaired (`meta.recovered`), as offsets and counts in the store's
 /// metadata files, with no paths: the storage spec (§2 rule 3, §3) says what each repair is.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
@@ -146,4 +163,11 @@ pub struct LogCutOut {
     pub at: u64,
     /// How many bytes were cut, to where the journal ended.
     pub bytes: u64,
+}
+
+impl LogCutOut {
+    /// Takes every field.
+    pub fn new(at: u64, bytes: u64) -> Self {
+        Self { at, bytes }
+    }
 }

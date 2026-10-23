@@ -13,6 +13,11 @@ use serde::{Deserialize, Serialize};
 pub struct Rev(pub String);
 
 impl Rev {
+    /// The revision `rev`, as written.
+    pub fn new(rev: impl Into<String>) -> Self {
+        Self(rev.into())
+    }
+
     /// The revision as written.
     pub fn as_str(&self) -> &str {
         &self.0

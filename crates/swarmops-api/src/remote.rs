@@ -75,6 +75,21 @@ pub struct CloneReq {
     pub lossy: Vec<LossyClass>,
 }
 
+impl CloneReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(url: impl Into<String>, path: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            path: path.into(),
+            name: None,
+            branch: None,
+            remote: default_remote(),
+            token_env: None,
+            lossy: Vec::new(),
+        }
+    }
+}
+
 /// `clone`: the store made, the remote recorded, its fetch, and where `main` stands.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct CloneResp {
@@ -89,6 +104,19 @@ pub struct CloneResp {
     /// The changeset `main` names; omitted when the remote is empty.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub main: Option<String>,
+}
+
+impl CloneResp {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(repo: RepoInfo, remote: RemoteInfo, fetch: FetchResp, imported: u64) -> Self {
+        Self {
+            repo,
+            remote,
+            fetch,
+            imported,
+            main: None,
+        }
+    }
 }
 
 // ---- remote add, remove, list ----
@@ -114,6 +142,19 @@ pub struct RemoteAddReq {
     pub lossy: Vec<LossyClass>,
 }
 
+impl RemoteAddReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(name: impl Into<String>, url: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            url: url.into(),
+            branch: None,
+            token_env: None,
+            lossy: Vec::new(),
+        }
+    }
+}
+
 /// A remote the store records.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct RemoteInfo {
@@ -136,11 +177,37 @@ pub struct RemoteInfo {
     pub warnings: Option<Vec<String>>,
 }
 
+impl RemoteInfo {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(
+        name: impl Into<String>,
+        url: impl Into<String>,
+        branch: impl Into<String>,
+        lossy: Vec<LossyClass>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            url: url.into(),
+            branch: branch.into(),
+            token_env: None,
+            lossy,
+            warnings: None,
+        }
+    }
+}
+
 /// `remote remove`: forget a remote, and the mirror's refs of it. No changeset is removed.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct RemoteRemoveReq {
     /// The remote's name.
     pub name: String,
+}
+
+impl RemoteRemoveReq {
+    /// Takes every field.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
 }
 
 /// `remote remove`: the remote forgotten.
@@ -152,8 +219,18 @@ pub struct RemoteRemoveResp {
     pub removed_refs: u64,
 }
 
+impl RemoteRemoveResp {
+    /// Takes every field.
+    pub fn new(name: impl Into<String>, removed_refs: u64) -> Self {
+        Self {
+            name: name.into(),
+            removed_refs,
+        }
+    }
+}
+
 /// `remote list`: the remotes the store records.
-#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
 pub struct RemoteListReq {}
 
 /// `remote list`: every remote, in the order they were added.
@@ -161,6 +238,13 @@ pub struct RemoteListReq {}
 pub struct RemoteList {
     /// The remotes; empty when the store has none.
     pub remotes: Vec<RemoteInfo>,
+}
+
+impl RemoteList {
+    /// Takes every field.
+    pub fn new(remotes: Vec<RemoteInfo>) -> Self {
+        Self { remotes }
+    }
 }
 
 // ---- fetch ----
@@ -174,6 +258,15 @@ pub struct FetchReq {
     pub remote: String,
 }
 
+impl FetchReq {
+    /// Takes every field.
+    pub fn new(remote: impl Into<String>) -> Self {
+        Self {
+            remote: remote.into(),
+        }
+    }
+}
+
 /// A remote branch's head: its commit, and the changeset that commit is in the store.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct RemoteHead {
@@ -181,6 +274,16 @@ pub struct RemoteHead {
     pub sha: String,
     /// The changeset id of that commit in the store.
     pub changeset: String,
+}
+
+impl RemoteHead {
+    /// Takes every field.
+    pub fn new(sha: impl Into<String>, changeset: impl Into<String>) -> Self {
+        Self {
+            sha: sha.into(),
+            changeset: changeset.into(),
+        }
+    }
 }
 
 /// A remote branch a fetch saw move, appear or go.
@@ -194,6 +297,17 @@ pub struct BranchUpdate {
     /// The commit it names now; omitted for a branch the remote deleted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new: Option<String>,
+}
+
+impl BranchUpdate {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(branch: impl Into<String>) -> Self {
+        Self {
+            branch: branch.into(),
+            old: None,
+            new: None,
+        }
+    }
 }
 
 /// `fetch`: where the followed branch stands, and what moved.
@@ -222,6 +336,30 @@ pub struct FetchResp {
     pub warnings: Option<Vec<String>>,
 }
 
+impl FetchResp {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(
+        remote: impl Into<String>,
+        branch: impl Into<String>,
+        imported: u64,
+        branches: Vec<BranchUpdate>,
+        branches_truncated: bool,
+        tags_fetched: u64,
+    ) -> Self {
+        Self {
+            remote: remote.into(),
+            branch: branch.into(),
+            head: None,
+            old_head: None,
+            imported,
+            branches,
+            branches_truncated,
+            tags_fetched,
+            warnings: None,
+        }
+    }
+}
+
 // ---- push ----
 
 /// `push`: send a store ref to a remote branch by compare-and-swap, never forcing: the remote
@@ -238,6 +376,17 @@ pub struct PushReq {
     /// name for `release/<name>`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+}
+
+impl PushReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(remote: impl Into<String>) -> Self {
+        Self {
+            remote: remote.into(),
+            source_ref: default_push_source(),
+            branch: None,
+        }
+    }
 }
 
 /// What a push did to the remote branch.
@@ -278,6 +427,31 @@ pub struct PushResp {
     pub warnings: Option<Vec<String>>,
 }
 
+impl PushResp {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(
+        remote: impl Into<String>,
+        branch: impl Into<String>,
+        status: PushStatus,
+        new: impl Into<String>,
+        head_changeset: impl Into<String>,
+        objects_written: u64,
+        rewritten: u64,
+    ) -> Self {
+        Self {
+            remote: remote.into(),
+            branch: branch.into(),
+            status,
+            old: None,
+            new: new.into(),
+            head_changeset: head_changeset.into(),
+            objects_written,
+            rewritten,
+            warnings: None,
+        }
+    }
+}
+
 // ---- sync ----
 
 /// Whether `sync` sends what it landed.
@@ -307,6 +481,17 @@ pub struct SyncReq {
     pub max_attempts: u32,
 }
 
+impl SyncReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(remote: impl Into<String>) -> Self {
+        Self {
+            remote: remote.into(),
+            mode: SyncMode::default(),
+            max_attempts: default_sync_attempts(),
+        }
+    }
+}
+
 /// What a sync did.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -332,6 +517,21 @@ pub struct PublishedChange {
     pub sha: String,
 }
 
+impl PublishedChange {
+    /// Takes every field.
+    pub fn new(
+        changeset: impl Into<String>,
+        landed_as: impl Into<String>,
+        sha: impl Into<String>,
+    ) -> Self {
+        Self {
+            changeset: changeset.into(),
+            landed_as: landed_as.into(),
+            sha: sha.into(),
+        }
+    }
+}
+
 /// How a sync found that the remote holds a change already.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -353,6 +553,16 @@ pub struct DroppedChange {
     pub by: DropReason,
 }
 
+impl DroppedChange {
+    /// Takes every field.
+    pub fn new(changeset: impl Into<String>, by: DropReason) -> Self {
+        Self {
+            changeset: changeset.into(),
+            by,
+        }
+    }
+}
+
 /// A head before and after a sync.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct HeadMove {
@@ -361,6 +571,16 @@ pub struct HeadMove {
     pub old: Option<String>,
     /// What it names now.
     pub new: String,
+}
+
+impl HeadMove {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(new: impl Into<String>) -> Self {
+        Self {
+            old: None,
+            new: new.into(),
+        }
+    }
 }
 
 /// `sync`: what it landed, dropped and sent, and where `main` and the remote stand.
@@ -387,6 +607,34 @@ pub struct SyncResp {
     pub warnings: Option<Vec<String>>,
 }
 
+impl SyncResp {
+    /// Takes the required fields; the others get their serde defaults.
+    // Every argument is a required field of the response: no default can stand in.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        remote: impl Into<String>,
+        branch: impl Into<String>,
+        status: SyncStatusKind,
+        attempts: u32,
+        published: Vec<PublishedChange>,
+        dropped: Vec<DroppedChange>,
+        main: HeadMove,
+        remote_head: HeadMove,
+    ) -> Self {
+        Self {
+            remote: remote.into(),
+            branch: branch.into(),
+            status,
+            attempts,
+            published,
+            dropped,
+            main,
+            remote_head,
+            warnings: None,
+        }
+    }
+}
+
 // ---- sync status ----
 
 /// `sync status`: how `main` and a remote's followed branch stand, as the last fetch saw the
@@ -398,6 +646,16 @@ pub struct SyncStatusReq {
     /// The most unpublished changesets to list.
     #[serde(default = "default_sync_status_limit")]
     pub limit: usize,
+}
+
+impl SyncStatusReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(remote: impl Into<String>) -> Self {
+        Self {
+            remote: remote.into(),
+            limit: default_sync_status_limit(),
+        }
+    }
 }
 
 /// `sync status`: what is unpublished, and how far behind `main` is.
@@ -424,4 +682,29 @@ pub struct SyncStatus {
     pub unpublished: Vec<ChangesetSummary>,
     /// Whether a count or the list stopped at its bound.
     pub truncated: bool,
+}
+
+impl SyncStatus {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(
+        remote: impl Into<String>,
+        branch: impl Into<String>,
+        fetched: bool,
+        ahead: u64,
+        behind: u64,
+        unpublished: Vec<ChangesetSummary>,
+        truncated: bool,
+    ) -> Self {
+        Self {
+            remote: remote.into(),
+            branch: branch.into(),
+            fetched,
+            remote_head: None,
+            base: None,
+            ahead,
+            behind,
+            unpublished,
+            truncated,
+        }
+    }
 }
