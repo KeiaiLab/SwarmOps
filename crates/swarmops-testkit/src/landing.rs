@@ -3,8 +3,8 @@
 //! binary (`swarmops-cli`'s `tests/landing.rs`).
 //!
 //! - [`Workload`], [`base_files`] and [`change_for`]: what the store starts with and what each
-//!   lander lands, drawn from a seed with [`mix`], so that every run of a cell lands the same
-//!   changes; [`own_line`]: the line of the shared file each lander replaces.
+//!   lander lands, drawn from a seed with [`mix`](measure::mix), so that every run of a cell
+//!   lands the same changes; [`own_line`]: the line of the shared file each lander replaces.
 //! - [`LandRecord`]: one land as its lander saw it; [`SyncTimer`] times the journal's and the
 //!   ref files' syncs a land made, its shares of the lock hold (the M4 plan's Decision 14).
 //! - [`check_invariants`]: the gate every run passes (the M4 plan's Decision 1): every landed
@@ -13,8 +13,8 @@
 //!   the chain, a clean deep `verify`, no op-head ref left and no land past [`MAX_LATENCY`].
 //! - [`Stats`]: a run's numbers (lands/s, latency, retry rate, conflicts, lock hold and its
 //!   sync shares, relocations), with the summary line a run prints and reads back.
-//! - [`backoff`]: ops spec §3 step 7's jittered backoff, its jitter from [`mix`]; [`slot`] and
-//!   [`open_loop_lands`]: when an open loop's lands are due.
+//! - [`backoff`]: ops spec §3 step 7's jittered backoff, its jitter from
+//!   [`mix`](measure::mix); [`slot`] and [`open_loop_lands`]: when an open loop's lands are due.
 //! - [`Cell`] and [`Run`]: a cell of the measurement, and one run of one model in it, with the
 //!   line the harness prints for it ([`RUN_TAG`]) and reads back.
 //! - [`decide`]: the M4 plan's Decision 1, written before any number exists, applied to a
@@ -35,13 +35,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use camino::Utf8Path;
-use swarmops_core::bytes::to_u64;
-use swarmops_core::{ChangesetId, ObjectId};
+use swarmops_core::{ChangesetId, ObjectId, bytes};
 use swarmops_repo::LocalRepo;
 use swarmops_store::{FsMethod, MetaStore};
 
 use crate::fs::{Call, Watch};
-use crate::measure::{mix, percentile};
+use crate::measure;
 
 /// The file the sharing workloads land lines of: [`REGISTRY_LINES`] lines, `line <l>\n`.
 pub const REGISTRY: &str = "REGISTRY";
@@ -231,10 +230,12 @@ pub fn with_line(file: &[u8], line: usize, text: &str) -> Vec<u8> {
     out
 }
 
-/// A lander's draw: `(seed, lander, land, domain)` folded into one [`mix`], as
+/// A lander's draw: `(seed, lander, land, domain)` folded into one [`mix`](measure::mix), as
 /// `mix(mix(mix(seed ^ lander) ^ land) ^ domain)`.
 pub fn draw(seed: u64, lander: usize, land: usize, domain: u64) -> u64 {
-    mix(mix(mix(seed ^ to_u64(lander)) ^ to_u64(land)) ^ domain)
+    measure::mix(
+        measure::mix(measure::mix(seed ^ bytes::to_u64(lander)) ^ bytes::to_u64(land)) ^ domain,
+    )
 }
 
 /// File `file` of `big/`: [`BIG_FILE_BYTES`] bytes naming it, and the land that wrote it
@@ -731,7 +732,8 @@ impl Stats {
     pub fn from(records: &[Vec<LandRecord>], wall: Duration) -> Stats {
         let all = || records.iter().flatten();
         let landed: Vec<&LandRecord> = all().filter(|record| record.id.is_some()).collect();
-        let count = |pick: fn(&LandRecord) -> bool| to_u64(all().filter(|r| pick(r)).count());
+        let count =
+            |pick: fn(&LandRecord) -> bool| bytes::to_u64(all().filter(|r| pick(r)).count());
         let mut latencies: Vec<Duration> = landed
             .iter()
             .map(|record| Duration::from_micros(record.latency_us))
@@ -749,7 +751,7 @@ impl Stats {
         let held: u64 = all().flat_map(|record| &record.lock_hold_us).sum();
         let journal: u64 = all().map(|record| record.journal_sync_us).sum();
         let refs: u64 = all().map(|record| record.ref_sync_us).sum();
-        let landed_count = to_u64(landed.len());
+        let landed_count = bytes::to_u64(landed.len());
         Stats {
             landed: landed_count,
             lands_per_s: as_f64(landed_count) / wall.as_secs_f64(),
@@ -819,7 +821,7 @@ fn micros(sorted: &[Duration], percent: usize) -> u64 {
     if sorted.is_empty() {
         return 0;
     }
-    u64::try_from(percentile(sorted, percent).as_micros()).unwrap_or(u64::MAX)
+    u64::try_from(measure::percentile(sorted, percent).as_micros()).unwrap_or(u64::MAX)
 }
 
 /// `n` as a float (exact up to 2^53, which no count here comes near).
@@ -1438,7 +1440,7 @@ pub fn line_fields(line: &str) -> BTreeMap<String, String> {
 // ---------------------------------------------------------------------------------------------
 
 #[cfg(feature = "cli")]
-use crate::cli::{Program, Store, agent, retry_busy};
+use crate::cli::{self, Program, Store};
 
 /// How many times at most a [`CliLander`] runs a land again that ended retryable, each time with
 /// the same key: `E_BUSY`, or `E_CAS_RETRY_EXHAUSTED` after its attempts. A land whose last run
@@ -1453,8 +1455,8 @@ pub fn land_key(lander: usize, land: usize) -> String {
 }
 
 /// A lander through the `swarmops` binary, as an agent lands a change: lander `n` of a run, as
-/// [`agent`]`(n)`, on ref `target` of a [`Store`]. Each land ([`CliLander::land`]) runs one
-/// process of the binary at a time:
+/// [`agent`](cli::agent)`(n)`, on ref `target` of a [`Store`]. Each land ([`CliLander::land`])
+/// runs one process of the binary at a time:
 ///
 /// 1. `cat <target>:REGISTRY`, whose `meta.resolved` names the target's head, and whose result is
 ///    [`REGISTRY`] as that head holds it;
@@ -1464,12 +1466,13 @@ pub fn land_key(lander: usize, land: usize) -> String {
 ///    `E_CAS_RETRY_EXHAUSTED`, runs again with the same key, as an agent would, at most
 ///    [`LAND_RERUNS`] times.
 ///
-/// A read or a commit that meets `E_BUSY` runs again too ([`retry_busy`]). Each land's envelope
-/// is read into its [`LandRecord`]: the changeset a run that landed or replayed names, the
-/// attempts of every run summed, whether it was relocated, conflicted (`E_CONFLICT`) or ended
-/// exhausted, the `E_BUSY`s it met, and its latency from the read to the end of its last run.
-/// The lock hold and sync times are the store's own, which a process of the binary does not
-/// report: they stay empty. A land that ends in any other way fails the test with its run.
+/// A read or a commit that meets `E_BUSY` runs again too ([`retry_busy`](cli::retry_busy)).
+/// Each land's envelope is read into its [`LandRecord`]: the changeset a run that landed or
+/// replayed names, the attempts of every run summed, whether it was relocated, conflicted
+/// (`E_CONFLICT`) or ended exhausted, the `E_BUSY`s it met, and its latency from the read to the
+/// end of its last run. The lock hold and sync times are the store's own, which a process of the
+/// binary does not report: they stay empty. A land that ends in any other way fails the test
+/// with its run.
 #[cfg(feature = "cli")]
 pub struct CliLander<'s, P> {
     /// The store it lands on.
@@ -1508,12 +1511,13 @@ enum LandEnd {
 
 #[cfg(feature = "cli")]
 impl<'s, P: Program> CliLander<'s, P> {
-    /// Lander `lander` (from 0) of a run on ref `target` of `store`, as [`agent`]`(lander)`.
+    /// Lander `lander` (from 0) of a run on ref `target` of `store`, as
+    /// [`agent`](cli::agent)`(lander)`.
     pub fn new(store: &'s Store<P>, lander: usize, target: &str) -> CliLander<'s, P> {
         CliLander {
             store,
             lander,
-            agent: agent(lander),
+            agent: cli::agent(lander),
             target: target.to_owned(),
         }
     }
@@ -1565,7 +1569,7 @@ impl<'s, P: Program> CliLander<'s, P> {
     fn read_target(&self) -> (String, Vec<u8>) {
         let file = format!("{}:{REGISTRY}", self.target);
         let args = ["cat", file.as_str()];
-        let run = retry_busy(self.store.read(&args), || self.store.read(&args));
+        let run = cli::retry_busy(self.store.read(&args), || self.store.read(&args));
         assert_eq!(run.exit(), 0, "{run}");
         let envelope = run.envelope();
         let head = envelope["meta"]["resolved"][self.target.as_str()].as_str();
@@ -1599,7 +1603,7 @@ impl<'s, P: Program> CliLander<'s, P> {
             head,
         ];
         let commit = || self.store.run_as(&self.agent, &args, &[]);
-        let run = retry_busy(commit(), commit);
+        let run = cli::retry_busy(commit(), commit);
         let result = run.ok();
         let id = result["changeset"].as_str();
         id.unwrap_or_else(|| panic!("a changeset id: {run}"))
