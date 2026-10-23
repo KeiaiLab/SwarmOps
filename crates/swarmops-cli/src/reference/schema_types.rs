@@ -17,7 +17,9 @@ use std::fmt::Write as _;
 
 use serde_json::{Map, Value};
 
-use super::{BIN, GENERATED, Page, cell, first_sentence, paragraphs, slug, trim_end, yes_no};
+use super::pages::{
+    BIN, GENERATED, Page, cell, first_sentence, paragraphs, slug, trim_end, yes_no,
+};
 
 /// The page's name in `docs/reference/`.
 pub(super) const FILE: &str = "schema-types.md";

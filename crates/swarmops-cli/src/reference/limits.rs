@@ -23,7 +23,7 @@ use swarmops_api::ErrorCode;
 use swarmops_core::bytes;
 
 use super::command_page::{self, file_name};
-use super::{GENERATED, Page, all_leaves, cell, paragraphs, reference_dir, slug, trim_end};
+use super::pages::{GENERATED, Page, all_leaves, cell, paragraphs, reference_dir, slug, trim_end};
 
 /// The page's name in `docs/reference/`.
 pub(super) const FILE: &str = "limits.md";
