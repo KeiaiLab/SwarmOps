@@ -34,6 +34,7 @@ check:
     cargo fmt --all --check
     cargo fmt --manifest-path fuzz/Cargo.toml --check
     cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+    cargo clippy --locked --workspace --lib --bins --all-features -- -D warnings -D clippy::unwrap_used -D clippy::missing_assert_message -D clippy::mod_module_files -D clippy::rc_buffer
     cargo clippy --locked -p swarmops-cli --test test_hooks -- -D warnings
     cargo clippy --locked --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
     cargo nextest run --locked --workspace --all-features --no-tests=warn
