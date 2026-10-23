@@ -64,6 +64,7 @@ impl Recording<'_> {
             git_ref,
             target_ref,
             lossy,
+            ..
         } = req;
         let failed = |e: ImportError| error::git_import_error(e, &git_path, &git_ref);
         if swarmops_store::check_ref_name(&target_ref).is_err() {
@@ -97,6 +98,7 @@ impl Recording<'_> {
             source_ref,
             branch,
             force,
+            ..
         } = req;
         let failed = |e: ExportError| error::git_export_error(e, &git_path, &source_ref, &branch);
         if swarmops_store::check_ref_name(&source_ref).is_err() {
@@ -104,11 +106,8 @@ impl Recording<'_> {
         }
         refuse_mirror(&git_path)?;
         let mut sink = GixSink::open(Path::new(&git_path)).map_err(|e| failed(e.into()))?;
-        let request = ExportRequest {
-            source_ref: source_ref.clone(),
-            branch: branch.clone(),
-            force,
-        };
+        let mut request = ExportRequest::new(&source_ref, &branch);
+        request.force = force;
         let report = swarmops_git::export(&self.ops.repo, &mut sink, &request).map_err(|e| {
             if let ExportError::Diverged { head, .. } = &e {
                 self.resolved.record(&source_ref, *head);
@@ -146,14 +145,14 @@ fn recovered(repair: TailRepair) -> Recovered {
         frames_listed,
         frames_rewritten,
         off_bytes_dropped,
+        ..
     } = repair;
-    Recovered {
-        log_cut: cut,
-        frames_listed,
-        frames_rewritten,
-        off_bytes_dropped,
-        ..Recovered::default()
-    }
+    let mut out = Recovered::default();
+    out.log_cut = cut;
+    out.frames_listed = frames_listed;
+    out.frames_rewritten = frames_rewritten;
+    out.off_bytes_dropped = off_bytes_dropped;
+    out
 }
 
 /// The response that gives what `report` says: ids as hex, `exported` the commits written, and
@@ -172,19 +171,21 @@ fn export_response(report: ExportReport) -> GitExportResp {
         rewritten,
         recovered: _,
         warnings,
+        ..
     } = report;
-    GitExportResp {
-        exported: commits_written,
+    let mut out = GitExportResp::new(
+        commits_written,
         objects_written,
-        head_changeset: head.to_string(),
-        head_sha: head_oid.to_string(),
+        head.to_string(),
+        head_oid.to_string(),
         branch,
-        old_sha: old.map(|oid| oid.to_string()),
         branch_moved,
-        incremental: base.is_some(),
+        base.is_some(),
         rewritten,
-        warnings,
-    }
+    );
+    out.old_sha = old.map(|oid| oid.to_string());
+    out.warnings = warnings;
+    out
 }
 
 /// The conversion's class of the wire's `class`: the one of the same name.
@@ -215,28 +216,31 @@ fn response(report: ImportReport) -> GitImportResp {
         lossy,
         lossy_total,
         warnings,
-        recovered: _,
+        ..
     } = report;
     let lossy = lossy
         .iter()
-        .map(|commit| LossyCommitOut {
-            commit: commit.commit.to_string(),
-            changeset: commit.changeset.to_string(),
-            classes: commit.classes.iter().map(wire_class).collect(),
+        .map(|commit| {
+            LossyCommitOut::new(
+                commit.commit.to_string(),
+                commit.changeset.to_string(),
+                commit.classes.iter().map(wire_class).collect(),
+            )
         })
         .collect();
-    GitImportResp {
+    let mut out = GitImportResp::new(
         imported,
         skipped,
-        head_changeset: head.to_string(),
-        git_head_sha: git_head.to_string(),
+        head.to_string(),
+        git_head.to_string(),
         target_ref,
         ref_moved,
-        old_head: old_head.map(|id| id.to_string()),
         lossy,
         lossy_total,
-        warnings,
-    }
+    );
+    out.old_head = old_head.map(|id| id.to_string());
+    out.warnings = warnings;
+    out
 }
 
 #[cfg(test)]

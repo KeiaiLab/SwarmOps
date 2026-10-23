@@ -499,7 +499,7 @@ impl LocalOps {
             LocalRepo::create(path, name).map_err(|e| error::repo_error(e, During::Init(path)))?;
         let ops = Self::with_repo(repo, path);
         let info = ops
-            .repo_info(InfoReq {})
+            .repo_info(InfoReq::default())
             .map_err(|e| crate::error::created_but_unread(path, e))?;
         Ok((ops, info))
     }
@@ -537,13 +537,10 @@ impl LocalOps {
             ),
         };
 
-        Ok(Signature {
-            name: name.into_bytes(),
-            email: email.into_bytes(),
-            secs: secs.unwrap_or_else(signing_time),
-            offset_secs: 0,
-            negative_zero: false,
-        })
+        // A UTC offset written +0000 always passes the signature's check.
+        let secs = secs.unwrap_or_else(signing_time);
+        Signature::new(name.into_bytes(), email.into_bytes(), secs, 0, false)
+            .map_err(|e| error::error(ErrorCode::Internal, e.to_string()))
     }
 
     /// The operations of one request: each revision they resolve is recorded in `resolved`,
@@ -627,7 +624,7 @@ fn no_file(
 /// once (an `offset` of 0 is the default, not a choice), and for lines numbered from 0 or a range
 /// that ends before it starts.
 fn file_span(offset: u64, lines: Option<LineRange>) -> Result<FileSpan, OpError> {
-    let Some(LineRange { first, last }) = lines else {
+    let Some(LineRange { first, last, .. }) = lines else {
         return Ok(FileSpan::Bytes { start: offset });
     };
     let range = || {
@@ -700,7 +697,7 @@ fn after_cursor(read: &Snapshot<'_>, cursor: &str) -> Result<Option<ChangesetId>
         .with_hint("pass the previous page's cursor as it was given, or none to start over")
     };
     let id = ObjectId::from_hex(cursor)
-        .map(ChangesetId)
+        .map(ChangesetId::new)
         .map_err(|_| bad("a cursor is a full changeset id"))?;
     let stored = read
         .changeset(id)
@@ -982,17 +979,18 @@ fn recovered_out(recovered: Recovered) -> RecoveredOut {
         views_rebuilt,
         records_replayed,
         refs_replayed,
+        ..
     } = recovered;
-    RecoveredOut {
-        log_cut: log_cut.map(|LogCut { at, bytes }| LogCutOut { at, bytes }),
-        frames_listed,
-        frames_rewritten,
-        off_bytes_dropped,
-        index_records_dropped,
-        views_rebuilt,
-        records_replayed,
-        refs_replayed,
-    }
+    let mut out = RecoveredOut::default();
+    out.log_cut = log_cut.map(|LogCut { at, bytes, .. }| LogCutOut::new(at, bytes));
+    out.frames_listed = frames_listed;
+    out.frames_rewritten = frames_rewritten;
+    out.off_bytes_dropped = off_bytes_dropped;
+    out.index_records_dropped = index_records_dropped;
+    out.views_rebuilt = views_rebuilt;
+    out.records_replayed = records_replayed;
+    out.refs_replayed = refs_replayed;
+    out
 }
 
 /// [`LocalOps`]'s operations as one request: [`StoreOps`], recording each revision they resolve
@@ -1089,6 +1087,7 @@ impl<'a> Recording<'a> {
             idempotency_key,
             max_conflict_bytes,
             resolutions,
+            ..
         } = req;
 
         // 1. The request's own rules, before anything is resolved or read.
@@ -1120,13 +1119,11 @@ impl<'a> Recording<'a> {
         content::check_metadata(&metadata)?;
 
         // 4. The rebase.
-        let rebase = swarmops_repo::RebaseRequest {
-            base,
-            message: message.map(String::into_bytes),
-            metadata,
-            resolutions,
-            ..swarmops_repo::RebaseRequest::new(head, &onto, signature)
-        };
+        let mut rebase = swarmops_repo::RebaseRequest::new(head, &onto, signature);
+        rebase.base = base;
+        rebase.message = message.map(String::into_bytes);
+        rebase.metadata = metadata;
+        rebase.resolutions = resolutions;
         let outcome = (self.ops.repo)
             .rebase(rebase)
             .map_err(|e| merge_error(e, max_conflict_bytes))?;
@@ -1174,12 +1171,11 @@ impl<'a> Recording<'a> {
         let old = changeset.parents.first().copied();
         let advanced = match (advance, confirmed.result) {
             (None, _) => None,
-            (Some(name), CasResult::Applied { .. }) => Some(swarmops_api::Advanced {
-                name: name.to_owned(),
-                old: old.map(|id| id.to_string()),
-                new: parent.to_string(),
-                already_applied: true,
-            }),
+            (Some(name), CasResult::Applied { .. }) => {
+                let mut moved = swarmops_api::Advanced::new(name, parent.to_string(), true);
+                moved.old = old.map(|id| id.to_string());
+                Some(moved)
+            }
             (Some(name), CasResult::Mismatch { actual }) => {
                 return Err(error::op(RepoError::RefMoved {
                     name: name.to_owned(),
@@ -1204,14 +1200,15 @@ impl<'a> Recording<'a> {
 impl StoreOps for Recording<'_> {
     fn repo_info(&self, _req: InfoReq) -> Result<RepoInfo, OpError> {
         let info = self.ops.repo.info().map_err(error::op)?;
-        Ok(RepoInfo {
-            repo_id: info.repo_id,
-            name: info.name,
-            main: info.main.map(|id| id.to_string()),
-            store_version: info.store_version,
-            changesets: info.changesets,
-            refs: info.refs,
-        })
+        let mut out = RepoInfo::new(
+            info.repo_id,
+            info.name,
+            info.store_version,
+            info.changesets,
+            info.refs,
+        );
+        out.main = info.main.map(|id| id.to_string());
+        Ok(out)
     }
 
     fn commit(&self, who: &Identity, req: CommitReq) -> Result<CommitResp, OpError> {
@@ -1222,6 +1219,7 @@ impl StoreOps for Recording<'_> {
             advance,
             idempotency_key,
             allow_empty,
+            ..
         } = req;
         // A key that is not a uuid v7 is refused before anything is resolved or read.
         let key = idempotency_key
@@ -1261,66 +1259,62 @@ impl StoreOps for Recording<'_> {
             metadata.push(("run_id".to_owned(), run_id.as_bytes().to_vec()));
         }
         content::check_metadata(&metadata)?;
+        let advance = advance.map(|name| swarmops_repo::Advance::new(&name, who.agent()));
+        let request = CommitRequest::new(
+            parent.into_iter().collect(),
+            changes,
+            signature.clone(),
+            signature,
+            message.into_bytes(),
+            metadata,
+            allow_empty,
+            advance,
+        );
         // The parent is checked in the snapshot it was resolved in, which is not read after the
         // commit.
-        let outcome = self
-            .ops
-            .repo
-            .commit_in(
-                &read,
-                CommitRequest {
-                    parents: parent.into_iter().collect(),
-                    changes,
-                    author: signature.clone(),
-                    committer: signature,
-                    message: message.into_bytes(),
-                    metadata,
-                    allow_empty,
-                    advance: advance.map(|name| swarmops_repo::Advance {
-                        name,
-                        actor: who.agent().to_owned(),
-                    }),
-                },
-            )
-            .map_err(|e| {
-                // A move refused under the lock is E_CAS_MISMATCH, which reports what the write
-                // repaired first, as a ref move's does.
-                if let RepoError::RefMoved { recovered, .. } = &e {
-                    self.resolved.record_recovered(**recovered);
-                }
-                // A blob the list names that the store lacks is said of its change, as the list's
-                // other refusals are.
-                let at = match &e {
-                    RepoError::MissingBlob { path, .. } => named
-                        .get(path)
-                        .map(|&index| (index, path.as_str().to_owned())),
-                    _ => None,
-                };
-                match at {
-                    Some((index, path)) => content::in_change(error::op(e), index, &path),
-                    None => error::op(e),
-                }
-            })?;
+        let outcome = self.ops.repo.commit_in(&read, request).map_err(|e| {
+            // A move refused under the lock is E_CAS_MISMATCH, which reports what the write
+            // repaired first, as a ref move's does.
+            if let RepoError::RefMoved { recovered, .. } = &e {
+                self.resolved.record_recovered(**recovered);
+            }
+            // A blob the list names that the store lacks is said of its change, as the list's
+            // other refusals are.
+            let at = match &e {
+                RepoError::MissingBlob { path, .. } => named
+                    .get(path)
+                    .map(|&index| (index, path.as_str().to_owned())),
+                _ => None,
+            };
+            match at {
+                Some((index, path)) => content::in_change(error::op(e), index, &path),
+                None => error::op(e),
+            }
+        })?;
         self.resolved.record_recovered(outcome.recovered);
         // The store held the changeset already, and the ref it advances, if any, named it: an
         // identical request made both, and this one wrote nothing.
         let replayed = matches!(outcome.insert, swarmops_repo::InsertOutcome::AlreadyPresent)
             && (outcome.advanced.as_ref()).is_none_or(|moved| moved.already_applied);
-        Ok(CommitResp {
-            changeset: outcome.id.to_string(),
-            parent: parent.map(|id| id.to_string()),
-            root: outcome.root.to_string(),
-            files_changed: bytes::to_u64(outcome.files_changed),
-            blobs_written: bytes::to_u64(outcome.blobs_written),
-            advanced: outcome.advanced.map(|moved| swarmops_api::Advanced {
-                name: moved.name,
-                old: moved.old.map(|id| id.to_string()),
-                new: outcome.id.to_string(),
-                already_applied: moved.already_applied,
-            }),
-            warnings: outcome.warnings,
-            replayed,
-        })
+        let mut out = CommitResp::new(
+            outcome.id.to_string(),
+            outcome.root.to_string(),
+            bytes::to_u64(outcome.files_changed),
+            bytes::to_u64(outcome.blobs_written),
+        );
+        out.parent = parent.map(|id| id.to_string());
+        out.advanced = outcome.advanced.map(|moved| {
+            let mut advanced = swarmops_api::Advanced::new(
+                moved.name,
+                outcome.id.to_string(),
+                moved.already_applied,
+            );
+            advanced.old = moved.old.map(|id| id.to_string());
+            advanced
+        });
+        out.warnings = outcome.warnings;
+        out.replayed = replayed;
+        Ok(out)
     }
 
     fn land(&self, who: &Identity, req: LandReq) -> Result<LandResp, OpError> {
@@ -1334,6 +1328,7 @@ impl StoreOps for Recording<'_> {
             max_conflict_bytes,
             expect_target,
             resolutions,
+            ..
         } = req;
         // The request's own rules are checked before anything is resolved or read.
         if let Some(key) = &idempotency_key {
@@ -1368,16 +1363,14 @@ impl StoreOps for Recording<'_> {
             let run_id = run_id.as_bytes().to_vec();
             lander_metadata.push((LANDER_RUN_ID_KEY.to_owned(), run_id));
         }
-        let land = LandRequest {
-            base,
-            key: idempotency_key,
-            message: message.map(String::into_bytes),
-            lander_metadata,
-            max_attempts,
-            expect_target: expected,
-            resolutions,
-            ..LandRequest::new(head, &target, self.ops.native_signature(who, None)?)
-        };
+        let mut land = LandRequest::new(head, &target, self.ops.native_signature(who, None)?);
+        land.base = base;
+        land.key = idempotency_key;
+        land.message = message.map(String::into_bytes);
+        land.lander_metadata = lander_metadata;
+        land.max_attempts = max_attempts;
+        land.expect_target = expected;
+        land.resolutions = resolutions;
         let outcome = self.ops.repo.land(land).map_err(|e| {
             // An exact land refused under the lock reports what the write repaired first.
             if let RepoError::CasMismatch { recovered, .. } = &e {
@@ -1445,11 +1438,11 @@ impl StoreOps for Recording<'_> {
                 present.push(id.to_string());
             }
         }
-        Ok(BlobHasResp { present })
+        Ok(BlobHasResp::new(present))
     }
 
     fn resolve_rev(&self, req: ResolveRevReq) -> Result<ResolvedRev, OpError> {
-        let ResolveRevReq { rev } = req;
+        let ResolveRevReq { rev, .. } = req;
         let read = self.snapshot()?;
         let id = self.resolve(&read, &rev)?;
         // The revision is a ref's name when the snapshot holds a ref by that very name, which is
@@ -1460,10 +1453,7 @@ impl StoreOps for Recording<'_> {
             Ok(None) | Err(RepoError::RefName(_)) => RevKind::Changeset,
             Err(e) => return Err(error::op(e)),
         };
-        Ok(ResolvedRev {
-            id: id.to_string(),
-            kind,
-        })
+        Ok(ResolvedRev::new(id.to_string(), kind))
     }
 
     fn read_file(&self, req: ReadFileReq) -> Result<FileContent, OpError> {
@@ -1473,6 +1463,7 @@ impl StoreOps for Recording<'_> {
             offset,
             lines,
             max_bytes,
+            ..
         } = req;
         let span = file_span(offset, lines)?;
         let read = self.snapshot()?;
@@ -1511,6 +1502,7 @@ impl StoreOps for Recording<'_> {
             depth,
             limit,
             cursor,
+            ..
         } = req;
         at_least_one("limit", limit)?;
         tree_depth(depth)?;
@@ -1590,6 +1582,7 @@ impl StoreOps for Recording<'_> {
             limit,
             cursor,
             paths,
+            ..
         } = req;
         at_least_one("limit", limit)?;
         let filter = log_filter(&paths)?;
@@ -1598,11 +1591,7 @@ impl StoreOps for Recording<'_> {
             Some(cursor) => match after_cursor(&read, &cursor)? {
                 Some(parent) => parent,
                 None => {
-                    return Ok(LogPage {
-                        entries: Vec::new(),
-                        truncated: false,
-                        cursor: None,
-                    });
+                    return Ok(LogPage::new(Vec::new(), false));
                 }
             },
             None => self.resolve(&read, &rev.unwrap_or_else(|| Rev::from("main")))?,
@@ -1614,24 +1603,20 @@ impl StoreOps for Recording<'_> {
                 .map_err(error::op)?;
             let truncated = changesets.len() > limit;
             changesets.truncate(limit);
-            return Ok(LogPage {
-                entries: changesets.iter().map(summary).collect(),
-                truncated,
-                cursor: (changesets.last())
-                    .filter(|_| truncated)
-                    .map(|last| last.id.to_string()),
-            });
+            let mut out = LogPage::new(changesets.iter().map(summary).collect(), truncated);
+            out.cursor = (changesets.last())
+                .filter(|_| truncated)
+                .map(|last| last.id.to_string());
+            return Ok(out);
         }
         let changesets = read.log_first_parent(from, limit).map_err(error::op)?;
         // A full page whose last changeset has a parent has older history after it.
         let last = changesets
             .last()
             .filter(|last| changesets.len() == limit && !last.changeset.parents.is_empty());
-        Ok(LogPage {
-            entries: changesets.iter().map(summary).collect(),
-            truncated: last.is_some(),
-            cursor: last.map(|last| last.id.to_string()),
-        })
+        let mut out = LogPage::new(changesets.iter().map(summary).collect(), last.is_some());
+        out.cursor = last.map(|last| last.id.to_string());
+        Ok(out)
     }
 
     fn path_history(&self, req: PathHistoryReq) -> Result<PathHistoryPage, OpError> {
@@ -1640,6 +1625,7 @@ impl StoreOps for Recording<'_> {
             path,
             limit,
             cursor,
+            ..
         } = req;
         at_least_one("limit", limit)?;
         let path = prefix_path(&path)?;
@@ -1664,14 +1650,11 @@ impl StoreOps for Recording<'_> {
         let entries = (events.iter())
             .map(|event| history_entry(&read, event))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(PathHistoryPage {
-            path: path.to_string(),
-            entries,
-            truncated,
-            cursor: (events.last())
-                .filter(|_| truncated)
-                .map(|last| last.changeset.to_string()),
-        })
+        let mut out = PathHistoryPage::new(path.to_string(), entries, truncated);
+        out.cursor = (events.last())
+            .filter(|_| truncated)
+            .map(|last| last.changeset.to_string());
+        Ok(out)
     }
 
     fn diff(&self, req: DiffReq) -> Result<Diff, OpError> {
@@ -1684,6 +1667,7 @@ impl StoreOps for Recording<'_> {
             limit,
             cursor,
             max_bytes,
+            ..
         } = req;
         at_least_one("limit", limit)?;
         if max_bytes == 0 {
@@ -1708,27 +1692,18 @@ impl StoreOps for Recording<'_> {
             .last()
             .filter(|_| truncated)
             .map(|last| last.path.clone());
-        Ok(Diff {
-            from: old.to_string(),
-            to: new.to_string(),
-            files,
-            truncated,
-            cursor,
-        })
+        let mut out = Diff::new(old.to_string(), new.to_string(), files, truncated);
+        out.cursor = cursor;
+        Ok(out)
     }
 
     fn ref_list(&self, _req: RefListReq) -> Result<RefListResp, OpError> {
         let refs = self.ops.repo.list_refs().map_err(error::op)?;
-        Ok(RefListResp {
-            refs: refs
-                .into_iter()
-                .map(|(name, state)| RefOut {
-                    name,
-                    target: state.target.to_string(),
-                    version: state.version,
-                })
+        Ok(RefListResp::new(
+            refs.into_iter()
+                .map(|(name, state)| RefOut::new(name, state.target.to_string(), state.version))
                 .collect(),
-        })
+        ))
     }
 
     fn ref_set(&self, who: &Identity, req: RefSetReq) -> Result<RefSetResp, OpError> {
@@ -1737,6 +1712,7 @@ impl StoreOps for Recording<'_> {
             new,
             expected_old,
             create,
+            ..
         } = req;
         if create == expected_old.is_some() {
             return Err(error::error(
@@ -1830,6 +1806,7 @@ impl StoreOps for Recording<'_> {
             before,
             limit,
             max_changesets,
+            ..
         } = req;
         at_least_one("limit", limit)?;
         let (operations, older) = self.ops.repo.op_log(before, limit).map_err(error::op)?;
@@ -1839,10 +1816,7 @@ impl StoreOps for Recording<'_> {
             .into_iter()
             .map(|operation| operation_out(&read, operation, max_changesets))
             .collect::<Result<_, _>>()?;
-        Ok(OpLogPage {
-            ops,
-            truncated: older,
-        })
+        Ok(OpLogPage::new(ops, older))
     }
 
     fn undo(&self, who: &Identity, req: UndoReq) -> Result<UndoResp, OpError> {
@@ -1858,21 +1832,17 @@ impl StoreOps for Recording<'_> {
         let ref_moves = outcome
             .moves
             .into_iter()
-            .map(|(name, old, new, at)| RefMoveOut {
-                name,
-                old: old.map(|id| id.to_string()),
-                new: new.map(|id| id.to_string()),
-                actor: who.agent().to_owned(),
-                at,
+            .map(|(name, old, new, at)| {
+                let mut moved = RefMoveOut::new(name, who.agent(), at);
+                moved.old = old.map(|id| id.to_string());
+                moved.new = new.map(|id| id.to_string());
+                moved
             })
             .collect();
-        Ok(UndoResp {
-            undone: outcome.undone,
-            op: outcome.frame_seq,
-            ref_moves,
-            already_applied: outcome.already_applied,
-            warnings: outcome.warnings,
-        })
+        let mut out = UndoResp::new(outcome.undone, ref_moves, outcome.already_applied);
+        out.op = outcome.frame_seq;
+        out.warnings = outcome.warnings;
+        Ok(out)
     }
 
     fn verify(&self, req: VerifyReq) -> Result<VerifyReport, OpError> {
@@ -1903,26 +1873,22 @@ impl StoreOps for Recording<'_> {
                 findings.push(found);
             }
         }
-        Ok(VerifyReport {
-            objects_checked: report.objects_checked,
-            changesets_checked: report.changesets_checked,
-            problems,
-            findings,
-        })
+        let mut out =
+            VerifyReport::new(report.objects_checked, report.changesets_checked, problems);
+        out.findings = findings;
+        Ok(out)
     }
 
     fn derive(&self, req: DeriveReq) -> Result<DeriveResp, OpError> {
-        let DeriveReq { after, limit } = req;
+        let DeriveReq { after, limit, .. } = req;
         let run = self
             .ops
             .repo
             .derive_eager(after, limit)
             .map_err(error::op)?;
-        Ok(DeriveResp {
-            derived: run.derived,
-            cached: run.cached,
-            next: run.last_frame,
-        })
+        let mut out = DeriveResp::new(run.derived, run.cached);
+        out.next = run.last_frame;
+        Ok(out)
     }
 }
 
@@ -2237,21 +2203,19 @@ impl CommitKey {
 
 /// Whom a changeset's `metadata` attributes it to.
 fn attribution(metadata: &[(String, Vec<u8>)]) -> Attribution {
-    Attribution {
-        agent: metadata_text(metadata, "agent").unwrap_or_else(|| UNKNOWN_AGENT.to_owned()),
-        run_id: metadata_text(metadata, "run_id"),
-        on_behalf_of: None,
-    }
+    let mut out = Attribution::new(
+        metadata_text(metadata, "agent").unwrap_or_else(|| UNKNOWN_AGENT.to_owned()),
+    );
+    out.run_id = metadata_text(metadata, "run_id");
+    out
 }
 
 /// Who landed a changeset whose metadata is `metadata`, if a land made it: its `lander` and, when
 /// present, its `lander_run_id`.
 fn lander(metadata: &[(String, Vec<u8>)]) -> Option<Attribution> {
-    Some(Attribution {
-        agent: metadata_text(metadata, LANDER_KEY)?,
-        run_id: metadata_text(metadata, LANDER_RUN_ID_KEY),
-        on_behalf_of: None,
-    })
+    let mut out = Attribution::new(metadata_text(metadata, LANDER_KEY)?);
+    out.run_id = metadata_text(metadata, LANDER_RUN_ID_KEY);
+    Some(out)
 }
 
 /// The value of `key` in a changeset's `metadata`, as text (invalid UTF-8 replaced), if it has
@@ -2328,7 +2292,7 @@ enum Shaped {
 /// `content`, and a blob it names by id an id. `E_INVALID_ARG` otherwise, naming the path in its
 /// message and its `details` ([`content::in_resolution`]).
 fn shaped_resolutions(input: ResolutionsInput) -> Result<ShapedResolutions, OpError> {
-    let ResolutionsInput { against, files } = input;
+    let ResolutionsInput { against, files, .. } = input;
     let files = (files.into_iter())
         .map(|(path, resolution)| {
             let refuse = |what: String| {
@@ -2341,6 +2305,7 @@ fn shaped_resolutions(input: ResolutionsInput) -> Result<ShapedResolutions, OpEr
                 content,
                 mode,
                 delete,
+                ..
             } = resolution;
             let given: Vec<&str> = [
                 ("take", take.is_some()),
@@ -2386,7 +2351,8 @@ impl ShapedResolutions {
     /// side, a delete, a blob by id, or new content, converted by a commit's rules for contents
     /// ([`content::resolution_bytes`]), each of the kind its mode gives, if it gives one.
     fn resolutions(self, against: ChangesetId) -> Result<Resolutions, OpError> {
-        let kind = |mode: Option<ModeInput>| mode.map(|mode| content::leaf_kind(Some(mode)));
+        let kind =
+            |mode: Option<ModeInput>| mode.map(|mode| content::leaf_kind(Some(mode))).transpose();
         let mut files = BTreeMap::new();
         let (mut contents, mut modes) = (Vec::new(), Vec::new());
         for (path, shaped) in self.files {
@@ -2426,13 +2392,13 @@ fn created_at(committer: &Signature) -> u64 {
 
 fn summary(stored: &StoredChangeset) -> ChangesetSummary {
     let changeset = &stored.changeset;
-    ChangesetSummary {
-        id: stored.id.to_string(),
-        parents: changeset.parents.iter().map(ToString::to_string).collect(),
-        author_agent: attribution(&changeset.metadata).agent,
-        created_at: created_at(&changeset.committer),
-        title: title(&changeset.message),
-    }
+    ChangesetSummary::new(
+        stored.id.to_string(),
+        changeset.parents.iter().map(ToString::to_string).collect(),
+        attribution(&changeset.metadata).agent,
+        created_at(&changeset.committer),
+        title(&changeset.message),
+    )
 }
 
 /// A message's first line, without its line break (`\n` or `\r\n`), as text.
@@ -2534,13 +2500,14 @@ fn operation_kind(
 /// A changeset an operation recorded, as the operation log lists it.
 fn op_changeset_out(stored: &StoredChangeset) -> OpChangesetOut {
     let changeset = &stored.changeset;
-    OpChangesetOut {
-        id: stored.id.to_string(),
-        agent: attribution(&changeset.metadata).agent,
-        created_at: created_at(&changeset.committer),
-        title: title(&changeset.message),
-        land_key: metadata_value(stored, LAND_KEY_KEY).map(lossy),
-    }
+    let mut out = OpChangesetOut::new(
+        stored.id.to_string(),
+        attribution(&changeset.metadata).agent,
+        created_at(&changeset.committer),
+        title(&changeset.message),
+    );
+    out.land_key = metadata_value(stored, LAND_KEY_KEY).map(lossy);
+    out
 }
 
 /// The value of metadata `key` of the changeset `stored`, if it has the key.
@@ -2590,19 +2557,10 @@ fn git_memo_finding(mismatch: &swarmops_git::GitMemoMismatch) -> (String, Verify
     // `git_oid` ([`swarmops_git::ExportOid`]) is a changeset's export oid; the other two memos are
     // a tree's and a blob's.
     let is_commit = mismatch.memo == "git_oid";
-    let found = VerifyFinding {
-        kind: "derived_mismatch".to_owned(),
-        object: (!is_commit).then(|| subject.clone()),
-        changeset: is_commit.then_some(subject),
-        parent: None,
-        seq: None,
-        offset: None,
-        ref_name: None,
-        cause: None,
-        system: None,
-        key: None,
-        derivation: Some(mismatch.memo.clone()),
-    };
+    let mut found = VerifyFinding::new("derived_mismatch".to_owned());
+    found.object = (!is_commit).then(|| subject.clone());
+    found.changeset = is_commit.then_some(subject);
+    found.derivation = Some(mismatch.memo.clone());
     (line, found)
 }
 

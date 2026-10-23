@@ -72,6 +72,7 @@ impl Recording<'_> {
             remote,
             mode,
             max_attempts,
+            ..
         } = req;
 
         // 1. The request's rules, the remote and the lander's signature, before the lock.
@@ -101,7 +102,7 @@ impl Recording<'_> {
     /// `sync status`: how `main` and the remote's followed branch stand, from the store and the
     /// mirror alone: no network, no lock.
     pub fn sync_status(&self, req: SyncStatusReq) -> Result<SyncStatus, OpError> {
-        let SyncStatusReq { remote, limit } = req;
+        let SyncStatusReq { remote, limit, .. } = req;
         let remote = self.sync_remote(&remote)?;
 
         // 1. What the last fetch saw, and what main names.
@@ -142,12 +143,10 @@ impl Recording<'_> {
             .min(limit);
         let unpublished = match main {
             Some(main) if listed > 0 => {
-                let page = self.log(LogReq {
-                    rev: Some(Rev::from(main.to_string())),
-                    limit: listed,
-                    cursor: None,
-                    paths: Vec::new(),
-                })?;
+                let mut req = LogReq::default();
+                req.rev = Some(Rev::from(main.to_string()));
+                req.limit = listed;
+                let page = self.log(req)?;
                 page.entries
             }
             _ => Vec::new(),
@@ -156,22 +155,23 @@ impl Recording<'_> {
         // 4. The response.
         let truncated =
             standing.truncated || u64::try_from(limit).is_ok_and(|n| standing.ahead > n);
-        Ok(SyncStatus {
-            remote: remote.name,
-            branch: remote.branch,
-            fetched: seen.is_some(),
-            remote_head: head.map(|(oid, changeset)| remote_head(oid, changeset)),
-            base: standing.base.map(|base| base.to_string()),
-            ahead: standing.ahead,
-            behind: standing.behind,
+        let mut out = SyncStatus::new(
+            remote.name,
+            remote.branch,
+            seen.is_some(),
+            standing.ahead,
+            standing.behind,
             unpublished,
             truncated,
-        })
+        );
+        out.remote_head = head.map(|(oid, changeset)| remote_head(oid, changeset));
+        out.base = standing.base.map(|base| base.to_string());
+        Ok(out)
     }
 
     /// The remote named `name`, as `remote list` reads it, or `E_REMOTE_NOT_FOUND`.
     fn sync_remote(&self, name: &str) -> Result<RemoteInfo, OpError> {
-        let listed = self.remote_list(RemoteListReq {})?;
+        let listed = self.remote_list(RemoteListReq::default())?;
         let found = listed
             .remotes
             .into_iter()
@@ -535,11 +535,8 @@ impl Syncing<'_, '_> {
 
     /// The push's locked form: `main` to the followed branch; the commit the branch names now.
     fn push(&mut self) -> Result<GitOid, OpError> {
-        let req = PushReq {
-            remote: self.remote.name.clone(),
-            source_ref: MAIN.to_owned(),
-            branch: None,
-        };
+        let mut req = PushReq::new(self.remote.name.clone());
+        MAIN.clone_into(&mut req.source_ref);
         let pushed = self.rec.push_locked(self.lock, self.remote, req)?;
         self.warnings.extend(pushed.warnings.unwrap_or_default());
         pushed
@@ -559,11 +556,11 @@ impl Syncing<'_, '_> {
             let exported = repo
                 .derived::<ExportOid>(landed_as, &())
                 .map_err(error::op)?;
-            published.push(PublishedChange {
-                changeset: change.to_string(),
-                landed_as: landed_as.to_string(),
-                sha: exported.git_oid().to_string(),
-            });
+            published.push(PublishedChange::new(
+                change.to_string(),
+                landed_as.to_string(),
+                exported.git_oid().to_string(),
+            ));
         }
         Ok(published)
     }
@@ -578,23 +575,22 @@ impl Syncing<'_, '_> {
         main_new: ChangesetId,
     ) -> SyncResp {
         let warnings = std::mem::take(&mut self.warnings);
-        SyncResp {
-            remote: self.remote.name.clone(),
-            branch: self.remote.branch.clone(),
-            status: kind,
-            attempts: attempt,
-            published: Vec::new(),
-            dropped: Vec::new(),
-            main: HeadMove {
-                old: self.main_old.map(|id| id.to_string()),
-                new: main_new.to_string(),
-            },
-            remote_head: HeadMove {
-                old: self.remote_old.map(|oid| oid.to_string()),
-                new: remote_new.to_string(),
-            },
-            warnings: (!warnings.is_empty()).then_some(warnings),
-        }
+        let mut main = HeadMove::new(main_new.to_string());
+        main.old = self.main_old.map(|id| id.to_string());
+        let mut remote_head = HeadMove::new(remote_new.to_string());
+        remote_head.old = self.remote_old.map(|oid| oid.to_string());
+        let mut out = SyncResp::new(
+            self.remote.name.clone(),
+            self.remote.branch.clone(),
+            kind,
+            attempt,
+            Vec::new(),
+            Vec::new(),
+            main,
+            remote_head,
+        );
+        out.warnings = (!warnings.is_empty()).then_some(warnings);
+        out
     }
 
     /// The engine's failure `e` as the sync's error.
@@ -680,10 +676,7 @@ fn drop_reason(by: engine::DropReason) -> DropReason {
 
 /// The remote's head `oid`, the changeset `changeset`, as the wire gives it.
 fn remote_head(oid: GitOid, changeset: ChangesetId) -> RemoteHead {
-    RemoteHead {
-        sha: oid.to_string(),
-        changeset: changeset.to_string(),
-    }
+    RemoteHead::new(oid.to_string(), changeset.to_string())
 }
 
 /// `n` as a count on the wire.

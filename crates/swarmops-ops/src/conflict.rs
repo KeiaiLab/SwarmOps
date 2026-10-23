@@ -31,13 +31,14 @@
 use std::io;
 use std::ops::Range;
 
-use swarmops_api::{ConflictKindOut, ConflictReport, FileConflictOut, HunkOut, LinesOut};
+use swarmops_api::{ConflictKindOut, ConflictReport, FileConflictOut, HunkOut, LinesOut, OpError};
 use swarmops_core::bytes;
 use swarmops_repo::MergeConflicts;
 use swarmops_repo::merge::conflict::{ConflictHunk, ConflictKind};
 use swarmops_repo::merge::tree_diff::Leaf;
 use swarmops_repo::merge::tree_merge::FileConflict;
 
+use crate::error;
 use crate::local::UNKNOWN_AGENT;
 
 /// The kinds of conflict, in the order the report's `kinds` lists them: the operations spec's
@@ -87,18 +88,19 @@ pub(crate) fn report(conflicts: &MergeConflicts, max_bytes: u64) -> ConflictRepo
     let kinds = (KINDS.into_iter())
         .filter(|kind| files.iter().any(|file| file.kind == *kind))
         .collect();
-    ConflictReport {
-        base: conflicts.base.to_string(),
-        ours: conflicts.ours.to_string(),
-        theirs: conflicts.theirs.to_string(),
+    let mut out = ConflictReport::new(
+        conflicts.base.to_string(),
+        conflicts.ours.to_string(),
+        conflicts.theirs.to_string(),
         files,
         kinds,
-        auto_merged: (conflicts.auto_merged.iter())
-            .map(ToString::to_string)
-            .collect(),
-        stale: conflicts.stale.iter().map(ToString::to_string).collect(),
-        truncated: budgets.texts.cut || budgets.entries.cut,
-    }
+        budgets.texts.cut || budgets.entries.cut,
+    );
+    out.auto_merged = (conflicts.auto_merged.iter())
+        .map(ToString::to_string)
+        .collect();
+    out.stale = conflicts.stale.iter().map(ToString::to_string).collect();
+    Ok(out)
 }
 
 /// What a report may still take: of its hunks' texts, and of its files' and hunks' entries.
@@ -179,16 +181,12 @@ fn file_out(
         "" => UNKNOWN_AGENT.to_owned(),
         named => named.to_owned(),
     };
-    let mut out = FileConflictOut {
-        path: file.path.to_string(),
-        kind,
-        base_blob: blob(file.base),
-        ours_blob: blob(file.ours),
-        theirs_blob: blob(file.theirs),
-        hunks: Vec::new(),
-        theirs_changeset: touched.map(|(changeset, _)| changeset.to_string()),
-        theirs_agent: touched.map(|(_, named)| agent(named)),
-    };
+    let mut out = FileConflictOut::new(file.path.to_string(), kind);
+    out.base_blob = blob(file.base);
+    out.ours_blob = blob(file.ours);
+    out.theirs_blob = blob(file.theirs);
+    out.theirs_changeset = touched.map(|(changeset, _)| changeset.to_string());
+    out.theirs_agent = touched.map(|(_, named)| agent(named));
 
     // The file's entry as JSON, then each hunk's, made one at a time: a hunk past the budget is
     // never made, nor its texts taken.
@@ -239,17 +237,15 @@ fn file_out(
 /// conflicts hold only for the lines of each hunk. `None` for no hunks.
 fn spanning(hunks: &[ConflictHunk], id: u32) -> Option<HunkOut> {
     let (first, last) = (hunks.first()?, hunks.last()?);
-    let side = |from: &Range<u32>, to: &Range<u32>| LinesOut {
-        first: u64::from(from.start) + 1,
-        last: u64::from(to.end),
-        text: None,
+    let side = |from: &Range<u32>, to: &Range<u32>| {
+        LinesOut::new(u64::from(from.start) + 1, u64::from(to.end))
     };
-    Some(HunkOut {
+    Some(HunkOut::new(
         id,
-        base: side(&first.base, &last.base),
-        ours: side(&first.ours, &last.ours),
-        theirs: side(&first.theirs, &last.theirs),
-    })
+        side(&first.base, &last.base),
+        side(&first.ours, &last.ours),
+        side(&first.theirs, &last.theirs),
+    ))
 }
 
 /// An entry's length in a report's list: its JSON's `json` bytes, the `,` before it, and
@@ -299,17 +295,17 @@ fn hunk_out(hunk: &ConflictHunk, id: u32, texts: &mut Budget) -> HunkOut {
         .iter()
         .sum();
     let with_texts = texts.take(bytes);
-    let side = |lines: &Range<u32>, text: &[u8]| LinesOut {
-        first: u64::from(lines.start) + 1,
-        last: u64::from(lines.end),
-        text: with_texts.then(|| String::from_utf8_lossy(text).into_owned()),
+    let side = |lines: &Range<u32>, text: &[u8]| {
+        let mut out = LinesOut::new(u64::from(lines.start) + 1, u64::from(lines.end));
+        out.text = with_texts.then(|| String::from_utf8_lossy(text).into_owned());
+        out
     };
-    HunkOut {
+    HunkOut::new(
         id,
-        base: side(&hunk.base, &hunk.base_text),
-        ours: side(&hunk.ours, &hunk.ours_text),
-        theirs: side(&hunk.theirs, &hunk.theirs_text),
-    }
+        side(&hunk.base, &hunk.base_text),
+        side(&hunk.ours, &hunk.ours_text),
+        side(&hunk.theirs, &hunk.theirs_text),
+    )
 }
 
 #[cfg(test)]

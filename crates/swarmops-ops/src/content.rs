@@ -64,6 +64,8 @@ use swarmops_core::bytes;
 use swarmops_core::{BlobId, LeafKind, ObjectId, RepoPath};
 use swarmops_repo::Change;
 
+use crate::error;
+
 /// The most bytes a put's content may hold: 512 MiB, the most an object of the store holds
 /// ([`swarmops_store::MAX_OBJECT_LEN`]).
 pub const MAX_CONTENT_BYTES: u64 = swarmops_store::MAX_OBJECT_LEN;
@@ -193,7 +195,7 @@ fn convert(content: ContentInput, room: Room) -> Result<Vec<u8>, OpError> {
 /// The blob `id` names, 64 hex digits of either case: `E_INVALID_ARG` with the `blob` in
 /// `details` for anything else.
 pub(crate) fn blob_id(id: &str) -> Result<BlobId, OpError> {
-    ObjectId::from_hex(id).map(BlobId).map_err(|e| {
+    ObjectId::from_hex(id).map(BlobId::new).map_err(|e| {
         OpError::new(
             ErrorCode::InvalidArg,
             format!("{id:?} is not a blob id: {e}"),
@@ -292,6 +294,7 @@ fn changes_within(
             op,
             content,
             mode,
+            ..
         } = input;
         let refuse =
             |what: &str| in_change(OpError::new(ErrorCode::InvalidArg, what), index, &path);
@@ -346,7 +349,7 @@ fn changes_within(
                 Some((kind, Content::Blob(id))) => swarmops_repo::ChangeOp::PutBlob { kind, id },
                 None => swarmops_repo::ChangeOp::Delete,
             };
-            Ok(Change { path, op })
+            Ok(Change::new(path, op))
         })
         .collect()
 }

@@ -329,21 +329,17 @@ fn located(io: &IoFailure) -> Map<String, Value> {
 /// `e` to read it back for its report: `e`, saying that the store is there
 /// (`details.created: true`, and a hint to read it), so that a client that retries does not
 /// find out only from `E_EXISTS`.
-pub(crate) fn created_but_unread(at: &Utf8Path, e: OpError) -> OpError {
-    let mut details = e.details;
-    details.insert("created".to_owned(), true.into());
-    OpError {
-        message: one_line(format!(
-            "the store at {at} is made, but reading it back failed: {}",
-            e.message
-        )),
-        details,
-        hint: Some(hint(format!(
-            "swarmops --repo {} info",
-            shell_word(at.as_str())
-        ))),
-        ..e
-    }
+pub(crate) fn created_but_unread(at: &Utf8Path, mut e: OpError) -> OpError {
+    e.details.insert("created".to_owned(), true.into());
+    e.message = one_line(format!(
+        "the store at {at} is made, but reading it back failed: {}",
+        e.message
+    ));
+    e.hint = Some(hint(format!(
+        "swarmops --repo {} info",
+        shell_word(at.as_str())
+    )));
+    e
 }
 
 /// An error of `code` with `message`, its control characters escaped so that it is one line.
@@ -586,10 +582,7 @@ pub(crate) fn git_import_error(e: ImportError, git_path: &str, git_ref: &str) ->
                 RepoError::Store(StoreError::NotCommitted { source }) => lasting_refusal(source),
                 _ => None,
             };
-            let stopped = OpError {
-                message: one_line(message),
-                ..op(*source)
-            };
+            let stopped = op(*source).with_message(one_line(message));
             let mut stopped = progress(stopped, imported, last);
             if let Some(fix) = fix {
                 stopped.hint = Some(format!("{fix}, then {RESUME_HINT}"));
@@ -759,10 +752,9 @@ pub(crate) fn git_export_error(
 ) -> OpError {
     let message = e.to_string();
     match e {
-        ExportError::SourceRef(name) => OpError {
-            message: one_line(message),
-            ..op(RepoError::NotFound(name))
-        },
+        ExportError::SourceRef(name) => {
+            op(RepoError::NotFound(name)).with_message(one_line(message))
+        }
         ExportError::RefName(name) => ref_name_invalid(name, message),
         ExportError::CheckedOut {
             branch: checked_out,
@@ -1264,6 +1256,7 @@ pub(crate) fn limit_error(e: LimitExceeded, remote: &str) -> OpError {
         path,
         size,
         limit,
+        ..
     } = e;
     let (message, next) = match &path {
         Some(path) => (
