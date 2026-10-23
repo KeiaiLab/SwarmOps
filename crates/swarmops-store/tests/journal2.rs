@@ -726,3 +726,305 @@ fn a_format_2_store_reads_back_what_it_committed() {
     assert_eq!(read.journal_after(None, 100).unwrap().len(), 40);
     assert_eq!(read.frames_before(None, 100).unwrap().len(), 40);
 }
+
+#[cfg(feature = "test-hooks")]
+mod hooks {
+    //! What needs the test hooks: the order checker on FORMAT 2 files, and the store-level
+    //! crash and power-loss sweeps on a FORMAT 2 store.
+
+    use std::ffi::OsString;
+    use std::os::unix::process::ExitStatusExt;
+    use std::panic::{self, AssertUnwindSafe};
+    use std::path::Path;
+
+    use camino::Utf8PathBuf;
+    use swarmops_store::{CRASH_AT_ENV, CrashAtFs, OrderCheckFs, RealFs};
+    use swarmops_testkit::child::{SIGABRT, run, this_test};
+    use swarmops_testkit::faults::checked;
+    use swarmops_testkit::power::{ImageRecordingFs, RecordedCall, Seeded, Timeline};
+    use swarmops_testkit::test_name;
+
+    use super::*;
+
+    /// Set only in the children of the crash sweep: the store root.
+    const CRASH_ROOT: &str = "SWARMOPS_TEST_JOURNAL2_CRASH_ROOT";
+
+    /// The panic message of `run`, if it panics.
+    fn panic_message(run: impl FnOnce()) -> Option<String> {
+        let hook = panic::take_hook();
+        panic::set_hook(Box::new(|_| {}));
+        let result = panic::catch_unwind(AssertUnwindSafe(run));
+        panic::set_hook(hook);
+        let payload = result.err()?;
+        Some(
+            payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+                .unwrap_or_default(),
+        )
+    }
+
+    /// The order checker knows FORMAT 2's files under the rules it knows FORMAT 1's by: a whole
+    /// store's life passes it, journal, entries of 16 bytes, checkpoint of 20 and all.
+    #[test]
+    fn a_format_2_store_passes_the_order_check() {
+        let (_dir, layout) = v2_root();
+        let mut store = MetaStore::create_in(layout.clone(), checked(RealFs::new())).unwrap();
+        store.set_parallelism(1);
+        for n in 0..33 {
+            commit(&store, n).unwrap();
+        }
+        // Recovery after a crash between a frame's two appends lists the frame.
+        drop(store);
+        let off = file_len(layout.journal_off());
+        set_len(layout.journal_off(), off - ENTRY as u64);
+        let journal = Journal::open(&layout, checked(RealFs::new())).unwrap();
+        assert_eq!(journal.repair_tail().unwrap().frames_listed, 1);
+        let store = MetaStore::open_in(layout, checked(RealFs::new())).unwrap();
+        store.flush().unwrap();
+    }
+
+    /// And it catches FORMAT 2 writes out of order: a frame listed before it is durable (W1), a
+    /// checkpoint past the durable journal (W3).
+    #[test]
+    fn the_order_check_catches_format_2_writes_out_of_order() {
+        let (_dir, layout) = v2_root();
+        Journal::create(&layout, Arc::new(RealFs::new())).unwrap();
+        let fs = OrderCheckFs::new(RealFs::new());
+        let (log, off) = (layout.journal_log(), layout.journal_off());
+        let frame = frame2(&payload(&[compacted(0)]), 0, 0);
+        fs.append(log.as_std_path(), &frame).unwrap();
+        let crc = crc32fast::hash(&payload(&[compacted(0)]));
+        let listed = panic_message(|| {
+            let _ = fs.append_durable(off.as_std_path(), &entry2(0, 0, crc));
+        });
+        let listed = listed.expect("listing a frame not durable panics");
+        assert!(listed.starts_with("order check: W1 violated"), "{listed}");
+
+        let mut ckpt = COMPACTED_FRAME.to_le_bytes().to_vec();
+        ckpt.extend(1u64.to_le_bytes());
+        ckpt.extend(crc32fast::hash(&ckpt).to_le_bytes());
+        let moved = panic_message(|| {
+            let _ = fs.atomic_replace(layout.journal_ckpt().as_std_path(), &ckpt);
+        });
+        let moved = moved.expect("a checkpoint past the durable journal panics");
+        assert!(moved.starts_with("order check: W3 violated"), "{moved}");
+
+        // Synced, the same frame is listed, and the checkpoint moves past it.
+        fs.sync_data(log.as_std_path()).unwrap();
+        fs.append_durable(off.as_std_path(), &entry2(0, 0, crc))
+            .unwrap();
+        fs.atomic_replace(layout.journal_ckpt().as_std_path(), &ckpt)
+            .unwrap();
+    }
+
+    /// One transaction in a child process, on the FORMAT 2 store at `root`, through a
+    /// `CrashAtFs` that aborts on its k-th call, under the order checker.
+    fn crash_child(root: OsString) {
+        let k = std::env::var(CRASH_AT_ENV).unwrap().parse().unwrap();
+        let root = Utf8PathBuf::from_path_buf(root.into()).unwrap();
+        let layout = Layout::with_format(&root, StoreFormat::V2);
+        let fs = checked(CrashAtFs::new(NoSyncFs, k));
+        let mut store = MetaStore::open_in(layout, fs).unwrap();
+        store.set_parallelism(1);
+        commit(&store, 31).unwrap();
+    }
+
+    /// A FORMAT 2 store of 31 changesets, the next commit moving the checkpoint, on a
+    /// filesystem that never syncs (a process crash keeps the page cache).
+    fn crash_template() -> (TempDir, Layout) {
+        let (dir, layout) = v2_root();
+        let store = MetaStore::create_in(layout.clone(), Arc::new(NoSyncFs)).unwrap();
+        for n in 0..31 {
+            commit(&store, n).unwrap();
+        }
+        append_bytes(layout.journal_log(), b"torn"); // an earlier writer crashed mid-append
+        (dir, layout)
+    }
+
+    /// A crash at any call of a transaction that moves the checkpoint leaves a FORMAT 2 store
+    /// that recovers to every changeset committed before it, the crashed one's once its frame
+    /// was durable.
+    #[test]
+    fn a_crash_at_any_call_of_a_transaction_recovers() {
+        if let Some(root) = std::env::var_os(CRASH_ROOT) {
+            crash_child(root);
+            return;
+        }
+        let test = "a_crash_at_any_call_of_a_transaction_recovers";
+        let calls = {
+            let (_dir, layout) = crash_template();
+            let counter = Arc::new(CrashAtFs::new(NoSyncFs, 0));
+            let mut store =
+                MetaStore::open_in(layout, Arc::clone(&counter) as Arc<dyn FsOps>).unwrap();
+            store.set_parallelism(1);
+            commit(&store, 31).unwrap();
+            counter.calls()
+        };
+        assert!(calls > 10, "{calls} calls");
+        for k in 1..=calls + 1 {
+            let (_dir, layout) = crash_template();
+            let child = run(this_test(&test_name!(test))
+                .env(CRASH_ROOT, layout.root())
+                .env(CRASH_AT_ENV, k.to_string()));
+            let ended = if k <= calls {
+                child.status.signal() == Some(SIGABRT)
+            } else {
+                child.status.success()
+            };
+            assert!(
+                ended,
+                "k={k}: {:?}\n{}",
+                child.status,
+                String::from_utf8_lossy(&child.stderr)
+            );
+            let mut store = MetaStore::open_in(layout.clone(), checked(NoSyncFs)).unwrap();
+            store.set_parallelism(1);
+            store.write().and_then(MetaWrite::commit).unwrap();
+            store.flush().unwrap();
+            let read = store.read().unwrap();
+            let count = read.count_changesets().unwrap();
+            assert!(count == 31 || count == 32, "k={k}: {count} changesets");
+            for n in 0..count {
+                assert!(
+                    read.changeset(changeset(n).id).unwrap().is_some(),
+                    "k={k}: {n}"
+                );
+            }
+            assert_eq!(
+                Journal::open(&layout, Arc::new(NoSyncFs))
+                    .unwrap()
+                    .ckpt()
+                    .unwrap(),
+                file_len(layout.journal_log()),
+                "k={k}"
+            );
+            // The next transaction commits.
+            commit(&store, 40).unwrap();
+        }
+    }
+
+    /// What the power-loss sweep records: a FORMAT 2 store made, then commits, each returned
+    /// at the step its mark names.
+    struct Recorded {
+        timeline: Timeline,
+        /// The step at which each commit returned.
+        returned: Vec<usize>,
+        /// The step of each commit's frame append.
+        begun: Vec<usize>,
+        /// The step at which the create returned.
+        created: usize,
+    }
+
+    /// The commits the power-loss sweep makes; a flush after the third moves the checkpoint.
+    const POWER_COMMITS: u64 = 5;
+
+    fn record() -> (TempDir, Recorded) {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        let root = Utf8PathBuf::from_path_buf(base.join("store")).unwrap();
+        let layout = Layout::with_format(&root, StoreFormat::V2);
+        let fs = Arc::new(ImageRecordingFs::new());
+        // The store root made durable first, as a repository's init makes it.
+        fs.create_dir_all(root.as_std_path()).unwrap();
+        fs.fsync_dir(&base).unwrap();
+        let mut store =
+            MetaStore::create_in(layout.clone(), Arc::clone(&fs) as Arc<dyn FsOps>).unwrap();
+        store.set_parallelism(1);
+        fs.mark("created");
+        for n in 0..POWER_COMMITS {
+            commit(&store, n).unwrap();
+            fs.mark(&format!("commit {n}"));
+            if n == 2 {
+                store.flush().unwrap();
+            }
+        }
+        let calls = fs.calls();
+        let timeline = Timeline::new(&base, &calls);
+        let log = layout.journal_log().into_std_path_buf();
+        let begun = (calls.iter().enumerate())
+            .filter(|(_, call)| {
+                matches!(call, RecordedCall::AppendDurable { path, bytes }
+                    if *path == log && !bytes.is_empty())
+            })
+            .map(|(at, _)| timeline.steps_of(at).start)
+            .collect();
+        let returned = (0..POWER_COMMITS)
+            .map(|n| timeline.mark(&format!("commit {n}")))
+            .collect();
+        let created = timeline.mark("created");
+        (
+            dir,
+            Recorded {
+                timeline,
+                returned,
+                begun,
+                created,
+            },
+        )
+    }
+
+    /// The changesets a power-loss image of the store recovers to, or why it does not.
+    fn recovered(base: &Path) -> Result<u64, String> {
+        let root = Utf8PathBuf::from_path_buf(base.join("store")).unwrap();
+        let layout = Layout::with_format(&root, StoreFormat::V2);
+        let mut store = MetaStore::open_in(layout.clone(), checked(NoSyncFs))
+            .map_err(|e| format!("open: {e}"))?;
+        store.set_parallelism(1);
+        (store.write().and_then(MetaWrite::commit)).map_err(|e| format!("recovery: {e}"))?;
+        store.flush().map_err(|e| format!("flush: {e}"))?;
+        let read = store.read().map_err(|e| format!("read: {e}"))?;
+        let count = read.count_changesets().map_err(|e| format!("count: {e}"))?;
+        for n in 0..count {
+            if read
+                .changeset(changeset(n).id)
+                .map_err(|e| e.to_string())?
+                .is_none()
+            {
+                return Err(format!("{count} changesets but {n} missing"));
+            }
+        }
+        drop(read);
+        commit(&store, 100).map_err(|e| format!("the next commit: {e}"))?;
+        Ok(count)
+    }
+
+    /// Checks the images of a power failure after every step from the create's return on, for
+    /// the seeds `seeds`: each recovers to a prefix of the commits holding every one that
+    /// returned and none that had not begun.
+    fn sweep(seeds: &[u64]) {
+        let (_dir, rec) = record();
+        let mut failures = Vec::new();
+        for cut in rec.created..=rec.timeline.steps() {
+            for &seed in seeds {
+                let image = rec.timeline.image(cut, &mut Seeded::new(seed, cut));
+                let dir = tempfile::tempdir().unwrap();
+                image.materialize(dir.path()).unwrap();
+                let acked = rec.returned.iter().filter(|&&at| at <= cut).count() as u64;
+                let begun = rec.begun.iter().filter(|&&at| at < cut).count() as u64;
+                match recovered(dir.path()) {
+                    Ok(count) if (acked..=begun).contains(&count) => {}
+                    Ok(count) => failures.push(format!(
+                        "cut {cut}, seed {seed}: {count} changesets, {acked} acknowledged, \
+                         {begun} begun"
+                    )),
+                    Err(why) => failures.push(format!("cut {cut}, seed {seed}: {why}")),
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} images failed; the first:\n{}",
+            failures.len(),
+            failures[..failures.len().min(5)].join("\n")
+        );
+    }
+
+    /// The images of a power failure at every step: the least and the most the disk can hold
+    /// (seeds 0 and 1), and random shapes of loss (2 to 15).
+    #[test]
+    fn power_loss_images_of_a_format_2_store_recover_every_acknowledged_commit() {
+        sweep(&(0..16).collect::<Vec<u64>>());
+    }
+}

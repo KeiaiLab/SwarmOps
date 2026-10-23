@@ -73,6 +73,12 @@
 //! so that it changes no call count, and it holds no lock while a call runs, so that calls made
 //! at once stay at once.
 //!
+//! It knows the files of both formats under the same rules: FORMAT 1's `journal.log`,
+//! `journal.off` (8-byte entries), `journal.ckpt` (8 bytes) and `refs/`, and FORMAT 2's
+//! `journal2.log`, `journal2.off` (16-byte entries), `journal2.ckpt` (20 bytes, its offset first)
+//! and `refs2/` (the M6 design §2.2). The poison an upgrade writes over FORMAT 1's checkpoint
+//! (`UPGRADE_POISON`) moves no checkpoint, and W3 lets it pass.
+//!
 //! It judges the order of the calls, and takes each at what [`FsOps`] documents for it, not at
 //! what `RealFs` does inside it: that `atomic_replace` syncs its temp file before the rename and
 //! the directory after it, that `append_durable`, `truncate` and `write_durable_temp` sync, that
@@ -86,14 +92,24 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::{fmt, io};
 
+use crate::format::{StoreFormat, UPGRADE_POISON};
 use crate::fs_ops::{FsMethod, FsOps, LinkOutcome};
-use crate::meta::frame::{self, Parsed, Record};
+use crate::meta::frame::{self, Parsed, Place, Record};
 
-/// The size of one `journal.off` entry.
+/// The size of one `journal.off` entry (FORMAT 1).
 const ENTRY_LEN: u64 = 8;
 
-/// The size of a frame's header: `u32le len | u32le crc`.
+/// The size of one `journal2.off` entry (FORMAT 2).
+const ENTRY_LEN_V2: u64 = 16;
+
+/// The size of a frame's header: `u32le len | u32le crc` (FORMAT 1).
 const HEADER_LEN: u64 = 8;
+
+/// The size of a FORMAT 2 frame's header: `len`, `crc`, `seq`, `prev_crc`, `hcrc`.
+const HEADER_LEN_V2: u64 = 24;
+
+/// The size of `journal2.ckpt`: its offset, its seq and their CRC.
+const CKPT_LEN_V2: usize = 20;
 
 /// The four view files of `meta/sorted/`, in the order a compaction renames them, with the size
 /// of one entry.
@@ -225,7 +241,7 @@ impl State {
         self.files.entry(path.to_path_buf()).or_insert_with(|| {
             let len = real_len(path);
             let durable_to = match journal_file(path) {
-                Some((JournalFile::Log, meta)) => listed_end(meta).min(len),
+                Some((JournalFile::Log, meta, format)) => listed_end(meta, format).min(len),
                 _ => len,
             };
             FileState {
@@ -364,25 +380,31 @@ impl State {
         }
     }
 
-    /// The bytes of `journal.log` in `meta` known to be durable: synced in this process, or
-    /// listed in `journal.off`.
-    fn durable_log_end(&self, meta: &Path) -> u64 {
+    /// The bytes of `journal.log` of `format` in `meta` known to be durable: synced in this
+    /// process, or listed in `journal.off`.
+    fn durable_log_end(&self, meta: &Path, format: StoreFormat) -> u64 {
         let synced = self
             .files
-            .get(&meta.join("journal.log"))
+            .get(&journal_path(meta, format, JournalFile::Log))
             .map_or(0, |file| file.durable_to);
-        synced.max(listed_end(meta))
+        synced.max(listed_end(meta, format))
     }
 
-    /// Where a failed sync left `journal.log` in `meta` not durable, if it did.
-    fn log_lost_from(&self, meta: &Path) -> Option<u64> {
+    /// Where a failed sync left `journal.log` of `format` in `meta` not durable, if it did.
+    fn log_lost_from(&self, meta: &Path, format: StoreFormat) -> Option<u64> {
         self.files
-            .get(&meta.join("journal.log"))
+            .get(&journal_path(meta, format, JournalFile::Log))
             .and_then(|file| file.lost_from)
     }
 
-    /// W1 for an append of `entries` to `off`, the `journal.off` of `meta`.
-    fn listing(&self, off: &Path, meta: &Path, entries: &[u8]) -> Option<String> {
+    /// W1 for an append of `entries` to `off`, the `journal.off` of `format` in `meta`.
+    fn listing(
+        &self,
+        off: &Path,
+        meta: &Path,
+        format: StoreFormat,
+        entries: &[u8],
+    ) -> Option<String> {
         if let Some(lost) = self.files.get(off).and_then(|file| file.lost_from) {
             return Some(format!(
                 "journal.off holds bytes from {lost} on that a failed sync left not durable, and \
@@ -390,18 +412,22 @@ impl State {
                  listed frames"
             ));
         }
-        let log = meta.join("journal.log");
-        let durable = self.durable_log_end(meta);
-        let lost = self.log_lost_from(meta);
-        for entry in entries.chunks(8) {
-            let Ok(entry) = <[u8; 8]>::try_from(entry) else {
+        let log = journal_path(meta, format, JournalFile::Log);
+        let durable = self.durable_log_end(meta, format);
+        let lost = self.log_lost_from(meta, format);
+        let entry_len = usize::try_from(entry_len(format)).unwrap_or(usize::MAX);
+        for entry in entries.chunks(entry_len) {
+            let Some(start) = (entry.len() == entry_len)
+                .then(|| entry.first_chunk::<8>())
+                .flatten()
+            else {
                 return Some(format!(
                     "it appends {} bytes, not whole entries",
                     entries.len()
                 ));
             };
-            let start = u64::from_le_bytes(entry);
-            let Some(end) = frame_end(&log, start) else {
+            let start = u64::from_le_bytes(*start);
+            let Some(end) = frame_end(&log, start, format) else {
                 return Some(format!(
                     "it lists a frame at {start}, where journal.log holds no frame header"
                 ));
@@ -429,10 +455,15 @@ impl State {
     /// never cut into the frames `journal.off` lists, nor `journal.off` below an entry this
     /// process synced or found there when it first saw the file, but for the zeroed entries past
     /// frame 0 at its end, which list no frame.
-    fn journal_cut(&self, file: JournalFile, path: &Path, meta: &Path, len: u64) -> Option<String> {
+    fn journal_cut(
+        &self,
+        (file, meta, format): (JournalFile, &Path, StoreFormat),
+        path: &Path,
+        len: u64,
+    ) -> Option<String> {
         match file {
             JournalFile::Log => {
-                let listed = listed_end(meta);
+                let listed = listed_end(meta, format);
                 (len < listed).then(|| {
                     format!(
                         "it cuts journal.log to {len}, into the frames journal.off lists (to \
@@ -442,7 +473,7 @@ impl State {
             }
             JournalFile::Off => {
                 let synced = self.files.get(path).map_or(0, |file| file.durable_to);
-                let listing = listing_entries_end(path, synced);
+                let listing = listing_entries_end(path, synced, format);
                 (len < listing).then(|| {
                     format!(
                         "it cuts journal.off to {len}, below the entries synced or found there \
@@ -456,7 +487,13 @@ impl State {
 
     /// W1 and W5 for an append of `frame` to `log`, the `journal.log` of `meta`: the rule
     /// broken, and how.
-    fn frame(&self, log: &Path, meta: &Path, frame: &[u8]) -> Option<(Rule, String)> {
+    fn frame(
+        &self,
+        log: &Path,
+        meta: &Path,
+        format: StoreFormat,
+        frame: &[u8],
+    ) -> Option<(Rule, String)> {
         if let Some(lost) = self.files.get(log).and_then(|file| file.lost_from) {
             return Some((
                 Rule::W1,
@@ -466,7 +503,7 @@ impl State {
                 ),
             ));
         }
-        let Parsed::Whole { records, .. } = frame::parse_frame(frame) else {
+        let Parsed::Whole { records, .. } = parse_any(format, frame) else {
             return None;
         };
         if !records
@@ -503,34 +540,39 @@ impl State {
     /// W8 for the link of an external id entry of `meta`: every byte this process wrote to its
     /// `journal.log` is durable (written by `append`, it is not until a sync covers it; a failed
     /// sync leaves it not durable for good), so the frame that records the entry's changeset is.
+    /// The journal of either format, an upgrade's among them.
     fn external_id(&self, meta: &Path) -> Option<String> {
-        let log = meta.join("journal.log");
-        let file = self.files.get(&log)?;
-        if let Some(lost) = file.lost_from
-            && real_len(&log) > lost
-        {
-            return Some(format!(
-                "journal.log holds bytes from {lost} on that a failed sync left not durable"
-            ));
-        }
-        file.dirty.then(|| {
-            "journal.log holds bytes this process wrote and has not synced: the frame that \
-             records the entry's changeset may not be durable yet"
-                .to_owned()
-        })
+        [StoreFormat::V1, StoreFormat::V2]
+            .iter()
+            .find_map(|&format| {
+                let log = journal_path(meta, format, JournalFile::Log);
+                let file = self.files.get(&log)?;
+                if let Some(lost) = file.lost_from
+                    && real_len(&log) > lost
+                {
+                    return Some(format!(
+                        "journal.log holds bytes from {lost} on that a failed sync left not durable"
+                    ));
+                }
+                file.dirty.then(|| {
+                    "journal.log holds bytes this process wrote and has not synced: the frame that \
+                 records the entry's changeset may not be durable yet"
+                        .to_owned()
+                })
+            })
     }
 
-    /// W2 for a change of a ref file of `meta`.
-    fn ref_change(&self, meta: &Path) -> Option<String> {
-        let len = real_len(&meta.join("journal.log"));
-        if let Some(lost) = self.log_lost_from(meta)
+    /// W2 for a change of a ref file of `meta`, of `format`.
+    fn ref_change(&self, (meta, format): (&Path, StoreFormat)) -> Option<String> {
+        let len = real_len(&journal_path(meta, format, JournalFile::Log));
+        if let Some(lost) = self.log_lost_from(meta, format)
             && len > lost
         {
             return Some(format!(
                 "journal.log holds bytes from {lost} on that a failed sync left not durable"
             ));
         }
-        let durable = self.durable_log_end(meta);
+        let durable = self.durable_log_end(meta, format);
         (len > durable).then(|| {
             format!(
                 "journal.log is durable to {durable} of its {len} bytes: the frame that moves \
@@ -539,26 +581,36 @@ impl State {
         })
     }
 
-    /// W3 for `journal.ckpt` of `meta` set to `bytes`.
-    fn checkpoint(&self, meta: &Path, bytes: &[u8]) -> Option<String> {
-        let Ok(offset) = <[u8; 8]>::try_from(bytes) else {
+    /// W3 for `journal.ckpt` of `format` in `meta` set to `bytes`.
+    fn checkpoint(&self, meta: &Path, format: StoreFormat, bytes: &[u8]) -> Option<String> {
+        if format == StoreFormat::V1 && bytes == UPGRADE_POISON {
+            return None;
+        }
+        let len = match format {
+            StoreFormat::V1 => 8,
+            StoreFormat::V2 => CKPT_LEN_V2,
+        };
+        let Some(offset) = (bytes.len() == len)
+            .then(|| bytes.first_chunk::<8>())
+            .flatten()
+        else {
             return Some(format!("journal.ckpt would hold {} bytes", bytes.len()));
         };
-        let offset = u64::from_le_bytes(offset);
+        let offset = u64::from_le_bytes(*offset);
         if offset == 0 {
             return None;
         }
         if let Some(why) = self.index_unsynced(meta) {
             return Some(format!("it moves the checkpoint to {offset} while {why}"));
         }
-        let durable = self.durable_log_end(meta);
+        let durable = self.durable_log_end(meta, format);
         if offset > durable {
             return Some(format!(
                 "it moves the checkpoint to {offset}, past the {durable} bytes of journal.log \
                  that are durable"
             ));
         }
-        let refs = meta.join("refs");
+        let refs = meta.join(refs_name(format));
         for (dir, pending) in &self.dirs {
             let change = if dir.starts_with(&refs) {
                 pending.first()
@@ -740,40 +792,70 @@ fn read_at(path: &Path, offset: u64, len: usize) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-/// Where the frame whose header starts at `offset` of `log` ends, by its header; `None` if the
-/// header is not there.
-fn frame_end(log: &Path, offset: u64) -> Option<u64> {
+/// Where the frame of `format` whose header starts at `offset` of `log` ends, by its header;
+/// `None` if the header is not there.
+fn frame_end(log: &Path, offset: u64, format: StoreFormat) -> Option<u64> {
     let len = read_at(log, offset, 4)?;
     let len = u32::from_le_bytes(len.try_into().ok()?);
-    Some(offset + HEADER_LEN + u64::from(len))
+    let header_len = match format {
+        StoreFormat::V1 => HEADER_LEN,
+        StoreFormat::V2 => HEADER_LEN_V2,
+    };
+    Some(offset + header_len + u64::from(len))
 }
 
-/// Where the last frame `journal.off` of `meta` lists ends, as the files are now (the zeroed
-/// entries past frame 0 at its end list none: [`listing_entries_end`]); 0 if it lists none, or
-/// its last entry or that frame's header cannot be read.
-fn listed_end(meta: &Path) -> u64 {
-    let off = meta.join("journal.off");
-    let listed = listing_entries_end(&off, real_len(&off)) / ENTRY_LEN;
+/// The records of `frame`, a frame of `format` (its place, in FORMAT 2, what its header names).
+fn parse_any(format: StoreFormat, frame: &[u8]) -> Parsed {
+    let place = match frame::decode_header_in(format, frame) {
+        Ok(Some(header)) => Place {
+            seq: header.seq.unwrap_or(0),
+            prev_crc: header.prev_crc.unwrap_or(0),
+        },
+        _ => return Parsed::Short,
+    };
+    frame::parse_frame_in(format, frame, place)
+}
+
+/// The size of one entry of `journal.off` in `format`.
+fn entry_len(format: StoreFormat) -> u64 {
+    match format {
+        StoreFormat::V1 => ENTRY_LEN,
+        StoreFormat::V2 => ENTRY_LEN_V2,
+    }
+}
+
+/// Where the last frame `journal.off` of `format` in `meta` lists ends, as the files are now
+/// (the zeroed entries past frame 0 at its end list none: [`listing_entries_end`]); 0 if it
+/// lists none, or its last entry or that frame's header cannot be read.
+fn listed_end(meta: &Path, format: StoreFormat) -> u64 {
+    let off = journal_path(meta, format, JournalFile::Off);
+    let entry_len = entry_len(format);
+    let listed = listing_entries_end(&off, real_len(&off), format) / entry_len;
     let Some(last) = listed.checked_sub(1) else {
         return 0;
     };
-    read_at(&off, last * ENTRY_LEN, 8)
+    let log = journal_path(meta, format, JournalFile::Log);
+    read_at(&off, last * entry_len, 8)
         .and_then(|entry| <[u8; 8]>::try_from(entry).ok())
-        .and_then(|entry| frame_end(&meta.join("journal.log"), u64::from_le_bytes(entry)))
+        .and_then(|entry| frame_end(&log, u64::from_le_bytes(entry), format))
         .unwrap_or(0)
 }
 
-/// Where the last entry of `off`, a `journal.off`, among its first `upto` bytes that lists a
-/// frame ends: a partial entry lists none, nor do the zeroed entries past frame 0 at the end
-/// (what a zero-filled block leaves: no frame but the first starts at 0), which the tail check
-/// drops; entry 0 lists frame 0 whatever it holds. 0 if there is no entry.
-fn listing_entries_end(off: &Path, upto: u64) -> u64 {
-    let whole = upto.min(real_len(off)) / ENTRY_LEN;
+/// Where the last entry of `off`, a `journal.off` of `format`, among its first `upto` bytes that
+/// lists a frame ends: a partial entry lists none, nor do the zeroed entries past frame 0 at the
+/// end (what a zero-filled block leaves: no frame but the first starts at 0), which the tail
+/// check drops; entry 0 lists frame 0 whatever it holds. 0 if there is no entry.
+fn listing_entries_end(off: &Path, upto: u64, format: StoreFormat) -> u64 {
+    let entry_len = entry_len(format);
+    let len = usize::try_from(entry_len).unwrap_or(usize::MAX);
+    let whole = upto.min(real_len(off)) / entry_len;
     let last = (1..whole)
         .rev()
-        .find(|&n| read_at(off, n * ENTRY_LEN, 8).is_none_or(|entry| entry != [0; 8]))
+        .find(|&n| {
+            read_at(off, n * entry_len, len).is_none_or(|entry| entry.iter().any(|&b| b != 0))
+        })
         .unwrap_or(0);
-    whole.min(last + 1) * ENTRY_LEN
+    whole.min(last + 1) * entry_len
 }
 
 /// The name of `path`'s last component, if it is UTF-8.
@@ -781,19 +863,47 @@ fn name(path: &Path) -> Option<&str> {
     path.file_name()?.to_str()
 }
 
-/// Which journal file `path` is, and the `meta/` directory it lies in.
-fn journal_file(path: &Path) -> Option<(JournalFile, &Path)> {
+/// Which journal file `path` is, the `meta/` directory it lies in, and the format it is of.
+fn journal_file(path: &Path) -> Option<(JournalFile, &Path, StoreFormat)> {
     let meta = path.parent()?;
     if name(meta)? != "meta" {
         return None;
     }
-    let file = match name(path)? {
-        "journal.log" => JournalFile::Log,
-        "journal.off" => JournalFile::Off,
-        "journal.ckpt" => JournalFile::Ckpt,
+    let (stem, ext) = name(path)?.split_once('.')?;
+    let format = match stem {
+        "journal" => StoreFormat::V1,
+        "journal2" => StoreFormat::V2,
         _ => return None,
     };
-    Some((file, meta))
+    let file = match ext {
+        "log" => JournalFile::Log,
+        "off" => JournalFile::Off,
+        "ckpt" => JournalFile::Ckpt,
+        _ => return None,
+    };
+    Some((file, meta, format))
+}
+
+/// The journal file `file` of `format` in `meta`.
+fn journal_path(meta: &Path, format: StoreFormat, file: JournalFile) -> PathBuf {
+    let stem = match format {
+        StoreFormat::V1 => "journal",
+        StoreFormat::V2 => "journal2",
+    };
+    let ext = match file {
+        JournalFile::Log => "log",
+        JournalFile::Off => "off",
+        JournalFile::Ckpt => "ckpt",
+    };
+    meta.join(format!("{stem}.{ext}"))
+}
+
+/// The name of the ref files' directory in `meta/` in `format`.
+fn refs_name(format: StoreFormat) -> &'static str {
+    match format {
+        StoreFormat::V1 => "refs",
+        StoreFormat::V2 => "refs2",
+    }
 }
 
 /// The five index files of the metadata store in `meta`, in the order `Index::append` writes
@@ -818,12 +928,18 @@ fn view_meta(path: &Path) -> Option<&Path> {
     is_view.then_some(meta)
 }
 
-/// The `meta/` directory of `path`, if it lies under `meta/refs/`.
-fn ref_meta(path: &Path) -> Option<&Path> {
-    path.ancestors()
-        .skip(1)
-        .find(|dir| name(dir) == Some("refs") && dir.parent().and_then(name) == Some("meta"))
-        .and_then(Path::parent)
+/// The `meta/` directory of `path`, if it lies under `meta/refs/` (FORMAT 1) or `meta/refs2/`
+/// (FORMAT 2), and that format.
+fn ref_meta(path: &Path) -> Option<(&Path, StoreFormat)> {
+    path.ancestors().skip(1).find_map(|dir| {
+        let format = match name(dir)? {
+            "refs" => StoreFormat::V1,
+            "refs2" => StoreFormat::V2,
+            _ => return None,
+        };
+        let meta = dir.parent()?;
+        (name(meta)? == "meta").then_some((meta, format))
+    })
 }
 
 /// The `meta/` directory of `path`, if it is an entry of the external id index,
@@ -964,10 +1080,10 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
             let mut state = self.state();
             state.track(path);
             match journal_file(path) {
-                Some((JournalFile::Off, meta)) => {
-                    state.listing(path, meta, bytes).map(|why| (Rule::W1, why))
-                }
-                Some((JournalFile::Log, meta)) => state.frame(path, meta, bytes),
+                Some((JournalFile::Off, meta, format)) => state
+                    .listing(path, meta, format, bytes)
+                    .map(|why| (Rule::W1, why)),
+                Some((JournalFile::Log, meta, format)) => state.frame(path, meta, format, bytes),
                 _ => None,
             }
         };
@@ -996,7 +1112,7 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
         let violation = {
             let mut state = self.state();
             state.track(path);
-            journal_file(path).and_then(|(file, meta)| state.journal_cut(file, path, meta, len))
+            journal_file(path).and_then(|file| state.journal_cut(file, path, len))
         };
         verdict(Rule::W1, FsMethod::Truncate, &[path], violation);
         let result = self.inner.truncate(path, len);
@@ -1012,8 +1128,10 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
     fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
         let violation = {
             let state = self.state();
-            if let Some((JournalFile::Ckpt, meta)) = journal_file(path) {
-                state.checkpoint(meta, bytes).map(|why| (Rule::W3, why))
+            if let Some((JournalFile::Ckpt, meta, format)) = journal_file(path) {
+                state
+                    .checkpoint(meta, format, bytes)
+                    .map(|why| (Rule::W3, why))
             } else if let Some(meta) = ref_meta(path) {
                 state.ref_change(meta).map(|why| (Rule::W2, why))
             } else {

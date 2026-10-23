@@ -442,8 +442,8 @@ pub(crate) fn parse_frame(buf: &[u8]) -> Parsed {
 /// Parses the frame of `format` at the start of `buf`, which runs from a frame boundary to (at
 /// most) the end of the journal, and must sit at `place` (FORMAT 2 checks its header names it).
 /// The journal reads a FORMAT 2 frame header first, from the disk; this parses one at hand, for
-/// the codec's tests.
-#[cfg(test)]
+/// the order checker and the codec's tests.
+#[cfg(any(test, feature = "test-hooks"))]
 pub(crate) fn parse_frame_in(format: StoreFormat, buf: &[u8], place: Place) -> Parsed {
     if format == StoreFormat::V1 {
         return parse_frame(buf);
