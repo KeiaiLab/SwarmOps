@@ -4129,15 +4129,20 @@ mod tests {
 
     /// The tests of `rebase` and of `land`'s `expect_target` (M5).
     mod exact {
+        use std::io;
         use std::sync::Mutex;
 
-        use serde_json::json;
-        use swarmops_api::{ChangeInput, ContentInput, RebaseStatus};
+        use camino::Utf8PathBuf;
+        use serde_json::{Value, json};
+        use swarmops_api::{
+            ChangeInput, ChangeOp, ChangesetDetail, CommitReq, ContentInput, Identity, InfoReq,
+            LandReq, LandStatus, OpLogReq, RebaseReq, RebaseStatus, Rev, ShowReq, StoreOps,
+        };
         use swarmops_store::RealFs;
         use swarmops_testkit::fs::{Call, Watch, Watched};
 
-        use super::super::*;
         use super::ops_on;
+        use crate::local::LocalOps;
 
         /// A uuid v7 whose time is 2023-06-30 03:34:18.518 UTC.
         const KEY: &str = "01890a5d-ac96-774b-bcce-b302099a8057";
