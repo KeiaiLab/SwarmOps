@@ -38,7 +38,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, ObjectId};
 
 use crate::error::{FileOp, StoreError};
-use crate::format::{self, StoreFormat};
+use crate::format::StoreFormat;
 use crate::fs_ops::{FsMethod, StoreFs};
 use crate::layout::Layout;
 
@@ -159,7 +159,10 @@ pub fn check_ref_name_in(format: StoreFormat, name: &str) -> Result<(), StoreErr
                 None => Err(StoreError::RefName(name.to_owned())),
             }
         }
-        StoreFormat::V2 => Err(format::not_built("FORMAT 2 refs")),
+        StoreFormat::V2 => match ref_kind(name) {
+            Some(_) => Ok(()),
+            None => Err(StoreError::RefName(name.to_owned())),
+        },
     }
 }
 
@@ -172,11 +175,16 @@ pub fn check_move(
     old: Option<ChangesetId>,
     new: Option<ChangesetId>,
 ) -> Result<(), StoreError> {
-    let _ = (name, old, new);
-    match format {
-        StoreFormat::V1 => Ok(()),
-        StoreFormat::V2 => Err(format::not_built("FORMAT 2 refs")),
+    if format == StoreFormat::V1 {
+        return Ok(());
     }
+
+    // A tag's move from one target to another; creating and deleting it are moves too.
+    let moves_tag = ref_kind(name) == Some(RefKind::Tag) && old.is_some() && new.is_some();
+    if moves_tag {
+        return Err(StoreError::TagImmutable(name.to_owned()));
+    }
+    Ok(())
 }
 
 /// The FORMAT 1 rule for `x` in `release/<x>`: one or more of `[A-Za-z0-9._-]`, not starting
