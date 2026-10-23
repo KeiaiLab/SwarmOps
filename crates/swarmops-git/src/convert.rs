@@ -35,22 +35,22 @@
 //! nothing was lost ([`Converted::lossy`] empty), and any other outcome is [`ConvertError::Bug`].
 //! A [`Converter`] converts each git tree and blob once, remembering what each became, and walks
 //! trees with a stack of its own, never by recursion, however deep they are.
+//!
+//! [`tree_bytes`]: render::tree_bytes
+//! [`commit_bytes`]: render::commit_bytes
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
-use swarmops_core::bytes::to_u64;
-use swarmops_core::{
-    BlobId, LeafKind, ObjectKind, Signature, Tree, TreeEntry, TreeId, hash_object,
-};
+use swarmops_core::bytes;
+use swarmops_core::{BlobId, LeafKind, ObjectKind, Signature, Tree, TreeEntry, TreeId};
 use swarmops_store::MAX_OBJECT_LEN;
 
-use crate::render::{commit_bytes, git_order, tree_bytes};
-use crate::source::read_bounded;
 use crate::{
     GitOid, GitSource, LossyClass, LossySet, RawCommit, RawError, RawIdent, RawKind, RawTree,
-    RawTreeEntry, SourceError, git_hash,
+    RawTreeEntry, SourceError,
 };
+use crate::{oid, render, source};
 
 /// The metadata key of a converted changeset's git commit: its id, 40 lowercase hex digits.
 pub const GIT_OID: &str = "git.oid";
@@ -330,7 +330,7 @@ impl<'s> Converter<'s> {
     }
 
     fn convert(&self, pending: &mut Pending, oid: GitOid) -> Result<Converted, ConvertError> {
-        let (kind, raw) = read_bounded(self.source, oid)?;
+        let (kind, raw) = source::read_bounded(self.source, oid)?;
         if kind != RawKind::Commit {
             return Err(ConvertError::Malformed {
                 oid,
@@ -371,7 +371,7 @@ impl<'s> Converter<'s> {
             ..
         } = commit;
         let (author, committer) = (signature(author), signature(committer));
-        let bytes = commit_bytes(
+        let bytes = render::commit_bytes(
             tree.rendered,
             &parents,
             &author,
@@ -379,7 +379,7 @@ impl<'s> Converter<'s> {
             &extra_headers,
             &message,
         );
-        if (git_hash(RawKind::Commit, &bytes) == oid) != lossy.is_empty() {
+        if (oid::git_hash(RawKind::Commit, &bytes) == oid) != lossy.is_empty() {
             return Err(ConvertError::Bug { commit: oid });
         }
         let mut metadata = Vec::with_capacity(2);
@@ -492,6 +492,8 @@ impl<'s> Converter<'s> {
     /// The frame of the git tree `oid` at `path`, which `named` names in its parent: read once
     /// its header lets it through the size gate ([`read_bounded`]), parsed, and classed
     /// `tree_order` when it is not in git's order.
+    ///
+    /// [`read_bounded`]: source::read_bounded
     fn open(
         &self,
         commit: GitOid,
@@ -499,7 +501,7 @@ impl<'s> Converter<'s> {
         path: &[u8],
         named: Option<Named>,
     ) -> Result<Frame, ConvertError> {
-        let (kind, bytes) = read_bounded(self.source, oid)?;
+        let (kind, bytes) = source::read_bounded(self.source, oid)?;
         if kind != RawKind::Tree {
             return Err(ConvertError::Malformed {
                 oid,
@@ -542,7 +544,7 @@ impl<'s> Converter<'s> {
         let memo = if kept.is_empty() {
             TreeMemo {
                 tree: None,
-                rendered: git_hash(RawKind::Tree, &[]),
+                rendered: oid::git_hash(RawKind::Tree, &[]),
                 classes,
             }
         } else {
@@ -556,9 +558,9 @@ impl<'s> Converter<'s> {
                 // should, which the commit's check reports as the bug it is.
                 at.map_or(GitOid::NULL, |at| git[at])
             };
-            let rendered = git_hash(RawKind::Tree, &tree_bytes(&tree, child));
+            let rendered = oid::git_hash(RawKind::Tree, &render::tree_bytes(&tree, child));
             let bytes = tree.encode();
-            let id = TreeId(hash_object(ObjectKind::Tree, &bytes));
+            let id = TreeId(swarmops_core::hash_object(ObjectKind::Tree, &bytes));
             self.add_tree(pending, id, bytes);
             TreeMemo {
                 tree: Some(id),
@@ -626,10 +628,10 @@ impl<'s> Converter<'s> {
             return Err(not_a_blob);
         }
         // Past the limit after all, from a source whose header said less.
-        if to_u64(bytes.len()) > MAX_OBJECT_LEN {
-            return Err(too_large(to_u64(bytes.len())));
+        if bytes::to_u64(bytes.len()) > MAX_OBJECT_LEN {
+            return Err(too_large(bytes::to_u64(bytes.len())));
         }
-        let id = BlobId(hash_object(ObjectKind::Blob, &bytes));
+        let id = BlobId(swarmops_core::hash_object(ObjectKind::Blob, &bytes));
         pending.blobs.insert(oid, id);
         pending.objects.push((ObjectKind::Blob, bytes));
         Ok(id)
@@ -764,7 +766,7 @@ fn component(name: &[u8]) -> Result<&str, &'static str> {
 /// git's order.
 fn disorder(entries: &[RawTreeEntry]) -> Option<(usize, String)> {
     for (before, pair) in entries.windows(2).enumerate() {
-        match git_order(order_key(&pair[0]), order_key(&pair[1])) {
+        match render::git_order(order_key(&pair[0]), order_key(&pair[1])) {
             Ordering::Less => {}
             Ordering::Equal => return Some((before + 1, "a name the tree holds twice".to_owned())),
             Ordering::Greater => {

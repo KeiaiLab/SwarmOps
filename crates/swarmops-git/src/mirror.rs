@@ -28,7 +28,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_store::Layout;
 use thiserror::Error;
 
-use crate::gix_sink::{GixSink, remove_stale_locks};
+use crate::gix_sink::{self, GixSink};
 use crate::oid::GitOid;
 use crate::sink::{BranchUpdate, SinkError};
 use crate::source::SourceError;
@@ -197,7 +197,7 @@ impl Mirror {
         if !exists(&self.git_dir)? {
             return Ok(Vec::new());
         }
-        match remove_stale_locks(&self.git_dir, STALE_LOCK_AGE) {
+        match gix_sink::remove_stale_locks(&self.git_dir, STALE_LOCK_AGE) {
             Ok(removed) => Ok(removed),
             Err(SinkError::RefLocked { lock }) => Err(MirrorError::GitLockBusy { file: lock }),
             Err(error) => Err(error.into()),

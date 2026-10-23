@@ -30,6 +30,9 @@
 //! changeset's export oid never changes. Version 1 fixes git's tree order and modes, the commit
 //! layout, the signatures verbatim and the native trailer block ([`crate::native`]): a change to
 //! any of them is a new version, which every branch exported before it meets as divergence.
+//!
+//! [`render_commit`]: native::render_commit
+//! [`tree_bytes`]: render::tree_bytes
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -41,9 +44,8 @@ use swarmops_core::{
 use swarmops_repo::{Derivation, DeriveCtx, DeriveError, Repo, RepoError, RepoRead, Subject};
 use swarmops_store::{DerivedSlot, DerivedStore, ObjectStore, SYSTEM_GIT};
 
-use crate::native::{metadata, render_commit};
-use crate::render::tree_bytes;
-use crate::{ExternalIdMismatch, GIT_LOSSY, GIT_OID, GitOid, RawKind, git_hash};
+use crate::{ExternalIdMismatch, GIT_LOSSY, GIT_OID, GitOid, RawKind};
+use crate::{native, oid, render};
 
 /// The derived store's name for a tree's memoized git oid ([`tree_oid`]).
 const TREE_MEMO: &str = "git_tree_oid";
@@ -108,12 +110,12 @@ impl Derivation for ExportOid {
         (): &(),
     ) -> Result<ExportedOid, DeriveError> {
         let cs = subject.changeset;
-        let recorded = metadata(cs, GIT_OID);
+        let recorded = native::metadata(cs, GIT_OID);
         let mut parents = Vec::with_capacity(cs.parents.len());
         for &parent in &cs.parents {
             parents.push(ctx.value::<ExportOid>(parent, &())?);
         }
-        if metadata(cs, GIT_LOSSY).is_none()
+        if native::metadata(cs, GIT_LOSSY).is_none()
             && let Some(own) = recorded.and_then(lowercase_oid)
             && imported_and_kept(ctx, &cs.parents, &parents)?
         {
@@ -125,9 +127,9 @@ impl Derivation for ExportOid {
         let parents: Vec<GitOid> = parents.iter().map(ExportedOid::git_oid).collect();
         let cache = OidCache::new();
         let tree = real_tree_oid(ctx, &cache, subject.id, cs.root)?;
-        let oid = git_hash(
+        let oid = oid::git_hash(
             RawKind::Commit,
-            &render_commit(subject.id, cs, &parents, tree),
+            &native::render_commit(subject.id, cs, &parents, tree),
         );
         let kept = recorded.is_none_or(|hex| hex == oid.to_string().as_bytes());
         Ok(ExportedOid { oid: oid.0, kept })
@@ -199,6 +201,8 @@ impl<O: ObjectStore> ExportObjects for ExportReader<'_, O> {
 /// memoized is not read. Walks the trees below `root` with a stack of its own, never by
 /// recursion. [`RepoError::MissingObject`] if the store lacks a tree or a blob it reads; a failed
 /// read of the derived store is [`RepoError::Store`].
+///
+/// [`tree_bytes`]: render::tree_bytes
 pub fn tree_oid(objects: &dyn ExportObjects, root: TreeId) -> Result<GitOid, RepoError> {
     let memo = objects.memo();
     if let Some(oid) = memoized(memo, TREE_MEMO, root.0)? {
@@ -227,8 +231,8 @@ pub fn tree_oid(objects: &dyn ExportObjects, root: TreeId) -> Result<GitOid, Rep
             None => {
                 // Every entry's oid is known: the tree renders, and its oid goes to its parent's.
                 let done = stack.pop().expect("the tree on top");
-                let bytes = tree_bytes(&done.tree, |entry| done.oid_of(entry));
-                let oid = git_hash(RawKind::Tree, &bytes);
+                let bytes = render::tree_bytes(&done.tree, |entry| done.oid_of(entry));
+                let oid = oid::git_hash(RawKind::Tree, &bytes);
                 memoize(memo, TREE_MEMO, done.id.0, oid);
                 if stack.is_empty() {
                     return Ok(oid);
@@ -250,7 +254,7 @@ pub fn blob_oid(objects: &dyn ExportObjects, blob: BlobId) -> Result<GitOid, Rep
     if let Some(oid) = memoized(memo, BLOB_MEMO, blob.0)? {
         return Ok(oid);
     }
-    let oid = git_hash(RawKind::Blob, &objects.blob(blob)?);
+    let oid = oid::git_hash(RawKind::Blob, &objects.blob(blob)?);
     memoize(memo, BLOB_MEMO, blob.0, oid);
     Ok(oid)
 }
@@ -357,7 +361,7 @@ fn blob_git_oid(
     if let Some(oid) = cache.get(blob.0) {
         return Ok(oid);
     }
-    let real = git_hash(RawKind::Blob, &objects.blob(blob)?);
+    let real = oid::git_hash(RawKind::Blob, &objects.blob(blob)?);
     if let Memos::Against(about) = memos {
         check_memo(objects.memo(), BLOB_MEMO, blob.0, real, about)?;
     }
@@ -399,8 +403,8 @@ fn tree_git_oid(
             None => {
                 // Every entry's oid is known: the tree renders, its oid is checked and cached.
                 let done = stack.pop().expect("the tree on top");
-                let bytes = tree_bytes(&done.tree, |entry| done.oid_of(entry));
-                let oid = git_hash(RawKind::Tree, &bytes);
+                let bytes = render::tree_bytes(&done.tree, |entry| done.oid_of(entry));
+                let oid = oid::git_hash(RawKind::Tree, &bytes);
                 if let Memos::Against(about) = memos {
                     check_memo(objects.memo(), TREE_MEMO, done.id.0, oid, about)?;
                 }
@@ -479,7 +483,7 @@ fn imported_and_kept(
     values: &[ExportedOid],
 ) -> Result<bool, DeriveError> {
     for (&id, value) in ids.iter().zip(values) {
-        if !value.kept || metadata(&ctx.changeset(id)?, GIT_OID).is_none() {
+        if !value.kept || native::metadata(&ctx.changeset(id)?, GIT_OID).is_none() {
             return Ok(false);
         }
     }
@@ -664,7 +668,7 @@ pub fn verify_external_ids<O: ObjectStore>(
         let Ok(Some(stored)) = snapshot.changeset(entry.changeset) else {
             continue;
         };
-        if metadata(&stored.changeset, GIT_OID).is_some() {
+        if native::metadata(&stored.changeset, GIT_OID).is_some() {
             continue;
         }
         if let Ok(exported) = exports.of(&snapshot, &reader, &cache, entry.changeset)
@@ -873,8 +877,8 @@ impl ExportOids {
         done: &PendingChangeset,
     ) -> Result<Known, RepoError> {
         let (id, cs) = (done.id, &done.changeset);
-        let recorded = metadata(cs, GIT_OID);
-        let unchanged = metadata(cs, GIT_LOSSY).is_none()
+        let recorded = native::metadata(cs, GIT_OID);
+        let unchanged = native::metadata(cs, GIT_LOSSY).is_none()
             && (done.parents.iter()).all(|parent| parent.imported && parent.value.kept);
         let value = if let Some(own) = recorded.and_then(lowercase_oid).filter(|_| unchanged) {
             ExportedOid {
@@ -890,7 +894,10 @@ impl ExportOids {
                 .map(|parent| parent.value.git_oid())
                 .collect();
             let tree = tree_git_oid(objects, cache, memos, cs.root)?;
-            let oid = git_hash(RawKind::Commit, &render_commit(id, cs, &parents, tree));
+            let oid = oid::git_hash(
+                RawKind::Commit,
+                &native::render_commit(id, cs, &parents, tree),
+            );
             let kept = recorded.is_none_or(|hex| hex == oid.to_string().as_bytes());
             ExportedOid { oid: oid.0, kept }
         };
