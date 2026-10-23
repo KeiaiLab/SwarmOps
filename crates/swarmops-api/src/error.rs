@@ -305,6 +305,13 @@ impl OpError {
         }
     }
 
+    /// Replaces the message, keeping the code, details and hint.
+    #[must_use]
+    pub fn with_message(mut self, message: impl Into<String>) -> Self {
+        self.message = message.into();
+        self
+    }
+
     /// Replaces the details.
     #[must_use]
     pub fn with_details(mut self, details: Map<String, Value>) -> Self {

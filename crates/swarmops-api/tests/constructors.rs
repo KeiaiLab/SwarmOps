@@ -13,21 +13,22 @@ use swarmops_api::{
     BlobPutResp, BranchUpdate, ChangeInput, ChangeOp, ChangeOut, ChangesetDetail, ChangesetSummary,
     CloneReq, CloneResp, CommitReq, CommitResp, ConflictKindOut, ConflictReport, ContentEncoding,
     ContentInput, DeriveReq, DeriveResp, Diff, DiffHunk, DiffLineOut, DiffReq, DiffStatus,
-    DropReason, DroppedChange, EntryKindOut, FetchReq, FetchResp, FileConflictOut, FileContent,
-    FileDiff, FileKind, GitExportReq, GitExportResp, GitImportReq, GitImportResp, HeadMove,
-    HunkOut, IdentityInfo, InfoReq, InitReq, LandReq, LandResp, LandStatus, LineOp, LineRange,
-    LinesOut, LogCutOut, LogPage, LogReq, LossyCommitOut, Meta, OpChangesetOut, OpLogPage,
-    OpLogReq, OperationKind, OperationOut, PathHistoryEntry, PathHistoryPage, PathHistoryReq,
-    PublishedChange, PushReq, PushResp, PushStatus, ReadFileReq, ReadTreeReq, RebaseReq,
-    RebaseResp, RebaseStatus, RefDeleteReq, RefListReq, RefListResp, RefMoveOut, RefOut, RefSetReq,
-    RefSetResp, RemoteAddReq, RemoteHead, RemoteInfo, RemoteList, RemoteListReq, RemoteRemoveReq,
-    RemoteRemoveResp, RepoInfo, ResolutionInput, ResolutionsInput, ResolveRevReq, ResolvedRev,
-    RevKind, ShowReq, SignatureOut, Signatures, SyncReq, SyncResp, SyncStatus, SyncStatusKind,
-    SyncStatusReq, TreeEntryOut, TreeListing, UndoReq, UndoResp, VerifyFinding, VerifyReport,
-    VerifyReq, WsChange, WsChangeKind, WsCheckInput, WsCommitReq, WsCommitResp, WsCreateReq,
-    WsDeleteReq, WsDeleteResp, WsDiffReq, WsDiscardReq, WsDiscardResp, WsInfo, WsInfoReq,
-    WsLandReq, WsLandResp, WsList, WsListReq, WsMaterializeReq, WsMaterializeResp, WsRebaseReq,
-    WsRebaseResp, WsRebasing, WsResolveReq, WsResolveResp, WsState, WsStatus, WsStatusReq,
+    DropReason, DroppedChange, EntryKindOut, ErrorCode, FetchReq, FetchResp, FileConflictOut,
+    FileContent, FileDiff, FileKind, GitExportReq, GitExportResp, GitImportReq, GitImportResp,
+    HeadMove, HunkOut, IdentityInfo, InfoReq, InitReq, LandReq, LandResp, LandStatus, LineOp,
+    LineRange, LinesOut, LogCutOut, LogPage, LogReq, LossyCommitOut, Meta, OpChangesetOut, OpError,
+    OpLogPage, OpLogReq, OperationKind, OperationOut, PathHistoryEntry, PathHistoryPage,
+    PathHistoryReq, PublishedChange, PushReq, PushResp, PushStatus, ReadFileReq, ReadTreeReq,
+    RebaseReq, RebaseResp, RebaseStatus, RefDeleteReq, RefListReq, RefListResp, RefMoveOut, RefOut,
+    RefSetReq, RefSetResp, RemoteAddReq, RemoteHead, RemoteInfo, RemoteList, RemoteListReq,
+    RemoteRemoveReq, RemoteRemoveResp, RepoInfo, ResolutionInput, ResolutionsInput, ResolveRevReq,
+    ResolvedRev, RevKind, ShowReq, SignatureOut, Signatures, SyncReq, SyncResp, SyncStatus,
+    SyncStatusKind, SyncStatusReq, TreeEntryOut, TreeListing, UndoReq, UndoResp, VerifyFinding,
+    VerifyReport, VerifyReq, WsChange, WsChangeKind, WsCheckInput, WsCommitReq, WsCommitResp,
+    WsCreateReq, WsDeleteReq, WsDeleteResp, WsDiffReq, WsDiscardReq, WsDiscardResp, WsInfo,
+    WsInfoReq, WsLandReq, WsLandResp, WsList, WsListReq, WsMaterializeReq, WsMaterializeResp,
+    WsRebaseReq, WsRebaseResp, WsRebasing, WsResolveReq, WsResolveResp, WsState, WsStatus,
+    WsStatusReq,
 };
 
 /// `built`, written as JSON, cut to its schema's required fields and read back, is unchanged.
@@ -306,4 +307,13 @@ fn every_default_is_the_empty_request() {
     reads_empty::<VerifyReq>();
     reads_empty::<WsCheckInput>();
     reads_empty::<WsListReq>();
+}
+
+/// `OpError::with_message` replaces the message only.
+#[test]
+fn with_message_keeps_the_rest() {
+    let error = OpError::new(ErrorCode::Busy, "first").with_hint("again");
+    let renamed = error.clone().with_message("second");
+    assert_eq!(renamed.message, "second");
+    assert_eq!(renamed.with_message("first"), error);
 }
