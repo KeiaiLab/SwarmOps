@@ -1,43 +1,4 @@
-//! Prototypes of the four landing models M4 measures before it builds one (umbrella decision 10;
-//! the M4 plan's Task 1): how a publish handles a target that moved after the land read it.
-//! Behind the `test-hooks` feature, for the measurement harness and its tests only: M4 Task 5
-//! builds the model the measurement chooses into the land's publish and deletes this module.
-//!
-//! A land reads the target's head, `onto`, and [`Repo::prepare`]s its changeset `L` there: its
-//! blobs, trees and changeset object written and flushed, outside the lock. Then
-//! [`Repo::publish_with`] publishes it in one write transaction by one of the [`Model`]s, and
-//! says how long it held the lock ([`Timed`]: from `MetaStore::write` returning to the end of
-//! the write).
-//!
-//! - [`Model::CasLoop`], the yardstick (ops spec §3 step 7 on M1.6's `commit --advance` frame):
-//!   inserts `L` and moves the target from `onto` to it by compare-and-swap. A target that moved
-//!   drops the write ([`Published::Moved`]): the lander re-merges and tries again.
-//! - [`Model::Pushrebase`]: reads the target under the lock (`MetaWrite::get_ref`); at `onto`,
-//!   it publishes as the CAS loop does. Moved, it walks first parents from the actual head back
-//!   to `onto` with `MetaWrite::changeset`, at most [`MAX_WALK`] steps (past them, or with
-//!   `onto` off that line: [`Published::Moved`]), and gathers the paths the deltas of those
-//!   changesets touch, reading their objects under the lock. When none of `L`'s paths overlaps
-//!   one of them (two paths overlap when they are equal or one is a directory prefix of the
-//!   other), it applies `L`'s delta to the actual head's tree, writes and flushes the new trees
-//!   and `L'` under the lock (I1: before the frame that names them), and inserts `L'`, whose one
-//!   parent is the actual head, with the target's move to it ([`Published::Landed`],
-//!   `relocated`): `L'`'s delta is `L`'s, so its delta hash is too. An overlap goes back to the
-//!   lander ([`Published::Overlap`]).
-//! - [`Model::Metalog`]: Pushrebase, and on an overlap it merges each overlapping path with
-//!   [`toy_merge`] when the path is a regular file on all three sides (`onto`, `L`, the actual
-//!   head) and at most [`MAX_MERGE_BYTES`] on each, and relocates with the merged blobs;
-//!   otherwise [`Published::Overlap`].
-//! - [`Model::OpHeads`]: first settles every recorded land, oldest record first, onto `main` by
-//!   Metalog's rule: a settled one moves `main` and loses its op-head ref; one that does not
-//!   settle keeps its changeset under `release/ophc-<rest>` instead, a conflict left as data for
-//!   its lander. Then it records its own: inserts `L` on `onto` and creates its op-head ref,
-//!   `release/oph-<rest>`, the name its lander put in `L`'s metadata under [`OP_HEAD_KEY`]
-//!   ([`Published::Pending`]), dropping that land's conflicted ref of an earlier record in the
-//!   same frame. No compare-and-swap of the target: [`Repo::settle_op_heads`] settles without
-//!   recording. Op heads land on `main` only, and their production form needs a record that
-//!   FORMAT 1 does not have (the M4 plan's Decision 1).
-
-mod relocate;
+//! The landing [`Model`]s and their publication against a target ref.
 
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -48,13 +9,12 @@ use swarmops_core::{
 };
 use swarmops_store::{CasResult, ChangesetMeta, InsertOutcome, MetaWrite, ObjectStore, StoreError};
 
-use crate::commit::{Change, ChangeOp, candidate_delta, sorted_changes};
+use crate::commit::{Change, ChangeOp, Empty, candidate_delta, sorted_changes};
 use crate::error::RepoError;
 use crate::repo::{Repo, ref_error};
 use crate::tree_edit::{Encoded, TreeEdit};
 
-pub use relocate::toy_merge;
-use relocate::{Relocation, relocate};
+use super::relocate::{self, Overlaps, Relocation};
 
 /// The most first-parent steps a publish walks from the target's actual head back to a land's
 /// `onto`: past them, the land goes back to its lander as [`Published::Moved`].
@@ -83,7 +43,7 @@ const SETTLER: &str = "op-heads/settle";
 const EMAIL: &[u8] = b"lander@swarmops.local";
 
 /// A landing model: how a publish handles a target that moved after the land read it (see
-/// [the module documentation](self)).
+/// [the module documentation](super)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Model {
     /// The yardstick: insert and compare-and-swap; a moved target goes back to the lander.
@@ -204,7 +164,7 @@ impl<O: ObjectStore> Repo<O> {
                 op: ChangeOp::Delete,
             }))
             .collect();
-        let (candidates, mut contents) = candidate_delta(sorted_changes(changes, false)?);
+        let (candidates, mut contents) = candidate_delta(sorted_changes(changes, Empty::Refuse)?);
         let mut edit = TreeEdit::new(&self.objects, self.changeset_object(onto)?.root)?;
         let effective = edit.apply(&candidates)?;
         let delta: Vec<DeltaEntry> = candidates
@@ -256,7 +216,7 @@ impl<O: ObjectStore> Repo<O> {
     }
 
     /// Publishes `p` by `model`, in one write transaction: see [the module
-    /// documentation](self).
+    /// documentation](super).
     pub fn publish_with(
         &self,
         model: Model,
@@ -266,8 +226,8 @@ impl<O: ObjectStore> Repo<O> {
         let held = Instant::now();
         let (value, queued) = match model {
             Model::CasLoop => publish_cas(&mut write, p)?,
-            Model::Pushrebase => self.publish_relocating(&mut write, p, false)?,
-            Model::Metalog => self.publish_relocating(&mut write, p, true)?,
+            Model::Pushrebase => self.publish_relocating(&mut write, p, Overlaps::Refuse)?,
+            Model::Metalog => self.publish_relocating(&mut write, p, Overlaps::Merge)?,
             Model::OpHeads => self.publish_op_head(&mut write, p)?,
         };
         // A publish that queued nothing drops the write: no frame, the lock released.
@@ -300,12 +260,12 @@ impl<O: ObjectStore> Repo<O> {
         })
     }
 
-    /// Pushrebase's publish, and with `merge` Metalog's: see [the module documentation](self).
+    /// Pushrebase's publish, and with [`Overlaps::Merge`] Metalog's: see [the module documentation](super).
     fn publish_relocating(
         &self,
         write: &mut MetaWrite<'_>,
         p: &Publication,
-        merge: bool,
+        overlaps: Overlaps,
     ) -> Result<(Published, bool), RepoError> {
         let actual = write
             .get_ref(&p.target)
@@ -314,7 +274,7 @@ impl<O: ObjectStore> Repo<O> {
         if actual == p.onto {
             return publish_cas(write, p);
         }
-        match relocate(self, write, &p.changeset, p.onto, actual, merge)? {
+        match relocate::relocate(self, write, &p.changeset, p.onto, actual, overlaps)? {
             Relocation::Relocated { id, changeset } => {
                 insert(write, &changeset, id)?;
                 move_ref(write, &p.target, Some(actual), Some(id), &p.actor)?;
@@ -381,7 +341,7 @@ impl<O: ObjectStore> Repo<O> {
             let settled = if head == onto {
                 Some(*id)
             } else {
-                match relocate(self, write, &changeset, onto, head, true)? {
+                match relocate::relocate(self, write, &changeset, onto, head, Overlaps::Merge)? {
                     Relocation::Relocated {
                         id: relocated,
                         changeset,

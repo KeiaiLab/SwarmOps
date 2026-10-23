@@ -58,7 +58,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use swarmops_core::bytes::to_u64;
+use swarmops_core::bytes;
 use swarmops_core::{
     BlobId, Changeset, ChangesetId, DeltaEntry, DeltaOp, Hashed, LeafKind, ObjectId, ObjectKind,
     RepoPath, Signature, TreeId,
@@ -305,7 +305,12 @@ impl<O: ObjectStore> Repo<O> {
             swarmops_store::check_ref_name(name).map_err(ref_error)?;
         }
         check_metadata(&metadata)?;
-        let changes = sorted_changes(changes, allow_empty)?;
+        let empty = if allow_empty {
+            Empty::Allow
+        } else {
+            Empty::Refuse
+        };
+        let changes = sorted_changes(changes, empty)?;
         self.check_parents(&parents, seen)?;
         self.retain_named(&changes)?;
         let (candidates, contents) = candidate_delta(changes);
@@ -423,7 +428,7 @@ impl<O: ObjectStore> Repo<O> {
     /// Nothing in the metadata names it until a commit does ([`ChangeOp::PutBlob`]); until then
     /// it is unreferenced, as the objects a failed commit flushed are, for GC.
     pub fn put_blob(&self, content: Vec<u8>) -> Result<BlobPut, RepoError> {
-        let size = to_u64(content.len());
+        let size = bytes::to_u64(content.len());
         let blob = Hashed::new(ObjectKind::Blob, content);
         let id = BlobId(blob.id());
         let outcomes = self.objects.put_hashed_batch(vec![blob])?;
@@ -592,8 +597,8 @@ pub(crate) fn check_parent_list(parents: &[ChangesetId]) -> Result<(), RepoError
     if parents.len() > MAX_PARENTS {
         return Err(StoreError::Limit {
             what: LimitKind::Parents,
-            max: to_u64(MAX_PARENTS),
-            got: to_u64(parents.len()),
+            max: bytes::to_u64(MAX_PARENTS),
+            got: bytes::to_u64(parents.len()),
         }
         .into());
     }
@@ -605,12 +610,19 @@ pub(crate) fn check_parent_list(parents: &[ChangesetId]) -> Result<(), RepoError
     Ok(())
 }
 
-/// `changes` sorted by path, once checked: not empty (unless `allow_empty`), each path once.
+/// Whether a commit may change nothing ([`CommitRequest::allow_empty`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Empty {
+    Refuse,
+    Allow,
+}
+
+/// `changes` sorted by path, once checked: not empty (unless [`Empty::Allow`]), each path once.
 pub(crate) fn sorted_changes(
     mut changes: Vec<Change>,
-    allow_empty: bool,
+    empty: Empty,
 ) -> Result<Vec<Change>, RepoError> {
-    if changes.is_empty() && !allow_empty {
+    if changes.is_empty() && empty == Empty::Refuse {
         return Err(RepoError::EmptyChanges);
     }
     changes.sort_by(|a, b| a.path.cmp(&b.path));

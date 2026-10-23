@@ -19,7 +19,7 @@
 use swarmops_core::{ChangesetId, EntryTarget, RepoPath};
 use swarmops_store::{ObjectStore, StoreError};
 
-use crate::derive::{Derivation, LastModified, PathKey, touches};
+use crate::derive::{self, Derivation, LastModified, PathKey};
 use crate::error::RepoError;
 use crate::merge::tree_diff::PathFilter;
 use crate::read::{RepoRead, StoredChangeset};
@@ -187,7 +187,7 @@ impl<O: ObjectStore> RepoRead<'_, O> {
                 )));
             }
         }
-        if !touches(&self.repo.changeset_object(toucher)?.delta, path) {
+        if !derive::touches(&self.repo.changeset_object(toucher)?.delta, path) {
             return Err(wrong(format!(
                 "under path {path} it names {toucher}, whose delta does not touch the path"
             )));

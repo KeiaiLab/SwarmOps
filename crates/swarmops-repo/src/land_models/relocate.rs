@@ -31,17 +31,26 @@ pub(super) enum Relocation {
     Overlap,
 }
 
+/// What a relocation does with a file both the land and the target's gain changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Overlaps {
+    /// Gives the land back: [`Relocation::Overlap`] (Pushrebase).
+    Refuse,
+    /// Merges the file with [`toy_merge`] (Metalog).
+    Merge,
+}
+
 /// `l`, prepared on `onto`, made anew on `actual`, the target's head, under the lock `write`
-/// holds: see [the module documentation](super). With `merge` (Metalog), overlapping files are
-/// merged by [`toy_merge`]. The new blobs, trees and changeset object are written and flushed
-/// before this returns, so before any frame names them (I1).
+/// holds: see [the module documentation](super). With [`Overlaps::Merge`] (Metalog), overlapping
+/// files are merged by [`toy_merge`]. The new blobs, trees and changeset object are written and
+/// flushed before this returns, so before any frame names them (I1).
 pub(super) fn relocate<O: ObjectStore>(
     repo: &Repo<O>,
     write: &MetaWrite<'_>,
     l: &Changeset,
     onto: ChangesetId,
     actual: ChangesetId,
-    merge: bool,
+    overlaps: Overlaps,
 ) -> Result<Relocation, RepoError> {
     let Some(gained) = gained_since(write, onto, actual)? else {
         return Ok(Relocation::Moved);
@@ -60,7 +69,7 @@ pub(super) fn relocate<O: ObjectStore>(
         if !overlaps_any(&entry.path, &paths) {
             continue;
         }
-        if !merge {
+        if overlaps == Overlaps::Refuse {
             return Ok(Relocation::Overlap);
         }
         let DeltaOp::Put {
