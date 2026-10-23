@@ -305,7 +305,12 @@ impl<O: ObjectStore> Repo<O> {
             swarmops_store::check_ref_name(name).map_err(ref_error)?;
         }
         check_metadata(&metadata)?;
-        let changes = sorted_changes(changes, allow_empty)?;
+        let empty = if allow_empty {
+            Empty::Allow
+        } else {
+            Empty::Refuse
+        };
+        let changes = sorted_changes(changes, empty)?;
         self.check_parents(&parents, seen)?;
         self.retain_named(&changes)?;
         let (candidates, contents) = candidate_delta(changes);
@@ -605,12 +610,19 @@ pub(crate) fn check_parent_list(parents: &[ChangesetId]) -> Result<(), RepoError
     Ok(())
 }
 
-/// `changes` sorted by path, once checked: not empty (unless `allow_empty`), each path once.
+/// Whether a commit may change nothing ([`CommitRequest::allow_empty`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Empty {
+    Refuse,
+    Allow,
+}
+
+/// `changes` sorted by path, once checked: not empty (unless [`Empty::Allow`]), each path once.
 pub(crate) fn sorted_changes(
     mut changes: Vec<Change>,
-    allow_empty: bool,
+    empty: Empty,
 ) -> Result<Vec<Change>, RepoError> {
-    if changes.is_empty() && !allow_empty {
+    if changes.is_empty() && empty == Empty::Refuse {
         return Err(RepoError::EmptyChanges);
     }
     changes.sort_by(|a, b| a.path.cmp(&b.path));

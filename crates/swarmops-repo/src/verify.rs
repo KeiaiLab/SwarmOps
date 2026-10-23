@@ -486,15 +486,21 @@ impl<'r, O: ObjectStore> Check<'r, O> {
         let mut records = Vec::new();
         if let Some(index) = &index {
             records = self.index_records(index)?;
-            self.compare(&journaled, &records, ckpt, whole);
+            let frames = if whole { Frames::Whole } else { Frames::Cut };
+            self.compare(&journaled, &records, ckpt, frames);
             // A record past the journal's last changeset, which no frame holds, whether the index
             // counts it or not.
             if whole && held > bytes::to_u64(journaled.len()) {
                 self.mismatches
                     .insert((bytes::to_u64(journaled.len()), MismatchCause::Journal));
             }
-            self.check_view(index.ids_view(), &records, |meta| meta.id.0.0, true)?;
-            self.check_view(index.dh_view(), &records, |meta| meta.delta_hash, false)?;
+            self.check_view(index.ids_view(), &records, |meta| meta.id.0.0, Keys::One)?;
+            self.check_view(
+                index.dh_view(),
+                &records,
+                |meta| meta.delta_hash,
+                Keys::Many,
+            )?;
         }
 
         let journaled_count = journaled.len();
@@ -637,7 +643,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
         journaled: &[(ChangesetMeta, u64)],
         records: &[Option<ChangesetMeta>],
         ckpt: Option<u64>,
-        whole: bool,
+        frames: Frames,
     ) {
         for (rec, record) in records.iter().enumerate() {
             let Some(record) = record else { continue };
@@ -645,7 +651,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
                 Some((want, _)) => want != record,
                 // A record no committed transaction holds; past damage in the journal, or with
                 // no journal, there is no telling.
-                None => whole,
+                None => frames == Frames::Whole,
             };
             if wrong {
                 self.mismatches
@@ -671,7 +677,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
         view: &SortedView<32>,
         records: &[Option<ChangesetMeta>],
         key_of: impl Fn(&ChangesetMeta) -> [u8; 32],
-        unique_keys: bool,
+        keys: Keys,
     ) -> Result<(), RepoError> {
         // The index opened only views that cover no more records than it holds.
         let mut named = vec![false; to_usize(view.len())];
@@ -686,12 +692,9 @@ impl<'r, O: ObjectStore> Check<'r, O> {
                     .as_ref()
                     .is_some_and(|meta| key_of(meta) == key)
             });
-            let ordered = previous.is_none_or(|before| {
-                if unique_keys {
-                    before.0 < key
-                } else {
-                    before < (key, rec)
-                }
+            let ordered = previous.is_none_or(|before| match keys {
+                Keys::One => before.0 < key,
+                Keys::Many => before < (key, rec),
             });
             if let Some(slot) = slot {
                 named[slot] = true;
@@ -1035,6 +1038,22 @@ fn journal_changesets(frames: &[Frame]) -> Vec<(ChangesetMeta, u64)> {
         }
     }
     changesets
+}
+
+/// The journal's frames verify read: all of them, or only up to damage (or none, with no
+/// journal).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Frames {
+    Whole,
+    Cut,
+}
+
+/// The records a sorted view's key names: one (the id view), or many, which then ascend by
+/// record (the delta-hash view).
+#[derive(Debug, Clone, Copy)]
+enum Keys {
+    One,
+    Many,
 }
 
 /// `n` as a `usize`; the counts verify converts are lengths of files it has open.

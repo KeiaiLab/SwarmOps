@@ -9,12 +9,12 @@ use swarmops_core::{
 };
 use swarmops_store::{CasResult, ChangesetMeta, InsertOutcome, MetaWrite, ObjectStore, StoreError};
 
-use crate::commit::{Change, ChangeOp, candidate_delta, sorted_changes};
+use crate::commit::{Change, ChangeOp, Empty, candidate_delta, sorted_changes};
 use crate::error::RepoError;
 use crate::repo::{Repo, ref_error};
 use crate::tree_edit::{Encoded, TreeEdit};
 
-use super::relocate::{self, Relocation};
+use super::relocate::{self, Overlaps, Relocation};
 
 /// The most first-parent steps a publish walks from the target's actual head back to a land's
 /// `onto`: past them, the land goes back to its lander as [`Published::Moved`].
@@ -164,7 +164,7 @@ impl<O: ObjectStore> Repo<O> {
                 op: ChangeOp::Delete,
             }))
             .collect();
-        let (candidates, mut contents) = candidate_delta(sorted_changes(changes, false)?);
+        let (candidates, mut contents) = candidate_delta(sorted_changes(changes, Empty::Refuse)?);
         let mut edit = TreeEdit::new(&self.objects, self.changeset_object(onto)?.root)?;
         let effective = edit.apply(&candidates)?;
         let delta: Vec<DeltaEntry> = candidates
@@ -226,8 +226,8 @@ impl<O: ObjectStore> Repo<O> {
         let held = Instant::now();
         let (value, queued) = match model {
             Model::CasLoop => publish_cas(&mut write, p)?,
-            Model::Pushrebase => self.publish_relocating(&mut write, p, false)?,
-            Model::Metalog => self.publish_relocating(&mut write, p, true)?,
+            Model::Pushrebase => self.publish_relocating(&mut write, p, Overlaps::Refuse)?,
+            Model::Metalog => self.publish_relocating(&mut write, p, Overlaps::Merge)?,
             Model::OpHeads => self.publish_op_head(&mut write, p)?,
         };
         // A publish that queued nothing drops the write: no frame, the lock released.
@@ -260,12 +260,12 @@ impl<O: ObjectStore> Repo<O> {
         })
     }
 
-    /// Pushrebase's publish, and with `merge` Metalog's: see [the module documentation](super).
+    /// Pushrebase's publish, and with [`Overlaps::Merge`] Metalog's: see [the module documentation](super).
     fn publish_relocating(
         &self,
         write: &mut MetaWrite<'_>,
         p: &Publication,
-        merge: bool,
+        overlaps: Overlaps,
     ) -> Result<(Published, bool), RepoError> {
         let actual = write
             .get_ref(&p.target)
@@ -274,7 +274,7 @@ impl<O: ObjectStore> Repo<O> {
         if actual == p.onto {
             return publish_cas(write, p);
         }
-        match relocate::relocate(self, write, &p.changeset, p.onto, actual, merge)? {
+        match relocate::relocate(self, write, &p.changeset, p.onto, actual, overlaps)? {
             Relocation::Relocated { id, changeset } => {
                 insert(write, &changeset, id)?;
                 move_ref(write, &p.target, Some(actual), Some(id), &p.actor)?;
@@ -341,7 +341,7 @@ impl<O: ObjectStore> Repo<O> {
             let settled = if head == onto {
                 Some(*id)
             } else {
-                match relocate::relocate(self, write, &changeset, onto, head, true)? {
+                match relocate::relocate(self, write, &changeset, onto, head, Overlaps::Merge)? {
                     Relocation::Relocated {
                         id: relocated,
                         changeset,

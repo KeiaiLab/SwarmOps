@@ -177,8 +177,8 @@ impl LocalRepo {
     /// stores' writes ([`HookedFs::from_env`]). A build without the feature ignores the
     /// variables.
     pub fn create(store: &Utf8Path, name: &str) -> Result<LocalRepo, RepoError> {
-        let (fs, one_thread) = default_fs();
-        Self::create_on(store, name, fs, one_thread)
+        let (fs, threads) = default_fs();
+        Self::create_on(store, name, fs, threads)
     }
 
     /// [`LocalRepo::create`] with every filesystem change going through `fs` (fault injection in
@@ -188,7 +188,7 @@ impl LocalRepo {
         name: &str,
         fs: Arc<dyn FsOps>,
     ) -> Result<LocalRepo, RepoError> {
-        Self::create_on(store, name, fs, false)
+        Self::create_on(store, name, fs, Threads::Pool)
     }
 
     /// Opens the store at `store`. Checks `FORMAT` first, then reads `REPO`:
@@ -198,13 +198,13 @@ impl LocalRepo {
     /// path leads under `/mnt/`, as `create` refuses it. Honors `SWARMOPS_TEST_CRASH_AT` and
     /// `SWARMOPS_TEST_FS_CALLS` as [`LocalRepo::create`] does.
     pub fn open(store: &Utf8Path) -> Result<LocalRepo, RepoError> {
-        let (fs, one_thread) = default_fs();
-        Self::open_on(store, fs, one_thread)
+        let (fs, threads) = default_fs();
+        Self::open_on(store, fs, threads)
     }
 
     /// [`LocalRepo::open`] with every filesystem access of both stores going through `fs`.
     pub fn open_with_fs(store: &Utf8Path, fs: Arc<dyn FsOps>) -> Result<LocalRepo, RepoError> {
-        Self::open_on(store, fs, false)
+        Self::open_on(store, fs, Threads::Pool)
     }
 
     /// The repository's identity and counts, in a snapshot of its own ([`RepoRead::info`]).
@@ -216,7 +216,7 @@ impl LocalRepo {
         store: &Utf8Path,
         name: &str,
         fs: Arc<dyn FsOps>,
-        one_thread: bool,
+        threads: Threads,
     ) -> Result<LocalRepo, RepoError> {
         // A name longer than open reads back from REPO is refused before anything is made, and
         // before the directory is checked for a store already there.
@@ -292,14 +292,14 @@ impl LocalRepo {
             Arc::clone(fs.ops()),
             meta,
             identity,
-            one_thread,
+            threads,
         ))
     }
 
     fn open_on(
         store: &Utf8Path,
         fs: Arc<dyn FsOps>,
-        one_thread: bool,
+        threads: Threads,
     ) -> Result<LocalRepo, RepoError> {
         let root = absolute(store)?;
         // Where the path leads (symlinks followed whether or not their target exists, `..` as
@@ -343,7 +343,7 @@ impl LocalRepo {
         }
         let identity = read_identity(&layout, &store_fs)?;
         let meta = MetaStore::open_with_fs(&root, Arc::clone(&fs))?;
-        Ok(Self::assemble(layout, fs, meta, identity, one_thread))
+        Ok(Self::assemble(layout, fs, meta, identity, threads))
     }
 
     fn assemble(
@@ -351,11 +351,11 @@ impl LocalRepo {
         fs: Arc<dyn FsOps>,
         mut meta: MetaStore,
         identity: Identity,
-        one_thread: bool,
+        threads: Threads,
     ) -> LocalRepo {
         let mut objects = FsObjectStore::open_shared(layout.clone(), Arc::clone(&fs));
         let mut external_ids = ExternalIds::new(layout.clone(), Arc::clone(&fs));
-        if one_thread {
+        if threads == Threads::One {
             objects.set_parallelism(1);
             meta.set_parallelism(1);
             external_ids.set_parallelism(1);
@@ -642,17 +642,31 @@ fn take_format_back(fs: &StoreFs, root: &Utf8Path, e: &IoFailure) {
 /// `SWARMOPS_TEST_CRASH_AT=<k>` to abort at call k, `SWARMOPS_TEST_FS_CALLS=<file>` to write the
 /// call count when the repository is dropped, `SWARMOPS_TEST_FAIL_AT=<k>[:<mode>[:<errno>]]` to
 /// fail call k, `SWARMOPS_TEST_ORDER_CHECK=1` to check the order of the writes), one filesystem
-/// for both stores, so that they count their calls together. `true` with a hook that counts
-/// calls (all but the order check): objects are then written, and the directories and the
-/// index's files synced, one at a time, so that call k is the same call in every run.
-fn default_fs() -> (Arc<dyn FsOps>, bool) {
+/// for both stores, so that they count their calls together. [`Threads::One`] with a hook that
+/// counts calls (all but the order check): objects are then written, and the directories and
+/// the index's files synced, one at a time, so that call k is the same call in every run.
+fn default_fs() -> (Arc<dyn FsOps>, Threads) {
     match HookedFs::from_env() {
         Some(hooked) => {
             let counts_calls = hooked.counts_calls();
-            (Arc::from(hooked.into_fs()), counts_calls)
+            let threads = if counts_calls {
+                Threads::One
+            } else {
+                Threads::Pool
+            };
+            (Arc::from(hooked.into_fs()), threads)
         }
-        None => (Arc::new(RealFs), false),
+        None => (Arc::new(RealFs), Threads::Pool),
     }
+}
+
+/// The threads the stores write and sync with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Threads {
+    /// The stores' own parallelism.
+    Pool,
+    /// One at a time, so that a counted filesystem call is the same call in every run.
+    One,
 }
 
 /// `store` as a canonical path on a native Linux filesystem, created (through `fs`) if
