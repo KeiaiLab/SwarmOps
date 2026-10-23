@@ -1,8 +1,8 @@
 //! One directory: `"SWTR" ver=1 | varint n | n × (kind u8 | varint len | name | id[32])`.
 
-use super::codec::{CodecError, check_strictly_sorted, put_count, put_len_prefixed, reader};
-use crate::id::{BlobId, ObjectId, ObjectKind, TreeId, hash_object};
-use crate::path::check_component;
+use super::codec::{self, CodecError};
+use crate::id::{self, BlobId, ObjectId, ObjectKind, TreeId};
+use crate::path;
 
 const MAGIC: &[u8; 4] = b"SWTR";
 const VERSION: u8 = 1;
@@ -179,9 +179,9 @@ impl Tree {
 
     fn validate(entries: &[TreeEntry]) -> Result<(), CodecError> {
         for e in entries {
-            check_component(&e.name)?;
+            path::check_component(&e.name)?;
         }
-        check_strictly_sorted(entries, |e| e.name.as_bytes())
+        codec::check_strictly_sorted(entries, |e| e.name.as_bytes())
     }
 
     /// The canonical bytes.
@@ -189,10 +189,10 @@ impl Tree {
         let mut out = Vec::with_capacity(8 + self.entries.len() * 48);
         out.extend_from_slice(MAGIC);
         out.push(VERSION);
-        put_count(&mut out, self.entries.len());
+        codec::put_count(&mut out, self.entries.len());
         for e in &self.entries {
             out.push(e.target.kind().as_u8());
-            put_len_prefixed(&mut out, e.name.as_bytes());
+            codec::put_len_prefixed(&mut out, e.name.as_bytes());
             out.extend_from_slice(&e.target.id().0);
         }
         out
@@ -200,7 +200,7 @@ impl Tree {
 
     /// Parses canonical bytes; an empty tree decodes successfully (it may be the root).
     pub fn decode(buf: &[u8]) -> Result<Self, CodecError> {
-        let mut r = reader(buf);
+        let mut r = codec::reader(buf);
         r.magic(*MAGIC, VERSION)?;
         let n = r.count()?;
         let mut entries = Vec::with_capacity(n.min(1024));
@@ -218,6 +218,6 @@ impl Tree {
 
     /// `hash_object(Tree, encode())`.
     pub fn id(&self) -> TreeId {
-        TreeId(hash_object(ObjectKind::Tree, &self.encode()))
+        TreeId(id::hash_object(ObjectKind::Tree, &self.encode()))
     }
 }

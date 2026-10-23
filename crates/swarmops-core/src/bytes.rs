@@ -40,7 +40,10 @@ impl<'a, E> Reader<'a, E> {
     /// The error a read past the end starting at `pos` gives: for a decoder that finds bytes
     /// it cannot accept at a position it noted.
     pub fn error_at(&self, pos: usize) -> E {
-        debug_assert!(pos <= self.buf.len());
+        debug_assert!(
+            pos <= self.buf.len(),
+            "a decoder notes only positions inside the buffer it reads"
+        );
         (self.error_at)(pos)
     }
 
@@ -94,7 +97,10 @@ pub fn to_u64(n: usize) -> u64 {
     u64::try_from(n).expect("a usize fits in a u64")
 }
 
-const _: () = assert!(usize::BITS <= u64::BITS);
+const _: () = assert!(
+    usize::BITS <= u64::BITS,
+    "to_u64 is lossless only where a usize fits in a u64"
+);
 
 #[cfg(test)]
 mod tests {

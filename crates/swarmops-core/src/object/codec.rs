@@ -3,7 +3,7 @@
 use thiserror::Error;
 
 use super::varint;
-use crate::bytes::{self, to_u64};
+use crate::bytes;
 use crate::error::PathError;
 
 /// Why bytes are not a canonical object.
@@ -124,13 +124,13 @@ impl<'a> Reader<'a> {
 
 /// Appends `varint(len) ++ bytes`.
 pub(crate) fn put_len_prefixed(out: &mut Vec<u8>, bytes: &[u8]) {
-    varint::write(out, to_u64(bytes.len()));
+    varint::write(out, bytes::to_u64(bytes.len()));
     out.extend_from_slice(bytes);
 }
 
 /// Appends `varint(n)`.
 pub(crate) fn put_count(out: &mut Vec<u8>, n: usize) {
-    varint::write(out, to_u64(n));
+    varint::write(out, bytes::to_u64(n));
 }
 
 /// Checks that `items` is strictly ascending under `key`.

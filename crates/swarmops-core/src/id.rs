@@ -3,7 +3,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use crate::bytes::to_u64;
+use crate::bytes;
 use crate::error::IdError;
 
 /// A 32-byte BLAKE3 digest identifying one immutable object.
@@ -77,7 +77,7 @@ impl ObjectKind {
 pub fn hash_object(kind: ObjectKind, payload: &[u8]) -> ObjectId {
     let mut h = blake3::Hasher::new();
     h.update(kind.domain());
-    let len = to_u64(payload.len());
+    let len = bytes::to_u64(payload.len());
     h.update(&len.to_le_bytes());
     h.update(payload);
     ObjectId(*h.finalize().as_bytes())
