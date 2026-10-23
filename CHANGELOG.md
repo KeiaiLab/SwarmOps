@@ -21,6 +21,11 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   after their item with no `mod.rs`, free functions called through their module, enums in place of
   `bool` parameters, lower-case hex literals; `just check` denies the first three. Behaviour,
   on-disk format and the public API paths are unchanged.
+- Every public enum and struct is `#[non_exhaustive]` (`just check` denies exhaustive ones): other
+  crates build them with `new` or `Default`, projection functions that could not fail now
+  return `Result`, and `RepoError::Internal` and `StoreError::Internal` are new. The CLI and MCP
+  wire contract is unchanged. An error variant this build does not map is reported as
+  `E_INTERNAL` with a hint; the compile-time guarantee that every variant is mapped is gone.
 
 ## [0.3.0] - 2026-10-22
 

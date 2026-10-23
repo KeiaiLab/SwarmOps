@@ -40,8 +40,14 @@
 //! rest depends on nothing above `swarmops-store`.
 
 // Test support: the guide lets test code panic on assertions, so the two lints `just check`
-// turns on for library code stay off here.
-#![allow(clippy::unwrap_used, clippy::missing_assert_message)]
+// turns on for library code stay off here. Its types are built by tests only, so they need not
+// be `#[non_exhaustive]`.
+#![allow(
+    clippy::unwrap_used,
+    clippy::missing_assert_message,
+    clippy::exhaustive_enums,
+    clippy::exhaustive_structs
+)]
 
 pub mod child;
 #[cfg(feature = "cli")]
