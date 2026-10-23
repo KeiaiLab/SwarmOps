@@ -27,7 +27,7 @@ use crate::scan::Want;
 use crate::state::{self, SWARMWS_DIR, WORKSPACE_JSON};
 use crate::status::changes_of;
 use crate::workspace::{Locate, open_locked};
-use crate::{Ctx, commit, io_failed};
+use crate::{Ctx, commit, io_error};
 
 /// The message of a rescue changeset of workspace `name`.
 pub(crate) fn rescue_message(name: &str) -> String {
@@ -81,9 +81,9 @@ pub fn delete(ctx: &Ctx<'_>, req: WsDeleteReq) -> Result<WsDeleteResp, OpError> 
     remove_below(host, &swarmws, &[WORKSPACE_JSON, LOCK_FILE])?;
     let state_file = state::path_in(&ws.dir);
     (ctx.fs.remove(state_file.as_std_path()))
-        .map_err(|e| io_failed(FsMethod::Remove, &shown(WORKSPACE_JSON), &e))?;
+        .map_err(|e| io_error::io_failed(FsMethod::Remove, &shown(WORKSPACE_JSON), &e))?;
     (ctx.fs.fsync_dir(swarmws.as_std_path()))
-        .map_err(|e| io_failed(FsMethod::FsyncDir, SWARMWS_DIR, &e))?;
+        .map_err(|e| io_error::io_failed(FsMethod::FsyncDir, SWARMWS_DIR, &e))?;
 
     // 5. The lock dropped, then what is left of the directory, then the entry (WS4).
     drop(held);

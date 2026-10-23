@@ -39,7 +39,7 @@ use crate::state::{self, SWARMWS_DIR, State};
 use crate::status::{self, CONFLICTS_JSON};
 use crate::volume::EXEC_BITS;
 use crate::workspace::{Locate, Workspace, open_locked};
-use crate::{Ctx, after, commit, discard, io_failed, markers};
+use crate::{Ctx, after, commit, discard, io_error, markers};
 
 /// The pending record's state of a rebase that starts.
 const STARTING: &str = "starting";
@@ -533,8 +533,8 @@ pub(crate) fn read_record<T: DeserializeOwned>(
     // 1. The bytes, if any.
     let file = format!("{SWARMWS_DIR}/{name}");
     let path = ws.dir.join(&file);
-    let bytes =
-        (ctx.fs.read(path.as_std_path())).map_err(|e| io_failed(FsMethod::Read, &file, &e))?;
+    let bytes = (ctx.fs.read(path.as_std_path()))
+        .map_err(|e| io_error::io_failed(FsMethod::Read, &file, &e))?;
     let Some(bytes) = bytes else {
         return Ok(None);
     };
@@ -559,7 +559,7 @@ pub(crate) fn write_record<T: Serialize>(
     let bytes = serde_json::to_vec(value).expect("a workspace record serializes");
     (ctx.fs
         .atomic_replace(ws.dir.join(&file).as_std_path(), &bytes))
-    .map_err(|e| io_failed(FsMethod::AtomicReplace, &file, &e))
+    .map_err(|e| io_error::io_failed(FsMethod::AtomicReplace, &file, &e))
 }
 
 /// Removes record `name` of workspace `ws`, in `.swarmws/`: an unlink, then a directory sync;
@@ -570,10 +570,11 @@ pub(crate) fn remove_record(ctx: &Ctx<'_>, ws: &Workspace, name: &str) -> Result
     match ctx.fs.remove(ws.dir.join(&file).as_std_path()) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(io_failed(FsMethod::Remove, &file, &e)),
+        Err(e) => return Err(io_error::io_failed(FsMethod::Remove, &file, &e)),
     }
 
     // 2. The removal made durable.
     let dir = ws.dir.join(SWARMWS_DIR);
-    (ctx.fs.fsync_dir(dir.as_std_path())).map_err(|e| io_failed(FsMethod::FsyncDir, &file, &e))
+    (ctx.fs.fsync_dir(dir.as_std_path()))
+        .map_err(|e| io_error::io_failed(FsMethod::FsyncDir, &file, &e))
 }

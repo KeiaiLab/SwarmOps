@@ -22,7 +22,7 @@ use swarmops_api::{ErrorCode, OpError};
 use swarmops_core::portable::check_component;
 use swarmops_store::{FsMethod, FsOps, LinkOutcome};
 
-use crate::io_failed;
+use crate::io_error;
 
 /// The registry's directory below the store's root: the one place its name is spelled.
 pub const REGISTRY_DIR: &str = "workspaces";
@@ -92,8 +92,8 @@ impl Registry {
         // 2. The entry's bytes, if it exists.
         let file = entry_file(name);
         let path = self.path(name);
-        let Some(bytes) =
-            (self.fs.read(path.as_std_path())).map_err(|e| io_failed(FsMethod::Read, &file, &e))?
+        let Some(bytes) = (self.fs.read(path.as_std_path()))
+            .map_err(|e| io_error::io_failed(FsMethod::Read, &file, &e))?
         else {
             return Ok(None);
         };
@@ -132,17 +132,17 @@ impl Registry {
         let tmp = self.dir.join(TMP_DIR);
         let tmp_file = format!("{REGISTRY_DIR}/{TMP_DIR}");
         (self.fs.create_dir_all(tmp.as_std_path()))
-            .map_err(|e| io_failed(FsMethod::CreateDirAll, &tmp_file, &e))?;
+            .map_err(|e| io_error::io_failed(FsMethod::CreateDirAll, &tmp_file, &e))?;
 
         // 4. A synced temp, linked no-clobber onto the entry's name.
         let bytes = serde_json::to_vec(entry).expect("a registry entry serializes");
         let staged = (self.fs.write_durable_temp(tmp.as_std_path(), &bytes))
-            .map_err(|e| io_failed(FsMethod::WriteDurableTemp, &tmp_file, &e))?;
+            .map_err(|e| io_error::io_failed(FsMethod::WriteDurableTemp, &tmp_file, &e))?;
         let file = entry_file(&entry.name);
         let outcome = (self
             .fs
             .link_noclobber(&staged, self.path(&entry.name).as_std_path()))
-        .map_err(|e| io_failed(FsMethod::LinkNoclobber, &file, &e))?;
+        .map_err(|e| io_error::io_failed(FsMethod::LinkNoclobber, &file, &e))?;
 
         // 5. The names made durable, whichever create linked it: the entry's in the registry,
         //    the registry's in the store root (a create cut earlier may have made it unsynced).
@@ -207,14 +207,14 @@ impl Registry {
         match self.fs.remove(self.path(name).as_std_path()) {
             Ok(()) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(io_failed(FsMethod::Remove, &file, &e)),
+            Err(e) => return Err(io_error::io_failed(FsMethod::Remove, &file, &e)),
         }
 
         // 2. The removal made durable; a registry never written has nothing to sync.
         match self.fs.fsync_dir(self.dir.as_std_path()) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(io_failed(FsMethod::FsyncDir, REGISTRY_DIR, &e)),
+            Err(e) => Err(io_error::io_failed(FsMethod::FsyncDir, REGISTRY_DIR, &e)),
         }
     }
 
@@ -225,7 +225,8 @@ impl Registry {
 
     /// Syncs directory `dir`, named `shown` in an error.
     fn sync(&self, dir: &Utf8Path, shown: &str) -> Result<(), OpError> {
-        (self.fs.fsync_dir(dir.as_std_path())).map_err(|e| io_failed(FsMethod::FsyncDir, shown, &e))
+        (self.fs.fsync_dir(dir.as_std_path()))
+            .map_err(|e| io_error::io_failed(FsMethod::FsyncDir, shown, &e))
     }
 
     /// Syncs `workspaces/`, then the store root: an entry's name, then the registry's.

@@ -27,7 +27,7 @@ use crate::materialize::{Tree, covered, host_failed, items_under};
 use crate::state::{SWARMWS_DIR, Volume};
 use crate::volume::EXEC_BITS;
 use crate::workspace::Workspace;
-use crate::{Ctx, io_failed};
+use crate::{Ctx, io_error};
 
 /// The most bytes of file content the hasher holds at once: a file is read only when its size
 /// fits what is left, else it waits; a larger file runs alone.
@@ -487,7 +487,7 @@ fn untracked(
         })
     });
     if let Some(e) = failed.into_inner().expect("no walker panicked") {
-        return Err(io_failed(
+        return Err(io_error::io_failed(
             swarmops_store::FsMethod::Read,
             ".",
             &io::Error::other(e),

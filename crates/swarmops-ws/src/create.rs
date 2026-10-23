@@ -29,7 +29,7 @@ use crate::pending::{self, Intent};
 use crate::registry::{ENTRY_FORMAT, Entry, Linked, Registry};
 use crate::state::{self, SWARMWS_DIR, State, WORKSPACE_FORMAT, WorkspaceFile};
 use crate::workspace::{Locate, Workspace, host_path};
-use crate::{Ctx, after, io_failed, volume};
+use crate::{Ctx, after, io_error, volume};
 
 /// The ref a workspace lands on when its base names no ref.
 const DEFAULT_TARGET: &str = "main";
@@ -97,8 +97,9 @@ pub fn create(ctx: &Ctx<'_>, req: WsCreateReq) -> Result<WsInfo, OpError> {
     let swarmws = dir.join(SWARMWS_DIR);
     let journal = pending::journal_in(&dir);
     (ctx.fs.create_dir_all(journal.as_std_path()))
-        .map_err(|e| io_failed(FsMethod::CreateDirAll, SWARMWS_DIR, &e))?;
-    (ctx.fs.fsync_dir(dir.as_std_path())).map_err(|e| io_failed(FsMethod::FsyncDir, ".", &e))?;
+        .map_err(|e| io_error::io_failed(FsMethod::CreateDirAll, SWARMWS_DIR, &e))?;
+    (ctx.fs.fsync_dir(dir.as_std_path()))
+        .map_err(|e| io_error::io_failed(FsMethod::FsyncDir, ".", &e))?;
     let volume = volume::probe(host, &swarmws).map_err(|e| host_failed(SWARMWS_DIR, &e))?;
 
     // 6. The tree checked before anything of it is written; a refusal leaves nothing.
