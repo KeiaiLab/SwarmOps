@@ -17,7 +17,6 @@ use swarmops_store::{Layout, ORDER_CHECK_ENV};
 use tempfile::TempDir;
 
 use crate::child::{Child, SIGABRT};
-use crate::fs::copy_dir;
 
 /// The binary under test, as the CLI's tests bind it: Cargo gives its path to them alone
 /// (`env!("CARGO_BIN_EXE_swarmops")`), so they implement this for a type of their own and run
@@ -427,7 +426,7 @@ impl<P: Program> Store<P> {
     /// each time.
     pub fn copy_of(template: &Store<P>) -> Store<P> {
         let mut store = Store::empty();
-        copy_dir(Path::new(template.path()), Path::new(store.path()));
+        crate::fs::copy_dir(Path::new(template.path()), Path::new(store.path()));
         store.env.clone_from(&template.env);
         store
     }

@@ -16,7 +16,6 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use swarmops_core::bytes::to_u64;
 use swarmops_store::{FsMethod, FsOps, LinkOutcome, RealFs};
 
 /// `fs` with the store's write-ordering rules checked on every call
@@ -107,7 +106,7 @@ impl ModelFile {
     /// A file all of whose `bytes` are durable.
     fn durable(bytes: Vec<u8>) -> ModelFile {
         ModelFile {
-            synced_len: to_u64(bytes.len()),
+            synced_len: swarmops_core::bytes::to_u64(bytes.len()),
             durable: bytes,
             lost: Vec::new(),
         }
@@ -127,7 +126,7 @@ impl ModelFile {
             .iter()
             .enumerate()
             .map(|(at, &byte)| {
-                if self.is_lost(to_u64(at)) {
+                if self.is_lost(swarmops_core::bytes::to_u64(at)) {
                     self.durable.get(at).copied().unwrap_or(0)
                 } else {
                     byte
@@ -135,7 +134,7 @@ impl ModelFile {
             })
             .collect();
         self.durable = durable;
-        self.synced_len = to_u64(now.len());
+        self.synced_len = swarmops_core::bytes::to_u64(now.len());
     }
 
     /// A sync that failed over a file `len` bytes long: the bytes written since the last sync
@@ -335,7 +334,7 @@ impl<F: FsOps> FsOps for FsyncModelFs<F> {
         if fails {
             // The temp file's one sync failed: none of it is durable.
             model = ModelFile::default();
-            model.sync_failed(to_u64(bytes.len()));
+            model.sync_failed(swarmops_core::bytes::to_u64(bytes.len()));
         }
         state.files.insert(path.clone(), model);
         drop(state);
