@@ -69,7 +69,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
-use swarmops_core::bytes::to_u64;
+use swarmops_core::bytes;
 use swarmops_core::{Changeset, ChangesetId, ObjectId, ObjectKind, Tree, TreeId};
 use swarmops_store::{
     CasResult, DerivedStore, ExternalEntry, ExternalIds, ExternalPut, FileOp, FsObjectStore, FsOps,
@@ -223,8 +223,8 @@ impl LocalRepo {
         if name.len() > MAX_NAME_LEN {
             return Err(StoreError::Limit {
                 what: swarmops_store::LimitKind::RepoNameBytes,
-                max: to_u64(MAX_NAME_LEN),
-                got: to_u64(name.len()),
+                max: bytes::to_u64(MAX_NAME_LEN),
+                got: bytes::to_u64(name.len()),
             }
             .into());
         }
@@ -317,7 +317,7 @@ impl LocalRepo {
         // refuses the latter as such.
         if let Ok(meta) = std::fs::metadata(layout.format_file().as_std_path())
             && meta.is_file()
-            && meta.len() > to_u64(FORMAT.len())
+            && meta.len() > bytes::to_u64(FORMAT.len())
         {
             return Err(StoreError::Format(format!(
                 "{root}/FORMAT is {} bytes long, not a store layout this build reads",
@@ -383,7 +383,7 @@ impl RepoRead<'_, FsObjectStore> {
             name: identity.name.clone(),
             store_version: STORE_VERSION,
             changesets: self.meta.count_changesets()?,
-            refs: to_u64(self.meta.list_refs()?.len()),
+            refs: bytes::to_u64(self.meta.list_refs()?.len()),
             main: self.meta.get_ref("main")?.map(|state| state.target),
         })
     }

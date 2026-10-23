@@ -73,7 +73,7 @@ use std::fmt;
 use std::io;
 use std::sync::Arc;
 
-use swarmops_core::bytes::to_u64;
+use swarmops_core::bytes;
 use swarmops_core::{Changeset, ChangesetId, EntryTarget, ObjectId, ObjectKind, Tree, TreeId};
 use swarmops_store::external_ids::lower_hex;
 use swarmops_store::{
@@ -489,9 +489,9 @@ impl<'r, O: ObjectStore> Check<'r, O> {
             self.compare(&journaled, &records, ckpt, whole);
             // A record past the journal's last changeset, which no frame holds, whether the index
             // counts it or not.
-            if whole && held > to_u64(journaled.len()) {
+            if whole && held > bytes::to_u64(journaled.len()) {
                 self.mismatches
-                    .insert((to_u64(journaled.len()), MismatchCause::Journal));
+                    .insert((bytes::to_u64(journaled.len()), MismatchCause::Journal));
             }
             self.check_view(index.ids_view(), &records, |meta| meta.id.0.0, true)?;
             self.check_view(index.dh_view(), &records, |meta| meta.delta_hash, false)?;
@@ -649,7 +649,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
             };
             if wrong {
                 self.mismatches
-                    .insert((to_u64(rec), MismatchCause::Journal));
+                    .insert((bytes::to_u64(rec), MismatchCause::Journal));
             }
         }
         // The checkpoint passes a record only once the index holds it durably.
@@ -657,7 +657,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
         for (seq, (_, offset)) in journaled.iter().enumerate().skip(records.len()) {
             if *offset < ckpt {
                 self.mismatches
-                    .insert((to_u64(seq), MismatchCause::Journal));
+                    .insert((bytes::to_u64(seq), MismatchCause::Journal));
             }
         }
     }
@@ -704,7 +704,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
         for (rec, named) in named.iter().enumerate() {
             if !named {
                 self.mismatches
-                    .insert((to_u64(rec), MismatchCause::SortedView));
+                    .insert((bytes::to_u64(rec), MismatchCause::SortedView));
             }
         }
         Ok(())
@@ -970,7 +970,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
         problems.extend(self.external_problems);
         problems.extend(self.derived_problems);
         VerifyReport {
-            objects_checked: to_u64(self.hashed.len() + looked_for),
+            objects_checked: bytes::to_u64(self.hashed.len() + looked_for),
             changesets_checked: self.changesets_checked,
             problems,
         }
@@ -985,7 +985,7 @@ fn read_frames(journal: &Journal) -> Result<(Vec<Frame>, Option<u64>), RepoError
     let mut frames: Vec<Frame> = Vec::new();
     let mut batch = FRAME_BATCH;
     loop {
-        match journal.frames_from(to_u64(frames.len()), batch) {
+        match journal.frames_from(bytes::to_u64(frames.len()), batch) {
             Ok(read) if read.is_empty() => break,
             Ok(read) => frames.extend(read),
             Err(StoreError::JournalCorrupt { offset }) if batch == 1 => {
@@ -1025,7 +1025,7 @@ fn journal_changesets(frames: &[Frame]) -> Vec<(ChangesetMeta, u64)> {
             {
                 let meta = ChangesetMeta {
                     id: *id,
-                    seq: to_u64(changesets.len()),
+                    seq: bytes::to_u64(changesets.len()),
                     generation: *generation,
                     delta_hash: *delta_hash,
                     parents: parents.clone(),

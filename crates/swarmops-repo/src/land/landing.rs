@@ -10,7 +10,7 @@ use swarmops_core::{
     BlobId, Changeset, ChangesetId, DeltaEntry, Hashed, ObjectId, ObjectKind, RepoPath, Signature,
     TreeId,
 };
-use swarmops_merge::diff3::merge_content;
+use swarmops_merge::diff3;
 use swarmops_merge::tree_merge::FileConflict;
 use swarmops_store::{ObjectStore, Recovered};
 
@@ -768,7 +768,7 @@ pub(super) fn merge_chain<O: ObjectStore>(
         head.changeset.root,
         theirs.changeset.root,
     ];
-    repo.merge_roots(roots, &merge_content)
+    repo.merge_roots(roots, &diff3::merge_content)
 }
 
 /// The three sides of a merge a conflict report names.

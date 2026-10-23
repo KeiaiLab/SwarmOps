@@ -40,7 +40,7 @@
 
 use std::collections::HashMap;
 
-use swarmops_core::bytes::to_u64;
+use swarmops_core::bytes;
 use swarmops_core::{
     Changeset, ChangesetId, CodecError, Hashed, ObjectKind, Signature, Tree, TreeId,
 };
@@ -364,8 +364,8 @@ impl<O: ObjectStore> TreeRead for StoredTrees<'_, O> {
 fn too_many(got: usize) -> RepoError {
     StoreError::Limit {
         what: LimitKind::Records,
-        max: to_u64(MAX_RAW_BATCH),
-        got: to_u64(got),
+        max: bytes::to_u64(MAX_RAW_BATCH),
+        got: bytes::to_u64(got),
     }
     .into()
 }

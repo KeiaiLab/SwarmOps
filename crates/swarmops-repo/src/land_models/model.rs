@@ -14,7 +14,7 @@ use crate::error::RepoError;
 use crate::repo::{Repo, ref_error};
 use crate::tree_edit::{Encoded, TreeEdit};
 
-use super::relocate::{Relocation, relocate};
+use super::relocate::{self, Relocation};
 
 /// The most first-parent steps a publish walks from the target's actual head back to a land's
 /// `onto`: past them, the land goes back to its lander as [`Published::Moved`].
@@ -274,7 +274,7 @@ impl<O: ObjectStore> Repo<O> {
         if actual == p.onto {
             return publish_cas(write, p);
         }
-        match relocate(self, write, &p.changeset, p.onto, actual, merge)? {
+        match relocate::relocate(self, write, &p.changeset, p.onto, actual, merge)? {
             Relocation::Relocated { id, changeset } => {
                 insert(write, &changeset, id)?;
                 move_ref(write, &p.target, Some(actual), Some(id), &p.actor)?;
@@ -341,7 +341,7 @@ impl<O: ObjectStore> Repo<O> {
             let settled = if head == onto {
                 Some(*id)
             } else {
-                match relocate(self, write, &changeset, onto, head, true)? {
+                match relocate::relocate(self, write, &changeset, onto, head, true)? {
                     Relocation::Relocated {
                         id: relocated,
                         changeset,

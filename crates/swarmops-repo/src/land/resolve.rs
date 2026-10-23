@@ -36,7 +36,7 @@ use swarmops_core::{
     hash_object,
 };
 use swarmops_merge::tree_diff::{Leaf, PathFilter, delta_of, diff_trees};
-use swarmops_merge::tree_merge::entry_in;
+use swarmops_merge::tree_merge;
 use swarmops_store::{ObjectStat, ObjectStore};
 
 use crate::error::RepoError;
@@ -163,8 +163,8 @@ impl Resolving {
                 Resolution::Delete => Makes::Delete,
             };
             paths.push(Prepared {
-                against: entry_in(read, against, &path)?,
-                ours: leaf(entry_in(read, ours, &path)?),
+                against: tree_merge::entry_in(read, against, &path)?,
+                ours: leaf(tree_merge::entry_in(read, ours, &path)?),
                 path,
                 makes,
             });
@@ -196,7 +196,7 @@ impl Resolving {
             let held = if theirs == self.against {
                 at.against
             } else {
-                entry_in(read, theirs, &at.path)?
+                tree_merge::entry_in(read, theirs, &at.path)?
             };
             if held != at.against {
                 stale.push(at.path.clone());

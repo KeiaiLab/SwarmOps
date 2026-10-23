@@ -28,8 +28,9 @@
 //! [`plan_path`]: tree_merge::plan_path
 //! [`entry_in`]: tree_merge::entry_in
 //! [`ContentMerger`]: conflict::ContentMerger
+//! [`merge_content`]: diff3::merge_content
 
-pub use swarmops_merge::*;
+pub use swarmops_merge::{conflict, diff3, line_diff, tree_diff, tree_merge};
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -40,7 +41,6 @@ use swarmops_core::{
     TreeId, hash_object,
 };
 use swarmops_merge::conflict::{ConflictHunk, ConflictKind, ContentMerge, ContentMerger};
-use swarmops_merge::diff3::merge_content;
 use swarmops_merge::tree_diff::{Leaf, PathFilter, PathTriple, TreeRead, diff_trees, three_way};
 use swarmops_merge::tree_merge::{FileConflict, PathPlan, entry_in, plan_path};
 use swarmops_store::ObjectStore;
@@ -116,18 +116,22 @@ impl<O: ObjectStore> Repo<O> {
 
     /// [`Repo::merge_with`] with the three-way text merge, [`merge_content`] (diff3): the merge a
     /// land makes of its change onto the target's head ([`crate::land`]).
+    ///
+    /// [`merge_content`]: diff3::merge_content
     pub fn merge(
         &self,
         base: ChangesetId,
         ours: ChangesetId,
         theirs: ChangesetId,
     ) -> Result<MergeOutcome, RepoError> {
-        self.merge_with(base, ours, theirs, &merge_content)
+        self.merge_with(base, ours, theirs, &diff3::merge_content)
     }
 
     /// [`Repo::merge_trees_with`] with the three-way text merge, [`merge_content`] (diff3): a
     /// land's incremental re-merge, after the target moved, of what it merged onto what the target
     /// gained ([`crate::land`]).
+    ///
+    /// [`merge_content`]: diff3::merge_content
     pub fn merge_trees(
         &self,
         base: TreeId,
@@ -135,7 +139,7 @@ impl<O: ObjectStore> Repo<O> {
         theirs: TreeId,
         paths: &[RepoPath],
     ) -> Result<MergeOutcome, RepoError> {
-        self.merge_trees_with(base, ours, theirs, paths, &merge_content)
+        self.merge_trees_with(base, ours, theirs, paths, &diff3::merge_content)
     }
 
     /// [`Repo::merge_with`] of the three roots `[base, ours, theirs]`, read by the caller already:

@@ -58,7 +58,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use swarmops_core::bytes::to_u64;
+use swarmops_core::bytes;
 use swarmops_core::{
     BlobId, Changeset, ChangesetId, DeltaEntry, DeltaOp, Hashed, LeafKind, ObjectId, ObjectKind,
     RepoPath, Signature, TreeId,
@@ -423,7 +423,7 @@ impl<O: ObjectStore> Repo<O> {
     /// Nothing in the metadata names it until a commit does ([`ChangeOp::PutBlob`]); until then
     /// it is unreferenced, as the objects a failed commit flushed are, for GC.
     pub fn put_blob(&self, content: Vec<u8>) -> Result<BlobPut, RepoError> {
-        let size = to_u64(content.len());
+        let size = bytes::to_u64(content.len());
         let blob = Hashed::new(ObjectKind::Blob, content);
         let id = BlobId(blob.id());
         let outcomes = self.objects.put_hashed_batch(vec![blob])?;
@@ -592,8 +592,8 @@ pub(crate) fn check_parent_list(parents: &[ChangesetId]) -> Result<(), RepoError
     if parents.len() > MAX_PARENTS {
         return Err(StoreError::Limit {
             what: LimitKind::Parents,
-            max: to_u64(MAX_PARENTS),
-            got: to_u64(parents.len()),
+            max: bytes::to_u64(MAX_PARENTS),
+            got: bytes::to_u64(parents.len()),
         }
         .into());
     }
