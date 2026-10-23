@@ -14,6 +14,14 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ## [Unreleased]
 
+### Changed
+
+- The code follows the Google Rust style guide, applied as `docs/develop/style.md` records: no
+  `unwrap()` or message-less assert in library code (`expect` with the reason), module files named
+  after their item with no `mod.rs`, free functions called through their module, enums in place of
+  `bool` parameters, lower-case hex literals; `just check` denies the first three. Behaviour,
+  on-disk format and the public API paths are unchanged.
+
 ## [0.3.0] - 2026-10-22
 
 ### Added

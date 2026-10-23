@@ -23,6 +23,7 @@ features, each with an example.
 | [GitHub as a remote](guides/github-remote.md) | Clone, fetch, push and sync with GitHub; pull requests, tokens in CI, commit authors, a sync that stops. |
 | [MCP integration](develop/mcp.md) | Connect any MCP client: registration, the stdio exchange, identity, every tool and its command, limits and failures. |
 | [CLI scripting](develop/cli-scripting.md) | Drive SwarmOps from scripts: the envelope, exit codes, jq recipes, retries and idempotency keys. |
+| [Code style](develop/style.md) | How the Google Rust style guide is kept here: what the gate enforces, what review reads for, the recorded deviations. |
 
 ## Operate
 

@@ -113,6 +113,9 @@ without `just`. Lints are strict: `unsafe` is forbidden, every exported item mus
 `-D warnings`), apart from five noisy lints the workspace `Cargo.toml` allows. `missing_docs`
 reaches test builds too: a `pub` item under `#[cfg(test)]` that the crate root reaches needs its
 `///` comment, and a new test, bench or binary crate root its `//!` one.
+Code follows the Google Rust style guide as [docs/develop/style.md](docs/develop/style.md) applies
+it: the second clippy step denies `unwrap()`, message-less asserts and `mod.rs` files in library
+and binary code, and the page lists what review reads for and the recorded deviations.
 
 ## Tests
 
