@@ -1316,7 +1316,7 @@ mod tests {
     }
 
     fn id() -> ChangesetId {
-        ChangesetId(ObjectId([7; 32]))
+        ChangesetId::new(ObjectId::new([7; 32]))
     }
 
     fn path() -> RepoPath {
@@ -1365,7 +1365,7 @@ mod tests {
         );
         let missing_blob = RepoError::MissingBlob {
             path: path(),
-            id: swarmops_core::BlobId(id().0),
+            id: swarmops_core::BlobId::new(id().0),
         };
         maps(missing_blob, op, ErrorCode::InvalidArg);
         maps(
@@ -1441,15 +1441,15 @@ mod tests {
     /// One of each error a land raises.
     fn land_errors() -> [RepoError; 8] {
         use swarmops_repo::{MergeConflicts, NothingToLandReason};
-        let conflicts = MergeConflicts {
-            base: id(),
-            ours: id(),
-            theirs: id(),
-            conflicts: Vec::new(),
-            auto_merged: Vec::new(),
-            last_touched: std::collections::BTreeMap::new(),
-            stale: Vec::new(),
-        };
+        let conflicts = MergeConflicts::new(
+            id(),
+            id(),
+            id(),
+            Vec::new(),
+            Vec::new(),
+            std::collections::BTreeMap::new(),
+            Vec::new(),
+        );
         [
             RepoError::Conflict(Box::new(conflicts)),
             RepoError::NothingToLand(NothingToLandReason::OnTarget),
@@ -1594,7 +1594,7 @@ mod tests {
     /// read-only hint; its details add what the land expected.
     #[test]
     fn cas_mismatch_and_ref_moved_map_to_one_code() {
-        let other = ChangesetId(swarmops_core::ObjectId([9; 32]));
+        let other = ChangesetId::new(swarmops_core::ObjectId::new([9; 32]));
 
         // 1. Both errors, one code.
         let moved = repo_error(
@@ -2085,8 +2085,8 @@ mod tests {
     /// The source repository and git ids the `git import` mapping tests name.
     const GIT_PATH: &str = "/nonexistent/swarmops-test/repo.git";
     const GIT_REF: &str = "stable";
-    const COMMIT: GitOid = GitOid([0x11; 20]);
-    const OBJECT: GitOid = GitOid([0x22; 20]);
+    const COMMIT: GitOid = GitOid::new([0x11; 20]);
+    const OBJECT: GitOid = GitOid::new([0x22; 20]);
 
     /// `e`, a `git import` of [`GIT_REF`] from [`GIT_PATH`] that failed, maps to `code`: its
     /// string, exit code and retry advice, and `details` as `want`; the error.
@@ -2279,7 +2279,7 @@ mod tests {
             ErrorCode::RefNameInvalid,
             &json!({"name": "feature/x"}),
         );
-        let head = ChangesetId(ObjectId([7; 32]));
+        let head = ChangesetId::new(ObjectId::new([7; 32]));
         let diverged = |base| ImportError::Diverged {
             target_ref: "main".into(),
             target_head: head,
@@ -2302,10 +2302,7 @@ mod tests {
             "git_head": COMMIT.to_string(),
         });
         git_maps(diverged(None), ErrorCode::GitImportDiverged, &want);
-        let entry = swarmops_git::ExternalIdMismatch {
-            commit: OBJECT,
-            changeset: head,
-        };
+        let entry = swarmops_git::ExternalIdMismatch::new(OBJECT, head);
         let passed_over = ImportError::Diverged {
             target_ref: "main".into(),
             target_head: head,
@@ -2322,7 +2319,7 @@ mod tests {
         });
         let error = git_maps(passed_over, ErrorCode::GitImportDiverged, &want);
         assert_eq!(error.hint.as_deref(), Some("swarmops verify --deep"));
-        let actual = ChangesetId(ObjectId([8; 32]));
+        let actual = ChangesetId::new(ObjectId::new([8; 32]));
         let moved = ImportError::CasMismatch {
             target_ref: "main".into(),
             actual: Some(actual),
@@ -2381,10 +2378,10 @@ mod tests {
             format!("make the store's files writable for this user, then {RESUME_HINT}");
         assert_eq!(error.hint.as_deref(), Some(fix_first.as_str()));
         let damaged = StoreError::Corrupt {
-            id: ObjectId([9; 32]),
+            id: ObjectId::new([9; 32]),
         };
         let want = json!({
-            "object": ObjectId([9; 32]).to_hex(),
+            "object": ObjectId::new([9; 32]).to_hex(),
             "imported": 1,
             "last_commit": commit,
         });
@@ -2429,8 +2426,8 @@ mod tests {
     fn git_export_divergences_map_to_their_reasons() {
         use serde_json::json;
 
-        let head = ChangesetId(ObjectId([7; 32]));
-        let exported = ChangesetId(ObjectId([8; 32]));
+        let head = ChangesetId::new(ObjectId::new([7; 32]));
+        let exported = ChangesetId::new(ObjectId::new([8; 32]));
         let diverged = |git_head, reason| ExportError::Diverged {
             branch: "main".into(),
             git_head,
@@ -2765,15 +2762,15 @@ mod tests {
         let want = json!({"remote": "origin", "branch": "main", "reason": "no_common_base"});
         is(&unrelated, ErrorCode::RemoteDiverged, &want);
 
-        let conflicts = MergeConflicts {
-            base: id(),
-            ours: id(),
-            theirs: id(),
-            conflicts: Vec::new(),
-            auto_merged: Vec::new(),
-            last_touched: std::collections::BTreeMap::new(),
-            stale: Vec::new(),
-        };
+        let conflicts = MergeConflicts::new(
+            id(),
+            id(),
+            id(),
+            Vec::new(),
+            Vec::new(),
+            std::collections::BTreeMap::new(),
+            Vec::new(),
+        );
         let conflicted = SyncError::Conflict {
             change: id(),
             onto: id(),
@@ -2807,22 +2804,17 @@ mod tests {
         use serde_json::json;
         use swarmops_git::limits::LimitScope;
 
-        let file = LimitExceeded {
-            scope: LimitScope::RemoteFile,
-            path: Some("assets/big.bin".into()),
-            size: 104_857_601,
-            limit: 104_857_600,
-        };
+        let file = LimitExceeded::new(
+            LimitScope::RemoteFile,
+            Some("assets/big.bin".into()),
+            104_857_601,
+            104_857_600,
+        );
         let file = limit_error(file, "origin");
         let want = json!({"scope": "remote_file", "path": "assets/big.bin", "size": 104_857_601_u64,
                           "limit": 104_857_600_u64, "remote": "origin"});
         is(&file, ErrorCode::TooLarge, &want);
-        let push = LimitExceeded {
-            scope: LimitScope::RemotePush,
-            path: None,
-            size: 2_000_000_001,
-            limit: 2_000_000_000,
-        };
+        let push = LimitExceeded::new(LimitScope::RemotePush, None, 2_000_000_001, 2_000_000_000);
         let push = limit_error(push, "origin");
         let want = json!({"scope": "remote_push", "size": 2_000_000_001_u64,
                           "limit": 2_000_000_000_u64, "remote": "origin"});

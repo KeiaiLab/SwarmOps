@@ -2773,8 +2773,8 @@ mod tests {
     #[test]
     fn an_operation_s_kind_comes_from_its_records() {
         let (a, b) = (
-            ChangesetId(ObjectId([1; 32])),
-            ChangesetId(ObjectId([2; 32])),
+            ChangesetId::new(ObjectId::new([1; 32])),
+            ChangesetId::new(ObjectId::new([2; 32])),
         );
         let inserted = |id| OpRecord::Changeset {
             id,
@@ -2870,7 +2870,7 @@ mod tests {
         let (object, child, parent) = ("ab".repeat(32), "cd".repeat(32), "ef".repeat(32));
         let key = "12".repeat(20);
         let id = |hex: &str| ObjectId::from_hex(&hex.to_uppercase()).unwrap();
-        let changeset = |hex: &str| ChangesetId(id(hex));
+        let changeset = |hex: &str| ChangesetId::new(id(hex));
         let mismatch = |cause| VerifyProblem::IndexMismatch { seq: 7, cause };
         let expected = |problem: &VerifyProblem| match problem {
             VerifyProblem::CorruptObject(_) => json!({"kind": "corrupt_object", "object": object}),
@@ -2888,6 +2888,7 @@ mod tests {
                     MismatchCause::Journal => "journal",
                     MismatchCause::SortedView => "sorted_view",
                     MismatchCause::Object => "object",
+                    _ => panic!("a variant this test does not know"),
                 };
                 json!({"kind": "index_mismatch", "seq": 7, "cause": cause})
             }
@@ -2912,6 +2913,7 @@ mod tests {
                 "kind": "derived_mismatch", "changeset": child, "key": "0161",
                 "derivation": "last_modified"
             }),
+            _ => panic!("a variant this test does not know"),
         };
         let cases = [
             VerifyProblem::CorruptObject(id(&object)),
@@ -2945,7 +2947,7 @@ mod tests {
         });
         let mut kinds: BTreeMap<String, Vec<&VerifyProblem>> = BTreeMap::new();
         for problem in cases.iter().chain(&external).chain(&derived) {
-            let found = finding(problem);
+            let found = finding(problem).unwrap();
             assert_eq!(
                 serde_json::to_value(&found).unwrap(),
                 expected(problem),
@@ -2974,20 +2976,9 @@ mod tests {
         // Materializing the commit's frame into the index fails once the frame is durable: the
         // commit succeeded, and says what went wrong after.
         let ops = ops_on(&root, failing("append", "idx/ids.col"));
-        let put = ChangeInput {
-            path: "f".to_owned(),
-            op: ChangeOp::Put,
-            content: Some(ContentInput::Inline("x".to_owned())),
-            mode: None,
-        };
-        let req = CommitReq {
-            parent: None,
-            changes: vec![put],
-            message: "m".to_owned(),
-            allow_empty: false,
-            advance: None,
-            idempotency_key: None,
-        };
+        let mut put = ChangeInput::new("f".to_owned(), ChangeOp::Put);
+        put.content = Some(ContentInput::Inline("x".to_owned()));
+        let req = CommitReq::new(vec![put], "m".to_owned());
         let committed = ops.commit(&who, req).unwrap();
         one_injected(&committed.warnings);
         assert_eq!(committed.files_changed, 1);
@@ -2995,12 +2986,8 @@ mod tests {
 
         // Writing the ref file fails once the move's frame is durable: likewise.
         let ops = ops_on(&root, failing("atomic_replace", "refs/main"));
-        let req = RefSetReq {
-            name: "main".to_owned(),
-            new: committed.changeset.as_str().into(),
-            expected_old: None,
-            create: true,
-        };
+        let mut req = RefSetReq::new("main".to_owned(), committed.changeset.as_str());
+        req.create = true;
         let moved = ops.ref_set(&who, req).unwrap();
         one_injected(&moved.warnings);
         assert!(!moved.already_applied);
@@ -3008,7 +2995,7 @@ mod tests {
 
         // Both are committed: a fresh handle sees them.
         let fresh = LocalOps::open(&root).unwrap();
-        let info = fresh.repo_info(InfoReq {}).unwrap();
+        let info = fresh.repo_info(InfoReq::default()).unwrap();
         assert_eq!(info.main.as_deref(), Some(committed.changeset.as_str()));
         assert_eq!(info.changesets, 1);
     }
@@ -3047,7 +3034,7 @@ mod tests {
 
         /// The real filesystem, but that it refuses the calls `refused` lists ([`Refuses`]).
         fn refusing(refused: &[(&'static str, &'static str, i32)]) -> Watched<Refuses> {
-            Watched(Refuses(refused.to_vec()), RealFs)
+            Watched(Refuses(refused.to_vec()), RealFs::new())
         }
 
         /// A store at `<dir>/store`, made, and the identity that commits to it.
@@ -3059,19 +3046,9 @@ mod tests {
 
         /// A request that puts `path` on main's head.
         fn put(path: &str) -> CommitReq {
-            CommitReq {
-                parent: None,
-                changes: vec![ChangeInput {
-                    path: path.to_owned(),
-                    op: ChangeOp::Put,
-                    content: Some(ContentInput::Inline("x".to_owned())),
-                    mode: None,
-                }],
-                message: "m".to_owned(),
-                allow_empty: false,
-                advance: None,
-                idempotency_key: None,
-            }
+            let mut change_input = ChangeInput::new(path.to_owned(), ChangeOp::Put);
+            change_input.content = Some(ContentInput::Inline("x".to_owned()));
+            CommitReq::new(vec![change_input], "m".to_owned())
         }
 
         /// `error` is the non-retryable `E_IO` of a journal append to `store_file` that
@@ -3103,7 +3080,7 @@ mod tests {
             drop(ops);
 
             let fresh = LocalOps::open(&root).unwrap();
-            assert_eq!(fresh.repo_info(InfoReq {}).unwrap().changesets, 0);
+            assert_eq!(fresh.repo_info(InfoReq::default()).unwrap().changesets, 0);
             fresh.commit(&who, put("f")).unwrap();
         }
 
@@ -3124,7 +3101,7 @@ mod tests {
 
             let fresh = LocalOps::open(&root).unwrap();
             fresh.commit(&who, put("g")).unwrap();
-            assert_eq!(fresh.repo_info(InfoReq {}).unwrap().changesets, 2);
+            assert_eq!(fresh.repo_info(InfoReq::default()).unwrap().changesets, 2);
         }
 
         /// (c) The tail check's sync of such a frame fails (`EIO`), and `journal.log` refuses
@@ -3149,7 +3126,7 @@ mod tests {
 
             let fresh = LocalOps::open(&root).unwrap();
             fresh.commit(&who, put("g")).unwrap();
-            assert_eq!(fresh.repo_info(InfoReq {}).unwrap().changesets, 1);
+            assert_eq!(fresh.repo_info(InfoReq::default()).unwrap().changesets, 1);
         }
     }
 
@@ -3163,20 +3140,9 @@ mod tests {
         drop(LocalOps::init(&root, "acme").unwrap());
         let who = Identity::parse("agent/worker-17").unwrap();
         let ops = ops_on(&root, failing("append_durable", "journal.log"));
-        let put = ChangeInput {
-            path: "f".to_owned(),
-            op: ChangeOp::Put,
-            content: Some(ContentInput::Inline("x".to_owned())),
-            mode: None,
-        };
-        let req = CommitReq {
-            parent: None,
-            changes: vec![put],
-            message: "m".to_owned(),
-            allow_empty: false,
-            advance: None,
-            idempotency_key: None,
-        };
+        let mut put = ChangeInput::new("f".to_owned(), ChangeOp::Put);
+        put.content = Some(ContentInput::Inline("x".to_owned()));
+        let req = CommitReq::new(vec![put], "m".to_owned());
         let error = ops.commit(&who, req).unwrap_err();
         assert_eq!(
             (error.code.as_str(), error.exit, error.retryable),
@@ -3188,7 +3154,7 @@ mod tests {
         drop(ops);
 
         let fresh = LocalOps::open(&root).unwrap();
-        assert_eq!(fresh.repo_info(InfoReq {}).unwrap().changesets, 0);
+        assert_eq!(fresh.repo_info(InfoReq::default()).unwrap().changesets, 0);
     }
 
     /// A commit whose write cannot list the frame a commit before it left whole and unlisted (that
@@ -3203,18 +3169,10 @@ mod tests {
         drop(LocalOps::init(&root, "acme").unwrap());
         let who = Identity::parse("agent/worker-17").unwrap();
         let ops = ops_on(&root, failing("append_durable", "journal.off"));
-        let commit = |path: &str| CommitReq {
-            parent: None,
-            changes: vec![ChangeInput {
-                path: path.to_owned(),
-                op: ChangeOp::Put,
-                content: Some(ContentInput::Inline("x".to_owned())),
-                mode: None,
-            }],
-            message: "m".to_owned(),
-            allow_empty: false,
-            advance: None,
-            idempotency_key: None,
+        let commit = |path: &str| {
+            let mut change_input = ChangeInput::new(path.to_owned(), ChangeOp::Put);
+            change_input.content = Some(ContentInput::Inline("x".to_owned()));
+            CommitReq::new(vec![change_input], "m".to_owned())
         };
         one_injected(&ops.commit(&who, commit("f")).unwrap().warnings);
         let error = ops.commit(&who, commit("g")).unwrap_err();
@@ -3230,7 +3188,7 @@ mod tests {
 
         let fresh = LocalOps::open(&root).unwrap();
         fresh.commit(&who, commit("g")).unwrap();
-        assert_eq!(fresh.repo_info(InfoReq {}).unwrap().changesets, 2);
+        assert_eq!(fresh.repo_info(InfoReq::default()).unwrap().changesets, 2);
     }
 
     /// What a request's write repaired first goes into that request's record alone, which the
@@ -3245,28 +3203,17 @@ mod tests {
         let (ops, _) = LocalOps::init(&root, "acme").unwrap();
         let who = Identity::parse("agent/worker-17").unwrap();
         let commit = |content: &str| {
-            let put = ChangeInput {
-                path: "f".to_owned(),
-                op: ChangeOp::Put,
-                content: Some(ContentInput::Inline(content.to_owned())),
-                mode: None,
-            };
-            let req = CommitReq {
-                parent: None,
-                changes: vec![put],
-                message: "m".to_owned(),
-                allow_empty: false,
-                advance: None,
-                idempotency_key: None,
-            };
+            let mut put = ChangeInput::new("f".to_owned(), ChangeOp::Put);
+            put.content = Some(ContentInput::Inline(content.to_owned()));
+            let req = CommitReq::new(vec![put], "m".to_owned());
             ops.commit(&who, req).unwrap().changeset
         };
         let (c1, c2) = (commit("1"), commit("2"));
-        let set = |new: &str, expected_old: Option<&str>| RefSetReq {
-            name: "main".to_owned(),
-            new: new.into(),
-            expected_old: expected_old.map(Rev::from),
-            create: expected_old.is_none(),
+        let set = |new: &str, expected_old: Option<&str>| {
+            let mut ref_set_req = RefSetReq::new("main".to_owned(), new);
+            ref_set_req.expected_old = expected_old.map(Rev::from);
+            ref_set_req.create = expected_old.is_none();
+            ref_set_req
         };
         let created = ops_on(&root, failing("append_durable", "journal.off"))
             .ref_set(&who, set(&c1, None))
@@ -3280,11 +3227,9 @@ mod tests {
             .ref_set(&who, set(&c2, Some(&c2)))
             .unwrap_err();
         assert_eq!(stale.code.as_str(), "E_CAS_MISMATCH", "{stale:?}");
-        let listed_and_written = RecoveredOut {
-            frames_listed: 1,
-            refs_replayed: 1,
-            ..RecoveredOut::default()
-        };
+        let mut listed_and_written = RecoveredOut::default();
+        listed_and_written.frames_listed = 1;
+        listed_and_written.refs_replayed = 1;
         assert_eq!(first.take_recovered(), Some(listed_and_written));
         assert_eq!(first.take_recovered(), None, "taking it empties the record");
         let replay = ops.recording(&second).ref_set(&who, set(&c1, Some(&c1)));
@@ -3304,29 +3249,14 @@ mod tests {
             let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
             let (ops, _) = LocalOps::init(&root, "acme").unwrap();
             let commit = |content: &str| {
-                let put = ChangeInput {
-                    path: "f".to_owned(),
-                    op: ChangeOp::Put,
-                    content: Some(ContentInput::Inline(content.to_owned())),
-                    mode: None,
-                };
-                let req = CommitReq {
-                    parent: None,
-                    changes: vec![put],
-                    message: "m".to_owned(),
-                    allow_empty: false,
-                    advance: None,
-                    idempotency_key: None,
-                };
+                let mut put = ChangeInput::new("f".to_owned(), ChangeOp::Put);
+                put.content = Some(ContentInput::Inline(content.to_owned()));
+                let req = CommitReq::new(vec![put], "m".to_owned());
                 ops.commit(&who, req).unwrap().changeset
             };
             let (c1, c2) = (commit("1"), commit("2"));
-            let main = RefSetReq {
-                name: "main".to_owned(),
-                new: c1.as_str().into(),
-                expected_old: None,
-                create: true,
-            };
+            let mut main = RefSetReq::new("main".to_owned(), c1.as_str());
+            main.create = true;
             let created = ops_on(&root, failing("append_durable", "journal.off"))
                 .ref_set(&who, main)
                 .unwrap();
@@ -3335,19 +3265,14 @@ mod tests {
             let resolved = Resolved::default();
             // main holds c1: the delete expects it, or c2.
             let expected = if deletes { &c1 } else { &c2 };
-            let delete = RefDeleteReq {
-                name: "main".to_owned(),
-                expected_old: expected.as_str().into(),
-            };
+            let delete = RefDeleteReq::new("main".to_owned(), expected.as_str());
             match ops.recording(&resolved).ref_delete(&who, delete) {
                 Ok(deleted) => assert!(deletes && !deleted.already_applied, "{deleted:?}"),
                 Err(e) => assert!(!deletes && e.code == "E_CAS_MISMATCH", "{e:?}"),
             }
-            let listed_and_written = RecoveredOut {
-                frames_listed: 1,
-                refs_replayed: 1,
-                ..RecoveredOut::default()
-            };
+            let mut listed_and_written = RecoveredOut::default();
+            listed_and_written.frames_listed = 1;
+            listed_and_written.refs_replayed = 1;
             let recovered = resolved.take_recovered();
             assert_eq!(recovered, Some(listed_and_written), "deletes: {deletes}");
         }
@@ -3357,26 +3282,24 @@ mod tests {
     /// values, the cut's two among them, each come back where they were.
     #[test]
     fn recovered_out_keeps_each_count_in_its_own_field() {
-        let recovered = Recovered {
-            log_cut: Some(LogCut { at: 1, bytes: 2 }),
-            frames_listed: 3,
-            frames_rewritten: 4,
-            off_bytes_dropped: 5,
-            index_records_dropped: 6,
-            views_rebuilt: true,
-            records_replayed: 7,
-            refs_replayed: 8,
-        };
-        let out = RecoveredOut {
-            log_cut: Some(LogCutOut { at: 1, bytes: 2 }),
-            frames_listed: 3,
-            frames_rewritten: 4,
-            off_bytes_dropped: 5,
-            index_records_dropped: 6,
-            views_rebuilt: true,
-            records_replayed: 7,
-            refs_replayed: 8,
-        };
+        let mut recovered = Recovered::default();
+        recovered.log_cut = Some(LogCut::new(1, 2));
+        recovered.frames_listed = 3;
+        recovered.frames_rewritten = 4;
+        recovered.off_bytes_dropped = 5;
+        recovered.index_records_dropped = 6;
+        recovered.views_rebuilt = true;
+        recovered.records_replayed = 7;
+        recovered.refs_replayed = 8;
+        let mut out = RecoveredOut::default();
+        out.log_cut = Some(LogCutOut::new(1, 2));
+        out.frames_listed = 3;
+        out.frames_rewritten = 4;
+        out.off_bytes_dropped = 5;
+        out.index_records_dropped = 6;
+        out.views_rebuilt = true;
+        out.records_replayed = 7;
+        out.refs_replayed = 8;
         assert_eq!(recovered_out(recovered), out);
     }
 
@@ -3389,27 +3312,18 @@ mod tests {
         let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
         let (ops, _) = LocalOps::init(&root, "acme").unwrap();
         let who = Identity::parse("agent/worker-17").unwrap();
-        let req = |parent: Option<&str>, content: &str, advance: Option<&str>| CommitReq {
-            parent: parent.map(Rev::from),
-            changes: vec![ChangeInput {
-                path: "f".to_owned(),
-                op: ChangeOp::Put,
-                content: Some(ContentInput::Inline(content.to_owned())),
-                mode: None,
-            }],
-            message: "m".to_owned(),
-            advance: advance.map(str::to_owned),
-            idempotency_key: None,
-            allow_empty: false,
+        let req = |parent: Option<&str>, content: &str, advance: Option<&str>| {
+            let mut change_input = ChangeInput::new("f".to_owned(), ChangeOp::Put);
+            change_input.content = Some(ContentInput::Inline(content.to_owned()));
+            let mut commit_req = CommitReq::new(vec![change_input], "m".to_owned());
+            commit_req.parent = parent.map(Rev::from);
+            commit_req.advance = advance.map(str::to_owned);
+            commit_req
         };
         let c0 = ops.commit(&who, req(None, "0", None)).unwrap().changeset;
         let c1 = ops.commit(&who, req(None, "1", None)).unwrap().changeset;
-        let main = RefSetReq {
-            name: "main".to_owned(),
-            new: c1.as_str().into(),
-            expected_old: None,
-            create: true,
-        };
+        let mut main = RefSetReq::new("main".to_owned(), c1.as_str());
+        main.create = true;
         let created = ops_on(&root, failing("append_durable", "journal.off"))
             .ref_set(&who, main)
             .unwrap();
@@ -3423,13 +3337,11 @@ mod tests {
             .unwrap_err();
         assert_eq!(lost.code.as_str(), "E_CAS_MISMATCH", "{lost:?}");
         assert_eq!(lost.details["committed"], false, "{lost:?}");
-        let listed_and_written = RecoveredOut {
-            frames_listed: 1,
-            refs_replayed: 1,
-            ..RecoveredOut::default()
-        };
+        let mut listed_and_written = RecoveredOut::default();
+        listed_and_written.frames_listed = 1;
+        listed_and_written.refs_replayed = 1;
         assert_eq!(resolved.take_recovered(), Some(listed_and_written));
-        assert_eq!(ops.repo_info(InfoReq {}).unwrap().changesets, 2);
+        assert_eq!(ops.repo_info(InfoReq::default()).unwrap().changesets, 2);
     }
 
     /// A keyed commit replays the changeset that carries its key, its ref's head here, only
@@ -3453,18 +3365,13 @@ mod tests {
             let (ops, _) = LocalOps::init(&root, "acme").unwrap();
             let who = Identity::parse("agent/worker-17").unwrap();
             // On main's head, advancing main.
-            let publish = |content: &str, key: Option<&str>| CommitReq {
-                parent: None,
-                changes: vec![ChangeInput {
-                    path: "f".to_owned(),
-                    op: ChangeOp::Put,
-                    content: Some(ContentInput::Inline(content.to_owned())),
-                    mode: None,
-                }],
-                message: "m".to_owned(),
-                advance: Some("main".to_owned()),
-                idempotency_key: key.map(str::to_owned),
-                allow_empty: false,
+            let publish = |content: &str, key: Option<&str>| {
+                let mut change_input = ChangeInput::new("f".to_owned(), ChangeOp::Put);
+                change_input.content = Some(ContentInput::Inline(content.to_owned()));
+                let mut commit_req = CommitReq::new(vec![change_input], "m".to_owned());
+                commit_req.advance = Some("main".to_owned());
+                commit_req.idempotency_key = key.map(str::to_owned);
+                commit_req
             };
             let c1 = ops.commit(&who, publish("1", None)).unwrap().changeset;
             let first = ops_on(&root, failing("append_durable", "journal.off"))
@@ -3472,7 +3379,7 @@ mod tests {
                 .unwrap();
             one_injected(&first.warnings);
             let c2 = first.changeset;
-            let main = |ops: &LocalOps| ops.repo_info(InfoReq {}).unwrap().main;
+            let main = |ops: &LocalOps| ops.repo_info(InfoReq::default()).unwrap().main;
             assert_eq!(main(&ops).as_deref(), Some(c2.as_str()), "readers see c2");
             let (log, off) = (root.join("meta/journal.log"), root.join("meta/journal.off"));
             let lens = || (file_len(&log), file_len(&off));
@@ -3502,7 +3409,7 @@ mod tests {
                     Some(c1.as_str()),
                     "the cut took the commit back"
                 );
-                assert_eq!(fresh.repo_info(InfoReq {}).unwrap().changesets, 1);
+                assert_eq!(fresh.repo_info(InfoReq::default()).unwrap().changesets, 1);
             } else {
                 let resolved = Resolved::default();
                 let replay = ops
@@ -3518,12 +3425,10 @@ mod tests {
                     "its write listed the frame before it answered, and wrote no frame of its own"
                 );
                 // It listed the frame, and wrote the index's record and the ref's file.
-                let listed_and_written = RecoveredOut {
-                    frames_listed: 1,
-                    records_replayed: 1,
-                    refs_replayed: 1,
-                    ..RecoveredOut::default()
-                };
+                let mut listed_and_written = RecoveredOut::default();
+                listed_and_written.frames_listed = 1;
+                listed_and_written.records_replayed = 1;
+                listed_and_written.refs_replayed = 1;
                 assert_eq!(resolved.take_recovered(), Some(listed_and_written));
             }
         }
@@ -3545,29 +3450,19 @@ mod tests {
             let (ops, _) = LocalOps::init(&root, "acme").unwrap();
             let who = Identity::parse("agent/worker-17").unwrap();
             let commit = |parent: Option<&str>, content: &str| {
-                let put = ChangeInput {
-                    path: "f".to_owned(),
-                    op: ChangeOp::Put,
-                    content: Some(ContentInput::Inline(content.to_owned())),
-                    mode: None,
-                };
-                let req = CommitReq {
-                    parent: parent.map(Rev::from),
-                    changes: vec![put],
-                    message: "m".to_owned(),
-                    allow_empty: false,
-                    advance: None,
-                    idempotency_key: None,
-                };
+                let mut put = ChangeInput::new("f".to_owned(), ChangeOp::Put);
+                put.content = Some(ContentInput::Inline(content.to_owned()));
+                let mut req = CommitReq::new(vec![put], "m".to_owned());
+                req.parent = parent.map(Rev::from);
                 ops.commit(&who, req).unwrap().changeset
             };
             let c1 = commit(None, "1");
             let c2 = commit(Some(&c1), "2");
-            let set = |new: &str, expected_old: Option<&str>| RefSetReq {
-                name: "main".to_owned(),
-                new: new.into(),
-                expected_old: expected_old.map(Rev::from),
-                create: expected_old.is_none(),
+            let set = |new: &str, expected_old: Option<&str>| {
+                let mut ref_set_req = RefSetReq::new("main".to_owned(), new);
+                ref_set_req.expected_old = expected_old.map(Rev::from);
+                ref_set_req.create = expected_old.is_none();
+                ref_set_req
             };
             ops.ref_set(&who, set(&c1, None)).unwrap();
             // The move to c2: its frame is whole and durable in journal.log, and its listing in
@@ -3577,7 +3472,7 @@ mod tests {
                 .ref_set(&who, set(&c2, Some(&c1)))
                 .unwrap();
             one_injected(&moved.warnings);
-            let main = |ops: &LocalOps| ops.repo_info(InfoReq {}).unwrap().main;
+            let main = |ops: &LocalOps| ops.repo_info(InfoReq::default()).unwrap().main;
             assert_eq!(main(&ops).as_deref(), Some(c2.as_str()), "readers see c2");
             let (log, off) = (root.join("meta/journal.log"), root.join("meta/journal.off"));
             let lens = || (file_len(&log), file_len(&off));
@@ -3632,24 +3527,18 @@ mod tests {
 
         /// `read_file` of `path` at `main`, 1 KiB at most.
         fn cat(path: &str) -> ReadFileReq {
-            ReadFileReq {
-                rev: "main".into(),
-                path: path.to_owned(),
-                offset: 0,
-                lines: None,
-                max_bytes: 1024,
-            }
+            let mut read_file_req = ReadFileReq::new("main", path.to_owned());
+            read_file_req.max_bytes = 1024;
+            read_file_req
         }
 
         /// `read_tree` of `path` at `main`, 100 entries at most.
         fn ls(path: &str) -> ReadTreeReq {
-            ReadTreeReq {
-                rev: "main".into(),
-                path: Some(path.to_owned()),
-                depth: 1,
-                limit: 100,
-                cursor: None,
-            }
+            let mut read_tree_req = ReadTreeReq::new("main");
+            read_tree_req.path = Some(path.to_owned());
+            read_tree_req.depth = 1;
+            read_tree_req.limit = 100;
+            read_tree_req
         }
 
         /// Each request reads in one snapshot of the metadata, counted by the reads of a witness
@@ -3666,34 +3555,27 @@ mod tests {
             let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
             let (setup, _) = LocalOps::init(&root, "acme").unwrap();
             let who = Identity::parse("agent/worker-17").unwrap();
-            let commit = |parent: Option<&str>, content: &str, advance: Option<&str>| CommitReq {
-                parent: parent.map(Rev::from),
-                changes: vec![ChangeInput {
-                    path: "src/f".to_owned(),
-                    op: ChangeOp::Put,
-                    content: Some(ContentInput::Inline(content.to_owned())),
-                    mode: None,
-                }],
-                message: "m".to_owned(),
-                advance: advance.map(str::to_owned),
-                idempotency_key: None,
-                allow_empty: false,
+            let commit = |parent: Option<&str>, content: &str, advance: Option<&str>| {
+                let mut change_input = ChangeInput::new("src/f".to_owned(), ChangeOp::Put);
+                change_input.content = Some(ContentInput::Inline(content.to_owned()));
+                let mut commit_req = CommitReq::new(vec![change_input], "m".to_owned());
+                commit_req.parent = parent.map(Rev::from);
+                commit_req.advance = advance.map(str::to_owned);
+                commit_req
             };
-            let set = |new: &str, expected_old: Option<&str>| RefSetReq {
-                name: "main".to_owned(),
-                new: new.into(),
-                expected_old: expected_old.map(Rev::from),
-                create: expected_old.is_none(),
+            let set = |new: &str, expected_old: Option<&str>| {
+                let mut ref_set_req = RefSetReq::new("main".to_owned(), new);
+                ref_set_req.expected_old = expected_old.map(Rev::from);
+                ref_set_req.create = expected_old.is_none();
+                ref_set_req
             };
             let c1 = setup
                 .commit(&who, commit(None, "1", None))
                 .unwrap()
                 .changeset;
             setup.ref_set(&who, set(&c1, None)).unwrap();
-            let witness = RefSetReq {
-                name: "release/witness".to_owned(),
-                ..set(&c1, None)
-            };
+            let mut witness = set(&c1, None);
+            witness.name = "release/witness".to_owned();
             setup.ref_set(&who, witness).unwrap();
             drop(setup);
             // The frames so far checkpointed: no write replays the witness's move again.
@@ -3707,11 +3589,13 @@ mod tests {
                 let reads = calls().into_iter().filter(|call| call == witness).count();
                 counts.push((request, reads));
             };
-            let log = |rev: Option<&str>, cursor: Option<&str>| LogReq {
-                rev: rev.map(Rev::from),
-                limit: 1,
-                cursor: cursor.map(str::to_owned),
-                paths: Vec::new(),
+            let log = |rev: Option<&str>, cursor: Option<&str>| {
+                let mut log_req = LogReq::default();
+                log_req.rev = rev.map(Rev::from);
+                log_req.limit = 1;
+                log_req.cursor = cursor.map(str::to_owned);
+                log_req.paths = Vec::new();
+                log_req
             };
             count("open");
 
@@ -3723,10 +3607,8 @@ mod tests {
             count("read_tree");
             ops.read_tree(ls("src/f")).unwrap_err();
             count("read_tree, a file there");
-            let show = ShowReq {
-                rev: "main".into(),
-                max_changes: 10,
-            };
+            let mut show = ShowReq::new("main");
+            show.max_changes = 10;
             ops.show(show).unwrap();
             count("show");
             ops.log(log(Some("main"), None)).unwrap();
@@ -3769,27 +3651,15 @@ mod tests {
             let who = Identity::parse("agent/worker-17").unwrap();
             let mut head: Option<String> = None;
             for content in ["1", "2"] {
-                let req = CommitReq {
-                    parent: head.as_deref().map(Rev::from),
-                    changes: vec![ChangeInput {
-                        path: "src/f".to_owned(),
-                        op: ChangeOp::Put,
-                        content: Some(ContentInput::Inline(content.to_owned())),
-                        mode: None,
-                    }],
-                    message: "m".to_owned(),
-                    advance: Some("main".to_owned()),
-                    idempotency_key: None,
-                    allow_empty: false,
-                };
+                let mut change_input = ChangeInput::new("src/f".to_owned(), ChangeOp::Put);
+                change_input.content = Some(ContentInput::Inline(content.to_owned()));
+                let mut req = CommitReq::new(vec![change_input], "m".to_owned());
+                req.parent = head.as_deref().map(Rev::from);
+                req.advance = Some("main".to_owned());
                 head = Some(setup.commit(&who, req).unwrap().changeset);
             }
-            let witness = RefSetReq {
-                name: "release/witness".to_owned(),
-                new: head.unwrap().as_str().into(),
-                expected_old: None,
-                create: true,
-            };
+            let mut witness = RefSetReq::new("release/witness".to_owned(), head.unwrap().as_str());
+            witness.create = true;
             setup.ref_set(&who, witness).unwrap();
             drop(setup);
             // The frames so far checkpointed: no write replays the witness's move again.
@@ -3802,11 +3672,11 @@ mod tests {
                 calls().into_iter().filter(|call| call == witness).count()
             };
             assert_eq!(witness_reads(), 0, "opening the store");
-            let history = |cursor: Option<&str>, path: &str| PathHistoryReq {
-                rev: None,
-                path: path.to_owned(),
-                limit: 1,
-                cursor: cursor.map(str::to_owned),
+            let history = |cursor: Option<&str>, path: &str| {
+                let mut path_history_req = PathHistoryReq::new(path.to_owned());
+                path_history_req.limit = 1;
+                path_history_req.cursor = cursor.map(str::to_owned);
+                path_history_req
             };
             let page = ops.path_history(history(None, "src")).unwrap();
             assert_eq!(witness_reads(), 1, "path_history");
@@ -3815,12 +3685,11 @@ mod tests {
             assert_eq!(witness_reads(), 1, "path_history after a cursor");
             ops.path_history(history(None, "nothing")).unwrap_err();
             assert_eq!(witness_reads(), 1, "path_history, nothing ever there");
-            let log = LogReq {
-                rev: None,
-                limit: 1,
-                cursor: None,
-                paths: vec!["src".to_owned()],
-            };
+            let mut log = LogReq::default();
+            log.rev = None;
+            log.limit = 1;
+            log.cursor = None;
+            log.paths = vec!["src".to_owned()];
             ops.log(log).unwrap();
             assert_eq!(witness_reads(), 1, "log with paths");
         }
@@ -3834,29 +3703,17 @@ mod tests {
             let (setup, _) = LocalOps::init(&root, "acme").unwrap();
             let who = Identity::parse("agent/worker-17").unwrap();
             let commit = |parent: Option<&str>, content: &str| {
-                let req = CommitReq {
-                    parent: parent.map(Rev::from),
-                    changes: vec![ChangeInput {
-                        path: "src/f".to_owned(),
-                        op: ChangeOp::Put,
-                        content: Some(ContentInput::Inline(content.to_owned())),
-                        mode: None,
-                    }],
-                    message: "m".to_owned(),
-                    advance: Some("main".to_owned()),
-                    idempotency_key: None,
-                    allow_empty: false,
-                };
+                let mut change_input = ChangeInput::new("src/f".to_owned(), ChangeOp::Put);
+                change_input.content = Some(ContentInput::Inline(content.to_owned()));
+                let mut req = CommitReq::new(vec![change_input], "m".to_owned());
+                req.parent = parent.map(Rev::from);
+                req.advance = Some("main".to_owned());
                 setup.commit(&who, req).unwrap().changeset
             };
             let c1 = commit(None, "1");
             let c2 = commit(Some(&c1), "2");
-            let witness = RefSetReq {
-                name: "release/witness".to_owned(),
-                new: c1.as_str().into(),
-                expected_old: None,
-                create: true,
-            };
+            let mut witness = RefSetReq::new("release/witness".to_owned(), c1.as_str());
+            witness.create = true;
             setup.ref_set(&who, witness).unwrap();
             drop(setup);
             MetaStore::open(&root).unwrap().flush().unwrap();
@@ -3864,16 +3721,11 @@ mod tests {
             let (fs, calls) = RecordingFs::new();
             let ops = ops_on(&root, fs.naming_paths_in(root.clone().into_std_path_buf()));
             let resolved = Resolved::default();
-            let req = DiffReq {
-                from: "main~1".into(),
-                to: "main".into(),
-                paths: Vec::new(),
-                format: DiffFormat::Unified,
-                context: 3,
-                limit: 500,
-                cursor: None,
-                max_bytes: 32_768,
-            };
+            let mut req = DiffReq::new("main~1", "main");
+            req.format = DiffFormat::Unified;
+            req.context = 3;
+            req.limit = 500;
+            req.max_bytes = 32_768;
             let page = ops.recording(&resolved).diff(req).unwrap();
             let witness = "read meta/refs/release/witness";
             let snapshots = calls().into_iter().filter(|call| call == witness).count();
@@ -3904,14 +3756,14 @@ mod tests {
         let refs = swarmops_testkit::git::fixture("refs");
         let git_path = refs.repo.as_deref().and_then(std::path::Path::to_str);
         let git_path = git_path.expect("a repository at a UTF-8 path").to_owned();
-        let import = |git_ref: &str| GitImportReq {
-            git_path: git_path.clone(),
-            git_ref: git_ref.to_owned(),
-            target_ref: "main".to_owned(),
-            lossy: Vec::new(),
+        let import = |git_ref: &str| {
+            let mut git_import_req = GitImportReq::new(git_path.clone());
+            git_import_req.git_ref = git_ref.to_owned();
+            git_import_req.target_ref = "main".to_owned();
+            git_import_req
         };
         let older = ops.git_import(&who, import("older")).unwrap();
-        let head = ObjectId::from_hex(&older.head_changeset).map(ChangesetId);
+        let head = ObjectId::from_hex(&older.head_changeset).map(ChangesetId::new);
         let moved = ops_on(&root, failing("append_durable", "journal.off"))
             .repo
             .cas_ref("release/older", None, Some(head.unwrap()), who.agent())
@@ -3922,11 +3774,9 @@ mod tests {
         let newer = ops.recording(&resolved).git_import(&who, import("newer"));
         let newer = newer.unwrap();
         assert_eq!((newer.imported, newer.skipped), (3, 1), "{newer:?}");
-        let listed_and_written = RecoveredOut {
-            frames_listed: 1,
-            refs_replayed: 1,
-            ..RecoveredOut::default()
-        };
+        let mut listed_and_written = RecoveredOut::default();
+        listed_and_written.frames_listed = 1;
+        listed_and_written.refs_replayed = 1;
         assert_eq!(resolved.take_recovered(), Some(listed_and_written));
     }
 
@@ -3943,21 +3793,12 @@ mod tests {
         let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
         let (ops, _) = LocalOps::init(&root, "acme").unwrap();
         let who = Identity::parse("agent/worker-17").unwrap();
-        let req = CommitReq {
-            parent: None,
-            changes: vec![ChangeInput {
-                path: "src/f".to_owned(),
-                op: ChangeOp::Put,
-                content: Some(ContentInput::Inline("1".to_owned())),
-                mode: None,
-            }],
-            message: "m".to_owned(),
-            advance: Some("main".to_owned()),
-            idempotency_key: None,
-            allow_empty: false,
-        };
+        let mut change_input = ChangeInput::new("src/f".to_owned(), ChangeOp::Put);
+        change_input.content = Some(ContentInput::Inline("1".to_owned()));
+        let mut req = CommitReq::new(vec![change_input], "m".to_owned());
+        req.advance = Some("main".to_owned());
         let head = ops.commit(&who, req).unwrap().changeset;
-        let id = ObjectId::from_hex(&head).map(ChangesetId).unwrap();
+        let id = ObjectId::from_hex(&head).map(ChangesetId::new).unwrap();
         let moved = ops_on(&root, failing("append_durable", "journal.off"))
             .repo
             .cas_ref("release/x", None, Some(id), who.agent())
@@ -3966,20 +3807,18 @@ mod tests {
 
         let destination = swarmops_testkit::git::empty_repository();
         let git_path = destination.dir.to_str().expect("a UTF-8 path").to_owned();
-        let export = || GitExportReq {
-            git_path: git_path.clone(),
-            source_ref: "main".to_owned(),
-            branch: "main".to_owned(),
-            force: false,
+        let export = || {
+            let mut git_export_req = GitExportReq::new(git_path.clone());
+            git_export_req.source_ref = "main".to_owned();
+            git_export_req.branch = "main".to_owned();
+            git_export_req
         };
         let resolved = Resolved::default();
         let exported = ops.recording(&resolved).git_export(export()).unwrap();
         assert_eq!((exported.exported, exported.branch_moved), (1, true));
         assert_eq!(exported.head_changeset, head);
-        let listed = RecoveredOut {
-            frames_listed: 1,
-            ..RecoveredOut::default()
-        };
+        let mut listed = RecoveredOut::default();
+        listed.frames_listed = 1;
         assert_eq!(resolved.take_recovered(), Some(listed));
         assert_eq!(resolved.take(), BTreeMap::from([("main".to_owned(), head)]));
 
@@ -4015,19 +3854,10 @@ mod tests {
                 let mut raced = self.raced.lock().unwrap();
                 if call.method == "fsync_dir" && at.starts_with("objects") && raced.is_none() {
                     let other = Identity::parse("agent/worker-9").unwrap();
-                    let req = CommitReq {
-                        parent: None,
-                        changes: vec![ChangeInput {
-                            path: "race".to_owned(),
-                            op: ChangeOp::Put,
-                            content: Some(ContentInput::Inline("theirs\n".to_owned())),
-                            mode: None,
-                        }],
-                        message: "a race".to_owned(),
-                        advance: Some("main".to_owned()),
-                        idempotency_key: None,
-                        allow_empty: false,
-                    };
+                    let mut change = ChangeInput::new("race".to_owned(), ChangeOp::Put);
+                    change.content = Some(ContentInput::Inline("theirs\n".to_owned()));
+                    let mut req = CommitReq::new(vec![change], "a race".to_owned());
+                    req.advance = Some("main".to_owned());
                     let won = LocalOps::open(&self.root).unwrap().commit(&other, req);
                     *raced = Some(won.unwrap().changeset);
                 }
@@ -4040,19 +3870,11 @@ mod tests {
         let (ops, _) = LocalOps::init(&root, "acme").unwrap();
         let who = Identity::parse("agent/worker-17").unwrap();
         let commit = |parent: Option<&str>, path: &str, advance: Option<&str>| {
-            let req = CommitReq {
-                parent: parent.map(Rev::from),
-                changes: vec![ChangeInput {
-                    path: path.to_owned(),
-                    op: ChangeOp::Put,
-                    content: Some(ContentInput::Inline("ours\n".to_owned())),
-                    mode: None,
-                }],
-                message: path.to_owned(),
-                advance: advance.map(str::to_owned),
-                idempotency_key: None,
-                allow_empty: false,
-            };
+            let mut change = ChangeInput::new(path.to_owned(), ChangeOp::Put);
+            change.content = Some(ContentInput::Inline("ours\n".to_owned()));
+            let mut req = CommitReq::new(vec![change], path.to_owned());
+            req.parent = parent.map(Rev::from);
+            req.advance = advance.map(str::to_owned);
             ops.commit(&who, req).unwrap().changeset
         };
         let t0 = commit(None, "base", Some("main"));
@@ -4061,18 +3883,15 @@ mod tests {
             root: root.clone(),
             raced: Mutex::new(None),
         });
-        let racing = ops_on(&root, Watched(Arc::clone(&race), RealFs));
+        let racing = ops_on(&root, Watched(Arc::clone(&race), RealFs::new()));
         let land: LandReq =
             serde_json::from_value(json!({"head": head, "max_attempts": 1})).unwrap();
         let frames = || {
-            ops.op_log(OpLogReq {
-                before: None,
-                limit: 1,
-                max_changesets: 1,
-            })
-            .unwrap()
-            .ops[0]
-                .op
+            let mut op_log_req = OpLogReq::default();
+            op_log_req.before = None;
+            op_log_req.limit = 1;
+            op_log_req.max_changesets = 1;
+            ops.op_log(op_log_req).unwrap().ops[0].op
         };
         let before = frames();
 
@@ -4091,7 +3910,7 @@ mod tests {
             error.hint.as_deref(),
             Some("run the land again: nothing of this one was recorded")
         );
-        let main = || ops.repo_info(InfoReq {}).unwrap().main;
+        let main = || ops.repo_info(InfoReq::default()).unwrap().main;
         assert_eq!(main().as_deref(), Some(actual.as_str()));
         assert_eq!(frames(), before + 1, "the race's frame alone");
 
@@ -4153,19 +3972,11 @@ mod tests {
             path: &str,
             advance: Option<&str>,
         ) -> String {
-            let req = CommitReq {
-                parent: parent.map(Rev::from),
-                changes: vec![ChangeInput {
-                    path: path.to_owned(),
-                    op: ChangeOp::Put,
-                    content: Some(ContentInput::Inline(format!("{path}\n"))),
-                    mode: None,
-                }],
-                message: path.to_owned(),
-                advance: advance.map(str::to_owned),
-                idempotency_key: None,
-                allow_empty: false,
-            };
+            let mut change_input = ChangeInput::new(path.to_owned(), ChangeOp::Put);
+            change_input.content = Some(ContentInput::Inline(format!("{path}\n")));
+            let mut req = CommitReq::new(vec![change_input], path.to_owned());
+            req.parent = parent.map(Rev::from);
+            req.advance = advance.map(str::to_owned);
             ops.commit(who, req).unwrap().changeset
         }
 
@@ -4181,10 +3992,8 @@ mod tests {
 
         /// `show` of `id`.
         fn show(ops: &LocalOps, id: &str) -> ChangesetDetail {
-            let req = ShowReq {
-                rev: Rev::from(id),
-                max_changes: 10,
-            };
+            let mut req = ShowReq::new(Rev::from(id));
+            req.max_changes = 10;
             ops.show(req).unwrap()
         }
 
@@ -4209,7 +4018,7 @@ mod tests {
             );
             assert_eq!((shown.lander, shown.land_key), (None, None));
             assert_eq!(shown.squashed_from, [head]);
-            let main = || ops.repo_info(InfoReq {}).unwrap().main;
+            let main = || ops.repo_info(InfoReq::default()).unwrap().main;
             assert_eq!(main(), Some(t1.clone()));
 
             // 2. The exact land.
@@ -4262,19 +4071,10 @@ mod tests {
         fn a_rebase_that_conflicts_reports_as_a_land_does() {
             // The change adds `c` with other content than main's `c` on t1.
             let (_dir, _root, ops, who, [t0, _, _]) = moved_on();
-            let edit = CommitReq {
-                parent: Some(Rev::from(t0.as_str())),
-                changes: vec![ChangeInput {
-                    path: "c".to_owned(),
-                    op: ChangeOp::Put,
-                    content: Some(ContentInput::Inline("ours\n".to_owned())),
-                    mode: None,
-                }],
-                message: "ours".to_owned(),
-                advance: None,
-                idempotency_key: None,
-                allow_empty: false,
-            };
+            let mut change_input = ChangeInput::new("c".to_owned(), ChangeOp::Put);
+            change_input.content = Some(ContentInput::Inline("ours\n".to_owned()));
+            let mut edit = CommitReq::new(vec![change_input], "ours".to_owned());
+            edit.parent = Some(Rev::from(t0.as_str()));
             let head = ops.commit(&who, edit).unwrap().changeset;
 
             let rebased = ops.rebase(&who, rebase(json!({"head": head}))).unwrap_err();
@@ -4302,7 +4102,7 @@ mod tests {
             );
             let want = json!({"name": "main", "actual": t1, "expected": t0, "committed": false});
             assert_eq!(Value::Object(error.details.clone()), want);
-            assert_eq!(ops.repo_info(InfoReq {}).unwrap().main, Some(t1));
+            assert_eq!(ops.repo_info(InfoReq::default()).unwrap().main, Some(t1));
         }
 
         /// Moves main once, as another lander would, at the land's first flush of objects
@@ -4337,13 +4137,13 @@ mod tests {
                 root: root.clone(),
                 raced: Mutex::new(None),
             });
-            let racing = ops_on(&root, Watched(std::sync::Arc::clone(&race), RealFs));
+            let racing = ops_on(&root, Watched(std::sync::Arc::clone(&race), RealFs::new()));
             let frames = || {
-                let page = ops.op_log(OpLogReq {
-                    before: None,
-                    limit: 1,
-                    max_changesets: 1,
-                });
+                let mut op_log_req = OpLogReq::default();
+                op_log_req.before = None;
+                op_log_req.limit = 1;
+                op_log_req.max_changesets = 1;
+                let page = ops.op_log(op_log_req);
                 page.unwrap().ops[0].op
             };
             let before = frames();

@@ -547,12 +547,9 @@ mod tests {
 
     /// A put of `content` at `path`.
     fn put(path: &str, content: ContentInput) -> ChangeInput {
-        ChangeInput {
-            path: path.to_owned(),
-            op: ChangeOp::Put,
-            content: Some(content),
-            mode: None,
-        }
+        let mut change_input = ChangeInput::new(path.to_owned(), ChangeOp::Put);
+        change_input.content = Some(content);
+        change_input
     }
 
     fn inline(text: &str) -> ContentInput {
