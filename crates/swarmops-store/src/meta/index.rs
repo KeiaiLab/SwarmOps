@@ -39,6 +39,7 @@
 //! included: [`Index::truncate_to`] says which lookups then fail.
 
 use std::num::NonZero;
+use std::ops::ControlFlow;
 use std::panic;
 use std::sync::Arc;
 use std::thread;
@@ -47,6 +48,7 @@ use std::{fmt, io};
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, ObjectId, bytes};
 
+use super::MAX_LOOKUP_HITS;
 use super::column::AppendOnlyColumn;
 use super::frame::{Frame, Record};
 use super::journal::Journal;
@@ -97,6 +99,25 @@ impl ChangesetMeta {
             delta_hash,
             parents,
         }
+    }
+}
+
+/// What a lookup by id prefix or by delta hash found ([`Index::find_prefix_hits`],
+/// [`Index::find_delta_hash_hits`]): the recs, ascending, of at most 4,096 matching records
+/// (`MAX_LOOKUP_HITS`), and whether more matched than that.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LookupHits {
+    /// The recs found, ascending.
+    pub recs: Vec<u64>,
+    /// Whether records past those in `recs` match too: the answer was cut at the cap.
+    pub truncated: bool,
+}
+
+impl LookupHits {
+    /// The hits `recs`, `truncated` saying whether more matched.
+    pub fn new(recs: Vec<u64>, truncated: bool) -> LookupHits {
+        LookupHits { recs, truncated }
     }
 }
 
@@ -315,6 +336,26 @@ impl Index {
     /// The sorted view by delta hash.
     pub fn dh_view(&self) -> &SortedView<32> {
         &self.views.dh
+    }
+
+    /// The most entries one read of an index file has taken through this handle: of a column,
+    /// of a sorted view this handle holds ([`SortedView::widest_read`]), or parent ids of
+    /// `parents.log`. A diagnostic, as [`SortedView::probes`] is: no open, lookup or compaction
+    /// reads more than 4,096 entries (`READ_WINDOW`) at once, whatever the files' lengths, but
+    /// the parents of one record (at most 255) in one read.
+    pub fn widest_read(&self) -> u64 {
+        [
+            self.ids.widest(),
+            self.gens.widest(),
+            self.dhs.widest(),
+            self.pars.widest(),
+            self.parents.widest() / PARENT_LEN,
+            self.views.ids.widest_read(),
+            self.views.dh.widest_read(),
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0)
     }
 
     /// Appends `meta` as the next record and returns its rec (`meta.seq` is ignored):
@@ -574,11 +615,12 @@ impl Index {
     /// The rec of changeset `id`, if the index holds it: a search of the id view's key
     /// column (one `read_at` per probe), which keeps the key it read at the bound it
     /// returns, so that no key is read twice ([`SortedView::lower_bound`]); then, if the view
-    /// lacks it, a scan of the tail of `ids.col`, read with one `read_at`. The rec the view
-    /// names is checked before it is returned, with one more `read_at`: the view must cover it
-    /// (a view of m entries holds the recs `[0, m)`), and `ids.col` must hold `id` there, or the
-    /// view's entry names another changeset's record, as a damaged or crafted `.rec` file makes
-    /// it do; [`StoreError::IndexCorrupt`] either way, never another changeset's rec.
+    /// lacks it, a scan of the tail of `ids.col`, one `read_at` per 4,096 ids, up to the first
+    /// that is `id`. The rec the view names is checked before it is returned, with one more
+    /// `read_at`: the view must cover it (a view of m entries holds the recs `[0, m)`), and
+    /// `ids.col` must hold `id` there, or the view's entry names another changeset's record, as a
+    /// damaged or crafted `.rec` file makes it do; [`StoreError::IndexCorrupt`] either way, never
+    /// another changeset's rec.
     pub fn find(&self, id: ChangesetId) -> Result<Option<u64>, StoreError> {
         let key = id.0.0;
         let view = &self.views.ids;
@@ -588,22 +630,27 @@ impl Index {
             let rec = covered_by(view, view.rec_at(at)?)?;
             return holding(&self.ids, rec, |held| *held == key).map(Some);
         }
-        let from = view.len();
-        let tail = self.ids.entries(from, self.len)?;
-        Ok(tail
-            .as_chunks::<32>()
-            .0
-            .iter()
-            .position(|probe| *probe == key)
-            .map(|i| from + bytes::to_u64(i)))
+        // The tail, a window at a time: no read takes more than READ_WINDOW ids.
+        self.ids.scan(view.len(), self.len, |first, probes| {
+            match probes.iter().position(|probe| *probe == key) {
+                Some(i) => ControlFlow::Break(first + bytes::to_u64(i)),
+                None => ControlFlow::Continue(()),
+            }
+        })
     }
 
     /// The recs, ascending, of the changesets whose ids start with `prefix_nibbles`, 1 to 64
     /// hex digits of either case; an odd count compares the last digit with the high half of
-    /// its byte. Anything else is [`StoreError::BadPrefix`]. A lower-bound search of the id
-    /// view, a forward scan of its keys while they match, one read of their recs, and a scan
-    /// of the tail of `ids.col`.
+    /// its byte. Anything else is [`StoreError::BadPrefix`]. At most 4,096 of them
+    /// (`MAX_LOOKUP_HITS`): [`Index::find_prefix_hits`] says whether more matched.
     pub fn find_prefix(&self, prefix_nibbles: &str) -> Result<Vec<u64>, StoreError> {
+        self.find_prefix_hits(prefix_nibbles).map(|hits| hits.recs)
+    }
+
+    /// [`Index::find_prefix`], saying whether the answer was cut at 4,096 recs. A lower-bound
+    /// search of the id view, a forward scan of its keys while they match, one read of their
+    /// recs, and a scan of the tail of `ids.col`, each read of at most 4,096 entries.
+    pub fn find_prefix_hits(&self, prefix_nibbles: &str) -> Result<LookupHits, StoreError> {
         let prefix = Prefix::parse(prefix_nibbles)?;
         self.find_all(&self.views.ids, &self.ids, &prefix.low, |key| {
             prefix.matches(key)
@@ -613,29 +660,40 @@ impl Index {
     /// The recs, ascending, of the changesets whose delta hash is `dh`: changesets that make
     /// the same change on different bases, as a rebase does onto an upstream that left the files
     /// the change touches alone (a delta's put names the file's blob after the change, so an
-    /// upstream edit elsewhere in that file changes the hash). Searched like
-    /// [`Index::find_prefix`], in the delta-hash view and the tail of `dh.col`.
+    /// upstream edit elsewhere in that file changes the hash). At most 4,096 of them, as for
+    /// [`Index::find_prefix`]: [`Index::find_delta_hash_hits`] says whether more matched.
     pub fn find_delta_hash(&self, dh: &[u8; 32]) -> Result<Vec<u64>, StoreError> {
+        self.find_delta_hash_hits(dh).map(|hits| hits.recs)
+    }
+
+    /// [`Index::find_delta_hash`], saying whether the answer was cut at 4,096 recs. Searched like
+    /// [`Index::find_prefix_hits`], in the delta-hash view and the tail of `dh.col`.
+    pub fn find_delta_hash_hits(&self, dh: &[u8; 32]) -> Result<LookupHits, StoreError> {
         self.find_all(&self.views.dh, &self.dhs, dh, |key| key == dh)
     }
 
-    /// The recs, ascending, of the records whose key `matches` accepts, the keys it accepts
-    /// being a run in key order that starts at `low` or after it: that run of `view`, from a
-    /// lower-bound search, one read of its recs, and a scan of the tail of `column`. Each rec of
-    /// the run is checked against what the view covers ([`covered_by`]) and against `column`,
-    /// one `read_at` each, which must hold a key `matches` accepts there ([`holding`]); and no
-    /// rec may come twice, since a view names each record it covers once:
-    /// [`StoreError::IndexCorrupt`] otherwise.
+    /// The recs, ascending, of up to [`MAX_LOOKUP_HITS`] records whose key `matches` accepts,
+    /// the keys it accepts being a run in key order that starts at `low` or after it: that run of
+    /// `view`, from a lower-bound search, one read of its recs, and a scan of the tail of
+    /// `column`, a window at a time. Each rec of the run is checked against what the view covers
+    /// ([`covered_by`]) and against `column`, one `read_at` each, which must hold a key `matches`
+    /// accepts there ([`holding`]); and no rec may come twice, since a view names each record it
+    /// covers once: [`StoreError::IndexCorrupt`] otherwise. More matches than the cap cut the
+    /// answer, and it says so: the view's first in key order are kept, then the tail's in rec
+    /// order, and the tail is not read once the view's run fills the cap.
     fn find_all(
         &self,
         view: &SortedView<32>,
         column: &AppendOnlyColumn<32>,
         low: &[u8; 32],
         matches: impl Fn(&[u8; 32]) -> bool,
-    ) -> Result<Vec<u64>, StoreError> {
+    ) -> Result<LookupHits, StoreError> {
+        // 1. The view's run, read one key past the cap: a longer run is cut there.
+        let cap = bytes::to_u64(MAX_LOOKUP_HITS);
         let start = view.lower_bound(low)?;
-        let end = view.run_end(start, &matches)?;
-        let mut recs = view.recs(start..end)?;
+        let end = view.run_end(start, cap + 1, &matches)?;
+        let kept = (end - start).min(cap);
+        let mut recs = view.recs(start..start + kept)?;
         for &rec in &recs {
             holding(column, covered_by(view, rec)?, &matches)?;
         }
@@ -645,16 +703,25 @@ impl Index {
                 what: "a sorted view names a record twice",
             });
         }
-        // The tail's recs follow in order: the view's lie below its end, theirs at or past it.
-        let from = view.len();
-        let tail = column.entries(from, self.len)?;
-        recs.extend(
-            (from..)
-                .zip(tail.as_chunks::<32>().0)
-                .filter(|(_, key)| matches(key))
-                .map(|(rec, _)| rec),
-        );
-        Ok(recs)
+        if end - start > kept {
+            return Ok(LookupHits::new(recs, true));
+        }
+
+        // 2. The tail's recs follow in order (the view's lie below its end, theirs at or past
+        //    it), until a match finds the cap full.
+        let cut = column.scan(view.len(), self.len, |first, keys| {
+            for (rec, key) in (first..).zip(keys) {
+                if !matches(key) {
+                    continue;
+                }
+                if recs.len() == MAX_LOOKUP_HITS {
+                    return ControlFlow::Break(());
+                }
+                recs.push(rec);
+            }
+            ControlFlow::Continue(())
+        })?;
+        Ok(LookupHits::new(recs, cut.is_some()))
     }
 
     /// Merges the unsorted tail into both sorted views, so that they cover every record, and
@@ -745,10 +812,12 @@ impl Index {
     ///
     /// Another handle that counted records cut, opened before the cut (a reader's snapshot,
     /// verify), then fails with an I/O error (`UnexpectedEof`), never with wrong data: on
-    /// [`Index::get`] of a record cut, on every [`Index::find`] that its sorted view misses (the
-    /// scan of the tail reads past the new end), and on every [`Index::find_prefix`] and
-    /// [`Index::find_delta_hash`]. A [`crate::MetaStore::read`] whose handle opened before the
-    /// cut fails the same way while it builds its snapshot. A handle opened after the cut, and
+    /// [`Index::get`] of a record cut, on every [`Index::find`] that its sorted view misses and
+    /// whose id the tail does not hold in a window of 4,096 before the cut (the scan of the tail
+    /// reads past the new end), and on every [`Index::find_prefix`] and
+    /// [`Index::find_delta_hash`] that the cap does not cut within the view. A
+    /// [`crate::MetaStore::read`] whose handle opened before the cut fails the same way while it
+    /// builds its snapshot. A handle opened after the cut, and
     /// so a new snapshot, reads the index as cut, the journal's frames over it. A handle that
     /// opens while the cut is made, its files measured before it and read after, counts every
     /// record the checkpoint passed or the sorted views cover, which the cut keeps, and of the
@@ -1156,27 +1225,31 @@ impl Index {
             return Ok(records);
         }
         let from = trusted.saturating_sub(1);
-        let entries = held_entries(&self.pars, from, records)?;
-        let entries = entries.as_chunks::<8>().0;
-        // What the cut keeps: the records par.col holds, bounded by ids.col measured after it.
-        let ids = AppendOnlyColumn::<32>::whole(self.ids.len()?);
-        let held = (from + bytes::to_u64(entries.len())).min(ids);
-        let checked = usize::try_from(held.saturating_sub(from)).unwrap_or(usize::MAX);
-        let mut ats = (entries.iter().take(checked))
-            .map(|entry| ParentsAt::from_entry(u64::from_le_bytes(*entry)));
-        // Where the record before the first one checked leaves off: at 0 before record 0.
-        let mut next = match trusted {
-            0 => 0,
-            _ => ats.next().map_or(0, ParentsAt::end),
-        };
-        for at in ats {
-            if at.offset != next {
-                return Err(StoreError::IndexCorrupt {
-                    what: "a record's parents do not start where the record before it leaves off \
-                           in parents.log",
-                });
+
+        // 1. The entries, a window at a time, noting the first out of layout. Where the record
+        //    before the first one checked leaves off: at 0 before record 0, else the first
+        //    entry read says.
+        let mut next = (trusted == 0).then_some(0);
+        let mut bad = None;
+        let end = held_scan(&self.pars, from, records, |first, entries| {
+            for (rec, entry) in (first..).zip(entries) {
+                let at = ParentsAt::from_entry(u64::from_le_bytes(*entry));
+                if next.is_some_and(|next| at.offset != next) {
+                    bad.get_or_insert(rec);
+                }
+                next = Some(at.end());
             }
-            next = at.end();
+        })?;
+
+        // 2. What the cut keeps: the records par.col holds, bounded by ids.col measured after
+        //    it. Only an entry out of layout among them is damage.
+        let ids = AppendOnlyColumn::<32>::whole(self.ids.len()?);
+        let held = end.min(ids);
+        if bad.is_some_and(|bad| bad < held) {
+            return Err(StoreError::IndexCorrupt {
+                what: "a record's parents do not start where the record before it leaves off \
+                       in parents.log",
+            });
         }
         Ok(held)
     }
@@ -1291,6 +1364,35 @@ fn held_entries<const W: usize>(
             column.entries(from.min(held), held)
         }
         read => read,
+    }
+}
+
+/// [`held_entries`], a window at a time ([`AppendOnlyColumn::scan`]), for ranges too long to
+/// hold: visits the entries `[from, to)` that `column` holds, and returns where they end. `to`,
+/// or, if the file is shorter now than when it was measured, its end, measured again once a
+/// window reads past it (one more `fstat`, and a `read_at` of what that window still holds).
+fn held_scan<const W: usize>(
+    column: &AppendOnlyColumn<W>,
+    from: u64,
+    to: u64,
+    mut visit: impl FnMut(u64, &[[u8; W]]),
+) -> Result<u64, StoreError> {
+    let mut next = from;
+    let scanned = column.scan(from, to, |first, entries| {
+        visit(first, entries);
+        next = first + bytes::to_u64(entries.len());
+        ControlFlow::<()>::Continue(())
+    });
+    match scanned {
+        Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
+            let held = AppendOnlyColumn::<W>::whole(column.len()?).min(to);
+            column.scan(next.min(held), held, |first, entries| {
+                visit(first, entries);
+                ControlFlow::<()>::Continue(())
+            })?;
+            Ok(held)
+        }
+        scanned => scanned.map(|_| to),
     }
 }
 

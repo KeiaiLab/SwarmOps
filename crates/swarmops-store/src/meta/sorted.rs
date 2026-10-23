@@ -54,6 +54,8 @@ pub struct SortedView<const K: usize> {
     len: u64,
     probes: AtomicU64,
     rec_reads: AtomicU64,
+    /// The most entries one read of either file has taken: [`SortedView::widest_read`].
+    widest: AtomicU64,
 }
 
 /// The two files of a view that holds entries, read-only, with their paths and what locates a
@@ -87,6 +89,7 @@ impl<const K: usize> SortedView<K> {
             len: 0,
             probes: AtomicU64::new(0),
             rec_reads: AtomicU64::new(0),
+            widest: AtomicU64::new(0),
         }
     }
 
@@ -107,6 +110,7 @@ impl<const K: usize> SortedView<K> {
                 len,
                 probes: AtomicU64::new(0),
                 rec_reads: AtomicU64::new(0),
+                widest: AtomicU64::new(0),
             }
         } else {
             Self::empty()
@@ -218,17 +222,26 @@ impl<const K: usize> SortedView<K> {
         self.rec_reads.load(Ordering::Relaxed)
     }
 
+    /// The most entries one read of the key file or the rec file has taken since the view was
+    /// opened: a lookup reads at most 4,096 of them (`READ_WINDOW`) at once.
+    pub fn widest_read(&self) -> u64 {
+        self.widest.load(Ordering::Relaxed)
+    }
+
     /// Where the run of keys from `start` on that `matches` accepts ends: the index of the
-    /// first key from `start` on that it rejects, or `len()`. Reads 64 keys per `read_at`.
+    /// first key from `start` on that it rejects, or `len()`, or `start + max`, whichever comes
+    /// first. Reads 64 keys per `read_at`.
     pub(crate) fn run_end(
         &self,
         start: u64,
+        max: u64,
         mut matches: impl FnMut(&[u8; K]) -> bool,
     ) -> Result<u64, StoreError> {
         let mut buf = Vec::new();
         let mut at = start;
-        while at < self.len {
-            let count = entries_from(at, self.len, RUN_BLOCK);
+        let end = start.saturating_add(max).min(self.len);
+        while at < end {
+            let count = entries_from(at, end, RUN_BLOCK);
             buf.resize(count * K, 0);
             self.read_keys(at, &mut buf)?;
             if let Some(stop) = buf.as_chunks::<K>().0.iter().position(|key| !matches(key)) {
@@ -268,6 +281,8 @@ impl<const K: usize> SortedView<K> {
     fn read_keys(&self, first: u64, buf: &mut [u8]) -> Result<(), StoreError> {
         let files = self.files_for(first, buf.len() / K)?;
         self.probes.fetch_add(1, Ordering::Relaxed);
+        self.widest
+            .fetch_max(bytes::to_u64(buf.len() / K), Ordering::Relaxed);
         (files.keys.read_exact_at(buf, first * bytes::to_u64(K)))
             .map_err(|e| files.keys_failed(e))?;
         Ok(())
@@ -278,6 +293,8 @@ impl<const K: usize> SortedView<K> {
     fn read_recs(&self, first: u64, buf: &mut [u8]) -> Result<(), StoreError> {
         let files = self.files_for(first, buf.len() / REC_LEN)?;
         self.rec_reads.fetch_add(1, Ordering::Relaxed);
+        self.widest
+            .fetch_max(bytes::to_u64(buf.len() / REC_LEN), Ordering::Relaxed);
         (files
             .recs
             .read_exact_at(buf, first * bytes::to_u64(REC_LEN)))

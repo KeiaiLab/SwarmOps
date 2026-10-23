@@ -2125,3 +2125,255 @@ fn crash_at_any_index_write_recovers_to_whole_records() {
         assert_eq!(after.find_delta_hash(&[2; 32]).unwrap(), [2, 5], "k={k}");
     }
 }
+
+/// The most entries one read of an index file may take: the store's `READ_WINDOW` (the M6
+/// design §5).
+const READ_WINDOW: u64 = 4_096;
+
+/// The most recs a lookup by id prefix or delta hash returns: the store's `MAX_LOOKUP_HITS`.
+const LOOKUP_HITS: usize = 4_096;
+
+/// Asserts that no read of `index`'s files has taken more than [`READ_WINDOW`] entries.
+#[track_caller]
+fn assert_windowed(index: &Index, what: &str) {
+    let widest = index.widest_read();
+    assert!(
+        widest <= READ_WINDOW,
+        "{what}: a read of {widest} entries, past the window of {READ_WINDOW}"
+    );
+}
+
+/// The process's peak resident memory, in KiB: `VmHWM` of `/proc/self/status` on Linux (nextest
+/// runs each test in a process of its own); 0 elsewhere, where the check that uses it checks
+/// nothing.
+fn peak_resident_kib() -> u64 {
+    let status = fs::read_to_string("/proc/self/status").unwrap_or_default();
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmHWM:"))
+        .and_then(|kib| kib.trim().trim_end_matches("kB").trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// A column padded to 4 GiB: no read takes more than a window, and nothing the size of a
+/// column is held, the peak resident memory growing by less than a quarter of par.col's 1 GiB,
+/// where one read of it, or of the tail of ids.col, would hold all of it.
+#[test]
+fn a_column_padded_to_4_gib_opens_and_answers_in_windows() {
+    // Three records compacted into the views, then every column padded with zeros, sparse, to
+    // 2^27 records: ids.col and dh.col are 4 GiB. With no journal to vouch for them, an open
+    // counts them by their lengths, and zeroed par.col entries keep the layout (no parents).
+    // Record 3, the first past the views, gets an id of its own.
+    const PADDED: u64 = 1 << 27;
+    const MAX_GROWTH_KIB: u64 = 256 << 10;
+    let (_root, layout) = new_root();
+    let mut index = open(&layout);
+    let metas = [1, 2, 3].map(|n| meta(id_of(n), 1, [n; 32], vec![]));
+    append_all(&mut index, &metas);
+    index.compact().unwrap();
+    for (rel, width) in &COLUMNS[1..] {
+        set_len(layout.meta_path(rel), PADDED * width);
+    }
+    assert_eq!(file_len(layout.meta_path("idx/ids.col")), 4 << 30);
+    write_at(layout.meta_path("idx/ids.col"), 3 * 32, &id_of(7).0.0);
+    let before = peak_resident_kib();
+
+    // 1. The open checks every par.col entry, a window at a time.
+    let padded = open(&layout);
+    assert_eq!(padded.len(), PADDED);
+    assert_windowed(&padded, "open");
+
+    // 2. Lookups: from the views, and cut at the cap in the tail. (A scan of the whole tail,
+    //    as a miss makes, takes as long as the open again: `lookups_cut_at_the_cap_and_say_so`
+    //    windows one.)
+    assert_eq!(padded.find(id_of(2)).unwrap(), Some(1), "from the view");
+    assert_eq!(
+        padded.find(id_of(7)).unwrap(),
+        Some(3),
+        "in the tail's first window"
+    );
+    let zeros: Vec<u64> = (4..).take(LOOKUP_HITS).collect();
+    let by_prefix = padded.find_prefix_hits("00").unwrap();
+    assert_eq!((by_prefix.recs, by_prefix.truncated), (zeros.clone(), true));
+    let by_dh = padded.find_delta_hash_hits(&[0; 32]).unwrap();
+    let zero_dh: Vec<u64> = (3..).take(LOOKUP_HITS).collect();
+    assert_eq!((by_dh.recs, by_dh.truncated), (zero_dh, true));
+    let last = meta(cs([0; 32]), 0, [0; 32], vec![]);
+    assert_eq!(padded.get(PADDED - 1).unwrap(), at_seq(&last, PADDED - 1));
+    assert_windowed(&padded, "lookups");
+    let growth = peak_resident_kib().saturating_sub(before);
+    assert!(
+        growth < MAX_GROWTH_KIB,
+        "the peak resident memory grew by {growth} KiB"
+    );
+}
+
+/// Writes `bytes` into the existing file at `path` at byte `offset`.
+fn write_at(path: impl AsRef<std::path::Path>, offset: u64, bytes: &[u8]) {
+    use std::os::unix::fs::FileExt as _;
+
+    let file = fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.write_all_at(bytes, offset).unwrap();
+}
+
+/// How many records [`lookups_cut_at_the_cap_and_say_so`] puts in the sorted views, and how
+/// many after them in the tail; every one matches.
+const SPLITS: [(u64, u64); 7] = [
+    (5_000, 0),
+    (0, 5_000),
+    (3_000, 2_000),
+    (4_096, 0),
+    (0, 4_096),
+    (2_000, 2_096),
+    (2_000, 2_097),
+];
+
+#[test]
+fn lookups_cut_at_the_cap_and_say_so() {
+    // Ids sharing the prefix abcdef and one delta hash, among two that match neither.
+    let shared = [0xab, 0xcd, 0xef];
+    let change = [0xc1; 32];
+    let matching = |n: u64| meta(id_with_prefix(&shared, 0x10, n), 1, change, vec![]);
+    for (in_view, in_tail) in SPLITS {
+        let what = format!("{in_view} in the views, {in_tail} in the tail");
+        let total = in_view + in_tail;
+        let (_root, layout) = new_root();
+        let mut index = open(&layout);
+        let view: Vec<ChangesetMeta> = (0..in_view).map(matching).collect();
+        let tail: Vec<ChangesetMeta> = (in_view..total).map(matching).collect();
+        let others = [spread_meta(total), spread_meta(total + 1)];
+        index.append_batch(&view).unwrap();
+        index.append_batch(&others).unwrap();
+        index.compact().unwrap();
+        index.append_batch(&tail).unwrap();
+        index.sync().unwrap();
+        assert_windowed(&index, &format!("{what}: the compaction"));
+
+        // Every answer holds the cap's worth of distinct matches, ascending, and says whether
+        // more matched; the lookups without the flag give the same recs.
+        let want_len = usize::try_from(total).unwrap().min(LOOKUP_HITS);
+        let cut = usize::try_from(total).unwrap() > LOOKUP_HITS;
+        let reopened = open(&layout);
+        for handle in [&index, &reopened] {
+            let by_prefix = handle.find_prefix_hits("abcdef").unwrap();
+            let by_dh = handle.find_delta_hash_hits(&change).unwrap();
+            for (how, hits) in [("prefix", &by_prefix), ("delta hash", &by_dh)] {
+                assert_eq!(
+                    (hits.recs.len(), hits.truncated),
+                    (want_len, cut),
+                    "{what}: {how}"
+                );
+                assert!(hits.recs.is_sorted(), "{what}: {how}");
+                assert!(hits.recs.windows(2).all(|pair| pair[0] < pair[1]), "{what}");
+                for &rec in &hits.recs {
+                    let got = handle.get(rec).unwrap();
+                    assert_eq!(got.id.0.0[..3], shared, "{what}: {how}, rec {rec}");
+                }
+            }
+            assert_eq!(
+                handle.find_prefix("abcdef").unwrap(),
+                by_prefix.recs,
+                "{what}"
+            );
+            assert_eq!(
+                handle.find_delta_hash(&change).unwrap(),
+                by_dh.recs,
+                "{what}"
+            );
+
+            // A run past the cap: its keys are read to one past the cap, 64 per read after the
+            // search, and its recs in one read of a window.
+            if in_view > to_u64(LOOKUP_HITS) {
+                let view = handle.ids_view();
+                let mut low = [0; 32];
+                low[..3].copy_from_slice(&shared);
+                let probes = view.probes();
+                view.lower_bound(&low).unwrap();
+                let search = view.probes() - probes;
+                handle.find_prefix_hits("abcdef").unwrap();
+                let run = (to_u64(LOOKUP_HITS) + 1).div_ceil(64);
+                assert_eq!(view.probes() - probes, 2 * search + run, "{what}");
+                assert_eq!(view.widest_read(), READ_WINDOW, "{what}");
+            }
+
+            // The view's run fills the cap first, then the tail's recs, in order.
+            if in_view <= to_u64(LOOKUP_HITS) {
+                let mut want: Vec<u64> = (0..in_view).collect();
+                want.extend((in_view + 2..).take(want_len - want.len()));
+                assert_eq!(by_prefix.recs, want, "{what}");
+                assert_eq!(by_dh.recs, want, "{what}");
+            }
+            assert_eq!(handle.find(spread_id(total + 2)).unwrap(), None, "{what}");
+            assert_windowed(handle, &what);
+        }
+    }
+}
+
+#[test]
+fn vouching_for_a_long_tail_reads_in_windows() {
+    use swarmops_store::{Journal, MetaLock, Record};
+    use swarmops_testkit::store::temp_dir;
+
+    // 5,000 changesets past the checkpoint in one journal frame, and as many records in the
+    // index: an open vouches for them against the frame, reading the columns a window at a
+    // time.
+    let (_dir, root) = temp_dir();
+    let layout = Layout::new(&root);
+    MetaStore::create_with_fs(&root, Arc::new(NoSyncFs)).unwrap();
+    let metas: Vec<ChangesetMeta> = (0..5_000).map(spread_meta).collect();
+    {
+        let _lock = MetaLock::acquire(&layout, Duration::from_secs(10)).unwrap();
+        let records: Vec<Record> = (metas.iter())
+            .map(|meta| Record::Changeset {
+                id: meta.id,
+                generation: meta.generation,
+                delta_hash: meta.delta_hash,
+                parents: meta.parents.clone(),
+            })
+            .collect();
+        Journal::open(&layout, real_fs())
+            .unwrap()
+            .append_frame(&records)
+            .unwrap();
+        let mut index = open(&layout);
+        index.append_batch(&metas).unwrap();
+        index.sync().unwrap();
+    }
+    let vouched = open(&layout);
+    assert_eq!(vouched.len(), 5_000, "every record vouched for");
+    assert_eq!(
+        vouched.widest_read(),
+        READ_WINDOW,
+        "the first window of each column"
+    );
+}
+
+#[test]
+fn resolve_prefix_past_the_cap_is_still_ambiguous() {
+    use swarmops_testkit::store::temp_dir;
+
+    // 5,000 changesets sharing a 12-hex prefix: the answer is cut at the cap, and still holds
+    // more than one id, which is what makes a prefix ambiguous.
+    let shared = [0xab, 0xcd, 0xef, 0x01, 0x23, 0x45];
+    let (_dir, root) = temp_dir();
+    let store = MetaStore::create_with_fs(&root, Arc::new(NoSyncFs)).unwrap();
+    let mut write = store.write().unwrap();
+    for n in 0..5_000 {
+        let id = id_with_prefix(&shared, 0x10, n);
+        write
+            .insert_changeset(meta(id, 1, [0; 32], vec![]))
+            .unwrap();
+    }
+    write.commit().unwrap();
+    let found = store
+        .read()
+        .unwrap()
+        .resolve_prefix("abcdef012345")
+        .unwrap();
+    assert_eq!(found.len(), LOOKUP_HITS);
+    assert!(
+        found
+            .iter()
+            .all(|id| id.0.to_hex().starts_with("abcdef012345"))
+    );
+}

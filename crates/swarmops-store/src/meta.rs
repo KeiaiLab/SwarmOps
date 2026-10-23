@@ -46,12 +46,10 @@ pub mod upgrade;
 
 /// How many entries of `journal.off`, an index column or a sorted view a bounded read takes at
 /// once (the M6 design §5): no read allocates by a file's length.
-#[allow(dead_code, reason = "the bounded reads (the M6 plan's E1, E2) use it")]
 pub(crate) const READ_WINDOW: u64 = 4_096;
 
 /// The most changesets a lookup by id prefix or by delta hash returns; past it the caller is
 /// told the answer was cut (the M6 design §5).
-#[allow(dead_code, reason = "the bounded lookups (the M6 plan's E2) use it")]
 pub(crate) const MAX_LOOKUP_HITS: usize = 4_096;
 
 pub use check::MetaCheck;

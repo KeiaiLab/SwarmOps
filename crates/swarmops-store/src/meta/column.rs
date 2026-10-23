@@ -8,12 +8,14 @@
 
 use std::fs::File;
 use std::io;
+use std::ops::ControlFlow;
 use std::os::unix::fs::FileExt;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::bytes;
 
-use super::sorted;
+use super::{READ_WINDOW, sorted};
 use crate::error::{FileOp, IoFailure, StoreError};
 use crate::fs_ops::{self, StoreFs};
 
@@ -24,6 +26,8 @@ pub(crate) struct AppendOnlyColumn<const W: usize> {
     file: File,
     /// What the column changes the file through, and locates its failures with.
     fs: StoreFs,
+    /// The most entries one `read_at` of the file has taken: [`crate::Index::widest_read`].
+    widest: AtomicU64,
 }
 
 impl<const W: usize> AppendOnlyColumn<W> {
@@ -41,6 +45,7 @@ impl<const W: usize> AppendOnlyColumn<W> {
             path,
             file,
             fs: fs.clone(),
+            widest: AtomicU64::new(0),
         })
     }
 
@@ -77,24 +82,74 @@ impl<const W: usize> AppendOnlyColumn<W> {
         if buf.is_empty() {
             return Ok(());
         }
+        self.widest
+            .fetch_max(bytes::to_u64(buf.len() / W), Ordering::Relaxed);
         (self.file.read_exact_at(buf, first * bytes::to_u64(W)))
             .map_err(|e| self.failed(FileOp::ReadAt, e))
     }
 
-    /// The entries `[from, to)`, read with one `read_at` (none for no entries). A range that
-    /// starts past its end is [`StoreError::IndexCorrupt`]: the index scans its columns from
-    /// where a sorted view ends, and a view never covers more records than the index counts.
+    /// The most entries one `read_at` of the file has taken since it was opened.
+    pub(crate) fn widest(&self) -> u64 {
+        self.widest.load(Ordering::Relaxed)
+    }
+
+    /// The entries `[from, to)`, read with one `read_at` per [`READ_WINDOW`] of them (none for no
+    /// entries), into one buffer: for ranges the caller holds as much of in memory already. A
+    /// range that starts past its end is [`StoreError::IndexCorrupt`]: the index scans its columns
+    /// from where a sorted view ends, and a view never covers more records than the index counts.
     pub(crate) fn entries(&self, from: u64, to: u64) -> Result<Vec<u8>, StoreError> {
-        let Some(count) = to.checked_sub(from) else {
-            return Err(StoreError::IndexCorrupt {
-                what: "a sorted view covers records past those the index counts",
-            });
-        };
+        let count = Self::count(from, to)?;
         let len = usize::try_from(count * bytes::to_u64(W))
             .map_err(|_| self.failed(FileOp::ReadAt, io::ErrorKind::OutOfMemory.into()))?;
         let mut bytes = vec![0; len];
-        self.read_at(from, &mut bytes)?;
+
+        // One read per window, so that no read takes more than READ_WINDOW entries.
+        for (first, window) in (from..)
+            .step_by(Self::window())
+            .zip(bytes.chunks_mut(Self::window() * W))
+        {
+            self.read_at(first, window)?;
+        }
         Ok(bytes)
+    }
+
+    /// Visits the entries `[from, to)` a window of at most [`READ_WINDOW`] of them at a time, one
+    /// `read_at` each, in one buffer of a window: `visit` gets the number of the window's first
+    /// entry and its entries, and the scan stops at the first window it breaks on, with what it
+    /// broke with. A range that starts past its end is [`StoreError::IndexCorrupt`], as for
+    /// [`AppendOnlyColumn::entries`].
+    pub(crate) fn scan<B>(
+        &self,
+        from: u64,
+        to: u64,
+        mut visit: impl FnMut(u64, &[[u8; W]]) -> ControlFlow<B>,
+    ) -> Result<Option<B>, StoreError> {
+        Self::count(from, to)?;
+        let mut buf = Vec::new();
+        let mut first = from;
+        while first < to {
+            let count =
+                usize::try_from(to - first).map_or(Self::window(), |left| left.min(Self::window()));
+            buf.resize(count * W, 0);
+            self.read_at(first, &mut buf)?;
+            if let ControlFlow::Break(stop) = visit(first, buf.as_chunks::<W>().0) {
+                return Ok(Some(stop));
+            }
+            first += bytes::to_u64(count);
+        }
+        Ok(None)
+    }
+
+    /// How many entries `[from, to)` holds; [`StoreError::IndexCorrupt`] if it starts past its end.
+    fn count(from: u64, to: u64) -> Result<u64, StoreError> {
+        to.checked_sub(from).ok_or(StoreError::IndexCorrupt {
+            what: "a sorted view covers records past those the index counts",
+        })
+    }
+
+    /// [`READ_WINDOW`], as a count of entries in memory.
+    fn window() -> usize {
+        usize::try_from(READ_WINDOW).unwrap_or(usize::MAX)
     }
 
     /// Appends `entries`, a whole number of them, with one [`crate::FsOps::append`]. The file
