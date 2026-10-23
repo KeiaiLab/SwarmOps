@@ -131,25 +131,37 @@ pub fn said(outcome: &Result<CommitInfo, StoreError>) -> Said {
     }
 }
 
+/// What the swept transaction on a [`sweep_template`] store does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Template {
+    /// It moves the checkpoint: 31 frames of one changeset each, the 32nd swept.
+    Checkpoint,
+    /// It compacts: 1,024 changesets in one frame, the swept one takes the tail past the
+    /// threshold.
+    Compaction,
+}
+
 /// A store for the error sweeps, on a filesystem that never syncs (durability is not their
 /// subject): changesets `0..n` past the checkpoint, `n` returned, so that the swept transaction
-/// `n` moves the checkpoint (31 frames of one changeset each, the 32nd swept) or, `compacting`,
-/// compacts (1,024 changesets in one frame: the swept one takes the tail past the threshold).
-pub fn sweep_template(compacting: bool) -> (TempDir, Utf8PathBuf, u64) {
+/// `n` does what `template` names.
+pub fn sweep_template(template: Template) -> (TempDir, Utf8PathBuf, u64) {
     let (dir, root) = super::temp_dir();
     let store = MetaStore::create_with_fs(&root, Arc::new(NoSyncFs)).unwrap();
-    let n = if compacting {
-        let mut write = store.write().unwrap();
-        for m in 0..Index::COMPACT_THRESHOLD {
-            write.insert_changeset(changeset(m)).unwrap();
+    let n = match template {
+        Template::Compaction => {
+            let mut write = store.write().unwrap();
+            for m in 0..Index::COMPACT_THRESHOLD {
+                write.insert_changeset(changeset(m)).unwrap();
+            }
+            write.commit().unwrap();
+            Index::COMPACT_THRESHOLD
         }
-        write.commit().unwrap();
-        Index::COMPACT_THRESHOLD
-    } else {
-        for m in 0..31 {
-            insert(&store, m);
+        Template::Checkpoint => {
+            for m in 0..31 {
+                insert(&store, m);
+            }
+            31
         }
-        31
     };
     assert_eq!(ckpt(&root), 0);
     (dir, root, n)
