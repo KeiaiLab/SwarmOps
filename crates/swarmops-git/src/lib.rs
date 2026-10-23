@@ -85,3 +85,7 @@ pub use raw::{RawCommit, RawError, RawIdent, RawTree, RawTreeEntry};
 pub use render::{commit_bytes, tree_bytes};
 pub use sink::{BranchUpdate, GitSink, SinkError, Stored};
 pub use source::{GitSource, SourceError, Unsupported};
+
+/// What the wildcard arm of a `match` on another crate's enum says: a variant newer than this
+/// build, which it refuses rather than guesses at.
+const UNKNOWN_VARIANT: &str = "a variant this build does not know";

@@ -243,10 +243,12 @@ pub fn tree_oid(objects: &dyn ExportObjects, root: TreeId) -> Result<GitOid, Rep
                     continue;
                 }
             }
+            Some(_) => return Err(unknown_variant("EntryTarget")),
             None => {
                 // Every entry's oid is known: the tree renders, and its oid goes to its parent's.
                 let done = stack.pop().expect("the tree on top");
-                let bytes = render::tree_bytes(&done.tree, |entry| done.oid_of(entry));
+                let bytes = render::tree_bytes(&done.tree, |entry| done.oid_of(entry))
+                    .ok_or_else(|| unknown_variant("EntryTarget"))?;
                 let oid = oid::git_hash(RawKind::Tree, &bytes);
                 memoize(memo, TREE_MEMO, done.id.0, oid);
                 if stack.is_empty() {
@@ -416,10 +418,12 @@ fn tree_git_oid(
                     continue;
                 }
             }
+            Some(_) => return Err(unknown_variant("EntryTarget")),
             None => {
                 // Every entry's oid is known: the tree renders, its oid is checked and cached.
                 let done = stack.pop().expect("the tree on top");
-                let bytes = render::tree_bytes(&done.tree, |entry| done.oid_of(entry));
+                let bytes = render::tree_bytes(&done.tree, |entry| done.oid_of(entry))
+                    .ok_or_else(|| unknown_variant("EntryTarget"))?;
                 let oid = oid::git_hash(RawKind::Tree, &bytes);
                 if let Memos::Against(about) = memos {
                     check_memo(objects.memo(), TREE_MEMO, done.id.0, oid, about)?;
@@ -518,12 +522,7 @@ fn lowercase_oid(hex: &[u8]) -> Option<GitOid> {
 
 /// The derived store's slot of `subject`'s memo `name`: version 1, no key.
 fn slot(name: &str, subject: ObjectId) -> DerivedSlot<'_> {
-    DerivedSlot {
-        name,
-        version: MEMO_VERSION,
-        subject,
-        key: &[],
-    }
+    DerivedSlot::new(name, MEMO_VERSION, subject, &[])
 }
 
 /// The git oid memoized for `subject` under `name`, if the derived store holds one. A value of
@@ -562,7 +561,14 @@ fn repo_error(e: DeriveError) -> RepoError {
             name: ExportOid::NAME.to_owned(),
             why: need.to_string(),
         },
+        _ => unknown_variant("DeriveError"),
     }
+}
+
+/// The [`RepoError::Internal`] of a `match` on enum `ty` of another crate that found a variant
+/// newer than this build.
+fn unknown_variant(ty: &str) -> RepoError {
+    RepoError::Internal(format!("{ty}: {}", crate::UNKNOWN_VARIANT))
 }
 
 /// A git-export oid the derived store memoized (`git_tree_oid`, `git_blob_oid` or `git_oid`) that
@@ -613,9 +619,9 @@ pub fn verify_export_oids<O: ObjectStore>(
                 continue;
             };
             let recomputed = if is_tree {
-                tree_git_oid(&reader, &cache, Memos::Recompute, TreeId(subject))
+                tree_git_oid(&reader, &cache, Memos::Recompute, TreeId::new(subject))
             } else {
-                blob_git_oid(&reader, &cache, Memos::Recompute, BlobId(subject))
+                blob_git_oid(&reader, &cache, Memos::Recompute, BlobId::new(subject))
             };
             if let Ok(got) = recomputed
                 && got != stored
@@ -633,7 +639,7 @@ pub fn verify_export_oids<O: ObjectStore>(
     // Each changeset's memoized export oid, against the one it renders to over real oids.
     let mut expected = ExportOids::new(OnMemo::Skip);
     for listed in store.list(ExportOid::NAME, ExportOid::VERSION)? {
-        let id = ChangesetId(listed.subject);
+        let id = ChangesetId::new(listed.subject);
         let Some(stored) = stored_export_oid(store, id)? else {
             continue;
         };
@@ -736,12 +742,7 @@ fn stored_export_oid(
 /// The derived store's slot of changeset `id`'s `git_oid` memo: [`ExportOid`]'s, whose key is
 /// `()`, of no bytes.
 fn export_slot(id: ChangesetId) -> DerivedSlot<'static> {
-    DerivedSlot {
-        name: ExportOid::NAME,
-        version: ExportOid::VERSION,
-        subject: id.0,
-        key: &[],
-    }
+    DerivedSlot::new(ExportOid::NAME, ExportOid::VERSION, id.0, &[])
 }
 
 /// An [`ExportedOid`] as its `git_oid` memo holds it, as postcard writes one: the oid's 20 bytes,

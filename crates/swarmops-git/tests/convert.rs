@@ -98,6 +98,7 @@ impl Objects {
         match entry.target {
             EntryTarget::Leaf(_, blob) => git_hash(RawKind::Blob, self.blob(blob)),
             EntryTarget::Dir(tree) => self.git_tree(tree),
+            _ => panic!("a variant this test does not know"),
         }
     }
 
@@ -106,7 +107,7 @@ impl Objects {
         let tree = self.tree(id);
         git_hash(
             RawKind::Tree,
-            &tree_bytes(&tree, |entry| self.git_oid(entry)),
+            &tree_bytes(&tree, |entry| self.git_oid(entry)).unwrap(),
         )
     }
 
@@ -126,6 +127,7 @@ impl Objects {
                         files.insert(path, (kind, self.blob(blob).to_vec()));
                     }
                     EntryTarget::Dir(tree) => trees.push((path, tree)),
+                    _ => panic!("a variant this test does not know"),
                 }
             }
         }
@@ -210,7 +212,7 @@ fn git_order_and_byte_order_both_hold() {
     let place = |names: &[&[u8]], name: &[u8]| names.iter().position(|n| *n == name).unwrap();
     assert!(place(&names, b"a") < place(&names, b"a.b"), "{names:?}");
     // Its git rendering is in git's order, `a.b` before `a/`, and is the commit's own tree.
-    let rendered = tree_bytes(&root, |entry| objects.git_oid(entry));
+    let rendered = tree_bytes(&root, |entry| objects.git_oid(entry)).unwrap();
     let git_names: Vec<Vec<u8>> = (RawTree::parse(&rendered).unwrap().entries.into_iter())
         .map(|entry| entry.name)
         .collect();
@@ -747,10 +749,11 @@ fn each_object_is_appended_once_and_remembered_ones_never() {
     let dir_id = match objects.tree(got.root).entries()[0].target {
         EntryTarget::Dir(id) => id,
         EntryTarget::Leaf(..) => unreachable!("`dir` sorts before `one.txt`"),
+        _ => panic!("a variant this test does not know"),
     };
     let mut seeded = Converter::new(&source, LossySet::empty());
     seeded.remember_tree(dir, dir_id);
-    seeded.remember_blob(one, BlobId(hash_object(ObjectKind::Blob, b"1\n")));
+    seeded.remember_blob(one, BlobId::new(hash_object(ObjectKind::Blob, b"1\n")));
     seeded.commit(second, &mut out).unwrap();
     let appended: Vec<ObjectId> = out
         .iter()
