@@ -129,7 +129,7 @@ pub fn entry_in<R: TreeRead>(
 ) -> Result<Option<EntryTarget>, R::Error> {
     let mut at = EntryTarget::Dir(root);
     for name in path.components() {
-        let EntryTarget::Dir(dir) = at else {
+        let Some(dir) = at.dir() else {
             // Below a file.
             return Ok(None);
         };

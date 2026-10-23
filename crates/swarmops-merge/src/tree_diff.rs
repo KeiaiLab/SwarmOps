@@ -366,18 +366,13 @@ impl<'t> Iterator for Pairs<'t> {
 
 /// The leaf an entry names, if it names one.
 fn leaf(target: Option<EntryTarget>) -> Option<Leaf> {
-    match target? {
-        EntryTarget::Leaf(kind, blob) => Some(Leaf { kind, blob }),
-        EntryTarget::Dir(_) => None,
-    }
+    let (kind, blob) = target?.leaf()?;
+    Some(Leaf { kind, blob })
 }
 
 /// The tree an entry names, if it names a directory.
 fn subtree(target: Option<EntryTarget>) -> Option<TreeId> {
-    match target? {
-        EntryTarget::Dir(tree) => Some(tree),
-        EntryTarget::Leaf(..) => None,
-    }
+    target?.dir()
 }
 
 /// The change from the leaf `before` to the leaf `after` at one path; `None` if they are the
@@ -422,16 +417,18 @@ fn repo_path(path: String) -> RepoPath {
 pub fn delta_of(changes: &[TreeChange]) -> Vec<DeltaEntry> {
     changes
         .iter()
-        .map(|change| DeltaEntry {
-            path: change.path.clone(),
-            op: match change.kind.after() {
+        .map(|change| {
+            let op = match change.kind.after() {
                 Some(new) => DeltaOp::Put {
                     kind: new.kind,
                     id: new.blob,
                 },
                 None => DeltaOp::Delete,
-            },
-            renamed_from: None,
+            };
+
+            // Only a rename source can make an entry invalid, and none is given.
+            DeltaEntry::new(change.path.clone(), op, None)
+                .expect("an entry without a rename source is valid")
         })
         .collect()
 }
