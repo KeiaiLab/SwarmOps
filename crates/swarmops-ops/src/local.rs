@@ -1531,7 +1531,7 @@ impl StoreOps for Recording<'_> {
         };
         Ok(TreeListing {
             entries: (page.entries.iter())
-                .map(|entry| tree_entry_out(entry, depth > 1))
+                .map(|entry| tree_entry_out(entry, EntryPath::when_deep(depth)))
                 .collect(),
             truncated: page.truncated,
             cursor: (page.entries.last())
@@ -2722,12 +2722,30 @@ fn mismatch_cause(cause: MismatchCause) -> &'static str {
     }
 }
 
-/// `entry` of a listing as `read_tree` gives it, with its `path` when `with_path` (a `depth` past
-/// 1).
-fn tree_entry_out(entry: &ListedEntry, with_path: bool) -> TreeEntryOut {
+/// Whether a `read_tree` entry carries its `path` beside its `name`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryPath {
+    /// A listing one level deep: the name says where the entry is.
+    Omitted,
+    /// A listing past one level: entries of several directories mix, so each names its path.
+    Included,
+}
+
+impl EntryPath {
+    /// The choice for a listing `depth` levels deep: the path past 1.
+    fn when_deep(depth: u32) -> EntryPath {
+        if depth > 1 {
+            return EntryPath::Included;
+        }
+        EntryPath::Omitted
+    }
+}
+
+/// `entry` of a listing as `read_tree` gives it, with its `path` as `path` says.
+fn tree_entry_out(entry: &ListedEntry, path: EntryPath) -> TreeEntryOut {
     TreeEntryOut {
         name: entry.path.file_name().to_owned(),
-        path: with_path.then(|| entry.path.to_string()),
+        path: (path == EntryPath::Included).then(|| entry.path.to_string()),
         kind: entry_kind_out(entry.target.kind()),
         size: entry.size,
         id: entry.target.id().to_hex(),
