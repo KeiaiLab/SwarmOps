@@ -6,6 +6,7 @@ use std::str::FromStr;
 /// A git object id: the SHA-1 of the object ([`git_hash`]), 20 bytes. It prints as 40 lowercase
 /// hex digits and parses from 40 hex digits of either case.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub struct GitOid(pub [u8; 20]);
 
 impl GitOid {
@@ -71,10 +72,12 @@ impl FromStr for GitOid {
 /// Text that is not a [`GitOid`]: not 40 hex digits.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("a git object id is 40 hex digits")]
+#[non_exhaustive]
 pub struct ParseGitOidError;
 
 /// The hash a git repository names its objects by (`extensions.objectFormat`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ObjectFormat {
     /// SHA-1, 20 bytes: the format of every repository without the extension, and the only one
     /// the import reads.
@@ -95,6 +98,7 @@ impl ObjectFormat {
 
 /// The kind of a git object, as its header names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum RawKind {
     /// A commit.
     Commit,

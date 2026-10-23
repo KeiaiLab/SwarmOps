@@ -337,7 +337,7 @@ fn a_directory_left_empty_by_a_drop_is_dropped() {
     // tree, is dropped with them: under both classes once allowed, as `empty_trees` otherwise.
     let mut source = MemSource::default();
     let empty = source.tree(&[]);
-    let gitlink = source.tree(&[("160000", b"module", GitOid([0x22; 20]))]);
+    let gitlink = source.tree(&[("160000", b"module", GitOid::new([0x22; 20]))]);
     let outer = source.tree(&[("40000", b"link", gitlink), ("40000", b"none", empty)]);
     let kept = source.blob(b"kept\n");
     let root = source.tree(&[("40000", b"outer", outer), ("100644", b"z.txt", kept)]);
@@ -387,7 +387,7 @@ fn more_than_255_parents_is_refused_naming_the_commit() {
 fn a_blob_past_the_object_limit_is_too_large_before_it_is_read() {
     let mut source = MemSource::default();
     // Its header claims one byte more than an object holds; reading it panics.
-    let huge = GitOid([0x5a; 20]);
+    let huge = GitOid::new([0x5a; 20]);
     source.claim(huge, RawKind::Blob, MAX_OBJECT_LEN + 1);
     let small = source.blob(b"small\n");
     let data = source.tree(&[
@@ -430,8 +430,11 @@ fn a_commit_or_a_tree_past_the_object_limit_is_too_large_before_it_is_read() {
     assert_eq!(out.len(), 3, "a blob and two trees");
 
     // Headers that claim one byte more; reading any of them panics.
-    let (huge_commit, huge_root, huge_dir) =
-        (GitOid([0x5c; 20]), GitOid([0x5d; 20]), GitOid([0x5e; 20]));
+    let (huge_commit, huge_root, huge_dir) = (
+        GitOid::new([0x5c; 20]),
+        GitOid::new([0x5d; 20]),
+        GitOid::new([0x5e; 20]),
+    );
     source.claim(huge_commit, RawKind::Commit, MAX_OBJECT_LEN + 1);
     source.claim(huge_root, RawKind::Tree, MAX_OBJECT_LEN + 1);
     source.claim(huge_dir, RawKind::Tree, MAX_OBJECT_LEN + 1);
@@ -496,7 +499,7 @@ fn metadata_is_git_lossy_then_git_oid() {
     let mut source = MemSource::default();
     let kept = source.blob(b"kept\n");
     let empty = source.tree(&[]);
-    let gitlink = GitOid([0x11; 20]);
+    let gitlink = GitOid::new([0x11; 20]);
     let lossy_root = source.tree(&[
         ("40000", b"empty", empty),
         ("100644", b"kept.txt", kept),
@@ -595,7 +598,7 @@ fn modes_map_by_their_file_type() {
         ("0100644", b"c", blob),
         ("120777", b"d", blob),
         ("40755", b"e", inner),
-        ("0160000", b"f", GitOid([0x33; 20])),
+        ("0160000", b"f", GitOid::new([0x33; 20])),
     ]);
     let commit = source.commit(root, &[], "modes git does not write\n");
     let mut out = Vec::new();
@@ -698,7 +701,7 @@ fn a_refused_commit_leaves_out_and_the_converter_as_they_were() {
     let blob = source.blob(b"shared\n");
     let refused_root = source.tree(&[
         ("100644", b"a.txt", blob),
-        ("160000", b"sub", GitOid([0x44; 20])),
+        ("160000", b"sub", GitOid::new([0x44; 20])),
     ]);
     let refused = source.commit(refused_root, &[], "a gitlink\n");
     let root = source.tree(&[("100644", b"a.txt", blob)]);

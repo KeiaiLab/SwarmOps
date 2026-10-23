@@ -70,6 +70,7 @@ pub trait Transport {
 
 /// The user's git, as a [`Transport`].
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct GitCli {
     /// The binary: `SWARMOPS_GIT`, else `git` as `PATH` finds it.
     binary: PathBuf,
@@ -455,6 +456,7 @@ impl Transport for GitCli {
 /// A remote's URL that the rules accept: `https://`, `ssh://` or the scp form, and plain
 /// `http://` to a loopback address only.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RemoteUrl {
     /// The URL, as given.
     url: String,
@@ -521,6 +523,7 @@ impl RemoteUrl {
 
 /// Why a URL is refused (`E_INVALID_ARG`, `details.reason`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum UrlRefused {
     /// `http://` to a host that is not a loopback address: `cleartext_http`.
     CleartextHttp,
@@ -535,6 +538,7 @@ pub enum UrlRefused {
 /// How git authenticates to a remote: by git's own credentials, and by the token in the
 /// variable `token_env` names when it is set.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Credential {
     /// The environment variable that holds a token, by its name; never the token.
     pub token_env: Option<String>,
@@ -544,6 +548,7 @@ pub struct Credential {
 /// mirror's refs record what the remote holds, so a fetch moves them to it whatever it was
 /// (`+src:dst`); a push never takes a refspec.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RefSpec {
     /// The remote's refs, such as `refs/heads/*`.
     pub src: String,
@@ -560,6 +565,7 @@ impl RefSpec {
 
 /// One branch update of a push.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PushUpdate {
     /// The commit the branch is to name.
     pub new: GitOid,
@@ -582,6 +588,7 @@ impl PushUpdate {
 
 /// What a push that succeeded did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PushOutcome {
     /// The remote moved.
     Sent,
@@ -592,6 +599,7 @@ pub enum PushOutcome {
 /// What a push would add to a remote: each blob with its size and path, and the bytes on disk
 /// of every object it adds.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct NewObjects {
     /// Each blob: its id, its size in bytes, and a path it is at.
     pub blobs: Vec<(GitOid, u64, String)>,
@@ -601,6 +609,7 @@ pub struct NewObjects {
 
 /// Why git failed, as the classifier reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TransportError {
     /// No git to run (`E_GIT_UNSUPPORTED`, `git_missing`).
     GitMissing,
@@ -649,6 +658,7 @@ pub enum TransportError {
 
 /// What did not answer, as `details.cause` names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Cause {
     /// The host's name did not resolve: `dns`.
     Dns,
@@ -680,6 +690,7 @@ impl Cause {
 
 /// Why the remote or git refused, as `details.reason` names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RejectReason {
     /// The credential was refused or missing: `auth`.
     Auth,

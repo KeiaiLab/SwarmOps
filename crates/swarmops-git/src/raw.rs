@@ -17,6 +17,7 @@ use crate::GitOid;
 
 /// A git commit's fields, as its bytes hold them.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RawCommit {
     /// The commit's tree.
     pub tree: GitOid,
@@ -37,6 +38,7 @@ pub struct RawCommit {
 
 /// An author or a committer: `name SP '<' email '>' SP secs SP (+|-)HHMM`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RawIdent {
     /// The name, without the white space git's ident parse trims before the `<`.
     pub name: Vec<u8>,
@@ -52,6 +54,7 @@ pub struct RawIdent {
 
 /// A git tree's entries, as its bytes hold them.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RawTree {
     /// The entries, in their stored order, whether or not it is git's.
     pub entries: Vec<RawTreeEntry>,
@@ -59,6 +62,7 @@ pub struct RawTree {
 
 /// One entry of a [`RawTree`].
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RawTreeEntry {
     /// The mode's octal digits as stored: `100644`, `100755`, `120000`, `40000` and `160000` as git
     /// writes them, and anything else a tree holds, such as `100664` or a zero-padded `040000`.
@@ -78,6 +82,7 @@ impl RawTreeEntry {
 
 /// Bytes that are no commit or tree the fields can hold.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum RawError {
     /// The bytes cannot be held at all: a commit whose first line is not its tree, an id that is
     /// not 40 hex digits, no author or committer after the parents, a `parent` after the author;

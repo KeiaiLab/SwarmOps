@@ -8,6 +8,7 @@ use std::fmt;
 /// its class is allowed, and otherwise drops or normalizes the content and names the class in the
 /// changeset's `git.lossy` metadata ([`convert`](crate::convert) says how, class by class).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum LossyClass {
     /// A submodule's entry, a gitlink (mode `160000`), which names a commit of another
     /// repository: dropped.
@@ -78,6 +79,7 @@ const BY_NAME: [LossyClass; 6] = [
 
 /// A set of [`LossyClass`]es: the classes a conversion allows, or the ones a commit lost.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct LossySet(u8);
 
 impl LossySet {

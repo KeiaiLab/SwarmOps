@@ -168,13 +168,13 @@ fn negative_zero_and_a_negative_time_round_trip() {
             b"m\n",
         );
         let parsed = RawCommit::parse(&raw).unwrap();
-        let expected = RawIdent {
-            name: b"A".to_vec(),
-            email: b"a@x".to_vec(),
+        let expected = RawIdent::new(
+            b"A".to_vec(),
+            b"a@x".to_vec(),
             secs,
             offset_secs,
             negative_zero,
-        };
+        );
         assert_eq!(parsed.author, expected, "{date}");
         assert_eq!(parsed.render(), raw, "{date}");
     }
@@ -220,13 +220,7 @@ fn an_ident_it_cannot_reproduce_parses_but_renders_otherwise() {
 }
 
 fn ident(name: &[u8], email: &[u8], secs: i64, offset_secs: i32) -> RawIdent {
-    RawIdent {
-        name: name.to_vec(),
-        email: email.to_vec(),
-        secs,
-        offset_secs,
-        negative_zero: false,
-    }
+    RawIdent::new(name.to_vec(), email.to_vec(), secs, offset_secs, false)
 }
 
 #[test]
@@ -327,16 +321,8 @@ fn tree_modes_and_order_are_kept_as_stored() {
     assert_eq!(
         parsed.entries,
         vec![
-            RawTreeEntry {
-                mode: b"100664".to_vec(),
-                name: b"b".to_vec(),
-                oid: GitOid(b),
-            },
-            RawTreeEntry {
-                mode: b"040000".to_vec(),
-                name: b"a".to_vec(),
-                oid: GitOid(a),
-            },
+            RawTreeEntry::new(b"100664".to_vec(), b"b".to_vec(), GitOid::new(b)),
+            RawTreeEntry::new(b"040000".to_vec(), b"a".to_vec(), GitOid::new(a)),
         ]
     );
     assert_eq!(parsed.render(), raw);
@@ -388,13 +374,13 @@ fn arb_ident() -> impl Strategy<Value = RawIdent> {
         .prop_map(
             |(name, email, secs, (west, hours, minutes), negative_zero)| {
                 let offset_secs = (hours * 3600 + minutes * 60) * if west { -1 } else { 1 };
-                RawIdent {
+                RawIdent::new(
                     name,
                     email,
                     secs,
                     offset_secs,
-                    negative_zero: negative_zero && offset_secs == 0,
-                }
+                    negative_zero && offset_secs == 0,
+                )
             },
         )
 }
@@ -410,7 +396,7 @@ fn arb_header() -> impl Strategy<Value = (Vec<u8>, Vec<u8>)> {
 }
 
 fn arb_oid() -> impl Strategy<Value = GitOid> {
-    any::<[u8; 20]>().prop_map(GitOid)
+    any::<[u8; 20]>().prop_map(GitOid::new)
 }
 
 proptest! {
@@ -423,7 +409,7 @@ proptest! {
         extra_headers in proptest::collection::vec(arb_header(), 0..5),
         message in proptest::collection::vec(any::<u8>(), 0..60),
     ) {
-        let commit = RawCommit { tree, parents, author, committer, extra_headers, message };
+        let commit = RawCommit::new(tree, parents, author, committer, extra_headers, message);
         prop_assert_eq!(RawCommit::parse(&commit.render()), Ok(commit));
     }
 
@@ -434,16 +420,18 @@ proptest! {
             0..6,
         ),
     ) {
-        let tree = RawTree {
-            entries: entries
+        let tree = RawTree::new(
+            entries
                 .into_iter()
-                .map(|(mode, name, oid)| RawTreeEntry {
-                    mode: mode.into_bytes(),
-                    name: name.into_iter().filter(|&b| b != 0).collect(),
-                    oid,
+                .map(|(mode, name, oid)| {
+                    RawTreeEntry::new(
+                        mode.into_bytes(),
+                        name.into_iter().filter(|&b| b != 0).collect(),
+                        oid,
+                    )
                 })
                 .collect(),
-        };
+        );
         prop_assert_eq!(RawTree::parse(&tree.render()), Ok(tree));
     }
 

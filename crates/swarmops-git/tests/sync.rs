@@ -112,12 +112,7 @@ fn base_is_the_newest_main_changeset_the_remote_reaches() {
     let r2 = plain(&repo, &[r1], vec![put("r2", b"2\n")]);
 
     // 1. Both moved: the base is B, the two lands above it unpublished, two behind.
-    let expected = SyncPlan {
-        base: b,
-        unpublished: vec![u1, u2],
-        behind: 2,
-        behind_truncated: false,
-    };
+    let expected = SyncPlan::new(b, vec![u1, u2], 2, false);
     assert_eq!(sync::plan(&repo, u2, r2).unwrap(), expected);
 
     // 2. The remote holds main: nothing unpublished.
@@ -142,12 +137,7 @@ fn merge_commit_on_the_remote_publishes_its_second_parent() {
     let merge = plain(&repo, &[r1, u1], vec![put("u1", b"1\n")]);
 
     // U1 is published through the merge's second parent; R1 and the merge are behind.
-    let expected = SyncPlan {
-        base: u1,
-        unpublished: vec![u2],
-        behind: 2,
-        behind_truncated: false,
-    };
+    let expected = SyncPlan::new(u1, vec![u2], 2, false);
     assert_eq!(sync::plan(&repo, u2, merge).unwrap(), expected);
 }
 
@@ -431,10 +421,7 @@ fn synced_from_is_not_rendered_by_the_export() {
 
     // 2. Its export oid is the hash of the rendering without the key: version 1 holds.
     let read = repo.snapshot().unwrap();
-    let reader = ExportReader {
-        read: &read,
-        store: repo.derived_store(),
-    };
+    let reader = ExportReader::new(&read, repo.derived_store());
     let tree = tree_oid(&reader, cs.root).unwrap();
     let parent = repo.derived::<ExportOid>(r1, &()).unwrap().git_oid();
     let rendered = render_commit(landed, &without, &[parent], tree);

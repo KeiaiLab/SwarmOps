@@ -31,6 +31,7 @@ pub const GITHUB_PUSH_REFUSED: u64 = 2_000_000_000;
 
 /// Which limit a push broke (`E_TOO_LARGE`, `details.scope`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LimitScope {
     /// A file over [`GITHUB_FILE_REFUSED`]: `remote_file`.
     RemoteFile,
@@ -50,6 +51,7 @@ impl LimitScope {
 
 /// A push past one of GitHub's limits.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LimitExceeded {
     /// Which limit.
     pub scope: LimitScope,

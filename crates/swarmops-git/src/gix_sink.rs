@@ -53,6 +53,7 @@ pub type SyncedPaths = Arc<Mutex<Vec<PathBuf>>>;
 /// [`stored`]: GitSink::stored
 /// [`read`]: GitSink::read
 /// [`sync`]: GitSink::sync
+#[non_exhaustive]
 pub struct GixSink {
     /// The repository, as gix opened it.
     repo: gix::Repository,

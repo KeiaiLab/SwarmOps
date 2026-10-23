@@ -112,6 +112,7 @@ pub const MAX_LOSSY_LISTED: usize = 100;
 
 /// What to import, and into which ref ([`import()`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ImportRequest {
     /// The source ref: `HEAD`, a ref's name, or 40 hex digits ([`GitSource::resolve`]).
     pub git_ref: String,
@@ -180,6 +181,7 @@ impl ImportRequest {
 
 /// What an import did ([`import()`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ImportReport {
     /// The commits it recorded: each one the walk did not know, its changeset made (or found in
     /// the store already, as after a crash before its external id was written) and its external
@@ -249,6 +251,7 @@ impl ImportReport {
 
 /// A commit an import recorded with a loss.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LossyCommit {
     /// The commit.
     pub commit: GitOid,
@@ -271,6 +274,7 @@ impl LossyCommit {
 
 /// Why an import failed. Each says how far it got where it wrote anything.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ImportError {
     /// The source could not open, resolve or read what the import needs: the ref names nothing,
     /// the repository is one the import does not read, an object is missing or damaged.
@@ -384,6 +388,7 @@ fn passed_over(entry: Option<&ExternalIdMismatch>) -> String {
 /// entry's: it neither holds the commit as its `git.oid` nor exports to it. No import or export
 /// writes one; the import passes over one it meets ([`ImportError::Diverged::external_id`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ExternalIdMismatch {
     /// The commit whose entry it is: the entry's key.
     pub commit: GitOid,
