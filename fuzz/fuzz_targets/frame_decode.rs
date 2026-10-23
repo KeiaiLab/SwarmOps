@@ -35,7 +35,7 @@ fuzz_target!(|data: &[u8]| {
     fs::write(layout.journal_off(), []).expect("write journal.off");
     fs::write(layout.journal_log(), data).expect("write journal.log");
     // Readers measure the files' lengths through FsOps: the real ones.
-    let journal = Journal::open(&layout, Arc::new(RealFs)).expect("open the journal");
+    let journal = Journal::open(&layout, Arc::new(RealFs::new())).expect("open the journal");
     agrees(
         "the input as journal.log",
         &journal.tail_frames_from(0),
@@ -47,11 +47,7 @@ fuzz_target!(|data: &[u8]| {
     let framed = frame_around(data);
     fs::write(layout.journal_log(), &framed).expect("rewrite journal.log");
     let listed = match model(&framed) {
-        Model::Whole { records, .. } => Ok(vec![Frame {
-            seq: 0,
-            offset: 0,
-            records,
-        }]),
+        Model::Whole { records, .. } => Ok(vec![Frame::new(0, 0, records)]),
         Model::Invalid => Err(0),
         other => panic!("a frame with a matching CRC reads as {other:?}"),
     };
@@ -95,12 +91,12 @@ fn records_back_to_back(data: &[u8]) {
                 );
                 let short = Record::decode(&rest[..used - 1]);
                 assert!(
-                    matches!(short, Err(BadRecord { at }) if at < used),
+                    matches!(short, Err(BadRecord { at, .. }) if at < used),
                     "{record:?} cut short by a byte decodes: {short:?}"
                 );
                 rest = &rest[used..];
             }
-            Err(BadRecord { at }) => {
+            Err(BadRecord { at, .. }) => {
                 assert!(
                     at <= rest.len(),
                     "decoding stopped at {at}, past the {} bytes decoded",
@@ -123,11 +119,7 @@ fn unlisted_frames(log: &[u8]) -> Result<Vec<Frame>, u64> {
     while at < log.len() {
         match model(&log[at..]) {
             Model::Whole { records, size } => {
-                frames.push(Frame {
-                    seq: to_u64(frames.len()),
-                    offset: to_u64(at),
-                    records,
-                });
+                frames.push(Frame::new(to_u64(frames.len()), to_u64(at), records));
                 at += size;
             }
             Model::Short | Model::BadCrc => break,
