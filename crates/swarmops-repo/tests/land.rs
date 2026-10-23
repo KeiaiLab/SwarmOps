@@ -76,18 +76,16 @@ fn landing(head: ChangesetId) -> LandRequest {
 
 /// [`landing`] with the idempotency key `key`.
 fn keyed(head: ChangesetId, key: &str) -> LandRequest {
-    LandRequest {
-        key: Some(key.to_owned()),
-        ..landing(head)
-    }
+    let mut land = landing(head);
+    land.key = Some(key.to_owned());
+    land
 }
 
 /// A request for `changes` on `parents`, recording `agent` in its metadata.
 fn by(agent: &str, parents: &[ChangesetId], changes: Vec<Change>) -> CommitRequest {
-    CommitRequest {
-        metadata: vec![("agent".to_owned(), agent.as_bytes().to_vec())],
-        ..request(parents, changes, "a test commit")
-    }
+    let mut req = request(parents, changes, "a test commit");
+    req.metadata = vec![("agent".to_owned(), agent.as_bytes().to_vec())];
+    req
 }
 
 /// Commits `changes` on `parents` by `agent`; the new changeset's id.
@@ -110,13 +108,8 @@ fn advance(
     parents: &[ChangesetId],
     changes: Vec<Change>,
 ) -> ChangesetId {
-    let req = CommitRequest {
-        advance: Some(Advance {
-            name: "main".to_owned(),
-            actor: agent.to_owned(),
-        }),
-        ..by(agent, parents, changes)
-    };
+    let mut req = by(agent, parents, changes);
+    req.advance = Some(Advance::new("main", agent));
     repo.commit(req).unwrap().id
 }
 
@@ -196,23 +189,21 @@ fn a_land_of_a_commit_on_the_head_is_one_new_changeset_on_the_target() {
     let head = repo.commit(change).unwrap().id;
     let frames = frame_count(&root);
 
-    let land = LandRequest {
-        lander_metadata: vec![("lander_run_id".to_owned(), b"run-2".to_vec())],
-        ..keyed(head, "key-1")
-    };
+    let mut land = keyed(head, "key-1");
+    land.lander_metadata = vec![("lander_run_id".to_owned(), b"run-2".to_vec())];
     let out = repo.land(land).unwrap();
-    let want = LandOutcome {
-        status: LandStatus::Landed,
-        landed: out.landed,
-        rebased_onto: t0,
-        base: t0,
-        attempts: 1,
-        relocated: false,
-        squashed_from: vec![head],
-        files_changed: 2,
-        auto_merged: Vec::new(),
-        warnings: Vec::new(),
-    };
+    let want = LandOutcome::new(
+        LandStatus::Landed,
+        out.landed,
+        t0,
+        t0,
+        1,
+        false,
+        vec![head],
+        2,
+        Vec::new(),
+        Vec::new(),
+    );
     assert_eq!(out, want);
     let landed = repo.changeset(out.landed).unwrap().unwrap().changeset;
     let made = repo.changeset(head).unwrap().unwrap().changeset;
@@ -275,10 +266,8 @@ fn a_land_squashes_a_chain_into_one_changeset() {
     );
     let c3 = commit_by(&repo, ACTOR, &[c2], vec![put("a", b"a 3\n"), delete("b")]);
 
-    let land = LandRequest {
-        message: Some(b"three in one\n".to_vec()),
-        ..landing(c3)
-    };
+    let mut land = landing(c3);
+    land.message = Some(b"three in one\n".to_vec());
     let out = repo.land(land).unwrap();
     assert_eq!(
         (out.base, out.squashed_from.clone()),
@@ -586,10 +575,8 @@ fn a_chain_with_a_merge_changeset_is_refused() {
     let merge = commit_by(&repo, ACTOR, &[one, two], vec![put("c", b"c\n")]);
     let head = commit_by(&repo, ACTOR, &[merge], vec![put("d", b"d\n")]);
     let frames = frame_count(&root);
-    let based = LandRequest {
-        base: Some(t0),
-        ..landing(head)
-    };
+    let mut based = landing(head);
+    based.base = Some(t0);
     for land in [landing(head), based] {
         match repo.land(land) {
             Err(RepoError::MergeChangeset(id)) => assert_eq!(id, merge),
@@ -608,10 +595,8 @@ fn a_base_that_is_not_an_ancestor_is_refused() {
     let head = commit_by(&repo, ACTOR, &[t0], vec![put("b", b"b\n")]);
     let x = advance(&repo, OTHER, &[t0], vec![put("c", b"c\n")]);
     let frames = frame_count(&root);
-    let land = LandRequest {
-        base: Some(x),
-        ..landing(head)
-    };
+    let mut land = landing(head);
+    land.base = Some(x);
     match repo.land(land) {
         Err(RepoError::BaseNotAncestor { base, head: of }) => assert_eq!((base, of), (x, head)),
         other => panic!("expected BaseNotAncestor, got {other:?}"),
@@ -630,10 +615,8 @@ fn an_explicit_base_off_the_target_lands() {
     let base = commit_by(&repo, OTHER, &[t0], vec![put("a", b"branch\n")]);
     let head = commit_by(&repo, OTHER, &[base], vec![put("b", b"b 2\n")]);
 
-    let land = LandRequest {
-        base: Some(base),
-        ..landing(head)
-    };
+    let mut land = landing(head);
+    land.base = Some(base);
     let out = repo.land(land).unwrap();
     assert_eq!(
         (out.base, out.rebased_onto, out.squashed_from.clone()),
@@ -660,10 +643,8 @@ fn a_head_unrelated_to_the_target_needs_a_base() {
     }
     assert_eq!(frame_count(&root), frames);
 
-    let land = LandRequest {
-        base: Some(other_root),
-        ..landing(head)
-    };
+    let mut land = landing(head);
+    land.base = Some(other_root);
     let out = repo.land(land).unwrap();
     assert_eq!(content(&repo, out.landed, "y"), Some(b"y\n".to_vec()));
     assert_eq!(content(&repo, out.landed, "z"), None);
@@ -728,11 +709,9 @@ fn a_keyed_land_with_a_base_off_the_target_stops_at_its_generation() {
     let mut chain = vec![commit_by(&repo, ACTOR, &[], vec![put("f", b"0\n")])];
     while chain.len() < 1_000 {
         let n = chain.len();
-        let empty = CommitRequest {
-            allow_empty: true,
-            message: format!("t{n}").into_bytes(),
-            ..by(ACTOR, &[chain[n - 1]], Vec::new())
-        };
+        let mut empty = by(ACTOR, &[chain[n - 1]], Vec::new());
+        empty.allow_empty = true;
+        empty.message = format!("t{n}").into_bytes();
         chain.push(repo.commit(empty).unwrap().id);
     }
     let top = chain[999];
@@ -749,10 +728,8 @@ fn a_keyed_land_with_a_base_off_the_target_stops_at_its_generation() {
     }
     let fs: Arc<dyn FsOps> = Arc::new(Watched(Arc::clone(&reads), NoSyncFs));
     let repo = LocalRepo::open_with_fs(&root, fs).unwrap();
-    let land = LandRequest {
-        base: Some(base),
-        ..keyed(head, "key-1")
-    };
+    let mut land = keyed(head, "key-1");
+    land.base = Some(base);
     let out = repo.land(land).unwrap();
     assert_eq!(
         (out.status, out.rebased_onto, out.base),
@@ -918,10 +895,8 @@ fn retries_stop_at_max_attempts() {
     let racer = Racer::new(&root, 10, |n| vec![put(&format!("race/{n}"), b"theirs\n")]);
     let repo = racer.open();
 
-    let land = LandRequest {
-        max_attempts: 3,
-        ..landing(head)
-    };
+    let mut land = landing(head);
+    land.max_attempts = 3;
     let out = repo.land(land);
     let gained = racer.landed();
     assert_eq!(gained.len(), 3, "a race before each publish");
@@ -1012,10 +987,9 @@ mod resolutions {
         let files = (files.into_iter())
             .map(|(p, resolution)| (path(p), resolution))
             .collect();
-        LandRequest {
-            resolutions: Some(Resolutions { against, files }),
-            ..landing(head)
-        }
+        let mut land = landing(head);
+        land.resolutions = Some(Resolutions::new(against, files));
+        land
     }
 
     /// A resolution that puts `bytes`, of the kind the land picks.

@@ -54,6 +54,7 @@ const MAX_HELD_HUNKS: usize = 128;
 
 /// What a three-way merge made ([`Repo::merge_with`]), for its caller to commit, or to report.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MergeOutcome {
     /// What turns theirs' root into the merged tree, sorted by path: a put of each leaf the
     /// merge holds that theirs does not, a delete of each leaf of theirs it drops. A path that

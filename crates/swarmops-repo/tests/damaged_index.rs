@@ -139,10 +139,9 @@ fn land_from(base: ChangesetId, head: ChangesetId) -> LandRequest {
         name: b"test/lander".to_vec(),
         ..signature()
     };
-    LandRequest {
-        base: Some(base),
-        ..LandRequest::new(head, "main", lander)
-    }
+    let mut land = LandRequest::new(head, "main", lander);
+    land.base = Some(base);
+    land
 }
 
 /// What verify finds, deep.

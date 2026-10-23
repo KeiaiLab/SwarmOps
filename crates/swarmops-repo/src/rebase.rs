@@ -35,6 +35,7 @@ const SQUASHED_FROM: &str = "squashed_from";
 /// A rebase to make ([`Repo::rebase`]): the change, the first-parent chain from `base` to `head`,
 /// onto the head of the ref `onto`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RebaseRequest {
     /// The change's head: the last changeset of the chain.
     pub head: ChangesetId,
@@ -73,6 +74,7 @@ impl RebaseRequest {
 
 /// What a rebase did ([`Repo::rebase`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RebaseOutcome {
     /// How it ended.
     pub status: RebaseStatus,
@@ -99,6 +101,7 @@ pub struct RebaseOutcome {
 
 /// How a rebase ended ([`RebaseOutcome::status`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum RebaseStatus {
     /// It recorded `H'` now.
     Rebased,

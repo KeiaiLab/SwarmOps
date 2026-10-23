@@ -96,6 +96,7 @@ const MAX_NAME_LEN: usize = 255;
 const MAX_REPO_LEN: u64 = 32 + 1 + 255;
 
 /// A repository: objects in `O`, metadata in the native [`MetaStore`].
+#[non_exhaustive]
 pub struct Repo<O: ObjectStore> {
     pub(crate) objects: O,
     pub(crate) meta: MetaStore,
@@ -118,6 +119,7 @@ pub type LocalRepo = Repo<FsObjectStore>;
 
 /// What [`LocalRepo::info`] reports about a repository.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RepoInfo {
     /// The id [`LocalRepo::create`] chose: 32 lowercase hex digits, random.
     pub repo_id: String,
@@ -133,8 +135,30 @@ pub struct RepoInfo {
     pub main: Option<ChangesetId>,
 }
 
+impl RepoInfo {
+    /// Makes one of the fields given.
+    pub fn new(
+        repo_id: String,
+        name: String,
+        store_version: u32,
+        changesets: u64,
+        refs: u64,
+        main: Option<ChangesetId>,
+    ) -> RepoInfo {
+        RepoInfo {
+            repo_id,
+            name,
+            store_version,
+            changesets,
+            refs,
+            main,
+        }
+    }
+}
+
 /// What [`Repo::cas_ref`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CasOutcome {
     /// What the store decided under the lock: [`CasResult::Applied`] when the ref named
     /// `expected` (it names `new` now; with `old` equal to `new` for a move to the target it
@@ -148,6 +172,17 @@ pub struct CasOutcome {
     /// [`CasResult::Mismatch`] included. It is no warning, and it is lost when the call fails
     /// after the repair.
     pub recovered: Recovered,
+}
+
+impl CasOutcome {
+    /// Makes one of the fields given.
+    pub fn new(result: CasResult, warnings: Vec<String>, recovered: Recovered) -> CasOutcome {
+        CasOutcome {
+            result,
+            warnings,
+            recovered,
+        }
+    }
 }
 
 /// What `REPO` holds.

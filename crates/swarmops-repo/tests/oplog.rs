@@ -20,8 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, ObjectKind, hash_object};
 use swarmops_repo::{
-    Advance, CasResult, CommitRequest, Depth, LocalRepo, OpRecord, Operation, RepoError,
-    UndoOutcome,
+    Advance, CasResult, Depth, LocalRepo, OpRecord, Operation, RepoError, UndoOutcome,
 };
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, ORDER_CHECK_ENV};
@@ -180,18 +179,13 @@ fn publish(repo: &LocalRepo, parent: ChangesetId, metadata: &[(&str, &[u8])]) ->
             .iter()
             .map(|(key, value)| ((*key).to_owned(), value.to_vec())),
     );
-    let req = CommitRequest {
-        metadata: all,
-        advance: Some(Advance {
-            name: "main".to_owned(),
-            actor: ACTOR.to_owned(),
-        }),
-        ..request(
-            &[parent],
-            vec![put("p", &[u8::try_from(metadata.len()).unwrap()])],
-            "p",
-        )
-    };
+    let mut req = request(
+        &[parent],
+        vec![put("p", &[u8::try_from(metadata.len()).unwrap()])],
+        "p",
+    );
+    req.metadata = all;
+    req.advance = Some(Advance::new("main", ACTOR));
     repo.commit(req).unwrap().id
 }
 

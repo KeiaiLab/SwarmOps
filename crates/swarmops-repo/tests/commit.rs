@@ -59,10 +59,9 @@ const PER_CHILD: u64 = 4;
 /// A request for `changes` on `parents` with the message "a test commit", recording the agent
 /// in its metadata.
 fn request(parents: &[ChangesetId], changes: Vec<Change>) -> CommitRequest {
-    CommitRequest {
-        metadata: vec![("agent".to_owned(), b"test/agent".to_vec())],
-        ..swarmops_testkit::repo::request(parents, changes, "a test commit")
-    }
+    let mut req = swarmops_testkit::repo::request(parents, changes, "a test commit");
+    req.metadata = vec![("agent".to_owned(), b"test/agent".to_vec())];
+    req
 }
 
 #[track_caller]
@@ -430,10 +429,11 @@ fn commit_refuses_a_reserved_metadata_key_too() {
 fn allow_empty_commits_a_changeset_with_the_parent_root() {
     let (_dir, _root, repo) = new_repo();
     let base = commit(&repo, &[], vec![put("a", b"a")]);
-    let empty = |parents: &[ChangesetId], changes| CommitRequest {
-        allow_empty: true,
-        message: b"nothing changes".to_vec(),
-        ..request(parents, changes)
+    let empty = |parents: &[ChangesetId], changes| {
+        let mut req = request(parents, changes);
+        req.allow_empty = true;
+        req.message = b"nothing changes".to_vec();
+        req
     };
 
     // No changes: the changeset keeps its parent's root, with an empty delta.
@@ -763,22 +763,14 @@ mod advance {
 
     /// A request for `changes` on `parents` ([`request`]) that advances ref `name`.
     fn advancing(parents: &[ChangesetId], changes: Vec<Change>, name: &str) -> CommitRequest {
-        CommitRequest {
-            advance: Some(Advance {
-                name: name.to_owned(),
-                actor: ACTOR.to_owned(),
-            }),
-            ..request(parents, changes)
-        }
+        let mut req = request(parents, changes);
+        req.advance = Some(Advance::new(name, ACTOR));
+        req
     }
 
     /// The move `advancing(.., name)` reports: from `old`, made now or before.
     fn moved(name: &str, old: Option<ChangesetId>, already_applied: bool) -> Advanced {
-        Advanced {
-            name: name.to_owned(),
-            old,
-            already_applied,
-        }
+        Advanced::new(name, old, already_applied)
     }
 
     /// A store with changeset `c0` (a file `a`) and main at it.
@@ -958,7 +950,9 @@ mod advance {
         let frames = journal_frames(&root);
 
         let advance = advancing(&[c0], vec![put("b", b"b")], "main").advance;
-        let out = repo.commit(CommitRequest { advance, ..plain }).unwrap();
+        let mut req = plain;
+        req.advance = advance;
+        let out = repo.commit(req).unwrap();
         assert_eq!(out.id, c1);
         assert_eq!(out.insert, InsertOutcome::AlreadyPresent);
         assert_eq!(out.advanced, Some(moved("main", Some(c0), false)));
@@ -1038,9 +1032,9 @@ mod advance {
         repo.commit(plain.clone()).unwrap();
         drop(repo);
         let advance = advancing(&[c0], vec![put("b", b"b")], "main").advance;
-        let out = listing_fails(&root)
-            .commit(CommitRequest { advance, ..plain })
-            .unwrap();
+        let mut req = plain;
+        req.advance = advance;
+        let out = listing_fails(&root).commit(req).unwrap();
         assert_eq!(out.insert, InsertOutcome::AlreadyPresent);
         let [warning] = &out.warnings[..] else {
             panic!("expected one warning, got {:?}", out.warnings);
@@ -1426,6 +1420,7 @@ fn root_commit_objects(req: &CommitRequest) -> [ObjectId; 3] {
         Change {
             path: file,
             op: ChangeOp::Put { kind, content },
+            ..
         },
     ] = &req.changes[..]
     else {
@@ -1472,9 +1467,10 @@ fn a_commit_in_one_fanout_dir() -> (CommitRequest, String) {
         .find(|req| share_a_dir(req, 0, 1))
         .expect("about one content in 256 fits");
     let req = (0..10_000_u32)
-        .map(|i| CommitRequest {
-            message: format!("a test commit, take {i}").into_bytes(),
-            ..base.clone()
+        .map(|i| {
+            let mut req = base.clone();
+            req.message = format!("a test commit, take {i}").into_bytes();
+            req
         })
         .find(|req| share_a_dir(req, 0, 2))
         .expect("about one message in 256 fits");
@@ -2030,6 +2026,7 @@ mod blob_by_id {
             Change {
                 path: file,
                 op: ChangeOp::PutBlob { kind, id },
+                ..
             },
         ] = &req.changes[..]
         else {
@@ -2110,21 +2107,11 @@ mod blob_by_id {
         let size = u64::try_from(content.len()).unwrap();
         let stored = repo.put_blob(content.clone()).unwrap();
         let id = blob(&content);
-        assert_eq!(
-            stored,
-            BlobPut {
-                id,
-                size,
-                written: true
-            }
-        );
+        assert_eq!(stored, BlobPut::new(id, size, true));
         let again = repo.put_blob(content.clone()).unwrap();
         assert_eq!(
             again,
-            BlobPut {
-                written: false,
-                ..stored
-            },
+            BlobPut::new(stored.id, stored.size, false),
             "stored already"
         );
         drop(repo);
@@ -2157,10 +2144,8 @@ mod blob_by_id {
             Some((LeafKind::File, id, content.clone()))
         );
         // The same request with the content itself makes the same changeset.
-        let by_content = CommitRequest {
-            changes: vec![put("named.bin", &content)],
-            ..req
-        };
+        let mut by_content = req;
+        by_content.changes = vec![put("named.bin", &content)];
         let (_dir2, _root2, twin) = new_repo();
         assert_eq!(twin.commit(by_content).unwrap().id, out.id);
         assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);

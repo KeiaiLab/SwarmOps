@@ -60,6 +60,7 @@ pub const SKIP_AFTER: u64 = 1024;
 /// snapshot ([`RepoRead::first_parents`]). Each item reads its changeset's object, which names the
 /// next item; the start's also looks its index record up, which says whether the snapshot holds
 /// it. An error ends the walk.
+#[non_exhaustive]
 pub struct FirstParents<'a, O: ObjectStore> {
     read: &'a RepoRead<'a, O>,
     /// The changeset to give next; `None` once the walk has ended.

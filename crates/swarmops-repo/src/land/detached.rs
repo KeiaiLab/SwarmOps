@@ -28,6 +28,7 @@ use crate::repo::Repo;
 
 /// A detached land to make ([`Repo::land_detached`]): the change `(base, head]` onto `onto`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DetachedLand {
     /// Where the change starts: a first-parent ancestor of `head`, whose own changes are not part
     /// of it.
@@ -51,8 +52,31 @@ pub struct DetachedLand {
     pub extra_metadata: Vec<(String, Vec<u8>)>,
 }
 
+impl DetachedLand {
+    /// A detached land of `(base, head]` onto `onto` by `lander`: no key, the chain as
+    /// `squashed_from`, the head's message, and no more metadata.
+    pub fn new(
+        base: ChangesetId,
+        head: ChangesetId,
+        onto: ChangesetId,
+        lander: Signature,
+    ) -> DetachedLand {
+        DetachedLand {
+            base,
+            head,
+            onto,
+            lander,
+            key: None,
+            squashed_from: None,
+            message: None,
+            extra_metadata: Vec::new(),
+        }
+    }
+}
+
 /// What a detached land did ([`Repo::land_detached`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DetachedOutcome {
     /// `L`, written and inserted: in the index, named by no ref.
     Landed(ChangesetId),

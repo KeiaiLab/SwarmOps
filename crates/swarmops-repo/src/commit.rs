@@ -83,6 +83,7 @@ pub const RESERVED_METADATA_KEY_SUFFIX: &str = ":b64";
 
 /// One change of a [`CommitRequest`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Change {
     /// The path it changes.
     pub path: RepoPath,
@@ -90,8 +91,16 @@ pub struct Change {
     pub op: ChangeOp,
 }
 
+impl Change {
+    /// Makes one of the fields given.
+    pub fn new(path: RepoPath, op: ChangeOp) -> Change {
+        Change { path, op }
+    }
+}
+
 /// What a [`Change`] does at its path.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ChangeOp {
     /// The path holds `content` as a `kind` leaf afterwards: a file, an executable or a symlink
     /// (whose content is its target), never a directory. Missing directories on the way are
@@ -119,6 +128,7 @@ pub enum ChangeOp {
 
 /// A commit to make: changes to the first parent's tree, and the changeset's other fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CommitRequest {
     /// The parents, the mainline parent first: the changes apply to its tree. None for a root
     /// changeset, whose changes apply to the empty tree.
@@ -142,8 +152,42 @@ pub struct CommitRequest {
     pub advance: Option<Advance>,
 }
 
+impl CommitRequest {
+    /// Makes a commit request of its fields.
+    ///
+    /// Invariant: metadata keys strictly ascending, none ending in `:b64`, each path changed at
+    /// most once. `new` does not check it: [`Repo::commit`] does, before anything is written, with
+    /// [`check_metadata`] and [`RepoError::DuplicatePath`], as for a request built field by field.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "every field is required (the non-exhaustive design, decision 2)"
+    )]
+    pub fn new(
+        parents: Vec<ChangesetId>,
+        changes: Vec<Change>,
+        author: Signature,
+        committer: Signature,
+        message: Vec<u8>,
+        metadata: Vec<(String, Vec<u8>)>,
+        allow_empty: bool,
+        advance: Option<Advance>,
+    ) -> CommitRequest {
+        CommitRequest {
+            parents,
+            changes,
+            author,
+            committer,
+            message,
+            metadata,
+            allow_empty,
+            advance,
+        }
+    }
+}
+
 /// The ref a commit publishes its changeset on ([`CommitRequest::advance`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Advance {
     /// The ref: `main` or `release/<x>`.
     pub name: String,
@@ -152,8 +196,19 @@ pub struct Advance {
     pub actor: String,
 }
 
+impl Advance {
+    /// Makes one of the fields given.
+    pub fn new(name: &str, actor: &str) -> Advance {
+        Advance {
+            name: name.to_owned(),
+            actor: actor.to_owned(),
+        }
+    }
+}
+
 /// The move of the ref a commit advanced ([`CommitOutcome::advanced`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Advanced {
     /// The ref.
     pub name: String,
@@ -165,8 +220,20 @@ pub struct Advanced {
     pub already_applied: bool,
 }
 
+impl Advanced {
+    /// Makes one of the fields given.
+    pub fn new(name: &str, old: Option<ChangesetId>, already_applied: bool) -> Advanced {
+        Advanced {
+            name: name.to_owned(),
+            old,
+            already_applied,
+        }
+    }
+}
+
 /// What [`Repo::put_blob`] stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BlobPut {
     /// The blob's id, which a [`ChangeOp::PutBlob`] names it by.
     pub id: BlobId,
@@ -177,8 +244,16 @@ pub struct BlobPut {
     pub written: bool,
 }
 
+impl BlobPut {
+    /// Makes one of the fields given.
+    pub fn new(id: BlobId, size: u64, written: bool) -> BlobPut {
+        BlobPut { id, size, written }
+    }
+}
+
 /// What [`Repo::commit`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CommitOutcome {
     /// The changeset's id.
     pub id: ChangesetId,

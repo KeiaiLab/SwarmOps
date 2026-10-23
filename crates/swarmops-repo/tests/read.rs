@@ -393,11 +393,11 @@ fn cas_ref_through_repo_records_reflog() {
     assert_eq!(repo.get_ref("main").unwrap(), None);
     assert_eq!(
         repo.cas_ref("main", None, Some(c1), "agent/one").unwrap(),
-        CasOutcome {
-            result: CasResult::Applied { old: None },
-            warnings: Vec::new(),
-            recovered: Recovered::default(),
-        },
+        CasOutcome::new(
+            CasResult::Applied { old: None },
+            Vec::new(),
+            Recovered::default()
+        ),
         "a move whose every step succeeds has no warnings, and repaired nothing first"
     );
     assert_eq!(
@@ -487,14 +487,7 @@ fn create_open_and_info() {
     );
     assert_eq!(
         info,
-        RepoInfo {
-            repo_id: info.repo_id.clone(),
-            name: "demo".to_owned(),
-            store_version: 1,
-            changesets: 0,
-            refs: 0,
-            main: None,
-        }
+        RepoInfo::new(info.repo_id.clone(), "demo".to_owned(), 1, 0, 0, None)
     );
     assert_eq!(
         fs::read(root.join("FORMAT")).unwrap(),
@@ -1377,14 +1370,8 @@ mod span {
             calls();
             let span = FileSpan::Bytes { start: 1000 };
             let got = snap.read_file_span(cs, &path(name), span, 100).unwrap();
-            let want = FileSpanRead {
-                kind: LeafKind::File,
-                blob: id,
-                size: 1 << 20,
-                start: 1000,
-                bytes: content[1000..1100].to_vec(),
-                lines: None,
-            };
+            let bytes = content[1000..1100].to_vec();
+            let want = FileSpanRead::new(LeafKind::File, id, 1 << 20, 1000, bytes, None);
             assert_eq!(got, Some(want), "{name}");
             assert_eq!(
                 calls(),
@@ -1537,21 +1524,17 @@ mod span {
         assert_eq!(
             page.entries,
             [
-                ListedEntry {
-                    path: path("b.rs"),
-                    target: EntryTarget::Leaf(LeafKind::File, blob(b"fn b() {}\n")),
-                    size: Some(10),
-                },
-                ListedEntry {
-                    path: path("c"),
-                    target: EntryTarget::Dir(c),
-                    size: None,
-                },
-                ListedEntry {
-                    path: path("c/d.md"),
-                    target: EntryTarget::Leaf(LeafKind::File, blob(b"# d\n")),
-                    size: Some(4),
-                },
+                ListedEntry::new(
+                    path("b.rs"),
+                    EntryTarget::Leaf(LeafKind::File, blob(b"fn b() {}\n")),
+                    Some(10),
+                ),
+                ListedEntry::new(path("c"), EntryTarget::Dir(c), None),
+                ListedEntry::new(
+                    path("c/d.md"),
+                    EntryTarget::Leaf(LeafKind::File, blob(b"# d\n")),
+                    Some(4),
+                ),
             ]
         );
         // A file, or nothing, at the listed path.

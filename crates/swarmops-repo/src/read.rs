@@ -37,6 +37,7 @@ use crate::repo::{self, Repo};
 /// 2. Never hold it across requests. Besides going stale, a snapshot that counted index records
 ///    which a writer then cut back after a failed sync fails its lookups with an I/O error until
 ///    a new one is taken (storage spec §3).
+#[non_exhaustive]
 pub struct RepoRead<'r, O: ObjectStore> {
     pub(crate) repo: &'r Repo<O>,
     pub(crate) meta: MetaRead<'r>,
@@ -44,6 +45,7 @@ pub struct RepoRead<'r, O: ObjectStore> {
 
 /// What [`RepoRead::blobs`] read.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BlobsRead {
     /// The blobs found, each with its bytes, in the order asked.
     pub found: Vec<(BlobId, Vec<u8>)>,
@@ -63,6 +65,7 @@ impl<O: ObjectStore> std::fmt::Debug for RepoRead<'_, O> {
 
 /// A changeset as the store holds it: its record in the index, and its object.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct StoredChangeset {
     /// Its id.
     pub id: ChangesetId,
@@ -76,6 +79,7 @@ pub struct StoredChangeset {
 
 /// Which part of a file [`RepoRead::read_file_span`] reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FileSpan {
     /// The bytes from offset `start` to the file's end: none when `start` is at or past the end.
     Bytes {
@@ -95,6 +99,7 @@ pub enum FileSpan {
 
 /// What [`RepoRead::read_file_span`] read of a file.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FileSpanRead {
     /// The file's kind.
     pub kind: LeafKind,
@@ -113,8 +118,30 @@ pub struct FileSpanRead {
     pub lines: Option<(u64, u64)>,
 }
 
+impl FileSpanRead {
+    /// Makes one of the fields given.
+    pub fn new(
+        kind: LeafKind,
+        blob: BlobId,
+        size: u64,
+        start: u64,
+        bytes: Vec<u8>,
+        lines: Option<(u64, u64)>,
+    ) -> FileSpanRead {
+        FileSpanRead {
+            kind,
+            blob,
+            size,
+            start,
+            bytes,
+            lines,
+        }
+    }
+}
+
 /// One entry of a listing below a directory ([`RepoRead::list_tree_depth`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ListedEntry {
     /// Its path below the listed directory: its name, for one of the directory's own entries.
     pub path: RepoPath,
@@ -125,8 +152,16 @@ pub struct ListedEntry {
     pub size: Option<u64>,
 }
 
+impl ListedEntry {
+    /// Makes one of the fields given.
+    pub fn new(path: RepoPath, target: EntryTarget, size: Option<u64>) -> ListedEntry {
+        ListedEntry { path, target, size }
+    }
+}
+
 /// A page of a listing below a directory ([`RepoRead::list_tree_depth`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TreePage {
     /// The page's entries, in pre-order.
     pub entries: Vec<ListedEntry>,
