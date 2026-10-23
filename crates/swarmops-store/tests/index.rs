@@ -102,21 +102,14 @@ fn meta(
     delta_hash: [u8; 32],
     parents: Vec<ChangesetId>,
 ) -> ChangesetMeta {
-    ChangesetMeta {
-        id,
-        seq: 0,
-        generation,
-        delta_hash,
-        parents,
-    }
+    ChangesetMeta::new(id, 0, generation, delta_hash, parents)
 }
 
 /// `meta` as the index returns it for record `seq`.
 fn at_seq(meta: &ChangesetMeta, seq: u64) -> ChangesetMeta {
-    ChangesetMeta {
-        seq,
-        ..meta.clone()
-    }
+    let mut stored = meta.clone();
+    stored.seq = seq;
+    stored
 }
 
 /// An id that looks like a hash, a different one for each `n` (its first 8 bytes are
@@ -222,10 +215,8 @@ fn append_get_roundtrip_with_parents() {
     }
 
     // The index numbers its records itself; a seq the caller sets is ignored.
-    let late = ChangesetMeta {
-        seq: 77,
-        ..meta(id_of(5), 2, [0xd5; 32], vec![id_of(1)])
-    };
+    let mut late = meta(id_of(5), 2, [0xd5; 32], vec![id_of(1)]);
+    late.seq = 77;
     assert_eq!(index.append(&late).unwrap(), 4);
     assert_eq!(index.get(4).unwrap(), at_seq(&late, 4));
     assert_bad_call(index.get(5), "a rec past the end");
@@ -2009,21 +2000,25 @@ fn an_append_batch_cut_anywhere_counts_its_whole_prefix() {
 fn real_fs_appends_without_syncing_and_renames_durably() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("f");
-    assert_eq!(RealFs.append(&file, b"abc").unwrap(), 0, "creates the file");
     assert_eq!(
-        RealFs.append(&file, b"de").unwrap(),
+        RealFs::new().append(&file, b"abc").unwrap(),
+        0,
+        "creates the file"
+    );
+    assert_eq!(
+        RealFs::new().append(&file, b"de").unwrap(),
         3,
         "where the bytes start"
     );
-    assert_eq!(RealFs.append(&file, b"").unwrap(), 5);
+    assert_eq!(RealFs::new().append(&file, b"").unwrap(), 5);
     assert_eq!(fs::read(&file).unwrap(), b"abcde");
 
     let target = dir.path().join("g");
     fs::write(&target, b"old").unwrap();
-    RealFs.rename_durable(&file, &target).unwrap();
+    RealFs::new().rename_durable(&file, &target).unwrap();
     assert_eq!(fs::read(&target).unwrap(), b"abcde", "replaces the target");
     assert!(!file.exists());
-    let missing = RealFs.rename_durable(&file, &target);
+    let missing = RealFs::new().rename_durable(&file, &target);
     assert!(
         matches!(&missing, Err(e) if e.kind() == io::ErrorKind::NotFound),
         "{missing:?}"
@@ -2032,7 +2027,7 @@ fn real_fs_appends_without_syncing_and_renames_durably() {
     // CrashAtFs (k = 0 never aborts) and Arc forward both.
     #[cfg(feature = "test-hooks")]
     {
-        let fs: Arc<dyn FsOps> = Arc::new(CrashAtFs::new(RealFs, 0));
+        let fs: Arc<dyn FsOps> = Arc::new(CrashAtFs::new(RealFs::new(), 0));
         assert_eq!(fs.append(&file, b"xy").unwrap(), 0);
         fs.rename_durable(&file, &target).unwrap();
         assert_eq!(fs::read(&target).unwrap(), b"xy");
@@ -2117,7 +2112,7 @@ fn crash_at_any_index_write_recovers_to_whole_records() {
         }
         // The next writer repairs, appends what is missing (as replay would) and compacts,
         // under the order checker as the crashed one was.
-        let mut writer = Index::open(&layout, checked(RealFs)).unwrap();
+        let mut writer = Index::open(&layout, checked(RealFs::new())).unwrap();
         writer.repair_tail().unwrap();
         assert_eq!(writer.len(), have, "k={k}");
         append_all(&mut writer, &metas[usize::try_from(have).unwrap()..]);

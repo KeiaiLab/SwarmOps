@@ -71,6 +71,7 @@ const NAME_MAX: usize = 64;
 /// BLAKE3 of the key ([`Layout::derived_path`]). The file holds the whole key too, so that two
 /// keys whose hashes share those bytes never read each other's value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct DerivedSlot<'a> {
     /// The derivation's name, its directory under `meta/derived/`: 1 to 64 bytes of `[a-z0-9_]`,
     /// and not `tmp`, the directory of the temp files.
@@ -153,6 +154,7 @@ fn check_derivation(name: &str, version: u32) -> Result<(), StoreError> {
 /// subject the name gives, and the hash of the key it ends in, if any. [`DerivedStore::read_listed`]
 /// reads the key and the value the file holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub struct ListedValue {
     /// The object the value is about: its first byte the file's fan-out directory, the rest the
     /// name's first 62 hex digits.
@@ -171,6 +173,7 @@ impl ListedValue {
 
 /// What a whole value file holds, as [`DerivedStore::read_listed`] reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct StoredValue {
     /// The key of the slot it is the file of, as the file records it.
     pub key: Vec<u8>,
@@ -199,6 +202,7 @@ pub(crate) fn is_derived_name(name: &str) -> bool {
 /// [`DerivedStore::get`] and [`DerivedStore::put`] by slot, through the store's [`FsOps`], with
 /// no lock and no sync. Opening it touches nothing; a put makes the directories it needs.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct DerivedStore {
     layout: Layout,
     /// Every filesystem call goes through it, its failure located in the store.

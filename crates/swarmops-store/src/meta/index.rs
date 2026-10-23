@@ -59,6 +59,7 @@ use crate::layout::Layout;
 
 /// One changeset as the index holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ChangesetMeta {
     /// The changeset's id.
     pub id: ChangesetId,
@@ -124,6 +125,7 @@ const PARENTS: &str = "parents.log";
 /// what this handle counts.
 /// Lookups take `&self` and read with `read_at` on read-only handles; changes take
 /// `&mut self`, go through [`FsOps`], and need [`crate::MetaLock`].
+#[non_exhaustive]
 pub struct Index {
     /// What changes go through, and what locates a failure in the store.
     fs: StoreFs,

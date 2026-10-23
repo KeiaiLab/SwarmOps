@@ -108,6 +108,7 @@ const VIEWS: [(&str, u64); 4] = [
 /// documentation](self). A call that breaks a rule panics before it runs (or, for a rename
 /// that leaves the view files out of order, right after), with a message that starts
 /// `order check: W<n> violated by <method> <paths>`.
+#[non_exhaustive]
 pub struct OrderCheckFs<F: FsOps> {
     inner: F,
     state: Mutex<State>,

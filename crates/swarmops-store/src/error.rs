@@ -10,6 +10,7 @@ use crate::fs_ops::FsMethod;
 
 /// Why a store operation failed.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum StoreError {
     /// The filesystem refused an operation of the store's, as the [`IoFailure`] says: which
     /// operation, on which file of the store, and the operating system's error as it came. Only
@@ -171,6 +172,7 @@ pub enum StoreError {
 /// Which limit of the store's layout a request went past ([`StoreError::Limit`]; storage spec
 /// §2's `REPO` line and rule 1, and §3, "커밋 결과·오류·한도").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LimitKind {
     /// A changeset's parents: a journal record and `par.col` count them in one byte (255).
     Parents,
@@ -238,6 +240,7 @@ impl fmt::Display for LimitKind {
 /// working out of where the store's path leads, and compressing an object. A closed list of 22;
 /// [`FileOp::as_str`] gives the names `details.fs_op` carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum FileOp {
     /// A method of the [`crate::FsOps`] seam, named as [`FsMethod::as_str`] names it.
     Fs(FsMethod),
@@ -330,6 +333,7 @@ impl fmt::Display for FileOp {
 /// error 5)"`), or `"<op>: <error>"` with no file, then `"; <also>"` if something else failed;
 /// its [`std::error::Error::source`] is the operating system's error.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct IoFailure {
     /// The operation that failed.
     pub op: FileOp,

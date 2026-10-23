@@ -129,6 +129,7 @@ pub trait ObjectStore: Send + Sync {
 
 /// What [`ObjectStore::put_hashed_batch`] did with one object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PutOutcome {
     /// The object's id.
     pub id: ObjectId,
@@ -148,6 +149,7 @@ impl PutOutcome {
 /// An object's kind and payload length, as its file's header records them
 /// ([`ObjectStore::stat`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ObjectStat {
     /// The object's kind.
     pub kind: ObjectKind,
@@ -199,6 +201,7 @@ impl TmpOnce {
 /// may run other tasks of the pool meanwhile. So never call `flush` (or anything that
 /// flushes, such as a commit) from a task on that same pool: if such a task flushed the same
 /// store while another flush waited, the two would deadlock.
+#[non_exhaustive]
 pub struct FsObjectStore {
     layout: Layout,
     /// Every filesystem call goes through it, its failure located in the store, but those of

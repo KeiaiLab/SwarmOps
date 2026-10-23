@@ -74,6 +74,7 @@ const OFF_REREADS: u32 = 3;
 const MAX_ZEROED: u64 = 512;
 
 /// A handle on one store's metadata journal.
+#[non_exhaustive]
 pub struct Journal {
     log_path: Utf8PathBuf,
     off_path: Utf8PathBuf,
@@ -100,6 +101,7 @@ impl fmt::Debug for Journal {
 
 /// A torn tail cut off `journal.log`: the bytes of a frame that never reached its commit point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LogCut {
     /// Where the file was cut: where the torn tail started, and the file ends now.
     pub at: u64,
@@ -117,6 +119,7 @@ impl LogCut {
 /// What [`Journal::repair_tail`] changed to bring the journal to a clean end; all zero when it
 /// ended cleanly.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TailRepair {
     /// The torn tail cut off `journal.log`, if there was one.
     pub cut: Option<LogCut>,

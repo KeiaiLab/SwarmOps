@@ -46,11 +46,17 @@ fn key(fanout: u8, n: u8) -> Vec<u8> {
 }
 
 /// An entry that names changeset `n`.
+/// What `put_batch` reports: `written` and `existing` counts, and the `conflicts`' keys.
+fn put_of(written: u64, existing: u64, conflicts: Vec<Vec<u8>>) -> ExternalPut {
+    let mut put = ExternalPut::default();
+    put.written = written;
+    put.existing = existing;
+    put.conflicts = conflicts;
+    put
+}
+
 fn entry(n: u8, faithful: bool) -> ExternalEntry {
-    ExternalEntry {
-        changeset: changeset(n),
-        faithful,
-    }
+    ExternalEntry::new(changeset(n), faithful)
 }
 
 /// Three entries in two fan-out directories, in key order: two in `aa/`, the second not
@@ -81,7 +87,7 @@ fn store_root() -> (TempDir, Layout) {
 
 /// The index of the store `layout` lays out, on the real filesystem.
 fn index_of(layout: &Layout) -> ExternalIds {
-    ExternalIds::new(layout.clone(), Arc::new(RealFs))
+    ExternalIds::new(layout.clone(), Arc::new(RealFs::new()))
 }
 
 /// Whether `result` is a `BadCall`.
@@ -103,14 +109,7 @@ fn put_batch_then_get_reads_each_entry() {
     let index = index_of(&layout);
     let entries = three();
     let put = index.put_batch(SYSTEM_GIT, &entries).unwrap();
-    assert_eq!(
-        put,
-        ExternalPut {
-            written: 3,
-            existing: 0,
-            conflicts: Vec::new(),
-        }
-    );
+    assert_eq!(put, put_of(3, 0, Vec::new()));
     for (key, entry) in &entries {
         assert_eq!(
             index.get(SYSTEM_GIT, key).unwrap(),
@@ -248,11 +247,7 @@ fn put_batch_again_writes_nothing_and_another_entry_is_a_conflict() {
     let watched = ExternalIds::new(layout.clone(), Arc::new(recording));
     assert_eq!(
         watched.put_batch(SYSTEM_GIT, &entries).unwrap(),
-        ExternalPut {
-            written: 0,
-            existing: 3,
-            conflicts: Vec::new(),
-        }
+        put_of(0, 3, Vec::new())
     );
     let made = calls();
     let writes = ["create_dir_all", "write_durable_temp", "link_noclobber"];
@@ -280,14 +275,7 @@ fn put_batch_again_writes_nothing_and_another_entry_is_a_conflict() {
             ],
         )
         .unwrap();
-    assert_eq!(
-        put,
-        ExternalPut {
-            written: 1,
-            existing: 0,
-            conflicts: vec![key(0xaa, 2)],
-        }
-    );
+    assert_eq!(put, put_of(1, 0, vec![key(0xaa, 2)]));
     assert_eq!(
         index.get(SYSTEM_GIT, &key(0xaa, 2)).unwrap(),
         Some(entry(2, false))
@@ -411,15 +399,7 @@ fn an_entry_file_longer_than_an_entry_is_corrupt_and_read_no_further() {
         assert!(corrupt(listed_entry, &id), "list, {what}: {listed_entry:?}");
         assert!(read <= 45, "list read {read} bytes of the file, {what}");
         let (put, read) = reading(|| index.put_batch(SYSTEM_GIT, &[(id.clone(), named)]));
-        assert_eq!(
-            put.unwrap(),
-            ExternalPut {
-                written: 0,
-                existing: 0,
-                conflicts: vec![id.clone()],
-            },
-            "put, {what}"
-        );
+        assert_eq!(put.unwrap(), put_of(0, 0, vec![id.clone()]), "put, {what}");
         assert!(read <= 45, "put read {read} bytes of the file, {what}");
         // The file as it was: its length, and the entry it begins with.
         assert_eq!(fs::metadata(&path).unwrap().len(), len, "{what}");
@@ -572,13 +552,16 @@ fn external_ids_crashing_at_any_call_leave_whole_entries_or_none() {
     if let Some(root) = std::env::var_os(CRASH_ROOT) {
         let root = Utf8PathBuf::from_path_buf(root.into()).expect("UTF-8 store root");
         let k = std::env::var(CRASH_AT_ENV).unwrap().parse().unwrap();
-        let mut index = ExternalIds::new(Layout::new(root), Arc::new(CrashAtFs::new(RealFs, k)));
+        let mut index = ExternalIds::new(
+            Layout::new(root),
+            Arc::new(CrashAtFs::new(RealFs::new(), k)),
+        );
         index.set_parallelism(1);
         let put = index.put_batch(SYSTEM_GIT, &three());
         panic!("the crash hook did not fire: put_batch returned {put:?}");
     }
     let (_dir, layout) = store_root();
-    let counted = Arc::new(CrashAtFs::new(RealFs, 0));
+    let counted = Arc::new(CrashAtFs::new(RealFs::new(), 0));
     let mut index = ExternalIds::new(layout, Arc::clone(&counted) as Arc<dyn FsOps>);
     index.set_parallelism(1);
     index.put_batch(SYSTEM_GIT, &three()).unwrap();

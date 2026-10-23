@@ -47,6 +47,7 @@ const REC_LEN: usize = 8;
 /// (`read_at_binary_search_touches_only_key_column`), since §8 keeps the metadata store's reads
 /// off `FsOps`: diagnostics, not a test double.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct SortedView<const K: usize> {
     /// The key file and the rec file, read-only; `None` exactly when `len` is 0.
     files: Option<ViewFiles>,

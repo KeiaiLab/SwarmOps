@@ -75,6 +75,7 @@ const CRC_AT: usize = 40;
 /// What an external id names: a changeset of the store, and whether that changeset holds the
 /// external object faithfully.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ExternalEntry {
     /// The changeset.
     pub changeset: ChangesetId,
@@ -99,6 +100,7 @@ pub type ListedEntry = (Vec<u8>, Result<ExternalEntry, StoreError>);
 
 /// What [`ExternalIds::put_batch`] did with the entries it was given.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ExternalPut {
     /// How many it wrote.
     pub written: u64,
@@ -114,6 +116,7 @@ pub struct ExternalPut {
 /// A system's name is `[a-z0-9][a-z0-9-]{0,63}` (M11's `swarmops-<repo id>` among them) and a
 /// key has 2 to 64 bytes; every method refuses anything else as [`StoreError::BadCall`] before
 /// it makes a filesystem call.
+#[non_exhaustive]
 pub struct ExternalIds {
     layout: Layout,
     /// Every filesystem call goes through it, its failure located in the store, but the reads of

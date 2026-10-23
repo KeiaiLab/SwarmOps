@@ -58,7 +58,7 @@ const CRASH_PAYLOAD: &[u8] = b"this put must never become visible";
 const ONE_AT_A_TIME_ROOT: &str = "SWARMOPS_TEST_ONE_AT_A_TIME_ROOT";
 
 fn real_store(layout: &Layout) -> FsObjectStore {
-    FsObjectStore::open(layout.clone(), Box::new(RealFs))
+    FsObjectStore::open(layout.clone(), Box::new(RealFs::new()))
 }
 
 /// Deterministic incompressible bytes.
@@ -192,7 +192,7 @@ impl Watch for ParkFsyncs {
 
 fn counting_store(layout: &Layout) -> (FsObjectStore, Arc<Calls>) {
     let calls = Arc::new(Calls::default());
-    let fs = Watched(Arc::clone(&calls), RealFs);
+    let fs = Watched(Arc::clone(&calls), RealFs::new());
     (FsObjectStore::open(layout.clone(), Box::new(fs)), calls)
 }
 
@@ -872,7 +872,7 @@ fn concurrent_flush_waits_for_the_one_in_progress() {
             parked: parked_tx,
             gate: Arc::clone(&gate),
         },
-        RealFs,
+        RealFs::new(),
     );
     let store = FsObjectStore::open(layout.clone(), Box::new(fs));
     // Two puts (two callers, say) into one existing fan-out dir: the touched set is {F}.
@@ -1119,7 +1119,7 @@ fn crash_at_fs_aborts_child_at_call_k() {
 fn crash_at_k_aborts_before_call_k_runs() {
     if let Some(file) = std::env::var_os(APPENDS_FILE) {
         let k = std::env::var(CRASH_AT_ENV).unwrap().parse().unwrap();
-        let fs = CrashAtFs::new(RealFs, k);
+        let fs = CrashAtFs::new(RealFs::new(), k);
         for append in [b"1", b"2", b"3"] {
             fs.append(Path::new(&file), append).unwrap();
         }
@@ -1157,7 +1157,7 @@ fn crash_at_k_aborts_before_call_k_runs() {
 fn crash_at_fs_counts_its_calls_and_reports_them_when_dropped() {
     let (_root, layout) = new_root();
     let report = layout.root().join("calls").into_std_path_buf();
-    let fs = CrashAtFs::new(RealFs, 0).reporting_calls_to(report.clone());
+    let fs = CrashAtFs::new(RealFs::new(), 0).reporting_calls_to(report.clone());
     let dir = layout.root().join("d").into_std_path_buf();
     fs.create_dir_all(&dir).unwrap();
     assert!(fs.exists(&dir).unwrap());
@@ -1185,7 +1185,7 @@ fn fs_calls_hook_reports_how_many_calls_a_process_made() {
     }
     // The same put and flush in this process, counted.
     let (_root, layout) = new_root();
-    let counted = Arc::new(CrashAtFs::new(RealFs, 0));
+    let counted = Arc::new(CrashAtFs::new(RealFs::new(), 0));
     let mut store = FsObjectStore::open(layout, Box::new(Arc::clone(&counted)));
     store.set_parallelism(1);
     store.put(ObjectKind::Blob, CRASH_PAYLOAD).unwrap();
@@ -1244,10 +1244,7 @@ mod hashed {
 
     /// The outcome of a put of `kind`/`payload` that placed its file (`written`) or did not.
     fn outcome(kind: ObjectKind, payload: &[u8], written: bool) -> PutOutcome {
-        PutOutcome {
-            id: hash_object(kind, payload),
-            written,
-        }
+        PutOutcome::new(hash_object(kind, payload), written)
     }
 
     #[test]
@@ -1409,7 +1406,7 @@ mod stat {
 
     /// What `stat` gives for a stored object of `kind` whose header records `size`.
     fn stat_of(kind: ObjectKind, size: u64) -> ObjectStat {
-        ObjectStat { kind, size }
+        ObjectStat::new(kind, size)
     }
 
     #[test]
@@ -1602,7 +1599,7 @@ mod read_chunks {
             let what = format!("{kind:?} of {size} bytes");
             assert_eq!(fs::read(layout.object_path(id)).unwrap()[5], enc, "{what}");
             let (got, pieces) = visit(&store, id);
-            assert_eq!(got.unwrap(), Some(ObjectStat { kind, size }), "{what}");
+            assert_eq!(got.unwrap(), Some(ObjectStat::new(kind, size)), "{what}");
             let whole = store.get(id).unwrap().expect("stored").1;
             assert!(
                 pieces.concat() == whole,
