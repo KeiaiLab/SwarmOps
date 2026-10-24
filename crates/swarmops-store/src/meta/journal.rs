@@ -48,11 +48,15 @@
 //! or a place not its own (a misplaced, stale or lost frame), is [`StoreError::JournalCorrupt`]
 //! wherever it lies, never a torn tail; an entry that does not check, or names a payload CRC its
 //! frame does not have, is too; and recovery checks the listed frames from the checkpoint's seq
-//! on, not from frame 0. FORMAT 2 reads a frame header first, and refuses a bad one before it
-//! reads a byte of its payload. The calls through [`FsOps`], the syncs among them, are FORMAT
-//! 1's.
+//! on, not from frame 0. FORMAT 2 refuses a bad frame header before it reads a byte of its
+//! payload. The calls through [`FsOps`], the syncs among them, are FORMAT 1's.
+//!
+//! Both formats read `journal.log` a frame at a time, its header before its payload, and
+//! `journal.off` 4,096 entries at a time, so no read is sized by a file's length (the M6 design
+//! §5): a read of entries stops after one whose offset is not past the one before it, which no
+//! frame has, and a FORMAT 1 payload announced past the largest one this build decodes is
+//! sorted by its CRC as it streams by, never held.
 
-use std::borrow::Cow;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Write};
@@ -63,7 +67,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use camino::Utf8PathBuf;
 use swarmops_core::bytes;
 
-use super::frame::{self, BadHeader, Frame, HEADER_LEN_V2, Parsed, Place, Record};
+use super::READ_WINDOW;
+use super::frame::{self, BadHeader, Frame, HEADER_LEN_V2, MAX_PAYLOAD_LEN, Parsed, Place, Record};
 use crate::error::{FileOp, IoFailure, StoreError};
 use crate::format::StoreFormat;
 use crate::fs_ops::{self, FsMethod, FsOps, StoreFs};
@@ -94,6 +99,15 @@ const OFF_REREADS: u32 = 3;
 /// entries that list frames end takes one read of at most the last 4 KiB of the file (and the
 /// entry before them), however long it is.
 const MAX_ZEROED: u64 = 512;
+
+/// The longest read of `journal.log` or `journal.off`: one whole frame of the largest payload
+/// this build decodes. A frame is read a frame at a time and entries a window at a time, so no
+/// read is sized by a file's length (the M6 design §5).
+const MAX_READ: u64 = (HEADER_LEN_V2 + MAX_PAYLOAD_LEN) as u64;
+
+/// How many bytes of a FORMAT 1 payload longer than [`MAX_PAYLOAD_LEN`] one read takes while its
+/// CRC streams by: its header has no CRC of its own to refuse the length with.
+const CRC_CHUNK: u64 = 1 << 20;
 
 /// A handle on one store's metadata journal.
 #[non_exhaustive]
@@ -192,13 +206,15 @@ struct Head {
     crc: u32,
 }
 
-/// The bytes of `journal.log` from `start` to `end` that a read parses frames in (see
-/// [`Journal::parse_at`]): read with one `read_at` in FORMAT 1, as its pinned reads are; in
-/// FORMAT 2 frame by frame.
-struct Span {
-    start: u64,
-    end: u64,
-    bytes: Option<Vec<u8>>,
+/// What a read of `journal.off` entries does at one whose offset is not past the offset of the
+/// entry before it, which no frame it lists has.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Disorder {
+    /// Reads on: the entries may end in zeroed ones ([`Journal::last_entries`]).
+    ReadOn,
+    /// Stops after it: the frames read with the entries meet it, and report it, before any
+    /// entry past it, which would be read only to be dropped.
+    Stop,
 }
 
 /// A FORMAT 2 checkpoint: an offset, and the seq of the frame that starts there (the number of
@@ -368,9 +384,9 @@ impl Journal {
 
     /// Up to `limit` frames in journal order from frame `first` on: the frames `journal.off`
     /// lists whose seq is `first` or greater. Reads the entries (the previous frame's, the
-    /// wanted frames', and the next one) with one `read_at`, the previous frame's header with
-    /// another (frame 0 has none: it starts at 0), and the frames' bytes with a third (FORMAT 2:
-    /// a frame at a time, its header first).
+    /// wanted frames', and the next one) 4,096 at a time, stopping after one whose offset is not
+    /// past the one before it, the previous frame's header (frame 0 has none: it starts at 0),
+    /// and the frames a frame at a time, each header before its payload.
     ///
     /// `journal.off` is measured, and the entries read, before `journal.log`: every frame
     /// listed then was whole and durable before its entry was written, so it is whole in
@@ -404,9 +420,9 @@ impl Journal {
         // the wanted frames' entries, and the next one (where the last wanted frame ends).
         let previous = first.checked_sub(1);
         let count = u64::from(previous.is_some()) + wanted + u64::from(first + wanted < listed);
-        let entries = self.entries_of(previous.unwrap_or(first), count)?;
+        let entries = self.entries_of(previous.unwrap_or(first), count, Disorder::Stop)?;
         let skip = usize::from(previous.is_some());
-        if bytes::to_u64(entries.len()) != count {
+        if bytes::to_u64(entries.len()) != count && !ends_in_disorder(&entries) {
             // journal.off was cut since it was measured: entries of the snapshot are gone.
             let offset = entries.get(skip).map_or(0, |entry| entry.offset);
             return Ok(Attempt::Shrunk { offset });
@@ -424,7 +440,6 @@ impl Journal {
         if start > end {
             return Err(StoreError::JournalCorrupt { offset: start });
         }
-        let span = self.span(start, end)?;
 
         // Each listed frame where the one before it ends, whole, at its own place, with the
         // payload CRC its entry names.
@@ -439,7 +454,7 @@ impl Journal {
                 seq: frame_seq,
                 prev_crc,
             };
-            match self.parse_at(&span, offset, place)? {
+            match self.parse_at(end, offset, place)? {
                 Parsed::Whole { records, size, crc } if entry.lists(crc) => {
                     frames.push(Frame {
                         seq: frame_seq,
@@ -462,10 +477,10 @@ impl Journal {
         Ok(Attempt::Read(frames))
     }
 
-    /// Every frame from `offset` to the end of `journal.log`, read with one `read_at` (FORMAT 2:
-    /// a frame at a time, its header first): what
-    /// a reader applies past [`Journal::ckpt`]. `offset` must be a frame boundary: 0, a
-    /// listed frame's start, or the end of the last listed frame. Zeroed entries at the end of
+    /// Every frame from `offset` to the end of `journal.log`, read a frame at a time, each header
+    /// before its payload: what a reader applies past [`Journal::ckpt`]. `offset` must be a
+    /// frame boundary: 0, a listed frame's start, or the end of the last listed frame; the
+    /// entries from there on are read 4,096 at a time. Zeroed entries at the end of
     /// `journal.off`, past frame 0, are not listings: a power loss between an entry's append
     /// and its sync may keep the file's length and lose the bytes. They are dropped first, as
     /// recovery drops them, and the frames they would list read as whole frames not listed yet.
@@ -522,8 +537,8 @@ impl Journal {
         };
         // Where each listed frame from `first` on starts, and where the listed frame just
         // before the read and the one before that start.
-        let entries = self.entries_of(first, listed - first)?;
-        if bytes::to_u64(entries.len()) != listed - first {
+        let entries = self.entries_of(first, listed - first, Disorder::Stop)?;
+        if bytes::to_u64(entries.len()) != listed - first && !ends_in_disorder(&entries) {
             return shrunk();
         }
         let before = match first.checked_sub(1) {
@@ -567,13 +582,12 @@ impl Journal {
                 .ok()
                 .and_then(|i| entries.get(i).copied())
         };
-        let span = self.span(offset, log_len)?;
 
         let mut frames = Vec::new();
         let mut seq = first;
         let mut at = offset;
-        while at < span.end {
-            match self.parse_at(&span, at, Place { seq, prev_crc })? {
+        while at < log_len {
+            match self.parse_at(log_len, at, Place { seq, prev_crc })? {
                 Parsed::Whole { records, size, crc } => {
                     if let Some(entry) = listed_at(seq)
                         && (entry.offset != at || !entry.lists(crc))
@@ -998,21 +1012,19 @@ impl Journal {
         if start > log_len {
             return Err(StoreError::JournalCorrupt { offset: start });
         }
-        let span = self.span(start, log_len)?;
         // Where the unlisted frames begin, and the payload CRC of the frame before them.
         let (mut at, mut prev_crc) = match listed.checked_sub(1) {
-            Some(last) => self.check_last_listed(last, last_entry, &span, log_len)?,
+            Some(last) => self.check_last_listed(last, last_entry, log_len)?,
             None => (0, 0),
         };
-        let unlisted_at = at;
         let mut unlisted = Vec::new(); // each unlisted frame's offset and payload CRC
         let mut cut = None;
-        while at < span.end {
+        while at < log_len {
             let place = Place {
                 seq: listed + bytes::to_u64(unlisted.len()),
                 prev_crc,
             };
-            match self.parse_at(&span, at, place)? {
+            match self.parse_at(log_len, at, place)? {
                 Parsed::Whole { size, crc, .. } => {
                     unlisted.push((at, crc));
                     at += bytes::to_u64(size);
@@ -1040,7 +1052,7 @@ impl Journal {
         let mut rewritten = false;
         if let Some(&(from, _)) = unlisted.first() {
             // The frames' bytes, read before the sync: a failed one may drop the pages.
-            let frames = self.span_bytes(&span, unlisted_at, at)?;
+            let frames = self.read_frames(&unlisted, at)?;
             // Their writer may have died after its write and before its sync, so their bytes
             // may still be only in the page cache: a listed frame must be durable. If the sync
             // fails, no later one can vouch for them: they are written afresh.
@@ -1087,14 +1099,14 @@ impl Journal {
         Ok((tail, repair))
     }
 
-    /// The tail check's check of the last listed frame, `last`, listed by `entry`, at the start
-    /// of `span`: it starts where the frame listed before it ends, and that one where the one
-    /// before ends; it reads whole. Returns where it ends, and its payload CRC.
+    /// The tail check's check of the last listed frame, `last`, listed by `entry`: it starts
+    /// where the frame listed before it ends, and that one where the one before ends; it reads
+    /// whole within the `log_len` bytes of `journal.log`. Returns where it ends, and its payload
+    /// CRC.
     fn check_last_listed(
         &self,
         last: u64,
         entry: Entry,
-        span: &Span,
         log_len: u64,
     ) -> Result<(u64, u32), StoreError> {
         let start = entry.offset;
@@ -1114,7 +1126,7 @@ impl Journal {
             seq: last,
             prev_crc,
         };
-        match self.parse_at(span, start, place)? {
+        match self.parse_at(log_len, start, place)? {
             Parsed::Whole { size, crc, .. } if entry.lists(crc) => {
                 Ok((start + bytes::to_u64(size), crc))
             }
@@ -1125,9 +1137,10 @@ impl Journal {
     /// Checks that the first `listed` entries list sound frames: each starts where the one
     /// listed before it ends (frame 0 at 0) and reads whole, its CRC included (in FORMAT 2, at
     /// its own place, with the payload CRC its entry names). A failure is
-    /// [`StoreError::JournalCorrupt`] at that entry's offset. Reads every listed frame, one
-    /// `read_at` each (and its header with another); FORMAT 2, whose entries carry checksums of
-    /// their own, only those from the checkpoint's seq on.
+    /// [`StoreError::JournalCorrupt`] at that entry's offset. Reads every listed frame, a frame
+    /// at a time (its header first, and again with its payload), and the entries 4,096 at a
+    /// time; FORMAT 2, whose entries carry checksums of their own, only those from the
+    /// checkpoint's seq on.
     fn check_listed_chain(&self, listed: u64, log_len: u64) -> Result<(), StoreError> {
         let from = match self.format {
             StoreFormat::V1 => 0,
@@ -1143,7 +1156,8 @@ impl Journal {
                 }
             }
         };
-        for (seq, entry) in (from..).zip(self.entries_of(from, listed - from)?) {
+        let entries = self.entries_of(from, listed - from, Disorder::Stop)?;
+        for (seq, entry) in (from..).zip(entries) {
             let start = entry.offset;
             if start != next {
                 return Err(StoreError::JournalCorrupt { offset: start });
@@ -1151,8 +1165,7 @@ impl Journal {
             let Some(end) = self.frame_end(start, log_len)? else {
                 return Err(StoreError::JournalCorrupt { offset: start });
             };
-            let span = self.span(start, end)?;
-            match self.parse_at(&span, start, Place { seq, prev_crc })? {
+            match self.parse_at(end, start, Place { seq, prev_crc })? {
                 Parsed::Whole { size, crc, .. }
                     if bytes::to_u64(size) == end - start && entry.lists(crc) =>
                 {
@@ -1248,24 +1261,48 @@ impl Journal {
         decode_entry(self.format, index, &bytes)
     }
 
-    /// Up to `count` entries of `journal.off` from entry `first`, in one `read_at`.
+    /// Up to `count` entries of `journal.off` from entry `first`, 4,096 to a `read_at`.
     fn entries(&self, first: u64, count: u64) -> Result<Vec<u64>, StoreError> {
-        let entries = self.entries_of(first, count)?;
+        let entries = self.entries_of(first, count, Disorder::ReadOn)?;
         Ok(entries.iter().map(|entry| entry.offset).collect())
     }
 
-    /// [`Journal::entries`], with each entry's payload CRC (FORMAT 2). An entry that does not
-    /// match its own checksum is [`StoreError::JournalCorrupt`] at the offset it holds; a zeroed
-    /// one reads as offset 0, as in FORMAT 1.
-    fn entries_of(&self, first: u64, count: u64) -> Result<Vec<Entry>, StoreError> {
+    /// [`Journal::entries`], with each entry's payload CRC (FORMAT 2), read on past an entry
+    /// whose offset is not past the one before it or not, as `disorder` says. An entry that does
+    /// not match its own checksum is [`StoreError::JournalCorrupt`] at the offset it holds; a
+    /// zeroed one reads as offset 0, as in FORMAT 1. Fewer entries where the file ends first.
+    fn entries_of(
+        &self,
+        first: u64,
+        count: u64,
+        disorder: Disorder,
+    ) -> Result<Vec<Entry>, StoreError> {
         let len = self.entry_len();
-        let bytes = read_upto(&self.off, first * len, count * len)
-            .map_err(|e| self.off_failed(FileOp::ReadAt, e))?;
-        let len = usize::try_from(len).expect("8 or 16");
-        (first..)
-            .zip(bytes.chunks_exact(len))
-            .map(|(seq, entry)| decode_entry(self.format, seq, entry))
-            .collect()
+        let width = usize::try_from(len).expect("8 or 16");
+        let end = first.saturating_add(count);
+        let mut entries = Vec::new();
+        let mut at = first;
+        while at < end {
+            // 1. One window of entries: a file of any length is never read whole.
+            let wanted = (end - at).min(READ_WINDOW);
+            let bytes = read_upto(&self.off, at * len, wanted * len)
+                .map_err(|e| self.off_failed(FileOp::ReadAt, e))?;
+
+            // 2. Decoded, up to the first out of order when the caller stops there.
+            for (seq, entry) in (at..).zip(bytes.chunks_exact(width)) {
+                entries.push(decode_entry(self.format, seq, entry)?);
+                if disorder == Disorder::Stop && ends_in_disorder(&entries) {
+                    return Ok(entries);
+                }
+            }
+
+            // 3. The file ends within the window: a writer cut it since it was measured.
+            if bytes::to_u64(bytes.len()) < wanted * len {
+                break;
+            }
+            at += wanted;
+        }
+        Ok(entries)
     }
 
     /// Where the frame at `offset` ends, judged by its header alone; `None` if the header,
@@ -1309,79 +1346,96 @@ impl Journal {
         Ok((end <= log_len).then_some(Head { end, crc }))
     }
 
-    /// The bytes of `journal.log` from `start` to `end` to parse frames in: read now in FORMAT 1,
-    /// with one `read_at` (fewer if the file ends first); frame by frame in FORMAT 2.
-    fn span(&self, start: u64, end: u64) -> Result<Span, IoFailure> {
-        match self.format {
-            StoreFormat::V1 => {
-                let bytes = self.read_log(start, end - start)?;
-                Ok(Span {
-                    start,
-                    end: start + bytes::to_u64(bytes.len()),
-                    bytes: Some(bytes),
-                })
+    /// The bytes of the whole frames `unlisted` names (each one's offset and payload CRC, in
+    /// order), the last of them ending at `end`: read a frame at a time, and all there, as the
+    /// tail check found them under the lock.
+    fn read_frames(&self, unlisted: &[(u64, u32)], end: u64) -> Result<Vec<u8>, IoFailure> {
+        let ends = unlisted
+            .iter()
+            .skip(1)
+            .map(|&(offset, _)| offset)
+            .chain([end]);
+        let mut bytes = Vec::new();
+        for (&(start, _), stop) in unlisted.iter().zip(ends) {
+            let frame = self.read_log(start, stop - start)?;
+            if bytes::to_u64(frame.len()) < stop - start {
+                let gone = io::Error::from(io::ErrorKind::UnexpectedEof);
+                return Err(self.log_failed(FileOp::ReadAt, gone));
             }
-            StoreFormat::V2 => Ok(Span {
-                start,
-                end,
-                bytes: None,
-            }),
+            bytes.extend(frame);
         }
+        Ok(bytes)
     }
 
-    /// The bytes of `span` from `from` to `to`, read again if the span holds none (FORMAT 2).
-    fn span_bytes<'a>(
-        &self,
-        span: &'a Span,
-        from: u64,
-        to: u64,
-    ) -> Result<Cow<'a, [u8]>, IoFailure> {
-        match &span.bytes {
-            Some(bytes) => {
-                let at = |offset: u64| usize::try_from(offset - span.start).expect("in the span");
-                Ok(Cow::Borrowed(&bytes[at(from)..at(to)]))
-            }
-            None => Ok(Cow::Owned(self.read_log(from, to - from)?)),
-        }
-    }
-
-    /// Parses the frame at `offset`, a frame boundary within `span`, which must sit at `place`.
-    /// FORMAT 1 parses the bytes the span read. FORMAT 2 reads the frame itself, its header
-    /// first: a header that fails its CRC, or announces a length no writer writes or a place not
-    /// its own, is judged before a byte of the payload is read, and a payload that runs past the
-    /// span's end is never read.
-    fn parse_at(&self, span: &Span, offset: u64, place: Place) -> Result<Parsed, IoFailure> {
-        if let Some(bytes) = &span.bytes {
-            let at = usize::try_from(offset - span.start).unwrap_or(usize::MAX);
-            return Ok(frame::parse_frame(bytes.get(at..).unwrap_or_default()));
-        }
-
-        // 1. The header, which says how long the payload is and where the frame belongs.
-        let header_len = bytes::to_u64(HEADER_LEN_V2);
-        if offset.saturating_add(header_len) > span.end {
+    /// Parses the frame at `offset`, a frame boundary before `end`, the end of `journal.log` as
+    /// measured, which must sit at `place`. Reads the frame itself, its header first: one that
+    /// says the frame runs past `end` leaves the payload unread, and so does, in FORMAT 2, a
+    /// header that fails its CRC or announces a length no writer writes or a place not its own.
+    /// A FORMAT 1 header has no CRC of its own: a payload it announces past the largest one this
+    /// build decodes is sorted by its CRC as it streams by ([`Journal::stream_crc`]).
+    fn parse_at(&self, end: u64, offset: u64, place: Place) -> Result<Parsed, IoFailure> {
+        // 1. The header, which says how long the payload is, and in FORMAT 2 where the frame
+        //    belongs. A FORMAT 1 length of 0 is a header that never reached the disk.
+        let header_len = frame::header_len(self.format);
+        let payload_at = offset.saturating_add(bytes::to_u64(header_len));
+        if payload_at > end {
             return Ok(Parsed::Short);
         }
-        let header = self.read_log(offset, header_len)?;
+        let header = self.read_log(offset, bytes::to_u64(header_len))?;
         let header = match frame::decode_header_in(self.format, &header) {
             Ok(Some(header)) => header,
             Ok(None) => return Ok(Parsed::Short),
             Err(BadHeader::Crc) => return Ok(Parsed::BadCrc),
             Err(BadHeader::Len) => return Ok(Parsed::Corrupt),
         };
+        if header.len == 0 {
+            return Ok(Parsed::Invalid { zero_len: true });
+        }
         if !header.sits_at(place) {
             return Ok(Parsed::Corrupt);
         }
 
-        // 2. The payload, if the span holds it all.
-        let (payload_at, len) = (offset + header_len, u64::from(header.len));
-        if payload_at + len > span.end {
+        // 2. The payload, if the file holds it all: whole, or streamed past the bound.
+        let len = u64::from(header.len);
+        if payload_at.saturating_add(len) > end {
             return Ok(Parsed::Short);
+        }
+        if len > bytes::to_u64(MAX_PAYLOAD_LEN) {
+            return self.stream_crc(payload_at, len, header.crc);
+        }
+
+        // 3. FORMAT 1: the whole frame, its header again, parsed by its codec as ever.
+        if self.format == StoreFormat::V1 {
+            let frame = self.read_log(offset, payload_at - offset + len)?;
+            return Ok(frame::parse_frame(&frame));
         }
         let payload = self.read_log(payload_at, len)?;
         if bytes::to_u64(payload.len()) < len {
             return Ok(Parsed::Short);
         }
-        Ok(frame::parse_payload(HEADER_LEN_V2, header.crc, &payload))
+        Ok(frame::parse_payload(header_len, header.crc, &payload))
+    }
+
+    /// What the FORMAT 1 payload of `len` bytes at `offset`, longer than any this build decodes,
+    /// is by its CRC, `crc` by its header, read [`CRC_CHUNK`] bytes at a time: matching, a payload
+    /// a writer wrote that does not decode ([`Parsed::Invalid`]); failing, [`Parsed::BadCrc`];
+    /// [`Parsed::Short`] if the file ends first.
+    fn stream_crc(&self, offset: u64, len: u64, crc: u32) -> Result<Parsed, IoFailure> {
+        let mut hasher = crc32fast::Hasher::new();
+        let mut done = 0;
+        while done < len {
+            let wanted = (len - done).min(CRC_CHUNK);
+            let chunk = self.read_log(offset + done, wanted)?;
+            if bytes::to_u64(chunk.len()) < wanted {
+                return Ok(Parsed::Short);
+            }
+            hasher.update(&chunk);
+            done += wanted;
+        }
+        if hasher.finalize() != crc {
+            return Ok(Parsed::BadCrc);
+        }
+        Ok(Parsed::Invalid { zero_len: false })
     }
 
     /// The index of the first of the `listed` entries that is `offset` or more (`listed` if
@@ -1488,8 +1542,13 @@ fn is_torn_unlisted(parsed: &Parsed) -> bool {
 }
 
 /// Up to `len` bytes of `file` from `offset`; fewer if the file ends first (another
-/// process may have cut it since its length was read).
+/// process may have cut it since its length was read). A read of more than [`MAX_READ`] bytes,
+/// which no caller makes, is refused (`InvalidInput`) before anything is held.
 fn read_upto(file: &File, offset: u64, len: u64) -> io::Result<Vec<u8>> {
+    if len > MAX_READ {
+        let why = format!("a read of {len} bytes, past the longest frame");
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, why));
+    }
     let len = usize::try_from(len).map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
     let mut buf = vec![0; len];
     let mut filled = 0;
@@ -1503,6 +1562,15 @@ fn read_upto(file: &File, offset: u64, len: u64) -> io::Result<Vec<u8>> {
     }
     buf.truncate(filled);
     Ok(buf)
+}
+
+/// Whether the last of `entries` holds an offset that is not past the one before it: no frame
+/// it lists has that offset, since each starts where the one before it ends.
+fn ends_in_disorder(entries: &[Entry]) -> bool {
+    match entries {
+        [.., before, last] => last.offset <= before.offset,
+        _ => false,
+    }
 }
 
 /// The size of one entry of `journal.off` in `format`.
@@ -1556,5 +1624,24 @@ impl Entry {
     /// zeroed entry, whose offset is checked instead.
     fn lists(&self, crc: u32) -> bool {
         self.crc.is_none_or(|listed| listed == crc)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// No read of a journal file is longer than one frame of the largest payload: a longer one,
+    /// which no caller makes, is refused before a byte is held.
+    #[test]
+    fn a_read_past_the_longest_frame_is_refused() {
+        let file = tempfile::tempfile().unwrap();
+        file.set_len(MAX_READ + 1).unwrap();
+        let refused = read_upto(&file, 0, MAX_READ + 1).map(|bytes| bytes.len());
+        assert!(
+            matches!(&refused, Err(e) if e.kind() == io::ErrorKind::InvalidInput),
+            "{refused:?}"
+        );
+        assert_eq!(read_upto(&file, MAX_READ, 1).unwrap(), [0]);
     }
 }

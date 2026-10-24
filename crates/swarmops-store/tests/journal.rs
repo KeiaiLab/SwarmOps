@@ -28,7 +28,7 @@ use proptest::prelude::*;
 use swarmops_core::{ChangesetId, ObjectId};
 use swarmops_store::{
     BadRecord, Frame, FsMethod, FsOps, Journal, Layout, LimitKind, LogCut, MetaLock, RealFs,
-    Record, StoreError, TailRepair,
+    Record, StoreError, StoreFormat, TailRepair,
 };
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, CrashAtFs};
@@ -2809,4 +2809,186 @@ fn lock_is_released_on_drop() {
         .join()
         .unwrap()
         .expect("the waiter gets the lock after the drop");
+}
+
+/// Twice the largest 32-bit length: a `journal.log` or `journal.off` padded to it, sparse, is
+/// what a read sized by the file's length would hold whole.
+const PADDED: u64 = 2 << 30;
+
+/// The most bytes a bounded read of a padded file may return in all: a few frames and windows
+/// of `journal.off` entries (4,096 entries, 64 KiB in FORMAT 2), never the padding.
+const MAX_READ_BYTES: u64 = 1 << 20;
+
+/// The most the peak resident memory may grow while a padded file is read: far less than the
+/// padding, which one read sized by the file's length would hold.
+const MAX_GROWTH_KIB: u64 = 256 << 10;
+
+/// The largest payload a FORMAT 1 frame holds: a count, then 65,535 changesets of 255 parents.
+const MAX_PAYLOAD: u32 = 539_615_192;
+
+/// What `call` returns, with the bytes this thread's `read` system calls returned during it
+/// (`rchar` of `/proc/thread-self/io`), less the read of that file itself.
+fn bytes_read<T>(call: impl FnOnce() -> T) -> (T, u64) {
+    fn rchar() -> (u64, u64) {
+        let text = fs::read_to_string("/proc/thread-self/io").unwrap();
+        let count = (text.lines())
+            .find_map(|line| line.strip_prefix("rchar:"))
+            .and_then(|count| count.trim().parse().ok())
+            .unwrap();
+        (count, text.len() as u64)
+    }
+    let (before, _) = rchar();
+    let value = call();
+    let (after, own) = rchar();
+    (value, after - before - own)
+}
+
+/// The process's peak resident memory, in KiB: `VmHWM` of `/proc/self/status` (nextest runs
+/// each test in a process of its own).
+fn peak_resident_kib() -> u64 {
+    let status = fs::read_to_string("/proc/self/status").unwrap();
+    (status.lines())
+        .find_map(|line| line.strip_prefix("VmHWM:"))
+        .and_then(|kib| kib.trim().trim_end_matches("kB").trim().parse().ok())
+        .unwrap()
+}
+
+/// What `call` returns, once it has read no more than [`MAX_READ_BYTES`].
+#[track_caller]
+fn bounded<T>(what: &str, call: impl FnOnce() -> T) -> T {
+    let (value, read) = bytes_read(call);
+    assert!(read <= MAX_READ_BYTES, "{what}: read {read} bytes");
+    value
+}
+
+/// A fresh store root in `format`, holding a journal of three frames whose tail is checked.
+fn three_frames_in(format: StoreFormat) -> (tempfile::TempDir, Layout, u64) {
+    let (dir, layout) = new_root();
+    let layout = Layout::with_format(layout.root(), format);
+    let journal = new_journal(&layout);
+    for n in 0..3 {
+        journal.append_frame(&[compacted(n)]).unwrap();
+    }
+    let end = journal.len();
+    (dir, layout, end)
+}
+
+/// The `journal.off` entry of `format` listing frame `seq` at `offset`, its payload CRC `crc`.
+fn entry_in(format: StoreFormat, seq: u64, offset: u64, crc: u32) -> Vec<u8> {
+    let mut entry = offset.to_le_bytes().to_vec();
+    if format == StoreFormat::V2 {
+        entry.extend(crc.to_le_bytes());
+        let mut covered = seq.to_le_bytes().to_vec();
+        covered.extend(&entry);
+        entry.extend(crc32fast::hash(&covered).to_le_bytes());
+    }
+    entry
+}
+
+/// A `journal.log` padded with zeros to 2 GiB, sparse, past three frames: readers read the frames
+/// one at a time and stop at the zeros, a torn tail, and recovery cuts it, none of them reading
+/// the padding or holding it, in either format (the M6 design §5).
+#[test]
+fn a_journal_log_padded_to_2_gib_reads_a_frame_at_a_time() {
+    for format in [StoreFormat::V1, StoreFormat::V2] {
+        let what = |call: &str| format!("{format:?} {call}");
+        let (_dir, layout, end) = three_frames_in(format);
+        set_len(layout.journal_log(), PADDED);
+        let before = peak_resident_kib();
+
+        let reader = reopen(&layout);
+        let tail = bounded(&what("tail_frames_from(0)"), || reader.tail_frames_from(0));
+        assert_eq!(tail.unwrap().len(), 3, "{format:?}");
+        let listed = bounded(&what("frames_from"), || reader.frames_from(0, usize::MAX));
+        assert_eq!(listed.unwrap().len(), 3, "{format:?}");
+        let at_end = bounded(&what("tail_frames_from(end)"), || {
+            reader.tail_frames_from(end)
+        });
+        assert!(at_end.unwrap().is_empty(), "{format:?}");
+
+        let repair = bounded(&what("repair_tail"), || reopen(&layout).repair_tail());
+        assert_eq!(
+            repair.unwrap().cut,
+            Some(LogCut::new(end, PADDED - end)),
+            "{format:?}"
+        );
+        assert_eq!(file_len(layout.journal_log()), end, "{format:?}");
+        let growth = peak_resident_kib().saturating_sub(before);
+        assert!(growth < MAX_GROWTH_KIB, "{format:?}: grew by {growth} KiB");
+    }
+}
+
+/// A `journal.off` padded with zeros to 2 GiB, sparse, past three entries, and ending in an
+/// entry that is not zero, so that the zeros are no tail a power loss left: readers read it a
+/// window at a time and stop at the first zeroed entry, which lists no frame, and recovery
+/// refuses the last entry; none reads the padding or holds it, in either format.
+#[test]
+fn a_journal_off_padded_to_2_gib_reads_in_windows() {
+    const FAR: u64 = 1 << 40;
+    for format in [StoreFormat::V1, StoreFormat::V2] {
+        let what = |call: &str| format!("{format:?} {call}");
+        let (_dir, layout, _end) = three_frames_in(format);
+        let entry_len = entry_in(format, 0, 0, 0).len() as u64;
+        let last = PADDED / entry_len - 1;
+        set_len(layout.journal_off(), last * entry_len);
+        append_bytes(layout.journal_off(), &entry_in(format, last, FAR, 0));
+        let before = peak_resident_kib();
+
+        let reader = reopen(&layout);
+        let count = bounded(&what("frame_count"), || reader.frame_count());
+        assert_eq!(count.unwrap(), last + 1, "{format:?}");
+        let tail = bounded(&what("tail_frames_from(0)"), || reader.tail_frames_from(0));
+        assert_corrupt_at(tail, 0, &what("tail_frames_from(0)"));
+        let listed = bounded(&what("frames_from"), || reader.frames_from(0, usize::MAX));
+        assert_corrupt_at(listed, 0, &what("frames_from"));
+        let repair = bounded(&what("repair_tail"), || reopen(&layout).repair_tail());
+        assert_corrupt_at(repair, FAR, &what("repair_tail"));
+        assert_eq!(file_len(layout.journal_off()), PADDED, "{format:?}");
+        let growth = peak_resident_kib().saturating_sub(before);
+        assert!(growth < MAX_GROWTH_KIB, "{format:?}: grew by {growth} KiB");
+    }
+}
+
+/// A FORMAT 1 header holds no CRC of its own, so an unlisted frame announcing a payload past the
+/// largest one a writer writes is still sorted by its payload's CRC, computed as it streams by:
+/// matching, it is a frame no writer of this build wrote that does not decode, damage; failing,
+/// it is a torn tail, cut. Neither holds the payload (515 MiB, sparse zeros).
+#[test]
+fn a_v1_frame_past_the_bound_is_sorted_by_a_streaming_crc() {
+    const LEN: u32 = MAX_PAYLOAD + 1;
+    let mut zeros = crc32fast::Hasher::new();
+    let chunk = vec![0; 1 << 20];
+    let mut left = usize::try_from(LEN).unwrap();
+    while left > 0 {
+        let n = left.min(chunk.len());
+        zeros.update(&chunk[..n]);
+        left -= n;
+    }
+    let zeros_crc = zeros.finalize();
+
+    for (crc, damage) in [(zeros_crc, true), (zeros_crc ^ 1, false)] {
+        let (_dir, layout, end) = three_frames_in(StoreFormat::V1);
+        let mut header = LEN.to_le_bytes().to_vec();
+        header.extend(crc.to_le_bytes());
+        append_bytes(layout.journal_log(), &header);
+        let log_len = end + 8 + u64::from(LEN);
+        set_len(layout.journal_log(), log_len);
+        let before = peak_resident_kib();
+
+        let tail = reopen(&layout).tail_frames_from(0);
+        let repair = reopen(&layout).repair_tail();
+        if damage {
+            assert_corrupt_at(tail, end, "a matching CRC, read");
+            assert_corrupt_at(repair, end, "a matching CRC, recovered");
+            assert_eq!(file_len(layout.journal_log()), log_len);
+        } else {
+            assert_eq!(tail.unwrap().len(), 3);
+            assert_eq!(repair.unwrap().cut, Some(LogCut::new(end, log_len - end)));
+        }
+        let growth = peak_resident_kib().saturating_sub(before);
+        assert!(
+            growth < MAX_GROWTH_KIB,
+            "damage {damage}: grew by {growth} KiB"
+        );
+    }
 }
