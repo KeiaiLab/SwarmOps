@@ -116,3 +116,52 @@ fn a_par_col_entry_out_of_place_fails_log_and_tilde_walks_the_objects() {
                     from the journal";
     assert_eq!(store.problems(), [mismatch]);
 }
+
+#[test]
+fn a_truncated_verify_exits_like_an_untruncated_one_with_problems() {
+    let (store, [c1, ..]) = chain();
+    // c1's id-view entry naming c3's record, and c3's par.col entry out of place: two problems.
+    let layout = store.layout();
+    let keys = fs::read(layout.meta_path("sorted/ids.key")).unwrap();
+    let key = ObjectId::from_hex(&c1).unwrap().0;
+    let at = (keys.as_chunks::<32>().0.iter())
+        .position(|entry| *entry == key)
+        .unwrap();
+    let recs_file = layout.meta_path("sorted/ids.rec");
+    let mut recs = fs::read(&recs_file).unwrap();
+    recs[at * 8..(at + 1) * 8].copy_from_slice(&2_u64.to_le_bytes());
+    fs::write(&recs_file, recs).unwrap();
+    let par = layout.meta_path("idx/par.col");
+    let mut entries = fs::read(&par).unwrap();
+    entries[16..24].copy_from_slice(&1_u64.to_le_bytes());
+    fs::write(&par, entries).unwrap();
+
+    let full = store.read(&["verify", "--deep"]);
+    let full_exit = full.exit();
+    let full = full.err("E_STORE_CORRUPT")["details"].take();
+    let total = full["problems"].as_array().unwrap().len();
+    assert!(total >= 2, "{full}");
+    assert_eq!(full["truncated"], false);
+
+    // One finding listed, the rest only counted; the exit code is the same.
+    let cut = store.read(&["verify", "--deep", "--max-findings", "1"]);
+    assert_eq!(cut.exit(), full_exit);
+    let cut = cut.err("E_STORE_CORRUPT")["details"].take();
+    assert_eq!(cut["problems"].as_array().unwrap().len(), 1, "{cut}");
+    assert_eq!(cut["findings"].as_array().unwrap().len(), 1, "{cut}");
+    assert_eq!(cut["found"], full["found"]);
+    assert_eq!(cut["problems"][0], full["problems"][0]);
+    assert_eq!(cut["truncated"], true);
+}
+
+#[test]
+fn verify_refuses_a_max_findings_of_0_or_over_the_cap() {
+    let (store, _) = chain();
+    for bad in ["0", "1001"] {
+        let run = store.read(&["verify", "--max-findings", bad]);
+        run.err("E_INVALID_ARG");
+        assert_eq!(run.exit(), 2, "{bad}");
+    }
+    let top = store.read(&["verify", "--max-findings", "1000"]).ok();
+    assert_eq!(top["truncated"], false);
+}

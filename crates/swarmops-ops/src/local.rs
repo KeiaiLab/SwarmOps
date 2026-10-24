@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::{Map, Value};
+use swarmops_api::VERIFY_MAX_FINDINGS;
 use swarmops_api::{
     Attribution, ChangeOp, ChangeOut, ChangesetDetail, ChangesetSummary, CommitReq, CommitResp,
     DeriveReq, DeriveResp, Diff, DiffFormat, DiffHunk, DiffLineOut, DiffReq, DiffStatus,
@@ -1919,32 +1920,60 @@ impl StoreOps for Recording<'_> {
         } else {
             Depth::Shallow
         };
-        let report = self.ops.repo.verify(depth).map_err(error::op)?;
+        // 1. The cap: the default, or what the request asks for within 1..=VERIFY_MAX_FINDINGS.
+        let max = req.max_findings.unwrap_or(VERIFY_MAX_FINDINGS);
+        if !(1..=VERIFY_MAX_FINDINGS).contains(&max) {
+            return Err(error::error(
+                ErrorCode::InvalidArg,
+                format!("max_findings is {max}; it takes 1 to {VERIFY_MAX_FINDINGS}"),
+            )
+            .with_details(error::details([("max_findings", max.into())]))
+            .with_hint(format!(
+                "pass a max_findings from 1 to {VERIFY_MAX_FINDINGS}"
+            )));
+        }
+        let max = usize::try_from(max).unwrap_or(usize::MAX);
+
+        // 2. The store-core problems, already cut to `max`; `found` counts them all.
+        let report = (self.ops.repo)
+            .verify_capped(depth, max)
+            .map_err(error::op)?;
         let mut problems: Vec<String> = (report.problems.iter())
             .map(|problem| error::one_line(problem.to_string()))
             .collect();
         let mut findings: Vec<VerifyFinding> = (report.problems.iter())
             .map(finding)
             .collect::<Result<_, _>>()?;
-        // A deep verify also re-derives the git export's oid memos against the objects, which the
-        // store-core verify cannot (rendering git objects lives in swarmops-git): a crafted or
-        // torn git_tree_oid, git_blob_oid or git_oid is reported as the other derived values are.
+        let mut found = report.found;
+        let mut truncated = report.truncated;
+
+        // 3. A deep verify also re-derives the git export's oid memos against the objects, which
+        // the store-core verify cannot (rendering git objects lives in swarmops-git): a crafted
+        // or torn git_tree_oid, git_blob_oid or git_oid is reported as the other derived values
+        // are. And the external id entries of native changesets against their export oids. Each
+        // counts in `found`; it is listed only while the report has room.
+        let mut extras: Vec<(String, VerifyFinding)> = Vec::new();
         if req.deep {
             for mismatch in swarmops_git::verify_export_oids(&self.ops.repo).map_err(error::op)? {
-                let (line, found) = git_memo_finding(&mismatch);
-                problems.push(line);
-                findings.push(found);
+                extras.push(git_memo_finding(&mismatch));
             }
-            // And the external id entries of native changesets against their export oids, which
-            // the store-core verify cannot render either.
             for entry in swarmops_git::verify_external_ids(&self.ops.repo).map_err(error::op)? {
-                let (line, found) = external_id_finding(&entry);
-                problems.push(line);
-                findings.push(found);
+                extras.push(external_id_finding(&entry));
             }
+        }
+        for (line, extra) in extras {
+            found = found.saturating_add(1);
+            if problems.len() >= max {
+                truncated = true;
+                continue;
+            }
+            problems.push(line);
+            findings.push(extra);
         }
         let mut out =
             VerifyReport::new(report.objects_checked, report.changesets_checked, problems);
+        out.found = found;
+        out.truncated = truncated;
         out.findings = findings;
         Ok(out)
     }
