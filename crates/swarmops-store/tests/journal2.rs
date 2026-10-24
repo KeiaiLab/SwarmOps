@@ -619,6 +619,7 @@ fn the_checkpoint_holds_offset_and_seq_and_its_entry_must_agree() {
         ("seq one past", ckpt(COMPACTED_FRAME, 2)),
         ("seq one before", ckpt(2 * COMPACTED_FRAME, 1)),
         ("seq past the entries", ckpt(3 * COMPACTED_FRAME, 4)),
+        ("seq at the end, offset not", ckpt(2 * COMPACTED_FRAME, 3)),
         ("offset of no frame", ckpt(COMPACTED_FRAME + 1, 1)),
         ("seq 0 past 0", ckpt(COMPACTED_FRAME, 0)),
     ];
@@ -640,6 +641,30 @@ fn the_checkpoint_holds_offset_and_seq_and_its_entry_must_agree() {
             other => panic!("{what}: {other:?}"),
         }
     }
+}
+
+/// An entry, its own checksum sound, that names a payload CRC other than its frame's, though the
+/// frame sits where the entry says: recovery, about to cut a torn tail or list a frame, walks
+/// the listed frames from the checkpoint's seq and refuses it, changing nothing.
+#[test]
+fn recovery_refuses_an_entry_naming_another_payload_crc() {
+    let (_dir, layout) = v2_root();
+    drop(journal_of(&layout, 3));
+    let crc0 = header_at(&fs::read(layout.journal_log()).unwrap(), 0).1;
+    patch(layout.journal_off(), 0, &entry2(0, 0, crc0 ^ 1));
+
+    // 1. A whole frame left to list: the readers see it too.
+    assert_all_corrupt_at(&layout, 0, "a frame to list", Recovery::ListsAt(0));
+
+    // 2. A torn tail to cut: only the walk sees it, the last frame and the headers before it
+    //    being sound.
+    let (_dir, layout) = v2_root();
+    drop(journal_of(&layout, 3));
+    patch(layout.journal_off(), 0, &entry2(0, 0, crc0 ^ 1));
+    append_bytes(layout.journal_log(), &[1, 2, 3]);
+    let before = fs::read(layout.journal_log()).unwrap();
+    assert_corrupt_at(reopen(&layout).repair_tail(), 0, "a torn tail to cut");
+    assert_eq!(fs::read(layout.journal_log()).unwrap(), before);
 }
 
 /// The changeset `n`, a root, as `insert_changeset` takes it.
