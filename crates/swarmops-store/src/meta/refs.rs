@@ -37,7 +37,7 @@
 //! [`FsOps::atomic_replace`]: crate::FsOps::atomic_replace
 //! [`FsOps::read`]: crate::FsOps::read
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -444,28 +444,91 @@ pub(crate) fn write(
     match moved(current, target) {
         // It says that already: see above for why that is enough (rule 5).
         next if next == current => return Ok(false),
-        Some(state) => {
-            let refs = layout.refs_dir();
-            make_dir(fs, &refs, &layout.meta_dir())?;
-            if let Some(dir) = path.parent()
-                && dir != refs
-            {
-                make_dir(fs, dir, &refs)?;
-            }
-            // FORMAT 2 files hold their name: their own is its hash.
-            let bytes = match layout.format() {
-                StoreFormat::V1 => format!("{}\n{}\n", state.target, state.version),
-                StoreFormat::V2 => format!("{name}\n{}\n{}\n", state.target, state.version),
-            };
-            fs.atomic_replace(path.as_std_path(), bytes.as_bytes())?;
-        }
-        None => {
-            fs.remove(path.as_std_path())?;
-            let dir = path.parent().expect("a ref file lies in meta/refs/");
-            fs.fsync_dir(dir.as_std_path())?;
-        }
+        Some(state) => put(layout, fs, name, &path, state)?,
+        None => remove(fs, &path)?,
     }
     Ok(true)
+}
+
+/// Makes the ref files hold `states` and nothing else, whatever they hold now: the file of each
+/// ref `states` names written unless it reads as that state already (a damaged, missing or stale
+/// one is), and every other ref file removed. Entries that are no ref files (temp files) are left
+/// alone. What a rebuild of the ref files from the journal writes ([`crate::meta::fsck`]); the
+/// caller holds [`crate::MetaLock`], and `states` holds valid names. Returns how many files it
+/// wrote or removed.
+pub(crate) fn rebuild(
+    layout: &Layout,
+    fs: &StoreFs,
+    states: &BTreeMap<String, RefState>,
+) -> Result<u64, StoreError> {
+    let mut changed = 0;
+
+    // 1. The refs `states` names, each file written unless it holds its state.
+    let mut kept = BTreeSet::new();
+    for (name, &state) in states {
+        let path = path(layout, name);
+        let holds = read_file(layout.format(), fs, &path).ok().flatten();
+        if holds.map(|(_, held)| held) != Some(state) {
+            put(layout, fs, name, &path, state)?;
+            changed += 1;
+        }
+        kept.insert(path);
+    }
+
+    // 2. Every other ref file: a ref no move leaves, or a file under a name it does not hold.
+    let listed: Vec<Utf8PathBuf> = match layout.format() {
+        StoreFormat::V1 => {
+            let mut names = vec!["main".to_owned()];
+            names.extend(release_names(layout, fs)?);
+            names.iter().map(|name| path(layout, name)).collect()
+        }
+        StoreFormat::V2 => {
+            let dir = layout.refs_dir();
+            let stems = file_stems(fs, &dir)?;
+            stems.iter().map(|stem| dir.join(stem)).collect()
+        }
+    };
+    for path in listed {
+        if kept.contains(&path) || !std::fs::exists(&path).unwrap_or(true) {
+            continue;
+        }
+        remove(fs, &path)?;
+        changed += 1;
+    }
+    Ok(changed)
+}
+
+/// Replaces the file of ref `name` at `path` with one holding `state`, making its directories
+/// first if they are missing.
+fn put(
+    layout: &Layout,
+    fs: &StoreFs,
+    name: &str,
+    path: &Utf8Path,
+    state: RefState,
+) -> Result<(), StoreError> {
+    let refs = layout.refs_dir();
+    make_dir(fs, &refs, &layout.meta_dir())?;
+    if let Some(dir) = path.parent()
+        && dir != refs
+    {
+        make_dir(fs, dir, &refs)?;
+    }
+    // FORMAT 2 files hold their name: their own is its hash.
+    let bytes = match layout.format() {
+        StoreFormat::V1 => format!("{}\n{}\n", state.target, state.version),
+        StoreFormat::V2 => format!("{name}\n{}\n{}\n", state.target, state.version),
+    };
+    fs.atomic_replace(path.as_std_path(), bytes.as_bytes())?;
+    Ok(())
+}
+
+/// Removes the ref file at `path`, then makes its removal durable.
+fn remove(fs: &StoreFs, path: &Utf8Path) -> Result<(), StoreError> {
+    fs.remove(path.as_std_path())?;
+    let dir = path.parent().expect("a ref file lies in meta/refs/");
+    fs.fsync_dir(dir.as_std_path())?;
+    Ok(())
 }
 
 /// The file of ref `name`: `refs/<name>`, or in FORMAT 2 `refs2/<file_stem(name)>`.
