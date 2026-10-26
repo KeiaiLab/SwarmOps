@@ -1,4 +1,4 @@
-//! Helpers shared by the journal fuzz targets: the canonical frame encoding, and a model of how
+//! Helpers shared by the journal fuzz targets (`v2` holds the FORMAT 2 ones): the canonical frame encoding, and a model of how
 //! the bytes at a frame boundary read. The model's frame layer (length, CRC, record count) is
 //! written from the layout (storage spec §3), not from the store's parser. Its records are
 //! decoded by the store's own `Record::decode`, which the targets check by re-encoding what it
@@ -10,6 +10,8 @@
 //! ```
 
 use std::io;
+
+pub mod v2;
 
 use swarmops_store::{Record, StoreError};
 

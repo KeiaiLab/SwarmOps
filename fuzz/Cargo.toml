@@ -18,6 +18,7 @@ bench = false
 [dependencies]
 libfuzzer-sys = "0.4.13"
 arbitrary = { version = "1.5.0", features = ["derive"] }
+blake3 = "1.8.7"
 crc32fast = "1.5.2"
 # The workspace's crates, at its version (RELEASE.md bumps it here too): cargo deny refuses a
 # dependency without a version requirement, a path one included.
@@ -52,6 +53,34 @@ bench = false
 [[bin]]
 name = "journal_recovery"
 path = "fuzz_targets/journal_recovery.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "object_file"
+path = "fuzz_targets/object_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "frame2_decode"
+path = "fuzz_targets/frame2_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "journal2_recovery"
+path = "fuzz_targets/journal2_recovery.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ref_file2"
+path = "fuzz_targets/ref_file2.rs"
 test = false
 doc = false
 bench = false
