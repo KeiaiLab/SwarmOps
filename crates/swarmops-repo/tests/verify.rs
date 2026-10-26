@@ -1528,3 +1528,67 @@ fn verify_capped_clean_store_is_not_truncated() {
         (0, 0, false)
     );
 }
+
+#[test]
+fn verify_reports_format_2_seq_prev_crc_and_entry_crc_damage() {
+    use swarmops_store::StoreFormat;
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0_u32;
+        for &b in bytes {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ (0xedb8_8320 & (0_u32.wrapping_sub(crc & 1)));
+            }
+        }
+        !crc
+    }
+
+    for kind in ["seq", "prev_crc", "entry_crc"] {
+        let (_dir, root, repo) = new_repo();
+        let c1 = commit(&repo, &[], vec![put("f", b"1")]);
+        let c2 = commit(&repo, &[c1], vec![put("f", b"2")]);
+        repo.cas_ref("main", None, Some(c2), "test/agent").unwrap();
+        repo.upgrade().unwrap();
+        let repo = LocalRepo::open(&root).unwrap();
+
+        let layout = Layout::with_format(&root, StoreFormat::V2);
+        let frames = Journal::open(&layout, Arc::new(RealFs::new()))
+            .unwrap()
+            .frames_from(0, 10)
+            .unwrap();
+        assert_eq!(frames.len(), 3, "{kind}");
+        let corrupt_offset = frames[1].offset;
+        let at = usize::try_from(corrupt_offset).unwrap();
+
+        match kind {
+            "seq" => {
+                let mut log = fs::read(layout.journal_log()).unwrap();
+                log[at + 4..at + 12].copy_from_slice(&99_u64.to_le_bytes());
+                let hcrc = crc32(&log[at..at + 20]);
+                log[at + 20..at + 24].copy_from_slice(&hcrc.to_le_bytes());
+                fs::write(layout.journal_log(), log).unwrap();
+            }
+            "prev_crc" => {
+                let mut log = fs::read(layout.journal_log()).unwrap();
+                log[at + 12] ^= 0x01;
+                let hcrc = crc32(&log[at..at + 20]);
+                log[at + 20..at + 24].copy_from_slice(&hcrc.to_le_bytes());
+                fs::write(layout.journal_log(), log).unwrap();
+            }
+            _ => {
+                let mut off = fs::read(layout.journal_off()).unwrap();
+                off[28] ^= 0x01;
+                fs::write(layout.journal_off(), off).unwrap();
+            }
+        }
+
+        let report = assert_problems(
+            &repo,
+            vec![VerifyProblem::JournalCorrupt {
+                offset: corrupt_offset,
+            }],
+        );
+        assert_eq!(report.changesets_checked, 2, "{kind}");
+    }
+}

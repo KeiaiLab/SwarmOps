@@ -252,6 +252,24 @@ impl<const K: usize> SortedView<K> {
         Ok(at)
     }
 
+    /// The keys in `range`, read with one `read_at` (none for an empty range).
+    pub(crate) fn keys(&self, range: Range<u64>) -> Result<Vec<[u8; K]>, StoreError> {
+        if range.is_empty() {
+            return Ok(Vec::new());
+        }
+        let Ok(count) = usize::try_from(range.end - range.start) else {
+            let e = io::Error::from(io::ErrorKind::OutOfMemory);
+            return Err(match &self.files {
+                Some(files) => files.keys_failed(e),
+                None => IoFailure::new(FileOp::ReadAt, None, e),
+            }
+            .into());
+        };
+        let mut bytes = vec![0; count * K];
+        self.read_keys(range.start, &mut bytes)?;
+        Ok(bytes.as_chunks::<K>().0.to_vec())
+    }
+
     /// The recs of the keys in `range`, read with one `read_at` (none for an empty range).
     pub(crate) fn recs(&self, range: Range<u64>) -> Result<Vec<u64>, StoreError> {
         if range.is_empty() {

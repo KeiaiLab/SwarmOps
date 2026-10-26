@@ -28,6 +28,8 @@ pub(crate) struct AppendOnlyColumn<const W: usize> {
     fs: StoreFs,
     /// The most entries one `read_at` of the file has taken: [`crate::Index::widest_read`].
     widest: AtomicU64,
+    /// How many `read_at` calls this handle has made.
+    reads: AtomicU64,
 }
 
 impl<const W: usize> AppendOnlyColumn<W> {
@@ -46,6 +48,7 @@ impl<const W: usize> AppendOnlyColumn<W> {
             file,
             fs: fs.clone(),
             widest: AtomicU64::new(0),
+            reads: AtomicU64::new(0),
         })
     }
 
@@ -82,10 +85,16 @@ impl<const W: usize> AppendOnlyColumn<W> {
         if buf.is_empty() {
             return Ok(());
         }
+        self.reads.fetch_add(1, Ordering::Relaxed);
         self.widest
             .fetch_max(bytes::to_u64(buf.len() / W), Ordering::Relaxed);
         (self.file.read_exact_at(buf, first * bytes::to_u64(W)))
             .map_err(|e| self.failed(FileOp::ReadAt, e))
+    }
+
+    /// How many `read_at` calls this file handle has made since it was opened.
+    pub(crate) fn reads(&self) -> u64 {
+        self.reads.load(Ordering::Relaxed)
     }
 
     /// The most entries one `read_at` of the file has taken since it was opened.

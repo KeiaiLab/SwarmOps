@@ -70,15 +70,12 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
-use std::io;
-use std::sync::Arc;
 
 use swarmops_core::bytes;
 use swarmops_core::{Changeset, ChangesetId, EntryTarget, ObjectId, ObjectKind, Tree, TreeId};
 use swarmops_store::external_ids;
 use swarmops_store::{
-    ChangesetMeta, ExternalEntry, Frame, Index, Journal, ListedEntry, ObjectStore, Record, RefFile,
-    SYSTEM_GIT, SortedView, StoreError,
+    ChangesetMeta, ExternalEntry, ListedEntry, ObjectStore, SYSTEM_GIT, StoreError,
 };
 
 use crate::derive::{LastModified, PathKey};
@@ -87,9 +84,6 @@ use crate::repo::Repo;
 use crate::tree_edit::TreeEdit;
 
 mod derived;
-
-/// How many journal frames verify reads with one call.
-const FRAME_BATCH: usize = 4096;
 
 /// What [`Repo::verify`] found.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -377,7 +371,6 @@ impl<O: ObjectStore> Repo<O> {
         max_findings: usize,
     ) -> Result<VerifyReport, RepoError> {
         let mut check = Check::new(self, depth);
-        check.lock_file();
         let changesets = check.metadata()?;
         if depth == Depth::Deep {
             check.derived = derived::Derived::read(self)?;
@@ -470,122 +463,41 @@ impl<'r, O: ObjectStore> Check<'r, O> {
 
     /// Reads and compares the metadata; returns the changesets to check, in seq order.
     fn metadata(&mut self) -> Result<Vec<ChangesetMeta>, RepoError> {
-        let (journal, journal_damage) = match self.open_journal()? {
-            Ok(journal) => (Some(journal), None),
-            Err(what) => (None, Some(what)),
-        };
-        let ckpt = match &journal {
-            Some(journal) => self.checkpoint(journal)?,
-            None => None,
-        };
-        let (index, index_damage) = match self.open_index()? {
-            Ok(index) => (Some(index), None),
-            Err(what) => (None, Some(what)),
-        };
-        // Before the journal is read: a writer appends a record only once its frame is durable
-        // and listed, so every record the index files hold now has its frame in what is read.
-        let held = match &index {
-            Some(index) => index.held()?,
-            None => 0,
-        };
-        let ref_files = self.repo.meta.ref_files()?;
-        // Before the journal too: an entry is linked only once the frame that records its
+        // Before the journal is read: an entry is linked only once the frame that records its
         // changeset is durable (W8), so an entry listed now that names a changeset the store
-        // holds names one of a frame read below.
+        // holds names one of a frame [`MetaStore::check`] reads below.
         self.external = self.external_ids()?;
         self.wants_git_oids = (self.external.iter())
             .any(|(system, entries)| system == SYSTEM_GIT && !entries.is_empty());
-        let (frames, whole) = match &journal {
-            Some(journal) => {
-                let (frames, corrupt) = read_frames(journal)?;
-                self.journal_corrupt = corrupt;
-                (frames, corrupt.is_none())
-            }
-            None => (Vec::new(), false),
-        };
-        // Every snapshot and write transaction reads the frames past the checkpoint: a
-        // checkpoint that is no frame boundary fails them all, so verify must say so.
-        let ckpt = match (&journal, ckpt) {
-            (Some(journal), Some(ckpt)) if whole => self.checkpoint_boundary(journal, ckpt)?,
-            _ => ckpt,
-        };
-
-        // What the damaged files leave unchecked depends on which of the others read.
-        if let Some(what) = journal_damage {
-            let rest = if index.is_some() {
-                ", and the index is checked as it is"
+        let checked = self.repo.meta.check()?;
+        for (name, corrupt) in checked.ref_problems() {
+            let problem = if *corrupt {
+                VerifyProblem::CorruptRef(name.clone())
             } else {
-                ""
+                VerifyProblem::DanglingRef(name.clone())
             };
-            self.meta.push(VerifyProblem::MetaCorrupt(format!(
-                "{what}: the journal is not checked{rest}"
-            )));
+            self.refs.push(problem);
         }
-        if let Some(what) = index_damage {
-            let rest = if whole {
-                ", and the journal's changesets are"
-            } else if journal.is_none() {
-                "; with no journal either, no changeset is known, so neither changesets nor the \
-                 targets of refs are checked"
-            } else {
-                "; with the journal read only up to its damage, neither the changesets past it \
-                 nor the targets of refs are checked"
-            };
-            self.meta.push(VerifyProblem::MetaCorrupt(format!(
-                "the changeset index does not open ({what}): it is not checked{rest}"
-            )));
+        self.meta.extend(
+            checked
+                .meta_corrupt
+                .into_iter()
+                .map(VerifyProblem::MetaCorrupt),
+        );
+        self.journal_corrupt = checked.journal_corrupt;
+        for seq in checked.journal_mismatches {
+            self.mismatches.insert((seq, MismatchCause::Journal));
         }
-        // Without them, a ref's target could be a changeset no readable file lists.
-        let targets_known = whole || index.is_some();
-        self.targets_known = targets_known;
-
-        let journaled = journal_changesets(&frames);
-        let mut records = Vec::new();
-        if let Some(index) = &index {
-            records = self.index_records(index)?;
-            let frames = if whole { Frames::Whole } else { Frames::Cut };
-            self.compare(&journaled, &records, ckpt, frames);
-            // A record past the journal's last changeset, which no frame holds, whether the index
-            // counts it or not.
-            if whole && held > bytes::to_u64(journaled.len()) {
-                self.mismatches
-                    .insert((bytes::to_u64(journaled.len()), MismatchCause::Journal));
-            }
-            self.check_view(index.ids_view(), &records, |meta| meta.id.0.0, Keys::One)?;
-            self.check_view(
-                index.dh_view(),
-                &records,
-                |meta| meta.delta_hash,
-                Keys::Many,
-            )?;
+        for seq in checked.view_mismatches {
+            self.mismatches.insert((seq, MismatchCause::SortedView));
         }
-
-        let journaled_count = journaled.len();
-        let mut changesets: Vec<ChangesetMeta> =
-            journaled.into_iter().map(|(meta, _)| meta).collect();
-        if !whole {
-            // The journal stops at damage, or is gone: past it, the index's records are what
-            // there is to check.
-            changesets.extend(records.into_iter().skip(journaled_count).flatten());
-        }
-        self.generations = changesets
+        self.targets_known = checked.targets_known;
+        self.generations = checked
+            .changesets
             .iter()
             .map(|meta| (meta.id, meta.generation))
             .collect();
-        for RefFile { name, state, .. } in ref_files {
-            match state {
-                Ok(state) if targets_known && !self.generations.contains_key(&state.target) => {
-                    self.refs.push(VerifyProblem::DanglingRef(name));
-                }
-                Ok(_) => {}
-                // A file that is no ref file; anything else that fails is no damage to report.
-                Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::InvalidData => {
-                    self.refs.push(VerifyProblem::CorruptRef(name));
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
-        Ok(changesets)
+        Ok(checked.changesets)
     }
 
     /// Every entry of the external id index, system by system: what
@@ -598,176 +510,6 @@ impl<'r, O: ObjectStore> Check<'r, O> {
             listed.push((system, entries));
         }
         Ok(listed)
-    }
-
-    /// Reports a `meta/lock` that every write refuses before it opens it (one that is not a
-    /// regular file), looked at without opening it.
-    fn lock_file(&mut self) {
-        if swarmops_store::MetaLock::refuses(&self.repo.layout) {
-            self.meta.push(VerifyProblem::MetaCorrupt(
-                "meta/lock is not a regular file: every write fails on it until it is removed, \
-                 and the next write makes a new one"
-                    .to_owned(),
-            ));
-        }
-    }
-
-    /// A handle on the journal, or what is wrong with it if one of its files is missing: the
-    /// failed open names the file, relative to the store's root.
-    fn open_journal(&self) -> Result<Result<Journal, String>, RepoError> {
-        let layout = &self.repo.layout;
-        match Journal::open(layout, Arc::clone(&self.repo.fs)) {
-            Ok(journal) => Ok(Ok(journal)),
-            Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::NotFound => {
-                Ok(Err(match &e.file {
-                    Some(file) => format!("{file} is missing"),
-                    None => format!("the journal does not open ({e})"),
-                }))
-            }
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// The journal's checkpoint; `None`, reported, if `journal.ckpt` is malformed.
-    fn checkpoint(&mut self, journal: &Journal) -> Result<Option<u64>, RepoError> {
-        match journal.ckpt() {
-            Ok(ckpt) => Ok(Some(ckpt)),
-            Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::InvalidData => {
-                self.meta.push(VerifyProblem::MetaCorrupt(
-                    "meta/journal.ckpt does not hold a u64le offset: the records the checkpoint \
-                     passed are not checked against the index"
-                        .to_owned(),
-                ));
-                Ok(None)
-            }
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// Whether the checkpoint is a frame boundary (0, a listed frame's start, or the end of the
-    /// last listed frame), read as every snapshot and write transaction reads the frames past
-    /// it; reported, and `None`, if not. Checked only when the journal read whole: otherwise
-    /// the damage reported is the journal's.
-    fn checkpoint_boundary(
-        &mut self,
-        journal: &Journal,
-        ckpt: u64,
-    ) -> Result<Option<u64>, RepoError> {
-        match journal.tail_frames_from(ckpt) {
-            Ok(_) => Ok(Some(ckpt)),
-            Err(StoreError::JournalCorrupt { .. }) => {
-                self.meta.push(VerifyProblem::MetaCorrupt(format!(
-                    "meta/journal.ckpt holds {ckpt}, which is not a frame boundary: reads and \
-                     writes fail on it, and the records the checkpoint passed are not checked \
-                     against the index"
-                )));
-                Ok(None)
-            }
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// A handle on the changeset index, or what is wrong with its files if they are too
-    /// damaged to open.
-    fn open_index(&self) -> Result<Result<Index, &'static str>, RepoError> {
-        match Index::open(&self.repo.layout, Arc::clone(&self.repo.fs)) {
-            Ok(index) => Ok(Ok(index)),
-            Err(StoreError::IndexCorrupt { what }) => Ok(Err(what)),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// The index's records, by rec; `None` for one that does not read (a mismatch).
-    fn index_records(&mut self, index: &Index) -> Result<Vec<Option<ChangesetMeta>>, RepoError> {
-        let mut records = Vec::new();
-        for rec in 0..index.len() {
-            match index.get(rec) {
-                Ok(meta) => records.push(Some(meta)),
-                Err(StoreError::IndexCorrupt { .. }) => {
-                    self.mismatches.insert((rec, MismatchCause::Journal));
-                    records.push(None);
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
-        Ok(records)
-    }
-
-    /// Compares the index's records with the journal's changeset records (each with its
-    /// frame's offset), place by place.
-    fn compare(
-        &mut self,
-        journaled: &[(ChangesetMeta, u64)],
-        records: &[Option<ChangesetMeta>],
-        ckpt: Option<u64>,
-        frames: Frames,
-    ) {
-        for (rec, record) in records.iter().enumerate() {
-            let Some(record) = record else { continue };
-            let wrong = match journaled.get(rec) {
-                Some((want, _)) => want != record,
-                // A record no committed transaction holds; past damage in the journal, or with
-                // no journal, there is no telling.
-                None => frames == Frames::Whole,
-            };
-            if wrong {
-                self.mismatches
-                    .insert((bytes::to_u64(rec), MismatchCause::Journal));
-            }
-        }
-        // The checkpoint passes a record only once the index holds it durably.
-        let Some(ckpt) = ckpt else { return };
-        for (seq, (_, offset)) in journaled.iter().enumerate().skip(records.len()) {
-            if *offset < ckpt {
-                self.mismatches
-                    .insert((bytes::to_u64(seq), MismatchCause::Journal));
-            }
-        }
-    }
-
-    /// Checks a sorted view against the index columns: each entry's key must be the key of the
-    /// record it names, the entries ascending (strictly by key for the id view, by key and then
-    /// record for the delta-hash view), and a view of m entries must name each of the records
-    /// 0 to m - 1 once. A record named wrongly, or not at all, is a mismatch.
-    fn check_view(
-        &mut self,
-        view: &SortedView<32>,
-        records: &[Option<ChangesetMeta>],
-        key_of: impl Fn(&ChangesetMeta) -> [u8; 32],
-        keys: Keys,
-    ) -> Result<(), RepoError> {
-        // The index opened only views that cover no more records than it holds.
-        let mut named = vec![false; to_usize(view.len())];
-        let mut previous: Option<([u8; 32], u64)> = None;
-        for at in 0..view.len() {
-            let (key, rec) = (view.key_at(at)?, view.rec_at(at)?);
-            let slot = usize::try_from(rec).ok().filter(|&slot| slot < named.len());
-            // A record named twice is named once under a key that is not its own, or out of
-            // order: the coverage below finds the record it pushed out.
-            let keyed = slot.is_some_and(|slot| {
-                records[slot]
-                    .as_ref()
-                    .is_some_and(|meta| key_of(meta) == key)
-            });
-            let ordered = previous.is_none_or(|before| match keys {
-                Keys::One => before.0 < key,
-                Keys::Many => before < (key, rec),
-            });
-            if let Some(slot) = slot {
-                named[slot] = true;
-            }
-            if !(keyed && ordered) {
-                self.mismatches.insert((rec, MismatchCause::SortedView));
-            }
-            previous = Some((key, rec));
-        }
-        for (rec, named) in named.iter().enumerate() {
-            if !named {
-                self.mismatches
-                    .insert((bytes::to_u64(rec), MismatchCause::SortedView));
-            }
-        }
-        Ok(())
     }
 
     /// Checks one changeset: its object, its record against the object and its parents'
@@ -1038,85 +780,4 @@ impl<'r, O: ObjectStore> Check<'r, O> {
             problems,
         }
     }
-}
-
-/// Every committed frame of `journal`, in order, read without a lock: the frames
-/// `journal.off` lists, each of which must read whole (the last one too), then the whole
-/// frames after them that a crash left unlisted. With where the journal is corrupt, if it is;
-/// the frames are then the ones before that point.
-fn read_frames(journal: &Journal) -> Result<(Vec<Frame>, Option<u64>), RepoError> {
-    let mut frames: Vec<Frame> = Vec::new();
-    let mut batch = FRAME_BATCH;
-    loop {
-        match journal.frames_from(bytes::to_u64(frames.len()), batch) {
-            Ok(read) if read.is_empty() => break,
-            Ok(read) => frames.extend(read),
-            Err(StoreError::JournalCorrupt { offset }) if batch == 1 => {
-                return Ok((frames, Some(offset)));
-            }
-            // The damage lies in this batch: read on a frame at a time, keeping those before.
-            Err(StoreError::JournalCorrupt { .. }) => batch = 1,
-            Err(e) => return Err(e.into()),
-        }
-    }
-    // From the last listed frame's start, a frame boundary: it comes again, then the whole
-    // frames after it, listed since or never.
-    let again = usize::from(!frames.is_empty());
-    let start = frames.last().map_or(0, |frame| frame.offset);
-    match journal.tail_frames_from(start) {
-        Ok(tail) => {
-            frames.extend(tail.into_iter().skip(again));
-            Ok((frames, None))
-        }
-        Err(StoreError::JournalCorrupt { offset }) => Ok((frames, Some(offset))),
-        Err(e) => Err(e.into()),
-    }
-}
-
-/// The changeset records of `frames`, in order, each as the index should hold it (its seq its
-/// place among them), with the offset of its frame.
-fn journal_changesets(frames: &[Frame]) -> Vec<(ChangesetMeta, u64)> {
-    let mut changesets = Vec::new();
-    for frame in frames {
-        for record in &frame.records {
-            if let Record::Changeset {
-                id,
-                generation,
-                delta_hash,
-                parents,
-            } = record
-            {
-                let meta = ChangesetMeta::new(
-                    *id,
-                    bytes::to_u64(changesets.len()),
-                    *generation,
-                    *delta_hash,
-                    parents.clone(),
-                );
-                changesets.push((meta, frame.offset));
-            }
-        }
-    }
-    changesets
-}
-
-/// The journal's frames verify read: all of them, or only up to damage (or none, with no
-/// journal).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Frames {
-    Whole,
-    Cut,
-}
-
-/// The records a sorted view's key names: one (the id view), or many, which then ascend by
-/// record (the delta-hash view).
-#[derive(Debug, Clone, Copy)]
-enum Keys {
-    One,
-    Many,
-}
-
-/// `n` as a `usize`; the counts verify converts are lengths of files it has open.
-fn to_usize(n: u64) -> usize {
-    usize::try_from(n).expect("a count of entries in an open file fits in usize")
 }

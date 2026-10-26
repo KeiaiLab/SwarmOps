@@ -102,9 +102,9 @@ const STAGING: &str = "meta.tmp";
 /// may hold at once.
 #[non_exhaustive]
 pub struct MetaStore {
-    layout: Layout,
+    pub(super) layout: Layout,
     /// What every change goes through, and what locates a failure in the store.
-    fs: StoreFs,
+    pub(super) fs: StoreFs,
     journal: Journal,
     lock_timeout: Duration,
     /// What every write transaction's index gets ([`Index::set_parallelism`]).

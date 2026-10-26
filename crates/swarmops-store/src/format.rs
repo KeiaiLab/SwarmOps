@@ -130,12 +130,6 @@ pub(crate) fn read_format_or_v1(layout: &Layout, fs: &StoreFs) -> Result<StoreFo
     })
 }
 
-/// The error a reader returns for a format arm this build does not have yet: `what` is the
-/// part of FORMAT 2 that is missing.
-pub(crate) fn not_built(what: &str) -> StoreError {
-    StoreError::Format(format!("{what} not built"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

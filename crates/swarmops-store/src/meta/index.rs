@@ -39,7 +39,7 @@
 //! included: [`Index::truncate_to`] says which lookups then fail.
 
 use std::num::NonZero;
-use std::ops::ControlFlow;
+use std::ops::{ControlFlow, Range};
 use std::panic;
 use std::sync::Arc;
 use std::thread;
@@ -358,6 +358,15 @@ impl Index {
         .unwrap_or(0)
     }
 
+    /// How many `read_at` calls the five column and parent files have made through this handle.
+    pub(crate) fn column_reads(&self) -> u64 {
+        self.ids.reads()
+            + self.gens.reads()
+            + self.dhs.reads()
+            + self.pars.reads()
+            + self.parents.reads()
+    }
+
     /// Appends `meta` as the next record and returns its rec (`meta.seq` is ignored):
     /// [`Index::append_batch`] of the one record, so one plain append (no fsync) to each of
     /// `parents.log`, `par.col`, `gen.col`, `dh.col` and `ids.col`, in that order, after the
@@ -511,6 +520,112 @@ impl Index {
         let id = ChangesetId::new(ObjectId::new(self.ids.entry(rec)?));
         let at = ParentsAt::from_entry(u64::from_le_bytes(self.pars.entry(rec)?));
         self.record(rec, id, at)
+    }
+
+    /// Records `range` as [`Index::get`] reads each one, read in blocks: one `read_at` per
+    /// [`super::READ_WINDOW`] entries of each column, and one of `parents.log` for each block
+    /// whose records' parents fit in a window of [`super::READ_WINDOW`] parent ids (else one
+    /// per record). A record past [`Index::len`] is [`StoreError::BadCall`]; a record whose
+    /// `par.col` entry points off `parents.log` is [`StoreError::IndexCorrupt`] in that record's
+    /// slot, while the others read on.
+    pub(crate) fn get_range(
+        &self,
+        range: Range<u64>,
+    ) -> Result<Vec<Result<ChangesetMeta, StoreError>>, StoreError> {
+        if range.is_empty() {
+            return Ok(Vec::new());
+        }
+        if range.start > range.end {
+            return Err(StoreError::BadCall(format!(
+                "range {}..{} starts past its end",
+                range.start, range.end
+            )));
+        }
+        self.check_counted(range.end - 1)?;
+        let ids = self.ids.entries(range.start, range.end)?;
+        let gens = self.gens.entries(range.start, range.end)?;
+        let dhs = self.dhs.entries(range.start, range.end)?;
+        let pars = self.pars.entries(range.start, range.end)?;
+        let ids = ids.as_chunks::<32>().0;
+        let gens = gens.as_chunks::<8>().0;
+        let dhs = dhs.as_chunks::<32>().0;
+        let pars = pars.as_chunks::<8>().0;
+        let ats: Vec<ParentsAt> = pars
+            .iter()
+            .map(|entry| ParentsAt::from_entry(u64::from_le_bytes(*entry)))
+            .collect();
+
+        // When every valid record's parents in the range span at most READ_WINDOW parent ids,
+        // one read of parents.log covers them all.
+        let mut span: Option<(u64, u64)> = None;
+        for &at in &ats {
+            if at.count > 0 && at.lies_within(self.parents_len) {
+                span = Some(match span {
+                    Some((low, high)) => (low.min(at.offset), high.max(at.end())),
+                    None => (at.offset, at.end()),
+                });
+            }
+        }
+        let window_bytes = super::READ_WINDOW * PARENT_LEN;
+        let logged = match span.filter(|&(low, high)| high - low <= window_bytes) {
+            Some((low, high)) => {
+                let len = usize::try_from(high - low).expect("a window fits in usize");
+                let mut buf = vec![0; len];
+                self.parents.read_at(low, &mut buf).map_err(|e| {
+                    if e.kind() == io::ErrorKind::UnexpectedEof {
+                        StoreError::IndexCorrupt {
+                            what: "a record's parents lie past the end of parents.log",
+                        }
+                    } else {
+                        e.into()
+                    }
+                })?;
+                Some((low, buf))
+            }
+            None => None,
+        };
+
+        let mut out = Vec::with_capacity(ids.len());
+        for (i, &at) in ats.iter().enumerate() {
+            let rec = range.start + bytes::to_u64(i);
+            let id = ChangesetId::new(ObjectId::new(ids[i]));
+            let generation = u64::from_le_bytes(gens[i]);
+            let delta_hash = dhs[i];
+            let parents = if !at.lies_within(self.parents_len) {
+                out.push(Err(StoreError::IndexCorrupt {
+                    what: "a record's parents lie off parents.log's parent boundaries or past its end",
+                }));
+                continue;
+            } else if at.count == 0 {
+                Vec::new()
+            } else if let Some((low, ref buf)) = logged {
+                let from = usize::try_from(at.offset - low).expect("within window");
+                let to = usize::try_from(at.end() - low).expect("within window");
+                buf[from..to]
+                    .as_chunks::<32>()
+                    .0
+                    .iter()
+                    .map(|p| ChangesetId::new(ObjectId::new(*p)))
+                    .collect()
+            } else {
+                match parents::read(&self.parents, at, self.parents_len) {
+                    Ok(parents) => parents,
+                    Err(e @ StoreError::IndexCorrupt { .. }) => {
+                        out.push(Err(e));
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                }
+            };
+            out.push(Ok(ChangesetMeta {
+                id,
+                seq: rec,
+                generation,
+                delta_hash,
+                parents,
+            }));
+        }
+        Ok(out)
     }
 
     /// The record of changeset `id`, if this handle counts one: the rec [`Index::find`] gives,
@@ -990,8 +1105,8 @@ impl Index {
     /// its own, not through this index's [`FsOps`]; `parents_file_len` is the length of
     /// `parents.log`. Records the sorted views cover were synced before the views were
     /// written: with no record past them, nothing is read. With no journal to read (an index
-    /// on its own), a checkpoint that does not hold a u64le, or a journal that is damaged, the
-    /// records are counted by their lengths ([`Index::by_length`]): that damage is the
+    /// on its own), a checkpoint that does not read (or, FORMAT 2, that its entry disagrees
+    /// with), or a journal that is damaged, the records are counted by their lengths ([`Index::by_length`]): that damage is the
     /// journal's, which verify reports. Any other error reading them is returned.
     fn vouched(&self, records: u64, parents_file_len: u64) -> Result<u64, StoreError> {
         if records <= self.views.covered() {
@@ -1009,6 +1124,8 @@ impl Index {
             Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::InvalidData => {
                 return self.by_length(records);
             }
+            // A FORMAT 2 checkpoint its entry disagrees with: the journal's damage too.
+            Err(StoreError::JournalCorrupt { .. }) => return self.by_length(records),
             Err(e) => return Err(e),
         };
         let frames = match journal.tail_frames_from(ckpt) {
