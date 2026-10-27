@@ -9,6 +9,10 @@
 # scratch repository. Hardened as ci.yml is, and run where it runs: on the maintainers' own host,
 # through the self-hosted runners labelled `swarmops-local`, each building into its runner's
 # persistent CARGO_TARGET_DIR, so no build cache travels through GitHub.
+# `just check-ci-slow` runs first and alone: its runners share one host, and next to the git
+# matrix and the fuzz smoke (load 319 on 32 cores) clone_cost_on_12000_commits ran into its
+# 20-minute kill: 1,048 s within the suite the run before, 721 s by itself. The other jobs wait
+# for it, pass or fail.
 # The git matrix alone runs in a container on that host, so that it needs none of its packages.
 name: Scheduled
 
@@ -71,6 +75,8 @@ jobs:
 
   fuzz:
     name: fuzz smoke
+    needs: slow
+    if: ${{ !cancelled() }}
     runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
     permissions:
       contents: read
@@ -120,6 +126,8 @@ jobs:
 
   bench-compare:
     name: bench/compare
+    needs: slow
+    if: ${{ !cancelled() }}
     runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
     permissions:
       contents: read
@@ -167,6 +175,8 @@ jobs:
   # moved by hand, with release.yml's.
   git-matrix:
     name: git matrix (${{ matrix.git }})
+    needs: slow
+    if: ${{ !cancelled() }}
     runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
     container:
       image: ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
@@ -297,7 +307,8 @@ jobs:
   # test hands the binary by its name (--token-env GH_TOKEN): never an argument.
   github-live:
     name: live run on GitHub
-    if: vars.SWARMOPS_GITHUB_LIVE_REPO != ''
+    needs: slow
+    if: ${{ !cancelled() && vars.SWARMOPS_GITHUB_LIVE_REPO != '' }}
     runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
     # The token is read in an environment of its own, without protection rules.
     environment: github-live
