@@ -464,7 +464,9 @@ impl MetaStore {
     /// repaired. No writer is between its frame's write and its `fdatasync`, or its cut,
     /// meanwhile, and every whole frame left has passed its commit point: neither a power loss nor
     /// a cut under rule 3 (a) can take back what the snapshot returns, which a lock-free snapshot
-    /// cannot promise (storage spec §3, "읽기"). Local readers keep the lock-free one.
+    /// cannot promise (storage spec §3, "읽기"). Local readers keep the lock-free one, but for
+    /// the operation log (`Repo::op_log`): `op undo` takes the numbers it lists, so a number it
+    /// lists must never be given to another operation by a take-back.
     ///
     /// It costs a wait behind the writer that holds the lock: about one transaction, longer under
     /// contention. The lock is held for the tail check and the snapshot only, not while the caller

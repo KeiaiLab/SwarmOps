@@ -1,8 +1,11 @@
 `op log` lists the store's operations, newest first. An operation is one write transaction: one
 frame of the store's journal, numbered from 0 in commit order. Each entry says what kind of write
 it was, which changesets it recorded and which refs it moved, by whom and when. It is the
-store's audit trail and the input of `op undo`, which takes an operation's number. It writes
-nothing, takes no lock and needs no identity.
+store's audit trail and the input of `op undo`, which takes an operation's number. It needs no
+identity. It waits for the store's lock, as a write does (`E_BUSY` after 10 s, retryable), so
+that a number it lists is never given to another operation. It writes nothing but the repair of
+the journal's tail that the next write would make, so a read-only store refuses it as it refuses
+a write.
 
 ### What an operation is
 
@@ -72,12 +75,12 @@ Before an `op undo`, list the operation again and check that its moves are the o
 
 ### Caveats
 
-- **A number can change hands.** `op log` lists a frame before its sync has finished. If that
-  sync fails, or a power loss comes first, the store takes the frame back, and the next write's
-  frame gets the same number. An `op undo` of the number you read then undoes that other
-  operation, as long as its refs still hold what it set. List again, after an error above all,
-  and check the operation's moves before you undo it
-  ([Known limitations](../../../known-limitations.md#commits-refs-and-history)).
+- **It waits behind writers.** A page waits for the write that holds the lock, about one
+  transaction; under a long burst of writes it can return `E_BUSY` instead. Retry it.
+- **A listed number keeps its operation.** `op log` lists only frames that are synced and listed
+  in the journal, so neither a failed sync nor a power loss takes one back. Only the triple fault
+  the journal's failure policy leaves open loses a listed frame
+  ([Known limitations](../../../known-limitations.md#durability)).
 - **Times are the writer's clock.** `at` and `created_at` are what each writer recorded, in
   different units; they need not grow with `op`.
 - **The log is the journal.** Nothing prunes it: every operation since the store was created is

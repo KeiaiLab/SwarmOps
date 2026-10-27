@@ -2,6 +2,11 @@
 //! operations, newest first ([`Repo::op_log`]), and an operation's ref moves restored by
 //! compare-and-swap in one transaction ([`Repo::undo`]).
 //!
+//! The log lists only operations that are committed and listed: it reads the committed snapshot
+//! ([`swarmops_store::MetaStore::read_committed`]), so it waits for the store's lock as a write
+//! does. No take-back the crash model allows (a failed sync, a power loss before it) can reach a
+//! frame it lists, so a number it lists is never given to another operation.
+//!
 //! An operation is one write transaction: a frame of the journal, numbered by the frame's seq,
 //! from 0 in commit order. Its records are what the frame holds, in its order: the changesets it
 //! inserted, the refs it moved and the marker of a compaction ([`OpRecord`]).
@@ -104,17 +109,21 @@ pub struct UndoOutcome {
 
 impl<O: ObjectStore> Repo<O> {
     /// Up to `limit` operations numbered below `before` (from the newest for `None`), newest
-    /// first, each with its records, from one snapshot of the metadata; and whether older
-    /// operations follow them in it.
+    /// first, each with its records, from one committed snapshot of the metadata; and whether
+    /// older operations follow them in it.
+    ///
+    /// It lists only operations that are committed and listed, and waits for the store's lock as
+    /// a write does (see [the module documentation](self)): [`StoreError::Busy`] after the lock
+    /// timeout, and the tail check's errors ([`StoreError::NotCommitted`], a read-only
+    /// filesystem) are returned as they are, never a lock-free listing instead.
     pub fn op_log(
         &self,
         before: Option<u64>,
         limit: usize,
     ) -> Result<(Vec<Operation>, bool), RepoError> {
-        let mut frames = self
-            .meta
-            .read()?
-            .frames_before(before, limit.saturating_add(1))?;
+        // The tail check's repair is no warning, as for the other committed readers.
+        let (snapshot, _repair) = self.meta.read_committed()?;
+        let mut frames = snapshot.frames_before(before, limit.saturating_add(1))?;
         let older = frames.len() > limit;
         frames.truncate(limit);
         let ops = frames

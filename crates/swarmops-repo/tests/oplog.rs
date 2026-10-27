@@ -13,9 +13,9 @@ use std::process::Output;
 use std::sync::Arc;
 #[cfg(feature = "test-hooks")]
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(feature = "test-hooks")]
+use std::sync::mpsc;
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, ObjectKind, hash_object};
@@ -24,13 +24,15 @@ use swarmops_repo::{
 };
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, ORDER_CHECK_ENV};
-use swarmops_store::{ChangesetMeta, Journal, MetaStore, RealFs, Recovered, StoreFormat};
+use swarmops_store::{
+    ChangesetMeta, Journal, MetaStore, RealFs, Recovered, StoreError, StoreFormat,
+};
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::child::{SIGABRT, run, this_test};
 use swarmops_testkit::faults::checked;
-use swarmops_testkit::fs::FailingFs;
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::fs::copy_dir;
+use swarmops_testkit::fs::{FailingFs, HoldThenFail};
 use swarmops_testkit::repo::{commit, new_repo, new_repo_as, put, request};
 use swarmops_testkit::store::layout_of;
 #[cfg(feature = "test-hooks")]
@@ -272,6 +274,68 @@ fn op_log_lists_each_transaction_newest_first() {
     assert_eq!(page(Some(1), 5), (vec![0], false));
     assert_eq!(page(Some(0), 5), (vec![], false));
     assert_eq!(page(Some(u64::MAX), 6), (vec![5, 4, 3, 2, 1, 0], false));
+}
+
+/// `op log` never lists a frame its writer cuts (storage spec §2 rule 3 (a)): it waits for the
+/// lock the writer holds between its frame's write and its failed sync, and then lists the
+/// operations committed before. So the number the next write takes, and `op log` lists, names
+/// that write only, and its `undo` undoes exactly its moves.
+#[test]
+fn op_log_never_lists_a_frame_its_writer_cuts() {
+    let (_dir, root, repo) = new_repo();
+    let c1 = commit(&repo, &[], vec![put("f", b"1")]); // op 0
+    cas(&repo, "main", None, Some(c1)); // op 1
+    let c2 = commit(&repo, &[c1], vec![put("f", b"2")]); // op 2
+    let c3 = commit(&repo, &[c1], vec![put("f", b"3")]); // op 3
+    let (fs, held) = HoldThenFail::new(layout_of(&root).journal_log(), RealFs::new());
+    let writer = LocalRepo::open_with_fs(&root, checked(fs)).unwrap();
+    let root = &root;
+    thread::scope(|scope| {
+        // 1. The writer's frame (op 4, main to c2) is whole in journal.log, not synced.
+        let writing = scope.spawn(|| writer.cas_ref("main", Some(c1), Some(c2), ACTOR));
+        held.wait();
+
+        // 2. `op log` waits for the lock the held writer keeps.
+        let (started, starting) = mpsc::channel();
+        let listing = scope.spawn(move || {
+            let reader = LocalRepo::open(root).unwrap();
+            started.send(()).unwrap();
+            reader.op_log(None, 10)
+        });
+        starting.recv_timeout(Duration::from_secs(60)).unwrap();
+        thread::sleep(Duration::from_millis(300));
+        assert!(
+            !listing.is_finished(),
+            "op log returned while the writer held the lock"
+        );
+
+        // 3. Let go: the sync fails, the writer cuts its frame, and op log lists op 3 newest.
+        held.release();
+        match writing.join().unwrap() {
+            Err(RepoError::Store(StoreError::NotCommitted { source })) => {
+                assert_eq!(source.raw_os_error(), Some(5), "{source}");
+            }
+            other => panic!("expected NotCommitted, got {other:?}"),
+        }
+        let (ops, older) = listing.join().unwrap().unwrap();
+        assert!(!older);
+        assert_eq!(seqs(&ops), [3, 2, 1, 0], "no trace of the cut frame");
+    });
+
+    // 4. The next write takes number 4; op log lists it with that write's move, and its undo
+    // undoes exactly that move.
+    let before = unix_now();
+    cas(&repo, "main", Some(c1), Some(c3));
+    let after = unix_now();
+    let (ops, _) = repo.op_log(None, 1).unwrap();
+    assert_eq!(seqs(&ops), [4]);
+    assert_eq!(
+        untimed(&ops[0], before, after),
+        [moved("main", Some(c1), Some(c3))]
+    );
+    let undone = undo(&repo, 4);
+    assert_eq!(moves_of(&undone), [("main".to_owned(), Some(c3), Some(c1))]);
+    assert_eq!(target(&repo, "main"), Some(c1));
 }
 
 /// `undo` of a move restores the ref to what it named before the move, in one new frame of one
