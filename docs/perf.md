@@ -995,3 +995,132 @@ run each: 11 commits, 144 KiB as a bare repository.
 `so clone` took about twice the manual path on this small repository. The difference is a fixed
 cost (the mirror's set-up, the fetch's own negotiation and the import), not a cost per commit; the
 first target's 1.1 times is for the 12,000-commit fixture above, where the ratio was 1.29.
+
+## v0.5.0 — 2026-10-27
+
+The measurements the roadmap to "usable" asks of v0.5.0 (G1 at 50 processes, G2, G4, G9's
+latencies, G17's ratios), each run on its own under the host's lock for heavy runs. Product code:
+`stable` at the commit that added the roadmap to usable, after v0.4.0; the harness changes are the
+`perf-v05` slice's (`SWARMOPS_TEST_CLI_CONTENTION_CHILDREN`, `landing::perf::landing_under_load`,
+`ws_processes::perf::perf_open_and_land_percentiles` and `swarmops-repo`'s `commit_latency` bench,
+all in `just perf`). Same host as M0: WSL2 (kernel 5.15.153.1), AMD Ryzen 9 7950X3D (32 threads),
+106 GiB RAM; Rust 1.99.0, optimized builds, every test binary built before its window. Every store
+lives in a fresh temporary directory under `~/.local/state/swarmops-bench`, on the ext4 virtual
+disk of the earlier runs.
+
+**Method and host state.** A driver waited before each step for a 1-minute load under 6, no CI job
+on this host's runners and no pilot soak cycle, then ran the step alone. The pilot's soak timer was
+stopped for both windows (21:55–22:46 and 22:47–23:07, +09:00), so no soak cycle ran beside a
+measurement; three of its half-hourly cycles were skipped. Each step's start load is in the
+tables. One step was disturbed: the first 50-process commit run (22:03) met a CI job that started
+during it (1-minute load up to 469); its numbers are given apart and the step was run again.
+Nearest-rank percentiles; one run per step unless the table says two.
+
+### G1: 50 agents committing through the binary
+
+The CLI contention test (as in "v0.1.0 — `just perf` in a quiet window") at 32 and at 50
+children, 1,000 commits each, each child on its own chain.
+
+| Run | Start load | Commits/s | `E_BUSY` | `meta.elapsed_ms` p50 / p99 / max | Uncontended commit p50 | `verify --deep` |
+| --- | --- | --- | --- | --- | --- | --- |
+| 32 × 1,000 | 4.14 (during 4.14–11.83) | **73.3** (32,000 in 436.7 s) | 0 | 428 / 645 / 708 ms | 19 ms | clean, 128,306 objects in 1,598 ms |
+| 50 × 1,000 | 3.49 (during 3.49–12.23) | **73.0** (50,000 in 685.0 s) | 0 | 669 / 1,043 / 1,106 ms | 19 ms | clean, 200,306 objects in 2,401 ms |
+| 50 × 1,000, disturbed by CI | 3.69 (during up to 468.97) | 44.1 (50,000 in 1,133.7 s) | 0 | 1,234 / 2,696 / 3,991 ms | 39 ms | clean, 200,306 objects in 2,817 ms |
+
+Throughput does not depend on the number of writers: the lock passes every 13.7 ms at both counts
+(one commit at a time), so each commit waits for about one round of the others, and the p99
+grows with the count (645 ms at 32, 1,043 ms at 50). Every child made all its commits (spread
+1.00×), and no commit took past 5 s, even disturbed. G1's target, no `E_BUSY` and no lost commit
+at 10 to 50 processes, is met at 50.
+
+### G2: one commit without its syncs
+
+`commit_latency` (`cargo bench -p swarmops-repo --bench commit_latency`): one `LocalRepo::commit`
+with `advance` of k changed files on `main`'s head, on a 1,000-file tree in 100 directories.
+`nosync` runs the store on the test kit's filesystem that skips every sync; `fsync` on the real
+one; `fsync less syncs` on the real one with, from each commit's time, the wall time during which
+at least one syncing call was running taken off (a lower bound: work on other threads overlaps
+those calls). Second run (22:47, start load 4.18); the first (22:44, load 1.08) agrees
+on `nosync` and `fsync` (within 4 %).
+
+| k files | Target (5 ms + 0.3 ms × k) | `nosync` p50 / p99 | `fsync less syncs` p50 / p99 | `fsync` p50 / p99 | Syncing calls per commit |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 5.3 ms | **1.29 / 1.83 ms** | 1.03 / 1.37 ms | 24.71 / 36.95 ms | 13.1 |
+| 10 | 8.0 ms | **2.88 / 3.60 ms** | 1.77 / 2.32 ms | 26.29 / 38.51 ms | 48.2 |
+| 100 | 35.0 ms | **10.73 / 13.81 ms** | 3.68 / 4.15 ms | 73.88 / 85.00 ms | 347.3 |
+
+Without its syncs a commit meets G2's target at every size, at p99 too. With full fsync (the only
+mode) the syncs are 85–95 % of a commit: about 23 ms for one file, six and a half raw
+`fdatasync`s of v0.1.0's probe (3.56 ms), and 63 ms for 100 files.
+
+### G4: landing under a swarm's load
+
+`landing::perf::landing_under_load`: N agents land on one `main` through the binary, each a thread
+running one process at a time as an agent does (testkit's CLI lander): `cat` of `main`, `commit` on
+the head it read, `land --key`, a land that ends retryable run again with its key. Each land puts a
+file of its own and every other one replaces the agent's line of a shared file. Open loop (the M4
+plan's scored cell): each agent lands once every 2 s ± 20 % for 120 s, so 16 lands/s are offered at
+32 agents and 25 at 50. Closed loop: 10 lands each, back to back. Latency is a land's, from its read
+of `main` to the end of its last `land` run; the retry rate is the land attempts beyond the first,
+over the landed lands. "Chain" is the gate's rules but the 30 s one: every land on `main` once,
+nothing else, every move a fast-forward, `verify --deep` clean.
+
+| Run | Start load | Lands/s | Latency p50 / p99 | Retries | Not landed, lost, doubled | Gate |
+| --- | --- | --- | --- | --- | --- | --- |
+| 32, open, run 1 (22:24) | 5.21 (5-minute 93.2, just after the disturbed run) | 16.0 (1,920) | 201.9 ms / 17.25 s | 159.3 % | 0 not landed; chain not checked | **failed**: a land took 42.3 s, past 30 s |
+| 32, open, run 2 (22:49) | 5.40 | 16.0 (1,920) | 73.9 ms / 1.01 s | 40.6 % | 0, 0, 0 | ok |
+| 50, open, run 1 (22:27) | 3.93 (5-minute 54.2) | **25.0** (3,000) | 115.6 ms / 7.94 s | 133.1 % | 0, 0, 0 | ok |
+| 50, open, run 2 (22:51) | 4.30 | **25.0** (3,000) | 108.8 ms / 7.32 s | 115.8 % | 0, 0, 0 | ok |
+| 50, closed, run 1 (22:30) | 4.55 (5-minute 34.9) | 26.3 (500 in 19.0 s) | 98.3 ms / 14.90 s | 134.4 % | 0, 0, 0 | ok |
+| 50, closed, run 2 (22:54) | 5.59 | 23.8 (500 in 21.0 s) | 101.0 ms / 14.89 s | 147.4 % | 0, 0, 0 | ok |
+
+Against G4's target at 50 processes: lands/s **met** (every offered land landed, 25/s, and 24–26/s
+back to back), nothing lost **met**, p99 under 500 ms **missed** (7.3–7.9 s), retries under 5 %
+**missed** (116–133 %). `E_BUSY` 0 and no land ended conflicted or exhausted in any run. The median
+land takes about 100 ms; the tail is lands that lose the race for `main` attempt after attempt:
+each attempt re-merges onto the new head and tries the compare-and-swap again, and a land that
+spends its 8 attempts (`E_CAS_RETRY_EXHAUSTED`) is run again by its agent. The two 32-agent runs
+differ by 17× at p99 (the first started as the host came off a CI job's load), so the tail
+depends on how the lands interleave and on the host, more than on the count.
+The landing model (the M4 prototypes' publish rules that settle a moved head inside the lock) is
+what the retry rate and the tail wait on (known-limitations, "Landing retries under a burst").
+
+### G9: workspace latencies
+
+`ws_processes::perf::*` (one run, 22:31, start load 4.15). Single timings are a median where the
+row says so; the percentiles row times 20 creates and 20 lands.
+
+| Case | Result | Target | Verdict |
+| --- | --- | --- | --- |
+| `ws status`, 50,000 files, nothing changed, warm (median of 20) | 52.3 ms | < 100 ms | met |
+| `ws status` after 100 edits (median of 20) | 56.4 ms | < 150 ms | met |
+| `ws create` of 10,000 files, 100 MiB, warm store (median of 3) | 787.5 ms | < 3 s | met |
+| `ws create --all` of a 10,000-file tree (64 B files), 20 times | p50 530.9 ms, p99 558.1 ms | — | — |
+| `ws land` of one changed file, 20 in a row | p50 206.9 ms, p99 229.4 ms | — | — |
+| update (`ws rebase`) after a land of 10 files, 50,000-file tree | 118.9 ms | < 100 ms | missed |
+| `ws commit` of 10 changed files, 50,000-file tree | 160.7 ms (`meta.elapsed_ms` 157) | G2's 8 ms plus hashing | missed |
+| `ws commit` of 100 changed files, 50,000-file tree (two runs) | 819.1 and 805.5 ms (815, 802) | G2's 35 ms plus hashing | missed |
+| `ws land --check true` overhead, 12,000 changesets | 47.3 ms (112.3 ms unchecked, 159.6 ms checked) | < 1 s | met |
+| `ws create` of the 50,000-file tree | 1,782.5 ms | — | — |
+
+The case the test prints as "commit of 1 changed files" commits 100 files: the 100 edits of the
+status row before it were never committed, so it is the first of the two 100-file rows above. A
+`ws commit` costs 8 ms per changed file, against 0.7 ms per file for `LocalRepo::commit` with full
+fsync (G2's table): about 7 ms more per file, two raw `fdatasync`s, which points at the
+workspace writing and syncing its objects one at a time rather than as one batch (not yet
+confirmed by a profile).
+
+### G17: one commit's fetch and push on 12,000 against 1,000 commits
+
+`remote_perf::fetch_and_push_scale_with_history` (one run, 22:38, start load 5.09, end 1.08),
+against the test kit's loopback smart-HTTP server; `meta.elapsed_ms`, median of 5.
+
+| Case | 1,000 commits | 12,000 commits | Ratio | Target | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| fetch of one commit | 81 ms | 126 ms | 1.56× | ≤ 1.5× | missed |
+| push of one commit | 76 ms | 283 ms | 3.72× | ≤ 1.5× | missed |
+
+On a quiet host the fetch ratio rose from 1.36× (the loaded 2026-10-22 run, "Git remotes (M13)")
+to 1.56×, now just over its target, and the push stayed near 3.7–3.9×: both grow with the history,
+which points at work proportional to the commits on each fetch and push (the export's or the
+negotiation's), not at the host.
