@@ -180,7 +180,7 @@ per_format! {
 
 per_format! {
     /// The slow variant: [`SLOW_KILLS`] kills per format.
-    #[ignore = "slow, ~120 s: 500 kills x 2 formats"]
+    #[ignore = "slow, ~200 s per format: 500 kills, each with verify --deep and log"]
     fn sigkill_mid_commit_500_times(format) {
         kill_commits(format, SLOW_KILLS);
     }
