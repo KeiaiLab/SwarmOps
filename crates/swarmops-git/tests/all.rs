@@ -9,6 +9,7 @@ mod convert;
 mod export;
 mod export_oid;
 mod git_dir;
+mod host_repos;
 mod import;
 mod limits;
 mod mirror;
