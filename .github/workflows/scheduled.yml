@@ -9,6 +9,7 @@
 # scratch repository. Hardened as ci.yml is, and run where it runs: on the maintainers' own host,
 # through the self-hosted runners labelled `swarmops-local`, each building into its runner's
 # persistent CARGO_TARGET_DIR, so no build cache travels through GitHub.
+# The git matrix alone runs in a container on that host, so that it needs none of its packages.
 name: Scheduled
 
 on:
@@ -158,9 +159,17 @@ jobs:
   # on and exported into an empty repository, pass its `git fsck --strict` (M8 Task 9). And the
   # remote suites run with this git as the product's (M13): built with curl, so that it speaks
   # smart HTTP to the test kit's loopback server.
+  # Inside ubuntu:24.04 pinned by digest, as root, as release.yml's build jobs are: the job
+  # installs the compiler, zlib's and curl's headers and the pinned toolchain itself, so it needs
+  # nothing of the runner's host; the last step gives the runner's user back what it wrote into
+  # the mounted workspace and temporary directory. The toolchain, the build and git's install
+  # prefix stay in the container's own filesystem. The digest and the rustup-init release are
+  # moved by hand, with release.yml's.
   git-matrix:
     name: git matrix (${{ matrix.git }})
     runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
+    container:
+      image: ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
     permissions:
       contents: read
     timeout-minutes: 45
@@ -176,12 +185,44 @@ jobs:
             sha256: 26c56c296b38c0695b26fa95f475f1d01704d2d38e73465ca30b0b2f5dc789d3
     env:
       CARGO_TERM_COLOR: always
+      RUSTUP_HOME: /opt/rustup
+      CARGO_HOME: /opt/cargo
+      CARGO_TARGET_DIR: /opt/target
+      DEBIAN_FRONTEND: noninteractive
+      # The git under test; built with the prefix it runs from, which git compiles in.
+      GIT_PREFIX: /opt/git
+      # rustup-init, the release the steps install, by the SHA-256 static.rust-lang.org gives.
+      RUSTUP_RELEASE: 1.29.2
+      RUSTUP_SHA256: 5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4
     steps:
+      # Ubuntu's git (2.43.0) before the checkout, which otherwise downloads the tree without its
+      # history, and on PATH for the tests that find git there, as the host's was. zlib's,
+      # OpenSSL's and curl's headers are what git's build needs beyond the compiler: without what
+      # the tests do not use (Tcl/Tk, gettext, Perl, Python, expat); curl for git's HTTP
+      # transport, which the remote suites run.
+      - name: Install the compiler, git's build dependencies and the tools the steps run
+        run: |
+          apt-get update
+          apt-get install --yes --no-install-recommends build-essential ca-certificates curl \
+            git libcurl4-openssl-dev libssl-dev xz-utils zlib1g-dev
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # Also the default toolchain: git 2.56.0 builds Rust code with cargo, outside the
+      # checkout's rust-toolchain.toml.
       - name: Install the toolchain rust-toolchain.toml pins
-        run: rustup toolchain install --no-self-update
+        run: |
+          init="$RUNNER_TEMP/rustup-init"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$init" \
+            "https://static.rust-lang.org/rustup/archive/$RUSTUP_RELEASE/x86_64-unknown-linux-gnu/rustup-init"
+          echo "$RUSTUP_SHA256  $init" | sha256sum --check --strict -
+          chmod +x "$init"
+          "$init" -y --no-modify-path --profile minimal --default-toolchain none
+          rm -f -- "$init"
+          export PATH="$CARGO_HOME/bin:$PATH"
+          echo "$CARGO_HOME/bin" >>"$GITHUB_PATH"
+          rustup toolchain install --no-self-update
+          rustup default "$(rustup show active-toolchain | cut -d ' ' -f 1)"
       - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: cargo-nextest@0.9.146
@@ -191,39 +232,28 @@ jobs:
         id: git-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/git
+          path: /opt/git
           # `-curl`: a git built before the remote suites, without curl, is never restored.
-          key: git-${{ matrix.git }}-${{ matrix.sha256 }}-curl-ubuntu-24.04
-      # Without what the tests do not use (Tcl/Tk, gettext, Perl, Python, expat), so that zlib's
-      # and curl's headers are the packages the build needs beyond the host's compiler; curl for
-      # git's HTTP transport, which the remote suites run. The runner's user cannot install
-      # packages: the host provides them (zlib1g-dev, libcurl4-openssl-dev).
+          # `-container`: nor one built on the host, under a prefix this container lacks.
+          key: git-${{ matrix.git }}-${{ matrix.sha256 }}-curl-ubuntu-24.04-container
       - name: Build git ${{ matrix.git }} from kernel.org's release tarball
         if: steps.git-cache.outputs.cache-hit != 'true'
         env:
           GIT_RELEASE: ${{ matrix.git }}
           GIT_SHA256: ${{ matrix.sha256 }}
         run: |
-          if [ ! -f /usr/include/zlib.h ]; then
-            echo "::error::the runner's host lacks zlib's headers (zlib1g-dev)"
-            exit 1
-          fi
-          if ! command -v curl-config >/dev/null; then
-            echo "::error::the runner's host lacks curl's headers (libcurl4-openssl-dev)"
-            exit 1
-          fi
           tarball="$RUNNER_TEMP/git-$GIT_RELEASE.tar.xz"
           curl -fsSL --retry 3 -o "$tarball" \
             "https://mirrors.edge.kernel.org/pub/software/scm/git/git-$GIT_RELEASE.tar.xz"
           echo "$GIT_SHA256  $tarball" | sha256sum -c -
           mkdir "$RUNNER_TEMP/git-src"
           tar -xJf "$tarball" -C "$RUNNER_TEMP/git-src" --strip-components=1
-          make -C "$RUNNER_TEMP/git-src" -j"$(nproc)" prefix="$RUNNER_TEMP/git" NO_TCLTK=1 \
+          make -C "$RUNNER_TEMP/git-src" -j"$(nproc)" prefix="$GIT_PREFIX" NO_TCLTK=1 \
             NO_GETTEXT=1 NO_PERL=1 NO_PYTHON=1 NO_EXPAT=1 install
       - name: Rebuild every fixture with git ${{ matrix.git }} and compare the manifests
         run: |
-          "$RUNNER_TEMP/git/bin/git" --version
-          SWARMOPS_GIT="$RUNNER_TEMP/git/bin/git" SWARMOPS_GIT_FIXTURES_CHECK="$RUNNER_TEMP/fx" \
+          "$GIT_PREFIX/bin/git" --version
+          SWARMOPS_GIT="$GIT_PREFIX/bin/git" SWARMOPS_GIT_FIXTURES_CHECK="$RUNNER_TEMP/fx" \
             cargo nextest run --locked --all-features -p swarmops-testkit -p swarmops-git \
             --run-ignored ignored-only -E 'test(check_git_fixtures)' --no-capture
       # The testkit's fixture tests and the git import's (`raw`, `source`, and `convert` and
@@ -241,16 +271,21 @@ jobs:
       # does.
       - name: The exports checked by git ${{ matrix.git }}'s fsck
         run: |
-          SWARMOPS_GIT="$RUNNER_TEMP/git/bin/git" SWARMOPS_GIT_FIXTURES_ANY_GIT=1 \
+          SWARMOPS_GIT="$GIT_PREFIX/bin/git" SWARMOPS_GIT_FIXTURES_ANY_GIT=1 \
             cargo nextest run --locked --all-features -p swarmops-git \
             --run-ignored ignored-only -E 'test(exported_repositories_pass_git_fsck)' --no-capture
       # The remote suites (the transport, the mirror, the sync engine, the limits, the test kit's
       # server and the CLI's remote tests) with this git as the product's.
       - name: The remote suites with git ${{ matrix.git }}
         run: |
-          SWARMOPS_GIT="$RUNNER_TEMP/git/bin/git" \
+          SWARMOPS_GIT="$GIT_PREFIX/bin/git" \
             cargo nextest run --locked --all-features -p swarmops-testkit -p swarmops-git \
             -p swarmops-cli -E 'test(/^(transport|mirror|sync|limits|remote|remote_[a-z_]+)::/)'
+      - name: Give the runner's user back the workspace
+        if: ${{ always() }}
+        run: |
+          owner=$(stat -c %u:%g "$(dirname "$RUNNER_TEMP")")
+          chown -R "$owner" "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
 
   # The live round trip with GitHub (M13, roadmap Topology 2's criterion 4): `github_live`'s
   # ignored test clones the scratch repository the variable SWARMOPS_GITHUB_LIVE_REPO names,
