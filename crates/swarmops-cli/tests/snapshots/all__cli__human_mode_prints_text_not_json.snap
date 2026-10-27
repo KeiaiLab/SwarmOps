@@ -7,7 +7,7 @@ $ swarmops --human --repo [tmp]/store info
 repo_id: [repo_id]
 name: acme
 main: [c1]
-store_version: 1
+store_version: 2
 changesets: 1
 refs: 1
 
@@ -63,7 +63,7 @@ $ SWARMOPS_FORMAT=human swarmops --repo [tmp]/store info
 repo_id: [repo_id]
 name: acme
 main: [c1]
-store_version: 1
+store_version: 2
 changesets: 1
 refs: 1
 
@@ -72,6 +72,6 @@ $ swarmops --json --human --repo [tmp]/store info
 repo_id: [repo_id]
 name: acme
 main: [c1]
-store_version: 1
+store_version: 2
 changesets: 1
 refs: 1

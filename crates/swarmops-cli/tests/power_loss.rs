@@ -52,13 +52,16 @@ use swarmops_core::bytes::to_u64;
 use swarmops_core::{Changeset, ChangesetId, LeafKind, ObjectKind, RepoPath, Signature, Tree};
 use swarmops_repo::{CasResult, Change, ChangeOp, CommitRequest, LocalRepo};
 use swarmops_store::{
-    ChangesetMeta, FsObjectStore, FsOps, Index, Journal, Layout, MetaLock, MetaStore, ObjectStore,
-    RealFs, Record,
+    ChangesetMeta, DEFAULT_INIT_FORMAT, FsObjectStore, FsOps, Index, Journal, Layout, MetaLock,
+    MetaStore, ObjectStore, RealFs, Record, StoreFormat,
 };
+use swarmops_testkit::per_format;
 use swarmops_testkit::power::{
     Chooser, Image, ImageRecordingFs, Keep, KeepAllBut, PAGE, RecordedCall, SECTOR, Seeded,
     Timeline,
 };
+
+use swarmops_testkit::store::layout_of;
 
 use crate::support;
 
@@ -279,6 +282,8 @@ struct Frame {
 struct Recorded {
     /// The temp dir it ran in, its store at `<base>/store`: the calls' paths start with it.
     base: PathBuf,
+    /// The store's format.
+    format: StoreFormat,
     timeline: Timeline,
     /// The id of each commit, in hex, by number.
     commits: Vec<String>,
@@ -321,10 +326,11 @@ fn signature() -> Signature {
     .unwrap()
 }
 
-/// Runs `init`, then [`RUN`], on an [`ImageRecordingFs`] in a temp dir, on a one-thread pool:
-/// objects are written, and directories synced, one at a time, in the same order every run.
-fn record() -> Recorded {
-    record_ops(RUN)
+/// Runs `init` of a store of `format`, then [`RUN`], on an [`ImageRecordingFs`] in a temp dir,
+/// on a one-thread pool: objects are written, and directories synced, one at a time, in the
+/// same order every run.
+fn record(format: StoreFormat) -> Recorded {
+    record_ops(format, RUN)
 }
 
 /// [`record`], with the run `ops` after `init`.
@@ -340,7 +346,7 @@ fn record() -> Recorded {
 /// that grows past 32 frames since [`Op::Flush`] would record its index syncs in an order that
 /// varies between runs (the oracle stays valid; the images change), and [`Op::Bulk`] passes the
 /// threshold on a store of its own.
-fn record_ops(ops: &[Op]) -> Recorded {
+fn record_ops(format: StoreFormat, ops: &[Op]) -> Recorded {
     let dir = tempfile::tempdir().expect("make a temp dir");
     let base = dir.path().canonicalize().expect("the temp dir's path");
     let root = Utf8PathBuf::from_path_buf(base.join("store")).expect("UTF-8 temp paths");
@@ -354,10 +360,12 @@ fn record_ops(ops: &[Op]) -> Recorded {
         parents,
         named,
         keys,
-    } = pool.install(|| run(&root, &fs, ops));
+    } = pool.install(|| run(&root, &fs, format, ops));
     let calls = fs.calls();
     let timeline = Timeline::new(&base, &calls);
-    let log = base.join("store/meta/journal.log");
+    let log = Layout::with_format(&root, format)
+        .journal_log()
+        .into_std_path_buf();
     // Each frame's transaction, in order; `None` for the `Compacted` frame that follows a bulk
     // transaction, which is no transaction's.
     let mut whats = ops.iter().flat_map(|op| match *op {
@@ -398,6 +406,7 @@ fn record_ops(ops: &[Op]) -> Recorded {
     }
     Recorded {
         base,
+        format,
         init: timeline.mark("init"),
         external,
         timeline,
@@ -422,10 +431,11 @@ struct Ran {
     keys: Vec<Vec<u8>>,
 }
 
-/// The run itself, `init` then `ops`.
-fn run(root: &Utf8Path, fs: &Arc<ImageRecordingFs>, ops: &[Op]) -> Ran {
+/// The run itself, `init` of a store of `format` then `ops`.
+fn run(root: &Utf8Path, fs: &Arc<ImageRecordingFs>, format: StoreFormat, ops: &[Op]) -> Ran {
     let shared: Arc<dyn FsOps> = Arc::clone(fs) as Arc<dyn FsOps>;
-    let repo = LocalRepo::create_with_fs(root, "power", Arc::clone(&shared)).expect("init");
+    let repo =
+        LocalRepo::create_with_fs_as(root, "power", format, Arc::clone(&shared)).expect("init");
     fs.mark("init");
     let (mut commits, mut parents, mut named) = (Vec::new(), Vec::new(), Vec::new());
     let mut keys = Vec::new();
@@ -481,12 +491,7 @@ fn run(root: &Utf8Path, fs: &Arc<ImageRecordingFs>, ops: &[Op]) -> Ran {
                 assert!(matches!(outcome.result, CasResult::Applied { .. }));
                 assert!(outcome.warnings.is_empty(), "{outcome:?}");
             }
-            Op::Compact => {
-                let layout = Layout::new(root);
-                let _lock = MetaLock::acquire(&layout, Duration::from_secs(10)).expect("lock");
-                let mut index = Index::open(&layout, Arc::clone(&shared)).expect("open");
-                index.compact().expect("compact");
-            }
+            Op::Compact => compact(&Layout::with_format(root, format), &shared),
             Op::Flush => {
                 let mut meta = MetaStore::open_with_fs(root, Arc::clone(&shared)).expect("open");
                 meta.set_parallelism(1);
@@ -524,6 +529,14 @@ fn run(root: &Utf8Path, fs: &Arc<ImageRecordingFs>, ops: &[Op]) -> Ran {
         named,
         keys,
     }
+}
+
+/// [`Op::Compact`] on the store of `layout`, its calls through `shared`: the index compacted, the
+/// writer lock held.
+fn compact(layout: &Layout, shared: &Arc<dyn FsOps>) {
+    let _lock = MetaLock::acquire(layout, Duration::from_secs(10)).expect("lock");
+    let mut index = Index::open(layout, Arc::clone(shared)).expect("open");
+    index.compact().expect("compact");
 }
 
 /// [`Op::CommitBlob`] on the store at `root`, whose repository is `repo`, its calls through
@@ -762,6 +775,23 @@ struct State {
 }
 
 impl Recorded {
+    /// The store's journal, as the images name it: `store/meta/journal.log`, or FORMAT 2's
+    /// `store/meta/journal2.log`.
+    fn log(&self) -> PathBuf {
+        let journal = Layout::with_format("store", self.format).journal_log();
+        journal.into_std_path_buf()
+    }
+
+    /// The length of a frame's header in the store's format: `len | crc` in FORMAT 1, and
+    /// `len | crc | seq | prev_crc | hcrc` in FORMAT 2, the length first in both.
+    fn header_len(&self) -> u64 {
+        match self.format {
+            StoreFormat::V1 => 8,
+            StoreFormat::V2 => 24,
+            other => panic!("no frame header for {other:?}"),
+        }
+    }
+
     /// The state after the first `frames` frames.
     fn state_after(&self, frames: usize) -> State {
         let mut state = State {
@@ -1030,7 +1060,7 @@ fn no_store(store: &str) -> Result<Found, String> {
 
 /// The journal of the store at `store`, on the real filesystem.
 fn journal_of(store: &str) -> Result<Journal, String> {
-    let layout = Layout::new(Utf8PathBuf::from(store));
+    let layout = layout_of(store);
     Journal::open(&layout, Arc::new(RealFs::new())).map_err(|e| format!("open the journal: {e}"))
 }
 
@@ -1111,7 +1141,7 @@ fn external_ids_as_imaged(
     state: &State,
     cut: usize,
 ) -> Result<(), String> {
-    let layout = Layout::new(Utf8PathBuf::from(store));
+    let layout = layout_of(store);
     let index = swarmops_store::ExternalIds::new(layout, Arc::new(RealFs::new()));
     for External {
         key,
@@ -1152,7 +1182,7 @@ fn a_store(
     // A commit that names a blob by id relies on a blob it did not write: wherever its frame
     // is, the blob is too (and `verify --deep` below hashes it).
     let held = rec.state_after(frames).changesets;
-    let layout = Layout::new(Utf8PathBuf::from(store));
+    let layout = layout_of(store);
     for &(n, id) in rec.named.iter().filter(|&&(n, _)| n < held) {
         if !layout.object_path(id).is_file() {
             return Err(format!("commit {n} names blob {id}, which the image lacks"));
@@ -1320,14 +1350,14 @@ fn image_losing(rec: &Recorded, cut: usize, lose: &[(&str, Keep)]) -> Image {
     rec.timeline.image(cut, &mut chooser as &mut dyn Chooser)
 }
 
+per_format! {
 /// The power fails after any step of a store's life (`init`, commits, ref moves, a compaction,
 /// a checkpoint, commits past it), and the disk keeps nothing that was not durable (seed 0);
 /// or, at every twentieth cut, what two seeds pick at random of it. The binary finds a prefix of
 /// the run that holds every committed transaction, or no store before `init` returned: see the
 /// module documentation. The slow variant checks every cut with more seeds.
-#[test]
-fn power_loss_images_recover_a_prefix_with_every_acknowledged_commit() {
-    let rec = record();
+fn power_loss_images_recover_a_prefix_with_every_acknowledged_commit(format) {
+    let rec = record(format);
     let cuts: Vec<usize> = (0..=rec.timeline.steps()).collect();
     let swept = sweep(&rec, &cuts, &[0]);
     let sampled: Vec<usize> = cuts.iter().copied().filter(|cut| cut % 20 == 0).collect();
@@ -1351,7 +1381,9 @@ fn power_loss_images_recover_a_prefix_with_every_acknowledged_commit() {
     }
     assert!(swept.found.contains_key(&None), "no image without a store");
 }
+}
 
+per_format! {
 /// [`power_loss_images_recover_a_prefix_with_every_acknowledged_commit`] at every cut, for ten
 /// seeds: nothing kept, everything kept, and eight at random; on [`RUN`] and then
 /// [`Op::Bulk`], so that the images hold the compaction a writer makes past
@@ -1362,11 +1394,10 @@ fn power_loss_images_recover_a_prefix_with_every_acknowledged_commit() {
 /// and the materialization of its records past the checkpoint (an unsynced append to each of
 /// the five index files, for each record, as every commit's materialization makes). Of their
 /// cuts it checks the first and last eight and every 64th.
-#[test]
 #[ignore = "slow, ~280 s: images of 830 cuts x 10 seeds through the binary; just check-slow runs it"]
-fn power_loss_images_recover_a_prefix_with_every_acknowledged_commit_at_every_cut() {
+fn power_loss_images_recover_a_prefix_with_every_acknowledged_commit_at_every_cut(format) {
     let ops: Vec<Op> = RUN.iter().copied().chain([Op::Bulk]).collect();
-    let rec = record_ops(&ops);
+    let rec = record_ops(format, &ops);
     let objects = rec.timeline.mark("bulk objects")..rec.timeline.mark("bulk objects flushed");
     // From the bulk frame's listing (its write and sync, then its entry's) to the index sync
     // that starts the compaction.
@@ -1396,16 +1427,17 @@ fn power_loss_images_recover_a_prefix_with_every_acknowledged_commit_at_every_cu
         assert!(swept.found.contains_key(&Some(frames)), "{:?}", swept.found);
     }
 }
+}
 
+per_format! {
 /// The index files past the checkpoint (`idx/*.col`, `parents.log`) are appended to without a
 /// sync: a power loss can keep a file's length and lose its bytes, zeros in their place. Records
 /// so zero-filled hold nothing the journal vouches for: readers must not count them (the frames
 /// past the checkpoint give the changesets), `verify --deep` must not take them for damage, and
 /// the next writer must replay the journal's records in their place, whichever file lost its
 /// bytes, or all five did.
-#[test]
-fn zero_filled_index_tail_after_power_loss_is_replayed_not_counted() {
-    let rec = record();
+fn zero_filled_index_tail_after_power_loss_is_replayed_not_counted(format) {
+    let rec = record(format);
     let cut = rec.timeline.steps();
     let index = [
         "store/meta/parents.log",
@@ -1432,7 +1464,31 @@ fn zero_filled_index_tail_after_power_loss_is_replayed_not_counted() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
+}
 
+/// A ref move whose frame is 171 bytes long in FORMAT 2 (its 81-byte name, its 19-byte actor):
+/// [`torn_run`] adds it to [`RUN`] there, after the first commit. The last frame then starts one
+/// byte before a sector boundary, the low byte of its length the one a lost sector takes.
+const PAD: Op = Op::Cas {
+    name: "release/a-pad-whose-name-moves-the-later-frames-across-sector-boundaries-as-needs",
+    expected: None,
+    new: Some(0),
+    actor: "test-power/worker-1",
+};
+
+/// The run of the torn-tail tests in `format`: [`RUN`], whose frames straddle a sector boundary
+/// in every shape those tests need in FORMAT 1; in FORMAT 2, whose frame headers are 16 bytes
+/// longer and so move every frame, [`RUN`] with [`PAD`] after its first commit, which moves the
+/// later frames back into those shapes.
+fn torn_run(format: StoreFormat) -> Vec<Op> {
+    match format {
+        StoreFormat::V1 => RUN.to_vec(),
+        StoreFormat::V2 => [&RUN[..1], &[PAD], &RUN[1..]].concat(),
+        other => panic!("no torn-tail run for {other:?}"),
+    }
+}
+
+per_format! {
 /// A frame is written to `journal.log` and then synced: a power loss in between may persist a
 /// later sector of it and lose the first, its header there. Its length then reads 0, which no
 /// writer writes, followed by bytes that are not zero. The frame never reached its commit point
@@ -1441,10 +1497,11 @@ fn zero_filled_index_tail_after_power_loss_is_replayed_not_counted() {
 /// sector, where only its length does, its CRC across the sector boundary, and where its length
 /// straddles the boundary: its low byte lost, the length reads as one that is not 0 but wrong,
 /// and the frame fails its CRC, or runs past the end of the file, instead.
-#[test]
-fn a_lost_header_sector_is_a_torn_tail() {
-    let rec = record();
-    let log = "store/meta/journal.log";
+fn a_lost_header_sector_is_a_torn_tail(format) {
+    let rec = record_ops(format, &torn_run(format));
+    let log = rec.log();
+    let log = log.to_str().expect("UTF-8 paths");
+    let header = rec.header_len();
     let mut torn = Vec::new();
     let mut failures = Vec::new();
     for (n, frame) in rec.frames.iter().enumerate() {
@@ -1488,27 +1545,31 @@ fn a_lost_header_sector_is_a_torn_tail() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
     assert!(
-        torn.iter().any(|&(_, lost)| lost >= 8),
+        torn.iter().any(|&(_, lost)| lost >= header),
         "a frame whose whole header lies in a lost sector: {torn:?}"
     );
     assert!(
-        torn.iter().any(|&(_, lost)| (4..8).contains(&lost)),
-        "a frame whose length lies in a lost sector, its CRC across the boundary: {torn:?}"
+        torn.iter().any(|&(_, lost)| (4..header).contains(&lost)),
+        "a frame whose length lies in a lost sector, the rest of its header across the \
+         boundary: {torn:?}"
     );
     assert!(
         torn.iter().any(|&(_, lost)| lost < 4),
         "a frame whose length straddles the boundary, its low bytes lost: {torn:?}"
     );
 }
+}
 
+per_format! {
 /// A frame written to `journal.log` and not yet synced may reach the disk in part: a power loss
 /// keeps the bytes before a 512 B boundary the writeback had reached and loses the rest. A frame
 /// that straddles a boundary is then cut there, its header whole or only its length kept, and none
 /// of its payload: a torn tail like any other, so the store opens and holds the frames before it.
-#[test]
-fn a_frame_kept_up_to_a_sector_boundary_is_a_torn_tail() {
-    let rec = record();
-    let log = "store/meta/journal.log";
+fn a_frame_kept_up_to_a_sector_boundary_is_a_torn_tail(format) {
+    let rec = record_ops(format, &torn_run(format));
+    let log = rec.log();
+    let log = log.to_str().expect("UTF-8 paths");
+    let header = rec.header_len();
     let keep = Keep::Prefix {
         granule: SECTOR,
         pick: 0,
@@ -1541,13 +1602,14 @@ fn a_frame_kept_up_to_a_sector_boundary_is_a_torn_tail() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
     assert!(
-        kept.iter().any(|&(_, bytes)| bytes >= 8),
+        kept.iter().any(|&(_, bytes)| bytes >= header),
         "a frame whose whole header is kept, its payload lost: {kept:?}"
     );
     assert!(
-        kept.iter().any(|&(_, bytes)| (4..8).contains(&bytes)),
-        "a frame whose length is kept, its CRC lost: {kept:?}"
+        kept.iter().any(|&(_, bytes)| (4..header).contains(&bytes)),
+        "a frame whose length is kept, the rest of its header lost: {kept:?}"
     );
+}
 }
 
 /// The sweeps rely on [`Seeded`] for the shapes of loss no other test pins: a seed of 2 or more
@@ -1579,6 +1641,7 @@ fn a_random_seed_picks_every_shape_of_loss() {
     );
 }
 
+per_format! {
 /// An object is linked into its fan-out directory and is durable only once that directory is
 /// synced (`ObjectStore::flush`); a commit flushes its objects, and the fan-out directories of the
 /// blobs it names by id, which it retains, before it appends its frame. So
@@ -1586,9 +1649,8 @@ fn a_random_seed_picks_every_shape_of_loss() {
 /// later point, whole, even when the disk keeps nothing else that was not durable; and the store
 /// verifies clean then. The images see what a process crash cannot: an object linked, its
 /// directory not yet synced, that a power loss takes back.
-#[test]
-fn objects_referenced_by_a_durable_frame_survive_power_loss() {
-    let rec = record();
+fn objects_referenced_by_a_durable_frame_survive_power_loss(format) {
+    let rec = record(format);
     let objects = rec.base.join("store/objects");
     let mut temps: HashMap<&Path, &[u8]> = HashMap::new();
     // Each object file the run linked, the step that did, and its content.
@@ -1655,15 +1717,19 @@ fn objects_referenced_by_a_durable_frame_survive_power_loss() {
         assert_eq!(found, Ok(Found::Prefix(n + 1)), "frame {n} just durable");
     }
 }
+}
 
 /// A run of one root commit that creates main with `advance`: one [`Txn::CommitAdvance`] frame,
 /// for the oracles' own checks.
 fn one_advancing_commit() -> Recorded {
-    record_ops(&[Op::CommitAdvance {
-        parent: None,
-        puts: &[("a.txt", "a\n")],
-        name: "main",
-    }])
+    record_ops(
+        DEFAULT_INIT_FORMAT,
+        &[Op::CommitAdvance {
+            parent: None,
+            puts: &[("a.txt", "a\n")],
+            name: "main",
+        }],
+    )
 }
 
 /// The prefix oracle's own check for an advancing commit's frame: after it, the store holds the
@@ -1740,8 +1806,11 @@ mod committed_read {
     use camino::Utf8PathBuf;
     use swarmops_core::{ChangesetId, LeafKind, RepoPath};
     use swarmops_repo::{Advance, Change, ChangeOp, CommitRequest, LocalRepo};
-    use swarmops_store::{FsOps, LinkOutcome, MetaRead, MetaStore, StoreError, TailRepair};
+    use swarmops_store::{
+        FsOps, Layout, LinkOutcome, MetaRead, MetaStore, StoreError, StoreFormat, TailRepair,
+    };
     use swarmops_testkit::fs::{Hold, NoSyncFs, hold};
+    use swarmops_testkit::per_format;
     use swarmops_testkit::power::{Image, ImageRecordingFs, RecordedCall, Seeded, Timeline};
 
     use super::signature;
@@ -1932,11 +2001,13 @@ mod committed_read {
     /// committed one on another thread, which marks `committed-read returned` once it has its
     /// snapshot. The writer is let go once that thread is waiting, 300 ms on; it must not have
     /// its snapshot by then.
-    fn record_run() -> Run {
+    fn record_run(format: StoreFormat) -> Run {
         let dir = tempfile::tempdir().expect("make a temp dir");
         let base = dir.path().canonicalize().expect("the temp dir's path");
         let root = Utf8PathBuf::from_path_buf(base.join("store")).expect("UTF-8 temp paths");
-        let log = base.join("store/meta/journal.log");
+        let log = Layout::with_format(&root, format)
+            .journal_log()
+            .into_std_path_buf();
         let fs = Arc::new(ImageRecordingFs::new());
         let gated = Arc::new(Gated {
             fs: Arc::clone(&fs),
@@ -1951,7 +2022,7 @@ mod committed_read {
             .expect("a one-thread pool");
         let shared = Arc::clone(&gated) as Arc<dyn FsOps>;
         let repo = pool
-            .install(|| LocalRepo::create_with_fs(&root, "power", shared))
+            .install(|| LocalRepo::create_with_fs_as(&root, "power", format, shared))
             .expect("init");
         fs.mark("init");
         let commit = |n, parent| {
@@ -2084,6 +2155,7 @@ mod committed_read {
         }
     }
 
+    per_format! {
     /// A committed snapshot survives a power loss, where a lock-free one may not (design-L107
     /// §5, test 3). The run ([`record_run`]): `init`, two one-file commits that each advance main,
     /// and a third whose writer is held after its frame's bytes are written and before they are
@@ -2095,9 +2167,8 @@ mod committed_read {
     /// failure after the mark, keeping nothing unsynced or what seeds 2 to 9 pick, holds every
     /// changeset and every ref target that snapshot returned, to a lock-free snapshot and to a
     /// committed one alike. The default gate checks every cut after the mark: the run is short.
-    #[test]
-    fn read_committed_snapshot_survives_power_loss() {
-        let run = record_run();
+    fn read_committed_snapshot_survives_power_loss(format) {
+        let run = record_run(format);
         let [first, second, third] = run.commits;
         let after = Shown {
             changesets: 3,
@@ -2148,5 +2219,6 @@ mod committed_read {
             run.calls,
             run.timeline.steps()
         );
+    }
     }
 }

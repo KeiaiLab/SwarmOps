@@ -11,9 +11,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use camino::Utf8PathBuf;
 use serde_json::{Value, json};
-use swarmops_store::{Layout, ORDER_CHECK_ENV};
+use swarmops_store::{Layout, ORDER_CHECK_ENV, StoreFormat};
 use tempfile::TempDir;
 
 use crate::child::{Child, SIGABRT};
@@ -390,11 +389,22 @@ pub struct Store<P> {
 }
 
 impl<P: Program> Store<P> {
-    /// A fresh store, made with `swarmops init`.
+    /// A fresh store, made with `swarmops init`: of this build's default format.
     pub fn init() -> Store<P> {
         let store = Store::empty();
         let init = run::<P, _>(&["init", store.path()], &[]);
         assert_eq!(init.ok()["changesets"], 0, "{init}");
+        store
+    }
+
+    /// A fresh store of `format`, made with `swarmops init --format <n>`.
+    pub fn init_as(format: StoreFormat) -> Store<P> {
+        let store = Store::empty();
+        let version = format.version().to_string();
+        let init = run::<P, _>(&["init", "--format", &version, store.path()], &[]);
+        let made = init.ok();
+        assert_eq!(made["changesets"], 0, "{init}");
+        assert_eq!(made["store_version"], format.version(), "{init}");
         store
     }
 
@@ -443,13 +453,13 @@ impl<P: Program> Store<P> {
 
     /// The store's paths.
     pub fn layout(&self) -> Layout {
-        Layout::new(Utf8PathBuf::from(self.path()))
+        crate::store::layout_of(self.path())
     }
 
     /// `meta/journal.ckpt`: how far the checkpoint is.
     pub fn checkpoint(&self) -> u64 {
         let bytes = fs::read(self.layout().journal_ckpt()).expect("read meta/journal.ckpt");
-        u64::from_le_bytes(bytes.try_into().expect("8 bytes"))
+        u64::from_le_bytes(bytes[..8].try_into().expect("8 bytes"))
     }
 
     /// The length of `meta/journal.log`.

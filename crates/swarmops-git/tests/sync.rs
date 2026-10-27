@@ -18,8 +18,9 @@ use swarmops_core::{ChangesetId, Signature};
 use swarmops_git::sync::{self, DropReason, Recognised, SyncError, SyncPlan};
 use swarmops_git::{ExportOid, ExportReader, RawKind, git_hash, register, render_commit, tree_oid};
 use swarmops_repo::{Change, LocalRepo};
-use swarmops_store::{Journal, Layout, RealFs};
+use swarmops_store::{Journal, RealFs};
 use swarmops_testkit::repo::{new_repo, path, put, request};
+use swarmops_testkit::store::layout_of;
 
 /// Who lands the relocated changes: their committer.
 const LANDER: &str = "test/lander";
@@ -83,7 +84,7 @@ fn file(repo: &LocalRepo, id: ChangesetId, file: &str) -> Vec<u8> {
 
 /// How many frames the journal of the store at `root` lists.
 fn frame_count(root: &Utf8Path) -> u64 {
-    Journal::open(&Layout::new(root), Arc::new(RealFs::new()))
+    Journal::open(&layout_of(root), Arc::new(RealFs::new()))
         .unwrap()
         .frame_count()
         .unwrap()

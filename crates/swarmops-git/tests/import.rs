@@ -20,13 +20,14 @@ use swarmops_git::{
 };
 use swarmops_repo::{CasResult, Depth, LocalRepo, RepoError, StoreError};
 use swarmops_store::{
-    ExternalEntry, ExternalIds, Frame, FsMethod, Journal, Layout, RealFs, Record, SYSTEM_GIT,
+    ExternalEntry, ExternalIds, Frame, FsMethod, Journal, RealFs, Record, SYSTEM_GIT,
 };
 use swarmops_testkit::fs::{FailingFs, NoSyncFs};
 use swarmops_testkit::git::{self, GitFixture, Manifest};
 use swarmops_testkit::repo::{commit, new_repo, put};
 
 use crate::support::MemSource;
+use swarmops_testkit::store::layout_of;
 
 /// The fixtures every commit of which a changeset holds as git wrote it (Task 8's list).
 const FAITHFUL: [&str; 10] = [
@@ -199,13 +200,13 @@ fn main_log(repo: &LocalRepo) -> Vec<GitOid> {
 }
 
 fn journal_len(root: &Utf8Path) -> u64 {
-    fs::metadata(root.join("meta/journal.log")).unwrap().len()
+    fs::metadata(layout_of(root).journal_log()).unwrap().len()
 }
 
 /// The journal's frames, as a reader reads them.
 fn frames(root: &Utf8Path) -> Vec<Frame> {
     let journal =
-        Journal::open(&Layout::new(root), Arc::new(RealFs::new())).expect("open the journal");
+        Journal::open(&layout_of(root), Arc::new(RealFs::new())).expect("open the journal");
     journal.tail_frames_from(0).expect("read the journal")
 }
 
@@ -239,7 +240,7 @@ fn objects(root: &Utf8Path) -> usize {
 /// every git entry of the external id index.
 fn state(root: &Utf8Path) -> (u64, ChangesetId, Vec<(Vec<u8>, ExternalEntry)>) {
     let repo = LocalRepo::open(root).unwrap();
-    let ids = ExternalIds::new(Layout::new(root), Arc::new(RealFs::new()));
+    let ids = ExternalIds::new(layout_of(root), Arc::new(RealFs::new()));
     let entries = (ids.list(SYSTEM_GIT).unwrap().into_iter())
         .map(|(key, entry)| (key, entry.expect("a whole entry")))
         .collect();
@@ -471,7 +472,7 @@ fn a_damaged_or_dangling_external_id_is_a_miss_and_a_warning() {
             fs::remove_file(&entry).unwrap();
             let nowhere = ChangesetId::new(hash_object(ObjectKind::Changeset, b"nowhere"));
             let dangling = ExternalEntry::new(nowhere, true);
-            let ids = ExternalIds::new(Layout::new(&root), Arc::new(RealFs::new()));
+            let ids = ExternalIds::new(layout_of(&root), Arc::new(RealFs::new()));
             ids.put_batch(SYSTEM_GIT, &[(fork.0.to_vec(), dangling)])
                 .unwrap();
         }
@@ -948,7 +949,7 @@ fn the_import_leaves_no_frame_past_the_checkpoint() {
     let fixture = git::fixture("linear");
     let (_dir, root, repo) = new_repo();
     import(&repo, &open(&fixture), &request("HEAD")).unwrap();
-    let journal = Journal::open(&Layout::new(&root), Arc::new(RealFs::new())).unwrap();
+    let journal = Journal::open(&layout_of(&root), Arc::new(RealFs::new())).unwrap();
     assert!(
         frames(&root).len() >= 2,
         "a frame of changesets and the target's move"
@@ -1002,9 +1003,10 @@ fn a_crashed_import_resumes_past_its_committed_frames() {
     let (_dir, root, repo) = new_repo();
     drop(repo);
     let appends = AtomicUsize::new(0);
+    let file = layout_of(&root).journal_log().into_std_path_buf();
     let failing = FailingFs::new(move |method, path| {
         method == FsMethod::AppendDurable
-            && path.file_name().is_some_and(|name| name == "journal.log")
+            && path == file
             && appends.fetch_add(1, Ordering::SeqCst) == 1
     });
     let repo = LocalRepo::open_with_fs(&root, Arc::new(failing)).unwrap();
@@ -1049,9 +1051,10 @@ fn a_frame_failing_after_its_commit_point_stops_the_import() {
     let (_dir, root, repo) = new_repo();
     drop(repo);
     let listings = AtomicUsize::new(0);
+    let file = layout_of(&root).journal_off().into_std_path_buf();
     let failing = FailingFs::new(move |method, path| {
         method == FsMethod::AppendDurable
-            && path.file_name().is_some_and(|name| name == "journal.off")
+            && path == file
             && listings.fetch_add(1, Ordering::SeqCst) == 1
     });
     let repo = LocalRepo::open_with_fs(&root, Arc::new(failing)).unwrap();
@@ -1445,7 +1448,7 @@ mod crafted_memos {
         value: &[u8],
     ) -> Utf8PathBuf {
         let slot = DerivedSlot::new(name, 1, subject, &[]);
-        let file = Layout::new(root).derived_path(&slot);
+        let file = layout_of(root).derived_path(&slot);
         match fs::remove_file(&file) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}

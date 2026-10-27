@@ -28,6 +28,7 @@ use swarmops_store::{Layout, ORDER_CHECK_ENV};
 use tempfile::TempDir;
 
 use crate::support;
+use swarmops_testkit::store::layout_of;
 
 /// The agent most mutations act as.
 const AGENT: &str = "agent/worker-17";
@@ -326,7 +327,7 @@ fn resolve_golden() {
     assert_eq!((missing.exit, missing.code()), (6, "E_REV_NOT_FOUND"));
     let past_root = resolve(&mut s, "main~2");
     assert_eq!((past_root.exit, past_root.code()), (6, "E_REV_NOT_FOUND"));
-    let bad = resolve(&mut s, "HEAD");
+    let bad = resolve(&mut s, "main~x");
     assert_eq!((bad.exit, bad.code()), (2, "E_INVALID_ARG"));
     insta::assert_json_snapshot!(s.transcript());
 }
@@ -637,7 +638,7 @@ fn a_move_to_the_current_target_is_a_replay() {
     s.run(&["init", &store]);
     let c1 = s.commit(&store, None, "a.txt", "a", "c1");
     let c2 = s.commit(&store, Some(&c1), "b.txt", "b", "c2");
-    let journal = Layout::new(Utf8PathBuf::from(&store)).journal_log();
+    let journal = layout_of(&store).journal_log();
     let set = |s: &mut Session, args: &[&str]| {
         let mut all = vec!["--repo", &store, "--as", AGENT, "ref", "set"];
         all.extend_from_slice(args);
@@ -1598,7 +1599,7 @@ const NOT_RAISED: &[(&str, &str)] = &[
     ),
     (
         "E_TAG_IMMUTABLE",
-        "needs a FORMAT 2 store, which init does not make yet",
+        "needs a FORMAT 2 store, and this session's is FORMAT 1",
     ),
     (
         "E_REMOTE_DIVERGED",
@@ -1629,7 +1630,8 @@ fn error_codes_reach_the_cli() {
     }
     let mut s = Session::new();
     let store = s.store();
-    let init = s.run(&["init", &store]);
+    // FORMAT 1: it takes no branch (E_FORMAT_REQUIRED), and its files are damaged by name.
+    let init = s.run(&["init", "--format", "1", &store]);
     s.name_at(&init, "/result/repo_id", "repo_id");
     let c1 = s.commit(&store, None, "src/lib.rs", "pub fn f() {}\n", "c1");
     s.run(&[

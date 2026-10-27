@@ -4,7 +4,7 @@ expression: s.transcript()
 ---
 [
   {
-    "args": "init [tmp]/store",
+    "args": "init --format 1 [tmp]/store",
     "exit": 0,
     "stdout": {
       "ok": true,

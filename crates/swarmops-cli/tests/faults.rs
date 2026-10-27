@@ -31,11 +31,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use swarmops_store::FAIL_AT_ENV;
+use swarmops_store::{FAIL_AT_ENV, StoreFormat};
 use swarmops_testkit::child::SIGABRT;
+use swarmops_testkit::per_format;
 
 use crate::support::sweep::{
-    NOW, SWEPT_PUTS, commit_template, dry_commit, dry_init, init_again, sweep, swept_commit,
+    NOW, SWEPT_PUTS, commit_template, dry_commit, dry_init, init_again, init_args, sweep,
+    swept_commit,
 };
 use crate::support::{self, Run, Store, agent, run};
 
@@ -164,18 +166,22 @@ fn commit_failing_at(template: &Store, k: u64, failure: &str, changeset: &str) -
     ended
 }
 
-/// One run of the init sweep: `init` on a fresh path, failing as `failure` says from call `k`.
+/// One run of the init sweep: `init` of a store of `format` on a fresh path, failing as
+/// `failure` says from call `k`.
 /// Then, the fault cleared: a store is there, whole, exactly when the run succeeded or said it
 /// made one (`details.created`; either after the documented abort); without one, a second `init`
 /// makes it, and with one, says `E_EXISTS`. Either way the store is fresh, and verifies clean
 /// ([`init_again`]).
-fn init_failing_at(k: u64, failure: &str) -> Ended {
+fn init_failing_at(format: StoreFormat, k: u64, failure: &str) -> Ended {
     let store = Store::empty();
     let what = format!("init, call {k} failing {failure}");
     let fail_at = format!("{k}:{failure}");
-    let init = run(&["init", store.path()], &[(FAIL_AT_ENV, fail_at.as_str())]);
+    let init = run(
+        &init_args(format, store.path()),
+        &[(FAIL_AT_ENV, fail_at.as_str())],
+    );
     let ended = ended(&init, store.path());
-    let whole = init_again(&store, &what);
+    let whole = init_again(&store, format, &what);
     match &ended {
         Ended::Succeeded(result) => {
             assert!(whole, "{what}: it succeeded, but left no store: {init}");
@@ -196,7 +202,8 @@ type EndedSo = fn(&str, &Ended) -> bool;
 
 /// The outcomes the commit sweep exists to reach: a failed journal append, cut back off the
 /// journal and reported as `E_IO_TRANSIENT` that did not commit; a failed listing of the
-/// committed frame in `journal.off`, a success whose warning names it; and, under a persistent
+/// committed frame in `journal.off` (FORMAT 2: `journal2.off`), a success whose warning names
+/// it; and, under a persistent
 /// failure, the documented abort of a failed append whose cut fails too.
 const COMMIT_OUTCOMES: [(&str, EndedSo); 3] = [
     ("E_IO_TRANSIENT, not committed", |_, ended| {
@@ -204,8 +211,11 @@ const COMMIT_OUTCOMES: [(&str, EndedSo); 3] = [
             if error["code"] == "E_IO_TRANSIENT" && error["details"]["committed"] == false)
     }),
     (
-        "a success with a warning that names journal.off",
-        |_, ended| matches!(ended, Ended::Succeeded(result) if warns_of(result, "journal.off")),
+        "a success with a warning that names journal.off or journal2.off",
+        |_, ended| {
+            matches!(ended, Ended::Succeeded(result)
+                if warns_of(result, "journal.off") || warns_of(result, "journal2.off"))
+        },
     ),
     (
         "a documented abort under a persistent failure",
@@ -231,6 +241,7 @@ fn unreached(ended: &[(&str, Ended)]) -> Vec<&'static str> {
         .collect()
 }
 
+per_format! {
 /// An injected I/O error at any filesystem call of `init` and of a `commit` that moves the
 /// checkpoint is reported honestly (Review Focus 3): each call of a dry run fails in turn, once
 /// and persistently, with `EIO` and with `ENOSPC` ([`FAILURES`], [`INIT_FAILURES`]). A success
@@ -239,10 +250,9 @@ fn unreached(ended: &[(&str, Ended)]) -> Vec<&'static str> {
 /// the commit asserts that it moves the checkpoint, so that the sweep fails the index sync and
 /// the checkpoint's move too; and the commit sweep reaches each outcome it exists for
 /// ([`COMMIT_OUTCOMES`]).
-#[test]
 #[ignore = "slow, ~3 min: ~1,300 failed runs of init and commit; just check-slow runs it"]
-fn fail_at_every_call_reports_honestly() {
-    let template = commit_template();
+fn fail_at_every_call_reports_honestly(format) {
+    let template = commit_template(format);
     let dry = dry_commit(&template);
     let mut ended = Vec::new();
     for failure in FAILURES {
@@ -257,10 +267,10 @@ fn fail_at_every_call_reports_honestly() {
         "no run of the commit sweep ended so: {missing:?}"
     );
 
-    let calls = dry_init();
+    let calls = dry_init(format);
     let mut aborted = false;
     for failure in INIT_FAILURES {
-        let runs = sweep(1..=calls, |k| init_failing_at(k, failure));
+        let runs = sweep(1..=calls, |k| init_failing_at(format, k, failure));
         aborted |= failure.starts_with("persistent:")
             && runs.iter().any(|run| matches!(run, Ended::Aborted));
     }
@@ -269,16 +279,18 @@ fn fail_at_every_call_reports_honestly() {
         "no init run ended in the documented abort: the root sync failed and FORMAT could not be taken back"
     );
 }
+}
 
+per_format! {
 /// The commit sweeps' dry run, in the default gate: the swept commit, on a copy of the
 /// template, moves the checkpoint ([`dry_commit`] asserts it), so the commit sweeps of the slow
 /// suite ([`fail_at_every_call_reports_honestly`], and `crash.rs`'s
 /// `kill9_during_commit_store_verifies_and_next_commit_succeeds`) fail and crash the index sync
 /// and the checkpoint's move too. A change to the checkpoint's batching or to the template fails
 /// here at once, not in the slow suite alone.
-#[test]
-fn the_commit_sweeps_reach_the_index_sync_and_the_checkpoint() {
-    dry_commit(&commit_template());
+fn the_commit_sweeps_reach_the_index_sync_and_the_checkpoint(format) {
+    dry_commit(&commit_template(format));
+}
 }
 
 /// The commit sweep for a publish, `commit --advance main`: its changeset and main's move are
@@ -395,16 +407,16 @@ mod advance {
         ended
     }
 
+    per_format! {
     /// An injected I/O error at any filesystem call of a `commit --advance` leaves its changeset
     /// and main's move both recorded or neither (Review Focus 3): each call of the dry run fails
     /// in turn, once and persistently, with `EIO` and with `ENOSPC` ([`FAILURES`]). A success
     /// records both, a warning or not; `E_IO_TRANSIENT` with `committed: false`, as every other
     /// failure, neither; the documented aborts either. No run panics, and the sweep reaches each
     /// outcome the commit sweep exists for ([`COMMIT_OUTCOMES`]).
-    #[test]
     #[ignore = "slow, ~15 s: ~500 failed runs of commit --advance; just check-slow runs it"]
-    fn fail_at_every_call_of_an_advancing_commit_reports_honestly() {
-        let template = commit_template();
+    fn fail_at_every_call_of_an_advancing_commit_reports_honestly(format) {
+        let template = commit_template(format);
         let dry = dry_advance(&template);
         let mut ended = Vec::new();
         for failure in FAILURES {
@@ -419,13 +431,15 @@ mod advance {
             "no run of the advancing sweep ended so: {missing:?}"
         );
     }
+    }
 
+    per_format! {
     /// The advancing sweep's dry run, in the default gate ([`dry_advance`] asserts what it
     /// does): a change to the publish, the template or the checkpoint's batching that would take
     /// the move, the index sync or the checkpoint out of the slow sweep fails here at once.
-    #[test]
-    fn the_advancing_commit_sweep_reaches_the_move_and_the_checkpoint() {
-        dry_advance(&commit_template());
+    fn the_advancing_commit_sweep_reaches_the_move_and_the_checkpoint(format) {
+        dry_advance(&commit_template(format));
+    }
     }
 }
 
@@ -545,6 +559,7 @@ mod land {
         ended
     }
 
+    per_format! {
     /// An injected I/O error at any filesystem call of a `land` leaves main at the landed
     /// changeset or where it was (operations spec §3; Review Focus 1): each call of the dry run
     /// fails in turn, once and persistently, with `EIO` and with `ENOSPC` ([`FAILURES`]). A
@@ -552,10 +567,9 @@ mod land {
     /// other failure, has not; the documented aborts either. The same land again always ends
     /// landed. No run panics, and the sweep reaches each outcome the commit sweep exists for
     /// ([`COMMIT_OUTCOMES`]).
-    #[test]
     #[ignore = "slow, ~10 s: ~200 failed runs of land, each checked twice; just check-slow runs it"]
-    fn fail_at_every_call_of_a_land_reports_honestly() {
-        let template = commit_template();
+    fn fail_at_every_call_of_a_land_reports_honestly(format) {
+        let template = commit_template(format);
         let dry = dry_land(&template);
         let mut ended = Vec::new();
         for failure in FAILURES {
@@ -570,16 +584,19 @@ mod land {
             "no run of the land sweep ended so: {missing:?}"
         );
     }
+    }
 
+    per_format! {
     /// The land sweep's dry run, in the default gate ([`dry_land`] asserts what it does): a
     /// change to the land, the template or the checkpoint's batching that would take the publish,
     /// the index sync or the checkpoint out of the slow sweep fails here at once.
-    #[test]
-    fn the_land_sweep_reaches_the_publish_and_the_checkpoint() {
-        dry_land(&commit_template());
+    fn the_land_sweep_reaches_the_publish_and_the_checkpoint(format) {
+        dry_land(&commit_template(format));
+    }
     }
 }
 
+per_format! {
 /// The documented abort of a commit (a failed journal append whose cut back off the journal
 /// fails too, [`ABORTS`]) ends the process by `std::process::abort` even when its reason cannot
 /// be written: here the run's stderr is a pipe nobody reads (its read end dropped before the
@@ -588,9 +605,8 @@ mod land {
 /// serve on after, against storage spec §2 rule 3). The aborting call is found by running the
 /// commit with a persistent `EIO` from each call in turn, cheaply, without the sweep's oracle;
 /// the first run that aborts is then run again without a reader.
-#[test]
-fn an_abort_whose_reason_cannot_be_written_still_aborts() {
-    let template = commit_template();
+fn an_abort_whose_reason_cannot_be_written_still_aborts(format) {
+    let template = commit_template(format);
     let dry = dry_commit(&template);
     let fail_at = |k: u64| format!("{k}:persistent:eio");
     let aborting = sweep(1..=dry.calls, |k| {
@@ -642,47 +658,53 @@ fn an_abort_whose_reason_cannot_be_written_still_aborts() {
     assert_eq!(stdout, "", "an aborted run prints no envelope");
     store.assert_clean(&format!("call {k} failing persistently: after the abort"));
 }
+}
 
-/// `init` failing at each of its last eight calls: the write of `FORMAT`'s temp file, its link,
-/// the sync of the store root that makes the link durable (its work done, then failing, as a
-/// failed writeback does), and the five reads of the new store it reports from. Failing once
-/// with `EIO`, each of them fails the `init`: the first three leave no store (an `init` whose
-/// root sync fails takes `FORMAT` back, and a second `init` makes the store), and the five reads
-/// fail after the store is made (`details.created`). The window's shape is pinned exactly: an
+per_format! {
+/// `init` failing at each of its last calls: the write of `FORMAT`'s temp file, its link, the
+/// sync of the store root that makes the link durable (its work done, then failing, as a failed
+/// writeback does), and the reads of the new store it reports from (five in FORMAT 1, four in
+/// FORMAT 2: [`report_reads`]). Failing once with `EIO`, each of them fails the `init`: the
+/// first three leave no store (an `init` whose root sync fails takes `FORMAT` back, and a second
+/// `init` makes the store), and the reads fail after the store is made (`details.created`). The window's shape is pinned exactly: an
 /// `init` that ignored the failed root sync would report success there, and a change to
 /// `repo_info`'s FsOps reads moves the boundary. Failing persistently from the root's sync on,
 /// the taking back fails too, and the process aborts, as documented ([`ABORTS`]; `init` appends
 /// to no journal, so it has no other abort). In the default gate;
 /// [`fail_at_every_call_reports_honestly`] sweeps every call.
-#[test]
-fn an_init_failing_at_its_last_calls_reports_honestly() {
-    let calls = dry_init();
-    let created = sweep(calls - 7..=calls, |k| {
-        match init_failing_at(k, "once:eio") {
+fn an_init_failing_at_its_last_calls_reports_honestly(format) {
+    let calls = dry_init(format);
+    let reads = report_reads(format);
+    let created = sweep(calls - 2 - reads..=calls, |k| {
+        match init_failing_at(format, k, "once:eio") {
             Ended::Failed(error) => Some(error["details"]["created"] == true),
             Ended::Succeeded(_) | Ended::Aborted => None,
         }
     });
+    let mut window = vec![Some(false); 3];
+    window.extend(std::iter::repeat_n(Some(true), usize::try_from(reads).unwrap()));
     assert_eq!(
         created,
-        [
-            Some(false),
-            Some(false),
-            Some(false),
-            Some(true),
-            Some(true),
-            Some(true),
-            Some(true),
-            Some(true)
-        ],
+        window,
         "init's last calls: the temp write, the link and the root's sync (whose take-back \
-         leaves no store, and the error says nothing was made), then the five reads of the \
+         leaves no store, and the error says nothing was made), then the {reads} reads of the \
          report, each failing after the store is made (created: true); none succeeds, none \
          aborts under a transient failure"
     );
-    let root_sync = calls - 5;
+    let root_sync = calls - reads;
     assert!(
-        matches!(init_failing_at(root_sync, "persistent:eio"), Ended::Aborted),
+        matches!(init_failing_at(format, root_sync, "persistent:eio"), Ended::Aborted),
         "a persistent failure at the root's sync, whose take-back fails too, aborts as documented"
     );
+}
+}
+
+/// How many FsOps reads `init`'s report of a fresh store of `format` makes: FORMAT 2 reads one
+/// file fewer.
+fn report_reads(format: StoreFormat) -> u64 {
+    match format {
+        StoreFormat::V1 => 5,
+        StoreFormat::V2 => 4,
+        other => panic!("no read count for {other:?}"),
+    }
 }

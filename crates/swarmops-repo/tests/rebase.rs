@@ -19,9 +19,10 @@ use swarmops_core::{ChangesetId, Signature};
 use swarmops_repo::land::LandRequest;
 use swarmops_repo::rebase::{RebaseOutcome, RebaseRequest, RebaseStatus};
 use swarmops_repo::{Advance, Change, CommitRequest, Depth, LocalRepo, RepoError};
-use swarmops_store::{Journal, Layout, MetaStore, RealFs};
+use swarmops_store::{Journal, MetaStore, RealFs};
 use swarmops_testkit::faults::checked;
 use swarmops_testkit::repo::{put, request};
+use swarmops_testkit::store::layout_of;
 use tempfile::TempDir;
 
 /// Who moves `main` in the tests' setup, and makes the changes they rebase.
@@ -102,7 +103,7 @@ pub(crate) fn main_head(repo: &LocalRepo) -> ChangesetId {
 
 /// How many frames the journal of the store at `root` lists.
 pub(crate) fn frame_count(root: &Utf8Path) -> u64 {
-    Journal::open(&Layout::new(root), Arc::new(RealFs::new()))
+    Journal::open(&layout_of(root), Arc::new(RealFs::new()))
         .unwrap()
         .frame_count()
         .unwrap()

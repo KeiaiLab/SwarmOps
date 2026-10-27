@@ -13,7 +13,7 @@ expression: s.transcript()
       "result": {
         "repo_id": "[repo_id]",
         "name": "acme",
-        "store_version": 1,
+        "store_version": 2,
         "changesets": 0,
         "refs": 0
       },
@@ -269,7 +269,7 @@ expression: s.transcript()
     }
   },
   {
-    "args": "--repo [tmp]/store resolve HEAD",
+    "args": "--repo [tmp]/store resolve main~x",
     "exit": 2,
     "stdout": {
       "ok": false,
@@ -277,11 +277,11 @@ expression: s.transcript()
       "api": 1,
       "error": {
         "code": "E_INVALID_ARG",
-        "message": "\"HEAD\" is not a revision",
+        "message": "\"main~x\" is not a revision",
         "retryable": false,
         "exit": 2,
         "details": {
-          "rev": "HEAD"
+          "rev": "main~x"
         },
         "hint": "a revision is main, release/<name>, a changeset id or 12 or more of its first hex digits, then optionally ~N for the N-th first parent"
       },

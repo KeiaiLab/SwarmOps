@@ -232,7 +232,18 @@ impl LocalRepo {
         name: &str,
         fs: Arc<dyn FsOps>,
     ) -> Result<LocalRepo, RepoError> {
-        Self::create_on(store, name, format::DEFAULT_INIT_FORMAT, fs, Threads::Pool)
+        Self::create_with_fs_as(store, name, format::DEFAULT_INIT_FORMAT, fs)
+    }
+
+    /// [`LocalRepo::create_with_fs`] of a store of `format`, as [`LocalRepo::create_as`] makes
+    /// one.
+    pub fn create_with_fs_as(
+        store: &Utf8Path,
+        name: &str,
+        format: StoreFormat,
+        fs: Arc<dyn FsOps>,
+    ) -> Result<LocalRepo, RepoError> {
+        Self::create_on(store, name, format, fs, Threads::Pool)
     }
 
     /// Opens the store at `store`. Checks `FORMAT` first, then reads `REPO`:

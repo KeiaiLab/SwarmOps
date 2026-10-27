@@ -13,7 +13,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, ObjectKind};
 use swarmops_store::{
     ChangesetMeta, CommitInfo, CrashAtFs, FailAt, FailAtFs, FailMode, FsOps, Index, InjectedError,
-    InsertOutcome, Journal, Layout, MetaStore, MetaWrite, RealFs, StoreError,
+    InsertOutcome, Journal, Layout, MetaStore, MetaWrite, RealFs, StoreError, StoreFormat,
 };
 use tempfile::TempDir;
 
@@ -58,7 +58,7 @@ fn insert(store: &MetaStore, n: u64) {
 
 /// The checkpoint of the store at `root`.
 fn ckpt(root: &Utf8Path) -> u64 {
-    Journal::open(&Layout::new(root), Arc::new(RealFs::new()))
+    Journal::open(&super::layout_of(root), Arc::new(RealFs::new()))
         .unwrap()
         .ckpt()
         .unwrap()
@@ -66,12 +66,12 @@ fn ckpt(root: &Utf8Path) -> u64 {
 
 /// The length of the journal of the store at `root`.
 fn log_len(root: &Utf8Path) -> u64 {
-    super::file_len(Layout::new(root).journal_log())
+    super::file_len(super::layout_of(root).journal_log())
 }
 
 /// An index handle of its own on the store at `root`.
 fn index(root: &Utf8Path) -> Index {
-    Index::open(&Layout::new(root), Arc::new(RealFs::new())).unwrap()
+    Index::open(&super::layout_of(root), Arc::new(RealFs::new())).unwrap()
 }
 
 /// What a child that ended normally reported (the line it printed after [`REPORT`]).
@@ -136,12 +136,15 @@ pub enum Template {
     Compaction,
 }
 
-/// A store for the error sweeps, on a filesystem that never syncs (durability is not their
-/// subject): changesets `0..n` past the checkpoint, `n` returned, so that the swept transaction
-/// `n` does what `template` names.
-pub fn sweep_template(template: Template) -> (TempDir, Utf8PathBuf, u64) {
+/// A metadata store of `format` for the error sweeps, on a filesystem that never syncs
+/// (durability is not their subject): changesets `0..n` past the checkpoint, `n` returned, so
+/// that the swept transaction `n` does what `template` names. Its root holds the `FORMAT` of
+/// `format`, which every open of it reads, as a repository's root does.
+pub fn sweep_template(template: Template, format: StoreFormat) -> (TempDir, Utf8PathBuf, u64) {
     let (dir, root) = super::temp_dir();
-    let store = MetaStore::create_with_fs(&root, Arc::new(NoSyncFs)).unwrap();
+    std::fs::write(root.join("FORMAT"), format.marker()).unwrap();
+    let layout = Layout::with_format(&root, format);
+    let store = MetaStore::create_in(layout, Arc::new(NoSyncFs)).unwrap();
     let n = match template {
         Template::Compaction => {
             let mut write = store.write().unwrap();

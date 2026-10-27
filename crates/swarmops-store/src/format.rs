@@ -39,7 +39,7 @@ pub enum StoreFormat {
 }
 
 /// The format a create writes when the request names none.
-pub const DEFAULT_INIT_FORMAT: StoreFormat = StoreFormat::V1;
+pub const DEFAULT_INIT_FORMAT: StoreFormat = StoreFormat::V2;
 
 /// The formats a create writes.
 pub const INIT_FORMATS: &[StoreFormat] = &[StoreFormat::V1, StoreFormat::V2];

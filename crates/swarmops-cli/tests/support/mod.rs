@@ -53,21 +53,23 @@ pub fn run_within<S: AsRef<str>>(args: &[S], env: &[(&str, &str)], timeout: Dura
 
 /// What the crash and error sweeps share (`swarmops_testkit::cli::sweep`), through [`BIN`].
 pub mod sweep {
+    use swarmops_store::StoreFormat;
     pub use swarmops_testkit::cli::sweep::{
-        DryRun, NOW, SWEPT_PUTS, TEMPLATE_FRAMES, calls_file, dry_commit, init_again,
+        DryRun, NOW, SWEPT_PUTS, TEMPLATE_FRAMES, calls_file, dry_commit, init_again, init_args,
         reported_calls, sweep, swept_commit,
     };
 
     use super::{Store, Swarmops};
 
-    /// A store for the commit sweeps (`swarmops_testkit::cli::sweep::commit_template`).
-    pub fn commit_template() -> Store {
-        swarmops_testkit::cli::sweep::commit_template::<Swarmops>()
+    /// A store of `format` for the commit sweeps
+    /// (`swarmops_testkit::cli::sweep::commit_template`).
+    pub fn commit_template(format: StoreFormat) -> Store {
+        swarmops_testkit::cli::sweep::commit_template::<Swarmops>(format)
     }
 
-    /// How many filesystem calls `init` makes on a fresh path
+    /// How many filesystem calls `init` of a store of `format` makes on a fresh path
     /// (`swarmops_testkit::cli::sweep::dry_init`).
-    pub fn dry_init() -> u64 {
-        swarmops_testkit::cli::sweep::dry_init::<Swarmops>()
+    pub fn dry_init(format: StoreFormat) -> u64 {
+        swarmops_testkit::cli::sweep::dry_init::<Swarmops>(format)
     }
 }

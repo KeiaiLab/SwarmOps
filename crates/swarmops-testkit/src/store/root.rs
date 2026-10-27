@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use camino::Utf8PathBuf;
-use swarmops_store::{FsOps, Layout, RealFs};
+use swarmops_store::{FsOps, Layout, RealFs, StoreFormat};
 use tempfile::TempDir;
 
 /// A fresh, empty directory and its path; the directory lives as long as the `TempDir`.
@@ -20,6 +20,18 @@ pub fn temp_dir() -> (TempDir, Utf8PathBuf) {
 pub fn new_root() -> (TempDir, Layout) {
     let (dir, root) = temp_dir();
     (dir, Layout::new(root))
+}
+
+/// The layout of the store rooted at `root`, in the format its `FORMAT` names: FORMAT 1 when
+/// there is no `FORMAT` (a metadata store made on its own, as the store's tests make, opens so)
+/// or it names no format.
+pub fn layout_of(root: impl Into<Utf8PathBuf>) -> Layout {
+    let root = root.into();
+    let format = stdfs::read(root.join("FORMAT"))
+        .ok()
+        .and_then(|bytes| StoreFormat::from_marker(&bytes))
+        .unwrap_or(StoreFormat::V1);
+    Layout::with_format(root, format)
 }
 
 /// The real filesystem, as the stores take it.

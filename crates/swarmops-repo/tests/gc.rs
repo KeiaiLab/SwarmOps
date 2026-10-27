@@ -12,8 +12,9 @@ use std::time::{Duration, Instant, SystemTime};
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::ObjectKind;
 use swarmops_repo::{GcReport, GcRequest, LocalRepo, RepoError, StoreError};
-use swarmops_store::{GC_TEMP_GRACE, Layout, LeftoverKind, MaintLease};
-use swarmops_testkit::repo::{commit, new_repo, put};
+use swarmops_store::{GC_TEMP_GRACE, LeftoverKind, MaintLease, StoreFormat};
+use swarmops_testkit::repo::{commit, new_repo, new_repo_as, put};
+use swarmops_testkit::store::layout_of;
 
 /// A temp file this much past the grace.
 const STALE: Duration = Duration::from_hours(1);
@@ -96,7 +97,7 @@ fn out_of_range(
 /// A store with a changeset, and one leftover of each class a FORMAT 1 store can hold, beside
 /// what gc never removes: an old temp-like file in `git/`, `workspaces/` and `quarantine/`.
 fn store_with_leftovers() -> (tempfile::TempDir, Utf8PathBuf, LocalRepo) {
-    let (dir, root, repo) = new_repo();
+    let (dir, root, repo) = new_repo_as(StoreFormat::V1);
     commit(&repo, &[], vec![put("a.txt", b"a")]);
     write(&root, "objects/tmp/.tmpold", b"12345");
     write(&root, "meta/derived/tmp/.tmpold", b"123");
@@ -208,14 +209,14 @@ fn orphan_objects_are_counted_and_kept() {
         repo.contains_object(ids[0]).unwrap(),
         "the orphan was removed"
     );
-    assert!(Layout::new(&root).object_path(ids[0]).is_file());
+    assert!(layout_of(&root).object_path(ids[0]).is_file());
 }
 
 /// A held lease, another gc's, repair's or upgrade's, refuses gc at once.
 #[test]
 fn a_held_lease_refuses_gc_at_once() {
     let (_dir, root, repo) = store_with_leftovers();
-    let held = MaintLease::try_acquire(&Layout::new(&root)).unwrap();
+    let held = MaintLease::try_acquire(&layout_of(&root)).unwrap();
     let before = tree(&root);
 
     let asked = Instant::now();
@@ -235,11 +236,11 @@ fn a_held_lease_refuses_gc_at_once() {
 /// object file, and one that removes FORMAT 1's journal in a FORMAT 1 store.
 #[test]
 fn the_range_detector_catches_a_gc_that_removes_an_object() {
-    let (_dir, root, repo) = new_repo();
+    let (_dir, root, repo) = new_repo_as(StoreFormat::V1);
     let id = commit(&repo, &[], vec![put("a.txt", b"a")]);
     let before = tree(&root);
 
-    let object = Layout::new(&root).object_path(id.0);
+    let object = layout_of(&root).object_path(id.0);
     fs::remove_file(&object).unwrap();
     let caught = out_of_range(&before, &tree(&root), 1);
     let rel = object.strip_prefix(&root).unwrap().to_owned();

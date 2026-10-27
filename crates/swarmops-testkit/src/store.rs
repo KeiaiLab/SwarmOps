@@ -8,4 +8,4 @@ mod frames;
 mod root;
 
 pub use frames::{lying_zstd, zstd_object, zstd_v07_frame};
-pub use root::{append_bytes, file_len, new_root, real_fs, set_len, temp_dir};
+pub use root::{append_bytes, file_len, layout_of, new_root, real_fs, set_len, temp_dir};

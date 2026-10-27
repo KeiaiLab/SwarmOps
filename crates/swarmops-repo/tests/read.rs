@@ -25,7 +25,8 @@ use swarmops_testkit::child::{SIGABRT, run, this_test};
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::faults::checked;
 use swarmops_testkit::fs::RecordingFs;
-use swarmops_testkit::repo::{blob, commit, new_repo, path, put, put_as, request};
+use swarmops_testkit::repo::{blob, commit, new_repo, new_repo_as, path, put, put_as, request};
+use swarmops_testkit::store::layout_of;
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::test_name;
 
@@ -167,7 +168,7 @@ fn insert_prefix_twins(root: &Utf8Path) -> [ChangesetId; 2] {
 
 #[test]
 fn resolve_ref_full_prefix_and_tilde() {
-    let (_dir, root, repo) = new_repo();
+    let (_dir, root, repo) = new_repo_as(StoreFormat::V1);
     let c1 = commit(&repo, &[], vec![put("f", b"1")]);
     let c2 = commit(&repo, &[c1], vec![put("f", b"2")]);
     let c3 = commit(&repo, &[c2], vec![put("f", b"3")]);
@@ -243,7 +244,7 @@ fn resolve_ref_full_prefix_and_tilde() {
 
 #[test]
 fn resolve_through_a_dangling_ref_is_not_found() {
-    let (_dir, root, repo) = new_repo();
+    let (_dir, root, repo) = new_repo_as(StoreFormat::V1);
     commit(&repo, &[], vec![put("f", b"1")]);
     // main's file names a changeset the store does not hold (damage verify reports).
     let nowhere = unknown_id();
@@ -310,8 +311,6 @@ fn log_first_parent_order_and_limit() {
 /// the record still reads, where `changeset` fails. An id the store does not hold is `None`.
 #[test]
 fn changeset_meta_reads_the_index_record() {
-    use swarmops_store::Layout;
-
     let (_dir, root, repo) = new_repo();
     let c1 = commit(&repo, &[], vec![put("a", b"a")]);
     let c2 = commit(&repo, &[c1], vec![put("b", b"b")]);
@@ -339,7 +338,7 @@ fn changeset_meta_reads_the_index_record() {
     assert_eq!(meta(merge), Some(merged.clone()));
     assert_eq!(meta(unknown_id()), None);
 
-    fs::remove_file(Layout::new(&root).object_path(merge.0)).unwrap();
+    fs::remove_file(layout_of(&root).object_path(merge.0)).unwrap();
     assert!(
         matches!(repo.changeset(merge), Err(RepoError::MissingObject { .. })),
         "the object is gone"
@@ -353,7 +352,7 @@ fn changeset_meta_reads_the_index_record() {
 #[test]
 fn put_objects_then_contains_object() {
     use swarmops_core::{Tree, TreeEntry};
-    use swarmops_store::{FsObjectStore, Layout, ObjectStore, RealFs};
+    use swarmops_store::{FsObjectStore, ObjectStore, RealFs};
 
     let (_dir, root, repo) = new_repo();
     let content = b"stored before any changeset names it\n".to_vec();
@@ -367,7 +366,7 @@ fn put_objects_then_contains_object() {
     let ids = repo.put_objects(objects.clone()).unwrap();
     assert_eq!(ids, [file.0, tree.id().0]);
 
-    let store = FsObjectStore::open(Layout::new(&root), Box::new(RealFs::new()));
+    let store = FsObjectStore::open(layout_of(&root), Box::new(RealFs::new()));
     for (&id, object) in ids.iter().zip(&objects) {
         assert!(repo.contains_object(id).unwrap(), "{id}");
         assert_eq!(store.get(id).unwrap().as_ref(), Some(object), "{id}");
@@ -526,11 +525,11 @@ fn create_open_and_info() {
     );
     assert_eq!(
         info,
-        RepoInfo::new(info.repo_id.clone(), "demo".to_owned(), 1, 0, 0, None)
+        RepoInfo::new(info.repo_id.clone(), "demo".to_owned(), 2, 0, 0, None)
     );
     assert_eq!(
         fs::read(root.join("FORMAT")).unwrap(),
-        b"swarmops-store 1\n"
+        b"swarmops-store 2\n"
     );
     for byte in 0..=255u8 {
         assert!(
@@ -668,7 +667,7 @@ fn a_format_file_one_byte_too_long_is_refused_by_its_length() {
     // The length check's boundary: a FORMAT of its 17 bytes is read, and refused for what it
     // names when that is another layout; one byte more is refused by its length, before it is
     // read.
-    let (_dir, root, repo) = new_repo();
+    let (_dir, root, repo) = new_repo_as(StoreFormat::V1);
     drop(repo);
     let format = root.join("FORMAT");
     let refused = |what: String| match LocalRepo::open(&root) {
@@ -1030,7 +1029,7 @@ fn create_calls() -> Vec<String> {
     let canonical_dir = dir.path().canonicalize().unwrap();
     let (fs, calls) = RecordingFs::new();
     let fs = fs.naming_paths_in(canonical_dir.join("store"));
-    LocalRepo::create_with_fs(&root, "demo", Arc::new(fs)).unwrap();
+    LocalRepo::create_with_fs_as(&root, "demo", StoreFormat::V1, Arc::new(fs)).unwrap();
     calls()
 }
 
@@ -1396,7 +1395,7 @@ mod span {
             &[],
             vec![put("raw.bin", &raw), put("text.txt", &text)],
         );
-        let layout = Layout::new(root.clone());
+        let layout = layout_of(root.clone());
         let snap = repo.snapshot().unwrap();
         let tree = snap.changeset(cs).unwrap().unwrap().changeset.root;
         for (name, content, enc) in [("raw.bin", &raw, 0_u8), ("text.txt", &text, 1)] {

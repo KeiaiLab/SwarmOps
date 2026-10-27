@@ -1462,9 +1462,9 @@ mod sweeps {
     /// frame whole and durable in `journal.log` and unlisted, as a crash between its sync and its
     /// listing leaves it, and its move not materialized.
     fn commit_unlisted(store: &Store) {
-        let fails = |method: FsMethod, path: &Path| {
-            method == FsMethod::AppendDurable && path.ends_with("journal.off")
-        };
+        let off = store.layout().journal_off().into_std_path_buf();
+        let fails =
+            move |method: FsMethod, path: &Path| method == FsMethod::AppendDurable && path == off;
         let root = Utf8Path::new(store.path());
         let repo =
             LocalRepo::open_with_fs(root, Arc::new(FailingFs::new(fails))).expect("open the store");
@@ -1837,7 +1837,8 @@ mod sweeps {
                 matches!(e, Ended::Exported(_))
             }),
             ("failed in the committed read", &|e| {
-                failed_in(e, "meta/journal.")
+                // `meta/journal.*`, or FORMAT 2's `meta/journal2.*`.
+                failed_in(e, "meta/journal")
             }),
             ("failed at a derived value", &|e| {
                 failed_in(e, "meta/derived/")

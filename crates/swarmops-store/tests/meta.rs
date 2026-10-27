@@ -35,7 +35,7 @@ use swarmops_testkit::store::sweep::{
 };
 use swarmops_testkit::store::temp_dir as new_root;
 use swarmops_testkit::store::{append_bytes, file_len, set_len};
-use swarmops_testkit::test_name;
+use swarmops_testkit::{per_format, test_name};
 use tempfile::TempDir;
 
 /// Set only in the children the multi-process tests spawn: the store root.
@@ -3729,6 +3729,8 @@ fn io_failure(e: &StoreError) -> Option<&swarmops_store::IoFailure> {
     }
 }
 
+#[cfg(feature = "test-hooks")]
+per_format! {
 /// An injected I/O error at any filesystem call of a write transaction, and of one that
 /// compacts, is reported honestly: a transaction that returns, or says it committed
 /// ([`StoreError::PostCommit`]), is in the store; one that fails otherwise is not; and the store
@@ -3739,15 +3741,20 @@ fn io_failure(e: &StoreError) -> Option<&swarmops_store::IoFailure> {
 /// relative to the store's root, with the injected errno. The same with every call from the
 /// k-th on failing is [`persistent_failures_at_every_store_call_report_honestly`], in the slow
 /// suite.
-#[test]
-#[cfg(feature = "test-hooks")]
-fn fail_at_every_store_call_reports_honestly() {
+fn fail_at_every_store_call_reports_honestly(format) {
     for shape in [Template::Checkpoint, Template::Compaction] {
-        let (_dir, template, n) = sweep_template(shape);
+        let (_dir, template, n) = sweep_template(shape, format);
         let calls = calls_of(&template, |store| {
             swept(store, n).unwrap();
         });
-        assert!(calls > 20, "{calls}");
+        // FORMAT 2 keeps its ref files flat in refs2/: no ref directory to make and sync, two
+        // calls fewer than FORMAT 1's.
+        let floor = match format {
+            StoreFormat::V1 => 20,
+            StoreFormat::V2 => 18,
+            other => panic!("no call floor for {other:?}"),
+        };
+        assert!(calls > floor, "{calls}");
         let kind = match shape {
             Template::Checkpoint => "a checkpoint",
             Template::Compaction => "a compaction",
@@ -3797,24 +3804,25 @@ fn fail_at_every_store_call_reports_honestly() {
         );
     }
 }
+}
 
+#[cfg(feature = "test-hooks")]
+per_format! {
 /// [`fail_at_every_store_call_reports_honestly`] with every mutating call from the k-th on
 /// failing (reads aside), as a device gone bad: each run in a child process, since a failed
 /// journal append whose cut fails too aborts (the documented abort, which says why on stderr).
 /// A run that aborts may have committed or not, but never half: the store opens, and holds the
 /// transaction whole or not at all.
-#[test]
 #[ignore = "slow, ~15 s: ~140 child processes; just check-slow runs it"]
-#[cfg(feature = "test-hooks")]
-fn persistent_failures_at_every_store_call_report_honestly() {
-    const TEST: &str = "persistent_failures_at_every_store_call_report_honestly";
+fn persistent_failures_at_every_store_call_report_honestly(format) {
+    let test = swarmops_testkit::formats::test_of(format);
     if let (Ok(root), Ok(plan)) = (std::env::var(SWEEP_ROOT), std::env::var(SWEEP_PLAN)) {
         sweep_child(Utf8Path::new(&root), &plan);
         return;
     }
     let mut aborted = 0;
     for shape in [Template::Checkpoint, Template::Compaction] {
-        let (_dir, template, n) = sweep_template(shape);
+        let (_dir, template, n) = sweep_template(shape, format);
         let calls = calls_of(&template, |store| {
             swept(store, n).unwrap();
         });
@@ -3827,7 +3835,7 @@ fn persistent_failures_at_every_store_call_report_honestly() {
                 let what = format!("{kind}, calls {k}.. of {calls} failing with {errno}");
                 let (_dir, root) = copy_of(&template);
                 let said =
-                    run_sweep_child(&test_name!(TEST), &root, &format!("fail:{k}:{errno}:{n}"));
+                    run_sweep_child(&test_name!(test), &root, &format!("fail:{k}:{errno}:{n}"));
                 aborted += usize::from(said == Said::Aborted);
                 assert_recovers(&root, n, &[(n, said)], &what);
             }
@@ -3838,7 +3846,10 @@ fn persistent_failures_at_every_store_call_report_honestly() {
         "a failed journal append whose cut fails too aborts"
     );
 }
+}
 
+#[cfg(feature = "test-hooks")]
+per_format! {
 /// Errors while a writer recovers from a crash (SQLite's compound failure: an I/O error while
 /// recovering from a prior crash) leave the store openable. The swept transaction is crashed at
 /// each of its calls in turn (a child each); then, on each crashed store, the next transaction (a
@@ -3847,11 +3858,9 @@ fn persistent_failures_at_every_store_call_report_honestly() {
 /// transaction is in the store whole or not at all, the next one exactly when it said it
 /// committed, and the store takes a write and a flush after. The next transaction's own calls,
 /// past its recovery, are [`fail_at_every_store_call_reports_honestly`]'s.
-#[test]
-#[cfg(feature = "test-hooks")]
-fn errors_during_recovery_leave_the_store_openable() {
-    const TEST: &str = "errors_during_recovery_leave_the_store_openable";
+fn errors_during_recovery_leave_the_store_openable(format) {
     const NEXT: u64 = 1000;
+    let test = swarmops_testkit::formats::test_of(format);
     if let (Ok(root), Ok(plan)) = (std::env::var(SWEEP_ROOT), std::env::var(SWEEP_PLAN)) {
         sweep_child(Utf8Path::new(&root), &plan);
         return;
@@ -3861,14 +3870,14 @@ fn errors_during_recovery_leave_the_store_openable() {
         write.insert_changeset(changeset(NEXT))?;
         write.commit()
     };
-    let (_dir, template, n) = sweep_template(Template::Checkpoint);
+    let (_dir, template, n) = sweep_template(Template::Checkpoint, format);
     let calls = calls_of(&template, |store| {
         swept(store, n).unwrap();
     });
     let mut most = 0;
     for k1 in 1..=calls {
         let (_crashed_dir, crashed) = copy_of(&template);
-        let crashed_said = run_sweep_child(&test_name!(TEST), &crashed, &format!("crash:{k1}:{n}"));
+        let crashed_said = run_sweep_child(&test_name!(test), &crashed, &format!("crash:{k1}:{n}"));
         assert_eq!(crashed_said, Said::Aborted, "crash at {k1}");
         let recovery = calls_of(&crashed, |store| {
             drop(store.write().unwrap());
@@ -3895,6 +3904,7 @@ fn errors_during_recovery_leave_the_store_openable() {
         most > 4,
         "some crash left recovery work: {most} calls at most"
     );
+}
 }
 
 /// Asserts that `result` is the refusal of a request past the layout's limit `what`, which

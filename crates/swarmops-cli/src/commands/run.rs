@@ -1590,8 +1590,12 @@ mod tests {
         drop(ops);
         // main's frame stays whole in journal.log, its entry gone from journal.off, as when its
         // writer died before listing it: the next write lists it.
-        let off = Layout::new(&root).journal_off();
-        set_len(&off, file_len(&off) - 8);
+        let off = Layout::with_format(&root, swarmops_store::DEFAULT_INIT_FORMAT).journal_off();
+        let entry_len = match swarmops_store::DEFAULT_INIT_FORMAT {
+            swarmops_store::StoreFormat::V1 => 8,
+            _ => 16,
+        };
+        set_len(&off, file_len(&off) - entry_len);
 
         let used = Used::default();
         let ops = LocalOps::open(&root).unwrap();

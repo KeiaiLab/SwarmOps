@@ -29,7 +29,7 @@ use swarmops_repo::merge::tree_diff::{PathFilter, delta_of};
 use swarmops_repo::{Advance, Change, CommitRequest, Depth, LocalRepo, RepoError};
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, FAIL_AT_ENV, FS_CALLS_ENV, ORDER_CHECK_ENV};
-use swarmops_store::{FsOps, Journal, Layout, MetaStore, RealFs};
+use swarmops_store::{FsOps, Journal, MetaStore, RealFs};
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::child::{SIGABRT, run, this_test};
 use swarmops_testkit::faults::checked;
@@ -37,6 +37,7 @@ use swarmops_testkit::faults::checked;
 use swarmops_testkit::fs::copy_dir;
 use swarmops_testkit::fs::{Call, FailingFs, NoSyncFs, Watch, Watched};
 use swarmops_testkit::repo::{blob, delete, path, put, request};
+use swarmops_testkit::store::layout_of;
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::test_name;
 use tempfile::TempDir;
@@ -121,7 +122,7 @@ fn main_head(repo: &LocalRepo) -> ChangesetId {
 
 /// How many frames the journal of the store at `root` lists.
 fn frame_count(root: &Utf8Path) -> u64 {
-    Journal::open(&Layout::new(root), Arc::new(RealFs::new()))
+    Journal::open(&layout_of(root), Arc::new(RealFs::new()))
         .unwrap()
         .frame_count()
         .unwrap()
@@ -663,7 +664,7 @@ struct ObjectReads {
 impl ObjectReads {
     /// Watches the object file of changeset `id` in the store at `root`.
     fn watch(&self, root: &Utf8Path, id: ChangesetId) {
-        let file = Layout::new(root).object_path(id.0);
+        let file = layout_of(root).object_path(id.0);
         let named = last_two(file.as_std_path());
         self.watched.lock().unwrap().insert(named);
     }
@@ -1451,8 +1452,8 @@ fn a_replay_is_decided_under_the_lock_after_the_tail_check() {
     let t0 = advance(&repo, ACTOR, &[], vec![put("a", b"a\n")]);
     let head = commit_by(&repo, ACTOR, &[t0], vec![put("b", b"b\n")]);
     drop(repo);
-    let unlisting =
-        FailingFs::new(|method, at| method == "append_durable" && at.ends_with("journal.off"));
+    let off = layout_of(&root).journal_off().into_std_path_buf();
+    let unlisting = FailingFs::new(move |method, at| method == "append_durable" && at == off);
     let repo = LocalRepo::open_with_fs(&root, Arc::new(unlisting)).unwrap();
     let first = repo.land(keyed(head, "key-1")).unwrap();
     assert_eq!(first.status, LandStatus::Landed);

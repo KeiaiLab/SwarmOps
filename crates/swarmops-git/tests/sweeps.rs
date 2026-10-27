@@ -51,7 +51,7 @@ use swarmops_git::{GitOid, GixSource, ImportError, ImportReport, ImportRequest, 
 use swarmops_repo::{Depth, LocalRepo};
 use swarmops_store::external_ids::lower_hex;
 use swarmops_store::{
-    CRASH_AT_ENV, ExternalEntry, ExternalIds, FAIL_AT_ENV, FS_CALLS_ENV, Frame, Journal, Layout,
+    CRASH_AT_ENV, ExternalEntry, ExternalIds, FAIL_AT_ENV, FS_CALLS_ENV, Frame, Journal,
     ORDER_CHECK_ENV, RealFs, Record, SYSTEM_GIT,
 };
 use swarmops_testkit::child::{Child, SIGABRT, run, this_test};
@@ -62,6 +62,7 @@ use swarmops_testkit::test_name;
 use tempfile::TempDir;
 
 use crate::support::MemSource;
+use swarmops_testkit::store::layout_of;
 
 /// Set only in the children the sweeps spawn: the store the child imports into.
 const STORE_ENV: &str = "SWARMOPS_TEST_GIT_SWEEP_STORE";
@@ -162,7 +163,7 @@ impl State {
     fn of(root: &Utf8Path) -> State {
         let repo = LocalRepo::open_with_fs(root, checked(RealFs::new())).expect("open the store");
         let info = repo.info().expect("the store's counts");
-        let ids = ExternalIds::new(Layout::new(root), checked(RealFs::new()));
+        let ids = ExternalIds::new(layout_of(root), checked(RealFs::new()));
         let listed = ids.list(SYSTEM_GIT).expect("list the git external ids");
         let mut entries: Vec<(String, ExternalEntry)> = (listed.into_iter())
             .map(|(key, entry)| (lower_hex(&key), entry.expect("a whole entry")))
@@ -179,7 +180,7 @@ impl State {
 /// The journal's frames in the store at `root`, as a reader reads them.
 fn frames(root: &Utf8Path) -> Vec<Frame> {
     let journal =
-        Journal::open(&Layout::new(root), Arc::new(RealFs::new())).expect("open the journal");
+        Journal::open(&layout_of(root), Arc::new(RealFs::new())).expect("open the journal");
     journal.tail_frames_from(0).expect("read the journal")
 }
 
@@ -393,8 +394,8 @@ impl Sweep {
         let added: Vec<String> = frames(&root)[before..].iter().map(shape).collect();
         assert_eq!(added, onto.frames(), "the dry run onto {onto:?}");
         let journal =
-            Journal::open(&Layout::new(&root), Arc::new(RealFs::new())).expect("the journal");
-        let end = std::fs::metadata(root.join("meta/journal.log")).expect("journal.log");
+            Journal::open(&layout_of(&root), Arc::new(RealFs::new())).expect("the journal");
+        let end = std::fs::metadata(layout_of(&root).journal_log()).expect("journal.log");
         assert_eq!(journal.ckpt().expect("the checkpoint"), end.len());
         let whole = State::of(&root);
         let recorded = (whole.changesets, to_u64(whole.entries.len()));

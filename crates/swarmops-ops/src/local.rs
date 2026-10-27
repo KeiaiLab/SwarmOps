@@ -3167,7 +3167,7 @@ mod tests {
     fn failures_after_the_commit_point_come_back_as_warnings() {
         let dir = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
-        drop(LocalOps::init(&root, "acme").unwrap());
+        drop(LocalOps::init_as(&root, "acme", Some(1)).unwrap());
         let who = Identity::parse("agent/worker-17").unwrap();
 
         // Materializing the commit's frame into the index fails once the frame is durable: the
@@ -3237,7 +3237,7 @@ mod tests {
         /// A store at `<dir>/store`, made, and the identity that commits to it.
         fn new_store(dir: &tempfile::TempDir) -> (Utf8PathBuf, Identity) {
             let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
-            drop(LocalOps::init(&root, "acme").unwrap());
+            drop(LocalOps::init_as(&root, "acme", Some(1)).unwrap());
             (root, Identity::parse("agent/worker-17").unwrap())
         }
 
@@ -3334,7 +3334,7 @@ mod tests {
     fn a_commit_whose_journal_append_fails_is_retryable_and_not_committed() {
         let dir = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
-        drop(LocalOps::init(&root, "acme").unwrap());
+        drop(LocalOps::init_as(&root, "acme", Some(1)).unwrap());
         let who = Identity::parse("agent/worker-17").unwrap();
         let ops = ops_on(&root, failing("append_durable", "journal.log"));
         let mut put = ChangeInput::new("f".to_owned(), ChangeOp::Put);
@@ -3363,7 +3363,7 @@ mod tests {
     fn a_commit_whose_tail_check_cannot_list_a_frame_is_retryable_and_not_committed() {
         let dir = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
-        drop(LocalOps::init(&root, "acme").unwrap());
+        drop(LocalOps::init_as(&root, "acme", Some(1)).unwrap());
         let who = Identity::parse("agent/worker-17").unwrap();
         let ops = ops_on(&root, failing("append_durable", "journal.off"));
         let commit = |path: &str| {
@@ -3397,7 +3397,7 @@ mod tests {
     fn a_request_records_what_its_own_write_repaired() {
         let dir = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
-        let (ops, _) = LocalOps::init(&root, "acme").unwrap();
+        let (ops, _) = LocalOps::init_as(&root, "acme", Some(1)).unwrap();
         let who = Identity::parse("agent/worker-17").unwrap();
         let commit = |content: &str| {
             let mut put = ChangeInput::new("f".to_owned(), ChangeOp::Put);
@@ -3444,7 +3444,7 @@ mod tests {
         for deletes in [true, false] {
             let dir = tempfile::tempdir().unwrap();
             let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
-            let (ops, _) = LocalOps::init(&root, "acme").unwrap();
+            let (ops, _) = LocalOps::init_as(&root, "acme", Some(1)).unwrap();
             let commit = |content: &str| {
                 let mut put = ChangeInput::new("f".to_owned(), ChangeOp::Put);
                 put.content = Some(ContentInput::Inline(content.to_owned()));
@@ -3507,7 +3507,7 @@ mod tests {
     fn an_advancing_commit_that_loses_records_what_its_write_repaired() {
         let dir = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
-        let (ops, _) = LocalOps::init(&root, "acme").unwrap();
+        let (ops, _) = LocalOps::init_as(&root, "acme", Some(1)).unwrap();
         let who = Identity::parse("agent/worker-17").unwrap();
         let req = |parent: Option<&str>, content: &str, advance: Option<&str>| {
             let mut change_input = ChangeInput::new("f".to_owned(), ChangeOp::Put);
@@ -3559,7 +3559,7 @@ mod tests {
         for tail_check_fails in [false, true] {
             let dir = tempfile::tempdir().unwrap();
             let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
-            let (ops, _) = LocalOps::init(&root, "acme").unwrap();
+            let (ops, _) = LocalOps::init_as(&root, "acme", Some(1)).unwrap();
             let who = Identity::parse("agent/worker-17").unwrap();
             // On main's head, advancing main.
             let publish = |content: &str, key: Option<&str>| {
@@ -3644,7 +3644,7 @@ mod tests {
         for tail_check_fails in [false, true] {
             let dir = tempfile::tempdir().unwrap();
             let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
-            let (ops, _) = LocalOps::init(&root, "acme").unwrap();
+            let (ops, _) = LocalOps::init_as(&root, "acme", Some(1)).unwrap();
             let who = Identity::parse("agent/worker-17").unwrap();
             let commit = |parent: Option<&str>, content: &str| {
                 let mut put = ChangeInput::new("f".to_owned(), ChangeOp::Put);
@@ -3750,7 +3750,7 @@ mod tests {
         fn each_request_takes_one_snapshot() {
             let dir = tempfile::tempdir().unwrap();
             let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
-            let (setup, _) = LocalOps::init(&root, "acme").unwrap();
+            let (setup, _) = LocalOps::init_as(&root, "acme", Some(1)).unwrap();
             let who = Identity::parse("agent/worker-17").unwrap();
             let commit = |parent: Option<&str>, content: &str, advance: Option<&str>| {
                 let mut change_input = ChangeInput::new("src/f".to_owned(), ChangeOp::Put);
@@ -3844,7 +3844,7 @@ mod tests {
         fn history_reads_take_one_snapshot_each() {
             let dir = tempfile::tempdir().unwrap();
             let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
-            let (setup, _) = LocalOps::init(&root, "acme").unwrap();
+            let (setup, _) = LocalOps::init_as(&root, "acme", Some(1)).unwrap();
             let who = Identity::parse("agent/worker-17").unwrap();
             let mut head: Option<String> = None;
             for content in ["1", "2"] {
@@ -3897,7 +3897,7 @@ mod tests {
         fn diff_resolves_both_revisions_in_one_snapshot() {
             let dir = tempfile::tempdir().unwrap();
             let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
-            let (setup, _) = LocalOps::init(&root, "acme").unwrap();
+            let (setup, _) = LocalOps::init_as(&root, "acme", Some(1)).unwrap();
             let who = Identity::parse("agent/worker-17").unwrap();
             let commit = |parent: Option<&str>, content: &str| {
                 let mut change_input = ChangeInput::new("src/f".to_owned(), ChangeOp::Put);
@@ -4059,7 +4059,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
-        let (ops, _) = LocalOps::init(&root, "acme").unwrap();
+        let (ops, _) = LocalOps::init_as(&root, "acme", Some(1)).unwrap();
         let who = Identity::parse("agent/worker-17").unwrap();
         let refs = swarmops_testkit::git::fixture("refs");
         let git_path = refs.repo.as_deref().and_then(std::path::Path::to_str);
@@ -4099,7 +4099,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
-        let (ops, _) = LocalOps::init(&root, "acme").unwrap();
+        let (ops, _) = LocalOps::init_as(&root, "acme", Some(1)).unwrap();
         let who = Identity::parse("agent/worker-17").unwrap();
         let mut change_input = ChangeInput::new("src/f".to_owned(), ChangeOp::Put);
         change_input.content = Some(ContentInput::Inline("1".to_owned()));

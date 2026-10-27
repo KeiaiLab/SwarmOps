@@ -4,13 +4,19 @@
 use camino::Utf8PathBuf;
 use swarmops_core::{BlobId, ChangesetId, LeafKind, ObjectKind, RepoPath, Signature};
 use swarmops_repo::{Change, ChangeOp, CommitRequest, LocalRepo};
+use swarmops_store::{DEFAULT_INIT_FORMAT, StoreFormat};
 use tempfile::TempDir;
 
 /// A fresh store in a temp dir of its own; the directory lives as long as the `TempDir`.
 pub fn new_repo() -> (TempDir, Utf8PathBuf, LocalRepo) {
+    new_repo_as(DEFAULT_INIT_FORMAT)
+}
+
+/// [`new_repo`] of a store of `format`: for a test of one format's files.
+pub fn new_repo_as(format: StoreFormat) -> (TempDir, Utf8PathBuf, LocalRepo) {
     let dir = tempfile::tempdir().expect("create a temp dir");
     let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).expect("temp dir is UTF-8");
-    let repo = LocalRepo::create(&root, "test").expect("create the store");
+    let repo = LocalRepo::create_as(&root, "test", format).expect("create the store");
     (dir, root, repo)
 }
 

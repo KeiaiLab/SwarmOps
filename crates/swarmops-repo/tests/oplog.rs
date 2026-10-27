@@ -24,14 +24,15 @@ use swarmops_repo::{
 };
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, ORDER_CHECK_ENV};
-use swarmops_store::{ChangesetMeta, Journal, Layout, MetaStore, RealFs, Recovered};
+use swarmops_store::{ChangesetMeta, Journal, MetaStore, RealFs, Recovered, StoreFormat};
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::child::{SIGABRT, run, this_test};
 use swarmops_testkit::faults::checked;
 use swarmops_testkit::fs::FailingFs;
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::fs::copy_dir;
-use swarmops_testkit::repo::{commit, new_repo, put, request};
+use swarmops_testkit::repo::{commit, new_repo, new_repo_as, put, request};
+use swarmops_testkit::store::layout_of;
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::test_name;
 
@@ -70,7 +71,7 @@ fn target(repo: &LocalRepo, name: &str) -> Option<ChangesetId> {
 
 /// How many frames the journal of the store at `root` lists.
 fn frame_count(root: &Utf8Path) -> u64 {
-    Journal::open(&Layout::new(root), Arc::new(RealFs::new()))
+    Journal::open(&layout_of(root), Arc::new(RealFs::new()))
         .unwrap()
         .frame_count()
         .unwrap()
@@ -506,7 +507,7 @@ fn undo_of_an_undo_restores_again() {
 /// the next write lists the frame and says so.
 #[test]
 fn an_undo_that_fails_after_its_commit_point_warns() {
-    let (_dir, root, repo) = new_repo();
+    let (_dir, root, repo) = new_repo_as(StoreFormat::V1);
     let [c1, c2, c3] = chain(&repo);
     cas(&repo, "main", None, Some(c1)); // op 3
     cas(&repo, "main", Some(c1), Some(c2)); // op 4
@@ -534,7 +535,7 @@ fn undo_reports_what_its_write_repaired() {
     let mut listed_and_replayed = Recovered::default();
     listed_and_replayed.frames_listed = 1;
     listed_and_replayed.refs_replayed = 1;
-    let (_dir, root, repo) = new_repo();
+    let (_dir, root, repo) = new_repo_as(StoreFormat::V1);
     let [c1, c2, c3] = chain(&repo);
     cas(&repo, "main", None, Some(c1)); // op 3
     let unlisted = listing_fails(&root)

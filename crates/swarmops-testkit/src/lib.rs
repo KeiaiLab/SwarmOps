@@ -16,6 +16,7 @@
 //! - [`child`]: this test binary run again as a child process, with a deadline, killed and
 //!   reaped however the test ends, by the name the harness knows the test by
 //!   ([`test_name!`]).
+//! - [`formats`]: a test run once per store format ([`per_format!`]).
 //! - [`store`], [`repo`]: fresh store roots, repositories, and the changes and commit requests
 //!   the tests make.
 //! - [`cli`]: runs of the real `swarmops` binary, their envelopes checked against the contract,
@@ -53,6 +54,7 @@ pub mod child;
 #[cfg(feature = "cli")]
 pub mod cli;
 pub mod faults;
+pub mod formats;
 pub mod fs;
 #[cfg(feature = "git")]
 pub mod git;

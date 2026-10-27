@@ -24,10 +24,11 @@ use swarmops_core::{
 use swarmops_repo::{
     Depth, Derivation, FirstParentSkipList, LocalRepo, RepoError, RepoRead, SKIP_AFTER,
 };
-use swarmops_store::{ChangesetMeta, FsObjectStore, FsOps, Layout, MetaStore, ObjectStore};
+use swarmops_store::{ChangesetMeta, FsObjectStore, FsOps, MetaStore, ObjectStore};
 use swarmops_testkit::fs::{NoSyncFs, RecordingFs};
 use swarmops_testkit::measure;
 use swarmops_testkit::repo::{path, put, request, signature};
+use swarmops_testkit::store::layout_of;
 use tempfile::TempDir;
 
 /// A fresh store in a temp dir of its own whose filesystem never syncs, for histories of many
@@ -98,7 +99,7 @@ fn skip_lists(root: &Utf8Path) -> BTreeSet<String> {
 
 /// The bytes of `meta/journal.ckpt`, which change when the checkpoint moves.
 fn checkpoint(root: &Utf8Path) -> Vec<u8> {
-    fs::read(root.join("meta/journal.ckpt")).unwrap()
+    fs::read(layout_of(root).journal_ckpt()).unwrap()
 }
 
 /// `main~k` is the changeset `k` first-parent steps back from `main`'s head, for every `k` up to
@@ -396,7 +397,7 @@ const BATCH: usize = 8_192;
 fn bulk_chain(root: &Utf8Path, n: usize, files: &[(&str, &[u8])]) -> Vec<ChangesetId> {
     LocalRepo::create_with_fs(root, "test", Arc::new(NoSyncFs)).expect("create");
     let fs: Arc<dyn FsOps> = Arc::new(NoSyncFs);
-    let objects = FsObjectStore::open_shared(Layout::new(root), Arc::clone(&fs));
+    let objects = FsObjectStore::open_shared(layout_of(root), Arc::clone(&fs));
     let mut entries = Vec::new();
     for &(name, content) in files {
         objects.put(ObjectKind::Blob, content).unwrap();
@@ -466,7 +467,7 @@ fn skip_list_reads(calls: &[String], root: &Utf8Path, objects: &[ChangesetId]) -
     );
     let (lists, others): (Vec<&String>, Vec<&String>) =
         calls.iter().partition(|call| call.starts_with(&prefix));
-    let layout = Layout::new(root);
+    let layout = layout_of(root);
     let objects: Vec<String> = objects
         .iter()
         .map(|cs| {
@@ -606,7 +607,7 @@ fn p50(mut f: impl FnMut()) -> Duration {
 #[cfg(feature = "test-hooks")]
 mod crafted_skip_lists {
     use swarmops_repo::{RepoError, VerifyProblem};
-    use swarmops_store::{DerivedSlot, Layout};
+    use swarmops_store::DerivedSlot;
 
     use super::*;
 
@@ -644,7 +645,7 @@ mod crafted_skip_lists {
                 cs.0,
                 &[],
             );
-            Layout::new(&self.root).derived_path(&slot)
+            layout_of(&self.root).derived_path(&slot)
         }
 
         /// Places a list of `ids` for `cs` in place of its file, as a put writes it; the bytes

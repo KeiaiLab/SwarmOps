@@ -20,11 +20,12 @@ use swarmops_core::{
 };
 use swarmops_repo::{Depth, InsertOutcome, LocalRepo, RawChangeset, RawOutcome, RepoError};
 use swarmops_store::{
-    Frame, FsObjectStore, Journal, Layout, LimitKind, ObjectStore, RealFs, Record, StoreError,
+    Frame, FsObjectStore, Journal, LimitKind, ObjectStore, RealFs, Record, StoreError, StoreFormat,
 };
 use swarmops_testkit::faults::checked;
 use swarmops_testkit::fs::RecordingFs;
-use swarmops_testkit::repo::{blob, commit, path, put, signature};
+use swarmops_testkit::repo::{blob, commit, new_repo_as, path, put, signature};
+use swarmops_testkit::store::layout_of;
 use tempfile::TempDir;
 
 /// A fresh store, written through the order checker in a build with the test hooks.
@@ -121,7 +122,7 @@ fn delta(repo: &LocalRepo, id: ChangesetId) -> Vec<DeltaEntry> {
 /// The journal's frames, as a reader reads them.
 fn frames(root: &Utf8Path) -> Vec<Frame> {
     let journal =
-        Journal::open(&Layout::new(root), Arc::new(RealFs::new())).expect("open the journal");
+        Journal::open(&layout_of(root), Arc::new(RealFs::new())).expect("open the journal");
     journal.tail_frames_from(0).expect("read the journal")
 }
 
@@ -138,7 +139,7 @@ fn on_disk(root: &Utf8Path) -> (Vec<PathBuf>, Vec<u8>) {
         }
     }
     files.sort();
-    let log = fs::read(Layout::new(root).journal_log()).expect("journal.log");
+    let log = fs::read(layout_of(root).journal_log()).expect("journal.log");
     (files, log)
 }
 
@@ -237,7 +238,7 @@ fn commit_raw_keeps_parents_signatures_headers_and_message_verbatim() {
 
     let outcome = repo.commit_raw(raw.clone()).expect("commit_raw");
     let id = outcome.outcomes[0].id;
-    let objects = FsObjectStore::open(Layout::new(&root_dir), Box::new(RealFs::new()));
+    let objects = FsObjectStore::open(layout_of(&root_dir), Box::new(RealFs::new()));
     let (kind, payload) = objects.get(id.0).unwrap().expect("the changeset's object");
     assert_eq!(kind, ObjectKind::Changeset);
     let stored = Changeset::decode(&payload).expect("a canonical changeset");
@@ -351,13 +352,13 @@ fn commit_raw_of_a_changeset_the_store_holds_is_already_present() {
         panic!("one outcome: {once:?}");
     };
     assert_eq!(made.insert, InsertOutcome::Inserted { seq: 0 });
-    let log = fs::read(Layout::new(&root_dir).journal_log()).unwrap();
+    let log = fs::read(layout_of(&root_dir).journal_log()).unwrap();
 
     let again = repo.commit_raw(raw(&[], root, "once")).expect("commit_raw");
     let present = RawOutcome::new(made.id, InsertOutcome::AlreadyPresent, made.files_changed);
     assert_eq!(again.outcomes, [present]);
     assert_eq!(again.frame_seq, None, "no frame");
-    assert_eq!(fs::read(Layout::new(&root_dir).journal_log()).unwrap(), log);
+    assert_eq!(fs::read(layout_of(&root_dir).journal_log()).unwrap(), log);
 
     let twice = vec![raw(&[], root, "twice"), raw(&[], root, "twice")];
     let twice = repo.commit_raw_batch(twice).expect("commit_raw_batch");
@@ -531,7 +532,7 @@ fn a_raw_batch_names_each_changeset_before_it_writes_anything() {
 /// directory before the frame that records the changeset, as it does for objects of its own.
 #[test]
 fn a_root_another_handle_stored_is_synced_before_the_frame() {
-    let (_dir, root_dir, repo) = new_repo();
+    let (_dir, root_dir, repo) = new_repo_as(StoreFormat::V1);
     drop(repo);
     let other = LocalRepo::open(&root_dir).expect("open");
     let root = store_tree(&other, &[("f", b"stored by another handle")]);
@@ -543,7 +544,7 @@ fn a_root_another_handle_stored_is_synced_before_the_frame() {
     let outcome = repo
         .commit_raw(raw(&[], root, "a root it did not put"))
         .unwrap();
-    let layout = Layout::new(&root_dir);
+    let layout = layout_of(&root_dir);
     let fanout = |id| {
         let file = layout.object_path(id);
         let dir = file.parent().expect("a fan-out directory");

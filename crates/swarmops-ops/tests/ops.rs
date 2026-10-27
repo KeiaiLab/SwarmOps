@@ -50,6 +50,14 @@ fn new_store() -> (TempDir, Utf8PathBuf, LocalOps) {
     (dir, root, ops)
 }
 
+/// [`new_store`] of FORMAT 1: for a test of the names and revisions FORMAT 1 alone refuses.
+fn v1_store() -> (TempDir, Utf8PathBuf, LocalOps) {
+    let dir = tempfile::tempdir().expect("create a temp dir");
+    let root = utf8(dir.path().join("store"));
+    let (ops, _) = LocalOps::init_as(&root, "acme", Some(1)).expect("create the store");
+    (dir, root, ops)
+}
+
 fn agent() -> Identity {
     Identity::parse("agent/worker-17").expect("a valid agent name")
 }
@@ -227,7 +235,7 @@ fn init_then_info_roundtrip() {
     );
     assert_eq!(
         (info.main.as_deref(), info.store_version),
-        (None, 1),
+        (None, 2),
         "{info:?}"
     );
     assert_eq!((info.changesets, info.refs), (0, 0), "{info:?}");
@@ -2374,7 +2382,7 @@ fn hints_quote_what_they_interpolate() {
 
 #[test]
 fn resolve_errors_map_to_codes() {
-    let (_dir, root, ops) = new_store();
+    let (_dir, root, ops) = v1_store();
     // Before main exists, `main` (log's default) names nothing.
     let err = expect_err(ops.log(log_req(None)), ErrorCode::RevNotFound);
     assert_eq!(err.details["rev"], "main");
@@ -4899,7 +4907,7 @@ mod diff {
     /// checked before any revision is resolved.
     #[test]
     fn diff_errors_map_to_codes() {
-        let (_dir, root, ops) = new_store();
+        let (_dir, root, ops) = v1_store();
         let c1 = commit(&ops, None, vec![text("f", "1")]);
         let unknown = "0".repeat(64);
         for (from, to) in [
@@ -4977,7 +4985,7 @@ mod resolve_rev {
     /// Made through a request's `recording`, the revision is in that request's `Resolved`.
     #[test]
     fn resolve_rev_names_the_kind() {
-        let (_dir, root, ops) = new_store();
+        let (_dir, root, ops) = v1_store();
         let c1 = commit(&ops, None, vec![text("f", "1")]);
         let c2 = commit(&ops, Some(&c1), vec![text("f", "2")]);
         ops.ref_set(&agent(), set("main", &c2, None, true)).unwrap();
@@ -5218,7 +5226,7 @@ mod formats {
     /// `E_REF_NAME_INVALID` as before. Nothing moves.
     #[test]
     fn v2_names_on_a_v1_store_are_format_required() {
-        let (_dir, _root, ops) = new_store();
+        let (_dir, _root, ops) = v1_store();
         let who = agent();
         let c1 = commit(&ops, None, vec![text("f", "1")]);
 
@@ -5298,9 +5306,9 @@ mod formats {
     }
 
     /// A format this build does not create is `E_INVALID_ARG`, naming the ones it does (1 and
-    /// 2), and nothing is made; `--format 2` makes a FORMAT 2 store.
+    /// 2), and nothing is made; `init` without a format makes FORMAT 2.
     #[test]
-    fn init_makes_format_2_on_request_and_refuses_others() {
+    fn init_makes_format_2_by_default_and_refuses_others() {
         let dir = tempfile::tempdir().unwrap();
         let root = utf8(dir.path().join("store"));
         for format in [3, 0] {
@@ -5316,7 +5324,8 @@ mod formats {
             assert!(!fs::exists(&root).unwrap(), "{format}: nothing was made");
         }
 
-        let (ops, info) = LocalOps::init_as(&root, "acme", Some(2)).unwrap();
+        // No format named: this build's default.
+        let (ops, info) = LocalOps::init(&root, "acme").unwrap();
         assert_eq!(info.store_version, 2);
         assert_eq!(ops.repo_info(InfoReq::default()).unwrap().store_version, 2);
         let format = fs::read(root.join("FORMAT")).unwrap();

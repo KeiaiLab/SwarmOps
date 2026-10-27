@@ -19,7 +19,7 @@ use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::thread;
 
-use swarmops_store::FS_CALLS_ENV;
+use swarmops_store::{FS_CALLS_ENV, StoreFormat};
 
 use super::{Program, Run, Store};
 
@@ -80,12 +80,12 @@ pub fn calls_file<P: Program>(store: &Store<P>) -> PathBuf {
     store.tmp().join("fs-calls")
 }
 
-/// A store for the commit sweeps: main at a first changeset, then changesets on it, until
-/// [`TEMPLATE_FRAMES`] frames lie past the checkpoint (which has passed none). Every command
-/// on it, and on its copies, signs at [`NOW`] ([`Program::NOW_ENV`]), so the store and every
-/// commit on it are the same in every run.
-pub fn commit_template<P: Program>() -> Store<P> {
-    let store = Store::<P>::init().with_env(&[(P::NOW_ENV, &NOW.to_string())]);
+/// A store of `format` for the commit sweeps: main at a first changeset, then changesets on
+/// it, until [`TEMPLATE_FRAMES`] frames lie past the checkpoint (which has passed none). Every
+/// command on it, and on its copies, signs at [`NOW`] ([`Program::NOW_ENV`]), so the store and
+/// every commit on it are the same in every run.
+pub fn commit_template<P: Program>(format: StoreFormat) -> Store<P> {
+    let store = Store::<P>::init_as(format).with_env(&[(P::NOW_ENV, &NOW.to_string())]);
     let first = store.commit(
         &super::agent(0),
         "README.md",
@@ -150,13 +150,21 @@ pub fn dry_commit<P: Program>(template: &Store<P>) -> DryRun {
     dry
 }
 
-/// Runs `init` on a fresh path with nothing crashing or failing it; how many filesystem calls it
-/// made: more than the 256 fan-out directories it makes alone.
-pub fn dry_init<P: Program>() -> u64 {
+/// The arguments of an `init` of a store of `format` at `path`.
+pub fn init_args(format: StoreFormat, path: &str) -> Vec<String> {
+    let version = format.version().to_string();
+    ["init", "--format", &version, path]
+        .map(str::to_owned)
+        .to_vec()
+}
+
+/// Runs `init` of a store of `format` on a fresh path with nothing crashing or failing it; how
+/// many filesystem calls it made: more than the 256 fan-out directories it makes alone.
+pub fn dry_init<P: Program>(format: StoreFormat) -> u64 {
     let store = Store::<P>::empty();
     let file = calls_file(&store);
     super::run::<P, _>(
-        &["init", store.path()],
+        &init_args(format, store.path()),
         &[(FS_CALLS_ENV, file.to_str().unwrap())],
     )
     .ok();
@@ -168,23 +176,30 @@ pub fn dry_init<P: Program>() -> u64 {
     calls
 }
 
-/// What an `init` of `store` that a crash or an injected failure may have cut short left there,
-/// the fault gone: whether `info` finds a store. With one, a second `init` says `E_EXISTS`;
-/// without one, `info` says `E_NOT_A_REPO`, and a second `init` makes the store. Either way, the
-/// store is then a fresh one, and verifies clean. `what` names the run in messages.
+/// What an `init` of a store of `format` at `store` that a crash or an injected failure may have
+/// cut short left there, the fault gone: whether `info` finds a store. With one, a second `init`
+/// says `E_EXISTS`; without one, `info` says `E_NOT_A_REPO`, and a second `init` makes the
+/// store. Either way, the store is then a fresh one of `format`, and verifies clean. `what`
+/// names the run in messages.
 #[track_caller]
-pub fn init_again<P: Program>(store: &Store<P>, what: &str) -> bool {
+pub fn init_again<P: Program>(store: &Store<P>, format: StoreFormat, what: &str) -> bool {
     let info = store.read(&["info"]);
     let whole = info.exit() == 0;
+    let init = init_args(format, store.path());
     if whole {
-        super::run::<P, _>(&["init", store.path()], &[]).err("E_EXISTS");
+        super::run::<P, _>(&init, &[]).err("E_EXISTS");
     } else {
         info.err("E_NOT_A_REPO");
-        super::run::<P, _>(&["init", store.path()], &[]).ok();
+        super::run::<P, _>(&init, &[]).ok();
     }
     let info = store.info();
-    let fresh = (info["name"].as_str(), info["changesets"].as_u64());
-    assert_eq!(fresh, (Some("store"), Some(0)), "{what}");
+    let fresh = (
+        info["name"].as_str(),
+        info["changesets"].as_u64(),
+        info["store_version"].as_u64(),
+    );
+    let made = (Some("store"), Some(0), Some(u64::from(format.version())));
+    assert_eq!(fresh, made, "{what}");
     store.assert_clean(what);
     whole
 }

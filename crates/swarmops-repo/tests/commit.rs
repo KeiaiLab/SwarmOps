@@ -31,7 +31,7 @@ use swarmops_repo::{
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, FailAt, FailAtFs, FailMode, InjectedError, ORDER_CHECK_ENV};
 use swarmops_store::{
-    ChangesetMeta, Journal, Layout, LimitKind, MetaStore, RealFs, Recovered, StoreError,
+    ChangesetMeta, Journal, LimitKind, MetaStore, RealFs, Recovered, StoreError, StoreFormat,
 };
 use swarmops_testkit::child::{CHILD_TIMEOUT, Child, this_test};
 #[cfg(feature = "test-hooks")]
@@ -40,7 +40,8 @@ use swarmops_testkit::faults::checked;
 use swarmops_testkit::fs::FailingFs;
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::fs::{RecordingFs, copy_dir};
-use swarmops_testkit::repo::{blob, delete, new_repo, path, put, put_as, signature};
+use swarmops_testkit::repo::{blob, delete, new_repo, new_repo_as, path, put, put_as, signature};
+use swarmops_testkit::store::layout_of;
 use swarmops_testkit::test_name;
 
 /// Set only in the children this file's tests spawn: the store root.
@@ -144,7 +145,7 @@ fn object_files(root: &Utf8Path) -> Vec<PathBuf> {
 
 /// How many frames the journal of the store at `root` lists.
 fn journal_frames(root: &Utf8Path) -> u64 {
-    Journal::open(&Layout::new(root), Arc::new(RealFs::new()))
+    Journal::open(&layout_of(root), Arc::new(RealFs::new()))
         .unwrap()
         .frame_count()
         .unwrap()
@@ -818,11 +819,10 @@ mod advance {
         let (fs, calls) = RecordingFs::new();
         let fs = fs.naming_paths_in(root.as_std_path().to_path_buf());
         let repo = LocalRepo::open_with_fs(&root, Arc::new(fs)).unwrap();
-        let appends = |calls: Vec<String>| {
-            (calls.iter())
-                .filter(|call| *call == "append_durable meta/journal.log")
-                .count()
-        };
+        // The journal's name in the store's format: `journal.log`, or `journal2.log`.
+        let log = layout_of(&root).journal_log();
+        let append = format!("append_durable meta/{}", log.file_name().unwrap());
+        let appends = |calls: Vec<String>| (calls.iter()).filter(|call| **call == append).count();
         let frames = journal_frames(&root);
         calls();
 
@@ -1325,9 +1325,9 @@ fn a_failed_object_flush_fails_the_commit_and_inserts_nothing() {
 /// flush, with no frame past the checkpoint, changes nothing.
 #[test]
 fn flush_metadata_moves_the_checkpoint_to_the_journal_end() {
-    let (_dir, root, repo) = new_repo();
+    let (_dir, root, repo) = new_repo_as(StoreFormat::V1);
     let ckpt = || {
-        Journal::open(&Layout::new(&root), Arc::new(RealFs::new()))
+        Journal::open(&layout_of(&root), Arc::new(RealFs::new()))
             .unwrap()
             .ckpt()
             .unwrap()
@@ -1360,7 +1360,7 @@ fn flush_metadata_moves_the_checkpoint_to_the_journal_end() {
 fn put_objects_are_made_durable_by_the_next_commit() {
     use swarmops_testkit::fs::RecordingFs;
 
-    let (_dir, root, repo) = new_repo();
+    let (_dir, root, repo) = new_repo_as(StoreFormat::V1);
     drop(repo);
     let (fs, calls) = RecordingFs::new();
     let fs = fs.naming_paths_in(root.as_std_path().to_path_buf());
@@ -1519,7 +1519,7 @@ fn a_failed_fanout_fsync_fails_the_commit_and_a_later_flush_syncs_the_directory(
     // A dry run on a twin store: how many calls the open and the commit make before the flush's
     // one fsync, which is then call k.
     let k = {
-        let (_dir, root, repo) = new_repo();
+        let (_dir, root, repo) = new_repo_as(StoreFormat::V1);
         drop(repo);
         let (fs, calls) = recording_in(&root);
         let repo = LocalRepo::open_with_fs(&root, checked(fs)).unwrap();
@@ -1533,7 +1533,7 @@ fn a_failed_fanout_fsync_fails_the_commit_and_a_later_flush_syncs_the_directory(
         u64::try_from(calls.iter().position(|call| *call == fsync).unwrap()).unwrap() + 1
     };
 
-    let (_dir, root, repo) = new_repo();
+    let (_dir, root, repo) = new_repo_as(StoreFormat::V1);
     drop(repo);
     let (recording, calls) = recording_in(&root);
     let enospc = FailAt::new(k, FailMode::Once, InjectedError::Enospc);
@@ -1660,7 +1660,7 @@ fn a_failure_after_the_commit_point_is_a_warning() {
 
 #[test]
 fn a_ref_move_whose_file_write_fails_is_applied_with_a_warning() {
-    let (_dir, root, repo) = new_repo();
+    let (_dir, root, repo) = new_repo_as(StoreFormat::V1);
     let base = commit(&repo, &[], vec![put("a", b"a")]);
     drop(repo);
     // Writing the ref file fails after the move's journal frame is durable.
@@ -1696,7 +1696,8 @@ fn a_ref_move_whose_file_write_fails_is_applied_with_a_warning() {
 /// through it commits, its frame whole and durable in `journal.log` but not listed, with one
 /// warning, and nothing materialized.
 fn listing_fails(root: &Utf8Path) -> LocalRepo {
-    let fs = FailingFs::new(|method, p| method == "append_durable" && p.ends_with("journal.off"));
+    let off = layout_of(root).journal_off().into_std_path_buf();
+    let fs = FailingFs::new(move |method, p| method == "append_durable" && p == off);
     LocalRepo::open_with_fs(root, Arc::new(fs)).unwrap()
 }
 
@@ -1712,7 +1713,7 @@ fn commit_and_cas_outcomes_carry_their_write_s_recovery() {
     listed_and_replayed.frames_listed = 1;
     listed_and_replayed.records_replayed = 1;
     for again in [false, true] {
-        let (_dir, root, repo) = new_repo();
+        let (_dir, root, repo) = new_repo_as(StoreFormat::V1);
         drop(repo);
         let first = request(&[], vec![put("a", b"a")]);
         let failed = listing_fails(&root).commit(first.clone()).unwrap();
@@ -1758,7 +1759,7 @@ fn commit_and_cas_outcomes_carry_their_write_s_recovery() {
         assert_eq!(created.warnings.len(), 1, "{created:?}");
         let (expected, new, want) = moves(c1, c2)[at];
         let repo = LocalRepo::open(&root).unwrap();
-        let log = Layout::new(&root).journal_log();
+        let log = layout_of(&root).journal_log();
         let written = fs::metadata(&log).unwrap().len();
         let out = repo.cas_ref("main", expected, new, "test/agent").unwrap();
         assert_eq!(out.result, want, "{expected:?} to {new:?}");
@@ -1936,7 +1937,7 @@ mod objects_once {
         drop(repo);
         let other = root.clone();
         let place = move || {
-            let store = FsObjectStore::open(Layout::new(other), Box::new(RealFs::new()));
+            let store = FsObjectStore::open(layout_of(other), Box::new(RealFs::new()));
             store.put(ObjectKind::Blob, RACED).unwrap();
             store.flush().unwrap();
         };
@@ -2090,7 +2091,7 @@ mod blob_by_id {
     /// changeset is the one a put of the content makes.
     #[test]
     fn a_commit_names_a_stored_blob_by_id() {
-        let (_dir, root, repo) = new_repo();
+        let (_dir, root, repo) = new_repo_as(StoreFormat::V1);
         let (req, content) = a_blob_apart();
         let size = u64::try_from(content.len()).unwrap();
         let stored = repo.put_blob(content.clone()).unwrap();

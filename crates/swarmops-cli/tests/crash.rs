@@ -28,11 +28,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use swarmops_ops::NOW_ENV;
-use swarmops_store::{CRASH_AT_ENV, FS_CALLS_ENV, Journal, RealFs};
+use swarmops_store::{CRASH_AT_ENV, FS_CALLS_ENV, Journal, RealFs, StoreFormat};
+
+use swarmops_testkit::per_format;
 
 use crate::support::sweep::{
     DryRun, NOW, SWEPT_PUTS, TEMPLATE_FRAMES, calls_file, commit_template, dry_commit, dry_init,
-    init_again, reported_calls, sweep, swept_commit,
+    init_again, init_args, reported_calls, sweep, swept_commit,
 };
 use crate::support::{Run, Store, agent, run};
 
@@ -192,16 +194,16 @@ fn crash_commit_at(template: &Store, k: u64, dry: &DryRun) -> Crashed {
     }
 }
 
+per_format! {
 /// A commit crashed at each of its filesystem calls in turn, from the first to past the last
 /// (k = 1..=N + 1, N counted by a dry run): after each crash the store verifies clean, and the
 /// next commit succeeds and is shown. The commit's frame is the 32nd past the checkpoint, so
 /// the sweep crashes its index sync and checkpoint too. Every run signs at [`NOW`], so every
 /// run makes the same calls, in the same order: two dry runs, in different seconds of the
 /// clock, must count the same calls and commit the same changeset.
-#[test]
 #[ignore = "slow, ~20 s: ~90 crashed commits; just check-slow runs it"]
-fn kill9_during_commit_store_verifies_and_next_commit_succeeds() {
-    let template = commit_template();
+fn kill9_during_commit_store_verifies_and_next_commit_succeeds(format) {
+    let template = commit_template(format);
     let dry = dry_commit(&template);
     wait_for_the_next_second();
     assert_eq!(
@@ -232,6 +234,7 @@ fn kill9_during_commit_store_verifies_and_next_commit_succeeds() {
         crashes.iter().any(|crash| crash.leftovers > 0),
         "some crash left a temp file in objects/tmp, which verify passed over"
     );
+}
 }
 
 /// Runs `args(store)` as `agent(1)` on a copy of `template` without a crash, counting its
@@ -274,6 +277,7 @@ fn sweep_checked(template: &Store, what: &str, args: impl Fn(&Store) -> Vec<Stri
     calls
 }
 
+per_format! {
 /// Every crash sweep runs under the order checker (`swarmops_store::OrderCheckFs`, rules W1 to
 /// W7): the tests set `SWARMOPS_TEST_ORDER_CHECK=1` for every run of the binary, and the store's
 /// and the repository's sweeps wrap their crashing child's filesystem in it, and the one their
@@ -282,9 +286,8 @@ fn sweep_checked(template: &Store, what: &str, args: impl Fn(&Store) -> Vec<Stri
 /// commit on a fresh store, a ref move on top of it and an `op undo` of that move at each of
 /// their calls; the slow sweeps (`kill9_during_*`) do the same for `init` and for a commit that
 /// syncs the index and moves the checkpoint.
-#[test]
-fn order_check_rules_hold_in_every_crash_sweep() {
-    let template = Store::init().with_env(&[(NOW_ENV, &NOW.to_string())]);
+fn order_check_rules_hold_in_every_crash_sweep(format) {
+    let template = Store::init_as(format).with_env(&[(NOW_ENV, &NOW.to_string())]);
     let commit = |store: &Store| {
         let changes = store.changes_of("crash", &SWEPT_PUTS);
         ["commit", "-m", "checked", "--changes", &changes]
@@ -316,7 +319,9 @@ fn order_check_rules_hold_in_every_crash_sweep() {
         "an undo writes its frame and removes the ref's file: {calls}"
     );
 }
+}
 
+per_format! {
 /// A land crashed at any filesystem call lands once or not at all (operations spec §3, §8),
 /// through the binary: on a store where main names `t0` and an agent's commit on it waits to
 /// land, the land, keyed, crashed at each call k of the N its dry run makes, leaves the store
@@ -325,10 +330,9 @@ fn order_check_rules_hold_in_every_crash_sweep() {
 /// published it, landed anew (onto `t0`, so main had stayed there) otherwise. Every run signs at
 /// one fixed time, so every land makes the same changeset. Past N, the land finishes as the dry
 /// run did. Both sides of the commit point are reached.
-#[test]
-fn a_land_crashing_at_any_call_lands_once_through_the_binary() {
+fn a_land_crashing_at_any_call_lands_once_through_the_binary(format) {
     const KEY: &str = "crash-land-1";
-    let template = Store::init().with_env(&[(NOW_ENV, &NOW.to_string())]);
+    let template = Store::init_as(format).with_env(&[(NOW_ENV, &NOW.to_string())]);
     let t0 = template.commit(&agent(0), "base.txt", "the base\n", None);
     let create = ["ref", "set", "main", t0.as_str(), "--create"];
     template.run_as(&agent(0), &create, &[]).ok();
@@ -382,17 +386,18 @@ fn a_land_crashing_at_any_call_lands_once_through_the_binary() {
         "some before it"
     );
 }
+}
 
-/// One run of the init sweep: `init` on a fresh path, its k-th filesystem call (of the
-/// `calls` a dry run counted) aborting it. Then either `info` says `E_NOT_A_REPO` and a second
+/// One run of the init sweep: `init` of a store of `format` on a fresh path, its k-th filesystem
+/// call (of the `calls` a dry run counted) aborting it. Then either `info` says `E_NOT_A_REPO` and a second
 /// `init` succeeds, or `info` succeeds (and a second `init` says `E_EXISTS`); either way the
 /// store is fresh and verifies clean ([`init_again`]). Returns whether `info` found the store
 /// right after the crash.
-fn init_crashing_at(k: u64, calls: u64) -> bool {
+fn init_crashing_at(format: StoreFormat, k: u64, calls: u64) -> bool {
     let store = Store::empty();
     let crash_at = k.to_string();
     let init = run(
-        &["init", store.path()],
+        &init_args(format, store.path()),
         &[(CRASH_AT_ENV, crash_at.as_str())],
     );
     if k <= calls {
@@ -400,18 +405,18 @@ fn init_crashing_at(k: u64, calls: u64) -> bool {
     } else {
         init.ok();
     }
-    init_again(&store, &format!("k={k}"))
+    init_again(&store, format, &format!("k={k}"))
 }
 
+per_format! {
 /// `init` crashed at each of its filesystem calls in turn (`LocalRepo::create`, with
 /// `MetaStore::create` inside it, then the first snapshot `init` reports from), from the first
 /// to past the last: before `FORMAT` is linked there is no store and a second `init` makes it;
 /// from then on the store is whole.
-#[test]
 #[ignore = "slow, ~25 s: ~300 crashed inits; just check-slow runs it"]
-fn kill9_during_init_leaves_no_store_or_a_whole_one() {
-    let calls = dry_init();
-    let whole = sweep(1..=calls + 1, |k| init_crashing_at(k, calls));
+fn kill9_during_init_leaves_no_store_or_a_whole_one(format) {
+    let calls = dry_init(format);
+    let whole = sweep(1..=calls + 1, |k| init_crashing_at(format, k, calls));
     let first = whole
         .iter()
         .position(|&whole| whole)
@@ -421,6 +426,7 @@ fn kill9_during_init_leaves_no_store_or_a_whole_one() {
         whole[first..].iter().all(|&whole| whole),
         "once FORMAT is linked, the store is whole: {whole:?}"
     );
+}
 }
 
 /// Makes the file at `path` refuse writes (`read_only`), or take them again.
@@ -444,6 +450,7 @@ fn listed_one(records: u64, refs: u64) -> Value {
     })
 }
 
+per_format! {
 /// A commit, then a ref move, whose journal frame is durable in `journal.log` but whose listing
 /// in `journal.off` fails (the file made read-only) has committed: the frame is its commit point.
 /// Each exits 0 with a warning that names the append that failed (`append_durable
@@ -455,10 +462,12 @@ fn listed_one(records: u64, refs: u64) -> Value {
 /// Once `journal.off` takes writes, the same commit run again finds its changeset (the store
 /// holds it once), the same move finds it applied, each reporting in `meta.recovered` the
 /// listing its write made and what it replayed, not as a warning; and the store verifies clean.
-#[test]
-fn a_frame_journal_off_refuses_to_list_is_committed_with_a_warning() {
-    let store = Store::init().with_env(&[(NOW_ENV, &NOW.to_string())]);
+fn a_frame_journal_off_refuses_to_list_is_committed_with_a_warning(format) {
+    let store = Store::init_as(format).with_env(&[(NOW_ENV, &NOW.to_string())]);
     let off = store.layout().journal_off().into_std_path_buf();
+    // `meta/journal.off`, or FORMAT 2's `meta/journal2.off`.
+    let off_file = format!("meta/{}", off.file_name().unwrap().to_str().unwrap());
+    let off_append = format!("append_durable {off_file}");
     set_read_only(&off, true);
     if OpenOptions::new().append(true).open(&off).is_ok() {
         // Root writes to a read-only file all the same: nothing here can fail the listing.
@@ -471,7 +480,7 @@ fn a_frame_journal_off_refuses_to_list_is_committed_with_a_warning() {
         assert_eq!(warnings.len(), 1, "{run}");
         let warning = warnings[0].as_str().unwrap();
         assert!(
-            warning.contains("is committed") && warning.contains("append_durable meta/journal.off"),
+            warning.contains("is committed") && warning.contains(&off_append),
             "{run}"
         );
         assert!(!warning.contains(store.path()), "{run}");
@@ -493,7 +502,7 @@ fn a_frame_journal_off_refuses_to_list_is_committed_with_a_warning() {
         serde_json::json!({
             "committed": false,
             "fs_op": "append_durable",
-            "store_file": "meta/journal.off"
+            "store_file": off_file
         }),
         "{error}"
     );
@@ -538,4 +547,5 @@ fn a_frame_journal_off_refuses_to_list_is_committed_with_a_warning() {
     assert!(again.get("warnings").is_none(), "{again}");
     assert_eq!(store.info()["main"], id.as_str());
     store.assert_clean("after the listings that failed");
+}
 }

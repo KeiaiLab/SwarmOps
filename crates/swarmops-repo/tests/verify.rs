@@ -25,16 +25,19 @@ use swarmops_repo::{
 };
 use swarmops_store::{
     ChangesetMeta, FsObjectStore, FsOps, Index, Journal, Layout, MetaLock, MetaStore, ObjectStore,
-    RealFs, Record,
+    RealFs, Record, StoreFormat,
 };
 use swarmops_testkit::fs::{Call, RecordingFs, Watch, Watched, When};
-use swarmops_testkit::repo::{blob, commit, delete, new_repo, path, put, put_as, signature};
+use swarmops_testkit::repo::{
+    blob, commit, delete, new_repo, new_repo_as, path, put, put_as, signature,
+};
+use swarmops_testkit::store::layout_of;
 use swarmops_testkit::store::lying_zstd;
 use tempfile::TempDir;
 
 /// The file of object `id` in the store at `root`.
 fn object_file(root: &Utf8Path, id: ObjectId) -> Utf8PathBuf {
-    Layout::new(root).object_path(id)
+    layout_of(root).object_path(id)
 }
 
 /// How many object files the store at `root` holds: the 62-hex files of its fan-out
@@ -55,7 +58,7 @@ fn object_count(root: &Utf8Path) -> u64 {
 /// Compacts the index of the store at `root` under the writer lock, so that the sorted views
 /// cover every record; returns how many they cover.
 fn compact(root: &Utf8Path) -> u64 {
-    let layout = Layout::new(root);
+    let layout = layout_of(root);
     let _lock = MetaLock::acquire(&layout, Duration::from_secs(10)).unwrap();
     Index::open(&layout, Arc::new(RealFs::new()))
         .unwrap()
@@ -92,7 +95,7 @@ fn record_by_hand(
     parents: Vec<ChangesetId>,
     delta_hash: [u8; 32],
 ) -> ChangesetId {
-    let objects = FsObjectStore::open(Layout::new(root), Box::new(RealFs::new()));
+    let objects = FsObjectStore::open(layout_of(root), Box::new(RealFs::new()));
     let id = ChangesetId::new(
         objects
             .put(ObjectKind::Changeset, &cs.encode().unwrap())
@@ -120,7 +123,7 @@ fn swap_entries(path: &Utf8Path, width: usize, a: usize, b: usize) {
 
 /// The recs of the id view's first two entries, in the store at `root`.
 fn first_two_recs(root: &Utf8Path) -> [u64; 2] {
-    let index = Index::open(&Layout::new(root), Arc::new(RealFs::new())).unwrap();
+    let index = Index::open(&layout_of(root), Arc::new(RealFs::new())).unwrap();
     let view = index.ids_view();
     [view.rec_at(0).unwrap(), view.rec_at(1).unwrap()]
 }
@@ -371,14 +374,14 @@ fn verify_deep_lists_an_object_held_in_a_legacy_zstd_frame() {
 
 #[test]
 fn verify_detects_dangling_ref() {
-    let (_dir, root, repo) = new_repo();
+    let (_dir, root, repo) = new_repo_as(StoreFormat::V1);
     let c1 = commit(&repo, &[], vec![put("f", b"1")]);
     repo.cas_ref("main", None, Some(c1), "test/agent").unwrap();
     repo.cas_ref("release/ok", None, Some(c1), "test/agent")
         .unwrap();
 
     // A ref file naming no changeset, and a file in refs/ that is no ref file at all.
-    let refs = Layout::new(&root).meta_path("refs/release");
+    let refs = layout_of(&root).meta_path("refs/release");
     let nowhere = ChangesetId::new(hash_object(ObjectKind::Changeset, b"never committed"));
     fs::write(refs.join("gone"), format!("{nowhere}\n1\n")).unwrap();
     fs::write(refs.join("broken"), b"not a ref file\n").unwrap();
@@ -401,7 +404,7 @@ fn verify_detects_index_journal_mismatch() {
     let (_dir, root, repo) = new_repo();
     let c1 = commit(&repo, &[], vec![put("f", b"1")]);
     let c2 = commit(&repo, &[c1], vec![put("f", b"2")]);
-    let layout = Layout::new(&root);
+    let layout = layout_of(&root);
     let bogus = ChangesetMeta::new(
         ChangesetId::new(hash_object(ObjectKind::Changeset, b"not in the journal")),
         0,
@@ -466,7 +469,7 @@ fn verify_detects_index_journal_mismatch() {
     let (_dir, root, repo) = new_repo();
     let c1 = commit(&repo, &[], vec![put("f", b"1")]);
     commit(&repo, &[c1], vec![put("f", b"2")]);
-    let layout = Layout::new(&root);
+    let layout = layout_of(&root);
     {
         let _lock = MetaLock::acquire(&layout, Duration::from_secs(10)).unwrap();
         let mut index = Index::open(&layout, Arc::new(RealFs::new())).unwrap();
@@ -487,7 +490,7 @@ fn verify_detects_index_records_lost_below_the_checkpoint() {
     // Move the checkpoint past both records: the index must hold them from now on.
     MetaStore::open(&root).unwrap().flush().unwrap();
     // A power loss after a lying fsync could take the last record back.
-    let ids = Layout::new(&root).meta_path("idx/ids.col");
+    let ids = layout_of(&root).meta_path("idx/ids.col");
     let column = fs::read(&ids).unwrap();
     fs::write(&ids, &column[..32]).unwrap();
     assert_problems(&repo, vec![mismatch(1, MismatchCause::Journal)]);
@@ -499,7 +502,7 @@ fn verify_detects_index_records_lost_below_the_checkpoint() {
 /// [`VerifyProblem::IndexMismatch`]; one that runs after the cut finds nothing wrong.
 #[test]
 fn verify_racing_the_cut_of_a_failed_index_sync_fails_with_an_io_error() {
-    let (_dir, root, repo) = new_repo();
+    let (_dir, root, repo) = new_repo_as(StoreFormat::V1);
     let c1 = commit(&repo, &[], vec![put("f", b"1")]);
     let c2 = commit(&repo, &[c1], vec![put("f", b"2")]);
     let c3 = commit(&repo, &[c2], vec![put("f", b"3")]);
@@ -507,7 +510,7 @@ fn verify_racing_the_cut_of_a_failed_index_sync_fails_with_an_io_error() {
     MetaStore::open(&root).unwrap().flush().unwrap();
     let c4 = commit(&repo, &[c3], vec![put("f", b"4")]);
     commit(&repo, &[c4], vec![put("f", b"5")]);
-    let layout = Layout::new(&root);
+    let layout = layout_of(&root);
     let records = || Index::open(&layout, Arc::new(RealFs::new())).unwrap().len();
     assert_eq!(records(), 5);
 
@@ -574,11 +577,11 @@ impl Watch for CutAfterMeasuring {
 /// and its check of the checkpoint, used to report the journal corrupt.)
 #[test]
 fn verify_reads_journal_off_again_when_a_writer_cuts_an_entry_it_measured() {
-    let (_dir, root, repo) = new_repo();
+    let (_dir, root, repo) = new_repo_as(StoreFormat::V1);
     let c1 = commit(&repo, &[], vec![put("f", b"1")]);
     let c2 = commit(&repo, &[c1], vec![put("f", b"2")]);
     repo.cas_ref("main", None, Some(c2), "test/agent").unwrap();
-    let off = Layout::new(&root).journal_off();
+    let off = layout_of(&root).journal_off();
     let entries = fs::read(&off).unwrap();
     let verify_cutting_after = |nth| {
         fs::write(&off, &entries).unwrap();
@@ -636,7 +639,7 @@ fn verify_checks_the_sorted_views_against_the_columns() {
 
     // Swap the first two keys of the id view: each now stands at the other's record, and out
     // of order.
-    let layout = Layout::new(&root);
+    let layout = layout_of(&root);
     let recs = {
         let index = Index::open(&layout, Arc::new(RealFs::new())).unwrap();
         let view = index.ids_view();
@@ -664,7 +667,7 @@ fn verify_checks_the_order_of_a_sorted_view() {
     // Swap the first two entries whole, key and rec: each still names its record by its key,
     // but they are out of order, which the entry now second shows.
     let [rec_first, _] = first_two_recs(&root);
-    let layout = Layout::new(&root);
+    let layout = layout_of(&root);
     swap_entries(&layout.meta_path("sorted/ids.key"), 32, 0, 1);
     swap_entries(&layout.meta_path("sorted/ids.rec"), 8, 0, 1);
     assert_problems(&repo, vec![mismatch(rec_first, MismatchCause::SortedView)]);
@@ -680,7 +683,7 @@ fn verify_checks_each_record_is_named_once_in_a_sorted_view() {
     // The second entry names the first entry's record again: under its own key, so that is
     // wrong, and the record it named before is named by no entry at all.
     let [first, second] = first_two_recs(&root);
-    let recs = Layout::new(&root).meta_path("sorted/ids.rec");
+    let recs = layout_of(&root).meta_path("sorted/ids.rec");
     let mut view = fs::read(&recs).unwrap();
     view[8..16].copy_from_slice(&first.to_le_bytes());
     fs::write(&recs, view).unwrap();
@@ -701,11 +704,11 @@ fn verify_fails_on_a_ref_file_it_cannot_read() {
     // in the store.
     use swarmops_store::{FileOp, FsMethod};
 
-    let (_dir, root, repo) = new_repo();
+    let (_dir, root, repo) = new_repo_as(StoreFormat::V1);
     let c1 = commit(&repo, &[], vec![put("f", b"1")]);
     repo.cas_ref("release/a", None, Some(c1), "test/agent")
         .unwrap();
-    let b = Layout::new(&root).meta_path("refs/release/b");
+    let b = layout_of(&root).meta_path("refs/release/b");
     fs::create_dir(&b).unwrap();
     assert_problems(
         &repo,
@@ -734,11 +737,11 @@ fn verify_fails_on_a_ref_file_it_cannot_read() {
 /// A store for the damaged-metadata tests: two changesets, `main` on the second, a ref
 /// `release/gone` that names no changeset, and the first blob corrupt.
 fn store_with_refs_and_a_corrupt_blob() -> (TempDir, Utf8PathBuf, LocalRepo) {
-    let (dir, root, repo) = new_repo();
+    let (dir, root, repo) = new_repo_as(StoreFormat::V1);
     let c1 = commit(&repo, &[], vec![put("f", b"1")]);
     let c2 = commit(&repo, &[c1], vec![put("g", b"2")]);
     repo.cas_ref("main", None, Some(c2), "test/agent").unwrap();
-    let release = Layout::new(&root).meta_path("refs/release");
+    let release = layout_of(&root).meta_path("refs/release");
     fs::create_dir_all(&release).unwrap();
     let nowhere = ChangesetId::new(hash_object(ObjectKind::Changeset, b"never committed"));
     fs::write(release.join("gone"), format!("{nowhere}\n1\n")).unwrap();
@@ -822,7 +825,7 @@ fn verify_reports_a_checkpoint_that_is_not_a_frame_boundary() {
     let (_dir, root, repo) = store_with_refs_and_a_corrupt_blob();
     let dangling = VerifyProblem::DanglingRef("release/gone".to_owned());
     let corrupt = VerifyProblem::CorruptObject(blob(b"1").0);
-    let layout = Layout::new(&root);
+    let layout = layout_of(&root);
     let journal = Journal::open(&layout, Arc::new(RealFs::new())).unwrap();
     let frames = journal.frames_from(0, usize::MAX).unwrap();
     assert_eq!(frames.len(), 3, "c1, c2 and the ref move");
@@ -878,7 +881,7 @@ fn verify_reports_a_lock_file_that_is_not_a_regular_file() {
     let corrupt = VerifyProblem::CorruptObject(blob(b"1").0);
     for what in ["a FIFO", "a symlink to a regular file", "a directory"] {
         let (_dir, root, repo) = store_with_refs_and_a_corrupt_blob();
-        let lock = Layout::new(&root).meta_lock();
+        let lock = layout_of(&root).meta_lock();
         fs::remove_file(&lock).unwrap();
         match what {
             "a FIFO" => {
@@ -906,7 +909,7 @@ fn verify_reports_a_lock_file_that_is_not_a_regular_file() {
     }
 
     let (_dir, root, repo) = store_with_refs_and_a_corrupt_blob();
-    fs::remove_file(Layout::new(&root).meta_lock()).unwrap();
+    fs::remove_file(layout_of(&root).meta_lock()).unwrap();
     let report = repo.verify(Depth::Deep).unwrap();
     assert_eq!(report.problems, [dangling, corrupt], "a missing lock file");
 }
@@ -914,7 +917,7 @@ fn verify_reports_a_lock_file_that_is_not_a_regular_file() {
 /// Damages metadata file `file` of the store at `root`: `journal.ckpt` malformed, a journal
 /// file removed, or a sorted view (compacted first) cut inside an entry.
 fn damage_meta(root: &Utf8Path, file: &str) {
-    let path = Layout::new(root).meta_path(file);
+    let path = layout_of(root).meta_path(file);
     match file {
         "journal.ckpt" => fs::write(&path, b"bad").unwrap(),
         "sorted/ids.rec" => {
@@ -955,7 +958,7 @@ fn verify_reports_a_corrupt_journal_frame() {
     let (_dir, root, repo) = new_repo();
     let c1 = commit(&repo, &[], vec![put("f", b"1")]);
     commit(&repo, &[c1], vec![put("f", b"2")]);
-    let layout = Layout::new(&root);
+    let layout = layout_of(&root);
     let frames = Journal::open(&layout, Arc::new(RealFs::new()))
         .unwrap()
         .frames_from(0, 10)
@@ -983,7 +986,7 @@ fn verify_reports_a_listed_frame_cut_short() {
     let (_dir, root, repo) = new_repo();
     let c1 = commit(&repo, &[], vec![put("f", b"1")]);
     commit(&repo, &[c1], vec![put("f", b"2")]);
-    let layout = Layout::new(&root);
+    let layout = layout_of(&root);
     let frames = Journal::open(&layout, Arc::new(RealFs::new()))
         .unwrap()
         .frames_from(0, 10)
@@ -1036,7 +1039,7 @@ fn verify_detects_missing_parents_root_mismatches_and_metadata_drift() {
     // A changeset whose object names a parent the store does not hold, recorded without it:
     // the parent is missing, and the record disagrees with the object.
     let empty_root = Tree::empty_root();
-    FsObjectStore::open(Layout::new(&root), Box::new(RealFs::new()))
+    FsObjectStore::open(layout_of(&root), Box::new(RealFs::new()))
         .put(ObjectKind::Tree, &empty_root.encode())
         .unwrap();
     let nowhere = ChangesetId::new(hash_object(ObjectKind::Changeset, b"never committed"));
@@ -1073,7 +1076,7 @@ fn verify_detects_generation_and_delta_hash_drift() {
     // Below the checkpoint, where the index holds its records for good (past it, the journal
     // vouches for them: `verify_detects_index_journal_mismatch`).
     MetaStore::open(&root).unwrap().flush().unwrap();
-    let generations = Layout::new(&root).meta_path("idx/gen.col");
+    let generations = layout_of(&root).meta_path("idx/gen.col");
     let mut column = fs::read(&generations).unwrap();
     column[8..16].copy_from_slice(&9_u64.to_le_bytes());
     fs::write(&generations, column).unwrap();
@@ -1085,14 +1088,14 @@ fn verify_detects_generation_and_delta_hash_drift() {
     let base = commit(&repo, &[], vec![put("a", b"a")]);
     let base_root = repo.changeset(base).unwrap().unwrap().changeset.root;
     let empty = changeset(vec![base], base_root, Vec::new());
-    let objects = FsObjectStore::open(Layout::new(&root), Box::new(RealFs::new()));
+    let objects = FsObjectStore::open(layout_of(&root), Box::new(RealFs::new()));
     let id = ChangesetId::new(
         objects
             .put(ObjectKind::Changeset, &empty.encode().unwrap())
             .unwrap(),
     );
     objects.flush().unwrap();
-    let layout = Layout::new(&root);
+    let layout = layout_of(&root);
     {
         let _lock = MetaLock::acquire(&layout, Duration::from_secs(10)).unwrap();
         let journal = Journal::open(&layout, Arc::new(RealFs::new())).unwrap();
@@ -1157,7 +1160,7 @@ fn verify_reports_external_ids_that_are_damaged_dangling_or_mismatched() {
             .written,
         3
     );
-    let layout = Layout::new(&root);
+    let layout = layout_of(&root);
     let damaged = layout.external_id_path(SYSTEM_GIT, &oid(0xdd));
     let mut bytes = fs::read(&damaged).unwrap();
     bytes[43] ^= 0x01;
@@ -1284,7 +1287,7 @@ mod derived_values {
         /// Places `value` in `slot` in place of the file there, if any, as a put writes it,
         /// trailer and all.
         fn place(&self, slot: &DerivedSlot<'_>, value: &[u8]) {
-            let file = Layout::new(&self.root).derived_path(slot);
+            let file = layout_of(&self.root).derived_path(slot);
             if file.exists() {
                 fs::remove_file(&file).unwrap();
             }
@@ -1351,7 +1354,7 @@ mod derived_values {
         let missing = ChangesetId::new(hash_object(ObjectKind::Changeset, b"in no store"));
         let keys = ["a", "b", "d", "e", "q"].map(path_key);
         let [key_a, key_b, key_d, key_e, key_q] = keys.each_ref().map(Vec::as_slice);
-        let layout = Layout::new(&h.root);
+        let layout = layout_of(&h.root);
         assert!(
             layout.derived_path(&touch_slot(head, key_a)).exists(),
             "a memo"
@@ -1453,13 +1456,13 @@ mod derived_values {
 /// A store whose `release/` holds `count` ref files that name no changeset, so that verify
 /// finds `count` dangling refs, in the order of their names.
 fn store_with_dangling_refs(count: usize) -> (TempDir, LocalRepo) {
-    let (dir, root, repo) = new_repo();
+    let (dir, root, repo) = new_repo_as(StoreFormat::V1);
     let c1 = commit(&repo, &[], vec![put("f", b"1")]);
     repo.cas_ref("release/ok", None, Some(c1), "test/agent")
         .unwrap();
 
     // Every file is a well-formed ref file that names a changeset nobody committed.
-    let refs = Layout::new(&root).meta_path("refs/release");
+    let refs = layout_of(&root).meta_path("refs/release");
     let nowhere = ChangesetId::new(hash_object(ObjectKind::Changeset, b"never committed"));
     for n in 0..count {
         fs::write(refs.join(format!("gone{n:05}")), format!("{nowhere}\n1\n")).unwrap();

@@ -11,9 +11,10 @@ use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, Signature};
 use swarmops_repo::land::{DetachedLand, DetachedOutcome, LandRequest};
 use swarmops_repo::{Advance, Change, CommitRequest, LocalRepo, RepoError};
-use swarmops_store::{Journal, Layout, MetaStore, RealFs};
+use swarmops_store::{Journal, MetaStore, RealFs};
 use swarmops_testkit::faults::checked;
 use swarmops_testkit::repo::{path, put, request};
+use swarmops_testkit::store::layout_of;
 use tempfile::TempDir;
 
 /// Who makes the changes and moves `main` in the tests' setup.
@@ -89,7 +90,7 @@ fn main_head(repo: &LocalRepo) -> ChangesetId {
 
 /// How many frames the journal of the store at `root` lists.
 fn frame_count(root: &Utf8Path) -> u64 {
-    Journal::open(&Layout::new(root), Arc::new(RealFs::new()))
+    Journal::open(&layout_of(root), Arc::new(RealFs::new()))
         .unwrap()
         .frame_count()
         .unwrap()

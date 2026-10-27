@@ -34,6 +34,7 @@ use swarmops_testkit::repo::{blob, delete, put, put_as, request, signature};
 use tempfile::TempDir;
 
 use crate::support::{Keep, MemSink, SinkCall, reaches_only_kept};
+use swarmops_testkit::store::layout_of;
 
 /// The fixtures every commit of which a changeset holds as git wrote it (M3 Task 8's list): each
 /// imported from `HEAD`, which names `main` in every one.
@@ -1173,8 +1174,7 @@ fn exported_native_commits_are_recorded_as_external_ids() {
 fn an_export_taken_while_a_writer_is_mid_commit_excludes_it() {
     let store = store();
     let head = commit_on_main(&store.repo, vec![put("a.txt", b"one\n")], "Add a.txt\n");
-    let (fs, writer_held) =
-        HoldThenFail::new(Layout::new(&store.root).journal_log(), RealFs::new());
+    let (fs, writer_held) = HoldThenFail::new(layout_of(&store.root).journal_log(), RealFs::new());
     let writer = LocalRepo::open_with_fs(&store.root, Arc::new(fs)).unwrap();
     let mut exporter = LocalRepo::open(&store.root).unwrap();
     register(&mut exporter).unwrap();
