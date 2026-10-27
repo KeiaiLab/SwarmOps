@@ -9,11 +9,11 @@
 //!
 //! - `nosync`: every sync skipped (the test kit's `NoSyncFs`), the store's work alone;
 //! - `fsync`: the real filesystem, every sync made (`RealFs`, the product's default);
-//! - `fsync_less_syncs`: the real filesystem, each commit's time less the time it spent in the
-//!   calls that sync (`write_durable_temp`, `fsync_dir`, `append_durable`, `atomic_replace`,
-//!   `sync_data`, `rename_durable`), counted and timed around each call. The timed calls hold
-//!   their writes too, so this is a lower bound of the work without syncs, where `nosync` is
-//!   an upper one (its writes still reach the page cache).
+//! - `fsync_less_syncs`: the real filesystem, each commit's time less the wall time during which
+//!   at least one call that syncs (`write_durable_temp`, `fsync_dir`, `append_durable`,
+//!   `atomic_replace`, `sync_data`, `rename_durable`) was running, those calls counted. The
+//!   timed calls hold their writes too, and work on other threads overlaps them, so this is a
+//!   lower bound of the work without syncs, beside `nosync`'s direct one.
 //!
 //! Besides criterion's estimate, each variant prints the nearest-rank percentiles of every
 //! commit it timed, warm-up included, and for `fsync_less_syncs` the syncing calls per commit
@@ -23,8 +23,7 @@
 
 use std::hint::black_box;
 use std::io;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use camino::Utf8PathBuf;
@@ -81,38 +80,43 @@ impl Syncs {
     }
 }
 
-/// Counts and times the calls that sync ([`SYNCING`]); one commit runs at a time.
+/// Counts the calls that sync ([`SYNCING`]) and the wall time during which at least one is in
+/// flight: a commit's object writes sync on many threads at once, so their summed times would
+/// exceed the commit's own.
 #[derive(Default)]
-struct SyncClock {
-    /// The syncing calls so far.
-    calls: AtomicU64,
-    /// Nanoseconds in them so far.
-    ns: AtomicU64,
-    /// When the call in flight began, in nanoseconds since `epoch`.
-    began: AtomicU64,
-    /// The clock's origin.
-    epoch: std::sync::OnceLock<Instant>,
+struct SyncClock(Mutex<InFlight>);
+
+/// What a [`SyncClock`] has seen so far.
+#[derive(Default)]
+struct InFlight {
+    /// The syncing calls now running.
+    open: u32,
+    /// Since when at least one has been running.
+    since: Option<Instant>,
+    /// The wall time covered by at least one, the calls closed so far.
+    covered: Duration,
+    /// The syncing calls made.
+    calls: u64,
 }
 
 impl SyncClock {
-    /// Nanoseconds since the clock's origin.
-    fn now(&self) -> u64 {
-        let epoch = self.epoch.get_or_init(Instant::now);
-        u64::try_from(epoch.elapsed().as_nanos()).unwrap_or(u64::MAX)
-    }
-
-    /// The calls and the time counted so far.
+    /// The calls and the covered time so far.
     fn read(&self) -> (u64, Duration) {
-        let calls = self.calls.load(Ordering::Relaxed);
-        (calls, Duration::from_nanos(self.ns.load(Ordering::Relaxed)))
+        let seen = self.0.lock().expect("the clock");
+        (seen.calls, seen.covered)
     }
 }
 
 impl Watch for SyncClock {
     fn before(&self, call: &Call<'_>) -> io::Result<()> {
-        if SYNCING.contains(&call.method) {
-            self.began.store(self.now(), Ordering::Relaxed);
+        if !SYNCING.contains(&call.method) {
+            return Ok(());
         }
+        let mut seen = self.0.lock().expect("the clock");
+        if seen.open == 0 {
+            seen.since = Some(Instant::now());
+        }
+        seen.open += 1;
         Ok(())
     }
 
@@ -120,11 +124,16 @@ impl Watch for SyncClock {
         if !SYNCING.contains(&call.method) {
             return;
         }
-        let took = self
-            .now()
-            .saturating_sub(self.began.load(Ordering::Relaxed));
-        self.ns.fetch_add(took, Ordering::Relaxed);
-        self.calls.fetch_add(1, Ordering::Relaxed);
+
+        // The last call in flight closes the covered interval.
+        let mut seen = self.0.lock().expect("the clock");
+        seen.open -= 1;
+        seen.calls += 1;
+        if seen.open == 0
+            && let Some(since) = seen.since.take()
+        {
+            seen.covered += since.elapsed();
+        }
     }
 }
 
