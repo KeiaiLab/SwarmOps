@@ -536,8 +536,7 @@ impl ResolvedRev {
     }
 }
 
-/// What kind of revision `resolve_rev` resolved. M5 adds `workspace`, for a workspace's head and
-/// the edits not committed yet (`ws:<name>`).
+/// What kind of revision `resolve_rev` resolved.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]

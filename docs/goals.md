@@ -59,6 +59,11 @@ milestone delivers it. [docs/perf.md](perf.md) holds every measurement,
   every commit and ref move.
 - **Speed bought with durability.** No fast mode exists unless a measurement in
   [docs/perf.md](perf.md) justifies it.
+- **A cache or relay tier between hosts.** Stores sync with each other directly; no regional
+  cache or relay sits between them, and none runs as a network daemon (the umbrella spec's
+  non-goals, and M11's).
+- **A virtual (lazy) checkout.** A workspace's files are real files on disk (a sparse one
+  holds fewer); no FUSE or virtual file system fetches them on first read (the umbrella spec's non-goals).
 - **A benchmark against git worktrees.** It is not on the roadmap; the README's comparison with
   git is judged from the design and the code.
 

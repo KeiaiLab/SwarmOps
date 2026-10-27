@@ -548,7 +548,7 @@ design, acceptance criteria and targets. Command names of planned work are provi
 | Topology | Today | Planned |
 | --- | --- | --- |
 | 1. Local git, remote SwarmOps | Not served: a bare git repository that `git export` writes, whose pushes someone imports and lands | M14: `swarmops serve` over ssh and HTTP; stock `git clone`, `fetch`, `pull` and `push`; a push to `refs/land/main` lands |
-| 2. Local SwarmOps, remote GitHub | ✅ M13: `so clone https://github.com/…`, `so fetch`, `so push`, `so sync`, with no hand-run git ([GitHub as a remote](docs/guides/github-remote.md)) | Signed commits; opening pull requests from SwarmOps |
+| 2. Local SwarmOps, remote GitHub | ✅ M13: `so clone https://github.com/…`, `so fetch`, `so push`, `so sync`, with no hand-run git ([GitHub as a remote](docs/guides/github-remote.md)) | Opening pull requests from SwarmOps |
 | 3. Local SwarmOps, remote SwarmOps | Through a git remote, one writing host at a time (M8) | M11: `so clone so://host/…` and `so sync`, offline-first |
 
 The milestones of the umbrella spec (§13), in the order they are built. ✅ delivered · 📋 planned.

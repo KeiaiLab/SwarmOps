@@ -7874,7 +7874,7 @@ expression: s.redact(&all)
     "ResolvedRev": {
       "$defs": {
         "RevKind": {
-          "description": "What kind of revision `resolve_rev` resolved. M5 adds `workspace`, for a workspace's head and\nthe edits not committed yet (`ws:<name>`).",
+          "description": "What kind of revision `resolve_rev` resolved.",
           "oneOf": [
             {
               "const": "ref",
@@ -7916,7 +7916,7 @@ expression: s.redact(&all)
     },
     "RevKind": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "What kind of revision `resolve_rev` resolved. M5 adds `workspace`, for a workspace's head and\nthe edits not committed yet (`ws:<name>`).",
+      "description": "What kind of revision `resolve_rev` resolved.",
       "oneOf": [
         {
           "const": "ref",

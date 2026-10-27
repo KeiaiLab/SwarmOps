@@ -97,8 +97,9 @@ No compatibility is promised for:
 - **A contract change** shows up in a test the gate runs: `all__cli__schema_snapshot.snap` holds
   the schema of every type, the MCP server's tool list and its discovery result have snapshots
   of their own, and each error code's exit code and `retryable` flag, which no schema holds,
-  have a row in `spec_row` (`crates/swarmops-api/tests/schema.rs`). The gate fails until the
-  snapshot or the row is updated in the same commit. That commit says that it changes the
-  contract, and the changelog records it. A change that breaks the envelope or a response's
-  shape also increments the envelope's `api` number.
+  have a row in `error_codes_map_to_spec_strings_and_exits`
+  (`crates/swarmops-api/tests/schema.rs`). The gate fails until the snapshot or the row is
+  updated in the same commit. That commit says that it changes the contract, and the changelog
+  records it. A change that breaks the envelope or a response's shape also increments the
+  envelope's `api` number.
 - **An error code** that is removed is never reused for another meaning.

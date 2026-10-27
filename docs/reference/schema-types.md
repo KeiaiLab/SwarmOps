@@ -1702,7 +1702,7 @@ Kind: string. `swarmops schema Rev` prints its JSON Schema.
 
 ## RevKind
 
-What kind of revision `resolve_rev` resolved. M5 adds `workspace`, for a workspace's head and the edits not committed yet (`ws:<name>`).
+What kind of revision `resolve_rev` resolved.
 
 Kind: enumeration. `swarmops schema RevKind` prints its JSON Schema.
 

@@ -205,6 +205,9 @@ left).
   `land`'s result has no `verification` field: annotations need a journal record the current
   `FORMAT` lacks. Agents check a landed tree with `read_file` and their own runs. *Target: M7, on
   a `FORMAT 3` (M4 Decision 11; the M6 design, decision D6). Found: M4 Task 12's hand-off.*
+- **A merge conflicts on a line both sides changed.** The three-way text merge (diff3) works
+  on whole lines, so two edits to different parts of one line conflict. *Unscheduled. Found:
+  the 2026-10-27 completeness report.*
 - **No rename detection.** A rename is a delete and an add, for `diff`, `log --path` and a land's
   merge alike: v1 finds no renames (storage spec §4). *Documented. Found: M4 Task 12's hand-off
   (issue #10 item 8).*
@@ -413,6 +416,8 @@ left).
   1 GiB for a line at the cap, before the operation refuses what is not an id or a resolution;
   the CLI reads `--changes` and `--resolve` the same way. *Unscheduled. Found: the 2026-10-20
   security audit.*
+- **No web view.** History, trees and diffs are read through the CLI and the MCP server; no
+  page serves them to a browser. *Unscheduled. Found: the 2026-10-27 completeness report.*
 
 ## Git import and export
 
@@ -578,9 +583,13 @@ left).
   retryable), and each lost race leaves one unlanded changeset in the journal. `--mode merge` with
   `--check` lands onto a moved target, a weaker promise. Checked lands are not measured yet.
   *Documented (the M5 design's decision 1). Found: M5 design, risk R1.*
-- **No virtual snapshot of uncommitted edits.** `ws:<name>` is the workspace's head: a store read
+- **`ws:<name>` is a label, not a revision.** No read resolves it: it is only the `to` label of
+  `ws diff`'s result. A read takes the workspace's head by its id, which `ws info` gives, and
   never sees edits that are not committed; `ws status` and `ws diff` show them. *Unscheduled.
-  Found: M5 design, decision 5.*
+  Found: M5 design, decision 5; the 2026-10-27 completeness report.*
+- **No agent transcripts.** A changeset records its `agent` and `run_id`, not the session or the
+  prompts that made it; a transcript stays wherever the agent's tool keeps it. *Unscheduled.
+  Found: the 2026-10-27 completeness report.*
 - **Names that differ only in Unicode normalisation (NFC and NFD) are two paths.** The case check
   of a case-insensitive volume folds ASCII only, and a volume that normalises names, such as
   macOS's, can make two paths of the tree one file. *Target: M12. Found: M5 design.*
@@ -655,6 +664,9 @@ left).
   swap (the M6 design, decision D2), or M3's merge outside the lock (its plan's Task 15) if the bench shows a
   stall of 100 ms or more at 100,000 records first. Found: M1.6 Task 7 (the compaction design);
   the 2026-10-20 plan triage.*
+- **A blob is stored whole.** Each version of a file is one object (zstd-compressed past a
+  small size), with no chunks or deltas, so a small edit to a large file stores it again.
+  *Unscheduled (content-defined chunking). Found: the 2026-10-27 completeness report.*
 - **Small object-store costs.** A put that creates a fan-out directory checks for it under the
   store's mutex. *Unscheduled. Found: M1 Task 1.*
 - **No benchmark gate.** The benches run by hand (`just bench`, `just perf`); failing on a 20 %
