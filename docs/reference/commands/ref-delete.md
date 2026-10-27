@@ -13,8 +13,8 @@ mutates: true
 identity_required: true
 mcp_tool: "ref_delete"
 envelope_op: "ref_delete"
-exit_codes: [0, 4, 5]
-errors: [E_IDENTITY_REQUIRED, E_CAS_MISMATCH]
+exit_codes: [0, 1, 4, 5]
+errors: [E_IDENTITY_REQUIRED, E_CAS_MISMATCH, E_REF_PROTECTED]
 syntax: "swarmops ref delete [OPTIONS] --expect <REV> <NAME>"
 ```
 
@@ -96,11 +96,13 @@ the store, readable by id, and `op undo` of the deletion creates the ref again.
    here, before the delete is tried.
 3. **The name.** `NAME` must be `main` or `release/<x>` (letters, digits, `.`, `_`, `-`, not
    starting with `.`, at most 255 bytes); anything else is `E_REF_NAME_INVALID` (exit 1).
+   `main` is never deleted: a delete of it that passes the compare-and-swap below is
+   `E_REF_PROTECTED` (exit 1, `details.name`), and nothing is written.
 4. **The compare-and-swap,** under the store's write lock, against the ref as committed:
 
 | The ref holds | Result |
 | --- | --- |
-| The expected changeset | Deleted; `old` is that changeset, `already_applied: false` |
+| The expected changeset | Deleted; `old` is that changeset, `already_applied: false`; for `main`, `E_REF_PROTECTED` |
 | Nothing (no such ref) | Replay: `already_applied: true`, nothing written |
 | Another changeset | `E_CAS_MISMATCH` (exit 4), `details.actual` is what it holds |
 
@@ -115,10 +117,10 @@ On `E_CAS_MISMATCH`, someone moved the ref after you read it. The hint, `swarmop
 
 ### Deleting `main`
 
-`main` can be deleted like any ref. Afterwards `log` without a revision, and every command given
-`main` (`ls main`, `cat main:…`), fails with `E_REV_NOT_FOUND` (exit 6, hint `swarmops ref list`),
-and a `commit` without `--parent` records a changeset with no parent, the root of a new history. To
-bring `main` back, `op undo` the deletion, or `ref set main <id> --create`.
+`main` is never deleted, in every store format: `ref delete main --expect <id>` with the id
+`main` names is `E_REF_PROTECTED` (exit 1, not retryable), and `main` keeps its target. There is
+no override. To point `main` elsewhere, move it with `swarmops ref set main <id> --expect <old>`.
+A stale `--expect` is still `E_CAS_MISMATCH`: the compare comes first.
 
 ### After the delete
 
@@ -144,7 +146,7 @@ Undo a deletion: find the newest operation that deleted the ref (a move with no 
 it. `op log` lists 50 operations unless `-n` says otherwise; page with `--before` for older ones.
 
 ```sh
-OP=$(swarmops op log | jq -r '[.result.ops[] | select(any(.ref_moves[]; .name == "main" and .new == null))][0].op')
+OP=$(swarmops op log | jq -r '[.result.ops[] | select(any(.ref_moves[]; .name == "release/1.0" and .new == null))][0].op')
 swarmops op undo "$OP"
 ```
 
@@ -185,6 +187,7 @@ Envelope `op`: `ref_delete`.
 Exit codes:
 
 - `0`: Success.
+- `1`: The operation failed.
 - `4`: The operation can succeed when it is run again.
 - `5`: An identity or policy requirement refused the operation.
 
@@ -192,6 +195,7 @@ Exit codes:
 
 - [`E_IDENTITY_REQUIRED`](../errors.md#e_identity_required) (exit 5): A mutation was asked for without an identity.
 - [`E_CAS_MISMATCH`](../errors.md#e_cas_mismatch) (exit 4): The ref no longer holds the expected target (or, with `create`, exists at another one); `details.actual` holds what it does, `null` when the ref does not exist.
+- [`E_REF_PROTECTED`](../errors.md#e_ref_protected) (exit 1): `main` was asked to be deleted: it is never deleted (`details.name`).
 
 Any command that opens a store may also fail with a store error, such as [`E_NOT_A_REPO`](../errors.md#e_not_a_repo), [`E_IO`](../errors.md#e_io) or [`E_STORE_CORRUPT`](../errors.md#e_store_corrupt); a command line the grammar refuses is [`E_INVALID_ARG`](../errors.md#e_invalid_arg) (exit 2).
 

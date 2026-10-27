@@ -77,3 +77,28 @@ fn tags_are_created_and_deleted_never_moved() {
     }
     assert_eq!(ref_kind("tags/v1"), Some(RefKind::Tag));
 }
+
+/// `main` is never deleted, in either format (the v0.6.0 design D8); every other kind is
+/// deleted freely, and `main` is created and moved as before.
+#[test]
+fn check_move_refuses_deleting_main_only() {
+    for format in [StoreFormat::V1, StoreFormat::V2] {
+        let deleted = check_move(format, "main", Some(cs(1)), None);
+        assert!(
+            matches!(&deleted, Err(StoreError::RefProtected(n)) if n == "main"),
+            "{format:?}: {deleted:?}"
+        );
+        check_move(format, "release/1", Some(cs(1)), None)
+            .unwrap_or_else(|e| panic!("{format:?}: release/1: {e}"));
+        check_move(format, "main", None, Some(cs(1)))
+            .unwrap_or_else(|e| panic!("{format:?}: create main: {e}"));
+        check_move(format, "main", Some(cs(1)), Some(cs(2)))
+            .unwrap_or_else(|e| panic!("{format:?}: move main: {e}"));
+    }
+
+    // FORMAT 2's other kinds.
+    for name in ["tags/v1", "feature/x", "remote/origin/main"] {
+        check_move(StoreFormat::V2, name, Some(cs(1)), None)
+            .unwrap_or_else(|e| panic!("{name:?}: {e}"));
+    }
+}

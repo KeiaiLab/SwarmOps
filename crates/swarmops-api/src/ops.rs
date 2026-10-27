@@ -1636,7 +1636,8 @@ impl RefSetResp {
     }
 }
 
-/// `ref delete`: remove a ref by compare-and-swap.
+/// `ref delete`: remove a ref by compare-and-swap. `main` is never deleted
+/// (`E_REF_PROTECTED`).
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RefDeleteReq {
@@ -4092,7 +4093,8 @@ pub trait StoreOps {
     /// Moves a ref, or creates one, by compare-and-swap (CLI `ref set`).
     fn ref_set(&self, who: &Identity, req: RefSetReq) -> Result<RefSetResp, OpError>;
 
-    /// Removes a ref by compare-and-swap (CLI `ref delete`).
+    /// Removes a ref by compare-and-swap (CLI `ref delete`); `main` is never deleted
+    /// (`E_REF_PROTECTED`).
     fn ref_delete(&self, who: &Identity, req: RefDeleteReq) -> Result<RefSetResp, OpError>;
 
     /// The store's operations, newest first, a page at a time (CLI `op log`).

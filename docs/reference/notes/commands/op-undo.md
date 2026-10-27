@@ -2,7 +2,9 @@
 back to what it named before `OP`, in one transaction of its own, all of them or none. It moves
 refs only. Changesets are never removed, so whatever an undo takes off a ref stays in the store,
 readable by id. Use it to take back a mistaken `ref set`, a publish or a land that should not
-have reached `main`, a deletion or a creation of a ref.
+have reached `main`, a deletion or a creation of a ref. An undo of `main`'s creation would
+delete `main`, which is never deleted: it is refused whole with `E_REF_PROTECTED` (exit 1), and
+nothing is written.
 
 ### What it restores
 
@@ -13,7 +15,7 @@ ref, in the order of `OP`'s moves, from `OP`'s `new` back to its `old`:
 | What `OP` did to the ref | What the undo does |
 | --- | --- |
 | Moved it from `A` to `B` (`ref set`, a publish, a land) | Moves it from `B` back to `A` |
-| Created it at `B` | Deletes it |
+| Created it at `B` | Deletes it (`main`: the whole undo is refused, `E_REF_PROTECTED`) |
 | Deleted it, from `A` | Creates it again at `A`, with `version` 1 |
 
 ### When it refuses, and when it is a replay

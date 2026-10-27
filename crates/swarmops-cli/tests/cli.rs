@@ -1641,7 +1641,7 @@ fn error_codes_reach_the_cli() {
     let c2 = s.commit(&store, None, "src/main.rs", "fn main() {}\n", "c2");
 
     let mut raised = Vec::new();
-    for (code, args) in error_cases(&s, &store, &c2) {
+    for (code, args) in error_cases(&s, &store, [&c1, &c2]) {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let failed = s.run(&args);
         assert_eq!(failed.code(), code, "{args:?}");
@@ -1728,7 +1728,7 @@ fn error_codes_reach_the_cli() {
 /// The failing commands of [`error_codes_reach_the_cli`], each with the code it must raise,
 /// against `store`, where main holds `src/lib.rs`, and `c2`, which main does not hold,
 /// adds `src/main.rs`.
-fn error_cases(s: &Session, store: &str, c2: &str) -> Vec<(&'static str, Vec<String>)> {
+fn error_cases(s: &Session, store: &str, [c1, c2]: [&str; 2]) -> Vec<(&'static str, Vec<String>)> {
     let empty = s.file("empty.json", "[]");
     let conflict = s.file(
         "conflict.json",
@@ -1812,6 +1812,11 @@ fn error_cases(s: &Session, store: &str, c2: &str) -> Vec<(&'static str, Vec<Str
         (
             "E_UNSUPPORTED_FS",
             vec!["init".to_owned(), MNT_STORE.to_owned()],
+        ),
+        // main names c1: a delete that expects it is refused all the same.
+        (
+            "E_REF_PROTECTED",
+            on(&["ref", "delete", "main", "--expect", c1]),
         ),
         // Operation 0 is the first commit, which moved no ref; the store has three.
         ("E_NOTHING_TO_UNDO", on(&["op", "undo", "0"])),

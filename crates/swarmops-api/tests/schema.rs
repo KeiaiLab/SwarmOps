@@ -342,6 +342,7 @@ const ROWS: &[(ErrorCode, &str, i32, bool)] = &[
     (ErrorCode::MaintenanceBusy, "E_MAINTENANCE_BUSY", 4, true),
     (ErrorCode::FormatRequired, "E_FORMAT_REQUIRED", 1, false),
     (ErrorCode::TagImmutable, "E_TAG_IMMUTABLE", 1, false),
+    (ErrorCode::RefProtected, "E_REF_PROTECTED", 1, false),
     (ErrorCode::GitNotARepo, "E_GIT_NOT_A_REPO", 6, false),
     (ErrorCode::GitRefNotFound, "E_GIT_REF_NOT_FOUND", 6, false),
     (

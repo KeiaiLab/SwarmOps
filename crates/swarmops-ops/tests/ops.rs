@@ -24,7 +24,7 @@ use swarmops_api::{
     DEFAULT_READ_TREE_LIMIT, EntryKindOut, ErrorCode, FileContent, FileKind, Identity,
     IdentityInfo, InfoReq, LogPage, LogReq, ModeInput, OpError, ReadFileReq, ReadTreeReq,
     RefDeleteReq, RefListReq, RefOut, RefSetReq, RefSetResp, Rev, ShowReq, StoreOps, TreeEntryOut,
-    VerifyReq,
+    UndoReq, VerifyReq,
 };
 use swarmops_core::{
     ChangesetId, LeafKind, ObjectId, ObjectKind, RepoPath, Signature, hash_object,
@@ -906,7 +906,8 @@ fn ref_set_takes_exactly_one_of_expected_old_and_create() {
     assert!(!ops.ref_set(&who, moved).unwrap().already_applied);
 }
 
-/// `main` names `c3`, and `c1` is an older changeset: delete it by compare-and-swap.
+/// `main` names `c3`, and `c1` is an older changeset: `main` is never deleted, so a release
+/// ref at `c3` is deleted by compare-and-swap.
 fn delete_refs_by_compare_and_swap(ops: &LocalOps, who: &Identity, [c1, c3]: [&str; 2]) {
     let delete = |name: &str, expected: &str| {
         ops.ref_delete(who, RefDeleteReq::new(name.to_owned(), expected))
@@ -916,19 +917,29 @@ fn delete_refs_by_compare_and_swap(ops: &LocalOps, who: &Identity, [c1, c3]: [&s
         ref_set_resp.old = Some(old.to_owned());
         ref_set_resp
     };
-    let err = expect_err(delete("main", c1), ErrorCode::CasMismatch);
+    let main_only = || [main_ref(c3.to_owned(), 3)];
+    ops.ref_set(who, set("release/x", c3, None, true)).unwrap();
+    let err = expect_err(delete("release/x", c1), ErrorCode::CasMismatch);
     assert_eq!(err.details["actual"], json!(c3));
     assert_eq!(
         err.message,
-        format!("ref main now points at {c3}; re-check before deleting")
+        format!("ref release/x now points at {c3}; re-check before deleting")
     );
     assert_eq!(err.hint, Some(format!("swarmops show {c3}")));
-    assert_eq!(delete("main", c3).unwrap(), deleted("main", c3, false));
-    let refs = ops.ref_list(RefListReq::default()).unwrap().refs;
-    assert!(refs.is_empty(), "{refs:?}");
+    assert_eq!(
+        delete("release/x", c3).unwrap(),
+        deleted("release/x", c3, false)
+    );
+    assert_eq!(
+        ops.ref_list(RefListReq::default()).unwrap().refs,
+        main_only()
+    );
     // Deleting it again finds it gone, as asked: a replay, already applied, which answers as
     // the delete did. A ref that never existed is gone just the same.
-    assert_eq!(delete("main", c3).unwrap(), deleted("main", c3, true));
+    assert_eq!(
+        delete("release/x", c3).unwrap(),
+        deleted("release/x", c3, true)
+    );
     assert_eq!(
         delete("release/never", c1).unwrap(),
         deleted("release/never", c1, true)
@@ -936,17 +947,84 @@ fn delete_refs_by_compare_and_swap(ops: &LocalOps, who: &Identity, [c1, c3]: [&s
     // A name that cannot be a ref's is refused, not taken for a ref that is gone.
     let err = expect_err(delete("main/x", c1), ErrorCode::RefNameInvalid);
     assert_eq!(err.details["name"], "main/x");
-    assert!(
-        ops.ref_list(RefListReq::default()).unwrap().refs.is_empty(),
+    assert_eq!(
+        ops.ref_list(RefListReq::default()).unwrap().refs,
+        main_only(),
         "nothing was created"
     );
     // Moving a ref that does not exist is a mismatch with no actual target.
     let err = expect_err(
-        ops.ref_set(who, set("main", c1, Some(c3), false)),
+        ops.ref_set(who, set("release/x", c1, Some(c3), false)),
         ErrorCode::CasMismatch,
     );
     assert_eq!(err.details["actual"], Value::Null);
     assert_eq!(err.hint.as_deref(), Some("swarmops ref list"));
+}
+
+/// The journal frames of the store at `root`: how many there are.
+fn frame_count(root: &Utf8Path) -> usize {
+    let meta = MetaStore::open(root).unwrap();
+    let mut entries = meta.read().unwrap().journal_after(None, 1_000).unwrap();
+    entries.dedup_by_key(|entry| entry.seq);
+    entries.len()
+}
+
+/// A deletion of `main` that names its target is `E_REF_PROTECTED` (exit 1, not retryable),
+/// naming the ref, with a hint that only moves it; `main` keeps its target and nothing is
+/// written (the v0.6.0 design D8). A stale delete is still `E_CAS_MISMATCH` first.
+#[test]
+fn ref_delete_of_main_is_ref_protected() {
+    let (_dir, root, ops) = new_store();
+    let who = agent();
+    let c1 = commit(&ops, None, vec![text("f", "1")]);
+    let c2 = commit(&ops, Some(&c1), vec![text("f", "2")]);
+    ops.ref_set(&who, set("main", &c1, None, true)).unwrap();
+    let frames = frame_count(&root);
+
+    let delete = |expected: &str| ops.ref_delete(&who, RefDeleteReq::new("main", expected));
+    expect_err(delete(&c2), ErrorCode::CasMismatch);
+    let err = expect_err(delete(&c1), ErrorCode::RefProtected);
+    assert_eq!((err.exit, err.retryable), (1, false), "{err:?}");
+    assert_eq!(err.details["name"], "main");
+    assert_eq!(
+        err.hint.as_deref(),
+        Some("move it with `swarmops ref set` instead; a protected ref is never deleted")
+    );
+    assert_eq!(
+        ops.ref_list(RefListReq::default()).unwrap().refs,
+        [main_ref(c1, 1)]
+    );
+    assert_eq!(frame_count(&root), frames, "nothing written");
+}
+
+/// An undo of an operation that created `main` and a release ref would delete both: it is
+/// refused whole, `E_REF_PROTECTED`, neither ref moves and no frame is written.
+#[test]
+fn undo_of_mains_creation_is_refused_whole() {
+    let (_dir, root, ops) = new_store();
+    let who = agent();
+    let c1 = commit(&ops, None, vec![text("f", "1")]);
+    let id = ChangesetId::new(c1.parse().unwrap());
+    let meta = MetaStore::open(&root).unwrap();
+    let mut write = meta.write().unwrap();
+    write
+        .cas_ref("release/r", None, Some(id), "agent/one")
+        .unwrap();
+    write.cas_ref("main", None, Some(id), "agent/one").unwrap();
+    let op = write.commit().unwrap().frame_seq;
+    let frames = frame_count(&root);
+
+    let err = expect_err(ops.undo(&who, UndoReq::new(op)), ErrorCode::RefProtected);
+    assert_eq!(err.details["name"], "main");
+    let names: Vec<String> = ops
+        .ref_list(RefListReq::default())
+        .unwrap()
+        .refs
+        .into_iter()
+        .map(|r| r.name)
+        .collect();
+    assert_eq!(names, ["main", "release/r"], "neither ref moved");
+    assert_eq!(frame_count(&root), frames, "nothing written");
 }
 
 #[test]

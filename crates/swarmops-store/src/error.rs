@@ -88,6 +88,10 @@ pub enum StoreError {
     /// Refused before anything is queued or written.
     #[error("tag {0:?} cannot move: delete it and create it again")]
     TagImmutable(String),
+    /// A deletion of `main`: `main` is never deleted, in every format. Refused before anything
+    /// is queued or written.
+    #[error("ref {0:?} is protected: it is never deleted")]
+    RefProtected(String),
     /// Another gc, repair or upgrade holds the store's maintenance lease (`meta/maint.lock`).
     /// Nothing was done. Retryable.
     #[error("the store is under maintenance: another gc, repair or upgrade holds the lease")]

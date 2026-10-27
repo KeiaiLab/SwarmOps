@@ -2998,6 +2998,11 @@ expression: s.redact(&all)
           "type": "string"
         },
         {
+          "const": "E_REF_PROTECTED",
+          "description": "`main` was asked to be deleted: it is never deleted (`details.name`). Nothing was\nwritten.",
+          "type": "string"
+        },
+        {
           "const": "E_GIT_NOT_A_REPO",
           "description": "`git import` found no git repository it can open at `git_path` (`details.git_path`).",
           "type": "string"
@@ -6680,7 +6685,7 @@ expression: s.redact(&all)
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "`ref delete`: remove a ref by compare-and-swap.",
+      "description": "`ref delete`: remove a ref by compare-and-swap. `main` is never deleted\n(`E_REF_PROTECTED`).",
       "properties": {
         "expected_old": {
           "$ref": "#/$defs/Rev",

@@ -682,6 +682,7 @@ Kind: enumeration. `swarmops schema ErrorCode` prints its JSON Schema.
 | `"E_MAINTENANCE_BUSY"` | Another gc, repair or upgrade holds the store's maintenance lease; nothing was done, and running the operation again once it is done can succeed. |
 | `"E_FORMAT_REQUIRED"` | The ref name is one the store's format does not take but a later one does: `details` names `name`, `needs` (the format that takes it) and `store` (the store's); `swarmops upgrade` moves the store to it. |
 | `"E_TAG_IMMUTABLE"` | A tag was asked to move from one target to another: a tag is created and deleted, never moved (`details.name`). Nothing was written. |
+| `"E_REF_PROTECTED"` | `main` was asked to be deleted: it is never deleted (`details.name`). Nothing was written. |
 | `"E_GIT_NOT_A_REPO"` | `git import` found no git repository it can open at `git_path` (`details.git_path`). |
 | `"E_GIT_REF_NOT_FOUND"` | `git import`: the source repository has no `git_ref`, or it names no commit (`details.git_ref`; `details.kind` the object it names instead, such as a tree). |
 | `"E_GIT_IMPORT_DIVERGED"` | `git import`: the target ref's head is not the import of `git_ref`'s commit or of an ancestor of it, because the source was rewritten or a native changeset was committed on the target, so nothing was written; there is no silent merge. `details` names `target_ref`, `target_head`, `git_head` and `base`, the git commit the head stands for (the one it holds, or for a native head the one it exports to); and `external_id` (`commit`, `changeset`) where the import passed over an external id entry whose changeset stands for another commit, which `verify --deep` reports. |
@@ -1420,7 +1421,7 @@ Kind: object. `swarmops schema RecoveredOut` prints its JSON Schema.
 
 ## RefDeleteReq
 
-`ref delete`: remove a ref by compare-and-swap.
+`ref delete`: remove a ref by compare-and-swap. `main` is never deleted (`E_REF_PROTECTED`).
 
 Kind: object. `swarmops schema RefDeleteReq` prints its JSON Schema.
 

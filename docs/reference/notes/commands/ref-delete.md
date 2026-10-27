@@ -11,11 +11,13 @@ the store, readable by id, and `op undo` of the deletion creates the ref again.
    here, before the delete is tried.
 3. **The name.** `NAME` must be `main` or `release/<x>` (letters, digits, `.`, `_`, `-`, not
    starting with `.`, at most 255 bytes); anything else is `E_REF_NAME_INVALID` (exit 1).
+   `main` is never deleted: a delete of it that passes the compare-and-swap below is
+   `E_REF_PROTECTED` (exit 1, `details.name`), and nothing is written.
 4. **The compare-and-swap,** under the store's write lock, against the ref as committed:
 
 | The ref holds | Result |
 | --- | --- |
-| The expected changeset | Deleted; `old` is that changeset, `already_applied: false` |
+| The expected changeset | Deleted; `old` is that changeset, `already_applied: false`; for `main`, `E_REF_PROTECTED` |
 | Nothing (no such ref) | Replay: `already_applied: true`, nothing written |
 | Another changeset | `E_CAS_MISMATCH` (exit 4), `details.actual` is what it holds |
 
@@ -30,10 +32,10 @@ On `E_CAS_MISMATCH`, someone moved the ref after you read it. The hint, `swarmop
 
 ### Deleting `main`
 
-`main` can be deleted like any ref. Afterwards `log` without a revision, and every command given
-`main` (`ls main`, `cat main:…`), fails with `E_REV_NOT_FOUND` (exit 6, hint `swarmops ref list`),
-and a `commit` without `--parent` records a changeset with no parent, the root of a new history. To
-bring `main` back, `op undo` the deletion, or `ref set main <id> --create`.
+`main` is never deleted, in every store format: `ref delete main --expect <id>` with the id
+`main` names is `E_REF_PROTECTED` (exit 1, not retryable), and `main` keeps its target. There is
+no override. To point `main` elsewhere, move it with `swarmops ref set main <id> --expect <old>`.
+A stale `--expect` is still `E_CAS_MISMATCH`: the compare comes first.
 
 ### After the delete
 
@@ -59,7 +61,7 @@ Undo a deletion: find the newest operation that deleted the ref (a move with no 
 it. `op log` lists 50 operations unless `-n` says otherwise; page with `--before` for older ones.
 
 ```sh
-OP=$(swarmops op log | jq -r '[.result.ops[] | select(any(.ref_moves[]; .name == "main" and .new == null))][0].op')
+OP=$(swarmops op log | jq -r '[.result.ops[] | select(any(.ref_moves[]; .name == "release/1.0" and .new == null))][0].op')
 swarmops op undo "$OP"
 ```
 

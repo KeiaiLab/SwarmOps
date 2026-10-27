@@ -646,20 +646,20 @@ fn cas_ref_create_update_delete_and_mismatch() {
     insert(&store, &[cs(1, &[]), cs(2, &[1])]);
     let before = unix_now();
     assert_eq!(
-        cas(&store, "main", None, Some(1)),
+        cas(&store, "release/v1", None, Some(1)),
         CasResult::Applied { old: None }
     );
     let read = store.read().unwrap();
-    assert_eq!(read.get_ref("main").unwrap(), Some(ref_state(1, 1)));
-    assert_eq!(ref_file(&root, "main"), Some(ref_content(1, 1)));
+    assert_eq!(read.get_ref("release/v1").unwrap(), Some(ref_state(1, 1)));
+    assert_eq!(ref_file(&root, "release/v1"), Some(ref_content(1, 1)));
 
     // A wrong expectation: the actual target comes back, and nothing is written.
     let frames_before = frames(&root).len();
     let actual_1 = CasResult::Mismatch {
         actual: Some(id(1)),
     };
-    assert_eq!(cas(&store, "main", Some(2), Some(2)), actual_1);
-    assert_eq!(cas(&store, "main", None, Some(2)), actual_1);
+    assert_eq!(cas(&store, "release/v1", Some(2), Some(2)), actual_1);
+    assert_eq!(cas(&store, "release/v1", None, Some(2)), actual_1);
     assert_eq!(
         frames(&root).len(),
         frames_before,
@@ -667,20 +667,24 @@ fn cas_ref_create_update_delete_and_mismatch() {
     );
 
     let applied = CasResult::Applied { old: Some(id(1)) };
-    assert_eq!(cas(&store, "main", Some(1), Some(2)), applied);
+    assert_eq!(cas(&store, "release/v1", Some(1), Some(2)), applied);
     let read = store.read().unwrap();
-    assert_eq!(read.get_ref("main").unwrap(), Some(ref_state(2, 2)));
-    assert_eq!(ref_file(&root, "main"), Some(ref_content(2, 2)));
+    assert_eq!(read.get_ref("release/v1").unwrap(), Some(ref_state(2, 2)));
+    assert_eq!(ref_file(&root, "release/v1"), Some(ref_content(2, 2)));
 
     let applied = CasResult::Applied { old: Some(id(2)) };
-    assert_eq!(cas(&store, "main", Some(2), None), applied);
-    assert_eq!(store.read().unwrap().get_ref("main").unwrap(), None);
-    assert_eq!(ref_file(&root, "main"), None, "a deleted ref has no file");
+    assert_eq!(cas(&store, "release/v1", Some(2), None), applied);
+    assert_eq!(store.read().unwrap().get_ref("release/v1").unwrap(), None);
+    assert_eq!(
+        ref_file(&root, "release/v1"),
+        None,
+        "a deleted ref has no file"
+    );
     let actual_none = CasResult::Mismatch { actual: None };
-    assert_eq!(cas(&store, "main", Some(2), Some(1)), actual_none);
+    assert_eq!(cas(&store, "release/v1", Some(2), Some(1)), actual_none);
 
     let after = unix_now();
-    let log = store.read().unwrap().reflog("main", 10).unwrap();
+    let log = store.read().unwrap().reflog("release/v1", 10).unwrap();
     let moves: Vec<_> = log
         .iter()
         .map(|entry| (entry.seq, entry.old, entry.new, entry.actor.as_str()))
@@ -692,8 +696,42 @@ fn cas_ref_create_update_delete_and_mismatch() {
     ];
     assert_eq!(moves, want, "newest first");
     assert!(log.iter().all(|entry| (before..=after).contains(&entry.ts)));
-    assert_eq!(store.read().unwrap().reflog("main", 2).unwrap(), log[..2]);
-    assert_eq!(store.read().unwrap().reflog("main", 0).unwrap(), []);
+    assert_eq!(
+        store.read().unwrap().reflog("release/v1", 2).unwrap(),
+        log[..2]
+    );
+    assert_eq!(store.read().unwrap().reflog("release/v1", 0).unwrap(), []);
+}
+
+/// A deletion of `main` is refused after the compare, before anything is queued: a stale
+/// `expected` is still a mismatch, and `main` keeps its target (the v0.6.0 design D8).
+#[test]
+fn a_refused_protected_delete_queues_nothing() {
+    let (_dir, root, store) = new_store();
+    insert(&store, &[cs(1, &[]), cs(2, &[1])]);
+    cas(&store, "main", None, Some(1));
+    let frames_before = frames(&root).len();
+
+    let mut write = store.write().unwrap();
+    let stale = write.cas_ref("main", Some(id(2)), None, ACTOR).unwrap();
+    assert_eq!(
+        stale,
+        CasResult::Mismatch {
+            actual: Some(id(1))
+        }
+    );
+    let refused = write.cas_ref("main", Some(id(1)), None, ACTOR);
+    assert!(
+        matches!(&refused, Err(StoreError::RefProtected(n)) if n == "main"),
+        "{refused:?}"
+    );
+    assert!(write.queued().is_empty(), "{:?}", write.queued());
+    write.commit().unwrap();
+
+    assert_eq!(frames(&root).len(), frames_before, "no frame for a refusal");
+    let read = store.read().unwrap();
+    assert_eq!(read.get_ref("main").unwrap(), Some(ref_state(1, 1)));
+    assert_eq!(ref_file(&root, "main"), Some(ref_content(1, 1)));
 }
 
 #[test]
@@ -791,6 +829,7 @@ fn a_write_reads_its_own_queued_move_first() {
     let (_dir, _root, store) = new_store();
     insert(&store, &[cs(1, &[]), cs(2, &[1])]);
     cas(&store, "main", None, Some(1));
+    cas(&store, "release/v0", None, Some(1));
 
     let mut write = store.write().unwrap();
     assert_eq!(write.get_ref("main").unwrap(), Some(id(1)), "the file's");
@@ -798,8 +837,10 @@ fn a_write_reads_its_own_queued_move_first() {
         .cas_ref("main", Some(id(1)), Some(id(2)), ACTOR)
         .unwrap();
     assert_eq!(write.get_ref("main").unwrap(), Some(id(2)), "the move");
-    write.cas_ref("main", Some(id(2)), None, ACTOR).unwrap();
-    assert_eq!(write.get_ref("main").unwrap(), None, "the delete");
+    write
+        .cas_ref("release/v0", Some(id(1)), None, ACTOR)
+        .unwrap();
+    assert_eq!(write.get_ref("release/v0").unwrap(), None, "the delete");
     write.insert_changeset(cs(3, &[2])).unwrap();
     write
         .cas_ref("release/v1", None, Some(id(3)), ACTOR)
@@ -809,6 +850,7 @@ fn a_write_reads_its_own_queued_move_first() {
 
     let read = store.read().unwrap();
     assert_eq!(read.get_ref("main").unwrap(), Some(ref_state(1, 1)));
+    assert_eq!(read.get_ref("release/v0").unwrap(), Some(ref_state(1, 1)));
     assert_eq!(read.get_ref("release/v1").unwrap(), None);
 }
 
@@ -4281,11 +4323,14 @@ fn ref_versions_count_target_changes_and_replay_never_bumps_twice() {
         (None, Some(id(1))),
     ];
     assert_eq!(moves, want);
-    // Deleted, then created again: the version starts over.
-    cas(&store, "main", Some(1), None);
-    cas(&store, "main", None, Some(2));
+    // Deleted, then created again: the version starts over. `main` is never deleted, so a
+    // release ref is.
+    cas(&store, "release/r", None, Some(1));
+    cas(&store, "release/r", Some(1), Some(3));
+    cas(&store, "release/r", Some(3), None);
+    cas(&store, "release/r", None, Some(2));
     assert_eq!(
-        store.read().unwrap().get_ref("main").unwrap(),
+        store.read().unwrap().get_ref("release/r").unwrap(),
         Some(ref_state(2, 1))
     );
 }

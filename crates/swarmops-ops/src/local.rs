@@ -3452,17 +3452,17 @@ mod tests {
                 ops.commit(&who, req).unwrap().changeset
             };
             let (c1, c2) = (commit("1"), commit("2"));
-            let mut main = RefSetReq::new("main".to_owned(), c1.as_str());
-            main.create = true;
+            let mut release = RefSetReq::new("release/1".to_owned(), c1.as_str());
+            release.create = true;
             let created = ops_on(&root, failing("append_durable", "journal.off"))
-                .ref_set(&who, main)
+                .ref_set(&who, release)
                 .unwrap();
             one_injected(&created.warnings);
 
             let resolved = Resolved::default();
-            // main holds c1: the delete expects it, or c2.
+            // release/1 holds c1: the delete expects it, or c2.
             let expected = if deletes { &c1 } else { &c2 };
-            let delete = RefDeleteReq::new("main".to_owned(), expected.as_str());
+            let delete = RefDeleteReq::new("release/1".to_owned(), expected.as_str());
             match ops.recording(&resolved).ref_delete(&who, delete) {
                 Ok(deleted) => assert!(deletes && !deleted.already_applied, "{deleted:?}"),
                 Err(e) => assert!(!deletes && e.code == "E_CAS_MISMATCH", "{e:?}"),

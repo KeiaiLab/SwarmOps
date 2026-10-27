@@ -177,14 +177,21 @@ pub fn check_ref_name_in(format: StoreFormat, name: &str) -> Result<(), StoreErr
 }
 
 /// Refuses a move of ref `name` (a name `format` takes) from `old` to `new` that its kind
-/// does not allow: a tag is created and deleted, never moved ([`StoreError::TagImmutable`]).
-/// FORMAT 1 has no tags, so every move is allowed there.
+/// does not allow: `main` is never deleted, in every format ([`StoreError::RefProtected`]); a
+/// tag is created and deleted, never moved ([`StoreError::TagImmutable`]). FORMAT 1 has no
+/// tags, so every other move is allowed there.
 pub fn check_move(
     format: StoreFormat,
     name: &str,
     old: Option<ChangesetId>,
     new: Option<ChangesetId>,
 ) -> Result<(), StoreError> {
+    // A deletion of `main`, refused in every format: both formats have the kind.
+    let deletes_main = ref_kind(name) == Some(RefKind::Main) && old.is_some() && new.is_none();
+    if deletes_main {
+        return Err(StoreError::RefProtected(name.to_owned()));
+    }
+
     if format == StoreFormat::V1 {
         return Ok(());
     }

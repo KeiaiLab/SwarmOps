@@ -983,8 +983,9 @@ impl MetaWrite<'_> {
     /// queued. Otherwise [`CasResult::Mismatch`], and nothing is queued.
     ///
     /// A name no format takes is [`StoreError::RefName`], one only a later format takes
-    /// [`StoreError::FormatRequired`]; a move its kind does not allow (a tag's from one target to
-    /// another), [`StoreError::TagImmutable`]; a `new` that is neither in the store nor queued,
+    /// [`StoreError::FormatRequired`]; a move its kind does not allow, after the compare: a
+    /// deletion of `main`, [`StoreError::RefProtected`], or a tag's from one target to another,
+    /// [`StoreError::TagImmutable`]; a `new` that is neither in the store nor queued,
     /// [`StoreError::UnknownRefTarget`]; an actor longer than 255 bytes, or a move that would
     /// not fit in the transaction's frame (65,535 records), [`StoreError::Limit`].
     pub fn cas_ref(

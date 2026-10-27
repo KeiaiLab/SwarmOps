@@ -447,15 +447,23 @@ fn cas_ref_through_repo_records_reflog() {
         &unknown.to_string(),
     );
 
+    // `main` is never deleted; a release ref is.
+    match repo.cas_ref("main", Some(c2), None, "agent/two") {
+        Err(RepoError::Store(StoreError::RefProtected(name))) => assert_eq!(name, "main"),
+        other => panic!("expected RefProtected, got {other:?}"),
+    }
+    assert_eq!(repo.get_ref("main").unwrap(), Some(main));
+    repo.cas_ref("release/1", None, Some(c2), "agent/two")
+        .unwrap();
     assert_eq!(
-        repo.cas_ref("main", Some(c2), None, "agent/two")
+        repo.cas_ref("release/1", Some(c2), None, "agent/two")
             .unwrap()
             .result,
         CasResult::Applied { old: Some(c2) },
         "a delete"
     );
-    assert_eq!(repo.get_ref("main").unwrap(), None);
-    assert_eq!(repo.list_refs().unwrap(), []);
+    assert_eq!(repo.get_ref("release/1").unwrap(), None);
+    assert_eq!(repo.list_refs().unwrap(), [("main".to_owned(), main)]);
 }
 
 /// A create that crashed after it renamed `meta/` into place and before it linked `FORMAT`

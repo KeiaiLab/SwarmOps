@@ -269,6 +269,9 @@ fn store_error(e: StoreError, message: String, during: During<'_>) -> OpError {
         StoreError::TagImmutable(name) => error(ErrorCode::TagImmutable, message)
             .with_details(details([("name", name.into())]))
             .with_hint("delete the tag with swarmops ref delete, then create it again"),
+        StoreError::RefProtected(name) => error(ErrorCode::RefProtected, message)
+            .with_details(details([("name", name.into())]))
+            .with_hint("move it with `swarmops ref set` instead; a protected ref is never deleted"),
         StoreError::MaintenanceBusy => error(ErrorCode::MaintenanceBusy, message)
             .with_hint("retry once the other gc, repair or upgrade is done"),
         StoreError::UnknownRefTarget(id) => repo_error(RepoError::NotFound(id.to_string()), during),
@@ -1745,6 +1748,11 @@ mod tests {
             store(StoreError::RefName("x".into())),
             op,
             ErrorCode::RefNameInvalid,
+        );
+        maps(
+            store(StoreError::RefProtected("main".into())),
+            op,
+            ErrorCode::RefProtected,
         );
         maps(
             store(StoreError::UnknownRefTarget(id())),

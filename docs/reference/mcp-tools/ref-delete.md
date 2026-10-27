@@ -33,7 +33,7 @@ As `tools/list` gives it: each `$ref` replaced by its definition, so that it sta
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "`ref delete`: remove a ref by compare-and-swap.",
+  "description": "`ref delete`: remove a ref by compare-and-swap. `main` is never deleted\n(`E_REF_PROTECTED`).",
   "properties": {
     "expected_old": {
       "description": "The target the caller last saw, by its full changeset id; if the ref holds another, the\ndelete fails with `E_CAS_MISMATCH`. A ref name or a relative revision is read from the\nstore when the delete runs instead of pinning the id the caller read: the ref's own name\nalways matches, so the compare-and-swap protects nothing, and `main~1` on `main` never\nmatches. An id prefix pins the id the caller read only until another changeset shares\nit; then it is `E_AMBIGUOUS_ID`. `swarmops mcp` refuses all three (`E_INVALID_ARG`), and\nthe CLI's `--expect` help warns against them.",

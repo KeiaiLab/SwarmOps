@@ -383,12 +383,15 @@ fn undo_of_a_creation_deletes_the_ref() {
 fn undo_of_a_deletion_recreates_the_ref() {
     let (_dir, _root, repo) = new_repo();
     let [c1, ..] = chain(&repo);
-    cas(&repo, "main", None, Some(c1)); // op 3
-    cas(&repo, "main", Some(c1), None); // op 4
+    cas(&repo, "release/r", None, Some(c1)); // op 3
+    cas(&repo, "release/r", Some(c1), None); // op 4
 
     let undone = undo(&repo, 4);
-    assert_eq!(moves_of(&undone), [("main".to_owned(), None, Some(c1))]);
-    assert_eq!(target(&repo, "main"), Some(c1));
+    assert_eq!(
+        moves_of(&undone),
+        [("release/r".to_owned(), None, Some(c1))]
+    );
+    assert_eq!(target(&repo, "release/r"), Some(c1));
 }
 
 /// An undo run again finds every ref back where the operation found it: `already_applied`,
@@ -516,8 +519,8 @@ fn undo_of_an_op_that_moved_no_ref_is_nothing_to_undo() {
     let [c1, ..] = chain(&repo);
     let meta = MetaStore::open_with_fs(&root, checked(RealFs::new())).unwrap();
     let mut write = meta.write().unwrap();
-    write.cas_ref("main", None, Some(c1), ACTOR).unwrap();
-    write.cas_ref("main", Some(c1), None, ACTOR).unwrap();
+    write.cas_ref("release/r", None, Some(c1), ACTOR).unwrap();
+    write.cas_ref("release/r", Some(c1), None, ACTOR).unwrap();
     assert_eq!(write.commit().unwrap().frame_seq, 3);
     let frames = frame_count(&root);
 

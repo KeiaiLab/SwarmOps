@@ -309,8 +309,9 @@ fn order_check_rules_hold_in_every_crash_sweep(format) {
         "a ref move writes its frame and its file: {calls}"
     );
 
-    // The move made on the template, operation 1, and its undo swept: it deletes main again.
-    let args = ["ref", "set", "main", id.as_str(), "--create"];
+    // The move made on the template, operation 1, and its undo swept: it deletes the ref again.
+    // `main` is never deleted, so the swept ref is a release ref.
+    let args = ["ref", "set", "release/swept", id.as_str(), "--create"];
     template.run_as(&agent(0), &args, &[]).ok();
     let undo = |_: &Store| ["op", "undo", "1"].map(str::to_owned).to_vec();
     let calls = sweep_checked(&template, "an undo", undo);
