@@ -89,7 +89,7 @@ Native sync is M11, planned.
 | Git's fetch and push protocols, as a server | 1 | Not built | M14 |
 | A server entry over ssh | 1, 3 | Not built; M11 plans `ssh <host> swarmops serve --stdio` ([architecture](architecture.md#crates-and-layering)) | M14, reused by M11 |
 | Remotes, remote state and `sync` | 2, 3 | Built for git remotes (M13): `remotes.toml`, the mirror's refs, `so sync` | M13 (done), M11 (store remotes) |
-| Ref names beyond `main` and `release/<name>`, and tags | 1, 3 | Not built ([README](../README.md#swarmops-and-git), "Refs beyond one compare-and-swap") | M6's next `FORMAT` |
+| Ref names beyond `main` and `release/<name>`, and tags | 1, 3 | Built (M6): free-form branches, `tags/<path>` and `remote/<remote>/<path>` in a `FORMAT 2` store; git-side branch and tag mapping not built | M6 (done), M14 (git side) |
 | Access control and identities for remote callers | 1, 3 | `E_AUTH` and `E_POLICY_DENIED` are in the schema and raised by nothing ([known limitations](known-limitations.md#serving-requests)) | M14 |
 | A server that refuses `{"file": "<path>"}` content and never passes on a host path | 1, 3 | Recorded as M11's work ([known limitations](known-limitations.md#serving-requests)) | M14, M11 |
 
@@ -547,7 +547,8 @@ Milestone ids are never renumbered. Two are new: M13 (topology 2) and M14 (topol
 (topology 3) takes `so clone`, `so remote` and `so sync`.
 
 **Settled:** M0 to M4 and M8 are delivered, in v0.1.0, M13 in v0.2.0 and M5 in v0.3.0, ahead of
-M12, which is developed separately. **Provisional:** the order from M6 on is settled once the pilot has run
+M12, which is developed separately; M6 is delivered on `stable`, for the next release.
+**Provisional:** the order after M6 is settled once the pilot has run
 ([README](../README.md#roadmap)); until then the order below is the plan:
 
 ```text
@@ -563,9 +564,9 @@ needs   M13  ← M3, M4, M8                 packs, the mirror, the sync engine
 | 📋 M12 | all | macOS and Windows builds, tests and releases | | Each platform passes `just check` in CI and ships in a release |
 | ✅ M13 | 2 | The user's git as the transport; the store's git mirror; `so clone`, `so remote`, `so fetch`, `so push`, `so sync`, `so sync status`, their MCP tools; `authors.toml`; v0.2.0 | M3, M4, M8 | Topology 2's acceptance criteria 1 to 6 pass (delivered: [CHANGELOG](../CHANGELOG.md)) |
 | ✅ M5 | — | Workspaces, with an adapter for Claude Code's worktree hooks; `rebase`, `land --expect-target`, `blob get`; eleven MCP workspace tools; v0.3.0 | M4 | As the README states it (delivered: [CHANGELOG](../CHANGELOG.md)) |
-| 📋 M6 | 1, 3 | Verify, crash safety, fuzzing, gc, and FORMAT 2 with the ref names M11 and M14 need (remote-tracking refs, branches, tags); gc keeps what the mirror's refs reach | | As the README states it, plus a FORMAT 2 store holding a free-form branch and a tag |
+| ✅ M6 | 1, 3 | Verify, crash safety, fuzzing, gc, and FORMAT 2 with the ref names M11 and M14 need (remote-tracking refs, branches, tags); gc keeps what the mirror's refs reach | | As the README states it, plus a FORMAT 2 store holding a free-form branch and a tag (delivered: [CHANGELOG](../CHANGELOG.md)) |
 | 📋 M14 | 1 | `swarmops serve` over ssh and CGI; upload-pack and receive-pack; `refs/land/`; the access file | M13, M6 | Topology 1's acceptance criteria 1 to 5 pass |
-| 📋 M7 | — | Blame and review | M6's `FORMAT` (annotations) | As the README states it |
+| 📋 M7 | — | Blame and review | A `FORMAT 3` (annotations, a new record kind) | As the README states it |
 | 📋 M9 | — | Simulation and a benchmark gate | | As the README states it |
 | 📋 M11 | 3 | Native sync over `so://`, extending M13's sync engine and M14's entry | M3, M4, M6, M7, M8, M9, M13, M14 | Topology 3's acceptance criteria 1 to 3 pass |
 
@@ -585,7 +586,7 @@ wait for M4's landing measurements and the landing model they choose. Part of ea
 through the binary is unexplained (M1.6's quiet-window runs, then M2's decision). Commit-path costs
 (index tail scans, the reflog walk) wait for M2's measured decision. Compaction rewrites both
 sorted views under the writer lock (M1.6's bench; M3's merge outside the lock if the stall reaches
-100 ms at 100,000 records, else M6). No test reads a real repository yet (M3's and M8's tests of
+100 ms at 100,000 records, else a `FORMAT 3`'s manifest). No test reads a real repository yet (M3's and M8's tests of
 this host's repositories).
 
 **M12.** No item; SwarmOps is Linux only, and the release binaries print an `ld.so` line on glibc
@@ -601,15 +602,18 @@ mirror; the rest are open for M14 or later.
 checked land takes two lock passes and may check again under a busy target; no virtual snapshot of
 uncommitted edits; Claude Code removes no subagent's workspace; the workspace latencies are not
 yet measured ([Workspaces](known-limitations.md#workspaces)). NFC and NFD names and the Windows
-check's kill wait for M12; whether gc keeps unlanded workspace heads is M6's.
+check's kill wait for M12. Since M6, `gc` deletes no changeset, so unlanded workspace heads stay.
 
-**M6.** A literal `SIGKILL` on a real device; the double and triple faults left in the journal's
-failure policy; a failed directory fsync retried, not taken back; a lock that is bounded, not
-first-in first-out; recovery that walks all of `journal.off`; bounded reads of objects, trees,
-merges, diffs and journal files; repair, gc and streaming verify; checksums on `journal.off`
-entries in the next `FORMAT`; detection of unsupported filesystems by `statfs`.
+**M6 (delivered).** Left open: the double and triple faults of the journal's failure policy that
+an append-only journal cannot take back (`repair` reports them); a failed directory fsync retried,
+not taken back, and ext4 without a journal, which `statfs` cannot tell from ext4; a lock that is
+bounded, not first-in first-out (the M6 design, decision D3); a FORMAT 1 recovery that still walks
+all of `journal.off`; `ls` decoding a wide directory's whole tree; `verify` holding every object
+id in memory; objects no changeset reaches, counted but not removed (decision D5); the index's
+journal reads outside the filesystem seam (M9); and the sorted views as immutable runs under a
+manifest (a `FORMAT 3`, decision D2) ([Verification and repair](known-limitations.md#verification-and-repair)).
 
-**M7.** No hooks or annotations after a land: annotations come with M6's next `FORMAT`.
+**M7.** No hooks or annotations after a land: annotations need a new record kind, so a `FORMAT 3`.
 
 **M9.** An index of commit keys, if measurements ask for one; the benchmark gate (a 20 % regression
 fails).

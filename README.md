@@ -198,8 +198,8 @@ exit 5
 
 ### An MCP server for agents
 
-`swarmops mcp` serves the store to an agent as an MCP server on stdin and stdout: 35 tools, one
-per operation (24 store operations and 11 workspace operations), each taking the operation's
+`swarmops mcp` serves the store to an agent as an MCP server on stdin and stdout: 38 tools, one
+per operation (27 store operations and 11 workspace operations), each taking the operation's
 request and returning the envelope the CLI prints.
 Register it with Claude Code, one identity per agent process:
 
@@ -353,9 +353,9 @@ Agents get killed mid-write. Durability is full fsync, with no fast mode: an obj
 before any metadata names it, and a commit returns only once its journal frame is on disk. The
 writer lock is an `flock`, which the kernel releases when its holder dies, so a crash leaves no
 stale lock, and the next writer repairs whatever a crash cut short (a commit's or a ref move's
-`meta.recovered` says what it repaired). Crash sweeps, injected I/O errors and simulated power
-losses test this through the real binary. `verify --deep` re-hashes every object and checks the
-derived values against the objects:
+`meta.recovered` says what it repaired). Crash sweeps, injected I/O errors, simulated power
+losses and a literal `SIGKILL` test this through the real binary. `verify --deep` re-hashes every
+object and checks the derived values against the objects:
 
 ```sh
 so --human verify --deep
@@ -366,9 +366,13 @@ objects_checked: 113
 changesets_checked: 21
 problems: []
 findings: []
+truncated: false
+found: 0
 ```
 
-A store is one directory; [architecture.md](docs/architecture.md#the-store-on-disk) lists its
+`repair` rebuilds what the journal can rebuild (`journal.off`, the index, the ref files) and sets
+damaged objects aside for a backup or `blob put` to restore; it never cuts the journal. `gc`
+removes the leftovers of crashed writes and deletes no object. A store is one directory; [architecture.md](docs/architecture.md#the-store-on-disk) lists its
 files, and the operations guide says how to
 [check, back up and restore](docs/operations.md#checking-a-store) one.
 
@@ -444,7 +448,7 @@ so log
 ```
 
 ```text
-{"ok":true,"op":"repo_init","api":1,"result":{"repo_id":"5357e87f…","name":"acme","store_version":1,"changesets":0,"refs":0},"meta":{…}}
+{"ok":true,"op":"repo_init","api":1,"result":{"repo_id":"5357e87f…","name":"acme","store_version":2,"changesets":0,"refs":0},"meta":{…}}
 {"ok":true,"op":"commit","api":1,"result":{"changeset":"4a7bc757…","root":"ca354c25…","files_changed":1,"blobs_written":1,"advanced":{"name":"main","new":"4a7bc757…","already_applied":false},"replayed":false},"meta":{…}}
 {"ok":true,"op":"read_file","api":1,"result":{"blob":"dfa55099…","size":28,"kind":"file","encoding":"utf8","content":"pub fn f() -> u32 {\n    1\n}\n","truncated":false},"meta":{…}}
 {"ok":true,"op":"log","api":1,"result":{"entries":[{"id":"4a7bc757…","parents":[],"author_agent":"agent/worker-1","created_at":1792626681000,"title":"add f"}],"truncated":false},"meta":{…}}
@@ -507,15 +511,15 @@ planned, each with its milestone.
 | Order of writes | ✅ M1: every commit and ref move is a frame of one journal, appended under one lock, so all of them have a single global order. | **Ahead by design.** |
 | Stale locks | ✅ M1: the writer lock is an `flock`, which the kernel releases when its holder dies. | **Ahead by design.** A git process killed with `SIGKILL` while it holds `index.lock` or a ref's `.lock` leaves the file behind, to be removed by hand (git removes its lock files on the signals it can catch). |
 | Durability | ✅ M1: full fsync is the only mode; an object is synced before a journal frame names it, and a commit returns after its frame's `fdatasync`. ✅ M1.5: the policy for a failed fsync. | **Ahead by design.** Git's defaults (2.43) sync packs, pack metadata and the commit graph, not loose objects, refs or the index. |
-| Machine-readable contract | ✅ M1: one JSON envelope per command, with a stable `E_*` code, a fixed exit code, `retryable`, `details` and a `hint`; a JSON Schema for every request and response. ✅ M1.6: an I/O failure names its operation and store file, and no host path but in two `E_IO`s (a symlink loop met while working out where the store's path leads, and tempfile's giving up after 65,536 taken temp-file names); a write reports what its recovery repaired (`meta.recovered`); `verify` lists typed findings. | **Ahead by design** for errors, which git reports as free text on stderr. Git's plumbing and `--porcelain` formats narrow the gap for output. Known gap: four codes are not raised yet. |
+| Machine-readable contract | ✅ M1: one JSON envelope per command, with a stable `E_*` code, a fixed exit code, `retryable`, `details` and a `hint`; a JSON Schema for every request and response. ✅ M1.6: an I/O failure names its operation and store file, and no host path but in two `E_IO`s (a symlink loop met while working out where the store's path leads, and tempfile's giving up after 65,536 taken temp-file names); a write reports what its recovery repaired (`meta.recovered`); `verify` lists typed findings. | **Ahead by design** for errors, which git reports as free text on stderr. Git's plumbing and `--porcelain` formats narrow the gap for output. Known gap: three codes are not raised yet. |
 | Commits from many writers | ✅ M1: concurrent commits all succeed, short of a lock wait past 10 s or, since M1.6, a snapshot that meets a new commit in each of its 32 rounds (the retryable `E_BUSY`). | **Parity** with agents in separate git worktrees, on lost commits and lock failures. |
 | One ref by compare-and-swap | ✅ M1: `ref set --expect` or `--create`, `ref delete --expect`; setting a ref to the target it holds is a replay. ✅ M1.6: `commit --advance` moves a ref to the new changeset in the commit's own transaction, or records nothing. | **Parity** with `git update-ref <ref> <new> <old>`, plus the replay. |
 | Reading a path at a revision | ✅ M1: `cat REV:PATH` and `ls REV[:PATH]`, without a checkout. | **Parity** with `git show REV:PATH` and `git ls-tree`. |
 | Offline, on one host | ✅ M1: every operation runs against the host's own store. ✅ M13: only `clone`, `fetch`, `push` and `sync` reach a remote, through the user's git; every other command works without a network. | **Parity.** |
 | Throughput of many writers | ✅ M1: writers take turns, each commit holding one store-wide lock across two journal `fdatasync`s, and two `fsync`s more when it moves a ref (`--advance`). | **Behind by design.** Agents in git worktrees serialize nothing, and git's defaults sync none of a commit's files. |
-| Refs beyond one compare-and-swap | ✅ M1: refs are `main` and `release/<name>` only, moved one per call. | **Behind**: no multi-ref transactions, tags, free-form branch names or symbolic refs. |
+| Refs beyond one compare-and-swap | ✅ M1: refs are `main` and `release/<name>`, moved one per call. ✅ M6: a `FORMAT 2` store also holds free-form branches and tags, which never move. | **Behind**: no multi-ref transactions or symbolic refs. |
 | Breadth of reads | Today one file or one directory per call. ✅ M2: a file from a byte offset or by a range of lines, and a directory with the directories below it to a depth, each file with its size. ✅ M5: `blob get` reads blobs by id in batches, and sparse workspaces write a changeset's tree, or the paths under chosen prefixes, to disk. | **Behind**: git has `git grep <tree>`; **parity** with sparse checkouts for building and testing on disk. |
-| Storage on disk | ✅ M1: one file per object, zstd-compressed when that makes it smaller; no packs, no delta compression. 📋 M6: gc, which removes leftovers but packs nothing. | **Behind by design**, in bytes and in files, against git's packs. |
+| Storage on disk | ✅ M1: one file per object, zstd-compressed when that makes it smaller; no packs, no delta compression. ✅ M6: `gc`, which removes leftovers but packs nothing. | **Behind by design**, in bytes and in files, against git's packs. |
 | Conflicts | Since M3, `E_GIT_IMPORT_DIVERGED` signals a conflict when a git import's target and the git history have diverged. ✅ M4: `land` merges three-way without a checkout and reports a conflict as `E_CONFLICT` with a JSON report: each conflicting file's kind, its hunks (each side's lines, numbered as `cat --lines` takes them, and their text) and the target's changeset and agent that last changed it. ✅ M4: `land --resolve` resolves them without a checkout, path by path (take a side, new content, or delete), against the report's `theirs`; a path the target changed since comes back stale. | **Parity** with `git merge-tree --write-tree`, which merges without a checkout and reports typed conflicts. Resolving without a checkout is one request here, where git takes plumbing (`git hash-object`, a temporary index, `git commit-tree`). |
 | Review | Nothing today. 📋 M7: change requests, their classification, approvals and a landing gate. | **Behind** today: git ships patch-review tools, and Gerrit and GitHub add review on top. M7 is **not yet comparable**. |
 | Sync between hosts | ✅ M8: through a git remote, one writing host at a time, with `git import` and `git export`. ✅ M13: a store clones, fetches and pushes a git remote over HTTPS or ssh, by running the user's git; a push is a compare-and-swap, never forced, and `sync` lands the store's unpublished changes onto the remote's head, so several stores can write to one remote. 📋 M11: offline-first sync between stores, `so://`. | **Parity** with git's clone, fetch and push to a git remote over HTTPS and ssh, which SwarmOps runs; **behind** on transports, shallow and partial clones, and bundles. |
@@ -562,7 +566,7 @@ The milestones of the umbrella spec (§13), in the order they are built. ✅ del
 | 📋 | M12 | Portability: macOS and Windows builds, tests and releases. |
 | ✅ | M13 | Git remotes from a store (topology 2): the store's git mirror, the user's git run as the transport, `so clone`, `so remote`, `so fetch`, `so push`, `so sync`, `so sync status` and their MCP tools, commit addresses per agent family (`authors.toml`). |
 | ✅ | M5 | Workspaces, with an adapter for Claude Code's worktree hooks, so that an agent builds and tests a change on disk before it lands it: `so ws`, `rebase`, `land --expect-target`, `blob get` and eleven MCP workspace tools. |
-| 📋 | M6 | Verify, crash safety and fuzzing: fsck and repair, gc, detection of unsupported filesystems, bounded reads of store files, a capped `verify` report, and the next store `FORMAT`, with branch names, tags and remote-tracking refs. |
+| ✅ | M6 | Verify, crash safety and fuzzing: `repair`, `gc`, detection of unsupported filesystems by `statfs`, bounded reads of store files, a capped `verify` report, a literal `SIGKILL` test, four more fuzz targets, and store `FORMAT 2`, with branch names, tags and remote-tracking refs, and `upgrade` to it. |
 | 📋 | M14 | Git clients against a store (topology 1): `swarmops serve` over ssh and HTTP, run per connection; pushes by compare-and-swap or that land; access control. |
 | 📋 | M7 | Blame and review. |
 | 📋 | M9 | Simulation and a benchmark gate: the store's own code under a deterministic simulator and in real processes killed at random, and benchmarks that fail on a regression. |
@@ -576,9 +580,10 @@ and the result exported back to git for its CI to run. Next come the measurement
 quiet host: landing by 32 and 50 processes through the binary against umbrella §15's targets,
 and the landing model those numbers choose; whether a transaction can sync the journal once
 instead of twice; the import's and the export's timings on larger repositories. The order of
-the milestones from M6 on is settled once the pilot has run; until then the table is the plan.
+the milestones after M6 is settled once the pilot has run; until then the table is the plan.
 M13 and M14 are new, and where they go is part of that plan. M13 came first, in 0.2.0, then M5,
-in 0.3.0, both ahead of M12, which is developed separately.
+in 0.3.0, both ahead of M12, which is developed separately, and M6, on `stable` for the next
+release.
 
 When it is usable (umbrella spec §1): by one agent from M1; by a swarm, landing through MCP,
 from M4; on an existing git repository, its history imported and its landed work exported back
@@ -592,7 +597,7 @@ milestone takes each item.
 ## MCP
 
 `swarmops mcp` serves the store's operations to an agent as an MCP server on stdin and stdout:
-35 tools, one per operation (24 store operations and 11 workspace operations), each taking the
+38 tools, one per operation (27 store operations and 11 workspace operations), each taking the
 operation's request and returning the envelope the CLI prints. [MCP integration](docs/develop/mcp.md) is the reference,
 [MCP tools](docs/reference/mcp-tools/README.md) has a page per tool, and
 [Claude Code](docs/guides/claude-code.md) is the guide.
@@ -622,7 +627,7 @@ for each: its syntax, its arguments, an example, what it returns and the errors 
 | Read | [`resolve`](docs/reference/commands/resolve.md) · [`cat`](docs/reference/commands/cat.md) · [`ls`](docs/reference/commands/ls.md) · [`show`](docs/reference/commands/show.md) · [`log`](docs/reference/commands/log.md) · [`history`](docs/reference/commands/history.md) · [`diff`](docs/reference/commands/diff.md) |
 | Move refs | [`ref list`](docs/reference/commands/ref-list.md) · [`ref set`](docs/reference/commands/ref-set.md) · [`ref delete`](docs/reference/commands/ref-delete.md) |
 | Take an operation back | [`op log`](docs/reference/commands/op-log.md) · [`op undo`](docs/reference/commands/op-undo.md) |
-| Check and derive | [`verify`](docs/reference/commands/verify.md) · [`derive`](docs/reference/commands/derive.md) · [`schema`](docs/reference/commands/schema.md) |
+| Check, repair and derive | [`verify`](docs/reference/commands/verify.md) · [`repair`](docs/reference/commands/repair.md) · [`gc`](docs/reference/commands/gc.md) · [`upgrade`](docs/reference/commands/upgrade.md) · [`derive`](docs/reference/commands/derive.md) · [`schema`](docs/reference/commands/schema.md) |
 | Move work to and from git | [`git import`](docs/reference/commands/git-import.md) · [`git export`](docs/reference/commands/git-export.md) |
 | Work with a git remote | [`clone`](docs/reference/commands/clone.md) · [`remote add`](docs/reference/commands/remote-add.md) · [`remote remove`](docs/reference/commands/remote-remove.md) · [`remote list`](docs/reference/commands/remote-list.md) · [`fetch`](docs/reference/commands/fetch.md) · [`push`](docs/reference/commands/push.md) · [`sync`](docs/reference/commands/sync.md) · [`sync status`](docs/reference/commands/sync-status.md) |
 | Build and test in a workspace | [`ws create`](docs/reference/commands/ws-create.md) · [`ws status`](docs/reference/commands/ws-status.md) · [`ws diff`](docs/reference/commands/ws-diff.md) · [`ws commit`](docs/reference/commands/ws-commit.md) · [`ws rebase`](docs/reference/commands/ws-rebase.md) · [`ws resolve`](docs/reference/commands/ws-resolve.md) · [`ws land`](docs/reference/commands/ws-land.md) · [`ws materialize`](docs/reference/commands/ws-materialize.md) · [`ws discard`](docs/reference/commands/ws-discard.md) · [`ws list`](docs/reference/commands/ws-list.md) · [`ws info`](docs/reference/commands/ws-info.md) · [`ws delete`](docs/reference/commands/ws-delete.md) · [`ws hook`](docs/reference/commands/ws-hook.md) |
