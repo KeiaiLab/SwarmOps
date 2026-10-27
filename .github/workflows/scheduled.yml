@@ -5,9 +5,9 @@
 # that `just check` does not build, and the git version matrix, which rebuilds the git fixtures
 # with three gits, runs the git import's tests on what each made, has each check the git
 # export's repositories with `git fsck`, and runs the remote suites (fetch, push, sync over smart
-# HTTP and ssh) with each; the round trip of mirrors of this host's repositories; and the live
+# HTTP and ssh) with each; the round trip of mirrors of this host's repositories; the live
 # run with GitHub, once a repository variable names its
-# scratch repository. Hardened as ci.yml is, and run where it runs: on the maintainers' own host,
+# scratch repository; and, last and alone, the benchmark gate. Hardened as ci.yml is, and run where it runs: on the maintainers' own host,
 # through the self-hosted runners labelled `swarmops-local`, each building into its runner's
 # persistent CARGO_TARGET_DIR, so no build cache travels through GitHub.
 # `just check-ci-slow` runs first and alone: its runners share one host, and next to the git
@@ -389,3 +389,64 @@ jobs:
         run: |
           cargo nextest run --locked --all-features -p swarmops-cli --run-ignored ignored-only \
             -E 'test(=github_live::round_trip_with_github)' --no-capture
+
+  # The benchmark gate (`just bench`): every criterion bench, its median against
+  # bench/thresholds.toml, red on a regression over 20 % (scripts/bench-gate.py). Last and alone:
+  # the other jobs share this host and reach load 319 together, which no 20 % threshold survives,
+  # and the heavy lock serializes the host's measurements, not CI jobs. `!cancelled()` runs it
+  # after a failed or skipped job too (github-live is skipped without its variable). A missing
+  # lock directory fails the job; the load average before and after is printed, and a loaded run
+  # fails, never passes. On failure the criterion results are uploaded.
+  bench-gate:
+    name: bench gate
+    needs: [fuzz, bench-compare, git-matrix, host-repos, github-live]
+    if: ${{ !cancelled() }}
+    runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
+    permissions:
+      contents: read
+    # Twice the slower quiet baseline run (1,015 s, bench/thresholds.toml), rounded up to 5 minutes.
+    timeout-minutes: 35
+    env:
+      CARGO_TERM_COLOR: always
+      HEAVY_LOCK: /data/swarmops/locks/heavy.lock
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        with:
+          tool: just@1.58.0
+          fallback: none
+      - name: Check that the heavy lock's directory is there
+        run: |
+          if [ ! -d "$(dirname "$HEAVY_LOCK")" ]; then
+            echo "::error::the runner's host lacks $(dirname "$HEAVY_LOCK")"
+            exit 1
+          fi
+      - name: Load average before
+        run: cut -d' ' -f1-3 /proc/loadavg
+      - name: Run the benches and the gate under the heavy lock
+        run: flock "$HEAVY_LOCK" just bench
+      - name: Load average after
+        if: ${{ !cancelled() }}
+        run: cut -d' ' -f1-3 /proc/loadavg
+      # The runner builds into its own CARGO_TARGET_DIR: bring the results to target/.
+      - name: Collect the criterion results
+        if: ${{ failure() }}
+        run: |
+          if [ -n "${CARGO_TARGET_DIR:-}" ] && [ -d "$CARGO_TARGET_DIR/criterion" ]; then
+            mkdir -p target
+            rm -rf target/criterion
+            cp -r "$CARGO_TARGET_DIR/criterion" target/criterion
+          fi
+      - name: Upload the criterion results
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: criterion
+          path: target/criterion/
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 14

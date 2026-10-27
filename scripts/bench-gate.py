@@ -216,7 +216,7 @@ def baseline(first: dict[str, float], second: dict[str, float], measured: str, r
     """The thresholds file two quiet runs give: the inclusion rule applied to every bench."""
     out = [
         "# Written by `scripts/bench-gate.py baseline` from two quiet runs; the inclusion rule:",
-        f"# medians within {INCLUSION_SPREAD:.0%} of each other enter [bench] with their mean.",
+        f"# medians less than {100 * INCLUSION_SPREAD:.0f} % apart enter [bench] with their mean.",
         "",
     ]
     skips: list[str] = []
