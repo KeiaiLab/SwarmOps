@@ -91,6 +91,11 @@ bench:
 # The M5 workspace cases (ws_processes::perf::*: the 50,000-file tree's status, edits, commits
 # and update, the 10,000-file create, the checked land on 12,000 changesets) print `ws-perf: `
 # lines.
+# The CLI contention test and G4's landing measurement (`landing::perf::landing_under_load`,
+# open loop: one land per agent every 2 s for 120 s) run at 32 and at 50 processes
+# (`SWARMOPS_PERF_PROCESSES` lists others; the landing store under the bench directory), and
+# G2's commit bench (`swarmops-repo`'s
+# `commit_latency`: with and without syncs) runs last.
 # The M1, M13 and M5 measurements in one go: both 32-process contention tests, the remote
 # cases, the workspace cases, then the store benches.
 perf:
@@ -107,11 +112,24 @@ perf:
         '^[0-9]+ processes x |^  (wall |transaction:|lock wait |child total time:|journal:|uncontended )'
     [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
     load between
-    cargo nextest run --locked --release -p swarmops-cli --run-ignored ignored-only --test all \
-        -E 'test(/^contention::/)' --no-capture 2>&1 | tee target/perf/contention.log \
-        | grep --line-buffered '^contention: '
-    [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
-    load between
+    for n in ${SWARMOPS_PERF_PROCESSES:-32 50}; do
+        SWARMOPS_TEST_CLI_CONTENTION_CHILDREN="$n" cargo nextest run --locked --release \
+            -p swarmops-cli --run-ignored ignored-only --test all -E 'test(/^contention::/)' \
+            --no-capture 2>&1 | tee "target/perf/contention-$n.log" \
+            | grep --line-buffered '^contention: '
+        [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
+        load between
+    done
+    bench_dir="${SWARMOPS_BENCH_DIR:-$HOME/.local/state/swarmops-bench}"
+    mkdir -p "$bench_dir"
+    for n in ${SWARMOPS_PERF_PROCESSES:-32 50}; do
+        TMPDIR="$bench_dir" SWARMOPS_TEST_CLI_LANDING_LANDERS="$n" cargo nextest run --locked --release \
+            -p swarmops-cli --run-ignored ignored-only --test all \
+            -E 'test(=landing::perf::landing_under_load)' --no-capture 2>&1 \
+            | tee "target/perf/landing-$n.log" | grep --line-buffered '^landing-perf: '
+        [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
+        load between
+    done
     cargo nextest run --locked --release -p swarmops-cli --all-features --run-ignored ignored-only \
         -E 'test(/^remote_perf::/)' --no-capture 2>&1 | tee target/perf/remote.log \
         | grep --line-buffered '^remote-perf: '
@@ -124,6 +142,10 @@ perf:
     load between
     cargo bench --locked -p swarmops-store --bench '*' -- --output-format bencher 2>&1 \
         | tee target/perf/benches.log | grep --line-buffered -E '^(test |percentiles )'
+    [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
+    load between
+    cargo bench --locked -p swarmops-repo --bench commit_latency -- --output-format bencher 2>&1 \
+        | tee target/perf/commit-latency.log | grep --line-buffered -E '^(test |percentiles )'
     [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
     load after
     [ "$status" -eq 0 ] || echo "perf: a step failed; target/perf/ has the full output" >&2

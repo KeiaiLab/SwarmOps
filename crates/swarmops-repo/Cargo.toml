@@ -47,3 +47,8 @@ name = "all"
 [[bench]]
 name = "remerge"
 harness = false
+
+# G2: one commit's latency with its syncs left out, and with full fsync (docs/goals.md).
+[[bench]]
+name = "commit_latency"
+harness = false
