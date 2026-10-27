@@ -421,6 +421,10 @@ frames are read than when it was measured is no damage: a writer cut an entry th
 genuine (one whose own sync failed, or zeroed ones a crash left at its end), and every reader of
 the journal (the snapshot's rounds, paging, `reflog`, `verify`) measures it again and reads on.
 
+`op log` is the one local reader that takes the lock: it reads the committed snapshot
+(`MetaStore::read_committed`, as the git export below does), so that a frame a failed sync or a
+power loss takes back is never listed, and a number it lists is never given to another operation.
+
 ```mermaid
 flowchart TD
   start(["A read: a snapshot, no lock"]) --> ckpt["Read journal.ckpt"]
