@@ -1,0 +1,45 @@
+---
+source: crates/swarmops-cli/tests/format2.rs
+expression: busy
+---
+{
+  "gc": {
+    "api": 1,
+    "error": {
+      "code": "E_MAINTENANCE_BUSY",
+      "details": {},
+      "exit": 4,
+      "hint": "retry once the other gc, repair or upgrade is done",
+      "message": "the store is under maintenance: another gc, repair or upgrade holds the lease",
+      "retryable": true
+    },
+    "ok": false,
+    "op": "gc"
+  },
+  "repair": {
+    "api": 1,
+    "error": {
+      "code": "E_MAINTENANCE_BUSY",
+      "details": {},
+      "exit": 4,
+      "hint": "retry once the other gc, repair or upgrade is done",
+      "message": "the store is under maintenance: another gc, repair or upgrade holds the lease",
+      "retryable": true
+    },
+    "ok": false,
+    "op": "repair"
+  },
+  "upgrade": {
+    "api": 1,
+    "error": {
+      "code": "E_MAINTENANCE_BUSY",
+      "details": {},
+      "exit": 4,
+      "hint": "retry once the other gc, repair or upgrade is done",
+      "message": "the store is under maintenance: another gc, repair or upgrade holds the lease",
+      "retryable": true
+    },
+    "ok": false,
+    "op": "upgrade"
+  }
+}

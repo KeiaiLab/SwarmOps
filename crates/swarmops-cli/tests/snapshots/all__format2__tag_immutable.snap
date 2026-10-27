@@ -1,0 +1,19 @@
+---
+source: crates/swarmops-cli/tests/format2.rs
+expression: golden(&moved)
+---
+{
+  "api": 1,
+  "error": {
+    "code": "E_TAG_IMMUTABLE",
+    "details": {
+      "name": "tags/v1"
+    },
+    "exit": 1,
+    "hint": "delete the tag with swarmops ref delete, then create it again",
+    "message": "tag \"tags/v1\" cannot move: delete it and create it again",
+    "retryable": false
+  },
+  "ok": false,
+  "op": "ref_set"
+}

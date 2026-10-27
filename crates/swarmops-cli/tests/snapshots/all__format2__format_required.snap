@@ -1,0 +1,21 @@
+---
+source: crates/swarmops-cli/tests/format2.rs
+expression: golden(&refused)
+---
+{
+  "api": 1,
+  "error": {
+    "code": "E_FORMAT_REQUIRED",
+    "details": {
+      "name": "feature/login",
+      "needs": 2,
+      "store": 1
+    },
+    "exit": 1,
+    "hint": "swarmops upgrade",
+    "message": "ref name \"feature/login\" needs store format 2; this store is format 1",
+    "retryable": false
+  },
+  "ok": false,
+  "op": "ref_set"
+}
