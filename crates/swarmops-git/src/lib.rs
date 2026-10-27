@@ -41,7 +41,7 @@
 //! - [`sync`](mod@sync): the sync engine: the unpublished changes, those a remote holds already,
 //!   and the rest landed onto the remote's head.
 //!
-//! Umbrella decision 3: gix is pinned (`=0.89.0`, its `sha1` feature alone, no default features)
+//! Umbrella decision 3: gix is pinned (`=0.90.0`, its `sha1` feature alone, no default features)
 //! and seen by [`gix_source`] and [`gix_sink`] alone; the first also computes the SHA-1 behind
 //! [`git_hash`]. Everything above [`GitSource`] and [`GitSink`] reads and writes raw bytes, parsed
 //! and rendered with this crate's own code, never with gix's, so git2 (0.21.0, the fallback) would

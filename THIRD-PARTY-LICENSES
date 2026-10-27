@@ -69,45 +69,45 @@ find-msvc-tools 0.1.14 (build): MIT OR Apache-2.0; used under MIT [13]
 foldhash 0.1.5: Zlib; used under Zlib [25]
 foldhash 0.2.0: Zlib; used under Zlib [25]
 getrandom 0.4.3: MIT OR Apache-2.0; used under MIT [26]
-gix 0.89.0: MIT OR Apache-2.0; used under MIT [27]
-gix-actor 0.44.0: MIT OR Apache-2.0; used under MIT [27]
-gix-chunk 0.10.0: MIT OR Apache-2.0; used under MIT [27]
-gix-command 0.12.0: MIT OR Apache-2.0; used under MIT [27]
-gix-commitgraph 0.41.0: MIT OR Apache-2.0; used under MIT [27]
-gix-config 0.62.0: MIT OR Apache-2.0; used under MIT [27]
-gix-config-value 0.21.0: MIT OR Apache-2.0; used under MIT [27]
-gix-date 0.18.0: MIT OR Apache-2.0; used under MIT [27]
-gix-diff 0.69.0: MIT OR Apache-2.0; used under MIT [27]
-gix-discover 0.57.0: MIT OR Apache-2.0; used under MIT [27]
-gix-error 0.5.1: MIT OR Apache-2.0; used under MIT [27]
-gix-fs 0.24.0: MIT OR Apache-2.0; used under MIT [27]
-gix-glob 0.29.0: MIT OR Apache-2.0; used under MIT [27]
-gix-hash 0.28.0: MIT OR Apache-2.0; used under MIT [27]
+gix 0.90.0: MIT OR Apache-2.0; used under MIT [27]
+gix-actor 0.44.1: MIT OR Apache-2.0; used under MIT [27]
+gix-chunk 0.10.1: MIT OR Apache-2.0; used under MIT [27]
+gix-command 0.12.1: MIT OR Apache-2.0; used under MIT [27]
+gix-commitgraph 0.42.0: MIT OR Apache-2.0; used under MIT [27]
+gix-config 0.62.2: MIT OR Apache-2.0; used under MIT [27]
+gix-config-value 0.21.1: MIT OR Apache-2.0; used under MIT [27]
+gix-date 0.18.1: MIT OR Apache-2.0; used under MIT [27]
+gix-diff 0.70.0: MIT OR Apache-2.0; used under MIT [27]
+gix-discover 0.57.1: MIT OR Apache-2.0; used under MIT [27]
+gix-error 0.5.2: MIT OR Apache-2.0; used under MIT [27]
+gix-fs 0.24.1: MIT OR Apache-2.0; used under MIT [27]
+gix-glob 0.29.1: MIT OR Apache-2.0; used under MIT [27]
+gix-hash 0.28.1: MIT OR Apache-2.0; used under MIT [27]
 gix-hashtable 0.18.0: MIT OR Apache-2.0; used under MIT [27]
 gix-lock 26.0.0: MIT OR Apache-2.0; used under MIT [27]
 gix-macros 0.2.0 (build): MIT OR Apache-2.0; used under MIT [27]
-gix-object 0.66.0: MIT OR Apache-2.0; used under MIT [27]
-gix-odb 0.86.0: MIT OR Apache-2.0; used under MIT [27]
-gix-pack 0.76.0: MIT OR Apache-2.0; used under MIT [27]
-gix-packetline 0.24.0: MIT OR Apache-2.0; used under MIT [27]
-gix-parallel 0.50.0: MIT OR Apache-2.0; used under MIT [27]
-gix-path 0.14.0: MIT OR Apache-2.0; used under MIT [27]
-gix-protocol 0.67.0: MIT OR Apache-2.0; used under MIT [27]
-gix-quote 0.10.0: MIT OR Apache-2.0; used under MIT [27]
-gix-ref 0.69.0: MIT OR Apache-2.0; used under MIT [27]
-gix-refspec 0.47.0: MIT OR Apache-2.0; used under MIT [27]
-gix-revision 0.51.0: MIT OR Apache-2.0; used under MIT [27]
-gix-revwalk 0.37.0: MIT OR Apache-2.0; used under MIT [27]
-gix-sec 0.16.0: MIT OR Apache-2.0; used under MIT [27]
-gix-shallow 0.15.0: MIT OR Apache-2.0; used under MIT [27]
+gix-object 0.66.1: MIT OR Apache-2.0; used under MIT [27]
+gix-odb 0.87.0: MIT OR Apache-2.0; used under MIT [27]
+gix-pack 0.77.0: MIT OR Apache-2.0; used under MIT [27]
+gix-packetline 0.24.1: MIT OR Apache-2.0; used under MIT [27]
+gix-parallel 0.50.1: MIT OR Apache-2.0; used under MIT [27]
+gix-path 0.14.1: MIT OR Apache-2.0; used under MIT [27]
+gix-protocol 0.68.0: MIT OR Apache-2.0; used under MIT [27]
+gix-quote 0.10.1: MIT OR Apache-2.0; used under MIT [27]
+gix-ref 0.69.1: MIT OR Apache-2.0; used under MIT [27]
+gix-refspec 0.47.1: MIT OR Apache-2.0; used under MIT [27]
+gix-revision 0.52.0: MIT OR Apache-2.0; used under MIT [27]
+gix-revwalk 0.38.0: MIT OR Apache-2.0; used under MIT [27]
+gix-sec 0.16.1: MIT OR Apache-2.0; used under MIT [27]
+gix-shallow 0.15.1: MIT OR Apache-2.0; used under MIT [27]
 gix-tempfile 26.0.0: MIT OR Apache-2.0; used under MIT [27]
-gix-trace 0.3.0: MIT OR Apache-2.0; used under MIT [27], [28]
-gix-transport 0.61.0: MIT OR Apache-2.0; used under MIT [27]
-gix-traverse 0.63.0: MIT OR Apache-2.0; used under MIT [27]
-gix-url 0.40.0: MIT OR Apache-2.0; used under MIT [27]
-gix-utils 0.5.1: MIT OR Apache-2.0; used under MIT [27]
-gix-validate 0.13.0: MIT OR Apache-2.0; used under MIT [27]
-gix-zlib 0.3.0: MIT OR Apache-2.0; used under MIT [27]
+gix-trace 0.3.1: MIT OR Apache-2.0; used under MIT [27], [28]
+gix-transport 0.62.0: MIT OR Apache-2.0; used under MIT [27]
+gix-traverse 0.64.0: MIT OR Apache-2.0; used under MIT [27]
+gix-url 0.40.1: MIT OR Apache-2.0; used under MIT [27]
+gix-utils 0.5.2: MIT OR Apache-2.0; used under MIT [27]
+gix-validate 0.13.1: MIT OR Apache-2.0; used under MIT [27]
+gix-zlib 0.4.0: MIT OR Apache-2.0; used under MIT [27]
 globset 0.4.20: Unlicense OR MIT; used under MIT [1], [2]
 hash32 0.3.1: MIT OR Apache-2.0; used under MIT [29]
 hashbrown 0.15.5: MIT OR Apache-2.0; used under MIT [30]
@@ -1249,15 +1249,15 @@ DEALINGS IN THE SOFTWARE.
 
 
 ====================================================================================================
-[27] MIT, from gix 0.89.0, gix-actor 0.44.0, gix-chunk 0.10.0, gix-command 0.12.0, gix-commitgraph
-    0.41.0, gix-config 0.62.0, gix-config-value 0.21.0, gix-date 0.18.0, gix-diff 0.69.0,
-    gix-discover 0.57.0, gix-error 0.5.1, gix-fs 0.24.0, gix-glob 0.29.0, gix-hash 0.28.0,
-    gix-hashtable 0.18.0, gix-lock 26.0.0, gix-macros 0.2.0, gix-object 0.66.0, gix-odb 0.86.0,
-    gix-pack 0.76.0, gix-packetline 0.24.0, gix-parallel 0.50.0, gix-path 0.14.0, gix-protocol
-    0.67.0, gix-quote 0.10.0, gix-ref 0.69.0, gix-refspec 0.47.0, gix-revision 0.51.0, gix-revwalk
-    0.37.0, gix-sec 0.16.0, gix-shallow 0.15.0, gix-tempfile 26.0.0, gix-trace 0.3.0, gix-transport
-    0.61.0, gix-traverse 0.63.0, gix-url 0.40.0, gix-utils 0.5.1, gix-validate 0.13.0, gix-zlib
-    0.3.0 (LICENSE-MIT)
+[27] MIT, from gix 0.90.0, gix-actor 0.44.1, gix-chunk 0.10.1, gix-command 0.12.1, gix-commitgraph
+    0.42.0, gix-config 0.62.2, gix-config-value 0.21.1, gix-date 0.18.1, gix-diff 0.70.0,
+    gix-discover 0.57.1, gix-error 0.5.2, gix-fs 0.24.1, gix-glob 0.29.1, gix-hash 0.28.1,
+    gix-hashtable 0.18.0, gix-lock 26.0.0, gix-macros 0.2.0, gix-object 0.66.1, gix-odb 0.87.0,
+    gix-pack 0.77.0, gix-packetline 0.24.1, gix-parallel 0.50.1, gix-path 0.14.1, gix-protocol
+    0.68.0, gix-quote 0.10.1, gix-ref 0.69.1, gix-refspec 0.47.1, gix-revision 0.52.0, gix-revwalk
+    0.38.0, gix-sec 0.16.1, gix-shallow 0.15.1, gix-tempfile 26.0.0, gix-trace 0.3.1, gix-transport
+    0.62.0, gix-traverse 0.64.0, gix-url 0.40.1, gix-utils 0.5.2, gix-validate 0.13.1, gix-zlib
+    0.4.0 (LICENSE-MIT)
 ====================================================================================================
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -1280,7 +1280,7 @@ SOFTWARE.
 
 
 ====================================================================================================
-[28] MIT, from gix-trace 0.3.0 (LICENSE-MIT-tracing-forest)
+[28] MIT, from gix-trace 0.3.1 (LICENSE-MIT-tracing-forest)
 ====================================================================================================
 
 The `gix-trace::forest` module is derived from tracing-forest 0.2.0

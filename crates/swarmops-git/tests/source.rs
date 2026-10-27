@@ -284,8 +284,8 @@ fn replacement_refs_are_not_followed() {
     fs::write(replace.join(&c2.oid), format!("{}\n", c3.oid)).unwrap();
     let config = repo(&fixture).join("config");
     let mut text = fs::read_to_string(&config).unwrap();
-    // git reads `refs/replace/<c2>` in place of `c2` unless told otherwise; and gix 0.89 loads
-    // the replacements when the repository's configuration says `core.useReplaceRefs = false`.
+    // git reads `refs/replace/<c2>` in place of `c2` unless told otherwise; and gix 0.89 loaded
+    // the replacements when the repository's configuration said `core.useReplaceRefs = false`.
     for told in ["", "[core]\n\tuseReplaceRefs = false\n"] {
         text.push_str(told);
         fs::write(&config, &text).unwrap();

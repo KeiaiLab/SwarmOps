@@ -38,6 +38,9 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ### Security
 
+- gix 0.89.0 -> 0.90.0 (GHSA-q54r-jf2p-rfr2: an untrusted `.git/config` could turn off the `.git`
+  path checks of checkout, index, merge and tree editing). SwarmOps runs none of those through
+  gix, so it was not exposed.
 - zstd 0.14.2 -> 0.14.3, zstd-safe 8.1.0 -> 8.2.0, zstd-sys 2.1.1 -> 2.1.2 (RUSTSEC-2026-0391,
   -0398, -0403, -0410). The store uses none of the affected paths (reused stream contexts, the
   seekable format, legacy frames, wasm32), so it was not exposed.

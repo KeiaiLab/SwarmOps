@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use crate::source;
 use crate::{GitOid, GitSource, ObjectFormat, RawKind, SourceError, Unsupported};
 
-/// A [`GitSource`] over a git repository on disk, read through gix (`=0.89.0`, its `sha1`
+/// A [`GitSource`] over a git repository on disk, read through gix (`=0.90.0`, its `sha1`
 /// feature alone).
 ///
 /// It opens the repository as gix's `open_opts` finds it, with `gix::open::Options::isolated()`:
@@ -160,9 +160,9 @@ pub(crate) fn open_repository(path: &Path) -> Result<gix::Repository, SourceErro
             reason: reason(&error),
         }
     })?;
-    // Replacement objects never apply. gix 0.89 reads `core.useReplaceRefs` the other way round
-    // (`false` is what loads `refs/replace/`), so the object handle is told to ignore them
-    // whatever the configuration says; `read`'s hash check would see one regardless.
+    // Replacement objects never apply, whatever `core.useReplaceRefs` says (gix 0.89 read it the
+    // other way round, `false` loading `refs/replace/`): the object handle is told to ignore them;
+    // `read`'s hash check would see one regardless.
     repo.objects.ignore_replacements = true;
     refuse_extensions(repo.config_snapshot().plumbing())?;
     if repo.is_shallow().map_err(|error| io(&error))? {

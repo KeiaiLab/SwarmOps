@@ -34,7 +34,7 @@ const LOCK_TIMEOUT: Duration = Duration::from_millis(100);
 #[cfg(feature = "test-hooks")]
 pub type SyncedPaths = Arc<Mutex<Vec<PathBuf>>>;
 
-/// A [`GitSink`] over a git repository on disk, through gix (`=0.89.0`, its `sha1` feature alone).
+/// A [`GitSink`] over a git repository on disk, through gix (`=0.90.0`, its `sha1` feature alone).
 ///
 /// It opens the repository as [`GixSource::open`](crate::GixSource::open) does, refusing what that
 /// refuses. Objects are written by gix's loose writer: `objects/<2 hex>/<38 hex>`, zlib, as git
