@@ -17,6 +17,9 @@ default: check
 # first run leaves out. A doc of the default build cannot link to that code, or the first run
 # fails. Every step that resolves dependencies runs `--locked`: a Cargo.lock (either
 # workspace's) that the manifests no longer match fails the gate instead of being rewritten.
+# bench/compare's lockfile, which the recipe does not build, is resolved `--locked` too
+# (`cargo metadata`, no build), so a dependency change that leaves it stale fails every push,
+# not the weekly run.
 # `cargo deny` checks both lockfiles the recipe builds, with deny.toml: the fuzz crate's too,
 # whose build scripts the fuzz clippy step runs (its one license exception is in
 # fuzz/deny.exceptions.toml). swarmops-core's `supply_chain` tests fail a recipe, script or
@@ -37,6 +40,7 @@ check:
     cargo clippy --locked --workspace --lib --bins --all-features -- -D warnings -D clippy::unwrap_used -D clippy::missing_assert_message -D clippy::mod_module_files -D clippy::rc_buffer
     cargo clippy --locked -p swarmops-cli --test test_hooks -- -D warnings
     cargo clippy --locked --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
+    cargo metadata --locked --format-version 1 --manifest-path bench/compare/Cargo.toml >/dev/null
     cargo nextest run --locked --workspace --all-features --no-tests=warn
     cargo nextest run --locked --profile default --release -p swarmops-cli --test test_hooks --no-tests=fail
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items

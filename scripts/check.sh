@@ -11,6 +11,8 @@ cargo clippy --locked --workspace --lib --bins --all-features -- -D warnings -D 
 # nothing: this step lints it, and the library crates it builds, without the feature.
 cargo clippy --locked -p swarmops-cli --test test_hooks -- -D warnings
 cargo clippy --locked --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
+# bench/compare is not built here, but a stale lockfile of it fails here all the same.
+cargo metadata --locked --format-version 1 --manifest-path bench/compare/Cargo.toml >/dev/null
 # `--all-features` turns on the test hooks the crash tests drive; the release run of
 # `test_hooks` is built without them, as `cargo build --release` is, and checks it ignores them.
 # That test exists only without the feature, so it must run: a build that turns the feature on
