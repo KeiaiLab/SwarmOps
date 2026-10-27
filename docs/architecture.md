@@ -384,6 +384,20 @@ recorded (`E_CAS_MISMATCH`, `details.committed: false`), only the flushed object
 GC. A publish so takes one lock pass and four syncs, where a commit and then a move take two and
 six.
 
+**A land's publish** (operations §3 step f) is that frame too: the land's changeset `L`, made and
+flushed outside the lock on the head the land read, and the target's compare-and-swap from that
+head. When the target moved in between, the writer holding the lock makes the land anew on the
+new head instead of handing it back (metalog merge, the model the M4 measurement chose:
+[perf.md](perf.md), "M4 — the landing model, measured"). It walks first parents from the new
+head back to the old one, at most 256, and gathers the paths those changesets touched. When none
+overlaps a path of `L` (equal to it, or a directory prefix of it either way), `L'` is `L`'s delta
+on the new head's tree; an overlapping regular file of at most 1 MiB on all three sides is merged
+three-way (diff3) in the lock. `L'`'s new trees, merged blobs and changeset object are written
+and flushed under the lock, before the frame that names them. A longer or backward move, any
+other overlap and a conflict drop the transaction instead: the lander merges again and retries.
+A land with an expected target (`ws land --check`) is never made anew, so what lands is the tree
+it checked. A relocated land holds the lock one object round longer.
+
 ## Reading
 
 Readers take no lock (storage §3, "읽기"). `MetaStore::read()` takes a snapshot: it reads
@@ -681,12 +695,13 @@ What an agent sees (operations §4):
 - `land` publishes a change made on an older head: it merges the change three-way onto the
   target's head (`main` or a `release/*` ref), and inserts the result, one squashed changeset whose
   parent is that head, with the target's compare-and-swap to it in one transaction, the frame a
-  `commit --advance` writes. A land that loses its race merges again onto what the target gained,
-  over its own paths, and tries again, waiting from its fourth attempt; a conflict is
-  `E_CONFLICT`, with a report of each conflicting file, and records nothing. A keyed land run
-  again finds its changeset on the target and replays it, decided under the store's lock. So an
-  agent that loses a ref race lands its change rather than re-sending whole files, which would
-  overwrite the winner's edits.
+  `commit --advance` writes. A land whose target moved meanwhile is made anew on its new head
+  under the lock where the paths allow (above, "Writing"); otherwise it merges again onto what
+  the target gained, over its own paths, and tries again, waiting from its fourth attempt; a
+  conflict is `E_CONFLICT`, with a report of each conflicting file, and records nothing. A keyed
+  land run again finds its changeset on the target and replays it, decided under the store's
+  lock. So an agent that loses a ref race lands its change rather than re-sending whole files,
+  which would overwrite the winner's edits.
 
 ## The contract
 

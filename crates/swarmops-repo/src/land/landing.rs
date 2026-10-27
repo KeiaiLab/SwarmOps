@@ -22,7 +22,7 @@ use crate::repo::{self, Repo};
 
 use super::key::{KeyFound, TargetWalk};
 use super::resolve::Resolving;
-use super::{Publication, Published, Resolutions};
+use super::{Publication, Published, Relocate, Resolutions};
 
 /// The metadata key of a landed changeset's idempotency key.
 pub(super) const LAND_KEY: &str = "land_key";
@@ -70,8 +70,9 @@ pub struct LandRequest {
     /// 1. The operations layer takes 1 to 32. A land with `expect_target` makes one.
     pub max_attempts: u32,
     /// Publish only while the target names this changeset (M5): one attempt, merged onto it and
-    /// published by compare-and-swap; a target that names another, when the attempt reads it or
-    /// when it publishes, is [`RepoError::CasMismatch`], and nothing is recorded. `None`: the
+    /// published by compare-and-swap, never relocated; a target that names another, when the
+    /// attempt reads it or when it publishes, is [`RepoError::CasMismatch`], and nothing is
+    /// recorded. `None`: the
     /// land merges onto whatever the target names, and retries.
     pub expect_target: Option<ChangesetId>,
     /// What to make of some paths of the merge, decided against a head of the target, which
@@ -115,8 +116,9 @@ pub struct LandOutcome {
     /// How many attempts it made: each read the target in a snapshot of its own, and published,
     /// or found the land made before.
     pub attempts: u32,
-    /// Whether the publish made `L` anew on a head the target moved to after the land read it;
-    /// the compare-and-swap publish never does.
+    /// Whether the publish made `L` anew on a head the target moved to after the land read it
+    /// (the lock holder's relocation, [`crate::land`] step 6); a land with `expect_target` never
+    /// is.
     pub relocated: bool,
     /// The changesets `L` squashed, oldest first: the head's first-parent chain after the base,
     /// ending at the head; for a replay, those the replayed changeset records.
@@ -627,6 +629,7 @@ impl<O: ObjectStore> Landing<'_, O> {
                 onto,
                 relocated,
                 merged_in_lock,
+                files_changed,
                 warnings,
             } => {
                 self.auto_merged.extend(merged_in_lock);
@@ -638,7 +641,7 @@ impl<O: ObjectStore> Landing<'_, O> {
                     attempts: attempt,
                     relocated,
                     squashed_from: chain,
-                    files_changed: publication.changeset.delta.len(),
+                    files_changed,
                     auto_merged: std::mem::take(&mut self.auto_merged).into_iter().collect(),
                     warnings,
                 }))
@@ -727,12 +730,19 @@ impl<O: ObjectStore> Landing<'_, O> {
             metadata: metadata(head, recorded),
         };
         let written = write_squash(self.repo, squash)?;
+
+        // An exact land publishes the tree it was checked with, or nothing (M5).
+        let relocate = match self.req.expect_target {
+            Some(_) => Relocate::Never,
+            None => Relocate::Allow,
+        };
         Ok(Publication {
             target: self.req.target.clone(),
             onto: theirs.id,
             id: written.id,
             changeset: written.changeset,
             actor: String::from_utf8_lossy(&self.req.lander.name).into_owned(),
+            relocate,
         })
     }
 

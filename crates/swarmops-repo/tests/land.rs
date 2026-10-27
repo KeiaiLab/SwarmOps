@@ -28,7 +28,7 @@ use swarmops_repo::land::{LandOutcome, LandRequest, LandStatus, NothingToLandRea
 use swarmops_repo::merge::tree_diff::{PathFilter, delta_of};
 use swarmops_repo::{Advance, Change, CommitRequest, Depth, LocalRepo, RepoError};
 #[cfg(feature = "test-hooks")]
-use swarmops_store::{CRASH_AT_ENV, FAIL_AT_ENV, FS_CALLS_ENV, ORDER_CHECK_ENV};
+use swarmops_store::{CRASH_AT_ENV, FAIL_AT_ENV, FS_CALLS_ENV, HookedFs, ORDER_CHECK_ENV};
 use swarmops_store::{FsOps, Journal, MetaStore, RealFs};
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::child::{SIGABRT, run, this_test};
@@ -763,14 +763,19 @@ fn a_land_onto_a_missing_target_is_not_found() {
     assert_eq!(frame_count(&root), frames);
 }
 
+/// A race's move of `main`, through the racer's handle, the race's number from 0: what `main`
+/// names after it.
+type Act = dyn Fn(&LocalRepo, usize) -> ChangesetId + Send + Sync;
+
 /// Races a land as another lander would: at the land's first flush of objects after each call it
 /// makes on the metadata (its first `fsync_dir` under `objects/` while it writes a changeset's
 /// objects, outside the lock), it lands `change(n)`, the n-th race's change from 0, on `main`'s
 /// head through a handle of its own on the real filesystem, which the land does not see, until it
-/// has run `races` races.
+/// has run `races` races. [`Racer::acting`] moves `main` its own way instead.
 struct Racer {
     root: Utf8PathBuf,
-    change: fn(usize) -> Vec<Change>,
+    /// The n-th race's move of `main` through the racer's handle: what `main` names after it.
+    act: Box<Act>,
     races: usize,
     /// Whether the land made a call on the metadata since the last race: a new attempt's objects
     /// are due.
@@ -782,9 +787,22 @@ struct Racer {
 impl Racer {
     /// A racer of the store at `root`, which runs `races` races.
     fn new(root: &Utf8Path, races: usize, change: fn(usize) -> Vec<Change>) -> Arc<Racer> {
+        Racer::acting(root, races, move |other, n| {
+            let head = main_head(other);
+            advance(other, OTHER, &[head], change(n))
+        })
+    }
+
+    /// A racer of the store at `root` whose n-th race is `act(handle, n)`, which returns what
+    /// `main` names after it.
+    fn acting(
+        root: &Utf8Path,
+        races: usize,
+        act: impl Fn(&LocalRepo, usize) -> ChangesetId + Send + Sync + 'static,
+    ) -> Arc<Racer> {
         Arc::new(Racer {
             root: root.to_owned(),
-            change,
+            act: Box::new(act),
             races,
             armed: AtomicBool::new(true),
             landed: Mutex::new(Vec::new()),
@@ -803,8 +821,8 @@ impl Racer {
             return;
         }
         let other = LocalRepo::open_with_fs(&self.root, checked(RealFs::new())).unwrap();
-        let (head, n) = (main_head(&other), landed.len());
-        landed.push(advance(&other, OTHER, &[head], (self.change)(n)));
+        let n = landed.len();
+        landed.push((self.act)(&other, n));
     }
 
     /// A handle on the store whose lands this racer races, under the order checker.
@@ -833,16 +851,42 @@ impl Watch for Racer {
     }
 }
 
+/// The file the races below edit beside the land.
+const REGISTRY: &str = "REGISTRY";
+
+/// The lines of a registry past the publish's in-lock merge bound (1 MiB a side) and within
+/// diff3's (48 Ki lines, 8 MiB): 32,000 lines of 36 bytes, 1,152,000 bytes.
+const LARGE: usize = 32_000;
+
+/// A registry of `lines` lines, each line `at` of `edits` (from 0) replaced by its text.
+fn registry(lines: usize, edits: &[(usize, &str)]) -> Vec<u8> {
+    let line = |at: usize| match edits.iter().find(|(edited, _)| *edited == at) {
+        Some((_, line)) => format!("{line}\n"),
+        None => format!("entry {at:06} of the registry, as is\n"),
+    };
+    (0..lines).map(line).collect::<String>().into_bytes()
+}
+
 /// A land that loses the race to the target (another lander moved it while the land wrote its
-/// changeset's objects) records nothing of that attempt, re-merges what it merged onto what the
-/// target gained, and lands on the next: `L` on the racer's changeset, with both changes.
+/// changeset's objects, editing the file the land edits, past the in-lock merge's bound) records
+/// nothing of that attempt, re-merges what it merged onto what the target gained, and lands on
+/// the next: `L` on the racer's changeset, with both changes.
 #[test]
 fn a_land_that_loses_a_race_re_merges_and_lands_on_the_next_attempt() {
     let (_dir, root, repo) = new_store();
-    let t0 = advance(&repo, ACTOR, &[], vec![put("a", b"a\n"), put("f", b"f\n")]);
-    let head = commit_by(&repo, ACTOR, &[t0], vec![put("a", b"ours\n")]);
+    let base = registry(LARGE, &[]);
+    let t0 = advance(
+        &repo,
+        ACTOR,
+        &[],
+        vec![put(REGISTRY, &base), put("f", b"f\n")],
+    );
+    let ours = registry(LARGE, &[(4, "ours")]);
+    let head = commit_by(&repo, ACTOR, &[t0], vec![put(REGISTRY, &ours)]);
     drop(repo);
-    let racer = Racer::new(&root, 1, |n| vec![put(&format!("race/{n}"), b"theirs\n")]);
+    let racer = Racer::new(&root, 1, |_| {
+        vec![put(REGISTRY, &registry(LARGE, &[(1, "theirs")]))]
+    });
     let repo = racer.open();
 
     let out = repo.land(landing(head)).unwrap();
@@ -852,12 +896,10 @@ fn a_land_that_loses_a_race_re_merges_and_lands_on_the_next_attempt() {
         (out.status, out.attempts, out.rebased_onto, out.base),
         (LandStatus::Landed, 2, gained[0], t0)
     );
+    assert!(!out.relocated, "the lander re-merged");
     assert_eq!(first_parent(&repo, out.landed), Some(gained[0]));
-    assert_eq!(content(&repo, out.landed, "a"), Some(b"ours\n".to_vec()));
-    assert_eq!(
-        content(&repo, out.landed, "race/0"),
-        Some(b"theirs\n".to_vec())
-    );
+    let both = registry(LARGE, &[(1, "theirs"), (4, "ours")]);
+    assert_eq!(content(&repo, out.landed, REGISTRY), Some(both));
     assert_eq!(main_head(&repo), out.landed);
     assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
 }
@@ -890,15 +932,26 @@ fn the_re_merge_after_a_lost_race_conflicts_with_a_full_report() {
 }
 
 /// A land that loses every race stops at its last attempt: with `max_attempts` 3 and a racer that
-/// moves the target before each publish, it fails after its third, naming what the target names
-/// then, and records nothing.
+/// moves the target before each publish, editing the land's file past the in-lock merge's bound,
+/// it fails after its third, naming what the target names then, and records nothing.
 #[test]
 fn retries_stop_at_max_attempts() {
     let (_dir, root, repo) = new_store();
-    let t0 = advance(&repo, ACTOR, &[], vec![put("a", b"a\n")]);
-    let head = commit_by(&repo, ACTOR, &[t0], vec![put("a", b"ours\n")]);
+    let t0 = advance(
+        &repo,
+        ACTOR,
+        &[],
+        vec![put(REGISTRY, &registry(LARGE, &[]))],
+    );
+    let ours = registry(LARGE, &[(4, "ours")]);
+    let head = commit_by(&repo, ACTOR, &[t0], vec![put(REGISTRY, &ours)]);
     drop(repo);
-    let racer = Racer::new(&root, 10, |n| vec![put(&format!("race/{n}"), b"theirs\n")]);
+    let racer = Racer::new(&root, 10, |n| {
+        vec![put(
+            REGISTRY,
+            &registry(LARGE, &[(1, &format!("theirs {n}"))]),
+        )]
+    });
     let repo = racer.open();
 
     let mut land = landing(head);
@@ -913,6 +966,213 @@ fn retries_stop_at_max_attempts() {
         other => panic!("expected RetryExhausted, got {other:?}"),
     }
     assert_eq!(main_head(&repo), gained[2]);
+}
+
+/// A land whose target moved, with paths disjoint from what it gained, while the land wrote `L`'s
+/// objects is relocated by the lock holder in its one attempt: `L'` on the racer's changeset, one
+/// frame, its root the root a commit of the same change on that changeset makes, and its delta
+/// hash that commit's.
+#[test]
+fn a_land_onto_a_moved_head_with_disjoint_paths_lands_in_one_attempt() {
+    let (_dir, root, repo) = new_store();
+    let t0 = advance(&repo, ACTOR, &[], vec![put("a", b"a\n"), put("f", b"f\n")]);
+    let head = commit_by(&repo, ACTOR, &[t0], vec![put("a", b"ours\n")]);
+    drop(repo);
+    let racer = Racer::new(&root, 1, |n| vec![put(&format!("race/{n}"), b"theirs\n")]);
+    let repo = racer.open();
+    let frames = frame_count(&root);
+
+    let out = repo.land(landing(head)).unwrap();
+    let gained = racer.landed();
+    assert_eq!(gained.len(), 1, "one race");
+    assert_eq!(
+        (out.status, out.attempts, out.relocated, out.rebased_onto),
+        (LandStatus::Landed, 1, true, gained[0])
+    );
+    assert_eq!(first_parent(&repo, out.landed), Some(gained[0]));
+    assert_eq!(main_head(&repo), out.landed);
+    assert_eq!(
+        records_past(&root, frames + 1),
+        [
+            (frames + 1, "changeset", out.landed.0.0.to_vec()),
+            (frames + 1, "ref_move", b"main".to_vec())
+        ],
+        "the race's frame, then the land's one"
+    );
+
+    // The same change committed on the racer's changeset: the same tree and delta.
+    let landed = repo.changeset(out.landed).unwrap().unwrap().changeset;
+    let same = commit_by(&repo, ACTOR, &[gained[0]], vec![put("a", b"ours\n")]);
+    let same = repo.changeset(same).unwrap().unwrap().changeset;
+    assert_eq!(landed.root, same.root);
+    assert_eq!(landed.delta_hash().unwrap(), same.delta_hash().unwrap());
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
+}
+
+/// Two paths overlap when one is a directory prefix of the other, not only when they are equal:
+/// the racer replaces the directory `docs/a`, which holds `x`, by a file `docs/a` while the land
+/// adds `docs/a/b`. No path the target gained is the land's, yet nothing is relocated: the land
+/// re-merges, and ends in a type change.
+#[test]
+fn a_publish_never_relocates_across_an_ancestor_or_descendant_path() {
+    let (_dir, root, repo) = new_store();
+    let t0 = advance(&repo, ACTOR, &[], vec![put("docs/a/x", b"x\n")]);
+    let head = commit_by(&repo, ACTOR, &[t0], vec![put("docs/a/b", b"b\n")]);
+    drop(repo);
+    let racer = Racer::new(&root, 1, |_| {
+        vec![delete("docs/a/x"), put("docs/a", b"a file\n")]
+    });
+    let repo = racer.open();
+
+    let conflicts = conflicts_of(repo.land(landing(head)));
+    let gained = racer.landed();
+    assert_eq!(gained.len(), 1, "one race");
+    assert_eq!(conflicts.theirs, gained[0]);
+    assert_eq!(kinds(&conflicts), [("docs/a/b", "type_change")]);
+    assert_eq!(main_head(&repo), gained[0]);
+}
+
+/// A target moved back, to a changeset below the one the land read, is not a line the publish
+/// relocates along: the publish gives it back, and the land re-merges and lands on its second
+/// attempt, on the older head.
+#[test]
+fn a_publish_past_a_non_fast_forward_move_is_moved() {
+    let (_dir, root, repo) = new_store();
+    let t0 = advance(&repo, ACTOR, &[], vec![put("a", b"a\n")]);
+    let t1 = advance(&repo, OTHER, &[t0], vec![put("b", b"b\n")]);
+    let head = commit_by(&repo, ACTOR, &[t1], vec![put("a", b"ours\n")]);
+    drop(repo);
+    let racer = Racer::acting(&root, 1, move |other, _| {
+        other.cas_ref("main", Some(t1), Some(t0), OTHER).unwrap();
+        t0
+    });
+    let repo = racer.open();
+
+    let out = repo.land(landing(head)).unwrap();
+    assert_eq!(racer.landed(), [t0], "one race");
+    assert_eq!(
+        (out.status, out.attempts, out.relocated, out.rebased_onto),
+        (LandStatus::Landed, 2, false, t0)
+    );
+    assert_eq!(first_parent(&repo, out.landed), Some(t0));
+    assert_eq!(content(&repo, out.landed, "a"), Some(b"ours\n".to_vec()));
+}
+
+/// The publish walks at most 256 first parents back from the target's head: past them it gives
+/// the land back, here after a race that lands 300 changesets (without syncs, for speed), and
+/// the land re-merges and lands on its second attempt.
+#[test]
+fn a_publish_whose_walk_passes_its_bound_is_moved() {
+    let (_dir, root, repo) = new_store();
+    let t0 = advance(&repo, ACTOR, &[], vec![put("a", b"a\n")]);
+    let head = commit_by(&repo, ACTOR, &[t0], vec![put("a", b"ours\n")]);
+    drop(repo);
+    let store = root.clone();
+    let racer = Racer::acting(&root, 1, move |_, _| {
+        let other = LocalRepo::open_with_fs(&store, Arc::new(NoSyncFs)).unwrap();
+        let other = &other;
+        let mut at = main_head(other);
+        for n in 0..300 {
+            at = advance(other, OTHER, &[at], vec![put(&format!("race/{n}"), b"r\n")]);
+        }
+        at
+    });
+    let repo = racer.open();
+
+    let out = repo.land(landing(head)).unwrap();
+    let gained = racer.landed();
+    assert_eq!(gained.len(), 1, "one race");
+    assert_eq!(
+        (out.status, out.attempts, out.relocated, out.rebased_onto),
+        (LandStatus::Landed, 2, false, gained[0])
+    );
+}
+
+/// A file both the land and the target's gain edited, at separate lines, is merged by the lock
+/// holder (diff3), and the land lands relocated in its one attempt, the file among its merged
+/// paths.
+#[test]
+fn an_overlapping_file_is_merged_in_the_lock() {
+    let (_dir, root, repo) = new_store();
+    let t0 = advance(&repo, ACTOR, &[], vec![put(REGISTRY, &registry(6, &[]))]);
+    let ours = registry(6, &[(4, "ours")]);
+    let head = commit_by(&repo, ACTOR, &[t0], vec![put(REGISTRY, &ours)]);
+    drop(repo);
+    let racer = Racer::new(&root, 1, |_| {
+        vec![put(REGISTRY, &registry(6, &[(1, "theirs")]))]
+    });
+    let repo = racer.open();
+
+    let out = repo.land(landing(head)).unwrap();
+    let gained = racer.landed();
+    assert_eq!(gained.len(), 1, "one race");
+    assert_eq!(
+        (out.status, out.attempts, out.relocated, out.rebased_onto),
+        (LandStatus::Landed, 1, true, gained[0])
+    );
+    assert_eq!(out.auto_merged, [path(REGISTRY)]);
+    let both = registry(6, &[(1, "theirs"), (4, "ours")]);
+    assert_eq!(content(&repo, out.landed, REGISTRY), Some(both));
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
+}
+
+/// A file both sides edited whose sides are past the in-lock merge's bound, 1 MiB, goes back to
+/// the lander: the land re-merges it (diff3 takes up to 8 MiB) and lands on its second attempt.
+#[test]
+fn a_file_past_the_merge_bound_goes_back_to_the_lander() {
+    let (_dir, root, repo) = new_store();
+    let t0 = advance(
+        &repo,
+        ACTOR,
+        &[],
+        vec![put(REGISTRY, &registry(LARGE, &[]))],
+    );
+    let ours = registry(LARGE, &[(4, "ours")]);
+    let head = commit_by(&repo, ACTOR, &[t0], vec![put(REGISTRY, &ours)]);
+    drop(repo);
+    let racer = Racer::new(&root, 1, |_| {
+        vec![put(REGISTRY, &registry(LARGE, &[(1, "theirs")]))]
+    });
+    let repo = racer.open();
+
+    let out = repo.land(landing(head)).unwrap();
+    let gained = racer.landed();
+    assert_eq!(
+        (out.status, out.attempts, out.relocated, out.rebased_onto),
+        (LandStatus::Landed, 2, false, gained[0])
+    );
+    assert_eq!(out.auto_merged, [path(REGISTRY)]);
+}
+
+/// A land with `expect_target` never relocates, so that what lands is what was checked (M5): a
+/// target moved with disjoint paths while it wrote `L` is a `CasMismatch`, and nothing is
+/// recorded past the race.
+#[test]
+fn a_land_with_an_expected_target_never_relocates() {
+    let (_dir, root, repo) = new_store();
+    let t0 = advance(&repo, ACTOR, &[], vec![put("a", b"a\n")]);
+    let head = commit_by(&repo, ACTOR, &[t0], vec![put("b", b"b\n")]);
+    drop(repo);
+    let racer = Racer::new(&root, 1, |n| vec![put(&format!("race/{n}"), b"theirs\n")]);
+    let repo = racer.open();
+    let frames = frame_count(&root);
+
+    let mut land = landing(head);
+    land.expect_target = Some(t0);
+    let refused = repo.land(land).unwrap_err();
+    let gained = racer.landed();
+    assert_eq!(gained.len(), 1, "one race");
+    let RepoError::CasMismatch {
+        actual, expected, ..
+    } = refused
+    else {
+        panic!("a CAS mismatch, not {refused:?}");
+    };
+    assert_eq!((actual, expected), (gained[0], t0));
+    assert_eq!(
+        (frame_count(&root), main_head(&repo)),
+        (frames + 1, gained[0])
+    );
 }
 
 /// The backoff before a land's attempt (operations spec §3 step 7): none before the fourth; from
@@ -1413,15 +1673,21 @@ mod resolutions {
     }
 
     /// Resolutions apply in every attempt: a land whose first publish loses its race to a change
-    /// elsewhere applies them again to its re-merge onto the target's new head, and lands there.
+    /// of another file it edits (past the in-lock merge's bound, so the publish gives it back)
+    /// applies them again to its re-merge onto the target's new head, and lands there.
     #[test]
     fn resolutions_apply_again_after_a_lost_race() {
         let (_dir, root, repo) = new_store();
-        let t0 = advance(&repo, ACTOR, &[], vec![put("f", b"1\n2\n3\n")]);
-        let head = commit_by(&repo, ACTOR, &[t0], vec![put("f", b"1\nours\n3\n")]);
+        let files = vec![put("f", b"1\n2\n3\n"), put(REGISTRY, &registry(LARGE, &[]))];
+        let t0 = advance(&repo, ACTOR, &[], files);
+        let ours = registry(LARGE, &[(4, "ours")]);
+        let changes = vec![put("f", b"1\nours\n3\n"), put(REGISTRY, &ours)];
+        let head = commit_by(&repo, ACTOR, &[t0], changes);
         let x = advance(&repo, OTHER, &[t0], vec![put("f", b"1\ntheirs\n3\n")]);
         drop(repo);
-        let racer = Racer::new(&root, 1, |n| vec![put(&format!("race/{n}"), b"theirs\n")]);
+        let racer = Racer::new(&root, 1, |_| {
+            vec![put(REGISTRY, &registry(LARGE, &[(1, "theirs")]))]
+        });
         let repo = racer.open();
 
         let land = resolving(head, x, vec![("f", new_content(b"1\nboth\n3\n"))]);
@@ -1433,10 +1699,8 @@ mod resolutions {
             content(&repo, out.landed, "f"),
             Some(b"1\nboth\n3\n".to_vec())
         );
-        assert_eq!(
-            content(&repo, out.landed, "race/0"),
-            Some(b"theirs\n".to_vec())
-        );
+        let both = registry(LARGE, &[(1, "theirs"), (4, "ours")]);
+        assert_eq!(content(&repo, out.landed, REGISTRY), Some(both));
         assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
     }
 }
@@ -1694,6 +1958,181 @@ fn a_land_crashing_at_any_call_lands_once() {
     let past_the_commit_point = AtomicBool::new(false);
     let calls = sweep(|k| {
         let (finished, landed) = land_crashing_at(&template, &swept, k);
+        if landed && !finished {
+            past_the_commit_point.store(true, Ordering::Relaxed);
+        }
+        finished
+    });
+    assert!(calls > 20, "the child finished after {calls} calls");
+    assert!(
+        past_the_commit_point.load(Ordering::Relaxed),
+        "no crash came after the commit point"
+    );
+}
+
+/// What the relocated crash sweep lands: [`Swept`]'s land, raced once by a change of `race/0`
+/// while it writes `L`'s objects, so that the lock holder relocates it; `raced` is the racer's
+/// changeset on `t0`, `want` the relocated `L'` on it.
+#[cfg(feature = "test-hooks")]
+#[derive(Debug, Clone, Copy)]
+struct Raced {
+    swept: Swept,
+    raced: ChangesetId,
+}
+
+/// The racer of the relocated crash sweep, on the store at `root`: one race, a change of a path
+/// the swept land does not touch.
+#[cfg(feature = "test-hooks")]
+fn sweep_racer(root: &Utf8Path) -> Arc<Racer> {
+    Racer::new(root, 1, |_| vec![put("race/0", b"theirs\n")])
+}
+
+/// A child's part of the relocated crash sweep: [`land_as_child`] with the store opened on the
+/// test hooks the environment sets inside the [`sweep_racer`], whose own handle runs on the real
+/// filesystem, so that its calls are not counted.
+#[cfg(feature = "test-hooks")]
+fn land_raced_as_child(root: &Utf8Path, head: ChangesetId) {
+    let hooked = HookedFs::from_env().expect("the sweep sets a hook");
+    let fs: Arc<dyn FsOps> = Arc::new(Watched(sweep_racer(root), hooked.into_fs()));
+    let landed =
+        LocalRepo::open_with_fs(root, fs).and_then(|repo| repo.land(keyed(head, SWEPT_KEY)));
+    match landed {
+        Ok(out) => println!(
+            "{REPORT}landed {} warnings {}",
+            out.landed,
+            out.warnings.len()
+        ),
+        Err(e) => println!("{REPORT}failed {e:?}"),
+    }
+}
+
+/// The relocated sweep's template ([`swept_template`]'s store), with what the raced land makes,
+/// landed on a copy: relocated, in one attempt.
+#[cfg(feature = "test-hooks")]
+fn raced_template() -> (TempDir, Utf8PathBuf, Raced) {
+    let (dir, template, swept) = swept_template();
+    let (_copy, root) = copy_of(&template);
+    let racer = sweep_racer(&root);
+    let out = racer.open().land(keyed(swept.head, SWEPT_KEY)).unwrap();
+    assert_eq!((out.attempts, out.relocated), (1, true), "{out:?}");
+    let swept = Swept {
+        want: out.landed,
+        ..swept
+    };
+    let landed = racer.landed();
+    (
+        dir,
+        template,
+        Raced {
+            swept,
+            raced: landed[0],
+        },
+    )
+}
+
+/// Whether the store holds the raced land, checked: a changeset with [`SWEPT_KEY`] on `main`'s
+/// first-parent chain exists exactly when `main` is `L'`, on the racer's changeset; otherwise
+/// `main` is `t0`, or the racer's changeset when the race ran. `what` names the run.
+#[cfg(feature = "test-hooks")]
+fn raced_landed(repo: &LocalRepo, raced: &Raced, what: &str) -> bool {
+    let main = main_head(repo);
+    let mut keyed = Vec::new();
+    let mut at = Some(main);
+    while let Some(id) = at {
+        if meta_value(repo, id, "land_key").as_deref() == Some(SWEPT_KEY.as_bytes()) {
+            keyed.push(id);
+        }
+        at = first_parent(repo, id);
+    }
+    if main == raced.swept.want {
+        assert_eq!(keyed, [main], "{what}");
+        assert_eq!(first_parent(repo, main), Some(raced.raced), "{what}");
+        return true;
+    }
+    assert_eq!(keyed, Vec::new(), "{what}");
+    assert!(
+        main == raced.swept.t0 || main == raced.raced,
+        "{what}: main is {main}"
+    );
+    false
+}
+
+/// One run of the relocated crash sweep: a child lands the raced head on a copy of `template`
+/// until its k-th filesystem call aborts it. `main` then names `L'` (the index holding it) or
+/// what it named before the land, the store verifies clean, and the same land again, unraced,
+/// replays `L'`, or lands: onto the racer's changeset as `L'` itself, the change a lander would
+/// make there. Returns whether the child finished, and whether the crash left `L'` on `main`.
+#[cfg(feature = "test-hooks")]
+fn relocated_crashing_at(template: &Utf8Path, raced: &Raced, k: u64) -> (bool, bool) {
+    let (_dir, root) = copy_of(template);
+    let crash_at = k.to_string();
+    let child = land_child(
+        "a_relocated_land_crashing_at_any_call_is_whole_or_absent",
+        &root,
+        raced.swept.head,
+        &[(CRASH_AT_ENV, crash_at.as_str())],
+    );
+    let finished = child.status.success();
+    assert!(
+        finished || child.status.signal() == Some(SIGABRT),
+        "k={k}: {:?}\n{}",
+        child.status,
+        String::from_utf8_lossy(&child.stderr)
+    );
+    let what = format!("k={k}");
+    let repo = LocalRepo::open_with_fs(&root, checked(RealFs::new())).unwrap();
+    let before = main_head(&repo);
+    let landed = raced_landed(&repo, raced, &what);
+    assert!(
+        landed || !finished,
+        "{what}: the land returned but is not on main"
+    );
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, [], "{what}");
+
+    // The same land again, unraced.
+    let again = repo.land(keyed(raced.swept.head, SWEPT_KEY)).unwrap();
+    let want = raced.swept.want;
+    if landed {
+        assert_eq!(
+            (again.status, again.landed),
+            (LandStatus::Replayed, want),
+            "{what}"
+        );
+    } else if before == raced.raced {
+        assert_eq!(
+            (again.status, again.landed),
+            (LandStatus::Landed, want),
+            "{what}"
+        );
+    } else {
+        assert_eq!(
+            (again.status, again.rebased_onto),
+            (LandStatus::Landed, before),
+            "{what}"
+        );
+    }
+    assert_eq!(main_head(&repo), again.landed, "{what}");
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, [], "{what}");
+    (finished, landed)
+}
+
+/// A land the lock holder relocates onto a target moved by a race, crashing at any filesystem
+/// call, is whole or absent: for every k, `main` names `L'`, on the racer's changeset, with the
+/// land's key, or names what it did before the land and no changeset with the key is on it; the
+/// store verifies clean; and the same land again ends with it on `main` once. Some crash comes
+/// after the commit point. The child's racer lands through a handle of its own, on the real
+/// filesystem, whose calls are not counted.
+#[test]
+#[cfg(feature = "test-hooks")]
+fn a_relocated_land_crashing_at_any_call_is_whole_or_absent() {
+    if let Some((root, head)) = child() {
+        land_raced_as_child(&root, head);
+        return;
+    }
+    let (_template_dir, template, raced) = raced_template();
+    let past_the_commit_point = AtomicBool::new(false);
+    let calls = sweep(|k| {
+        let (finished, landed) = relocated_crashing_at(&template, &raced, k);
         if landed && !finished {
             past_the_commit_point.store(true, Ordering::Relaxed);
         }

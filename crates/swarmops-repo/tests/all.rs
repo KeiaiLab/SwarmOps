@@ -12,8 +12,6 @@ mod history;
 mod land;
 mod land_detached;
 mod land_expect;
-#[cfg(feature = "test-hooks")]
-mod landing_models;
 mod merge;
 mod oplog;
 mod path_history;

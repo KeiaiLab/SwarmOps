@@ -44,8 +44,6 @@ pub mod error;
 pub mod gc;
 pub mod history;
 pub mod land;
-#[cfg(feature = "test-hooks")]
-pub mod land_models;
 pub mod log;
 pub mod merge;
 pub mod oplog;

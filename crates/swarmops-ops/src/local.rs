@@ -4139,7 +4139,9 @@ mod tests {
     /// A land that loses its race at every attempt fails `E_CAS_RETRY_EXHAUSTED` (exit 4,
     /// retryable), naming how many attempts it made and what the target names after the last,
     /// with a hint to run it again; it recorded nothing, and run again it lands. Here the land
-    /// makes one attempt, and another lander moves main while it flushes its changeset's objects.
+    /// makes one attempt, and another lander moves main while it flushes its changeset's objects,
+    /// editing the file the land edits, a line apart, past the size the publish merges in the
+    /// lock (1 MiB a side), so the publish gives the land back.
     #[test]
     fn retry_exhausted_is_retryable_with_attempts_and_actual() {
         use std::sync::Mutex;
@@ -4152,6 +4154,8 @@ mod tests {
         /// head through a handle of its own on the real filesystem.
         struct Race {
             root: Utf8PathBuf,
+            /// What it puts at `registry`.
+            content: String,
             /// The changeset it moved main to, once it has.
             raced: Mutex<Option<String>>,
         }
@@ -4162,8 +4166,8 @@ mod tests {
                 let mut raced = self.raced.lock().unwrap();
                 if call.method == "fsync_dir" && at.starts_with("objects") && raced.is_none() {
                     let other = Identity::parse("agent/worker-9").unwrap();
-                    let mut change = ChangeInput::new("race".to_owned(), ChangeOp::Put);
-                    change.content = Some(ContentInput::Inline("theirs\n".to_owned()));
+                    let mut change = ChangeInput::new("registry".to_owned(), ChangeOp::Put);
+                    change.content = Some(ContentInput::Inline(self.content.clone()));
                     let mut req = CommitReq::new(vec![change], "a race".to_owned());
                     req.advance = Some("main".to_owned());
                     let won = LocalOps::open(&self.root).unwrap().commit(&other, req);
@@ -4177,18 +4181,34 @@ mod tests {
         let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
         let (ops, _) = LocalOps::init(&root, "acme").unwrap();
         let who = Identity::parse("agent/worker-17").unwrap();
-        let commit = |parent: Option<&str>, path: &str, advance: Option<&str>| {
-            let mut change = ChangeInput::new(path.to_owned(), ChangeOp::Put);
-            change.content = Some(ContentInput::Inline("ours\n".to_owned()));
-            let mut req = CommitReq::new(vec![change], path.to_owned());
+        // 32,000 lines of 36 bytes, line `at` replaced by `line`.
+        let registry = |at: usize, line: &str| -> String {
+            let lines = (0..32_000_usize).map(|n| {
+                if n == at {
+                    format!("{line}\n")
+                } else {
+                    format!("entry {n:06} of the registry, as is\n")
+                }
+            });
+            lines.collect()
+        };
+        let commit = |parent: Option<&str>, content: String, advance: Option<&str>| {
+            let mut change = ChangeInput::new("registry".to_owned(), ChangeOp::Put);
+            change.content = Some(ContentInput::Inline(content));
+            let mut req = CommitReq::new(vec![change], "registry".to_owned());
             req.parent = parent.map(Rev::from);
             req.advance = advance.map(str::to_owned);
             ops.commit(&who, req).unwrap().changeset
         };
-        let t0 = commit(None, "base", Some("main"));
-        let head = commit(Some(&t0), "change", None);
+        let t0 = commit(
+            None,
+            registry(0, "entry 000000 of the registry, as is"),
+            Some("main"),
+        );
+        let head = commit(Some(&t0), registry(4, "ours"), None);
         let race = Arc::new(Race {
             root: root.clone(),
+            content: registry(1, "theirs"),
             raced: Mutex::new(None),
         });
         let racing = ops_on(&root, Watched(Arc::clone(&race), RealFs::new()));

@@ -40,12 +40,18 @@
 //!    request's `lander_metadata`, and `squashed_from`, the chain's ids, oldest first, in hex, a
 //!    space between each two. Its blobs, trees and object are written and flushed before anything
 //!    names them (I1).
-//! 6. It publishes `L`: its insert and the target's move from `theirs` to it, by
-//!    compare-and-swap, in one write transaction, the frame a commit with `advance` writes. A
-//!    target that moved since drops the write, and the next attempt starts from what it names,
-//!    after a wait from the fourth attempt on ([`backoff`]). A failure after the commit point is a
-//!    warning; a journal append that fails (`NotCommitted`), a lock wait that times out (`Busy`)
-//!    and any other error end the land as they are.
+//! 6. It publishes `L` in one write transaction, one frame: `L`'s insert and the target's move
+//!    from `theirs` to it, by compare-and-swap. A target that moved since is read again under the
+//!    lock, and the lock holder makes the land anew on its head, `L'`, by the landing model M4
+//!    measured (metalog merge, umbrella decision 10): when the head is at most 256 first parents
+//!    above `theirs` and the paths it gained since do not overlap `L`'s, or the overlapping ones
+//!    are regular files of at most 1 MiB that merge cleanly (diff3), `L'` is `L`'s delta (those
+//!    files merged) on that head, written and flushed under the lock before the frame that names
+//!    it, and it lands in the same attempt ([`LandOutcome::relocated`]). Otherwise the write is
+//!    dropped, and the next attempt starts from what the target names, after a wait from the
+//!    fourth attempt on ([`backoff`]). A failure after the commit point is a warning; a journal
+//!    append that fails (`NotCommitted`), a lock wait that times out (`Busy`) and any other error
+//!    end the land as they are.
 //!
 //! A land that finds its change on the target, landed by a land with its key or there in any
 //! other way, decides so under the store's lock, as a keyed commit's replay is decided: it takes a
@@ -59,7 +65,8 @@
 //!
 //! A land with [`LandRequest::expect_target`] (M5) makes one attempt. After step 3, a target that
 //! does not name the expected changeset ends it with [`RepoError::CasMismatch`], before the
-//! merge; so does a publish that loses its race, which never merges again. Its replay check
+//! merge; so does a publish that loses its race, which never merges again and is never made
+//! anew on the moved head, so that what lands is the tree its lander checked. Its replay check
 //! runs first, so a land whose key landed its change replays it whatever the target names.
 //!
 //! Steps 1 to 4 are the land's preparation, which a rebase shares ([`crate::rebase`]): step 1
@@ -83,7 +90,7 @@ pub use landing::{
     LandOutcome, LandRequest, LandStatus, MergeConflicts, NothingToLandReason, backoff,
 };
 pub(crate) use landing::{Prep, Prepared};
-pub use publish::{Publication, Published};
+pub use publish::{Publication, Published, Relocate};
 pub use resolve::{Resolution, Resolutions, Side};
 
 // The module documentation's links only.
