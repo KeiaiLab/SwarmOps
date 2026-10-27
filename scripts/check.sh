@@ -43,3 +43,5 @@ python3 -I scripts/third-party-licenses.py --check
 # attribution; the selftest first shows that each rule still finds what it is for.
 python3 -I scripts/check-docs.py selftest
 python3 -I scripts/check-docs.py
+# The benchmark gate (`just bench`) still finds each kind of failure it is for.
+python3 -I scripts/bench-gate.py selftest

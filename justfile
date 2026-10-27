@@ -32,7 +32,8 @@ default: check
 # the workspace run in target/nextest/ci/.
 # Then scripts/test-install.py runs the one-line installer against a fake release on 127.0.0.1,
 # offline, and checks that web/public/install.sh is the same file.
-# The definition of done for every session: fmt, clippy, tests, hook proof, docs, cargo-deny, license notices, installer, Markdown.
+# Last, scripts/bench-gate.py's selftest shows that the benchmark gate still finds what it is for.
+# The definition of done for every session: fmt, clippy, tests, hook proof, docs, cargo-deny, license notices, installer, Markdown, bench gate.
 check:
     cargo fmt --all --check
     cargo fmt --manifest-path fuzz/Cargo.toml --check
@@ -51,6 +52,7 @@ check:
     python3 -I scripts/test-install.py
     python3 -I scripts/check-docs.py selftest
     python3 -I scripts/check-docs.py
+    python3 -I scripts/bench-gate.py selftest
 
 # The test hooks are on (`--all-features`), as in `just check`. The ignored switches that rewrite
 # or rebuild fixtures on purpose (`regenerate_golden`, `regenerate_git_fixtures`,
@@ -79,8 +81,20 @@ git-fixtures:
     SWARMOPS_REGEN_GIT_FIXTURES=1 cargo nextest run --locked -p swarmops-testkit --run-ignored ignored-only -E 'test(regenerate_git_fixtures)' --no-capture
 
 # The criterion benches, with cargo's full output (`perf` prints only their summary lines).
-bench:
+bench-run:
     cargo bench --locked --workspace
+
+# scripts/bench-gate.py fails on a median over 20 % above its baseline, a listed bench without an
+# estimate, an estimate neither listed nor skipped for a reason, or no estimate at all. Criterion
+# writes under CARGO_TARGET_DIR, where the CI runners build; the old results go first, so that the
+# gate never reads a bench this run did not measure. Run it in a quiet window, under the heavy lock.
+# The benchmark gate: a fresh `bench-run`, its medians against bench/thresholds.toml.
+bench: _bench-fresh bench-run
+    python3 -I scripts/bench-gate.py check "${CARGO_TARGET_DIR:-target}/criterion" bench/thresholds.toml
+
+# Removes the criterion results of earlier runs (`bench`'s first step).
+_bench-fresh:
+    rm -rf -- "${CARGO_TARGET_DIR:-target}/criterion"
 
 # Optimized, for a quiet window: the 32-process store-level contention test, the 32-process
 # CLI contention test at the spec's 32 x 1,000 commits (SWARMOPS_TEST_CLI_CONTENTION_COMMITS
