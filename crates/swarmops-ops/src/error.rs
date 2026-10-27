@@ -1179,6 +1179,9 @@ fn rejected(reason: RejectReason, said: Said, remote: &str) -> OpError {
             "details.refs and details.remote_messages give the remote's reason"
         }
         RejectReason::Unclassified => "details.stderr_tail gives what git said",
+        RejectReason::BadObjects => {
+            "the remote sent objects git refuses; nothing was moved; fix the remote's history"
+        }
         _ => {
             let message = format!("the remote {remote:?} refused ({})", reason.as_str());
             return unmapped(message).with_details(found);
@@ -2713,6 +2716,7 @@ mod tests {
             RejectReason::Auth,
             RejectReason::NotFound,
             RejectReason::Unclassified,
+            RejectReason::BadObjects,
         ] {
             let refused = TransportError::Rejected {
                 reason,

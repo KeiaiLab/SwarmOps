@@ -14,7 +14,10 @@
 //!     remotes.toml ──▶ the remote (E_REMOTE_NOT_FOUND)
 //!     git/lock     ──▶ held to the end (E_BUSY at once)
 //!     mirror.git   ──▶ made or set aside and made again; stale git lock files removed
-//!     git fetch    ──▶ refs/remotes/<remote>/*, refs/remote-tags/<remote>/*
+//!     git fetch    ──▶ refs/incoming/<remote>/{heads,tags}/*, fsck on receive
+//!     closure check ─▶ every object the incoming refs reach is there (E_REMOTE_REJECTED
+//!                      bad_objects otherwise, nothing moved)
+//!     promote      ──▶ refs/remotes/<remote>/*, refs/remote-tags/<remote>/* by compare-and-swap
 //!     import       ──▶ the followed branch's commits become changesets; no ref moves
 //!     git gc --auto
 //!   clone <url> --into <dir>
@@ -331,11 +334,20 @@ impl Recording<'_> {
         cred.token_env.clone_from(&remote.token_env);
         let git = GitCli::find().map_err(failed)?;
 
-        // 2. git fetch, between two readings of the remote's refs in the mirror.
+        // 2. git fetch into the incoming refs, their objects checked whole, then the tracking
+        //    refs moved to them; between two readings of the remote's refs in the mirror. A
+        //    failure returns here: nothing imported, no tracking ref moved.
         let branches = mirror.branches(name).map_err(error::mirror_error)?;
         let tags = mirror.tags(name).map_err(error::mirror_error)?;
         git.fetch(mirror.git_dir(), &url, &cred, &refspecs(name))
             .map_err(failed)?;
+        let incoming = mirror.incoming(name).map_err(error::mirror_error)?;
+        let tips: BTreeSet<GitOid> = incoming.into_values().collect();
+        let tips: Vec<GitOid> = tips.into_iter().collect();
+        git.closed(mirror.git_dir(), &tips).map_err(failed)?;
+        mirror
+            .promote(name, &branches, &tags)
+            .map_err(error::mirror_error)?;
         let branches_now = mirror.branches(name).map_err(error::mirror_error)?;
         let tags_now = mirror.tags(name).map_err(error::mirror_error)?;
 
@@ -735,16 +747,17 @@ fn io(e: IoFailure) -> OpError {
 }
 
 /// The two refspecs of a fetch of `remote`: its branches and its tags, each into its own
-/// place in the mirror.
+/// place under the mirror's incoming refs, which the closure check reads before any tracking
+/// ref moves.
 fn refspecs(remote: &str) -> [RefSpec; 2] {
     [
         RefSpec::new(
             "refs/heads/*".to_owned(),
-            format!("refs/remotes/{remote}/*"),
+            format!("refs/incoming/{remote}/heads/*"),
         ),
         RefSpec::new(
             "refs/tags/*".to_owned(),
-            format!("refs/remote-tags/{remote}/*"),
+            format!("refs/incoming/{remote}/tags/*"),
         ),
     ]
 }

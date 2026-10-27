@@ -15,6 +15,16 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ## [Unreleased]
 
+### Changed
+
+- A fetch checks what it receives: git's fsck runs on every received object
+  (`fetch.fsckObjects`, `transfer.fsckObjects`), the fetch writes the mirror's
+  `refs/incoming/<remote>/` only, and the tracking refs move to them by compare-and-swap after a
+  closure check finds every object they reach. A refused or missing object fails the fetch with
+  `E_REMOTE_REJECTED` `details.reason: "bad_objects"`, with nothing imported and no tracking ref
+  moved, and every later fetch fails the same way until the remote's history changes; there is no
+  override (the v0.6.0 design's decision 9).
+
 ## [0.5.0] - 2026-10-27
 
 Prove and measure. The 0.5.0 release holds the pilot on a real repository, the goal

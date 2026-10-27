@@ -441,8 +441,8 @@ const FETCH_FLAGS: [&str; 8] = [
 
 /// The product's refspecs for [`ORIGIN`], each forced.
 const REFSPECS: [&str; 2] = [
-    "+refs/heads/*:refs/remotes/origin/*",
-    "+refs/tags/*:refs/remote-tags/origin/*",
+    "+refs/heads/*:refs/incoming/origin/heads/*",
+    "+refs/tags/*:refs/incoming/origin/tags/*",
 ];
 
 /// The medians, in ms, of one fetch's phases.

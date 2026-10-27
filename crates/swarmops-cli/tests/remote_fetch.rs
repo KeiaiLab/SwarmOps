@@ -690,3 +690,37 @@ fn fetch_and_clone_import_the_mirror_despite_the_store_mirror_refusal() {
     let fetched = remote.run(&["--repo", &into, "fetch", ORIGIN], &[]).ok();
     assert_eq!(fetched["imported"], 1, "{fetched}");
 }
+
+/// A remote whose branch reaches an object git's fsck refuses (a tree with one entry twice)
+/// fails the fetch with `E_REMOTE_REJECTED` `bad_objects`: no tracking ref moves and nothing is
+/// imported, and the same fetch fails the same way again. Once the remote's branch names good
+/// commits only, the fetch succeeds and imports.
+#[test]
+fn a_fetch_of_a_bad_object_moves_no_ref_and_imports_nothing() {
+    let remote = Remote::new();
+    let store = remote.store();
+    add(&store, ORIGIN, &remote.url(), &[]).ok();
+    fetch(&store, ORIGIN);
+    let good = remote.head("main");
+    let tracked = || mirror_refs(&remote, store.path(), "refs/remotes/origin/");
+    let before = (tracked(), refs(&store), changesets(&store));
+    remote
+        .server
+        .commit_fsck_error(REPO, "main", "a tree with one entry twice");
+
+    // 1. Refused, twice the same way, with nothing moved.
+    for _ in 0..2 {
+        let refused = store.read(&["fetch", ORIGIN]);
+        let error = refused.err("E_REMOTE_REJECTED");
+        assert_eq!(error["details"]["reason"], "bad_objects", "{refused}");
+        assert_eq!(error["retryable"], false, "{refused}");
+        assert_eq!((tracked(), refs(&store), changesets(&store)), before);
+    }
+
+    // 2. The remote's branch back on good commits: fetched and imported.
+    remote.server.move_to(REPO, "main", &good);
+    remote.commit("main", "third", &[("c.txt", "c\n")]);
+    let fetched = fetch(&store, ORIGIN);
+    assert_eq!(fetched["imported"], 1, "{fetched}");
+    assert_eq!(fetched["head"]["sha"], remote.head("main"));
+}

@@ -3049,7 +3049,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_REMOTE_REJECTED",
-          "description": "The remote or git refused: `details.reason` is `auth`, `not_found`, `declined` (a hook or\na rule of the remote's) or `unclassified` (a failure git's messages do not explain, never\nretried), with `remote` and what git said (`refs`, `remote_messages`, `git_exit`,\n`stderr_tail`, the token redacted).",
+          "description": "The remote or git refused: `details.reason` is `auth`, `not_found`, `declined` (a hook or\na rule of the remote's), `bad_objects` (a fetch received an object git's fsck refuses, or\none its refs reach is missing; no tracking ref moved) or `unclassified` (a failure git's\nmessages do not explain, never retried), with `remote` and what git said (`refs`,\n`remote_messages`, `git_exit`, `stderr_tail`, the token redacted).",
           "type": "string"
         },
         {

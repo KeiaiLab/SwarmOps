@@ -209,9 +209,10 @@ error_codes! {
     /// the hint names the fetch or the sync to run.
     RemoteDiverged => "E_REMOTE_DIVERGED", EXIT_CONFLICT, false;
     /// The remote or git refused: `details.reason` is `auth`, `not_found`, `declined` (a hook or
-    /// a rule of the remote's) or `unclassified` (a failure git's messages do not explain, never
-    /// retried), with `remote` and what git said (`refs`, `remote_messages`, `git_exit`,
-    /// `stderr_tail`, the token redacted).
+    /// a rule of the remote's), `bad_objects` (a fetch received an object git's fsck refuses, or
+    /// one its refs reach is missing; no tracking ref moved) or `unclassified` (a failure git's
+    /// messages do not explain, never retried), with `remote` and what git said (`refs`,
+    /// `remote_messages`, `git_exit`, `stderr_tail`, the token redacted).
     RemoteRejected => "E_REMOTE_REJECTED", EXIT_AUTH, false;
     /// The network or the remote's host did not answer: `details.phase` (`fetch`, `push`,
     /// `ls_remote`) and `details.cause` (`dns`, `connect`, `timeout`, `tls`, `disconnected`,
