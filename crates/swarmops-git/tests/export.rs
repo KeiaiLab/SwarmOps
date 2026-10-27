@@ -1292,6 +1292,7 @@ mod crafted_memos {
     };
     use swarmops_store::DerivedSlot;
 
+    use super::mac_memos::checked;
     use super::*;
 
     /// Places `value` as the memo `name` (version 1, no key) of `subject` in `store`'s derived
@@ -1394,7 +1395,7 @@ mod crafted_memos {
     /// own `hello.txt` of its first commit, under the content a native changeset gives it), or as
     /// a loose file of an empty repository someone placed there.
     #[test]
-    fn a_crafted_blob_memo_puts_no_other_blob_in_the_branch() {
+    pub(super) fn a_crafted_blob_memo_puts_no_other_blob_in_the_branch() {
         let fx = Imported::new("linear");
         let repo = &fx.store.repo;
         let new: &[u8] = b"hello, again\n";
@@ -1402,7 +1403,7 @@ mod crafted_memos {
         let packed = git_hash(RawKind::Blob, b"hello\n");
         assert_eq!(gix(fx.repo_dir()).stored(packed), Ok(Stored::Packed));
         let file = plant(&fx.store, "git_blob_oid", blob(new).0, &packed.0);
-        let result = export(repo, &mut gix(fx.repo_dir()), &main_branch());
+        let result = export(repo, &mut gix(fx.repo_dir()), &checked());
         let file_and_content = ("hello.txt", new);
         refused(
             &result,
@@ -1423,7 +1424,7 @@ mod crafted_memos {
         sink.sync(&[loose]).unwrap();
         assert_eq!(sink.stored(loose), Ok(Stored::Loose));
         let file = plant(&store, "git_blob_oid", blob(good).0, &loose.0);
-        let result = export(&store.repo, &mut gix(&destination.dir), &main_branch());
+        let result = export(&store.repo, &mut gix(&destination.dir), &checked());
         let file_and_content = ("app.sh", good);
         refused(
             &result,
@@ -1438,7 +1439,7 @@ mod crafted_memos {
     /// A `git_tree_oid` memo for a native changeset's root naming another tree the repository
     /// holds in a pack: the fixture's tip's root, which a changed `hello.txt` is not.
     #[test]
-    fn a_crafted_tree_memo_puts_no_other_tree_in_the_branch() {
+    pub(super) fn a_crafted_tree_memo_puts_no_other_tree_in_the_branch() {
         let fx = Imported::new("linear");
         let repo = &fx.store.repo;
         let new: &[u8] = b"hello, again\n";
@@ -1447,7 +1448,7 @@ mod crafted_memos {
         let packed = commit_at(fx.repo_dir(), fx.tip()).tree;
         assert_eq!(gix(fx.repo_dir()).stored(packed), Ok(Stored::Packed));
         let file = plant(&fx.store, "git_tree_oid", root.0, &packed.0);
-        let result = export(repo, &mut gix(fx.repo_dir()), &main_branch());
+        let result = export(repo, &mut gix(fx.repo_dir()), &checked());
         let file_and_content = ("hello.txt", new);
         refused(
             &result,
@@ -1464,7 +1465,7 @@ mod crafted_memos {
     /// placed on the branch's commit (whose `app.sh` is not the store's). The branch never names
     /// it.
     #[test]
-    fn a_crafted_commit_memo_never_moves_the_branch_to_another_commit() {
+    pub(super) fn a_crafted_commit_memo_never_moves_the_branch_to_another_commit() {
         let fx = Imported::new("linear");
         let repo = &fx.store.repo;
         let new: &[u8] = b"hello, again\n";
@@ -1472,7 +1473,7 @@ mod crafted_memos {
         let packed = oid(&fx.manifest().commits[0].oid);
         assert_eq!(gix(fx.repo_dir()).stored(packed), Ok(Stored::Packed));
         let file = plant(&fx.store, "git_oid", native.0, &commit_memo(packed));
-        let result = export(repo, &mut gix(fx.repo_dir()), &main_branch());
+        let result = export(repo, &mut gix(fx.repo_dir()), &checked());
         assert_ne!(gix(fx.repo_dir()).branch("main"), Ok(Some(packed)));
         let file_and_content = ("hello.txt", new);
         refused(
@@ -1504,7 +1505,7 @@ mod crafted_memos {
         sink.sync(&[evil, tree, loose]).unwrap();
         assert_eq!(sink.stored(loose), Ok(Stored::Loose));
         let file = plant(&store, "git_oid", second.0, &commit_memo(loose));
-        let result = export(&store.repo, &mut gix(&destination.dir), &main_branch());
+        let result = export(&store.repo, &mut gix(&destination.dir), &checked());
         assert_ne!(gix(&destination.dir).branch("main"), Ok(Some(loose)));
         let file_and_content = ("app.sh", two);
         refused(
@@ -1715,7 +1716,7 @@ mod crafted_memos {
     /// verify names the memo; with the memo removed, the side branch's commit has the fork point's
     /// real export as its parent, and the export after it writes nothing.
     #[test]
-    fn a_crafted_ancestor_memo_splices_no_merge_parent() {
+    pub(super) fn a_crafted_ancestor_memo_splices_no_merge_parent() {
         let store = store();
         let repo = &store.repo;
         let p2 = commit_on_main(repo, vec![put("f.txt", b"p2\n")], "P2\n");
@@ -1728,7 +1729,7 @@ mod crafted_memos {
         let placed = placed_commit(&mut gix(&destination.dir));
         let file = plant(&store, "git_oid", p2.0, &commit_memo(placed));
 
-        let result = export(repo, &mut gix(&destination.dir), &main_branch());
+        let result = export(repo, &mut gix(&destination.dir), &checked());
         unspliced(&destination.dir, placed);
         refused_memo_of(&result, p2);
         let at = gix(&destination.dir).branch("main");
@@ -1762,7 +1763,7 @@ mod crafted_memos {
     /// refuses it (`E_STORE_CORRUPT`) and makes no branch; with `meta/derived/` removed, the merge
     /// exports over the fork point's real export.
     #[test]
-    fn a_crafted_ancestor_memo_splices_no_fresh_export() {
+    pub(super) fn a_crafted_ancestor_memo_splices_no_fresh_export() {
         let store = store();
         let repo = &store.repo;
         let p2 = commit_on_main(repo, vec![put("f.txt", b"p2\n")], "P2\n");
@@ -1771,7 +1772,7 @@ mod crafted_memos {
         let destination = git::empty_repository();
         let placed = placed_commit(&mut gix(&destination.dir));
         plant(&store, "git_oid", p2.0, &commit_memo(placed));
-        let result = export(repo, &mut gix(&destination.dir), &main_branch());
+        let result = export(repo, &mut gix(&destination.dir), &checked());
         unspliced(&destination.dir, placed);
         refused_memo_of(&result, p2);
         assert_eq!(gix(&destination.dir).branch("main"), Ok(None));
@@ -1786,7 +1787,7 @@ mod crafted_memos {
         let bytes = render_commit(h, &cs, &parents, tree);
         assert_eq!(git_hash(RawKind::Commit, &bytes), spliced);
         let mut sink = MemSink::with_packed([(RawKind::Commit, bytes)]);
-        let result = export(repo, &mut sink, &main_branch());
+        let result = export(repo, &mut sink, &checked());
         let at = sink.branch("main");
         assert_ne!(at, Ok(Some(spliced)), "the branch names the spliced merge");
         refused_memo_of(&result, p2);
@@ -1810,7 +1811,7 @@ mod crafted_memos {
     /// goes on from, so nothing of the store's history is written on that commit and the branch
     /// stays; with the memo removed, the entry alone is the divergence it is.
     #[test]
-    fn a_crafted_memo_makes_no_diverged_branch_a_base() {
+    pub(super) fn a_crafted_memo_makes_no_diverged_branch_a_base() {
         let store = store();
         let repo = &store.repo;
         let a = commit_on_main(repo, vec![put("f.txt", b"a\n")], "A\n");
@@ -1825,7 +1826,7 @@ mod crafted_memos {
         let before = object_files(&destination.dir);
         let file = plant(&store, "git_oid", a.0, &commit_memo(placed));
 
-        let result = export(repo, &mut gix(&destination.dir), &main_branch());
+        let result = export(repo, &mut gix(&destination.dir), &checked());
         refused_memo_of(&result, a);
         assert_eq!(gix(&destination.dir).branch("main"), Ok(Some(placed)));
         assert_eq!(object_files(&destination.dir), before, "nothing written");
@@ -1835,7 +1836,7 @@ mod crafted_memos {
         let key = placed.0.to_vec();
         repo.record_external_ids(SYSTEM_GIT, &[(key, entry)])
             .unwrap();
-        let result = export(repo, &mut gix(&destination.dir), &main_branch());
+        let result = export(repo, &mut gix(&destination.dir), &checked());
         refused_memo_of(&result, a);
         assert_eq!(gix(&destination.dir).branch("main"), Ok(Some(placed)));
 
@@ -1853,7 +1854,7 @@ mod crafted_memos {
     /// not take the branch for up to date, it refuses the memo (`E_STORE_CORRUPT`); with the memo
     /// removed it moves the branch on to the head's export.
     #[test]
-    fn a_crafted_head_memo_makes_no_branch_up_to_date() {
+    pub(super) fn a_crafted_head_memo_makes_no_branch_up_to_date() {
         let store = store();
         let repo = &store.repo;
         commit_on_main(repo, vec![put("f.txt", b"one\n")], "One\n");
@@ -1862,7 +1863,7 @@ mod crafted_memos {
         let head = commit_on_main(repo, vec![put("f.txt", b"two\n")], "Two\n");
         let file = plant(&store, "git_oid", head.0, &commit_memo(first.head_oid));
 
-        let result = export(repo, &mut gix(&destination.dir), &main_branch());
+        let result = export(repo, &mut gix(&destination.dir), &checked());
         refused_memo_of(&result, head);
         fs::remove_file(&file).unwrap();
         let report = exported(repo, &mut gix(&destination.dir), &main_branch());
@@ -1974,5 +1975,314 @@ mod crafted_memos {
         // The engine's own derivation of the head, every memo gone.
         fs::remove_dir_all(store.root.join("meta/derived")).unwrap();
         assert_eq!(export_oid(repo, head), report.head_oid);
+    }
+}
+
+/// The memos a key authenticates (`git_oid_mac`, `git_tree_oid_mac`, `git_blob_oid_mac`): an
+/// export given the key stops its walk at a changeset, a tree or a blob whose memo checks, and
+/// writes every value it derives under the key; one whose MAC does not check is refused; one
+/// under another key is not read; and the commits are the same with a key as without.
+mod mac_memos {
+    use std::cell::RefCell;
+
+    use proptest::prelude::*;
+    use swarmops_core::ObjectId;
+    use swarmops_git::{GitMemoMismatch, MemoKey, verify_export_oids, verify_export_oids_with};
+    use swarmops_store::DerivedSlot;
+
+    use super::*;
+    use crate::support::{MemSource, counted_store};
+
+    /// The test's key `n`.
+    fn key(n: u8) -> MemoKey {
+        MemoKey::from_bytes([n; 32])
+    }
+
+    /// A request to export `main` into the branch `main` under `key`.
+    fn keyed(key: &MemoKey) -> ExportRequest {
+        let mut req = main_branch();
+        req.memo_key = Some(key.clone());
+        req
+    }
+
+    /// The slot of `subject`'s memo `name` under `key`.
+    fn mac_slot<'a>(name: &'a str, subject: ObjectId, id: &'a [u8; 16]) -> DerivedSlot<'a> {
+        DerivedSlot::new(name, 1, subject, id)
+    }
+
+    /// The bytes of `subject`'s memo `name` under `key` in `repo`'s derived store.
+    fn mac_memo(repo: &LocalRepo, name: &str, subject: ObjectId, key: &MemoKey) -> Option<Vec<u8>> {
+        let id = key.id();
+        repo.derived_store()
+            .get(&mac_slot(name, subject, &id))
+            .unwrap()
+    }
+
+    /// Places `value` as `subject`'s memo `name` under `key`, in place of the one there.
+    fn plant_mac(store: &Store, name: &str, subject: ObjectId, key: &MemoKey, value: &[u8]) {
+        let id = key.id();
+        let slot = mac_slot(name, subject, &id);
+        let file = Layout::new(&store.root).derived_path(&slot);
+        let _ = fs::remove_file(&file);
+        let placed = store.repo.derived_store().put(&slot, value);
+        assert!(
+            placed.expect("place the memo"),
+            "{file}: a memo is in the way"
+        );
+    }
+
+    /// Checks that `result` refused memo `name`, naming changeset `of`.
+    #[track_caller]
+    fn refused_mac(result: &Result<ExportReport, ExportError>, name: &str, of: ChangesetId) {
+        match result {
+            Err(ExportError::Repo(RepoError::DerivedCorrupt {
+                name: refused,
+                changeset,
+                ..
+            })) => assert_eq!((refused.as_str(), *changeset), (name, of)),
+            other => panic!("an export over a wrong {name} memo: {other:?}"),
+        }
+    }
+
+    /// A git history of `n` commits in memory, each changing `f.txt` and keeping `keep.txt`:
+    /// the source and its tip.
+    fn chain(n: usize) -> (MemSource, GitOid) {
+        let mut source = MemSource::default();
+        let keep = source.blob(b"kept\n");
+        let mut tip: Option<GitOid> = None;
+        for i in 0..n {
+            let blob = source.blob(format!("{i}\n").as_bytes());
+            let tree = source.tree(&[("100644", b"f.txt", blob), ("100644", b"keep.txt", keep)]);
+            tip = Some(source.commit(tree, tip.as_slice(), &format!("{i}\n")));
+        }
+        (source, tip.expect("one commit at least"))
+    }
+
+    /// An export of one new commit over 2,000 imported ones reads a handful of the store's
+    /// objects with a key, the memos of its first export stopping the walk; without, it reads
+    /// every changeset below the head again.
+    #[test]
+    fn an_incremental_export_reads_only_new_changesets() {
+        const HISTORY: usize = 2_000;
+        let (_dir, _root, repo, reads) = counted_store();
+        let (source, tip) = chain(HISTORY);
+        let req = ImportRequest::new(tip.to_string(), "main", ACTOR);
+        import(&repo, &source, &req).expect("import");
+        let key = key(7);
+        let mut sink = MemSink::default();
+        exported(&repo, &mut sink, &keyed(&key));
+
+        // One commit more, under the key: the walk stops at its parent's memo.
+        commit_on_main(&repo, vec![put("f.txt", b"one more\n")], "One more\n");
+        reads.take();
+        let report = exported(&repo, &mut sink, &keyed(&key));
+        let with_key = reads.take();
+        assert_eq!(report.commits_written, 1, "{report:?}");
+        assert!(with_key < 10, "{with_key} object reads with a key");
+
+        // And one more without the key: every changeset below is read again.
+        commit_on_main(&repo, vec![put("f.txt", b"and another\n")], "Another\n");
+        let report = exported(&repo, &mut sink, &main_branch());
+        let without = reads.take();
+        assert_eq!(report.commits_written, 1, "{report:?}");
+        assert!(without >= 2_000, "{without} object reads without a key");
+    }
+
+    /// Two changesets exported under a key, and a third on them: `a` and `b`, then `c`, whose
+    /// `keep.txt` is `a`'s and `b`'s. The store and the three.
+    fn three_exported(key: &MemoKey) -> (Store, [ChangesetId; 3], MemSink) {
+        let store = store();
+        let repo = &store.repo;
+        let a = commit_on_main(
+            repo,
+            vec![put("f.txt", b"a\n"), put("keep.txt", b"k\n")],
+            "A\n",
+        );
+        let b = commit_on_main(repo, vec![put("f.txt", b"b\n")], "B\n");
+        let mut sink = MemSink::default();
+        exported(repo, &mut sink, &keyed(key));
+        let c = commit_on_main(repo, vec![put("f.txt", b"c\n")], "C\n");
+        (store, [a, b, c], sink)
+    }
+
+    /// A whole memo under the key, copied from another subject's slot to the one the export
+    /// reads (`a`'s export oid to its child `b`, one blob's oid to another's): its MAC binds it
+    /// to its subject, so the export refuses it (`E_STORE_CORRUPT`) and the branch stays.
+    #[test]
+    fn a_mac_memo_from_another_subject_is_refused() {
+        let key = key(1);
+        let (store, [a, b, c], mut sink) = three_exported(&key);
+        let before = sink.branch("main").unwrap();
+        let theirs = mac_memo(&store.repo, "git_oid_mac", a.0, &key).expect("a's memo");
+        plant_mac(&store, "git_oid_mac", b.0, &key, &theirs);
+        let result = export(&store.repo, &mut sink, &keyed(&key));
+        refused_mac(&result, "git_oid_mac", b);
+        assert_eq!(sink.branch("main").unwrap(), before);
+
+        // The blob `keep.txt`, which `c` keeps, under the memo of `a`'s `f.txt`.
+        let (store, [_, _, c2], mut sink) = three_exported(&key);
+        let theirs = mac_memo(&store.repo, "git_blob_oid_mac", blob(b"a\n").0, &key);
+        let theirs = theirs.expect("f.txt's memo");
+        plant_mac(&store, "git_blob_oid_mac", blob(b"k\n").0, &key, &theirs);
+        let result = export(&store.repo, &mut sink, &keyed(&key));
+        refused_mac(&result, "git_blob_oid_mac", c2);
+        assert_eq!(c, c2, "the same history, the same ids");
+    }
+
+    /// A memo under the key with one bit of its value or its MAC flipped is refused, as one
+    /// whose length is wrong is; the branch stays.
+    #[test]
+    fn a_mac_memo_with_a_flipped_bit_is_refused() {
+        let key = key(2);
+        for at in [0, 21, 53] {
+            let (store, [_, b, _], mut sink) = three_exported(&key);
+            let before = sink.branch("main").unwrap();
+            let mut memo = mac_memo(&store.repo, "git_oid_mac", b.0, &key).expect("b's memo");
+            memo[at] ^= 1;
+            plant_mac(&store, "git_oid_mac", b.0, &key, &memo);
+            let result = export(&store.repo, &mut sink, &keyed(&key));
+            refused_mac(&result, "git_oid_mac", b);
+            assert_eq!(sink.branch("main").unwrap(), before, "byte {at}");
+        }
+        let (store, [_, b, _], mut sink) = three_exported(&key);
+        let memo = mac_memo(&store.repo, "git_oid_mac", b.0, &key).expect("b's memo");
+        plant_mac(&store, "git_oid_mac", b.0, &key, &memo[..53]);
+        let result = export(&store.repo, &mut sink, &keyed(&key));
+        refused_mac(&result, "git_oid_mac", b);
+    }
+
+    /// The memos of another key are not read: an export under a new key derives every value
+    /// again, to the same commit as one without a key, and writes its own memos beside the old.
+    #[test]
+    fn a_memo_under_another_key_is_ignored_and_rewritten() {
+        let (old, new) = (key(3), key(4));
+        let (store, [a, b, c], mut sink) = three_exported(&old);
+        let report = exported(&store.repo, &mut sink, &keyed(&new));
+        let mut plain = MemSink::default();
+        let without = exported(&store.repo, &mut plain, &main_branch());
+        assert_eq!(report.head_oid, without.head_oid);
+        for id in [a, b, c] {
+            assert!(
+                mac_memo(&store.repo, "git_oid_mac", id.0, &new).is_some(),
+                "{id}"
+            );
+        }
+        assert!(mac_memo(&store.repo, "git_oid_mac", c.0, &old).is_none());
+        assert_eq!(
+            verify_export_oids_with(&store.repo, Some(&new)).unwrap(),
+            []
+        );
+        assert_eq!(
+            verify_export_oids_with(&store.repo, Some(&old)).unwrap(),
+            []
+        );
+    }
+
+    thread_local! {
+        /// The key the crafted-memo cases' exports under test run with ([`checked`]).
+        static UNDER_TEST: RefCell<Option<MemoKey>> = const { RefCell::new(None) };
+    }
+
+    /// The request of a crafted-memo case's export under test: `main` into `main`, under the key
+    /// [`UNDER_TEST`] holds, if any.
+    pub(super) fn checked() -> ExportRequest {
+        let mut req = main_branch();
+        req.memo_key = UNDER_TEST.with(|key| key.borrow().clone());
+        req
+    }
+
+    /// Every crafted `git_oid`, `git_tree_oid` and `git_blob_oid` case, its export under test
+    /// given a key: a changeset, tree or blob it derives is checked against its memo as without
+    /// one, so each crafted memo is refused the same way.
+    #[test]
+    fn the_crafted_v1_memos_still_fail_with_a_key() {
+        UNDER_TEST.with(|under| *under.borrow_mut() = Some(key(5)));
+        super::crafted_memos::a_crafted_blob_memo_puts_no_other_blob_in_the_branch();
+        super::crafted_memos::a_crafted_tree_memo_puts_no_other_tree_in_the_branch();
+        super::crafted_memos::a_crafted_commit_memo_never_moves_the_branch_to_another_commit();
+        super::crafted_memos::a_crafted_ancestor_memo_splices_no_merge_parent();
+        super::crafted_memos::a_crafted_ancestor_memo_splices_no_fresh_export();
+        super::crafted_memos::a_crafted_memo_makes_no_diverged_branch_a_base();
+        super::crafted_memos::a_crafted_head_memo_makes_no_branch_up_to_date();
+    }
+
+    /// One step of a history [`an_export_with_and_without_a_key_writes_the_same_commits`] runs:
+    /// a commit on `main` putting `content` at the path numbered `path`, then an export if
+    /// `export` (and after the last step).
+    type Step = (usize, u8, bool);
+
+    /// The paths a step puts, in a directory or two so that subtrees are memoized too.
+    const PATHS: [&str; 4] = ["a", "d/b", "d/e/c", "d/e/f"];
+
+    proptest! {
+        /// Over any history of commits and exports between them, the export under a key moves
+        /// its branch to the commit the export without one does, writing the same commits, and
+        /// a deep verify given the key finds every memo right.
+        #[test]
+        fn an_export_with_and_without_a_key_writes_the_same_commits(
+            steps in proptest::collection::vec((0..PATHS.len(), 0..3_u8, any::<bool>()), 1..6)
+        ) {
+            let steps: Vec<Step> = steps;
+            let store = store();
+            let repo = &store.repo;
+            let key = key(6);
+            let (mut with, mut without) = (MemSink::default(), MemSink::default());
+            for (i, &(path, content, export_here)) in steps.iter().enumerate() {
+                // The step's number in the content too: no commit is empty.
+                let content = format!("{content} {i}\n");
+                let change = put(PATHS[path], content.as_bytes());
+                commit_on_main(repo, vec![change], &format!("{i}\n"));
+                if !export_here && i + 1 < steps.len() {
+                    continue;
+                }
+                let keyed = exported(repo, &mut with, &keyed(&key));
+                let plain = exported(repo, &mut without, &main_branch());
+                prop_assert_eq!(keyed.head_oid, plain.head_oid);
+                prop_assert_eq!(keyed.commits_written, plain.commits_written);
+                prop_assert_eq!(with.branch("main"), without.branch("main"));
+            }
+            let found: Vec<GitMemoMismatch> = verify_export_oids_with(repo, Some(&key)).unwrap();
+            prop_assert_eq!(found, []);
+        }
+    }
+
+    /// A deep verify compares the memos under a key with what the objects give: a whole memo
+    /// of another changeset copied to `b`'s slot is reported, with or without the key; a MAC
+    /// flipped, its value right, only given the key.
+    #[test]
+    fn verify_reports_a_wrong_mac_memo_value() {
+        let key = key(8);
+        let (store, [a, b, _], _) = three_exported(&key);
+        let repo = &store.repo;
+        assert_eq!(verify_export_oids_with(repo, Some(&key)).unwrap(), []);
+        let theirs = mac_memo(repo, "git_oid_mac", a.0, &key).expect("a's memo");
+        plant_mac(&store, "git_oid_mac", b.0, &key, &theirs);
+        for found in [
+            verify_export_oids(repo),
+            verify_export_oids_with(repo, Some(&key)),
+        ] {
+            let found = found.unwrap();
+            let [mismatch] = found.as_slice() else {
+                panic!("one mismatch, b's: {found:?}");
+            };
+            let got = (
+                mismatch.memo.as_str(),
+                mismatch.subject,
+                mismatch.key.as_slice(),
+            );
+            assert_eq!(got, ("git_oid_mac", b.0, key.id().as_slice()));
+            assert_eq!(mismatch.real, export_oid(repo, b));
+        }
+
+        // A flipped MAC: the value is right, which only the key tells from a forged one.
+        let (store, [_, b, _], _) = three_exported(&key);
+        let repo = &store.repo;
+        let mut memo = mac_memo(repo, "git_oid_mac", b.0, &key).expect("b's memo");
+        memo[40] ^= 1;
+        plant_mac(&store, "git_oid_mac", b.0, &key, &memo);
+        assert_eq!(verify_export_oids(repo).unwrap(), []);
+        let found = verify_export_oids_with(repo, Some(&key)).unwrap();
+        let subjects: Vec<_> = found.iter().map(|m| (m.memo.as_str(), m.subject)).collect();
+        assert_eq!(subjects, [("git_oid_mac", b.0)]);
     }
 }

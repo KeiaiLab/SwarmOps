@@ -275,6 +275,48 @@ fn damaged_derived_and_external_id_entries_are_dropped() {
     }
 }
 
+/// The memos a git export writes under a memo key (`git_oid_mac`, 54 bytes, and
+/// `git_tree_oid_mac`, 52, each under the key's 16-byte id) are dropped when their length or
+/// their slot key is not theirs, whole files with a right trailer: a 53-byte `git_oid_mac`, a
+/// 52-byte one, and a `git_tree_oid_mac` under a 15-byte key; a valid one of each is kept.
+#[test]
+fn repair_drops_a_mac_memo_of_the_wrong_length() {
+    let (_dir, root, repo, ids) = build_repo(StoreFormat::V2, 2);
+    let layout = Layout::with_format(&root, StoreFormat::V2);
+    let derived = repo.derived_store();
+    let key_id = [7_u8; 16];
+    let placed = |name: &str, subject: ObjectId, key: &[u8], value: Vec<u8>| {
+        let slot = DerivedSlot::new(name, 1, subject, key);
+        assert!(derived.put(&slot, &value).unwrap(), "{name}: placed");
+        layout.derived_path(&slot)
+    };
+    let mut commit = vec![0_u8; 54];
+    commit[20] = 1;
+    let valid_commit = placed("git_oid_mac", ids[0].0, &key_id, commit.clone());
+    let short = placed("git_oid_mac", ids[1].0, &key_id, commit[..53].to_vec());
+    let tree_sized = placed("git_oid_mac", ObjectId::new([1; 32]), &key_id, vec![0; 52]);
+    let valid_tree = placed(
+        "git_tree_oid_mac",
+        ObjectId::new([2; 32]),
+        &key_id,
+        vec![0; 52],
+    );
+    let short_key = placed(
+        "git_tree_oid_mac",
+        ObjectId::new([3; 32]),
+        &[7; 15],
+        vec![0; 52],
+    );
+
+    let report = repo.repair(RepairRequest::new(false)).unwrap();
+    assert_no_host_path(&report, &root);
+    assert!(valid_commit.exists(), "a valid git_oid_mac was dropped");
+    assert!(valid_tree.exists(), "a valid git_tree_oid_mac was dropped");
+    for dropped in [short, tree_sized, short_key] {
+        assert!(!dropped.exists(), "{dropped} was kept");
+    }
+}
+
 /// Index, sorted view, generation and checkpoint damage are repaired by `rebuild_index`, and a
 /// second repair does nothing.
 #[test]

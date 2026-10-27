@@ -843,6 +843,15 @@ fn derived_payload_valid(name: &str, version: u32, key: &[u8], value: &[u8]) -> 
         }
         ("git_tree_oid" | "git_blob_oid", 1) => key.is_empty() && value.len() == 20,
         ("git_oid", 1) => key.is_empty() && value.len() == 21 && matches!(value[20], 0 | 1),
+        // The memos under a memo key: the key's 16-byte id as the slot key, the value then a
+        // 32-byte MAC.
+        ("git_tree_oid_mac" | "git_blob_oid_mac", 1) => key.len() == 16 && value.len() == 52,
+        ("git_oid_mac", 1) => {
+            key.len() == 16
+                && value.len() == 54
+                && matches!(value[20], 0 | 1)
+                && matches!(value[21], 0 | 1)
+        }
         _ => true,
     }
 }

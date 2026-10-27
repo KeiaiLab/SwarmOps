@@ -1831,6 +1831,90 @@ mod crafted_memos {
     }
 }
 
+/// An import onto a native head given a memo key takes the head's export oid from its memo under
+/// the key: a commit made in git on the export of a head 2,000 native changesets deep is imported
+/// reading a handful of the store's objects, where without the key the head's export oid is
+/// derived over the whole history below it again.
+#[test]
+fn an_import_onto_a_native_head_trusts_mac_memos() {
+    use swarmops_core::{LeafKind, ObjectKind, Tree, TreeEntry};
+    use swarmops_git::{ExportRequest, GitSink as _, MemoKey, export};
+    use swarmops_repo::RawChangeset;
+    use swarmops_testkit::repo::{blob, signature};
+
+    use crate::support::{MemSink, SinkCall, counted_store};
+
+    const DEPTH: usize = 2_000;
+    let (_dir, _root, repo, reads) = counted_store();
+    let deep: &[u8] = b"deep\n";
+    let entry = TreeEntry::leaf("f.txt", LeafKind::File, blob(deep));
+    let tree = Tree::new(vec![entry]).unwrap();
+    let objects = vec![
+        (ObjectKind::Blob, deep.to_vec()),
+        (ObjectKind::Tree, tree.encode()),
+    ];
+    repo.put_objects(objects).unwrap();
+    let mut batch = repo.raw_batch();
+    let mut tip: Option<ChangesetId> = None;
+    for i in 0..DEPTH {
+        let message = format!("{i}\n").into_bytes();
+        let raw = RawChangeset::new(
+            tip.into_iter().collect(),
+            tree.id(),
+            signature(),
+            signature(),
+            message,
+            Vec::new(),
+            Vec::new(),
+        );
+        tip = Some(batch.push(raw).unwrap());
+    }
+    batch.commit().unwrap();
+    let head = tip.expect("a chain");
+    let moved = repo.cas_ref("main", None, Some(head), ACTOR).unwrap();
+    assert!(matches!(moved.result, CasResult::Applied { .. }));
+
+    // The history exported under the key, and copied into a source: two commits made in git on
+    // the head's export.
+    let key = MemoKey::from_bytes([9; 32]);
+    let mut sink = MemSink::default();
+    let mut req = ExportRequest::new("main", "main");
+    req.memo_key = Some(key.clone());
+    let e = export(&repo, &mut sink, &req).expect("export").head_oid;
+    let mut source = MemSource::default();
+    for call in sink.log() {
+        if let SinkCall::Write { oid } = call {
+            let (kind, bytes) = sink.read(*oid).unwrap();
+            source.put(kind, bytes);
+        }
+    }
+    let f = source.blob(deep);
+    let made = |source: &mut MemSource, name: &[u8]| {
+        let new = source.blob(b"made in git\n");
+        let tree = source.tree(&[("100644", b"f.txt", f), ("100644", name, new)]);
+        source.commit(tree, &[e], "Made in git\n")
+    };
+    let (c, c2) = (made(&mut source, b"g.txt"), made(&mut source, b"h.txt"));
+
+    // With the key: the head's memo stands for the history below it.
+    let mut keyed = request(&c.to_string());
+    keyed.memo_key = Some(key);
+    reads.take();
+    let report = import(&repo, &source, &keyed).expect("import under the key");
+    let with_key = reads.take();
+    assert_eq!((report.imported, report.skipped), (1, 1));
+    assert!(with_key < 20, "{with_key} object reads with a key");
+
+    // Without: the head's export oid is derived over the history below it again.
+    let back = repo.cas_ref("main", Some(report.head), Some(head), ACTOR);
+    assert!(matches!(back.unwrap().result, CasResult::Applied { .. }));
+    reads.take();
+    let report = import(&repo, &source, &request(&c2.to_string())).expect("import");
+    let without = reads.take();
+    assert_eq!((report.imported, report.skipped), (1, 1));
+    assert!(without >= 2_000, "{without} object reads without a key");
+}
+
 /// Crafted external id entries (the 2026-10-20 security review's re-verification of the git
 /// import): an entry of the index (`meta/external_ids/git/`) is a file anyone who can write the
 /// store's files can place whole, its checksum right, naming any changeset the store holds. The

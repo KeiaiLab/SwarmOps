@@ -14,9 +14,11 @@
 //! 2. The branch is read, and the head's export oid derived from the store's own objects
 //!    ([`ExportOid`](crate::ExportOid)'s value), with every export oid below it, each once: never
 //!    read from a memo of the derived store, whose memos are checked against what the objects give
-//!    instead (one that disagrees is [`RepoError::DerivedCorrupt`], and nothing is written). Every
-//!    export oid the steps after it compare a branch with, name as a commit's parent or move the
-//!    branch to is one of these.
+//!    instead (one that disagrees is [`RepoError::DerivedCorrupt`], and nothing is written). With
+//!    a memo key ([`ExportRequest::memo_key`]), a memo whose MAC under the key checks is taken,
+//!    and the history below it is not read (one whose MAC does not check is refused the same
+//!    way). Every export oid the steps after it compare a branch with, name as a commit's parent
+//!    or move the branch to is one of these.
 //! 3. A branch at the head's export is up to date: nothing is written, and it does not move.
 //! 4. A branch that exists must name the export of the head or of an ancestor of it, over every
 //!    parent: the base, found through the external id index (the changeset it names for the
@@ -63,8 +65,8 @@ use swarmops_store::{ExternalEntry, FsObjectStore, SYSTEM_GIT, TailRepair};
 
 use crate::export_oid::{ExportOids, OnMemo};
 use crate::{
-    BranchUpdate, ExportReader, ExportedOid, GIT_OID, GitOid, GitSink, ObjectFormat, OidCache,
-    RawCommit, RawKind, SinkError, Stored, Unsupported,
+    BranchUpdate, ExportReader, ExportedOid, GIT_OID, GitOid, GitSink, MemoKey, ObjectFormat,
+    OidCache, RawCommit, RawKind, SinkError, Stored, Unsupported,
 };
 use crate::{ancestry, export_oid, native, oid, render};
 
@@ -86,15 +88,21 @@ pub struct ExportRequest {
     /// the export read, so that a branch another writer moves meanwhile still stops it. It never
     /// moves a branch a work tree has checked out.
     pub force: bool,
+    /// The key that authenticates the export oid memos ([`MemoKey`]): with one, a memo whose MAC
+    /// checks stops the export's walk of the history below it, and every value derived is
+    /// memoized under it; without, every export oid is derived from the history below it.
+    pub memo_key: Option<MemoKey>,
 }
 
 impl ExportRequest {
-    /// A request to export `source_ref` into the branch `branch`, without `force`.
+    /// A request to export `source_ref` into the branch `branch`, without `force`, with no memo
+    /// key.
     pub fn new(source_ref: &str, branch: &str) -> ExportRequest {
         ExportRequest {
             source_ref: source_ref.to_owned(),
             branch: branch.to_owned(),
             force: false,
+            memo_key: None,
         }
     }
 }
@@ -335,7 +343,7 @@ pub fn export(
     };
     let head = state.target;
     let old = sink.branch(&req.branch)?;
-    let mut run = Run::new(repo, &read, sink, head);
+    let mut run = Run::new(repo, &read, sink, (head, req.memo_key.as_ref()));
     let head_oid = run.export_of(head)?.git_oid();
     let mut report = ExportReport {
         head,
@@ -477,6 +485,8 @@ struct Run<'a, 'r> {
     cache: OidCache,
     /// The changeset the export is writing, for the error a wrong memo raises.
     current: ChangesetId,
+    /// The key the memos the export trusts are made under, if any.
+    key: Option<&'a MemoKey>,
     /// The export oid of every changeset the run has needed, re-derived from the store's own
     /// objects with the history below it, its memo checked ([`Run::export_of`]).
     exports: ExportOids,
@@ -491,8 +501,9 @@ impl<'a, 'r> Run<'a, 'r> {
         repo: &'a LocalRepo,
         read: &'a RepoRead<'r, FsObjectStore>,
         sink: &'a mut dyn GitSink,
-        head: ChangesetId,
+        (head, key): (ChangesetId, Option<&'a MemoKey>),
     ) -> Run<'a, 'r> {
+        let on_memo = key.map_or(OnMemo::Check, |key| OnMemo::Trusted(key.clone()));
         Run {
             repo,
             read,
@@ -503,7 +514,8 @@ impl<'a, 'r> Run<'a, 'r> {
             pending: Vec::new(),
             cache: OidCache::new(),
             current: head,
-            exports: ExportOids::new(OnMemo::Check),
+            key,
+            exports: ExportOids::new(on_memo),
             commits_written: 0,
             objects_written: 0,
             objects_checked: 0,
@@ -521,27 +533,27 @@ impl<'a, 'r> Run<'a, 'r> {
 
     /// The real git oid of tree `tree`, from the store's own bytes, the memo checked against it
     /// ([`real_tree_oid`]): what the export reuses, writes or renders for the tree, never a memo
-    /// alone. Cached for the run.
+    /// alone, but for one the run's memo key authenticates. Cached for the run.
     ///
     /// [`real_tree_oid`]: export_oid::real_tree_oid
     fn tree_git_oid(&self, tree: TreeId) -> Result<GitOid, ExportError> {
-        Ok(export_oid::real_tree_oid(
+        Ok(export_oid::keyed_tree_oid(
             &self.reader(),
             &self.cache,
-            self.current,
+            (self.current, self.key),
             tree,
         )?)
     }
 
     /// The real git oid of blob `blob`, from the store's own bytes, the memo checked against it
-    /// ([`real_blob_oid`]). Cached for the run.
+    /// ([`real_blob_oid`]), or one the run's memo key authenticates. Cached for the run.
     ///
     /// [`real_blob_oid`]: export_oid::real_blob_oid
     fn blob_git_oid(&self, blob: BlobId) -> Result<GitOid, ExportError> {
-        Ok(export_oid::real_blob_oid(
+        Ok(export_oid::keyed_blob_oid(
             &self.reader(),
             &self.cache,
-            self.current,
+            (self.current, self.key),
             blob,
         )?)
     }

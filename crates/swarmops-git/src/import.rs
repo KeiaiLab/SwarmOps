@@ -69,7 +69,9 @@
 //! walks the whole history below the head, each changeset once, parents first, on a stack of its
 //! own, and takes no `git_oid` memo of the derived store as a value: a memo it meets that
 //! disagrees with what it derives is [`RepoError::DerivedCorrupt`] ([`ImportError::Store`]),
-//! before anything is written, and one that is missing is written. The target, those export oids
+//! before anything is written, and one that is missing is written. With a memo key
+//! ([`ImportRequest::memo_key`]) a memo whose MAC under the key checks is taken, and the history
+//! below it is not walked, as the export takes it. The target, those export oids
 //! and the trees and blobs that seed the conversion are read in one snapshot of the store.
 //!
 //! [`ExportedOid::kept`]: crate::ExportedOid::kept
@@ -93,7 +95,7 @@ use swarmops_store::{ExternalEntry, FsObjectStore, Recovered, SYSTEM_GIT};
 use crate::export_oid::{ExportOids, OnMemo};
 use crate::{
     ConvertError, Converted, Converter, ExportReader, GIT_LOSSY, GIT_OID, GitOid, GitSource,
-    LossySet, ObjectFormat, OidCache, RawCommit, RawError, RawKind, RawTree, SourceError,
+    LossySet, MemoKey, ObjectFormat, OidCache, RawCommit, RawError, RawKind, RawTree, SourceError,
     Unsupported,
 };
 use crate::{ancestry, export_oid, source};
@@ -129,6 +131,10 @@ pub struct ImportRequest {
     pub frame_changesets: usize,
     /// How many bytes of new trees and blobs the import gathers before it stores them.
     pub object_batch_bytes: usize,
+    /// The key that authenticates the export oid memos ([`MemoKey`]): with one, a memo whose MAC
+    /// checks stops the walk of the history below it where the import derives an export oid;
+    /// without, the whole history below is derived.
+    pub memo_key: Option<MemoKey>,
     /// Whether a target ref is read and moved: set by the constructor alone.
     mode: Mode,
 }
@@ -158,6 +164,7 @@ impl ImportRequest {
             actor: actor.into(),
             frame_changesets: DEFAULT_FRAME_CHANGESETS,
             object_batch_bytes: DEFAULT_OBJECT_BATCH_BYTES,
+            memo_key: None,
             mode: Mode::IntoRef,
         }
     }
@@ -433,7 +440,7 @@ pub fn import(
         return Err(SourceError::Unsupported(format).into());
     }
     let tip = source.resolve(&req.git_ref)?;
-    let mut oids = Oids::new(repo)?;
+    let mut oids = Oids::new(repo, req.memo_key.as_ref())?;
     let mut base = Base::of(&mut oids, req)?;
     let mut walk = Walk::from_tip(repo, &mut oids, source, tip, base.as_ref())?;
     let old_head = base.as_ref().map(|base| base.head);
@@ -641,14 +648,15 @@ struct Oids<'r> {
 }
 
 impl<'r> Oids<'r> {
-    /// A snapshot of `repo`, nothing derived yet.
-    fn new(repo: &'r LocalRepo) -> Result<Oids<'r>, ImportError> {
+    /// A snapshot of `repo`, nothing derived yet; the memos under `key` trusted, if given.
+    fn new(repo: &'r LocalRepo, key: Option<&MemoKey>) -> Result<Oids<'r>, ImportError> {
         let read = repo.snapshot().map_err(|source| stopped(source, 0, None))?;
+        let on_memo = key.map_or(OnMemo::Check, |key| OnMemo::Trusted(key.clone()));
         Ok(Oids {
             repo,
             read,
             cache: OidCache::new(),
-            exports: ExportOids::new(OnMemo::Check),
+            exports: ExportOids::new(on_memo),
         })
     }
 

@@ -26,6 +26,16 @@
 //! id entries of native changesets against their export oids the same way
 //! ([`verify_external_ids`]).
 //!
+//! Given a [`MemoKey`], a key kept outside the store, the export and the import trust a memo
+//! that it authenticates (derived names `git_oid_mac`, `git_tree_oid_mac`, `git_blob_oid_mac`,
+//! version 1, the key's id as the slot key): the value, then a MAC over the name, the subject and
+//! the value ([`MemoKey`]). Such a memo stops the walk: the history below a changeset whose
+//! `git_oid_mac` checks is not read, nor is a tree or a blob whose memo checks. One whose MAC does
+//! not check is [`RepoError::DerivedCorrupt`], never derived again in silence. Every value a run
+//! with a key derives, from objects or from memos that check, is written under the key too, so
+//! that a value the key authenticates comes from the store's objects by induction. Without a key
+//! no `_mac` memo is read or written.
+//!
 //! Export oids read objects and derived values alone, never a ref, the journal or the clock, so a
 //! changeset's export oid never changes. Version 1 fixes git's tree order and modes, the commit
 //! layout, the signatures verbatim and the native trailer block ([`crate::native`]): a change to
@@ -44,7 +54,8 @@ use swarmops_core::{
 use swarmops_repo::{Derivation, DeriveCtx, DeriveError, Repo, RepoError, RepoRead, Subject};
 use swarmops_store::{DerivedSlot, DerivedStore, ObjectStore, SYSTEM_GIT};
 
-use crate::{ExternalIdMismatch, GIT_LOSSY, GIT_OID, GitOid, RawKind};
+use crate::memo_key::{MAC_LEN, MEMO_KEY_ID_LEN};
+use crate::{ExternalIdMismatch, GIT_LOSSY, GIT_OID, GitOid, MemoKey, RawKind};
 use crate::{native, oid, render};
 
 /// The derived store's name for a tree's memoized git oid ([`tree_oid`]).
@@ -59,6 +70,29 @@ const MEMO_VERSION: u32 = 1;
 /// The length of a `git_oid` memo, an [`ExportedOid`] as postcard writes it: the oid's 20 bytes,
 /// then one for `kept`.
 const EXPORT_MEMO_LEN: usize = 21;
+
+/// The derived store's name for a changeset's export oid under a [`MemoKey`].
+const EXPORT_MAC_MEMO: &str = "git_oid_mac";
+
+/// The derived store's name for a tree's git oid under a [`MemoKey`].
+const TREE_MAC_MEMO: &str = "git_tree_oid_mac";
+
+/// The derived store's name for a blob's git oid under a [`MemoKey`].
+const BLOB_MAC_MEMO: &str = "git_blob_oid_mac";
+
+/// The version of the three memos under a key: a slot keyed by the key's id ([`MemoKey::id`]).
+const MAC_MEMO_VERSION: u32 = 1;
+
+/// The bytes of a `git_oid_mac` memo before its MAC: the oid's 20, one for `kept`, one for
+/// `imported`.
+const EXPORT_MAC_VALUE_LEN: usize = 22;
+
+/// The length of a `git_oid_mac` memo: its value, then the MAC.
+const EXPORT_MAC_MEMO_LEN: usize = EXPORT_MAC_VALUE_LEN + MAC_LEN;
+
+/// The length of a `git_tree_oid_mac` or `git_blob_oid_mac` memo: the oid's 20 bytes, then the
+/// MAC.
+const OID_MAC_MEMO_LEN: usize = 20 + MAC_LEN;
 
 /// The derivation of the git commit each changeset exports to (storage spec §5's `GitOid`,
 /// derived name `git_oid`): see [the module documentation](self). Its key is `()`, its value an
@@ -303,18 +337,59 @@ impl OidCache {
 }
 
 /// Whether a recomputation checks the memos it finds against what it computes: the export does
-/// ([`Against`], naming the changeset for the error a wrong memo raises); `verify --deep`, which
-/// reports every mismatch itself rather than stopping at the first, does not ([`Recompute`]).
+/// ([`Against`], naming the changeset for the error a wrong memo raises), and given a key also
+/// trusts the memos the key authenticates ([`Trusted`]); `verify --deep`, which reports every
+/// mismatch itself rather than stopping at the first, does not ([`Recompute`]).
 ///
 /// [`Against`]: Memos::Against
+/// [`Trusted`]: Memos::Trusted
 /// [`Recompute`]: Memos::Recompute
 #[derive(Clone, Copy)]
-enum Memos {
+enum Memos<'k> {
     /// Check each memo, refusing a crafted one ([`check_memo`]); write one where none is there.
     Against(ChangesetId),
+    /// Take a tree's or a blob's oid from its memo under the key where the MAC checks, refusing
+    /// one whose MAC does not ([`trusted_oid`]); check and write the rest as [`Memos::Against`]
+    /// does, and write each oid computed under the key too.
+    Trusted(ChangesetId, &'k MemoKey),
     /// Only recompute, reading or writing no memo.
     Recompute,
 }
+
+impl Memos<'_> {
+    /// The oid memo `name` of `subject` holds under the key, if there is one and its MAC checks;
+    /// `None` without a key.
+    fn trusted(self, objects: &dyn ExportObjects, name: &str, subject: ObjectId) -> Trusted {
+        match self {
+            Memos::Trusted(about, key) => trusted_oid(objects.memo(), name, key, subject, about),
+            Memos::Against(_) | Memos::Recompute => Ok(None),
+        }
+    }
+
+    /// Checks `real`, the oid of `subject` computed from the store's bytes, against its v1 memo
+    /// `name`, writing it there where none is; and with a key writes it under the key, as memo
+    /// `mac_name`. Nothing for [`Memos::Recompute`].
+    fn computed(
+        self,
+        objects: &dyn ExportObjects,
+        (name, mac_name): (&str, &str),
+        subject: ObjectId,
+        real: GitOid,
+    ) -> Result<(), RepoError> {
+        match self {
+            Memos::Against(about) => check_memo(objects.memo(), name, subject, real, about),
+            Memos::Trusted(about, key) => {
+                check_memo(objects.memo(), name, subject, real, about)?;
+                memoize_mac(objects.memo(), mac_name, key, subject, &real.0);
+                Ok(())
+            }
+            Memos::Recompute => Ok(()),
+        }
+    }
+}
+
+/// What [`Memos::trusted`] gives.
+type Trusted = Result<Option<GitOid>, RepoError>;
 
 /// The real git oid of blob `blob`, the hash of the store's own bytes as a git blob, never a memo:
 /// the git oid an export reuses or writes is bound to the content the store holds. Checks the memo
@@ -346,6 +421,37 @@ pub fn real_tree_oid(
     tree_git_oid(objects, cache, Memos::Against(about), root)
 }
 
+/// [`real_blob_oid`], or with `key` the oid its memo under the key holds where the MAC checks,
+/// the blob unread; every oid computed written under the key too. The export's.
+pub(crate) fn keyed_blob_oid(
+    objects: &dyn ExportObjects,
+    cache: &OidCache,
+    (about, key): (ChangesetId, Option<&MemoKey>),
+    blob: BlobId,
+) -> Result<GitOid, RepoError> {
+    blob_git_oid(objects, cache, checked(about, key), blob)
+}
+
+/// [`real_tree_oid`], or with `key` taking each tree's and blob's oid from its memo under the key
+/// where the MAC checks, without reading below it; every oid computed written under the key too.
+/// The export's.
+pub(crate) fn keyed_tree_oid(
+    objects: &dyn ExportObjects,
+    cache: &OidCache,
+    (about, key): (ChangesetId, Option<&MemoKey>),
+    root: TreeId,
+) -> Result<GitOid, RepoError> {
+    tree_git_oid(objects, cache, checked(about, key), root)
+}
+
+/// The memos a check of `about`'s objects reads: under `key` if there is one.
+fn checked(about: ChangesetId, key: Option<&MemoKey>) -> Memos<'_> {
+    match key {
+        Some(key) => Memos::Trusted(about, key),
+        None => Memos::Against(about),
+    }
+}
+
 /// The git oid of the tree `root` renders to, from the store's own bytes alone, as
 /// [`real_tree_oid`] computes it but reading and writing no memo of the derived store: what the
 /// import compares a git tree with before it takes the tree as converted ([`crate::import()`]).
@@ -373,16 +479,20 @@ pub(crate) fn rendered_blob_oid(
 fn blob_git_oid(
     objects: &dyn ExportObjects,
     cache: &OidCache,
-    memos: Memos,
+    memos: Memos<'_>,
     blob: BlobId,
 ) -> Result<GitOid, RepoError> {
     if let Some(oid) = cache.get(blob.0) {
         return Ok(oid);
     }
-    let real = oid::git_hash(RawKind::Blob, &objects.blob(blob)?);
-    if let Memos::Against(about) = memos {
-        check_memo(objects.memo(), BLOB_MEMO, blob.0, real, about)?;
+
+    // A memo the key authenticates stands for the blob's bytes, which are not read.
+    if let Some(oid) = memos.trusted(objects, BLOB_MAC_MEMO, blob.0)? {
+        cache.insert(blob.0, oid);
+        return Ok(oid);
     }
+    let real = oid::git_hash(RawKind::Blob, &objects.blob(blob)?);
+    memos.computed(objects, (BLOB_MEMO, BLOB_MAC_MEMO), blob.0, real)?;
     cache.insert(blob.0, real);
     Ok(real)
 }
@@ -392,10 +502,10 @@ fn blob_git_oid(
 fn tree_git_oid(
     objects: &dyn ExportObjects,
     cache: &OidCache,
-    memos: Memos,
+    memos: Memos<'_>,
     root: TreeId,
 ) -> Result<GitOid, RepoError> {
-    if let Some(oid) = cache.get(root.0) {
+    if let Some(oid) = known_tree(objects, cache, memos, root)? {
         return Ok(oid);
     }
     let mut stack = vec![Pending::new(root, objects.tree(root)?)];
@@ -411,7 +521,7 @@ fn tree_git_oid(
         let oid = match next {
             Some(EntryTarget::Leaf(_, blob)) => blob_git_oid(objects, cache, memos, blob)?,
             Some(EntryTarget::Dir(dir)) => {
-                if let Some(oid) = cache.get(dir.0) {
+                if let Some(oid) = known_tree(objects, cache, memos, dir)? {
                     oid
                 } else {
                     stack.push(Pending::new(dir, objects.tree(dir)?));
@@ -425,9 +535,7 @@ fn tree_git_oid(
                 let bytes = render::tree_bytes(&done.tree, |entry| done.oid_of(entry))
                     .ok_or_else(|| unknown_variant("EntryTarget"))?;
                 let oid = oid::git_hash(RawKind::Tree, &bytes);
-                if let Memos::Against(about) = memos {
-                    check_memo(objects.memo(), TREE_MEMO, done.id.0, oid, about)?;
-                }
+                memos.computed(objects, (TREE_MEMO, TREE_MAC_MEMO), done.id.0, oid)?;
                 cache.insert(done.id.0, oid);
                 if stack.is_empty() {
                     return Ok(oid);
@@ -438,6 +546,71 @@ fn tree_git_oid(
         let top = stack.last_mut().expect("the tree the oid is an entry of");
         top.oids.push(oid);
     }
+}
+
+/// The oid of tree `tree` known without reading it: cached in this run, or held by its memo
+/// under the key, whose MAC checks (then cached).
+fn known_tree(
+    objects: &dyn ExportObjects,
+    cache: &OidCache,
+    memos: Memos<'_>,
+    tree: TreeId,
+) -> Trusted {
+    if let Some(oid) = cache.get(tree.0) {
+        return Ok(Some(oid));
+    }
+    let trusted = memos.trusted(objects, TREE_MAC_MEMO, tree.0)?;
+    if let Some(oid) = trusted {
+        cache.insert(tree.0, oid);
+    }
+    Ok(trusted)
+}
+
+/// The slot of `subject`'s memo `name` under `key`: version 1, the key's id as the slot key.
+fn mac_slot<'a>(name: &'a str, subject: ObjectId, id: &'a [u8]) -> DerivedSlot<'a> {
+    DerivedSlot::new(name, MAC_MEMO_VERSION, subject, id)
+}
+
+/// The git oid the tree or blob memo `name` of `subject` holds under `key`, if the derived store
+/// holds one; one whose length or MAC does not check is [`RepoError::DerivedCorrupt`] (the
+/// export's or the import's memo of `about`), so that no memo the key did not make is taken.
+fn trusted_oid(
+    memo: &DerivedStore,
+    name: &str,
+    key: &MemoKey,
+    subject: ObjectId,
+    about: ChangesetId,
+) -> Trusted {
+    let id = key.id();
+    let Some(value) = memo.get(&mac_slot(name, subject, &id))? else {
+        return Ok(None);
+    };
+    if value.len() != OID_MAC_MEMO_LEN || !key.checks(name, subject, &value[..20], &value[20..]) {
+        return Err(mac_refused(name, about, subject, value.len()));
+    }
+    let oid = <[u8; 20]>::try_from(&value[..20]).expect("20 bytes of 52");
+    Ok(Some(GitOid(oid)))
+}
+
+/// The refusal of memo `name` of `subject` under the key, of `len` bytes, whose MAC does not
+/// check: [`RepoError::DerivedCorrupt`] naming `about`.
+fn mac_refused(name: &str, about: ChangesetId, subject: ObjectId, len: usize) -> RepoError {
+    RepoError::DerivedCorrupt {
+        name: name.to_owned(),
+        changeset: about,
+        why: format!(
+            "the memo of object {subject} under the memo key ({len} bytes) does not check \
+             against its MAC"
+        ),
+    }
+}
+
+/// Memoizes `value` for `subject` under `key`, as memo `name`: the value, then its MAC. A put
+/// that fails is dropped, as [`memoize`] drops one.
+fn memoize_mac(memo: &DerivedStore, name: &str, key: &MemoKey, subject: ObjectId, value: &[u8]) {
+    let mut bytes = value.to_vec();
+    bytes.extend_from_slice(key.mac(name, subject, value).as_bytes());
+    let _ = memo.put(&mac_slot(name, subject, &key.id()), &bytes);
 }
 
 /// Checks the git oid the derived store memoized for `subject` under `name` against `real`, the oid
@@ -571,17 +744,24 @@ fn unknown_variant(ty: &str) -> RepoError {
     RepoError::Internal(format!("{ty}: {}", crate::UNKNOWN_VARIANT))
 }
 
-/// A git-export oid the derived store memoized (`git_tree_oid`, `git_blob_oid` or `git_oid`) that
-/// is not the one the store's own objects give, as a deep verify re-derives it ([`verify_export_oids`]):
-/// a file someone placed in the store, or a cache a faulty build wrote. Removing the file, or all
-/// of `meta/derived/`, has it derived again.
+/// A git-export oid the derived store memoized (`git_tree_oid`, `git_blob_oid` or `git_oid`, or
+/// one of them under a memo key: `git_tree_oid_mac`, `git_blob_oid_mac`, `git_oid_mac`) that is
+/// not the one the store's own objects give, as a deep verify re-derives it
+/// ([`verify_export_oids`]), or, given the key, a memo under it whose MAC does not check
+/// ([`verify_export_oids_with`]): a file someone placed in the store, or a cache a faulty build
+/// wrote. Removing the file, or all of `meta/derived/`, has it derived again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct GitMemoMismatch {
-    /// The memo's derivation name: `git_tree_oid`, `git_blob_oid` or `git_oid`.
+    /// The memo's derivation name: `git_tree_oid`, `git_blob_oid`, `git_oid`, or one of them
+    /// followed by `_mac`.
     pub memo: String,
-    /// The object the memo is about: a tree, a blob, or (for `git_oid`) a changeset.
+    /// The object the memo is about: a tree, a blob, or (for `git_oid` and `git_oid_mac`) a
+    /// changeset.
     pub subject: ObjectId,
+    /// The memo's slot key: the id of the key a `_mac` memo was made under
+    /// ([`MemoKey::id`]); empty for the others.
+    pub key: Vec<u8>,
     /// The git oid the memo holds.
     pub stored: GitOid,
     /// The git oid the store's own objects give.
@@ -599,6 +779,16 @@ pub struct GitMemoMismatch {
 /// own). [`RepoError`] only where a read cannot go on.
 pub fn verify_export_oids<O: ObjectStore>(
     repo: &Repo<O>,
+) -> Result<Vec<GitMemoMismatch>, RepoError> {
+    verify_export_oids_with(repo, None)
+}
+
+/// [`verify_export_oids`], which also compares the memos made under a key (`git_tree_oid_mac`,
+/// `git_blob_oid_mac`, `git_oid_mac`, under any key) with what the objects give, and given `key`
+/// reports each memo under it whose MAC does not check.
+pub fn verify_export_oids_with<O: ObjectStore>(
+    repo: &Repo<O>,
+    key: Option<&MemoKey>,
 ) -> Result<Vec<GitMemoMismatch>, RepoError> {
     let snapshot = repo.snapshot()?;
     let reader = ExportReader {
@@ -629,6 +819,7 @@ pub fn verify_export_oids<O: ObjectStore>(
                 found.push(GitMemoMismatch {
                     memo: name.to_owned(),
                     subject,
+                    key: Vec::new(),
                     stored,
                     real: got,
                 });
@@ -649,12 +840,116 @@ pub fn verify_export_oids<O: ObjectStore>(
             found.push(GitMemoMismatch {
                 memo: ExportOid::NAME.to_owned(),
                 subject: id.0,
+                key: Vec::new(),
                 stored: stored.git_oid(),
                 real: got.git_oid(),
             });
         }
     }
+
+    // The memos under a key, under any key: their values against what the objects give, and
+    // their MACs under `key`, if given.
+    let macs = MacCheck {
+        store,
+        key,
+        key_id: key.map(MemoKey::id),
+    };
+    for (name, is_tree) in [(BLOB_MAC_MEMO, false), (TREE_MAC_MEMO, true)] {
+        for (subject, slot_key, value) in macs.listed(name)? {
+            let Some(stored) = macs.oid(name, subject, &slot_key, &value) else {
+                continue;
+            };
+            let recomputed = if is_tree {
+                tree_git_oid(&reader, &cache, Memos::Recompute, TreeId::new(subject))
+            } else {
+                blob_git_oid(&reader, &cache, Memos::Recompute, BlobId::new(subject))
+            };
+            if let Ok(got) = recomputed
+                && (got != stored.0 || !stored.1)
+            {
+                found.push(GitMemoMismatch {
+                    memo: name.to_owned(),
+                    subject,
+                    key: slot_key,
+                    stored: stored.0,
+                    real: got,
+                });
+            }
+        }
+    }
+    for (subject, slot_key, value) in macs.listed(EXPORT_MAC_MEMO)? {
+        let Some(stored) = decode_export_mac(&value) else {
+            continue;
+        };
+        let checks = macs.checks(EXPORT_MAC_MEMO, subject, &slot_key, &value);
+        let id = ChangesetId::new(subject);
+        if let Ok(got) = expected.known(&snapshot, &reader, &cache, id)
+            && (got != stored || !checks)
+        {
+            found.push(GitMemoMismatch {
+                memo: EXPORT_MAC_MEMO.to_owned(),
+                subject,
+                key: slot_key,
+                stored: stored.value.git_oid(),
+                real: got.value.git_oid(),
+            });
+        }
+    }
     Ok(found)
+}
+
+/// A memo under a key as a deep verify lists it: its subject, its slot key and its value.
+type ListedMemo = (ObjectId, Vec<u8>, Vec<u8>);
+
+/// What a deep verify reads of the memos under a key ([`verify_export_oids_with`]).
+struct MacCheck<'a> {
+    store: &'a DerivedStore,
+    /// The key whose memos' MACs it checks, if given.
+    key: Option<&'a MemoKey>,
+    key_id: Option<[u8; MEMO_KEY_ID_LEN]>,
+}
+
+impl MacCheck<'_> {
+    /// Every whole memo `name` under any key: its subject, its slot key and its value.
+    fn listed(&self, name: &str) -> Result<Vec<ListedMemo>, RepoError> {
+        let mut memos = Vec::new();
+        for listed in self.store.list(name, MAC_MEMO_VERSION)? {
+            if let Some(stored) = self.store.read_listed(name, MAC_MEMO_VERSION, &listed)? {
+                memos.push((listed.subject, stored.key, stored.value));
+            }
+        }
+        Ok(memos)
+    }
+
+    /// Whether memo `name` of `subject` under slot key `slot_key`, of `value`, checks: its MAC,
+    /// when the key it was made under is the one given; true for one under another key, whose
+    /// MAC no one here can check.
+    fn checks(&self, name: &str, subject: ObjectId, slot_key: &[u8], value: &[u8]) -> bool {
+        let (Some(key), Some(id)) = (self.key, self.key_id) else {
+            return true;
+        };
+        if slot_key != id {
+            return true;
+        }
+        let at = value.len().saturating_sub(MAC_LEN);
+        key.checks(name, subject, &value[..at], &value[at..])
+    }
+
+    /// The oid a tree or blob memo of `value` holds, and whether its MAC checks
+    /// ([`MacCheck::checks`]); `None` for a value of another length.
+    fn oid(
+        &self,
+        name: &str,
+        subject: ObjectId,
+        slot_key: &[u8],
+        value: &[u8],
+    ) -> Option<(GitOid, bool)> {
+        if value.len() != OID_MAC_MEMO_LEN {
+            return None;
+        }
+        let oid = <[u8; 20]>::try_from(&value[..20]).expect("20 bytes of 52");
+        Some((GitOid(oid), self.checks(name, subject, slot_key, value)))
+    }
 }
 
 /// Checks each entry of system `git` in the external id index that names a native changeset, one
@@ -789,12 +1084,17 @@ fn check_export_memo(
 
 /// What re-deriving export oids does with the memos of the derived store it meets
 /// ([`ExportOids`]).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) enum OnMemo {
     /// Checks each against what the store's objects give, a memo that disagrees refused
     /// ([`check_memo`], [`check_export_memo`]), and writes one where none is: the export's and
     /// the import's.
     Check,
+    /// As [`OnMemo::Check`], and takes a changeset's, a tree's or a blob's value from its memo
+    /// under the key where the MAC checks, reading nothing below it; a memo under the key whose
+    /// MAC does not check is refused. Every value derived is written under the key too: the
+    /// export's and the import's, given a key.
+    Trusted(MemoKey),
     /// Reads and writes none: a deep verify's, which compares the memos with the values itself
     /// and reports every mismatch ([`verify_export_oids`]).
     Skip,
@@ -827,7 +1127,7 @@ pub(crate) struct ExportOids {
 
 /// What [`ExportOids`] keeps of a changeset it derived: its export oid, and whether it was
 /// imported (it has [`GIT_OID`]), which a child's check for an unchanged import reads.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct Known {
     value: ExportedOid,
     imported: bool,
@@ -856,8 +1156,23 @@ impl ExportOids {
         cache: &OidCache,
         id: ChangesetId,
     ) -> Result<ExportedOid, RepoError> {
-        if let Some(known) = self.known.get(&id) {
-            return Ok(known.value);
+        Ok(self.known(snapshot, objects, cache, id)?.value)
+    }
+
+    /// [`ExportOids::of`], with whether the changeset was imported.
+    fn known<O: ObjectStore>(
+        &mut self,
+        snapshot: &RepoRead<'_, O>,
+        objects: &dyn ExportObjects,
+        cache: &OidCache,
+        id: ChangesetId,
+    ) -> Result<Known, RepoError> {
+        if let Some(&known) = self.known.get(&id) {
+            return Ok(known);
+        }
+        if let Some(known) = self.trusted(objects.memo(), id)? {
+            self.known.insert(id, known);
+            return Ok(known);
         }
         let mut stack = vec![PendingChangeset::read(snapshot, id)?];
         loop {
@@ -865,12 +1180,16 @@ impl ExportOids {
                 .last_mut()
                 .expect("the stack holds a changeset until id's value is known");
 
-            // The next parent's value: known, it joins the changeset's; else the parent goes on
-            // top.
+            // The next parent's value: known, or held by a memo the key authenticates, it joins
+            // the changeset's; else the parent goes on top.
             if let Some(&parent) = top.changeset.parents.get(top.parents.len()) {
-                match self.known.get(&parent) {
-                    Some(&known) => top.parents.push(known),
-                    None => stack.push(PendingChangeset::read(snapshot, parent)?),
+                if let Some(&known) = self.known.get(&parent) {
+                    top.parents.push(known);
+                } else if let Some(known) = self.trusted(objects.memo(), parent)? {
+                    self.known.insert(parent, known);
+                    top.parents.push(known);
+                } else {
+                    stack.push(PendingChangeset::read(snapshot, parent)?);
                 }
                 continue;
             }
@@ -881,7 +1200,7 @@ impl ExportOids {
             let known = self.derive(objects, cache, &done)?;
             self.known.insert(done.id, known);
             if stack.is_empty() {
-                return Ok(known.value);
+                return Ok(known);
             }
         }
     }
@@ -904,8 +1223,9 @@ impl ExportOids {
                 kept: true,
             }
         } else {
-            let memos = match self.on_memo {
+            let memos = match &self.on_memo {
                 OnMemo::Check => Memos::Against(id),
+                OnMemo::Trusted(key) => Memos::Trusted(id, key),
                 OnMemo::Skip => Memos::Recompute,
             };
             let parents: Vec<GitOid> = (done.parents.iter())
@@ -919,14 +1239,73 @@ impl ExportOids {
             let kept = recorded.is_none_or(|hex| hex == oid.to_string().as_bytes());
             ExportedOid { oid: oid.0, kept }
         };
-        if self.on_memo == OnMemo::Check {
-            check_export_memo(objects.memo(), id, value)?;
-        }
-        Ok(Known {
+        let known = Known {
             value,
             imported: recorded.is_some(),
-        })
+        };
+        match &self.on_memo {
+            OnMemo::Check => check_export_memo(objects.memo(), id, value)?,
+            OnMemo::Trusted(key) => {
+                check_export_memo(objects.memo(), id, value)?;
+                let mac_value = export_mac_value(known);
+                memoize_mac(objects.memo(), EXPORT_MAC_MEMO, key, id.0, &mac_value);
+            }
+            OnMemo::Skip => {}
+        }
+        Ok(known)
     }
+
+    /// Changeset `id`'s value from its `git_oid_mac` memo under the key, where the MAC checks;
+    /// `None` without a key or without such a memo. One whose length, bytes or MAC does not check
+    /// is [`RepoError::DerivedCorrupt`].
+    fn trusted(&self, memo: &DerivedStore, id: ChangesetId) -> Result<Option<Known>, RepoError> {
+        let OnMemo::Trusted(key) = &self.on_memo else {
+            return Ok(None);
+        };
+        let key_id = key.id();
+        let Some(bytes) = memo.get(&mac_slot(EXPORT_MAC_MEMO, id.0, &key_id))? else {
+            return Ok(None);
+        };
+        let decoded = decode_export_mac(&bytes).filter(|_| {
+            let (value, mac) = bytes.split_at(EXPORT_MAC_VALUE_LEN);
+            key.checks(EXPORT_MAC_MEMO, id.0, value, mac)
+        });
+        match decoded {
+            Some(known) => Ok(Some(known)),
+            None => Err(mac_refused(EXPORT_MAC_MEMO, id, id.0, bytes.len())),
+        }
+    }
+}
+
+/// A changeset's value as its `git_oid_mac` memo holds it before the MAC: the oid's 20 bytes,
+/// then one for `kept` and one for `imported`.
+fn export_mac_value(known: Known) -> [u8; EXPORT_MAC_VALUE_LEN] {
+    let mut bytes = [0; EXPORT_MAC_VALUE_LEN];
+    bytes[..20].copy_from_slice(&known.value.oid);
+    bytes[20] = u8::from(known.value.kept);
+    bytes[21] = u8::from(known.imported);
+    bytes
+}
+
+/// The value a `git_oid_mac` memo of `bytes` holds, its MAC unchecked; `None` for one of another
+/// length, or whose `kept` or `imported` byte is neither 0 nor 1.
+fn decode_export_mac(bytes: &[u8]) -> Option<Known> {
+    if bytes.len() != EXPORT_MAC_MEMO_LEN {
+        return None;
+    }
+    let flag = |b: u8| match b {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    };
+    let oid = <[u8; 20]>::try_from(&bytes[..20]).expect("20 bytes of 54");
+    Some(Known {
+        value: ExportedOid {
+            oid,
+            kept: flag(bytes[20])?,
+        },
+        imported: flag(bytes[21])?,
+    })
 }
 
 /// A changeset [`ExportOids::of`] is re-deriving the export oid of: its id, its object, and what

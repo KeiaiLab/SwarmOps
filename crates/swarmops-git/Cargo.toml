@@ -42,6 +42,8 @@ swarmops-repo = { path = "../swarmops-repo", version = "0.5.0" }
 swarmops-store = { path = "../swarmops-store", version = "0.5.0" }
 # A token's `Authorization: Basic` header for a remote (M13).
 base64.workspace = true
+# The MACs of the export oid memos a memo key authenticates, and the key's id.
+blake3.workspace = true
 # The store root a mirror is opened at (M13).
 camino.workspace = true
 gix.workspace = true

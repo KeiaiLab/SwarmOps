@@ -1918,7 +1918,8 @@ pub struct VerifyFinding {
     /// The object: one whose content does not hash to its id or does not decode
     /// (`corrupt_object`), one a changeset references that the store lacks, or holds as
     /// another kind (`missing_object`), or the tree or blob a git export oid memo
-    /// (`git_tree_oid`, `git_blob_oid`) is about (`derived_mismatch`).
+    /// (`git_tree_oid`, `git_blob_oid`, `git_tree_oid_mac`, `git_blob_oid_mac`) is about
+    /// (`derived_mismatch`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub object: Option<String>,
     /// The changeset: the first, in seq order, that references the missing object
@@ -1956,14 +1957,17 @@ pub struct VerifyFinding {
     /// The key, in lowercase hex: the external id whose entry it is, a git commit's oid for
     /// system `git` (`external_id_corrupt`, `external_id_dangling`, `external_id_mismatch`); or a
     /// derived value's key, its postcard bytes, omitted for a derivation whose key is `()`
-    /// (`derived_mismatch`: a path's for `last_modified`).
+    /// (`derived_mismatch`: a path's for `last_modified`; for a memo under a memo key, a `_mac`
+    /// derivation, the id of the key it was made under).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
     /// The derivation whose stored value is not the one the objects give: `first_parent_skip_list`,
-    /// `last_modified`, or a git export oid memo `git_tree_oid`, `git_blob_oid` or `git_oid`
-    /// (`derived_mismatch`, which a deep verify finds; `git_oid` names its `changeset`, the tree
-    /// and blob memos their `object`). Removing the value's file under `meta/derived/<derivation>/`,
-    /// or all of `meta/derived/`, has it derived again.
+    /// `last_modified`, or a git export oid memo `git_tree_oid`, `git_blob_oid` or `git_oid`, or
+    /// one of them under a memo key, `git_tree_oid_mac`, `git_blob_oid_mac` or `git_oid_mac`,
+    /// whose value, or under the store's key whose MAC, does not check (`derived_mismatch`, which
+    /// a deep verify finds; `git_oid` and `git_oid_mac` name their `changeset`, the tree and blob
+    /// memos their `object`). Removing the value's file under `meta/derived/<derivation>/`, or all
+    /// of `meta/derived/`, has it derived again.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub derivation: Option<String>,
 }

@@ -2186,6 +2186,7 @@ name = "swarmops-git"
 version = "0.5.0"
 dependencies = [
  "base64",
+ "blake3",
  "camino",
  "gix",
  "proptest",

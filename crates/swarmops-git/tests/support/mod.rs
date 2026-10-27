@@ -11,6 +11,16 @@ mod mem_sink;
 pub use mem_sink::{Keep, MemImage, MemSink, SinkCall, reaches_only_kept};
 
 use std::collections::HashMap;
+use std::io;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use camino::Utf8PathBuf;
+use swarmops_repo::LocalRepo;
+use swarmops_store::FsMethod;
+use swarmops_testkit::fs::{Call, NoSyncFs, Watch, Watched};
+use tempfile::TempDir;
 
 use swarmops_git::{
     GitOid, GitSource, ObjectFormat, RawCommit, RawIdent, RawKind, RawTree, RawTreeEntry,
@@ -134,4 +144,44 @@ impl GitSource for MemSource {
             .cloned()
             .ok_or(SourceError::Missing { oid })
     }
+}
+
+/// Counts the reads of a store's object files (`objects/`): how many changesets, trees and blobs
+/// a call read, which the memos a key authenticates spare.
+pub struct ObjectReads {
+    /// The store's `objects/`, as the store names its files.
+    dir: PathBuf,
+    reads: AtomicU64,
+}
+
+impl ObjectReads {
+    /// How many object files were read since the last call, and none counted from here on.
+    pub fn take(&self) -> u64 {
+        self.reads.swap(0, Ordering::Relaxed)
+    }
+}
+
+impl Watch for ObjectReads {
+    fn before(&self, call: &Call<'_>) -> io::Result<()> {
+        if call.method == FsMethod::Read && call.path().starts_with(&self.dir) {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+}
+
+/// A store of its own on a filesystem that never flushes ([`NoSyncFs`]), whose object reads are
+/// counted, `ExportOid` registered: its temp dir, its root, the store and the counter.
+pub fn counted_store() -> (TempDir, Utf8PathBuf, LocalRepo, Arc<ObjectReads>) {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let base = dir.path().canonicalize().expect("the temp dir");
+    let root = Utf8PathBuf::from_path_buf(base.join("store")).expect("a UTF-8 temp dir");
+    let reads = Arc::new(ObjectReads {
+        dir: base.join("store").join("objects"),
+        reads: AtomicU64::new(0),
+    });
+    let fs = Arc::new(Watched(Arc::clone(&reads), NoSyncFs));
+    let mut repo = LocalRepo::create_with_fs(&root, "test", fs).expect("create");
+    swarmops_git::register(&mut repo).expect("register ExportOid");
+    (dir, root, repo, reads)
 }

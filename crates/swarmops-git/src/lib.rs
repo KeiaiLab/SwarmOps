@@ -18,6 +18,8 @@
 //! - [`export_oid`]: [`ExportOid`], the derivation of the git commit each changeset exports to
 //!   ([`ExportedOid`]), and the git oids of its trees and blobs, memoized per object
 //!   ([`tree_oid`], [`blob_oid`]).
+//! - [`memo_key`]: [`MemoKey`], the key, kept outside the store, that authenticates the export
+//!   oid memos the export and the import trust.
 //! - [`convert`]: [`Converter`], which converts git's commits, trees and blobs into a changeset's
 //!   fields ([`Converted`]), trees and blobs, refusing what the classes it allows do not cover
 //!   ([`ConvertError`]); a commit is converted without loss only if it renders back to its own
@@ -57,6 +59,7 @@ pub mod gix_source;
 pub mod import;
 pub mod limits;
 pub mod lossy;
+pub mod memo_key;
 pub mod mirror;
 pub mod native;
 pub mod oid;
@@ -71,7 +74,8 @@ pub use convert::{ConvertError, Converted, Converter, GIT_LOSSY, GIT_OID};
 pub use export::{DivergedReason, ExportError, ExportReport, ExportRequest, export};
 pub use export_oid::{
     ExportObjects, ExportOid, ExportReader, ExportedOid, GitMemoMismatch, OidCache, blob_oid,
-    real_blob_oid, real_tree_oid, register, tree_oid, verify_export_oids, verify_external_ids,
+    real_blob_oid, real_tree_oid, register, tree_oid, verify_export_oids, verify_export_oids_with,
+    verify_external_ids,
 };
 pub use gix_sink::GixSink;
 pub use gix_source::GixSource;
@@ -79,6 +83,7 @@ pub use import::{
     ExternalIdMismatch, ImportError, ImportReport, ImportRequest, LossyCommit, import,
 };
 pub use lossy::{LossyClass, LossySet};
+pub use memo_key::{MEMO_KEY_LEN, MemoKey};
 pub use native::{TRAILERS, export_message, render_commit};
 pub use oid::{GitOid, ObjectFormat, ParseGitOidError, RawKind, git_hash};
 pub use raw::{RawCommit, RawError, RawIdent, RawTree, RawTreeEntry};

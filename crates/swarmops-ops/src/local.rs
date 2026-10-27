@@ -2739,12 +2739,14 @@ fn git_memo_finding(mismatch: &swarmops_git::GitMemoMismatch) -> (String, Verify
         stored = mismatch.stored,
         real = mismatch.real,
     ));
-    // `git_oid` ([`swarmops_git::ExportOid`]) is a changeset's export oid; the other two memos are
-    // a tree's and a blob's.
-    let is_commit = mismatch.memo == "git_oid";
+    // `git_oid` ([`swarmops_git::ExportOid`]) and `git_oid_mac`, the same under a memo key, are a
+    // changeset's export oid; the other memos are a tree's and a blob's. A memo under a key names
+    // the key's id as its key.
+    let is_commit = matches!(mismatch.memo.as_str(), "git_oid" | "git_oid_mac");
     let mut found = VerifyFinding::new("derived_mismatch".to_owned());
     found.object = (!is_commit).then(|| subject.clone());
     found.changeset = is_commit.then_some(subject);
+    found.key = (!mismatch.key.is_empty()).then(|| external_ids::lower_hex(&mismatch.key));
     found.derivation = Some(mismatch.memo.clone());
     (line, found)
 }
