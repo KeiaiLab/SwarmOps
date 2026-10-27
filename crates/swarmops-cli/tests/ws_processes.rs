@@ -387,6 +387,10 @@ mod perf {
             .collect();
         say("status after 100 edits", median(times), "(target < 150 ms)");
 
+        // 3a. Those edits committed, untimed: each round below commits only its own k files.
+        let edits = ["ws", "commit", "-m", "edits", "--status-after", "none"];
+        inside(&dir, &edits).ok();
+
         // 4. Row 5: a commit of k changed files, by wall time and by the binary's own meta.
         for (round, k) in [1_usize, 10, 100].into_iter().enumerate() {
             let version = u32::try_from(round + 2).unwrap();
