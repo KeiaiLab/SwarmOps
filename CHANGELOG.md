@@ -14,7 +14,74 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ## [Unreleased]
 
+### Added
+
+#### M6: verify, crash safety, fuzzing, gc and FORMAT 2 (2026-10-27)
+
+- Store `FORMAT 2` (`swarmops-store 2`): ref names beyond `main` and `release/<name>`, namely
+  free-form branches (`feature/login`), tags (`tags/<path>`) and remote-tracking names
+  (`remote/<remote>/<path>`, kept for M11's fetch and refused to every command); each ref file is
+  named by a hash of the ref's name and holds it. A tag is created and deleted, never moved
+  (`E_TAG_IMMUTABLE`). `ref list` reports each ref's `kind` and takes `--prefix`.
+- `FORMAT 2`'s journal (`journal2.*`): each frame header carries its seq, the previous frame's CRC
+  and its own CRC, and each `journal.off` entry and the checkpoint carry checksums, so a
+  misplaced, stale or lost frame, or a crafted or zeroed entry anywhere in the chain, is reported
+  as damage; recovery checks the entries from the checkpoint on, not all of them.
+- `swarmops upgrade` (MCP `upgrade`) moves a FORMAT 1 store to FORMAT 2 in place, under the lock,
+  and finishes an interrupted upgrade on the next open; on a FORMAT 2 store it does nothing
+  (`upgraded: false`). It cannot be undone: older releases open no FORMAT 2 store, and a FORMAT 1
+  handle opened before the upgrade, of this release or an older one, fails its next read or write
+  with `E_STORE_CORRUPT` (its hint says to verify; opening the store again reads FORMAT 2).
+- `swarmops gc [--dry-run]` (MCP `gc`) removes a store's leftovers: temp files older than a day, a
+  crashed `init`'s staging, derived values of older versions, and what an upgrade left. It
+  deletes no object and no changeset, and counts the objects no changeset reaches
+  (`orphan_objects`) without removing them.
+- `swarmops repair [--dry-run]` (MCP `repair`) rebuilds `journal.off`, the changeset index and
+  its sorted views, and the ref files from the journal, moves damaged objects to
+  `quarantine/objects/<id>` so that `blob put` or `git import` can store them again, drops
+  damaged derived values and external id entries, and verifies again (`after`). It never cuts the
+  journal: damage past a torn tail is refused as `E_STORE_CORRUPT` with `details.offset`.
+- `gc`, `repair` and `upgrade` take a maintenance lease: while one runs, another fails at once
+  with the retryable `E_MAINTENANCE_BUSY`, raised for the first time.
+- `swarmops init --format <1|2>` (MCP `repo_init`'s `format`); `info` reports the store's
+  `store_version`.
+- `verify --max-findings <N>` (default and maximum 1,000): the report lists at most that many
+  problems and says `truncated` and `found` (every problem found).
+- Error codes `E_FORMAT_REQUIRED` (a ref name a FORMAT 1 store cannot hold: `details{name,
+  needs, store}`, hint `swarmops upgrade`) and `E_TAG_IMMUTABLE`, both exit 1, not retryable.
+- Four libFuzzer targets: `object_file` (loose object files), `frame2_decode`,
+  `journal2_recovery` and `ref_file2` (FORMAT 2's frames, journal recovery and ref files).
+- Tests: a literal `SIGKILL` kills `commit --advance` at seeded random points on both formats on
+  a real disk, then checks `verify --deep`, that every acknowledged commit is in `log`, and that
+  the next commit succeeds (10 kills per format in `just check`, 500 in the slow suite); the
+  crash, I/O-error and power-loss sweeps run once per format; golden tests pin the
+  `E_FORMAT_REQUIRED`, `E_TAG_IMMUTABLE` and `E_MAINTENANCE_BUSY` envelopes and run the FORMAT 2
+  acceptance (a branch and a tag in one store, the FORMAT 1 refusal and `upgrade`, a land onto a
+  branch but not a tag) through the binary.
+
 ### Changed
+
+#### M6: verify, crash safety, fuzzing, gc and FORMAT 2 (2026-10-27)
+
+- `swarmops init` makes a FORMAT 2 store unless `--format 1` asks for one that older releases
+  open. FORMAT 1 stores open, read and write as before.
+- A store on a filesystem off the Linux allow-list (ext2/3/4, XFS, btrfs, tmpfs, ZFS, F2FS,
+  overlayfs) is refused with `E_UNSUPPORTED_FS`, its `statfs` magic in `details.fs_type`: NFS, SMB,
+  FUSE and 9p mounts among them. `init` checks the nearest existing directory, every other command
+  the store's root. The `/mnt/` rule stays.
+- A remote-tracking name (`remote/<remote>/<path>`) is refused to `ref set`, `ref delete`, `land`,
+  `commit --advance` and `rebase --onto` (`E_REF_NAME_INVALID`, `details.reason: "reserved"`), and
+  a tag as the target of `land` or `commit --advance` (`details.reason: "tag"`).
+- Bounded reads: the journal is read a frame at a time, header first, and `journal.off`, the
+  index columns and the sorted views in windows of 4,096 entries, so no store file is read into a
+  buffer of its length; a lookup by id prefix or delta hash keeps at most 4,096 changesets.
+  `cat` reads a blob in windows, and `diff` (stat and unified) and `land`'s merge leave unread a
+  blob past the line diff's 8 MiB bound, with the same output as before. A NUL-holding blob past
+  8 MiB opposite a text one now shows in `diff` as cut, not binary.
+- `verify`'s metadata checks run in the store, reading the index and the sorted views in blocks
+  of 4,096 entries.
+
+#### Since 0.3.0
 
 - The code follows the Google Rust style guide, applied as `docs/develop/style.md` records: no
   `unwrap()` or message-less assert in library code (`expect` with the reason), module files named
@@ -32,6 +99,9 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ### Fixed
 
+- `init` over a store whose `init` crashed in the other format no longer fails with
+  `E_STORE_CORRUPT` until the directory is removed: it sets the half-made metadata aside and makes
+  the store in the format asked for.
 - `ws status` could miss a same-size edit made in the filesystem tick a status had confirmed the
   file in: once a later status rewrote the index for another file, the racy row was trusted. A
   row a scan does not confirm keeps no stat at or after its index's time (it is hashed again).
