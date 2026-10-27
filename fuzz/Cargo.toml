@@ -22,11 +22,11 @@ blake3 = "1.8.7"
 crc32fast = "1.5.2"
 # The workspace's crates, at its version (RELEASE.md bumps it here too): cargo deny refuses a
 # dependency without a version requirement, a path one included.
-swarmops-core = { path = "../crates/swarmops-core", version = "0.3.0", features = ["arbitrary"] }
-swarmops-store = { path = "../crates/swarmops-store", version = "0.3.0" }
+swarmops-core = { path = "../crates/swarmops-core", version = "0.4.0", features = ["arbitrary"] }
+swarmops-store = { path = "../crates/swarmops-store", version = "0.4.0" }
 # The filesystem doubles only (`NoSyncFs`): without its default features, which hold the CLI
 # and repository helpers, it adds no dependency the store does not have.
-swarmops-testkit = { path = "../crates/swarmops-testkit", version = "0.3.0", default-features = false }
+swarmops-testkit = { path = "../crates/swarmops-testkit", version = "0.4.0", default-features = false }
 tempfile = "3.27.0"
 
 [[bin]]

@@ -546,8 +546,8 @@ Several upstreams merging with each other, partial replicas and a caching tier.
 Milestone ids are never renumbered. Two are new: M13 (topology 2) and M14 (topology 1); M11
 (topology 3) takes `so clone`, `so remote` and `so sync`.
 
-**Settled:** M0 to M4 and M8 are delivered, in v0.1.0, M13 in v0.2.0 and M5 in v0.3.0, ahead of
-M12, which is developed separately; M6 is delivered on `stable`, for the next release.
+**Settled:** M0 to M4 and M8 are delivered, in v0.1.0, M13 in v0.2.0, M5 in v0.3.0 and M6 in
+v0.4.0, ahead of M12, which is developed separately.
 **Provisional:** the order after M6 is settled once the pilot has run
 ([README](../README.md#roadmap)); until then the order below is the plan:
 
@@ -564,7 +564,7 @@ needs   M13  ← M3, M4, M8                 packs, the mirror, the sync engine
 | 📋 M12 | all | macOS and Windows builds, tests and releases | | Each platform passes `just check` in CI and ships in a release |
 | ✅ M13 | 2 | The user's git as the transport; the store's git mirror; `so clone`, `so remote`, `so fetch`, `so push`, `so sync`, `so sync status`, their MCP tools; `authors.toml`; v0.2.0 | M3, M4, M8 | Topology 2's acceptance criteria 1 to 6 pass (delivered: [CHANGELOG](../CHANGELOG.md)) |
 | ✅ M5 | — | Workspaces, with an adapter for Claude Code's worktree hooks; `rebase`, `land --expect-target`, `blob get`; eleven MCP workspace tools; v0.3.0 | M4 | As the README states it (delivered: [CHANGELOG](../CHANGELOG.md)) |
-| ✅ M6 | 1, 3 | Verify, crash safety, fuzzing, gc, and FORMAT 2 with the ref names M11 and M14 need (remote-tracking refs, branches, tags); gc keeps what the mirror's refs reach | | As the README states it, plus a FORMAT 2 store holding a free-form branch and a tag (delivered: [CHANGELOG](../CHANGELOG.md)) |
+| ✅ M6 | 1, 3 | Verify, crash safety, fuzzing, gc, and FORMAT 2 with the ref names M11 and M14 need (remote-tracking refs, branches, tags); gc keeps what the mirror's refs reach; v0.4.0 | | As the README states it, plus a FORMAT 2 store holding a free-form branch and a tag (delivered: [CHANGELOG](../CHANGELOG.md)) |
 | 📋 M14 | 1 | `swarmops serve` over ssh and CGI; upload-pack and receive-pack; `refs/land/`; the access file | M13, M6 | Topology 1's acceptance criteria 1 to 5 pass |
 | 📋 M7 | — | Blame and review | A `FORMAT 3` (annotations, a new record kind) | As the README states it |
 | 📋 M9 | — | Simulation and a benchmark gate | | As the README states it |

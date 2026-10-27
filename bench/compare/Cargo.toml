@@ -13,8 +13,8 @@ description = "Measures SwarmOps' native metadata store against embedded databas
 [dependencies]
 # The two from this tree, at the workspace's version (RELEASE.md bumps it here too): cargo deny
 # refuses a dependency without a version requirement, a path one included.
-swarmops-core = { path = "../../crates/swarmops-core", version = "0.3.0" }
-swarmops-store = { path = "../../crates/swarmops-store", version = "0.3.0" }
+swarmops-core = { path = "../../crates/swarmops-core", version = "0.4.0" }
+swarmops-store = { path = "../../crates/swarmops-store", version = "0.4.0" }
 camino = "=1.2.6"
 tempfile = "=3.27.0"
 serde = { version = "=1.0.229", features = ["derive"] }

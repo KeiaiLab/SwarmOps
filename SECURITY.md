@@ -15,13 +15,13 @@ what it lets an attacker do, and the commit you tested. A fix lands on `stable`,
 
 ## Supported versions
 
-SwarmOps 0.1.0, 0.2.0 and 0.3.0 are released as the tags `v0.1.0`, `v0.2.0` and `v0.3.0`, with
-their archives; no crate is published. Security fixes go to the main line, the `stable` branch, and nowhere else.
+SwarmOps 0.1.0, 0.2.0, 0.3.0 and 0.4.0 are released as the tags `v0.1.0`, `v0.2.0`, `v0.3.0`
+and `v0.4.0`, with their archives; no crate is published. Security fixes go to the main line, the `stable` branch, and nowhere else.
 
 | Version | Supported |
 | --- | --- |
 | `stable` (the main line) | yes |
-| `0.3.0`, `0.2.0`, `0.1.0` (released; fixes go to `stable`) | no |
+| `0.4.0`, `0.3.0`, `0.2.0`, `0.1.0` (released; fixes go to `stable`) | no |
 | anything else | no |
 
 ## What is in scope
