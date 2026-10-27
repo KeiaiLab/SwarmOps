@@ -53,17 +53,12 @@ impl From<StoreError> for Error {
 }
 
 fn cid(id: Id) -> ChangesetId {
-    ChangesetId(ObjectId(id))
+    ChangesetId::new(ObjectId::new(id))
 }
 
 fn meta(cs: &Changeset) -> ChangesetMeta {
-    ChangesetMeta {
-        id: cid(cs.id),
-        seq: 0,
-        generation: 0,
-        delta_hash: cs.delta_hash,
-        parents: cs.parents.iter().copied().map(cid).collect(),
-    }
+    let parents = cs.parents.iter().copied().map(cid).collect();
+    ChangesetMeta::new(cid(cs.id), 0, 0, cs.delta_hash, parents)
 }
 
 struct NativeDb(MetaStore);
@@ -86,6 +81,7 @@ impl Session for NativeSession<'_> {
         match write.insert_changeset(meta(cs))? {
             InsertOutcome::Inserted { .. } => {}
             InsertOutcome::AlreadyPresent => return Err(other("changeset already present")),
+            _ => return Err(other("an insert outcome this harness does not know")),
         }
         let new = Some(cid(cs.id));
         let first = match main {
@@ -101,8 +97,10 @@ impl Session for NativeSession<'_> {
                 match write.cas_ref("main", actual, new, actor)? {
                     CasResult::Applied { old } => (old, true),
                     CasResult::Mismatch { .. } => return Err(other("main moved under the lock")),
+                    _ => return Err(other("a CAS result this harness does not know")),
                 }
             }
+            _ => return Err(other("a CAS result this harness does not know")),
         };
         write.commit()?;
         Ok(Committed {

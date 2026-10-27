@@ -111,29 +111,32 @@ impl TimingFs {
     }
 }
 
+/// The filesystem every timed call goes to.
+const REAL_FS: RealFs = RealFs::new();
+
 impl FsOps for TimingFs {
     fn create_dir_all(&self, p: &Path) -> io::Result<()> {
-        self.time("create_dir_all", p, || RealFs.create_dir_all(p))
+        self.time("create_dir_all", p, || REAL_FS.create_dir_all(p))
     }
     fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
         self.time("write_durable_temp", dir, || {
-            RealFs.write_durable_temp(dir, bytes)
+            REAL_FS.write_durable_temp(dir, bytes)
         })
     }
     fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
-        self.time("link_noclobber", to, || RealFs.link_noclobber(from, to))
+        self.time("link_noclobber", to, || REAL_FS.link_noclobber(from, to))
     }
     fn fsync_dir(&self, p: &Path) -> io::Result<()> {
-        self.time("fsync_dir", p, || RealFs.fsync_dir(p))
+        self.time("fsync_dir", p, || REAL_FS.fsync_dir(p))
     }
     fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
-        self.time("read", p, || RealFs.read(p))
+        self.time("read", p, || REAL_FS.read(p))
     }
     fn exists(&self, p: &Path) -> io::Result<bool> {
-        self.time("exists", p, || RealFs.exists(p))
+        self.time("exists", p, || REAL_FS.exists(p))
     }
     fn remove(&self, p: &Path) -> io::Result<()> {
-        self.time("remove", p, || RealFs.remove(p))
+        self.time("remove", p, || REAL_FS.remove(p))
     }
     /// `RealFs::append_durable`, step by step.
     fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
@@ -146,16 +149,16 @@ impl FsOps for TimingFs {
         Ok(offset)
     }
     fn file_len(&self, path: &Path) -> io::Result<u64> {
-        self.time("file_len", path, || RealFs.file_len(path))
+        self.time("file_len", path, || REAL_FS.file_len(path))
     }
     fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
-        self.time("truncate", path, || RealFs.truncate(path, len))
+        self.time("truncate", path, || REAL_FS.truncate(path, len))
     }
     /// `RealFs::atomic_replace`, step by step for a ref file.
     fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
         if !self.rel(path).starts_with("meta/refs/") {
             return self.time("atomic_replace", path, || {
-                RealFs.atomic_replace(path, bytes)
+                REAL_FS.atomic_replace(path, bytes)
             });
         }
         let dir = match path.parent() {
@@ -174,18 +177,18 @@ impl FsOps for TimingFs {
         self.time("fsync dir", path, || File::open(dir)?.sync_all())
     }
     fn sync_data(&self, path: &Path) -> io::Result<()> {
-        self.time("sync_data", path, || RealFs.sync_data(path))
+        self.time("sync_data", path, || REAL_FS.sync_data(path))
     }
     fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        self.time("append", path, || RealFs.append(path, bytes))
+        self.time("append", path, || REAL_FS.append(path, bytes))
     }
     fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
-        self.time("rename_durable", to, || RealFs.rename_durable(from, to))
+        self.time("rename_durable", to, || REAL_FS.rename_durable(from, to))
     }
 }
 
 fn cid(id: [u8; 32]) -> ChangesetId {
-    ChangesetId(ObjectId(id))
+    ChangesetId::new(ObjectId::new(id))
 }
 
 /// W1's transaction, `txns` timed after `warmup`; the values are means per commit: `commit_ms`,
@@ -205,16 +208,12 @@ pub fn run(base: &Path, warmup: u64, txns: u64) -> Result<Values> {
     let mut commit = |n: u64| -> Result<()> {
         let cs = changeset(chain::W1, n, None);
         let mut write = store.write()?;
-        write.insert_changeset(ChangesetMeta {
-            id: cid(cs.id),
-            seq: 0,
-            generation: 0,
-            delta_hash: cs.delta_hash,
-            parents: cs.parents.iter().copied().map(cid).collect(),
-        })?;
+        let parents = cs.parents.iter().copied().map(cid).collect();
+        write.insert_changeset(ChangesetMeta::new(cid(cs.id), 0, 0, cs.delta_hash, parents))?;
         match write.cas_ref("main", main.map(cid), Some(cid(cs.id)), "w1")? {
             CasResult::Applied { .. } => {}
             CasResult::Mismatch { .. } => return Err(other("main moved")),
+            _ => return Err(other("a CAS result this harness does not know")),
         }
         write.commit()?;
         main = Some(cs.id);
