@@ -410,3 +410,157 @@ fn sync_of_one_land_on_12000_commits() {
         took.as_secs_f64()
     );
 }
+
+/// The mirror's git directory inside a store, as the git crate lays it out.
+const MIRROR: &str = "git/mirror.git";
+
+/// The configuration the product's git children run with (the git crate's `CONFIG`), so that
+/// git alone does the same durable work.
+const GIT_CONFIG: [&str; 6] = [
+    "core.fsync=all",
+    "core.fsyncMethod=fsync",
+    "gc.autoDetach=false",
+    "protocol.version=2",
+    "fetch.recurseSubmodules=false",
+    "transfer.credentialsInUrl=die",
+];
+
+/// The product's `git fetch` options up to the URL (the git crate's `FETCH_FLAGS`).
+const FETCH_FLAGS: [&str; 8] = [
+    "fetch",
+    "--no-tags",
+    "--prune",
+    "--no-write-fetch-head",
+    "--no-auto-gc",
+    "--no-recurse-submodules",
+    "--no-show-forced-updates",
+    "--end-of-options",
+];
+
+/// The product's refspecs for [`ORIGIN`], each forced.
+const REFSPECS: [&str; 2] = [
+    "+refs/heads/*:refs/remotes/origin/*",
+    "+refs/tags/*:refs/remote-tags/origin/*",
+];
+
+/// The medians, in ms, of one fetch's phases.
+struct Phases {
+    /// The binary's `fetch`, by `meta.elapsed_ms`.
+    so: u32,
+    /// `git fetch` alone into a copy of the mirror.
+    fetch: u32,
+    /// `git gc --auto` alone on that copy.
+    gc: u32,
+}
+
+impl Phases {
+    /// What git's two phases leave of the binary's time: SwarmOps' own share.
+    fn rest(&self) -> i32 {
+        let rest = i64::from(self.so) - i64::from(self.fetch) - i64::from(self.gc);
+        i32::try_from(rest).expect("a small time")
+    }
+}
+
+/// `args` run as the product runs git: the server's binary and pinned environment, with
+/// [`GIT_CONFIG`], on the git directory `dir`.
+fn git_on(remote: &Remote, dir: &Path, args: &[&str]) -> std::process::Command {
+    let mut command = remote.server.command();
+    for pair in GIT_CONFIG {
+        command.args(["-c", pair]);
+    }
+    command.arg("--git-dir").arg(dir).args(args);
+    command
+}
+
+/// Times `command` to its end, in ms; a failure fails the case.
+fn timed_ms(command: &mut std::process::Command) -> u32 {
+    let took = timed(|| succeed(command));
+    u32::try_from(took.as_millis()).expect("a small time")
+}
+
+/// [`ROUNDS`] one-commit fetches on `store`, the remote's commits numbered from `first`: each
+/// round copies the mirror (`cp -a`), then times the binary's `fetch`, and `git fetch` and
+/// `git gc --auto` alone on the copy.
+fn phases(remote: &Remote, store: &Store, first: usize) -> Phases {
+    let mirror = Path::new(store.path()).join(MIRROR);
+    let url = remote.url();
+    let (mut so, mut fetch, mut gc) = (Vec::new(), Vec::new(), Vec::new());
+    for n in first..first + ROUNDS {
+        remote.commit(n);
+
+        // 1. The copy holds what the mirror held before the binary's fetch.
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let copy = dir.path().join("copy.git");
+        let mut cp = std::process::Command::new("cp");
+        cp.arg("-a").arg(&mirror).arg(&copy);
+        succeed(&mut cp);
+
+        // 2. The binary's fetch, then git's two phases of it alone.
+        so.push(elapsed_ms(&remote.on(store, &["fetch", ORIGIN])));
+        let mut args = FETCH_FLAGS.to_vec();
+        args.push(url.as_str());
+        args.extend(REFSPECS);
+        fetch.push(timed_ms(&mut git_on(remote, &copy, &args)));
+        let auto = ["gc", "--auto", "--quiet"];
+        gc.push(timed_ms(&mut git_on(remote, &copy, &auto)));
+    }
+    Phases {
+        so: median(so),
+        fetch: median(fetch),
+        gc: median(gc),
+    }
+}
+
+/// Prints `phases` of `label`.
+fn print_phases(label: &str, phases: &Phases) {
+    println!(
+        "remote-perf: fetch phases {label}: so fetch {} ms; git fetch {} ms + git gc --auto {} \
+         ms; rest (SwarmOps) {} ms",
+        phases.so,
+        phases.fetch,
+        phases.gc,
+        phases.rest()
+    );
+}
+
+/// The phases of a one-commit fetch on `commits`, without and then with a commit-graph on the
+/// server and the mirror.
+fn fetch_phases(commits: usize) -> (Phases, Phases) {
+    let remote = Remote::with_history(commits);
+    let store = remote.cloned();
+    let plain = phases(&remote, &store, 0);
+
+    // A commit-graph on both sides; each round's copy takes the mirror's.
+    let write = ["commit-graph", "write", "--reachable"];
+    let bare = remote.server.bare(REPO);
+    succeed(&mut git_on(&remote, &bare, &write));
+    let mirror = Path::new(store.path()).join(MIRROR);
+    succeed(&mut git_on(&remote, &mirror, &write));
+    let graph = phases(&remote, &store, ROUNDS);
+    (plain, graph)
+}
+
+/// G17 fetch's evidence: the one-commit fetch on 1,000 and 12,000 commits split into git's
+/// `fetch` and `gc --auto` and the rest, SwarmOps' own, with and without a commit-graph.
+#[test]
+#[ignore = "slow, minutes: imports 13,000 commits, times 20 fetches three ways, run by `just perf`"]
+fn fetch_phases_scale_with_history() {
+    let (short, short_graph) = fetch_phases(SHORT);
+    let (long, long_graph) = fetch_phases(LONG);
+    let ratio = |long: f64, short: f64| long / short.max(1.0);
+    for (label, short, long) in [
+        ("without commit-graph", &short, &long),
+        ("with commit-graph", &short_graph, &long_graph),
+    ] {
+        print_phases(&format!("{SHORT} commits, {label}"), short);
+        print_phases(&format!("{LONG} commits, {label}"), long);
+        println!(
+            "remote-perf: fetch phases ratio {label}: so fetch {:.2}, git fetch {:.2}, \
+             git gc --auto {:.2}, rest {:.2}",
+            ratio(f64::from(long.so), f64::from(short.so)),
+            ratio(f64::from(long.fetch), f64::from(short.fetch)),
+            ratio(f64::from(long.gc), f64::from(short.gc)),
+            ratio(f64::from(long.rest()), f64::from(short.rest()))
+        );
+    }
+}
