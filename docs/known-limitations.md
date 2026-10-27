@@ -1,6 +1,6 @@
 # Known limitations
 
-What SwarmOps does not do yet, or does less well than it should, as of M5, and the milestone
+What SwarmOps does not do yet, or does less well than it should, as of M6, and the milestone
 meant to change it. The items come from the M1 and M1.5 reviews and the 2026-10-16 code review:
 the carry-overs their tasks handed to later milestones, the deferred minors that are still open,
 and the rulings of M1's final review, which left 14 questions to the maintainer (the table at the
@@ -15,7 +15,7 @@ M4 merge and landing · M8 git export · M12 portability · M13 git remotes · M
 M6 verify, crash safety and fuzzing · M14 git clients against a store · M7 blame and review ·
 M9 simulation and a benchmark gate · M11 remote sync, offline-first.
 M0, M1, M1.5, M1.6, M2, M3, M4 and M8 make the first release, 0.1.0; M13 makes 0.2.0, and M5
-0.3.0. M1.5, the hardening milestone after M1, closed a few, and M1.6, the code-review follow-ups after it,
+0.3.0; M6 is on `stable`, for the next release. M1.5, the hardening milestone after M1, closed a few, and M1.6, the code-review follow-ups after it,
 closed more. "Deferred
 until after the pilot" marks a delivered milestone's task that waits until SwarmOps has been
 piloted on a real repository ([pilot.md](pilot.md)): the measurements that need a quiet host,
@@ -28,22 +28,17 @@ left).
 
 ## Durability
 
-- **The crash model is a process crash and a modelled power loss.** The sweeps abort the process
-  at a chosen filesystem call, which leaves the kernel's page cache intact. A power loss is
-  modelled by the images of `crates/swarmops-cli/tests/power_loss.rs`: for one recorded run,
-  what a disk may hold after the power fails at each of its steps (unsynced data dropped, cut at
-  512 B or 4 KiB, zero-filled, or with its first sector lost; directory entries that no fsync
-  covered reverted), each of which the binary must recover. What stays open: `abort()` stands
-  in for `SIGKILL`, and the images come from a model of the disk, not a real device, and the
-  recorded run is short (its journal ends at 2,016 B), so a cut at 4 KiB is in the model but
-  never differs from dropping there; only the slow variant's bulk frame (1,025 changeset
-  records, about 76 KB) reaches past a 4 KiB boundary. A test with a literal `SIGKILL` on a real
-  device is *M6*. *Found: M1 Task 6; final review, question 11; narrowed by M1.5 Task 3 and M1.6
-  Task 4.*
-- **A double failure leaves an index risk open.** When an index sync fails, the writer cuts the
-  unsynced records back so the journal can supply them again; if the cut fails too, the error
-  names both failures, and the risk stays open until the next successful sync, which could carry
-  the checkpoint past records the failed writeback lost. *Target: M6 (fsck). Found: M1 Task 6.*
+- **The power-loss model is a model.** The sweeps abort the process at a chosen filesystem call,
+  which leaves the kernel's page cache intact, and since M6 a literal `SIGKILL` kills
+  `commit --advance` at random points on a real disk, on both formats. A power loss is modelled by
+  the images of `crates/swarmops-cli/tests/power_loss.rs`: for one recorded run, what a disk may
+  hold after the power fails at each of its steps (unsynced data dropped, cut at 512 B or 4 KiB,
+  zero-filled, or with its first sector lost; directory entries that no fsync covered reverted),
+  each of which the binary must recover. What stays open: the images come from a model of the
+  disk, not a real device, and the recorded run is short (its journal ends at 2,016 B), so a cut
+  at 4 KiB is in the model but never differs from dropping there; only the slow variant's bulk
+  frame (1,025 changeset records, about 76 KB) reaches past a 4 KiB boundary. *Unscheduled. Found:
+  M1 Task 6; final review, question 11; narrowed by M1.5 Task 3, M1.6 Task 4 and M6 Task K1.*
 - **A reader can get `E_IO` after such a cut.** A snapshot that counted the records a writer
   then cut fails with an I/O error until the reader takes a new one. A snapshot that opens while
   the cut is made counts every record the checkpoint passed or the sorted views cover and reads
@@ -64,9 +59,10 @@ left).
   damage, which loses the rewritten frames, one of which may be a commit acknowledged with a
   warning, and the intruding bytes, with no trace but that one error. A crash inside a frame's
   append, between the write and its `fdatasync`,
-  may leave no one to receive the frame's writeback error. *Target: M6 (the next `FORMAT`'s
-  frame header, with the frame's sequence number and the previous frame's CRC, and fsck).
-  Found: M1.5 Task 2.*
+  may leave no one to receive the frame's writeback error. A FORMAT 2 frame carries its seq and
+  the previous frame's CRC, so a misplaced, stale or lost frame is reported as damage, but an
+  append-only journal cannot bring a lost frame back: `repair` reports it and cuts nothing.
+  *Documented (the M6 design, section 12). Found: M1.5 Task 2; narrowed by M6.*
 - **A failed directory fsync in the object store is retried, not taken back.**
   `FsObjectStore::flush` keeps a fan-out directory whose fsync failed and fsyncs it again on a
   later flush; the commit whose flush failed fails. The retry is for an fsync that never ran (the
@@ -74,10 +70,10 @@ left).
   good a failed one, and on the filesystems the store supports it need not: there a failed
   directory fsync is fail-stop (storage spec §2 rule 5), so every later sync fails too; the
   order checker and the fsync-failure model assume the same. On a filesystem that is not
-  fail-stop (ext4 without a journal, ext2, FUSE, NFS or SMB), which the store does not detect
-  yet, a later fsync's success proves nothing about the earlier links, and a later commit may
-  name an object whose link a power loss then takes back. *Target: M6 (detection by `statfs`).
-  Found: M1.5 Task 2; the 2026-10-16 expert review.*
+  fail-stop, a later fsync's success proves nothing about the earlier links, and a later commit
+  may name an object whose link a power loss then takes back. Since M6 the store refuses FUSE,
+  NFS and SMB by `statfs`, but ext2 and ext4 without a journal share ext4's magic and pass.
+  *Documented. Found: M1.5 Task 2; the 2026-10-16 expert review; narrowed by M6.*
 - **Full fsync is slow on this host.** An uncontended durable commit takes about 21 ms through
   the binary, at about 4 ms per fsync; the umbrella spec's commit target (5 ms plus 0.3 ms per
   file) leaves syncs out. Batching object and journal syncs, and whether any
@@ -92,8 +88,8 @@ left).
   a commit can wait a few hundred transactions; where a transaction takes more than about 28 ms
   (a slow disk), that can exceed the 10 s `lock_timeout` and end in `E_BUSY` (retryable). The
   quiet-window measurement saw no `E_BUSY` and a slowest commit of 918 ms (1.2 s at store
-  level). A ticket or FIFO hand-off on top of `flock` is the next step. *Target: M6. Found: M1
-  Task 7c; final review, question 3.*
+  level). A ticket or FIFO hand-off on top of `flock` is the next step. *Unscheduled (the M6
+  design, decision D3, kept the bounded wait). Found: M1 Task 7c; final review, question 3.*
 - **Landing retries under a burst.** `land` publishes by compare-and-swap: a land that loses the
   race for its target records nothing, merges again onto the new head and tries again, up to its
   `max_attempts` (8 by default, at most 32), and then fails with the retryable
@@ -108,11 +104,17 @@ left).
   `E_CAS_RETRY_EXHAUSTED` lands again with the same key, or asks for more attempts. *Target:
   M4's landing measurements and landing model (its plan's Tasks 11, 1 and 5), deferred until
   after the pilot. Found: the 2026-10-20 plan triage (a probe through the binary).*
-- **Recovery after a crash walks all of `journal.off` under the lock.** Before it cuts or
-  lists anything, the first writer after a crash checks every entry of `journal.off`. On a long
-  journal that walk could approach `lock_timeout` for the writers queued behind it. *Target: M6
-  (fsck, and the lock timeout against journal size). Found: M1 fuzzing review; final review,
-  question 5.*
+- **Recovery after a crash walks all of a FORMAT 1 `journal.off` under the lock.** Before it cuts
+  or lists anything, the first writer after a crash checks every entry of a FORMAT 1 store's
+  `journal.off`. On a long journal that walk could approach `lock_timeout` for the writers queued
+  behind it. A FORMAT 2 entry carries its own checksum, so recovery checks only the entries from
+  the checkpoint on; `swarmops upgrade` moves a store to FORMAT 2. *Documented (M6). Found: M1
+  fuzzing review; final review, question 5.*
+- **`repair` and `upgrade` hold the lock for the whole journal.** Rebuilding the index and
+  upgrading a store read every frame under `meta/lock`, so a writer that waits for them past the
+  10 s `lock_timeout` gets the retryable `E_BUSY`; an upgrade of 200,000 changesets took 2.79 s on
+  a loaded host. Streaming them in steps is the next step if a store takes longer. *Unscheduled.
+  Found: the M6 plan, risk R-1.*
 - **An abandoned lock wait parks a thread.** A wait that times out leaves its helper thread in
   the kernel's queue until the holder lets go, and a hung holder leaves one parked thread per
   abandoned wait. That costs nothing in a short-lived CLI process; a long-lived one (the stdio
@@ -143,26 +145,13 @@ left).
 
 ## Reads and response sizes
 
-- **`cat` reads the whole object file.** `read_file` returns part of a file, from `offset` or by
-  `lines`, and keeps only the bytes it returns while it verifies the whole blob (M2), but it
-  still reads the blob's object file whole: a large blob stored raw costs its size in memory on
-  every read, however little is asked for. Bounded reads come later. *Target: M6. Found: M1 Task
-  4b; final review, question 6; the offset gap by the M1.5 Task 5 review, closed in M2.*
 - **`ls` of a wide directory decodes its whole tree.** Paging limits what is returned, not what
   is read: a page decodes the whole tree object of the listed directory, and at a `depth` of
   every directory it enters, however few of their entries it lists. Bounded reads come later.
   (Sizes and depths came in M2, and the default page was measured again for them: 250 entries.)
-  *Target: M6. Found: M1 Task 5; final review, question 9.*
-- **A land merges a file both sides changed in memory, whole.** For a path that both the change
-  and the target changed since their base, `land` reads the three versions whole and line-diffs
-  them, with no cap of its own; a large file changed on both sides costs a few times its size.
-  The commit limits bound what a file can hold (512 MiB a put). *Target: M6 (bounded reads).
-  Found: the 2026-10-20 plan triage.*
-- **`diff` in stat and unified form reads both blobs whole.** For each changed file the two
-  versions are read whole and its hunks are built before the page is cut to `max_bytes`, so
-  memory and time follow the files, not the page (a 33 MB file's unified diff took about
-  122 MB); the default form, `names`, reads no content. *Target: M6 (bounded reads). Found: M2's
-  consolidated review (issue #4 item 5).*
+  A tree object is decoded whole within the 512 MiB object bound. *Unscheduled (a streaming tree
+  decode is a codec path of its own, the M6 design, section 5). Found: M1 Task 5; final review,
+  question 9.*
 - **A page cursor does not pin the revisions it pages.** `diff`'s `cursor` and `read_file`'s
   `next_offset` say where the next page starts, not which revisions it pages: an agent that pages
   through a diff or a file at `main` while another agent lands gets its next page from the new
@@ -174,10 +163,11 @@ left).
   be refused with `E_INVALID_ARG`, as `diff` refuses it). Found: M2's consolidated review.*
 - **A snapshot reads every ref file**: cheap with a few refs, linear in their number. Each
   request reads in one snapshot of the metadata (a commit, `cat`, `ls`, `show` and `log` take one
-  each, a ref move one besides its write), so a request pays it once. Refs are `main` and
-  `release/*` alone by design; should they grow past dozens, a snapshot's reading them calls for
-  a validated lazy read, a per-handle map of refs or a packed refs file (a FORMAT change), and
-  the `read_snapshot` bench measures 0, 16 and 256 refs to tell. *Unscheduled: when refs grow
+  each, a ref move one besides its write), so a request pays it once. A FORMAT 1 store holds
+  `main` and `release/*` alone, and a FORMAT 2 store branches and tags too; should they grow past
+  dozens, a snapshot's reading them calls for a validated lazy read, a per-handle map of refs or
+  a packed refs file (a FORMAT change), and the `read_snapshot` bench measures 0, 16 and 256 refs
+  to tell. *Unscheduled: when refs grow
   past dozens. Found: M1 Tasks 2c, 3 and 4b.*
 - **A file of control characters reads back at many times its size.** `read_file` returns UTF-8
   content as JSON text, which spells most control characters in six bytes each (`\u0001`): a page of
@@ -214,7 +204,7 @@ left).
 - **No hooks or annotations after a land.** A land records no post-land verification, and
   `land`'s result has no `verification` field: annotations need a journal record the current
   `FORMAT` lacks. Agents check a landed tree with `read_file` and their own runs. *Target: M7, on
-  M6's next `FORMAT` (M4 Decision 11). Found: M4 Task 12's hand-off.*
+  a `FORMAT 3` (M4 Decision 11; the M6 design, decision D6). Found: M4 Task 12's hand-off.*
 - **No rename detection.** A rename is a delete and an add, for `diff`, `log --path` and a land's
   merge alike: v1 finds no renames (storage spec §4). *Documented. Found: M4 Task 12's hand-off
   (issue #10 item 8).*
@@ -251,68 +241,35 @@ left).
   parallel, besides the request's text (at most 64 MiB). `blob put` (`blob_put`) and
   `{"blob": "<id>"}` take large contents out of the commit request. *Documented (bounded by the
   limits since M2). Found: the 2026-10-16 code review, issue 10.*
+- **Branches and tags stay in the store.** `git export`, `git import`, `push` and `sync` take
+  `main` and `release/<name>` only: mapping a FORMAT 2 branch or tag to a git ref is M14's work.
+  Names that differ only in case (`Feature` and `feature`) are two refs here, and would collide in
+  git's loose refs on a case-insensitive volume. *Target: M14. Found: the M6 design, section 2.5;
+  the M6 plan, risk R-7.*
 
 ## Verification and repair
 
-- **No repair tool.** `verify` reports damage (a corrupt listed frame, index records lost below
-  the checkpoint, a malformed ref file, a missing index file), but M1 cannot fix any of it;
-  restoring the store is the only remedy. The index can be rebuilt from the journal in
-  principle (`fsck --rebuild-index`). *Target: M6 (fsck). Found: M1 Tasks 2b, 2c and 3; final
-  review, question 5.*
-- **A zero-filled index tail over a damaged journal wedges the store.** A store whose journal
-  is damaged before the checkpoint, and whose index records past the checkpoint a power loss
-  zeroed, opens with `IndexCorrupt` (`E_STORE_CORRUPT`) on every read and write; no writer
-  repairs it. (A malformed `journal.ckpt`, or one that is not a frame boundary, fails every read
-  and write with `E_STORE_CORRUPT` on its own; verify reports both.) *Target: M6 (fsck). Found:
-  M1.5 minors (Task 3 review N1).*
-- **A zeroed index tail over a damaged journal can be counted when no record before it has
-  parents.** Where the journal cannot vouch for the index's records past the checkpoint (it is
-  damaged, or the index lacks the last changeset before the checkpoint), the index counts those
-  records by their lengths and checks only that each record's parents start in `parents.log`
-  where the record before it leaves off. Entries a power loss zeroed read "no parents, at 0":
-  after a record with parents the check refuses them (the entry above), but after records that
-  have none they pass, so the zeroed records are counted as they read, and the next write keeps
-  them. `verify` reports the journal's damage, not them. *Target: M6 (fsck). Found: M1.5
-  code-minors review (minor 2); M1.5 final review (D11).*
-- **Temp files of crashed writes stay.** `objects/tmp/` keeps what interrupted object writes, and
-  interrupted writes of external id entries, left there, and `meta/derived/tmp/` what interrupted
-  writes of derived values left. *Target: M6 (`gc`). Found: M1 final review, question 8; M2 Task 5.*
-- **Derived values are never collected.** `meta/derived/` keeps every value it was given: those of
-  a derivation's older versions, and those about objects nothing names any more. A damaged value
-  file that the store fails to remove reads as missing, and is derived again, on every read.
-  *Target: M6 (`gc`). Found: M2 Task 5.*
-- **A damaged or wrong external id entry stays until it is removed by hand.** `verify` reports a
-  damaged one (`external_id_corrupt`), and one whose changeset does not stand for its commit
-  (`external_id_mismatch`; `verify --deep` finds it where the changeset was made in the store),
-  but nothing removes either, and a put never replaces a file, so its id stays unmapped while it
-  is there. The index is a cache: what that costs is the work its writer does again (the git
-  import passes over the entry with a warning and converts that commit again, into the changeset
-  the store holds for it if there is one). *Target: M6 (fsck). Found: M3 Task 6; the wrong entry,
-  the 2026-10-20 security review's re-verification of the git import.*
-- **`verify` does not scale to very large stores.** It holds the journal and the index in memory,
-  and checks each sorted-view entry with its own reads (about 9 million reads at a million
-  changesets, about 9 per changeset: each index record, and each entry of both sorted views, is
-  read on its own). A deep check of a store with derived values also holds the first-parent
-  forest (a few words per changeset) and every `last_modified` value the store holds.
-  *Target: M6 (streaming verify). Found: M1 Task 3; final review.*
-- **`verify`'s report has no cap.** `problems` and `findings` list every problem found, a line
-  and a finding each, and a failed verify's `E_STORE_CORRUPT` carries the whole report in
-  `details`, so a store damaged in many places gives a response as long as its damage, twice
-  over through MCP, whose result holds its envelope twice. *Target: M6 (streaming verify, which
-  pages the report and says when it cut it, `truncated`). Found: M1.5 addendum review (gap 14;
-  ruling 9(c)).*
+- **Derived values about objects nothing names stay.** `gc` removes the values of a built-in
+  derivation's older versions, and `repair` the damaged ones, but values of the current version
+  stay, whatever they are about, and so do the versions of a derivation a caller registered,
+  whose name `gc` does not know. *Unscheduled. Found: M2 Task 5; narrowed by M6 Task G1.*
+- **`gc` collects no object.** Objects no changeset reaches (those of a commit that died before
+  its frame) are counted, as `orphan_objects`, and stay: collecting them needs a freshness rule on
+  the put path. *Unscheduled (the M6 design, decision D5). Found: the M6 design, section 8.*
+- **`verify` holds every object id in memory.** Since M6 its metadata checks read the index and
+  the sorted views in blocks of 4,096 entries, but its object phase holds the set of object ids,
+  and a deep check of a store with derived values also holds the first-parent forest (a few words
+  per changeset) and every `last_modified` value the store holds. *Unscheduled. Found: M1 Task 3;
+  final review; narrowed by M6.*
 - **A missing `journal.off` opens as `E_IO`** (`details.store_file: meta/journal.off`), not
-  `E_STORE_CORRUPT`. *Unscheduled. Found: M1 final review.*
+  `E_STORE_CORRUPT`; `swarmops repair` writes it again. *Unscheduled. Found: M1 final review.*
 - **`verify --deep` skips object files that are symlinks**, because the object listing ignores
   them; SwarmOps never writes one. *Unscheduled. Found: M1 final review.*
-- **A damaged object file stays until it is removed by hand.** A put never replaces a file, so where
-  an object's file is there already, whatever it holds (other bytes, or a symlink to nothing), a
-  commit of that object's content takes the file for the object: it succeeds, names the object and
-  does not count it in `blobs_written`. Reads of the object then fail with `E_STORE_CORRUPT`, and
-  `verify --deep` reports it (`corrupt_object`, or `missing_object` for a symlink to nothing, which
-  a shallow `verify` reports too). Once the file is removed, the same content committed again writes
-  it afresh, and every changeset that names it reads again. *Target: M6 (fsck). Found: the
-  2026-10-20 security review.*
+- **An upgraded store fails older handles as damaged.** After `swarmops upgrade`, an older
+  release, and a handle this release opened as FORMAT 1 before the upgrade, fail their next read
+  or write with `E_STORE_CORRUPT` and a hint to verify: the FORMAT 1 checkpoint is poisoned so
+  that no older writer appends to the old journal. Opening the store again with this release
+  reads FORMAT 2. *Documented (the M6 design, section 3). Found: the M6 plan, risk R-3.*
 
 ## Hostile input
 
@@ -343,41 +300,20 @@ left).
   Since M2, streamed reads bound `cat` below 512 MiB (`read_chunks`); every other read of the
   payload decodes it whole. *Unscheduled; M2 streamed `cat`, and M3 Task 4 set the bound. Found: M1
   Task 1; the 2026-10-16 code review; for derived values, the 2026-10-20 security review.*
-- **A huge `journal.log`, `journal.off`, index column or sorted view aborts a read.** The journal
-  past the checkpoint and the `journal.off` entries from there (`read_upto`, `Journal::entries`;
-  every read and write, and recovery's tail check and listed-chain walk), a column range
-  (`Column::entries`: the `ids.col` or `dh.col` tail of every lookup and of a compaction,
-  `by_length` over a damaged journal) and a view range (`Sorted::recs`: every match a prefix or
-  delta-hash lookup returns) are each read into one buffer sized from the file's length, with an
-  infallible allocation: a sparse or crafted file of gigabytes makes any command take that much
-  memory and abort when the allocation fails, instead of failing with an error, and the abort is
-  no panic, so `swarmops mcp` dies with it. A `journal.off` that ends in more than 512 zeroed
-  entries, as a sparse one does, is refused before that read ("A `journal.off` that ends in more
-  than 512 zeroed entries is refused, not repaired" below); one that does not still takes that read.
-  SwarmOps never writes such a file. *Target: M6 (bounded reads, when M6 moves the metadata read
-  path onto `FsOps` for fault injection: the journal a frame at a time with a streaming CRC,
-  `journal.off`, the index columns and the views in windows, and a cap on what a lookup returns).
-  Found: M1.5 final review (security-1); narrowed by the 2026-10-20 security review.*
-- **Crafted `journal.off` entries can mis-number a read.** Entries crafted to agree with each
-  other (one pointing into a payload whose bytes read as a frame header ending where the next
-  entry starts), three or more links before the end, pass the two links recovery and readers
-  check: a read that starts past them numbers its frames by them, and `frame_count` counts
-  them. That is outside the crash model, and `verify`, which walks every listed frame, reports
-  it. No frame is lost: before recovery cuts or lists anything it checks every listed frame
-  ("Recovery after a crash walks all of `journal.off`" above), which the `journal_recovery`
-  fuzz target asserts on every input. A checksum on each entry is a format change: the next
-  `FORMAT` (planned as 2, M6), together with a frame header that carries the frame's sequence
-  number and the previous frame's CRC. *Target: M6. Found: M1 fuzzing; final review,
-  question 7.*
-- **A zeroed `journal.off` entry deep in the chain** (three or more links before the end) is
-  outside the crash model: recovery checks the last two links, and `verify` finds the rest.
-  *Target: M6 (the next `FORMAT`'s checksums). Found: M1 fuzzing review.*
-- **A `journal.off` that ends in more than 512 zeroed entries is refused, not repaired.** A
-  power loss leaves zeroed only the entry being written, so readers and recovery drop at most a
-  4 KiB block of zeroed entries at the end of `journal.off`, found with one read, and refuse a
-  longer run as damage (`E_STORE_CORRUPT`, at offset 0; `verify` reports it): every read and
-  write fails until the file is cut back to its last entry that is not zero. *Target: M6
-  (fsck). Found: 2026-10-20 review.*
+- **Crafted FORMAT 1 `journal.off` entries can mis-number a read.** In a FORMAT 1 store, entries
+  crafted to agree with each other (one pointing into a payload whose bytes read as a frame header
+  ending where the next entry starts), three or more links before the end, pass the two links
+  recovery and readers check: a read that starts past them numbers its frames by them, and
+  `frame_count` counts them. That is outside the crash model, and `verify`, which walks every
+  listed frame, reports it. No frame is lost: before recovery cuts or lists anything it checks
+  every listed frame ("Recovery after a crash walks all of a FORMAT 1 `journal.off`" above), which
+  the `journal_recovery` fuzz target asserts on every input. A FORMAT 2 entry carries the frame's
+  payload CRC and a checksum of its own, which close this. *Documented (M6). Found: M1 fuzzing;
+  final review, question 7.*
+- **A zeroed FORMAT 1 `journal.off` entry deep in the chain** (three or more links before the
+  end) is outside the crash model: recovery checks the last two links, and `verify` finds the
+  rest. FORMAT 2 refuses a zeroed entry anywhere but at the end. *Documented (M6). Found: M1
+  fuzzing review.*
 - **A crafted index's generations steer history queries.** A read checks what the changeset
   index says where it can do so cheaply: a sorted view's entry must name a record that holds its
   key, and a record's parents must start where the record before it leaves off, or the read
@@ -387,9 +323,10 @@ left).
   as is its delta hash: a damaged or crafted `meta/idx/gen.col` can make a revision's `~N` name
   nothing where a changeset is, a land take an older common ancestor than the newest for its
   merge base, and `log --path` list its changesets out of order. Every changeset such a walk
-  reaches is on the objects' first-parent chain, and `verify` reports the damage. Checking a
-  generation takes the journal, or every generation down to a root. *Target: M6 (fsck). Found:
-  2026-10-20, when the read path came to check the index.*
+  reaches is on the objects' first-parent chain, and `verify` reports the damage, which
+  `swarmops repair` rebuilds from the journal. Checking a generation on every read takes the
+  journal, or every generation down to a root. *Documented (M6). Found: 2026-10-20, when the read
+  path came to check the index.*
 - **A text file past the line diff's bound is not diffed or merged by lines.** The histogram diff's
   time can grow with the square of a file's lines, so `diff` and a land's merge run it only on sides
   of at most 49,152 lines and 8 MiB (`MAX_DIFF_LINES`, `MAX_DIFF_BYTES`): past that,
@@ -458,9 +395,8 @@ left).
   and anything that is not a regular file (a FIFO, a socket, a device or a directory, or a
   symlink to one) are refused before anything is read. *Target: M14 (`serve`, reused by M11). Found: M1
   Task 4b; M1.5 Task 9 review (M11's `serve`).*
-- **Four error codes are not raised yet.** `E_REF_NOT_FOUND` (no operation looks a ref up by
-  name), `E_AUTH`, `E_POLICY_DENIED` and `E_MAINTENANCE_BUSY` (tokens, `policy.toml` and gc's
-  maintenance lease come later) are in the schema, so that an agent can match them before any
+- **Three error codes are not raised yet.** `E_REF_NOT_FOUND` (no operation looks a ref up by
+  name), `E_AUTH` and `E_POLICY_DENIED` (tokens and `policy.toml` come later) are in the schema, so that an agent can match them before any
   operation raises them. *Documented. Found: the 2026-10-16 comparison; M1.5 Task 9 review.*
 - **One temp-file error names a host path.** When 65,536 temp-file names in a row are taken in
   a directory of the store, the `tempfile` crate gives up with `too many temporary files exist`
@@ -656,9 +592,6 @@ left).
 - **A failed bootstrap is not run again.** When the repository's bootstrap command fails, the hook
   fails and Claude Code may retry it: the retry finds the workspace (`created: false`) and returns
   its path without running the bootstrap. *Documented. Found: M5 Task W9 review.*
-- **The registry is no gc root.** Workspaces' heads that have not landed are reachable from no ref;
-  whether gc keeps them is M6's decision, and until then `ws delete --rescue` prints the rescue
-  changeset's id. *Target: M6. Found: M5 design, risk R7.*
 - **Rough edges the reviews left.** A `ws land` cut while it publishes and run again can answer
   `E_NOTHING_TO_LAND`, or `E_CAS_RETRY_EXHAUSTED` with a smaller `--max-attempts`, though the land
   is durable and the workspace stands on it; a cut unchecked land run again with `--check` replays
@@ -670,14 +603,14 @@ left).
 
 ## Platforms
 
-- **The filesystem check is by path name only.** A store under `/mnt/` is refused, but NFS, SMB and FUSE mounts, Docker Desktop's and virtiofs bind mounts among them, are neither
-  detected nor supported. *Target: M6 (detection by `statfs`).
-  Found: M1 Task 3; umbrella spec §4.*
 - **Directory fsync failures are assumed fail-stop.** On ext4 with a journal, XFS and btrfs a
   failed directory fsync makes every later sync fail until the filesystem is mounted again, so a
   later sync that succeeds covers the entries made before it (storage spec §2 rule 5). ext4
   without a journal, ext2, FUSE and network filesystems do not behave this way and are not
-  supported. *Target: M6 (detection by `statfs`). Found: the 2026-10-16 code review.*
+  supported. Since M6 a store is refused unless `statfs` names ext2/3/4, XFS, btrfs, tmpfs, ZFS,
+  F2FS or overlayfs (`E_UNSUPPORTED_FS`), which keeps FUSE and network mounts out, but ext2 and
+  ext4 without a journal share ext4's magic and pass. *Documented. Found: the 2026-10-16 code
+  review; narrowed by M6.*
 - **btrfs and a resumed `init`.** Resuming an interrupted `init` relies on ext4's and XFS's
   ordered journal to make the crashed attempt's directories durable; on btrfs they might not be
   (recoverable by creating the store again). *Unscheduled. Found: M1 Task 3.*
@@ -689,8 +622,8 @@ left).
   `~/.local/state/swarmops/repos/<name>/` is only the convention the README follows.
   *Unscheduled. Found: M1 Task 5; umbrella spec §4; M1.5 final review.*
 - **No migration between pre-release formats.** A store made before a format change may be
-  refused afterwards and need creating again; it happened once during M1. *Documented (the
-  versioning policy, before 1.0).*
+  refused afterwards and need creating again; it happened once during M1. A FORMAT 1 store moves
+  to FORMAT 2 with `swarmops upgrade` (M6). *Documented (the versioning policy, before 1.0).*
 - **The release binaries print an `ld.so` line on glibc 2.34 to 2.38.** On glibc 2.34 to 2.38 hosts
   (Ubuntu 22.04, Debian 12, RHEL 9) every start of the release `swarmops` and `so` binaries prints
   one `ld.so` line on stderr, `weak version 'GLIBC_2.39' not found (required by …)`; exit codes,
@@ -714,9 +647,9 @@ left).
   writes them anew before it lets go, so the writers queued behind it wait for a rewrite that
   grows with the store; one that waits past the 10 s `lock_timeout` fails with the retryable
   `E_BUSY`, and nothing is lost. What the rewrite costs at 100,000 and 1,000,000 records is
-  M1.6's compaction bench, deferred until after the pilot. *Target: M6 (the sorted views as
-  immutable runs under a manifest, in the next `FORMAT`, so that the lock holds only the
-  manifest's swap), or M3's merge outside the lock (its plan's Task 15) if the bench shows a
+  M1.6's compaction bench, deferred until after the pilot. *Target: the sorted views as
+  immutable runs under a manifest, in a `FORMAT 3`, so that the lock holds only the manifest's
+  swap (the M6 design, decision D2), or M3's merge outside the lock (its plan's Task 15) if the bench shows a
   stall of 100 ms or more at 100,000 records first. Found: M1.6 Task 7 (the compaction design);
   the 2026-10-20 plan triage.*
 - **Small object-store costs.** A put that creates a fan-out directory checks for it under the
@@ -749,13 +682,15 @@ These do not change what SwarmOps does, only how well the tests can see it.
   open that finds none of the changesets past the checkpoint among the index's last records
   (`vouched` and `vouched_with` in `meta/index.rs`). No injected failure, recorded call or hook
   reaches those reads' measurements of `journal.off` and `journal.log`, so their re-read of a
-  `journal.off` a writer cut is tested only at the journal's level. *Target: M6 (the metadata
-  read paths through `FsOps`, umbrella spec §14). Found: M1.5 Task 3 review (M3); M1.5 final
+  `journal.off` a writer cut is tested only at the journal's level. *Target: M9 (the metadata
+  read paths through `FsOps`, umbrella spec §14; the M6 design, decision D4). Found: M1.5 Task 3 review (M3); M1.5 final
   review (D5).*
-- **Golden envelopes cover 40 of the 50 error codes.** `error_codes_reach_the_cli` pins the
-  envelope of 36, the nine workspace codes (M5) among them, and `remote_error_codes_golden` the
-  four `E_REMOTE_*` codes over smart HTTP and ssh (M13); the other ten are in the first test's
-  `NOT_RAISED` list, each with why the test cannot raise it (the four codes above among them). *Unscheduled (`E_IO` joined in M1.6, the six
+- **Golden envelopes cover 44 of the 53 error codes.** `error_codes_reach_the_cli` pins the
+  envelope of 38, the nine workspace codes (M5) and `E_FORMAT_REQUIRED` (M6) among them,
+  `remote_error_codes_golden` the four `E_REMOTE_*` codes over smart HTTP and ssh (M13), and the
+  FORMAT 2 goldens `E_TAG_IMMUTABLE` and `E_MAINTENANCE_BUSY` (M6); the other nine are in the
+  first test's `NOT_RAISED` list, each with why the test cannot raise it (the three codes above
+  among them). *Unscheduled (`E_IO` joined in M1.6, the six
   `E_GIT_*` codes in M3). Found: the 2026-10-16 comparison.*
 - **The git remotes' reference pages have no recorded example.** The pages of `clone`,
   `remote add|remove|list`, `fetch`, `push`, `sync` and `sync status`, and of their five MCP tools,
@@ -770,6 +705,10 @@ These do not change what SwarmOps does, only how well the tests can see it.
   what it measures, so it retries none: a lock wait that load stretches past 10 s fails it. Its
   sixteen-racer sibling retries its setup commits (`retry_busy`). *Unscheduled. Found: M1.5
   Task 3.*
+- **Some sweeps and tests run on one format.** The git import and export sweeps run on the
+  default format, FORMAT 2, only; and the tests pinned to FORMAT 1 (verify's damaged ref, lock and
+  checkpoint cases, the operations' mapping of malformed revisions) have no FORMAT 2 twin yet.
+  *Unscheduled. Found: M6 Task A4.*
 - **Gaps the reviews found and left.** The I/O-error sweeps now fail each of a commit's calls
   once, the object store's links and directory fsyncs included, and check that the commit
   reports honestly, but the cleanup after a failed link is still not asserted; the CLI's panic
@@ -798,15 +737,15 @@ each ruling is tracked above:
 | --- | --- | --- | --- |
 | 1 | Concurrent `init` on one directory | unsupported, documented; revisit with workspaces | closed in M5: `REPO` is linked no-clobber before `meta/`, under a lock held until `FORMAT`, so one `init` makes the store and the other fails with `E_EXISTS` |
 | 2 | Readers return state from frames not yet synced | allowed for local readers; committed snapshots for off-host readers (M8) | "Readers may return state" |
-| 3 | The lock's wait tail | `lock_timeout` stays 10 s; a FIFO hand-off later | M6, "bounded, not first-in, first-out" |
+| 3 | The lock's wait tail | `lock_timeout` stays 10 s; a FIFO hand-off later | Unscheduled (the M6 design, decision D3), "bounded, not first-in, first-out" |
 | 4 | Commit latency against the spec's target | target restated without syncs; batching re-evaluated | M2 (its Task 4, after the pilot), "Full fsync is slow" |
-| 5 | The recovery walk under the lock | with fsck, and the lock timeout against journal size | M6, "Recovery after a crash walks all of `journal.off`", "No repair tool" |
-| 6 | `read_file` reads the whole blob | ranged reads | M6, "`cat` reads the whole object file" (ranged reads: M2) |
-| 7 | Crafted `journal.off` entries | a per-entry checksum in the next `FORMAT` | M6, "Crafted `journal.off` entries" |
-| 8 | `objects/tmp` leftovers | `gc` | M6, "Temp files of crashed writes" |
-| 9 | Wide directories in `ls` | size and depth | M6, "`ls` of a wide directory" (size and depth: M2) |
+| 5 | The recovery walk under the lock | with fsck, and the lock timeout against journal size | closed in M6 for FORMAT 2 (entry checksums) and by `swarmops repair`; FORMAT 1, "Recovery after a crash walks all of a FORMAT 1 `journal.off`" |
+| 6 | `read_file` reads the whole blob | ranged reads | closed in M6: `cat` reads a blob in windows (ranged reads: M2) |
+| 7 | Crafted `journal.off` entries | a per-entry checksum in the next `FORMAT` | closed in M6 for FORMAT 2; FORMAT 1, "Crafted FORMAT 1 `journal.off` entries" |
+| 8 | `objects/tmp` leftovers | `gc` | closed in M6: `swarmops gc` |
+| 9 | Wide directories in `ls` | size and depth | Unscheduled, "`ls` of a wide directory" (size and depth: M2) |
 | 10 | Parked helper threads | the daemon | Unscheduled, "An abandoned lock wait" |
-| 11 | `abort()` standing in for `SIGKILL` | a literal `SIGKILL` test | M6, "The crash model" |
+| 11 | `abort()` standing in for `SIGKILL` | a literal `SIGKILL` test | closed in M6: a literal `SIGKILL` test on a real disk; "The power-loss model is a model" |
 | 12 | Second root commits | `commit_raw` | closed in M3: `Repo::commit_raw`, the git import's writer, makes a root changeset whatever refs exist |
 | 13 | `--expect` with a ref name | documented | "`--expect` with a ref name" |
 | 14 | Tests that read host repositories | none in M1: nothing to judge | M3 and M8 (their Tasks 13 and 11, after the pilot), "No test reads a real repository" |
