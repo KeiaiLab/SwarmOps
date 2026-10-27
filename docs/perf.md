@@ -1124,3 +1124,130 @@ On a quiet host the fetch ratio rose from 1.36× (the loaded 2026-10-22 run, "Gi
 to 1.56×, now just over its target, and the push stayed near 3.7–3.9×: both grow with the history,
 which points at work proportional to the commits on each fetch and push (the export's or the
 negotiation's), not at the host.
+
+## M4 — the landing model, measured (2026-10-28)
+
+The M4 plan's Task 1 matrix: the four landing-model prototypes of `swarmops-repo` (behind
+`test-hooks`) raced by separate processes on one store, and the plan's Decision 1 applied to the
+numbers. It runs because the v0.5.0 measurement through the binary missed G4 (p99 and retries, "G4:
+landing under a swarm's load" above). The models: the **CAS loop** with its incremental re-merge,
+today's `land` and the yardstick, never chosen; **pushrebase**, where the lock holder re-reads the
+target and, when the paths it gained since the land's `onto` are disjoint from the land's, applies
+the land's delta to the new head in the same transaction (an overlap goes back to the lander);
+**metalog merge**, pushrebase that also merges overlapping files three-way under the lock (each
+side at most 1 MiB); **op heads**, where a land records its changeset without a compare-and-swap
+and the next transaction settles it onto the target.
+
+**Method.** `scripts/landing-models.sh` (one optimized `cargo nextest run` of the ignored
+`landing_models_*` measurements per cell, model and run) on `stable` at the v0.5.0 measurements'
+commit, no uncommitted paths. Five cells × four models × three runs = 60 runs, each its own fresh
+store under `~/.local/state/swarmops-bench` on the ext4 virtual disk of the earlier sections, full
+fsync, the default FORMAT 2 store. Run `k` of a cell lands the same changes in each model (seed
+`k`); the models' order rotates from run to run. Each lander is a process; a land reads the
+target, prepares its change outside the lock, publishes, and after a moved target or an overlap
+re-merges and tries again, backing off from its fourth attempt, at most 8 attempts. A land that
+spends them is counted exhausted and not run again. The measured tree makes two journal syncs per
+transaction (the M2 plan's one-sync rule is not in it) and the ref file's two: the models'
+comparison does not depend on that, their absolute numbers do.
+
+**Host state.** Same host as M0. The matrix ran alone under the host's lock for heavy runs,
+02:20–03:58 (+09:00), 1 h 38 min, after the 1-minute load had stayed under 6 for a minute; the
+pilot's soak timer was stopped for the window (three half-hourly cycles skipped). Every run
+recorded the load and a raw `fdatasync` probe at its start and end: the 1-minute load stayed
+within 1.9–13.7 over the window, and the probe within 3.5–5.6 ms (3.5–3.7 ms in the scored cell).
+Each table's last two columns give the lowest and highest of those samples over the cell's runs.
+
+**Metrics** (Decision 1's): lands/s, landed changesets over the wall time (closed loop) or the
+run's 120 s (open loop); latency, from a land's first read of the target to the publish that put it
+there (op heads: to the poll that saw it there), nearest-rank over the landed lands; retries, the
+attempts beyond the first over the landed lands; conflicts, lands that ended conflicted, left out of
+the other figures; lock hold, from the write transaction's start to its end, per publish. Each cell
+gives the median of its three runs and [min–max]. No run met `E_BUSY`.
+
+**The gate**, after every run: every landed id on the target's first-parent chain exactly once
+and nothing else on it, each move a fast-forward, a deep `verify` clean, no land past 30 s, no
+op-head ref left. All 60 runs passed it: "Gate" is runs passed / runs.
+
+**W-disjoint**, 32 landers × 100 lands, closed loop:
+
+| Model | Gate | Lands/s | Latency p50 ms | Latency p99 ms | Retries % | Conflicts | Exhausted | Lock hold p50 ms | Lock hold p99 ms | Relocated | Load | `fdatasync` probe ms |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| CAS loop (yardstick) | 3/3 | 30.6 [30.5–30.7] | 26.0 [25.7–27.3] | 92.6 [90.4–112.8] | 91.30 [83.23–100.66] | 0 [0–0] | 279 [261–308] | 0.1 [0.1–13.1] | 26.4 [26.3–32.4] | 0 [0–0] | 1.9–4.8 | 3.6–3.8 |
+| pushrebase | 3/3 | 39.1 [36.9–39.1] | 814.6 [813.7–824.3] | 939.9 [900.8–1271.9] | 0.00 [0.00–0.00] | 0 [0–0] | 0 [0–0] | 24.7 [24.7–25.0] | 37.7 [37.6–41.8] | 3199 [3199–3199] | 3.4–5.3 | 3.6–3.6 |
+| metalog merge | 3/3 | 39.0 [39.0–39.0] | 816.5 [815.4–817.8] | 903.7 [876.6–928.3] | 0.00 [0.00–0.00] | 0 [0–0] | 0 [0–0] | 24.8 [24.7–24.8] | 37.9 [37.6–38.4] | 3199 [3199–3199] | 3.8–6.9 | 3.6–3.7 |
+| op heads | 3/3 | 24.4 [24.2–24.4] | 1095.0 [1094.4–1096.3] | 2286.4 [2283.8–2328.8] | 0.00 [0.00–0.00] | 0 [0–0] | 0 [0–0] | 35.5 [35.5–35.6] | 51.8 [51.6–52.5] | 3198 [3195–3199] | 3.9–6.9 | 3.6–3.7 |
+
+**W-shared**, 32 landers × 100 lands, closed loop:
+
+| Model | Gate | Lands/s | Latency p50 ms | Latency p99 ms | Retries % | Conflicts | Exhausted | Lock hold p50 ms | Lock hold p99 ms | Relocated | Load | `fdatasync` probe ms |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| CAS loop (yardstick) | 3/3 | 30.1 [29.0–31.5] | 26.0 [26.0–26.1] | 89.4 [88.8–91.9] | 91.68 [90.77–94.40] | 0 [0–0] | 289 [286–290] | 0.1 [0.1–0.1] | 26.8 [26.6–27.0] | 0 [0–0] | 4.6–5.8 | 3.6–3.7 |
+| pushrebase | 3/3 | 34.2 [34.0–34.9] | 164.4 [163.7–171.2] | 712.2 [675.3–759.8] | 56.87 [56.55–59.26] | 0 [0–0] | 195 [194–208] | 23.7 [23.6–23.7] | 39.7 [39.5–44.3] | 2903 [2869–2905] | 4.2–5.9 | 3.6–3.7 |
+| metalog merge | 3/3 | 38.9 [38.9–39.0] | 818.3 [817.1–820.4] | 902.4 [889.9–922.8] | 0.00 [0.00–0.00] | 0 [0–0] | 0 [0–0] | 24.9 [24.8–24.9] | 38.2 [37.8–38.7] | 3199 [3199–3199] | 4.1–5.9 | 3.6–3.7 |
+| op heads | 3/3 | 24.2 [23.4–24.2] | 1080.1 [1072.1–1099.9] | 2245.5 [2243.6–2292.3] | 0.00 [0.00–0.00] | 0 [0–0] | 0 [0–0] | 35.3 [35.2–35.3] | 51.9 [50.3–57.4] | 3199 [3198–3199] | 3.8–5.8 | 3.6–3.7 |
+
+**W-conflict**, 32 landers × 100 lands, closed loop:
+
+| Model | Gate | Lands/s | Latency p50 ms | Latency p99 ms | Retries % | Conflicts | Exhausted | Lock hold p50 ms | Lock hold p99 ms | Relocated | Load | `fdatasync` probe ms |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| CAS loop (yardstick) | 3/3 | 31.6 [29.8–31.8] | 26.2 [25.9–26.4] | 92.9 [92.1–93.4] | 93.16 [91.08–94.03] | 22 [20–23] | 280 [275–283] | 0.1 [0.1–0.1] | 26.9 [26.8–27.0] | 0 [0–0] | 3.8–5.8 | 3.6–3.7 |
+| pushrebase | 3/3 | 35.4 [33.5–36.2] | 149.6 [144.8–153.6] | 638.7 [625.6–646.1] | 58.01 [57.10–60.84] | 72 [70–75] | 191 [189–204] | 23.6 [23.3–23.7] | 39.3 [39.0–39.6] | 2830 [2814–2886] | 3.9–8.2 | 3.5–3.7 |
+| metalog merge | 3/3 | 38.6 [37.3–38.8] | 799.7 [798.6–803.7] | 935.2 [910.8–1274.0] | 0.00 [0.00–0.00] | 104 [102–106] | 0 [0–0] | 24.8 [24.8–24.9] | 38.1 [38.1–41.1] | 3095 [3093–3097] | 4.6–6.7 | 3.6–3.7 |
+| op heads | 3/3 | 23.4 [22.8–23.5] | 1069.9 [1059.9–1071.3] | 2230.5 [2194.0–2278.6] | 0.00 [0.00–0.00] | 91 [88–92] | 0 [0–0] | 35.2 [35.2–35.3] | 51.7 [50.6–55.5] | 3106 [3105–3111] | 3.9–6.0 | 3.6–3.6 |
+
+**W-large**, 32 landers × 50 lands, closed loop:
+
+| Model | Gate | Lands/s | Latency p50 ms | Latency p99 ms | Retries % | Conflicts | Exhausted | Lock hold p50 ms | Lock hold p99 ms | Relocated | Load | `fdatasync` probe ms |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| CAS loop (yardstick) | 3/3 | 24.8 [22.7–25.0] | 25.8 [25.5–26.2] | 144.6 [143.6–210.9] | 90.58 [86.04–96.28] | 0 [0–0] | 145 [139–147] | 0.1 [0.1–13.0] | 29.4 [28.9–29.5] | 0 [0–0] | 4.4–11.2 | 3.6–5.6 |
+| pushrebase | 3/3 | 36.1 [35.0–36.2] | 878.5 [876.0–880.4] | 975.0 [954.6–1397.1] | 0.00 [0.00–0.00] | 0 [0–0] | 0 [0–0] | 24.9 [24.8–25.0] | 48.6 [48.1–57.0] | 1596 [1596–1596] | 5.0–10.2 | 3.5–5.6 |
+| metalog merge | 3/3 | 36.2 [36.1–36.3] | 876.5 [873.8–880.1] | 947.6 [944.3–1018.8] | 0.00 [0.00–0.00] | 0 [0–0] | 0 [0–0] | 24.8 [24.8–24.9] | 48.7 [48.2–49.1] | 1596 [1596–1596] | 5.4–12.0 | 3.5–3.7 |
+| op heads | 3/3 | 22.9 [22.9–23.1] | 1109.3 [1100.9–1110.6] | 2325.3 [2320.7–2327.4] | 0.00 [0.00–0.00] | 0 [0–0] | 0 [0–0] | 35.4 [35.3–35.6] | 69.1 [68.7–69.6] | 1590 [1589–1592] | 5.6–13.7 | 3.5–3.7 |
+
+**The scored cell**: W-shared, 50 landers, open loop, one land each every 2 s ± 20 % for 120 s:
+
+| Model | Gate | Lands/s | Latency p50 ms | Latency p99 ms | Retries % | Conflicts | Exhausted | Lock hold p50 ms | Lock hold p99 ms | Relocated | Load | `fdatasync` probe ms |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| CAS loop (yardstick) | 3/3 | 22.9 [22.8–23.1] | 31.6 [31.4–31.7] | 94.3 [93.1–94.4] | 98.00 [91.51–101.24] | 0 [0–0] | 249 [232–267] | 0.1 [0.1–12.8] | 28.3 [28.3–28.9] | 0 [0–0] | 3.6–6.2 | 3.6–3.7 |
+| pushrebase | 3/3 | 24.9 [24.9–25.0] | 37.6 [36.9–39.1] | 166.6 [163.9–171.6] | 5.41 [4.67–5.58] | 0 [0–0] | 7 [4–7] | 19.9 [19.9–20.1] | 37.6 [36.8–38.1] | 1349 [1335–1380] | 3.3–7.9 | 3.5–3.7 |
+| metalog merge | 3/3 | 25.0 [25.0–25.0] | 39.4 [38.8–46.3] | 184.4 [164.1–848.9] | 0.00 [0.00–0.00] | 0 [0–0] | 0 [0–0] | 20.4 [20.4–20.9] | 40.2 [38.1–51.2] | 1427 [1418–1564] | 2.6–7.7 | 3.6–3.7 |
+| op heads | 3/3 | 25.0 [25.0–25.0] | 1380.4 [1334.3–1525.3] | 3170.3 [3072.7–3632.8] | 0.00 [0.00–0.00] | 0 [0–0] | 0 [0–0] | 34.1 [34.0–34.7] | 52.3 [51.8–57.2] | 2988 [2985–2991] | 2.6–4.7 | 3.6–3.7 |
+
+The CAS loop's latencies are low because they count only the lands that landed: 8–9 % of its
+lands spent their 8 attempts in every cell (748 in the scored cell's three runs), and in the scored
+cell it lands 22.9 of the 25 offered lands/s. In the closed loops every relocating model's
+median latency is its wait for the lock: 32 landers each wanting the lock for about 25 ms. Metalog's
+scored p99 has one high run, 848.9 ms in run 2 (start load 3.45, lock hold p99 51.2 ms, 1,564
+relocations against 1,418 and 1,427); runs 1 and 3 gave 164.1 and 184.4 ms.
+
+**Lock hold's journal and ref-file shares** (the plan's Decision 14): not measured. The harness's
+sync timer matches the FORMAT 1 file names (`meta/journal.log`, `meta/refs/`), and the measured
+stores are FORMAT 2 (`journal2.log`, `refs2/`), so every run reports 0 % for both. The lock hold
+totals above are measured. Decision 14's follow-up is asked for only if the scored cell misses its
+lands/s or p99 on lock time; the chosen model meets both, so the shares change nothing here.
+
+**Decision 1, line by line** (scored cell medians):
+
+| Candidate | Gate, all 15 runs | Lands/s ≥ 20 | p99 < 500 ms | Retries < 5 % | No land exhausted | Eligible |
+| --- | --- | --- | --- | --- | --- | --- |
+| pushrebase | 15/15 | 24.94, met | 166.6 ms, met | 5.41 %, **missed** | 18 exhausted, **missed** | no |
+| metalog merge | 15/15 | 25.00, met | 184.4 ms, met | 0.00 %, met | 0, met | **yes** |
+| op heads | 15/15 | 25.00, met | 3,170.3 ms, **missed** | 0.00 %, met | 0, met | no |
+| CAS loop (yardstick, never chosen) | 15/15 | 22.93, met | 94.3 ms, met | 98.00 %, missed | 748 exhausted, missed | — |
+
+Choice: the eligible candidate with the lowest scored p99. Metalog merge is the only eligible one,
+so it has the lowest p99 (184.4 ms); the 10 % margin (less work under the lock) and the op-heads
+rule (a scored p99 at most half the best other's) have nothing to compare. Pushrebase misses only
+on the overlapping lands it sends back: under W-shared one land in five replaces a line of the
+shared file, so its retries sit at the 5 % line (4.67–5.58 %) and some lands exhaust.
+
+**The choice: metalog merge**, the M4 plan's Task 5 variant C (its planning default). It needs no
+new record kind and no FORMAT change. Task 5 builds it into `Repo::publish`; the G4 measurement
+through the binary is taken again after it (the v0.6.0 release's measurements).
+
+Reproduce (about 1 h 40 min; the script takes the host's lock itself):
+
+```sh
+scripts/landing-models.sh            # logs and decision.log in target/perf/landing-models/
+scripts/landing-models.sh --smoke    # the matrix at tiny sizes, to check the script
+```
