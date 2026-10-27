@@ -32,6 +32,10 @@ tests its change on disk and lands the tree it tested, through `so ws` or MCP, w
 worktree hooks ([Build and test a change](operate/build-and-test.md)). v0.4.0 (M6) adds `repair`,
 `gc`, store `FORMAT 2`, with free-form branches, tags and remote-tracking refs, and `upgrade` from
 FORMAT 1 ([Verify and repair](operate/verify-and-repair.md), [Making room](operate/making-room.md)).
+v0.5.0, the first release of [To usable](#to-usable), ran the pilot on a real repository
+([pilot.md](pilot.md#the-traders-pilot-a-real-repository)), measured G1, G2, G4, G9 and G17 and the
+landing model ([perf.md](perf.md)), and holds the first v0.6 fixes: `ws commit` sends missing blobs
+inline, `op log` lists committed operations only, and MCP `ws_create` fills its default path.
 
 ### Topology 1 today: local git, remote SwarmOps
 

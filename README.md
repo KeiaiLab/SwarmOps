@@ -32,11 +32,11 @@ processes on one host commit into one embedded store at once, and every command 
 JSON envelope. It is one Rust program, with no external database and no daemon, and it moves the
 work to and from git, so that CI and deployments keep running.
 
-It is pre-release, at milestone M6 (v0.4.0): usable by one agent, with a store that already takes
-commits from many processes at once; merging and landing, which a swarm needs, are built, but
-landing is not yet measured under a swarm's load; a store clones, fetches, pushes and syncs with
-GitHub itself; and an agent builds and tests its change in a workspace on disk, then lands the
-tree it tested ([roadmap](#roadmap)).
+It is pre-release, at v0.5.0 (milestones through M6): usable by one agent, with a store that
+already takes commits from many processes at once; merging and landing, which a swarm needs, are
+built, and landing under a swarm's load is measured, not yet within its targets; a store clones,
+fetches, pushes and syncs with GitHub itself; and an agent builds and tests its change in a
+workspace on disk, then lands the tree it tested ([roadmap](#roadmap)).
 
 ## Core features
 
@@ -524,8 +524,8 @@ planned, each with its milestone.
 | Review | Nothing today. 📋 M7: change requests, their classification, approvals and a landing gate. | **Behind** today: git ships patch-review tools, and Gerrit and GitHub add review on top. M7 is **not yet comparable**. |
 | Sync between hosts | ✅ M8: through a git remote, one writing host at a time, with `git import` and `git export`. ✅ M13: a store clones, fetches and pushes a git remote over HTTPS or ssh, by running the user's git; a push is a compare-and-swap, never forced, and `sync` lands the store's unpublished changes onto the remote's head, so several stores can write to one remote. 📋 M11: offline-first sync between stores, `so://`. | **Parity** with git's clone, fetch and push to a git remote over HTTPS and ssh, which SwarmOps runs; **behind** on transports, shallow and partial clones, and bundles. |
 | Ecosystem | ✅ M1: the CLI and `swarmops schema`. ✅ M1.5: an MCP server. ✅ M3: git import. ✅ M8: git export. ✅ M13: git remotes, and GitHub's pull requests merged by any method. No user hooks, signing, submodules or LFS, and no GitHub API calls. | **Behind**, after v1 too: git parity is not a v1 goal, and git has MCP servers as well. |
-| Maturity | Pre-release: v0.1.0 is the first tag, v0.4.0 the latest, and the first spec dates from 2026-10-15. | **Behind**: git has hosted itself since 2005. |
-| Landing | ✅ M4: `land` merges an agent's change onto `main` and publishes it as one changeset in one transaction, merging again and retrying by itself when `main` moves, and a retry with the same key replays it. 📋 M4, after the pilot: the landing model chosen by measurement. | **Ahead by design** of git alone, whose push refuses a moved branch and leaves the fetch, the merge and the retry to the pusher; not yet measured under a swarm's load. |
+| Maturity | Pre-release: v0.1.0 is the first tag, v0.5.0 the latest, and the first spec dates from 2026-10-15. | **Behind**: git has hosted itself since 2005. |
+| Landing | ✅ M4: `land` merges an agent's change onto `main` and publishes it as one changeset in one transaction, merging again and retrying by itself when `main` moves, and a retry with the same key replays it. 📋 M4, after the pilot: the landing model chosen by measurement. | **Ahead by design** of git alone, whose push refuses a moved branch and leaves the fetch, the merge and the retry to the pusher; measured under a swarm's load in 0.5.0: lands/s met, p99 and retries missed ([docs/perf.md](docs/perf.md)). |
 
 No git baseline has been measured: these verdicts come from the design, the code, and git's own
 documentation and source, not from a benchmark, and a side-by-side benchmark against git
@@ -576,11 +576,12 @@ M0, M1, M1.5, M1.6, M2, M3, M4 and M8 make the first release, 0.1.0, together wi
 fixes in its [changelog](CHANGELOG.md), an [operations guide](docs/operations.md) and a
 [pilot runbook](docs/pilot.md). The pilot runs SwarmOps' own repository through the round trip:
 its history imported from git, changes committed and landed by agents through `swarmops mcp`,
-and the result exported back to git for its CI to run. Next come the measurements that need a
-quiet host: landing by 32 and 50 processes through the binary against umbrella §15's targets,
-and the landing model those numbers choose; whether a transaction can sync the journal once
-instead of twice; the import's and the export's timings on larger repositories. M13 came first, in 0.2.0, then
-M5, in 0.3.0, both ahead of M12, which is developed separately, and M6 in 0.4.0.
+and the result exported back to git for its CI to run. M13 came first, in 0.2.0, then
+M5, in 0.3.0, both ahead of M12, which is developed separately, and M6 in 0.4.0. 0.5.0 ran the
+pilot on a real repository of 993 commits and the measurements that need a quiet host: landing by
+32 and 50 processes through the binary against umbrella §15's targets, a commit without its syncs,
+and one commit's fetch and push on a long history ([docs/perf.md](docs/perf.md)); the landing
+model those numbers choose is 0.6.0's.
 
 The road to usable ([To usable](docs/roadmap.md#to-usable)): a real repository runs 8 or more
 agents for 3 or more days with no lost commit, a clean `verify --deep`, nothing rewritten and an

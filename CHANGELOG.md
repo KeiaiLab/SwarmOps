@@ -6,26 +6,80 @@ Notable changes to SwarmOps. The format follows
 pre-1.0 way).
 
 SwarmOps 0.1.0 is the first release, tagged `v0.1.0`, 0.2.0 the second, with the git remotes
-(M13), 0.3.0 the third, with the workspaces (M5), and 0.4.0 the fourth, with verify, crash
-safety, fuzzing, gc and FORMAT 2 (M6); no crate is published (`publish = false`). The 0.1.0
+(M13), 0.3.0 the third, with the workspaces (M5), 0.4.0 the fourth, with verify, crash
+safety, fuzzing, gc and FORMAT 2 (M6), and 0.5.0 the fifth, with the pilot on a real repository
+and the goal measurements; no crate is published (`publish = false`). The 0.1.0
 section holds every change up to it, grouped by milestone of the design (umbrella spec §13).
 From here, **Unreleased** collects the changes on `stable` that no release holds yet, until the
 next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-27
+
+Prove and measure. The 0.5.0 release holds the pilot on a real repository, the goal
+measurements, the tests of this host's repositories, the roadmap to usable and the first v0.6
+fixes the measurements and the pilot asked for.
+
 ### Added
 
+- The pilot ran on a real repository, this host's `traders` (993 commits, Python), with the 0.4.0
+  binary: import, one agent session over MCP, export, the repository's own gate on the export, a
+  person's commit and the second import, eight sessions landing at once with one killed, the
+  second export, backup and restore, `repair` of an induced corrupt object, and the rollback to
+  git. Every criterion of the runbook passed; nothing was lost or rewritten
+  ([docs/pilot.md](docs/pilot.md#the-traders-pilot-a-real-repository)). A soak of eight sessions
+  every 30 minutes runs on that store towards the three days that "usable" asks.
+- The measurements the roadmap to usable asks for, in [docs/perf.md](docs/perf.md) ("v0.5.0"):
+  G1 at 50 processes (met), G2 without syncs (met), G4 landing under load at 32 and 50 processes
+  (lands/s and nothing lost met; p99 and retries missed), G9's workspace latencies (status,
+  create and the check overhead met; the update after a land and `ws commit` missed) and G17's
+  fetch and push ratios (missed). [docs/goals.md](docs/goals.md) cites each.
+- The harness for them: `SWARMOPS_TEST_CLI_CONTENTION_CHILDREN` sets the contention test's
+  process count, `landing::perf::landing_under_load` offers one land per agent every 2 s for
+  120 s (`SWARMOPS_TEST_CLI_LANDING_LANDERS`) and reports its chain beside slow lands,
+  `ws_processes::perf::perf_open_and_land_percentiles` gives `ws create` and `ws land`
+  percentiles, and `swarmops-repo`'s `commit_latency` bench times a commit with and without its
+  syncs. `just perf` runs the contention and landing cases at 32 and 50 processes
+  (`SWARMOPS_PERF_PROCESSES`), then the bench.
 - Tests of this host's real repositories, behind `SWARMOPS_HOST_REPOS=1`: each bare mirror in
   `SWARMOPS_HOST_REPOS_DIR` is imported, verified deep, exported, checked by `git fsck --strict`
   and imported again to the same head. The weekly run's `host repositories` job refreshes the
   mirrors with `scripts/host-repos.py` and runs them.
+- The ignored perf case `remote_perf::fetch_phases_scale_with_history` splits a fetch's time, on
+  a 1,000- and a 12,000-commit history, into the binary's fetch, `git fetch` alone, `git gc --auto`
+  alone and the same after `git commit-graph write --reachable`, for G17's missed fetch ratio
+  (`just perf`).
 
 ### Changed
+
+- `ws commit` sends the blobs the store lacks inline in its one keyed commit request, which the
+  store writes as one batch, instead of one durable `blob put` per file; a blob past what is left
+  of the 64 MiB inline budget is still put alone first. G9's commit of 100 files took 805-819 ms
+  before. `blobs_written` counts the puts' writes plus the commit's.
+- `op log` reads the committed operations only: it waits for the store's lock (`E_BUSY` after
+  the lock timeout, retryable), runs the journal tail check and lists the frames synced and
+  listed in `journal.off`, so a listed number keeps its operation and `op undo` of it never undoes
+  another (issue #11).
+- The landing model is measured: four prototypes, five cells, three runs each, in
+  [docs/perf.md](docs/perf.md) ("M4 — the landing model, measured"); metalog merge is the candidate v0.6.0 builds
+  (the M4 plan's decision 10).
+- Documents brought to the code: the README's topology-2 "Planned" cell no longer lists signed
+  commits; `ws:<name>` is described as `ws diff`'s label, not a revision; a cache or relay tier and
+  a virtual checkout are [docs/goals.md](docs/goals.md) non-goals; content-defined chunking,
+  intra-line merge, a web view and agent transcripts are unscheduled known limitations.
 
 - `docs/roadmap.md`: a "To usable" section defines when SwarmOps is usable and plans v0.5.0 to
   v0.8.0 to get there (the pilot and measurements, their fixes, M14, operations); M7, M9's
   simulator, M11 and M12 wait until then. The README's roadmap summarises it.
+- `scheduled.yml`: the fuzz smoke, `bench/compare`, the git matrix and the live GitHub run wait
+  for the slow suite, so that it has the host to itself, and the git 2.56.0 build no longer
+  inherits the job's `CARGO_TARGET_DIR`.
+
+### Fixed
+
+- MCP `ws_create` without a `path` makes the workspace at `<working directory>/<name>`, as its
+  schema says, instead of failing with `E_INVALID_ARG`.
 
 ## [0.4.0] - 2026-10-27
 
@@ -1482,7 +1536,8 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   ([docs/known-limitations.md](docs/known-limitations.md), "An import onto a target reads the
   head's whole tree, and onto a native head the whole history below it").
 
-[Unreleased]: https://github.com/KeiaiLab/SwarmOps/compare/v0.4.0...stable
+[Unreleased]: https://github.com/KeiaiLab/SwarmOps/compare/v0.5.0...stable
+[0.5.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.1.0...v0.2.0

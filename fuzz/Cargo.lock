@@ -274,7 +274,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "swarmops-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "arbitrary",
  "blake3",
@@ -298,7 +298,7 @@ dependencies = [
 
 [[package]]
 name = "swarmops-store"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "blake3",
  "camino",
@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "swarmops-testkit"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "camino",
  "swarmops-core",

@@ -742,6 +742,45 @@ The pilot of the git remotes (M13) ran SwarmOps against a private GitHub reposit
   11-commit repository took 2.0 s against 1.0 s for `git clone --bare` plus `so git import`
   ([perf.md](perf.md#the-pilots-repository-2026-10-22)).
 
+## The traders pilot: a real repository
+
+The runbook above ran on 2026-10-27 on a real repository, not SwarmOps' own: this host's `traders`,
+993 commits of Python, hosted on a Forgejo, read through a mirror clone and never written. The
+binary was the 0.4.0 release, checked against its `SHA256SUMS`. Where the runbook names GitHub,
+the pilot used what the repository has: its own gate (lint, format, types, security,
+9,811 tests, schema and oracle checks) ran locally on the exported checkout, the
+person's commit was made in a clone of the export, and nothing was pushed anywhere. Step 8 ran
+eight sessions, not four. Every criterion passed:
+
+- The import took the 993 commits with `lossy_total` 0 in 5.3 s; `verify --deep` found nothing
+  after it, after the agent session, after the second import and after the eight sessions.
+- One agent landed a README change over MCP (`landed`, one attempt, no error); the export of 994
+  commits had `rewritten` 0, every original commit present and every tree equal, `git fsck
+  --strict` silent, and a second export the same head. The gate passed on that head.
+- The person's commit came in through the second import (`imported` 1, `lossy_total` 0), and the
+  eight sessions, one killed by `SIGKILL` after its commit and run twice more, left each key on
+  `main` exactly once (seven `landed`, the killed one `landed` then `replayed`). The only error was
+  the shared line's `E_CONFLICT`, resolved and landed. Four of the seven unkilled lands retried
+  (3 to 4 attempts), the slowest in 552 ms.
+- The incremental export wrote 9 commits in 0.1 s on top of the first, with the person's commit
+  under its own id and the eight above it; a whole export into a new repository gave the same
+  head, `git fsck --strict` passed, and the gate passed on it.
+- Backup and restore ([Backup and restore](operate/backup-and-restore.md)): the restored copy was
+  byte-identical, with the same deep verify, refs and op log. A store rebuilt from the export alone
+  imported the 1,003 commits and exported the same head. `repair`
+  ([Verify and repair](operate/verify-and-repair.md)): with one byte of a blob flipped, `verify
+  --deep` reported `E_STORE_CORRUPT`, `repair` quarantined the object, `blob put` of the file's
+  content brought it back, and the export was unchanged.
+- Rollback: the source repository and its Forgejo origin were untouched (refs, index and HEAD as
+  before; none of the 10 pilot commits in either).
+
+Three soft findings came out of it: MCP `ws_create`'s schema marks `path` optional but the server
+needs it; lands retried at eight sessions already (G4's measurement, [perf.md](perf.md)); the
+export writes every object loose (16,667 files, 165 MiB, for a history the mirror packs in 33 MB).
+Timings were taken under other runs' load and are not measurements. A soak now runs eight
+sessions against that store every 30 minutes, verifies after each cycle and exports and runs the
+gate daily, towards the three days that [To usable](roadmap.md#to-usable) asks of condition 1.
+
 ## Appendix: the scripted session
 
 `mcp_session.py` speaks MCP to `swarmops mcp` over stdin and stdout, one JSON-RPC message a line.
