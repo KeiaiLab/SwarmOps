@@ -60,10 +60,10 @@ swarmops init "$SWARMOPS_REPO" --name acme
 ```
 
 ```json
-{"ok":true,"op":"repo_init","api":1,"result":{"repo_id":"101d13d0eebd438776f99316f817dad6","name":"acme","store_version":1,"changesets":0,"refs":0},"meta":{"repo":"…","elapsed_ms":52,"resolved":{},"auth":"trust"}}
+{"ok":true,"op":"repo_init","api":1,"result":{"repo_id":"101d13d0eebd438776f99316f817dad6","name":"acme","store_version":2,"changesets":0,"refs":0},"meta":{"repo":"…","elapsed_ms":52,"resolved":{},"auth":"trust"}}
 ```
 
-The directory holds `FORMAT` (`swarmops-store 1`, the layout's version), `REPO` (the repository's
+The directory holds `FORMAT` (`swarmops-store 2`, the layout's version; `init --format 1` makes one that 0.3.0 and earlier open), `REPO` (the repository's
 id and name), `objects/` and `meta/`; [the README](../../README.md#the-store-on-disk) and
 [architecture.md](../architecture.md) describe them. Nothing runs in the background: there is no
 daemon, and each command or MCP call opens the store, does its work and closes it.

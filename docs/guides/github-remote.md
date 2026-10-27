@@ -54,7 +54,7 @@ export SWARMOPS_REPO=~/.local/state/swarmops/repos/acme
 ```
 
 ```json
-{"ok":true,"op":"clone_repo","api":1,"result":{"repo":{"repo_id":"8e5730de…","name":"acme","main":"f3c47805…","store_version":1,"changesets":2,"refs":1},"remote":{"name":"origin","url":"git@github.com:acme/acme.git","branch":"main","lossy":[]},"fetch":{"remote":"origin","branch":"main","head":{"sha":"c6359690e26dc8f27294cffd27efcea1b5fb7192","changeset":"f3c47805…"},"imported":2,"branches":[{"branch":"main","new":"c6359690e26dc8f27294cffd27efcea1b5fb7192"}],"branches_truncated":false,"tags_fetched":0},"imported":2,"main":"f3c47805…"},"meta":{"repo":"…","elapsed_ms":223,…}}
+{"ok":true,"op":"clone_repo","api":1,"result":{"repo":{"repo_id":"8e5730de…","name":"acme","main":"f3c47805…","store_version":2,"changesets":2,"refs":1},"remote":{"name":"origin","url":"git@github.com:acme/acme.git","branch":"main","lossy":[]},"fetch":{"remote":"origin","branch":"main","head":{"sha":"c6359690e26dc8f27294cffd27efcea1b5fb7192","changeset":"f3c47805…"},"imported":2,"branches":[{"branch":"main","new":"c6359690e26dc8f27294cffd27efcea1b5fb7192"}],"branches_truncated":false,"tags_fetched":0},"imported":2,"main":"f3c47805…"},"meta":{"repo":"…","elapsed_ms":223,…}}
 ```
 
 The transcripts in this guide cut ids to eight digits and leave most of `meta` out; they come from

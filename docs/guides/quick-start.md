@@ -48,7 +48,7 @@ so init "$SWARMOPS_REPO" --name acme
 ```
 
 ```text
-{"ok":true,"op":"repo_init","api":1,"result":{"repo_id":"3ca95e25fe9bbe471edc25c8c77d2073","name":"acme","store_version":1,"changesets":0,"refs":0},"meta":{"repo":"/home/me/.local/state/swarmops/repos/acme","elapsed_ms":34,"resolved":{},"auth":"trust"}}
+{"ok":true,"op":"repo_init","api":1,"result":{"repo_id":"3ca95e25fe9bbe471edc25c8c77d2073","name":"acme","store_version":2,"changesets":0,"refs":0},"meta":{"repo":"/home/me/.local/state/swarmops/repos/acme","elapsed_ms":34,"resolved":{},"auth":"trust"}}
 ```
 
 `init` makes the directory if it is missing. A store has no default location: every command finds

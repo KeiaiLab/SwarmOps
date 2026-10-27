@@ -16,9 +16,10 @@ to the weakest:
    even before 1.0. The golden vectors in `crates/swarmops-core/tests/golden/` pin the bytes and
    ids of representative objects, and `just check` fails if either moves.
 2. **The store format.** The on-disk layout of a store, named by its `FORMAT` file
-   (`swarmops-store 1`): the object file header, the journal's frames and records, the index
-   files and the ref files (storage-core spec §2, §3). A binary opens only a store whose
-   `FORMAT` it knows; any other, the CLI refuses as `E_NOT_A_REPO`.
+   (`swarmops-store 1` or, since M6, `swarmops-store 2`): the object file header, the journal's
+   frames and records, the index files and the ref files (storage-core spec §2, §3). A binary
+   opens only a store whose `FORMAT` it knows; any other, the CLI refuses as `E_NOT_A_REPO`.
+   A release that writes a new `FORMAT` still opens, reads and writes the older ones it knows.
 3. **The command-line contract.** One JSON envelope per run on stdout,
    `{ok, op, api, result | error{code, message, retryable, exit, details, hint}, meta}`, with
    `api` 1; the `E_*` error codes, each with its fixed exit code (1 to 6, 3 for a conflict; 0
@@ -75,9 +76,10 @@ No compatibility is promised for:
   (0.1.0 to 0.1.1) breaks none. Every crate shares the workspace version.
 - Every breaking change is called out under its version in [CHANGELOG.md](../../CHANGELOG.md),
   with what to do about it.
-- A store format change may need a store to be created again: there is no migration tool before
-  1.0. (It happened once during M1: once `init` began to create every index file, stores created
-  before that were refused.) The changelog says when.
+- A store format change may need a store to be created again. (It happened once during M1:
+  once `init` began to create every index file, stores created before that were refused.) The
+  changelog says when. `FORMAT 1` moves to `FORMAT 2` in place, with `swarmops upgrade` (M6),
+  which no older release can read afterwards.
 - From 1.0 on, the intent is that a release opens every store an earlier 1.x release wrote, or
   migrates it, and that a test proves it before each release.
 
@@ -85,12 +87,13 @@ No compatibility is promised for:
 
 - **A new object layout** gets a new kind/version header and its own golden vectors, beside the
   old ones. Objects already stored keep their bytes and their ids.
-- **A new store layout** bumps `FORMAT`. The first new journal record kind, for instance, makes
-  the store `swarmops-store 2` (storage-core spec §3): an older binary then refuses to open it
-  rather than misread it, because there is no rule for skipping unknown records. The next
-  `FORMAT` (planned as 2, M6) adds a checksum to each `journal.off` entry and a frame header
-  that carries the frame's sequence number and the previous frame's CRC; whichever version
-  first changes the layout takes the next number.
+- **A new store layout** bumps `FORMAT`: an older binary then refuses to open the store rather
+  than misread it, because there is no rule for skipping unknown records. `FORMAT 2` (M6) added a
+  checksum to each `journal.off` entry, a frame header that carries the frame's sequence number
+  and the previous frame's CRC, and ref files named by the hash of the ref's name, under new
+  file names, with the record layouts unchanged. The first new journal record kind (annotations,
+  M7) makes the next one, `swarmops-store 3`; whichever version first changes the layout takes
+  the next number.
 - **A contract change** shows up in a test the gate runs: `all__cli__schema_snapshot.snap` holds
   the schema of every type, the MCP server's tool list and its discovery result have snapshots
   of their own, and each error code's exit code and `retryable` flag, which no schema holds,

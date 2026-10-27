@@ -808,7 +808,7 @@ swarmops --repo torn commit -m notes --changes notes.json --advance main --prett
 ```
 
 ```text
-{"ok":true,"op":"verify","api":1,"result":{"objects_checked":12,"changesets_checked":3,"problems":[],"findings":[]},"meta":{"repo":"torn","elapsed_ms":1,"resolved":{},"auth":"trust"}}
+{"ok":true,"op":"verify","api":1,"result":{"objects_checked":12,"changesets_checked":3,"problems":[],"findings":[],"truncated":false,"found":0},"meta":{"repo":"torn","elapsed_ms":1,"resolved":{},"auth":"trust"}}
 {
   "ok": true,
   "op": "commit",

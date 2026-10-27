@@ -55,12 +55,12 @@ matters. Give the store's path absolute, as above.
 
 ## The tools agents get
 
-The server lists 35 tools, one per operation, each taking the operation's request as its
+The server lists 38 tools, one per operation, each taking the operation's request as its
 arguments and returning the envelope the CLI prints for it:
 
 | Reads | Writes | Workspaces |
 | --- | --- | --- |
-| `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `path_history`, `diff`, `op_log`, `ref_list`, `blob_has`, `verify`, `remote_list`, `sync_status` | `commit`, `land`, `rebase`, `blob_put`, `ref_set`, `ref_delete`, `undo`, `fetch`, `push`, `sync` | `ws_create`, `ws_status`, `ws_diff`, `ws_commit`, `ws_rebase`, `ws_resolve`, `ws_land`, `ws_materialize`, `ws_discard`, `ws_list`, `ws_info` |
+| `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `path_history`, `diff`, `op_log`, `ref_list`, `blob_has`, `verify`, `remote_list`, `sync_status` | `commit`, `land`, `rebase`, `blob_put`, `ref_set`, `ref_delete`, `undo`, `fetch`, `push`, `sync`, `gc`, `repair`, `upgrade` | `ws_create`, `ws_status`, `ws_diff`, `ws_commit`, `ws_rebase`, `ws_resolve`, `ws_land`, `ws_materialize`, `ws_discard`, `ws_list`, `ws_info` |
 
 `init`, `whoami`, `schema`, `blob get`, `ws delete`, `ws hook`, `git import`, `git export`,
 `derive`, `clone` and `remote add|remove` are commands only: you run them, not the agents. The git remote tools take a remote by its name

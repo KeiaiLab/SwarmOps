@@ -49,7 +49,7 @@ swarmops --repo "$BACKUP" verify --deep
 ```
 
 ```json
-{"ok":true,"op":"verify","api":1,"result":{"objects_checked":42,"changesets_checked":14,"problems":[],"findings":[]},"meta":{"repo":"…","elapsed_ms":2,"resolved":{},"auth":"trust"}}
+{"ok":true,"op":"verify","api":1,"result":{"objects_checked":42,"changesets_checked":14,"problems":[],"findings":[],"truncated":false,"found":0},"meta":{"repo":"…","elapsed_ms":2,"resolved":{},"auth":"trust"}}
 ```
 
 ## Back up a large store
@@ -105,7 +105,7 @@ swarmops git export "$GIT_SIDE" --ref main --branch review
 ```
 
 ```text
-{"ok":true,"op":"verify","api":1,"result":{"objects_checked":42,"changesets_checked":14,"problems":[],"findings":[]},…}
+{"ok":true,"op":"verify","api":1,"result":{"objects_checked":42,"changesets_checked":14,"problems":[],"findings":[],"truncated":false,"found":0},…}
 {"ok":true,"op":"git_import","api":1,"result":{"imported":1,"skipped":1,"head_changeset":"ebbd2134…","git_head_sha":"327bbc8898086c815a71e9ca1ab69bec147e5e36","target_ref":"main","ref_moved":true,"old_head":"c250bd46…","lossy":[],"lossy_total":0},…}
 {"ok":true,"op":"git_export","api":1,"result":{"exported":0,"objects_written":0,…,"branch_moved":false,"incremental":true,"rewritten":0},…}
 ```

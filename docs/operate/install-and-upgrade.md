@@ -115,15 +115,18 @@ swarmops 0.1.0
 
 ### Check the store's format
 
-Every store today is `FORMAT 1`:
+`init` makes a `FORMAT 2` store; one made by 0.3.0 or earlier, or by `init --format 1`, is
+`FORMAT 1`:
 
 ```sh
 cat "$SWARMOPS_REPO/FORMAT"
 ```
 
 ```text
-swarmops-store 1
+swarmops-store 2
 ```
+
+`swarmops info` reports the same number as `store_version`.
 
 A binary opens only a store whose `FORMAT` it knows, and refuses any other as `E_NOT_A_REPO`
 (exit 6). This is a store whose `FORMAT` file was edited to a layout this build does not know:
@@ -145,11 +148,30 @@ A binary opens only a store whose `FORMAT` it knows, and refuses any other as `E
 ### Upgrade to a release with a new FORMAT
 
 A new `FORMAT` comes with the release that needs it, and [CHANGELOG.md](../../CHANGELOG.md)
-says so. The next one (planned as 2, in M6) adds a header to every journal frame and a checksum
-to every `journal.off` entry. An older binary then refuses the new store rather than misread it,
-because nothing skips a record it does not know. Before 1.0 there is no migration tool
-([versioning policy](../policies/versioning-and-stability.md)): a store may have to be created
-again.
+says so. `FORMAT 2` (M6) adds a header with a sequence number and checksums to every journal
+frame, a checksum to every `journal.off` entry, and ref names beyond `main` and
+`release/<name>`. An older binary refuses the new store rather than misread it. A FORMAT 1 store
+stays FORMAT 1 under the new binary, which reads and writes it as before, until it is upgraded:
+
+1. Install the new binary, and end the sessions that run the old one, as for the same `FORMAT`.
+2. Run `verify --deep` ([Verify and repair](verify-and-repair.md)), then upgrade:
+
+   ```sh
+   swarmops upgrade
+   swarmops gc
+   ```
+
+   ```text
+   {"ok":true,"op":"upgrade","api":1,"result":{"from":1,"to":2,"upgraded":true},…}
+   {"ok":true,"op":"gc","api":1,"result":{"removed":[{"kind":"upgrade_residue","count":4}],"bytes":229,"orphan_objects":0},…}
+   ```
+
+`upgrade` cannot be undone: from then on no older release opens the store, and a process that
+had it open as FORMAT 1, of an older release or of this one, fails its next read or write with
+`E_STORE_CORRUPT`, and opens it again as FORMAT 2. An upgrade cut short is finished by the next
+command that opens the store. `gc` then removes the FORMAT 1 files the upgrade left. On a FORMAT 2
+store, `upgrade` does nothing (`"upgraded":false`). A `FORMAT` that `upgrade` does not reach
+means creating the store again ([versioning policy](../policies/versioning-and-stability.md)).
 
 ### Create a store again
 
@@ -169,7 +191,7 @@ swarmops --repo "$NEW" git export "$GIT_SIDE" --ref main --branch review
 ```
 
 ```text
-{"ok":true,"op":"repo_init","api":1,"result":{"repo_id":"393244461d7a5f01f7d600c8612a93f0","name":"acme","store_version":1,"changesets":0,"refs":0},…}
+{"ok":true,"op":"repo_init","api":1,"result":{"repo_id":"393244461d7a5f01f7d600c8612a93f0","name":"acme","store_version":2,"changesets":0,"refs":0},…}
 {"ok":true,"op":"git_import","api":1,"result":{"imported":10,"skipped":0,"head_changeset":"b9607b5d…","git_head_sha":"327bbc8898086c815a71e9ca1ab69bec147e5e36","target_ref":"main","ref_moved":true,"lossy":[],"lossy_total":0},…}
 {"ok":true,"op":"git_export","api":1,"result":{"exported":0,"objects_written":0,…,"head_sha":"327bbc8898086c815a71e9ca1ab69bec147e5e36","branch":"review",…,"branch_moved":false,…,"rewritten":0},…}
 ```

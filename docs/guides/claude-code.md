@@ -116,7 +116,7 @@ SwarmOps records an identity and does not verify it: every envelope's `meta.auth
 treats every agent that runs against a store as a trusted local user acting for the same owner, and
 the store directory's permissions are the access boundary.
 
-## The 35 MCP tools
+## The 38 MCP tools
 
 A changeset is what a commit records, and a ref, such as `main`, is a name that points at one.
 `swarmops mcp` lists one tool for each store operation but `derive`, which `swarmops derive` runs
@@ -239,6 +239,16 @@ annotations say whether it changes the store and how.
 
   Fetches, lands `main`'s unpublished changes onto the remote's head, moves `main` there and
   pushes; with `mode` `local`, it does not push.
+
+### Three maintenance tools
+
+- **`gc`**, **`repair`** and **`upgrade`**
+
+  `gc` removes the store's leftovers and never an object or a changeset; `repair` rebuilds what
+  the journal can rebuild, sets damaged objects aside and verifies again; `upgrade` moves a
+  FORMAT 1 store to FORMAT 2, which takes free-form branches and tags, and cannot be undone. While
+  one runs, another fails at once with `E_MAINTENANCE_BUSY` (exit 4): retry
+  ([Verify and repair](../operate/verify-and-repair.md), [Making room](../operate/making-room.md)).
 
 ### Eleven workspace tools
 

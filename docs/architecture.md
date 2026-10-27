@@ -69,8 +69,8 @@ swarmops-testkit core, store, repo   (repo behind its default feature `repo`; a 
                                       of store, repo, ops, cli, git and ws, and fuzz/'s dependency)
 ```
 
-`fuzz/` is a cargo workspace of its own, with four cargo-fuzz targets over the codec and the
-journal. The specs plan one more crate, `swarmops-sim` (the simulation harness, M9).
+`fuzz/` is a cargo workspace of its own, with eight cargo-fuzz targets over the codec, object
+files, the journal of each `FORMAT` and FORMAT 2's ref files. The specs plan one more crate, `swarmops-sim` (the simulation harness, M9).
 
 Two rules shape the layers (umbrella §1, [CONTRIBUTING.md](../CONTRIBUTING.md#the-rules)):
 
@@ -140,11 +140,12 @@ A store is one directory (storage §2, §3):
 
 ```text
 <store>/
-  FORMAT                     "swarmops-store 1\n", written last by init: a store without it was never finished
+  FORMAT                     "swarmops-store 2\n" (or 1), written last by init: a store without it was never finished
   REPO                       the repository's id and name
   objects/tmp/               where new object files are staged
   objects/<2 hex>/<62 hex>   one file per object: a header ("SOB1", kind, encoding, length), then the payload
   meta/lock                  the lock that serializes metadata writers
+  meta/maint.lock            the maintenance lease (M6): one gc, repair or upgrade at a time
   meta/journal.log           append-only, CRC-framed journal: one frame per write transaction, the source of truth
   meta/journal.off           each frame's start offset, so frame n is found at once
   meta/journal.ckpt          how far the journal is materialized and synced
@@ -152,6 +153,8 @@ A store is one directory (storage §2, §3):
   meta/parents.log           the parents the index points into
   meta/sorted/*.{key,rec}    sorted views of the index, by id and by delta hash, for searching
   meta/refs/main             one file per ref ("<64 hex>\n<version>\n"); also meta/refs/release/<name>
+  meta/journal2.{log,off,ckpt}  FORMAT 2's journal, offsets and checkpoint, in place of journal.* (M6)
+  meta/refs2/<32 hex>        FORMAT 2's ref files, in place of meta/refs/ (M6): named by the name's hash, holding it
   meta/derived/<name>/...    derived values, one file each: a cache beside the journal, never synced (M2)
   meta/derived/tmp/          where new derived values are staged
   meta/external_ids/         the external id index (M3): <system>/<2 hex>/<rest of the hex>, one 44-byte file per id
@@ -160,6 +163,7 @@ A store is one directory (storage §2, §3):
   git/MIRROR                 "swarmops-git-mirror 1\n" (M13): the mirror's own layout version, apart from FORMAT
   git/lock                   the mirror's lock (M13): one clone, remote add|remove, fetch, push or sync at a time
   git/mirror.git/            the git mirror (M13): a bare git repository, a cache that SwarmOps alone writes
+  quarantine/objects/<64 hex>  object files repair found damaged (M6), set aside, never deleted
 ```
 
 Objects are compressed one at a time with zstd at level 3, with zstd's content checksum, when
@@ -170,7 +174,11 @@ The index and the ref files are projections of the journal. A journal frame is
 `u32le len | u32le crc32(payload) | payload`, and its payload holds fixed-width little-endian
 records: a changeset entering the index, a ref move, a compaction marker. The frame layout and
 the record layouts are the disk contract of `FORMAT 1`: not part of the hash contract, but
-changed only with a new `FORMAT` (storage §3). Derived values (M2) are no projection of the
+changed only with a new `FORMAT` (storage §3). `FORMAT 2` (M6) keeps the records and changes the
+frame header to `u32le len | u32le crc32(payload) | u64le seq | u32le prev_crc | u32le
+crc32(header)`, gives each `journal.off` entry the frame's payload CRC and a checksum of its own,
+and names each ref file `hex(blake3("swarmops:refname:v1\0" ++ name)[0..16])`, which holds the
+name; that recipe names files, and is no part of the hash contract. Derived values (M2) are no projection of the
 journal but a cache beside it, with a header of their own (below). The external id index (M3,
 storage §7) says which changeset an id of another system names, a git commit's oid say: an immutable
 file per id, written as an object is and only once the frame that records its changeset is durable.
@@ -623,14 +631,15 @@ lock (I4). The tests that hold the code to them:
   first sector lost, and directory entries that no fsync covered reverted. Opened with the
   binary, each must hold a prefix of the run's transactions with every committed one in it, and
   verify clean;
-- property tests and fuzz targets for the codec and for journal recovery, the latter checked
-  against a model;
+- property tests and fuzz targets for the codec, object files, FORMAT 2's frames and ref files,
+  and journal recovery in each `FORMAT`, FORMAT 1's checked against a model;
 - multi-process tests through the binary (8 processes committing at once, 16 racing to move one
   ref), each ending with `verify --deep`.
 
 The crash sweeps model a process crash, which leaves the kernel's page cache intact, and the
-power-loss images a model of the disk rather than a real device: a test with a literal
-`SIGKILL` is M6 ([known-limitations.md](known-limitations.md)).
+power-loss images a model of the disk rather than a real device ([known-limitations.md](known-limitations.md)).
+Since M6 a literal `SIGKILL` kills `commit --advance` at random points on a real disk, and every
+sweep runs once per `FORMAT`.
 
 ## Concurrency
 

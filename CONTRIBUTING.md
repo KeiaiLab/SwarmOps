@@ -177,7 +177,8 @@ and binary code, and the page lists what review reads for and the recorded devia
   `probes` and `rec_reads` count reads in every build, one relaxed atomic add per `read_at`:
   they check storage spec §3's lookup cost model
   (`read_at_binary_search_touches_only_key_column`), since the metadata store's reads do not go
-  through `FsOps`.
+  through `FsOps`. `Index::widest_read` and `SortedView::widest_read` (M6) record the widest read,
+  which the bounded-read tests hold to 4,096 entries.
 - **Writes are checked against the ordering rules.** Every run of the binary in the CLI tests,
   and the store's and the repository's crash sweeps (their recovery after the crash included),
   check each filesystem call against the
@@ -217,7 +218,7 @@ and binary code, and the page lists what review reads for and the recorded devia
 | `just check-ci-slow` | The regular suite at `PROPTEST_CASES=2000` plus every ignored test except `regenerate_golden`, the git fixtures' two switches and the two 32-process contention measurements, which are far too heavy for CI runners: what the weekly CI run does, under the `ci-slow` nextest profile. |
 | `just perf` | The measurements `docs/perf.md` records, optimized: the store-level and the CLI-level 32 × 1,000 contention tests, then every store bench. It prints their summary lines; `target/perf/` keeps the full output. |
 | `just bench` | The criterion benches. |
-| `just fuzz [target]` | One cargo-fuzz target for 60 s on the nightly toolchain: `codec_roundtrip` (the default), `tree_decode`, `frame_decode` or `journal_recovery`. It reads the tracked corpus as a seed and writes the new inputs it finds into `fuzz/corpus-new/<target>/`, which git ignores, so a run leaves the tree clean. |
+| `just fuzz [target]` | One cargo-fuzz target for 60 s on the nightly toolchain: `codec_roundtrip` (the default), `tree_decode`, `frame_decode`, `journal_recovery`, `object_file`, `frame2_decode`, `journal2_recovery` or `ref_file2`. It reads the tracked corpus as a seed and writes the new inputs it finds into `fuzz/corpus-new/<target>/`, which git ignores, so a run leaves the tree clean. |
 | `just git-fixtures` | Rebuilds the git fixtures' archives and manifests (`crates/swarmops-testkit/git-fixtures/`) from their scripts with the declared git, 2.43.0: the ignored test `regenerate_git_fixtures`, with `SWARMOPS_REGEN_GIT_FIXTURES=1`. A few seconds; run it after changing a script, and commit what it rewrites. |
 
 Run `just check-slow` before landing a change to the store's write, recovery or locking paths.

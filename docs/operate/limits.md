@@ -11,10 +11,12 @@ each with the milestone that takes it.
   ([Building and testing a change](build-and-test.md)).
 - **No review** (M7): SwarmOps does not hold a landing for a person's approval. The loop puts the
   review in git, between the review branch and the trunk ([step 5](daily-loop.md#5-review-then-move-the-trunk)).
-- **Nothing is collected** (M6): `objects/tmp/` keeps the leftovers of interrupted writes, and
-  `meta/derived/` every derived value. A store only grows, but for what [Making room](making-room.md)
-  removes by hand.
-- **No repair tool** (M6): `verify` reports damage, and a restore fixes it.
+- **No object is collected**: `swarmops gc` removes leftovers and counts the objects no changeset
+  reaches, but deletes none, and `meta/derived/` keeps every value of the current versions. A store
+  only grows, but for what [Making room](making-room.md) removes.
+- **`repair` rebuilds, it does not restore**: it rebuilds the index, `journal.off` and the ref files
+  from the journal and sets damaged objects aside, but a damaged journal, or an object whose
+  content nothing holds, takes a restore ([Verify and repair](verify-and-repair.md)).
 - **Writers take turns.** Every write holds one store-wide lock across two journal syncs: about
   21 ms per uncontended commit on the maintainers' host. With 32 writers committing in a loop, a
   commit can wait a few hundred transactions; on a slow enough disk that passes the 10 s wait for

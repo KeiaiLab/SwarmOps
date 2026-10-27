@@ -41,7 +41,7 @@ swarmops info
 ```
 
 ```json
-{"ok":true,"op":"repo_info","api":1,"result":{"repo_id":"94b6b112787a77d96c23be442f233f0d","name":"acme","main":"bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118","store_version":1,"changesets":2,"refs":1},"meta":{"repo":"/tmp/dev-guide/acme","elapsed_ms":0,"resolved":{},"auth":"trust"}}
+{"ok":true,"op":"repo_info","api":1,"result":{"repo_id":"94b6b112787a77d96c23be442f233f0d","name":"acme","main":"bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118","store_version":2,"changesets":2,"refs":1},"meta":{"repo":"/tmp/dev-guide/acme","elapsed_ms":0,"resolved":{},"auth":"trust"}}
 ```
 
 | Field | What it holds |

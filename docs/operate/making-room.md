@@ -1,35 +1,33 @@
 # Making room
 
-Remove, by hand and with every writer stopped, the two kinds of file a store may lose before
-`swarmops gc` exists.
+Remove what a store may lose: its leftovers with `swarmops gc`, and its derived values by hand,
+with every writer stopped.
 Commands and outputs here follow the
 [conventions of the operations guide](../operations.md#how-to-read-these-pages).
 
 ## What may go
 
-A store only grows ([Limits](limits.md)): nothing is collected until M6's `swarmops gc`. Two kinds of
-file in it may go by hand meanwhile, with every writer stopped. This is what the storage spec gives
-for each, and no more:
+A store only grows ([Limits](limits.md)) but for two kinds of file. This is what the storage spec
+gives for each, and no more:
 
-- **The leftovers of interrupted writes**, files in `objects/tmp/` and `meta/derived/tmp/`. A write
-  stages its file there and links it into place, and a writer that dies on the way leaves the file.
-  The spec has a crash before the frame that names an object leave only orphan objects and temp
-  files, and no frame names an object before it is linked and durable (§2, rules 1 and 2), so a
-  staging file is never the only name of an object that a changeset needs. `swarmops gc` is to clear
-  the files of `objects/tmp/` that are older than an hour (§2) and the temp files of `meta/derived/`
-  (§3). By hand, remove the files older than an hour, and not the directories: the spec lists them
-  as part of the layout, and does not say that a store makes them again.
+- **Leftovers**, which `swarmops gc` removes (the M6 design, section 8): files in `objects/tmp/`
+  and `meta/derived/tmp/` older than a day (`object_temp`, `derived_temp`), where a write that died
+  on the way left the file it was staging; a crashed `init`'s `meta.tmp/` (`meta_staging`); the
+  values of a built-in derivation's older versions (`derived_version`); and the old files an
+  upgrade left (`upgrade_residue`). No frame names an object before it is linked and durable (§2,
+  rules 1 and 2), so a staging file is never the only name of an object that a changeset needs,
+  and a day keeps the files of writes still in flight.
 - **The derived values**, `meta/derived/`, which may go whole. They are a cache that neither the
   journal nor any other file names (§3), and removing a value's file, or `meta/derived/`, makes the
   value derived again (§5).
 
-The orphan objects stay: telling them from the objects a changeset names takes the mark and sweep
-from the journal that `gc` gets later. The objects, the journal, the index and the refs stay as they
-are.
+`gc` deletes no object and no changeset, and nothing a ref, a workspace or the git mirror reaches:
+the objects, the journal, the index, the refs, `quarantine/` and `git/` stay as they are. It counts
+the orphan objects (`orphan_objects`), those no changeset reaches, and keeps them.
 
 ## 1. Stop every writer
 
-Both removals need the store to themselves. A writer is every process that can write it: the agents'
+Removing the derived values needs the store to itself. A writer is every process that can write it: the agents'
 sessions and their MCP servers (a server lives as long as its session), the loop's commands and
 `swarmops derive`, and also a read, which stores the values it derives. `flock` on `meta/lock` stops
 none of them, since objects and derived values are written without it. Check that no `swarmops` is
@@ -48,31 +46,26 @@ command prints nothing and exits 1.
 
 ## 2. Remove the leftovers of interrupted writes
 
-From the store's directory (the `:?` refuses an empty variable, which `cd` would take for the
-current directory), the leftovers (on a store that never derived a value, `find` says that `meta/derived/tmp` does not exist, which is right):
+`gc` needs no writer stopped: it takes the store's maintenance lease and its lock, and leaves the
+temp files younger than a day. `--dry-run` reports what it would remove and removes nothing:
 
 ```sh
-cd "${SWARMOPS_REPO:?}"
-find objects/tmp meta/derived/tmp -type f -mmin +60
+swarmops gc --dry-run
+swarmops gc
+ls -a "${SWARMOPS_REPO:?}/objects/tmp"
 ```
 
 ```text
-objects/tmp/.tmpUbSpKg
-meta/derived/tmp/3849408-0-ffc434ac1bd4cb92
+{"ok":true,"op":"gc","api":1,"result":{"removed":[{"kind":"object_temp","count":1}],"bytes":1000,"orphan_objects":0},…}
+{"ok":true,"op":"gc","api":1,"result":{"removed":[{"kind":"object_temp","count":1}],"bytes":1000,"orphan_objects":0},…}
+.
+..
+.tmpoyk2fg
 ```
 
-This store had three leftovers of writers that were killed in the middle of a write; two were set
-back a day with `touch -d`, to have the hour pass, and the third is as young as it was. The removal
-leaves that one:
-
-```sh
-find objects/tmp meta/derived/tmp -type f -mmin +60 -delete
-find objects/tmp meta/derived/tmp -type f
-```
-
-```text
-objects/tmp/.tmpoyk2fg
-```
+This store had two leftovers of writers killed in the middle of a write; one was set back two days
+with `touch -d`, and the other, as young as it was, stays. A second `gc`, `repair` or `upgrade`
+started meanwhile fails at once with the retryable `E_MAINTENANCE_BUSY`.
 
 ## 3. Remove the derived values
 
@@ -87,7 +80,7 @@ swarmops verify --deep
 ```text
 344K	meta/derived
 38
-{"ok":true,"op":"verify","api":1,"result":{"objects_checked":45,"changesets_checked":15,"problems":[],"findings":[]},"meta":{"repo":"…","elapsed_ms":2,…}}
+{"ok":true,"op":"verify","api":1,"result":{"objects_checked":45,"changesets_checked":15,"problems":[],"findings":[],"truncated":false,"found":0},"meta":{"repo":"…","elapsed_ms":2,…}}
 ```
 
 ## 4. Derive them again
@@ -109,7 +102,7 @@ entries[0].changeset: 1092352e3a895f0ae9301a5e0637b74ae36763b57d3e907897e0e0408a
 …
 2
 {"ok":true,"op":"derive","api":1,"result":{"derived":15,"cached":0,"next":20},"meta":{"repo":"…","elapsed_ms":1,…}}
-{"ok":true,"op":"verify","api":1,"result":{"objects_checked":45,"changesets_checked":15,"problems":[],"findings":[]},"meta":{"repo":"…","elapsed_ms":2,…}}
+{"ok":true,"op":"verify","api":1,"result":{"objects_checked":45,"changesets_checked":15,"problems":[],"findings":[],"truncated":false,"found":0},"meta":{"repo":"…","elapsed_ms":2,…}}
 ```
 
 ## What it saves

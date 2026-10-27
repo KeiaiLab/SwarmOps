@@ -43,7 +43,7 @@ swarmops clone git@github.com:acme/acme.git --into "$SWARMOPS_REPO" --branch sta
 ```
 
 ```json
-{"ok":true,"op":"clone_repo","api":1,"result":{"repo":{"repo_id":"3930dfc5…","name":"acme","main":"c51b1735…","store_version":1,"changesets":3,"refs":1},"remote":{"name":"origin","url":"git@github.com:acme/acme.git","branch":"stable","lossy":[]},"fetch":{"remote":"origin","branch":"stable","head":{"sha":"a4a47ecd332f37219c9e1c12ddf79977cd168f46","changeset":"c51b1735…"},"imported":3,"branches":[{"branch":"stable","new":"a4a47ecd332f37219c9e1c12ddf79977cd168f46"}],"branches_truncated":false,"tags_fetched":0},"imported":3,"main":"c51b1735…"},"meta":{"repo":"…","elapsed_ms":235,…}}
+{"ok":true,"op":"clone_repo","api":1,"result":{"repo":{"repo_id":"3930dfc5…","name":"acme","main":"c51b1735…","store_version":2,"changesets":3,"refs":1},"remote":{"name":"origin","url":"git@github.com:acme/acme.git","branch":"stable","lossy":[]},"fetch":{"remote":"origin","branch":"stable","head":{"sha":"a4a47ecd332f37219c9e1c12ddf79977cd168f46","changeset":"c51b1735…"},"imported":3,"branches":[{"branch":"stable","new":"a4a47ecd332f37219c9e1c12ddf79977cd168f46"}],"branches_truncated":false,"tags_fetched":0},"imported":3,"main":"c51b1735…"},"meta":{"repo":"…","elapsed_ms":235,…}}
 ```
 
 `clone` made the store, recorded the remote as `origin` following `stable` (`--branch`; without
