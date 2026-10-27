@@ -200,9 +200,10 @@ fn assert_every_change_on_main(store: &Store) {
 /// passed ([`slot`]); with an interval of 0, a closed loop, [`LANDS_VAR`] lands each (10), each as
 /// soon as the last one ended. It prints one `landing-perf: ` line: the run's [`Stats`] (a land's
 /// latency from its read of `main` to the end of its last `land`), the lands that did not land,
-/// and the load before and after; then asserts only that nothing was lost or doubled
-/// ([`check_invariants`]) and the store verifies clean, never a target: a missed target is
-/// recorded in `docs/perf.md`.
+/// and the load before and after; then a second line with the gate's verdict ([`check_invariants`])
+/// and that of its rules but the first, `slow land`, on their own (`chain`: nothing lost or
+/// doubled, every move a fast-forward, a clean `verify`). It asserts the gate and a clean store,
+/// never a target: a missed target is recorded in `docs/perf.md`.
 mod perf {
     use std::sync::Barrier;
     use std::thread;
@@ -317,12 +318,30 @@ mod perf {
             load1(),
         );
 
-        // 4. Nothing lost or doubled, and a clean store.
+        // 4. The gate, then its rules after the first (`slow land`) on their own: a land past
+        //    30 s still fails the run, and the line says whether anything was lost or doubled.
         let base_id = ChangesetId::new(ObjectId::from_hex(&base).expect("a changeset id"));
-        if let Err(rule) = check_invariants(Utf8Path::new(store.path()), "main", base_id, &records)
-        {
+        let path = Utf8Path::new(store.path());
+        let gate = check_invariants(path, "main", base_id, &records);
+        let unslowed: Vec<Vec<LandRecord>> = (records.iter())
+            .map(|lands| {
+                (lands.iter())
+                    .map(|r| LandRecord {
+                        latency_us: 0,
+                        ..r.clone()
+                    })
+                    .collect()
+            })
+            .collect();
+        let chain = check_invariants(path, "main", base_id, &unslowed);
+        println!(
+            "{TAG}gate {} chain {}",
+            gate.as_ref().map_or_else(String::as_str, |()| "ok"),
+            chain.as_ref().map_or_else(String::as_str, |()| "ok"),
+        );
+        store.assert_clean("after the lands");
+        if let Err(rule) = gate {
             panic!("{rule}");
         }
-        store.assert_clean("after the lands");
     }
 }
