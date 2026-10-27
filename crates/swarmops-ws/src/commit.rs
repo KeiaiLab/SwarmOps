@@ -3,7 +3,8 @@
 //!
 //! ```text
 //!  lock → scan → sizes (E_TOO_LARGE) → hashes, bounded → journal/pending.json {key} (WS1)
-//!       → blob_has, blob_put what is missing → commit{parent: head, {blob: id}…, key}
+//!       → blob_has; what is missing inline up to INLINE_BYTES, blob_put past it
+//!       → commit{parent: head, {blob: id} | {inline}…, key}
 //!       → workspace.json head (WS2) → index → the pending record removed
 //! ```
 //!
@@ -35,6 +36,19 @@ use crate::{Ctx, after};
 
 /// The ids one `blob_has` asks about.
 const HAS_BATCH: usize = 1000;
+
+/// The most content bytes, as sent (inline or base64 text), that one commit request carries:
+/// the memory it holds. A missing blob past what is left goes by `blob_put` first. It stays
+/// under the store's 1 GiB a commit's contents may hold.
+const INLINE_BYTES: u64 = 64 << 20;
+
+/// How a blob the store lacked reaches it.
+enum Sent {
+    /// Put alone before the commit; whether that wrote it.
+    Put(bool),
+    /// Carried in the commit request.
+    Inline(ContentInput),
+}
 
 /// One path the commit writes or removes.
 struct Entry {
@@ -131,15 +145,21 @@ pub(crate) fn commit_in(
     // 6. The pending record, durable before the store hears of the commit (WS1).
     let key = pending_key(ctx, ws)?;
 
-    // 7. The blobs the store lacks, uploaded.
-    let blobs_written = upload(ctx, ws, &entries)?;
+    // 7. The blobs the store lacks: inline under the budget, put alone past it.
+    let sent = upload(ctx, ws, &entries, INLINE_BYTES)?;
+    let puts = (sent.values())
+        .filter(|sent| matches!(sent, Sent::Put(true)))
+        .count();
 
-    // 8. The commit, by blob id, on the head's full id.
-    let changes = entries.iter().map(change_input).collect::<Result<_, _>>()?;
+    // 8. The commit, by blob id or inline, on the head's full id.
+    let changes = (entries.iter())
+        .map(|entry| change_input(entry, &sent))
+        .collect::<Result<_, _>>()?;
     let mut req = CommitReq::new(changes, message);
     req.parent = Some(ws.file.head.as_str().into());
     req.idempotency_key = Some(key);
     let done = ctx.store.commit(&ws.who, req)?;
+    let blobs_written = u64::try_from(puts).unwrap_or(u64::MAX) + done.blobs_written;
 
     // 9. The workspace stands on it (WS2); the index learns it; the record goes.
     let parent = ws.file.head.clone();
@@ -311,16 +331,27 @@ fn pending_key(ctx: &Ctx<'_>, ws: &Workspace) -> Result<String, OpError> {
     Ok(key)
 }
 
-/// Uploads the blobs of `entries` the store lacks, asked in batches; how many it got.
-fn upload(ctx: &Ctx<'_>, ws: &Workspace, entries: &[Entry]) -> Result<u64, OpError> {
-    // 1. Each blob once, with a file that holds it.
-    let mut wanted: HashMap<String, &Entry> = HashMap::new();
+/// The blobs of `entries` the store lacks, asked in batches, each read from its file, which
+/// must still hold it: carried inline while their text, once per entry holding it, fits in
+/// `budget` bytes; past that, put alone. By blob id.
+fn upload(
+    ctx: &Ctx<'_>,
+    ws: &Workspace,
+    entries: &[Entry],
+    budget: u64,
+) -> Result<HashMap<String, Sent>, OpError> {
+    // 1. Each blob once, with the first file that holds it and how many entries hold it.
+    let mut wanted: HashMap<String, (&Entry, u64)> = HashMap::new();
     for entry in entries {
         if let (Some((_, blob)), Some(_)) = (entry.put, entry.host) {
-            wanted.entry(ObjectId::new(blob).to_hex()).or_insert(entry);
+            let held = wanted
+                .entry(ObjectId::new(blob).to_hex())
+                .or_insert((entry, 0));
+            held.1 += 1;
         }
     }
-    let ids: Vec<String> = wanted.keys().cloned().collect();
+    let mut ids: Vec<String> = wanted.keys().cloned().collect();
+    ids.sort_by(|a, b| wanted[a].0.path.cmp(&wanted[b].0.path));
 
     // 2. Those the store lacks, asked in batches.
     let mut missing = Vec::new();
@@ -330,10 +361,11 @@ fn upload(ctx: &Ctx<'_>, ws: &Workspace, entries: &[Entry]) -> Result<u64, OpErr
         missing.extend(batch.iter().filter(|id| !present.contains(*id)).cloned());
     }
 
-    // 3. Each uploaded from its file, which must still hold it.
-    let mut written = 0;
+    // 3. Each read from its file, which must still hold it, then inline or put.
+    let mut sent = HashMap::new();
+    let mut left = budget;
     for id in missing {
-        let entry = wanted[&id];
+        let (entry, held) = wanted[&id];
         let host = entry
             .host
             .expect("only entries read from the host are uploaded");
@@ -343,19 +375,35 @@ fn upload(ctx: &Ctx<'_>, ws: &Workspace, entries: &[Entry]) -> Result<u64, OpErr
         if ObjectId::new(scan::blob_id(&bytes)).to_hex() != id {
             return Err(changed_meanwhile(&entry.path));
         }
-        let content = match String::from_utf8(bytes) {
-            Ok(text) => ContentInput::Inline(text),
-            Err(e) => ContentInput::Base64(STANDARD.encode(e.into_bytes())),
+        let (content, len) = match String::from_utf8(bytes) {
+            Ok(text) => {
+                let len = text.len();
+                (ContentInput::Inline(text), len)
+            }
+            Err(e) => {
+                let text = STANDARD.encode(e.into_bytes());
+                let len = text.len();
+                (ContentInput::Base64(text), len)
+            }
         };
+
+        // 4. Inline while it fits, once per entry holding it; else put alone.
+        let cost = u64::try_from(len).unwrap_or(u64::MAX).saturating_mul(held);
+        if cost <= left {
+            left -= cost;
+            sent.insert(id, Sent::Inline(content));
+            continue;
+        }
         let put = ctx.store.blob_put(&ws.who, BlobPutReq::new(content))?;
-        written += u64::from(put.written);
+        sent.insert(id, Sent::Put(put.written));
     }
-    Ok(written)
+    Ok(sent)
 }
 
-/// The change list's line of `entry`: a put by blob id in its kind, or a delete. `E_INTERNAL`
-/// for a kind this build does not know.
-fn change_input(entry: &Entry) -> Result<ChangeInput, OpError> {
+/// The change list's line of `entry`: a put in its kind, of the content `sent` carries inline
+/// for its blob or else by blob id, or a delete. `E_INTERNAL` for a kind this build does not
+/// know.
+fn change_input(entry: &Entry, sent: &HashMap<String, Sent>) -> Result<ChangeInput, OpError> {
     let Some((kind, blob)) = entry.put else {
         return Ok(ChangeInput::new(entry.path.clone(), ChangeOp::Delete));
     };
@@ -365,8 +413,13 @@ fn change_input(entry: &Entry) -> Result<ChangeInput, OpError> {
         FileKind::Symlink => ModeInput::Symlink,
         _ => return Err(unknown_variant("FileKind")),
     };
+    let id = ObjectId::new(blob).to_hex();
+    let content = match sent.get(&id) {
+        Some(Sent::Inline(content)) if entry.host.is_some() => content.clone(),
+        _ => ContentInput::Blob(id),
+    };
     let mut out = ChangeInput::new(entry.path.clone(), ChangeOp::Put);
-    out.content = Some(ContentInput::Blob(ObjectId::new(blob).to_hex()));
+    out.content = Some(content);
     out.mode = Some(mode);
     Ok(out)
 }
@@ -430,7 +483,83 @@ fn changed_meanwhile(path: &str) -> OpError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use camino::Utf8Path;
+    use swarmops_api::{Identity, StatusAfter, StoreOps, WsCreateReq};
+    use swarmops_ops::LocalOps;
+
     use super::*;
+    use crate::hostfs::RealHost;
+    use crate::{RealFs, create};
+
+    /// The budget the test passes in place of [`INLINE_BYTES`].
+    const SMALL_BUDGET: u64 = 1024;
+
+    /// Under a 1 KiB budget, the missing blob past it is put alone and the two that fit stay
+    /// inline: the store then holds the one put and neither inline one.
+    #[test]
+    fn a_blob_past_the_inline_budget_is_put_alone() {
+        // 1. A store, a workspace of it, two small new files and one of 2 KiB.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(tmp.path()).unwrap().join("store");
+        let (ops, _) = LocalOps::init(&root, "acme").unwrap();
+        let who = Identity::parse("agent/tester").unwrap();
+        let mut seed = ChangeInput::new("src/a.txt".to_owned(), ChangeOp::Put);
+        seed.content = Some(ContentInput::Inline("a\n".to_owned()));
+        let base = ops
+            .commit(&who, CommitReq::new(vec![seed], "seed"))
+            .unwrap();
+        let ctx = Ctx::new(
+            &ops,
+            root.clone(),
+            Some(who),
+            Arc::new(RealFs::new()),
+            Arc::new(RealHost::default()),
+        );
+        let dir = root.parent().unwrap().join("w");
+        let mut req = WsCreateReq::new("w".to_owned());
+        req.path = Some(dir.to_string());
+        req.base = base.changeset.as_str().into();
+        req.prefixes = vec!["src".to_owned()];
+        req.status_after = StatusAfter::None;
+        create(&ctx, req).unwrap();
+        let big = "b".repeat(2048);
+        for (path, text) in [
+            ("src/one.txt", "one\n"),
+            ("src/two.txt", "two\n"),
+            ("src/big.txt", &big),
+        ] {
+            std::fs::write(dir.join(path), text).unwrap();
+        }
+
+        // 2. The entries a commit makes of them, hashed.
+        let ws = Workspace::open(&ctx, Locate::Name("w".to_owned())).unwrap();
+        let want = Want {
+            paths: Vec::new(),
+            full: false,
+            extra: Vec::new(),
+        };
+        let scanned = scan::scan(&ctx, &ws, &want).unwrap();
+        let mut entries = entries_of(&scanned.changes, &BTreeMap::new());
+        hash_missing(&ctx, &ws, &mut entries).unwrap();
+
+        // 3. Sent under the small budget: the big one put, the small ones inline.
+        let sent = upload(&ctx, &ws, &entries, SMALL_BUDGET).unwrap();
+        let id_of = |text: &str| ObjectId::new(scan::blob_id(text.as_bytes())).to_hex();
+        assert!(matches!(sent[&id_of(&big)], Sent::Put(true)));
+        for text in ["one\n", "two\n"] {
+            assert!(matches!(
+                sent[&id_of(text)],
+                Sent::Inline(ContentInput::Inline(_))
+            ));
+        }
+
+        // 4. The store holds the one put, not yet the inline ones.
+        let ids = vec![id_of(&big), id_of("one\n"), id_of("two\n")];
+        let present = ops.blob_has(BlobHasReq::new(ids)).unwrap().present;
+        assert_eq!(present, [id_of(&big)]);
+    }
 
     /// A put's row takes the scan's stat of its file; a removal's row goes; a mode-only put
     /// keeps the row's stat.

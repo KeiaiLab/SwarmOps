@@ -1,13 +1,18 @@
-//! `ws commit` and `ws diff`: hashing, uploading only the blobs the store lacks, the replay of a
-//! crashed commit by its key, and the one diff renderer.
+//! `ws commit` and `ws diff`: hashing, sending only the blobs the store lacks, inline in the
+//! commit, the replay of a crashed commit by its key, and the one diff renderer.
 
-use std::sync::atomic::Ordering;
+use std::io;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use camino::{Utf8Path, Utf8PathBuf};
 
 use swarmops_api::{
     ChangeOp, ContentInput, DiffFormat, DiffReq, StatusAfter, StoreOps, WsCommitReq, WsDiffReq,
 };
-use swarmops_ws::RealFs;
+use swarmops_ws::hostfs::HostMeta;
 use swarmops_ws::state::{self, SWARMWS_DIR};
+use swarmops_ws::{HostFs, RealFs, RealHost};
 
 use crate::fixture::{Fixture, Put, Watched, changes, remove, write};
 
@@ -23,11 +28,11 @@ fn pending_of(dir: &camino::Utf8Path) -> camino::Utf8PathBuf {
     dir.join(SWARMWS_DIR).join("journal/pending.json")
 }
 
-/// A commit asks which blobs the store has, uploads only the one it lacks, and commits every
-/// change by blob id on the workspace's head; the workspace then stands on the new changeset,
-/// clean.
+/// A commit asks which blobs the store has, carries the one it lacks inline and every other
+/// change by blob id, in one commit on the workspace's head; the workspace then stands on the
+/// new changeset, clean.
 #[test]
-fn commit_uploads_only_missing_blobs_and_commits_blob_refs() {
+fn commit_inlines_only_missing_blobs_and_commits_blob_refs() {
     // 1. A workspace, a file added with content the store holds, one with content it lacks,
     //    one deleted.
     let f = Fixture::new();
@@ -53,9 +58,10 @@ fn commit_uploads_only_missing_blobs_and_commits_blob_refs() {
     assert!(!done.replayed);
     assert_eq!(done.status_after.unwrap().changes, []);
 
-    // 3. One question, one upload, one commit, every put by blob id, on the full head.
+    // 3. One question, no upload, one commit on the full head: the held blob by id, the
+    //    missing one inline.
     assert!(watched.count("blob_has") >= 1);
-    assert_eq!(watched.count("blob_put"), 1);
+    assert_eq!(watched.count("blob_put"), 0);
     let commits = watched.commits();
     let [(req, Some(made))] = commits.as_slice() else {
         panic!("{commits:?}");
@@ -74,7 +80,7 @@ fn commit_uploads_only_missing_blobs_and_commits_blob_refs() {
         ops,
         [
             ("src/copy.txt", ChangeOp::Put, true),
-            ("src/fresh.txt", ChangeOp::Put, true),
+            ("src/fresh.txt", ChangeOp::Put, false),
             ("src/gone.txt", ChangeOp::Delete, false),
         ]
     );
@@ -89,6 +95,145 @@ fn commit_uploads_only_missing_blobs_and_commits_blob_refs() {
     assert_eq!(changes(&f.ctx(), "w", true), []);
     let empty = swarmops_ws::commit(&f.ctx(), commit_of("w", "nothing")).unwrap_err();
     assert_eq!(empty.code, "E_EMPTY_COMMIT", "{empty:?}");
+}
+
+/// A commit of 100 new files sends them in the one commit request: no `blob_put`, all 100
+/// written by the commit.
+#[test]
+fn a_commit_of_many_new_files_makes_no_blob_put() {
+    // 1. A workspace with 100 new files.
+    let f = Fixture::new();
+    let base = f.commit(None, &[Put::File("src/a.txt", "a\n")]);
+    f.create("w", &base, &["src"]);
+    let dir = f.beside("w");
+    for n in 0..100 {
+        write(&dir, &format!("src/new{n:03}.txt"), &format!("new {n}\n"));
+    }
+
+    // 2. Committed: 100 blobs written, every put inline.
+    let watched = Watched::new(&f.ops);
+    let done = swarmops_ws::commit(&f.ctx_over(&watched), commit_of("w", "many")).unwrap();
+    assert_eq!((done.files_changed, done.blobs_written), (100, 100));
+    let commits = watched.commits();
+    let [(req, Some(_))] = commits.as_slice() else {
+        panic!("{commits:?}");
+    };
+    let inline = (req.changes.iter())
+        .filter(|change| matches!(change.content, Some(ContentInput::Inline(_))))
+        .count();
+    assert_eq!(inline, 100);
+
+    // 3. The store asked which it has, then the commit; no blob put.
+    let calls = watched.calls();
+    let sent: Vec<&str> = (calls.iter().copied())
+        .filter(|call| matches!(*call, "blob_has" | "blob_put" | "commit"))
+        .collect();
+    assert_eq!(sent, ["blob_has", "commit"], "{calls:?}");
+    assert_eq!(changes(&f.ctx(), "w", true), []);
+}
+
+/// A file rewritten after the commit hashed it, before the commit read it to send, is
+/// `E_IO_TRANSIENT`, naming it: nothing put or committed, the file left as it is now.
+#[test]
+fn a_file_changed_after_hashing_still_fails() {
+    // 1. A workspace with a new file, over a host that rewrites it once it was first read.
+    let f = Fixture::new();
+    let base = f.commit(None, &[Put::File("src/a.txt", "a\n")]);
+    f.create("w", &base, &["src"]);
+    let dir = f.beside("w");
+    write(&dir, "src/fresh.txt", "hashed\n");
+    let host = Arc::new(EditAfterRead::new(
+        &dir.join("src/fresh.txt"),
+        "rewritten\n",
+    ));
+    let watched = Watched::new(&f.ops);
+    let mut ctx = f.ctx_on(host);
+    ctx.store = &watched;
+
+    // 2. Refused, naming it; nothing sent that writes.
+    let refused = swarmops_ws::commit(&ctx, commit_of("w", "racy")).unwrap_err();
+    assert_eq!(refused.code, "E_IO_TRANSIENT", "{refused:?}");
+    assert_eq!(refused.details["path"], "src/fresh.txt");
+    for op in ["blob_put", "commit"] {
+        assert_eq!(watched.count(op), 0, "{op}: {:?}", watched.calls());
+    }
+    assert_eq!(state::read(&RealFs::new(), &dir).unwrap().head, base);
+}
+
+/// The real host, but the file at `path` is rewritten with `text` once it was first read: an
+/// edit between the commit's hash and its send.
+struct EditAfterRead {
+    /// The host under it.
+    inner: RealHost,
+    /// The file rewritten.
+    path: Utf8PathBuf,
+    /// What it holds after.
+    text: &'static str,
+    /// Whether it was rewritten yet.
+    done: AtomicBool,
+}
+
+impl EditAfterRead {
+    /// A host rewriting `path` with `text` after its first read.
+    fn new(path: &Utf8Path, text: &'static str) -> EditAfterRead {
+        EditAfterRead {
+            inner: RealHost::default(),
+            path: path.to_owned(),
+            text,
+            done: AtomicBool::new(false),
+        }
+    }
+}
+
+impl HostFs for EditAfterRead {
+    fn write_file(&self, path: &Utf8Path, bytes: &[u8]) -> io::Result<()> {
+        self.inner.write_file(path, bytes)
+    }
+
+    fn symlink(&self, target: &str, path: &Utf8Path) -> io::Result<()> {
+        self.inner.symlink(target, path)
+    }
+
+    fn symlink_metadata(&self, path: &Utf8Path) -> io::Result<Option<HostMeta>> {
+        self.inner.symlink_metadata(path)
+    }
+
+    fn read_file(&self, path: &Utf8Path) -> io::Result<Vec<u8>> {
+        // The bytes as read; the file rewritten after its first read.
+        let bytes = self.inner.read_file(path)?;
+        if path == self.path && !self.done.swap(true, Ordering::SeqCst) {
+            std::fs::write(path, self.text)?;
+        }
+        Ok(bytes)
+    }
+
+    fn read_dir(&self, path: &Utf8Path) -> io::Result<Vec<String>> {
+        self.inner.read_dir(path)
+    }
+
+    fn remove_file(&self, path: &Utf8Path) -> io::Result<()> {
+        self.inner.remove_file(path)
+    }
+
+    fn remove_dir_if_empty(&self, path: &Utf8Path) -> io::Result<bool> {
+        self.inner.remove_dir_if_empty(path)
+    }
+
+    fn create_dir_all(&self, path: &Utf8Path) -> io::Result<()> {
+        self.inner.create_dir_all(path)
+    }
+
+    fn rename(&self, from: &Utf8Path, to: &Utf8Path) -> io::Result<()> {
+        self.inner.rename(from, to)
+    }
+
+    fn read_link(&self, path: &Utf8Path) -> io::Result<String> {
+        self.inner.read_link(path)
+    }
+
+    fn set_mode(&self, path: &Utf8Path, mode: u32) -> io::Result<()> {
+        self.inner.set_mode(path, mode)
+    }
 }
 
 /// A commit killed after the store recorded it, before `workspace.json` names it, leaves its
