@@ -5297,23 +5297,29 @@ mod formats {
         assert_eq!(format, b"swarmops-store 1\n");
     }
 
-    /// A format this build does not create is `E_INVALID_ARG`, naming the ones it does, and
-    /// nothing is made; FORMAT 2 is among them only once its journal is built.
+    /// A format this build does not create is `E_INVALID_ARG`, naming the ones it does (1 and
+    /// 2), and nothing is made; `--format 2` makes a FORMAT 2 store.
     #[test]
-    fn init_format_2_is_refused_until_built() {
+    fn init_makes_format_2_on_request_and_refuses_others() {
         let dir = tempfile::tempdir().unwrap();
         let root = utf8(dir.path().join("store"));
-        for format in [2, 3, 0] {
+        for format in [3, 0] {
             let err = expect_err(
                 LocalOps::init_as(&root, "acme", Some(format)),
                 ErrorCode::InvalidArg,
             );
             assert_eq!(
                 Value::Object(err.details.clone()),
-                json!({"format": format, "formats": [1]}),
+                json!({"format": format, "formats": [1, 2]}),
                 "{format}"
             );
             assert!(!fs::exists(&root).unwrap(), "{format}: nothing was made");
         }
+
+        let (ops, info) = LocalOps::init_as(&root, "acme", Some(2)).unwrap();
+        assert_eq!(info.store_version, 2);
+        assert_eq!(ops.repo_info(InfoReq::default()).unwrap().store_version, 2);
+        let format = fs::read(root.join("FORMAT")).unwrap();
+        assert_eq!(format, b"swarmops-store 2\n");
     }
 }

@@ -42,7 +42,7 @@ pub enum StoreFormat {
 pub const DEFAULT_INIT_FORMAT: StoreFormat = StoreFormat::V1;
 
 /// The formats a create writes.
-pub const INIT_FORMATS: &[StoreFormat] = &[StoreFormat::V1];
+pub const INIT_FORMATS: &[StoreFormat] = &[StoreFormat::V1, StoreFormat::V2];
 
 /// What an upgrade writes over FORMAT 1's `journal.ckpt` before it replaces `FORMAT`: not 8
 /// bytes, so every FORMAT 1 reader and writer fails closed from then on.

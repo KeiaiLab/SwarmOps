@@ -90,6 +90,10 @@ const MAX_NAME_LEN: usize = 255;
 /// at most [`MAX_NAME_LEN`] bytes. Open refuses a longer `REPO` by its length, unread.
 const MAX_REPO_LEN: u64 = 32 + 1 + 255;
 
+/// The staging directory a metadata store's create works in (`MetaStore::create_in`), and
+/// removes when a crashed create left it.
+const META_STAGING: &str = "meta.tmp";
+
 /// A repository: objects in `O`, metadata in the native [`MetaStore`].
 #[non_exhaustive]
 pub struct Repo<O: ObjectStore> {
@@ -319,8 +323,14 @@ impl LocalRepo {
             return Err(RepoError::Exists);
         }
 
-        // 4. MetaStore::create renames a whole meta/ into place, so one that exists is whole.
-        let meta = if fs.exists(layout.meta_dir().as_std_path())? {
+        // 4. MetaStore::create renames a whole meta/ into place, so one that exists is whole: a
+        //    crashed create's. One of the other format is set aside, and made anew.
+        let mut leftover = fs.exists(layout.meta_dir().as_std_path())?;
+        if leftover && of_another_format(&layout, &fs)? {
+            set_aside(&layout, &fs)?;
+            leftover = false;
+        }
+        let meta = if leftover {
             MetaStore::open_in(layout.clone(), Arc::clone(fs.ops()))?
         } else {
             MetaStore::create_in(layout.clone(), Arc::clone(fs.ops()))?
@@ -683,6 +693,35 @@ fn lock_repo(layout: &Layout, fs: &StoreFs) -> Result<File, RepoError> {
     let file = File::open(&path).map_err(|e| fs.locate(FileOp::Open, &path, e))?;
     file.lock().map_err(|e| fs.locate(FileOp::Lock, &path, e))?;
     Ok(file)
+}
+
+/// Whether the `meta/` of the store `layout` lays out, which a crashed create left without a
+/// `FORMAT`, holds the journal of another format this build creates and not one of `layout`'s:
+/// that create's, of the other format.
+fn of_another_format(layout: &Layout, fs: &StoreFs) -> Result<bool, IoFailure> {
+    if fs.exists(layout.journal_log().as_std_path())? {
+        return Ok(false);
+    }
+    for &other in format::INIT_FORMATS {
+        let theirs = Layout::with_format(layout.root(), other).journal_log();
+        if other != layout.format() && fs.exists(theirs.as_std_path())? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Sets the `meta/` of a crashed create of another format aside as `meta.tmp/` (renamed whole,
+/// the root synced), which [`MetaStore::create_in`] removes as the staging a crashed create
+/// leaves: without `FORMAT` it is no part of a store. A `meta.tmp/` there already, an older
+/// create's staging, goes first. A crash on the way leaves a `meta/` that is whole, or none.
+fn set_aside(layout: &Layout, fs: &StoreFs) -> Result<(), IoFailure> {
+    let staging = layout.root().join(META_STAGING);
+    if std::fs::exists(&staging).map_err(|e| fs.locate(FileOp::Stat, &staging, e))? {
+        std::fs::remove_dir_all(&staging)
+            .map_err(|e| fs.locate(FileOp::RemoveDirAll, &staging, e))?;
+    }
+    fs.rename_durable(layout.meta_dir().as_std_path(), staging.as_std_path())
 }
 
 /// What a create does when the sync of the store root that makes `FORMAT`'s name durable fails

@@ -19,7 +19,7 @@ use swarmops_core::{ChangesetId, EntryKind, LeafKind, ObjectId, ObjectKind, hash
 use swarmops_repo::{CasOutcome, CasResult, Depth, LocalRepo, RefState, RepoError, RepoInfo};
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, ORDER_CHECK_ENV, RealFs};
-use swarmops_store::{ChangesetMeta, MetaStore, Recovered, StoreError};
+use swarmops_store::{ChangesetMeta, MetaStore, Recovered, StoreError, StoreFormat};
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::child::{SIGABRT, run, this_test};
 #[cfg(feature = "test-hooks")]
@@ -457,6 +457,54 @@ fn cas_ref_through_repo_records_reflog() {
     );
     assert_eq!(repo.get_ref("main").unwrap(), None);
     assert_eq!(repo.list_refs().unwrap(), []);
+}
+
+/// A create that crashed after it renamed `meta/` into place and before it linked `FORMAT`
+/// leaves a whole `meta/` and no store. A create of the other format over it makes a store of
+/// the format it was asked for: it sets the leftover aside, as `meta.tmp/`, and makes its own
+/// `meta/`, never opening the leftover as one of its format. `REPO`, linked first, stays the
+/// crashed create's, as for a create of the same format. Both ways round.
+#[test]
+fn a_create_over_another_format_s_crashed_create_makes_its_own_format() {
+    let formats = [StoreFormat::V1, StoreFormat::V2];
+    for (crashed, asked) in [(formats[0], formats[1]), (formats[1], formats[0])] {
+        let what = format!("{crashed:?}, then {asked:?}");
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+        drop(LocalRepo::create_as(&root, "crashed", crashed).unwrap());
+        // As a crash before the link of FORMAT leaves it.
+        fs::remove_file(root.join("FORMAT")).unwrap();
+
+        let repo =
+            LocalRepo::create_as(&root, "asked", asked).unwrap_or_else(|e| panic!("{what}: {e}"));
+        let info = repo.info().unwrap();
+        assert_eq!(
+            (info.name.as_str(), info.store_version),
+            ("crashed", asked.version()),
+            "{what}"
+        );
+        assert_eq!(
+            fs::read(root.join("FORMAT")).unwrap(),
+            asked.marker(),
+            "{what}"
+        );
+        assert!(
+            !root.join("meta.tmp").exists(),
+            "{what}: the leftover removed"
+        );
+        let id = commit(&repo, &[], vec![put("f", b"1")]);
+        assert_eq!(repo.verify(Depth::Deep).unwrap().problems, [], "{what}");
+        let reopened = LocalRepo::open(&root).unwrap();
+        assert_eq!(reopened.info().unwrap().changesets, 1, "{what}");
+        assert!(
+            reopened
+                .snapshot()
+                .unwrap()
+                .changeset(id)
+                .unwrap()
+                .is_some()
+        );
+    }
 }
 
 #[test]
