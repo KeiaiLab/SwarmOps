@@ -1676,7 +1676,7 @@ expression: golden.transcript()
                     "type": "string"
                   },
                   "path": {
-                    "description": "The directory to make it in, on the caller's host; when omitted, one named after it.",
+                    "description": "The directory to make it in, on the caller's host; when omitted, one named after it in the\nworking directory of the process that serves the call.",
                     "type": [
                       "string",
                       "null"

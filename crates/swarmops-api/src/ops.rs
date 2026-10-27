@@ -3250,7 +3250,8 @@ pub enum LandMode {
 pub struct WsCreateReq {
     /// The workspace's name: 1 to 64 of `a-z`, `0-9`, `.`, `_` and `-`, not starting with `.`.
     pub name: String,
-    /// The directory to make it in, on the caller's host; when omitted, one named after it.
+    /// The directory to make it in, on the caller's host; when omitted, one named after it in the
+    /// working directory of the process that serves the call.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     /// The changeset whose tree it holds.

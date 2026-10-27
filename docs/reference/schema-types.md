@@ -2057,7 +2057,7 @@ Kind: object. `swarmops schema WsCreateReq` prints its JSON Schema.
 | `base` | [`Rev`](#rev) | no | The changeset whose tree it holds. Default: `"main"`. |
 | `from` | `string` or `null` | no | A directory on the caller's host whose `.worktreeinclude` names files to copy in; when omitted, nothing is copied. |
 | `name` | `string` | yes | The workspace's name: 1 to 64 of `a-z`, `0-9`, `.`, `_` and `-`, not starting with `.`. |
-| `path` | `string` or `null` | no | The directory to make it in, on the caller's host; when omitted, one named after it. |
+| `path` | `string` or `null` | no | The directory to make it in, on the caller's host; when omitted, one named after it in the working directory of the process that serves the call. |
 | `prefixes` | array of `string` | no | The repository paths whose subtrees are written out. |
 | `session` | `string` or `null` | no | The hook's session, 16 hex digits; set by the Claude Code hook only. |
 | `status_after` | [`StatusAfter`](#statusafter) | no | Whether the response carries the status after the mutation. Default: `"page"`. |

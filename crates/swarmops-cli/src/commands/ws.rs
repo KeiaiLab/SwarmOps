@@ -301,9 +301,15 @@ pub(crate) fn context<'a>(
 /// command. Shared by `so ws create` and the `ws_create` tool.
 pub(crate) fn create_bootstrapped(
     ctx: &WsCtx<'_>,
-    req: WsCreateReq,
+    mut req: WsCreateReq,
     how: Bootstrap,
 ) -> Result<WsInfo, OpError> {
+    // 0. No `path`: NAME in the working directory, as `so ws create` has it; the workspace
+    //    crate reads no working directory.
+    if req.path.is_none() {
+        req.path = Some(absolute(&req.name)?.into_string());
+    }
+
     // 1. `from` is checked before anything is made, so that a bad one leaves nothing.
     let from = req
         .from
@@ -654,5 +660,22 @@ mod tests {
         let here = context::here().expect("a UTF-8 working directory");
         assert_eq!(absolute("x/y").unwrap(), here.join("x/y"));
         assert_eq!(absolute("/a/b").unwrap(), Utf8PathBuf::from("/a/b"));
+    }
+
+    /// The workspace crate reads no working directory: a create without `path` is refused
+    /// there, and only `create_bootstrapped` fills the default.
+    #[test]
+    fn the_library_create_still_needs_a_path() {
+        let tmp = tempfile::tempdir().expect("a temp dir");
+        let root = Utf8Path::from_path(tmp.path())
+            .expect("UTF-8")
+            .join("store");
+        let (store, _) = LocalOps::init(&root, "acme").expect("a store");
+        let who = Identity::parse("agent/worker-17").expect("an identity");
+
+        let req = WsCreateReq::new("w".to_owned());
+        let refused =
+            swarmops_ws::create(&context(&store, &root, Some(&who)), req).expect_err("no path");
+        assert_eq!(refused.code, ErrorCode::InvalidArg.as_str(), "{refused:?}");
     }
 }

@@ -27,7 +27,18 @@ pub struct Client {
 impl Client {
     /// `swarmops mcp --repo <store> --as AGENT`, with `env` set and no other `SWARMOPS_*`.
     pub fn start(lab: &Lab, env: &[(&str, &str)]) -> Client {
+        Client::start_in(lab, env, Command::new(support::BIN))
+    }
+
+    /// [`Client::start`], with `cwd` as the server's working directory.
+    pub fn start_at(lab: &Lab, env: &[(&str, &str)], cwd: &Path) -> Client {
         let mut command = Command::new(support::BIN);
+        command.current_dir(cwd);
+        Client::start_in(lab, env, command)
+    }
+
+    /// Starts `command`, the binary, as [`Client::start`] describes.
+    fn start_in(lab: &Lab, env: &[(&str, &str)], mut command: Command) -> Client {
         command.args(["mcp", "--repo", lab.path(), "--as", AGENT]);
         for name in support::swarmops_vars() {
             command.env_remove(name);
@@ -176,6 +187,25 @@ fn mcp_ws_tools_address_workspaces_by_name() {
         json!(["scratch.txt"]),
         "{discarded}"
     );
+}
+
+/// `ws_create` without `path` makes the workspace named after it in the server's working
+/// directory, as its schema says and `so ws create` does.
+#[test]
+fn ws_create_without_a_path_makes_it_in_the_working_directory() {
+    let lab = Lab::new();
+    let cwd = tempfile::tempdir().expect("a temp dir");
+    let mut server = Client::start_at(&lab, &[], cwd.path());
+
+    // 1. Made, in `<cwd>/<name>`.
+    let made = server.ok("ws_create", json!({"name": "here", "all": true}));
+    assert_eq!(made["created"], true, "{made}");
+    let dir = std::path::absolute(cwd.path().join("here")).expect("an absolute path");
+    assert!(dir.join(".swarmws").is_dir(), "{made}");
+
+    // 2. The registry has it there.
+    let info = server.ok("ws_info", json!({"workspace": "here"}));
+    assert_eq!(info["path"], dir.to_str().unwrap(), "{info}");
 }
 
 /// The `ws_create` tool bootstraps a new workspace as `so ws create` does (see `ws.rs`): the
