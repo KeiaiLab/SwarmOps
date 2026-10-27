@@ -783,7 +783,7 @@ fn check_own_refs(store: &str, run: &Contention) {
 
 /// How many frames the journal of `store` holds.
 fn journal_frames(store: &str) -> u64 {
-    let layout = Layout::new(Utf8PathBuf::from(store));
+    let layout = swarmops_testkit::store::layout_of(store);
     let journal = Journal::open(&layout, Arc::new(RealFs::new())).expect("open the journal");
     journal.frame_count().expect("count the journal's frames")
 }
