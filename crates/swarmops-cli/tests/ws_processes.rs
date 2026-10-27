@@ -415,6 +415,63 @@ mod perf {
         say("update after a land of 10 files", took, "(target < 100 ms)");
     }
 
+    /// The workspaces created, and the lands made, for the percentiles of G9's open and land.
+    const SAMPLES: usize = 20;
+
+    /// The nearest-rank `percent` percentile of `times`, which is not empty.
+    fn percentile(mut times: Vec<Duration>, percent: usize) -> Duration {
+        times.sort();
+        let rank = (times.len() * percent).div_ceil(100).max(1);
+        times[rank - 1]
+    }
+
+    /// Prints the p50 and p99 of `times` for `case`.
+    fn spread(case: &str, times: &[Duration], note: &str) {
+        let (p50, p99) = (
+            percentile(times.to_vec(), 50),
+            percentile(times.to_vec(), 99),
+        );
+        println!(
+            "ws-perf: {case}: p50 {:.1} ms p99 {:.1} ms n {} {note}",
+            p50.as_secs_f64() * 1e3,
+            p99.as_secs_f64() * 1e3,
+            times.len()
+        );
+    }
+
+    /// G9's open and land latencies, as percentiles: [`SAMPLES`] workspaces of all of a
+    /// 10,000-file tree (`ws create --all`), then [`SAMPLES`] lands in a row from one of them,
+    /// each of one changed file (`ws land`), every land a fast-forward of `main`.
+    #[test]
+    #[ignore = "slow, perf: seeds 10,000 files and times 20 creates and 20 lands"]
+    fn perf_open_and_land_percentiles() {
+        // 1. The store, and the creates.
+        let store = Store::init();
+        seed(&store, CREATE_FILES, TREE_DIRS, |i| content_of(i, 0));
+        let opens: Vec<Duration> = (0..SAMPLES)
+            .map(|n| {
+                let name = format!("o{n}");
+                let flags = ["--status-after", "none"];
+                create(&store, &store.tmp().join(&name), &name, &flags)
+            })
+            .collect();
+        spread("create 10,000 files", &opens, "(target < 3 s, for 100 MiB)");
+
+        // 2. The lands, one changed file each, from the first workspace.
+        let dir = store.tmp().join("o0");
+        let lands: Vec<Duration> = (0..SAMPLES)
+            .map(|n| {
+                let version = u32::try_from(n + 1).unwrap();
+                rewrite_first(&dir, TREE_DIRS, 1, version).unwrap();
+                let args = ["ws", "land", "-m", "perf", "--status-after", "none"];
+                let (out, took) = timed(&dir, &args);
+                out.ok();
+                took
+            })
+            .collect();
+        spread("land of 1 changed file", &lands, "");
+    }
+
     /// The head of `main` in `ops`.
     fn ops_head(ops: &LocalOps) -> String {
         let req = swarmops_api::ResolveRevReq::new("main");

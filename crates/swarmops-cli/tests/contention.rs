@@ -9,7 +9,8 @@
 //! optimized and prints only its summary, as docs/perf.md cites it: `cargo nextest run
 //! --locked --release -p swarmops-cli --run-ignored ignored-only --test all -E
 //! 'test(/^contention::/)' --no-capture`.
-//! [`COMMITS_VAR`] sets how many commits each child makes, for a quick check of the harness.
+//! [`COMMITS_VAR`] sets how many commits each child makes, for a quick check of the harness;
+//! [`CHILDREN_VAR`] how many children run (50 for G1's upper bound).
 //! [`PUBLISH_VAR`] makes each child publish every commit on a ref of its own, in one transaction
 //! (`commit --advance`) or in two (`commit`, then `ref set`), and the summary then gives the
 //! journal frames, so the lock passes, each publish took (docs/perf.md, "M1.6 — publishes").
@@ -79,8 +80,12 @@ use swarmops_testkit::test_name;
 
 use crate::support;
 
-/// How many children commit at once.
+/// How many children commit at once unless [`CHILDREN_VAR`] says otherwise.
 const CHILDREN: usize = 32;
+
+/// Set to run another number of children than [`CHILDREN`]: 50 for G1's upper bound
+/// (docs/goals.md).
+const CHILDREN_VAR: &str = "SWARMOPS_TEST_CLI_CONTENTION_CHILDREN";
 
 /// How many commits each child makes unless [`COMMITS_VAR`] says otherwise: the storage
 /// spec's scenario (risk 1).
@@ -216,7 +221,7 @@ fn thirty_two_processes_thousand_commits_each() {
     for report in run.reports.iter().flatten() {
         assert_eq!(report.elapsed_ms.len(), commits, "child {}", report.child);
     }
-    let expected = 1 + CHILDREN * commits;
+    let expected = 1 + child_count() * commits;
     assert_eq!(
         changesets.ok()["changesets"].as_u64(),
         u64::try_from(expected).ok(),
@@ -227,7 +232,7 @@ fn thirty_two_processes_thousand_commits_each() {
     check_log(&log, &run, commits);
     // Each publish wrote as many frames as it has transactions; a compaction adds one frame every
     // 1,025 changesets.
-    let publishes = u64::try_from(CHILDREN * commits).expect("fits");
+    let publishes = u64::try_from(child_count() * commits).expect("fits");
     let passes = publishes * publish.passes();
     assert!(
         (passes..=passes + publishes / 1_000 + 1).contains(&frames),
@@ -751,7 +756,7 @@ fn create_store(work: &Path) -> String {
 /// Creates each child's ref ([`own_ref`]) at `base` in `store`, for the publishes
 /// ([`PUBLISH_VAR`]).
 fn create_own_refs(store: &str, base: &str) {
-    for number in 0..CHILDREN {
+    for number in 0..child_count() {
         let name = own_ref(number);
         let create = [
             "--repo",
@@ -1008,7 +1013,7 @@ fn run_children(work: &Path, base: &str, publish: Publish) -> Contention {
         .map(|v| (PUBLISH_VAR, v))
         .into_iter()
         .collect();
-    let mut children = spawn_children(work, base, TEST, CHILDREN, &env);
+    let mut children = spawn_children(work, base, TEST, child_count(), &env);
     wait_until_ready(work, &mut children);
     let before = load_average();
     let sampler = LoadSampler::start();
@@ -1022,7 +1027,7 @@ fn run_children(work: &Path, base: &str, publish: Publish) -> Contention {
     }
     let after = load_average();
     Contention {
-        reports: (0..CHILDREN)
+        reports: (0..child_count())
             .map(|number| report_of(work, number))
             .collect(),
         wall,
@@ -1062,8 +1067,9 @@ fn print_contention(
         }
     };
     println!(
-        "{SUMMARY}{CHILDREN} children x {commits} commits of one small file each, each child on \
-         its own chain (--parent its previous changeset){how}"
+        "{SUMMARY}{} children x {commits} commits of one small file each, each child on \
+         its own chain (--parent its previous changeset){how}",
+        child_count()
     );
     println!(
         "{SUMMARY}load (1-minute average): {before:.2} before, {low:.2}-{high:.2} during, \
@@ -1331,6 +1337,14 @@ fn base_dir() -> PathBuf {
     );
     fs::create_dir_all(&dir).expect("create the bench base dir");
     dir
+}
+
+/// How many children commit at once: [`CHILDREN`], or what [`CHILDREN_VAR`] says.
+fn child_count() -> usize {
+    std::env::var(CHILDREN_VAR).map_or(CHILDREN, |n| {
+        n.parse()
+            .expect("SWARMOPS_TEST_CLI_CONTENTION_CHILDREN is a number")
+    })
 }
 
 /// How many commits each child makes: [`COMMITS`], or what [`COMMITS_VAR`] says.

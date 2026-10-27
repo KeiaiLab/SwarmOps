@@ -64,7 +64,7 @@ fn change(lander: usize, land: usize) -> Change {
 #[test]
 fn eight_processes_land_concurrently_none_lost() {
     let store = Store::init();
-    let base = commit_base(&store);
+    let base = commit_base(&store, LANDERS);
     let start = Barrier::new(LANDERS);
     let started = Instant::now();
     let records: Vec<Vec<LandRecord>> = thread::scope(|scope| {
@@ -111,15 +111,15 @@ fn eight_processes_land_concurrently_none_lost() {
 }
 
 /// Commits the base the landers start from ([`base_files`]: [`REGISTRY`] and a file under each
-/// lander's directory) and creates `main` there: its id.
-fn commit_base(store: &Store) -> String {
-    let files = base_files(LANDERS, Workload::Shared);
+/// lander's directory, for `landers` landers) and creates `main` there: its id.
+fn commit_base(store: &Store, landers: usize) -> String {
+    let files = base_files(landers, Workload::Shared);
     let puts: Vec<(&str, &str)> = files
         .iter()
         .map(|(path, content)| (path.as_str(), std::str::from_utf8(content).unwrap()))
         .collect();
     let changes = store.changes_of("base", &puts);
-    let who = agent(LANDERS);
+    let who = agent(landers);
     let args = ["commit", "-m", "base", "--changes", &changes];
     let base = store.run_as(&who, &args, &[]).ok()["changeset"]
         .as_str()
@@ -190,4 +190,139 @@ fn assert_every_change_on_main(store: &Store) {
         })
         .collect();
     assert_eq!(on_main, expected, "every land's own file, as it put it");
+}
+
+/// G4 (docs/goals.md): landing under a swarm's load through the binary, for `just perf` (a
+/// release build, a quiet host). [`LANDERS_VAR`] agents (50 by default) land on one `main`, each
+/// a thread running one process of the binary at a time as an agent does ([`CliLander`]), the
+/// lands of [`change`]. In an open loop (the default, the M4 plan's scored cell) each agent
+/// lands once every [`INTERVAL_VAR`] ms ± 20 % (2,000) until [`DURATION_VAR`] s (120) have
+/// passed ([`slot`]); with an interval of 0, a closed loop, [`LANDS_VAR`] lands each (10), each as
+/// soon as the last one ended. It prints one `landing-perf: ` line: the run's [`Stats`] (a land's
+/// latency from its read of `main` to the end of its last `land`), the lands that did not land,
+/// and the load before and after; then asserts only that nothing was lost or doubled
+/// ([`check_invariants`]) and the store verifies clean, never a target: a missed target is
+/// recorded in `docs/perf.md`.
+mod perf {
+    use std::sync::Barrier;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use camino::Utf8Path;
+    use swarmops_core::{ChangesetId, ObjectId};
+    use swarmops_testkit::landing::{
+        CliLander, LandRecord, Stats, check_invariants, load1, open_loop_lands, slot,
+    };
+
+    use super::{change, commit_base};
+    use crate::support::Store;
+
+    /// How many agents land at once.
+    const LANDERS_VAR: &str = "SWARMOPS_TEST_CLI_LANDING_LANDERS";
+
+    /// Each agent's interval between two lands, in milliseconds; 0 for a closed loop.
+    const INTERVAL_VAR: &str = "SWARMOPS_TEST_CLI_LANDING_INTERVAL_MS";
+
+    /// How long an open loop offers lands, in seconds.
+    const DURATION_VAR: &str = "SWARMOPS_TEST_CLI_LANDING_DURATION_S";
+
+    /// How many lands each agent makes in a closed loop.
+    const LANDS_VAR: &str = "SWARMOPS_TEST_CLI_LANDING_LANDS";
+
+    /// The seed of the open loop's slots.
+    const SEED: u64 = 1;
+
+    /// How the summary line starts.
+    const TAG: &str = "landing-perf: ";
+
+    /// `name`'s value as a number, or `default`.
+    fn var(name: &str, default: u64) -> u64 {
+        std::env::var(name).map_or(default, |n| n.parse().expect("a number"))
+    }
+
+    /// The lands of agent `lander` on `store`: in an open loop, each at its slot after `go`.
+    fn lands(
+        store: &Store,
+        lander: usize,
+        go: Instant,
+        pace: (Duration, Duration, usize),
+    ) -> Vec<LandRecord> {
+        let (interval, duration, closed) = pace;
+        let cli = CliLander::new(store, lander, "main");
+        if interval.is_zero() {
+            return (0..closed)
+                .map(|land| cli.land(land, &change(lander, land)))
+                .collect();
+        }
+        let count = open_loop_lands(SEED, lander, interval, duration);
+        let mut records = Vec::with_capacity(count);
+        for land in 0..count {
+            let due = go + slot(SEED, lander, land, interval);
+            thread::sleep(due.saturating_duration_since(Instant::now()));
+            records.push(cli.land(land, &change(lander, land)));
+        }
+        records
+    }
+
+    #[test]
+    #[ignore = "slow, perf: 50 agents landing through the binary for 2 minutes"]
+    fn landing_under_load() {
+        // 1. The run's shape, and the base every agent lands on.
+        let landers = usize::try_from(var(LANDERS_VAR, 50)).expect("fits");
+        let interval = Duration::from_millis(var(INTERVAL_VAR, 2_000));
+        let duration = Duration::from_secs(var(DURATION_VAR, 120));
+        let closed = usize::try_from(var(LANDS_VAR, 10)).expect("fits");
+        let store = Store::init();
+        let base = commit_base(&store, landers);
+
+        // 2. Every agent at once, from one go.
+        let start = Barrier::new(landers + 1);
+        let load_before = load1();
+        let (records, go): (Vec<Vec<LandRecord>>, Instant) = thread::scope(|scope| {
+            let (store, start) = (&store, &start);
+            let threads: Vec<_> = (0..landers)
+                .map(|lander| {
+                    scope.spawn(move || {
+                        start.wait();
+                        lands(store, lander, Instant::now(), (interval, duration, closed))
+                    })
+                })
+                .collect();
+            start.wait();
+            let go = Instant::now();
+            let records = (threads.into_iter())
+                .map(|t| t.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+                .collect();
+            (records, go)
+        });
+        let wall = go.elapsed();
+
+        // 3. The numbers: lands/s over the open loop's duration, or the closed loop's wall.
+        let over = if interval.is_zero() { wall } else { duration };
+        let stats = Stats::from(&records, over);
+        let unlanded = records.iter().flatten().filter(|r| r.id.is_none()).count();
+        let pace = if interval.is_zero() {
+            format!("closed lands={closed}")
+        } else {
+            format!(
+                "open interval_ms={} duration_s={}",
+                interval.as_millis(),
+                duration.as_secs()
+            )
+        };
+        println!(
+            "{TAG}landers={landers} pace={pace} {} unlanded={unlanded} wall_ms={} load_start={load_before:.2} load_end={:.2}",
+            stats.summary(),
+            wall.as_millis(),
+            load1(),
+        );
+
+        // 4. Nothing lost or doubled, and a clean store.
+        let base_id = ChangesetId::new(ObjectId::from_hex(&base).expect("a changeset id"));
+        if let Err(rule) = check_invariants(Utf8Path::new(store.path()), "main", base_id, &records)
+        {
+            panic!("{rule}");
+        }
+        store.assert_clean("after the lands");
+    }
 }
