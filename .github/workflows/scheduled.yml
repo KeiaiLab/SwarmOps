@@ -236,6 +236,8 @@ jobs:
           # `-curl`: a git built before the remote suites, without curl, is never restored.
           # `-container`: nor one built on the host, under a prefix this container lacks.
           key: git-${{ matrix.git }}-${{ matrix.sha256 }}-curl-ubuntu-24.04-container
+      # Without the job's CARGO_TARGET_DIR: git 2.56.0's cargo would build libgitcore.a there,
+      # and its Makefile links target/release/libgitcore.a of its own tree.
       - name: Build git ${{ matrix.git }} from kernel.org's release tarball
         if: steps.git-cache.outputs.cache-hit != 'true'
         env:
@@ -248,8 +250,8 @@ jobs:
           echo "$GIT_SHA256  $tarball" | sha256sum -c -
           mkdir "$RUNNER_TEMP/git-src"
           tar -xJf "$tarball" -C "$RUNNER_TEMP/git-src" --strip-components=1
-          make -C "$RUNNER_TEMP/git-src" -j"$(nproc)" prefix="$GIT_PREFIX" NO_TCLTK=1 \
-            NO_GETTEXT=1 NO_PERL=1 NO_PYTHON=1 NO_EXPAT=1 install
+          env -u CARGO_TARGET_DIR make -C "$RUNNER_TEMP/git-src" -j"$(nproc)" \
+            prefix="$GIT_PREFIX" NO_TCLTK=1 NO_GETTEXT=1 NO_PERL=1 NO_PYTHON=1 NO_EXPAT=1 install
       - name: Rebuild every fixture with git ${{ matrix.git }} and compare the manifests
         run: |
           "$GIT_PREFIX/bin/git" --version
