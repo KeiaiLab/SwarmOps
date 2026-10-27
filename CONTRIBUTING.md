@@ -245,7 +245,8 @@ self-hosted runners on the maintainers' host, labelled `swarmops-local`; a pull 
 fork runs on GitHub's `ubuntu-24.04` instead, so that the host never runs a stranger's code. The one check to look at is `tests-pass`: it passes only when every job
 it depends on passed. A weekly scheduled workflow runs `just check-ci-slow`, a 60-second fuzz
 smoke of every target, the `cargo deny`, format, lint and test commands of `bench/compare` (a
-cargo workspace of its own that `just check` does not build) and the git version matrix.
+cargo workspace of its own that `just check` does not build), the git version matrix and the
+round trip of this host's repositories.
 Dependabot proposes grouped, weekly updates for Cargo and GitHub Actions, after a cooldown;
 review them like any other change.
 
@@ -274,6 +275,14 @@ review them like any other change.
   `SWARMOPS_GIT_FIXTURES_ANY_GIT=1`, which the matrix sets. The newest release is moved by hand,
   in a `ci:` commit, with the SHA-256 that kernel.org's signed `sha256sums.asc` gives: Dependabot
   does not know it.
+- **This host's repositories round-trip once a week.** The `host repositories` job refreshes bare
+  mirrors in a directory of the host with `scripts/host-repos.py` from the list file there
+  (one source path a line; the job writes the defaults when it is missing). A partial clone is
+  passed over: its objects are not all on the host, and reading them would fetch into the
+  source. It then runs `host_repos::every_mirror_round_trips` with `SWARMOPS_HOST_REPOS=1` and
+  `SWARMOPS_HOST_REPOS_DIR`: each mirror's `HEAD` imported without loss, the store verified deep,
+  `main` exported to the mirror's own head commit, `git fsck --strict` clean, and the export
+  imported again to the same head. Run it locally the same way; without the variable it skips.
 - **A new RustSec advisory turns every push red** through `cargo deny check`, on purpose. Update
   the affected crate; if no fixed release exists and the advisory cannot affect SwarmOps, add an
   `ignore` entry with the advisory id and the reason to `[advisories]` in `deny.toml`, in a

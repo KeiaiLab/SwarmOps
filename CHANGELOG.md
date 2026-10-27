@@ -14,6 +14,13 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ## [Unreleased]
 
+### Added
+
+- Tests of this host's real repositories, behind `SWARMOPS_HOST_REPOS=1`: each bare mirror in
+  `SWARMOPS_HOST_REPOS_DIR` is imported, verified deep, exported, checked by `git fsck --strict`
+  and imported again to the same head. The weekly run's `host repositories` job refreshes the
+  mirrors with `scripts/host-repos.py` and runs them.
+
 ### Changed
 
 - `docs/roadmap.md`: a "To usable" section defines when SwarmOps is usable and plans v0.5.0 to

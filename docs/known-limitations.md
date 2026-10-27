@@ -422,10 +422,13 @@ left).
   1970. The git import keeps such commits as they are, without loss (the M3 plan's decision 4),
   and `show`'s `signatures` give their exact times. *Documented (storage spec §7). Found: M1
   Task 4a.*
-- **No test reads a real repository yet.** M1 had none, so the final review had nothing to judge
-  (question 14). The git import's and export's tests read fixtures that real git made. *Target:
-  M3's test of this host's repositories behind `SWARMOPS_HOST_REPOS=1` (its plan's Task 13) and
-  M8's round trip of them (its plan's Task 11), both deferred until after the pilot.*
+- **Real repositories are read weekly only, and nothing is landed on them.** The default gate
+  reads fixtures that real git made. `host_repos::every_mirror_round_trips`, behind
+  `SWARMOPS_HOST_REPOS=1` and run by the weekly `host repositories` job, round-trips bare mirrors
+  of this host's repositories: import, deep verify, export, `git fsck --strict`, import of the
+  export. It lands no change on them, and passes over a partial clone, whose objects are not all
+  on the host. *Target: M8's round trip of them with lands (its plan's Task 11), in the pilot.
+  Found: M1, final review, question 14; narrowed by the host-repository tests (v0.5.0).*
 - **A git import or export reports what it repaired only when it succeeds.** An import's
   `meta.recovered` adds up what its frames' and its ref move's write transactions repaired of what
   earlier writers left. An import that fails reports none of it (the import's error carries no such
@@ -748,4 +751,4 @@ each ruling is tracked above:
 | 11 | `abort()` standing in for `SIGKILL` | a literal `SIGKILL` test | closed in M6: a literal `SIGKILL` test on a real disk; "The power-loss model is a model" |
 | 12 | Second root commits | `commit_raw` | closed in M3: `Repo::commit_raw`, the git import's writer, makes a root changeset whatever refs exist |
 | 13 | `--expect` with a ref name | documented | "`--expect` with a ref name" |
-| 14 | Tests that read host repositories | none in M1: nothing to judge | M3 and M8 (their Tasks 13 and 11, after the pilot), "No test reads a real repository" |
+| 14 | Tests that read host repositories | none in M1: nothing to judge | M3's narrowed by the weekly host-repository round trip; M8 (its Task 11, the pilot), "Real repositories are read weekly only" |
