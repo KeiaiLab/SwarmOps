@@ -579,10 +579,17 @@ its history imported from git, changes committed and landed by agents through `s
 and the result exported back to git for its CI to run. Next come the measurements that need a
 quiet host: landing by 32 and 50 processes through the binary against umbrella §15's targets,
 and the landing model those numbers choose; whether a transaction can sync the journal once
-instead of twice; the import's and the export's timings on larger repositories. The order of
-the milestones after M6 is settled once the pilot has run; until then the table is the plan.
-M13 and M14 are new, and where they go is part of that plan. M13 came first, in 0.2.0, then M5,
-in 0.3.0, both ahead of M12, which is developed separately, and M6 in 0.4.0.
+instead of twice; the import's and the export's timings on larger repositories. M13 came first, in 0.2.0, then
+M5, in 0.3.0, both ahead of M12, which is developed separately, and M6 in 0.4.0.
+
+The road to usable ([To usable](docs/roadmap.md#to-usable)): a real repository runs 8 or more
+agents for 3 or more days with no lost commit, a clean `verify --deep`, nothing rewritten and an
+export that passes `git fsck --strict` and the repository's own gate; G1, G2, G4 and G17 are
+measured and met; a benchmark gate in CI fails a regression of more than 20 %; backup and restore,
+`repair` and the rollback to git are exercised in that pilot; no open soft finding touches data
+safety or the contract; two releases in a row ship no data-safety fix; and, for teams without
+GitHub, M14. v0.5.0 runs the pilot and the measurements, v0.6.0 fixes what they miss, v0.7.0 is
+M14 and v0.8.0 is operations. M7, M9's simulator, M11 and M12 wait until then.
 
 When it is usable (umbrella spec §1): by one agent from M1; by a swarm, landing through MCP,
 from M4; on an existing git repository, its history imported and its landed work exported back

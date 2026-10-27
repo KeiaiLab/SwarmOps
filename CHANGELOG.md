@@ -14,6 +14,12 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ## [Unreleased]
 
+### Changed
+
+- `docs/roadmap.md`: a "To usable" section defines when SwarmOps is usable and plans v0.5.0 to
+  v0.8.0 to get there (the pilot and measurements, their fixes, M14, operations); M7, M9's
+  simulator, M11 and M12 wait until then. The README's roadmap summarises it.
+
 ## [0.4.0] - 2026-10-27
 
 ### Added

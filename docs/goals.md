@@ -25,7 +25,7 @@ milestone delivers it. [docs/perf.md](perf.md) holds every measurement,
 
 "Stated in" names the public document that states the target. "Measured" cites a section of
 [docs/perf.md](perf.md), or says that no measurement exists yet. The milestones are those of
-[docs/roadmap.md](roadmap.md); the order of those from M6 on is settled once the pilot has run.
+[docs/roadmap.md](roadmap.md); the order of those from M6 on follows its [To usable](roadmap.md#to-usable).
 
 | # | Goal | Metric | Target | Stated in | Measured | Milestone |
 | --- | --- | --- | --- | --- | --- | --- |

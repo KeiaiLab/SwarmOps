@@ -29,7 +29,9 @@ remote itself, through the user's own git, which carries everything that crosses
 ([README](../README.md#swarmops-and-git), the "Offline, on one host" and "Sync between hosts"
 rows). Topologies 1 and 3 are not served yet. v0.3.0 (M5) adds workspaces: an agent builds and
 tests its change on disk and lands the tree it tested, through `so ws` or MCP, with Claude Code's
-worktree hooks ([Build and test a change](operate/build-and-test.md)).
+worktree hooks ([Build and test a change](operate/build-and-test.md)). v0.4.0 (M6) adds `repair`,
+`gc`, store `FORMAT 2`, with free-form branches, tags and remote-tracking refs, and `upgrade` from
+FORMAT 1 ([Verify and repair](operate/verify-and-repair.md), [Making room](operate/making-room.md)).
 
 ### Topology 1 today: local git, remote SwarmOps
 
@@ -92,6 +94,43 @@ Native sync is M11, planned.
 | Ref names beyond `main` and `release/<name>`, and tags | 1, 3 | Built (M6): free-form branches, `tags/<path>` and `remote/<remote>/<path>` in a `FORMAT 2` store; git-side branch and tag mapping not built | M6 (done), M14 (git side) |
 | Access control and identities for remote callers | 1, 3 | `E_AUTH` and `E_POLICY_DENIED` are in the schema and raised by nothing ([known limitations](known-limitations.md#serving-requests)) | M14 |
 | A server that refuses `{"file": "<path>"}` content and never passes on a host path | 1, 3 | Recorded as M11's work ([known limitations](known-limitations.md#serving-requests)) | M14, M11 |
+
+## To usable
+
+SwarmOps is **usable** when all of these hold:
+
+1. A real repository, not SwarmOps' own, ran 8 or more agents for 3 or more days, and then: no
+   commit was lost, `verify --deep` is clean, `rewritten` is 0, the export passes
+   `git fsck --strict`, and the repository's own gate passes on the export.
+2. [Goals](goals.md) G1 (50 processes), G2 (commit latency without syncs), G4 (landing under load:
+   at 50 processes at least 20 lands/s, p99 under 500 ms, retries under 5 %) and G17 (a push at
+   most 1.5× as costly on 12,000 commits as on 1,000) are measured in [docs/perf.md](perf.md) and
+   met.
+3. A benchmark gate in CI fails a regression of more than 20 %.
+4. Backup and restore, `repair` and the rollback to git were exercised in that pilot
+   ([Backup and restore](operate/backup-and-restore.md), [Verify and repair](operate/verify-and-repair.md),
+   the pilot's [Rollback](pilot.md#rollback)).
+5. No open soft finding touches data safety or the contract.
+6. Two releases in a row shipped no data-safety fix.
+7. For teams without GitHub: M14 (topology 1) is delivered.
+
+The releases that get there:
+
+| Release | Theme | Exit criteria |
+| --- | --- | --- |
+| v0.5.0 | Prove and measure | The pilot ran on a real repository of 993 commits, with condition 1's checks and condition 4's exercises recorded in [docs/pilot.md](pilot.md); G1 at 50 processes, G2 without syncs, G4 and G17 measured in [docs/perf.md](perf.md), met or not; the tests that read this host's repositories run in the Scheduled workflow; this section |
+| v0.6.0 | Fix what the measurements miss | G1, G2, G4 and G17 met in [docs/perf.md](perf.md); the benchmark gate (condition 3), pulled forward from M9, in CI. Candidates, chosen by the measurements: the landing retry model; incremental export, fetch, push and sync; batched journal syncs only if G2 justifies them, and no `--durability fast` without a measurement in [docs/perf.md](perf.md) |
+| v0.7.0 | M14 | Topology 1's acceptance criteria 1 to 5 pass in CI ([Topology 1](#topology-1-local-git-remote-swarmops)) |
+| v0.8.0 | Operations | The open soft findings triaged, none left touching data safety or the contract (condition 5); packages beyond the install script |
+
+Deferred past usable, with what stands in until then:
+
+| Milestone | Why it waits | Stand-in |
+| --- | --- | --- |
+| M7, blame and review | No condition needs it, and its annotations need a `FORMAT 3` | Review in GitHub pull requests (topology 2); `so log` and `so diff`; `git blame` on the export |
+| M9's simulator | No condition needs it; only the benchmark gate is pulled forward, into v0.6.0 | M6's literal `SIGKILL` test, power-loss images, crash sweeps and fuzz targets |
+| M11, native sync (topology 3) | No condition needs it, and it needs M14 and M9 first | Sync through a git remote, one writing host at a time ([Topology 3 today](#topology-3-today-local-swarmops-remote-swarmops)) |
+| M12, macOS and Windows | The pilot and CI run on Linux | The Linux releases; M12 is developed separately |
 
 ## What the three share
 
@@ -548,8 +587,9 @@ Milestone ids are never renumbered. Two are new: M13 (topology 2) and M14 (topol
 
 **Settled:** M0 to M4 and M8 are delivered, in v0.1.0, M13 in v0.2.0, M5 in v0.3.0 and M6 in
 v0.4.0, ahead of M12, which is developed separately.
-**Provisional:** the order after M6 is settled once the pilot has run
-([README](../README.md#roadmap)); until then the order below is the plan:
+**Provisional:** after M6 the order follows [To usable](#to-usable): v0.5.0 and v0.6.0 prove and
+fix, M14 is v0.7.0, and M7, M9's simulator, M11 and M12 wait until SwarmOps is usable; the order
+below is the plan:
 
 ```text
 order   M12 → M13 → M5 → M6 → M14 → M7 → M9 → M11
