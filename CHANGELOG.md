@@ -36,6 +36,12 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   file in: once a later status rewrote the index for another file, the racy row was trusted. A
   row a scan does not confirm keeps no stat at or after its index's time (it is hashed again).
 
+### Security
+
+- zstd 0.14.2 -> 0.14.3, zstd-safe 8.1.0 -> 8.2.0, zstd-sys 2.1.1 -> 2.1.2 (RUSTSEC-2026-0391,
+  -0398, -0403, -0410). The store uses none of the affected paths (reused stream contexts, the
+  seekable format, legacy frames, wasm32), so it was not exposed.
+
 ## [0.3.0] - 2026-10-22
 
 ### Added

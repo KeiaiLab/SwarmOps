@@ -181,9 +181,9 @@ walkdir 2.5.0: Unlicense/MIT; used under MIT [1], [2]
 winnow 1.0.4: MIT; used under MIT [62]
 zlib-rs 0.6.8: Zlib; used under Zlib [63]
 zmij 1.0.23: MIT; used under MIT [3]
-zstd 0.14.2: BSD-3-Clause; used under BSD-3-Clause [64]
-zstd-safe 8.1.0: BSD-3-Clause; used under BSD-3-Clause [64]
-zstd-sys 2.1.1+zstd.1.5.7: BSD-3-Clause; used under BSD-3-Clause [64], [65], [66], [67]
+zstd 0.14.3: BSD-3-Clause; used under BSD-3-Clause [64]
+zstd-safe 8.2.0: BSD-3-Clause; used under BSD-3-Clause [64]
+zstd-sys 2.1.2+zstd.1.5.7: BSD-3-Clause; used under BSD-3-Clause [64], [65], [66], [67]
 
 
 Texts (67)
@@ -2718,7 +2718,7 @@ freely, subject to the following restrictions:
 
 
 ====================================================================================================
-[64] BSD-3-Clause, from zstd 0.14.2, zstd-safe 8.1.0, zstd-sys 2.1.1+zstd.1.5.7 (LICENSE)
+[64] BSD-3-Clause, from zstd 0.14.3, zstd-safe 8.2.0, zstd-sys 2.1.2+zstd.1.5.7 (LICENSE)
 ====================================================================================================
 
 BSD 3-Clause License
@@ -2752,7 +2752,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 ====================================================================================================
-[65] BSD-3-Clause, from zstd-sys 2.1.1+zstd.1.5.7 (LICENSE.BSD-3-Clause)
+[65] BSD-3-Clause, from zstd-sys 2.1.2+zstd.1.5.7 (LICENSE.BSD-3-Clause)
 ====================================================================================================
 
 The auto-generated bindings are under the 3-clause BSD license:
@@ -2790,7 +2790,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 ====================================================================================================
-[66] BSD-3-Clause, from zstd-sys 2.1.1+zstd.1.5.7 (zstd/LICENSE: zstd's C library, which zstd-sys
+[66] BSD-3-Clause, from zstd-sys 2.1.2+zstd.1.5.7 (zstd/LICENSE: zstd's C library, which zstd-sys
     compiles)
 ====================================================================================================
 
@@ -2827,7 +2827,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 ====================================================================================================
-[67] MIT, from zstd-sys 2.1.1+zstd.1.5.7 (the leading comment of zstd/lib/dictBuilder/divsufsort.c:
+[67] MIT, from zstd-sys 2.1.2+zstd.1.5.7 (the leading comment of zstd/lib/dictBuilder/divsufsort.c:
     libdivsufsort-lite, in zstd's dictionary builder)
 ====================================================================================================
 

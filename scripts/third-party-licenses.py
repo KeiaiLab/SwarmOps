@@ -68,7 +68,7 @@ REVIEWED = {
     # dictionary builder and legacy decoders among them), under BSD-3-Clause or GPL-2.0 at the
     # user's option. Its files carry that dual-license header, but for the dictionary builder's
     # libdivsufsort-lite, whose files carry an MIT notice of their own.
-    ("zstd-sys", "2.1.1+zstd.1.5.7"): {
+    ("zstd-sys", "2.1.2+zstd.1.5.7"): {
         "zstd/LICENSE": ("text", "BSD-3-Clause", "zstd's C library, which zstd-sys compiles"),
         "zstd/COPYING": ("omit", "GPL-2.0", "zstd's other license, which is not taken"),
         "zstd/lib/dictBuilder/divsufsort.c": (
