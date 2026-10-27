@@ -414,6 +414,42 @@ impl GitServer {
         );
     }
 
+    /// Writes a commit on `branch` of repository `name` whose tree holds one entry twice, an
+    /// error-level `git fsck` finding (`duplicateEntries`) that only `hash-object --literally`
+    /// writes, and moves the branch to it. Returns the commit. SHA-1 repositories only.
+    pub fn commit_fsck_error(&self, name: &str, branch: &str, message: &str) -> String {
+        assert_eq!(self.format, ObjectFormat::Sha1, "a SHA-1 tree entry");
+        let parent = self.rev_parse(name, &format!("refs/heads/{branch}"));
+        let scratch = self.scratch();
+
+        // 1. A blob, and a tree naming it twice by the same name.
+        let file = scratch.path().join("blob");
+        fs::write(&file, "twice\n").expect("write a blob's contents");
+        let blob = self.out(name, &["hash-object", "-w", path_str(&file)]);
+        let mut entry = b"100644 twice.txt\0".to_vec();
+        entry.extend(hex_bytes(&blob));
+        let tree_file = scratch.path().join("tree");
+        fs::write(&tree_file, [entry.as_slice(), entry.as_slice()].concat())
+            .expect("write the tree");
+        let tree = self.out(
+            name,
+            &[
+                "hash-object",
+                "-t",
+                "tree",
+                "-w",
+                "--literally",
+                path_str(&tree_file),
+            ],
+        );
+
+        // 2. Committed on the branch's tip and moved to.
+        let parents: Vec<&str> = parent.iter().map(String::as_str).collect();
+        let commit = self.commit_tree(name, &tree, &parents, message, Identity::Default);
+        self.update(name, branch, &commit, parent.as_deref());
+        commit
+    }
+
     /// The ssh stand-in in `mode`: the value for `GIT_SSH_COMMAND`. Its URLs are
     /// [`GitServer::ssh_url`]'s.
     pub fn ssh_command(&self, mode: SshMode) -> String {
@@ -1267,6 +1303,17 @@ fn text(bytes: &[u8]) -> String {
 /// `path` as UTF-8: the temporary directories' paths are.
 fn path_str(path: &Path) -> &str {
     path.to_str().expect("a UTF-8 temporary path")
+}
+
+/// The bytes the hex text `hex` (an object id git printed) spells.
+fn hex_bytes(hex: &str) -> Vec<u8> {
+    let digits = hex.as_bytes().chunks(2);
+    digits
+        .map(|pair| {
+            let pair = std::str::from_utf8(pair).expect("ASCII hex");
+            u8::from_str_radix(pair, 16).expect("a hex byte")
+        })
+        .collect()
 }
 
 /// `value` quoted for `sh`.

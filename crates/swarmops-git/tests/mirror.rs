@@ -347,7 +347,7 @@ fn seed_staging_to_none_deletes_it() {
 }
 
 /// `remove_remote` deletes the remote's tracking refs, tags and staging branches, and counts
-/// them; another remote's refs stay.
+/// them, and its incoming refs; another remote's refs stay.
 #[test]
 fn remove_remote_drops_its_refs_only() {
     let root = Root::new();
@@ -359,13 +359,16 @@ fn remove_remote_drops_its_refs_only() {
         "refs/remotes/origin/topic/a",
         "refs/remote-tags/origin/v1",
         "refs/heads/push/origin/main",
+        "refs/incoming/origin/heads/main",
         "refs/remotes/upstream/main",
     ] {
         let made = sink.cas_ref(full, None, Some(first)).expect(full);
         assert_eq!(made, swarmops_git::BranchUpdate::Applied, "{full}");
     }
 
+    // The incoming refs go too, uncounted: a fetch's scratch, not the remote's refs.
     assert_eq!(mirror.remove_remote(REMOTE).expect("remove"), 4);
+    assert!(mirror.incoming(REMOTE).expect("incoming").is_empty());
     assert_eq!(mirror.tracking(REMOTE, BRANCH).expect("read"), None);
     assert_eq!(
         mirror.tracking("upstream", BRANCH).expect("read"),
@@ -435,4 +438,119 @@ fn create_bare_error_names_no_host_path() {
     let host = root.dir.path().display().to_string();
     assert!(!text.contains(&host), "{text}");
     assert!(text.contains("mirror.git"), "{text}");
+}
+
+/// Sets each `(full name, value)` ref of the mirror from absent.
+fn set_refs(mirror: &Mirror, refs: &[(&str, GitOid)]) {
+    let mut sink = GixSink::open(mirror.git_dir()).expect("open");
+    for (full, oid) in refs {
+        let made = sink.cas_ref(full, None, Some(*oid)).expect(full);
+        assert_eq!(made, swarmops_git::BranchUpdate::Applied, "{full}");
+    }
+}
+
+/// `promote` moves each tracking ref and tag to its incoming value, makes those that are new,
+/// deletes those with no incoming value, and leaves the incoming refs and other remotes' refs.
+#[test]
+fn promote_moves_and_prunes_tracking_refs() {
+    let root = Root::new();
+    let (mirror, _lock) = made(&root);
+    let [first, second] = two_blobs(&mirror);
+    set_refs(
+        &mirror,
+        &[
+            ("refs/remotes/origin/main", first),
+            ("refs/remotes/origin/gone", first),
+            ("refs/remote-tags/origin/old", first),
+            ("refs/remotes/upstream/main", first),
+            ("refs/incoming/origin/heads/main", second),
+            ("refs/incoming/origin/heads/fresh", first),
+            ("refs/incoming/origin/tags/v1", second),
+        ],
+    );
+    let incoming = mirror.incoming(REMOTE).expect("incoming");
+    let expected = [
+        ("heads/fresh".to_owned(), first),
+        ("heads/main".to_owned(), second),
+        ("tags/v1".to_owned(), second),
+    ];
+    assert_eq!(incoming, expected.into_iter().collect());
+
+    // Promoted from what was read: main moved, fresh and v1 made, gone and old deleted.
+    let branches = mirror.branches(REMOTE).expect("branches");
+    let tags = mirror.tags(REMOTE).expect("tags");
+    let promoted = mirror.promote(REMOTE, &branches, &tags).expect("promote");
+    assert_eq!((promoted.moved, promoted.deleted), (3, 2));
+    let branches = [("fresh".to_owned(), first), ("main".to_owned(), second)];
+    assert_eq!(
+        mirror.branches(REMOTE).expect("branches"),
+        branches.into_iter().collect()
+    );
+    let tags = [("v1".to_owned(), second)];
+    assert_eq!(
+        mirror.tags(REMOTE).expect("tags"),
+        tags.into_iter().collect()
+    );
+    assert_eq!(mirror.incoming(REMOTE).expect("incoming").len(), 3);
+    assert_eq!(
+        mirror.tracking("upstream", BRANCH).expect("read"),
+        Some(first)
+    );
+}
+
+/// A second `promote` finds every tracking ref at its incoming value: nothing moves.
+#[test]
+fn promote_twice_moves_nothing() {
+    let root = Root::new();
+    let (mirror, _lock) = made(&root);
+    let [first, second] = two_blobs(&mirror);
+    set_refs(
+        &mirror,
+        &[
+            ("refs/remotes/origin/main", first),
+            ("refs/incoming/origin/heads/main", second),
+        ],
+    );
+    let promote = || {
+        let branches = mirror.branches(REMOTE).expect("branches");
+        let tags = mirror.tags(REMOTE).expect("tags");
+        mirror.promote(REMOTE, &branches, &tags).expect("promote")
+    };
+
+    let once = promote();
+    assert_eq!((once.moved, once.deleted), (1, 0));
+    let twice = promote();
+    assert_eq!((twice.moved, twice.deleted), (0, 0));
+    assert_eq!(mirror.tracking(REMOTE, BRANCH).expect("read"), Some(second));
+}
+
+/// A tracking ref that moved after the caller read it is refused, by compare-and-swap, and
+/// stays where it was moved to.
+#[test]
+fn promote_refuses_a_tracking_ref_moved_meanwhile() {
+    let root = Root::new();
+    let (mirror, _lock) = made(&root);
+    let [first, second] = two_blobs(&mirror);
+    set_refs(
+        &mirror,
+        &[
+            ("refs/remotes/origin/main", first),
+            ("refs/incoming/origin/heads/main", second),
+        ],
+    );
+    let branches = mirror.branches(REMOTE).expect("branches");
+    let tags = mirror.tags(REMOTE).expect("tags");
+
+    // Something other than SwarmOps moves the ref after the read.
+    let mut sink = GixSink::open(mirror.git_dir()).expect("open");
+    let third = sink.write_object(RawKind::Blob, b"third\n").expect("write");
+    sink.sync(&[third]).expect("sync");
+    let moved = sink
+        .cas_ref("refs/remotes/origin/main", Some(first), Some(third))
+        .expect("move");
+    assert_eq!(moved, swarmops_git::BranchUpdate::Applied);
+
+    let refused = mirror.promote(REMOTE, &branches, &tags);
+    assert!(matches!(refused, Err(MirrorError::Sink(_))), "{refused:?}");
+    assert_eq!(mirror.tracking(REMOTE, BRANCH).expect("read"), Some(third));
 }

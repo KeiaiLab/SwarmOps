@@ -66,6 +66,23 @@ pub trait Transport {
         ancestor: GitOid,
         descendant: GitOid,
     ) -> Result<bool, TransportError>;
+
+    /// Whether `mirror` holds every object `tips` reach, short of what its refs outside
+    /// `refs/incoming/` reach already: a fetch's received objects are whole before any tracking
+    /// ref moves to them. A missing or unreadable object is [`RejectReason::BadObjects`].
+    ///
+    /// A transport that does not check refuses: the default body fails closed.
+    fn closed(&self, mirror: &Path, tips: &[GitOid]) -> Result<(), TransportError> {
+        let _ = (mirror, tips);
+        Err(TransportError::Rejected {
+            reason: RejectReason::BadObjects,
+            refs: Vec::new(),
+            remote_messages: vec!["closure check not implemented by this transport".to_owned()],
+            git_exit: None,
+            stderr_tail: String::new(),
+            token_env_unset: false,
+        })
+    }
 }
 
 /// The user's git, as a [`Transport`].
@@ -451,6 +468,21 @@ impl Transport for GitCli {
             _ => Err(self.failure(&call, &ran)),
         }
     }
+
+    fn closed(&self, mirror: &Path, tips: &[GitOid]) -> Result<(), TransportError> {
+        let call = Call {
+            mirror: Some(mirror),
+            remote: None,
+        };
+
+        // The tips on stdin, positive; then every ref outside the incoming namespace, negative.
+        let lines = tips.iter().map(GitOid::to_string).collect();
+        let ran = self.spawn(&call, &args(&CLOSED_FLAGS, []), &Input::Lines(lines))?;
+        if ran.status.success() {
+            return Ok(());
+        }
+        Err(classify::closure(&self.said(&call, &ran)))
+    }
 }
 
 /// A remote's URL that the rules accept: `https://`, `ssh://` or the scp form, and plain
@@ -700,6 +732,9 @@ pub enum RejectReason {
     Declined,
     /// A failure git's messages do not explain: `unclassified`.
     Unclassified,
+    /// A received object git's fsck refuses, or one a fetched ref reaches that is missing or
+    /// unreadable: `bad_objects`.
+    BadObjects,
 }
 
 impl RejectReason {
@@ -710,6 +745,7 @@ impl RejectReason {
             RejectReason::NotFound => "not_found",
             RejectReason::Declined => "declined",
             RejectReason::Unclassified => "unclassified",
+            RejectReason::BadObjects => "bad_objects",
         }
     }
 }
@@ -796,14 +832,18 @@ const FIXED_ENV: [(&str, &str); 4] = [
 ];
 
 /// The configuration every command gets in its environment: git's writes fsynced, its
-/// housekeeping in the foreground, protocol v2, no submodule, no credential in a URL.
-const CONFIG: [(&str, &str); 6] = [
+/// housekeeping in the foreground, protocol v2, no submodule, no credential in a URL, and every
+/// received object checked by git's fsck (an error-level finding fails the fetch before any ref
+/// moves; no `fsck.<id>` override).
+const CONFIG: [(&str, &str); 8] = [
     ("core.fsync", "all"),
     ("core.fsyncMethod", "fsync"),
     ("gc.autoDetach", "false"),
     ("protocol.version", "2"),
     ("fetch.recurseSubmodules", "false"),
     ("transfer.credentialsInUrl", "die"),
+    ("fetch.fsckObjects", "true"),
+    ("transfer.fsckObjects", "true"),
 ];
 
 /// `git fetch`'s fixed options, up to the URL.
@@ -816,6 +856,19 @@ const FETCH_FLAGS: [&str; 8] = [
     "--no-recurse-submodules",
     "--no-show-forced-updates",
     END_OF_OPTIONS,
+];
+
+/// `git rev-list`'s closure check of a fetch's tips (read on stdin): every object they reach,
+/// minus what the refs outside `refs/incoming/` reach; a missing one fails it.
+const CLOSED_FLAGS: [&str; 8] = [
+    "rev-list",
+    "--objects",
+    "--missing=error",
+    "--quiet",
+    "--stdin",
+    "--not",
+    "--exclude=refs/incoming/*",
+    "--all",
 ];
 
 /// `git push`'s fixed options, before the lease: never `--force`.
@@ -901,7 +954,7 @@ impl Secrets {
 enum Input {
     /// None (`Stdio::null()`).
     Null,
-    /// A pipe holding these lines, each a 40-hex object id SwarmOps wrote.
+    /// A pipe holding these lines, each a 40-hex object id SwarmOps wrote or read from a ref.
     Lines(Vec<String>),
 }
 

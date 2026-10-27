@@ -11,6 +11,8 @@
 //!                                             anything else                        → Rejected declined
 //!   no line, or another command:  stderr against ROWS, in order  → Sha256 | Rejected | Unreachable
 //!                                 no row                         → Rejected unclassified
+//!   the closure check (rev-list):  stderr against TRAVERSAL      → Rejected bad_objects
+//!                                  else as another command
 //! ```
 
 use super::{Cause, PushOutcome, RejectReason, TransportError};
@@ -33,8 +35,23 @@ enum Verdict {
 }
 
 /// The table: substrings of git's messages, lower-cased, and what they mean. `\n` starts a line.
-const ROWS: [(&[&str], Verdict); 9] = [
+const ROWS: [(&[&str], Verdict); 10] = [
     (&["mismatched algorithms", "server sha256"], Verdict::Sha256),
+    (
+        &[
+            "fsck error",
+            "error in object",
+            "did not send all necessary objects",
+            "missing blob object",
+            "missing tree object",
+            "missing commit object",
+            "missing tag object",
+            "bad object",
+            "bad tree object",
+            "bad blob object",
+        ],
+        Verdict::Rejected(RejectReason::BadObjects),
+    ),
     (
         &[
             "authentication failed",
@@ -114,6 +131,10 @@ const ROWS: [(&[&str], Verdict); 9] = [
     ),
 ];
 
+/// `rev-list`'s own traversal failures, lower-cased: an object the closure check cannot read.
+/// Read for that command only: ssh's "could not read from remote repository" is no object's.
+const TRAVERSAL: [&str; 3] = ["unable to read", "could not read", "is corrupt"];
+
 /// What git said: its exit, its stderr (redacted), and whether the remote's token variable is
 /// unset.
 pub(super) struct Said<'a> {
@@ -141,6 +162,16 @@ pub(super) fn failure(said: &Said<'_>) -> TransportError {
         Some(Verdict::Rejected(reason)) => rejected(reason, Vec::new(), said),
         None => rejected(RejectReason::Unclassified, Vec::new(), said),
     }
+}
+
+/// What the closure check's failure `said` means: [`RejectReason::BadObjects`] for an object
+/// [`ROWS`] or [`TRAVERSAL`] names, else as [`failure`] reads it.
+pub(super) fn closure(said: &Said<'_>) -> TransportError {
+    let text = said.stderr.to_ascii_lowercase();
+    if TRAVERSAL.iter().any(|needle| text.contains(needle)) {
+        return rejected(RejectReason::BadObjects, Vec::new(), said);
+    }
+    failure(said)
 }
 
 /// What a push did to `dst` (the branch `branch`), by its porcelain line in `porcelain`; with no
@@ -312,6 +343,64 @@ mod tests {
             assert_eq!(reason, expected);
             assert_eq!(remote_messages.len(), 1);
         }
+    }
+
+    /// The reason `stderr` classifies as, by `classify`, or a panic.
+    fn reason(classify: fn(&Said<'_>) -> TransportError, stderr: &str) -> RejectReason {
+        match classify(&said(stderr)) {
+            TransportError::Rejected { reason, .. } => reason,
+            other => panic!("{stderr:?}: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bad_objects_rows() {
+        // git 2.43.0's wording: the fsck refusal of index-pack and unpack-objects, the fetch's
+        // connectivity check, and rev-list's traversal of a missing or unreadable object.
+        let fetched = [
+            "error: object 8e01: duplicateEntries: contains duplicate file entries
+fatal: fsck error in packed object
+fatal: index-pack failed",
+            "error: error in object: unshallow 8e01
+fatal: unpack-objects failed",
+            "fatal: bad object 8e01
+error: http://127.0.0.1:1/r.git did not send all necessary objects",
+            "fatal: missing blob object '1111'",
+            "fatal: bad tree object 2222",
+            "fatal: bad object 3333",
+        ];
+        for stderr in fetched {
+            assert_eq!(
+                reason(failure, stderr),
+                RejectReason::BadObjects,
+                "{stderr:?}"
+            );
+            assert_eq!(
+                reason(closure, stderr),
+                RejectReason::BadObjects,
+                "{stderr:?}"
+            );
+        }
+        let traversal = [
+            "error: Could not read 4444
+fatal: revision walk setup failed",
+            "fatal: unable to read tree 5555",
+            "error: object file .git/objects/66/66 is corrupt",
+        ];
+        for stderr in traversal {
+            assert_eq!(
+                reason(closure, stderr),
+                RejectReason::BadObjects,
+                "{stderr:?}"
+            );
+        }
+
+        // Outside the closure check, ssh's "could not read" is the network's, as before.
+        let ssh = "ssh: connect to host h port 22: Connection refused
+fatal: Could not read from remote repository.";
+        assert_eq!(cause(ssh), Cause::Ssh);
+        let odd = "fatal: the flux capacitor is out of alignment";
+        assert_eq!(reason(closure, odd), RejectReason::Unclassified);
     }
 
     #[test]

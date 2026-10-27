@@ -694,6 +694,8 @@ fn child_env_drops_git_dir_and_traces() {
             ("protocol.version", "2"),
             ("fetch.recurseSubmodules", "false"),
             ("transfer.credentialsInUrl", "die"),
+            ("fetch.fsckObjects", "true"),
+            ("transfer.fsckObjects", "true"),
         ] {
             assert!(
                 config.contains(&(key.to_owned(), value.to_owned())),
@@ -1139,7 +1141,7 @@ fn fetch_moves_the_mirror_to_the_remote() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn stdin_is_null_for_every_child_but_cat_file() {
+fn stdin_is_null_for_every_child_but_the_id_pipes() {
     let setup = Setup::new();
     let http = setup.server.http(HttpAuth::Anonymous);
     let cli = setup.recorded(&[]);
@@ -1155,11 +1157,12 @@ fn stdin_is_null_for_every_child_but_cat_file() {
         .expect("new objects");
     cli.is_ancestor(&mirror, setup.first, next)
         .expect("is ancestor");
+    cli.closed(&mirror, &[next]).expect("closed");
     let update = PushUpdate::new(next, "main".to_owned(), Some(setup.first));
     cli.push(&mirror, &url, &cred, &update).expect("push");
     cli.gc_auto(&mirror).expect("gc");
 
-    // /dev/null for each, but cat-file's pipe of 40-hex lines.
+    // /dev/null for each, but the pipes of 40-hex lines: cat-file's, and the closure check's.
     let dumps = setup.dumps();
     let ran: Vec<&str> = dumps.iter().map(Dump::subcommand).collect();
     for expected in [
@@ -1174,12 +1177,13 @@ fn stdin_is_null_for_every_child_but_cat_file() {
         assert!(ran.contains(&expected), "{expected} not in {ran:?}");
     }
     for dump in &dumps {
-        if dump.subcommand() != "cat-file" {
+        let piped = dump.subcommand() == "cat-file" || dump.argv.iter().any(|arg| arg == "--stdin");
+        if !piped {
             assert_eq!(dump.stdin_kind, "/dev/null", "{:?}", dump.argv);
             continue;
         }
         assert!(dump.stdin_kind.starts_with("pipe:"), "{}", dump.stdin_kind);
-        assert_ne!(dump.stdin, "", "cat-file got no ids");
+        assert_ne!(dump.stdin, "", "{:?} got no ids", dump.argv);
         for line in dump.stdin.lines() {
             assert!(
                 line.len() == 40 && line.bytes().all(|byte| byte.is_ascii_hexdigit()),
@@ -1187,4 +1191,73 @@ fn stdin_is_null_for_every_child_but_cat_file() {
             );
         }
     }
+}
+
+#[test]
+fn a_fetch_of_an_object_fsck_refuses_fails() {
+    let setup = Setup::new();
+    let http = setup.server.http(HttpAuth::Anonymous);
+    let cli = setup.cli(&[]);
+    let cred = Credential::default();
+    setup
+        .server
+        .commit_fsck_error(REPO, "main", "a tree with one entry twice");
+
+    // 1. The detector's self-check: git's own fsck on the server finds the object.
+    let fsck = setup
+        .server
+        .command()
+        .arg("--git-dir")
+        .arg(setup.server.bare(REPO))
+        .arg("fsck")
+        .output()
+        .expect("run git fsck");
+    let said = String::from_utf8_lossy(&fsck.stderr);
+    assert!(
+        !fsck.status.success() && said.contains("duplicateEntries"),
+        "{said}"
+    );
+
+    // 2. The fetch refuses it, and no ref of the mirror moves.
+    let (reason, _) = rejected(setup.fetch(&cli, &http.url(REPO), &cred));
+    assert_eq!(reason, RejectReason::BadObjects);
+    assert_eq!(reason.as_str(), "bad_objects");
+    let refs = run(setup.in_mirror().arg("for-each-ref"));
+    assert_eq!(refs, "");
+}
+
+#[test]
+fn closed_finds_a_missing_object() {
+    let setup = Setup::new();
+    let cli = setup.cli(&[]);
+
+    // A commit whose tree the mirror does not hold.
+    let commit = "tree 2222222222222222222222222222222222222222\n\
+                  author a <a@a> 1 +0000\ncommitter a <a@a> 1 +0000\n\nno tree\n";
+    let file = setup.dir.path().join("commit");
+    fs::write(&file, commit).expect("write the commit");
+    let written = run(setup
+        .in_mirror()
+        .args(["hash-object", "-t", "commit", "-w", "--literally"])
+        .arg(&file));
+    let tip = oid(&written);
+
+    let (reason, _) = rejected(cli.closed(&setup.mirror(), &[tip]));
+    assert_eq!(reason, RejectReason::BadObjects);
+
+    // A tip the mirror lacks altogether: the same.
+    let absent = oid("3333333333333333333333333333333333333333");
+    let (reason, _) = rejected(cli.closed(&setup.mirror(), &[absent]));
+    assert_eq!(reason, RejectReason::BadObjects);
+}
+
+#[test]
+fn closed_passes_a_whole_history() {
+    let setup = Setup::new();
+    let cli = setup.cli(&[]);
+    let base = setup.commit(None, "base", &[("a.txt", b"a\n")]);
+    let next = setup.commit(Some(base), "next", &[("dir/b.txt", b"b\n")]);
+
+    assert_eq!(cli.closed(&setup.mirror(), &[next, base]), Ok(()));
+    assert_eq!(cli.closed(&setup.mirror(), &[]), Ok(()));
 }

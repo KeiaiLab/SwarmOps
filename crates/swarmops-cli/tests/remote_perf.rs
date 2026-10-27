@@ -416,13 +416,15 @@ const MIRROR: &str = "git/mirror.git";
 
 /// The configuration the product's git children run with (the git crate's `CONFIG`), so that
 /// git alone does the same durable work.
-const GIT_CONFIG: [&str; 6] = [
+const GIT_CONFIG: [&str; 8] = [
     "core.fsync=all",
     "core.fsyncMethod=fsync",
     "gc.autoDetach=false",
     "protocol.version=2",
     "fetch.recurseSubmodules=false",
     "transfer.credentialsInUrl=die",
+    "fetch.fsckObjects=true",
+    "transfer.fsckObjects=true",
 ];
 
 /// The product's `git fetch` options up to the URL (the git crate's `FETCH_FLAGS`).

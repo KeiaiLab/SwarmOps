@@ -7,18 +7,23 @@
 //!   MIRROR                              "swarmops-git-mirror 1\n": the layout's version
 //!   lock                                one fetch, push, sync or clone at a time
 //!   mirror.git/                         bare, SHA-1, never written by people
-//!     refs/remotes/<remote>/<branch>    what the last fetch saw of each remote branch
+//!     refs/incoming/<remote>/heads/<b>  what git fetch wrote of each remote branch, unchecked
+//!     refs/incoming/<remote>/tags/<t>   and of each tag
+//!     refs/remotes/<remote>/<branch>    what the last fetch saw of each remote branch, checked
 //!     refs/remote-tags/<remote>/<tag>   the remote's tags, never imported
 //!     refs/heads/push/<remote>/<branch> the branch a push's export writes
 //!     hooks-none/                       empty: git runs no hook here
 //! ```
+//!
+//! A fetch writes the incoming refs only; the tracking refs and tags move to them
+//! ([`Mirror::promote`]) after the transport's closure check found every object they reach.
 //!
 //! The mirror is a cache: it holds nothing the store and the remote cannot give again, and one
 //! that is missing, of an unknown version or that gix cannot open is set aside and made again by
 //! the next fetch. Its lock is taken once per command and passed down by reference
 //! ([`MirrorLock`]): it is not re-entrant, and a held lock is refused at once, never waited for.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -53,6 +58,12 @@ const TRACKING: &str = "refs/remotes";
 const REMOTE_TAGS: &str = "refs/remote-tags";
 const STAGING: &str = "push";
 
+/// Where a fetch writes a remote's refs before they are checked: `refs/incoming/<remote>/`,
+/// its branches under `heads/`, its tags under `tags/`.
+const INCOMING: &str = "refs/incoming";
+const INCOMING_HEADS: &str = "heads/";
+const INCOMING_TAGS: &str = "tags/";
+
 /// How old a git lock file in the mirror must be, by its mtime, before a run takes it for a dead
 /// process's and removes it: younger, it may belong to a git child still writing.
 pub const STALE_LOCK_AGE: Duration = Duration::from_mins(10);
@@ -71,6 +82,17 @@ pub struct Mirror {
 pub struct MirrorLock {
     /// The open lock file, which holds the lock.
     _file: File,
+}
+
+/// What [`Mirror::promote`] did: how many tracking refs and tags it moved (or made), and how
+/// many it deleted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Promoted {
+    /// Refs moved to, or made at, their incoming value.
+    pub moved: u64,
+    /// Refs deleted: the remote no longer has them.
+    pub deleted: u64,
 }
 
 /// What [`Mirror::ensure`] found.
@@ -231,6 +253,63 @@ impl Mirror {
         self.refs_under(&format!("{REMOTE_TAGS}/{remote}/"))
     }
 
+    /// What the last fetch wrote of `remote`, unchecked: `refs/incoming/<remote>/*`, by the name
+    /// under it (`heads/<branch>`, `tags/<tag>`). Its values are the tips the closure check takes.
+    pub fn incoming(&self, remote: &str) -> Result<BTreeMap<String, GitOid>, MirrorError> {
+        self.refs_under(&format!("{INCOMING}/{remote}/"))
+    }
+
+    /// Moves `remote`'s tracking refs and tags to its incoming refs, each by compare-and-swap
+    /// from what the caller read before the fetch (`branches`, `tags`): one with an incoming
+    /// value moves to it, one without is deleted; the incoming refs stay. A ref that names
+    /// something else than was read is [`SinkError::Write`], and those after it stay. Run again,
+    /// it moves nothing: a crash between two moves is finished by the next fetch.
+    pub fn promote(
+        &self,
+        remote: &str,
+        branches: &BTreeMap<String, GitOid>,
+        tags: &BTreeMap<String, GitOid>,
+    ) -> Result<Promoted, MirrorError> {
+        let incoming = self.incoming(remote)?;
+        let mut sink = GixSink::open(&self.git_dir)?;
+        let mut promoted = Promoted::default();
+
+        // 1. Each namespace: its incoming values against what was read.
+        let spaces = [
+            (INCOMING_HEADS, TRACKING, branches),
+            (INCOMING_TAGS, REMOTE_TAGS, tags),
+        ];
+        for (space, target, seen) in spaces {
+            let wanted: BTreeMap<&str, GitOid> = incoming
+                .iter()
+                .filter_map(|(name, oid)| Some((name.strip_prefix(space)?, *oid)))
+                .collect();
+            let names = wanted
+                .keys()
+                .copied()
+                .chain(seen.keys().map(String::as_str));
+            let names: BTreeSet<&str> = names.collect();
+
+            // 2. Each ref moved, made or deleted from its read value.
+            for name in names {
+                let old = seen.get(name).copied();
+                let new = wanted.get(name).copied();
+                if old == new {
+                    continue;
+                }
+                let full = format!("{target}/{remote}/{name}");
+                if let BranchUpdate::Mismatch { actual } = sink.cas_ref(&full, old, new)? {
+                    return Err(moved(full, old, actual));
+                }
+                match new {
+                    Some(_) => promoted.moved += 1,
+                    None => promoted.deleted += 1,
+                }
+            }
+        }
+        Ok(promoted)
+    }
+
     /// Moves `refs/remotes/<remote>/<branch>` from `old` to `new` by compare-and-swap. A ref that
     /// names something else is left as it is, and is [`SinkError::Write`]: under the mirror's lock
     /// nothing else moves it.
@@ -273,21 +352,22 @@ impl Mirror {
     }
 
     /// Removes the mirror's refs of `remote` (its tracking refs, its tags and its staging
-    /// branches), and gives how many.
+    /// branches), and gives how many; its incoming refs go too, uncounted (a fetch's scratch).
     pub fn remove_remote(&self, remote: &str) -> Result<u64, MirrorError> {
         let mut sink = GixSink::open(&self.git_dir)?;
         let prefixes = [
-            format!("{TRACKING}/{remote}/"),
-            format!("{REMOTE_TAGS}/{remote}/"),
-            format!("refs/heads/{STAGING}/{remote}/"),
+            (format!("{TRACKING}/{remote}/"), 1),
+            (format!("{REMOTE_TAGS}/{remote}/"), 1),
+            (format!("refs/heads/{STAGING}/{remote}/"), 1),
+            (format!("{INCOMING}/{remote}/"), 0),
         ];
 
-        // Each ref under the three prefixes, deleted from the value it names.
+        // Each ref under the four prefixes, deleted from the value it names.
         let mut removed = 0;
-        for prefix in &prefixes {
+        for (prefix, counted) in &prefixes {
             for (full, oid) in sink.references_under(prefix)? {
                 match sink.cas_ref(&full, Some(oid), None)? {
-                    BranchUpdate::Applied => removed += 1,
+                    BranchUpdate::Applied => removed += counted,
                     BranchUpdate::Mismatch { actual } => {
                         return Err(moved(full, Some(oid), actual));
                     }
