@@ -74,6 +74,7 @@ impl Recording<'_> {
         let source = GixSource::open(Path::new(&git_path)).map_err(|e| failed(e.into()))?;
         let mut request = ImportRequest::new(git_ref.as_str(), target_ref, who.agent());
         request.lossy = lossy.into_iter().map(import_class).collect();
+        request.memo_key.clone_from(&self.ops.memo_key);
         let report = swarmops_git::import(&self.ops.repo, &source, &request).map_err(failed)?;
         self.resolved.record_recovered(report.recovered);
         Ok(response(report))
@@ -108,6 +109,7 @@ impl Recording<'_> {
         let mut sink = GixSink::open(Path::new(&git_path)).map_err(|e| failed(e.into()))?;
         let mut request = ExportRequest::new(&source_ref, &branch);
         request.force = force;
+        request.memo_key.clone_from(&self.ops.memo_key);
         let report = swarmops_git::export(&self.ops.repo, &mut sink, &request).map_err(|e| {
             if let ExportError::Diverged { head, .. } = &e {
                 self.resolved.record(&source_ref, *head);

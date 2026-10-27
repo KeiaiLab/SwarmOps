@@ -443,6 +443,7 @@ impl Recording<'_> {
         let failed = |e: ImportError| error::git_import_error(e, MIRROR_GIT, git_ref);
         let source = GixSource::open(mirror.git_dir()).map_err(|e| failed(e.into()))?;
         request.lossy = lossy_set(lossy);
+        request.memo_key.clone_from(&self.ops.memo_key);
         let report = swarmops_git::import(&self.ops.repo, &source, &request).map_err(failed)?;
         self.resolved.record_recovered(report.recovered);
         Ok(report)

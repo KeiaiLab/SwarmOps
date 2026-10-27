@@ -203,6 +203,7 @@ impl Recording<'_> {
         let failed = |e: ImportError| error::git_import_error(e, MIRROR_GIT, &git_ref);
         let source = GixSource::open(mirror.git_dir()).map_err(|e| failed(e.into()))?;
         let mut request = ImportRequest::objects_only(git_ref.as_str());
+        request.memo_key.clone_from(&self.ops.memo_key);
         request.lossy = lossy_set(&remote.lossy);
         let report = swarmops_git::import(&self.ops.repo, &source, &request).map_err(failed)?;
         self.resolved.record_recovered(report.recovered);
@@ -221,7 +222,8 @@ impl Recording<'_> {
     ) -> Result<ExportReport, OpError> {
         let failed = |e: ExportError| error::git_export_error(e, MIRROR_GIT, source_ref, staging);
         let mut sink = GixSink::open(mirror.git_dir()).map_err(|e| failed(e.into()))?;
-        let request = ExportRequest::new(source_ref, staging);
+        let mut request = ExportRequest::new(source_ref, staging);
+        request.memo_key.clone_from(&self.ops.memo_key);
         let exported = swarmops_git::export(&self.ops.repo, &mut sink, &request);
 
         // The outcome: a report, or why the staging branch is no base of the head.

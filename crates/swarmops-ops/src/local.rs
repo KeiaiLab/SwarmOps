@@ -32,6 +32,7 @@ use swarmops_core::{
     ChangesetId, DeltaEntry, DeltaOp, EntryKind, EntryTarget, LeafKind, ObjectId, RepoPath,
     Signature,
 };
+use swarmops_git::MemoKey;
 use swarmops_repo::LandRequest;
 use swarmops_repo::merge::line_diff::{self, DiffLine, UnifiedHunk};
 use swarmops_repo::merge::tree_diff::{ChangeKind, Leaf, PathFilter, TreeChange};
@@ -479,6 +480,9 @@ pub struct LocalOps {
     pub(crate) repo: LocalRepo,
     /// The store's path as the caller gave it, for hints and display.
     store_path: Utf8PathBuf,
+    /// The key the git export and import trust export oid memos under, if the caller gave one
+    /// ([`LocalOps::with_memo_key`]).
+    pub(crate) memo_key: Option<MemoKey>,
 }
 
 impl fmt::Debug for LocalOps {
@@ -530,6 +534,17 @@ impl LocalOps {
         &self.store_path
     }
 
+    /// These operations, their git export and import (`git export`, `git import`, `push`,
+    /// `fetch`, `sync`) and their deep verify given `key`, the store's memo key, which the caller
+    /// keeps outside the store: an export oid memo whose MAC under it checks stops their walk of
+    /// the history below it, and every export oid they derive is memoized under it (storage spec
+    /// §5, §7). Without one, they derive every export oid from the history below it.
+    #[must_use]
+    pub fn with_memo_key(mut self, key: MemoKey) -> LocalOps {
+        self.memo_key = Some(key);
+        self
+    }
+
     /// The signature of a changeset that `who` records: the name and email `<store>/authors.toml`
     /// gives `who`'s family (read now, every time: operations spec §5), else the agent name and
     /// `<instance>@<family>.swarmops.local`, and `secs`, a keyed commit's key's time, or else the
@@ -575,6 +590,7 @@ impl LocalOps {
         LocalOps {
             repo,
             store_path: path.to_owned(),
+            memo_key: None,
         }
     }
 }
@@ -1954,7 +1970,9 @@ impl StoreOps for Recording<'_> {
         // counts in `found`; it is listed only while the report has room.
         let mut extras: Vec<(String, VerifyFinding)> = Vec::new();
         if req.deep {
-            for mismatch in swarmops_git::verify_export_oids(&self.ops.repo).map_err(error::op)? {
+            let key = self.ops.memo_key.as_ref();
+            let mismatches = swarmops_git::verify_export_oids_with(&self.ops.repo, key);
+            for mismatch in mismatches.map_err(error::op)? {
                 extras.push(git_memo_finding(&mismatch));
             }
             for entry in swarmops_git::verify_external_ids(&self.ops.repo).map_err(error::op)? {

@@ -53,6 +53,8 @@ swarmops-ops = { path = "../swarmops-ops", version = "0.5.0" }
 swarmops-ws = { path = "../swarmops-ws", version = "0.5.0" }
 camino.workspace = true
 clap.workspace = true
+# A store's memo key, made on first use (`context::memo_key`).
+getrandom.workspace = true
 serde.workspace = true
 # `swarmops mcp` reads a message line's members as their JSON text (`RawValue`), so that it
 # parses only what it serves and nothing else a line holds.

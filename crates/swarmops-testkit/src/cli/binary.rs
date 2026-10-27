@@ -43,6 +43,15 @@ const POLL: Duration = Duration::from_millis(1);
 /// How many times at most [`retry_busy`] runs a setup command again that met `E_BUSY`.
 pub const BUSY_RETRIES: usize = 5;
 
+/// The variable that names the directory of the stores' memo keys (`swarmops-cli`'s
+/// `context::MEMO_KEY_DIR_ENV`, which this crate cannot name): every run of the binary sets it,
+/// so that no test makes a key in the user's state directory.
+const MEMO_KEY_DIR_ENV: &str = "SWARMOPS_MEMO_KEY_DIR";
+
+/// The memo keys' directory of every run, under the system's temp directory: one for all, so
+/// that every command run on a store, through a [`Store`] or not, reads the same key.
+const SHARED_MEMO_KEYS: &str = "swarmops-test-memo-keys";
+
 /// The agent of test child `n`: one identity per child.
 pub fn agent(n: usize) -> String {
     format!("test-swarm/worker-{n}")
@@ -71,13 +80,18 @@ pub fn swarmops_vars() -> impl Iterator<Item = OsString> {
 }
 
 /// Gives `command` the environment of this process without its `SWARMOPS_*` variables, then
-/// `SWARMOPS_TEST_ORDER_CHECK=1`, then `env`; and pipes for its output.
+/// `SWARMOPS_TEST_ORDER_CHECK=1` and a memo keys' directory under the system's temp directory
+/// (`SWARMOPS_MEMO_KEY_DIR`), then `env`; and pipes for its output.
 fn with_env(command: &mut Command, env: &[(&str, &str)]) {
     for name in swarmops_vars() {
         command.env_remove(name);
     }
     command
         .env(ORDER_CHECK_ENV, "1")
+        .env(
+            MEMO_KEY_DIR_ENV,
+            std::env::temp_dir().join(SHARED_MEMO_KEYS),
+        )
         .envs(env.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

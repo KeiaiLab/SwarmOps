@@ -2155,6 +2155,7 @@ dependencies = [
  "assert_cmd",
  "camino",
  "clap",
+ "getrandom",
  "insta",
  "rayon",
  "serde",

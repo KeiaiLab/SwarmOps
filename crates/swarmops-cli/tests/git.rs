@@ -1160,9 +1160,26 @@ fn the_round_trip_through_the_binary() {
 /// records nothing, where it used to record `c` as a faithful changeset holding the head's
 /// `foo.txt`; `verify --deep` names the memo. With the memo removed, the import is
 /// `E_GIT_IMPORT_DIVERGED` (exit 3), from the commit the head really exports to, and the store
-/// verifies clean.
+/// verifies clean. The same with the store's memo key and without one: the head, which no
+/// export wrote a memo of under the key, is derived and checked against its memo either way.
 #[test]
 fn git_import_over_a_crafted_head_memo_is_e_store_corrupt() {
+    let keys = tempfile::tempdir().expect("a temp dir");
+    let keys = utf8(keys.path());
+    crafted_head_memo(&[("SWARMOPS_MEMO_KEY_DIR", &keys)]);
+    assert_eq!(std::fs::read_dir(&keys).unwrap().count(), 1, "one key made");
+
+    // No memo key: no key directory, and no state directory to make one in.
+    let none = [
+        ("SWARMOPS_MEMO_KEY_DIR", ""),
+        ("HOME", ""),
+        ("XDG_STATE_HOME", ""),
+    ];
+    crafted_head_memo(&none);
+}
+
+/// [`git_import_over_a_crafted_head_memo_is_e_store_corrupt`] on a store whose commands set `env`.
+fn crafted_head_memo(env: &[(&str, &str)]) {
     use std::sync::Arc;
 
     use swarmops_core::{ChangesetId, ObjectId};
@@ -1172,7 +1189,7 @@ fn git_import_over_a_crafted_head_memo_is_e_store_corrupt() {
     use swarmops_store::{DerivedSlot, DerivedStore, RealFs};
     use swarmops_testkit::repo::signature;
 
-    let store = Store::init();
+    let store = Store::init().with_env(env);
     let native = store.commit(AGENT, "foo.txt", "store\n", None);
     let main = ["ref", "set", "main", &native, "--create"];
     store.run_as(AGENT, &main, &[]).ok();
@@ -1241,6 +1258,88 @@ fn git_import_over_a_crafted_head_memo_is_e_store_corrupt() {
     assert_ne!(base, x, "{error}");
     assert_eq!(store.show("main")["id"], native.as_str());
     store.assert_clean("after the memo was removed");
+}
+
+/// Commits `content` at `foo.txt` on `main`'s head as [`AGENT`], `main` moved there.
+fn on_main(store: &Store, content: &str) {
+    let changes = store.changes("on-main", "foo.txt", content);
+    let line = [
+        "commit",
+        "-m",
+        "foo.txt",
+        "--changes",
+        &changes,
+        "--advance",
+        "main",
+    ];
+    store.run_as(AGENT, &line, &[]).ok();
+}
+
+/// The memo key of a store is made on the first command that exports or imports git history:
+/// one file of 32 bytes, `<repo_id>.key`, mode 0600, in a directory of mode 0700; the commands
+/// after it read it, and a command that neither exports nor imports makes none.
+#[test]
+fn the_memo_key_is_made_once_with_mode_0600() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let keys = tempfile::tempdir().expect("a temp dir");
+    let dir = keys.path().join("memo-keys");
+    let env = [("SWARMOPS_MEMO_KEY_DIR", utf8(&dir))];
+    let env: Vec<(&str, &str)> = env.iter().map(|(n, v)| (*n, v.as_str())).collect();
+    let store = Store::init().with_env(&env);
+    on_main(&store, "one\n");
+    assert!(!dir.exists(), "a commit made a key");
+
+    // The first export makes it; the second reads it, unchanged.
+    let destination = swarmops_testkit::git::empty_repository();
+    let path = utf8(&destination.dir);
+    export(&store, &path, &[]).ok();
+    let repo_id = store.info()["repo_id"]
+        .as_str()
+        .expect("a repo id")
+        .to_owned();
+    let file = dir.join(format!("{repo_id}.key"));
+    let key = std::fs::read(&file).expect("the key file");
+    assert_eq!(key.len(), 32);
+    let mode = |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode();
+    assert_eq!(mode(&file) & 0o777, 0o600);
+    assert_eq!(mode(&dir) & 0o777, 0o700);
+    on_main(&store, "two\n");
+    export(&store, &path, &[]).ok();
+    assert_eq!(std::fs::read(&file).unwrap(), key, "the key changed");
+    let names: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names, [std::ffi::OsString::from(format!("{repo_id}.key"))]);
+}
+
+/// A key file of another length than a key's 32 bytes is `E_INVALID_ARG`, naming the file, and
+/// is left as it is: the export writes nothing.
+#[test]
+fn a_short_key_file_is_refused() {
+    let keys = tempfile::tempdir().expect("a temp dir");
+    let dir = utf8(keys.path());
+    let store = Store::init().with_env(&[("SWARMOPS_MEMO_KEY_DIR", &dir)]);
+    on_main(&store, "one\n");
+    let repo_id = store.info()["repo_id"]
+        .as_str()
+        .expect("a repo id")
+        .to_owned();
+    let file = keys.path().join(format!("{repo_id}.key"));
+    std::fs::write(&file, [7; 31]).unwrap();
+
+    let destination = swarmops_testkit::git::empty_repository();
+    let refused = export(&store, &utf8(&destination.dir), &[]);
+    let error = refused.err("E_INVALID_ARG");
+    assert_eq!(error["details"]["key_file"], utf8(&file), "{error}");
+    assert_eq!(
+        std::fs::read(&file).unwrap(),
+        [7; 31],
+        "the file was rewritten"
+    );
+    let branch = swarmops_git::GixSink::open(&destination.dir).unwrap();
+    assert_eq!(swarmops_git::GitSink::branch(&branch, "main"), Ok(None));
 }
 
 /// A crafted external id entry (a file under `meta/external_ids/git/`, placed whole with its

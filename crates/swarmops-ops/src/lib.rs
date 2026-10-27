@@ -41,3 +41,5 @@ mod upgrade;
 
 pub use error::shell_word;
 pub use local::{LocalOps, NOW_ENV, Recording, Resolved};
+/// The key [`LocalOps::with_memo_key`] takes, which the caller keeps outside the store.
+pub use swarmops_git::{MEMO_KEY_LEN, MemoKey};

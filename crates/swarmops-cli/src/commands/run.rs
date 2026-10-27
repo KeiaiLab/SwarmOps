@@ -48,6 +48,17 @@ use crate::context::{self, Env};
 use crate::mcp;
 use crate::output::{self, Format, Printed};
 
+/// The operations that export or import git history, or deep-verify it, and so run with the
+/// store's memo key ([`Ctx::keyed`]).
+const KEYED_OPS: [&str; 6] = [
+    "git_export",
+    "git_import",
+    "fetch",
+    "push",
+    "sync",
+    "verify",
+];
+
 /// The client file `blob put -` reads: this process's stdin, through the path it is open at.
 const STDIN: &str = "/dev/stdin";
 
@@ -671,10 +682,27 @@ impl Ctx<'_> {
             let store =
                 named.ok_or_else(|| context::no_store_named(self.global.repo.as_deref()))?;
             let root = Utf8Path::new(&store);
-            let ops = LocalOps::open(root)?;
+            let ops = self.keyed(op, LocalOps::open(root)?)?;
             call(ops.recording(&self.used.resolved), root, input)
         });
         envelope(op, self.used.meta(), result, self.started)
+    }
+
+    /// `ops`, given the store's memo key ([`context::memo_key`]) when `op` exports or imports
+    /// git history (one of [`KEYED_OPS`]) or deep-verifies it: the others neither make nor read a
+    /// key.
+    fn keyed(&self, op: &str, ops: LocalOps) -> Result<LocalOps, OpError> {
+        if !KEYED_OPS.contains(&op) {
+            return Ok(ops);
+        }
+        let repo_id = ops
+            .recording(&self.used.resolved)
+            .repo_info(InfoReq::default())?
+            .repo_id;
+        Ok(match context::memo_key(self.env, &repo_id)? {
+            Some(key) => ops.with_memo_key(key),
+            None => ops,
+        })
     }
 
     /// `op`'s envelope for `result`, with `meta` from `used` (what [`Used::meta`] gives) and the

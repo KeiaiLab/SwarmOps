@@ -10,6 +10,10 @@
 //!   (`json` or `human`), else JSON; JSON is pretty with `--pretty`, and by default when
 //!   stdout is a terminal.
 //!
+//! - The memo key of a store, which the git export and import trust export oid memos under, is
+//!   the file `<repo_id>.key` of `SWARMOPS_MEMO_KEY_DIR`, else of the per-OS state directory's
+//!   `swarmops/memo-keys/`, made on first use ([`memo_key`]); no such directory, no key.
+//!
 //! A variable set to the empty string counts as unset. An explicit empty `--repo` names no
 //! store and does not fall back to `SWARMOPS_REPO` (an unset shell variable in `--repo "$X"`
 //! must not pick another store). A variable that is not UTF-8 is `E_INVALID_ARG`, said of the
@@ -17,10 +21,16 @@
 //! Every function reads the environment through `env`, so that tests can hand it one.
 
 use std::ffi::OsString;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::{Map, Value};
 use swarmops_api::{ErrorCode, Identity, OpError};
+use swarmops_ops::{MEMO_KEY_LEN, MemoKey};
 use swarmops_ws::RealFs;
 use swarmops_ws::hook::Bootstrap;
 use swarmops_ws::workspace::{self, Locate};
@@ -42,6 +52,17 @@ pub const WS_BOOTSTRAP_ENV: &str = "SWARMOPS_WS_BOOTSTRAP";
 
 /// What [`WS_BOOTSTRAP_ENV`] is set to in order to skip the bootstrap.
 pub const BOOTSTRAP_SKIP: &str = "skip";
+
+/// The environment variable that names the directory of the stores' memo keys ([`memo_key`]).
+pub const MEMO_KEY_DIR_ENV: &str = "SWARMOPS_MEMO_KEY_DIR";
+
+/// The mode of the memo keys' directory, which [`memo_key`] makes: its owner's alone.
+#[cfg(unix)]
+const MEMO_KEY_DIR_MODE: u32 = 0o700;
+
+/// The mode of a memo key's file: its owner reads and writes it, no one else.
+#[cfg(unix)]
+const MEMO_KEY_FILE_MODE: u32 = 0o600;
 
 /// How a command reads environment variable `name`.
 pub type Env<'a> = &'a dyn Fn(&str) -> Option<OsString>;
@@ -111,6 +132,95 @@ pub fn ws_root(env: Env<'_>) -> Result<Utf8PathBuf, OpError> {
     }
     let state = state_dir(env)?;
     Ok(state.join("swarmops").join("workspaces"))
+}
+
+/// The memo key of the store whose id is `repo_id` (operations spec §1, storage spec §5): 32
+/// bytes in `<dir>/<repo_id>.key`, `<dir>` being [`MEMO_KEY_DIR_ENV`], else the per-OS state
+/// directory's `swarmops/memo-keys` (`$XDG_STATE_HOME/swarmops/memo-keys`, `~/.local/state/…` by
+/// default, on Linux). A key the file does not hold yet is made: 32 random bytes in a temp file
+/// of mode 0600, linked into place without replacing anything, the directory (made 0700) synced,
+/// so that of two makers racing one wins and both read its key. `None` for a host with no state
+/// directory, or a store id that is no 32 lowercase hex digits: the export and the import then
+/// derive every export oid. A file of another length, or one that cannot be read or made, is
+/// `E_INVALID_ARG` naming the file (`details.key_file`), never overwritten.
+pub fn memo_key(env: Env<'_>, repo_id: &str) -> Result<Option<MemoKey>, OpError> {
+    let dir = match var(env, MEMO_KEY_DIR_ENV)? {
+        Some(dir) => Utf8PathBuf::from(dir),
+        None => match state_dir(env) {
+            Ok(state) => state.join("swarmops").join("memo-keys"),
+            Err(_) => return Ok(None),
+        },
+    };
+    let is_id = repo_id.len() == 32
+        && repo_id
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    if !is_id {
+        return Ok(None);
+    }
+    let file = dir.join(format!("{repo_id}.key"));
+    let failed = |why: String| {
+        let mut details = Map::new();
+        details.insert("key_file".to_owned(), Value::from(file.as_str()));
+        OpError::new(ErrorCode::InvalidArg, format!("the memo key {file}: {why}"))
+            .with_details(details)
+    };
+
+    // 1. The key the file holds; made first if there is none.
+    let bytes = match fs::read(&file) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            make_key(&dir, &file).map_err(|e| failed(format!("cannot be made: {e}")))?;
+            fs::read(&file).map_err(|e| failed(format!("cannot be read: {e}")))?
+        }
+        Err(e) => return Err(failed(format!("cannot be read: {e}"))),
+    };
+
+    // 2. Exactly a key's bytes, or the file is not one.
+    let Ok(key) = <[u8; MEMO_KEY_LEN]>::try_from(bytes.as_slice()) else {
+        let why = format!(
+            "holds {} bytes, where a key has {MEMO_KEY_LEN}",
+            bytes.len()
+        );
+        return Err(failed(why));
+    };
+    Ok(Some(MemoKey::from_bytes(key)))
+}
+
+/// Makes the key file `file` in `dir`, unless one is there: 32 random bytes written to a temp file
+/// of its own in `dir`, synced, and hard-linked to `file`, which replaces nothing (a maker that
+/// lost the race leaves the winner's); then the temp file removed and `dir` synced.
+fn make_key(dir: &Utf8Path, file: &Utf8Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    builder.mode(MEMO_KEY_DIR_MODE);
+    builder.create(dir)?;
+
+    // 1. The key, durable in a temp file no other maker names.
+    let mut key = [0; MEMO_KEY_LEN];
+    getrandom::fill(&mut key).map_err(|e| io::Error::other(e.to_string()))?;
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    let temp = dir.join(format!(".{}.{nanos}.tmp", std::process::id()));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(MEMO_KEY_FILE_MODE);
+    let written = options.open(&temp).and_then(|mut out| {
+        out.write_all(&key)?;
+        out.sync_all()
+    });
+
+    // 2. Linked into place without replacing a winner's, then the directory synced.
+    let linked = written.and_then(|()| match fs::hard_link(&temp, file) {
+        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => Err(e),
+        _ => Ok(()),
+    });
+    let _ = fs::remove_file(&temp);
+    linked?;
+    File::open(dir)?.sync_all()
 }
 
 /// The per-OS directory for state that is neither config nor cache.

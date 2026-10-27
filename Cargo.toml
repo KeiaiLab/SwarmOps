@@ -43,6 +43,9 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 schemars = "1.2.3"
 base64 = "0.22.1"
+# A store's memo key, 32 bytes from the operating system (swarmops-cli only): the version the
+# lockfile holds already; no new package.
+getrandom = "0.4.3"
 # The store's TOML files (M13's `remotes.toml` and `authors.toml`, swarmops-ops only): parse and
 # write through serde, no `preserve_order`; MIT OR Apache-2.0, as its two new crates
 # (serde_spanned, toml_writer) are.

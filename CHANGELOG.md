@@ -24,6 +24,15 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   `E_REMOTE_REJECTED` `details.reason: "bad_objects"`, with nothing imported and no tracking ref
   moved, and every later fetch fails the same way until the remote's history changes; there is no
   override (the v0.6.0 design's decision 9).
+- `git export`, `git import`, `push`, `fetch` and `sync` trust the export oid memos that a
+  per-store memo key authenticates, and stop their walk of the history there: an export of one
+  commit over 2,000 imported ones reads 9 of the store's objects, not 2,015. The key is 32 random
+  bytes in `$XDG_STATE_HOME/swarmops/memo-keys/<repo_id>.key` (mode 0600, made on first use;
+  `SWARMOPS_MEMO_KEY_DIR` moves it), outside the store, so a memo placed in the store without it
+  is refused (`E_STORE_CORRUPT`), never taken. No state directory, no key: every export oid is
+  derived as before. `verify --deep` checks the new `git_oid_mac`, `git_tree_oid_mac` and
+  `git_blob_oid_mac` memos too (`derived_mismatch`, `key` the key's id), and `repair` drops a
+  malformed one.
 
 ## [0.5.0] - 2026-10-27
 
