@@ -112,6 +112,12 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   damaged or crafted `meta/idx/gen.col` instead of answering by it, and a revision's `~N` no
   longer names nothing by one (issue #16 item 5).
 
+### Fixed
+
+- A commit or a land's resolutions refuse a content past 512 MiB (`E_TOO_LARGE`, scope `put`) by
+  the size it declares, before any file is read; the check used to wait until the contents
+  before it were read.
+
 ## [0.6.0] - 2026-10-28
 
 Fix what the measurements missed. The 0.6.0 release holds the landing model the v0.5.0

@@ -75,9 +75,9 @@ filesystem permissions are the access boundary. Within that model, these are vul
   outside the store; one that corrupts the store; or one that makes it allocate without bound.
   A request's size is checked before it is read: its text (a `--changes` file or stdin, or one
   line of `swarmops mcp`'s input) holds at most 64 MiB. A commit's contents hold at most 1 GiB
-  together, measured by the sizes they declare (a client file's length) before a byte of them is
-  read; a put's content holds at most 512 MiB, checked as each content is converted, in list
-  order, so the contents before it may already have been read.
+  together and a put's content at most 512 MiB, both measured by the sizes they declare (a client
+  file's length) before a byte of them is read, and again as each content is converted, in list
+  order, for a file that grows meanwhile.
 - **Test hooks in a release build.** The `SWARMOPS_TEST_*` variables make a process crash or
   fail at a chosen filesystem call, count its calls, or pin its clock. A build without the
   `test-hooks` feature, as `cargo build --release` is, must ignore them; one that honours them
