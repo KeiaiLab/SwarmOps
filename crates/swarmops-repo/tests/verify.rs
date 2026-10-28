@@ -1161,10 +1161,8 @@ fn verify_reports_external_ids_that_are_damaged_dangling_or_mismatched() {
         3
     );
     let layout = layout_of(&root);
-    let damaged = layout.external_id_path(SYSTEM_GIT, &oid(0xdd));
-    let mut bytes = fs::read(&damaged).unwrap();
-    bytes[43] ^= 0x01;
-    fs::write(&damaged, bytes).unwrap();
+    damage_entry(&layout.external_id_path(SYSTEM_GIT, &oid(0xdd)));
+    let other_damaged = other_system_entries(&root, &repo, imported, native);
     let git = layout.external_ids_dir().join("git");
     fs::write(git.join("aa/stray"), b"junk").unwrap();
     fs::create_dir(git.join("zz")).unwrap();
@@ -1186,6 +1184,7 @@ fn verify_reports_external_ids_that_are_damaged_dangling_or_mismatched() {
             system: "git".to_owned(),
             key: key(0xdd),
         },
+        other_damaged.clone(),
     ];
     let report = assert_problems(&repo, want.clone());
     assert_eq!(
@@ -1210,8 +1209,64 @@ fn verify_reports_external_ids_that_are_damaged_dangling_or_mismatched() {
                 "the entry of external id {} of system git is corrupt",
                 key(0xdd)
             ),
+            format!(
+                "the entry of external id {} of system swarmops-0a1b is corrupt",
+                "dd".repeat(32)
+            ),
         ]
     );
+    assert_targets_unknown(&root, &repo, &want[2..]);
+}
+
+/// Flips a bit of the CRC of the external id entry at `path`.
+fn damage_entry(path: &Utf8Path) {
+    let mut bytes = fs::read(path).unwrap();
+    bytes[43] ^= 0x01;
+    fs::write(path, bytes).unwrap();
+}
+
+/// Records two entries of system `swarmops-0a1b` in the store at `root`: one naming `imported`,
+/// whose `git.oid` is no key of that system and so no mismatch there, and one naming `native`
+/// whose CRC is then damaged. Returns the problem the damaged one is.
+fn other_system_entries(
+    root: &Utf8Path,
+    repo: &LocalRepo,
+    imported: ChangesetId,
+    native: ChangesetId,
+) -> VerifyProblem {
+    use swarmops_store::ExternalEntry;
+    use swarmops_store::external_ids::lower_hex;
+
+    let other = "swarmops-0a1b";
+    let entries = [
+        (vec![0xcc; 32], ExternalEntry::new(imported, true)),
+        (vec![0xdd; 32], ExternalEntry::new(native, true)),
+    ];
+    let written = repo.record_external_ids(other, &entries).unwrap().written;
+    assert_eq!(written, 2);
+    damage_entry(&layout_of(root).external_id_path(other, &[0xdd; 32]));
+    VerifyProblem::ExternalIdCorrupt {
+        system: other.to_owned(),
+        key: lower_hex(&[0xdd; 32]),
+    }
+}
+
+/// Removes the journal and cuts the index of the store at `root`: with no changeset known, verify
+/// reports no entry dangling and checks none against a `git.oid`, and reports the damaged
+/// entries, `damaged`, all the same, beside the two metadata findings.
+fn assert_targets_unknown(root: &Utf8Path, repo: &LocalRepo, damaged: &[VerifyProblem]) {
+    fs::remove_file(layout_of(root).journal_log()).unwrap();
+    damage_meta(root, "sorted/ids.rec");
+    let report = repo.verify(Depth::Deep).unwrap();
+    let (meta, external): (Vec<_>, Vec<_>) = (report.problems.into_iter())
+        .partition(|problem| matches!(problem, VerifyProblem::MetaCorrupt(_)));
+    assert_eq!(meta.len(), 2, "the journal and the index: {meta:?}");
+    assert!(
+        meta[1].to_string().contains("no changeset is known"),
+        "{meta:?}"
+    );
+    assert_eq!(external, damaged, "the damaged entries alone");
+    assert_eq!(report.changesets_checked, 0);
 }
 
 /// What a deep verify finds in the derived store (storage spec §5): every value it holds of the
