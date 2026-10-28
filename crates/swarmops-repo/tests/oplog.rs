@@ -338,6 +338,55 @@ fn op_log_never_lists_a_frame_its_writer_cuts() {
     assert_eq!(target(&repo, "main"), Some(c1));
 }
 
+/// `undo` reads the frame it undoes under the write's lock, after the tail check (storage spec
+/// §3): an undo started while a writer holds its frame, whole and not synced, waits, and once
+/// the failed sync cuts the frame back finds no such operation. Reading the frame before the
+/// lock would see the cut frame, and act on it (here: a replay of a move never made).
+#[test]
+fn undo_never_acts_on_a_frame_its_writer_cuts() {
+    let (_dir, root, repo) = new_repo();
+    let c1 = commit(&repo, &[], vec![put("f", b"1")]); // op 0
+    cas(&repo, "main", None, Some(c1)); // op 1
+    let c2 = commit(&repo, &[c1], vec![put("f", b"2")]); // op 2
+    let (fs, held) = HoldThenFail::new(layout_of(&root).journal_log(), RealFs::new());
+    let writer = LocalRepo::open_with_fs(&root, checked(fs)).unwrap();
+    let root = &root;
+    thread::scope(|scope| {
+        // 1. The writer's frame (op 3, main to c2) is whole in journal.log, not synced.
+        let writing = scope.spawn(|| writer.cas_ref("main", Some(c1), Some(c2), ACTOR));
+        held.wait();
+
+        // 2. The undo of op 3 waits for the lock the held writer keeps.
+        let (started, starting) = mpsc::channel();
+        let undoing = scope.spawn(move || {
+            let undoer = LocalRepo::open(root).unwrap();
+            started.send(()).unwrap();
+            undoer.undo(3, UNDOER)
+        });
+        starting.recv_timeout(Duration::from_secs(60)).unwrap();
+        thread::sleep(Duration::from_millis(300));
+        assert!(
+            !undoing.is_finished(),
+            "undo returned while the writer held the lock"
+        );
+
+        // 3. Let go: the sync fails, the writer cuts its frame, and op 3 is not found.
+        held.release();
+        match writing.join().unwrap() {
+            Err(RepoError::Store(StoreError::NotCommitted { source })) => {
+                assert_eq!(source.raw_os_error(), Some(5), "{source}");
+            }
+            other => panic!("expected NotCommitted, got {other:?}"),
+        }
+        match undoing.join().unwrap() {
+            Err(RepoError::OpNotFound { op: 3, last, .. }) => assert_eq!(last, Some(2)),
+            other => panic!("expected OpNotFound, got {other:?}"),
+        }
+    });
+    assert_eq!(target(&repo, "main"), Some(c1));
+    assert_eq!(frame_count(root), 3, "the undo wrote nothing");
+}
+
 /// `undo` of a move restores the ref to what it named before the move, in one new frame of one
 /// ref move by the undoer; the changesets stay.
 #[test]
