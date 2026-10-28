@@ -84,3 +84,20 @@ fn tree_names_are_checked_as_before() {
         assert_eq!(decoded.map(drop), want, "decode {name:?}");
     }
 }
+
+/// A name with two faults gives the first in the documented order (`/`, empty, NUL, `.`/`..`):
+/// a slash beside a NUL or a dot name is refused as a slash, by `Tree::new` and `Tree::decode`
+/// alike. Empty and dot names hold no second fault, so the slash is the only one that can lead.
+#[test]
+fn a_name_with_two_faults_gives_the_first() {
+    use swarmops_core::{BlobId, CodecError, LeafKind, ObjectKind, Tree, TreeEntry, hash_object};
+
+    let blob = BlobId::new(hash_object(ObjectKind::Blob, b"x"));
+    let slash = Err(CodecError::BadPath(PathError::Slash));
+    for name in ["a/\0", "\0/", "/\0", "./", "../..", "\0/.."] {
+        let made = Tree::new(vec![TreeEntry::leaf(name, LeafKind::File, blob)]);
+        assert_eq!(made.map(drop), slash, "new {name:?}");
+        let decoded = Tree::decode(&one_file_tree_bytes(name, blob.0.0));
+        assert_eq!(decoded.map(drop), slash, "decode {name:?}");
+    }
+}
