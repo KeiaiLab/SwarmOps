@@ -20,11 +20,11 @@ use swarmops_git::{
 };
 use swarmops_repo::{CasResult, Depth, LocalRepo, RepoError, StoreError};
 use swarmops_store::{
-    ExternalEntry, ExternalIds, Frame, FsMethod, Journal, RealFs, Record, SYSTEM_GIT,
+    ExternalEntry, ExternalIds, Frame, FsMethod, Journal, RealFs, Record, SYSTEM_GIT, StoreFormat,
 };
 use swarmops_testkit::fs::{FailingFs, NoSyncFs};
 use swarmops_testkit::git::{self, GitFixture, Manifest};
-use swarmops_testkit::repo::{commit, new_repo, put};
+use swarmops_testkit::repo::{commit, new_repo, new_repo_as, put};
 
 use crate::support::MemSource;
 use swarmops_testkit::store::layout_of;
@@ -1387,25 +1387,90 @@ fn a_source_of_another_object_format_is_refused_before_reading() {
     assert_eq!(files(&root), before);
 }
 
-/// A target that is no ref name is refused before the source is read or the store written.
+/// A target the store takes no ref of is refused before the source is read or the store
+/// written: a name no format takes, a remote-tracking ref (only a fetch moves one), and in a
+/// FORMAT 1 store a FORMAT 2 branch, which needs the later format.
 #[test]
 fn a_target_that_is_no_ref_name_is_refused() {
     let fixture = git::fixture("linear");
-    let (_dir, root, repo) = new_repo();
-    let before = files(&root);
-    let counting = Counting {
-        inner: open(&fixture),
-        reads: RefCell::new(Vec::new()),
-    };
-    let req = ImportRequest::new("HEAD", "feature/x", ACTOR);
+    let refused = [
+        (StoreFormat::V2, "main/x"),
+        (StoreFormat::V2, "remote/origin/x"),
+        (StoreFormat::V1, "feature/x"),
+    ];
+    for (format, name) in refused {
+        let (_dir, root, repo) = new_repo_as(format);
+        let before = files(&root);
+        let counting = Counting {
+            inner: open(&fixture),
+            reads: RefCell::new(Vec::new()),
+        };
+        let req = ImportRequest::new("HEAD", name, ACTOR);
 
-    let error = import(&repo, &counting, &req).unwrap_err();
+        // 1. The error: no ref name, or one the store's format does not take.
+        let error = import(&repo, &counting, &req).unwrap_err();
+        let named = match &error {
+            ImportError::RefName(refused) => refused == name,
+            ImportError::Store { source, .. } => matches!(
+                &**source,
+                RepoError::Store(StoreError::FormatRequired { name: refused, needs: 2, store: 1 })
+                    if refused == name
+            ),
+            _ => false,
+        };
+        assert!(named, "{name}: {error:?}");
+
+        // 2. Nothing read, nothing written.
+        assert!(counting.reads.borrow().is_empty(), "{name}");
+        assert_eq!(files(&root), before, "{name}");
+    }
+}
+
+/// In a FORMAT 2 store an import creates a branch and a tag (FORMAT 2 names) as it does `main`;
+/// a tag, which never moves, is refused a move to a later commit (`E_TAG_IMMUTABLE`'s error).
+#[test]
+fn an_import_creates_a_format_2_branch_and_tag() {
+    let fixture = git::fixture("linear");
+    let manifest = manifest(&fixture);
+    let (_dir, _root, repo) = unsynced_repo();
+    let source = open(&fixture);
+    let main = tip(manifest, "HEAD");
+    let older = first_parents(manifest, &main)[1].to_string();
+
+    // 1. A branch at the tip, and a tag at the commit before it.
+    let branch = import(
+        &repo,
+        &source,
+        &ImportRequest::new("HEAD", "feature/y", ACTOR),
+    )
+    .unwrap();
+    let tag = import(
+        &repo,
+        &source,
+        &ImportRequest::new(&older, "tags/v1", ACTOR),
+    )
+    .unwrap();
+    assert_eq!((branch.git_head, branch.ref_moved), (oid(&main), true));
+    assert_eq!((tag.git_head, tag.ref_moved), (oid(&older), true));
+    let at = |name: &str| repo.get_ref(name).unwrap().map(|state| state.target);
+    assert_eq!(at("feature/y"), Some(branch.head));
+    assert_eq!(at("tags/v1"), Some(tag.head));
+
+    // 2. The tag moved on to the tip: refused, and left where it is.
+    let error = import(
+        &repo,
+        &source,
+        &ImportRequest::new("HEAD", "tags/v1", ACTOR),
+    )
+    .unwrap_err();
+    let ImportError::Store { source: failed, .. } = &error else {
+        panic!("expected the store's refusal, got {error:?}");
+    };
     assert!(
-        matches!(&error, ImportError::RefName(name) if name == "feature/x"),
+        matches!(&**failed, RepoError::Store(StoreError::TagImmutable(name)) if name == "tags/v1"),
         "{error:?}"
     );
-    assert!(counting.reads.borrow().is_empty());
-    assert_eq!(files(&root), before);
+    assert_eq!(at("tags/v1"), Some(tag.head));
 }
 
 /// Crafted export memos, and a head whose bytes are not its commit's (the 2026-10-20 security

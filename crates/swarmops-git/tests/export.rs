@@ -27,7 +27,7 @@ use swarmops_git::{
     RawKind, RawTree, commit_bytes, export, git_hash, import, register,
 };
 use swarmops_repo::{Advance, CasResult, Change, LocalRepo, RawChangeset, RepoError, StoreError};
-use swarmops_store::{ExternalEntry, ExternalIds, Layout, RealFs, SYSTEM_GIT};
+use swarmops_store::{ExternalEntry, ExternalIds, Layout, RealFs, SYSTEM_GIT, StoreFormat};
 use swarmops_testkit::fs::{HoldThenFail, NoSyncFs};
 use swarmops_testkit::git::{self, GitFixture, Manifest};
 use swarmops_testkit::repo::{blob, delete, put, put_as, request, signature};
@@ -1104,6 +1104,136 @@ fn a_checked_out_branch_is_refused() {
     assert!(report.branch_moved);
     assert_eq!(gix(work.path()).branch("other"), Ok(Some(report.head_oid)));
     assert_eq!(gix(work.path()).branch("main"), Ok(None));
+}
+
+/// Points the store ref `name` at `target`, created, as `ref set --create` does.
+fn create_ref(repo: &LocalRepo, name: &str, target: ChangesetId) {
+    let made = repo
+        .cas_ref(name, None, Some(target), ACTOR)
+        .expect("cas_ref");
+    assert!(matches!(made.result, CasResult::Applied { .. }), "{made:?}");
+}
+
+/// A FORMAT 2 branch exports as `main` does: the same history gives the same commits, written
+/// once, and `refs/heads/feature/x` names the head's export.
+#[test]
+fn a_format_2_branch_exports_as_main_does() {
+    let store = store();
+    let repo = &store.repo;
+    let natives = three_natives(repo);
+    create_ref(repo, "feature/x", natives[2]);
+    let destination = git::empty_repository();
+
+    // 1. `main`, then the branch, into one repository.
+    let main = exported(repo, &mut gix(&destination.dir), &main_branch());
+    let req = ExportRequest::new("feature/x", "feature/x");
+    let branch = exported(repo, &mut gix(&destination.dir), &req);
+
+    // 2. The same commit, written by the first export alone.
+    assert_eq!(branch.head_oid, main.head_oid);
+    assert_eq!(branch.head_oid, export_oid(repo, natives[2]));
+    assert_eq!((main.commits_written, branch.commits_written), (3, 0));
+    assert_eq!((branch.old, branch.branch_moved), (None, true));
+    let sink = gix(&destination.dir);
+    assert_eq!(sink.branch("feature/x"), Ok(Some(main.head_oid)));
+    assert_eq!(sink.tag("feature/x"), Ok(None));
+}
+
+/// A tag export writes the lightweight tag `refs/tags/<name>`: the commit itself, no tag object,
+/// and no branch. A tag at another commit is not moved, whether that commit is an ancestor or
+/// not (`tag_exists`), unless the export is forced.
+#[test]
+fn a_tag_export_writes_a_lightweight_tag() {
+    let store = store();
+    let repo = &store.repo;
+    let natives = three_natives(repo);
+    create_ref(repo, "tags/v1", natives[2]);
+    create_ref(repo, "tags/v0", natives[0]);
+    let destination = git::empty_repository();
+
+    // 1. Created: the file names the commit.
+    let tag = ExportRequest::tag("tags/v1", "v1");
+    let report = exported(repo, &mut gix(&destination.dir), &tag);
+    assert_eq!(report.head_oid, export_oid(repo, natives[2]));
+    assert_eq!((report.old, report.branch_moved), (None, true));
+    let file = fs::read_to_string(destination.dir.join("refs/tags/v1")).unwrap();
+    assert_eq!(file, format!("{}\n", report.head_oid));
+    assert_eq!(gix(&destination.dir).branch("v1"), Ok(None));
+    let again = exported(repo, &mut gix(&destination.dir), &tag);
+    assert_eq!((again.branch_moved, again.commits_written), (false, 0));
+
+    // 2. Another commit into the same tag: an ancestor, then a descendant, each refused.
+    let ancestor = ExportRequest::tag("tags/v0", "v1");
+    let v0 = exported(
+        repo,
+        &mut gix(&destination.dir),
+        &ExportRequest::tag("tags/v0", "v0"),
+    );
+    let descendant = ExportRequest::tag("tags/v1", "v0");
+    for (req, at) in [(&ancestor, report.head_oid), (&descendant, v0.head_oid)] {
+        let error = export(repo, &mut gix(&destination.dir), req).unwrap_err();
+        let ExportError::Diverged {
+            branch,
+            git_head,
+            reason,
+            ..
+        } = error
+        else {
+            panic!("expected a divergence, got {error}");
+        };
+        assert_eq!((branch.as_str(), git_head), (req.branch.as_str(), at));
+        assert_eq!(
+            (reason, reason.as_str()),
+            (DivergedReason::TagExists, "tag_exists")
+        );
+        assert_eq!(gix(&destination.dir).tag(&req.branch), Ok(Some(at)));
+    }
+
+    // 3. Forced, the tag moves, and a warning says so.
+    let mut forced = ancestor;
+    forced.force = true;
+    let moved = exported(repo, &mut gix(&destination.dir), &forced);
+    assert_eq!(moved.head_oid, v0.head_oid);
+    assert!(moved.branch_moved);
+    assert!(
+        moved.warnings.iter().any(|w| w.contains("tag v1")),
+        "{:?}",
+        moved.warnings
+    );
+    assert_eq!(gix(&destination.dir).tag("v1"), Ok(Some(v0.head_oid)));
+}
+
+/// A source the store takes no ref of is refused before the repository is read: a name no format
+/// takes and a remote-tracking ref (`RefName`), and a FORMAT 2 branch of a FORMAT 1 store (the
+/// store's `FormatRequired`).
+#[test]
+fn a_source_ref_the_store_does_not_take_is_refused() {
+    let store = store();
+    for name in ["main/x", "remote/origin/x"] {
+        let mut sink = MemSink::default();
+        let error = export(&store.repo, &mut sink, &ExportRequest::new(name, "x")).unwrap_err();
+        assert!(
+            matches!(&error, ExportError::RefName(refused) if refused == name),
+            "{error}"
+        );
+        assert_eq!(sink.log(), [], "{name}");
+    }
+
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let root = Utf8PathBuf::from_path_buf(dir.path().join("v1")).expect("a UTF-8 temp dir");
+    let v1 = LocalRepo::create_with_fs_as(&root, "v1", StoreFormat::V1, Arc::new(NoSyncFs));
+    let v1 = v1.expect("create a FORMAT 1 store");
+    let mut sink = MemSink::default();
+    let error = export(&v1, &mut sink, &ExportRequest::new("feature/x", "x")).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            ExportError::Repo(RepoError::Store(StoreError::FormatRequired { name, needs: 2, store: 1 }))
+                if name == "feature/x"
+        ),
+        "{error}"
+    );
+    assert_eq!(sink.log(), []);
 }
 
 /// A loose object an earlier export left, emptied since (as a power loss can leave a file never

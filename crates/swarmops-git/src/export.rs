@@ -48,6 +48,11 @@
 //!    objects and the entries written: loose objects the branch does not reach, and entries that
 //!    are true.
 //!
+//! A request whose [`target`](ExportRequest::target) is [`GitTarget::Tag`] writes the lightweight
+//! tag `refs/tags/<name>` the same way, by [`GitSink::cas_tag`]: step 1 looks for no work tree,
+//! and in step 4 a tag at any other commit is [`DivergedReason::TagExists`] unless the request
+//! forces it, as `git push` moves no tag.
+//!
 //! The export writes no journal frame. Its store-side writes are the derived store's values
 //! (export oids, and the memoized git oids of trees and blobs) and the external id entries. Its
 //! reads go by the committed snapshot: the head, the changesets' records and objects, the trees
@@ -61,7 +66,7 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use swarmops_core::bytes;
 use swarmops_core::{BlobId, Changeset, ChangesetId, EntryTarget, Tree, TreeEntry, TreeId};
 use swarmops_repo::{LocalRepo, RepoError, RepoRead, StoreError};
-use swarmops_store::{ExternalEntry, FsObjectStore, SYSTEM_GIT, TailRepair};
+use swarmops_store::{ExternalEntry, FsObjectStore, RefKind, SYSTEM_GIT, TailRepair};
 
 use crate::export_oid::{ExportOids, OnMemo};
 use crate::{
@@ -74,16 +79,20 @@ use crate::{ancestry, export_oid, native, oid, render};
 /// export of the head or of an ancestor of it, before it says the branch moved.
 const BRANCH_WALK: usize = 1_000;
 
-/// What to export, and into which branch ([`export()`]).
+/// What to export, and into which branch or tag ([`export()`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ExportRequest {
-    /// The store ref whose history is exported, `main` or `release/<x>`: its head is the commit
-    /// the branch ends at.
+    /// The store ref whose history is exported, any name the store's format takes but a
+    /// remote-tracking one (`main`, `release/<x>`, and in FORMAT 2 a branch `<path>` or a tag
+    /// `tags/<path>`): its head is the commit the branch or tag ends at.
     pub source_ref: String,
-    /// The git branch written, by its short name (`refs/heads/<branch>`), created if it does not
+    /// The git branch or tag written, by its short name (`refs/heads/<branch>`,
+    /// `refs/tags/<branch>` as [`target`](ExportRequest::target) says), created if it does not
     /// exist.
     pub branch: String,
+    /// Whether [`branch`](ExportRequest::branch) names a branch or a lightweight tag.
+    pub target: GitTarget,
     /// Whether a branch that diverged moves all the same, by compare-and-swap against the commit
     /// the export read, so that a branch another writer moves meanwhile still stops it. It never
     /// moves a branch a work tree has checked out.
@@ -101,10 +110,32 @@ impl ExportRequest {
         ExportRequest {
             source_ref: source_ref.to_owned(),
             branch: branch.to_owned(),
+            target: GitTarget::Branch,
             force: false,
             memo_key: None,
         }
     }
+
+    /// A request to export `source_ref` into the lightweight tag `refs/tags/<tag>`, without
+    /// `force`, with no memo key: `ExportRequest::tag("tags/v1", "v1")`.
+    pub fn tag(source_ref: &str, tag: &str) -> ExportRequest {
+        ExportRequest {
+            target: GitTarget::Tag,
+            ..ExportRequest::new(source_ref, tag)
+        }
+    }
+}
+
+/// What an [`ExportRequest`] writes in git.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum GitTarget {
+    /// A branch, `refs/heads/<name>`: moved forward by later exports.
+    #[default]
+    Branch,
+    /// A lightweight tag, `refs/tags/<name>`, naming the commit: created, and moved only by a
+    /// forced export ([`DivergedReason::TagExists`] otherwise).
+    Tag,
 }
 
 /// What an export did ([`export()`]).
@@ -195,8 +226,10 @@ pub enum ExportError {
     /// The source ref does not exist. Nothing was read but the ref.
     #[error("the store has no ref {0}")]
     SourceRef(String),
-    /// The source ref's name is no ref name: refs are `main` and `release/<x>`. Nothing was read.
-    #[error("invalid source ref name {0:?}: a ref is main or release/<name>")]
+    /// The source ref's name is no ref name the store takes, or a remote-tracking one, which is
+    /// no history of the store's own. A name only a later format takes is
+    /// [`ExportError::Repo`] ([`StoreError::FormatRequired`]). Nothing was read.
+    #[error("invalid source ref name {0:?}: not a ref of the store's own")]
     RefName(String),
     /// The branch is checked out in the repository's work tree: moving it would leave the work
     /// tree behind its `HEAD`, which `git push` refuses by default (`receive.denyCurrentBranch`).
@@ -296,12 +329,15 @@ pub enum DivergedReason {
         /// What the branch names: `None` when it no longer exists.
         actual: Option<GitOid>,
     },
+    /// The tag ([`GitTarget::Tag`]) names another commit: a tag is not moved, as `git push`
+    /// does not move one, unless the request forces it.
+    TagExists,
 }
 
 impl DivergedReason {
     /// The reason's name, as `E_GIT_EXPORT_DIVERGED`'s `details.reason` gives it: `branch_ahead`,
-    /// `both_moved`, `branch_moved`, `source_moved_back`, `lossy_history` or
-    /// `moved_during_export`.
+    /// `both_moved`, `branch_moved`, `source_moved_back`, `lossy_history`,
+    /// `moved_during_export` or `tag_exists`.
     pub fn as_str(&self) -> &'static str {
         match self {
             DivergedReason::BranchAhead { .. } => "branch_ahead",
@@ -310,6 +346,7 @@ impl DivergedReason {
             DivergedReason::SourceMovedBack { .. } => "source_moved_back",
             DivergedReason::LossyHistory { .. } => "lossy_history",
             DivergedReason::MovedDuringExport { .. } => "moved_during_export",
+            DivergedReason::TagExists => "tag_exists",
         }
     }
 }
@@ -324,15 +361,17 @@ pub fn export(
     sink: &mut dyn GitSink,
     req: &ExportRequest,
 ) -> Result<ExportReport, ExportError> {
-    if swarmops_store::check_ref_name(&req.source_ref).is_err() {
-        return Err(ExportError::RefName(req.source_ref.clone()));
+    match check_store_ref(repo, &req.source_ref) {
+        Err(RepoError::RefName(name)) => return Err(ExportError::RefName(name)),
+        checked => checked?,
     }
     let format = sink.object_format();
     if format != ObjectFormat::Sha1 {
         let format = Unsupported::ObjectFormat(format.as_str().to_owned());
         return Err(SinkError::Unsupported(format).into());
     }
-    if sink.checked_out()?.as_deref() == Some(req.branch.as_str()) {
+    let is_branch = req.target == GitTarget::Branch;
+    if is_branch && sink.checked_out()?.as_deref() == Some(req.branch.as_str()) {
         return Err(ExportError::CheckedOut {
             branch: req.branch.clone(),
         });
@@ -342,7 +381,7 @@ pub fn export(
         return Err(ExportError::SourceRef(req.source_ref.clone()));
     };
     let head = state.target;
-    let old = sink.branch(&req.branch)?;
+    let old = target_at(sink, req)?;
     let mut run = Run::new(repo, &read, sink, (head, req.memo_key.as_ref()));
     let head_oid = run.export_of(head)?.git_oid();
     let mut report = ExportReport {
@@ -365,11 +404,12 @@ pub fn export(
     }
 
     if let Some(branch) = old {
-        report.base = match run.base(branch)? {
+        report.base = match run.base(branch)?.for_target(req.target) {
             Found::Base(base) => Some(base),
             Found::Diverged { reason, base } if req.force => {
                 run.warnings.push(format!(
-                    "the branch {} had diverged ({}), and the export moved it all the same",
+                    "the {} {} had diverged ({}), and the export moved it all the same",
+                    target_word(req.target),
                     req.branch,
                     reason.as_str()
                 ));
@@ -404,7 +444,7 @@ pub fn export(
             report.rewritten
         ));
     }
-    report.branch_moved = match run.sink.cas_branch(&req.branch, old, head_oid)? {
+    report.branch_moved = match move_target(run.sink, req, old, head_oid)? {
         BranchUpdate::Applied => true,
         // Another export of the same head moved it first.
         BranchUpdate::Mismatch { actual } if actual == Some(head_oid) => false,
@@ -422,6 +462,47 @@ pub fn export(
     report.objects_checked = run.objects_checked;
     report.warnings = run.warnings;
     Ok(report)
+}
+
+/// Refuses `name` as a store ref an export reads or an import moves: [`RepoError::RefName`] for a
+/// name no format takes, and for a remote-tracking one (`remote/<r>/<path>`, what a fetch last saw
+/// of a remote, no history of the store's own); [`StoreError::FormatRequired`] for one only a
+/// later format than `repo`'s takes (`feature/x` in a FORMAT 1 store).
+pub(crate) fn check_store_ref(repo: &LocalRepo, name: &str) -> Result<(), RepoError> {
+    if swarmops_store::ref_kind(name) == Some(RefKind::RemoteTracking) {
+        return Err(RepoError::RefName(name.to_owned()));
+    }
+    repo.check_ref_name(name)
+}
+
+/// What the branch or the tag `req` writes names now; `None` when there is none.
+fn target_at(sink: &dyn GitSink, req: &ExportRequest) -> Result<Option<GitOid>, SinkError> {
+    match req.target {
+        GitTarget::Tag => sink.tag(&req.branch),
+        _ => sink.branch(&req.branch),
+    }
+}
+
+/// Moves the branch or the tag `req` writes from `old` to `new` ([`GitSink::cas_branch`],
+/// [`GitSink::cas_tag`]).
+fn move_target(
+    sink: &mut dyn GitSink,
+    req: &ExportRequest,
+    old: Option<GitOid>,
+    new: GitOid,
+) -> Result<BranchUpdate, SinkError> {
+    match req.target {
+        GitTarget::Tag => sink.cas_tag(&req.branch, old, new),
+        _ => sink.cas_branch(&req.branch, old, new),
+    }
+}
+
+/// `target`, as a warning names it: `branch` or `tag`.
+fn target_word(target: GitTarget) -> &'static str {
+    match target {
+        GitTarget::Tag => "tag",
+        _ => "branch",
+    }
 }
 
 /// What step 4 of [the module documentation](self) found.
@@ -465,6 +546,24 @@ struct Commit {
 enum Mark {
     In,
     Out,
+}
+
+impl Found {
+    /// What step 4 found for a `target`: a tag at another commit, an ancestor's export or not, is
+    /// [`DivergedReason::TagExists`], since a tag is not moved unless forced.
+    fn for_target(self, target: GitTarget) -> Found {
+        match (target, self) {
+            (GitTarget::Tag, Found::Base(base)) => Found::Diverged {
+                reason: DivergedReason::TagExists,
+                base: Some(base),
+            },
+            (GitTarget::Tag, Found::Diverged { base, .. }) => Found::Diverged {
+                reason: DivergedReason::TagExists,
+                base,
+            },
+            (_, found) => found,
+        }
+    }
 }
 
 /// An export as it runs, from step 4 on.

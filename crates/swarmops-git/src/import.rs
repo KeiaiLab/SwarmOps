@@ -98,7 +98,7 @@ use crate::{
     LossySet, MemoKey, ObjectFormat, OidCache, RawCommit, RawError, RawKind, RawTree, SourceError,
     Unsupported,
 };
-use crate::{ancestry, export_oid, source};
+use crate::{ancestry, export, export_oid, source};
 
 /// How many changesets a frame of the import holds unless asked otherwise: issue 6 Stage 1's
 /// N, past the index's compaction threshold, so that a compaction runs once a frame at most.
@@ -118,8 +118,10 @@ pub const MAX_LOSSY_LISTED: usize = 100;
 pub struct ImportRequest {
     /// The source ref: `HEAD`, a ref's name, or 40 hex digits ([`GitSource::resolve`]).
     pub git_ref: String,
-    /// The target ref, `main` or `release/<x>`: created at the tip's changeset, or moved there
-    /// from the changeset of an earlier import.
+    /// The target ref, any name the store's format takes but a remote-tracking one (`main`,
+    /// `release/<x>`, and in FORMAT 2 a branch `<path>` or a tag `tags/<path>`, which is created
+    /// and never moved): created at the tip's changeset, or moved there from the changeset of an
+    /// earlier import.
     pub target_ref: String,
     /// The classes of content the import may drop or normalize; it refuses the others
     /// ([`ConvertError::Lossy`]).
@@ -291,9 +293,11 @@ pub enum ImportError {
     /// content no class covers. The frames before the one that would hold it are recorded.
     #[error(transparent)]
     Convert(#[from] ConvertError),
-    /// The target is no ref name: refs are `main` and `release/<x>`. Nothing was read or
-    /// written.
-    #[error("invalid target ref name {0:?}: a ref is main or release/<name>")]
+    /// The target is no ref name the store takes, or a remote-tracking one, which only a fetch
+    /// moves. A name only a later format takes is [`ImportError::Store`]
+    /// ([`StoreError::FormatRequired`](swarmops_repo::StoreError::FormatRequired)), with nothing
+    /// recorded. Nothing was read or written.
+    #[error("invalid target ref name {0:?}: not a ref an import moves")]
     RefName(String),
     /// The target does not lead to the tip: the git commit its head stands for, the one it holds
     /// or for a native head the one it exports to, is not an ancestor of the tip (the source was
@@ -431,8 +435,22 @@ pub fn import(
     source: &dyn GitSource,
     req: &ImportRequest,
 ) -> Result<ImportReport, ImportError> {
-    if req.moves_ref() && swarmops_store::check_ref_name(&req.target_ref).is_err() {
-        return Err(ImportError::RefName(req.target_ref.clone()));
+    // The target, a name the store's format takes, before the source is read.
+    let checked = if req.moves_ref() {
+        export::check_store_ref(repo, &req.target_ref)
+    } else {
+        Ok(())
+    };
+    match checked {
+        Ok(()) => {}
+        Err(RepoError::RefName(name)) => return Err(ImportError::RefName(name)),
+        Err(e) => {
+            return Err(ImportError::Store {
+                source: Box::new(e),
+                imported: 0,
+                last: None,
+            });
+        }
     }
     let format = source.object_format();
     if format != ObjectFormat::Sha1 {
