@@ -2240,6 +2240,31 @@ fn op_log_pages_with_before() {
     assert_eq!((zero.exit, zero.code()), (2, "E_INVALID_ARG"));
 }
 
+/// `op log` waits for the store's lock as a write does: behind a lock held for the whole of the
+/// store's 10 s timeout it is `E_BUSY` (exit 4, retryable), never a lock-free listing.
+#[test]
+#[ignore = "slow, ~10 s: waits out the store's 10 s lock timeout; just check-slow runs it"]
+fn op_log_behind_a_held_lock_is_e_busy() {
+    use std::time::Duration;
+
+    use swarmops_store::MetaLock;
+
+    use crate::support::Store;
+
+    let store = Store::init();
+    store.commit(AGENT, "a.txt", "a\n", None);
+    let held = MetaLock::acquire(&store.layout(), Duration::from_secs(1)).expect("take meta/lock");
+    let listed = store.read(&["op", "log"]);
+    drop(held);
+    assert!(listed.busy(), "{listed}");
+    let error = listed.err("E_BUSY");
+    assert_eq!(error["retryable"], true, "{listed}");
+    assert!(
+        error["hint"].as_str().unwrap().starts_with("retry"),
+        "{listed}"
+    );
+}
+
 /// `op undo` through the binary moves the refs an operation moved back, in an operation of its
 /// own for the caller's agent, which `op log` lists and another undo takes back; run again, it is
 /// a replay that writes nothing. An operation whose ref was moved since is `E_CAS_MISMATCH` (exit

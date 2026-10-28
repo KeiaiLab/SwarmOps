@@ -863,6 +863,7 @@ fn mcp_tool_errors_carry_the_error_envelope() {
         json!({"message": "m", "changes": []}),
         "E_EMPTY_COMMIT",
     );
+    main_is_protected(&mut server, &c1);
 
     // Arguments that do not fit the tool's request type: a missing field, a wrong type, a
     // value of an enum it does not have.
@@ -921,6 +922,24 @@ fn mcp_tool_errors_carry_the_error_envelope() {
     let unnamed = server.err("repo_info", json!({}), "E_NOT_A_REPO");
     assert!(unnamed["meta"].get("repo").is_none(), "{unnamed}");
     server.finish_clean();
+}
+
+/// main, which names `c1`, is protected: a delete that expects what it names is refused all the
+/// same, with `E_REF_PROTECTED` (exit 1, not retryable) naming it.
+fn main_is_protected(server: &mut Server, c1: &str) {
+    let protected = server.err(
+        "ref_delete",
+        json!({"name": "main", "expected_old": c1}),
+        "E_REF_PROTECTED",
+    );
+    assert_eq!(
+        (
+            &protected["error"]["exit"],
+            &protected["error"]["retryable"]
+        ),
+        (&json!(1), &json!(false))
+    );
+    assert_eq!(protected["error"]["details"], json!({"name": "main"}));
 }
 
 /// `show`'s request for `rev`'s changeset with one change at most.
