@@ -8,8 +8,10 @@
 //! message prefixed with where it came from (`--as`, `SWARMOPS_AGENT`, `SWARMOPS_RUN_ID`),
 //! which `details.source` also holds.
 //!
-//! Reads need no identity; a mutation (`commit`, `blob put`, `ref set`, `ref delete`) without one
-//! is `E_IDENTITY_REQUIRED` ([`require_identity`]). M1 trusts the name as claimed: the store's
+//! Reads need no identity; a mutation (`commit`, `blob put`, `ref set`, `ref delete`, `land`,
+//! `rebase`, `op undo`, `git import`, `clone`, `sync` and more: each command's reference page
+//! says it in `identity_required`) without one is `E_IDENTITY_REQUIRED` ([`require_identity`]).
+//! M1 trusts the name as claimed: the store's
 //! authentication mode is [`AUTH_TRUST`], and `whoami` reports [`AUTH_TRUST`] for an
 //! identified caller and [`AUTH_ANONYMOUS`] for one without an identity.
 

@@ -304,8 +304,8 @@ takes no --as. --stdio, the store-to-store sync, is not served yet.";
 const SERVE_USER_FAMILY_HELP: &str = "With --cgi: name the caller <FAMILY>/$REMOTE_USER, the user \
 the web server authenticated";
 
-/// Source control for coding-agent swarms. Every command but mcp prints one JSON envelope
-/// on stdout.
+/// Source control for coding-agent swarms. Every command but mcp, serve and derive --follow
+/// prints one JSON envelope on stdout.
 #[derive(Parser, Debug)]
 #[command(name = "swarmops", version)]
 pub struct Cli {

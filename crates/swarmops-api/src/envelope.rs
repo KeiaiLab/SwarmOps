@@ -104,10 +104,12 @@ pub struct Meta {
     pub auth: String,
     /// What the command's write repaired before its own work, of what earlier writers left when
     /// they crashed or failed after their commit point; omitted when there was nothing to repair,
-    /// and for a command that writes nothing. `commit`, `ref_set` and `ref_delete` report it on
-    /// success and on `E_CAS_MISMATCH` alike, and lose it when they fail otherwise. Whoever
-    /// writes next gets it, not the agent whose process crashed, and it is no failure: `warnings`
-    /// still names only the steps after this command's own commit point that failed.
+    /// and for a command that writes nothing. `commit`, `ref_set`, `ref_delete`, `undo`,
+    /// `git_import`, `git_export`, `fetch`, `push` and `sync` report it on success; `commit`,
+    /// `land`, `ref_set`, `ref_delete` and `undo` on `E_CAS_MISMATCH` too, and `undo` on
+    /// `E_OP_NOT_FOUND` and `E_NOTHING_TO_UNDO`; any other failure loses it. Whoever writes next
+    /// gets it, not the agent whose process crashed, and it is no failure: `warnings` still names
+    /// only the steps after this command's own commit point that failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recovered: Option<RecoveredOut>,
 }

@@ -4,7 +4,7 @@
 
 Every command of `swarmops` and `so`, its short form: the same program by a shorter name. This page and the command pages are generated from the command line's own definition, so they say what `swarmops <command> --help` says. `-h` prints the short help and `--help` the long help that the pages give.
 
-Every command but `mcp` prints one JSON envelope on stdout; its `op` names the operation the command runs (`cat` runs `read_file`). [Errors](errors.md) lists every error code an envelope can carry, with its exit code.
+Every command but `mcp`, `serve` and `derive --follow` prints one JSON envelope on stdout: `mcp` speaks MCP there, `serve` git's protocol, and `derive --follow` prints one envelope a line for each run that derived something. An envelope's `op` names the operation the command runs (`cat` runs `read_file`). [Errors](errors.md) lists every error code an envelope can carry, with its exit code.
 
 Each command's page gives its syntax, its arguments, an example recorded by the tests, what it returns and the errors it fails with. Its `yaml` metadata block says the same for programs: `group`, `mutates` (it can change what the store holds, its changesets and refs, or make the store; a write to the store's caches alone does not count), `identity_required` (it refuses to run without `--as` or `SWARMOPS_AGENT`), `mcp_tool`, `envelope_op`, `exit_codes`, `errors` and `syntax`.
 

@@ -122,6 +122,10 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 - A store path that leads through a name that is not UTF-8 (a symlink's target, the working
   directory) is `E_IO` (`fs_op: "resolve"`) whose message names no host path, where it was
   `E_STORE_CORRUPT` with the path in its message (issue #9 item C1).
+- `swarmops --help`, the CLI reference and the versioning policy name `serve` and
+  `derive --follow` beside `mcp` as the runs that print other than one envelope on stdout, and
+  `schema Meta` lists every operation that reports `meta.recovered`, and on which errors, where it
+  named `commit`, `ref_set` and `ref_delete` alone (issue #2 item 2, issue #11 item 2).
 
 ## [0.6.0] - 2026-10-28
 

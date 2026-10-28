@@ -1,6 +1,6 @@
 //! The SwarmOps command line (operations spec §0–§1), the program of two binaries: `swarmops`,
 //! and `so`, its short form. One subcommand per operation, and on stdout exactly one envelope
-//! per run, which agents script against.
+//! per run, which agents script against, but for `mcp`, `serve` and `derive --follow` (below).
 //!
 //! - Success prints `{"ok":true,"op":…,"api":1,"result":…,"meta":…}` and exits 0; a failure
 //!   prints `{"ok":false,…,"error":{code,message,retryable,exit,details,hint},…}` and exits
@@ -12,11 +12,16 @@
 //!   stderr.
 //! - stdout carries the envelope, or with `--human` its text rendering, and nothing else;
 //!   diagnostics go to stderr, and there are none by default.
-//! - `mcp` is the one command that prints no envelope on stdout: it serves the operations over
-//!   MCP on stdin and stdout until stdin ends, exiting 0 (the `mcp` module). Its stdout belongs
+//! - `mcp` prints no envelope on stdout: it serves the operations over MCP on stdin and stdout
+//!   until stdin ends, exiting 0 (the `mcp` module). Its stdout belongs
 //!   to the protocol, so what it would print before it serves (the envelope of a command line it
 //!   refuses, or of a panic) goes to stderr instead, with the same exit code. A panic while the
 //!   line itself is read comes before anything knows the line runs `mcp`.
+//! - `serve` prints no envelope on stdout either: it carries git's protocol there (with `--cgi`,
+//!   the HTTP response), and a refusal before git starts is one `ERR` pkt-line (with `--cgi`, a
+//!   `Status:` header and the same text), its envelope on stderr.
+//! - `derive --follow` prints one envelope a line for each run that derived something, until it
+//!   is killed or a run fails, whose envelope is the last.
 //!
 //! The envelope's `op` is the operation's library name (`cat` is `read_file`), or `swarmops`
 //! for a command line that names no operation.

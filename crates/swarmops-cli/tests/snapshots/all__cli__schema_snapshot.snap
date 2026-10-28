@@ -2633,7 +2633,7 @@ expression: s.redact(&all)
                   "type": "null"
                 }
               ],
-              "description": "What the command's write repaired before its own work, of what earlier writers left when\nthey crashed or failed after their commit point; omitted when there was nothing to repair,\nand for a command that writes nothing. `commit`, `ref_set` and `ref_delete` report it on\nsuccess and on `E_CAS_MISMATCH` alike, and lose it when they fail otherwise. Whoever\nwrites next gets it, not the agent whose process crashed, and it is no failure: `warnings`\nstill names only the steps after this command's own commit point that failed."
+              "description": "What the command's write repaired before its own work, of what earlier writers left when\nthey crashed or failed after their commit point; omitted when there was nothing to repair,\nand for a command that writes nothing. `commit`, `ref_set`, `ref_delete`, `undo`,\n`git_import`, `git_export`, `fetch`, `push` and `sync` report it on success; `commit`,\n`land`, `ref_set`, `ref_delete` and `undo` on `E_CAS_MISMATCH` too, and `undo` on\n`E_OP_NOT_FOUND` and `E_NOTHING_TO_UNDO`; any other failure loses it. Whoever writes next\ngets it, not the agent whose process crashed, and it is no failure: `warnings` still names\nonly the steps after this command's own commit point that failed."
             },
             "repo": {
               "description": "The store as the user named it, for display; omitted when the command used no store.",
@@ -5164,7 +5164,7 @@ expression: s.redact(&all)
               "type": "null"
             }
           ],
-          "description": "What the command's write repaired before its own work, of what earlier writers left when\nthey crashed or failed after their commit point; omitted when there was nothing to repair,\nand for a command that writes nothing. `commit`, `ref_set` and `ref_delete` report it on\nsuccess and on `E_CAS_MISMATCH` alike, and lose it when they fail otherwise. Whoever\nwrites next gets it, not the agent whose process crashed, and it is no failure: `warnings`\nstill names only the steps after this command's own commit point that failed."
+          "description": "What the command's write repaired before its own work, of what earlier writers left when\nthey crashed or failed after their commit point; omitted when there was nothing to repair,\nand for a command that writes nothing. `commit`, `ref_set`, `ref_delete`, `undo`,\n`git_import`, `git_export`, `fetch`, `push` and `sync` report it on success; `commit`,\n`land`, `ref_set`, `ref_delete` and `undo` on `E_CAS_MISMATCH` too, and `undo` on\n`E_OP_NOT_FOUND` and `E_NOTHING_TO_UNDO`; any other failure loses it. Whoever writes next\ngets it, not the agent whose process crashed, and it is no failure: `warnings` still names\nonly the steps after this command's own commit point that failed."
         },
         "repo": {
           "description": "The store as the user named it, for display; omitted when the command used no store.",

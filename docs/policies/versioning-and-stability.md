@@ -21,7 +21,9 @@ to the weakest:
    opens only a store whose `FORMAT` it knows; any other, the CLI refuses as `E_NOT_A_REPO`.
    A release that writes a new `FORMAT` still opens, reads and writes the older ones it knows.
 3. **The command-line contract.** One JSON envelope per run on stdout,
-   `{ok, op, api, result | error{code, message, retryable, exit, details, hint}, meta}`, with
+   `{ok, op, api, result | error{code, message, retryable, exit, details, hint}, meta}` (but
+   for `mcp` and `serve`, which speak MCP and git's protocol there, and `derive --follow`, which
+   prints one envelope a line for each run that derived something), with
    `api` 1; the `E_*` error codes, each with its fixed exit code (1 to 6, 3 for a conflict; 0
    is success) and its `retryable` flag; the commands, their flags and the grammar
    of their arguments, such as revisions and change lists (operations spec §0, §1); and the
