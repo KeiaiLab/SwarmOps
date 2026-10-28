@@ -17,6 +17,8 @@ Each task has a page of its own under [operate/](operate/).
 | Register `swarmops mcp` with Claude Code, and keep a copy of every envelope | [Give agents the store](operate/agents.md) |
 | Run the loop between the store and its git remote, with a person's review | [The daily loop](operate/daily-loop.md) |
 | Clone, fetch, push and sync with GitHub; tokens and commit authors | [GitHub as a remote](guides/github-remote.md) |
+| Let people and CI clone, fetch and push a store with stock git over ssh; who may do what | [Serve over ssh](operate/serve-over-ssh.md) |
+| The same over HTTPS, behind a web server | [Serve over HTTP](operate/serve-over-http.md) |
 | Build and test an agent's change in a workspace, or in a git worktree | [Build and test a change](operate/build-and-test.md) |
 | Keep one writer per trunk through a bare clone, and recover when both sides moved | [One writer per trunk](operate/one-writer-per-trunk.md) |
 | Check a store, read a failed check, repair | [Verify and repair](operate/verify-and-repair.md) |
