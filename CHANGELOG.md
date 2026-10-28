@@ -16,6 +16,13 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ## [Unreleased]
 
+### Added
+
+- Two probes for v0.6.0's misses, no fix: `just perf` times a sync of one land on 1,000 and
+  12,000 commits by phase (`fetch`, `sync --no-push`, `push`), and G4's landing case with
+  `SWARMOPS_TEST_CLI_LANDING_LOCK_SAMPLE_US` set prints each process's wait for `meta/lock` and
+  its hold, sampled from `/proc/locks`.
+
 ## [0.6.0] - 2026-10-28
 
 Fix what the measurements missed. The 0.6.0 release holds the landing model the v0.5.0
