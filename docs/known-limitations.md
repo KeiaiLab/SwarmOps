@@ -96,20 +96,22 @@ left).
   quiet-window measurement saw no `E_BUSY` and a slowest commit of 918 ms (1.2 s at store
   level). A ticket or FIFO hand-off on top of `flock` is the next step. *Unscheduled (the M6
   design, decision D3, kept the bounded wait). Found: M1 Task 7c; final review, question 3.*
-- **Landing retries under a burst.** `land` publishes by compare-and-swap: a land that loses the
-  race for its target records nothing, merges again onto the new head and tries again, up to its
-  `max_attempts` (8 by default, at most 32), and then fails with the retryable
-  `E_CAS_RETRY_EXHAUSTED`. Nothing is lost, but a burst of lands, such as subagents that finish
-  at once, costs retries: in one closed-loop run through the binary on a loaded host (load 80 to
-  87, so the figures are indicative), 8, 16 and 32 processes landing 4, 4 and 3 times each on one
-  `main`, each land its own file and every other one a line of one shared file, landed every
-  change exactly once with `verify --deep` clean, and 22 %, 44 % and 44 % of the lands retried;
-  at 32, four of the 96 took all 8 attempts. The umbrella spec's target (§15) for 50 landing
-  processes is 20 lands/s or more, a p99 under 500 ms, a retry rate under 5 % and nothing lost;
-  the M4 plan measures it with each process landing once every 2 s. An agent that meets
-  `E_CAS_RETRY_EXHAUSTED` lands again with the same key, or asks for more attempts. *Target:
-  M4's landing measurements and landing model (its plan's Tasks 11, 1 and 5), deferred until
-  after the pilot. Found: the 2026-10-20 plan triage (a probe through the binary).*
+- **Landing under a burst queues on the lock.** Since v0.6.0 a land whose target moved after it
+  read it is made anew on the new head by the writer that holds the lock (metalog merge: its delta
+  where no path overlaps, overlapping regular files of at most 1 MiB merged three-way), so a burst
+  no longer costs retries: at 50 processes each landing once every 2 s, every land landed, 25 a
+  second, with 0 % retries and nothing lost, against 116–133 % retries in v0.5.0. What remains is
+  the wait for the lock, which each publish holds for its move and its merge: the p99 is
+  579.5–594.6 ms at 50 processes and 207–216 ms at 32. The umbrella spec's target (§15) for 50
+  landing processes is 20 lands/s or more, a p99 under 500 ms, a retry rate under 5 % and nothing
+  lost; the p99 is the one part missed ([perf.md](perf.md#v060--2026-10-28)). A land still goes
+  back to its lander, and is merged again outside the lock, when a path overlaps in a way the
+  lock's merge does not take (anything but a regular file of at most 1 MiB on every side, or a
+  conflict), or the target moved off the first-parent line through the head the land read, or
+  more than 256 changesets along it; a land with `expect_target` (`ws land --check`) never
+  relocates. An agent that meets
+  `E_CAS_RETRY_EXHAUSTED` lands again with the same key, or asks for more attempts. *Open: G4's
+  p99 (goals.md). Found: the 2026-10-20 plan triage; narrowed by v0.6.0.*
 - **Recovery after a crash walks all of a FORMAT 1 `journal.off` under the lock.** Before it cuts
   or lists anything, the first writer after a crash checks every entry of a FORMAT 1 store's
   `journal.off`. On a long journal that walk could approach `lock_timeout` for the writers queued
@@ -173,8 +175,8 @@ left).
   each, a ref move one besides its write), so a request pays it once. A FORMAT 1 store holds
   `main` and `release/*` alone, and a FORMAT 2 store branches and tags too; should they grow past
   dozens, a snapshot's reading them calls for a validated lazy read, a per-handle map of refs or
-  a packed refs file (a FORMAT change), and the `read_snapshot` bench measures 0, 16 and 256 refs
-  to tell. *Unscheduled: when refs grow
+  a packed refs file (a FORMAT change). The `read_snapshot` bench measures it: 1.43 ms p50 and
+  2.75 ms p99 with 256 refs, about 5.4 µs a ref, over G3's 1 ms ([perf.md](perf.md#v060--2026-10-28)). *Unscheduled: when refs grow
   past dozens. Found: M1 Tasks 2c, 3 and 4b.*
 - **A file of control characters reads back at many times its size.** `read_file` returns UTF-8
   content as JSON text, which spells most control characters in six bytes each (`\u0001`): a page of
@@ -228,6 +230,13 @@ left).
   resolves when the command runs, so it matches whatever the ref holds by then (it fails only
   if the ref is gone); give an id for an expectation that can fail, or be replayed.
   *Documented (`--expect` help). Found: M1 Task 5; final review, question 13.*
+- **Only `main` is protected.** `ref delete main`, and an `op undo` that would delete `main`, fail
+  with `E_REF_PROTECTED` in every format, with nothing written. Any other ref, `release/<x>`, a
+  tag, a branch, can be deleted by whoever gives its value to `--expect`, and `op undo` of its
+  move takes it back: the published procedures delete `release/*` refs as their normal flow, and
+  a FORMAT 1 store takes no other name, so protecting them would leave it no deletable ref.
+  *Unscheduled: a configured set of protected refs (the v0.6.0 design, decision 8). Found: the
+  2026-10-27 completeness report (B23).*
 - **A commit holds its contents in memory.** All of them, up to the 1 GiB they may hold
   together, and up to about two to three times that while their objects are encoded in
   parallel, besides the request's text (at most 64 MiB). `blob put` (`blob_put`) and
@@ -437,37 +446,35 @@ left).
   gc` packs them (M8 Decision 5; one pack per export is the alternative, which M8 Task 11's
   measurement of the service repositories, deferred until after the pilot, weighs). *Documented
   (storage spec §7). Found: M8 Task 5.*
-- **An export reads the whole history below its head.** The export takes no export oid the
-  derived store memoizes as the truth ("Crafted derived values that agree with each other are read
-  as valid", above), so every export, an incremental one and one with nothing to write included,
-  derives the export oid of each changeset below the head again: it reads each changeset's object
-  and its `git_oid` memo and, for a changeset other than an unchanged import, the trees and blobs
-  of its root the run has not hashed yet. That is about 20 µs a changeset (a release build, on
-  NVMe): an export of one new commit above 12,000 imported ones takes 0.25 s, where
-  trusting the memos took 0.03 s, while a first export costs what it did or less (12.5 s for those
-  12,000 commits' 36,000 objects, 13.1 s before; 1.2 s for 200 native commits over a 2,000-file
-  tree, 6.6 s before). An object missing or damaged anywhere in that history, a changeset or a
-  tree or blob of a native one, fails every export (`E_STORE_CORRUPT`, which `verify` lists) until
-  it is restored. A keyed memo trailer whose key lives outside the store would let the export trust
-  its own memos again. *Unscheduled: an authenticated cache. Found: the 2026-10-20 security
-  review's re-verification of the git export.*
-- **An import onto a target reads the head's whole tree, and onto a native head the whole history
-  below it.** The import takes no git oid the derived store memoizes as the truth ("Crafted derived
-  values that agree with each other are read as valid", above): before the head's trees and blobs
-  seed its conversion it reads and hashes each of them, and where the head is native, or holds a
-  git commit the source does not go on from, it derives the head's export oid with the whole
-  history below it, as an export does ("An export reads the whole history below its head").
-  In a release build on NVMe, at a load of about 20, an import of one commit onto an imported head
-  of 2,000 small files takes 0.08 s (0.07 s before), and onto one of 2,000 files of 64 KiB 0.18 s
-  (0.07 s); onto a native head above 12,000 imported commits it takes 0.31 to 0.36 s, about 25 µs
-  a changeset, where trusting the memo took 0.05 s. A fresh import costs what it did. An import
-  whose walk meets the external id entry of a changeset made in the store, which an export wrote,
-  derives that changeset's export oid the same way, once a run, to check the entry: at a load of
-  about 30, one commit made on the export of a changeset with 14,000 below it, imported into a
-  target of its own, takes 0.36 to 0.46 s, where trusting the entry took 0.06 s. An object
-  missing or damaged in that tree or history fails the import (`E_STORE_CORRUPT`, which `verify`
-  lists) until it is restored. *Unscheduled: an authenticated cache. Found: the 2026-10-20
-  security review's re-verification of the git export, and of the git import.*
+- **An export without its memo key reads the whole history below its head.** With the store's
+  memo key (32 bytes the CLI keeps outside the store, in
+  `$XDG_STATE_HOME/swarmops/memo-keys/<repo_id>.key`, made on first use), the export trusts an
+  export oid memo whose keyed MAC checks (`git_oid_mac`, `git_tree_oid_mac`, `git_blob_oid_mac`)
+  and reads nothing below it: an export of one commit over 2,000 imported ones reads 9 of the
+  store's objects, not 2,015. Without the key (no state directory, or a library caller that
+  passes none) it derives the export oid of each changeset below the head from the objects, as
+  before: about 20 µs a changeset, 0.25 s for one new commit above 12,000 imported ones. The
+  threat model: whoever can write the store but not the user's state directory cannot steer an
+  export through memos (a memo under the key whose MAC fails is `E_STORE_CORRUPT`, never
+  re-derived in silence); whoever can write both can. Below a trusted memo the export reads
+  nothing, so an object missing or damaged there no longer fails it: `verify --deep` finds it.
+  The key is a cache key, outside any backup ([backup and
+  restore](operate/backup-and-restore.md#the-git-mirror-and-the-remotes-files)): a store restored
+  without it derives its history once, then exports incrementally. *Documented (the v0.6.0
+  design, decision 2). Found: the 2026-10-20 security review's re-verification of the git
+  export; narrowed by v0.6.0.*
+- **An import onto a target without its memo key reads the head's whole tree, and onto a native
+  head the whole history below it.** With the memo key (the export's entry above) the import
+  takes a subtree's, a blob's or a parent's git oid from a memo whose keyed MAC checks and reads
+  nothing below it: an import of one commit onto a native head 2,000 changesets deep reads 8 of
+  the store's objects, not 2,008. Without it, the import reads and hashes each of the head's
+  trees and blobs before they seed its conversion, and where the head is native, or holds a git
+  commit the source does not go on from, derives the head's export oid with the whole history
+  below it: 0.31 to 0.36 s onto a native head above 12,000 imported commits, about 25 µs a
+  changeset, at a load of about 20. An object missing or damaged in what it reads fails the
+  import (`E_STORE_CORRUPT`, which `verify` lists) until it is restored. The threat model is the
+  export's. *Documented (the v0.6.0 design, decision 2). Found: the 2026-10-20 security review's
+  re-verification of the git export, and of the git import; narrowed by v0.6.0.*
 - **A crash while an export moves its branch leaves the branch's lock.** A `git export` that dies
   between taking `refs/heads/<branch>.lock` and renaming it onto the branch leaves the lock file,
   as git does: every later export of that branch, and git itself, refuses the branch
@@ -509,14 +516,15 @@ left).
 
 ## Git remotes
 
-- **A fetch, a push or a sync reads the whole history below a native head.** Each imports or
-  exports onto the store's history, and so pays the cost the import and the export pay there
-  ("An export reads the whole history below its head", "An import onto a target reads the head's
-  whole tree", above): on 12,000 commits a one-commit push costs 3.9 times what it does on 1,000,
-  and a sync of one land takes 8.8 s, against roadmap targets of 1.5 times and 1 s
-  ([perf.md](perf.md#git-remotes-m13-the-three-topology-2-targets), one run on a loaded host).
-  *Unscheduled: an authenticated cache, as for the import and the export. Found: the M13 design's
-  risks; measured by M13 Task C11.*
+- **A fetch and a sync grow with the history.** A push no longer does: with the memo key, a
+  one-commit push costs 1.04 times on 12,000 commits what it does on 1,000 (3.7 to 3.9 times
+  before v0.6.0), against the roadmap's 1.5. A one-commit fetch costs 1.65 times: git's own fetch
+  grows (34 to 84 ms) and so does SwarmOps' share (61 to 84 ms), which holds the closure check, a
+  `git rev-list --objects` walk of the incoming refs; with a commit-graph in the remote and the
+  mirror neither grows (1.04 times). A sync of one land on 12,000 commits took 52.9 s, against the
+  roadmap's 1 s and 8.76 s in M13's loaded run; the store's first keyed export accounts for about
+  1.3 s of it, the rest is not profiled yet ([perf.md](perf.md#v060--2026-10-28)). *Open: G17's fetch
+  and sync (goals.md). Found: the M13 design's risks; measured by M13 Task C11 and v0.6.0.*
 - **A squash that lost its trailer lines, then edited on the remote, stops sync.** Sync
   recognises a change the remote holds by a `SwarmOps-Changeset`, `SwarmOps-Squashed-From` or
   `SwarmOps-Land-Key` line in a remote commit, or by its merging as no change. A pull request
@@ -550,6 +558,13 @@ left).
   file is read each time a changeset is signed, so a retry made after the file changed signs with
   the new address: the retry records a second changeset rather than replaying the first.
   *Documented (operations spec §5). Found: the M13 design's risks.*
+- **A remote whose history holds an object git's fsck refuses cannot be fetched.** git's fsck
+  checks every object a fetch receives (`fetch.fsckObjects`, `transfer.fsckObjects`) and the
+  fetch's tips must reach only objects the mirror holds; an error-level finding, or a missing
+  object, fails the fetch with `E_REMOTE_REJECTED` `details.reason: "bad_objects"`, nothing
+  imported and no tracking ref moved, and every later fetch fails the same way until the remote's
+  history changes. There is no `fsck.<id>` override and no way to skip the check. *Documented
+  (the v0.6.0 design, decision 9). Found: the 2026-10-27 completeness report (A3).*
 - **A server that cuts git's first HTTP response inside its headers looks like an empty remote.**
   git then falls back to the old "dumb" HTTP protocol, finds no refs and succeeds: the fetch reports
   no branches and prunes the mirror's tracking refs, and a clone ends with no `main`. Nothing is
@@ -647,8 +662,8 @@ left).
   tail passes 1,024 records, the writer that holds the lock merges it into the sorted views and
   writes them anew before it lets go, so the writers queued behind it wait for a rewrite that
   grows with the store; one that waits past the 10 s `lock_timeout` fails with the retryable
-  `E_BUSY`, and nothing is lost. What the rewrite costs at 100,000 and 1,000,000 records is
-  M1.6's compaction bench, deferred until after the pilot. *Target: the sorted views as
+  `E_BUSY`, and nothing is lost. The rewrite takes 50 ms at 100,000 records and 173 ms at
+  1,000,000 (p50; 179 ms at most, [perf.md](perf.md#v060--2026-10-28)). *Target: the sorted views as
   immutable runs under a manifest, in a `FORMAT 3`, so that the lock holds only the manifest's
   swap (the M6 design, decision D2), or M3's merge outside the lock (its plan's Task 15) if the bench shows a
   stall of 100 ms or more at 100,000 records first. Found: M1.6 Task 7 (the compaction design);
@@ -658,8 +673,6 @@ left).
   *Unscheduled (content-defined chunking). Found: the 2026-10-27 completeness report.*
 - **Small object-store costs.** A put that creates a fan-out directory checks for it under the
   store's mutex. *Unscheduled. Found: M1 Task 1.*
-- **No benchmark gate.** The benches run by hand (`just bench`, `just perf`); failing on a 20 %
-  regression (`bench/thresholds.toml`) comes later. *Target: M9. Found: docs/perf.md.*
 
 ## Tests and tooling
 

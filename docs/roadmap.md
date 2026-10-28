@@ -127,6 +127,12 @@ The releases that get there:
 | v0.7.0 | M14 | Topology 1's acceptance criteria 1 to 5 pass in CI ([Topology 1](#topology-1-local-git-remote-swarmops)) |
 | v0.8.0 | Operations | The open soft findings triaged, none left touching data safety or the contract (condition 5); packages beyond the install script |
 
+**Status (2026-10-28).** v0.6.0's fixes are on `stable`, measured in
+[docs/perf.md](perf.md#v060--2026-10-28) and not yet released. G1 and G2 are met. G4 is met but
+for its p99 at 50 processes: 25 lands/s, 0 % retries and nothing lost, with a p99 of 579.5–594.6 ms
+against 500. G17's push is met (1.04×); its fetch is not (1.65×; 1.04× with a commit-graph in the
+remote and the mirror). The benchmark gate (condition 3) runs in the weekly Scheduled run.
+
 Deferred past usable, with what stands in until then:
 
 | Milestone | Why it waits | Stand-in |
@@ -625,19 +631,20 @@ was found.
 
 **Delivered milestones, deferred until after the pilot.** Full fsync is slow on this host (about
 21 ms for an uncontended durable commit through the binary); batching syncs, and whether any
-`--durability fast` flag is justified, is M2's journal-sync decision. Landing retries under a burst
-wait for M4's landing measurements and the landing model they choose. Part of each lock pass
+`--durability fast` flag is justified, is M2's journal-sync decision. A burst of lands no longer retries
+(v0.6.0's landing model), but its p99 at 50 processes is still over 500 ms. Part of each lock pass
 through the binary is unexplained (M1.6's quiet-window runs, then M2's decision). Commit-path costs
 (index tail scans, the reflog walk) wait for M2's measured decision. Compaction rewrites both
-sorted views under the writer lock (M1.6's bench; M3's merge outside the lock if the stall reaches
-100 ms at 100,000 records, else a `FORMAT 3`'s manifest). No test reads a real repository yet (M3's and M8's tests of
+sorted views under the writer lock (50 ms at 100,000 records, 173 ms at 1M; M3's merge outside the lock if
+the stall reaches 100 ms at 100,000 records, else a `FORMAT 3`'s manifest). No test reads a real repository yet (M3's and M8's tests of
 this host's repositories).
 
 **M12.** No item; SwarmOps is Linux only, and the release binaries print an `ld.so` line on glibc
 2.34 to 2.38 (unscheduled).
 
-**M13 (delivered) and M14.** An export and an import onto a native head read the whole history
-below it, and so do a fetch, a push and a sync, which missed their targets; an export writes loose
+**M13 (delivered) and M14.** Without the memo key, an export and an import onto a native head
+read the whole history below it; a fetch and a sync still grow with the history, past their
+targets; an export writes loose
 objects; an export leaves no reflog entry ([Git import and export](known-limitations.md#git-import-and-export),
 [Git remotes](known-limitations.md#git-remotes)). M13 took the stale git lock files in its own
 mirror; the rest are open for M14 or later.

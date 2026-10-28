@@ -1245,9 +1245,179 @@ shared file, so its retries sit at the 5 % line (4.67–5.58 %) and some lands e
 new record kind and no FORMAT change. Task 5 builds it into `Repo::publish`; the G4 measurement
 through the binary is taken again after it (the v0.6.0 release's measurements).
 
-Reproduce (about 1 h 40 min; the script takes the host's lock itself):
+Reproduce on the commit that recorded this section (about 1 h 40 min; the script takes the
+host's lock itself); the prototypes and the script were removed when v0.6.0 built metalog merge:
 
 ```sh
 scripts/landing-models.sh            # logs and decision.log in target/perf/landing-models/
 scripts/landing-models.sh --smoke    # the matrix at tiny sizes, to check the script
 ```
+
+## v0.6.0 — 2026-10-28
+
+The v0.5.0 measurements taken again after the v0.6.0 fixes (the landing model built, authenticated
+export memos, `ws commit`'s inline blobs, the fetch's checks, the benchmark gate), with the same
+methods and on the same host: G1 at 32 and 50 processes, G4 at 32 and 50, G9's workspace
+latencies, G17's fetch and push ratios, G2, and two benches the v0.6.0 design names as
+candidates, compaction at 1M records and a snapshot with 256 refs. Product code: `stable` at the
+commit that keeps a memo key per store (the last v0.6.0 code slice), every harness the v0.5.0
+section names, built optimized before the window. Stores in fresh temporary directories under
+`~/.local/state/swarmops-bench`, on the ext4 virtual disk of the earlier sections.
+
+**Method and host state.** A driver waited before each step for a 1-minute load under 6 held for
+a minute, no CI job on this host's runners and no pilot soak cycle, then took the host's lock for
+heavy runs, stopped the pilot's soak timer, and ran the step alone; the timer started again after
+each step (so its cycles at 11:00, 11:30 and 12:00 ran between steps or were skipped, never beside
+one). Before and after each step it recorded the load and a raw `fdatasync` probe (the median of
+40 appends of 120 B, each `fdatasync`'d): 3.25–3.87 ms over the window, 10:44–12:12 (+09:00). No
+CI job ran during any step. The 1-minute load is the step's own: its peak per step is in the
+tables. Nearest-rank percentiles; one run per step unless the table says two.
+
+### G1: 50 agents committing through the binary
+
+| Run | Start load (peak) | Commits/s | `E_BUSY` | `meta.elapsed_ms` p50 / p99 / max | Uncontended commit p50 | `verify --deep` |
+| --- | --- | --- | --- | --- | --- | --- |
+| 32 × 1,000 | 2.06 (11.18) | **73.2** (32,000 in 437.1 s) | 0 | 431 / 509 / 579 ms | 19 ms | clean, 128,306 objects in 1,638 ms |
+| 50 × 1,000 | 2.13 (11.29) | **74.0** (50,000 in 675.6 s) | 0 | 670 / 765 / 841 ms | 18 ms | clean, 200,306 objects in 2,434 ms |
+
+No regression from the landing change, which a commit does not take: commits/s within 1.5 % of
+v0.5.0's (73.3 and 73.0), the p50 within 1 %, and the tails shorter (p99 509 and 765 ms against
+645 and 1,043). Every child made all its commits (spread 1.00×), none took past 1 s. G1 met.
+
+### G2: one commit without its syncs
+
+`commit_latency`, as in v0.5.0 (start load 0.38, peak 7.50).
+
+| k files | Target | `nosync` p50 / p99 | `fsync less syncs` p50 / p99 | `fsync` p50 / p99 | Syncing calls per commit |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 5.3 ms | **1.26 / 1.77 ms** | 0.99 / 1.41 ms | 24.27 / 36.93 ms | 13.1 |
+| 10 | 8.0 ms | **2.80 / 3.44 ms** | 1.76 / 2.32 ms | 26.34 / 38.42 ms | 48.2 |
+| 100 | 35.0 ms | **10.36 / 13.50 ms** | 3.53 / 4.27 ms | 74.65 / 86.09 ms | 347.3 |
+
+Within 5 % of v0.5.0 at every size; G2 met. The last column is the less-syncs row's count, as in
+v0.5.0.
+
+### G4: landing under a swarm's load
+
+`landing::perf::landing_under_load`, as in v0.5.0. "Relocated" counts the lands the writer
+holding the lock made anew on a moved `main` (metalog merge) instead of handing back.
+
+| Run | Start load (peak) | Lands/s | Latency p50 / p99 | Retries | Relocated | Not landed, lost, doubled | Gate |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 32, open, run 1 (11:06) | 2.05 (4.60) | 16.0 (1,920) | 73.8 ms / 206.7 ms | 0.0 % | 652 | 0, 0, 0 | ok |
+| 32, open, run 2 (11:57) | 2.23 (3.24) | 16.0 (1,920) | 73.2 ms / 215.9 ms | 0.0 % | 635 | 0, 0, 0 | ok |
+| 50, open, run 1 (11:09) | 1.76 (7.16) | **25.0** (3,000) | 270.4 ms / 594.6 ms | 0.0 % | 2,601 | 0, 0, 0 | ok |
+| 50, open, run 2 (12:00) | 1.07 (6.09) | **25.0** (3,000) | 277.8 ms / 579.5 ms | 0.0 % | 2,668 | 0, 0, 0 | ok |
+| 50, closed, run 1 (11:12) | 2.17 (3.21) | 24.4 (500 in 20.5 s) | 2.06 s / 2.14 s | 0.0 % | 498 | 0, 0, 0 | ok |
+| 50, closed, run 2 (12:04) | 2.13 (3.63) | 24.5 (500 in 20.4 s) | 2.05 s / 2.12 s | 0.0 % | 498 | 0, 0, 0 | ok |
+
+Against G4's target at 50 processes: lands/s **met** (every offered land landed, 25/s), nothing
+lost **met**, retries under 5 % **met** (0 in every run, against 116–133 %), p99 under 500 ms
+**missed** (579.5 and 594.6 ms, against 7.32–7.94 s). `E_BUSY` 0, no land conflicted or exhausted.
+At 32 the p99 is 207–216 ms (1.01–17.25 s before). The tail is now the lock's queue, not retries:
+no land is sent back, and each publish holds the lock for its move and merge (about 25 ms, the M4
+matrix's metalog merge p50), so at 25 lands/s the lock is busy about 62 % of the time and at 16/s
+about 40 %: the wait for it is the difference between the p50s, 270–278 ms at 50 against 73–74 ms
+at 32. The closed loop's latency is that
+queue whole: 50 lands always pending, one land every 41 ms, about 2 s each.
+
+### G9: workspace latencies
+
+`ws_processes::perf::*` (one run, 11:49, start load 0.41, peak 12.34). Since v0.5.0 the commit
+case commits the status case's edits before it times, so "1 changed file" commits one.
+
+| Case | Result | Target | Verdict |
+| --- | --- | --- | --- |
+| `ws status`, 50,000 files, nothing changed, warm (median of 20) | 51.9 ms | < 100 ms | met |
+| `ws status` after 100 edits (median of 20) | 54.8 ms | < 150 ms | met |
+| `ws create` of 10,000 files, 100 MiB, warm store (median of 3) | 772.1 ms | < 3 s | met |
+| `ws create --all` of a 10,000-file tree (64 B files), 20 times | p50 570.4 ms, p99 786.2 ms | — | — |
+| `ws land` of one changed file, 20 in a row | p50 196.2 ms, p99 237.2 ms | — | — |
+| update (`ws rebase`) after a land of 10 files, 50,000-file tree | 116.6 ms | < 100 ms | missed |
+| `ws commit` of 1 changed file, 50,000-file tree | 89.0 ms (`meta.elapsed_ms` 85) | G2's 5.3 ms plus hashing | missed |
+| `ws commit` of 10 changed files | 93.5 ms (90) | G2's 8 ms plus hashing | missed |
+| `ws commit` of 100 changed files | 148.4 ms (145) | G2's 35 ms plus hashing | missed |
+| `ws land --check true` overhead, 12,000 changesets | 38.5 ms (109.1 ms unchecked, 147.6 ms checked) | < 1 s | met |
+| `ws create` of the 50,000-file tree | 1,833.0 ms | — | — |
+
+`ws commit` now costs 0.6 ms per changed file ((148.4 − 89.0) / 99), against 8 ms in v0.5.0 (100
+files: 148.4 ms against 805–819): the inline blobs made it one batch, about the 0.5 ms per file of
+`LocalRepo::commit` with full fsync (G2's `fsync` column). What is left above G2's target is fixed
+cost: the scan of the 50,000-file tree that finds the changes (`ws status`, 52 ms) and the
+commit's syncs (about 23 ms, G2's `fsync` less its `fsync less syncs` for one file), so the target as stated stays missed.
+The update after a land, which no v0.6.0 slice changed, measures as before (116.6 against
+118.9 ms).
+
+### G17: one commit's fetch and push on 12,000 against 1,000 commits
+
+`remote_perf::fetch_and_push_scale_with_history` (11:13, start load 1.14, peak 3.26), as in
+v0.5.0; `meta.elapsed_ms`, median of 5. The test kit's runs of the binary carry a memo key.
+
+| Case | 1,000 commits | 12,000 commits | Ratio | Target | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| fetch of one commit | 93 ms | 153 ms | 1.65× | ≤ 1.5× | missed |
+| push of one commit | 55 ms | 57 ms | **1.04×** | ≤ 1.5× | met |
+
+The push is met: with the memo key the export stops at the memo of the commit below the new one
+and reads nothing further (3.72× and 283 ms in v0.5.0).
+
+The fetch, split by `remote_perf::fetch_phases_scale_with_history` (same window), now with the
+fetch's checks (git's fsck of the received objects, the closure check over the incoming refs and
+the promotion of the tracking refs):
+
+| Phase, median of 5 | Without a commit-graph: 1,000 / 12,000 commits | Ratio | With a commit-graph: 1,000 / 12,000 | Ratio |
+| --- | --- | --- | --- | --- |
+| `so fetch` | 95 / 169 ms | 1.78× | 91 / 95 ms | 1.04× |
+| `git fetch` alone | 34 / 84 ms | 2.47× | 32 / 33 ms | 1.03× |
+| `git gc --auto` alone | 0 / 1 ms | — | 1 / 1 ms | 1.00× |
+| the rest (SwarmOps' share) | 61 / 84 ms | 1.38× | 58 / 61 ms | 1.05× |
+
+Without a commit-graph both shares grow with the history: git's fetch (34 → 84 ms) as P1 found
+before the checks, and now SwarmOps' share too (61 → 84 ms; P1, on a loaded host before the checks:
+39 → 40 ms), which holds the closure check, a `git rev-list --objects` walk that SwarmOps runs.
+With a commit-graph in the server and the mirror, neither grows, and the fetch is 1.04×. At 1,000
+commits a fetch takes 93 ms, against v0.5.0's 81 ms before the checks.
+
+The same run's other cases, for the record (the M13 targets of "Git remotes (M13)"; one run):
+`so clone` of 12,000 commits 374.5 s against `git clone --bare` 0.375 s + `git import` 361.5 s,
+1.04× (target 1.1×, met; 1.29× on the loaded 2026-10-22 host); the committed fixtures 2.11–2.81×
+(fixed costs); **a `sync` of one land on 12,000 commits 52.9 s** (target under 1 s; 8.76 s on
+2026-10-22, on a loaded host). The sync holds that store's first export with its memo key, which
+derives every export oid below the head once, so a diagnostic timed that alone (12:25, start load
+0.00, peak 9.69; the release binary, one run): a linear history of N commits, one of 64 files in 8
+directories changed in each, made by `git fast-import`, `git import`ed into a fresh store, then
+`git export`ed twice to new branches of the same repository, with a memo key.
+
+| N commits | `git import` | First keyed export | Second export |
+| --- | --- | --- | --- |
+| 2,000 | 2.63 s | 0.279 s | 0.009 s |
+| 4,000 | 5.19 s | 0.475 s | 0.009 s |
+| 12,000 | 16.58 s | 1.274 s | 0.013 s |
+
+The first keyed export is linear, about 0.1 ms a changeset, 1.3 s at 12,000: it explains about
+1.3 s of the sync's 52.9 s, and the rest is not profiled yet. The same import costs 1.4 ms a
+commit here and 30 ms in the clone case above (361.5 s for 12,000 commits fetched over the
+loopback server), which is not explained either.
+
+### The v0.6 candidates: compaction at 1M, a snapshot with 256 refs
+
+`cargo bench -p swarmops-store --bench compaction` (12:05, start load 1.66) and
+`--bench read_snapshot` (12:07, start load 0.66); criterion medians, nearest-rank percentiles over
+every operation timed.
+
+| Bench | v0.6.0 | v0.1.0 ("v0.1.0 — `just perf` in a quiet window") |
+| --- | --- | --- |
+| `compaction/compact/100k` | 50.3 ms (p50 50.2, p90 52.5, max 66.8 over 131; 8,000,000 B each) | 52.1 ms (max 55.3) |
+| `compaction/compact/1M` | 172.0 ms (p50 173.0, p90 175.4, max 178.6 over 37; 80,000,000 B each) | 201 ms (max 221.4) |
+| `read_snapshot/10k_refs0/read_changeset`, p50 / p99 | 60.5 / 94.0 µs | 55.8 / 113.6 µs |
+| `read_snapshot/10k_refs16/read_changeset` | 145.6 / 236.8 µs | 145 / 282 µs |
+| `read_snapshot/10k_refs256/read_changeset` | **1.43 / 2.75 ms** | 1.55 / 3.00 ms |
+| `read_snapshot/10k_refs256/show_one_snapshot`, p50 | 1.44 ms | 1.55 ms |
+
+A compaction at 1M records holds the writer lock for 173 ms, under the 200 ms the design's
+candidate list cites, and at 100,000 for 50 ms, under the 100 ms that would bring M3's merge
+outside the lock forward (known limitations, "Compaction rewrites both sorted views under the
+writer lock"); no goal sets a target for it, so no fix is designed for v0.6. A snapshot with 256
+refs takes 1.43 ms at the median and 2.75 ms at p99, still over G3's 1 ms: each ref adds about
+5.4 µs (5.8 µs in v0.1.0). A validated lazy read of the refs needs no FORMAT change (the v0.6.0 design's
+decision 11 asks that of a fix), so that fix is the one to design.

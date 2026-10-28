@@ -81,6 +81,15 @@ A store with a git remote holds three more things in its directory
   `git/mirror.git.broken-<time>` and never deletes it. `meta/lock` does not stop the mirror's
   writers; `git/lock` does, for the time a `fetch`, `push`, `sync` or `remote` command runs.
 
+One file outside the store belongs to it: the **memo key**,
+`$XDG_STATE_HOME/swarmops/memo-keys/<repo_id>.key` (`~/.local/state` without `XDG_STATE_HOME`;
+`SWARMOPS_MEMO_KEY_DIR` moves the directory).
+It is a cache key, not data: `git export`, `git import`, `push`, `fetch` and `sync` trust the
+export oid memos it authenticates and stop their walk of the history there. It needs no backup.
+A restore on a host without it gets a new key at its first export or import, which derives the
+history below the head once and is incremental from then on. Copy it only to keep that first run
+short, and with mode 0600: whoever can write the store and the key can steer an export.
+
 ## What writers see while you hold the lock
 
 A writer that meets the held lock waits, then gives up:

@@ -15,8 +15,33 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ## [Unreleased]
 
+### Added
+
+- `just bench`, the benchmark gate: it clears old criterion results, runs every bench and fails
+  on a median over 20 % above its baseline in `bench/thresholds.toml` (113 medians from two quiet
+  runs), on a listed bench without an estimate, or on an estimate neither listed nor skipped for
+  a reason (`scripts/bench-gate.py`; `just check` runs its selftest). The weekly Scheduled run
+  gates on it, last and alone, under the host's lock for heavy runs.
+- The v0.6.0 measurements, in [docs/perf.md](docs/perf.md) ("v0.6.0"), with v0.5.0's methods:
+  G1 at 50 processes and G2 met as before; G4 at 50 processes 25 lands/s, 0 % retries and nothing
+  lost (met), p99 579.5–594.6 ms (missed, 7.3–7.9 s before); G17's push 1.04× (met, 3.72×
+  before), its fetch 1.65× (missed; 1.04× with a commit-graph); `ws commit` 0.6 ms per changed
+  file (8 ms before); a sync of one land on 12,000 commits 52.9 s (missed, not profiled);
+  compaction at 1M records 173 ms and a snapshot with 256 refs 2.75 ms p99.
+  [docs/goals.md](docs/goals.md) cites each.
+
 ### Changed
 
+- `land` settles a moved target inside the lock (metalog merge, the model the M4 measurement
+  chose): when `main` moved after the land read it, the writer walks first parents back to the
+  head the land read (at most 256) and makes the land anew on the new head, its delta where no
+  path overlaps and overlapping regular files of at most 1 MiB merged three-way, instead of
+  handing it back for another attempt. Anything else goes back to the lander as before. A land
+  with `expect_target` (`ws land --check`) never relocates, so it lands the tree it checked.
+- `ref delete main`, and an `op undo` that would delete `main`, fail with the new
+  `E_REF_PROTECTED` (exit 1, not retryable, `details.name`) in every format, with nothing written;
+  `release/<x>`, tags, branches and remote-tracking refs stay deletable (the v0.6.0 design's
+  decision 8).
 - A fetch checks what it receives: git's fsck runs on every received object
   (`fetch.fsckObjects`, `transfer.fsckObjects`), the fetch writes the mirror's
   `refs/incoming/<remote>/` only, and the tracking refs move to them by compare-and-swap after a

@@ -580,8 +580,10 @@ and the result exported back to git for its CI to run. M13 came first, in 0.2.0,
 M5, in 0.3.0, both ahead of M12, which is developed separately, and M6 in 0.4.0. 0.5.0 ran the
 pilot on a real repository of 993 commits and the measurements that need a quiet host: landing by
 32 and 50 processes through the binary against umbrella §15's targets, a commit without its syncs,
-and one commit's fetch and push on a long history ([docs/perf.md](docs/perf.md)); the landing
-model those numbers choose is 0.6.0's.
+and one commit's fetch and push on a long history ([docs/perf.md](docs/perf.md)). On `stable`
+since, for 0.6.0: the landing model those numbers chose (metalog merge: 0 % retries at 50
+landing processes, p99 still 580–595 ms against 500), authenticated export memos (a push 1.04× on
+12,000 commits against 1,000), checked fetches and the benchmark gate.
 
 The road to usable ([To usable](docs/roadmap.md#to-usable)): a real repository runs 8 or more
 agents for 3 or more days with no lost commit, a clean `verify --deep`, nothing rewritten and an
