@@ -36,6 +36,10 @@ v0.5.0, the first release of [To usable](#to-usable), ran the pilot on a real re
 ([pilot.md](pilot.md#the-traders-pilot-a-real-repository)), measured G1, G2, G4, G9 and G17 and the
 landing model ([perf.md](perf.md)), and holds the first v0.6 fixes: `ws commit` sends missing blobs
 inline, `op log` lists committed operations only, and MCP `ws_create` fills its default path.
+v0.6.0 fixes what the measurements missed: `land` settles a moved `main` inside the lock by metalog
+merge, export memos a per-store key authenticates shorten `push` and `export`, a fetch checks every
+object it receives, `main` cannot be deleted, and `just bench` gates the weekly run
+([perf.md](perf.md#v060--2026-10-28)).
 
 ### Topology 1 today: local git, remote SwarmOps
 
@@ -127,8 +131,8 @@ The releases that get there:
 | v0.7.0 | M14 | Topology 1's acceptance criteria 1 to 5 pass in CI ([Topology 1](#topology-1-local-git-remote-swarmops)) |
 | v0.8.0 | Operations | The open soft findings triaged, none left touching data safety or the contract (condition 5); packages beyond the install script |
 
-**Status (2026-10-28).** v0.6.0's fixes are on `stable`, measured in
-[docs/perf.md](perf.md#v060--2026-10-28) and not yet released. G1 and G2 are met. G4 is met but
+**Status (2026-10-28).** v0.6.0 is released, its fixes measured in
+[docs/perf.md](perf.md#v060--2026-10-28). G1 and G2 are met. G4 is met but
 for its p99 at 50 processes: 25 lands/s, 0 % retries and nothing lost, with a p99 of 579.5–594.6 ms
 against 500. G17's push is met (1.04×); its fetch is not (1.65×; 1.04× with a commit-graph in the
 remote and the mirror). The benchmark gate (condition 3) runs in the weekly Scheduled run.

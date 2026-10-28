@@ -20,13 +20,13 @@ workspace = true
 test-hooks = ["swarmops-store/test-hooks", "swarmops-testkit/test-hooks"]
 
 [dependencies]
-swarmops-api = { path = "../swarmops-api", version = "0.5.0" }
-swarmops-core = { path = "../swarmops-core", version = "0.5.0" }
+swarmops-api = { path = "../swarmops-api", version = "0.6.0" }
+swarmops-core = { path = "../swarmops-core", version = "0.6.0" }
 # The conflict markers: the three-way content merge, rendered as diff3 markers.
-swarmops-merge = { path = "../swarmops-merge", version = "0.5.0" }
+swarmops-merge = { path = "../swarmops-merge", version = "0.6.0" }
 # `FsOps` only: the workspace's durable files (`workspace.json`, the intents, the registry)
 # are written through the store's file primitives; never the store's data.
-swarmops-store = { path = "../swarmops-store", version = "0.5.0" }
+swarmops-store = { path = "../swarmops-store", version = "0.6.0" }
 # The parallel hashing and writing of a workspace's files.
 rayon.workspace = true
 # The contents `blob_get` returns in base64, decoded before they are written out.
@@ -48,8 +48,8 @@ rustix.workspace = true
 
 [dev-dependencies]
 # `LocalOps`: the store the tests open.
-swarmops-ops = { path = "../swarmops-ops", version = "0.5.0" }
-swarmops-testkit = { path = "../swarmops-testkit", version = "0.5.0" }
+swarmops-ops = { path = "../swarmops-ops", version = "0.6.0" }
+swarmops-testkit = { path = "../swarmops-testkit", version = "0.6.0" }
 proptest.workspace = true
 tempfile.workspace = true
 
