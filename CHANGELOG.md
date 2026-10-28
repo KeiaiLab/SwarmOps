@@ -60,6 +60,8 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 - `op undo` refused with `E_OP_NOT_FOUND` or `E_NOTHING_TO_UNDO` reports in `meta.recovered` what
   its write repaired first, as `E_CAS_MISMATCH` already did; the next write no longer reports
   `null` for a repair the refused undo made.
+- `verify` on a FORMAT 2 store names its checkpoint file `meta/journal2.ckpt`, and what it holds
+  (an offset, a seq and their CRC), where it named FORMAT 1's `meta/journal.ckpt` and a u64le.
 
 ## [0.6.0] - 2026-10-28
 

@@ -315,7 +315,8 @@ fn meta_check_reports_format_2_seq_prev_crc_entry_crc_and_ckpt_damage() {
         assert_eq!(checked.journal_corrupt, Some(offsets[1]));
     }
 
-    // 4. FORMAT 2 journal2.ckpt disagreed seq/offset and bad CRC are reported, not raised.
+    // 4. FORMAT 2 journal2.ckpt disagreed seq/offset and bad CRC are reported, not raised, by
+    // the file's own name.
     {
         let (_dir, layout, store) = store_of(StoreFormat::V2, 3);
         let offsets = frame_offsets(&layout);
@@ -323,7 +324,7 @@ fn meta_check_reports_format_2_seq_prev_crc_entry_crc_and_ckpt_damage() {
         assert_eq!(
             store.check().unwrap().problems,
             [format!(
-                "damaged metadata: meta/journal.ckpt holds {}, which is not a frame boundary: \
+                "damaged metadata: meta/journal2.ckpt holds {}, which is not a frame boundary: \
                  reads and writes fail on it, and the records the checkpoint passed are not \
                  checked against the index",
                 offsets[1]
@@ -336,8 +337,8 @@ fn meta_check_reports_format_2_seq_prev_crc_entry_crc_and_ckpt_damage() {
         assert_eq!(
             store.check().unwrap().problems,
             [
-                "damaged metadata: meta/journal.ckpt does not hold a u64le offset: the records \
-                 the checkpoint passed are not checked against the index"
+                "damaged metadata: meta/journal2.ckpt does not hold an offset, a seq and their \
+                 CRC: the records the checkpoint passed are not checked against the index"
             ]
         );
     }

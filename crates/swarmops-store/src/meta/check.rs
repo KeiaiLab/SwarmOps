@@ -16,6 +16,7 @@ use super::refs::RefFile;
 use super::sorted::SortedView;
 use super::store::MetaStore;
 use crate::error::StoreError;
+use crate::format::StoreFormat;
 
 /// How many journal frames [`MetaStore::check`] reads with one call.
 const FRAME_BATCH: usize = 4_096;
@@ -89,6 +90,9 @@ struct Run {
     changesets: Vec<ChangesetMeta>,
     targets_known: bool,
     index_reads: u64,
+    /// The checkpoint's file, by its place in the store: `meta/journal.ckpt`, or in FORMAT 2
+    /// `meta/journal2.ckpt`.
+    ckpt_file: String,
 }
 
 /// What a metadata mismatch found disagreeing, ordered as `VerifyProblem::IndexMismatch` orders
@@ -126,12 +130,17 @@ impl Run {
 
     /// Reads and compares the metadata files.
     fn metadata(&mut self, store: &MetaStore) -> Result<(), StoreError> {
+        let layout = &store.layout;
+        let ckpt = layout.journal_ckpt();
+        self.ckpt_file = (ckpt.strip_prefix(layout.root()))
+            .unwrap_or(&ckpt)
+            .to_string();
         let (journal, journal_damage) = match open_journal(store)? {
             Ok(journal) => (Some(journal), None),
             Err(what) => (None, Some(what)),
         };
         let ckpt_state = match &journal {
-            Some(journal) => self.checkpoint(journal)?,
+            Some(journal) => self.checkpoint(journal, layout.format())?,
             None => CkptState::Malformed,
         };
         let (index, index_damage) = match open_index(store)? {
@@ -267,16 +276,25 @@ impl Run {
         Ok(())
     }
 
-    /// The journal's checkpoint; reported if `journal.ckpt` is malformed.
-    fn checkpoint(&mut self, journal: &Journal) -> Result<CkptState, StoreError> {
+    /// The journal's checkpoint; reported if its file is malformed: in a store of `format`, the
+    /// file holds a `u64le` offset (FORMAT 1), or an offset, a seq and their CRC (FORMAT 2).
+    fn checkpoint(
+        &mut self,
+        journal: &Journal,
+        format: StoreFormat,
+    ) -> Result<CkptState, StoreError> {
         match journal.ckpt() {
             Ok(ckpt) => Ok(CkptState::At(ckpt)),
             Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::InvalidData => {
-                self.meta_corrupt.push(
-                    "meta/journal.ckpt does not hold a u64le offset: the records the checkpoint \
-                     passed are not checked against the index"
-                        .to_owned(),
-                );
+                let holds = match format {
+                    StoreFormat::V1 => "a u64le offset",
+                    _ => "an offset, a seq and their CRC",
+                };
+                self.meta_corrupt.push(format!(
+                    "{} does not hold {holds}: the records the checkpoint passed are not checked \
+                     against the index",
+                    self.ckpt_file
+                ));
                 Ok(CkptState::Malformed)
             }
             Err(StoreError::JournalCorrupt { offset }) => Ok(CkptState::Disagreed(offset)),
@@ -305,9 +323,9 @@ impl Run {
 
     fn report_bad_boundary(&mut self, ckpt: u64) {
         self.meta_corrupt.push(format!(
-            "meta/journal.ckpt holds {ckpt}, which is not a frame boundary: reads and \
-             writes fail on it, and the records the checkpoint passed are not checked \
-             against the index"
+            "{} holds {ckpt}, which is not a frame boundary: reads and writes fail on it, and \
+             the records the checkpoint passed are not checked against the index",
+            self.ckpt_file
         ));
     }
 
