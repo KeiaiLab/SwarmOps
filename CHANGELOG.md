@@ -31,6 +31,9 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   `E_REF_NAME_INVALID` `reserved`, and a FORMAT 2 name in a FORMAT 1 store `E_FORMAT_REQUIRED`.
   The git side writes lightweight tags too (`refs/tags/<name>`), which a later export moves only
   when forced (`tag_exists`).
+- The git remote's mirror keeps a commit-graph: every git child gets
+  `fetch.writeCommitGraph=true`, so git updates it after each fetch (for G17's fetch ratio;
+  v0.6.0 measured 1.04× with one, 1.65× without).
 
 ## [0.6.0] - 2026-10-28
 

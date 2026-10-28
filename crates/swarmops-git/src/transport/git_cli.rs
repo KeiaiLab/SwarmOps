@@ -871,8 +871,8 @@ const FIXED_ENV: [(&str, &str); 4] = [
 /// The configuration every command gets in its environment: git's writes fsynced, its
 /// housekeeping in the foreground, protocol v2, no submodule, no credential in a URL, and every
 /// received object checked by git's fsck (an error-level finding fails the fetch before any ref
-/// moves; no `fsck.<id>` override).
-const CONFIG: [(&str, &str); 8] = [
+/// moves; no `fsck.<id>` override), and a commit-graph kept after each fetch (G17's fetch ratio).
+const CONFIG: [(&str, &str); 9] = [
     ("core.fsync", "all"),
     ("core.fsyncMethod", "fsync"),
     ("gc.autoDetach", "false"),
@@ -881,6 +881,7 @@ const CONFIG: [(&str, &str); 8] = [
     ("transfer.credentialsInUrl", "die"),
     ("fetch.fsckObjects", "true"),
     ("transfer.fsckObjects", "true"),
+    ("fetch.writeCommitGraph", "true"),
 ];
 
 /// `git fetch`'s fixed options, up to the URL.

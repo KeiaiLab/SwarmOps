@@ -696,6 +696,7 @@ fn child_env_drops_git_dir_and_traces() {
             ("transfer.credentialsInUrl", "die"),
             ("fetch.fsckObjects", "true"),
             ("transfer.fsckObjects", "true"),
+            ("fetch.writeCommitGraph", "true"),
         ] {
             assert!(
                 config.contains(&(key.to_owned(), value.to_owned())),
@@ -1137,6 +1138,26 @@ fn fetch_moves_the_mirror_to_the_remote() {
     setup.server.move_to(REPO, "main", &other);
     setup.fetch(&cli, &http.url(REPO), &cred).expect("fetch");
     assert_eq!(tracked(&setup), other);
+}
+
+#[test]
+fn fetch_writes_a_commit_graph() {
+    let setup = Setup::new();
+    let http = setup.server.http(HttpAuth::Anonymous);
+    let cli = setup.cli(&[]);
+    setup
+        .fetch(&cli, &http.url(REPO), &Credential::default())
+        .expect("fetch");
+
+    // git keeps a commit-graph after the fetch, as one file or as a chain (G17's fetch ratio).
+    let info = setup.mirror().join("objects/info");
+    let single = info.join("commit-graph");
+    let chain = info.join("commit-graphs/commit-graph-chain");
+    assert!(
+        single.is_file() || chain.is_file(),
+        "no commit-graph in {}",
+        info.display()
+    );
 }
 
 #[cfg(target_os = "linux")]
