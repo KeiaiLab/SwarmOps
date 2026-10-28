@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use camino::{Utf8Path, Utf8PathBuf};
 use rayon::ThreadPool;
 use rayon::prelude::*;
-use swarmops_core::{Hashed, ObjectId, ObjectKind, bytes};
+use swarmops_core::{Hashed, ObjectHasher, ObjectId, ObjectKind, bytes};
 
 use crate::error::{FileOp, IoFailure, LimitKind, StoreError};
 use crate::fs_ops::{self, FsMethod, FsOps, HookedFs, LinkOutcome, RealFs, StoreFs};
@@ -728,7 +728,7 @@ fn stream_failure(id: ObjectId, e: io::Error) -> StoreError {
 /// makes them. Checks what [`decode`] checks, in the same order and with the same errors: the
 /// header; for zstd, that the frame records the length the header does, and that the stream makes
 /// exactly that many bytes (stopping as soon as it makes more); and that the payload hashes to
-/// `id` ([`PayloadHash`]). The decoder keeps zstd's default window limit, as [`stream_decode`]'s
+/// `id` ([`ObjectHasher`]). The decoder keeps zstd's default window limit, as [`stream_decode`]'s
 /// does.
 fn visit_payload(
     id: ObjectId,
@@ -745,7 +745,7 @@ fn visit_payload(
     if size > MAX_OBJECT_LEN {
         return Err(bad_header());
     }
-    let mut hash = PayloadHash::new(kind, size);
+    let mut hash = ObjectHasher::new(kind, size);
     let mut piece = |bytes: &[u8]| {
         hash.update(bytes);
         visit(bytes);
@@ -794,31 +794,6 @@ fn visit_payload(
     Ok(ObjectStat { kind, size })
 }
 
-/// [`swarmops_core::hash_object`]'s recipe, `blake3(domain(kind) ++ u64le(len) ++ payload)`,
-/// fed the payload in pieces: `len` is the length the object's header records, which the caller
-/// checks the pieces add up to. A unit test holds it to `hash_object`.
-struct PayloadHash(blake3::Hasher);
-
-impl PayloadHash {
-    /// The hash of a payload of `kind` and `len` bytes, before any of them.
-    fn new(kind: ObjectKind, len: u64) -> Self {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(kind.domain());
-        hasher.update(&len.to_le_bytes());
-        Self(hasher)
-    }
-
-    /// Feeds the payload's next piece.
-    fn update(&mut self, piece: &[u8]) {
-        self.0.update(piece);
-    }
-
-    /// The object's id, once every piece is fed.
-    fn finish(&self) -> ObjectId {
-        ObjectId::new(*self.0.finalize().as_bytes())
-    }
-}
-
 /// `body` decoded by zstd's streaming decoder into a buffer that starts at `start` bytes and
 /// grows only as the output arrives, keeping at most `ulen + 1` bytes of it: one more than the
 /// frame should produce, so that a longer output shows. `read_to_end` grows the buffer with
@@ -849,25 +824,6 @@ mod tests {
         file.extend(size.to_le_bytes()); // frame content size
         file.extend([0x01, 0x00, 0x00]); // last block, raw, 0 bytes
         file
-    }
-
-    #[test]
-    fn a_payload_hashed_in_pieces_is_hash_object() {
-        let text = b"sixteen bytes, \n".repeat(1024);
-        for kind in [ObjectKind::Blob, ObjectKind::Tree, ObjectKind::Changeset] {
-            for len in [0, 1, 15, 16, 16 << 10] {
-                let payload = &text[..len];
-                for piece in [1, 7, 4096, 16 << 10] {
-                    let mut hash = PayloadHash::new(kind, bytes::to_u64(len));
-                    payload.chunks(piece).for_each(|bytes| hash.update(bytes));
-                    assert_eq!(
-                        hash.finish(),
-                        swarmops_core::hash_object(kind, payload),
-                        "{kind:?}, {len} bytes in pieces of {piece}"
-                    );
-                }
-            }
-        }
     }
 
     #[test]

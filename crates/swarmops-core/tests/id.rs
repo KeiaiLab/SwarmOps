@@ -1,4 +1,4 @@
-use swarmops_core::{IdError, ObjectId, ObjectKind, hash_object};
+use swarmops_core::{IdError, ObjectHasher, ObjectId, ObjectKind, hash_object};
 
 #[test]
 fn object_id_equals_blake3_of_domain_len_and_payload() {
@@ -129,4 +129,58 @@ fn id_constructors_wrap_their_input() {
     assert_eq!(BlobId::new(id).as_object_id(), id);
     assert_eq!(TreeId::new(id).as_object_id(), id);
     assert_eq!(ChangesetId::new(id).as_object_id(), id);
+}
+
+/// The ids of fixed payloads, written out: the recipe's bytes (storage spec §0) are the hash
+/// contract, so no rewrite of `hash_object` may change one of them.
+#[test]
+fn fixed_payloads_keep_their_ids() {
+    for (kind, payload, want) in [
+        (
+            ObjectKind::Blob,
+            &b""[..],
+            "fba31bda60be7140c663f949530dc7fccc773e986b879898d27e547ee527c1ea",
+        ),
+        (
+            ObjectKind::Blob,
+            &b"hello"[..],
+            "43c2af1d7e085f308a9e898a122898d708b151ee4ab915605be0c068828dd28c",
+        ),
+        (
+            ObjectKind::Tree,
+            &b"hello"[..],
+            "8aed18d5a2c8e4dff6682915942e4eb7409c03c10bf0f89216fe8ff3f9313568",
+        ),
+        (
+            ObjectKind::Changeset,
+            &b"hello"[..],
+            "0af42fbed9681515fc83814f09420af14a37bad2460ae332d8862aa4888daf65",
+        ),
+    ] {
+        assert_eq!(
+            hash_object(kind, payload).to_hex(),
+            want,
+            "{kind:?} {payload:?}"
+        );
+    }
+}
+
+/// `ObjectHasher` fed a payload in pieces of any size gives `hash_object`'s id for it.
+#[test]
+fn a_payload_hashed_in_pieces_is_hash_object() {
+    let text = b"sixteen bytes, \n".repeat(1024);
+    for kind in [ObjectKind::Blob, ObjectKind::Tree, ObjectKind::Changeset] {
+        for len in [0, 1, 15, 16, 16 << 10] {
+            let payload = &text[..len];
+            for piece in [1, 7, 4096, 16 << 10] {
+                let mut hasher = ObjectHasher::new(kind, u64::try_from(len).unwrap());
+                payload.chunks(piece).for_each(|bytes| hasher.update(bytes));
+                assert_eq!(
+                    hasher.finish(),
+                    hash_object(kind, payload),
+                    "{kind:?}, {len} bytes in pieces of {piece}"
+                );
+            }
+        }
+    }
 }

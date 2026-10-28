@@ -108,12 +108,37 @@ impl ObjectKind {
 
 /// `blake3( domain(kind) ++ u64le(payload.len()) ++ payload )`.
 pub fn hash_object(kind: ObjectKind, payload: &[u8]) -> ObjectId {
-    let mut h = blake3::Hasher::new();
-    h.update(kind.domain());
-    let len = bytes::to_u64(payload.len());
-    h.update(&len.to_le_bytes());
-    h.update(payload);
-    ObjectId(*h.finalize().as_bytes())
+    let mut hasher = ObjectHasher::new(kind, bytes::to_u64(payload.len()));
+    hasher.update(payload);
+    hasher.finish()
+}
+
+/// [`hash_object`]'s recipe fed the payload in pieces, the one place the recipe is written: `len`
+/// goes into the hash before any piece, so the caller states the payload's length up front (an
+/// object file's header records it) and checks that the pieces add up to it. Pieces of
+/// `payload`, in order, give `hash_object(kind, payload)` however it is cut.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct ObjectHasher(blake3::Hasher);
+
+impl ObjectHasher {
+    /// The hash of a payload of `kind` and `len` bytes, before any of them.
+    pub fn new(kind: ObjectKind, len: u64) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(kind.domain());
+        hasher.update(&len.to_le_bytes());
+        Self(hasher)
+    }
+
+    /// Feeds the payload's next piece.
+    pub fn update(&mut self, piece: &[u8]) {
+        self.0.update(piece);
+    }
+
+    /// The object's id, once every piece is fed.
+    pub fn finish(&self) -> ObjectId {
+        ObjectId(*self.0.finalize().as_bytes())
+    }
 }
 
 /// An object's payload with its id, which only hashing makes: the id is always

@@ -12,7 +12,9 @@ pub mod path;
 pub mod portable;
 
 pub use error::{IdError, PathError};
-pub use id::{BlobId, ChangesetId, Hashed, ObjectId, ObjectKind, TreeId, hash_object};
+pub use id::{
+    BlobId, ChangesetId, Hashed, ObjectHasher, ObjectId, ObjectKind, TreeId, hash_object,
+};
 pub use object::{
     Changeset, CodecError, DeltaEntry, DeltaOp, EntryKind, EntryTarget, LeafKind, Signature, Tree,
     TreeEntry,
