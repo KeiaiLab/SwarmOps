@@ -24,7 +24,7 @@
 //! The run ends by recording two external ids (`meta/external_ids/`) of commits whose frames are
 //! durable, keyed as an export keys them ([`Op::ExternalIds`]): in every image each is whole and
 //! names its commit, or is absent, and it is absent from no image of a power failure after its
-//! put returned.
+//! put returned, judged at each cut of the image, not once for the files it holds.
 //!
 //! Then three changesets whose fields the caller gives are recorded in one frame through
 //! `Repo::commit_raw_batch` ([`Op::Batch`]): a second root changeset, its child, and a merge of
@@ -1029,9 +1029,28 @@ fn seen(rec: &Recorded, store: &str, info: &Value) -> Result<Seen, String> {
     })
 }
 
-/// Writes `image`, of a power failure after the first `cut` steps, to a fresh temp dir and finds
-/// out what the binary makes of it.
+/// What the binary found in an image, and which of the run's external ids it held.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Observed {
+    found: Found,
+    /// One for each of [`Recorded::external`], in its order: whether the image held that entry,
+    /// whole and naming its commit, which the store holds. An entry the image holds otherwise
+    /// fails the image whatever the cut.
+    held: Vec<bool>,
+}
+
+/// [`observed_in`], with the external ids judged at `cut` ([`externals_allowed`]): for a check
+/// of one cut.
 fn found_in(rec: &Recorded, image: &Image, cut: usize) -> Result<Found, String> {
+    let observed = observed_in(rec, image, cut)?;
+    externals_allowed(rec, cut, &observed.held)?;
+    Ok(observed.found)
+}
+
+/// Writes `image`, of a power failure after the first `cut` steps, to a fresh temp dir and finds
+/// out what the binary makes of it. Which external ids it holds is judged per cut by the caller
+/// ([`allowed`]): images of later cuts may hold the same files.
+fn observed_in(rec: &Recorded, image: &Image, cut: usize) -> Result<Observed, String> {
     let dir = tempfile::tempdir().map_err(|e| format!("a temp dir: {e}"))?;
     image
         .materialize(dir.path())
@@ -1041,7 +1060,10 @@ fn found_in(rec: &Recorded, image: &Image, cut: usize) -> Result<Found, String> 
     let info = ask(&["--repo", store, "info"])?;
     let formatted = image.file(Path::new("store/FORMAT")).is_some();
     match (info.exit, info.code()) {
-        (_, Some("E_NOT_A_REPO")) if !formatted => no_store(store),
+        (_, Some("E_NOT_A_REPO")) if !formatted => Ok(Observed {
+            found: no_store(store)?,
+            held: vec![false; rec.external.len()],
+        }),
         (0, _) if formatted => a_store(rec, store, info.ok()?, dir.path(), cut),
         _ => Err(format!("info, with FORMAT {formatted}: {}", info.run)),
     }
@@ -1131,42 +1153,50 @@ fn recovered_as_imaged(
     Ok(())
 }
 
-/// `Ok` if the external ids the run recorded are in the store at `store`, in state `state`, as
-/// the image of a power failure after the first `cut` steps may hold them: each whole and naming
-/// its commit, which the store holds; or absent, but only if the power failed before its put
-/// returned.
-fn external_ids_as_imaged(
-    rec: &Recorded,
-    store: &str,
-    state: &State,
-    cut: usize,
-) -> Result<(), String> {
+/// Which of the external ids the run recorded the store at `store`, in state `state`, holds:
+/// each whole and naming its commit, which the store holds (`true`), or absent (`false`). Any
+/// other entry is an error, whatever the cut.
+fn external_ids_in(rec: &Recorded, store: &str, state: &State) -> Result<Vec<bool>, String> {
     let layout = layout_of(store);
     let index = swarmops_store::ExternalIds::new(layout, Arc::new(RealFs::new()));
-    for External {
-        key,
-        commit,
-        returned,
-    } in &rec.external
-    {
+    let mut held = Vec::new();
+    for External { key, commit, .. } in &rec.external {
         let named = &rec.commits[*commit];
         match index.get(swarmops_store::SYSTEM_GIT, key) {
             Ok(Some(entry))
-                if entry.changeset.to_string() == *named && *commit < state.changesets => {}
-            Ok(None) if cut < *returned => {}
+                if entry.changeset.to_string() == *named && *commit < state.changesets =>
+            {
+                held.push(true);
+            }
+            Ok(None) => held.push(false),
             found => {
                 return Err(format!(
-                    "the external id of commit {commit} ({named}), whose put returned after step \
-                     {returned}: {found:?}, in a store of {} changesets",
+                    "the external id of commit {commit} ({named}): {found:?}, in a store of {} \
+                     changesets",
                     state.changesets
                 ));
             }
         }
     }
+    Ok(held)
+}
+
+/// `Ok` if the image of a power failure after the first `cut` steps may lack the external ids
+/// `held` marks absent: only those whose put had not returned by the cut.
+fn externals_allowed(rec: &Recorded, cut: usize, held: &[bool]) -> Result<(), String> {
+    for (external, &held) in rec.external.iter().zip(held) {
+        if held || cut < external.returned {
+            continue;
+        }
+        return Err(format!(
+            "the external id of commit {} is absent, though its put returned after step {}",
+            external.commit, external.returned
+        ));
+    }
     Ok(())
 }
 
-/// [`found_in`] a store, whose `info` gave `info`, in the image of a power failure after the
+/// [`observed_in`] a store, whose `info` gave `info`, in the image of a power failure after the
 /// first `cut` steps; `tmp` takes a change list.
 fn a_store(
     rec: &Recorded,
@@ -1174,7 +1204,7 @@ fn a_store(
     info: &Value,
     tmp: &Path,
     cut: usize,
-) -> Result<Found, String> {
+) -> Result<Observed, String> {
     let seen = seen(rec, store, info)?;
     let frames = (0..=rec.frames.len())
         .find(|&frames| seen.is_after(rec, frames))
@@ -1189,7 +1219,7 @@ fn a_store(
         }
     }
     clean(store, "after the power loss")?;
-    external_ids_as_imaged(rec, store, &seen.state, cut)?;
+    let held = external_ids_in(rec, store, &seen.state)?;
     // The journal as the image holds it, which the next commit's write repairs.
     let journal = journal_of(store)?;
     let whole = journal
@@ -1225,7 +1255,10 @@ fn a_store(
         history.extend(rec.history(main));
     }
     match log(store, new)? {
-        logged if logged == history => Ok(Found::Prefix(frames)),
+        logged if logged == history => Ok(Observed {
+            found: Found::Prefix(frames),
+            held,
+        }),
         logged => Err(format!(
             "log of the next commit: {logged:?}, not {history:?}"
         )),
@@ -1236,7 +1269,7 @@ fn a_store(
 /// what the binary found in it.
 struct Checked<'a> {
     uses: &'a [(usize, u64)],
-    found: Result<Found, String>,
+    found: Result<Observed, String>,
 }
 
 /// What a sweep found.
@@ -1245,6 +1278,8 @@ struct Swept {
     images: usize,
     /// How many of them held each prefix of the frames, and how many no store.
     found: BTreeMap<Option<usize>, usize>,
+    /// Which external ids they held, each set seen ([`Observed::held`]).
+    held: BTreeSet<Vec<bool>>,
 }
 
 /// Checks the image of every cut of `cuts` for every seed of `seeds` ([`Seeded`]): the binary
@@ -1273,7 +1308,7 @@ fn sweep(rec: &Recorded, cuts: &[usize], seeds: &[u64]) -> Swept {
                     scope.spawn(move || {
                         let (cut, seed) = uses[0];
                         let image = rec.timeline.image(cut, &mut Seeded::new(seed, cut));
-                        found_in(rec, &image, cut)
+                        observed_in(rec, &image, cut)
                     })
                 })
                 .collect();
@@ -1287,6 +1322,7 @@ fn sweep(rec: &Recorded, cuts: &[usize], seeds: &[u64]) -> Swept {
     }
     let mut failures = Vec::new();
     let mut found = BTreeMap::new();
+    let mut held = BTreeSet::new();
     for Checked {
         uses,
         found: result,
@@ -1303,11 +1339,12 @@ fn sweep(rec: &Recorded, cuts: &[usize], seeds: &[u64]) -> Swept {
             }
         }
         if let Ok(result) = result {
-            let prefix = match result {
+            let prefix = match result.found {
                 Found::NoStore => None,
-                Found::Prefix(frames) => Some(*frames),
+                Found::Prefix(frames) => Some(frames),
             };
             *found.entry(prefix).or_default() += 1;
+            held.insert(result.held.clone());
         }
     }
     assert!(
@@ -1321,17 +1358,22 @@ fn sweep(rec: &Recorded, cuts: &[usize], seeds: &[u64]) -> Swept {
     Swept {
         images: checked.len(),
         found,
+        held,
     }
 }
 
-/// `Ok` if `found` is what the image of a power failure after the first `cut` steps may hold.
-fn allowed(rec: &Recorded, cut: usize, found: &Result<Found, String>) -> Result<(), String> {
+/// `Ok` if `observed` is what the image of a power failure after the first `cut` steps may hold.
+fn allowed(rec: &Recorded, cut: usize, observed: &Result<Observed, String>) -> Result<(), String> {
     let (durable, begun) = (rec.durable(cut), rec.begun(cut));
+    if let Ok(observed) = observed {
+        externals_allowed(rec, cut, &observed.held)?;
+    }
+    let found = observed.as_ref().map(|observed| observed.found);
     match found {
         Err(why) => Err(why.clone()),
         Ok(Found::NoStore) if cut < rec.init => Ok(()),
         Ok(Found::NoStore) => Err("no store, though init had returned".to_owned()),
-        Ok(Found::Prefix(frames)) if (durable..=begun).contains(frames) => Ok(()),
+        Ok(Found::Prefix(frames)) if (durable..=begun).contains(&frames) => Ok(()),
         Ok(Found::Prefix(frames)) => Err(format!(
             "the first {frames} frames, not {durable} to {begun}: a committed transaction lost, \
              or one never begun found"
@@ -1380,6 +1422,12 @@ fn power_loss_images_recover_a_prefix_with_every_acknowledged_commit(format) {
         );
     }
     assert!(swept.found.contains_key(&None), "no image without a store");
+
+    // The external-id oracle saw images without the entries and images with them.
+    let externals = rec.external.len();
+    for held in [vec![false; externals], vec![true; externals]] {
+        assert!(swept.held.contains(&held), "no image held {held:?}: {:?}", swept.held);
+    }
 }
 }
 
@@ -1791,6 +1839,38 @@ fn the_recovery_oracle_refuses_a_report_that_misstates_the_repair() {
         Ok(())
     );
     assert!(recovered_as_imaged(&rec, write + 1, &exact, clean, 92).is_err());
+}
+
+/// The external-id oracle's own check ([`allowed`]): an image that lacks an external id passes at
+/// a cut before its put returned and fails at every cut after, so a put that returns before its
+/// entry is durable fails the sweep even where images of cuts on both sides hold the same files.
+#[test]
+fn the_external_id_oracle_judges_each_cut() {
+    let rec = record_ops(
+        DEFAULT_INIT_FORMAT,
+        &[
+            Op::CommitAdvance {
+                parent: None,
+                puts: &[("a.txt", "a\n")],
+                name: "main",
+            },
+            Op::ExternalIds { entries: &[0] },
+        ],
+    );
+    let returned = rec.external[0].returned;
+    let observed = |held: bool| {
+        Ok(Observed {
+            found: Found::Prefix(1),
+            held: vec![held],
+        })
+    };
+    assert_eq!(allowed(&rec, returned - 1, &observed(false)), Ok(()));
+    assert_eq!(allowed(&rec, returned - 1, &observed(true)), Ok(()));
+    assert_eq!(allowed(&rec, returned, &observed(true)), Ok(()));
+    for cut in returned..=rec.timeline.steps() {
+        let judged = allowed(&rec, cut, &observed(false));
+        assert!(judged.is_err(), "cut {cut}: an absent entry was taken");
+    }
 }
 
 /// The committed snapshot ([`MetaStore::read_committed`], storage spec §3 "읽기") under power
