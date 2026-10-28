@@ -30,7 +30,7 @@ swarmops ref set [OPTIONS] <--expect <REV>|--create> <NAME> <REV>
 
 Syntax: `<NAME>`.
 
-main or release/&lt;name&gt;.
+main or release/&lt;name&gt;, and in a FORMAT 2 store a branch (feature/x) or a tag (tags/v1).
 
 ### `REV`
 

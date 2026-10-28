@@ -51,7 +51,7 @@ The workspace's directory.
 Syntax: `--onto <REF>`.
 Default: `main`.
 
-The ref to rebase onto: main or release/&lt;name&gt;.
+The ref to rebase onto: main or release/&lt;name&gt;, and in a FORMAT 2 store a branch (feature/x) or a tag (tags/v1).
 
 ### `--message`
 

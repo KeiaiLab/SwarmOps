@@ -518,18 +518,21 @@ Use `swarmops ls` for a directory and `swarmops cat` for a file.
 
 ### `E_REF_NAME_INVALID`
 
-Exit 1, not retryable. Refs are `main` and `release/<name>`; there are no other branches.
+Exit 1, not retryable. No store format takes the name: refs are `main` and `release/<name>`, and
+in a FORMAT 2 store also branches (`feature/x`), tags (`tags/<path>`) and remote-tracking refs.
+A FORMAT 2 name in a FORMAT 1 store is `E_FORMAT_REQUIRED` instead.
 
 ```sh
-swarmops ref set feature/x main --create
+swarmops ref set main/x main --create
 ```
 
 ```text
-{"ok":false,"op":"ref_set","api":1,"error":{"code":"E_REF_NAME_INVALID","message":"invalid ref name \"feature/x\"","retryable":false,"exit":1,"details":{"name":"feature/x"},"hint":"a ref name is main or release/<name>, the name of letters, digits, '.', '_' and '-', not starting with '.'"},"meta":{"repo":"acme","elapsed_ms":0,"resolved":{"main":"82a6c2d1…"},"auth":"trust"}}
+{"ok":false,"op":"ref_set","api":1,"error":{"code":"E_REF_NAME_INVALID","message":"invalid ref name \"main/x\"","retryable":false,"exit":1,"details":{"name":"main/x"},"hint":"a ref name is main or release/<name>, and in a FORMAT 2 store a branch (feature/x), tags/<path> or remote/<remote>/<path>: each part of letters, digits, '.', '_' and '-', not starting with '.'"},"meta":{"repo":"acme","elapsed_ms":0,"resolved":{"main":"82a6c2d1…"},"auth":"trust"}}
 ```
 
 An agent's own line of work needs no ref: it commits on a parent and lands the head. Use
-`release/<name>` for a ref of your own, such as `release/feature-x`. `git export` gives this code
+`release/<name>` for a ref of your own, such as `release/feature-x`, or in a FORMAT 2 store a
+branch such as `feature/x`. `git export` gives this code
 too for a branch name git does not take; its hint is `git check-ref-format --branch`.
 
 ### `E_OP_NOT_FOUND`

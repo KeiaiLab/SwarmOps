@@ -1069,7 +1069,7 @@ then move the ref once: `swarmops ref set <ref> <last> --expect <old>` (or `--cr
 ```sh
 swarmops ref set release/2.0 "$NEW" --create --human
 swarmops ref set release/2.0 "$OLD" --create --human
-swarmops ref set feature "$NEW" --create --human
+swarmops ref set main/x "$NEW" --create --human
 ```
 
 ```text
@@ -1081,9 +1081,9 @@ details.actual: 36f80fb0ef55b7746efd722256370ac342d33a834b449d5295d8192fd30db3b9
 details.name: release/2.0
 retryable: true
 hint: swarmops show 36f80fb0ef55b7746efd722256370ac342d33a834b449d5295d8192fd30db3b9
-error: E_REF_NAME_INVALID: invalid ref name "feature"
-details.name: feature
-hint: a ref name is main or release/<name>, the name of letters, digits, '.', '_' and '-', not starting with '.'
+error: E_REF_NAME_INVALID: invalid ref name "main/x"
+details.name: main/x
+hint: a ref name is main or release/<name>, and in a FORMAT 2 store a branch (feature/x), tags/<path> or remote/<remote>/<path>: each part of letters, digits, '.', '_' and '-', not starting with '.'
 ```
 
 They exit 0, 4 and 1.

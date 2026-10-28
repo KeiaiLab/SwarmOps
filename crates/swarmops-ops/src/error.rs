@@ -522,7 +522,8 @@ fn ref_name_invalid(name: String, message: String) -> OpError {
     error(ErrorCode::RefNameInvalid, message)
         .with_details(details([("name", name.into())]))
         .with_hint(
-            "a ref name is main or release/<name>, the name of letters, digits, '.', '_' and \
+            "a ref name is main or release/<name>, and in a FORMAT 2 store a branch (feature/x), \
+             tags/<path> or remote/<remote>/<path>: each part of letters, digits, '.', '_' and \
              '-', not starting with '.'",
         )
 }

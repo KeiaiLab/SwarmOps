@@ -49,7 +49,7 @@ Where the change starts: a first-parent ancestor of HEAD, whose own changes are 
 Syntax: `--target <REF>`.
 Default: `main`.
 
-The ref to land on: main or release/&lt;name&gt;.
+The ref to land on: main or release/&lt;name&gt;, and in a FORMAT 2 store a branch (feature/x).
 
 ### `--message`
 

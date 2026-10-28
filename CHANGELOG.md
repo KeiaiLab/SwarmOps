@@ -68,6 +68,9 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 - The hints of `E_EMPTY_COMMIT` and `E_CONFLICT` name the MCP argument beside the flag
   (`allow_empty`, `resolutions`), and the MCP `commit` tool's description says when
   `allow_empty` is needed.
+- The `E_REF_NAME_INVALID` hint and the help of `commit --advance`, `land --target`, `rebase
+  --onto` and `ref set NAME` name the FORMAT 2 refs (a branch such as `feature/x`, a tag), where
+  they said `main` or `release/<name>` alone.
 
 ### Fixed
 

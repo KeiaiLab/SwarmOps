@@ -58,7 +58,7 @@ Record the changeset even if it changes nothing.
 
 Syntax: `--advance <REF>`.
 
-Also move REF (main or release/&lt;name&gt;) to the new changeset, in the same transaction: both are recorded, or neither.
+Also move REF (main or release/&lt;name&gt;, and in a FORMAT 2 store a branch such as feature/x; never a tag) to the new changeset, in the same transaction: both are recorded, or neither.
 
 The move happens only if REF still names --parent (for a root commit, only if REF does not exist yet), so it is always a one-step fast-forward. Give --parent as the full changeset id you read REF at (from ref list, show, log or a commit's result): a ref name resolves when the command runs, and without --parent the commit builds on REF's head as it is then, so the move catches only a race from that moment on.
 

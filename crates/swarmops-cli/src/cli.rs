@@ -64,8 +64,9 @@ const ADVANCE_HELP: &str =
     "Also move REF to the new changeset, in the same transaction, if REF still names --parent";
 
 /// `commit --advance`'s long help.
-const ADVANCE_LONG_HELP: &str = "Also move REF (main or release/<name>) to the new changeset, in \
-the same transaction: both are recorded, or neither.
+const ADVANCE_LONG_HELP: &str = "Also move REF (main or release/<name>, and in a FORMAT 2 \
+store a branch such as feature/x; never a tag) to the new changeset, in the same transaction: \
+both are recorded, or neither.
 
 The move happens only if REF still names --parent (for a root commit, only if REF does not exist \
 yet), so it is always a one-step fast-forward. Give --parent as the full changeset id you read \
@@ -172,8 +173,13 @@ Give --parent as the full changeset id you read: without it the commit builds on
 (REF's, with --advance) as it is when the command runs, so a retry after that head moved to \
 another changeset commits again, on the new head.";
 
+/// `ref set NAME`'s help.
+const REF_SET_NAME_HELP: &str =
+    "main or release/<name>, and in a FORMAT 2 store a branch (feature/x) or a tag (tags/v1)";
+
 /// `land --target`'s help.
-const TARGET_HELP: &str = "The ref to land on: main or release/<name>";
+const TARGET_HELP: &str =
+    "The ref to land on: main or release/<name>, and in a FORMAT 2 store a branch (feature/x)";
 
 /// `land --key`'s short help.
 const LAND_KEY_HELP: &str =
@@ -191,7 +197,8 @@ E_INVALID_ARG. Without a key, the same land run again finds its change on the re
 E_NOTHING_TO_LAND.";
 
 /// `rebase --onto`'s help.
-const ONTO_HELP: &str = "The ref to rebase onto: main or release/<name>";
+const ONTO_HELP: &str = "The ref to rebase onto: main or release/<name>, and in a FORMAT 2 \
+store a branch (feature/x) or a tag (tags/v1)";
 
 /// `rebase --key`'s help.
 const REBASE_KEY_HELP: &str = "A uuid v7 that makes a retry safe: the same rebase onto the same \
@@ -1108,7 +1115,7 @@ pub enum RefCommand {
     /// Point ref NAME at REV: move it from --expect, or --create it.
     #[command(group(ArgGroup::new("from").required(true).args(["expect", "create"])))]
     Set {
-        #[arg(help = "main or release/<name>")]
+        #[arg(help = REF_SET_NAME_HELP)]
         name: String,
         /// The revision to point it at.
         rev: String,
