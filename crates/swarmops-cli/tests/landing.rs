@@ -204,8 +204,16 @@ fn assert_every_change_on_main(store: &Store) {
 /// and that of its rules but the first, `slow land`, on their own (`chain`: nothing lost or
 /// doubled, every move a fast-forward, a clean `verify`). It asserts the gate and a clean store,
 /// never a target: a missed target is recorded in `docs/perf.md`.
+///
+/// With [`LOCK_SAMPLE_VAR`] set, a thread samples `meta/lock`'s holder and waiters in the
+/// kernel's `/proc/locks` every that many microseconds while the agents land ([`locks`]): the
+/// binary reports no lock times of its own, neither in its envelope nor in a log. It prints a
+/// `landing-lock: ` line per process that waited for or held the lock (its subcommand, its wait,
+/// its hold), then a `landing-perf: lock` line per subcommand with their p50 and p99, the share
+/// of samples the lock was held in and the mean queue. Unset, the case runs as before.
 mod perf {
     use std::sync::Barrier;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -217,6 +225,9 @@ mod perf {
 
     use super::{change, commit_base};
     use crate::support::Store;
+
+    /// The interval, in microseconds, at which [`locks`] samples `meta/lock`; unset: not sampled.
+    const LOCK_SAMPLE_VAR: &str = "SWARMOPS_TEST_CLI_LANDING_LOCK_SAMPLE_US";
 
     /// How many agents land at once.
     const LANDERS_VAR: &str = "SWARMOPS_TEST_CLI_LANDING_LANDERS";
@@ -276,11 +287,17 @@ mod perf {
         let store = Store::init();
         let base = commit_base(&store, landers);
 
-        // 2. Every agent at once, from one go.
+        // 2. Every agent at once, from one go; the lock sampled meanwhile if asked.
         let start = Barrier::new(landers + 1);
         let load_before = load1();
+        let sample = std::env::var(LOCK_SAMPLE_VAR).ok();
+        let sample = sample.map(|us| Duration::from_micros(us.parse().expect("a number")));
+        let stop = AtomicBool::new(false);
+        let mut lock_times = None;
         let (records, go): (Vec<Vec<LandRecord>>, Instant) = thread::scope(|scope| {
-            let (store, start) = (&store, &start);
+            let (store, start, stop) = (&store, &start, &stop);
+            let sampler =
+                sample.map(|every| scope.spawn(move || locks::sample(store, every, stop)));
             let threads: Vec<_> = (0..landers)
                 .map(|lander| {
                     scope.spawn(move || {
@@ -294,6 +311,8 @@ mod perf {
             let records = (threads.into_iter())
                 .map(|t| t.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
                 .collect();
+            stop.store(true, Ordering::Relaxed);
+            lock_times = sampler.map(|t| t.join().unwrap_or_else(|e| std::panic::resume_unwind(e)));
             (records, go)
         });
         let wall = go.elapsed();
@@ -317,6 +336,9 @@ mod perf {
             wall.as_millis(),
             load1(),
         );
+        if let Some(lock_times) = &lock_times {
+            lock_times.print(TAG);
+        }
 
         // 4. The gate, then its rules after the first (`slow land`) on their own: a land past
         //    30 s still fails the run, and the line says whether anything was lost or doubled.
@@ -342,6 +364,217 @@ mod perf {
         store.assert_clean("after the lands");
         if let Err(rule) = gate {
             panic!("{rule}");
+        }
+    }
+
+    /// `meta/lock` seen from outside the binary: its holder and waiters in `/proc/locks`.
+    ///
+    /// ```text
+    /// 1: FLOCK  ADVISORY  WRITE 4242 08:10:435976 0 EOF      the holder, pid 4242
+    /// 1: -> FLOCK  ADVISORY  WRITE 4243 08:10:435976 0 EOF   a waiter, pid 4243
+    /// ```
+    ///
+    /// A process's wait and hold are the time from the sample that first saw it waiting (or
+    /// holding) to the first that did not, summed over its turns: exact to one interval.
+    mod locks {
+        use std::collections::BTreeMap;
+        use std::os::unix::fs::MetadataExt as _;
+        use std::path::Path;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        use crate::support::Store;
+
+        /// The kernel's table of file locks.
+        const PROC_LOCKS: &str = "/proc/locks";
+
+        /// The subcommands told apart; any other is `other`.
+        const KINDS: [&str; 4] = ["land", "commit", "ref", "cat"];
+
+        /// Where a process stands with the lock in one sample.
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum Seen {
+            /// Blocked in `flock`, behind the holder.
+            Waiting,
+            /// Holding it.
+            Holding,
+            /// Neither.
+            Gone,
+        }
+
+        /// One process's time with the lock.
+        struct Track {
+            /// Its subcommand ([`KINDS`]).
+            kind: &'static str,
+            /// What the last sample saw, since when.
+            seen: (Seen, Instant),
+            /// Its waits, summed.
+            wait: Duration,
+            /// Its holds, summed.
+            hold: Duration,
+            /// How many times it took the lock.
+            holds: u32,
+        }
+
+        impl Track {
+            /// Ends what the last sample saw at `now` and starts `seen`.
+            fn move_to(&mut self, seen: Seen, now: Instant) {
+                let (was, since) = self.seen;
+                if was == seen {
+                    return;
+                }
+                match was {
+                    Seen::Waiting => self.wait += now - since,
+                    Seen::Holding => self.hold += now - since,
+                    Seen::Gone => {}
+                }
+                if seen == Seen::Holding {
+                    self.holds += 1;
+                }
+                self.seen = (seen, now);
+            }
+        }
+
+        /// What [`sample`] saw.
+        pub(super) struct Sampled {
+            /// Each process that waited for or held the lock, by pid.
+            tracks: BTreeMap<u32, Track>,
+            /// How many samples it took.
+            samples: u32,
+            /// In how many of them the lock was held.
+            held: u32,
+            /// The waiters it saw, summed over the samples.
+            waiters: u32,
+        }
+
+        /// Samples `store`'s `meta/lock` every `every` until `stop`.
+        pub(super) fn sample(store: &Store, every: Duration, stop: &AtomicBool) -> Sampled {
+            let lock = Path::new(store.path()).join("meta").join("lock");
+            let ino = std::fs::metadata(&lock).expect("meta/lock").ino();
+            let mut sampled = Sampled {
+                tracks: BTreeMap::new(),
+                samples: 0,
+                held: 0,
+                waiters: 0,
+            };
+            while !stop.load(Ordering::Relaxed) {
+                let now = Instant::now();
+                let table = std::fs::read_to_string(PROC_LOCKS).expect("/proc/locks");
+                let current = on_lock(&table, ino);
+                sampled.add(&current, now);
+                thread::sleep(every.saturating_sub(now.elapsed()));
+            }
+            sampled.add(&BTreeMap::new(), Instant::now());
+            sampled
+        }
+
+        /// The pids `table` shows holding or waiting for the flock on inode `ino`.
+        fn on_lock(table: &str, ino: u64) -> BTreeMap<u32, Seen> {
+            let mut current = BTreeMap::new();
+            for line in table.lines() {
+                // `<n>: [->] FLOCK <mode> <access> <pid> <maj>:<min>:<ino> <start> <end>`.
+                let mut words = line.split_whitespace().skip(1).peekable();
+                let seen = if words.next_if_eq(&"->").is_some() {
+                    Seen::Waiting
+                } else {
+                    Seen::Holding
+                };
+                let words: Vec<&str> = words.collect();
+                let [kind, _, _, pid, file, ..] = words.as_slice() else {
+                    continue;
+                };
+                let on = file.rsplit(':').next().and_then(|n| n.parse::<u64>().ok());
+                if *kind != "FLOCK" || on != Some(ino) {
+                    continue;
+                }
+                let Ok(pid) = pid.parse::<u32>() else {
+                    continue;
+                };
+                current.insert(pid, seen);
+            }
+            current
+        }
+
+        /// `pid`'s subcommand, from its command line ([`KINDS`]).
+        fn kind_of(pid: u32) -> &'static str {
+            let line = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+            let mut args = line.split(|&b| b == 0).skip(1);
+            let found = args.find_map(|arg| KINDS.iter().find(|kind| kind.as_bytes() == arg));
+            found.copied().unwrap_or("other")
+        }
+
+        impl Sampled {
+            /// Adds one sample, `current`, taken at `now`.
+            fn add(&mut self, current: &BTreeMap<u32, Seen>, now: Instant) {
+                // 1. The lock's state in this sample.
+                self.samples += 1;
+                let holding = current.values().filter(|&&s| s == Seen::Holding).count();
+                self.held += u32::from(holding > 0);
+                let waiting = current.len() - holding;
+                self.waiters += u32::try_from(waiting).expect("fits");
+
+                // 2. Each process seen before and not now has let go or stopped waiting.
+                for (pid, track) in &mut self.tracks {
+                    if !current.contains_key(pid) {
+                        track.move_to(Seen::Gone, now);
+                    }
+                }
+
+                // 3. Each process seen now, met for the first time or not.
+                for (&pid, &seen) in current {
+                    let track = self.tracks.entry(pid).or_insert_with(|| Track {
+                        kind: kind_of(pid),
+                        seen: (Seen::Gone, now),
+                        wait: Duration::ZERO,
+                        hold: Duration::ZERO,
+                        holds: 0,
+                    });
+                    track.move_to(seen, now);
+                }
+            }
+
+            /// Prints a `landing-lock: ` line per process, then a `<tag>lock` line per
+            /// subcommand.
+            pub(super) fn print(&self, tag: &str) {
+                let ms = |d: Duration| d.as_secs_f64() * 1_000.0;
+                for (pid, track) in &self.tracks {
+                    println!(
+                        "landing-lock: pid={pid} cmd={} wait_ms={:.1} hold_ms={:.1} holds={}",
+                        track.kind,
+                        ms(track.wait),
+                        ms(track.hold),
+                        track.holds
+                    );
+                }
+                let share = |n: u32| f64::from(n) / f64::from(self.samples.max(1));
+                for kind in KINDS.iter().copied().chain(["other"]) {
+                    let of_kind = || self.tracks.values().filter(|t| t.kind == kind);
+                    let mut waits: Vec<Duration> = of_kind().map(|t| t.wait).collect();
+                    let mut holds: Vec<Duration> = of_kind().map(|t| t.hold).collect();
+                    if waits.is_empty() {
+                        continue;
+                    }
+                    waits.sort_unstable();
+                    holds.sort_unstable();
+                    let at = |all: &[Duration], pct: usize| all[(all.len() - 1) * pct / 100];
+                    println!(
+                        "{tag}lock cmd={kind} processes={} wait_p50_ms={:.1} wait_p99_ms={:.1} \
+                         hold_p50_ms={:.1} hold_p99_ms={:.1}",
+                        waits.len(),
+                        ms(at(&waits, 50)),
+                        ms(at(&waits, 99)),
+                        ms(at(&holds, 50)),
+                        ms(at(&holds, 99)),
+                    );
+                }
+                println!(
+                    "{tag}lock samples={} held_pct={:.1} mean_waiters={:.2}",
+                    self.samples,
+                    share(self.held) * 100.0,
+                    share(self.waiters)
+                );
+            }
         }
     }
 }
