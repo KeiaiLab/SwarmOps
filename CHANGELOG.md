@@ -22,6 +22,12 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   12,000 commits by phase (`fetch`, `sync --no-push`, `push`), and G4's landing case with
   `SWARMOPS_TEST_CLI_LANDING_LOCK_SAMPLE_US` set prints each process's wait for `meta/lock` and
   its hold, sampled from `/proc/locks`.
+- `swarmops serve` serves reads over ssh: as an `authorized_keys` forced command it takes
+  `git-upload-pack '<store>.git'`, checks the caller's `read` in the store's `access.toml`,
+  exports every served ref of the committed snapshot into `<store>/git/serve.git`, and runs the
+  host git's `upload-pack` there, so stock git clones, fetches, pulls and shallow-clones with
+  protocol v2 or v0. Partial clone filters are not advertised (git fetches every blob), and no
+  text a client gets names a host path.
 
 ### Changed
 
