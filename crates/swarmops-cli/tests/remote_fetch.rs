@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use swarmops_testkit::remote::{GitServer, HttpAuth, HttpServer, SshMode};
 use tempfile::TempDir;
 
-use crate::support::{BIN, Run, Store, run, run_bin};
+use crate::support::{BIN, Run, Store, run, run_bin, swarmops};
 
 /// The agent the commands that need an identity run as.
 const AGENT: &str = "agent/worker-17";
@@ -319,6 +319,36 @@ fn fetch_moves_no_store_ref() {
     let fetched = fetch(&store, ORIGIN);
     assert_eq!(fetched["imported"], 2, "{fetched}");
     assert_eq!(refs(&store), before);
+}
+
+/// `--repo` relative to the working directory: the fetch's git runs in the mirror, and still
+/// finds it.
+#[test]
+fn fetch_with_a_relative_repo() {
+    let remote = Remote::new();
+    let store = remote.store();
+    add(&store, ORIGIN, &remote.url(), &[]).ok();
+
+    // The store named from its parent directory.
+    let path = Path::new(store.path());
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("a UTF-8 store name");
+    let parent = path.parent().expect("the store's parent");
+    let args = ["--repo", name, "fetch", ORIGIN];
+    let output = swarmops(&args, &remote.vars(&[]))
+        .current_dir(parent)
+        .output()
+        .expect("run swarmops");
+    let fetched = Run {
+        args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+        status: output.status,
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+    .ok();
+    assert_eq!(fetched["imported"], 2, "{fetched}");
 }
 
 /// A fetch imports the followed branch's commits only: the remote's other branches reach the

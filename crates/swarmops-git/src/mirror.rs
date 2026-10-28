@@ -72,7 +72,8 @@ pub const STALE_LOCK_AGE: Duration = Duration::from_mins(10);
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct Mirror {
-    /// `<store>/git/mirror.git`.
+    /// `<store>/git/mirror.git`, absolute: git runs in it, so a relative path would name it
+    /// again from inside itself.
     git_dir: PathBuf,
 }
 
@@ -138,7 +139,8 @@ pub enum MirrorError {
 impl Mirror {
     /// The mirror of the store at `store_root`: makes `git/` and `git/lock`, and writes `MIRROR`
     /// when it is absent; never `mirror.git`, which [`Mirror::ensure`] makes under the lock. A
-    /// `MIRROR` that is there, known or not, is left for `ensure`.
+    /// `MIRROR` that is there, known or not, is left for `ensure`. A relative `store_root` is
+    /// read from the working directory.
     pub fn open(store_root: &Utf8Path) -> Result<Mirror, MirrorError> {
         let root = store_root.as_std_path();
         let git = root.join(GIT);
@@ -167,7 +169,7 @@ impl Mirror {
             sync_dir(&git)?;
         }
         Ok(Mirror {
-            git_dir: git.join(MIRROR_GIT),
+            git_dir: std::path::absolute(git.join(MIRROR_GIT))?,
         })
     }
 
@@ -230,7 +232,7 @@ impl Mirror {
         }
     }
 
-    /// `mirror.git`, the directory every git command runs in.
+    /// `mirror.git`, the directory every git command runs in, as an absolute path.
     pub fn git_dir(&self) -> &Path {
         &self.git_dir
     }

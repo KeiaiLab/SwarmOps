@@ -113,6 +113,8 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   longer names nothing by one (issue #16 item 5).
 - A fetch that meets a garbled loose object in the mirror fails `E_REMOTE_REJECTED`
   `bad_objects`, no longer `unclassified` or a retried `E_REMOTE_UNREACHABLE`.
+- `--repo` with a relative path works for the remote commands (`fetch`, `push`, `sync`); git
+  failed with "not a git repository" (`E_REMOTE_REJECTED` `unclassified`).
 
 ### Fixed
 
