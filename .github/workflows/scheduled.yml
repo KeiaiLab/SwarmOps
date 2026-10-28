@@ -288,12 +288,13 @@ jobs:
             cargo nextest run --locked --all-features -p swarmops-git \
             --run-ignored ignored-only -E 'test(exported_repositories_pass_git_fsck)' --no-capture
       # The remote suites (the transport, the mirror, the sync engine, the limits, the test kit's
-      # server and the CLI's remote tests) with this git as the product's.
+      # server and the CLI's remote tests) and the serve suites (the test kit's serve site, git's
+      # serve modules and the CLI's serve tests) with this git as the product's.
       - name: The remote suites with git ${{ matrix.git }}
         run: |
           SWARMOPS_GIT="$GIT_PREFIX/bin/git" \
             cargo nextest run --locked --all-features -p swarmops-testkit -p swarmops-git \
-            -p swarmops-cli -E 'test(/^(transport|mirror|sync|limits|remote|remote_[a-z_]+)::/)'
+            -p swarmops-cli -E 'test(/^(transport|mirror|sync|limits|remote|remote_[a-z_]+|serve|serve_[a-z_]+)::/)'
       - name: Give the runner's user back the workspace
         if: ${{ always() }}
         run: |
