@@ -2,7 +2,10 @@
 //! test kit's forced-command stand-in: receive-pack hands every command to the `proc-receive`
 //! hook, which imports the pushed commits from `serve.git` and moves the store ref by
 //! compare-and-swap, as the caller `--as` names. The hook runs only inside a push `serve`
-//! started, and a push it cannot decide moves nothing.
+//! started, and a push it cannot decide moves nothing. The push rules: branches and lightweight
+//! tags created, a tag never moved, `main` never deleted and moved only forward along first
+//! parents, another branch's backward move and every deletion by the `force` grant, a stale old
+//! value refused, each command of a push decided on its own.
 
 use std::fs;
 use std::io::Write as _;
@@ -22,6 +25,12 @@ use crate::support::{self, Swarmops};
 /// The agent a forced command names.
 const AGENT: &str = "person/ada";
 
+/// An agent that pushes feature branches, without `force`.
+const PUSHER: &str = "person/bob";
+
+/// An agent that only reads.
+const READER: &str = "person/eve";
+
 /// An agent the serving account's environment names, which never pushes.
 const INTRUDER: &str = "agent/intruder";
 
@@ -31,13 +40,27 @@ const WRITER: &str = "agent/worker-1";
 /// The store every site serves.
 const STORE: &str = "acme";
 
-/// The served store's access file: [`AGENT`] pushes `main` and the release branches.
+/// The served store's access file: [`AGENT`] pushes `main`, the release and feature branches
+/// and the tags, and forces the feature branches; [`PUSHER`] pushes the feature branches;
+/// [`READER`] reads.
 const ACCESS: &str = r#"version = 1
 
 [[grant]]
 who = ["person/ada"]
-push = ["main", "release/*"]
+push = ["main", "release/*", "feature/**", "tags/**"]
+force = ["feature/**"]
+
+[[grant]]
+who = ["person/bob"]
+push = ["feature/**"]
+
+[[grant]]
+who = ["person/eve"]
+read = true
 "#;
+
+/// The most commands one push may hold (`MAX_PUSH_COMMANDS`).
+const MAX_PUSH_COMMANDS: usize = 1_000;
 
 /// The variables the parent `serve` gives its hook.
 const SERVE_STORE: &str = "SWARMOPS_SERVE_STORE";
@@ -66,6 +89,19 @@ impl Site {
     /// The store, served by `served`.
     fn on(served: ServeSite) -> Site {
         served.init(STORE);
+        Site::filled(served)
+    }
+
+    /// The store made at FORMAT 1, served with the test kit's environment.
+    fn format1() -> Site {
+        let served = ServeSite::new::<Swarmops>();
+        let path = served.store(STORE);
+        support::run(&["init", "--format", "1", path.to_str().unwrap()], &[]).ok();
+        Site::filled(served)
+    }
+
+    /// The store `served` made, given [`ACCESS`] and the `linear` fixture as `main`.
+    fn filled(served: ServeSite) -> Site {
         let site = Site {
             served,
             work: TempDir::new().unwrap(),
@@ -136,10 +172,38 @@ impl Site {
     /// git with `args` in `dir` as [`AGENT`]; what it did. Its stderr never holds the store's
     /// path.
     fn git_out(&self, dir: &Path, args: &[&str]) -> Output {
-        let output = self.git_via(&self.served.ssh_command(AGENT), dir, args);
+        self.git_as(AGENT, dir, args)
+    }
+
+    /// git with `args` in `dir` as `who`; what it did. Its stderr never holds the store's path.
+    fn git_as(&self, who: &str, dir: &Path, args: &[&str]) -> Output {
+        let output = self.git_via(&self.served.ssh_command(who), dir, args);
         let stderr = text(&output.stderr);
         assert!(!stderr.contains(&self.store()), "a host path: {stderr}");
         output
+    }
+
+    /// The store's refs and `serve.git`'s, to see that nothing moved.
+    fn refs(&self) -> (Value, String) {
+        (
+            self.so(&["ref", "list"])["refs"].clone(),
+            self.served_refs(),
+        )
+    }
+
+    /// The names of the store's refs.
+    fn ref_names(&self) -> Vec<String> {
+        let listed = self.so(&["ref", "list"]);
+        (listed["refs"].as_array().unwrap().iter())
+            .map(|entry| entry["name"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    /// Whether `serve.git` has `name` at `oid`.
+    fn serves(&self, oid: &str, name: &str) -> bool {
+        self.served_refs()
+            .lines()
+            .any(|line| line == format!("{oid} {name}"))
     }
 
     /// git with `args` in `dir` as [`AGENT`], which must succeed; its stdout.
@@ -179,6 +243,17 @@ impl Site {
 /// `bytes` as text.
 fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// git's report of a push the hook refused: exit non-zero, `[remote rejected]`, and each of
+/// `needles` in it.
+fn assert_rejected(output: &Output, needles: &[&str]) {
+    let stderr = text(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.contains("[remote rejected]"), "{stderr}");
+    for needle in needles {
+        assert!(stderr.contains(needle), "no {needle:?} in: {stderr}");
+    }
 }
 
 /// The hook run directly in `dir` with `env`, `args` after [`HOOK`] and `input` on its stdin;
@@ -475,4 +550,293 @@ fn serve_push_advertises_no_atomic() {
     assert!(!atomic.status.success(), "{stderr}");
     assert!(stderr.contains("atomic"), "{stderr}");
     assert_eq!(site.newest_op()["op"], before);
+}
+
+/// A FORMAT 2 branch and a lightweight tag are created (`v1.4.0` as `tags/v1.4.0`); a tag never
+/// moves (`E_TAG_IMMUTABLE`), and an annotated tag, which is no changeset, is refused
+/// (`annotated_tag`): neither moves anything.
+#[test]
+fn serve_push_creates_branches_and_tags() {
+    let site = Site::new();
+    let work = site.clone("work");
+    let tip = site.commit(&work, "feature.txt");
+
+    // 1. feature/x: created in the store and in serve.git.
+    site.git(
+        &work,
+        &["push", "--quiet", "origin", "HEAD:refs/heads/feature/x"],
+    );
+    assert!(site.ref_names().contains(&"feature/x".to_owned()));
+    assert!(
+        site.serves(&tip, "refs/heads/feature/x"),
+        "{}",
+        site.served_refs()
+    );
+
+    // 2. The tag v1.4.0: created as tags/v1.4.0.
+    site.git(&work, &["tag", "v1.4.0"]);
+    site.git(&work, &["push", "--quiet", "origin", "refs/tags/v1.4.0"]);
+    assert!(site.ref_names().contains(&"tags/v1.4.0".to_owned()));
+    assert!(
+        site.serves(&tip, "refs/tags/v1.4.0"),
+        "{}",
+        site.served_refs()
+    );
+
+    // 3. The tag moved, forced by the client: refused by the store.
+    let before = site.refs();
+    site.commit(&work, "moved.txt");
+    site.git(&work, &["tag", "--force", "v1.4.0"]);
+    let moved = site.git_out(&work, &["push", "--force", "origin", "refs/tags/v1.4.0"]);
+    assert_rejected(&moved, &["E_TAG_IMMUTABLE"]);
+    assert_eq!(site.refs(), before);
+
+    // 4. An annotated tag: refused before its import.
+    site.git(&work, &["tag", "--annotate", "--message", "v2", "v2.0.0"]);
+    let annotated = site.git_out(&work, &["push", "origin", "refs/tags/v2.0.0"]);
+    assert_rejected(&annotated, &["E_INVALID_ARG", "annotated tag"]);
+    assert_eq!(site.refs(), before);
+}
+
+/// A deletion needs the `force` grant (`E_POLICY_DENIED` without it), and `main` is never
+/// deleted (`E_REF_PROTECTED`), whoever asks.
+#[test]
+fn serve_push_deletes_with_force() {
+    let site = Site::new();
+    let work = site.clone("work");
+    let main = site.rev(&work, "HEAD");
+    site.git(
+        &work,
+        &["push", "--quiet", "origin", "HEAD:refs/heads/feature/x"],
+    );
+    let before = site.refs();
+
+    // 1. Without force: refused, nothing deleted.
+    let denied = site.git_as(PUSHER, &work, &["push", "origin", ":refs/heads/feature/x"]);
+    assert_rejected(&denied, &["E_POLICY_DENIED"]);
+    assert_eq!(site.refs(), before);
+
+    // 2. With force: deleted from the store and from serve.git.
+    site.git(
+        &work,
+        &["push", "--quiet", "origin", ":refs/heads/feature/x"],
+    );
+    assert!(!site.ref_names().contains(&"feature/x".to_owned()));
+    assert!(
+        !site.served_refs().contains("refs/heads/feature/x"),
+        "{}",
+        site.served_refs()
+    );
+
+    // 3. main: protected.
+    let before = site.refs();
+    let protected = site.git_out(&work, &["push", "origin", ":refs/heads/main"]);
+    assert_rejected(&protected, &["E_REF_PROTECTED"]);
+    assert_eq!(site.refs(), before);
+    assert!(
+        site.serves(&main, "refs/heads/main"),
+        "{}",
+        site.served_refs()
+    );
+}
+
+/// Criterion 3: a push whose old value is stale, because another clone pushed between its
+/// advertisement and its commands, moves nothing and exits non-zero; the store verifies clean.
+#[test]
+fn serve_push_refuses_a_stale_old() {
+    let site = Site::new();
+    let first = site.clone("first");
+    let second = site.clone("second");
+    let won = site.commit(&first, "first.txt");
+    site.commit(&second, "second.txt");
+
+    // 1. The second clone's pre-push hook, which runs after the advertisement, pushes the first
+    //    clone's commit to main.
+    let pre_push = second.join(".git/hooks/pre-push");
+    let race = format!(
+        "#!/bin/sh\nunset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX\n\
+         cd '{}' && exec git push --quiet origin main\n",
+        first.to_str().unwrap()
+    );
+    fs::write(&pre_push, race).unwrap();
+    fs::set_permissions(&pre_push, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // 2. The second push: stale, refused.
+    let stale = site.git_out(&second, &["push", "origin", "main"]);
+    assert_rejected(&stale, &["stale: refs/heads/main moved; fetch first"]);
+
+    // 3. main is the first clone's commit, in the store and in serve.git; the store is whole.
+    assert!(
+        site.serves(&won, "refs/heads/main"),
+        "{}",
+        site.served_refs()
+    );
+    let fresh = site.clone("fresh");
+    assert_eq!(site.rev(&fresh, "origin/main"), won);
+    site.so(&["verify", "--deep"]);
+}
+
+/// `main` moves only forward along first parents: a forced rewrite and a merge whose first
+/// parent does not reach `main` are `non-fast-forward`, while that merge moves `feature/x`
+/// forward (any parent); a backward move of `feature/x` needs `force`.
+#[test]
+fn serve_push_moves_main_forward_only() {
+    let site = Site::new();
+    let work = site.clone("work");
+    let main = site.rev(&work, "HEAD");
+    site.git(
+        &work,
+        &["push", "--quiet", "origin", "HEAD:refs/heads/feature/x"],
+    );
+
+    // 1. main rewritten, forced by the client: refused.
+    let before = site.refs();
+    site.git(
+        &work,
+        &["commit", "--quiet", "--amend", "--message", "rewritten"],
+    );
+    let forced = site.git_out(
+        &work,
+        &["push", "--force", "origin", "HEAD:refs/heads/main"],
+    );
+    assert_rejected(&forced, &["non-fast-forward", "refs/land/main"]);
+    assert_eq!(site.refs(), before);
+
+    // 2. A merge whose first parent is a side branch and whose second is main: refused on main.
+    site.git(
+        &work,
+        &["checkout", "--quiet", "-B", "side", &format!("{main}~1")],
+    );
+    let branched = site.commit(&work, "side.txt");
+    site.git(
+        &work,
+        &["merge", "--quiet", "--no-ff", "--message", "merge", &main],
+    );
+    let merge = site.rev(&work, "HEAD");
+    let refused = site.git_out(&work, &["push", "origin", "HEAD:refs/heads/main"]);
+    assert_rejected(&refused, &["non-fast-forward", "refs/land/main"]);
+    assert!(
+        site.serves(&main, "refs/heads/main"),
+        "{}",
+        site.served_refs()
+    );
+
+    // 3. The same merge onto feature/x: forward through its second parent, accepted.
+    site.git(
+        &work,
+        &["push", "--quiet", "origin", "HEAD:refs/heads/feature/x"],
+    );
+    assert!(
+        site.serves(&merge, "refs/heads/feature/x"),
+        "{}",
+        site.served_refs()
+    );
+
+    // 4. feature/x moved back to the side commit: refused without force, moved with it.
+    let back = format!("+{branched}:refs/heads/feature/x");
+    let denied = site.git_as(PUSHER, &work, &["push", "origin", &back]);
+    assert_rejected(&denied, &["E_POLICY_DENIED"]);
+    assert!(
+        site.serves(&merge, "refs/heads/feature/x"),
+        "{}",
+        site.served_refs()
+    );
+    site.git(&work, &["push", "--quiet", "origin", &back]);
+    assert!(
+        site.serves(&branched, "refs/heads/feature/x"),
+        "{}",
+        site.served_refs()
+    );
+}
+
+/// Names the store does not serve are refused: `refs/notes/` (not served), a branch the store
+/// reserves (`remote/…`), and a FORMAT 2 branch on a FORMAT 1 store (`E_FORMAT_REQUIRED`).
+#[test]
+fn serve_push_refuses_unserved_names() {
+    let site = Site::new();
+    let work = site.clone("work");
+    let before = site.refs();
+
+    // 1. refs/notes/x and refs/heads/remote/o/x: neither is a store ref.
+    let notes = site.git_out(&work, &["push", "origin", "HEAD:refs/notes/x"]);
+    assert_rejected(&notes, &["E_REF_NAME_INVALID", "is not served"]);
+    let reserved = site.git_out(&work, &["push", "origin", "HEAD:refs/heads/remote/o/x"]);
+    assert_rejected(&reserved, &["E_REF_NAME_INVALID", "reserves"]);
+    assert_eq!(site.refs(), before);
+
+    // 2. A FORMAT 1 store: feature/x needs FORMAT 2.
+    let old = Site::format1();
+    let work = old.clone("work");
+    let before = old.refs();
+    let branch = old.git_out(&work, &["push", "origin", "HEAD:refs/heads/feature/x"]);
+    assert_rejected(&branch, &["E_FORMAT_REQUIRED"]);
+    assert_eq!(old.refs(), before);
+}
+
+/// A push of more than `MAX_PUSH_COMMANDS` commands is refused whole: every command `ng`,
+/// nothing created.
+#[test]
+fn serve_push_bounds_its_commands() {
+    let site = Site::new();
+    let work = site.clone("work");
+    let before = site.refs();
+
+    // 1. One command past the bound.
+    let specs: Vec<String> = (0..=MAX_PUSH_COMMANDS)
+        .map(|n| format!("HEAD:refs/heads/feature/b{n}"))
+        .collect();
+    let mut args = vec!["push", "origin"];
+    args.extend(specs.iter().map(String::as_str));
+    let pushed = site.git_out(&work, &args);
+
+    // 2. Every one refused; nothing moved.
+    assert_rejected(&pushed, &["E_INVALID_ARG"]);
+    let stderr = text(&pushed.stderr);
+    let rejected = stderr.matches("[remote rejected]").count();
+    assert_eq!(rejected, MAX_PUSH_COMMANDS + 1, "{stderr}");
+    assert_eq!(site.refs(), before);
+}
+
+/// Criterion 5: an identity with `read` only is refused each ref it pushes
+/// (`E_POLICY_DENIED`); and the commands of one push are decided each on its own, so a refused
+/// one does not stop another from moving.
+#[test]
+fn serve_push_decides_each_ref() {
+    let site = Site::new();
+    let work = site.clone("work");
+    let tip = site.commit(&work, "each.txt");
+    let before = site.refs();
+
+    // 1. The reader: both refs refused.
+    let line = [
+        "push",
+        "origin",
+        "HEAD:refs/heads/main",
+        "HEAD:refs/heads/feature/y",
+    ];
+    let denied = site.git_as(READER, &work, &line);
+    assert_rejected(&denied, &["E_POLICY_DENIED"]);
+    let stderr = text(&denied.stderr);
+    assert_eq!(stderr.matches("E_POLICY_DENIED").count(), 2, "{stderr}");
+    assert_eq!(site.refs(), before);
+
+    // 2. One push, one ref refused and the other moved.
+    let line = [
+        "push",
+        "origin",
+        "HEAD:refs/heads/main",
+        "HEAD:refs/notes/x",
+    ];
+    let mixed = site.git_out(&work, &line);
+    assert_rejected(&mixed, &["refs/notes/x", "is not served"]);
+    assert!(
+        site.serves(&tip, "refs/heads/main"),
+        "{}",
+        site.served_refs()
+    );
+    assert!(
+        !site.served_refs().contains("refs/notes/x"),
+        "{}",
+        site.served_refs()
+    );
 }

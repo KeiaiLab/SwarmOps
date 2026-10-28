@@ -37,6 +37,11 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   for the caller `--as` names. `atomic` and push options are not advertised. The hook refuses
   (`not_from_git`) unless the parent `serve` named the store and the caller and `GIT_DIR` is that
   store's `serve.git`.
+- `swarmops serve`'s pushes take the rest of the push rules: a lightweight tag is created as
+  `tags/<name>` and never moved (`E_TAG_IMMUTABLE`), an annotated tag is refused
+  (`annotated_tag`); a branch or tag is deleted with the `force` grant (`E_POLICY_DENIED`
+  without it) and `main` never (`E_REF_PROTECTED`); a branch other than `main` moves backwards
+  with the `force` grant. Each command of a push is decided on its own.
 
 ### Changed
 
