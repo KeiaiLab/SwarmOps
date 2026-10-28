@@ -195,10 +195,6 @@ impl GitCli {
     /// the service and its arguments, and the stdio it serves on (stdin is closed here).
     ///
     /// [`base_command`]: GitCli::base_command
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "serve::child runs it once its body is built")
-    )]
     pub(crate) fn serve_command(&self, git_dir: &Path, config: &[(&str, &OsStr)]) -> Command {
         let mut command = self.base_command();
         for key in SERVE_DROPPED_VARS {
