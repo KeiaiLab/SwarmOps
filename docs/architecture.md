@@ -400,7 +400,7 @@ it checked. A relocated land holds the lock one object round longer.
 
 ## Reading
 
-Readers take no lock (storage §3, "읽기"). `MetaStore::read()` takes a snapshot: it reads
+Readers take no lock (storage §3, "읽기"), `op log` aside (below). `MetaStore::read()` takes a snapshot: it reads
 `journal.ckpt`, opens the index (counting only the records that all five index files hold whole,
 and, past the checkpoint and the sorted views, only those that the frames past the checkpoint
 vouch for, field by field, as storage §3, "색인의 보증", says: a record that a power loss zero-filled
@@ -523,7 +523,11 @@ protocol.
 2. It reads the branch (`main` by default) and the head's export oid, the derived value `git_oid`
    (`ExportOid`): the commit each changeset exports to. An imported changeset whose lineage
    SwarmOps did not change takes its `git.oid` without reading a tree; any other is rendered and
-   hashed, the git oids of its trees and blobs memoized per object in the derived store.
+   hashed, the git oids of its trees and blobs memoized per object in the derived store. With
+   the store's memo key (32 bytes the CLI keeps outside the store, in
+   `$XDG_STATE_HOME/swarmops/memo-keys/<repo_id>.key`), the walk stops at a parent, tree or blob
+   whose `_mac` memo's keyed MAC checks and reads nothing below it; without one, every export
+   oid below the head is derived from the objects (the v0.6.0 design, D2).
 3. A branch at the head's export is up to date. Otherwise a branch that exists must name the
    export of the head or of an ancestor of it, the base: found through the external id index, or
    along the head's first parents. Anything else stops the export with `E_GIT_EXPORT_DIVERGED`
@@ -555,12 +559,13 @@ store and its remotes, and move packs with the user's own git:
   (GitHub)        the user's git, spawned       refs/remotes/<remote>/*                   main
                   with the user's credentials   refs/remote-tags/<remote>/*
                                                 refs/heads/push/<remote>/*
+                                                refs/incoming/<remote>/*
 ```
 
 **The transport.** `GitCli` runs `git` (2.39 or later: `SWARMOPS_GIT`, else `PATH`) as a child
 process, without a shell, with its arguments after `--end-of-options` and its configuration in
 the environment (`GIT_CONFIG_COUNT`: `core.fsync=all`, an empty hooks directory, protocol version
-2), never in its arguments. The child's environment loses the variables that point git at another
+2, git's fsck of every received object), never in its arguments. The child's environment loses the variables that point git at another
 repository, git's tracing and the locale, and gains `GIT_DIR` (the mirror), `LC_ALL=C`,
 `GIT_TERMINAL_PROMPT=0` and `GIT_ALLOW_PROTOCOL` (the remote URL's scheme alone); credential
 helpers, `SSH_AUTH_SOCK`, `GIT_SSH_COMMAND` and proxy variables pass through. A remote's
@@ -568,7 +573,8 @@ helpers, `SSH_AUTH_SOCK`, `GIT_SSH_COMMAND` and proxy variables pass through. A 
 base64 form, from whatever git prints before it enters an error. A failure is classified by one
 table, from git's exit status, push's porcelain and git's messages under `LC_ALL=C`, into
 `E_REMOTE_UNREACHABLE` (retryable), `E_REMOTE_REJECTED` and `E_REMOTE_DIVERGED`; a failure the table
-does not know is `E_REMOTE_REJECTED` with the reason `unclassified`, never retried. SwarmOps has no
+does not know is `E_REMOTE_REJECTED` with the reason `unclassified`, never retried; an object
+git's fsck refuses, or one a fetched ref reaches and the mirror lacks, is `bad_objects`. SwarmOps has no
 network crate and writes no pack: gix stays on the disk side.
 
 **The mirror.** `git/mirror.git` is a cache that SwarmOps alone writes: fetched packs land in it,
@@ -580,8 +586,11 @@ process's git lock files has those removed once they are older than ten minutes.
 serializes the commands that write the mirror; a held lock is `E_BUSY` at once. `meta/lock`, the
 store's writer lock, is never held across the network.
 
-**Fetch, push and sync.** `fetch` has git fetch every branch and tag into the mirror, then imports
-the followed branch's commits with no ref moved (`objects_only`). `push` exports a store ref onto
+**Fetch, push and sync.** `fetch` has git fetch every branch and tag into the mirror's
+`refs/incoming/<remote>/` alone, checks that every object their tips reach is there
+(`git rev-list --objects --missing=error`), moves the tracking refs and tags to them by
+compare-and-swap, then imports the followed branch's commits with no ref moved (`objects_only`).
+A failed step stops it before the import, with no tracking ref moved. `push` exports a store ref onto
 a staging branch set to what the last fetch saw (`refs/heads/push/<remote>/<branch>`), so that the
 export only appends, and has git push it with `--force-with-lease` on that value: a compare-and-swap
 on the remote, never forced. `sync` fetches, finds `main`'s changes above the newest changeset the
