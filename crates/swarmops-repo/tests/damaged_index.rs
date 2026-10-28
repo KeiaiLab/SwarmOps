@@ -7,7 +7,10 @@
 //! its object. Every first-parent walk (a revision's `~N`, `first_parents`, `is_ancestor`,
 //! `merge_base`, a path's history, a land's squash) takes each step from the changeset objects,
 //! hash-checked against their ids, so that none drops a committed changeset or loops on a cycle
-//! the index makes up. `verify` reports the damage all the same.
+//! the index makes up. `verify` reports the damage all the same. A generation in `gen.col` that
+//! is not 1 + the largest of its object's parents' fails the walks that order or bound by it
+//! (`merge_base`, a revision's `~N` past a root, `is_ancestor` answering no, `log --path`), so that
+//! none answers what the damage makes up.
 //!
 //! Every test owns a fresh store: a chain committed and checkpointed, then one index file damaged
 //! by hand.
@@ -20,6 +23,7 @@ use std::time::Duration;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::ChangesetId;
+use swarmops_repo::merge::tree_diff::PathFilter;
 use swarmops_repo::{
     Depth, LandRequest, LandStatus, LocalRepo, MismatchCause, RepoError, StoreError, VerifyProblem,
 };
@@ -142,6 +146,19 @@ fn land_from(base: ChangesetId, head: ChangesetId) -> LandRequest {
     land
 }
 
+/// Writes generation `now` over record `record`'s in `idx/gen.col`, after checking that it is
+/// `was`.
+fn set_generation(root: &Utf8Path, record: usize, was: u64, now: u64) {
+    let at = 8 * record;
+    overwrite(
+        root,
+        "idx/gen.col",
+        at,
+        &was.to_le_bytes(),
+        &now.to_le_bytes(),
+    );
+}
+
 /// What verify finds, deep.
 fn problems(repo: &LocalRepo) -> Vec<VerifyProblem> {
     repo.verify(Depth::Deep).unwrap().problems
@@ -238,6 +255,92 @@ fn a_first_parent_cycle_in_the_index_is_never_walked() {
         problems(&repo),
         [VerifyProblem::IndexMismatch {
             seq: 1,
+            cause: MismatchCause::Journal
+        }]
+    );
+}
+
+#[test]
+fn a_crafted_generation_fails_the_merge_base_walk() {
+    let (_dir, root, repo, Chain { c, b, .. }) = chain();
+    let [_, c2, _, _, c5] = c;
+    // c3's generation (record 2) 3 to 2: by it, the walk passes c2 and answers c1.
+    set_generation(&root, 2, 3, 2);
+
+    assert_index_corrupt(merge_base_within(&root, c5, b), "merge base of c5 and b");
+    assert_index_corrupt(merge_base_within(&root, b, c5), "merge base of b and c5");
+    assert_eq!(
+        merge_base_within(&root, c2, b).unwrap(),
+        Some(c2),
+        "below c3"
+    );
+
+    assert_eq!(
+        problems(&repo),
+        [VerifyProblem::IndexMismatch {
+            seq: 2,
+            cause: MismatchCause::Journal
+        }]
+    );
+}
+
+#[test]
+fn a_crafted_generation_never_makes_a_revision_name_nothing() {
+    let (_dir, root, repo, Chain { c, .. }) = chain();
+    let [c1, c2, _, _, c5] = c;
+    // c5's generation (record 4) 5 to 2: by it, c5 has one first-parent step above a root.
+    set_generation(&root, 4, 5, 2);
+
+    assert_eq!(resolve(&repo, &format!("{c5}~3")).unwrap(), c2, "c5~3");
+    assert_eq!(resolve(&repo, &format!("{c5}~4")).unwrap(), c1, "c5~4");
+    let read = repo.snapshot().unwrap();
+    assert_eq!(read.ancestor(c5, 5).unwrap(), None, "past the root");
+    assert_index_corrupt(
+        read.is_ancestor(c1, c5),
+        "c1, one generation below c5's crafted one",
+    );
+    // A no from the two generations alone, no step taken, reads nothing that could check them:
+    // the documented limit (docs/known-limitations.md, "A crafted index's generations").
+    assert!(
+        !read.is_ancestor(c2, c5).unwrap(),
+        "c2, at c5's crafted generation"
+    );
+
+    assert_eq!(
+        problems(&repo),
+        [VerifyProblem::IndexMismatch {
+            seq: 4,
+            cause: MismatchCause::Journal
+        }]
+    );
+}
+
+#[test]
+fn a_crafted_generation_fails_a_log_of_paths() {
+    let (_dir, root, repo) = new_repo();
+    let mut d = Vec::new();
+    for (n, file) in ["a", "b", "x", "x", "a"].into_iter().enumerate() {
+        let parents: Vec<ChangesetId> = d.last().copied().into_iter().collect();
+        let content = format!("{n}");
+        let req = request(
+            &parents,
+            vec![put(file, content.as_bytes())],
+            &format!("d{n}"),
+        );
+        d.push(repo.commit(req).unwrap().id);
+    }
+    repo.flush_metadata().unwrap();
+    // d1's generation (record 0) 1 to 3, still below d4's: by it, d1 is listed before d2.
+    set_generation(&root, 0, 1, 3);
+
+    let read = repo.snapshot().unwrap();
+    let filter = PathFilter::under(vec![path("a"), path("b")]);
+    assert_index_corrupt(read.log_paths(d[4], &filter, 10), "log of a and b");
+
+    assert_eq!(
+        problems(&repo),
+        [VerifyProblem::IndexMismatch {
+            seq: 0,
             cause: MismatchCause::Journal
         }]
     );

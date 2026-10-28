@@ -108,7 +108,7 @@ fn checkpoint(root: &Utf8Path) -> Vec<u8> {
 /// yet, the store checkpoints every 32 frames), and again after 20 more commits and a ref move,
 /// when the checkpoint has moved and the walk crosses it. `RepoRead::ancestor` and
 /// `RepoRead::first_parents` give the same changesets. A `~N` past the root by far is found to
-/// name nothing from the head's generation alone, without a derived value.
+/// name nothing from the head's generation, checked against its parents', without a derived value.
 #[test]
 fn resolve_tilde_walks_with_first_parent() {
     let (_dir, root, repo) = unsynced_repo();
@@ -458,7 +458,8 @@ fn bulk_chain(root: &Utf8Path, n: usize, files: &[(&str, &[u8])]) -> Vec<Changes
 /// The calls of `calls` that read a skip list, and whether every other call it made reads the
 /// object of one of `objects`, in their order, in the store at `root`: a walk that derives nothing
 /// makes no other filesystem call (the index is read through its own handles) but the read of the
-/// changeset a lift of `is_ancestor` or `merge_base` stops at, for its first parent.
+/// changeset a lift of `is_ancestor` or `merge_base` stops at, for its first parent, and of the
+/// start of an `ancestor` past a root, whose parents vouch for its generation.
 fn skip_list_reads(calls: &[String], root: &Utf8Path, objects: &[ChangesetId]) -> usize {
     let prefix = format!(
         "read meta/derived/{}/{}/",
@@ -546,7 +547,7 @@ fn a_long_gap_lifts_along_the_skip_list() {
     assert_eq!(read.ancestor(head, gap + 1).unwrap(), None);
     assert_eq!(read.ancestor(head, gap - 1).unwrap(), Some(c[1]));
     assert_eq!(read.ancestor(head, 2_000).unwrap(), Some(c[N - 1 - 2_000]));
-    assert!(skip_list_reads(&calls(), &root, &[]) <= 4 * 2 * 12);
+    assert!(skip_list_reads(&calls(), &root, &[head]) <= 4 * 2 * 12);
     assert_eq!(read.merge_base(head, c[0]).unwrap(), Some(c[0]));
     assert_eq!(read.merge_base(c[1_500], head).unwrap(), Some(c[1_500]));
     assert!(skip_list_reads(&calls(), &root, &[c[0], c[1_500]]) <= 2 * 2 * 12);

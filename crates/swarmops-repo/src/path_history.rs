@@ -124,7 +124,8 @@ impl<O: ObjectStore> RepoRead<'_, O> {
     }
 
     /// The last changeset to touch `prefix` from `at` (none from no changeset), with its
-    /// generation, which orders it on the chain.
+    /// generation, which orders it on the chain, checked against its parents'
+    /// ([`RepoRead::check_generation`]).
     fn touch(
         &self,
         at: Option<ChangesetId>,
@@ -138,6 +139,9 @@ impl<O: ObjectStore> RepoRead<'_, O> {
             .meta
             .changeset(id)?
             .ok_or(StoreError::MissingParent(id))?;
+
+        // The generation orders the touches, so its parents must vouch for it.
+        self.check_generation(&record)?;
         Ok(Some((record.generation, id)))
     }
 

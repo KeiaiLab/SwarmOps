@@ -83,6 +83,13 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   with `--follow` too and whatever `--limit`: it read as caught up before (`{derived: 0,
   cached: 0}`, exit 0), so a follower given such a frame stayed silent for good.
 
+### Fixed
+
+- History queries check each index generation they order or bound by against its parents': a
+  land's merge base and a `log --path` over several paths fail with `E_STORE_CORRUPT` on a
+  damaged or crafted `meta/idx/gen.col` instead of answering by it, and a revision's `~N` no
+  longer names nothing by one (issue #16 item 5).
+
 ## [0.6.0] - 2026-10-28
 
 Fix what the measurements missed. The 0.6.0 release holds the landing model the v0.5.0

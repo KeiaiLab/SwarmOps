@@ -320,14 +320,20 @@ left).
   key, and a record's parents must start where the record before it leaves off, or the read
   fails with `E_STORE_CORRUPT`; and every first-parent walk takes its parents from the changeset
   objects, which their hashes bind to their ids, so that no walk drops a committed changeset or
-  loops. A record's generation below the checkpoint or under the sorted views is taken as it is,
-  as is its delta hash: a damaged or crafted `meta/idx/gen.col` can make a revision's `~N` name
-  nothing where a changeset is, a land take an older common ancestor than the newest for its
-  merge base, and `log --path` list its changesets out of order. Every changeset such a walk
-  reaches is on the objects' first-parent chain, and `verify` reports the damage, which
-  `swarmops repair` rebuilds from the journal. Checking a generation on every read takes the
-  journal, or every generation down to a root. *Documented (M6). Found: 2026-10-20, when the read
-  path came to check the index.*
+  loops. A record's generation below the checkpoint or under the sorted views is read as it is,
+  but the walks that order or bound by one check it against the generations of the parents its object names (1 + the largest, 1 for a root), or fail with
+  `E_STORE_CORRUPT`: each changeset a merge base's walk steps from, each touch `log --path`
+  orders, and where a no of `is_ancestor` stopped; and a revision's `~N` takes no `None` from a
+  generation, reaching a root or a skip list's checked end instead. Each check covers one link:
+  a generation that agrees with its parents' crafted ones passes, as does a no of
+  `is_ancestor` from the two generations alone, no step taken, and a keyed land's walk of its
+  target, which stops at a generation. Such a `meta/idx/gen.col` can still have a land take an
+  older common ancestor than the newest for its merge base, or `log --path` list its changesets
+  out of order; a record's delta hash is taken as it is. Every changeset such a walk reaches is on
+  the objects' first-parent chain, and `verify` reports the damage, which `swarmops repair`
+  rebuilds from the journal. Checking a generation fully on every read takes the journal, or
+  every generation down to a root. *Documented (M6); narrowed to one link by issue #16 item 5's fix.
+  Found: 2026-10-20, when the read path came to check the index.*
 - **A text file past the line diff's bound is not diffed or merged by lines.** The histogram diff's
   time can grow with the square of a file's lines, so `diff` and a land's merge run it only on sides
   of at most 49,152 lines and 8 MiB (`MAX_DIFF_LINES`, `MAX_DIFF_BYTES`): past that,

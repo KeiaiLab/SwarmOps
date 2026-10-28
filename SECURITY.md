@@ -53,8 +53,9 @@ filesystem permissions are the access boundary. Within that model, these are vul
   the two links recovery and readers check, pass as valid, so a read that starts past them
   numbers its frames by them until `verify` walks the file and reports them (recovery checks
   every listed frame before it cuts or lists anything, so no committed frame is lost); the
-  generations a crafted index records (`meta/idx/gen.col`) are taken as they are, so the history
-  queries that prune by them (a land's merge base, a revision's `~N`) can answer wrongly, though
+  generations a crafted index records (`meta/idx/gen.col`) are checked only against their
+  parents' where a history walk uses them, so a run of them crafted to agree can still have a
+  land's merge base or `log --path` answer wrongly, though
   every changeset they reach is on the first-parent chain the changeset objects name, and
   `verify` reports the damage; and a
   `journal.log`, `journal.off`, index column or sorted view whose length is huge (sparse or

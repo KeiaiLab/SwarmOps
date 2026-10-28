@@ -37,6 +37,14 @@
 //! changesets they start from and lift to, for their generations; [`RepoRead::merge_base`] reads
 //! the record of each changeset it steps to as well, since it steps the side of the higher
 //! generation.
+//!
+//! A generation is the index's word too, so a walk that orders or bounds by one checks it where
+//! that costs at most one object read more than the walk makes: each changeset
+//! [`RepoRead::merge_base`] steps from, and the start of an [`RepoRead::ancestor`] past a root,
+//! against the generations of the parents its object names (1 + the largest, 1 for a root);
+//! where a no of [`RepoRead::is_ancestor`] stopped, against the generation it walked to. One that
+//! fails is [`StoreError::IndexCorrupt`]. A run of generations crafted to agree passes;
+//! `verify` checks them all.
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -117,10 +125,13 @@ impl<O: ObjectStore> RepoRead<'_, O> {
     /// The changeset `n` first-parent steps back from changeset `cs` (`cs` itself for 0), or
     /// `None` if a root comes first. Up to [`SKIP_AFTER`] steps it walks by narrow lookups;
     /// further, it lifts along the first-parent skip list, a jump per bit of `n`. A `cs` of
-    /// generation `g` has at most `g - 1` first-parent steps above a root, so an `n` of `g` or
-    /// more is `None` from `cs`'s record alone. [`RepoError::NotFound`] if the snapshot does not
-    /// hold `cs`; [`RepoError::DerivedCorrupt`] for a skip list that fails a walk's checks ([the
-    /// module documentation](self)).
+    /// generation `g` has at most `g - 1` first-parent steps above a root, so an `n` past
+    /// [`SKIP_AFTER`] and of `g` or more is `None` from `cs`'s record, its generation checked
+    /// against its parents'; a shorter walk stops at the root it reaches.
+    /// [`RepoError::NotFound`] if the snapshot does not hold `cs`;
+    /// [`RepoError::DerivedCorrupt`] for a skip list that fails a walk's checks ([the module
+    /// documentation](self)); [`StoreError::IndexCorrupt`] for a generation that is not
+    /// 1 + its parents' largest, where a check meets one.
     pub fn ancestor(&self, cs: ChangesetId, n: u64) -> Result<Option<ChangesetId>, RepoError> {
         self.ancestor_within(cs, n, SKIP_AFTER)
     }
@@ -164,9 +175,8 @@ impl<O: ObjectStore> RepoRead<'_, O> {
         if n == 0 {
             return Ok(Some(cs));
         }
-        if n >= start.generation {
-            return Ok(None);
-        }
+
+        // A short walk stops at a root, whatever the start's generation says.
         if n <= skip_after {
             let mut at = cs;
             for _ in 0..n {
@@ -177,6 +187,14 @@ impl<O: ObjectStore> RepoRead<'_, O> {
             }
             return Ok(Some(at));
         }
+
+        // Past a root by the start's generation, which its parents' vouch for: one object read,
+        // no derived value.
+        if n >= start.generation {
+            self.check_generation(&start)?;
+            return Ok(None);
+        }
+
         // A jump of `2^level` steps for each bit of `n`, from the highest: entry `level` of the
         // list of where the walk is, which a chain shorter than the jump does not have.
         let mut at = start;
@@ -229,8 +247,14 @@ impl<O: ObjectStore> RepoRead<'_, O> {
             match self.walk_step(at)? {
                 Some(parent) if parent == ancestor => return Ok(true),
                 Some(parent) => at = parent,
-                None => break,
+                None => return Ok(false),
             }
+        }
+
+        // A no that the gap bounded: where the walk stopped is at `target` or below, else a
+        // generation it took is wrong (one record read, no object).
+        if self.walk_record(at)?.generation > target {
+            return Err(wrong_generation());
         }
         Ok(false)
     }
@@ -245,6 +269,12 @@ impl<O: ObjectStore> RepoRead<'_, O> {
     ) -> Result<Option<ChangesetId>, RepoError> {
         let mut x = self.walk_start(a)?;
         let mut y = self.walk_start(b)?;
+
+        // The walk orders the two sides by their generations, each checked against its parents'
+        // when the walk steps from it; a 0, below every root's 1, would end it at a root first.
+        if x.generation == 0 || y.generation == 0 {
+            return Err(wrong_generation());
+        }
         loop {
             if x.id == y.id {
                 return Ok(Some(x.id));
@@ -354,6 +384,8 @@ impl<O: ObjectStore> RepoRead<'_, O> {
                 .checked_sub(1)
                 .is_none_or(|top| 1_u64 << top < at.generation);
         if !room {
+            // A list longer than a wrong generation leaves room for blames the index.
+            self.check_generation(at)?;
             return Err(wrong_list(
                 at.id,
                 format!(
@@ -398,6 +430,9 @@ impl<O: ObjectStore> RepoRead<'_, O> {
             .checked_add(1 << level)
             .is_some_and(|reach| reach <= at.generation);
         if !lower {
+            // A jump short by a wrong generation blames the index, not the list.
+            self.check_generation(at)?;
+            self.check_generation(next)?;
             return Err(wrong_list(
                 at.id,
                 format!(
@@ -467,11 +502,31 @@ impl<O: ObjectStore> RepoRead<'_, O> {
     }
 
     /// The index record of the first parent of the changeset `record` is of, `None` for a root:
-    /// the parent its object names ([`RepoRead::walk_step`]), not the one the record does.
+    /// the parent its object names ([`RepoRead::walk_step`]), not the one the record does. Checks
+    /// `record`'s generation on the way ([`RepoRead::check_generation`]).
     fn walk_parent(&self, record: &ChangesetMeta) -> Result<Option<ChangesetMeta>, RepoError> {
-        self.walk_step(record.id)?
-            .map(|parent| self.walk_record(parent))
-            .transpose()
+        let parents = self.repo.changeset_object(record.id)?.parents;
+
+        // Every parent's record, for the largest generation; the first one is the step.
+        let mut first = None;
+        let mut top = 0;
+        for &parent in &parents {
+            let meta = self.walk_record(parent)?;
+            top = top.max(meta.generation);
+            first.get_or_insert(meta);
+        }
+        if record.generation != top.saturating_add(1) {
+            return Err(wrong_generation());
+        }
+        Ok(first)
+    }
+
+    /// Checks the generation of the changeset `record` is of against its parents', as its object
+    /// names them: 1 + the largest of theirs, 1 for a root, or [`StoreError::IndexCorrupt`]. A
+    /// damaged or crafted `gen.col` fails here rather than order or bound a walk; parents' own
+    /// generations are taken as they are, so one check covers one link.
+    pub(crate) fn check_generation(&self, record: &ChangesetMeta) -> Result<(), RepoError> {
+        self.walk_parent(record).map(drop)
     }
 
     /// The first parent of changeset `id`, `None` for a root, as its object names it: the object
@@ -484,6 +539,14 @@ impl<O: ObjectStore> RepoRead<'_, O> {
     pub(crate) fn walk_step(&self, id: ChangesetId) -> Result<Option<ChangesetId>, RepoError> {
         Ok(self.repo.changeset_object(id)?.parents.first().copied())
     }
+}
+
+/// The error of an index record whose generation is not 1 + the largest of its parents'.
+fn wrong_generation() -> RepoError {
+    StoreError::IndexCorrupt {
+        what: "a changeset's generation is not 1 + the largest of its parents'",
+    }
+    .into()
 }
 
 /// The error of a skip list read back for changeset `cs` that a walk finds wrong, as `why` says
