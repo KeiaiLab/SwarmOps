@@ -2140,6 +2140,36 @@ mod blob_by_id {
         assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
     }
 
+    /// `Repo::put_blob` is durable on return: before it returns, it fsyncs the fan-out
+    /// directory it placed the blob's file in, after placing it, so that the blob's name
+    /// survives a power loss that follows.
+    #[test]
+    fn put_blob_fsyncs_the_blob_s_directory_before_it_returns() {
+        let (_dir, root, repo) = new_repo_as(StoreFormat::V1);
+        drop(repo);
+        let (fs, calls) = RecordingFs::new();
+        let fs = fs.naming_paths_in(root.as_std_path().to_path_buf());
+        let repo = LocalRepo::open_with_fs(&root, checked(fs)).unwrap();
+        calls();
+
+        let content = b"durable on return\n".to_vec();
+        let stored = repo.put_blob(content.clone()).unwrap();
+        let made = calls();
+        assert_eq!(stored.id, blob(&content));
+        assert!(stored.written, "{stored:?}");
+        let hex = stored.id.to_string();
+        let file = format!("objects/{}/{}", &hex[..2], &hex[2..]);
+        let placed = made
+            .iter()
+            .rposition(|call| call.ends_with(&file))
+            .unwrap_or_else(|| panic!("no call places {file}: {made:?}"));
+        let fsync = format!("fsync_dir {}", fanout(stored.id.0));
+        assert!(
+            placed < at(&made, &fsync),
+            "the blob's directory is fsynced after its file is placed: {made:?}"
+        );
+    }
+
     /// A change that names by id a blob the store lacks, a tree, or a changeset is
     /// `RepoError::MissingBlob`, with its path and the id, and the commit writes nothing: no
     /// object (not even the new blob of the put beside it), no frame, no call that changes a
