@@ -119,6 +119,9 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 - A commit or a land's resolutions refuse a content past 512 MiB (`E_TOO_LARGE`, scope `put`) by
   the size it declares, before any file is read; the check used to wait until the contents
   before it were read.
+- A store path that leads through a name that is not UTF-8 (a symlink's target, the working
+  directory) is `E_IO` (`fs_op: "resolve"`) whose message names no host path, where it was
+  `E_STORE_CORRUPT` with the path in its message (issue #9 item C1).
 
 ## [0.6.0] - 2026-10-28
 

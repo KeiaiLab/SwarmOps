@@ -65,6 +65,7 @@
 use std::fs::File;
 use std::hash::{BuildHasher, RandomState};
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -826,7 +827,7 @@ fn native_root(store: &Utf8Path, fs: &Arc<dyn FsOps>) -> Result<Utf8PathBuf, Rep
             fs.fsync_dir(parent.as_std_path())?;
         }
     }
-    let canonical = target.canonicalize_utf8().map_err(resolving)?;
+    let canonical = utf8(target.as_std_path().canonicalize().map_err(resolving)?)?;
     if !swarmops_store::is_native_linux_fs(&canonical) {
         return Err(StoreError::UnsupportedFs(canonical).into());
     }
@@ -837,7 +838,19 @@ fn native_root(store: &Utf8Path, fs: &Arc<dyn FsOps>) -> Result<Utf8PathBuf, Rep
 /// `path` made absolute, against the working directory if it is relative; a failure is one of
 /// working out where the path leads ([`FileOp::Resolve`], no file).
 fn absolute(path: &Utf8Path) -> Result<Utf8PathBuf, IoFailure> {
-    camino::absolute_utf8(path).map_err(resolving)
+    utf8(std::path::absolute(path).map_err(resolving)?)
+}
+
+/// `path`, a step of working out where a store's path leads, as UTF-8. A failure is
+/// [`FileOp::Resolve`]'s, with no file, and its text names no path: camino's own error would
+/// carry the host path (a working directory or a symlink's target that is not UTF-8).
+fn utf8(path: PathBuf) -> Result<Utf8PathBuf, IoFailure> {
+    Utf8PathBuf::from_path_buf(path).map_err(|_| {
+        resolving(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the store's path leads through a name that is not UTF-8",
+        ))
+    })
 }
 
 /// The failure `e` of working out where a store's path leads: on no file of the store.
@@ -872,8 +885,7 @@ fn resolve(path: &Utf8Path) -> Result<(Utf8PathBuf, Vec<Utf8PathBuf>), IoFailure
                         "{path}: too many levels of symbolic links"
                     ))));
                 }
-                let link = Utf8PathBuf::try_from(std::fs::read_link(&next).map_err(resolving)?)
-                    .map_err(|e| resolving(io::Error::new(io::ErrorKind::InvalidData, e)))?;
+                let link = utf8(std::fs::read_link(&next).map_err(resolving)?)?;
                 if link.is_absolute() {
                     target = Utf8PathBuf::from("/");
                 }

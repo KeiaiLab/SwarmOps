@@ -948,6 +948,46 @@ fn open_refuses_a_path_that_leads_under_mnt() {
 }
 
 #[test]
+fn a_store_path_that_leads_to_non_utf8_is_refused_without_a_host_path() {
+    use std::os::unix::ffi::OsStrExt;
+
+    // A symlink on the store's path whose target is not UTF-8: create and open refuse it as a
+    // failure of working out where the path leads, an `E_IO`, not damage (`InvalidData`, which
+    // is `E_STORE_CORRUPT`), and its text names no host path.
+    let dir = tempfile::tempdir().unwrap();
+    let base = Utf8PathBuf::from_path_buf(dir.path().canonicalize().unwrap()).unwrap();
+    let target = std::ffi::OsStr::from_bytes(b"not-utf8-\xff");
+    std::os::unix::fs::symlink(target, base.join("bad")).unwrap();
+    let store = base.join("bad/x");
+    let results = [
+        ("create", LocalRepo::create(&store, "x").map(|_| ())),
+        ("open", LocalRepo::open(&store).map(|_| ())),
+    ];
+    for (call, result) in results {
+        match result {
+            Err(RepoError::Store(StoreError::Io(failure))) => {
+                assert_eq!(failure.op, swarmops_store::FileOp::Resolve, "{call}");
+                assert_eq!(failure.file, None, "{call}");
+                assert_ne!(
+                    failure.source.kind(),
+                    std::io::ErrorKind::InvalidData,
+                    "{call}: {failure}"
+                );
+                let text = failure.to_string();
+                assert!(!text.contains(base.as_str()), "{call}: {text}");
+                assert!(!text.contains("not-utf8"), "{call}: {text}");
+            }
+            other => panic!("{call}: expected an I/O error resolving the path, got {other:?}"),
+        }
+    }
+    assert_eq!(
+        entries(base.as_str()),
+        Some(vec!["bad".to_owned()]),
+        "nothing was created here"
+    );
+}
+
+#[test]
 fn create_syncs_each_directory_it_makes() {
     // create makes the store root and the missing directories above it: each new entry is
     // made durable, by syncing the directory that holds it, outermost first.
