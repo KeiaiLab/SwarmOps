@@ -127,6 +127,13 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   `schema Meta` lists every operation that reports `meta.recovered`, and on which errors, where it
   named `commit`, `ref_set` and `ref_delete` alone (issue #2 item 2, issue #11 item 2).
 
+### Fixed
+
+- The order checker's W8 now ties an external id entry to its changeset's frame: it reads the
+  entry's changeset id and requires a durable frame of `journal.log` (synced, or listed by any
+  process) that records it. Before, it asked only that the bytes its own process wrote be
+  durable, so an entry naming a changeset no durable frame held passed.
+
 ## [0.6.0] - 2026-10-28
 
 Fix what the measurements missed. The 0.6.0 release holds the landing model the v0.5.0

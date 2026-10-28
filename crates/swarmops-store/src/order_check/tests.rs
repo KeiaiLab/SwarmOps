@@ -37,8 +37,13 @@ fn compacted() -> Vec<u8> {
 }
 
 fn changeset() -> Vec<u8> {
+    changeset_of([1; 32])
+}
+
+/// A frame recording the root changeset `id`.
+fn changeset_of(id: [u8; 32]) -> Vec<u8> {
     frame(&[Record::Changeset {
-        id: ChangesetId::new(ObjectId::new([1; 32])),
+        id: ChangesetId::new(ObjectId::new(id)),
         generation: 1,
         delta_hash: [2; 32],
         parents: Vec::new(),
@@ -478,51 +483,91 @@ fn w7_format_is_linked_last() {
     link(&fs);
 }
 
-/// An external id entry is linked only from synced data, and only while every byte this
-/// process wrote to `journal.log` is durable, the frame that records the entry's changeset among
-/// them; bytes another process wrote, which may be another writer's frame on its way, do not
-/// hold it back.
+/// The 44 bytes of an external id entry naming changeset `id`, its CRC left 0: the checker reads
+/// the id, bytes 8..40, and nothing else.
+fn entry(id: [u8; 32]) -> Vec<u8> {
+    let mut bytes = b"SXID\x01\x00\x00\x00".to_vec();
+    bytes.extend_from_slice(&id);
+    bytes.extend_from_slice(&[0; 4]);
+    bytes
+}
+
+/// An external id entry is linked only from synced data, and only once a frame that records the
+/// entry's changeset (bytes 8..40 of the entry) is durable in `journal.log`: synced in this
+/// process, or listed, by whichever process wrote it.
 #[test]
-fn w8_an_external_id_is_linked_only_once_the_journal_is_durable() {
+fn w8_an_external_id_is_linked_only_once_its_frame_is_durable() {
     use std::io::Write as _;
 
     let (_dir, root) = root();
-    let (log, staging) = (root.join("meta/journal.log"), root.join("objects/tmp"));
+    let (log, off) = (root.join("meta/journal.log"), root.join("meta/journal.off"));
+    let staging = root.join("objects/tmp");
     let fanout = root.join("meta/external_ids/git/ab");
     fs::create_dir_all(&fanout).unwrap();
     let fs = OrderCheckFs::new(RealFs);
-    let temp = fs.write_durable_temp(&staging, b"entry").unwrap();
+
+    // 1. The changeset's frame written, not synced: the entry waits.
+    let temp = fs.write_durable_temp(&staging, &entry([1; 32])).unwrap();
     fs.append(&log, &changeset()).unwrap();
-    let message = panic_message(|| {
+    assert_breaks_by("W8", "link_noclobber", || {
         fs.link_noclobber(&temp, &fanout.join("cdef")).unwrap();
     });
-    assert!(
-        message.as_deref().is_some_and(
-            |message| message.starts_with("order check: W8 violated by link_noclobber")
-        ),
-        "{message:?}"
-    );
     fs.sync_data(&log).unwrap();
     fs.link_noclobber(&temp, &fanout.join("cdef")).unwrap();
-    // A temp file written but not synced breaks it too.
+
+    // 2. A temp file written but not synced breaks it too.
     let unsynced = staging.join("unsynced");
-    fs.append(&unsynced, b"entry").unwrap();
+    fs.append(&unsynced, &entry([1; 32])).unwrap();
     assert_breaks("W8", || {
         fs.link_noclobber(&unsynced, &fanout.join("0123")).unwrap();
     });
 
-    // Another process's frame, written and not synced yet: no frame of this one's.
-    std::fs::OpenOptions::new()
-        .append(true)
-        .open(&log)
-        .unwrap()
-        .write_all(&changeset())
-        .unwrap();
-    let temp = fs.write_durable_temp(&staging, b"entry").unwrap();
-    fs.link_noclobber(&temp, &fanout.join("4567")).unwrap();
+    // 3. Every byte of journal.log durable, but no frame records the entry's changeset; nor
+    //    does a temp file that holds no entry name one.
+    let stray = fs.write_durable_temp(&staging, &entry([9; 32])).unwrap();
+    assert_breaks("W8", || {
+        fs.link_noclobber(&stray, &fanout.join("4567")).unwrap();
+    });
+    let short = fs.write_durable_temp(&staging, b"entry").unwrap();
+    assert_breaks("W8", || {
+        fs.link_noclobber(&short, &fanout.join("4567")).unwrap();
+    });
+
+    // 4. Another process's frame, written and not synced yet, holds the entry back; listed by
+    //    that process, the frame is durable, and the entry may follow in any process.
+    let at = real_len(&log);
+    let mut other_log = fs::OpenOptions::new().append(true).open(&log).unwrap();
+    other_log.write_all(&changeset_of([3; 32])).unwrap();
+    let temp = fs.write_durable_temp(&staging, &entry([3; 32])).unwrap();
+    assert_breaks("W8", || {
+        fs.link_noclobber(&temp, &fanout.join("89ab")).unwrap();
+    });
+    let mut other_off = fs::OpenOptions::new().append(true).open(&off).unwrap();
+    for start in [0, at] {
+        other_off.write_all(&start.to_le_bytes()).unwrap();
+    }
+    fs.link_noclobber(&temp, &fanout.join("89ab")).unwrap();
     let other = OrderCheckFs::new(RealFs);
-    let temp = other.write_durable_temp(&staging, b"entry").unwrap();
-    other.link_noclobber(&temp, &fanout.join("89ab")).unwrap();
+    let temp = other.write_durable_temp(&staging, &entry([3; 32])).unwrap();
+    other.link_noclobber(&temp, &fanout.join("cdab")).unwrap();
+}
+
+/// A frame whose sync failed holds its changeset's entries back for good: Linux reports a failed
+/// writeback once, so a later sync that succeeds does not make the frame durable.
+#[test]
+fn w8_a_frame_a_failed_sync_left_holds_its_entry_back() {
+    let (_dir, root) = root();
+    let log = root.join("meta/journal.log");
+    let staging = root.join("objects/tmp");
+    let fanout = root.join("meta/external_ids/git/ab");
+    fs::create_dir_all(&fanout).unwrap();
+    let fs = OrderCheckFs::new(eio_at(1));
+    fs.append_durable(&log, &changeset()).unwrap_err();
+    fs.sync_data(&log).unwrap();
+    let temp = fs.write_durable_temp(&staging, &entry([1; 32])).unwrap();
+    assert_breaks("W8", || {
+        fs.link_noclobber(&temp, &fanout.join("cdef")).unwrap();
+    });
 }
 
 fn to_u64(n: usize) -> u64 {

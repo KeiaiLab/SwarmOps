@@ -52,10 +52,11 @@
 //!   The pinned call sequence of `LocalRepo::create` and the create sweeps' oracle hold that
 //!   they are made before `FORMAT`.
 //! - **W8, the external ids.** An entry of the external id index (`meta/external_ids/`) is linked
-//!   only from data synced first, and only while every byte this process wrote to `journal.log`
-//!   is durable: the frame that records the entry's changeset is durable before the entry. W2
-//!   asks more of a ref change, every byte of `journal.log`; a put of entries takes no lock, so
-//!   another process's frame may be on its way meanwhile.
+//!   only from data synced first, and only once a frame that records the entry's changeset (the
+//!   id at bytes 8..40 of the entry) is durable in `journal.log`: synced in this process, or
+//!   listed in `journal.off`, by whichever process wrote it, and short of what a failed sync left
+//!   not durable. A put of entries takes no lock, so other frames may be on their way meanwhile;
+//!   W2 asks more of a ref change, every byte of `journal.log`.
 //!
 //! # What it knows
 //!
@@ -85,7 +86,7 @@
 //! `rename_durable` syncs the directory, and that `sync_data` and `fsync_dir` flush are read in
 //! `fs_ops.rs`, not tested.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
@@ -104,6 +105,9 @@ const ENTRY_LEN_V2: u64 = 16;
 
 /// The size of a frame's header: `u32le len | u32le crc` (FORMAT 1).
 const HEADER_LEN: u64 = 8;
+
+/// Where an external id entry holds its changeset id: bytes 8..40.
+const ENTRY_ID_AT: u64 = 8;
 
 /// The size of a FORMAT 2 frame's header: `len`, `crc`, `seq`, `prev_crc`, `hcrc`.
 const HEADER_LEN_V2: u64 = 24;
@@ -160,6 +164,15 @@ struct State {
     dirs: HashMap<PathBuf, Vec<Pending>>,
     /// Counts the changes recorded, so that an fsync covers those made before it began.
     generation: u64,
+    /// The changesets each `journal.log` records in its durable frames, as far as read (W8).
+    recorded: HashMap<PathBuf, Recorded>,
+}
+
+/// The changesets the frames of a `journal.log` record, read from its start to `read_to`.
+#[derive(Default)]
+struct Recorded {
+    read_to: u64,
+    ids: HashSet<[u8; 32]>,
 }
 
 /// How a cut of a file ended: [`Cut::Done`] syncs it.
@@ -339,6 +352,10 @@ impl State {
 
     /// `from` (a file, or a directory and everything under it) is `to` now.
     fn moved(&mut self, from: &Path, to: &Path) {
+        // A journal moved or replaced is read again.
+        self.recorded
+            .retain(|log, _| !log.starts_with(from) && !log.starts_with(to));
+
         let rekey = |path: &Path| -> Option<PathBuf> {
             let rest = path.strip_prefix(from).ok()?;
             Some(if rest.as_os_str().is_empty() {
@@ -537,29 +554,62 @@ impl State {
         None
     }
 
-    /// W8 for the link of an external id entry of `meta`: every byte this process wrote to its
-    /// `journal.log` is durable (written by `append`, it is not until a sync covers it; a failed
-    /// sync leaves it not durable for good), so the frame that records the entry's changeset is.
-    /// The journal of either format, an upgrade's among them.
-    fn external_id(&self, meta: &Path) -> Option<String> {
-        [StoreFormat::V1, StoreFormat::V2]
-            .iter()
-            .find_map(|&format| {
-                let log = journal_path(meta, format, JournalFile::Log);
-                let file = self.files.get(&log)?;
-                if let Some(lost) = file.lost_from
-                    && real_len(&log) > lost
-                {
-                    return Some(format!(
-                        "journal.log holds bytes from {lost} on that a failed sync left not durable"
-                    ));
+    /// W8 for the link of `entry`, an external id entry of `meta`: a durable frame of its
+    /// `journal.log` records the changeset the entry names (bytes 8..40). The journal of either
+    /// format, an upgrade's among them.
+    fn external_id(&mut self, meta: &Path, entry: &Path) -> Option<String> {
+        let Some(id) = read_at(entry, ENTRY_ID_AT, 32).and_then(|id| <[u8; 32]>::try_from(id).ok())
+        else {
+            return Some(format!("{} holds no changeset id", entry.display()));
+        };
+        let mut durable = Vec::new();
+        for format in [StoreFormat::V1, StoreFormat::V2] {
+            let log = journal_path(meta, format, JournalFile::Log);
+            if !log.exists() {
+                continue;
+            }
+            let end = self
+                .log_lost_from(meta, format)
+                .map_or(self.durable_log_end(meta, format), |lost| {
+                    lost.min(self.durable_log_end(meta, format))
+                });
+            if self.records(&log, format, end).contains(&id) {
+                return None;
+            }
+            durable.push(end);
+        }
+        let hex = swarmops_core::ObjectId::new(id).to_hex();
+        Some(format!(
+            "no frame of journal.log durable (to {durable:?}) records changeset {hex}: the entry \
+             would name a changeset a power loss can take back"
+        ))
+    }
+
+    /// The changesets the whole frames among the first `end` bytes of `log`, of `format`,
+    /// record. Read once, then from where the last read stopped; again from the start if `end`
+    /// or the file fell below it.
+    fn records(&mut self, log: &Path, format: StoreFormat, end: u64) -> &HashSet<[u8; 32]> {
+        let recorded = self.recorded.entry(log.to_path_buf()).or_default();
+        if end.min(real_len(log)) < recorded.read_to {
+            *recorded = Recorded::default();
+        }
+
+        // 1. The bytes past what was read, up to `end`.
+        let len = usize::try_from(end.saturating_sub(recorded.read_to)).unwrap_or(0);
+        let bytes = read_at(log, recorded.read_to, len).unwrap_or_default();
+
+        // 2. Whole frames only: a frame cut short at `end` waits for a later read.
+        let mut at = 0;
+        while let Parsed::Whole { records, size, .. } = parse_any(format, &bytes[at..]) {
+            for record in records {
+                if let Record::Changeset { id, .. } = record {
+                    recorded.ids.insert(id.0.0);
                 }
-                file.dirty.then(|| {
-                    "journal.log holds bytes this process wrote and has not synced: the frame that \
-                 records the entry's changeset may not be durable yet"
-                        .to_owned()
-                })
-            })
+            }
+            at += size;
+        }
+        recorded.read_to += u64::try_from(at).unwrap_or(0);
+        &recorded.ids
     }
 
     /// W2 for a change of a ref file of `meta`, of `format`.
@@ -1001,7 +1051,7 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
 
     fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
         let violation = {
-            let state = self.state();
+            let mut state = self.state();
             if name(to) == Some("FORMAT") {
                 let root = to.parent().unwrap_or(Path::new("."));
                 state
@@ -1011,7 +1061,7 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
             } else if let Some(meta) = external_id_meta(to) {
                 state
                     .linked_data(from)
-                    .or_else(|| state.external_id(meta))
+                    .or_else(|| state.external_id(meta, from))
                     .map(|why| (Rule::W8, why))
             } else if is_object(to) {
                 state.linked_data(from).map(|why| (Rule::W5, why))
@@ -1121,7 +1171,9 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
         } else {
             Cut::Failed
         };
-        self.state().cut(path, cut);
+        let mut state = self.state();
+        state.cut(path, cut);
+        state.recorded.remove(path);
         result
     }
 
