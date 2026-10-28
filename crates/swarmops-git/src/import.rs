@@ -295,8 +295,7 @@ pub enum ImportError {
     Convert(#[from] ConvertError),
     /// The target is no ref name the store takes, or a remote-tracking one, which only a fetch
     /// moves. A name only a later format takes is [`ImportError::Store`]
-    /// ([`StoreError::FormatRequired`](swarmops_repo::StoreError::FormatRequired)), with nothing
-    /// recorded. Nothing was read or written.
+    /// ([`StoreError::FormatRequired`]), with nothing recorded. Nothing was read or written.
     #[error("invalid target ref name {0:?}: not a ref an import moves")]
     RefName(String),
     /// The target does not lead to the tip: the git commit its head stands for, the one it holds
