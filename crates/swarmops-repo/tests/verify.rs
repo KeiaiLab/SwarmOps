@@ -372,31 +372,71 @@ fn verify_deep_lists_an_object_held_in_a_legacy_zstd_frame() {
     assert_problems_when(&repo, Depth::Shallow, Vec::new());
 }
 
+/// Both store formats: the tests of damaged ref, lock and checkpoint files run on each, as
+/// each names its files otherwise.
+const FORMATS: [StoreFormat; 2] = [StoreFormat::V1, StoreFormat::V2];
+
+/// The file of ref `name` in the store at `root`: `meta/refs/<name>`, or in FORMAT 2
+/// `meta/refs2/<the first 32 hex digits of blake3(b"swarmops:refname:v1\0" ‖ name)>` (the M6
+/// design §2.5).
+fn ref_file(root: &Utf8Path, name: &str) -> Utf8PathBuf {
+    let layout = layout_of(root);
+    if layout.format() == StoreFormat::V1 {
+        return layout.refs_dir().join(name);
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"swarmops:refname:v1\0");
+    hasher.update(name.as_bytes());
+    layout.refs_dir().join(&hasher.finalize().to_hex()[..32])
+}
+
+/// What verify names the damaged file of ref `name` by: the ref's name, or in FORMAT 2 the
+/// file's name, the only name a file that does not read has.
+fn listed_as(root: &Utf8Path, name: &str) -> String {
+    match layout_of(root).format() {
+        StoreFormat::V1 => name.to_owned(),
+        _ => ref_file(root, name).file_name().unwrap().to_owned(),
+    }
+}
+
+/// Writes the file of ref `name` naming `target` at version 1 in the store at `root`, by hand:
+/// no frame records it.
+fn plant_ref(root: &Utf8Path, name: &str, target: ChangesetId) {
+    let file = ref_file(root, name);
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let named = match layout_of(root).format() {
+        StoreFormat::V1 => String::new(),
+        _ => format!("{name}\n"),
+    };
+    fs::write(file, format!("{named}{target}\n1\n")).unwrap();
+}
+
 #[test]
 fn verify_detects_dangling_ref() {
-    let (_dir, root, repo) = new_repo_as(StoreFormat::V1);
-    let c1 = commit(&repo, &[], vec![put("f", b"1")]);
-    repo.cas_ref("main", None, Some(c1), "test/agent").unwrap();
-    repo.cas_ref("release/ok", None, Some(c1), "test/agent")
-        .unwrap();
+    for format in FORMATS {
+        let (_dir, root, repo) = new_repo_as(format);
+        let c1 = commit(&repo, &[], vec![put("f", b"1")]);
+        repo.cas_ref("main", None, Some(c1), "test/agent").unwrap();
+        repo.cas_ref("release/ok", None, Some(c1), "test/agent")
+            .unwrap();
 
-    // A ref file naming no changeset, and a file in refs/ that is no ref file at all.
-    let refs = layout_of(&root).meta_path("refs/release");
-    let nowhere = ChangesetId::new(hash_object(ObjectKind::Changeset, b"never committed"));
-    fs::write(refs.join("gone"), format!("{nowhere}\n1\n")).unwrap();
-    fs::write(refs.join("broken"), b"not a ref file\n").unwrap();
-    assert!(
-        MetaStore::open(&root).unwrap().read().is_err(),
-        "a damaged ref file fails every snapshot"
-    );
+        // A ref file naming no changeset, and a ref's file that is no ref file at all.
+        let nowhere = ChangesetId::new(hash_object(ObjectKind::Changeset, b"never committed"));
+        plant_ref(&root, "release/gone", nowhere);
+        fs::write(ref_file(&root, "release/broken"), b"not a ref file\n").unwrap();
+        assert!(
+            MetaStore::open(&root).unwrap().read().is_err(),
+            "{format:?}: a damaged ref file fails every snapshot"
+        );
 
-    assert_problems(
-        &repo,
-        vec![
-            VerifyProblem::CorruptRef("release/broken".to_owned()),
-            VerifyProblem::DanglingRef("release/gone".to_owned()),
-        ],
-    );
+        assert_problems(
+            &repo,
+            vec![
+                VerifyProblem::CorruptRef(listed_as(&root, "release/broken")),
+                VerifyProblem::DanglingRef("release/gone".to_owned()),
+            ],
+        );
+    }
 }
 
 #[test]
@@ -704,47 +744,46 @@ fn verify_fails_on_a_ref_file_it_cannot_read() {
     // in the store.
     use swarmops_store::{FileOp, FsMethod};
 
-    let (_dir, root, repo) = new_repo_as(StoreFormat::V1);
-    let c1 = commit(&repo, &[], vec![put("f", b"1")]);
-    repo.cas_ref("release/a", None, Some(c1), "test/agent")
-        .unwrap();
-    let b = layout_of(&root).meta_path("refs/release/b");
-    fs::create_dir(&b).unwrap();
-    assert_problems(
-        &repo,
-        vec![VerifyProblem::CorruptRef("release/b".to_owned())],
-    );
-    fs::remove_dir(&b).unwrap();
-    std::os::unix::fs::symlink("b", &b).unwrap(); // a loop: a read of it fails with ELOOP
-    for depth in [Depth::Deep, Depth::Shallow] {
-        match repo.verify(depth) {
-            Err(RepoError::Store(StoreError::Io(e))) => {
-                assert_eq!(e.raw_os_error(), Some(40), "ELOOP: {e}");
-                assert_eq!(
-                    (e.op, e.file.as_deref()),
-                    (
-                        FileOp::Fs(FsMethod::Read),
-                        Some(Utf8Path::new("meta/refs/release/b"))
-                    ),
-                    "{e}"
-                );
+    for format in FORMATS {
+        let (_dir, root, repo) = new_repo_as(format);
+        let c1 = commit(&repo, &[], vec![put("f", b"1")]);
+        repo.cas_ref("release/a", None, Some(c1), "test/agent")
+            .unwrap();
+        let b = ref_file(&root, "release/b");
+        fs::create_dir_all(&b).unwrap();
+        assert_problems(
+            &repo,
+            vec![VerifyProblem::CorruptRef(listed_as(&root, "release/b"))],
+        );
+        fs::remove_dir(&b).unwrap();
+        // A loop: a read of it fails with ELOOP.
+        std::os::unix::fs::symlink(b.file_name().unwrap(), &b).unwrap();
+        let in_store = b.strip_prefix(&root).unwrap();
+        for depth in [Depth::Deep, Depth::Shallow] {
+            match repo.verify(depth) {
+                Err(RepoError::Store(StoreError::Io(e))) => {
+                    assert_eq!(e.raw_os_error(), Some(40), "ELOOP: {e}");
+                    assert_eq!(
+                        (e.op, e.file.as_deref()),
+                        (FileOp::Fs(FsMethod::Read), Some(in_store)),
+                        "{format:?}: {e}"
+                    );
+                }
+                other => panic!("{format:?} {depth:?}: expected an I/O error, got {other:?}"),
             }
-            other => panic!("{depth:?}: expected an I/O error, got {other:?}"),
         }
     }
 }
 
 /// A store for the damaged-metadata tests: two changesets, `main` on the second, a ref
 /// `release/gone` that names no changeset, and the first blob corrupt.
-fn store_with_refs_and_a_corrupt_blob() -> (TempDir, Utf8PathBuf, LocalRepo) {
-    let (dir, root, repo) = new_repo_as(StoreFormat::V1);
+fn store_with_refs_and_a_corrupt_blob(format: StoreFormat) -> (TempDir, Utf8PathBuf, LocalRepo) {
+    let (dir, root, repo) = new_repo_as(format);
     let c1 = commit(&repo, &[], vec![put("f", b"1")]);
     let c2 = commit(&repo, &[c1], vec![put("g", b"2")]);
     repo.cas_ref("main", None, Some(c2), "test/agent").unwrap();
-    let release = layout_of(&root).meta_path("refs/release");
-    fs::create_dir_all(&release).unwrap();
     let nowhere = ChangesetId::new(hash_object(ObjectKind::Changeset, b"never committed"));
-    fs::write(release.join("gone"), format!("{nowhere}\n1\n")).unwrap();
+    plant_ref(&root, "release/gone", nowhere);
     let file = object_file(&root, blob(b"1").0);
     let mut bytes = fs::read(&file).unwrap();
     *bytes.last_mut().unwrap() ^= 0x01;
@@ -759,61 +798,82 @@ fn verify_reports_damaged_metadata_files_and_checks_on() {
     let meta = |what: &str| VerifyProblem::MetaCorrupt(what.to_owned());
     let dangling = VerifyProblem::DanglingRef("release/gone".to_owned());
     let corrupt = VerifyProblem::CorruptObject(blob(b"1").0);
-    let journal_gone = |file: &str| {
-        format!(
-            "meta/{file} is missing: the journal is not checked, and the index is checked as it is"
-        )
-    };
     let index_damage = "the changeset index does not open (a sorted view file ends in a partial \
                         entry): it is not checked";
-    let cases: [(&str, String); 4] = [
-        (
-            "journal.ckpt",
-            "meta/journal.ckpt does not hold a u64le offset: the records the checkpoint passed \
-             are not checked against the index"
-                .to_owned(),
-        ),
-        ("journal.log", journal_gone("journal.log")),
-        ("journal.off", journal_gone("journal.off")),
-        (
-            "sorted/ids.rec",
-            format!("{index_damage}, and the journal's changesets are"),
-        ),
-    ];
-    for (damage, what) in cases {
-        let (_dir, root, repo) = store_with_refs_and_a_corrupt_blob();
-        damage_meta(&root, damage);
+    for format in FORMATS {
+        // The journal's files, by their names in this format: `meta/journal.log` or
+        // `meta/journal2.log`.
+        let (journal_log, journal_off, journal_ckpt) = {
+            let (_dir, root, _repo) = new_repo_as(format);
+            let layout = layout_of(&root);
+            let in_store = |path: Utf8PathBuf| path.strip_prefix(&root).unwrap().to_string();
+            (
+                in_store(layout.journal_log()),
+                in_store(layout.journal_off()),
+                in_store(layout.journal_ckpt()),
+            )
+        };
+        let journal_gone = |file: &str| {
+            format!(
+                "{file} is missing: the journal is not checked, and the index is checked as it is"
+            )
+        };
+        let holds = match format {
+            StoreFormat::V1 => "a u64le offset",
+            _ => "an offset, a seq and their CRC",
+        };
+        let cases: [(&str, String); 4] = [
+            (
+                "journal.ckpt",
+                format!(
+                    "{journal_ckpt} does not hold {holds}: the records the checkpoint passed \
+                     are not checked against the index"
+                ),
+            ),
+            ("journal.log", journal_gone(&journal_log)),
+            ("journal.off", journal_gone(&journal_off)),
+            (
+                "sorted/ids.rec",
+                format!("{index_damage}, and the journal's changesets are"),
+            ),
+        ];
+        for (damage, what) in cases {
+            let (_dir, root, repo) = store_with_refs_and_a_corrupt_blob(format);
+            damage_meta(&root, damage);
+            let report = repo.verify(Depth::Deep).unwrap();
+            assert_eq!(
+                report.problems,
+                [meta(&what), dangling.clone(), corrupt.clone()],
+                "{format:?} {damage}"
+            );
+            assert_eq!(report.changesets_checked, 2, "{format:?} {damage}");
+        }
+
+        // With neither the journal nor the index, no changeset is known: no ref's target can
+        // be checked, which the report says, rather than calling every ref dangling.
+        let (_dir, root, repo) = store_with_refs_and_a_corrupt_blob(format);
+        damage_meta(&root, "journal.log");
+        damage_meta(&root, "sorted/ids.rec");
         let report = repo.verify(Depth::Deep).unwrap();
+        let journal_missing = format!("{journal_log} is missing: the journal is not checked");
         assert_eq!(
             report.problems,
-            [meta(&what), dangling.clone(), corrupt.clone()],
-            "{damage}"
+            [
+                meta(&journal_missing),
+                meta(&format!(
+                    "{index_damage}; with no journal either, no changeset is known, so neither \
+                     changesets nor the targets of refs are checked"
+                )),
+                corrupt.clone(),
+            ],
+            "{format:?}"
         );
-        assert_eq!(report.changesets_checked, 2, "{damage}");
+        assert_eq!(report.changesets_checked, 0, "{format:?}");
+        assert_eq!(
+            report.problems[0].to_string(),
+            format!("damaged metadata: {journal_missing}")
+        );
     }
-
-    // With neither the journal nor the index, no changeset is known: no ref's target can be
-    // checked, which the report says, rather than calling every ref dangling.
-    let (_dir, root, repo) = store_with_refs_and_a_corrupt_blob();
-    damage_meta(&root, "journal.log");
-    damage_meta(&root, "sorted/ids.rec");
-    let report = repo.verify(Depth::Deep).unwrap();
-    assert_eq!(
-        report.problems,
-        [
-            meta("meta/journal.log is missing: the journal is not checked"),
-            meta(&format!(
-                "{index_damage}; with no journal either, no changeset is known, so neither \
-                 changesets nor the targets of refs are checked"
-            )),
-            corrupt,
-        ]
-    );
-    assert_eq!(report.changesets_checked, 0);
-    assert_eq!(
-        report.problems[0].to_string(),
-        "damaged metadata: meta/journal.log is missing: the journal is not checked"
-    );
 }
 
 #[test]
@@ -822,48 +882,80 @@ fn verify_reports_a_checkpoint_that_is_not_a_frame_boundary() {
     // inside a frame, or past the log's end, fails them all with JournalCorrupt
     // (E_STORE_CORRUPT), so verify must report it (it reported nothing). One at a frame
     // boundary (0, a frame's start, the end of the last frame) is sound, and nothing is reported.
-    let (_dir, root, repo) = store_with_refs_and_a_corrupt_blob();
     let dangling = VerifyProblem::DanglingRef("release/gone".to_owned());
     let corrupt = VerifyProblem::CorruptObject(blob(b"1").0);
-    let layout = layout_of(&root);
-    let journal = Journal::open(&layout, Arc::new(RealFs::new())).unwrap();
-    let frames = journal.frames_from(0, usize::MAX).unwrap();
-    assert_eq!(frames.len(), 3, "c1, c2 and the ref move");
-    let end = fs::metadata(layout.journal_log()).unwrap().len();
-    for boundary in [0, frames[1].offset, frames[2].offset, end] {
-        journal.set_ckpt(boundary).unwrap();
-        MetaStore::open(&root).unwrap().read().unwrap();
-        let report = repo.verify(Depth::Deep).unwrap();
-        assert_eq!(
-            report.problems,
-            [dangling.clone(), corrupt.clone()],
-            "ckpt {boundary}: no false report"
-        );
-        assert_eq!(report.changesets_checked, 2, "ckpt {boundary}");
+    for format in FORMATS {
+        let (_dir, root, repo) = store_with_refs_and_a_corrupt_blob(format);
+        let layout = layout_of(&root);
+        let ckpt_file = layout.journal_ckpt();
+        let ckpt_file = ckpt_file.strip_prefix(&root).unwrap();
+        let journal = Journal::open(&layout, Arc::new(RealFs::new())).unwrap();
+        let frames = journal.frames_from(0, usize::MAX).unwrap();
+        assert_eq!(frames.len(), 3, "{format:?}: c1, c2 and the ref move");
+        let end = fs::metadata(layout.journal_log()).unwrap().len();
+        for boundary in [0, frames[1].offset, frames[2].offset, end] {
+            journal.set_ckpt(boundary).unwrap();
+            MetaStore::open(&root).unwrap().read().unwrap();
+            let report = repo.verify(Depth::Deep).unwrap();
+            assert_eq!(
+                report.problems,
+                [dangling.clone(), corrupt.clone()],
+                "{format:?} ckpt {boundary}: no false report"
+            );
+            assert_eq!(report.changesets_checked, 2, "{format:?} ckpt {boundary}");
+        }
+        for bogus in [frames[1].offset - 1, frames[1].offset + 1, end + 8] {
+            set_bogus_ckpt(&journal, &layout, bogus);
+            let read = MetaStore::open(&root).unwrap().read().map(|_| ());
+            assert!(
+                matches!(read, Err(StoreError::JournalCorrupt { offset }) if offset == bogus),
+                "{format:?} ckpt {bogus}: {read:?}"
+            );
+            let report = repo.verify(Depth::Deep).unwrap();
+            assert_eq!(
+                report.problems,
+                [
+                    VerifyProblem::MetaCorrupt(format!(
+                        "{ckpt_file} holds {bogus}, which is not a frame boundary: reads and \
+                         writes fail on it, and the records the checkpoint passed are not \
+                         checked against the index"
+                    )),
+                    dangling.clone(),
+                    corrupt.clone()
+                ],
+                "{format:?} ckpt {bogus}"
+            );
+            assert_eq!(report.changesets_checked, 2, "{format:?} ckpt {bogus}");
+        }
     }
-    for bogus in [frames[1].offset - 1, frames[1].offset + 1, end + 8] {
-        journal.set_ckpt(bogus).unwrap();
-        let read = MetaStore::open(&root).unwrap().read().map(|_| ());
-        assert!(
-            matches!(read, Err(StoreError::JournalCorrupt { offset }) if offset == bogus),
-            "ckpt {bogus}: {read:?}"
-        );
-        let report = repo.verify(Depth::Deep).unwrap();
-        assert_eq!(
-            report.problems,
-            [
-                VerifyProblem::MetaCorrupt(format!(
-                    "meta/journal.ckpt holds {bogus}, which is not a frame boundary: reads and \
-                     writes fail on it, and the records the checkpoint passed are not checked \
-                     against the index"
-                )),
-                dangling.clone(),
-                corrupt.clone()
-            ],
-            "ckpt {bogus}"
-        );
-        assert_eq!(report.changesets_checked, 2, "ckpt {bogus}");
+}
+
+/// Points the checkpoint of `journal` at `offset`, which is no frame boundary: FORMAT 1's
+/// `journal.ckpt` holds the offset alone, which [`Journal::set_ckpt`] writes. [`Journal::set_ckpt`]
+/// refuses such an offset in FORMAT 2, so `journal2.ckpt` is written by hand: the offset, seq 1
+/// (whose `journal2.off` entry lists another offset), and the CRC of the two.
+fn set_bogus_ckpt(journal: &Journal, layout: &Layout, offset: u64) {
+    if layout.format() == StoreFormat::V1 {
+        journal.set_ckpt(offset).unwrap();
+        return;
     }
+    let mut bytes = offset.to_le_bytes().to_vec();
+    bytes.extend_from_slice(&1_u64.to_le_bytes());
+    let crc = crc32(&bytes);
+    bytes.extend_from_slice(&crc.to_le_bytes());
+    fs::write(layout.journal_ckpt(), bytes).unwrap();
+}
+
+/// The CRC-32 (IEEE) of `bytes`, which FORMAT 2's journal files carry.
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = !0_u32;
+    for &b in bytes {
+        crc ^= u32::from(b);
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (0xedb8_8320 & (0_u32.wrapping_sub(crc & 1)));
+        }
+    }
+    !crc
 }
 
 #[test]
@@ -879,45 +971,58 @@ fn verify_reports_a_lock_file_that_is_not_a_regular_file() {
                      removed, and the next write makes a new one";
     let dangling = VerifyProblem::DanglingRef("release/gone".to_owned());
     let corrupt = VerifyProblem::CorruptObject(blob(b"1").0);
-    for what in ["a FIFO", "a symlink to a regular file", "a directory"] {
-        let (_dir, root, repo) = store_with_refs_and_a_corrupt_blob();
-        let lock = layout_of(&root).meta_lock();
-        fs::remove_file(&lock).unwrap();
-        match what {
-            "a FIFO" => {
-                let made = Command::new("mkfifo").arg(&lock).status();
-                assert!(made.expect("run mkfifo").success(), "mkfifo");
+    for format in FORMATS {
+        for what in ["a FIFO", "a symlink to a regular file", "a directory"] {
+            let (_dir, root, repo) = store_with_refs_and_a_corrupt_blob(format);
+            let lock = layout_of(&root).meta_lock();
+            fs::remove_file(&lock).unwrap();
+            match what {
+                "a FIFO" => {
+                    let made = Command::new("mkfifo").arg(&lock).status();
+                    assert!(made.expect("run mkfifo").success(), "mkfifo");
+                }
+                "a symlink to a regular file" => {
+                    let regular = root.join("regular");
+                    fs::write(&regular, b"").unwrap();
+                    symlink(regular, &lock).unwrap();
+                }
+                _ => fs::create_dir(&lock).unwrap(),
             }
-            "a symlink to a regular file" => {
-                let regular = root.join("regular");
-                fs::write(&regular, b"").unwrap();
-                symlink(regular, &lock).unwrap();
-            }
-            _ => fs::create_dir(&lock).unwrap(),
+            let report = repo.verify(Depth::Deep).unwrap();
+            assert_eq!(
+                report.problems,
+                [
+                    VerifyProblem::MetaCorrupt(lock_text.to_owned()),
+                    dangling.clone(),
+                    corrupt.clone()
+                ],
+                "{format:?} {what}"
+            );
+            assert_eq!(report.changesets_checked, 2, "{format:?} {what}");
         }
+
+        let (_dir, root, repo) = store_with_refs_and_a_corrupt_blob(format);
+        fs::remove_file(layout_of(&root).meta_lock()).unwrap();
         let report = repo.verify(Depth::Deep).unwrap();
         assert_eq!(
             report.problems,
-            [
-                VerifyProblem::MetaCorrupt(lock_text.to_owned()),
-                dangling.clone(),
-                corrupt.clone()
-            ],
-            "{what}"
+            [dangling.clone(), corrupt.clone()],
+            "{format:?}: a missing lock file"
         );
-        assert_eq!(report.changesets_checked, 2, "{what}");
     }
-
-    let (_dir, root, repo) = store_with_refs_and_a_corrupt_blob();
-    fs::remove_file(layout_of(&root).meta_lock()).unwrap();
-    let report = repo.verify(Depth::Deep).unwrap();
-    assert_eq!(report.problems, [dangling, corrupt], "a missing lock file");
 }
 
-/// Damages metadata file `file` of the store at `root`: `journal.ckpt` malformed, a journal
-/// file removed, or a sorted view (compacted first) cut inside an entry.
+/// Damages metadata file `file` of the store at `root`, named as in FORMAT 1 (FORMAT 2's
+/// `journal2.*` stand in for `journal.*`): `journal.ckpt` malformed, a journal file removed, or a
+/// sorted view (compacted first) cut inside an entry.
 fn damage_meta(root: &Utf8Path, file: &str) {
-    let path = layout_of(root).meta_path(file);
+    let layout = layout_of(root);
+    let path = match file {
+        "journal.ckpt" => layout.journal_ckpt(),
+        "journal.log" => layout.journal_log(),
+        "journal.off" => layout.journal_off(),
+        _ => layout.meta_path(file),
+    };
     match file {
         "journal.ckpt" => fs::write(&path, b"bad").unwrap(),
         "sorted/ids.rec" => {
@@ -1589,19 +1694,6 @@ fn verify_capped_clean_store_is_not_truncated() {
 
 #[test]
 fn verify_reports_format_2_seq_prev_crc_and_entry_crc_damage() {
-    use swarmops_store::StoreFormat;
-
-    fn crc32(bytes: &[u8]) -> u32 {
-        let mut crc = !0_u32;
-        for &b in bytes {
-            crc ^= u32::from(b);
-            for _ in 0..8 {
-                crc = (crc >> 1) ^ (0xedb8_8320 & (0_u32.wrapping_sub(crc & 1)));
-            }
-        }
-        !crc
-    }
-
     for kind in ["seq", "prev_crc", "entry_crc"] {
         let (_dir, root, repo) = new_repo();
         let c1 = commit(&repo, &[], vec![put("f", b"1")]);

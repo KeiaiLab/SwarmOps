@@ -723,8 +723,8 @@ These do not change what SwarmOps does, only how well the tests can see it.
   sixteen-racer sibling retries its setup commits (`retry_busy`). *Unscheduled. Found: M1.5
   Task 3.*
 - **Some sweeps and tests run on one format.** The git import and export sweeps run on the
-  default format, FORMAT 2, only; and the tests pinned to FORMAT 1 (verify's damaged ref, lock and
-  checkpoint cases, the operations' mapping of malformed revisions) have no FORMAT 2 twin yet.
+  default format, FORMAT 2, only; and the operations' mapping of malformed revisions, pinned to
+  FORMAT 1, has no FORMAT 2 twin yet. Verify's damaged ref, lock and checkpoint cases run on both.
   *Unscheduled. Found: M6 Task A4.*
 - **Gaps the reviews found and left.** The I/O-error sweeps now fail each of a commit's calls
   once, the object store's links and directory fsyncs included, and check that the commit
