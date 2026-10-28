@@ -14,6 +14,8 @@ use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use camino::Utf8Path;
 use serde::Serialize;
 use serde_json::{Map, Value};
@@ -34,7 +36,7 @@ use swarmops_api::{
     SyncMode, SyncReq, SyncStatusReq,
 };
 use swarmops_api::{GcReq, RepairReq, UpgradeReq};
-use swarmops_ops::content::MAX_REQUEST_BYTES;
+use swarmops_ops::content::{MAX_CONTENT_BYTES, MAX_REQUEST_BYTES};
 use swarmops_ops::identity::{self, AUTH_TRUST};
 use swarmops_ops::{LocalOps, Recording, Resolved};
 use swarmops_ws::workspace::Locate;
@@ -59,8 +61,8 @@ const KEYED_OPS: [&str; 6] = [
     "verify",
 ];
 
-/// The client file `blob put -` reads: this process's stdin, through the path it is open at.
-const STDIN: &str = "/dev/stdin";
+/// The FILE of `blob put` that names this process's stdin.
+const STDIN: &str = "-";
 
 /// The hint of a change list past [`MAX_REQUEST_BYTES`]: what takes contents out of it.
 const REQUEST_HINT: &str = "send large contents as {\"file\": path} content, or store them first \
@@ -372,8 +374,12 @@ fn run_blob(ctx: &Ctx<'_>, op: &'static str, command: BlobCommand) -> Printed {
             op,
             || {
                 let who = context::mutator(agent, ctx.env)?;
-                let file = if file == "-" { STDIN.to_owned() } else { file };
-                let req = BlobPutReq::new(ContentInput::File(file));
+                let content = if file == STDIN {
+                    stdin_content()?
+                } else {
+                    ContentInput::File(file)
+                };
+                let req = BlobPutReq::new(content);
                 Ok((who, req))
             },
             |ops, (who, req)| ops.blob_put(&who, req),
@@ -1228,6 +1234,40 @@ fn read_request(source: &str, limit: u64, flag: &str, what: &str) -> Result<Vec<
             (flag, source.into()),
         ]))
         .with_hint(REQUEST_HINT)
+    })
+}
+
+/// The content of `blob put -`: stdin read to its end, whatever it is (a pipe, a file, a socket,
+/// which no path opens), as inline text when it is UTF-8 and in base64 otherwise. It is read no
+/// further than one byte past what a put may hold, so that a stdin past it is refused
+/// (`E_TOO_LARGE`, scope `put`) without being kept whole; one that cannot be read is
+/// `E_INVALID_ARG`, with `-` as the `file` in `details`.
+fn stdin_content() -> Result<ContentInput, OpError> {
+    let limit = MAX_CONTENT_BYTES;
+    let read = read_text(io::stdin().lock(), None, limit).map_err(|e| {
+        OpError::new(
+            ErrorCode::InvalidArg,
+            format!("cannot read the content from stdin: {e}"),
+        )
+        .with_details(details([("file", STDIN.into())]))
+    })?;
+    let bytes = read.map_err(|size| {
+        OpError::new(
+            ErrorCode::TooLarge,
+            format!("the content on stdin is {size} bytes, more than the {limit} a put may hold"),
+        )
+        .with_details(details([
+            ("size", size.into()),
+            ("limit", limit.into()),
+            ("scope", "put".into()),
+            ("file", STDIN.into()),
+        ]))
+    })?;
+
+    // Text goes as it is; other bytes in base64, which ops decodes.
+    Ok(match String::from_utf8(bytes) {
+        Ok(text) => ContentInput::Inline(text),
+        Err(e) => ContentInput::Base64(STANDARD.encode(e.into_bytes())),
     })
 }
 

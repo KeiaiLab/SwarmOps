@@ -51,6 +51,8 @@ swarmops-api = { path = "../swarmops-api", version = "0.6.0" }
 swarmops-ops = { path = "../swarmops-ops", version = "0.6.0" }
 # The workspaces (M5): `so ws`, its hooks and the MCP server's workspace tools.
 swarmops-ws = { path = "../swarmops-ws", version = "0.6.0" }
+# `blob put -` sends stdin's bytes that are not UTF-8 as base64 content.
+base64.workspace = true
 camino.workspace = true
 clap.workspace = true
 # A store's memo key, made on first use (`context::memo_key`).

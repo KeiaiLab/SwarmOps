@@ -2696,6 +2696,37 @@ fn a_conflicting_land_resolved_with_a_file_lands() {
 
 // ---------------------------------------------------------------------------------------------
 // Golden steps of the commands the tests above show no success of.
+/// `blob put -` reads its stdin whatever it is, a socket among them, which no path opens: the
+/// bytes a peer sends before it shuts its end are stored, as from a pipe.
+#[test]
+fn blob_put_reads_a_socket_stdin() {
+    use std::io::Write as _;
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
+    use std::process::Stdio;
+
+    let s = Session::new();
+    let store = s.store();
+    let init = Session::run_raw(&[], &["init", &store], None);
+    assert_eq!(init.exit, 0, "{}", init.stderr);
+    let content = b"through a socket\n";
+    let (mut ours, theirs) = UnixStream::pair().unwrap();
+    ours.write_all(content).unwrap();
+    ours.shutdown(std::net::Shutdown::Write).unwrap();
+
+    let output = support::swarmops(&["--repo", &store, "--as", AGENT, "blob", "put", "-"], &[])
+        .stdin(Stdio::from(OwnedFd::from(theirs)))
+        .output()
+        .unwrap();
+    let printed: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(0), "{printed}");
+    let id = hash_object(ObjectKind::Blob, content).to_hex();
+    assert_eq!(
+        printed["result"],
+        json!({"blob": id, "size": content.len(), "written": true})
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 
 /// `blob put` stores a file's bytes, or stdin's, as a blob before a commit names it, and says

@@ -13,7 +13,8 @@ commits.
 
 ### Behaviour
 
-- FILE is read whole, by the command, on this host; `-` reads stdin to its end.
+- FILE is read whole, by the command, on this host; `-` reads stdin to its end, whatever it is:
+  a pipe, a file or a socket.
 - The id is the content's hash: the same bytes always give the same id, whoever puts them. A put
   of bytes the store holds already writes nothing and says `written: false`; so does a put that
   a concurrent writer of the same bytes beat. `size` is the content's length in bytes.
@@ -46,6 +47,6 @@ swarmops commit -m "add the asset" --changes change.json --parent "$BASE"
 | Error | Exit | When |
 | --- | --- | --- |
 | `E_IDENTITY_REQUIRED` | 5 | No identity. Checked before the file is read. |
-| `E_INVALID_ARG` | 2 | FILE cannot be read (`details.file` names it). |
-| `E_TOO_LARGE` | 1 | The content is over 512 MiB (`details.scope` `put`), measured by the file's length before it is read. |
+| `E_INVALID_ARG` | 2 | FILE cannot be read (`details.file` names it, `-` for stdin). |
+| `E_TOO_LARGE` | 1 | The content is over 512 MiB (`details.scope` `put`), measured by the file's length before it is read; stdin is read no further than one byte past it. |
 | `E_IO` | 1 | The object store could not be written; `details.fs_op` names the file operation that failed. |

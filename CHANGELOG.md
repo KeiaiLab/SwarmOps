@@ -114,6 +114,8 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ### Fixed
 
+- `blob put -` reads stdin itself, so a socket stdin works; it used to open `/dev/stdin`, which
+  fails for a socket.
 - A commit or a land's resolutions refuse a content past 512 MiB (`E_TOO_LARGE`, scope `put`) by
   the size it declares, before any file is read; the check used to wait until the contents
   before it were read.
