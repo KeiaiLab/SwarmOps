@@ -13,11 +13,11 @@ use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 use proptest::prelude::*;
 use swarmops_core::{
-    ChangesetId, DeltaEntry, DeltaOp, EntryTarget, LeafKind, ObjectKind, RepoPath, TreeId,
-    hash_object,
+    ChangesetId, DeltaEntry, DeltaOp, EntryTarget, LeafKind, ObjectId, ObjectKind, RepoPath,
+    TreeId, hash_object,
 };
 use swarmops_repo::merge::conflict::{ConflictHunk, ConflictKind, ContentMerge};
 use swarmops_repo::merge::diff3::merge_content;
@@ -1160,6 +1160,63 @@ fn merge_trees_with_merges_only_the_paths_it_is_given() {
             Err(RepoError::NotFound(missing)) => assert_eq!(missing, unknown.to_string()),
             other => panic!("expected NotFound, got {other:?}"),
         }
+    }
+}
+
+/// Removes object `id`'s file from the store at `root` (`objects/<2 hex>/<62 hex>`).
+fn remove_object(root: &Utf8Path, id: ObjectId) {
+    let hex = id.to_string();
+    let file = root.join(format!("objects/{}/{}", &hex[..2], &hex[2..]));
+    std::fs::remove_file(&file).unwrap_or_else(|e| panic!("remove {file}: {e}"));
+}
+
+/// A tree or a blob a merge must read and the store lacks is the merge's error, not "nothing
+/// there" or empty content: with theirs' directory `d` removed, a path ours changed under it is
+/// `MissingObject` (a tree), and so is `entry_in` below it; with theirs' side of a file both
+/// changed removed, so is its content merge (a blob).
+#[test]
+fn a_missing_tree_or_blob_fails_the_merge() {
+    // 1. Theirs' tree of `d`, which the decision on `d/f` reads.
+    let (_dir, root, repo) = unsynced_repo();
+    let [base, ours, theirs] = three(
+        &repo,
+        vec![put("d/f", b"1\n"), put("x", b"1\n")],
+        vec![put("d/f", b"2\n")],
+        vec![put("d/g", b"g\n")],
+    );
+    let read = repo.snapshot().unwrap();
+    let Some(EntryTarget::Dir(d)) = entry_in(&read, root_of(&repo, theirs), &path("d")).unwrap()
+    else {
+        panic!("theirs' d is a directory");
+    };
+    drop(read);
+    remove_object(&root, d.0);
+    match repo.merge_with(base, ours, theirs, &no_content_merge) {
+        Err(RepoError::MissingObject { id, kind }) => {
+            assert_eq!((id, kind), (d.0, ObjectKind::Tree));
+        }
+        other => panic!("expected MissingObject, got {other:?}"),
+    }
+    let read = repo.snapshot().unwrap();
+    match entry_in(&read, root_of(&repo, theirs), &path("d/f")) {
+        Err(RepoError::MissingObject { id, .. }) => assert_eq!(id, d.0, "entry_in's own read"),
+        other => panic!("expected MissingObject, got {other:?}"),
+    }
+
+    // 2. Theirs' blob of `f`, which the content merge reads.
+    let (_dir, root, repo) = unsynced_repo();
+    let [base, ours, theirs] = three(
+        &repo,
+        vec![put("f", b"1\n")],
+        vec![put("f", b"2\n")],
+        vec![put("f", b"3\n")],
+    );
+    remove_object(&root, blob(b"3\n").0);
+    match repo.merge_with(base, ours, theirs, &merge_content) {
+        Err(RepoError::MissingObject { id, kind }) => {
+            assert_eq!((id, kind), (blob(b"3\n").0, ObjectKind::Blob));
+        }
+        other => panic!("expected MissingObject, got {other:?}"),
     }
 }
 
