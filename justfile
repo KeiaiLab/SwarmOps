@@ -62,15 +62,13 @@ check-slow:
     PROPTEST_CASES=2000 cargo nextest run --locked --workspace --all-features --run-ignored all -E 'not test(regenerate_golden) and not test(regenerate_git_fixtures) and not test(check_git_fixtures)'
 
 # `check-slow` without the two 32-process contention measurements (`thirty_two_processes_*`),
-# which `just perf` runs, and the three landing-model measurements of M4 Task 1
-# (`landing_models::landing_models_*`: 32 and 50 landing processes), which
-# `scripts/landing-models.sh` runs: each takes minutes of fsync'd work on this host, and their
-# assertions (no `Busy`; no land past 30 s) assume a disk at most about a third slower than its
-# own, far too heavy a load for a 2-vCPU hosted runner. The crash sweeps and the other ignored
+# which `just perf` runs: each takes minutes of fsync'd work on this host, and their assertions
+# (no `Busy`) assume a disk at most about a third slower than its own, far too heavy a load for a
+# 2-vCPU hosted runner. The crash sweeps and the other ignored
 # tests stay. CI runs it with `NEXTEST_PROFILE=ci-slow` (.config/nextest.toml).
 # The weekly CI slow suite (scheduled.yml): check-slow without the multi-process measurements.
 check-ci-slow:
-    PROPTEST_CASES=2000 cargo nextest run --locked --workspace --all-features --run-ignored all -E 'not test(regenerate_golden) and not test(regenerate_git_fixtures) and not test(check_git_fixtures) and not test(thirty_two_processes) and not test(/^landing_models::landing_models_/)'
+    PROPTEST_CASES=2000 cargo nextest run --locked --workspace --all-features --run-ignored all -E 'not test(regenerate_golden) and not test(regenerate_git_fixtures) and not test(check_git_fixtures) and not test(thirty_two_processes)'
 
 # The git fixtures (crates/swarmops-testkit/git-fixtures/): every script run again by the git
 # that git-fixtures/GIT_VERSION declares (`SWARMOPS_GIT` names the binary; any other version is
