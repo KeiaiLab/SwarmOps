@@ -49,6 +49,15 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   line (a fetch brings it in); a conflict is refused with the report on `remote:` lines (at most
   50 paths), as are `E_NOTHING_TO_LAND` and a tag as the target. No ref is left under
   `refs/land/`.
+- `swarmops serve --cgi` serves git's smart HTTP behind a web server: `PATH_INFO`
+  `/<store>.git/info/refs`, `/git-upload-pack` or `/git-receive-pack` runs the host git's
+  `http-backend` on the store's `serve.git`, after the same read check and refresh as over ssh,
+  so clones, fetches, pulls and pushes (the push rules and `refs/land/<target>` included) work
+  over HTTP with protocol v2 or v0. The caller is `--as`, or `--user-family <f>` with the web
+  server's `REMOTE_USER`; a push needs no web authentication, since the access file decides.
+  Refusals before git are a status and a `<CODE>: <message>` body: 403 for `E_AUTH` and
+  `E_POLICY_DENIED`, 404 for a missing store or any other path (`not_smart_http`), 400 for a
+  path out of the root (`bad_path`).
 
 ### Changed
 
