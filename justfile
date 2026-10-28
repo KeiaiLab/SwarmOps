@@ -148,6 +148,11 @@ perf:
     [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
     load between
     cargo nextest run --locked --release -p swarmops-cli --all-features --run-ignored ignored-only \
+        -E 'test(/^serve_perf::/)' --no-capture 2>&1 | tee target/perf/serve.log \
+        | grep --line-buffered '^serve-perf: '
+    [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
+    load between
+    cargo nextest run --locked --release -p swarmops-cli --all-features --run-ignored ignored-only \
         -E 'test(/^ws_processes::perf::/)' --no-capture 2>&1 | tee target/perf/ws.log \
         | grep --line-buffered '^ws-perf: '
     [ "${PIPESTATUS[0]}" -eq 0 ] || status=1

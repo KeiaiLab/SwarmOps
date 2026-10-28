@@ -58,6 +58,9 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   Refusals before git are a status and a `<CODE>: <message>` body: 403 for `E_AUTH` and
   `E_POLICY_DENIED`, 404 for a missing store or any other path (`not_smart_http`), 400 for a
   path out of the root (`bad_path`).
+- `just perf` times `swarmops serve` (G16) over ssh on 12,000 commits: a clone and a no-op fetch
+  against git's own `upload-pack` on the same history (medians of 5 and their ratio), and one
+  push to `refs/land/main`, printed as `serve-perf:` lines.
 
 ### Changed
 
