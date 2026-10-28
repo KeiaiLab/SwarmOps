@@ -566,3 +566,70 @@ fn fetch_phases_scale_with_history() {
         );
     }
 }
+
+/// One phase of a sync, as timed by the client and by the binary.
+struct Phase {
+    /// The client's wall time, process start included.
+    wall: Duration,
+    /// The binary's `meta.elapsed_ms`.
+    so: u32,
+}
+
+/// Runs `args` on `store` and times it ([`Phase`]); a failure fails the case.
+fn phase(remote: &Remote, store: &Store, args: &[&str]) -> Phase {
+    let mut run = None;
+    let wall = timed(|| run = Some(remote.on(store, args)));
+    let so = elapsed_ms(&run.expect("ran"));
+    Phase { wall, so }
+}
+
+/// The phases of a sync of one land on `commits`, taken apart: the remote gains a commit and the
+/// store lands one, then `fetch`, `sync --no-push` (plan and land, its own fetch finding nothing
+/// new) and `push`, each timed; then the same again with `sync` whole, for the sum.
+fn sync_phases(commits: usize) -> [(&'static str, Phase); 4] {
+    let remote = Remote::with_history(commits);
+    let store = remote.cloned();
+
+    // 1. Both sides move, then the three phases one after another.
+    remote.commit(0);
+    land(&store, "local0.txt", "local 0\n");
+    let fetched = phase(&remote, &store, &["fetch", ORIGIN]);
+    let landed = phase(&remote, &store, &["sync", ORIGIN, "--no-push"]);
+    let pushed = phase(&remote, &store, &["push", ORIGIN]);
+
+    // 2. Both sides move again, and the sync runs whole.
+    remote.commit(1);
+    land(&store, "local1.txt", "local 1\n");
+    let whole = phase(&remote, &store, &["sync", ORIGIN]);
+    [
+        ("so fetch", fetched),
+        ("so sync --no-push", landed),
+        ("so push", pushed),
+        ("so sync (whole)", whole),
+    ]
+}
+
+/// G17 sync's evidence: a sync of one land on 1,000 and 12,000 commits split into `fetch`,
+/// `sync --no-push` and `push`, one line per phase, and the ratio of each.
+#[test]
+#[ignore = "slow, minutes: imports 13,000 commits, runs two syncs on each, run by `just perf`"]
+fn sync_phases_scale_with_history() {
+    let short = sync_phases(SHORT);
+    let long = sync_phases(LONG);
+    for (commits, phases) in [(SHORT, &short), (LONG, &long)] {
+        for (name, phase) in phases {
+            println!(
+                "remote-perf: sync phases {commits} commits: {name} {:.3} s wall, {} ms \
+                 elapsed_ms",
+                phase.wall.as_secs_f64(),
+                phase.so
+            );
+        }
+    }
+    for ((name, short), (_, long)) in short.iter().zip(&long) {
+        println!(
+            "remote-perf: sync phases ratio: {name} {:.2}",
+            long.wall.as_secs_f64() / short.wall.as_secs_f64().max(0.001)
+        );
+    }
+}
