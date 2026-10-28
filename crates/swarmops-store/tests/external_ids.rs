@@ -16,12 +16,14 @@ use std::sync::Arc;
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, ObjectKind, hash_object};
 #[cfg(feature = "test-hooks")]
-use swarmops_store::{CRASH_AT_ENV, CrashAtFs, FsOps};
+use swarmops_store::{CRASH_AT_ENV, CrashAtFs, FailAt, FailAtFs, FailMode, InjectedError};
 use swarmops_store::{
     ExternalEntry, ExternalIds, ExternalPut, Layout, RealFs, SYSTEM_GIT, StoreError,
 };
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::child::{self, SIGABRT, this_test};
+#[cfg(feature = "test-hooks")]
+use swarmops_testkit::faults::checked;
 use swarmops_testkit::fs::RecordingFs;
 use swarmops_testkit::store::new_root;
 #[cfg(feature = "test-hooks")]
@@ -543,8 +545,8 @@ fn files_under(dir: &Utf8Path) -> Vec<Utf8PathBuf> {
 }
 
 /// A put of three entries crashed at each of its calls (a child under `CrashAtFs`, one call at a
-/// time): each entry is then whole or absent, and the temp files lie in `objects/tmp/` alone;
-/// the same put again completes it.
+/// time, under the order checker): each entry is then whole or absent, and the temp files lie in
+/// `objects/tmp/` alone; the same put again completes it.
 #[test]
 #[cfg(feature = "test-hooks")]
 fn external_ids_crashing_at_any_call_leave_whole_entries_or_none() {
@@ -552,17 +554,15 @@ fn external_ids_crashing_at_any_call_leave_whole_entries_or_none() {
     if let Some(root) = std::env::var_os(CRASH_ROOT) {
         let root = Utf8PathBuf::from_path_buf(root.into()).expect("UTF-8 store root");
         let k = std::env::var(CRASH_AT_ENV).unwrap().parse().unwrap();
-        let mut index = ExternalIds::new(
-            Layout::new(root),
-            Arc::new(CrashAtFs::new(RealFs::new(), k)),
-        );
+        let mut index =
+            ExternalIds::new(Layout::new(root), checked(CrashAtFs::new(RealFs::new(), k)));
         index.set_parallelism(1);
         let put = index.put_batch(SYSTEM_GIT, &three());
         panic!("the crash hook did not fire: put_batch returned {put:?}");
     }
     let (_dir, layout) = store_root();
     let counted = Arc::new(CrashAtFs::new(RealFs::new(), 0));
-    let mut index = ExternalIds::new(layout, Arc::clone(&counted) as Arc<dyn FsOps>);
+    let mut index = ExternalIds::new(layout, checked(Arc::clone(&counted)));
     index.set_parallelism(1);
     index.put_batch(SYSTEM_GIT, &three()).unwrap();
     let calls = counted.calls();
@@ -610,4 +610,83 @@ fn external_ids_crashing_at_any_call_leave_whole_entries_or_none() {
             "k = {k}"
         );
     }
+}
+
+/// A put of three entries whose k-th call fails once, for every k, under the order checker:
+/// `EIO` (a flushing call does its work first, then fails) or `ENOSPC` (the call does nothing).
+/// The put fails, never `Ok`, naming the call that failed: its method, the path relative to the
+/// store's root, and the injected errno. The same put again completes it. Every class of call a
+/// put makes fails once so: `exists`, `create_dir_all`, `write_durable_temp`, `link_noclobber`
+/// and `fsync_dir`, the directory fsyncs that make its names durable among them.
+#[test]
+#[cfg(feature = "test-hooks")]
+fn a_put_failing_at_any_call_fails_and_completes_again() {
+    use std::collections::BTreeSet;
+
+    use swarmops_store::FsMethod;
+
+    // 1. A dry run counts the put's calls.
+    let (_dir, layout) = store_root();
+    let counted = Arc::new(CrashAtFs::new(RealFs::new(), 0));
+    let mut index = ExternalIds::new(layout, checked(Arc::clone(&counted)));
+    index.set_parallelism(1);
+    index.put_batch(SYSTEM_GIT, &three()).unwrap();
+    let calls = counted.calls();
+
+    // 2. Each call fails once, with each error; the call after the last fails nothing.
+    let mut classes = BTreeSet::new();
+    for error in [InjectedError::Eio, InjectedError::Enospc] {
+        for k in 1..=calls + 1 {
+            let what = format!("call {k} of {calls} failing once with {error:?}");
+            let (_dir, layout) = store_root();
+            let fail = FailAt::new(k, FailMode::Once, error);
+            let failing = Arc::new(FailAtFs::new(RealFs::new(), fail));
+            let mut index = ExternalIds::new(layout.clone(), checked(Arc::clone(&failing)));
+            index.set_parallelism(1);
+            let put = index.put_batch(SYSTEM_GIT, &three());
+            if k > calls {
+                assert_eq!(put.unwrap(), put_of(3, 0, vec![]), "{what}");
+                continue;
+            }
+
+            // 3. The put fails, and its error names the call that failed.
+            let failed = failing.failed_calls();
+            let [(method, path)] = failed.as_slice() else {
+                panic!("{what}: one call failed: {failed:?}");
+            };
+            classes.insert(*method);
+            let file = (path.strip_prefix(layout.root()).ok()).and_then(Utf8Path::from_path);
+            let Err(StoreError::Io(failure)) = &put else {
+                panic!("{what}: expected an I/O error, got {put:?}");
+            };
+            assert_eq!(
+                (failure.op, failure.file.as_deref(), failure.raw_os_error()),
+                ((*method).into(), file, error.os_error().raw_os_error()),
+                "{what}: the error names the call that failed: {failure}"
+            );
+
+            // 4. The same put again completes it: every entry whole, none a conflict.
+            let again = index_of(&layout).put_batch(SYSTEM_GIT, &three()).unwrap();
+            assert_eq!(
+                (again.written + again.existing, again.conflicts.len()),
+                (3, 0),
+                "{what}"
+            );
+            for (key, entry) in three() {
+                let got = index_of(&layout).get(SYSTEM_GIT, &key).unwrap();
+                assert_eq!(got, Some(entry), "{what}: {}", hex(&key));
+            }
+        }
+    }
+    assert_eq!(
+        classes,
+        BTreeSet::from([
+            FsMethod::CreateDirAll,
+            FsMethod::WriteDurableTemp,
+            FsMethod::LinkNoclobber,
+            FsMethod::FsyncDir,
+            FsMethod::Exists,
+        ]),
+        "every class of call a put makes failed once"
+    );
 }
