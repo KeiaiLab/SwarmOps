@@ -111,6 +111,8 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   land's merge base and a `log --path` over several paths fail with `E_STORE_CORRUPT` on a
   damaged or crafted `meta/idx/gen.col` instead of answering by it, and a revision's `~N` no
   longer names nothing by one (issue #16 item 5).
+- A fetch that meets a garbled loose object in the mirror fails `E_REMOTE_REJECTED`
+  `bad_objects`, no longer `unclassified` or a retried `E_REMOTE_UNREACHABLE`.
 
 ### Fixed
 

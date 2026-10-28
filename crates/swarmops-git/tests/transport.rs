@@ -1282,3 +1282,57 @@ fn closed_passes_a_whole_history() {
     assert_eq!(cli.closed(&setup.mirror(), &[next, base]), Ok(()));
     assert_eq!(cli.closed(&setup.mirror(), &[]), Ok(()));
 }
+
+#[test]
+fn a_corrupt_mirror_object_is_bad_objects() {
+    // The mirror's copy of the first commit, then of its tree, garbled on disk: the next fetch
+    // meets it and fails as bad objects, not as a retryable disconnect.
+    for object in ["", "^{tree}"] {
+        let setup = Setup::new();
+        let http = setup.server.http(HttpAuth::Anonymous);
+        let cli = setup.cli(&[]);
+        let cred = Credential::default();
+        setup.fetch(&cli, &http.url(REPO), &cred).expect("fetch");
+
+        // 1. The fetch's pack unpacked loose, as an export writes objects; then the object
+        //    overwritten with bytes that do not inflate.
+        let packs = setup.mirror().join("objects").join("pack");
+        for entry in fs::read_dir(&packs).expect("read the packs") {
+            let path = entry.expect("a pack file").path();
+            if path.extension().is_some_and(|ext| ext == "pack") {
+                let moved = setup.dir.path().join("fetched.pack");
+                fs::rename(&path, &moved).expect("move the pack aside");
+                fs::remove_file(path.with_extension("idx")).expect("remove its index");
+                let pack = fs::File::open(&moved).expect("open the pack");
+                let unpacked = setup
+                    .in_mirror()
+                    .arg("unpack-objects")
+                    .stdin(pack)
+                    .status()
+                    .expect("run git unpack-objects");
+                assert!(unpacked.success(), "git unpack-objects");
+            }
+        }
+        let hex = run(setup
+            .in_mirror()
+            .args(["rev-parse", &format!("{}{object}", setup.first)]));
+        let file = setup
+            .mirror()
+            .join("objects")
+            .join(&hex[..2])
+            .join(&hex[2..]);
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).expect("chmod");
+        fs::write(&file, b"garbage").expect("garble the object");
+
+        // 2. The remote moves on; the fetch refuses and leaves the mirror's ref.
+        setup
+            .server
+            .commit_on(REPO, "main", "second", &[("b.txt", "b\n")]);
+        let (reason, error) = rejected(setup.fetch(&cli, &http.url(REPO), &cred));
+        assert_eq!(reason, RejectReason::BadObjects, "{object}: {error:?}");
+        let tracked = run(setup
+            .in_mirror()
+            .args(["rev-parse", "refs/remotes/origin/main"]));
+        assert_eq!(oid(&tracked), setup.first);
+    }
+}
