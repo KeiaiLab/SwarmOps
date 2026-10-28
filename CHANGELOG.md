@@ -42,6 +42,13 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   (`annotated_tag`); a branch or tag is deleted with the `force` grant (`E_POLICY_DENIED`
   without it) and `main` never (`E_REF_PROTECTED`); a branch other than `main` moves backwards
   with the `force` grant. Each command of a push is decided on its own.
+- `swarmops serve` lands pushes to `refs/land/<target>`: `git push origin HEAD:refs/land/main`
+  imports the pushed commits, checks the caller's `land` grant, and lands them onto `main` as one
+  squashed changeset keyed by who pushed which commit where (`gp1-` and 60 hex digits), so the
+  same push again replays and writes nothing. The client reads the landed commit on a `remote:`
+  line (a fetch brings it in); a conflict is refused with the report on `remote:` lines (at most
+  50 paths), as are `E_NOTHING_TO_LAND` and a tag as the target. No ref is left under
+  `refs/land/`.
 
 ### Changed
 
