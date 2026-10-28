@@ -28,6 +28,15 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   host git's `upload-pack` there, so stock git clones, fetches, pulls and shallow-clones with
   protocol v2 or v0. Partial clone filters are not advertised (git fetches every blob), and no
   text a client gets names a host path.
+- `swarmops serve` takes pushes over ssh: for `git-receive-pack '<store>.git'` it runs the host
+  git's `receive-pack` on `serve.git`, which hands every command to `serve --hook proc-receive`.
+  The hook imports the pushed commits from `serve.git` (a gitlink is refused,
+  `E_GIT_IMPORT_LOSSY`), checks the caller's `push` grant, and moves the store's `main` or
+  `release/<x>` (or, in FORMAT 2, a branch) when the client's old value is the ref's export
+  (`E_CAS_MISMATCH` otherwise) and the move is forward (`main` along first parents), recorded
+  for the caller `--as` names. `atomic` and push options are not advertised. The hook refuses
+  (`not_from_git`) unless the parent `serve` named the store and the caller and `GIT_DIR` is that
+  store's `serve.git`.
 
 ### Changed
 
