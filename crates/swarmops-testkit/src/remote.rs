@@ -40,7 +40,6 @@ use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -1399,9 +1398,18 @@ pub(crate) fn sh_quote(value: &str) -> String {
 }
 
 /// Writes `script` to `path`, executable.
+///
+/// A child `sh` writes it, not this process: a descriptor open here for writing is copied
+/// into every child another test thread forks meanwhile, and running the script before
+/// that child execs fails with ETXTBSY ("Text file busy").
 pub(crate) fn write_script(path: &Path, script: &str) {
-    fs::write(path, script).expect("write a script");
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("make a script executable");
+    let status = Command::new("sh")
+        .args(["-c", r#"printf '%s' "$2" > "$1" && chmod 755 "$1""#, "sh"])
+        .arg(path)
+        .arg(script)
+        .status()
+        .expect("start sh to write a script");
+    assert!(status.success(), "write {}: {status}", path.display());
 }
 
 /// `mutex`'s guard, a poisoned one taken as is: a test thread's panic is reported on its own.
@@ -1418,12 +1426,18 @@ mod tests {
 
     use super::{
         GitServer, HeaderPassing, HttpAuth, MergeMethod, REMOTE_NAME, SquashMessage, SshMode,
-        base64, text,
+        base64, text, write_script,
     };
     use crate::child;
 
     /// The repository every test serves.
     const REPO: &str = "repo";
+
+    /// Threads that write and run scripts at once in the script race test.
+    const SCRIPT_THREADS: usize = 16;
+
+    /// Scripts each of those threads writes and runs.
+    const SCRIPTS_PER_THREAD: usize = 50;
 
     /// Branches in the gzipped fetch's repository: enough wants and haves for git to gzip the
     /// request (above about 1 KiB).
@@ -1934,5 +1948,28 @@ mod tests {
         for (plain, encoded) in vectors {
             assert_eq!(base64(plain.as_bytes()), encoded);
         }
+    }
+
+    #[test]
+    fn scripts_run_while_other_threads_fork() {
+        // A thread's fork copies every open descriptor, so a script another thread is
+        // writing stays open for writing until that child execs: running the script then
+        // fails with ETXTBSY ("Text file busy"). Each thread writes and runs at once.
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        std::thread::scope(|scope| {
+            for t in 0..SCRIPT_THREADS {
+                let dir = dir.path();
+                scope.spawn(move || {
+                    for n in 0..SCRIPTS_PER_THREAD {
+                        let script = dir.join(format!("script-{t}-{n}"));
+                        write_script(&script, "#!/bin/sh\nexit 0\n");
+                        let status = std::process::Command::new(&script)
+                            .status()
+                            .unwrap_or_else(|error| panic!("run {}: {error}", script.display()));
+                        assert!(status.success(), "{}: {status}", script.display());
+                    }
+                });
+            }
+        });
     }
 }
