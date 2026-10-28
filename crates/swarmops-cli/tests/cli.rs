@@ -3442,6 +3442,7 @@ mod derive {
     /// Once, `swarmops derive` derives the skip lists of what the journal records, up to 1,000
     /// frames, and says where to go on (`next`); after that frame nothing is left, and `next` is
     /// omitted; from the first frame again, the lists are found stored. It needs no identity.
+    /// `--after` past the journal's last frame is refused, with `--follow` too, at once.
     /// `--from-start` and `--interval-ms` without `--follow`, `--after` with `--from-start`, and
     /// an interval of 0 are usage errors; and a follower of a store that is not there fails at
     /// once, as any command does.
@@ -3460,6 +3461,17 @@ mod derive {
             json!({"derived": 0, "cached": 0})
         );
         assert_eq!(derive(&[]), json!({"derived": 0, "cached": 2, "next": 1}));
+
+        // A frame past the journal's last is refused, once or followed: no run said it.
+        for past in [
+            &["derive", "--after", "2"][..],
+            &["derive", "--follow", "--after", "2"],
+        ] {
+            let run = store.read(past);
+            assert_eq!(run.exit(), 2, "{run}");
+            let error = run.err("E_INVALID_ARG");
+            assert_eq!(error["details"]["after"], 2, "{run}");
+        }
 
         for refused in [
             &["derive", "--from-start"][..],

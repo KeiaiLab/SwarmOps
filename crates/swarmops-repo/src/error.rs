@@ -279,6 +279,13 @@ pub enum RepoError {
         /// The target's head.
         theirs: ChangesetId,
     },
+    /// [`crate::Repo::derive_eager`] was given an `after` past the journal's last frame: no
+    /// call of it read that frame, so it is no frame to go on after.
+    #[error("frame {after} is past the journal's end")]
+    PastJournalEnd {
+        /// The frame given.
+        after: u64,
+    },
     /// A value of a non-exhaustive enum of the store's, the core's or the merge's that this
     /// build does not handle: the fail-closed value of a wildcard arm, which a variant added
     /// to that enum without a match of its own reaches. A bug of this build, never a state of

@@ -68,6 +68,9 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 - A derived value whose put finds its slot held by a damaged file the store cannot remove is
   kept for the rest of the run, as a failed put's is, so a run derives it once (storage spec §5),
   not once for each value that needs it.
+- `derive --after N` with N past the journal's last frame is `E_INVALID_ARG` (`details.after`),
+  with `--follow` too and whatever `--limit`: it read as caught up before (`{derived: 0,
+  cached: 0}`, exit 0), so a follower given such a frame stayed silent for good.
 
 ## [0.6.0] - 2026-10-28
 

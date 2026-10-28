@@ -443,14 +443,28 @@ impl<O: ObjectStore> Repo<O> {
     /// and stored, and counted `derived`. A frame that records no changeset (a ref's move) is
     /// read and passed over.
     ///
-    /// With a `limit` of 0 it reads no frame and derives nothing, wherever `after` is:
-    /// [`DeriveRun::last_frame`] is then the journal's last frame, from where a follower derives
-    /// only what is recorded later (`swarmops derive --follow`, unless `--from-start`).
+    /// With a `limit` of 0 it reads no frame and derives nothing: [`DeriveRun::last_frame`] is
+    /// then the journal's last frame, from where a follower derives only what is recorded later
+    /// (`swarmops derive --follow`, unless `--from-start`).
     ///
-    /// The errors are [`Repo::derived`]'s, for the first value that cannot be made, and
-    /// [`RepoError::Store`] for a read of the journal that fails; the values derived before the
-    /// error stay stored.
+    /// An `after` past the journal's last frame is [`RepoError::PastJournalEnd`], whatever the
+    /// `limit`, before anything is derived: no call read it, and reading nothing after it would
+    /// pass for being at the journal's end. The other errors are [`Repo::derived`]'s, for the
+    /// first value that cannot be made, and [`RepoError::Store`] for a read of the journal that
+    /// fails; the values derived before the error stay stored.
     pub fn derive_eager(&self, after: Option<u64>, limit: usize) -> Result<DeriveRun, RepoError> {
+        // 1. `after` must be a frame of the journal: one past its end would read as caught up.
+        //    A frame a call read is in every later snapshot.
+        let read = match after {
+            Some(seq) => {
+                let read = self.snapshot()?;
+                if read.meta.frame(seq)?.is_none() {
+                    return Err(RepoError::PastJournalEnd { after: seq });
+                }
+                Some(read)
+            }
+            None => None,
+        };
         if limit == 0 {
             // What readers count as listed: the seq the next frame takes.
             let journal = Journal::open(&self.layout, Arc::clone(&self.fs))?;
@@ -460,8 +474,14 @@ impl<O: ObjectStore> Repo<O> {
                 ..DeriveRun::default()
             });
         }
-        // The frames' records, read in one snapshot, which no derivation needs past this.
-        let entries = self.snapshot()?.meta.journal_after(after, limit)?;
+
+        // 2. The frames' records, read in one snapshot, which no derivation needs past this.
+        let read = match read {
+            Some(read) => read,
+            None => self.snapshot()?,
+        };
+        let entries = read.meta.journal_after(after, limit)?;
+        drop(read);
         let mut run = DeriveRun {
             last_frame: entries.last().map(|entry| entry.seq),
             ..DeriveRun::default()

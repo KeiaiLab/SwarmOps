@@ -139,9 +139,22 @@ pub(crate) fn repo_error(e: RepoError, during: During<'_>) -> OpError {
             corrupt(message, during, "swarmops verify").with_details(object(id))
         }
         RepoError::Codec(_) => corrupt(message, during, "swarmops verify"),
-        // A derivation that fails on immutable inputs fails again on every call: a bug. So is
-        // a variant of another crate's enum this build does not know.
-        RepoError::Derived { .. } | RepoError::Internal(_) => error(ErrorCode::Internal, message),
+        e @ (RepoError::Derived { .. }
+        | RepoError::DerivedCorrupt { .. }
+        | RepoError::PastJournalEnd { .. }) => derive_error(e, message, during),
+        // A variant of another crate's enum this build does not know: a bug.
+        RepoError::Internal(_) => error(ErrorCode::Internal, message),
+        _ => unmapped(message),
+    }
+}
+
+/// The operations-spec error for a derivation's error `e`, raised while `during`, whose message
+/// is `message`: [`repo_error`]'s table, the derived values' rows. Any other error is
+/// [`repo_error`]'s.
+fn derive_error(e: RepoError, message: String, during: During<'_>) -> OpError {
+    match e {
+        // A derivation that fails on immutable inputs fails again on every call: a bug.
+        RepoError::Derived { .. } => error(ErrorCode::Internal, message),
         // A cache file someone placed, or a faulty build wrote: a deep verify names them all.
         RepoError::DerivedCorrupt {
             name, changeset, ..
@@ -149,7 +162,11 @@ pub(crate) fn repo_error(e: RepoError, during: During<'_>) -> OpError {
             ("derivation", name.into()),
             ("changeset", changeset.to_string().into()),
         ])),
-        _ => unmapped(message),
+        // An `after` that no `derive` gave as its `next`.
+        RepoError::PastJournalEnd { after } => error(ErrorCode::InvalidArg, message)
+            .with_details(details([("after", after.into())]))
+            .with_hint("pass a previous derive's next as after, or no after"),
+        other => repo_error(other, during),
     }
 }
 
@@ -1333,6 +1350,15 @@ mod tests {
             "{shown}"
         );
         assert!(!error.message.is_empty(), "{shown}");
+    }
+
+    /// An `after` past the journal's end is `E_INVALID_ARG`, naming it.
+    #[test]
+    fn an_after_past_the_journals_end_is_invalid() {
+        let past = || RepoError::PastJournalEnd { after: 7 };
+        maps(past(), During::Op, ErrorCode::InvalidArg);
+        let details = repo_error(past(), During::Op).details;
+        assert_eq!(details["after"].as_u64(), Some(7));
     }
 
     fn id() -> ChangesetId {

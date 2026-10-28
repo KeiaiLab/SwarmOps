@@ -1926,7 +1926,7 @@ expression: s.redact(&all)
       "description": "`derive`: derive ahead of any reader the eager derived values (storage spec §5: each\nchangeset's first-parent skip list) of the changesets the journal records after a frame, so\nthat reads find them stored. It writes only the store's cache of derived values, so it takes\nno identity.",
       "properties": {
         "after": {
-          "description": "Go on after this journal frame: a previous call's `next`. From the journal's first frame\nwhen omitted.",
+          "description": "Go on after this journal frame: a previous call's `next`. From the journal's first frame\nwhen omitted. A frame past the journal's last is `E_INVALID_ARG`.",
           "format": "uint64",
           "minimum": 0,
           "type": [
@@ -1962,7 +1962,7 @@ expression: s.redact(&all)
           "type": "integer"
         },
         "next": {
-          "description": "The last frame it read: pass it as the next call's `after` to go on, through a journal\nlonger than `limit` frames or through the frames recorded since. Omitted when it read no\nframe, as none follows `after`: it is at the journal's end. With `limit` 0, the journal's\nlast frame, omitted while the journal holds none.",
+          "description": "The last frame it read: pass it as the next call's `after` to go on, through a journal\nlonger than `limit` frames or through the frames recorded since. Omitted when it read no\nframe, as none follows `after`, the journal's last frame: it is at the journal's end (an\n`after` past that is `E_INVALID_ARG`). With `limit` 0, the journal's last frame, omitted\nwhile the journal holds none.",
           "format": "uint64",
           "minimum": 0,
           "type": [

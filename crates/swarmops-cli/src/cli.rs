@@ -672,7 +672,7 @@ pub enum Command {
     /// that run's envelope and exit code. Commits derive nothing.
     Derive {
         /// Go on after journal frame N, a previous run's next (default: the first frame; with
-        /// --follow, the journal's end).
+        /// --follow, the journal's end). A frame past the journal's last is E_INVALID_ARG.
         #[arg(long, value_name = "N", conflicts_with = "from_start")]
         after: Option<u64>,
         /// Keep deriving what the journal records, until killed.

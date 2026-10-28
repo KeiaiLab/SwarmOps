@@ -38,7 +38,7 @@ The command also takes the [global options](../cli.md#global-options).
 
 Syntax: `--after <N>`.
 
-Go on after journal frame N, a previous run's next (default: the first frame; with --follow, the journal's end).
+Go on after journal frame N, a previous run's next (default: the first frame; with --follow, the journal's end). A frame past the journal's last is E\_INVALID\_ARG.
 
 ### `--follow`
 
@@ -154,7 +154,7 @@ derives nothing and counts the values as cached.
 | --- | --- | --- | --- |
 | `cached` | `integer` | yes | How many of those values the store held already. |
 | `derived` | `integer` | yes | How many values it derived: of each eager derivation, one for each changeset its frames record whose value the store lacked. Values those needed on the way, an older changeset's, are derived too and not counted. |
-| `next` | `integer or null` | no | The last frame it read: pass it as the next call's `after` to go on, through a journal longer than `limit` frames or through the frames recorded since. Omitted when it read no frame, as none follows `after`: it is at the journal's end. With `limit` 0, the journal's last frame, omitted while the journal holds none. |
+| `next` | `integer or null` | no | The last frame it read: pass it as the next call's `after` to go on, through a journal longer than `limit` frames or through the frames recorded since. Omitted when it read no frame, as none follows `after`, the journal's last frame: it is at the journal's end (an `after` past that is `E_INVALID_ARG`). With `limit` 0, the journal's last frame, omitted while the journal holds none. |
 
 Envelope `op`: `derive`.
 

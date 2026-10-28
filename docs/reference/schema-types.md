@@ -488,7 +488,7 @@ Kind: object. `swarmops schema DeriveReq` prints its JSON Schema.
 
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
-| `after` | `integer` (uint64) or `null` | no | Go on after this journal frame: a previous call's `next`. From the journal's first frame when omitted. |
+| `after` | `integer` (uint64) or `null` | no | Go on after this journal frame: a previous call's `next`. From the journal's first frame when omitted. A frame past the journal's last is `E_INVALID_ARG`. |
 | `limit` | `integer` (uint) | no | The most journal frames to read; a frame is one transaction, a commit or a ref's move. 0 reads none and derives nothing: `next` is then the journal's last frame, from where the next calls derive only what is recorded later. Default: `1000`. |
 
 ## DeriveResp
@@ -501,7 +501,7 @@ Kind: object. `swarmops schema DeriveResp` prints its JSON Schema.
 | --- | --- | --- | --- |
 | `cached` | `integer` (uint64) | yes | How many of those values the store held already. |
 | `derived` | `integer` (uint64) | yes | How many values it derived: of each eager derivation, one for each changeset its frames record whose value the store lacked. Values those needed on the way, an older changeset's, are derived too and not counted. |
-| `next` | `integer` (uint64) or `null` | no | The last frame it read: pass it as the next call's `after` to go on, through a journal longer than `limit` frames or through the frames recorded since. Omitted when it read no frame, as none follows `after`: it is at the journal's end. With `limit` 0, the journal's last frame, omitted while the journal holds none. |
+| `next` | `integer` (uint64) or `null` | no | The last frame it read: pass it as the next call's `after` to go on, through a journal longer than `limit` frames or through the frames recorded since. Omitted when it read no frame, as none follows `after`, the journal's last frame: it is at the journal's end (an `after` past that is `E_INVALID_ARG`). With `limit` 0, the journal's last frame, omitted while the journal holds none. |
 
 ## Diff
 

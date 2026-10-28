@@ -2317,7 +2317,7 @@ impl GitExportResp {
 #[non_exhaustive]
 pub struct DeriveReq {
     /// Go on after this journal frame: a previous call's `next`. From the journal's first frame
-    /// when omitted.
+    /// when omitted. A frame past the journal's last is `E_INVALID_ARG`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub after: Option<u64>,
     /// The most journal frames to read; a frame is one transaction, a commit or a ref's move. 0
@@ -2350,8 +2350,9 @@ pub struct DeriveResp {
     pub cached: u64,
     /// The last frame it read: pass it as the next call's `after` to go on, through a journal
     /// longer than `limit` frames or through the frames recorded since. Omitted when it read no
-    /// frame, as none follows `after`: it is at the journal's end. With `limit` 0, the journal's
-    /// last frame, omitted while the journal holds none.
+    /// frame, as none follows `after`, the journal's last frame: it is at the journal's end (an
+    /// `after` past that is `E_INVALID_ARG`). With `limit` 0, the journal's last frame, omitted
+    /// while the journal holds none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next: Option<u64>,
 }

@@ -1433,9 +1433,9 @@ mod eager {
         assert_eq!(repo.derive_eager(None, 1000).unwrap(), run(0, 5, Some(5)));
     }
 
-    /// A `limit` of 0 reads no frame and derives nothing, wherever `after` is: it gives the
-    /// journal's last frame, where a follower that leaves what is recorded so far starts, and
-    /// `None` while the journal holds no frame.
+    /// A `limit` of 0 reads no frame and derives nothing, wherever up to the journal's end
+    /// `after` is: it gives the journal's last frame, where a follower that leaves what is
+    /// recorded so far starts, and `None` while the journal holds no frame.
     #[test]
     fn a_limit_of_0_gives_the_journals_end_and_derives_nothing() {
         let (_dir, root, repo) = new_repo();
@@ -1443,8 +1443,27 @@ mod eager {
         chain(&repo, 3);
         assert_eq!(repo.derive_eager(None, 0).unwrap(), run(0, 0, Some(2)));
         assert_eq!(repo.derive_eager(Some(0), 0).unwrap(), run(0, 0, Some(2)));
-        assert_eq!(repo.derive_eager(Some(7), 0).unwrap(), run(0, 0, Some(2)));
+        assert_eq!(repo.derive_eager(Some(2), 0).unwrap(), run(0, 0, Some(2)));
         assert_eq!(lists(&root), BTreeSet::new(), "nothing derived");
+    }
+
+    /// An `after` past the journal's last frame is refused, whatever the `limit`, and nothing is
+    /// derived: reading no frame after it would pass for being at the journal's end. The last
+    /// frame itself is the journal's end, and reads nothing.
+    #[test]
+    fn an_after_past_the_journals_end_is_refused() {
+        let (_dir, root, repo) = new_repo();
+        let past = |after: u64, limit: usize| match repo.derive_eager(Some(after), limit) {
+            Err(RepoError::PastJournalEnd { after: given }) => assert_eq!(given, after),
+            other => panic!("after {after}: expected PastJournalEnd, got {other:?}"),
+        };
+        past(0, 1000);
+        chain(&repo, 3);
+        for (after, limit) in [(3, 1000), (3, 0), (u64::MAX, 1000), (u64::MAX, 0)] {
+            past(after, limit);
+        }
+        assert_eq!(lists(&root), BTreeSet::new(), "nothing derived");
+        assert_eq!(repo.derive_eager(Some(2), 1000).unwrap(), run(0, 0, None));
     }
 
     /// Values a call needs on the way and the store lacks are derived, as `Repo::derived`
