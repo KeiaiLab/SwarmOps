@@ -653,6 +653,60 @@ fn the_sink_refuses_what_the_source_refuses() {
     }
 }
 
+/// A tag is `refs/tags/<name>`, moved as a branch is, by git's lock protocol: created, then
+/// refused on a mismatch, a lock left nowhere. A branch of the same name is another ref, and a
+/// name git takes for no ref is refused before anything is written.
+#[test]
+fn cas_tag_creates_and_refuses_a_mismatch() {
+    let destination = git::empty_repository();
+    let mut sink = open(&destination.dir);
+    let [first, second, _] = three_commits(&mut sink);
+
+    // 1. Created, read back, and no branch of that name.
+    assert_eq!(sink.tag("v1"), Ok(None));
+    assert_eq!(sink.cas_tag("v1", None, first), Ok(BranchUpdate::Applied));
+    assert_eq!(sink.tag("v1"), Ok(Some(first)));
+    assert_eq!(sink.branch("v1"), Ok(None));
+    let v1 = destination.dir.join("refs/tags/v1");
+    assert_eq!(fs::read_to_string(&v1).unwrap(), format!("{first}\n"));
+
+    // 2. A mismatch leaves it as it was.
+    let moved = Ok(BranchUpdate::Mismatch {
+        actual: Some(first),
+    });
+    assert_eq!(sink.cas_tag("v1", None, second), moved);
+    assert_eq!(sink.tag("v1"), Ok(Some(first)));
+
+    // 3. A tag in a directory of its own, and a bad name refused.
+    assert_eq!(
+        sink.cas_tag("rel/v2", None, second),
+        Ok(BranchUpdate::Applied)
+    );
+    let bad = SinkError::BadBranch {
+        name: "a..b".to_owned(),
+    };
+    assert_eq!(sink.cas_tag("a..b", None, first), Err(bad));
+    let refs = ["refs/tags/rel/v2", "refs/tags/v1"].map(PathBuf::from);
+    assert_eq!(
+        ref_files(&destination.dir),
+        BTreeSet::from(refs),
+        "no lock left"
+    );
+    let reader = GixSource::open(&destination.dir).unwrap();
+    assert_eq!(reader.resolve("refs/tags/v1"), Ok(first));
+    assert_eq!(reader.resolve("refs/tags/rel/v2"), Ok(second));
+}
+
+/// A sink that writes no tags says so: the trait's default bodies, which `MemSink` keeps.
+#[test]
+fn a_sink_without_tags_is_unsupported() {
+    let mut sink = MemSink::default();
+    let unsupported = SinkError::Unsupported(Unsupported::Tags);
+    assert_eq!(sink.tag("v1"), Err(unsupported.clone()));
+    let cas = sink.cas_tag("v1", None, oid(NOTHING));
+    assert_eq!(cas, Err(unsupported));
+}
+
 /// A root commit of `tree`, written as git writes one.
 fn commit_of(tree: GitOid) -> Vec<u8> {
     let ident = RawIdent::new(

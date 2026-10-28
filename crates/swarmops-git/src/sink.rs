@@ -1,4 +1,4 @@
-//! Where the git export writes: a repository's objects and one of its branches, behind
+//! Where the git export writes: a repository's objects and one of its branches or tags, behind
 //! [`GitSink`].
 
 use crate::{GitOid, ObjectFormat, RawKind, Unsupported};
@@ -8,8 +8,9 @@ use crate::{GitOid, ObjectFormat, RawKind, Unsupported};
 /// [`GixSink`](crate::GixSink) implements it with gix, and a test an in-memory one.
 ///
 /// The export writes the objects a new commit reaches ([`write_object`]), makes them durable
-/// ([`sync`]), and only then moves the branch ([`cas_branch`]), so that the branch never names an
-/// object a power loss can take. Branches are `refs/heads/<name>`, named without that prefix. A
+/// ([`sync`]), and only then moves the branch ([`cas_branch`]) or the tag ([`cas_tag`]), so that
+/// the ref never names an object a power loss can take. Branches are `refs/heads/<name>` and tags
+/// `refs/tags/<name>` (lightweight: the ref names the commit), each named without that prefix. A
 /// sink refuses, when it opens, a repository it cannot write as it is (a SHA-256 one, reftable
 /// refs, a shallow clone, a FIFO, a socket or a device where it reads a file), as a source
 /// refuses one it cannot read.
@@ -17,6 +18,7 @@ use crate::{GitOid, ObjectFormat, RawKind, Unsupported};
 /// [`write_object`]: GitSink::write_object
 /// [`sync`]: GitSink::sync
 /// [`cas_branch`]: GitSink::cas_branch
+/// [`cas_tag`]: GitSink::cas_tag
 pub trait GitSink {
     /// The hash the repository names its objects by.
     fn object_format(&self) -> ObjectFormat;
@@ -63,6 +65,28 @@ pub trait GitSink {
         expected: Option<GitOid>,
         new: GitOid,
     ) -> Result<BranchUpdate, SinkError>;
+
+    /// The object the lightweight tag `refs/tags/<name>` names, as [`branch`](GitSink::branch)
+    /// reads a branch; `None` when there is no such tag. A sink that writes no tags keeps this
+    /// body: [`SinkError::Unsupported`] ([`Unsupported::Tags`]).
+    fn tag(&self, name: &str) -> Result<Option<GitOid>, SinkError> {
+        let _ = name;
+        Err(SinkError::Unsupported(Unsupported::Tags))
+    }
+
+    /// Moves the lightweight tag `refs/tags/<name>` to `new` if it names `expected` now, as
+    /// [`cas_branch`](GitSink::cas_branch) moves a branch: one compare-and-swap, durable once it
+    /// returns [`BranchUpdate::Applied`]. A sink that writes no tags keeps this body:
+    /// [`SinkError::Unsupported`] ([`Unsupported::Tags`]).
+    fn cas_tag(
+        &mut self,
+        name: &str,
+        expected: Option<GitOid>,
+        new: GitOid,
+    ) -> Result<BranchUpdate, SinkError> {
+        let _ = (name, expected, new);
+        Err(SinkError::Unsupported(Unsupported::Tags))
+    }
 }
 
 /// Where a [`GitSink`] holds an object.
@@ -107,8 +131,9 @@ pub enum SinkError {
     /// The repository is one the sink does not write, refused before any read.
     #[error("the repository is not written as it is: {0}")]
     Unsupported(Unsupported),
-    /// The name is no branch name git takes (`refs/heads/<name>` is no valid ref name).
-    #[error("{name:?} is not a branch name git takes")]
+    /// The name is no branch or tag name git takes (`refs/heads/<name>` or `refs/tags/<name>` is
+    /// no valid ref name).
+    #[error("{name:?} is not a branch or tag name git takes")]
     BadBranch {
         /// The name, as given.
         name: String,

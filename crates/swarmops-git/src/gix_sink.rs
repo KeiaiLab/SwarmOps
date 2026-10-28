@@ -29,6 +29,12 @@ use crate::{gix_source, oid};
 /// loaded host makes as many attempts as a quiet one.
 const LOCK_TIMEOUT: Duration = Duration::from_millis(100);
 
+/// Where a branch's ref is, by its name: `refs/heads/<name>`.
+const HEADS: &str = "refs/heads/";
+
+/// Where a tag's ref is, by its name: `refs/tags/<name>`.
+const TAGS: &str = "refs/tags/";
+
 /// The paths a [`GixSink`] opened with [`GixSink::open_recording_syncs`] fsynced, relative to the
 /// git directory, in the order the syncs ended.
 #[cfg(feature = "test-hooks")]
@@ -42,13 +48,13 @@ pub type SyncedPaths = Arc<Mutex<Vec<PathBuf>>>;
 /// read (and checked against its id) before a pack, and gix's answer for the empty tree, which it
 /// gives whether or not the tree is stored, is not taken: git's own object writer goes by the files
 /// too, and writes the tree where it is not. [`sync`] fsyncs each file and directory on rayon's
-/// global pool. A branch moves by git's lock protocol: `refs/heads/<name>.lock` created
-/// exclusively, tried again for up to 100 ms (git's `core.filesRefLockTimeout`), the ref read and
-/// compared under it, the new value written to the lock and synced, the lock renamed onto the ref,
-/// and the ref's directory synced, with each directory the move made and its parent. A process that
-/// dies between the lock and the rename leaves the lock, which, as with git, stays until it is
-/// removed; a failure to sync those directories after the rename leaves the branch moved, perhaps
-/// not durably.
+/// global pool. A branch moves by git's lock protocol, and a tag as a branch does under
+/// `refs/tags/`: `refs/heads/<name>.lock` created exclusively, tried again for up to 100 ms
+/// (git's `core.filesRefLockTimeout`), the ref read and compared under it, the new value written
+/// to the lock and synced, the lock renamed onto the ref, and the ref's directory synced, with
+/// each directory the move made and its parent. A process that dies between the lock and the
+/// rename leaves the lock, which, as with git, stays until it is removed; a failure to sync those
+/// directories after the rename leaves the branch moved, perhaps not durably.
 ///
 /// [`stored`]: GitSink::stored
 /// [`read`]: GitSink::read
@@ -197,11 +203,13 @@ impl GixSink {
         }
     }
 
-    /// Refuses the branch `full` when another ref is in the way: one whose name is a directory of
-    /// `full`'s (its loose file, `packed-refs`, or a file that is no ref), or one under `full/`.
-    /// git refuses both, and the filesystem alone would not see a packed one.
+    /// Refuses the branch or tag `full` (`refs/heads/…`, `refs/tags/…`) when another ref is in
+    /// the way: one whose name is a directory of `full`'s below its namespace (its loose file,
+    /// `packed-refs`, or a file that is no ref), or one under `full/`. git refuses both, and the
+    /// filesystem alone would not see a packed one.
     fn refuse_conflicts(&self, full: &str) -> Result<(), SinkError> {
-        let mut at = "refs/heads/".len();
+        let namespace = full.match_indices('/').nth(1);
+        let mut at = namespace.map_or(full.len(), |(slash, _)| slash + 1);
         while let Some(slash) = full[at..].find('/') {
             let directory = &full[..at + slash];
             if !matches!(self.read_ref(directory), Ok(None)) {
@@ -395,7 +403,7 @@ impl GitSink for GixSink {
     }
 
     fn branch(&self, name: &str) -> Result<Option<GitOid>, SinkError> {
-        self.read_ref(&branch_ref(name)?)
+        self.read_ref(&short_ref(HEADS, name)?)
     }
 
     fn checked_out(&self) -> Result<Option<String>, SinkError> {
@@ -418,16 +426,44 @@ impl GitSink for GixSink {
         expected: Option<GitOid>,
         new: GitOid,
     ) -> Result<BranchUpdate, SinkError> {
-        let full = branch_ref(name)?;
+        self.cas_short(&short_ref(HEADS, name)?, expected, new)
+    }
+
+    fn tag(&self, name: &str) -> Result<Option<GitOid>, SinkError> {
+        self.read_ref(&short_ref(TAGS, name)?)
+    }
+
+    fn cas_tag(
+        &mut self,
+        name: &str,
+        expected: Option<GitOid>,
+        new: GitOid,
+    ) -> Result<BranchUpdate, SinkError> {
+        self.cas_short(&short_ref(TAGS, name)?, expected, new)
+    }
+}
+
+impl GixSink {
+    /// [`cas_branch`](GitSink::cas_branch) and [`cas_tag`](GitSink::cas_tag) of the ref `full`
+    /// (`refs/heads/<name>`, `refs/tags/<name>`): another ref in the way refused, then git's lock
+    /// protocol, then the directories the move made synced.
+    fn cas_short(
+        &mut self,
+        full: &str,
+        expected: Option<GitOid>,
+        new: GitOid,
+    ) -> Result<BranchUpdate, SinkError> {
         if !self.has(new) {
             return Err(SinkError::Missing { oid: new });
         }
-        self.refuse_conflicts(&full)?;
-        let (lock, path) = self.files.ref_paths(&full);
-        let dir = path.parent().expect("a branch's file is in refs/heads/");
+        self.refuse_conflicts(full)?;
+        let (lock, path) = self.files.ref_paths(full);
+        let dir = path
+            .parent()
+            .expect("a branch's or a tag's file is in refs/");
         let made = self.files.make_dirs(dir)?;
         let file = self.lock(&format!("{full}.lock"))?;
-        let moved = self.move_locked(&full, file, expected, new);
+        let moved = self.move_locked(full, file, expected, new);
         if moved != Ok(BranchUpdate::Applied) {
             // A mismatch or a failure leaves the branch as it was, and the lock goes with it.
             return match (moved, fs::remove_file(&lock)) {
@@ -557,10 +593,11 @@ impl Files {
     }
 }
 
-/// The full name of the branch `name`, `refs/heads/<name>`, when git takes that as a ref name
-/// (gix's reference-name rules); [`SinkError::BadBranch`] otherwise.
-fn branch_ref(name: &str) -> Result<String, SinkError> {
-    let full = format!("refs/heads/{name}");
+/// The full name of the branch or tag `name` under `namespace` ([`HEADS`], [`TAGS`]):
+/// `refs/heads/<name>`, `refs/tags/<name>`, when git takes that as a ref name (gix's
+/// reference-name rules); [`SinkError::BadBranch`] otherwise.
+fn short_ref(namespace: &str, name: &str) -> Result<String, SinkError> {
+    let full = format!("{namespace}{name}");
     match gix::refs::FullName::try_from(full.as_str()) {
         Ok(_) => Ok(full),
         Err(_) => Err(SinkError::BadBranch {

@@ -172,4 +172,9 @@ pub enum Unsupported {
         /// The most it reads of such a file.
         max: u64,
     },
+    /// A [`GitSink`](crate::GitSink) that writes no tags was asked to read or move one: the
+    /// trait's default bodies of [`tag`](crate::GitSink::tag) and
+    /// [`cas_tag`](crate::GitSink::cas_tag).
+    #[error("it writes no tags")]
+    Tags,
 }
