@@ -188,6 +188,39 @@ impl GitCli {
         command
     }
 
+    /// git for `swarmops serve` (M14), on the serving repository `git_dir`: [`base_command`]'s
+    /// cleaned environment, without the caller's [`SERVE_DROPPED_VARS`] either; `GIT_DIR` and
+    /// the working directory `git_dir`; no transport (`GIT_ALLOW_PROTOCOL` empty); and the
+    /// configuration in the environment, [`CONFIG`] then `config`, which wins. The caller adds
+    /// the service and its arguments, and the stdio it serves on (stdin is closed here).
+    ///
+    /// [`base_command`]: GitCli::base_command
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "serve::child runs it once its body is built")
+    )]
+    pub(crate) fn serve_command(&self, git_dir: &Path, config: &[(&str, &OsStr)]) -> Command {
+        let mut command = self.base_command();
+        for key in SERVE_DROPPED_VARS {
+            command.env_remove(key);
+        }
+        command
+            .env("GIT_DIR", git_dir)
+            .current_dir(git_dir)
+            .env("GIT_ALLOW_PROTOCOL", "");
+
+        // The configuration, in the environment (never in the arguments, which others see).
+        let fixed = CONFIG.iter().map(|(key, value)| (*key, OsStr::new(value)));
+        let entries: Vec<(&str, &OsStr)> = fixed.chain(config.iter().copied()).collect();
+        command.env("GIT_CONFIG_COUNT", entries.len().to_string());
+        for (n, (key, value)) in entries.into_iter().enumerate() {
+            command
+                .env(format!("GIT_CONFIG_KEY_{n}"), key)
+                .env(format!("GIT_CONFIG_VALUE_{n}"), value);
+        }
+        command
+    }
+
     /// The token `cred` names, when its variable is set, not empty and UTF-8.
     fn token(&self, cred: &Credential) -> Option<String> {
         let name = cred.token_env.as_deref()?;
@@ -822,6 +855,10 @@ const DROPPED_VARS: [&str; 5] = [
 /// set beside the dropped `GIT_CONFIG_COUNT`.
 const DROPPED_PREFIXES: [&str; 3] = ["GIT_TRACE", "GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"];
 
+/// The caller's variables a serving child does not get besides those every child drops: they
+/// point git at another configuration than the one `swarmops serve` gives it in the environment.
+const SERVE_DROPPED_VARS: [&str; 2] = ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"];
+
 /// What every child's environment sets: git's messages in English, no prompt (a missing
 /// credential fails), and a stalled HTTP transfer ended after a minute below 1 KB/s.
 const FIXED_ENV: [(&str, &str); 4] = [
@@ -1129,4 +1166,71 @@ fn scp_parts(url: &str) -> Option<(Option<&str>, &str)> {
 /// Whether `host` is a literal loopback address: `127.0.0.0/8` or `::1`.
 fn is_loopback(host: &str) -> bool {
     host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::ffi::{OsStr, OsString};
+    use std::path::Path;
+
+    use super::GitCli;
+
+    /// A serving child gets `GIT_DIR` and the configuration `serve` gives it, never the caller's
+    /// variables that point git at another repository or configuration.
+    #[test]
+    fn serve_command_cleans_the_environment() {
+        // 1. A caller whose environment points git elsewhere.
+        let path = std::env::var_os("PATH").expect("PATH is set");
+        let caller: Vec<(OsString, OsString)> = [
+            ("GIT_DIR", "/elsewhere.git"),
+            ("GIT_CONFIG_GLOBAL", "/elsewhere/gitconfig"),
+            ("GIT_CONFIG_SYSTEM", "/elsewhere/system"),
+            ("GIT_CONFIG_KEY_0", "core.hooksPath"),
+            ("GIT_CONFIG_VALUE_0", "/elsewhere/hooks"),
+            ("HOME", "/home/serving"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .chain([("PATH".into(), path)])
+        .collect();
+        let git = GitCli::find_with_env(caller).expect("git on PATH");
+
+        // 2. The child: its repository, its configuration, and what the caller gave it.
+        let git_dir = Path::new("/srv/so/acme/git/serve.git");
+        let config = [("receive.fsckObjects", OsStr::new("true"))];
+        let command = git.serve_command(git_dir, &config);
+        let env: BTreeMap<&OsStr, Option<&OsStr>> = command.get_envs().collect();
+        let value = |key: &str| env.get(OsStr::new(key)).copied().flatten();
+        assert_eq!(value("GIT_DIR"), Some(git_dir.as_os_str()), "{env:?}");
+        assert_eq!(command.get_current_dir(), Some(git_dir));
+        assert_eq!(value("GIT_CONFIG_GLOBAL"), None, "{env:?}");
+        assert_eq!(value("GIT_CONFIG_SYSTEM"), None, "{env:?}");
+        assert_eq!(value("HOME"), Some(OsStr::new("/home/serving")), "{env:?}");
+
+        // 3. The configuration, in the environment alone: the fixed entries, then serve's.
+        let count: usize = value("GIT_CONFIG_COUNT")
+            .and_then(OsStr::to_str)
+            .and_then(|count| count.parse().ok())
+            .expect("GIT_CONFIG_COUNT");
+        let entries: Vec<(&OsStr, &OsStr)> = (0..count)
+            .map(|n| {
+                let key = value(&format!("GIT_CONFIG_KEY_{n}")).expect("a key");
+                let value = value(&format!("GIT_CONFIG_VALUE_{n}")).expect("a value");
+                (key, value)
+            })
+            .collect();
+        assert_eq!(
+            entries.last(),
+            Some(&(OsStr::new("receive.fsckObjects"), OsStr::new("true"))),
+            "{entries:?}"
+        );
+        assert!(
+            !entries
+                .iter()
+                .any(|(_, value)| *value == OsStr::new("/elsewhere/hooks")),
+            "{entries:?}"
+        );
+        assert_eq!(command.get_args().count(), 0, "no argument of the caller's");
+    }
 }

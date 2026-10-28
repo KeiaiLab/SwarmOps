@@ -42,6 +42,8 @@
 //! - [`limits`]: GitHub's documented limits, checked before a push sends anything.
 //! - [`sync`](mod@sync): the sync engine: the unpublished changes, those a remote holds already,
 //!   and the rest landed onto the remote's head.
+//! - [`serve`]: the git side of `swarmops serve` (M14): the serving repository, the ref map, the
+//!   pkt-line and `proc-receive` codecs, and the land key of a push that lands.
 //!
 //! Umbrella decision 3: gix is pinned (`=0.90.0`, its `sha1` feature alone, no default features)
 //! and seen by [`gix_source`] and [`gix_sink`] alone; the first also computes the SHA-1 behind
@@ -65,6 +67,7 @@ pub mod native;
 pub mod oid;
 pub mod raw;
 pub mod render;
+pub mod serve;
 pub mod sink;
 pub mod source;
 pub mod sync;
