@@ -1878,8 +1878,8 @@ mod land {
             error.hint.as_deref(),
             Some(
                 format!(
-                    "swarmops cat {theirs}:f, then swarmops land {head} --resolve <file> with \
-                     each path's resolution and against = {theirs}"
+                    "swarmops cat {theirs}:f, then swarmops land {head} --resolve <file> \
+                     (resolutions over MCP) with each path's resolution and against = {theirs}"
                 )
                 .as_str()
             )
@@ -2728,7 +2728,11 @@ fn commit_errors_map_to_codes() {
     // Nothing to record: no changes, or only puts of what is there already.
     for changes in [vec![], vec![text("file", "x")]] {
         let err = expect_err(commit_on_c1(changes), ErrorCode::EmptyCommit);
-        assert!(err.hint.unwrap().contains("--allow-empty"));
+        let hint = err.hint.unwrap();
+        assert!(
+            hint.contains("--allow-empty (allow_empty over MCP)"),
+            "{hint}"
+        );
     }
     // ...unless an empty changeset is asked for: it keeps its parent's root.
     let mut req = commit_req(Some(&c1), vec![]);

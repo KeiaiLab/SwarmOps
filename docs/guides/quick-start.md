@@ -215,7 +215,7 @@ so --human --as agent/worker-3 land "$C3" --key "$(uuidgen)"; echo "exit $?"
 ```text
 error: E_CONFLICT: 1 path(s) of the change conflict with the target's head 4c54d337…: nothing was recorded
 conflict: content src/lib.rs
-hint: swarmops cat 4c54d337…:src/lib.rs, then swarmops land 4b4e8668… --resolve <file> with each path's resolution and against = 4c54d337…
+hint: swarmops cat 4c54d337…:src/lib.rs, then swarmops land 4b4e8668… --resolve <file> (resolutions over MCP) with each path's resolution and against = 4c54d337…
 exit 3
 ```
 

@@ -65,6 +65,9 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   so: `E_AUTH` when the serving entry names no caller or no grant of the store's `access.toml`
   names it, `E_POLICY_DENIED` when the file grants that caller no such action. Both stay exit 5,
   not retryable.
+- The hints of `E_EMPTY_COMMIT` and `E_CONFLICT` name the MCP argument beside the flag
+  (`allow_empty`, `resolutions`), and the MCP `commit` tool's description says when
+  `allow_empty` is needed.
 
 ### Fixed
 

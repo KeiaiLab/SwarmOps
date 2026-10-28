@@ -114,7 +114,7 @@ so --as agent/worker-2 --human land "$b"; echo "exit $?"
 landed 31528945… on main (onto e0f1f8a6…, attempt 1)
 error: E_CONFLICT: 1 path(s) of the change conflict with the target's head 31528945…: nothing was recorded
 conflict: content src/lib.rs
-hint: swarmops cat 31528945…:src/lib.rs, then swarmops land 7436166c… --resolve <file> with each path's resolution and against = 31528945…
+hint: swarmops cat 31528945…:src/lib.rs, then swarmops land 7436166c… --resolve <file> (resolutions over MCP) with each path's resolution and against = 31528945…
 exit 3
 ```
 

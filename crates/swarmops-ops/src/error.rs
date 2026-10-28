@@ -78,8 +78,10 @@ pub(crate) fn repo_error(e: RepoError, during: During<'_>) -> OpError {
         RepoError::UnknownParent(id) => error(ErrorCode::UnknownParent, message)
             .with_details(details([("parent", id.to_string().into())]))
             .with_hint("swarmops log"),
-        RepoError::EmptyChanges => error(ErrorCode::EmptyCommit, message)
-            .with_hint("pass --allow-empty to record a changeset that changes nothing"),
+        RepoError::EmptyChanges => error(ErrorCode::EmptyCommit, message).with_hint(
+            "pass --allow-empty (allow_empty over MCP) to record a changeset that changes \
+             nothing",
+        ),
         RepoError::TypeConflict { path: at } => {
             error(ErrorCode::TypeConflict, message).with_details(path(&at))
         }
@@ -215,7 +217,7 @@ fn land_error(e: RepoError, message: String) -> OpError {
 /// message is `message`: `details.report` is the conflict report, its hunk texts within
 /// `max_bytes` ([`crate::conflict::report`]), and the hint reads the target's side of the first
 /// conflicting path, then names the land again with its resolutions, against the target's head
-/// the report names (`land --resolve`).
+/// the report names (`land --resolve`, `resolutions` over MCP).
 pub(crate) fn conflict(conflicts: &MergeConflicts, message: String, max_bytes: u64) -> OpError {
     let report = match crate::conflict::report(conflicts, max_bytes) {
         Ok(report) => report,
@@ -226,8 +228,8 @@ pub(crate) fn conflict(conflicts: &MergeConflicts, message: String, max_bytes: u
         None => format!("{}:<path>", report.theirs),
     };
     let next = hint(format!(
-        "swarmops cat {side}, then swarmops land {} --resolve <file> with each path's resolution \
-         and against = {}",
+        "swarmops cat {side}, then swarmops land {} --resolve <file> (resolutions over MCP) with \
+         each path's resolution and against = {}",
         report.ours, report.theirs
     ));
     let report = serde_json::to_value(&report).expect("a conflict report serializes");
@@ -1574,8 +1576,8 @@ mod tests {
         assert_eq!(
             conflict.hint,
             Some(format!(
-                "swarmops cat {full}:<path>, then swarmops land {full} --resolve <file> with each \
-                 path's resolution and against = {full}"
+                "swarmops cat {full}:<path>, then swarmops land {full} --resolve <file> \
+                 (resolutions over MCP) with each path's resolution and against = {full}"
             ))
         );
         let exhausted = repo_error(

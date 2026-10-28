@@ -644,7 +644,7 @@ expression: golden.transcript()
                 "openWorldHint": false,
                 "readOnlyHint": false
               },
-              "description": "Records a changeset from an explicit change list, on parent or else on main's head. With advance it also moves that ref to the changeset in the same transaction, only if the ref still names parent, which must then be the full 64-hex id you read; otherwise it records nothing (E_CAS_MISMATCH, details.committed false). Check result.advanced: a server that does not know advance moves no ref. An idempotency_key, a uuid v7 new for each commit, makes a retry safe: the same call again replays it (result.replayed) instead of recording it twice. A {\"file\": path} content is read by this server: give an absolute path.",
+              "description": "Records a changeset from an explicit change list, on parent or else on main's head. With advance it also moves that ref to the changeset in the same transaction, only if the ref still names parent, which must then be the full 64-hex id you read; otherwise it records nothing (E_CAS_MISMATCH, details.committed false). Check result.advanced: a server that does not know advance moves no ref. An idempotency_key, a uuid v7 new for each commit, makes a retry safe: the same call again replays it (result.replayed) instead of recording it twice. A change list that changes nothing is E_EMPTY_COMMIT unless allow_empty is true. A {\"file\": path} content is read by this server: give an absolute path.",
               "inputSchema": {
                 "$schema": "https://json-schema.org/draft/2020-12/schema",
                 "description": "`commit`: record a changeset from an explicit change list. It moves no ref, unless\n`advance` names one.",

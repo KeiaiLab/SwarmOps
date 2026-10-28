@@ -289,7 +289,7 @@ expression: s.transcript()
         "retryable": false,
         "exit": 1,
         "details": {},
-        "hint": "pass --allow-empty to record a changeset that changes nothing"
+        "hint": "pass --allow-empty (allow_empty over MCP) to record a changeset that changes nothing"
       },
       "meta": {
         "repo": "[tmp]/store",
@@ -984,7 +984,7 @@ expression: s.transcript()
             "truncated": false
           }
         },
-        "hint": "swarmops cat [theirs]:src/lib.rs, then swarmops land [ours] --resolve <file> with each path's resolution and against = [theirs]"
+        "hint": "swarmops cat [theirs]:src/lib.rs, then swarmops land [ours] --resolve <file> (resolutions over MCP) with each path's resolution and against = [theirs]"
       },
       "meta": {
         "repo": "[tmp]/store",
@@ -1284,7 +1284,7 @@ expression: s.transcript()
             "truncated": false
           }
         },
-        "hint": "swarmops cat [id15]:src/lib.rs, then swarmops land [id14] --resolve <file> with each path's resolution and against = [id15]"
+        "hint": "swarmops cat [id15]:src/lib.rs, then swarmops land [id14] --resolve <file> (resolutions over MCP) with each path's resolution and against = [id15]"
       },
       "meta": {
         "repo": "[tmp]/store",

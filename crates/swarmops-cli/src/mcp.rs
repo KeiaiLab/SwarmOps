@@ -435,8 +435,10 @@ static TOOLS: [Spec; 27] = [
                       details.committed false). Check result.advanced: a server that does not \
                       know advance moves no ref. An idempotency_key, a uuid v7 new for each \
                       commit, makes a retry safe: the same call again replays it \
-                      (result.replayed) instead of recording it twice. A {\"file\": path} \
-                      content is read by this server: give an absolute path.",
+                      (result.replayed) instead of recording it twice. A change list that \
+                      changes nothing is E_EMPTY_COMMIT unless allow_empty is true. A \
+                      {\"file\": path} content is read by this server: give an absolute \
+                      path.",
         effect: Effect::Adds,
         result_chars: None,
     },

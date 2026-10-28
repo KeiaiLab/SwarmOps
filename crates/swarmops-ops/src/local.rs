@@ -305,7 +305,8 @@ const MAX_LAND_KEY: usize = 64;
 ///   limit, scope}`, below).
 /// - `E_EXISTS`: `Exists`; the hint is `swarmops --repo <path> info`.
 /// - `E_UNKNOWN_PARENT` `{parent}`: `UnknownParent`; the hint is `swarmops log`.
-/// - `E_EMPTY_COMMIT`: `EmptyChanges`; the hint names `--allow-empty`.
+/// - `E_EMPTY_COMMIT`: `EmptyChanges`; the hint names `--allow-empty` and its MCP argument,
+///   `allow_empty`.
 /// - `E_TYPE_CONFLICT` `{path}`: `TypeConflict`.
 /// - `E_PATH_NOT_FOUND` `{path}`: `PathNotFound`.
 /// - `E_REF_NAME_INVALID` `{name}`: `RefName`, the repository's or the store's; the hint gives

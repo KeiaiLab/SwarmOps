@@ -163,7 +163,7 @@ swarmops --as agent/worker-2 land "$C2" --key "$(uuidgen)" --pretty
         "truncated": false
       }
     },
-    "hint": "swarmops cat 91073fdd…:src/lib.rs, then swarmops land 70177113… --resolve <file> with each path's resolution and against = 91073fdd…"
+    "hint": "swarmops cat 91073fdd…:src/lib.rs, then swarmops land 70177113… --resolve <file> (resolutions over MCP) with each path's resolution and against = 91073fdd…"
   },
   …
 }

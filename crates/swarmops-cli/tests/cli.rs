@@ -2518,8 +2518,8 @@ fn a_conflicting_land_exits_3_with_the_report() {
     });
     assert_eq!(conflict["error"]["details"], json!({ "report": report }));
     let hint = format!(
-        "swarmops cat {theirs}:f.txt, then swarmops land {head} --resolve <file> with each path's \
-         resolution and against = {theirs}"
+        "swarmops cat {theirs}:f.txt, then swarmops land {head} --resolve <file> (resolutions over \
+         MCP) with each path's resolution and against = {theirs}"
     );
     assert_eq!(conflict["error"]["hint"], hint.as_str());
     assert_eq!(

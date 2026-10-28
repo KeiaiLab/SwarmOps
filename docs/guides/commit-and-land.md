@@ -442,7 +442,7 @@ echo "[]" | swarmops commit -m "checkpoint" --changes - --allow-empty --human
 
 ```text
 error: E_EMPTY_COMMIT: the change list changes nothing
-hint: pass --allow-empty to record a changeset that changes nothing
+hint: pass --allow-empty (allow_empty over MCP) to record a changeset that changes nothing
 changeset: 483992a7615836d3898ade34af8efa1cb8076de326a3858f2893b805a6e6ab6e
 parent: 68cc12a030d5d5cc2b295716fca66de5ecc01965c781d03dc328be70c7a1ca01
 root: d0c3b6d581cde3495a792c626ea02d30db022d771431604b0b1883ca43a65da2
@@ -784,7 +784,7 @@ swarmops --as agent/worker-2 land "$W2" --key "$KEY2" --human
 landed 10c18b5463b47eadcf50505cf1d80845551f87f6ffa65bd8fceeb02a264aad40 on main (onto 3994c02dbe4e228e0db558707b23c54b0feda4270c9e4aad6d5512fa34eb4615, attempt 1)
 error: E_CONFLICT: 1 path(s) of the change conflict with the target's head 10c18b5463b47eadcf50505cf1d80845551f87f6ffa65bd8fceeb02a264aad40: nothing was recorded
 conflict: content src/lib.rs
-hint: swarmops cat 10c18b5463b47eadcf50505cf1d80845551f87f6ffa65bd8fceeb02a264aad40:src/lib.rs, then swarmops land 298552d6226ffb544df36fdd210ebf2ca1450539f5680a3c3b450d3fa1e7e393 --resolve <file> with each path's resolution and against = 10c18b5463b47eadcf50505cf1d80845551f87f6ffa65bd8fceeb02a264aad40
+hint: swarmops cat 10c18b5463b47eadcf50505cf1d80845551f87f6ffa65bd8fceeb02a264aad40:src/lib.rs, then swarmops land 298552d6226ffb544df36fdd210ebf2ca1450539f5680a3c3b450d3fa1e7e393 --resolve <file> (resolutions over MCP) with each path's resolution and against = 10c18b5463b47eadcf50505cf1d80845551f87f6ffa65bd8fceeb02a264aad40
 ```
 
 The land exits 3 and records nothing. `main` is as the first agent left it. Only
@@ -851,7 +851,7 @@ cat conflict.json
         "truncated": false
       }
     },
-    "hint": "swarmops cat 10c18b5463b47eadcf50505cf1d80845551f87f6ffa65bd8fceeb02a264aad40:src/lib.rs, then swarmops land 298552d6226ffb544df36fdd210ebf2ca1450539f5680a3c3b450d3fa1e7e393 --resolve <file> with each path's resolution and against = 10c18b5463b47eadcf50505cf1d80845551f87f6ffa65bd8fceeb02a264aad40"
+    "hint": "swarmops cat 10c18b5463b47eadcf50505cf1d80845551f87f6ffa65bd8fceeb02a264aad40:src/lib.rs, then swarmops land 298552d6226ffb544df36fdd210ebf2ca1450539f5680a3c3b450d3fa1e7e393 --resolve <file> (resolutions over MCP) with each path's resolution and against = 10c18b5463b47eadcf50505cf1d80845551f87f6ffa65bd8fceeb02a264aad40"
   },
   "meta": {
     "repo": "…",

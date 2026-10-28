@@ -550,7 +550,7 @@ Exit 1, not retryable. The change list changes nothing: it is empty, or every pu
 path holds already.
 
 ```text
-{"ok":false,"op":"commit","api":1,"error":{"code":"E_EMPTY_COMMIT","message":"the change list changes nothing","retryable":false,"exit":1,"details":{},"hint":"pass --allow-empty to record a changeset that changes nothing"},"meta":{"repo":"acme","elapsed_ms":0,"resolved":{"main":"82a6c2d1…"},"auth":"trust"}}
+{"ok":false,"op":"commit","api":1,"error":{"code":"E_EMPTY_COMMIT","message":"the change list changes nothing","retryable":false,"exit":1,"details":{},"hint":"pass --allow-empty (allow_empty over MCP) to record a changeset that changes nothing"},"meta":{"repo":"acme","elapsed_ms":0,"resolved":{"main":"82a6c2d1…"},"auth":"trust"}}
 ```
 
 Check the change list against the parent (`swarmops cat <parent>:<path>`), or pass
@@ -677,7 +677,7 @@ nothing was recorded. Continuing the example above, the land of `03b168a3…` (`
         "truncated": false
       }
     },
-    "hint": "swarmops cat a2c75f68…:src/lib.rs, then swarmops land 03b168a3… --resolve <file> with each path's resolution and against = a2c75f68…"
+    "hint": "swarmops cat a2c75f68…:src/lib.rs, then swarmops land 03b168a3… --resolve <file> (resolutions over MCP) with each path's resolution and against = a2c75f68…"
   },
   …
 }

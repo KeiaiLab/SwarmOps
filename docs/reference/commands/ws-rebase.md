@@ -138,7 +138,7 @@ swarmops --repo [tmp]/store --as agent/worker-17 ws rebase --ws w2 --onto releas
         "truncated": false
       }
     },
-    "hint": "swarmops cat [id15]:src/lib.rs, then swarmops land [id14] --resolve <file> with each path's resolution and against = [id15]"
+    "hint": "swarmops cat [id15]:src/lib.rs, then swarmops land [id14] --resolve <file> (resolutions over MCP) with each path's resolution and against = [id15]"
   },
   "meta": {
     "repo": "[tmp]/store",

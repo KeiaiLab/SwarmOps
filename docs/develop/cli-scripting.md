@@ -455,7 +455,7 @@ $ SWARMOPS_AGENT=agent/worker-1 ./publish.sh "$BASE" notes.json greet.json; echo
 main moved to 5cc2a136cfe06ab61e00b3d322a20a8c80bc80913cee1e92e9dfe2f9848692a7: landing instead
 notes.json: {"op":"landed","main":"aacf0e0212fb5a34121a8dd9a80296fc62d9a0e207e51aaf6c79ebcdb7450009"}
 main moved to aacf0e0212fb5a34121a8dd9a80296fc62d9a0e207e51aaf6c79ebcdb7450009: landing instead
-{"code":"E_CONFLICT","message":"1 path(s) of the change conflict with the target's head aacf0e0212fb5a34121a8dd9a80296fc62d9a0e207e51aaf6c79ebcdb7450009: nothing was recorded","hint":"swarmops cat aacf0e0212fb5a34121a8dd9a80296fc62d9a0e207e51aaf6c79ebcdb7450009:src/lib.rs, then swarmops land 84ebff1a072e50457bd50ac606a289a51b61d4d4fa5249fe4455599d80a4356e --resolve <file> with each path's resolution and against = aacf0e0212fb5a34121a8dd9a80296fc62d9a0e207e51aaf6c79ebcdb7450009"}
+{"code":"E_CONFLICT","message":"1 path(s) of the change conflict with the target's head aacf0e0212fb5a34121a8dd9a80296fc62d9a0e207e51aaf6c79ebcdb7450009: nothing was recorded","hint":"swarmops cat aacf0e0212fb5a34121a8dd9a80296fc62d9a0e207e51aaf6c79ebcdb7450009:src/lib.rs, then swarmops land 84ebff1a072e50457bd50ac606a289a51b61d4d4fa5249fe4455599d80a4356e --resolve <file> (resolutions over MCP) with each path's resolution and against = aacf0e0212fb5a34121a8dd9a80296fc62d9a0e207e51aaf6c79ebcdb7450009"}
 exit=3
 $ SWARMOPS_AGENT=agent/worker-1 RESOLVE=ours ./publish.sh "$BASE" greet.json; echo "exit=$?"
 main moved to aacf0e0212fb5a34121a8dd9a80296fc62d9a0e207e51aaf6c79ebcdb7450009: landing instead

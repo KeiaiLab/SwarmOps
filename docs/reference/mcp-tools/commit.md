@@ -2,7 +2,7 @@
 
 # commit
 
-Records a changeset from an explicit change list, on parent or else on main's head. With advance it also moves that ref to the changeset in the same transaction, only if the ref still names parent, which must then be the full 64-hex id you read; otherwise it records nothing (E\_CAS\_MISMATCH, details.committed false). Check result.advanced: a server that does not know advance moves no ref. An idempotency\_key, a uuid v7 new for each commit, makes a retry safe: the same call again replays it (result.replayed) instead of recording it twice. A {"file": path} content is read by this server: give an absolute path.
+Records a changeset from an explicit change list, on parent or else on main's head. With advance it also moves that ref to the changeset in the same transaction, only if the ref still names parent, which must then be the full 64-hex id you read; otherwise it records nothing (E\_CAS\_MISMATCH, details.committed false). Check result.advanced: a server that does not know advance moves no ref. An idempotency\_key, a uuid v7 new for each commit, makes a retry safe: the same call again replays it (result.replayed) instead of recording it twice. A change list that changes nothing is E\_EMPTY\_COMMIT unless allow\_empty is true. A {"file": path} content is read by this server: give an absolute path.
 
 ```yaml
 title: "commit"

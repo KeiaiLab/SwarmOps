@@ -369,7 +369,7 @@ a branch that requires signed commits refuses those it makes.
 met (`details.change`, `details.onto`) and carries the report `land` gives:
 
 ```json
-{"ok":false,"op":"sync","api":1,"error":{"code":"E_CONFLICT","message":"5cbbb8c0… conflicts with 028564b4…","retryable":false,"exit":3,"details":{"change":"5cbbb8c0…","onto":"028564b4…","report":{…}},"hint":"swarmops cat 028564b4…:src/lib.rs, then swarmops land 5cbbb8c0… --resolve <file> with each path's resolution and against = 028564b4…"},…}
+{"ok":false,"op":"sync","api":1,"error":{"code":"E_CONFLICT","message":"5cbbb8c0… conflicts with 028564b4…","retryable":false,"exit":3,"details":{"change":"5cbbb8c0…","onto":"028564b4…","report":{…}},"hint":"swarmops cat 028564b4…:src/lib.rs, then swarmops land 5cbbb8c0… --resolve <file> (resolutions over MCP) with each path's resolution and against = 028564b4…"},…}
 ```
 
 Put `main` on the remote's head, land `main`'s old head with the resolutions, and sync:
