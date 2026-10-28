@@ -71,6 +71,10 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 - The `E_REF_NAME_INVALID` hint and the help of `commit --advance`, `land --target`, `rebase
   --onto` and `ref set NAME` name the FORMAT 2 refs (a branch such as `feature/x`, a tag), where
   they said `main` or `release/<name>` alone.
+- The error reference documents each `E_TOO_LARGE` details shape, `git import`'s `E_IO` after a
+  commit point (`committed: true`, no `fs_op`), a source behind the target as
+  `E_GIT_IMPORT_DIVERGED`, and 255 *distinct* parents for `E_GIT_UNSUPPORTED`; the concepts page
+  says a `nonstandard` commit's unreadable date is kept as 0 seconds at `+0000`.
 
 ### Fixed
 

@@ -67,7 +67,15 @@ error_codes! {
     PathNotFound => "E_PATH_NOT_FOUND", EXIT_NOT_FOUND, false;
     /// A file operation named a directory.
     IsDir => "E_IS_DIR", EXIT_ERROR, false;
-    /// The content is larger than the operation allows.
+    /// The content is larger than the operation allows. `details` has one of four shapes:
+    /// `{size, limit, scope}` for a limit of SwarmOps (`scope` `put` for one content, `commit`
+    /// for a commit's contents together, `request` for a request's text, with the flag that
+    /// named it as `changes` or `resolve`), where a commit adds the change's `index` and `path`,
+    /// and `file` for a client file; `{scope, size, limit, remote}` for a push past a remote's
+    /// limit (`scope` `remote_file`, which adds `path`, or `remote_push`); `{store_limit, max,
+    /// got}` for an object longer than an object holds (`store_limit` `object_bytes`); and from
+    /// `git import`, `{commit, path, size, max}` for a blob and `{object, kind, size, max}` for a
+    /// commit, a tree or a tag.
     TooLarge => "E_TOO_LARGE", EXIT_ERROR, false;
     /// The commit changes nothing and `allow_empty` is off.
     EmptyCommit => "E_EMPTY_COMMIT", EXIT_ERROR, false;
@@ -96,12 +104,16 @@ error_codes! {
     /// the file of the store it was on, relative to the store's root. A journal append it
     /// refused for want of permission or as a read-only filesystem also says
     /// `details.committed: false`: nothing was committed, and running the same operation again
-    /// fails the same way until the hint's cause is fixed.
+    /// fails the same way until the hint's cause is fixed. `git import` also gives it for a
+    /// frame that committed but failed after its commit point, with `details.committed: true`,
+    /// `details.warnings` and no `fs_op`: the import stopped there, `details.imported` and
+    /// `details.last_commit` say what it recorded, and the hint is to run it again, which
+    /// continues after them.
     Io => "E_IO", EXIT_ERROR, false;
     /// A journal append failed, and the store cut what it wrote back off the journal
     /// (`details.committed` is `false`): nothing was committed, so running the same operation
     /// again is safe. A failure after the commit point is no error: the operation succeeds,
-    /// with a warning. `details.fs_op` and `details.store_file` name the append that failed.
+    /// with a warning (but in `git import`, which stops there: `E_IO`). `details.fs_op` and `details.store_file` name the append that failed.
     IoTransient => "E_IO_TRANSIENT", EXIT_RETRYABLE, true;
     /// Another writer held the store's metadata lock for the whole wait, or commits landed during
     /// every one of a read's attempts to take a snapshot; nothing was committed (a commit's
@@ -151,8 +163,8 @@ error_codes! {
     /// (`details.git_ref`; `details.kind` the object it names instead, such as a tree).
     GitRefNotFound => "E_GIT_REF_NOT_FOUND", EXIT_NOT_FOUND, false;
     /// `git import`: the target ref's head is not the import of `git_ref`'s commit or of an
-    /// ancestor of it, because the source was rewritten or a native changeset was committed on
-    /// the target, so nothing was written; there is no silent merge. `details` names
+    /// ancestor of it, because the source was rewritten, `git_ref` is behind the commit the
+    /// head holds, or a native changeset was committed on the target, so nothing was written; there is no silent merge. `details` names
     /// `target_ref`, `target_head`, `git_head` and `base`, the git commit the head stands for
     /// (the one it holds, or for a native head the one it exports to); and `external_id`
     /// (`commit`, `changeset`) where the import passed over an external id entry whose changeset
@@ -165,7 +177,8 @@ error_codes! {
     GitImportLossy => "E_GIT_IMPORT_LOSSY", EXIT_ERROR, false;
     /// `git import` does not read the source: a SHA-256 repository, reftable refs, a shallow
     /// clone, a FIFO, a socket or a device where it reads a file of the git directory, a file it
-    /// reads whole there that is longer than 16 MiB, a commit of more than 255 parents, or an
+    /// reads whole there that is longer than 16 MiB, a commit of more than 255 distinct parents
+    /// (a parent listed twice counts once), or an
     /// entry whose mode is no kind of entry; `details.reason` says which (`object_format`,
     /// `ref_storage`, `shallow`, `special_file`, `file_too_long`, `parents`, `mode`),
     /// `details.file` names the file of `special_file` and `file_too_long` by its path in the git

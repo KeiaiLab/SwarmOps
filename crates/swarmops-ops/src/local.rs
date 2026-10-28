@@ -298,7 +298,9 @@ const MAX_LAND_KEY: usize = 64;
 ///   resolution takes 12 to 63 hex digits. And `MissingBlob` `{index, path, blob}`: a change
 ///   that names by id a blob the store does not hold (no object, or a tree or a changeset), a
 ///   mistake in the request rather than damage; its hint is `swarmops blob put <file>`. A land's
-///   resolution that names such a blob is `MissingBlob` `{path, blob}`.
+///   resolution that names such a blob is `MissingBlob` `{path, blob}`. Its `blob` is the id in
+///   lowercase, however the request spelled it; an id that is not 64 hex digits is
+///   `E_INVALID_ARG` `{blob}` with the id as the request sent it.
 /// - `E_TOO_LARGE` `{store_limit, max, got}`: the store's `Limit` of an object longer than an
 ///   object holds (`store_limit` `object_bytes`, `max` 512 MiB): a commit's tree or changeset
 ///   object past that size, since a put's content is refused at it first (`{index, path, size,
@@ -370,9 +372,10 @@ const MAX_LAND_KEY: usize = 64;
 ///   (`PermissionDenied`, `ReadOnlyFilesystem`), `{committed, fs_op, store_file}`: running the
 ///   same command again meets the same refusal until its cause is fixed, which the hint names.
 /// - `E_IO_TRANSIENT` (retryable) `{committed, fs_op, store_file}`, `committed` always `false`:
-///   the store's `NotCommitted`, a journal append that failed and that the store cut back off
-///   the journal, so the write committed nothing; `fs_op` and `store_file` name the append. The
-///   hint says to run the same command again.
+///   the store's `NotCommitted` other than the two refusals `E_IO` takes (above): a journal
+///   append that failed and that the store cut back off the journal, so the write committed
+///   nothing; `fs_op` and `store_file` name the append. The hint says to run the same command
+///   again.
 /// - `E_INTERNAL`: the store's `PostCommit`, which the repository turns into a warning (a
 ///   failure after the commit point, a failed listing in `journal.off` among them), so that it
 ///   never reaches here; the store's `BadCall`, a call its API does not take, which only a bug

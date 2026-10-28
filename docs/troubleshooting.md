@@ -586,6 +586,12 @@ A file over 512 MiB cannot be stored. Send large content as `{"file": <path>}` r
 (`{"blob": "<id>"}`): a blob named by id counts nothing against that total. A `git import` of a
 blob longer than an object holds fails with this code too.
 
+Its `details` take one of four shapes, which [Errors](reference/errors.md#e_too_large) lists:
+`{size, limit, scope}` above (`scope` `put`, `commit` or `request`); `{scope, size, limit,
+remote}` for a push past a remote's limit; `{store_limit, max, got}` for an object of the store
+past 512 MiB; and from `git import`, `{commit, path, size, max}` for a blob and `{object, kind,
+size, max}` for a commit, a tree or a tag.
+
 ### `E_UNKNOWN_PARENT`
 
 Exit 6, not retryable. Rare: the commit's parent was in the store when the commit started, and

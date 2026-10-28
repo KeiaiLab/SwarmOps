@@ -1981,11 +1981,10 @@ mod tests {
 
     /// A filesystem failure names the file operation that failed (`details.fs_op`) and, where it
     /// was on a file of the store, that file relative to the store's root
-    /// (`details.store_file`): on `E_IO`, which has no hint (no command fixes a file's owner); on
-    /// the `E_STORE_CORRUPT` of a metadata file that does not parse; and on the `E_IO_TRANSIENT`
-    /// of a journal append the store cut back, beside `committed`. A failure on no file of the
-    /// store has no `store_file`; an open of a store that is no directory is still
-    /// `E_NOT_A_REPO`.
+    /// (`details.store_file`): on `E_IO`; on the `E_STORE_CORRUPT` of a metadata file that does
+    /// not parse; and on the `E_IO_TRANSIENT` of a journal append the store cut back, beside
+    /// `committed`. A failure on no file of the store has no `store_file`; an open of a store
+    /// that is no directory is still `E_NOT_A_REPO`.
     #[test]
     fn io_errors_name_the_operation_and_the_store_file() {
         let (op, at) = (During::Op, Utf8Path::new(AT));

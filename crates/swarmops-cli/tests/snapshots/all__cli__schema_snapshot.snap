@@ -2879,7 +2879,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_TOO_LARGE",
-          "description": "The content is larger than the operation allows.",
+          "description": "The content is larger than the operation allows. `details` has one of four shapes:\n`{size, limit, scope}` for a limit of SwarmOps (`scope` `put` for one content, `commit`\nfor a commit's contents together, `request` for a request's text, with the flag that\nnamed it as `changes` or `resolve`), where a commit adds the change's `index` and `path`,\nand `file` for a client file; `{scope, size, limit, remote}` for a push past a remote's\nlimit (`scope` `remote_file`, which adds `path`, or `remote_push`); `{store_limit, max,\ngot}` for an object longer than an object holds (`store_limit` `object_bytes`); and from\n`git import`, `{commit, path, size, max}` for a blob and `{object, kind, size, max}` for a\ncommit, a tree or a tag.",
           "type": "string"
         },
         {
@@ -2929,12 +2929,12 @@ expression: s.redact(&all)
         },
         {
           "const": "E_IO",
-          "description": "The filesystem refused an operation: `details.fs_op` names it, and `details.store_file`\nthe file of the store it was on, relative to the store's root. A journal append it\nrefused for want of permission or as a read-only filesystem also says\n`details.committed: false`: nothing was committed, and running the same operation again\nfails the same way until the hint's cause is fixed.",
+          "description": "The filesystem refused an operation: `details.fs_op` names it, and `details.store_file`\nthe file of the store it was on, relative to the store's root. A journal append it\nrefused for want of permission or as a read-only filesystem also says\n`details.committed: false`: nothing was committed, and running the same operation again\nfails the same way until the hint's cause is fixed. `git import` also gives it for a\nframe that committed but failed after its commit point, with `details.committed: true`,\n`details.warnings` and no `fs_op`: the import stopped there, `details.imported` and\n`details.last_commit` say what it recorded, and the hint is to run it again, which\ncontinues after them.",
           "type": "string"
         },
         {
           "const": "E_IO_TRANSIENT",
-          "description": "A journal append failed, and the store cut what it wrote back off the journal\n(`details.committed` is `false`): nothing was committed, so running the same operation\nagain is safe. A failure after the commit point is no error: the operation succeeds,\nwith a warning. `details.fs_op` and `details.store_file` name the append that failed.",
+          "description": "A journal append failed, and the store cut what it wrote back off the journal\n(`details.committed` is `false`): nothing was committed, so running the same operation\nagain is safe. A failure after the commit point is no error: the operation succeeds,\nwith a warning (but in `git import`, which stops there: `E_IO`). `details.fs_op` and `details.store_file` name the append that failed.",
           "type": "string"
         },
         {
@@ -3014,7 +3014,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_GIT_IMPORT_DIVERGED",
-          "description": "`git import`: the target ref's head is not the import of `git_ref`'s commit or of an\nancestor of it, because the source was rewritten or a native changeset was committed on\nthe target, so nothing was written; there is no silent merge. `details` names\n`target_ref`, `target_head`, `git_head` and `base`, the git commit the head stands for\n(the one it holds, or for a native head the one it exports to); and `external_id`\n(`commit`, `changeset`) where the import passed over an external id entry whose changeset\nstands for another commit, which `verify --deep` reports.",
+          "description": "`git import`: the target ref's head is not the import of `git_ref`'s commit or of an\nancestor of it, because the source was rewritten, `git_ref` is behind the commit the\nhead holds, or a native changeset was committed on the target, so nothing was written; there is no silent merge. `details` names\n`target_ref`, `target_head`, `git_head` and `base`, the git commit the head stands for\n(the one it holds, or for a native head the one it exports to); and `external_id`\n(`commit`, `changeset`) where the import passed over an external id entry whose changeset\nstands for another commit, which `verify --deep` reports.",
           "type": "string"
         },
         {
@@ -3024,7 +3024,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_GIT_UNSUPPORTED",
-          "description": "`git import` does not read the source: a SHA-256 repository, reftable refs, a shallow\nclone, a FIFO, a socket or a device where it reads a file of the git directory, a file it\nreads whole there that is longer than 16 MiB, a commit of more than 255 parents, or an\nentry whose mode is no kind of entry; `details.reason` says which (`object_format`,\n`ref_storage`, `shallow`, `special_file`, `file_too_long`, `parents`, `mode`),\n`details.file` names the file of `special_file` and `file_too_long` by its path in the git\ndirectory (`details.size` and `details.max` give the long one's length and the limit), and\n`details.commit` names the commit of `parents` and `mode`.",
+          "description": "`git import` does not read the source: a SHA-256 repository, reftable refs, a shallow\nclone, a FIFO, a socket or a device where it reads a file of the git directory, a file it\nreads whole there that is longer than 16 MiB, a commit of more than 255 distinct parents\n(a parent listed twice counts once), or an\nentry whose mode is no kind of entry; `details.reason` says which (`object_format`,\n`ref_storage`, `shallow`, `special_file`, `file_too_long`, `parents`, `mode`),\n`details.file` names the file of `special_file` and `file_too_long` by its path in the git\ndirectory (`details.size` and `details.max` give the long one's length and the limit), and\n`details.commit` names the commit of `parents` and `mode`.",
           "type": "string"
         },
         {

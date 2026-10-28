@@ -209,7 +209,7 @@ such content with `E_GIT_IMPORT_LOSSY`, naming the commit, the path and the clas
 | `modes` | A mode git does not write. |
 | `tree_order` | A tree out of git's order. |
 | `empty_trees` | An empty directory. |
-| `nonstandard` | A commit whose bytes its fields cannot give back. |
+| `nonstandard` | A commit whose bytes its fields cannot give back. A signature date git cannot read is kept as 0 seconds at `+0000`. |
 
 A changeset imported with a loss names the class in its `git.lossy` metadata, and a history imported
 with a loss exports as new commits. `--gitlinks drop` is `--lossy gitlinks`.

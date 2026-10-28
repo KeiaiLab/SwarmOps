@@ -54,9 +54,9 @@ A failed command prints an envelope whose `error` names a stable `E_*` code, the
 | [`E_REF_PROTECTED`](#e_ref_protected) | 1 | no | `main` was asked to be deleted: it is never deleted (`details.name`). |
 | [`E_GIT_NOT_A_REPO`](#e_git_not_a_repo) | 6 | no | `git import` found no git repository it can open at `git_path` (`details.git_path`). |
 | [`E_GIT_REF_NOT_FOUND`](#e_git_ref_not_found) | 6 | no | `git import`: the source repository has no `git_ref`, or it names no commit (`details.git_ref`; `details.kind` the object it names instead, such as a tree). |
-| [`E_GIT_IMPORT_DIVERGED`](#e_git_import_diverged) | 3 | no | `git import`: the target ref's head is not the import of `git_ref`'s commit or of an ancestor of it, because the source was rewritten or a native changeset was committed on the target, so nothing was written; there is no silent merge. |
+| [`E_GIT_IMPORT_DIVERGED`](#e_git_import_diverged) | 3 | no | `git import`: the target ref's head is not the import of `git_ref`'s commit or of an ancestor of it, because the source was rewritten, `git_ref` is behind the commit the head holds, or a native changeset was committed on the target, so nothing was written; there is no silent merge. |
 | [`E_GIT_IMPORT_LOSSY`](#e_git_import_lossy) | 1 | no | `git import`: a commit holds content a changeset cannot keep as git has it; `details` names the `commit`, the `path` (also as `path_base64` when it is not UTF-8) and the lossy `class`, which the request's `lossy` can allow. |
-| [`E_GIT_UNSUPPORTED`](#e_git_unsupported) | 1 | no | `git import` does not read the source: a SHA-256 repository, reftable refs, a shallow clone, a FIFO, a socket or a device where it reads a file of the git directory, a file it reads whole there that is longer than 16 MiB, a commit of more than 255 parents, or an entry whose mode is no kind of entry; `details.reason` says which (`object_format`, `ref_storage`, `shallow`, `special_file`, `file_too_long`, `parents`, `mode`), `details.file` names the file of `special_file` and `file_too_long` by its path in the git directory (`details.size` and `details.max` give the long one's length and the limit), and `details.commit` names the commit of `parents` and `mode`. |
+| [`E_GIT_UNSUPPORTED`](#e_git_unsupported) | 1 | no | `git import` does not read the source: a SHA-256 repository, reftable refs, a shallow clone, a FIFO, a socket or a device where it reads a file of the git directory, a file it reads whole there that is longer than 16 MiB, a commit of more than 255 distinct parents (a parent listed twice counts once), or an entry whose mode is no kind of entry; `details.reason` says which (`object_format`, `ref_storage`, `shallow`, `special_file`, `file_too_long`, `parents`, `mode`), `details.file` names the file of `special_file` and `file_too_long` by its path in the git directory (`details.size` and `details.max` give the long one's length and the limit), and `details.commit` names the commit of `parents` and `mode`. |
 | [`E_GIT_READ`](#e_git_read) | 1 | no | `git import` could not read the source: an object is missing (as in a partial clone), does not hash to its id or does not parse, or the filesystem refused a read (`details.reason`; `details.object` names the object when there is one). |
 | [`E_GIT_EXPORT_DIVERGED`](#e_git_export_diverged) | 3 | no | `git export`: the branch holds commits that are not the export of the source ref's head or of an ancestor of it, so the branch did not move; there is no silent merge, and the request's `force` moves it anyway. |
 | [`E_GIT_WRITE`](#e_git_write) | 1 | no | `git export` could not write the repository; `details.reason` says what failed: `io` (the filesystem refused a write; `details.path` names the file, relative to the git directory), `ref_locked` (the branch's lock file, `refs/heads/<branch>.lock`, exists: another git process holds it, or an earlier export died holding it, and git itself says to remove it once no git process runs; `details.path` names it) or `ref_name_conflict` (an existing ref stands where the branch's name needs a directory, or the other way round; `details.branch`). |
@@ -120,7 +120,7 @@ A file operation named a directory.
 
 Exit 1. Retryable: no.
 
-The content is larger than the operation allows.
+The content is larger than the operation allows. `details` has one of four shapes: `{size, limit, scope}` for a limit of SwarmOps (`scope` `put` for one content, `commit` for a commit's contents together, `request` for a request's text, with the flag that named it as `changes` or `resolve`), where a commit adds the change's `index` and `path`, and `file` for a client file; `{scope, size, limit, remote}` for a push past a remote's limit (`scope` `remote_file`, which adds `path`, or `remote_push`); `{store_limit, max, got}` for an object longer than an object holds (`store_limit` `object_bytes`); and from `git import`, `{commit, path, size, max}` for a blob and `{object, kind, size, max}` for a commit, a tree or a tag.
 
 ## E_EMPTY_COMMIT
 
@@ -180,13 +180,13 @@ The store path is not on a native Linux filesystem (for example WSL's `/mnt/*`).
 
 Exit 1. Retryable: no.
 
-The filesystem refused an operation: `details.fs_op` names it, and `details.store_file` the file of the store it was on, relative to the store's root. A journal append it refused for want of permission or as a read-only filesystem also says `details.committed: false`: nothing was committed, and running the same operation again fails the same way until the hint's cause is fixed.
+The filesystem refused an operation: `details.fs_op` names it, and `details.store_file` the file of the store it was on, relative to the store's root. A journal append it refused for want of permission or as a read-only filesystem also says `details.committed: false`: nothing was committed, and running the same operation again fails the same way until the hint's cause is fixed. `git import` also gives it for a frame that committed but failed after its commit point, with `details.committed: true`, `details.warnings` and no `fs_op`: the import stopped there, `details.imported` and `details.last_commit` say what it recorded, and the hint is to run it again, which continues after them.
 
 ## E_IO_TRANSIENT
 
 Exit 4. Retryable: yes.
 
-A journal append failed, and the store cut what it wrote back off the journal (`details.committed` is `false`): nothing was committed, so running the same operation again is safe. A failure after the commit point is no error: the operation succeeds, with a warning. `details.fs_op` and `details.store_file` name the append that failed.
+A journal append failed, and the store cut what it wrote back off the journal (`details.committed` is `false`): nothing was committed, so running the same operation again is safe. A failure after the commit point is no error: the operation succeeds, with a warning (but in `git import`, which stops there: `E_IO`). `details.fs_op` and `details.store_file` name the append that failed.
 
 ## E_BUSY
 
@@ -282,7 +282,7 @@ Exit 6. Retryable: no.
 
 Exit 3. Retryable: no.
 
-`git import`: the target ref's head is not the import of `git_ref`'s commit or of an ancestor of it, because the source was rewritten or a native changeset was committed on the target, so nothing was written; there is no silent merge. `details` names `target_ref`, `target_head`, `git_head` and `base`, the git commit the head stands for (the one it holds, or for a native head the one it exports to); and `external_id` (`commit`, `changeset`) where the import passed over an external id entry whose changeset stands for another commit, which `verify --deep` reports.
+`git import`: the target ref's head is not the import of `git_ref`'s commit or of an ancestor of it, because the source was rewritten, `git_ref` is behind the commit the head holds, or a native changeset was committed on the target, so nothing was written; there is no silent merge. `details` names `target_ref`, `target_head`, `git_head` and `base`, the git commit the head stands for (the one it holds, or for a native head the one it exports to); and `external_id` (`commit`, `changeset`) where the import passed over an external id entry whose changeset stands for another commit, which `verify --deep` reports.
 
 ## E_GIT_IMPORT_LOSSY
 
@@ -294,7 +294,7 @@ Exit 1. Retryable: no.
 
 Exit 1. Retryable: no.
 
-`git import` does not read the source: a SHA-256 repository, reftable refs, a shallow clone, a FIFO, a socket or a device where it reads a file of the git directory, a file it reads whole there that is longer than 16 MiB, a commit of more than 255 parents, or an entry whose mode is no kind of entry; `details.reason` says which (`object_format`, `ref_storage`, `shallow`, `special_file`, `file_too_long`, `parents`, `mode`), `details.file` names the file of `special_file` and `file_too_long` by its path in the git directory (`details.size` and `details.max` give the long one's length and the limit), and `details.commit` names the commit of `parents` and `mode`.
+`git import` does not read the source: a SHA-256 repository, reftable refs, a shallow clone, a FIFO, a socket or a device where it reads a file of the git directory, a file it reads whole there that is longer than 16 MiB, a commit of more than 255 distinct parents (a parent listed twice counts once), or an entry whose mode is no kind of entry; `details.reason` says which (`object_format`, `ref_storage`, `shallow`, `special_file`, `file_too_long`, `parents`, `mode`), `details.file` names the file of `special_file` and `file_too_long` by its path in the git directory (`details.size` and `details.max` give the long one's length and the limit), and `details.commit` names the commit of `parents` and `mode`.
 
 ## E_GIT_READ
 
