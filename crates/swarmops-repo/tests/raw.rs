@@ -442,6 +442,88 @@ fn commit_raw_refuses_before_writing() {
         matches!(err, RepoError::UnknownParent(p) if p == stranger),
         "{err:?}"
     );
+    // A second parent is looked for too, not the first alone.
+    let mut raw = good();
+    raw.parents = vec![parent, stranger];
+    let err = refuse(raw);
+    assert!(
+        matches!(err, RepoError::UnknownParent(p) if p == stranger),
+        "{err:?}"
+    );
+}
+
+/// Whether an error is the one a test expects.
+type Expected = fn(&RepoError) -> bool;
+
+/// A push checks what `commit_raw` checks, before it adds anything: too many parents, metadata
+/// keys out of order, a root the store does not hold, and an unknown parent that is not the
+/// first are each refused, the batch left as it was and nothing written; its commit then writes
+/// the one changeset pushed before.
+#[test]
+fn a_raw_batch_push_refuses_what_commit_raw_refuses() {
+    let (_dir, root_dir, repo) = new_repo();
+    let parent = commit(&repo, &[], vec![put("a", b"a")]);
+    let root = store_tree(&repo, &[("b", b"b")]);
+    let good = || raw(&[parent], root, "pushed");
+    let before = on_disk(&root_dir);
+    let mut batch = repo.raw_batch();
+    let pushed = batch.push(good()).expect("push");
+
+    // 1. Each refusal, and what it is.
+    let mut many = good();
+    many.parents = (0..256_u32).map(|n| unknown(&n.to_le_bytes())).collect();
+    let mut unsorted = good();
+    unsorted.metadata = vec![("b".to_owned(), Vec::new()), ("a".to_owned(), Vec::new())];
+    let unstored = TreeId::new(hash_object(ObjectKind::Tree, b"never stored"));
+    let mut rootless = good();
+    rootless.root = unstored;
+    let stranger = unknown(b"never committed");
+    let mut second = good();
+    second.parents = vec![parent, stranger];
+    let refusals: [(RawChangeset, Expected); 4] = [
+        (many, |e| {
+            matches!(
+                e,
+                RepoError::Store(StoreError::Limit {
+                    what: LimitKind::Parents,
+                    max: 255,
+                    got: 256
+                })
+            )
+        }),
+        (unsorted, |e| {
+            matches!(e, RepoError::Codec(CodecError::UnsortedMetadata))
+        }),
+        (rootless, |e| {
+            matches!(
+                e,
+                RepoError::MissingObject {
+                    kind: ObjectKind::Tree,
+                    ..
+                }
+            )
+        }),
+        (
+            second,
+            |e| matches!(e, RepoError::UnknownParent(p) if *p == unknown(b"never committed")),
+        ),
+    ];
+    for (raw, expected) in refusals {
+        let err = batch.push(raw).expect_err("refused");
+        assert!(expected(&err), "{err:?}");
+        assert_eq!(batch.len(), 1, "{err:?}: the batch changed");
+    }
+    assert_eq!(
+        on_disk(&root_dir),
+        before,
+        "nothing written before the commit"
+    );
+
+    // 2. The commit writes the one pushed.
+    let outcome = batch.commit().expect("commit the batch");
+    let committed: Vec<ChangesetId> = outcome.outcomes.iter().map(|made| made.id).collect();
+    assert_eq!(committed, [pushed]);
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
 }
 
 /// A batch is checked whole before any of it is written: a raw refused refuses the batch, the
