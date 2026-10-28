@@ -2176,18 +2176,19 @@ mod committed_read {
         }
     }
 
-    /// Checks the image of every cut of the run after `mark`, for seeds 0 and 2 to 9
-    /// ([`Seeded`]): what it lacks of what `snapshot` shows ([`lacks`]), for each image that lacks
-    /// something. Each distinct image is checked once, built again from its first cut and seed,
-    /// `AT_ONCE` at a time. Returns how many distinct images there were, and the failures.
-    fn images_after(
+    /// Checks the image of every cut of the run from `from` on (a power failure after the first
+    /// `from` steps or later), for seeds 0 and 2 to 9 ([`Seeded`]): what it lacks of what
+    /// `snapshot` shows ([`lacks`]), for each image that lacks something. Each distinct image is
+    /// checked once, built again from its first cut and seed, `AT_ONCE` at a time. Returns how
+    /// many distinct images there were, and the failures.
+    fn images_from(
         timeline: &Timeline,
-        mark: usize,
+        from: usize,
         commits: &[ChangesetId],
         snapshot: &Shown,
     ) -> (usize, Vec<String>) {
         let mut distinct = HashMap::new();
-        for cut in mark + 1..=timeline.steps() {
+        for cut in from..=timeline.steps() {
             for seed in [0, 2, 3, 4, 5, 6, 7, 8, 9] {
                 let image = timeline.image(cut, &mut Seeded::new(seed, cut));
                 distinct.entry(image.digest()).or_insert((cut, seed));
@@ -2244,9 +2245,13 @@ mod committed_read {
     /// (seed 0) lacks it. A committed snapshot, started there on a thread of its own (a `flock`
     /// is per open file, so the writer's thread could take it too), waits until the writer lets
     /// the lock go, so that it returns after the frame's sync; and every image of a power
-    /// failure after the mark, keeping nothing unsynced or what seeds 2 to 9 pick, holds every
-    /// changeset and every ref target that snapshot returned, to a lock-free snapshot and to a
-    /// committed one alike. The default gate checks every cut after the mark: the run is short.
+    /// failure from the step it returned at, keeping nothing unsynced or what seeds 2 to 9 pick,
+    /// holds every changeset and every ref target that snapshot returned, to a lock-free snapshot
+    /// and to a committed one alike. The image oracle is anchored at the snapshot's return, not
+    /// at the frame's sync, so a snapshot that returned early fails it; the lock-free snapshot,
+    /// judged the same way from the mark, must fail it (the negative control). The timing checks
+    /// (the 300 ms wait, the return after the sync) say why it passes. The default gate checks
+    /// every cut from the mark: the run is short.
     fn read_committed_snapshot_survives_power_loss(format) {
         let run = record_run(format);
         let [first, second, third] = run.commits;
@@ -2284,18 +2289,26 @@ mod committed_read {
         let found = shown_in(&lost, &run.commits).expect("the image at the mark");
         assert_eq!(found, (before.clone(), before), "{}", lost.describe());
 
-        // Every power failure after the mark keeps what the committed snapshot returned.
-        let (images, failures) = images_after(&run.timeline, mark, &run.commits, &after);
+        // Every power failure from the snapshot's return keeps what it returned.
+        let snapshot = &run.committed.0;
+        let (images, failures) = images_from(&run.timeline, returned, &run.commits, snapshot);
         assert!(
             failures.is_empty(),
             "{} of {images} distinct images lack what the committed snapshot returned \
-             ({after:?}); the first ones:\n\n{}",
+             ({snapshot:?}); the first ones:\n\n{}",
             failures.len(),
             failures[..failures.len().min(5)].join("\n\n")
         );
+        // Negative control: the lock-free snapshot taken at the mark fails the same oracle.
+        let (_, lost) = images_from(&run.timeline, mark, &run.commits, &run.local);
+        assert!(
+            !lost.is_empty(),
+            "no image from the mark lacks what the lock-free snapshot showed: the oracle cannot \
+             fail"
+        );
         println!(
             "committed read: {} calls in {} steps, the mark after {mark}, the snapshot returned \
-             after {returned}; {images} distinct images after the mark",
+             after {returned}; {images} distinct images from its return",
             run.calls,
             run.timeline.steps()
         );
