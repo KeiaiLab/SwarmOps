@@ -4,6 +4,7 @@
 use std::ffi::OsString;
 use std::path::Path;
 
+use camino::Utf8PathBuf;
 use clap::error::ErrorKind;
 use clap::{
     ArgGroup, ArgMatches, Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum,
@@ -21,6 +22,10 @@ use crate::output;
 
 /// The envelope's `op` for a command line that names no operation.
 pub const NO_OP: &str = "swarmops";
+
+/// The operations whose stdout carries a protocol, not an envelope: what they would print before
+/// it goes to stderr.
+const PROTOCOL_OPS: [&str; 2] = ["mcp", "serve"];
 
 // The help of `--expect`, as `help` (`-h`) and `long_help` (`--help`) strings rather than doc
 // comments, which rustdoc would read `<actual>` in as HTML.
@@ -247,6 +252,42 @@ rest land onto the remote's head one by one, as land merges them. A remote that 
 makes it fetch and land again, up to --max-attempts. With --no-push it stops before the push, for \
 a branch that takes pull requests only. It needs an identity: it moves main. sync status shows \
 where main and the remote stand, offline.";
+
+/// `serve`'s short help.
+const SERVE_HELP: &str = "Serve the stores under --root to stock git: fetch, clone and push over \
+ssh as a forced command, or over smart HTTP as a CGI program";
+
+/// `serve`'s long help.
+const SERVE_LONG_HELP: &str = "Serve the stores under --root to stock git: fetch, clone and push \
+over ssh as a forced command, or over smart HTTP as a CGI program. One process per connection, \
+no daemon.
+
+Over ssh, an authorized_keys line runs it: command=\"swarmops serve --root /srv/so --as \
+person/ada\",restrict ssh-ed25519 .... The client's git-upload-pack '<store>.git' or \
+git-receive-pack '<store>.git' (SSH_ORIGINAL_COMMAND) names a store by its directory under \
+--root. With --cgi, a web server runs it for smart HTTP, its PATH_INFO starting with the store's \
+name; TLS and authentication are the web server's.
+
+The caller is named by --as alone, or with --cgi by --user-family <family> as \
+<family>/$REMOTE_USER: the global --as default, $SWARMOPS_AGENT, does not apply to serve, nor \
+does $SWARMOPS_RUN_ID, so that the serving account's environment names no caller. A connection \
+that names none is refused with E_AUTH (details.reason no_identity), whatever it asks for. The \
+store's access.toml grants read, push, force and land; a caller it names but does not grant is \
+refused with E_POLICY_DENIED.
+
+The branches are served as refs/heads/<name>, main among them, and the tags as \
+refs/tags/<path>. A push moves a store ref by compare-and-swap: main only forward along first \
+parents. A push to refs/land/<target> lands its commits onto <target> as swarmops land does, \
+and reports a conflict on git's remote: lines.
+
+A refusal before git starts prints one ERR pkt-line on stdout, which git shows as remote error: \
+<CODE>: <message>, and the envelope on stderr; with --cgi, a Status: header and the same text. \
+--hook proc-receive is the entry git runs inside a push, from the hook file serve writes; it \
+takes no --as. --stdio, the store-to-store sync, is not served yet.";
+
+/// `serve --user-family`'s help.
+const SERVE_USER_FAMILY_HELP: &str = "With --cgi: name the caller <FAMILY>/$REMOTE_USER, the user \
+the web server authenticated";
 
 /// Source control for coding-agent swarms. Every command but mcp prints one JSON envelope
 /// on stdout.
@@ -610,6 +651,8 @@ pub enum Command {
     /// derive command has no tool: it is maintenance, no agent's work; nor have clone and remote
     /// add|remove, so that an agent cannot point the store at a URL of its choosing.
     Mcp,
+    #[command(about = SERVE_HELP, long_about = SERVE_LONG_HELP)]
+    Serve(ServeArgs),
     /// Derive the eager derived values of new changesets, ahead of any reader.
     ///
     /// Once, it derives the values of the changesets the journal records in up to 1,000 frames,
@@ -640,6 +683,38 @@ pub enum Command {
         #[arg(long, requires = "follow")]
         from_start: bool,
     },
+}
+
+/// `serve`'s arguments.
+#[derive(Args, Debug)]
+pub struct ServeArgs {
+    /// The directory whose subdirectories are the stores served, each by its name.
+    #[arg(long, value_name = "DIR", required_unless_present = "hook")]
+    pub root: Option<Utf8PathBuf>,
+    /// Serve one CGI request: smart HTTP behind a web server.
+    #[arg(long, conflicts_with_all = ["hook", "stdio"])]
+    pub cgi: bool,
+    #[arg(
+        long,
+        value_name = "FAMILY",
+        requires = "cgi",
+        conflicts_with = "agent",
+        help = SERVE_USER_FAMILY_HELP
+    )]
+    pub user_family: Option<String>,
+    /// Run as the hook git runs inside a push: proc-receive, from the hook file serve writes.
+    #[arg(long, value_enum, value_name = "HOOK", conflicts_with = "stdio")]
+    pub hook: Option<HookKind>,
+    /// Serve the store-to-store sync on stdin and stdout: not served yet.
+    #[arg(long)]
+    pub stdio: bool,
+}
+
+/// The hooks `serve --hook` runs as.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookKind {
+    /// git's `proc-receive`: it decides each command of a push.
+    ProcReceive,
 }
 
 /// `blob`'s operations.
@@ -1241,12 +1316,14 @@ pub enum Parsed {
 }
 
 impl Parsed {
-    /// Whether the line runs `swarmops mcp`, as far as it could be read: a command to run, or a
-    /// usage error in its arguments. Its stdout belongs to the protocol.
+    /// Whether the line runs `swarmops mcp` or `swarmops serve`, as far as it could be read: a
+    /// command to run, or a usage error in its arguments. Their stdout belongs to the protocol.
     pub fn runs_mcp(&self) -> bool {
         match self {
-            Parsed::Run(_, op) => *op == "mcp",
-            Parsed::Usage { path, .. } => path.first().is_some_and(|name| name == "mcp"),
+            Parsed::Run(_, op) => PROTOCOL_OPS.contains(op),
+            Parsed::Usage { path, .. } => path
+                .first()
+                .is_some_and(|name| PROTOCOL_OPS.contains(&name.as_str())),
             Parsed::Text(_) => false,
         }
     }
@@ -1382,6 +1459,7 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["sync"] => "sync",
         ["sync", "status"] => "sync_status",
         ["mcp"] => "mcp",
+        ["serve"] => "serve",
         ["derive"] => "derive",
         _ => return None,
     })
@@ -1510,10 +1588,10 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 51);
+        assert_eq!(ops.len(), 52);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 51, "two subcommands name one op");
+        assert_eq!(ops.len(), 52, "two subcommands name one op");
         assert_eq!(op_name(&["ref"]), None);
         assert_eq!(op_name(&["blob"]), None);
         assert_eq!(op_name(&["ws"]), None);
@@ -1751,6 +1829,8 @@ mod tests {
             &["--repo", "s", "mcp"],
             &["mcp", "--frob"],
             &["mcp", "x"],
+            &["serve"],
+            &["serve", "--root", "r", "--as", "person/ada"],
         ] {
             assert!(parse(&args(line)).runs_mcp(), "{line:?}");
         }

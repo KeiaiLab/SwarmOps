@@ -18,6 +18,9 @@ The limits of the SwarmOps contract: what a request may hold, with the error a r
 | [Agent name](#agent-name) | 255 bytes | `swarmops_api::identity::MAX_AGENT_LEN` | [`E_INVALID_ARG`](errors.md#e_invalid_arg) |
 | [Ref name](#ref-name) | 255 bytes | `swarmops_store::meta::refs::MAX_NAME_LEN` | [`E_REF_NAME_INVALID`](errors.md#e_ref_name_invalid) |
 | [Repository name](#repository-name) | 255 bytes | `swarmops_repo::repo::MAX_NAME_LEN` | [`E_INVALID_ARG`](errors.md#e_invalid_arg) |
+| [Access file](#access-file) | 1,048,576 bytes (1 MiB) | `swarmops_ops::serve::access::MAX_ACCESS_BYTES` | [`E_POLICY_DENIED`](errors.md#e_policy_denied) |
+| [Push size](#push-size) | 2,147,483,648 bytes (2 GiB) | `swarmops_ops::serve::receive::MAX_PUSH_BYTES` | git's own |
+| [Push commands](#push-commands) | 1,000 commands | `swarmops_ops::serve::hook::MAX_PUSH_COMMANDS` | [`E_INVALID_ARG`](errors.md#e_invalid_arg) |
 
 ### Request text
 
@@ -88,7 +91,7 @@ The agent name of `--as` or `SWARMOPS_AGENT`, `<family>/<instance>`, which a ref
 
 - Value: 255 bytes.
 - Constant: `swarmops_api::identity::MAX_AGENT_LEN`, in `crates/swarmops-api/src/identity.rs`.
-- Commands: [`whoami`](commands/whoami.md), [`commit`](commands/commit.md), [`land`](commands/land.md), [`rebase`](commands/rebase.md), [`blob put`](commands/blob-put.md), [`ref set`](commands/ref-set.md), [`ref delete`](commands/ref-delete.md), [`op undo`](commands/op-undo.md), [`git import`](commands/git-import.md), [`clone`](commands/clone.md), [`ws create`](commands/ws-create.md), [`sync`](commands/sync.md), [`mcp`](commands/mcp.md).
+- Commands: [`whoami`](commands/whoami.md), [`commit`](commands/commit.md), [`land`](commands/land.md), [`rebase`](commands/rebase.md), [`blob put`](commands/blob-put.md), [`ref set`](commands/ref-set.md), [`ref delete`](commands/ref-delete.md), [`op undo`](commands/op-undo.md), [`git import`](commands/git-import.md), [`clone`](commands/clone.md), [`ws create`](commands/ws-create.md), [`sync`](commands/sync.md), [`mcp`](commands/mcp.md), [`serve`](commands/serve.md).
 - Error: [`E_INVALID_ARG`](errors.md#e_invalid_arg).
 
 ### Ref name
@@ -109,6 +112,32 @@ A ref's name, `main` or `release/<x>`, which a ref move records with a one-byte 
 - Commands: [`init`](commands/init.md).
 - Error: [`E_INVALID_ARG`](errors.md#e_invalid_arg).
 
+### Access file
+
+A store's `access.toml`, which `serve` reads on every connection: a longer one is invalid, and every request is refused with `details.reason` `access_file_invalid`.
+
+- Value: 1,048,576 bytes (1 MiB).
+- Constant: `swarmops_ops::serve::access::MAX_ACCESS_BYTES`, in `crates/swarmops-ops/src/serve/access.rs`.
+- Commands: [`serve`](commands/serve.md).
+- Error: [`E_POLICY_DENIED`](errors.md#e_policy_denied).
+
+### Push size
+
+The pack one push to `serve` may send, git's `receive.maxInputSize`: git refuses a longer one itself, before any ref moves.
+
+- Value: 2,147,483,648 bytes (2 GiB).
+- Constant: `swarmops_ops::serve::receive::MAX_PUSH_BYTES`, in `crates/swarmops-ops/src/serve/receive.rs`.
+- Commands: [`serve`](commands/serve.md).
+
+### Push commands
+
+The refs one push to `serve` may update: past it, every command of the push is refused (`ng`), and no ref moves.
+
+- Value: 1,000 commands.
+- Constant: `swarmops_ops::serve::hook::MAX_PUSH_COMMANDS`, in `crates/swarmops-ops/src/serve/hook.rs`.
+- Commands: [`serve`](commands/serve.md).
+- Error: [`E_INVALID_ARG`](errors.md#e_invalid_arg).
+
 ## Bounds without an error
 
 A response past these leaves the rest out, and says so in its fields; nothing fails.
@@ -121,6 +150,7 @@ A response past these leaves the rest out, and says so in its fields; nothing fa
 | [Text probe](#text-probe) | 8,000 bytes | `swarmops_merge::line_diff::TEXT_PROBE` | [`diff`](commands/diff.md), [`land`](commands/land.md) |
 | [Conflict report entries](#conflict-report-entries) | 24,576 bytes (24 KiB) | `swarmops_ops::conflict::MAX_ENTRY_BYTES` | [`land`](commands/land.md) |
 | [Verify findings](#verify-findings) | 1,000 problems | `swarmops_api::VERIFY_MAX_FINDINGS` | [`verify`](commands/verify.md) |
+| [Land conflict lines](#land-conflict-lines) | 50 paths | `swarmops_ops::serve::land::MAX_CONFLICT_LINES` | [`serve`](commands/serve.md) |
 
 ### Lossy commits listed
 
@@ -169,6 +199,14 @@ The most problems a `verify` report lists, and `--max-findings` (`max_findings`)
 - Value: 1,000 problems.
 - Constant: `swarmops_api::VERIFY_MAX_FINDINGS`, in `crates/swarmops-api/src/ops.rs`.
 - Commands: [`verify`](commands/verify.md).
+
+### Land conflict lines
+
+The most conflicting paths the report of a push to `refs/land/<target>` lists on git's `remote:` lines; `… and <k> more` counts the rest.
+
+- Value: 50 paths.
+- Constant: `swarmops_ops::serve::land::MAX_CONFLICT_LINES`, in `crates/swarmops-ops/src/serve/land.rs`.
+- Commands: [`serve`](commands/serve.md).
 
 ## Defaults
 
@@ -236,6 +274,7 @@ Not part of the contract: these tune the implementation, or bound the store's la
 | Temp file grace | 86,400 s | `swarmops_store::GC_TEMP_GRACE` | How old a temp file in `objects/tmp/` or `meta/derived/tmp/` must be before `gc` removes it: a write in progress holds a younger one. |
 | Read window | 4,096 entries | `swarmops_store::meta::READ_WINDOW` | How many entries of `journal.off`, an index column or a sorted view one read of the store takes, so that no read allocates by a file's length. |
 | Lookup hits | 4,096 changesets | `swarmops_store::meta::MAX_LOOKUP_HITS` | The most changesets a lookup by id prefix or by delta hash gathers before it says its answer was cut. |
+| Serve refresh attempts | 8 attempts | `swarmops_ops::serve::refresh::SERVE_REFRESH_ATTEMPTS` | How many times `serve` reads a store ref again when the move of its export in `serve.git` met another writer's, before the connection is refused. |
 
 ## Details
 

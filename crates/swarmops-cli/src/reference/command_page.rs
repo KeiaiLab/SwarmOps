@@ -91,8 +91,15 @@ const WORKSPACE_SINCE: &str = "0.3.0";
 const MAINTENANCE_COMMANDS: [&str; 3] = ["gc", "repair", "upgrade"];
 const MAINTENANCE_SINCE: &str = "0.4.0";
 
+/// The command that serves git (M14), and the release it first ships in.
+const SERVE_COMMAND: &str = "serve";
+const SERVE_SINCE: &str = "0.7.0";
+
 /// The release the command at `path` first shipped in.
 fn since(path: &str) -> &'static str {
+    if path == SERVE_COMMAND {
+        return SERVE_SINCE;
+    }
     if REMOTE_COMMANDS.contains(&path) {
         return REMOTE_SINCE;
     }
@@ -213,7 +220,7 @@ struct Meta {
 
 /// Every command, in the grammar's order. `meta_matches_the_code` checks each column it can
 /// against the code.
-const META: [Meta; 51] = [
+const META: [Meta; 52] = [
     meta("init", Group::Store, true, false, Returns::Type("RepoInfo")),
     meta(
         "info",
@@ -516,6 +523,7 @@ const META: [Meta; 51] = [
         Returns::Type("SyncStatus"),
     ),
     meta("mcp", Group::Server, true, false, Returns::Protocol),
+    meta("serve", Group::Server, true, false, Returns::Protocol),
     meta(
         "derive",
         Group::Store,
@@ -1147,6 +1155,15 @@ fn returns(out: &mut String, command: &Entry<'_>) {
                  type's.\n"
             );
         }
+        Returns::Protocol if command.meta.path == SERVE_COMMAND => {
+            let _ = writeln!(
+                out,
+                "`{BIN} serve` prints no envelope on stdout, which carries git's protocol: a \
+                 refusal before git starts is one `ERR` pkt-line there (with `--cgi`, a \
+                 `Status:` header and its text), and the envelope goes to stderr, as for a \
+                 command line it refuses.\n"
+            );
+        }
         Returns::Protocol => {
             let _ = writeln!(
                 out,
@@ -1488,6 +1505,20 @@ const NO_IDENTITY: [(&str, &str, &str); 7] = [
     ),
 ];
 
+/// The command that changes the store for a caller its own flag names (M14): `serve` names its
+/// caller from `--as` alone, never through [`IDENTITY_CALL`]'s fallback to `SWARMOPS_AGENT`. An
+/// exception to [`CHANGE_RULE`]: the command, its operation's file, and the phrase there.
+const FLAG_IDENTITY: (&str, &str, &str) = (
+    "serve",
+    "../swarmops-ops/src/serve.rs",
+    "names its caller from `--as` alone",
+);
+
+/// The calls that name a caller through the CLI's fallback to `SWARMOPS_AGENT`, which
+/// [`FLAG_IDENTITY`]'s command makes none of, and its file there.
+const FALLBACK_CALLS: [&str; 2] = [IDENTITY_CALL, "context::identity("];
+const FLAG_IDENTITY_CLI: &str = "src/commands/serve.rs";
+
 /// The workspace commands that change the store or the workspace with no identity of their own:
 /// a mutation without one acts as the workspace's `created_by` (M5 design §2.6), where the
 /// workspace is opened. Exceptions to [`CHANGE_RULE`], but `ws create`, which records who made
@@ -1577,6 +1608,20 @@ fn meta_matches_the_code() {
             "{path}: changes with no identity"
         );
     }
+    let (flag_path, flag_file, flag_phrase) = FLAG_IDENTITY;
+    assert!(
+        source(flag_file).contains(flag_phrase),
+        "{flag_file}: no {flag_phrase:?}"
+    );
+    let meta = lookup(flag_path);
+    assert!(
+        meta.mutates && !meta.identity,
+        "{flag_path}: changes for the caller its flag names"
+    );
+    let cli = source(FLAG_IDENTITY_CLI);
+    for call in FALLBACK_CALLS {
+        assert!(!cli.contains(call), "{FLAG_IDENTITY_CLI}: {call}");
+    }
     let (acts_file, acts_phrase) = WORKSPACE_ACTS_SOURCE;
     assert!(
         source(acts_file).contains(acts_phrase),
@@ -1591,7 +1636,8 @@ fn meta_matches_the_code() {
     }
     for meta in &META {
         let exempt = NO_IDENTITY.iter().any(|(path, _, _)| *path == meta.path)
-            || WORKSPACE_ACTS_AS.contains(&meta.path);
+            || WORKSPACE_ACTS_AS.contains(&meta.path)
+            || meta.path == flag_path;
         if meta.path == maker || meta.path == SERVER || exempt {
             continue;
         }

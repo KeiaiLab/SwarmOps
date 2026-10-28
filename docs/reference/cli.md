@@ -139,3 +139,4 @@ Work in a directory of your own: a workspace holds a sparse copy of a changeset'
 ## Server
 
 - [`swarmops mcp`](commands/mcp.md): Serve the store's operations to an agent as an MCP server on stdin and stdout.
+- [`swarmops serve`](commands/serve.md): Serve the stores under --root to stock git: fetch, clone and push over ssh as a forced command, or over smart HTTP as a CGI program.

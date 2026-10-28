@@ -22,10 +22,14 @@
 //! A panic's envelope has the same `repo`, `resolved` and `recovered` (see [`Used`]), or none of
 //! them when it came before a store was named.
 //!
+//! `serve` (M14) prints no envelope on stdout, which carries git's protocol: a refusal before git
+//! starts is one `ERR` pkt-line there, and its envelope goes to stderr (the `serve` module).
+//!
 //! `whoami` prints `IdentityInfo` as the API writes it: for a caller without an identity,
 //! `{"auth":"anonymous"}`, with `agent` omitted rather than null.
 
 mod run;
+mod serve;
 pub(crate) mod ws;
 
 pub use self::run::{Ctx, Used, failed, failed_after, failed_envelope, panicked, run, usage};

@@ -85,8 +85,9 @@
 //! changes the store and how; none reaches beyond the store (`openWorldHint: false`) but
 //! `fetch`, `push` and `sync`, which reach a git remote.
 //!
-//! `derive` alone has no tool: `swarmops derive` runs it beside the store as maintenance,
-//! deriving values ahead of readers as the journal grows, which is no agent's work.
+//! `derive` and `serve` have no tool: `swarmops derive` runs beside the store as maintenance,
+//! deriving values ahead of readers as the journal grows, and `swarmops serve` serves stock git,
+//! neither of which is an agent's work.
 //!
 //! A call runs as one command of the CLI does. Its arguments are the request: a field the type
 //! does not know is ignored, and arguments that do not fit the type, a field of it named twice

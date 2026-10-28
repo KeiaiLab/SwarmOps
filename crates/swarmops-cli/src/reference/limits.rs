@@ -34,6 +34,9 @@ const NOTE: &str = "notes/limits.md";
 /// The schema-types page, which the schema bounds link to.
 const SCHEMA_TYPES: &str = "schema-types.md";
 
+/// The error cell of a contract limit that git enforces itself, with no SwarmOps error.
+const NO_ERROR: &str = "git's own";
+
 /// One binary unit of bytes: a kibibyte.
 const KIB: u64 = 1024;
 
@@ -172,7 +175,7 @@ const fn internal_value(
 // ---- The tables ----
 
 /// The limits a request is refused past, with the error it gets.
-static CONTRACT: [Limit; 10] = [
+static CONTRACT: [Limit; 13] = [
     Limit {
         name: "Request text",
         constant: code(
@@ -302,6 +305,7 @@ static CONTRACT: [Limit; 10] = [
             "ws create",
             "sync",
             "mcp",
+            "serve",
         ],
         errors: &[ErrorCode::InvalidArg],
         what: "The agent name of `--as` or `SWARMOPS_AGENT`, `<family>/<instance>`, which a \
@@ -344,10 +348,53 @@ static CONTRACT: [Limit; 10] = [
         what: "`init --name`, refused before anything is created, with \
                    `details.store_limit` `repo_name_bytes`.",
     },
+    Limit {
+        name: "Access file",
+        constant: code(
+            "swarmops_ops::serve::access::MAX_ACCESS_BYTES",
+            "crates/swarmops-ops/src/serve/access.rs",
+            "pub const MAX_ACCESS_BYTES: u64 = 1 << 20;",
+            || swarmops_ops::serve::access::MAX_ACCESS_BYTES,
+        ),
+        unit: Unit::Bytes,
+        commands: &["serve"],
+        errors: &[ErrorCode::PolicyDenied],
+        what: "A store's `access.toml`, which `serve` reads on every connection: a longer one \
+                   is invalid, and every request is refused with `details.reason` \
+                   `access_file_invalid`.",
+    },
+    Limit {
+        name: "Push size",
+        constant: code(
+            "swarmops_ops::serve::receive::MAX_PUSH_BYTES",
+            "crates/swarmops-ops/src/serve/receive.rs",
+            "pub const MAX_PUSH_BYTES: u64 = 2 << 30;",
+            || swarmops_ops::serve::receive::MAX_PUSH_BYTES,
+        ),
+        unit: Unit::Bytes,
+        commands: &["serve"],
+        errors: &[],
+        what: "The pack one push to `serve` may send, git's `receive.maxInputSize`: git \
+                   refuses a longer one itself, before any ref moves.",
+    },
+    Limit {
+        name: "Push commands",
+        constant: code(
+            "swarmops_ops::serve::hook::MAX_PUSH_COMMANDS",
+            "crates/swarmops-ops/src/serve/hook.rs",
+            "pub const MAX_PUSH_COMMANDS: usize = 1_000;",
+            || bytes::to_u64(swarmops_ops::serve::hook::MAX_PUSH_COMMANDS),
+        ),
+        unit: Unit::Count("commands"),
+        commands: &["serve"],
+        errors: &[ErrorCode::InvalidArg],
+        what: "The refs one push to `serve` may update: past it, every command of the push is \
+                   refused (`ng`), and no ref moves.",
+    },
 ];
 
 /// The bounds a response keeps without an error: what it leaves out, and how it says so.
-static BOUNDS: [Limit; 6] = [
+static BOUNDS: [Limit; 7] = [
     Limit {
         name: "Lossy commits listed",
         constant: code(
@@ -436,6 +483,20 @@ static BOUNDS: [Limit; 6] = [
         what: "The most problems a `verify` report lists, and `--max-findings` \
                    (`max_findings`) its default: the first ones found, with `truncated`; \
                    `found` counts them all.",
+    },
+    Limit {
+        name: "Land conflict lines",
+        constant: code(
+            "swarmops_ops::serve::land::MAX_CONFLICT_LINES",
+            "crates/swarmops-ops/src/serve/land.rs",
+            "pub const MAX_CONFLICT_LINES: usize = 50;",
+            || bytes::to_u64(swarmops_ops::serve::land::MAX_CONFLICT_LINES),
+        ),
+        unit: Unit::Count("paths"),
+        commands: &["serve"],
+        errors: &[],
+        what: "The most conflicting paths the report of a push to `refs/land/<target>` lists \
+                   on git's `remote:` lines; `… and <k> more` counts the rest.",
     },
 ];
 
@@ -614,7 +675,7 @@ static DEFAULTS: [DefaultRow; 13] = [
 
 /// Values that tune the implementation, or bound the store's layout where no request reaches:
 /// no option sets them, and they are not part of the contract.
-static INTERNAL: [Limit; 17] = [
+static INTERNAL: [Limit; 18] = [
     internal_value(
         "Writer lock wait",
         declared(
@@ -816,6 +877,18 @@ static INTERNAL: [Limit; 17] = [
         "The most changesets a lookup by id prefix or by delta hash gathers before it says \
              its answer was cut.",
     ),
+    internal_value(
+        "Serve refresh attempts",
+        code(
+            "swarmops_ops::serve::refresh::SERVE_REFRESH_ATTEMPTS",
+            "crates/swarmops-ops/src/serve/refresh.rs",
+            "pub const SERVE_REFRESH_ATTEMPTS: u32 = 8;",
+            || u64::from(swarmops_ops::serve::refresh::SERVE_REFRESH_ATTEMPTS),
+        ),
+        Unit::Count("attempts"),
+        "How many times `serve` reads a store ref again when the move of its export in \
+             `serve.git` met another writer's, before the connection is refused.",
+    ),
 ];
 
 // ---- The page ----
@@ -888,6 +961,7 @@ fn limits_table(out: &mut String, limits: &[Limit], last: Column) {
     let _ = writeln!(out, "| --- | --- | --- | --- |");
     for limit in limits {
         let tail = match last {
+            Column::Error if limit.errors.is_empty() => NO_ERROR.to_owned(),
             Column::Error => error_links(limit.errors),
             Column::Commands => command_links(limit.commands),
         };
@@ -1265,15 +1339,15 @@ fn defaults_and_commands_match() {
     }
 }
 
-/// The agent name's commands are `whoami`, `mcp` and every command whose page says it needs an
-/// identity.
+/// The agent name's commands are `whoami`, `mcp`, `serve` and every command whose page says it
+/// needs an identity.
 #[test]
 fn identity_commands_match() {
     let agent = CONTRACT
         .iter()
         .find(|limit| limit.name == "Agent name")
         .unwrap();
-    let mut want: Vec<String> = vec!["whoami".to_owned(), "mcp".to_owned()];
+    let mut want: Vec<String> = vec!["whoami".to_owned(), "mcp".to_owned(), "serve".to_owned()];
     for leaf in all_leaves() {
         let page = reference_dir()
             .join(command_page::DIR)

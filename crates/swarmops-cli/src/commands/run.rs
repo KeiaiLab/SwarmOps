@@ -39,7 +39,7 @@ use swarmops_ops::identity::{self, AUTH_TRUST};
 use swarmops_ops::{LocalOps, Recording, Resolved};
 use swarmops_ws::workspace::Locate;
 
-use super::ws;
+use super::{serve, ws};
 use crate::cli::{
     self, BlobCommand, Command, DiffArgs, DiffFormatArg, GitCommand, Global, OpCommand, RefCommand,
     RemoteCommand, SyncCommand,
@@ -206,6 +206,7 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
         | Command::Upgrade) => run_integrity(ctx, op, integrity),
         Command::Git(command) => run_git(ctx, op, command),
         Command::Mcp => mcp::serve(ctx.global, ctx.env),
+        Command::Serve(args) => serve::run(ctx, op, args),
         derive @ Command::Derive { .. } => run_derive(ctx, op, &derive),
         // The rest: the git remotes' commands (M13).
         remotes => run_remotes(ctx, op, remotes),
