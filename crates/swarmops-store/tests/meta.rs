@@ -3284,6 +3284,58 @@ fn a_failed_listing_in_the_tail_check_is_not_committed() {
     }
 }
 
+/// [`a_failed_listing_in_the_tail_check_is_not_committed`] for a committed snapshot: its own tail
+/// check lists the frame a transaction before it left whole and unlisted, and when that listing
+/// fails the snapshot is [`StoreError::NotCommitted`], naming the append that failed. Nothing more
+/// is listed, and the next committed snapshot lists the frame and returns its changeset.
+#[test]
+fn a_failed_listing_in_read_committeds_tail_check_is_not_committed() {
+    use swarmops_store::{FileOp, FsMethod};
+
+    for strike in [Strike::After, Strike::Before] {
+        // 1. Frame 1 committed, its listing failed: whole and unlisted.
+        let (_dir, root) = new_root();
+        let fails = Arc::new(Watched(
+            Fails::new("append_durable journal.off", strike),
+            RealFs::new(),
+        ));
+        let store = store_on(&root, &fails);
+        insert(&store, &[cs(0, &[])]); // frame 0
+        fails.arm();
+        let mut write = store.write().unwrap();
+        write.insert_changeset(cs(1, &[0])).unwrap();
+        let committed = write.commit();
+        assert!(
+            matches!(committed, Err(StoreError::PostCommit { frame_seq: 1, .. })),
+            "{committed:?}"
+        );
+        assert_eq!(listed(&root), 1, "frame 1 is whole and unlisted");
+
+        // 2. The committed snapshot's tail check lists frame 1, and that listing fails.
+        fails.arm();
+        match store.read_committed() {
+            Err(StoreError::NotCommitted { source }) => assert_eq!(
+                (source.op, source.file.as_deref()),
+                (
+                    FileOp::Fs(FsMethod::AppendDurable),
+                    Some(Utf8Path::new("meta/journal.off"))
+                ),
+                "{source}"
+            ),
+            Ok((_, repair)) => panic!("expected NotCommitted, got a snapshot after {repair:?}"),
+            Err(other) => panic!("expected NotCommitted, got {other:?}"),
+        }
+        assert_eq!(listed(&root), 1, "nothing more is listed");
+
+        // 3. Taken again, the snapshot lists the frame and returns its changeset.
+        let (read, repair) = store.read_committed().unwrap();
+        assert_eq!(repair.frames_listed, 1, "{repair:?}");
+        assert_eq!(read.count_changesets().unwrap(), 2);
+        drop(read);
+        assert_eq!(listed(&root), 2, "the snapshot listed the frame");
+    }
+}
+
 /// What a write transaction on `store` repaired, as it reports it once open; the write is dropped
 /// uncommitted (its repairs stay made). Then the next write repairs nothing.
 #[track_caller]
