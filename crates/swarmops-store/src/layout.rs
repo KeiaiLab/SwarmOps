@@ -4,7 +4,7 @@
 //! <root>/FORMAT                 "swarmops-store 1\n" or "…2\n", written last by a create
 //! <root>/REPO                   the repository's identity: its id, then its name
 //! <root>/meta/                  metadata store files (storage spec §3), among them:
-//! <root>/meta/lock              the flock that serializes metadata writers
+//! <root>/meta/lock              the flock of metadata writers and committed readers
 //! <root>/meta/journal.log       append-only journal frames, the metadata's source of truth
 //! <root>/meta/journal.off       each frame's start offset in journal.log, u64le
 //! <root>/meta/journal.ckpt      how far the journal is materialized, a u64le offset
@@ -82,7 +82,8 @@ impl Layout {
         self.meta_dir().join(rel)
     }
 
-    /// `<root>/meta/lock`, whose exclusive flock serializes metadata writers.
+    /// `<root>/meta/lock`, whose exclusive flock serializes metadata writers and committed
+    /// readers.
     pub fn meta_lock(&self) -> Utf8PathBuf {
         self.meta_path("lock")
     }

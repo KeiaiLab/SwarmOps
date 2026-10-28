@@ -1,5 +1,6 @@
 //! `meta/lock`: the exclusive advisory lock (the standard library's file lock, `flock` on
-//! Linux) that serializes metadata writers across threads and processes (storage spec §3).
+//! Linux) that serializes metadata writers, and committed readers, across threads and processes
+//! (storage spec §3).
 //!
 //! # The lock file
 //!

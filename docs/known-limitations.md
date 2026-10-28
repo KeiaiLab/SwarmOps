@@ -66,7 +66,9 @@ left).
   no take-back the failure policy allows reuses a listed number, but a frame committed with a
   warning (its listing failed; the warning names its seq) and then lost this way gives its number
   to the next write, and an `op undo` of that number acts on the other operation. `repair` reports
-  the lost frame; nothing hides the reuse. *Documented (the M6 design, section 12; the v0.6.0
+  the lost frame; nothing hides the reuse. The tail check runs in a committed read too (M8's git
+  export, M11's `serve`), so a double fault there aborts a reader process as it does a writer.
+  *Documented (the M6 design, section 12; the v0.6.0
   design, D7). Found: M1.5 Task 2; narrowed by M6; the operation number from the M4
   consolidated review (issue #11).*
 - **A failed directory fsync in the object store is retried, not taken back.**
@@ -145,7 +147,11 @@ left).
   back, at the cost of a wait behind the writer that holds the lock. So does `op log`, the one
   local reader that does, so that a number it lists is never given to another operation.
   *Documented (storage spec §3). Found: M1 Task 2c; final review, question 2.*
-- **A commit acknowledged with a warning can vanish for a moment.** When a writer's tail check
+- **A committed read fails on a read-only filesystem.** `MetaStore::read_committed` (the git
+  export, `push`, `serve`, `op log`) opens `meta/lock` for writing before its tail check, as a
+  writer does, so on a read-only mount it fails with `E_IO` at `open meta/lock`, even where the
+  tail needs no repair. The lock-free reads work there. *Unscheduled. Found: M8 area A review.*
+- **A commit acknowledged with a warning can vanish for a moment.** When a tail check
   writes unlisted frames afresh after a failed sync (storage spec §2 rule 3 (c)), a reader that
   reads between the cut and the rewrite does not see them: a changeset whose commit was
   acknowledged with a warning can be `E_REV_NOT_FOUND` for that moment, and a retry finds it.
@@ -728,6 +734,14 @@ These do not change what SwarmOps does, only how well the tests can see it.
   what it measures, so it retries none: a lock wait that load stretches past 10 s fails it. Its
   sixteen-racer sibling retries its setup commits (`retry_busy`). *Unscheduled. Found: M1.5
   Task 3.*
+- **A create's removal of a crashed create's staging is outside the fault doubles.** A create
+  removes what a crashed create left in `meta.tmp/`, and a repository create removes an older
+  `meta.tmp/` before it sets a crashed create of another format aside there, with `std::fs`:
+  `FsOps` removes no directories. So the crash and I/O-error sweeps inject no fault there, and the
+  power-loss images do not model it. A failed removal fails the create before it changes `meta/`
+  (pinned with a directory the process may not change); a crash during it leaves part of
+  `meta.tmp/`, which the next create removes. *Unscheduled: an `FsOps::remove_dir_all` is a new
+  seam method that every double must forward. Found: M6 Task A4 review.*
 - **Some sweeps and tests run on one format.** The git import and export sweeps run on the
   default format, FORMAT 2, only; and the operations' mapping of malformed revisions, pinned to
   FORMAT 1, has no FORMAT 2 twin yet. Verify's damaged ref, lock and checkpoint cases run on both.

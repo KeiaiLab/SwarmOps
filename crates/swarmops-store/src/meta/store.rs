@@ -473,7 +473,14 @@ impl MetaStore {
     /// reads what the snapshot names. It repairs no index and replays nothing: the snapshot's
     /// overlay supplies the frames past the checkpoint. On a clean tail it writes nothing; a tail
     /// that needs a repair it repairs as the next writer would, and it fails where that writer's
-    /// tail check fails ([`MetaStore::write`]): on a read-only filesystem, say.
+    /// tail check fails ([`MetaStore::write`]). Before any of that it opens `meta/lock` for
+    /// writing, as a writer does (making it if it is missing): on a read-only filesystem it fails
+    /// there, a [`StoreError::Io`] at `open meta/lock`, whatever the tail.
+    ///
+    /// A tail check that cannot list a frame, or write afresh the frames whose sync failed, is
+    /// [`StoreError::NotCommitted`], as for a writer: here no snapshot is taken, nothing more is
+    /// listed, and the next committed read lists the frame. A cut that fails too aborts the
+    /// process, as a writer's does ([`Journal::repair_tail`]).
     pub fn read_committed(&self) -> Result<(MetaRead<'_>, TailRepair), StoreError> {
         let _lock = MetaLock::acquire(&self.layout, self.lock_timeout)?;
         let repair = self.journal.repair_tail()?;

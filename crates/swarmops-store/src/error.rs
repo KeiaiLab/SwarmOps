@@ -183,6 +183,9 @@ pub enum StoreError {
     /// refused the append for want of permission or as a read-only filesystem (`source.kind()`
     /// `PermissionDenied`, `ReadOnlyFilesystem`): running it again meets that refusal again
     /// until its cause is fixed, and the API layer reports it as `E_IO`, not `E_IO_TRANSIENT`.
+    /// A committed read ([`crate::MetaStore::read_committed`]) gets it from its own tail check:
+    /// it began no transaction, so "did not commit" means it took no snapshot, and reading again
+    /// lists the frame.
     #[error(
         "the transaction did not commit: a journal append failed, and what it wrote was cut \
          back off the journal: {source}"

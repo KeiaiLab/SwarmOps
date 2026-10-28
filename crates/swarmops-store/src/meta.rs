@@ -6,7 +6,7 @@
 //!   append-only frames, one per write transaction. It is the source of truth; every other
 //!   metadata file is a projection of it.
 //! - [`Record`] and [`Frame`]: what the journal holds, in a fixed byte layout.
-//! - [`MetaLock`] (`meta/lock`): the flock that serializes writers.
+//! - [`MetaLock`] (`meta/lock`): the flock that serializes writers and committed readers.
 //! - [`Index`] (`meta/idx/*.col`, `meta/parents.log`, `meta/sorted/`): the columnar
 //!   changeset index, one [`ChangesetMeta`] record per changeset in journal order, with
 //!   [`SortedView`]s by id and by delta hash for `O(log n)` lookups.
@@ -26,8 +26,9 @@
 //! ref's file replacement) are its only per-transaction fsyncs. [`Index::sync`] and the
 //! [`Journal::set_ckpt`] after it are batched instead: every 32 frames past the checkpoint,
 //! with [`Index::compact`] (which syncs the index before it writes the sorted views), and on
-//! an explicit [`MetaStore::flush`]. Readers take no lock and overlay the frames past the
-//! checkpoint (storage spec §3).
+//! an explicit [`MetaStore::flush`]. Local readers ([`MetaStore::read`]) take no lock and overlay
+//! the frames past the checkpoint (storage spec §3); committed readers
+//! ([`MetaStore::read_committed`]) take it for their tail check and their snapshot.
 
 pub mod check;
 mod column;
