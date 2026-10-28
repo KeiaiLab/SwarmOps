@@ -22,6 +22,12 @@
 //!   documented aborts, which say why on stderr: a failed journal append whose cut back off the
 //!   journal fails too, and a failed sync of the store root after `init` linked `FORMAT` whose
 //!   taking `FORMAT` back fails too.
+//! - No sweep here reaches the index's compaction: the commit template holds 31 frames
+//!   (`support::sweep`), far short of `Index::COMPACT_THRESHOLD` (1,024 records). A compaction
+//!   past that threshold under a power loss or a crash is the slow power-loss variant's cover
+//!   (`power_loss.rs`, `..._at_every_cut`, which `just check-slow` and the weekly
+//!   `just check-ci-slow` run); a failed call in one is the store's tests' (`meta.rs`: a failed
+//!   sync before a compaction, a failed `Compacted` frame, an interrupted compaction finished).
 //!
 //! Each test owns its temp dirs, and the tests share nothing.
 

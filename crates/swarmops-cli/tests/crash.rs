@@ -16,6 +16,13 @@
 //!   which the test support sets for every run): a write that breaks one panics, and the run
 //!   ends in `E_INTERNAL` instead of at its crash point.
 //! - Every test ends with `verify --deep` through the binary, and reads its `problems`.
+//! - No sweep here reaches the index's compaction: the commit template holds 31 frames
+//!   (`support::sweep`), far short of `Index::COMPACT_THRESHOLD` (1,024 records). A crash in a
+//!   writer's compaction past that threshold (the index sync, the views written and renamed into
+//!   place, the `Compacted` frame, the checkpoint) is the slow power-loss variant's cover
+//!   (`power_loss.rs`, `..._at_every_cut`, its run ending in `Op::Bulk`): one of its seeds keeps
+//!   every unsynced write, the state a process crash leaves, at every cut of it. `just check-slow`
+//!   and the weekly `just check-ci-slow` run it; `just check` does not.
 //!
 //! Each test owns its temp dirs, and the tests share nothing.
 
@@ -279,7 +286,7 @@ fn sweep_checked(template: &Store, what: &str, args: impl Fn(&Store) -> Vec<Stri
 
 per_format! {
 /// Every crash sweep runs under the order checker (`swarmops_store::OrderCheckFs`, rules W1 to
-/// W7): the tests set `SWARMOPS_TEST_ORDER_CHECK=1` for every run of the binary, and the store's
+/// W8): the tests set `SWARMOPS_TEST_ORDER_CHECK=1` for every run of the binary, and the store's
 /// and the repository's sweeps wrap their crashing child's filesystem in it, and the one their
 /// parent recovers on, so a write that breaks a rule panics in the run crashed at any call, in a
 /// dry run, or in what recovers from the crash. This sweep, in the default gate, crashes a root
