@@ -575,7 +575,7 @@ fn undo_of_an_op_that_moved_no_ref_is_nothing_to_undo() {
 
     for op in [0, 2, 3] {
         match repo.undo(op, UNDOER) {
-            Err(RepoError::NothingToUndo(nothing)) => assert_eq!(nothing, op),
+            Err(RepoError::NothingToUndo { op: nothing, .. }) => assert_eq!(nothing, op),
             other => panic!("op {op}: expected NothingToUndo, got {other:?}"),
         }
     }
@@ -587,7 +587,9 @@ fn undo_of_an_op_that_moved_no_ref_is_nothing_to_undo() {
 fn undo_of_an_op_past_the_journal_is_not_found() {
     let (_dir, _root, repo) = new_repo();
     let not_found = |op| match repo.undo(op, UNDOER) {
-        Err(RepoError::OpNotFound { op: missing, last }) => {
+        Err(RepoError::OpNotFound {
+            op: missing, last, ..
+        }) => {
             assert_eq!(missing, op);
             last
         }
@@ -672,6 +674,30 @@ fn undo_reports_what_its_write_repaired() {
             assert_eq!(*recovered, listed_and_replayed);
         }
         other => panic!("expected UndoBlocked, got {other:?}"),
+    }
+
+    // The two refusals found under the lock, after the repair, report it too.
+    let unlisted = listing_fails(&root)
+        .cas_ref("main", Some(c3), Some(c2), ACTOR)
+        .unwrap(); // op 7, committed and not listed
+    assert_eq!(unlisted.warnings.len(), 1);
+    match repo.undo(99, UNDOER) {
+        Err(RepoError::OpNotFound {
+            op: 99,
+            last: Some(7),
+            recovered,
+        }) => assert_eq!(*recovered, listed_and_replayed),
+        other => panic!("expected OpNotFound, got {other:?}"),
+    }
+    let unlisted = listing_fails(&root)
+        .cas_ref("main", Some(c2), Some(c1), ACTOR)
+        .unwrap(); // op 8, committed and not listed
+    assert_eq!(unlisted.warnings.len(), 1);
+    match repo.undo(0, UNDOER) {
+        Err(RepoError::NothingToUndo { op: 0, recovered }) => {
+            assert_eq!(*recovered, listed_and_replayed);
+        }
+        other => panic!("expected NothingToUndo, got {other:?}"),
     }
 }
 

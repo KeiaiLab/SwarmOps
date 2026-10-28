@@ -55,6 +55,12 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   `fetch.writeCommitGraph=true`, so git updates it after each fetch (for G17's fetch ratio;
   v0.6.0 measured 1.04× with one, 1.65× without).
 
+### Fixed
+
+- `op undo` refused with `E_OP_NOT_FOUND` or `E_NOTHING_TO_UNDO` reports in `meta.recovered` what
+  its write repaired first, as `E_CAS_MISMATCH` already did; the next write no longer reports
+  `null` for a repair the refused undo made.
+
 ## [0.6.0] - 2026-10-28
 
 Fix what the measurements missed. The 0.6.0 release holds the landing model the v0.5.0

@@ -111,13 +111,13 @@ pub(crate) fn repo_error(e: RepoError, during: During<'_>) -> OpError {
             expected,
             ..
         } => target_moved(&target, actual, expected),
-        RepoError::OpNotFound { op: number, last } => {
+        RepoError::OpNotFound { op, last, .. } => {
             let last = last.map_or(Value::Null, Value::from);
             error(ErrorCode::OpNotFound, message)
-                .with_details(details([("op", number.into()), ("last", last)]))
+                .with_details(details([("op", op.into()), ("last", last)]))
                 .with_hint("swarmops op log")
         }
-        RepoError::NothingToUndo(number) => error(ErrorCode::NothingToUndo, message)
+        RepoError::NothingToUndo { op: number, .. } => error(ErrorCode::NothingToUndo, message)
             .with_details(details([("op", number.into())]))
             .with_hint("swarmops op log"),
         RepoError::UndoBlocked {
@@ -1402,9 +1402,14 @@ mod tests {
         let not_found = RepoError::OpNotFound {
             op: 7,
             last: Some(3),
+            recovered: Box::default(),
         };
         maps(not_found, op, ErrorCode::OpNotFound);
-        maps(RepoError::NothingToUndo(2), op, ErrorCode::NothingToUndo);
+        let nothing = RepoError::NothingToUndo {
+            op: 2,
+            recovered: Box::default(),
+        };
+        maps(nothing, op, ErrorCode::NothingToUndo);
         let blocked = RepoError::UndoBlocked {
             op: 2,
             name: "main".into(),
@@ -1686,7 +1691,12 @@ mod tests {
         }
         assert_eq!(blocked.hint.as_deref(), Some("swarmops op log"));
 
-        let not_found = repo_error(RepoError::OpNotFound { op: 9, last: None }, During::Op);
+        let not_found = RepoError::OpNotFound {
+            op: 9,
+            last: None,
+            recovered: Box::default(),
+        };
+        let not_found = repo_error(not_found, During::Op);
         assert_eq!(
             (not_found.code.as_str(), not_found.exit),
             ("E_OP_NOT_FOUND", 6)
@@ -1696,7 +1706,11 @@ mod tests {
             details([("op", 9.into()), ("last", Value::Null)])
         );
         assert_eq!(not_found.hint.as_deref(), Some("swarmops op log"));
-        let nothing = repo_error(RepoError::NothingToUndo(3), During::Op);
+        let nothing = RepoError::NothingToUndo {
+            op: 3,
+            recovered: Box::default(),
+        };
+        let nothing = repo_error(nothing, During::Op);
         assert_eq!(
             (nothing.code.as_str(), nothing.exit),
             ("E_NOTHING_TO_UNDO", 1)

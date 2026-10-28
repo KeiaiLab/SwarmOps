@@ -163,11 +163,22 @@ pub enum RepoError {
         op: u64,
         /// The store's last operation; `None` when it has none.
         last: Option<u64>,
+        /// What the write transaction's recovery repaired before the operation was looked up,
+        /// of what earlier writers left: those repairs stay made. Boxed, as for
+        /// [`RepoError::RefMoved`].
+        recovered: Box<Recovered>,
     },
     /// `undo` of an operation that left every ref where it found it: it moved none, or moved
     /// each one back. Nothing was written.
-    #[error("operation {0} moved no ref, so there is nothing to undo")]
-    NothingToUndo(u64),
+    #[error("operation {op} moved no ref, so there is nothing to undo")]
+    NothingToUndo {
+        /// The operation asked for.
+        op: u64,
+        /// What the write transaction's recovery repaired before the operation was read, of
+        /// what earlier writers left: those repairs stay made. Boxed, as for
+        /// [`RepoError::RefMoved`].
+        recovered: Box<Recovered>,
+    },
     /// `undo` found a ref the operation moved naming neither what the operation set it to nor
     /// what it named before: a later operation moved it. Nothing was written, the moves of the
     /// operation's other refs included; undo the later operations first.

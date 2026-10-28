@@ -1906,9 +1906,12 @@ impl StoreOps for Recording<'_> {
 
     fn undo(&self, who: &Identity, req: UndoReq) -> Result<UndoResp, OpError> {
         let outcome = self.ops.repo.undo(req.op, who.agent()).map_err(|e| {
-            // An undo refused under the lock is E_CAS_MISMATCH, which reports what the write
-            // repaired first, as a ref move's does.
-            if let RepoError::UndoBlocked { recovered, .. } = &e {
+            // An undo refused under the lock (E_CAS_MISMATCH, E_OP_NOT_FOUND,
+            // E_NOTHING_TO_UNDO) reports what the write repaired first, as a ref move's does.
+            if let RepoError::UndoBlocked { recovered, .. }
+            | RepoError::OpNotFound { recovered, .. }
+            | RepoError::NothingToUndo { recovered, .. } = &e
+            {
                 self.resolved.record_recovered(**recovered);
             }
             error::op(e)

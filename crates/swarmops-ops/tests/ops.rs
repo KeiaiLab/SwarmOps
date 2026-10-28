@@ -1027,6 +1027,57 @@ fn undo_of_mains_creation_is_refused_whole() {
     assert_eq!(frame_count(&root), frames, "nothing written");
 }
 
+/// An undo refused under the lock records what its write repaired first (a frame an earlier
+/// writer committed and failed to list), as a ref move's refusal does: `E_OP_NOT_FOUND` and
+/// `E_NOTHING_TO_UNDO` alike.
+#[test]
+fn a_refused_undo_records_what_its_write_repaired() {
+    use std::sync::Arc;
+    use swarmops_testkit::fs::FailingFs;
+
+    let (_dir, root, ops) = new_store();
+    let who = agent();
+    let c1 = commit(&ops, None, vec![text("f", "1")]); // op 0
+    let c2 = commit(&ops, Some(&c1), vec![text("f", "2")]); // op 1
+    let id = |hex: &str| ChangesetId::new(hex.parse().unwrap());
+
+    // 1. A ref move committed and not listed: its listing in the journal's `.off` file fails.
+    let unlisted = |old: Option<&str>, new: &str| {
+        let fs = FailingFs::new(|method, p| {
+            method == "append_durable" && p.extension().is_some_and(|ext| ext == "off")
+        });
+        let repo = LocalRepo::open_with_fs(&root, Arc::new(fs)).unwrap();
+        let moved = repo
+            .cas_ref("main", old.map(id), Some(id(new)), "agent/one")
+            .unwrap();
+        assert_eq!(moved.warnings.len(), 1, "{moved:?}");
+    };
+
+    // 2. Each refusal reports the listing its write made; the next write finds none to make.
+    let refusals = [(99, ErrorCode::OpNotFound), (0, ErrorCode::NothingToUndo)];
+    for (round, (op, code)) in refusals.into_iter().enumerate() {
+        match round {
+            0 => unlisted(None, &c1),
+            _ => unlisted(Some(&c1), &c2),
+        }
+        let resolved = Resolved::default();
+        expect_err(ops.recording(&resolved).undo(&who, UndoReq::new(op)), code);
+        let recovered = resolved.take_recovered().expect("its write repaired");
+        assert_eq!(
+            (recovered.frames_listed, recovered.refs_replayed),
+            (1, 1),
+            "{code:?}: {recovered:?}"
+        );
+    }
+    let resolved = Resolved::default();
+    let main = ops
+        .recording(&resolved)
+        .undo(&who, UndoReq::new(3))
+        .unwrap();
+    assert_eq!(main.op, Some(4), "{main:?}");
+    assert_eq!(resolved.take_recovered(), None, "nothing left to repair");
+}
+
 #[test]
 fn cas_mismatch_hints_never_overwrite_the_winner() {
     let (_dir, _root, ops) = new_store();

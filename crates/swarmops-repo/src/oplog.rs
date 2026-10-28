@@ -102,8 +102,8 @@ pub struct UndoOutcome {
     pub warnings: Vec<String>,
     /// What the write transaction's recovery repaired before the undo, of what earlier writers
     /// left ([`swarmops_store::MetaWrite::recovered`]): on every outcome, and with
-    /// [`RepoError::UndoBlocked`] too. It is no warning, and it is lost when the call fails
-    /// otherwise after the repair.
+    /// [`RepoError::OpNotFound`], [`RepoError::NothingToUndo`] and [`RepoError::UndoBlocked`]
+    /// too. It is no warning, and it is lost when the call fails otherwise after the repair.
     pub recovered: Recovered,
 }
 
@@ -150,12 +150,19 @@ impl<O: ObjectStore> Repo<O> {
             let read = self.meta.read()?;
             let Some(frame) = read.frame(op)? else {
                 let last = read.frames_before(None, 1)?.first().map(|frame| frame.seq);
-                return Err(RepoError::OpNotFound { op, last });
+                return Err(RepoError::OpNotFound {
+                    op,
+                    last,
+                    recovered: Box::new(recovered),
+                });
             };
             net_moves(&frame)
         };
         if moves.is_empty() {
-            return Err(RepoError::NothingToUndo(op));
+            return Err(RepoError::NothingToUndo {
+                op,
+                recovered: Box::new(recovered),
+            });
         }
         for (name, old, new) in moves {
             match write
