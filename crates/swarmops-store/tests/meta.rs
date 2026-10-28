@@ -4269,6 +4269,50 @@ fn create_starts_over_from_what_a_crashed_create_left() {
     assert!(!Layout::new(&root).meta_path(".tmpA1b2C3").exists());
 }
 
+/// A create that cannot remove what a crashed create left in `meta.tmp/` fails there, naming the
+/// removal (`remove_dir_all meta.tmp`), and makes no `meta/`; once the staging can go, the next
+/// create starts over. The removal runs outside [`swarmops_store::FsOps`], so this permission
+/// failure stands in for the injected ones the doubles cannot make there.
+#[test]
+fn create_fails_where_a_crashed_creates_staging_cannot_go() {
+    use std::os::unix::fs::PermissionsExt;
+
+    use swarmops_store::FileOp;
+
+    // 1. A staged file in a directory the process may not change.
+    let (_dir, root) = new_root();
+    let staged = root.join("meta.tmp/meta");
+    fs::create_dir_all(&staged).unwrap();
+    fs::write(staged.join("journal.log"), b"not a frame").unwrap();
+    let mode = |bits| fs::Permissions::from_mode(bits);
+    fs::set_permissions(&staged, mode(0o500)).unwrap();
+    if fs::write(staged.join("probe"), b"").is_ok() {
+        eprintln!("skipped: this process changes a directory of mode 0500 (root)");
+        return;
+    }
+
+    // 2. The create fails at the removal, and leaves no meta/.
+    let created = create_checked(&root);
+    fs::set_permissions(&staged, mode(0o700)).unwrap();
+    match created {
+        Err(StoreError::Io(failure)) => assert_eq!(
+            (failure.op, failure.file.as_deref(), failure.kind()),
+            (
+                FileOp::RemoveDirAll,
+                Some(Utf8Path::new("meta.tmp")),
+                io::ErrorKind::PermissionDenied
+            ),
+            "{failure}"
+        ),
+        other => panic!("expected the removal's failure, got {other:?}"),
+    }
+    assert!(!Layout::new(&root).meta_dir().exists(), "no meta/");
+
+    // 3. Once the staging can go, the next create starts over.
+    create_checked(&root).unwrap();
+    assert_fresh_meta(&root);
+}
+
 #[test]
 fn create_lays_out_meta_and_open_requires_it() {
     let (_dir, root) = new_root();
