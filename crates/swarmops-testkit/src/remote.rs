@@ -20,7 +20,9 @@
 //!   passed to `git http-backend` as the CGI metavariable `HTTP_<NAME>` (RFC 3875 §4.1.18), so
 //!   that git's gzipped fetch requests are inflated; [`HttpAuth::Basic`] asks for a password;
 //!   [`HttpServer::stop`] refuses connections and [`HttpServer::cut_after`] ends a response
-//!   early; [`HttpServer::requests`] is what it was asked.
+//!   early; [`HttpServer::requests`] is what it was asked. The same request loop runs any CGI
+//!   program instead, `swarmops serve --cgi` among them ([`crate::serve::ServeSite::http`]);
+//!   a script with no header block is answered 500, one past [`CGI_TIMEOUT`] is killed.
 //! - [`GitServer::ssh_command`]: the ssh stand-in, a value for `GIT_SSH_COMMAND`, which serves
 //!   the root ([`SshMode::Serve`]) or fails as ssh does ([`SshMode::Deny`], [`SshMode::Down`]).
 //! - [`GitServer::merge`] with a [`MergeMethod`]: the three ways a hosting service merges a
@@ -44,6 +46,7 @@ use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
@@ -58,6 +61,10 @@ pub const MIN_GIT: [u32; 2] = [2, 39];
 
 /// The largest request body the HTTP server reads; a larger one is answered 413.
 pub const MAX_BODY: usize = 256 << 20;
+
+/// How long a CGI script may run for one request: the child runner's deadline. One still
+/// running then is killed and the request answered 500.
+pub const CGI_TIMEOUT: Duration = child::CHILD_TIMEOUT;
 
 /// The host name in the ssh stand-in's URLs, which the stand-in drops.
 pub const SSH_HOST: &str = "remote.invalid";
@@ -481,28 +488,20 @@ impl GitServer {
 
     /// [`GitServer::http`], passing the request headers on as `passing` says.
     fn http_with(&self, auth: HttpAuth, passing: HeaderPassing) -> HttpServer {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("listen on loopback");
-        let addr = listener.local_addr().expect("the listener's address");
-        let shared = Arc::new(Shared {
-            backend: Backend {
-                git: self.git.clone(),
-                path: self.path.clone(),
-                home: self.root.path().join("home"),
-                repos: self.repos(),
-            },
-            auth,
-            passing,
-            log: Mutex::new(Vec::new()),
-            cut: Mutex::new(None),
-            stopped: AtomicBool::new(false),
-        });
-        let accepting = Arc::clone(&shared);
-        let thread = thread::spawn(move || accept(&listener, &accepting));
-        HttpServer {
-            addr,
-            shared,
-            thread: Some(thread),
-        }
+        let backend = Backend::GitHttpBackend {
+            git: self.git.clone(),
+            path: self.path.clone(),
+            home: self.root.path().join("home"),
+            repos: self.repos(),
+        };
+        HttpServer::start_with(backend, auth, passing)
+    }
+
+    /// git's `PATH`: the caller's, with [`GIT_ENV`]'s directory first, for a server of another
+    /// program that runs this git.
+    #[cfg(feature = "cli")]
+    pub(crate) fn path_env(&self) -> &OsString {
+        &self.path
     }
 
     /// The stand-in's script: skip ssh's options, drop the host, map the path under the
@@ -781,6 +780,33 @@ pub struct HttpServer {
 }
 
 impl HttpServer {
+    /// Serves on `127.0.0.1` by running `backend` once a request, until stopped or dropped.
+    #[cfg(feature = "cli")]
+    pub(crate) fn start(backend: Backend, auth: HttpAuth) -> HttpServer {
+        HttpServer::start_with(backend, auth, HeaderPassing::Every)
+    }
+
+    /// [`HttpServer::start`], passing the request headers on as `passing` says.
+    fn start_with(backend: Backend, auth: HttpAuth, passing: HeaderPassing) -> HttpServer {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listen on loopback");
+        let addr = listener.local_addr().expect("the listener's address");
+        let shared = Arc::new(Shared {
+            backend,
+            auth,
+            passing,
+            log: Mutex::new(Vec::new()),
+            cut: Mutex::new(None),
+            stopped: AtomicBool::new(false),
+        });
+        let accepting = Arc::clone(&shared);
+        let thread = thread::spawn(move || accept(&listener, &accepting));
+        HttpServer {
+            addr,
+            shared,
+            thread: Some(thread),
+        }
+    }
+
     /// The URL of repository `name`: `http://127.0.0.1:<port>/<name>.git`.
     pub fn url(&self, name: &str) -> String {
         format!("http://{}/{name}.git", self.addr)
@@ -833,7 +859,7 @@ impl Drop for HttpServer {
 /// What the HTTP server's threads share.
 #[derive(Debug)]
 struct Shared {
-    /// How to run `git http-backend`.
+    /// The CGI script each request runs.
     backend: Backend,
     /// Whether it asks for a password.
     auth: HttpAuth,
@@ -847,17 +873,71 @@ struct Shared {
     stopped: AtomicBool,
 }
 
-/// How the HTTP server runs `git http-backend`.
+/// The CGI script the HTTP server runs once a request, with the request's metavariables.
 #[derive(Debug)]
-struct Backend {
-    /// The git binary.
-    git: PathBuf,
-    /// Its `PATH`.
-    path: OsString,
-    /// Its empty `HOME`.
-    home: PathBuf,
-    /// `GIT_PROJECT_ROOT`.
-    repos: PathBuf,
+pub(crate) enum Backend {
+    /// `git http-backend` over a root of bare repositories ([`GitServer::http`]).
+    GitHttpBackend {
+        /// The git binary.
+        git: PathBuf,
+        /// Its `PATH`.
+        path: OsString,
+        /// Its empty `HOME`.
+        home: PathBuf,
+        /// `GIT_PROJECT_ROOT`.
+        repos: PathBuf,
+    },
+    /// Any program, as a web server's CGI entry runs it: `swarmops serve --cgi …`
+    /// ([`crate::serve::ServeSite::http`]).
+    #[cfg(feature = "cli")]
+    Cgi {
+        /// The program.
+        program: PathBuf,
+        /// Its arguments.
+        args: Vec<OsString>,
+        /// Its environment beside the metavariables: nothing else of this process's reaches
+        /// it.
+        env: Vec<(OsString, OsString)>,
+    },
+}
+
+impl Backend {
+    /// The backend's command for `incoming`, its environment cleared but for what the backend
+    /// needs.
+    fn command(&self, incoming: &Incoming) -> Command {
+        match self {
+            Backend::GitHttpBackend {
+                git,
+                path,
+                home,
+                repos,
+            } => {
+                let mut command = Command::new(git);
+                command
+                    .arg("http-backend")
+                    .env_clear()
+                    .env("PATH", path)
+                    .env("HOME", home)
+                    .envs(PINNED)
+                    .env("GIT_PROJECT_ROOT", repos)
+                    .env("GIT_HTTP_EXPORT_ALL", "1");
+                if let Some(protocol) = incoming.header("Git-Protocol") {
+                    command.env("GIT_PROTOCOL", protocol);
+                }
+                command
+            }
+            #[cfg(feature = "cli")]
+            Backend::Cgi { program, args, env } => {
+                // A web server passes the protocol as `HTTP_GIT_PROTOCOL` only.
+                let mut command = Command::new(program);
+                command
+                    .args(args)
+                    .env_clear()
+                    .envs(env.iter().map(|(name, value)| (name, value)));
+                command
+            }
+        }
+    }
 }
 
 /// A request as read off the connection.
@@ -1119,22 +1199,16 @@ fn authenticate(auth: &HttpAuth, incoming: &Incoming) -> Result<Option<String>, 
     Err(answer)
 }
 
-/// Runs `git http-backend` for `incoming` as a CGI script, and its output as the answer.
+/// Runs the backend for `incoming` as a CGI script, within [`CGI_TIMEOUT`], and its output as
+/// the answer.
 fn run_backend(
     backend: &Backend,
     passing: HeaderPassing,
     incoming: &Incoming,
     user: Option<&str>,
 ) -> io::Result<Answer> {
-    let mut command = Command::new(&backend.git);
+    let mut command = backend.command(incoming);
     command
-        .arg("http-backend")
-        .env_clear()
-        .env("PATH", &backend.path)
-        .env("HOME", &backend.home)
-        .envs(PINNED)
-        .env("GIT_PROJECT_ROOT", &backend.repos)
-        .env("GIT_HTTP_EXPORT_ALL", "1")
         .env("GATEWAY_INTERFACE", "CGI/1.1")
         .env("SERVER_PROTOCOL", "HTTP/1.1")
         .env("REQUEST_METHOD", &incoming.method)
@@ -1145,9 +1219,6 @@ fn run_backend(
     // 1. The CGI metavariables of the request.
     if let Some(kind) = incoming.header("Content-Type") {
         command.env("CONTENT_TYPE", kind);
-    }
-    if let Some(protocol) = incoming.header("Git-Protocol") {
-        command.env("GIT_PROTOCOL", protocol);
     }
     if let Some(user) = user {
         command.env("REMOTE_USER", user);
@@ -1160,20 +1231,27 @@ fn run_backend(
         }
     }
 
-    // 2. The body on stdin from a thread of its own, while stdout is read.
-    let mut child = command
+    // 2. The body on stdin from a thread of its own, while the child runner reads stdout.
+    let mut spawned = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    let mut stdin = child.stdin.take().expect("a piped stdin");
+    let mut stdin = spawned.stdin.take().expect("a piped stdin");
     let body = incoming.body.clone();
     let feeder = thread::spawn(move || {
         // The backend may stop reading early; what it answers still counts.
         let _ = stdin.write_all(&body);
     });
-    let output = child.wait_with_output()?;
+
+    // 3. A script past its deadline is killed: the request is answered, never left hanging.
+    let (output, killed) = child::Child::adopt(spawned).finish(Instant::now() + CGI_TIMEOUT);
     let _ = feeder.join();
+    if killed {
+        let mut answer = Answer::bare(500, "Internal Server Error");
+        answer.body = b"the CGI script ran past its deadline".to_vec();
+        return Ok(answer);
+    }
     Ok(cgi_answer(&output))
 }
 
@@ -1190,9 +1268,14 @@ fn metavariable(name: &str) -> Option<String> {
 }
 
 /// A CGI script's output as an answer: its headers, `Status:` its status (200 without one).
+/// An output without a header block (RFC 3875 §6.2: headers, then an empty line) is a failed
+/// script, answered 500 with its stderr as the body.
 fn cgi_answer(output: &Output) -> Answer {
-    let bytes = &output.stdout;
-    let (head, body) = split_head(bytes);
+    let Some((head, body)) = split_head(&output.stdout) else {
+        let mut answer = Answer::bare(500, "Internal Server Error");
+        answer.body.clone_from(&output.stderr);
+        return answer;
+    };
     let mut answer = Answer::bare(200, "OK");
     answer.body = body.to_vec();
     for line in String::from_utf8_lossy(head).lines() {
@@ -1210,28 +1293,22 @@ fn cgi_answer(output: &Output) -> Answer {
         answer.status = code.parse().unwrap_or(500);
         reason.clone_into(&mut answer.reason);
     }
-
-    // A backend that printed nothing failed: its stderr is the body.
-    if bytes.is_empty() {
-        answer.status = 500;
-        "Internal Server Error".clone_into(&mut answer.reason);
-        answer.body.clone_from(&output.stderr);
-    }
     answer
 }
 
-/// A CGI output's headers and body, split at the first empty line (CRLF or LF).
-fn split_head(bytes: &[u8]) -> (&[u8], &[u8]) {
+/// A CGI output's headers and body, split at the first empty line (CRLF or LF); `None` without
+/// one.
+fn split_head(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
     for (separator, len) in [(&b"\r\n\r\n"[..], 4), (&b"\n\n"[..], 2)] {
         if let Some(at) = bytes.windows(len).position(|window| window == separator) {
-            return (&bytes[..at], &bytes[at + len..]);
+            return Some((&bytes[..at], &bytes[at + len..]));
         }
     }
-    (bytes, &[])
+    None
 }
 
 /// `bytes` in standard base64 with padding, for the `Authorization` header.
-fn base64(bytes: &[u8]) -> String {
+pub(crate) fn base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in bytes.chunks(3) {
@@ -1301,7 +1378,7 @@ fn text(bytes: &[u8]) -> String {
 }
 
 /// `path` as UTF-8: the temporary directories' paths are.
-fn path_str(path: &Path) -> &str {
+pub(crate) fn path_str(path: &Path) -> &str {
     path.to_str().expect("a UTF-8 temporary path")
 }
 
@@ -1317,12 +1394,12 @@ fn hex_bytes(hex: &str) -> Vec<u8> {
 }
 
 /// `value` quoted for `sh`.
-fn sh_quote(value: &str) -> String {
+pub(crate) fn sh_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
 /// Writes `script` to `path`, executable.
-fn write_script(path: &Path, script: &str) {
+pub(crate) fn write_script(path: &Path, script: &str) {
     fs::write(path, script).expect("write a script");
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("make a script executable");
 }

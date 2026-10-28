@@ -30,6 +30,8 @@
 //!   invariants every run keeps, and a run's statistics.
 //! - [`remote`]: the git remotes' test double (M13), git's own server on loopback and through
 //!   an ssh stand-in.
+//! - [`serve`]: `swarmops serve`'s test site (M14), a root of stores served through an ssh
+//!   forced-command stand-in and as a CGI script behind [`remote`]'s loopback server.
 //! - [`ws`]: the workspaces' synthetic trees and edit driver (M5).
 //!
 //! It depends on no crate above `swarmops-repo`: the operations' unit tests use it, and a
@@ -65,5 +67,7 @@ pub mod power;
 pub mod remote;
 #[cfg(feature = "repo")]
 pub mod repo;
+#[cfg(feature = "cli")]
+pub mod serve;
 pub mod store;
 pub mod ws;
