@@ -351,6 +351,65 @@ fn fetch_with_a_relative_repo() {
     assert_eq!(fetched["imported"], 2, "{fetched}");
 }
 
+/// A stand-in for git that runs the real git and, after a `fetch` that succeeded, unpacks the
+/// mirror's packs and deletes the tree of each `refs/incoming/` tip: objects lost between git's
+/// fetch and the tracking refs' move. The value for `SWARMOPS_GIT`.
+#[cfg(unix)]
+fn tree_losing_git(remote: &Remote, dir: &Path) -> String {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let program = dir.join("git");
+    let real = path_text(&real_git(&remote.server));
+    let script = format!(
+        "#!/bin/sh
+         if [ \"$1\" != fetch ]; then exec '{real}' \"$@\"; fi
+         '{real}' \"$@\" || exit $?
+         cd \"$GIT_DIR\" || exit 1
+         for pack in objects/pack/*.pack; do
+         \t[ -e \"$pack\" ] || continue
+         \tmv \"$pack\" unpacked.tmp && rm -f \"${{pack%.pack}}\".idx
+         \t'{real}' unpack-objects < unpacked.tmp && rm unpacked.tmp || exit 1
+         done
+         for tip in $('{real}' for-each-ref --format='%(objectname)' refs/incoming/); do
+         \ttree=$('{real}' rev-parse \"$tip^{{tree}}\") || exit 1
+         \trm -f objects/$(echo $tree | cut -c1-2)/$(echo $tree | cut -c3-)
+         done
+"
+    );
+    fs::write(&program, script).expect("write the stand-in");
+    let mut mode = fs::metadata(&program).expect("the stand-in").permissions();
+    mode.set_mode(0o755);
+    fs::set_permissions(&program, mode).expect("make the stand-in runnable");
+    path_text(&program)
+}
+
+/// A fetched tip whose tree the mirror lost before the tracking refs move fails the fetch with
+/// `bad_objects`: the closure check runs, whatever git's own checks saw. No tracking ref moves
+/// and nothing is imported.
+#[cfg(unix)]
+#[test]
+fn fetch_of_a_tip_whose_tree_is_lost_is_bad_objects() {
+    let remote = Remote::new();
+    let store = remote.store();
+    add(&store, ORIGIN, &remote.url(), &[]).ok();
+    fetch(&store, ORIGIN);
+    let before = mirror_refs(&remote, store.path(), "refs/remotes/");
+    let count = changesets(&store);
+
+    // The remote moves on; the stand-in loses the new commit's tree after git's fetch.
+    remote.commit("main", "third", &[("c.txt", "c\n")]);
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let git = tree_losing_git(&remote, dir.path());
+    let refused = remote.run(
+        &["--repo", store.path(), "fetch", ORIGIN],
+        &[("SWARMOPS_GIT", git.as_str())],
+    );
+    let error = refused.err("E_REMOTE_REJECTED");
+    assert_eq!(error["details"]["reason"], "bad_objects", "{error}");
+    assert_eq!(mirror_refs(&remote, store.path(), "refs/remotes/"), before);
+    assert_eq!(changesets(&store), count);
+}
+
 /// A fetch imports the followed branch's commits only: the remote's other branches reach the
 /// mirror, not the store. Its response names the followed branch's head, by commit and
 /// changeset, and lists the branches that appeared.
