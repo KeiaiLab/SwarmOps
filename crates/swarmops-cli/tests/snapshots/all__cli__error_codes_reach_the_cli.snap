@@ -1626,6 +1626,65 @@ expression: s.transcript()
     }
   },
   {
+    "args": "serve --root [tmp] --as agent/worker-17",
+    "env": {
+      "SSH_ORIGINAL_COMMAND": "git-upload-pack 'store'"
+    },
+    "exit": 5,
+    "stdout": "003dERR E_AUTH: no grant of access.toml names agent/worker-17",
+    "stderr": {
+      "ok": false,
+      "op": "serve",
+      "api": 1,
+      "error": {
+        "code": "E_AUTH",
+        "message": "no grant of access.toml names agent/worker-17",
+        "retryable": false,
+        "exit": 5,
+        "details": {
+          "reason": "unknown_identity"
+        },
+        "hint": "the operator writes access.toml in the store's root: version = 1, then one [[grant]] per set of callers (who, read, push, force, land)"
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "serve --root [tmp] --as person/bob",
+    "env": {
+      "SSH_ORIGINAL_COMMAND": "git-upload-pack 'store'"
+    },
+    "exit": 5,
+    "stdout": "0036ERR E_POLICY_DENIED: person/bob may not read store",
+    "stderr": {
+      "ok": false,
+      "op": "serve",
+      "api": 1,
+      "error": {
+        "code": "E_POLICY_DENIED",
+        "message": "person/bob may not read store",
+        "retryable": false,
+        "exit": 5,
+        "details": {
+          "action": "read",
+          "identity": "person/bob",
+          "reason": "not_granted",
+          "ref": "store"
+        },
+        "hint": null
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
     "args": "--repo [tmp]/store verify",
     "exit": 1,
     "stdout": {

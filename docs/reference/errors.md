@@ -46,8 +46,8 @@ A failed command prints an envelope whose `error` names a stable `E_*` code, the
 | [`E_NOTHING_TO_LAND`](#e_nothing_to_land) | 1 | no | The land has nothing to add to the target: its head is on the target already, or its change is (`details.reason` says which). |
 | [`E_NOTHING_TO_UNDO`](#e_nothing_to_undo) | 1 | no | The operation moved no ref, so there is nothing to restore. |
 | [`E_OP_NOT_FOUND`](#e_op_not_found) | 6 | no | The store has no operation by that number. |
-| [`E_AUTH`](#e_auth) | 5 | no | The caller's token failed verification. |
-| [`E_POLICY_DENIED`](#e_policy_denied) | 5 | no | A policy refused the operation for this identity. |
+| [`E_AUTH`](#e_auth) | 5 | no | The serving entry could not name the caller, or no grant of the store's access file names it. |
+| [`E_POLICY_DENIED`](#e_policy_denied) | 5 | no | The store's access file grants this identity no such action. |
 | [`E_MAINTENANCE_BUSY`](#e_maintenance_busy) | 4 | yes | Another gc, repair or upgrade holds the store's maintenance lease; nothing was done, and running the operation again once it is done can succeed. |
 | [`E_FORMAT_REQUIRED`](#e_format_required) | 1 | no | The ref name is one the store's format does not take but a later one does: `details` names `name`, `needs` (the format that takes it) and `store` (the store's); `swarmops upgrade` moves the store to it. |
 | [`E_TAG_IMMUTABLE`](#e_tag_immutable) | 1 | no | A tag was asked to move from one target to another: a tag is created and deleted, never moved (`details.name`). |
@@ -234,13 +234,13 @@ The store has no operation by that number.
 
 Exit 5. Retryable: no.
 
-The caller's token failed verification.
+The serving entry could not name the caller, or no grant of the store's access file names it.
 
 ## E_POLICY_DENIED
 
 Exit 5. Retryable: no.
 
-A policy refused the operation for this identity.
+The store's access file grants this identity no such action.
 
 ## E_MAINTENANCE_BUSY
 

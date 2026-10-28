@@ -36,6 +36,12 @@ const AGENT: &str = "agent/worker-17";
 /// The keys whose numbers are times or durations, replaced by `[<key>]` in snapshots.
 const TIME_KEYS: &[&str] = &["elapsed_ms", "created_at", "secs", "at"];
 
+/// The store's access file for `serve`'s refusals: `person/bob` is named and granted nothing.
+const ACCESS: &str = "version = 1\n\n[[grant]]\nwho = [\"person/bob\"]\n";
+
+/// A fetch of the store `store`, as git over ssh asks `serve` for it.
+const UPLOAD_STORE: &str = "git-upload-pack 'store'";
+
 /// A store path under `/mnt/`, where WSL mounts Windows drives: `init` and every open refuse it
 /// by its name, so it need not exist, and nothing is made there.
 const MNT_STORE: &str = "/mnt/swarmops-cli-test/store";
@@ -1591,8 +1597,6 @@ const NOT_RAISED: &[(&str, &str)] = &[
         "E_CAS_RETRY_EXHAUSTED",
         "needs the target moved before every attempt: the ops unit tests raise it",
     ),
-    ("E_AUTH", "tokens arrive after M1"),
-    ("E_POLICY_DENIED", "policies arrive after M1"),
     (
         "E_MAINTENANCE_BUSY",
         "needs a gc, repair or upgrade running: their suites raise it",
@@ -1682,6 +1686,21 @@ fn error_codes_reach_the_cli() {
         raised.push("E_WS_LOCKED");
         drop(held);
     }
+    // `serve`'s (M14), refused before git starts: a caller no grant of the access file names,
+    // and one it names without a read.
+    let access = format!("{store}/access.toml");
+    fs::write(&access, ACCESS).unwrap();
+    let ssh = [("SSH_ORIGINAL_COMMAND", UPLOAD_STORE)];
+    let root = s.tmp();
+    for (code, who) in [("E_AUTH", AGENT), ("E_POLICY_DENIED", "person/bob")] {
+        let refused = s.serve(&ssh, &["serve", "--root", &root, "--as", who]);
+        assert_eq!(refused.code(), code, "{who}");
+        let message = refused["error"]["message"].as_str().unwrap();
+        assert!(!message.contains(&root), "no host path: {message}");
+        raised.push(code);
+    }
+    fs::remove_file(&access).unwrap();
+
     // Last, as it damages the store: verify finds the blob gone.
     let blob = hash_object(ObjectKind::Blob, b"pub fn f() {}\n");
     fs::remove_file(Layout::new(Utf8PathBuf::from(&store)).object_path(blob)).unwrap();
@@ -3052,6 +3071,48 @@ impl Session {
             exit,
             stdout: String::from_utf8(output.stdout).expect("stdout is UTF-8"),
             stderr: String::from_utf8(output.stderr).expect("stderr is UTF-8"),
+        }
+    }
+
+    /// Runs `serve` with `env` and `args`, refused before git starts: one `ERR` pkt-line on
+    /// stdout, which git shows as `remote error:`, and the envelope on stderr. Checks both
+    /// ([`check`]) and records the step, the envelope as its `stderr`.
+    fn serve(&mut self, env: &[(&str, &str)], args: &[&str]) -> Reply {
+        let output = Session::run_raw(env, args, None);
+
+        // 1. stdout: one pkt-line, its four hex digits counting themselves, then the envelope.
+        let len = output
+            .stdout
+            .get(..4)
+            .and_then(|digits| usize::from_str_radix(digits, 16).ok());
+        assert_eq!(len, Some(output.stdout.len()), "one pkt-line: {args:?}");
+        assert!(output.stdout[4..].starts_with("ERR "), "{args:?}");
+        let envelope = Output {
+            exit: output.exit,
+            stdout: output.stderr.clone(),
+            stderr: String::new(),
+        };
+        let json = check(args, &envelope);
+        let code = json["error"]["code"].as_str().unwrap_or_default();
+        let message = json["error"]["message"].as_str().unwrap_or_default();
+        assert_eq!(output.stdout[8..], format!("{code}: {message}"), "{args:?}");
+
+        // 2. The step, its stdout the pkt-line as text.
+        let mut step = vec![("args".to_owned(), Json::String(shell_words(args)))];
+        let vars = env
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), Json::String((*value).to_owned())))
+            .collect();
+        step.push(("env".to_owned(), Json::Object(vars)));
+        step.push(("exit".to_owned(), Json::Number(output.exit.into())));
+        step.push(("stdout".to_owned(), Json::String(output.stdout)));
+        let printed: Json = serde_json::from_str(&output.stderr).expect("checked above");
+        step.push(("stderr".to_owned(), printed.clone()));
+        self.steps.push(Json::Object(step));
+        Reply {
+            exit: output.exit,
+            json,
+            printed,
         }
     }
 

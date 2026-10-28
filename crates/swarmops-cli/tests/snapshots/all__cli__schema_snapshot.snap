@@ -2974,12 +2974,12 @@ expression: s.redact(&all)
         },
         {
           "const": "E_AUTH",
-          "description": "The caller's token failed verification.",
+          "description": "The serving entry could not name the caller, or no grant of the store's access file\nnames it.",
           "type": "string"
         },
         {
           "const": "E_POLICY_DENIED",
-          "description": "A policy refused the operation for this identity.",
+          "description": "The store's access file grants this identity no such action.",
           "type": "string"
         },
         {

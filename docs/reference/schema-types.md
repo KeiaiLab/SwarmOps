@@ -677,8 +677,8 @@ Kind: enumeration. `swarmops schema ErrorCode` prints its JSON Schema.
 | `"E_NOTHING_TO_LAND"` | The land has nothing to add to the target: its head is on the target already, or its change is (`details.reason` says which). |
 | `"E_NOTHING_TO_UNDO"` | The operation moved no ref, so there is nothing to restore. |
 | `"E_OP_NOT_FOUND"` | The store has no operation by that number. |
-| `"E_AUTH"` | The caller's token failed verification. |
-| `"E_POLICY_DENIED"` | A policy refused the operation for this identity. |
+| `"E_AUTH"` | The serving entry could not name the caller, or no grant of the store's access file names it. |
+| `"E_POLICY_DENIED"` | The store's access file grants this identity no such action. |
 | `"E_MAINTENANCE_BUSY"` | Another gc, repair or upgrade holds the store's maintenance lease; nothing was done, and running the operation again once it is done can succeed. |
 | `"E_FORMAT_REQUIRED"` | The ref name is one the store's format does not take but a later one does: `details` names `name`, `needs` (the format that takes it) and `store` (the store's); `swarmops upgrade` moves the store to it. |
 | `"E_TAG_IMMUTABLE"` | A tag was asked to move from one target to another: a tag is created and deleted, never moved (`details.name`). Nothing was written. |

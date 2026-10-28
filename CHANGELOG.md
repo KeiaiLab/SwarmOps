@@ -54,6 +54,10 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 - The git remote's mirror keeps a commit-graph: every git child gets
   `fetch.writeCommitGraph=true`, so git updates it after each fetch (for G17's fetch ratio;
   v0.6.0 measured 1.04× with one, 1.65× without).
+- `E_AUTH` and `E_POLICY_DENIED` are raised, by `swarmops serve`, and `schema ErrorCode` says
+  so: `E_AUTH` when the serving entry names no caller or no grant of the store's `access.toml`
+  names it, `E_POLICY_DENIED` when the file grants that caller no such action. Both stay exit 5,
+  not retryable.
 
 ### Fixed
 

@@ -124,10 +124,11 @@ error_codes! {
     NothingToUndo => "E_NOTHING_TO_UNDO", EXIT_ERROR, false;
     /// The store has no operation by that number.
     OpNotFound => "E_OP_NOT_FOUND", EXIT_NOT_FOUND, false;
-    // Not raised in M1: token checks and `policy.toml` arrive later.
-    /// The caller's token failed verification.
+    // `serve`'s (M14): the caller and the store's access file.
+    /// The serving entry could not name the caller, or no grant of the store's access file
+    /// names it.
     Auth => "E_AUTH", EXIT_AUTH, false;
-    /// A policy refused the operation for this identity.
+    /// The store's access file grants this identity no such action.
     PolicyDenied => "E_POLICY_DENIED", EXIT_AUTH, false;
     /// Another gc, repair or upgrade holds the store's maintenance lease; nothing was done, and
     /// running the operation again once it is done can succeed.
