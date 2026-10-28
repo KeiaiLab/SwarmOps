@@ -907,6 +907,46 @@ fn every_parent_is_a_dependency_by_default() {
     assert_eq!(derives.get(), 5, "read back");
 }
 
+/// A value whose put stores nothing because a damaged file it cannot remove holds the slot is
+/// kept for the rest of the run, as a failed put's is (storage spec §5: once per run): over the
+/// same merge, with the root's file zero-filled and every remove under `meta/derived/` failing,
+/// the root is derived once though both sides need it, and its file stays damaged.
+#[test]
+fn a_value_an_unremovable_file_blocks_is_kept() {
+    let (_dir, root, repo) = new_repo();
+    let commit = |parents: &[ChangesetId], name: &str| {
+        let req = request(parents, vec![put("f", name.as_bytes())], name);
+        repo.commit(req).unwrap().id
+    };
+    let r = commit(&[], "r");
+    let a = commit(&[r], "a");
+    let a2 = commit(&[a], "a2");
+    let b = commit(&[r], "b");
+    let m = commit(&[a2, b], "m");
+    drop(repo);
+
+    // 1. The root's value stored, then zero-filled.
+    let mut repo = LocalRepo::open(&root).unwrap();
+    repo.register(Tally(Count::default())).unwrap();
+    assert_eq!(repo.derived::<Tally>(r, &()).unwrap(), 1);
+    drop(repo);
+    let file = value_file(&root, "tally", 1, r);
+    let len = usize::try_from(fs::metadata(&file).unwrap().len()).unwrap();
+    fs::write(&file, vec![0; len]).unwrap();
+
+    // 2. A run that can remove nothing under `meta/derived/`.
+    let derived_dir = root.join("meta/derived").into_std_path_buf();
+    let failing = FailingFs::new(move |method, path: &Path| {
+        method == FsMethod::Remove && path.starts_with(&derived_dir)
+    });
+    let mut stuck = LocalRepo::open_with_fs(&root, Arc::new(failing)).unwrap();
+    let derives = Count::default();
+    stuck.register(Tally(derives.clone())).unwrap();
+    assert_eq!(stuck.derived::<Tally>(m, &()).unwrap(), 6);
+    assert_eq!(derives.get(), 5, "each of the five once, the root included");
+    assert_eq!(fs::read(&file).unwrap(), vec![0; len], "still damaged");
+}
+
 /// What another process does while a `derive` waits for a value: given the changeset.
 type Meanwhile = Box<dyn Fn(ChangesetId) + Send + Sync>;
 

@@ -32,11 +32,12 @@
 //! while it is on the stack is a cycle, and an error ([`RepoError::Derived`]).
 //!
 //! Keys and values are stored as their postcard bytes (a key of `()` has none), in the derived
-//! store's slots: derivation name and version, changeset, key. A put that fails is dropped, and the
-//! value returned all the same. A run holds the values a node waits on (its dependencies, and the
-//! values its calls asked for) in memory until that node is done, and keeps the values it derived
-//! and could not store until it ends: so a run derives each value once, even over a store that
-//! takes none. A read of the store that fails is the run's error.
+//! store's slots: derivation name and version, changeset, key. A put that fails, or that finds the
+//! slot's file there (a damaged one the store cannot remove), is dropped, and the value returned
+//! all the same. A run holds the values a node waits on (its dependencies, and the values its
+//! calls asked for) in memory until that node is done, and keeps the values it derived and did not
+//! store until it ends: so a run derives each value once, even over a store that takes none. A
+//! read of the store that fails is the run's error.
 //!
 //! # Eager derivations
 //!

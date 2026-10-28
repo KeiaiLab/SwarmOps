@@ -42,7 +42,7 @@ pub(super) struct Node {
 
 /// The values a run holds besides the derived store's: the ones a frame on the stack waits on (its
 /// last node's dependencies, and the values its calls asked for), until that frame is done; and
-/// the ones the run derived and could not store, until the run ends, since the store cannot give
+/// the ones the run derived and did not store, until the run ends, since the store cannot give
 /// them back. So a value a call reads is read from the store at most once per frame, and a store
 /// that takes no value costs nothing but the puts.
 #[derive(Default)]
@@ -223,8 +223,9 @@ impl Engine<'_> {
         match derivation.derive(&self.ctx(), subject, &node.key) {
             Ok(value) => {
                 let value = Value::from(value);
-                // A put that fails is dropped, the value kept for the rest of the run.
-                if self.write(&node, &value).is_err() {
+                // A put that fails, or finds the slot held (a damaged file it cannot remove, or
+                // a racing put's), is dropped, the value kept for the rest of the run.
+                if !matches!(self.write(&node, &value), Ok(true)) {
                     self.memo.keep(node, Arc::clone(&value));
                 }
                 Ok(self.done(value))

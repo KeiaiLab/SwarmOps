@@ -63,6 +63,12 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 - `verify` on a FORMAT 2 store names its checkpoint file `meta/journal2.ckpt`, and what it holds
   (an offset, a seq and their CRC), where it named FORMAT 1's `meta/journal.ckpt` and a u64le.
 
+### Fixed
+
+- A derived value whose put finds its slot held by a damaged file the store cannot remove is
+  kept for the rest of the run, as a failed put's is, so a run derives it once (storage spec §5),
+  not once for each value that needs it.
+
 ## [0.6.0] - 2026-10-28
 
 Fix what the measurements missed. The 0.6.0 release holds the landing model the v0.5.0
