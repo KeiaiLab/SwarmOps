@@ -17,6 +17,9 @@
 //!   `fetch`, `push`, `sync` and `sync status` ([`Recording::fetch`], [`Recording::push`],
 //!   [`Recording::sync`], …), client-side operations that spawn git against the store's mirror.
 //!
+//! - [`serve`] (M14): a directory of stores served to stock git over ssh and smart HTTP, its
+//!   pushes decided by a `proc-receive` hook.
+//!
 //! - Maintenance (M6): `gc`, `repair` and `upgrade`, [`StoreOps`](swarmops_api::StoreOps) methods
 //!   that record nothing, so they take no identity.
 //!
@@ -36,6 +39,7 @@ mod push;
 mod rebase;
 mod remote;
 mod repair;
+pub mod serve;
 mod sync;
 mod upgrade;
 
