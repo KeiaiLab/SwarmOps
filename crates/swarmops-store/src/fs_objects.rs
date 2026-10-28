@@ -858,6 +858,41 @@ mod tests {
         }
     }
 
+    /// The object limit's edge, for `decode` and `read_chunks` alike: a zstd header and frame
+    /// that claim `MAX_OBJECT_LEN + 1` bytes are `BadHeader` before any decode; the same lie of
+    /// exactly `MAX_OBJECT_LEN` bytes is within the limit, so it is decoded (as a stream, into a
+    /// 1 KiB buffer) and found `Corrupt`.
+    #[test]
+    fn the_object_limit_is_the_longest_payload_decoded() {
+        let id = swarmops_core::hash_object(ObjectKind::Blob, b"a payload");
+        let past = lying_zstd(MAX_OBJECT_LEN + 1);
+        let at = lying_zstd(MAX_OBJECT_LEN);
+
+        // 1. One byte past the limit: refused by the header.
+        let got = decode_capped(id, past.clone(), 1 << 10);
+        assert!(
+            matches!(got, Err(StoreError::BadHeader { id: bad }) if bad == id),
+            "{got:?}"
+        );
+        let got = visit_payload(id, &past, &mut |_| {});
+        assert!(
+            matches!(got, Err(StoreError::BadHeader { id: bad }) if bad == id),
+            "{got:?}"
+        );
+
+        // 2. At the limit: decoded, and the frame that makes nothing is damage.
+        let got = decode_capped(id, at.clone(), 1 << 10);
+        assert!(
+            matches!(got, Err(StoreError::Corrupt { id: bad }) if bad == id),
+            "{got:?}"
+        );
+        let got = visit_payload(id, &at, &mut |_| {});
+        assert!(
+            matches!(got, Err(StoreError::Corrupt { id: bad }) if bad == id),
+            "{got:?}"
+        );
+    }
+
     /// A stream that fails because the host cannot back its buffer's growth (`OutOfMemory`,
     /// what `read_to_end`'s `try_reserve` gives) is a failed read of the object's file, named by
     /// its place in the store, not damage: the file is not at fault. Any other failure of the
