@@ -8,6 +8,8 @@ The repository is read on this host, at PATH, relative to the working directory:
 
 Content a changeset cannot hold as git has it is refused by class (E\_GIT\_IMPORT\_LOSSY, naming the commit, the path and the class) unless --lossy allows that class: then it is dropped or normalized, and the changeset names the class in its git.lossy metadata.
 
+--into takes any ref name the store's format takes but a remote-tracking one (remote/&lt;r&gt;/&lt;path&gt;, E\_REF\_NAME\_INVALID reserved); a FORMAT 2 name in a FORMAT 1 store is E\_FORMAT\_REQUIRED.
+
 ```yaml
 title: "swarmops git import"
 description: "Bring a git repository's history in: every commit --ref reaches that the store does not hold, then move --into to it."
@@ -52,7 +54,7 @@ The commit to import, with every commit it reaches: HEAD, a ref's name or a comm
 Syntax: `--into <REF>`.
 Default: `main`.
 
-The ref to move to that commit's changeset: main or release/&lt;name&gt;.
+The ref to move to that commit's changeset: main or release/&lt;name&gt;, and in a FORMAT 2 store a branch (feature/x) or a tag (tags/v1, created, never moved).
 
 ### `--lossy`
 

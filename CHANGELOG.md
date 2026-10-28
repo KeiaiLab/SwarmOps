@@ -23,6 +23,15 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   `SWARMOPS_TEST_CLI_LANDING_LOCK_SAMPLE_US` set prints each process's wait for `meta/lock` and
   its hold, sampled from `/proc/locks`.
 
+### Changed
+
+- `git import --into`, `git export --ref` and `push` take every ref name the store's format takes
+  (in FORMAT 2 a branch such as `feature/x`, or a tag `tags/v1`, which an import creates and never
+  moves), where they took `main` and `release/<x>` alone. A remote-tracking ref is
+  `E_REF_NAME_INVALID` `reserved`, and a FORMAT 2 name in a FORMAT 1 store `E_FORMAT_REQUIRED`.
+  The git side writes lightweight tags too (`refs/tags/<name>`), which a later export moves only
+  when forced (`tag_exists`).
+
 ## [0.6.0] - 2026-10-28
 
 Fix what the measurements missed. The 0.6.0 release holds the landing model the v0.5.0

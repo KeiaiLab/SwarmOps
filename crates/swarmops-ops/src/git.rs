@@ -28,10 +28,11 @@ use swarmops_git::{
     ExportError, ExportReport, ExportRequest, GixSink, GixSource, ImportError, ImportReport,
     ImportRequest,
 };
+use swarmops_repo::RepoError;
 use swarmops_store::{Recovered, TailRepair};
 
 use crate::error;
-use crate::local::{LocalOps, Recording, Resolved};
+use crate::local::{LocalOps, Recording, RefUse, Resolved, check_ref_use};
 
 impl LocalOps {
     /// `git import` as a request of its own ([`Recording::git_import`]), whose repairs go
@@ -67,9 +68,9 @@ impl Recording<'_> {
             ..
         } = req;
         let failed = |e: ImportError| error::git_import_error(e, &git_path, &git_ref);
-        if swarmops_store::check_ref_name(&target_ref).is_err() {
-            return Err(failed(ImportError::RefName(target_ref)));
-        }
+        check_git_ref(self.ops, &target_ref, |name| {
+            failed(ImportError::RefName(name))
+        })?;
         refuse_mirror(&git_path)?;
         let source = GixSource::open(Path::new(&git_path)).map_err(|e| failed(e.into()))?;
         let mut request = ImportRequest::new(git_ref.as_str(), target_ref, who.agent());
@@ -102,9 +103,9 @@ impl Recording<'_> {
             ..
         } = req;
         let failed = |e: ExportError| error::git_export_error(e, &git_path, &source_ref, &branch);
-        if swarmops_store::check_ref_name(&source_ref).is_err() {
-            return Err(failed(ExportError::RefName(source_ref.clone())));
-        }
+        check_git_ref(self.ops, &source_ref, |name| {
+            failed(ExportError::RefName(name))
+        })?;
         refuse_mirror(&git_path)?;
         let mut sink = GixSink::open(Path::new(&git_path)).map_err(|e| failed(e.into()))?;
         let mut request = ExportRequest::new(&source_ref, &branch);
@@ -119,6 +120,23 @@ impl Recording<'_> {
         self.resolved.record(&source_ref, report.head);
         self.resolved.record_recovered(recovered(report.recovered));
         Ok(export_response(report))
+    }
+}
+
+/// Refuses `name` as the store ref a git import moves or a git export or a push reads, before any
+/// repository is opened: a remote-tracking ref is `E_REF_NAME_INVALID` `reserved` (only a fetch
+/// moves one, and it is no history of the store's own); a name no format takes is `invalid(name)`;
+/// a FORMAT 2 name (`feature/x`, `tags/v1`) in a FORMAT 1 store is `E_FORMAT_REQUIRED`.
+pub(crate) fn check_git_ref(
+    ops: &LocalOps,
+    name: &str,
+    invalid: impl FnOnce(String) -> OpError,
+) -> Result<(), OpError> {
+    check_ref_use(name, RefUse::Move)?;
+    match ops.repo.check_ref_name(name) {
+        Ok(()) => Ok(()),
+        Err(RepoError::RefName(name)) => Err(invalid(name)),
+        Err(e) => Err(error::op(e)),
     }
 }
 

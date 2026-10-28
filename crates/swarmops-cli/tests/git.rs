@@ -435,12 +435,75 @@ fn git_import_into_a_bad_ref_name_is_e_ref_name_invalid() {
     let linear = Source::new("linear");
     let journal = store.journal_len();
     for source in [linear.path.clone(), nowhere(&store)] {
-        let failed = import(&store, &source, &["--into", "feature/x"]);
+        let failed = import(&store, &source, &["--into", "main/x"]);
         assert_eq!(failed.exit(), 1, "{failed}");
         let error = failed.err("E_REF_NAME_INVALID");
-        assert_eq!(error["details"], json!({"name": "feature/x"}), "{failed}");
+        assert_eq!(error["details"], json!({"name": "main/x"}), "{failed}");
     }
     assert_eq!(store.journal_len(), journal, "nothing is written");
+}
+
+/// A FORMAT 2 store takes FORMAT 2 names on the git side: `git import --into feature/y` creates
+/// the branch, and `git export --ref feature/y --branch feature/y` writes `refs/heads/feature/y`
+/// at the commit a `main` export of the same history names.
+#[test]
+fn git_import_and_export_take_a_format_2_branch() {
+    let (store, linear, head) = imported("linear");
+    let tip = linear.commit("refs/heads/main");
+
+    // 1. The import creates the branch at the same changeset as main's.
+    let made = import(&store, &linear.path, &["--into", "feature/y"]).ok();
+    assert_eq!(made["target_ref"], "feature/y", "{made}");
+    assert_eq!(made["head_changeset"], head.as_str(), "{made}");
+
+    // 2. The export writes the branch at the fixture's tip, as main's export does.
+    let destination = swarmops_testkit::git::empty_repository();
+    let path = utf8(&destination.dir);
+    let main = export(&store, &path, &[]).ok();
+    let branch = export(
+        &store,
+        &path,
+        &["--ref", "feature/y", "--branch", "feature/y"],
+    )
+    .ok();
+    assert_eq!(main["head_sha"], tip.as_str(), "{main}");
+    assert_eq!(branch["head_sha"], tip.as_str(), "{branch}");
+    assert_eq!(branch_at(&destination.dir, "feature/y"), tip);
+}
+
+/// A remote-tracking ref is neither an import's target nor an export's source:
+/// `E_REF_NAME_INVALID` `reserved`, only a fetch moving one. In a FORMAT 1 store a FORMAT 2 name
+/// is `E_FORMAT_REQUIRED`, whose hint upgrades the store. Each before the repository is opened.
+#[test]
+fn git_refuses_reserved_and_later_format_names() {
+    let store = Store::init();
+    let linear = Source::new("linear");
+    let destination = nowhere(&store);
+    let reserved = json!({"name": "remote/origin/x", "reason": "reserved"});
+    let into = import(&store, &linear.path, &["--into", "remote/origin/x"]);
+    assert_eq!(
+        into.err("E_REF_NAME_INVALID")["details"],
+        reserved,
+        "{into}"
+    );
+    let from = export(&store, &destination, &["--ref", "remote/origin/x"]);
+    assert_eq!(
+        from.err("E_REF_NAME_INVALID")["details"],
+        reserved,
+        "{from}"
+    );
+
+    let old = Store::empty();
+    run_bin(BIN, &["init", "--format", "1", old.path()], &[], "").ok();
+    let needs = json!({"name": "feature/x", "needs": 2, "store": 1});
+    let into = import(&old, &linear.path, &["--into", "feature/x"]);
+    let error = into.err("E_FORMAT_REQUIRED");
+    assert_eq!(
+        (&error["details"], &error["hint"]),
+        (&needs, &json!("swarmops upgrade"))
+    );
+    let from = export(&old, &destination, &["--ref", "feature/x"]);
+    assert_eq!(from.err("E_FORMAT_REQUIRED")["details"], needs, "{from}");
 }
 
 /// `swarmops mcp` serves no `git_import` tool: `tools/list` names none, and a `tools/call` of it
@@ -783,6 +846,60 @@ fn git_export_of_an_unknown_source_ref_is_e_rev_not_found() {
     assert_eq!(loose_objects(&destination.dir), 0, "nothing is written");
 }
 
+/// `push` takes a FORMAT 2 branch as it takes `release/<x>` (it checks its source as `git export`
+/// does): `push origin feature/x` creates the remote branch of that name, offline, against the
+/// test kit's loopback server.
+#[test]
+fn push_takes_a_format_2_branch() {
+    use swarmops_testkit::remote::{GitServer, HttpAuth};
+
+    // 1. A served repository with one commit, and git's environment for the binary.
+    let server = GitServer::new();
+    server.create("repo");
+    server.commit_on("repo", "main", "first", &[("a.txt", "a\n")]);
+    let http = server.http(HttpAuth::Anonymous);
+    let home = tempfile::tempdir().expect("a temp HOME");
+    let git = which_git(server.git_program());
+    let env = [
+        ("SWARMOPS_GIT", git.as_str()),
+        ("HOME", home.path().to_str().expect("UTF-8 temp paths")),
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+    ];
+
+    // 2. A store that fetched it, with feature/x at what it fetched.
+    let store = Store::init().with_env(&env);
+    let url = http.url("repo");
+    store
+        .read(&["remote", "add", "origin", &url, "--branch", "main"])
+        .ok();
+    let fetched = store.read(&["fetch", "origin"]).ok();
+    let head = fetched["head"]["changeset"].as_str().expect("a head");
+    let line = ["ref", "set", "feature/x", head, "--create"];
+    store.run_as(AGENT, &line, &[]).ok();
+
+    // 3. The push creates the remote branch at main's commit.
+    let pushed = store.read(&["push", "origin", "feature/x"]).ok();
+    assert_eq!(pushed["status"], "created", "{pushed}");
+    assert_eq!(pushed["branch"], "feature/x", "{pushed}");
+    let remote = |rev: &str| server.rev_parse("repo", rev);
+    assert_eq!(remote("refs/heads/feature/x"), remote("refs/heads/main"));
+}
+
+/// `program`, the git the test kit's server runs, as an absolute path: itself, or the first of
+/// that name on `PATH`.
+fn which_git(program: &std::path::Path) -> String {
+    let found = if program.is_absolute() {
+        Some(program.to_path_buf())
+    } else {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        std::env::split_paths(&path)
+            .map(|dir| dir.join(program))
+            .find(|candidate| candidate.is_file())
+    };
+    utf8(&found.expect("git on PATH"))
+}
+
 /// A branch name git does not take is `E_REF_NAME_INVALID`, naming it, with a hint that says how
 /// git checks one, and nothing is written. A source ref that is no store ref name is the same
 /// code, before the repository is opened, so that a missing one says nothing of itself.
@@ -801,10 +918,10 @@ fn git_export_into_a_bad_branch_name_is_e_ref_name_invalid() {
     }
     assert_eq!(loose_objects(&destination.dir), 0, "nothing is written");
     for repository in [path, nowhere(&store)] {
-        let failed = export(&store, &repository, &["--ref", "feature/x"]);
+        let failed = export(&store, &repository, &["--ref", "main/x"]);
         assert_eq!(failed.exit(), 1, "{failed}");
         let error = failed.err("E_REF_NAME_INVALID");
-        assert_eq!(error["details"], json!({"name": "feature/x"}), "{failed}");
+        assert_eq!(error["details"], json!({"name": "main/x"}), "{failed}");
     }
 }
 

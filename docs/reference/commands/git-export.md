@@ -8,6 +8,8 @@ The repository is written on this host, at PATH, relative to the working directo
 
 A branch at a commit that is no export of --ref's head or of an ancestor of it fails with E\_GIT\_EXPORT\_DIVERGED (exit 3), details.reason saying why, and nothing is written; --force moves it all the same, still by compare-and-swap. Then git push sends the branch on.
 
+--ref takes any ref name the store's format takes but a remote-tracking one (remote/&lt;r&gt;/&lt;path&gt;, E\_REF\_NAME\_INVALID reserved); a FORMAT 2 name in a FORMAT 1 store is E\_FORMAT\_REQUIRED.
+
 ```yaml
 title: "swarmops git export"
 description: "Send the store's history to git: write every commit of --ref's history that --branch's last export does not reach into the git repository at PATH, then move --branch to it."
@@ -45,7 +47,7 @@ The command also takes the [global options](../cli.md#global-options).
 Syntax: `--ref <REF>`.
 Default: `main`.
 
-The store ref whose history to export: main or release/&lt;name&gt;.
+The store ref whose history to export: main or release/&lt;name&gt;, and in a FORMAT 2 store a branch (feature/x) or a tag (tags/v1).
 
 ### `--branch`
 

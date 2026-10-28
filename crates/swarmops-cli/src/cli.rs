@@ -96,14 +96,18 @@ E_GIT_IMPORT_DIVERGED (exit 3), and nothing is written.
 
 Content a changeset cannot hold as git has it is refused by class (E_GIT_IMPORT_LOSSY, naming \
 the commit, the path and the class) unless --lossy allows that class: then it is dropped or \
-normalized, and the changeset names the class in its git.lossy metadata.";
+normalized, and the changeset names the class in its git.lossy metadata.
+
+--into takes any ref name the store's format takes but a remote-tracking one (remote/<r>/<path>, \
+E_REF_NAME_INVALID reserved); a FORMAT 2 name in a FORMAT 1 store is E_FORMAT_REQUIRED.";
 
 /// `git import --ref`'s help.
 const GIT_REF_HELP: &str =
     "The commit to import, with every commit it reaches: HEAD, a ref's name or a commit id";
 
 /// `git import --into`'s help.
-const GIT_INTO_HELP: &str = "The ref to move to that commit's changeset: main or release/<name>";
+const GIT_INTO_HELP: &str = "The ref to move to that commit's changeset: main or release/<name>, \
+and in a FORMAT 2 store a branch (feature/x) or a tag (tags/v1, created, never moved)";
 
 /// `git import --lossy`'s help.
 const GIT_LOSSY_HELP: &str =
@@ -133,10 +137,14 @@ when the branch is at the export of --ref's head. It needs no identity.
 
 A branch at a commit that is no export of --ref's head or of an ancestor of it fails with \
 E_GIT_EXPORT_DIVERGED (exit 3), details.reason saying why, and nothing is written; --force moves \
-it all the same, still by compare-and-swap. Then git push sends the branch on.";
+it all the same, still by compare-and-swap. Then git push sends the branch on.
+
+--ref takes any ref name the store's format takes but a remote-tracking one (remote/<r>/<path>, \
+E_REF_NAME_INVALID reserved); a FORMAT 2 name in a FORMAT 1 store is E_FORMAT_REQUIRED.";
 
 /// `git export --ref`'s help.
-const GIT_EXPORT_REF_HELP: &str = "The store ref whose history to export: main or release/<name>";
+const GIT_EXPORT_REF_HELP: &str = "The store ref whose history to export: main or release/<name>, \
+and in a FORMAT 2 store a branch (feature/x) or a tag (tags/v1)";
 
 /// `git export --branch`'s help.
 const GIT_EXPORT_BRANCH_HELP: &str = "The git branch to write, refs/heads/<BRANCH>: main, or a trunk named otherwise, such as stable";

@@ -166,13 +166,14 @@ impl Recording<'_> {
         found.ok_or_else(|| error::remote_not_found(name))
     }
 
-    /// Checks that `source_ref` is a ref name (`E_REF_NAME_INVALID`) and that the store has it
-    /// (`E_REV_NOT_FOUND`), as `git export` names them.
+    /// Checks that `source_ref` is a ref name the store's format takes (`E_REF_NAME_INVALID`,
+    /// `E_FORMAT_REQUIRED`) and that the store has it (`E_REV_NOT_FOUND`), as `git export` names
+    /// them.
     fn source_head(&self, source_ref: &str) -> Result<(), OpError> {
         let refused = |e| error::git_export_error(e, MIRROR_GIT, source_ref, source_ref);
-        if swarmops_store::check_ref_name(source_ref).is_err() {
-            return Err(refused(ExportError::RefName(source_ref.to_owned())));
-        }
+        crate::git::check_git_ref(self.ops, source_ref, |name| {
+            refused(ExportError::RefName(name))
+        })?;
         let state = self.ops.repo.get_ref(source_ref).map_err(error::op)?;
         if state.is_none() {
             return Err(refused(ExportError::SourceRef(source_ref.to_owned())));
@@ -286,7 +287,7 @@ impl Recording<'_> {
 }
 
 /// The remote branch a push of `source_ref` goes to by default: the remote's followed branch
-/// for `main`, the same name for `release/<x>`.
+/// for `main`, the same name for any other ref (`release/<x>`, a FORMAT 2 branch).
 fn default_branch(remote: &RemoteInfo, source_ref: &str) -> String {
     if source_ref == MAIN {
         return remote.branch.clone();

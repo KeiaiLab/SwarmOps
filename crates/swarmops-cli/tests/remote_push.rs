@@ -447,7 +447,7 @@ fn push_bad_branch_name_starts_no_git() {
 fn push_of_a_bad_or_missing_ref_is_refused() {
     let remote = Remote::new();
     let store = remote.cloned();
-    push(&store, &["topic"]).err("E_REF_NAME_INVALID");
+    push(&store, &["main/x"]).err("E_REF_NAME_INVALID");
     push(&store, &["release/none"]).err("E_REV_NOT_FOUND");
 }
 
