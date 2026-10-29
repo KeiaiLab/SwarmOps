@@ -559,8 +559,9 @@ left).
   it. Found: the 2026-10-20 security review.*
 - **A commit an earlier import took with a loss is reused without `--lossy`.** A commit the store
   already holds is reused as it is, so a later import without `--lossy` that reaches one an
-  earlier import took with a loss reports `lossy_total` 0 and skips it rather than refusing.
-  *Unscheduled (issue #8 item 3). Found: M3's consolidated review.*
+  earlier import took with a loss reports `lossy_total` 0 and skips it rather than refusing, as
+  `GitImportReq.lossy` and `git import`'s help say. *Documented (issue #8 item 3; refusing or
+  listing such a commit is unscheduled). Found: M3's consolidated review.*
 
 ## Git remotes
 

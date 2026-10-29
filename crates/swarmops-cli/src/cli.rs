@@ -97,7 +97,8 @@ E_GIT_IMPORT_DIVERGED (exit 3), and nothing is written.
 
 Content a changeset cannot hold as git has it is refused by class (E_GIT_IMPORT_LOSSY, naming \
 the commit, the path and the class) unless --lossy allows that class: then it is dropped or \
-normalized, and the changeset names the class in its git.lossy metadata.
+normalized, and the changeset names the class in its git.lossy metadata. A commit the store holds \
+already is reused as it is, even one an earlier import took with --lossy.
 
 --into takes any ref name the store's format takes but a remote-tracking one (remote/<r>/<path>, \
 E_REF_NAME_INVALID reserved); a FORMAT 2 name in a FORMAT 1 store is E_FORMAT_REQUIRED.";
@@ -421,8 +422,9 @@ pub enum Command {
         /// How many times to try to publish before E_CAS_RETRY_EXHAUSTED: 1 to 32.
         #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_ATTEMPTS)]
         max_attempts: u32,
-        /// The most bytes of hunk text an E_CONFLICT report carries; past them it leaves the
-        /// texts out (truncated) and keeps every line position and blob id.
+        /// The most bytes of hunk text an E_CONFLICT report carries: from the first hunk past
+        /// them it leaves the texts out (truncated), and keeps the hunks' line positions and the
+        /// blob ids.
         #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_CONFLICT_BYTES)]
         max_conflict_bytes: u64,
         #[arg(long, value_name = "FILE", help = RESOLVE_HELP, long_help = RESOLVE_LONG_HELP)]
@@ -453,7 +455,7 @@ pub enum Command {
         message: Option<String>,
         #[arg(long, value_name = "UUID", help = REBASE_KEY_HELP)]
         key: Option<String>,
-        /// The most bytes of hunk text an E_CONFLICT report carries.
+        /// The most bytes of hunk text an E_CONFLICT report carries, as land's.
         #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_CONFLICT_BYTES)]
         max_conflict_bytes: u64,
         #[arg(long, value_name = "FILE", help = RESOLVE_HELP, long_help = RESOLVE_LONG_HELP)]
@@ -1228,7 +1230,7 @@ pub enum SyncCommand {
 pub enum LossyArg {
     /// A submodule's entry: dropped.
     Gitlinks,
-    /// A name that is not UTF-8, or is . or ..: dropped.
+    /// A name that is no path component: not UTF-8, . or .., empty, or holding a /: dropped.
     Paths,
     /// A mode git does not write, such as 100664: normalized.
     Modes,

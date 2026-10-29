@@ -115,6 +115,16 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   page at the full ids the first page resolved, since a cursor or `next_offset` pins no revision,
   and that `next_offset` reads on to the file's end, past a `lines` range (issue #4 items 3 and
   13).
+- The schema, the help and the land reference say what the code does: a conflict report's files
+  are bounded apart from `max_conflict_bytes` (24 KiB of entries, the first file's later hunks
+  spanned by one without texts, later files left out whole), `auto_merged` lists the paths merged
+  into a content neither side had, every `add_add` carries hunks, `type_change` also covers a file
+  the change deleted where the target made a directory, and `hunks_truncated` also marks, in
+  `stat` too, a text past the line diff's bound, which gets no line counts (issue #10 item 4,
+  issue #17 item 3). `git import` reuses a commit the store holds as it is, even one an earlier
+  import took with a loss, `paths` also covers empty and `/`-holding names, and the import and
+  export docs say how memos are checked or, under the memo key, taken (issue #8 items 3 and 9,
+  issue #16).
 
 ### Fixed
 

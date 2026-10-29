@@ -77,7 +77,7 @@ How many times to try to publish before E\_CAS\_RETRY\_EXHAUSTED: 1 to 32.
 Syntax: `--max-conflict-bytes <N>`.
 Default: `32768`.
 
-The most bytes of hunk text an E\_CONFLICT report carries; past them it leaves the texts out (truncated) and keeps every line position and blob id.
+The most bytes of hunk text an E\_CONFLICT report carries: from the first hunk past them it leaves the texts out (truncated), and keeps the hunks' line positions and the blob ids.
 
 ### `--resolve`
 
@@ -201,13 +201,19 @@ as the other writers left it. `details.report` names:
   last changed it (`theirs_changeset`, `theirs_agent`);
 - `kinds`: `content` (the same or adjacent lines of a text file), `binary`, `delete_modify`,
   `modify_delete`, `add_add`, `mode` or `type_change`;
-- `auto_merged`, the paths both sides changed that merged cleanly.
+- `auto_merged`, the paths both sides changed whose contents merged cleanly into a content
+  neither side had.
 
-Hunks carry their texts until they pass `--max-conflict-bytes` (32,768 by default); past it the
-report sets `truncated` and leaves every text out, keeping the line positions and the blob ids,
-from which [`cat`](../commands/cat.md) reads any side. With `--max-conflict-bytes 0` a report
-carries no hunk text. The error's hint is the `cat` of the first conflicting path at `theirs`, then
-the land again with `--resolve`.
+Hunks carry their texts while their sum stays within `--max-conflict-bytes` (32,768 by default):
+from the first hunk whose texts would pass it, no hunk carries its texts, and the report sets
+`truncated`. The hunks' line positions and the blob ids stay, from which
+[`cat`](../commands/cat.md) reads any side. With `--max-conflict-bytes 0` a report carries no
+hunk text. The files are bounded apart from it, at 24 KiB of entries without their texts
+([conflict report entries](../limits.md#conflict-report-entries)): the first file is always
+there, its hunks past the bound as one hunk that spans them, without texts; a later file that
+does not fit is left out, with every file after it, and `truncated` is set. The error's message
+counts every conflicting path. The error's hint is the `cat` of the first conflicting path at
+`theirs`, then the land again with `--resolve`.
 
 ### Resolving without a checkout
 
@@ -280,7 +286,7 @@ re-merge](../../perf.md#m4--a-lands-incremental-re-merge-not-measured-yet)).
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `attempts` | `integer` | yes | How many times the land tried to publish. |
-| `auto_merged` | `array of string` | no | The paths both sides changed that merged cleanly. Omitted when empty. |
+| `auto_merged` | `array of string` | no | The paths both sides changed whose contents merged cleanly into a content neither side had. Omitted when empty. |
 | `base` | `string` | yes | The changeset the change was taken from: what `head`'s first-parent chain added after it is what landed. |
 | `files_changed` | `integer` | yes | How many paths the landed changeset changes. |
 | `landed` | `string` | yes | The landed changeset: the change squashed into one changeset on the target. |

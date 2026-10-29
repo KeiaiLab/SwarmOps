@@ -1354,19 +1354,23 @@ pub struct FileDiff {
     /// that is not UTF-8, or holds a NUL in its first 8,000 bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub binary: Option<bool>,
-    /// `stat` and `unified`, for text: the lines the change inserts.
+    /// `stat` and `unified`, for text within the line diff's bound: the lines the change
+    /// inserts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub insertions: Option<u64>,
-    /// `stat` and `unified`, for text: the lines the change deletes.
+    /// `stat` and `unified`, for text within the line diff's bound: the lines the change
+    /// deletes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deletions: Option<u64>,
     /// `unified`, for text: the hunks, in order; empty when only the exec bit or the kind
     /// changed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hunks: Option<Vec<DiffHunk>>,
-    /// `unified`: true when `hunks` stops before the file's last hunk, to keep the page within
-    /// `max_bytes`; omitted otherwise. `insertions` and `deletions` count every line all the
-    /// same.
+    /// `stat` and `unified`: true for text past the line diff's bound (49,152 lines or 8 MiB a
+    /// side), which gets no `insertions`, `deletions` or hunks (`hunks` empty for `unified`);
+    /// and for `unified`, when `hunks` stops before the file's last hunk, to keep the page within
+    /// `max_bytes`, `insertions` and `deletions` counting every line all the same. Omitted
+    /// otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hunks_truncated: Option<bool>,
 }
@@ -2011,7 +2015,11 @@ fn default_target_ref() -> String {
 /// `git import`: bring a git repository's history into the store. Every commit that `git_ref`
 /// reaches and the store does not hold yet becomes a changeset, parents first, and
 /// `target_ref` moves to the changeset of `git_ref`'s commit. It runs on the caller's host, as
-/// `init` does: no server receives this request, and it is no MCP tool.
+/// `init` does: no server receives this request, and it is no MCP tool. The git oids it takes
+/// for the target's head, its trees and its blobs are derived from the store's objects, and
+/// each memo it meets is checked against them; with the store's memo key, which the CLI keeps
+/// outside the store, a memo whose MAC checks is taken, and nothing below it read. A memo that
+/// disagrees, or whose MAC does not check, is `E_STORE_CORRUPT`, with nothing written.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct GitImportReq {
@@ -2033,8 +2041,10 @@ pub struct GitImportReq {
     #[serde(default = "default_target_ref")]
     pub target_ref: String,
     /// The classes of content the import may drop or normalize; a changeset that loses any
-    /// names them in its `git.lossy` metadata. Empty by default: a commit holding any class is
-    /// refused with `E_GIT_IMPORT_LOSSY`, which names the commit, the path and the class.
+    /// names them in its `git.lossy` metadata. Empty by default: a commit the import converts
+    /// that holds any class is refused with `E_GIT_IMPORT_LOSSY`, which names the commit, the
+    /// path and the class. A commit the store holds already is reused as it is, even one an
+    /// earlier import took with a loss.
     #[serde(default)]
     pub lossy: Vec<LossyClass>,
 }
@@ -2062,7 +2072,8 @@ impl GitImportReq {
 pub enum LossyClass {
     /// A submodule's entry (git mode 160000): dropped.
     Gitlinks,
-    /// A name that is not UTF-8, or is `.` or `..`: dropped.
+    /// A name that is no path component: not UTF-8, `.`, `..`, empty, or holding a `/`:
+    /// dropped.
     Paths,
     /// A mode written other than git's own `100644`, `100755`, `120000` and `40000`, such as
     /// `100664` or a zero-padded `040000`: a regular file's becomes a file or an executable by
@@ -2208,7 +2219,9 @@ fn default_branch() -> String {
 /// commit with its own signatures and `SwarmOps-*` trailers. The branch moves to the export of
 /// the ref's head by compare-and-swap, and only once everything it reaches is durable. It runs
 /// on the caller's host, as `git import` does: no server receives this request, and it is no MCP
-/// tool.
+/// tool. It derives the export oids it compares the branch with, names as parents and moves the
+/// branch to, and takes or refuses memos, as `git import` does: with the store's memo key, a
+/// memo whose MAC checks stops the walk of the history below it.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct GitExportReq {
@@ -2445,8 +2458,10 @@ pub struct LandReq {
     #[serde(default = "default_max_attempts")]
     #[schemars(range(min = 1, max = MAX_LAND_ATTEMPTS))]
     pub max_attempts: u32,
-    /// The most bytes of hunk text an `E_CONFLICT` report carries: past it, the texts are left
-    /// out (`truncated`), and the line positions and blob ids stay.
+    /// The most bytes of hunk text an `E_CONFLICT` report carries: from the first hunk whose
+    /// texts would pass it, no hunk carries its texts (`truncated`), and the hunks' line
+    /// positions and the blob ids stay. The report's files are bounded apart from it, as
+    /// `ConflictReport.files` says.
     #[serde(default = "default_max_conflict_bytes")]
     pub max_conflict_bytes: u64,
     /// Publish only while the target names this changeset (M5): one attempt, and a target that
@@ -2564,7 +2579,8 @@ pub struct LandResp {
     /// The changesets the land squashed, oldest first: `head`'s first-parent chain after `base`,
     /// ending at `head`.
     pub squashed_from: Vec<String>,
-    /// The paths both sides changed that merged cleanly. Omitted when empty.
+    /// The paths both sides changed whose contents merged cleanly into a content neither side
+    /// had. Omitted when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub auto_merged: Vec<String>,
     /// Problems found after the land became durable, such as failed housekeeping; the land
@@ -2627,11 +2643,15 @@ pub struct ConflictReport {
     pub ours: String,
     /// The target's head the change was merged with.
     pub theirs: String,
-    /// The files that conflict, by path.
+    /// The files that conflict, in path order, while their entries stay within 24 KiB as JSON,
+    /// texts aside: the first file always, with at least its first hunk, its hunks past the bound
+    /// as one hunk that spans them, without texts; a later file whole, or else left out with
+    /// every file after it (`truncated`). The error's message counts every conflicting path.
     pub files: Vec<FileConflictOut>,
     /// The kinds of conflict in `files`, each once.
     pub kinds: Vec<ConflictKindOut>,
-    /// The paths both sides changed that merged cleanly. Omitted when empty.
+    /// The paths both sides changed whose contents merged cleanly into a content neither side
+    /// had. Omitted when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub auto_merged: Vec<String>,
     /// The paths whose resolutions did not apply, since the target holds there what their
@@ -2639,8 +2659,8 @@ pub struct ConflictReport {
     /// Read them at `theirs` and resolve them again, against it. Omitted when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stale: Vec<String>,
-    /// Whether hunk texts were left out to keep the report within the request's
-    /// `max_conflict_bytes`; the line positions and blob ids are always there.
+    /// Whether the report left something out: hunk texts, to stay within the request's
+    /// `max_conflict_bytes`, or files and hunks, to stay within the bound of `files`.
     pub truncated: bool,
 }
 
@@ -2687,7 +2707,8 @@ pub struct FileConflictOut {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub theirs_blob: Option<String>,
     /// The places where the two sides' edits of its lines meet, in file order: for a text file
-    /// both sides edited (`content`, and `add_add` of two texts). Omitted when there are none.
+    /// both sides edited (`content` and `add_add`; contents not all text conflict as `binary`,
+    /// with no hunks). Omitted when there are none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hunks: Vec<HunkOut>,
     /// The newest changeset on the target since the merge base that changed this path: what to
@@ -2732,7 +2753,8 @@ pub enum ConflictKindOut {
     AddAdd,
     /// Both sides changed the file's kind (file, executable or symlink), differently.
     Mode,
-    /// One side has a file where the other has a directory.
+    /// One side has a file where the other has a directory, or the change deleted a file where
+    /// the target made a directory.
     TypeChange,
 }
 
@@ -2773,8 +2795,9 @@ pub struct LinesOut {
     pub first: u64,
     /// The last line; `first` minus one when the side has none.
     pub last: u64,
-    /// The lines' text; omitted when the report would pass its `max_conflict_bytes`
-    /// (`truncated`).
+    /// The lines' text; omitted from the first hunk whose texts would pass the report's
+    /// `max_conflict_bytes`, and on the hunk that spans the first file's hunks past the
+    /// report's bound (`truncated`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
 }
@@ -3100,7 +3123,8 @@ pub struct RebaseResp {
     pub base: String,
     /// How many paths `changeset` changes against `onto`.
     pub files_changed: u64,
-    /// The paths both sides changed that merged cleanly. Omitted when empty.
+    /// The paths both sides changed whose contents merged cleanly into a content neither side
+    /// had. Omitted when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub auto_merged: Vec<String>,
 }

@@ -830,7 +830,7 @@ expression: listed
           },
           "max_conflict_bytes": {
             "default": 32768,
-            "description": "The most bytes of hunk text an `E_CONFLICT` report carries: past it, the texts are left\nout (`truncated`), and the line positions and blob ids stay.",
+            "description": "The most bytes of hunk text an `E_CONFLICT` report carries: from the first hunk whose\ntexts would pass it, no hunk carries its texts (`truncated`), and the hunks' line\npositions and the blob ids stay. The report's files are bounded apart from it, as\n`ConflictReport.files` says.",
             "format": "uint64",
             "minimum": 0,
             "type": "integer"

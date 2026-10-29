@@ -68,7 +68,7 @@ A uuid v7 that makes a retry safe: the same rebase onto the same head replays (s
 Syntax: `--max-conflict-bytes <N>`.
 Default: `32768`.
 
-The most bytes of hunk text an E\_CONFLICT report carries.
+The most bytes of hunk text an E\_CONFLICT report carries, as land's.
 
 ### `--resolve`
 
@@ -96,7 +96,7 @@ No recorded example yet.
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `auto_merged` | `array of string` | no | The paths both sides changed that merged cleanly. Omitted when empty. |
+| `auto_merged` | `array of string` | no | The paths both sides changed whose contents merged cleanly into a content neither side had. Omitted when empty. |
 | `base` | `string` | yes | The changeset the change was taken from. |
 | `changeset` | `string` | yes | The changeset that holds the result: the recorded one, `head` when it is up to date, the ref's head when the change was absorbed. |
 | `files_changed` | `integer` | yes | How many paths `changeset` changes against `onto`. |

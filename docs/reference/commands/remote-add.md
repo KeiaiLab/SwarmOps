@@ -60,7 +60,7 @@ The environment variable that holds a token for the remote, by its name.
 
 Syntax: `--lossy <CLASS>...`.
 
-A class of content the import of the remote's commits may drop or normalize. Values: `gitlinks`: A submodule's entry: dropped; `paths`: A name that is not UTF-8, or is . or ..: dropped; `modes`: A mode git does not write, such as 100664: normalized; `tree_order`: A tree out of git's order, or naming an entry twice: put in order; `empty_trees`: An entry naming an empty tree: dropped; `nonstandard`: A commit whose bytes the changeset cannot keep: kept as its fields hold it; `all`: Every class.
+A class of content the import of the remote's commits may drop or normalize. Values: `gitlinks`: A submodule's entry: dropped; `paths`: A name that is no path component: not UTF-8, . or .., empty, or holding a /: dropped; `modes`: A mode git does not write, such as 100664: normalized; `tree_order`: A tree out of git's order, or naming an entry twice: put in order; `empty_trees`: An entry naming an empty tree: dropped; `nonstandard`: A commit whose bytes the changeset cannot keep: kept as its fields hold it; `all`: Every class.
 
 ## Examples
 

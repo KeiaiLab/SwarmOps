@@ -205,7 +205,7 @@ such content with `E_GIT_IMPORT_LOSSY`, naming the commit, the path and the clas
 | Class | Content |
 | --- | --- |
 | `gitlinks` | A submodule's entry. |
-| `paths` | A name that is not UTF-8, or is `.` or `..`. |
+| `paths` | A name that is no path component: not UTF-8, `.`, `..`, empty, or holding a `/`. |
 | `modes` | A mode git does not write. |
 | `tree_order` | A tree out of git's order. |
 | `empty_trees` | An empty directory. |

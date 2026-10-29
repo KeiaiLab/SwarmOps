@@ -6,7 +6,7 @@ Bring a git repository's history in: every commit --ref reaches that the store d
 
 The repository is read on this host, at PATH, relative to the working directory: a work tree, which holds .git, or a bare repository. Each changeset keeps its git commit's id in its git.oid metadata, and its author and committer in its signatures; it records no agent. Run again, it takes only the commits after the one --into's head holds, and writes nothing when that is --ref's commit. A head that holds no git commit, or one --ref does not reach, fails with E\_GIT\_IMPORT\_DIVERGED (exit 3), and nothing is written.
 
-Content a changeset cannot hold as git has it is refused by class (E\_GIT\_IMPORT\_LOSSY, naming the commit, the path and the class) unless --lossy allows that class: then it is dropped or normalized, and the changeset names the class in its git.lossy metadata.
+Content a changeset cannot hold as git has it is refused by class (E\_GIT\_IMPORT\_LOSSY, naming the commit, the path and the class) unless --lossy allows that class: then it is dropped or normalized, and the changeset names the class in its git.lossy metadata. A commit the store holds already is reused as it is, even one an earlier import took with --lossy.
 
 --into takes any ref name the store's format takes but a remote-tracking one (remote/&lt;r&gt;/&lt;path&gt;, E\_REF\_NAME\_INVALID reserved); a FORMAT 2 name in a FORMAT 1 store is E\_FORMAT\_REQUIRED.
 
@@ -60,7 +60,7 @@ The ref to move to that commit's changeset: main or release/&lt;name&gt;, and in
 
 Syntax: `--lossy <CLASS>...`.
 
-A class of content to drop or normalize instead of refusing it, or all; repeatable. Values: `gitlinks`: A submodule's entry: dropped; `paths`: A name that is not UTF-8, or is . or ..: dropped; `modes`: A mode git does not write, such as 100664: normalized; `tree_order`: A tree out of git's order, or naming an entry twice: put in order; `empty_trees`: An entry naming an empty tree: dropped; `nonstandard`: A commit whose bytes the changeset cannot keep: kept as its fields hold it; `all`: Every class.
+A class of content to drop or normalize instead of refusing it, or all; repeatable. Values: `gitlinks`: A submodule's entry: dropped; `paths`: A name that is no path component: not UTF-8, . or .., empty, or holding a /: dropped; `modes`: A mode git does not write, such as 100664: normalized; `tree_order`: A tree out of git's order, or naming an entry twice: put in order; `empty_trees`: An entry naming an empty tree: dropped; `nonstandard`: A commit whose bytes the changeset cannot keep: kept as its fields hold it; `all`: Every class.
 
 ### `--gitlinks`
 

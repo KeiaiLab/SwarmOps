@@ -253,8 +253,11 @@ const MAX_LAND_KEY: usize = 64;
 ///   signatures and `SwarmOps-*` trailers. It needs no identity: it writes no journal frame, only
 ///   the git repository and the store's caches (derived values, external id entries). The
 ///   export oids it compares the branch with, names as parents and moves the branch to are
-///   derived from the store's own objects, each memo it meets checked against them, not read
-///   from the derivation of export oids that every `LocalOps` has registered.
+///   derived from the store's own objects, not read from the derivation of export oids that
+///   every `LocalOps` has registered, and each memo it meets is checked against them; given
+///   the store's memo key ([`LocalOps::with_memo_key`]), a memo whose MAC under it checks is
+///   taken instead, and the history below it is not read. A memo that disagrees, or whose MAC
+///   does not check, is `E_STORE_CORRUPT`.
 /// - `op_log` lists the store's operations, newest first, below `before`: each one write
 ///   transaction, a journal frame numbered from 0 in commit order, with its kind (read from its
 ///   records: one changeset and a move of a ref to it is a `land` when the changeset's metadata

@@ -28,7 +28,7 @@ max_result_chars: null
 | `head` | string | yes |  | The changeset to land: the change's head. A revision as the caller wrote it, for the store to resolve: a ref name (`main`, `release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, optionally followed by `~N` for the N-th first-parent ancestor. |
 | `idempotency_key` | string or null | no |  | Makes a retry of this land safe: 1 to 64 letters, digits and `-`, such as a uuid v7. A land with a key first looks down the target's first parents, to `base`, for a changeset that landed with the same key: one squashed from this `head` is the replay, which writes nothing (`status` is `replayed`); one from another head is `E_INVALID_ARG`, a key used for another change. |
 | `max_attempts` | integer | no | `8` | How many times to try to publish before failing with `E_CAS_RETRY_EXHAUSTED`: 1 to 32. |
-| `max_conflict_bytes` | integer | no | `32768` | The most bytes of hunk text an `E_CONFLICT` report carries: past it, the texts are left out (`truncated`), and the line positions and blob ids stay. |
+| `max_conflict_bytes` | integer | no | `32768` | The most bytes of hunk text an `E_CONFLICT` report carries: from the first hunk whose texts would pass it, no hunk carries its texts (`truncated`), and the hunks' line positions and the blob ids stay. The report's files are bounded apart from it, as `ConflictReport.files` says. |
 | `message` | string or null | no |  | The landed changeset's message; `head`'s when omitted. |
 | `resolutions` | object or null | no |  | What to make of the paths an `E_CONFLICT` report named, decided without a checkout. Each resolution applies to its path while the target holds there what `against` held, whether the path conflicts or not; a path the target changed since is stale, and the land fails `E_CONFLICT` again, with a fresh report that names it in `stale`. Conflicts left unresolved fail it too. `swarmops mcp` refuses an `against` that is not a full 64-hex id (`E_INVALID_ARG`). |
 | `target` | string | no | `"main"` | The ref to land on: `main` or `release/<name>`, which must exist. |
@@ -88,7 +88,7 @@ Its descriptions' citations of the design documents are left out here.
     },
     "max_conflict_bytes": {
       "default": 32768,
-      "description": "The most bytes of hunk text an `E_CONFLICT` report carries: past it, the texts are left\nout (`truncated`), and the line positions and blob ids stay.",
+      "description": "The most bytes of hunk text an `E_CONFLICT` report carries: from the first hunk whose\ntexts would pass it, no hunk carries its texts (`truncated`), and the hunks' line\npositions and the blob ids stay. The report's files are bounded apart from it, as\n`ConflictReport.files` says.",
       "format": "uint64",
       "minimum": 0,
       "type": "integer"

@@ -924,7 +924,7 @@ expression: s.redact(&all)
             },
             {
               "const": "paths",
-              "description": "A name that is not UTF-8, or is `.` or `..`: dropped.",
+              "description": "A name that is no path component: not UTF-8, `.`, `..`, empty, or holding a `/`:\ndropped.",
               "type": "string"
             },
             {
@@ -1119,7 +1119,7 @@ expression: s.redact(&all)
             },
             {
               "const": "paths",
-              "description": "A name that is not UTF-8, or is `.` or `..`: dropped.",
+              "description": "A name that is no path component: not UTF-8, `.`, `..`, empty, or holding a `/`:\ndropped.",
               "type": "string"
             },
             {
@@ -1618,7 +1618,7 @@ expression: s.redact(&all)
         },
         {
           "const": "type_change",
-          "description": "One side has a file where the other has a directory.",
+          "description": "One side has a file where the other has a directory, or the change deleted a file where\nthe target made a directory.",
           "type": "string"
         }
       ],
@@ -1661,7 +1661,7 @@ expression: s.redact(&all)
             },
             {
               "const": "type_change",
-              "description": "One side has a file where the other has a directory.",
+              "description": "One side has a file where the other has a directory, or the change deleted a file where\nthe target made a directory.",
               "type": "string"
             }
           ]
@@ -1677,7 +1677,7 @@ expression: s.redact(&all)
               ]
             },
             "hunks": {
-              "description": "The places where the two sides' edits of its lines meet, in file order: for a text file\nboth sides edited (`content`, and `add_add` of two texts). Omitted when there are none.",
+              "description": "The places where the two sides' edits of its lines meet, in file order: for a text file\nboth sides edited (`content` and `add_add`; contents not all text conflict as `binary`,\nwith no hunks). Omitted when there are none.",
               "items": {
                 "$ref": "#/$defs/HunkOut"
               },
@@ -1772,7 +1772,7 @@ expression: s.redact(&all)
               "type": "integer"
             },
             "text": {
-              "description": "The lines' text; omitted when the report would pass its `max_conflict_bytes`\n(`truncated`).",
+              "description": "The lines' text; omitted from the first hunk whose texts would pass the report's\n`max_conflict_bytes`, and on the hunk that spans the first file's hunks past the\nreport's bound (`truncated`).",
               "type": [
                 "string",
                 "null"
@@ -1790,7 +1790,7 @@ expression: s.redact(&all)
       "description": "Why a land could not merge its change onto the target, file by file, or could not apply its\nresolutions to it (operations spec §3): the report `E_CONFLICT` carries in `details.report`.\n`ours` is the change, `theirs` the target. Ids are full.",
       "properties": {
         "auto_merged": {
-          "description": "The paths both sides changed that merged cleanly. Omitted when empty.",
+          "description": "The paths both sides changed whose contents merged cleanly into a content neither side\nhad. Omitted when empty.",
           "items": {
             "type": "string"
           },
@@ -1801,7 +1801,7 @@ expression: s.redact(&all)
           "type": "string"
         },
         "files": {
-          "description": "The files that conflict, by path.",
+          "description": "The files that conflict, in path order, while their entries stay within 24 KiB as JSON,\ntexts aside: the first file always, with at least its first hunk, its hunks past the bound\nas one hunk that spans them, without texts; a later file whole, or else left out with\nevery file after it (`truncated`). The error's message counts every conflicting path.",
           "items": {
             "$ref": "#/$defs/FileConflictOut"
           },
@@ -1830,7 +1830,7 @@ expression: s.redact(&all)
           "type": "string"
         },
         "truncated": {
-          "description": "Whether hunk texts were left out to keep the report within the request's\n`max_conflict_bytes`; the line positions and blob ids are always there.",
+          "description": "Whether the report left something out: hunk texts, to stay within the request's\n`max_conflict_bytes`, or files and hunks, to stay within the bound of `files`.",
           "type": "boolean"
         }
       },
@@ -2078,7 +2078,7 @@ expression: s.redact(&all)
               ]
             },
             "deletions": {
-              "description": "`stat` and `unified`, for text: the lines the change deletes.",
+              "description": "`stat` and `unified`, for text within the line diff's bound: the lines the change\ndeletes.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -2097,14 +2097,14 @@ expression: s.redact(&all)
               ]
             },
             "hunks_truncated": {
-              "description": "`unified`: true when `hunks` stops before the file's last hunk, to keep the page within\n`max_bytes`; omitted otherwise. `insertions` and `deletions` count every line all the\nsame.",
+              "description": "`stat` and `unified`: true for text past the line diff's bound (49,152 lines or 8 MiB a\nside), which gets no `insertions`, `deletions` or hunks (`hunks` empty for `unified`);\nand for `unified`, when `hunks` stops before the file's last hunk, to keep the page within\n`max_bytes`, `insertions` and `deletions` counting every line all the same. Omitted\notherwise.",
               "type": [
                 "boolean",
                 "null"
               ]
             },
             "insertions": {
-              "description": "`stat` and `unified`, for text: the lines the change inserts.",
+              "description": "`stat` and `unified`, for text within the line diff's bound: the lines the change\ninserts.",
               "format": "uint64",
               "minimum": 0,
               "type": [
@@ -3288,7 +3288,7 @@ expression: s.redact(&all)
             },
             {
               "const": "type_change",
-              "description": "One side has a file where the other has a directory.",
+              "description": "One side has a file where the other has a directory, or the change deleted a file where\nthe target made a directory.",
               "type": "string"
             }
           ]
@@ -3339,7 +3339,7 @@ expression: s.redact(&all)
               "type": "integer"
             },
             "text": {
-              "description": "The lines' text; omitted when the report would pass its `max_conflict_bytes`\n(`truncated`).",
+              "description": "The lines' text; omitted from the first hunk whose texts would pass the report's\n`max_conflict_bytes`, and on the hunk that spans the first file's hunks past the\nreport's bound (`truncated`).",
               "type": [
                 "string",
                 "null"
@@ -3364,7 +3364,7 @@ expression: s.redact(&all)
           ]
         },
         "hunks": {
-          "description": "The places where the two sides' edits of its lines meet, in file order: for a text file\nboth sides edited (`content`, and `add_add` of two texts). Omitted when there are none.",
+          "description": "The places where the two sides' edits of its lines meet, in file order: for a text file\nboth sides edited (`content` and `add_add`; contents not all text conflict as `binary`,\nwith no hunks). Omitted when there are none.",
           "items": {
             "$ref": "#/$defs/HunkOut"
           },
@@ -3685,7 +3685,7 @@ expression: s.redact(&all)
           ]
         },
         "deletions": {
-          "description": "`stat` and `unified`, for text: the lines the change deletes.",
+          "description": "`stat` and `unified`, for text within the line diff's bound: the lines the change\ndeletes.",
           "format": "uint64",
           "minimum": 0,
           "type": [
@@ -3704,14 +3704,14 @@ expression: s.redact(&all)
           ]
         },
         "hunks_truncated": {
-          "description": "`unified`: true when `hunks` stops before the file's last hunk, to keep the page within\n`max_bytes`; omitted otherwise. `insertions` and `deletions` count every line all the\nsame.",
+          "description": "`stat` and `unified`: true for text past the line diff's bound (49,152 lines or 8 MiB a\nside), which gets no `insertions`, `deletions` or hunks (`hunks` empty for `unified`);\nand for `unified`, when `hunks` stops before the file's last hunk, to keep the page within\n`max_bytes`, `insertions` and `deletions` counting every line all the same. Omitted\notherwise.",
           "type": [
             "boolean",
             "null"
           ]
         },
         "insertions": {
-          "description": "`stat` and `unified`, for text: the lines the change inserts.",
+          "description": "`stat` and `unified`, for text within the line diff's bound: the lines the change\ninserts.",
           "format": "uint64",
           "minimum": 0,
           "type": [
@@ -3884,7 +3884,7 @@ expression: s.redact(&all)
     },
     "GitExportReq": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "`git export`: write the history behind a store ref into a branch of a git repository. Every\ncommit that the branch's last export does not reach is written, parents first: a changeset\nthat was imported from git keeps the commit it came from, and one made in the store becomes a\ncommit with its own signatures and `SwarmOps-*` trailers. The branch moves to the export of\nthe ref's head by compare-and-swap, and only once everything it reaches is durable. It runs\non the caller's host, as `git import` does: no server receives this request, and it is no MCP\ntool.",
+      "description": "`git export`: write the history behind a store ref into a branch of a git repository. Every\ncommit that the branch's last export does not reach is written, parents first: a changeset\nthat was imported from git keeps the commit it came from, and one made in the store becomes a\ncommit with its own signatures and `SwarmOps-*` trailers. The branch moves to the export of\nthe ref's head by compare-and-swap, and only once everything it reaches is durable. It runs\non the caller's host, as `git import` does: no server receives this request, and it is no MCP\ntool. It derives the export oids it compares the branch with, names as parents and moves the\nbranch to, and takes or refuses memos, as `git import` does: with the store's memo key, a\nmemo whose MAC checks stops the walk of the history below it.",
       "properties": {
         "branch": {
           "default": "main",
@@ -3994,7 +3994,7 @@ expression: s.redact(&all)
             },
             {
               "const": "paths",
-              "description": "A name that is not UTF-8, or is `.` or `..`: dropped.",
+              "description": "A name that is no path component: not UTF-8, `.`, `..`, empty, or holding a `/`:\ndropped.",
               "type": "string"
             },
             {
@@ -4021,7 +4021,7 @@ expression: s.redact(&all)
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "`git import`: bring a git repository's history into the store. Every commit that `git_ref`\nreaches and the store does not hold yet becomes a changeset, parents first, and\n`target_ref` moves to the changeset of `git_ref`'s commit. It runs on the caller's host, as\n`init` does: no server receives this request, and it is no MCP tool.",
+      "description": "`git import`: bring a git repository's history into the store. Every commit that `git_ref`\nreaches and the store does not hold yet becomes a changeset, parents first, and\n`target_ref` moves to the changeset of `git_ref`'s commit. It runs on the caller's host, as\n`init` does: no server receives this request, and it is no MCP tool. The git oids it takes\nfor the target's head, its trees and its blobs are derived from the store's objects, and\neach memo it meets is checked against them; with the store's memo key, which the CLI keeps\noutside the store, a memo whose MAC checks is taken, and nothing below it read. A memo that\ndisagrees, or whose MAC does not check, is `E_STORE_CORRUPT`, with nothing written.",
       "properties": {
         "git_path": {
           "description": "The git repository to read, on the caller's host: its directory, absolute or relative to\nthe caller's working directory (a bare repository, or a work tree with its `.git`). The\ncaller reads it; no store or server is ever asked to read a path.",
@@ -4034,7 +4034,7 @@ expression: s.redact(&all)
         },
         "lossy": {
           "default": [],
-          "description": "The classes of content the import may drop or normalize; a changeset that loses any\nnames them in its `git.lossy` metadata. Empty by default: a commit holding any class is\nrefused with `E_GIT_IMPORT_LOSSY`, which names the commit, the path and the class.",
+          "description": "The classes of content the import may drop or normalize; a changeset that loses any\nnames them in its `git.lossy` metadata. Empty by default: a commit the import converts\nthat holds any class is refused with `E_GIT_IMPORT_LOSSY`, which names the commit, the\npath and the class. A commit the store holds already is reused as it is, even one an\nearlier import took with a loss.",
           "items": {
             "$ref": "#/$defs/LossyClass"
           },
@@ -4064,7 +4064,7 @@ expression: s.redact(&all)
             },
             {
               "const": "paths",
-              "description": "A name that is not UTF-8, or is `.` or `..`: dropped.",
+              "description": "A name that is no path component: not UTF-8, `.`, `..`, empty, or holding a `/`:\ndropped.",
               "type": "string"
             },
             {
@@ -4228,7 +4228,7 @@ expression: s.redact(&all)
               "type": "integer"
             },
             "text": {
-              "description": "The lines' text; omitted when the report would pass its `max_conflict_bytes`\n(`truncated`).",
+              "description": "The lines' text; omitted from the first hunk whose texts would pass the report's\n`max_conflict_bytes`, and on the hunk that spans the first file's hunks past the\nreport's bound (`truncated`).",
               "type": [
                 "string",
                 "null"
@@ -4587,7 +4587,7 @@ expression: s.redact(&all)
         },
         "max_conflict_bytes": {
           "default": 32768,
-          "description": "The most bytes of hunk text an `E_CONFLICT` report carries: past it, the texts are left\nout (`truncated`), and the line positions and blob ids stay.",
+          "description": "The most bytes of hunk text an `E_CONFLICT` report carries: from the first hunk whose\ntexts would pass it, no hunk carries its texts (`truncated`), and the hunks' line\npositions and the blob ids stay. The report's files are bounded apart from it, as\n`ConflictReport.files` says.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -4650,7 +4650,7 @@ expression: s.redact(&all)
           "type": "integer"
         },
         "auto_merged": {
-          "description": "The paths both sides changed that merged cleanly. Omitted when empty.",
+          "description": "The paths both sides changed whose contents merged cleanly into a content neither side\nhad. Omitted when empty.",
           "items": {
             "type": "string"
           },
@@ -4795,7 +4795,7 @@ expression: s.redact(&all)
           "type": "integer"
         },
         "text": {
-          "description": "The lines' text; omitted when the report would pass its `max_conflict_bytes`\n(`truncated`).",
+          "description": "The lines' text; omitted from the first hunk whose texts would pass the report's\n`max_conflict_bytes`, and on the hunk that spans the first file's hunks past the\nreport's bound (`truncated`).",
           "type": [
             "string",
             "null"
@@ -4960,7 +4960,7 @@ expression: s.redact(&all)
         },
         {
           "const": "paths",
-          "description": "A name that is not UTF-8, or is `.` or `..`: dropped.",
+          "description": "A name that is no path component: not UTF-8, `.`, `..`, empty, or holding a `/`:\ndropped.",
           "type": "string"
         },
         {
@@ -4998,7 +4998,7 @@ expression: s.redact(&all)
             },
             {
               "const": "paths",
-              "description": "A name that is not UTF-8, or is `.` or `..`: dropped.",
+              "description": "A name that is no path component: not UTF-8, `.`, `..`, empty, or holding a `/`:\ndropped.",
               "type": "string"
             },
             {
@@ -6514,7 +6514,7 @@ expression: s.redact(&all)
       "description": "`rebase`: the changeset that holds the change merged onto the ref's head. Ids are full.",
       "properties": {
         "auto_merged": {
-          "description": "The paths both sides changed that merged cleanly. Omitted when empty.",
+          "description": "The paths both sides changed whose contents merged cleanly into a content neither side\nhad. Omitted when empty.",
           "items": {
             "type": "string"
           },
@@ -7069,7 +7069,7 @@ expression: s.redact(&all)
             },
             {
               "const": "paths",
-              "description": "A name that is not UTF-8, or is `.` or `..`: dropped.",
+              "description": "A name that is no path component: not UTF-8, `.`, `..`, empty, or holding a `/`:\ndropped.",
               "type": "string"
             },
             {
@@ -7168,7 +7168,7 @@ expression: s.redact(&all)
             },
             {
               "const": "paths",
-              "description": "A name that is not UTF-8, or is `.` or `..`: dropped.",
+              "description": "A name that is no path component: not UTF-8, `.`, `..`, empty, or holding a `/`:\ndropped.",
               "type": "string"
             },
             {
@@ -7255,7 +7255,7 @@ expression: s.redact(&all)
             },
             {
               "const": "paths",
-              "description": "A name that is not UTF-8, or is `.` or `..`: dropped.",
+              "description": "A name that is no path component: not UTF-8, `.`, `..`, empty, or holding a `/`:\ndropped.",
               "type": "string"
             },
             {
@@ -10311,7 +10311,7 @@ expression: s.redact(&all)
               "type": "integer"
             },
             "auto_merged": {
-              "description": "The paths both sides changed that merged cleanly. Omitted when empty.",
+              "description": "The paths both sides changed whose contents merged cleanly into a content neither side\nhad. Omitted when empty.",
               "items": {
                 "type": "string"
               },

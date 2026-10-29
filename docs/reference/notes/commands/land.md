@@ -58,13 +58,19 @@ as the other writers left it. `details.report` names:
   last changed it (`theirs_changeset`, `theirs_agent`);
 - `kinds`: `content` (the same or adjacent lines of a text file), `binary`, `delete_modify`,
   `modify_delete`, `add_add`, `mode` or `type_change`;
-- `auto_merged`, the paths both sides changed that merged cleanly.
+- `auto_merged`, the paths both sides changed whose contents merged cleanly into a content
+  neither side had.
 
-Hunks carry their texts until they pass `--max-conflict-bytes` (32,768 by default); past it the
-report sets `truncated` and leaves every text out, keeping the line positions and the blob ids,
-from which [`cat`](../../commands/cat.md) reads any side. With `--max-conflict-bytes 0` a report
-carries no hunk text. The error's hint is the `cat` of the first conflicting path at `theirs`, then
-the land again with `--resolve`.
+Hunks carry their texts while their sum stays within `--max-conflict-bytes` (32,768 by default):
+from the first hunk whose texts would pass it, no hunk carries its texts, and the report sets
+`truncated`. The hunks' line positions and the blob ids stay, from which
+[`cat`](../../commands/cat.md) reads any side. With `--max-conflict-bytes 0` a report carries no
+hunk text. The files are bounded apart from it, at 24 KiB of entries without their texts
+([conflict report entries](../../limits.md#conflict-report-entries)): the first file is always
+there, its hunks past the bound as one hunk that spans them, without texts; a later file that
+does not fit is left out, with every file after it, and `truncated` is set. The error's message
+counts every conflicting path. The error's hint is the `cat` of the first conflicting path at
+`theirs`, then the land again with `--resolve`.
 
 ### Resolving without a checkout
 

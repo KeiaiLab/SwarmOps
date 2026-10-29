@@ -511,7 +511,8 @@ operation like `init`, opens the repository at the path on the caller's host thr
 names, the ref move recorded for the caller's identity. It maps each failure to its code
 (`E_GIT_NOT_A_REPO`, `E_GIT_REF_NOT_FOUND`, `E_GIT_UNSUPPORTED`, `E_GIT_READ`,
 `E_GIT_IMPORT_LOSSY`, `E_GIT_IMPORT_DIVERGED`, `E_TOO_LARGE`, or the store failure's own, with how
-far the import got), and reports what its writes repaired in `meta.recovered`, as a commit does.
+far the import got), and reports what its writes repaired in `meta.recovered` when it succeeds
+(a commit reports it on `E_CAS_MISMATCH` too).
 
 ## Git export
 

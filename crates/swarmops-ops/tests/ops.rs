@@ -1820,8 +1820,8 @@ mod land {
     /// its kind, the blob each side holds there (none for a side without the file), the hunks of
     /// a text both sides edited (each side's lines from 1, both ends included, and their texts),
     /// and the newest changeset on main since the base that changed it, with its agent; the
-    /// kinds; and the paths both sides changed that merged cleanly. The hint reads the target's
-    /// side, then names the land with its resolutions.
+    /// kinds; and the paths both sides changed whose contents merged cleanly into a content
+    /// neither had. The hint reads the target's side, then names the land with its resolutions.
     #[test]
     fn a_conflicting_land_is_e_conflict_with_the_report() {
         let (_dir, _root, ops) = new_store();

@@ -437,7 +437,7 @@ Kind: enumeration. `swarmops schema ConflictKindOut` prints its JSON Schema.
 | `"modify_delete"` | The change changed the file, and the target deleted it. |
 | `"add_add"` | Both sides added the file, with contents that do not merge. |
 | `"mode"` | Both sides changed the file's kind (file, executable or symlink), differently. |
-| `"type_change"` | One side has a file where the other has a directory. |
+| `"type_change"` | One side has a file where the other has a directory, or the change deleted a file where the target made a directory. |
 
 ## ConflictReport
 
@@ -447,14 +447,14 @@ Kind: object. `swarmops schema ConflictReport` prints its JSON Schema.
 
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
-| `auto_merged` | array of `string` | no | The paths both sides changed that merged cleanly. Omitted when empty. |
+| `auto_merged` | array of `string` | no | The paths both sides changed whose contents merged cleanly into a content neither side had. Omitted when empty. |
 | `base` | `string` | yes | The merge base: the changeset the change starts from. |
-| `files` | array of [`FileConflictOut`](#fileconflictout) | yes | The files that conflict, by path. |
+| `files` | array of [`FileConflictOut`](#fileconflictout) | yes | The files that conflict, in path order, while their entries stay within 24 KiB as JSON, texts aside: the first file always, with at least its first hunk, its hunks past the bound as one hunk that spans them, without texts; a later file whole, or else left out with every file after it (`truncated`). The error's message counts every conflicting path. |
 | `kinds` | array of [`ConflictKindOut`](#conflictkindout) | yes | The kinds of conflict in `files`, each once. |
 | `ours` | `string` | yes | The change's head. |
 | `stale` | array of `string` | no | The paths whose resolutions did not apply, since the target holds there what their `against` did not: the target changed them after the report the resolutions answered. Read them at `theirs` and resolve them again, against it. Omitted when empty. |
 | `theirs` | `string` | yes | The target's head the change was merged with. |
-| `truncated` | `boolean` | yes | Whether hunk texts were left out to keep the report within the request's `max_conflict_bytes`; the line positions and blob ids are always there. |
+| `truncated` | `boolean` | yes | Whether the report left something out: hunk texts, to stay within the request's `max_conflict_bytes`, or files and hunks, to stay within the bound of `files`. |
 
 ## ContentEncoding
 
@@ -742,7 +742,7 @@ Kind: object. `swarmops schema FileConflictOut` prints its JSON Schema.
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
 | `base_blob` | `string` or `null` | no | Its blob at the merge base. |
-| `hunks` | array of [`HunkOut`](#hunkout) | no | The places where the two sides' edits of its lines meet, in file order: for a text file both sides edited (`content`, and `add_add` of two texts). Omitted when there are none. |
+| `hunks` | array of [`HunkOut`](#hunkout) | no | The places where the two sides' edits of its lines meet, in file order: for a text file both sides edited (`content` and `add_add`; contents not all text conflict as `binary`, with no hunks). Omitted when there are none. |
 | `kind` | [`ConflictKindOut`](#conflictkindout) | yes | What kind of conflict it is. |
 | `ours_blob` | `string` or `null` | no | Its blob in the change. |
 | `path` | `string` | yes | The file's repository path. |
@@ -777,10 +777,10 @@ Kind: object. `swarmops schema FileDiff` prints its JSON Schema.
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
 | `binary` | `boolean` or `null` | no | `stat` and `unified`: whether it is binary, which gets no line counts and no hunks: a side that is not UTF-8, or holds a NUL in its first 8,000 bytes. |
-| `deletions` | `integer` (uint64) or `null` | no | `stat` and `unified`, for text: the lines the change deletes. |
+| `deletions` | `integer` (uint64) or `null` | no | `stat` and `unified`, for text within the line diff's bound: the lines the change deletes. |
 | `hunks` | array of [`DiffHunk`](#diffhunk) or `null` | no | `unified`, for text: the hunks, in order; empty when only the exec bit or the kind changed. |
-| `hunks_truncated` | `boolean` or `null` | no | `unified`: true when `hunks` stops before the file's last hunk, to keep the page within `max_bytes`; omitted otherwise. `insertions` and `deletions` count every line all the same. |
-| `insertions` | `integer` (uint64) or `null` | no | `stat` and `unified`, for text: the lines the change inserts. |
+| `hunks_truncated` | `boolean` or `null` | no | `stat` and `unified`: true for text past the line diff's bound (49,152 lines or 8 MiB a side), which gets no `insertions`, `deletions` or hunks (`hunks` empty for `unified`); and for `unified`, when `hunks` stops before the file's last hunk, to keep the page within `max_bytes`, `insertions` and `deletions` counting every line all the same. Omitted otherwise. |
+| `insertions` | `integer` (uint64) or `null` | no | `stat` and `unified`, for text within the line diff's bound: the lines the change inserts. |
 | `new_blob` | `string` or `null` | no | `unified`: its blob id in `to`; omitted for a deleted file. |
 | `new_kind` | [`FileKind`](#filekind) or `null` | no | `unified`: its kind in `to`; omitted for a deleted file. |
 | `old_blob` | `string` or `null` | no | `unified`: its blob id in `from`; omitted for an added file. |
@@ -835,7 +835,7 @@ Kind: object. `swarmops schema GcResp` prints its JSON Schema.
 
 ## GitExportReq
 
-`git export`: write the history behind a store ref into a branch of a git repository. Every commit that the branch's last export does not reach is written, parents first: a changeset that was imported from git keeps the commit it came from, and one made in the store becomes a commit with its own signatures and `SwarmOps-*` trailers. The branch moves to the export of the ref's head by compare-and-swap, and only once everything it reaches is durable. It runs on the caller's host, as `git import` does: no server receives this request, and it is no MCP tool.
+`git export`: write the history behind a store ref into a branch of a git repository. Every commit that the branch's last export does not reach is written, parents first: a changeset that was imported from git keeps the commit it came from, and one made in the store becomes a commit with its own signatures and `SwarmOps-*` trailers. The branch moves to the export of the ref's head by compare-and-swap, and only once everything it reaches is durable. It runs on the caller's host, as `git import` does: no server receives this request, and it is no MCP tool. It derives the export oids it compares the branch with, names as parents and moves the branch to, and takes or refuses memos, as `git import` does: with the store's memo key, a memo whose MAC checks stops the walk of the history below it.
 
 Kind: object. `swarmops schema GitExportReq` prints its JSON Schema.
 
@@ -867,7 +867,7 @@ Kind: object. `swarmops schema GitExportResp` prints its JSON Schema.
 
 ## GitImportReq
 
-`git import`: bring a git repository's history into the store. Every commit that `git_ref` reaches and the store does not hold yet becomes a changeset, parents first, and `target_ref` moves to the changeset of `git_ref`'s commit. It runs on the caller's host, as `init` does: no server receives this request, and it is no MCP tool.
+`git import`: bring a git repository's history into the store. Every commit that `git_ref` reaches and the store does not hold yet becomes a changeset, parents first, and `target_ref` moves to the changeset of `git_ref`'s commit. It runs on the caller's host, as `init` does: no server receives this request, and it is no MCP tool. The git oids it takes for the target's head, its trees and its blobs are derived from the store's objects, and each memo it meets is checked against them; with the store's memo key, which the CLI keeps outside the store, a memo whose MAC checks is taken, and nothing below it read. A memo that disagrees, or whose MAC does not check, is `E_STORE_CORRUPT`, with nothing written.
 
 Kind: object. `swarmops schema GitImportReq` prints its JSON Schema.
 
@@ -875,7 +875,7 @@ Kind: object. `swarmops schema GitImportReq` prints its JSON Schema.
 | --- | --- | --- | --- |
 | `git_path` | `string` | yes | The git repository to read, on the caller's host: its directory, absolute or relative to the caller's working directory (a bare repository, or a work tree with its `.git`). The caller reads it; no store or server is ever asked to read a path. |
 | `git_ref` | `string` | no | The commit to import, with every commit it reaches: `HEAD` (the default), a ref name, short or full (`stable`, `refs/heads/stable`), looked up in git's order, or a commit id of 40 hex digits; a tag is peeled to its commit. There is no revision syntax such as `main~3`. Default: `"HEAD"`. |
-| `lossy` | array of [`LossyClass`](#lossyclass) | no | The classes of content the import may drop or normalize; a changeset that loses any names them in its `git.lossy` metadata. Empty by default: a commit holding any class is refused with `E_GIT_IMPORT_LOSSY`, which names the commit, the path and the class. Default: `[]`. |
+| `lossy` | array of [`LossyClass`](#lossyclass) | no | The classes of content the import may drop or normalize; a changeset that loses any names them in its `git.lossy` metadata. Empty by default: a commit the import converts that holds any class is refused with `E_GIT_IMPORT_LOSSY`, which names the commit, the path and the class. A commit the store holds already is reused as it is, even one an earlier import took with a loss. Default: `[]`. |
 | `target_ref` | `string` | no | The ref to move to that commit's changeset: `main` (the default) or `release/<name>`, created if it does not exist. If it does, its head must be the import of that commit or of an ancestor of it, and only the commits after that head are imported; any other head (the source was rewritten, or a native changeset was committed on the ref) is `E_GIT_IMPORT_DIVERGED`, and nothing is written. Default: `"main"`. |
 
 ## GitImportResp
@@ -990,7 +990,7 @@ Kind: object. `swarmops schema LandReq` prints its JSON Schema.
 | `head` | [`Rev`](#rev) | yes | The changeset to land: the change's head. |
 | `idempotency_key` | `string` or `null` | no | Makes a retry of this land safe: 1 to 64 letters, digits and `-`, such as a uuid v7. A land with a key first looks down the target's first parents, to `base`, for a changeset that landed with the same key: one squashed from this `head` is the replay, which writes nothing (`status` is `replayed`); one from another head is `E_INVALID_ARG`, a key used for another change. |
 | `max_attempts` | `integer` (uint32) | no | How many times to try to publish before failing with `E_CAS_RETRY_EXHAUSTED`: 1 to 32. Default: `8`. At least 1. At most 32. |
-| `max_conflict_bytes` | `integer` (uint64) | no | The most bytes of hunk text an `E_CONFLICT` report carries: past it, the texts are left out (`truncated`), and the line positions and blob ids stay. Default: `32768`. |
+| `max_conflict_bytes` | `integer` (uint64) | no | The most bytes of hunk text an `E_CONFLICT` report carries: from the first hunk whose texts would pass it, no hunk carries its texts (`truncated`), and the hunks' line positions and the blob ids stay. The report's files are bounded apart from it, as `ConflictReport.files` says. Default: `32768`. |
 | `message` | `string` or `null` | no | The landed changeset's message; `head`'s when omitted. |
 | `resolutions` | [`ResolutionsInput`](#resolutionsinput) or `null` | no | What to make of the paths an `E_CONFLICT` report named, decided without a checkout . Each resolution applies to its path while the target holds there what `against` held, whether the path conflicts or not; a path the target changed since is stale, and the land fails `E_CONFLICT` again, with a fresh report that names it in `stale`. Conflicts left unresolved fail it too. `swarmops mcp` refuses an `against` that is not a full 64-hex id (`E_INVALID_ARG`). |
 | `target` | `string` | no | The ref to land on: `main` or `release/<name>`, which must exist. Default: `"main"`. |
@@ -1004,7 +1004,7 @@ Kind: object. `swarmops schema LandResp` prints its JSON Schema.
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
 | `attempts` | `integer` (uint32) | yes | How many times the land tried to publish. |
-| `auto_merged` | array of `string` | no | The paths both sides changed that merged cleanly. Omitted when empty. |
+| `auto_merged` | array of `string` | no | The paths both sides changed whose contents merged cleanly into a content neither side had. Omitted when empty. |
 | `base` | `string` | yes | The changeset the change was taken from: what `head`'s first-parent chain added after it is what landed. |
 | `files_changed` | `integer` (uint64) | yes | How many paths the landed changeset changes. |
 | `landed` | `string` | yes | The landed changeset: the change squashed into one changeset on the target. |
@@ -1059,7 +1059,7 @@ Kind: object. `swarmops schema LinesOut` prints its JSON Schema.
 | --- | --- | --- | --- |
 | `first` | `integer` (uint64) | yes | The first line. |
 | `last` | `integer` (uint64) | yes | The last line; `first` minus one when the side has none. |
-| `text` | `string` or `null` | no | The lines' text; omitted when the report would pass its `max_conflict_bytes` (`truncated`). |
+| `text` | `string` or `null` | no | The lines' text; omitted from the first hunk whose texts would pass the report's `max_conflict_bytes`, and on the hunk that spans the first file's hunks past the report's bound (`truncated`). |
 
 ## LogCutOut
 
@@ -1106,7 +1106,7 @@ Kind: enumeration. `swarmops schema LossyClass` prints its JSON Schema.
 | Value | Description |
 | --- | --- |
 | `"gitlinks"` | A submodule's entry (git mode 160000): dropped. |
-| `"paths"` | A name that is not UTF-8, or is `.` or `..`: dropped. |
+| `"paths"` | A name that is no path component: not UTF-8, `.`, `..`, empty, or holding a `/`: dropped. |
 | `"modes"` | A mode written other than git's own `100644`, `100755`, `120000` and `40000`, such as `100664` or a zero-padded `040000`: a regular file's becomes a file or an executable by its owner's execute bit, and `040000` a directory. |
 | `"tree_order"` | A tree whose entries are not in git's order, or that names one entry twice: put in order, the first of a name kept. |
 | `"empty_trees"` | An entry naming an empty tree: dropped. |
@@ -1381,7 +1381,7 @@ Kind: object. `swarmops schema RebaseResp` prints its JSON Schema.
 
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
-| `auto_merged` | array of `string` | no | The paths both sides changed that merged cleanly. Omitted when empty. |
+| `auto_merged` | array of `string` | no | The paths both sides changed whose contents merged cleanly into a content neither side had. Omitted when empty. |
 | `base` | `string` | yes | The changeset the change was taken from. |
 | `changeset` | `string` | yes | The changeset that holds the result: the recorded one, `head` when it is up to date, the ref's head when the change was absorbed. |
 | `files_changed` | `integer` (uint64) | yes | How many paths `changeset` changes against `onto`. |
