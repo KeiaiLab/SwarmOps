@@ -338,7 +338,15 @@ impl GitSink for GixSink {
     }
 
     fn write_object(&mut self, kind: RawKind, bytes: &[u8]) -> Result<GitOid, SinkError> {
-        let oid = oid::git_hash(kind, bytes);
+        // Bytes git's collision detection flags are no object git reads: refused before a write.
+        let Some(oid) = oid::checked_hash(kind, bytes) else {
+            return Err(SinkError::Write {
+                what: self.files.named(&self.files.objects),
+                reason: format!(
+                    "git's collision detection flags the {kind}'s bytes as a SHA-1 collision attack"
+                ),
+            });
+        };
         let path = self.files.loose(oid);
         // gix writes nothing for an id it finds, a loose file of that name among them, so one
         // that does not read back as the object goes first. One that does is the object.
@@ -1055,4 +1063,31 @@ pub(crate) fn remove_stale_locks(git_dir: &Path, age: Duration) -> Result<Vec<St
         }
     }
     Ok(locks.into_iter().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Bytes git's collision detection flags are no object git reads: the sink refuses them
+    /// before it writes, and the repository holds them under no id.
+    #[test]
+    fn a_flagged_object_is_not_written() {
+        let dir = tempfile::tempdir().unwrap();
+        GixSink::create_bare(dir.path()).unwrap();
+        let mut sink = GixSink::open(dir.path()).unwrap();
+        let bytes = b"flagged\n";
+        let real = oid::git_hash(RawKind::Blob, bytes);
+        oid::flagged::flag(RawKind::Blob, bytes);
+
+        let got = sink.write_object(RawKind::Blob, bytes);
+        assert!(
+            matches!(&got, Err(SinkError::Write { what, reason })
+                if what == "objects" && reason.contains("collision detection")),
+            "{got:?}"
+        );
+        for oid in [real, GitOid::NULL] {
+            assert_eq!(sink.stored(oid), Ok(Stored::Absent), "{oid}");
+        }
+    }
 }

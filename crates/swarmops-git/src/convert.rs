@@ -27,7 +27,8 @@
 //! than 255 parents ([`ConvertError::Parents`]), a blob longer than an object holds
 //! ([`ConvertError::TooLarge`], before it is read), a commit or a tree longer than that
 //! ([`SourceError::TooLarge`], before it is read: each is read whole, to be parsed), bytes that
-//! are no commit or tree, or an object of another kind than its name says
+//! are no commit or tree, or an object of another kind than its name says, and a tree or a
+//! commit whose rendering git's collision detection flags as a SHA-1 collision attack
 //! ([`ConvertError::Malformed`]), and what the source cannot read ([`ConvertError::Source`]).
 //!
 //! The fidelity check. Each commit converted is rendered back, every tree with [`tree_bytes`] and
@@ -104,7 +105,8 @@ pub enum ConvertError {
     #[error(transparent)]
     Source(#[from] SourceError),
     /// An object is no commit or tree the conversion can read, or is of another kind than its
-    /// name says: a file's entry naming a tree, a commit's id a blob.
+    /// name says: a file's entry naming a tree, a commit's id a blob. Or a tree or a commit
+    /// converted with loss renders back to bytes git's collision detection flags.
     #[error("git object {oid} is malformed: {what}")]
     Malformed {
         /// The object.
@@ -382,7 +384,7 @@ impl<'s> Converter<'s> {
             &extra_headers,
             &message,
         );
-        if (oid::git_hash(RawKind::Commit, &bytes) == oid) != lossy.is_empty() {
+        if (rendered_oid(RawKind::Commit, &bytes, oid)? == oid) != lossy.is_empty() {
             return Err(ConvertError::Bug { commit: oid });
         }
         let mut metadata = Vec::with_capacity(2);
@@ -547,7 +549,7 @@ impl<'s> Converter<'s> {
         let memo = if kept.is_empty() {
             TreeMemo {
                 tree: None,
-                rendered: oid::git_hash(RawKind::Tree, &[]),
+                rendered: rendered_oid(RawKind::Tree, &[], oid)?,
                 classes,
             }
         } else {
@@ -562,7 +564,7 @@ impl<'s> Converter<'s> {
                 at.map_or(GitOid::NULL, |at| git[at])
             };
             let rendered = render::tree_bytes(&tree, child).ok_or(ConvertError::Bug { commit })?;
-            let rendered = oid::git_hash(RawKind::Tree, &rendered);
+            let rendered = rendered_oid(RawKind::Tree, &rendered, oid)?;
             let bytes = tree.encode();
             let id = TreeId::new(swarmops_core::hash_object(ObjectKind::Tree, &bytes));
             self.add_tree(pending, id, bytes);
@@ -826,6 +828,18 @@ fn signature(oid: GitOid, ident: RawIdent) -> Result<Signature, ConvertError> {
     })
 }
 
+/// The git oid of `bytes`, the git object `oid` rendered back as a `kind`.
+/// [`ConvertError::Malformed`] naming `oid` when git's collision detection flags the bytes as a
+/// SHA-1 collision attack: a conversion that loses something renders new bytes, which git
+/// would refuse to read, so the commit is refused rather than given an oid no object has.
+fn rendered_oid(kind: RawKind, bytes: &[u8], oid: GitOid) -> Result<GitOid, ConvertError> {
+    oid::checked_hash(kind, bytes).ok_or(ConvertError::Malformed {
+        oid,
+        what: "it renders back to bytes git's collision detection flags as a SHA-1 collision \
+               attack",
+    })
+}
+
 /// What in a commit's `raw` bytes git writes otherwise: the first line that `rendered`, what its
 /// fields render to, does not hold as it is.
 fn unlike(raw: &[u8], rendered: &[u8]) -> String {
@@ -875,6 +889,8 @@ fn at_path(path: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::ObjectFormat;
+
     use super::*;
 
     /// A mode's digits, and what they name.
@@ -983,5 +999,85 @@ mod tests {
             signature(GitOid::NULL, ident(3_600)),
             Err(ConvertError::Malformed { oid, .. }) if oid == GitOid::NULL
         ));
+    }
+
+    /// A source of the objects it holds, under the ids git gives them; it checks no bytes.
+    #[derive(Default)]
+    struct Held(HashMap<GitOid, (RawKind, Vec<u8>)>);
+
+    impl Held {
+        /// Holds the object of `kind` and `bytes`: its id.
+        fn hold(&mut self, kind: RawKind, bytes: Vec<u8>) -> GitOid {
+            let id = oid::git_hash(kind, &bytes);
+            self.0.insert(id, (kind, bytes));
+            id
+        }
+    }
+
+    impl GitSource for Held {
+        fn object_format(&self) -> ObjectFormat {
+            ObjectFormat::Sha1
+        }
+
+        fn resolve(&self, name: &str) -> Result<GitOid, SourceError> {
+            let name = name.to_owned();
+            Err(SourceError::RefNotFound { name })
+        }
+
+        fn header(&self, oid: GitOid) -> Result<(RawKind, u64), SourceError> {
+            let (kind, bytes) = self.read(oid)?;
+            Ok((kind, u64::try_from(bytes.len()).unwrap()))
+        }
+
+        fn read(&self, oid: GitOid) -> Result<(RawKind, Vec<u8>), SourceError> {
+            self.0
+                .get(&oid)
+                .cloned()
+                .ok_or(SourceError::Missing { oid })
+        }
+    }
+
+    /// A commit converted with loss renders anew, its tree and itself: where git's collision
+    /// detection flags either rendering, the commit is refused as malformed, naming the git
+    /// object that renders so, and nothing is appended.
+    #[test]
+    fn a_rendering_the_collision_detection_flags_is_refused() {
+        // 1. A file of mode `100664`, which the conversion takes as `100644` (`modes`).
+        let mut source = Held::default();
+        let blob = source.hold(RawKind::Blob, b"a\n".to_vec());
+        let tree = source.hold(RawKind::Tree, [b"100664 a\0".as_slice(), &blob.0].concat());
+        let raw = format!("tree {tree}\nauthor A <a> 1 +0000\ncommitter C <c> 1 +0000\n\nm\n");
+        let commit = source.hold(RawKind::Commit, raw.into_bytes());
+        let mut modes = LossySet::empty();
+        modes.insert(LossyClass::Modes);
+        let converted = Converter::new(&source, modes).commit(commit, &mut Vec::new());
+        let converted = converted.unwrap();
+        assert_eq!(converted.lossy, modes);
+
+        // 2. Its renderings: the tree with `100644`, and the commit over that tree.
+        let rendered_tree = [b"100644 a\0".as_slice(), &blob.0].concat();
+        let rendered_commit = render::commit_bytes(
+            oid::git_hash(RawKind::Tree, &rendered_tree),
+            &[],
+            &converted.author,
+            &converted.committer,
+            &converted.extra_headers,
+            &converted.message,
+        );
+
+        // 3. Each flagged in turn, the commit's first: each refused as its git object's.
+        for (kind, rendered, refused) in [
+            (RawKind::Commit, rendered_commit, commit),
+            (RawKind::Tree, rendered_tree, tree),
+        ] {
+            oid::flagged::flag(kind, &rendered);
+            let mut out = Vec::new();
+            let got = Converter::new(&source, modes).commit(commit, &mut out);
+            assert!(
+                matches!(got, Err(ConvertError::Malformed { oid, .. }) if oid == refused),
+                "{kind}: {got:?}"
+            );
+            assert!(out.is_empty(), "{kind}");
+        }
     }
 }

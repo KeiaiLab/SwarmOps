@@ -174,6 +174,10 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   entry's changeset id and requires a durable frame of `journal.log` (synced, or listed by any
   process) that records it. Before, it asked only that the bytes its own process wrote be
   durable, so an entry naming a changeset no durable frame held passed.
+- `git export` refuses a blob, tree or commit whose bytes git's collision detection flags as a
+  SHA-1 collision attack (`E_INTERNAL`, naming the object) before it memoizes an oid of it; it
+  memoized the zero oid and rendered it into trees and commits. `git import` refuses a commit
+  whose lossy rendering git would flag (`E_GIT_READ`, `malformed`) (issue #5 item 12).
 
 ## [0.6.0] - 2026-10-28
 

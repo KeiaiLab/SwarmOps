@@ -132,7 +132,47 @@ impl fmt::Display for RawKind {
 /// `"<kind> <len>\0"` followed by the bytes, by gix's SHA-1 (`gix::hash`, in the crate's one
 /// module that sees gix), which runs git's collision detection as git does. Bytes that detection
 /// flags as a SHA-1 collision attack, an object git refuses to read, get [`GitOid::NULL`], which
-/// no object has, so that a comparison with any object's id fails.
+/// no object has, so that a comparison with any object's id fails. What keeps or writes an id
+/// (the export's oids and their memos, [`GixSink`](crate::GixSink), the import's renderings)
+/// refuses such bytes instead.
 pub fn git_hash(kind: RawKind, bytes: &[u8]) -> GitOid {
-    crate::gix_source::object_sha1(kind, bytes).unwrap_or(GitOid::NULL)
+    checked_hash(kind, bytes).unwrap_or(GitOid::NULL)
+}
+
+/// [`git_hash`], `None` for bytes git's collision detection flags.
+pub(crate) fn checked_hash(kind: RawKind, bytes: &[u8]) -> Option<GitOid> {
+    #[cfg(test)]
+    if flagged::holds(kind, bytes) {
+        return None;
+    }
+    crate::gix_source::object_sha1(kind, bytes)
+}
+
+/// The objects the crate's unit tests have git's collision detection flag. No test can make
+/// bytes it flags: a collision attack's blocks hold only after the prefix they were computed
+/// for, and git's header `"<kind> <len>\0"` comes first here. So a test names the object, and
+/// [`checked_hash`] takes it as flagged, on that test's thread alone.
+#[cfg(test)]
+pub(crate) mod flagged {
+    use std::cell::RefCell;
+
+    use crate::RawKind;
+
+    thread_local! {
+        /// The objects flagged on this thread: their kinds and bytes.
+        static FLAGGED: RefCell<Vec<(RawKind, Vec<u8>)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Has [`checked_hash`](super::checked_hash) take the object of `kind` and `bytes` as
+    /// flagged, on this thread.
+    pub(crate) fn flag(kind: RawKind, bytes: &[u8]) {
+        FLAGGED.with(|flagged| flagged.borrow_mut().push((kind, bytes.to_vec())));
+    }
+
+    /// Whether the object of `kind` and `bytes` is flagged on this thread.
+    pub(super) fn holds(kind: RawKind, bytes: &[u8]) -> bool {
+        FLAGGED.with(|flagged| {
+            (flagged.borrow().iter()).any(|(of, held)| *of == kind && held.as_slice() == bytes)
+        })
+    }
 }

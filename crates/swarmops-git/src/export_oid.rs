@@ -17,7 +17,9 @@
 //! as value (`meta/derived/git_tree_oid/1/`, `meta/derived/git_blob_oid/1/`), so that a tree or a
 //! blob that many changesets share is hashed once; trees are walked with a stack of their own,
 //! never by recursion. As M2's engine does with its values, a memo whose put fails is dropped and
-//! the oid returned all the same; a read of the derived store that fails is the error.
+//! the oid returned all the same; a read of the derived store that fails is the error. A blob, a
+//! tree or a commit whose bytes git's collision detection flags as a SHA-1 collision attack has
+//! no oid: [`RepoError::Derived`], before any memo of it or of what holds it is written.
 //!
 //! Neither the export, the import nor a deep verify takes a `git_oid` memo as the truth: each
 //! derives every export oid it uses again, with the history below it, from the objects, the export
@@ -168,10 +170,8 @@ impl Derivation for ExportOid {
         let parents: Vec<GitOid> = parents.iter().map(ExportedOid::git_oid).collect();
         let cache = OidCache::new();
         let tree = real_tree_oid(ctx, &cache, subject.id, cs.root)?;
-        let oid = oid::git_hash(
-            RawKind::Commit,
-            &native::render_commit(subject.id, cs, &parents, tree),
-        );
+        let bytes = native::render_commit(subject.id, cs, &parents, tree);
+        let oid = hashed(RawKind::Commit, &bytes, ExportOid::NAME, subject.id.0)?;
         let kept = recorded.is_none_or(|hex| hex == oid.to_string().as_bytes());
         Ok(ExportedOid { oid: oid.0, kept })
     }
@@ -249,7 +249,8 @@ impl<O: ObjectStore> ExportObjects for ExportReader<'_, O> {
 /// tree in `objects`' derived store, as each of its blobs' is ([`blob_oid`]): a tree whose oid is
 /// memoized is not read. Walks the trees below `root` with a stack of its own, never by
 /// recursion. [`RepoError::MissingObject`] if the store lacks a tree or a blob it reads; a failed
-/// read of the derived store is [`RepoError::Store`].
+/// read of the derived store is [`RepoError::Store`]; bytes git's collision detection flags are
+/// [`RepoError::Derived`].
 ///
 /// [`tree_bytes`]: render::tree_bytes
 pub fn tree_oid(objects: &dyn ExportObjects, root: TreeId) -> Result<GitOid, RepoError> {
@@ -283,7 +284,7 @@ pub fn tree_oid(objects: &dyn ExportObjects, root: TreeId) -> Result<GitOid, Rep
                 let done = stack.pop().expect("the tree on top");
                 let bytes = render::tree_bytes(&done.tree, |entry| done.oid_of(entry))
                     .ok_or_else(|| unknown_variant("EntryTarget"))?;
-                let oid = oid::git_hash(RawKind::Tree, &bytes);
+                let oid = hashed(RawKind::Tree, &bytes, TREE_MEMO, done.id.0)?;
                 memoize(memo, TREE_MEMO, done.id.0, oid);
                 if stack.is_empty() {
                     return Ok(oid);
@@ -299,13 +300,13 @@ pub fn tree_oid(objects: &dyn ExportObjects, root: TreeId) -> Result<GitOid, Rep
 /// The git oid of blob `blob`, the hash of its bytes as a git blob, memoized per blob in
 /// `objects`' derived store: a blob whose oid is memoized is not read.
 /// [`RepoError::MissingObject`] if the store lacks it; a failed read of the derived store is
-/// [`RepoError::Store`].
+/// [`RepoError::Store`]; bytes git's collision detection flags are [`RepoError::Derived`].
 pub fn blob_oid(objects: &dyn ExportObjects, blob: BlobId) -> Result<GitOid, RepoError> {
     let memo = objects.memo();
     if let Some(oid) = memoized(memo, BLOB_MEMO, blob.0)? {
         return Ok(oid);
     }
-    let oid = oid::git_hash(RawKind::Blob, &objects.blob(blob)?);
+    let oid = hashed(RawKind::Blob, &objects.blob(blob)?, BLOB_MEMO, blob.0)?;
     memoize(memo, BLOB_MEMO, blob.0, oid);
     Ok(oid)
 }
@@ -491,7 +492,7 @@ fn blob_git_oid(
         cache.insert(blob.0, oid);
         return Ok(oid);
     }
-    let real = oid::git_hash(RawKind::Blob, &objects.blob(blob)?);
+    let real = hashed(RawKind::Blob, &objects.blob(blob)?, BLOB_MEMO, blob.0)?;
     memos.computed(objects, (BLOB_MEMO, BLOB_MAC_MEMO), blob.0, real)?;
     cache.insert(blob.0, real);
     Ok(real)
@@ -534,7 +535,7 @@ fn tree_git_oid(
                 let done = stack.pop().expect("the tree on top");
                 let bytes = render::tree_bytes(&done.tree, |entry| done.oid_of(entry))
                     .ok_or_else(|| unknown_variant("EntryTarget"))?;
-                let oid = oid::git_hash(RawKind::Tree, &bytes);
+                let oid = hashed(RawKind::Tree, &bytes, TREE_MEMO, done.id.0)?;
                 memos.computed(objects, (TREE_MEMO, TREE_MAC_MEMO), done.id.0, oid)?;
                 cache.insert(done.id.0, oid);
                 if stack.is_empty() {
@@ -722,6 +723,20 @@ fn memoized(
 /// and a later call computes it again.
 fn memoize(memo: &DerivedStore, name: &str, subject: ObjectId, oid: GitOid) {
     let _ = memo.put(&slot(name, subject), &oid.0);
+}
+
+/// The git oid of `bytes`, object `subject` rendered as a git `kind`, for memo `name`.
+/// [`RepoError::Derived`] when git's collision detection flags the bytes as a SHA-1 collision
+/// attack: git refuses to read such an object, so it has no oid to memoize or render into a
+/// tree or a commit.
+fn hashed(kind: RawKind, bytes: &[u8], name: &str, subject: ObjectId) -> Result<GitOid, RepoError> {
+    oid::checked_hash(kind, bytes).ok_or_else(|| RepoError::Derived {
+        name: name.to_owned(),
+        why: format!(
+            "git's collision detection flags the {kind} of object {subject} as a SHA-1 collision \
+             attack, an object git refuses to read"
+        ),
+    })
 }
 
 /// The [`RepoError`] of a [`DeriveError`] that a read of an object returned. Such a read never
@@ -1232,10 +1247,8 @@ impl ExportOids {
                 .map(|parent| parent.value.git_oid())
                 .collect();
             let tree = tree_git_oid(objects, cache, memos, cs.root)?;
-            let oid = oid::git_hash(
-                RawKind::Commit,
-                &native::render_commit(id, cs, &parents, tree),
-            );
+            let bytes = native::render_commit(id, cs, &parents, tree);
+            let oid = hashed(RawKind::Commit, &bytes, ExportOid::NAME, id.0)?;
             let kept = recorded.is_none_or(|hex| hex == oid.to_string().as_bytes());
             ExportedOid { oid: oid.0, kept }
         };
@@ -1332,5 +1345,144 @@ impl PendingChangeset {
             changeset: stored.changeset,
             parents,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fmt;
+
+    use swarmops_repo::LocalRepo;
+    use swarmops_testkit::repo::{blob, new_repo, put, request};
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::oid::flagged;
+
+    /// The content of the file the tests have git's collision detection flag.
+    const FLAGGED: &[u8] = b"flagged\n";
+
+    /// A store with [`ExportOid`] registered, holding one changeset that puts [`FLAGGED`] at
+    /// `f`: the store and the changeset.
+    fn flagged_store() -> (TempDir, LocalRepo, ChangesetId) {
+        let (dir, _, mut repo) = new_repo();
+        register(&mut repo).unwrap();
+        let id = repo
+            .commit(request(&[], vec![put("f", FLAGGED)], "f\n"))
+            .unwrap()
+            .id;
+        (dir, repo, id)
+    }
+
+    /// The memo `name` of `subject` under the slot key `key` (empty for a memo without a key),
+    /// if `repo`'s derived store holds one.
+    fn memo(repo: &LocalRepo, name: &str, subject: ObjectId, key: &[u8]) -> Option<Vec<u8>> {
+        let slot = DerivedSlot::new(name, 1, subject, key);
+        repo.derived_store().get(&slot).unwrap()
+    }
+
+    /// Checks that `got` is the refusal of an object git's collision detection flags, as memo
+    /// `name`'s.
+    #[track_caller]
+    fn refused<T: fmt::Debug>(got: Result<T, RepoError>, name: &str) {
+        match got {
+            Err(RepoError::Derived { name: of, why }) => {
+                assert_eq!(of, name, "{why}");
+                assert!(why.contains("collision detection"), "{why}");
+            }
+            other => panic!("a flagged object's oid as {name}'s: {other:?}"),
+        }
+    }
+
+    /// A blob git's collision detection flags has no git oid: each way of asking for its oid,
+    /// its tree's or its changeset's export oid refuses, and writes no memo, with a key or not.
+    #[test]
+    fn a_flagged_blob_has_no_oid_and_no_memo() {
+        let (_dir, repo, id) = flagged_store();
+        flagged::flag(RawKind::Blob, FLAGGED);
+        let read = repo.snapshot().unwrap();
+        let reader = ExportReader::new(&read, repo.derived_store());
+        let (file, root) = (
+            blob(FLAGGED),
+            read.changeset(id).unwrap().unwrap().changeset.root,
+        );
+        let key = MemoKey::from_bytes([1; 32]);
+
+        // 1. The blob's oid, memoized, checked against its memo, and under a key.
+        refused(blob_oid(&reader, file), BLOB_MEMO);
+        refused(
+            real_blob_oid(&reader, &OidCache::new(), id, file),
+            BLOB_MEMO,
+        );
+        let keyed = keyed_blob_oid(&reader, &OidCache::new(), (id, Some(&key)), file);
+        refused(keyed, BLOB_MEMO);
+
+        // 2. The tree that holds it, and the changeset's export oid, derived and re-derived.
+        refused(tree_oid(&reader, root), BLOB_MEMO);
+        refused(
+            real_tree_oid(&reader, &OidCache::new(), id, root),
+            BLOB_MEMO,
+        );
+        refused(repo.derived::<ExportOid>(id, &()), BLOB_MEMO);
+        let mut exports = ExportOids::new(OnMemo::Trusted(key.clone()));
+        refused(exports.of(&read, &reader, &OidCache::new(), id), BLOB_MEMO);
+
+        // 3. No memo of any of them.
+        for (name, subject) in [
+            (BLOB_MEMO, file.0),
+            (TREE_MEMO, root.0),
+            (ExportOid::NAME, id.0),
+        ] {
+            assert_eq!(memo(&repo, name, subject, &[]), None, "{name}");
+        }
+        for (name, subject) in [
+            (BLOB_MAC_MEMO, file.0),
+            (TREE_MAC_MEMO, root.0),
+            (EXPORT_MAC_MEMO, id.0),
+        ] {
+            assert_eq!(memo(&repo, name, subject, &key.id()), None, "{name}");
+        }
+    }
+
+    /// A tree whose rendering git's collision detection flags, and a commit whose rendering it
+    /// flags, have no git oid either: refused as the tree's and the changeset's, no memo written.
+    #[test]
+    fn a_flagged_tree_or_commit_has_no_oid_and_no_memo() {
+        let (_dir, repo, id) = flagged_store();
+        let read = repo.snapshot().unwrap();
+        let reader = ExportReader::new(&read, repo.derived_store());
+        let cs = read.changeset(id).unwrap().unwrap().changeset;
+        let tree = rendered_tree_oid(&reader, &OidCache::new(), cs.root).unwrap();
+        let commit = native::render_commit(id, &cs, &[], tree);
+
+        // 1. The commit's rendering: its export oid is refused, the tree's is not.
+        flagged::flag(RawKind::Commit, &commit);
+        refused(repo.derived::<ExportOid>(id, &()), ExportOid::NAME);
+        let mut exports = ExportOids::new(OnMemo::Check);
+        refused(
+            exports.of(&read, &reader, &OidCache::new(), id),
+            ExportOid::NAME,
+        );
+        assert_eq!(memo(&repo, ExportOid::NAME, id.0, &[]), None);
+        assert_eq!(tree_oid(&reader, cs.root).unwrap(), tree);
+
+        // 2. The tree's rendering, a store of its own: its oid is refused, memoized nowhere.
+        let (_dir, repo, id) = flagged_store();
+        let read = repo.snapshot().unwrap();
+        let reader = ExportReader::new(&read, repo.derived_store());
+        // The one file `f`, as git writes a tree.
+        let entry = [
+            b"100644 f\0".as_slice(),
+            &oid::git_hash(RawKind::Blob, FLAGGED).0,
+        ];
+        flagged::flag(RawKind::Tree, &entry.concat());
+        refused(tree_oid(&reader, cs.root), TREE_MEMO);
+        refused(
+            real_tree_oid(&reader, &OidCache::new(), id, cs.root),
+            TREE_MEMO,
+        );
+        refused(repo.derived::<ExportOid>(id, &()), TREE_MEMO);
+        assert_eq!(memo(&repo, TREE_MEMO, cs.root.0, &[]), None);
+        assert_eq!(memo(&repo, ExportOid::NAME, id.0, &[]), None);
     }
 }
