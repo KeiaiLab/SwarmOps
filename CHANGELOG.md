@@ -103,6 +103,11 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   commit point (`committed: true`, no `fs_op`), a source behind the target as
   `E_GIT_IMPORT_DIVERGED`, and 255 *distinct* parents for `E_GIT_UNSUPPORTED`; the concepts page
   says a `nonstandard` commit's unreadable date is kept as 0 seconds at `+0000`.
+- `just check-ci-slow` leaves out the four measurement cases on 12,000 commits
+  (`remote_perf::clone_cost_on_12000_commits` and `serve_perf`'s three), which ran into its
+  20-minute kill unoptimized and failed the weekly run; the new `just check-ci-perf` runs them
+  optimized, one at a time, in the weekly run's last job, under the heavy lock and the `ci-perf`
+  nextest profile (55-minute kill). `just check-slow` keeps them.
 
 ### Fixed
 

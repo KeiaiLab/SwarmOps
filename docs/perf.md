@@ -1521,3 +1521,14 @@ needs), the store's `rebase` 24–28 ms and the workspace's five syncs 16–18 m
 redundant work a change to `swarmops-ws` alone removes, so no fix; a bounded pool for the
 parallel stat (16.5 ms against 30–39 ms with 8 threads in one loaded run) is a lead for a later
 design.
+
+### The 12,000-commit cases' run times
+
+Each case's wall time in this window, optimized and one at a time (`--no-capture`), as `just perf`
+runs them: `remote_perf::clone_cost_on_12000_commits` 850.5 s (two imports of the history), and
+`serve_perf`'s `clone_against_git` 1,650.0 s, `noop_fetch_against_git` 1,643.0 s and
+`land_push_on_12000` 1,599.3 s (each one import and `serve.git`'s first refresh); 5,742.8 s in
+all. Unoptimized, in the weekly `just check-ci-slow` (the Scheduled run of 2026-10-28 on
+`c7baf861`), all four ran into the `ci-slow` profile's 20-minute kill. The weekly run now runs
+them optimized, last, in a job of their own (`just check-ci-perf`): its timeout is twice their sum
+plus the build, and the `ci-perf` profile kills a case after 55 minutes, twice the longest.

@@ -215,7 +215,8 @@ and binary code, and the page lists what review reads for and the recorded devia
 | Command | What it does |
 | --- | --- |
 | `just check-slow` | `PROPTEST_CASES=2000` and every ignored test except `regenerate_golden` (which rewrites the golden vectors) and the git fixtures' two switches (`regenerate_git_fixtures`, `check_git_fixtures`): the crash and I/O-error sweeps, the power-loss images at every cut (sampled in the two long stretches of its bulk transaction that repeat what the run checks at every step), the two 32-process contention measurements, long journal and index runs. It took 723 s at the end of M1, most of it the two contention runs, which run one after the other. |
-| `just check-ci-slow` | The regular suite at `PROPTEST_CASES=2000` plus every ignored test except `regenerate_golden`, the git fixtures' two switches and the two 32-process contention measurements, which are far too heavy for CI runners: what the weekly CI run does, under the `ci-slow` nextest profile. |
+| `just check-ci-slow` | The regular suite at `PROPTEST_CASES=2000` plus every ignored test except `regenerate_golden`, the git fixtures' two switches, the two 32-process contention measurements, which are far too heavy for CI runners, and the four measurement cases on 12,000 commits, which outlast its 20-minute kill unoptimized: what the weekly CI run does, under the `ci-slow` nextest profile. |
+| `just check-ci-perf` | Those four measurement cases (`remote_perf::clone_cost_on_12000_commits` and the three `serve_perf` cases), optimized and one at a time as `just perf` runs them, about 96 minutes: what the weekly CI run does last, under the heavy lock and the `ci-perf` nextest profile. They fail on what they ran, never on its time. |
 | `just perf` | The measurements `docs/perf.md` records, optimized: the store-level and the CLI-level 32 × 1,000 contention tests, then every store bench. It prints their summary lines; `target/perf/` keeps the full output. |
 | `just bench` | The criterion benches. |
 | `just fuzz [target]` | One cargo-fuzz target for 60 s on the nightly toolchain: `codec_roundtrip` (the default), `tree_decode`, `frame_decode`, `journal_recovery`, `object_file`, `frame2_decode`, `journal2_recovery` or `ref_file2`. It reads the tracked corpus as a seed and writes the new inputs it finds into `fuzz/corpus-new/<target>/`, which git ignores, so a run leaves the tree clean. |
@@ -245,15 +246,15 @@ self-hosted runners on the maintainers' host, labelled `swarmops-local`; a pull 
 fork runs on GitHub's `ubuntu-24.04` instead, so that the host never runs a stranger's code. The one check to look at is `tests-pass`: it passes only when every job
 it depends on passed. A weekly scheduled workflow runs `just check-ci-slow`, a 60-second fuzz
 smoke of every target, the `cargo deny`, format, lint and test commands of `bench/compare` (a
-cargo workspace of its own that `just check` does not build), the git version matrix and the
-round trip of this host's repositories.
+cargo workspace of its own that `just check` does not build), the git version matrix, the
+round trip of this host's repositories, the benchmark gate and, last, `just check-ci-perf`.
 Dependabot proposes grouped, weekly updates for Cargo and GitHub Actions, after a cooldown;
 review them like any other change.
 
-- **Hung tests are killed and named.** The `ci` nextest profile ends a test after 10 minutes and
-  the weekly `ci-slow` profile after 20; either way the test appears as a failure in the JUnit
-  report the run uploads, and a hanging fuzz input stops after 30 seconds with its reproducer
-  uploaded.
+- **Hung tests are killed and named.** The `ci` nextest profile ends a test after 10 minutes,
+  the weekly `ci-slow` profile after 20 and `ci-perf` after 55; either way the test appears as a
+  failure in the JUnit report the run uploads, and a hanging fuzz input stops after 30 seconds
+  with its reproducer uploaded.
 - **Tool versions are bumped by hand.** `just`, `cargo-nextest` and `cargo-deny` are pinned in
   the installer step of both workflows, `cargo-fuzz` in `scheduled.yml`'s `cargo install` step,
   each to a release at least 7 days old. Dependabot cannot bump them. The installer step
