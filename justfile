@@ -64,11 +64,25 @@ check-slow:
 # `check-slow` without the two 32-process contention measurements (`thirty_two_processes_*`),
 # which `just perf` runs: each takes minutes of fsync'd work on this host, and their assertions
 # (no `Busy`) assume a disk at most about a third slower than its own, far too heavy a load for a
-# 2-vCPU hosted runner. The crash sweeps and the other ignored
+# 2-vCPU hosted runner. Nor the four 12,000-commit measurement cases (`ci_perf_cases`), which
+# `check-ci-perf` runs optimized: unoptimized, each ran into the `ci-slow` profile's 20-minute
+# kill (the Scheduled run of 2026-10-28 on `c7baf861`). The crash sweeps and the other ignored
 # tests stay. CI runs it with `NEXTEST_PROFILE=ci-slow` (.config/nextest.toml).
-# The weekly CI slow suite (scheduled.yml): check-slow without the multi-process measurements.
+# The weekly CI slow suite (scheduled.yml): check-slow without the multi-process and 12,000-commit cases.
 check-ci-slow:
-    PROPTEST_CASES=2000 cargo nextest run --locked --workspace --all-features --run-ignored all -E 'not test(regenerate_golden) and not test(regenerate_git_fixtures) and not test(check_git_fixtures) and not test(thirty_two_processes)'
+    PROPTEST_CASES=2000 cargo nextest run --locked --workspace --all-features --run-ignored all -E 'not test(regenerate_golden) and not test(regenerate_git_fixtures) and not test(check_git_fixtures) and not test(thirty_two_processes) and not ({{ ci_perf_cases }})'
+
+# The measurement cases that import 12,000 commits: `remote_perf`'s clone cost and `serve_perf`'s
+# three cases. `check-ci-slow` leaves them out, `check-ci-perf` runs them, `check-slow` keeps them.
+ci_perf_cases := 'test(=remote_perf::clone_cost_on_12000_commits) | test(/^serve_perf::/)'
+
+# `ci_perf_cases` optimized and one at a time (`--no-capture`), as `perf` runs them, printing their
+# `remote-perf: ` and `serve-perf: ` lines. They assert what they ran, never its time. Measured
+# 850.5 s and 1,599.3 to 1,650.0 s each, 5,742.8 s in all (docs/perf.md, "v0.7.0"). No match fails.
+# scheduled.yml runs it weekly under the heavy lock, with `NEXTEST_PROFILE=ci-perf`.
+# The weekly CI measurement cases (scheduled.yml): what check-ci-slow leaves out, optimized.
+check-ci-perf:
+    cargo nextest run --locked --release --workspace --all-features --run-ignored all --no-tests=fail -E '{{ ci_perf_cases }}' --no-capture
 
 # The git fixtures (crates/swarmops-testkit/git-fixtures/): every script run again by the git
 # that git-fixtures/GIT_VERSION declares (`SWARMOPS_GIT` names the binary; any other version is

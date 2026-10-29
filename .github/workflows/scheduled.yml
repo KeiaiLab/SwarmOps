@@ -1,19 +1,20 @@
 # What is too slow for every push, weekly and on demand: `just check-ci-slow` (the regular suite
 # at 2,000 proptest cases plus the ignored slow tests, crash sweeps included, without the
-# 32-process contention measurements), a 60-second fuzz smoke of every fuzz target on nightly,
-# the cargo-deny check, formatting, lints and tests of bench/compare, a workspace of its own
+# 32-process contention measurements and the 12,000-commit measurement cases), a 60-second fuzz
+# smoke of every fuzz target on nightly, the cargo-deny check, formatting, lints and tests of bench/compare, a workspace of its own
 # that `just check` does not build, and the git version matrix, which rebuilds the git fixtures
 # with three gits, runs the git import's tests on what each made, has each check the git
 # export's repositories with `git fsck`, and runs the remote suites (fetch, push, sync over smart
 # HTTP and ssh) with each; the round trip of mirrors of this host's repositories; the live
 # run with GitHub, once a repository variable names its
-# scratch repository; and, last and alone, the benchmark gate. Hardened as ci.yml is, and run where it runs: on the maintainers' own host,
+# scratch repository; alone, the benchmark gate; and, last and alone, those measurement cases,
+# optimized. Hardened as ci.yml is, and run where it runs: on the maintainers' own host,
 # through the self-hosted runners labelled `swarmops-local`, each building into its runner's
 # persistent CARGO_TARGET_DIR, so no build cache travels through GitHub.
 # `just check-ci-slow` runs first and alone: its runners share one host, and next to the git
-# matrix and the fuzz smoke (load 319 on 32 cores) clone_cost_on_12000_commits ran into its
-# 20-minute kill: 1,048 s within the suite the run before, 721 s by itself. The other jobs wait
-# for it, pass or fail.
+# matrix and the fuzz smoke (load 319 on 32 cores) clone_cost_on_12000_commits, in the suite
+# then, ran into its 20-minute kill: 1,048 s within the suite the run before, 721 s by itself.
+# The other jobs wait for it, pass or fail.
 # The git matrix alone runs in a container on that host, so that it needs none of its packages.
 name: Scheduled
 
@@ -392,8 +393,8 @@ jobs:
             -E 'test(=github_live::round_trip_with_github)' --no-capture
 
   # The benchmark gate (`just bench`): every criterion bench, its median against
-  # bench/thresholds.toml, red on a regression over 20 % (scripts/bench-gate.py). Last and alone:
-  # the other jobs share this host and reach load 319 together, which no 20 % threshold survives,
+  # bench/thresholds.toml, red on a regression over 20 % (scripts/bench-gate.py). Alone, before the
+  # measurement cases: the other jobs share this host and reach load 319 together, which no 20 % threshold survives,
   # and the heavy lock serializes the host's measurements, not CI jobs. `!cancelled()` runs it
   # after a failed or skipped job too (github-live is skipped without its variable). A missing
   # lock directory fails the job; the load average before and after is printed, and a loaded run
@@ -448,6 +449,71 @@ jobs:
         with:
           name: criterion
           path: target/criterion/
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 14
+
+  # The measurement cases that `just check-ci-slow` leaves out (`just check-ci-perf`): the clone
+  # cost on 12,000 commits and `serve_perf`'s three cases, each importing 12,000 commits.
+  # Unoptimized, in the slow suite, each ran into the ci-slow profile's 20-minute kill; optimized
+  # and one at a time, as `just perf` runs them, they took 5,743 s in all, the longest 1,650 s
+  # (docs/perf.md, "v0.7.0"). They fail on what they ran, never on its time. Last and alone, after
+  # the bench gate, and under the heavy lock as it is: the bench gate runs where it did, and
+  # neither waits for the lock the other holds. `!cancelled()` runs it after a failed bench gate
+  # too. A wait for a lock that a measurement outside CI holds counts against the timeout, as it
+  # does for the bench gate. The `ci-perf` profile kills a hung case after 55 minutes and names
+  # it in the JUnit report, which is uploaded.
+  perf-cases:
+    name: measurement cases
+    needs: bench-gate
+    if: ${{ !cancelled() }}
+    runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
+    permissions:
+      contents: read
+    # Twice the cases' 5,743 s (191 minutes), plus 5 for the optimized build (62 s cold on this
+    # host at load 650), rounded up to 5 minutes.
+    timeout-minutes: 200
+    env:
+      CARGO_TERM_COLOR: always
+      HEAVY_LOCK: /data/swarmops/locks/heavy.lock
+      NEXTEST_PROFILE: ci-perf
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        with:
+          tool: just@1.58.0,cargo-nextest@0.9.146
+          fallback: none
+      - name: Check that the heavy lock's directory is there
+        run: |
+          if [ ! -d "$(dirname "$HEAVY_LOCK")" ]; then
+            echo "::error::the runner's host lacks $(dirname "$HEAVY_LOCK")"
+            exit 1
+          fi
+      - name: Load average before
+        run: cut -d' ' -f1-3 /proc/loadavg
+      - name: Run the cases under the heavy lock
+        run: flock "$HEAVY_LOCK" just check-ci-perf
+      - name: Load average after
+        if: ${{ !cancelled() }}
+        run: cut -d' ' -f1-3 /proc/loadavg
+      # The runner builds into its own CARGO_TARGET_DIR: bring the report to target/.
+      - name: Collect the JUnit report
+        if: ${{ !cancelled() }}
+        run: |
+          if [ -n "${CARGO_TARGET_DIR:-}" ] && [ -f "$CARGO_TARGET_DIR/nextest/ci-perf/junit.xml" ]; then
+            mkdir -p target/nextest/ci-perf
+            cp "$CARGO_TARGET_DIR/nextest/ci-perf/junit.xml" target/nextest/ci-perf/
+          fi
+      - name: Upload the JUnit report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: junit-perf
+          path: target/nextest/ci-perf/junit.xml
           if-no-files-found: ignore
           overwrite: true
           retention-days: 14
