@@ -763,8 +763,9 @@ fn unknown_variant(ty: &str) -> RepoError {
 /// one of them under a memo key: `git_tree_oid_mac`, `git_blob_oid_mac`, `git_oid_mac`) that is
 /// not the one the store's own objects give, as a deep verify re-derives it
 /// ([`verify_export_oids`]), or, given the key, a memo under it whose MAC does not check
-/// ([`verify_export_oids_with`]): a file someone placed in the store, or a cache a faulty build
-/// wrote. Removing the file, or all of `meta/derived/`, has it derived again.
+/// ([`verify_export_oids_with`]), or a memo the export refuses as malformed
+/// ([`verify_export_oids`]): a file someone placed in the store, or a cache a faulty build wrote.
+/// Removing the file, or all of `meta/derived/`, has it derived again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct GitMemoMismatch {
@@ -777,7 +778,8 @@ pub struct GitMemoMismatch {
     /// The memo's slot key: the id of the key a `_mac` memo was made under
     /// ([`MemoKey::id`]); empty for the others.
     pub key: Vec<u8>,
-    /// The git oid the memo holds.
+    /// The git oid the memo holds: its first 20 bytes, [`GitOid::NULL`] for a memo shorter than
+    /// an oid.
     pub stored: GitOid,
     /// The git oid the store's own objects give.
     pub real: GitOid,
@@ -789,9 +791,12 @@ pub struct GitMemoMismatch {
 /// every changeset, rendered over oids recomputed that way. A deep `verify` calls this (storage
 /// spec §5, §7), so that a crafted or torn git memo is found as the other derived values' are; it
 /// reads no `meta/derived/` memo as the truth and writes none (unlike an export, it reports every
-/// mismatch rather than refusing at the first). A memo about an object the store lacks, or that
-/// does not decode, is passed over (the deep verify reports the missing or corrupt object on its
-/// own). [`RepoError`] only where a read cannot go on.
+/// mismatch rather than refusing at the first). A memo the export refuses as malformed is
+/// reported too: a tree's or a blob's of another length than an oid's, and one under a key, any
+/// key, of another length or whose `kept` or `imported` byte is neither 0 nor 1. A memo about an
+/// object the store lacks is passed over (the deep verify reports the missing or corrupt object
+/// on its own), as is a `git_oid` memo of another length, which the export passes over too.
+/// [`RepoError`] only where a read cannot go on.
 pub fn verify_export_oids<O: ObjectStore>(
     repo: &Repo<O>,
 ) -> Result<Vec<GitMemoMismatch>, RepoError> {
@@ -820,7 +825,7 @@ pub fn verify_export_oids_with<O: ObjectStore>(
     for (name, is_tree) in [(BLOB_MEMO, false), (TREE_MEMO, true)] {
         for listed in store.list(name, MEMO_VERSION)? {
             let subject = listed.subject;
-            let Some(stored) = listed_oid(store, name, subject)? else {
+            let Some((stored, whole)) = listed_oid(store, name, subject)? else {
                 continue;
             };
             let recomputed = if is_tree {
@@ -829,7 +834,7 @@ pub fn verify_export_oids_with<O: ObjectStore>(
                 blob_git_oid(&reader, &cache, Memos::Recompute, BlobId::new(subject))
             };
             if let Ok(got) = recomputed
-                && got != stored
+                && (got != stored || !whole)
             {
                 found.push(GitMemoMismatch {
                     memo: name.to_owned(),
@@ -871,9 +876,7 @@ pub fn verify_export_oids_with<O: ObjectStore>(
     };
     for (name, is_tree) in [(BLOB_MAC_MEMO, false), (TREE_MAC_MEMO, true)] {
         for (subject, slot_key, value) in macs.listed(name)? {
-            let Some(stored) = macs.oid(name, subject, &slot_key, &value) else {
-                continue;
-            };
+            let stored = macs.oid(name, subject, &slot_key, &value);
             let recomputed = if is_tree {
                 tree_git_oid(&reader, &cache, Memos::Recompute, TreeId::new(subject))
             } else {
@@ -893,19 +896,19 @@ pub fn verify_export_oids_with<O: ObjectStore>(
         }
     }
     for (subject, slot_key, value) in macs.listed(EXPORT_MAC_MEMO)? {
-        let Some(stored) = decode_export_mac(&value) else {
-            continue;
-        };
-        let checks = macs.checks(EXPORT_MAC_MEMO, subject, &slot_key, &value);
+        // One that does not decode, which the export refuses as one whose MAC does not check,
+        // is reported under any key.
+        let stored = decode_export_mac(&value);
+        let checks = stored.is_some() && macs.checks(EXPORT_MAC_MEMO, subject, &slot_key, &value);
         let id = ChangesetId::new(subject);
         if let Ok(got) = expected.known(&snapshot, &reader, &cache, id)
-            && (got != stored || !checks)
+            && (stored != Some(got) || !checks)
         {
             found.push(GitMemoMismatch {
                 memo: EXPORT_MAC_MEMO.to_owned(),
                 subject,
                 key: slot_key,
-                stored: stored.value.git_oid(),
+                stored: held_oid(&value),
                 real: got.value.git_oid(),
             });
         }
@@ -950,20 +953,13 @@ impl MacCheck<'_> {
         key.checks(name, subject, &value[..at], &value[at..])
     }
 
-    /// The oid a tree or blob memo of `value` holds, and whether its MAC checks
-    /// ([`MacCheck::checks`]); `None` for a value of another length.
-    fn oid(
-        &self,
-        name: &str,
-        subject: ObjectId,
-        slot_key: &[u8],
-        value: &[u8],
-    ) -> Option<(GitOid, bool)> {
-        if value.len() != OID_MAC_MEMO_LEN {
-            return None;
-        }
-        let oid = <[u8; 20]>::try_from(&value[..20]).expect("20 bytes of 52");
-        Some((GitOid(oid), self.checks(name, subject, slot_key, value)))
+    /// The oid a tree or blob memo of `value` holds ([`held_oid`]), and whether it checks: its
+    /// length, which the export refuses otherwise under any key, and its MAC
+    /// ([`MacCheck::checks`]).
+    fn oid(&self, name: &str, subject: ObjectId, slot_key: &[u8], value: &[u8]) -> (GitOid, bool) {
+        let whole = value.len() == OID_MAC_MEMO_LEN;
+        let checks = whole && self.checks(name, subject, slot_key, value);
+        (held_oid(value), checks)
     }
 }
 
@@ -1016,18 +1012,26 @@ pub fn verify_external_ids<O: ObjectStore>(
     Ok(found)
 }
 
-/// The git oid a `git_tree_oid`/`git_blob_oid` memo (key `()`) holds for `subject`, if the store
-/// has one of an oid's 20 bytes; `None` for none, or a value of another length (a deep verify
-/// reports a torn or malformed value no further).
+/// The git oid a `git_tree_oid`/`git_blob_oid` memo (key `()`) holds for `subject`
+/// ([`held_oid`]), and whether it is whole, an oid's 20 bytes, as the export requires; `None`
+/// if the store has none.
 fn listed_oid(
     store: &DerivedStore,
     name: &str,
     subject: ObjectId,
-) -> Result<Option<GitOid>, RepoError> {
+) -> Result<Option<(GitOid, bool)>, RepoError> {
     let Some(value) = store.get(&slot(name, subject))? else {
         return Ok(None);
     };
-    Ok(<[u8; 20]>::try_from(value.as_slice()).ok().map(GitOid))
+    Ok(Some((held_oid(&value), value.len() == 20)))
+}
+
+/// The git oid a memo's value starts with, its first 20 bytes: what a deep verify reports a memo
+/// holds, whole or not. [`GitOid::NULL`], git's "no object", for a value shorter than an oid.
+fn held_oid(value: &[u8]) -> GitOid {
+    value
+        .first_chunk::<20>()
+        .map_or(GitOid::NULL, |oid| GitOid(*oid))
 }
 
 /// The [`ExportedOid`] a `git_oid` memo holds for changeset `id`, as its 21 bytes record it (the

@@ -178,6 +178,11 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   SHA-1 collision attack (`E_INTERNAL`, naming the object) before it memoizes an oid of it; it
   memoized the zero oid and rendered it into trees and commits. `git import` refuses a commit
   whose lossy rendering git would flag (`E_GIT_READ`, `malformed`) (issue #5 item 12).
+- `verify --deep` reports as `derived_mismatch` each git memo that `git export` refuses as
+  malformed: a `_mac` memo of another length, or whose `kept` or `imported` byte is neither 0
+  nor 1, under any memo key, and a `git_tree_oid` or `git_blob_oid` of another length than an
+  oid's. It passed over them, so a store could fail `git export` yet verify clean, and `repair`,
+  which drops them, went unasked (issue #21 item D1).
 
 ## [0.6.0] - 2026-10-28
 

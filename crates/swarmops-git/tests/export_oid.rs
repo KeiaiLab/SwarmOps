@@ -13,8 +13,9 @@ use swarmops_core::{
     Changeset, ChangesetId, LeafKind, ObjectId, ObjectKind, Signature, Tree, TreeEntry,
 };
 use swarmops_git::{
-    ExportOid, ExportReader, ExportedOid, GitOid, RawKind, TRAILERS, blob_oid, commit_bytes,
-    export_message, git_hash, register, render_commit, tree_oid,
+    ExportOid, ExportReader, ExportedOid, GitOid, MemoKey, RawKind, TRAILERS, blob_oid,
+    commit_bytes, export_message, git_hash, register, render_commit, tree_oid, verify_export_oids,
+    verify_export_oids_with,
 };
 use swarmops_repo::{Change, LocalRepo, RepoError};
 use swarmops_store::DerivedSlot;
@@ -631,4 +632,107 @@ fn export_oids_are_derived_once_registered() {
         panic!("ExportOid registered twice");
     };
     assert_eq!(name, "git_oid");
+}
+
+/// A memo a test places: its derivation name, its subject, its slot key, its value, and the git
+/// oid a deep verify reports it holds.
+type Planted<'a> = (&'a str, ObjectId, &'a [u8], Vec<u8>, GitOid);
+
+/// A deep verify reports each memo the export refuses as malformed, given a key or not and under
+/// any key, so that `repair` drops it (issue #21 item D1): a `_mac` memo of another length, or
+/// whose `kept` or `imported` byte is neither 0 nor 1, and a tree or blob memo of another length
+/// than an oid's. Its stored oid is the memo's first 20 bytes, or none for a shorter one.
+#[test]
+fn verify_reports_a_malformed_memo() {
+    let (_dir, repo) = registered();
+    let id = commit(&repo, &[], vec![put("a", b"a\n")], "a\n", &[]);
+    let cs = changeset(&repo, id);
+
+    // 1. The oids the objects give, worked out apart from the store.
+    let file = git_blob(b"a\n");
+    let tree = git_tree(&[("100644", "a", file)]);
+    let head = git_hash(RawKind::Commit, &render_commit(id, &cs, &[], tree));
+    let real = |name: &str| match name {
+        "git_oid_mac" => head,
+        "git_tree_oid" | "git_tree_oid_mac" => tree,
+        _ => file,
+    };
+
+    // 2. Each memo malformed, its oid right, so that only its shape is wrong: by name, subject,
+    // slot key, value, and the oid a report says it holds.
+    let (one, two) = (MemoKey::from_bytes([1; 32]), MemoKey::from_bytes([2; 32]));
+    let (one_id, two_id) = (one.id(), two.id());
+    let (root, a) = (cs.root.0, blob(b"a\n").0);
+    let malformed: [Planted<'_>; 6] = [
+        // 53 bytes, one short of a `git_oid_mac`.
+        (
+            "git_oid_mac",
+            id.0,
+            &one_id,
+            [&head.0[..], &[1, 0], &[0; 31]].concat(),
+            head,
+        ),
+        // 54 bytes, `kept` 2.
+        (
+            "git_oid_mac",
+            id.0,
+            &two_id,
+            [&head.0[..], &[2, 0], &[0; 32]].concat(),
+            head,
+        ),
+        // 53 and 51 bytes, where an oid and a MAC are 52.
+        (
+            "git_tree_oid_mac",
+            root,
+            &one_id,
+            [&tree.0[..], &[0; 33]].concat(),
+            tree,
+        ),
+        (
+            "git_blob_oid_mac",
+            a,
+            &two_id,
+            [&file.0[..], &[0; 31]].concat(),
+            file,
+        ),
+        // 21 and 19 bytes, where an oid is 20.
+        (
+            "git_tree_oid",
+            root,
+            &[],
+            [&tree.0[..], &[0]].concat(),
+            tree,
+        ),
+        ("git_blob_oid", a, &[], file.0[..19].to_vec(), GitOid::NULL),
+    ];
+    for (name, subject, key, value, _) in &malformed {
+        let slot = DerivedSlot::new(name, 1, *subject, key);
+        assert!(repo.derived_store().put(&slot, value).unwrap(), "{name}");
+    }
+
+    // 3. Each reported, without a key and with either: its memo, subject, slot key, the oid it
+    // holds and the one the objects give.
+    let mut expected: Vec<_> = (malformed.iter())
+        .map(|(name, subject, key, _, stored)| {
+            (
+                name.to_string(),
+                *subject,
+                key.to_vec(),
+                *stored,
+                real(name),
+            )
+        })
+        .collect();
+    expected.sort();
+    for found in [
+        verify_export_oids(&repo),
+        verify_export_oids_with(&repo, Some(&one)),
+        verify_export_oids_with(&repo, Some(&two)),
+    ] {
+        let mut got: Vec<_> = (found.unwrap().into_iter())
+            .map(|m| (m.memo, m.subject, m.key, m.stored, m.real))
+            .collect();
+        got.sort();
+        assert_eq!(got, expected);
+    }
 }
