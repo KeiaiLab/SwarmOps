@@ -10,7 +10,8 @@
 //!   ([`request`]), onto two stores ([`Onto`]): a fresh one (three frames, then `main` created),
 //!   and one that holds `older`, `newer`'s first three commits, with `main` at its tip (two frames
 //!   from that base, then `main` moved on). Each frame's external ids follow it, and the
-//!   metadata's flush, the target's move and the flush after it end the import.
+//!   metadata's flush, the target's move and the flush after it end the import. Each store is
+//!   made in every format a create writes ([`INIT_FORMATS`]), so each sweep runs on each.
 //! - A dry run counts the import's filesystem calls, its store's opening included
 //!   (`SWARMOPS_TEST_FS_CALLS`). Each run then imports in a child process, this test binary run
 //!   again ([`import_as_child`]), on a copy of the sweep's store, its k-th call crashing or failing
@@ -28,10 +29,11 @@
 //!   ids the crash left out.
 //! - The default gate takes every fifth call, with the last two, and fails them onto the fresh
 //!   store alone; the ignored variants take every call, onto both. A failure sweep also fails
-//!   every fifth call persistently, with `ENOSPC`.
+//!   every fifth call persistently, with `ENOSPC`. Both formats, in the default gate too.
 //!
 //! The git export's crash and failure sweeps at its git-side calls (the M8 plan's Review Focus
-//! 3) are the module `export` below; `swarmops-cli`'s `tests/git.rs` sweeps its store calls.
+//! 3) are the module `export` below, from a store of each format; `swarmops-cli`'s
+//! `tests/git.rs` sweeps its store calls.
 //!
 //! Each run owns its temp dirs, and the tests share nothing.
 
@@ -51,8 +53,8 @@ use swarmops_git::{GitOid, GixSource, ImportError, ImportReport, ImportRequest, 
 use swarmops_repo::{Depth, LocalRepo};
 use swarmops_store::external_ids::lower_hex;
 use swarmops_store::{
-    CRASH_AT_ENV, ExternalEntry, ExternalIds, FAIL_AT_ENV, FS_CALLS_ENV, Frame, Journal,
-    ORDER_CHECK_ENV, RealFs, Record, SYSTEM_GIT,
+    CRASH_AT_ENV, ExternalEntry, ExternalIds, FAIL_AT_ENV, FS_CALLS_ENV, Frame, INIT_FORMATS,
+    Journal, ORDER_CHECK_ENV, RealFs, Record, SYSTEM_GIT, StoreFormat,
 };
 use swarmops_testkit::child::{Child, SIGABRT, run, this_test};
 use swarmops_testkit::faults::checked;
@@ -119,6 +121,18 @@ fn utf8(path: PathBuf) -> Utf8PathBuf {
 /// The repository at `path`, read through gix.
 fn open(path: &Path) -> GixSource {
     GixSource::open(path).unwrap_or_else(|error| panic!("open {}: {error}", path.display()))
+}
+
+/// Each format a create writes ([`INIT_FORMATS`]) with each of `starts`: what the sweeps run on.
+fn grounds<O: Copy>(starts: &[O]) -> Vec<(StoreFormat, O)> {
+    (INIT_FORMATS.iter())
+        .flat_map(|&format| starts.iter().map(move |&onto| (format, onto)))
+        .collect()
+}
+
+/// How a sweep's messages name what it runs on: `FORMAT 1, onto Fresh`, say.
+fn ground(format: StoreFormat, onto: impl std::fmt::Debug) -> String {
+    format!("FORMAT {}, onto {onto:?}", format.version())
 }
 
 /// What a sweep's import starts from.
@@ -344,6 +358,8 @@ fn copy(template: &Utf8Path) -> (TempDir, Utf8PathBuf) {
 struct Sweep {
     /// The test whose children import ([`import_as_child`]).
     test: &'static str,
+    /// The store's format.
+    format: StoreFormat,
     /// What the import starts from.
     onto: Onto,
     /// `refs`, which holds `source`; it lives as long as the sweep.
@@ -361,16 +377,18 @@ struct Sweep {
 }
 
 impl Sweep {
-    /// The ground of a sweep of `test` whose import starts from `onto`: the store (fresh, or
-    /// holding `older`), and the dry run, a child that imports on a copy of it, counting its
-    /// calls, under the order checker. That import must record `newer`'s other commits in frames
-    /// of two, their external ids, and `main`'s move to the tip's changeset, and flush.
-    fn new(test: &'static str, onto: Onto) -> Sweep {
+    /// The ground of a sweep of `test` whose import starts from `onto`: the store of `format`
+    /// (fresh, or holding `older`), and the dry run, a child that imports on a copy of it,
+    /// counting its calls, under the order checker. That import must record `newer`'s other
+    /// commits in frames of two, their external ids, and `main`'s move to the tip's changeset,
+    /// and flush.
+    fn new(test: &'static str, format: StoreFormat, onto: Onto) -> Sweep {
         let fixture = git::fixture("refs");
         let source = fixture.repo.clone().expect("refs holds a repository");
         let template_dir = tempfile::tempdir().expect("a temp dir");
         let template = utf8(template_dir.path().join("store"));
-        let repo = LocalRepo::create_with_fs(&template, "sweeps", checked(RealFs::new()))
+        let fs = checked(RealFs::new());
+        let repo = LocalRepo::create_with_fs_as(&template, "sweeps", format, fs)
             .expect("create the store");
         if let Onto::Older = onto {
             let older = ImportRequest::new("older", "main", ACTOR);
@@ -387,19 +405,20 @@ impl Sweep {
             imported: COMMITS - onto.held(),
             warnings: 0,
         };
-        assert_eq!(ended(&output), uninterrupted, "the dry run onto {onto:?}");
+        let dry = format!("the dry run on {}", ground(format, onto));
+        assert_eq!(ended(&output), uninterrupted, "{dry}");
         let calls = std::fs::read_to_string(&file).expect("the dry run's call count");
         let calls: u64 = calls.trim().parse().expect("a call count");
         let before = frames(&template).len();
         let added: Vec<String> = frames(&root)[before..].iter().map(shape).collect();
-        assert_eq!(added, onto.frames(), "the dry run onto {onto:?}");
+        assert_eq!(added, onto.frames(), "{dry}");
         let journal =
             Journal::open(&layout_of(&root), Arc::new(RealFs::new())).expect("the journal");
         let end = std::fs::metadata(layout_of(&root).journal_log()).expect("journal.log");
         assert_eq!(journal.ckpt().expect("the checkpoint"), end.len());
         let whole = State::of(&root);
         let recorded = (whole.changesets, to_u64(whole.entries.len()));
-        assert_eq!(recorded, (COMMITS, COMMITS), "the dry run onto {onto:?}");
+        assert_eq!(recorded, (COMMITS, COMMITS), "{dry}");
         assert!(whole.entries.iter().all(|(_, entry)| entry.faithful));
         assert!(
             calls > 100,
@@ -407,6 +426,7 @@ impl Sweep {
         );
         Sweep {
             test,
+            format,
             onto,
             _fixture: fixture,
             source,
@@ -415,6 +435,11 @@ impl Sweep {
             calls,
             whole,
         }
+    }
+
+    /// What the sweep runs on, as its messages name it ([`ground`]).
+    fn ground(&self) -> String {
+        ground(self.format, self.onto)
     }
 
     /// The import run again on the store at `root` as a run left it (`what` names the run), all
@@ -501,10 +526,7 @@ fn crash_at(sweep: &Sweep, k: u64) -> Crashed {
     let (_dir, root) = copy(&sweep.template);
     let at = k.to_string();
     let output = child(sweep.test, &root, &sweep.source, (CRASH_AT_ENV, &at));
-    let what = format!(
-        "onto {:?}, crashed at call {k} of {}",
-        sweep.onto, sweep.calls
-    );
+    let what = format!("{}, crashed at call {k} of {}", sweep.ground(), sweep.calls);
     let finished = k > sweep.calls;
     if finished {
         let whole = Ended::Imported {
@@ -546,8 +568,8 @@ fn crash_at(sweep: &Sweep, k: u64) -> Crashed {
 /// `main` moved, and one past the move's commit point: else the sweep missed what it is for.
 /// Prints how many runs it made, and how many crashes fell in each of those windows.
 fn crash_sweep(test: &'static str, every: u64) {
-    for onto in [Onto::Fresh, Onto::Older] {
-        let sweep = Sweep::new(test, onto);
+    for (format, onto) in grounds(&[Onto::Fresh, Onto::Older]) {
+        let sweep = Sweep::new(test, format, onto);
         let ks = calls_taken(sweep.calls + 1, every);
         let crashes = runs(&ks, |&k| crash_at(&sweep, k));
         let held = onto.held();
@@ -567,12 +589,17 @@ fn crash_sweep(test: &'static str, every: u64) {
         let counts: Vec<String> = (windows.iter())
             .map(|(what, left)| {
                 let inside = crashes.iter().filter(|&&c| left(c)).count();
-                assert!(inside > 0, "onto {onto:?}, no crash {what}: {crashes:?}");
+                assert!(
+                    inside > 0,
+                    "{}, no crash {what}: {crashes:?}",
+                    sweep.ground()
+                );
                 format!("{inside} {what}")
             })
             .collect();
         println!(
-            "crash sweep onto {onto:?}: {} runs over {} calls; {}",
+            "crash sweep on {}: {} runs over {} calls; {}",
+            sweep.ground(),
             ks.len(),
             sweep.calls,
             counts.join(", ")
@@ -592,8 +619,9 @@ fn fail_at(sweep: &Sweep, k: u64, failure: &str) -> Ended {
     let spec = format!("{k}:{failure}");
     let output = child(sweep.test, &root, &sweep.source, (FAIL_AT_ENV, &spec));
     let what = format!(
-        "onto {:?}, call {k} of {} failing {failure}",
-        sweep.onto, sweep.calls
+        "{}, call {k} of {} failing {failure}",
+        sweep.ground(),
+        sweep.calls
     );
     let ended = ended(&output);
     let left = State::of(&root);
@@ -630,8 +658,8 @@ fn fail_at(sweep: &Sweep, k: u64, failure: &str) -> Ended {
 /// one after a frame's commit point (`PostCommit`), and a success with a warning, a failure past
 /// the import's last commit point. Prints how many runs it made, and how they ended.
 fn failure_sweep(test: &'static str, every: u64, starts: &[Onto]) {
-    for &onto in starts {
-        let sweep = Sweep::new(test, onto);
+    for (format, onto) in grounds(starts) {
+        let sweep = Sweep::new(test, format, onto);
         let once = calls_taken(sweep.calls, every).into_iter();
         let once = once.map(|k| (k, "once:eio"));
         let persistent = (1..=sweep.calls)
@@ -655,12 +683,13 @@ fn failure_sweep(test: &'static str, every: u64, starts: &[Onto]) {
         let counts: Vec<String> = (classes.iter())
             .map(|(what, class)| {
                 let failed = ended.iter().filter(|&&e| class(e)).count();
-                assert!(failed > 0, "onto {onto:?}, no run {what}: {ended:?}");
+                assert!(failed > 0, "{}, no run {what}: {ended:?}", sweep.ground());
                 format!("{failed} {what}")
             })
             .collect();
         println!(
-            "failure sweep onto {onto:?}: {} runs over {} calls; {}",
+            "failure sweep on {}: {} runs over {} calls; {}",
+            sweep.ground(),
             failures.len(),
             sweep.calls,
             counts.join(", ")
@@ -684,7 +713,7 @@ fn import_crashing_at_any_call_resumes_to_the_same_state() {
 
 /// [`import_crashing_at_any_call_resumes_to_the_same_state`] at every call.
 #[test]
-#[ignore = "slow, ~90 s: an import crashed at each of its calls"]
+#[ignore = "slow, ~3 min: an import crashed at each of its calls, on both formats"]
 fn import_crashing_at_every_call_resumes_to_the_same_state() {
     if import_as_child() {
         return;
@@ -693,9 +722,9 @@ fn import_crashing_at_every_call_resumes_to_the_same_state() {
 }
 
 /// An import whose filesystem call fails (every fifth here, once and persistently, onto the fresh
-/// store; every one onto both in the ignored variant below) stops with a store failure, its
-/// committed frames recorded, or succeeds with everything recorded and a warning; the same import
-/// run again ends where an uninterrupted one ends.
+/// store of each format; every one onto both in the ignored variant below) stops with a store
+/// failure, its committed frames recorded, or succeeds with everything recorded and a warning; the
+/// same import run again ends where an uninterrupted one ends.
 #[test]
 fn import_failing_at_any_call_stops_and_resumes() {
     if import_as_child() {
@@ -710,7 +739,7 @@ fn import_failing_at_any_call_stops_and_resumes() {
 
 /// [`import_failing_at_any_call_stops_and_resumes`] at every call, onto both stores.
 #[test]
-#[ignore = "slow, ~2 min: an import failed at each of its calls"]
+#[ignore = "slow, ~1 min: an import failed at each of its calls, on both formats"]
 fn import_failing_at_every_call_stops_and_resumes() {
     if import_as_child() {
         return;
@@ -831,7 +860,7 @@ fn a_hundred_thousand_commit_import_stays_within_its_budget() {
 ///   on it, the third deleting a file and adding an executable and a symlink ([`template`]), onto
 ///   two destinations ([`Onto`]): an empty repository, which takes `linear`'s history too, and
 ///   `linear`'s own repository, its objects in a pack and `main` in `packed-refs`, which takes the
-///   three native commits on its tip.
+///   three native commits on its tip. The store is made in each format ([`grounds`]).
 /// - The crash sweep exports in a child process, this test binary run again ([`export_as_child`]),
 ///   through [`Crashing`], a [`GixSink`] that aborts the process right before its k-th mutating
 ///   call (`write_object`, `sync`, `cas_branch`, counted by a dry run), or inside the branch's move,
@@ -863,6 +892,7 @@ mod export {
         Stored, export, import, register,
     };
     use swarmops_repo::{Advance, Change, Depth, LocalRepo};
+    use swarmops_store::StoreFormat;
     use swarmops_testkit::child::{SIGABRT, run, this_test};
     use swarmops_testkit::faults::checked;
     use swarmops_testkit::fs::{NoSyncFs, copy_dir};
@@ -871,7 +901,7 @@ mod export {
     use swarmops_testkit::test_name;
     use tempfile::TempDir;
 
-    use super::{Class, SAMPLED, State, runs, utf8};
+    use super::{Class, SAMPLED, State, ground, grounds, runs, utf8};
     use crate::support::{Keep, MemSink, reaches_only_kept};
 
     /// Set only in the children of the crash sweep: the store the child exports from.
@@ -933,12 +963,13 @@ mod export {
         repo.commit(req).expect("commit on main").id
     }
 
-    /// Makes the store every run of a sweep copies, at `root`: `linear`'s `main`, imported from
-    /// the repository at `source`, then three native changesets on it, `main` at the third; the
-    /// second's message ends in a trailer, and the third deletes a file and adds an executable and
-    /// a symlink.
-    fn template(root: &Utf8Path, source: &Path) {
-        let repo = LocalRepo::create_with_fs(root, "export-sweeps", checked(NoSyncFs))
+    /// Makes the store every run of a sweep copies, at `root`, of `format`: `linear`'s `main`,
+    /// imported from the repository at `source`, then three native changesets on it, `main` at
+    /// the third; the second's message ends in a trailer, and the third deletes a file and adds
+    /// an executable and a symlink.
+    fn template(root: &Utf8Path, source: &Path, format: StoreFormat) {
+        let fs = checked(NoSyncFs);
+        let repo = LocalRepo::create_with_fs_as(root, "export-sweeps", format, fs)
             .expect("create the store");
         let source = GixSource::open(source).expect("open linear");
         let imported = import(&repo, &source, &ImportRequest::new(MAIN, MAIN, ACTOR));
@@ -1202,6 +1233,8 @@ mod export {
     struct Sweep {
         /// The test whose children export ([`export_as_child`]).
         test: &'static str,
+        /// The store's format.
+        format: StoreFormat,
         /// What the export writes into.
         onto: Onto,
         /// `linear`, the store's source, whose repository is the [`Onto::Fixture`] destination.
@@ -1225,17 +1258,18 @@ mod export {
     }
 
     impl Sweep {
-        /// The ground of a sweep of `test` onto `onto`: the store, and the dry run, an
-        /// uninterrupted export into a copy of the destination through a [`Crashing`] sink that
-        /// never crashes, which counts its calls. It must write the three native commits (and
-        /// `linear`'s five into an empty repository), sync once and move the branch once.
-        fn new(test: &'static str, onto: Onto) -> Sweep {
+        /// The ground of a sweep of `test` onto `onto`: the store, of `format`, and the dry run,
+        /// an uninterrupted export into a copy of the destination through a [`Crashing`] sink
+        /// that never crashes, which counts its calls. It must write the three native commits
+        /// (and `linear`'s five into an empty repository), sync once and move the branch once.
+        fn new(test: &'static str, format: StoreFormat, onto: Onto) -> Sweep {
             let fixture = git::fixture("linear");
             let source = fixture.repo.clone().expect("linear holds a repository");
             let empty = git::empty_repository();
             let store_dir = tempfile::tempdir().expect("a temp dir");
             let store = utf8(store_dir.path().join("store"));
-            template(&store, &source);
+            template(&store, &source, format);
+            let dry = format!("the dry run on {}", ground(format, onto));
             let destination = match onto {
                 Onto::Empty => empty.dir.clone(),
                 Onto::Fixture => source.clone(),
@@ -1252,10 +1286,7 @@ mod export {
                 Onto::Empty => 8,
                 Onto::Fixture => 3,
             };
-            assert_eq!(
-                report.commits_written, new_commits,
-                "the dry run onto {onto:?}"
-            );
+            assert_eq!(report.commits_written, new_commits, "{dry}");
             assert_eq!(
                 (
                     report.old,
@@ -1264,12 +1295,12 @@ mod export {
                     report.rewritten
                 ),
                 (old, true, 0, 0),
-                "the dry run onto {onto:?}"
+                "{dry}"
             );
             assert_eq!(
                 calls,
                 report.objects_written + 2,
-                "the dry run onto {onto:?}: a write per object, one sync, one move"
+                "{dry}: a write per object, one sync, one move"
             );
             let objects = reachable(&copied, report.head_oid);
             let files_after = loose_files(&copied);
@@ -1289,6 +1320,7 @@ mod export {
             };
             Sweep {
                 test,
+                format,
                 onto,
                 _fixture: fixture,
                 _empty: empty,
@@ -1348,7 +1380,8 @@ mod export {
             .env(STORE_ENV, &root)
             .env(DESTINATION_ENV, &destination)
             .env(CRASH_ENV, crash.env()));
-        let what = format!("onto {:?}, {crash:?} of {} calls", sweep.onto, sweep.calls);
+        let on = ground(sweep.format, sweep.onto);
+        let what = format!("{on}, {crash:?} of {} calls", sweep.calls);
         if crash == Crash::Never {
             let whole = (sweep.whole.report.commits_written, sweep.calls);
             assert_eq!(reported(&output), whole, "{what}");
@@ -1461,8 +1494,9 @@ mod export {
     /// crash in the move leaves, and the branch moved: else the sweep missed what it is for.
     /// Prints how many runs it made, and how many crashes fell in each of those windows.
     fn crash_sweep(test: &'static str, every: u64) {
-        for onto in [Onto::Empty, Onto::Fixture] {
-            let sweep = Sweep::new(test, onto);
+        for (format, onto) in grounds(&[Onto::Empty, Onto::Fixture]) {
+            let sweep = Sweep::new(test, format, onto);
+            let on = ground(format, onto);
             let points = sweep.crashes(every);
             let crashed = runs(&points, |&crash| crash_at(&sweep, crash));
             let written = sweep.whole.files.len() - sweep.files.len();
@@ -1484,12 +1518,12 @@ mod export {
             let counts: Vec<String> = (windows.iter())
                 .map(|(what, inside)| {
                     let count = crashed.iter().filter(|&&c| inside(c)).count();
-                    assert!(count > 0, "onto {onto:?}, no crash {what}: {crashed:?}");
+                    assert!(count > 0, "{on}, no crash {what}: {crashed:?}");
                     format!("{count} {what}")
                 })
                 .collect();
             println!(
-                "export crash sweep onto {onto:?}: {} runs over {} calls; {}",
+                "export crash sweep on {on}: {} runs over {} calls; {}",
                 points.len(),
                 sweep.calls,
                 counts.join(", ")
@@ -1511,7 +1545,7 @@ mod export {
 
     /// [`export_crashing_at_any_sink_call_resumes`] at every call.
     #[test]
-    #[ignore = "slow, ~15 s: an export crashed at each of its 54 git-side calls"]
+    #[ignore = "slow, ~10 s: an export crashed at each of its git-side calls, both formats"]
     fn export_crashing_at_every_sink_call_resumes() {
         if export_as_child() {
             return;
@@ -1556,6 +1590,8 @@ mod export {
     /// What a failure sweep stands on: the store every run copies, the sink every run starts from,
     /// and what the uninterrupted export makes of them.
     struct MemSweep {
+        /// The store's format.
+        format: StoreFormat,
         /// `linear`, the store's source.
         _fixture: GitFixture,
         /// The temp dir that holds `store`.
@@ -1576,14 +1612,14 @@ mod export {
     }
 
     impl MemSweep {
-        /// The ground of a failure sweep onto `onto`: the store, and the uninterrupted export into
-        /// a fresh sink, on a copy of it.
-        fn new(onto: Onto) -> MemSweep {
+        /// The ground of a failure sweep onto `onto`: the store, of `format`, and the
+        /// uninterrupted export into a fresh sink, on a copy of it.
+        fn new(format: StoreFormat, onto: Onto) -> MemSweep {
             let fixture = git::fixture("linear");
             let source = fixture.repo.clone().expect("linear holds a repository");
             let store_dir = tempfile::tempdir().expect("a temp dir");
             let store = utf8(store_dir.path().join("store"));
-            template(&store, &source);
+            template(&store, &source, format);
             let manifest = fixture.manifest.as_ref().expect("linear's manifest");
             let tip: GitOid = manifest.refs["refs/heads/main"].parse().expect("an oid");
             let reader = GixSource::open(&source).expect("open linear");
@@ -1602,9 +1638,11 @@ mod export {
             let (_dir, root) = super::copy(&store);
             let mut sink = start.sink();
             let report = export(&exporter(&root), &mut sink, &request_main()).expect("the dry run");
-            assert!(report.branch_moved, "the dry run onto {onto:?}");
+            let on = ground(format, onto);
+            assert!(report.branch_moved, "the dry run on {on}");
             let calls = sink.log().len();
             MemSweep {
+                format,
                 _fixture: fixture,
                 _store_dir: store_dir,
                 store,
@@ -1628,8 +1666,9 @@ mod export {
     /// leaves the branch naming an object it took ([`reaches_only_kept`]).
     fn fail_at(sweep: &MemSweep, k: usize) {
         let what = format!(
-            "onto {:?}, call {k} of {} failing",
-            sweep.start.onto, sweep.calls
+            "{}, call {k} of {} failing",
+            ground(sweep.format, sweep.start.onto),
+            sweep.calls
         );
         let (_dir, root) = super::copy(&sweep.store);
         let repo = exporter(&root);
@@ -1708,15 +1747,16 @@ mod export {
     /// An export whose destination fails any of its mutating calls stops there, with that error,
     /// the branch where it was; the same export run again ends where an uninterrupted export ends,
     /// and the branch never names an object a power loss can take, before or after the failure.
-    /// Every call, onto both sinks: they live in memory.
+    /// Every call, onto both sinks, from a store of each format: the sinks live in memory.
     #[test]
     fn export_failing_at_any_sink_call_stops_and_resumes() {
-        for onto in [Onto::Empty, Onto::Fixture] {
-            let sweep = MemSweep::new(onto);
+        for (format, onto) in grounds(&[Onto::Empty, Onto::Fixture]) {
+            let sweep = MemSweep::new(format, onto);
             let ks: Vec<usize> = (1..=sweep.calls + 1).collect();
             runs(&ks, |&k| fail_at(&sweep, k));
             println!(
-                "export failure sweep onto {onto:?}: {} runs over {} calls",
+                "export failure sweep on {}: {} runs over {} calls",
+                ground(format, onto),
                 ks.len(),
                 sweep.calls
             );

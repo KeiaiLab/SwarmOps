@@ -1573,7 +1573,8 @@ fn git_import_over_a_crafted_external_id_is_e_git_import_diverged() {
 ///   with `EIO`, or failing from there on with `ENOSPC`. Every run is checked against the store's
 ///   write-ordering rules (`SWARMOPS_TEST_ORDER_CHECK=1`, which the test support sets).
 /// - The default gate takes every fifth call, with the last two; the ignored variants take every
-///   call. A failure sweep also fails every fifth call persistently, with `ENOSPC`.
+///   call. A failure sweep also fails every fifth call persistently, with `ENOSPC`. Each sweep
+///   runs on a store of each format a create writes (`INIT_FORMATS`).
 #[cfg(feature = "test-hooks")]
 mod sweeps {
     use std::collections::BTreeSet;
@@ -1586,7 +1587,7 @@ mod sweeps {
     use swarmops_store::external_ids::lower_hex;
     use swarmops_store::{
         CRASH_AT_ENV, ExternalEntry, ExternalIds, FAIL_AT_ENV, FS_CALLS_ENV, FileOp, FsMethod,
-        Journal, RealFs, SYSTEM_GIT,
+        INIT_FORMATS, Journal, RealFs, SYSTEM_GIT, StoreFormat,
     };
     use swarmops_testkit::fs::{FailingFs, copy_dir};
     use swarmops_testkit::repo::{put, request};
@@ -1704,6 +1705,8 @@ mod sweeps {
         /// The store: `linear` imported, then two changesets on `main`, the second's frame
         /// unlisted.
         store: Store,
+        /// The store's format.
+        format: StoreFormat,
         /// `linear`, whose repository every run's destination copies.
         linear: Source,
         /// `linear`'s tip: what the branch names before the export.
@@ -1720,11 +1723,11 @@ mod sweeps {
     }
 
     impl Template {
-        /// The store, and the dry run: the export on copies of the store and of `linear`'s
-        /// repository, counting its store calls. It must list the unlisted frame, write the two
-        /// commits onto `linear`'s tip, and record their external id entries.
-        fn new() -> Template {
-            let store = Store::init();
+        /// The store, of `format`, and the dry run: the export on copies of the store and of
+        /// `linear`'s repository, counting its store calls. It must list the unlisted frame, write
+        /// the two commits onto `linear`'s tip, and record their external id entries.
+        fn new(format: StoreFormat) -> Template {
+            let store = Store::init_as(format);
             let linear = Source::new("linear");
             let tip = linear.commit("refs/heads/main");
             import(&store, &linear.path, &[]).ok();
@@ -1765,12 +1768,18 @@ mod sweeps {
             Template {
                 files: loose_files(&copied),
                 store,
+                format,
                 linear,
                 tip,
                 calls,
                 result,
                 entries,
             }
+        }
+
+        /// How the sweep's messages name the store's format: `FORMAT 1`, say.
+        fn on(&self) -> String {
+            format!("FORMAT {}", self.format.version())
         }
 
         /// The commit the uninterrupted export moved the branch to.
@@ -1847,7 +1856,8 @@ mod sweeps {
         let copied = destination(&store, &template.linear);
         let at = k.to_string();
         let crashed = export_into(&store, &copied, &[(CRASH_AT_ENV, at.as_str())]);
-        let what = format!("crashed at store call {k} of {}", template.calls);
+        let on = template.on();
+        let what = format!("{on}, crashed at store call {k} of {}", template.calls);
         let finished = k > template.calls;
         if finished {
             let result = crashed.ok();
@@ -1875,13 +1885,14 @@ mod sweeps {
         }
     }
 
-    /// The crash sweep at every `every`-th store call of the export and its last two, and past
-    /// them. What the crashes left must hold a crash before the committed read listed the frame,
-    /// one after it and before the export wrote an object, one among the object writes, one with
-    /// every entry recorded and the branch not moved, and the branch moved: else the sweep missed
-    /// what it is for. Prints how many runs it made, and how many crashes fell in each window.
-    fn crash_sweep(every: u64) {
-        let template = Template::new();
+    /// The crash sweep on a store of `format` at every `every`-th store call of the export and its
+    /// last two, and past them. What the crashes left must hold a crash before the committed read
+    /// listed the frame, one after it and before the export wrote an object, one among the object
+    /// writes, one with every entry recorded and the branch not moved, and the branch moved: else
+    /// the sweep missed what it is for. Prints how many runs it made, and how many crashes fell in
+    /// each window.
+    fn crash_sweep(format: StoreFormat, every: u64) {
+        let template = Template::new(format);
         let ks = calls_taken(template.calls + 1, every);
         let crashes = sweep_of(&ks, |&k| crash_export_at(&template, k));
         let written = template.files.len();
@@ -1903,12 +1914,13 @@ mod sweeps {
         let counts: Vec<String> = (windows.iter())
             .map(|(what, inside)| {
                 let count = crashes.iter().filter(|c| inside(c)).count();
-                assert!(count > 0, "no crash {what}: {crashes:?}");
+                assert!(count > 0, "{}, no crash {what}: {crashes:?}", template.on());
                 format!("{count} {what}")
             })
             .collect();
         println!(
-            "git export crash sweep: {} runs over {} store calls; {}",
+            "git export crash sweep on {}: {} runs over {} store calls; {}",
+            template.on(),
             ks.len(),
             template.calls,
             counts.join(", ")
@@ -1933,14 +1945,18 @@ mod sweeps {
     /// writes between them and the entries.
     #[test]
     fn git_export_crashing_at_any_store_call_resumes() {
-        crash_sweep(SAMPLED);
+        for &format in INIT_FORMATS {
+            crash_sweep(format, SAMPLED);
+        }
     }
 
     /// [`git_export_crashing_at_any_store_call_resumes`] at every call.
     #[test]
-    #[ignore = "slow, ~20 s: git export crashed at each of its 225 store calls"]
+    #[ignore = "slow, ~50 s: git export crashed at each of its 301 store calls, both formats"]
     fn git_export_crashing_at_every_store_call_resumes() {
-        crash_sweep(1);
+        for &format in INIT_FORMATS {
+            crash_sweep(format, 1);
+        }
     }
 
     /// How a run with an injected failure ended.
@@ -2013,7 +2029,11 @@ mod sweeps {
         let copied = destination(&store, &template.linear);
         let spec = format!("{k}:{failure}");
         let failed = export_into(&store, &copied, &[(FAIL_AT_ENV, spec.as_str())]);
-        let what = format!("store call {k} of {} failing {failure}", template.calls);
+        let on = template.on();
+        let what = format!(
+            "{on}, store call {k} of {} failing {failure}",
+            template.calls
+        );
         let ended = ended(&failed, store.path());
         let branch = branch_at(&copied, "main");
         if let Ended::Exported(result) = &ended {
@@ -2030,15 +2050,15 @@ mod sweeps {
         ended
     }
 
-    /// The failure sweep: every `every`-th store call of the export and its last two failed once
-    /// with `EIO`, and every fifth ([`PERSISTENT_AT`]) failed persistently with `ENOSPC`. Among
-    /// what they ended in must be an export that went on past a failed call (a derived value's
-    /// write, which the store drops: the derived values are a cache), and a failure in each part
-    /// of the store the export reads or writes: the committed read, a derived value, an object,
-    /// the external id entries. Else the sweep missed what it is for. Prints how many runs it
-    /// made, and how they ended.
-    fn failure_sweep(every: u64) {
-        let template = Template::new();
+    /// The failure sweep on a store of `format`: every `every`-th store call of the export and its
+    /// last two failed once with `EIO`, and every fifth ([`PERSISTENT_AT`]) failed persistently
+    /// with `ENOSPC`. Among what they ended in must be an export that went on past a failed call
+    /// (a derived value's write, which the store drops: the derived values are a cache), and a
+    /// failure in each part of the store the export reads or writes: the committed read, a
+    /// derived value, an object, the external id entries. Else the sweep missed what it is for.
+    /// Prints how many runs it made, and how they ended.
+    fn failure_sweep(format: StoreFormat, every: u64) {
+        let template = Template::new(format);
         let once = calls_taken(template.calls, every).into_iter();
         let once = once.map(|k| (k, "once:eio"));
         let persistent = (1..=template.calls)
@@ -2069,14 +2089,15 @@ mod sweeps {
         let counts: Vec<String> = (parts.iter())
             .map(|(what, inside)| {
                 let count = ended.iter().filter(|e| inside(e)).count();
-                assert!(count > 0, "no run {what}: {ended:?}");
+                assert!(count > 0, "{}, no run {what}: {ended:?}", template.on());
                 format!("{count} {what}")
             })
             .collect();
         let aborted = ended.iter().filter(|e| matches!(e, Ended::Aborted)).count();
         println!(
-            "git export failure sweep: {} runs over {} store calls; {}, {aborted} aborted as \
-             documented",
+            "git export failure sweep on {}: {} runs over {} store calls; {}, {aborted} aborted \
+             as documented",
+            template.on(),
             failures.len(),
             template.calls,
             counts.join(", ")
@@ -2099,14 +2120,18 @@ mod sweeps {
     /// whole; the same export run again ends where an uninterrupted one ends.
     #[test]
     fn git_export_failing_at_any_store_call_stops_and_resumes() {
-        failure_sweep(SAMPLED);
+        for &format in INIT_FORMATS {
+            failure_sweep(format, SAMPLED);
+        }
     }
 
     /// [`git_export_failing_at_any_store_call_stops_and_resumes`] at every call.
     #[test]
-    #[ignore = "slow, ~10 s: git export failed at each of its 225 store calls, 270 runs"]
+    #[ignore = "slow, ~15 s: git export failed at each of its 301 store calls, both formats"]
     fn git_export_failing_at_every_store_call_stops_and_resumes() {
-        failure_sweep(1);
+        for &format in INIT_FORMATS {
+            failure_sweep(format, 1);
+        }
     }
 }
 

@@ -791,10 +791,10 @@ These do not change what SwarmOps does, only how well the tests can see it.
   (pinned with a directory the process may not change); a crash during it leaves part of
   `meta.tmp/`, which the next create removes. *Unscheduled: an `FsOps::remove_dir_all` is a new
   seam method that every double must forward. Found: M6 Task A4 review.*
-- **Some sweeps and tests run on one format.** The git import and export sweeps run on the
-  default format, FORMAT 2, only; and the operations' mapping of malformed revisions, pinned to
-  FORMAT 1, has no FORMAT 2 twin yet. Verify's damaged ref, lock and checkpoint cases run on both.
-  *Unscheduled. Found: M6 Task A4.*
+- **Some tests run on one format.** The operations' mapping of malformed revisions, pinned to
+  FORMAT 1, has no FORMAT 2 twin yet. Verify's damaged ref, lock and checkpoint cases run on both,
+  and so do the git import's and export's crash and failure sweeps. *Unscheduled. Found: M6 Task
+  A4; narrowed by issue #20 item 29.*
 - **Gaps the reviews found and left.** The I/O-error sweeps now fail each of a commit's calls
   once, the object store's links and directory fsyncs included, and check that the commit
   reports honestly, but the cleanup after a failed link is still not asserted; the CLI's panic
