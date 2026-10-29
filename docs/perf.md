@@ -1421,3 +1421,103 @@ writer lock"); no goal sets a target for it, so no fix is designed for v0.6. A s
 refs takes 1.43 ms at the median and 2.75 ms at p99, still over G3's 1 ms: each ref adds about
 5.4 µs (5.8 µs in v0.1.0). A validated lazy read of the refs needs no FORMAT change (the v0.6.0 design's
 decision 11 asks that of a fix), so that fix is the one to design.
+
+## v0.7.0 — 2026-10-29
+
+M14's measurements: G16's three targets against `swarmops serve`, and the v0.6.0 misses taken
+again after M14's track for them (the mirror's commit-graph for G17's fetch; probes, no fix, for
+G4's p99 and the sync of one land; G9's update profiled, no fix). Product code: `stable` at the
+commit that adds G16's cases (`7b8f8ce9`) and its testkit fix (`c7baf861`), every harness built
+optimized before the window. Same host as v0.6.0: WSL2 (kernel 5.15.153.1), AMD Ryzen 9 7950X3D
+(32 threads), 106 GiB RAM; Rust 1.99.0, git 2.43.0. G4's stores live under
+`~/.local/state/swarmops-bench` on the ext4 virtual disk, as before; the other cases' in the
+temporary directory of M14's runs, on an NVMe RAID 0.
+
+**Method and host state.** A driver waited before each step for a 1-minute load under 6, took the
+host's lock for heavy runs, waited again for that load (at most 30 minutes), stopped the pilot's
+soak timer, ran the step alone and started the timer again. Other runs on the host take the same
+lock for their heavy work, but CI jobs do not: the 1-minute load at each step's start was 3.8–5.7,
+but the 5-minute load stood at 30–105 from other runs' builds and tests, and during one step (G4
+without the probe, 11:13) it rose to 516. The window ran 08:31–13:25 (+09:00). The raw `fdatasync`
+probe on the bench directory (the median of 40 appends of 120 B, each `fdatasync`'d) read 3.46–3.81
+ms, v0.6.0's 3.25–3.87 ms. One run per step; nearest-rank percentiles.
+
+### G16: `swarmops serve` against git's own server
+
+`serve_perf`: a history of 12,000 commits (the `remote_perf` generator) served by
+`swarmops serve` and by git's `upload-pack` on a bare copy, both through the ssh stand-in, the
+median of 5 runs each.
+
+| Case | `swarmops serve` | git `upload-pack` | Ratio | Target |
+| --- | --- | --- | --- | --- |
+| Clone | 0.341 s | 0.352 s | **0.97** | at most 2× (met) |
+| No-op fetch | 0.007 s | 0.004 s | **1.82** | at most 2× (met) |
+| Push of one commit to `refs/land/main` | 0.104 s | — | — | under 1 s (met) |
+| First clone (no target) | 1,195.6 s | 0.362 s | — | — |
+
+The first clone exports the whole history into `serve.git` before git advertises it, as loose
+objects (the M14 design's risk R-3; known-limitations, "The first connection to a large store
+exports its whole history"); every later connection exports only what moved. Q1's run of the
+same cases (2026-10-29, a 1-minute load of 134 at its start) gave a clone ratio of 0.95, a no-op
+fetch 1.47×, a land push of 0.089 s and a first clone of 1,071.6 s. A no-op fetch is a few
+milliseconds either way; `serve`'s extra 3 ms is its start, the access check and a refresh that
+finds nothing to export.
+
+Criteria 1–5 (every listed git command over ssh and HTTP, the ids at every ref and
+`git fsck --strict`, the push rules, `refs/land/<target>`, the codes): green in `just check` with
+git 2.43.0, and in the Scheduled run's git matrix on `c7baf861` with git 2.39.5, 2.43.0 and
+2.56.0 (`serve_fetch`, `serve_push`, `serve_land` and `serve_http` in each). G16 met.
+
+### G17: one commit on 12,000 commits against 1,000
+
+`remote_perf`, unchanged, with the mirror's commit-graph that M14 adds.
+
+| Case | 1,000 commits | 12,000 commits | Ratio | Target |
+| --- | --- | --- | --- | --- |
+| Fetch of one commit | 87 ms | 117 ms | **1.34** | at most 1.5× (met; 1.65 in v0.6.0) |
+| Push of one commit | 50 ms | 51 ms | **1.02** | at most 1.5× (met) |
+| Sync of one land | — | 49.6 s | — | under 1 s (missed) |
+| `so clone` against `git clone --bare` + `git import` | — | 433.4 s against 414.0 s | **1.05** | at most 1.1× (met) |
+
+The fetch's phases: with the commit-graph `so fetch` grows 1.12× (git's fetch 1.09×, SwarmOps'
+rest 1.11×); without it, 1.42× (git's fetch 1.86×). On the committed fixtures (about 100 ms of
+work) `so clone` is 1.99–2.40× its git equivalent, a fixed start-up cost the 12,000-commit case
+dilutes.
+
+The sync of one land, by phase on 12,000 commits: `so fetch` 0.119 s, `so sync --no-push`
+10.48 s, `so push` 10.13 s; a second `so sync` on the same store, with a new remote commit and a
+new land, 0.213 s (1.23× its 1,000-commit value). The land step and the push grow with the
+history only the first time after a clone, and the case syncs right after one: a one-time cost
+that a stored result makes free afterwards (B3's inference from the code, not profiled: the
+first `ExportOid` derive and the first keyed export's memos). No fix in M14.
+
+### G4: 50 landing processes
+
+`landing::perf::landing_under_load` at 50, open loop, in the bench directory on the ext4 disk, as
+v0.6.0 ran it. Two runs with M14's code, and one with v0.6.0's (`c99f68cd`) in the same window to
+tell the code from the host.
+
+| Run | Start load | Lands/s | p50 / p99 | Retries | Lost |
+| --- | --- | --- | --- | --- | --- |
+| M14, lock probe on (1 ms) | 3.83 | **25.0** | 2,128 / **2,731 ms** | 0 % | 0 |
+| M14, probe off | 5.41 | **25.0** | 2,324 / **2,501 ms** | 0 % | 0 |
+| v0.6.0's code, probe off | 4.76 | **25.0** | 2,404 / **2,674 ms** | 0 % | 0 |
+
+A third run of M14's code (11:13) is left out: the host's load rose to 516 during it (p99
+3,577 ms). The probe's lock lines: a `land` held the lock 31.6 ms at the median (48.8 ms p99), a
+`commit` 10.0 ms (29.0 ms), and each waited about 990 ms at the median; the lock was held 99.6 %
+of the samples, with 44 waiters on average. At 25 lands a second, 41.6 ms of lock per land asks
+for 104 % of the lock, so the queue grows for the whole run, and the p99 is its wait. B3's run of
+the same case on the NVMe disk (2026-10-28, 24.9 ms of lock per land, 62 % held) had a p99 of
+252.7 ms. v0.6.0's code gives the same p99 as M14's here, so the change from v0.6.0's 579.5–594.6
+ms is the disk's, not the code's; the raw `fdatasync` probe did not move (3.46–3.81 ms). G4's p99
+missed; lands/s, retries and lost lands met.
+
+### G9: the update after a land
+
+Profiled in M14 (B2), not measured again: of about 110 ms, the status scan of the 50,000 files
+takes 49–57 ms (the stat of every tracked file and one walk for untracked ones, which `E_WS_DIRTY`
+needs), the store's `rebase` 24–28 ms and the workspace's five syncs 16–18 ms. No one span is
+redundant work a change to `swarmops-ws` alone removes, so no fix; a bounded pool for the
+parallel stat (16.5 ms against 30–39 ms with 8 threads in one loaded run) is a lead for a later
+design.
