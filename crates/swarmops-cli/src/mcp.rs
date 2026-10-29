@@ -3119,6 +3119,41 @@ mod tests {
         }
     }
 
+    /// A blob's client file is held to a commit's rules, by this server and before any read:
+    /// a relative path and a device are refused, naming the `file` and why, with what to send
+    /// instead; inline and base64 content, and an absolute regular file, pass. The operation's
+    /// own open refuses a relative path with the same code, so only the message tells this
+    /// refusal from that one.
+    #[test]
+    fn a_blob_s_client_file_is_held_to_a_commit_s_rules() {
+        let file = |file: &str| BlobPutReq::new(ContentInput::File(file.to_owned()));
+        for (named, why) in [
+            ("src/lib.rs", "relative path"),
+            ("./src/lib.rs", "relative path"),
+            ("/dev/zero", "not a regular file"),
+        ] {
+            let error = file(named).refuse().expect_err(named);
+            assert_eq!((error.code.as_str(), error.exit), ("E_INVALID_ARG", 2));
+            assert_eq!(Value::Object(error.details), json!({"file": named}));
+            assert!(error.message.contains(why), "{named}: {}", error.message);
+            assert!(error.message.ends_with(SEND_INSTEAD), "{}", error.message);
+            assert!(!error.message.contains('\n'), "{}", error.message);
+        }
+
+        // What the server reads: content it was sent, and an absolute regular file.
+        let dir = tempfile::tempdir().unwrap();
+        let regular = dir.path().join("blob.bin");
+        std::fs::write(&regular, b"\x00\x01").unwrap();
+        for content in [
+            ContentInput::Inline("x\n".to_owned()),
+            ContentInput::Base64("AAE=".to_owned()),
+            ContentInput::File(regular.to_str().unwrap().to_owned()),
+        ] {
+            let what = format!("{content:?}");
+            assert!(BlobPutReq::new(content).refuse().is_ok(), "{what}");
+        }
+    }
+
     /// A panic in a tool's operation is that call's `E_INTERNAL` envelope, with the store the
     /// server names and what the operation resolved before it panicked, as a command's is.
     #[test]
