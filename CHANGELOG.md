@@ -22,6 +22,12 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   12,000 commits by phase (`fetch`, `sync --no-push`, `push`), and G4's landing case with
   `SWARMOPS_TEST_CLI_LANDING_LOCK_SAMPLE_US` set prints each process's wait for `meta/lock` and
   its hold, sampled from `/proc/locks`.
+- `swarmops serve` (M14), the server for stock git clients, run per connection by ssh or a web
+  server; it takes its caller from `--as` alone (`SWARMOPS_AGENT` does not apply). Each store it
+  serves holds an `access.toml` (version 1): `[[grant]]`s naming callers (`who`) with the refs
+  they may `read`, `push`, `force` (a backward move or a deletion) and `land` onto. Without the
+  file every caller is refused (`E_AUTH`), and an invalid one refuses every request
+  (`E_POLICY_DENIED`, with its line).
 - `swarmops serve` serves reads over ssh: as an `authorized_keys` forced command it takes
   `git-upload-pack '<store>.git'`, checks the caller's `read` in the store's `access.toml`,
   exports every served ref of the committed snapshot into `<store>/git/serve.git`, and runs the
@@ -61,6 +67,16 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 - `just perf` times `swarmops serve` (G16) over ssh on 12,000 commits: a clone and a no-op fetch
   against git's own `upload-pack` on the same history (medians of 5 and their ratio), and one
   push to `refs/land/main`, printed as `serve-perf:` lines.
+- Operating guides [Serve over ssh](docs/operate/serve-over-ssh.md) and
+  [Serve over HTTP](docs/operate/serve-over-http.md): the `authorized_keys` line,
+  `AcceptEnv GIT_PROTOCOL`, the serving account's memo key directory, `access.toml` and its
+  refusals, CGI entries for nginx with fcgiwrap and for Apache, what a client types and the
+  refusals it sees.
+- `docs/perf.md` "v0.7.0" records G16 and the v0.6.0 misses measured again: `swarmops serve` on 12,000 commits clones
+  0.97× and fetches with nothing new 1.82× git's own server, a push to `refs/land/main` takes
+  0.104 s, and its first clone 1,195.6 s; G17's fetch 1.34× (1.65× in v0.6.0); G4 at 50
+  processes on the ext4 bench disk, p99 2.5–2.7 s for v0.6.0's code as for M14's, the lock held
+  99.6 % of the run; the sync of one land 49.6 s.
 
 ### Changed
 
@@ -95,18 +111,12 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   `null` for a repair the refused undo made.
 - `verify` on a FORMAT 2 store names its checkpoint file `meta/journal2.ckpt`, and what it holds
   (an offset, a seq and their CRC), where it named FORMAT 1's `meta/journal.ckpt` and a u64le.
-
-### Fixed
-
 - A derived value whose put finds its slot held by a damaged file the store cannot remove is
   kept for the rest of the run, as a failed put's is, so a run derives it once (storage spec §5),
   not once for each value that needs it.
 - `derive --after N` with N past the journal's last frame is `E_INVALID_ARG` (`details.after`),
   with `--follow` too and whatever `--limit`: it read as caught up before (`{derived: 0,
   cached: 0}`, exit 0), so a follower given such a frame stayed silent for good.
-
-### Fixed
-
 - History queries check each index generation they order or bound by against its parents': a
   land's merge base and a `log --path` over several paths fail with `E_STORE_CORRUPT` on a
   damaged or crafted `meta/idx/gen.col` instead of answering by it, and a revision's `~N` no
