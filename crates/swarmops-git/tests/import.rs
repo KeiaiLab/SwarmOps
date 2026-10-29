@@ -8,8 +8,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier, Mutex};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::ChangesetId;
@@ -403,6 +403,35 @@ fn a_base_reached_through_a_second_parent_is_not_diverged() {
         oid(&tip(manifest, "merged"))
     );
     assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
+}
+
+/// The store's walk below a known tip takes every parent, not only first ones: `merged`, imported
+/// into another ref first, reaches `older`'s tip through its second parent alone, so its import
+/// into `main`, which names `older`, stops at once at `merged` and finds the base below it in the
+/// store, through that parent: `main` moves on, and no changeset is written.
+#[test]
+fn a_known_tip_reaches_the_base_through_a_second_parent() {
+    let fixture = git::fixture("refs");
+    let manifest = manifest(&fixture);
+    let source = open(&fixture);
+    let (_dir, _root, repo) = unsynced_repo();
+    let into = |git_ref: &str, target: &str| {
+        import(&repo, &source, &ImportRequest::new(git_ref, target, ACTOR))
+    };
+    into("merged", "release/merged").unwrap();
+    let older = into("older", "main").unwrap();
+    assert_eq!((older.imported, older.ref_moved), (0, true));
+
+    let merged = into("merged", "main").unwrap();
+    assert_eq!(
+        (merged.imported, merged.skipped, merged.ref_moved),
+        (0, 1, true)
+    );
+    assert_eq!(merged.old_head, Some(older.head));
+    assert_eq!(
+        git_oid(&repo, main_head(&repo)),
+        oid(&tip(manifest, "merged"))
+    );
 }
 
 /// A tip the external id index names already, brought in by an import into another ref, stops
@@ -957,6 +986,88 @@ fn the_import_leaves_no_frame_past_the_checkpoint() {
     assert_eq!(journal.ckpt().unwrap(), journal_len(&root));
 }
 
+/// The metadata is flushed before the target's move, not only after it: an import whose swap is
+/// lost, another writer having moved the target meanwhile, makes no move to flush after, and
+/// still leaves no frame past the checkpoint.
+#[test]
+fn a_lost_swap_still_flushes() {
+    let fixture = git::fixture("refs");
+    let manifest = manifest(&fixture);
+    let (_dir, root, repo) = unsynced_repo();
+    import(&repo, &open(&fixture), &request("older")).unwrap();
+    let moving = MovesMain {
+        inner: open(&fixture),
+        repo: &repo,
+        tip: oid(&tip(manifest, "newer")),
+        native: Cell::new(None),
+    };
+
+    let error = import(&repo, &moving, &request("newer")).unwrap_err();
+    assert!(
+        matches!(error, ImportError::CasMismatch { .. }),
+        "{error:?}"
+    );
+    let journal = Journal::open(&layout_of(&root), Arc::new(RealFs::new())).unwrap();
+    assert_eq!(journal.ckpt().unwrap(), journal_len(&root));
+}
+
+/// A target's move whose listing in `journal.off` fails, a failure after its commit point, is
+/// followed by no write (storage spec §2 rule 5's fail-stop): the import does not flush after it,
+/// and succeeds, the target moved, with the failure as its one warning. The next writer repairs
+/// the store, which then names the tip's changeset and verifies clean.
+#[test]
+fn no_write_after_the_move_s_failed_listing() {
+    let fixture = git::fixture("refs");
+    let manifest = manifest(&fixture);
+    let (_dir, root, repo) = new_repo();
+    drop(repo);
+
+    // 1. Once the flush before the move has written the checkpoint, the next listing, the move's,
+    //    fails; every call after it is recorded.
+    let layout = layout_of(&root);
+    let ckpt = layout.journal_ckpt().into_std_path_buf();
+    let off = layout.journal_off().into_std_path_buf();
+    let flushed = AtomicBool::new(false);
+    let failed = AtomicBool::new(false);
+    let after = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&after);
+    let failing = FailingFs::new(move |method, path| {
+        if failed.load(Ordering::SeqCst) {
+            recorded.lock().unwrap().push((method, path.to_owned()));
+            return false;
+        }
+        if method.is_mutating() && path == ckpt {
+            flushed.store(true, Ordering::SeqCst);
+        }
+        let fail =
+            flushed.load(Ordering::SeqCst) && method == FsMethod::AppendDurable && path == off;
+        if fail {
+            failed.store(true, Ordering::SeqCst);
+        }
+        fail
+    });
+
+    // 2. The import: the move made, its failed listing a warning, and no write after it.
+    let repo = LocalRepo::open_with_fs(&root, Arc::new(failing)).unwrap();
+    let report = import(&repo, &open(&fixture), &request("newer")).unwrap();
+    assert!(report.ref_moved);
+    assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+    let writes: Vec<(FsMethod, PathBuf)> = (after.lock().unwrap().iter())
+        .filter(|(method, _)| method.is_mutating())
+        .cloned()
+        .collect();
+    assert_eq!(writes, [], "a write after the failed listing");
+    drop(repo);
+
+    // 3. The next writer's repair: the move is in the store.
+    let repo = LocalRepo::open(&root).unwrap();
+    assert_eq!(
+        git_oid(&repo, main_head(&repo)),
+        oid(&tip(manifest, "newer"))
+    );
+    assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
+}
+
 /// A frame holds at most `frame_changesets` changesets, and the index compacts about once a
 /// frame: 3,300 commits in frames of 1,100 are three frames, and at most ⌈3,300 / 1,100⌉ + 1
 /// compactions.
@@ -1192,6 +1303,64 @@ fn the_report_lists_the_first_hundred_lossy_commits() {
     assert_eq!((report.imported, report.lossy_total), (105, 105));
     let listed: Vec<GitOid> = report.lossy.iter().map(|lossy| lossy.commit).collect();
     assert_eq!(listed, commits[..100]);
+}
+
+/// A base imported with a loss seeds nothing: its root does not hold its commit's tree, so the
+/// commits above it are converted in full. Without `gitlinks` allowed, the next commit, which
+/// keeps the base's gitlink, is refused by name and nothing is written; with it allowed, the blob
+/// that commit shares with the base is read again rather than taken from the base.
+#[test]
+fn a_lossy_base_seeds_no_import() {
+    let mut source = MemSource::default();
+    let readme = source.blob(b"readme\n");
+    let lib = source.tree(&[
+        ("100644", b"readme.txt", readme),
+        ("160000", b"sub", readme),
+    ]);
+    let one = source.blob(b"one\n");
+    let first_tree = source.tree(&[("100644", b"a.txt", one), ("40000", b"lib", lib)]);
+    let first = source.commit(first_tree, &[], "first\n");
+    let two = source.blob(b"two\n");
+    let second_tree = source.tree(&[("100644", b"a.txt", two), ("40000", b"lib", lib)]);
+    let second = source.commit(second_tree, &[first], "second\n");
+    let gitlinks: LossySet = [LossyClass::Gitlinks].into_iter().collect();
+    let (_dir, root, repo) = unsynced_repo();
+    let mut lossy = request(&first.to_string());
+    lossy.lossy = gitlinks;
+    let base = import(&repo, &source, &lossy).unwrap();
+    assert_eq!(base.lossy_total, 1);
+
+    // 1. Without the class: the gitlink refused, as the base's would be.
+    let before = files(&root);
+    let error = import(&repo, &source, &request(&second.to_string())).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            ImportError::Convert(ConvertError::Lossy { class: LossyClass::Gitlinks, path, .. })
+                if path == b"lib/sub"
+        ),
+        "{error:?}"
+    );
+    assert_eq!(files(&root), before, "nothing written");
+    assert_eq!(main_head(&repo), base.head);
+
+    // 2. With it: both of the commit's blobs read, the one it shares with the base too.
+    let counting = Counting {
+        inner: source,
+        reads: RefCell::new(Vec::new()),
+    };
+    let mut allowed = request(&second.to_string());
+    allowed.lossy = gitlinks;
+    let report = import(&repo, &counting, &allowed).unwrap();
+    assert_eq!(
+        (report.imported, report.skipped, report.lossy_total),
+        (1, 1, 1)
+    );
+    let blobs: BTreeSet<GitOid> = (counting.reads.borrow().iter())
+        .filter(|(_, kind)| *kind == RawKind::Blob)
+        .map(|(oid, _)| *oid)
+        .collect();
+    assert_eq!(blobs, BTreeSet::from([readme, two]));
 }
 
 /// Without `gitlinks` allowed, the commit that holds one is refused by name, and nothing of the
