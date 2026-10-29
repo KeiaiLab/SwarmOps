@@ -119,31 +119,42 @@ def files(target: str) -> dict[str, bytes]:
     return contents
 
 
+Member = tuple[tarfile.TarInfo, bytes | None]
+
+
 def archive(directory: Path, target: str = X86, version: str = VERSION,
             change: Callable[[dict[str, bytes]], None] | None = None,
             dates: Callable[[str], int] = lambda _: MTIME, level: int = 9,
-            name: str | None = None) -> Path:
+            name: str | None = None,
+            members: Callable[[list[Member]], None] | None = None) -> Path:
     """Packs a release archive as the release workflow does: the directory, then its entries
     sorted by name, owned by root, gzip'd at `level`. `change` edits the entries first; `dates`
-    dates each entry by name."""
+    dates each entry by name; `members` edits the tar members last."""
     top = f"swarmops-{version}-{target}"
     contents = files(target)
     if change:
         change(contents)
-    raw = io.BytesIO()
-    with tarfile.open(fileobj=raw, mode="w", format=tarfile.GNU_FORMAT) as tar:
-        entries = [(top, None)] + [(f"{top}/{n}", contents[n]) for n in sorted(contents)]
-        for path, data in entries:
-            info = tarfile.TarInfo(path)
-            info.mtime = dates(path)
-            info.uname = info.gname = "root"
-            if data is None:
-                info.type, info.mode = tarfile.DIRTYPE, 0o755
-                tar.addfile(info)
-                continue
+
+    # 1. The tar members: the directory, then the files.
+    packed: list[Member] = []
+    for path, data in [(top, None)] + [(f"{top}/{n}", contents[n]) for n in sorted(contents)]:
+        info = tarfile.TarInfo(path)
+        info.mtime = dates(path)
+        info.uname = info.gname = "root"
+        if data is None:
+            info.type, info.mode = tarfile.DIRTYPE, 0o755
+        else:
             info.size = len(data)
             info.mode = 0o755 if path.rsplit("/", 1)[1] in BINARIES else 0o644
-            tar.addfile(info, io.BytesIO(data))
+        packed.append((info, data))
+    if members:
+        members(packed)
+
+    # 2. The archive.
+    raw = io.BytesIO()
+    with tarfile.open(fileobj=raw, mode="w", format=tarfile.GNU_FORMAT) as tar:
+        for info, data in packed:
+            tar.addfile(info, None if data is None else io.BytesIO(data))
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / (name or f"{top}.tar.gz")
     path.write_bytes(gzip_bytes(raw.getvalue(), level))
@@ -364,6 +375,9 @@ def rpm_layout(scratch: Path) -> None:
     modes = [0o100755, 0o100755, 0o40755] + [0o100644] * 4
     assert value(header, 1030) == modes, [oct(m) for m in value(header, 1030)]
     assert value(header, 1037) == [0, 0, 0, 2, 128, 2, 128], "doc and license flags"
+    # rpm --verify checks every attribute of every file, the digests being SHA-256 (8).
+    assert header[1045] == (4, [0xFFFFFFFF] * len(paths)), "file verify flags"
+    assert header[5011] == (4, [8]), "file digest algorithm"
 
     # 4. The payload: the same files, prefixed with `.`, dated at the archive.
     cpio = package["cpio"]
@@ -417,10 +431,32 @@ def put(name: str, data: bytes) -> Callable[[dict[str, bytes]], None]:
     return lambda contents: contents.__setitem__(name, data)
 
 
+def duplicate(name: str) -> Callable[[list[Member]], None]:
+    """A second member of the file `name`, the same as the first."""
+    def edit(packed: list[Member]) -> None:
+        packed.append(next(m for m in packed if m[0].name.endswith(f"/{name}")))
+    return edit
+
+
+def retype(suffix: str, kind: bytes, linkname: str = "") -> Callable[[list[Member]], None]:
+    """The member whose name ends with `suffix` made of type `kind`, with no data."""
+    def edit(packed: list[Member]) -> None:
+        for i, (info, _) in enumerate(packed):
+            if info.name.endswith(suffix):
+                info.type, info.linkname, info.size = kind, linkname, 0
+                packed[i] = (info, b"" if kind == tarfile.REGTYPE else None)
+    return edit
+
+
 # The refusals: (label, archive arguments, a line of the error).
 REFUSALS = (
     ("an entry too many", {"change": put("SECURITY.md", b"x")}, "does not hold exactly"),
     ("an entry missing", {"change": drop("README.md")}, "does not hold exactly"),
+    ("an entry twice", {"members": duplicate("README.md")}, "does not hold exactly"),
+    ("a symlink entry", {"members": retype("/README.md", tarfile.SYMTYPE, "LICENSE")},
+     "is not a directory of regular files"),
+    ("the directory a file", {"members": retype(f"-{X86}", tarfile.REGTYPE)},
+     "is not a directory of regular files"),
     ("entries dated apart", {"dates": lambda p: MTIME + p.endswith("so")}, "not all dated alike"),
     ("the other machine's binary", {"change": put("so", binary(ARM, "so"))},
      "for ELF machine 183"),
