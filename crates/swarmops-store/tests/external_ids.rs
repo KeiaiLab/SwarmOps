@@ -16,7 +16,9 @@ use std::sync::Arc;
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, ObjectKind, hash_object};
 #[cfg(feature = "test-hooks")]
-use swarmops_store::{CRASH_AT_ENV, CrashAtFs, FailAt, FailAtFs, FailMode, InjectedError};
+use swarmops_store::{
+    CRASH_AT_ENV, ChangesetMeta, CrashAtFs, FailAt, FailAtFs, FailMode, InjectedError, MetaStore,
+};
 use swarmops_store::{
     ExternalEntry, ExternalIds, ExternalPut, Layout, RealFs, SYSTEM_GIT, StoreError,
 };
@@ -83,6 +85,26 @@ fn hex(bytes: &[u8]) -> String {
 fn store_root() -> (TempDir, Layout) {
     let (dir, layout) = new_root();
     fs::create_dir_all(layout.meta_dir()).unwrap();
+    fs::create_dir_all(layout.objects_tmp()).unwrap();
+    (dir, layout)
+}
+
+/// A store root whose journal records the changesets `three()` names in a durable frame: the
+/// order checker's W8 links an entry only once its changeset's frame is durable.
+#[cfg(feature = "test-hooks")]
+fn journaled_root() -> (TempDir, Layout) {
+    let (dir, layout) = new_root();
+
+    // 1. One frame inserts changesets 1 to 3.
+    let store = MetaStore::create_in(layout.clone(), Arc::new(RealFs::new())).unwrap();
+    let mut write = store.write().unwrap();
+    for n in 1..=3 {
+        let meta = ChangesetMeta::new(changeset(n), 0, 0, [n; 32], vec![]);
+        write.insert_changeset(meta).unwrap();
+    }
+    write.commit().unwrap();
+
+    // 2. The staging directory a put's temp files go to.
     fs::create_dir_all(layout.objects_tmp()).unwrap();
     (dir, layout)
 }
@@ -560,7 +582,7 @@ fn external_ids_crashing_at_any_call_leave_whole_entries_or_none() {
         let put = index.put_batch(SYSTEM_GIT, &three());
         panic!("the crash hook did not fire: put_batch returned {put:?}");
     }
-    let (_dir, layout) = store_root();
+    let (_dir, layout) = journaled_root();
     let counted = Arc::new(CrashAtFs::new(RealFs::new(), 0));
     let mut index = ExternalIds::new(layout, checked(Arc::clone(&counted)));
     index.set_parallelism(1);
@@ -569,7 +591,8 @@ fn external_ids_crashing_at_any_call_leave_whole_entries_or_none() {
     assert!(calls > 3 * 4, "a put of three makes more calls: {calls}");
 
     for k in 1..=calls {
-        let (_dir, layout) = store_root();
+        let (_dir, layout) = journaled_root();
+        let made = files_under(layout.root());
         let child = child::run(
             this_test(&test_name!(TEST))
                 .env(CRASH_ROOT, layout.root())
@@ -595,6 +618,9 @@ fn external_ids_crashing_at_any_call_leave_whole_entries_or_none() {
             }
         }
         for file in files_under(layout.root()) {
+            if made.contains(&file) {
+                continue;
+            }
             let entry = three()
                 .iter()
                 .any(|(key, _)| file == layout.external_id_path(SYSTEM_GIT, key));
@@ -626,7 +652,7 @@ fn a_put_failing_at_any_call_fails_and_completes_again() {
     use swarmops_store::FsMethod;
 
     // 1. A dry run counts the put's calls.
-    let (_dir, layout) = store_root();
+    let (_dir, layout) = journaled_root();
     let counted = Arc::new(CrashAtFs::new(RealFs::new(), 0));
     let mut index = ExternalIds::new(layout, checked(Arc::clone(&counted)));
     index.set_parallelism(1);
@@ -638,7 +664,7 @@ fn a_put_failing_at_any_call_fails_and_completes_again() {
     for error in [InjectedError::Eio, InjectedError::Enospc] {
         for k in 1..=calls + 1 {
             let what = format!("call {k} of {calls} failing once with {error:?}");
-            let (_dir, layout) = store_root();
+            let (_dir, layout) = journaled_root();
             let fail = FailAt::new(k, FailMode::Once, error);
             let failing = Arc::new(FailAtFs::new(RealFs::new(), fail));
             let mut index = ExternalIds::new(layout.clone(), checked(Arc::clone(&failing)));
