@@ -60,7 +60,8 @@
 //! [`ImportError::PostCommit`]), saying how far it got. It never writes again after such a
 //! failure: storage spec §2 rule 5's fail-stop assumption goes unchecked until M6. The same
 //! import run again continues after the frames that committed. A commit the conversion refuses
-//! ([`ImportError::Convert`]) ends the import before the frame that would hold it.
+//! ([`ImportError::Convert`]) ends the import before the frame that would hold it; the frames
+//! before it stay recorded, but the refusal does not say how many commits they hold.
 //!
 //! The export oids of steps 1 to 3 are derived from the store's own objects, as the export
 //! derives them: the import asks for one only where the target's head is native, or holds a git
@@ -194,7 +195,8 @@ impl ImportRequest {
 pub struct ImportReport {
     /// The commits it recorded: each one the walk did not know, its changeset made (or found in
     /// the store already, as after a crash before its external id was written) and its external
-    /// id written.
+    /// id entry written, unless the index held another entry for the commit, which it keeps (a
+    /// warning names the commit).
     pub imported: u64,
     /// The known commits the walk stopped at: the base, and commits the external id index
     /// names.
@@ -281,16 +283,23 @@ impl LossyCommit {
     }
 }
 
-/// Why an import failed. Each says how far it got where it wrote anything.
+/// Why an import failed. A store failure and a failure after a frame's commit point say how far
+/// it got ([`ImportError::Store`], [`ImportError::PostCommit`]); a refusal of the conversion does
+/// not ([`ImportError::Convert`]), though frames may be recorded before it.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ImportError {
     /// The source could not open, resolve or read what the import needs: the ref names nothing,
-    /// the repository is one the import does not read, an object is missing or damaged.
+    /// the repository is one the import does not read, an object is missing or damaged. Raised
+    /// before any frame: no changeset was recorded. A read the conversion makes fails as
+    /// [`ImportError::Convert`] ([`ConvertError::Source`]).
     #[error(transparent)]
     Source(#[from] SourceError),
-    /// The conversion refused a commit: content of a class the request does not allow, or
-    /// content no class covers. The frames before the one that would hold it are recorded.
+    /// The conversion refused a commit: content of a class the request does not allow, content
+    /// no class covers, or an object it could not read. The frames before the one that would hold
+    /// it are recorded, with their external ids, but the refusal does not say how many commits
+    /// they hold; the same import run again, once the refusal is dealt with, continues after
+    /// them.
     #[error(transparent)]
     Convert(#[from] ConvertError),
     /// The target is no ref name the store takes, or a remote-tracking one, which only a fetch

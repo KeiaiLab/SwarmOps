@@ -564,11 +564,14 @@ const RESUME_HINT: &str =
 
 /// The operations-spec error for a `git import` of `git_ref` from the repository at `git_path`
 /// that failed with `e`: the table in [`crate::LocalOps`]'s documentation. The source and its
-/// objects are named as the caller gave them and by their git ids; an import that stopped after
-/// it committed frames says how far it got (`details.imported`, `details.last_commit`).
+/// objects are named as the caller gave them and by their git ids; an import that a store
+/// failure, or a failure after a frame's commit point, stopped says how far it got
+/// (`details.imported`, `details.last_commit`). A refusal does not, though frames committed
+/// before it may be recorded: `ImportError::Convert` carries no count.
 pub(crate) fn git_import_error(e: ImportError, git_path: &str, git_ref: &str) -> OpError {
     let message = e.to_string();
     match e {
+        // A refusal: no `details.imported`, whatever frames it followed.
         ImportError::Source(e) => source_error(e, message, git_path, git_ref),
         ImportError::Convert(e) => convert_error(e, message, git_path, git_ref),
         ImportError::RefName(name) => ref_name_invalid(name, message),

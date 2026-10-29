@@ -565,6 +565,14 @@ left).
   earlier import took with a loss reports `lossy_total` 0 and skips it rather than refusing, as
   `GitImportReq.lossy` and `git import`'s help say. *Documented (issue #8 item 3; refusing or
   listing such a commit is unscheduled). Found: M3's consolidated review.*
+- **A refused import does not say how far it got.** An import stops before the frame that would
+  hold a commit it refuses (`E_GIT_IMPORT_LOSSY`, `E_GIT_UNSUPPORTED`, or `E_GIT_READ` for an
+  object it cannot read), and the frames before it, 8,192 commits each, stay recorded with their
+  external ids; but the error carries no `details.imported` or `details.last_commit`, which only a
+  store failure and a failure after a frame's commit point report. The same import run again, once
+  the refusal is dealt with, continues after those frames. *Unscheduled: the refusal would carry
+  the run's progress, as a store failure's error does. Found: M3's import review (issue #7 item
+  2, issue #8 item 2).*
 
 ## Git remotes
 

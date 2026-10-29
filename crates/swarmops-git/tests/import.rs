@@ -1484,9 +1484,10 @@ fn two_imports_racing_end_at_the_same_head() {
     assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
 }
 
-/// What the import does not read is refused before anything is written: a SHA-256 repository and
-/// a shallow clone when the source opens, a partial clone's missing blob and a damaged object
-/// when the conversion reads them; the store stays as `init` left it.
+/// What the import does not read is refused: a SHA-256 repository and a shallow clone when the
+/// source opens, a partial clone's missing blob and a damaged object when the conversion reads
+/// them, before the frame that would hold their commit. Here that frame is the first, so nothing
+/// is written: the store stays as `init` left it.
 #[test]
 fn the_unsupported_fixtures_are_refused_before_writing() {
     for (name, unsupported) in [

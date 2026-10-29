@@ -500,8 +500,10 @@ changesets (`Repo::raw_batch`), objects and external id index:
 A store failure stops the import after the last frame that committed (a writer lock held for the
 whole wait is retried three times), and so does a frame whose step after its commit point
 failed: it never writes again after a failed sync. The same import run again resumes there,
-since each commit it recorded has its external id. A commit the conversion refuses stops it
-before the frame that would hold that commit. The import reads no object whole whose header says
+since each commit it recorded is in the store and named by its external id entry (or warned of,
+where the index kept another entry for it). A commit the conversion refuses stops it before the
+frame that would hold that commit; the frames before stay recorded, though the refusal does not
+count them. The import reads no object whole whose header says
 it is longer than an object holds (512 MiB): a commit, a tree or an annotated tag it would parse,
 or a blob it would store, is refused before a byte of it is read (`E_TOO_LARGE`, naming it).
 

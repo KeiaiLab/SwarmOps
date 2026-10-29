@@ -130,6 +130,11 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   `SECURITY.md` drops the unbounded journal and index reads M6 bounded; the `op undo`, `ref list`
   and concepts pages describe `op log`'s committed numbers and FORMAT 2's refs (issue #6 item 12,
   issue #3 item 2, issue #16 item 8, issue #20 items 10 and 21, issue #21 item C1).
+- The git round-trip guide and the import's documentation say which stopped imports count what
+  they recorded: a store failure and a failure after a frame's commit point do
+  (`details.imported`, `details.last_commit`), and a refusal (`E_GIT_IMPORT_LOSSY`,
+  `E_GIT_UNSUPPORTED`, `E_GIT_READ`) keeps the frames before it without counting them; the guide
+  promised the count for every import cut short (issue #7 item 2, issue #8 item 2).
 
 ### Fixed
 
