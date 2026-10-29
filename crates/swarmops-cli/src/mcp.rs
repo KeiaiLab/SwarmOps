@@ -3214,7 +3214,8 @@ mod tests {
 
     /// A line longer than the server's cap (`MAX_REQUEST_BYTES`, small here) is answered with
     /// `-32600` and no `id`, and the server serves on: the next request on the same input is
-    /// answered. A line of exactly the cap is served, and so is a last line without a line break.
+    /// answered. A line of exactly the cap is served, with a line break and as the last line
+    /// without one, where only its length tells it from a longer line.
     #[test]
     fn an_over_long_line_is_an_invalid_request_and_the_server_serves_on() {
         let global = Global::default();
@@ -3223,11 +3224,14 @@ mod tests {
         let mut server = Server::with_max_line(&global, &env, cap);
         let ping = |id: &str| format!(r#"{{"jsonrpc":"2.0","id":"{id}","method":"ping"}}"#);
         let long = ping(&"x".repeat(200));
-        // An id that pads the request to exactly the cap.
+        // Ids that pad a request to exactly the cap.
         let at_cap_id = "y".repeat(64 - ping("").len());
         let at_cap = ping(&at_cap_id);
         assert_eq!(at_cap.len(), 64);
-        let input = format!("{long}\n{}\n{at_cap}\n{}", ping("after"), ping("last"));
+        let last_id = "z".repeat(at_cap_id.len());
+        let last = ping(&last_id);
+        assert_eq!(last.len(), 64);
+        let input = format!("{long}\n{}\n{at_cap}\n{last}", ping("after"));
         let mut output = Vec::new();
         server.serve(input.as_bytes(), &mut output).unwrap();
         let answers: Vec<Value> = String::from_utf8(output)
@@ -3242,7 +3246,7 @@ mod tests {
         assert!(message.contains("64 bytes"), "{message}");
         for (answer, id) in answers[1..]
             .iter()
-            .zip(["after", at_cap_id.as_str(), "last"])
+            .zip(["after", at_cap_id.as_str(), last_id.as_str()])
         {
             assert_eq!(answer, &json!({"jsonrpc": "2.0", "id": id, "result": {}}));
         }
