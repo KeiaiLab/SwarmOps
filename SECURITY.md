@@ -129,8 +129,10 @@ filesystem permissions are the access boundary. Within that model, these are vul
 ## What is not a vulnerability under M1's model
 
 - **One agent acting as another.** In M1 an identity (`--as`, `SWARMOPS_AGENT`) is a claim that
-  is recorded, not verified: every envelope's `meta.auth` says `"trust"`. Tokens arrive later
-  (`E_AUTH` is reserved for them).
+  is recorded, not verified: every envelope's `meta.auth` says `"trust"`. Tokens arrive later.
+  `swarmops serve` (M14) is the exception: its caller is named by the operator's ssh key line or
+  web server, not claimed, and the store's `access.toml` decides what that caller may do
+  (`E_AUTH`, `E_POLICY_DENIED`).
 - **Anything a local user with write access to the store can do directly**: delete, rewrite or
   corrupt its files, hold its lock, fill its disk. Filesystem permissions are the boundary.
   SwarmOps detecting such damage is in scope (`swarmops verify --deep` re-hashes every object
@@ -146,5 +148,9 @@ filesystem permissions are the access boundary. Within that model, these are vul
   describes the durability model and its tests.
 - **Builds with the `test-hooks` feature**, which exist for the test suite only.
 
-When SwarmOps gains a server that takes requests from another host (M11's `serve` first), the
-trust model changes, and this policy with it.
+`swarmops serve` (M14) takes git's requests from another host, behind the operator's ssh or web
+server: what a caller may do is the store's `access.toml`, and no text it sends a client names a
+host path, except the git lines [docs/known-limitations.md](docs/known-limitations.md#serving-requests)
+lists. A flaw that lets a caller act past its grants, or read a host path, is a vulnerability.
+When M11's server takes SwarmOps requests from another host, the trust model changes again, and
+this policy with it.

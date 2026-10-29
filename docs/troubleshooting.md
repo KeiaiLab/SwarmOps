@@ -86,8 +86,8 @@ retry advice; this is that table. Four codes are in the schema but no operation 
 | `E_WS_UNPORTABLE` | 1 | no | The tree holds paths the workspace's volume cannot hold. | [Workspaces](#e_ws_unportable) |
 | `E_CHECK_FAILED` | 1 | no | A workspace's check or bootstrap command failed or timed out. | [Workspaces](#e_check_failed) |
 | `E_REF_NOT_FOUND` | 6 | no | Not raised yet. | [Codes not raised yet](#codes-not-raised-yet) |
-| `E_AUTH` | 5 | no | Not raised yet. | [Codes not raised yet](#codes-not-raised-yet) |
-| `E_POLICY_DENIED` | 5 | no | Not raised yet. | [Codes not raised yet](#codes-not-raised-yet) |
+| `E_AUTH` | 5 | no | `swarmops serve` names no caller, or no grant of the store's `access.toml` names it. | [Serve over ssh](operate/serve-over-ssh.md#refusals-a-client-sees) |
+| `E_POLICY_DENIED` | 5 | no | The store's `access.toml` grants the caller no such action, or the file is invalid. | [Serve over ssh](operate/serve-over-ssh.md#refusals-a-client-sees) |
 | `E_MAINTENANCE_BUSY` | 4 | yes | Not raised yet. | [Codes not raised yet](#codes-not-raised-yet) |
 
 `git import` and `git export` are commands only, so the `E_GIT_*` codes never come from a tool
@@ -1236,9 +1236,10 @@ A check that needs more than 900 s takes `--check-timeout`.
 
 ## Codes not raised yet
 
-`E_REF_NOT_FOUND` (exit 6), `E_AUTH` (exit 5), `E_POLICY_DENIED` (exit 5) and
-`E_MAINTENANCE_BUSY` (exit 4, retryable) are in the schema so that a client can match them now, but
-no operation raises them: no operation looks a ref up by name (a missing ref is
-`E_REV_NOT_FOUND`), and tokens, `policy.toml` and gc's maintenance lease come later
-([known-limitations.md](known-limitations.md#serving-requests)). A client that meets a code newer
+`E_REF_NOT_FOUND` (exit 6) and `E_MAINTENANCE_BUSY` (exit 4, retryable) are in the schema so
+that a client can match them now, but no operation raises them: no operation looks a ref up by
+name (a missing ref is `E_REV_NOT_FOUND`), and gc's maintenance lease comes later
+([known-limitations.md](known-limitations.md#serving-requests)). `E_AUTH` and `E_POLICY_DENIED`
+are raised by `swarmops serve` since M14
+([Serve over ssh](operate/serve-over-ssh.md#refusals-a-client-sees)). A client that meets a code newer
 than its own table reads `exit` and `retryable` from the error itself.

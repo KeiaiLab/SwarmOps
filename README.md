@@ -512,7 +512,7 @@ planned, each with its milestone.
 | Order of writes | ✅ M1: every commit and ref move is a frame of one journal, appended under one lock, so all of them have a single global order. | **Ahead by design.** |
 | Stale locks | ✅ M1: the writer lock is an `flock`, which the kernel releases when its holder dies. | **Ahead by design.** A git process killed with `SIGKILL` while it holds `index.lock` or a ref's `.lock` leaves the file behind, to be removed by hand (git removes its lock files on the signals it can catch). |
 | Durability | ✅ M1: full fsync is the only mode; an object is synced before a journal frame names it, and a commit returns after its frame's `fdatasync`. ✅ M1.5: the policy for a failed fsync. | **Ahead by design.** Git's defaults (2.43) sync packs, pack metadata and the commit graph, not loose objects, refs or the index. |
-| Machine-readable contract | ✅ M1: one JSON envelope per command, with a stable `E_*` code, a fixed exit code, `retryable`, `details` and a `hint`; a JSON Schema for every request and response. ✅ M1.6: an I/O failure names its operation and store file, and no host path but in two `E_IO`s (a symlink loop met while working out where the store's path leads, and tempfile's giving up after 65,536 taken temp-file names); a write reports what its recovery repaired (`meta.recovered`); `verify` lists typed findings. | **Ahead by design** for errors, which git reports as free text on stderr. Git's plumbing and `--porcelain` formats narrow the gap for output. Known gap: three codes are not raised yet. |
+| Machine-readable contract | ✅ M1: one JSON envelope per command, with a stable `E_*` code, a fixed exit code, `retryable`, `details` and a `hint`; a JSON Schema for every request and response. ✅ M1.6: an I/O failure names its operation and store file, and no host path but in two `E_IO`s (a symlink loop met while working out where the store's path leads, and tempfile's giving up after 65,536 taken temp-file names); a write reports what its recovery repaired (`meta.recovered`); `verify` lists typed findings. | **Ahead by design** for errors, which git reports as free text on stderr. Git's plumbing and `--porcelain` formats narrow the gap for output. Known gap: `E_REF_NOT_FOUND` is not raised yet. |
 | Commits from many writers | ✅ M1: concurrent commits all succeed, short of a lock wait past 10 s or, since M1.6, a snapshot that meets a new commit in each of its 32 rounds (the retryable `E_BUSY`). | **Parity** with agents in separate git worktrees, on lost commits and lock failures. |
 | One ref by compare-and-swap | ✅ M1: `ref set --expect` or `--create`, `ref delete --expect`; setting a ref to the target it holds is a replay. ✅ M1.6: `commit --advance` moves a ref to the new changeset in the commit's own transaction, or records nothing. | **Parity** with `git update-ref <ref> <new> <old>`, plus the replay. |
 | Reading a path at a revision | ✅ M1: `cat REV:PATH` and `ls REV[:PATH]`, without a checkout. | **Parity** with `git show REV:PATH` and `git ls-tree`. |
@@ -548,7 +548,7 @@ design, acceptance criteria and targets. Command names of planned work are provi
 
 | Topology | Today | Planned |
 | --- | --- | --- |
-| 1. Local git, remote SwarmOps | Not served: a bare git repository that `git export` writes, whose pushes someone imports and lands | M14: `swarmops serve` over ssh and HTTP; stock `git clone`, `fetch`, `pull` and `push`; a push to `refs/land/main` lands |
+| 1. Local git, remote SwarmOps | ✅ M14: `swarmops serve` over ssh and smart HTTP, run per connection; stock `git clone`, `fetch`, `pull` and `push`, and a push to `refs/land/main` lands ([Serve over ssh](docs/operate/serve-over-ssh.md), [Serve over HTTP](docs/operate/serve-over-http.md)) | Whether `git push origin main` should land too |
 | 2. Local SwarmOps, remote GitHub | ✅ M13: `so clone https://github.com/…`, `so fetch`, `so push`, `so sync`, with no hand-run git ([GitHub as a remote](docs/guides/github-remote.md)) | Opening pull requests from SwarmOps |
 | 3. Local SwarmOps, remote SwarmOps | Through a git remote, one writing host at a time (M8) | M11: `so clone so://host/…` and `so sync`, offline-first |
 
@@ -568,7 +568,7 @@ The milestones of the umbrella spec (§13), in the order they are built. ✅ del
 | ✅ | M13 | Git remotes from a store (topology 2): the store's git mirror, the user's git run as the transport, `so clone`, `so remote`, `so fetch`, `so push`, `so sync`, `so sync status` and their MCP tools, commit addresses per agent family (`authors.toml`). |
 | ✅ | M5 | Workspaces, with an adapter for Claude Code's worktree hooks, so that an agent builds and tests a change on disk before it lands it: `so ws`, `rebase`, `land --expect-target`, `blob get` and eleven MCP workspace tools. |
 | ✅ | M6 | Verify, crash safety and fuzzing: `repair`, `gc`, detection of unsupported filesystems by `statfs`, bounded reads of store files, a capped `verify` report, a literal `SIGKILL` test, four more fuzz targets, and store `FORMAT 2`, with branch names, tags and remote-tracking refs, and `upgrade` to it. |
-| 📋 | M14 | Git clients against a store (topology 1): `swarmops serve` over ssh and HTTP, run per connection; pushes by compare-and-swap or that land; access control. |
+| ✅ | M14 | Git clients against a store (topology 1): `swarmops serve` over ssh and HTTP, run per connection; pushes by compare-and-swap or that land; access control (`access.toml`, `E_AUTH`, `E_POLICY_DENIED`). |
 | 📋 | M7 | Blame and review. |
 | 📋 | M9 | Simulation and a benchmark gate: the store's own code under a deterministic simulator and in real processes killed at random, and benchmarks that fail on a regression. |
 | 📋 | M11 | Remote sync, offline-first (topology 3): a full store on every host, `so clone so://…`, `fetch`, `push`, `sync` and `sync status` against one upstream, over ssh. |
@@ -585,6 +585,8 @@ and one commit's fetch and push on a long history ([docs/perf.md](docs/perf.md))
 what they missed: the landing model those numbers chose (metalog merge: 0 % retries at 50
 landing processes, p99 still 580–595 ms against 500), authenticated export memos (a push 1.04× on
 12,000 commits against 1,000), checked fetches, a protected `main` and the benchmark gate.
+M14, for 0.7.0, serves stores to stock git (on 12,000 commits a clone 0.97× and a no-op fetch
+1.82× git's own server, a push that lands 0.104 s).
 
 The road to usable ([To usable](docs/roadmap.md#to-usable)): a real repository runs 8 or more
 agents for 3 or more days with no lost commit, a clean `verify --deep`, nothing rewritten and an
@@ -641,7 +643,7 @@ for each: its syntax, its arguments, an example, what it returns and the errors 
 | Move work to and from git | [`git import`](docs/reference/commands/git-import.md) · [`git export`](docs/reference/commands/git-export.md) |
 | Work with a git remote | [`clone`](docs/reference/commands/clone.md) · [`remote add`](docs/reference/commands/remote-add.md) · [`remote remove`](docs/reference/commands/remote-remove.md) · [`remote list`](docs/reference/commands/remote-list.md) · [`fetch`](docs/reference/commands/fetch.md) · [`push`](docs/reference/commands/push.md) · [`sync`](docs/reference/commands/sync.md) · [`sync status`](docs/reference/commands/sync-status.md) |
 | Build and test in a workspace | [`ws create`](docs/reference/commands/ws-create.md) · [`ws status`](docs/reference/commands/ws-status.md) · [`ws diff`](docs/reference/commands/ws-diff.md) · [`ws commit`](docs/reference/commands/ws-commit.md) · [`ws rebase`](docs/reference/commands/ws-rebase.md) · [`ws resolve`](docs/reference/commands/ws-resolve.md) · [`ws land`](docs/reference/commands/ws-land.md) · [`ws materialize`](docs/reference/commands/ws-materialize.md) · [`ws discard`](docs/reference/commands/ws-discard.md) · [`ws list`](docs/reference/commands/ws-list.md) · [`ws info`](docs/reference/commands/ws-info.md) · [`ws delete`](docs/reference/commands/ws-delete.md) · [`ws hook`](docs/reference/commands/ws-hook.md) |
-| Serve agents | [`mcp`](docs/reference/commands/mcp.md) |
+| Serve agents and git clients | [`mcp`](docs/reference/commands/mcp.md) · [`serve`](docs/reference/commands/serve.md) |
 
 - <a id="publishing-a-change"></a>**Publishing a change**: commit on the head you read, then
   land it ([Commit and land](docs/guides/commit-and-land.md)).

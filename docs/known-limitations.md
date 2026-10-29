@@ -1,6 +1,6 @@
 # Known limitations
 
-What SwarmOps does not do yet, or does less well than it should, as of M6, and the milestone
+What SwarmOps does not do yet, or does less well than it should, as of M14, and the milestone
 meant to change it. The items come from the M1 and M1.5 reviews and the 2026-10-16 code review:
 the carry-overs their tasks handed to later milestones, the deferred minors that are still open,
 and the rulings of M1's final review, which left 14 questions to the maintainer (the table at the
@@ -15,7 +15,7 @@ M4 merge and landing · M8 git export · M12 portability · M13 git remotes · M
 M6 verify, crash safety and fuzzing · M14 git clients against a store · M7 blame and review ·
 M9 simulation and a benchmark gate · M11 remote sync, offline-first.
 M0, M1, M1.5, M1.6, M2, M3, M4 and M8 make the first release, 0.1.0; M13 makes 0.2.0, M5
-0.3.0 and M6 0.4.0; 0.5.0 adds no milestone: it holds the pilot, the measurements and the first v0.6 fixes; 0.6.0 holds the fixes the measurements asked for. M1.5, the hardening milestone after M1, closed a few, and M1.6, the code-review follow-ups after it,
+0.3.0 and M6 0.4.0; 0.5.0 adds no milestone: it holds the pilot, the measurements and the first v0.6 fixes; 0.6.0 holds the fixes the measurements asked for; M14 makes 0.7.0. M1.5, the hardening milestone after M1, closed a few, and M1.6, the code-review follow-ups after it,
 closed more. "Deferred
 until after the pilot" marks a delivered milestone's task that waits until SwarmOps has been
 piloted on a real repository ([pilot.md](pilot.md)): the measurements that need a quiet host,
@@ -112,8 +112,13 @@ left).
   conflict), or the target moved off the first-parent line through the head the land read, or
   more than 256 changesets along it; a land with `expect_target` (`ws land --check`) never
   relocates. An agent that meets
-  `E_CAS_RETRY_EXHAUSTED` lands again with the same key, or asks for more attempts. *Open: G4's
-  p99 (goals.md). Found: the 2026-10-20 plan triage; narrowed by v0.6.0.*
+  `E_CAS_RETRY_EXHAUSTED` lands again with the same key, or asks for more attempts. Each land
+  takes the lock twice, for its `commit` and for its `land`, about 25 ms together, so at 25 lands
+  a second the lock is held about 62 % of the time and the tail is the queue's wait, not the hold
+  (on the bench disk in M14's window the two took about 42 ms at the median, the lock was held
+  99.6 % of the run and the p99 rose to 2.5–2.7 s, for v0.6.0's code as for M14's;
+  [perf.md](perf.md#v070--2026-10-29)). *Open: G4's p99 (goals.md). Found: the 2026-10-20 plan
+  triage; narrowed by v0.6.0; its cause measured in M14.*
 - **Recovery after a crash walks all of a FORMAT 1 `journal.off` under the lock.** Before it cuts
   or lists anything, the first writer after a crash checks every entry of a FORMAT 1 store's
   `journal.off`. On a long journal that walk could approach `lock_timeout` for the writers queued
@@ -402,22 +407,55 @@ left).
   No protocol bytes are ever interleaved, because no server starts. *Unscheduled. Found: M1.5
   Task 5 review.*
 - **`{"file": "<path>"}` content is read by whoever serves the request.** That is the caller for
-  the CLI and the stdio MCP server; a server that takes requests from another host (M11's
-  `serve` first) must refuse such content, and a client must turn it into bytes before the
-  request leaves. Through MCP a relative path, a path that is the server's own stdin or stdout,
-  and anything that is not a regular file (a FIFO, a socket, a device or a directory, or a
-  symlink to one) are refused before anything is read. *Target: M14 (`serve`, reused by M11). Found: M1
-  Task 4b; M1.5 Task 9 review (M11's `serve`).*
-- **Three error codes are not raised yet.** `E_REF_NOT_FOUND` (no operation looks a ref up by
-  name), `E_AUTH` and `E_POLICY_DENIED` (tokens and `policy.toml` come later) are in the schema, so that an agent can match them before any
-  operation raises them. *Documented. Found: the 2026-10-16 comparison; M1.5 Task 9 review.*
+  the CLI and the stdio MCP server. Through MCP a relative path, a path that is the server's own
+  stdin or stdout, and anything that is not a regular file (a FIFO, a socket, a device or a
+  directory, or a symlink to one) are refused before anything is read. `swarmops serve` (M14)
+  takes no request from a git client as JSON, and the guard its operations run through refuses
+  `{"file"}` content anyway (`E_INVALID_ARG` `file_content_refused`); M11's `serve --stdio`,
+  which will take requests from another host, is to reuse that guard. *Target: M11. Found: M1
+  Task 4b; M1.5 Task 9 review (M11's `serve`); closed for `serve`'s git paths by M14.*
+- **`E_REF_NOT_FOUND` is not raised yet.** No operation looks a ref up by name; the code is in the
+  schema so that an agent can match it before any operation raises it. `E_AUTH` and
+  `E_POLICY_DENIED`, listed here before, are raised by `swarmops serve` since M14. *Documented.
+  Found: the 2026-10-16 comparison; M1.5 Task 9 review.*
 - **One temp-file error names a host path.** When 65,536 temp-file names in a row are taken in
   a directory of the store, the `tempfile` crate gives up with `too many temporary files exist`
   and the directory's absolute path, which an `E_IO` then carries; the names are random, so it
   is not met in practice. The other errors that name the store's own path answer for the path a
-  command was given (operations spec §0). A server that takes requests from another host must
-  not pass either on as it is. *Target: M14 (`serve`, reused by M11). Found: the M1.6 consolidated review
-  (error contract).*
+  command was given (operations spec §0). `swarmops serve` (M14) masks the store's path, its
+  `--root` and `serve.git` as `<path>` in every text it sends a client, so neither reaches a git
+  client; M11's server is to do the same. *Target: M11. Found: the M1.6 consolidated review
+  (error contract); narrowed by M14.*
+- **git's own lines on a push's side band are not masked.** `serve` masks what it and its hook
+  write, and git's stderr; receive-pack's side band travels on git's stdout, which `serve` passes
+  on as it is. One such line names a host path: when the hook's program is gone (the serving
+  binary replaced or removed), `sh` names the hook file `<store>/git/serve-hooks/proc-receive`,
+  and the client prints it as a `remote:` line. *Unscheduled. Found: M14 Task S3.*
+- **A pushed object `serve` refused can be fetched over protocol v2.** git moves a push's objects
+  out of its quarantine before the `proc-receive` hook decides, so a refused command's objects
+  stay in `serve.git`, unreferenced, until `gc --auto` prunes them after git's grace period.
+  `uploadpack.allowAnySHA1InWant=false` keeps them from protocol v0 clients, but protocol v2's
+  `fetch` takes any object the repository holds as a want (gitprotocol-v2), so a v2 client that
+  knows the id fetches it. Every caller of `upload-pack` holds the store's `read` grant, which
+  covers the whole store, so no grant is crossed; but a caller with `read` alone reaches
+  receive-pack, and each of its pushes may leave up to `MAX_PUSH_BYTES` (2 GiB) of objects in
+  `serve.git` before the hook refuses each ref. *Open: receive-pack into an object directory of
+  its own, or the decision moved into `pre-receive` (the M14 design's risk R-2). Found: M14 Task
+  S3.*
+- **A land through `refs/land/<target>` does not move the client's tracking branch.** The landed
+  commit is a squash the server made, so the client holds none of its objects, and git would
+  refuse to move `origin/<target>` onto it (`update_ref failed … nonexistent object`, git 2.43.0).
+  The hook names the landed commit on a `remote:` line (`landed onto main as <40 hex>: git fetch
+  brings it in`), and the next `git fetch` or `git pull` moves `origin/<target>`. *Documented (the
+  M14 design §7). Found: M14 Task L1.*
+- **A refused ref's `ng` line carries the code and the message, not `details.reason`.** A client
+  reads `reserved`, `not_served` and `annotated_tag` as words of the message ("reserves", "is not
+  served", "annotated tag"). *Unscheduled. Found: M14 Task S4.*
+- **The first connection to a large store exports its whole history.** `serve` exports every
+  served ref into `serve.git` before it advertises; a store whose history no export has reached
+  yet pays that once, as loose objects: on 12,000 commits the first clone took 1,195.6 s,
+  against 0.36 s from git's own server ([perf.md](perf.md#v070--2026-10-29)). The connections
+  after it export only what moved. *Unscheduled (one pack per export; the M14 design's risk R-3). Found: M14 Task Q1.*
 - **A request takes the memory its type holds.** The MCP server reads of a message line, at
   most 64 MiB, only the members it serves, and a tool's arguments only as their request type,
   so what else a line holds costs it nothing beyond the line's bytes (operations spec §0). A

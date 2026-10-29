@@ -27,7 +27,7 @@ v0.1.0 (2026-10-20) read and wrote only this host's store and git repositories. 
 [CHANGELOG](../CHANGELOG.md)) serves topology 2: a store clones, fetches, pushes and syncs a git
 remote itself, through the user's own git, which carries everything that crosses hosts
 ([README](../README.md#swarmops-and-git), the "Offline, on one host" and "Sync between hosts"
-rows). Topologies 1 and 3 are not served yet. v0.3.0 (M5) adds workspaces: an agent builds and
+rows). Topology 3 is not served yet. v0.3.0 (M5) adds workspaces: an agent builds and
 tests its change on disk and lands the tree it tested, through `so ws` or MCP, with Claude Code's
 worktree hooks ([Build and test a change](operate/build-and-test.md)). v0.4.0 (M6) adds `repair`,
 `gc`, store `FORMAT 2`, with free-form branches, tags and remote-tracking refs, and `upgrade` from
@@ -39,26 +39,32 @@ inline, `op log` lists committed operations only, and MCP `ws_create` fills its 
 v0.6.0 fixes what the measurements missed: `land` settles a moved `main` inside the lock by metalog
 merge, export memos a per-store key authenticates shorten `push` and `export`, a fetch checks every
 object it receives, `main` cannot be deleted, and `just bench` gates the weekly run
-([perf.md](perf.md#v060--2026-10-28)).
+([perf.md](perf.md#v060--2026-10-28)). M14, on `stable` for v0.7.0, serves topology 1:
+`swarmops serve` lets stock git clone, fetch, pull and push a store over ssh and smart HTTP
+([Topology 1 today](#topology-1-today-local-git-remote-swarmops)).
 
 ### Topology 1 today: local git, remote SwarmOps
 
-Not served. The only server is `swarmops mcp`, for an agent on the same host, so a git client
-cannot reach a store. The nearest setup is a
-bare git repository beside the store, written by `git export` and served by git itself:
+Served since M14 (v0.7.0). `swarmops serve` runs per connection, as an ssh forced command or a
+web server's CGI program, and runs the host git's `upload-pack`, `receive-pack` and
+`http-backend` on a serving repository inside the store, `git/serve.git`, whose refs are the
+exports of the store's committed snapshot. Stock git clones, fetches, pulls and pushes with
+protocol v2 or v0; a push moves a store ref by compare-and-swap, and a push to
+`refs/land/<target>` lands. The store's `access.toml` says who may read, push, force and land
+([Serve over ssh](operate/serve-over-ssh.md), [Serve over HTTP](operate/serve-over-http.md)):
 
 ```sh
-so git export /srv/git/acme.git --ref main --branch main   # the store's main, as git commits
-# people: git clone ssh://host/srv/git/acme.git, commit, git push to a branch
-so git import /srv/git/acme.git --ref feature/x --into release/x
-so land release/x --key "$(uuidgen)"                      # people's work joins main
+git clone ssh://so-host/acme.git                  # or https://so-host/acme.git
+git push origin HEAD:refs/land/main               # lands; `git fetch` brings the landed commit
+git push origin feature/x v1.4.0                  # a branch and a tag, in a FORMAT 2 store
 ```
 
-An import continues a branch that an export wrote, so commits people push on top of an export come
-in linearly ([README](../README.md#bring-a-git-repository-in)). A person must still run the import
-and the land, and a push to the branch that exports write meets `E_GIT_IMPORT_DIVERGED` or
-`E_GIT_EXPORT_DIVERGED` once both sides moved
-([One writer per trunk](operate/one-writer-per-trunk.md)).
+Criteria 1 to 5 below pass in `just check` with git 2.43.0; the Scheduled run's git matrix
+passed them with git 2.39.5, 2.43.0 and 2.56.0 on `c7baf861` (2026-10-29). G16's three targets
+are measured in [perf.md](perf.md#v070--2026-10-29). What it does not do yet is in
+[known limitations](known-limitations.md#serving-requests): a land does not move the client's
+`origin/main` until it fetches, a refused push's objects can be fetched over protocol v2 by id,
+and the first connection to a large store exports its whole history once.
 
 ### Topology 2 today: local SwarmOps, remote GitHub
 
@@ -94,14 +100,14 @@ Native sync is M11, planned.
 
 | Needed | Topology | State on `stable` | Planned in |
 | --- | --- | --- | --- |
-| Packs sent and received over a connection | 1, 2 | Built for topology 2 (M13): the user's git moves them between the remote and the store's mirror; SwarmOps writes no pack, and the export writes loose objects ([known limitations](known-limitations.md#git-import-and-export)) | M13 (done), M14 |
+| Packs sent and received over a connection | 1, 2 | Built (M13, M14): the user's git moves them between the remote and the store's mirror, and the host git serves them from `serve.git`; SwarmOps writes no pack, and the export writes loose objects ([known limitations](known-limitations.md#git-import-and-export)) | M13 (done), M14 (done) |
 | Git's fetch and push protocols, as a client | 2 | Built (M13), by running the user's git | M13 (done) |
-| Git's fetch and push protocols, as a server | 1 | Not built | M14 |
-| A server entry over ssh | 1, 3 | Not built; M11 plans `ssh <host> swarmops serve --stdio` ([architecture](architecture.md#crates-and-layering)) | M14, reused by M11 |
+| Git's fetch and push protocols, as a server | 1 | Built (M14), by running the host git | M14 (done) |
+| A server entry over ssh | 1, 3 | Built for git clients (M14): `swarmops serve` as a forced command; M11 plans `ssh <host> swarmops serve --stdio` ([architecture](architecture.md#crates-and-layering)) | M14 (done), reused by M11 |
 | Remotes, remote state and `sync` | 2, 3 | Built for git remotes (M13): `remotes.toml`, the mirror's refs, `so sync` | M13 (done), M11 (store remotes) |
-| Ref names beyond `main` and `release/<name>`, and tags | 1, 3 | Built (M6): free-form branches, `tags/<path>` and `remote/<remote>/<path>` in a `FORMAT 2` store; git-side branch and tag mapping not built | M6 (done), M14 (git side) |
-| Access control and identities for remote callers | 1, 3 | `E_AUTH` and `E_POLICY_DENIED` are in the schema and raised by nothing ([known limitations](known-limitations.md#serving-requests)) | M14 |
-| A server that refuses `{"file": "<path>"}` content and never passes on a host path | 1, 3 | Recorded as M11's work ([known limitations](known-limitations.md#serving-requests)) | M14, M11 |
+| Ref names beyond `main` and `release/<name>`, and tags | 1, 3 | Built (M6): free-form branches, `tags/<path>` and `remote/<remote>/<path>` in a `FORMAT 2` store; the git side maps them (M14): `git import`, `git export` and `serve` take branches and lightweight tags | M6 (done), M14 (done) |
+| Access control and identities for remote callers | 1, 3 | Built (M14): the store's `access.toml`, the caller named by the key line or the web server, `E_AUTH` and `E_POLICY_DENIED` | M14 (done), M11 |
+| A server that refuses `{"file": "<path>"}` content and never passes on a host path | 1, 3 | Built for `serve` (M14), but git's own side-band lines ([known limitations](known-limitations.md#serving-requests)); M11's server reuses its guard | M14 (done), M11 |
 
 ## To usable
 
@@ -192,8 +198,7 @@ people with git and hosts with SwarmOps at once.
 
 ### What people type
 
-On the server, once, an operator makes a store and gives each person or tool a key line (the forced
-command's flags are provisional):
+On the server, once, an operator makes a store and gives each person or tool a key line:
 
 ```sh
 so init /srv/so/acme --name acme
@@ -225,13 +230,15 @@ TLS and authenticates.
 **Ref mapping.** The store's `main` is git's `refs/heads/main`, `release/<name>` is
 `refs/heads/release/<name>`, and `HEAD` points at `refs/heads/main`. Each advertised value is the
 export of the ref's head: before it advertises, the server exports every ref it serves into its
-git mirror from a committed snapshot, as `git export` does, so what a client fetches is what the
-store holds and never what a crash could take back. With FORMAT 2 (M6), other branch names and
-tags become store refs of their own (`branch/<name>`, `tag/<name>`, provisional), refused until
-then with a per-ref `ng` and a reason the client prints.
+serving repository, `git/serve.git`, from a committed snapshot, as `git export` does, so what a
+client fetches is what the store holds and never what a crash could take back. In a FORMAT 2
+store (M6) every branch `<path>` is `refs/heads/<path>` and every tag `tags/<path>` is
+`refs/tags/<path>`, lightweight only; a FORMAT 1 store refuses them with a per-ref `ng`
+(`E_FORMAT_REQUIRED`), and `remote/…` and other `refs/…` are not served.
 
-**A push.** The server writes the received pack into a quarantine of the mirror, checks that every
-object the new tips reach is present and hashes to its id, then, for each ref the client named:
+**A push.** git's `receive-pack` writes the received pack into a quarantine of `serve.git`, checks
+that every object the new tips reach is present and hashes to its id, then hands each command to
+SwarmOps' `proc-receive` hook, which, for each ref the client named:
 
 1. It imports the commits the new tip reaches that the store does not hold, as `git import` does:
    each becomes the changeset it already is in every store, byte-identical, refused by lossy class
@@ -320,7 +327,7 @@ locally, HTTP through a loopback server that runs the CGI program.
 
 ### Targets
 
-Not measured; each becomes a `just perf` case.
+Measured by `just perf`'s `serve_perf` cases ([perf.md](perf.md#v070--2026-10-29)).
 
 | Target | How it is measured |
 | --- | --- |
