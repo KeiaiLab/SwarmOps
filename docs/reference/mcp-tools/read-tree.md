@@ -2,7 +2,7 @@
 
 # read_tree
 
-Lists one directory at a revision, without a checkout, a page of entries at a time, each file with its size, and with depth the directories below it too; pass a limit of 100 or less and page on with the cursor, since clients limit long tool results.
+Lists one directory at a revision, without a checkout, a page of entries at a time, each file with its size, and with depth the directories below it too; pass a limit of 100 or less and page on with the cursor at the full id meta.resolved gave for rev, since clients limit long tool results and a cursor pins no revision.
 
 ```yaml
 title: "read_tree"
@@ -23,7 +23,7 @@ max_result_chars: null
 
 | Field | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
-| `cursor` | string or null | no |  | Resume a listing: the previous page's `cursor`. Pass it back exactly as returned; do not construct it (cursors are opaque). This page starts after the entry it names. |
+| `cursor` | string or null | no |  | Resume a listing: the previous page's `cursor`. Pass it back exactly as returned; do not construct it (cursors are opaque). This page starts after the entry it names. It pins no revision: list at the full id the first page resolved (the envelope's `meta.resolved`), or a ref that moved since lists another tree, with no error. |
 | `depth` | integer | no | `1` | How many levels to list: 1 for the directory's own entries, 2 for theirs too, and so on, up to 64 (0 or more than 64 is `E_INVALID_ARG`). |
 | `limit` | integer | no | `250` | The most entries to return: at least 1 (0 is `E_INVALID_ARG`). |
 | `path` | string or null | no |  | The directory's repository path; omitted for the root. |
@@ -39,7 +39,7 @@ As `tools/list` gives it: each `$ref` replaced by its definition, so that it sta
   "description": "`read_tree` (CLI `ls`): list one directory at a revision, without a checkout, a page at a\ntime; with `depth`, the directories below it too.",
   "properties": {
     "cursor": {
-      "description": "Resume a listing: the previous page's `cursor`. Pass it back exactly as returned; do not\nconstruct it (cursors are opaque). This page starts after the entry it names.",
+      "description": "Resume a listing: the previous page's `cursor`. Pass it back exactly as returned; do not\nconstruct it (cursors are opaque). This page starts after the entry it names. It pins no\nrevision: list at the full id the first page resolved (the envelope's `meta.resolved`), or\na ref that moved since lists another tree, with no error.",
       "type": [
         "string",
         "null"

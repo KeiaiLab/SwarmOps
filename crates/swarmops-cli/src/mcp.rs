@@ -299,7 +299,9 @@ static TOOLS: [Spec; 27] = [
                       base64, from offset or the lines a range names; pass max_bytes of 32768 or \
                       less (less for a binary file), since clients limit long tool results and \
                       this one holds the content twice, and read on from next_offset while the \
-                      result is truncated.",
+                      result is truncated, at the full id meta.resolved gave for rev: \
+                      next_offset pins no revision, and reads on to the file's end, past a lines \
+                      range.",
         effect: Effect::Reads,
         result_chars: Some(READ_FILE_RESULT_CHARS),
     },
@@ -310,8 +312,9 @@ static TOOLS: [Spec; 27] = [
         title: "List a directory",
         description: "Lists one directory at a revision, without a checkout, a page of entries \
                       at a time, each file with its size, and with depth the directories below it \
-                      too; pass a limit of 100 or less and page on with the cursor, since clients \
-                      limit long tool results.",
+                      too; pass a limit of 100 or less and page on with the cursor at the full id \
+                      meta.resolved gave for rev, since clients limit long tool results and a \
+                      cursor pins no revision.",
         effect: Effect::Reads,
         result_chars: None,
     },
@@ -358,8 +361,9 @@ static TOOLS: [Spec; 27] = [
         description: "The files that differ between two revisions, in path order: with format \
                       names (the default) each one's path and status, with stat also its line \
                       counts, with unified also its hunks; pass a limit of 100 or less, keep \
-                      max_bytes at 32768 or less for unified, and page on with the cursor, since \
-                      clients limit long tool results.",
+                      max_bytes at 32768 or less for unified, and page on with the cursor and the \
+                      first page's from and to (full ids), since clients limit long tool results \
+                      and a cursor pins no revision.",
         effect: Effect::Reads,
         result_chars: None,
     },

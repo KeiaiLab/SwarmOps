@@ -2,7 +2,7 @@
 
 # read_file
 
-Reads one file at a revision, without a checkout, as UTF-8 text or base64, from offset or the lines a range names; pass max\_bytes of 32768 or less (less for a binary file), since clients limit long tool results and this one holds the content twice, and read on from next\_offset while the result is truncated.
+Reads one file at a revision, without a checkout, as UTF-8 text or base64, from offset or the lines a range names; pass max\_bytes of 32768 or less (less for a binary file), since clients limit long tool results and this one holds the content twice, and read on from next\_offset while the result is truncated, at the full id meta.resolved gave for rev: next\_offset pins no revision, and reads on to the file's end, past a lines range.
 
 ```yaml
 title: "read_file"

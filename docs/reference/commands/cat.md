@@ -191,7 +191,7 @@ the range's last line.
 | `encoding` | `ContentEncoding` | yes | How `content` encodes the bytes it returns: `utf8` when they are text, `base64` when they are not (as when `offset` falls inside a character). |
 | `kind` | `FileKind` | yes | The file's kind. |
 | `lines` | `LineRange or null` | no | For a request by `lines`: the lines of its range that exist, which `content` holds (the start of them when `truncated`); omitted when none does. |
-| `next_offset` | `integer or null` | no | When `truncated`: where `content` stops, the `offset` that reads on from there. A cut text holds whole characters, so a `max_bytes` under 4 can stop before a longer character at the `offset` it started from. |
+| `next_offset` | `integer or null` | no | When `truncated`: where `content` stops, the `offset` that reads on from there, to the file's end: a `lines` range is not kept. It pins no revision: read on at the full id the first read resolved (the envelope's `meta.resolved`), or a ref that moved since gives another file's bytes, with no error. A cut text holds whole characters, so a `max_bytes` under 4 can stop before a longer character at the `offset` it started from. |
 | `offset` | `integer or null` | no | Where `content` starts in the file, in bytes: the request's `offset`, or where the first of its `lines` that exists starts (the file's size when none does); omitted when that is the file's start. |
 | `size` | `integer` | yes | The whole blob's size in bytes, also when `content` is part of it. |
 | `truncated` | `boolean` | yes | Whether `content` stops before the end of what was asked for: the file, from `offset`; or the requested lines that exist. |

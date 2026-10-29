@@ -111,6 +111,10 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 - `read_file` (`cat`) refuses a `max_bytes` of 0 with `E_INVALID_ARG` (`details.max_bytes`), as
   `diff` does, and its schema says the minimum is 1: it returned nothing, truncated, with a
   `next_offset` where it started, so a read on while truncated never ended (issue #4 item 2).
+- The MCP tool descriptions of `read_file`, `read_tree` and `diff`, and the request types, say to
+  page at the full ids the first page resolved, since a cursor or `next_offset` pins no revision,
+  and that `next_offset` reads on to the file's end, past a `lines` range (issue #4 items 3 and
+  13).
 
 ### Fixed
 

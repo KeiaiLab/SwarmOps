@@ -66,7 +66,7 @@ expression: listed
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Reads one file at a revision, without a checkout, as UTF-8 text or base64, from offset or the lines a range names; pass max_bytes of 32768 or less (less for a binary file), since clients limit long tool results and this one holds the content twice, and read on from next_offset while the result is truncated.",
+      "description": "Reads one file at a revision, without a checkout, as UTF-8 text or base64, from offset or the lines a range names; pass max_bytes of 32768 or less (less for a binary file), since clients limit long tool results and this one holds the content twice, and read on from next_offset while the result is truncated, at the full id meta.resolved gave for rev: next_offset pins no revision, and reads on to the file's end, past a lines range.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "`read_file` (CLI `cat`): read one file at a revision, without a checkout: from an offset, or\na range of its lines.",
@@ -141,13 +141,13 @@ expression: listed
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Lists one directory at a revision, without a checkout, a page of entries at a time, each file with its size, and with depth the directories below it too; pass a limit of 100 or less and page on with the cursor, since clients limit long tool results.",
+      "description": "Lists one directory at a revision, without a checkout, a page of entries at a time, each file with its size, and with depth the directories below it too; pass a limit of 100 or less and page on with the cursor at the full id meta.resolved gave for rev, since clients limit long tool results and a cursor pins no revision.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "`read_tree` (CLI `ls`): list one directory at a revision, without a checkout, a page at a\ntime; with `depth`, the directories below it too.",
         "properties": {
           "cursor": {
-            "description": "Resume a listing: the previous page's `cursor`. Pass it back exactly as returned; do not\nconstruct it (cursors are opaque). This page starts after the entry it names.",
+            "description": "Resume a listing: the previous page's `cursor`. Pass it back exactly as returned; do not\nconstruct it (cursors are opaque). This page starts after the entry it names. It pins no\nrevision: list at the full id the first page resolved (the envelope's `meta.resolved`), or\na ref that moved since lists another tree, with no error.",
             "type": [
               "string",
               "null"
@@ -333,7 +333,7 @@ expression: listed
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "The files that differ between two revisions, in path order: with format names (the default) each one's path and status, with stat also its line counts, with unified also its hunks; pass a limit of 100 or less, keep max_bytes at 32768 or less for unified, and page on with the cursor, since clients limit long tool results.",
+      "description": "The files that differ between two revisions, in path order: with format names (the default) each one's path and status, with stat also its line counts, with unified also its hunks; pass a limit of 100 or less, keep max_bytes at 32768 or less for unified, and page on with the cursor and the first page's from and to (full ids), since clients limit long tool results and a cursor pins no revision.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "`diff`: the files that differ between two revisions, in path order, a page at a time.",
@@ -346,7 +346,7 @@ expression: listed
             "type": "integer"
           },
           "cursor": {
-            "description": "Resume a diff: the previous page's `cursor`. Pass it back exactly as returned; do not\nconstruct it (cursors are opaque). This page starts after the file it names.",
+            "description": "Resume a diff: the previous page's `cursor`. Pass it back exactly as returned; do not\nconstruct it (cursors are opaque). This page starts after the file it names. It pins no\nrevision: give the first page's `from` and `to`, full ids, as `from` and `to`, or a ref\nthat moved since pages another diff, with no error.",
             "type": [
               "string",
               "null"

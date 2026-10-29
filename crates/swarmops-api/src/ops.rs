@@ -8,9 +8,10 @@
 //! capped by its request (`max_bytes`, `limit`, `max_changes`) and says when it was cut
 //! (`truncated`, `changes_truncated`, `hunks_truncated`); `read_tree`, `log`, `path_history` and
 //! `diff` also return a `cursor` that resumes after the page, and `read_file` a `next_offset`. The
-//! default page of `read_tree`, `show`, `log`, `path_history` and `diff` stays within the
-//! operations spec's 64 KiB target for a default response (§9); `read_file`'s 1 MiB is the spec's
-//! own.
+//! cursor of `read_tree` or `diff`, and a `next_offset`, name a place, not a revision: page at the
+//! full ids the first page resolved. The default page of `read_tree`, `show`, `log`,
+//! `path_history` and `diff` stays within the operations spec's 64 KiB target for a default
+//! response (§9); `read_file`'s 1 MiB is the spec's own.
 //!
 //! No store-facing type carries a filesystem path. The exceptions are client-side:
 //! [`ContentInput::File`], which the client reads and sends as bytes, [`InitReq::path`],
@@ -21,8 +22,9 @@
 //! [`WsCreateReq::path`], [`WsCreateReq::from`], [`WsInfo::path`]), which run on the caller's
 //! host and which no server receives.
 //!
-//! Not in M1 yet:
-//! - M2: `LogReq.first_parent`;
+//! Not yet:
+//! - `LogReq.first_parent`: `log` follows first parents only (the M2 plan's decision 8), until
+//!   imported merge histories need the field;
 //! - M7: `cr` and `annotations` on `ChangesetDetail` (`show`).
 
 use std::collections::BTreeMap;
@@ -637,9 +639,11 @@ pub struct FileContent {
     /// start of them when `truncated`); omitted when none does.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lines: Option<LineRange>,
-    /// When `truncated`: where `content` stops, the `offset` that reads on from there. A cut text
-    /// holds whole characters, so a `max_bytes` under 4 can stop before a longer character at
-    /// the `offset` it started from.
+    /// When `truncated`: where `content` stops, the `offset` that reads on from there, to the
+    /// file's end: a `lines` range is not kept. It pins no revision: read on at the full id the
+    /// first read resolved (the envelope's `meta.resolved`), or a ref that moved since gives
+    /// another file's bytes, with no error. A cut text holds whole characters, so a `max_bytes`
+    /// under 4 can stop before a longer character at the `offset` it started from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_offset: Option<u64>,
 }
@@ -727,7 +731,9 @@ pub struct ReadTreeReq {
     #[schemars(range(min = 1))]
     pub limit: usize,
     /// Resume a listing: the previous page's `cursor`. Pass it back exactly as returned; do not
-    /// construct it (cursors are opaque). This page starts after the entry it names.
+    /// construct it (cursors are opaque). This page starts after the entry it names. It pins no
+    /// revision: list at the full id the first page resolved (the envelope's `meta.resolved`), or
+    /// a ref that moved since lists another tree, with no error.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
 }
@@ -1239,7 +1245,9 @@ pub struct DiffReq {
     #[schemars(range(min = 1))]
     pub limit: usize,
     /// Resume a diff: the previous page's `cursor`. Pass it back exactly as returned; do not
-    /// construct it (cursors are opaque). This page starts after the file it names.
+    /// construct it (cursors are opaque). This page starts after the file it names. It pins no
+    /// revision: give the first page's `from` and `to`, full ids, as `from` and `to`, or a ref
+    /// that moved since pages another diff, with no error.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
     /// The most bytes a `unified` page's files take, as the JSON array `files` they print as: at

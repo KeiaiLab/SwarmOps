@@ -2,7 +2,7 @@
 
 # diff
 
-The files that differ between two revisions, in path order: with format names (the default) each one's path and status, with stat also its line counts, with unified also its hunks; pass a limit of 100 or less, keep max\_bytes at 32768 or less for unified, and page on with the cursor, since clients limit long tool results.
+The files that differ between two revisions, in path order: with format names (the default) each one's path and status, with stat also its line counts, with unified also its hunks; pass a limit of 100 or less, keep max\_bytes at 32768 or less for unified, and page on with the cursor and the first page's from and to (full ids), since clients limit long tool results and a cursor pins no revision.
 
 ```yaml
 title: "diff"
@@ -24,7 +24,7 @@ max_result_chars: null
 | Field | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
 | `context` | integer | no | `3` | The unchanged lines around each change in a `unified` hunk. |
-| `cursor` | string or null | no |  | Resume a diff: the previous page's `cursor`. Pass it back exactly as returned; do not construct it (cursors are opaque). This page starts after the file it names. |
+| `cursor` | string or null | no |  | Resume a diff: the previous page's `cursor`. Pass it back exactly as returned; do not construct it (cursors are opaque). This page starts after the file it names. It pins no revision: give the first page's `from` and `to`, full ids, as `from` and `to`, or a ref that moved since pages another diff, with no error. |
 | `format` | string | no | `"names"` | What to say of each file: `names` its path and status; `stat` also whether it is binary and, for text, the lines it inserts and deletes; `unified` also its kinds, its blobs and, for text, its hunks. What `diff` says of each file. |
 | `from` | string | yes |  | The revision to diff from: the old side. A revision as the caller wrote it, for the store to resolve: a ref name (`main`, `release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, optionally followed by `~N` for the N-th first-parent ancestor. |
 | `limit` | integer | no | `500` | The most files to return: at least 1 (0 is `E_INVALID_ARG`). |
@@ -49,7 +49,7 @@ As `tools/list` gives it: each `$ref` replaced by its definition, so that it sta
       "type": "integer"
     },
     "cursor": {
-      "description": "Resume a diff: the previous page's `cursor`. Pass it back exactly as returned; do not\nconstruct it (cursors are opaque). This page starts after the file it names.",
+      "description": "Resume a diff: the previous page's `cursor`. Pass it back exactly as returned; do not\nconstruct it (cursors are opaque). This page starts after the file it names. It pins no\nrevision: give the first page's `from` and `to`, full ids, as `from` and `to`, or a ref\nthat moved since pages another diff, with no error.",
       "type": [
         "string",
         "null"

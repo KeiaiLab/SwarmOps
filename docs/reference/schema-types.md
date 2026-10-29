@@ -563,7 +563,7 @@ Kind: object. `swarmops schema DiffReq` prints its JSON Schema.
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
 | `context` | `integer` (uint32) | no | The unchanged lines around each change in a `unified` hunk. Default: `3`. |
-| `cursor` | `string` or `null` | no | Resume a diff: the previous page's `cursor`. Pass it back exactly as returned; do not construct it (cursors are opaque). This page starts after the file it names. |
+| `cursor` | `string` or `null` | no | Resume a diff: the previous page's `cursor`. Pass it back exactly as returned; do not construct it (cursors are opaque). This page starts after the file it names. It pins no revision: give the first page's `from` and `to`, full ids, as `from` and `to`, or a ref that moved since pages another diff, with no error. |
 | `format` | [`DiffFormat`](#diffformat) | no | What to say of each file: `names` its path and status; `stat` also whether it is binary and, for text, the lines it inserts and deletes; `unified` also its kinds, its blobs and, for text, its hunks. Default: `"names"`. |
 | `from` | [`Rev`](#rev) | yes | The revision to diff from: the old side. |
 | `limit` | `integer` (uint) | no | The most files to return: at least 1 (0 is `E_INVALID_ARG`). Default: `500`. At least 1. |
@@ -763,7 +763,7 @@ Kind: object. `swarmops schema FileContent` prints its JSON Schema.
 | `encoding` | [`ContentEncoding`](#contentencoding) | yes | How `content` encodes the bytes it returns: `utf8` when they are text, `base64` when they are not (as when `offset` falls inside a character). |
 | `kind` | [`FileKind`](#filekind) | yes | The file's kind. |
 | `lines` | [`LineRange`](#linerange) or `null` | no | For a request by `lines`: the lines of its range that exist, which `content` holds (the start of them when `truncated`); omitted when none does. |
-| `next_offset` | `integer` (uint64) or `null` | no | When `truncated`: where `content` stops, the `offset` that reads on from there. A cut text holds whole characters, so a `max_bytes` under 4 can stop before a longer character at the `offset` it started from. |
+| `next_offset` | `integer` (uint64) or `null` | no | When `truncated`: where `content` stops, the `offset` that reads on from there, to the file's end: a `lines` range is not kept. It pins no revision: read on at the full id the first read resolved (the envelope's `meta.resolved`), or a ref that moved since gives another file's bytes, with no error. A cut text holds whole characters, so a `max_bytes` under 4 can stop before a longer character at the `offset` it started from. |
 | `offset` | `integer` (uint64) or `null` | no | Where `content` starts in the file, in bytes: the request's `offset`, or where the first of its `lines` that exists starts (the file's size when none does); omitted when that is the file's start. |
 | `size` | `integer` (uint64) | yes | The whole blob's size in bytes, also when `content` is part of it. |
 | `truncated` | `boolean` | yes | Whether `content` stops before the end of what was asked for: the file, from `offset`; or the requested lines that exist. |
@@ -1351,7 +1351,7 @@ Kind: object. `swarmops schema ReadTreeReq` prints its JSON Schema.
 
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
-| `cursor` | `string` or `null` | no | Resume a listing: the previous page's `cursor`. Pass it back exactly as returned; do not construct it (cursors are opaque). This page starts after the entry it names. |
+| `cursor` | `string` or `null` | no | Resume a listing: the previous page's `cursor`. Pass it back exactly as returned; do not construct it (cursors are opaque). This page starts after the entry it names. It pins no revision: list at the full id the first page resolved (the envelope's `meta.resolved`), or a ref that moved since lists another tree, with no error. |
 | `depth` | `integer` (uint32) | no | How many levels to list: 1 for the directory's own entries, 2 for theirs too, and so on, up to 64 (0 or more than 64 is `E_INVALID_ARG`). Default: `1`. At least 1. At most 64. |
 | `limit` | `integer` (uint) | no | The most entries to return: at least 1 (0 is `E_INVALID_ARG`). Default: `250`. At least 1. |
 | `path` | `string` or `null` | no | The directory's repository path; omitted for the root. |

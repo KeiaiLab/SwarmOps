@@ -2431,7 +2431,7 @@ expression: s.redact(&all)
           "type": "integer"
         },
         "cursor": {
-          "description": "Resume a diff: the previous page's `cursor`. Pass it back exactly as returned; do not\nconstruct it (cursors are opaque). This page starts after the file it names.",
+          "description": "Resume a diff: the previous page's `cursor`. Pass it back exactly as returned; do not\nconstruct it (cursors are opaque). This page starts after the file it names. It pins no\nrevision: give the first page's `from` and `to`, full ids, as `from` and `to`, or a ref\nthat moved since pages another diff, with no error.",
           "type": [
             "string",
             "null"
@@ -3505,7 +3505,7 @@ expression: s.redact(&all)
           "description": "For a request by `lines`: the lines of its range that exist, which `content` holds (the\nstart of them when `truncated`); omitted when none does."
         },
         "next_offset": {
-          "description": "When `truncated`: where `content` stops, the `offset` that reads on from there. A cut text\nholds whole characters, so a `max_bytes` under 4 can stop before a longer character at\nthe `offset` it started from.",
+          "description": "When `truncated`: where `content` stops, the `offset` that reads on from there, to the\nfile's end: a `lines` range is not kept. It pins no revision: read on at the full id the\nfirst read resolved (the envelope's `meta.resolved`), or a ref that moved since gives\nanother file's bytes, with no error. A cut text holds whole characters, so a `max_bytes`\nunder 4 can stop before a longer character at the `offset` it started from.",
           "format": "uint64",
           "minimum": 0,
           "type": [
@@ -6218,7 +6218,7 @@ expression: s.redact(&all)
       "description": "`read_tree` (CLI `ls`): list one directory at a revision, without a checkout, a page at a\ntime; with `depth`, the directories below it too.",
       "properties": {
         "cursor": {
-          "description": "Resume a listing: the previous page's `cursor`. Pass it back exactly as returned; do not\nconstruct it (cursors are opaque). This page starts after the entry it names.",
+          "description": "Resume a listing: the previous page's `cursor`. Pass it back exactly as returned; do not\nconstruct it (cursors are opaque). This page starts after the entry it names. It pins no\nrevision: list at the full id the first page resolved (the envelope's `meta.resolved`), or\na ref that moved since lists another tree, with no error.",
           "type": [
             "string",
             "null"

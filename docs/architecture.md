@@ -765,9 +765,12 @@ A mutation needs an identity, `<family>/<instance>` (for example `agent/worker-1
 Reads need none.
 
 Responses are bounded for an agent's context: `read_file` returns at most `max_bytes` (1 MiB by
-default); `read_tree` and `log` return pages, sized by default for a 64 KiB response, with an
-opaque cursor for the next one; and `show` lists at most `max_changes` changes (400 by default)
-and says when it cut the list.
+default), with a `next_offset` to read on from when it cuts; `read_tree`, `log`, `path_history`
+and `diff` return pages, sized by default for a 64 KiB response, with an opaque cursor for the
+next one (a `unified` diff's page also within `max_bytes` of its files, 32 KiB by default); and
+`show` lists at most `max_changes` changes (400 by default) and says when it cut the list. A
+`next_offset`, or the cursor of `read_tree` or `diff`, names a place and not a revision: an agent
+pages at the full ids the first page resolved.
 
 `swarmops mcp` (M1.5) serves the same operations to agents over the Model Context Protocol, on
 stdio: one tool per `StoreOps` operation but `derive`, maintenance that `swarmops derive` runs

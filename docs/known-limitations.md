@@ -172,11 +172,13 @@ left).
   A tree object is decoded whole within the 512 MiB object bound. *Unscheduled (a streaming tree
   decode is a codec path of its own, the M6 design, section 5). Found: M1 Task 5; final review,
   question 9.*
-- **A page cursor does not pin the revisions it pages.** `diff`'s `cursor` and `read_file`'s
-  `next_offset` say where the next page starts, not which revisions it pages: an agent that pages
-  through a diff or a file at `main` while another agent lands gets its next page from the new
-  revision, with no error. Page with the full ids the first page resolved (a diff's `from` and
-  `to`). *Unscheduled (issue #4 item 3). Found: M2's consolidated review.*
+- **A page cursor does not pin the revisions it pages.** The `cursor` of `diff` and `read_tree`,
+  and `read_file`'s `next_offset`, say where the next page starts, not which revisions it pages:
+  an agent that pages through a diff, a directory or a file at `main` while another agent lands
+  gets its next page from the new revision, with no error. Page with the full ids the first page
+  resolved (a diff's `from` and `to`, the envelope's `meta.resolved`), as the request types and
+  the MCP tool descriptions say. *Documented (issue #4 item 3; a cursor that carries the ids and
+  refuses a moved page is unscheduled). Found: M2's consolidated review.*
 - **A snapshot reads every ref file**: cheap with a few refs, linear in their number. Each
   request reads in one snapshot of the metadata (a commit, `cat`, `ls`, `show` and `log` take one
   each, a ref move one besides its write), so a request pays it once. A FORMAT 1 store holds
