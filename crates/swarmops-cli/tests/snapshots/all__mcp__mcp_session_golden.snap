@@ -151,9 +151,9 @@ expression: golden.transcript()
                   },
                   "max_bytes": {
                     "default": 1048576,
-                    "description": "The most content bytes to return; more comes back truncated, with the `next_offset` to\nread on from.",
+                    "description": "The most content bytes to return: at least 1 (0 is `E_INVALID_ARG`); more comes back\ntruncated, with the `next_offset` to read on from.",
                     "format": "uint64",
-                    "minimum": 0,
+                    "minimum": 1,
                     "type": "integer"
                   },
                   "offset": {

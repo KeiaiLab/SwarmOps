@@ -588,9 +588,11 @@ fn cat_truncates_to_max_bytes() {
         assert!(!whole.truncated);
         assert_eq!(STANDARD.decode(&whole.content).unwrap(), big);
     }
-    let none = read(0);
-    assert!(none.truncated);
-    assert_eq!(none.content, "");
+    // A cap of 0 is refused: it would return nothing, truncated, where it started.
+    let mut zero = cat(&c, "big.bin");
+    zero.max_bytes = 0;
+    let err = expect_err(ops.read_file(zero), ErrorCode::InvalidArg);
+    assert_eq!(err.details["max_bytes"], 0);
 }
 
 #[test]
@@ -4027,8 +4029,7 @@ mod spans {
     }
 
     /// An offset at or past the end returns empty content, not truncated, saying where it
-    /// starts, whatever the cap; an empty file is empty from its start. Short of the end, a cap
-    /// of 0 cuts all the same: nothing returned, and more to read from there.
+    /// starts, whatever the cap; an empty file is empty from its start.
     #[test]
     fn an_offset_past_the_end_is_empty() {
         let (_dir, _root, ops) = new_store();
@@ -4038,7 +4039,7 @@ mod spans {
             vec![text("f.txt", "hello\n"), text("empty.txt", "")],
         );
         for offset in [6, 7, 1 << 40, u64::MAX] {
-            for max_bytes in [0, 1, DEFAULT_MAX_BYTES] {
+            for max_bytes in [1, DEFAULT_MAX_BYTES] {
                 let read = ops.read_file(at(&c, "f.txt", offset, max_bytes)).unwrap();
                 let what = format!("offset {offset}, max_bytes {max_bytes}");
                 assert_eq!(
@@ -4063,16 +4064,11 @@ mod spans {
             ),
             ("", false, None, 0)
         );
-        let none = ops.read_file(at(&c, "f.txt", 5, 0)).unwrap();
-        assert_eq!(
-            (none.content.as_str(), none.truncated, none.next_offset),
-            ("", true, Some(5))
-        );
     }
 
     /// `offset` and `lines` together, lines from 0 or a range that ends before it starts, a
-    /// `depth` of 0 or past 64, and a cursor that is no repository path: `E_INVALID_ARG`, which
-    /// names what broke the rule, before the revision is resolved.
+    /// `max_bytes` of 0, a `depth` of 0 or past 64, and a cursor that is no repository path:
+    /// `E_INVALID_ARG`, which names what broke the rule, before the revision is resolved.
     #[test]
     fn spans_depths_and_cursors_that_break_their_rules_are_invalid_args() {
         let (_dir, _root, ops) = new_store();
@@ -4093,6 +4089,18 @@ mod spans {
         // An offset of 0 is the default, not a choice: lines go with it.
         let second = ops.read_file(lines(&c, "dir/f", (2, 2), all)).unwrap();
         assert_eq!(second.content, "2\n");
+        // A cap of 0 would give nothing, truncated, with a `next_offset` where it started: a
+        // read on while truncated would never end. From the start, inside, past the end, by
+        // lines.
+        for zero in [
+            at(&c, "dir/f", 0, 0),
+            at(&c, "dir/f", 1, 0),
+            at(&c, "dir/f", 1 << 40, 0),
+            lines(&c, "dir/f", (1, 1), 0),
+        ] {
+            let err = expect_err(ops.read_file(zero), ErrorCode::InvalidArg);
+            assert_eq!(Value::Object(err.details), json!({"max_bytes": 0}));
+        }
 
         for depth in [0, MAX_TREE_DEPTH + 1, u32::MAX] {
             let mut req = ls(&c, None);
@@ -4118,6 +4126,10 @@ mod spans {
         let mut req = lines(&unknown, "dir/f", (1, 1), all);
         req.offset = 1;
         expect_err(ops.read_file(req), ErrorCode::InvalidArg);
+        expect_err(
+            ops.read_file(at(&unknown, "dir/f", 0, 0)),
+            ErrorCode::InvalidArg,
+        );
     }
 
     /// `depth` lists the directories below the listed one too, in pre-order (a directory, then

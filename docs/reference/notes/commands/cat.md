@@ -69,15 +69,12 @@ the range's last line.
 
 ### Caveats
 
-- `--max-bytes 0` returns empty content with `truncated: true` and `next_offset` equal to the
-  offset it started from, so a loop that reads on while `truncated` never ends. Ask for at least
-  one byte.
 - `cat` reads the blob's object file whole, and verifies all of it, however little it returns:
   a large file costs its size in memory on every read.
 - A file of control characters prints at about six times its size through the CLI, since JSON
   spells most of them in six bytes each, and at about thirteen times through MCP.
-- These three are listed in
-  [known limitations](../../../known-limitations.md#reads-and-response-sizes).
+- See [known limitations](../../../known-limitations.md#reads-and-response-sizes).
+- `--max-bytes 0` is `E_INVALID_ARG`.
 
 ### Guides
 

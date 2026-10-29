@@ -243,6 +243,7 @@ The bounds `swarmops schema` states on a field, beside the integer formats' own.
 | [`LogReq`](schema-types.md#logreq) | `limit` | at least 1 |
 | [`OpLogReq`](schema-types.md#oplogreq) | `limit` | at least 1 |
 | [`PathHistoryReq`](schema-types.md#pathhistoryreq) | `limit` | at least 1 |
+| [`ReadFileReq`](schema-types.md#readfilereq) | `max_bytes` | at least 1 |
 | [`ReadTreeReq`](schema-types.md#readtreereq) | `depth` | 1 to 64 |
 | [`ReadTreeReq`](schema-types.md#readtreereq) | `limit` | at least 1 |
 | [`ShowReq`](schema-types.md#showreq) | `max_changes` | at least 1 |
@@ -280,9 +281,9 @@ Not part of the contract: these tune the implementation, or bound the store's la
 
 ### Page sizes of 0
 
-A `limit` or `max_changes` of 0, and a `diff` `max_bytes` of 0, is `E_INVALID_ARG`: the schema
-states their minimum of 1 above. `derive`'s `limit` takes 0, and then gives the journal's last
-frame as `next`.
+A `limit` or `max_changes` of 0, and a `max_bytes` of 0 for `read_file` or `diff`, is
+`E_INVALID_ARG`: the schema states their minimum of 1 above. `derive`'s `limit` takes 0, and
+then gives the journal's last frame as `next`.
 
 ### Contents past a limit
 

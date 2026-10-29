@@ -108,6 +108,9 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   20-minute kill unoptimized and failed the weekly run; the new `just check-ci-perf` runs them
   optimized, one at a time, in the weekly run's last job, under the heavy lock and the `ci-perf`
   nextest profile (55-minute kill). `just check-slow` keeps them.
+- `read_file` (`cat`) refuses a `max_bytes` of 0 with `E_INVALID_ARG` (`details.max_bytes`), as
+  `diff` does, and its schema says the minimum is 1: it returned nothing, truncated, with a
+  `next_offset` where it started, so a read on while truncated never ended (issue #4 item 2).
 
 ### Fixed
 

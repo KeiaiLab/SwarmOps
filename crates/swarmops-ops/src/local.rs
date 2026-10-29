@@ -270,8 +270,8 @@ const MAX_LAND_KEY: usize = 64;
 ///   nothing is written: `already_applied`. Its `op` is the operation it recorded, which
 ///   another undo can take back.
 ///
-/// Limits of 0 (`limit`, `max_changes`, and `diff`'s `max_bytes`) are `E_INVALID_ARG`, but for
-/// `derive`'s `limit`.
+/// Limits of 0 (`limit`, `max_changes`, and the `max_bytes` of `read_file` and `diff`) are
+/// `E_INVALID_ARG`, but for `derive`'s `limit`.
 ///
 /// # Errors
 ///
@@ -1542,6 +1542,8 @@ impl StoreOps for Recording<'_> {
             max_bytes,
             ..
         } = req;
+        // A cap of 0 would return nothing, truncated, with a `next_offset` where it started.
+        at_least_one_byte(max_bytes)?;
         let span = file_span(offset, lines)?;
         let read = self.snapshot()?;
         let cs = self.resolve(&read, &rev)?;
@@ -1749,12 +1751,7 @@ impl StoreOps for Recording<'_> {
             ..
         } = req;
         at_least_one("limit", limit)?;
-        if max_bytes == 0 {
-            return Err(
-                error::error(ErrorCode::InvalidArg, "max_bytes must be at least 1")
-                    .with_details(error::details([("max_bytes", max_bytes.into())])),
-            );
-        }
+        at_least_one_byte(max_bytes)?;
         let filter = diff_filter(&paths)?;
         let after = cursor.as_deref().map(diff_cursor).transpose()?;
         // Both revisions resolve in one snapshot, which every read of the diff is made in.
@@ -2308,6 +2305,17 @@ fn at_least_one(field: &str, value: usize) -> Result<(), OpError> {
         return Err(
             error::error(ErrorCode::InvalidArg, format!("{field} must be at least 1"))
                 .with_details(error::details([(field, value.into())])),
+        );
+    }
+    Ok(())
+}
+
+/// `E_INVALID_ARG` unless `max_bytes`, of `read_file` or `diff`, is at least 1.
+fn at_least_one_byte(max_bytes: u64) -> Result<(), OpError> {
+    if max_bytes == 0 {
+        return Err(
+            error::error(ErrorCode::InvalidArg, "max_bytes must be at least 1")
+                .with_details(error::details([("max_bytes", max_bytes.into())])),
         );
     }
     Ok(())

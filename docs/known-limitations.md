@@ -177,10 +177,6 @@ left).
   through a diff or a file at `main` while another agent lands gets its next page from the new
   revision, with no error. Page with the full ids the first page resolved (a diff's `from` and
   `to`). *Unscheduled (issue #4 item 3). Found: M2's consolidated review.*
-- **`read_file` with `max_bytes` 0 returns nothing, as truncated.** Its result has
-  `truncated: true` and a `next_offset` equal to its `offset`, so an agent that reads on while a
-  result is truncated never ends; ask for at least one byte. *Unscheduled (issue #4 item 2: 0 to
-  be refused with `E_INVALID_ARG`, as `diff` refuses it). Found: M2's consolidated review.*
 - **A snapshot reads every ref file**: cheap with a few refs, linear in their number. Each
   request reads in one snapshot of the metadata (a commit, `cat`, `ls`, `show` and `log` take one
   each, a ref move one besides its write), so a request pays it once. A FORMAT 1 store holds

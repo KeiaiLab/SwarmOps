@@ -568,9 +568,10 @@ pub struct ReadFileReq {
     /// come back, none past the file's last. Give this or `offset`, not both (`E_INVALID_ARG`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lines: Option<LineRange>,
-    /// The most content bytes to return; more comes back truncated, with the `next_offset` to
-    /// read on from.
+    /// The most content bytes to return: at least 1 (0 is `E_INVALID_ARG`); more comes back
+    /// truncated, with the `next_offset` to read on from.
     #[serde(default = "default_max_bytes")]
+    #[schemars(range(min = 1))]
     pub max_bytes: u64,
 }
 

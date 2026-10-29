@@ -1,8 +1,8 @@
 ### Page sizes of 0
 
-A `limit` or `max_changes` of 0, and a `diff` `max_bytes` of 0, is `E_INVALID_ARG`: the schema
-states their minimum of 1 above. `derive`'s `limit` takes 0, and then gives the journal's last
-frame as `next`.
+A `limit` or `max_changes` of 0, and a `max_bytes` of 0 for `read_file` or `diff`, is
+`E_INVALID_ARG`: the schema states their minimum of 1 above. `derive`'s `limit` takes 0, and
+then gives the journal's last frame as `next`.
 
 ### Contents past a limit
 

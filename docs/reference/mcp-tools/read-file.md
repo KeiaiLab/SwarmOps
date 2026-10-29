@@ -24,7 +24,7 @@ max_result_chars: 200000
 | Field | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
 | `lines` | object or null | no |  | Read these lines instead, numbered from 1, both ends included: a line ends after its newline, and a last line without one is a line too. The lines of the range that exist come back, none past the file's last. Give this or `offset`, not both (`E_INVALID_ARG`). |
-| `max_bytes` | integer | no | `1048576` | The most content bytes to return; more comes back truncated, with the `next_offset` to read on from. |
+| `max_bytes` | integer | no | `1048576` | The most content bytes to return: at least 1 (0 is `E_INVALID_ARG`); more comes back truncated, with the `next_offset` to read on from. |
 | `offset` | integer | no | `0` | Where to start reading, in bytes from the file's start: a truncated read's `next_offset` reads on from where it stopped. An offset past the end gives empty content. Give this or `lines`, not both (`E_INVALID_ARG`). |
 | `path` | string | yes |  | The file's repository path. |
 | `rev` | string | yes |  | The revision to read at. A revision as the caller wrote it, for the store to resolve: a ref name (`main`, `release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, optionally followed by `~N` for the N-th first-parent ancestor. |
@@ -70,9 +70,9 @@ As `tools/list` gives it: each `$ref` replaced by its definition, so that it sta
     },
     "max_bytes": {
       "default": 1048576,
-      "description": "The most content bytes to return; more comes back truncated, with the `next_offset` to\nread on from.",
+      "description": "The most content bytes to return: at least 1 (0 is `E_INVALID_ARG`); more comes back\ntruncated, with the `next_offset` to read on from.",
       "format": "uint64",
-      "minimum": 0,
+      "minimum": 1,
       "type": "integer"
     },
     "offset": {

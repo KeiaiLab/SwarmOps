@@ -1338,7 +1338,7 @@ Kind: object. `swarmops schema ReadFileReq` prints its JSON Schema.
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
 | `lines` | [`LineRange`](#linerange) or `null` | no | Read these lines instead, numbered from 1, both ends included: a line ends after its newline, and a last line without one is a line too. The lines of the range that exist come back, none past the file's last. Give this or `offset`, not both (`E_INVALID_ARG`). |
-| `max_bytes` | `integer` (uint64) | no | The most content bytes to return; more comes back truncated, with the `next_offset` to read on from. Default: `1048576`. |
+| `max_bytes` | `integer` (uint64) | no | The most content bytes to return: at least 1 (0 is `E_INVALID_ARG`); more comes back truncated, with the `next_offset` to read on from. Default: `1048576`. At least 1. |
 | `offset` | `integer` (uint64) | no | Where to start reading, in bytes from the file's start: a truncated read's `next_offset` reads on from where it stopped. An offset past the end gives empty content. Give this or `lines`, not both (`E_INVALID_ARG`). Default: `0`. |
 | `path` | `string` | yes | The file's repository path. |
 | `rev` | [`Rev`](#rev) | yes | The revision to read at. |
