@@ -202,6 +202,8 @@ def parse_elf(name: str, data: bytes) -> Elf:
                 return address - vaddr + at
         raise ValueError(f"no loadable segment maps {address:#x}")
 
+    if DT_STRTAB not in values:
+        raise Failure(f"{name} has no string table (DT_STRTAB) in its dynamic section")
     strings = offset(values[DT_STRTAB])
 
     def string(at: int) -> str:

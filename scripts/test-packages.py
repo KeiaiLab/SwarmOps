@@ -58,10 +58,10 @@ GCC_NEEDS = [("GCC_3.0", 0)]
 
 
 def elf(machine: int, needed: list[str], needs: list[tuple[str, list[tuple[str, int]]]],
-        dynamic: bool = True) -> bytes:
+        dynamic: bool = True, without: tuple[int, ...] = ()) -> bytes:
     """A minimal 64-bit little-endian ELF: one loadable segment over the whole file and, when
     `dynamic`, a dynamic section with `needed` (DT_NEEDED) and `needs` (Elf64_Verneed records,
-    each a library with its (version, flags))."""
+    each a library with its (version, flags)), less the tags in `without`."""
     strings = bytearray(b"\0")
 
     def add(text: str) -> int:
@@ -89,6 +89,7 @@ def elf(machine: int, needed: list[str], needs: list[tuple[str, list[tuple[str, 
     entries = [(1, at) for at in needed_at] + [(5, strings_at), (10, len(strings))]
     if needs:
         entries += [(0x6FFFFFFE, verneed_at), (0x6FFFFFFF, len(needs))]
+    entries = [(tag, value) for tag, value in entries if tag not in without]
     section = b"".join(struct.pack("<qQ", tag, value) for tag, value in entries + [(0, 0)])
     size = dynamic_at + len(section)
 
@@ -435,6 +436,9 @@ REFUSALS = (
      "need no glibc version"),
     ("not an ELF file", {"change": put("so", b"#!/bin/sh\necho swarmops 9.9.9\n")},
      "not a 64-bit little-endian ELF"),
+    ("a dynamic section without DT_STRTAB",
+     {"change": put("so", elf(62, ["libc.so.6"], [("libc.so.6", GLIBC_NEEDS)], without=(5,)))},
+     "no string table (DT_STRTAB)"),
     ("a truncated ELF file", {"change": put("so", binary(X86, "so")[:100])},
      "not an ELF file this script reads"),
     ("no crate in THIRD-PARTY-LICENSES", {"change": put("THIRD-PARTY-LICENSES", b"none\n")},
