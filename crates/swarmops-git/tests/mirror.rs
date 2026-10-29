@@ -1,14 +1,23 @@
 //! The store's git mirror (M13): its layout and marker, its lock, its rebuild, the staging
-//! branch and the stale git lock files. Written by the M13 plan's task C4.
+//! branch and the stale git lock files. Written by the M13 plan's task C4. And a damaged object
+//! of the mirror, which the fetch's import refuses.
 
 use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::fs::{self, File};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use camino::Utf8Path;
 use swarmops_git::mirror::{Mirror, MirrorError, MirrorLock, Rebuilt, STALE_LOCK_AGE};
-use swarmops_git::{GitOid, GitSink, GixSink, GixSource, RawKind};
+use swarmops_git::transport::{GitCli, RejectReason, Transport, TransportError};
+use swarmops_git::{
+    ConvertError, GitOid, GitSink, GixSink, GixSource, ImportError, ImportRequest, RawCommit,
+    RawIdent, RawKind, RawTree, RawTreeEntry, SourceError, import,
+};
+use swarmops_repo::Depth;
+use swarmops_testkit::repo::new_repo;
 use tempfile::TempDir;
 
 /// The marker a mirror of this layout holds.
@@ -553,4 +562,117 @@ fn promote_refuses_a_tracking_ref_moved_meanwhile() {
     let refused = mirror.promote(REMOTE, &branches, &tags);
     assert!(matches!(refused, Err(MirrorError::Sink(_))), "{refused:?}");
     assert_eq!(mirror.tracking(REMOTE, BRANCH).expect("read"), Some(third));
+}
+
+/// How a test damages a loose object's file.
+#[derive(Clone, Copy, Debug)]
+enum Damage {
+    /// Bytes that do not inflate.
+    Garbled,
+    /// Another loose object's file in its place, as a disk or a copy can leave it: it inflates,
+    /// to bytes that hash to the other object's id.
+    Swapped,
+}
+
+/// The file of the loose object `oid` in the git directory `git_dir`.
+fn loose(git_dir: &Path, oid: GitOid) -> PathBuf {
+    let hex = oid.to_string();
+    git_dir.join("objects").join(&hex[..2]).join(&hex[2..])
+}
+
+/// The user's git as a transport, in an environment of its own: the caller's `PATH` and git
+/// under test (`SWARMOPS_GIT`), `home` for an empty `HOME`, and no system or global
+/// configuration.
+fn git_cli(home: &Path) -> GitCli {
+    let mut env: Vec<(OsString, OsString)> = vec![
+        ("PATH".into(), std::env::var_os("PATH").unwrap_or_default()),
+        ("HOME".into(), home.into()),
+        ("GIT_CONFIG_NOSYSTEM".into(), "1".into()),
+        ("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()),
+    ];
+    let git = swarmops_testkit::git::GIT_ENV;
+    if let Some(binary) = std::env::var_os(git) {
+        env.push((git.into(), binary));
+    }
+    GitCli::find_with_env(env).expect("find git")
+}
+
+/// A blob of the mirror damaged on disk, its file garbled or another object's, passes the
+/// fetch's closure check, which finds missing objects and reads no blob (git 2.43); the fetch's
+/// import then refuses it: its reader checks each object it reads against its id, so the
+/// objects-only import of the promoted tracking ref fails naming the blob, and records nothing.
+#[test]
+fn a_damaged_loose_blob_is_refused_by_the_fetch_s_import() {
+    for damage in [Damage::Garbled, Damage::Swapped] {
+        // 1. A commit of one file, its objects loose, as `origin`'s incoming `main`.
+        let root = Root::new();
+        let (mirror, _lock) = made(&root);
+        let mut sink = GixSink::open(mirror.git_dir()).expect("open the mirror");
+        let mut write = |kind, bytes: &[u8]| sink.write_object(kind, bytes).expect("write");
+        let blob = write(RawKind::Blob, b"damaged\n");
+        let other = write(RawKind::Blob, b"other\n");
+        let entry = RawTreeEntry::new(b"100644".to_vec(), b"a.txt".to_vec(), blob);
+        let tree = write(RawKind::Tree, &RawTree::new(vec![entry]).render());
+        let ident = RawIdent::new(
+            b"A".to_vec(),
+            b"a@a.invalid".to_vec(),
+            1_700_000_000,
+            0,
+            false,
+        );
+        let message = b"One file\n".to_vec();
+        let commit = RawCommit::new(tree, Vec::new(), ident.clone(), ident, Vec::new(), message);
+        let commit = write(RawKind::Commit, &commit.render());
+        sink.sync(&[blob, other, tree, commit]).expect("sync");
+        set_refs(&mirror, &[("refs/incoming/origin/heads/main", commit)]);
+
+        // 2. The blob's file damaged.
+        let file = loose(mirror.git_dir(), blob);
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).expect("chmod");
+        match damage {
+            Damage::Garbled => fs::write(&file, b"garbage").expect("garble the blob"),
+            Damage::Swapped => {
+                fs::copy(loose(mirror.git_dir(), other), &file).expect("swap the blob");
+            }
+        }
+
+        // 3. The closure check, then the promotion, as a fetch makes them. The check finds
+        //    missing objects: a damaged blob may pass it, and does with git 2.43.
+        let home = TempDir::new().expect("a temp dir");
+        let closure = git_cli(home.path()).closed(mirror.git_dir(), &[commit]);
+        assert!(
+            matches!(
+                closure,
+                Ok(())
+                    | Err(TransportError::Rejected {
+                        reason: RejectReason::BadObjects,
+                        ..
+                    })
+            ),
+            "{damage:?}: {closure:?}"
+        );
+        let branches = mirror.branches(REMOTE).expect("branches");
+        let tags = mirror.tags(REMOTE).expect("tags");
+        mirror.promote(REMOTE, &branches, &tags).expect("promote");
+
+        // 4. The fetch's import of the tracking ref: refused, naming the blob; nothing recorded.
+        let (_dir, _store, repo) = new_repo();
+        let source = GixSource::open(mirror.git_dir()).expect("open the mirror to read");
+        let request = ImportRequest::objects_only("refs/remotes/origin/main");
+        let error = import(&repo, &source, &request).expect_err("the damaged blob is refused");
+        assert!(
+            matches!(
+                &error,
+                ImportError::Convert(ConvertError::Source(SourceError::Corrupt { oid, .. }))
+                    if *oid == blob
+            ),
+            "{damage:?}: {error:?}"
+        );
+        assert_eq!(repo.info().expect("info").changesets, 0, "{damage:?}");
+        assert_eq!(
+            repo.verify(Depth::Deep).expect("verify").problems,
+            [],
+            "{damage:?}"
+        );
+    }
 }
