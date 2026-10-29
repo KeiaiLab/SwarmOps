@@ -29,18 +29,6 @@ the schema, the help and the references say what the code does.
 
 ### Added
 
-- `.deb` and `.rpm` packages for x86_64 and aarch64 on every release, with their lines in
-  `SHA256SUMS`: `swarmops_<version>_<arch>.deb` and `swarmops-<version>-1.<arch>.rpm`, made by
-  `scripts/packages.py` from the release archive's binaries, byte for byte, into `/usr/bin`, with
-  the license, the third-party notices, README and changelog in `/usr/share/doc/swarmops`;
-  reproducible, and depending on glibc 2.34 or newer and libgcc. The release workflow installs,
-  runs, verifies and removes each one with `dpkg` in Debian 12 and `rpm` in AlmaLinux 9 (the
-  aarch64 ones for aarch64, under QEMU) before it publishes anything, and a run started by hand
-  rehearses a branch without publishing
-  ([Install from a .deb or .rpm package](docs/operate/install-and-upgrade.md#install-from-a-deb-or-rpm-package)).
-
-### Added
-
 - Two probes for v0.6.0's misses, no fix: `just perf` times a sync of one land on 1,000 and
   12,000 commits by phase (`fetch`, `sync --no-push`, `push`), and G4's landing case with
   `SWARMOPS_TEST_CLI_LANDING_LOCK_SAMPLE_US` set prints each process's wait for `meta/lock` and
@@ -100,6 +88,15 @@ the schema, the help and the references say what the code does.
   0.104 s, and its first clone 1,195.6 s; G17's fetch 1.34× (1.65× in v0.6.0); G4 at 50
   processes on the ext4 bench disk, p99 2.5–2.7 s for v0.6.0's code as for M14's, the lock held
   99.6 % of the run; the sync of one land 49.6 s.
+- `.deb` and `.rpm` packages for x86_64 and aarch64 on every release, with their lines in
+  `SHA256SUMS`: `swarmops_<version>_<arch>.deb` and `swarmops-<version>-1.<arch>.rpm`, made by
+  `scripts/packages.py` from the release archive's binaries, byte for byte, into `/usr/bin`, with
+  the license, the third-party notices, README and changelog in `/usr/share/doc/swarmops`;
+  reproducible, and depending on glibc 2.34 or newer and libgcc. The release workflow installs,
+  runs, verifies and removes each one with `dpkg` in Debian 12 and `rpm` in AlmaLinux 9 (the
+  aarch64 ones for aarch64, under QEMU) before it publishes anything, and a run started by hand
+  rehearses a branch without publishing
+  ([Install from a .deb or .rpm package](docs/operate/install-and-upgrade.md#install-from-a-deb-or-rpm-package)).
 
 ### Changed
 
