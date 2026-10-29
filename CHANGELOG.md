@@ -125,6 +125,11 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   import took with a loss, `paths` also covers empty and `/`-holding names, and the import and
   export docs say how memos are checked or, under the memo key, taken (issue #8 items 3 and 9,
   issue #16).
+- The versioning policy lists the external id index's entries (`SXID` version 1) as part of the
+  store format, with the rule for a new entry layout, and no longer pins a crate count or 0.1.0;
+  `SECURITY.md` drops the unbounded journal and index reads M6 bounded; the `op undo`, `ref list`
+  and concepts pages describe `op log`'s committed numbers and FORMAT 2's refs (issue #6 item 12,
+  issue #3 item 2, issue #16 item 8, issue #20 items 10 and 21, issue #21 item C1).
 
 ### Fixed
 
@@ -220,6 +225,20 @@ the benchmark gate, and the measurements of all of it.
   derived as before. `verify --deep` checks the new `git_oid_mac`, `git_tree_oid_mac` and
   `git_blob_oid_mac` memos too (`derived_mismatch`, `key` the key's id), and `repair` drops a
   malformed one.
+- `op log` lists committed operations only: it waits for the store's lock (`E_BUSY` after the
+  lock timeout, retryable), runs the journal's tail check, and lists only frames synced and listed
+  in `journal.off`. It read the lock-free snapshot, which shows a frame before its sync, so a
+  failed sync or a power loss could take a listed operation back, the next write take its number,
+  and an `op undo` of that number undo the other write (issue #11; the v0.6.0 design, D7).
+- `ws commit` sends the blobs the store lacks inline in its one keyed commit request, which the
+  store writes as one batch, where it put each with a durable `blob_put` of its own, a sync round
+  a file (805–819 ms for 100 files in the v0.5.0 measurements). A blob past what is left of the
+  request's 64 MiB inline budget is still put alone first.
+
+### Fixed
+
+- The MCP tool `ws_create` without a `path` makes the workspace in the server's working
+  directory, named after it, as its schema says; it failed with `E_INVALID_ARG`.
 
 ## [0.5.0] - 2026-10-27
 
@@ -1415,7 +1434,7 @@ fixes the measurements and the pilot asked for.
   index record, its object unread) and `flush_metadata` (the index synced and the checkpoint
   moved to the end of the journal).
 - An object holds at most 512 MiB (`swarmops_store::MAX_OBJECT_LEN`), the limit a put's content
-  already had. The store refuses a longer object before it hashes or writes anything, and a batch
+  already had. The store refuses a longer object before it writes anything, and a batch
   with one such object in it writes none of its objects: `E_TOO_LARGE`, with `details`
   `{"store_limit": "object_bytes", "max": 536870912, "got": <bytes>}` (in the Rust API,
   `StoreError::Limit` with the new `LimitKind::ObjectBytes`). A stored object whose header

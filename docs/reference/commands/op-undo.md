@@ -164,11 +164,11 @@ already; otherwise `ref_moves` lists each move made and `op` is the undo's own n
 
 ### Caveats
 
-- **Check the number first.** `op log` lists an operation before its sync has finished. If the
-  store takes that frame back (a failed sync, a power loss), the next write's frame gets the same
-  number, and an undo of the number you read moves back that other operation's refs, with no
-  error, as long as they hold what it set. List the operation again before you undo it, above
-  all after an error ([Known limitations](../../known-limitations.md#commits-refs-and-history)).
+- **Check the number first.** `op log` lists only committed operations, so a listed number keeps
+  its operation; only the triple fault the journal's failure policy leaves open can lose one
+  ([Known limitations](../../known-limitations.md#durability)). An undo moves back the refs
+  that the operation of the number you give moved, with no error while they hold what it set:
+  list the operation again before you undo it, as the pattern above does.
 - **It is not a revert.** An undo moves refs; it does not record a change that reverses the
   files. After it, the changesets `OP` added are on no ref, yet still in the store.
 - **Land keys.** A keyed land looks for an earlier land of its key on the target's

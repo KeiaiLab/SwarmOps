@@ -4,9 +4,10 @@ agents can run it while others commit and land.
 
 ### What it lists
 
-- **Every ref, sorted by name.** A store has two kinds of ref: `main`, and `release/<name>`
-  ([Ref](../../../concepts.md#ref)). There are no other branches, tags or symbolic refs, so
-  `main` always sorts first.
+- **Every ref, sorted by name**, with its `kind`. A FORMAT 1 store has two kinds of ref: `main`,
+  and `release/<name>`. A FORMAT 2 store also has branches such as `feature/x`, tags
+  (`tags/<path>`) and remote-tracking refs (`remote/<remote>/<path>`)
+  ([Ref](../../../concepts.md#ref)). There are no symbolic refs.
 - **`target`** is the full 64-hex id of the changeset the ref names now. Pass it as it is to
   `ref set --expect` or `ref delete --expect`, or as `--parent` to a commit.
 - **`version`** counts the transactions that changed the ref's target since the ref was created,

@@ -57,10 +57,7 @@ filesystem permissions are the access boundary. Within that model, these are vul
   parents' where a history walk uses them, so a run of them crafted to agree can still have a
   land's merge base or `log --path` answer wrongly, though
   every changeset they reach is on the first-parent chain the changeset objects name, and
-  `verify` reports the damage; and a
-  `journal.log`, `journal.off`, index column or sorted view whose length is huge (sparse or
-  crafted) is read into one buffer of that length, so a read allocates without bound and aborts
-  when the allocation fails instead of returning an error; and a derived value file crafted with
+  `verify` reports the damage; and a derived value file crafted with
   a value its derivation does not give, whole and with its trailer right, is refused by a reader
   only where the reader's checks against the index and the objects tell (a skip list's first
   entry, length and each jump against the list one level down; a last touch's changeset against

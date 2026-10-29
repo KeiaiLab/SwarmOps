@@ -76,9 +76,12 @@ Explained in: [README, Revisions and change lists](../README.md#revisions-and-ch
 
 ## Ref
 
-A ref names a changeset. Refs are `main` and `release/<name>` only, each one file under
-`meta/refs/`, moved one per call and only by [compare-and-swap](#compare-and-swap). There are no
-tags, free-form branch names or symbolic refs; the journal's ref moves are the reflog.
+A ref names a changeset. A FORMAT 1 store's refs are `main` and `release/<name>` only; a
+[FORMAT](#format) 2 store also takes free-form branches such as `feature/x`, tags (`tags/<path>`,
+created and deleted, never moved) and remote-tracking refs (`remote/<remote>/<path>`, which a
+fetch moves). Each is one file under `meta/refs/` (`meta/refs2/` in FORMAT 2), moved one per call
+and only by [compare-and-swap](#compare-and-swap). There are no symbolic refs; the journal's ref
+moves are the reflog.
 
 `ref list` lists the refs, and `ref set` and `ref delete` move one.
 
@@ -219,13 +222,15 @@ Explained in: [README, Bring a git repository in](../README.md#bring-a-git-repos
 
 ## FORMAT
 
-`FORMAT` is the file that names a store's layout version: `swarmops-store 1` for every store today.
+`FORMAT` is the file that names a store's layout version: `swarmops-store 2` for a store `init`
+makes by default since M6 (v0.4.0), `swarmops-store 1` for an older one or one made with
+`init --format 1`.
 `init` writes it last, so a store without it was never finished. A binary opens only a store whose
 `FORMAT` it knows, and refuses any other as `E_NOT_A_REPO` (exit 6).
 
-A new `FORMAT` comes with the release that needs it, and the changelog says so. SwarmOps is pre-1.0,
-and before 1.0 there is no migration tool: a store may have to be created again. The hash contract
-does not change with it: a changeset's id is the same under every `FORMAT`.
+A new `FORMAT` comes with the release that needs it, and the changelog says so. `swarmops upgrade`
+moves a store to the latest format a build writes, in place, after which older releases do not open
+it. The hash contract does not change with it: a changeset's id is the same under every `FORMAT`.
 
 Explained in: [operations, Upgrades](operations.md#upgrades) ·
 [versioning policy, Public surfaces](policies/versioning-and-stability.md#public-surfaces).

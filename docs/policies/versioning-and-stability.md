@@ -1,8 +1,9 @@
 # Versioning and stability
 
-SwarmOps 0.1.0 is the first release, tagged `v0.1.0`. Every crate of the workspace is at version
-0.1.0 (the workspace version), and none is published (`publish = false`). This page says what
-users and agents may rely on, what they may not, and how a change to a public surface is made.
+SwarmOps 0.1.0 was the first release, tagged `v0.1.0`, and each release is tagged `v<version>`.
+Every crate of the workspace is at the workspace version (`[workspace.package]` in `Cargo.toml`),
+and none is published (`publish = false`). This page says what users and agents may rely on, what
+they may not, and how a change to a public surface is made.
 The release steps are in [RELEASE.md](../../RELEASE.md).
 
 ## Public surfaces
@@ -17,8 +18,10 @@ to the weakest:
    ids of representative objects, and `just check` fails if either moves.
 2. **The store format.** The on-disk layout of a store, named by its `FORMAT` file
    (`swarmops-store 1` or, since M6, `swarmops-store 2`): the object file header, the journal's
-   frames and records, the index files and the ref files (storage-core spec §2, §3). A binary
-   opens only a store whose `FORMAT` it knows; any other, the CLI refuses as `E_NOT_A_REPO`.
+   frames and records, the index files and the ref files (storage-core spec §2, §3), and the
+   entries of the external id index, which carry a version of their own (`SXID` version 1,
+   storage-core spec §7). A binary opens only a store whose `FORMAT` it knows; any other, the
+   CLI refuses as `E_NOT_A_REPO`.
    A release that writes a new `FORMAT` still opens, reads and writes the older ones it knows.
 3. **The command-line contract.** One JSON envelope per run on stdout,
    `{ok, op, api, result | error{code, message, retryable, exit, details, hint}, meta}` (but
@@ -59,7 +62,7 @@ a code's exit code or `retryable` flag; or makes an optional input required.
 
 No compatibility is promised for:
 
-- **The Rust crate APIs**, all nine of them (the eight product crates and `swarmops-testkit`).
+- **The Rust crate APIs**, of every crate of the workspace, `swarmops-testkit` included.
   They are internal to the workspace and unpublished; `swarmops-api`'s types are a contract only
   through their JSON.
 - **Performance.** The spec's targets and the numbers in [docs/perf.md](../perf.md) are goals
@@ -96,6 +99,10 @@ No compatibility is promised for:
   file names, with the record layouts unchanged. The first new journal record kind (annotations,
   M7) makes the next one, `swarmops-store 3`; whichever version first changes the layout takes
   the next number.
+- **A new external id entry layout** gets the next `SXID` version, beside version 1: entries
+  already written keep their bytes. A binary reads only the versions it knows and reports an
+  entry of any other as damaged (`E_STORE_CORRUPT`), so an older binary fails on such an entry
+  rather than misreads it.
 - **A contract change** shows up in a test the gate runs: `all__cli__schema_snapshot.snap` holds
   the schema of every type, the MCP server's tool list and its discovery result have snapshots
   of their own, and each error code's exit code and `retryable` flag, which no schema holds,

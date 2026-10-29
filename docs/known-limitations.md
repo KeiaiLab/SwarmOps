@@ -206,10 +206,13 @@ left).
   head. Given `--parent` by its full id, the retry records the changeset once; with `--advance`
   too, a ref that moved on past it makes the retry `E_CAS_MISMATCH`, and `swarmops log` shows
   whether the ref's history holds it. A commit without a key still signs at its own time, so
-  its retry records a second changeset, or, as a `commit --advance` retried a second or more after a
-  first attempt that published, nothing: the ref names that attempt, so the retry fails with
-  `E_CAS_MISMATCH`, whose `actual` may be the agent's own change; `swarmops show <actual>` gives its
-  `agent` and `run_id` metadata, to check before applying the edits again on top of it. *Target: M9
+  its retry records a second changeset, or, as a `commit --advance` given `--parent` and retried a
+  second or more after a first attempt that published, nothing: the ref names that attempt, so the
+  retry fails with `E_CAS_MISMATCH`, whose `actual` may be the agent's own change; `swarmops show
+  <actual>` gives its `agent` and `run_id` metadata, to check before applying the edits again on
+  top of it. Without `--parent` that retry builds on the ref's head, the first attempt, so its puts
+  change nothing (`E_EMPTY_COMMIT`), or a delete names a path no longer there
+  (`E_PATH_NOT_FOUND`). *Target: M9
   (an index of commit keys, if measurements ask for one). Found: M1 final fix pass; the `--advance`
   case, the M1.6 review; narrowed by M4 Task 8.*
 - **A keyed land searches the target's first parents.** A land with a key first looks for an
@@ -769,8 +772,9 @@ These do not change what SwarmOps does, only how well the tests can see it.
 - **The eight-committer race can meet `E_BUSY` on a loaded host.**
   `multiprocess::eight_processes_commit_concurrently_all_persist` races eight commits, which are
   what it measures, so it retries none: a lock wait that load stretches past 10 s fails it. Its
-  sixteen-racer sibling retries its setup commits (`retry_busy`). *Unscheduled. Found: M1.5
-  Task 3.*
+  two sixteen-racer siblings run again a command that meets `E_BUSY` (`retry_busy`): the `ref set`
+  race its setup commits, and the `commit --advance` race its racers' publishes, since one that
+  met `E_BUSY` recorded nothing. *Unscheduled. Found: M1.5 Task 3.*
 - **A create's removal of a crashed create's staging is outside the fault doubles.** A create
   removes what a crashed create left in `meta.tmp/`, and a repository create removes an older
   `meta.tmp/` before it sets a crashed create of another format aside there, with `std::fs`:
