@@ -32,11 +32,12 @@ processes on one host commit into one embedded store at once, and every command 
 JSON envelope. It is one Rust program, with no external database and no daemon, and it moves the
 work to and from git, so that CI and deployments keep running.
 
-It is pre-release, at v0.6.0 (milestones through M6): usable by one agent, with a store that
+It is pre-release, at v0.7.0 (milestones through M14): usable by one agent, with a store that
 already takes commits from many processes at once; merging and landing, which a swarm needs, are
 built, and landing under a swarm's load is measured, within its targets but for the p99 at 50
 processes; a store clones,
-fetches, pushes and syncs with GitHub itself; and an agent builds and tests its change in a
+fetches, pushes and syncs with GitHub itself; stock git clones, fetches and pushes a store that
+`swarmops serve` serves; and an agent builds and tests its change in a
 workspace on disk, then lands the tree it tested ([roadmap](#roadmap)).
 
 ## Core features
@@ -525,7 +526,7 @@ planned, each with its milestone.
 | Review | Nothing today. 📋 M7: change requests, their classification, approvals and a landing gate. | **Behind** today: git ships patch-review tools, and Gerrit and GitHub add review on top. M7 is **not yet comparable**. |
 | Sync between hosts | ✅ M8: through a git remote, one writing host at a time, with `git import` and `git export`. ✅ M13: a store clones, fetches and pushes a git remote over HTTPS or ssh, by running the user's git; a push is a compare-and-swap, never forced, and `sync` lands the store's unpublished changes onto the remote's head, so several stores can write to one remote. 📋 M11: offline-first sync between stores, `so://`. | **Parity** with git's clone, fetch and push to a git remote over HTTPS and ssh, which SwarmOps runs; **behind** on transports, shallow and partial clones, and bundles. |
 | Ecosystem | ✅ M1: the CLI and `swarmops schema`. ✅ M1.5: an MCP server. ✅ M3: git import. ✅ M8: git export. ✅ M13: git remotes, and GitHub's pull requests merged by any method. No user hooks, signing, submodules or LFS, and no GitHub API calls. | **Behind**, after v1 too: git parity is not a v1 goal, and git has MCP servers as well. |
-| Maturity | Pre-release: v0.1.0 is the first tag, v0.6.0 the latest, and the first spec dates from 2026-10-15. | **Behind**: git has hosted itself since 2005. |
+| Maturity | Pre-release: v0.1.0 is the first tag, v0.7.0 the latest, and the first spec dates from 2026-10-15. | **Behind**: git has hosted itself since 2005. |
 | Landing | ✅ M4: `land` merges an agent's change onto `main` and publishes it as one changeset in one transaction, merging again and retrying by itself when `main` moves, and a retry with the same key replays it. 📋 M4, after the pilot: the landing model chosen by measurement. | **Ahead by design** of git alone, whose push refuses a moved branch and leaves the fetch, the merge and the retry to the pusher; measured under a swarm's load in 0.6.0, with metalog merge: lands/s, retries and nothing lost met, p99 at 50 processes missed ([docs/perf.md](docs/perf.md)). |
 
 No git baseline has been measured: these verdicts come from the design, the code, and git's own
@@ -585,7 +586,7 @@ and one commit's fetch and push on a long history ([docs/perf.md](docs/perf.md))
 what they missed: the landing model those numbers chose (metalog merge: 0 % retries at 50
 landing processes, p99 still 580–595 ms against 500), authenticated export memos (a push 1.04× on
 12,000 commits against 1,000), checked fetches, a protected `main` and the benchmark gate.
-M14, for 0.7.0, serves stores to stock git (on 12,000 commits a clone 0.97× and a no-op fetch
+0.7.0 is M14: it serves stores to stock git (on 12,000 commits a clone 0.97× and a no-op fetch
 1.82× git's own server, a push that lands 0.104 s).
 
 The road to usable ([To usable](docs/roadmap.md#to-usable)): a real repository runs 8 or more

@@ -1244,7 +1244,7 @@ fn usage_error_exits_2_with_envelope() {
     for (args, start) in [
         (&["--help"][..], "Source control for coding-agent swarms"),
         (&["commit", "--help"], "Record a changeset"),
-        (&["--version"], "swarmops 0.6.0\n"),
+        (&["--version"], "swarmops 0.7.0\n"),
     ] {
         let output = swarmops().args(args).output().unwrap();
         let stdout = String::from_utf8(output.stdout).unwrap();

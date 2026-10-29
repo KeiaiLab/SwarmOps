@@ -33,13 +33,13 @@ test-hooks = [
 # 0.21.0 would be a second `GitSource` and a second `GitSink` there. rayon syncs the objects an
 # export writes in parallel.
 [dependencies]
-swarmops-core = { path = "../swarmops-core", version = "0.6.0" }
+swarmops-core = { path = "../swarmops-core", version = "0.7.0" }
 # The repository the import writes into (objects, raw changesets, external ids and refs) and
 # export oids are derived in (its derivation framework, and the derived store that memoizes the
 # git oids of its trees and blobs).
-swarmops-repo = { path = "../swarmops-repo", version = "0.6.0" }
+swarmops-repo = { path = "../swarmops-repo", version = "0.7.0" }
 # The object length limit (`MAX_OBJECT_LEN`), which the conversion refuses a longer blob against.
-swarmops-store = { path = "../swarmops-store", version = "0.6.0" }
+swarmops-store = { path = "../swarmops-store", version = "0.7.0" }
 # A token's `Authorization: Basic` header for a remote (M13).
 base64.workspace = true
 # The MACs of the export oid memos a memo key authenticates, and the key's id.
@@ -53,7 +53,7 @@ serde.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-swarmops-testkit = { path = "../swarmops-testkit", version = "0.6.0" }
+swarmops-testkit = { path = "../swarmops-testkit", version = "0.7.0" }
 tempfile.workspace = true
 proptest.workspace = true
 

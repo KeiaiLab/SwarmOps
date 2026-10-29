@@ -39,7 +39,7 @@ inline, `op log` lists committed operations only, and MCP `ws_create` fills its 
 v0.6.0 fixes what the measurements missed: `land` settles a moved `main` inside the lock by metalog
 merge, export memos a per-store key authenticates shorten `push` and `export`, a fetch checks every
 object it receives, `main` cannot be deleted, and `just bench` gates the weekly run
-([perf.md](perf.md#v060--2026-10-28)). M14, on `stable` for v0.7.0, serves topology 1:
+([perf.md](perf.md#v060--2026-10-28)). v0.7.0 (M14) serves topology 1:
 `swarmops serve` lets stock git clone, fetch, pull and push a store over ssh and smart HTTP
 ([Topology 1 today](#topology-1-today-local-git-remote-swarmops)).
 
@@ -126,7 +126,7 @@ SwarmOps is **usable** when all of these hold:
    the pilot's [Rollback](pilot.md#rollback)).
 5. No open soft finding touches data safety or the contract.
 6. Two releases in a row shipped no data-safety fix.
-7. For teams without GitHub: M14 (topology 1) is delivered.
+7. For teams without GitHub: M14 (topology 1) is delivered. Met by v0.7.0.
 
 The releases that get there:
 
@@ -137,11 +137,15 @@ The releases that get there:
 | v0.7.0 | M14 | Topology 1's acceptance criteria 1 to 5 pass in CI ([Topology 1](#topology-1-local-git-remote-swarmops)) |
 | v0.8.0 | Operations | The open soft findings triaged, none left touching data safety or the contract (condition 5); packages beyond the install script |
 
-**Status (2026-10-28).** v0.6.0 is released, its fixes measured in
-[docs/perf.md](perf.md#v060--2026-10-28). G1 and G2 are met. G4 is met but
-for its p99 at 50 processes: 25 lands/s, 0 % retries and nothing lost, with a p99 of 579.5–594.6 ms
-against 500. G17's push is met (1.04×); its fetch is not (1.65×; 1.04× with a commit-graph in the
-remote and the mirror). The benchmark gate (condition 3) runs in the weekly Scheduled run.
+**Status (2026-10-29).** v0.7.0 is released: M14 serves topology 1 (condition 7), its criteria 1
+to 5 pass in `just check` and in the Scheduled run's git matrix, and G16 is met
+([docs/perf.md](perf.md#v070--2026-10-29): a clone 0.97× and a no-op fetch 1.82× git's own
+server on 12,000 commits). G1 and G2 are met. G4 is met but for its p99 at 50 processes: 25
+lands/s, 0 % retries and nothing lost, with a p99 of 2.5–2.7 s on the ext4 bench disk in M14's
+window, for v0.6.0's code as for M14's (579.5–594.6 ms in v0.6.0's). G17's push and fetch are met
+(1.02× and 1.34×, the fetch with the mirror's commit-graph); the sync of one land right after a
+clone is not (49.6 s against 1 s). The benchmark gate (condition 3) runs in the weekly Scheduled
+run.
 
 Deferred past usable, with what stands in until then:
 
@@ -606,8 +610,8 @@ Several upstreams merging with each other, partial replicas and a caching tier.
 Milestone ids are never renumbered. Two are new: M13 (topology 2) and M14 (topology 1); M11
 (topology 3) takes `so clone`, `so remote` and `so sync`.
 
-**Settled:** M0 to M4 and M8 are delivered, in v0.1.0, M13 in v0.2.0, M5 in v0.3.0 and M6 in
-v0.4.0, ahead of M12, which is developed separately.
+**Settled:** M0 to M4 and M8 are delivered, in v0.1.0, M13 in v0.2.0, M5 in v0.3.0, M6 in
+v0.4.0 and M14 in v0.7.0, ahead of M12, which is developed separately.
 **Provisional:** after M6 the order follows [To usable](#to-usable): v0.5.0 and v0.6.0 prove and
 fix, M14 is v0.7.0, and M7, M9's simulator, M11 and M12 wait until SwarmOps is usable; the order
 below is the plan:
@@ -626,7 +630,7 @@ needs   M13  ← M3, M4, M8                 packs, the mirror, the sync engine
 | ✅ M13 | 2 | The user's git as the transport; the store's git mirror; `so clone`, `so remote`, `so fetch`, `so push`, `so sync`, `so sync status`, their MCP tools; `authors.toml`; v0.2.0 | M3, M4, M8 | Topology 2's acceptance criteria 1 to 6 pass (delivered: [CHANGELOG](../CHANGELOG.md)) |
 | ✅ M5 | — | Workspaces, with an adapter for Claude Code's worktree hooks; `rebase`, `land --expect-target`, `blob get`; eleven MCP workspace tools; v0.3.0 | M4 | As the README states it (delivered: [CHANGELOG](../CHANGELOG.md)) |
 | ✅ M6 | 1, 3 | Verify, crash safety, fuzzing, gc, and FORMAT 2 with the ref names M11 and M14 need (remote-tracking refs, branches, tags); gc keeps what the mirror's refs reach; v0.4.0 | | As the README states it, plus a FORMAT 2 store holding a free-form branch and a tag (delivered: [CHANGELOG](../CHANGELOG.md)) |
-| 📋 M14 | 1 | `swarmops serve` over ssh and CGI; upload-pack and receive-pack; `refs/land/`; the access file | M13, M6 | Topology 1's acceptance criteria 1 to 5 pass |
+| ✅ M14 | 1 | `swarmops serve` over ssh and CGI; upload-pack and receive-pack; `refs/land/`; the access file; v0.7.0 | M13, M6 | Topology 1's acceptance criteria 1 to 5 pass (delivered: [CHANGELOG](../CHANGELOG.md)) |
 | 📋 M7 | — | Blame and review | A `FORMAT 3` (annotations, a new record kind) | As the README states it |
 | 📋 M9 | — | Simulation and a benchmark gate | | As the README states it |
 | 📋 M11 | 3 | Native sync over `so://`, extending M13's sync engine and M14's entry | M3, M4, M6, M7, M8, M9, M13, M14 | Topology 3's acceptance criteria 1 to 3 pass |

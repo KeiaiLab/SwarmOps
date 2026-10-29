@@ -8,13 +8,24 @@ pre-1.0 way).
 SwarmOps 0.1.0 is the first release, tagged `v0.1.0`, 0.2.0 the second, with the git remotes
 (M13), 0.3.0 the third, with the workspaces (M5), 0.4.0 the fourth, with verify, crash
 safety, fuzzing, gc and FORMAT 2 (M6), 0.5.0 the fifth, with the pilot on a real repository
-and the goal measurements, and 0.6.0 the sixth, with the fixes those measurements asked for; no
-crate is published (`publish = false`). The 0.1.0
-section holds every change up to it, grouped by milestone of the design (umbrella spec §13).
+and the goal measurements, 0.6.0 the sixth, with the fixes those measurements asked for, and
+0.7.0 the seventh, with stock git against a store (M14); no crate is published
+(`publish = false`). The 0.1.0 section holds every change up to it, grouped by milestone of the design (umbrella spec §13).
 From here, **Unreleased** collects the changes on `stable` that no release holds yet, until the
 next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ## [Unreleased]
+
+## [0.7.0] - 2026-10-29
+
+Serve stock git. The 0.7.0 release holds M14, topology 1: `swarmops serve`, run per connection
+by ssh or a web server, lets stock git clone, fetch, pull and push a store under the store's
+`access.toml`, and lands a push to `refs/land/<target>`; `git import`, `git export` and `push`
+take every ref name the store's format takes; and the measurements of G16 and of v0.6.0's
+misses. It carries the first of v0.8.0's fixes for the open soft findings (issues #2 to #21): a
+collision-flagged git object, a malformed memo and a damaged generation index are refused or
+reported, `read_file` refuses a `max_bytes` of 0, `op undo`'s refusals report their repairs, and
+the schema, the help and the references say what the code does.
 
 ### Added
 
@@ -161,9 +172,6 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   (issue #21 item D3).
 - `--repo` with a relative path works for the remote commands (`fetch`, `push`, `sync`); git
   failed with "not a git repository" (`E_REMOTE_REJECTED` `unclassified`).
-
-### Fixed
-
 - `blob put -` reads stdin itself, so a socket stdin works; it used to open `/dev/stdin`, which
   fails for a socket.
 - A commit or a land's resolutions refuse a content past 512 MiB (`E_TOO_LARGE`, scope `put`) by
@@ -176,9 +184,6 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   `derive --follow` beside `mcp` as the runs that print other than one envelope on stdout, and
   `schema Meta` lists every operation that reports `meta.recovered`, and on which errors, where it
   named `commit`, `ref_set` and `ref_delete` alone (issue #2 item 2, issue #11 item 2).
-
-### Fixed
-
 - The order checker's W8 now ties an external id entry to its changeset's frame: it reads the
   entry's changeset id and requires a durable frame of `journal.log` (synced, or listed by any
   process) that records it. Before, it asked only that the bytes its own process wrote be
@@ -1779,7 +1784,8 @@ fixes the measurements and the pilot asked for.
   ([docs/known-limitations.md](docs/known-limitations.md), "An import onto a target reads the
   head's whole tree, and onto a native head the whole history below it").
 
-[Unreleased]: https://github.com/KeiaiLab/SwarmOps/compare/v0.6.0...stable
+[Unreleased]: https://github.com/KeiaiLab/SwarmOps/compare/v0.7.0...stable
+[0.7.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.3.0...v0.4.0

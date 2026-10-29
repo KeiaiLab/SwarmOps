@@ -15,7 +15,7 @@ M4 merge and landing · M8 git export · M12 portability · M13 git remotes · M
 M6 verify, crash safety and fuzzing · M14 git clients against a store · M7 blame and review ·
 M9 simulation and a benchmark gate · M11 remote sync, offline-first.
 M0, M1, M1.5, M1.6, M2, M3, M4 and M8 make the first release, 0.1.0; M13 makes 0.2.0, M5
-0.3.0 and M6 0.4.0; 0.5.0 adds no milestone: it holds the pilot, the measurements and the first v0.6 fixes; 0.6.0 holds the fixes the measurements asked for; M14 makes 0.7.0. M1.5, the hardening milestone after M1, closed a few, and M1.6, the code-review follow-ups after it,
+0.3.0 and M6 0.4.0; 0.5.0 adds no milestone: it holds the pilot, the measurements and the first v0.6 fixes; 0.6.0 holds the fixes the measurements asked for, and M14 makes 0.7.0. M1.5, the hardening milestone after M1, closed a few, and M1.6, the code-review follow-ups after it,
 closed more. "Deferred
 until after the pilot" marks a delivered milestone's task that waits until SwarmOps has been
 piloted on a real repository ([pilot.md](pilot.md)): the measurements that need a quiet host,
