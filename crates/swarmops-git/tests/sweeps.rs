@@ -10,8 +10,9 @@
 //!   ([`request`]), onto two stores ([`Onto`]): a fresh one (three frames, then `main` created),
 //!   and one that holds `older`, `newer`'s first three commits, with `main` at its tip (two frames
 //!   from that base, then `main` moved on). Each frame's external ids follow it, and the
-//!   metadata's flush, the target's move and the flush after it end the import. Each store is
-//!   made in every format a create writes ([`INIT_FORMATS`]), so each sweep runs on each.
+//!   metadata's flush, the target's move and the flush after it end the import. Each sweep runs
+//!   once per store format, a test of its own (`<sweep>::format_1`, `<sweep>::format_2`,
+//!   [`per_format!`]).
 //! - A dry run counts the import's filesystem calls, its store's opening included
 //!   (`SWARMOPS_TEST_FS_CALLS`). Each run then imports in a child process, this test binary run
 //!   again ([`import_as_child`]), on a copy of the sweep's store, its k-th call crashing or failing
@@ -29,11 +30,11 @@
 //!   ids the crash left out.
 //! - The default gate takes every fifth call, with the last two, and fails them onto the fresh
 //!   store alone; the ignored variants take every call, onto both. A failure sweep also fails
-//!   every fifth call persistently, with `ENOSPC`. Both formats, in the default gate too.
+//!   every fifth call persistently, with `ENOSPC`.
 //!
 //! The git export's crash and failure sweeps at its git-side calls (the M8 plan's Review Focus
-//! 3) are the module `export` below, from a store of each format; `swarmops-cli`'s
-//! `tests/git.rs` sweeps its store calls.
+//! 3) are the module `export` below, also once per store format; `swarmops-cli`'s `tests/git.rs`
+//! sweeps its store calls.
 //!
 //! Each run owns its temp dirs, and the tests share nothing.
 
@@ -53,14 +54,15 @@ use swarmops_git::{GitOid, GixSource, ImportError, ImportReport, ImportRequest, 
 use swarmops_repo::{Depth, LocalRepo};
 use swarmops_store::external_ids::lower_hex;
 use swarmops_store::{
-    CRASH_AT_ENV, ExternalEntry, ExternalIds, FAIL_AT_ENV, FS_CALLS_ENV, Frame, INIT_FORMATS,
-    Journal, ORDER_CHECK_ENV, RealFs, Record, SYSTEM_GIT, StoreFormat,
+    CRASH_AT_ENV, ExternalEntry, ExternalIds, FAIL_AT_ENV, FS_CALLS_ENV, Frame, Journal,
+    ORDER_CHECK_ENV, RealFs, Record, SYSTEM_GIT, StoreFormat,
 };
 use swarmops_testkit::child::{Child, SIGABRT, run, this_test};
 use swarmops_testkit::faults::checked;
+use swarmops_testkit::formats::test_of;
 use swarmops_testkit::fs::{NoSyncFs, copy_dir};
 use swarmops_testkit::git::{self, GitFixture};
-use swarmops_testkit::test_name;
+use swarmops_testkit::{per_format, test_name};
 use tempfile::TempDir;
 
 use crate::support::MemSource;
@@ -121,13 +123,6 @@ fn utf8(path: PathBuf) -> Utf8PathBuf {
 /// The repository at `path`, read through gix.
 fn open(path: &Path) -> GixSource {
     GixSource::open(path).unwrap_or_else(|error| panic!("open {}: {error}", path.display()))
-}
-
-/// Each format a create writes ([`INIT_FORMATS`]) with each of `starts`: what the sweeps run on.
-fn grounds<O: Copy>(starts: &[O]) -> Vec<(StoreFormat, O)> {
-    (INIT_FORMATS.iter())
-        .flat_map(|&format| starts.iter().map(move |&onto| (format, onto)))
-        .collect()
 }
 
 /// How a sweep's messages name what it runs on: `FORMAT 1, onto Fresh`, say.
@@ -314,12 +309,13 @@ fn import_into(repo: &LocalRepo, source: &GixSource, root: &Utf8Path) -> Ended {
     }
 }
 
-/// Runs `test` again in a child process ([`import_as_child`]) that imports `newer` from `source`
+/// Runs `test` (as the harness knows it) again in a child process ([`import_as_child`]) that
+/// imports `newer` from `source`
 /// into the store at `root`, with `hook`, a test hook's variable and value, set and every
 /// filesystem call checked against the store's write-ordering rules; what it printed and how it
 /// ended.
 fn child(test: &str, root: &Utf8Path, source: &Path, hook: (&str, &str)) -> Output {
-    run(this_test(&test_name!(test))
+    run(this_test(test)
         .env(STORE_ENV, root)
         .env(SOURCE_ENV, source)
         .env(hook.0, hook.1)
@@ -356,8 +352,9 @@ fn copy(template: &Utf8Path) -> (TempDir, Utf8PathBuf) {
 /// What a sweep stands on: the fixture, the store every run copies, the dry run's call count,
 /// and what the uninterrupted import leaves.
 struct Sweep {
-    /// The test whose children import ([`import_as_child`]).
-    test: &'static str,
+    /// The test whose children import ([`import_as_child`]), as the harness knows it
+    /// ([`test_name!`]).
+    test: String,
     /// The store's format.
     format: StoreFormat,
     /// What the import starts from.
@@ -382,7 +379,7 @@ impl Sweep {
     /// counting its calls, under the order checker. That import must record `newer`'s other
     /// commits in frames of two, their external ids, and `main`'s move to the tip's changeset,
     /// and flush.
-    fn new(test: &'static str, format: StoreFormat, onto: Onto) -> Sweep {
+    fn new(test: &str, format: StoreFormat, onto: Onto) -> Sweep {
         let fixture = git::fixture("refs");
         let source = fixture.repo.clone().expect("refs holds a repository");
         let template_dir = tempfile::tempdir().expect("a temp dir");
@@ -425,7 +422,7 @@ impl Sweep {
             "the import makes a hundred calls and more: {calls}"
         );
         Sweep {
-            test,
+            test: test.to_owned(),
             format,
             onto,
             _fixture: fixture,
@@ -525,7 +522,7 @@ struct Crashed {
 fn crash_at(sweep: &Sweep, k: u64) -> Crashed {
     let (_dir, root) = copy(&sweep.template);
     let at = k.to_string();
-    let output = child(sweep.test, &root, &sweep.source, (CRASH_AT_ENV, &at));
+    let output = child(&sweep.test, &root, &sweep.source, (CRASH_AT_ENV, &at));
     let what = format!("{}, crashed at call {k} of {}", sweep.ground(), sweep.calls);
     let finished = k > sweep.calls;
     if finished {
@@ -567,8 +564,8 @@ fn crash_at(sweep: &Sweep, k: u64) -> Crashed {
 /// commit point and before its external ids (W8's window), one past the last frame and before
 /// `main` moved, and one past the move's commit point: else the sweep missed what it is for.
 /// Prints how many runs it made, and how many crashes fell in each of those windows.
-fn crash_sweep(test: &'static str, every: u64) {
-    for (format, onto) in grounds(&[Onto::Fresh, Onto::Older]) {
+fn crash_sweep(test: &str, format: StoreFormat, every: u64) {
+    for onto in [Onto::Fresh, Onto::Older] {
         let sweep = Sweep::new(test, format, onto);
         let ks = calls_taken(sweep.calls + 1, every);
         let crashes = runs(&ks, |&k| crash_at(&sweep, k));
@@ -617,7 +614,7 @@ fn crash_sweep(test: &'static str, every: u64) {
 fn fail_at(sweep: &Sweep, k: u64, failure: &str) -> Ended {
     let (_dir, root) = copy(&sweep.template);
     let spec = format!("{k}:{failure}");
-    let output = child(sweep.test, &root, &sweep.source, (FAIL_AT_ENV, &spec));
+    let output = child(&sweep.test, &root, &sweep.source, (FAIL_AT_ENV, &spec));
     let what = format!(
         "{}, call {k} of {} failing {failure}",
         sweep.ground(),
@@ -657,8 +654,8 @@ fn fail_at(sweep: &Sweep, k: u64, failure: &str) -> Ended {
 /// ([`PERSISTENT_AT`]). Among what the failures ended in must be a failure between two frames,
 /// one after a frame's commit point (`PostCommit`), and a success with a warning, a failure past
 /// the import's last commit point. Prints how many runs it made, and how they ended.
-fn failure_sweep(test: &'static str, every: u64, starts: &[Onto]) {
-    for (format, onto) in grounds(starts) {
+fn failure_sweep(test: &str, format: StoreFormat, every: u64, starts: &[Onto]) {
+    for &onto in starts {
         let sweep = Sweep::new(test, format, onto);
         let once = calls_taken(sweep.calls, every).into_iter();
         let once = once.map(|k| (k, "once:eio"));
@@ -697,58 +694,52 @@ fn failure_sweep(test: &'static str, every: u64, starts: &[Onto]) {
     }
 }
 
+per_format! {
 /// An import crashed at any filesystem call (every fifth here; every one in the ignored variant
 /// below) leaves a store that verifies clean, and the same import run again takes exactly what
 /// the crash left out, ending where an uninterrupted import ends.
-#[test]
-fn import_crashing_at_any_call_resumes_to_the_same_state() {
+fn import_crashing_at_any_call_resumes_to_the_same_state(format) {
     if import_as_child() {
         return;
     }
-    crash_sweep(
-        "import_crashing_at_any_call_resumes_to_the_same_state",
-        SAMPLED,
-    );
+    crash_sweep(&test_name!(test_of(format)), format, SAMPLED);
+}
 }
 
+per_format! {
 /// [`import_crashing_at_any_call_resumes_to_the_same_state`] at every call.
-#[test]
-#[ignore = "slow, ~3 min: an import crashed at each of its calls, on both formats"]
-fn import_crashing_at_every_call_resumes_to_the_same_state() {
+#[ignore = "slow, ~90 s: an import crashed at each of its calls"]
+fn import_crashing_at_every_call_resumes_to_the_same_state(format) {
     if import_as_child() {
         return;
     }
-    crash_sweep("import_crashing_at_every_call_resumes_to_the_same_state", 1);
+    crash_sweep(&test_name!(test_of(format)), format, 1);
+}
 }
 
+per_format! {
 /// An import whose filesystem call fails (every fifth here, once and persistently, onto the fresh
-/// store of each format; every one onto both in the ignored variant below) stops with a store
-/// failure, its committed frames recorded, or succeeds with everything recorded and a warning; the
-/// same import run again ends where an uninterrupted one ends.
-#[test]
-fn import_failing_at_any_call_stops_and_resumes() {
+/// store; every one onto both in the ignored variant below) stops with a store failure, its
+/// committed frames recorded, or succeeds with everything recorded and a warning; the same import
+/// run again ends where an uninterrupted one ends.
+fn import_failing_at_any_call_stops_and_resumes(format) {
     if import_as_child() {
         return;
     }
-    failure_sweep(
-        "import_failing_at_any_call_stops_and_resumes",
-        SAMPLED,
-        &[Onto::Fresh],
-    );
+    failure_sweep(&test_name!(test_of(format)), format, SAMPLED, &[Onto::Fresh]);
+}
 }
 
+per_format! {
 /// [`import_failing_at_any_call_stops_and_resumes`] at every call, onto both stores.
-#[test]
-#[ignore = "slow, ~1 min: an import failed at each of its calls, on both formats"]
-fn import_failing_at_every_call_stops_and_resumes() {
+#[ignore = "slow, ~2 min: an import failed at each of its calls"]
+fn import_failing_at_every_call_stops_and_resumes(format) {
     if import_as_child() {
         return;
     }
-    failure_sweep(
-        "import_failing_at_every_call_stops_and_resumes",
-        1,
-        &[Onto::Fresh, Onto::Older],
-    );
+    let starts = [Onto::Fresh, Onto::Older];
+    failure_sweep(&test_name!(test_of(format)), format, 1, &starts);
+}
 }
 
 /// The peak resident memory of this process (`VmHWM` in `/proc/self/status`), in KiB.
@@ -860,7 +851,7 @@ fn a_hundred_thousand_commit_import_stays_within_its_budget() {
 ///   on it, the third deleting a file and adding an executable and a symlink ([`template`]), onto
 ///   two destinations ([`Onto`]): an empty repository, which takes `linear`'s history too, and
 ///   `linear`'s own repository, its objects in a pack and `main` in `packed-refs`, which takes the
-///   three native commits on its tip. The store is made in each format ([`grounds`]).
+///   three native commits on its tip.
 /// - The crash sweep exports in a child process, this test binary run again ([`export_as_child`]),
 ///   through [`Crashing`], a [`GixSink`] that aborts the process right before its k-th mutating
 ///   call (`write_object`, `sync`, `cas_branch`, counted by a dry run), or inside the branch's move,
@@ -895,13 +886,14 @@ mod export {
     use swarmops_store::StoreFormat;
     use swarmops_testkit::child::{SIGABRT, run, this_test};
     use swarmops_testkit::faults::checked;
+    use swarmops_testkit::formats::test_of;
     use swarmops_testkit::fs::{NoSyncFs, copy_dir};
     use swarmops_testkit::git::{self, EmptyRepository, GitFixture};
     use swarmops_testkit::repo::{delete, put, put_as, request};
-    use swarmops_testkit::test_name;
+    use swarmops_testkit::{per_format, test_name};
     use tempfile::TempDir;
 
-    use super::{Class, SAMPLED, State, ground, grounds, runs, utf8};
+    use super::{Class, SAMPLED, State, ground, runs, utf8};
     use crate::support::{Keep, MemSink, reaches_only_kept};
 
     /// Set only in the children of the crash sweep: the store the child exports from.
@@ -1231,8 +1223,9 @@ mod export {
     /// What a sweep stands on: the fixture, the store and the destination every run copies, and
     /// what the uninterrupted export makes of them.
     struct Sweep {
-        /// The test whose children export ([`export_as_child`]).
-        test: &'static str,
+        /// The test whose children export ([`export_as_child`]), as the harness knows it
+        /// ([`test_name!`]).
+        test: String,
         /// The store's format.
         format: StoreFormat,
         /// What the export writes into.
@@ -1262,7 +1255,7 @@ mod export {
         /// an uninterrupted export into a copy of the destination through a [`Crashing`] sink
         /// that never crashes, which counts its calls. It must write the three native commits
         /// (and `linear`'s five into an empty repository), sync once and move the branch once.
-        fn new(test: &'static str, format: StoreFormat, onto: Onto) -> Sweep {
+        fn new(test: &str, format: StoreFormat, onto: Onto) -> Sweep {
             let fixture = git::fixture("linear");
             let source = fixture.repo.clone().expect("linear holds a repository");
             let empty = git::empty_repository();
@@ -1319,7 +1312,7 @@ mod export {
                 report,
             };
             Sweep {
-                test,
+                test: test.to_owned(),
                 format,
                 onto,
                 _fixture: fixture,
@@ -1376,7 +1369,7 @@ mod export {
     /// ([`resume`]).
     fn crash_at(sweep: &Sweep, crash: Crash) -> Crashed {
         let (_dir, root, destination) = copy_both(&sweep.store, &sweep.destination);
-        let output = run(this_test(&test_name!(sweep.test))
+        let output = run(this_test(&sweep.test)
             .env(STORE_ENV, &root)
             .env(DESTINATION_ENV, &destination)
             .env(CRASH_ENV, crash.env()));
@@ -1493,8 +1486,8 @@ mod export {
     /// with the external id entries recorded and the branch not moved (at the move), the lock a
     /// crash in the move leaves, and the branch moved: else the sweep missed what it is for.
     /// Prints how many runs it made, and how many crashes fell in each of those windows.
-    fn crash_sweep(test: &'static str, every: u64) {
-        for (format, onto) in grounds(&[Onto::Empty, Onto::Fixture]) {
+    fn crash_sweep(test: &str, format: StoreFormat, every: u64) {
+        for onto in [Onto::Empty, Onto::Fixture] {
             let sweep = Sweep::new(test, format, onto);
             let on = ground(format, onto);
             let points = sweep.crashes(every);
@@ -1531,26 +1524,28 @@ mod export {
         }
     }
 
+    per_format! {
     /// An export crashed right before any call that writes its destination (every fifth here,
     /// with the sync, the move, the move's inside and past it; every one in the ignored variant
     /// below) leaves the branch where it was, and the same export run again takes exactly what the
     /// crash left out, ending where an uninterrupted export ends.
-    #[test]
-    fn export_crashing_at_any_sink_call_resumes() {
+    fn export_crashing_at_any_sink_call_resumes(format) {
         if export_as_child() {
             return;
         }
-        crash_sweep("export_crashing_at_any_sink_call_resumes", SAMPLED);
+        crash_sweep(&test_name!(test_of(format)), format, SAMPLED);
+    }
     }
 
+    per_format! {
     /// [`export_crashing_at_any_sink_call_resumes`] at every call.
-    #[test]
-    #[ignore = "slow, ~10 s: an export crashed at each of its git-side calls, both formats"]
-    fn export_crashing_at_every_sink_call_resumes() {
+    #[ignore = "slow, ~15 s: an export crashed at each of its 54 git-side calls"]
+    fn export_crashing_at_every_sink_call_resumes(format) {
         if export_as_child() {
             return;
         }
-        crash_sweep("export_crashing_at_every_sink_call_resumes", 1);
+        crash_sweep(&test_name!(test_of(format)), format, 1);
+    }
     }
 
     /// The sink a failure sweep's runs start from: empty, or holding `linear`'s objects packed,
@@ -1744,13 +1739,13 @@ mod export {
         }
     }
 
+    per_format! {
     /// An export whose destination fails any of its mutating calls stops there, with that error,
     /// the branch where it was; the same export run again ends where an uninterrupted export ends,
     /// and the branch never names an object a power loss can take, before or after the failure.
-    /// Every call, onto both sinks, from a store of each format: the sinks live in memory.
-    #[test]
-    fn export_failing_at_any_sink_call_stops_and_resumes() {
-        for (format, onto) in grounds(&[Onto::Empty, Onto::Fixture]) {
+    /// Every call, onto both sinks: they live in memory.
+    fn export_failing_at_any_sink_call_stops_and_resumes(format) {
+        for onto in [Onto::Empty, Onto::Fixture] {
             let sweep = MemSweep::new(format, onto);
             let ks: Vec<usize> = (1..=sweep.calls + 1).collect();
             runs(&ks, |&k| fail_at(&sweep, k));
@@ -1761,5 +1756,6 @@ mod export {
                 sweep.calls
             );
         }
+    }
     }
 }

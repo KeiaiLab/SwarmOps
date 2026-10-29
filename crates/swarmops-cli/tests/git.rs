@@ -1574,7 +1574,7 @@ fn git_import_over_a_crafted_external_id_is_e_git_import_diverged() {
 ///   write-ordering rules (`SWARMOPS_TEST_ORDER_CHECK=1`, which the test support sets).
 /// - The default gate takes every fifth call, with the last two; the ignored variants take every
 ///   call. A failure sweep also fails every fifth call persistently, with `ENOSPC`. Each sweep
-///   runs on a store of each format a create writes (`INIT_FORMATS`).
+///   runs once per store format, a test of its own (`<sweep>::format_1`, `<sweep>::format_2`).
 #[cfg(feature = "test-hooks")]
 mod sweeps {
     use std::collections::BTreeSet;
@@ -1587,9 +1587,10 @@ mod sweeps {
     use swarmops_store::external_ids::lower_hex;
     use swarmops_store::{
         CRASH_AT_ENV, ExternalEntry, ExternalIds, FAIL_AT_ENV, FS_CALLS_ENV, FileOp, FsMethod,
-        INIT_FORMATS, Journal, RealFs, SYSTEM_GIT, StoreFormat,
+        Journal, RealFs, SYSTEM_GIT, StoreFormat,
     };
     use swarmops_testkit::fs::{FailingFs, copy_dir};
+    use swarmops_testkit::per_format;
     use swarmops_testkit::repo::{put, request};
 
     use super::{AGENT, Source, branch_at, import};
@@ -1938,25 +1939,23 @@ mod sweeps {
         })
     }
 
+    per_format! {
     /// `git export` crashed at any store call (every fifth here; every one in the ignored variant
     /// below) leaves the branch where it was and a store that verifies clean, and the same export
     /// run again ends where an uninterrupted one ends: the branch, the objects and the external id
     /// entries. The crashes reach the committed read's tail check, the derived values, the object
     /// writes between them and the entries.
-    #[test]
-    fn git_export_crashing_at_any_store_call_resumes() {
-        for &format in INIT_FORMATS {
-            crash_sweep(format, SAMPLED);
-        }
+    fn git_export_crashing_at_any_store_call_resumes(format) {
+        crash_sweep(format, SAMPLED);
+    }
     }
 
+    per_format! {
     /// [`git_export_crashing_at_any_store_call_resumes`] at every call.
-    #[test]
-    #[ignore = "slow, ~50 s: git export crashed at each of its 301 store calls, both formats"]
-    fn git_export_crashing_at_every_store_call_resumes() {
-        for &format in INIT_FORMATS {
-            crash_sweep(format, 1);
-        }
+    #[ignore = "slow, ~25 s: git export crashed at each of its 301 store calls"]
+    fn git_export_crashing_at_every_store_call_resumes(format) {
+        crash_sweep(format, 1);
+    }
     }
 
     /// How a run with an injected failure ended.
@@ -2114,24 +2113,22 @@ mod sweeps {
         file.is_some_and(|file| file.starts_with(prefix))
     }
 
+    per_format! {
     /// `git export` whose store call fails (every fifth here, once and persistently; every one in
     /// the ignored variant below) ends with an envelope that names the failure, or with the
     /// documented abort, never a panic, and leaves the branch where it was unless it exported
     /// whole; the same export run again ends where an uninterrupted one ends.
-    #[test]
-    fn git_export_failing_at_any_store_call_stops_and_resumes() {
-        for &format in INIT_FORMATS {
-            failure_sweep(format, SAMPLED);
-        }
+    fn git_export_failing_at_any_store_call_stops_and_resumes(format) {
+        failure_sweep(format, SAMPLED);
+    }
     }
 
+    per_format! {
     /// [`git_export_failing_at_any_store_call_stops_and_resumes`] at every call.
-    #[test]
-    #[ignore = "slow, ~15 s: git export failed at each of its 301 store calls, both formats"]
-    fn git_export_failing_at_every_store_call_stops_and_resumes() {
-        for &format in INIT_FORMATS {
-            failure_sweep(format, 1);
-        }
+    #[ignore = "slow, ~10 s: git export failed at each of its 301 store calls, 361 runs"]
+    fn git_export_failing_at_every_store_call_stops_and_resumes(format) {
+        failure_sweep(format, 1);
+    }
     }
 }
 
