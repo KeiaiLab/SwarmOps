@@ -48,11 +48,15 @@ keeps its heading here, so that links to it still arrive, and points to where it
 
 ## Install
 
-[Install and upgrade](operate/install-and-upgrade.md): the installer, a clone, or a release archive.
+[Install and upgrade](operate/install-and-upgrade.md): the installer, a package, a clone, or a release archive.
 
 ### With the installer
 
 [Install with the installer](operate/install-and-upgrade.md#install-with-the-installer).
+
+### From a package
+
+[Install from a .deb or .rpm package](operate/install-and-upgrade.md#install-from-a-deb-or-rpm-package).
 
 ### From a clone
 

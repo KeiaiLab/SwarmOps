@@ -415,6 +415,20 @@ it again to update. `--version`, `--dir` and `--uninstall` go after `bash -s --`
 [install guide](docs/guides/install.md) and the operations guide's
 [Install](docs/operations.md#install) cover them, release archives and building from a clone.
 
+From v0.8.0 on, each release also carries a `.deb` and an `.rpm` per architecture (`amd64` and
+`x86_64`, `arm64` and `aarch64`), which install both names into `/usr/bin`. Download one and
+`SHA256SUMS` from the release, check it with `sha256sum --check --ignore-missing SHA256SUMS`,
+then:
+
+```sh
+sudo apt install ./swarmops_0.8.0_amd64.deb      # Debian 12, Ubuntu 22.04 or newer
+sudo dnf install ./swarmops-0.8.0-1.x86_64.rpm   # RHEL 9 and its rebuilds, Fedora
+```
+
+The packages come from no apt or dnf repository, so update by installing the next release's
+package; `sudo apt remove swarmops` or `sudo dnf remove swarmops` removes one
+([install guide](docs/guides/install.md#how-do-i-install-the-deb-or-rpm-package)).
+
 Linux, x86_64 or aarch64, glibc 2.34 or newer (Ubuntu 22.04, Debian 12, RHEL 9). On glibc 2.34
 to 2.38 every start prints one `ld.so` line on stderr, `weak version 'GLIBC_2.39' not found`;
 exit codes, stdout and the MCP protocol are unaffected. The aarch64 build is cross-compiled and

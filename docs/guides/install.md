@@ -110,6 +110,40 @@ The script is the repository's `scripts/install.sh`. get.swarmops.cc serves its 
 `web/public/install.sh`, and `just check` fails when the two differ. Each host still checks its download
 against the release's `SHA256SUMS`.
 
+## How do I install the .deb or .rpm package?
+
+From v0.8.0 on, each release also carries a `.deb` and an `.rpm` for each architecture. They hold
+the same `swarmops` and `so` as the release's archives, byte for byte, installed into `/usr/bin`,
+with `LICENSE`, `THIRD-PARTY-LICENSES`, `README.md` and `CHANGELOG.md` in `/usr/share/doc/swarmops`.
+Download the one for your host and `SHA256SUMS`, and check it:
+
+```sh
+v=0.8.0                                   # the release's version
+u=https://github.com/KeiaiLab/SwarmOps/releases/download/v$v
+curl -fsSL -O "$u/swarmops_${v}_amd64.deb" -O "$u/SHA256SUMS"   # arm64 on aarch64
+sha256sum --check --ignore-missing SHA256SUMS
+sudo apt install "./swarmops_${v}_amd64.deb"
+so --version
+```
+
+```text
+swarmops_0.8.0_amd64.deb: OK
+…
+swarmops 0.8.0
+```
+
+On RHEL 9, its rebuilds such as AlmaLinux and Rocky Linux, and Fedora, the package is
+`swarmops-0.8.0-1.x86_64.rpm` (`aarch64` on aarch64), installed with
+`sudo dnf install ./swarmops-0.8.0-1.x86_64.rpm`. Either package manager installs what the
+package needs, glibc 2.34 or newer and libgcc, which every supported host has.
+
+The packages come from no repository, so `apt upgrade` and `dnf upgrade` do not update them:
+install the next release's package the same way, and it replaces the old one. They carry no
+signature of their own: `SHA256SUMS` from the release page is what checks them. The release
+workflow installs every package in a Debian 12 and an AlmaLinux 9 container, runs both binaries
+and removes it again before it publishes anything
+([RELEASE.md](../../RELEASE.md#what-the-release-workflow-does)).
+
 ## How do I update?
 
 Run the same command again. It replaces both binaries in place and names the version it replaced:
@@ -168,7 +202,8 @@ Removed swarmops so from /home/me/.local/bin. Stores are left as they are.
 ```
 
 It removes `swarmops` and `so` only if they are SwarmOps' own, and leaves another program by either
-name alone. A build from source is removed with `cargo uninstall swarmops-cli`. SwarmOps keeps no
+name alone. A build from source is removed with `cargo uninstall swarmops-cli`, and a package with
+`sudo apt remove swarmops` or `sudo dnf remove swarmops`. SwarmOps keeps no
 configuration file and runs no daemon, so nothing else of it is installed.
 
 Your stores stay. A store is one directory, and no command removes one: delete it yourself
@@ -197,7 +232,9 @@ two binaries yourself. Each release holds:
 | --- | --- |
 | `swarmops-<version>-x86_64-unknown-linux-gnu.tar.gz` | The x86_64 build: `swarmops`, `so`, `LICENSE`, `THIRD-PARTY-LICENSES` (the licenses of the third-party crates compiled into the binaries), `README.md` and `CHANGELOG.md`, in a directory named after the archive. |
 | `swarmops-<version>-aarch64-unknown-linux-gnu.tar.gz` | The same for aarch64. |
-| `SHA256SUMS` | The SHA-256 of each archive. |
+| `swarmops_<version>_amd64.deb`, `swarmops_<version>_arm64.deb` | From v0.8.0 on: the x86_64 and aarch64 binaries as Debian packages ([installing them](#how-do-i-install-the-deb-or-rpm-package)). |
+| `swarmops-<version>-1.x86_64.rpm`, `swarmops-<version>-1.aarch64.rpm` | The same as RPM packages. |
+| `SHA256SUMS` | The SHA-256 of each archive and package. |
 
 ```sh
 v=0.1.0                        # the release's version

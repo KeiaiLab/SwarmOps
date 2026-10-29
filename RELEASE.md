@@ -39,14 +39,42 @@ GitHub's hosted runners.
    unless the archive holds exactly these files. `THIRD-PARTY-LICENSES` gives each third-party
    crate compiled into the binaries with its license and the license texts; it is committed, and
    `just check`, which the release gate runs, fails when it no longer matches `Cargo.lock`.
-4. **Publishes** (job `publish the release`, the only one with a write permission,
-   `contents: write`): checks each archive against the SHA-256 its build job wrote, writes
-   `SHA256SUMS`, and creates the release `vX.Y.Z`, titled `SwarmOps X.Y.Z`, with the archives,
-   `SHA256SUMS` and the notes. A version with a pre-release part, such as `0.2.0-rc.1`, is
-   published as a pre-release.
+4. **Makes and installs the packages** (job `packages <target>`, one per target):
+   [`scripts/packages.py`](scripts/packages.py) makes `swarmops_X.Y.Z_<arch>.deb` and
+   `swarmops-X.Y.Z-1.<arch>.rpm` (`amd64` and `x86_64`, `arm64` and `aarch64`) from the target's
+   archive alone, checked against its SHA-256 first: the archive's binaries, byte for byte, in
+   `/usr/bin`, and its `LICENSE`, `THIRD-PARTY-LICENSES`, `README.md` and `CHANGELOG.md` in
+   `/usr/share/doc/swarmops`; entries sorted, owned by root, dated at the tagged commit, with fixed
+   modes, so that the same archive gives the same packages, byte for byte. Their dependencies are
+   the binaries' own, read from their ELF dynamic sections: glibc at the newest version they need
+   that is not weak (`libc6 (>= 2.34)`), and libgcc. Then each package is installed in a container
+   pinned by digest, the `.deb` with `dpkg` in Debian 12 and the `.rpm` with `rpm` in AlmaLinux 9,
+   whose glibc 2.34 is the oldest the binaries run on: `rpm` checks every digest of the `.rpm`,
+   both installed binaries must print the tag's version, `dpkg --verify` and `rpm --verify` must
+   find every file as packaged, and removing the package must remove its files. The aarch64
+   packages are installed for aarch64, in Debian with that architecture's C library (multiarch)
+   and into an AlmaLinux root of that architecture, against whose glibc `rpm` checks the
+   dependencies, and run under QEMU's user-mode emulator; these two containers download from
+   Debian's and AlmaLinux's mirrors. The job runs on the runner, which starts the containers;
+   they mount the packages read-only.
+5. **Publishes** (job `publish the release`, the only one with a write permission,
+   `contents: write`, and only for a pushed tag): checks each archive and package against the
+   SHA-256 its job wrote, writes `SHA256SUMS`, and creates the release `vX.Y.Z`, titled
+   `SwarmOps X.Y.Z`, with the archives, the packages, `SHA256SUMS` and the notes. A version with a
+   pre-release part, such as `0.2.0-rc.1`, is published as a pre-release; its packages carry the
+   version as `0.2.0~rc.1`, which `dpkg` and `rpm` order before `0.2.0`, and their file names keep
+   `0.2.0-rc.1`.
+
+**A rehearsal** runs the workflow by hand on a branch, `gh workflow run release.yml --ref <branch>
+--repo KeiaiLab/SwarmOps`: it builds, smoke-runs, packs, makes the packages of and installs them for
+the workspace version of the branch's commit, and publishes nothing: `publish` runs for a pushed
+`v*` tag only, and the tag's checks and `just check` (which CI runs on every push) are skipped. The
+run's artifacts hold its archives and packages for 14 days.
 
 Like CI, the workflow pins every action by commit, starts from `permissions: {}`, keeps no
-credentials in its checkouts, and CI's zizmor job audits it. No job restores a cache: what a
+credentials in its checkouts, and CI's zizmor job audits it. The container images it builds and
+installs in are pinned by digest, the build image in the workflow and the install images in
+`scripts/packages.py`; Dependabot moves none of them. No job restores a cache: what a
 release ships is built from the tagged commit and `Cargo.lock` alone. Its `just check` job
 installs the same tool versions as `ci.yml`'s: move them together.
 
@@ -65,6 +93,11 @@ installs the same tool versions as `ci.yml`'s: move them together.
   cross-compiled and only smoke-tested, under QEMU; the test suite runs on x86_64
   ([docs/policies/msrv-and-platforms.md](docs/policies/msrv-and-platforms.md)). There is no
   macOS, Windows or static (musl) build.
+- **Packages are files on the release, not a repository.** There is no apt or dnf repository to
+  add, so `apt upgrade` and `dnf upgrade` do not see a new release: install the next release's
+  package. The packages carry no signature of their own (`rpm --checksig` finds their digests,
+  not a key's signature): check them against `SHA256SUMS`. No npm or PyPI package yet: those need
+  registry accounts.
 - **No crates.io publishing.** Every crate is `publish = false` until a release policy has been
   exercised on binary releases. Publishing a crate needs a decision of its own, and its own
   version and MSRV policy.
@@ -118,7 +151,9 @@ installs the same tool versions as `ci.yml`'s: move them together.
    version the workspace already has, so it skips this step. Commit the changelog and the bump
    (for 0.1.0, the changelog and the first release's updates): `chore: release X.Y.Z`.
 6. **Land that commit on `stable`** and wait for `tests-pass` to be green for it. Push `stable`
-   before the tag: the workflow refuses a tagged commit that `stable` does not hold.
+   before the tag: the workflow refuses a tagged commit that `stable` does not hold. Then rehearse
+   the release on it, `gh workflow run release.yml --ref stable --repo KeiaiLab/SwarmOps`, and
+   wait for its build and packages jobs to pass: a packaging failure found there costs no tag.
 7. **Tag** the commit with an annotated tag, unsigned until a signing key is registered (then
    `git tag -s`), and push the tag:
 
@@ -137,6 +172,9 @@ installs the same tool versions as `ci.yml`'s: move them together.
      (`gh release delete vX.Y.Z --repo KeiaiLab/SwarmOps`), then run the job again.
 9. **Check the release** as a user would: download an archive and `SHA256SUMS` from the
    releases page, run `sha256sum --check --ignore-missing SHA256SUMS`, unpack the archive and
-   run `swarmops --version`.
+   run `swarmops --version`. Then install a package the same way, checked against the same
+   `SHA256SUMS`, on a Debian or Ubuntu host (`sudo apt install ./swarmops_X.Y.Z_amd64.deb`) or a
+   RHEL-family one (`sudo dnf install ./swarmops-X.Y.Z-1.x86_64.rpm`), run `so --version`, and
+   remove it (`sudo apt remove swarmops`, `sudo dnf remove swarmops`).
 10. **Afterwards**, check that `stable` carries the release commit and the tag, and that the next
     change starts a new **Unreleased** entry.

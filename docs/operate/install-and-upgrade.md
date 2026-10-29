@@ -13,13 +13,15 @@ Commands and outputs here follow the
   remote: `swarmops clone`, `fetch`, `push` and `sync` run it. `swarmops git import` and
   `swarmops git export` read and write git repositories themselves.
 - For the installer: curl or wget, tar, and sha256sum or shasum.
+- For a package: a Debian-family host with dpkg and apt, or a RHEL-family one with rpm and dnf.
 - For a build from a clone: rustup and a C compiler.
 
-Pick one of the three ways to install:
+Pick one of the four ways to install:
 
 | Way | When |
 | --- | --- |
 | [The installer](#install-with-the-installer) | one command, the latest or a pinned release |
+| [From a .deb or .rpm package](#install-from-a-deb-or-rpm-package) | the host's package manager owns the files (v0.8.0 on) |
 | [From a clone](#install-from-a-clone) | a commit that is not a release |
 | [From a release archive](#install-from-a-release-archive) | you download and check the archive yourself |
 
@@ -49,6 +51,49 @@ and keep a reviewed copy of the script with your provisioning rather than piping
 network each time. It needs curl or wget, tar, and sha256sum or shasum; it sends no telemetry
 and edits no shell startup file, so it prints the `PATH` line to add when the directory is not
 on `PATH`.
+
+## Install from a .deb or .rpm package
+
+From v0.8.0 on, each release carries one `.deb` and one `.rpm` per architecture, made from that
+architecture's release archive: its `swarmops` and `so`, byte for byte, in `/usr/bin`, and its
+`LICENSE`, `THIRD-PARTY-LICENSES`, `README.md` and `CHANGELOG.md` in `/usr/share/doc/swarmops`.
+
+| Host | Package |
+| --- | --- |
+| Debian 12, Ubuntu 22.04 or newer, x86_64 | `swarmops_<version>_amd64.deb` |
+| The same, aarch64 | `swarmops_<version>_arm64.deb` |
+| RHEL 9, its rebuilds (AlmaLinux, Rocky) or Fedora, x86_64 | `swarmops-<version>-1.x86_64.rpm` |
+| The same, aarch64 | `swarmops-<version>-1.aarch64.rpm` |
+
+1. Download the package and the checksums, and check the package:
+
+   ```sh
+   gh release download v0.8.0 --repo KeiaiLab/SwarmOps \
+     --pattern 'swarmops_0.8.0_amd64.deb' --pattern SHA256SUMS
+   sha256sum --check --ignore-missing SHA256SUMS
+   ```
+
+2. Install it with the host's package manager, which installs what it depends on (glibc 2.34 or
+   newer, and libgcc), and check the version:
+
+   ```sh
+   sudo apt install ./swarmops_0.8.0_amd64.deb       # or: sudo dnf install ./swarmops-0.8.0-1.x86_64.rpm
+   so --version
+   ```
+
+```text
+swarmops_0.8.0_amd64.deb: OK
+swarmops 0.8.0
+```
+
+The packages come from no apt or dnf repository, so `apt upgrade` and `dnf upgrade` do not see a
+new release: install the next release's package the same way, which replaces the old one. They
+carry no signature of their own; `SHA256SUMS` is what checks them. `sudo apt remove swarmops` or
+`sudo dnf remove swarmops` removes the binaries and the documents, and no store. The release
+workflow installs, runs, verifies and removes every package in a Debian 12 and an AlmaLinux 9
+container before it publishes them ([RELEASE.md](../../RELEASE.md#what-the-release-workflow-does)).
+A pre-release's packages carry its version as `0.8.0~rc.1`, which both package managers order
+before `0.8.0`.
 
 ## Install from a clone
 
@@ -138,8 +183,8 @@ A binary opens only a store whose `FORMAT` it knows, and refuses any other as `E
 ### Upgrade to a release with the same FORMAT
 
 1. Install the new binary over the old one, the way you installed it
-   ([installer](#install-with-the-installer), [clone](#install-from-a-clone) or
-   [archive](#install-from-a-release-archive)).
+   ([installer](#install-with-the-installer), [package](#install-from-a-deb-or-rpm-package),
+   [clone](#install-from-a-clone) or [archive](#install-from-a-release-archive)).
 2. Running MCP servers keep the binary they started with until their sessions end: end the
    sessions to move them to the new one.
 3. Check the store with `verify --deep` after the upgrade
