@@ -1,7 +1,12 @@
 # The release (RELEASE.md): a pushed `v*` tag is checked against the workspace version, `stable`
 # and CHANGELOG.md; `just check` runs on the tagged commit; `swarmops` and `so` are built for two
-# Linux targets and smoke-run; and the tag's GitHub release is published with one archive per
-# target, `SHA256SUMS`, and the version's CHANGELOG.md section as its notes.
+# Linux targets and smoke-run; each target's archive is made into a .deb and an .rpm, which are
+# installed in containers; and the tag's GitHub release is published with the archives, the
+# packages, `SHA256SUMS`, and the version's CHANGELOG.md section as its notes.
+#
+# A run started by hand (workflow_dispatch) on a branch rehearses the builds, the packages and
+# their installs for the workspace version, and publishes nothing: `publish` runs for a pushed tag
+# only, and neither the tag checks nor `just check` (CI's) run.
 #
 # Hardened as ci.yml is: every action is pinned to a full commit SHA (its version in the trailing
 # comment; Dependabot updates both), the token has no permissions unless a job asks for one,
@@ -17,13 +22,15 @@
 # CARGO_TARGET_DIR that CI's runs reuse, and deletes it at the end. The build jobs run inside an
 # ubuntu:24.04 container pinned by digest, the image whose glibc README's install section is
 # measured against; they install the cross compiler, QEMU and the pinned toolchain there and build
-# into the container's own filesystem, which goes with the container. The digest and the
-# rustup-init release are moved by hand: Dependabot does not read them.
+# into the container's own filesystem, which goes with the container. The packages jobs run on the
+# runner, which starts their install containers. The digests and the rustup-init release are
+# moved by hand: Dependabot does not read them.
 name: Release
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions: {}
 
@@ -56,7 +63,7 @@ jobs:
       # `## [X.Y.Z] - YYYY-MM-DD`, to the next `## ` heading, with its relative links made
       # absolute, to the tag's files; then how to check a download, and the file's link
       # definitions. A version with a pre-release part (`0.2.0-rc.1`) is published as a
-      # pre-release.
+      # pre-release. A rehearsal takes the workspace version and checks nothing else.
       - name: The tag names the workspace version, and CHANGELOG.md has its section
         id: version
         run: |
@@ -73,6 +80,13 @@ jobs:
           tag = os.environ["GITHUB_REF_NAME"]
           with open("Cargo.toml", "rb") as manifest:
               version = tomllib.load(manifest)["workspace"]["package"]["version"]
+          prerelease = "-" in version.split("+")[0]
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"version={version}\nprerelease={str(prerelease).lower()}\n")
+          if os.environ["GITHUB_EVENT_NAME"] != "push":
+              print(f"::notice::a rehearsal of {tag} at {version}: nothing is checked or published")
+              sys.exit(0)
+
           if tag != f"v{version}":
               fail(f"this tag is not v{version}, the workspace version in Cargo.toml (RELEASE.md)")
 
@@ -114,18 +128,17 @@ jobs:
           notes_file = os.path.join(os.environ["RUNNER_TEMP"], "notes.md")
           with open(notes_file, "w", encoding="utf-8") as out:
               out.write(notes)
-          prerelease = "-" in version.split("+")[0]
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
-              out.write(f"version={version}\nprerelease={str(prerelease).lower()}\n")
           print(notes)
           EOF
       - name: The tagged commit is on stable
+        if: github.event_name == 'push'
         run: |
           if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/stable; then
             echo "::error::stable does not hold the tagged commit $GITHUB_SHA (RELEASE.md)"
             exit 1
           fi
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - if: github.event_name == 'push'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-notes
           path: ${{ runner.temp }}/notes.md
@@ -134,10 +147,11 @@ jobs:
 
   # The release gate: `just check`, as ci.yml's `check` job runs it (the same tool versions: move
   # them together), on the tagged commit. Without CI's cache or the runner's target directory, so
-  # its build is a clean one.
+  # its build is a clean one. A rehearsal leaves it to CI.
   check:
     name: just check
     needs: version
+    if: github.event_name == 'push'
     runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
     permissions:
       contents: read
@@ -175,9 +189,10 @@ jobs:
   # `swarmops` and `so` for one target, `cargo build --release --locked` on the pinned toolchain
   # without the `test-hooks` feature, smoke-run, then packed into
   # `swarmops-<version>-<target>.tar.gz` (both binaries, LICENSE, THIRD-PARTY-LICENSES, README.md,
-  # CHANGELOG.md) with its SHA-256. Inside ubuntu:24.04 (glibc 2.39) as root: the steps install
-  # what they need with apt, and the last one gives the runner's user back what they wrote into
-  # the mounted workspace and temporary directory.
+  # CHANGELOG.md) with its SHA-256, which the `packages` job makes into a .deb and an .rpm. Inside
+  # ubuntu:24.04 (glibc 2.39) as root: the steps install what they need with apt, and the last one
+  # gives the runner's user back what they wrote into the mounted workspace and temporary
+  # directory.
   build:
     name: build ${{ matrix.target }}
     needs: version
@@ -379,9 +394,60 @@ jobs:
           owner=$(stat -c %u:%g "$(dirname "$RUNNER_TEMP")")
           chown -R "$owner" "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
 
+  # One target's .deb and .rpm, made by scripts/packages.py from that target's archive alone (its
+  # binaries and files, byte for byte, dated at the tagged commit), then each installed with dpkg
+  # or rpm in a container pinned by digest (the digests are in the script): Debian 12, and
+  # AlmaLinux 9, whose glibc 2.34 is README's floor. Both binaries must print the version, the
+  # packages verify and remove cleanly. The aarch64 packages are installed for aarch64 (Debian's
+  # multiarch, an AlmaLinux root of that architecture, whose glibc rpm checks the dependencies
+  # against) and run under QEMU; those two containers download from the distributions' mirrors.
+  # On the runner itself, which starts the containers with docker: the containers write nothing
+  # back, as they mount the packages read-only.
+  packages:
+    name: packages ${{ matrix.target }}
+    needs: [version, build]
+    runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+    env:
+      TARGET_TRIPLE: ${{ matrix.target }}
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: swarmops-${{ needs.version.outputs.version }}-${{ matrix.target }}
+          path: archive
+      - name: Make the .deb and the .rpm from the archive
+        run: |
+          archive="swarmops-$VERSION-$TARGET_TRIPLE.tar.gz"
+          (cd archive && sha256sum --check --strict -- "$archive.sha256")
+          python3 -I scripts/packages.py build "archive/$archive" dist
+          cd dist
+          for package in *.deb *.rpm; do
+            sha256sum -- "$package" >"$package.sha256"
+          done
+          cat -- *.sha256
+      - name: Install, run, verify and remove them in containers
+        run: python3 -I scripts/packages.py smoke "$VERSION" dist/*.deb dist/*.rpm
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: swarmops-${{ needs.version.outputs.version }}-${{ matrix.target }}-packages
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  # For a pushed tag only: a rehearsal publishes nothing.
   publish:
     name: publish the release
-    needs: [version, check, build]
+    needs: [version, check, build, packages]
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
     permissions:
       contents: write # `gh release create`: the release, its notes and its assets
@@ -391,12 +457,13 @@ jobs:
         with:
           name: release-notes
           path: notes
+      # The archives and the packages: `swarmops-<version>-<target>` and its `-packages`.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: swarmops-*
           merge-multiple: true
           path: dist
-      # Every archive is checked against the SHA-256 its build job wrote before anything is
+      # Every archive and package is checked against the SHA-256 its job wrote before anything is
       # uploaded. `gh` creates the release as a draft, uploads the assets, then publishes it.
       - name: Check the archives and publish the release
         env:
@@ -414,4 +481,4 @@ jobs:
             flags+=(--prerelease)
           fi
           gh release create "v$VERSION" --verify-tag --title "SwarmOps $VERSION" \
-            --notes-file ../notes/notes.md "${flags[@]}" -- *.tar.gz SHA256SUMS
+            --notes-file ../notes/notes.md "${flags[@]}" -- *.tar.gz *.deb *.rpm SHA256SUMS
