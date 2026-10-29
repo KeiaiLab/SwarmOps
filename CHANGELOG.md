@@ -5,14 +5,14 @@ Notable changes to SwarmOps. The format follows
 [the versioning policy](docs/policies/versioning-and-stability.md) (Semantic Versioning, read the
 pre-1.0 way).
 
-SwarmOps 0.1.0 is the first release, tagged `v0.1.0`, 0.2.0 the second, with the git remotes
-(M13), 0.3.0 the third, with the workspaces (M5), 0.4.0 the fourth, with verify, crash
-safety, fuzzing, gc and FORMAT 2 (M6), 0.5.0 the fifth, with the pilot on a real repository
-and the goal measurements, 0.6.0 the sixth, with the fixes those measurements asked for, and
-0.7.0 the seventh, with stock git against a store (M14); no crate is published
-(`publish = false`). The 0.1.0 section holds every change up to it, grouped by milestone of the design (umbrella spec §13).
-From here, **Unreleased** collects the changes on `stable` that no release holds yet, until the
-next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
+SwarmOps 0.1.0 is the first release, tagged `v0.1.0`, 0.2.0 the second, with the git remotes (M13),
+0.3.0 the third, with the workspaces (M5), 0.4.0 the fourth, with verify, crash safety, fuzzing, gc
+and FORMAT 2 (M6), 0.5.0 the fifth, with the pilot on a real repository and the goal measurements,
+0.6.0 the sixth, with the fixes those measurements asked for, and 0.7.0 the seventh, with stock git
+against a store (M14); no crate is published (`publish = false`). The 0.1.0 section holds every
+change up to it, grouped by milestone of the design (umbrella spec §13). From here, **Unreleased**
+collects the changes on `stable` that no release holds yet, until the next release
+([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ## [Unreleased]
 
@@ -260,20 +260,6 @@ the benchmark gate, and the measurements of all of it.
   derived as before. `verify --deep` checks the new `git_oid_mac`, `git_tree_oid_mac` and
   `git_blob_oid_mac` memos too (`derived_mismatch`, `key` the key's id), and `repair` drops a
   malformed one.
-- `op log` lists committed operations only: it waits for the store's lock (`E_BUSY` after the
-  lock timeout, retryable), runs the journal's tail check, and lists only frames synced and listed
-  in `journal.off`. It read the lock-free snapshot, which shows a frame before its sync, so a
-  failed sync or a power loss could take a listed operation back, the next write take its number,
-  and an `op undo` of that number undo the other write (issue #11; the v0.6.0 design, D7).
-- `ws commit` sends the blobs the store lacks inline in its one keyed commit request, which the
-  store writes as one batch, where it put each with a durable `blob_put` of its own, a sync round
-  a file (805–819 ms for 100 files in the v0.5.0 measurements). A blob past what is left of the
-  request's 64 MiB inline budget is still put alone first.
-
-### Fixed
-
-- The MCP tool `ws_create` without a `path` makes the workspace in the server's working
-  directory, named after it, as its schema says; it failed with `E_INVALID_ARG`.
 
 ## [0.5.0] - 2026-10-27
 
