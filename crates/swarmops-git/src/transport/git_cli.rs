@@ -68,8 +68,12 @@ pub trait Transport {
     ) -> Result<bool, TransportError>;
 
     /// Whether `mirror` holds every object `tips` reach, short of what its refs outside
-    /// `refs/incoming/` reach already: a fetch's received objects are whole before any tracking
-    /// ref moves to them. A missing or unreadable object is [`RejectReason::BadObjects`].
+    /// `refs/incoming/` reach already: a fetch's received objects are all there before any
+    /// tracking ref moves to them. A missing object, or a commit or tree it cannot parse where it
+    /// walks, is [`RejectReason::BadObjects`]. No object is checked against its id: a damaged
+    /// blob passes, as does a tip whose file holds another object's bytes, and the import after
+    /// the check refuses them (it checks each object it reads against its id, and that a tip is a
+    /// commit).
     ///
     /// A transport that does not check refuses: the default body fails closed.
     fn closed(&self, mirror: &Path, tips: &[GitOid]) -> Result<(), TransportError> {
@@ -893,7 +897,8 @@ const FETCH_FLAGS: [&str; 8] = [
 ];
 
 /// `git rev-list`'s closure check of a fetch's tips (read on stdin): every object they reach,
-/// minus what the refs outside `refs/incoming/` reach; a missing one fails it.
+/// minus what the refs outside `refs/incoming/` reach; a missing one fails it, and no object is
+/// checked against its id.
 const CLOSED_FLAGS: [&str; 8] = [
     "rev-list",
     "--objects",

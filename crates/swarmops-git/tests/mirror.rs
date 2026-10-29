@@ -597,16 +597,18 @@ fn git_cli(home: &Path) -> GitCli {
     GitCli::find_with_env(env).expect("find git")
 }
 
-/// A blob of the mirror damaged on disk, its file garbled or another object's, passes the
-/// fetch's closure check, which finds missing objects and reads no blob (git 2.43); the fetch's
-/// import then refuses it: its reader checks each object it reads against its id, so the
-/// objects-only import of the promoted tracking ref fails naming the blob, and records nothing.
-#[test]
-fn a_damaged_loose_blob_is_refused_by_the_fetch_s_import() {
-    for damage in [Damage::Garbled, Damage::Swapped] {
-        // 1. A commit of one file, its objects loose, as `origin`'s incoming `main`.
-        let root = Root::new();
-        let (mirror, _lock) = made(&root);
+/// The objects of a commit of one file, written loose into a mirror, and one blob more.
+struct OneFile {
+    blob: GitOid,
+    tree: GitOid,
+    commit: GitOid,
+    /// A blob no ref reaches: the bytes a swapped file takes.
+    other: GitOid,
+}
+
+impl OneFile {
+    /// Writes them into `mirror`, synced.
+    fn write(mirror: &Mirror) -> OneFile {
         let mut sink = GixSink::open(mirror.git_dir()).expect("open the mirror");
         let mut write = |kind, bytes: &[u8]| sink.write_object(kind, bytes).expect("write");
         let blob = write(RawKind::Blob, b"damaged\n");
@@ -624,22 +626,61 @@ fn a_damaged_loose_blob_is_refused_by_the_fetch_s_import() {
         let commit = RawCommit::new(tree, Vec::new(), ident.clone(), ident, Vec::new(), message);
         let commit = write(RawKind::Commit, &commit.render());
         sink.sync(&[blob, other, tree, commit]).expect("sync");
-        set_refs(&mirror, &[("refs/incoming/origin/heads/main", commit)]);
+        OneFile {
+            blob,
+            tree,
+            commit,
+            other,
+        }
+    }
 
-        // 2. The blob's file damaged.
-        let file = loose(mirror.git_dir(), blob);
+    /// Damages the loose file of `oid` in `mirror` as `damage` says.
+    fn damage(&self, mirror: &Mirror, oid: GitOid, damage: Damage) {
+        let file = loose(mirror.git_dir(), oid);
         fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).expect("chmod");
         match damage {
-            Damage::Garbled => fs::write(&file, b"garbage").expect("garble the blob"),
+            Damage::Garbled => fs::write(&file, b"garbage").expect("garble it"),
             Damage::Swapped => {
-                fs::copy(loose(mirror.git_dir(), other), &file).expect("swap the blob");
+                fs::copy(loose(mirror.git_dir(), self.other), &file).expect("swap it");
             }
         }
+    }
+}
 
-        // 3. The closure check, then the promotion, as a fetch makes them. The check finds
-        //    missing objects: a damaged blob may pass it, and does with git 2.43.
+/// An object of the mirror damaged on disk where the fetch's closure check does not read it, a
+/// blob garbled or another's, or the tip commit's file another object's (which the check then
+/// takes for that object), passes that check, which finds missing objects and checks no object
+/// against its id (git 2.43); the fetch's import of the promoted tracking ref then refuses it and
+/// records nothing. Its reader checks each object it reads against its id, so a blob is
+/// `Corrupt`, naming it; the tip's header, read before its bytes, says it is a blob, so the tip
+/// is no commit.
+#[test]
+fn a_damaged_object_is_refused_by_the_fetch_s_import() {
+    let cases = [
+        ("blob", Damage::Garbled),
+        ("blob", Damage::Swapped),
+        ("commit", Damage::Swapped),
+    ];
+    for (what, damage) in cases {
+        // 1. A commit of one file, as `origin`'s incoming `main`; one of its objects damaged.
+        let root = Root::new();
+        let (mirror, _lock) = made(&root);
+        let objects = OneFile::write(&mirror);
+        set_refs(
+            &mirror,
+            &[("refs/incoming/origin/heads/main", objects.commit)],
+        );
+        let damaged = if what == "blob" {
+            objects.blob
+        } else {
+            objects.commit
+        };
+        objects.damage(&mirror, damaged, damage);
+
+        // 2. The closure check, then the promotion, as a fetch makes them. The check finds
+        //    missing objects: a damaged one may pass it, and these do with git 2.43.
         let home = TempDir::new().expect("a temp dir");
-        let closure = git_cli(home.path()).closed(mirror.git_dir(), &[commit]);
+        let closure = git_cli(home.path()).closed(mirror.git_dir(), &[objects.commit]);
         assert!(
             matches!(
                 closure,
@@ -649,30 +690,63 @@ fn a_damaged_loose_blob_is_refused_by_the_fetch_s_import() {
                         ..
                     })
             ),
-            "{damage:?}: {closure:?}"
+            "{what} {damage:?}: {closure:?}"
         );
         let branches = mirror.branches(REMOTE).expect("branches");
         let tags = mirror.tags(REMOTE).expect("tags");
         mirror.promote(REMOTE, &branches, &tags).expect("promote");
 
-        // 4. The fetch's import of the tracking ref: refused, naming the blob; nothing recorded.
+        // 3. The fetch's import of the tracking ref: refused, naming the object; nothing recorded.
         let (_dir, _store, repo) = new_repo();
         let source = GixSource::open(mirror.git_dir()).expect("open the mirror to read");
         let request = ImportRequest::objects_only("refs/remotes/origin/main");
-        let error = import(&repo, &source, &request).expect_err("the damaged blob is refused");
+        let refused = import(&repo, &source, &request).expect_err("the damage is refused");
+        let as_expected = match &refused {
+            ImportError::Convert(ConvertError::Source(SourceError::Corrupt { oid, .. })) => {
+                what == "blob" && *oid == damaged
+            }
+            ImportError::Source(SourceError::NotACommit { kind, .. }) => {
+                what == "commit" && *kind == RawKind::Blob
+            }
+            _ => false,
+        };
+        assert!(as_expected, "{what} {damage:?}: {refused:?}");
+        assert_eq!(
+            repo.info().expect("info").changesets,
+            0,
+            "{what} {damage:?}"
+        );
+        let verified = repo.verify(Depth::Deep).expect("verify");
+        assert_eq!(verified.problems, [], "{what} {damage:?}");
+    }
+}
+
+/// A tree or a commit of the mirror that the closure check cannot parse where it walks, its file
+/// garbled, fails the check: [`RejectReason::BadObjects`], so no tracking ref moves to it.
+#[test]
+fn a_garbled_tree_or_commit_fails_the_closure_check() {
+    for what in ["tree", "commit"] {
+        let root = Root::new();
+        let (mirror, _lock) = made(&root);
+        let objects = OneFile::write(&mirror);
+        let damaged = if what == "tree" {
+            objects.tree
+        } else {
+            objects.commit
+        };
+        objects.damage(&mirror, damaged, Damage::Garbled);
+
+        let home = TempDir::new().expect("a temp dir");
+        let closure = git_cli(home.path()).closed(mirror.git_dir(), &[objects.commit]);
         assert!(
             matches!(
-                &error,
-                ImportError::Convert(ConvertError::Source(SourceError::Corrupt { oid, .. }))
-                    if *oid == blob
+                closure,
+                Err(TransportError::Rejected {
+                    reason: RejectReason::BadObjects,
+                    ..
+                })
             ),
-            "{damage:?}: {error:?}"
-        );
-        assert_eq!(repo.info().expect("info").changesets, 0, "{damage:?}");
-        assert_eq!(
-            repo.verify(Depth::Deep).expect("verify").problems,
-            [],
-            "{damage:?}"
+            "{what}: {closure:?}"
         );
     }
 }
