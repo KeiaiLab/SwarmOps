@@ -2980,6 +2980,107 @@ fn land_golden() {
     insta::assert_json_snapshot!(s.transcript());
 }
 
+/// A land's conflicts other than `content`: a file the change deleted and main changed
+/// (`delete_modify`), one the change changed and main deleted (`modify_delete`), and a file
+/// holding a NUL both changed (`binary`). Each names its blobs, and none has hunks.
+#[test]
+fn land_conflict_kinds_golden() {
+    let mut s = Session::new();
+    let store = s.store();
+    let init = s.run(&["init", &store]);
+    s.name_at(&init, "/result/repo_id", "repo_id");
+
+    // 1. main at t0, holding the three files.
+    let t0 = s.file(
+        "t0.json",
+        &json!([
+            {"path": "gone.txt", "op": "put", "content": {"inline": "gone\n"}},
+            {"path": "kept.txt", "op": "put", "content": {"inline": "kept\n"}},
+            {"path": "logo.bin", "op": "put", "content": {"base64": "AAE="}},
+        ])
+        .to_string(),
+    );
+    let base = s.run(&[
+        "--repo",
+        &store,
+        "--as",
+        AGENT,
+        "commit",
+        "-m",
+        "t0",
+        "--changes",
+        &t0,
+        "--advance",
+        "main",
+    ]);
+    let t0 = s.name_at(&base, "/result/changeset", "t0");
+
+    // 2. The change: gone.txt deleted, kept.txt and logo.bin changed.
+    let ours = s.file(
+        "ours.json",
+        &json!([
+            {"path": "gone.txt", "op": "delete"},
+            {"path": "kept.txt", "op": "put", "content": {"inline": "ours\n"}},
+            {"path": "logo.bin", "op": "put", "content": {"base64": "AAI="}},
+        ])
+        .to_string(),
+    );
+    let change = s.run(&[
+        "--repo",
+        &store,
+        "--as",
+        AGENT,
+        "commit",
+        "-m",
+        "ours",
+        "--changes",
+        &ours,
+        "--parent",
+        &t0,
+    ]);
+    let ours = s.name_at(&change, "/result/changeset", "ours");
+
+    // 3. Another agent on main: gone.txt and logo.bin changed, kept.txt deleted.
+    let theirs = s.file(
+        "theirs.json",
+        &json!([
+            {"path": "gone.txt", "op": "put", "content": {"inline": "theirs\n"}},
+            {"path": "kept.txt", "op": "delete"},
+            {"path": "logo.bin", "op": "put", "content": {"base64": "AAM="}},
+        ])
+        .to_string(),
+    );
+    let published = s.run(&[
+        "--repo",
+        &store,
+        "--as",
+        OTHER,
+        "commit",
+        "-m",
+        "theirs",
+        "--changes",
+        &theirs,
+        "--parent",
+        &t0,
+        "--advance",
+        "main",
+    ]);
+    s.name_at(&published, "/result/changeset", "theirs");
+
+    // 4. The land conflicts on all three files.
+    let refused = s.run(&["--repo", &store, "--as", AGENT, "land", &ours]);
+    assert_eq!((refused.exit, refused.code()), (3, "E_CONFLICT"));
+    let kinds = &refused["error"]["details"]["report"]["kinds"];
+    assert_eq!(
+        *kinds,
+        json!(["binary", "delete_modify", "modify_delete"]),
+        "{}",
+        refused.json
+    );
+
+    insta::assert_json_snapshot!(s.transcript());
+}
+
 /// `git export` writes main's history into a git repository, made here without git, and
 /// `git import` brings that repository's history into a second store; each run again writes
 /// only what is new.
