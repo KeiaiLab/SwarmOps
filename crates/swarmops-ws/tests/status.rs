@@ -505,13 +505,15 @@ fn move_main(f: &Fixture, from: &str, to: &str) {
         .unwrap();
 }
 
-/// A base the target's history lost to a squash-like replacement (X <- A in the workspace, the
-/// target moved to X <- B): `behind_by` counts B alone, from both histories' first page.
+/// A base the target's history lost to a squash-like replacement (R <- X <- A in the workspace,
+/// the target moved to X <- B): `behind_by` counts B alone, from where the histories first meet,
+/// X, not where they last do, R; from both histories' first page.
 #[test]
 fn behind_by_counts_past_a_replaced_base() {
-    // 1. A workspace on A, on X.
+    // 1. A workspace on A, on X, on R.
     let f = Fixture::new();
-    let x = f.commit(None, &[Put::File("src/a.txt", "x\n")]);
+    let root = f.commit(None, &[Put::File("src/a.txt", "r\n")]);
+    let x = f.commit(Some(&root), &[Put::File("src/a.txt", "x\n")]);
     let a = f.commit(Some(&x), &[Put::File("src/a.txt", "a\n")]);
     f.create("w", &a, &["src"]);
 
@@ -524,6 +526,40 @@ fn behind_by_counts_past_a_replaced_base() {
     let page = swarmops_ws::status(&f.ctx_over(&watched), page_of("w")).unwrap();
     assert_eq!((page.main.as_str(), page.behind_by), (&*b, 1));
     assert_eq!((watched.count("resolve_rev"), watched.count("log")), (1, 2));
+}
+
+/// `n` changesets on `from`, each editing `src/a.txt`; the last one.
+fn chain(f: &Fixture, from: Option<&str>, n: usize, tag: &str) -> String {
+    let mut head = from.map(str::to_owned);
+    for i in 0..n {
+        let text = format!("{tag}{i}\n");
+        head = Some(f.commit(head.as_deref(), &[Put::File("src/a.txt", &text)]));
+    }
+    head.unwrap()
+}
+
+/// The base's own history is read a page at a time, and no further than where it first meets
+/// the target's (R1 <- ... <- R100 <- X <- A1 <- ... <- A100 in the workspace, the target moved
+/// to X <- B): two pages of the target's history, then two of the base's, the second ending at
+/// X with R100 to R2 left unread.
+#[test]
+fn behind_by_pages_the_base_history_until_it_meets() {
+    // 1. A workspace on A100, a page of history past X.
+    let f = Fixture::new();
+    let x = chain(&f, None, 101, "r");
+    let a = chain(&f, Some(&x), 100, "a");
+    f.create("w", &a, &["src"]);
+
+    // 2. The target moved back to X, then on to B in A1's place.
+    move_main(&f, &a, &x);
+    let b = f.commit(Some(&x), &[Put::File("src/a.txt", "b\n")]);
+
+    // 3. One changeset behind, from four pages: B, X, R100..R3 and R2, R1 of the target's;
+    //    A100..A1 and X of the base's.
+    let watched = Watched::new(&f.ops);
+    let page = swarmops_ws::status(&f.ctx_over(&watched), page_of("w")).unwrap();
+    assert_eq!((page.main.as_str(), page.behind_by), (&*b, 1));
+    assert_eq!((watched.count("resolve_rev"), watched.count("log")), (1, 4));
 }
 
 /// A target moved back to an ancestor of the base (X <- A in the workspace, the target at X):
