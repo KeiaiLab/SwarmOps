@@ -1616,7 +1616,7 @@ fn cat_truncates_to_max_bytes() {
 }
 
 /// The codes of [`NOT_RAISED`] no golden pins: no operation raises them yet.
-const UNPINNED: &[&str] = &["E_REF_NOT_FOUND", "E_WS_OUTSIDE_PREFIXES", "E_WS_STALE"];
+const UNPINNED: &[&str] = &["E_REF_NOT_FOUND", "E_WS_STALE"];
 
 /// Codes [`error_codes_reach_the_cli`] does not raise, and why: each names the test whose golden
 /// pins it, but those of [`UNPINNED`].
@@ -1673,10 +1673,6 @@ const NOT_RAISED: &[(&str, &str)] = &[
     (
         "E_REMOTE_NOT_FOUND",
         "needs remotes.toml: remote_acceptance::remote_error_codes_golden pins it",
-    ),
-    (
-        "E_WS_OUTSIDE_PREFIXES",
-        "raised by the M15 workspace refusals, pinned when they land",
     ),
     (
         "E_WS_STALE",
@@ -2122,9 +2118,11 @@ fn ws_cases(s: &mut Session, store: &str, c1: &str) -> (Vec<(&'static str, Vec<S
             .collect()
     };
 
-    // 1. w1: a workspace of `src`, dirty; w3: clean with one commit, never rebased.
+    // 1. w1: a workspace of `src`, dirty; w3: clean with one commit, never rebased; w7: a
+    //    workspace of `src` with a file off it.
     let w1 = format!("{tmp}/w1");
     let w3 = format!("{tmp}/w3");
+    let w7 = format!("{tmp}/w7");
     let mut ok = |args: &[&str]| {
         let line = on(args);
         let line: Vec<&str> = line.iter().map(String::as_str).collect();
@@ -2136,6 +2134,8 @@ fn ws_cases(s: &mut Session, store: &str, c1: &str) -> (Vec<(&'static str, Vec<S
     ok(&["ws", "create", "w3", "--path", &w3, "--all"]);
     fs::write(format!("{w3}/third.txt"), "third\n").unwrap();
     ok(&["ws", "commit", "--ws", "w3", "-m", "third"]);
+    ok(&["ws", "create", "w7", "--path", &w7, "--prefix", "src"]);
+    fs::write(format!("{w7}/notes.txt"), "off the prefixes\n").unwrap();
 
     ws_conflict(s, store, c1, &tmp);
 
@@ -2177,6 +2177,10 @@ fn ws_cases(s: &mut Session, store: &str, c1: &str) -> (Vec<(&'static str, Vec<S
         (
             "E_CHECK_FAILED",
             on(&["ws", "land", "--ws", "w3", "--check", "--", "false"]),
+        ),
+        (
+            "E_WS_OUTSIDE_PREFIXES",
+            on(&["ws", "commit", "--ws", "w7", "-m", "notes"]),
         ),
     ];
 

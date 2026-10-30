@@ -1107,6 +1107,44 @@ expression: s.transcript()
     }
   },
   {
+    "args": "--repo [tmp]/store --as agent/worker-17 ws create w7 --path [tmp]/w7 --prefix src",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "ws_create",
+      "api": 1,
+      "result": {
+        "name": "w7",
+        "path": "[tmp]/w7",
+        "base": "[c1]",
+        "head": "[c1]",
+        "prefixes": [
+          "src"
+        ],
+        "created": true,
+        "status_after": {
+          "name": "w7",
+          "base": "[c1]",
+          "head": "[c1]",
+          "main": "[c1]",
+          "behind_by": 0,
+          "state": "clean",
+          "changes": [],
+          "truncated": false
+        }
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]",
+          "main": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
     "args": "--repo [tmp]/store --as agent/worker-17 ref set release/ws [c1] --create",
     "exit": 0,
     "stdout": {
@@ -1568,6 +1606,33 @@ expression: s.transcript()
           "[id13]": "[id13]",
           "main": "[c1]"
         },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ws commit --ws w7 -m notes",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "ws_commit",
+      "api": 1,
+      "error": {
+        "code": "E_WS_OUTSIDE_PREFIXES",
+        "message": "the workspace holds edits outside its prefixes: [\"notes.txt\"]",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "paths": [
+            "notes.txt"
+          ]
+        },
+        "hint": "swarmops ws materialize notes.txt"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
         "auth": "trust"
       }
     }

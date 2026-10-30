@@ -13,8 +13,8 @@ mutates: true
 identity_required: false
 mcp_tool: "ws_commit"
 envelope_op: "ws_commit"
-exit_codes: [0]
-errors: []
+exit_codes: [0, 1]
+errors: [E_WS_OUTSIDE_PREFIXES]
 syntax: "swarmops ws commit [OPTIONS] --message <MESSAGE> [PATH]..."
 ```
 
@@ -133,10 +133,11 @@ Envelope `op`: `ws_commit`.
 Exit codes:
 
 - `0`: Success.
+- `1`: The operation failed.
 
 ## Errors
 
-No golden step shows this command failing yet.
+- [`E_WS_OUTSIDE_PREFIXES`](../errors.md#e_ws_outside_prefixes) (exit 1): A sparse workspace's `ws commit` or `ws land` met edits outside its prefixes (`details.paths`, sorted, the first 20).
 
 Any command that opens a store may also fail with a store error, such as [`E_NOT_A_REPO`](../errors.md#e_not_a_repo), [`E_IO`](../errors.md#e_io) or [`E_STORE_CORRUPT`](../errors.md#e_store_corrupt); a command line the grammar refuses is [`E_INVALID_ARG`](../errors.md#e_invalid_arg) (exit 2).
 

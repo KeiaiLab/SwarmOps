@@ -38,9 +38,9 @@ collects the changes on `stable` that no release holds yet, until the next relea
   workspace's edits outside its prefixes, raised by `ws commit` and `ws land`) and `E_WS_STALE` (a
   workspace's base gone from its target's history, not raised yet), the workspace refusals of the
   M15 design §5 ([Troubleshooting](docs/troubleshooting.md#e_ws_outside_prefixes)).
-- Golden envelopes pin 52 of the 55 error codes, six more than before: `E_AMBIGUOUS_ID`,
-  `E_IO_TRANSIENT`, `E_INTERNAL`, `E_BUSY`, `E_CAS_RETRY_EXHAUSTED`, and `E_UNKNOWN_PARENT` as an
-  error object.
+- Golden envelopes pin 53 of the 55 error codes, seven more than before: `E_AMBIGUOUS_ID`,
+  `E_IO_TRANSIENT`, `E_INTERNAL`, `E_BUSY`, `E_CAS_RETRY_EXHAUSTED`, `E_UNKNOWN_PARENT` as an
+  error object, and `E_WS_OUTSIDE_PREFIXES`.
 
 ### Changed (breaking)
 
