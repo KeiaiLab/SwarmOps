@@ -571,8 +571,8 @@ const RESUME_HINT: &str =
 pub(crate) fn git_import_error(e: ImportError, git_path: &str, git_ref: &str) -> OpError {
     let message = e.to_string();
     match e {
-        // A refusal: no `details.imported`, whatever frames it followed.
         ImportError::Source(e) => source_error(e, message, git_path, git_ref),
+        // A refusal: no `details.imported`, whatever frames it followed.
         ImportError::Convert(e) => convert_error(e, message, git_path, git_ref),
         ImportError::RefName(name) => ref_name_invalid(name, message),
         ImportError::Diverged {

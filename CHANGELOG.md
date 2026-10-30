@@ -156,8 +156,10 @@ the schema, the help and the references say what the code does.
 - The git round-trip guide and the import's documentation say which stopped imports count what
   they recorded: a store failure and a failure after a frame's commit point do
   (`details.imported`, `details.last_commit`), and a refusal (`E_GIT_IMPORT_LOSSY`,
-  `E_GIT_UNSUPPORTED`, `E_GIT_READ`) keeps the frames before it without counting them; the guide
-  promised the count for every import cut short (issue #7 item 2, issue #8 item 2).
+  `E_GIT_UNSUPPORTED`, `E_GIT_READ`, `E_TOO_LARGE`, `E_INTERNAL`) keeps the frames before it
+  without counting them, as an `E_CAS_MISMATCH` after the last frame records every commit without
+  a count; the guide promised the count for every import cut short (issue #7 item 2, issue #8
+  item 2).
 
 ### Fixed
 
@@ -180,8 +182,10 @@ the schema, the help and the references say what the code does.
   `bad_objects`, no longer `unclassified` or a retried `E_REMOTE_UNREACHABLE`.
 - The fetch's closure check is documented as finding missing objects and unparsable commits and
   trees only: it checks no object against its id, so a damaged loose blob of the mirror passes
-  it, and the fetch's import refuses it (`E_GIT_READ`, `reason: corrupt`), importing nothing
-  (issue #21 item D3).
+  it. The fetch moves the mirror's tracking refs before it imports, so they name the damaged
+  commit when the fetch's import refuses it (`E_GIT_READ`, `reason: corrupt`); a refusal in the
+  first frame imports nothing, and one in a later frame keeps the frames before it (issue #21 item
+  D3).
 - `--repo` with a relative path works for the remote commands (`fetch`, `push`, `sync`); git
   failed with "not a git repository" (`E_REMOTE_REJECTED` `unclassified`).
 - `blob put -` reads stdin itself, so a socket stdin works; it used to open `/dev/stdin`, which

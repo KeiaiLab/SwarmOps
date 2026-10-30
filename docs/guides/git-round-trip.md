@@ -332,8 +332,10 @@ $ so git export ~/src/acme.git --branch stable
 An import cut short by the store (a failed write, a lock held too long) says how many commits it
 recorded (`details.imported`, `details.last_commit`), and the same command run again continues
 after them. An import stopped by a refusal (`E_GIT_IMPORT_LOSSY`, `E_GIT_UNSUPPORTED`,
-`E_GIT_READ`) keeps the frames it recorded before the refused commit, 8,192 commits each, but does
-not count them; run again once the cause is dealt with, it continues after them too.
+`E_GIT_READ`, `E_TOO_LARGE`, or `E_INTERNAL` for a fault of the conversion) keeps the frames it
+recorded before the refused commit, 8,192 commits each, but does not count them; run again once
+the cause is dealt with, it continues after them too. An `E_CAS_MISMATCH` (the target moved
+after the last frame) has recorded every commit, and carries no count either.
 
 A script can branch on the exit code: 0 for success, 3 when git and the store diverged, 4 when
 running again can succeed, and 5 when an import has no identity.
