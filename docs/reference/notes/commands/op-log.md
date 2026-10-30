@@ -78,8 +78,8 @@ Before an `op undo`, list the operation again and check that its moves are the o
 - **It waits behind writers.** A page waits for the write that holds the lock, about one
   transaction; under a long burst of writes it can return `E_BUSY` instead. Retry it.
 - **A listed number keeps its operation.** `op log` lists only frames that are synced and listed
-  in the journal, so neither a failed sync nor a power loss takes one back. Only the triple fault
-  the journal's failure policy leaves open loses a listed frame
+  in the journal, so neither a failed sync nor a power loss takes one back. Only the double and
+  triple faults the journal's failure policy leaves open lose a listed frame
   ([Known limitations](../../../known-limitations.md#durability)).
 - **Times are the writer's clock.** `at` and `created_at` are what each writer recorded, in
   different units; they need not grow with `op`.
