@@ -308,7 +308,7 @@ the web server authenticated";
 /// Source control for coding-agent swarms. Every command but mcp, serve and derive --follow
 /// prints one JSON envelope on stdout.
 #[derive(Parser, Debug)]
-#[command(name = "swarmops", version)]
+#[command(name = "swarmops", version = crate::version::version())]
 pub struct Cli {
     #[command(flatten)]
     pub global: Global,

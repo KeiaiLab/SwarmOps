@@ -28,6 +28,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
   (the aarch64 ones for aarch64, under QEMU) before it publishes anything, and a run started by
   hand rehearses a branch without publishing
   ([Install from a .deb or .rpm package](docs/operate/install-and-upgrade.md#install-from-a-deb-or-rpm-package)).
+- `--version` names the build's commit when `SWARMOPS_BUILD_COMMIT` is set at compile time:
+  `swarmops 0.7.0+<commit>`, the commit as semver build metadata, so a binary built from a clone
+  can be compared with the commit it came from. The value must be 7 to 40 lowercase hex digits;
+  any other, empty included, fails the build. Release builds leave it unset and still print
+  `swarmops <version>`
+  ([Install from a clone](docs/operate/install-and-upgrade.md#install-from-a-clone)).
 
 ### Changed
 

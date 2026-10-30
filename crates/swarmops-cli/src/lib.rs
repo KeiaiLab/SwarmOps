@@ -41,5 +41,6 @@ mod mcp;
 mod output;
 #[cfg(test)]
 mod reference;
+mod version;
 
 pub use crate::entry::run;
