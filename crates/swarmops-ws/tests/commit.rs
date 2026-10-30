@@ -9,8 +9,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use camino::{Utf8Path, Utf8PathBuf};
 
 use swarmops_api::{
-    ChangeOp, ContentInput, DiffFormat, DiffReq, ErrorCode, ModeInput, ReadTreeReq, StatusAfter,
-    StoreOps, WsCommitReq, WsDiffReq, WsLandReq, WsRebaseReq,
+    ChangeOp, ContentInput, DiffFormat, DiffReq, ErrorCode, ModeInput, OpError, ReadFileReq,
+    ReadTreeReq, StatusAfter, StoreOps, WsCommitReq, WsDeleteReq, WsDiffReq, WsLandReq,
+    WsMaterializeReq, WsRebaseReq,
 };
 use swarmops_ws::hostfs::HostMeta;
 use swarmops_ws::state::{self, SWARMWS_DIR, Volume};
@@ -748,4 +749,251 @@ fn a_root_dot_git_is_not_refused() {
     };
     let paths: Vec<&str> = req.changes.iter().map(|c| c.path.as_str()).collect();
     assert_eq!(paths, ["src/a.txt"]);
+}
+
+/// `ws materialize` of `paths` in workspace `name`.
+fn widen(f: &Fixture, name: &str, paths: &[&str]) -> Result<Vec<String>, OpError> {
+    let mut req = WsMaterializeReq::new(
+        name.to_owned(),
+        paths.iter().map(|p| (*p).to_owned()).collect(),
+    );
+    req.status_after = StatusAfter::None;
+    swarmops_ws::materialize(&f.ctx(), req).map(|done| done.materialized)
+}
+
+/// `ws rebase` of workspace `name` onto `main`.
+fn rebased(f: &Fixture, name: &str) {
+    let mut req = WsRebaseReq::new(name.to_owned());
+    req.status_after = StatusAfter::None;
+    swarmops_ws::rebase(&f.ctx(), req).unwrap();
+}
+
+/// Whether changeset `id`'s tree holds a file at `path`.
+fn tree_holds(f: &Fixture, id: &str, path: &str) -> bool {
+    let mut req = ReadFileReq::new(id, path);
+    req.max_bytes = 1024;
+    match f.ops.read_file(req) {
+        Ok(_) => true,
+        Err(e) if e.code == "E_PATH_NOT_FOUND" => false,
+        Err(e) => panic!("{path}: {e:?}"),
+    }
+}
+
+/// The path a refusal's hint widens to.
+fn hinted(refused: &OpError) -> &str {
+    let hint = refused.hint.as_deref().unwrap_or_default();
+    hint.strip_prefix("swarmops ws materialize ")
+        .unwrap_or_else(|| panic!("{refused:?}"))
+}
+
+/// A workspace made before its base had the root `.gitignore` meets the copy that file names as
+/// an outside edit; the hint's materialize adds the copy and the `.gitignore`, and the next
+/// commit leaves the copy out (the M15 design §5a, I3).
+#[test]
+fn an_older_workspace_follows_the_hint_without_committing_a_copy() {
+    // 1. A workspace of `src` on a base without `.gitignore`; main gains one naming `.env`.
+    let f = Fixture::new();
+    let base = f.commit(None, &[Put::File("src/a.txt", "a\n")]);
+    f.create("w", &base, &["src"]);
+    f.commit(Some(&base), &[Put::File(".gitignore", ".env\n")]);
+    rebased(&f, "w");
+
+    // 2. A copy at the root and an edit: refused, naming the copy.
+    let dir = f.beside("w");
+    write(&dir, ".env", "TOKEN=1\n");
+    write(&dir, "src/a.txt", "edited\n");
+    let refused = swarmops_ws::commit(&f.ctx(), commit_of("w", "copy")).unwrap_err();
+    assert_eq!(refused.code, "E_WS_OUTSIDE_PREFIXES", "{refused:?}");
+    assert_eq!(refused_paths(&refused), [".env"]);
+    assert_eq!(
+        refused.hint.as_deref(),
+        Some("swarmops ws materialize .env")
+    );
+
+    // 3. The hint: the copy and the root `.gitignore` added.
+    assert_eq!(widen(&f, "w", &[".env"]).unwrap(), [".env", ".gitignore"]);
+
+    // 4. The next commit holds the edit and not the copy.
+    let done = swarmops_ws::commit(&f.ctx(), commit_of("w", "copy")).unwrap();
+    assert!(tree_holds(&f, &done.changeset, "src/a.txt"));
+    assert!(!tree_holds(&f, &done.changeset, ".env"));
+}
+
+/// A new directory widened by the hint is walked under the root `.gitignore` the sparse create
+/// put on disk: what it names is not committed.
+#[test]
+fn a_widened_new_directory_skips_what_the_root_gitignore_names() {
+    // 1. A workspace of `src`; the root `.gitignore` names `__pycache__/`.
+    let f = Fixture::new();
+    let base = f.commit(
+        None,
+        &[
+            Put::File(".gitignore", "__pycache__/\n"),
+            Put::File("src/a.py", "a\n"),
+        ],
+    );
+    f.create("w", &base, &["src"]);
+    let dir = f.beside("w");
+    write(&dir, "scripts/x.py", "x\n");
+    write(&dir, "scripts/__pycache__/x.pyc", "pyc\n");
+
+    // 2. Refused, naming `scripts`; the hint's materialize adds it.
+    let refused = swarmops_ws::commit(&f.ctx(), commit_of("w", "scripts")).unwrap_err();
+    assert_eq!(refused.code, "E_WS_OUTSIDE_PREFIXES", "{refused:?}");
+    assert_eq!(refused_paths(&refused), ["scripts"]);
+    assert_eq!(widen(&f, "w", &["scripts"]).unwrap(), ["scripts"]);
+
+    // 3. The next commit holds the script, not what `__pycache__/` names.
+    let done = swarmops_ws::commit(&f.ctx(), commit_of("w", "scripts")).unwrap();
+    assert!(tree_holds(&f, &done.changeset, "scripts/x.py"));
+    assert!(!tree_holds(
+        &f,
+        &done.changeset,
+        "scripts/__pycache__/x.pyc"
+    ));
+}
+
+/// An agent's file at a tree path outside the prefixes is an outside edit though an ignore file
+/// on disk names it: commit, land and a rescuing delete refuse it, and nothing is lost.
+#[test]
+fn a_tracked_outside_path_an_ignore_file_names_is_refused() {
+    // Each row: the root `.gitignore`, the tree path it names, the agent's file, the refusal.
+    let rows = [
+        ("*.log\n", "keep.log", "keep.log", "keep.log"),
+        ("vendor/\n", "vendor/x", "vendor/x", "vendor"),
+    ];
+    for (ignore, tracked, edited, named) in rows {
+        // 1. A workspace of `src` and the root `.gitignore`; the agent's file and an edit.
+        let f = Fixture::new();
+        let base = f.commit(
+            None,
+            &[
+                Put::File(".gitignore", ignore),
+                Put::File(tracked, "tree\n"),
+                Put::File("src/a.txt", "a\n"),
+            ],
+        );
+        f.create("w", &base, &[".gitignore", "src"]);
+        let dir = f.beside("w");
+        write(&dir, edited, "mine\n");
+        write(&dir, "src/a.txt", "edited\n");
+
+        // 2. Commit, land and a rescuing delete: each refused, naming it.
+        let refusals = [
+            swarmops_ws::commit(&f.ctx(), commit_of("w", "x")).map(|_| ()),
+            swarmops_ws::land(&f.ctx(), {
+                let mut req = WsLandReq::new("w".to_owned());
+                req.message = Some("x".to_owned());
+                req.status_after = StatusAfter::None;
+                req
+            })
+            .map(|_| ()),
+            swarmops_ws::delete(&f.ctx(), {
+                let mut req = WsDeleteReq::new("w".to_owned());
+                req.rescue = true;
+                req
+            })
+            .map(|_| ()),
+        ];
+        for refused in refusals {
+            let refused = refused.unwrap_err();
+            assert_eq!(
+                refused.code, "E_WS_OUTSIDE_PREFIXES",
+                "{named}: {refused:?}"
+            );
+            assert_eq!(refused_paths(&refused), [named]);
+        }
+
+        // 3. The directory and the agent's file are where they were.
+        assert_eq!(std::fs::read_to_string(dir.join(edited)).unwrap(), "mine\n");
+        assert_eq!(
+            standing(&dir),
+            (base, vec![".gitignore".to_owned(), "src".to_owned()])
+        );
+    }
+}
+
+/// An ignore file the base gained above the prefixes after the create, missing from disk under
+/// one the workspace holds, is refused, so its `!` cannot be lost; following the hints twice
+/// commits the file it lets through (the M15 design §5a, H2).
+#[test]
+fn a_negation_the_base_gained_above_the_prefixes_is_refused() {
+    // 1. A workspace of `crates/a` under the root `.gitignore` naming `*.log`; main gains
+    //    `crates/.gitignore`, which lets `special.log` through.
+    let f = Fixture::new();
+    let base = f.commit(
+        None,
+        &[
+            Put::File(".gitignore", "*.log\n"),
+            Put::File("crates/a/x.rs", "x\n"),
+        ],
+    );
+    f.create("w", &base, &["crates/a"]);
+    f.commit(
+        Some(&base),
+        &[Put::File("crates/.gitignore", "!special.log\n")],
+    );
+    rebased(&f, "w");
+    let dir = f.beside("w");
+    write(&dir, "crates/special.log", "special\n");
+
+    // 2. Commit and land: refused, naming the missing ignore file.
+    let refused = swarmops_ws::commit(&f.ctx(), commit_of("w", "log")).unwrap_err();
+    assert_eq!(refused.code, "E_WS_OUTSIDE_PREFIXES", "{refused:?}");
+    assert_eq!(refused_paths(&refused), ["crates/.gitignore"]);
+    let mut land = WsLandReq::new("w".to_owned());
+    land.message = Some("log".to_owned());
+    land.status_after = StatusAfter::None;
+    let landed = swarmops_ws::land(&f.ctx(), land).unwrap_err();
+    assert_eq!(landed.code, "E_WS_OUTSIDE_PREFIXES", "{landed:?}");
+    assert_eq!(refused_paths(&landed), ["crates/.gitignore"]);
+
+    // 3. Its hint, then the file it lets through.
+    widen(&f, "w", &[hinted(&refused)]).unwrap();
+    let refused = swarmops_ws::commit(&f.ctx(), commit_of("w", "log")).unwrap_err();
+    assert_eq!(refused_paths(&refused), ["crates/special.log"]);
+    widen(&f, "w", &[hinted(&refused)]).unwrap();
+
+    // 4. The next commit holds it.
+    let done = swarmops_ws::commit(&f.ctx(), commit_of("w", "log")).unwrap();
+    assert!(tree_holds(&f, &done.changeset, "crates/special.log"));
+}
+
+/// Every kind of outside edit has a hint whose materialize succeeds, after which the next commit
+/// does not refuse that path.
+#[test]
+fn every_outside_hint_materializes() {
+    // Each row: the prefix, the agent's new file.
+    let rows = [
+        ("src", "notes.txt"),
+        ("src", "scratch/a.txt"),
+        ("src", "docs/new.md"),
+        ("crates/a", "crates/new.rs"),
+        ("new/deep", "new/x.txt"),
+    ];
+    for (prefix, new) in rows {
+        // 1. A workspace of the prefix; the agent's new file.
+        let f = Fixture::new();
+        let base = f.commit(
+            None,
+            &[
+                Put::File("src/a.txt", "a\n"),
+                Put::File("docs/d.md", "d\n"),
+                Put::File("crates/a/x.rs", "x\n"),
+            ],
+        );
+        f.create("w", &base, &[prefix]);
+        write(&f.beside("w"), new, "new\n");
+
+        // 2. Refused; the hint's path materialized.
+        let refused = swarmops_ws::commit(&f.ctx(), commit_of("w", "new")).unwrap_err();
+        assert_eq!(refused.code, "E_WS_OUTSIDE_PREFIXES", "{new}: {refused:?}");
+        let path = hinted(&refused).to_owned();
+        widen(&f, "w", &[&path]).unwrap_or_else(|e| panic!("{new}: {path}: {e:?}"));
+
+        // 3. The next commit holds the new file.
+        let done = swarmops_ws::commit(&f.ctx(), commit_of("w", "new"))
+            .unwrap_or_else(|e| panic!("{new}: {e:?}"));
+        assert!(tree_holds(&f, &done.changeset, new), "{new}");
+    }
 }

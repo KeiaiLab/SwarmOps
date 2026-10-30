@@ -78,7 +78,9 @@ swarmops --repo [tmp]/store --as agent/worker-17 ws delete w1
   "meta": {
     "repo": "[tmp]/store",
     "elapsed_ms": "[elapsed_ms]",
-    "resolved": {},
+    "resolved": {
+      "[c1]": "[c1]"
+    },
     "auth": "trust"
   }
 }

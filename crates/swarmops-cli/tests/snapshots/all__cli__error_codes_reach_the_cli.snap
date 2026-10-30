@@ -1463,7 +1463,9 @@ expression: s.transcript()
       "meta": {
         "repo": "[tmp]/store",
         "elapsed_ms": "[elapsed_ms]",
-        "resolved": {},
+        "resolved": {
+          "[c1]": "[c1]"
+        },
         "auth": "trust"
       }
     }
@@ -1659,7 +1661,9 @@ expression: s.transcript()
       "meta": {
         "repo": "[tmp]/store",
         "elapsed_ms": "[elapsed_ms]",
-        "resolved": {},
+        "resolved": {
+          "[c1]": "[c1]"
+        },
         "auth": "trust"
       }
     }

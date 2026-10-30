@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_api::{
-    OpError, ReadFileReq, ShowReq, StatusAfter, StoreOps, WsCommitReq, WsDeleteReq,
+    OpError, ReadFileReq, ShowReq, StatusAfter, StoreOps, WsCommitReq, WsDeleteReq, WsLandReq,
 };
 use swarmops_ws::hook::{self, Bootstrap, HookCreate, HookRemove, MAX_HOOK_INPUT};
 use swarmops_ws::registry::{Entry, Registry};
@@ -563,4 +563,65 @@ fn bootstrap_refuses_copies_past_the_file_limit() {
     assert_eq!(refused.details["limit"], "files");
     let kept = ws_root.join("acme").join("w");
     assert_eq!(tree_of(&kept), [file("a.txt", "a\n")]);
+}
+
+/// Whether changeset `id`'s tree holds a file at `path`.
+fn tree_holds(f: &Fixture, id: &str, path: &str) -> bool {
+    let mut req = ReadFileReq::new(id, path);
+    req.max_bytes = 1024;
+    match f.ops.read_file(req) {
+        Ok(_) => true,
+        Err(e) if e.code == "E_PATH_NOT_FOUND" => false,
+        Err(e) => panic!("{path}: {e:?}"),
+    }
+}
+
+/// A hook-made sparse workspace holds the root `.gitignore`, so the `.env` the bootstrap copies
+/// is ignored: an edit commits and lands without it, and the remove hook deletes the directory
+/// (the M15 design §5a, I3).
+#[cfg(unix)]
+#[test]
+fn a_hook_sparse_workspace_with_copies_commits_lands_and_is_removed() {
+    // 1. A repository of `src` whose root `.gitignore` names `.env`; a session listing `.env`.
+    let f = Fixture::new();
+    let base = f.commit(
+        None,
+        &[
+            Put::File(".gitignore", ".env\n"),
+            Put::File("src/a.txt", "a\n"),
+        ],
+    );
+    with_config(&f, &base, r#"{"prefixes": ["src"]}"#);
+    let cwd = made(&f, "session");
+    write(&cwd, ".worktreeinclude", ".env\n");
+    write(&cwd, ".env", "TOKEN=1\n");
+
+    // 2. The hook's workspace: the root `.gitignore` among its prefixes, the copy on disk.
+    let ws_root = made(&f, "workspaces");
+    let ctx = anonymous(&f);
+    let input = asking("abc123", "w", &cwd);
+    let path = hook::worktree_create(&ctx, &input, &ws_root, Bootstrap::Run).unwrap();
+    let saved = state::read(&RealFs::new(), &path).unwrap();
+    assert!(
+        saved.prefixes.contains(&".gitignore".to_owned()),
+        "{saved:?}"
+    );
+    assert!(path.join(".env").exists());
+
+    // 3. An edit commits and lands; neither tree holds the copy.
+    write(&path, "src/a.txt", "edited\n");
+    let mut commit = WsCommitReq::new(saved.name.clone(), "edit".to_owned());
+    commit.status_after = StatusAfter::None;
+    let committed = swarmops_ws::commit(&f.ctx(), commit).unwrap();
+    let mut land = WsLandReq::new(saved.name.clone());
+    land.status_after = StatusAfter::None;
+    let landed = swarmops_ws::land(&f.ctx(), land).unwrap();
+    for id in [committed.changeset.as_str(), landed.land.landed.as_str()] {
+        assert!(tree_holds(&f, id, "src/a.txt"), "{id}");
+        assert!(!tree_holds(&f, id, ".env"), "{id}");
+    }
+
+    // 4. The remove hook deletes the directory.
+    hook::worktree_remove(&ctx, &HookRemove::new(path.clone())).unwrap();
+    assert!(!path.exists());
 }

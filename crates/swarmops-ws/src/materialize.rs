@@ -41,6 +41,7 @@ use swarmops_core::{ObjectKind, RepoPath};
 use crate::hostfs::{HostFs, HostKind, HostMeta};
 use crate::pending::{self, Intent};
 use crate::portable::{self, HOST};
+use crate::scan;
 use crate::state::{self, Volume};
 use crate::volume::{EXEC_BITS, EXEC_MODE};
 use crate::workspace::{self, Locate, Workspace};
@@ -51,6 +52,12 @@ const PAGE: usize = 1000;
 
 /// The most paths an `E_WS_DIRTY` names.
 const MAX_DIRTY: usize = 20;
+
+/// The ignore file of the tree's own syntax.
+const GITIGNORE: &str = ".gitignore";
+
+/// The ignore files a walk reads in each directory.
+const IGNORE_FILES: [&str; 2] = [GITIGNORE, scan::SWARMIGNORE];
 
 /// What a materialisation did on the host.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -113,8 +120,10 @@ pub(crate) struct Prepared {
     puts: Vec<Put>,
 }
 
-/// `ws_materialize`: adds `req.paths` to the workspace's prefixes and writes their subtrees,
-/// from the tree its files stand for. `E_PATH_NOT_FOUND` for a path that tree lacks.
+/// `ws_materialize`: adds `req.paths` to the workspace's prefixes, with the ignore files the tree
+/// holds in the directories above them, and writes their subtrees, from the tree its files stand
+/// for. A path that tree lacks joins as it is, nothing written, when it is on disk and its parent
+/// is the root, a directory of the tree or one above a prefix; else `E_PATH_NOT_FOUND`.
 pub fn materialize(ctx: &Ctx<'_>, req: WsMaterializeReq) -> Result<WsMaterializeResp, OpError> {
     // 1. The paths, then the workspace under its lock.
     let WsMaterializeReq {
@@ -132,8 +141,9 @@ pub fn materialize(ctx: &Ctx<'_>, req: WsMaterializeReq) -> Result<WsMaterialize
     let asked = normalize(paths)?;
     let (mut ws, _held) = workspace::open_locked(ctx, &Locate::Name(workspace))?;
 
-    // 2. The ones it does not hold yet, each one the tree has.
-    let added: Vec<String> = if ws.file.all {
+    // 2. The ones it does not hold yet: each one the tree has, or a new path on disk whose
+    //    parent the workspace can hold.
+    let wanted: Vec<String> = if ws.file.all {
         Vec::new()
     } else {
         (asked.into_iter())
@@ -141,8 +151,12 @@ pub fn materialize(ctx: &Ctx<'_>, req: WsMaterializeReq) -> Result<WsMaterialize
             .collect()
     };
     let tree = Tree::new(ctx.store, &ws.file.materialized);
-    for path in &added {
-        if items_under(ctx.store, &tree, Some(path))?.is_none() {
+    let mut new = Vec::new();
+    for path in &wanted {
+        if items_under(ctx.store, &tree, Some(path))?.is_some() {
+            continue;
+        }
+        if !is_new(ctx.host.as_ref(), &ws, &tree, path)? {
             return Err(OpError::new(
                 ErrorCode::PathNotFound,
                 format!("{} has no {path:?}", short(&ws.file.materialized)),
@@ -152,9 +166,15 @@ pub fn materialize(ctx: &Ctx<'_>, req: WsMaterializeReq) -> Result<WsMaterialize
                 Value::from(path.as_str()),
             )])));
         }
+        new.push(path.clone());
     }
 
-    // 3. Written as a materialisation of the whole subtrees, under its intent.
+    // 3. With the ignore files above them (so the walk reads what the whole tree's would); the
+    //    new paths, which `prepare` does not see, under the portability rules.
+    let added = with_ignores(&tree, wanted, &ws.file.prefixes)?;
+    check_new(&tree, &ws, &new, &added)?;
+
+    // 4. Written as a materialisation of the whole subtrees, under its intent.
     let mut written = Written::default();
     if !added.is_empty() {
         let intent = Intent {
@@ -729,6 +749,149 @@ fn after_intent(ws: &Workspace, intent: &Intent) -> Vec<String> {
         .cloned()
         .collect();
     tidy(joined)
+}
+
+/// Whether `path`, which `tree` lacks, is a new path workspace `ws` takes: on disk, and its parent
+/// the root, a directory of `tree` or a directory above a prefix. A typo is not on disk.
+fn is_new(host: &dyn HostFs, ws: &Workspace, tree: &Tree<'_>, path: &str) -> Result<bool, OpError> {
+    // 1. The agent's path, on disk.
+    if !on_disk(host, &ws.dir, path)? {
+        return Ok(false);
+    }
+
+    // 2. Its parent: the root, above a prefix, or a directory of the tree.
+    let Some((parent, _)) = path.rsplit_once('/') else {
+        return Ok(true);
+    };
+    if held_by(parent, &ws.file.prefixes) {
+        return Ok(true);
+    }
+    let entry = tree.entry(parent)?;
+    Ok(entry.is_some_and(|entry| entry.kind == EntryKindOut::Dir))
+}
+
+/// The portability rules over `new`, the paths of a materialize that `tree` lacks, as `prepare`
+/// checks the paths it writes; `added` is all the request adds to workspace `ws`'s prefixes.
+fn check_new(
+    tree: &Tree<'_>,
+    ws: &Workspace,
+    new: &[String],
+    added: &[String],
+) -> Result<(), OpError> {
+    // 1. Nothing new: nothing to check.
+    if new.is_empty() {
+        return Ok(());
+    }
+
+    // 2. The case set only where the volume folds case, over the prefixes after the request.
+    let case_set = if ws.file.volume.case_insensitive {
+        let after = tidy(ws.file.prefixes.iter().chain(added).cloned().collect());
+        let mut set = case_set(tree, new, ws.file.all, &after)?;
+        set.extend(new.iter().cloned());
+        Some(set)
+    } else {
+        None
+    };
+    portable::check(new, case_set.as_deref(), HOST)
+}
+
+/// `paths`, prefixes a sparse workspace adds, with the ignore files (not directories) `tree`
+/// holds in each directory above each one, the root included; those `held` or `paths` already
+/// cover are not added. Sorted, as [`normalize`] leaves prefixes.
+///
+/// For example, a tree of `.gitignore`, `crates/.swarmignore`, `crates/a/x.rs` and
+/// `docs/.gitignore` gives `crates/a` as `[".gitignore", "crates/.swarmignore", "crates/a"]`.
+pub(crate) fn with_ignores(
+    tree: &Tree<'_>,
+    paths: Vec<String>,
+    held: &[String],
+) -> Result<Vec<String>, OpError> {
+    let mut found = Vec::new();
+    for path in &paths {
+        // 1. Each directory above the path.
+        let parts: Vec<&str> = path.split('/').collect();
+        for dir in (0..parts.len()).map(|n| parts[..n].join("/")) {
+            // 2. Its ignore files the tree holds, unless covered already.
+            for name in IGNORE_FILES {
+                let file = join(&dir, name);
+                if covered(&file, held) || covered(&file, &paths) {
+                    continue;
+                }
+                if (tree.entry(&file)?).is_some_and(|entry| entry.kind != EntryKindOut::Dir) {
+                    found.push(file);
+                }
+            }
+        }
+    }
+    found.extend(paths);
+    Ok(tidy(found))
+}
+
+/// What sparse workspace `ws` holds off its prefixes that a walk does not see, from its
+/// `materialized` tree: each entry of the root and of each directory above a prefix, off the
+/// prefixes, that is (1) on disk, whatever the ignore files say, as no such tree path is; or
+/// (2) an ignore file below one the prefixes hold, whose rules the walk lacks. Sorted; none for
+/// a workspace of the whole tree.
+pub(crate) fn tree_outside(
+    store: &dyn StoreOps,
+    host: &dyn HostFs,
+    ws: &Workspace,
+) -> Result<Vec<String>, OpError> {
+    // 1. Nothing is off the prefixes of the whole tree.
+    let prefixes = &ws.file.prefixes;
+    if ws.file.all || prefixes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // 2. The directories looked at: the root, and each one above a prefix.
+    let mut dirs = BTreeSet::from([String::new()]);
+    for prefix in prefixes {
+        let parts: Vec<&str> = prefix.split('/').collect();
+        dirs.extend((1..parts.len()).map(|n| parts[..n].join("/")));
+    }
+
+    // 3. Their tree entries off the prefixes, on disk or an ignore file the walk lacks.
+    let tree = Tree::new(store, &ws.file.materialized);
+    let mut found = BTreeSet::new();
+    for dir in &dirs {
+        let Some(entries) = tree.listing(dir)? else {
+            continue;
+        };
+        for entry in entries.iter() {
+            let path = join(dir, &entry.name);
+            if held_by(&path, prefixes) {
+                continue;
+            }
+            if on_disk(host, &ws.dir, &path)? || stale_ignore(dir, entry, prefixes) {
+                found.insert(path);
+            }
+        }
+    }
+    Ok(found.into_iter().collect())
+}
+
+/// Whether `entry` of tree directory `dir` is an ignore file a walk of `prefixes` would need:
+/// the prefixes hold an ignore file in `dir` or above, whose rules a deeper one may turn.
+fn stale_ignore(dir: &str, entry: &TreeEntryOut, prefixes: &[String]) -> bool {
+    // 1. Only an ignore file.
+    if entry.kind == EntryKindOut::Dir || !IGNORE_FILES.contains(&entry.name.as_str()) {
+        return false;
+    }
+
+    // 2. One held in `dir` or a directory above it.
+    let parts: Vec<&str> = dir.split('/').filter(|part| !part.is_empty()).collect();
+    let mut above = (0..=parts.len()).map(|n| parts[..n].join("/"));
+    above.any(|at| (IGNORE_FILES.iter()).any(|name| covered(&join(&at, name), prefixes)))
+}
+
+/// Whether the workspace at `dir` holds anything at repository path `path`, a symlink not
+/// followed; a parent that is no directory means nothing there.
+fn on_disk(host: &dyn HostFs, dir: &Utf8Path, path: &str) -> Result<bool, OpError> {
+    match host.symlink_metadata(&dir.join(path)) {
+        Ok(meta) => Ok(meta.is_some()),
+        Err(e) if e.kind() == io::ErrorKind::NotADirectory => Ok(false),
+        Err(e) => Err(host_failed(path, &e)),
+    }
 }
 
 /// The files of `tree` at or below `prefix` (the root for none), from `read_tree` at depth 64,

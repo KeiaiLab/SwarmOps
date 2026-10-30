@@ -57,7 +57,7 @@ pub fn create(ctx: &Ctx<'_>, req: WsCreateReq) -> Result<WsInfo, OpError> {
             "give prefixes or `all`, not both",
         ));
     }
-    let prefixes = materialize::normalize(req.prefixes)?;
+    let mut prefixes = materialize::normalize(req.prefixes)?;
 
     // 2. The store's side: the base's changeset, the ref it lands on, the store's id.
     let resolved = ctx
@@ -69,6 +69,13 @@ pub fn create(ctx: &Ctx<'_>, req: WsCreateReq) -> Result<WsInfo, OpError> {
         _ => return Err(io_error::unknown_variant("RevKind")),
     };
     let repo_id = ctx.store.repo_info(InfoReq::default())?.repo_id;
+
+    // A sparse workspace also holds the ignore files above its prefixes, so its walk reads what
+    // the whole tree's would.
+    if !req.all && !prefixes.is_empty() {
+        let tree = materialize::Tree::new(ctx.store, &resolved.id);
+        prefixes = materialize::with_ignores(&tree, prefixes, &[])?;
+    }
 
     // 3. A workspace of this name there already: the same one, its entry made sure of.
     let entry = Entry {

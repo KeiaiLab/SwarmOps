@@ -910,3 +910,325 @@ fn a_bare_workspace_holds_the_whole_tree() {
         assert_eq!(wire["all"], true, "{how:?}");
     }
 }
+
+/// Whether changeset `id`'s tree holds a file at `path`.
+fn tree_holds(f: &Fixture, id: &str, path: &str) -> bool {
+    use swarmops_api::{ReadFileReq, StoreOps};
+    let mut req = ReadFileReq::new(id, path);
+    req.max_bytes = 1024;
+    match f.ops.read_file(req) {
+        Ok(_) => true,
+        Err(e) if e.code == "E_PATH_NOT_FOUND" => false,
+        Err(e) => panic!("{path}: {e:?}"),
+    }
+}
+
+/// The intent file of workspace `dir`.
+fn intent_of(dir: &camino::Utf8Path) -> camino::Utf8PathBuf {
+    dir.join(SWARMWS_DIR).join("journal/materialize.json")
+}
+
+/// A sparse create holds the `.gitignore` and `.swarmignore` of each directory above its
+/// prefixes, as prefixes, and no other file of those directories (the M15 design §5a).
+#[test]
+fn create_also_holds_the_ignore_files_above_its_prefixes() {
+    // 1. Ignore files at the root, above the prefix, and in a sibling directory.
+    let f = Fixture::new();
+    let base = f.commit(
+        None,
+        &[
+            Put::File(".gitignore", "*.log\n"),
+            Put::File("crates/.swarmignore", "tmp/\n"),
+            Put::File("crates/a/x.rs", "x\n"),
+            Put::File("docs/.gitignore", "*.html\n"),
+        ],
+    );
+
+    // 2. A workspace of `crates/a`: the two above it join the prefixes.
+    let info = f.create("w", &base, &["crates/a"]);
+    assert_eq!(
+        info.prefixes,
+        [".gitignore", "crates/.swarmignore", "crates/a"]
+    );
+
+    // 3. On disk: those two and the prefix's file; nothing of `docs`.
+    let dir = f.beside("w");
+    assert_eq!(
+        tree_of(&dir),
+        [
+            file(".gitignore", "*.log\n"),
+            file("crates/.swarmignore", "tmp/\n"),
+            file("crates/a/x.rs", "x\n"),
+        ]
+    );
+}
+
+/// `ws materialize` of a new prefix adds the ignore files above it too, and writes them.
+#[test]
+fn materialize_adds_the_ignore_files_above_a_new_prefix() {
+    // 1. A workspace of `src`; `docs/.gitignore` above `docs/api`.
+    let f = Fixture::new();
+    let base = f.commit(
+        None,
+        &[
+            Put::File("src/a.rs", "a\n"),
+            Put::File("docs/.gitignore", "*.html\n"),
+            Put::File("docs/api/a.md", "a\n"),
+        ],
+    );
+    f.create("w", &base, &["src"]);
+
+    // 2. `docs/api` added: with `docs/.gitignore`, both written.
+    let done = swarmops_ws::materialize(&f.ctx(), expand("w", &["docs/api"])).unwrap();
+    assert_eq!(done.materialized, ["docs/.gitignore", "docs/api"]);
+    let dir = f.beside("w");
+    assert_eq!(
+        tree_of(&dir),
+        [
+            file("docs/.gitignore", "*.html\n"),
+            file("docs/api/a.md", "a\n"),
+            file("src/a.rs", "a\n"),
+        ]
+    );
+    let saved = state::read(&RealFs::new(), &dir).unwrap();
+    assert_eq!(saved.prefixes, ["docs/.gitignore", "docs/api", "src"]);
+}
+
+/// A path the tree lacks that is on disk, its parent the root or a directory of the tree, joins
+/// the prefixes with nothing written; the next commit holds it.
+#[test]
+fn a_new_path_joins_the_prefixes_with_nothing_written() {
+    // 1. A workspace of `src`; the agent's new file at the root and in `docs`, a directory of
+    //    the tree outside the prefixes.
+    let f = Fixture::new();
+    let base = f.commit(
+        None,
+        &[Put::File("src/a.rs", "a\n"), Put::File("docs/d.md", "d\n")],
+    );
+    f.create("w", &base, &["src"]);
+    let dir = f.beside("w");
+    write(&dir, "notes.txt", "notes\n");
+    write(&dir, "docs/new.md", "new\n");
+    let before = tree_of(&dir);
+
+    // 2. Both added: no byte written, the agent's files as they were.
+    let done =
+        swarmops_ws::materialize(&f.ctx(), expand("w", &["notes.txt", "docs/new.md"])).unwrap();
+    assert_eq!(done.materialized, ["docs/new.md", "notes.txt"]);
+    assert_eq!(done.bytes, 0);
+    assert_eq!(tree_of(&dir), before);
+    let saved = state::read(&RealFs::new(), &dir).unwrap();
+    assert_eq!(saved.prefixes, ["docs/new.md", "notes.txt", "src"]);
+
+    // 3. The next commit holds both.
+    let mut req = WsCommitReq::new("w".to_owned(), "new".to_owned());
+    req.status_after = StatusAfter::None;
+    let committed = swarmops_ws::commit(&f.ctx(), req).unwrap();
+    assert!(tree_holds(&f, &committed.changeset, "notes.txt"));
+    assert!(tree_holds(&f, &committed.changeset, "docs/new.md"));
+}
+
+/// A new path without a parent (a directory neither the tree nor the prefixes hold, or a file
+/// of the tree), or one not on disk, is still `E_PATH_NOT_FOUND` naming it, and nothing changes.
+#[test]
+fn a_new_path_without_a_parent_is_still_not_found() {
+    // 1. A workspace of `src`; the agent's file two directories deep in a new directory, and
+    //    one below `README.md`, a file of the tree that is a directory on disk.
+    let f = Fixture::new();
+    let base = f.commit(
+        None,
+        &[Put::File("src/a.rs", "a\n"), Put::File("README.md", "r\n")],
+    );
+    f.create("w", &base, &["src"]);
+    let dir = f.beside("w");
+    write(&dir, "nope/deeper/x", "x\n");
+    write(&dir, "README.md/x", "x\n");
+    let files = tree_of(&dir);
+    let saved = std::fs::read(state::path_in(&dir)).unwrap();
+
+    // 2. Each refused, naming its path; nothing changed, no intent.
+    for path in ["nope/deeper/x", "README.md/x", "srcc"] {
+        let refused = swarmops_ws::materialize(&f.ctx(), expand("w", &[path])).unwrap_err();
+        assert_eq!(refused.code, "E_PATH_NOT_FOUND", "{path}: {refused:?}");
+        assert_eq!(refused.details["path"], path);
+        assert_eq!(tree_of(&dir), files, "{path}");
+        assert_eq!(
+            std::fs::read(state::path_in(&dir)).unwrap(),
+            saved,
+            "{path}"
+        );
+        assert!(!intent_of(&dir).exists(), "{path}");
+    }
+}
+
+/// A new path meets the portability rules before anything is written: the reserved name, and a
+/// case collision on a volume that folds case.
+#[test]
+fn a_new_path_meets_the_portability_rules() {
+    // 1. The reserved name at the root, on disk.
+    let f = Fixture::new();
+    let base = f.commit(
+        None,
+        &[Put::File("src/a.rs", "a\n"), Put::File("notes.txt", "n\n")],
+    );
+    f.create("w", &base, &["src"]);
+    let dir = f.beside("w");
+    write(&dir, ".SWARMWS", "x\n");
+    let saved = std::fs::read(state::path_in(&dir)).unwrap();
+    let refused = swarmops_ws::materialize(&f.ctx(), expand("w", &[".SWARMWS"])).unwrap_err();
+    assert_eq!(refused.code, "E_WS_UNPORTABLE", "{refused:?}");
+    assert_eq!(refused.details["reason"], "reserved_name");
+    assert_eq!(std::fs::read(state::path_in(&dir)).unwrap(), saved);
+    assert!(!intent_of(&dir).exists());
+
+    // 2. On a volume that folds case, `Notes.txt` beside the tree's `notes.txt`.
+    f.create("c", &base, &["notes.txt", "src"]);
+    let mut volume = LINUX;
+    volume.case_insensitive = true;
+    f.simulate("c", volume);
+    let dir = f.beside("c");
+    write(&dir, "Notes.txt", "N\n");
+    let files = tree_of(&dir);
+    let saved = std::fs::read(state::path_in(&dir)).unwrap();
+    let refused = swarmops_ws::materialize(&f.ctx(), expand("c", &["Notes.txt"])).unwrap_err();
+    assert_eq!(refused.code, "E_WS_UNPORTABLE", "{refused:?}");
+    assert_eq!(refused.details["reason"], "case_collision");
+    assert_eq!(tree_of(&dir), files);
+    assert_eq!(std::fs::read(state::path_in(&dir)).unwrap(), saved);
+    assert!(!intent_of(&dir).exists());
+}
+
+/// An agent's file where an ignore file above the new prefix goes refuses the materialize with
+/// `E_WS_DIRTY` naming it, though the request did not name it; nothing changes.
+#[test]
+fn a_dirty_ignore_file_above_refuses_the_materialize() {
+    // 1. A workspace of `src` made on a base without the root `.gitignore`; main gains it, and
+    //    the workspace is moved onto it.
+    let f = Fixture::new();
+    let base = f.commit(
+        None,
+        &[
+            Put::File("src/a.txt", "a\n"),
+            Put::File("docs/api/a.md", "a\n"),
+        ],
+    );
+    f.create("w", &base, &["src"]);
+    let next = f.commit(Some(&base), &[Put::File(".gitignore", "*.log\n")]);
+    update(&f.ctx(), "w", &next).unwrap();
+
+    // 2. The agent's own root `.gitignore`.
+    let dir = f.beside("w");
+    write(&dir, ".gitignore", "mine\n");
+    let files = tree_of(&dir);
+    let saved = std::fs::read(state::path_in(&dir)).unwrap();
+
+    // 3. `docs/api` refused, naming `.gitignore`; nothing changed.
+    let refused = swarmops_ws::materialize(&f.ctx(), expand("w", &["docs/api"])).unwrap_err();
+    assert_eq!(refused.code, "E_WS_DIRTY", "{refused:?}");
+    assert_eq!(refused.details["paths"], serde_json::json!([".gitignore"]));
+    assert_eq!(tree_of(&dir), files);
+    assert_eq!(std::fs::read(state::path_in(&dir)).unwrap(), saved);
+    assert!(!intent_of(&dir).exists());
+}
+
+/// A new-path materialize killed at each call of the durable files' layer ends whole on the
+/// next open: the path is a prefix or not, no intent is left, and the agent's file is intact.
+#[test]
+#[cfg(feature = "test-hooks")]
+fn a_killed_new_path_materialize_ends_whole() {
+    let test = swarmops_testkit::test_name!("a_killed_new_path_materialize_ends_whole");
+    new_path_killed::sweep(&test);
+}
+
+/// The crash sweep of a new-path materialize, run by the test above.
+#[cfg(feature = "test-hooks")]
+mod new_path_killed {
+    use std::sync::Arc;
+
+    use camino::Utf8Path;
+    use swarmops_api::Identity;
+    use swarmops_ops::LocalOps;
+    use swarmops_store::{CrashAtFs, FsOps};
+    use swarmops_testkit::child;
+    use swarmops_ws::workspace::{Locate, Workspace};
+    use swarmops_ws::{Ctx, HostFs, RealHost};
+
+    use super::*;
+    use crate::fixture::AGENT;
+
+    /// The variables that make a run of the sweep's test the child that crashes.
+    const STORE: &str = "SWARMOPS_WS_TEST_STORE";
+    const CUT: &str = "SWARMOPS_WS_TEST_CUT";
+
+    /// The new path the sweep adds.
+    const NEW: &str = "notes.txt";
+
+    /// What the agent's new file holds.
+    const TEXT: &str = "notes\n";
+
+    /// Kills the materialize at each call of the durable files' layer in a child process, a run
+    /// of `test`, then opens the workspace; in that child, makes the materialize and dies.
+    pub(super) fn sweep(test: &str) {
+        // 1. In the child: the materialize, over a layer that aborts at call k.
+        if let (Ok(root), Ok(cut)) = (std::env::var(STORE), std::env::var(CUT)) {
+            crash(&root, &cut);
+            return;
+        }
+
+        // 2. A store, and how many calls the materialize makes, counted with no cut.
+        let f = Fixture::new();
+        let base = f.commit(None, &[Put::File("src/a.rs", "a\n")]);
+        made(&f, &base, "count");
+        let counting = Arc::new(CrashAtFs::new(RealFs::new(), 0));
+        let ctx = f.ctx_with(Arc::new(RealHost::default()), counting.clone());
+        swarmops_ws::materialize(&ctx, expand("count", &[NEW])).unwrap();
+        let calls = counting.calls();
+        assert!(calls > 2, "{calls}");
+
+        // 3. A child killed at each cut; the next open ends it whole.
+        for k in 1..=calls {
+            let name = format!("w{k}");
+            let dir = made(&f, &base, &name);
+            let out = child::run(
+                child::this_test(test)
+                    .env(STORE, f.root.as_str())
+                    .env(CUT, format!("{k}:{name}")),
+            );
+            assert!(!out.status.success(), "{name}: the child was not killed");
+            let ws = Workspace::open(&f.ctx(), Locate::Name(name.clone())).unwrap();
+            let prefixes = ws.file.prefixes.clone();
+            let ends = [
+                vec!["src".to_owned()],
+                vec![NEW.to_owned(), "src".to_owned()],
+            ];
+            assert!(ends.contains(&prefixes), "{name}: {prefixes:?}");
+            assert!(!intent_of(&dir).exists(), "{name}");
+            assert_eq!(std::fs::read_to_string(dir.join(NEW)).unwrap(), TEXT);
+        }
+    }
+
+    /// Workspace `name` of `src` on `base`, the agent's new file in it; its directory.
+    fn made(f: &Fixture, base: &str, name: &str) -> camino::Utf8PathBuf {
+        f.create(name, base, &["src"]);
+        let dir = f.beside(name);
+        write(&dir, NEW, TEXT);
+        dir
+    }
+
+    /// The child's part: the materialize in the workspace `cut` (`<k>:<name>`) names, on the
+    /// store at `root`, over a durable files' layer aborting at its call `k`.
+    fn crash(root: &str, cut: &str) {
+        let (k, name) = cut.split_once(':').unwrap();
+        let ops = LocalOps::open(Utf8Path::new(root)).unwrap();
+        let host: Arc<dyn HostFs> = Arc::new(RealHost::default());
+        let fs: Arc<dyn FsOps> = Arc::new(CrashAtFs::new(RealFs::new(), k.parse().unwrap()));
+        let ctx = Ctx::new(
+            &ops,
+            root.into(),
+            Some(Identity::parse(AGENT).unwrap()),
+            fs,
+            host,
+        );
+        let _ = swarmops_ws::materialize(&ctx, expand(name, &[NEW]));
+    }
+}

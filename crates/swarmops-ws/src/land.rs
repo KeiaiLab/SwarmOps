@@ -118,7 +118,7 @@ pub fn land(ctx: &Ctx<'_>, req: WsLandReq) -> Result<WsLandResp, OpError> {
         None => LandMode::Merge,
     });
     let seen = Workspace::open(ctx, Locate::Name(workspace.clone()))?;
-    commit::refuse_outside(scan::outside(&seen)?)?;
+    commit::refuse_outside(scan::outside(ctx, &seen)?)?;
     let target = target.unwrap_or_else(|| seen.file.target.clone());
     let check = check
         .map(|check| command(ctx, &seen, &target, check))

@@ -296,6 +296,36 @@ fn every_ws_mutation_returns_status_after() {
     assert!(landed["land"]["landed"].is_string(), "{landed}");
 }
 
+/// The hint of a commit refused for a new file at the root, run as it is inside the workspace,
+/// widens the prefixes; the next commit holds the file (the M15 design §5a, I4).
+#[test]
+fn ws_follows_the_outside_hint_for_a_new_root_file() {
+    // 1. A workspace of `src`; a new file at its root.
+    let lab = Lab::new();
+    let dir = lab.beside("w1");
+    let path = dir.to_str().unwrap();
+    lab.so(&["ws", "create", "w1", "--path", path, "--prefix", "src"])
+        .ok();
+    write(&dir, "notes.txt", "notes\n");
+
+    // 2. The commit refused; its hint, run inside the workspace, succeeds.
+    let refused = inside(&dir, &["ws", "commit", "-m", "notes"]);
+    let error = refused.err("E_WS_OUTSIDE_PREFIXES", 1);
+    let hint = error["hint"].as_str().unwrap();
+    let args: Vec<&str> = hint
+        .strip_prefix("swarmops ")
+        .unwrap_or_else(|| panic!("{refused}"))
+        .split(' ')
+        .collect();
+    inside(&dir, &args).ok();
+
+    // 3. The next commit holds the file.
+    let committed = inside(&dir, &["ws", "commit", "-m", "notes"]).ok();
+    let changeset = committed["changeset"].as_str().unwrap();
+    let shown = lab.so(&["cat", &format!("{changeset}:notes.txt")]).ok();
+    assert_eq!(shown["content"], "notes\n", "{shown}");
+}
+
 /// The head of `main` in the lab's store.
 pub fn main_of(lab: &Lab) -> String {
     let resolved = lab.store.read(&["resolve", "main"]).ok();

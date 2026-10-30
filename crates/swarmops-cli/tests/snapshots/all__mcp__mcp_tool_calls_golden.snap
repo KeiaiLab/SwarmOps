@@ -1284,7 +1284,7 @@ expression: transcript
         "result": {
           "content": [
             {
-              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"main\":\"[landed]\"}},\"ok\":true,\"op\":\"ws_status\",\"result\":{\"base\":\"[landed]\",\"behind_by\":0,\"changes\":[{\"kind\":\"modified\",\"path\":\"src/lib.rs\",\"size\":17}],\"head\":\"[landed]\",\"main\":\"[landed]\",\"name\":\"ws1\",\"state\":\"clean\",\"truncated\":false}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[landed]\":\"[landed]\",\"main\":\"[landed]\"}},\"ok\":true,\"op\":\"ws_status\",\"result\":{\"base\":\"[landed]\",\"behind_by\":0,\"changes\":[{\"kind\":\"modified\",\"path\":\"src/lib.rs\",\"size\":17}],\"head\":\"[landed]\",\"main\":\"[landed]\",\"name\":\"ws1\",\"state\":\"clean\",\"truncated\":false}}",
               "type": "text"
             }
           ],
@@ -1296,6 +1296,7 @@ expression: transcript
               "elapsed_ms": "[elapsed_ms]",
               "repo": "[tmp]/store",
               "resolved": {
+                "[landed]": "[landed]",
                 "main": "[landed]"
               }
             },
@@ -1340,7 +1341,7 @@ expression: transcript
         "result": {
           "content": [
             {
-              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"ws_diff\",\"result\":{\"files\":[{\"binary\":false,\"deletions\":1,\"hunks\":[{\"lines\":[{\"op\":\"remove\",\"text\":\"pub fn g() {}\\n\"},{\"op\":\"add\",\"text\":\"pub fn mine() {}\\n\"}],\"new_lines\":1,\"new_start\":1,\"old_lines\":1,\"old_start\":1}],\"insertions\":1,\"new_blob\":\"[id8]\",\"new_kind\":\"file\",\"old_blob\":\"[id6]\",\"old_kind\":\"file\",\"path\":\"src/lib.rs\",\"status\":\"modified\"}],\"from\":\"[landed]\",\"to\":\"ws:ws1\",\"truncated\":false}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[landed]\":\"[landed]\"}},\"ok\":true,\"op\":\"ws_diff\",\"result\":{\"files\":[{\"binary\":false,\"deletions\":1,\"hunks\":[{\"lines\":[{\"op\":\"remove\",\"text\":\"pub fn g() {}\\n\"},{\"op\":\"add\",\"text\":\"pub fn mine() {}\\n\"}],\"new_lines\":1,\"new_start\":1,\"old_lines\":1,\"old_start\":1}],\"insertions\":1,\"new_blob\":\"[id8]\",\"new_kind\":\"file\",\"old_blob\":\"[id6]\",\"old_kind\":\"file\",\"path\":\"src/lib.rs\",\"status\":\"modified\"}],\"from\":\"[landed]\",\"to\":\"ws:ws1\",\"truncated\":false}}",
               "type": "text"
             }
           ],
@@ -1351,7 +1352,9 @@ expression: transcript
               "auth": "trust",
               "elapsed_ms": "[elapsed_ms]",
               "repo": "[tmp]/store",
-              "resolved": {}
+              "resolved": {
+                "[landed]": "[landed]"
+              }
             },
             "ok": true,
             "op": "ws_diff",
@@ -1735,7 +1738,7 @@ expression: transcript
         "result": {
           "content": [
             {
-              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[id10]\":\"[id10]\",\"main\":\"[id10]\"}},\"ok\":true,\"op\":\"ws_resolve\",\"result\":{\"remaining\":[],\"resolved\":[\"src/lib.rs\"],\"status_after\":{\"base\":\"[landed]\",\"behind_by\":1,\"changes\":[{\"kind\":\"modified\",\"path\":\"src/lib.rs\",\"size\":17}],\"head\":\"[id9]\",\"main\":\"[id10]\",\"name\":\"ws1\",\"rebasing\":{\"conflicts\":[],\"onto\":\"[id10]\"},\"state\":\"rebasing\",\"truncated\":false}}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[id10]\":\"[id10]\",\"[id9]\":\"[id9]\",\"main\":\"[id10]\"}},\"ok\":true,\"op\":\"ws_resolve\",\"result\":{\"remaining\":[],\"resolved\":[\"src/lib.rs\"],\"status_after\":{\"base\":\"[landed]\",\"behind_by\":1,\"changes\":[{\"kind\":\"modified\",\"path\":\"src/lib.rs\",\"size\":17}],\"head\":\"[id9]\",\"main\":\"[id10]\",\"name\":\"ws1\",\"rebasing\":{\"conflicts\":[],\"onto\":\"[id10]\"},\"state\":\"rebasing\",\"truncated\":false}}}",
               "type": "text"
             }
           ],
@@ -1748,6 +1751,7 @@ expression: transcript
               "repo": "[tmp]/store",
               "resolved": {
                 "[id10]": "[id10]",
+                "[id9]": "[id9]",
                 "main": "[id10]"
               }
             },
@@ -1975,7 +1979,7 @@ expression: transcript
         "result": {
           "content": [
             {
-              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"main\":\"[id14]\"}},\"ok\":true,\"op\":\"ws_info\",\"result\":{\"base\":\"[id14]\",\"created\":false,\"head\":\"[id14]\",\"name\":\"ws1\",\"path\":\"[tmp]/ws1\",\"prefixes\":[\"docs.md\",\"src\"],\"status_after\":{\"base\":\"[id14]\",\"behind_by\":0,\"changes\":[],\"head\":\"[id14]\",\"main\":\"[id14]\",\"name\":\"ws1\",\"state\":\"clean\",\"truncated\":false}}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[id14]\":\"[id14]\",\"main\":\"[id14]\"}},\"ok\":true,\"op\":\"ws_info\",\"result\":{\"base\":\"[id14]\",\"created\":false,\"head\":\"[id14]\",\"name\":\"ws1\",\"path\":\"[tmp]/ws1\",\"prefixes\":[\"docs.md\",\"src\"],\"status_after\":{\"base\":\"[id14]\",\"behind_by\":0,\"changes\":[],\"head\":\"[id14]\",\"main\":\"[id14]\",\"name\":\"ws1\",\"state\":\"clean\",\"truncated\":false}}}",
               "type": "text"
             }
           ],
@@ -1987,6 +1991,7 @@ expression: transcript
               "elapsed_ms": "[elapsed_ms]",
               "repo": "[tmp]/store",
               "resolved": {
+                "[id14]": "[id14]",
                 "main": "[id14]"
               }
             },

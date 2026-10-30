@@ -88,8 +88,9 @@ pub(crate) struct Scanned {
     pub(crate) index: Index,
     /// Whether `index` differs from the one read (rebuilt or refreshed).
     pub(crate) refreshed: bool,
-    /// The topmost entries off a sparse workspace's prefixes that no ignore file names, sorted:
-    /// edits a commit of it refuses.
+    /// The topmost entries off a sparse workspace's prefixes that no ignore file names, and
+    /// those its tree holds there that are on disk or are ignore files the walk lacks
+    /// ([`materialize::tree_outside`]), sorted: edits a commit of it refuses.
     pub(crate) outside: Vec<String>,
     /// The temp file the next index is written through; its mtime is `index.written_ns`. None
     /// where `.swarmws/` takes no file: the index is not written then.
@@ -177,10 +178,10 @@ fn configured(root: &Utf8Path, prefixes: &[String], strays: Option<Strays>) -> W
     builder
 }
 
-/// The topmost entries off the prefixes of sparse workspace `ws` that no ignore file names,
-/// sorted; none for a workspace of the whole tree. Only the directories above the prefixes are
-/// read: what `ws land` refuses before anything else.
-pub(crate) fn outside(ws: &Workspace) -> Result<Vec<String>, OpError> {
+/// The topmost entries off the prefixes of sparse workspace `ws` that no ignore file names, and
+/// those of [`materialize::tree_outside`], sorted; none for a workspace of the whole tree. Only
+/// the directories above the prefixes are read: what `ws land` refuses before anything else.
+pub(crate) fn outside(ctx: &Ctx<'_>, ws: &Workspace) -> Result<Vec<String>, OpError> {
     // 1. Nothing is off the prefixes of the whole tree.
     if ws.file.all {
         return Ok(Vec::new());
@@ -215,8 +216,9 @@ pub(crate) fn outside(ws: &Workspace) -> Result<Vec<String>, OpError> {
         });
     walk_failed(failed)?;
 
-    // 3. In path order.
-    Ok(sorted(&strays))
+    // 3. With what the tree holds there, in path order.
+    let tree = materialize::tree_outside(ctx.store, ctx.host.as_ref(), ws)?;
+    Ok(joined(sorted(&strays), tree))
 }
 
 /// Scans workspace `ws` as `want` says: its changes against its head, and its index refreshed.
@@ -278,9 +280,12 @@ pub(crate) fn scan(ctx: &Ctx<'_>, ws: &Workspace, want: &Want) -> Result<Scanned
         smudge(row, stale_ns);
     }
 
-    // 6. The untracked additions under the prefixes; what lies off them, noted.
+    // 6. The untracked additions under the prefixes; what lies off them, noted, with the tree
+    //    paths off them a walk does not see.
     let tracked: HashSet<&str> = index.rows.iter().map(|row| row.path.as_str()).collect();
-    let (added, outside) = untracked(ctx.host.as_ref(), ws, &tracked)?;
+    let (added, walked) = untracked(ctx.host.as_ref(), ws, &tracked)?;
+    let tree = materialize::tree_outside(ctx.store, ctx.host.as_ref(), ws)?;
+    let outside = joined(walked, tree);
     for (path, meta) in added {
         if !wanted(&path) {
             continue;
@@ -585,6 +590,14 @@ fn sorted(strays: &Strays) -> Vec<String> {
     let mut paths = strays.lock().expect("no walker panicked").clone();
     paths.sort();
     paths
+}
+
+/// `walked` and `tree` as one list, sorted, without repeats.
+fn joined(mut walked: Vec<String>, tree: Vec<String>) -> Vec<String> {
+    walked.extend(tree);
+    walked.sort();
+    walked.dedup();
+    walked
 }
 
 /// `path` below `root` as a repository path (`/`-separated); none for `root` itself or a path

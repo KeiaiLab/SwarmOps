@@ -20,6 +20,9 @@ use swarmops_ws::{RealFs, lock};
 
 use crate::fixture::{BARE, Fixture, Put, Watched, changes, file, tree_of, write};
 
+/// The store calls an outside refusal makes: the workspace's open and the reads of its tree.
+const OPEN_AND_READ: [&str; 2] = ["repo_info", "read_tree"];
+
 /// A store that forwards every call to `inner`, and can run a hook before the first `land` (a
 /// second process landing first) or fail right after a `land` or a `rebase` the store recorded,
 /// as a process killed there would.
@@ -589,7 +592,7 @@ fn a_sparse_land_keeps_every_outside_path() {
 
 /// `ws land` of a sparse workspace with an edit outside its prefixes is
 /// `E_WS_OUTSIDE_PREFIXES` before anything else: no edit committed, nothing rebased or landed,
-/// no store call but the workspace's open.
+/// no store call but the workspace's open and the reads of its tree.
 #[test]
 fn ws_land_refuses_an_outside_edit() {
     // 1. A workspace of `src` with an edit inside and a stray file outside.
@@ -612,9 +615,13 @@ fn ws_land_refuses_an_outside_edit() {
     assert_eq!(refused.code, "E_WS_OUTSIDE_PREFIXES", "{refused:?}");
     assert_eq!(refused.details["paths"], serde_json::json!(["docs"]));
 
-    // 3. Nothing changed: the store only opened the workspace; its state and files as they were.
+    // 3. Nothing changed: the store only opened the workspace and read its tree; its state and
+    //    files as they were.
     let calls = watched.calls();
-    assert!(calls.iter().all(|call| *call == "repo_info"), "{calls:?}");
+    assert!(
+        calls.iter().all(|call| OPEN_AND_READ.contains(call)),
+        "{calls:?}"
+    );
     assert_eq!(state::read(&RealFs::new(), &dir).unwrap(), before);
     assert_eq!(main_of(&f), base);
     assert_eq!(
@@ -635,7 +642,7 @@ fn unconfigured_check(name: &str) -> WsLandReq {
 
 /// The outside refusal comes first: before a checked land resolves its command and before the
 /// lock, so a land with `--check`, no command and a stray outside the prefixes is
-/// `E_WS_OUTSIDE_PREFIXES`, with no store call but the workspace's open.
+/// `E_WS_OUTSIDE_PREFIXES`, with no store call but the workspace's open and the reads of its tree.
 #[test]
 fn an_outside_edit_is_refused_before_the_check() {
     // 1. A workspace of `src` with a stray file outside.
@@ -651,9 +658,12 @@ fn an_outside_edit_is_refused_before_the_check() {
     assert_eq!(refused.code, "E_WS_OUTSIDE_PREFIXES", "{refused:?}");
     assert_eq!(refused.details["paths"], serde_json::json!(["docs"]));
 
-    // 3. The store only opened the workspace.
+    // 3. The store only opened the workspace and read its tree.
     let calls = watched.calls();
-    assert!(calls.iter().all(|call| *call == "repo_info"), "{calls:?}");
+    assert!(
+        calls.iter().all(|call| OPEN_AND_READ.contains(call)),
+        "{calls:?}"
+    );
 }
 
 /// The mode bits of a directory made unreadable, given back when dropped.
