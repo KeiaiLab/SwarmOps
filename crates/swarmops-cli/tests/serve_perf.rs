@@ -265,7 +265,7 @@ fn print_ratio(what: &str, serve: Duration, git: Duration) {
 /// A clone of the same history from `swarmops serve` and from git's `upload-pack`, median of
 /// [`ROUNDS`] each after a first clone (printed apart: serve's first refreshes `serve.git`).
 #[test]
-#[ignore = "slow, ~24 min: imports 12,000 commits, serve.git's first refresh, run by `just perf`"]
+#[ignore = "slow, ~27.5 min: imports 12,000 commits, serve.git's first refresh, run by `just perf`"]
 fn clone_against_git() {
     let bench = Bench::new();
     let (serve, git) = (bench.serve(), bench.git());
@@ -290,7 +290,7 @@ fn clone_against_git() {
 /// A fetch that finds nothing new, from `swarmops serve` and from git's `upload-pack`, median of
 /// [`ROUNDS`] each.
 #[test]
-#[ignore = "slow, ~23 min: imports 12,000 commits, serve.git's first refresh, run by `just perf`"]
+#[ignore = "slow, ~27.4 min: imports 12,000 commits, serve.git's first refresh, run by `just perf`"]
 fn noop_fetch_against_git() {
     let bench = Bench::new();
     let mut medians = Vec::new();
@@ -313,7 +313,7 @@ fn noop_fetch_against_git() {
 /// One commit pushed to `refs/land/main` on [`LONG`] commits, timed by the client, median of
 /// [`ROUNDS`]; each lands, and the client takes the landed commit before the next.
 #[test]
-#[ignore = "slow, ~23 min: imports 12,000 commits, serve.git's first refresh, run by `just perf`"]
+#[ignore = "slow, ~26.7 min: imports 12,000 commits, serve.git's first refresh, run by `just perf`"]
 fn land_push_on_12000() {
     let bench = Bench::new();
     let side = bench.serve();
