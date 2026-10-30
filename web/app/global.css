@@ -187,3 +187,96 @@ a[aria-current]:not([aria-current='false']) {
   font-weight: 600;
   box-shadow: inset 2px 0 0 var(--ring);
 }
+
+/* Prose: the readable-site design board's reading type over Fumadocs' prose plugin. Body 17 / 28
+   in the text colour, two weights (400 and 600). The table of contents uses .prose-sm and keeps
+   its own type. */
+.prose:not(.prose-sm) {
+  --tw-prose-body: var(--text);
+  --tw-prose-headings: var(--foreground);
+  --tw-prose-bold: var(--foreground);
+  --tw-prose-code: var(--foreground);
+  font-size: 17px;
+  line-height: 28px;
+}
+
+/* About 70 characters a line for running text; tables and code keep the whole column. */
+.prose:not(.prose-sm) :is(p, ul, ol, blockquote, h2, h3, h4):not(.not-prose *) {
+  max-width: 60ch;
+}
+
+.prose:not(.prose-sm) :is(strong, dt, th):not(.not-prose *) {
+  font-weight: 600;
+}
+
+/* Serif title and sections, sans subsections: each level differs in face, size or weight. */
+.prose:not(.prose-sm) h1:not(.not-prose *) {
+  font: 400 42px / 50px var(--font-serif);
+  letter-spacing: -0.01em;
+  color: var(--foreground);
+}
+
+.prose:not(.prose-sm) h2:not(.not-prose *) {
+  font: 400 30px / 38px var(--font-serif);
+  letter-spacing: -0.005em;
+  color: var(--foreground);
+}
+
+.prose:not(.prose-sm) h3:not(.not-prose *) {
+  font: 600 19px / 28px var(--font-sans);
+  color: var(--foreground);
+}
+
+@media (max-width: 640px) {
+  .prose:not(.prose-sm) h1:not(.not-prose *) {
+    font-size: 32px;
+    line-height: 40px;
+  }
+
+  .prose:not(.prose-sm) h2:not(.not-prose *) {
+    font-size: 26px;
+    line-height: 34px;
+  }
+}
+
+/* Links in running text (a component's link has a class of its own): violet, underlined at rest
+   because violet against body text is under 3:1, a 2 px underline on hover instead of a fade. */
+.prose:not(.prose-sm) a:not([class]) {
+  color: var(--primary);
+  font-weight: 400;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-decoration-color: color-mix(in srgb, var(--primary) 55%, transparent);
+  text-underline-offset: 0.22em;
+  transition: none;
+}
+
+.prose:not(.prose-sm) a:not([class]):hover {
+  opacity: 1;
+  text-decoration-thickness: 2px;
+  text-decoration-color: var(--primary);
+}
+
+/* Inline code: 2 px under its text, on paper3, and free to break inside a long path. */
+.prose:not(.prose-sm) :not(pre) > code:not(.not-prose *) {
+  padding: 0.1em 0.32em;
+  border: 0;
+  border-radius: 4px;
+  background: var(--muted);
+  color: var(--foreground);
+  font-size: calc(1em - 2px);
+  overflow-wrap: anywhere;
+}
+
+.prose:not(.prose-sm) a code {
+  color: inherit;
+}
+
+/* Product pages: a list item's bold opening sentence (marked lead-in at build time) as a heading
+   of its own line. */
+.prose:not(.prose-sm) .lead-in {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 19px;
+  line-height: 28px;
+}
