@@ -57,6 +57,9 @@ on `PATH`.
 From v0.8.0 on, each release carries one `.deb` and one `.rpm` per architecture, made from that
 architecture's release archive: its `swarmops` and `so`, byte for byte, in `/usr/bin`, and its
 `LICENSE`, `THIRD-PARTY-LICENSES`, `README.md` and `CHANGELOG.md` in `/usr/share/doc/swarmops`.
+The `.deb` adds `/usr/share/doc/swarmops/copyright`, both license files in Debian's
+machine-readable copyright format: an image that leaves out `/usr/share/doc` but keeps each
+package's `copyright`, as `debian:12-slim` does, still holds the license texts.
 
 | Host | Package |
 | --- | --- |

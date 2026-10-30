@@ -44,10 +44,12 @@ GitHub's hosted runners.
    `swarmops-X.Y.Z-1.<arch>.rpm` (`amd64` and `x86_64`, `arm64` and `aarch64`) from the target's
    archive alone, checked against its SHA-256 first: the archive's binaries, byte for byte, in
    `/usr/bin`, and its `LICENSE`, `THIRD-PARTY-LICENSES`, `README.md` and `CHANGELOG.md` in
-   `/usr/share/doc/swarmops`; entries sorted, owned by root, dated at the tagged commit, with fixed
-   modes, so that the same archive gives the same packages, byte for byte. Their dependencies are
-   the binaries' own, read from their ELF dynamic sections: glibc at the newest version they need
-   that is not weak (`libc6 (>= 2.34)`), and libgcc. Then each package is installed in a container
+   `/usr/share/doc/swarmops`, where the `.deb` adds `copyright`, both license files in Debian's
+   machine-readable copyright format, which images without `/usr/share/doc` keep; entries sorted,
+   owned by root, dated at the tagged commit, with fixed modes, so that the same archive gives the
+   same packages, byte for byte. Their dependencies are the binaries' own, read from their ELF
+   dynamic sections: glibc at the newest version they need that is not weak (`libc6 (>= 2.34)`),
+   and libgcc. Then each package is installed in a container
    pinned by digest, the `.deb` with `dpkg` in Debian 12 and the `.rpm` with `rpm` in AlmaLinux 9,
    whose glibc 2.34 is the oldest the binaries run on: `rpm` checks every digest of the `.rpm`,
    both installed binaries must print the tag's version, `dpkg --verify` and `rpm --verify` must
@@ -55,8 +57,8 @@ GitHub's hosted runners.
    binary, and removing the package must remove its files. The aarch64 packages are installed for
    aarch64, in Debian with that architecture's C library (multiarch) and into an AlmaLinux root of
    that architecture, against whose glibc `rpm` checks the dependencies, and run under QEMU's
-   user-mode emulator; these two containers download from Debian's and AlmaLinux's mirrors. The job runs on the runner, which starts the containers;
-   they mount the packages read-only.
+   user-mode emulator; these two containers download from Debian's and AlmaLinux's mirrors. The
+   job runs on the runner, which starts the containers; they mount the packages read-only.
 5. **Publishes** (job `publish the release`, the only one with a write permission,
    `contents: write`, and only for a pushed tag): checks each archive and package against the
    SHA-256 its job wrote, writes `SHA256SUMS`, and creates the release `vX.Y.Z`, titled

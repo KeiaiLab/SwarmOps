@@ -10,13 +10,13 @@
 `build` reads `swarmops-<version>-<target>.tar.gz`, as the release workflow packs it, and writes
 `swarmops_<version>_<arch>.deb` and `swarmops-<version>-1.<arch>.rpm` into the out directory from
 the archive's files alone: `swarmops` and `so` to /usr/bin, LICENSE, THIRD-PARTY-LICENSES,
-README.md and CHANGELOG.md to /usr/share/doc/swarmops. The binaries are the archive's, byte for
-byte. The same archive gives the same packages, byte for byte: entries sorted, owned by root,
-dated at the archive's own date (the tagged commit's), with fixed modes. The dependencies are the
-binaries' own: each shared library their ELF dynamic section needs, and for glibc the newest
-version they need that is not weak. A library the script does not know, a binary of another
-machine, an entry the archive should not hold or a version the formats cannot carry fails the run
-before anything is written.
+README.md and CHANGELOG.md to /usr/share/doc/swarmops, and in the .deb a copyright file made of
+LICENSE and THIRD-PARTY-LICENSES. The binaries are the archive's, byte for byte. The same archive
+gives the same packages, byte for byte: entries sorted, owned by root, dated at the archive's own
+date (the tagged commit's), with fixed modes. The dependencies are the binaries' own: each shared
+library their ELF dynamic section needs, and for glibc the newest version they need that is not
+weak. A library the script does not know, a binary of another machine, an entry the archive
+should not hold or a version the formats cannot carry fails the run before anything is written.
 
     archive                              .deb (dpkg)                .rpm (rpm 4)
     swarmops-X-<target>/so        -->    ar: debian-binary,         lead, signature header,
@@ -59,9 +59,18 @@ DOCS = ("CHANGELOG.md", "LICENSE", "README.md", "THIRD-PARTY-LICENSES")
 LICENSES = ("LICENSE", "THIRD-PARTY-LICENSES")
 BIN_DIR = "/usr/bin"
 DOC_DIR = f"/usr/share/doc/{PACKAGE}"
+# The .deb's copyright file, in Debian's machine-readable format: an image that leaves out
+# /usr/share/doc but keeps every */copyright (debian:12-slim) keeps the license texts.
+DEB_COPYRIGHT = f"{DOC_DIR}/copyright"
+COPYRIGHT_FORMAT = "https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/"
+COPYRIGHT_COMMENT = (
+    "swarmops and so are built from SwarmOps' own crates, under the license below, and from",
+    "the third-party crates that THIRD-PARTY-LICENSES lists, which follows in full.",
+)
 
 MAINTAINER = "SwarmOps Maintainers <maintainers@swarmops.cc>"
 HOMEPAGE = "https://swarmops.cc"
+SOURCE = "https://github.com/KeiaiLab/SwarmOps"
 SUMMARY = "Source control for a swarm of coding agents"
 DESCRIPTION = (
     "SwarmOps is source control for a swarm of coding agents: many agent processes on one host "
@@ -425,6 +434,39 @@ def wrap(text: str, width: int = 78) -> list[str]:
     return lines + [line]
 
 
+def folded(text: str) -> list[str]:
+    """`text` as a field's continuation lines: each indented by one space, an empty one ` .`."""
+    return [f" {line.rstrip()}" if line.strip() else " ." for line in text.rstrip().splitlines()]
+
+
+def deb_copyright(release: Release) -> bytes:
+    """The copyright file: LICENSE as every file's license, THIRD-PARTY-LICENSES as a comment."""
+    texts = {f.path: f.data for f in release.files}
+    try:
+        license_text = texts[f"{DOC_DIR}/LICENSE"].decode()
+        notices = texts[f"{DOC_DIR}/THIRD-PARTY-LICENSES"].decode()
+    except UnicodeDecodeError as error:
+        raise Failure(f"LICENSE or THIRD-PARTY-LICENSES is not UTF-8: {error}") from error
+    holders = [line.strip() for line in license_text.splitlines() if line.startswith("Copyright")]
+    if not holders:
+        raise Failure("LICENSE has no Copyright line for the .deb's copyright file")
+
+    # 1. The header: the upstream, then the third-party notices as its comment.
+    lines = [
+        f"Format: {COPYRIGHT_FORMAT}",
+        f"Upstream-Name: {PACKAGE}",
+        f"Upstream-Contact: {MAINTAINER}",
+        f"Source: {SOURCE}",
+        f"Comment: {COPYRIGHT_COMMENT[0]}",
+    ]
+    lines += [f" {line}" for line in COPYRIGHT_COMMENT[1:]] + [" ."] + folded(notices)
+
+    # 2. Every file: SwarmOps' copyright holders and license, its text in full.
+    lines += ["", "Files: *", f"Copyright: {holders[0]}"] + [f" {h}" for h in holders[1:]]
+    lines += [f"License: {OWN_LICENSE}"] + folded(license_text)
+    return ("\n".join(lines) + "\n").encode()
+
+
 def deb_depends(release: Release) -> str:
     """Depends: each library's package, libc6 at the newest glibc the binaries need."""
     needed, versions = dependencies(release)
@@ -435,20 +477,21 @@ def deb_depends(release: Release) -> str:
 
 def build_deb(release: Release) -> bytes:
     """The .deb of a release archive."""
-    paths = [f.path for f in release.files]
-    directories = parents(paths)
+    files = release.files + (File(DEB_COPYRIGHT, MODE_DOC, deb_copyright(release)),)
+    files = tuple(sorted(files, key=lambda f: f.path))
+    directories = parents([f.path for f in files])
 
     # 1. data.tar.xz: ./ and every directory, then the files, sorted by path.
     entries: list[tuple[str, int, bytes | None]] = [("./", MODE_DIR, None)]
     entries += [(f".{d}/", MODE_DIR, None) for d in directories]
-    entries += [(f".{f.path}", f.mode, f.data) for f in release.files]
+    entries += [(f".{f.path}", f.mode, f.data) for f in files]
     entries.sort(key=lambda e: e[0])
     data = tar_xz(entries, release.mtime)
 
     # 2. control.tar.xz: control and md5sums. Installed-Size is in KiB, a directory counting 1.
-    size = sum(math.ceil(len(f.data) / 1024) for f in release.files) + len(directories)
+    size = sum(math.ceil(len(f.data) / 1024) for f in files) + len(directories)
     control = deb_control(release, deb_depends(release), size)
-    md5sums = "".join(f"{hashlib.md5(f.data).hexdigest()}  {f.path[1:]}\n" for f in release.files)
+    md5sums = "".join(f"{hashlib.md5(f.data).hexdigest()}  {f.path[1:]}\n" for f in files)
     control_tar = tar_xz(
         [("./", MODE_DIR, None), ("./control", MODE_DOC, control),
          ("./md5sums", MODE_DOC, md5sums.encode())],
@@ -783,9 +826,10 @@ def expect_versions(box: Container, emulator: list[str], root: str, version: str
             raise Failure(f"{name} --version printed '{printed}', not '{PACKAGE} {version}'")
 
 
-def expect_listed(listing: str, tool: str) -> None:
-    """The package manager lists every file the package installs."""
+def expect_listed(listing: str, tool: str, extra: tuple[str, ...] = ()) -> None:
+    """The package manager lists every file the package installs: both formats' and `extra`."""
     installed = {f"{BIN_DIR}/{n}" for n in BINARIES} | {f"{DOC_DIR}/{n}" for n in DOCS}
+    installed |= set(extra)
     missing = sorted(installed - set(listing.splitlines()))
     if missing:
         raise Failure(f"{tool} does not list {', '.join(missing)} as installed")
@@ -825,7 +869,7 @@ def smoke_deb(deb: Path, version: str, target: Target, emulator: Path) -> None:
         if status != recorded:
             raise Failure(f"dpkg records '{status}', not '{recorded}'")
         expect_versions(box, run_with, "", version)
-        expect_listed(box.run("dpkg", "--listfiles", PACKAGE), "dpkg")
+        expect_listed(box.run("dpkg", "--listfiles", PACKAGE), "dpkg", (DEB_COPYRIGHT,))
         if box.run("dpkg", "--verify", PACKAGE).strip():
             raise Failure("dpkg --verify reports a file that differs from the package")
 

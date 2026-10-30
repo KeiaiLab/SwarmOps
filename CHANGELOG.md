@@ -21,11 +21,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
 - `.deb` and `.rpm` packages for x86_64 and aarch64 on every release, with their lines in
   `SHA256SUMS`: `swarmops_<version>_<arch>.deb` and `swarmops-<version>-1.<arch>.rpm`, made by
   `scripts/packages.py` from the release archive's binaries, byte for byte, into `/usr/bin`, with
-  the license, the third-party notices, README and changelog in `/usr/share/doc/swarmops`;
-  reproducible, and depending on glibc 2.34 or newer and libgcc. The release workflow installs,
-  runs, verifies and removes each one with `dpkg` in Debian 12 and `rpm` in AlmaLinux 9 (the
-  aarch64 ones for aarch64, under QEMU) before it publishes anything, and a run started by hand
-  rehearses a branch without publishing
+  the license, the third-party notices, README and changelog in `/usr/share/doc/swarmops`, and in
+  the `.deb` both licenses as a machine-readable Debian `copyright` file there, which slim images
+  keep; reproducible, and depending on glibc 2.34 or newer and libgcc. The release workflow
+  installs, runs, verifies and removes each one with `dpkg` in Debian 12 and `rpm` in AlmaLinux 9
+  (the aarch64 ones for aarch64, under QEMU) before it publishes anything, and a run started by
+  hand rehearses a branch without publishing
   ([Install from a .deb or .rpm package](docs/operate/install-and-upgrade.md#install-from-a-deb-or-rpm-package)).
 
 ### Changed

@@ -51,6 +51,16 @@ c 3.0.0 (x86_64-unknown-linux-gnu only): Zlib; used under Zlib [3]
 d 4.0.0: BSD-3-Clause; used under BSD-3-Clause [4]
 """
 LICENSE_OF = {X86: "BSD-3-Clause AND MIT AND Zlib", ARM: "BSD-3-Clause AND MIT"}
+# LICENSE in the MIT License's layout: its copyright line, blank lines between paragraphs.
+LICENSE = """MIT License
+
+Copyright (c) 2026 The fake release
+
+Permission is granted.
+"""
+# The machine-readable copyright file of the .deb (Debian's copyright format 1.0).
+COPYRIGHT = "usr/share/doc/swarmops/copyright"
+COPYRIGHT_FORMAT = "https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/"
 
 # The libraries and version needs of the binaries a case packs, unless it gives others.
 GLIBC_NEEDS = [("GLIBC_2.2.5", 0), ("GLIBC_2.34", 0), ("GLIBC_2.39", WEAK)]
@@ -116,6 +126,7 @@ def files(target: str) -> dict[str, bytes]:
     contents = {name: binary(target, name) for name in BINARIES}
     contents |= {name: f"{name} of the fake release\n".encode() for name in DOCS}
     contents["THIRD-PARTY-LICENSES"] = NOTICES.encode()
+    contents["LICENSE"] = LICENSE.encode()
     return contents
 
 
@@ -297,6 +308,25 @@ def value(header: dict, tag: int):
     return header[tag][1]
 
 
+def read_deb822(text: str) -> list[dict[str, str]]:
+    """Paragraphs of `Field: value` lines, a continuation line starting with a space and ` .`
+    standing for an empty line; each value unfolded into lines."""
+    paragraphs = []
+    for block in text.split("\n\n"):
+        fields: dict[str, str] = {}
+        name = ""
+        for line in block.splitlines():
+            if line.startswith(" "):
+                assert name, f"continuation line first: {line!r}"
+                fields[name] += "\n" + ("" if line == " ." else line[1:])
+                continue
+            name, _, first = line.partition(": ")
+            assert name and name not in fields, f"bad field line {line!r}"
+            fields[name] = first
+        paragraphs.append(fields)
+    return paragraphs
+
+
 # The cases.
 
 
@@ -315,6 +345,9 @@ def deb_layout(scratch: Path) -> None:
     assert list(control) == [".", "./control", "./md5sums"], list(control)
     fields = dict(line.split(": ", 1) for line in control["./control"].decode().splitlines()
                   if not line.startswith(" "))
+    data = read_tar_xz(members[2][2])
+    copyright = next(d for i, d in data if i.name == f"./{COPYRIGHT}")
+    contents["copyright"] = copyright
     size = sum(-(-len(d) // 1024) for d in contents.values()) + 5
     want = {"Package": "swarmops", "Version": VERSION, "Architecture": "amd64",
             "Maintainer": "SwarmOps Maintainers <maintainers@swarmops.cc>",
@@ -322,12 +355,12 @@ def deb_layout(scratch: Path) -> None:
             "Section": "vcs", "Priority": "optional", "Homepage": "https://swarmops.cc"}
     assert {k: fields.get(k) for k in want} == want, fields
     paths = [f"usr/bin/{n}" for n in BINARIES] + [f"usr/share/doc/swarmops/{n}" for n in DOCS]
+    paths.append(COPYRIGHT)
     sums = "".join(f"{hashlib.md5(contents[p.rsplit('/', 1)[1]]).hexdigest()}  {p}\n"
                    for p in sorted(paths))
     assert control["./md5sums"].decode() == sums, control["./md5sums"]
 
     # 2. data: every directory and file, sorted, owned by root, dated at the archive.
-    data = read_tar_xz(members[2][2])
     names = [info.name for info, _ in data]
     dirs = [".", "./usr", "./usr/bin", "./usr/share", "./usr/share/doc", "./usr/share/doc/swarmops"]
     assert names == sorted(dirs + [f"./{p}" for p in paths]), names
@@ -337,6 +370,15 @@ def deb_layout(scratch: Path) -> None:
         assert (info.uid, info.gid, info.uname, info.gname) == (0, 0, "root", "root"), info.name
         assert (info.mode, info.mtime) == (mode, MTIME), (info.name, oct(info.mode), info.mtime)
         assert info.isdir() or body == contents[base], f"{info.name}: not the archive's bytes"
+
+    # 3. The copyright file: LICENSE as SwarmOps' license, THIRD-PARTY-LICENSES in full.
+    header, files_ = read_deb822(copyright.decode())
+    assert (header["Format"], header["Upstream-Name"]) == (COPYRIGHT_FORMAT, "swarmops"), header
+    assert header["Source"] == "https://github.com/KeiaiLab/SwarmOps", header
+    assert NOTICES.rstrip("\n") in header["Comment"], header["Comment"]
+    want = {"Files": "*", "Copyright": "Copyright (c) 2026 The fake release",
+            "License": "MIT\n" + LICENSE.rstrip("\n")}
+    assert files_ == want, files_
 
 
 def rpm_layout(scratch: Path) -> None:
@@ -477,6 +519,8 @@ REFUSALS = (
      "no string table (DT_STRTAB)"),
     ("a truncated ELF file", {"change": put("so", binary(X86, "so")[:100])},
      "not an ELF file this script reads"),
+    ("a LICENSE without a copyright line", {"change": put("LICENSE", b"MIT License\n")},
+     "LICENSE has no Copyright line"),
     ("no crate in THIRD-PARTY-LICENSES", {"change": put("THIRD-PARTY-LICENSES", b"none\n")},
      "lists no crate"),
     ("build metadata", {"version": "9.9.9+build.1"}, "is not X.Y.Z or X.Y.Z-pre"),
@@ -507,6 +551,8 @@ def dpkg_deb(scratch: Path) -> None:
     for name, data in files(X86).items():
         where = "usr/bin" if name in BINARIES else "usr/share/doc/swarmops"
         assert (scratch / "root" / where / name).read_bytes() == data, f"dpkg-deb -x: {name}"
+    copyright = (scratch / "root" / COPYRIGHT).read_text()
+    assert copyright.startswith(f"Format: {COPYRIGHT_FORMAT}\n"), "dpkg-deb -x: copyright"
 
 
 CASES: tuple[tuple[str, Callable[[Path], None]], ...] = (
