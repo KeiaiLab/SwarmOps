@@ -1,75 +1,81 @@
 /* swarmops.cc. Tailwind 4, Fumadocs' shadcn bridge (fumadocs colours read the shadcn variables
-   below, so docs and product pages share one palette), no web fonts. Brand colours come from
-   docs/assets/logo.svg: violet #7c5cff, amber #d97706; the light theme darkens both for contrast,
-   as the retired site/styles.css does. */
+   below, so docs and product pages share one palette), no web fonts. The colours are the
+   readable-site design board's tokens: the logo's violet and amber, darkened in the light theme
+   for contrast. */
 @import 'tailwindcss';
 @import 'fumadocs-ui/css/shadcn.css';
 @import 'fumadocs-ui/css/preset.css';
 
 @custom-variant dark (&:is(.dark *));
 
-/* Light theme. */
+/* Light theme: the readable-site design board's tokens (Tokens board, "Colour, both themes") on
+   the shadcn variables. paper = background, paper2 = card and sidebar, paper3 = muted and hover,
+   ink = foreground, text = prose body, muted = muted-foreground, link = primary, accent (amber,
+   "you are here") = ring, field = input, rule = border. Violet marks what a reader can act on,
+   amber where they are. */
 :root {
-  --radius: 0.75rem;
-  --background: #ffffff;
-  --foreground: #1b1f27;
-  --card: #f7f8fb;
-  --card-foreground: #1b1f27;
-  --popover: #ffffff;
-  --popover-foreground: #1b1f27;
+  --radius: 0.5rem;
+  --background: #fbfbf9;
+  --foreground: #191b20;
+  --text: #2b2e35;
+  --card: #f3f3f0;
+  --card-foreground: #191b20;
+  --popover: #fbfbf9;
+  --popover-foreground: #191b20;
   --primary: #5b3ee6;
   --primary-foreground: #ffffff;
-  --secondary: #f3f4f8;
-  --secondary-foreground: #1b1f27;
-  --muted: #f3f4f8;
-  --muted-foreground: #57606e;
-  --accent: rgba(107, 76, 240, 0.09);
-  --accent-foreground: #3b25b8;
+  --secondary: #f3f3f0;
+  --secondary-foreground: #191b20;
+  --muted: #ebebe6;
+  --muted-foreground: #5c626c;
+  --accent: #ebebe6;
+  --accent-foreground: #191b20;
   --destructive: #b42318;
-  --border: #e1e4ea;
-  --input: #e1e4ea;
+  --border: #e2e2dc;
+  --input: #868b94;
   --ring: #b45309;
   --brand: #5b3ee6;
   --brand-2: #b45309;
-  --sidebar: #f7f8fb;
-  --sidebar-foreground: #1b1f27;
+  --sidebar: #f3f3f0;
+  --sidebar-foreground: #191b20;
   --sidebar-primary: #5b3ee6;
   --sidebar-primary-foreground: #ffffff;
-  --sidebar-accent: rgba(107, 76, 240, 0.09);
-  --sidebar-accent-foreground: #3b25b8;
-  --sidebar-border: #e1e4ea;
+  --sidebar-accent: #ebebe6;
+  --sidebar-accent-foreground: #191b20;
+  --sidebar-border: #e2e2dc;
   --sidebar-ring: #b45309;
 }
 
-/* Dark theme. */
+/* Dark theme: the same tokens, dark values. */
 .dark {
-  --background: #0b0e14;
-  --foreground: #e6edf3;
-  --card: #141a23;
-  --card-foreground: #e6edf3;
-  --popover: #0f141c;
-  --popover-foreground: #e6edf3;
-  --primary: #8b70ff;
-  --primary-foreground: #0b0e14;
-  --secondary: #1a212c;
-  --secondary-foreground: #e6edf3;
-  --muted: #141a23;
-  --muted-foreground: #9aa5b4;
-  --accent: rgba(124, 92, 255, 0.14);
-  --accent-foreground: #c9bdff;
+  --background: #111317;
+  --foreground: #eceef2;
+  --text: #d1d5dc;
+  --card: #181b21;
+  --card-foreground: #eceef2;
+  --popover: #111317;
+  --popover-foreground: #eceef2;
+  --primary: #9783fe;
+  --primary-foreground: #111317;
+  --secondary: #181b21;
+  --secondary-foreground: #eceef2;
+  --muted: #20242c;
+  --muted-foreground: #9da4b0;
+  --accent: #20242c;
+  --accent-foreground: #eceef2;
   --destructive: #f97066;
-  --border: #252d3a;
-  --input: #252d3a;
+  --border: #2a2e36;
+  --input: #646b78;
   --ring: #f5a524;
-  --brand: #8b70ff;
+  --brand: #9783fe;
   --brand-2: #f5a524;
-  --sidebar: #0f141c;
-  --sidebar-foreground: #e6edf3;
-  --sidebar-primary: #8b70ff;
-  --sidebar-primary-foreground: #0b0e14;
-  --sidebar-accent: rgba(124, 92, 255, 0.14);
-  --sidebar-accent-foreground: #c9bdff;
-  --sidebar-border: #252d3a;
+  --sidebar: #181b21;
+  --sidebar-foreground: #eceef2;
+  --sidebar-primary: #9783fe;
+  --sidebar-primary-foreground: #111317;
+  --sidebar-accent: #20242c;
+  --sidebar-accent-foreground: #eceef2;
+  --sidebar-border: #2a2e36;
   --sidebar-ring: #f5a524;
 }
 
@@ -77,6 +83,8 @@
 @theme inline {
   --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Ubuntu Sans', 'Noto Sans', Helvetica, Arial, sans-serif;
   --font-mono: ui-monospace, 'SF Mono', 'JetBrains Mono', 'Cascadia Code', Menlo, Consolas, monospace;
+  /* Titles and sections: system serifs only, macOS and Windows faces first, Linux fallbacks last. */
+  --font-serif: 'Iowan Old Style', Charter, 'Bitstream Charter', 'Sitka Text', Cambria, Georgia, 'Noto Serif', 'DejaVu Serif', serif;
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -116,4 +124,66 @@ html > body[data-scroll-locked] {
 :focus-visible {
   outline: 2px solid var(--ring);
   outline-offset: 2px;
+}
+
+/* Titles break into even lines, not one long line and a widow. */
+@layer base {
+  h1,
+  h2 {
+    text-wrap: balance;
+  }
+
+  ::placeholder {
+    color: var(--muted-foreground);
+    opacity: 1;
+  }
+}
+
+/* Motion stops when the reader asks: one rule for every animation and transition. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* A skip link to the content, out of view until the first Tab. */
+.skip-link {
+  position: absolute;
+  top: -80px;
+  left: 16px;
+  z-index: 100;
+  min-height: 44px;
+  padding: 10px 16px;
+  border: 2px solid var(--ring);
+  border-radius: 8px;
+  background: var(--background);
+  color: var(--foreground);
+  font-size: 15px;
+  line-height: 24px;
+}
+
+.skip-link:focus {
+  top: 8px;
+}
+
+/* "You are here": ink at 600 with an amber bar, never violet. Inline navigation marks the
+   current link from below; the docs sidebar, from the left. */
+a[aria-current]:not([aria-current='false']) {
+  color: var(--foreground);
+  font-weight: 600;
+  box-shadow: inset 0 -2px 0 var(--ring);
+}
+
+#nd-sidebar a[aria-current]:not([aria-current='false']),
+#nd-sidebar a[data-active='true'] {
+  border-radius: 0 6px 6px 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-weight: 600;
+  box-shadow: inset 2px 0 0 var(--ring);
 }
