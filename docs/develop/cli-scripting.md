@@ -204,10 +204,10 @@ $ swarmops diff f9fac3d60106 main --format stat | jq -r '.result.files[] | "\(.s
 added TODO.md +1 -0
 added docs/notes.md +3 -0
 modified src/lib.rs +1 -1
-$ swarmops op log -n 3 | jq -c '.result.ops[] | {op, kind}'
-{"op":7,"kind":"publish"}
-{"op":6,"kind":"land"}
-{"op":5,"kind":"commit"}
+$ swarmops op log -n 3 | jq -c '.result.ops[] | {op, id, kind}'
+{"op":7,"id":"7:5e0b93a1","kind":"publish"}
+{"op":6,"id":"6:c41d07f8","kind":"land"}
+{"op":5,"id":"5:2a9f6e3d","kind":"commit"}
 $ swarmops cat main:nope.rs | jq -r 'if .ok then .result.content else "\(.error.code) retryable=\(.error.retryable) exit=\(.error.exit)" end'
 E_PATH_NOT_FOUND retryable=false exit=6
 ```
@@ -221,6 +221,7 @@ E_PATH_NOT_FOUND retryable=false exit=6
 | Changed files between two revisions | `swarmops diff FROM TO \| jq -r '.result.files[] \| "\(.status) \(.path)"'` |
 | The new changeset of a commit | `swarmops commit … \| jq -r '.result.changeset'` |
 | Where a land put the target | `swarmops land … \| jq -r '.result.landed'` |
+| The id `op undo` takes, of the newest operation | `swarmops op log -n 1 \| jq -r '.result.ops[0].id'` |
 | Branch on the failure | `jq -r '.error.code // empty'` on the envelope, after a non-zero exit |
 
 A read cut short says so: `cat` gives `truncated` and `next_offset` (read on with `--offset`), and

@@ -906,9 +906,10 @@ truncated: true
 ## Undo an operation
 
 `so op undo ID` moves every ref the operation `ID` moved back to what it named before, in one
-transaction: all of them or none. `ID` is the operation's `id` in `op log`, `<op>:<crc>`: its
-number and the checksum of what it recorded, so an id names one operation and no other. It is a write, so it needs an identity. It never removes a
-changeset: what the ref named stays in the store, readable by id.
+transaction: all of them or none. `ID` is the operation's `id` in `op log`, `<op>:<crc>`: its number
+and the checksum of what it recorded, so an id names one operation and no other. It is a write, so
+it needs an identity. It never removes a changeset: what the ref named stays in the store, readable
+by id.
 
 ### Take back a mistaken ref move
 

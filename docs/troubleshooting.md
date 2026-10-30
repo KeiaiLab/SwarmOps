@@ -53,7 +53,7 @@ retry advice; this is that table. Two codes are in the schema but no operation r
 | `E_PATH_NOT_FOUND` | 6 | no | Nothing is at that path at that revision. | [Arguments and revisions](#e_path_not_found) |
 | `E_IS_DIR` | 1 | no | A file read named a directory. | [Arguments and revisions](#e_is_dir) |
 | `E_REF_NAME_INVALID` | 1 | no | A ref name that is not `main` or `release/<name>`. | [Arguments and revisions](#e_ref_name_invalid) |
-| `E_OP_NOT_FOUND` | 6 | no | No operation by that number. | [Arguments and revisions](#e_op_not_found) |
+| `E_OP_NOT_FOUND` | 6 | no | No operation with that id. | [Arguments and revisions](#e_op_not_found) |
 | `E_EMPTY_COMMIT` | 1 | no | The change list changes nothing. | [Commits](#e_empty_commit) |
 | `E_TYPE_CONFLICT` | 1 | no | A file and a directory at the same path. | [Commits](#e_type_conflict) |
 | `E_TOO_LARGE` | 1 | no | Content past a size limit. | [Commits](#e_too_large) |

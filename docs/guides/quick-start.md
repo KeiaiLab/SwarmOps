@@ -293,8 +293,9 @@ truncated: false
 ```
 
 `main` is back where it was before the resolved land. The undo is operation 7 (`id` `7:d93b0c61`),
-an operation of its own, which another undo takes back (step 9). Changesets are never removed. If another operation has
-moved one of the refs since, an undo refuses with `E_CAS_MISMATCH` and writes nothing.
+an operation of its own, which another undo takes back (step 9). Changesets are never removed. If
+another operation has moved one of the refs since, an undo refuses with `E_CAS_MISMATCH` and writes
+nothing.
 
 ## 9. How do I check the store?
 
