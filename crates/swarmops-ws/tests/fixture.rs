@@ -328,6 +328,9 @@ pub struct Watched<'a> {
     commits: Mutex<Vec<(CommitReq, Option<String>)>>,
     /// `commit` records the changeset, then fails as a process killed right after it would.
     pub crash_after_commit: AtomicBool,
+    /// `commit` refuses with this code, as a store that writes nothing would, without calling
+    /// the store.
+    pub refuse_commit: Option<ErrorCode>,
     /// `log` of `main`'s head answers this many made-up changesets, none of them the store's,
     /// instead of the store's history; `log` of another changeset reads the store's, but for
     /// [`Watched::fake_history_of`]'s.
@@ -349,6 +352,7 @@ impl<'a> Watched<'a> {
             calls: Mutex::new(Vec::new()),
             commits: Mutex::new(Vec::new()),
             crash_after_commit: AtomicBool::new(false),
+            refuse_commit: None,
             fake_history: None,
             fake_history_of: None,
             #[cfg(feature = "test-hooks")]
@@ -437,6 +441,10 @@ impl StoreOps for Watched<'_> {
 
     fn commit(&self, who: &Identity, req: CommitReq) -> Result<CommitResp, OpError> {
         self.saw("commit");
+        if let Some(code) = self.refuse_commit {
+            self.commits.lock().unwrap().push((req, None));
+            return Err(OpError::new(code, "refused by the test store"));
+        }
         let done = self.inner.commit(who, req.clone());
         let made = done.as_ref().ok().map(|done| done.changeset.clone());
         self.commits.lock().unwrap().push((req, made));

@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use camino::{Utf8Path, Utf8PathBuf};
 
 use swarmops_api::{
-    ChangeOp, ContentInput, DiffFormat, DiffReq, ModeInput, ReadTreeReq, StatusAfter, StoreOps,
-    WsCommitReq, WsDiffReq, WsLandReq, WsRebaseReq,
+    ChangeOp, ContentInput, DiffFormat, DiffReq, ErrorCode, ModeInput, ReadTreeReq, StatusAfter,
+    StoreOps, WsCommitReq, WsDiffReq, WsLandReq, WsRebaseReq,
 };
 use swarmops_ws::hostfs::HostMeta;
 use swarmops_ws::state::{self, SWARMWS_DIR, Volume};
@@ -267,6 +267,36 @@ fn a_crash_between_store_commit_and_workspace_update_replays_the_same_changeset(
     assert_eq!(state::read(&RealFs::new(), &dir).unwrap().head, first);
     assert!(!pending_of(&dir).exists());
     assert_eq!(changes(&f.ctx(), "w", true), []);
+}
+
+/// A commit the store refuses outright, having written nothing, takes its pending record with
+/// it: the workspace is as before, and `ws land` is not stopped by a commit cut short.
+#[test]
+fn a_store_refusal_takes_the_pending_record() {
+    for code in [ErrorCode::EmptyCommit, ErrorCode::InvalidArg] {
+        // 1. A workspace of `src` with an edit.
+        let f = Fixture::new();
+        let base = f.commit(None, &[Put::File("src/a.txt", "a\n")]);
+        f.create("w", &base, &["src"]);
+        let dir = f.beside("w");
+        write(&dir, "src/a.txt", "edited\n");
+
+        // 2. The store refuses the commit: the refusal comes back, no record is left.
+        let mut watched = Watched::new(&f.ops);
+        watched.refuse_commit = Some(code);
+        let refused =
+            swarmops_ws::commit(&f.ctx_over(&watched), commit_of("w", "edit")).unwrap_err();
+        assert_eq!(refused.code, code.as_str(), "{refused:?}");
+        assert_eq!(watched.count("commit"), 1, "{code:?}");
+        assert!(!pending_of(&dir).exists(), "{code:?}");
+        assert_eq!(standing(&dir), (base.clone(), vec!["src".to_owned()]));
+
+        // 3. The edit commits and lands as if nothing had happened.
+        swarmops_ws::commit(&f.ctx(), commit_of("w", "edit")).unwrap();
+        let mut land = WsLandReq::new("w".to_owned());
+        land.status_after = StatusAfter::None;
+        swarmops_ws::land(&f.ctx(), land).unwrap();
+    }
 }
 
 /// A file past the 512 MiB an object holds is `E_TOO_LARGE`, naming it, before the store is

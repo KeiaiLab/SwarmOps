@@ -14,7 +14,7 @@
 //!
 //! A crash between the store's commit and `workspace.json` leaves the pending record: the next
 //! commit takes its key, and the store replays the same changeset (a keyed commit takes its
-//! key's time).
+//! key's time). A commit the store refuses outright takes the record with it.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -32,6 +32,7 @@ use crate::index::{Index, Row, UNCONFIRMED};
 use crate::io_error::unknown_variant;
 use crate::materialize;
 use crate::pending::{self, Pending, PendingOp};
+use crate::rebase;
 use crate::scan::{self, Blob, Change, HASH_BYTES_IN_FLIGHT, HostFile, Keep, Want};
 use crate::state::{self, State};
 use crate::workspace::{self, Locate, Workspace};
@@ -190,7 +191,14 @@ fn commit_with(
     let mut req = CommitReq::new(changes, message);
     req.parent = Some(ws.file.head.as_str().into());
     req.idempotency_key = Some(key);
-    let done = ctx.store.commit(&ws.who, req)?;
+    let done = match ctx.store.commit(&ws.who, req) {
+        // A refusal wrote nothing: its record has nothing to replay.
+        Err(e) if refused(&e) => {
+            pending::remove_pending(ctx.fs.as_ref(), &ws.dir)?;
+            return Err(e);
+        }
+        done => done?,
+    };
     let blobs_written = u64::try_from(puts).unwrap_or(u64::MAX) + done.blobs_written;
 
     // 10. The workspace stands on it (WS2); the index learns it; the record goes.
@@ -236,6 +244,12 @@ fn modes_of(modes: BTreeMap<String, ModeInput>) -> Result<BTreeMap<String, FileK
         out.insert(path, kind);
     }
     Ok(out)
+}
+
+/// Whether the store refused a commit outright, nothing written: a rebase's refusals, or a
+/// change list that changes nothing. A keyed commit it made already replays before either.
+fn refused(e: &OpError) -> bool {
+    rebase::refused(e) || e.code == ErrorCode::EmptyCommit.as_str()
 }
 
 /// The `named` paths and those of `modes` outside workspace `ws`'s prefixes; none for a
