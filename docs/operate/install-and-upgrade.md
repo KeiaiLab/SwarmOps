@@ -124,6 +124,25 @@ names into `~/.cargo/bin` (add `--bin swarmops` for the long name alone); it too
 wall time on a 32-thread host. To install another commit, check it out and run the same
 `cargo install`: it replaces both binaries (`Replaced package`).
 
+To have `--version` name the commit the binary was built from, set `SWARMOPS_BUILD_COMMIT` for
+the build:
+
+```sh
+SWARMOPS_BUILD_COMMIT=$(git rev-parse HEAD) cargo install --locked --path crates/swarmops-cli
+swarmops --version
+```
+
+```text
+swarmops 0.7.0+69e435e36a6781b907a1fa1a5bd69caeff4c6db0
+```
+
+The commit follows a `+`, as semver build metadata, so the version itself and its order are
+unchanged; compare it with `git rev-parse origin/stable` to see whether the installed binary is
+current. The value must be 7 to 40 lowercase hex digits (an abbreviation such as
+`git rev-parse --short HEAD` works too); any other value, the empty string included, fails the
+build with a message that names the variable. Changing the variable rebuilds the binary.
+Release archives and packages are built without it and print `swarmops <version>`.
+
 ## Install from a release archive
 
 From v0.1.0 on, each release on the
