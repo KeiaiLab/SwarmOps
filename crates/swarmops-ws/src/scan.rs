@@ -178,12 +178,11 @@ fn configured(root: &Utf8Path, prefixes: &[String], strays: Option<Strays>) -> W
 }
 
 /// The topmost entries off the prefixes of sparse workspace `ws` that no ignore file names,
-/// sorted; none for a workspace of the whole tree (`all`, or no prefix), which is not walked.
-/// Only the directories above the prefixes are read: what `ws land` refuses before anything
-/// else.
+/// sorted; none for a workspace of the whole tree. Only the directories above the prefixes are
+/// read: what `ws land` refuses before anything else.
 pub(crate) fn outside(ws: &Workspace) -> Result<Vec<String>, OpError> {
     // 1. Nothing is off the prefixes of the whole tree.
-    if ws.file.all || ws.file.prefixes.is_empty() {
+    if ws.file.all {
         return Ok(Vec::new());
     }
 

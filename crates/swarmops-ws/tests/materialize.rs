@@ -1,10 +1,10 @@
 //! Materialisation: what an update writes, what it never overwrites, and the volume's rules.
 
-use swarmops_api::{StatusAfter, WsDiscardReq, WsMaterializeReq};
+use swarmops_api::{StatusAfter, WsCommitReq, WsCreateReq, WsDiscardReq, WsMaterializeReq};
 use swarmops_ws::state::{self, SWARMWS_DIR, Volume};
 use swarmops_ws::{RealFs, lock, materialize};
 
-use crate::fixture::{Fixture, Put, exec, file, link, tree_of};
+use crate::fixture::{BARE, Fixture, Put, exec, file, link, tree_of, write};
 
 /// A volume as this host's, which holds all three.
 const LINUX: Volume = Volume::new(false, true, true);
@@ -825,4 +825,63 @@ fn a_non_utf8_path_is_invalid_arg() {
     assert_eq!(relative.code, "E_INVALID_ARG", "{relative:?}");
     let fine = swarmops_ws::workspace::host_path(std::path::Path::new("/tmp/ws")).unwrap();
     assert_eq!(fine, "/tmp/ws");
+}
+
+/// A workspace with neither prefixes nor `all` asked for holds the whole tree, as `ws create`
+/// wrote it, and so does one an older build wrote as `all` false: it reads as `all`, the same
+/// create again is the same workspace, `ws materialize` adds nothing to it, `ws discard` takes
+/// any path, a commit meets no outside edit, and the state it writes back says `all`.
+#[test]
+fn a_bare_workspace_holds_the_whole_tree() {
+    for how in BARE {
+        // 1. A workspace with no prefixes: read as the whole tree.
+        let f = Fixture::new();
+        let base = f.commit(
+            None,
+            &[
+                Put::File("README", "readme\n"),
+                Put::File("docs/d.md", "d\n"),
+                Put::File("src/a.txt", "a\n"),
+            ],
+        );
+        let dir = f.create_bare("w", &base, how);
+        let saved = state::read(&RealFs::new(), &dir).unwrap();
+        assert_eq!((saved.all, saved.prefixes.len()), (true, 0), "{how:?}");
+
+        // 2. The same create again: the same workspace.
+        let mut again = WsCreateReq::new("w".to_owned());
+        again.path = Some(dir.to_string());
+        again.base = base.as_str().into();
+        again.status_after = StatusAfter::None;
+        let again = swarmops_ws::create(&f.ctx(), again).unwrap();
+        assert_eq!((again.created, again.all), (false, true), "{how:?}");
+
+        // 3. `ws materialize src`: nothing added, the prefixes still none.
+        let done = swarmops_ws::materialize(&f.ctx(), expand("w", &["src"])).unwrap();
+        assert_eq!(done.materialized, Vec::<String>::new(), "{how:?}");
+        let saved = state::read(&RealFs::new(), &dir).unwrap();
+        assert_eq!((saved.all, saved.prefixes.len()), (true, 0), "{how:?}");
+
+        // 4. `ws discard README`: restored.
+        write(&dir, "README", "edited\n");
+        let mut discard = WsDiscardReq::new("w".to_owned());
+        discard.paths = vec!["README".to_owned()];
+        discard.status_after = StatusAfter::None;
+        let done = swarmops_ws::discard(&f.ctx(), discard).unwrap();
+        assert_eq!(done.discarded, ["README"], "{how:?}");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("README")).unwrap(),
+            "readme\n"
+        );
+
+        // 5. An edit beside `src` commits, and the state written back says `all`.
+        write(&dir, "docs/d.md", "edited\n");
+        let mut commit = WsCommitReq::new("w".to_owned(), "docs".to_owned());
+        commit.status_after = StatusAfter::None;
+        let done = swarmops_ws::commit(&f.ctx(), commit).unwrap();
+        assert_eq!(done.files_changed, 1, "{how:?}");
+        let wire: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(state::path_in(&dir)).unwrap()).unwrap();
+        assert_eq!(wire["all"], true, "{how:?}");
+    }
 }

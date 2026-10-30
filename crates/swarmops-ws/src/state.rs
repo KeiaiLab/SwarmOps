@@ -42,7 +42,7 @@ pub struct WorkspaceFile {
     pub head: String,
     /// The repository paths whose subtrees are written out; paths outside are absent.
     pub prefixes: Vec<String>,
-    /// The whole tree, instead of `prefixes`.
+    /// The whole tree, instead of `prefixes`; always so when there is no prefix.
     pub all: bool,
     /// The identity that made the workspace, which a mutation without one acts as.
     pub created_by: String,
@@ -152,8 +152,9 @@ pub fn path_in(dir: &Utf8Path) -> Utf8PathBuf {
     dir.join(SWARMWS_DIR).join(WORKSPACE_JSON)
 }
 
-/// The `workspace.json` of the workspace at `dir`. `E_WS_NOT_FOUND` when there is none,
-/// `E_INVALID_ARG` for one that does not parse or that a newer build wrote.
+/// The `workspace.json` of the workspace at `dir`, `all` when it names no prefix.
+/// `E_WS_NOT_FOUND` when there is none, `E_INVALID_ARG` for one that does not parse or that a
+/// newer build wrote.
 pub fn read(fs: &dyn FsOps, dir: &Utf8Path) -> Result<WorkspaceFile, OpError> {
     // 1. The bytes, if the file is there.
     let file = relative();
@@ -184,8 +185,11 @@ pub fn read(fs: &dyn FsOps, dir: &Utf8Path) -> Result<WorkspaceFile, OpError> {
         ])));
     }
 
-    // 3. Then the state itself.
-    serde_json::from_value(value).map_err(|e| unreadable(&file, &e))
+    // 3. Then the state itself; no prefix is the whole tree, as an older create wrote it.
+    let mut state: WorkspaceFile =
+        serde_json::from_value(value).map_err(|e| unreadable(&file, &e))?;
+    state.all |= state.prefixes.is_empty();
+    Ok(state)
 }
 
 /// Replaces the `workspace.json` of the workspace at `dir` with `file`, durably. Its
@@ -289,5 +293,28 @@ pub(crate) mod tests {
         // 5. No workspace.json: no workspace there.
         std::fs::remove_file(path_in(dir)).unwrap();
         assert_eq!(read(&fs, dir).unwrap_err().code, "E_WS_NOT_FOUND");
+    }
+
+    /// A stored `all` false with no prefix, as an older `ws create` wrote the whole tree, reads
+    /// as `all`; with a prefix it stays sparse.
+    #[test]
+    fn no_prefix_reads_as_the_whole_tree() {
+        // 1. A workspace directory with its .swarmws/.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = Utf8Path::from_path(tmp.path()).unwrap();
+        std::fs::create_dir(dir.join(SWARMWS_DIR)).unwrap();
+        let fs = RealFs::new();
+
+        // 2. No prefix, `all` false on disk: read as the whole tree.
+        let mut wire = serde_json::to_value(sample("w", State::Clean)).unwrap();
+        wire["prefixes"] = json!([]);
+        std::fs::write(path_in(dir), wire.to_string()).unwrap();
+        let saved = read(&fs, dir).unwrap();
+        assert_eq!((saved.all, saved.prefixes.len()), (true, 0));
+
+        // 3. A prefix: sparse, as written.
+        let sparse = sample("w", State::Clean);
+        replace(&fs, dir, &sparse).unwrap();
+        assert!(!read(&fs, dir).unwrap().all);
     }
 }

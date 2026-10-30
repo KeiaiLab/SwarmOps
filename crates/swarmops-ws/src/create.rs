@@ -104,7 +104,8 @@ pub fn create(ctx: &Ctx<'_>, req: WsCreateReq) -> Result<WsInfo, OpError> {
     let volume =
         volume::probe(host, &swarmws).map_err(|e| materialize::host_failed(SWARMWS_DIR, &e))?;
 
-    // 6. The tree checked before anything of it is written; a refusal leaves nothing.
+    // 6. The tree checked before anything of it is written; a refusal leaves nothing. No
+    //    prefix is the whole tree.
     let file = WorkspaceFile {
         format: WORKSPACE_FORMAT,
         name: req.name.clone(),
@@ -113,7 +114,7 @@ pub fn create(ctx: &Ctx<'_>, req: WsCreateReq) -> Result<WsInfo, OpError> {
         base: resolved.id.clone(),
         head: resolved.id.clone(),
         prefixes: prefixes.clone(),
-        all: req.all,
+        all: req.all || prefixes.is_empty(),
         created_by: entry.created_by.clone(),
         created_at: entry.created_at,
         target,

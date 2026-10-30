@@ -18,7 +18,7 @@ use swarmops_api::{
 use swarmops_ws::RealFs;
 use swarmops_ws::state::{self, SWARMWS_DIR};
 
-use crate::fixture::{Fixture, Put, Watched, changes, file, tree_of, write};
+use crate::fixture::{BARE, Fixture, Put, Watched, changes, file, tree_of, write};
 
 /// A store that forwards every call to `inner`, and can run a hook before the first `land` (a
 /// second process landing first) or fail right after a `land` or a `rebase` the store recorded,
@@ -710,4 +710,33 @@ fn an_unreadable_walk_stops_ws_land() {
     // 3. The store only opened the workspace.
     let calls = watched.calls();
     assert!(calls.iter().all(|call| *call == "repo_info"), "{calls:?}");
+}
+
+/// A workspace of the whole tree, also one with neither prefixes nor `all` asked for, has
+/// nothing off its prefixes: `ws land` does not walk it, so a directory it cannot read does not
+/// stop the land before the check is resolved (the check's `E_INVALID_ARG` comes first).
+/// Skipped where an unreadable directory can still be read (as root).
+#[cfg(unix)]
+#[test]
+fn a_whole_tree_is_not_walked_before_land() {
+    for how in BARE {
+        // 1. A workspace with no prefixes; `docs` made unreadable.
+        let f = Fixture::new();
+        let base = f.commit(
+            None,
+            &[Put::File("docs/d.md", "d\n"), Put::File("src/a.txt", "a\n")],
+        );
+        let docs = f.create_bare("w", &base, how).join("docs");
+        let held = Unreadable::new(docs.clone());
+        if std::fs::read_dir(&docs).is_ok() {
+            eprintln!("skipped: an unreadable directory can be read here (root)");
+            return;
+        }
+
+        // 2. A checked land with no command: the check's refusal, not the walk's `E_IO`.
+        let refused = swarmops_ws::land(&f.ctx(), unconfigured_check("w"));
+        drop(held);
+        let refused = refused.unwrap_err();
+        assert_eq!(refused.code, "E_INVALID_ARG", "{how:?} {refused:?}");
+    }
 }

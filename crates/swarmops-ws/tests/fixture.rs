@@ -158,7 +158,43 @@ impl Fixture {
         file.volume = volume;
         state::replace(&RealFs::new(), &dir, &file).unwrap();
     }
+
+    /// Makes workspace `name` beside the store, on `base`, with neither prefixes nor `all` (the
+    /// CLI's default), its `workspace.json` then as `how` says; its directory.
+    pub fn create_bare(&self, name: &str, base: &str, how: Bare) -> Utf8PathBuf {
+        // 1. Made through `create`.
+        let dir = self.beside(name);
+        let mut req = WsCreateReq::new(name.to_owned());
+        req.path = Some(dir.to_string());
+        req.base = base.into();
+        req.status_after = StatusAfter::None;
+        swarmops_ws::create(&self.ctx(), req).unwrap();
+        if how == Bare::Made {
+            return dir;
+        }
+
+        // 2. Rewritten as an older build wrote it: `all` false, no prefixes.
+        let path = state::path_in(&dir);
+        let mut wire: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        wire["all"] = serde_json::Value::Bool(false);
+        assert_eq!(wire["prefixes"], serde_json::json!([]), "{wire}");
+        std::fs::write(&path, wire.to_string()).unwrap();
+        dir
+    }
 }
+
+/// How a workspace with neither prefixes nor `all` asked for stands on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bare {
+    /// As `ws create` writes it.
+    Made,
+    /// As an older build wrote it: `"all": false`, `"prefixes": []`.
+    OldFile,
+}
+
+/// Both ways a [`Bare`] workspace stands on disk.
+pub const BARE: [Bare; 2] = [Bare::Made, Bare::OldFile];
 
 /// The files below `dir`, by repository path, with what each is (`f` a file, `x` an executable,
 /// `l` a symlink) and holds: `.swarmws/` left out.
