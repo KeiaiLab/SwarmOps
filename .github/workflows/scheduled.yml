@@ -1,14 +1,14 @@
 # What is too slow for every push, weekly and on demand: `just check-ci-slow` (the regular suite
 # at 2,000 proptest cases plus the ignored slow tests, crash sweeps included, without the
-# 32-process contention measurements and the 12,000-commit measurement cases), a 60-second fuzz
-# smoke of every fuzz target on nightly, the cargo-deny check, formatting, lints and tests of bench/compare, a workspace of its own
-# that `just check` does not build, and the git version matrix, which rebuilds the git fixtures
-# with three gits, runs the git import's tests on what each made, has each check the git
-# export's repositories with `git fsck`, and runs the remote suites (fetch, push, sync over smart
-# HTTP and ssh) with each; the round trip of mirrors of this host's repositories; the live
-# run with GitHub, once a repository variable names its
-# scratch repository; alone, the benchmark gate; and, last and alone, those measurement cases,
-# optimized. Hardened as ci.yml is, and run where it runs: on the maintainers' own host,
+# 32-process contention measurements and the measurement cases on 12,000 or more commits or
+# changesets), a 60-second fuzz smoke of every fuzz target on nightly, the cargo-deny check,
+# formatting, lints and tests of bench/compare, a workspace of its own that `just check` does not
+# build, and the git version matrix, which rebuilds the git fixtures with three gits, runs the git
+# import's tests on what each made, has each check the git export's repositories with `git fsck`,
+# and runs the remote suites (fetch, push, sync over smart HTTP and ssh) with each; the round trip
+# of mirrors of this host's repositories; the live run with GitHub, once a repository variable
+# names its scratch repository; alone, the benchmark gate; and, last and alone, those measurement
+# cases, optimized. Hardened as ci.yml is, and run where it runs: on the maintainers' own host,
 # through the self-hosted runners labelled `swarmops-local`, each building into its runner's
 # persistent CARGO_TARGET_DIR, so no build cache travels through GitHub.
 # `just check-ci-slow` runs first and alone: its runners share one host, and next to the git
