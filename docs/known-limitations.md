@@ -696,8 +696,23 @@ left).
   Task S4b.*
 - **A new path outside the prefixes needs an existing ancestor to materialise.** A commit no longer
   widens the prefixes; `ws materialize` does, and only to a path the tree holds: a file new to the
-  tree is committed after materialising the directory already in the tree that will hold it.
-  *Documented (the M15 design §5). Found: M15 Task S4b.*
+  tree is committed after materialising the directory already in the tree that will hold it. The
+  refusal's hint, `ws materialize <path>`, fails for such a path with `E_PATH_NOT_FOUND`, and a new
+  file at the root has no such directory: commit it from a workspace of the whole tree (`ws create`
+  with `--all` or without `--prefix`). *Documented (the M15 design §5). Found: M15 Task S4b.*
+- **Files `.worktreeinclude` copies outside the prefixes block a sparse workspace.** A new
+  workspace gets them (`.env` and the like, which the tree does not hold) at their paths whatever
+  its prefixes, and the root `.gitignore` that names them is on disk only when materialised; so a
+  copy outside the prefixes is an edit outside them, and `ws commit`, `ws land`,
+  `ws delete --rescue` and the `worktree-remove` hook refuse it (`E_WS_OUTSIDE_PREFIXES`), the
+  directory and its edits kept. The hint `ws materialize <copy>` fails (`E_PATH_NOT_FOUND`); the
+  way out is `ws materialize .gitignore`, when the root `.gitignore` names the copy, or deleting
+  the copy, then `ws delete --rescue <name>` for a workspace the hook could not remove.
+  *Documented (the M15 design §5). Found: M15 Task S4b review.*
+- **`ws status` shows a sparse workspace clean while a commit refuses it.** `ws status` lists the
+  changes under the prefixes only, so it reports `clean` while `ws commit` and `ws land` refuse an
+  entry outside them; the refusal's `details.paths` names those entries. *Documented (the M15
+  design §5 leaves the display out of scope). Found: M15 Task S4b review.*
 
 ## Platforms
 

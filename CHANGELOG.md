@@ -120,6 +120,9 @@ collects the changes on `stable` that no release holds yet, until the next relea
   `ws land` too, as `ws create` materialises it: a commit naming a path or setting a mode there is
   no longer `E_WS_OUTSIDE_PREFIXES`, and `ws land` no longer walks it for edits outside prefixes it
   does not have (the M15 design §5).
+- The scripting guide names `E_REF_NOT_FOUND` and `E_WS_STALE` as the codes not raised yet, as
+  Troubleshooting does; it named `E_AUTH`, `E_POLICY_DENIED` and `E_MAINTENANCE_BUSY` too, which
+  `swarmops serve` and the maintenance commands raise.
 
 ## [0.7.0] - 2026-10-29
 

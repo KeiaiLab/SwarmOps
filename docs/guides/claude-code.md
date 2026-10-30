@@ -303,7 +303,12 @@ repository. `so ws hook config` prints the settings to merge into `.claude/setti
   another session's workspace of the same name gets a suffix. A new workspace gets the files `.worktreeinclude` lists, copied from the session's
   directory, and runs the repository's bootstrap command (`bootstrap.argv` of
   `.swarmops/workspaces.json`); `SWARMOPS_WS_BOOTSTRAP=skip` skips both. The hook prints the
-  workspace's path, and a failure is an envelope on stderr.
+  workspace's path, and a failure is an envelope on stderr. In a workspace with prefixes, a copy
+  outside them that no `.gitignore` or `.swarmignore` on disk names is an edit outside them:
+  `ws commit`, `ws land` and the remove hook refuse it (`E_WS_OUTSIDE_PREFIXES`, the directory and
+  its edits kept), and the hint's `ws materialize <copy>` fails, since the tree does not hold the
+  copy. `so ws materialize .gitignore`, when the root `.gitignore` names the copy, or deleting the
+  copy clears it ([known limitations](../known-limitations.md#workspaces)).
 - **Remove.** Uncommitted edits are kept as a rescue changeset on the workspace's head (no ref
   moves), its id printed on stderr; then the directory and its registry entry go. A directory that
   is no workspace is left alone, with exit 0.
