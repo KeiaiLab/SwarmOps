@@ -657,12 +657,12 @@ this host's repositories).
 **M12.** No item; SwarmOps is Linux only, and the release binaries print an `ld.so` line on glibc
 2.34 to 2.38 (unscheduled).
 
-**M13 (delivered) and M14.** Without the memo key, an export and an import onto a native head
-read the whole history below it; a fetch and a sync still grow with the history, past their
-targets; an export writes loose
+**M13 and M14 (delivered).** Without the memo key, an export and an import onto a native head
+read the whole history below it; the first sync after a clone still grows with the history, past
+its target; an export writes loose
 objects; an export leaves no reflog entry ([Git import and export](known-limitations.md#git-import-and-export),
 [Git remotes](known-limitations.md#git-remotes)). M13 took the stale git lock files in its own
-mirror; the rest are open for M14 or later.
+mirror, and M14 the fetch's growth (the mirror's commit-graph); the rest are open.
 
 **M5 (delivered).** Materialised files are not synced, so a power cut can leave them torn; a
 checked land takes two lock passes and may check again under a busy target; no virtual snapshot of

@@ -576,15 +576,16 @@ left).
 
 ## Git remotes
 
-- **A fetch and a sync grow with the history.** A push no longer does: with the memo key, a
-  one-commit push costs 1.04 times on 12,000 commits what it does on 1,000 (3.7 to 3.9 times
-  before v0.6.0), against the roadmap's 1.5. A one-commit fetch costs 1.65 times: git's own fetch
-  grows (34 to 84 ms) and so does SwarmOps' share (61 to 84 ms), which holds the closure check, a
-  `git rev-list --objects` walk of the incoming refs; with a commit-graph in the remote and the
-  mirror neither grows (1.04 times). A sync of one land on 12,000 commits took 52.9 s, against the
-  roadmap's 1 s and 8.76 s in M13's loaded run; the store's first keyed export accounts for about
-  1.3 s of it, the rest is not profiled yet ([perf.md](perf.md#v060--2026-10-28)). *Open: G17's fetch
-  and sync (goals.md). Found: the M13 design's risks; measured by M13 Task C11 and v0.6.0.*
+- **A sync grows with the history.** A push and a fetch no longer do: with the memo key, a
+  one-commit push costs 1.02 times on 12,000 commits what it does on 1,000 (3.7 to 3.9 times
+  before v0.6.0), and with the mirror's commit-graph (v0.7.0) a one-commit fetch costs 1.34 times
+  (1.65 in v0.6.0), against the roadmap's 1.5. A sync of one land on 12,000 commits, the first
+  after a clone, took 49.6 s, against the roadmap's 1 s (52.9 s in v0.6.0, 8.76 s in M13's loaded
+  run): its land step (10.48 s) and its push (10.13 s) grow with the history the first time after
+  a clone, which the first export oid derive and the first keyed export's memos would explain
+  (inferred from the code, not profiled), and a second sync takes 0.213 s
+  ([perf.md](perf.md#v070--2026-10-29)). *Open: G17's sync (goals.md). Found: the M13 design's
+  risks; measured by M13 Task C11, v0.6.0 and v0.7.0.*
 - **A squash that lost its trailer lines, then edited on the remote, stops sync.** Sync
   recognises a change the remote holds by a `SwarmOps-Changeset`, `SwarmOps-Squashed-From` or
   `SwarmOps-Land-Key` line in a remote commit, or by its merging as no change. A pull request
