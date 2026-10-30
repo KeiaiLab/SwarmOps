@@ -97,8 +97,11 @@ A change is done when `just check` passes on it. It runs, in order:
    dash and busybox sh where installed) against a fake release on 127.0.0.1, with no network;
    and `web/public/install.sh`, the copy get.swarmops.cc serves, still the same file. After changing the
    installer, copy it to `web/public/install.sh`.
-9. `scripts/check-docs.py`, its `selftest` first: the public Markdown's relative links and
-   anchors resolve as GitHub reads them, and it carries no host path or tool attribution.
+9. `scripts/test-packages.py`: the `.deb` and `.rpm` packer, `scripts/packages.py`, run on fake
+   release archives and its packages read back by readers of the test's own, with no network
+   and without dpkg or rpm.
+10. `scripts/check-docs.py`, its `selftest` first: the public Markdown's relative links and
+    anchors resolve as GitHub reads them, and it carries no host path or tool attribution.
 
 The third lockfile, `bench/compare/Cargo.lock`, which `just check` does not build, is checked
 where it is built, by `just bench-compare` and the weekly scheduled run, with a policy of its

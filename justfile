@@ -31,9 +31,10 @@ default: check
 # keeps the default profile, so that its one-test report does not replace the JUnit report of
 # the workspace run in target/nextest/ci/.
 # Then scripts/test-install.py runs the one-line installer against a fake release on 127.0.0.1,
-# offline, and checks that web/public/install.sh is the same file.
+# offline, and checks that web/public/install.sh is the same file; scripts/test-packages.py packs
+# fake release archives with scripts/packages.py and reads the .deb and .rpm back, offline.
 # Last, scripts/bench-gate.py's selftest shows that the benchmark gate still finds what it is for.
-# The definition of done for every session: fmt, clippy, tests, hook proof, docs, cargo-deny, license notices, installer, Markdown, bench gate.
+# The definition of done for every session: fmt, clippy, tests, hook proof, docs, cargo-deny, license notices, installer, packages, Markdown, bench gate.
 check:
     cargo fmt --all --check
     cargo fmt --manifest-path fuzz/Cargo.toml --check
@@ -50,6 +51,7 @@ check:
     cargo deny --locked --manifest-path fuzz/Cargo.toml --config deny.toml check
     python3 -I scripts/third-party-licenses.py --check
     python3 -I scripts/test-install.py
+    python3 -I scripts/test-packages.py
     python3 -I scripts/check-docs.py selftest
     python3 -I scripts/check-docs.py
     python3 -I scripts/bench-gate.py selftest
