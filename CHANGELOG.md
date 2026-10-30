@@ -34,6 +34,11 @@ collects the changes on `stable` that no release holds yet, until the next relea
   text in a 60-character measure, serif titles and sections, underlined links, and code blocks
   labelled by language, each command joined with the output after it, long output folded behind
   "Show N more lines"; still no web font, no other origin and no new script.
+- The weekly run's `just check-ci-perf` job also runs the other five measurement cases on 12,000
+  or 13,000 commits or 12,000 changesets (`remote_perf`'s fetch, push and sync cases and the
+  workspace's checked land), which took 65-76 % of `just check-ci-slow`'s 20-minute kill;
+  `check-ci-slow` leaves them out, and swarmops-core's `supply_chain` tests fail a case it leaves
+  out that no scheduled job runs optimized.
 
 ## [0.7.0] - 2026-10-29
 
@@ -135,9 +140,9 @@ the schema, the help and the references say what the code does.
   says a `nonstandard` commit's unreadable date is kept as 0 seconds at `+0000`.
 - `just check-ci-slow` leaves out the four measurement cases on 12,000 commits
   (`remote_perf::clone_cost_on_12000_commits` and `serve_perf`'s three), which ran into its
-  20-minute kill unoptimized and failed the weekly run; the new `just check-ci-perf` runs them
-  optimized, one at a time, in the weekly run's last job, under the heavy lock and the `ci-perf`
-  nextest profile (55-minute kill). `just check-slow` keeps them.
+  20-minute kill (three take longer even optimized) and failed the weekly run; the new
+  `just check-ci-perf` runs them optimized, one at a time, in the weekly run's last job, under
+  the heavy lock and the `ci-perf` nextest profile (55-minute kill). `just check-slow` keeps them.
 - `read_file` (`cat`) refuses a `max_bytes` of 0 with `E_INVALID_ARG` (`details.max_bytes`), as
   `diff` does, and its schema says the minimum is 1: it returned nothing, truncated, with a
   `next_offset` where it started, so a read on while truncated never ended (issue #4 item 2).

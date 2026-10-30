@@ -453,16 +453,18 @@ jobs:
           overwrite: true
           retention-days: 14
 
-  # The measurement cases that `just check-ci-slow` leaves out (`just check-ci-perf`): the clone
-  # cost on 12,000 commits and `serve_perf`'s three cases, each importing 12,000 commits.
-  # Unoptimized, in the slow suite, each ran into the ci-slow profile's 20-minute kill; optimized
-  # and one at a time, as `just perf` runs them, they took 5,743 s in all, the longest 1,650 s
-  # (docs/perf.md, "v0.7.0"). They fail on what they ran, never on its time. Last and alone, after
-  # the bench gate, and under the heavy lock as it is: the bench gate runs where it did, and
-  # neither waits for the lock the other holds. `!cancelled()` runs it after a failed bench gate
-  # too. A wait for a lock that a measurement outside CI holds counts against the timeout, as it
-  # does for the bench gate. The `ci-perf` profile kills a hung case after 55 minutes and names
-  # it in the JUnit report, which is uploaded.
+  # The measurement cases that `just check-ci-slow` leaves out (`just check-ci-perf`):
+  # `remote_perf`'s five and `serve_perf`'s three, on 12,000 or 13,000 commits, and the checked
+  # land on 12,000 changesets. They need a longer kill than the ci-slow profile's 20 minutes: in
+  # the slow suite four ran into it and the other five took 65-76 % of it, and three take over 20
+  # minutes even optimized. Optimized and one at a time, as `just perf` runs them, they took
+  # 7,541 s in all, the longest 1,650 s (justfile, `check-ci-perf`). They fail on what they ran,
+  # never on its time. Last and alone, after the bench gate, and under the heavy lock as it is:
+  # the bench gate runs where it did, and neither waits for the lock the other holds.
+  # `!cancelled()` runs it after a failed bench gate too. A wait for a lock that a measurement
+  # outside CI holds counts against the timeout, as it does for the bench gate. The `ci-perf`
+  # profile kills a hung case after 55 minutes and names it in the JUnit report, which is
+  # uploaded.
   perf-cases:
     name: measurement cases
     needs: bench-gate
@@ -470,9 +472,9 @@ jobs:
     runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
     permissions:
       contents: read
-    # Twice the cases' 5,743 s (191 minutes), plus 5 for the optimized build (62 s cold on this
+    # Twice the cases' 7,541 s (251 minutes), plus 5 for the optimized build (62 s cold on this
     # host at load 650), rounded up to 5 minutes.
-    timeout-minutes: 200
+    timeout-minutes: 260
     env:
       CARGO_TERM_COLOR: always
       HEAVY_LOCK: /data/swarmops/locks/heavy.lock

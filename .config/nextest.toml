@@ -47,10 +47,10 @@ slow-timeout = { period = "60s", terminate-after = 20 }
 
 # The weekly measurement cases' profile (scheduled.yml runs `just check-ci-perf` with
 # `NEXTEST_PROFILE=ci-perf`): the ci profile, with a test killed after 55 minutes instead. Its
-# cases import 12,000 commits and run optimized, one at a time; the longest,
-# `serve_perf::clone_against_git`, took 1,650 s on this host (docs/perf.md, "v0.7.0"), past the
-# ci-slow profile's 20 minutes, and 55 minutes is twice that, so only a hang reaches it. Its
-# JUnit report is target/nextest/ci-perf/junit.xml.
+# cases import 12,000 or 13,000 commits or seed 12,000 changesets, and run optimized, one at a
+# time; the longest, `serve_perf::clone_against_git`, took 1,650 s on this host (docs/perf.md,
+# "v0.7.0"), past the ci-slow profile's 20 minutes, and 55 minutes is twice that, so only a hang
+# reaches it. Its JUnit report is target/nextest/ci-perf/junit.xml.
 [profile.ci-perf]
 inherits = "ci"
 slow-timeout = { period = "60s", terminate-after = 55 }
