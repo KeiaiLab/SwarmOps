@@ -164,7 +164,10 @@ pub enum StoreError {
     /// Retrying the same transaction is safe: an insert finds the changeset
     /// ([`crate::InsertOutcome::AlreadyPresent`]), and a ref move finds the ref at the caller's
     /// own target ([`crate::CasResult::Mismatch`], with that target as `actual`).
-    #[error("the transaction committed at frame {frame_seq}, but a step after it failed: {source}")]
+    #[error(
+        "the transaction committed at frame {frame_seq} (crc {frame_crc:08x}), but a step after it \
+         failed: {source}"
+    )]
     PostCommit {
         /// The seq of the transaction's frame.
         frame_seq: u64,
@@ -470,6 +473,22 @@ mod tests {
         assert_eq!(
             StoreError::BadCall(past.to_owned()).to_string(),
             format!("a call the store does not take: {past}")
+        );
+    }
+
+    /// A failure past the commit point names the committed frame by its seq and its crc: with
+    /// the crc, the operation's id.
+    #[test]
+    fn a_post_commit_error_names_its_frame() {
+        let failed = StoreError::PostCommit {
+            frame_seq: 4,
+            frame_crc: 0x09f3_a01c,
+            source: Box::new(StoreError::IndexMismatch { seq: 4 }),
+        };
+        assert_eq!(
+            failed.to_string(),
+            "the transaction committed at frame 4 (crc 09f3a01c), but a step after it failed: \
+             the changeset index disagrees with the journal at seq 4"
         );
     }
 
