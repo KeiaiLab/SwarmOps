@@ -95,11 +95,27 @@ mod tests {
         assert_eq!(version_text("0.7.0", Some(FULL)), format!("0.7.0+{FULL}"));
     }
 
-    /// This build's text: the package version, and the commit if one was set.
+    /// This build's text: the package version, and the commit if one was set. The test reads
+    /// the variable itself, so a module that stops reading it fails in a stamped build.
     #[test]
     fn this_build_has_its_text() {
         let pkg = env!("CARGO_PKG_VERSION");
-        let expected = BUILD_COMMIT.map_or_else(|| pkg.to_owned(), |c| format!("{pkg}+{c}"));
+        let commit = option_env!("SWARMOPS_BUILD_COMMIT");
+        let expected = commit.map_or_else(|| pkg.to_owned(), |c| format!("{pkg}+{c}"));
         assert_eq!(version(), expected);
+    }
+
+    /// clap prints this text, not the package version it takes by default: the same string,
+    /// so the check holds in an unstamped build too.
+    #[test]
+    fn clap_shows_this_text() {
+        use clap::CommandFactory;
+
+        let shown = crate::cli::Cli::command().get_version().map(str::as_ptr);
+        assert_eq!(
+            shown,
+            Some(version().as_ptr()),
+            "clap shows version()'s text"
+        );
     }
 }

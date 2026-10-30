@@ -10,7 +10,7 @@
 
 use serde_json::{Value, json};
 
-use crate::support::{BIN, SO, Store, run_bin};
+use crate::support::{BIN, SO, Store, run_bin, version_line};
 
 /// Command lines clap refuses, each on a path of its own, and the usage line each one's hint
 /// gives after the program's name: a missing subcommand, at the top and under `ref` (clap's
@@ -31,7 +31,7 @@ const REFUSED: [(&[&str], &str); 6] = [
 /// answer to MCP's `initialize`.
 #[test]
 fn so_is_the_same_program_as_swarmops() {
-    let version = format!("swarmops {}\n", env!("CARGO_PKG_VERSION"));
+    let version = version_line();
     for bin in [SO, BIN] {
         let run = run_bin(bin, &["--version"], &[], "");
         assert_eq!(

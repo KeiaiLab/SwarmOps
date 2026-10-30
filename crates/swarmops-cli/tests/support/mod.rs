@@ -19,6 +19,16 @@ pub const BIN: &str = env!("CARGO_BIN_EXE_swarmops");
 /// The binary under test by its short name, `so`: the same program.
 pub const SO: &str = env!("CARGO_BIN_EXE_so");
 
+/// The line `--version` prints: `swarmops <version>`, and `+<commit>` when the build set
+/// `SWARMOPS_BUILD_COMMIT`, which this crate reads at compile time as the binaries do.
+pub fn version_line() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    let Some(commit) = option_env!("SWARMOPS_BUILD_COMMIT") else {
+        return format!("swarmops {version}\n");
+    };
+    format!("swarmops {version}+{commit}\n")
+}
+
 /// The program the test kit runs: [`BIN`], whose commits sign at `SWARMOPS_TEST_NOW`'s time in a
 /// build with the test hooks.
 pub enum Swarmops {}
