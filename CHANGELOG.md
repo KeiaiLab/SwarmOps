@@ -88,6 +88,17 @@ collects the changes on `stable` that no release holds yet, until the next relea
   command run inside a workspace did, but `commit`, `land`, `sync` and the other commands that need
   an identity still refuse an anonymous caller there with `E_IDENTITY_REQUIRED`, while `gc`,
   `repair`, `upgrade`, `fetch` and `push` need none anywhere.
+- `fetch`, and so `clone` and `sync`, import the followed branch before it moves the tracking
+  refs and remote tags, and the import reads the branch's incoming ref
+  (`refs/incoming/<remote>/heads/<branch>`), each object against its id. A mirror object that
+  holds another object's bytes, or any refusal of the import (`E_GIT_READ`, `E_GIT_IMPORT_LOSSY`,
+  `E_GIT_UNSUPPORTED`, `E_TOO_LARGE`), now leaves every tracking ref and remote tag as it was; they
+  moved first before, so a later `push` leased on a value the import had refused. An import error's
+  `details.git_ref` is now the incoming ref, not the tracking ref. A crash between the import and
+  the move is finished by the next fetch ([architecture](docs/architecture.md), the M15 design §3).
+- A pack garbled in transit, which git refuses with "pack is corrupted (SHA1 mismatch)" or "final
+  sha1 did not match", is classified by rows of its own: `E_REMOTE_REJECTED` with
+  `details.reason: "bad_objects"`, not retryable, no ref moved.
 
 ## [0.7.0] - 2026-10-29
 

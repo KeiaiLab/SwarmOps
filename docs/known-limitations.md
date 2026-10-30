@@ -628,6 +628,15 @@ left).
   imported and no tracking ref moved, and every later fetch fails the same way until the remote's
   history changes. There is no `fsck.<id>` override and no way to skip the check. *Documented
   (the v0.6.0 design, decision 9). Found: the 2026-10-27 completeness report (A3).*
+- **A damaged mirror object that only a non-followed branch or tag reaches is not caught.** A
+  fetch reads, and checks against its id, every object the followed branch reaches before it
+  moves any tracking ref; the other branches and the tags are checked by git's fsck on receive
+  and by the closure check (every object is there), not by an id check. A mirror object that
+  holds other bytes and sits under such a ref stays unnoticed until the followed branch reaches
+  it. One that the followed branch reaches fails every fetch with
+  `E_GIT_READ` (`details.reason: "corrupt"`, `details.object`) until `git/mirror.git` is moved
+  aside; the next fetch makes it again. *Documented (the M15 design §3). Found: the 2026-10-27
+  completeness report (D45).*
 - **A server that cuts git's first HTTP response inside its headers looks like an empty remote.**
   git then falls back to the old "dumb" HTTP protocol, finds no refs and succeeds: the fetch reports
   no branches and prunes the mirror's tracking refs, and a clone ends with no `main`. Nothing is
