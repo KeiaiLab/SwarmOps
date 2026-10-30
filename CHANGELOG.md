@@ -55,6 +55,10 @@ collects the changes on `stable` that no release holds yet, until the next relea
   lacks when the base is not on the target's history: 1 after a sync replaced the base with its
   squash-merged copy, and 0 when the target moved back to an ancestor of the base, where it
   counted the target's whole history up to 10,000.
+- The build-and-test guide says that only the workspace operations act as the workspace's creator
+  without `--as` or `SWARMOPS_AGENT`; it said every command run inside a workspace did, but
+  `commit`, `land`, `sync` and the other commands that change the store still refuse an anonymous
+  caller there with `E_IDENTITY_REQUIRED`.
 
 ## [0.7.0] - 2026-10-29
 

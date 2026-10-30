@@ -39,8 +39,10 @@ and `ws materialize <path>` writes more of it later. A new workspace also gets t
 repository's bootstrap command, `bootstrap.argv` of `.swarmops/workspaces.json`;
 `SWARMOPS_WS_BOOTSTRAP=skip` skips both.
 
-A command run inside the workspace finds its store through `.swarmws/workspace.json`, and its
-identity is the workspace's creator unless `--as` or `SWARMOPS_AGENT` names another. `--repo` and
+A command run inside the workspace finds its store through `.swarmws/workspace.json`. The
+workspace operations (`ws …` and the MCP workspace tools) act as the workspace's creator unless
+`--as` or `SWARMOPS_AGENT` names another; the other commands that change the store, such as
+`commit`, `land` and `sync`, still need `--as` or `SWARMOPS_AGENT` there. `--repo` and
 `SWARMOPS_REPO` still come first, and a relative `SWARMOPS_REPO` is read against the working
 directory: give it absolute, or unset it, before you `cd` in.
 
