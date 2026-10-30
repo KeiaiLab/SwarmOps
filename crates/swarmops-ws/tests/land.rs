@@ -623,3 +623,91 @@ fn ws_land_refuses_an_outside_edit() {
     );
     assert!(!pending_in(&dir).exists());
 }
+
+/// A checked land with no command given and none configured.
+fn unconfigured_check(name: &str) -> WsLandReq {
+    let mut out = land_of(name, None);
+    let mut check = WsCheckInput::default();
+    check.timeout_s = 900;
+    out.check = Some(check);
+    out
+}
+
+/// The outside refusal comes first: before a checked land resolves its command and before the
+/// lock, so a land with `--check`, no command and a stray outside the prefixes is
+/// `E_WS_OUTSIDE_PREFIXES`, with no store call but the workspace's open.
+#[test]
+fn an_outside_edit_is_refused_before_the_check() {
+    // 1. A workspace of `src` with a stray file outside.
+    let f = Fixture::new();
+    let base = f.commit(None, &[Put::File("src/a", "a\n")]);
+    f.create("w", &base, &["src"]);
+    write(&f.beside("w"), "docs/a", "stray\n");
+
+    // 2. Refused for the stray, not for the missing command.
+    let watched = Watched::new(&f.ops);
+    let refused = swarmops_ws::land(&f.ctx_over(&watched), unconfigured_check("w")).unwrap_err();
+    assert_eq!(refused.code, "E_WS_OUTSIDE_PREFIXES", "{refused:?}");
+    assert_eq!(refused.details["paths"], serde_json::json!(["docs"]));
+
+    // 3. The store only opened the workspace.
+    let calls = watched.calls();
+    assert!(calls.iter().all(|call| *call == "repo_info"), "{calls:?}");
+}
+
+/// The mode bits of a directory made unreadable, given back when dropped.
+#[cfg(unix)]
+struct Unreadable(camino::Utf8PathBuf);
+
+#[cfg(unix)]
+impl Unreadable {
+    /// Directory `dir`, made unreadable.
+    fn new(dir: camino::Utf8PathBuf) -> Unreadable {
+        set_mode(&dir, 0o000);
+        Unreadable(dir)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Unreadable {
+    fn drop(&mut self) {
+        set_mode(&self.0, 0o755);
+    }
+}
+
+/// Sets the permission bits of `path` to `mode`.
+#[cfg(unix)]
+fn set_mode(path: &Utf8Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// A directory the outside walk cannot read stops `ws land` with `E_IO`, before the check is
+/// resolved: the walk fails closed. Skipped where an unreadable directory can still be read
+/// (as root).
+#[cfg(unix)]
+#[test]
+fn an_unreadable_walk_stops_ws_land() {
+    // 1. A workspace of `src/a`; `src`, which the walk reads to reach it, made unreadable.
+    let f = Fixture::new();
+    let base = f.commit(None, &[Put::File("src/a/f", "f\n")]);
+    f.create("w", &base, &["src/a"]);
+    let src = f.beside("w").join("src");
+    let held = Unreadable::new(src.clone());
+    if std::fs::read_dir(&src).is_ok() {
+        eprintln!("skipped: an unreadable directory can be read here (root)");
+        return;
+    }
+
+    // 2. A checked land with no command: `E_IO` from the walk, not the check's `E_INVALID_ARG`.
+    let watched = Watched::new(&f.ops);
+    let refused = swarmops_ws::land(&f.ctx_over(&watched), unconfigured_check("w"));
+    drop(held);
+    let refused = refused.unwrap_err();
+    assert_eq!(refused.code, "E_IO", "{refused:?}");
+    assert_eq!(refused.details["file"], ".");
+
+    // 3. The store only opened the workspace.
+    let calls = watched.calls();
+    assert!(calls.iter().all(|call| *call == "repo_info"), "{calls:?}");
+}

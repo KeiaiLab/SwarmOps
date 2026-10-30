@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use camino::{Utf8Path, Utf8PathBuf};
 
 use swarmops_api::{
-    ChangeOp, ContentInput, DiffFormat, DiffReq, ModeInput, StatusAfter, StoreOps, WsCommitReq,
-    WsCreateReq, WsDiffReq, WsLandReq,
+    ChangeOp, ContentInput, DiffFormat, DiffReq, ModeInput, ReadTreeReq, StatusAfter, StoreOps,
+    WsCommitReq, WsCreateReq, WsDiffReq, WsLandReq, WsRebaseReq,
 };
 use swarmops_ws::hostfs::HostMeta;
 use swarmops_ws::state::{self, SWARMWS_DIR, Volume};
@@ -514,4 +514,139 @@ fn an_empty_prefix_workspace_commits_a_named_path() {
     land.status_after = StatusAfter::None;
     let landed = swarmops_ws::land(&f.ctx(), land).unwrap();
     assert_eq!(landed.land.rebased_onto, base);
+}
+
+/// Under a nested prefix, a file in a directory on the path to it is outside too: with prefix
+/// `src/a`, a stray `src/stray` is refused by its own path, the edit under `src/a` not committed.
+#[test]
+fn a_stray_beside_a_nested_prefix_is_refused() {
+    // 1. A workspace of `src/a`; an edit under it and a file written beside it, in `src`.
+    let f = Fixture::new();
+    let base = f.commit(
+        None,
+        &[Put::File("src/a/f", "f\n"), Put::File("src/b", "b\n")],
+    );
+    f.create("w", &base, &["src/a"]);
+    let dir = f.beside("w");
+    write(&dir, "src/a/f", "edited\n");
+    write(&dir, "src/stray", "stray\n");
+
+    // 2. Refused, naming `src/stray` alone.
+    let watched = Watched::new(&f.ops);
+    let refused = swarmops_ws::commit(&f.ctx_over(&watched), commit_of("w", "nested")).unwrap_err();
+    assert_eq!(refused.code, "E_WS_OUTSIDE_PREFIXES", "{refused:?}");
+    assert_eq!(refused_paths(&refused), ["src/stray"]);
+
+    // 3. Nothing changed.
+    assert_eq!(standing(&dir), (base, vec!["src/a".to_owned()]));
+    assert_eq!(watched.count("commit"), 0, "{:?}", watched.calls());
+}
+
+/// `ws rebase -m` commits the edits under the prefixes and leaves one outside them where it is
+/// (the M15 design §5 leaves `ws rebase` as it was): not refused, not committed, not removed.
+#[test]
+fn rebase_m_leaves_an_outside_edit() {
+    // 1. A workspace of `src` with an edit inside and a stray outside; main moved since.
+    let f = Fixture::new();
+    let base = f.commit(None, &[Put::File("src/a", "a\n")]);
+    f.create("w", &base, &["src"]);
+    let dir = f.beside("w");
+    write(&dir, "src/a", "mine\n");
+    write(&dir, "docs/a", "stray\n");
+    let main = f.commit(Some(&base), &[Put::File("src/b", "b\n")]);
+
+    // 2. Rebased with a message: the edit inside committed and moved onto main.
+    let mut req = WsRebaseReq::new("w".to_owned());
+    req.message = Some("mine".to_owned());
+    req.status_after = StatusAfter::None;
+    let done = swarmops_ws::rebase(&f.ctx(), req).unwrap();
+    assert_eq!(done.onto, main);
+
+    // 3. The rebased tree holds `src` alone; the stray is still on disk.
+    let listing = f
+        .ops
+        .read_tree(ReadTreeReq::new(done.changeset.as_str()))
+        .unwrap();
+    let names: Vec<&str> = (listing.entries.iter())
+        .map(|entry| entry.name.as_str())
+        .collect();
+    assert_eq!(names, ["src"]);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("docs/a")).unwrap(),
+        "stray\n"
+    );
+}
+
+/// A refusal names at most 20 paths, the first in path order, and its hint widens to the first.
+#[test]
+fn a_refusal_names_the_first_twenty_paths() {
+    // 1. A workspace of `src`; 25 files outside it, written last to first.
+    let f = Fixture::new();
+    let base = f.commit(None, &[Put::File("src/a.txt", "a\n")]);
+    f.create("w", &base, &["src"]);
+    let dir = f.beside("w");
+    for n in (0..25).rev() {
+        write(&dir, &format!("o{n:02}"), "stray\n");
+    }
+
+    // 2. Refused: `o00` to `o19` in the details, the hint naming `o00`.
+    let refused = swarmops_ws::commit(&f.ctx(), commit_of("w", "many")).unwrap_err();
+    assert_eq!(refused.code, "E_WS_OUTSIDE_PREFIXES", "{refused:?}");
+    let first: Vec<String> = (0..20).map(|n| format!("o{n:02}")).collect();
+    assert_eq!(refused_paths(&refused), first);
+    assert_eq!(refused.hint.as_deref(), Some("swarmops ws materialize o00"));
+}
+
+/// A mode set on a path outside the prefixes is refused as a named path is, before the scan:
+/// the prefixes not widened, nothing committed.
+#[test]
+fn a_mode_outside_the_prefixes_is_refused() {
+    // 1. A workspace of `src`, on a volume without the executable bit; `docs/run` in the tree
+    //    outside it.
+    let f = Fixture::new();
+    let base = f.commit(
+        None,
+        &[
+            Put::File("docs/run", "#!/bin/sh\n"),
+            Put::File("src/a.txt", "a\n"),
+        ],
+    );
+    f.create("w", &base, &["src"]);
+    f.simulate("w", Volume::new(false, false, true));
+    let dir = f.beside("w");
+
+    // 2. A commit setting its mode: refused, naming it.
+    let watched = Watched::new(&f.ops);
+    let mut req = commit_of("w", "mode");
+    req.modes = BTreeMap::from([("docs/run".to_owned(), ModeInput::Exec)]);
+    let refused = swarmops_ws::commit(&f.ctx_over(&watched), req).unwrap_err();
+    assert_eq!(refused.code, "E_WS_OUTSIDE_PREFIXES", "{refused:?}");
+    assert_eq!(refused_paths(&refused), ["docs/run"]);
+
+    // 3. Nothing changed.
+    assert_eq!(standing(&dir), (base, vec!["src".to_owned()]));
+    assert_eq!(watched.count("commit"), 0, "{:?}", watched.calls());
+}
+
+/// A `.git` directory at the root of a sparse workspace is skipped, as every `.git` is: no edit
+/// outside the prefixes, and not committed.
+#[test]
+fn a_root_dot_git_is_not_refused() {
+    // 1. A workspace of `src` with an edit, and a `.git` directory at its root.
+    let f = Fixture::new();
+    let base = f.commit(None, &[Put::File("src/a.txt", "a\n")]);
+    f.create("w", &base, &["src"]);
+    let dir = f.beside("w");
+    write(&dir, ".git/HEAD", "ref: refs/heads/main\n");
+    write(&dir, "src/a.txt", "edited\n");
+
+    // 2. Committed: the edit alone.
+    let watched = Watched::new(&f.ops);
+    swarmops_ws::commit(&f.ctx_over(&watched), commit_of("w", "git")).unwrap();
+    let commits = watched.commits();
+    let [(req, Some(_))] = commits.as_slice() else {
+        panic!("{commits:?}");
+    };
+    let paths: Vec<&str> = req.changes.iter().map(|c| c.path.as_str()).collect();
+    assert_eq!(paths, ["src/a.txt"]);
 }
