@@ -1283,7 +1283,7 @@ pub fn lossy_classes(lossy: &[LossyArg], gitlinks: Option<Gitlinks>) -> Vec<Loss
 }
 
 /// `op`'s operations: the operation log, and undo.
-#[derive(Subcommand, Debug, Clone, Copy)]
+#[derive(Subcommand, Debug, Clone)]
 pub enum OpCommand {
     /// List the store's operations, newest first: each write transaction, its changesets and
     /// its ref moves.
@@ -1304,9 +1304,13 @@ pub enum OpCommand {
     /// is skipped): one that was moved since stops the undo with E_CAS_MISMATCH, and nothing is
     /// written. An undo run again is a replay (already_applied). Changesets are never removed.
     Undo {
-        /// The operation, as op log numbers it.
-        #[arg(value_name = "OP")]
-        op: u64,
+        // Help given as `help` rather than a doc comment: rustdoc would take `<op>` for HTML.
+        #[arg(
+            value_name = "OP",
+            help = "The operation's id, as op log prints it: <op>:<crc> (4:9f3a01c2). A bare \
+                    number is E_INVALID_ARG."
+        )]
+        op: String,
     },
 }
 

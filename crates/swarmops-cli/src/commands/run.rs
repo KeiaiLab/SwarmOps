@@ -595,11 +595,11 @@ fn run_op(ctx: &Ctx<'_>, op: &'static str, command: OpCommand) -> Printed {
             },
             |ops, req| ops.op_log(req),
         ),
-        OpCommand::Undo { op: number } => ctx.on_store(
+        OpCommand::Undo { op: id } => ctx.on_store(
             op,
             || {
                 let who = context::mutator(ctx.global.agent.as_deref(), ctx.env)?;
-                Ok((who, UndoReq::new(number)))
+                Ok((who, UndoReq::new(id.as_str())))
             },
             |ops, (who, req)| ops.undo(&who, req),
         ),

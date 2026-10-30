@@ -26,7 +26,7 @@ use swarmops_core::{
 };
 use swarmops_repo::{
     CasResult, Change, ChangeOp, CommitOutcome, CommitRequest, Depth, InsertOutcome, LocalRepo,
-    RepoError,
+    OpId, RepoError,
 };
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, FailAt, FailAtFs, FailMode, InjectedError, ORDER_CHECK_ENV};
@@ -1642,12 +1642,13 @@ fn a_failure_after_the_commit_point_is_a_warning() {
     let [warning] = &out.warnings[..] else {
         panic!("expected one warning, got {:?}", out.warnings);
     };
-    assert!(warning.contains("frame 0"), "{warning}");
     assert!(warning.contains("injected"), "{warning}");
 
     // The changeset is committed: another handle sees it, and its next write repairs the
     // index.
     let fresh = LocalRepo::open(&root).unwrap();
+    let named = format!("(operation {})", newest_id(&fresh));
+    assert!(warning.contains(&named), "{warning}");
     let stored = fresh.changeset(out.id).unwrap().expect("committed");
     assert_eq!(stored.seq, 0);
     let next = fresh
@@ -1673,13 +1674,14 @@ fn a_ref_move_whose_file_write_fails_is_applied_with_a_warning() {
     let [warning] = &out.warnings[..] else {
         panic!("expected one warning, got {:?}", out.warnings);
     };
-    assert!(warning.contains("frame 1"), "{warning}");
     assert!(warning.contains("injected"), "{warning}");
 
     // The move is committed: another handle sees it, and its next write writes the file.
     let ref_file = root.join("meta/refs/main");
     assert!(!ref_file.exists());
     let fresh = LocalRepo::open(&root).unwrap();
+    let named = format!("(operation {})", newest_id(&fresh));
+    assert!(warning.contains(&named), "{warning}");
     let main = fresh.get_ref("main").unwrap().map(|state| state.target);
     assert_eq!(main, Some(base.id));
     fresh
@@ -1690,6 +1692,15 @@ fn a_ref_move_whose_file_write_fails_is_applied_with_a_warning() {
         format!("{}\n1\n", base.id)
     );
     assert_eq!(fresh.verify(Depth::Deep).unwrap().problems, []);
+}
+
+/// The id of the newest operation `repo`'s log lists.
+fn newest_id(repo: &LocalRepo) -> OpId {
+    let (ops, _) = repo.op_log(None, 1).unwrap();
+    let [op] = &ops[..] else {
+        panic!("expected one operation, got {ops:?}");
+    };
+    OpId::new(op.seq, op.crc)
 }
 
 /// The repository at `root`, its listings in `journal.off` failing: a commit or a ref move made

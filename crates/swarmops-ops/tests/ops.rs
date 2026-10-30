@@ -22,7 +22,7 @@ use swarmops_api::{
     Attribution, ChangeInput, ChangeOp, ChangeOut, ChangesetSummary, CommitReq, ContentEncoding,
     ContentInput, DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES,
     DEFAULT_READ_TREE_LIMIT, EntryKindOut, ErrorCode, FileContent, FileKind, Identity,
-    IdentityInfo, InfoReq, LogPage, LogReq, ModeInput, OpError, ReadFileReq, ReadTreeReq,
+    IdentityInfo, InfoReq, LogPage, LogReq, ModeInput, OpError, OpLogReq, ReadFileReq, ReadTreeReq,
     RefDeleteReq, RefListReq, RefOut, RefSetReq, RefSetResp, Rev, ShowReq, StoreOps, TreeEntryOut,
     UndoReq, VerifyReq,
 };
@@ -1013,7 +1013,9 @@ fn undo_of_mains_creation_is_refused_whole() {
         .cas_ref("release/r", None, Some(id), "agent/one")
         .unwrap();
     write.cas_ref("main", None, Some(id), "agent/one").unwrap();
-    let op = write.commit().unwrap().frame_seq;
+    let committed = write.commit().unwrap();
+    let crc = committed.frame_crc.expect("the write queued records");
+    let op = format!("{}:{crc:08x}", committed.frame_seq);
     let frames = frame_count(&root);
 
     let err = expect_err(ops.undo(&who, UndoReq::new(op)), ErrorCode::RefProtected);
@@ -1056,14 +1058,20 @@ fn a_refused_undo_records_what_its_write_repaired() {
     };
 
     // 2. Each refusal reports the listing its write made; the next write finds none to make.
-    let refusals = [(99, ErrorCode::OpNotFound), (0, ErrorCode::NothingToUndo)];
+    // Read before the unlisted moves: a listing takes the lock, and so repairs what they leave.
+    let op0 = op_id(&ops, 0);
+    let refusals = [
+        (None, ErrorCode::OpNotFound),
+        (Some(op0), ErrorCode::NothingToUndo),
+    ];
     for (round, (op, code)) in refusals.into_iter().enumerate() {
         match round {
             0 => unlisted(None, &c1),
             _ => unlisted(Some(&c1), &c2),
         }
+        let id = op.unwrap_or_else(|| "99:00000000".to_owned());
         let resolved = Resolved::default();
-        expect_err(ops.recording(&resolved).undo(&who, UndoReq::new(op)), code);
+        expect_err(ops.recording(&resolved).undo(&who, UndoReq::new(id)), code);
         let recovered = resolved.take_recovered().expect("its write repaired");
         assert_eq!(
             (recovered.frames_listed, recovered.refs_replayed),
@@ -1074,10 +1082,113 @@ fn a_refused_undo_records_what_its_write_repaired() {
     let resolved = Resolved::default();
     let main = ops
         .recording(&resolved)
-        .undo(&who, UndoReq::new(3))
+        .undo(&who, UndoReq::new(op_id(&ops, 3)))
         .unwrap();
     assert_eq!(main.op, Some(4), "{main:?}");
     assert_eq!(resolved.take_recovered(), None, "nothing left to repair");
+}
+
+/// The id `op log` lists for operation `op`.
+fn op_id(ops: &LocalOps, op: u64) -> String {
+    let mut req = OpLogReq::default();
+    req.before = Some(op + 1);
+    req.limit = 1;
+    let listed = ops.op_log(req).unwrap().ops.remove(0);
+    assert_eq!(listed.op, op, "op {op} is listed");
+    listed.id
+}
+
+/// `undo` takes an operation's id only (the M15 design §2): a bare number, upper case, a short
+/// crc or a request without `id` is refused before the undo takes the store's lock, and a
+/// wrong crc is `E_OP_NOT_FOUND` that names the id asked for and never the listed one.
+#[test]
+fn undo_takes_an_op_id_only() {
+    let (_dir, root, ops) = new_store();
+    let who = agent();
+    let c1 = commit(&ops, None, vec![text("f", "1")]); // op 0
+    let c2 = commit(&ops, Some(&c1), vec![text("f", "2")]); // op 1
+    ops.ref_set(&who, set("release/r", &c1, None, true))
+        .unwrap(); // op 2
+    ops.ref_set(&who, set("release/r", &c2, Some(&c1), false))
+        .unwrap(); // op 3
+    let frames = frame_count(&root);
+
+    // 1. Every other form is E_INVALID_ARG, with the store's lock held by another writer.
+    let meta = MetaStore::open(&root).unwrap();
+    let held = meta.write().unwrap();
+    for id in [
+        "3",
+        "3:9F3A01C2",
+        "3:9f3a",
+        "",
+        " 3:9f3a01c2",
+        "-3:9f3a01c2",
+    ] {
+        let err = expect_err(ops.undo(&who, UndoReq::new(id)), ErrorCode::InvalidArg);
+        assert_eq!(err.details["id"], id, "{err:?}");
+    }
+    drop(held);
+    let refused = serde_json::from_value::<UndoReq>(json!({"op": 3}));
+    assert!(refused.is_err_and(|e| e.to_string().contains("`id`")));
+
+    // 2. A wrong crc: not found, with the id asked for; the listed id is not given.
+    let listed = op_id(&ops, 3);
+    let wrong = format!(
+        "3:{}",
+        if listed.ends_with('0') {
+            "00000001"
+        } else {
+            "00000000"
+        }
+    );
+    let err = expect_err(ops.undo(&who, UndoReq::new(&wrong)), ErrorCode::OpNotFound);
+    let expected = json!({"op": 3, "id": wrong, "last": 3, "reason": "checksum"});
+    assert_eq!(Value::Object(err.details.clone()), expected);
+    assert!(!err.message.contains(&listed), "{err:?}");
+    let err = expect_err(
+        ops.undo(&who, UndoReq::new("9:00000000")),
+        ErrorCode::OpNotFound,
+    );
+    assert_eq!(err.details["reason"], "past_end", "{err:?}");
+    assert_eq!(frame_count(&root), frames, "nothing written");
+}
+
+/// What `name` points at.
+fn ref_target(ops: &LocalOps, name: &str) -> String {
+    let refs = ops.ref_list(RefListReq::default()).unwrap().refs;
+    let found = refs.into_iter().find(|r| r.name == name);
+    found.expect("the ref exists").target
+}
+
+/// The op log's `id` and the `id` of an undo's response are what `undo` takes: an undo by the
+/// listed id restores the ref, and an undo by the response's id takes the undo back.
+#[test]
+fn op_log_and_undo_carry_ids() {
+    let (_dir, _root, ops) = new_store();
+    let who = agent();
+    let c1 = commit(&ops, None, vec![text("f", "1")]);
+    let c2 = commit(&ops, Some(&c1), vec![text("f", "2")]);
+    ops.ref_set(&who, set("release/r", &c1, None, true))
+        .unwrap(); // op 2
+    ops.ref_set(&who, set("release/r", &c2, Some(&c1), false))
+        .unwrap(); // op 3
+
+    // 1. The listed id undoes the move; the response names its own operation's id.
+    let undone = ops.undo(&who, UndoReq::new(op_id(&ops, 3))).unwrap();
+    assert_eq!((undone.undone, undone.op), (3, Some(4)), "{undone:?}");
+    let id = undone.id.clone().expect("the undo wrote an operation");
+    assert_eq!(id, op_id(&ops, 4), "the response's id is the listed one");
+    assert_eq!(ref_target(&ops, "release/r"), c1);
+
+    // 2. That id takes the undo back.
+    let redone = ops.undo(&who, UndoReq::new(&id)).unwrap();
+    assert_eq!(redone.undone, 4, "{redone:?}");
+    assert_eq!(ref_target(&ops, "release/r"), c2);
+
+    // 3. Run again, it is a replay: nothing written, and no id.
+    let replay = ops.undo(&who, UndoReq::new(id)).unwrap();
+    assert!(replay.already_applied, "{replay:?}");
+    assert_eq!((replay.op, replay.id), (None, None));
 }
 
 #[test]

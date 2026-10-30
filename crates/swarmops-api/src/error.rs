@@ -134,7 +134,7 @@ error_codes! {
     NothingToLand => "E_NOTHING_TO_LAND", EXIT_ERROR, false;
     /// The operation moved no ref, so there is nothing to restore.
     NothingToUndo => "E_NOTHING_TO_UNDO", EXIT_ERROR, false;
-    /// The store has no operation by that number.
+    /// The store has no operation with that id.
     OpNotFound => "E_OP_NOT_FOUND", EXIT_NOT_FOUND, false;
     // `serve`'s (M14): the caller and the store's access file.
     /// The serving entry could not name the caller, or no grant of the store's access file

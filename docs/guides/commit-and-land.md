@@ -1116,7 +1116,8 @@ ops[0].ref_moves[0].at: 1792626970
 truncated: true
 ```
 
-`op log` records who moved the ref, and `swarmops op undo <op>` moves it back.
+`op log` records who moved the ref, and `swarmops op undo <id>` of that operation's `id` moves it
+back.
 
 Give `--expect` as the full id you read. A ref name, or a relative revision such as `main~1`, is
 read when the command runs, so it does not pin what you saw: the ref's own name always matches,

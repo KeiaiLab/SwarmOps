@@ -224,8 +224,8 @@ ops[0].ref_moves[0].actor: agent/worker-2
 …
 ```
 
-`op log` numbers every write transaction; `swarmops op undo <op>` moves the refs one of them moved
-back, by compare-and-swap, all or none ([README](../../README.md#first-commands)).
+`op log` lists every write transaction with its id; `swarmops op undo <id>` moves the refs one of
+them moved back, by compare-and-swap, all or none ([README](../../README.md#first-commands)).
 
 ## 4. Send it to git for review
 

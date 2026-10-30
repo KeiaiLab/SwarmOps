@@ -1696,9 +1696,10 @@ fn error_codes_reach_the_cli() {
     ]);
     // On main's head, but main stays where it is: a commit without --advance moves no ref.
     let c2 = s.commit(&store, None, "src/main.rs", "fn main() {}\n", "c2");
+    let op0 = Session::op_id(&store, 0);
 
     let mut raised = Vec::new();
-    for (code, args) in error_cases(&s, &store, [&c1, &c2]) {
+    for (code, args) in error_cases(&s, &store, [&c1, &c2], &op0) {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let failed = s.run(&args);
         assert_eq!(failed.code(), code, "{args:?}");
@@ -1810,8 +1811,13 @@ fn check_not_raised() {
 
 /// The failing commands of [`error_codes_reach_the_cli`], each with the code it must raise,
 /// against `store`, where main holds `src/lib.rs`, and `c2`, which main does not hold,
-/// adds `src/main.rs`.
-fn error_cases(s: &Session, store: &str, [c1, c2]: [&str; 2]) -> Vec<(&'static str, Vec<String>)> {
+/// adds `src/main.rs`; `op0` is the id of operation 0, the first commit.
+fn error_cases(
+    s: &Session,
+    store: &str,
+    [c1, c2]: [&str; 2],
+    op0: &str,
+) -> Vec<(&'static str, Vec<String>)> {
     let empty = s.file("empty.json", "[]");
     let conflict = s.file(
         "conflict.json",
@@ -1902,8 +1908,10 @@ fn error_cases(s: &Session, store: &str, [c1, c2]: [&str; 2]) -> Vec<(&'static s
             on(&["ref", "delete", "main", "--expect", c1]),
         ),
         // Operation 0 is the first commit, which moved no ref; the store has three.
-        ("E_NOTHING_TO_UNDO", on(&["op", "undo", "0"])),
-        ("E_OP_NOT_FOUND", on(&["op", "undo", "99"])),
+        ("E_NOTHING_TO_UNDO", on(&["op", "undo", op0])),
+        ("E_OP_NOT_FOUND", on(&["op", "undo", "99:00000000"])),
+        // An undo takes an operation's id, never its bare number.
+        ("E_INVALID_ARG", on(&["op", "undo", "0"])),
     ]
 }
 
@@ -2248,7 +2256,10 @@ fn op_log_pages_with_before() {
         .extend(["--changes", &changes, "--parent", &c1, "--advance", "main"].map(str::to_owned));
     let published = run(&mut s, publish); // op 2
     let c2 = s.name_at(&published, "/result/changeset", "c2");
-    run(&mut s, on(&["op", "undo", "2"])); // op 3
+    let op2 = Session::op_id(&store, 2);
+    let mut undo = on(&["op", "undo"]);
+    undo.push(op2.clone());
+    run(&mut s, undo); // op 3
 
     let all = run(&mut s, on(&["op", "log"]));
     assert_eq!(all["op"], "op_log");
@@ -2256,6 +2267,10 @@ fn op_log_pages_with_before() {
     let ops = all["result"]["ops"].as_array().unwrap();
     let field = |key: &str| -> Vec<Value> { ops.iter().map(|op| op[key].clone()).collect() };
     assert_eq!(field("op"), [3, 2, 1, 0].map(Value::from));
+    for op in ops {
+        let id = op["id"].as_str().unwrap();
+        assert!(id.starts_with(&format!("{}:", op["op"])), "{op}");
+    }
     let kinds = ["ref_move", "publish", "ref_move", "commit"];
     assert_eq!(field("kind"), kinds.map(Value::from));
     assert_eq!(field("changesets_total"), [0, 1, 0, 1].map(Value::from));
@@ -2266,6 +2281,7 @@ fn op_log_pages_with_before() {
         ops[1],
         json!({
             "op": 2,
+            "id": op2,
             "kind": "publish",
             "changesets": [{"id": c2, "agent": AGENT, "created_at": created_at, "title": "c2"}],
             "changesets_total": 1,
@@ -2343,12 +2359,12 @@ fn op_log_behind_a_held_lock_is_e_busy() {
     insta::assert_json_snapshot!(envelope);
 }
 
-/// `op undo` through the binary moves the refs an operation moved back, in an operation of its
-/// own for the caller's agent, which `op log` lists and another undo takes back; run again, it is
-/// a replay that writes nothing. An operation whose ref was moved since is `E_CAS_MISMATCH` (exit
-/// 4) naming the ref, what it names and the operation, with nothing written; one past the last is
-/// `E_OP_NOT_FOUND` (exit 6), one that moved no ref `E_NOTHING_TO_UNDO`; without an identity, an
-/// undo is refused as every mutation is.
+/// `op undo` through the binary takes the id `op log` prints and moves the refs that operation
+/// moved back, in an operation of its own for the caller's agent, whose id the response gives
+/// and another undo takes back; run again, it is a replay that writes nothing. An operation whose
+/// ref was moved since is `E_CAS_MISMATCH` (exit 4) naming the ref, what it names and the
+/// operation, with nothing written; one that moved no ref is `E_NOTHING_TO_UNDO`; without an
+/// identity, an undo is refused as every mutation is.
 #[test]
 fn op_undo_end_to_end() {
     const UNDOER: &str = "agent/worker-18";
@@ -2381,7 +2397,8 @@ fn op_undo_end_to_end() {
         refs["result"]["refs"][0]["target"].clone()
     };
 
-    let undone = undo(&mut s, "3");
+    let op3 = Session::op_id(&store, 3);
+    let undone = undo(&mut s, &op3);
     assert_eq!(
         (undone.exit, &undone["op"]),
         (0, &json!("undo")),
@@ -2389,18 +2406,20 @@ fn op_undo_end_to_end() {
         undone.json
     );
     let at = undone["result"]["ref_moves"][0]["at"].clone();
+    let op4 = Session::op_id(&store, 4);
     assert_eq!(
         undone["result"],
         json!({
             "undone": 3,
             "op": 4,
+            "id": op4,
             "ref_moves": [{"name": "main", "old": c2, "new": c1, "actor": UNDOER, "at": at}],
             "already_applied": false,
         })
     );
     assert!(undone["meta"].get("recovered").is_none(), "{}", undone.json);
     assert_eq!(main(&mut s), c1.as_str());
-    let again = undo(&mut s, "3");
+    let again = undo(&mut s, &op3);
     assert_eq!(
         again["result"],
         json!({"undone": 3, "ref_moves": [], "already_applied": true})
@@ -2413,14 +2432,14 @@ fn op_undo_end_to_end() {
     );
     assert_eq!(newest["ref_moves"], undone["result"]["ref_moves"]);
     // The undo is an operation of its own, and undoing it moves main forward again.
-    let redone = undo(&mut s, "4");
+    let redone = undo(&mut s, &op4);
     assert_eq!(redone["result"]["op"], 5);
     assert_eq!(main(&mut s), c2.as_str());
 
     // Moved since: main names c3 now, neither what operation 3 set nor what it found.
     let c3 = s.commit(&store, Some(&c2), "a.txt", "3\n", "c3"); // op 6
     set(&mut s, &c3, &["--expect", &c2]); // op 7
-    let blocked = undo(&mut s, "3");
+    let blocked = undo(&mut s, &op3);
     assert_eq!((blocked.exit, blocked.code()), (4, "E_CAS_MISMATCH"));
     assert_eq!(
         blocked["error"]["details"],
@@ -2433,13 +2452,12 @@ fn op_undo_end_to_end() {
     let listed = s.run(&["--repo", store.as_str(), "op", "log", "-n", "1"]);
     assert_eq!(listed["result"]["ops"][0]["op"], 7, "nothing written");
 
-    let missing = undo(&mut s, "99");
-    assert_eq!((missing.exit, missing.code()), (6, "E_OP_NOT_FOUND"));
-    assert_eq!(missing["error"]["details"], json!({"op": 99, "last": 7}));
-    let nothing = undo(&mut s, "6");
+    let op6 = Session::op_id(&store, 6);
+    let nothing = undo(&mut s, &op6);
     assert_eq!((nothing.exit, nothing.code()), (1, "E_NOTHING_TO_UNDO"));
     assert_eq!(nothing["error"]["details"], json!({"op": 6}));
-    let anonymous = s.run(&["--repo", store.as_str(), "op", "undo", "7"]);
+    let op7 = Session::op_id(&store, 7);
+    let anonymous = s.run(&["--repo", store.as_str(), "op", "undo", &op7]);
     assert_eq!(
         (anonymous.exit, anonymous.code()),
         (5, "E_IDENTITY_REQUIRED")
@@ -2449,6 +2467,61 @@ fn op_undo_end_to_end() {
         s.run(&["--repo", store.as_str(), "verify", "--deep"]).exit,
         0
     );
+}
+
+/// `op undo` refuses an id it cannot trust, writing nothing: one past the last operation or
+/// whose crc is not the frame's at its number is `E_OP_NOT_FOUND` (exit 6) with the reason, a
+/// bare number `E_INVALID_ARG` (exit 2) naming it.
+#[test]
+fn op_undo_refuses_bad_ids() {
+    let mut s = Session::new();
+    let store = s.store();
+    s.run(&["init", &store]);
+    let c1 = s.commit(&store, None, "a.txt", "1\n", "c1"); // op 0
+    let created = s.run(&[
+        "--repo",
+        &store,
+        "--as",
+        AGENT,
+        "ref",
+        "set",
+        "release/r",
+        &c1,
+        "--create",
+    ]); // op 1
+    assert_eq!(created.exit, 0, "{}", created.json);
+    let undo = |s: &mut Session, id: &str| {
+        s.run(&["--repo", store.as_str(), "--as", AGENT, "op", "undo", id])
+    };
+
+    // Past the last operation.
+    let missing = undo(&mut s, "99:00000000");
+    assert_eq!((missing.exit, missing.code()), (6, "E_OP_NOT_FOUND"));
+    assert_eq!(
+        missing["error"]["details"],
+        json!({"op": 99, "id": "99:00000000", "last": 1, "reason": "past_end"})
+    );
+
+    // The right number with another crc: the message never names the real id.
+    let op1 = Session::op_id(&store, 1);
+    let mistyped = if op1.ends_with('0') {
+        "1:00000001"
+    } else {
+        "1:00000000"
+    };
+    let other = undo(&mut s, mistyped);
+    assert_eq!((other.exit, other.code()), (6, "E_OP_NOT_FOUND"));
+    assert_eq!(other["error"]["details"]["reason"], "checksum");
+    let message = other["error"]["message"].as_str().unwrap();
+    assert!(!message.contains(&op1), "{message}");
+
+    // A bare number.
+    let bare = undo(&mut s, "1");
+    assert_eq!((bare.exit, bare.code()), (2, "E_INVALID_ARG"));
+    assert_eq!(bare["error"]["details"], json!({"id": "1"}));
+
+    let listed = s.run(&["--repo", store.as_str(), "op", "log", "-n", "1"]);
+    assert_eq!(listed["result"]["ops"][0]["op"], 1, "nothing written");
 }
 
 /// The agent whose publish main gains while a change waits to land, in the land tests.
@@ -2886,7 +2959,8 @@ fn op_log_undo_golden() {
     // 2. The log, then the undo of the move (operation 3), then the newest operation.
     let log = s.run(&["--repo", &store, "op", "log"]);
     assert_eq!(log["result"]["ops"][0]["op"], 3, "{}", log.json);
-    let undo = s.run(&["--repo", &store, "--as", AGENT, "op", "undo", "3"]);
+    let op3 = log["result"]["ops"][0]["id"].as_str().unwrap().to_owned();
+    let undo = s.run(&["--repo", &store, "--as", AGENT, "op", "undo", &op3]);
     assert_eq!(undo.exit, 0, "{}", undo.json);
     let newest = s.run(&["--repo", &store, "op", "log", "-n", "1"]);
     assert_eq!(newest["result"]["ops"][0]["op"], 4, "{}", newest.json);
@@ -3273,6 +3347,21 @@ impl Session {
         self.run_env(&[], args)
     }
 
+    /// The id `op log` lists for operation `op` of `store`; records nothing.
+    fn op_id(store: &str, op: u64) -> String {
+        let before = (op + 1).to_string();
+        let args = ["--repo", store, "op", "log", "--before", &before, "-n", "1"];
+        let output = Session::run_raw(&[], &args, None);
+        let listed: Value = serde_json::from_str(&output.stdout).expect("an envelope");
+        let id = listed
+            .pointer("/result/ops/0/id")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("no operation {op}: {listed}"))
+            .to_owned();
+        assert!(id.starts_with(&format!("{op}:")), "{listed}");
+        id
+    }
+
     fn run_env(&mut self, env: &[(&str, &str)], args: &[&str]) -> Reply {
         self.step(env, args, None)
     }
@@ -3526,13 +3615,14 @@ impl Names {
         }
     }
 
-    /// `text` with each named value replaced by its name, then each other run of 32 or more
-    /// lowercase hex digits by `[id<n>]`.
+    /// `text` with each named value replaced by its name, each other operation id's checksum by
+    /// `[crc]`, then each other run of 32 or more lowercase hex digits by `[id<n>]`.
     fn redact_str(&mut self, text: &str) -> String {
         let mut text = text.to_owned();
         for (value, name) in &self.named {
             text = text.replace(value.as_str(), name);
         }
+        let text = support::redact_crcs(&text);
         let mut out = String::with_capacity(text.len());
         let mut run = String::new();
         for c in text.chars().chain(std::iter::once('\0')) {

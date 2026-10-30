@@ -2865,8 +2865,12 @@ impl OpLogPage {
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct OperationOut {
-    /// Its number: its journal frame's, from 0 in commit order. `undo` takes it.
+    /// Its number: its journal frame's, from 0 in commit order. `before` pages on from it.
     pub op: u64,
+    /// Its id, which `undo` takes: `<op>:<crc>`, the number and its frame's payload CRC-32 as 8
+    /// lowercase hex digits (`4:9f3a01c2`). An operation that took the number of one a failed
+    /// sync took back has another id.
+    pub id: String,
     /// What it did, read from what it recorded.
     pub kind: OperationKind,
     /// The changesets it recorded, in its order: at most the request's `max_changesets`.
@@ -2881,6 +2885,7 @@ impl OperationOut {
     /// Takes every field.
     pub fn new(
         op: u64,
+        id: impl Into<String>,
         kind: OperationKind,
         changesets: Vec<OpChangesetOut>,
         changesets_total: u64,
@@ -2888,6 +2893,7 @@ impl OperationOut {
     ) -> Self {
         Self {
             op,
+            id: id.into(),
             kind,
             changesets,
             changesets_total,
@@ -2986,14 +2992,23 @@ impl RefMoveOut {
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct UndoReq {
-    /// The operation to undo: its `op` in the operation log.
-    pub op: u64,
+    /// The operation to undo: its `id` in the operation log, `<op>:<crc>` (`4:9f3a01c2`). A bare
+    /// number, upper case or any other form is `E_INVALID_ARG`; an id whose number is past the
+    /// last operation, or whose crc is not the frame's at that number, is `E_OP_NOT_FOUND`.
+    #[schemars(pattern(op_id_pattern()))]
+    pub id: String,
+}
+
+/// The form of [`UndoReq::id`]: a number of at most 20 digits, a colon and 8 lowercase hex
+/// digits.
+fn op_id_pattern() -> String {
+    "^[0-9]{1,20}:[0-9a-f]{8}$".to_owned()
 }
 
 impl UndoReq {
     /// Takes every field.
-    pub fn new(op: u64) -> Self {
-        Self { op }
+    pub fn new(id: impl Into<String>) -> Self {
+        Self { id: id.into() }
     }
 }
 
@@ -3003,10 +3018,14 @@ impl UndoReq {
 pub struct UndoResp {
     /// The operation undone.
     pub undone: u64,
-    /// The operation this undo recorded, which another undo can take; omitted when it wrote
-    /// nothing (`already_applied`).
+    /// The number of the operation this undo recorded; omitted when it wrote nothing
+    /// (`already_applied`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub op: Option<u64>,
+    /// The id of the operation this undo recorded, which another undo takes; omitted exactly when
+    /// `op` is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     /// The moves it made: each ref from what the operation set back to what it named before.
     pub ref_moves: Vec<RefMoveOut>,
     /// Every ref the operation moved already names what it named before, so nothing was written:
@@ -3024,6 +3043,7 @@ impl UndoResp {
         Self {
             undone,
             op: None,
+            id: None,
             ref_moves,
             already_applied,
             warnings: Vec::new(),

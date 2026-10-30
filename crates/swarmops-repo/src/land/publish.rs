@@ -45,6 +45,7 @@ use swarmops_store::{
 
 use crate::commit::{Draft, WrittenChangeset};
 use crate::error::RepoError;
+use crate::oplog::OpId;
 use crate::repo::{self, Repo};
 
 /// The most first-parent steps a publish walks from the target's head back to a land's `onto`:
@@ -336,13 +337,19 @@ fn record(
     match write.commit() {
         Ok(_) => {}
         Err(StoreError::PostCommit {
-            frame_seq, source, ..
+            frame_seq,
+            frame_crc,
+            source,
         }) => {
             let what = format!(
                 "the landed changeset {} and the move of ref {}",
                 frame.id, p.target
             );
-            warnings.push(repo::post_commit_warning(&what, frame_seq, &source));
+            warnings.push(repo::post_commit_warning(
+                &what,
+                OpId::new(frame_seq, frame_crc),
+                &source,
+            ));
         }
         Err(e) => return Err(e.into()),
     }

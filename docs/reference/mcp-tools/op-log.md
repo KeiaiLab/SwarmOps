@@ -2,7 +2,7 @@
 
 # op_log
 
-The store's operations, newest first: each write transaction, numbered as undo takes it, with its kind, the changesets it recorded and the refs it moved; pass a limit of 20 or less and page on with before, since clients limit long tool results.
+The store's operations, newest first: each write transaction, with the id undo takes, its kind, the changesets it recorded and the refs it moved; pass a limit of 20 or less and page on with before, since clients limit long tool results.
 
 ```yaml
 title: "op_log"
@@ -107,7 +107,7 @@ Its entry in `tools/list` carries no `_meta`.
   "result": {
     "content": [
       {
-        "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"op_log\",\"result\":{\"ops\":[{\"changesets\":[],\"changesets_total\":0,\"kind\":\"ref_move\",\"op\":7,\"ref_moves\":[{\"actor\":\"agent/worker-17\",\"at\":\"[at]\",\"name\":\"release/v1\",\"old\":\"[c1]\"}]},{\"changesets\":[],\"changesets_total\":0,\"kind\":\"ref_move\",\"op\":6,\"ref_moves\":[{\"actor\":\"agent/worker-17\",\"at\":\"[at]\",\"name\":\"release/v1\",\"new\":\"[c1]\"}]}],\"truncated\":true}}",
+        "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"op_log\",\"result\":{\"ops\":[{\"changesets\":[],\"changesets_total\":0,\"id\":\"7:[crc]\",\"kind\":\"ref_move\",\"op\":7,\"ref_moves\":[{\"actor\":\"agent/worker-17\",\"at\":\"[at]\",\"name\":\"release/v1\",\"old\":\"[c1]\"}]},{\"changesets\":[],\"changesets_total\":0,\"id\":\"6:[crc]\",\"kind\":\"ref_move\",\"op\":6,\"ref_moves\":[{\"actor\":\"agent/worker-17\",\"at\":\"[at]\",\"name\":\"release/v1\",\"new\":\"[c1]\"}]}],\"truncated\":true}}",
         "type": "text"
       }
     ],
@@ -127,6 +127,7 @@ Its entry in `tools/list` carries no `_meta`.
           {
             "changesets": [],
             "changesets_total": 0,
+            "id": "7:[crc]",
             "kind": "ref_move",
             "op": 7,
             "ref_moves": [
@@ -141,6 +142,7 @@ Its entry in `tools/list` carries no `_meta`.
           {
             "changesets": [],
             "changesets_total": 0,
+            "id": "6:[crc]",
             "kind": "ref_move",
             "op": 6,
             "ref_moves": [

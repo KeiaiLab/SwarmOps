@@ -1,7 +1,7 @@
 `op log` lists the store's operations, newest first. An operation is one write transaction: one
 frame of the store's journal, numbered from 0 in commit order. Each entry says what kind of write
 it was, which changesets it recorded and which refs it moved, by whom and when. It is the
-store's audit trail and the input of `op undo`, which takes an operation's number. It needs no
+store's audit trail and the input of `op undo`, which takes an operation's `id`. It needs no
 identity. It waits for the store's lock, as a write does (`E_BUSY` after 10 s, retryable), so
 that a number it lists is never given to another operation. It writes nothing but the repair of
 the journal's tail that the next write would make, so a read-only store refuses it as it refuses
@@ -29,7 +29,10 @@ the store's caches and the git repository, so they are not listed either.
 
 ### Reading an entry
 
-- **`op`** is the number `op undo` takes.
+- **`op`** is the operation's number; `--before` pages on from it.
+- **`id`** is the id `op undo` takes: `<op>:<crc>`, the number and the CRC-32 of the operation's
+  journal frame as 8 lowercase hex digits (`4:9f3a01c2`). An operation that took the number of
+  one a failed write took back has another id.
 - **`changesets`** lists at most `--max-changesets` of the changesets the operation recorded, in
   its order, each with its `id`, the `agent` that wrote it, `created_at` (the committer's time,
   in Unix **milliseconds**), the message's first line as `title`, and the land's `land_key` when

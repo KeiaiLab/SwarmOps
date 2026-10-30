@@ -45,7 +45,7 @@ A failed command prints an envelope whose `error` names a stable `E_*` code, the
 | [`E_CAS_RETRY_EXHAUSTED`](#e_cas_retry_exhausted) | 4 | yes | The target moved before every one of the land's attempts could publish; nothing was recorded, and running the land again can succeed. |
 | [`E_NOTHING_TO_LAND`](#e_nothing_to_land) | 1 | no | The land has nothing to add to the target: its head is on the target already, or its change is (`details.reason` says which). |
 | [`E_NOTHING_TO_UNDO`](#e_nothing_to_undo) | 1 | no | The operation moved no ref, so there is nothing to restore. |
-| [`E_OP_NOT_FOUND`](#e_op_not_found) | 6 | no | The store has no operation by that number. |
+| [`E_OP_NOT_FOUND`](#e_op_not_found) | 6 | no | The store has no operation with that id. |
 | [`E_AUTH`](#e_auth) | 5 | no | The serving entry could not name the caller, or no grant of the store's access file names it. |
 | [`E_POLICY_DENIED`](#e_policy_denied) | 5 | no | The store's access file grants this identity no such action. |
 | [`E_MAINTENANCE_BUSY`](#e_maintenance_busy) | 4 | yes | Another gc, repair or upgrade holds the store's maintenance lease; nothing was done, and running the operation again once it is done can succeed. |
@@ -230,7 +230,7 @@ The operation moved no ref, so there is nothing to restore.
 
 Exit 6. Retryable: no.
 
-The store has no operation by that number.
+The store has no operation with that id.
 
 ## E_AUTH
 

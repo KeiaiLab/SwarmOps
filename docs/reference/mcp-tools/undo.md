@@ -2,7 +2,7 @@
 
 # undo
 
-Moves every ref an operation of op\_log moved back to what it named before, by compare-and-swap in one transaction: all of them or none. A ref moved since stops it (E\_CAS\_MISMATCH, nothing written: undo the later operations first); an undo run again is a replay (already\_applied). Changesets are never removed.
+Moves every ref an operation of op\_log moved back to what it named before, by compare-and-swap in one transaction: all of them or none. It takes the operation's id from op\_log (4:9f3a01c2); a bare number is E\_INVALID\_ARG. A ref moved since stops it (E\_CAS\_MISMATCH, nothing written: undo the later operations first); an undo run again is a replay (already\_applied). Changesets are never removed.
 
 ```yaml
 title: "undo"
@@ -23,7 +23,7 @@ max_result_chars: null
 
 | Field | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
-| `op` | integer | yes |  | The operation to undo: its `op` in the operation log. |
+| `id` | string | yes |  | The operation to undo: its `id` in the operation log, `<op>:<crc>` (`4:9f3a01c2`). A bare number, upper case or any other form is `E_INVALID_ARG`; an id whose number is past the last operation, or whose crc is not the frame's at that number, is `E_OP_NOT_FOUND`. |
 
 ### JSON Schema
 
@@ -34,15 +34,14 @@ As `tools/list` gives it: each `$ref` replaced by its definition, so that it sta
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "`undo` (CLI `op undo`): restore every ref an operation moved to what it named before, by\ncompare-and-swap, in one transaction: all of them or none. Changesets are never removed.",
   "properties": {
-    "op": {
-      "description": "The operation to undo: its `op` in the operation log.",
-      "format": "uint64",
-      "minimum": 0,
-      "type": "integer"
+    "id": {
+      "description": "The operation to undo: its `id` in the operation log, `<op>:<crc>` (`4:9f3a01c2`). A bare\nnumber, upper case or any other form is `E_INVALID_ARG`; an id whose number is past the\nlast operation, or whose crc is not the frame's at that number, is `E_OP_NOT_FOUND`.",
+      "pattern": "^[0-9]{1,20}:[0-9a-f]{8}$",
+      "type": "string"
     }
   },
   "required": [
-    "op"
+    "id"
   ],
   "title": "UndoReq",
   "type": "object"
@@ -77,7 +76,7 @@ Its entry in `tools/list` carries no `_meta`.
   "method": "tools/call",
   "params": {
     "arguments": {
-      "op": 7
+      "id": "7:[crc]"
     },
     "name": "undo"
   }
@@ -91,7 +90,7 @@ Its entry in `tools/list` carries no `_meta`.
   "result": {
     "content": [
       {
-        "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"undo\",\"result\":{\"already_applied\":false,\"op\":8,\"ref_moves\":[{\"actor\":\"agent/worker-17\",\"at\":\"[at]\",\"name\":\"release/v1\",\"new\":\"[c1]\"}],\"undone\":7}}",
+        "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"undo\",\"result\":{\"already_applied\":false,\"id\":\"8:[crc]\",\"op\":8,\"ref_moves\":[{\"actor\":\"agent/worker-17\",\"at\":\"[at]\",\"name\":\"release/v1\",\"new\":\"[c1]\"}],\"undone\":7}}",
         "type": "text"
       }
     ],
@@ -108,6 +107,7 @@ Its entry in `tools/list` carries no `_meta`.
       "op": "undo",
       "result": {
         "already_applied": false,
+        "id": "8:[crc]",
         "op": 8,
         "ref_moves": [
           {

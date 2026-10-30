@@ -1046,7 +1046,7 @@ expression: transcript
         "result": {
           "content": [
             {
-              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"op_log\",\"result\":{\"ops\":[{\"changesets\":[],\"changesets_total\":0,\"kind\":\"ref_move\",\"op\":7,\"ref_moves\":[{\"actor\":\"agent/worker-17\",\"at\":\"[at]\",\"name\":\"release/v1\",\"old\":\"[c1]\"}]},{\"changesets\":[],\"changesets_total\":0,\"kind\":\"ref_move\",\"op\":6,\"ref_moves\":[{\"actor\":\"agent/worker-17\",\"at\":\"[at]\",\"name\":\"release/v1\",\"new\":\"[c1]\"}]}],\"truncated\":true}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"op_log\",\"result\":{\"ops\":[{\"changesets\":[],\"changesets_total\":0,\"id\":\"7:[crc]\",\"kind\":\"ref_move\",\"op\":7,\"ref_moves\":[{\"actor\":\"agent/worker-17\",\"at\":\"[at]\",\"name\":\"release/v1\",\"old\":\"[c1]\"}]},{\"changesets\":[],\"changesets_total\":0,\"id\":\"6:[crc]\",\"kind\":\"ref_move\",\"op\":6,\"ref_moves\":[{\"actor\":\"agent/worker-17\",\"at\":\"[at]\",\"name\":\"release/v1\",\"new\":\"[c1]\"}]}],\"truncated\":true}}",
               "type": "text"
             }
           ],
@@ -1066,6 +1066,7 @@ expression: transcript
                 {
                   "changesets": [],
                   "changesets_total": 0,
+                  "id": "7:[crc]",
                   "kind": "ref_move",
                   "op": 7,
                   "ref_moves": [
@@ -1080,6 +1081,7 @@ expression: transcript
                 {
                   "changesets": [],
                   "changesets_total": 0,
+                  "id": "6:[crc]",
                   "kind": "ref_move",
                   "op": 6,
                   "ref_moves": [
@@ -1105,7 +1107,7 @@ expression: transcript
         "method": "tools/call",
         "params": {
           "arguments": {
-            "op": 7
+            "id": "7:[crc]"
           },
           "name": "undo"
         }
@@ -1116,7 +1118,7 @@ expression: transcript
         "result": {
           "content": [
             {
-              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"undo\",\"result\":{\"already_applied\":false,\"op\":8,\"ref_moves\":[{\"actor\":\"agent/worker-17\",\"at\":\"[at]\",\"name\":\"release/v1\",\"new\":\"[c1]\"}],\"undone\":7}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"undo\",\"result\":{\"already_applied\":false,\"id\":\"8:[crc]\",\"op\":8,\"ref_moves\":[{\"actor\":\"agent/worker-17\",\"at\":\"[at]\",\"name\":\"release/v1\",\"new\":\"[c1]\"}],\"undone\":7}}",
               "type": "text"
             }
           ],
@@ -1133,6 +1135,7 @@ expression: transcript
             "op": "undo",
             "result": {
               "already_applied": false,
+              "id": "8:[crc]",
               "op": 8,
               "ref_moves": [
                 {

@@ -15,8 +15,8 @@ mutates: true
 identity_required: true
 mcp_tool: "undo"
 envelope_op: "undo"
-exit_codes: [0, 1, 6]
-errors: [E_NOTHING_TO_UNDO, E_OP_NOT_FOUND]
+exit_codes: [0, 1, 2, 6]
+errors: [E_INVALID_ARG, E_NOTHING_TO_UNDO, E_OP_NOT_FOUND]
 syntax: "swarmops op undo [OPTIONS] <OP>"
 ```
 
@@ -32,7 +32,7 @@ swarmops op undo [OPTIONS] <OP>
 
 Syntax: `<OP>`.
 
-The operation, as op log numbers it.
+The operation's id, as op log prints it: &lt;op&gt;:&lt;crc&gt; (4:9f3a01c2). A bare number is E\_INVALID\_ARG.
 
 ## Optional arguments
 
@@ -43,7 +43,7 @@ The command also takes the [global options](../cli.md#global-options).
 ### CLI
 
 ```sh
-swarmops --repo [tmp]/store --as agent/worker-17 op undo 3
+swarmops --repo [tmp]/store --as agent/worker-17 op undo 3:[crc]
 ```
 
 ```json
@@ -54,6 +54,7 @@ swarmops --repo [tmp]/store --as agent/worker-17 op undo 3
   "result": {
     "undone": 3,
     "op": 4,
+    "id": "4:[crc]",
     "ref_moves": [
       {
         "name": "main",
@@ -83,7 +84,9 @@ No recorded example yet.
 ## Details
 
 `op undo` takes back the ref moves of one operation: every ref that operation `OP` moved goes
-back to what it named before `OP`, in one transaction of its own, all of them or none. It moves
+back to what it named before `OP`, in one transaction of its own, all of them or none. It names
+`OP` by its id as `op log` prints it, `<op>:<crc>` (`4:9f3a01c2`): the operation's number and the
+CRC-32 of its journal frame, so an id names one operation and no other. It moves
 refs only. Changesets are never removed, so whatever an undo takes off a ref stays in the store,
 readable by id. Use it to take back a mistaken `ref set`, a publish or a land that should not
 have reached `main`, a deletion or a creation of a ref. An undo of `main`'s creation would
@@ -118,8 +121,14 @@ no `op`, and lists no moves. So running the same undo again is safe.
 
 Before the comparison:
 
-- **`E_OP_NOT_FOUND`** (exit 6): the store has no operation `OP`. `details.last` is the newest
-  operation's number, `null` for a store without one.
+- **`E_INVALID_ARG`** (exit 2): the argument is no id: a bare number, upper-case hex, or any
+  other form. Nothing is read or written.
+- **`E_OP_NOT_FOUND`** (exit 6): the store has no operation with that id. `details.reason` says
+  why: `past_end`, its number is past the last operation; `checksum`, the operation at its
+  number has another crc, so the one named was taken back and its number went to another write,
+  or the id is mistyped. `details.op` and `details.id` give what was asked, and `details.last`
+  the newest operation's number, `null` for a store without one. The error never gives the id
+  of the operation at that number: undoing it would undo another operation.
 - **`E_NOTHING_TO_UNDO`** (exit 1): `OP` moved no ref (a `commit` without `--advance`, a
   compaction), or moved each ref back to where it found it.
 - **`E_IDENTITY_REQUIRED`** (exit 5): an undo is a write, so it needs `--as` or
@@ -142,33 +151,35 @@ the same undo again without changing anything fails the same way.
 
 ### The undo is an operation
 
-A successful undo records one operation of kind `ref_move`, its number in the result's `op`. Its
-moves name the undoer as `actor` and carry the undo's time. Another `op undo` of that number
-takes the undo back, which moves the refs forward again.
+A successful undo records one operation of kind `ref_move`, its number in the result's `op` and
+its id in `id`. Its moves name the undoer as `actor` and carry the undo's time. Another
+`op undo` of that id takes the undo back, which moves the refs forward again.
 
 ### Patterns
 
 Take back the newest move of `main`:
 
 ```sh
-OP=$(swarmops op log | jq -r '[.result.ops[] | select(any(.ref_moves[]; .name == "main"))][0].op')
-swarmops op log --before $((OP + 1)) -n 1 | jq -c '.result.ops[0]'
-swarmops op undo "$OP"
+ID=$(swarmops op log | jq -r '[.result.ops[] | select(any(.ref_moves[]; .name == "main"))][0].id')
+swarmops op log --before $((${ID%%:*} + 1)) -n 1 | jq -c '.result.ops[0]'
+swarmops op undo "$ID"
 ```
 
 The second line lists the operation once more, to check that its moves are the ones you mean
 before you undo it (below).
 
 Read the result: `already_applied: true` means nothing was written because every ref was back
-already; otherwise `ref_moves` lists each move made and `op` is the undo's own number.
+already; otherwise `ref_moves` lists each move made, and `op` and `id` are the undo's own.
 
 ### Caveats
 
-- **Check the number first.** `op log` lists only committed operations, so a listed number keeps
-  its operation; only the double and triple faults the journal's failure policy leaves open can
-  lose one ([Known limitations](../../known-limitations.md#durability)). An undo moves back
-  the refs that the operation of the number you give moved, with no error while they hold what it
-  set: list the operation again before you undo it, as the pattern above does.
+- **Check the operation first.** An id read before a failed write took its operation back
+  never undoes the operation that took its number next: that one has another crc, and the undo
+  is `E_OP_NOT_FOUND` (`checksum`). Two operations share a number and a crc only by a CRC-32
+  collision, one chance in 2^32 for each number taken back
+  ([Known limitations](../../known-limitations.md#durability)). An undo moves back the refs
+  the operation moved, with no error while they hold what it set: list the operation again
+  before you undo it, as the pattern above does.
 - **It is not a revert.** An undo moves refs; it does not record a change that reverses the
   files. After it, the changesets `OP` added are on no ref, yet still in the store.
 - **Land keys.** A keyed land looks for an earlier land of its key on the target's
@@ -180,7 +191,7 @@ already; otherwise `ref_moves` lists each move made and `op` is the undo's own n
 
 ### Through MCP
 
-The MCP tool is `undo`, with `op`. Its description says the same: a ref moved since stops it,
+The MCP tool is `undo`, with `id`. Its description says the same: a ref moved since stops it,
 undo the later operations first, and a second run is a replay.
 
 ### Guides
@@ -196,7 +207,8 @@ undo the later operations first, and a second run is a replay.
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `already_applied` | `boolean` | yes | Every ref the operation moved already names what it named before, so nothing was written: an undo run again is a replay, and safe. |
-| `op` | `integer or null` | no | The operation this undo recorded, which another undo can take; omitted when it wrote nothing (`already_applied`). |
+| `id` | `string or null` | no | The id of the operation this undo recorded, which another undo takes; omitted exactly when `op` is. |
+| `op` | `integer or null` | no | The number of the operation this undo recorded; omitted when it wrote nothing (`already_applied`). |
 | `ref_moves` | `array of RefMoveOut` | yes | The moves it made: each ref from what the operation set back to what it named before. |
 | `undone` | `integer` | yes | The operation undone. |
 | `warnings` | `array of string` | no | Problems found after the undo became durable, such as failed housekeeping; the undo itself succeeded. Omitted when empty. |
@@ -207,12 +219,14 @@ Exit codes:
 
 - `0`: Success.
 - `1`: The operation failed.
+- `2`: The request or the command line is malformed.
 - `6`: Something the request names does not exist.
 
 ## Errors
 
+- [`E_INVALID_ARG`](../errors.md#e_invalid_arg) (exit 2): A malformed argument or request, including a command-line usage error.
 - [`E_NOTHING_TO_UNDO`](../errors.md#e_nothing_to_undo) (exit 1): The operation moved no ref, so there is nothing to restore.
-- [`E_OP_NOT_FOUND`](../errors.md#e_op_not_found) (exit 6): The store has no operation by that number.
+- [`E_OP_NOT_FOUND`](../errors.md#e_op_not_found) (exit 6): The store has no operation with that id.
 
 Any command that opens a store may also fail with a store error, such as [`E_NOT_A_REPO`](../errors.md#e_not_a_repo), [`E_IO`](../errors.md#e_io) or [`E_STORE_CORRUPT`](../errors.md#e_store_corrupt); a command line the grammar refuses is [`E_INVALID_ARG`](../errors.md#e_invalid_arg) (exit 2).
 

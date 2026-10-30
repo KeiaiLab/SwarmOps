@@ -20,7 +20,7 @@ use swarmops_git::{
     ConvertError, DivergedReason, ExportError, GitOid, ImportError, SinkError, SourceError,
     Unsupported,
 };
-use swarmops_repo::{MergeConflicts, RepoError, StoreError};
+use swarmops_repo::{MergeConflicts, OpId, OpNotFoundReason, RepoError, StoreError};
 use swarmops_store::{IoFailure, Layout, LimitKind, MAX_OBJECT_LEN};
 
 use crate::local;
@@ -113,12 +113,13 @@ pub(crate) fn repo_error(e: RepoError, during: During<'_>) -> OpError {
             expected,
             ..
         } => target_moved(&target, actual, expected),
-        RepoError::OpNotFound { op, last, .. } => {
-            let last = last.map_or(Value::Null, Value::from);
-            error(ErrorCode::OpNotFound, message)
-                .with_details(details([("op", op.into()), ("last", last)]))
-                .with_hint("swarmops op log")
-        }
+        RepoError::OpNotFound {
+            op,
+            crc,
+            last,
+            reason,
+            ..
+        } => op_not_found(OpId::new(op, crc), last, reason, message),
         RepoError::NothingToUndo { op: number, .. } => error(ErrorCode::NothingToUndo, message)
             .with_details(details([("op", number.into())]))
             .with_hint("swarmops op log"),
@@ -490,6 +491,21 @@ fn target_moved(name: &str, actual: ChangesetId, expected: ChangesetId) -> OpErr
         .insert("expected".to_owned(), expected.to_string().into());
     error.details.insert("committed".to_owned(), false.into());
     error
+}
+
+/// An `undo` of operation `id` the store does not hold (`last`: the last operation's number,
+/// `None` in an empty store): `E_OP_NOT_FOUND` `{id, last, op, reason}`, whose hint reads the
+/// operation log.
+fn op_not_found(id: OpId, last: Option<u64>, reason: OpNotFoundReason, message: String) -> OpError {
+    let last = last.map_or(Value::Null, Value::from);
+    error(ErrorCode::OpNotFound, message)
+        .with_details(details([
+            ("op", id.seq.into()),
+            ("id", id.to_string().into()),
+            ("last", last),
+            ("reason", reason.as_str().into()),
+        ]))
+        .with_hint("swarmops op log")
 }
 
 /// An `undo` of operation `op` that found ref `name` at `actual` (`None`: it does not exist), not
@@ -1338,6 +1354,7 @@ fn put_text(found: &mut Map<String, Value>, key: &str, text: String) {
 #[cfg(test)]
 mod tests {
     use swarmops_core::{ChangesetId, CodecError, ObjectKind};
+    use swarmops_repo::OpNotFoundReason;
     use swarmops_store::{FileOp, FsMethod, IoFailure, LimitKind};
 
     use super::*;
@@ -1451,7 +1468,9 @@ mod tests {
         maps(moved, op, ErrorCode::CasMismatch);
         let not_found = RepoError::OpNotFound {
             op: 7,
+            crc: 0,
             last: Some(3),
+            reason: OpNotFoundReason::PastEnd,
             recovered: Box::default(),
         };
         maps(not_found, op, ErrorCode::OpNotFound);
@@ -1743,7 +1762,9 @@ mod tests {
 
         let not_found = RepoError::OpNotFound {
             op: 9,
+            crc: 0,
             last: None,
+            reason: OpNotFoundReason::PastEnd,
             recovered: Box::default(),
         };
         let not_found = repo_error(not_found, During::Op);
@@ -1753,7 +1774,12 @@ mod tests {
         );
         assert_eq!(
             not_found.details,
-            details([("op", 9.into()), ("last", Value::Null)])
+            details([
+                ("op", 9.into()),
+                ("id", "9:00000000".into()),
+                ("last", Value::Null),
+                ("reason", "past_end".into()),
+            ])
         );
         assert_eq!(not_found.hint.as_deref(), Some("swarmops op log"));
         let nothing = RepoError::NothingToUndo {

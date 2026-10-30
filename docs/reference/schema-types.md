@@ -676,7 +676,7 @@ Kind: enumeration. `swarmops schema ErrorCode` prints its JSON Schema.
 | `"E_CAS_RETRY_EXHAUSTED"` | The target moved before every one of the land's attempts could publish; nothing was recorded, and running the land again can succeed. |
 | `"E_NOTHING_TO_LAND"` | The land has nothing to add to the target: its head is on the target already, or its change is (`details.reason` says which). |
 | `"E_NOTHING_TO_UNDO"` | The operation moved no ref, so there is nothing to restore. |
-| `"E_OP_NOT_FOUND"` | The store has no operation by that number. |
+| `"E_OP_NOT_FOUND"` | The store has no operation with that id. |
 | `"E_AUTH"` | The serving entry could not name the caller, or no grant of the store's access file names it. |
 | `"E_POLICY_DENIED"` | The store's access file grants this identity no such action. |
 | `"E_MAINTENANCE_BUSY"` | Another gc, repair or upgrade holds the store's maintenance lease; nothing was done, and running the operation again once it is done can succeed. |
@@ -1231,8 +1231,9 @@ Kind: object. `swarmops schema OperationOut` prints its JSON Schema.
 | --- | --- | --- | --- |
 | `changesets` | array of [`OpChangesetOut`](#opchangesetout) | yes | The changesets it recorded, in its order: at most the request's `max_changesets`. |
 | `changesets_total` | `integer` (uint64) | yes | How many changesets it recorded in all, also past `max_changesets`. |
+| `id` | `string` | yes | Its id, which `undo` takes: `<op>:<crc>`, the number and its frame's payload CRC-32 as 8 lowercase hex digits (`4:9f3a01c2`). An operation that took the number of one a failed sync took back has another id. |
 | `kind` | [`OperationKind`](#operationkind) | yes | What it did, read from what it recorded. |
-| `op` | `integer` (uint64) | yes | Its number: its journal frame's, from 0 in commit order. `undo` takes it. |
+| `op` | `integer` (uint64) | yes | Its number: its journal frame's, from 0 in commit order. `before` pages on from it. |
 | `ref_moves` | array of [`RefMoveOut`](#refmoveout) | yes | The ref moves it made, in its order. |
 
 ## PathHistoryEntry
@@ -1888,7 +1889,7 @@ Kind: object. `swarmops schema UndoReq` prints its JSON Schema.
 
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
-| `op` | `integer` (uint64) | yes | The operation to undo: its `op` in the operation log. |
+| `id` | `string` | yes | The operation to undo: its `id` in the operation log, `<op>:<crc>` (`4:9f3a01c2`). A bare number, upper case or any other form is `E_INVALID_ARG`; an id whose number is past the last operation, or whose crc is not the frame's at that number, is `E_OP_NOT_FOUND`. Matches `^[0-9]{1,20}:[0-9a-f]{8}$`. |
 
 ## UndoResp
 
@@ -1899,7 +1900,8 @@ Kind: object. `swarmops schema UndoResp` prints its JSON Schema.
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
 | `already_applied` | `boolean` | yes | Every ref the operation moved already names what it named before, so nothing was written: an undo run again is a replay, and safe. |
-| `op` | `integer` (uint64) or `null` | no | The operation this undo recorded, which another undo can take; omitted when it wrote nothing (`already_applied`). |
+| `id` | `string` or `null` | no | The id of the operation this undo recorded, which another undo takes; omitted exactly when `op` is. |
+| `op` | `integer` (uint64) or `null` | no | The number of the operation this undo recorded; omitted when it wrote nothing (`already_applied`). |
 | `ref_moves` | array of [`RefMoveOut`](#refmoveout) | yes | The moves it made: each ref from what the operation set back to what it named before. |
 | `undone` | `integer` (uint64) | yes | The operation undone. |
 | `warnings` | array of `string` | no | Problems found after the undo became durable, such as failed housekeeping; the undo itself succeeded. Omitted when empty. |

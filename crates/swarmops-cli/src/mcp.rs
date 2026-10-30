@@ -372,9 +372,9 @@ static TOOLS: [Spec; 27] = [
         name: "op_log",
         request: "OpLogReq",
         title: "List operations",
-        description: "The store's operations, newest first: each write transaction, numbered as \
-                      undo takes it, with its kind, the changesets it recorded and the refs it \
-                      moved; pass a limit of 20 or less and page on with before, since clients \
+        description: "The store's operations, newest first: each write transaction, with the id \
+                      undo takes, its kind, the changesets it recorded and the refs it moved; \
+                      pass a limit of 20 or less and page on with before, since clients \
                       limit long tool results.",
         effect: Effect::Reads,
         result_chars: None,
@@ -420,10 +420,11 @@ static TOOLS: [Spec; 27] = [
         request: "UndoReq",
         title: "Undo an operation",
         description: "Moves every ref an operation of op_log moved back to what it named before, \
-                      by compare-and-swap in one transaction: all of them or none. A ref moved \
-                      since stops it (E_CAS_MISMATCH, nothing written: undo the later operations \
-                      first); an undo run again is a replay (already_applied). Changesets are \
-                      never removed.",
+                      by compare-and-swap in one transaction: all of them or none. It takes the \
+                      operation's id from op_log (4:9f3a01c2); a bare number is E_INVALID_ARG. \
+                      A ref moved since stops it (E_CAS_MISMATCH, nothing written: undo the \
+                      later operations first); an undo run again is a replay (already_applied). \
+                      Changesets are never removed.",
         effect: Effect::Moves,
         result_chars: None,
     },
@@ -2484,7 +2485,7 @@ pub(crate) mod probe {
             "changes": [],
             "content": {"inline": "x"},
             "ids": [],
-            "op": 0,
+            "id": "0:00000000",
             "remote": "origin",
             "workspace": "probe",
             "paths": [],

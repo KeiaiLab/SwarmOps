@@ -332,8 +332,8 @@ fn mcp_tool_calls_golden() {
     let ops = golden.ok("op_log", json!({"limit": 2}));
     let deleted = &ops["result"]["ops"][0];
     assert_eq!(deleted["ref_moves"][0]["name"], "release/v1", "{ops}");
-    let op = deleted["op"].as_u64().expect("an operation number");
-    golden.ok("undo", json!({"op": op}));
+    let id = deleted["id"].as_str().unwrap().to_owned();
+    golden.ok("undo", json!({"id": id}));
     golden.ok("ref_list", json!({}));
 
     // 6. A workspace: made, edited, diffed and committed; more of the tree written out and an
@@ -732,7 +732,7 @@ fn mcp_mutation_without_identity_is_e_identity_required() {
             "ref_delete",
             json!({"name": "main", "expected_old": "0".repeat(64)}),
         ),
-        ("undo", json!({"op": 0})),
+        ("undo", json!({"id": "0:00000000"})),
     ];
     // Each call is well formed, so the missing identity is what refuses it.
     for (tool, arguments) in mutations {
@@ -1073,10 +1073,12 @@ fn mcp_compare_and_swap_needs_a_concrete_expected_id() {
 }
 
 /// `undo` through the server: it lists as a mutation that moves refs by compare-and-swap, and
-/// `op_log` as a read. It restores what an operation moved, in an operation of its own that
-/// `op_log` lists, for the server's agent; again, it is a replay; once a later move has moved the
-/// ref, it is refused with `E_CAS_MISMATCH` naming the ref, what it names and the operation, with
-/// nothing written, and its hint, `swarmops op log`, is the `op_log` tool's.
+/// `op_log` as a read. It takes the id `op_log` lists and restores what that operation moved, in
+/// an operation of its own that `op_log` lists under the id the response gives, for the server's
+/// agent; again, it is a replay; once a later move has moved the ref, it is refused with
+/// `E_CAS_MISMATCH` naming the ref, what it names and the operation, with nothing written, and its
+/// hint, `swarmops op log`, is the `op_log` tool's. A request that names a number and no id is
+/// `E_INVALID_ARG`.
 #[test]
 fn mcp_undo_is_compare_and_swap_guarded() {
     let store = Store::init();
@@ -1116,16 +1118,20 @@ fn mcp_undo_is_compare_and_swap_guarded() {
     assert_eq!(moved["kind"], "ref_move", "{newest}");
     assert_eq!(newest["result"]["truncated"], true, "{newest}");
     let op = moved["op"].as_u64().unwrap();
+    let id = moved["id"].as_str().unwrap().to_owned();
+    server.err("undo", json!({"op": op}), "E_INVALID_ARG");
 
-    let undone = server.ok("undo", json!({"op": op}));
+    let undone = server.ok("undo", json!({"id": id}));
     assert_eq!(undone["result"]["undone"], op);
     assert_eq!(undone["result"]["op"], op + 1);
+    let listed = server.ok("op_log", json!({"limit": 1}));
+    assert_eq!(undone["result"]["id"], listed["result"]["ops"][0]["id"]);
     assert_eq!(undone["result"]["ref_moves"][0]["actor"], AGENT, "{undone}");
     assert_eq!(
         refs_of(&mut server),
         json!([{"name": "main", "kind": "main", "target": c1, "version": 3}])
     );
-    let again = server.ok("undo", json!({"op": op}));
+    let again = server.ok("undo", json!({"id": id}));
     assert_eq!(again["result"]["already_applied"], true, "{again}");
 
     // A later move: main from c1 to c3. The undo of the move to c2 expects c2 there.
@@ -1134,7 +1140,7 @@ fn mcp_undo_is_compare_and_swap_guarded() {
         "ref_set",
         json!({"name": "main", "new": c3, "expected_old": c1}),
     );
-    let refused = server.err("undo", json!({"op": op}), "E_CAS_MISMATCH");
+    let refused = server.err("undo", json!({"id": id}), "E_CAS_MISMATCH");
     assert_eq!(
         refused["error"]["details"],
         json!({"name": "main", "actual": c3, "op": op})
@@ -1151,7 +1157,8 @@ fn mcp_undo_is_compare_and_swap_guarded() {
         op + 3,
         "the refused undo wrote nothing: {after}"
     );
-    server.err("undo", json!({"op": op + 99}), "E_OP_NOT_FOUND");
+    let past = format!("{}:00000000", op + 99);
+    server.err("undo", json!({"id": past}), "E_OP_NOT_FOUND");
     server.finish_clean();
 }
 
@@ -2783,10 +2790,10 @@ impl Names {
     }
 
     /// `text` with each named value replaced by its name, each time key's number in JSON text (a
-    /// tool result's text block) by `"[<key>]"`, then each other run of 32 or more lowercase hex
-    /// digits by `[id<n>]`.
+    /// tool result's text block) by `"[<key>]"`, each other operation id's checksum by `[crc]`,
+    /// then each other run of 32 or more lowercase hex digits by `[id<n>]`.
     fn redact_str(&mut self, text: &str) -> String {
-        // 1. Named values, and times.
+        // 1. Named values, times and checksums.
         let mut text = text.to_owned();
         for (value, name) in &self.named {
             text = text.replace(value.as_str(), name);
@@ -2794,6 +2801,7 @@ impl Names {
         for key in TIME_KEYS {
             text = redact_number(&text, key);
         }
+        text = support::redact_crcs(&text);
 
         // 2. Hex runs: each new one numbered in the order met.
         let mut out = String::with_capacity(text.len());

@@ -224,20 +224,22 @@ result sizes; [Claude Code](docs/guides/claude-code.md) is the guide.
 ### Op log and undo
 
 `so op log` lists the store's operations, newest first: every commit, publish and ref move is
-one write transaction, numbered in commit order (`op`). `so op undo <op>` moves every ref that
-operation moved back to what it named before, all of them or none, by compare-and-swap: if
+one write transaction, numbered in commit order (`op`) and named by an `id` (`<op>:<crc>`).
+`so op undo <id>` moves every ref that operation moved back to what it named before, all of them
+or none, by compare-and-swap: if
 another operation has moved one of them since, it refuses with `E_CAS_MISMATCH` and writes
 nothing. Changesets are never removed, and an undo is an operation of its own, which another
 undo takes back. Here an operator takes back the resolved land above:
 
 ```sh
 so --human op log -n 1
-so --as operator/ada --human op undo 20
+so --as operator/ada --human op undo 20:c41e9a07
 so --human cat main:src/lib.rs --lines 2-2
 ```
 
 ```text
 ops[0].op: 20
+ops[0].id: 20:c41e9a07
 ops[0].kind: land
 …
 ops[0].changesets[0].title: f returns 3
@@ -249,6 +251,7 @@ ops[0].ref_moves[0].actor: agent/worker-2
 …
 undone: 20
 op: 21
+id: 21:5b07d3e8
 ref_moves[0].name: main
 ref_moves[0].old: e1b27d16…
 ref_moves[0].new: 31528945…

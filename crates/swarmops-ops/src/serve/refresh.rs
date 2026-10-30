@@ -471,7 +471,7 @@ mod tests {
         refresh(&site.ops, &site.repo, &Scope::All).expect("refresh");
         assert_ne!(site.served()["refs/heads/main"], main_before);
         let log = site.ops.op_log(OpLogReq::default()).expect("op log");
-        let newest = log.ops.first().expect("an operation").op;
+        let newest = log.ops.first().expect("an operation").id.clone();
         site.ops
             .undo(&site.who, UndoReq::new(newest))
             .expect("undo");

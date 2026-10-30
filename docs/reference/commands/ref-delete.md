@@ -146,8 +146,8 @@ Undo a deletion: find the newest operation that deleted the ref (a move with no 
 it. `op log` lists 50 operations unless `-n` says otherwise; page with `--before` for older ones.
 
 ```sh
-OP=$(swarmops op log | jq -r '[.result.ops[] | select(any(.ref_moves[]; .name == "release/1.0" and .new == null))][0].op')
-swarmops op undo "$OP"
+ID=$(swarmops op log | jq -r '[.result.ops[] | select(any(.ref_moves[]; .name == "release/1.0" and .new == null))][0].id')
+swarmops op undo "$ID"
 ```
 
 ### Caveats

@@ -559,7 +559,7 @@ mod tests {
             "ref_delete",
             s.ref_delete(&w, RefDeleteReq::new("r", "x")).map(drop),
         );
-        assert_passed(&s, "undo", s.undo(&w, UndoReq::new(1)).map(drop));
+        assert_passed(&s, "undo", s.undo(&w, UndoReq::new("1:00000000")).map(drop));
     }
 
     /// Derivation and maintenance reach the inner store, their errors masked.

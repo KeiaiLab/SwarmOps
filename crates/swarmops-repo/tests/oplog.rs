@@ -6,6 +6,7 @@
 //! in any order or in parallel. The crash sweep runs this test binary again as its children
 //! (selected by [`CHILD_ROOT`]), on the real filesystem.
 
+use std::collections::HashSet;
 #[cfg(feature = "test-hooks")]
 use std::os::unix::process::ExitStatusExt;
 #[cfg(feature = "test-hooks")]
@@ -20,7 +21,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, ObjectKind, hash_object};
 use swarmops_repo::{
-    Advance, CasResult, Depth, LocalRepo, OpId, OpRecord, Operation, RepoError, UndoOutcome,
+    Advance, CasResult, Depth, LocalRepo, OpId, OpNotFoundReason, OpRecord, Operation, RepoError,
+    UndoOutcome,
 };
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, ORDER_CHECK_ENV};
@@ -407,12 +409,122 @@ fn undo_never_acts_on_a_frame_its_writer_cuts() {
             other => panic!("expected NotCommitted, got {other:?}"),
         }
         match undoing.join().unwrap() {
-            Err(RepoError::OpNotFound { op: 3, last, .. }) => assert_eq!(last, Some(2)),
+            Err(RepoError::OpNotFound {
+                op: 3,
+                last,
+                reason,
+                ..
+            }) => assert_eq!((last, reason), (Some(2), OpNotFoundReason::PastEnd)),
             other => panic!("expected OpNotFound, got {other:?}"),
         }
     });
     assert_eq!(target(&repo, "main"), Some(c1));
     assert_eq!(frame_count(root), 3, "the undo wrote nothing");
+}
+
+/// Writer A's move of `release/r` from `from` to `cut` is whole in journal.log and then cut
+/// back by its failed sync; returns the id a lock-free read gave its frame, numbered `op`, before
+/// the cut.
+fn taken_back(root: &Utf8Path, op: u64, from: ChangesetId, cut: ChangesetId) -> OpId {
+    let (fs, held) = HoldThenFail::new(layout_of(root).journal_log(), RealFs::new());
+    let writer = LocalRepo::open_with_fs(root, checked(fs)).unwrap();
+    thread::scope(|scope| {
+        // 1. A's frame is whole in journal.log, not synced: a read without the lock sees it.
+        let writing = scope.spawn(|| writer.cas_ref("release/r", Some(from), Some(cut), ACTOR));
+        held.wait();
+        let id = id_at(root, op);
+
+        // 2. Let go: the sync fails, and A cuts its frame.
+        held.release();
+        match writing.join().unwrap() {
+            Err(RepoError::Store(StoreError::NotCommitted { source })) => {
+                assert_eq!(source.raw_os_error(), Some(5), "{source}");
+            }
+            other => panic!("expected NotCommitted, got {other:?}"),
+        }
+        id
+    })
+}
+
+/// An undo by the id of a frame its writer cut never acts on the operation that took the
+/// frame's number (the M15 design §2): the frame at that number has another crc, so the undo is
+/// not found and writes nothing, and the later operation's move stays.
+#[test]
+fn undo_of_a_taken_back_id_is_not_found() {
+    let (_dir, root, repo) = new_repo();
+    let [c1, c2, c3] = chain(&repo);
+    cas(&repo, "release/r", None, Some(c1)); // op 3
+    let cut = taken_back(&root, 4, c1, c2);
+    cas(&repo, "release/r", Some(c1), Some(c3)); // op 4, writer B's
+    let frames = frame_count(&root);
+
+    match repo.undo(cut, UNDOER) {
+        Err(RepoError::OpNotFound {
+            op: 4,
+            crc,
+            last,
+            reason,
+            ..
+        }) => assert_eq!(
+            (crc, last, reason),
+            (cut.crc, Some(4), OpNotFoundReason::Checksum)
+        ),
+        other => panic!("expected OpNotFound, got {other:?}"),
+    }
+    assert_eq!(target(&repo, "release/r"), Some(c3), "B's move stays");
+    assert_eq!(frame_count(&root), frames, "nothing written");
+    assert_ne!(id_of(&repo, 4), cut, "B's frame has an id of its own");
+}
+
+/// How many take-backs [`take_backs_never_reuse_an_id`] makes.
+const TAKE_BACKS: u64 = 1_000;
+
+/// [`undo_of_a_taken_back_id_is_not_found`] [`TAKE_BACKS`] times on one store: each round's
+/// writer A moves `release/r` and cuts its frame, writer B takes its number with another move,
+/// and the undo by A's id is not found (`checksum`) and leaves B's move. The op log then lists
+/// no id twice, and none that was taken back.
+#[test]
+#[ignore = "slow, ~25 s: 1,000 take-backs"]
+fn take_backs_never_reuse_an_id() {
+    let (_dir, root, repo) = new_repo();
+    let chain = chain(&repo);
+    cas(&repo, "release/r", None, Some(chain[0])); // op 3
+    let mut at = 0;
+    let mut cut_ids = Vec::new();
+    for round in 0..TAKE_BACKS {
+        // 1. A moves release/r to the next changeset and cuts the frame; B moves it to the one
+        // after, so their payloads differ.
+        let op = round + 4;
+        let (cut, kept) = ((at + 1) % 3, (at + 2) % 3);
+        let id = taken_back(&root, op, chain[at], chain[cut]);
+        cas(&repo, "release/r", Some(chain[at]), Some(chain[kept]));
+        at = kept;
+
+        // 2. The undo by A's id is not found, and B's move stays.
+        match repo.undo(id, UNDOER) {
+            Err(RepoError::OpNotFound {
+                op: missing,
+                reason: OpNotFoundReason::Checksum,
+                ..
+            }) => assert_eq!(missing, op, "round {round}"),
+            other => panic!("round {round}: expected OpNotFound, got {other:?}"),
+        }
+        assert_eq!(
+            target(&repo, "release/r"),
+            Some(chain[kept]),
+            "round {round}"
+        );
+        cut_ids.push(id);
+    }
+
+    // 3. Every listed id once; none taken back.
+    let total = usize::try_from(TAKE_BACKS).unwrap() + 4;
+    let (ops, older) = repo.op_log(None, total).unwrap();
+    assert!(!older, "op 0 is on the page");
+    let ids: HashSet<OpId> = ops.iter().map(|op| OpId::new(op.seq, op.crc)).collect();
+    assert_eq!(ids.len(), total, "no id twice");
+    let reused: Vec<&OpId> = cut_ids.iter().filter(|id| ids.contains(id)).collect();
+    assert_eq!(reused, Vec::<&OpId>::new(), "no taken-back id listed");
 }
 
 /// `undo` of a move restores the ref to what it named before the move, in one new frame of one
@@ -616,9 +728,12 @@ fn undo_of_an_op_past_the_journal_is_not_found() {
     let (_dir, _root, repo) = new_repo();
     let not_found = |op| match repo.undo(OpId::new(op, 0), UNDOER) {
         Err(RepoError::OpNotFound {
-            op: missing, last, ..
+            op: missing,
+            last,
+            reason,
+            ..
         }) => {
-            assert_eq!(missing, op);
+            assert_eq!((missing, reason), (op, OpNotFoundReason::PastEnd));
             last
         }
         other => panic!("op {op}: expected OpNotFound, got {other:?}"),
@@ -627,6 +742,22 @@ fn undo_of_an_op_past_the_journal_is_not_found() {
     chain(&repo);
     assert_eq!(not_found(3), Some(2));
     assert_eq!(not_found(u64::MAX), Some(2));
+
+    // A mistyped crc: the frame at the number has another, which the error never gives.
+    let listed = id_of(&repo, 2);
+    let mistyped = OpId::new(2, listed.crc ^ 1);
+    match repo.undo(mistyped, UNDOER) {
+        Err(e @ RepoError::OpNotFound { op: 2, .. }) => {
+            let RepoError::OpNotFound { last, reason, .. } = &e else {
+                unreachable!("matched above");
+            };
+            assert_eq!((*last, *reason), (Some(2), OpNotFoundReason::Checksum));
+            let message = e.to_string();
+            assert!(message.contains(&mistyped.to_string()), "{message}");
+            assert!(!message.contains(&listed.to_string()), "{message}");
+        }
+        other => panic!("expected OpNotFound, got {other:?}"),
+    }
 }
 
 /// An undo is an operation like any other, and undoing it restores what it took back.
@@ -658,12 +789,16 @@ fn an_undo_that_fails_after_its_commit_point_warns() {
     cas(&repo, "main", None, Some(c1)); // op 3
     cas(&repo, "main", Some(c1), Some(c2)); // op 4
 
-    let undone = listing_fails(&root).undo(id_of(&repo, 4), UNDOER).unwrap();
+    let op4 = id_of(&repo, 4);
+    let undone = listing_fails(&root).undo(op4, UNDOER).unwrap();
     assert_eq!(undone.frame_seq, Some(5));
     assert_eq!(moves_of(&undone), [("main".to_owned(), Some(c2), Some(c1))]);
     assert_eq!(undone.warnings.len(), 1, "{undone:?}");
+    let op5 = id_at(&root, 5);
+    assert_eq!(undone.frame_crc, Some(op5.crc), "the committed frame's crc");
+    let said = format!("the undo of operation {op4} is committed (operation {op5})");
     assert!(
-        undone.warnings[0].starts_with("the undo of operation 4 is committed (journal frame 5)"),
+        undone.warnings[0].starts_with(&said),
         "{}",
         undone.warnings[0]
     );
@@ -715,6 +850,7 @@ fn undo_reports_what_its_write_repaired() {
             op: 99,
             last: Some(7),
             recovered,
+            ..
         }) => assert_eq!(*recovered, listed_and_replayed),
         other => panic!("expected OpNotFound, got {other:?}"),
     }

@@ -16,7 +16,20 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 ## [Unreleased]
 
+### Changed (breaking)
+
+- `op undo` and the `undo` request take the operation id `op log` prints (`<op>:<crc>`); a bare
+  number is `E_INVALID_ARG`. What to do: read `id` from `op log` or from the response that
+  recorded the operation.
+
 ### Added
+
+- Every `op log` entry and every `undo` result that wrote an operation carry its `id`: the number
+  and its journal frame's CRC-32 as 8 lowercase hex digits. An id read before a failed write took
+  its operation back is `E_OP_NOT_FOUND` with `details.reason: checksum`, never the operation that
+  took the number next (the M15 design §2); a number past the last is `reason: past_end`. A
+  warning after a write's commit point names the operation by its id
+  ([Troubleshooting](docs/troubleshooting.md#e_op_not_found)).
 
 - `.deb` and `.rpm` packages for x86_64 and aarch64 on every release, with their lines in
   `SHA256SUMS`: `swarmops_<version>_<arch>.deb` and `swarmops-<version>-1.<arch>.rpm`, made by

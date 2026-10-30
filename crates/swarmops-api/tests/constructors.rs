@@ -87,7 +87,7 @@ fn every_request_new_fills_the_serde_defaults() {
     reads_back(&ShowReq::new("main"));
     reads_back(&SyncReq::new("x"));
     reads_back(&SyncStatusReq::new("x"));
-    reads_back(&UndoReq::new(7));
+    reads_back(&UndoReq::new("7:00000007"));
     reads_back(&WsCommitReq::new("x", "x"));
     reads_back(&WsCreateReq::new("x"));
     reads_back(&WsDeleteReq::new("x"));
@@ -202,6 +202,7 @@ fn every_item_new_fills_the_serde_defaults() {
     reads_back(&OpChangesetOut::new("x", "x", 7, "x"));
     reads_back(&OperationOut::new(
         7,
+        "7:00000007",
         OperationKind::Commit,
         Vec::new(),
         7,

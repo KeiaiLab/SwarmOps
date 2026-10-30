@@ -569,7 +569,7 @@ expression: s.transcript()
     }
   },
   {
-    "args": "--repo [tmp]/store --as agent/worker-17 op undo 0",
+    "args": "--repo [tmp]/store --as agent/worker-17 op undo 0:[crc]",
     "exit": 1,
     "stdout": {
       "ok": false,
@@ -594,7 +594,7 @@ expression: s.transcript()
     }
   },
   {
-    "args": "--repo [tmp]/store --as agent/worker-17 op undo 99",
+    "args": "--repo [tmp]/store --as agent/worker-17 op undo 99:[crc]",
     "exit": 6,
     "stdout": {
       "ok": false,
@@ -602,12 +602,39 @@ expression: s.transcript()
       "api": 1,
       "error": {
         "code": "E_OP_NOT_FOUND",
-        "message": "there is no operation 99 (the last is 2)",
+        "message": "there is no operation 99:[crc]: its number is past the last operation (the last is 2)",
         "retryable": false,
         "exit": 6,
         "details": {
+          "id": "99:[crc]",
           "last": 2,
-          "op": 99
+          "op": 99,
+          "reason": "past_end"
+        },
+        "hint": "swarmops op log"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 op undo 0",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "undo",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "not an operation id: expected <op>:<crc>, as `op log` prints it (4:[crc])",
+        "retryable": false,
+        "exit": 2,
+        "details": {
+          "id": "0"
         },
         "hint": "swarmops op log"
       },

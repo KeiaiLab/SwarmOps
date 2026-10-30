@@ -2969,7 +2969,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_OP_NOT_FOUND",
-          "description": "The store has no operation by that number.",
+          "description": "The store has no operation with that id.",
           "type": "string"
         },
         {
@@ -5396,12 +5396,16 @@ expression: s.redact(&all)
               "minimum": 0,
               "type": "integer"
             },
+            "id": {
+              "description": "Its id, which `undo` takes: `<op>:<crc>`, the number and its frame's payload CRC-32 as 8\nlowercase hex digits (`4:[crc]`). An operation that took the number of one a failed\nsync took back has another id.",
+              "type": "string"
+            },
             "kind": {
               "$ref": "#/$defs/OperationKind",
               "description": "What it did, read from what it recorded."
             },
             "op": {
-              "description": "Its number: its journal frame's, from 0 in commit order. `undo` takes it.",
+              "description": "Its number: its journal frame's, from 0 in commit order. `before` pages on from it.",
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
@@ -5416,6 +5420,7 @@ expression: s.redact(&all)
           },
           "required": [
             "op",
+            "id",
             "kind",
             "changesets",
             "changesets_total",
@@ -5681,12 +5686,16 @@ expression: s.redact(&all)
           "minimum": 0,
           "type": "integer"
         },
+        "id": {
+          "description": "Its id, which `undo` takes: `<op>:<crc>`, the number and its frame's payload CRC-32 as 8\nlowercase hex digits (`4:[crc]`). An operation that took the number of one a failed\nsync took back has another id.",
+          "type": "string"
+        },
         "kind": {
           "$ref": "#/$defs/OperationKind",
           "description": "What it did, read from what it recorded."
         },
         "op": {
-          "description": "Its number: its journal frame's, from 0 in commit order. `undo` takes it.",
+          "description": "Its number: its journal frame's, from 0 in commit order. `before` pages on from it.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -5701,6 +5710,7 @@ expression: s.redact(&all)
       },
       "required": [
         "op",
+        "id",
         "kind",
         "changesets",
         "changesets_total",
@@ -8670,15 +8680,14 @@ expression: s.redact(&all)
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "`undo` (CLI `op undo`): restore every ref an operation moved to what it named before, by\ncompare-and-swap, in one transaction: all of them or none. Changesets are never removed.",
       "properties": {
-        "op": {
-          "description": "The operation to undo: its `op` in the operation log.",
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
+        "id": {
+          "description": "The operation to undo: its `id` in the operation log, `<op>:<crc>` (`4:[crc]`). A bare\nnumber, upper case or any other form is `E_INVALID_ARG`; an id whose number is past the\nlast operation, or whose crc is not the frame's at that number, is `E_OP_NOT_FOUND`.",
+          "pattern": "^[0-9]{1,20}:[0-9a-f]{8}$",
+          "type": "string"
         }
       },
       "required": [
-        "op"
+        "id"
       ],
       "title": "UndoReq",
       "type": "object"
@@ -8731,8 +8740,15 @@ expression: s.redact(&all)
           "description": "Every ref the operation moved already names what it named before, so nothing was written:\nan undo run again is a replay, and safe.",
           "type": "boolean"
         },
+        "id": {
+          "description": "The id of the operation this undo recorded, which another undo takes; omitted exactly when\n`op` is.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "op": {
-          "description": "The operation this undo recorded, which another undo can take; omitted when it wrote\nnothing (`already_applied`).",
+          "description": "The number of the operation this undo recorded; omitted when it wrote nothing\n(`already_applied`).",
           "format": "uint64",
           "minimum": 0,
           "type": [

@@ -320,7 +320,10 @@ fn order_check_rules_hold_in_every_crash_sweep(format) {
     // `main` is never deleted, so the swept ref is a release ref.
     let args = ["ref", "set", "release/swept", id.as_str(), "--create"];
     template.run_as(&agent(0), &args, &[]).ok();
-    let undo = |_: &Store| ["op", "undo", "1"].map(str::to_owned).to_vec();
+    let listed = template.read(&["op", "log", "-n", "1"]).ok();
+    let op1 = listed["ops"][0]["id"].as_str().expect("an id").to_owned();
+    assert!(op1.starts_with("1:"), "{listed}");
+    let undo = |_: &Store| vec!["op".to_owned(), "undo".to_owned(), op1.clone()];
     let calls = sweep_checked(&template, "an undo", undo);
     assert!(
         calls > 5,

@@ -129,6 +129,7 @@ expression: s.transcript()
         "ops": [
           {
             "op": 3,
+            "id": "3:[crc]",
             "kind": "ref_move",
             "changesets": [],
             "changesets_total": 0,
@@ -144,6 +145,7 @@ expression: s.transcript()
           },
           {
             "op": 2,
+            "id": "2:[crc]",
             "kind": "commit",
             "changesets": [
               {
@@ -158,6 +160,7 @@ expression: s.transcript()
           },
           {
             "op": 1,
+            "id": "1:[crc]",
             "kind": "ref_move",
             "changesets": [],
             "changesets_total": 0,
@@ -172,6 +175,7 @@ expression: s.transcript()
           },
           {
             "op": 0,
+            "id": "0:[crc]",
             "kind": "commit",
             "changesets": [
               {
@@ -196,7 +200,7 @@ expression: s.transcript()
     }
   },
   {
-    "args": "--repo [tmp]/store --as agent/worker-17 op undo 3",
+    "args": "--repo [tmp]/store --as agent/worker-17 op undo 3:[crc]",
     "exit": 0,
     "stdout": {
       "ok": true,
@@ -205,6 +209,7 @@ expression: s.transcript()
       "result": {
         "undone": 3,
         "op": 4,
+        "id": "4:[crc]",
         "ref_moves": [
           {
             "name": "main",
@@ -235,6 +240,7 @@ expression: s.transcript()
         "ops": [
           {
             "op": 4,
+            "id": "4:[crc]",
             "kind": "ref_move",
             "changesets": [],
             "changesets_total": 0,

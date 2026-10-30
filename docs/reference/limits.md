@@ -248,6 +248,7 @@ The bounds `swarmops schema` states on a field, beside the integer formats' own.
 | [`ReadTreeReq`](schema-types.md#readtreereq) | `limit` | at least 1 |
 | [`ShowReq`](schema-types.md#showreq) | `max_changes` | at least 1 |
 | [`SyncReq`](schema-types.md#syncreq) | `max_attempts` | 1 to 32 |
+| [`UndoReq`](schema-types.md#undoreq) | `id` | matches `^[0-9]{1,20}:[0-9a-f]{8}$` |
 | [`WsDiffReq`](schema-types.md#wsdiffreq) | `limit` | at least 1 |
 | [`WsLandReq`](schema-types.md#wslandreq) | `max_attempts` | 1 to 32 |
 | [`WsStatusReq`](schema-types.md#wsstatusreq) | `limit` | at least 1 |

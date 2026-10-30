@@ -55,6 +55,7 @@ use swarmops_store::{
 
 use crate::commit;
 use crate::error::RepoError;
+use crate::oplog::OpId;
 use crate::repo::{self, Repo};
 
 /// The most changesets a raw batch holds: the records of one journal frame (65,535), which holds
@@ -291,10 +292,16 @@ impl<O: ObjectStore> RawBatch<'_, O> {
             frame_seq = Some(match write.commit() {
                 Ok(info) => info.frame_seq,
                 Err(StoreError::PostCommit {
-                    frame_seq, source, ..
+                    frame_seq,
+                    frame_crc,
+                    source,
                 }) => {
                     let what = "the batch of changesets";
-                    warnings.push(repo::post_commit_warning(what, frame_seq, &source));
+                    warnings.push(repo::post_commit_warning(
+                        what,
+                        OpId::new(frame_seq, frame_crc),
+                        &source,
+                    ));
                     frame_seq
                 }
                 Err(e) => return Err(e.into()),

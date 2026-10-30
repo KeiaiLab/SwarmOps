@@ -62,15 +62,17 @@ left).
   may leave no one to receive the frame's writeback error. A FORMAT 2 frame carries its seq and
   the previous frame's CRC, so a misplaced, stale or lost frame is reported as damage, but an
   append-only journal cannot bring a lost frame back: `repair` reports it and cuts nothing.
-  Such a loss also frees an operation number: `op log` lists only committed frames (v0.6.0), so
-  no take-back the failure policy allows reuses a listed number, but a frame committed with a
-  warning (its listing failed; the warning names its seq) and then lost this way gives its number
-  to the next write, and an `op undo` of that number acts on the other operation. `repair` reports
-  the lost frame; nothing hides the reuse. The tail check runs in a committed read too (M8's git
-  export, M11's `serve`), so a double fault there aborts a reader process as it does a writer.
+  Such a loss also frees an operation number: a frame committed with a warning (its listing
+  failed; the warning names its id) and then lost this way gives its number to the next write.
+  An operation's id carries its frame's CRC-32 beside the number, so an `op undo` of the lost
+  operation's id is `E_OP_NOT_FOUND` (`reason: checksum`) and never acts on the other operation,
+  unless the two frames' CRC-32s are equal: one chance in 2^32 for each number taken back (the
+  M15 design §2). `repair` reports the lost frame. The tail check runs in a committed read too
+  (M8's git export, M11's `serve`), so a double fault there aborts a reader process as it does a
+  writer.
   *Documented (the M6 design, section 12; the v0.6.0
   design, D7). Found: M1.5 Task 2; narrowed by M6; the operation number from the M4
-  consolidated review (issue #11).*
+  consolidated review (issue #11), closed by operation ids in M15 but for the CRC-32 collision.*
 - **A failed directory fsync in the object store is retried, not taken back.**
   `FsObjectStore::flush` keeps a fan-out directory whose fsync failed and fsyncs it again on a
   later flush; the commit whose flush failed fails. The retry is for an fsync that never ran (the

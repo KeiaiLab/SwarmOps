@@ -146,10 +146,11 @@ Explained in: [README, Store, identity and lifetime](../README.md#store-identity
 ## Op log and undo
 
 The store's operations are its write transactions: every commit, publish and ref move is one,
-numbered in commit order (`op`). `op log` lists them, newest first, each with its kind, its
-changesets and its ref moves: the [journal](#journal-and-frame), shown a frame each.
+numbered in commit order (`op`) and named by an `id`, `<op>:<crc>`: the number and the CRC-32
+of its frame. `op log` lists them, newest first, each with its kind, its changesets and its ref
+moves: the [journal](#journal-and-frame), shown a frame each.
 
-`op undo <op>` moves every ref that operation moved back to what it named before, all of them or
+`op undo <id>` moves every ref that operation moved back to what it named before, all of them or
 none, by compare-and-swap; if another operation has moved one of them since, it refuses with
 `E_CAS_MISMATCH` and writes nothing. An undo is an operation of its own, which another undo takes
 back.

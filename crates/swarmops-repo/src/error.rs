@@ -7,6 +7,7 @@ use swarmops_store::{IoFailure, Recovered, StoreError};
 use thiserror::Error;
 
 use crate::land::{MergeConflicts, NothingToLandReason};
+use crate::oplog::{OpId, OpNotFoundReason};
 
 /// Why a repository operation failed.
 #[derive(Debug, Error)]
@@ -153,16 +154,24 @@ pub enum RepoError {
         /// What is wrong with it, as one line.
         why: String,
     },
-    /// `undo` of an operation the journal does not hold: past its last one.
+    /// `undo` of an operation the journal does not hold: its number is past the last one, or the
+    /// frame at its number has another crc. The error never gives that frame's id: undoing it
+    /// would undo another operation.
     #[error(
-        "there is no operation {op} (the last is {})",
+        "there is no operation {}: {} (the last is {})",
+        OpId::new(*.op, *.crc),
+        not_found_why(*.reason),
         .last.map_or_else(|| "none: the store has no operation yet".to_owned(), |last| last.to_string())
     )]
     OpNotFound {
-        /// The operation asked for.
+        /// The number of the operation asked for.
         op: u64,
+        /// The crc of the id asked for.
+        crc: u32,
         /// The store's last operation; `None` when it has none.
         last: Option<u64>,
+        /// Why there is none.
+        reason: OpNotFoundReason,
         /// What the write transaction's recovery repaired before the operation was looked up,
         /// of what earlier writers left: those repairs stay made. Boxed, as for
         /// [`RepoError::RefMoved`].
@@ -299,6 +308,17 @@ impl RepoError {
     /// `unknown_variant("CasResult")`.
     pub(crate) fn unknown_variant(ty: &str) -> Self {
         Self::Internal(format!("{ty}: a variant this build does not know"))
+    }
+}
+
+/// Why [`RepoError::OpNotFound`] found none, as its message says it.
+fn not_found_why(reason: OpNotFoundReason) -> &'static str {
+    match reason {
+        OpNotFoundReason::PastEnd => "its number is past the last operation",
+        OpNotFoundReason::Checksum => {
+            "the operation at its number has another crc, so the one named was taken back and \
+             its number went to another, or the id is mistyped"
+        }
     }
 }
 

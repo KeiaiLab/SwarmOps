@@ -83,3 +83,37 @@ pub mod sweep {
         swarmops_testkit::cli::sweep::dry_init::<Swarmops>(format)
     }
 }
+
+/// Lowercase hex digits in an operation id's checksum: `<op>:<crc>`.
+const CRC_DIGITS: usize = 8;
+
+/// `text` with the checksum of each operation id (`4:9f3a01c2`) replaced by `[crc]`
+/// (`4:[crc]`): the checksum covers the operation's times and ids, which change from run to run.
+pub fn redact_crcs(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let bounded = |b: Option<&u8>| !b.is_some_and(u8::is_ascii_alphanumeric);
+    let mut out = String::with_capacity(text.len());
+    let mut done = 0;
+    for (colon, _) in text.match_indices(':') {
+        // `<digits>:<8 hex digits>`, neither end inside a longer word.
+        let digits = bytes[..colon]
+            .iter()
+            .rev()
+            .take_while(|b| b.is_ascii_digit())
+            .count();
+        let crc = &bytes[colon + 1..];
+        let hex = crc
+            .iter()
+            .take_while(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+            .count();
+        let before = (colon - digits).checked_sub(1).map(|at| &bytes[at]);
+        if digits == 0 || hex != CRC_DIGITS || !bounded(before) || !bounded(crc.get(hex)) {
+            continue;
+        }
+        out.push_str(&text[done..=colon]);
+        out.push_str("[crc]");
+        done = colon + 1 + hex;
+    }
+    out.push_str(&text[done..]);
+    out
+}

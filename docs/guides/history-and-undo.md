@@ -831,6 +831,7 @@ so op log -n 2 --human
 
 ```text
 ops[0].op: 4
+ops[0].id: 4:3d1f09a2
 ops[0].kind: ref_move
 ops[0].changesets: []
 ops[0].changesets_total: 0
@@ -840,6 +841,7 @@ ops[0].ref_moves[0].new: 3ba35c44081b…
 ops[0].ref_moves[0].actor: agent/worker-1
 ops[0].ref_moves[0].at: 1792626486
 ops[1].op: 3
+ops[1].id: 3:0c4f8a21
 ops[1].kind: ref_move
 ops[1].changesets: []
 ops[1].changesets_total: 0
@@ -870,6 +872,7 @@ so op log --before 3 -n 2 --human
 
 ```text
 ops[0].op: 2
+ops[0].id: 2:b27e94c5
 ops[0].kind: publish
 ops[0].changesets[0].id: 48b8a4cf3ca9…
 ops[0].changesets[0].agent: agent/worker-1
@@ -882,6 +885,7 @@ ops[0].ref_moves[0].new: 48b8a4cf3ca9…
 ops[0].ref_moves[0].actor: agent/worker-1
 ops[0].ref_moves[0].at: 1792626460
 ops[1].op: 1
+ops[1].id: 1:6a1d0f3e
 ops[1].kind: publish
 ops[1].changesets[0].id: ce8c4ae35795…
 ops[1].changesets[0].agent: agent/worker-1
@@ -901,8 +905,9 @@ truncated: true
 
 ## Undo an operation
 
-`so op undo OP` moves every ref operation `OP` moved back to what it named before, in one
-transaction: all of them or none. It is a write, so it needs an identity. It never removes a
+`so op undo ID` moves every ref the operation `ID` moved back to what it named before, in one
+transaction: all of them or none. `ID` is the operation's `id` in `op log`, `<op>:<crc>`: its
+number and the checksum of what it recorded, so an id names one operation and no other. It is a write, so it needs an identity. It never removes a
 changeset: what the ref named stays in the store, readable by id.
 
 ### Take back a mistaken ref move
@@ -910,12 +915,13 @@ changeset: what the ref named stays in the store, readable by id.
 Operation 4 moved `main` from `48b8a4cf3ca9…` to `3ba35c44081b…`. Undo it:
 
 ```sh
-so op undo 4 --human
+so op undo 4:3d1f09a2 --human
 ```
 
 ```text
 undone: 4
 op: 5
+id: 5:e8a3b617
 ref_moves[0].name: main
 ref_moves[0].old: 3ba35c44081b…
 ref_moves[0].new: 48b8a4cf3ca9…
@@ -932,7 +938,7 @@ An undo whose refs already name what they named before writes nothing, and says
 `already_applied: true`. Retrying an undo is safe:
 
 ```sh
-so op undo 4 --human
+so op undo 4:3d1f09a2 --human
 ```
 
 ```text
@@ -947,12 +953,13 @@ An undo is an operation like any other, so another undo takes it back. Undoing o
 moves `main` to `3ba35c44081b…` again:
 
 ```sh
-so op undo 5 --human
+so op undo 5:e8a3b617 --human
 ```
 
 ```text
 undone: 5
 op: 6
+id: 6:47c2d9e0
 ref_moves[0].name: main
 ref_moves[0].old: 48b8a4cf3ca9…
 ref_moves[0].new: 3ba35c44081b…
@@ -988,7 +995,7 @@ undo refuses with `E_CAS_MISMATCH` (exit 4) and writes nothing. `details.actual`
 names now:
 
 ```sh
-so op undo 6 --human
+so op undo 6:47c2d9e0 --human
 ```
 
 ```text
@@ -1022,7 +1029,7 @@ replayed: false
 ```
 
 ```sh
-so op undo 8 --human
+so op undo 8:f1a6720c --human
 ```
 
 ```text
@@ -1031,16 +1038,31 @@ details.op: 8
 hint: swarmops op log
 ```
 
-A number past the last operation is `E_OP_NOT_FOUND` (exit 6):
+An id whose number is past the last operation is `E_OP_NOT_FOUND` (exit 6), and so is one whose
+checksum is not that operation's (`details.reason: checksum`):
 
 ```sh
-so op undo 99 --human
+so op undo 99:00000000 --human
 ```
 
 ```text
-error: E_OP_NOT_FOUND: there is no operation 99 (the last is 8)
+error: E_OP_NOT_FOUND: there is no operation 99:00000000: its number is past the last operation (the last is 8)
+details.id: 99:00000000
 details.last: 8
 details.op: 99
+details.reason: past_end
+hint: swarmops op log
+```
+
+A bare number is no id, and is `E_INVALID_ARG` (exit 2):
+
+```sh
+so op undo 4 --human
+```
+
+```text
+error: E_INVALID_ARG: not an operation id: expected <op>:<crc>, as `op log` prints it (4:9f3a01c2)
+details.id: 4
 hint: swarmops op log
 ```
 
@@ -1048,7 +1070,7 @@ Without an identity, an undo is `E_IDENTITY_REQUIRED` (exit 5). An empty variabl
 unset:
 
 ```sh
-SWARMOPS_AGENT= so op undo 4 --human
+SWARMOPS_AGENT= so op undo 4:3d1f09a2 --human
 ```
 
 ```text
@@ -1071,12 +1093,13 @@ already_applied: false
 ```
 
 ```sh
-so op undo 9 --human
+so op undo 9:5e8d1b39 --human
 ```
 
 ```text
 undone: 9
 op: 10
+id: 10:a2c7f480
 ref_moves[0].name: release/1.0
 ref_moves[0].new: ce8c4ae35795…
 ref_moves[0].actor: agent/worker-1
@@ -1090,12 +1113,13 @@ Back to the refusal of operation 6: `main` moved since, by operation 7. Undo the
 move first, newest first, then operation 6:
 
 ```sh
-so op undo 7 --human
+so op undo 7:9b05e3f4 --human
 ```
 
 ```text
 undone: 7
 op: 11
+id: 11:1f93b6d2
 ref_moves[0].name: main
 ref_moves[0].old: e1ff8dd6a805…
 ref_moves[0].new: 3ba35c44081b…
@@ -1105,12 +1129,13 @@ already_applied: false
 ```
 
 ```sh
-so op undo 6 --human
+so op undo 6:47c2d9e0 --human
 ```
 
 ```text
 undone: 6
 op: 12
+id: 12:c6e05a17
 ref_moves[0].name: main
 ref_moves[0].old: 3ba35c44081b…
 ref_moves[0].new: 48b8a4cf3ca9…
@@ -1143,12 +1168,13 @@ When the later moves must stay, land a change that reverses what the operation d
 An undo of a creation deletes the ref. Operation 3 created `release/1.0`:
 
 ```sh
-so op undo 3 --human
+so op undo 3:0c4f8a21 --human
 ```
 
 ```text
 undone: 3
 op: 13
+id: 13:7d4a28bf
 ref_moves[0].name: release/1.0
 ref_moves[0].old: ce8c4ae35795…
 ref_moves[0].actor: agent/worker-1

@@ -38,7 +38,7 @@ use swarmops_repo::merge::line_diff::{self, DiffLine, UnifiedHunk};
 use swarmops_repo::merge::tree_diff::{ChangeKind, Leaf, PathFilter, TreeChange};
 use swarmops_repo::{
     CasResult, CommitRequest, Depth, FileSpan, ListedEntry, LocalRepo, MismatchCause, OpId,
-    OpRecord, Operation, PathEvent, RepoError, RepoRead, StoredChangeset, VerifyProblem,
+    OpIdError, OpRecord, Operation, PathEvent, RepoError, RepoRead, StoredChangeset, VerifyProblem,
 };
 use swarmops_repo::{Resolution, Resolutions};
 use swarmops_store::external_ids;
@@ -331,8 +331,11 @@ const MAX_LAND_KEY: usize = 64;
 ///   operation, so that the undo wrote nothing. The message says to undo the operations that
 ///   moved it since, newest first, or to land a change that reverses the operation; the hint is
 ///   `swarmops op log`, which only reads.
-/// - `E_OP_NOT_FOUND` `{op, last}`: `OpNotFound`, an `undo` of an operation past the store's last
-///   (`last` null when the store has none); the hint is `swarmops op log`.
+/// - `E_OP_NOT_FOUND` `{op, id, last, reason}`: `OpNotFound`, an `undo` of id `id`, numbered
+///   `op`, past the store's last (`reason` `past_end`, `last` null when the store has none) or
+///   whose crc is not the frame's at `op` (`checksum`: the operation named was taken back and its
+///   number went to another, or the id is mistyped); the frame's id is never given. The hint is
+///   `swarmops op log`.
 /// - `E_NOTHING_TO_UNDO` `{op}`: `NothingToUndo`, an `undo` of an operation that left every ref
 ///   where it found it; the hint is `swarmops op log`.
 /// - `E_CONFLICT` `{report}` (exit 3): `Conflict`, a land whose change conflicts with the target's
@@ -1909,8 +1912,12 @@ impl StoreOps for Recording<'_> {
     }
 
     fn undo(&self, who: &Identity, req: UndoReq) -> Result<UndoResp, OpError> {
-        // The request names a number only, and the undo looks the frame up by its seq alone.
-        let id = OpId::new(req.op, 0);
+        // The id, parsed before the store's lock is taken: any other form is E_INVALID_ARG.
+        let id: OpId = req.id.parse().map_err(|e: OpIdError| {
+            error::error(ErrorCode::InvalidArg, e.to_string())
+                .with_details(error::details([("id", req.id.clone().into())]))
+                .with_hint("swarmops op log")
+        })?;
         let outcome = self.ops.repo.undo(id, who.agent()).map_err(|e| {
             // An undo refused under the lock (E_CAS_MISMATCH, E_OP_NOT_FOUND,
             // E_NOTHING_TO_UNDO) reports what the write repaired first, as a ref move's does.
@@ -1935,6 +1942,10 @@ impl StoreOps for Recording<'_> {
             .collect();
         let mut out = UndoResp::new(outcome.undone, ref_moves, outcome.already_applied);
         out.op = outcome.frame_seq;
+        out.id = outcome
+            .frame_seq
+            .zip(outcome.frame_crc)
+            .map(|(seq, crc)| OpId::new(seq, crc).to_string());
         out.warnings = outcome.warnings;
         Ok(out)
     }
@@ -2642,7 +2653,9 @@ fn operation_out(
     operation: Operation,
     max_changesets: usize,
 ) -> Result<OperationOut, OpError> {
-    let Operation { seq, records, .. } = operation;
+    let Operation {
+        seq, crc, records, ..
+    } = operation;
     let ids: Vec<ChangesetId> = records
         .iter()
         .filter_map(|record| match record {
@@ -2684,6 +2697,7 @@ fn operation_out(
         .collect::<Result<_, _>>()?;
     Ok(OperationOut::new(
         seq,
+        OpId::new(seq, crc).to_string(),
         kind,
         listed.iter().map(op_changeset_out).collect(),
         bytes::to_u64(ids.len()),

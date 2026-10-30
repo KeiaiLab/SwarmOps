@@ -249,17 +249,18 @@ The hint names the program `swarmops`, whichever name you invoked.
 ## 8. How do I see and undo an operation?
 
 `op log` lists the store's operations, newest first: every commit, land and ref move is one write
-transaction, numbered in commit order. `op undo` moves every ref an operation moved back to what it
-named before, all of them or none, by compare-and-swap:
+transaction, numbered in commit order and named by an id (`<op>:<crc>`). `op undo <id>` moves every
+ref an operation moved back to what it named before, all of them or none, by compare-and-swap:
 
 ```sh
 so --human op log -n 1
-so --human op undo 6
+so --human op undo 6:8e2a4f10
 so --human cat main:src/lib.rs
 ```
 
 ```text
 ops[0].op: 6
+ops[0].id: 6:8e2a4f10
 ops[0].kind: land
 ops[0].changesets[0].id: aa1b0e84…
 ops[0].changesets[0].agent: agent/worker-3
@@ -275,6 +276,7 @@ ops[0].ref_moves[0].at: 1792626497
 truncated: true
 undone: 6
 op: 7
+id: 7:d93b0c61
 ref_moves[0].name: main
 ref_moves[0].old: aa1b0e84…
 ref_moves[0].new: 4c54d337…
@@ -290,8 +292,8 @@ content: |
 truncated: false
 ```
 
-`main` is back where it was before the resolved land. The undo is operation 7, an operation of its
-own, which another undo takes back (step 9). Changesets are never removed. If another operation has
+`main` is back where it was before the resolved land. The undo is operation 7 (`id` `7:d93b0c61`),
+an operation of its own, which another undo takes back (step 9). Changesets are never removed. If another operation has
 moved one of the refs since, an undo refuses with `E_CAS_MISMATCH` and writes nothing.
 
 ## 9. How do I check the store?
@@ -299,13 +301,14 @@ moved one of the refs since, an undo refuses with `E_CAS_MISMATCH` and writes no
 Take the undo back, so `main` holds the resolved land again, then check the store:
 
 ```sh
-so --human op undo 7
+so --human op undo 7:d93b0c61
 so --human verify --deep
 ```
 
 ```text
 undone: 7
 op: 8
+id: 8:2f61c7ab
 ref_moves[0].name: main
 ref_moves[0].old: 4c54d337…
 ref_moves[0].new: aa1b0e84…
@@ -337,7 +340,7 @@ findings: []
 | `so land C --key K` | Merge changeset `C` three-way onto `main` and publish the result; the same key replays. |
 | `so land C --resolve FILE --key K` | Land again with a resolution for each conflicting path. |
 | `so op log -n 1` | The store's operations, newest first. |
-| `so op undo OP` | Move every ref operation `OP` moved back, all or none. |
+| `so op undo ID` | Move every ref the operation `op log` lists as `ID` moved back, all or none. |
 | `so verify --deep` | Re-hash every object and check the derived values against the objects. |
 
 ## What next?

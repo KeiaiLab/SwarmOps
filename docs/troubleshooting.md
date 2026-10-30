@@ -539,13 +539,17 @@ too for a branch name git does not take; its hint is `git check-ref-format --bra
 
 ### `E_OP_NOT_FOUND`
 
-Exit 6, not retryable. `op undo` of an operation the store does not have:
+Exit 6, not retryable. `op undo` of an id the store does not have:
 
 ```text
-{"ok":false,"op":"undo","api":1,"error":{"code":"E_OP_NOT_FOUND","message":"there is no operation 99 (the last is 1)","retryable":false,"exit":6,"details":{"last":1,"op":99},"hint":"swarmops op log"},"meta":{"repo":"acme","elapsed_ms":0,"resolved":{},"auth":"trust"}}
+{"ok":false,"op":"undo","api":1,"error":{"code":"E_OP_NOT_FOUND","message":"there is no operation 99:00000000: its number is past the last operation (the last is 1)","retryable":false,"exit":6,"details":{"id":"99:00000000","last":1,"op":99,"reason":"past_end"},"hint":"swarmops op log"},"meta":{"repo":"acme","elapsed_ms":0,"resolved":{},"auth":"trust"}}
 ```
 
-Operations are numbered from 0; `swarmops op log` lists them, newest first.
+`details.reason` is `past_end` for a number past the last operation, and `checksum` when the
+operation at that number has another crc: the operation the id named was taken back and its
+number went to another write, or the id is mistyped. Operations are numbered from 0;
+`swarmops op log` lists them, newest first, each with the `id` that `op undo` takes. A bare
+number is no id: it is `E_INVALID_ARG` (exit 2).
 
 ## Commits
 

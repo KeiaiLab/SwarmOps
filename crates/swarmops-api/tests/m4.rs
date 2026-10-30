@@ -207,9 +207,15 @@ fn an_op_log_request_takes_its_defaults() {
     assert_eq!(all["OpLogReq"]["properties"]["limit"]["minimum"], 1);
     assert!(all["OpLogReq"].get("required").is_none());
 
-    assert_eq!(all["UndoReq"]["required"], json!(["op"]));
+    assert_eq!(all["UndoReq"]["required"], json!(["id"]));
+    let pattern = &all["UndoReq"]["properties"]["id"]["pattern"];
+    assert_eq!(pattern, "^[0-9]{1,20}:[0-9a-f]{8}$");
     assert!(serde_json::from_value::<UndoReq>(json!({})).is_err());
-    assert_eq!(round_trip(&UndoReq::new(41)), r#"{"op":41}"#);
+    assert!(serde_json::from_value::<UndoReq>(json!({"op": 41})).is_err());
+    assert_eq!(
+        round_trip(&UndoReq::new("41:9f3a01c2")),
+        r#"{"id":"41:9f3a01c2"}"#
+    );
 }
 
 /// Requests and responses alike read as before with a field they do not know (operations spec
@@ -225,7 +231,7 @@ fn the_m4_requests_ignore_fields_they_do_not_know() {
     }
     ignores::<LandReq>(json!({"head": "x", "base": "b1", "idempotency_key": "k-1"}));
     ignores::<OpLogReq>(json!({"before": 7}));
-    ignores::<UndoReq>(json!({"op": 7}));
+    ignores::<UndoReq>(json!({"id": "7:9f3a01c2"}));
     ignores::<CommitReq>(json!({"message": "m", "changes": [], "idempotency_key": "k"}));
 
     ignores::<LandResp>(json!({
@@ -237,8 +243,8 @@ fn the_m4_requests_ignore_fields_they_do_not_know() {
         "files": [{"path": "a.bin", "kind": "binary", "zz_nested": 1}], "truncated": false,
     }));
     ignores::<OpLogPage>(json!({
-        "ops": [{"op": 0, "kind": "commit", "changesets": [], "changesets_total": 0,
-                 "ref_moves": [], "zz_nested": 1}],
+        "ops": [{"op": 0, "id": "0:9f3a01c2", "kind": "commit", "changesets": [],
+                 "changesets_total": 0, "ref_moves": [], "zz_nested": 1}],
         "truncated": false,
     }));
     ignores::<UndoResp>(json!({"undone": 4, "ref_moves": [], "already_applied": true}));
@@ -505,6 +511,7 @@ fn an_op_log_page_and_an_undo_have_the_spec_shape() {
     let page = OpLogPage::new(
         vec![OperationOut::new(
             41,
+            "41:9f3a01c2",
             OperationKind::Land,
             vec![landed],
             1,
@@ -517,7 +524,8 @@ fn an_op_log_page_and_an_undo_have_the_spec_shape() {
         round_trip(&page),
         format!(
             concat!(
-                r#"{{"ops":[{{"op":41,"kind":"land","changesets":[{{"id":"l1","#,
+                r#"{{"ops":[{{"op":41,"id":"41:9f3a01c2","kind":"land","#,
+                r#""changesets":[{{"id":"l1","#,
                 r#""agent":"agent/worker-3","created_at":1760000000000,"#,
                 r#""title":"fix the parser","land_key":"k-1"}}],"changesets_total":1,"#,
                 r#""ref_moves":[{{"name":"main","old":"m9","new":"l1",{actor}}}]}}],"#,
@@ -556,11 +564,12 @@ fn an_op_log_page_and_an_undo_have_the_spec_shape() {
 
     let mut undo = UndoResp::new(41, vec![moved(Some("l1"), Some("m9"))], false);
     undo.op = Some(42);
+    undo.id = Some("42:0b1c2d3e".to_owned());
     undo.warnings = vec!["the undo is durable".to_owned()];
     assert_eq!(
         round_trip(&undo),
         format!(
-            r#"{{"undone":41,"op":42,"ref_moves":[{{"name":"main","old":"l1","new":"m9",{actor}}}],"already_applied":false,"warnings":["the undo is durable"]}}"#
+            r#"{{"undone":41,"op":42,"id":"42:0b1c2d3e","ref_moves":[{{"name":"main","old":"l1","new":"m9",{actor}}}],"already_applied":false,"warnings":["the undo is durable"]}}"#
         )
     );
     let replay = UndoResp::new(41, Vec::new(), true);

@@ -69,6 +69,7 @@ use swarmops_store::{
 };
 
 use crate::error::RepoError;
+use crate::oplog::OpId;
 use crate::read::RepoRead;
 use crate::repo::{self, Repo};
 use crate::tree_edit::{Encoded, TreeEdit};
@@ -632,7 +633,9 @@ impl<O: ObjectStore> Repo<O> {
             match write.commit() {
                 Ok(_) => {}
                 Err(StoreError::PostCommit {
-                    frame_seq, source, ..
+                    frame_seq,
+                    frame_crc,
+                    source,
                 }) => {
                     let what = match moved {
                         Some(moved) if inserted => {
@@ -641,7 +644,11 @@ impl<O: ObjectStore> Repo<O> {
                         Some(moved) => format!("the move of ref {}", moved.name),
                         None => "the changeset".to_owned(),
                     };
-                    warnings.push(repo::post_commit_warning(&what, frame_seq, &source));
+                    warnings.push(repo::post_commit_warning(
+                        &what,
+                        OpId::new(frame_seq, frame_crc),
+                        &source,
+                    ));
                 }
                 Err(e) => return Err(e.into()),
             }

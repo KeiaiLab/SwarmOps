@@ -81,6 +81,7 @@ use swarmops_store::{
 
 use crate::derive::Registry;
 use crate::error::RepoError;
+use crate::oplog::OpId;
 use crate::read::RepoRead;
 
 /// The most bytes a repository's name may have: create refuses a longer one
@@ -596,9 +597,15 @@ impl<O: ObjectStore> Repo<O> {
             match write.commit() {
                 Ok(_) => {}
                 Err(StoreError::PostCommit {
-                    frame_seq, source, ..
+                    frame_seq,
+                    frame_crc,
+                    source,
                 }) => {
-                    warnings.push(post_commit_warning("the ref move", frame_seq, &source));
+                    warnings.push(post_commit_warning(
+                        "the ref move",
+                        OpId::new(frame_seq, frame_crc),
+                        &source,
+                    ));
                 }
                 Err(e) => return Err(e.into()),
             }
@@ -663,12 +670,12 @@ impl<O: ObjectStore> Repo<O> {
     }
 }
 
-/// The warning for a transaction (`what`) committed at journal frame `frame_seq` whose step
-/// after the commit point failed with `source`.
-pub(crate) fn post_commit_warning(what: &str, frame_seq: u64, source: &StoreError) -> String {
+/// The warning for a transaction (`what`) committed as operation `id` whose step after the
+/// commit point failed with `source`.
+pub(crate) fn post_commit_warning(what: &str, id: OpId, source: &StoreError) -> String {
     format!(
-        "{what} is committed (journal frame {frame_seq}), but a step after the commit point \
-         failed: {source}; the next write to the store repairs it"
+        "{what} is committed (operation {id}), but a step after the commit point failed: \
+         {source}; the next write to the store repairs it"
     )
 }
 

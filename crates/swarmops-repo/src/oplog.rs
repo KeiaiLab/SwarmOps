@@ -9,17 +9,21 @@
 //!
 //! An operation is one write transaction: a frame of the journal, numbered by the frame's seq,
 //! from 0 in commit order. Its records are what the frame holds, in its order: the changesets it
-//! inserted, the refs it moved and the marker of a compaction ([`OpRecord`]).
+//! inserted, the refs it moved and the marker of a compaction ([`OpRecord`]). Its id
+//! ([`OpId`], `<seq>:<crc>`) adds the frame header's payload CRC-32: a frame read before a
+//! take-back cut it (a lock-free read, a frame committed and then lost) lends its number to the
+//! next write, whose id differs unless its payload is the same bytes.
 //!
 //! # Undo
 //!
-//! [`Repo::undo`] restores every ref operation N moved to what the ref named before N: for each
-//! ref, N's net move, from the first `old` the frame records for it to the last `new` (a frame
-//! that moved a ref twice counts once, and one that moved it there and back not at all). It opens
-//! one write transaction, and under its lock, after the write's repair of the journal's tail,
-//! reads frame N: so a frame that a failed sync took back is never undone in place of the frame
-//! that took its seq. Then it moves each ref, in the order of N's moves, from N's `new` back to
-//! N's `old` by compare-and-swap:
+//! [`Repo::undo`] takes an operation's id, and restores every ref operation N moved to what the
+//! ref named before N: for each ref, N's net move, from the first `old` the frame records for it
+//! to the last `new` (a frame that moved a ref twice counts once, and one that moved it there and
+//! back not at all). It opens one write transaction, and under its lock, after the write's repair
+//! of the journal's tail, reads frame N and compares its crc with the id's, before anything
+//! else: a frame at N with another crc, or none, is [`RepoError::OpNotFound`], so a frame that a
+//! take-back cut is never undone in place of the frame that took its seq. Then it moves each ref,
+//! in the order of N's moves, from N's `new` back to N's `old` by compare-and-swap:
 //!
 //! - a ref that names N's `old` already is skipped: an undo made it so before, or another move
 //!   since;
@@ -99,6 +103,27 @@ impl FromStr for OpId {
         let seq = seq.parse().map_err(|_| OpIdError)?;
         let crc = u32::from_str_radix(crc, 16).map_err(|_| OpIdError)?;
         Ok(Self { seq, crc })
+    }
+}
+
+/// Why [`Repo::undo`] found no operation by an id ([`RepoError::OpNotFound`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum OpNotFoundReason {
+    /// The number is past the journal's last operation.
+    PastEnd,
+    /// The frame at the number has another crc: the operation named was taken back and the
+    /// number went to another, or the crc is mistyped.
+    Checksum,
+}
+
+impl OpNotFoundReason {
+    /// The reason's name, as the operations layer reports it: `past_end` or `checksum`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OpNotFoundReason::PastEnd => "past_end",
+            OpNotFoundReason::Checksum => "checksum",
+        }
     }
 }
 
@@ -211,16 +236,28 @@ impl<O: ObjectStore> Repo<O> {
         let op = id.seq;
         let mut write = self.meta.write()?;
         let recovered = write.recovered();
-        // Read under the lock, after the write's tail check: the frame as committed.
+        // Read under the lock, after the write's tail check: the frame as committed. Its crc
+        // must be the id's, before anything else is decided: a frame a take-back cut lent its
+        // number to the next write, whose crc differs.
         let moves = {
             let read = self.meta.read()?;
-            let Some(frame) = read.frame(op)? else {
-                let last = read.frames_before(None, 1)?.first().map(|frame| frame.seq);
-                return Err(RepoError::OpNotFound {
-                    op,
-                    last,
-                    recovered: Box::new(recovered),
-                });
+            let frame = match read.frame(op)? {
+                Some(frame) if frame.crc == id.crc => frame,
+                found => {
+                    let reason = if found.is_some() {
+                        OpNotFoundReason::Checksum
+                    } else {
+                        OpNotFoundReason::PastEnd
+                    };
+                    let last = read.frames_before(None, 1)?.first().map(|frame| frame.seq);
+                    return Err(RepoError::OpNotFound {
+                        op,
+                        crc: id.crc,
+                        last,
+                        reason,
+                        recovered: Box::new(recovered),
+                    });
+                }
             };
             net_moves(&frame)
         };
@@ -283,8 +320,9 @@ impl<O: ObjectStore> Repo<O> {
                 frame_crc,
                 source,
             }) => {
-                let what = format!("the undo of operation {op}");
-                warnings.push(repo::post_commit_warning(&what, frame_seq, &source));
+                let what = format!("the undo of operation {id}");
+                let committed = OpId::new(frame_seq, frame_crc);
+                warnings.push(repo::post_commit_warning(&what, committed, &source));
                 (frame_seq, Some(frame_crc))
             }
             Err(e) => return Err(e.into()),

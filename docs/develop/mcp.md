@@ -282,7 +282,7 @@ the CLI command's request; `swarmops schema <Request>` prints the type.
 | `ref_list` | `swarmops ref list` | `RefListReq` | no |
 | `ref_set` | `swarmops ref set NAME REV` | `RefSetReq` | moves a ref |
 | `ref_delete` | `swarmops ref delete NAME` | `RefDeleteReq` | moves a ref |
-| `undo` | `swarmops op undo OP` | `UndoReq` | moves refs |
+| `undo` | `swarmops op undo ID` | `UndoReq` | moves refs |
 | `commit` | `swarmops commit` | `CommitReq` | adds a changeset; with `advance`, moves a ref |
 | `land` | `swarmops land HEAD` | `LandReq` | adds a changeset and moves the target |
 | `rebase` | `swarmops rebase HEAD` | `RebaseReq` | adds a changeset |

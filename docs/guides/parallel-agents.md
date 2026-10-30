@@ -282,8 +282,9 @@ files. The usual way forward is `land`: commit on the head you read and let the 
 
 Every write names its agent, `<family>/<instance>` such as `agent/worker-1`. The changeset records
 it, and the journal records who moved each ref. `so op log` lists the store's operations, newest
-first. `so op undo <op>` moves every ref that operation moved back to what it named before, all of
-them or none, by compare-and-swap, and refuses if another operation has moved one since.
+first, each with its `id`. `so op undo <id>` moves every ref that operation moved back to what it
+named before, all of them or none, by compare-and-swap, and refuses if another operation has moved
+one since.
 
 ### Claude Code and MCP
 
