@@ -7,6 +7,8 @@
 //! the same) checks the workspace's lockfile and every other one its own steps build, and a
 //! recipe, script or job that builds a workspace the gate does not check checks that one itself.
 //! bench/compare's policy is a file of its own, which must keep every line of the workspace's.
+//! Read the same way, every case the weekly slow suite (`just check-ci-slow`) leaves out still
+//! runs weekly: optimized, one at a time, in a job of `scheduled.yml`.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -191,6 +193,169 @@ fn table_lines(toml: &str) -> BTreeSet<(String, String)> {
         }
     }
     lines
+}
+
+/// The exclusions `just check-ci-slow` may add to `just check-slow`'s filter that no scheduled job
+/// runs: the two 32-process contention measurements, which assume this host's disk and which
+/// `just perf` runs.
+const HOST_ONLY: [&str; 1] = ["not test(thirty_two_processes)"];
+
+/// The flags of a `cargo nextest run` that runs left-out cases as `just perf` does: every one,
+/// ignored or not, optimized and one at a time, red when the filter matches none.
+const PERF_FLAGS: [&str; 7] = [
+    "--locked",
+    "--release",
+    "--workspace",
+    "--all-features",
+    "--run-ignored all",
+    "--no-tests=fail",
+    "--no-capture",
+];
+
+/// The terms of the nextest filter (`-E '<filter>'`) in a recipe's body, split at ` and `; empty
+/// without one.
+fn filter_terms(body: &str) -> Vec<String> {
+    let Some((_, rest)) = body.split_once("-E '") else {
+        return Vec::new();
+    };
+    let filter = rest.split('\'').next().unwrap_or_default();
+    filter
+        .split(" and ")
+        .map(|t| t.trim().to_string())
+        .collect()
+}
+
+/// The justfile variable a filter term leaves out, `not ({{ name }})`; `None` for any other term.
+fn left_out_variable(term: &str) -> Option<&str> {
+    let inner = term.strip_prefix("not ({{")?.strip_suffix("}})")?;
+    Some(inner.trim())
+}
+
+/// The recipes a workflow job runs: each word after `just` in its shell lines.
+fn just_runs(lines: &str) -> BTreeSet<String> {
+    let mut runs = BTreeSet::new();
+    for line in shell_lines(lines) {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        for pair in words.windows(2) {
+            if pair[0] == "just" {
+                runs.insert(pair[1].to_string());
+            }
+        }
+    }
+    runs
+}
+
+/// What keeps a case `check-ci-slow` leaves out from running weekly, optimized, in `workflow`'s
+/// jobs, one line each; empty when every one does. A term it adds to `check-slow`'s filter is a
+/// `HOST_ONLY` exclusion, or `not ({{ name }})` for a variable that some recipe runs with every
+/// `PERF_FLAGS` flag and the filter `'{{ name }}'`, and that a job runs.
+fn unscheduled(justfile: &str, workflow: &str) -> Vec<String> {
+    // 1. The terms the weekly slow suite adds to the slow suite's filter.
+    let slow = filter_terms(&recipe(justfile, "check-slow"));
+    let weekly = filter_terms(&recipe(justfile, "check-ci-slow"));
+    let added = weekly.iter().filter(|term| !slow.contains(term));
+
+    // 2. The recipes each job of the workflow runs.
+    let scheduled: BTreeSet<String> = (jobs(workflow).into_iter())
+        .flat_map(|(_, lines)| just_runs(&lines))
+        .collect();
+
+    // 3. Each left-out variable needs a scheduled recipe that runs it as `just perf` does.
+    let mut problems = Vec::new();
+    for term in added {
+        if HOST_ONLY.contains(&term.as_str()) {
+            continue;
+        }
+        let Some(name) = left_out_variable(term) else {
+            problems.push(format!(
+                "`{term}` is no `not ({{{{ name }}}})` of a scheduled variable"
+            ));
+            continue;
+        };
+        let wanted = format!("-E '{{{{ {name} }}}}'");
+        let runners: Vec<(String, String)> = (recipes(justfile).into_iter())
+            .filter(|(_, body)| shell_lines(body).iter().any(|l| l.contains(&wanted)))
+            .collect();
+        let optimized = |body: &str| {
+            shell_lines(body).iter().any(|line| {
+                line.contains("cargo nextest run")
+                    && line.contains(&wanted)
+                    && PERF_FLAGS.iter().all(|flag| line.contains(flag))
+            })
+        };
+        let runs_weekly = runners
+            .iter()
+            .any(|(recipe, body)| scheduled.contains(recipe) && optimized(body));
+        if !runs_weekly {
+            let names: Vec<&String> = runners.iter().map(|(n, _)| n).collect();
+            problems.push(format!(
+                "`{name}`: recipes {names:?} run it; none runs it with {PERF_FLAGS:?} and is \
+                 run by a scheduled job"
+            ));
+        }
+    }
+    problems
+}
+
+/// Every case `just check-ci-slow` leaves out, but the host-only contention measurements, runs
+/// weekly in a job of `scheduled.yml`, optimized and one at a time (`just check-ci-perf`).
+#[test]
+fn every_case_the_weekly_suite_leaves_out_runs_weekly() {
+    let problems = unscheduled(&read("justfile"), &read(".github/workflows/scheduled.yml"));
+    assert!(
+        problems.is_empty(),
+        "check-ci-slow leaves out cases no scheduled job runs optimized: {problems:#?}"
+    );
+}
+
+/// The check fails a weekly job deleted, a recipe that drops `--release` or `--no-capture`, and a
+/// case left out by name instead of through a scheduled variable.
+#[test]
+fn the_left_out_check_finds_each_gap() {
+    let justfile = |slow_extra: &str, perf_flags: &str| {
+        [
+            "check-slow:".to_string(),
+            "    cargo nextest run --run-ignored all -E 'not test(a)'".to_string(),
+            "check-ci-slow:".to_string(),
+            format!(
+                "    cargo nextest run --run-ignored all -E 'not test(a) and not \
+                 test(thirty_two_processes){slow_extra}'"
+            ),
+            "cases := 'test(=x::y)'".to_string(),
+            "check-ci-perf:".to_string(),
+            format!("    cargo nextest run {perf_flags} -E '{{{{ cases }}}}' --no-capture"),
+        ]
+        .join("\n")
+    };
+    let flags = "--locked --release --workspace --all-features --run-ignored all --no-tests=fail";
+    let workflow = |run: &str| format!("jobs:\n  perf:\n    steps:\n      - run: {run}\n");
+    let job = workflow("flock -w 60 \"$LOCK\" just check-ci-perf");
+
+    // 1. The arrangement as it stands passes, and so does a filter that leaves nothing out.
+    assert_eq!(
+        unscheduled(&justfile(" and not ({{ cases }})", flags), &job),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        unscheduled(&justfile("", flags), &workflow("true")),
+        Vec::<String>::new()
+    );
+
+    // 2. Each gap is found.
+    let unoptimized = flags.replace("--release ", "");
+    let gaps = [
+        justfile(" and not ({{ cases }})", flags).replace(" --no-capture", ""),
+        justfile(" and not ({{ cases }})", &unoptimized),
+        justfile(" and not test(=x::y)", flags),
+    ];
+    for gap in &gaps {
+        assert_eq!(unscheduled(gap, &job).len(), 1, "{gap}");
+    }
+    let deleted = workflow("just check-ci-slow");
+    assert_eq!(
+        unscheduled(&justfile(" and not ({{ cases }})", flags), &deleted).len(),
+        1
+    );
 }
 
 /// The gate runs `cargo deny` over the workspace's lockfile and over every other one its own
