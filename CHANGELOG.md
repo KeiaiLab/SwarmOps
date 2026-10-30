@@ -38,7 +38,9 @@ collects the changes on `stable` that no release holds yet, until the next relea
   or 13,000 commits or 12,000 changesets (`remote_perf`'s fetch, push and sync cases and the
   workspace's checked land), which took 65-76 % of `just check-ci-slow`'s 20-minute kill;
   `check-ci-slow` leaves them out, and swarmops-core's `supply_chain` tests fail a case it leaves
-  out that no scheduled job runs optimized.
+  out that no scheduled job runs optimized. That job and the benchmark gate wait at most 60
+  minutes for the heavy lock, apart from their run time, and fail with a message when the wait
+  runs out; their timeouts add the wait.
 
 ## [0.7.0] - 2026-10-29
 

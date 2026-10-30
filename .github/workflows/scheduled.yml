@@ -393,12 +393,15 @@ jobs:
             -E 'test(=github_live::round_trip_with_github)' --no-capture
 
   # The benchmark gate (`just bench`): every criterion bench, its median against
-  # bench/thresholds.toml, red on a regression over 20 % (scripts/bench-gate.py). Alone, before the
-  # measurement cases: the other jobs share this host and reach load 319 together, which no 20 % threshold survives,
-  # and the heavy lock serializes the host's measurements, not CI jobs. `!cancelled()` runs it
-  # after a failed or skipped job too (github-live is skipped without its variable). A missing
-  # lock directory fails the job; the load average before and after is printed, and a loaded run
-  # fails, never passes. On failure the criterion results are uploaded.
+  # bench/thresholds.toml, red on a regression over 20 % (scripts/bench-gate.py). Alone, before
+  # the measurement cases: the other jobs share this host and reach load 319 together, which no
+  # 20 % threshold survives, and the heavy lock serializes the host's measurements, not CI jobs.
+  # `!cancelled()` runs it after a failed or skipped job too (github-live is skipped without its
+  # variable). A missing lock directory fails the job; the load average before and after is
+  # printed, and a loaded run fails, never passes. On failure the criterion results are uploaded.
+  # The wait for the heavy lock is bounded apart from the run: HEAVY_LOCK_WAIT, 60 minutes, twice
+  # the 29.4 minutes the gate waited in run 40785386333; a wait that runs out fails the job, and
+  # the timeout is that wait plus the run's.
   bench-gate:
     name: bench gate
     needs: [fuzz, bench-compare, git-matrix, host-repos, github-live]
@@ -406,11 +409,13 @@ jobs:
     runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
     permissions:
       contents: read
-    # Twice the slower quiet baseline run (1,015 s, bench/thresholds.toml), rounded up to 5 minutes.
-    timeout-minutes: 35
+    # The lock wait's 60 minutes, plus twice the slower quiet baseline run (1,015 s,
+    # bench/thresholds.toml) rounded up to 5 minutes, 35.
+    timeout-minutes: 95
     env:
       CARGO_TERM_COLOR: always
       HEAVY_LOCK: /data/swarmops/locks/heavy.lock
+      HEAVY_LOCK_WAIT: "3600"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -430,7 +435,19 @@ jobs:
       - name: Load average before
         run: cut -d' ' -f1-3 /proc/loadavg
       - name: Run the benches and the gate under the heavy lock
-        run: flock "$HEAVY_LOCK" just bench
+        run: |
+          # 1. Wait for the lock at most HEAVY_LOCK_WAIT seconds, apart from the run, on fd 9.
+          [ -e "$HEAVY_LOCK" ] || : >>"$HEAVY_LOCK"
+          exec 9<"$HEAVY_LOCK"
+          start=$SECONDS
+          if ! flock -w "$HEAVY_LOCK_WAIT" 9; then
+            echo "::error::the heavy lock stayed held for $HEAVY_LOCK_WAIT s; nothing ran"
+            exit 1
+          fi
+          echo "waited $((SECONDS - start)) s for the heavy lock"
+
+          # 2. The run, holding the lock until this step's shell exits.
+          just bench
       - name: Load average after
         if: ${{ !cancelled() }}
         run: cut -d' ' -f1-3 /proc/loadavg
@@ -461,10 +478,10 @@ jobs:
   # 7,541 s in all, the longest 1,650 s (justfile, `check-ci-perf`). They fail on what they ran,
   # never on its time. Last and alone, after the bench gate, and under the heavy lock as it is:
   # the bench gate runs where it did, and neither waits for the lock the other holds.
-  # `!cancelled()` runs it after a failed bench gate too. A wait for a lock that a measurement
-  # outside CI holds counts against the timeout, as it does for the bench gate. The `ci-perf`
-  # profile kills a hung case after 55 minutes and names it in the JUnit report, which is
-  # uploaded.
+  # `!cancelled()` runs it after a failed bench gate too. The wait for a lock that a measurement
+  # outside CI holds is bounded as the bench gate's is, apart from the run, and fails the job when
+  # it runs out. The `ci-perf` profile kills a hung case after 55 minutes and names it in the
+  # JUnit report, which is uploaded.
   perf-cases:
     name: measurement cases
     needs: bench-gate
@@ -472,12 +489,13 @@ jobs:
     runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
     permissions:
       contents: read
-    # Twice the cases' 7,541 s (251 minutes), plus 5 for the optimized build (62 s cold on this
-    # host at load 650), rounded up to 5 minutes.
-    timeout-minutes: 260
+    # The lock wait's 60 minutes, plus twice the cases' 7,541 s (251 minutes) and 5 for the
+    # optimized build (62 s cold on this host at load 650), rounded up to 5 minutes, 260.
+    timeout-minutes: 320
     env:
       CARGO_TERM_COLOR: always
       HEAVY_LOCK: /data/swarmops/locks/heavy.lock
+      HEAVY_LOCK_WAIT: "3600"
       NEXTEST_PROFILE: ci-perf
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -498,7 +516,19 @@ jobs:
       - name: Load average before
         run: cut -d' ' -f1-3 /proc/loadavg
       - name: Run the cases under the heavy lock
-        run: flock "$HEAVY_LOCK" just check-ci-perf
+        run: |
+          # 1. Wait for the lock at most HEAVY_LOCK_WAIT seconds, apart from the run, on fd 9.
+          [ -e "$HEAVY_LOCK" ] || : >>"$HEAVY_LOCK"
+          exec 9<"$HEAVY_LOCK"
+          start=$SECONDS
+          if ! flock -w "$HEAVY_LOCK_WAIT" 9; then
+            echo "::error::the heavy lock stayed held for $HEAVY_LOCK_WAIT s; nothing ran"
+            exit 1
+          fi
+          echo "waited $((SECONDS - start)) s for the heavy lock"
+
+          # 2. The run, holding the lock until this step's shell exits.
+          just check-ci-perf
       - name: Load average after
         if: ${{ !cancelled() }}
         run: cut -d' ' -f1-3 /proc/loadavg
