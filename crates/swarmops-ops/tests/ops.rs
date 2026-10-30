@@ -1111,7 +1111,7 @@ fn undo_takes_an_op_id_only() {
         .unwrap(); // op 2
     ops.ref_set(&who, set("release/r", &c2, Some(&c1), false))
         .unwrap(); // op 3
-    let frames = frame_count(&root);
+    let before = journal_bytes(&root);
 
     // 1. Every other form is E_INVALID_ARG, with the store's lock held by another writer.
     let meta = MetaStore::open(&root).unwrap();
@@ -1145,12 +1145,33 @@ fn undo_takes_an_op_id_only() {
     let expected = json!({"op": 3, "id": wrong, "last": 3, "reason": "checksum"});
     assert_eq!(Value::Object(err.details.clone()), expected);
     assert!(!err.message.contains(&listed), "{err:?}");
+
+    // 3. `id` echoes the request as sent: leading zeros stay.
+    let padded = format!("00{wrong}");
+    let err = expect_err(ops.undo(&who, UndoReq::new(&padded)), ErrorCode::OpNotFound);
+    assert_eq!(
+        (&err.details["id"], &err.details["op"]),
+        (&json!(padded), &json!(3))
+    );
     let err = expect_err(
-        ops.undo(&who, UndoReq::new("9:00000000")),
+        ops.undo(&who, UndoReq::new("09:00000000")),
         ErrorCode::OpNotFound,
     );
-    assert_eq!(err.details["reason"], "past_end", "{err:?}");
-    assert_eq!(frame_count(&root), frames, "nothing written");
+    let echoed = (&err.details["id"], &err.details["reason"]);
+    assert_eq!(
+        echoed,
+        (&json!("09:00000000"), &json!("past_end")),
+        "{err:?}"
+    );
+    assert!(journal_bytes(&root) == before, "nothing written");
+}
+
+/// The bytes of the journal of the store at `root`: `journal.log` and `journal.off`.
+fn journal_bytes(root: &Utf8Path) -> (Vec<u8>, Vec<u8>) {
+    let layout = swarmops_testkit::store::layout_of(root);
+    let log = fs::read(layout.journal_log()).unwrap();
+    let off = fs::read(layout.journal_off()).unwrap();
+    (log, off)
 }
 
 /// What `name` points at.

@@ -331,11 +331,11 @@ const MAX_LAND_KEY: usize = 64;
 ///   operation, so that the undo wrote nothing. The message says to undo the operations that
 ///   moved it since, newest first, or to land a change that reverses the operation; the hint is
 ///   `swarmops op log`, which only reads.
-/// - `E_OP_NOT_FOUND` `{op, id, last, reason}`: `OpNotFound`, an `undo` of id `id`, numbered
-///   `op`, past the store's last (`reason` `past_end`, `last` null when the store has none) or
-///   whose crc is not the frame's at `op` (`checksum`: the operation named was taken back and its
-///   number went to another, or the id is mistyped); the frame's id is never given. The hint is
-///   `swarmops op log`.
+/// - `E_OP_NOT_FOUND` `{op, id, last, reason}`: `OpNotFound`, an `undo` of id `id` (as the
+///   request gave it), numbered `op`, past the store's last (`reason` `past_end`, `last` null
+///   when the store has none) or whose crc is not the frame's at `op` (`checksum`: the operation
+///   named was taken back and its number went to another, or the id is mistyped); the frame's id
+///   is never given. The hint is `swarmops op log`.
 /// - `E_NOTHING_TO_UNDO` `{op}`: `NothingToUndo`, an `undo` of an operation that left every ref
 ///   where it found it; the hint is `swarmops op log`.
 /// - `E_CONFLICT` `{report}` (exit 3): `Conflict`, a land whose change conflicts with the target's
@@ -1927,7 +1927,13 @@ impl StoreOps for Recording<'_> {
             {
                 self.resolved.record_recovered(**recovered);
             }
-            error::op(e)
+
+            // E_OP_NOT_FOUND's `id` is the id as requested (`004:…` stays), not as parsed.
+            let mut err = error::op(e);
+            if err.code == ErrorCode::OpNotFound.as_str() {
+                err.details.insert("id".to_owned(), req.id.clone().into());
+            }
+            err
         })?;
         self.resolved.record_recovered(outcome.recovered);
         let ref_moves = outcome
