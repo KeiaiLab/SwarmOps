@@ -1238,9 +1238,10 @@ out; a `ws rebase` or `ws materialize` that would bring such a path in refuses t
 A sparse workspace's `ws commit` or `ws land` met edits outside its prefixes and changed
 nothing: `details.paths` names them, sorted, the first 20, each the topmost entry off the
 prefixes (a directory, not what it holds). A commit no longer widens the prefixes; widen them
-with `swarmops ws materialize <path>` (for a new path, a directory already in the tree that holds
-it), then commit again. Build output outside the prefixes is refused unless a `.gitignore` or
-`.swarmignore` on disk names it. Before widening to a directory, check what it holds on disk: a
+with `swarmops ws materialize <path>` (a new path on disk whose parent the workspace has, else its
+topmost new directory), then commit again. Build output outside the prefixes is refused unless a
+`.gitignore` or `.swarmignore` the workspace holds names it; a path the tree holds outside the
+prefixes, written to disk, is refused whatever those files say. Before widening to a directory, check what it holds on disk: a
 file `.worktreeinclude` copied there (`.env`, a key) is committed with the rest, and the store
 keeps it for good; delete it first
 ([known limitations](known-limitations.md#workspaces)).

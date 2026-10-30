@@ -33,8 +33,9 @@ created: true
 ```
 
 The same command again is the same workspace (`created: false`). Without `--all`, give
-`--prefix <path>` once for each subtree to write out: the rest of the tree is absent, not deleted,
-and `ws materialize <path>` writes more of it later. A new workspace also gets the files that
+`--prefix <path>` once for each subtree to write out, with the `.gitignore` and `.swarmignore`
+files of the directories above it: the rest of the tree is absent, not deleted, and
+`ws materialize <path>` writes more of it later. A new workspace also gets the files that
 `.worktreeinclude` lists, copied from `--from <dir>` (gitignored files such as `.env`), and runs the
 repository's bootstrap command, `bootstrap.argv` of `.swarmops/workspaces.json`;
 `SWARMOPS_WS_BOOTSTRAP=skip` skips both.

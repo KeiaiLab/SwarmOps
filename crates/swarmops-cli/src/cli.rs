@@ -767,8 +767,9 @@ pub enum BlobCommand {
 pub enum WsCommand {
     /// Make a workspace NAME in a directory of its own, and bootstrap it.
     ///
-    /// The directory holds the tree of --base under the --prefix paths (--all: the whole tree),
-    /// and .swarmws/, its private state. The same command again is the same workspace
+    /// The directory holds the tree of --base under the --prefix paths, with the .gitignore and
+    /// .swarmignore files of the directories above them (--all, or neither: the whole tree), and
+    /// .swarmws/, its private state. The same command again is the same workspace
     /// (created: false). A new workspace gets the files .worktreeinclude lists from --from, and
     /// runs the repository's bootstrap command (.swarmops/workspaces.json) unless
     /// SWARMOPS_WS_BOOTSTRAP=skip. It needs an identity.
@@ -781,7 +782,8 @@ pub enum WsCommand {
         /// The changeset or ref whose tree it holds.
         #[arg(long, value_name = "REV", default_value = "main")]
         base: String,
-        /// A repository path whose subtree to write out; give it again for more.
+        /// A repository path whose subtree to write out, with the .gitignore and .swarmignore
+        /// files of the directories above it; give it again for more.
         #[arg(long = "prefix", value_name = "P", conflicts_with = "all")]
         prefixes: Vec<String>,
         /// Write out the whole tree.
@@ -928,6 +930,11 @@ pub enum WsCommand {
         after: WsAfter,
     },
     /// Write out more of a workspace's tree: the paths join its prefixes.
+    ///
+    /// The .gitignore and .swarmignore files of the directories above each path join too. A path
+    /// the tree lacks joins as it is, nothing written, when it is on disk and its parent is the
+    /// root, a directory of the tree or one above a prefix: a new file the hint of
+    /// E_WS_OUTSIDE_PREFIXES names. Else it is E_PATH_NOT_FOUND.
     Materialize {
         #[command(flatten)]
         at: WsAt,

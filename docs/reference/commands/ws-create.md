@@ -4,7 +4,7 @@
 
 Make a workspace NAME in a directory of its own, and bootstrap it.
 
-The directory holds the tree of --base under the --prefix paths (--all: the whole tree), and .swarmws/, its private state. The same command again is the same workspace (created: false). A new workspace gets the files .worktreeinclude lists from --from, and runs the repository's bootstrap command (.swarmops/workspaces.json) unless SWARMOPS\_WS\_BOOTSTRAP=skip. It needs an identity.
+The directory holds the tree of --base under the --prefix paths, with the .gitignore and .swarmignore files of the directories above them (--all, or neither: the whole tree), and .swarmws/, its private state. The same command again is the same workspace (created: false). A new workspace gets the files .worktreeinclude lists from --from, and runs the repository's bootstrap command (.swarmops/workspaces.json) unless SWARMOPS\_WS\_BOOTSTRAP=skip. It needs an identity.
 
 ```yaml
 title: "swarmops ws create"
@@ -55,7 +55,7 @@ The changeset or ref whose tree it holds.
 
 Syntax: `--prefix <P>...`.
 
-A repository path whose subtree to write out; give it again for more.
+A repository path whose subtree to write out, with the .gitignore and .swarmignore files of the directories above it; give it again for more.
 
 ### `--all`
 

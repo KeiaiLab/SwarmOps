@@ -4,6 +4,8 @@
 
 Write out more of a workspace's tree: the paths join its prefixes.
 
+The .gitignore and .swarmignore files of the directories above each path join too. A path the tree lacks joins as it is, nothing written, when it is on disk and its parent is the root, a directory of the tree or one above a prefix: a new file the hint of E\_WS\_OUTSIDE\_PREFIXES names. Else it is E\_PATH\_NOT\_FOUND.
+
 ```yaml
 title: "swarmops ws materialize"
 description: "Write out more of a workspace's tree: the paths join its prefixes."
