@@ -1847,7 +1847,7 @@ expression: listed
             "type": "object"
           },
           "paths": {
-            "description": "Only these repository paths; paths outside the workspace's prefixes join them.",
+            "description": "Only these repository paths; one outside the prefixes is `E_WS_OUTSIDE_PREFIXES`.",
             "items": {
               "type": "string"
             },

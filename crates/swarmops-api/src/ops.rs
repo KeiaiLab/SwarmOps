@@ -3619,7 +3619,7 @@ pub struct WsCommitReq {
     pub workspace: String,
     /// The changeset's message.
     pub message: String,
-    /// Only these repository paths; paths outside the workspace's prefixes join them.
+    /// Only these repository paths; one outside the prefixes is `E_WS_OUTSIDE_PREFIXES`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
     /// A kind to record for a path, where the volume cannot hold the executable bit.

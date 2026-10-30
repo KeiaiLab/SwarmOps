@@ -2031,7 +2031,7 @@ Kind: object. `swarmops schema WsCommitReq` prints its JSON Schema.
 | --- | --- | --- | --- |
 | `message` | `string` | yes | The changeset's message. |
 | `modes` | map of `string` to [`ModeInput`](#modeinput) | no | A kind to record for a path, where the volume cannot hold the executable bit. |
-| `paths` | array of `string` | no | Only these repository paths; paths outside the workspace's prefixes join them. |
+| `paths` | array of `string` | no | Only these repository paths; one outside the prefixes is `E_WS_OUTSIDE_PREFIXES`. |
 | `status_after` | [`StatusAfter`](#statusafter) | no | Whether the response carries the status after the mutation. Default: `"page"`. |
 | `workspace` | `string` | yes | The workspace, by name. |
 
