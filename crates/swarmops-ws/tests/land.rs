@@ -15,8 +15,8 @@ use swarmops_api::{
     ResolveRevReq, ResolvedRev, ShowReq, StatusAfter, StoreOps, TreeListing, UndoReq, UndoResp,
     VerifyReport, VerifyReq, WsCheckInput, WsCommitReq, WsLandReq, WsRebaseAction, WsRebaseReq,
 };
-use swarmops_ws::RealFs;
 use swarmops_ws::state::{self, SWARMWS_DIR};
+use swarmops_ws::{RealFs, lock};
 
 use crate::fixture::{BARE, Fixture, Put, Watched, changes, file, tree_of, write};
 
@@ -644,7 +644,8 @@ fn an_outside_edit_is_refused_before_the_check() {
     f.create("w", &base, &["src"]);
     write(&f.beside("w"), "docs/a", "stray\n");
 
-    // 2. Refused for the stray, not for the missing command.
+    // 2. Refused for the stray, not for the missing command nor the lock another holds.
+    let _held = lock::acquire(&f.beside("w")).unwrap();
     let watched = Watched::new(&f.ops);
     let refused = swarmops_ws::land(&f.ctx_over(&watched), unconfigured_check("w")).unwrap_err();
     assert_eq!(refused.code, "E_WS_OUTSIDE_PREFIXES", "{refused:?}");

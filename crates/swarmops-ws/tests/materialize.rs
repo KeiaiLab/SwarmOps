@@ -827,6 +827,31 @@ fn a_non_utf8_path_is_invalid_arg() {
     assert_eq!(fine, "/tmp/ws");
 }
 
+/// `ws create` with neither prefixes nor `all` answers `all` and writes `"all": true` to
+/// `workspace.json`, read raw.
+#[test]
+fn a_bare_create_answers_and_stores_all() {
+    // 1. Made with no prefix and no `all`.
+    let f = Fixture::new();
+    let base = f.commit(None, &[Put::File("src/a.txt", "a\n")]);
+    let dir = f.beside("w");
+    let mut req = WsCreateReq::new("w".to_owned());
+    req.path = Some(dir.to_string());
+    req.base = base.as_str().into();
+    req.status_after = StatusAfter::None;
+    let made = swarmops_ws::create(&f.ctx(), req).unwrap();
+
+    // 2. The answer and the file both say the whole tree.
+    assert_eq!(
+        (made.created, made.all, made.prefixes.len()),
+        (true, true, 0)
+    );
+    let wire: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(state::path_in(&dir)).unwrap()).unwrap();
+    assert_eq!(wire["all"], true, "{wire}");
+    assert_eq!(wire["prefixes"], serde_json::json!([]), "{wire}");
+}
+
 /// A workspace with neither prefixes nor `all` asked for holds the whole tree, as `ws create`
 /// wrote it, and so does one an older build wrote as `all` false: it reads as `all`, the same
 /// create again is the same workspace, `ws materialize` adds nothing to it, `ws discard` takes
