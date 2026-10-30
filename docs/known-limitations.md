@@ -705,14 +705,18 @@ left).
   its prefixes, and the root `.gitignore` that names them is on disk only when materialised; so a
   copy outside the prefixes is an edit outside them, and `ws commit`, `ws land`,
   `ws delete --rescue` and the `worktree-remove` hook refuse it (`E_WS_OUTSIDE_PREFIXES`), the
-  directory and its edits kept. The hint `ws materialize <copy>` fails (`E_PATH_NOT_FOUND`); the
-  way out is `ws materialize .gitignore`, when the root `.gitignore` names the copy, or deleting
-  the copy, then `ws delete --rescue <name>` for a workspace the hook could not remove.
-  *Documented (the M15 design §5). Found: M15 Task S4b review.*
-- **`ws status` shows a sparse workspace clean while a commit refuses it.** `ws status` lists the
-  changes under the prefixes only, so it reports `clean` while `ws commit` and `ws land` refuse an
-  entry outside them; the refusal's `details.paths` names those entries. *Documented (the M15
-  design §5 leaves the display out of scope). Found: M15 Task S4b review.*
+  directory and its edits kept. The hint names the topmost entry off the prefixes, and fails
+  (`E_PATH_NOT_FOUND`) only when the tree lacks it: a copy at the root, or one in a directory the
+  tree does not hold. When the tree holds that directory (`config` for a copy at
+  `config/master.key`), the hint succeeds and the next commit stores the copy, which may be a
+  secret, in the store for good ([`gc` collects no object](#verification-and-repair)). The way
+  out is `ws materialize .gitignore`, when the root `.gitignore` names the copy, or deleting the
+  copy, then `ws delete --rescue <name>` for a workspace the hook could not remove.
+  *Documented (the M15 design §5). Found: M15 Task S4b review; narrowed by M15 Task S4b2 review.*
+- **`ws status` lists no change in a sparse workspace that a commit refuses.** `ws status` lists
+  the changes under the prefixes only, so its `changes` list can be empty while `ws commit` and
+  `ws land` refuse an entry outside them; the refusal's `details.paths` names those entries.
+  *Documented (the M15 design §5 leaves the display out of scope). Found: M15 Task S4b review.*
 
 ## Platforms
 

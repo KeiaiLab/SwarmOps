@@ -116,10 +116,17 @@ collects the changes on `stable` that no release holds yet, until the next relea
   lower-case `.swarmws` was refused before, so `src/.swarmws/y` was written. `src/swarmws/y` and
   `src/.swarmws.bak/y` are still written. To keep such a tree out of a workspace, rename the path
   in the store with a commit, or create the workspace with `--prefix` paths that leave it out.
-- A workspace made with neither `--prefix` nor `--all` holds the whole tree for `ws commit` and
-  `ws land` too, as `ws create` materialises it: a commit naming a path or setting a mode there is
-  no longer `E_WS_OUTSIDE_PREFIXES`, and `ws land` no longer walks it for edits outside prefixes it
-  does not have (the M15 design §5).
+- A workspace made with neither `--prefix` nor `--all` is stored as the whole tree it is written
+  out as (`all: true` in its state and in `ws create` and `ws list`), and one an older build
+  stored with `all: false` and no prefix is read as the whole tree. In 0.7.0 such a workspace was
+  otherwise handled as holding nothing: a deleted file was left out of the commit, files a commit
+  or `ws rebase -m` did not touch were listed as added and `ws land` refused them
+  (`E_WS_DIRTY`), `ws discard <path>` was refused, and a named commit or `ws materialize <path>`
+  narrowed its prefixes to that path. Each now acts as in a workspace of the whole tree (the M15
+  design §5).
+- A commit the store refuses outright (`E_EMPTY_COMMIT`, `E_INVALID_ARG`) no longer leaves its
+  pending record behind; the next `ws land` refused with "a ws commit … was cut short: run it
+  again first", which could not succeed.
 - The scripting guide names `E_REF_NOT_FOUND` and `E_WS_STALE` as the codes not raised yet, as
   Troubleshooting does; it named `E_AUTH`, `E_POLICY_DENIED` and `E_MAINTENANCE_BUSY` too, which
   `swarmops serve` and the maintenance commands raise.

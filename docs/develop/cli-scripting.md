@@ -163,7 +163,7 @@ The exit code is `error.exit`, and 0 on success:
 
 `E_REF_NOT_FOUND` and `E_WS_STALE` are not raised yet; they are in the schema so that a script can
 match them before any operation raises them
-([known limitations](../known-limitations.md#serving-requests)). `ErrorCode` in
+([Troubleshooting](../troubleshooting.md#codes-not-raised-yet)). `ErrorCode` in
 [crates/swarmops-api/src/error.rs](../../crates/swarmops-api/src/error.rs) is the one table of
 each code's exit and `retryable`.
 

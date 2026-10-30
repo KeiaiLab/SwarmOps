@@ -1236,7 +1236,10 @@ nothing: `details.paths` names them, sorted, the first 20, each the topmost entr
 prefixes (a directory, not what it holds). A commit no longer widens the prefixes; widen them
 with `swarmops ws materialize <path>` (for a new path, a directory already in the tree that holds
 it), then commit again. Build output outside the prefixes is refused unless a `.gitignore` or
-`.swarmignore` on disk names it.
+`.swarmignore` on disk names it. Before widening to a directory, check what it holds on disk: a
+file `.worktreeinclude` copied there (`.env`, a key) is committed with the rest, and the store
+keeps it for good; delete it first
+([known limitations](known-limitations.md#workspaces)).
 
 ### `E_WS_STALE`
 
