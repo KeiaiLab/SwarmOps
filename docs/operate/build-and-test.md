@@ -40,9 +40,11 @@ repository's bootstrap command, `bootstrap.argv` of `.swarmops/workspaces.json`;
 `SWARMOPS_WS_BOOTSTRAP=skip` skips both.
 
 A command run inside the workspace finds its store through `.swarmws/workspace.json`. The
-workspace operations (`ws …` and the MCP workspace tools) other than `ws create` act as the
-workspace's creator, its `created_by`, unless `--as` or `SWARMOPS_AGENT` names another; `ws create`
-always needs one, since it records who made the new workspace. The other commands that need an
+workspace operations (`ws …` and the MCP workspace tools) other than `ws create` and
+`ws hook worktree-create` act as the workspace's creator, its `created_by`, unless `--as` or
+`SWARMOPS_AGENT` names another; `ws create` always needs `--as` or `SWARMOPS_AGENT`, since it
+records who made the new workspace, and `ws hook worktree-create` without either acts as
+`claude-code/<name>`, the new workspace's name. The other commands that need an
 identity, such as `commit`, `land` and `sync`, still need `--as` or `SWARMOPS_AGENT` there, and
 those that need none, such as `gc`, `repair`, `upgrade`, `fetch` and `push`, need none there
 either. `--repo` and `SWARMOPS_REPO` still come first, and a relative `SWARMOPS_REPO` is read

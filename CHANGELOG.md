@@ -70,11 +70,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
   reads at most 200 `log` pages instead of 100, the value still at most 10,000.
   `WsStatus.behind_by`'s schema description now says it is 0 when the target head is on `base`'s
   first-parent history fewer than 10,000 changesets behind `base`.
-- The build-and-test guide says that only the workspace operations other than `ws create` act as
-  the workspace's creator without `--as` or `SWARMOPS_AGENT`, and `ws create` always needs an
-  identity; it said every command run inside a workspace did, but `commit`, `land`, `sync` and the
-  other commands that need an identity still refuse an anonymous caller there with
-  `E_IDENTITY_REQUIRED`, while `gc`, `repair`, `upgrade`, `fetch` and `push` need none anywhere.
+- The build-and-test guide says that only the workspace operations other than `ws create` and
+  `ws hook worktree-create` act as the workspace's creator without `--as` or `SWARMOPS_AGENT`,
+  `ws create` always needs an identity and the hook acts as `claude-code/<name>`; it said every
+  command run inside a workspace did, but `commit`, `land`, `sync` and the other commands that need
+  an identity still refuse an anonymous caller there with `E_IDENTITY_REQUIRED`, while `gc`,
+  `repair`, `upgrade`, `fetch` and `push` need none anywhere.
 
 ## [0.7.0] - 2026-10-29
 
