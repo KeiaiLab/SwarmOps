@@ -110,6 +110,38 @@ fn eight_processes_land_concurrently_none_lost() {
     store.assert_clean("after the lands");
 }
 
+/// A key that landed a change onto `release/1` and is given for a land onto `main` is
+/// `E_INVALID_ARG` (exit 2) through the binary, whether the land is another change or the same
+/// one: the details name the key, the changeset it landed and `release/1`, and neither ref moves.
+#[test]
+fn a_key_reused_on_another_target_is_invalid_arg() {
+    const KEY: &str = "other-target";
+    let store = Store::init();
+    let who = agent(0);
+    let t0 = commit_base(&store, 1);
+    let release = ["ref", "set", "release/1", &t0, "--create"];
+    store.run_as(&who, &release, &[]).ok();
+    let one = store.commit(&who, "one.txt", "one\n", Some(&t0));
+    let land = ["land", one.as_str(), "--key", KEY, "--target", "release/1"];
+    let landed = store.run_as(&who, &land, &[]).ok()["landed"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let two = store.commit(&who, "two.txt", "two\n", Some(&t0));
+    let refs = || store.read(&["ref", "list"]).ok();
+    let before = refs();
+
+    for head in [&two, &one] {
+        let run = store.run_as(&who, &["land", head, "--key", KEY], &[]);
+        let error = run.err("E_INVALID_ARG");
+        assert_eq!(error["exit"], 2, "{run}");
+        let details = serde_json::json!({"key": KEY, "landed": landed, "target": "release/1"});
+        assert_eq!(error["details"], details, "{run}");
+    }
+    assert_eq!(refs(), before, "neither ref moved");
+    store.assert_clean("after the refused lands");
+}
+
 /// Commits the base the landers start from ([`base_files`]: [`REGISTRY`] and a file under each
 /// lander's directory, for `landers` landers) and creates `main` there: its id.
 fn commit_base(store: &Store, landers: usize) -> String {

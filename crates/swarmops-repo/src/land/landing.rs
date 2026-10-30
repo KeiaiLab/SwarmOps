@@ -552,7 +552,7 @@ impl<O: ObjectStore> Landing<'_, O> {
         let chain = self.squashed()?;
         let theirs = stored(read, theirs)?;
 
-        // 2. The key's walk: a replay, or a key reused.
+        // 2. The key's walk: a replay, or a key reused, on the target or on another ref.
         if let Some(key) = &self.req.key {
             match self.walk.find_key(read, &theirs, key, self.req.head)? {
                 Some(KeyFound::Replay(found)) => {
@@ -574,9 +574,21 @@ impl<O: ObjectStore> Landing<'_, O> {
                     return Err(RepoError::KeyReused {
                         key: key.clone(),
                         landed,
+                        target: self.req.target.clone(),
                     });
                 }
-                None => {}
+                None => {
+                    // The target holds no land of the key: another ref may.
+                    let target = &self.req.target;
+                    let elsewhere = self.walk.find_elsewhere(read, target, key, &theirs)?;
+                    if let Some((ref_name, landed)) = elsewhere {
+                        return Err(RepoError::KeyReused {
+                            key: key.clone(),
+                            landed,
+                            target: ref_name,
+                        });
+                    }
+                }
             }
         }
 

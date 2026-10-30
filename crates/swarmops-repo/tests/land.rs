@@ -523,12 +523,166 @@ fn a_key_reused_for_another_head_is_refused() {
     let frames = frame_count(&root);
 
     match repo.land(keyed(two, "key-1")) {
-        Err(RepoError::KeyReused { key, landed: found }) => {
-            assert_eq!((key.as_str(), found), ("key-1", landed));
-        }
+        Err(RepoError::KeyReused {
+            key,
+            landed: found,
+            target,
+        }) => assert_eq!(
+            (key.as_str(), found, target.as_str()),
+            ("key-1", landed, "main")
+        ),
         other => panic!("expected KeyReused, got {other:?}"),
     }
     assert_eq!((frame_count(&root), main_head(&repo)), (frames, landed));
+}
+
+/// Creates ref `name` at `id`.
+#[track_caller]
+fn create_ref(repo: &LocalRepo, name: &str, id: ChangesetId) {
+    repo.cas_ref(name, None, Some(id), ACTOR).unwrap();
+}
+
+/// Moves ref `name` from `old` to `new`.
+#[track_caller]
+fn move_ref(repo: &LocalRepo, name: &str, old: ChangesetId, new: ChangesetId) {
+    repo.cas_ref(name, Some(old), Some(new), ACTOR).unwrap();
+}
+
+/// A land of `head` onto `target` by [`lander`], keyed `key`.
+fn keyed_on(head: ChangesetId, target: &str, key: &str) -> LandRequest {
+    let mut land = LandRequest::new(head, target, lander());
+    land.key = Some(key.to_owned());
+    land
+}
+
+/// Asserts that `result` is a refusal of `key`, which landed `landed` on `target`.
+#[track_caller]
+fn assert_reused(
+    result: Result<LandOutcome, RepoError>,
+    key: &str,
+    landed: ChangesetId,
+    target: &str,
+) {
+    match result {
+        Err(RepoError::KeyReused {
+            key: k,
+            landed: l,
+            target: t,
+        }) => assert_eq!((k.as_str(), l, t.as_str()), (key, landed, target)),
+        other => panic!("expected KeyReused, got {other:?}"),
+    }
+}
+
+/// A key that landed a change on one target refuses another change on a second target: the walk
+/// of `main` finds nothing, the walk of `release/1` finds the key, and the refusal names that ref
+/// and records nothing.
+#[test]
+fn a_key_landed_on_another_target_is_refused() {
+    let (_dir, root, repo) = new_store();
+    let t0 = advance(&repo, ACTOR, &[], vec![put("a", b"a\n")]);
+    create_ref(&repo, "release/1", t0);
+    let one = commit_by(&repo, ACTOR, &[t0], vec![put("b", b"b\n")]);
+    let landed = repo
+        .land(keyed_on(one, "release/1", "key-1"))
+        .unwrap()
+        .landed;
+    let two = commit_by(&repo, ACTOR, &[t0], vec![put("c", b"c\n")]);
+    let frames = frame_count(&root);
+
+    assert_reused(repo.land(keyed(two, "key-1")), "key-1", landed, "release/1");
+    assert_eq!((frame_count(&root), main_head(&repo)), (frames, t0));
+}
+
+/// The same change under the same key on another target is refused too: a land onto another
+/// target takes a key of its own.
+#[test]
+fn the_same_change_on_another_target_is_refused() {
+    let (_dir, root, repo) = new_store();
+    let t0 = advance(&repo, ACTOR, &[], vec![put("a", b"a\n")]);
+    create_ref(&repo, "release/1", t0);
+    let head = commit_by(&repo, ACTOR, &[t0], vec![put("b", b"b\n")]);
+    let landed = repo
+        .land(keyed_on(head, "release/1", "key-1"))
+        .unwrap()
+        .landed;
+    let frames = frame_count(&root);
+
+    assert_reused(
+        repo.land(keyed(head, "key-1")),
+        "key-1",
+        landed,
+        "release/1",
+    );
+    assert_eq!((frame_count(&root), main_head(&repo)), (frames, t0));
+}
+
+/// A branch cut from the target after the key landed there holds the landed changeset in its
+/// chain, and does not make the key another target's: the land run again is a replay, found on
+/// the target first.
+#[test]
+fn a_key_on_a_branch_cut_after_it_landed_replays() {
+    let (_dir, root, repo) = new_store();
+    let t0 = advance(&repo, ACTOR, &[], vec![put("a", b"a\n")]);
+    let head = commit_by(&repo, ACTOR, &[t0], vec![put("b", b"b\n")]);
+    let landed = repo.land(keyed(head, "key-1")).unwrap().landed;
+    create_ref(&repo, "release/2", landed);
+    let frames = frame_count(&root);
+
+    let again = repo.land(keyed(head, "key-1")).unwrap();
+    assert_eq!((again.status, again.landed), (LandStatus::Replayed, landed));
+    assert_eq!((frame_count(&root), main_head(&repo)), (frames, landed));
+}
+
+/// A key found on another ref that the target's head reaches is not another target's: an
+/// ancestor of the head below the land's base, which the target's own walk stops above, is
+/// passed over, and the land goes on.
+#[test]
+fn a_key_below_the_base_on_the_target_is_not_another_target() {
+    let (_dir, _root, repo) = new_store();
+    let t0 = advance(&repo, ACTOR, &[], vec![put("a", b"a\n")]);
+    let old = commit_by(&repo, ACTOR, &[t0], vec![put("b", b"b\n")]);
+    let keyed_land = repo.land(keyed(old, "key-1")).unwrap().landed;
+    let t2 = advance(&repo, ACTOR, &[keyed_land], vec![put("c", b"c\n")]);
+    let t3 = advance(&repo, ACTOR, &[t2], vec![put("d", b"d\n")]);
+    create_ref(&repo, "release/2", keyed_land);
+    let head = commit_by(&repo, ACTOR, &[t3], vec![put("e", b"e\n")]);
+
+    let out = repo.land(keyed(head, "key-1")).unwrap();
+    assert_eq!((out.status, out.rebased_onto), (LandStatus::Landed, t3));
+}
+
+/// The walk of the other refs ends at the same floor as the target's, the base's generation:
+/// a key that landed on `release/1` below that generation is not found, and the land goes on.
+#[test]
+fn a_key_below_the_base_on_another_target_is_not_found() {
+    let (_dir, _root, repo) = new_store();
+    let t0 = advance(&repo, ACTOR, &[], vec![put("a", b"a\n")]);
+    create_ref(&repo, "release/1", t0);
+    let one = commit_by(&repo, ACTOR, &[t0], vec![put("b", b"b\n")]);
+    let old = repo
+        .land(keyed_on(one, "release/1", "key-1"))
+        .unwrap()
+        .landed;
+    // `release/1` goes on above the land: generations 3, 4 and 5.
+    let mut at = old;
+    for n in 0..3 {
+        let next = commit_by(&repo, OTHER, &[at], vec![put(&format!("r{n}"), b"r\n")]);
+        move_ref(&repo, "release/1", at, next);
+        at = next;
+    }
+    // `main` reaches generation 4: the base of the land, whose floor stops the walks above the
+    // key's changeset (generation 2).
+    let mut top = t0;
+    for n in 0..3 {
+        top = advance(&repo, ACTOR, &[top], vec![put(&format!("m{n}"), b"m\n")]);
+    }
+    let head = commit_by(&repo, ACTOR, &[top], vec![put("h", b"h\n")]);
+
+    let out = repo.land(keyed(head, "key-1")).unwrap();
+    assert_eq!(
+        (out.status, out.rebased_onto, out.base),
+        (LandStatus::Landed, top, top)
+    );
 }
 
 /// A head on the target's first-parent chain, its head or one below it, has nothing to land.

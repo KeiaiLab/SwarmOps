@@ -113,6 +113,13 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 ### Fixed
 
+- A land key that landed a change onto one target is refused for a land onto another: `land --key
+  K` onto `main` after `K` landed onto `release/1` was a new land, so a retry that named the
+  wrong target landed the change twice. The land looks for the key on `main`, `release/<x>` and
+  branch refs other than its target too, down to the change's base like the target's own walk, and
+  refuses it with `E_INVALID_ARG`; `details.target` is new and names the ref whose history holds
+  the landed changeset (the M15 design §6). Give each change and each target a key of its own. A
+  key that landed below the change's base on another ref is not found, as on the target.
 - `ws status`'s `behind_by` counts the changesets the target holds that the workspace's base lacks
   when the base is not on the target's history: 1 after a sync replaced the base with its
   squash-merged copy, and 0 when the target moved back onto the base's first-parent history,

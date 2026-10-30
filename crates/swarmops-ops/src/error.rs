@@ -211,10 +211,15 @@ fn land_error(e: RepoError, message: String) -> OpError {
                 ]))
                 .with_hint("run the land again: nothing of this one was recorded")
         }
-        RepoError::KeyReused { key, landed } => error(ErrorCode::InvalidArg, message)
+        RepoError::KeyReused {
+            key,
+            landed,
+            target,
+        } => error(ErrorCode::InvalidArg, message)
             .with_details(details([
                 ("key", key.into()),
                 ("landed", landed.to_string().into()),
+                ("target", target.into()),
             ]))
             .with_hint(hint(format!("swarmops show {landed}"))),
         RepoError::MergeChangeset(id) => error(ErrorCode::InvalidArg, message)
@@ -1610,6 +1615,7 @@ mod tests {
             RepoError::KeyReused {
                 key: "k-1".into(),
                 landed: id(),
+                target: "release/1".into(),
             },
             RepoError::MergeChangeset(id()),
             RepoError::BaseNotAncestor {
@@ -1649,7 +1655,7 @@ mod tests {
             ),
             (
                 "E_INVALID_ARG",
-                serde_json::json!({"key": "k-1", "landed": full}),
+                serde_json::json!({"key": "k-1", "landed": full, "target": "release/1"}),
             ),
             ("E_INVALID_ARG", serde_json::json!({"changeset": full})),
             (
@@ -1690,10 +1696,12 @@ mod tests {
             RepoError::KeyReused {
                 key: "k-1".into(),
                 landed: id(),
+                target: "release/1".into(),
             },
             During::Op,
         );
         assert_eq!(reused.hint, Some(format!("swarmops show {full}")));
+        assert_eq!(reused.details["target"], "release/1");
     }
 
     /// A commit with `advance` whose ref moved first recorded nothing: `E_CAS_MISMATCH` (exit 4,

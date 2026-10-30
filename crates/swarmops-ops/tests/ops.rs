@@ -2429,7 +2429,7 @@ mod land {
         let error = expect_err(ops.land(&who, reused), ErrorCode::InvalidArg);
         assert_eq!(
             Value::Object(error.details),
-            json!({"key": "land-1", "landed": first.landed})
+            json!({"key": "land-1", "landed": first.landed, "target": "main"})
         );
     }
 

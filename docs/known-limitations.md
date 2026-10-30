@@ -217,10 +217,17 @@ left).
   (`E_PATH_NOT_FOUND`). *Target: M9
   (an index of commit keys, if measurements ask for one). Found: M1 final fix pass; the `--advance`
   case, the M1.6 review; narrowed by M4 Task 8.*
-- **A keyed land searches the target's first parents.** A land with a key first looks for an
+- **A keyed land searches first parents, not a key index.** A land with a key first looks for an
   earlier land of the same key on the target's first-parent chain, from its head down to the
-  land's base, so a land made on an old base walks the changesets landed since. *Target: M9 (an
-  index of commit keys, if measurements ask for one). Found: M4 Task 12's hand-off.*
+  land's base, so a land made on an old base walks the changesets landed since. A key it does not
+  find there is looked for on every other `main`, `release/<x>` and branch ref (not tags or
+  remote-tracking refs), down to the same base generation, and a key that landed on another ref
+  is `E_INVALID_ARG` with `details.target` (the M15 design §6). Three bounds stay. A key that
+  landed on another ref at or below the base's generation is not found, as one on the target is
+  not. Two lands with one key onto different targets at the same time can both land: the search
+  is outside the store's lock. The cost grows with the refs a land has to walk. *Target: M9 (an
+  index of commit keys, if measurements ask for one; it also closes the last two bounds). Found:
+  M4 Task 12's hand-off; the other-ref search, M15 S5a.*
 - **`undo` does not take back a land on `main`, nor one that later lands built on.** `main`
   moves only forward, so the undo of a land on it is `E_REF_PROTECTED` (the M15 design §4). On a
   `release/<name>` ref an undo moves refs back only while they still name what the operation set;

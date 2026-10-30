@@ -278,15 +278,21 @@ pub enum RepoError {
         /// found the target moved before it merged. Boxed, as for [`RepoError::RefMoved`].
         recovered: Box<Recovered>,
     },
-    /// A land's idempotency key landed another change already: the changeset `landed` on the
-    /// target carries it, squashed from another head. Nothing was recorded; a land of another
-    /// change takes a key of its own.
-    #[error("land key {key:?} landed another change already, as {landed}")]
+    /// A land's idempotency key landed already, as the changeset `landed`, which is not this
+    /// land's own on its target: it is squashed from another head, or it is on another ref
+    /// (`target`). Nothing was recorded; a land of another change, or onto another target,
+    /// takes a key of its own.
+    #[error(
+        "land key {key:?} landed already, as {landed} on {target}: another change or target \
+         takes a key of its own"
+    )]
     KeyReused {
         /// The key.
         key: String,
         /// The changeset it landed.
         landed: ChangesetId,
+        /// The ref whose first-parent chain holds `landed`: the land's target, or another ref.
+        target: String,
     },
     /// A land squashes a first-parent chain, and this changeset of the chain from the land's
     /// base to its head has two parents or more: a merge, which v1 does not land.

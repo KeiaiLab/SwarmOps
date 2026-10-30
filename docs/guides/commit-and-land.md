@@ -580,7 +580,9 @@ It exits 2.
 `land --key` takes 1 to 64 letters, digits and `-`, such as a uuid v7. A land with a key first
 looks down the target's first parents, as far as the change's base, for a changeset landed with
 the same key. One squashed from the same head is the earlier land: the rerun replays it and
-writes nothing.
+writes nothing. A key not found there is looked for on the other `main`, `release/<x>` and branch
+refs, down to the same base: one that landed on another ref is refused, even for the same change,
+so give each change and each target a key of its own.
 
 ```sh
 C=$(swarmops commit -m "add a changelog" --changes log.json --parent "$BASE" --key "$KEY" | field result.changeset)
@@ -595,7 +597,7 @@ replayed
 ```
 
 The first line replays the commit from the section above (same key, same parent), so `C` is
-the changeset made there. A key that landed another change is refused:
+the changeset made there. A key that landed another change, or landed on another ref, is refused:
 
 ```sh
 echo '[{"path": "LICENSE", "op": "put", "content": {"inline": "MIT\n"}}]' > licence.json
@@ -604,9 +606,10 @@ swarmops land "$D" --key "$LAND_KEY" --human
 ```
 
 ```text
-error: E_INVALID_ARG: land key "01a160e4-4c48-7bfa-8d7c-c65e2fe68a29" landed another change already, as ceb0401d18e3433059e9241785f92551c761f482f895c9a57aa8c941d2471095
+error: E_INVALID_ARG: land key "01a160e4-4c48-7bfa-8d7c-c65e2fe68a29" landed already, as ceb0401d18e3433059e9241785f92551c761f482f895c9a57aa8c941d2471095 on main: another change or target takes a key of its own
 details.key: 01a160e4-4c48-7bfa-8d7c-c65e2fe68a29
 details.landed: ceb0401d18e3433059e9241785f92551c761f482f895c9a57aa8c941d2471095
+details.target: main
 hint: swarmops show ceb0401d18e3433059e9241785f92551c761f482f895c9a57aa8c941d2471095
 ```
 

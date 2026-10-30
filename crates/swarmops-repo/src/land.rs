@@ -20,8 +20,11 @@
 //!    the change lands above its base), for a changeset whose `land_key` metadata is the key: one
 //!    whose `squashed_from` ends at the head is the land, made before, and the land is a replay
 //!    ([`LandStatus::Replayed`]); any other means the key landed another change
-//!    ([`RepoError::KeyReused`]). The walk reads each changeset once per land, so a later attempt
-//!    reads only what the target gained.
+//!    ([`RepoError::KeyReused`]). A key the target's walk does not find is looked for on the other
+//!    refs a land publishes to (`main`, `release/<x>` and branches), down to the same floor: a
+//!    changeset of the key there that the target's head does not reach is a key landed on another
+//!    target ([`RepoError::KeyReused`], naming that ref). The walk reads each changeset once per
+//!    land, so a later attempt reads only what the target gained.
 //! 4. It merges three-way (storage spec §4): the first attempt what the chain changed onto
 //!    `theirs` ([`Repo::merge`] of the base, the head and `theirs`, over the paths the chain
 //!    touches); a later one what it merged before, `L`, onto what the target gained since, over

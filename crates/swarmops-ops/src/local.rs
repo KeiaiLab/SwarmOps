@@ -350,9 +350,10 @@ const MAX_LAND_KEY: usize = 64;
 /// - `E_CAS_RETRY_EXHAUSTED` (retryable) `{attempts, actual}`: `RetryExhausted`, a land whose
 ///   target moved before each of its attempts could publish, which recorded nothing; the hint says
 ///   to run it again.
-/// - `E_INVALID_ARG`, of a land: `KeyReused` `{key, landed}` (a key that landed another change; the
-///   hint is `swarmops show <landed>`), `MergeChangeset` `{changeset}`, `BaseNotAncestor`
-///   `{base, head}` and `NoMergeBase` `{head, theirs}` (the hint is `swarmops log <head>`).
+/// - `E_INVALID_ARG`, of a land: `KeyReused` `{key, landed, target}` (a key that landed another
+///   change, or landed on another ref, `target`; the hint is `swarmops show <landed>`),
+///   `MergeChangeset` `{changeset}`, `BaseNotAncestor` `{base, head}` and `NoMergeBase`
+///   `{head, theirs}` (the hint is `swarmops log <head>`).
 /// - `E_BUSY` (retryable): the store's `Busy` (a writer's lock wait ran out) or
 ///   `SnapshotContended` (a read's snapshot rounds ran out); either way nothing was committed (a
 ///   commit's flushed objects may remain, for GC). The hint says which, and to retry.

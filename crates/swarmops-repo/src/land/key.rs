@@ -3,6 +3,12 @@
 //! conflicts on (the M4 plan's Decision 6), from one walk that reads each changeset of the target
 //! once per land, however many attempts continue it.
 //!
+//! A key the target's walk does not find is looked for on the other refs a land can publish to
+//! (`main`, `release/<x>` and branches; the M15 design §6): the same walk from each head, to the
+//! same floor, over the same kept changesets, so a chain shared with the target is read once.
+//! A changeset it finds there that the target's head reaches is the target's own, below its walk's
+//! floor, and is passed over.
+//!
 //! The walk starts at the head an attempt read, and ends at the first changeset at or below the
 //! base's generation: the base itself, when it is on the target; for a base off the target (M11's
 //! form), the changeset of the target's chain where a land of the change could have landed at the
@@ -13,8 +19,9 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 
 use swarmops_core::{ChangesetId, ObjectId, RepoPath};
-use swarmops_store::{ObjectStore, StoreError};
+use swarmops_store::{ObjectStore, RefKind, StoreError, ref_kind};
 
+use super::landing::stored;
 use super::{LAND_KEY, SQUASHED_FROM};
 use crate::error::RepoError;
 use crate::read::{RepoRead, StoredChangeset};
@@ -177,6 +184,51 @@ impl TargetWalk {
             false
         })?;
         Ok(found)
+    }
+
+    /// The newest changeset whose `land_key` is `key` on the first-parent chain of a ref other
+    /// than `target` that a land publishes to, with that ref's name; `theirs` is the target's head.
+    /// The refs are visited by name, each walked from its head to the floor; a changeset the
+    /// target's head reaches is passed over, with the rest of its chain. `None`: no other ref
+    /// holds the key above the floor.
+    pub(super) fn find_elsewhere<O: ObjectStore>(
+        &mut self,
+        read: &RepoRead<'_, O>,
+        target: &str,
+        key: &str,
+        theirs: &StoredChangeset,
+    ) -> Result<Option<(String, ChangesetId)>, RepoError> {
+        for (name, state) in read.list_refs()? {
+            // 1. Only the refs a land publishes to; the target was walked already.
+            let landable = matches!(
+                ref_kind(&name),
+                Some(RefKind::Main | RefKind::Release | RefKind::Branch)
+            );
+            if name == target || !landable {
+                continue;
+            }
+
+            // 2. The ref's chain, down to the floor, for the key.
+            let top = stored(read, state.target)?;
+            let mut hit = None;
+            self.walk(read, &top, |id, walked| {
+                if walked.land_key.as_deref() != Some(key.as_bytes()) {
+                    return true;
+                }
+                hit = Some(id);
+                false
+            })?;
+            let Some(landed) = hit else {
+                continue;
+            };
+
+            // 3. A changeset the target's head reaches is not another target's.
+            if read.is_ancestor(landed, theirs.id)? {
+                continue;
+            }
+            return Ok(Some((name, landed)));
+        }
+        Ok(None)
     }
 
     /// For each of `paths`, the newest changeset on the walk from `top`, above the floor (since
