@@ -3430,8 +3430,8 @@ pub struct WsStatus {
     pub main: String,
     /// How many changesets the target's first-parent history holds that `base`'s lacks: those
     /// past `base` when it is on that history; otherwise (a sync dropped it, or the target moved
-    /// back) those before where the two histories meet, 0 when the target is an ancestor of
-    /// `base`. At most 10,000.
+    /// back) those before where the two histories meet, 0 when the target head is on `base`'s
+    /// first-parent history. At most 10,000.
     pub behind_by: u64,
     /// Whether the workspace is rebasing.
     pub state: WsState,
