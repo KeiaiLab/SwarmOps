@@ -356,8 +356,6 @@ fn fetch_with_a_relative_repo() {
 /// fetch and the tracking refs' move. The value for `SWARMOPS_GIT`.
 #[cfg(unix)]
 fn tree_losing_git(remote: &Remote, dir: &Path) -> String {
-    use std::os::unix::fs::PermissionsExt as _;
-
     let program = dir.join("git");
     let real = path_text(&real_git(&remote.server));
     let script = format!(
@@ -376,11 +374,48 @@ fn tree_losing_git(remote: &Remote, dir: &Path) -> String {
          done
 "
     );
-    fs::write(&program, script).expect("write the stand-in");
-    let mut mode = fs::metadata(&program).expect("the stand-in").permissions();
+    install_stand_in(&program, &script)
+}
+
+/// Writes `script` as the executable `program`; its path as text.
+#[cfg(unix)]
+fn install_stand_in(program: &Path, script: &str) -> String {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fs::write(program, script).expect("write the stand-in");
+    let mut mode = fs::metadata(program).expect("the stand-in").permissions();
     mode.set_mode(0o755);
-    fs::set_permissions(&program, mode).expect("make the stand-in runnable");
-    path_text(&program)
+    fs::set_permissions(program, mode).expect("make the stand-in runnable");
+    path_text(program)
+}
+
+/// A stand-in for git that runs the real git and, after a `fetch` that succeeded, unpacks the
+/// mirror's packs and gives the loose file of each `refs/incoming/` tip's `c.txt` the content of
+/// its `a.txt`: a mirror object whose bytes belong to another id, which the closure check does
+/// not read. The value for `SWARMOPS_GIT`.
+#[cfg(unix)]
+fn blob_swapping_git(remote: &Remote, dir: &Path) -> String {
+    let program = dir.join("git");
+    let real = path_text(&real_git(&remote.server));
+    let script = format!(
+        "#!/bin/sh
+         if [ \"$1\" != fetch ]; then exec '{real}' \"$@\"; fi
+         '{real}' \"$@\" || exit $?
+         cd \"$GIT_DIR\" || exit 1
+         for pack in objects/pack/*.pack; do
+         \t[ -e \"$pack\" ] || continue
+         \tmv \"$pack\" unpacked.tmp && rm -f \"${{pack%.pack}}\".idx
+         \t'{real}' unpack-objects < unpacked.tmp && rm unpacked.tmp || exit 1
+         done
+         loose() {{ echo objects/$(echo $1 | cut -c1-2)/$(echo $1 | cut -c3-); }}
+         for tip in $('{real}' for-each-ref --format='%(objectname)' refs/incoming/); do
+         \tfrom=$('{real}' rev-parse \"$tip:a.txt\") || exit 1
+         \tinto=$('{real}' rev-parse \"$tip:c.txt\" 2>/dev/null) || continue
+         \trm -f \"$(loose $into)\" && cp \"$(loose $from)\" \"$(loose $into)\" || exit 1
+         done
+"
+    );
+    install_stand_in(&program, &script)
 }
 
 /// A fetched tip whose tree the mirror lost before the tracking refs move fails the fetch with
@@ -408,6 +443,45 @@ fn fetch_of_a_tip_whose_tree_is_lost_is_bad_objects() {
     assert_eq!(error["details"]["reason"], "bad_objects", "{error}");
     assert_eq!(mirror_refs(&remote, store.path(), "refs/remotes/"), before);
     assert_eq!(changesets(&store), count);
+    store.read(&["verify", "--deep"]).ok();
+}
+
+/// A mirror blob that holds another blob's bytes passes git's checks and the closure check but
+/// not the import's id check: the fetch fails with `E_GIT_READ` `corrupt`, and no tracking ref
+/// or remote tag moves, nothing is imported, and the store verifies.
+#[cfg(unix)]
+#[test]
+fn fetch_of_a_mirror_blob_holding_another_moves_no_ref() {
+    let remote = Remote::new();
+    let store = remote.store();
+    add(&store, ORIGIN, &remote.url(), &[]).ok();
+    fetch(&store, ORIGIN);
+    let tracking = || mirror_refs(&remote, store.path(), "refs/remotes/");
+    let tags = || mirror_refs(&remote, store.path(), "refs/remote-tags/");
+    let before = (tracking(), tags(), refs(&store), changesets(&store));
+
+    // The remote moves on; the stand-in swaps the new blob's bytes for another's.
+    remote.commit("main", "third", &[("c.txt", "c\n")]);
+    remote.git(&["tag", "v2", "main"]);
+    let blob = remote.git(&["rev-parse", "main:c.txt"]);
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let git = blob_swapping_git(&remote, dir.path());
+    let refused = remote.run(
+        &["--repo", store.path(), "fetch", ORIGIN],
+        &[("SWARMOPS_GIT", git.as_str())],
+    );
+
+    // 1. Refused: the import read the object and its id did not match.
+    let error = refused.err("E_GIT_READ");
+    assert_eq!(error["details"]["reason"], "corrupt", "{refused}");
+    assert_eq!(error["details"]["object"], blob, "{refused}");
+
+    // 2. Nothing moved, and the store is whole.
+    assert_eq!(
+        (tracking(), tags(), refs(&store), changesets(&store)),
+        before
+    );
+    store.read(&["verify", "--deep"]).ok();
 }
 
 /// A fetch imports the followed branch's commits only: the remote's other branches reach the
@@ -489,7 +563,8 @@ fn fetch_reports_moved_new_and_pruned_branches() {
 }
 
 /// The followed branch holding a submodule entry fails the fetch with `E_GIT_IMPORT_LOSSY`
-/// unless the remote allows the class (`--lossy gitlinks`); the mirror keeps what git fetched.
+/// unless the remote allows the class (`--lossy gitlinks`); no tracking ref moves, and the
+/// mirror keeps what git fetched in its incoming ref.
 #[test]
 fn fetch_of_a_lossy_followed_branch_fails_unless_allowed() {
     let remote = Remote::new();
@@ -503,13 +578,19 @@ fn fetch_of_a_lossy_followed_branch_fails_unless_allowed() {
     remote.git(&["update-ref", "refs/heads/main", &lossy, &parent]);
     let store = remote.store();
 
-    // 1. Refused: nothing lossy allowed; git's fetch stays in the mirror.
+    // 1. Refused: nothing lossy allowed; no tracking ref moved, git's fetch stays in the
+    // incoming ref.
     add(&store, ORIGIN, &remote.url(), &[]).ok();
     let refused = store.read(&["fetch", ORIGIN]);
     refused.err("E_GIT_IMPORT_LOSSY");
+    let none: Vec<String> = Vec::new();
     assert_eq!(
         mirror_refs(&remote, store.path(), "refs/remotes/origin/main"),
-        [format!("refs/remotes/origin/main {lossy}")]
+        none
+    );
+    assert_eq!(
+        mirror_refs(&remote, store.path(), "refs/incoming/origin/heads/main"),
+        [format!("refs/incoming/origin/heads/main {lossy}")]
     );
 
     // 2. Allowed: the commit is imported with its loss recorded.
@@ -804,6 +885,7 @@ fn a_fetch_of_a_bad_object_moves_no_ref_and_imports_nothing() {
         assert_eq!(error["details"]["reason"], "bad_objects", "{refused}");
         assert_eq!(error["retryable"], false, "{refused}");
         assert_eq!((tracked(), refs(&store), changesets(&store)), before);
+        store.read(&["verify", "--deep"]).ok();
     }
 
     // 2. The remote's branch back on good commits: fetched and imported.

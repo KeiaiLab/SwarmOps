@@ -17,8 +17,11 @@
 //!     git fetch    ──▶ refs/incoming/<remote>/{heads,tags}/*, fsck on receive
 //!     closure check ─▶ every object the incoming refs reach is there (E_REMOTE_REJECTED
 //!                      bad_objects otherwise, nothing moved)
-//!     promote      ──▶ refs/remotes/<remote>/*, refs/remote-tags/<remote>/* by compare-and-swap
-//!     import       ──▶ the followed branch's commits become changesets; no ref moves
+//!     import       ──▶ the followed branch's incoming ref is read, each object against its id;
+//!                      its commits become changesets, no ref moves (a refusal: no tracking ref
+//!                      moved)
+//!     promote      ──▶ refs/remotes/<remote>/*, refs/remote-tags/<remote>/* by compare-and-swap,
+//!                      only after the import
 //!     git gc --auto
 //!   clone <url> --into <dir>
 //!     init (or open, to resume) ──▶ lock ──▶ remote add ──▶ fetch ──▶ import into main
@@ -334,41 +337,42 @@ impl Recording<'_> {
         cred.token_env.clone_from(&remote.token_env);
         let git = GitCli::find().map_err(failed)?;
 
-        // 2. git fetch into the incoming refs, their objects checked whole, then the tracking
-        //    refs moved to them; between two readings of the remote's refs in the mirror. A
-        //    failure returns here: nothing imported, no tracking ref moved.
+        // 2. git fetch into the incoming refs, their objects checked whole. A failure returns
+        //    here: nothing imported, no tracking ref moved.
         let branches = mirror.branches(name).map_err(error::mirror_error)?;
         let tags = mirror.tags(name).map_err(error::mirror_error)?;
         git.fetch(mirror.git_dir(), &url, &cred, &refspecs(name))
             .map_err(failed)?;
         let incoming = mirror.incoming(name).map_err(error::mirror_error)?;
-        let tips: BTreeSet<GitOid> = incoming.into_values().collect();
+        let tips: BTreeSet<GitOid> = incoming.values().copied().collect();
         let tips: Vec<GitOid> = tips.into_iter().collect();
         git.closed(mirror.git_dir(), &tips).map_err(failed)?;
+
+        // 3. The followed branch's commits into the store, read from its incoming ref, each
+        //    object against its id, no ref moved. A refusal returns here: no tracking ref moved.
+        let incoming_ref = incoming_ref(name, &remote.branch);
+        let mut report = None;
+        if incoming.contains_key(&incoming_name(&remote.branch)) {
+            let request = ImportRequest::objects_only(incoming_ref.as_str());
+            report = Some(self.import_from(&mirror, request, &remote.lossy, &incoming_ref)?);
+        }
+
+        // 4. The tracking refs and remote tags moved to the incoming refs, between two readings
+        //    of the remote's refs in the mirror. A crash between the import and here is finished
+        //    by the next fetch: it imports nothing and moves what is left.
         mirror
             .promote(name, &branches, &tags)
             .map_err(error::mirror_error)?;
         let branches_now = mirror.branches(name).map_err(error::mirror_error)?;
         let tags_now = mirror.tags(name).map_err(error::mirror_error)?;
-
-        // 3. The followed branch's commits into the store, no ref moved.
         let old = branches.get(&remote.branch).copied();
-        let new = branches_now.get(&remote.branch).copied();
-        let report = match new {
-            Some(_) => {
-                let git_ref = tracking_ref(name, &remote.branch);
-                let request = ImportRequest::objects_only(git_ref.as_str());
-                Some(self.import_from(&mirror, request, &remote.lossy, &git_ref)?)
-            }
-            None => None,
-        };
 
-        // 4. git's housekeeping; its failure costs disk, not the fetch.
+        // 5. git's housekeeping; its failure costs disk, not the fetch.
         if let Err(e) = git.gc_auto(mirror.git_dir()) {
             warnings.push(format!("gc_auto_failed: {}", failed(e).message));
         }
 
-        // 5. The response.
+        // 6. The response.
         let head = report
             .as_ref()
             .map(|report| remote_head(report.git_head, report.head));
@@ -761,6 +765,17 @@ fn refspecs(remote: &str) -> [RefSpec; 2] {
             format!("refs/incoming/{remote}/tags/*"),
         ),
     ]
+}
+
+/// `refs/incoming/<remote>/heads/<branch>`, what git fetch wrote of the branch, checked by the
+/// closure check and read by the import before the tracking ref moves.
+fn incoming_ref(remote: &str, branch: &str) -> String {
+    format!("refs/incoming/{remote}/{}", incoming_name(branch))
+}
+
+/// `heads/<branch>`, the branch's name under `refs/incoming/<remote>/`.
+fn incoming_name(branch: &str) -> String {
+    format!("heads/{branch}")
 }
 
 /// `refs/remotes/<remote>/<branch>`, what the last fetch saw of the branch.

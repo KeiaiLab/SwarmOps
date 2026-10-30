@@ -596,9 +596,11 @@ store's writer lock, is never held across the network.
 
 **Fetch, push and sync.** `fetch` has git fetch every branch and tag into the mirror's
 `refs/incoming/<remote>/` alone, checks that every object their tips reach is there
-(`git rev-list --objects --missing=error`), moves the tracking refs and tags to them by
-compare-and-swap, then imports the followed branch's commits with no ref moved (`objects_only`).
-A failed step stops it before the import, with no tracking ref moved. `push` exports a store ref onto
+(`git rev-list --objects --missing=error`), imports the followed branch's commits from its incoming
+ref with no ref moved (`objects_only`; each object it reads is checked against its id), and only
+then moves the tracking refs and tags to the incoming refs by compare-and-swap. A failed step
+stops it before the move, so no tracking ref moves on a refusal; a crash between the import and the
+move is finished by the next fetch. `push` exports a store ref onto
 a staging branch set to what the last fetch saw (`refs/heads/push/<remote>/<branch>`), so that the
 export only appends, and has git push it with `--force-with-lease` on that value: a compare-and-swap
 on the remote, never forced. `sync` fetches, finds `main`'s changes above the newest changeset the
