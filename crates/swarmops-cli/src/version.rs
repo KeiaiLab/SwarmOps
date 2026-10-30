@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 /// The build's commit, from `SWARMOPS_BUILD_COMMIT` at compile time.
 const BUILD_COMMIT: Option<&str> = option_env!("SWARMOPS_BUILD_COMMIT");
 
-/// The fewest hex digits a commit may have: git's shortest abbreviation.
+/// The fewest hex digits a commit may have: git's default abbreviation (`core.abbrev`).
 const MIN_COMMIT_LEN: usize = 7;
 
 /// The most hex digits a commit may have: a full SHA-1 object name.

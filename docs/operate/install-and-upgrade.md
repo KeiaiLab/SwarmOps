@@ -114,8 +114,8 @@ swarmops --version
 ```text
   Installing …/bin/so
   Installing …/bin/swarmops
-   Installed package `swarmops-cli v0.1.0 (…/SwarmOps/crates/swarmops-cli)` (executables `so`, `swarmops`)
-swarmops 0.1.0
+   Installed package `swarmops-cli v0.7.0 (…/SwarmOps/crates/swarmops-cli)` (executables `so`, `swarmops`)
+swarmops 0.7.0
 ```
 
 `gh repo clone` uses your GitHub login; `git clone https://github.com/KeiaiLab/SwarmOps` needs
