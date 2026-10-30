@@ -74,8 +74,8 @@ and a way back to git so that existing CI and deployments keep running.
 
 SwarmOps' design has prior art in git, Mononoke's Bonsai changesets and pushrebase, and jj's
 operation log. It adapts several principles that Anthropic described for its in-house system Scion,
-in the engineering post
-["Redesigning source control at Anthropic"](https://www.anthropic.com/engineering/redesigning-source-control),
+in the post
+["Redesigning source control at Anthropic"](https://www.anthropic.com/research/redesigning-source-control),
 to a single host. SwarmOps is an independent project, not affiliated with or endorsed by Anthropic,
 and contains no Scion code, which is not public.
 

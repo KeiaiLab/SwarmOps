@@ -550,8 +550,8 @@ worktrees is not on the roadmap (umbrella spec §17). SwarmOps' own measurements
 
 SwarmOps' design has prior art in git, Mononoke's Bonsai changesets and pushrebase, and jj's
 operation log. It adapts several principles that Anthropic described for its in-house system
-Scion, in the engineering post
-["Redesigning source control at Anthropic"](https://www.anthropic.com/engineering/redesigning-source-control),
+Scion, in the post
+["Redesigning source control at Anthropic"](https://www.anthropic.com/research/redesigning-source-control),
 to a single host. SwarmOps is an independent project, not affiliated with or endorsed by
 Anthropic, and contains no Scion code, which is not public.
 

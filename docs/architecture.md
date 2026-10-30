@@ -17,8 +17,8 @@ the spec is right and this page has a bug.
 SwarmOps is source control for a swarm of coding agents on one host (and, from M11,
 offline-first across hosts): 10 to 50 Claude Code or LangGraph processes working in one
 repository at once (umbrella §1). It adapts several principles that Anthropic described for its
-in-house system Scion, in the engineering post "Redesigning source control at Anthropic"
-(https://www.anthropic.com/engineering/redesigning-source-control, 2026-10-13), to a single
+in-house system Scion, in the post "Redesigning source control at Anthropic"
+(https://www.anthropic.com/research/redesigning-source-control, 2026-10-13), to a single
 host; others, such as horizontal scaling, lock-free commits and always-online clients across
 hosts, do not carry over. SwarmOps is an independent project, not affiliated with or endorsed by
 Anthropic, and contains no Scion code, which is not public. It is not meant as a
