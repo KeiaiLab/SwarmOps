@@ -406,30 +406,91 @@ fn exec_mode_lives_in_the_index_on_a_volume_without_the_bit() {
     );
 }
 
-/// A tree with a top-level `.swarmws` is refused on every platform, before anything is
-/// written; one deeper is an ordinary directory.
+/// The three trees the reserved name must refuse: at the top, below a directory, and in another
+/// ASCII case, each as its path to the reserved directory and the file it holds.
+const RESERVED_TREES: [(&str, &str); 3] = [
+    (".SWARMWS", ".SWARMWS/x"),
+    ("src/.swarmws", "src/.swarmws/y"),
+    ("src/.SwarmWs", "src/.SwarmWs/z"),
+];
+
+/// A tree holding `.swarmws` as a component, at any depth and in any ASCII case, is refused on
+/// every platform, before anything is written; a name that only resembles it is an ordinary
+/// directory.
 #[test]
-fn a_top_level_swarmws_in_the_tree_is_reserved() {
-    // 1. A tree with `.swarmws/x` at the top and `src/.swarmws/y` below.
+fn the_swarmws_name_is_reserved_at_any_depth_and_case() {
+    // 1. Each reserved tree alone, in a store of its own: refused, naming the path, nothing
+    //    written.
+    for (_, path) in RESERVED_TREES {
+        let f = Fixture::new();
+        let base = f.commit(None, &[Put::File(path, "x\n"), Put::File("lib/a", "a\n")]);
+        let name = "w";
+        let refused = f.create_in(&f.ctx(), name, &base, &[]).unwrap_err();
+        assert_eq!(refused.code, "E_WS_UNPORTABLE", "{path}: {refused:?}");
+        assert_eq!(refused.details["reason"], "reserved_name", "{path}");
+        assert_eq!(
+            refused.details["paths"],
+            serde_json::json!([path]),
+            "{path}"
+        );
+        assert!(!f.beside(name).join("lib").exists(), "{path}");
+    }
+
+    // 2. Names that only resemble it are written.
     let f = Fixture::new();
     let base = f.commit(
         None,
         &[
-            Put::File(".swarmws/x", "x\n"),
-            Put::File("src/.swarmws/y", "y\n"),
+            Put::File("src/swarmws/y", "y\n"),
+            Put::File("src/.swarmws.bak/y", "b\n"),
         ],
     );
+    f.create("ok", &base, &[]);
+    assert_eq!(
+        tree_of(&f.beside("ok")),
+        [
+            file("src/.swarmws.bak/y", "b\n"),
+            file("src/swarmws/y", "y\n"),
+        ]
+    );
+}
 
-    // 2. The whole tree: refused, naming the path, nothing written.
-    let refused = f.create_in(&f.ctx(), "w", &base, &[]).unwrap_err();
-    assert_eq!(refused.code, "E_WS_UNPORTABLE", "{refused:?}");
-    assert_eq!(refused.details["reason"], "reserved_name");
-    assert_eq!(refused.details["paths"], serde_json::json!([".swarmws/x"]));
-    assert!(!f.beside("w").join("src").exists());
+/// A workspace moved onto a tree holding the reserved name, by a rebase's update or by
+/// `ws materialize` of the directory, is refused with its files and its state unchanged.
+#[test]
+fn moving_onto_a_reserved_tree_is_refused() {
+    // Each tree in a store of its own: `main` moves along with every commit.
+    for (i, (dir_path, path)) in RESERVED_TREES.iter().enumerate() {
+        // 1. A workspace of the whole clean base, to be moved onto a tree that holds the reserved
+        //    name.
+        let f = Fixture::new();
+        let clean = f.commit(None, &[Put::File("lib/a", "a\n")]);
+        let reserved = f.commit(Some(&clean), &[Put::File(path, "x\n")]);
+        let name = format!("u{i}");
+        f.create(&name, &clean, &[]);
+        let dir = f.beside(&name);
+        let files = tree_of(&dir);
+        let saved = state::read(&RealFs::new(), &dir).unwrap();
 
-    // 3. `src` alone: its `.swarmws` is a directory like any other.
-    f.create("v", &base, &["src"]);
-    assert_eq!(tree_of(&f.beside("v")), [file("src/.swarmws/y", "y\n")]);
+        // 2. An update onto it, as a rebase does: refused, nothing changed.
+        let err = update(&f.ctx(), &name, &reserved).unwrap_err();
+        assert!(err.starts_with("E_WS_UNPORTABLE"), "{path}: {err}");
+        assert!(err.contains("reserved_name"), "{path}: {err}");
+        assert_eq!(tree_of(&dir), files, "{path}");
+        assert_eq!(state::read(&RealFs::new(), &dir).unwrap(), saved, "{path}");
+
+        // 3. A workspace of the clean prefix on that tree, widened onto the reserved directory.
+        let wide = format!("m{i}");
+        f.create(&wide, &reserved, &["lib"]);
+        let dir = f.beside(&wide);
+        let files = tree_of(&dir);
+        let saved = state::read(&RealFs::new(), &dir).unwrap();
+        let err = swarmops_ws::materialize(&f.ctx(), expand(&wide, &[dir_path])).unwrap_err();
+        assert_eq!(err.code, "E_WS_UNPORTABLE", "{path}: {err:?}");
+        assert_eq!(err.details["reason"], "reserved_name", "{path}");
+        assert_eq!(tree_of(&dir), files, "{path}");
+        assert_eq!(state::read(&RealFs::new(), &dir).unwrap(), saved, "{path}");
+    }
 }
 
 /// A materialisation killed at any call of the host or of the durable files' layer is finished

@@ -154,7 +154,7 @@ Exit codes:
 
 - [`E_WS_EXISTS`](../errors.md#e_ws_exists) (exit 1): `ws create` found a workspace of that name already, made by other arguments (`details.name`, `details.path` of the existing one).
 - [`E_PATH_NOT_EMPTY`](../errors.md#e_path_not_empty) (exit 1): `ws create` was given a directory that holds something already (`details.path`).
-- [`E_WS_UNPORTABLE`](../errors.md#e_ws_unportable) (exit 1): The tree holds paths the workspace's volume cannot hold: `details.reason` says why (`case_collision`, `windows_name`, `reserved_name`) and `details.paths` names them.
+- [`E_WS_UNPORTABLE`](../errors.md#e_ws_unportable) (exit 1): The tree holds paths the workspace's volume cannot hold: `details.reason` says why (`case_collision`, `windows_name`, `reserved_name`: a path component named `.swarmws` at any depth, in any ASCII case) and `details.paths` names them.
 
 Any command that opens a store may also fail with a store error, such as [`E_NOT_A_REPO`](../errors.md#e_not_a_repo), [`E_IO`](../errors.md#e_io) or [`E_STORE_CORRUPT`](../errors.md#e_store_corrupt); a command line the grammar refuses is [`E_INVALID_ARG`](../errors.md#e_invalid_arg) (exit 2).
 

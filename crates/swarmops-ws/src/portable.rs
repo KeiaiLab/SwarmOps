@@ -1,6 +1,6 @@
 //! The portability rules of a materialisation (§3.3 of the M5 design): case collisions on a
-//! case-insensitive volume, names Windows refuses, and the reserved top-level `.swarmws`, all
-//! checked before anything is written. A refusal is `E_WS_UNPORTABLE{reason, paths}`, and
+//! case-insensitive volume, names Windows refuses, and the reserved `.swarmws` (at any depth, in
+//! any ASCII case), all checked before anything is written. A refusal is `E_WS_UNPORTABLE{reason, paths}`, and
 //! nothing is written.
 //!
 //! The rules over names are M12's (`swarmops_core::portable`); this module applies them to the
@@ -38,7 +38,8 @@ pub(crate) const HOST: Platform = if cfg!(windows) {
 
 /// Refuses the paths a materialisation adds, `added`, unless the volume can hold them:
 ///
-/// 1. a top-level `.swarmws`, on every platform (`reserved_name`);
+/// 1. a component equal to `.swarmws` under ASCII case folding, at any depth, on every platform
+///    (`reserved_name`);
 /// 2. on Windows, a component `check_component` refuses (`windows_name`);
 /// 3. with `case_set` (a case-insensitive volume: every path the workspace will hold that can
 ///    meet an added one, `added` among them), two that differ only in case (`case_collision`,
@@ -48,9 +49,9 @@ pub(crate) fn check(
     case_set: Option<&[String]>,
     platform: Platform,
 ) -> Result<(), OpError> {
-    // 1. The workspace's own directory, at the top.
+    // 1. The workspace's own directory's name, in any component and any ASCII case.
     let reserved: Vec<&String> = (added.iter())
-        .filter(|path| path.split('/').next() == Some(SWARMWS_DIR))
+        .filter(|path| path.split('/').any(is_reserved))
         .collect();
     if !reserved.is_empty() {
         return Err(refused("reserved_name", paths_value(&reserved)));
@@ -78,6 +79,12 @@ pub(crate) fn check(
         .map(|[a, b]| Value::from(vec![a, b]))
         .collect();
     Err(refused("case_collision", Value::from(pairs)))
+}
+
+/// Whether path component `component` is the workspace's own directory's name: `.swarmws` under
+/// ASCII case folding. Other letters are not folded.
+fn is_reserved(component: &str) -> bool {
+    component.eq_ignore_ascii_case(SWARMWS_DIR)
 }
 
 /// The pairs of `paths` that name one file on a case-insensitive volume: the first two
@@ -177,15 +184,26 @@ mod tests {
     }
 
     /// Each rule refuses with its reason and names the paths; Windows names only on Windows;
-    /// the case rule only with a case set; `.swarmws` only at the top.
+    /// the case rule only with a case set; `.swarmws` at any depth and in any ASCII case.
     #[test]
     fn check_refuses_with_the_reason_and_the_paths() {
-        // 1. The reserved name, at the top only.
-        let reserved = check(&owned(&[".swarmws/x", "a"]), None, Platform::Other).unwrap_err();
+        // 1. The reserved name, at any depth and in any ASCII case; lookalikes pass.
+        let paths = owned(&[
+            ".swarmws/x",
+            "a",
+            "src/.SwarmWs/z",
+            ".SWARMWS",
+            "ok/.swarmws.bak/y",
+        ]);
+        let reserved = check(&paths, None, Platform::Other).unwrap_err();
         assert_eq!(reserved.code, "E_WS_UNPORTABLE");
         assert_eq!(reserved.details["reason"], "reserved_name");
-        assert_eq!(reserved.details["paths"], json!([".swarmws/x"]));
-        check(&owned(&["a/.swarmws/x"]), None, Platform::Other).unwrap();
+        assert_eq!(
+            reserved.details["paths"],
+            json!([".swarmws/x", "src/.SwarmWs/z", ".SWARMWS"])
+        );
+        let lookalikes = owned(&["src/swarmws/y", "src/.swarmws.bak/y", "src/.swarmwş/y"]);
+        check(&lookalikes, None, Platform::Other).unwrap();
 
         // 2. Windows names, on Windows.
         let names = owned(&["src/aux.txt", "src/a:b", "src/ok", "src/dot."]);

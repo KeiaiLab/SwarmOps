@@ -253,8 +253,8 @@ error_codes! {
     /// `ws resolve` found a conflict marker line still in a file (`details.paths`).
     MarkersPresent => "E_MARKERS_PRESENT", EXIT_ERROR, false;
     /// The tree holds paths the workspace's volume cannot hold: `details.reason` says why
-    /// (`case_collision`, `windows_name`, `reserved_name`) and `details.paths` names them.
-    /// Nothing was written.
+    /// (`case_collision`, `windows_name`, `reserved_name`: a path component named `.swarmws` at
+    /// any depth, in any ASCII case) and `details.paths` names them. Nothing was written.
     WsUnportable => "E_WS_UNPORTABLE", EXIT_ERROR, false;
     /// A sparse workspace's `ws commit` or `ws land` met edits outside its prefixes
     /// (`details.paths`, sorted, the first 20). Nothing changed; the hint names

@@ -71,7 +71,7 @@ A failed command prints an envelope whose `error` names a stable `E_*` code, the
 | [`E_PATH_NOT_EMPTY`](#e_path_not_empty) | 1 | no | `ws create` was given a directory that holds something already (`details.path`). |
 | [`E_UNRESOLVED_CONFLICTS`](#e_unresolved_conflicts) | 1 | no | A rebase still has conflicting paths no one resolved (`details.paths`). |
 | [`E_MARKERS_PRESENT`](#e_markers_present) | 1 | no | `ws resolve` found a conflict marker line still in a file (`details.paths`). |
-| [`E_WS_UNPORTABLE`](#e_ws_unportable) | 1 | no | The tree holds paths the workspace's volume cannot hold: `details.reason` says why (`case_collision`, `windows_name`, `reserved_name`) and `details.paths` names them. |
+| [`E_WS_UNPORTABLE`](#e_ws_unportable) | 1 | no | The tree holds paths the workspace's volume cannot hold: `details.reason` says why (`case_collision`, `windows_name`, `reserved_name`: a path component named `.swarmws` at any depth, in any ASCII case) and `details.paths` names them. |
 | [`E_WS_OUTSIDE_PREFIXES`](#e_ws_outside_prefixes) | 1 | no | A sparse workspace's `ws commit` or `ws land` met edits outside its prefixes (`details.paths`, sorted, the first 20). |
 | [`E_WS_STALE`](#e_ws_stale) | 1 | no | `ws land` found the workspace's base gone from its target's history (`details.target`, `base`, `head`; `base_op`, the operation that moved the target to the base; `moved_op`, the latest that moved it to `head`, or null when not found). |
 | [`E_CHECK_FAILED`](#e_check_failed) | 1 | no | A workspace's check or bootstrap command failed or ran past its time (`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its output, `log`, `changeset`). |
@@ -386,7 +386,7 @@ Exit 1. Retryable: no.
 
 Exit 1. Retryable: no.
 
-The tree holds paths the workspace's volume cannot hold: `details.reason` says why (`case_collision`, `windows_name`, `reserved_name`) and `details.paths` names them. Nothing was written.
+The tree holds paths the workspace's volume cannot hold: `details.reason` says why (`case_collision`, `windows_name`, `reserved_name`: a path component named `.swarmws` at any depth, in any ASCII case) and `details.paths` names them. Nothing was written.
 
 ## E_WS_OUTSIDE_PREFIXES
 

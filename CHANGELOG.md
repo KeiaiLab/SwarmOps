@@ -99,6 +99,13 @@ collects the changes on `stable` that no release holds yet, until the next relea
 - A pack garbled in transit, which git refuses with "pack is corrupted (SHA1 mismatch)" or "final
   sha1 did not match", is classified by rows of its own: `E_REMOTE_REJECTED` with
   `details.reason: "bad_objects"`, not retryable, no ref moved.
+- A tree that holds a path with a component named `.swarmws` at any depth, in any ASCII case
+  (`.SWARMWS/x`, `src/.swarmws/y`, `src/.SwarmWs/z`), is refused with `E_WS_UNPORTABLE`
+  (`reason: "reserved_name"`) on every platform when a workspace is created on it, moved onto it
+  (`ws rebase`) or widened onto it (`ws materialize`), and nothing is written. Only a top-level
+  lower-case `.swarmws` was refused before, so `src/.swarmws/y` was written. `src/swarmws/y` and
+  `src/.swarmws.bak/y` are still written. To keep such a tree out of a workspace, rename the path
+  in the store with a commit, or create the workspace with `--prefix` paths that leave it out.
 
 ## [0.7.0] - 2026-10-29
 

@@ -1223,9 +1223,11 @@ file it was asked to mark resolved. Remove the markers, or give `--force` if the
 
 The tree holds paths this workspace's volume cannot hold, and nothing was written: `details.reason`
 is `case_collision` (two paths that differ only in case, on a case-insensitive volume, both in
-`details.paths`), `windows_name` (a name Windows refuses) or `reserved_name` (a top-level
-`.swarmws`, the workspace's own directory). Rename the paths in the store with a commit, or create
-the workspace with `--prefix` paths that leave them out.
+`details.paths`), `windows_name` (a name Windows refuses) or `reserved_name` (a path with a
+component named `.swarmws`, the workspace's own directory, at any depth and in any ASCII case:
+`.SWARMWS/x`, `src/.swarmws/y`; `src/swarmws/y` and `src/.swarmws.bak/y` are fine). Rename the
+paths in the store with a commit, or create the workspace with `--prefix` paths that leave them
+out; a `ws rebase` or `ws materialize` that would bring such a path in refuses the same way.
 
 ### `E_WS_OUTSIDE_PREFIXES`
 
