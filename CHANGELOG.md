@@ -37,6 +37,11 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 ### Changed
 
+- `just check` and `scripts/check.sh` also build the CLI with `SWARMOPS_BUILD_COMMIT` set, which
+  no other step does (`scripts/check-stamped.py`): the `version` tests and the two `--version`
+  pins pass with a fixed commit, each required to run, and a malformed commit must fail the build
+  with the compile-time guard's message; `target/debug`'s `swarmops` and `so` are linked again
+  without the fixed commit after. It adds about 5 s to a warm run.
 - The [versioning policy](docs/policies/versioning-and-stability.md) counts the `--version` line
   in the command-line contract, with `SWARMOPS_BUILD_COMMIT`'s name and the values it takes, and
   names `--help` and `--version` among the runs that print other than one envelope: they print

@@ -8,7 +8,8 @@
 //! recipe, script or job that builds a workspace the gate does not check checks that one itself.
 //! bench/compare's policy is a file of its own, which must keep every line of the workspace's.
 //! Read the same way, every case the weekly slow suite (`just check-ci-slow`) leaves out still
-//! runs weekly: optimized, one at a time, in a job of `scheduled.yml`.
+//! runs weekly: optimized, one at a time, in a job of `scheduled.yml`. And the gate, both ways,
+//! runs `scripts/check-stamped.py`, the one step that builds with `SWARMOPS_BUILD_COMMIT` set.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -375,6 +376,31 @@ fn the_gate_checks_every_lockfile_it_builds() {
         scan(&read("scripts/check.sh")),
         gate,
         "scripts/check.sh builds and checks what `just check` does"
+    );
+}
+
+/// The gate's step that builds swarmops-cli with `SWARMOPS_BUILD_COMMIT` set, which no cargo line
+/// of the gate does.
+const STAMPED: &str = "python3 -I scripts/check-stamped.py";
+
+/// Whether shell text runs `step` as a line of its own, comments aside.
+fn runs_step(script: &str, step: &str) -> bool {
+    shell_lines(script).iter().any(|line| line.trim() == step)
+}
+
+/// `just check` and `scripts/check.sh` both run the stamped build's check: without it, a build
+/// whose `--version` drops the commit, or whose compile-time guard is off, passes the gate.
+#[test]
+fn the_gate_runs_the_stamped_check() {
+    let gate = recipe(&read("justfile"), "check");
+    assert!(
+        runs_step(&gate, STAMPED),
+        "`just check` does not run `{STAMPED}`"
+    );
+    let script = read("scripts/check.sh");
+    assert!(
+        runs_step(&script, STAMPED),
+        "scripts/check.sh does not run `{STAMPED}`"
     );
 }
 

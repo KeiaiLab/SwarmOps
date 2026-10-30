@@ -30,6 +30,9 @@ else
     exit 1
   }
 fi
+# `--version` in a build stamped with SWARMOPS_BUILD_COMMIT, each pin required to run, and a
+# malformed one refused; target/debug's binaries are linked again unstamped after.
+python3 -I scripts/check-stamped.py
 # Twice: the second run, with every feature on, also renders and link-checks the test-hooks code.
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items --all-features

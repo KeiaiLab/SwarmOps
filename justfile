@@ -30,11 +30,16 @@ default: check
 # CI (.github/workflows/ci.yml) runs this recipe with `NEXTEST_PROFILE=ci`; the release run
 # keeps the default profile, so that its one-test report does not replace the JUnit report of
 # the workspace run in target/nextest/ci/.
+# scripts/check-stamped.py builds swarmops-cli with `SWARMOPS_BUILD_COMMIT` set, which no other
+# step does: the `version` tests and each `--version` pin with a fixed commit, every filter
+# required to match a test, then a malformed one, whose build must fail; last it links
+# target/debug's `swarmops` and `so` again without the fixed commit. Each value rebuilds that
+# crate alone, incrementally.
 # Then scripts/test-install.py runs the one-line installer against a fake release on 127.0.0.1,
 # offline, and checks that web/public/install.sh is the same file; scripts/test-packages.py packs
 # fake release archives with scripts/packages.py and reads the .deb and .rpm back, offline.
 # Last, scripts/bench-gate.py's selftest shows that the benchmark gate still finds what it is for.
-# The definition of done for every session: fmt, clippy, tests, hook proof, docs, cargo-deny, license notices, installer, packages, Markdown, bench gate.
+# The definition of done for every session: fmt, clippy, tests, hook proof, stamped build, docs, cargo-deny, license notices, installer, packages, Markdown, bench gate.
 check:
     cargo fmt --all --check
     cargo fmt --manifest-path fuzz/Cargo.toml --check
@@ -45,6 +50,7 @@ check:
     cargo metadata --locked --format-version 1 --manifest-path bench/compare/Cargo.toml >/dev/null
     cargo nextest run --locked --workspace --all-features --no-tests=warn
     cargo nextest run --locked --profile default --release -p swarmops-cli --test test_hooks --no-tests=fail
+    python3 -I scripts/check-stamped.py
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items --all-features
     cargo deny --locked check

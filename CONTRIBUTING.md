@@ -81,26 +81,31 @@ A change is done when `just check` passes on it. It runs, in order:
    hooks the crash tests drive);
 4. the `test_hooks` test in a release build without the feature, which proves that such a build
    ignores the test hooks (`--no-tests=fail`: it fails if the test does not run);
-5. `cargo doc` with `RUSTDOCFLAGS="-D warnings"` and `--document-private-items`, which documents
+5. `scripts/check-stamped.py`: the `version` unit tests and the two `--version` pins in a build
+   stamped with a fixed commit (`SWARMOPS_BUILD_COMMIT`, which no other step sets), each filter
+   required to match a test, then a build with a malformed commit, which must fail with the
+   compile-time guard's message; last, `swarmops` and `so` in `target/debug` are linked again
+   without the fixed commit;
+6. `cargo doc` with `RUSTDOCFLAGS="-D warnings"` and `--document-private-items`, which documents
    private items too, so that the CLI's internal docs (its modules are private to its library)
    stay link-checked, run twice: as it stands, and with `--all-features`, which also renders and
    link-checks the code behind `test-hooks` (the order checker and the fault doubles);
-6. `cargo deny check`, advisories, licenses, bans and sources, with `deny.toml`, over both
+7. `cargo deny check`, advisories, licenses, bans and sources, with `deny.toml`, over both
    lockfiles the steps above build: the workspace's and the fuzz crate's, whose one license
    exception is in `fuzz/deny.exceptions.toml`;
-7. `scripts/third-party-licenses.py --check`: `THIRD-PARTY-LICENSES`, the notices that the
+8. `scripts/third-party-licenses.py --check`: `THIRD-PARTY-LICENSES`, the notices that the
    release archives carry for the third-party crates compiled into `swarmops` and `so`, still
    matches `Cargo.lock`, the licenses `deny.toml` allows and the crates' own license files. After
    a dependency change, run `python3 -I scripts/third-party-licenses.py` and commit the file it
    writes with `Cargo.lock`.
-8. `scripts/test-install.py`: the one-line installer, `scripts/install.sh`, run under sh (and
+9. `scripts/test-install.py`: the one-line installer, `scripts/install.sh`, run under sh (and
    dash and busybox sh where installed) against a fake release on 127.0.0.1, with no network;
    and `web/public/install.sh`, the copy get.swarmops.cc serves, still the same file. After changing the
    installer, copy it to `web/public/install.sh`.
-9. `scripts/test-packages.py`: the `.deb` and `.rpm` packer, `scripts/packages.py`, run on fake
-   release archives and its packages read back by readers of the test's own, with no network
-   and without dpkg or rpm.
-10. `scripts/check-docs.py`, its `selftest` first: the public Markdown's relative links and
+10. `scripts/test-packages.py`: the `.deb` and `.rpm` packer, `scripts/packages.py`, run on fake
+    release archives and its packages read back by readers of the test's own, with no network
+    and without dpkg or rpm.
+11. `scripts/check-docs.py`, its `selftest` first: the public Markdown's relative links and
     anchors resolve as GitHub reads them, and it carries no host path or tool attribution.
 
 The third lockfile, `bench/compare/Cargo.lock`, which `just check` does not build, is checked
