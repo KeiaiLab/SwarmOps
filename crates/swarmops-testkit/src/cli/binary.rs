@@ -285,9 +285,9 @@ impl std::fmt::Display for Run {
 /// retryable lock timeout, which a host under heavy load can stretch a short queue past. For
 /// setup, not for the operation a test measures: what such a wait does may be its subject, and a
 /// run again is not the run it asserts on (a commit run again finds the objects its first run
-/// wrote). `sixteen_processes_race_ref_set_exactly_one_wins_per_round` runs its racers' commits,
+/// wrote). `fifty_processes_race_ref_set_exactly_one_wins_per_round` runs its racers' commits,
 /// the setup of each ref race, through it. One race runs the operation it measures through it:
-/// in `sixteen_processes_race_commit_advance_exactly_one_wins_per_round` a racer's publish that
+/// in `fifty_processes_race_commit_advance_exactly_one_wins_per_round` a racer's publish that
 /// met `E_BUSY` recorded nothing, and its run again, which names the parent the racer read,
 /// races as a racer that read late does.
 pub fn retry_busy(mut run: Run, mut again: impl FnMut() -> Run) -> Run {

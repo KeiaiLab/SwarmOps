@@ -33,7 +33,10 @@ use crate::support::{BIN, Racers, Run, Store, agent, retry_busy, run, run_bin_wi
 const COMMITTERS: usize = 8;
 
 /// How many children race each round of the ref tests.
-const RACERS: usize = 16;
+const RACERS: usize = 50;
+
+/// How many operations [`main_moves`] reads a page.
+const OP_LOG_PAGE: &str = "200";
 
 /// How many rounds the ref tests race: in the `ref set` race the first creates main and each
 /// other one moves it; the `commit --advance` race makes main first, and each round moves it.
@@ -167,15 +170,16 @@ fn blob_write_idempotent_across_processes() {
     store.assert_clean("after the commits");
 }
 
-/// Sixteen processes race to move main, each to a changeset of its own, from what main names
+/// Fifty processes race to move main, each to a changeset of its own, from what main names
 /// now: in the first round they race to create it (`--create`), in each later round to move it
 /// from the last winner (`--expect <its id>`). Every round exactly one wins (exit 0), and every
-/// other one exits 4 with `E_CAS_MISMATCH`, whose `actual` is the winner. main's history is
-/// then the winners, and its version counts the rounds. The racers' commits are the setup of
-/// each round: one that meets `E_BUSY` (a lock wait a loaded host stretched past its 10 s) runs
-/// again, as an agent's would ([`retry_busy`]); the ref moves, the race itself, never do.
+/// other one exits 4 with `E_CAS_MISMATCH`, whose `actual` is the winner, and main's reflog
+/// gains one entry, the winner. main's history is then the winners, and its version counts the
+/// rounds. The racers' commits are the setup of each round: one that meets `E_BUSY` (a lock wait
+/// a loaded host stretched past its 10 s) runs again, as an agent's would ([`retry_busy`]); the
+/// ref moves, the race itself, never do.
 #[test]
-fn sixteen_processes_race_ref_set_exactly_one_wins_per_round() {
+fn fifty_processes_race_ref_set_exactly_one_wins_per_round() {
     let store = Store::init();
     let mut main: Option<String> = None;
     let mut winners = Vec::new();
@@ -247,10 +251,7 @@ fn sixteen_processes_race_ref_set_exactly_one_wins_per_round() {
             let details = json!({"name": "main", "actual": new});
             assert_eq!(error["details"], details, "round {round}, racer {racer}");
         }
-        let refs = store.read(&["ref", "list"]).ok();
-        let main_ref =
-            json!([{"name": "main", "kind": "main", "target": new, "version": round + 1}]);
-        assert_eq!(refs["refs"], main_ref, "round {round}");
+        main_moved(&store, new, round + 1, round);
         winners.push(new.to_owned());
         main = Some(new.to_owned());
     }
@@ -272,19 +273,19 @@ fn sixteen_processes_race_ref_set_exactly_one_wins_per_round() {
     store.assert_clean("after the races");
 }
 
-/// Sixteen processes race to publish on main with one call each, `commit --advance main` with
+/// Fifty processes race to publish on main with one call each, `commit --advance main` with
 /// `--parent` the main they read: each round exactly one exits 0 with `advanced`, and every other
 /// one exits 4 with `E_CAS_MISMATCH`, the winner as `actual` and `committed: false`, having
-/// recorded nothing, so the store gains one changeset a round, not sixteen as when each racer
-/// commits and then runs `ref set`. main's history is then the winners, its version counts the
-/// rounds, and the store verifies clean. main is made first, by one publish alone: a racer that
-/// named no parent would build on main as it read it, so one that read it after the winner's
-/// move would win too (as `--advance`'s long help says). A racer that meets `E_BUSY` (a lock wait
-/// a loaded host stretched past its 10 s) runs again, as an agent's would ([`retry_busy`]): it
-/// recorded nothing, and its run again, which names the parent the winner moved main past, meets
-/// that move.
+/// recorded nothing, so the store gains one changeset a round, not fifty as when each racer
+/// commits and then runs `ref set`, and main's reflog one entry, the winner. main's history is
+/// then the winners, its version counts the rounds, and the store verifies clean. main is made
+/// first, by one publish alone: a racer that named no parent would build on main as it read it,
+/// so one that read it after the winner's move would win too (as `--advance`'s long help says). A
+/// racer that meets `E_BUSY` (a lock wait a loaded host stretched past its 10 s) runs again, as an
+/// agent's would ([`retry_busy`]): it recorded nothing, and its run again, which names the parent
+/// the winner moved main past, meets that move.
 #[test]
-fn sixteen_processes_race_commit_advance_exactly_one_wins_per_round() {
+fn fifty_processes_race_commit_advance_exactly_one_wins_per_round() {
     let store = Store::init();
     let changes = store.changes("first", "first.txt", "first\n");
     let first = [
@@ -365,10 +366,7 @@ fn sixteen_processes_race_commit_advance_exactly_one_wins_per_round() {
             round + 2,
             "round {round}: the losers recorded nothing"
         );
-        let refs = store.read(&["ref", "list"]).ok();
-        let main_ref =
-            json!([{"name": "main", "kind": "main", "target": new, "version": round + 2}]);
-        assert_eq!(refs["refs"], main_ref, "round {round}");
+        main_moved(&store, &new, round + 2, round);
         winners.push(new.clone());
         main = new;
     }
@@ -386,6 +384,51 @@ fn sixteen_processes_race_commit_advance_exactly_one_wins_per_round() {
         "main's first parents are the winners"
     );
     store.assert_clean("after the races");
+}
+
+/// Checks main after `round`: it names `winner` at `version`, and its reflog holds one entry per
+/// version (so the round added exactly one), the newest the winner's.
+fn main_moved(store: &Store, winner: &str, version: u64, round: u64) {
+    // 1. The ref list's main.
+    let refs = store.read(&["ref", "list"]).ok();
+    let main_ref = json!([{"name": "main", "kind": "main", "target": winner, "version": version}]);
+    assert_eq!(refs["refs"], main_ref, "round {round}");
+
+    // 2. main's reflog: one entry more than before the round, the winner's on top.
+    let moves = main_moves(store);
+    let entries = u64::try_from(moves.len()).expect("a count");
+    assert_eq!(entries, version, "round {round}: main's reflog grew by one");
+    assert_eq!(
+        moves[0], winner,
+        "round {round}: its new entry is the winner"
+    );
+}
+
+/// main's reflog, newest first: the new id of each of its moves in the op log, read a page at a
+/// time.
+fn main_moves(store: &Store) -> Vec<String> {
+    let mut moves = Vec::new();
+    let mut before: Option<String> = None;
+    loop {
+        // 1. One page of operations, below the last page's.
+        let mut args = vec!["op", "log", "--limit", OP_LOG_PAGE];
+        if let Some(before) = &before {
+            args.extend(["--before", before]);
+        }
+        let page = store.read(&args).ok();
+        let ops = page["ops"].as_array().expect("ops");
+
+        // 2. Its moves of main.
+        let ref_moves = ops
+            .iter()
+            .flat_map(|op| op["ref_moves"].as_array().expect("moves"));
+        let of_main = ref_moves.filter(|moved| moved["name"] == "main");
+        moves.extend(of_main.map(|moved| moved["new"].as_str().expect("an id").to_owned()));
+        if page["truncated"] != true {
+            return moves;
+        }
+        before = Some(ops.last().expect("an operation")["op"].to_string());
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

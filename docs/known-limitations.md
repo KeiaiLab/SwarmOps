@@ -788,7 +788,7 @@ These do not change what SwarmOps does, only how well the tests can see it.
 - **The eight-committer race can meet `E_BUSY` on a loaded host.**
   `multiprocess::eight_processes_commit_concurrently_all_persist` races eight commits, which are
   what it measures, so it retries none: a lock wait that load stretches past 10 s fails it. Its
-  two sixteen-racer siblings run again a command that meets `E_BUSY` (`retry_busy`): the `ref set`
+  two fifty-racer siblings run again a command that meets `E_BUSY` (`retry_busy`): the `ref set`
   race its setup commits, and the `commit --advance` race its racers' publishes, since one that
   met `E_BUSY` recorded nothing. *Unscheduled. Found: M1.5 Task 3.*
 - **A create's removal of a crashed create's staging is outside the fault doubles.** A create
