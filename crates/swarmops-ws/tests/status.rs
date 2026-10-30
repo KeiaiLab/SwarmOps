@@ -2,10 +2,12 @@
 //! files, and how far the target has moved.
 
 use swarmops_api::WsChangeKind::{Added, Deleted, ModeChanged, Modified, TypeChanged};
-use swarmops_api::{StatusAfter, WsDiscardReq, WsState, WsStatusReq};
+use swarmops_api::{
+    Identity, RefSetReq, StatusAfter, StoreOps, WsDiscardReq, WsState, WsStatusReq,
+};
 use swarmops_ws::state::SWARMWS_DIR;
 
-use crate::fixture::{Fixture, Put, Watched, change, changes, remove, tree_of, write};
+use crate::fixture::{AGENT, Fixture, Put, Watched, change, changes, remove, tree_of, write};
 
 /// The index's path in workspace `dir`.
 fn index_of(dir: &camino::Utf8Path) -> camino::Utf8PathBuf {
@@ -455,7 +457,8 @@ fn a_corrupt_index_is_rebuilt_by_hashing() {
 }
 
 /// `behind_by` reads the target's head once, no history when it is the base, history 100
-/// changesets a page until the base, and never past 10,000 changesets.
+/// changesets a page until the base, and never past 10,000 changesets; a history without the
+/// base, then the base's own, a page here.
 #[test]
 fn behind_by_reads_pages_until_base_and_stops_at_the_cap() {
     // 1. A workspace on the target's head: one ref read, no log.
@@ -477,19 +480,66 @@ fn behind_by_reads_pages_until_base_and_stops_at_the_cap() {
     assert_eq!((page.main.as_str(), page.behind_by), (&*head, 3));
     assert_eq!((watched.count("resolve_rev"), watched.count("log")), (1, 1));
 
-    // 3. A history of 250 changesets without the base: three pages, all counted.
+    // 3. A history of 250 changesets without the base: three pages, all counted, then the
+    //    base's page, which shares none of them.
     let mut long = Watched::new(&f.ops);
     long.fake_history = Some(250);
     let page = swarmops_ws::status(&f.ctx_over(&long), page_of("w")).unwrap();
     assert_eq!(page.behind_by, 250);
-    assert_eq!((long.count("resolve_rev"), long.count("log")), (1, 3));
+    assert_eq!((long.count("resolve_rev"), long.count("log")), (1, 4));
 
-    // 4. One of 20,000: the cap, after 100 pages.
+    // 4. One of 20,000: the cap, after 100 pages and the base's.
     let mut longer = Watched::new(&f.ops);
     longer.fake_history = Some(20_000);
     let page = swarmops_ws::status(&f.ctx_over(&longer), page_of("w")).unwrap();
     assert_eq!(page.behind_by, 10_000);
-    assert_eq!((longer.count("resolve_rev"), longer.count("log")), (1, 100));
+    assert_eq!((longer.count("resolve_rev"), longer.count("log")), (1, 101));
+}
+
+/// Moves `main` from `from` back or aside to `to`, as `sync` or `op undo` can.
+fn move_main(f: &Fixture, from: &str, to: &str) {
+    let mut req = RefSetReq::new("main", to);
+    req.expected_old = Some(from.into());
+    f.ops
+        .ref_set(&Identity::parse(AGENT).unwrap(), req)
+        .unwrap();
+}
+
+/// A base the target's history lost to a squash-like replacement (X <- A in the workspace, the
+/// target moved to X <- B): `behind_by` counts B alone, from both histories' first page.
+#[test]
+fn behind_by_counts_past_a_replaced_base() {
+    // 1. A workspace on A, on X.
+    let f = Fixture::new();
+    let x = f.commit(None, &[Put::File("src/a.txt", "x\n")]);
+    let a = f.commit(Some(&x), &[Put::File("src/a.txt", "a\n")]);
+    f.create("w", &a, &["src"]);
+
+    // 2. The target moved back to X, then on to B in A's place.
+    move_main(&f, &a, &x);
+    let b = f.commit(Some(&x), &[Put::File("src/a.txt", "b\n")]);
+
+    // 3. One changeset behind: a page of the target's history, then one of the base's.
+    let watched = Watched::new(&f.ops);
+    let page = swarmops_ws::status(&f.ctx_over(&watched), page_of("w")).unwrap();
+    assert_eq!((page.main.as_str(), page.behind_by), (&*b, 1));
+    assert_eq!((watched.count("resolve_rev"), watched.count("log")), (1, 2));
+}
+
+/// A target moved back to an ancestor of the base (X <- A in the workspace, the target at X):
+/// `behind_by` is 0.
+#[test]
+fn behind_by_is_zero_for_a_target_moved_back() {
+    // 1. A workspace on A, on X; the target moved back to X.
+    let f = Fixture::new();
+    let x = f.commit(None, &[Put::File("src/a.txt", "x\n")]);
+    let a = f.commit(Some(&x), &[Put::File("src/a.txt", "a\n")]);
+    f.create("w", &a, &["src"]);
+    move_main(&f, &a, &x);
+
+    // 2. Nothing to catch up.
+    let page = swarmops_ws::status(&f.ctx(), page_of("w")).unwrap();
+    assert_eq!((page.main.as_str(), page.behind_by), (&*x, 0));
 }
 
 /// `ws discard` without paths restores every change status finds: edits, deletions, kinds and

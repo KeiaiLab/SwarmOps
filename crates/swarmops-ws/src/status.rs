@@ -4,8 +4,11 @@
 //! ```text
 //!  resolve_rev{target} ──▶ main      equal to base: behind_by 0, no history read
 //!  log{main, 100, cursor}…           until base, at most 10,000 counted
+//!  log{base, 100, cursor}…           base not met: until a changeset main's log held
 //!  scan (the index, the walker) ──▶ changes, a page after `cursor`, `limit` long
 //! ```
+
+use std::collections::HashMap;
 
 use serde_json::{Map, Value};
 use swarmops_api::{
@@ -120,8 +123,9 @@ pub(crate) fn changes_of(
     Ok(scanned.keep(&ws.dir, &scan::binding_of(ws), Keep::IfChanged))
 }
 
-/// The head of ref `target`, and how many changesets it holds past `base` along first parents,
-/// at most [`BEHIND_CAP`]: one ref read, then `log` a page at a time until `base`.
+/// The head of ref `target`, and how many changesets it holds that `base`'s first-parent
+/// history lacks, at most [`BEHIND_CAP`]: one ref read, then `log` a page at a time until `base`;
+/// when `base` is not on the target's history, `base`'s own history too, until it meets it.
 fn behind(store: &dyn StoreOps, target: &str, base: &str) -> Result<(String, u64), OpError> {
     // 1. The head, a ref read; at the base, nothing to count.
     let main = store.resolve_rev(ResolveRevReq::new(target))?.id;
@@ -129,23 +133,60 @@ fn behind(store: &dyn StoreOps, target: &str, base: &str) -> Result<(String, u64
         return Ok((main, 0));
     }
 
-    // 2. The history, a page at a time, until the base or the cap.
+    // 2. The target's history until the base: each changeset's place on it, the base's the count.
     let mut count = 0;
+    let mut seen = HashMap::new();
+    let mut met = false;
+    walk(store, &main, |id| {
+        met = id == base;
+        if !met {
+            seen.insert(id.to_owned(), count);
+            count += 1;
+        }
+        met
+    })?;
+    if met {
+        return Ok((main, count));
+    }
+
+    // 3. The base off it (a sync dropped it, or the target moved back): the place of the first
+    //    changeset of the base's history the target's holds; none, unrelated, the count as read.
+    let mut parted = None;
+    walk(store, base, |id| {
+        parted = seen.get(id).copied();
+        parted.is_some()
+    })?;
+    Ok((main, parted.unwrap_or(count)))
+}
+
+/// Visits `rev`'s first-parent history, newest first, a `log` page at a time, until `stop` says
+/// so, the history ends or [`BEHIND_CAP`] changesets were visited.
+fn walk(
+    store: &dyn StoreOps,
+    rev: &str,
+    mut stop: impl FnMut(&str) -> bool,
+) -> Result<(), OpError> {
+    let mut visited = 0;
     let mut cursor = None;
     loop {
+        // 1. The next page.
         let mut req = LogReq::default();
-        req.rev = Some(main.as_str().into());
+        req.rev = Some(rev.into());
         req.limit = LOG_PAGE;
         req.cursor = cursor.take();
         let page = store.log(req)?;
+
+        // 2. Its changesets, until the stop or the cap.
         for entry in &page.entries {
-            if entry.id == base || count == BEHIND_CAP {
-                return Ok((main, count));
+            if visited == BEHIND_CAP || stop(&entry.id) {
+                return Ok(());
             }
-            count += 1;
+            visited += 1;
         }
-        if !page.truncated || count == BEHIND_CAP {
-            return Ok((main, count));
+
+        // 3. The next page, while there is one under the cap.
+        if !page.truncated || visited == BEHIND_CAP {
+            return Ok(());
         }
         cursor = page.cursor;
     }

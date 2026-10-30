@@ -292,8 +292,8 @@ pub struct Watched<'a> {
     commits: Mutex<Vec<(CommitReq, Option<String>)>>,
     /// `commit` records the changeset, then fails as a process killed right after it would.
     pub crash_after_commit: AtomicBool,
-    /// `log` answers this many made-up changesets, none of them the store's, instead of the
-    /// store's history.
+    /// `log` of `main`'s head answers this many made-up changesets, none of them the store's,
+    /// instead of the store's history; `log` of another changeset reads the store's.
     pub fake_history: Option<u64>,
     /// Where each call to `commit`, `rebase` and `land` is also noted, in order with the file
     /// layers' events (the sweep driver's order checker).
@@ -342,6 +342,16 @@ impl<'a> Watched<'a> {
         if let Some(trace) = &self.trace {
             trace.store(op);
         }
+    }
+
+    /// Whether `req` asks for the history of `main`'s head, read without being recorded.
+    fn of_main(&self, req: &LogReq) -> bool {
+        let head = self
+            .inner
+            .resolve_rev(ResolveRevReq::new("main"))
+            .unwrap()
+            .id;
+        req.rev.as_ref().is_some_and(|rev| rev.as_str() == head)
     }
 
     /// The made-up page of `total` changesets that `req` asks for: 64-hex ids counting up from
@@ -436,8 +446,8 @@ impl StoreOps for Watched<'_> {
     fn log(&self, req: LogReq) -> Result<LogPage, OpError> {
         self.saw("log");
         match self.fake_history {
-            Some(total) => Ok(Watched::made_up(total, &req)),
-            None => self.inner.log(req),
+            Some(total) if self.of_main(&req) => Ok(Watched::made_up(total, &req)),
+            _ => self.inner.log(req),
         }
     }
 

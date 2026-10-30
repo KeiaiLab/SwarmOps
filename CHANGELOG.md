@@ -49,6 +49,13 @@ collects the changes on `stable` that no release holds yet, until the next relea
   scroll sideways on a phone. The version and date shown are the top released section of this
   changelog, read when the site is built.
 
+### Fixed
+
+- `ws status`'s `behind_by` counts the changesets the target holds that the workspace's base
+  lacks when the base is not on the target's history: 1 after a sync replaced the base with its
+  squash-merged copy, and 0 when the target moved back to an ancestor of the base, where it
+  counted the target's whole history up to 10,000.
+
 ## [0.7.0] - 2026-10-29
 
 Serve stock git. The 0.7.0 release holds M14, topology 1: `swarmops serve`, run per connection

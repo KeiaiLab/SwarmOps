@@ -9374,7 +9374,7 @@ expression: s.redact(&all)
               "type": "string"
             },
             "behind_by": {
-              "description": "How many changesets the target holds past `base`, along first parents: at most 10,000.",
+              "description": "How many changesets the target's first-parent history holds that `base`'s lacks: those\npast `base` when it is on that history; otherwise (a sync dropped it, or the target moved\nback) those before where the two histories meet, 0 when the target is an ancestor of\n`base`. At most 10,000.",
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
@@ -9839,7 +9839,7 @@ expression: s.redact(&all)
               "type": "string"
             },
             "behind_by": {
-              "description": "How many changesets the target holds past `base`, along first parents: at most 10,000.",
+              "description": "How many changesets the target's first-parent history holds that `base`'s lacks: those\npast `base` when it is on that history; otherwise (a sync dropped it, or the target moved\nback) those before where the two histories meet, 0 when the target is an ancestor of\n`base`. At most 10,000.",
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
@@ -10034,7 +10034,7 @@ expression: s.redact(&all)
               "type": "string"
             },
             "behind_by": {
-              "description": "How many changesets the target holds past `base`, along first parents: at most 10,000.",
+              "description": "How many changesets the target's first-parent history holds that `base`'s lacks: those\npast `base` when it is on that history; otherwise (a sync dropped it, or the target moved\nback) those before where the two histories meet, 0 when the target is an ancestor of\n`base`. At most 10,000.",
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
@@ -10491,7 +10491,7 @@ expression: s.redact(&all)
               "type": "string"
             },
             "behind_by": {
-              "description": "How many changesets the target holds past `base`, along first parents: at most 10,000.",
+              "description": "How many changesets the target's first-parent history holds that `base`'s lacks: those\npast `base` when it is on that history; otherwise (a sync dropped it, or the target moved\nback) those before where the two histories meet, 0 when the target is an ancestor of\n`base`. At most 10,000.",
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
@@ -10749,7 +10749,7 @@ expression: s.redact(&all)
               "type": "string"
             },
             "behind_by": {
-              "description": "How many changesets the target holds past `base`, along first parents: at most 10,000.",
+              "description": "How many changesets the target's first-parent history holds that `base`'s lacks: those\npast `base` when it is on that history; otherwise (a sync dropped it, or the target moved\nback) those before where the two histories meet, 0 when the target is an ancestor of\n`base`. At most 10,000.",
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
@@ -10990,7 +10990,7 @@ expression: s.redact(&all)
               "type": "string"
             },
             "behind_by": {
-              "description": "How many changesets the target holds past `base`, along first parents: at most 10,000.",
+              "description": "How many changesets the target's first-parent history holds that `base`'s lacks: those\npast `base` when it is on that history; otherwise (a sync dropped it, or the target moved\nback) those before where the two histories meet, 0 when the target is an ancestor of\n`base`. At most 10,000.",
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
@@ -11313,7 +11313,7 @@ expression: s.redact(&all)
               "type": "string"
             },
             "behind_by": {
-              "description": "How many changesets the target holds past `base`, along first parents: at most 10,000.",
+              "description": "How many changesets the target's first-parent history holds that `base`'s lacks: those\npast `base` when it is on that history; otherwise (a sync dropped it, or the target moved\nback) those before where the two histories meet, 0 when the target is an ancestor of\n`base`. At most 10,000.",
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
@@ -11622,7 +11622,7 @@ expression: s.redact(&all)
               "type": "string"
             },
             "behind_by": {
-              "description": "How many changesets the target holds past `base`, along first parents: at most 10,000.",
+              "description": "How many changesets the target's first-parent history holds that `base`'s lacks: those\npast `base` when it is on that history; otherwise (a sync dropped it, or the target moved\nback) those before where the two histories meet, 0 when the target is an ancestor of\n`base`. At most 10,000.",
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
@@ -11843,7 +11843,7 @@ expression: s.redact(&all)
           "type": "string"
         },
         "behind_by": {
-          "description": "How many changesets the target holds past `base`, along first parents: at most 10,000.",
+          "description": "How many changesets the target's first-parent history holds that `base`'s lacks: those\npast `base` when it is on that history; otherwise (a sync dropped it, or the target moved\nback) those before where the two histories meet, 0 when the target is an ancestor of\n`base`. At most 10,000.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
