@@ -42,11 +42,7 @@ pub fn diff(ctx: &Ctx<'_>, req: WsDiffReq) -> Result<Diff, OpError> {
 
     // 2. The changes after the cursor, by a scan without the lock: a read.
     let ws = Workspace::open(ctx, Locate::Name(workspace))?;
-    let want = Want {
-        paths,
-        full: false,
-        extra: Vec::new(),
-    };
+    let want = Want { paths, full: false };
     let changes = status::changes_of(ctx, &ws, &want)?;
     let rest: Vec<&Change> = (changes.iter())
         .filter(|change| {

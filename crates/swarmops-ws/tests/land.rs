@@ -18,7 +18,7 @@ use swarmops_api::{
 use swarmops_ws::RealFs;
 use swarmops_ws::state::{self, SWARMWS_DIR};
 
-use crate::fixture::{Fixture, Put, changes, file, tree_of, write};
+use crate::fixture::{Fixture, Put, Watched, changes, file, tree_of, write};
 
 /// A store that forwards every call to `inner`, and can run a hook before the first `land` (a
 /// second process landing first) or fail right after a `land` or a `rebase` the store recorded,
@@ -541,4 +541,85 @@ fn a_check_land_without_a_check_command_is_refused() {
     let done = swarmops_ws::land(&f.ctx(), req).unwrap();
     assert_eq!(done.land.rebased_onto, main);
     assert_eq!(seen_lines(&seen).len(), 1);
+}
+
+/// The root entries of changeset `id`'s tree, by name with their ids, but `src`.
+fn outside_src(f: &Fixture, id: &str) -> Vec<(String, String)> {
+    let listing = f.ops.read_tree(ReadTreeReq::new(id)).unwrap();
+    (listing.entries.into_iter())
+        .filter(|entry| entry.name != "src")
+        .map(|entry| (entry.name, entry.id))
+        .collect()
+}
+
+/// A sparse workspace's land moves only its own chain: every path outside its prefixes is the
+/// target's, though the target moved one of them since the workspace's base.
+#[test]
+fn a_sparse_land_keeps_every_outside_path() {
+    // 1. A base with `docs` and `src`; a workspace of `src` on it, with an edit committed.
+    let f = Fixture::new();
+    let base = f.commit(
+        None,
+        &[
+            Put::File("README", "readme\n"),
+            Put::File("docs/a", "a\n"),
+            Put::File("docs/b", "b\n"),
+            Put::File("src/a", "a\n"),
+            Put::File("src/b", "b\n"),
+        ],
+    );
+    f.create("w", &base, &["src"]);
+    write(&f.beside("w"), "src/b", "mine\n");
+    let mut req = WsCommitReq::new("w".to_owned(), "mine".to_owned());
+    req.status_after = StatusAfter::None;
+    swarmops_ws::commit(&f.ctx(), req).unwrap();
+
+    // 2. Main moves `docs/a`; the workspace lands.
+    let main = f.commit(Some(&base), &[Put::File("docs/a", "moved\n")]);
+    let done = swarmops_ws::land(&f.ctx(), land_of("w", None)).unwrap();
+    assert_eq!(done.land.rebased_onto, main);
+
+    // 3. Outside `src` the landed tree is main's; inside, the workspace's edit.
+    let landed = &done.land.landed;
+    assert_eq!(outside_src(&f, landed), outside_src(&f, &main));
+    let mut read = ReadFileReq::new(landed.as_str(), "src/b");
+    read.max_bytes = 64;
+    assert_eq!(f.ops.read_file(read).unwrap().content, "mine\n");
+}
+
+/// `ws land` of a sparse workspace with an edit outside its prefixes is
+/// `E_WS_OUTSIDE_PREFIXES` before anything else: no edit committed, nothing rebased or landed,
+/// no store call but the workspace's open.
+#[test]
+fn ws_land_refuses_an_outside_edit() {
+    // 1. A workspace of `src` with an edit inside and a stray file outside.
+    let f = Fixture::new();
+    let base = f.commit(
+        None,
+        &[Put::File("docs/a", "a\n"), Put::File("src/a", "a\n")],
+    );
+    f.create("w", &base, &["src"]);
+    let dir = f.beside("w");
+    write(&dir, "src/a", "mine\n");
+    write(&dir, "docs/a", "stray\n");
+    let before = state::read(&RealFs::new(), &dir).unwrap();
+
+    // 2. A land that would commit the edit: refused, naming `docs`.
+    let watched = Watched::new(&f.ops);
+    let mut req = land_of("w", None);
+    req.message = Some("mine".to_owned());
+    let refused = swarmops_ws::land(&f.ctx_over(&watched), req).unwrap_err();
+    assert_eq!(refused.code, "E_WS_OUTSIDE_PREFIXES", "{refused:?}");
+    assert_eq!(refused.details["paths"], serde_json::json!(["docs"]));
+
+    // 3. Nothing changed: the store only opened the workspace; its state and files as they were.
+    let calls = watched.calls();
+    assert!(calls.iter().all(|call| *call == "repo_info"), "{calls:?}");
+    assert_eq!(state::read(&RealFs::new(), &dir).unwrap(), before);
+    assert_eq!(main_of(&f), base);
+    assert_eq!(
+        tree_of(&dir),
+        [file("docs/a", "stray\n"), file("src/a", "mine\n")]
+    );
+    assert!(!pending_in(&dir).exists());
 }

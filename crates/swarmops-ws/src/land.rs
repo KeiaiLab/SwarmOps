@@ -2,7 +2,9 @@
 //! one, rebase, check and an exact land, up to `max_attempts`, under one land key.
 //!
 //! ```text
-//!  refusals before the lock: no command for --check (E_INVALID_ARG missing "check")
+//!  refusals before the lock: an edit off a sparse workspace's prefixes
+//!    (E_WS_OUTSIDE_PREFIXES, before any store call but the workspace's open), no command for
+//!    --check (E_INVALID_ARG missing "check")
 //!  lock → edits committed (-m) or E_WS_DIRTY → the land key K
 //!
 //!  without --check (mode merge by default):
@@ -32,9 +34,11 @@ use swarmops_api::{
 };
 
 use crate::check::{self, Subject};
+use crate::commit;
 use crate::io_error::unknown_variant;
 use crate::pending::{self, Pending, PendingOp};
 use crate::rebase;
+use crate::scan;
 use crate::state::State;
 use crate::workspace::{self, Locate, Workspace};
 use crate::{Ctx, after};
@@ -114,6 +118,7 @@ pub fn land(ctx: &Ctx<'_>, req: WsLandReq) -> Result<WsLandResp, OpError> {
         None => LandMode::Merge,
     });
     let seen = Workspace::open(ctx, Locate::Name(workspace.clone()))?;
+    commit::refuse_outside(scan::outside(&seen)?)?;
     let target = target.unwrap_or_else(|| seen.file.target.clone());
     let check = check
         .map(|check| command(ctx, &seen, &target, check))

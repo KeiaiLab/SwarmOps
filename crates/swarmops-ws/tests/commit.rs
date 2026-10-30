@@ -371,3 +371,100 @@ fn ws_diff_matches_store_diff_after_commit() {
     assert_eq!(second.files, store_second.files);
     assert_eq!(before[0].files.len(), 6);
 }
+
+/// The head and prefixes of workspace `dir`'s state, which a refusal leaves as they were.
+fn standing(dir: &Utf8Path) -> (String, Vec<String>) {
+    let saved = state::read(&RealFs::new(), dir).unwrap();
+    (saved.head, saved.prefixes)
+}
+
+/// The paths of a refusal's `details.paths`.
+fn refused_paths(refused: &swarmops_api::OpError) -> Vec<&str> {
+    (refused.details["paths"].as_array().unwrap().iter())
+        .map(|path| path.as_str().unwrap())
+        .collect()
+}
+
+/// A commit naming a path outside a sparse workspace's prefixes is `E_WS_OUTSIDE_PREFIXES`
+/// naming it: the prefixes are not widened, and the store commits nothing.
+#[test]
+fn a_named_path_outside_the_prefixes_is_refused() {
+    // 1. A workspace of `src`; a file written outside it.
+    let f = Fixture::new();
+    let base = f.commit(None, &[Put::File("src/a.txt", "a\n")]);
+    f.create("w", &base, &["src"]);
+    let dir = f.beside("w");
+    write(&dir, "docs/a", "doc\n");
+
+    // 2. A commit naming it: refused, naming it, with the hint that widens the prefixes.
+    let watched = Watched::new(&f.ops);
+    let mut req = commit_of("w", "outside");
+    req.paths = vec!["docs/a".to_owned()];
+    let refused = swarmops_ws::commit(&f.ctx_over(&watched), req).unwrap_err();
+    assert_eq!(refused.code, "E_WS_OUTSIDE_PREFIXES", "{refused:?}");
+    assert_eq!(refused_paths(&refused), ["docs/a"]);
+    assert_eq!(
+        refused.hint.as_deref(),
+        Some("swarmops ws materialize docs/a")
+    );
+
+    // 3. Nothing changed: head and prefixes, no store commit, no pending record.
+    assert_eq!(standing(&dir), (base, vec!["src".to_owned()]));
+    assert_eq!(watched.count("commit"), 0, "{:?}", watched.calls());
+    assert!(!pending_of(&dir).exists());
+}
+
+/// A commit naming no path meets the edits outside the prefixes too: the topmost entry of each,
+/// a directory not entered, refused in path order; the edit inside is not committed alone.
+#[test]
+fn an_unnamed_edit_outside_the_prefixes_is_refused() {
+    // 1. A workspace of `src`: an edit inside, a directory and a file outside.
+    let f = Fixture::new();
+    let base = f.commit(None, &[Put::File("src/a.txt", "a\n")]);
+    f.create("w", &base, &["src"]);
+    let dir = f.beside("w");
+    write(&dir, "src/x", "x\n");
+    write(&dir, "docs/a", "doc\n");
+    write(&dir, "README", "readme\n");
+
+    // 2. Refused, naming `README` and `docs`.
+    let watched = Watched::new(&f.ops);
+    let refused =
+        swarmops_ws::commit(&f.ctx_over(&watched), commit_of("w", "unnamed")).unwrap_err();
+    assert_eq!(refused.code, "E_WS_OUTSIDE_PREFIXES", "{refused:?}");
+    assert_eq!(refused_paths(&refused), ["README", "docs"]);
+
+    // 3. Nothing changed.
+    assert_eq!(standing(&dir), (base, vec!["src".to_owned()]));
+    assert_eq!(watched.count("commit"), 0, "{:?}", watched.calls());
+    assert!(!pending_of(&dir).exists());
+}
+
+/// An outside path an ignore file on disk names is no edit: build output outside the prefixes
+/// does not stop a commit, and is not committed.
+#[test]
+fn an_ignored_outside_path_is_not_refused() {
+    // 1. A workspace of `src` and the root `.gitignore`, which names `target/`.
+    let f = Fixture::new();
+    let base = f.commit(
+        None,
+        &[
+            Put::File("src/a.txt", "a\n"),
+            Put::File(".gitignore", "target/\n"),
+        ],
+    );
+    f.create("w", &base, &["src", ".gitignore"]);
+    let dir = f.beside("w");
+    write(&dir, "target/debug/out", "built\n");
+    write(&dir, "src/a.txt", "edited\n");
+
+    // 2. Committed: the edit inside, nothing under `target/`.
+    let watched = Watched::new(&f.ops);
+    swarmops_ws::commit(&f.ctx_over(&watched), commit_of("w", "build")).unwrap();
+    let commits = watched.commits();
+    let [(req, Some(_))] = commits.as_slice() else {
+        panic!("{commits:?}");
+    };
+    let paths: Vec<&str> = req.changes.iter().map(|c| c.path.as_str()).collect();
+    assert_eq!(paths, ["src/a.txt"]);
+}

@@ -8,6 +8,10 @@
 //!       → workspace.json head (WS2) → index → the pending record removed
 //! ```
 //!
+//! A sparse workspace's commit stays under its prefixes: a path named outside them, or an edit
+//! the scan meets outside them, is `E_WS_OUTSIDE_PREFIXES` (the M15 design §5); only
+//! `ws materialize` widens the prefixes.
+//!
 //! A crash between the store's commit and `workspace.json` leaves the pending record: the next
 //! commit takes its key, and the store replays the same changeset (a keyed commit takes its
 //! key's time).
@@ -24,7 +28,6 @@ use swarmops_api::{
 use swarmops_core::ObjectId;
 use swarmops_store::MAX_OBJECT_LEN;
 
-use crate::hostfs::HostKind;
 use crate::index::{Index, Row, UNCONFIRMED};
 use crate::io_error::unknown_variant;
 use crate::materialize;
@@ -37,10 +40,22 @@ use crate::{Ctx, after};
 /// The ids one `blob_has` asks about.
 const HAS_BATCH: usize = 1000;
 
+/// The most paths an `E_WS_OUTSIDE_PREFIXES` names.
+const MAX_OUTSIDE: usize = 20;
+
 /// The most content bytes, as sent (inline or base64 text), that one commit request carries:
 /// the memory it holds. A missing blob past what is left goes by `blob_put` first. It stays
 /// under the store's 1 GiB a commit's contents may hold.
 const INLINE_BYTES: u64 = 64 << 20;
+
+/// What a commit does with the edits a scan meets off a sparse workspace's prefixes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OffPrefixes {
+    /// Refused: `ws commit`.
+    Refuse,
+    /// Left as they are: the commit of `ws rebase -m` and `ws land -m`.
+    Leave,
+}
 
 /// How a blob the store lacked reaches it.
 enum Sent {
@@ -76,20 +91,33 @@ pub fn commit(ctx: &Ctx<'_>, req: WsCommitReq) -> Result<WsCommitResp, OpError> 
     let (mut ws, _held) = workspace::open_locked(ctx, &Locate::Name(workspace))?;
 
     // 2. The commit, then the status after it.
-    let mut done = commit_in(ctx, &mut ws, message, &named, &modes)?;
+    let mut done = commit_with(ctx, &mut ws, message, &named, &modes, OffPrefixes::Refuse)?;
     done.status_after = after::attach(ctx, &ws, status_after);
     Ok(done)
 }
 
 /// Commits the edits of workspace `ws`, whose lock the caller holds, under the `named` paths
 /// (every path when empty) with `modes`: what `ws commit` does once it holds the lock, and what
-/// `ws rebase -m` and `ws land -m` do first. The response carries no status.
+/// `ws rebase -m` and `ws land -m` do first. A path named off a sparse workspace's prefixes is
+/// refused; an edit the scan meets there is left. The response carries no status.
 pub(crate) fn commit_in(
     ctx: &Ctx<'_>,
     ws: &mut Workspace,
     message: String,
     named: &[String],
     modes: &BTreeMap<String, FileKind>,
+) -> Result<WsCommitResp, OpError> {
+    commit_with(ctx, ws, message, named, modes, OffPrefixes::Leave)
+}
+
+/// [`commit_in`], doing with the edits the scan meets off the prefixes what `off` says.
+fn commit_with(
+    ctx: &Ctx<'_>,
+    ws: &mut Workspace,
+    message: String,
+    named: &[String],
+    modes: &BTreeMap<String, FileKind>,
+    off: OffPrefixes,
 ) -> Result<WsCommitResp, OpError> {
     // 1. Not rebasing; a mode only where the volume drops the bit.
     if let State::Rebasing { .. } = ws.file.state {
@@ -106,9 +134,11 @@ pub(crate) fn commit_in(
         ));
     }
 
-    // 2. What changed, under the named paths (and those of the modes); a named path outside the
-    //    prefixes joins them.
-    let extra = outside(ctx, ws, named)?;
+    // 2. No path named (or of a mode) outside the prefixes: refused before the scan.
+    refuse_outside(outside(ws, named, modes))?;
+
+    // 3. What changed, under the named paths (and those of the modes); for `ws commit`, no edit
+    //    off the prefixes either.
     let mut filter = named.to_vec();
     if !named.is_empty() {
         filter.extend(modes.keys().cloned());
@@ -116,11 +146,13 @@ pub(crate) fn commit_in(
     let want = Want {
         paths: filter,
         full: false,
-        extra: extra.clone(),
     };
     let scanned = scan::scan(ctx, ws, &want)?;
+    if off == OffPrefixes::Refuse {
+        refuse_outside(scanned.outside.clone())?;
+    }
 
-    // 3. The entries: each change, and each mode asked for; nothing, an empty commit.
+    // 4. The entries: each change, and each mode asked for; nothing, an empty commit.
     let mut entries = entries_of(&scanned.changes, modes);
     entries.extend(mode_only(&scanned.index, &scanned.changes, modes));
     entries.sort_by(|a, b| a.path.cmp(&b.path));
@@ -131,7 +163,7 @@ pub(crate) fn commit_in(
         ));
     }
 
-    // 4. No file past what an object holds, before anything is read or sent.
+    // 5. No file past what an object holds, before anything is read or sent.
     if let Some(entry) =
         (entries.iter()).find(|e| e.host.is_some_and(|h| h.meta.size > MAX_OBJECT_LEN))
     {
@@ -139,19 +171,19 @@ pub(crate) fn commit_in(
         return Err(too_large(&entry.path, size));
     }
 
-    // 5. The bytes the scan did not hash, hashed under the budget.
+    // 6. The bytes the scan did not hash, hashed under the budget.
     hash_missing(ctx, ws, &mut entries)?;
 
-    // 6. The pending record, durable before the store hears of the commit (WS1).
+    // 7. The pending record, durable before the store hears of the commit (WS1).
     let key = pending_key(ctx, ws)?;
 
-    // 7. The blobs the store lacks: inline under the budget, put alone past it.
+    // 8. The blobs the store lacks: inline under the budget, put alone past it.
     let sent = upload(ctx, ws, &entries, INLINE_BYTES)?;
     let puts = (sent.values())
         .filter(|sent| matches!(sent, Sent::Put(true)))
         .count();
 
-    // 8. The commit, by blob id or inline, on the head's full id.
+    // 9. The commit, by blob id or inline, on the head's full id.
     let changes = (entries.iter())
         .map(|entry| change_input(entry, &sent))
         .collect::<Result<_, _>>()?;
@@ -161,16 +193,12 @@ pub(crate) fn commit_in(
     let done = ctx.store.commit(&ws.who, req)?;
     let blobs_written = u64::try_from(puts).unwrap_or(u64::MAX) + done.blobs_written;
 
-    // 9. The workspace stands on it (WS2); the index learns it; the record goes.
+    // 10. The workspace stands on it (WS2); the index learns it; the record goes.
     let parent = ws.file.head.clone();
     let mut file = ws.file.clone();
     file.head.clone_from(&done.changeset);
     file.materialized.clone_from(&done.changeset);
     file.onto = None;
-    if !extra.is_empty() {
-        file.prefixes =
-            materialize::normalize(file.prefixes.iter().chain(&extra).cloned().collect())?;
-    }
     state::replace(ctx.fs.as_ref(), &ws.dir, &file)?;
     ws.file = file;
     let mut scanned = scanned;
@@ -210,28 +238,43 @@ fn modes_of(modes: BTreeMap<String, ModeInput>) -> Result<BTreeMap<String, FileK
     Ok(out)
 }
 
-/// The named paths outside workspace `ws`'s prefixes, each a file or a symlink on the host;
-/// `E_INVALID_ARG` for one that is not (a directory outside is materialised first).
-fn outside(ctx: &Ctx<'_>, ws: &Workspace, named: &[String]) -> Result<Vec<String>, OpError> {
-    let mut extra = Vec::new();
-    for path in named {
-        if ws.file.all || materialize::covered(path, &ws.file.prefixes) {
-            continue;
-        }
-        let meta = ctx
-            .host
-            .symlink_metadata(&ws.dir.join(path))
-            .map_err(|e| materialize::host_failed(path, &e))?;
-        if !meta.is_some_and(|meta| matches!(meta.kind, HostKind::File | HostKind::Symlink)) {
-            return Err(OpError::new(
-                ErrorCode::InvalidArg,
-                format!("{path:?} is outside the workspace's prefixes and no file there"),
-            )
-            .with_hint(format!("swarmops ws materialize {path}")));
-        }
-        extra.push(path.clone());
+/// The `named` paths and those of `modes` outside workspace `ws`'s prefixes; none for a
+/// workspace of the whole tree.
+fn outside(ws: &Workspace, named: &[String], modes: &BTreeMap<String, FileKind>) -> Vec<String> {
+    if ws.file.all {
+        return Vec::new();
     }
-    Ok(extra)
+    (named.iter())
+        .chain(modes.keys())
+        .filter(|path| !materialize::covered(path, &ws.file.prefixes))
+        .cloned()
+        .collect()
+}
+
+/// `E_WS_OUTSIDE_PREFIXES` naming `paths` (sorted, the first 20), when there are any: edits off
+/// a sparse workspace's prefixes, which only `ws materialize` widens. Nothing was changed.
+pub(crate) fn refuse_outside(mut paths: Vec<String>) -> Result<(), OpError> {
+    // 1. None: nothing to refuse.
+    paths.sort();
+    paths.dedup();
+    let Some(first) = paths.first().cloned() else {
+        return Ok(());
+    };
+
+    // 2. The first 20, in the message and the details; the hint widens to the first.
+    let named: Vec<Value> = (paths.iter())
+        .take(MAX_OUTSIDE)
+        .map(|path| Value::from(path.as_str()))
+        .collect();
+    Err(OpError::new(
+        ErrorCode::WsOutsidePrefixes,
+        format!(
+            "the workspace holds edits outside its prefixes: {}",
+            Value::from(named.clone())
+        ),
+    )
+    .with_details(Map::from_iter([("paths".to_owned(), Value::from(named))]))
+    .with_hint(format!("swarmops ws materialize {first}")))
 }
 
 /// The entries of `changes`, each put of the kind `modes` names for it, if any.
@@ -538,7 +581,6 @@ mod tests {
         let want = Want {
             paths: Vec::new(),
             full: false,
-            extra: Vec::new(),
         };
         let scanned = scan::scan(&ctx, &ws, &want).unwrap();
         let mut entries = entries_of(&scanned.changes, &BTreeMap::new());
@@ -581,7 +623,7 @@ mod tests {
 
         // 2. `a` removed, `b` made executable in place, `c` added.
         let meta = crate::hostfs::HostMeta {
-            kind: HostKind::File,
+            kind: crate::hostfs::HostKind::File,
             size: 9,
             mtime_ns: 15,
             inode: 7,

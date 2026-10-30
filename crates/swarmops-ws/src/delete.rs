@@ -60,7 +60,6 @@ pub fn delete(ctx: &Ctx<'_>, req: WsDeleteReq) -> Result<WsDeleteResp, OpError> 
         let want = Want {
             paths: Vec::new(),
             full: false,
-            extra: Vec::new(),
         };
         let changed = status::changes_of(ctx, &ws, &want)?;
         if !changed.is_empty() {

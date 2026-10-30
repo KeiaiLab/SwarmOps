@@ -52,11 +52,7 @@ pub fn status(ctx: &Ctx<'_>, req: WsStatusReq) -> Result<WsStatus, OpError> {
 
     // 2. The workspace, without its lock: a read.
     let ws = Workspace::open(ctx, Locate::Name(workspace))?;
-    let want = Want {
-        paths,
-        full,
-        extra: Vec::new(),
-    };
+    let want = Want { paths, full };
     page(ctx, &ws, &want, limit, cursor.as_deref())
 }
 

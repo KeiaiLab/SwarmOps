@@ -688,6 +688,16 @@ left).
   default, applies), and a `--check-timeout` too large for the clock aborts the command;
   `blob get` takes `--max-bytes 0` as one blob, and caps neither the ids nor the bytes it holds.
   *Unscheduled. Found: M5 Tasks W3, W7 and W10 reviews.*
+- **Build output outside a sparse workspace's prefixes needs an ignore file on disk.** `ws commit`
+  and `ws land` refuse every file or directory outside the prefixes that no `.gitignore` or
+  `.swarmignore` on disk names (`E_WS_OUTSIDE_PREFIXES`), and the walk reads only the ignore files
+  the workspace holds: a `target/` at the root is refused unless the root's `.gitignore` names it
+  and is materialised (`ws materialize .gitignore`). *Documented (the M15 design §5). Found: M15
+  Task S4b.*
+- **A new path outside the prefixes needs an existing ancestor to materialise.** A commit no longer
+  widens the prefixes; `ws materialize` does, and only to a path the tree holds: a file new to the
+  tree is committed after materialising the directory already in the tree that will hold it.
+  *Documented (the M15 design §5). Found: M15 Task S4b.*
 
 ## Platforms
 

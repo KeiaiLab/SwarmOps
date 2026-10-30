@@ -9,11 +9,12 @@
 //!                                                         └─ else hashed ─▶ unchanged, row
 //!                                                                           refreshed; or changed
 //!  walker(root, prefixes) ──▶ files the rows lack and no ignore file names ──▶ added
+//!                          └─▶ the topmost entries off the prefixes no ignore file names ──▶ outside
 //! ```
 
 use std::collections::{BTreeMap, HashSet};
 use std::io;
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use camino::Utf8Path;
 use ignore::{WalkBuilder, WalkState};
@@ -39,6 +40,12 @@ pub const SWARMIGNORE: &str = ".swarmignore";
 /// A blob's id, as the index holds it.
 pub(crate) type Blob = [u8; 32];
 
+/// Where a walk's threads note the entries they met off the prefixes.
+type Strays = Arc<Mutex<Vec<String>>>;
+
+/// An untracked file a walk found, with its stat.
+type Found = (String, HostMeta);
+
 /// What a scan looks at.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Want {
@@ -46,9 +53,6 @@ pub(crate) struct Want {
     pub(crate) paths: Vec<String>,
     /// Hash every tracked file, trusting no stat.
     pub(crate) full: bool,
-    /// Paths outside the workspace's prefixes to look at too, each a file the host holds: a
-    /// commit that names them.
-    pub(crate) extra: Vec<String>,
 }
 
 /// One changed path.
@@ -84,6 +88,9 @@ pub(crate) struct Scanned {
     pub(crate) index: Index,
     /// Whether `index` differs from the one read (rebuilt or refreshed).
     pub(crate) refreshed: bool,
+    /// The topmost entries off a sparse workspace's prefixes that no ignore file names, sorted:
+    /// edits a commit of it refuses.
+    pub(crate) outside: Vec<String>,
     /// The temp file the next index is written through; its mtime is `index.written_ns`. None
     /// where `.swarmws/` takes no file: the index is not written then.
     pub(crate) temp: Option<tempfile::NamedTempFile>,
@@ -98,6 +105,7 @@ impl Scanned {
             index,
             refreshed,
             temp,
+            ..
         } = self;
         if let Some(temp) = temp
             && (refreshed || force == Keep::Always)
@@ -123,6 +131,13 @@ pub(crate) enum Keep {
 /// are listed; nothing above `root`, no `.ignore` and no host-wide exclude is read; no link is
 /// followed; `.swarmws` at the root and every `.git` directory are skipped.
 pub fn walker(root: &Utf8Path, prefixes: &[String]) -> WalkBuilder {
+    configured(root, prefixes, None)
+}
+
+/// The walker of [`walker`], noting in `strays`, when given, each entry it does not enter for
+/// lying off the prefixes: only entries no ignore file names reach the filter, so these are the
+/// topmost edits outside the prefixes (a directory's path, not what it holds).
+fn configured(root: &Utf8Path, prefixes: &[String], strays: Option<Strays>) -> WalkBuilder {
     // 1. Away from the defaults, which are git's inside a repository.
     let mut builder = WalkBuilder::new(root);
     builder
@@ -148,9 +163,60 @@ pub fn walker(root: &Utf8Path, prefixes: &[String]) -> WalkBuilder {
         if rel == SWARMWS_DIR || (is_dir && entry.file_name() == ".git") {
             return false;
         }
-        prefixes.is_empty() || materialize::covered(&rel, &prefixes) || leads_to(&rel, &prefixes)
+        if prefixes.is_empty() || materialize::covered(&rel, &prefixes) || leads_to(&rel, &prefixes)
+        {
+            return true;
+        }
+
+        // 3. Off the prefixes: noted, not entered.
+        if let Some(strays) = &strays {
+            strays.lock().expect("no walker panicked").push(rel);
+        }
+        false
     });
     builder
+}
+
+/// The topmost entries off the prefixes of sparse workspace `ws` that no ignore file names,
+/// sorted; none for a workspace of the whole tree. Only the directories above the prefixes are
+/// read: what `ws land` refuses before anything else.
+pub(crate) fn outside(ws: &Workspace) -> Result<Vec<String>, OpError> {
+    // 1. Nothing is off the prefixes of the whole tree.
+    if ws.file.all {
+        return Ok(Vec::new());
+    }
+
+    // 2. The walk, entering no directory under a prefix.
+    let strays = Strays::default();
+    let failed = Mutex::new(None);
+    let prefixes = &ws.file.prefixes;
+    configured(&ws.dir, prefixes, Some(Arc::clone(&strays)))
+        .build_parallel()
+        .run(|| {
+            Box::new(|entry| {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(e) => {
+                        failed
+                            .lock()
+                            .expect("no walker panicked")
+                            .get_or_insert(e.to_string());
+                        return WalkState::Quit;
+                    }
+                };
+                let under = relative(&ws.dir, entry.path())
+                    .is_some_and(|rel| materialize::covered(&rel, prefixes));
+                if under {
+                    WalkState::Skip
+                } else {
+                    WalkState::Continue
+                }
+            })
+        });
+    walk_failed(failed)?;
+
+    // 3. In path order.
+    Ok(sorted(&strays))
 }
 
 /// Scans workspace `ws` as `want` says: its changes against its head, and its index refreshed.
@@ -163,7 +229,7 @@ pub(crate) fn scan(ctx: &Ctx<'_>, ws: &Workspace, want: &Want) -> Result<Scanned
         .ok();
     let written_ns = temp.as_ref().and_then(stamp).unwrap_or(i64::MAX);
 
-    // 2. The rows: the index, or the head's tree rebuilt; the named outside paths joined.
+    // 2. The rows: the index, or the head's tree rebuilt.
     let binding = binding_of(ws);
     let (mut index, mut refreshed) = match index::read(dir, &binding) {
         Some(index) => (index, false),
@@ -174,9 +240,6 @@ pub(crate) fn scan(ctx: &Ctx<'_>, ws: &Workspace, want: &Want) -> Result<Scanned
     } else {
         index.written_ns
     };
-    for path in &want.extra {
-        refreshed |= join_rows(ctx.store, ws, &mut index, path)?;
-    }
     index.written_ns = written_ns;
 
     // 3. The tracked rows, stat'd in parallel; those whose stat says nothing, hashed.
@@ -215,9 +278,10 @@ pub(crate) fn scan(ctx: &Ctx<'_>, ws: &Workspace, want: &Want) -> Result<Scanned
         smudge(row, stale_ns);
     }
 
-    // 6. The untracked additions under the prefixes.
+    // 6. The untracked additions under the prefixes; what lies off them, noted.
     let tracked: HashSet<&str> = index.rows.iter().map(|row| row.path.as_str()).collect();
-    for (path, meta) in untracked(ctx.host.as_ref(), ws, &want.extra, &tracked)? {
+    let (added, outside) = untracked(ctx.host.as_ref(), ws, &tracked)?;
+    for (path, meta) in added {
         if !wanted(&path) {
             continue;
         }
@@ -242,6 +306,7 @@ pub(crate) fn scan(ctx: &Ctx<'_>, ws: &Workspace, want: &Want) -> Result<Scanned
         changes: changes.into_values().collect(),
         index,
         refreshed,
+        outside,
         temp,
     })
 }
@@ -422,31 +487,6 @@ fn rebuild(store: &dyn StoreOps, ws: &Workspace) -> Result<Index, OpError> {
     })
 }
 
-/// Adds to `index` the head's entry at `path`, outside the prefixes of workspace `ws`, if the
-/// head has one there and the index lacks it; whether it did.
-fn join_rows(
-    store: &dyn StoreOps,
-    ws: &Workspace,
-    index: &mut Index,
-    path: &str,
-) -> Result<bool, OpError> {
-    let tree = Tree::new(store, &ws.file.head);
-    let mut joined = false;
-    for item in materialize::items_under(store, &tree, Some(path))?.unwrap_or_default() {
-        let Err(at) = index
-            .rows
-            .binary_search_by(|row| row.path.as_str().cmp(&item.path))
-        else {
-            continue;
-        };
-        index
-            .rows
-            .insert(at, unconfirmed(&item.path, item.kind, &item.blob)?);
-        joined = true;
-    }
-    Ok(joined)
-}
-
 /// A row for `path` holding blob `blob` (hex) of `kind`, its stat unconfirmed.
 fn unconfirmed(path: &str, kind: FileKind, blob: &str) -> Result<Row, OpError> {
     Ok(Row {
@@ -469,24 +509,26 @@ pub(crate) fn blob_of(hex: &str) -> Result<Blob, OpError> {
     })
 }
 
-/// The files and symlinks below the root of workspace `ws`, under its prefixes and `extra`,
-/// that `tracked` lacks and no ignore file names, with their stat; paths that are not UTF-8 are
-/// passed over (a repository path is UTF-8).
+/// The files and symlinks below the root of workspace `ws`, under its prefixes, that `tracked`
+/// lacks and no ignore file names, with their stat; paths that are not UTF-8 are passed over (a
+/// repository path is UTF-8). Beside them, sorted, the topmost entries off the prefixes no
+/// ignore file names.
 fn untracked(
     host: &dyn HostFs,
     ws: &Workspace,
-    extra: &[String],
     tracked: &HashSet<&str>,
-) -> Result<Vec<(String, HostMeta)>, OpError> {
-    // 1. The walk, in parallel, keeping what no row names.
+) -> Result<(Vec<Found>, Vec<String>), OpError> {
+    // 1. The walk, in parallel, keeping what no row names and noting what lies off the prefixes.
     let prefixes = if ws.file.all {
         Vec::new()
     } else {
-        ws.file.prefixes.iter().chain(extra).cloned().collect()
+        ws.file.prefixes.clone()
     };
+    let strays = Strays::default();
     let found = Mutex::new(Vec::new());
     let failed = Mutex::new(None);
-    walker(&ws.dir, &prefixes).build_parallel().run(|| {
+    let walk = configured(&ws.dir, &prefixes, Some(Arc::clone(&strays)));
+    walk.build_parallel().run(|| {
         Box::new(|entry| {
             let entry = match entry {
                 Ok(entry) => entry,
@@ -509,13 +551,7 @@ fn untracked(
             WalkState::Continue
         })
     });
-    if let Some(e) = failed.into_inner().expect("no walker panicked") {
-        return Err(io_error::io_failed(
-            swarmops_store::FsMethod::Read,
-            ".",
-            &io::Error::other(e),
-        ));
-    }
+    walk_failed(failed)?;
 
     // 2. Each one's stat, through the host layer; one gone since is not there.
     let mut found = found.into_inner().expect("no walker panicked");
@@ -529,7 +565,26 @@ fn untracked(
             out.push((path, meta));
         }
     }
-    Ok(out)
+    Ok((out, sorted(&strays)))
+}
+
+/// `E_IO` for the first error a walk met, if any (`failed`, as its threads left it).
+fn walk_failed(failed: Mutex<Option<String>>) -> Result<(), OpError> {
+    let Some(e) = failed.into_inner().expect("no walker panicked") else {
+        return Ok(());
+    };
+    Err(io_error::io_failed(
+        swarmops_store::FsMethod::Read,
+        ".",
+        &io::Error::other(e),
+    ))
+}
+
+/// The entries a walk noted in `strays`, in path order.
+fn sorted(strays: &Strays) -> Vec<String> {
+    let mut paths = strays.lock().expect("no walker panicked").clone();
+    paths.sort();
+    paths
 }
 
 /// `path` below `root` as a repository path (`/`-separated); none for `root` itself or a path

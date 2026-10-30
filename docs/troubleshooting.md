@@ -39,7 +39,7 @@ the process aborts, and says why on stderr ([The server exits](#the-server-exits
 ## Every error code
 
 `ErrorCode` in `crates/swarmops-api/src/error.rs` is the one table of codes, exit codes and
-retry advice; this is that table. Four codes are in the schema but no operation raises them yet.
+retry advice; this is that table. Two codes are in the schema but no operation raises them yet.
 
 | Code | Exit | Retryable | Means | Section |
 | --- | --- | --- | --- | --- |
@@ -84,13 +84,13 @@ retry advice; this is that table. Four codes are in the schema but no operation 
 | `E_UNRESOLVED_CONFLICTS` | 1 | no | A rebase still has conflicting paths no one resolved. | [Workspaces](#e_unresolved_conflicts) |
 | `E_MARKERS_PRESENT` | 1 | no | `ws resolve` found a conflict marker line in a file. | [Workspaces](#e_markers_present) |
 | `E_WS_UNPORTABLE` | 1 | no | The tree holds paths the workspace's volume cannot hold. | [Workspaces](#e_ws_unportable) |
-| `E_WS_OUTSIDE_PREFIXES` | 1 | no | Not raised yet: a sparse workspace's edits outside its prefixes. | [Workspaces](#e_ws_outside_prefixes) |
+| `E_WS_OUTSIDE_PREFIXES` | 1 | no | A sparse workspace holds edits outside its prefixes. | [Workspaces](#e_ws_outside_prefixes) |
 | `E_WS_STALE` | 1 | no | Not raised yet: a workspace's base left its target's history. | [Workspaces](#e_ws_stale) |
 | `E_CHECK_FAILED` | 1 | no | A workspace's check or bootstrap command failed or timed out. | [Workspaces](#e_check_failed) |
 | `E_REF_NOT_FOUND` | 6 | no | Not raised yet. | [Codes not raised yet](#codes-not-raised-yet) |
 | `E_AUTH` | 5 | no | `swarmops serve` names no caller, or no grant of the store's `access.toml` names it. | [Serve over ssh](operate/serve-over-ssh.md#refusals-a-client-sees) |
 | `E_POLICY_DENIED` | 5 | no | The store's `access.toml` grants the caller no such action, or the file is invalid. | [Serve over ssh](operate/serve-over-ssh.md#refusals-a-client-sees) |
-| `E_MAINTENANCE_BUSY` | 4 | yes | Not raised yet. | [Codes not raised yet](#codes-not-raised-yet) |
+| `E_MAINTENANCE_BUSY` | 4 | yes | Another `gc`, `repair` or `upgrade` holds the store's maintenance lease. | [Making room](operate/making-room.md#2-remove-the-leftovers-of-interrupted-writes) |
 
 `git import` and `git export` are commands only, so the `E_GIT_*` codes never come from a tool
 call; `init` is a command only too. Every other code can come from both.
@@ -1231,10 +1231,12 @@ out; a `ws rebase` or `ws materialize` that would bring such a path in refuses t
 
 ### `E_WS_OUTSIDE_PREFIXES`
 
-Not raised yet; the schema holds it so that a client can match it now. A sparse workspace's
-`ws commit` or `ws land` will refuse edits outside its prefixes, changing nothing:
-`details.paths` names them, sorted, the first 20. Widen the prefixes with
-`swarmops ws materialize <path>` (the directory holding a path), then commit again.
+A sparse workspace's `ws commit` or `ws land` met edits outside its prefixes and changed
+nothing: `details.paths` names them, sorted, the first 20, each the topmost entry off the
+prefixes (a directory, not what it holds). A commit no longer widens the prefixes; widen them
+with `swarmops ws materialize <path>` (for a new path, a directory already in the tree that holds
+it), then commit again. Build output outside the prefixes is refused unless a `.gitignore` or
+`.swarmignore` on disk names it.
 
 ### `E_WS_STALE`
 
@@ -1255,12 +1257,10 @@ A check that needs more than 900 s takes `--check-timeout`.
 
 ## Codes not raised yet
 
-`E_REF_NOT_FOUND` (exit 6) and `E_MAINTENANCE_BUSY` (exit 4, retryable) are in the schema so
-that a client can match them now, but no operation raises them: no operation looks a ref up by
-name (a missing ref is `E_REV_NOT_FOUND`), and gc's maintenance lease comes later
-([known-limitations.md](known-limitations.md#serving-requests)). `E_AUTH` and `E_POLICY_DENIED`
-are raised by `swarmops serve` since M14
+`E_REF_NOT_FOUND` (exit 6) is in the schema so that a client can match it now, but no
+operation raises it: no operation looks a ref up by name (a missing ref is `E_REV_NOT_FOUND`).
+`E_AUTH` and `E_POLICY_DENIED` are raised by `swarmops serve` since M14
 ([Serve over ssh](operate/serve-over-ssh.md#refusals-a-client-sees)). A client that meets a code newer
 than its own table reads `exit` and `retryable` from the error itself.
-`E_WS_OUTSIDE_PREFIXES` and `E_WS_STALE` (exit 1) are the workspace refusals of the M15 design §5;
-their sections above say what each will mean.
+`E_WS_STALE` (exit 1) is a workspace refusal of the M15 design §5; its section above says what it
+will mean.
