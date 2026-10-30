@@ -26,12 +26,12 @@ before anything is written.
 `smoke` installs both packages of one target in containers pinned by digest: the .deb with dpkg
 in Debian 12, the .rpm with rpm in AlmaLinux 9 (glibc 2.34, the oldest the binaries run on). It
 checks what dpkg and rpm record, that `so --version` and `swarmops --version` print the version,
-that the packages verify, and that removing them removes their files. A target this host does not
-run is installed for its own architecture and run under QEMU's user-mode emulator: the .deb in
-Debian with that architecture's C library (multiarch), the .rpm into an AlmaLinux root of that
-architecture, so that rpm checks its dependencies against that architecture's glibc. Needs docker;
-an emulated target downloads its packages from Debian's and AlmaLinux's mirrors. Exit 1 on a
-failure.
+that the packages verify, that `rpm --verify` sees a byte appended to an installed binary, and
+that removing them removes their files. A target this host does not run is installed for its own
+architecture and run under QEMU's user-mode emulator: the .deb in Debian with that architecture's
+C library (multiarch), the .rpm into an AlmaLinux root of that architecture, so that rpm checks
+its dependencies against that architecture's glibc. Needs docker; an emulated target downloads its
+packages from Debian's and AlmaLinux's mirrors. Exit 1 on a failure.
 """
 
 import argparse
@@ -874,7 +874,12 @@ def smoke_rpm(rpm: Path, version: str, target: Target, emulator: Path) -> None:
         expect_listed(box.run("rpm", *on_root, "--query", "--list", PACKAGE), "rpm")
         box.run("rpm", *on_root, "--verify", PACKAGE)
 
-        # 3. Remove.
+        # 3. A byte appended to a binary: rpm --verify must see it, which it does not when the
+        # package asks it to check nothing.
+        box.run("sh", "-c", f"printf x >>'{root}{BIN_DIR}/{BINARIES[0]}'")
+        box.run("rpm", *on_root, "--verify", PACKAGE, expect=1)
+
+        # 4. Remove.
         box.run("rpm", *on_root, "--erase", PACKAGE)
         expect_removed(box, root)
 

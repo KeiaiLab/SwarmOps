@@ -51,11 +51,11 @@ GitHub's hosted runners.
    pinned by digest, the `.deb` with `dpkg` in Debian 12 and the `.rpm` with `rpm` in AlmaLinux 9,
    whose glibc 2.34 is the oldest the binaries run on: `rpm` checks every digest of the `.rpm`,
    both installed binaries must print the tag's version, `dpkg --verify` and `rpm --verify` must
-   find every file as packaged, and removing the package must remove its files. The aarch64
-   packages are installed for aarch64, in Debian with that architecture's C library (multiarch)
-   and into an AlmaLinux root of that architecture, against whose glibc `rpm` checks the
-   dependencies, and run under QEMU's user-mode emulator; these two containers download from
-   Debian's and AlmaLinux's mirrors. The job runs on the runner, which starts the containers;
+   find every file as packaged, `rpm --verify` must then see a byte appended to an installed
+   binary, and removing the package must remove its files. The aarch64 packages are installed for
+   aarch64, in Debian with that architecture's C library (multiarch) and into an AlmaLinux root of
+   that architecture, against whose glibc `rpm` checks the dependencies, and run under QEMU's
+   user-mode emulator; these two containers download from Debian's and AlmaLinux's mirrors. The job runs on the runner, which starts the containers;
    they mount the packages read-only.
 5. **Publishes** (job `publish the release`, the only one with a write permission,
    `contents: write`, and only for a pushed tag): checks each archive and package against the

@@ -398,9 +398,10 @@ jobs:
   # binaries and files, byte for byte, dated at the tagged commit), then each installed with dpkg
   # or rpm in a container pinned by digest (the digests are in the script): Debian 12, and
   # AlmaLinux 9, whose glibc 2.34 is README's floor. Both binaries must print the version, the
-  # packages verify and remove cleanly. The aarch64 packages are installed for aarch64 (Debian's
-  # multiarch, an AlmaLinux root of that architecture, whose glibc rpm checks the dependencies
-  # against) and run under QEMU; those two containers download from the distributions' mirrors.
+  # packages verify (rpm's seeing a tampered binary) and remove cleanly. The aarch64 packages are
+  # installed for aarch64 (Debian's multiarch, an AlmaLinux root of that architecture, whose glibc
+  # rpm checks the dependencies against) and run under QEMU; those two containers download from
+  # the distributions' mirrors.
   # On the runner itself, which starts the containers with docker: the containers write nothing
   # back, as they mount the packages read-only.
   packages:
