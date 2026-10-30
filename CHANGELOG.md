@@ -33,7 +33,9 @@ collects the changes on `stable` that no release holds yet, until the next relea
   can be compared with the commit it came from. The value must be 7 to 40 lowercase hex digits;
   any other, empty included, fails the build. Release builds leave it unset and still print
   `swarmops <version>`
-  ([Install from a clone](docs/operate/install-and-upgrade.md#install-from-a-clone)).
+  ([Install from a clone](docs/operate/install-and-upgrade.md#install-from-a-clone)). The
+  [versioning policy](docs/policies/versioning-and-stability.md) counts the line in the
+  command-line contract.
 
 ### Changed
 

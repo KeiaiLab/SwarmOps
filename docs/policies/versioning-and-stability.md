@@ -33,6 +33,11 @@ to the weakest:
    environment variables `SWARMOPS_REPO` (operations spec §1, umbrella §4), `SWARMOPS_FORMAT`
    (operations spec §0), `SWARMOPS_AGENT` (operations spec §5) and `SWARMOPS_RUN_ID`, which no
    spec names yet (the README, `docs/architecture.md` and the crate documentation describe it).
+   The line `--version` prints is part of it too: `swarmops <version>` on one line, followed by
+   `+<commit>` as semver build metadata when the build set `SWARMOPS_BUILD_COMMIT`, a variable
+   read at compile time, not at run time (umbrella §4). The release workflow's smoke check,
+   the package builder (`scripts/packages.py`) and the installer (`scripts/install.sh`) read that
+   line.
 4. **The API schema.** The JSON Schema of every request and response type that
    `swarmops schema` prints (`schema_for_all` in `swarmops-api`), and the `StoreOps` operations
    it describes.
