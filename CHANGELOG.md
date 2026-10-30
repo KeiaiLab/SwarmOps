@@ -33,12 +33,15 @@ collects the changes on `stable` that no release holds yet, until the next relea
   can be compared with the commit it came from. The value must be 7 to 40 lowercase hex digits;
   any other, empty included, fails the build. Release builds leave it unset and still print
   `swarmops <version>`
-  ([Install from a clone](docs/operate/install-and-upgrade.md#install-from-a-clone)). The
-  [versioning policy](docs/policies/versioning-and-stability.md) counts the line in the
-  command-line contract.
+  ([Install from a clone](docs/operate/install-and-upgrade.md#install-from-a-clone)).
 
 ### Changed
 
+- The [versioning policy](docs/policies/versioning-and-stability.md) counts the `--version` line
+  in the command-line contract, with `SWARMOPS_BUILD_COMMIT`'s name and the values it takes, and
+  names `--help` and `--version` among the runs that print other than one envelope: they print
+  plain text. Changing the line's form, renaming an environment variable of the contract or
+  narrowing the values `SWARMOPS_BUILD_COMMIT` takes is a breaking change.
 - swarmops.cc reads like the readable-site design board: its colours in both themes, 17 px body
   text in a 60-character measure, serif titles and sections, underlined links, and code blocks
   labelled by language, each command joined with the output after it, long output folded behind

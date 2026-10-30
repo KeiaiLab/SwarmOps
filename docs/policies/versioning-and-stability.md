@@ -25,8 +25,9 @@ to the weakest:
    A release that writes a new `FORMAT` still opens, reads and writes the older ones it knows.
 3. **The command-line contract.** One JSON envelope per run on stdout,
    `{ok, op, api, result | error{code, message, retryable, exit, details, hint}, meta}` (but
-   for `mcp` and `serve`, which speak MCP and git's protocol there, and `derive --follow`, which
-   prints one envelope a line for each run that derived something), with
+   for `--help` and `--version`, which print plain text, `mcp` and `serve`, which speak MCP and
+   git's protocol there, and `derive --follow`, which prints one envelope a line for each run
+   that derived something), with
    `api` 1; the `E_*` error codes, each with its fixed exit code (1 to 6, 3 for a conflict; 0
    is success) and its `retryable` flag; the commands, their flags and the grammar
    of their arguments, such as revisions and change lists (operations spec §0, §1); and the
@@ -35,9 +36,11 @@ to the weakest:
    spec names yet (the README, `docs/architecture.md` and the crate documentation describe it).
    The line `--version` prints is part of it too: `swarmops <version>` on one line, followed by
    `+<commit>` as semver build metadata when the build set `SWARMOPS_BUILD_COMMIT`, a variable
-   read at compile time, not at run time (umbrella §4). The release workflow's smoke check,
-   the package builder (`scripts/packages.py`) and the installer (`scripts/install.sh`) read that
-   line.
+   read at compile time, not at run time
+   ([Install from a clone](../operate/install-and-upgrade.md#install-from-a-clone)). The
+   variable's name and the values it takes are part of it as well: 7 to 40 lowercase hex digits,
+   and any other value fails the build. The release workflow's smoke check, the packages' smoke
+   check (`scripts/packages.py smoke`) and the installer (`scripts/install.sh`) read that line.
 4. **The API schema.** The JSON Schema of every request and response type that
    `swarmops schema` prints (`schema_for_all` in `swarmops-api`), and the `StoreOps` operations
    it describes.
@@ -60,8 +63,10 @@ command, a new error code or a new tool is not a breaking change. Clients must a
 Requests and responses ignore fields they do not know (the operations spec forbids
 `deny_unknown_fields`), and an unknown `E_*` code still carries its `exit` and `retryable`, so a
 client can act on a code newer than its own table. A change is breaking when it removes or
-renames a field, a command, a flag, a code or a tool; changes a field's type or meaning; changes
-a code's exit code or `retryable` flag; or makes an optional input required.
+renames a field, a command, a flag, a code, a tool or an environment variable; changes a field's
+type or meaning; changes a code's exit code or `retryable` flag; changes the form of the
+`--version` line, `swarmops <version>` and the optional `+<commit>` on one line; narrows the
+values `SWARMOPS_BUILD_COMMIT` takes; or makes an optional input required.
 
 ## Internal surfaces
 
