@@ -280,3 +280,202 @@ a[aria-current]:not([aria-current='false']) {
   font-size: 19px;
   line-height: 28px;
 }
+
+/* Code figures. A block is Fumadocs' code block (docs) or a bare <pre> (product pages), labelled
+   at build time (source.config.ts); a command and its output are joined into one .code-ex:
+     .code-ex > .code-block (the command, with copy) + .code-out (what it printed, quieter). */
+.code-block {
+  --padding-left: 18px;
+  --padding-right: 18px;
+  margin-block: 24px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+}
+
+/* 1. The caption strip: the label left, the copy button right, never over the code. */
+figure.code-block > div:has(> figcaption) {
+  gap: 16px;
+  height: auto;
+  min-height: 36px;
+  padding: 0 6px 0 16px;
+  border-color: var(--border);
+}
+
+.code-block figcaption,
+.code-out .code-label,
+pre.code-block::before {
+  color: var(--muted-foreground);
+  font: 600 13px / 20px var(--font-sans);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* 2. Copy, with its word: 32 px tall, 44 at 390. */
+figure.code-block > div:has(> figcaption) button {
+  gap: 6px;
+  width: auto;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--muted-foreground);
+  font-size: 14px;
+  font-weight: 400;
+}
+
+figure.code-block > div:has(> figcaption) button:hover {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+figure.code-block > div:has(> figcaption) button::after {
+  content: 'Copy';
+  content: 'Copy' / '';
+}
+
+figure.code-block > div:has(> figcaption) button[data-checked]::after {
+  content: 'Copied';
+  content: 'Copied' / '';
+}
+
+/* 3. The command: 14 / 24 mono, sideways scroll with CSS shadows at the hidden edge. */
+figure.code-block > [role='region'] {
+  padding: 14px 0 16px;
+  font: 400 14px / 24px var(--font-mono);
+  background:
+    linear-gradient(to right, var(--card) 40%, transparent) left / 40px 100% no-repeat local,
+    linear-gradient(to left, var(--card) 40%, transparent) right / 40px 100% no-repeat local,
+    radial-gradient(farthest-side at 0 50%, color-mix(in srgb, var(--foreground) 18%, transparent), transparent) left / 12px 100% no-repeat scroll,
+    radial-gradient(farthest-side at 100% 50%, color-mix(in srgb, var(--foreground) 18%, transparent), transparent) right / 12px 100% no-repeat scroll,
+    var(--card);
+}
+
+/* 4. A bare <pre> on product pages: the same box, the label as its strip, no chip per line. */
+pre.code-block {
+  padding: 0 0 16px;
+  overflow-x: auto;
+  font: 400 14px / 24px var(--font-mono);
+  color: var(--text);
+}
+
+pre.code-block::before {
+  content: attr(data-label);
+  position: sticky;
+  left: 0;
+  display: block;
+  min-height: 36px;
+  margin-bottom: 14px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.prose pre code {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: inherit;
+  font-size: inherit;
+}
+
+/* 5. Output joined below the command: on paper, muted, wrapped, its label in the same strip. */
+.code-ex {
+  margin-block: 24px;
+}
+
+.code-ex > .code-block {
+  margin: 0;
+  border-bottom-right-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.code-out {
+  margin: 0;
+  border: 1px solid var(--border);
+  border-top: 0;
+  border-radius: 0 0 10px 10px;
+  background: var(--background);
+}
+
+.code-out figcaption {
+  display: flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 4px 16px 0;
+}
+
+.code-out-text {
+  display: block;
+  padding: 4px 18px 16px;
+  color: var(--muted-foreground);
+  font: 400 14px / 24px var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* An error: an ink edge and an ink label, not colour alone. */
+.code-out-err {
+  box-shadow: inset 3px 0 0 var(--foreground);
+}
+
+.code-out-err .code-label {
+  color: var(--foreground);
+}
+
+/* 6. Long output: the rest behind a native <details>. */
+.code-fold summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 18px;
+  border-top: 1px dashed var(--border);
+  color: var(--primary);
+  font-size: 14px;
+  line-height: 24px;
+  list-style: none;
+  cursor: pointer;
+}
+
+.code-fold summary::-webkit-details-marker {
+  display: none;
+}
+
+.code-fold summary::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-top: 1.6px solid currentColor;
+  border-right: 1.6px solid currentColor;
+  transform: rotate(45deg);
+}
+
+.code-fold[open] summary::before {
+  transform: rotate(135deg);
+}
+
+.code-fold summary span {
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.22em;
+}
+
+.code-fold .code-out-text {
+  padding-top: 0;
+}
+
+/* 7. At 390: 44 px targets. */
+@media (max-width: 640px) {
+  figure.code-block > div:has(> figcaption) {
+    min-height: 44px;
+  }
+
+  figure.code-block > div:has(> figcaption) button {
+    height: 44px;
+  }
+
+  .code-fold summary {
+    min-height: 44px;
+  }
+}

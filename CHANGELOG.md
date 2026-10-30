@@ -28,6 +28,13 @@ collects the changes on `stable` that no release holds yet, until the next relea
   rehearses a branch without publishing
   ([Install from a .deb or .rpm package](docs/operate/install-and-upgrade.md#install-from-a-deb-or-rpm-package)).
 
+### Changed
+
+- swarmops.cc reads like the readable-site design board: its colours in both themes, 17 px body
+  text in a 60-character measure, serif titles and sections, underlined links, and code blocks
+  labelled by language, each command joined with the output after it, long output folded behind
+  "Show N more lines"; still no web font, no other origin and no new script.
+
 ## [0.7.0] - 2026-10-29
 
 Serve stock git. The 0.7.0 release holds M14, topology 1: `swarmops serve`, run per connection
