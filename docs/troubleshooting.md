@@ -84,6 +84,8 @@ retry advice; this is that table. Four codes are in the schema but no operation 
 | `E_UNRESOLVED_CONFLICTS` | 1 | no | A rebase still has conflicting paths no one resolved. | [Workspaces](#e_unresolved_conflicts) |
 | `E_MARKERS_PRESENT` | 1 | no | `ws resolve` found a conflict marker line in a file. | [Workspaces](#e_markers_present) |
 | `E_WS_UNPORTABLE` | 1 | no | The tree holds paths the workspace's volume cannot hold. | [Workspaces](#e_ws_unportable) |
+| `E_WS_OUTSIDE_PREFIXES` | 1 | no | Not raised yet: a sparse workspace's edits outside its prefixes. | [Workspaces](#e_ws_outside_prefixes) |
+| `E_WS_STALE` | 1 | no | Not raised yet: a workspace's base left its target's history. | [Workspaces](#e_ws_stale) |
 | `E_CHECK_FAILED` | 1 | no | A workspace's check or bootstrap command failed or timed out. | [Workspaces](#e_check_failed) |
 | `E_REF_NOT_FOUND` | 6 | no | Not raised yet. | [Codes not raised yet](#codes-not-raised-yet) |
 | `E_AUTH` | 5 | no | `swarmops serve` names no caller, or no grant of the store's `access.toml` names it. | [Serve over ssh](operate/serve-over-ssh.md#refusals-a-client-sees) |
@@ -1225,6 +1227,21 @@ is `case_collision` (two paths that differ only in case, on a case-insensitive v
 `.swarmws`, the workspace's own directory). Rename the paths in the store with a commit, or create
 the workspace with `--prefix` paths that leave them out.
 
+### `E_WS_OUTSIDE_PREFIXES`
+
+Not raised yet; the schema holds it so that a client can match it now. A sparse workspace's
+`ws commit` or `ws land` will refuse edits outside its prefixes, changing nothing:
+`details.paths` names them, sorted, the first 20. Widen the prefixes with
+`swarmops ws materialize <path>` (the directory holding a path), then commit again.
+
+### `E_WS_STALE`
+
+Not raised yet; the schema holds it so that a client can match it now. `ws land` will refuse a
+workspace whose base left its target's history (an `op undo`, a restore, a `ref set` or a sync
+moved the target back), changing nothing: `details` names the `target`, the `base`, the target's
+`head`, `base_op` (the operation that moved the target to the base) and `moved_op` (the latest
+that moved it to `head`, or `null`). `swarmops ws rebase` moves the workspace onto the head.
+
 ### `E_CHECK_FAILED`
 
 The check of `ws land --check` (`details.stage: check`) or a new workspace's bootstrap command
@@ -1243,3 +1260,5 @@ name (a missing ref is `E_REV_NOT_FOUND`), and gc's maintenance lease comes late
 are raised by `swarmops serve` since M14
 ([Serve over ssh](operate/serve-over-ssh.md#refusals-a-client-sees)). A client that meets a code newer
 than its own table reads `exit` and `retryable` from the error itself.
+`E_WS_OUTSIDE_PREFIXES` and `E_WS_STALE` (exit 1) are the workspace refusals of the M15 design §5;
+their sections above say what each will mean.

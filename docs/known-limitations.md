@@ -765,13 +765,18 @@ These do not change what SwarmOps does, only how well the tests can see it.
   `journal.off` a writer cut is tested only at the journal's level. *Target: M9 (the metadata
   read paths through `FsOps`, umbrella spec §14; the M6 design, decision D4). Found: M1.5 Task 3 review (M3); M1.5 final
   review (D5).*
-- **Golden envelopes cover 44 of the 53 error codes.** `error_codes_reach_the_cli` pins the
-  envelope of 38, the nine workspace codes (M5) and `E_FORMAT_REQUIRED` (M6) among them,
-  `remote_error_codes_golden` the four `E_REMOTE_*` codes over smart HTTP and ssh (M13), and the
-  FORMAT 2 goldens `E_TAG_IMMUTABLE` and `E_MAINTENANCE_BUSY` (M6); the other nine are in the
-  first test's `NOT_RAISED` list, each with why the test cannot raise it (the three codes above
-  among them). *Unscheduled (`E_IO` joined in M1.6, the six
-  `E_GIT_*` codes in M3). Found: the 2026-10-16 comparison.*
+- **Golden envelopes cover 52 of the 55 error codes.** `error_codes_reach_the_cli` pins the
+  envelope of 40, the nine workspace codes (M5), `E_FORMAT_REQUIRED` (M6), `E_AUTH` and
+  `E_POLICY_DENIED` (M14) among them; `remote_error_codes_golden` the four `E_REMOTE_*` codes over
+  smart HTTP and ssh (M13); the FORMAT 2 goldens `E_TAG_IMMUTABLE` and `E_MAINTENANCE_BUSY` (M6);
+  and goldens of their own six the first test cannot raise (M15): `E_AMBIGUOUS_ID`,
+  `E_IO_TRANSIENT`, `E_INTERNAL`, `E_CAS_RETRY_EXHAUSTED`, `E_BUSY` in the slow
+  `op_log_behind_a_held_lock_is_e_busy`, and `E_UNKNOWN_PARENT` as an error object, since every
+  operation resolves a parent first. The other three are in the first test's `NOT_RAISED` list:
+  `E_REF_NOT_FOUND`, which no operation raises, and `E_WS_OUTSIDE_PREFIXES` and `E_WS_STALE`, the
+  workspace refusals of the M15 design §5, not raised yet. *Target: M15 for the two workspace
+  codes; `E_REF_NOT_FOUND` unscheduled (`E_IO` joined in M1.6, the six `E_GIT_*` codes in M3).
+  Found: the 2026-10-16 comparison.*
 - **The git remotes' reference pages have no recorded example.** The pages of `clone`,
   `remote add|remove|list`, `fetch`, `push`, `sync` and `sync status`, and of their five MCP tools,
   say "No recorded example yet": no golden step runs them, since they need a remote. *Unscheduled.

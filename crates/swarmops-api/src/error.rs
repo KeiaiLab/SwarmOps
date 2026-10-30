@@ -256,6 +256,15 @@ error_codes! {
     /// (`case_collision`, `windows_name`, `reserved_name`) and `details.paths` names them.
     /// Nothing was written.
     WsUnportable => "E_WS_UNPORTABLE", EXIT_ERROR, false;
+    /// A sparse workspace's `ws commit` or `ws land` met edits outside its prefixes
+    /// (`details.paths`, sorted, the first 20). Nothing changed; the hint names
+    /// `swarmops ws materialize <path>`, which widens the prefixes.
+    WsOutsidePrefixes => "E_WS_OUTSIDE_PREFIXES", EXIT_ERROR, false;
+    /// `ws land` found the workspace's base gone from its target's history
+    /// (`details.target`, `base`, `head`; `base_op`, the operation that moved the target to
+    /// the base; `moved_op`, the latest that moved it to `head`, or null when not found).
+    /// Nothing changed; the hint names `swarmops ws rebase`.
+    WsStale => "E_WS_STALE", EXIT_ERROR, false;
     /// A workspace's check or bootstrap command failed or ran past its time
     /// (`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its
     /// output, `log`, `changeset`). Nothing was landed.

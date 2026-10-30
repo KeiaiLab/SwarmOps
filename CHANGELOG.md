@@ -34,6 +34,13 @@ collects the changes on `stable` that no release holds yet, until the next relea
   any other, empty included, fails the build. Release builds leave it unset and still print
   `swarmops <version>`
   ([Install from a clone](docs/operate/install-and-upgrade.md#install-from-a-clone)).
+- Two error codes in the schema, exit 1, not retryable, not raised yet: `E_WS_OUTSIDE_PREFIXES`
+  (a sparse workspace's edits outside its prefixes) and `E_WS_STALE` (a workspace's base gone from
+  its target's history), the workspace refusals of the M15 design §5
+  ([Troubleshooting](docs/troubleshooting.md#e_ws_outside_prefixes)).
+- Golden envelopes pin 52 of the 55 error codes, six more than before: `E_AMBIGUOUS_ID`,
+  `E_IO_TRANSIENT`, `E_INTERNAL`, `E_BUSY`, `E_CAS_RETRY_EXHAUSTED`, and `E_UNKNOWN_PARENT` as an
+  error object.
 
 ### Changed
 

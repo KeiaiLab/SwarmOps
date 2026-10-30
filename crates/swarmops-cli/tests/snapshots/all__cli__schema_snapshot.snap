@@ -3103,6 +3103,16 @@ expression: s.redact(&all)
           "type": "string"
         },
         {
+          "const": "E_WS_OUTSIDE_PREFIXES",
+          "description": "A sparse workspace's `ws commit` or `ws land` met edits outside its prefixes\n(`details.paths`, sorted, the first 20). Nothing changed; the hint names\n`swarmops ws materialize <path>`, which widens the prefixes.",
+          "type": "string"
+        },
+        {
+          "const": "E_WS_STALE",
+          "description": "`ws land` found the workspace's base gone from its target's history\n(`details.target`, `base`, `head`; `base_op`, the operation that moved the target to\nthe base; `moved_op`, the latest that moved it to `head`, or null when not found).\nNothing changed; the hint names `swarmops ws rebase`.",
+          "type": "string"
+        },
+        {
           "const": "E_CHECK_FAILED",
           "description": "A workspace's check or bootstrap command failed or ran past its time\n(`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its\noutput, `log`, `changeset`). Nothing was landed.",
           "type": "string"

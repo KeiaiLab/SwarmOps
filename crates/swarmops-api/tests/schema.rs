@@ -383,6 +383,13 @@ const ROWS: &[(ErrorCode, &str, i32, bool)] = &[
     ),
     (ErrorCode::MarkersPresent, "E_MARKERS_PRESENT", 1, false),
     (ErrorCode::WsUnportable, "E_WS_UNPORTABLE", 1, false),
+    (
+        ErrorCode::WsOutsidePrefixes,
+        "E_WS_OUTSIDE_PREFIXES",
+        1,
+        false,
+    ),
+    (ErrorCode::WsStale, "E_WS_STALE", 1, false),
     (ErrorCode::CheckFailed, "E_CHECK_FAILED", 1, false),
 ];
 

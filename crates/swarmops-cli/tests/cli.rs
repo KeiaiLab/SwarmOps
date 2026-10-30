@@ -1615,8 +1615,8 @@ fn cat_truncates_to_max_bytes() {
     assert_eq!(default["result"]["truncated"], true);
 }
 
-/// The codes of [`NOT_RAISED`] no golden pins: no operation raises `E_REF_NOT_FOUND`.
-const UNPINNED: &[&str] = &["E_REF_NOT_FOUND"];
+/// The codes of [`NOT_RAISED`] no golden pins: no operation raises them yet.
+const UNPINNED: &[&str] = &["E_REF_NOT_FOUND", "E_WS_OUTSIDE_PREFIXES", "E_WS_STALE"];
 
 /// Codes [`error_codes_reach_the_cli`] does not raise, and why: each names the test whose golden
 /// pins it, but those of [`UNPINNED`].
@@ -1673,6 +1673,14 @@ const NOT_RAISED: &[(&str, &str)] = &[
     (
         "E_REMOTE_NOT_FOUND",
         "needs remotes.toml: remote_acceptance::remote_error_codes_golden pins it",
+    ),
+    (
+        "E_WS_OUTSIDE_PREFIXES",
+        "raised by the M15 workspace refusals, pinned when they land",
+    ),
+    (
+        "E_WS_STALE",
+        "raised by the M15 workspace refusals, pinned when they land",
     ),
 ];
 
