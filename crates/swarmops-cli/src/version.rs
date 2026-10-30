@@ -9,7 +9,8 @@ use std::sync::OnceLock;
 /// The build's commit, from `SWARMOPS_BUILD_COMMIT` at compile time.
 const BUILD_COMMIT: Option<&str> = option_env!("SWARMOPS_BUILD_COMMIT");
 
-/// The fewest hex digits a commit may have: git's default abbreviation (`core.abbrev`).
+/// The fewest hex digits a commit may have: the floor of git's default abbreviation
+/// (`core.abbrev` = `auto`), which scales with the object count but never goes below 7.
 const MIN_COMMIT_LEN: usize = 7;
 
 /// The most hex digits a commit may have: a full SHA-1 object name.
@@ -115,7 +116,7 @@ mod tests {
         assert_eq!(
             shown,
             Some(version().as_ptr()),
-            "clap shows version()'s text"
+            "clap shows version()'s text: the same pointer"
         );
     }
 }
