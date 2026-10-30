@@ -239,9 +239,9 @@ fn modes_of(modes: BTreeMap<String, ModeInput>) -> Result<BTreeMap<String, FileK
 }
 
 /// The `named` paths and those of `modes` outside workspace `ws`'s prefixes; none for a
-/// workspace of the whole tree.
+/// workspace of the whole tree (`all`, or no prefix: what materialise writes then).
 fn outside(ws: &Workspace, named: &[String], modes: &BTreeMap<String, FileKind>) -> Vec<String> {
-    if ws.file.all {
+    if ws.file.all || ws.file.prefixes.is_empty() {
         return Vec::new();
     }
     (named.iter())

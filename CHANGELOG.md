@@ -116,6 +116,10 @@ collects the changes on `stable` that no release holds yet, until the next relea
   lower-case `.swarmws` was refused before, so `src/.swarmws/y` was written. `src/swarmws/y` and
   `src/.swarmws.bak/y` are still written. To keep such a tree out of a workspace, rename the path
   in the store with a commit, or create the workspace with `--prefix` paths that leave it out.
+- A workspace made with neither `--prefix` nor `--all` holds the whole tree for `ws commit` and
+  `ws land` too, as `ws create` materialises it: a commit naming a path or setting a mode there is
+  no longer `E_WS_OUTSIDE_PREFIXES`, and `ws land` no longer walks it for edits outside prefixes it
+  does not have (the M15 design §5).
 
 ## [0.7.0] - 2026-10-29
 

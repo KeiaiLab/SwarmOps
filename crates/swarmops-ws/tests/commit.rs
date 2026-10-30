@@ -1,6 +1,7 @@
 //! `ws commit` and `ws diff`: hashing, sending only the blobs the store lacks, inline in the
 //! commit, the replay of a crashed commit by its key, and the one diff renderer.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,10 +9,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use camino::{Utf8Path, Utf8PathBuf};
 
 use swarmops_api::{
-    ChangeOp, ContentInput, DiffFormat, DiffReq, StatusAfter, StoreOps, WsCommitReq, WsDiffReq,
+    ChangeOp, ContentInput, DiffFormat, DiffReq, ModeInput, StatusAfter, StoreOps, WsCommitReq,
+    WsCreateReq, WsDiffReq, WsLandReq,
 };
 use swarmops_ws::hostfs::HostMeta;
-use swarmops_ws::state::{self, SWARMWS_DIR};
+use swarmops_ws::state::{self, SWARMWS_DIR, Volume};
 use swarmops_ws::{HostFs, RealFs, RealHost};
 
 use crate::fixture::{Fixture, Put, Watched, changes, remove, write};
@@ -467,4 +469,49 @@ fn an_ignored_outside_path_is_not_refused() {
     };
     let paths: Vec<&str> = req.changes.iter().map(|c| c.path.as_str()).collect();
     assert_eq!(paths, ["src/a.txt"]);
+}
+
+/// A workspace made with neither prefixes nor `all` holds the whole tree: no path is outside
+/// it, so a named commit and a mode commit go through, and its prefixes stay empty.
+#[test]
+fn an_empty_prefix_workspace_commits_a_named_path() {
+    // 1. A workspace with no prefixes and `all` false, the CLI's default, on a volume without
+    //    the executable bit.
+    let f = Fixture::new();
+    let base = f.commit(
+        None,
+        &[
+            Put::File("README", "readme\n"),
+            Put::File("bin/run", "#!/bin/sh\n"),
+            Put::File("src/a.txt", "a\n"),
+        ],
+    );
+    let mut create = WsCreateReq::new("w".to_owned());
+    create.path = Some(f.beside("w").to_string());
+    create.base = base.as_str().into();
+    create.status_after = StatusAfter::None;
+    let made = swarmops_ws::create(&f.ctx(), create).unwrap();
+    assert_eq!((made.all, made.prefixes.len()), (false, 0));
+    f.simulate("w", Volume::new(false, false, true));
+    let dir = f.beside("w");
+
+    // 2. A commit naming an edited path: committed.
+    write(&dir, "src/a.txt", "edited\n");
+    let mut named = commit_of("w", "named");
+    named.paths = vec!["src/a.txt".to_owned()];
+    let first = swarmops_ws::commit(&f.ctx(), named).unwrap();
+    assert_eq!(first.files_changed, 1);
+
+    // 3. A commit of a mode alone: committed.
+    let mut moded = commit_of("w", "mode");
+    moded.modes = BTreeMap::from([("bin/run".to_owned(), ModeInput::Exec)]);
+    let second = swarmops_ws::commit(&f.ctx(), moded).unwrap();
+    assert_eq!(second.parent, first.changeset);
+
+    // 4. The prefixes are still empty, and the chain lands.
+    assert_eq!(standing(&dir), (second.changeset.clone(), Vec::new()));
+    let mut land = WsLandReq::new("w".to_owned());
+    land.status_after = StatusAfter::None;
+    let landed = swarmops_ws::land(&f.ctx(), land).unwrap();
+    assert_eq!(landed.land.rebased_onto, base);
 }
