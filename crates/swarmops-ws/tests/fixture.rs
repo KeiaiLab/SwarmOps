@@ -293,8 +293,12 @@ pub struct Watched<'a> {
     /// `commit` records the changeset, then fails as a process killed right after it would.
     pub crash_after_commit: AtomicBool,
     /// `log` of `main`'s head answers this many made-up changesets, none of them the store's,
-    /// instead of the store's history; `log` of another changeset reads the store's.
+    /// instead of the store's history; `log` of another changeset reads the store's, but for
+    /// [`Watched::fake_history_of`]'s.
     pub fake_history: Option<u64>,
+    /// `log` of this changeset (a workspace's base) answers this many made-up changesets, as
+    /// [`Watched::fake_history`] does for `main`'s head.
+    pub fake_history_of: Option<(String, u64)>,
     /// Where each call to `commit`, `rebase` and `land` is also noted, in order with the file
     /// layers' events (the sweep driver's order checker).
     #[cfg(feature = "test-hooks")]
@@ -310,6 +314,7 @@ impl<'a> Watched<'a> {
             commits: Mutex::new(Vec::new()),
             crash_after_commit: AtomicBool::new(false),
             fake_history: None,
+            fake_history_of: None,
             #[cfg(feature = "test-hooks")]
             trace: None,
         }
@@ -352,6 +357,14 @@ impl<'a> Watched<'a> {
             .unwrap()
             .id;
         req.rev.as_ref().is_some_and(|rev| rev.as_str() == head)
+    }
+
+    /// How many made-up changesets answer `req` when it asks for the history of
+    /// [`Watched::fake_history_of`]'s changeset.
+    fn fake_of(&self, req: &LogReq) -> Option<u64> {
+        let (rev, total) = self.fake_history_of.as_ref()?;
+        let asked = req.rev.as_ref()?;
+        (asked.as_str() == rev).then_some(*total)
     }
 
     /// The made-up page of `total` changesets that `req` asks for: 64-hex ids counting up from
@@ -445,9 +458,15 @@ impl StoreOps for Watched<'_> {
 
     fn log(&self, req: LogReq) -> Result<LogPage, OpError> {
         self.saw("log");
-        match self.fake_history {
-            Some(total) if self.of_main(&req) => Ok(Watched::made_up(total, &req)),
-            _ => self.inner.log(req),
+
+        // A made-up history for `main`'s head or the named changeset; else the store's.
+        let fake = match self.fake_history {
+            Some(total) if self.of_main(&req) => Some(total),
+            _ => self.fake_of(&req),
+        };
+        match fake {
+            Some(total) => Ok(Watched::made_up(total, &req)),
+            None => self.inner.log(req),
         }
     }
 

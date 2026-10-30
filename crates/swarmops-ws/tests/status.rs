@@ -541,7 +541,7 @@ fn chain(f: &Fixture, from: Option<&str>, n: usize, tag: &str) -> String {
 /// The base's own history is read a page at a time, and no further than where it first meets
 /// the target's (R1 <- ... <- R100 <- X <- A1 <- ... <- A100 in the workspace, the target moved
 /// to X <- B): two pages of the target's history, then two of the base's, the second ending at
-/// X with R100 to R2 left unread.
+/// X, with R100 to R2 read but not visited.
 #[test]
 fn behind_by_pages_the_base_history_until_it_meets() {
     // 1. A workspace on A100, a page of history past X.
@@ -576,6 +576,29 @@ fn behind_by_is_zero_for_a_target_moved_back() {
     // 2. Nothing to catch up.
     let page = swarmops_ws::status(&f.ctx(), page_of("w")).unwrap();
     assert_eq!((page.main.as_str(), page.behind_by), (&*x, 0));
+}
+
+/// The base's own history stops at the cap too (X <- A in the workspace, the target moved back
+/// to X, A's history made up: 20,000 changesets without X): a page of the target's history, then
+/// 100 of the base's.
+#[test]
+fn behind_by_caps_the_base_walk() {
+    // 1. A workspace on A, on X; the target moved back to X.
+    let f = Fixture::new();
+    let x = f.commit(None, &[Put::File("src/a.txt", "x\n")]);
+    let a = f.commit(Some(&x), &[Put::File("src/a.txt", "a\n")]);
+    f.create("w", &a, &["src"]);
+    move_main(&f, &a, &x);
+
+    // 2. The histories never meet: X counted, from the target's page and the base's first 10,000.
+    let mut watched = Watched::new(&f.ops);
+    watched.fake_history_of = Some((a.clone(), 20_000));
+    let page = swarmops_ws::status(&f.ctx_over(&watched), page_of("w")).unwrap();
+    assert_eq!((page.main.as_str(), page.behind_by), (&*x, 1));
+    assert_eq!(
+        (watched.count("resolve_rev"), watched.count("log")),
+        (1, 101)
+    );
 }
 
 /// `ws discard` without paths restores every change status finds: edits, deletions, kinds and
