@@ -62,13 +62,14 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 ### Fixed
 
-- `ws status`'s `behind_by` counts the changesets the target holds that the workspace's base
-  lacks when the base is not on the target's history: 1 after a sync replaced the base with its
-  squash-merged copy, and 0 when the target moved back to an ancestor of the base, where it
-  counted the target's whole history up to 10,000. To find where the two histories meet, it then
-  reads the base's history too, so one status reads at most 200 `log` pages instead of 100, the
-  value still at most 10,000. `WsStatus.behind_by`'s schema description says so: 0 when the
-  target head is on the base's first-parent history.
+- `ws status`'s `behind_by` counts the changesets the target holds that the workspace's base lacks
+  when the base is not on the target's history: 1 after a sync replaced the base with its
+  squash-merged copy, and 0 when the target moved back onto the base's first-parent history,
+  fewer than 10,000 changesets behind the base, where it counted the target's whole history up to
+  10,000. To find where the two histories meet, it then reads the base's history too, so one status
+  reads at most 200 `log` pages instead of 100, the value still at most 10,000.
+  `WsStatus.behind_by`'s schema description now says it is 0 when the target head is on `base`'s
+  first-parent history fewer than 10,000 changesets behind `base`.
 - The build-and-test guide says that only the workspace operations other than `ws create` act as
   the workspace's creator without `--as` or `SWARMOPS_AGENT`, and `ws create` always needs an
   identity; it said every command run inside a workspace did, but `commit`, `land`, `sync` and the

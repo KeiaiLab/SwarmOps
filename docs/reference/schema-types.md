@@ -2324,7 +2324,7 @@ Kind: object. `swarmops schema WsStatus` prints its JSON Schema.
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
 | `base` | `string` | yes | The target's changeset its chain starts from. |
-| `behind_by` | `integer` (uint64) | yes | How many changesets the target's first-parent history holds that `base`'s lacks: those past `base` when it is on that history; otherwise (a sync dropped it, or the target moved back) those before where the two histories meet, 0 when the target head is on `base`'s first-parent history. At most 10,000. |
+| `behind_by` | `integer` (uint64) | yes | How many changesets the target's first-parent history holds that `base`'s lacks: those past `base` when it is on that history; otherwise (a sync dropped it, or the target moved back) those before where the two histories meet, 0 when the target head is on `base`'s first-parent history fewer than 10,000 changesets behind `base`. At most 10,000. |
 | `changes` | array of [`WsChange`](#wschange) | yes | The changes, by path. |
 | `cursor` | `string` or `null` | no | Where this page stopped. |
 | `head` | `string` | yes | Its chain's last changeset. |
