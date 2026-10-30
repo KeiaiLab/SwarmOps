@@ -37,8 +37,8 @@ use swarmops_repo::LandRequest;
 use swarmops_repo::merge::line_diff::{self, DiffLine, UnifiedHunk};
 use swarmops_repo::merge::tree_diff::{ChangeKind, Leaf, PathFilter, TreeChange};
 use swarmops_repo::{
-    CasResult, CommitRequest, Depth, FileSpan, ListedEntry, LocalRepo, MismatchCause, OpRecord,
-    Operation, PathEvent, RepoError, RepoRead, StoredChangeset, VerifyProblem,
+    CasResult, CommitRequest, Depth, FileSpan, ListedEntry, LocalRepo, MismatchCause, OpId,
+    OpRecord, Operation, PathEvent, RepoError, RepoRead, StoredChangeset, VerifyProblem,
 };
 use swarmops_repo::{Resolution, Resolutions};
 use swarmops_store::external_ids;
@@ -1909,7 +1909,9 @@ impl StoreOps for Recording<'_> {
     }
 
     fn undo(&self, who: &Identity, req: UndoReq) -> Result<UndoResp, OpError> {
-        let outcome = self.ops.repo.undo(req.op, who.agent()).map_err(|e| {
+        // The request names a number only, and the undo looks the frame up by its seq alone.
+        let id = OpId::new(req.op, 0);
+        let outcome = self.ops.repo.undo(id, who.agent()).map_err(|e| {
             // An undo refused under the lock (E_CAS_MISMATCH, E_OP_NOT_FOUND,
             // E_NOTHING_TO_UNDO) reports what the write repaired first, as a ref move's does.
             if let RepoError::UndoBlocked { recovered, .. }

@@ -27,7 +27,7 @@ use swarmops_git::{
     GitOid, GitSink, GitSource, GixSink, GixSource, ImportError, ImportReport, ImportRequest,
     RawCommit, RawIdent, RawKind, RawTree, Stored, export, import, register,
 };
-use swarmops_repo::{Change, LandRequest, LandStatus, LocalRepo, OpRecord};
+use swarmops_repo::{Change, LandRequest, LandStatus, LocalRepo, OpId, OpRecord};
 use swarmops_testkit::fs::NoSyncFs;
 use swarmops_testkit::git::{self, GitFixture, Manifest};
 use swarmops_testkit::repo::{put, put_as, request};
@@ -533,7 +533,7 @@ fn an_undone_land_after_an_export_is_source_moved_back() {
             if name == "main" && *old == Some(first.landed) && *new == Some(second.landed))
     });
     assert!(op.records.contains(&landed) && main_moved, "{op:?}");
-    let undone = repo.undo(op.seq, ACTOR).unwrap();
+    let undone = repo.undo(OpId::new(op.seq, op.crc), ACTOR).unwrap();
     let moves: Vec<_> = (undone.moves.iter())
         .map(|(name, from, to, _)| (name.as_str(), *from, *to))
         .collect();

@@ -20,7 +20,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, ObjectKind, hash_object};
 use swarmops_repo::{
-    Advance, CasResult, Depth, LocalRepo, OpRecord, Operation, RepoError, UndoOutcome,
+    Advance, CasResult, Depth, LocalRepo, OpId, OpRecord, Operation, RepoError, UndoOutcome,
 };
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, ORDER_CHECK_ENV};
@@ -41,6 +41,11 @@ use swarmops_testkit::test_name;
 /// Set only in the children the crash sweep spawns: the store root.
 #[cfg(feature = "test-hooks")]
 const CHILD_ROOT: &str = "SWARMOPS_TEST_REPO_OPLOG_CHILD_ROOT";
+
+/// Set with [`CHILD_ROOT`]: the id of the operation the child undoes, read by the parent so the
+/// child's filesystem calls are the undo's alone.
+#[cfg(feature = "test-hooks")]
+const CHILD_ID: &str = "SWARMOPS_TEST_REPO_OPLOG_CHILD_ID";
 
 /// Who moves the refs the tests set up.
 const ACTOR: &str = "test/agent";
@@ -94,16 +99,36 @@ fn unix_now() -> i64 {
     i64::try_from(since.as_secs()).unwrap()
 }
 
-/// Undoes operation `op` as [`UNDOER`]: what the undo did, each move it reports timed now and
-/// recorded in its frame as reported, by the undoer.
+/// The id of operation `op` as the operation log lists it.
+#[track_caller]
+fn id_of(repo: &LocalRepo, op: u64) -> OpId {
+    let (ops, _) = repo.op_log(op.checked_add(1), 1).unwrap();
+    assert_eq!(seqs(&ops), [op], "operation {op} is listed");
+    OpId::new(op, ops[0].crc)
+}
+
+/// The id of the frame numbered `op` in the store at `root`, read without the store's lock: a
+/// frame not listed, or not synced yet, too.
+#[track_caller]
+fn id_at(root: &Utf8Path, op: u64) -> OpId {
+    let meta = MetaStore::open_with_fs(root, checked(RealFs::new())).unwrap();
+    let frame = meta.read().unwrap().frame(op).unwrap();
+    OpId::new(op, frame.expect("the frame is in journal.log").crc)
+}
+
+/// Undoes operation `op` as [`UNDOER`], by the id the operation log lists: what the undo did,
+/// each move it reports timed now and recorded in its frame as reported, by the undoer, and the
+/// frame's crc reported.
 #[track_caller]
 fn undo(repo: &LocalRepo, op: u64) -> UndoOutcome {
+    let id = id_of(repo, op);
     let before = unix_now();
-    let undone = repo.undo(op, UNDOER).unwrap();
+    let undone = repo.undo(id, UNDOER).unwrap();
     let after = unix_now();
     assert_eq!(undone.undone, op);
     assert_eq!(undone.warnings, Vec::<String>::new());
     assert_eq!(undone.already_applied, undone.frame_seq.is_none());
+    assert_eq!(undone.frame_seq.is_none(), undone.frame_crc.is_none());
     for (_, _, _, ts) in &undone.moves {
         assert!(
             (before..=after).contains(ts),
@@ -124,6 +149,7 @@ fn undo(repo: &LocalRepo, op: u64) -> UndoOutcome {
             })
             .collect();
         assert_eq!(ops[0].seq, seq);
+        assert_eq!(Some(ops[0].crc), undone.frame_crc, "the frame's crc");
         assert_eq!(ops[0].records, recorded, "one frame, of the moves reported");
     } else {
         assert_eq!(undone.moves, Vec::new(), "nothing written, nothing moved");
@@ -356,12 +382,14 @@ fn undo_never_acts_on_a_frame_its_writer_cuts() {
         let writing = scope.spawn(|| writer.cas_ref("main", Some(c1), Some(c2), ACTOR));
         held.wait();
 
-        // 2. The undo of op 3 waits for the lock the held writer keeps.
+        // 2. The undo of op 3, by the id a lock-free read shows, waits for the lock the held
+        // writer keeps.
+        let id = id_at(root, 3);
         let (started, starting) = mpsc::channel();
         let undoing = scope.spawn(move || {
             let undoer = LocalRepo::open(root).unwrap();
             started.send(()).unwrap();
-            undoer.undo(3, UNDOER)
+            undoer.undo(id, UNDOER)
         });
         starting.recv_timeout(Duration::from_secs(60)).unwrap();
         thread::sleep(Duration::from_millis(300));
@@ -473,7 +501,7 @@ fn undo_after_a_later_move_is_blocked_and_writes_nothing() {
     cas(&repo, "main", Some(c2), Some(c3)); // op 5
     let frames = frame_count(&root);
 
-    match repo.undo(4, UNDOER) {
+    match repo.undo(id_of(&repo, 4), UNDOER) {
         Err(RepoError::UndoBlocked {
             op: 4,
             name,
@@ -514,7 +542,7 @@ fn undo_of_a_frame_with_two_refs_is_all_or_nothing() {
     cas(&repo, "release/r", Some(c2), Some(c3)); // op 6
     let frames = frame_count(&root);
 
-    match repo.undo(op, UNDOER) {
+    match repo.undo(id_of(&repo, op), UNDOER) {
         Err(RepoError::UndoBlocked {
             name,
             expected,
@@ -574,7 +602,7 @@ fn undo_of_an_op_that_moved_no_ref_is_nothing_to_undo() {
     let frames = frame_count(&root);
 
     for op in [0, 2, 3] {
-        match repo.undo(op, UNDOER) {
+        match repo.undo(id_of(&repo, op), UNDOER) {
             Err(RepoError::NothingToUndo { op: nothing, .. }) => assert_eq!(nothing, op),
             other => panic!("op {op}: expected NothingToUndo, got {other:?}"),
         }
@@ -586,7 +614,7 @@ fn undo_of_an_op_that_moved_no_ref_is_nothing_to_undo() {
 #[test]
 fn undo_of_an_op_past_the_journal_is_not_found() {
     let (_dir, _root, repo) = new_repo();
-    let not_found = |op| match repo.undo(op, UNDOER) {
+    let not_found = |op| match repo.undo(OpId::new(op, 0), UNDOER) {
         Err(RepoError::OpNotFound {
             op: missing, last, ..
         }) => {
@@ -630,7 +658,7 @@ fn an_undo_that_fails_after_its_commit_point_warns() {
     cas(&repo, "main", None, Some(c1)); // op 3
     cas(&repo, "main", Some(c1), Some(c2)); // op 4
 
-    let undone = listing_fails(&root).undo(4, UNDOER).unwrap();
+    let undone = listing_fails(&root).undo(id_of(&repo, 4), UNDOER).unwrap();
     assert_eq!(undone.frame_seq, Some(5));
     assert_eq!(moves_of(&undone), [("main".to_owned(), Some(c2), Some(c1))]);
     assert_eq!(undone.warnings.len(), 1, "{undone:?}");
@@ -661,7 +689,8 @@ fn undo_reports_what_its_write_repaired() {
         .unwrap(); // op 4, committed and not listed
     assert_eq!(unlisted.warnings.len(), 1);
 
-    let undone = repo.undo(4, UNDOER).unwrap();
+    let op4 = id_at(&root, 4);
+    let undone = repo.undo(op4, UNDOER).unwrap();
     assert_eq!(undone.recovered, listed_and_replayed);
     assert_eq!(target(&repo, "main"), Some(c1));
 
@@ -669,7 +698,7 @@ fn undo_reports_what_its_write_repaired() {
         .cas_ref("main", Some(c1), Some(c3), ACTOR)
         .unwrap(); // op 6, committed and not listed
     assert_eq!(unlisted.warnings.len(), 1);
-    match repo.undo(4, UNDOER) {
+    match repo.undo(op4, UNDOER) {
         Err(RepoError::UndoBlocked { recovered, .. }) => {
             assert_eq!(*recovered, listed_and_replayed);
         }
@@ -681,7 +710,7 @@ fn undo_reports_what_its_write_repaired() {
         .cas_ref("main", Some(c3), Some(c2), ACTOR)
         .unwrap(); // op 7, committed and not listed
     assert_eq!(unlisted.warnings.len(), 1);
-    match repo.undo(99, UNDOER) {
+    match repo.undo(OpId::new(99, 0), UNDOER) {
         Err(RepoError::OpNotFound {
             op: 99,
             last: Some(7),
@@ -693,7 +722,7 @@ fn undo_reports_what_its_write_repaired() {
         .cas_ref("main", Some(c2), Some(c1), ACTOR)
         .unwrap(); // op 8, committed and not listed
     assert_eq!(unlisted.warnings.len(), 1);
-    match repo.undo(0, UNDOER) {
+    match repo.undo(id_at(&root, 0), UNDOER) {
         Err(RepoError::NothingToUndo { op: 0, recovered }) => {
             assert_eq!(*recovered, listed_and_replayed);
         }
@@ -716,11 +745,12 @@ fn child_root() -> Option<Utf8PathBuf> {
 /// k-th filesystem call aborting it (`SWARMOPS_TEST_CRASH_AT=k`) and every call before it
 /// checked against the store's write-ordering rules (`SWARMOPS_TEST_ORDER_CHECK=1`).
 #[cfg(feature = "test-hooks")]
-fn crash_child(root: &Utf8Path, k: u64) -> Output {
+fn crash_child(root: &Utf8Path, id: OpId, k: u64) -> Output {
     run(this_test(&test_name!(
         "an_undo_crashing_at_any_call_is_whole_or_absent"
     ))
     .env(CHILD_ROOT, root)
+    .env(CHILD_ID, id.to_string())
     .env(CRASH_AT_ENV, k.to_string())
     .env(ORDER_CHECK_ENV, "1"))
 }
@@ -767,7 +797,8 @@ fn undo_crashing_at(template: &Utf8Path, k: u64, c1: ChangesetId, c2: ChangesetI
     let dir = tempfile::tempdir().unwrap();
     let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
     copy_dir(template.as_std_path(), root.as_std_path());
-    let child = crash_child(&root, k);
+    let id = id_at(&root, SWEPT_OP);
+    let child = crash_child(&root, id, k);
     let finished = child.status.success();
     assert!(
         finished || child.status.signal() == Some(SIGABRT),
@@ -789,7 +820,7 @@ fn undo_crashing_at(template: &Utf8Path, k: u64, c1: ChangesetId, c2: ChangesetI
     );
     assert_eq!(repo.verify(Depth::Deep).unwrap().problems, [], "k={k}");
 
-    let again = repo.undo(SWEPT_OP, UNDOER).unwrap();
+    let again = repo.undo(id, UNDOER).unwrap();
     assert_eq!(again.already_applied, undone, "k={k}");
     assert_eq!(both(), (Some(c1), Some(c1)), "k={k}");
     assert_eq!(repo.verify(Depth::Deep).unwrap().problems, [], "k={k}");
@@ -805,8 +836,9 @@ fn an_undo_crashing_at_any_call_is_whole_or_absent() {
     if let Some(root) = child_root() {
         // SWARMOPS_TEST_CRASH_AT is set: open shares one CrashAtFs between the object store
         // and the metadata store, so that call k is the same call in every run.
+        let id: OpId = std::env::var(CHILD_ID).unwrap().parse().unwrap();
         let repo = LocalRepo::open(&root).unwrap();
-        repo.undo(SWEPT_OP, UNDOER).unwrap();
+        repo.undo(id, UNDOER).unwrap();
         return;
     }
     let (_template_dir, template, repo) = new_repo();

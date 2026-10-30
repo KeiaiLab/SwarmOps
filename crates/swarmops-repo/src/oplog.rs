@@ -35,6 +35,8 @@
 //! ([`Repo::cas_ref`]).
 
 use std::collections::HashMap;
+use std::fmt;
+use std::str::FromStr;
 
 use swarmops_core::ChangesetId;
 use swarmops_store::{CasResult, Frame, ObjectStore, Record, Recovered, StoreError};
@@ -42,12 +44,72 @@ use swarmops_store::{CasResult, Frame, ObjectStore, Record, Recovered, StoreErro
 use crate::error::RepoError;
 use crate::repo::{self, Repo};
 
+/// An operation's id, `<seq>:<crc>` (`4:9f3a01c2`): its number and its frame header's payload
+/// CRC-32, as 8 lowercase hex digits. A frame a take-back cut and the one that took its seq
+/// differ in their crc unless their payloads are equal, so an id never names the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct OpId {
+    /// The operation's number: its frame's seq.
+    pub seq: u64,
+    /// Its frame header's `crc32(payload)`.
+    pub crc: u32,
+}
+
+impl OpId {
+    /// The id of the operation numbered `seq` whose frame's payload CRC-32 is `crc`.
+    pub fn new(seq: u64, crc: u32) -> Self {
+        Self { seq, crc }
+    }
+}
+
+impl fmt::Display for OpId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{:08x}", self.seq, self.crc)
+    }
+}
+
+/// A string that is not an [`OpId`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("not an operation id: expected <op>:<crc>, as `op log` prints it (4:9f3a01c2)")]
+#[non_exhaustive]
+pub struct OpIdError;
+
+/// The longest operation number an id spells: `u64::MAX` has 20 digits.
+const MAX_SEQ_DIGITS: usize = 20;
+
+/// The crc's length in an id: 8 lowercase hex digits.
+const CRC_DIGITS: usize = 8;
+
+impl FromStr for OpId {
+    type Err = OpIdError;
+
+    /// Exactly `^[0-9]{1,20}:[0-9a-f]{8}$` with the number at most `u64::MAX`: a bare number,
+    /// upper case, a sign or a space is refused.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (seq, crc) = s.split_once(':').ok_or(OpIdError)?;
+        let digits = |part: &str, ok: fn(&u8) -> bool| part.bytes().all(|b| ok(&b));
+        if seq.is_empty() || seq.len() > MAX_SEQ_DIGITS || !digits(seq, u8::is_ascii_digit) {
+            return Err(OpIdError);
+        }
+        let lower_hex = |b: &u8| b.is_ascii_digit() || (b'a'..=b'f').contains(b);
+        if crc.len() != CRC_DIGITS || !digits(crc, lower_hex) {
+            return Err(OpIdError);
+        }
+        let seq = seq.parse().map_err(|_| OpIdError)?;
+        let crc = u32::from_str_radix(crc, 16).map_err(|_| OpIdError)?;
+        Ok(Self { seq, crc })
+    }
+}
+
 /// One operation: a write transaction, as the journal holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Operation {
     /// Its number: its frame's seq, from 0 in commit order.
     pub seq: u64,
+    /// Its frame header's payload CRC-32: with `seq`, its [`OpId`].
+    pub crc: u32,
     /// What it recorded, in its frame's order.
     pub records: Vec<OpRecord>,
 }
@@ -89,6 +151,9 @@ pub struct UndoOutcome {
     /// The seq of the frame that recorded the undo: an operation of its own, which another undo
     /// can take back. `None` when it wrote nothing ([`UndoOutcome::already_applied`]).
     pub frame_seq: Option<u64>,
+    /// That frame's payload CRC-32: with `frame_seq`, the undo's own [`OpId`]. `None` exactly
+    /// when `frame_seq` is.
+    pub frame_crc: Option<u32>,
     /// The moves it made, in the order of the operation's: each the ref, what it named before
     /// (what the operation set it to), what it names after (what it named before the
     /// operation), and the time the undo's frame records for the move, in Unix seconds. Empty
@@ -133,7 +198,7 @@ impl<O: ObjectStore> Repo<O> {
         Ok((ops, older))
     }
 
-    /// Undoes operation `op` for `actor`: moves every ref it moved back to what the ref named
+    /// Undoes operation `id` for `actor`: moves every ref it moved back to what the ref named
     /// before it, in one write transaction of its own, all of them or none (see [the module
     /// documentation](self)). [`RepoError::OpNotFound`] for an operation the journal does not
     /// hold, [`RepoError::NothingToUndo`] for one that left every ref where it found it, and
@@ -142,7 +207,8 @@ impl<O: ObjectStore> Repo<O> {
     ///
     /// A journal append that fails ([`StoreError::NotCommitted`]) is returned as it is: nothing
     /// was undone, and the same undo made again undoes it.
-    pub fn undo(&self, op: u64, actor: &str) -> Result<UndoOutcome, RepoError> {
+    pub fn undo(&self, id: OpId, actor: &str) -> Result<UndoOutcome, RepoError> {
+        let op = id.seq;
         let mut write = self.meta.write()?;
         let recovered = write.recovered();
         // Read under the lock, after the write's tail check: the frame as committed.
@@ -202,6 +268,7 @@ impl<O: ObjectStore> Repo<O> {
             return Ok(UndoOutcome {
                 undone: op,
                 frame_seq: None,
+                frame_crc: None,
                 moves: made,
                 already_applied: true,
                 warnings: Vec::new(),
@@ -209,20 +276,23 @@ impl<O: ObjectStore> Repo<O> {
             });
         }
         let mut warnings = Vec::new();
-        let frame_seq = match write.commit() {
-            Ok(info) => info.frame_seq,
+        let (frame_seq, frame_crc) = match write.commit() {
+            Ok(info) => (info.frame_seq, info.frame_crc),
             Err(StoreError::PostCommit {
-                frame_seq, source, ..
+                frame_seq,
+                frame_crc,
+                source,
             }) => {
                 let what = format!("the undo of operation {op}");
                 warnings.push(repo::post_commit_warning(&what, frame_seq, &source));
-                frame_seq
+                (frame_seq, Some(frame_crc))
             }
             Err(e) => return Err(e.into()),
         };
         Ok(UndoOutcome {
             undone: op,
             frame_seq: Some(frame_seq),
+            frame_crc,
             moves: made,
             already_applied: false,
             warnings,
@@ -254,6 +324,7 @@ fn operation(frame: Frame) -> Result<Operation, RepoError> {
     let records = records.collect::<Result<_, RepoError>>()?;
     Ok(Operation {
         seq: frame.seq,
+        crc: frame.crc,
         records,
     })
 }
@@ -277,4 +348,50 @@ fn net_moves(frame: &Frame) -> Vec<(String, Option<ChangesetId>, Option<Changese
     }
     moves.retain(|(_, old, new)| old != new);
     moves
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_op_id_round_trips() {
+        let id = OpId::new(4, 0x9f3a_01c2);
+        assert_eq!(id.to_string(), "4:9f3a01c2", "display");
+        assert_eq!("4:9f3a01c2".parse(), Ok(id), "parse");
+        assert_eq!("0:00000000".parse(), Ok(OpId::new(0, 0)), "zero");
+        let max = format!("{}:ffffffff", u64::MAX);
+        assert_eq!(max.parse(), Ok(OpId::new(u64::MAX, u32::MAX)), "maximum");
+        assert_eq!("004:9f3a01c2".parse(), Ok(id), "leading zeros");
+    }
+
+    #[test]
+    fn an_op_id_refuses_every_other_form() {
+        let refused = [
+            "",
+            "4",
+            ":9f3a01c2",
+            "4:",
+            "4:9F3A01C2",
+            "4:9f3a",
+            "4:9f3a01c2a",
+            "4:9f3a01cg",
+            "4:9f3a01c2:1",
+            "+4:9f3a01c2",
+            "-4:9f3a01c2",
+            " 4:9f3a01c2",
+            "4:9f3a01c2 ",
+            "4 :9f3a01c2",
+            "4: 9f3a01c",
+            "0x4:9f3a01c2",
+            "4:0x9f3a01",
+            "4:+9f3a01c",
+            "18446744073709551616:9f3a01c2",
+            "000000000000000000004:9f3a01c2",
+            "\u{0664}:9f3a01c2",
+        ];
+        for s in refused {
+            assert_eq!(s.parse::<OpId>(), Err(OpIdError), "{s:?}");
+        }
+    }
 }
