@@ -484,7 +484,7 @@ lossily, and `lossy_total` counts them all.
 | Class | Git content | With the class allowed |
 |---|---|---|
 | **`gitlinks`** | A submodule's entry. | Dropped. |
-| **`paths`** | A name that is not UTF-8, or is `.` or `..`. | Dropped. |
+| **`paths`** | A name that is no path component: not UTF-8, `.`, `..`, empty, or holding a `/`. | Dropped. |
 | **`modes`** | A mode git does not write, such as `100664` or a zero-padded `040000`. | Normalized: a regular file becomes a file or an executable by its owner's execute bit, and `040000` a directory. |
 | **`tree_order`** | A tree whose entries are not in git's order, or that names one entry twice. | Put in order, the first of a name kept. |
 | **`empty_trees`** | An entry naming an empty tree (an empty directory). | Dropped. |
