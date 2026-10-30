@@ -38,10 +38,13 @@ walks through it.
 
 ### What `ref set` does not check
 
-- **No ancestry.** `REV` can be any changeset in the store: a descendant of the ref's target, an
-  ancestor (moving the ref back), or one on another line of history. Moving `main` drops from
-  its history every changeset the new target is not built on. Those changesets stay in the
-  store, readable by id, and `op undo` can move the ref back.
+- **No ancestry, except for `main`.** On a `release/<name>` ref, `REV` can be any changeset in
+  the store: a descendant of the ref's target, an ancestor (moving the ref back), or one on
+  another line of history. Changesets a move drops stay in the store, readable by id, and
+  `op undo` can move the ref back. `main` moves only forward (the M15 design §4): its target
+  must be a first-parent ancestor of `REV`, or the move is refused with `E_REF_PROTECTED`
+  (exit 1, `details.name`, `details.changeset` the head it would drop, `details.target`) and
+  nothing is written. To take `main` back, land a change that reverts it.
 - **No merge.** Nothing of the ref's old target is carried over. `land` is the command that
   merges.
 
@@ -52,7 +55,8 @@ walks through it.
   failed, and the next write to the store finishes it. `meta.recovered` reports what this write repaired of an
   earlier writer that died mid-write ([Monitoring](../../../operate/monitoring.md#metarecovered)).
 - **The record.** The journal records the move with the agent's identity and the time, in
-  seconds; `op log` shows it as an operation of kind `ref_move`, which `op undo` can take back.
+  seconds; `op log` shows it as an operation of kind `ref_move`, which `op undo` can take back
+  (on `main`, only while the undo moves it forward).
 - **The lock.** A write waits up to 10 s for the store's lock. If another writer holds it the
   whole time, the command fails with `E_BUSY` (exit 4, retryable) and nothing is written: run
   the same command again.

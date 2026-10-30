@@ -2999,7 +2999,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_REF_PROTECTED",
-          "description": "`main` was asked to be deleted: it is never deleted (`details.name`). Nothing was\nwritten.",
+          "description": "`main` was asked to be deleted, or moved off its first-parent history by `ref set` or\n`op undo`: it is never deleted, and moves only forward (`details.name`). A move adds\n`changeset` (the head it would drop) and `target`; an undo adds `op` and `id`. Nothing was\nwritten; to take `main` back, land a change that reverts it.",
           "type": "string"
         },
         {

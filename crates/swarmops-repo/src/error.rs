@@ -212,6 +212,28 @@ pub enum RepoError {
         /// made. Boxed, as for [`RepoError::RefMoved`].
         recovered: Box<Recovered>,
     },
+    /// A move of `main` off its first-parent history: its head `head` is not on the first-parent
+    /// chain of `target` (the M15 design §4). A ref set, or an undo, that asks for it is refused
+    /// whole: nothing was written. The way back is landing a change that reverts it.
+    #[error(
+        "{name} moves only forward: {head} is not a first-parent ancestor of {target}{}, so \
+         nothing was written",
+        .op.map_or_else(String::new, |op| format!(" (the undo of operation {op})"))
+    )]
+    HistoryProtected {
+        /// The protected ref: `main`.
+        name: String,
+        /// Its head, which the move would drop.
+        head: ChangesetId,
+        /// What the move asked it to name.
+        target: ChangesetId,
+        /// The operation whose undo asked for the move; `None` for a ref set.
+        op: Option<OpId>,
+        /// What the write transaction's recovery repaired before the undo was refused, of what
+        /// earlier writers left: those repairs stay made. Nothing for a ref set, which judges on
+        /// a snapshot. Boxed, as for [`RepoError::RefMoved`].
+        recovered: Box<Recovered>,
+    },
     /// A land's change conflicts with the target's head, or some of its resolutions did not
     /// apply, since the target's head holds their paths otherwise than their `against`: the
     /// merge's conflicts and the stale paths, with what the report of them needs

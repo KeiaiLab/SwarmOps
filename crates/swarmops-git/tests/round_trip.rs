@@ -2,8 +2,7 @@
 //! store, changes landed on it, and the history exported back. Every faithful fixture keeps its
 //! commits byte for byte and gains one single-parent commit per land, signed by the agent that
 //! made the change and by the lander, its message ending in SwarmOps' trailers, its tree the
-//! store's; a land undone after its export stops the next export (`source_moved_back`) until it is
-//! forced. And umbrella §13's single-writer layout (M8 decisions 4 and 7): one host lands and
+//! store's; the undo of a land on `main` after its export is refused (the M15 design §4). And umbrella §13's single-writer layout (M8 decisions 4 and 7): one host lands and
 //! exports to a git remote and another imports it, each step taking only what is new; when both
 //! write, both stop, and nothing is merged.
 //!
@@ -27,7 +26,7 @@ use swarmops_git::{
     GitOid, GitSink, GitSource, GixSink, GixSource, ImportError, ImportReport, ImportRequest,
     RawCommit, RawIdent, RawKind, RawTree, Stored, export, import, register,
 };
-use swarmops_repo::{Change, LandRequest, LandStatus, LocalRepo, OpId, OpRecord};
+use swarmops_repo::{Change, LandRequest, LandStatus, LocalRepo, OpId, OpRecord, RepoError};
 use swarmops_testkit::fs::NoSyncFs;
 use swarmops_testkit::git::{self, GitFixture, Manifest};
 use swarmops_testkit::repo::{put, put_as, request};
@@ -48,7 +47,7 @@ const FAITHFUL: [&str; 10] = [
     "signatures",
 ];
 
-/// Who moves the store refs these tests move themselves: the imports' targets, an undo.
+/// Who moves the store refs these tests move themselves: the imports' targets; who asks an undo.
 const ACTOR: &str = "test/round-trip";
 
 /// The agent that makes the changes the tests land, as its `agent` metadata names it.
@@ -506,12 +505,11 @@ fn import_land_export_round_trips_every_faithful_fixture() {
     }
 }
 
-/// A land undone after its export: the branch names the export of a changeset `main` no longer
-/// reaches, so the next export stops as `source_moved_back` and writes nothing. Forced, it moves
-/// the branch back to the first land's export by compare-and-swap, writing nothing either: that
-/// commit is there already, the parent of the one the branch named.
+/// The undo of a land on `main` after its export is refused (the M15 design §4): `main` moves
+/// only forward, so it stays on the exported head, the op log gains nothing, and the next export
+/// has nothing new to write.
 #[test]
-fn an_undone_land_after_an_export_is_source_moved_back() {
+fn an_undone_land_on_main_is_refused_after_an_export() {
     let fixture = git::fixture("linear");
     let dir = repo_dir(&fixture);
     let store = store();
@@ -533,48 +531,33 @@ fn an_undone_land_after_an_export_is_source_moved_back() {
             if name == "main" && *old == Some(first.landed) && *new == Some(second.landed))
     });
     assert!(op.records.contains(&landed) && main_moved, "{op:?}");
-    let undone = repo.undo(OpId::new(op.seq, op.crc), ACTOR).unwrap();
-    let moves: Vec<_> = (undone.moves.iter())
-        .map(|(name, from, to, _)| (name.as_str(), *from, *to))
-        .collect();
-    assert_eq!(moves, [("main", Some(second.landed), Some(first.landed))]);
-    assert_eq!(main_head(repo), first.landed);
 
-    let before = object_files(dir);
-    let error = export_fails(repo, &mut gix(dir), &main_branch());
-    let ExportError::Diverged {
-        branch: name,
-        git_head,
+    // The undo would take main back to the first land: refused, nothing written.
+    let id = OpId::new(op.seq, op.crc);
+    let error = repo.undo(id, ACTOR).unwrap_err();
+    let RepoError::HistoryProtected {
+        name,
         head,
-        reason,
+        target,
+        op: refused,
+        ..
     } = error
     else {
-        panic!("expected a divergence, got {error}");
-    };
-    let reason_expected = DivergedReason::SourceMovedBack {
-        exported: second.landed,
+        panic!("expected HistoryProtected, got {error}");
     };
     assert_eq!(
-        (name.as_str(), git_head, head, reason),
-        ("main", report.head_oid, first.landed, reason_expected)
+        (name.as_str(), head, target, refused),
+        ("main", second.landed, first.landed, Some(id))
     );
-    assert_eq!(reason.as_str(), "source_moved_back");
+    assert_eq!(main_head(repo), second.landed);
+    let (after, _) = repo.op_log(None, 1).unwrap();
+    assert_eq!(after[0].seq, op.seq, "the op log gains nothing");
+
+    let before = object_files(dir);
+    let again = exported(repo, &mut gix(dir), &main_branch());
+    assert_eq!((again.head, again.commits_written), (second.landed, 0));
     assert_eq!(object_files(dir), before, "nothing written");
     assert_eq!(branch(dir), Some(report.head_oid));
-
-    let mut forced = main_branch();
-    forced.force = true;
-    let back = exported(repo, &mut gix(dir), &forced);
-    let first_oid = export_oid(repo, first.landed);
-    assert_eq!((back.head, back.head_oid), (first.landed, first_oid));
-    assert_eq!(
-        (back.old, back.base, back.branch_moved),
-        (Some(report.head_oid), Some(second.landed), true)
-    );
-    assert_eq!((back.commits_written, back.objects_written), (0, 0));
-    assert_eq!(object_files(dir), before, "nothing written");
-    assert_eq!(branch(dir), Some(first_oid));
-    assert_eq!(commit_at(dir, report.head_oid).parents, [first_oid]);
 }
 
 /// Host A and host B in umbrella §13's single-writer layout, and the git remote R between them:

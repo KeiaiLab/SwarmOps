@@ -458,18 +458,18 @@ mod tests {
         assert_eq!(files(site.repo.git_dir().as_std_path()), before);
     }
 
-    /// A store ref moved back (`op undo`) moves back in `serve.git` too, by the forced export;
-    /// one deleted is deleted.
+    /// A store ref moved back (`op undo`, which never takes `main` back) moves back in
+    /// `serve.git` too, by the forced export; one deleted is deleted.
     #[test]
     fn refresh_follows_an_undo_and_a_deletion() {
         let site = Site::new();
         refresh(&site.ops, &site.repo, &Scope::All).expect("refresh");
-        let main_before = site.served()["refs/heads/main"];
+        let release_before = site.served()["refs/heads/release/1"];
 
-        // 1. A commit on main, served, then undone: main is served where it was.
-        site.commit("d", Some("main"));
+        // 1. A commit on release/1, served, then undone: release/1 is served where it was.
+        site.commit("d", Some("release/1"));
         refresh(&site.ops, &site.repo, &Scope::All).expect("refresh");
-        assert_ne!(site.served()["refs/heads/main"], main_before);
+        assert_ne!(site.served()["refs/heads/release/1"], release_before);
         let log = site.ops.op_log(OpLogReq::default()).expect("op log");
         let newest = log.ops.first().expect("an operation").id.clone();
         site.ops
@@ -477,7 +477,7 @@ mod tests {
             .expect("undo");
         let undone = refresh(&site.ops, &site.repo, &Scope::All).expect("refresh");
         assert_eq!(undone.moved, 1, "{undone:?}");
-        assert_eq!(site.served()["refs/heads/main"], main_before);
+        assert_eq!(site.served()["refs/heads/release/1"], release_before);
 
         // 2. feature/x deleted in the store, then in serve.git.
         let head = site

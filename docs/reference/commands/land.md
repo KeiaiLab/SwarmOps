@@ -169,7 +169,9 @@ The change is HEAD with its first-parent chain after the base:
   `lander_run_id` (your run id, when you have one), `land_key` (with `--key`) and
   `squashed_from`. [`show`](../commands/show.md) prints them.
 - The target's move is recorded for your agent; [`op log`](../commands/op-log.md) lists the
-  land as one operation, and [`op undo`](../commands/op-undo.md) can take it back.
+  land as one operation. [`op undo`](../commands/op-undo.md) takes back a land on a
+  `release/<name>` ref; on `main` it is refused (`E_REF_PROTECTED`): land a change that reverts
+  it instead.
 
 ### The target
 

@@ -220,13 +220,16 @@ fn publish(repo: &LocalRepo, parent: ChangesetId, metadata: &[(&str, &[u8])]) ->
     repo.commit(req).unwrap().id
 }
 
-/// Moves `main` and `release/r` from `from` to `to` in one frame, written through a write
-/// transaction of the metadata store's own (no operation of the repository's moves two refs
-/// at once); the frame's seq.
-fn two_ref_move(root: &Utf8Path, from: ChangesetId, to: ChangesetId) -> u64 {
+/// The two refs [`two_ref_move`] moves for an undo that takes them back: `main` refuses one.
+const TWO_REFS: [&str; 2] = ["release/r", "release/s"];
+
+/// Moves refs `names` from `from` to `to` in one frame, written through a write transaction of
+/// the metadata store's own (no operation of the repository's moves two refs at once); the
+/// frame's seq.
+fn two_ref_move(root: &Utf8Path, names: [&str; 2], from: ChangesetId, to: ChangesetId) -> u64 {
     let meta = MetaStore::open_with_fs(root, checked(RealFs::new())).unwrap();
     let mut write = meta.write().unwrap();
-    for name in ["main", "release/r"] {
+    for name in names {
         let moved = write.cas_ref(name, Some(from), Some(to), ACTOR).unwrap();
         assert_eq!(moved, CasResult::Applied { old: Some(from) }, "{name}");
     }
@@ -312,15 +315,15 @@ fn op_log_lists_each_transaction_newest_first() {
 fn op_log_never_lists_a_frame_its_writer_cuts() {
     let (_dir, root, repo) = new_repo();
     let c1 = commit(&repo, &[], vec![put("f", b"1")]); // op 0
-    cas(&repo, "main", None, Some(c1)); // op 1
+    cas(&repo, "release/r", None, Some(c1)); // op 1
     let c2 = commit(&repo, &[c1], vec![put("f", b"2")]); // op 2
     let c3 = commit(&repo, &[c1], vec![put("f", b"3")]); // op 3
     let (fs, held) = HoldThenFail::new(layout_of(&root).journal_log(), RealFs::new());
     let writer = LocalRepo::open_with_fs(&root, checked(fs)).unwrap();
     let root = &root;
     thread::scope(|scope| {
-        // 1. The writer's frame (op 4, main to c2) is whole in journal.log, not synced.
-        let writing = scope.spawn(|| writer.cas_ref("main", Some(c1), Some(c2), ACTOR));
+        // 1. The writer's frame (op 4, release/r to c2) is whole in journal.log, not synced.
+        let writing = scope.spawn(|| writer.cas_ref("release/r", Some(c1), Some(c2), ACTOR));
         held.wait();
 
         // 2. `op log` waits for the lock the held writer keeps.
@@ -353,17 +356,20 @@ fn op_log_never_lists_a_frame_its_writer_cuts() {
     // 4. The next write takes number 4; op log lists it with that write's move, and its undo
     // undoes exactly that move.
     let before = unix_now();
-    cas(&repo, "main", Some(c1), Some(c3));
+    cas(&repo, "release/r", Some(c1), Some(c3));
     let after = unix_now();
     let (ops, _) = repo.op_log(None, 1).unwrap();
     assert_eq!(seqs(&ops), [4]);
     assert_eq!(
         untimed(&ops[0], before, after),
-        [moved("main", Some(c1), Some(c3))]
+        [moved("release/r", Some(c1), Some(c3))]
     );
     let undone = undo(&repo, 4);
-    assert_eq!(moves_of(&undone), [("main".to_owned(), Some(c3), Some(c1))]);
-    assert_eq!(target(&repo, "main"), Some(c1));
+    assert_eq!(
+        moves_of(&undone),
+        [("release/r".to_owned(), Some(c3), Some(c1))]
+    );
+    assert_eq!(target(&repo, "release/r"), Some(c1));
 }
 
 /// `undo` reads the frame it undoes under the write's lock, after the tail check (storage spec
@@ -574,15 +580,18 @@ fn take_backs_never_reuse_an_id() {
 fn undo_restores_a_moved_ref_in_one_frame() {
     let (_dir, root, repo) = new_repo();
     let [c1, c2, _] = chain(&repo);
-    cas(&repo, "main", None, Some(c1)); // op 3
-    cas(&repo, "main", Some(c1), Some(c2)); // op 4
+    cas(&repo, "release/r", None, Some(c1)); // op 3
+    cas(&repo, "release/r", Some(c1), Some(c2)); // op 4
     let changesets = repo.info().unwrap().changesets;
 
     let undone = undo(&repo, 4);
     assert_eq!(undone.frame_seq, Some(5));
-    assert_eq!(moves_of(&undone), [("main".to_owned(), Some(c2), Some(c1))]);
+    assert_eq!(
+        moves_of(&undone),
+        [("release/r".to_owned(), Some(c2), Some(c1))]
+    );
     assert_eq!(undone.recovered, Recovered::default());
-    assert_eq!(target(&repo, "main"), Some(c1));
+    assert_eq!(target(&repo, "release/r"), Some(c1));
     assert_eq!(frame_count(&root), 6, "one frame");
     assert_eq!(
         repo.info().unwrap().changesets,
@@ -630,8 +639,8 @@ fn undo_of_a_deletion_recreates_the_ref() {
 fn undo_twice_is_a_replay() {
     let (_dir, root, repo) = new_repo();
     let [c1, c2, _] = chain(&repo);
-    cas(&repo, "main", None, Some(c1)); // op 3
-    cas(&repo, "main", Some(c1), Some(c2)); // op 4
+    cas(&repo, "release/r", None, Some(c1)); // op 3
+    cas(&repo, "release/r", Some(c1), Some(c2)); // op 4
     assert_eq!(undo(&repo, 4).frame_seq, Some(5));
     let frames = frame_count(&root);
 
@@ -639,7 +648,7 @@ fn undo_twice_is_a_replay() {
     assert!(again.already_applied);
     assert_eq!((again.frame_seq, again.moves.len()), (None, 0));
     assert_eq!(frame_count(&root), frames, "no frame");
-    assert_eq!(target(&repo, "main"), Some(c1));
+    assert_eq!(target(&repo, "release/r"), Some(c1));
 }
 
 /// An undo of an operation whose ref has moved since is blocked: it names the ref, what the
@@ -649,9 +658,9 @@ fn undo_twice_is_a_replay() {
 fn undo_after_a_later_move_is_blocked_and_writes_nothing() {
     let (_dir, root, repo) = new_repo();
     let [c1, c2, c3] = chain(&repo);
-    cas(&repo, "main", None, Some(c1)); // op 3
-    cas(&repo, "main", Some(c1), Some(c2)); // op 4
-    cas(&repo, "main", Some(c2), Some(c3)); // op 5
+    cas(&repo, "release/r", None, Some(c1)); // op 3
+    cas(&repo, "release/r", Some(c1), Some(c2)); // op 4
+    cas(&repo, "release/r", Some(c2), Some(c3)); // op 5
     let frames = frame_count(&root);
 
     match repo.undo(id_of(&repo, 4), UNDOER) {
@@ -662,24 +671,24 @@ fn undo_after_a_later_move_is_blocked_and_writes_nothing() {
             actual,
             recovered,
         }) => {
-            assert_eq!(name, "main");
+            assert_eq!(name, "release/r");
             assert_eq!((expected, actual), (Some(c2), Some(c3)));
             assert_eq!(*recovered, Recovered::default());
         }
         other => panic!("expected UndoBlocked, got {other:?}"),
     }
     assert_eq!(frame_count(&root), frames, "nothing written");
-    assert_eq!(target(&repo, "main"), Some(c3));
+    assert_eq!(target(&repo, "release/r"), Some(c3));
 
     assert_eq!(
         moves_of(&undo(&repo, 5)),
-        [("main".to_owned(), Some(c3), Some(c2))]
+        [("release/r".to_owned(), Some(c3), Some(c2))]
     );
     assert_eq!(
         moves_of(&undo(&repo, 4)),
-        [("main".to_owned(), Some(c2), Some(c1))]
+        [("release/r".to_owned(), Some(c2), Some(c1))]
     );
-    assert_eq!(target(&repo, "main"), Some(c1));
+    assert_eq!(target(&repo, "release/r"), Some(c1));
 }
 
 /// An undo of a frame that moved two refs restores both in one frame, or neither: with one of
@@ -688,9 +697,9 @@ fn undo_after_a_later_move_is_blocked_and_writes_nothing() {
 fn undo_of_a_frame_with_two_refs_is_all_or_nothing() {
     let (_dir, root, repo) = new_repo();
     let [c1, c2, c3] = chain(&repo);
-    cas(&repo, "main", None, Some(c1)); // op 3
+    cas(&repo, "release/s", None, Some(c1)); // op 3
     cas(&repo, "release/r", None, Some(c1)); // op 4
-    let op = two_ref_move(&root, c1, c2);
+    let op = two_ref_move(&root, TWO_REFS, c1, c2);
     assert_eq!(op, 5);
     cas(&repo, "release/r", Some(c2), Some(c3)); // op 6
     let frames = frame_count(&root);
@@ -708,15 +717,15 @@ fn undo_of_a_frame_with_two_refs_is_all_or_nothing() {
         other => panic!("expected UndoBlocked, got {other:?}"),
     }
     assert_eq!(frame_count(&root), frames, "nothing written");
-    let both = || (target(&repo, "main"), target(&repo, "release/r"));
-    assert_eq!(both(), (Some(c2), Some(c3)), "main untouched");
+    let both = || (target(&repo, "release/s"), target(&repo, "release/r"));
+    assert_eq!(both(), (Some(c2), Some(c3)), "release/s untouched");
 
     undo(&repo, 6); // release/r back to c2: frame 7
     let undone = undo(&repo, op);
     assert_eq!(undone.frame_seq, Some(8));
     let restored = [
-        ("main".to_owned(), Some(c2), Some(c1)),
         ("release/r".to_owned(), Some(c2), Some(c1)),
+        ("release/s".to_owned(), Some(c2), Some(c1)),
     ];
     assert_eq!(moves_of(&undone), restored, "both, in one frame");
     assert_eq!(both(), (Some(c1), Some(c1)));
@@ -729,16 +738,23 @@ fn undo_of_a_frame_with_two_refs_is_all_or_nothing() {
 fn undo_of_a_frame_that_moved_a_ref_twice_restores_its_first_old() {
     let (_dir, root, repo) = new_repo();
     let [c1, c2, c3] = chain(&repo);
-    cas(&repo, "main", None, Some(c1)); // op 3
+    cas(&repo, "release/r", None, Some(c1)); // op 3
     let meta = MetaStore::open_with_fs(&root, checked(RealFs::new())).unwrap();
     let mut write = meta.write().unwrap();
-    write.cas_ref("main", Some(c1), Some(c2), ACTOR).unwrap();
-    write.cas_ref("main", Some(c2), Some(c3), ACTOR).unwrap();
+    write
+        .cas_ref("release/r", Some(c1), Some(c2), ACTOR)
+        .unwrap();
+    write
+        .cas_ref("release/r", Some(c2), Some(c3), ACTOR)
+        .unwrap();
     assert_eq!(write.commit().unwrap().frame_seq, 4);
 
     let undone = undo(&repo, 4);
-    assert_eq!(moves_of(&undone), [("main".to_owned(), Some(c3), Some(c1))]);
-    assert_eq!(target(&repo, "main"), Some(c1));
+    assert_eq!(
+        moves_of(&undone),
+        [("release/r".to_owned(), Some(c3), Some(c1))]
+    );
+    assert_eq!(target(&repo, "release/r"), Some(c1));
 }
 
 /// An operation that left every ref where it found it (a commit, or moves of a ref that cancel
@@ -806,18 +822,138 @@ fn undo_of_an_op_past_the_journal_is_not_found() {
 fn undo_of_an_undo_restores_again() {
     let (_dir, _root, repo) = new_repo();
     let [c1, c2, _] = chain(&repo);
-    cas(&repo, "main", None, Some(c1)); // op 3
-    cas(&repo, "main", Some(c1), Some(c2)); // op 4
+    cas(&repo, "release/r", None, Some(c1)); // op 3
+    cas(&repo, "release/r", Some(c1), Some(c2)); // op 4
     assert_eq!(undo(&repo, 4).frame_seq, Some(5));
 
     let redone = undo(&repo, 5);
     assert_eq!(redone.frame_seq, Some(6));
-    assert_eq!(moves_of(&redone), [("main".to_owned(), Some(c1), Some(c2))]);
-    assert_eq!(target(&repo, "main"), Some(c2));
+    assert_eq!(
+        moves_of(&redone),
+        [("release/r".to_owned(), Some(c1), Some(c2))]
+    );
+    assert_eq!(target(&repo, "release/r"), Some(c2));
     assert!(
         undo(&repo, 5).already_applied,
         "op 5's refs are back where it found them"
     );
+}
+
+/// Writes one frame through the metadata store's own write transaction that moves `main` from
+/// `from` to `to`, as a store written before the forward rule may hold; the frame's seq.
+fn main_moved_raw(root: &Utf8Path, from: ChangesetId, to: ChangesetId) -> u64 {
+    let meta = MetaStore::open_with_fs(root, checked(RealFs::new())).unwrap();
+    let mut write = meta.write().unwrap();
+    let moved = write.cas_ref("main", Some(from), Some(to), ACTOR).unwrap();
+    assert_eq!(moved, CasResult::Applied { old: Some(from) });
+    write.commit().unwrap().frame_seq
+}
+
+/// The undo of operation `op` is refused as one that moves `main` from `head` back to `to`
+/// (the M15 design §4): the error names both and the operation's id, and nothing is written.
+#[track_caller]
+fn assert_protected(
+    repo: &LocalRepo,
+    root: &Utf8Path,
+    op: u64,
+    head: ChangesetId,
+    to: ChangesetId,
+) {
+    let id = id_of(repo, op);
+    let before = journal_bytes(root);
+    match repo.undo(id, UNDOER) {
+        Err(RepoError::HistoryProtected {
+            name,
+            head: dropped,
+            target: asked,
+            op: refused,
+            recovered,
+        }) => {
+            assert_eq!(name, "main");
+            assert_eq!((dropped, asked, refused), (head, to, Some(id)));
+            assert_eq!(*recovered, Recovered::default());
+        }
+        other => panic!("expected HistoryProtected, got {other:?}"),
+    }
+    assert!(journal_bytes(root) == before, "nothing written");
+}
+
+/// An undo that moves `main` off its first-parent history is refused whole (the M15 design
+/// §4): alone, and with another ref in the same frame, which stays where it is too. A `main`
+/// back where the operation found it already is not judged: the undo is a replay.
+#[test]
+fn undo_moving_main_back_is_protected() {
+    let (_dir, root, repo) = new_repo();
+    let [c1, c2, c3] = chain(&repo);
+    cas(&repo, "main", None, Some(c1)); // op 3
+    cas(&repo, "main", Some(c1), Some(c2)); // op 4
+
+    // 1. One ref: main stays on c2.
+    assert_protected(&repo, &root, 4, c2, c1);
+    assert_eq!(target(&repo, "main"), Some(c2));
+
+    // 2. Two refs in one frame: neither moves.
+    cas(&repo, "release/r", None, Some(c2)); // op 5
+    let op = two_ref_move(&root, ["main", "release/r"], c2, c3);
+    assert_protected(&repo, &root, op, c3, c2);
+    let both = (target(&repo, "main"), target(&repo, "release/r"));
+    assert_eq!(both, (Some(c3), Some(c3)), "neither ref moved");
+
+    // 3. Back on c1 by a move from before the rule: op 4's undo has nothing left to move.
+    main_moved_raw(&root, c3, c1);
+    assert!(undo(&repo, 4).already_applied);
+    assert_eq!(target(&repo, "main"), Some(c1));
+}
+
+/// The undo of a move from before the rule that took `main` back moves it forward, and goes
+/// through; the undo of that undo takes it back, and is refused (the M15 design §4).
+#[test]
+fn undo_moving_main_forward_is_allowed() {
+    let (_dir, root, repo) = new_repo();
+    let [c1, c2, _] = chain(&repo);
+    cas(&repo, "main", None, Some(c2)); // op 3
+    assert_eq!(main_moved_raw(&root, c2, c1), 4);
+
+    let undone = undo(&repo, 4);
+    assert_eq!(moves_of(&undone), [("main".to_owned(), Some(c1), Some(c2))]);
+    assert_eq!(target(&repo, "main"), Some(c2));
+    assert_protected(&repo, &root, 5, c2, c1);
+    assert_eq!(target(&repo, "main"), Some(c2));
+}
+
+/// `check_forward` follows first parents only (the M15 design §4): a merge whose first parent
+/// descends from `main`'s head is forward; one holding the head as its second parent only is
+/// refused, as are a move back and a move sideways. It judges `main` alone, and only a move.
+#[test]
+fn a_merge_holding_main_second_is_not_forward() {
+    let (_dir, _root, repo) = new_repo();
+    let c1 = commit(&repo, &[], vec![put("f", b"1")]);
+    let x = commit(&repo, &[], vec![put("g", b"x")]);
+    let second = commit(&repo, &[x, c1], vec![put("h", b"m")]);
+    let first = commit(&repo, &[c1, x], vec![put("h", b"n")]);
+    let read = repo.snapshot().unwrap();
+    let refused = |old, new| match read.check_forward("main", Some(old), Some(new)) {
+        Err(RepoError::HistoryProtected {
+            name,
+            head,
+            target: asked,
+            op: None,
+            ..
+        }) => assert_eq!((name.as_str(), head, asked), ("main", old, new)),
+        other => panic!("{old} → {new}: expected HistoryProtected, got {other:?}"),
+    };
+
+    // 1. Off the first-parent chain: refused.
+    refused(c1, second);
+    refused(second, c1);
+    refused(c1, x);
+
+    // 2. Forward, no move, a creation, a deletion, another ref: not judged here.
+    read.check_forward("main", Some(c1), Some(first)).unwrap();
+    read.check_forward("main", Some(c1), Some(c1)).unwrap();
+    read.check_forward("main", None, Some(x)).unwrap();
+    read.check_forward("main", Some(c1), None).unwrap();
+    read.check_forward("release/r", Some(c1), Some(x)).unwrap();
 }
 
 /// An undo whose frame is durable but whose step after the commit point fails (here its listing
@@ -827,13 +963,16 @@ fn undo_of_an_undo_restores_again() {
 fn an_undo_that_fails_after_its_commit_point_warns() {
     let (_dir, root, repo) = new_repo_as(StoreFormat::V1);
     let [c1, c2, c3] = chain(&repo);
-    cas(&repo, "main", None, Some(c1)); // op 3
-    cas(&repo, "main", Some(c1), Some(c2)); // op 4
+    cas(&repo, "release/r", None, Some(c1)); // op 3
+    cas(&repo, "release/r", Some(c1), Some(c2)); // op 4
 
     let op4 = id_of(&repo, 4);
     let undone = listing_fails(&root).undo(op4, UNDOER).unwrap();
     assert_eq!(undone.frame_seq, Some(5));
-    assert_eq!(moves_of(&undone), [("main".to_owned(), Some(c2), Some(c1))]);
+    assert_eq!(
+        moves_of(&undone),
+        [("release/r".to_owned(), Some(c2), Some(c1))]
+    );
     assert_eq!(undone.warnings.len(), 1, "{undone:?}");
     let op5 = id_at(&root, 5);
     assert_eq!(undone.frame_crc, Some(op5.crc), "the committed frame's crc");
@@ -843,7 +982,7 @@ fn an_undo_that_fails_after_its_commit_point_warns() {
         "{}",
         undone.warnings[0]
     );
-    assert_eq!(target(&repo, "main"), Some(c1));
+    assert_eq!(target(&repo, "release/r"), Some(c1));
     let listed = repo
         .commit(request(&[c3], vec![put("g", b"g")], "next"))
         .unwrap();
@@ -859,19 +998,19 @@ fn undo_reports_what_its_write_repaired() {
     listed_and_replayed.refs_replayed = 1;
     let (_dir, root, repo) = new_repo_as(StoreFormat::V1);
     let [c1, c2, c3] = chain(&repo);
-    cas(&repo, "main", None, Some(c1)); // op 3
+    cas(&repo, "release/r", None, Some(c1)); // op 3
     let unlisted = listing_fails(&root)
-        .cas_ref("main", Some(c1), Some(c2), ACTOR)
+        .cas_ref("release/r", Some(c1), Some(c2), ACTOR)
         .unwrap(); // op 4, committed and not listed
     assert_eq!(unlisted.warnings.len(), 1);
 
     let op4 = id_at(&root, 4);
     let undone = repo.undo(op4, UNDOER).unwrap();
     assert_eq!(undone.recovered, listed_and_replayed);
-    assert_eq!(target(&repo, "main"), Some(c1));
+    assert_eq!(target(&repo, "release/r"), Some(c1));
 
     let unlisted = listing_fails(&root)
-        .cas_ref("main", Some(c1), Some(c3), ACTOR)
+        .cas_ref("release/r", Some(c1), Some(c3), ACTOR)
         .unwrap(); // op 6, committed and not listed
     assert_eq!(unlisted.warnings.len(), 1);
     match repo.undo(op4, UNDOER) {
@@ -883,7 +1022,7 @@ fn undo_reports_what_its_write_repaired() {
 
     // The two refusals found under the lock, after the repair, report it too.
     let unlisted = listing_fails(&root)
-        .cas_ref("main", Some(c3), Some(c2), ACTOR)
+        .cas_ref("release/r", Some(c3), Some(c2), ACTOR)
         .unwrap(); // op 7, committed and not listed
     assert_eq!(unlisted.warnings.len(), 1);
     match repo.undo(OpId::new(99, 0), UNDOER) {
@@ -896,7 +1035,7 @@ fn undo_reports_what_its_write_repaired() {
         other => panic!("expected OpNotFound, got {other:?}"),
     }
     let unlisted = listing_fails(&root)
-        .cas_ref("main", Some(c2), Some(c1), ACTOR)
+        .cas_ref("release/r", Some(c2), Some(c1), ACTOR)
         .unwrap(); // op 8, committed and not listed
     assert_eq!(unlisted.warnings.len(), 1);
     match repo.undo(id_at(&root, 0), UNDOER) {
@@ -907,8 +1046,8 @@ fn undo_reports_what_its_write_repaired() {
     }
 }
 
-/// The operation the crash sweep's child undoes: the template's frame that moved `main` and
-/// `release/r` together.
+/// The operation the crash sweep's child undoes: the template's frame that moved [`TWO_REFS`]
+/// together.
 #[cfg(feature = "test-hooks")]
 const SWEPT_OP: u64 = 5;
 
@@ -985,10 +1124,10 @@ fn undo_crashing_at(template: &Utf8Path, k: u64, c1: ChangesetId, c2: ChangesetI
     );
 
     let repo = LocalRepo::open_with_fs(&root, checked(RealFs::new())).unwrap();
-    let both = || (target(&repo, "main"), target(&repo, "release/r"));
+    let both = || (target(&repo, TWO_REFS[0]), target(&repo, TWO_REFS[1]));
     let undone = match both() {
-        (Some(main), Some(r)) if (main, r) == (c2, c2) => false,
-        (Some(main), Some(r)) if (main, r) == (c1, c1) => true,
+        (Some(r), Some(s)) if (r, s) == (c2, c2) => false,
+        (Some(r), Some(s)) if (r, s) == (c1, c1) => true,
         other => panic!("k={k}: half an undo: {other:?}"),
     };
     assert!(
@@ -1020,9 +1159,9 @@ fn an_undo_crashing_at_any_call_is_whole_or_absent() {
     }
     let (_template_dir, template, repo) = new_repo();
     let [c1, c2, _] = chain(&repo);
-    cas(&repo, "main", None, Some(c1)); // op 3
-    cas(&repo, "release/r", None, Some(c1)); // op 4
-    assert_eq!(two_ref_move(&template, c1, c2), SWEPT_OP);
+    cas(&repo, TWO_REFS[0], None, Some(c1)); // op 3
+    cas(&repo, TWO_REFS[1], None, Some(c1)); // op 4
+    assert_eq!(two_ref_move(&template, TWO_REFS, c1, c2), SWEPT_OP);
     drop(repo);
     let past_the_commit_point = AtomicBool::new(false);
     let calls = sweep(|k| {

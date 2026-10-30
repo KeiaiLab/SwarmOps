@@ -3,7 +3,8 @@
 
 use swarmops_api::WsChangeKind::{Added, Deleted, ModeChanged, Modified, TypeChanged};
 use swarmops_api::{
-    Identity, RefSetReq, StatusAfter, StoreOps, WsDiscardReq, WsState, WsStatusReq,
+    ChangeInput, ChangeOp, CommitReq, ContentInput, Identity, RefSetReq, StatusAfter, StoreOps,
+    WsDiscardReq, WsState, WsStatusReq,
 };
 use swarmops_ws::state::SWARMWS_DIR;
 
@@ -496,13 +497,34 @@ fn behind_by_reads_pages_until_base_and_stops_at_the_cap() {
     assert_eq!((longer.count("resolve_rev"), longer.count("log")), (1, 101));
 }
 
-/// Moves `main` from `from` back or aside to `to`, as `sync` or `op undo` can.
-fn move_main(f: &Fixture, from: &str, to: &str) {
-    let mut req = RefSetReq::new("main", to);
-    req.expected_old = Some(from.into());
+/// The ref the workspaces below land on: it moves back or aside, as `sync` takes `main`, which
+/// `ref set` and `op undo` never move back (the M15 design §4).
+const TARGET: &str = "release/r";
+
+/// Moves [`TARGET`] from `from` (none: creates it) to `to`.
+fn move_target(f: &Fixture, from: Option<&str>, to: &str) {
+    let mut req = RefSetReq::new(TARGET, to);
+    req.expected_old = from.map(Into::into);
+    req.create = from.is_none();
     f.ops
         .ref_set(&Identity::parse(AGENT).unwrap(), req)
         .unwrap();
+}
+
+/// Commits `text` to `src/a.txt` on `parent`, moving no ref; the changeset.
+fn commit_aside(f: &Fixture, parent: &str, text: &str) -> String {
+    let mut put = ChangeInput::new("src/a.txt".to_owned(), ChangeOp::Put);
+    put.content = Some(ContentInput::Inline(text.to_owned()));
+    let mut req = CommitReq::new(vec![put], "aside".to_owned());
+    req.parent = Some(parent.into());
+    let who = Identity::parse(AGENT).unwrap();
+    f.ops.commit(&who, req).unwrap().changeset
+}
+
+/// Workspace `w` on [`TARGET`], made to name `base` first.
+fn create_on_target(f: &Fixture, base: &str) {
+    move_target(f, None, base);
+    f.create("w", TARGET, &["src"]);
 }
 
 /// A base the target's history lost to a squash-like replacement (R <- X <- A in the workspace,
@@ -515,11 +537,12 @@ fn behind_by_counts_past_a_replaced_base() {
     let root = f.commit(None, &[Put::File("src/a.txt", "r\n")]);
     let x = f.commit(Some(&root), &[Put::File("src/a.txt", "x\n")]);
     let a = f.commit(Some(&x), &[Put::File("src/a.txt", "a\n")]);
-    f.create("w", &a, &["src"]);
+    create_on_target(&f, &a);
 
     // 2. The target moved back to X, then on to B in A's place.
-    move_main(&f, &a, &x);
-    let b = f.commit(Some(&x), &[Put::File("src/a.txt", "b\n")]);
+    move_target(&f, Some(&a), &x);
+    let b = commit_aside(&f, &x, "b\n");
+    move_target(&f, Some(&x), &b);
 
     // 3. One changeset behind: a page of the target's history, then one of the base's.
     let watched = Watched::new(&f.ops);
@@ -548,11 +571,12 @@ fn behind_by_pages_the_base_history_until_it_meets() {
     let f = Fixture::new();
     let x = chain(&f, None, 101, "r");
     let a = chain(&f, Some(&x), 100, "a");
-    f.create("w", &a, &["src"]);
+    create_on_target(&f, &a);
 
     // 2. The target moved back to X, then on to B in A1's place.
-    move_main(&f, &a, &x);
-    let b = f.commit(Some(&x), &[Put::File("src/a.txt", "b\n")]);
+    move_target(&f, Some(&a), &x);
+    let b = commit_aside(&f, &x, "b\n");
+    move_target(&f, Some(&x), &b);
 
     // 3. One changeset behind, from four pages: B, X, R100..R3 and R2, R1 of the target's;
     //    A100..A1 and X of the base's.
@@ -570,8 +594,8 @@ fn behind_by_is_zero_for_a_target_moved_back() {
     let f = Fixture::new();
     let x = f.commit(None, &[Put::File("src/a.txt", "x\n")]);
     let a = f.commit(Some(&x), &[Put::File("src/a.txt", "a\n")]);
-    f.create("w", &a, &["src"]);
-    move_main(&f, &a, &x);
+    create_on_target(&f, &a);
+    move_target(&f, Some(&a), &x);
 
     // 2. Nothing to catch up.
     let page = swarmops_ws::status(&f.ctx(), page_of("w")).unwrap();
@@ -587,8 +611,8 @@ fn behind_by_caps_the_base_walk() {
     let f = Fixture::new();
     let x = f.commit(None, &[Put::File("src/a.txt", "x\n")]);
     let a = f.commit(Some(&x), &[Put::File("src/a.txt", "a\n")]);
-    f.create("w", &a, &["src"]);
-    move_main(&f, &a, &x);
+    create_on_target(&f, &a);
+    move_target(&f, Some(&a), &x);
 
     // 2. The histories never meet: X counted, from the target's page and the base's first 10,000.
     let mut watched = Watched::new(&f.ops);

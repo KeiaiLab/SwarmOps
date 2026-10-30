@@ -113,23 +113,11 @@ pub(crate) fn repo_error(e: RepoError, during: During<'_>) -> OpError {
             expected,
             ..
         } => target_moved(&target, actual, expected),
-        RepoError::OpNotFound {
-            op,
-            crc,
-            last,
-            reason,
-            ..
-        } => op_not_found(OpId::new(op, crc), last, reason, message),
-        RepoError::NothingToUndo { op: number, .. } => error(ErrorCode::NothingToUndo, message)
-            .with_details(details([("op", number.into())]))
-            .with_hint("swarmops op log"),
-        RepoError::UndoBlocked {
-            op: number,
-            name,
-            expected,
-            actual,
-            ..
-        } => undo_blocked(number, &name, expected, actual),
+        // An undo's, and a move of main off its first-parent history (the M15 design §4).
+        e @ (RepoError::OpNotFound { .. }
+        | RepoError::NothingToUndo { .. }
+        | RepoError::UndoBlocked { .. }
+        | RepoError::HistoryProtected { .. }) => undo_error(e, message),
         // A land's (M4).
         e @ (RepoError::Conflict(_)
         | RepoError::NothingToLand(_)
@@ -147,6 +135,39 @@ pub(crate) fn repo_error(e: RepoError, during: During<'_>) -> OpError {
         | RepoError::PastJournalEnd { .. }) => derive_error(e, message, during),
         // A variant of another crate's enum this build does not know: a bug.
         RepoError::Internal(_) => error(ErrorCode::Internal, message),
+        _ => unmapped(message),
+    }
+}
+
+/// The operations-spec error for an undo's error `e`, or a refused move of `main` (a ref set's
+/// or an undo's), whose message is `message`: [`repo_error`]'s table, the undo rows. Any other
+/// error is unmapped.
+fn undo_error(e: RepoError, message: String) -> OpError {
+    match e {
+        RepoError::OpNotFound {
+            op,
+            crc,
+            last,
+            reason,
+            ..
+        } => op_not_found(OpId::new(op, crc), last, reason, message),
+        RepoError::NothingToUndo { op: number, .. } => error(ErrorCode::NothingToUndo, message)
+            .with_details(details([("op", number.into())]))
+            .with_hint("swarmops op log"),
+        RepoError::UndoBlocked {
+            op: number,
+            name,
+            expected,
+            actual,
+            ..
+        } => undo_blocked(number, &name, expected, actual),
+        RepoError::HistoryProtected {
+            name,
+            head,
+            target,
+            op: undone,
+            ..
+        } => history_protected(name, head, target, undone, message),
         _ => unmapped(message),
     }
 }
@@ -532,6 +553,30 @@ fn undo_blocked(
     let mut error = local::cas_mismatch(name, actual, message).with_hint("swarmops op log");
     error.details.insert("op".to_owned(), op.into());
     error
+}
+
+/// A move of `main` from `head` to `target` off its first-parent history, asked by a ref set or
+/// by the undo of operation `undone` (the M15 design §4): `E_REF_PROTECTED` `{name, changeset,
+/// target}`, an undo's with `{op, id}`. A deletion's has `name` only.
+fn history_protected(
+    name: String,
+    head: ChangesetId,
+    target: ChangesetId,
+    undone: Option<OpId>,
+    message: String,
+) -> OpError {
+    let mut found = details([
+        ("name", name.into()),
+        ("changeset", head.to_string().into()),
+        ("target", target.to_string().into()),
+    ]);
+    if let Some(id) = undone {
+        found.insert("op".to_owned(), id.seq.into());
+        found.insert("id".to_owned(), id.to_string().into());
+    }
+    error(ErrorCode::RefProtected, message)
+        .with_details(found)
+        .with_hint("main moves only forward: land a change that takes it back")
 }
 
 fn ref_name_invalid(name: String, message: String) -> OpError {
@@ -1792,6 +1837,45 @@ mod tests {
             ("E_NOTHING_TO_UNDO", 1)
         );
         assert_eq!(nothing.details, details([("op", 3.into())]));
+    }
+
+    /// A move of `main` off its first-parent history (the M15 design §4) is `E_REF_PROTECTED`
+    /// (exit 1, not retryable) naming the head it would drop and the target; an undo's names
+    /// the operation by number and id too. The hint is the way back: a land.
+    #[test]
+    fn a_move_of_main_back_is_ref_protected() {
+        let (head, target) = (id(), ChangesetId::new(ObjectId::new([2; 32])));
+        let refused = |op| {
+            let e = RepoError::HistoryProtected {
+                name: "main".into(),
+                head,
+                target,
+                op,
+                recovered: Box::default(),
+            };
+            repo_error(e, During::Op)
+        };
+        let moved = [
+            ("name", "main".into()),
+            ("changeset", head.to_string().into()),
+            ("target", target.to_string().into()),
+        ];
+
+        // 1. A ref set.
+        let set = refused(None);
+        assert_eq!(set.code, ErrorCode::RefProtected.as_str());
+        assert_eq!((set.exit, set.retryable), (1, false));
+        assert_eq!(set.details, details(moved.clone()));
+        let hint = "main moves only forward: land a change that takes it back";
+        assert_eq!(set.hint.as_deref(), Some(hint));
+
+        // 2. An undo.
+        let undo = refused(Some(swarmops_repo::OpId::new(6, 0xab)));
+        let mut want = details(moved);
+        want.insert("op".to_owned(), 6.into());
+        want.insert("id".to_owned(), "6:000000ab".into());
+        assert_eq!(undo.details, want);
+        assert!(undo.message.contains("operation 6:000000ab"), "{undo:?}");
     }
 
     #[test]

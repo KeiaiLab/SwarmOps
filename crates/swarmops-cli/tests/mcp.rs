@@ -1104,14 +1104,15 @@ fn mcp_undo_is_compare_and_swap_guarded() {
         .as_str()
         .unwrap()
         .to_owned();
+    // A release ref: an undo never takes `main` back (the M15 design §4).
     server.ok(
         "ref_set",
-        json!({"name": "main", "new": c1, "create": true}),
+        json!({"name": "release/r", "new": c1, "create": true}),
     );
     let c2 = commit_on(&mut server, "c2", &c1);
     server.ok(
         "ref_set",
-        json!({"name": "main", "new": c2, "expected_old": c1}),
+        json!({"name": "release/r", "new": c2, "expected_old": c1}),
     );
     let newest = server.ok("op_log", json!({"limit": 1}));
     let moved = &newest["result"]["ops"][0];
@@ -1129,27 +1130,27 @@ fn mcp_undo_is_compare_and_swap_guarded() {
     assert_eq!(undone["result"]["ref_moves"][0]["actor"], AGENT, "{undone}");
     assert_eq!(
         refs_of(&mut server),
-        json!([{"name": "main", "kind": "main", "target": c1, "version": 3}])
+        json!([{"name": "release/r", "kind": "release", "target": c1, "version": 3}])
     );
     let again = server.ok("undo", json!({"id": id}));
     assert_eq!(again["result"]["already_applied"], true, "{again}");
 
-    // A later move: main from c1 to c3. The undo of the move to c2 expects c2 there.
+    // A later move: release/r from c1 to c3. The undo of the move to c2 expects c2 there.
     let c3 = commit_on(&mut server, "c3", &c1);
     server.ok(
         "ref_set",
-        json!({"name": "main", "new": c3, "expected_old": c1}),
+        json!({"name": "release/r", "new": c3, "expected_old": c1}),
     );
     let refused = server.err("undo", json!({"id": id}), "E_CAS_MISMATCH");
     assert_eq!(
         refused["error"]["details"],
-        json!({"name": "main", "actual": c3, "op": op})
+        json!({"name": "release/r", "actual": c3, "op": op})
     );
     assert_eq!(refused["error"]["hint"], "swarmops op log", "{refused}");
     assert_eq!(refused["error"]["exit"], 4, "{refused}");
     assert_eq!(
         refs_of(&mut server),
-        json!([{"name": "main", "kind": "main", "target": c3, "version": 4}])
+        json!([{"name": "release/r", "kind": "release", "target": c3, "version": 4}])
     );
     let after = server.ok("op_log", json!({"limit": 1}));
     assert_eq!(
@@ -1752,7 +1753,7 @@ fn concrete_expectations_compare_and_swap(server: &mut Server, c1: &str, c2: &st
     }
     let stale = server.err(
         "ref_set",
-        json!({"name": "main", "new": c3, "expected_old": c2}),
+        json!({"name": "main", "new": c3, "expected_old": c1}),
         "E_CAS_MISMATCH",
     );
     assert_eq!(
@@ -1763,18 +1764,22 @@ fn concrete_expectations_compare_and_swap(server: &mut Server, c1: &str, c2: &st
         refs_of(server),
         json!([{"name": "main", "kind": "main", "target": c4, "version": 3}])
     );
-    let back = json!({"name": "main", "new": "main~1", "expected_old": c4});
+    // A release ref moves back, which main never does (the M15 design §4).
+    server.ok(
+        "ref_set",
+        json!({"name": "release/a", "new": c4, "create": true}),
+    );
+    let back = json!({"name": "release/a", "new": "release/a~1", "expected_old": c4});
     server.ok("ref_set", back.clone());
     server.err("ref_set", back, "E_CAS_MISMATCH");
     assert_eq!(
         refs_of(server),
-        json!([{"name": "main", "kind": "main", "target": c2, "version": 4}])
+        json!([
+            {"name": "main", "kind": "main", "target": c4, "version": 3},
+            {"name": "release/a", "kind": "release", "target": c2, "version": 2},
+        ])
     );
-    server.ok(
-        "ref_set",
-        json!({"name": "release/a", "new": c1, "create": true}),
-    );
-    let delete = json!({"name": "release/a", "expected_old": c1});
+    let delete = json!({"name": "release/a", "expected_old": c2});
     let deleted = server.ok("ref_delete", delete.clone());
     assert_eq!(deleted["result"]["already_applied"], false);
     let gone = server.ok("ref_delete", delete);

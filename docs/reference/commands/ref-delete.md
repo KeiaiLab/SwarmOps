@@ -195,7 +195,7 @@ Exit codes:
 
 - [`E_IDENTITY_REQUIRED`](../errors.md#e_identity_required) (exit 5): A mutation was asked for without an identity.
 - [`E_CAS_MISMATCH`](../errors.md#e_cas_mismatch) (exit 4): The ref no longer holds the expected target (or, with `create`, exists at another one); `details.actual` holds what it does, `null` when the ref does not exist.
-- [`E_REF_PROTECTED`](../errors.md#e_ref_protected) (exit 1): `main` was asked to be deleted: it is never deleted (`details.name`).
+- [`E_REF_PROTECTED`](../errors.md#e_ref_protected) (exit 1): `main` was asked to be deleted, or moved off its first-parent history by `ref set` or `op undo`: it is never deleted, and moves only forward (`details.name`).
 
 Any command that opens a store may also fail with a store error, such as [`E_NOT_A_REPO`](../errors.md#e_not_a_repo), [`E_IO`](../errors.md#e_io) or [`E_STORE_CORRUPT`](../errors.md#e_store_corrupt); a command line the grammar refuses is [`E_INVALID_ARG`](../errors.md#e_invalid_arg) (exit 2).
 

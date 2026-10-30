@@ -153,8 +153,10 @@ error_codes! {
     /// A tag was asked to move from one target to another: a tag is created and deleted, never
     /// moved (`details.name`). Nothing was written.
     TagImmutable => "E_TAG_IMMUTABLE", EXIT_ERROR, false;
-    /// `main` was asked to be deleted: it is never deleted (`details.name`). Nothing was
-    /// written.
+    /// `main` was asked to be deleted, or moved off its first-parent history by `ref set` or
+    /// `op undo`: it is never deleted, and moves only forward (`details.name`). A move adds
+    /// `changeset` (the head it would drop) and `target`; an undo adds `op` and `id`. Nothing was
+    /// written; to take `main` back, land a change that reverts it.
     RefProtected => "E_REF_PROTECTED", EXIT_ERROR, false;
     // `git import` (M3): the source repository and its history.
     /// `git import` found no git repository it can open at `git_path` (`details.git_path`).

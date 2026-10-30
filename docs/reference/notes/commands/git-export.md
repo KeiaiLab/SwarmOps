@@ -100,7 +100,7 @@ commit it names (`git_head`), the source's head (`head_changeset`) and, for `bra
 | `branch_ahead` | Commits were made in git on top of the export of the head. | `swarmops git import <path> --ref refs/heads/<branch> --into <ref>`, then export again. |
 | `both_moved` | Commits were made in git on top of an older export, and the source moved too. | `git -C <path> log refs/heads/<branch>` shows the git side; `--force` replaces it. |
 | `branch_moved` | The branch names a commit that is no export of this history. | `git -C <path> log refs/heads/<branch>`; `--force` replaces it with the export. |
-| `source_moved_back` | The branch holds the export of a changeset that is no ancestor of the head, as after an `op undo` or a `ref set` backwards. | `swarmops op log` names what moved the source; `--force` moves the branch back. |
+| `source_moved_back` | The branch holds the export of a changeset that is no ancestor of the head, as after an `op undo` or a `ref set` that took a `release/<name>` source back. | `swarmops op log` names what moved the source; `--force` moves the branch back. |
 | `lossy_history` | The branch holds the original commits of a history imported with a loss. | Export to another branch, or `--force` replaces the originals. |
 | `moved_during_export` | Another writer moved the branch while the export wrote; `git_head` is null when it deleted it. | Run the same export again. What it wrote stays. |
 
@@ -126,9 +126,11 @@ git -C ~/src/acme.git push origin review
 the next export continues the branch; when it stops with `branch_ahead`, run the import its hint
 names, then export again.
 
-**Undo a landed change, in git too.** After `swarmops op undo` takes `main` back, the export stops
-with `source_moved_back`; `--force` moves the branch back to the export of the new head, and the
-push after it must be forced too.
+**Take a release back, in git too.** After `swarmops op undo` takes a `release/<name>` source back,
+the export stops with `source_moved_back`; `--force` moves the branch back to the export of the new
+head, and the push after it must be forced too. An undo never takes `main` back
+(`E_REF_PROTECTED`): land a change that reverts the landed one, and the export continues the
+branch.
 
 ### Concurrency and interruptions
 

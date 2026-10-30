@@ -2,7 +2,8 @@
 //! walk from a changeset back through its first parents ([`RepoRead::first_parents`]), the
 //! ancestor a number of first-parent steps back ([`RepoRead::ancestor`], which a revision's `~N`
 //! takes), whether one changeset is a first-parent ancestor of another
-//! ([`RepoRead::is_ancestor`]), and the newest changeset two first-parent chains share
+//! ([`RepoRead::is_ancestor`]), which a move of `main` must keep to
+//! ([`RepoRead::check_forward`]), and the newest changeset two first-parent chains share
 //! ([`RepoRead::merge_base`]). History is first-parent, as `log` is: a merge's other parents are
 //! not walked.
 //!
@@ -51,7 +52,7 @@ use std::fmt;
 use std::iter::FusedIterator;
 
 use swarmops_core::ChangesetId;
-use swarmops_store::{ChangesetMeta, ObjectStore, StoreError};
+use swarmops_store::{ChangesetMeta, ObjectStore, RefKind, StoreError, ref_kind};
 
 use crate::derive::{Derivation, FirstParentSkipList, SkipList};
 use crate::error::RepoError;
@@ -145,6 +146,39 @@ impl<O: ObjectStore> RepoRead<'_, O> {
     /// [`RepoError::DerivedCorrupt`] for a skip list that fails a lift's checks.
     pub fn is_ancestor(&self, ancestor: ChangesetId, of: ChangesetId) -> Result<bool, RepoError> {
         self.is_ancestor_within(ancestor, of, SKIP_AFTER)
+    }
+
+    /// Refuses a move of ref `name` from `old` to `new` that takes `main` off its first-parent
+    /// history (the M15 design §4): [`RepoError::HistoryProtected`], with no operation and
+    /// nothing recovered, when `old` is not [`RepoRead::is_ancestor`] of `new`. Only a move of
+    /// `main` is judged: a creation, a deletion (the store refuses that), no move, and every
+    /// other ref pass. A `new` of a generation at most `old`'s is refused from two index records.
+    /// [`RepoError::NotFound`] if the snapshot does not hold either.
+    pub fn check_forward(
+        &self,
+        name: &str,
+        old: Option<ChangesetId>,
+        new: Option<ChangesetId>,
+    ) -> Result<(), RepoError> {
+        // A move of main, both ends set and apart.
+        let (Some(head), Some(target)) = (old, new) else {
+            return Ok(());
+        };
+        if ref_kind(name) != Some(RefKind::Main) || head == target {
+            return Ok(());
+        }
+
+        // Forward: the head on the target's first-parent chain.
+        if self.is_ancestor(head, target)? {
+            return Ok(());
+        }
+        Err(RepoError::HistoryProtected {
+            name: name.to_owned(),
+            head,
+            target,
+            op: None,
+            recovered: Box::default(),
+        })
     }
 
     /// The newest changeset on the first-parent chains of both changesets `a` and `b` (either one

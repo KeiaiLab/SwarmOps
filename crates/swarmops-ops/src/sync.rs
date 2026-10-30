@@ -610,7 +610,7 @@ impl Syncing<'_, '_> {
             let remote = error::shell_word(&self.remote.name);
             e.hint = Some(error::hint(format!(
                 "main holds the landed changes: swarmops push {remote} main:<a branch of yours>, \
-                 then open a pull request; swarmops op undo takes main back"
+                 then open a pull request; to take main back, land a change that reverts them"
             )));
         }
         e

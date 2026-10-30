@@ -16,7 +16,7 @@ identity_required: true
 mcp_tool: "undo"
 envelope_op: "undo"
 exit_codes: [0, 1, 2, 6]
-errors: [E_INVALID_ARG, E_NOTHING_TO_UNDO, E_OP_NOT_FOUND]
+errors: [E_INVALID_ARG, E_NOTHING_TO_UNDO, E_OP_NOT_FOUND, E_REF_PROTECTED]
 syntax: "swarmops op undo [OPTIONS] <OP>"
 ```
 
@@ -57,7 +57,7 @@ swarmops --repo [tmp]/store --as agent/worker-17 op undo 3:[crc]
     "id": "4:[crc]",
     "ref_moves": [
       {
-        "name": "main",
+        "name": "release/r",
         "old": "[c2]",
         "new": "[c1]",
         "actor": "agent/worker-17",
@@ -88,10 +88,11 @@ back to what it named before `OP`, in one transaction of its own, all of them or
 `OP` by its id as `op log` prints it, `<op>:<crc>` (`4:9f3a01c2`): the operation's number and the
 CRC-32 of its journal frame, so an id names one operation and no other. It moves
 refs only. Changesets are never removed, so whatever an undo takes off a ref stays in the store,
-readable by id. Use it to take back a mistaken `ref set`, a publish or a land that should not
-have reached `main`, a deletion or a creation of a ref. An undo of `main`'s creation would
-delete `main`, which is never deleted: it is refused whole with `E_REF_PROTECTED` (exit 1), and
-nothing is written.
+readable by id. Use it to take back a mistaken move, deletion or creation of a `release/<name>`
+ref. `main` is never deleted and moves only forward (the M15 design §4): an undo of `main`'s
+creation, or one that would move `main` off its first-parent history, such as the undo of a
+publish, a land or a `ref set` on `main`, is refused whole with `E_REF_PROTECTED` (exit 1), and
+nothing is written. To take `main` back, land a change that reverts it.
 
 ### What it restores
 
@@ -101,7 +102,7 @@ ref, in the order of `OP`'s moves, from `OP`'s `new` back to its `old`:
 
 | What `OP` did to the ref | What the undo does |
 | --- | --- |
-| Moved it from `A` to `B` (`ref set`, a publish, a land) | Moves it from `B` back to `A` |
+| Moved it from `A` to `B` (`ref set`, a publish, a land) | Moves it from `B` back to `A` (`main`: only when `B` is a first-parent ancestor of `A`; otherwise the whole undo is refused, `E_REF_PROTECTED`) |
 | Created it at `B` | Deletes it (`main`: the whole undo is refused, `E_REF_PROTECTED`) |
 | Deleted it, from `A` | Creates it again at `A`, with `version` 1 |
 
@@ -118,6 +119,12 @@ journal's tail, then compares each ref:
 
 With every ref skipped, nothing is written either: the result says `already_applied: true`, has
 no `op`, and lists no moves. So running the same undo again is safe.
+
+A move of `main` that the comparison keeps is judged last, under the same lock: one that would
+take `main` off its first-parent history refuses the whole undo with `E_REF_PROTECTED` (exit 1),
+and nothing is written. Its details are `name`, `changeset` (the head the undo would drop),
+`target`, `op` and `id`; an undo that would delete `main` gives `name` only. The hint is the way
+back: land a change that reverts it.
 
 Before the comparison:
 
@@ -157,10 +164,10 @@ its id in `id`. Its moves name the undoer as `actor` and carry the undo's time. 
 
 ### Patterns
 
-Take back the newest move of `main`:
+Take back the newest move of `release/1.0`:
 
 ```sh
-ID=$(swarmops op log | jq -r '[.result.ops[] | select(any(.ref_moves[]; .name == "main"))][0].id')
+ID=$(swarmops op log | jq -r '[.result.ops[] | select(any(.ref_moves[]; .name == "release/1.0"))][0].id')
 swarmops op log --before $((${ID%%:*} + 1)) -n 1 | jq -c '.result.ops[0]'
 swarmops op undo "$ID"
 ```
@@ -183,7 +190,7 @@ already; otherwise `ref_moves` lists each move made, and `op` and `id` are the u
 - **It is not a revert.** An undo moves refs; it does not record a change that reverses the
   files. After it, the changesets `OP` added are on no ref, yet still in the store.
 - **Land keys.** A keyed land looks for an earlier land of its key on the target's
-  first-parent chain. A land that an undo took off `main` is no longer there, so the same
+  first-parent chain. A land that an undo took off a `release/<name>` ref is no longer there, so the same
   `land --key` run again lands once more (`status: landed`, not `replayed`).
 - **Durability and the lock** work as for [`ref set`](../commands/ref-set.md#after-the-move):
   the undo commits when its frame is durable, `warnings` reports a later step that failed, and a
@@ -227,6 +234,7 @@ Exit codes:
 - [`E_INVALID_ARG`](../errors.md#e_invalid_arg) (exit 2): A malformed argument or request, including a command-line usage error.
 - [`E_NOTHING_TO_UNDO`](../errors.md#e_nothing_to_undo) (exit 1): The operation moved no ref, so there is nothing to restore.
 - [`E_OP_NOT_FOUND`](../errors.md#e_op_not_found) (exit 6): The store has no operation with that id.
+- [`E_REF_PROTECTED`](../errors.md#e_ref_protected) (exit 1): `main` was asked to be deleted, or moved off its first-parent history by `ref set` or `op undo`: it is never deleted, and moves only forward (`details.name`).
 
 Any command that opens a store may also fail with a store error, such as [`E_NOT_A_REPO`](../errors.md#e_not_a_repo), [`E_IO`](../errors.md#e_io) or [`E_STORE_CORRUPT`](../errors.md#e_store_corrupt); a command line the grammar refuses is [`E_INVALID_ARG`](../errors.md#e_invalid_arg) (exit 2).
 

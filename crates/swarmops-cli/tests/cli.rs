@@ -693,16 +693,17 @@ fn a_move_to_the_current_target_is_a_replay() {
         list["result"]["refs"][0]["version"].clone()
     };
 
-    set(&mut s, &["main", &c1, "--create"]);
-    let moved = set(&mut s, &["main", &c2, "--expect", &c1]);
+    // A release ref: `main` never moves back (the M15 design §4).
+    set(&mut s, &["release/r", &c1, "--create"]);
+    let moved = set(&mut s, &["release/r", &c2, "--expect", &c1]);
     assert_eq!(moved["result"]["already_applied"], false);
     assert_eq!(version(&mut s), 2);
     let written = fs::metadata(&journal).unwrap().len();
     for expect in [&c1, &c1, &c2, &c2] {
-        let replay = set(&mut s, &["main", &c2, "--expect", expect]);
+        let replay = set(&mut s, &["release/r", &c2, "--expect", expect]);
         assert_eq!(
             replay["result"],
-            json!({"name": "main", "old": expect, "new": c2, "already_applied": true}),
+            json!({"name": "release/r", "old": expect, "new": c2, "already_applied": true}),
             "--expect {expect}"
         );
         assert_eq!(version(&mut s), 2, "--expect {expect}");
@@ -712,7 +713,7 @@ fn a_move_to_the_current_target_is_a_replay() {
             "nothing written"
         );
     }
-    let back = set(&mut s, &["main", &c1, "--expect", &c2]);
+    let back = set(&mut s, &["release/r", &c1, "--expect", &c2]);
     assert_eq!(back["result"]["already_applied"], false);
     assert_eq!(version(&mut s), 3);
     assert!(fs::metadata(&journal).unwrap().len() > written);
@@ -1907,6 +1908,11 @@ fn error_cases(
             "E_REF_PROTECTED",
             on(&["ref", "delete", "main", "--expect", c1]),
         ),
+        // main names c1 already, but the pair asks it back from c2: refused before the CAS.
+        (
+            "E_REF_PROTECTED",
+            on(&["ref", "set", "main", c1, "--expect", c2]),
+        ),
         // Operation 0 is the first commit, which moved no ref; the store has three.
         ("E_NOTHING_TO_UNDO", on(&["op", "undo", op0])),
         ("E_OP_NOT_FOUND", on(&["op", "undo", "99:00000000"])),
@@ -2246,14 +2252,22 @@ fn op_log_pages_with_before() {
         assert_eq!(reply.exit, 0, "{args:?}: {}", reply.json);
         reply
     };
-    let mut create = on(&["ref", "set", "main"]);
+    // A release ref: an undo never takes `main` back (the M15 design §4).
+    let mut create = on(&["ref", "set", "release/r"]);
     create.extend([c1.clone(), "--create".to_owned()]);
     run(&mut s, create); // op 1
     let list = json!([{"path": "b.txt", "op": "put", "content": {"inline": "b\n"}}]);
     let changes = s.file("c2.json", &list.to_string());
     let mut publish = on(&["commit", "-m", "c2\n\nthe body"]);
-    publish
-        .extend(["--changes", &changes, "--parent", &c1, "--advance", "main"].map(str::to_owned));
+    let advance = [
+        "--changes",
+        &changes,
+        "--parent",
+        &c1,
+        "--advance",
+        "release/r",
+    ];
+    publish.extend(advance.map(str::to_owned));
     let published = run(&mut s, publish); // op 2
     let c2 = s.name_at(&published, "/result/changeset", "c2");
     let op2 = Session::op_id(&store, 2);
@@ -2285,7 +2299,7 @@ fn op_log_pages_with_before() {
             "kind": "publish",
             "changesets": [{"id": c2, "agent": AGENT, "created_at": created_at, "title": "c2"}],
             "changesets_total": 1,
-            "ref_moves": [{"name": "main", "old": c1, "new": c2, "actor": AGENT, "at": at}],
+            "ref_moves": [{"name": "release/r", "old": c1, "new": c2, "actor": AGENT, "at": at}],
         })
     );
     let undo_move = &ops[0]["ref_moves"][0];
@@ -2381,18 +2395,19 @@ fn op_undo_end_to_end() {
             AGENT,
             "ref",
             "set",
-            "main",
+            "release/r",
             new,
         ];
         args.extend(from);
         assert_eq!(s.run(&args).exit, 0);
     };
+    // A release ref: an undo never takes `main` back (the M15 design §4).
     set(&mut s, &c1, &["--create"]); // op 2
     set(&mut s, &c2, &["--expect", &c1]); // op 3
     let undo = |s: &mut Session, op: &str| {
         s.run(&["--repo", store.as_str(), "--as", UNDOER, "op", "undo", op])
     };
-    let main = |s: &mut Session| {
+    let release = |s: &mut Session| {
         let refs = s.run(&["--repo", store.as_str(), "ref", "list"]);
         refs["result"]["refs"][0]["target"].clone()
     };
@@ -2413,12 +2428,12 @@ fn op_undo_end_to_end() {
             "undone": 3,
             "op": 4,
             "id": op4,
-            "ref_moves": [{"name": "main", "old": c2, "new": c1, "actor": UNDOER, "at": at}],
+            "ref_moves": [{"name": "release/r", "old": c2, "new": c1, "actor": UNDOER, "at": at}],
             "already_applied": false,
         })
     );
     assert!(undone["meta"].get("recovered").is_none(), "{}", undone.json);
-    assert_eq!(main(&mut s), c1.as_str());
+    assert_eq!(release(&mut s), c1.as_str());
     let again = undo(&mut s, &op3);
     assert_eq!(
         again["result"],
@@ -2431,24 +2446,24 @@ fn op_undo_end_to_end() {
         (&json!(4), &json!("ref_move"))
     );
     assert_eq!(newest["ref_moves"], undone["result"]["ref_moves"]);
-    // The undo is an operation of its own, and undoing it moves main forward again.
+    // The undo is an operation of its own, and undoing it moves release/r forward again.
     let redone = undo(&mut s, &op4);
     assert_eq!(redone["result"]["op"], 5);
-    assert_eq!(main(&mut s), c2.as_str());
+    assert_eq!(release(&mut s), c2.as_str());
 
-    // Moved since: main names c3 now, neither what operation 3 set nor what it found.
+    // Moved since: release/r names c3 now, neither what operation 3 set nor what it found.
     let c3 = s.commit(&store, Some(&c2), "a.txt", "3\n", "c3"); // op 6
     set(&mut s, &c3, &["--expect", &c2]); // op 7
     let blocked = undo(&mut s, &op3);
     assert_eq!((blocked.exit, blocked.code()), (4, "E_CAS_MISMATCH"));
     assert_eq!(
         blocked["error"]["details"],
-        json!({"name": "main", "actual": c3, "op": 3})
+        json!({"name": "release/r", "actual": c3, "op": 3})
     );
     let message = blocked["error"]["message"].as_str().unwrap();
     assert!(message.contains("newest first"), "{message}");
     assert_eq!(blocked["error"]["hint"], "swarmops op log");
-    assert_eq!(main(&mut s), c3.as_str());
+    assert_eq!(release(&mut s), c3.as_str());
     let listed = s.run(&["--repo", store.as_str(), "op", "log", "-n", "1"]);
     assert_eq!(listed["result"]["ops"][0]["op"], 7, "nothing written");
 
@@ -2462,11 +2477,86 @@ fn op_undo_end_to_end() {
         (anonymous.exit, anonymous.code()),
         (5, "E_IDENTITY_REQUIRED")
     );
-    assert_eq!(main(&mut s), c3.as_str());
+    assert_eq!(release(&mut s), c3.as_str());
     assert_eq!(
         s.run(&["--repo", store.as_str(), "verify", "--deep"]).exit,
         0
     );
+}
+
+/// `main` moves only forward (the M15 design §4): `ref set` back and `op undo` of a land are
+/// `E_REF_PROTECTED` (exit 1) naming the head and the target, and the op log is unchanged.
+#[test]
+fn main_never_moves_back() {
+    let mut s = Session::new();
+    let store = s.store();
+    s.run(&["init", &store]);
+    let c1 = s.commit(&store, None, "a.txt", "1\n", "c1");
+    let set = [
+        "--repo",
+        store.as_str(),
+        "--as",
+        AGENT,
+        "ref",
+        "set",
+        "main",
+    ];
+    let created = s.run(&[&set[..], &[c1.as_str(), "--create"]].concat());
+    assert_eq!(created.exit, 0, "{}", created.json);
+    let head = s.commit(&store, Some(&c1), "b.txt", "2\n", "c2");
+    let landing = [
+        "--repo",
+        store.as_str(),
+        "--as",
+        AGENT,
+        "land",
+        head.as_str(),
+    ];
+    let land = s.run(&landing);
+    assert_eq!(land.exit, 0, "{}", land.json);
+    let landed = land["result"]["landed"].as_str().unwrap().to_owned();
+    let newest = |s: &mut Session| {
+        let listed = s.run(&["--repo", store.as_str(), "op", "log", "-n", "1"]);
+        listed["result"]["ops"][0].clone()
+    };
+    let before = newest(&mut s);
+    let id = before["id"].as_str().unwrap().to_owned();
+
+    // 1. ref set back.
+    let back = s.run(&[&set[..], &[c1.as_str(), "--expect", landed.as_str()]].concat());
+    assert_eq!(
+        (back.exit, back.code()),
+        (1, "E_REF_PROTECTED"),
+        "{}",
+        back.json
+    );
+    assert_eq!(
+        back["error"]["details"],
+        json!({"name": "main", "changeset": landed, "target": c1})
+    );
+
+    // 2. op undo of the land.
+    let undo = [
+        "--repo",
+        store.as_str(),
+        "--as",
+        AGENT,
+        "op",
+        "undo",
+        id.as_str(),
+    ];
+    let undone = s.run(&undo);
+    assert_eq!(
+        (undone.exit, undone.code()),
+        (1, "E_REF_PROTECTED"),
+        "{}",
+        undone.json
+    );
+    assert_eq!(
+        undone["error"]["details"],
+        json!({"name": "main", "changeset": landed, "target": c1, "op": before["op"], "id": id})
+    );
+    assert_eq!(newest(&mut s), before, "the op log is unchanged");
 }
 
 /// `op undo` refuses an id it cannot trust, writing nothing: one past the last operation or
@@ -2945,25 +3035,43 @@ fn blob_put_has_golden() {
 }
 
 /// `op log` lists the store's operations newest first, with the changesets each recorded and
-/// the refs it moved; `op undo` moves a move back, in an operation of its own.
+/// the refs it moved; `op undo` moves a move back, in an operation of its own. An undo that
+/// would take `main` back is `E_REF_PROTECTED` (the M15 design §4).
 #[test]
 fn op_log_undo_golden() {
     let mut s = Session::new();
     let store = s.store();
     let init = s.run(&["init", &store]);
     s.name_at(&init, "/result/repo_id", "repo_id");
+    let set = |name: &str, new: &str, from: &[&str]| -> Vec<String> {
+        [
+            "--repo",
+            store.as_str(),
+            "--as",
+            AGENT,
+            "ref",
+            "set",
+            name,
+            new,
+        ]
+        .iter()
+        .chain(from)
+        .map(|arg| (*arg).to_owned())
+        .collect()
+    };
+    let run = |s: &mut Session, args: Vec<String>| {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        s.run(&args)
+    };
 
-    // 1. Four operations: a commit, main's creation, a commit, main's move to it.
+    // 1. Four operations: a commit, release/r's creation, a commit, release/r's move to it.
     let c1 = s.commit(&store, None, "a.txt", "a\n", "c1");
-    let create = [
-        "--repo", &store, "--as", AGENT, "ref", "set", "main", &c1, "--create",
-    ];
-    assert_eq!(s.run(&create).exit, 0);
+    assert_eq!(run(&mut s, set("release/r", &c1, &["--create"])).exit, 0);
     let c2 = s.commit(&store, Some(&c1), "b.txt", "b\n", "c2");
-    let mv = [
-        "--repo", &store, "--as", AGENT, "ref", "set", "main", &c2, "--expect", &c1,
-    ];
-    assert_eq!(s.run(&mv).exit, 0);
+    assert_eq!(
+        run(&mut s, set("release/r", &c2, &["--expect", &c1])).exit,
+        0
+    );
 
     // 2. The log, then the undo of the move (operation 3), then the newest operation.
     let log = s.run(&["--repo", &store, "op", "log"]);
@@ -2973,6 +3081,18 @@ fn op_log_undo_golden() {
     assert_eq!(undo.exit, 0, "{}", undo.json);
     let newest = s.run(&["--repo", &store, "op", "log", "-n", "1"]);
     assert_eq!(newest["result"]["ops"][0]["op"], 4, "{}", newest.json);
+
+    // 3. main moves only forward: the undo of its move (operation 6) is refused.
+    assert_eq!(run(&mut s, set("main", &c1, &["--create"])).exit, 0);
+    assert_eq!(run(&mut s, set("main", &c2, &["--expect", &c1])).exit, 0);
+    let op6 = Session::op_id(&store, 6);
+    let refused = s.run(&["--repo", &store, "--as", AGENT, "op", "undo", &op6]);
+    assert_eq!(
+        (refused.exit, refused.code()),
+        (1, "E_REF_PROTECTED"),
+        "{}",
+        refused.json
+    );
 
     insta::assert_json_snapshot!(s.transcript());
 }

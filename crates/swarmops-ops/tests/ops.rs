@@ -1031,6 +1031,101 @@ fn undo_of_mains_creation_is_refused_whole() {
     assert_eq!(frame_count(&root), frames, "nothing written");
 }
 
+/// The hint of a refused move of `main` (the M15 design §4).
+const FORWARD_HINT: &str = "main moves only forward: land a change that takes it back";
+
+/// `ref set` moves `main` only forward along first parents (the M15 design §4): back, sideways,
+/// and a request whose pair is backward though `main` names its target already are
+/// `E_REF_PROTECTED` (exit 1, not retryable) naming the head and the target, with nothing
+/// written. A forward move goes through, and the same backward move of `release/r` too.
+#[test]
+fn ref_set_moving_main_back_is_refused() {
+    let (_dir, root, ops) = new_store();
+    let who = agent();
+    let c1 = commit(&ops, None, vec![text("f", "1")]);
+    let c2 = commit(&ops, Some(&c1), vec![text("f", "2")]);
+    let c3 = commit(&ops, Some(&c2), vec![text("f", "3")]);
+    let x = commit(&ops, Some(&c1), vec![text("f", "x")]);
+    ops.ref_set(&who, set("main", &c1, None, true)).unwrap();
+    ops.ref_set(&who, set("main", &c2, Some(&c1), false))
+        .unwrap();
+    let frames = frame_count(&root);
+
+    // 1. Back, sideways, and a backward pair whose target main names already: refused.
+    for (new, head) in [(&c1, &c2), (&x, &c2), (&c2, &c3)] {
+        let refused = ops.ref_set(&who, set("main", new, Some(head), false));
+        let err = expect_err(refused, ErrorCode::RefProtected);
+        assert_eq!((err.exit, err.retryable), (1, false), "{err:?}");
+        let expected = json!({"name": "main", "changeset": head, "target": new});
+        assert_eq!(Value::Object(err.details.clone()), expected, "{err:?}");
+        assert_eq!(err.hint.as_deref(), Some(FORWARD_HINT));
+    }
+    assert_eq!(ref_target(&ops, "main"), c2);
+    assert_eq!(frame_count(&root), frames, "nothing written");
+
+    // 2. Forward: moved.
+    ops.ref_set(&who, set("main", &c3, Some(&c2), false))
+        .unwrap();
+    assert_eq!(ref_target(&ops, "main"), c3);
+
+    // 3. Another ref moves back.
+    ops.ref_set(&who, set("release/r", &c2, None, true))
+        .unwrap();
+    ops.ref_set(&who, set("release/r", &c1, Some(&c2), false))
+        .unwrap();
+    assert_eq!(ref_target(&ops, "release/r"), c1);
+}
+
+/// An undo of a land would take `main` back: it is `E_REF_PROTECTED` naming the operation, its
+/// id as asked, the landed head and the head before (the M15 design §4). Nothing is written,
+/// and what the undo's write repaired first is recorded.
+#[test]
+fn undo_of_a_land_is_refused_whole() {
+    use std::sync::Arc;
+    use swarmops_testkit::fs::FailingFs;
+
+    let (_dir, root, ops) = new_store();
+    let who = agent();
+    let c1 = commit(&ops, None, vec![text("f", "1")]);
+    ops.ref_set(&who, set("main", &c1, None, true)).unwrap();
+    let head = commit(&ops, Some(&c1), vec![text("g", "g")]);
+    let land = serde_json::from_value(json!({"head": head})).expect("a land request");
+    let landed = ops.land(&who, land).unwrap().landed;
+    let listed = ops.op_log(OpLogReq::default()).unwrap().ops.remove(0);
+    let (op, id) = (listed.op, listed.id);
+
+    // 1. A frame committed and not listed, for the undo's write to repair.
+    let fs = FailingFs::new(|method, p| {
+        method == "append_durable" && p.extension().is_some_and(|ext| ext == "off")
+    });
+    let repo = LocalRepo::open_with_fs(&root, Arc::new(fs)).unwrap();
+    let c1_id = ChangesetId::new(c1.parse().unwrap());
+    let moved = repo
+        .cas_ref("release/r", None, Some(c1_id), "agent/one")
+        .unwrap();
+    assert_eq!(moved.warnings.len(), 1, "{moved:?}");
+
+    // 2. The undo is refused, and records the repair.
+    let resolved = Resolved::default();
+    let refused = ops.recording(&resolved).undo(&who, UndoReq::new(&id));
+    let err = expect_err(refused, ErrorCode::RefProtected);
+    assert_eq!((err.exit, err.retryable), (1, false), "{err:?}");
+    let expected = json!({
+        "name": "main",
+        "changeset": landed,
+        "target": c1,
+        "op": op,
+        "id": id,
+    });
+    assert_eq!(Value::Object(err.details.clone()), expected, "{err:?}");
+    assert_eq!(err.hint.as_deref(), Some(FORWARD_HINT));
+    let recovered = resolved.take_recovered().expect("its write repaired");
+    assert_eq!(recovered.frames_listed, 1, "{recovered:?}");
+    assert_eq!(ref_target(&ops, "main"), landed);
+    let newest = ops.op_log(OpLogReq::default()).unwrap().ops.remove(0);
+    assert_eq!(newest.op, op + 1, "no frame after the repaired one");
+}
+
 /// An undo refused under the lock records what its write repaired first (a frame an earlier
 /// writer committed and failed to list), as a ref move's refusal does: `E_OP_NOT_FOUND` and
 /// `E_NOTHING_TO_UNDO` alike.
@@ -1052,7 +1147,7 @@ fn a_refused_undo_records_what_its_write_repaired() {
         });
         let repo = LocalRepo::open_with_fs(&root, Arc::new(fs)).unwrap();
         let moved = repo
-            .cas_ref("main", old.map(id), Some(id(new)), "agent/one")
+            .cas_ref("release/r", old.map(id), Some(id(new)), "agent/one")
             .unwrap();
         assert_eq!(moved.warnings.len(), 1, "{moved:?}");
     };
@@ -1080,11 +1175,11 @@ fn a_refused_undo_records_what_its_write_repaired() {
         );
     }
     let resolved = Resolved::default();
-    let main = ops
+    let undone = ops
         .recording(&resolved)
         .undo(&who, UndoReq::new(op_id(&ops, 3)))
         .unwrap();
-    assert_eq!(main.op, Some(4), "{main:?}");
+    assert_eq!(undone.op, Some(4), "{undone:?}");
     assert_eq!(resolved.take_recovered(), None, "nothing left to repair");
 }
 
@@ -1777,12 +1872,18 @@ mod commit_key {
         let (_dir, _root, ops) = new_store();
         let who = agent();
         let c1 = commit(&ops, None, vec![text("f", "1")]);
-        ops.ref_set(&who, set("main", &c1, None, true)).unwrap();
+        ops.ref_set(&who, set("release/r", &c1, None, true))
+            .unwrap();
         let key = key_at(KEY_MS, 9);
-        let request = || keyed_advancing(Some(&c1), vec![text("f", "2")], &key);
+        // `main` never moves back (the M15 design §4): a release ref does.
+        let request = || {
+            let mut req = keyed_advancing(Some(&c1), vec![text("f", "2")], &key);
+            req.advance = Some("release/r".to_owned());
+            req
+        };
         let first = ops.commit(&who, request()).unwrap();
         let c2 = first.changeset.clone();
-        ops.ref_set(&who, set("main", &c1, Some(&c2), false))
+        ops.ref_set(&who, set("release/r", &c1, Some(&c2), false))
             .unwrap();
 
         let again = ops.commit(&who, request()).unwrap();
@@ -1790,7 +1891,9 @@ mod commit_key {
         moved_again.blobs_written = 0;
         assert_eq!(again, moved_again);
         let info = ops.repo_info(InfoReq::default()).unwrap();
-        assert_eq!((info.changesets, info.main), (2, Some(c2)));
+        assert_eq!(info.changesets, 2);
+        let head = ops.resolve_rev(swarmops_api::ResolveRevReq::new("release/r"));
+        assert_eq!(head.unwrap().id, c2);
     }
 
     /// What `commit --key` leaves open (known limitations): a keyed commit that names no parent

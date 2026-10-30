@@ -51,7 +51,7 @@ A failed command prints an envelope whose `error` names a stable `E_*` code, the
 | [`E_MAINTENANCE_BUSY`](#e_maintenance_busy) | 4 | yes | Another gc, repair or upgrade holds the store's maintenance lease; nothing was done, and running the operation again once it is done can succeed. |
 | [`E_FORMAT_REQUIRED`](#e_format_required) | 1 | no | The ref name is one the store's format does not take but a later one does: `details` names `name`, `needs` (the format that takes it) and `store` (the store's); `swarmops upgrade` moves the store to it. |
 | [`E_TAG_IMMUTABLE`](#e_tag_immutable) | 1 | no | A tag was asked to move from one target to another: a tag is created and deleted, never moved (`details.name`). |
-| [`E_REF_PROTECTED`](#e_ref_protected) | 1 | no | `main` was asked to be deleted: it is never deleted (`details.name`). |
+| [`E_REF_PROTECTED`](#e_ref_protected) | 1 | no | `main` was asked to be deleted, or moved off its first-parent history by `ref set` or `op undo`: it is never deleted, and moves only forward (`details.name`). |
 | [`E_GIT_NOT_A_REPO`](#e_git_not_a_repo) | 6 | no | `git import` found no git repository it can open at `git_path` (`details.git_path`). |
 | [`E_GIT_REF_NOT_FOUND`](#e_git_ref_not_found) | 6 | no | `git import`: the source repository has no `git_ref`, or it names no commit (`details.git_ref`; `details.kind` the object it names instead, such as a tree). |
 | [`E_GIT_IMPORT_DIVERGED`](#e_git_import_diverged) | 3 | no | `git import`: the target ref's head is not the import of `git_ref`'s commit or of an ancestor of it, because the source was rewritten, `git_ref` is behind the commit the head holds, or a native changeset was committed on the target, so nothing was written; there is no silent merge. |
@@ -266,7 +266,7 @@ A tag was asked to move from one target to another: a tag is created and deleted
 
 Exit 1. Retryable: no.
 
-`main` was asked to be deleted: it is never deleted (`details.name`). Nothing was written.
+`main` was asked to be deleted, or moved off its first-parent history by `ref set` or `op undo`: it is never deleted, and moves only forward (`details.name`). A move adds `changeset` (the head it would drop) and `target`; an undo adds `op` and `id`. Nothing was written; to take `main` back, land a change that reverts it.
 
 ## E_GIT_NOT_A_REPO
 

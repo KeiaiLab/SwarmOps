@@ -30,6 +30,10 @@
 //! - a ref that names neither blocks the undo ([`RepoError::UndoBlocked`]): a later operation
 //!   moved it. The transaction is dropped, so nothing is written, the other refs' moves
 //!   included;
+//! - a move of `main` that takes it off its first-parent history refuses the undo the same way
+//!   ([`RepoError::HistoryProtected`], the M15 design §4): the undo of a land, of
+//!   `commit --advance` or of a forward `ref set` takes `main` back. It is judged on a snapshot
+//!   read under the lock, only for a move the compare-and-swap queued;
 //! - with every ref skipped, nothing is written either: the undo is a replay
 //!   ([`UndoOutcome::already_applied`]).
 //!
@@ -43,7 +47,9 @@ use std::fmt;
 use std::str::FromStr;
 
 use swarmops_core::ChangesetId;
-use swarmops_store::{CasResult, Frame, ObjectStore, Record, Recovered, StoreError};
+use swarmops_store::{
+    CasResult, Frame, ObjectStore, Record, Recovered, RefKind, StoreError, ref_kind,
+};
 
 use crate::error::RepoError;
 use crate::repo::{self, Repo};
@@ -272,7 +278,14 @@ impl<O: ObjectStore> Repo<O> {
                 .cas_ref(&name, new, old, actor)
                 .map_err(repo::ref_error)?
             {
-                CasResult::Applied { .. } => {}
+                // Queued: a move of main keeps to its first-parent history, judged on a snapshot
+                // read under the lock (main moves once in a frame's net moves). Returning drops
+                // the write, as for a block.
+                CasResult::Applied { .. } => {
+                    if let Err(e) = self.undo_forward(&name, new, old) {
+                        return Err(protected(e, id, recovered));
+                    }
+                }
                 // Back where the operation found it already: nothing to move.
                 CasResult::Mismatch { actual } if actual == old => {}
                 // Moved since. Returning drops the write, which appends nothing and releases the
@@ -336,6 +349,37 @@ impl<O: ObjectStore> Repo<O> {
             warnings,
             recovered,
         })
+    }
+
+    /// The queued undo move of `name` from `head` to `target`, if `name` is `main`, judged by
+    /// [`crate::RepoRead::check_forward`] on a snapshot read under the write's lock.
+    fn undo_forward(
+        &self,
+        name: &str,
+        head: Option<ChangesetId>,
+        target: Option<ChangesetId>,
+    ) -> Result<(), RepoError> {
+        if ref_kind(name) != Some(RefKind::Main) {
+            return Ok(());
+        }
+        self.snapshot()?.check_forward(name, head, target)
+    }
+}
+
+/// `e`, a refusal of [`crate::RepoRead::check_forward`], as the refusal of the undo of
+/// operation `id`, reporting what its write repaired first; any other error as it is.
+fn protected(e: RepoError, id: OpId, recovered: Recovered) -> RepoError {
+    match e {
+        RepoError::HistoryProtected {
+            name, head, target, ..
+        } => RepoError::HistoryProtected {
+            name,
+            head,
+            target,
+            op: Some(id),
+            recovered: Box::new(recovered),
+        },
+        other => other,
     }
 }
 

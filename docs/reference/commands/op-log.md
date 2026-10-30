@@ -75,7 +75,7 @@ swarmops --repo [tmp]/store op log
         "changesets_total": 0,
         "ref_moves": [
           {
-            "name": "main",
+            "name": "release/r",
             "old": "[c1]",
             "new": "[c2]",
             "actor": "agent/worker-17",
@@ -106,7 +106,7 @@ swarmops --repo [tmp]/store op log
         "changesets_total": 0,
         "ref_moves": [
           {
-            "name": "main",
+            "name": "release/r",
             "new": "[c1]",
             "actor": "agent/worker-17",
             "at": "[at]"

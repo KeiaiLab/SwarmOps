@@ -48,14 +48,14 @@ expression: s.transcript()
     }
   },
   {
-    "args": "--repo [tmp]/store --as agent/worker-17 ref set main [c1] --create",
+    "args": "--repo [tmp]/store --as agent/worker-17 ref set release/r [c1] --create",
     "exit": 0,
     "stdout": {
       "ok": true,
       "op": "ref_set",
       "api": 1,
       "result": {
-        "name": "main",
+        "name": "release/r",
         "new": "[c1]",
         "already_applied": false
       },
@@ -95,14 +95,14 @@ expression: s.transcript()
     }
   },
   {
-    "args": "--repo [tmp]/store --as agent/worker-17 ref set main [c2] --expect [c1]",
+    "args": "--repo [tmp]/store --as agent/worker-17 ref set release/r [c2] --expect [c1]",
     "exit": 0,
     "stdout": {
       "ok": true,
       "op": "ref_set",
       "api": 1,
       "result": {
-        "name": "main",
+        "name": "release/r",
         "old": "[c1]",
         "new": "[c2]",
         "already_applied": false
@@ -135,7 +135,7 @@ expression: s.transcript()
             "changesets_total": 0,
             "ref_moves": [
               {
-                "name": "main",
+                "name": "release/r",
                 "old": "[c1]",
                 "new": "[c2]",
                 "actor": "agent/worker-17",
@@ -166,7 +166,7 @@ expression: s.transcript()
             "changesets_total": 0,
             "ref_moves": [
               {
-                "name": "main",
+                "name": "release/r",
                 "new": "[c1]",
                 "actor": "agent/worker-17",
                 "at": "[at]"
@@ -212,7 +212,7 @@ expression: s.transcript()
         "id": "4:[crc]",
         "ref_moves": [
           {
-            "name": "main",
+            "name": "release/r",
             "old": "[c2]",
             "new": "[c1]",
             "actor": "agent/worker-17",
@@ -246,7 +246,7 @@ expression: s.transcript()
             "changesets_total": 0,
             "ref_moves": [
               {
-                "name": "main",
+                "name": "release/r",
                 "old": "[c2]",
                 "new": "[c1]",
                 "actor": "agent/worker-17",
@@ -256,6 +256,81 @@ expression: s.transcript()
           }
         ],
         "truncated": true
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ref set main [c1] --create",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "ref_set",
+      "api": 1,
+      "result": {
+        "name": "main",
+        "new": "[c1]",
+        "already_applied": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ref set main [c2] --expect [c1]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "ref_set",
+      "api": 1,
+      "result": {
+        "name": "main",
+        "old": "[c1]",
+        "new": "[c2]",
+        "already_applied": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]",
+          "[c2]": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 op undo 6:[crc]",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "undo",
+      "api": 1,
+      "error": {
+        "code": "E_REF_PROTECTED",
+        "message": "main moves only forward: [c2] is not a first-parent ancestor of [c1] (the undo of operation 6:[crc]), so nothing was written",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "changeset": "[c2]",
+          "id": "6:[crc]",
+          "name": "main",
+          "op": 6,
+          "target": "[c1]"
+        },
+        "hint": "main moves only forward: land a change that takes it back"
       },
       "meta": {
         "repo": "[tmp]/store",

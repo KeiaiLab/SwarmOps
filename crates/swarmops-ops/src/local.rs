@@ -1823,6 +1823,11 @@ impl StoreOps for Recording<'_> {
             Some(rev) => Some(self.resolve(&read, rev)?),
             None => None,
         };
+        // main moves only forward: the pair the request names, judged on its snapshot. Ancestry
+        // never changes, so a move of main since is the compare-and-swap's to catch.
+        read.check_forward(&name, expected, Some(new))
+            .map_err(error::op)?;
+
         // Every move is compared under the lock, after the write's tail check, never on a reader's
         // snapshot, which can show another writer's frame before its sync. A ref that holds `new`
         // already is a replay, whatever `expected` says: a mismatch whose actual target is `new`,
@@ -1920,17 +1925,19 @@ impl StoreOps for Recording<'_> {
         })?;
         let outcome = self.ops.repo.undo(id, who.agent()).map_err(|e| {
             // An undo refused under the lock (E_CAS_MISMATCH, E_OP_NOT_FOUND,
-            // E_NOTHING_TO_UNDO) reports what the write repaired first, as a ref move's does.
+            // E_NOTHING_TO_UNDO, E_REF_PROTECTED) reports what the write repaired first, as a ref
+            // move's does.
             if let RepoError::UndoBlocked { recovered, .. }
             | RepoError::OpNotFound { recovered, .. }
-            | RepoError::NothingToUndo { recovered, .. } = &e
+            | RepoError::NothingToUndo { recovered, .. }
+            | RepoError::HistoryProtected { recovered, .. } = &e
             {
                 self.resolved.record_recovered(**recovered);
             }
 
-            // E_OP_NOT_FOUND's `id` is the id as requested (`004:…` stays), not as parsed.
+            // An `id` in the details is the id as requested (`004:…` stays), not as parsed.
             let mut err = error::op(e);
-            if err.code == ErrorCode::OpNotFound.as_str() {
+            if err.details.contains_key("id") {
                 err.details.insert("id".to_owned(), req.id.clone().into());
             }
             err
@@ -3870,10 +3877,13 @@ mod tests {
             count("show");
             ops.log(log(Some("main"), None)).unwrap();
             count("log");
-            let c2 = ops.commit(&who, commit(Some(&c1), "2", None)).unwrap();
-            count("commit with a parent");
             let c3 = ops.commit(&who, commit(None, "3", Some("main"))).unwrap();
             count("commit with advance and no parent");
+            // A child of main's head: the ref_set below moves main forward.
+            let c2 = ops
+                .commit(&who, commit(Some(&c3.changeset), "2", None))
+                .unwrap();
+            count("commit with a parent");
             let (c2, c3) = (c2.changeset, c3.changeset);
             ops.log(log(None, Some(&c2))).unwrap();
             count("log after a cursor");
