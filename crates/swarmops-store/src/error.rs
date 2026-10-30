@@ -168,6 +168,9 @@ pub enum StoreError {
     PostCommit {
         /// The seq of the transaction's frame.
         frame_seq: u64,
+        /// The payload CRC of the transaction's frame ([`crate::Frame::crc`]): with
+        /// `frame_seq`, the id of the operation it committed.
+        frame_crc: u32,
         /// The step's error.
         source: Box<StoreError>,
     },

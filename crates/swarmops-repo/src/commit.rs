@@ -631,7 +631,9 @@ impl<O: ObjectStore> Repo<O> {
         if inserted || moved.is_some() {
             match write.commit() {
                 Ok(_) => {}
-                Err(StoreError::PostCommit { frame_seq, source }) => {
+                Err(StoreError::PostCommit {
+                    frame_seq, source, ..
+                }) => {
                     let what = match moved {
                         Some(moved) if inserted => {
                             format!("the changeset and the move of ref {}", moved.name)

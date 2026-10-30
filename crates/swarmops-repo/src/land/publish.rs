@@ -335,7 +335,9 @@ fn record(
     let mut warnings = Vec::new();
     match write.commit() {
         Ok(_) => {}
-        Err(StoreError::PostCommit { frame_seq, source }) => {
+        Err(StoreError::PostCommit {
+            frame_seq, source, ..
+        }) => {
             let what = format!(
                 "the landed changeset {} and the move of ref {}",
                 frame.id, p.target

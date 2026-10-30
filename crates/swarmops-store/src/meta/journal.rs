@@ -353,6 +353,7 @@ impl Journal {
                 let source = self.cut_failed_entries(tail.frames, e);
                 return Err(StoreError::PostCommit {
                     frame_seq: tail.frames,
+                    frame_crc: crc,
                     source: Box::new(source.into()),
                 });
             }
@@ -368,6 +369,7 @@ impl Journal {
             seq,
             offset,
             records: records.to_vec(),
+            crc,
         })
     }
 
@@ -460,6 +462,7 @@ impl Journal {
                         seq: frame_seq,
                         offset,
                         records,
+                        crc,
                     });
                     at += bytes::to_u64(size);
                     prev_crc = crc;
@@ -600,6 +603,7 @@ impl Journal {
                         seq,
                         offset: at,
                         records,
+                        crc,
                     });
                     seq += 1;
                     at += bytes::to_u64(size);

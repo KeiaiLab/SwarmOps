@@ -1833,6 +1833,7 @@ mod tests {
         );
         let post = StoreError::PostCommit {
             frame_seq: 1,
+            frame_crc: 0x9f3a_01c2,
             source: Box::new(StoreError::Busy),
         };
         maps(store(post), op, ErrorCode::Internal);

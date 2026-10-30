@@ -120,6 +120,9 @@ pub struct CommitInfo {
     /// which names the `Compacted` frame its housekeeping appends if it compacts (for a flush,
     /// or a tail that replay took past the threshold).
     pub frame_seq: u64,
+    /// The payload CRC of the transaction's own frame ([`crate::Frame::crc`]); `None` when it
+    /// queued nothing and so appended no frame of its own.
+    pub frame_crc: Option<u32>,
     /// How many changesets it inserted.
     pub inserted: u64,
     /// How many ref moves it recorded.
@@ -132,10 +135,11 @@ pub struct CommitInfo {
 
 impl CommitInfo {
     /// What a commit at frame `frame_seq` did: `inserted` changesets, `moved_refs` ref moves,
-    /// and whether it `checkpointed`.
+    /// and whether it `checkpointed`; no `frame_crc`, as for a commit with nothing queued.
     pub fn new(frame_seq: u64, inserted: u64, moved_refs: u64, checkpointed: bool) -> CommitInfo {
         CommitInfo {
             frame_seq,
+            frame_crc: None,
             inserted,
             moved_refs,
             checkpointed,
@@ -1059,6 +1063,7 @@ impl MetaWrite<'_> {
         if self.records.is_empty() {
             let info = CommitInfo {
                 frame_seq: store.journal.frame_count()?,
+                frame_crc: None,
                 inserted: 0,
                 moved_refs: 0,
                 checkpointed: false,
@@ -1069,6 +1074,7 @@ impl MetaWrite<'_> {
         self.uncheckpointed += 1;
         let info = CommitInfo {
             frame_seq: frame.seq,
+            frame_crc: Some(frame.crc),
             inserted: bytes::to_u64(self.queued.len()),
             moved_refs: bytes::to_u64(self.records.len() - self.queued.len()),
             checkpointed: false,
@@ -1077,6 +1083,7 @@ impl MetaWrite<'_> {
             .and_then(|()| self.settle(info, settle))
             .map_err(|source| StoreError::PostCommit {
                 frame_seq: frame.seq,
+                frame_crc: frame.crc,
                 source: Box::new(source),
             })
     }

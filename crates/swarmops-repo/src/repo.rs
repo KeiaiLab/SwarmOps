@@ -595,7 +595,9 @@ impl<O: ObjectStore> Repo<O> {
         {
             match write.commit() {
                 Ok(_) => {}
-                Err(StoreError::PostCommit { frame_seq, source }) => {
+                Err(StoreError::PostCommit {
+                    frame_seq, source, ..
+                }) => {
                     warnings.push(post_commit_warning("the ref move", frame_seq, &source));
                 }
                 Err(e) => return Err(e.into()),

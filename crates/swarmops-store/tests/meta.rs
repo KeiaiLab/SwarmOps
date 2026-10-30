@@ -410,8 +410,7 @@ fn insert_changesets_batch_is_one_frame() {
         .insert_changesets_batch(vec![first, cs(2, &[1]), cs(3, &[2])])
         .unwrap();
     assert_eq!(outcomes, [inserted(0), inserted(1), inserted(2)]);
-    let want = CommitInfo::new(0, 3, 0, false);
-    assert_eq!(write.commit().unwrap(), want);
+    let info = write.commit().unwrap();
     let records = [
         changeset_record(&cs(1, &[]), 1),
         changeset_record(&cs(2, &[1]), 2),
@@ -419,6 +418,9 @@ fn insert_changesets_batch_is_one_frame() {
     ];
     let frames = frames(&root);
     assert_eq!(frames.len(), 1, "one frame for the batch");
+    let mut want = CommitInfo::new(0, 3, 0, false);
+    want.frame_crc = Some(frames[0].crc);
+    assert_eq!(info, want);
     assert_eq!(frames[0].records, records, "generations 1 to 3");
     let entry = |n| JournalEntry::new(0, "changeset", id(n).0.0.to_vec(), 0);
     let entries = store.read().unwrap().journal_after(None, 10).unwrap();
@@ -1366,11 +1368,12 @@ fn write_is_one_frame_for_insert_plus_cas() {
     let applied = write.cas_ref("main", None, Some(id(1)), ACTOR).unwrap();
     assert_eq!(applied, CasResult::Applied { old: None });
     let info = write.commit().unwrap();
-    let want = CommitInfo::new(0, 1, 1, false);
-    assert_eq!(info, want);
 
     let frames = frames(&root);
     assert_eq!(frames.len(), 1, "one frame for the whole transaction");
+    let mut want = CommitInfo::new(0, 1, 1, false);
+    want.frame_crc = Some(frames[0].crc);
+    assert_eq!(info, want);
     match frames[0].records.as_slice() {
         [
             Record::Changeset { id: inserted, .. },
@@ -2210,6 +2213,7 @@ fn errors_after_the_commit_point_say_the_transaction_committed() {
             Err(StoreError::PostCommit {
                 frame_seq: 31,
                 source,
+                ..
             }) => assert!(
                 matches!(*source, StoreError::Io(_)),
                 "{failing}: {source:?}"
@@ -2371,6 +2375,7 @@ fn a_failed_index_sync_cuts_the_index_back_to_the_checkpoint() {
         Err(StoreError::PostCommit {
             frame_seq: 63,
             source,
+            ..
         }) => assert!(matches!(*source, StoreError::Io(_)), "{source:?}"),
         other => panic!("expected PostCommit at frame 63, got {other:?}"),
     }
@@ -2459,6 +2464,7 @@ fn a_failed_sync_before_a_compaction_cuts_the_index_and_compacts_nothing() {
         Err(StoreError::PostCommit {
             frame_seq: 32,
             source,
+            ..
         }) => assert!(matches!(*source, StoreError::Io(_)), "{source:?}"),
         other => panic!("expected PostCommit at frame 32, got {other:?}"),
     }
@@ -2497,6 +2503,7 @@ fn a_cut_that_fails_after_a_failed_sync_is_reported_with_it() {
         Err(StoreError::PostCommit {
             frame_seq: 31,
             source,
+            ..
         }) => {
             let StoreError::Io(failure) = &*source else {
                 panic!("expected the sync's I/O failure, got {source:?}");
@@ -3091,6 +3098,7 @@ fn a_failed_off_append_after_the_log_sync_is_post_commit() {
             Err(StoreError::PostCommit {
                 frame_seq: 1,
                 source,
+                ..
             }) => {
                 let StoreError::Io(failure) = &*source else {
                     panic!("expected the listing's I/O failure, got {source:?}");
@@ -3163,6 +3171,7 @@ fn a_failed_listing_whose_cut_fails_too_tells_both() {
         Err(StoreError::PostCommit {
             frame_seq: 1,
             source,
+            ..
         }) => {
             let StoreError::Io(failure) = &*source else {
                 panic!("expected the listing's I/O failure, got {source:?}");
@@ -3212,6 +3221,7 @@ fn a_failed_compacted_marker_is_told_as_the_append_it_was() {
         Err(StoreError::PostCommit {
             frame_seq: 0,
             source,
+            ..
         }) => {
             let StoreError::Io(failure) = &*source else {
                 panic!("expected the marker's I/O failure, got {source:?}");
@@ -5919,6 +5929,7 @@ fn the_index_syncs_its_five_files_at_once_and_the_checkpoint_waits_for_them() {
         Err(StoreError::PostCommit {
             frame_seq: 63,
             source,
+            ..
         }) => {
             assert!(matches!(*source, StoreError::Io(_)), "{source:?}");
         }

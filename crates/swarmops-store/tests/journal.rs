@@ -26,9 +26,10 @@ use std::time::{Duration, Instant};
 use camino::Utf8PathBuf;
 use proptest::prelude::*;
 use swarmops_core::{ChangesetId, ObjectId};
+use swarmops_store::meta::upgrade;
 use swarmops_store::{
-    BadRecord, Frame, FsMethod, FsOps, Journal, Layout, LimitKind, LogCut, MetaLock, RealFs,
-    Record, StoreError, StoreFormat, TailRepair,
+    BadRecord, Frame, FsMethod, FsOps, Journal, Layout, LimitKind, LogCut, MetaLock, MetaStore,
+    RealFs, Record, StoreError, StoreFormat, TailRepair,
 };
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, CrashAtFs};
@@ -36,6 +37,7 @@ use swarmops_store::{CRASH_AT_ENV, CrashAtFs};
 use swarmops_testkit::child::{SIGABRT, run, this_test};
 use swarmops_testkit::faults::{FsyncModelFs, checked};
 use swarmops_testkit::fs::{Call, Hook, RecordingFs, Watch, Watched, When};
+use swarmops_testkit::store::sweep;
 use swarmops_testkit::store::{append_bytes, file_len, new_root, real_fs, set_len};
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::test_name;
@@ -445,6 +447,72 @@ fn append_frame_assigns_sequential_seq_and_offsets() {
     assert_corrupt_at(reader.tail_frames_from(50), 50, "inside frame 0");
     assert_corrupt_at(reader.tail_frames_from(260), 260, "inside the last frame");
     assert_corrupt_at(reader.tail_frames_from(277), 277, "past the end");
+}
+
+/// The payload CRC its header holds: the 4 bytes after the length, at the frame's offset in
+/// `journal.log`, in either format.
+fn header_crc(layout: &Layout, frame: &Frame) -> u32 {
+    let log = fs::read(layout.journal_log()).unwrap();
+    let at = usize::try_from(frame.offset).unwrap() + 4;
+    u32::from_le_bytes(log[at..at + 4].try_into().unwrap())
+}
+
+/// A frame carries the payload CRC of its header (the operation id's checksum, the M15 design
+/// §2): as appended, as read back by every reader and in both formats, as a commit reports it,
+/// and unchanged by `upgrade`, which moves payloads byte for byte.
+#[test]
+fn a_frame_carries_its_payload_crc() {
+    // 1. Appended and read back, in FORMAT 1 and 2: the header's CRC, the payload's crc32.
+    for format in [StoreFormat::V1, StoreFormat::V2] {
+        let (_root, plain) = new_root();
+        let layout = Layout::with_format(plain.root(), format);
+        let journal = Journal::create(&layout, real_fs()).unwrap();
+        journal.repair_tail().unwrap();
+        let records = [child_changeset(), main_created()];
+        let first = journal.append_frame(&[root_changeset()]).unwrap();
+        let second = journal.append_frame(&records).unwrap();
+        let mut payload = 2_u16.to_le_bytes().to_vec();
+        payload.extend(records.iter().flat_map(encoded));
+        assert_eq!(second.crc, crc32fast::hash(&payload), "{format:?}");
+        assert_eq!(
+            Frame::new(1, second.offset, records.to_vec()).crc,
+            second.crc
+        );
+        for frame in [&first, &second] {
+            assert_eq!(frame.crc, header_crc(&layout, frame), "{format:?}");
+        }
+        let reader = Journal::open(&layout, real_fs()).unwrap();
+        let both = [first, second];
+        assert_eq!(reader.frames_from(0, 10).unwrap(), both, "{format:?}");
+        assert_eq!(reader.tail_frames_from(0).unwrap(), both, "{format:?}");
+    }
+
+    // 2. A FORMAT 1 store's commits: the frame's CRC, none when nothing was queued.
+    let (_dir, layout) = new_root();
+    MetaStore::create_in(layout.clone(), real_fs()).unwrap();
+    fs::write(layout.format_file(), StoreFormat::V1.marker()).unwrap();
+    let store = MetaStore::open(layout.root()).unwrap();
+    let mut crcs = Vec::new();
+    for n in 0..3 {
+        let mut write = store.write().unwrap();
+        write.insert_changeset(sweep::changeset(n)).unwrap();
+        let old = (n > 0).then(|| sweep::id(n - 1));
+        let new = Some(sweep::id(n));
+        write.cas_ref("main", old, new, "test/agent").unwrap();
+        crcs.push(write.commit().unwrap().frame_crc.unwrap());
+    }
+    assert_eq!(store.write().unwrap().commit().unwrap().frame_crc, None);
+    let read = |store: &MetaStore| -> Vec<u32> {
+        let mut frames = store.read().unwrap().frames_before(None, 10).unwrap();
+        frames.reverse();
+        frames.iter().map(|frame| frame.crc).collect()
+    };
+    assert_eq!(read(&store), crcs);
+    drop(store);
+
+    // 3. Upgraded to FORMAT 2, every frame keeps its CRC.
+    upgrade::upgrade(&layout, real_fs()).unwrap();
+    assert_eq!(read(&MetaStore::open(layout.root()).unwrap()), crcs);
 }
 
 #[test]

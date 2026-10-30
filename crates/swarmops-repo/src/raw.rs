@@ -290,7 +290,9 @@ impl<O: ObjectStore> RawBatch<'_, O> {
         {
             frame_seq = Some(match write.commit() {
                 Ok(info) => info.frame_seq,
-                Err(StoreError::PostCommit { frame_seq, source }) => {
+                Err(StoreError::PostCommit {
+                    frame_seq, source, ..
+                }) => {
                     let what = "the batch of changesets";
                     warnings.push(repo::post_commit_warning(what, frame_seq, &source));
                     frame_seq

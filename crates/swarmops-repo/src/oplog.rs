@@ -211,7 +211,9 @@ impl<O: ObjectStore> Repo<O> {
         let mut warnings = Vec::new();
         let frame_seq = match write.commit() {
             Ok(info) => info.frame_seq,
-            Err(StoreError::PostCommit { frame_seq, source }) => {
+            Err(StoreError::PostCommit {
+                frame_seq, source, ..
+            }) => {
                 let what = format!("the undo of operation {op}");
                 warnings.push(repo::post_commit_warning(&what, frame_seq, &source));
                 frame_seq

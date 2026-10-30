@@ -105,20 +105,27 @@ pub struct Frame {
     pub offset: u64,
     /// Its records, in the order they were appended.
     pub records: Vec<Record>,
+    /// The `crc32` of its payload, as its header holds it (in either format): with `seq`, the
+    /// operation's id. A writer that takes the frame back and gives its seq to another frame
+    /// gives that one another CRC unless the payloads collide (2^-32).
+    pub crc: u32,
 }
 
 impl Frame {
-    /// The frame `seq` at `offset`, holding `records`.
+    /// The frame `seq` at `offset`, holding `records`; its `crc` is that of their payload
+    /// encoding, or 0 for records no frame can hold (none, or past the layout's limits).
     ///
     /// Invariant: `seq` and `offset` are the frame's own in `journal.off` and `journal.log`.
     /// Nothing checks it here, and nothing needs to: no store call takes a frame, and the
     /// journal's reads take both from `journal.off` (see [`crate::Journal`]). A frame built
     /// here is a value to compare with what the journal returns.
     pub fn new(seq: u64, offset: u64, records: Vec<Record>) -> Frame {
+        let crc = encode_frame(&records).map_or(0, |bytes| payload_crc(&bytes));
         Frame {
             seq,
             offset,
             records,
+            crc,
         }
     }
 }
