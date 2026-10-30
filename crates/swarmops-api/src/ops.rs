@@ -2707,8 +2707,9 @@ pub struct FileConflictOut {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub theirs_blob: Option<String>,
     /// The places where the two sides' edits of its lines meet, in file order: for a text file
-    /// both sides edited (`content` and `add_add`; contents not all text conflict as `binary`,
-    /// with no hunks). Omitted when there are none.
+    /// both sides edited (`content` and `add_add`; contents not all text, or past the line
+    /// diff's bound of 49,152 lines or 8 MiB a side, conflict as `binary`, with no hunks).
+    /// Omitted when there are none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hunks: Vec<HunkOut>,
     /// The newest changeset on the target since the merge base that changed this path: what to

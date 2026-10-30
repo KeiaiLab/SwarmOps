@@ -1677,7 +1677,7 @@ expression: s.redact(&all)
               ]
             },
             "hunks": {
-              "description": "The places where the two sides' edits of its lines meet, in file order: for a text file\nboth sides edited (`content` and `add_add`; contents not all text conflict as `binary`,\nwith no hunks). Omitted when there are none.",
+              "description": "The places where the two sides' edits of its lines meet, in file order: for a text file\nboth sides edited (`content` and `add_add`; contents not all text, or past the line\ndiff's bound of 49,152 lines or 8 MiB a side, conflict as `binary`, with no hunks).\nOmitted when there are none.",
               "items": {
                 "$ref": "#/$defs/HunkOut"
               },
@@ -3364,7 +3364,7 @@ expression: s.redact(&all)
           ]
         },
         "hunks": {
-          "description": "The places where the two sides' edits of its lines meet, in file order: for a text file\nboth sides edited (`content` and `add_add`; contents not all text conflict as `binary`,\nwith no hunks). Omitted when there are none.",
+          "description": "The places where the two sides' edits of its lines meet, in file order: for a text file\nboth sides edited (`content` and `add_add`; contents not all text, or past the line\ndiff's bound of 49,152 lines or 8 MiB a side, conflict as `binary`, with no hunks).\nOmitted when there are none.",
           "items": {
             "$ref": "#/$defs/HunkOut"
           },

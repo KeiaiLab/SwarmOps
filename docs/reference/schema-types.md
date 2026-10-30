@@ -742,7 +742,7 @@ Kind: object. `swarmops schema FileConflictOut` prints its JSON Schema.
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
 | `base_blob` | `string` or `null` | no | Its blob at the merge base. |
-| `hunks` | array of [`HunkOut`](#hunkout) | no | The places where the two sides' edits of its lines meet, in file order: for a text file both sides edited (`content` and `add_add`; contents not all text conflict as `binary`, with no hunks). Omitted when there are none. |
+| `hunks` | array of [`HunkOut`](#hunkout) | no | The places where the two sides' edits of its lines meet, in file order: for a text file both sides edited (`content` and `add_add`; contents not all text, or past the line diff's bound of 49,152 lines or 8 MiB a side, conflict as `binary`, with no hunks). Omitted when there are none. |
 | `kind` | [`ConflictKindOut`](#conflictkindout) | yes | What kind of conflict it is. |
 | `ours_blob` | `string` or `null` | no | Its blob in the change. |
 | `path` | `string` | yes | The file's repository path. |
