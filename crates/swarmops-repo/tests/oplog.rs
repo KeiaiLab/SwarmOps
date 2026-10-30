@@ -457,6 +457,7 @@ fn undo_of_a_taken_back_id_is_not_found() {
     let cut = taken_back(&root, 4, c1, c2);
     cas(&repo, "release/r", Some(c1), Some(c3)); // op 4, writer B's
     let frames = frame_count(&root);
+    let before = journal_bytes(&root);
 
     match repo.undo(cut, UNDOER) {
         Err(RepoError::OpNotFound {
@@ -472,8 +473,47 @@ fn undo_of_a_taken_back_id_is_not_found() {
         other => panic!("expected OpNotFound, got {other:?}"),
     }
     assert_eq!(target(&repo, "release/r"), Some(c3), "B's move stays");
-    assert_eq!(frame_count(&root), frames, "nothing written");
+    assert_eq!(frame_count(&root), frames, "no frame");
+    assert!(journal_bytes(&root) == before, "nothing written");
     assert_ne!(id_of(&repo, 4), cut, "B's frame has an id of its own");
+}
+
+/// The bytes of the journal of the store at `root`: `journal.log` and `journal.off`.
+fn journal_bytes(root: &Utf8Path) -> (Vec<u8>, Vec<u8>) {
+    let layout = layout_of(root);
+    let log = std::fs::read(layout.journal_log()).unwrap();
+    let off = std::fs::read(layout.journal_off()).unwrap();
+    (log, off)
+}
+
+/// The crc check comes before the undo's other decisions (the M15 design §2): an undo by a
+/// taken-back id whose number now holds a move of a ref that has moved again since is not found
+/// (`checksum`), never blocked on that ref, and leaves the journal's bytes as they were.
+#[test]
+fn checksum_comes_before_cas() {
+    let (_dir, root, repo) = new_repo();
+    let [c1, c2, c3] = chain(&repo);
+    cas(&repo, "release/r", None, Some(c1)); // op 3
+    let cut = taken_back(&root, 4, c1, c2);
+    cas(&repo, "release/r", Some(c1), Some(c3)); // op 4, writer B's
+    cas(&repo, "release/r", Some(c3), Some(c2)); // op 5: B's ref moved since
+    let before = journal_bytes(&root);
+
+    match repo.undo(cut, UNDOER) {
+        Err(RepoError::OpNotFound {
+            op: 4,
+            crc,
+            last,
+            reason,
+            ..
+        }) => assert_eq!(
+            (crc, last, reason),
+            (cut.crc, Some(5), OpNotFoundReason::Checksum)
+        ),
+        other => panic!("expected OpNotFound, got {other:?}"),
+    }
+    assert_eq!(target(&repo, "release/r"), Some(c2), "op 5's move stays");
+    assert!(journal_bytes(&root) == before, "nothing written");
 }
 
 /// How many take-backs [`take_backs_never_reuse_an_id`] makes.
@@ -482,7 +522,7 @@ const TAKE_BACKS: u64 = 1_000;
 /// [`undo_of_a_taken_back_id_is_not_found`] [`TAKE_BACKS`] times on one store: each round's
 /// writer A moves `release/r` and cuts its frame, writer B takes its number with another move,
 /// and the undo by A's id is not found (`checksum`) and leaves B's move. The op log then lists
-/// no id twice, and none that was taken back.
+/// every number once, and no id that was taken back.
 #[test]
 #[ignore = "slow, ~25 s: 1,000 take-backs"]
 fn take_backs_never_reuse_an_id() {
@@ -517,12 +557,13 @@ fn take_backs_never_reuse_an_id() {
         cut_ids.push(id);
     }
 
-    // 3. Every listed id once; none taken back.
-    let total = usize::try_from(TAKE_BACKS).unwrap() + 4;
-    let (ops, older) = repo.op_log(None, total).unwrap();
+    // 3. Every number listed once, newest first; no taken-back id among them.
+    let total = TAKE_BACKS + 4;
+    let (ops, older) = repo.op_log(None, usize::try_from(total).unwrap()).unwrap();
     assert!(!older, "op 0 is on the page");
+    let numbers: Vec<u64> = (0..total).rev().collect();
+    assert!(seqs(&ops) == numbers, "every number once, none skipped");
     let ids: HashSet<OpId> = ops.iter().map(|op| OpId::new(op.seq, op.crc)).collect();
-    assert_eq!(ids.len(), total, "no id twice");
     let reused: Vec<&OpId> = cut_ids.iter().filter(|id| ids.contains(id)).collect();
     assert_eq!(reused, Vec::<&OpId>::new(), "no taken-back id listed");
 }

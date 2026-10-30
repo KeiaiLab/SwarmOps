@@ -2514,11 +2514,20 @@ fn op_undo_refuses_bad_ids() {
     assert_eq!(other["error"]["details"]["reason"], "checksum");
     let message = other["error"]["message"].as_str().unwrap();
     assert!(!message.contains(&op1), "{message}");
+    let said = format!(
+        "there is no operation {mistyped}: the operation at its number has another crc, so the \
+         one named was taken back and its number went to another, or the id is mistyped (the \
+         last is 1)"
+    );
+    assert_eq!(message, said);
 
-    // A bare number.
-    let bare = undo(&mut s, "1");
-    assert_eq!((bare.exit, bare.code()), (2, "E_INVALID_ARG"));
-    assert_eq!(bare["error"]["details"], json!({"id": "1"}));
+    // A bare number, and an upper-case crc: the CLI passes the id on as given, and the
+    // operation refuses it.
+    for id in ["1", "1:9F3A01C2"] {
+        let refused = undo(&mut s, id);
+        assert_eq!((refused.exit, refused.code()), (2, "E_INVALID_ARG"), "{id}");
+        assert_eq!(refused["error"]["details"], json!({"id": id}));
+    }
 
     let listed = s.run(&["--repo", store.as_str(), "op", "log", "-n", "1"]);
     assert_eq!(listed["result"]["ops"][0]["op"], 1, "nothing written");

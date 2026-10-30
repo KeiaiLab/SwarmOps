@@ -26,7 +26,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, ObjectId, RepoPath, Signature};
 use swarmops_repo::land::{LandOutcome, LandRequest, LandStatus, NothingToLandReason, backoff};
 use swarmops_repo::merge::tree_diff::{PathFilter, delta_of};
-use swarmops_repo::{Advance, Change, CommitRequest, Depth, LocalRepo, RepoError};
+use swarmops_repo::{Advance, Change, CommitRequest, Depth, LocalRepo, OpId, RepoError};
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, FAIL_AT_ENV, FS_CALLS_ENV, HookedFs, ORDER_CHECK_ENV};
 use swarmops_store::{FsOps, Journal, MetaStore, RealFs};
@@ -1736,6 +1736,11 @@ fn a_replay_is_decided_under_the_lock_after_the_tail_check() {
         listed + 1,
         "the replay's write listed the land's frame before it answered"
     );
+
+    // The warning named the land's operation by its id: the newest, the replay wrote none.
+    let (ops, _) = repo.op_log(None, 1).unwrap();
+    let named = format!("(operation {})", OpId::new(ops[0].seq, ops[0].crc));
+    assert!(first.warnings[0].contains(&named), "{:?}", first.warnings);
 }
 
 /// What the crash and failure sweeps land: on a store whose `main` is `t0`, an agent's commit on

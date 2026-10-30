@@ -18,7 +18,7 @@ use swarmops_git::{
     ImportRequest, LossyClass, LossySet, ObjectFormat, RawKind, RawTree, SourceError, Unsupported,
     import,
 };
-use swarmops_repo::{CasResult, Depth, LocalRepo, RepoError, StoreError};
+use swarmops_repo::{CasResult, Depth, LocalRepo, OpId, RepoError, StoreError};
 use swarmops_store::{
     ExternalEntry, ExternalIds, Frame, FsMethod, Journal, RealFs, Record, SYSTEM_GIT, StoreFormat,
 };
@@ -1174,20 +1174,25 @@ fn a_frame_failing_after_its_commit_point_stops_the_import() {
     let chain = first_parents(manifest, &tip(manifest, "newer"));
 
     let error = import(&repo, &source, &req).unwrap_err();
-    assert!(
-        matches!(
-            &error,
-            ImportError::PostCommit { imported: 4, last: Some(last), warnings, .. }
-                if *last == chain[2] && warnings.len() == 1
-        ),
-        "{error:?}"
-    );
+    let warning = match &error {
+        ImportError::PostCommit {
+            imported: 4,
+            last: Some(last),
+            warnings,
+            ..
+        } if *last == chain[2] && warnings.len() == 1 => warnings[0].clone(),
+        other => panic!("{other:?}"),
+    };
     let entry = |commit: GitOid| repo.external_id(SYSTEM_GIT, &commit.0).unwrap();
     assert!(entry(chain[4]).is_some(), "the first frame's external ids");
     assert!(entry(chain[2]).is_none(), "none of the second's");
     drop(repo);
 
+    // The warning names the second frame's operation by its id: the newest.
     let repo = LocalRepo::open(&root).unwrap();
+    let (ops, _) = repo.op_log(None, 1).unwrap();
+    let named = format!("(operation {})", OpId::new(ops[0].seq, ops[0].crc));
+    assert!(warning.contains(&named), "{warning}");
     let resumed = import(&repo, &source, &req).unwrap();
     assert_eq!((resumed.imported, resumed.skipped), (4, 1));
     let (_other_dir, other, fresh) = new_repo();
