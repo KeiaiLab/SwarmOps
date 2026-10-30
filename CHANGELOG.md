@@ -117,13 +117,15 @@ collects the changes on `stable` that no release holds yet, until the next relea
   `src/.swarmws.bak/y` are still written. To keep such a tree out of a workspace, rename the path
   in the store with a commit, or create the workspace with `--prefix` paths that leave it out.
 - A workspace made with neither `--prefix` nor `--all` is stored as the whole tree it is written
-  out as (`all: true` in its state and in `ws create` and `ws list`), and one an older build
-  stored with `all: false` and no prefix is read as the whole tree. In 0.7.0 such a workspace was
-  otherwise handled as holding nothing: a deleted file was left out of the commit, files a commit
-  or `ws rebase -m` did not touch were listed as added and `ws land` refused them
-  (`E_WS_DIRTY`), `ws discard <path>` was refused, and a named commit or `ws materialize <path>`
-  narrowed its prefixes to that path. Each now acts as in a workspace of the whole tree (the M15
-  design §5).
+  out as (`all: true` in its state and in `ws create`, `ws info` and `ws list --check`), and one
+  an older build stored with `all: false` and no prefix is read as the whole tree. In 0.7.0 such a
+  workspace was otherwise handled as holding nothing: a fresh one listed every file as added and
+  `ws land` refused them (`E_WS_DIRTY`), as it did the files a commit or `ws rebase -m` did not
+  touch; a deleted file was left out of the commit; `ws discard <path>` was refused; and a named
+  commit or `ws materialize <path>` narrowed its prefixes to that path. Each now acts as in a
+  workspace of the whole tree (the M15 design §5). A workspace 0.7.0 already narrowed that way
+  stays sparse: `ws materialize` the paths it needs, or create it again (`ws delete`, then
+  `ws create`) once its work has landed.
 - A commit the store refuses outright (such as `E_EMPTY_COMMIT` or `E_INVALID_ARG`) no longer
   leaves its pending record behind; the next `ws land` refused with "a ws commit … was cut short:
   run it again first", which could not succeed. A record an older build left that way goes with
