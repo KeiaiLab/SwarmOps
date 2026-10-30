@@ -19,8 +19,9 @@
 //! - [`HttpServer`] ([`GitServer::http`]): git's smart HTTP on `127.0.0.1`, every request header
 //!   passed to `git http-backend` as the CGI metavariable `HTTP_<NAME>` (RFC 3875 §4.1.18), so
 //!   that git's gzipped fetch requests are inflated; [`HttpAuth::Basic`] asks for a password;
-//!   [`HttpServer::stop`] refuses connections and [`HttpServer::cut_after`] ends a response
-//!   early; [`HttpServer::requests`] is what it was asked. The same request loop runs any CGI
+//!   [`HttpServer::stop`] refuses connections, [`HttpServer::cut_after`] ends a response early
+//!   and [`HttpServer::flip_pack_trailer`] garbles the next pack's checksum;
+//!   [`HttpServer::requests`] is what it was asked. The same request loop runs any CGI
 //!   program instead, `swarmops serve --cgi` among them ([`crate::serve::ServeSite::http`]);
 //!   a script with no header block is answered 500, one past [`CGI_TIMEOUT`] is killed.
 //! - [`GitServer::ssh_command`]: the ssh stand-in, a value for `GIT_SSH_COMMAND`, which serves
@@ -94,6 +95,15 @@ const EPOCH: u64 = 1_700_000_000;
 
 /// The seconds between two commits the double writes.
 const TICK: u64 = 60;
+
+/// The width of a pkt-line's hex length prefix.
+const PKT_PREFIX: usize = 4;
+
+/// The side-band byte of pack data in a pkt-line payload (2 is progress, 3 an error).
+const BAND_PACK: u8 = 1;
+
+/// The bits [`HttpServer::flip_pack_trailer`] flips in the pack's last byte.
+const FLIP: u8 = 0xff;
 
 /// The default branch of every repository the double makes.
 pub const DEFAULT_BRANCH: &str = "main";
@@ -795,6 +805,7 @@ impl HttpServer {
             passing,
             log: Mutex::new(Vec::new()),
             cut: Mutex::new(None),
+            flip: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
         });
         let accepting = Arc::clone(&shared);
@@ -835,6 +846,14 @@ impl HttpServer {
         *lock(&self.shared.cut) = Some(bytes);
     }
 
+    /// Garbles the next pack a `git-upload-pack` answer carries: the last byte of the last
+    /// pack-data packet (side-band 1), which ends the pack's trailing checksum, is flipped, so
+    /// git's receive fails on a checksum mismatch. Progress packets (bands 2 and 3) are left
+    /// alone; one pack garbled, the server answers whole again.
+    pub fn flip_pack_trailer(&self) {
+        self.shared.flip.store(true, Ordering::SeqCst);
+    }
+
     /// The requests answered so far, in order.
     pub fn requests(&self) -> Vec<Request> {
         lock(&self.shared.log).clone()
@@ -868,6 +887,8 @@ struct Shared {
     log: Mutex<Vec<Request>>,
     /// The armed cut, in bytes.
     cut: Mutex<Option<usize>>,
+    /// Set by [`HttpServer::flip_pack_trailer`], cleared once a pack is garbled.
+    flip: AtomicBool,
     /// Set by [`HttpServer::stop`].
     stopped: AtomicBool,
 }
@@ -1036,10 +1057,13 @@ fn serve(stream: TcpStream, shared: &Shared) -> io::Result<()> {
     };
 
     // 2. The password, when asked for; then git http-backend.
-    let answer = match authenticate(&shared.auth, &incoming) {
+    let mut answer = match authenticate(&shared.auth, &incoming) {
         Err(answer) => answer,
         Ok(user) => run_backend(&shared.backend, shared.passing, &incoming, user.as_deref())?,
     };
+    if incoming.path.ends_with("/git-upload-pack") {
+        garble_pack(shared, &mut answer.body);
+    }
 
     // 3. The answer, cut when armed; the request logged.
     let logged = Request {
@@ -1049,6 +1073,46 @@ fn serve(stream: TcpStream, shared: &Shared) -> io::Result<()> {
         status: answer.status,
     };
     write_answer(&mut writer, shared, &answer, Some(logged))
+}
+
+/// Flips the last byte of the pack in `body`, an upload-pack answer, when a flip is armed and
+/// the answer carries pack data; the flip is then spent.
+fn garble_pack(shared: &Shared, body: &mut [u8]) {
+    if !shared.flip.load(Ordering::SeqCst) {
+        return;
+    }
+    let Some(at) = last_pack_byte(body) else {
+        return;
+    };
+    if shared.flip.swap(false, Ordering::SeqCst) {
+        body[at] ^= FLIP;
+    }
+}
+
+/// The offset of the last byte of the last pack-data packet (side-band 1) of `body`, a pkt-line
+/// stream; `None` without one. The last such packet ends the pack's checksum; the packets after
+/// it, if any, are progress or errors (bands 2 and 3) and flush packets.
+fn last_pack_byte(body: &[u8]) -> Option<usize> {
+    let mut last = None;
+    let mut at = 0;
+    while let Some(prefix) = body.get(at..at + PKT_PREFIX) {
+        let size = usize::from_str_radix(std::str::from_utf8(prefix).ok()?, 16).ok()?;
+
+        // 1. Flush, delimiter and response-end packets carry no payload.
+        if size < PKT_PREFIX {
+            at += PKT_PREFIX;
+            continue;
+        }
+
+        // 2. A data packet; a pack-data one starts with band 1 and holds at least a byte.
+        let end = at + size;
+        let payload = body.get(at + PKT_PREFIX..end)?;
+        if payload.len() > 1 && payload[0] == BAND_PACK {
+            last = Some(end - 1);
+        }
+        at = end;
+    }
+    last
 }
 
 /// Writes `answer`, cut short when a cut is armed and it is longer, and logs `logged`.
@@ -1642,6 +1706,42 @@ mod tests {
                 &http.url(REPO),
                 dir.to_str().expect("UTF-8"),
             ],
+        ));
+    }
+
+    #[test]
+    fn flip_pack_trailer_fails_a_clone_once() {
+        let server = served();
+        let http = server.http(HttpAuth::Anonymous);
+        let work = tempfile::tempdir().expect("a temp dir");
+
+        // 1. Armed: a clone with progress on receives a pack whose checksum is wrong.
+        http.flip_pack_trailer();
+        let dir = work.path().join("first");
+        let stderr = failed(&client(
+            &server,
+            None,
+            &[],
+            &[
+                "clone",
+                "--progress",
+                &http.url(REPO),
+                dir.to_str().expect("UTF-8"),
+            ],
+        ));
+        let stderr = stderr.to_lowercase();
+        assert!(
+            stderr.contains("sha1 mismatch") || stderr.contains("sha1 did not match"),
+            "{stderr}",
+        );
+
+        // 2. One pack only: the same clone then succeeds.
+        let dir = work.path().join("second");
+        ok(&client(
+            &server,
+            None,
+            &[],
+            &["clone", &http.url(REPO), dir.to_str().expect("UTF-8")],
         ));
     }
 

@@ -484,6 +484,37 @@ fn fetch_of_a_mirror_blob_holding_another_moves_no_ref() {
     store.read(&["verify", "--deep"]).ok();
 }
 
+/// A pack whose checksum was garbled in transit fails git's receive: `E_REMOTE_REJECTED`
+/// `bad_objects`, not retryable, and no incoming ref, tracking ref or changeset appears. The
+/// same fetch run again, the transfer whole, imports.
+#[test]
+fn fetch_of_a_corrupt_pack_is_bad_objects_and_moves_no_ref() {
+    let remote = Remote::new();
+    let store = remote.store();
+    add(&store, ORIGIN, &remote.url(), &[]).ok();
+    fetch(&store, ORIGIN);
+    let incoming = || mirror_refs(&remote, store.path(), "refs/incoming/");
+    let tracking = || mirror_refs(&remote, store.path(), "refs/remotes/");
+    let before = (incoming(), tracking(), refs(&store), changesets(&store));
+
+    // 1. The remote moves on; the next pack it sends has a wrong checksum.
+    remote.commit("main", "third", &[("c.txt", "c\n")]);
+    remote.http.flip_pack_trailer();
+    let refused = store.read(&["fetch", ORIGIN]);
+    let error = refused.err("E_REMOTE_REJECTED");
+    assert_eq!(error["details"]["reason"], "bad_objects", "{refused}");
+    assert_eq!(error["retryable"], false, "{refused}");
+
+    // 2. Nothing moved, and the store is whole.
+    let after = (incoming(), tracking(), refs(&store), changesets(&store));
+    assert_eq!(after, before);
+    store.read(&["verify", "--deep"]).ok();
+
+    // 3. The transfer whole: fetched and imported.
+    let fetched = fetch(&store, ORIGIN);
+    assert_eq!(fetched["imported"], 1, "{fetched}");
+}
+
 /// A fetch imports the followed branch's commits only: the remote's other branches reach the
 /// mirror, not the store. Its response names the followed branch's head, by commit and
 /// changeset, and lists the branches that appeared.

@@ -52,6 +52,8 @@ const ROWS: [(&[&str], Verdict); 10] = [
             "unable to unpack",
             "cannot read existing object",
             "is corrupt",
+            "pack is corrupted (sha1 mismatch)",
+            "final sha1 did not match",
         ],
         Verdict::Rejected(RejectReason::BadObjects),
     ),
@@ -359,8 +361,8 @@ mod tests {
     #[test]
     fn bad_objects_rows() {
         // git 2.43.0's wording: the fsck refusal of index-pack and unpack-objects, the fetch's
-        // connectivity check, a corrupt object of the mirror, and rev-list's traversal of a
-        // missing or unreadable object.
+        // connectivity check, a corrupt object of the mirror, a pack garbled in transit, and
+        // rev-list's traversal of a missing or unreadable object.
         let fetched = [
             "error: object 8e01: duplicateEntries: contains duplicate file entries
 fatal: fsck error in packed object
@@ -378,6 +380,12 @@ error: http://127.0.0.1:1/r.git did not send all necessary objects",
 fatal: cannot read existing object info 7777
 fatal: index-pack failed",
             "fatal: loose object 8888 (stored in ./objects/88/88) is corrupt",
+            // A pack whose bytes changed in transit: index-pack's and unpack-objects' checksum
+            // refusals.
+            "fatal: pack is corrupted (SHA1 mismatch)
+fatal: index-pack failed",
+            "fatal: final sha1 did not match
+fatal: unpack-objects failed",
         ];
         for stderr in fetched {
             assert_eq!(
