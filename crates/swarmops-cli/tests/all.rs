@@ -21,6 +21,7 @@ mod github_live;
 mod landing;
 mod mcp;
 mod mcp_ws;
+mod merge_table;
 mod multiprocess;
 mod pilot_ws;
 mod power_loss;
