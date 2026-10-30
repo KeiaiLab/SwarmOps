@@ -299,6 +299,44 @@ fn a_store_refusal_takes_the_pending_record() {
     }
 }
 
+/// A commit record an older build left after a refusal, with nothing left to commit, goes with
+/// the next `ws commit`, as `ws land`'s hint asks: the land after it is not stopped by it.
+#[test]
+fn an_old_refusal_record_goes_on_commit() {
+    for how in BARE {
+        // 1. An untouched workspace with the record 0.7.0 left after `E_EMPTY_COMMIT`.
+        let f = Fixture::new();
+        let base = f.commit(None, &[Put::File("src/a.txt", "a\n")]);
+        let dir = f.create_bare("w", &base, how);
+        let record = serde_json::json!({
+            "op": "commit",
+            "key": "0192f6c4-0000-7000-8000-000000000000",
+            "head": standing(&dir).0,
+            "attempt": 1,
+            "state": "committing",
+        });
+        std::fs::write(pending_of(&dir), record.to_string()).unwrap();
+
+        // 2. `ws land` stops at it.
+        let mut land = WsLandReq::new("w".to_owned());
+        land.status_after = StatusAfter::None;
+        let refused = swarmops_ws::land(&f.ctx(), land.clone()).unwrap_err();
+        assert!(
+            refused.message.contains("cut short"),
+            "{how:?}: {refused:?}"
+        );
+
+        // 3. `ws commit`: nothing to commit, and the record gone.
+        let refused = swarmops_ws::commit(&f.ctx(), commit_of("w", "again")).unwrap_err();
+        assert_eq!(refused.code, "E_EMPTY_COMMIT", "{how:?}: {refused:?}");
+        assert!(!pending_of(&dir).exists(), "{how:?}");
+
+        // 4. `ws land`: nothing to land, not a commit cut short.
+        let refused = swarmops_ws::land(&f.ctx(), land).unwrap_err();
+        assert_eq!(refused.code, "E_NOTHING_TO_LAND", "{how:?}: {refused:?}");
+    }
+}
+
 /// A file past the 512 MiB an object holds is `E_TOO_LARGE`, naming it, before the store is
 /// asked anything that writes (a sparse file: nothing is read).
 #[cfg(not(windows))]

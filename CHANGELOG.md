@@ -124,9 +124,10 @@ collects the changes on `stable` that no release holds yet, until the next relea
   (`E_WS_DIRTY`), `ws discard <path>` was refused, and a named commit or `ws materialize <path>`
   narrowed its prefixes to that path. Each now acts as in a workspace of the whole tree (the M15
   design §5).
-- A commit the store refuses outright (`E_EMPTY_COMMIT`, `E_INVALID_ARG`) no longer leaves its
-  pending record behind; the next `ws land` refused with "a ws commit … was cut short: run it
-  again first", which could not succeed.
+- A commit the store refuses outright (such as `E_EMPTY_COMMIT` or `E_INVALID_ARG`) no longer
+  leaves its pending record behind; the next `ws land` refused with "a ws commit … was cut short:
+  run it again first", which could not succeed. A record an older build left that way goes with
+  the next `ws commit` that finds nothing to commit.
 - The scripting guide names `E_REF_NOT_FOUND` and `E_WS_STALE` as the codes not raised yet, as
   Troubleshooting does; it named `E_AUTH`, `E_POLICY_DENIED` and `E_MAINTENANCE_BUSY` too, which
   `swarmops serve` and the maintenance commands raise.

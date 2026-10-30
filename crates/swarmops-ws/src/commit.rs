@@ -14,7 +14,8 @@
 //!
 //! A crash between the store's commit and `workspace.json` leaves the pending record: the next
 //! commit takes its key, and the store replays the same changeset (a keyed commit takes its
-//! key's time). A commit the store refuses outright takes the record with it.
+//! key's time). A commit the store refuses outright takes the record with it, as does one that
+//! finds nothing left to commit.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -153,11 +154,15 @@ fn commit_with(
         refuse_outside(scanned.outside.clone())?;
     }
 
-    // 4. The entries: each change, and each mode asked for; nothing, an empty commit.
+    // 4. The entries: each change, and each mode asked for; nothing, an empty commit, and on a
+    //    whole scan no commit cut short left to redo.
     let mut entries = entries_of(&scanned.changes, modes);
     entries.extend(mode_only(&scanned.index, &scanned.changes, modes));
     entries.sort_by(|a, b| a.path.cmp(&b.path));
     if entries.is_empty() {
+        if named.is_empty() {
+            drop_cut_commit(ctx, ws)?;
+        }
         return Err(OpError::new(
             ErrorCode::EmptyCommit,
             "the workspace has no change to commit",
@@ -247,9 +252,22 @@ fn modes_of(modes: BTreeMap<String, ModeInput>) -> Result<BTreeMap<String, FileK
 }
 
 /// Whether the store refused a commit outright, nothing written: a rebase's refusals, or a
-/// change list that changes nothing. A keyed commit it made already replays before either.
+/// change list that changes nothing. The record has nothing left to redo: with an explicit
+/// parent and no advance the store replays no key, and a redo of a commit it made makes that
+/// changeset again (a keyed commit takes its key's time) instead of a refusal.
 fn refused(e: &OpError) -> bool {
     rebase::refused(e) || e.code == ErrorCode::EmptyCommit.as_str()
+}
+
+/// Removes the record of a commit cut short in workspace `ws` once a whole scan finds nothing to
+/// commit: a commit the store made leaves its edits unindexed, so none was made, or one never
+/// answered whose edits are gone. An older build left such a record after a refusal.
+fn drop_cut_commit(ctx: &Ctx<'_>, ws: &Workspace) -> Result<(), OpError> {
+    let fs = ctx.fs.as_ref();
+    match pending::read_pending(fs, &ws.dir)? {
+        Some(cut) if cut.op == PendingOp::Commit => pending::remove_pending(fs, &ws.dir),
+        _ => Ok(()),
+    }
 }
 
 /// The `named` paths and those of `modes` outside workspace `ws`'s prefixes; none for a
