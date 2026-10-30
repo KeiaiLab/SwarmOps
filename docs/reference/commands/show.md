@@ -13,8 +13,8 @@ mutates: false
 identity_required: false
 mcp_tool: "show"
 envelope_op: "show"
-exit_codes: [0, 2, 6]
-errors: [E_NOT_A_REPO, E_REV_NOT_FOUND, E_INVALID_ARG]
+exit_codes: [0, 1, 2, 6]
+errors: [E_NOT_A_REPO, E_REV_NOT_FOUND, E_AMBIGUOUS_ID, E_INVALID_ARG]
 syntax: "swarmops show [OPTIONS] <REV>"
 ```
 
@@ -217,6 +217,7 @@ Envelope `op`: `show`.
 Exit codes:
 
 - `0`: Success.
+- `1`: The operation failed.
 - `2`: The request or the command line is malformed.
 - `6`: Something the request names does not exist.
 
@@ -224,6 +225,7 @@ Exit codes:
 
 - [`E_NOT_A_REPO`](../errors.md#e_not_a_repo) (exit 6): No store at the given path, or no store was named.
 - [`E_REV_NOT_FOUND`](../errors.md#e_rev_not_found) (exit 6): A revision names no changeset.
+- [`E_AMBIGUOUS_ID`](../errors.md#e_ambiguous_id) (exit 1): An id prefix matches more than one changeset; give more digits.
 - [`E_INVALID_ARG`](../errors.md#e_invalid_arg) (exit 2): A malformed argument or request, including a command-line usage error.
 
 Any command that opens a store may also fail with a store error, such as [`E_NOT_A_REPO`](../errors.md#e_not_a_repo), [`E_IO`](../errors.md#e_io) or [`E_STORE_CORRUPT`](../errors.md#e_store_corrupt); a command line the grammar refuses is [`E_INVALID_ARG`](../errors.md#e_invalid_arg) (exit 2).

@@ -1367,6 +1367,24 @@ mod tests {
         assert_eq!(details["after"].as_u64(), Some(7));
     }
 
+    /// The golden error object of `E_UNKNOWN_PARENT` (exit 6): no operation reaches it through
+    /// `LocalOps` or the binary, which resolve a parent first (`E_REV_NOT_FOUND`), so the
+    /// mapping itself is pinned, whole.
+    #[test]
+    fn unknown_parent_golden() {
+        let error = op(RepoError::UnknownParent(id()));
+        let parent = id().to_string();
+        let golden = serde_json::json!({
+            "code": "E_UNKNOWN_PARENT",
+            "message": format!("parent changeset {parent} is not in the store"),
+            "retryable": false,
+            "exit": 6,
+            "details": {"parent": parent},
+            "hint": "swarmops log",
+        });
+        assert_eq!(serde_json::to_value(&error).unwrap(), golden);
+    }
+
     fn id() -> ChangesetId {
         ChangesetId::new(ObjectId::new([7; 32]))
     }

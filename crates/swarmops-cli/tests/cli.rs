@@ -338,6 +338,44 @@ fn resolve_golden() {
     insta::assert_json_snapshot!(s.transcript());
 }
 
+/// `E_AMBIGUOUS_ID` (exit 1) through the binary: two index records whose ids share their first
+/// 12 hex digits, written straight through the metadata store (no operation makes such twins),
+/// and `show` of that prefix. The golden pins its message, details and hint.
+#[test]
+fn prefix_twins_golden() {
+    use swarmops_core::{ChangesetId, ObjectId};
+    use swarmops_store::{ChangesetMeta, MetaStore};
+
+    /// The byte both twins' ids repeat: their 12-digit prefix is `abababababab`.
+    const TWIN_BYTE: u8 = 0xab;
+
+    let mut s = Session::new();
+    let store = s.store();
+    let init = s.run(&["init", &store]);
+    s.name_at(&init, "/result/repo_id", "repo_id");
+
+    // 1. The twins: ids `ab…ab01` and `ab…ab02`, each with a distinct root tree.
+    let meta = MetaStore::open(&Utf8PathBuf::from(&store)).expect("open the metadata store");
+    let mut write = meta.write().expect("take the store's lock");
+    for last in [1u8, 2] {
+        let mut id = [TWIN_BYTE; 32];
+        id[31] = last;
+        let id = ChangesetId::new(ObjectId::new(id));
+        s.name(&id.to_string(), &format!("twin{last}"));
+        write
+            .insert_changeset(ChangesetMeta::new(id, 0, 0, [last; 32], Vec::new()))
+            .expect("insert a twin");
+    }
+    write.commit().expect("commit the twins");
+    drop(meta);
+
+    // 2. Their shared prefix names neither: ambiguous.
+    let shown = s.run(&["--repo", &store, "show", "abababababab"]);
+    assert_eq!((shown.exit, shown.code()), (1, "E_AMBIGUOUS_ID"));
+    assert_eq!(shown["error"]["details"]["rev"], "abababababab");
+    insta::assert_json_snapshot!(s.transcript());
+}
+
 /// `history` and `log --path`: a file's history and a directory's, a page at a time with its
 /// cursor (a directory may end in `/`); the log of the changesets that change some paths; and the
 /// errors: a path nothing ever touched (`E_PATH_NOT_FOUND`), a target without a path and a limit
@@ -1577,50 +1615,64 @@ fn cat_truncates_to_max_bytes() {
     assert_eq!(default["result"]["truncated"], true);
 }
 
-/// Codes [`error_codes_reach_the_cli`] cannot raise through the binary, and why.
+/// The codes of [`NOT_RAISED`] no golden pins: no operation raises `E_REF_NOT_FOUND`.
+const UNPINNED: &[&str] = &["E_REF_NOT_FOUND"];
+
+/// Codes [`error_codes_reach_the_cli`] does not raise, and why: each names the test whose golden
+/// pins it, but those of [`UNPINNED`].
 const NOT_RAISED: &[(&str, &str)] = &[
     (
         "E_AMBIGUOUS_ID",
-        "needs two changesets sharing a 12-digit prefix (ops tests)",
+        "needs two changesets sharing a 12-digit prefix: prefix_twins_golden pins it",
     ),
     (
         "E_UNKNOWN_PARENT",
-        "a parent is resolved first, so it is E_REV_NOT_FOUND",
+        "a parent is resolved first (E_REV_NOT_FOUND): swarmops-ops's \
+         error::tests::unknown_parent_golden pins its error object",
     ),
-    ("E_REF_NOT_FOUND", "no M1 operation looks a ref up by name"),
+    ("E_REF_NOT_FOUND", "no operation raises it"),
     (
         "E_IO_TRANSIENT",
-        "needs a journal append that fails: tests/faults.rs raises it",
+        "needs a journal append that fails: faults::fault_codes_golden pins it",
     ),
-    ("E_BUSY", "needs the store's lock held for its 10 s wait"),
-    ("E_INTERNAL", "a caught panic: the binary's unit tests"),
+    (
+        "E_BUSY",
+        "needs the store's lock held for its 10 s wait: the slow \
+         op_log_behind_a_held_lock_is_e_busy pins it",
+    ),
+    (
+        "E_INTERNAL",
+        "a caught panic, from a test hook: faults::fault_codes_golden pins it",
+    ),
     (
         "E_CAS_RETRY_EXHAUSTED",
-        "needs the target moved before every attempt: the ops unit tests raise it",
+        "needs main moved under every attempt: remote_sync::cas_retry_exhausted_golden pins it",
     ),
     (
         "E_MAINTENANCE_BUSY",
-        "needs a gc, repair or upgrade running: their suites raise it",
+        "needs the maintenance lease held: \
+         format2::a_held_maintenance_lease_is_busy_through_the_binary pins it",
     ),
     (
         "E_TAG_IMMUTABLE",
-        "needs a FORMAT 2 store, and this session's is FORMAT 1",
+        "needs a FORMAT 2 store, and this session's is FORMAT 1: \
+         format2::a_format_2_store_holds_a_branch_and_a_tag pins it",
     ),
     (
         "E_REMOTE_DIVERGED",
-        "needs a remote: the M13 remote suites raise it",
+        "needs a remote: remote_acceptance::remote_error_codes_golden pins it",
     ),
     (
         "E_REMOTE_REJECTED",
-        "needs a remote: the M13 remote suites raise it",
+        "needs a remote: remote_acceptance::remote_error_codes_golden pins it",
     ),
     (
         "E_REMOTE_UNREACHABLE",
-        "needs a remote: the M13 remote suites raise it",
+        "needs a remote: remote_acceptance::remote_error_codes_golden pins it",
     ),
     (
         "E_REMOTE_NOT_FOUND",
-        "needs remotes.toml: the M13 remote suites raise it",
+        "needs remotes.toml: remote_acceptance::remote_error_codes_golden pins it",
     ),
 ];
 
@@ -1628,11 +1680,7 @@ const NOT_RAISED: &[(&str, &str)] = &[
 /// `E_` code at least once), and the golden snapshot pins each one's message, details and hint.
 #[test]
 fn error_codes_reach_the_cli() {
-    // Each code listed is one the table has.
-    for (code, _) in NOT_RAISED {
-        let known = ErrorCode::ALL.iter().any(|known| known.as_str() == *code);
-        assert!(known, "{code} is not an error code");
-    }
+    check_not_raised();
     let mut s = Session::new();
     let store = s.store();
     // FORMAT 1: it takes no branch (E_FORMAT_REQUIRED), and its files are damaged by name.
@@ -1743,6 +1791,17 @@ fn error_codes_reach_the_cli() {
         assert_ne!(raised.contains(&code), listed, "{code}");
     }
     insta::assert_json_snapshot!(s.transcript());
+}
+
+/// Checks [`NOT_RAISED`]: each code listed is one the table has, and each reason names the test
+/// that pins its code, but those of [`UNPINNED`].
+fn check_not_raised() {
+    for (code, why) in NOT_RAISED {
+        let known = ErrorCode::ALL.iter().any(|known| known.as_str() == *code);
+        assert!(known, "{code} is not an error code");
+        let pinned = why.contains(" pins it");
+        assert_eq!(pinned, !UNPINNED.contains(code), "{code}: {why}");
+    }
 }
 
 /// The failing commands of [`error_codes_reach_the_cli`], each with the code it must raise,
@@ -2264,6 +2323,12 @@ fn op_log_behind_a_held_lock_is_e_busy() {
         error["hint"].as_str().unwrap().starts_with("retry"),
         "{listed}"
     );
+
+    // The golden: the envelope without its `meta`, whose `elapsed_ms` is the wait.
+    let mut envelope = listed.envelope();
+    let meta = envelope.as_object_mut().expect("an object").remove("meta");
+    assert!(meta.is_some(), "{listed}");
+    insta::assert_json_snapshot!(envelope);
 }
 
 /// `op undo` through the binary moves the refs an operation moved back, in an operation of its

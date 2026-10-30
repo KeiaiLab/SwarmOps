@@ -1,0 +1,21 @@
+---
+source: crates/swarmops-cli/tests/faults.rs
+expression: golden(&transient)
+---
+{
+  "api": 1,
+  "error": {
+    "code": "E_IO_TRANSIENT",
+    "details": {
+      "committed": false,
+      "fs_op": "append_durable",
+      "store_file": "meta/journal2.log"
+    },
+    "exit": 4,
+    "hint": "run the same command again: nothing of this one was committed",
+    "message": "the transaction did not commit: a journal append failed, and what it wrote was cut back off the journal: append_durable meta/journal2.log: Input/output error (os error 5)",
+    "retryable": true
+  },
+  "ok": false,
+  "op": "commit"
+}

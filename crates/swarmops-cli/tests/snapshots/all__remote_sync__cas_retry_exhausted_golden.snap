@@ -1,0 +1,22 @@
+---
+source: crates/swarmops-cli/tests/remote_sync.rs
+expression: envelope
+---
+{
+  "api": 1,
+  "error": {
+    "code": "E_CAS_RETRY_EXHAUSTED",
+    "details": {
+      "attempts": 1,
+      "branch": "main",
+      "main_moved": false,
+      "remote": "origin"
+    },
+    "exit": 4,
+    "hint": "swarmops sync origin again",
+    "message": "main moved under the sync in each of its 1 attempts",
+    "retryable": true
+  },
+  "ok": false,
+  "op": "sync"
+}

@@ -1,0 +1,17 @@
+---
+source: crates/swarmops-cli/tests/cli.rs
+expression: envelope
+---
+{
+  "api": 1,
+  "error": {
+    "code": "E_BUSY",
+    "details": {},
+    "exit": 4,
+    "hint": "retry: another writer held the store's lock for the whole wait",
+    "message": "the metadata store is busy: another writer holds meta/lock",
+    "retryable": true
+  },
+  "ok": false,
+  "op": "op_log"
+}

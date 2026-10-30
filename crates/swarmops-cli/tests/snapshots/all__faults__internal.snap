@@ -1,0 +1,17 @@
+---
+source: crates/swarmops-cli/tests/faults.rs
+expression: golden(&internal)
+---
+{
+  "api": 1,
+  "error": {
+    "code": "E_INTERNAL",
+    "details": {},
+    "exit": 1,
+    "hint": null,
+    "message": "swarmops panicked, a bug (stderr has where): SWARMOPS_TEST_FAIL_AT=\"bogus\": \"bogus\" is not a call number",
+    "retryable": false
+  },
+  "ok": false,
+  "op": "repo_info"
+}

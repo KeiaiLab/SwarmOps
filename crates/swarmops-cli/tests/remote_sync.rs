@@ -524,6 +524,42 @@ fn sync_exhausted_reports_main_moved() {
     assert_eq!(remote.head(), theirs);
 }
 
+/// The golden envelope of `E_CAS_RETRY_EXHAUSTED` (exit 4, retryable): a sync of one attempt
+/// whose git stand-in moves `main` before the sync's own move. Its details name the remote, the
+/// branch, the attempts and `main_moved`, and no id, so the envelope without its `meta` is the
+/// same in every run.
+#[cfg(unix)]
+#[test]
+fn cas_retry_exhausted_golden() {
+    // 1. A change landed on main, another agent's change on it, and the remote moved.
+    let remote = Remote::new();
+    let store = remote.cloned();
+    let mine = land(&store, "mine.txt", "mine\n");
+    let other = store.commit(AGENT, "other.txt", "other\n", Some(&mine));
+    remote.commit("theirs", &[("theirs.txt", "theirs\n")]);
+
+    // 2. The sync's one attempt loses main to the stand-in.
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let git = moving_main(&remote, &store, dir.path(), &mine, &other);
+    let failed = sync_with(
+        &remote,
+        &store,
+        &["--max-attempts", "1"],
+        &[("SWARMOPS_GIT", &git)],
+    );
+    let error = failed.err("E_CAS_RETRY_EXHAUSTED");
+    assert_eq!(
+        (&error["exit"], &error["retryable"]),
+        (&4.into(), &true.into())
+    );
+
+    // 3. The golden: the envelope without its `meta`.
+    let mut envelope = failed.envelope();
+    let meta = envelope.as_object_mut().expect("an object").remove("meta");
+    assert!(meta.is_some(), "{failed}");
+    insta::assert_json_snapshot!(envelope);
+}
+
 /// A push the remote refuses leaves `main` landed on the remote's head: the error says so, and
 /// hints at a push to another branch for a pull request.
 #[test]

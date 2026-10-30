@@ -714,3 +714,52 @@ fn report_reads(format: StoreFormat) -> u64 {
         other => panic!("no read count for {other:?}"),
     }
 }
+
+/// The golden envelopes of the two codes only a test hook raises through the binary: the first
+/// call of the swept commit whose single `EIO` gives `E_IO_TRANSIENT` (exit 4, retryable,
+/// `committed: false`), every call swept and the first such run kept; and `E_INTERNAL` (exit 1),
+/// the panic of a malformed `SWARMOPS_TEST_FAIL_AT` caught into an envelope whose message names
+/// no host path. Each snapshot is the envelope without its `meta`.
+#[test]
+fn fault_codes_golden() {
+    let template = commit_template(swarmops_store::DEFAULT_INIT_FORMAT);
+    let dry = dry_commit(&template);
+
+    // 1. E_IO_TRANSIENT: of the runs failing each call once, the first reported so.
+    let runs = sweep(1..=dry.calls, |k| {
+        let store = Store::copy_of(&template);
+        let fail_at = format!("{k}:once:eio");
+        let run = swept_commit(&store, &[(FAIL_AT_ENV, fail_at.as_str())]);
+        let transient = run.exit() != 0 && run.envelope()["error"]["code"] == "E_IO_TRANSIENT";
+        transient.then_some(run)
+    });
+    let transient = runs
+        .into_iter()
+        .flatten()
+        .next()
+        .expect("a call whose transient failure is E_IO_TRANSIENT");
+    let error = transient.err("E_IO_TRANSIENT");
+    assert_eq!(
+        (&error["exit"], &error["details"]["committed"]),
+        (&4.into(), &false.into()),
+        "{transient}"
+    );
+    insta::assert_json_snapshot!("io_transient", golden(&transient));
+
+    // 2. E_INTERNAL: a value the hook cannot parse panics as the store opens.
+    let store = Store::copy_of(&template);
+    let internal = run(&["--repo", store.path(), "info"], &[(FAIL_AT_ENV, "bogus")]);
+    let error = internal.err("E_INTERNAL");
+    assert_eq!(internal.exit(), 1, "{internal}");
+    let message = error["message"].as_str().unwrap_or_default();
+    assert!(!holds_store_path(message, store.path()), "{internal}");
+    insta::assert_json_snapshot!("internal", golden(&internal));
+}
+
+/// `run`'s envelope without its `meta`: what a golden snapshot pins.
+fn golden(run: &Run) -> Value {
+    let mut envelope = run.envelope();
+    let meta = envelope.as_object_mut().expect("an object").remove("meta");
+    assert!(meta.is_some(), "{run}");
+    envelope
+}
