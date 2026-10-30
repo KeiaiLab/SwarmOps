@@ -42,6 +42,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
   out that no scheduled job runs optimized. That job and the benchmark gate wait at most 60
   minutes for the heavy lock, apart from their run time, and fail with a message when the wait
   runs out; their timeouts add the wait.
+- swarmops.cc's home page follows the readable-site design board: a status line, the install
+  command and an "At a glance" rail, then six numbered sections (see it, why a swarm needs it,
+  what it does today, where it stands, fit, read on) behind an "On this page" list. Product pages
+  carry one title, a tab strip, the same rail with their own "On this page" list, and tables that
+  scroll sideways on a phone. The version and date shown are the top released section of this
+  changelog, read when the site is built.
 
 ## [0.7.0] - 2026-10-29
 
