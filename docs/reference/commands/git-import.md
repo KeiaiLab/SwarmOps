@@ -253,7 +253,8 @@ swarmops git import ~/src/acme.git --ref refs/heads/stable --into main
 ```
 
 **Land a git branch.** Import it into a ref of its own, land that ref onto `main`, and delete the
-ref with the id it holds; [One writer per trunk](../../operate/one-writer-per-trunk.md#change-the-trunk-without-breaking-the-rule)
+ref with the id it holds;
+[One writer per trunk](../../operate/one-writer-per-trunk.md#change-the-trunk-without-breaking-the-rule)
 runs it end to end.
 
 **Take back an import's move.** `swarmops op log` shows the target's move as a `ref_move` operation,
