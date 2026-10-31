@@ -765,8 +765,8 @@ pub enum RejectReason {
     Declined,
     /// A failure git's messages do not explain: `unclassified`.
     Unclassified,
-    /// A received object git's fsck refuses, or one a fetched ref reaches that is missing or
-    /// unreadable: `bad_objects`.
+    /// A received object git's fsck refuses, a pack whose checksum does not match, or one a
+    /// fetched ref reaches that is missing or unreadable: `bad_objects`.
     BadObjects,
 }
 
