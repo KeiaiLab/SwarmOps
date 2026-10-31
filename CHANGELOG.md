@@ -85,7 +85,10 @@ collects the changes on `stable` that no release holds yet, until the next relea
   land's changeset and the target's history is longer than the last 10,000 commits, which do not
   hold it, or the operation that made the record's head is not among the journal's newest 10,000
   (the journal is read back no further than that operation, so a recent land is placed in a
-  journal of any length); `ws delete <name> --rescue` is the way out. `ws land` is refused as stale only by the rules above, so it can land such a record
+  journal of any length). `ws land` lands such a record unless its own stale check refuses it:
+  that check also answers `E_WS_STALE` when the target was moved back to the base (`op undo`,
+  `ref set`) within the journal's newest 10,000 operations. `ws delete <name> --rescue` is the
+  way out when both refuse
   ([Troubleshooting](docs/troubleshooting.md#e_ws_stale)).
 - Golden envelopes pin 54 of the 55 error codes, eight more than before: `E_AMBIGUOUS_ID`,
   `E_IO_TRANSIENT`, `E_INTERNAL`, `E_BUSY`, `E_CAS_RETRY_EXHAUSTED`, `E_UNKNOWN_PARENT` as an
@@ -163,9 +166,10 @@ collects the changes on `stable` that no release holds yet, until the next relea
   to the landed changeset, and then `ws land` answered `E_WS_UNPORTABLE` "nothing was written"
   and kept its pending record; now it answers first, the target stays where it was and no record
   is left (the M15 design §5). A target that gains such a path between the check and the land
-  still takes the old way out, `ws delete --rescue`: the landed changeset holds the path for
-  good, so a re-run of `ws land` replays it and is refused again, whatever the target holds by
-  then, and `ws rebase` answers `E_INVALID_ARG`.
+  still takes the old way out, `ws delete --rescue`: while the target holds the landed changeset,
+  which holds the path for good, a re-run of `ws land` replays it and is refused again, even
+  after the target drops the path, and `ws rebase` answers `E_INVALID_ARG`; a target moved back
+  below it is a land the target left, which `ws land` lands anew and `ws rebase` takes over.
 - `ws status`'s `behind_by` counts the changesets the target holds that the workspace's base lacks
   when the base is not on the target's history: 1 after a sync replaced the base with its
   squash-merged copy, and 0 when the target moved back onto the base's first-parent history,
@@ -237,8 +241,8 @@ collects the changes on `stable` that no release holds yet, until the next relea
   on disk, so the store landed or rebased first, and the files then could not follow. A path the
   chain deletes is not in the tree it leaves, nor is a directory it empties, so a rename that
   only changes case lands, of a file (`src/readme` to `src/README`) or of a directory (`src/Lib`
-  to `src/lib`); a path of the edits `-m` commits that deletes or renames one the chain added is
-  no new path of the land
+  to `src/lib`). A path the chain added and the edits `-m` commits then delete or rename is no
+  new path of the land, nor is a path the chain deleted and the edits add back
   ([Troubleshooting](docs/troubleshooting.md#e_ws_unportable)).
 
 ## [0.7.0] - 2026-10-29

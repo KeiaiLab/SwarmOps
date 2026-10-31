@@ -1256,12 +1256,14 @@ out; a `ws rebase`, `ws land` or `ws materialize` that would bring such a path i
 or `ws resolve --take` that would restore one, refuses the same way, before the store records
 anything and with no pending record left. A target that gains the path after that check and before
 the store's call has recorded it when the refusal comes, and the pending record stays. After the
-store's rebase (`ws rebase`, `ws rebase --continue`, the rebase step of `ws land --check`) a
-re-run is refused the same way while the target holds the path, and rebases again once it does
-not. After the store's land (`ws land`, the land step of `ws land --check`) the landed changeset
-holds the path for good: a re-run of `ws land` replays it and is refused again, whatever the
-target holds by then, and `ws rebase` answers `E_INVALID_ARG` ("run it again first"). `ws delete
-<name> --rescue` removes the workspace, and its commits stay in the store.
+store's rebase (`ws rebase`, `ws rebase --continue`, the rebase step of `ws land --check`) a re-run
+is refused the same way while the target holds the path, and rebases again once it does not. After
+the store's land (`ws land`, the land step of `ws land --check`) a re-run depends on the target.
+While it holds the landed changeset, which holds the path for good, `ws land` replays it and is
+refused again, even after the target drops the path, and `ws rebase` answers `E_INVALID_ARG` ("run
+it again first"); `ws delete <name> --rescue` removes the workspace, and its commits stay in the
+store. A target moved back below the landed changeset has left the land: `ws land` lands it anew and
+`ws rebase` takes the record over.
 
 ### `E_WS_OUTSIDE_PREFIXES`
 
@@ -1294,9 +1296,11 @@ the record. A land the target still holds is not taken over: `ws land` again fin
 over either, and the record stays: the journal names the land's changeset and the target's
 history is longer than the last 10,000 commits, which do not hold it, or the operation that made
 the record's head is not among the journal's newest 10,000 (a land is looked for no further back
-than that operation, so a recent one is placed in a journal of any length). `ws land` is refused as stale only by the rules below, so it can land
-that record; `ws delete <name> --rescue` is the way out of it, and its commits stay in the
-store.
+than that operation, so a recent one is placed in a journal of any length). `ws land` lands that
+record unless its own stale check, below, refuses it: that check also answers `E_WS_STALE` when
+the target was moved back to the base (`op undo`, `ref set`) within the journal's newest 10,000
+operations. `ws delete <name> --rescue` is the way out when both refuse, and its commits stay in
+the store.
 
 The check runs for a land onto the workspace's own target, and lets a land through that it cannot
 place: a target whose first-parent history is longer than 10,000 commits, or a base with no

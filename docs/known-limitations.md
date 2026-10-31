@@ -771,33 +771,35 @@ left).
   the changes under the prefixes only, so its `changes` list can be empty while `ws commit` and
   `ws land` refuse an entry outside them; the refusal's `details.paths` names those entries.
   *Documented (the M15 design §5 leaves the display out of scope). Found: M15 Task S4b review.*
-- **`ws land` checks a stale base only against its own target, and only so far.** `E_WS_STALE`
-  needs the workspace's base gone from its target's history and an operation in the log that moved
-  the target to it. A land onto another `--target` is not checked, and neither are `ws commit`,
-  `ws status` and `ws rebase`; a target whose first-parent history is longer than 10,000 commits
-  (`BEHIND_CAP`), or a base with no such operation among the last 10,000, lands as it did before
-  the check. `ws rebase` leaves the pending record of a land cut short that it cannot place, and
-  answers "run it again first": the journal names the land's changeset and the target's
-  history is longer than the last 10,000 commits, which do not hold it, or the operation that
-  made the record's head is not among the journal's newest 10,000 (a land is looked for no
-  further back than that operation). `ws land` is refused only
-  by the rules above, so it can land such a record on the stale base; `ws delete <name>
-  --rescue` is the way out of the record. `ws rebase` of a stale workspace takes no
-  snapshot of the edits it moves onto the new head, and no test kills a land in the middle of
-  the check and the update (the M15 design's third SIGKILL acceptance). *Unscheduled (the M15
-  design §5 leaves them out of scope). Found: M15 Task S4c.*
+- **`ws land` checks a stale base only against its own target, and only so far.** `E_WS_STALE` needs
+  the workspace's base gone from its target's history and an operation in the log that moved the
+  target to it. A land onto another `--target` is not checked, and neither are `ws commit`, `ws
+  status` and `ws rebase`; a target whose first-parent history is longer than 10,000 commits
+  (`BEHIND_CAP`), or a base with no such operation among the last 10,000, lands as it did before the
+  check. `ws rebase` leaves the pending record of a land cut short that it cannot place, and answers
+  "run it again first": the journal names the land's changeset and the target's history is longer
+  than the last 10,000 commits, which do not hold it, or the operation that made the record's head
+  is not among the journal's newest 10,000 (a land is looked for no further back than that
+  operation). `ws land` lands such a record unless its own stale check refuses it: that check also
+  answers `E_WS_STALE` when the target was moved back to the base (`op undo`, `ref set`) within the
+  journal's newest 10,000 operations. `ws delete <name> --rescue` is the way out when both refuse.
+  `ws rebase` of a stale workspace takes no snapshot of the edits it moves onto the new head, and no
+  test kills a land in the middle of the check and the update (the M15 design's third SIGKILL
+  acceptance). *Unscheduled (the M15 design §5 leaves them out of scope). Found: M15 Task S4c.*
 - **A target that gains a reserved path after the check is not refused.** `ws land` and `ws rebase`
   check the target's paths for names the files cannot hold (`E_WS_UNPORTABLE`) before the store
   call. A target that gains a path with a component named `.swarmws` between that check and the
   store's call is landed or rebased onto, and the materialisation then refuses it with the pending
-  record kept. After the store's rebase (`ws rebase`, `ws rebase --continue`, the rebase step of
-  `ws land --check`) a re-run is refused the same way while the target holds the path, and
-  rebases again once it does not. After the store's land (`ws land`, the land step of `ws land
-  --check`) the landed changeset holds the path for good: a re-run of `ws land` replays it and is
-  refused again, whatever the target holds by then, and `ws rebase` answers `E_INVALID_ARG`. The
-  way out is `ws delete <name> --rescue`: the workspace's commits stay in the store. The same
-  window lets a case collision through that the target creates after the check. *Unscheduled (the
-  window is the time between two calls of one command). Found: M15 Task S4c review.*
+  record kept. After the store's rebase (`ws rebase`, `ws rebase --continue`, the rebase step of `ws
+  land --check`) a re-run is refused the same way while the target holds the path, and rebases again
+  once it does not. After the store's land (`ws land`, the land step of `ws land --check`) a re-run
+  depends on the target. While it holds the landed changeset, which holds the path for good, `ws
+  land` replays it and is refused again, even after the target drops the path, and `ws rebase`
+  answers `E_INVALID_ARG`; the way out is `ws delete <name> --rescue`: the workspace's commits stay
+  in the store. A target moved back below the landed changeset has left the land: `ws land` lands it
+  anew and `ws rebase` takes the record over. The same window lets a case collision through that the
+  target creates after the check. *Unscheduled (the window is the time between two calls of one
+  command). Found: M15 Task S4c review.*
 
 ## Platforms
 

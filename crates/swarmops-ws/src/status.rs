@@ -372,12 +372,14 @@ pub(crate) enum Landed {
 
 /// Whether a land with `key` is on the first-parent history of ref `target`: any changeset the
 /// journal names as a land of that key, looked for on the history within [`BEHIND_CAP`]
-/// changesets, as the store's own search for a key does. The journal is read back from its
-/// newest operation to the one that made `head`, the changeset the record stands on: no land of
-/// the key can be older, and the read ends there however long the journal is. When that
-/// operation is not among the newest [`OP_CAP`] (or no operation made `head`), a key no
+/// changesets (the store's own search for a key also looks on other refs, which this does not).
+/// The journal is read back from its newest operation to the one that made `head`, the
+/// changeset the record stands on: no land of this record can be older (a reused caller key may
+/// have an older one, which the store does not replay for it), and the read ends there however
+/// long the journal is. When that operation is not among the newest [`OP_CAP`], a key no
 /// changeset of the cap's operations carries is not known to be missing. A key no operation
-/// made is [`Landed::Absent`] once the journal is read back to `head`.
+/// made is [`Landed::Absent`] once the journal is read back to `head`; a `head` no operation
+/// lists gives [`Landed::Unknown`] only past the cap, as a journal within it is read to its end.
 pub(crate) fn landed(
     store: &dyn StoreOps,
     target: &str,
