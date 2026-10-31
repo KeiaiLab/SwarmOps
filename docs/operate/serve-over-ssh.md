@@ -64,7 +64,10 @@ make it yourself before people clone a large store, with any read the account is
 
 The store grants nothing until its root holds an `access.toml`, read on every connection. Write it
 as the serving account, beside `FORMAT` and `REPO`; no command writes it, and a change applies to
-the next connection.
+the next connection. A push to `refs/land/<target>` also reads it before each land attempt: a
+`land` grant removed while a land retries after a lost race stops it before its next attempt,
+with the refusal the connection would get and nothing written. An attempt already checked still
+lands.
 
 ```toml
 # Who may do what through `swarmops serve`. Read on every connection.

@@ -1,6 +1,6 @@
 //! Who may do what through `serve` (M14 design §5): the store's `access.toml`, read on every
-//! connection, and the caller named by [`resolve_identity`], the one resolver of `serve`'s
-//! identity.
+//! connection and before each land attempt (the M15 design §6), and the caller named by
+//! [`resolve_identity`], the one resolver of `serve`'s identity.
 
 use serde::Deserialize;
 use swarmops_api::{ErrorCode, Identity, OpError};

@@ -3,11 +3,16 @@
 //!
 //! ```text
 //! 1 a commit to land, and access: land ─▶ 2 import the tip from serve.git, objects only
-//! ─▶ 3 LocalOps::land, keyed by who pushed which tip where
+//! ─▶ 3 LocalOps::land_gated, keyed by who pushed which tip where, access: land read again
+//!      before each attempt
 //!      landed | replayed ─▶ 4 target exported ─▶ ok, and the landed commit on stderr
 //!      E_CONFLICT        ─▶ 4 target exported ─▶ ng conflict, the report on stderr
 //!      any other error   ─▶ ng <CODE>: <message>
 //! ```
+//!
+//! Each attempt of step 3 reads `access.toml` again first (the M15 design §6): a `land` grant taken
+//! away while an attempt loses its race stops the land before the next, with step 1's refusal.
+//! An attempt already judged lands even if the grant goes before its publish.
 //!
 //! The same push again finds its key on the target's first parents and replays the land, writing
 //! nothing. receive-pack moves no ref itself, so nothing is left under `refs/land/`. The hook's
@@ -23,8 +28,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use swarmops_api::{
-    ConflictKindOut, ConflictReport, ErrorCode, FileConflictOut, LandReq, LandStatus, LinesOut,
-    OpError, Rev, StoreOps as _,
+    ConflictKindOut, ConflictReport, ErrorCode, FileConflictOut, Identity, LandReq, LandResp,
+    LandStatus, LinesOut, OpError, Rev,
 };
 use swarmops_core::{ChangesetId, ObjectId};
 use swarmops_git::serve::land_key::land_key;
@@ -35,11 +40,11 @@ use swarmops_git::{
     ImportError, ImportRequest, RawCommit, export, import,
 };
 
-use super::access::Action;
+use super::access::{Access, Action};
 use super::guard::Redactor;
 use super::hook::{HookCtx, ng};
 use super::refresh::{SERVE_REFRESH_ATTEMPTS, serve_error};
-use crate::error;
+use crate::{LocalOps, error};
 
 /// The most conflicting paths a land's report lists, then `… and <k> more`.
 pub const MAX_CONFLICT_LINES: usize = 50;
@@ -90,7 +95,7 @@ fn land(ctx: &HookCtx<'_>, command: &Command, target: &str) -> Result<Report, Op
     let mut req = LandReq::new(Rev::from(head.to_string()));
     target.clone_into(&mut req.target);
     req.idempotency_key = Some(land_key(ctx.who.agent(), target, tip));
-    let landed = match ctx.ops.land(ctx.who, req) {
+    let landed = match land_onto(ctx.ops, ctx.who, req, target) {
         Ok(landed) => landed,
         Err(e) if e.code == ErrorCode::Conflict.as_str() => {
             return conflict(ctx, command, target, e);
@@ -114,6 +119,19 @@ fn land(ctx: &HookCtx<'_>, command: &Command, target: &str) -> Result<Report, Op
         );
     }
     Ok(Report::ok(command.refname.clone()))
+}
+
+/// Step 3's land of `req` onto `target` for `who`, `access.toml` read again before each attempt
+/// (the M15 design §6): a grant taken away between attempts stops the land before the next, with
+/// the refusal step 1 gives at connection.
+fn land_onto(
+    ops: &LocalOps,
+    who: &Identity,
+    req: LandReq,
+    target: &str,
+) -> Result<LandResp, OpError> {
+    let granted = |_attempt: u32| Access::load(ops)?.check(who, Action::Land, target);
+    ops.land_gated(who, req, granted)
 }
 
 /// The `ng` of a land that conflicts, `e`: its report written on stderr for the client, with the
@@ -384,5 +402,180 @@ mod tests {
         deleted.theirs_agent = None;
         let lines = conflict_lines(&report(vec![deleted]), "main", "1a2b3c4");
         assert_eq!(lines[1], "  gone.txt: changed by the push, deleted on main");
+    }
+
+    /// The land's grant, judged again before each attempt (the M15 design §6).
+    mod grant {
+        use std::io;
+        use std::sync::{Arc, Mutex};
+
+        use camino::Utf8PathBuf;
+        use serde_json::json;
+        use swarmops_api::{
+            ChangeInput, ChangeOp, CommitReq, ContentInput, ErrorCode, Identity, InfoReq, LandReq,
+            LandStatus, OpLogReq, Rev, StoreOps as _,
+        };
+        use swarmops_store::RealFs;
+        use swarmops_testkit::fs::{Call, Watch, Watched};
+        use tempfile::TempDir;
+
+        use super::super::land_onto;
+        use crate::LocalOps;
+
+        /// Who lands.
+        const LANDER: &str = "person/ada";
+
+        /// Who moves `main` while the land writes.
+        const RACER: &str = "person/bob";
+
+        /// The file both edit: 32,000 lines of 36 bytes, past the size the publish merges in
+        /// the lock (1 MiB a side), so a race on it gives the land back to its lander.
+        const REGISTRY: &str = "registry";
+
+        /// The lines of the registry.
+        const LINES: usize = 32_000;
+
+        /// The lander may land onto `main`.
+        const GRANTED: &str = "version = 1\n[[grant]]\nwho = [\"person/ada\"]\nland = [\"main\"]\n";
+
+        /// The lander may read, no longer land.
+        const REVOKED: &str = "version = 1\n[[grant]]\nwho = [\"person/ada\"]\nread = true\n";
+
+        /// What the race does to `access.toml` beside its move of `main`.
+        #[derive(Clone, Copy)]
+        enum Meanwhile {
+            /// It leaves the file as it is.
+            Kept,
+            /// It takes the lander's `land` away, keeping `read`.
+            Revoked,
+        }
+
+        /// Moves `main` once, as another lander would, at the land's first flush of objects
+        /// (its first `fsync_dir` under `objects/`, outside the lock), editing the registry a
+        /// line apart from the land; then does to `access.toml` what `meanwhile` says.
+        struct Race {
+            root: Utf8PathBuf,
+            meanwhile: Meanwhile,
+            /// The changeset it moved `main` to, once it has.
+            raced: Mutex<Option<String>>,
+        }
+
+        impl Watch for Race {
+            fn before(&self, call: &Call<'_>) -> io::Result<()> {
+                let at = call.path().strip_prefix(&self.root).unwrap_or(call.path());
+                let mut raced = self.raced.lock().unwrap();
+                if call.method != "fsync_dir" || !at.starts_with("objects") || raced.is_some() {
+                    return Ok(());
+                }
+
+                // 1. Another lander's change on main, through a handle of its own.
+                let other = LocalOps::open(&self.root).unwrap();
+                *raced = Some(commit(&other, RACER, None, registry(1, "theirs")));
+
+                // 2. The grant, as the operator leaves it.
+                if let Meanwhile::Revoked = self.meanwhile {
+                    std::fs::write(self.root.join("access.toml"), REVOKED)?;
+                }
+                Ok(())
+            }
+        }
+
+        /// The registry, its line `at` replaced by `line`.
+        fn registry(at: usize, line: &str) -> String {
+            let lines = (0..LINES).map(|n| {
+                if n == at {
+                    format!("{line}\n")
+                } else {
+                    format!("entry {n:06} of the registry, as is\n")
+                }
+            });
+            lines.collect()
+        }
+
+        /// Commits `content` at the registry by `agent` on `parent`, moving `main` when no
+        /// parent is given: the changeset's id.
+        fn commit(ops: &LocalOps, agent: &str, parent: Option<&str>, content: String) -> String {
+            let who = Identity::parse(agent).unwrap();
+            let mut change = ChangeInput::new(REGISTRY.to_owned(), ChangeOp::Put);
+            change.content = Some(ContentInput::Inline(content));
+            let mut req = CommitReq::new(vec![change], "registry".to_owned());
+            req.parent = parent.map(Rev::from);
+            req.advance = parent.is_none().then(|| "main".to_owned());
+            ops.commit(&who, req).unwrap().changeset
+        }
+
+        /// The number of the store's last operation: its frame count.
+        fn last_op(ops: &LocalOps) -> u64 {
+            let mut req = OpLogReq::default();
+            req.before = None;
+            req.limit = 1;
+            req.max_changesets = 1;
+            ops.op_log(req).unwrap().ops[0].op
+        }
+
+        /// A land onto `main` that loses its first race, with the race doing `meanwhile`:
+        /// the store's directory, its operations, the handle the race watches, the race, and the
+        /// land's request.
+        fn raced_land(meanwhile: Meanwhile) -> (TempDir, LocalOps, LocalOps, Arc<Race>, LandReq) {
+            // 1. The store, main's registry, the lander's grant, and the change.
+            let dir = tempfile::tempdir().unwrap();
+            let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+            let (ops, _) = LocalOps::init(&root, "acme").unwrap();
+            let base = registry(0, "entry 000000 of the registry, as is");
+            let t0 = commit(&ops, LANDER, None, base);
+            std::fs::write(root.join("access.toml"), GRANTED).unwrap();
+            let head = commit(&ops, LANDER, Some(&t0), registry(4, "ours"));
+
+            // 2. The race, and a handle whose writes it watches.
+            let race = Arc::new(Race {
+                root: root.clone(),
+                meanwhile,
+                raced: Mutex::new(None),
+            });
+            let racing = LocalOps::open_on(&root, Watched(Arc::clone(&race), RealFs::new()));
+            let land: LandReq = serde_json::from_value(json!({"head": head})).unwrap();
+            (dir, ops, racing, race, land)
+        }
+
+        /// A grant taken away while a land loses its first race stops the land before its
+        /// second attempt: `E_POLICY_DENIED` as at connection, `main` the racer's changeset,
+        /// and the race's frame alone.
+        #[test]
+        fn a_grant_revoked_after_a_lost_race_is_policy_denied() {
+            let (_dir, ops, racing, race, land) = raced_land(Meanwhile::Revoked);
+            let who = Identity::parse(LANDER).unwrap();
+            let before = last_op(&ops);
+
+            // 1. The refusal, as the connection's check gives it.
+            let error = land_onto(&racing, &who, land, "main").unwrap_err();
+            let raced = race.raced.lock().unwrap().clone().expect("the race ran");
+            assert_eq!(error.code, ErrorCode::PolicyDenied.as_str(), "{error:?}");
+            assert!(!error.retryable, "{error:?}");
+            assert_eq!(error.details["reason"], "not_granted", "{error:?}");
+            assert_eq!(error.details["identity"], LANDER, "{error:?}");
+            assert_eq!(error.details["action"], "land", "{error:?}");
+            assert_eq!(error.details["ref"], "main", "{error:?}");
+
+            // 2. Nothing of the land recorded.
+            let main = ops.repo_info(InfoReq::default()).unwrap().main;
+            assert_eq!(main.as_deref(), Some(raced.as_str()));
+            assert_eq!(last_op(&ops), before + 1, "the race's frame alone");
+        }
+
+        /// A grant kept through a lost race lets the land land on its second attempt.
+        #[test]
+        fn a_grant_kept_through_a_lost_race_lands() {
+            let (_dir, ops, racing, race, land) = raced_land(Meanwhile::Kept);
+            let who = Identity::parse(LANDER).unwrap();
+
+            let landed = land_onto(&racing, &who, land, "main").unwrap();
+            let raced = race.raced.lock().unwrap().clone().expect("the race ran");
+            assert_eq!(
+                (landed.status, landed.attempts, landed.rebased_onto.as_str()),
+                (LandStatus::Landed, 2, raced.as_str())
+            );
+            let main = ops.repo_info(InfoReq::default()).unwrap().main;
+            assert_eq!(main, Some(landed.landed));
+        }
     }
 }

@@ -34,6 +34,7 @@ use swarmops_core::{
 };
 use swarmops_git::MemoKey;
 use swarmops_repo::LandRequest;
+use swarmops_repo::land::Gated;
 use swarmops_repo::merge::line_diff::{self, DiffLine, UnifiedHunk};
 use swarmops_repo::merge::tree_diff::{ChangeKind, Leaf, PathFilter, TreeChange};
 use swarmops_repo::{
@@ -538,6 +539,27 @@ impl LocalOps {
     pub fn open(path: &Utf8Path) -> Result<LocalOps, OpError> {
         let repo = LocalRepo::open(path).map_err(|e| error::repo_error(e, During::Open(path)))?;
         Ok(Self::with_repo(repo, path))
+    }
+
+    /// [`StoreOps::land`], `gate` asked before each of the land's attempts with its number,
+    /// counted from 1: a refusal stops the land there, nothing of it recorded, and is its error
+    /// as the gate gave it. `serve`'s land judges its caller's grant so (the M15 design §6).
+    pub(crate) fn land_gated(
+        &self,
+        who: &Identity,
+        req: LandReq,
+        gate: impl FnMut(u32) -> Result<(), OpError>,
+    ) -> Result<LandResp, OpError> {
+        self.recording(&Resolved::default())
+            .land_with(who, req, gate)
+    }
+
+    /// The operations over the store at `path`, its every filesystem call going through `fs`: a
+    /// test's watched filesystem.
+    #[cfg(test)]
+    pub(crate) fn open_on(path: &Utf8Path, fs: impl swarmops_store::FsOps + 'static) -> LocalOps {
+        let repo = LocalRepo::open_with_fs(path, std::sync::Arc::new(fs)).expect("open the store");
+        Self::with_repo(repo, path)
     }
 
     /// The store's path, as given to [`LocalOps::init`] or [`LocalOps::open`].
@@ -1268,6 +1290,107 @@ impl<'a> Recording<'a> {
         out.replayed = true;
         Ok(Some(out))
     }
+
+    /// [`StoreOps::land`], `gate` asked before each of the land's attempts with its number,
+    /// counted from 1 ([`swarmops_repo::Repo::land_gated`]): a refusal is the land's error, as
+    /// the gate gave it.
+    fn land_with(
+        &self,
+        who: &Identity,
+        req: LandReq,
+        gate: impl FnMut(u32) -> Result<(), OpError>,
+    ) -> Result<LandResp, OpError> {
+        let LandReq {
+            head,
+            base,
+            target,
+            message,
+            idempotency_key,
+            max_attempts,
+            max_conflict_bytes,
+            expect_target,
+            resolutions,
+            ..
+        } = req;
+        // The request's own rules are checked before anything is resolved or read.
+        check_ref_use(&target, RefUse::Publish)?;
+        if let Some(key) = &idempotency_key {
+            land_key(key)?;
+        }
+        if !(1..=MAX_LAND_ATTEMPTS).contains(&max_attempts) {
+            return Err(error::error(
+                ErrorCode::InvalidArg,
+                format!("max_attempts is {max_attempts}, not 1 to {MAX_LAND_ATTEMPTS}"),
+            )
+            .with_details(error::details([("max_attempts", max_attempts.into())])));
+        }
+        let resolutions = resolutions.map(shaped_resolutions).transpose()?;
+
+        // 1. The change and the head it expects the target to name, resolved in one snapshot.
+        let ResolvedChange {
+            head,
+            base,
+            expected,
+            resolutions,
+        } = self.change(
+            &head,
+            base.as_ref(),
+            expect_target.as_ref(),
+            &target,
+            resolutions,
+        )?;
+
+        // 2. The land itself.
+        let mut lander_metadata = Vec::new();
+        if let Some(run_id) = who.run_id() {
+            let run_id = run_id.as_bytes().to_vec();
+            lander_metadata.push((LANDER_RUN_ID_KEY.to_owned(), run_id));
+        }
+        let mut land = LandRequest::new(head, &target, self.ops.native_signature(who, None)?);
+        land.base = base;
+        land.key = idempotency_key;
+        land.message = message.map(String::into_bytes);
+        land.lander_metadata = lander_metadata;
+        land.max_attempts = max_attempts;
+        land.expect_target = expected;
+        land.resolutions = resolutions;
+        let outcome = match self.ops.repo.land_gated(land, gate) {
+            Ok(outcome) => outcome,
+            // The gate's refusal, as it gave it.
+            Err(Gated::Refused(e)) => return Err(e),
+            Err(Gated::Repo(e)) => {
+                // An exact land refused under the lock reports what the write repaired first.
+                if let RepoError::CasMismatch { recovered, .. } = &e {
+                    self.resolved.record_recovered(**recovered);
+                }
+                return Err(merge_error(e, max_conflict_bytes));
+            }
+            Err(_) => return Err(error::unknown_variant("Gated")),
+        };
+        let status = match outcome.status {
+            swarmops_repo::LandStatus::Landed => LandStatus::Landed,
+            swarmops_repo::LandStatus::Replayed => LandStatus::Replayed,
+            _ => return Err(error::unknown_variant("LandStatus")),
+        };
+        let mut out = LandResp::new(
+            status,
+            outcome.landed.to_string(),
+            outcome.rebased_onto.to_string(),
+            target,
+            outcome.base.to_string(),
+            outcome.attempts,
+            outcome.relocated,
+            bytes::to_u64(outcome.files_changed),
+            (outcome.squashed_from.iter())
+                .map(ToString::to_string)
+                .collect(),
+        );
+        out.auto_merged = (outcome.auto_merged.iter())
+            .map(ToString::to_string)
+            .collect();
+        out.warnings = outcome.warnings;
+        Ok(out)
+    }
 }
 
 impl StoreOps for Recording<'_> {
@@ -1395,90 +1518,8 @@ impl StoreOps for Recording<'_> {
     }
 
     fn land(&self, who: &Identity, req: LandReq) -> Result<LandResp, OpError> {
-        let LandReq {
-            head,
-            base,
-            target,
-            message,
-            idempotency_key,
-            max_attempts,
-            max_conflict_bytes,
-            expect_target,
-            resolutions,
-            ..
-        } = req;
-        // The request's own rules are checked before anything is resolved or read.
-        check_ref_use(&target, RefUse::Publish)?;
-        if let Some(key) = &idempotency_key {
-            land_key(key)?;
-        }
-        if !(1..=MAX_LAND_ATTEMPTS).contains(&max_attempts) {
-            return Err(error::error(
-                ErrorCode::InvalidArg,
-                format!("max_attempts is {max_attempts}, not 1 to {MAX_LAND_ATTEMPTS}"),
-            )
-            .with_details(error::details([("max_attempts", max_attempts.into())])));
-        }
-        let resolutions = resolutions.map(shaped_resolutions).transpose()?;
-
-        // 1. The change and the head it expects the target to name, resolved in one snapshot.
-        let ResolvedChange {
-            head,
-            base,
-            expected,
-            resolutions,
-        } = self.change(
-            &head,
-            base.as_ref(),
-            expect_target.as_ref(),
-            &target,
-            resolutions,
-        )?;
-
-        // 2. The land itself.
-        let mut lander_metadata = Vec::new();
-        if let Some(run_id) = who.run_id() {
-            let run_id = run_id.as_bytes().to_vec();
-            lander_metadata.push((LANDER_RUN_ID_KEY.to_owned(), run_id));
-        }
-        let mut land = LandRequest::new(head, &target, self.ops.native_signature(who, None)?);
-        land.base = base;
-        land.key = idempotency_key;
-        land.message = message.map(String::into_bytes);
-        land.lander_metadata = lander_metadata;
-        land.max_attempts = max_attempts;
-        land.expect_target = expected;
-        land.resolutions = resolutions;
-        let outcome = self.ops.repo.land(land).map_err(|e| {
-            // An exact land refused under the lock reports what the write repaired first.
-            if let RepoError::CasMismatch { recovered, .. } = &e {
-                self.resolved.record_recovered(**recovered);
-            }
-            merge_error(e, max_conflict_bytes)
-        })?;
-        let status = match outcome.status {
-            swarmops_repo::LandStatus::Landed => LandStatus::Landed,
-            swarmops_repo::LandStatus::Replayed => LandStatus::Replayed,
-            _ => return Err(error::unknown_variant("LandStatus")),
-        };
-        let mut out = LandResp::new(
-            status,
-            outcome.landed.to_string(),
-            outcome.rebased_onto.to_string(),
-            target,
-            outcome.base.to_string(),
-            outcome.attempts,
-            outcome.relocated,
-            bytes::to_u64(outcome.files_changed),
-            (outcome.squashed_from.iter())
-                .map(ToString::to_string)
-                .collect(),
-        );
-        out.auto_merged = (outcome.auto_merged.iter())
-            .map(ToString::to_string)
-            .collect();
-        out.warnings = outcome.warnings;
-        Ok(out)
+        // No gate: every attempt goes ahead.
+        self.land_with(who, req, |_| Ok(()))
     }
 
     fn blob_put(&self, _who: &Identity, req: BlobPutReq) -> Result<BlobPutResp, OpError> {
