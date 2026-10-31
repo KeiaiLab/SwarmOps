@@ -631,8 +631,9 @@ swarmops land 03b168a3…
 
 To publish without a land, read the files you changed at `actual`, apply your edits to them, and
 commit with `--parent <actual> --advance main`. An `op undo` that finds a ref moved since the
-operation fails with this code as well, and writes nothing: undo the later operations first,
-newest first, or land a change that reverses the operation.
+operation fails with this code as well, and writes nothing: on a `release/<name>` ref undo the
+later operations first, newest first; on `main`, which moves only forward, land a change that
+reverses the operation.
 
 ## Landing and undo
 
