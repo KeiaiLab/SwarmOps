@@ -159,11 +159,13 @@ collects the changes on `stable` that no release holds yet, until the next relea
   only such a file names is no longer committed; a new file at the root, which the refusal's hint
   names, now materialises instead of failing with `E_PATH_NOT_FOUND`
   ([Troubleshooting](docs/troubleshooting.md#e_ws_outside_prefixes)).
-- In a sparse workspace, `ws commit`, `ws land` and `ws delete --rescue` refuse
-  (`E_WS_OUTSIDE_PREFIXES`) an edit to a tree path outside the prefixes that is on disk, and a
-  tree ignore file off the prefixes and missing from disk under an ignore file the workspace
-  holds. An ignore file on disk hid the first, and the walk read without the second's rules, so a
-  commit left such edits out without a word (the M15 design §5a).
+- In a sparse workspace, `ws commit`, `ws land`, `ws delete --rescue` and the `worktree-remove`
+  hook refuse (`E_WS_OUTSIDE_PREFIXES`) an edit to a tree path outside the prefixes that is on
+  disk, and a tree ignore file off the prefixes and missing from disk under an ignore file the
+  workspace holds. An ignore file on disk hid the first, and the walk read without the second's
+  rules, so a commit left such edits out without a word. A root `.swarmws` of the tree, under
+  any ASCII case, is no such path: the workspace's own directory stands there (the M15 design
+  §5a).
 
 ## [0.7.0] - 2026-10-29
 

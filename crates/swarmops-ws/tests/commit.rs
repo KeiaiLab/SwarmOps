@@ -913,6 +913,42 @@ fn a_tracked_outside_path_an_ignore_file_names_is_refused() {
     }
 }
 
+/// A tree whose root holds `.swarmws` (legal in the store, never written to a workspace) does not
+/// turn the workspace's own state into an outside edit: a sparse workspace on it commits, lands
+/// and rescues.
+#[test]
+fn a_root_swarmws_in_the_tree_is_not_refused() {
+    // 1. A workspace of `lib` on a tree holding `.swarmws/x`.
+    let f = Fixture::new();
+    let base = f.commit(
+        None,
+        &[Put::File(".swarmws/x", "x\n"), Put::File("lib/a", "a\n")],
+    );
+    f.create("w", &base, &["lib"]);
+    let dir = f.beside("w");
+
+    // 2. Commit, land and a rescuing delete, each after an edit: none refused.
+    write(&dir, "lib/a", "committed\n");
+    swarmops_ws::commit(&f.ctx(), commit_of("w", "commit")).unwrap();
+    write(&dir, "lib/a", "landed\n");
+    swarmops_ws::land(&f.ctx(), {
+        let mut req = WsLandReq::new("w".to_owned());
+        req.message = Some("land".to_owned());
+        req.status_after = StatusAfter::None;
+        req
+    })
+    .unwrap();
+    write(&dir, "lib/a", "rescued\n");
+    let deleted = swarmops_ws::delete(&f.ctx(), {
+        let mut req = WsDeleteReq::new("w".to_owned());
+        req.rescue = true;
+        req
+    })
+    .unwrap();
+    assert!(deleted.rescued.is_some(), "{deleted:?}");
+    assert!(!dir.exists());
+}
+
 /// An ignore file the base gained above the prefixes after the create, missing from disk under
 /// one the workspace holds, is refused, so its `!` cannot be lost; following the hints twice
 /// commits the file it lets through (the M15 design §5a, H2).

@@ -830,8 +830,8 @@ pub(crate) fn with_ignores(
 /// What sparse workspace `ws` holds off its prefixes that a walk does not see, from its
 /// `materialized` tree: each entry of the root and of each directory above a prefix, off the
 /// prefixes, that is (1) on disk, whatever the ignore files say, as no such tree path is; or
-/// (2) an ignore file below one the prefixes hold, whose rules the walk lacks. Sorted; none for
-/// a workspace of the whole tree.
+/// (2) an ignore file below one the prefixes hold, whose rules the walk lacks. A root `.swarmws`
+/// under any ASCII case is skipped. Sorted; none for a workspace of the whole tree.
 pub(crate) fn tree_outside(
     store: &dyn StoreOps,
     host: &dyn HostFs,
@@ -858,6 +858,10 @@ pub(crate) fn tree_outside(
             continue;
         };
         for entry in entries.iter() {
+            // The workspace's own directory, under any ASCII case, as the walk skips it.
+            if dir.is_empty() && entry.name.eq_ignore_ascii_case(state::SWARMWS_DIR) {
+                continue;
+            }
             let path = join(dir, &entry.name);
             if held_by(&path, prefixes) {
                 continue;
