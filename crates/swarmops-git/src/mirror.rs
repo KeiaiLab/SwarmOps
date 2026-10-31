@@ -16,7 +16,9 @@
 //! ```
 //!
 //! A fetch writes the incoming refs only; the tracking refs and tags move to them
-//! ([`Mirror::promote`]) after the transport's closure check found every object they reach.
+//! ([`Mirror::promote`]) after the transport's closure check found every object they reach and,
+//! when the followed branch has an incoming ref, the import took its commits from it; a fetch
+//! that brought no such ref imports nothing and promotes all the same.
 //!
 //! The mirror is a cache: it holds nothing the store and the remote cannot give again, and one
 //! that is missing, of an unknown version or that gix cannot open is set aside and made again by

@@ -621,6 +621,123 @@ fn sync_needs_an_identity() {
     assert_eq!(remote.head(), head);
 }
 
+/// The remote's `main` naming a tree: the sync's fetch refuses its import with
+/// `E_GIT_REF_NOT_FOUND`, whose `details.git_ref` is the incoming ref the import read.
+#[test]
+fn sync_of_a_tree_names_the_incoming_ref() {
+    let remote = Remote::new();
+    let store = remote.cloned();
+    land(&store, "mine.txt", "mine\n");
+    let before = main_at(&store);
+
+    // 1. The remote's main at its own tree, written past git's refusal to.
+    let bare = remote.server.bare(REPO);
+    let tree = git_out(&remote.server, &bare, &["rev-parse", "main^{tree}"]);
+    let main_file = bare.join("refs").join("heads").join("main");
+    fs::write(main_file, format!("{tree}\n")).expect("write the remote's main");
+
+    // 2. Refused at the import, by the ref it read.
+    let failed = sync(&store, &[]);
+    let error = failed.err("E_GIT_REF_NOT_FOUND");
+    let incoming = format!("refs/incoming/{ORIGIN}/heads/main");
+    assert_eq!(error["details"]["git_ref"], incoming.as_str(), "{failed}");
+    assert_eq!(error["details"]["kind"], "tree", "{failed}");
+    assert_eq!(main_at(&store), before);
+}
+
+/// A fetch whose import committed but whose tracking ref could not move (the mirror's
+/// `refs/remotes/origin` made read-only at the closure check) fails `E_GIT_WRITE`; the next
+/// fetch imports nothing again and moves the tracking ref to the remote's head. Skipped where a
+/// read-only directory takes writes (root).
+#[cfg(unix)]
+#[test]
+fn fetch_finishes_one_cut_before_promote() {
+    // 1. Root writes into a read-only directory all the same: nothing here can fail the promote.
+    let dir = tempfile::tempdir().expect("a temp dir");
+    if !read_only_refuses(dir.path()) {
+        eprintln!("skipped: a read-only directory takes writes (running as root?)");
+        return;
+    }
+
+    let remote = Remote::new();
+    let store = remote.cloned();
+    let mirror = Path::new(store.path()).join("git").join("mirror.git");
+    let tracking = format!("refs/remotes/{ORIGIN}/main");
+    let old = git_out(&remote.server, &mirror, &["rev-parse", &tracking]);
+    remote.commit("third", &[("c.txt", "c\n")]);
+    let count = store.info()["changesets"].as_u64().expect("a count");
+
+    // 2. A stand-in that makes the tracking refs read-only at the closure check; writable again
+    //    when the test ends, failed or not.
+    let refs = mirror.join("refs").join("remotes").join(ORIGIN);
+    let writable = Writable(refs.clone());
+    let script = format!(
+        "{}  mkdir -p '{refs}' && chmod {READ_ONLY:o} '{refs}'\nfi",
+        first("rev-list", &dir.path().join("cut")),
+        refs = path_text(&refs)
+    );
+    let git = stand_in(&remote, dir.path(), &script);
+
+    // 3. The import committed, the tracking ref where it was.
+    let line = ["--repo", store.path(), "fetch", ORIGIN];
+    let failed = run(&line, &remote.vars(&[("SWARMOPS_GIT", &git)]));
+    failed.err("E_GIT_WRITE");
+    let after = store.info()["changesets"].as_u64().expect("a count");
+    assert_eq!(after, count + 1, "{failed}");
+    let kept = git_out(&remote.server, &mirror, &["rev-parse", &tracking]);
+    assert_eq!(kept, old);
+
+    // 4. Writable again: the next fetch imports nothing and moves the tracking ref.
+    drop(writable);
+    let fetched = store.read(&["fetch", ORIGIN]).ok();
+    assert_eq!(fetched["imported"], 0, "{fetched}");
+    assert_eq!(fetched["head"]["sha"], remote.head().as_str(), "{fetched}");
+    let moved = git_out(&remote.server, &mirror, &["rev-parse", &tracking]);
+    assert_eq!(moved, remote.head());
+    store.read(&["verify", "--deep"]).ok();
+}
+
+/// Whether a read-only directory under `dir` refuses a new file: no for root, whom no mode stops.
+#[cfg(unix)]
+fn read_only_refuses(dir: &Path) -> bool {
+    let probe = dir.join("probe");
+    fs::create_dir(&probe).expect("make the probe");
+    let probed = Writable(probe.clone());
+    set_mode(&probe, READ_ONLY);
+    let refused = fs::write(probe.join("file"), "").is_err();
+    drop(probed);
+    refused
+}
+
+/// A directory made writable again (mode 755) when dropped, so that a failed test leaves no
+/// read-only directory behind; one that does not exist is left as it is.
+#[cfg(unix)]
+struct Writable(PathBuf);
+
+#[cfg(unix)]
+impl Drop for Writable {
+    fn drop(&mut self) {
+        if self.0.exists() {
+            set_mode(&self.0, WRITABLE);
+        }
+    }
+}
+
+/// The mode the stand-in gives the tracking refs' directory, and the probe.
+#[cfg(unix)]
+const READ_ONLY: u32 = 0o555;
+
+/// The mode [`Writable`] gives back.
+#[cfg(unix)]
+const WRITABLE: u32 = 0o755;
+
+/// Sets the permission bits of `path` to `mode`.
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("set the mode");
+}
+
 /// The sync takes the mirror's lock once, at its start, and runs its fetch and push under it:
 /// while a stand-in holds the sync in its fetch, a second handle on `git/lock` would block, and
 /// the sync then completes without `E_BUSY`.

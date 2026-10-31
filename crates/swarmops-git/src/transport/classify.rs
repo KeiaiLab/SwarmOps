@@ -51,9 +51,9 @@ const ROWS: [(&[&str], Verdict); 10] = [
             "bad blob object",
             "unable to unpack",
             "cannot read existing object",
-            "is corrupt",
             "pack is corrupted (sha1 mismatch)",
             "final sha1 did not match",
+            "is corrupt",
         ],
         Verdict::Rejected(RejectReason::BadObjects),
     ),
@@ -358,6 +358,46 @@ mod tests {
         }
     }
 
+    /// The first needle of `rows` that holds a needle read before it, and that needle. One in
+    /// a row above takes its every match to that row's verdict; one before it in its row leaves
+    /// it no match of its own, the verdict the same.
+    fn first_shadowed<'a>(rows: &[(&[&'a str], Verdict)]) -> Option<(&'a str, &'a str)> {
+        let needles: Vec<&str> = rows
+            .iter()
+            .flat_map(|(needles, _)| needles.iter().copied())
+            .collect();
+        needles.iter().enumerate().find_map(|(at, needle)| {
+            let earlier = needles[..at]
+                .iter()
+                .find(|before| needle.contains(*before))?;
+            Some((*earlier, *needle))
+        })
+    }
+
+    /// Every needle can decide a match: none holds a needle read before it.
+    #[test]
+    fn no_needle_is_shadowed() {
+        // 1. The check finds a shadow across rows: a bad-objects `"denied"` would take Auth's
+        //    `"permission denied ("`, so an ssh key refusal would read as bad objects.
+        let bad: [(&[&str], Verdict); 2] = [
+            (
+                &["fsck error", "denied"],
+                Verdict::Rejected(RejectReason::BadObjects),
+            ),
+            (
+                &["permission denied ("],
+                Verdict::Rejected(RejectReason::Auth),
+            ),
+        ];
+        assert_eq!(
+            first_shadowed(&bad),
+            Some(("denied", "permission denied ("))
+        );
+
+        // 2. The table has none.
+        assert_eq!(first_shadowed(&ROWS), None);
+    }
+
     #[test]
     fn bad_objects_rows() {
         // git 2.43.0's wording: the fsck refusal of index-pack and unpack-objects, the fetch's
@@ -380,14 +420,15 @@ error: http://127.0.0.1:1/r.git did not send all necessary objects",
 fatal: cannot read existing object info 7777
 fatal: index-pack failed",
             "fatal: loose object 8888 (stored in ./objects/88/88) is corrupt",
-            // A pack whose bytes changed in transit: index-pack's and unpack-objects' checksum
-            // refusals.
+            // A pack whose bytes changed in transit: index-pack's checksum refusal.
             "fatal: pack is corrupted (SHA1 mismatch)
 fatal: index-pack failed",
-            "fatal: final sha1 did not match
-fatal: unpack-objects failed",
         ];
-        for stderr in fetched {
+        // unpack-objects' checksum refusal of the same pack: git's wording, which no fetch here
+        // gives (`fetch.fsckObjects` makes git receive every pack with index-pack).
+        let unpacked = "fatal: final sha1 did not match
+fatal: unpack-objects failed";
+        for stderr in fetched.into_iter().chain([unpacked]) {
             assert_eq!(
                 reason(failure, stderr),
                 RejectReason::BadObjects,
