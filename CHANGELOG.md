@@ -18,36 +18,36 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 ### Changed (breaking)
 
-- `op undo` and the `undo` request take the operation id `op log` prints (`<op>:<crc>`); a bare
-  number is `E_INVALID_ARG`. What to do: read `id` from `op log` or from the response that
-  recorded the operation.
+- The `undo` request's `op` field is now `id` (`UndoReq.op` became `UndoReq.id`), and `op undo`
+  takes the same value: the operation id `op log` prints (`<op>:<crc>`). A bare number, and a
+  request that still sends `op`, is `E_INVALID_ARG`. What to do: send the `id` that `op log`, or
+  the response that recorded the operation, gives.
 
 - `ref set` and `op undo` refuse to move `main` off its first-parent history (`E_REF_PROTECTED`).
   What to do: land a change that reverts it. The error's details name the head the move would
   drop (`changeset`) and its `target`, and an undo's its `op` and `id`; nothing is written, and
-  `release/<name>` refs move either way (the M15 design §4,
-  [Troubleshooting](docs/troubleshooting.md#e_ref_protected)). An undo that a later move of `main`
+  `release/<name>` refs move either way
+  ([Troubleshooting](docs/troubleshooting.md#e_ref_protected)). An undo that a later move of `main`
   blocks (`E_CAS_MISMATCH`) says to land a change that reverses the operation, no longer to undo
   the later operations first; the `op undo` and `ref set` help, the MCP `undo` tool and the MCP
   server instructions state the rule.
 
 - `ws commit` in a sparse workspace no longer widens its prefixes; an edit outside them is
   `E_WS_OUTSIDE_PREFIXES`. What to do: `ws materialize <path>` first. A path named outside the
-  prefixes, and any file or directory the walk meets outside them that no `.gitignore` or
-  `.swarmignore` on disk names, is refused, nothing changed; `details.paths` lists them, sorted,
-  the first 20. `ws land` refuses the same before anything else; `ws rebase -m` commits the edits
-  under the prefixes as before (the M15 design §5,
-  [Troubleshooting](docs/troubleshooting.md#e_ws_outside_prefixes)).
+  prefixes is refused, and so is any file or directory the walk meets outside them that no
+  `.gitignore` or `.swarmignore` on disk names; nothing changes, and `details.paths` lists them,
+  sorted, the first 20. `ws land` refuses the same before anything else; `ws rebase -m` commits
+  the edits under the prefixes as before
+  ([Troubleshooting](docs/troubleshooting.md#e_ws_outside_prefixes)).
 
 ### Added
 
 - Every `op log` entry and every `undo` result that wrote an operation carry its `id`: the number
   and its journal frame's CRC-32 as 8 lowercase hex digits. An id read before a failed write took
   its operation back is `E_OP_NOT_FOUND` with `details.reason: checksum`, never the operation that
-  took the number next (the M15 design §2); a number past the last is `reason: past_end`; either
-  way `details.id` is the id as the request sent it. A warning after a write's commit point names
-  the operation by its id ([Troubleshooting](docs/troubleshooting.md#e_op_not_found)).
-
+  took the number next; a number past the last is `reason: past_end`; either way `details.id`
+  is the id as the request sent it. A warning after a write's commit point names the operation by
+  its id ([Troubleshooting](docs/troubleshooting.md#e_op_not_found)).
 - `.deb` and `.rpm` packages for x86_64 and aarch64 on every release, with their lines in
   `SHA256SUMS`: `swarmops_<version>_<arch>.deb` and `swarmops-<version>-1.<arch>.rpm`, made by
   `scripts/packages.py` from the release archive's binaries, byte for byte, into `/usr/bin`, with
@@ -66,29 +66,28 @@ collects the changes on `stable` that no release holds yet, until the next relea
   ([Install from a clone](docs/operate/install-and-upgrade.md#install-from-a-clone)).
 - Two error codes in the schema, exit 1, not retryable: `E_WS_OUTSIDE_PREFIXES` (a sparse
   workspace's edits outside its prefixes, raised by `ws commit` and `ws land`) and `E_WS_STALE` (a
-  workspace's base gone from its target's history, raised by `ws land`), the workspace refusals of
-  the M15 design §5 ([Troubleshooting](docs/troubleshooting.md#e_ws_outside_prefixes)).
-- `ws land` refuses a workspace whose base left its target's history with `E_WS_STALE`, and
-  changes nothing: an `op undo`, a restore, a `ref set` or a sync moved the target back, or
-  rewrote it, so that landing would carry the changes the target dropped along (the M15 design
-  §5). It is checked before `E_WS_DIRTY`, after `E_WS_OUTSIDE_PREFIXES`. `details` names the
-  `target`, the `base`, the target's `head`, `base_op` (the operation that moved the target to the
-  base) and `moved_op` (the latest that moved it to `head`, or `null`); `swarmops ws rebase`
-  moves the workspace onto the head. A land onto another `--target`, `ws commit`, `ws status`
-  and `ws rebase` are not refused; a base the check cannot place (a first-parent walk of more
-  than 10,000 commits, or no operation in the last 10,000 that moved the target to it) lands as
-  before. A land cut short whose target then left the base is refused the same way, and `ws
-  rebase` takes over its record when no land of its key is on the target (the record would
-  otherwise refuse the rebase: "run it again first"); a land the target holds is finished by `ws
-  land`, and it replays past a reserved name the target gained since. `ws rebase` leaves the
-  record of a land it cannot place, with the same "run it again first": the journal names the
-  land's changeset and the target's history is longer than the last 10,000 commits, which do not
-  hold it, or the operation that made the record's head is not among the journal's newest 10,000
-  (the journal is read back no further than that operation, so a recent land is placed in a
-  journal of any length). `ws land` lands such a record unless its own stale check refuses it:
-  that check also answers `E_WS_STALE` when the target was moved back to the base (`op undo`,
-  `ref set`) within the journal's newest 10,000 operations. `ws delete <name> --rescue` is the
-  way out when both refuse
+  workspace's base gone from its target's history, raised by `ws land`)
+  ([Troubleshooting](docs/troubleshooting.md#e_ws_outside_prefixes)).
+- `ws land` refuses a workspace whose base left its target's history with `E_WS_STALE`, and changes
+  nothing: an `op undo`, a restore, a `ref set` or a sync moved the target back, or rewrote it, so
+  that landing would carry the changes the target dropped along. It is checked before `E_WS_DIRTY`,
+  after `E_WS_OUTSIDE_PREFIXES`. `details` names the `target`, the `base`, the target's `head`,
+  `base_op` (the operation that moved the target to the base) and `moved_op` (the latest that moved
+  it to `head`, or `null`); `swarmops ws rebase` moves the workspace onto the head. A land onto
+  another `--target`, `ws commit`, `ws status` and `ws rebase` are not refused; a base the check
+  cannot place (a first-parent walk of more than 10,000 commits, or no operation in the last 10,000
+  that moved the target to it) lands as before. A land cut short whose target then left the base is
+  refused the same way, and `ws rebase` takes over its record when no land of its key is on the
+  target (the record would otherwise refuse the rebase: "run it again first"); a land the target
+  holds is finished by `ws land`, and it replays past a reserved name the target gained since.
+  `ws rebase` leaves the record of a land it cannot place, with the same "run it again first": the
+  journal names the land's changeset and the target's history is longer than the last 10,000
+  commits, which do not hold it, or the operation that made the record's head is not among the
+  journal's newest 10,000 (the journal is read back no further than that operation, so a recent land
+  is placed in a journal of any length). `ws land` lands such a record unless its own stale check
+  refuses it: that check also answers `E_WS_STALE` when the target was moved back to the base
+  (`op undo`, `ref set`) within the journal's newest 10,000 operations. `ws delete <name> --rescue`
+  is the way out when both refuse
   ([Troubleshooting](docs/troubleshooting.md#e_ws_stale)).
 - Golden envelopes pin 54 of the 55 error codes, eight more than before: `E_AMBIGUOUS_ID`,
   `E_IO_TRANSIENT`, `E_INTERNAL`, `E_BUSY`, `E_CAS_RETRY_EXHAUSTED`, `E_UNKNOWN_PARENT` as an
@@ -123,53 +122,56 @@ collects the changes on `stable` that no release holds yet, until the next relea
   carry one title, a tab strip, the same rail with their own "On this page" list, and tables that
   scroll sideways on a phone. The version and date shown are the top released section of this
   changelog, read when the site is built.
-
 - A sparse workspace holds the `.gitignore` and `.swarmignore` files of the directories above
   its prefixes: `ws create --prefix` writes them out and `ws materialize` adds them with each
   path. `ws materialize` takes a path the tree lacks when it is on disk and its parent is the
   root, a directory of the tree or one above a prefix, writing only the ignore files above it
   that the workspace lacks, so the next commit stores it; a path absent from disk or without such
-  a parent is still `E_PATH_NOT_FOUND` (the M15 design §5a).
+  a parent is still `E_PATH_NOT_FOUND`
+  ([Build and test a change](docs/operate/build-and-test.md#1-create-a-workspace)).
 - The `meta.resolved` of a sparse workspace's `ws` envelopes also names its materialized
-  changeset, which the commands read to compare the tree with the disk (the M15 design §5a).
+  changeset, which the commands read to compare the tree with the disk.
 
 ### Fixed
 
-- A land key that landed a change onto one target is refused for a land onto another: `land --key
-  K` onto `main` after `K` landed onto `release/1` was a new land, so a retry that named the
-  wrong target landed the change twice. The land looks for the key on `main`, `release/<x>` and
-  branch refs other than its target too, down to the change's base like the target's own walk, and
-  refuses it with `E_INVALID_ARG`; `details.target` is new and names the ref whose history holds
-  the landed changeset (the M15 design §6). Give each change and each target a key of its own. A
-  key whose land is further below the change's base on another ref is found only when it is that
-  ref's head, or the first changeset of its history at or below the base's generation.
+- A land key that landed a change onto one target is refused for a land onto another: `land --key K`
+  onto `main` after `K` landed onto `release/1` was a new land, so a retry that named the wrong
+  target landed the change twice. The land looks for the key on `main`, `release/<x>` and branch
+  refs other than its target too, down to the change's base like the target's own walk, and refuses
+  it with `E_INVALID_ARG`; `details.target` is new and names the ref whose history holds the landed
+  changeset. Give each change and each target a key of its own. A key whose land is further below
+  the change's base on another ref is found only when it is that ref's head, or the first changeset
+  of its history at or below the base's generation
+  ([Troubleshooting](docs/troubleshooting.md#e_invalid_arg)).
 - A push to `refs/land/<target>` reads `access.toml` again before each land attempt: a `land`
   grant removed while the land retried after a lost race no longer lets its next attempt land. It
   stops with the code the connection would get (`E_POLICY_DENIED` `not_granted` or
   `access_file_invalid`, or `E_AUTH`), reported on the `ng` line, and writes nothing. An attempt
-  already checked is not stopped by the check: it can still land, lose its race or conflict (the
-  M15 design §6).
+  already checked is not stopped by the check: it can still land, lose its race or conflict
+  ([Serve over ssh](docs/operate/serve-over-ssh.md#write-accesstoml)).
 - `ws discard`, `ws resolve --take` and `ws rebase --abort` refuse, with `E_WS_UNPORTABLE`, to
   restore a path whose name the workspace's volume cannot hold (a `.swarmws` component, in any
   ASCII case), and write nothing; they wrote it, and `src/.swarmws/y` made `src/` look like a
-  workspace of its own (the M15 design §5).
+  workspace of its own ([Troubleshooting](docs/troubleshooting.md#e_ws_unportable)).
 - `ws rebase` checks the paths its target holds against the workspace's volume before the store
-  rebases, and a refused rebase leaves no pending record. A target holding a path with a
-  `.swarmws` component (`src/.SwarmWs/z`) was rebased in the store, answered `E_WS_UNPORTABLE`
-  and kept its record, so `ws land` and `ws rebase --abort` then answered `E_INVALID_ARG`; now no
-  operation is recorded and the workspace is as it was (the M15 design §5). A target that gains
-  such a path between the check and the store's call keeps the record the refusal leaves: a
-  re-run is refused while the target holds the path, and rebases again once it does not (`ws
-  rebase`, `ws rebase --continue` and the rebase step of `ws land --check`).
-- `ws land` checks the paths its target gained against the workspace's volume before the store
-  lands anything. A target that gained a path with a `.swarmws` component (`src/.SwarmWs/z`) moved
-  to the landed changeset, and then `ws land` answered `E_WS_UNPORTABLE` "nothing was written"
-  and kept its pending record; now it answers first, the target stays where it was and no record
-  is left (the M15 design §5). A target that gains such a path between the check and the land
-  still takes the old way out, `ws delete --rescue`: while the target holds the landed changeset,
-  which holds the path for good, a re-run of `ws land` replays it and is refused again, even
-  after the target drops the path, and `ws rebase` answers `E_INVALID_ARG`; a target moved back
-  below it is a land the target left, which `ws land` lands anew and `ws rebase` takes over.
+  rebases, and a refused rebase leaves no pending record. A target holding a path with a `.swarmws`
+  component (`src/.SwarmWs/z`) was rebased in the store, answered `E_WS_UNPORTABLE` and kept its
+  record, so `ws land` and `ws rebase --abort` then answered `E_INVALID_ARG`; now no operation is
+  recorded and the workspace is as it was. A target that gains such a path between the check and the
+  store's call keeps the record the refusal leaves: a re-run is refused while the target holds the
+  path, and rebases again once it does not (`ws rebase`, `ws rebase --continue` and the rebase step
+  of `ws land --check`) ([Troubleshooting](docs/troubleshooting.md#e_ws_unportable)).
+- `ws land` checks the paths its target gained against the workspace's volume before the store lands
+  anything. A target that gained a path with a `.swarmws` component (`src/.SwarmWs/z`) moved to the
+  landed changeset, and then `ws land` answered `E_WS_UNPORTABLE` "nothing was written" and kept its
+  pending record; now it answers first, the target stays where it was and no record is left. A
+  target that gains such a path between the check and the land still takes the old way out,
+  `ws delete --rescue`: while the target holds the landed changeset, which holds the path for good,
+  a re-run of `ws land` replays it and is refused again, even after the target drops the path, and
+  `ws rebase` answers `E_INVALID_ARG`. A target moved back below it is a land the target left, which
+  `ws land` lands anew and `ws rebase` takes over, unless the target still holds the path (moved
+  back to the commit that added it): then both answer `E_WS_UNPORTABLE` before any store call until
+  the target drops the path ([Troubleshooting](docs/troubleshooting.md#e_ws_unportable)).
 - `ws status`'s `behind_by` counts the changesets the target holds that the workspace's base lacks
   when the base is not on the target's history: 1 after a sync replaced the base with its
   squash-merged copy, and 0 when the target moved back onto the base's first-parent history,
@@ -184,17 +186,15 @@ collects the changes on `stable` that no release holds yet, until the next relea
   command run inside a workspace did, but `commit`, `land`, `sync` and the other commands that need
   an identity still refuse an anonymous caller there with `E_IDENTITY_REQUIRED`, while `gc`,
   `repair`, `upgrade`, `fetch` and `push` need none anywhere.
-- `fetch`, and so `clone` and `sync`, import the followed branch before it moves the tracking
-  refs and remote tags, and the import reads the branch's incoming ref
-  (`refs/incoming/<remote>/heads/<branch>`), each object against its id. A mirror object that
-  holds another object's bytes, or any refusal of the import (`E_GIT_READ`, `E_GIT_IMPORT_LOSSY`,
-  `E_GIT_UNSUPPORTED`, `E_TOO_LARGE`), now leaves every tracking ref and remote tag as it was; they
-  moved first before, so a later `push` leased on a value the import had refused. An import error's
-  `details.git_ref` is now the incoming ref, not the tracking ref. A crash between the import and
-  the move is finished by the next fetch ([architecture](docs/architecture.md), the M15 design §3).
-- A pack garbled in transit, which git refuses with "pack is corrupted (SHA1 mismatch)" or "final
-  sha1 did not match", is classified by rows of its own: `E_REMOTE_REJECTED` with
-  `details.reason: "bad_objects"`, not retryable, no ref moved.
+- `fetch`, and so `clone` and `sync`, import the followed branch before it moves the tracking refs
+  and remote tags. The import reads the branch from its incoming ref
+  (`refs/incoming/<remote>/heads/<branch>`) and checks each object it reads, those of the commits
+  the store does not hold yet, against its id. Such an object that holds another object's bytes, or
+  any refusal of the import (`E_GIT_READ`, `E_GIT_IMPORT_LOSSY`, `E_GIT_UNSUPPORTED`,
+  `E_TOO_LARGE`), now leaves every tracking ref and remote tag as it was; they moved first before,
+  so a later `push` leased on a value the import had refused. An import error's `details.git_ref` is
+  now the incoming ref, not the tracking ref. A crash between the import and the move is finished by
+  the next fetch ([architecture](docs/architecture.md)).
 - A tree that holds a path with a component named `.swarmws` at any depth, in any ASCII case
   (`.SWARMWS/x`, `src/.swarmws/y`, `src/.SwarmWs/z`), is refused with `E_WS_UNPORTABLE`
   (`reason: "reserved_name"`) on every platform when a workspace is created on it, moved onto it
@@ -209,9 +209,9 @@ collects the changes on `stable` that no release holds yet, until the next relea
   `ws land` refused them (`E_WS_DIRTY`), as it did the files a commit or `ws rebase -m` did not
   touch; a deleted file was left out of the commit; `ws discard <path>` was refused; and a named
   commit or `ws materialize <path>` narrowed its prefixes to that path. Each now acts as in a
-  workspace of the whole tree (the M15 design §5). A workspace 0.7.0 already narrowed that way
-  stays sparse: `ws materialize` the paths it needs, or create it again (`ws delete`, then
-  `ws create`) once its work has landed.
+  workspace of the whole tree. A workspace 0.7.0 already narrowed that way stays sparse:
+  `ws materialize` the paths it needs, or create it again (`ws delete`, then `ws create`) once its
+  work has landed ([Build and test a change](docs/operate/build-and-test.md#1-create-a-workspace)).
 - A commit the store refuses outright (such as `E_EMPTY_COMMIT` or `E_INVALID_ARG`) no longer
   leaves its pending record behind; the next `ws land` refused with "a ws commit … was cut short:
   run it again first", which could not succeed. A record an older build left that way goes with
@@ -232,8 +232,8 @@ collects the changes on `stable` that no release holds yet, until the next relea
   disk, and a tree ignore file off the prefixes and missing from disk under an ignore file the
   workspace holds. An ignore file on disk hid the first, and the walk read without the second's
   rules, so a commit left such edits out without a word. A root `.swarmws` of the tree, under
-  any ASCII case, is no such path: the workspace's own directory stands there (the M15 design
-  §5a).
+  any ASCII case, is no such path: the workspace's own directory stands there
+  ([Troubleshooting](docs/troubleshooting.md#e_ws_outside_prefixes)).
 - On a volume that folds case, a case collision between a path the workspace's chain adds (or
   the edits `-m` commits) and a path the target adds (`src/Readme` and `src/README`) is refused
   before `ws land` or `ws rebase` reaches the store, with `E_WS_UNPORTABLE` (`reason:
