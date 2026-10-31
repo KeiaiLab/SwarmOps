@@ -22,7 +22,6 @@ collects the changes on `stable` that no release holds yet, until the next relea
   takes the same value: the operation id `op log` prints (`<op>:<crc>`). A bare number, and a
   request that still sends `op`, is `E_INVALID_ARG`. What to do: send the `id` that `op log`, or
   the response that recorded the operation, gives.
-
 - `ref set` and `op undo` refuse to move `main` off its first-parent history (`E_REF_PROTECTED`).
   What to do: land a change that reverts it. The error's details name the head the move would
   drop (`changeset`) and its `target`, and an undo's its `op` and `id`; nothing is written, and
@@ -31,7 +30,6 @@ collects the changes on `stable` that no release holds yet, until the next relea
   blocks (`E_CAS_MISMATCH`) says to land a change that reverses the operation, no longer to undo
   the later operations first; the `op undo` and `ref set` help, the MCP `undo` tool and the MCP
   server instructions state the rule.
-
 - `ws commit` in a sparse workspace no longer widens its prefixes; an edit outside them is
   `E_WS_OUTSIDE_PREFIXES`. What to do: `ws materialize <path>` first. A path named outside the
   prefixes is refused, and so is any file or directory the walk meets outside them that no
