@@ -409,18 +409,23 @@ mod tests {
         use std::io;
         use std::sync::{Arc, Mutex};
 
-        use camino::Utf8PathBuf;
+        use camino::{Utf8Path, Utf8PathBuf};
         use serde_json::json;
         use swarmops_api::{
             ChangeInput, ChangeOp, CommitReq, ContentInput, ErrorCode, Identity, InfoReq, LandReq,
-            LandStatus, OpLogReq, Rev, StoreOps as _,
+            LandStatus, OpError, OpLogReq, RefSetReq, Rev, StoreOps,
         };
+        use swarmops_git::serve::proc_receive::{Command, Report};
+        use swarmops_git::serve::repo::ServeRepo;
+        use swarmops_git::{ExportRequest, GitOid, GixSink, export};
         use swarmops_store::RealFs;
         use swarmops_testkit::fs::{Call, Watch, Watched};
         use tempfile::TempDir;
 
-        use super::super::land_onto;
+        use super::super::{land, land_onto};
         use crate::LocalOps;
+        use crate::serve::access::Access;
+        use crate::serve::hook::HookCtx;
 
         /// Who lands.
         const LANDER: &str = "person/ada";
@@ -441,6 +446,15 @@ mod tests {
         /// The lander may read, no longer land.
         const REVOKED: &str = "version = 1\n[[grant]]\nwho = [\"person/ada\"]\nread = true\n";
 
+        /// A file this build does not read: a table header left open.
+        const BROKEN: &str = "version = 1\n[[grant]\n";
+
+        /// Another may land onto `main`; no grant names the lander.
+        const UNNAMED: &str = "version = 1\n[[grant]]\nwho = [\"person/zed\"]\nland = [\"main\"]\n";
+
+        /// The ref a push lands onto, as the hook gets it.
+        const LAND_REF: &str = "refs/land/main";
+
         /// What the race does to `access.toml` beside its move of `main`.
         #[derive(Clone, Copy)]
         enum Meanwhile {
@@ -448,6 +462,12 @@ mod tests {
             Kept,
             /// It takes the lander's `land` away, keeping `read`.
             Revoked,
+            /// It removes the file.
+            Removed,
+            /// It leaves a file this build does not read.
+            Broken,
+            /// It names another in the lander's place.
+            Unnamed,
         }
 
         /// Moves `main` once, as another lander would, at the land's first flush of objects
@@ -472,11 +492,15 @@ mod tests {
                 let other = LocalOps::open(&self.root).unwrap();
                 *raced = Some(commit(&other, RACER, None, registry(1, "theirs")));
 
-                // 2. The grant, as the operator leaves it.
-                if let Meanwhile::Revoked = self.meanwhile {
-                    std::fs::write(self.root.join("access.toml"), REVOKED)?;
+                // 2. The grants, as the operator leaves them.
+                let access = self.root.join("access.toml");
+                match self.meanwhile {
+                    Meanwhile::Kept => Ok(()),
+                    Meanwhile::Revoked => std::fs::write(access, REVOKED),
+                    Meanwhile::Removed => std::fs::remove_file(access),
+                    Meanwhile::Broken => std::fs::write(access, BROKEN),
+                    Meanwhile::Unnamed => std::fs::write(access, UNNAMED),
                 }
-                Ok(())
             }
         }
 
@@ -511,6 +535,40 @@ mod tests {
             req.limit = 1;
             req.max_changesets = 1;
             ops.op_log(req).unwrap().ops[0].op
+        }
+
+        /// How many object files the store at `root` holds: the files of its fan-out directories.
+        fn object_count(root: &Utf8Path) -> usize {
+            let fanouts = std::fs::read_dir(root.join("objects")).unwrap();
+            let fanouts = fanouts
+                .map(Result::unwrap)
+                .filter(|dir| dir.file_name() != "tmp");
+            let files = fanouts.map(|dir| std::fs::read_dir(dir.path()).unwrap().count());
+            files.sum()
+        }
+
+        /// The changeset `head` of `from` as a push brings it into the serve.git of the store at
+        /// `root`: exported there as the branch `pushed`. Its commit.
+        fn pushed(from: &LocalOps, root: &Utf8Path, head: &str) -> GitOid {
+            let who = Identity::parse(LANDER).unwrap();
+            let mut req = RefSetReq::new("pushed", head);
+            req.create = true;
+            from.ref_set(&who, req).unwrap();
+            let repo = ServeRepo::open(root).unwrap();
+            let mut sink = GixSink::open(repo.git_dir().as_std_path()).unwrap();
+            let mut req = ExportRequest::new("pushed", "pushed");
+            req.force = true;
+            export(&from.repo, &mut sink, &req).unwrap().head_oid
+        }
+
+        /// The hook's land of the pushed commit `tip` onto `main` by the lander, through `ops`,
+        /// under the grants `access` the connection read.
+        fn hooked(ops: &LocalOps, access: &Access, tip: GitOid) -> Result<Report, OpError> {
+            let root = ops.repo.store_fs().root().to_owned();
+            let repo = ServeRepo::open(&root).unwrap();
+            let who = Identity::parse(LANDER).unwrap();
+            let ctx = HookCtx::new(ops, &repo, &who, access);
+            land(&ctx, &Command::new(None, Some(tip), LAND_REF), "main")
         }
 
         /// A land onto `main` that loses its first race, with the race doing `meanwhile`:
@@ -568,7 +626,71 @@ mod tests {
             let (_dir, ops, racing, race, land) = raced_land(Meanwhile::Kept);
             let who = Identity::parse(LANDER).unwrap();
 
+            // 1. The land, on its second attempt, onto the racer's changeset.
             let landed = land_onto(&racing, &who, land, "main").unwrap();
+            let raced = race.raced.lock().unwrap().clone().expect("the race ran");
+            assert_eq!(
+                (landed.status, landed.attempts, landed.rebased_onto.as_str()),
+                (LandStatus::Landed, 2, raced.as_str())
+            );
+
+            // 2. main at the landed changeset.
+            let main = ops.repo_info(InfoReq::default()).unwrap().main;
+            assert_eq!(main, Some(landed.landed));
+        }
+
+        /// An `access.toml` that changes while a land loses its first race, so that it no
+        /// longer lets the lander land: the refusal, not retryable, after checking that `main`
+        /// is the racer's changeset and the race's frame is the only one.
+        fn refused_mid_race(meanwhile: Meanwhile) -> OpError {
+            let (_dir, ops, racing, race, land) = raced_land(meanwhile);
+            let who = Identity::parse(LANDER).unwrap();
+            let before = last_op(&ops);
+
+            let error = land_onto(&racing, &who, land, "main").unwrap_err();
+            let raced = race.raced.lock().unwrap().clone().expect("the race ran");
+            assert!(!error.retryable, "{error:?}");
+            let main = ops.repo_info(InfoReq::default()).unwrap().main;
+            assert_eq!(main.as_deref(), Some(raced.as_str()));
+            assert_eq!(last_op(&ops), before + 1, "the race's frame alone");
+            error
+        }
+
+        /// `access.toml` removed while a land loses its first race: `E_AUTH` `no_access_file`,
+        /// as at connection.
+        #[test]
+        fn an_access_file_removed_after_a_lost_race_is_auth() {
+            let error = refused_mid_race(Meanwhile::Removed);
+            assert_eq!(error.code, ErrorCode::Auth.as_str(), "{error:?}");
+            assert_eq!(error.details["reason"], "no_access_file", "{error:?}");
+        }
+
+        /// `access.toml` broken while a land loses its first race: `E_POLICY_DENIED`
+        /// `access_file_invalid`, as at connection.
+        #[test]
+        fn an_access_file_broken_after_a_lost_race_is_policy_denied() {
+            let error = refused_mid_race(Meanwhile::Broken);
+            assert_eq!(error.code, ErrorCode::PolicyDenied.as_str(), "{error:?}");
+            assert_eq!(error.details["reason"], "access_file_invalid", "{error:?}");
+        }
+
+        /// The lander no longer named by `access.toml` after a lost race: `E_AUTH`
+        /// `unknown_identity`, as at connection.
+        #[test]
+        fn a_lander_unnamed_after_a_lost_race_is_auth() {
+            let error = refused_mid_race(Meanwhile::Unnamed);
+            assert_eq!(error.code, ErrorCode::Auth.as_str(), "{error:?}");
+            assert_eq!(error.details["reason"], "unknown_identity", "{error:?}");
+        }
+
+        /// `StoreOps::land`, which the CLI, MCP and `ws land` call, asks no grant: a land whose
+        /// grant goes during its lost race still lands on its second attempt.
+        #[test]
+        fn an_ungated_land_through_a_lost_race_lands() {
+            let (_dir, ops, racing, race, land) = raced_land(Meanwhile::Revoked);
+            let who = Identity::parse(LANDER).unwrap();
+
+            let landed = StoreOps::land(&racing, &who, land).unwrap();
             let raced = race.raced.lock().unwrap().clone().expect("the race ran");
             assert_eq!(
                 (landed.status, landed.attempts, landed.rebased_onto.as_str()),
@@ -576,6 +698,77 @@ mod tests {
             );
             let main = ops.repo_info(InfoReq::default()).unwrap().main;
             assert_eq!(main, Some(landed.landed));
+        }
+
+        /// Through the hook: a grant taken away while the push's land loses its first race
+        /// refuses the push before the second attempt, though the connection granted it.
+        #[test]
+        fn a_push_whose_grant_goes_after_a_lost_race_is_refused() {
+            let (_dir, ops, racing, race, land) = raced_land(Meanwhile::Revoked);
+
+            // 1. The pushed commit in serve.git, and the grants as the connection read them.
+            let tip = pushed(&ops, &race.root, land.head.as_str());
+            let access = Access::load(&ops).unwrap();
+            let before = last_op(&ops);
+
+            // 2. The refusal, from the file as the race left it.
+            let error = hooked(&racing, &access, tip).unwrap_err();
+            let raced = race.raced.lock().unwrap().clone().expect("the race ran");
+            assert_eq!(error.code, ErrorCode::PolicyDenied.as_str(), "{error:?}");
+            assert_eq!(error.details["reason"], "not_granted", "{error:?}");
+
+            // 3. Nothing of the land recorded.
+            let main = ops.repo_info(InfoReq::default()).unwrap().main;
+            assert_eq!(main.as_deref(), Some(raced.as_str()));
+            assert_eq!(last_op(&ops), before + 1, "the race's frame alone");
+        }
+
+        /// Through the hook: a grant taken away after the connection read it, before the
+        /// land's first attempt, refuses the push with nothing written.
+        #[test]
+        fn a_push_whose_grant_goes_before_its_first_attempt_is_refused() {
+            let (_dir, ops, _racing, race, land) = raced_land(Meanwhile::Kept);
+
+            // 1. The pushed commit, the grants as the connection read them, then the file
+            //    without the lander's `land`.
+            let tip = pushed(&ops, &race.root, land.head.as_str());
+            let access = Access::load(&ops).unwrap();
+            std::fs::write(race.root.join("access.toml"), REVOKED).unwrap();
+            let main = ops.repo_info(InfoReq::default()).unwrap().main;
+            let (before, objects) = (last_op(&ops), object_count(&race.root));
+
+            // 2. The refusal of the first attempt.
+            let error = hooked(&ops, &access, tip).unwrap_err();
+            assert_eq!(error.code, ErrorCode::PolicyDenied.as_str(), "{error:?}");
+            assert_eq!(error.details["reason"], "not_granted", "{error:?}");
+
+            // 3. Nothing written.
+            assert_eq!(ops.repo_info(InfoReq::default()).unwrap().main, main);
+            assert_eq!(last_op(&ops), before, "no frame");
+            assert_eq!(object_count(&race.root), objects, "no object");
+        }
+
+        /// Through the hook: a pusher without a grant is refused before the pushed commit is
+        /// imported, so the store gains no object.
+        #[test]
+        fn a_push_without_a_grant_imports_nothing() {
+            let (dir, ops, _racing, race, _land) = raced_land(Meanwhile::Kept);
+
+            // 1. A commit the store does not hold, pushed from a store of its own, and the
+            //    grants without the lander's `land`.
+            let elsewhere = Utf8PathBuf::from_path_buf(dir.path().join("elsewhere")).unwrap();
+            let (other, _) = LocalOps::init(&elsewhere, "other").unwrap();
+            let theirs = commit(&other, LANDER, None, registry(2, "elsewhere"));
+            let tip = pushed(&other, &race.root, &theirs);
+            std::fs::write(race.root.join("access.toml"), REVOKED).unwrap();
+            let access = Access::load(&ops).unwrap();
+            let objects = object_count(&race.root);
+
+            // 2. The refusal, and no object imported.
+            let error = hooked(&ops, &access, tip).unwrap_err();
+            assert_eq!(error.code, ErrorCode::PolicyDenied.as_str(), "{error:?}");
+            assert_eq!(error.details["reason"], "not_granted", "{error:?}");
+            assert_eq!(object_count(&race.root), objects, "no object imported");
         }
     }
 }
