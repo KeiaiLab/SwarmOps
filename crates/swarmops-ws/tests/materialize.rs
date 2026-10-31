@@ -1312,3 +1312,29 @@ mod new_path_killed {
         let _ = swarmops_ws::materialize(&ctx, expand(name, &[NEW]));
     }
 }
+
+/// A restore of a path whose name the volume cannot hold (`ws discard` from a head that holds it,
+/// as `ws resolve --take` and a rebase's `--abort` restore) is refused as unportable and writes
+/// nothing.
+#[test]
+fn a_restore_of_a_reserved_name_is_refused() {
+    // 1. A workspace whose head holds `src/.swarmws/y` (committed from the agent's files), the
+    //    file then gone from the disk.
+    let f = Fixture::new();
+    let base = f.commit(None, &[Put::File("src/a", "a\n")]);
+    f.create("w", &base, &[]);
+    let dir = f.beside("w");
+    write(&dir, "src/.swarmws/y", "y\n");
+    let mut req = WsCommitReq::new("w".to_owned(), "reserved".to_owned());
+    req.status_after = StatusAfter::None;
+    swarmops_ws::commit(&f.ctx(), req).unwrap();
+    std::fs::remove_dir_all(dir.join("src/.swarmws")).unwrap();
+
+    // 2. The discard is refused, and the path is still absent.
+    let mut req = WsDiscardReq::new("w".to_owned());
+    req.paths = vec!["src/.swarmws/y".to_owned()];
+    req.status_after = StatusAfter::None;
+    let refused = swarmops_ws::discard(&f.ctx(), req).unwrap_err();
+    assert_eq!(refused.code, "E_WS_UNPORTABLE", "{refused:?}");
+    assert!(!dir.join("src/.swarmws").exists());
+}

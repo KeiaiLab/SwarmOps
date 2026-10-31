@@ -12,6 +12,7 @@ use swarmops_api::{ErrorCode, OpError, WsDiscardReq, WsDiscardResp};
 
 use crate::hostfs::{HostFs, HostKind};
 use crate::materialize::{self, Item, Put, Tree};
+use crate::portable::{self, HOST};
 use crate::scan::Want;
 use crate::workspace::{self, Locate, Workspace};
 use crate::{Ctx, after, status};
@@ -61,12 +62,23 @@ pub(crate) fn restore(
     rev: &str,
     named: &[String],
 ) -> Result<BTreeSet<String>, OpError> {
-    // 1. What to restore, and what the agent put in its way, path by path.
+    // 1. What `rev` holds under each name, and the portability rules over it, before anything
+    //    is touched.
     let tree = Tree::new(ctx.store, rev);
-    let mut restore = Vec::new();
-    let mut discarded = BTreeSet::new();
+    let mut found = Vec::new();
     for path in named {
         let items = materialize::items_under(ctx.store, &tree, Some(path))?.unwrap_or_default();
+        found.push((path, items));
+    }
+    let held: Vec<String> = (found.iter())
+        .flat_map(|(_, items)| items.iter().map(|item| item.path.clone()))
+        .collect();
+    portable::check(&held, None, HOST)?;
+
+    // 2. What the agent put in the way, path by path.
+    let mut restore = Vec::new();
+    let mut discarded = BTreeSet::new();
+    for (path, items) in found {
         if items.is_empty() {
             discard_added(ctx.host.as_ref(), ws, path, &mut discarded)?;
         }
@@ -79,7 +91,7 @@ pub(crate) fn restore(
         }
     }
 
-    // 2. Its files written back.
+    // 3. Its files written back.
     restore.sort_by(|a, b| a.item.path.cmp(&b.item.path));
     materialize::put_all(ctx, &ws.dir, ws.file.volume, &restore)?;
     Ok(discarded)

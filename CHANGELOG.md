@@ -137,6 +137,10 @@ collects the changes on `stable` that no release holds yet, until the next relea
   `access_file_invalid`, or `E_AUTH`), reported on the `ng` line, and writes nothing. An attempt
   already checked is not stopped by the check: it can still land, lose its race or conflict (the
   M15 design §6).
+- `ws discard`, `ws resolve --take` and `ws rebase --abort` refuse, with `E_WS_UNPORTABLE`, to
+  restore a path whose name the workspace's volume cannot hold (a `.swarmws` component, in any
+  ASCII case), and write nothing; they wrote it, and `src/.swarmws/y` made `src/` look like a
+  workspace of its own (the M15 design §5).
 - `ws rebase` checks the paths its target holds against the workspace's volume before the store
   rebases, and a refused rebase leaves no pending record. A target holding a path with a
   `.swarmws` component (`src/.SwarmWs/z`) was rebased in the store, answered `E_WS_UNPORTABLE`
