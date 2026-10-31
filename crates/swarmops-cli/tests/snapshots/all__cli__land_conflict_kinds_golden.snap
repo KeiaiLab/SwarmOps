@@ -141,12 +141,12 @@ expression: s.transcript()
                 "theirs_changeset": "[theirs]"
               },
               {
-                "base_blob": "[id8]",
+                "base_blob": "[logo_base]",
                 "kind": "binary",
-                "ours_blob": "[id9]",
+                "ours_blob": "[logo_ours]",
                 "path": "logo.bin",
                 "theirs_agent": "agent/worker-18",
-                "theirs_blob": "[id10]",
+                "theirs_blob": "[logo_theirs]",
                 "theirs_changeset": "[theirs]"
               }
             ],

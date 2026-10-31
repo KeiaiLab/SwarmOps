@@ -117,3 +117,23 @@ pub fn redact_crcs(text: &str) -> String {
     out.push_str(&text[done..]);
     out
 }
+
+/// [`redact_crcs`] rewrites a whole operation id alone: not a shorter or longer hex run, one
+/// followed by a letter, an uppercase one, one with no operation number, or one inside a
+/// longer word.
+#[test]
+fn redact_crcs_takes_whole_ids_only() {
+    let cases = [
+        ("op 4:9f3a01c2 done", "op 4:[crc] done"),
+        ("1:00000000,22:abcdef01", "1:[crc],22:[crc]"),
+        ("4:9f3a", "4:9f3a"),
+        ("4:9f3a01c2a", "4:9f3a01c2a"),
+        ("4:9f3a01c2z", "4:9f3a01c2z"),
+        ("4:9F3A01C2", "4:9F3A01C2"),
+        (":9f3a01c2", ":9f3a01c2"),
+        ("x4:9f3a01c2", "x4:9f3a01c2"),
+    ];
+    for (text, redacted) in cases {
+        assert_eq!(redact_crcs(text), redacted, "{text}");
+    }
+}

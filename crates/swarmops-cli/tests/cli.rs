@@ -1795,15 +1795,62 @@ fn error_codes_reach_the_cli() {
     insta::assert_json_snapshot!(s.transcript());
 }
 
-/// Checks [`NOT_RAISED`]: each code listed is one the table has, and each reason names the test
-/// that pins its code, but those of [`UNPINNED`].
+/// How many error codes there are, and how many goldens pin: the counts the known limitations
+/// and the goals state ("54 of the 55").
+const CODE_COUNT: usize = 55;
+const PINNED_COUNT: usize = 54;
+
+/// Checks [`NOT_RAISED`]: each code listed is one the table has, and each reason names a test
+/// that exists and pins its code, but those of [`UNPINNED`], each listed and unpinned; and the
+/// counts of [`CODE_COUNT`] and [`PINNED_COUNT`].
 fn check_not_raised() {
+    // 1. Each code known; pinned unless unpinned.
     for (code, why) in NOT_RAISED {
         let known = ErrorCode::ALL.iter().any(|known| known.as_str() == *code);
         assert!(known, "{code} is not an error code");
         let pinned = why.contains(" pins it");
         assert_eq!(pinned, !UNPINNED.contains(code), "{code}: {why}");
+        if pinned {
+            check_pin_exists(code, why);
+        }
     }
+
+    // 2. Each unpinned code listed.
+    for code in UNPINNED {
+        let listed = NOT_RAISED.iter().any(|(c, _)| c == code);
+        assert!(listed, "{code} is unpinned but not listed as not raised");
+    }
+
+    // 3. The counts the documents state.
+    assert_eq!(ErrorCode::ALL.len(), CODE_COUNT, "error codes");
+    assert_eq!(CODE_COUNT - UNPINNED.len(), PINNED_COUNT, "pinned codes");
+}
+
+/// Checks that the test reason `why` names before "pins" is defined: `<crate>'s
+/// <module>::…::<name>` in that crate's `src/<module>.rs`, `<file>::<name>` in this crate's
+/// `tests/<file>.rs`, and a bare name in `tests/cli.rs`.
+fn check_pin_exists(code: &str, why: &str) {
+    // 1. The test's path, and the crate that holds it if another.
+    let words: Vec<&str> = why.split_whitespace().collect();
+    let at = words.iter().position(|word| *word == "pins");
+    let at = at.unwrap_or_else(|| panic!("{code}: no test named in {why:?}"));
+    let path = words[at - 1];
+    let owner = words[at - 2].strip_suffix("'s");
+
+    // 2. Its source file.
+    let here = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let (module, name) = path.rsplit_once("::").unwrap_or(("cli", path));
+    let first = module.split("::").next().unwrap_or(module);
+    let file = match owner {
+        Some(krate) => here.join("..").join(krate).join("src"),
+        None => here.join("tests"),
+    }
+    .join(format!("{first}.rs"));
+
+    // 3. The test defined there.
+    let source = fs::read_to_string(&file).unwrap_or_else(|e| panic!("{code}: {file}: {e}"));
+    let defined = source.contains(&format!("fn {name}("));
+    assert!(defined, "{code}: no test {path} in {file}");
 }
 
 /// The failing commands of [`error_codes_reach_the_cli`], each with the code it must raise,
@@ -3336,6 +3383,11 @@ fn land_conflict_kinds_golden() {
         refused.json
     );
 
+    // 5. The binary file's blobs by name: ours and theirs swapped would number the same.
+    let logo = |bytes: &[u8]| hash_object(ObjectKind::Blob, bytes).to_hex();
+    s.name(&logo(&[0, 1]), "logo_base");
+    s.name(&logo(&[0, 2]), "logo_ours");
+    s.name(&logo(&[0, 3]), "logo_theirs");
     insta::assert_json_snapshot!(s.transcript());
 }
 
