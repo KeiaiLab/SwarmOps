@@ -147,11 +147,12 @@ pub fn land(ctx: &Ctx<'_>, req: WsLandReq) -> Result<WsLandResp, OpError> {
         }
     }
 
-    // 4. Names the target gained that the files cannot hold: refused before the store lands,
-    //    unless the store only replays a land cut short that the target holds.
+    // 4. Names the target gained that the files cannot hold, and those of the edits `-m`
+    //    commits: refused before the store lands, unless the store only replays a land cut short that the target holds.
     if !replays(ctx, &ws, &target)? {
         let head = ctx.store.resolve_rev(ResolveRevReq::new(target.as_str()))?;
-        materialize::preflight(ctx, &ws, &head.id)?;
+        let edits = rebase::unsettled(ctx, &ws, message.as_deref(), PendingOp::Land)?;
+        materialize::preflight(ctx, &ws, &head.id, &edits)?;
     }
 
     // 5. A land cut short: its keys; else the edits settled and something to land.
@@ -261,7 +262,7 @@ impl Landing<'_, '_> {
         // 1. The names the target holds that the files cannot: refused before the key is recorded.
         let ctx = self.ctx;
         let target = self.target.clone();
-        rebase::check_onto(ctx, &self.ws, &target)?;
+        rebase::check_onto(ctx, &self.ws, &target, &[])?;
 
         // 2. The rebase, its key durable first (WS1).
         self.write(Some(rebase_key), attempt, REBASING)?;

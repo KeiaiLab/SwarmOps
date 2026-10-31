@@ -2,8 +2,9 @@
 //! result; on a conflict, the workspace rebasing with markers written.
 //!
 //! ```text
-//!  start     lock → a land cut short that the target does not hold: its record dropped
-//!            → names onto's head holds that the files cannot: E_WS_UNPORTABLE, nothing written
+//!  start     lock → names onto's head holds that the files cannot (and those of the edits -m
+//!            commits): E_WS_UNPORTABLE, nothing written
+//!            → a land cut short that the target does not hold: its record dropped
 //!            → edits committed (-m) or E_WS_DIRTY → journal/pending.json {key} (WS1)
 //!            → rebase{head, base, onto, key}
 //!              ├─ H' → files from `materialized` to H' with workspace.json {head: H', base: T,
@@ -16,10 +17,11 @@
 //! ```
 //!
 //! A rebase cut short after the store's frame leaves its pending record: the same call again
-//! takes its key, and the store replays the same `H'`. The record of a land cut short is taken
-//! over only when no land of its key is on the target (`status::landed`): its target left the
-//! base since, and `ws land` answers `E_WS_STALE`; a land the target holds is finished by
-//! `ws land`.
+//! takes its key, so the store replays that rebase while the target's head and the chain are as
+//! they were, and makes a new one when they are not. The record of a land cut short is taken
+//! over only when no land of its key is on the target (`status::landed`) and the names the
+//! target holds are portable: its target left the base since, and `ws land` answers
+//! `E_WS_STALE`; a land the target holds is finished by `ws land`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -40,7 +42,7 @@ use crate::land::REBASING;
 use crate::materialize;
 use crate::pending::{self, Pending, PendingOp};
 use crate::resolve::{self, RESOLVED_JSON, Resolved};
-use crate::scan::Want;
+use crate::scan::{Change, Want};
 use crate::state::{self, SWARMWS_DIR, State};
 use crate::status::{self, CONFLICTS_JSON, Landed};
 use crate::volume::EXEC_BITS;
@@ -93,10 +95,12 @@ fn start(
         );
     }
 
-    // 2. A land cut short that its target no longer holds goes; the names onto's head holds
-    //    that the files cannot are refused, before anything is settled or recorded.
-    let landed_key = take_over(ctx, ws, onto)?;
-    check_onto(ctx, ws, onto)?;
+    // 2. The names onto's head holds that the files cannot, and those of the edits `-m`
+    //    commits, are refused before anything is dropped, settled or recorded.
+    let left = left_land(ctx, ws)?;
+    let edits = unsettled(ctx, ws, message.as_deref(), PendingOp::Rebase)?;
+    check_onto(ctx, ws, onto, &edits)?;
+    let landed_key = take_over(ctx, ws, left, onto)?;
 
     // 3. A rebase cut short: its key; else the edits settled first.
     let cut = cut_short(ctx, ws, PendingOp::Rebase, STARTING)?;
@@ -116,12 +120,11 @@ fn start(
     Ok(response(&done))
 }
 
-/// Takes over a `ws land` cut short on workspace `ws`'s head whose land the ref its record names
-/// does not hold: no land of its key is on that history, so no re-run could finish it, and the
-/// record only stands in the way. It goes, and the rebase key its attempt made is returned when
-/// that attempt may have been written, onto the same ref, so the store replays it. A land the
-/// ref holds is left to the land that finishes it.
-fn take_over(ctx: &Ctx<'_>, ws: &Workspace, onto: &str) -> Result<Option<String>, OpError> {
+/// The `ws land` cut short on workspace `ws`'s head whose land the ref its record names does not
+/// hold: no land of its key is on that history, so no re-run could finish it, and the record
+/// only stands in the way. A land the ref holds is left to the land that finishes it, and one
+/// not known to be missing stays.
+fn left_land(ctx: &Ctx<'_>, ws: &Workspace) -> Result<Option<Pending>, OpError> {
     // 1. A land cut short on this head, and the ref it lands on.
     let Some(cut) = pending::read_pending(ctx.fs.as_ref(), &ws.dir)? else {
         return Ok(None);
@@ -129,25 +132,45 @@ fn take_over(ctx: &Ctx<'_>, ws: &Workspace, onto: &str) -> Result<Option<String>
     if cut.op != PendingOp::Land || cut.head != ws.file.head {
         return Ok(None);
     }
-    let target = cut.target.as_deref().unwrap_or(&ws.file.target);
 
     // 2. Held, or not known not to be: it stays.
+    let target = cut.target.as_deref().unwrap_or(&ws.file.target);
     if status::landed(ctx.store, target, &cut.key)? != Landed::Absent {
         return Ok(None);
     }
+    Ok(Some(cut))
+}
 
-    // 3. The record gone; its rebase's key, if its attempt was at the rebase.
+/// Takes over the land `left` cut short, if any: its record goes, and the rebase key its attempt
+/// made is returned when that attempt may have been written, onto `onto` the ref it landed on, so
+/// that the store replays it while `onto`'s head and the chain are as they were.
+fn take_over(
+    ctx: &Ctx<'_>,
+    ws: &Workspace,
+    left: Option<Pending>,
+    onto: &str,
+) -> Result<Option<String>, OpError> {
+    let Some(cut) = left else {
+        return Ok(None);
+    };
     pending::remove_pending(ctx.fs.as_ref(), &ws.dir)?;
+    let target = cut.target.as_deref().unwrap_or(&ws.file.target);
     Ok(cut
         .rebase_key
         .filter(|_| cut.state == REBASING && target == onto))
 }
 
 /// Refuses a rebase of workspace `ws` onto ref `onto` whose head holds names the files cannot,
-/// before the store rebases and before a pending record is written: nothing is left to replay.
-pub(crate) fn check_onto(ctx: &Ctx<'_>, ws: &Workspace, onto: &str) -> Result<(), OpError> {
+/// with those of `edits` its call commits first, before the store rebases and before a pending
+/// record is written: nothing is left to replay.
+pub(crate) fn check_onto(
+    ctx: &Ctx<'_>,
+    ws: &Workspace,
+    onto: &str,
+    edits: &[Change],
+) -> Result<(), OpError> {
     let head = ctx.store.resolve_rev(ResolveRevReq::new(onto))?;
-    materialize::preflight(ctx, ws, &head.id)
+    materialize::preflight(ctx, ws, &head.id, edits)
 }
 
 /// Continues workspace `ws`'s rebase with its resolutions: refused while a conflict is
@@ -173,7 +196,7 @@ fn resume(ctx: &Ctx<'_>, ws: &mut Workspace) -> Result<WsRebaseResp, OpError> {
 
     // 2. The names the target holds that the files cannot: refused before anything is recorded.
     let target = ws.file.target.clone();
-    check_onto(ctx, ws, &target)?;
+    check_onto(ctx, ws, &target, &[])?;
 
     // 3. A continue cut short: its key; else no edit beside the resolved paths.
     let resolved = resolve::read(ctx, ws)?;
@@ -472,6 +495,33 @@ pub(crate) fn settle_edits(
         }
         _ => Err(materialize::dirty(paths)),
     }
+}
+
+/// The edits of workspace `ws` that a call `op` with `message` commits before it moves the
+/// workspace, where their names are judged: a volume that folds case. None when the call has no
+/// message, the files stand for another changeset (see [`settle_edits`]), or its own cut record
+/// is there to re-run instead.
+pub(crate) fn unsettled(
+    ctx: &Ctx<'_>,
+    ws: &Workspace,
+    message: Option<&str>,
+    op: PendingOp,
+) -> Result<Vec<Change>, OpError> {
+    // 1. Nothing is committed without a message, on files of another changeset, or where case
+    //    is not folded.
+    if message.is_none() || ws.file.materialized != ws.file.head || !ws.file.volume.case_insensitive
+    {
+        return Ok(Vec::new());
+    }
+
+    // 2. Nor when the call's own record is re-run, which settles nothing.
+    let cut = pending::read_pending(ctx.fs.as_ref(), &ws.dir)?;
+    if cut.is_some_and(|cut| cut.op == op && cut.head == ws.file.head) {
+        return Ok(Vec::new());
+    }
+
+    // 3. The edits a commit takes.
+    status::changes_of(ctx, ws, &Want::default())
 }
 
 /// The pending record of a call `op` in state `state` that was cut short on workspace `ws`'s

@@ -1113,6 +1113,16 @@ fn cut_land(f: &Fixture, store: &Hooked<'_>, cut: Cut) -> String {
     state::read(&RealFs::new(), &f.beside("w")).unwrap().head
 }
 
+/// `ws rebase -m` of workspace `w` onto `release/r`, which would commit an edit.
+fn rebase_settling(ctx: &swarmops_ws::Ctx<'_>) -> Result<swarmops_api::WsRebaseResp, OpError> {
+    let mut req = WsRebaseReq::new("w".to_owned());
+    req.action = WsRebaseAction::Start;
+    "release/r".clone_into(&mut req.onto);
+    req.message = Some("settle".to_owned());
+    req.status_after = StatusAfter::None;
+    swarmops_ws::rebase(ctx, req)
+}
+
 /// `ws rebase` of workspace `w` onto `release/r`.
 fn rebase_w(ctx: &swarmops_ws::Ctx<'_>) -> Result<swarmops_api::WsRebaseResp, OpError> {
     let mut req = WsRebaseReq::new("w".to_owned());
@@ -1228,9 +1238,9 @@ fn a_held_land_replays_past_a_reserved_name() {
 }
 
 /// A land cut short whose land is not on the target, which then gained a reserved name above
-/// the base: the land is refused as unportable and writes nothing; `ws rebase` takes the record
-/// over and gives the same refusal, so nothing is left to wedge, and the land goes through once
-/// the target is fixed.
+/// the base: the land is refused as unportable and writes nothing; `ws rebase` gives the same
+/// refusal before it takes the record over, so the record stays for the land, which goes
+/// through once the target is fixed.
 #[test]
 fn a_cut_land_and_a_reserved_name_leave_no_dead_end() {
     // 1. The land cut short after its frame; the target set to a child of the base with a
@@ -1250,10 +1260,11 @@ fn a_cut_land_and_a_reserved_name_leave_no_dead_end() {
     assert_eq!(refused.code, "E_WS_UNPORTABLE", "{refused:?}");
     assert!(Snapshot::of(&f, "w") == before);
 
-    // 3. The rebase takes the record over; the unportable name is its refusal now.
+    // 3. The rebase is refused the same way, before it takes the record over.
     let refused = rebase_w(&ctx).unwrap_err();
     assert_eq!(refused.code, "E_WS_UNPORTABLE", "{refused:?}");
-    assert!(!pending_in(&dir).exists());
+    assert!(Snapshot::of(&f, "w") == before);
+    assert!(pending_in(&dir).exists(), "the record went");
 
     // 4. The target fixed: the land goes through.
     f.point("release/r", &b);
@@ -1713,6 +1724,106 @@ fn a_chain_is_read_past_one_page() {
     let refused = swarmops_ws::land(&f.ctx_over(&watched), land_of("w", None)).unwrap_err();
     assert_eq!(refused.code, "E_WS_UNPORTABLE", "{refused:?}");
     assert_eq!(watched.count("land"), 0);
+}
+
+/// A rename that only changes case, inside the chain, leaves no `src/readme` behind for
+/// `src/README` to meet: it lands and rebases on a volume that folds case, the target moved on
+/// or not.
+#[test]
+fn a_case_only_rename_is_not_a_collision() {
+    for moved in [false, true] {
+        for rebase in [false, true] {
+            // 1. The workspace renames `src/readme` to `src/README`; the target, maybe, moves.
+            let f = Fixture::new();
+            let b = folding(
+                &f,
+                &[
+                    Put::File("src/a.txt", "a\n"),
+                    Put::File("src/readme", "r\n"),
+                ],
+            );
+            let dir = f.beside("w");
+            std::fs::remove_file(dir.join("src/readme")).unwrap();
+            write(&dir, "src/README", "r\n");
+            commit_w(&f, "rename");
+            if moved {
+                let ahead = f.side(Some(&b), &[Put::File("src/c.txt", "c\n")]);
+                f.point("release/r", &ahead);
+            }
+
+            // 2. The call goes through.
+            let ctx = f.ctx();
+            let case = format!("moved={moved} rebase={rebase}");
+            if rebase {
+                rebase_w(&ctx).unwrap_or_else(|e| panic!("{case}: {e:?}"));
+                continue;
+            }
+            let done = swarmops_ws::land(&ctx, land_of("w", None))
+                .unwrap_or_else(|e| panic!("{case}: {e:?}"));
+            assert_eq!(done.land.status, LandStatus::Landed, "{case}");
+        }
+    }
+}
+
+/// A rename by case beside a target path of the same name still collides: only the paths the
+/// chain deletes leave the case set.
+#[test]
+fn a_renamed_path_still_meets_the_targets() {
+    // 1. The workspace renames `src/readme` to `src/Readme`; the target gains `src/README`.
+    let f = Fixture::new();
+    let b = folding(
+        &f,
+        &[
+            Put::File("src/a.txt", "a\n"),
+            Put::File("src/readme", "r\n"),
+        ],
+    );
+    let dir = f.beside("w");
+    std::fs::remove_file(dir.join("src/readme")).unwrap();
+    write(&dir, "src/Readme", "r\n");
+    commit_w(&f, "rename");
+    let gained = f.side(Some(&b), &[Put::File("src/README", "theirs\n")]);
+    f.point("release/r", &gained);
+    let watched = Watched::new(&f.ops);
+
+    // 2. Refused as a case collision, before any store write.
+    let refused = swarmops_ws::land(&f.ctx_over(&watched), land_of("w", None)).unwrap_err();
+    assert_eq!(refused.code, "E_WS_UNPORTABLE", "{refused:?}");
+    assert_eq!(refused.details["reason"], "case_collision");
+    assert_eq!(watched.count("land"), 0);
+}
+
+/// The edits `-m` is about to commit are judged with the chain's before the store is called: a
+/// new path of them that meets the target's by case refuses the call, and nothing is written.
+#[test]
+fn an_unsettled_edit_is_judged_before_the_store() {
+    for rebase in [false, true] {
+        // 1. An unsettled `src/Readme`; the target gains `src/README`.
+        let f = Fixture::new();
+        let b = folding(&f, &[Put::File("src/a.txt", "a\n")]);
+        write(&f.beside("w"), "src/Readme", "mine\n");
+        let gained = f.side(Some(&b), &[Put::File("src/README", "theirs\n")]);
+        f.point("release/r", &gained);
+        let before = Snapshot::of(&f, "w");
+        let watched = Watched::new(&f.ops);
+        let ctx = f.ctx_over(&watched);
+
+        // 2. Refused as a case collision: the edit not committed, the store not called.
+        let refused = if rebase {
+            rebase_settling(&ctx).unwrap_err()
+        } else {
+            swarmops_ws::land(&ctx, land_with_message()).unwrap_err()
+        };
+        assert_eq!(refused.code, "E_WS_UNPORTABLE", "{rebase}: {refused:?}");
+        assert_eq!(refused.details["reason"], "case_collision", "{rebase}");
+        assert_eq!(
+            watched.count("land") + watched.count("rebase"),
+            0,
+            "{rebase}"
+        );
+        assert_eq!(watched.count("commit"), 0, "{rebase}");
+        assert!(Snapshot::of(&f, "w") == before, "{rebase}: a write");
+    }
 }
 
 /// A key that a newer changeset of the journal also carries is held when an older one is on the
