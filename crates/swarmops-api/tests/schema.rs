@@ -303,8 +303,10 @@ fn every_operation_takes_a_request_and_returns_a_response() {
 /// names the code, from the M1 plan and rulings for `E_UNSUPPORTED_FS`, `E_BUSY` and
 /// `E_INTERNAL`, from the M4 plan for `E_NOTHING_TO_UNDO` and `E_OP_NOT_FOUND`, from the M13
 /// plan for the four `E_REMOTE_*` codes, from the M5 plan for `E_WS_UNPORTABLE` and
-/// `E_CHECK_FAILED` (the other seven M5 codes are the operations spec's), and by the `E_<NAME>` convention for `E_TYPE_CONFLICT`,
-/// `E_UNKNOWN_PARENT` and `E_IO`. A new variant fails the test below until its row is added.
+/// `E_CHECK_FAILED` (the other seven M5 codes are the operations spec's), from the M15 design §5
+/// for `E_WS_OUTSIDE_PREFIXES` and `E_WS_STALE`, and by the `E_<NAME>` convention for
+/// `E_TYPE_CONFLICT`, `E_UNKNOWN_PARENT` and `E_IO`. A new variant fails the test below until its
+/// row is added.
 const ROWS: &[(ErrorCode, &str, i32, bool)] = &[
     (ErrorCode::ExistsAlready, "E_EXISTS", 1, false),
     (ErrorCode::NotARepo, "E_NOT_A_REPO", 6, false),

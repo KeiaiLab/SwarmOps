@@ -38,6 +38,9 @@ const RACERS: usize = 50;
 /// How many operations [`main_moves`] reads a page.
 const OP_LOG_PAGE: &str = "200";
 
+/// The page of [`main_moves`]'s own test: small enough that main's first move is on page 2.
+const SMALL_PAGE: &str = "2";
+
 /// How many rounds the ref tests race: in the `ref set` race the first creates main and each
 /// other one moves it; the `commit --advance` race makes main first, and each round moves it.
 const ROUNDS: u64 = 4;
@@ -395,7 +398,7 @@ fn main_moved(store: &Store, winner: &str, version: u64, round: u64) {
     assert_eq!(refs["refs"], main_ref, "round {round}");
 
     // 2. main's reflog: one entry more than before the round, the winner's on top.
-    let moves = main_moves(store);
+    let moves = main_moves(store, OP_LOG_PAGE);
     let entries = u64::try_from(moves.len()).expect("a count");
     assert_eq!(entries, version, "round {round}: main's reflog grew by one");
     assert_eq!(
@@ -404,14 +407,14 @@ fn main_moved(store: &Store, winner: &str, version: u64, round: u64) {
     );
 }
 
-/// main's reflog, newest first: the new id of each of its moves in the op log, read a page at a
-/// time.
-fn main_moves(store: &Store) -> Vec<String> {
+/// main's reflog, newest first: the new id of each of its moves in the op log, read `page`
+/// operations at a time.
+fn main_moves(store: &Store, page: &str) -> Vec<String> {
     let mut moves = Vec::new();
     let mut before: Option<String> = None;
     loop {
         // 1. One page of operations, below the last page's.
-        let mut args = vec!["op", "log", "--limit", OP_LOG_PAGE];
+        let mut args = vec!["op", "log", "--limit", page];
         if let Some(before) = &before {
             args.extend(["--before", before]);
         }
@@ -429,6 +432,28 @@ fn main_moves(store: &Store) -> Vec<String> {
         }
         before = Some(ops.last().expect("an operation")["op"].to_string());
     }
+}
+
+/// [`main_moves`] reads past its first page: read 2 operations a page, main's first move sits on
+/// the second page, below two commits that move no ref and above its first commit, and is listed
+/// after the newer move.
+#[test]
+fn main_moves_reads_past_its_first_page() {
+    let store = Store::init();
+    let who = agent(0);
+
+    // 1. Five operations, newest first: move to c3, c3, c2, move to c1, c1.
+    let c1 = store.commit(&who, "a.txt", "1\n", None);
+    store
+        .run_as(&who, &["ref", "set", "main", &c1, "--create"], &[])
+        .ok();
+    let c2 = store.commit(&who, "a.txt", "2\n", Some(&c1));
+    let c3 = store.commit(&who, "a.txt", "3\n", Some(&c2));
+    let moved = ["ref", "set", "main", &c3, "--expect", &c1];
+    store.run_as(&who, &moved, &[]).ok();
+
+    // 2. Both moves, read over three pages.
+    assert_eq!(main_moves(&store, SMALL_PAGE), [c3, c1]);
 }
 
 // ---------------------------------------------------------------------------------------------

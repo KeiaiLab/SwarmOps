@@ -984,6 +984,25 @@ fn a_merge_holding_main_second_is_not_forward() {
     read.check_forward("release/r", Some(c1), Some(x)).unwrap();
 }
 
+/// The undo of a move from before the rule that took `main` from a merge to the merge's second
+/// parent is refused: the merge does not hold that parent on its first-parent chain (the M15
+/// design §4).
+#[test]
+fn undo_onto_a_merge_holding_main_second_is_protected() {
+    let (_dir, root, repo) = new_repo();
+    let c1 = commit(&repo, &[], vec![put("f", b"1")]);
+    let x = commit(&repo, &[], vec![put("g", b"x")]);
+    let merge = commit(&repo, &[x, c1], vec![put("h", b"m")]);
+
+    // 1. main on the merge, then back on its second parent by a move from before the rule.
+    cas(&repo, "main", None, Some(merge));
+    let op = main_moved_raw(&root, merge, c1);
+
+    // 2. Its undo would move main from c1 to the merge: refused, main stays on c1.
+    assert_protected(&repo, &root, op, c1, merge);
+    assert_eq!(target(&repo, "main"), Some(c1));
+}
+
 /// An undo whose frame is durable but whose step after the commit point fails (here its listing
 /// in `journal.off`) is committed: it reports its moves with a warning, a read shows them, and
 /// the next write lists the frame and says so.
@@ -1018,7 +1037,8 @@ fn an_undo_that_fails_after_its_commit_point_warns() {
 }
 
 /// An undo reports what its write's recovery repaired first, of what an earlier writer left (a
-/// frame whose listing failed): when it restores, and with the error that blocks it.
+/// frame whose listing failed): when it restores, with the error that blocks it, and with the
+/// refusal of a move of `main` back.
 #[test]
 fn undo_reports_what_its_write_repaired() {
     let mut listed_and_replayed = Recovered::default();
@@ -1071,6 +1091,20 @@ fn undo_reports_what_its_write_repaired() {
             assert_eq!(*recovered, listed_and_replayed);
         }
         other => panic!("expected NothingToUndo, got {other:?}"),
+    }
+
+    // A move of main back, refused after the repair, reports it too.
+    cas(&repo, "main", None, Some(c1)); // op 9
+    cas(&repo, "main", Some(c1), Some(c2)); // op 10
+    let unlisted = listing_fails(&root)
+        .cas_ref("release/r", Some(c1), Some(c3), ACTOR)
+        .unwrap(); // op 11, committed and not listed
+    assert_eq!(unlisted.warnings.len(), 1);
+    match repo.undo(id_at(&root, 10), UNDOER) {
+        Err(RepoError::HistoryProtected { recovered, .. }) => {
+            assert_eq!(*recovered, listed_and_replayed);
+        }
+        other => panic!("expected HistoryProtected, got {other:?}"),
     }
 }
 

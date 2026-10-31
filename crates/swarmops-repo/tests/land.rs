@@ -31,7 +31,7 @@ use swarmops_repo::merge::tree_diff::{PathFilter, delta_of};
 use swarmops_repo::{Advance, Change, CommitRequest, Depth, LocalRepo, OpId, RepoError};
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, FAIL_AT_ENV, FS_CALLS_ENV, HookedFs, ORDER_CHECK_ENV};
-use swarmops_store::{FsOps, Journal, MetaStore, RealFs};
+use swarmops_store::{FsOps, Journal, MetaStore, RealFs, Recovered};
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::child::{SIGABRT, run, this_test};
 use swarmops_testkit::faults::checked;
@@ -1043,19 +1043,28 @@ impl Watch for ObjectReads {
 /// changeset objects.
 #[test]
 fn a_keyed_land_with_a_base_off_the_target_stops_at_its_generation() {
-    keyed_land_reads(false);
+    keyed_land_reads(OtherRef::Absent);
 }
 
 /// The same land with another ref, `release/x`, whose head is a changeset the target's walk reads:
 /// the ref's head is not read again, so the land still reads at most 6 of the changesets.
 #[test]
 fn a_keyed_land_reads_a_changeset_once_with_other_refs() {
-    keyed_land_reads(true);
+    keyed_land_reads(OtherRef::OnTheWalk);
 }
 
-/// Lands the keyed change of the two tests above, with `release/x` at the changeset of generation
-/// 999 when `other_ref`, and asserts the reads of the target's changesets.
-fn keyed_land_reads(other_ref: bool) {
+/// Whether the store of [`keyed_land_reads`] holds a ref besides the target.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OtherRef {
+    /// `main` is the store's only ref.
+    Absent,
+    /// `release/x` names the target's changeset of generation 999, which the target's walk reads.
+    OnTheWalk,
+}
+
+/// Lands the keyed change of the two tests above, with the other ref `other_ref` says, and
+/// asserts the reads of the target's changesets.
+fn keyed_land_reads(other_ref: OtherRef) {
     let dir = tempfile::tempdir().unwrap();
     let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
     let repo = LocalRepo::create_with_fs(&root, "test", Arc::new(NoSyncFs)).unwrap();
@@ -1073,7 +1082,7 @@ fn keyed_land_reads(other_ref: bool) {
     // 997, three below the target's head (1,000), is the base.
     let base = commit_by(&repo, OTHER, &[chain[995]], vec![put("g", b"g\n")]);
     let head = commit_by(&repo, OTHER, &[base], vec![put("h", b"h\n")]);
-    if other_ref {
+    if other_ref == OtherRef::OnTheWalk {
         create_ref(&repo, "release/x", chain[998]);
     }
     drop(repo);
@@ -1527,6 +1536,46 @@ fn a_land_with_an_expected_target_never_relocates() {
         (frame_count(&root), main_head(&repo)),
         (frames + 1, gained[0])
     );
+}
+
+/// An exact land that loses its race reports in its `CasMismatch` what its write's recovery
+/// repaired first: here the racer's commit onto `main`, committed but not listed in
+/// `journal.off`, whose changeset record and ref file the land's write replays.
+#[test]
+fn an_exact_land_s_mismatch_reports_its_recovery() {
+    let mut listed_and_replayed = Recovered::default();
+    listed_and_replayed.frames_listed = 1;
+    listed_and_replayed.records_replayed = 1;
+    listed_and_replayed.refs_replayed = 1;
+    let (_dir, root, repo) = new_store();
+    let t0 = advance(&repo, ACTOR, &[], vec![put("a", b"a\n")]);
+    let head = commit_by(&repo, ACTOR, &[t0], vec![put("b", b"b\n")]);
+    drop(repo);
+
+    // 1. The racer moves main through a handle whose listing in `journal.off` fails.
+    let racer_root = root.clone();
+    let off = layout_of(&root).journal_off().into_std_path_buf();
+    let racer = Racer::acting(&root, 1, move |other, _| {
+        let off = off.clone();
+        let unlisting = FailingFs::new(move |method, p| method == "append_durable" && p == off);
+        let unlisted = LocalRepo::open_with_fs(&racer_root, Arc::new(unlisting)).unwrap();
+        let mut req = by(OTHER, &[main_head(other)], vec![put("race", b"theirs\n")]);
+        req.advance = Some(Advance::new("main", OTHER));
+        let raced = unlisted.commit(req).unwrap();
+        assert_eq!(raced.warnings.len(), 1, "{raced:?}");
+        raced.id
+    });
+    let repo = racer.open();
+
+    // 2. The exact land, refused with what its write repaired.
+    let mut land = landing(head);
+    land.expect_target = Some(t0);
+    let refused = repo.land(land).unwrap_err();
+    let RepoError::CasMismatch { recovered, .. } = refused else {
+        panic!("a CAS mismatch, not {refused:?}");
+    };
+    assert_eq!(*recovered, listed_and_replayed);
+    assert_eq!(main_head(&repo), racer.landed()[0]);
 }
 
 /// A land that loses its first race to `main` (the racer edits the land's file past the in-lock

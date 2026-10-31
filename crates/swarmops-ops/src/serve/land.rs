@@ -416,19 +416,20 @@ mod tests {
         use serde_json::json;
         use swarmops_api::{
             ChangeInput, ChangeOp, CommitReq, ContentInput, ErrorCode, Identity, InfoReq, LandReq,
-            LandStatus, OpError, OpLogReq, RefSetReq, Rev, StoreOps,
+            LandStatus, OpError, OpLogReq, RecoveredOut, RefSetReq, Rev, StoreOps,
         };
         use swarmops_git::serve::proc_receive::{Command, Report};
         use swarmops_git::serve::repo::ServeRepo;
         use swarmops_git::{ExportRequest, GitOid, GixSink, export};
         use swarmops_store::RealFs;
-        use swarmops_testkit::fs::{Call, Watch, Watched};
+        use swarmops_testkit::fs::{Call, FailingFs, Watch, Watched};
+        use swarmops_testkit::store::layout_of;
         use tempfile::TempDir;
 
         use super::super::{land, land_onto};
-        use crate::LocalOps;
         use crate::serve::access::Access;
         use crate::serve::hook::HookCtx;
+        use crate::{LocalOps, Resolved};
 
         /// Who lands.
         const LANDER: &str = "person/ada";
@@ -471,6 +472,8 @@ mod tests {
             Broken,
             /// It names another in the lander's place.
             Unnamed,
+            /// It leaves the file as it is, its move of `main` left out of `journal.off`.
+            Unlisted,
         }
 
         /// Moves `main` once, as another lander would, at the land's first flush of objects
@@ -492,19 +495,29 @@ mod tests {
                 }
 
                 // 1. Another lander's change on main, through a handle of its own.
-                let other = LocalOps::open(&self.root).unwrap();
+                let other = match self.meanwhile {
+                    Meanwhile::Unlisted => LocalOps::open_on(&self.root, unlisting(&self.root)),
+                    _ => LocalOps::open(&self.root).unwrap(),
+                };
                 *raced = Some(commit(&other, RACER, None, registry(1, "theirs")));
 
                 // 2. The grants, as the operator leaves them.
                 let access = self.root.join("access.toml");
                 match self.meanwhile {
-                    Meanwhile::Kept => Ok(()),
+                    Meanwhile::Kept | Meanwhile::Unlisted => Ok(()),
                     Meanwhile::Revoked => std::fs::write(access, REVOKED),
                     Meanwhile::Removed => std::fs::remove_file(access),
                     Meanwhile::Broken => std::fs::write(access, BROKEN),
                     Meanwhile::Unnamed => std::fs::write(access, UNNAMED),
                 }
             }
+        }
+
+        /// The real filesystem, except that the listing of a frame in the store at `root`'s
+        /// `journal.off` fails.
+        fn unlisting(root: &Utf8Path) -> FailingFs {
+            let off = layout_of(root).journal_off().into_std_path_buf();
+            FailingFs::new(move |method, path| method == "append_durable" && path == off)
         }
 
         /// The registry, its line `at` replaced by `line`.
@@ -650,9 +663,12 @@ mod tests {
             let who = Identity::parse(LANDER).unwrap();
             let before = last_op(&ops);
 
+            // 1. The refusal, not retryable.
             let error = land_onto(&racing, &who, land, "main").unwrap_err();
             let raced = race.raced.lock().unwrap().clone().expect("the race ran");
             assert!(!error.retryable, "{error:?}");
+
+            // 2. Nothing of the land recorded.
             let main = ops.repo_info(InfoReq::default()).unwrap().main;
             assert_eq!(main.as_deref(), Some(raced.as_str()));
             assert_eq!(last_op(&ops), before + 1, "the race's frame alone");
@@ -693,14 +709,43 @@ mod tests {
             let (_dir, ops, racing, race, land) = raced_land(Meanwhile::Revoked);
             let who = Identity::parse(LANDER).unwrap();
 
+            // 1. The land, on its second attempt, onto the racer's changeset.
             let landed = StoreOps::land(&racing, &who, land).unwrap();
             let raced = race.raced.lock().unwrap().clone().expect("the race ran");
             assert_eq!(
                 (landed.status, landed.attempts, landed.rebased_onto.as_str()),
                 (LandStatus::Landed, 2, raced.as_str())
             );
+
+            // 2. main at the landed changeset.
             let main = ops.repo_info(InfoReq::default()).unwrap().main;
             assert_eq!(main, Some(landed.landed));
+        }
+
+        /// An exact land refused under the lock records what its write repaired first, which
+        /// the CLI and the MCP server report as `meta.recovered`: after the race's move of
+        /// `main`, whose listing in `journal.off` failed, the land's write lists the frame and
+        /// replays its changeset record and ref file.
+        #[test]
+        fn an_exact_land_s_mismatch_records_its_recovery() {
+            let (_dir, ops, racing, race, mut land) = raced_land(Meanwhile::Unlisted);
+            let who = Identity::parse(LANDER).unwrap();
+            let main = || ops.repo_info(InfoReq::default()).unwrap().main;
+            land.expect_target = main().map(Rev::from);
+
+            // 1. The mismatch, and the repair in the request's record.
+            let resolved = Resolved::default();
+            let error = racing.recording(&resolved).land(&who, land).unwrap_err();
+            assert_eq!(error.code, ErrorCode::CasMismatch.as_str(), "{error:?}");
+            let mut listed_and_replayed = RecoveredOut::default();
+            listed_and_replayed.frames_listed = 1;
+            listed_and_replayed.records_replayed = 1;
+            listed_and_replayed.refs_replayed = 1;
+            assert_eq!(resolved.take_recovered(), Some(listed_and_replayed));
+
+            // 2. main at the racer's changeset.
+            let raced = race.raced.lock().unwrap().clone().expect("the race ran");
+            assert_eq!(main(), Some(raced));
         }
 
         /// Through the hook: a grant taken away while the push's land loses its first race
