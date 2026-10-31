@@ -790,10 +790,14 @@ left).
   check the target's paths for names the files cannot hold (`E_WS_UNPORTABLE`) before the store
   call. A target that gains a path with a component named `.swarmws` between that check and the
   store's call is landed or rebased onto, and the materialisation then refuses it with the pending
-  record kept: a re-run is refused the same way while the target holds the path. The way out is
-  `ws delete <name> --rescue`: the workspace's commits stay in the store. The same window lets a
-  case collision through that the target creates after the check. *Unscheduled (the window is the
-  time between two calls of one command). Found: M15 Task S4c review.*
+  record kept. After the store's rebase (`ws rebase`, `ws rebase --continue`, the rebase step of
+  `ws land --check`) a re-run is refused the same way while the target holds the path, and
+  rebases again once it does not. After the store's land (`ws land`, the land step of `ws land
+  --check`) the landed changeset holds the path for good: a re-run of `ws land` replays it and is
+  refused again, whatever the target holds by then, and `ws rebase` answers `E_INVALID_ARG`. The
+  way out is `ws delete <name> --rescue`: the workspace's commits stay in the store. The same
+  window lets a case collision through that the target creates after the check. *Unscheduled (the
+  window is the time between two calls of one command). Found: M15 Task S4c review.*
 
 ## Platforms
 

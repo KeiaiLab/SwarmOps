@@ -1677,6 +1677,45 @@ fn a_retry_checks_the_target() {
     assert!(!pending_in(&f.beside("w")).exists(), "a record");
 }
 
+/// A target that gains a reserved name between the preflight and the store's land is landed on,
+/// and the landed changeset holds the name for good: a re-run replays it and is refused again,
+/// though the target dropped the name since, and `ws rebase` leaves the record.
+#[test]
+fn a_land_race_is_not_freed_by_the_target_dropping_the_name() {
+    // 1. A land; the target gains `src/.swarmws/x` as the store is called.
+    let f = Fixture::new();
+    let (_, b, _) = on_release(&f);
+    let c = f.side(Some(&b), &[Put::File("src/c.txt", "c\n")]);
+    f.point("release/r", &c);
+    let store = Hooked::new(&f.ops);
+    let fixture = &f;
+    let racer = c.clone();
+    *store.before_land.lock().unwrap() = Some(Box::new(move || {
+        let d = fixture.side(Some(&racer), &[Put::File("src/.swarmws/x", "z\n")]);
+        fixture.point("release/r", &d);
+    }));
+    let ctx = f.ctx_over(&store);
+    let dir = f.beside("w");
+    let first = swarmops_ws::land(&ctx, land_with_message()).unwrap_err();
+    assert_eq!(first.code, "E_WS_UNPORTABLE", "{first:?}");
+    assert!(pending_in(&dir).exists());
+
+    // 2. The target drops the name: the re-run replays the land and is refused again.
+    let head = head_of(&f, "release/r");
+    f.point("main", &head);
+    let dropped = f.commit(Some(&head), &[Put::Gone("src/.swarmws/x")]);
+    f.point("release/r", &dropped);
+    let again = swarmops_ws::land(&ctx, land_of("w", None)).unwrap_err();
+    assert_eq!(again.code, "E_WS_UNPORTABLE", "{again:?}");
+    let statuses: Vec<_> = store.lands().iter().map(|l| l.status).collect();
+    assert_eq!(statuses, [LandStatus::Landed, LandStatus::Replayed]);
+
+    // 3. The rebase leaves the record: the land is the one to finish.
+    let refused = rebase_w(&ctx).unwrap_err();
+    assert_eq!(refused.code, "E_INVALID_ARG", "{refused:?}");
+    assert!(pending_in(&dir).exists(), "the record went");
+}
+
 /// A path the workspace deleted is not its new one: a target that renamed it by case lands on a
 /// volume that folds case.
 #[test]

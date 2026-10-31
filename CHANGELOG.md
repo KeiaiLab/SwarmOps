@@ -156,14 +156,16 @@ collects the changes on `stable` that no release holds yet, until the next relea
   and kept its record, so `ws land` and `ws rebase --abort` then answered `E_INVALID_ARG`; now no
   operation is recorded and the workspace is as it was (the M15 design §5). A target that gains
   such a path between the check and the store's call keeps the record the refusal leaves: a
-  re-run is refused while the target holds the path, and rebases again once it does not; `ws land
-  --check` and `ws rebase --continue` likewise.
+  re-run is refused while the target holds the path, and rebases again once it does not (`ws
+  rebase`, `ws rebase --continue` and the rebase step of `ws land --check`).
 - `ws land` checks the paths its target gained against the workspace's volume before the store
   lands anything. A target that gained a path with a `.swarmws` component (`src/.SwarmWs/z`) moved
   to the landed changeset, and then `ws land` answered `E_WS_UNPORTABLE` "nothing was written"
   and kept its pending record; now it answers first, the target stays where it was and no record
   is left (the M15 design §5). A target that gains such a path between the check and the land
-  still takes the old way out, `ws delete --rescue`.
+  still takes the old way out, `ws delete --rescue`: the landed changeset holds the path for
+  good, so a re-run of `ws land` replays it and is refused again, whatever the target holds by
+  then, and `ws rebase` answers `E_INVALID_ARG`.
 - `ws status`'s `behind_by` counts the changesets the target holds that the workspace's base lacks
   when the base is not on the target's history: 1 after a sync replaced the base with its
   squash-merged copy, and 0 when the target moved back onto the base's first-parent history,

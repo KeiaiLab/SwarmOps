@@ -148,7 +148,8 @@ pub fn land(ctx: &Ctx<'_>, req: WsLandReq) -> Result<WsLandResp, OpError> {
     }
 
     // 4. Names the target gained that the files cannot hold, and those of the edits `-m`
-    //    commits: refused before the store lands, unless the store only replays a land cut short that the target holds.
+    //    commits: refused before the store lands, unless the store only replays a land cut
+    //    short that the target holds.
     if !replays(ctx, &ws, &target)? {
         let head = ctx.store.resolve_rev(ResolveRevReq::new(target.as_str()))?;
         let edits = rebase::unsettled(ctx, &ws, message.as_deref(), PendingOp::Land)?;

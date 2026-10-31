@@ -1255,9 +1255,13 @@ paths in the store with a commit, or create the workspace with `--prefix` paths 
 out; a `ws rebase`, `ws land` or `ws materialize` that would bring such a path in, or a `ws discard`
 or `ws resolve --take` that would restore one, refuses the same way, before the store records
 anything and with no pending record left. A target that gains the path after that check and before
-the store's call has recorded it when the refusal comes, and the pending record stays: a re-run
-is refused the same way while the target holds the path, and rebases again once it does not.
-`ws delete <name> --rescue` removes the workspace, and its commits stay in the store.
+the store's call has recorded it when the refusal comes, and the pending record stays. After the
+store's rebase (`ws rebase`, `ws rebase --continue`, the rebase step of `ws land --check`) a
+re-run is refused the same way while the target holds the path, and rebases again once it does
+not. After the store's land (`ws land`, the land step of `ws land --check`) the landed changeset
+holds the path for good: a re-run of `ws land` replays it and is refused again, whatever the
+target holds by then, and `ws rebase` answers `E_INVALID_ARG` ("run it again first"). `ws delete
+<name> --rescue` removes the workspace, and its commits stay in the store.
 
 ### `E_WS_OUTSIDE_PREFIXES`
 
