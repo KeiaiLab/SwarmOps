@@ -46,6 +46,9 @@ const SEED: u64 = 0x5167_4b11;
 /// The ref every commit advances.
 const MAIN: &str = "main";
 
+/// The ref the land test's last step lands onto.
+const RELEASE: &str = "release/1";
+
 /// How one killed run ended.
 enum Ended {
     /// SIGKILL hit it; its envelope was read if it printed one whole.
@@ -198,6 +201,18 @@ const SLOW_LAND_KILLS: usize = 200;
 /// The seed of the land test's delays, apart from the commit test's.
 const LAND_SEED: u64 = 0x1a4d_5167;
 
+/// How many lands per kill the land test may spend. A land that ends before its delay is no kill,
+/// and shrinks the window the delays are drawn from ([`WINDOW_SHRINK`]), so a loaded host that
+/// slows the lands after the first still ends in the kills asked for.
+const LAND_RUNS_PER_KILL: usize = 16;
+
+/// A land that ended before its delay cuts the window by this fraction (1 in 8).
+const WINDOW_SHRINK: u64 = 8;
+
+/// The entries `log` is asked for beyond the `n + 2` `main` holds after land `n`: a surplus
+/// changeset shows in the log, and fails the count.
+const LOG_SURPLUS: usize = 2;
+
 /// The idempotency key of the `n`-th land.
 fn land_key(n: usize) -> String {
     format!("kill-land-{n}")
@@ -282,7 +297,7 @@ fn land_again(store: &Store, head: &str, n: usize) -> String {
 /// `kills` SIGKILLs of `land --key` on a store of `format`, each followed by the same land again
 /// and the checks: the store verifies clean, `main`'s log holds each key's changeset exactly once
 /// (and the base), and a reported land is the one `main` holds. Ends with the first key given for
-/// another change: `E_INVALID_ARG`, `main` unmoved.
+/// another change, then for a land onto another target: `E_INVALID_ARG` each, no ref moved.
 fn kill_lands(format: StoreFormat, kills: usize) {
     let store = Store::init_as(format);
     let mut rng = Rng::new(LAND_SEED ^ u64::from(format.version()));
@@ -296,7 +311,7 @@ fn kill_lands(format: StoreFormat, kills: usize) {
     let first = change_off_main(&store, 0);
     let start = Instant::now();
     let landed = land_again(&store, &first, 0);
-    let window = u64::try_from(start.elapsed().as_micros()).expect("a short land");
+    let mut window = u64::try_from(start.elapsed().as_micros()).expect("a short land");
     keys.insert(landed, Some(land_key(0)));
     keys.insert(base.clone(), None);
 
@@ -304,7 +319,10 @@ fn kill_lands(format: StoreFormat, kills: usize) {
     let mut n = 0;
     while killed < kills {
         n += 1;
-        assert!(n <= kills * RUNS_PER_KILL, "{killed} kills in {n} lands");
+        assert!(
+            n <= kills * LAND_RUNS_PER_KILL,
+            "{killed} kills in {n} lands"
+        );
         let head = change_off_main(&store, n);
         let delay = Duration::from_micros(rng.next_u64() % window);
         let what = format!("{format:?} seed {LAND_SEED:#x} land {n} delay {delay:?}");
@@ -315,7 +333,10 @@ fn kill_lands(format: StoreFormat, kills: usize) {
                 killed += 1;
                 reported
             }
-            Ended::Exited(id) => Some(id),
+            Ended::Exited(id) => {
+                window -= window / WINDOW_SHRINK;
+                Some(id)
+            }
         };
         let again = land_again(&store, &head, n);
         if let Some(reported) = reported {
@@ -324,7 +345,9 @@ fn kill_lands(format: StoreFormat, kills: usize) {
 
         // 3. The store verifies clean; main holds the base and one land per key so far.
         store.assert_clean(&what);
-        let log = store.read(&["log", MAIN, "-n", &(n + 4).to_string()]).ok();
+        let log = store
+            .read(&["log", MAIN, "-n", &(n + 2 + LOG_SURPLUS).to_string()])
+            .ok();
         let on_main: Vec<&str> = (log["entries"].as_array().expect("log entries").iter())
             .map(|entry| entry["id"].as_str().expect("an id"))
             .collect();
@@ -352,7 +375,21 @@ fn kill_lands(format: StoreFormat, kills: usize) {
     let args = ["land", other.as_str(), "--key", &land_key(0)];
     let refused = store.run_as(&agent(0), &args, &[]).err("E_INVALID_ARG");
     assert_eq!(refused["details"]["key"], land_key(0).as_str());
+    assert_eq!(refused["details"]["target"], MAIN);
     assert_eq!(main_head(&store), before, "main did not move");
+
+    // 5. The same key for a land onto another target, `release/1` at the base: refused, naming
+    // `main`, and neither ref moves.
+    store
+        .run_as(&agent(0), &["ref", "set", RELEASE, &base, "--create"], &[])
+        .ok();
+    let refs = || store.read(&["ref", "list"]).ok();
+    let before = refs();
+    let args = ["land", other.as_str(), "--key", &land_key(0)];
+    let args: Vec<&str> = args.into_iter().chain(["--target", RELEASE]).collect();
+    let refused = store.run_as(&agent(0), &args, &[]).err("E_INVALID_ARG");
+    assert_eq!(refused["details"]["target"], MAIN);
+    assert_eq!(refs(), before, "no ref moved");
 
     println!("{format:?}: {killed} kills in {n} lands, window {window} us");
     store.assert_clean("after the last land");
@@ -367,7 +404,7 @@ per_format! {
 
 per_format! {
     /// The slow land variant: [`SLOW_LAND_KILLS`] kills per format.
-    #[ignore = "slow, ~30 s per format: 200 kills, each with verify --deep and a log"]
+    #[ignore = "slow, ~30 s per format, 180 s at load 900: 200 kills, each with verify --deep and a log"]
     fn sigkill_mid_land_200_times(format) {
         kill_lands(format, SLOW_LAND_KILLS);
     }

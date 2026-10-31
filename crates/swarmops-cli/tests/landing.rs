@@ -131,6 +131,8 @@ fn a_key_reused_on_another_target_is_invalid_arg() {
     let refs = || store.read(&["ref", "list"]).ok();
     let before = refs();
 
+    // Another change and the same change, each given the key for `main`: refused, with the
+    // ref that holds the land named.
     for head in [&two, &one] {
         let run = store.run_as(&who, &["land", head, "--key", KEY], &[]);
         let error = run.err("E_INVALID_ARG");
@@ -140,6 +142,27 @@ fn a_key_reused_on_another_target_is_invalid_arg() {
     }
     assert_eq!(refs(), before, "neither ref moved");
     store.assert_clean("after the refused lands");
+}
+
+/// A key reused on its own target names that target in `details.target`.
+#[test]
+fn a_key_reused_on_its_target_names_it() {
+    const KEY: &str = "same-target";
+    let store = Store::init();
+    let who = agent(0);
+    let t0 = commit_base(&store, 1);
+
+    // The key lands one change onto `main`; another change is given it for `main` too.
+    let one = store.commit(&who, "one.txt", "one\n", Some(&t0));
+    let landed = store.run_as(&who, &["land", &one, "--key", KEY], &[]).ok()["landed"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let two = store.commit(&who, "two.txt", "two\n", Some(&t0));
+
+    let run = store.run_as(&who, &["land", &two, "--key", KEY], &[]);
+    let details = serde_json::json!({"key": KEY, "landed": landed, "target": "main"});
+    assert_eq!(run.err("E_INVALID_ARG")["details"], details, "{run}");
 }
 
 /// Commits the base the landers start from ([`base_files`]: [`REGISTRY`] and a file under each
