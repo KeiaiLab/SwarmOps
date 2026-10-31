@@ -58,7 +58,7 @@ Syntax: `--key <KEY>`.
 
 Makes a retry of this land safe: 1 to 64 letters, digits and '-', such as a uuid v7. Make a new one for each change you land, and give it again only to retry that land.
 
-A land with a key first looks down the ref's first parents, to the change's base, for a changeset landed with the same key: one squashed from this HEAD is the land made before, which the land replays (status: replayed) without writing anything; one from another head is E\_INVALID\_ARG. Without a key, the same land run again finds its change on the ref already: E\_NOTHING\_TO\_LAND.
+A land with a key first looks down the ref's first parents, to the change's base, for a changeset landed with the same key: one squashed from this HEAD is the land made before, which the land replays (status: replayed) without writing anything; one from another head is E\_INVALID\_ARG. A key not found there is looked for on the other main, release and branch refs: one that landed on another target is E\_INVALID\_ARG too, and details.target names the ref. Without a key, the same land run again finds its change on the ref already: E\_NOTHING\_TO\_LAND.
 
 ### `--target`
 

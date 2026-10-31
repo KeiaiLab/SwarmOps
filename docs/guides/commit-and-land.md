@@ -1161,7 +1161,7 @@ your old puts would undo the winner's edits to every file you both changed.
 | Code | Exit | When | What to do |
 | --- | --- | --- | --- |
 | `E_IDENTITY_REQUIRED` | 5 | A write without `--as` or `SWARMOPS_AGENT`. | Name the agent. |
-| `E_INVALID_ARG` | 2 | A bad agent name, path, key or option value; a land key used for another change. | Fix the request; `details` names the field. |
+| `E_INVALID_ARG` | 2 | A bad agent name, path, key or option value; a land key used for another change or landed on another target. | Fix the request; `details` names the field. |
 | `E_EMPTY_COMMIT` | 1 | A change list that changes nothing. | Pass `--allow-empty` if you meant it. |
 | `E_TOO_LARGE` | 1 | A content, a commit or a change list past its limit. | Use `file` content or `blob put`; `details.scope` says which limit. |
 | `E_PATH_NOT_FOUND` | 6 | A delete of a path with no file. | Check the path at the parent with `ls`. |

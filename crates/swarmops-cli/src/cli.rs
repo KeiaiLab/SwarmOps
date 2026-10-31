@@ -194,7 +194,9 @@ that land.
 A land with a key first looks down the ref's first parents, to the change's base, for a \
 changeset landed with the same key: one squashed from this HEAD is the land made before, which \
 the land replays (status: replayed) without writing anything; one from another head is \
-E_INVALID_ARG. Without a key, the same land run again finds its change on the ref already: \
+E_INVALID_ARG. A key not found there is looked for on the other main, release and branch refs: \
+one that landed on another target is E_INVALID_ARG too, and details.target names the ref. \
+Without a key, the same land run again finds its change on the ref already: \
 E_NOTHING_TO_LAND.";
 
 /// `rebase --onto`'s help.

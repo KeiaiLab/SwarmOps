@@ -2451,7 +2451,9 @@ pub struct LandReq {
     /// with a key first looks down the target's first parents, to `base`, for a changeset that
     /// landed with the same key: one squashed from this `head` is the replay, which writes
     /// nothing (`status` is `replayed`); one from another head is `E_INVALID_ARG`, a key used
-    /// for another change.
+    /// for another change. A key not found there is looked for on the other `main`,
+    /// `release/<name>` and branch refs: one that landed on another target is `E_INVALID_ARG`
+    /// too, and `details.target` names the ref.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idempotency_key: Option<String>,
     /// How many times to try to publish before failing with `E_CAS_RETRY_EXHAUSTED`: 1 to 32.

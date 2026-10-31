@@ -102,8 +102,9 @@ first parents, to the change's base, for a changeset landed with the same key:
 | What it finds | Result |
 | --- | --- |
 | A changeset squashed from this HEAD | `status: replayed`, the first land's result, nothing written. |
-| A changeset squashed from another head | `E_INVALID_ARG` (exit 2), `details.key` and `details.landed`: the key was used for another change. |
-| None | The land runs. |
+| A changeset squashed from another head | `E_INVALID_ARG` (exit 2), `details.key`, `details.landed` and `details.target` (the target): the key was used for another change. |
+| None on the target, one on another `main`, `release/<x>` or branch ref | `E_INVALID_ARG` (exit 2), `details.key`, `details.landed` and `details.target` (that ref): the key landed there; give each target a key of its own. |
+| None anywhere | The land runs. |
 
 Without a key, a land run again after it succeeded fails with `E_NOTHING_TO_LAND` (exit 1),
 `details.reason` `no_changes`. A HEAD that is on the target already fails with `reason`

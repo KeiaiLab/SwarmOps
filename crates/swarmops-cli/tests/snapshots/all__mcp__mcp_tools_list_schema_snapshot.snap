@@ -813,7 +813,7 @@ expression: listed
             "type": "string"
           },
           "idempotency_key": {
-            "description": "Makes a retry of this land safe: 1 to 64 letters, digits and `-`, such as a uuid v7. A land\nwith a key first looks down the target's first parents, to `base`, for a changeset that\nlanded with the same key: one squashed from this `head` is the replay, which writes\nnothing (`status` is `replayed`); one from another head is `E_INVALID_ARG`, a key used\nfor another change.",
+            "description": "Makes a retry of this land safe: 1 to 64 letters, digits and `-`, such as a uuid v7. A land\nwith a key first looks down the target's first parents, to `base`, for a changeset that\nlanded with the same key: one squashed from this `head` is the replay, which writes\nnothing (`status` is `replayed`); one from another head is `E_INVALID_ARG`, a key used\nfor another change. A key not found there is looked for on the other `main`,\n`release/<name>` and branch refs: one that landed on another target is `E_INVALID_ARG`\ntoo, and `details.target` names the ref.",
             "type": [
               "string",
               "null"

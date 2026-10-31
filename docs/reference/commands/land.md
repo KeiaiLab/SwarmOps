@@ -63,7 +63,7 @@ Syntax: `--key <KEY>`.
 
 Makes a retry of this land safe: 1 to 64 letters, digits and '-', such as a uuid v7. Make a new one for each change you land, and give it again only to retry that land.
 
-A land with a key first looks down the ref's first parents, to the change's base, for a changeset landed with the same key: one squashed from this HEAD is the land made before, which the land replays (status: replayed) without writing anything; one from another head is E\_INVALID\_ARG. Without a key, the same land run again finds its change on the ref already: E\_NOTHING\_TO\_LAND.
+A land with a key first looks down the ref's first parents, to the change's base, for a changeset landed with the same key: one squashed from this HEAD is the land made before, which the land replays (status: replayed) without writing anything; one from another head is E\_INVALID\_ARG. A key not found there is looked for on the other main, release and branch refs: one that landed on another target is E\_INVALID\_ARG too, and details.target names the ref. Without a key, the same land run again finds its change on the ref already: E\_NOTHING\_TO\_LAND.
 
 ### `--max-attempts`
 
@@ -245,8 +245,9 @@ first parents, to the change's base, for a changeset landed with the same key:
 | What it finds | Result |
 | --- | --- |
 | A changeset squashed from this HEAD | `status: replayed`, the first land's result, nothing written. |
-| A changeset squashed from another head | `E_INVALID_ARG` (exit 2), `details.key` and `details.landed`: the key was used for another change. |
-| None | The land runs. |
+| A changeset squashed from another head | `E_INVALID_ARG` (exit 2), `details.key`, `details.landed` and `details.target` (the target): the key was used for another change. |
+| None on the target, one on another `main`, `release/<x>` or branch ref | `E_INVALID_ARG` (exit 2), `details.key`, `details.landed` and `details.target` (that ref): the key landed there; give each target a key of its own. |
+| None anywhere | The land runs. |
 
 Without a key, a land run again after it succeeded fails with `E_NOTHING_TO_LAND` (exit 1),
 `details.reason` `no_changes`. A HEAD that is on the target already fails with `reason`
