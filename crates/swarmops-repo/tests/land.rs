@@ -24,7 +24,9 @@ use std::time::Duration;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, ObjectId, RepoPath, Signature};
-use swarmops_repo::land::{LandOutcome, LandRequest, LandStatus, NothingToLandReason, backoff};
+use swarmops_repo::land::{
+    Gated, LandOutcome, LandRequest, LandStatus, NothingToLandReason, backoff,
+};
 use swarmops_repo::merge::tree_diff::{PathFilter, delta_of};
 use swarmops_repo::{Advance, Change, CommitRequest, Depth, LocalRepo, OpId, RepoError};
 #[cfg(feature = "test-hooks")]
@@ -1515,6 +1517,74 @@ fn a_land_with_an_expected_target_never_relocates() {
         (frame_count(&root), main_head(&repo)),
         (frames + 1, gained[0])
     );
+}
+
+/// A land that loses its first race to `main` (the racer edits the land's file past the in-lock
+/// merge's bound), for the gate tests below: the store's root, a handle the racer races, the
+/// racer, and the change's head.
+fn gated_race() -> (TempDir, Utf8PathBuf, LocalRepo, Arc<Racer>, ChangesetId) {
+    let (dir, root, repo) = new_store();
+    let t0 = advance(
+        &repo,
+        ACTOR,
+        &[],
+        vec![put(REGISTRY, &registry(LARGE, &[]))],
+    );
+    let ours = registry(LARGE, &[(4, "ours")]);
+    let head = commit_by(&repo, ACTOR, &[t0], vec![put(REGISTRY, &ours)]);
+    drop(repo);
+    let racer = Racer::new(&root, 1, |_| {
+        vec![put(REGISTRY, &registry(LARGE, &[(1, "theirs")]))]
+    });
+    let repo = racer.open();
+    (dir, root, repo, racer, head)
+}
+
+/// A gate that closes before the second attempt stops the land there (the M15 design §6): the
+/// refusal comes back as it is, nothing of the land is recorded, and `main` names the racer's
+/// changeset.
+#[test]
+fn a_gate_closed_after_a_lost_race_stops_the_land() {
+    let (_dir, root, repo, racer, head) = gated_race();
+    let frames = frame_count(&root);
+
+    // 1. The gate refuses from the second attempt on.
+    let gate = |n: u32| if n >= 2 { Err("revoked") } else { Ok(()) };
+    let refused = repo.land_gated(landing(head), gate);
+
+    // 2. The refusal, and only the race's frame.
+    let gained = racer.landed();
+    assert_eq!(gained.len(), 1, "one race");
+    match refused {
+        Err(Gated::Refused(reason)) => assert_eq!(reason, "revoked"),
+        other => panic!("expected the gate's refusal, got {other:?}"),
+    }
+    assert_eq!(main_head(&repo), gained[0]);
+    assert_eq!(frame_count(&root), frames + 1, "the race's frame alone");
+}
+
+/// A gate that stays open is asked before each attempt, the first included: the land that lost
+/// its first race lands on its second.
+#[test]
+fn a_gate_kept_lands_on_the_second_attempt() {
+    let (_dir, _root, repo, racer, head) = gated_race();
+
+    // 1. The gate records each attempt it is asked about.
+    let mut seen = Vec::new();
+    let gate = |n: u32| {
+        seen.push(n);
+        Ok::<(), &str>(())
+    };
+    let out = repo.land_gated(landing(head), gate).unwrap();
+
+    // 2. Asked twice, landed on the racer's changeset.
+    let gained = racer.landed();
+    assert_eq!(seen, [1, 2]);
+    assert_eq!(
+        (out.status, out.attempts, out.rebased_onto),
+        (LandStatus::Landed, 2, gained[0])
+    );
+    assert_eq!(main_head(&repo), out.landed);
 }
 
 /// The backoff before a land's attempt (operations spec §3 step 7): none before the fourth; from

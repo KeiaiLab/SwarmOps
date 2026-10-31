@@ -66,6 +66,14 @@
 //! When the last attempt lost its race, the land fails with [`RepoError::RetryExhausted`]. A lost
 //! attempt leaves nothing in the journal: the objects it flushed stay, unreferenced, for GC.
 //!
+//! A gated land ([`Repo::land_gated`], the M15 design §6) asks its caller's gate before each
+//! attempt, the first included: after the attempt's backoff, before its snapshot (for the first,
+//! before step 1). A refusal ends the land as the gate gave it ([`Gated::Refused`]), before the
+//! attempt prepares, writes or publishes anything. The gate is asked outside the lock, so what it
+//! decides holds for that attempt, not up to its publish. The repository knows nothing of why a
+//! gate refuses: `serve` reads its access file again there. [`Repo::land`] is the land whose gate
+//! never refuses.
+//!
 //! A land with [`LandRequest::expect_target`] (M5) makes one attempt. After step 3, a target that
 //! does not name the expected changeset ends it with [`RepoError::CasMismatch`], before the
 //! merge; so does a publish that loses its race, which never merges again and is never made
@@ -88,10 +96,10 @@ mod publish;
 mod resolve;
 
 pub use detached::{DetachedLand, DetachedOutcome};
-use landing::{LAND_KEY, SQUASHED_FROM};
 pub use landing::{
-    LandOutcome, LandRequest, LandStatus, MergeConflicts, NothingToLandReason, backoff,
+    Gated, LandOutcome, LandRequest, LandStatus, MergeConflicts, NothingToLandReason, backoff,
 };
+use landing::{LAND_KEY, SQUASHED_FROM};
 pub(crate) use landing::{Prep, Prepared};
 pub use publish::{Publication, Published, Relocate};
 pub use resolve::{Resolution, Resolutions, Side};

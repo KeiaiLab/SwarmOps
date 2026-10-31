@@ -1,7 +1,8 @@
-//! The land itself: [`Repo::land`], its request and outcome, and the merge and publication
-//! steps the detached land and the rebase share.
+//! The land itself: [`Repo::land`] and [`Repo::land_gated`], its request and outcome, and the
+//! merge and publication steps the detached land and the rebase share.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::convert::Infallible;
 use std::fmt;
 use std::thread;
 use std::time::Duration;
@@ -256,6 +257,17 @@ impl MergeConflicts {
     }
 }
 
+/// Why a gated land ([`Repo::land_gated`]) failed: the land's own error, or its gate's refusal
+/// of an attempt, as the gate gave it.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum Gated<R> {
+    /// The land failed as [`Repo::land`] fails.
+    Repo(RepoError),
+    /// The gate refused an attempt: nothing of that attempt was prepared, written or published.
+    Refused(R),
+}
+
 /// How long a land waits before its attempt `attempt`, counted from 1 (operations spec §3 step
 /// 7): nothing before the fourth; from it, `min(2 s, 25 ms·2^attempt)·U(0.5, 1.5)`, `U` drawn from
 /// the BLAKE3 hash of `seed` and the attempt's number, so that the same land waits the same each
@@ -283,12 +295,34 @@ impl<O: ObjectStore> Repo<O> {
     /// `against` the store does not hold, [`RepoError::MissingBlob`] for a blob one names by id
     /// that it does not hold.
     pub fn land(&self, req: LandRequest) -> Result<LandOutcome, RepoError> {
-        // 1. The request, checked in the snapshot the first attempt reads in.
+        // A gate that never refuses.
+        let open = |_| Ok::<(), Infallible>(());
+        match self.land_gated(req, open) {
+            Ok(outcome) => Ok(outcome),
+            Err(Gated::Repo(e)) => Err(e),
+            Err(Gated::Refused(never)) => match never {},
+        }
+    }
+
+    /// [`Repo::land`], `gate` asked before each attempt with the attempt's number, counted from
+    /// 1: after the attempt's backoff, before its snapshot (before the request's check, for the
+    /// first). A refusal stops the land there, as [`Gated::Refused`]: that attempt prepares,
+    /// writes and publishes nothing, so the journal holds no frame of the land. The gate is asked
+    /// outside the store's lock: what it decides holds for the attempt it is asked about, not up
+    /// to that attempt's publish.
+    pub fn land_gated<R>(
+        &self,
+        req: LandRequest,
+        mut gate: impl FnMut(u32) -> Result<(), R>,
+    ) -> Result<LandOutcome, Gated<R>> {
+        // 1. The request, checked in the snapshot the first attempt reads in, once the gate lets
+        //    the first attempt start.
+        gate(1).map_err(Gated::Refused)?;
         let Started {
             mut landing,
             read,
             theirs,
-        } = self.start(req)?;
+        } = self.start(req).map_err(Gated::Repo)?;
         let seed = match &landing.req.key {
             Some(key) => key.as_bytes().to_vec(),
             None => landing.req.head.0.0.to_vec(),
@@ -303,16 +337,19 @@ impl<O: ObjectStore> Repo<O> {
         let (mut read, mut theirs) = (Some(read), theirs);
         let mut lost = Recovered::default();
         for attempt in 1..=max_attempts {
-            // The first attempt reads in the snapshot the request was checked in.
+            // The first attempt reads in the snapshot the request was checked in; a later one
+            // waits, asks the gate, then reads afresh.
             let read = if let Some(read) = read.take() {
                 read
             } else {
                 thread::sleep(backoff(attempt, &seed));
-                let read = self.snapshot()?;
-                theirs = target_head(&read, &landing.req.target)?;
+                gate(attempt).map_err(Gated::Refused)?;
+                let read = self.snapshot().map_err(Gated::Repo)?;
+                theirs = target_head(&read, &landing.req.target).map_err(Gated::Repo)?;
                 read
             };
-            match landing.attempt(read, theirs, attempt)? {
+            let tried = landing.attempt(read, theirs, attempt);
+            match tried.map_err(Gated::Repo)? {
                 Attempt::Done(outcome) => return Ok(outcome),
                 Attempt::Moved { actual, recovered } => (theirs, lost) = (actual, recovered),
             }
@@ -320,17 +357,17 @@ impl<O: ObjectStore> Repo<O> {
 
         // 3. Every attempt lost: an exact land's one, or all of them.
         if let Some(expected) = expected {
-            return Err(RepoError::CasMismatch {
+            return Err(Gated::Repo(RepoError::CasMismatch {
                 target: landing.req.target,
                 actual: theirs,
                 expected,
                 recovered: Box::new(lost),
-            });
+            }));
         }
-        Err(RepoError::RetryExhausted {
+        Err(Gated::Repo(RepoError::RetryExhausted {
             attempts: max_attempts,
             actual: theirs,
-        })
+        }))
     }
 
     /// Starts a land of `req` (step 1 of [the module documentation](super)): checks the request in
