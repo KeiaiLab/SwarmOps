@@ -1931,12 +1931,34 @@ fn snapshots_of(file: &Utf8Path, path: &str) -> Vec<String> {
     found
 }
 
-/// Whether `text` holds error code `code` whole: `E_IO_TRANSIENT` holds no `E_IO`.
+/// Whether `text` holds error code `code` whole, with no code character on either side:
+/// `E_IO_TRANSIENT` holds no `E_IO`, `E_MAINTENANCE_BUSY` no `E_BUSY`.
 fn holds_code(text: &str, code: &str) -> bool {
+    let in_code = |c: char| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_';
     text.match_indices(code).any(|(at, _)| {
-        let next = text[at + code.len()..].chars().next();
-        !next.is_some_and(|c| c.is_ascii_uppercase() || c == '_')
+        let before = text[..at].chars().next_back();
+        let after = text[at + code.len()..].chars().next();
+        !before.is_some_and(in_code) && !after.is_some_and(in_code)
     })
+}
+
+/// [`holds_code`] holds a code standing alone, never one inside a longer code.
+#[test]
+fn holds_code_whole() {
+    // A longer code that ends with the code holds none.
+    assert!(!holds_code("E_MAINTENANCE_BUSY", "E_BUSY"));
+    assert!(!holds_code("raised E_TYPE_CONFLICT", "E_CONFLICT"));
+
+    // The code alone, before a period, in backticks, at either end.
+    for text in [
+        "E_BUSY",
+        "is E_BUSY.",
+        "`E_BUSY`",
+        "E_BUSY first",
+        "last E_BUSY",
+    ] {
+        assert!(holds_code(text, "E_BUSY"), "{text:?}");
+    }
 }
 
 /// Checks that the documents state [`PINNED_COUNT`] and [`CODE_COUNT`]: the known limitations
