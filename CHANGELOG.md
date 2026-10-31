@@ -125,7 +125,8 @@ collects the changes on `stable` that no release holds yet, until the next relea
   grant removed while the land retried after a lost race no longer lets its next attempt land. It
   stops with the code the connection would get (`E_POLICY_DENIED` `not_granted` or
   `access_file_invalid`, or `E_AUTH`), reported on the `ng` line, and writes nothing. An attempt
-  already checked still lands (the M15 design §6).
+  already checked is not stopped by the check: it can still land, lose its race or conflict (the
+  M15 design §6).
 - `ws status`'s `behind_by` counts the changesets the target holds that the workspace's base lacks
   when the base is not on the target's history: 1 after a sync replaced the base with its
   squash-merged copy, and 0 when the target moved back onto the base's first-parent history,

@@ -66,11 +66,12 @@ The store grants nothing until its root holds an `access.toml`, read on every co
 as the serving account, beside `FORMAT` and `REPO`; no command writes it, and a change applies to
 the next connection. A push to `refs/land/<target>` also reads it before each land attempt: a
 `land` grant removed while a land retries after a lost race stops it before its next attempt,
-with the refusal the connection would get and nothing written. An attempt already checked still
-lands.
+with the refusal the connection would get and nothing written. An attempt already checked is not
+stopped by the check: it can still land, lose its race or conflict.
 
 ```toml
-# Who may do what through `swarmops serve`. Read on every connection.
+# Who may do what through `swarmops serve`.
+# Read on every connection and before each land attempt.
 version = 1
 
 [[grant]]

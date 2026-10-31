@@ -474,9 +474,9 @@ left).
 - **A land attempt checks access before it starts, not under the lock.** A push to
   `refs/land/<target>` reads `access.toml` again before each attempt and stops with the
   connection's refusal when the `land` grant is gone, writing nothing (the M15 design §6). A
-  grant removed after an attempt's check and before its publish does not stop that attempt, which
-  lands. *Open: the check under the store's lock (the M15 design §6, out of scope). Found: M15
-  Task S5b.*
+  grant removed after an attempt's check and before its publish does not stop that attempt: it
+  can still land, lose its race or conflict. *Unscheduled (the M15 design §6 leaves it out of
+  scope). Found: M15 Task S5b.*
 - **The first connection to a large store exports its whole history.** `serve` exports every
   served ref into `serve.git` before it advertises; a store whose history no export has reached
   yet pays that once, as loose objects: on 12,000 commits the first clone took 1,195.6 s,

@@ -11,8 +11,10 @@
 //! ```
 //!
 //! Each attempt of step 3 reads `access.toml` again first (the M15 design §6): a `land` grant taken
-//! away while an attempt loses its race stops the land before the next, with step 1's refusal.
-//! An attempt already judged lands even if the grant goes before its publish.
+//! away while an attempt loses its race stops the land before the next, with the connection's
+//! refusal (the codes of the hook's `open`, `no_access_file` and `access_file_invalid` among
+//! them). An attempt already checked is not stopped by the check: it can still land, lose its
+//! race or conflict.
 //!
 //! The same push again finds its key on the target's first parents and replays the land, writing
 //! nothing. receive-pack moves no ref itself, so nothing is left under `refs/land/`. The hook's
@@ -123,7 +125,8 @@ fn land(ctx: &HookCtx<'_>, command: &Command, target: &str) -> Result<Report, Op
 
 /// Step 3's land of `req` onto `target` for `who`, `access.toml` read again before each attempt
 /// (the M15 design §6): a grant taken away between attempts stops the land before the next, with
-/// the refusal step 1 gives at connection.
+/// the connection's refusal (the codes of the hook's `open`, `no_access_file` and
+/// `access_file_invalid` among them).
 fn land_onto(
     ops: &LocalOps,
     who: &Identity,
