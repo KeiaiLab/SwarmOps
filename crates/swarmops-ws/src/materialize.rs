@@ -317,10 +317,16 @@ fn moves_of(ctx: &Ctx<'_>, ws: &Workspace, edits: &[scan::Change]) -> Result<Mov
         cursor = page.cursor;
     }
 
-    // 2. The edits, which a commit makes the chain's last changeset.
+    // 2. The edits, which a commit makes the chain's last changeset: a path they delete that the
+    //    chain added is no path of the land, and one they add back that the chain deleted is
+    //    not a new one.
     for edit in edits {
         match edit.kind {
+            WsChangeKind::Added if moves.deleted.remove(&edit.path) => {}
             WsChangeKind::Added => moves.added.push(edit.path.clone()),
+            WsChangeKind::Deleted if moves.added.contains(&edit.path) => {
+                moves.added.retain(|path| *path != edit.path);
+            }
             WsChangeKind::Deleted => {
                 moves.deleted.insert(edit.path.clone());
             }
@@ -358,9 +364,12 @@ fn portable_over(
             Some(_) => named.clone(),
         };
 
-        // 3. The tree the land leaves: the paths the chain deletes are not in it.
+        // 3. The tree the land leaves: the paths the chain deletes are not in it, nor the
+        //    directories it empties.
         let mut set = case_set(&new, &roots, ws.file.all, &prefixes)?;
         set.retain(|path| !own.deleted.contains(path));
+        let emptied = emptied_dirs(&new, &set, &own.deleted, ws.file.all, &prefixes)?;
+        set.retain(|path| !emptied.contains(path));
         set.extend(named.iter().cloned());
         Some(set)
     } else {
@@ -845,6 +854,66 @@ fn case_set(
         }
     }
     Ok(set.into_iter().collect())
+}
+
+/// The directories among `set` that the deletion of `gone` leaves empty in `tree`: those above a
+/// deleted path under which the workspace holds no other file. A path that is no directory of
+/// `tree` is not among them.
+fn emptied_dirs(
+    tree: &Tree<'_>,
+    set: &[String],
+    gone: &BTreeSet<String>,
+    all: bool,
+    prefixes: &[String],
+) -> Result<HashSet<String>, OpError> {
+    // 1. The directories above a deleted path that the set names.
+    let listed: HashSet<&String> = set.iter().collect();
+    let mut candidates = BTreeSet::new();
+    for path in gone {
+        let parts: Vec<&str> = path.split('/').collect();
+        let above = (1..parts.len()).map(|n| parts[..n].join("/"));
+        candidates.extend(above.filter(|dir| listed.contains(dir)));
+    }
+
+    // 2. Those with no file left under them.
+    let mut emptied = HashSet::new();
+    for dir in candidates {
+        let kept = holds_file(tree, &dir, gone, all, prefixes)?;
+        if kept == Some(false) {
+            emptied.insert(dir);
+        }
+    }
+    Ok(emptied)
+}
+
+/// Whether directory `dir` of `tree` holds a file the workspace holds and `gone` does not
+/// delete, at any depth; none when `dir` is no directory.
+fn holds_file(
+    tree: &Tree<'_>,
+    dir: &str,
+    gone: &BTreeSet<String>,
+    all: bool,
+    prefixes: &[String],
+) -> Result<Option<bool>, OpError> {
+    let Some(entries) = tree.listing(dir)? else {
+        return Ok(None);
+    };
+    for entry in entries.iter() {
+        let path = join(dir, &entry.name);
+        if !all && !held_by(&path, prefixes) {
+            continue;
+        }
+        if entry.kind != EntryKindOut::Dir {
+            if gone.contains(&path) {
+                continue;
+            }
+            return Ok(Some(true));
+        }
+        if holds_file(tree, &path, gone, all, prefixes)? == Some(true) {
+            return Ok(Some(true));
+        }
+    }
+    Ok(Some(false))
 }
 
 /// The workspace's prefixes once `intent` is done: those it adds joined in.

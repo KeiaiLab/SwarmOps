@@ -230,7 +230,10 @@ collects the changes on `stable` that no release holds yet, until the next relea
   before `ws land` or `ws rebase` reaches the store, with `E_WS_UNPORTABLE` (`reason:
   "case_collision"`) and nothing written. The check saw only the target's paths against the files
   on disk, so the store landed or rebased first, and the files then could not follow. A path the
-  chain deletes is not in the tree it leaves, so a rename that only changes case lands
+  chain deletes is not in the tree it leaves, nor is a directory it empties, so a rename that
+  only changes case lands, of a file (`src/readme` to `src/README`) or of a directory (`src/Lib`
+  to `src/lib`); a path of the edits `-m` commits that deletes or renames one the chain added is
+  no new path of the land
   ([Troubleshooting](docs/troubleshooting.md#e_ws_unportable)).
 
 ## [0.7.0] - 2026-10-29

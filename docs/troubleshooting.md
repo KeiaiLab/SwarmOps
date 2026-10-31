@@ -1248,7 +1248,9 @@ The tree holds paths this workspace's volume cannot hold, and nothing was writte
 is `case_collision` (two paths that differ only in case, on a case-insensitive volume, both in
 `details.paths`), `windows_name` (a name Windows refuses) or `reserved_name` (a path with a
 component named `.swarmws`, the workspace's own directory, at any depth and in any ASCII case:
-`.SWARMWS/x`, `src/.swarmws/y`; `src/swarmws/y` and `src/.swarmws.bak/y` are fine). Rename the
+`.SWARMWS/x`, `src/.swarmws/y`; `src/swarmws/y` and `src/.swarmws.bak/y` are fine). A chain that
+renames a file or a directory by case (`src/Lib/a.rs` to `src/lib/a.rs`) does not collide with
+the name it replaces, and one that keeps another file under the old spelling does. Rename the
 paths in the store with a commit, or create the workspace with `--prefix` paths that leave them
 out; a `ws rebase`, `ws land` or `ws materialize` that would bring such a path in, or a `ws discard`
 or `ws resolve --take` that would restore one, refuses the same way, before the store records

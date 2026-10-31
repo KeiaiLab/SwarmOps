@@ -1793,6 +1793,147 @@ fn a_renamed_path_still_meets_the_targets() {
     assert_eq!(watched.count("land"), 0);
 }
 
+/// Renames `src/Lib/a.rs` of workspace `w` to `src/lib/a.rs`; the base also holds
+/// `src/Lib/keep.rs`, which stays, when `keep`. The base.
+fn rename_directory(f: &Fixture, keep: bool) -> String {
+    let mut files = vec![
+        Put::File("src/a.txt", "a\n"),
+        Put::File("src/Lib/a.rs", "x\n"),
+    ];
+    if keep {
+        files.push(Put::File("src/Lib/keep.rs", "k\n"));
+    }
+    let b = folding(f, &files);
+    let dir = f.beside("w");
+    std::fs::remove_file(dir.join("src/Lib/a.rs")).unwrap();
+    if !keep {
+        std::fs::remove_dir(dir.join("src/Lib")).unwrap();
+    }
+    write(&dir, "src/lib/a.rs", "x\n");
+    commit_w(f, "rename directory");
+    b
+}
+
+/// A directory renamed by case inside the chain leaves no `src/Lib` for `src/lib` to meet: it
+/// lands and rebases on a volume that folds case, the target moved on or not.
+#[test]
+fn a_case_only_rename_of_a_directory_is_not_a_collision() {
+    for moved in [false, true] {
+        for rebase in [false, true] {
+            // 1. The workspace renames the directory; the target, maybe, moves.
+            let f = Fixture::new();
+            let b = rename_directory(&f, false);
+            if moved {
+                let ahead = f.side(Some(&b), &[Put::File("src/c.txt", "c\n")]);
+                f.point("release/r", &ahead);
+            }
+
+            // 2. The call goes through.
+            let ctx = f.ctx();
+            let case = format!("moved={moved} rebase={rebase}");
+            if rebase {
+                rebase_w(&ctx).unwrap_or_else(|e| panic!("{case}: {e:?}"));
+                continue;
+            }
+            let done = swarmops_ws::land(&ctx, land_of("w", None))
+                .unwrap_or_else(|e| panic!("{case}: {e:?}"));
+            assert_eq!(done.land.status, LandStatus::Landed, "{case}");
+        }
+    }
+}
+
+/// A file under the old spelling of the directory, the target's or the base's that the chain
+/// leaves, keeps that directory: the renamed one collides with it.
+#[test]
+fn a_file_under_a_renamed_directory_still_collides() {
+    for kept in [false, true] {
+        for rebase in [false, true] {
+            // 1. The workspace renames `a.rs` into `src/lib`; `src/Lib` stays by a file of the
+            //    base or one the target adds.
+            let f = Fixture::new();
+            let b = rename_directory(&f, kept);
+            if !kept {
+                let gained = f.side(Some(&b), &[Put::File("src/Lib/b.rs", "b\n")]);
+                f.point("release/r", &gained);
+            }
+            let watched = Watched::new(&f.ops);
+            let ctx = f.ctx_over(&watched);
+
+            // 2. Refused as a case collision, before any store write.
+            let refused = if rebase {
+                rebase_w(&ctx).unwrap_err()
+            } else {
+                swarmops_ws::land(&ctx, land_of("w", None)).unwrap_err()
+            };
+            let case = format!("kept={kept} rebase={rebase}");
+            assert_eq!(refused.code, "E_WS_UNPORTABLE", "{case}: {refused:?}");
+            assert_eq!(refused.details["reason"], "case_collision", "{case}");
+            assert_eq!(watched.count("land") + watched.count("rebase"), 0, "{case}");
+        }
+    }
+}
+
+/// A path the chain adds and the edits `-m` commits then rename by case is one new path, the
+/// edit's: the target moved on or not, the call goes through.
+#[test]
+fn an_edit_that_renames_a_chain_add_is_not_a_collision() {
+    for moved in [false, true] {
+        for rebase in [false, true] {
+            // 1. The chain adds `src/readme`; the files rename it to `src/README`, uncommitted.
+            let f = Fixture::new();
+            let b = folding(&f, &[Put::File("src/a.txt", "a\n")]);
+            let dir = f.beside("w");
+            write(&dir, "src/readme", "r\n");
+            commit_w(&f, "add");
+            std::fs::remove_file(dir.join("src/readme")).unwrap();
+            write(&dir, "src/README", "r\n");
+            if moved {
+                let ahead = f.side(Some(&b), &[Put::File("src/c.txt", "c\n")]);
+                f.point("release/r", &ahead);
+            }
+
+            // 2. The call commits the rename and goes through.
+            let ctx = f.ctx();
+            let case = format!("moved={moved} rebase={rebase}");
+            if rebase {
+                rebase_settling(&ctx).unwrap_or_else(|e| panic!("{case}: {e:?}"));
+                continue;
+            }
+            let done = swarmops_ws::land(&ctx, land_with_message())
+                .unwrap_or_else(|e| panic!("{case}: {e:?}"));
+            assert_eq!(done.land.status, LandStatus::Landed, "{case}");
+        }
+    }
+}
+
+/// A new path of the chain that the target's meets by case, deleted by the edits `-m` commits,
+/// leaves nothing to collide: the call goes through.
+#[test]
+fn an_edit_that_deletes_a_colliding_add_goes_through() {
+    for rebase in [false, true] {
+        // 1. The chain adds `src/X`, the target `src/x`; the files delete `src/X`, uncommitted.
+        let f = Fixture::new();
+        let b = folding(&f, &[Put::File("src/a.txt", "a\n")]);
+        let dir = f.beside("w");
+        write(&dir, "src/X", "mine\n");
+        commit_w(&f, "add");
+        std::fs::remove_file(dir.join("src/X")).unwrap();
+        write(&dir, "src/a.txt", "edited\n");
+        let gained = f.side(Some(&b), &[Put::File("src/x", "theirs\n")]);
+        f.point("release/r", &gained);
+
+        // 2. The call goes through.
+        let ctx = f.ctx();
+        if rebase {
+            rebase_settling(&ctx).unwrap_or_else(|e| panic!("rebase: {e:?}"));
+            continue;
+        }
+        let done =
+            swarmops_ws::land(&ctx, land_with_message()).unwrap_or_else(|e| panic!("land: {e:?}"));
+        assert_eq!(done.land.status, LandStatus::Landed);
+    }
+}
+
 /// The edits `-m` is about to commit are judged with the chain's before the store is called: a
 /// new path of them that meets the target's by case refuses the call, and nothing is written.
 #[test]
