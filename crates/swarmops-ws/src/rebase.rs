@@ -3,8 +3,8 @@
 //!
 //! ```text
 //!  start     lock → a land cut short that the target does not hold: its record dropped
+//!            → names onto's head holds that the files cannot: E_WS_UNPORTABLE, nothing written
 //!            → edits committed (-m) or E_WS_DIRTY → journal/pending.json {key} (WS1)
-//!            → names onto's head holds that the files cannot: E_WS_UNPORTABLE, the record removed
 //!            → rebase{head, base, onto, key}
 //!              ├─ H' → files from `materialized` to H' with workspace.json {head: H', base: T,
 //!              │       onto: T} (WS2) → the pending record removed
@@ -93,8 +93,10 @@ fn start(
         );
     }
 
-    // 2. A land cut short that its target no longer holds goes.
+    // 2. A land cut short that its target no longer holds goes; the names onto's head holds
+    //    that the files cannot are refused, before anything is settled or recorded.
     let landed_key = take_over(ctx, ws, onto)?;
+    check_onto(ctx, ws, onto)?;
 
     // 3. A rebase cut short: its key; else the edits settled first.
     let cut = cut_short(ctx, ws, PendingOp::Rebase, STARTING)?;
@@ -141,6 +143,13 @@ fn take_over(ctx: &Ctx<'_>, ws: &Workspace, onto: &str) -> Result<Option<String>
         .filter(|_| cut.state == REBASING && target == onto))
 }
 
+/// Refuses a rebase of workspace `ws` onto ref `onto` whose head holds names the files cannot,
+/// before the store rebases and before a pending record is written: nothing is left to replay.
+pub(crate) fn check_onto(ctx: &Ctx<'_>, ws: &Workspace, onto: &str) -> Result<(), OpError> {
+    let head = ctx.store.resolve_rev(ResolveRevReq::new(onto))?;
+    materialize::preflight(ctx, ws, &head.id)
+}
+
 /// Continues workspace `ws`'s rebase with its resolutions: refused while a conflict is
 /// unresolved.
 fn resume(ctx: &Ctx<'_>, ws: &mut Workspace) -> Result<WsRebaseResp, OpError> {
@@ -162,7 +171,11 @@ fn resume(ctx: &Ctx<'_>, ws: &mut Workspace) -> Result<WsRebaseResp, OpError> {
         .with_hint("edit them, then swarmops ws resolve <path>…"));
     }
 
-    // 2. A continue cut short: its key; else no edit beside the resolved paths.
+    // 2. The names the target holds that the files cannot: refused before anything is recorded.
+    let target = ws.file.target.clone();
+    check_onto(ctx, ws, &target)?;
+
+    // 3. A continue cut short: its key; else no edit beside the resolved paths.
     let resolved = resolve::read(ctx, ws)?;
     let cut = cut_short(ctx, ws, PendingOp::Rebase, CONTINUING)?;
     if cut.is_none() {
@@ -170,10 +183,9 @@ fn resume(ctx: &Ctx<'_>, ws: &mut Workspace) -> Result<WsRebaseResp, OpError> {
         settle_edits(ctx, ws, None, &conflicted)?;
     }
 
-    // 3. The resolutions, the pending record (WS1), the call.
+    // 4. The resolutions, the pending record (WS1), the call.
     let resolutions = resolutions(ctx, ws, &resolved, &against)?;
     let key = cut.map_or_else(new_key, |cut| cut.key);
-    let target = ws.file.target.clone();
     let record = record(PendingOp::Rebase, &key, None, ws, &target, CONTINUING);
     pending::write_pending(ctx.fs.as_ref(), &ws.dir, &record)?;
     let done = rebase_in(ctx, ws, &target, &key, Some(resolutions));
@@ -218,11 +230,7 @@ pub(crate) fn rebase_in(
     key: &str,
     resolutions: Option<ResolutionsInput>,
 ) -> Result<RebaseResp, OpError> {
-    // 1. Names the target holds that the files cannot: refused before the store rebases.
-    let head = ctx.store.resolve_rev(ResolveRevReq::new(onto))?;
-    materialize::preflight(ctx, ws, &head.id)?;
-
-    // 2. The store's rebase of the chain from the base.
+    // 1. The store's rebase of the chain from the base.
     let mut req = RebaseReq::new(ws.file.head.as_str());
     req.base = Some(ws.file.base.as_str().into());
     onto.clone_into(&mut req.onto);
@@ -238,7 +246,7 @@ pub(crate) fn rebase_in(
         Err(e) => return Err(e),
     };
 
-    // 3. The workspace moved to it: files and state in one replace of workspace.json (WS2).
+    // 2. The workspace moved to it: files and state in one replace of workspace.json (WS2).
     let rebasing = matches!(ws.file.state, State::Rebasing { .. });
     ws.file.head.clone_from(&done.changeset);
     ws.file.base.clone_from(&done.onto);
@@ -247,7 +255,7 @@ pub(crate) fn rebase_in(
     ws.file.state = State::Clean;
     move_to(ctx, ws, &done.changeset)?;
 
-    // 4. A rebase in progress is over: its records go.
+    // 3. A rebase in progress is over: its records go.
     if rebasing {
         remove_record(ctx, ws, CONFLICTS_JSON)?;
         remove_record(ctx, ws, RESOLVED_JSON)?;
@@ -295,7 +303,6 @@ pub(crate) fn refused(e: &OpError) -> bool {
         ErrorCode::RevNotFound,
         ErrorCode::NothingToLand,
         ErrorCode::CheckFailed,
-        ErrorCode::WsUnportable,
     ]
     .iter()
     .any(|code| e.code == code.as_str())

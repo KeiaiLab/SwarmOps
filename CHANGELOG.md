@@ -149,7 +149,10 @@ collects the changes on `stable` that no release holds yet, until the next relea
   rebases, and a refused rebase leaves no pending record. A target holding a path with a
   `.swarmws` component (`src/.SwarmWs/z`) was rebased in the store, answered `E_WS_UNPORTABLE`
   and kept its record, so `ws land` and `ws rebase --abort` then answered `E_INVALID_ARG`; now no
-  operation is recorded and the workspace is as it was (the M15 design §5).
+  operation is recorded and the workspace is as it was (the M15 design §5). A target that gains
+  such a path between the check and the store's call keeps the record the refusal leaves, so a
+  re-run replays the same rebase and makes no second one; `ws land --check` and `ws rebase
+  --continue` likewise.
 - `ws land` checks the paths its target gained against the workspace's volume before the store
   lands anything. A target that gained a path with a `.swarmws` component (`src/.SwarmWs/z`) moved
   to the landed changeset, and then `ws land` answered `E_WS_UNPORTABLE` "nothing was written"

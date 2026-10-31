@@ -31,6 +31,8 @@ struct Hooked<'a> {
     inner: &'a dyn StoreOps,
     /// Run once, before the first `land` reaches the store.
     before_land: Mutex<Option<Box<dyn FnOnce() + Send + 'a>>>,
+    /// Run once, before the first `rebase` reaches the store.
+    before_rebase: Mutex<Option<Box<dyn FnOnce() + Send + 'a>>>,
     /// The next `land` fails before the store sees it.
     crash_before_land: AtomicBool,
     /// The next `land` is recorded, then fails.
@@ -49,6 +51,7 @@ impl<'a> Hooked<'a> {
         Hooked {
             inner,
             before_land: Mutex::new(None),
+            before_rebase: Mutex::new(None),
             crash_before_land: AtomicBool::new(false),
             crash_after_land: AtomicBool::new(false),
             crash_after_rebase: AtomicBool::new(false),
@@ -102,6 +105,10 @@ impl StoreOps for Hooked<'_> {
     }
 
     fn rebase(&self, who: &Identity, req: RebaseReq) -> Result<RebaseResp, OpError> {
+        let hook = self.before_rebase.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook();
+        }
         let done = self.inner.rebase(who, req)?;
         self.rebases.lock().unwrap().push(done.clone());
         if self.crash_after_rebase.swap(false, Ordering::SeqCst) {
@@ -1306,4 +1313,51 @@ fn a_rebase_onto_a_case_collision_records_nothing() {
 /// The head of `name`.
 fn main_or(f: &Fixture, name: &str) -> String {
     f.ops.resolve_rev(ResolveRevReq::new(name)).unwrap().id
+}
+
+/// A target that gains a reserved name between the preflight and the store's rebase (a race the
+/// preflight cannot see): the store has rebased, the files cannot follow, and the record stays,
+/// so a re-run replays the same rebase instead of making another. `ws rebase` and a checked land
+/// alike.
+#[cfg(unix)]
+#[test]
+fn a_refusal_after_the_store_rebase_keeps_the_record() {
+    for checked in [false, true] {
+        // 1. A workspace one commit above `b`; the target a commit ahead, and about to gain a
+        //    reserved name as the store is called.
+        let f = Fixture::new();
+        let (_, b, _) = on_release(&f);
+        write(&f.beside("w"), "src/a.txt", "mine\n");
+        let c = f.side(Some(&b), &[Put::File("src/c.txt", "c\n")]);
+        f.point("release/r", &c);
+        let store = Hooked::new(&f.ops);
+        let fixture = &f;
+        let racer = c.clone();
+        *store.before_rebase.lock().unwrap() = Some(Box::new(move || {
+            let d = fixture.side(Some(&racer), &[Put::File("src/.swarmws/x", "z\n")]);
+            fixture.point("release/r", &d);
+        }));
+        let ctx = f.ctx_over(&store);
+        let dir = f.beside("w");
+
+        // 2. The call is refused as unportable, after the store's rebase.
+        let refused = if checked {
+            swarmops_ws::land(&ctx, land_of("w", Some(&sh("true", &[])))).unwrap_err()
+        } else {
+            rebase_w(&ctx).unwrap_err()
+        };
+        assert_eq!(refused.code, "E_WS_UNPORTABLE", "{checked}: {refused:?}");
+        assert_eq!(store.rebases().len(), 1, "{checked}");
+
+        // 3. The record stays; a re-run is refused before the store, and adds no rebase.
+        assert!(pending_in(&dir).exists(), "{checked}: the record went");
+        let again = if checked {
+            swarmops_ws::land(&ctx, land_of("w", Some(&sh("true", &[])))).unwrap_err()
+        } else {
+            rebase_w(&ctx).unwrap_err()
+        };
+        assert_eq!(again.code, "E_WS_UNPORTABLE", "{checked}: {again:?}");
+        assert_eq!(store.rebases().len(), 1, "{checked}: a second rebase");
+        assert!(pending_in(&dir).exists(), "{checked}");
+    }
 }

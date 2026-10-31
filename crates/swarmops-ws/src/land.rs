@@ -258,14 +258,17 @@ impl Landing<'_, '_> {
         rebase_key: &str,
         attempt: u32,
     ) -> Result<(), OpError> {
-        // 1. The rebase, its key durable first (WS1).
+        // 1. The names the target holds that the files cannot: refused before the key is recorded.
         let ctx = self.ctx;
-        self.write(Some(rebase_key), attempt, REBASING)?;
         let target = self.target.clone();
+        rebase::check_onto(ctx, &self.ws, &target)?;
+
+        // 2. The rebase, its key durable first (WS1).
+        self.write(Some(rebase_key), attempt, REBASING)?;
         let done = rebase::rebase_in(ctx, &mut self.ws, &target, rebase_key, None);
         let done = rebase::finish_call(ctx, &self.ws, done)?;
 
-        // 2. The check on it: the request's command, else the repository's there.
+        // 3. The check on it: the request's command, else the repository's there.
         let argv = match &check.argv {
             Some(argv) => Ok(argv.clone()),
             None => check::configured(ctx.store, &done.changeset)?.ok_or_else(check::missing),
@@ -278,7 +281,7 @@ impl Landing<'_, '_> {
         let ran = argv.and_then(|argv| check::run(&self.ws, &argv, &subject, check.timeout));
         rebase::finish_call(ctx, &self.ws, ran)?;
 
-        // 3. The land next, from the rebased head.
+        // 4. The land next, from the rebased head.
         self.write(Some(rebase_key), attempt, LANDING)
     }
 
