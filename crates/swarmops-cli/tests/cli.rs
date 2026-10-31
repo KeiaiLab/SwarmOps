@@ -1617,7 +1617,7 @@ fn cat_truncates_to_max_bytes() {
 }
 
 /// The codes of [`NOT_RAISED`] no golden pins: no operation raises them yet.
-const UNPINNED: &[&str] = &["E_REF_NOT_FOUND", "E_WS_STALE"];
+const UNPINNED: &[&str] = &["E_REF_NOT_FOUND"];
 
 /// Codes [`error_codes_reach_the_cli`] does not raise, and why: each names the test whose golden
 /// pins it, but those of [`UNPINNED`].
@@ -1674,10 +1674,6 @@ const NOT_RAISED: &[(&str, &str)] = &[
     (
         "E_REMOTE_NOT_FOUND",
         "needs remotes.toml: remote_acceptance::remote_error_codes_golden pins it",
-    ),
-    (
-        "E_WS_STALE",
-        "raised by the M15 workspace refusals, pinned when they land",
     ),
 ];
 
@@ -2118,6 +2114,59 @@ fn ws_conflict(s: &mut Session, store: &str, c1: &str, tmp: &str) {
     );
 }
 
+/// Workspace `w8` of `release/stale`, made on a changeset one above `c1` and left behind when
+/// the ref moves back to `c1`: its land is `E_WS_STALE`.
+fn ws_stale(s: &mut Session, store: &str, c1: &str, tmp: &str) {
+    let on = |args: &[&str]| -> Vec<String> {
+        ["--repo", store, "--as", AGENT]
+            .iter()
+            .chain(args)
+            .map(|arg| (*arg).to_owned())
+            .collect()
+    };
+    let w8 = format!("{tmp}/w8");
+    let run = |s: &mut Session, args: &[&str]| {
+        let line = on(args);
+        let line: Vec<&str> = line.iter().map(String::as_str).collect();
+        let done = s.run(&line);
+        assert_eq!(done.exit, 0, "{args:?}: {}", done.json);
+        done
+    };
+
+    // 1. `release/stale` one commit above `c1`, and a workspace of it.
+    let ahead = json!([{"path": "src/ahead.rs", "op": "put", "content": {"inline": "ahead\n"}}]);
+    let changes = s.file("ws-stale-ahead.json", &ahead.to_string());
+    run(s, &["ref", "set", "release/stale", c1, "--create"]);
+    let args = [
+        "commit",
+        "-m",
+        "ahead",
+        "--parent",
+        c1,
+        "--changes",
+        &changes,
+    ];
+    let args = [&args[..], &["--advance", "release/stale"]].concat();
+    let ahead = run(s, &args);
+    let ahead = s.name_at(&ahead, "/result/changeset", "stale_base");
+    run(
+        s,
+        &[
+            "ws",
+            "create",
+            "w8",
+            "--path",
+            &w8,
+            "--base",
+            "release/stale",
+            "--all",
+        ],
+    );
+
+    // 2. The ref moved back: the workspace's base is off its history.
+    run(s, &["ref", "set", "release/stale", c1, "--expect", &ahead]);
+}
+
 /// The failing commands of the workspaces (M5), each with the code it must raise, and the
 /// command that meets a held lock. The workspaces they need are made here, `main` of `store`
 /// being `c1`; two goldens of `E_INVALID_ARG` (H5's refusals, `details.missing` `rebase` and
@@ -2152,6 +2201,7 @@ fn ws_cases(s: &mut Session, store: &str, c1: &str) -> (Vec<(&'static str, Vec<S
     fs::write(format!("{w7}/notes.txt"), "off the prefixes\n").unwrap();
 
     ws_conflict(s, store, c1, &tmp);
+    ws_stale(s, store, c1, &tmp);
 
     let mut cases = vec![
         (
@@ -2196,6 +2246,7 @@ fn ws_cases(s: &mut Session, store: &str, c1: &str) -> (Vec<(&'static str, Vec<S
             "E_WS_OUTSIDE_PREFIXES",
             on(&["ws", "commit", "--ws", "w7", "-m", "notes"]),
         ),
+        ("E_WS_STALE", on(&["ws", "land", "--ws", "w8"])),
     ];
 
     // 3. A changeset with a top-level `.swarmws`, the workspace's own directory: a workspace of

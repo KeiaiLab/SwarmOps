@@ -370,3 +370,40 @@ fn markers_follow_the_reports_hunk_order() {
         expected
     );
 }
+
+/// `ws rebase` is the way out of `E_WS_STALE`: it moves the workspace onto the target's head,
+/// and the next land goes through.
+#[test]
+fn ws_rebase_updates_a_stale_workspace() {
+    // 1. A workspace on `release/r` at `b` with a commit; the target moved back to `p`.
+    let f = Fixture::new();
+    let p = f.commit(None, &[Put::File("src/a.txt", "a\n")]);
+    let b = f.side(Some(&p), &[Put::File("src/b.txt", "b\n")]);
+    f.point("release/r", &b);
+    f.create("w", "release/r", &[]);
+    let dir = f.beside("w");
+    write(&dir, "src/a.txt", "mine\n");
+    commit_all(&f, "w", "mine");
+    f.point("release/r", &p);
+    let mut land = swarmops_api::WsLandReq::new("w".to_owned());
+    land.status_after = StatusAfter::None;
+    let refused = swarmops_ws::land(&f.ctx(), land.clone()).unwrap_err();
+    assert_eq!(refused.code, "E_WS_STALE", "{refused:?}");
+
+    // 2. Rebased onto `release/r`: the base is its head.
+    let mut req = rebase_of("w", WsRebaseAction::Start);
+    req.onto = "release/r".to_owned();
+    let done = swarmops_ws::rebase(&f.ctx(), req).unwrap();
+    assert_eq!(done.onto, p);
+    let saved = state::read(&RealFs::new(), &dir).unwrap();
+    assert_eq!(saved.base, p);
+    assert_eq!(saved.target, "release/r");
+
+    // 3. The land proceeds and moves `release/r` to what it landed.
+    let landed = swarmops_ws::land(&f.ctx(), land).unwrap();
+    let head = f
+        .ops
+        .resolve_rev(swarmops_api::ResolveRevReq::new("release/r"));
+    assert_eq!(head.unwrap().id, landed.land.landed);
+    assert_eq!(tree_of(&dir), [file("src/a.txt", "mine\n")]);
+}

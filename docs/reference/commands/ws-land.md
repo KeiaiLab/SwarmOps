@@ -16,7 +16,7 @@ identity_required: false
 mcp_tool: "ws_land"
 envelope_op: "ws_land"
 exit_codes: [0, 1, 2]
-errors: [E_INVALID_ARG, E_CHECK_FAILED]
+errors: [E_INVALID_ARG, E_WS_STALE, E_CHECK_FAILED]
 syntax: "swarmops ws land [OPTIONS] [-- <ARGV>...]"
 ```
 
@@ -131,7 +131,9 @@ swarmops --repo [tmp]/store --as agent/worker-17 ws land --ws w3 --mode exact
   "meta": {
     "repo": "[tmp]/store",
     "elapsed_ms": "[elapsed_ms]",
-    "resolved": {},
+    "resolved": {
+      "main": "[c1]"
+    },
     "auth": "trust"
   }
 }
@@ -164,6 +166,7 @@ Exit codes:
 ## Errors
 
 - [`E_INVALID_ARG`](../errors.md#e_invalid_arg) (exit 2): A malformed argument or request, including a command-line usage error.
+- [`E_WS_STALE`](../errors.md#e_ws_stale) (exit 1): `ws land` found the workspace's base gone from its target's history (`details.target`, `base`, `head`; `base_op`, the operation that moved the target to the base; `moved_op`, the latest that moved it to `head`, or null when not found).
 - [`E_CHECK_FAILED`](../errors.md#e_check_failed) (exit 1): A workspace's check or bootstrap command failed or ran past its time (`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its output, `log`, `changeset`).
 
 Any command that opens a store may also fail with a store error, such as [`E_NOT_A_REPO`](../errors.md#e_not_a_repo), [`E_IO`](../errors.md#e_io) or [`E_STORE_CORRUPT`](../errors.md#e_store_corrupt); a command line the grammar refuses is [`E_INVALID_ARG`](../errors.md#e_invalid_arg) (exit 2).

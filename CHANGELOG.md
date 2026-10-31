@@ -66,11 +66,21 @@ collects the changes on `stable` that no release holds yet, until the next relea
   ([Install from a clone](docs/operate/install-and-upgrade.md#install-from-a-clone)).
 - Two error codes in the schema, exit 1, not retryable: `E_WS_OUTSIDE_PREFIXES` (a sparse
   workspace's edits outside its prefixes, raised by `ws commit` and `ws land`) and `E_WS_STALE` (a
-  workspace's base gone from its target's history, not raised yet), the workspace refusals of the
-  M15 design §5 ([Troubleshooting](docs/troubleshooting.md#e_ws_outside_prefixes)).
-- Golden envelopes pin 53 of the 55 error codes, seven more than before: `E_AMBIGUOUS_ID`,
+  workspace's base gone from its target's history, raised by `ws land`), the workspace refusals of
+  the M15 design §5 ([Troubleshooting](docs/troubleshooting.md#e_ws_outside_prefixes)).
+- `ws land` refuses a workspace whose base left its target's history with `E_WS_STALE`, and
+  changes nothing: an `op undo`, a restore, a `ref set` or a sync moved the target back, or
+  rewrote it, so that landing would carry the changes the target dropped along (the M15 design
+  §5). It is checked before `E_WS_DIRTY`, after `E_WS_OUTSIDE_PREFIXES`. `details` names the
+  `target`, the `base`, the target's `head`, `base_op` (the operation that moved the target to the
+  base) and `moved_op` (the latest that moved it to `head`, or `null`); `swarmops ws rebase`
+  moves the workspace onto the head. A land onto another `--target`, `ws commit`, `ws status`
+  and `ws rebase` are not refused; a base the check cannot place (a first-parent walk of more
+  than 10,000 commits, or no operation in the last 10,000 that moved the target to it) lands as
+  before ([Troubleshooting](docs/troubleshooting.md#e_ws_stale)).
+- Golden envelopes pin 54 of the 55 error codes, eight more than before: `E_AMBIGUOUS_ID`,
   `E_IO_TRANSIENT`, `E_INTERNAL`, `E_BUSY`, `E_CAS_RETRY_EXHAUSTED`, `E_UNKNOWN_PARENT` as an
-  error object, and `E_WS_OUTSIDE_PREFIXES`.
+  error object, `E_WS_OUTSIDE_PREFIXES` and `E_WS_STALE`.
 
 ### Changed
 

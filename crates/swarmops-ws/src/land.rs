@@ -5,7 +5,8 @@
 //!  refusals before the lock: an edit off a sparse workspace's prefixes
 //!    (E_WS_OUTSIDE_PREFIXES, before any store call but the workspace's open), no command for
 //!    --check (E_INVALID_ARG missing "check")
-//!  lock → edits committed (-m) or E_WS_DIRTY → the land key K
+//!  lock → a base the target left, on the workspace's own target (E_WS_STALE, nothing written)
+//!       → edits committed (-m) or E_WS_DIRTY → the land key K
 //!
 //!  without --check (mode merge by default):
 //!    pending {K, landing} → land{head, base, key: K[, expect_target: onto]} → files to L
@@ -40,6 +41,7 @@ use crate::pending::{self, Pending, PendingOp};
 use crate::rebase;
 use crate::scan;
 use crate::state::State;
+use crate::status::{self, Stale};
 use crate::workspace::{self, Locate, Workspace};
 use crate::{Ctx, after};
 
@@ -134,7 +136,15 @@ pub fn land(ctx: &Ctx<'_>, req: WsLandReq) -> Result<WsLandResp, OpError> {
         .with_hint("swarmops ws rebase --continue, or swarmops ws rebase --abort"));
     }
 
-    // 3. A land cut short: its keys; else the edits settled and something to land.
+    // 3. A base the target left: refused before anything is settled or landed.
+    if target == ws.file.target {
+        let left = status::stale(ctx.store, &target, &ws.file.base)?;
+        if let Some(stale) = left {
+            return Err(stale_error(&target, &ws.file.base, &stale));
+        }
+    }
+
+    // 4. A land cut short: its keys; else the edits settled and something to land.
     let cut = cut_land(ctx, &ws)?;
     if cut.is_none() {
         rebase::settle_edits(ctx, &mut ws, message.clone(), &BTreeSet::new())?;
@@ -146,7 +156,7 @@ pub fn land(ctx: &Ctx<'_>, req: WsLandReq) -> Result<WsLandResp, OpError> {
         }
     }
 
-    // 4. The land, checked or not; then the status after it.
+    // 5. The land, checked or not; then the status after it.
     let key = (cut.as_ref().map(|cut| cut.key.clone()))
         .or(idempotency_key)
         .unwrap_or_else(rebase::new_key);
@@ -372,6 +382,27 @@ fn backoff(attempt: u32, seed: &[u8]) -> Duration {
     let [a, b, c, d, ..] = *hasher.finalize().as_bytes();
     let unit = f64::from(u32::from_le_bytes([a, b, c, d])) / 4_294_967_296.0;
     step.mul_f64(0.5 + unit)
+}
+
+/// `E_WS_STALE`: the workspace's `base` is gone from the history of `target`, which `stale`
+/// says moved off it. Nothing was changed; `ws rebase` brings the workspace onto the target.
+fn stale_error(target: &str, base: &str, stale: &Stale) -> OpError {
+    OpError::new(
+        ErrorCode::WsStale,
+        format!(
+            "the workspace's base {base} is no longer on {target}'s history: \
+             {target} moved to {head}",
+            head = stale.head,
+        ),
+    )
+    .with_details(Map::from_iter([
+        ("target".to_owned(), Value::from(target)),
+        ("base".to_owned(), Value::from(base)),
+        ("head".to_owned(), Value::from(stale.head.as_str())),
+        ("base_op".to_owned(), Value::from(stale.base_op)),
+        ("moved_op".to_owned(), Value::from(stale.moved_op)),
+    ]))
+    .with_hint("swarmops ws rebase")
 }
 
 /// `E_INVALID_ARG{details.missing: "rebase"}`: an exact land of a workspace not rebased onto

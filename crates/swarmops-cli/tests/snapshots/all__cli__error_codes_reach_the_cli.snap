@@ -1394,6 +1394,119 @@ expression: s.transcript()
     }
   },
   {
+    "args": "--repo [tmp]/store --as agent/worker-17 ref set release/stale [c1] --create",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "ref_set",
+      "api": 1,
+      "result": {
+        "name": "release/stale",
+        "new": "[c1]",
+        "already_applied": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m ahead --parent [c1] --changes [tmp]/ws-stale-ahead.json --advance release/stale",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[stale_base]",
+        "parent": "[c1]",
+        "root": "[id19]",
+        "files_changed": 1,
+        "blobs_written": 1,
+        "advanced": {
+          "name": "release/stale",
+          "old": "[c1]",
+          "new": "[stale_base]",
+          "already_applied": false
+        },
+        "replayed": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ws create w8 --path [tmp]/w8 --base release/stale --all",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "ws_create",
+      "api": 1,
+      "result": {
+        "name": "w8",
+        "path": "[tmp]/w8",
+        "base": "[stale_base]",
+        "head": "[stale_base]",
+        "all": true,
+        "created": true,
+        "status_after": {
+          "name": "w8",
+          "base": "[stale_base]",
+          "head": "[stale_base]",
+          "main": "[stale_base]",
+          "behind_by": 0,
+          "state": "clean",
+          "changes": [],
+          "truncated": false
+        }
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[stale_base]": "[stale_base]",
+          "release/stale": "[stale_base]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ref set release/stale [c1] --expect [stale_base]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "ref_set",
+      "api": 1,
+      "result": {
+        "name": "release/stale",
+        "old": "[stale_base]",
+        "new": "[c1]",
+        "already_applied": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]",
+          "[stale_base]": "[stale_base]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
     "args": "--repo [tmp]/store --as agent/worker-17 commit -m reserved --changes [tmp]/reserved.json --parent [c1]",
     "exit": 0,
     "stdout": {
@@ -1403,7 +1516,7 @@ expression: s.transcript()
       "result": {
         "changeset": "[reserved]",
         "parent": "[c1]",
-        "root": "[id19]",
+        "root": "[id20]",
         "files_changed": 1,
         "blobs_written": 1,
         "replayed": false
@@ -1601,7 +1714,9 @@ expression: s.transcript()
       "meta": {
         "repo": "[tmp]/store",
         "elapsed_ms": "[elapsed_ms]",
-        "resolved": {},
+        "resolved": {
+          "main": "[c1]"
+        },
         "auth": "trust"
       }
     }
@@ -1693,6 +1808,38 @@ expression: s.transcript()
         "elapsed_ms": "[elapsed_ms]",
         "resolved": {
           "[c1]": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ws land --ws w8",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "ws_land",
+      "api": 1,
+      "error": {
+        "code": "E_WS_STALE",
+        "message": "the workspace's base [stale_base] is no longer on release/stale's history: release/stale moved to [c1]",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "base": "[stale_base]",
+          "base_op": 11,
+          "head": "[c1]",
+          "moved_op": 12,
+          "target": "release/stale"
+        },
+        "hint": "swarmops ws rebase"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]",
+          "release/stale": "[c1]"
         },
         "auth": "trust"
       }
@@ -1823,7 +1970,7 @@ expression: s.transcript()
         "retryable": false,
         "exit": 1,
         "details": {
-          "changesets_checked": 8,
+          "changesets_checked": 9,
           "findings": [
             {
               "changeset": "[c1]",
@@ -1832,7 +1979,7 @@ expression: s.transcript()
             }
           ],
           "found": 1,
-          "objects_checked": 31,
+          "objects_checked": 35,
           "problems": [
             "object [id10] is missing; changeset [c1] references it"
           ],

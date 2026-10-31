@@ -161,8 +161,8 @@ The exit code is `error.exit`, and 0 on success:
 | 5 | An identity or policy requirement refused it. | `E_IDENTITY_REQUIRED`, `E_AUTH`, `E_POLICY_DENIED`, `E_REMOTE_REJECTED` |
 | 6 | Something it names does not exist. | `E_NOT_A_REPO`, `E_REV_NOT_FOUND`, `E_PATH_NOT_FOUND`, `E_UNKNOWN_PARENT`, `E_REF_NOT_FOUND`, `E_OP_NOT_FOUND`, `E_GIT_NOT_A_REPO`, `E_GIT_REF_NOT_FOUND`, `E_REMOTE_NOT_FOUND`, `E_WS_NOT_FOUND` |
 
-`E_REF_NOT_FOUND` and `E_WS_STALE` are not raised yet; they are in the schema so that a script can
-match them before any operation raises them
+`E_REF_NOT_FOUND` is not raised yet; it is in the schema so that a script can match it before any
+operation raises it
 ([Troubleshooting](../troubleshooting.md#codes-not-raised-yet)). `ErrorCode` in
 [crates/swarmops-api/src/error.rs](../../crates/swarmops-api/src/error.rs) is the one table of
 each code's exit and `retryable`.

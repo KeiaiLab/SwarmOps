@@ -39,7 +39,7 @@ the process aborts, and says why on stderr ([The server exits](#the-server-exits
 ## Every error code
 
 `ErrorCode` in `crates/swarmops-api/src/error.rs` is the one table of codes, exit codes and
-retry advice; this is that table. Two codes are in the schema but no operation raises them yet.
+retry advice; this is that table. One code is in the schema but no operation raises it yet.
 
 | Code | Exit | Retryable | Means | Section |
 | --- | --- | --- | --- | --- |
@@ -86,7 +86,7 @@ retry advice; this is that table. Two codes are in the schema but no operation r
 | `E_MARKERS_PRESENT` | 1 | no | `ws resolve` found a conflict marker line in a file. | [Workspaces](#e_markers_present) |
 | `E_WS_UNPORTABLE` | 1 | no | The tree holds paths the workspace's volume cannot hold. | [Workspaces](#e_ws_unportable) |
 | `E_WS_OUTSIDE_PREFIXES` | 1 | no | A sparse workspace holds edits outside its prefixes. | [Workspaces](#e_ws_outside_prefixes) |
-| `E_WS_STALE` | 1 | no | Not raised yet: a workspace's base left its target's history. | [Workspaces](#e_ws_stale) |
+| `E_WS_STALE` | 1 | no | `ws land` found a workspace's base gone from its target's history. | [Workspaces](#e_ws_stale) |
 | `E_CHECK_FAILED` | 1 | no | A workspace's check or bootstrap command failed or timed out. | [Workspaces](#e_check_failed) |
 | `E_REF_NOT_FOUND` | 6 | no | Not raised yet. | [Codes not raised yet](#codes-not-raised-yet) |
 | `E_AUTH` | 5 | no | `swarmops serve` names no caller, or no grant of the store's `access.toml` names it. | [Serve over ssh](operate/serve-over-ssh.md#refusals-a-client-sees) |
@@ -1268,11 +1268,17 @@ first ([known limitations](known-limitations.md#workspaces)).
 
 ### `E_WS_STALE`
 
-Not raised yet; the schema holds it so that a client can match it now. `ws land` will refuse a
-workspace whose base left its target's history (an `op undo`, a restore, a `ref set` or a sync
-moved the target back), changing nothing: `details` names the `target`, the `base`, the target's
+`ws land` refuses a workspace whose base left its target's history (an `op undo`, a restore, a
+`ref set` or a sync moved the target back, or rewrote it), changing nothing: landing would carry
+the changes the target dropped along. `details` names the `target`, the `base`, the target's
 `head`, `base_op` (the operation that moved the target to the base) and `moved_op` (the latest
-that moved it to `head`, or `null`). `swarmops ws rebase` moves the workspace onto the head.
+that moved it to `head`, or `null`). `swarmops ws rebase` moves the workspace onto the head; land
+again. The refusal comes after `E_WS_OUTSIDE_PREFIXES` and before `E_WS_DIRTY`.
+
+The check runs for a land onto the workspace's own target, and lets a land through that it cannot
+place: a target whose first-parent history is longer than 10,000 commits, or a base with no
+operation among the last 10,000 that moved the target to it. `ws commit`, `ws status` and
+`ws rebase` do not refuse a stale base ([known limitations](known-limitations.md#workspaces)).
 
 ### `E_CHECK_FAILED`
 
@@ -1290,5 +1296,3 @@ operation raises it: no operation looks a ref up by name (a missing ref is `E_RE
 `E_AUTH` and `E_POLICY_DENIED` are raised by `swarmops serve` since M14
 ([Serve over ssh](operate/serve-over-ssh.md#refusals-a-client-sees)). A client that meets a code newer
 than its own table reads `exit` and `retryable` from the error itself.
-`E_WS_STALE` (exit 1) is a workspace refusal of the M15 design §5; its section above says what it
-will mean.

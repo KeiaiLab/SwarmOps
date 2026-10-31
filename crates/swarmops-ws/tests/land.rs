@@ -751,3 +751,204 @@ fn a_whole_tree_is_not_walked_before_land() {
         assert_eq!(refused.code, "E_INVALID_ARG", "{how:?} {refused:?}");
     }
 }
+
+/// What a refused stale land must leave as it was: the workspace's files and state, the pending
+/// record, and the store's journal.
+struct Snapshot {
+    /// The workspace's files.
+    files: Vec<(String, char, String)>,
+    /// Its `workspace.json`.
+    state: state::WorkspaceFile,
+    /// The newest operation's number.
+    op: u64,
+}
+
+impl Snapshot {
+    /// Workspace `name`'s files and state, and the journal's end.
+    fn of(f: &Fixture, name: &str) -> Snapshot {
+        let dir = f.beside(name);
+        Snapshot {
+            files: tree_of(&dir),
+            state: state::read(&RealFs::new(), &dir).unwrap(),
+            op: f.last_op(),
+        }
+    }
+}
+
+/// A workspace `w` on `release/r` at `b` (one commit above `p`, which `main` holds too), with a
+/// commit of its own on `src/a.txt` and an unsettled edit of it. `p`, `b` and `w`'s head.
+fn on_release(f: &Fixture) -> (String, String, String) {
+    // 1. `p`, and `b` on it; `release/r` at `b` (not protected, so it may move back).
+    let p = f.commit(None, &[Put::File("src/a.txt", "a\n")]);
+    let b = f.side(Some(&p), &[Put::File("src/b.txt", "b\n")]);
+    f.point("release/r", &b);
+
+    // 2. A workspace of it, one commit and one edit not committed.
+    f.create("w", "release/r", &[]);
+    let dir = f.beside("w");
+    write(&dir, "src/a.txt", "mine\n");
+    let mut req = WsCommitReq::new("w".to_owned(), "mine".to_owned());
+    req.status_after = StatusAfter::None;
+    let head = swarmops_ws::commit(&f.ctx(), req).unwrap().changeset;
+    write(&dir, "src/a.txt", "unsettled\n");
+    (p, b, head)
+}
+
+/// Land of workspace `w` as `ws land -m` asks, which would commit an edit.
+fn land_with_message() -> WsLandReq {
+    let mut req = land_of("w", None);
+    req.message = Some("settle".to_owned());
+    req
+}
+
+/// A land of a workspace whose target moved back off its base is `E_WS_STALE`: nothing is
+/// settled, landed or written, and `details` names the target, the base, the head and the two
+/// operations the journal holds.
+#[test]
+fn a_land_after_a_move_back_is_stale() {
+    // 1. The workspace on `b`; `release/r` moved back to `p`.
+    let f = Fixture::new();
+    let (p, b, _) = on_release(&f);
+    f.point("release/r", &p);
+    let (base_op, _) = f.op_moving("release/r", &b);
+    let (moved_op, _) = f.op_moving("release/r", &p);
+    let before = Snapshot::of(&f, "w");
+
+    // 2. Refused, even where `-m` would commit the edit.
+    let refused = swarmops_ws::land(&f.ctx(), land_with_message()).unwrap_err();
+    assert_eq!(refused.code, "E_WS_STALE", "{refused:?}");
+    assert_eq!(
+        serde_json::Value::Object(refused.details.clone()),
+        serde_json::json!({
+            "target": "release/r",
+            "base": b,
+            "head": p,
+            "base_op": base_op,
+            "moved_op": moved_op,
+        })
+    );
+    assert_eq!(refused.hint.as_deref(), Some("swarmops ws rebase"));
+
+    // 3. Every file, the state and the journal as they were; no record.
+    let after = Snapshot::of(&f, "w");
+    assert!(after.files == before.files && after.state == before.state);
+    assert_eq!(after.op, before.op);
+    assert!(!pending_in(&f.beside("w")).exists());
+}
+
+/// The base's operation is found past the first page of the journal.
+#[test]
+fn a_stale_land_reads_the_journal_past_one_page() {
+    // 1. The base's operation, then more than a page of other moves, then the move back.
+    let f = Fixture::new();
+    let (p, b, _) = on_release(&f);
+    for n in 0..120 {
+        f.point("release/other", if n % 2 == 0 { &p } else { &b });
+    }
+    f.point("release/r", &p);
+    let (base_op, _) = f.op_moving("release/r", &b);
+    let (moved_op, _) = f.op_moving("release/r", &p);
+    assert!(moved_op - base_op > 100, "{base_op} {moved_op}");
+
+    // 2. Both numbers found.
+    let refused = swarmops_ws::land(&f.ctx(), land_of("w", None)).unwrap_err();
+    assert_eq!(refused.code, "E_WS_STALE", "{refused:?}");
+    assert_eq!(refused.details["base_op"], serde_json::json!(base_op));
+    assert_eq!(refused.details["moved_op"], serde_json::json!(moved_op));
+}
+
+/// A target rewritten to an unrelated changeset leaves the base off its history.
+#[test]
+fn a_rewritten_target_is_stale() {
+    // 1. `release/r` moved to a changeset that shares nothing with the base.
+    let f = Fixture::new();
+    let (_, b, _) = on_release(&f);
+    let other = f.side(None, &[Put::File("z.txt", "z\n")]);
+    f.point("release/r", &other);
+    let (base_op, _) = f.op_moving("release/r", &b);
+    let (moved_op, _) = f.op_moving("release/r", &other);
+    let before = Snapshot::of(&f, "w");
+
+    // 2. Refused, nothing written.
+    let refused = swarmops_ws::land(&f.ctx(), land_of("w", None)).unwrap_err();
+    assert_eq!(refused.code, "E_WS_STALE", "{refused:?}");
+    assert_eq!(refused.details["head"], serde_json::json!(other));
+    assert_eq!(refused.details["base_op"], serde_json::json!(base_op));
+    assert_eq!(refused.details["moved_op"], serde_json::json!(moved_op));
+    let after = Snapshot::of(&f, "w");
+    assert!(after.files == before.files && after.state == before.state);
+    assert_eq!(after.op, before.op);
+}
+
+/// An `op undo` of the move that put the target on the base takes it off again: stale.
+#[test]
+fn a_land_after_an_undo_is_stale() {
+    // 1. `release/r` at `p`, moved forward to `b`; a workspace of `b`; that move undone.
+    let f = Fixture::new();
+    let p = f.commit(None, &[Put::File("src/a.txt", "a\n")]);
+    f.point("release/r", &p);
+    let b = f.side(Some(&p), &[Put::File("src/b.txt", "b\n")]);
+    f.point("release/r", &b);
+    let (base_op, id) = f.op_moving("release/r", &b);
+    f.create("w", "release/r", &[]);
+    let who = swarmops_api::Identity::parse(crate::fixture::AGENT).unwrap();
+    f.ops.undo(&who, UndoReq::new(id)).unwrap();
+    let (moved_op, _) = f.op_moving("release/r", &p);
+    assert_ne!(moved_op, base_op);
+    let before = Snapshot::of(&f, "w");
+
+    // 2. Refused, nothing written.
+    let refused = swarmops_ws::land(&f.ctx(), land_of("w", None)).unwrap_err();
+    assert_eq!(refused.code, "E_WS_STALE", "{refused:?}");
+    assert_eq!(refused.details["base_op"], serde_json::json!(base_op));
+    assert_eq!(refused.details["moved_op"], serde_json::json!(moved_op));
+    let after = Snapshot::of(&f, "w");
+    assert!(after.files == before.files && after.state == before.state);
+    assert_eq!(after.op, before.op);
+}
+
+/// A base no operation put on the target (a changeset the workspace was made from, off the
+/// target's history) is not stale: the land proceeds.
+#[test]
+fn a_workspace_from_a_side_changeset_is_not_stale() {
+    // 1. A workspace on a side changeset; `main` has other work.
+    let f = Fixture::new();
+    let p = f.commit(None, &[Put::File("src/a.txt", "a\n")]);
+    let side = f.side(Some(&p), &[Put::File("src/s.txt", "s\n")]);
+    f.commit(Some(&p), &[Put::File("src/m.txt", "m\n")]);
+    f.create("w", &side, &[]);
+    write(&f.beside("w"), "src/a.txt", "mine\n");
+
+    // 2. Landed on `main`.
+    let done = swarmops_ws::land(&f.ctx(), land_with_message()).unwrap();
+    assert_eq!(done.land.status, LandStatus::Landed);
+    assert_eq!(main_of(&f), done.land.landed);
+}
+
+/// The outside refusal comes first, then the stale one, then the dirty one.
+#[test]
+fn a_stale_refusal_sits_between_the_outside_and_the_dirty_ones() {
+    // 1. A sparse workspace of `src` on `b`, `release/r` moved back, an edit inside and a stray
+    //    outside.
+    let f = Fixture::new();
+    let p = f.commit(
+        None,
+        &[Put::File("docs/d", "d\n"), Put::File("src/a", "a\n")],
+    );
+    let b = f.side(Some(&p), &[Put::File("src/b", "b\n")]);
+    f.point("release/r", &b);
+    f.create("w", "release/r", &["src"]);
+    f.point("release/r", &p);
+    let dir = f.beside("w");
+    write(&dir, "src/a", "mine\n");
+    write(&dir, "docs/d", "stray\n");
+
+    // 2. The stray first.
+    let refused = swarmops_ws::land(&f.ctx(), land_of("w", None)).unwrap_err();
+    assert_eq!(refused.code, "E_WS_OUTSIDE_PREFIXES", "{refused:?}");
+
+    // 3. Without it, stale, not dirty.
+    std::fs::remove_dir_all(dir.join("docs")).unwrap();
+    let refused = swarmops_ws::land(&f.ctx(), land_of("w", None)).unwrap_err();
+    assert_eq!(refused.code, "E_WS_STALE", "{refused:?}");
+}

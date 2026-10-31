@@ -6,14 +6,17 @@
 //!  log{main, 100, cursor}…           until base, at most 10,000 counted
 //!  log{base, 100, cursor}…           base not met: until a changeset main's log held
 //!  scan (the index, the walker) ──▶ changes, a page after `cursor`, `limit` long
+//!
+//!  stale (for `ws land`): base off main's history, history ended short of the cap
+//!  op_log{before…}                   until the operation that put the target on the base
 //! ```
 
 use std::collections::HashMap;
 
 use serde_json::{Map, Value};
 use swarmops_api::{
-    ConflictReport, ErrorCode, LogReq, OpError, ResolveRevReq, StoreOps, WsChange, WsRebasing,
-    WsState, WsStatus, WsStatusReq,
+    ConflictReport, ErrorCode, LogReq, OpError, OpLogReq, ResolveRevReq, StoreOps, WsChange,
+    WsRebasing, WsState, WsStatus, WsStatusReq,
 };
 
 use crate::Ctx;
@@ -27,6 +30,15 @@ pub const BEHIND_CAP: u64 = 10_000;
 
 /// The changesets one `log` page of `behind_by` asks for.
 const LOG_PAGE: usize = 100;
+
+/// The most operations the search for a stale base reads.
+pub const OP_CAP: u64 = 10_000;
+
+/// The operations one `op_log` page of that search asks for.
+const OP_PAGE: usize = 100;
+
+/// The changesets of an operation the search asks to list: it reads ref moves only.
+const OP_CHANGESETS: usize = 1;
 
 /// The conflict report of a rebase in progress, in [`SWARMWS_DIR`].
 pub const CONFLICTS_JSON: &str = "conflicts.json";
@@ -119,40 +131,95 @@ pub(crate) fn changes_of(
     Ok(scanned.keep(&ws.dir, &scan::binding_of(ws), Keep::IfChanged))
 }
 
+/// Where a base stands on its target's first-parent history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Standing {
+    /// On it.
+    On,
+    /// Off it: the history was read to its end without meeting the base.
+    Off,
+    /// Not met in the first [`BEHIND_CAP`] changesets: unknown.
+    PastCap,
+}
+
+/// What reading a target's first-parent history for a base found.
+struct Placed {
+    /// The target's head.
+    head: String,
+    /// The changesets read before the base, or all of them.
+    count: u64,
+    /// Where each of them stands on the history, newest first from 0.
+    seen: HashMap<String, u64>,
+    /// Whether the base was met.
+    standing: Standing,
+}
+
 /// The head of ref `target`, and how many changesets it holds that `base`'s first-parent
 /// history lacks, at most [`BEHIND_CAP`]: one ref read, then `log` a page at a time until `base`;
 /// when `base` is not on the target's history, `base`'s own history too, until it meets it.
 fn behind(store: &dyn StoreOps, target: &str, base: &str) -> Result<(String, u64), OpError> {
-    // 1. The head, a ref read; at the base, nothing to count.
-    let main = store.resolve_rev(ResolveRevReq::new(target))?.id;
-    if main == base {
-        return Ok((main, 0));
+    // 1. The target's history until the base: on it, the count is the base's place.
+    let placed = place(store, target, base)?;
+    if placed.standing == Standing::On {
+        return Ok((placed.head, placed.count));
     }
 
-    // 2. The target's history until the base: each changeset's place on it, the base's the count.
-    let mut count = 0;
-    let mut seen = HashMap::new();
-    let mut met = false;
-    walk(store, &main, |id| {
-        met = id == base;
-        if !met {
-            seen.insert(id.to_owned(), count);
-            count += 1;
-        }
-        met
-    })?;
-    if met {
-        return Ok((main, count));
-    }
-
-    // 3. The base off it (a sync dropped it, or the target moved back): the place of the first
+    // 2. The base off it (a sync dropped it, or the target moved back): the place of the first
     //    changeset of the base's history the target's holds; none, unrelated, the count as read.
     let mut parted = None;
     walk(store, base, |id| {
-        parted = seen.get(id).copied();
+        parted = placed.seen.get(id).copied();
         parted.is_some()
     })?;
-    Ok((main, parted.unwrap_or(count)))
+    Ok((placed.head, parted.unwrap_or(placed.count)))
+}
+
+/// Reads the first-parent history of ref `target`, newest first, until `base`, the end of the
+/// history or [`BEHIND_CAP`] changesets: the head, each changeset's place, and what became of the
+/// base. At the base, no history is read.
+fn place(store: &dyn StoreOps, target: &str, base: &str) -> Result<Placed, OpError> {
+    // 1. The head, a ref read; at the base, nothing to count.
+    let head = store.resolve_rev(ResolveRevReq::new(target))?.id;
+    let mut placed = Placed {
+        head,
+        count: 0,
+        seen: HashMap::new(),
+        standing: Standing::On,
+    };
+    if placed.head == base {
+        return Ok(placed);
+    }
+
+    // 2. The history until the base: each changeset's place on it, the base's the count.
+    let mut met = false;
+    let (count, seen) = (&mut placed.count, &mut placed.seen);
+    let ended = walk(store, &placed.head, |id| {
+        met = id == base;
+        if !met {
+            seen.insert(id.to_owned(), *count);
+            *count += 1;
+        }
+        met
+    })?;
+
+    // 3. Met, or the history ended without it, or the cap came first.
+    placed.standing = match (met, ended) {
+        (true, _) => Standing::On,
+        (false, Walked::Ended) => Standing::Off,
+        (false, _) => Standing::PastCap,
+    };
+    Ok(placed)
+}
+
+/// How a walk of a history stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Walked {
+    /// The caller's `stop` said so.
+    Stopped,
+    /// The history ended.
+    Ended,
+    /// [`BEHIND_CAP`] changesets were visited.
+    Capped,
 }
 
 /// Visits `rev`'s first-parent history, newest first, a `log` page at a time, until `stop` says
@@ -161,7 +228,7 @@ fn walk(
     store: &dyn StoreOps,
     rev: &str,
     mut stop: impl FnMut(&str) -> bool,
-) -> Result<(), OpError> {
+) -> Result<Walked, OpError> {
     let mut visited = 0;
     let mut cursor = None;
     loop {
@@ -174,17 +241,90 @@ fn walk(
 
         // 2. Its changesets, until the stop or the cap.
         for entry in &page.entries {
-            if visited == BEHIND_CAP || stop(&entry.id) {
-                return Ok(());
+            if visited == BEHIND_CAP {
+                return Ok(Walked::Capped);
+            }
+            if stop(&entry.id) {
+                return Ok(Walked::Stopped);
             }
             visited += 1;
         }
 
         // 3. The next page, while there is one under the cap.
-        if !page.truncated || visited == BEHIND_CAP {
-            return Ok(());
+        if !page.truncated {
+            return Ok(Walked::Ended);
+        }
+        if visited == BEHIND_CAP {
+            return Ok(Walked::Capped);
         }
         cursor = page.cursor;
+    }
+}
+
+/// A base its target left: the operations that put the target on the base and on its head.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Stale {
+    /// The target's head now.
+    pub(crate) head: String,
+    /// The newest operation that moved the target to the base.
+    pub(crate) base_op: u64,
+    /// The newest operation that moved the target to `head`; none when not found.
+    pub(crate) moved_op: Option<u64>,
+}
+
+/// Whether `base` has left ref `target`'s history: the first-parent history from the target's
+/// head, read to its end within [`BEHIND_CAP`], lacks it, and the journal's newest [`OP_CAP`]
+/// operations hold one that moved the target to it. A base no operation put on the target (a
+/// workspace made of a side changeset) and a history longer than the cap are not stale.
+pub(crate) fn stale(
+    store: &dyn StoreOps,
+    target: &str,
+    base: &str,
+) -> Result<Option<Stale>, OpError> {
+    // 1. On the history, or not known to be off it: not stale, and the journal is not read.
+    let placed = place(store, target, base)?;
+    if placed.standing != Standing::Off {
+        return Ok(None);
+    }
+
+    // 2. The journal, newest first: the move to the head, then the move to the base.
+    let mut moved_op = None;
+    let mut visited = 0;
+    let mut before = None;
+    loop {
+        // 3. The next page of operations.
+        let mut req = OpLogReq::default();
+        req.before = before;
+        req.limit = OP_PAGE;
+        req.max_changesets = OP_CHANGESETS;
+        let page = store.op_log(req)?;
+
+        // 4. Each operation's moves of the target, until the cap.
+        for op in &page.ops {
+            if visited == OP_CAP {
+                return Ok(None);
+            }
+            visited += 1;
+            let moves = |to: &str| {
+                (op.ref_moves.iter()).any(|m| m.name == target && m.new.as_deref() == Some(to))
+            };
+            if moved_op.is_none() && moves(&placed.head) {
+                moved_op = Some(op.op);
+            }
+            if moves(base) {
+                return Ok(Some(Stale {
+                    head: placed.head,
+                    base_op: op.op,
+                    moved_op,
+                }));
+            }
+        }
+
+        // 5. The next page, while there is one.
+        before = page.ops.last().map(|op| op.op);
+        if !page.truncated || before.is_none() {
+            return Ok(None);
+        }
     }
 }
 

@@ -122,6 +122,64 @@ impl Fixture {
         self.ops.commit(&who, req).unwrap().changeset
     }
 
+    /// Commits `puts` on `parent` without moving any ref.
+    pub fn side(&self, parent: Option<&str>, puts: &[Put<'_>]) -> String {
+        let changes = (puts.iter())
+            .map(|put| {
+                let Put::File(path, text) = *put else {
+                    panic!("side commits hold plain files only");
+                };
+                let mut out = ChangeInput::new(path.to_owned(), ChangeOp::Put);
+                out.content = Some(ContentInput::Inline(text.to_owned()));
+                out.mode = Some(ModeInput::File);
+                out
+            })
+            .collect();
+        let mut req = CommitReq::new(changes, "side".to_owned());
+        req.parent = parent.map(Into::into);
+        let who = Identity::parse(AGENT).unwrap();
+        self.ops.commit(&who, req).unwrap().changeset
+    }
+
+    /// Points ref `name` at `to`: created when it is absent, else moved from its head.
+    pub fn point(&self, name: &str, to: &str) {
+        let held = self.ops.resolve_rev(ResolveRevReq::new(name)).ok();
+        let mut req = RefSetReq::new(name, to);
+        match held {
+            Some(held) => req.expected_old = Some(held.id.into()),
+            None => req.create = true,
+        }
+        let who = Identity::parse(AGENT).unwrap();
+        self.ops.ref_set(&who, req).unwrap();
+    }
+
+    /// The newest operation's number.
+    pub fn last_op(&self) -> u64 {
+        let mut req = OpLogReq::default();
+        req.limit = 1;
+        self.ops.op_log(req).unwrap().ops[0].op
+    }
+
+    /// The newest operation's `(number, id)` that moved ref `name` to `to`.
+    pub fn op_moving(&self, name: &str, to: &str) -> (u64, String) {
+        let mut before = None;
+        loop {
+            let mut req = OpLogReq::default();
+            req.before = before;
+            req.limit = 100;
+            let page = self.ops.op_log(req).unwrap();
+            for op in &page.ops {
+                let moved =
+                    (op.ref_moves.iter()).any(|m| m.name == name && m.new.as_deref() == Some(to));
+                if moved {
+                    return (op.op, op.id.clone());
+                }
+            }
+            assert!(page.truncated, "no operation moved {name} to {to}");
+            before = page.ops.last().map(|op| op.op);
+        }
+    }
+
     /// Makes workspace `name` beside the store, on `base`, holding `prefixes` (the whole tree
     /// when empty), through `ctx`.
     pub fn create_in(
