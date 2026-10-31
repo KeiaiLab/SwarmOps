@@ -557,6 +557,29 @@ fn a_long_gap_lifts_along_the_skip_list() {
     assert_eq!(skip_lists(&root).len(), N, "nothing derived since");
 }
 
+/// `check_forward` refuses a move of `main` back from the two changesets' index records alone
+/// (the M15 design §4): on a chain of 200, a move from the head to the 100th reads no object and
+/// no derived value, where a walk from the target would read a hundred objects.
+#[test]
+fn a_back_move_of_main_reads_two_records() {
+    const N: usize = 200;
+    let dir = tempfile::tempdir().expect("create a temp dir");
+    let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).expect("temp dir is UTF-8");
+    let c = bulk_chain(&root, N, &[]);
+    let (fs, calls) = RecordingFs::new();
+    let fs = fs.naming_paths_in(root.clone().into_std_path_buf());
+    let repo = LocalRepo::open_with_fs(&root, Arc::new(fs)).unwrap();
+
+    let read = repo.snapshot().unwrap();
+    calls();
+    let refused = read.check_forward("main", Some(c[N - 1]), Some(c[N / 2]));
+    assert!(
+        matches!(refused, Err(RepoError::HistoryProtected { .. })),
+        "{refused:?}"
+    );
+    assert_eq!(calls(), Vec::<String>::new(), "no filesystem call");
+}
+
 /// Umbrella spec §15's read targets on a chain of 200,000 changesets, measured on `RepoRead`: a
 /// `log -n 100` (`log_first_parent(head, 100)`) at a p50 under 10 ms, and a warm `cat` of a 4 KiB
 /// file (`read_blob_at`) under 1 ms; `resolve("main~1000")`, a walk of 1,000 first-parent steps,

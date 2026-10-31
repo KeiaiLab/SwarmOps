@@ -921,6 +921,34 @@ fn undo_moving_main_forward_is_allowed() {
     assert_eq!(target(&repo, "main"), Some(c2));
 }
 
+/// The undo of a move of `main` that later moves left behind is blocked, not protected: the
+/// forward rule judges only a move the compare-and-swap would make (the M15 design §4).
+#[test]
+fn undo_of_main_moved_since_is_blocked() {
+    let (_dir, root, repo) = new_repo();
+    let [c1, c2, c3] = chain(&repo);
+    cas(&repo, "main", None, Some(c1)); // op 3
+    cas(&repo, "main", Some(c1), Some(c2)); // op 4
+    cas(&repo, "main", Some(c2), Some(c3)); // op 5
+    let frames = frame_count(&root);
+
+    match repo.undo(id_of(&repo, 4), UNDOER) {
+        Err(RepoError::UndoBlocked {
+            op: 4,
+            name,
+            expected,
+            actual,
+            ..
+        }) => {
+            assert_eq!(name, "main");
+            assert_eq!((expected, actual), (Some(c2), Some(c3)));
+        }
+        other => panic!("expected UndoBlocked, got {other:?}"),
+    }
+    assert_eq!(frame_count(&root), frames, "nothing written");
+    assert_eq!(target(&repo, "main"), Some(c3));
+}
+
 /// `check_forward` follows first parents only (the M15 design §4): a merge whose first parent
 /// descends from `main`'s head is forward; one holding the head as its second parent only is
 /// refused, as are a move back and a move sideways. It judges `main` alone, and only a move.

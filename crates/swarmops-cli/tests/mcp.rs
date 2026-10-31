@@ -1730,8 +1730,8 @@ fn vague_expectations_are_refused(server: &mut Server, c2: &str, c3: &str) {
 
 /// With main at `c2` and `c3` built on `c1`: the full id main holds moves it, and the same move
 /// again finds its work done, as does a move to the target main holds; a stale full id is
-/// `E_CAS_MISMATCH`; a relative `new` is safe with a concrete expectation; a delete by full id
-/// deletes, and again finds the ref gone.
+/// `E_CAS_MISMATCH`; `main~1` with a concrete expectation is `E_REF_PROTECTED` on main and
+/// moves a release ref back; a delete by full id deletes, and again finds the ref gone.
 fn concrete_expectations_compare_and_swap(server: &mut Server, c1: &str, c2: &str, c3: &str) {
     let c4 = commit_on(server, "c4", c2);
     let set = json!({"name": "main", "new": c4, "expected_old": c2});
@@ -1764,7 +1764,22 @@ fn concrete_expectations_compare_and_swap(server: &mut Server, c1: &str, c2: &st
         refs_of(server),
         json!([{"name": "main", "kind": "main", "target": c4, "version": 3}])
     );
-    // A release ref moves back, which main never does (the M15 design §4).
+    // main never moves back (the M15 design §4): refused, nothing written.
+    let refused = server.err(
+        "ref_set",
+        json!({"name": "main", "new": "main~1", "expected_old": c4}),
+        "E_REF_PROTECTED",
+    );
+    assert_eq!(
+        refused["error"]["details"],
+        json!({"name": "main", "changeset": c4, "target": c2}),
+        "{refused}"
+    );
+    assert_eq!(
+        refs_of(server),
+        json!([{"name": "main", "kind": "main", "target": c4, "version": 3}])
+    );
+    // A release ref moves back.
     server.ok(
         "ref_set",
         json!({"name": "release/a", "new": c4, "create": true}),

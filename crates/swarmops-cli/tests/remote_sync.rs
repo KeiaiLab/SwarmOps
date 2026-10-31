@@ -576,8 +576,13 @@ fn sync_push_refused_leaves_main_landed() {
     let error = failed.err("E_REMOTE_REJECTED");
     assert_eq!(error["details"]["reason"], "declined", "{failed}");
     assert_eq!(error["details"]["main_moved"], true, "{failed}");
-    let next = error["hint"].as_str().expect("a hint");
-    assert!(next.contains("push origin main:"), "{failed}");
+    // The way back is a land: main moves only forward (the M15 design §4).
+    assert_eq!(
+        error["hint"],
+        "main holds the landed changes: swarmops push origin main:<a branch of yours>, then open \
+         a pull request; to take main back, land a change that reverts them",
+        "{failed}"
+    );
 
     // main names the landed change, on the remote's head; the remote did not move.
     let main = main_at(&store).expect("main");

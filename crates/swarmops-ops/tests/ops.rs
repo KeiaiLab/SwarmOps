@@ -1124,6 +1124,15 @@ fn undo_of_a_land_is_refused_whole() {
     assert_eq!(ref_target(&ops, "main"), landed);
     let newest = ops.op_log(OpLogReq::default()).unwrap().ops.remove(0);
     assert_eq!(newest.op, op + 1, "no frame after the repaired one");
+
+    // 3. An id with a leading zero names the same operation, and is reported as sent.
+    let padded = format!("0{id}");
+    let err = expect_err(
+        ops.undo(&who, UndoReq::new(&padded)),
+        ErrorCode::RefProtected,
+    );
+    assert_eq!(err.details["id"], json!(padded), "{err:?}");
+    assert_eq!(err.details["op"], json!(op), "{err:?}");
 }
 
 /// An undo refused under the lock records what its write repaired first (a frame an earlier
