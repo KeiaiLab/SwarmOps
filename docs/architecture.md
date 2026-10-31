@@ -273,7 +273,7 @@ looks again every `--interval-ms` once it has caught up, and prints one envelope
 that derived something. A commit derives nothing, so commits keep their latency and their filesystem
 calls, and a value no follower has derived yet is derived by the first reader that asks for it.
 `derive` writes only the cache of derived values, so it needs no identity, and it has no MCP tool:
-it is maintenance beside the store, no agent's work.
+a reader fills that cache itself, so a call would gain an agent nothing.
 
 **Path history** (storage §5). The built-in derivation `LastModified` gives, for a changeset and a
 path, the newest changeset on its first-parent chain, itself included, whose delta has an entry

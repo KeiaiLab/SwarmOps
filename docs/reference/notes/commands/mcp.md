@@ -67,8 +67,9 @@ every reference inlined so that it stands alone. Its annotations say what it doe
 Only the git remote tools reach beyond the store and the workspaces' directories. `init`, `whoami`,
 `schema`, `blob get`, `ws delete`, `ws hook`, `git import`, `git export`, `clone`,
 `remote add|remove`, `derive` and `mcp` have no tool: a call to one is the protocol error `-32602`
-(`Unknown tool`). The git commands and `init` read or write paths on the operator's host, and
-`derive` is maintenance, no agent's work.
+(`Unknown tool`). The git commands and `init` read or write paths on the operator's host.
+`derive` only fills ahead of time a cache that a read fills itself when it needs a value, and
+with `--follow` it never returns, so a call would gain an agent nothing.
 
 ### Tool results
 

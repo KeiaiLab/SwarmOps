@@ -4,7 +4,7 @@
 
 Serve the store's operations to an agent as an MCP server on stdin and stdout.
 
-One tool per operation (repo\_info, resolve\_rev, read\_file, read\_tree, show, log, path\_history, diff, op\_log, ref\_list, ref\_set, ref\_delete, undo, commit, land, blob\_put, blob\_has, verify, the maintenance's gc, repair and upgrade, and the git remotes' remote\_list, fetch, push, sync and sync\_status), each taking the operation's request as its arguments and returning the envelope the other commands print. The store and the identity are the server's, --repo and --as or their variables, never a call's. Speaks MCP 2026-07-28, and 2025-11-25 and 2025-06-18 to clients that open with initialize. Prints no envelope: stdout carries the protocol until stdin ends, and a command line it refuses has its envelope on stderr. The derive command has no tool: it is maintenance, no agent's work; nor have clone and remote add\|remove, so that an agent cannot point the store at a URL of its choosing.
+One tool per operation (repo\_info, resolve\_rev, read\_file, read\_tree, show, log, path\_history, diff, op\_log, ref\_list, ref\_set, ref\_delete, undo, commit, land, blob\_put, blob\_has, verify, the maintenance's gc, repair and upgrade, and the git remotes' remote\_list, fetch, push, sync and sync\_status), each taking the operation's request as its arguments and returning the envelope the other commands print. The store and the identity are the server's, --repo and --as or their variables, never a call's. Speaks MCP 2026-07-28, and 2025-11-25 and 2025-06-18 to clients that open with initialize. Prints no envelope: stdout carries the protocol until stdin ends, and a command line it refuses has its envelope on stderr. The derive command has no tool: it only fills ahead of time a cache that a read fills itself, and with --follow it never returns; nor have clone and remote add\|remove, so that an agent cannot point the store at a URL of its choosing.
 
 ```yaml
 title: "swarmops mcp"
@@ -111,8 +111,9 @@ every reference inlined so that it stands alone. Its annotations say what it doe
 Only the git remote tools reach beyond the store and the workspaces' directories. `init`, `whoami`,
 `schema`, `blob get`, `ws delete`, `ws hook`, `git import`, `git export`, `clone`,
 `remote add|remove`, `derive` and `mcp` have no tool: a call to one is the protocol error `-32602`
-(`Unknown tool`). The git commands and `init` read or write paths on the operator's host, and
-`derive` is maintenance, no agent's work.
+(`Unknown tool`). The git commands and `init` read or write paths on the operator's host.
+`derive` only fills ahead of time a cache that a read fills itself when it needs a value, and
+with `--follow` it never returns, so a call would gain an agent nothing.
 
 ### Tool results
 

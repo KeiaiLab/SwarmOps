@@ -2719,9 +2719,9 @@ mod tests {
         // operations, so they have no tool, and neither have `clone` and `remote add|remove`,
         // which would let an agent point the store at a URL of its choosing; the workspaces'
         // operations (M5) are tools of their own table, `WS_TOOLS`, but `ws_delete`, which
-        // removes a directory tree. `derive` is maintenance, which `swarmops derive` runs beside
-        // the store, and no agent's work; `blob_get` is a client's primitive, raw bytes that a
-        // workspace writes out.
+        // removes a directory tree. `derive` only fills ahead of time a cache that a read
+        // fills itself, so a call gains an agent nothing; `blob_get` is a client's primitive,
+        // raw bytes that a workspace writes out.
         let client_side = [
             "InitReq",
             "GitImportReq",

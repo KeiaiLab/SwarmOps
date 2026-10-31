@@ -95,8 +95,8 @@ compute them, such as each changeset's first-parent skip list. A
 derived value is a cache: computed from immutable objects, stored in a file of its own under
 `meta/derived/`, never synced and named by no journal record ([Derived
 value](../../concepts.md#derived-value)). So `derive` writes nothing but that cache: it needs
-no identity, it is not a mutation, and it has no MCP tool, being maintenance rather than an
-agent's work.
+no identity, it is not a mutation, and it has no MCP tool: a read fills that cache itself, so a
+call would gain an agent nothing.
 
 Nothing is lost without it. Commits derive nothing, and a read that needs a value not derived yet
 derives it and stores it. `derive` moves that work off the read path.
