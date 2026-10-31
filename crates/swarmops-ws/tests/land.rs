@@ -19,7 +19,7 @@ use swarmops_ws::state::{self, SWARMWS_DIR, Volume};
 use swarmops_ws::status::BEHIND_CAP as HISTORY_CAP;
 use swarmops_ws::{RealFs, lock};
 
-use crate::fixture::{BARE, Fixture, Put, Watched, changes, file, tree_of, write};
+use crate::fixture::{BARE, Fixture, Put, Watched, changes, file, tree_holds, tree_of, write};
 
 /// The store calls an outside refusal makes: the workspace's open and the reads of its tree.
 const OPEN_AND_READ: [&str; 2] = ["repo_info", "read_tree"];
@@ -1844,20 +1844,31 @@ fn a_renamed_path_still_meets_the_targets() {
     assert_eq!(watched.count("land"), 0);
 }
 
-/// Renames `src/Lib/a.rs` of workspace `w` to `src/lib/a.rs`; the base also holds
-/// `src/Lib/keep.rs`, which stays, when `keep`. The base.
-fn rename_directory(f: &Fixture, keep: bool) -> String {
+/// What the base holds of `src/Lib` besides the file `rename_directory` moves.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Lib {
+    /// Nothing: the rename empties the directory.
+    Alone,
+    /// `src/Lib/keep.rs`, which stays.
+    Kept,
+}
+
+/// Renames `src/Lib/a.rs` of workspace `w` to `src/lib/a.rs`. The base.
+fn rename_directory(f: &Fixture, lib: Lib) -> String {
+    // 1. The base: `src/Lib/a.rs`, and `src/Lib/keep.rs` when it is kept.
     let mut files = vec![
         Put::File("src/a.txt", "a\n"),
         Put::File("src/Lib/a.rs", "x\n"),
     ];
-    if keep {
+    if lib == Lib::Kept {
         files.push(Put::File("src/Lib/keep.rs", "k\n"));
     }
     let b = folding(f, &files);
+
+    // 2. The file moves to `src/lib`; the directory goes with it when nothing else is in it.
     let dir = f.beside("w");
     std::fs::remove_file(dir.join("src/Lib/a.rs")).unwrap();
-    if !keep {
+    if lib == Lib::Alone {
         std::fs::remove_dir(dir.join("src/Lib")).unwrap();
     }
     write(&dir, "src/lib/a.rs", "x\n");
@@ -1873,7 +1884,7 @@ fn a_case_only_rename_of_a_directory_is_not_a_collision() {
         for rebase in [false, true] {
             // 1. The workspace renames the directory; the target, maybe, moves.
             let f = Fixture::new();
-            let b = rename_directory(&f, false);
+            let b = rename_directory(&f, Lib::Alone);
             if moved {
                 let ahead = f.side(Some(&b), &[Put::File("src/c.txt", "c\n")]);
                 f.point("release/r", &ahead);
@@ -1897,13 +1908,13 @@ fn a_case_only_rename_of_a_directory_is_not_a_collision() {
 /// leaves, keeps that directory: the renamed one collides with it.
 #[test]
 fn a_file_under_a_renamed_directory_still_collides() {
-    for kept in [false, true] {
+    for lib in [Lib::Alone, Lib::Kept] {
         for rebase in [false, true] {
             // 1. The workspace renames `a.rs` into `src/lib`; `src/Lib` stays by a file of the
             //    base or one the target adds.
             let f = Fixture::new();
-            let b = rename_directory(&f, kept);
-            if !kept {
+            let b = rename_directory(&f, lib);
+            if lib == Lib::Alone {
                 let gained = f.side(Some(&b), &[Put::File("src/Lib/b.rs", "b\n")]);
                 f.point("release/r", &gained);
             }
@@ -1916,12 +1927,159 @@ fn a_file_under_a_renamed_directory_still_collides() {
             } else {
                 swarmops_ws::land(&ctx, land_of("w", None)).unwrap_err()
             };
-            let case = format!("kept={kept} rebase={rebase}");
+            let case = format!("lib={lib:?} rebase={rebase}");
             assert_eq!(refused.code, "E_WS_UNPORTABLE", "{case}: {refused:?}");
             assert_eq!(refused.details["reason"], "case_collision", "{case}");
             assert_eq!(watched.count("land") + watched.count("rebase"), 0, "{case}");
         }
     }
+}
+
+/// A directory renamed by case two levels above its file leaves no `src/Lib` for `src/lib` to
+/// meet either: it lands.
+#[test]
+fn a_nested_directory_rename_is_not_a_collision() {
+    // 1. `src/Lib/sub/a.rs` moves to `src/lib/sub/a.rs`, both directories emptied.
+    let f = Fixture::new();
+    folding(
+        &f,
+        &[
+            Put::File("src/a.txt", "a\n"),
+            Put::File("src/Lib/sub/a.rs", "x\n"),
+        ],
+    );
+    let dir = f.beside("w");
+    std::fs::remove_file(dir.join("src/Lib/sub/a.rs")).unwrap();
+    std::fs::remove_dir(dir.join("src/Lib/sub")).unwrap();
+    std::fs::remove_dir(dir.join("src/Lib")).unwrap();
+    write(&dir, "src/lib/sub/a.rs", "x\n");
+    commit_w(&f, "rename directory");
+
+    // 2. The land goes through.
+    let done = swarmops_ws::land(&f.ctx(), land_of("w", None)).unwrap();
+    assert_eq!(done.land.status, LandStatus::Landed);
+}
+
+/// A file the base keeps in a subdirectory of the old spelling keeps `src/Lib`: the file renamed
+/// into `src/lib` collides with it, before any store write.
+#[test]
+fn a_file_in_a_subdirectory_keeps_the_old_spelling() {
+    // 1. `src/Lib/a.rs` moves to `src/lib/a.rs`; `src/Lib/sub/k.rs` stays.
+    let f = Fixture::new();
+    folding(
+        &f,
+        &[
+            Put::File("src/a.txt", "a\n"),
+            Put::File("src/Lib/a.rs", "x\n"),
+            Put::File("src/Lib/sub/k.rs", "k\n"),
+        ],
+    );
+    let dir = f.beside("w");
+    std::fs::remove_file(dir.join("src/Lib/a.rs")).unwrap();
+    write(&dir, "src/lib/a.rs", "x\n");
+    commit_w(&f, "rename");
+
+    // 2. Refused as a case collision.
+    let watched = Watched::new(&f.ops);
+    let refused = swarmops_ws::land(&f.ctx_over(&watched), land_of("w", None)).unwrap_err();
+    assert_eq!(refused.code, "E_WS_UNPORTABLE", "{refused:?}");
+    assert_eq!(refused.details["reason"], "case_collision");
+    assert_eq!(watched.count("land"), 0);
+}
+
+/// A sparse workspace holds files under its prefixes only: one outside them does not keep a
+/// directory the chain renamed by case.
+#[test]
+fn a_file_outside_the_prefixes_keeps_no_directory() {
+    // 1. The workspace holds `src/Lib/sub` and `src/lib`; `src/Lib/other.rs` is outside them.
+    let f = Fixture::new();
+    let b = f.commit(
+        None,
+        &[
+            Put::File("src/a.txt", "a\n"),
+            Put::File("src/Lib/other.rs", "o\n"),
+            Put::File("src/Lib/sub/a.rs", "x\n"),
+        ],
+    );
+    f.point("release/r", &b);
+    f.create("w", "release/r", &["src/Lib/sub", "src/lib"]);
+    let mut volume = Volume::new(false, true, true);
+    volume.case_insensitive = true;
+    f.simulate("w", volume);
+
+    // 2. `src/Lib/sub/a.rs` moves to `src/lib/sub/a.rs`, and the land goes through.
+    let dir = f.beside("w");
+    std::fs::remove_file(dir.join("src/Lib/sub/a.rs")).unwrap();
+    write(&dir, "src/lib/sub/a.rs", "x\n");
+    commit_w(&f, "rename");
+    let done = swarmops_ws::land(&f.ctx(), land_of("w", None)).unwrap();
+    assert_eq!(done.land.status, LandStatus::Landed);
+}
+
+/// A path the chain deleted and the edits `-m` add back unchanged is no new path: the target's
+/// case rename of it does not collide, and the landed tree holds the target's spelling.
+#[test]
+fn an_edit_that_adds_back_a_chain_delete_goes_through() {
+    // 1. The chain deletes `src/readme`; the files hold it again; the target renames it.
+    let f = Fixture::new();
+    let b = folding(
+        &f,
+        &[
+            Put::File("src/a.txt", "a\n"),
+            Put::File("src/readme", "r\n"),
+        ],
+    );
+    let dir = f.beside("w");
+    std::fs::remove_file(dir.join("src/readme")).unwrap();
+    write(&dir, "src/a.txt", "mine\n");
+    commit_w(&f, "drop");
+    write(&dir, "src/readme", "r\n");
+    f.point("main", &b);
+    let renamed = f.commit(
+        Some(&b),
+        &[Put::Gone("src/readme"), Put::File("src/README", "r\n")],
+    );
+    f.point("release/r", &renamed);
+
+    // 2. The land goes through, and the tree it leaves holds `src/README` only.
+    let done = swarmops_ws::land(&f.ctx(), land_with_message()).unwrap();
+    assert_eq!(done.land.status, LandStatus::Landed);
+    assert!(tree_holds(&f, &done.land.landed, "src/README"));
+    assert!(!tree_holds(&f, &done.land.landed, "src/readme"));
+}
+
+/// The double that numbers the store's operations higher is read across its made-up ones: the
+/// pages run on, without a gap, down to operation 0.
+#[test]
+fn the_older_ops_double_pages_through_its_made_up_ones() {
+    // 1. The store's operations, and 250 made-up ones below them: three pages of 100.
+    const OLDER: u64 = 250;
+    const PAGE: usize = 100;
+    let f = Fixture::new();
+    on_release(&f);
+    let own = f.last_op() + 1;
+    let mut watched = Watched::new(&f.ops);
+    watched.fake_older_ops = Some(OLDER);
+
+    // 2. Every page, newest first, until the last.
+    let mut seen = Vec::new();
+    let mut before = None;
+    loop {
+        let mut req = OpLogReq::default();
+        req.limit = PAGE;
+        req.before = before;
+        let page = watched.op_log(req).unwrap();
+        seen.extend(page.ops.iter().map(|op| op.op));
+        if !page.truncated {
+            break;
+        }
+        before = seen.last().copied();
+    }
+
+    // 3. One run, from the shifted newest down to 0, longer than the store's own.
+    let top = seen[0];
+    assert!(top >= OLDER + own - 1, "{top}");
+    assert_eq!(seen, (0..=top).rev().collect::<Vec<_>>());
 }
 
 /// A path the chain adds and the edits `-m` commits then rename by case is one new path, the
@@ -2116,7 +2274,7 @@ fn a_cut_land_is_placed_up_to_the_cap() {
         let newest = f.last_op();
         let depth = newest - f.op_recording(&head) + 1;
         assert!(
-            newest - f.op_recording(&land) < depth,
+            f.op_recording(&land) > f.op_recording(&head),
             "the land is above the head"
         );
         let mut watched = Watched::new(&hooked);
