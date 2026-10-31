@@ -1714,3 +1714,61 @@ fn a_chain_is_read_past_one_page() {
     assert_eq!(refused.code, "E_WS_UNPORTABLE", "{refused:?}");
     assert_eq!(watched.count("land"), 0);
 }
+
+/// A key that a newer changeset of the journal also carries is held when an older one is on the
+/// target: a land cut after its frame, the target moved back, the resume onto another ref cut
+/// after its frame (the record still names the first target), the first target restored to the
+/// first land. `ws rebase` leaves the record, and the land replays the first changeset.
+#[test]
+fn a_key_on_an_older_changeset_is_held() {
+    // 1. The land on `release/r` cut; `release/r` back; the resume onto `release/x` cut too.
+    let f = Fixture::new();
+    let (p, _, _) = on_release(&f);
+    let store = Hooked::new(&f.ops);
+    cut_land(&f, &store, Cut::After);
+    let first = store.lands()[0].landed.clone();
+    f.point("release/r", &p);
+    let other = f.side(Some(&p), &[Put::File("src/x.txt", "x\n")]);
+    f.point("release/x", &other);
+    store.crash_after_land.store(true, Ordering::SeqCst);
+    let mut req = land_of("w", None);
+    req.target = Some("release/x".to_owned());
+    let cut = swarmops_ws::land(&f.ctx_over(&store), req).unwrap_err();
+    assert_eq!(cut.code, "E_IO", "{cut:?}");
+    let second = store.lands()[1].landed.clone();
+    assert_ne!(first, second);
+
+    // 2. `release/r` restored to the first land: `ws rebase` leaves the record.
+    f.point("release/r", &first);
+    let ctx = f.ctx_over(&store);
+    let dir = f.beside("w");
+    let refused = rebase_w(&ctx).unwrap_err();
+    assert_eq!(refused.code, "E_INVALID_ARG", "{refused:?}");
+    assert!(pending_in(&dir).exists(), "the record went");
+
+    // 3. The land replays the first changeset.
+    let done = swarmops_ws::land(&ctx, land_of("w", None)).unwrap();
+    assert_eq!(done.land.status, LandStatus::Replayed);
+    assert_eq!(done.land.landed, first);
+}
+
+/// A cut land the journal names within its cap, but not on the target, is not known to be
+/// missing while the journal runs on past the cap: an older copy of its key may be on the
+/// target. The record stays.
+#[test]
+fn a_cut_land_with_a_capped_journal_is_left() {
+    // 1. A land cut after its frame, the target moved back; the journal's cap reached just
+    //    after the land's operation.
+    let f = Fixture::new();
+    let (p, _, _) = on_release(&f);
+    let hooked = Hooked::new(&f.ops);
+    cut_land(&f, &hooked, Cut::After);
+    f.point("release/r", &p);
+    let mut watched = Watched::new(&hooked);
+    watched.fake_ops = Some(JOURNAL_CAP - 3);
+
+    // 2. The rebase does not take the record over.
+    let refused = rebase_w(&f.ctx_over(&watched)).unwrap_err();
+    assert_eq!(refused.code, "E_INVALID_ARG", "{refused:?}");
+    assert!(pending_in(&f.beside("w")).exists(), "the record went");
+}

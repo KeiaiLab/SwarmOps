@@ -10,12 +10,12 @@
 //!  stale (for `ws land`): base off main's history, history ended short of the cap
 //!  op_log{before…}                   until the operation that put the target on the base
 //!
-//!  landed (for `ws rebase`): the operation of a land key, then the target's history
-//!  op_log{before…}                   until the changeset the key landed
-//!  log{target, 100, cursor}…         until that changeset: held; ended: absent
+//!  landed (for `ws rebase`): the operations of a land key, then the target's history
+//!  op_log{before…}                   to the journal's end: every changeset the key landed
+//!  log{target, 100, cursor}…         until one of them: held; ended: absent
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::{Map, Value};
 use swarmops_api::{
@@ -41,7 +41,8 @@ pub(crate) const OP_CAP: u64 = 10_000;
 /// The operations one `op_log` page of that search asks for.
 const OP_PAGE: usize = 100;
 
-/// The changesets of an operation the search asks to list: it reads ref moves only.
+/// The changesets of an operation the searches ask to list: `stale` reads ref moves only, and
+/// `landed` the land key of the one changeset each operation lists.
 const OP_CHANGESETS: usize = 1;
 
 /// The conflict report of a rebase in progress, in [`SWARMWS_DIR`].
@@ -369,28 +370,33 @@ pub(crate) enum Landed {
     Unknown,
 }
 
-/// Whether the land with `key` is on the first-parent history of ref `target`: the changeset the
-/// journal's newest [`OP_CAP`] operations name as that key's land, looked for on the history
-/// within [`BEHIND_CAP`] changesets. A key no operation made is [`Landed::Absent`].
+/// Whether a land with `key` is on the first-parent history of ref `target`: any changeset the
+/// journal's newest [`OP_CAP`] operations name as a land of that key, looked for on the history
+/// within [`BEHIND_CAP`] changesets, as the store's own search for a key does. A key no
+/// operation made is [`Landed::Absent`].
 pub(crate) fn landed(store: &dyn StoreOps, target: &str, key: &str) -> Result<Landed, OpError> {
-    // 1. The journal: the changeset the key's land made.
-    let mut made = None;
+    // 1. The journal: every changeset a land of the key made.
+    let mut made = HashSet::new();
     let scanned = scan_ops(store, |op| {
-        let land = (op.changesets.iter()).find(|c| c.land_key.as_deref() == Some(key));
-        made = land.map(|c| c.id.clone());
-        made.is_some()
+        let lands = (op.changesets.iter()).filter(|c| c.land_key.as_deref() == Some(key));
+        made.extend(lands.map(|c| c.id.clone()));
+        false
     })?;
-    let Some(made) = made else {
-        return Ok(match scanned {
-            Scanned::Capped => Landed::Unknown,
-            _ => Landed::Absent,
+    let capped = matches!(scanned, Scanned::Capped);
+    if made.is_empty() {
+        return Ok(if capped {
+            Landed::Unknown
+        } else {
+            Landed::Absent
         });
-    };
+    }
 
-    // 2. The target's history: met, or ended without it, or cut at the cap.
-    let walked = walk(store, target, |id| id == made)?;
+    // 2. The target's history: one of them met, or ended without (an older copy past the
+    //    journal's cap may be on it), or cut at the cap.
+    let walked = walk(store, target, |id| made.contains(id))?;
     Ok(match walked {
         Walked::Stopped => Landed::Held,
+        Walked::Ended if capped => Landed::Unknown,
         Walked::Ended => Landed::Absent,
         Walked::Capped => Landed::Unknown,
     })
