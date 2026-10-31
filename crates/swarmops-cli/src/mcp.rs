@@ -85,9 +85,9 @@
 //! changes the store and how; none reaches beyond the store (`openWorldHint: false`) but
 //! `fetch`, `push` and `sync`, which reach a git remote.
 //!
-//! `derive` and `serve` have no tool: `swarmops derive` runs beside the store as maintenance,
-//! deriving values ahead of readers as the journal grows, and `swarmops serve` serves stock git,
-//! neither of which is an agent's work.
+//! `derive` and `serve` have no tool: `swarmops derive` only fills ahead of time the cache of
+//! derived values that each read fills itself, so it changes no result an agent reads, and
+//! `swarmops serve` serves stock git to git clients.
 //!
 //! A call runs as one command of the CLI does. Its arguments are the request: a field the type
 //! does not know is ignored, and arguments that do not fit the type, a field of it named twice
@@ -2719,9 +2719,9 @@ mod tests {
         // operations, so they have no tool, and neither have `clone` and `remote add|remove`,
         // which would let an agent point the store at a URL of its choosing; the workspaces'
         // operations (M5) are tools of their own table, `WS_TOOLS`, but `ws_delete`, which
-        // removes a directory tree. `derive` only fills ahead of time a cache that a read
-        // fills itself, so a call gains an agent nothing; `blob_get` is a client's primitive,
-        // raw bytes that a workspace writes out.
+        // removes a directory tree. `derive` only fills ahead of time a cache that each read
+        // fills itself, so it changes no result an agent reads; `blob_get` is a client's
+        // primitive, raw bytes that a workspace writes out.
         let client_side = [
             "InitReq",
             "GitImportReq",

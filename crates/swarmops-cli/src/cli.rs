@@ -667,9 +667,9 @@ pub enum Command {
     /// identity are the server's, --repo and --as or their variables, never a call's. Speaks MCP 2026-07-28, and 2025-11-25 and
     /// 2025-06-18 to clients that open with initialize. Prints no envelope: stdout carries the
     /// protocol until stdin ends, and a command line it refuses has its envelope on stderr. The
-    /// derive command has no tool: it only fills ahead of time a cache that a read fills itself,
-    /// and with --follow it never returns; nor have clone and remote add|remove, so that an
-    /// agent cannot point the store at a URL of its choosing.
+    /// derive command has no tool: it only fills ahead of time a cache that each read fills
+    /// itself, so it changes no result an agent reads; nor have clone and remote add|remove, so
+    /// that an agent cannot point the store at a URL of its choosing.
     Mcp,
     #[command(about = SERVE_HELP, long_about = SERVE_LONG_HELP)]
     Serve(ServeArgs),

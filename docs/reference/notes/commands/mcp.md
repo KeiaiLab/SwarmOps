@@ -68,8 +68,8 @@ Only the git remote tools reach beyond the store and the workspaces' directories
 `schema`, `blob get`, `ws delete`, `ws hook`, `git import`, `git export`, `clone`,
 `remote add|remove`, `derive` and `mcp` have no tool: a call to one is the protocol error `-32602`
 (`Unknown tool`). The git commands and `init` read or write paths on the operator's host.
-`derive` only fills ahead of time a cache that a read fills itself when it needs a value, and
-with `--follow` it never returns, so a call would gain an agent nothing.
+`derive` only fills ahead of time a cache that each read fills itself when it needs a value, so
+it changes no result an agent reads.
 
 ### Tool results
 
