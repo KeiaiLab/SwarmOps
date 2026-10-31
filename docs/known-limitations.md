@@ -810,10 +810,14 @@ left).
 - **A stale workspace's update takes no snapshot.** `ws rebase` refuses edits on disk
   (`E_WS_DIRTY`) unless `-m` commits them onto the old head first, and one that conflicts with the
   new head leaves the workspace rebasing, with markers in the files, until `ws resolve` and
-  `ws rebase --continue`, or `ws rebase --abort`. No update sets the edits aside by itself, and no
-  test kills a `ws land` at random points between its journal append and its last file write.
-  *Unscheduled (the M15 design §5 leaves them out of scope). Found: the 2026-10-27 completeness
-  report (B3); M15 Task S4c.*
+  `ws rebase --continue`, or `ws rebase --abort`. No update sets the edits aside by itself. The kill
+  test this needs is missing too: `eight_checked_lands_land_once_each_with_the_checked_tree` kills
+  one of eight `ws land --check` processes at a random moment within 600 ms (twelve rounds in the
+  slow suite) and checks that each confirmed land is on `main` once with its checked tree, but no
+  test aims its kills at the window between a land's journal append and its last file write, 10 per
+  format and 500 in the slow suite, and checks after the update that the workspace's files equal its
+  head plus every edit made before the kill. *Unscheduled (the M15 design §5 leaves them out of
+  scope). Found: the 2026-10-27 completeness report (B3); M15 Task S4c.*
 - **A target that gains a reserved path after the check is not refused.** `ws land` and `ws rebase`
   check the target's paths for names the files cannot hold (`E_WS_UNPORTABLE`) before the store
   call. A target that gains a path with a component named `.swarmws` between that check and the
