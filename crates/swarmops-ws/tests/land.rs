@@ -2477,3 +2477,44 @@ fn a_chain_path_of_the_reserved_name_is_refused() {
     assert_eq!(refused.details["paths"], paths, "{refused:?}");
     assert_eq!(watched.count("land"), 0);
 }
+
+/// A land record left by a land whose record could not be removed names the old head: the next
+/// `ws land -m`, onto a target that since gained a path the volume refuses, judges the target
+/// before it commits the edit or calls the store.
+#[test]
+fn a_record_of_an_old_head_is_judged_anew() {
+    use std::sync::Arc;
+    use swarmops_store::FsMethod;
+    use swarmops_testkit::fs::FailingFs;
+    use swarmops_ws::RealHost;
+
+    // 1. A land whose record removal fails after the workspace names the landed head.
+    let f = Fixture::new();
+    let b = f.commit(None, &[Put::File("src/a.txt", "a\n")]);
+    f.point("release/r", &b);
+    f.create("w", "release/r", &[]);
+    let dir = f.beside("w");
+    write(&dir, "src/a.txt", "mine\n");
+    commit_w(&f, "mine");
+    let fs = FailingFs::new(|method, p| {
+        method == FsMethod::Remove && p.ends_with("journal/pending.json")
+    });
+    let ctx = f.ctx_with(Arc::new(RealHost::default()), Arc::new(fs));
+    let cut = swarmops_ws::land(&ctx, land_of("w", None)).unwrap_err();
+    assert_eq!(cut.code, "E_IO", "{cut:?}");
+    assert!(pending_in(&dir).exists());
+
+    // 2. The target gains `src/.swarmws/y`; a new edit.
+    let landed = state::read(&RealFs::new(), &dir).unwrap().head;
+    let gained = f.side(Some(&landed), &[Put::File("src/.swarmws/y", "y\n")]);
+    f.point("release/r", &gained);
+    write(&dir, "src/a.txt", "again\n");
+
+    // 3. Refused before the store commits or lands.
+    let watched = Watched::new(&f.ops);
+    let refused = swarmops_ws::land(&f.ctx_over(&watched), land_with_message()).unwrap_err();
+    assert_eq!(refused.code, "E_WS_UNPORTABLE", "{refused:?}");
+    assert_eq!(refused.details["reason"], "reserved_name", "{refused:?}");
+    assert_eq!(watched.count("commit"), 0);
+    assert_eq!(watched.count("land"), 0);
+}
