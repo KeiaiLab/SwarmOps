@@ -5,10 +5,14 @@
 //!
 //! ```text
 //!   spawn `commit --advance main` ──┐
-//!   wait a seeded delay < window    │  window: how long one commit takes here
+//!   wait a seeded delay < window    │  window: how long the last whole commit took here
 //!   SIGKILL (testkit deadline) ─────┘
-//!   verify --deep clean · every commit whose envelope was read is in `log` · next commit ok
+//!   verify --deep clean · every commit whose envelope was read is in `log` · next commit ok,
+//!   timed: the next window
 //! ```
+//!
+//! A kill counts wherever it hits, before the run wrote anything included: about 1 kill of a land
+//! in 5 hit there, measured over 200 kills a format.
 //!
 //! The land variant (the M15 design §6) kills `land --key` instead and runs the same land again
 //! with the same key: the key lands its change exactly once, whatever moment the kill hit.
@@ -118,15 +122,16 @@ fn logged(store: &Store, at_least: usize) -> BTreeSet<String> {
         .collect()
 }
 
-/// Commits on `main` to its end; the changeset.
-fn commit(store: &Store, n: usize) -> String {
+/// Commits on `main` to its end: the changeset, and the commit's wall time in microseconds, the
+/// window of the next kill's delay.
+fn commit(store: &Store, n: usize) -> (String, u64) {
     let args = commit_args(store, n);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let start = Instant::now();
     let result = crate::support::run(&args, &[]).ok();
-    result["changeset"]
-        .as_str()
-        .expect("a changeset id")
-        .to_owned()
+    let window = u64::try_from(start.elapsed().as_micros()).expect("a short commit");
+    let id = result["changeset"].as_str().expect("a changeset id");
+    (id.to_owned(), window)
 }
 
 /// `kills` SIGKILLs of `commit --advance` on a store of `format`, each followed by the checks.
@@ -135,10 +140,10 @@ fn kill_commits(format: StoreFormat, kills: usize) {
     let mut read = BTreeSet::new();
     let mut rng = Rng::new(SEED ^ u64::from(format.version()));
 
-    // 1. The window: one whole commit's wall time here, so most delays land inside a run.
-    let start = Instant::now();
-    read.insert(commit(&store, 0));
-    let window = u64::try_from(start.elapsed().as_micros()).expect("a short commit");
+    // 1. The window: one whole commit's wall time here, so most delays land inside a run. Each
+    //    round's last commit times it again, so it follows the host's load as it rises or falls.
+    let (first, mut window) = commit(&store, 0);
+    read.insert(first);
 
     let mut killed = 0;
     let mut runs = 0;
@@ -169,11 +174,13 @@ fn kill_commits(format: StoreFormat, kills: usize) {
         let lost: Vec<&String> = read.difference(&log).collect();
         assert!(lost.is_empty(), "{what}: reported, not in log: {lost:?}");
 
-        // 4. The next commit succeeds.
-        read.insert(commit(&store, n));
+        // 4. The next commit succeeds; its wall time is the next window.
+        let (id, took) = commit(&store, n);
+        read.insert(id);
+        window = took;
     }
 
-    println!("{format:?}: {killed} kills in {runs} runs, window {window} us");
+    println!("{format:?}: {killed} kills in {runs} runs, last window {window} us");
     store.assert_clean("after the last commit");
 }
 
@@ -186,7 +193,7 @@ per_format! {
 
 per_format! {
     /// The slow variant: [`SLOW_KILLS`] kills per format.
-    #[ignore = "slow, ~200 s per format: 500 kills, each with verify --deep and log"]
+    #[ignore = "slow, ~220 s per format, 310 s at load 270: 500 kills, each with verify --deep and log"]
     fn sigkill_mid_commit_500_times(format) {
         kill_commits(format, SLOW_KILLS);
     }
@@ -297,7 +304,8 @@ fn land_again(store: &Store, head: &str, n: usize) -> String {
 /// `kills` SIGKILLs of `land --key` on a store of `format`, each followed by the same land again
 /// and the checks: the store verifies clean, `main`'s log holds each key's changeset exactly once
 /// (and the base), and a reported land is the one `main` holds. Ends with the first key given for
-/// another change, then for a land onto another target: `E_INVALID_ARG` each, no ref moved.
+/// another change, then for a land onto another target: `E_INVALID_ARG` each, no ref moved. Every
+/// SIGKILL counts, one before the land wrote anything included (the module documentation).
 fn kill_lands(format: StoreFormat, kills: usize) {
     let store = Store::init_as(format);
     let mut rng = Rng::new(LAND_SEED ^ u64::from(format.version()));
