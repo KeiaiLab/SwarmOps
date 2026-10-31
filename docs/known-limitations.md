@@ -780,6 +780,14 @@ left).
   head, and no test kills a land in the middle of the check and the update (the M15 design's
   third SIGKILL acceptance). *Unscheduled (the M15 design §5 leaves them out of scope). Found:
   M15 Task S4c.*
+- **A target that gains a reserved path after the check is not refused.** `ws land` and `ws rebase`
+  check the target's paths for names the files cannot hold (`E_WS_UNPORTABLE`) before the store
+  call. A target that gains a path with a component named
+  `.swarmws` between that check and the store's call is landed or rebased onto, and the
+  materialisation then refuses it with the pending record kept, so a re-run fails the same way. The
+  way out is `ws delete <name> --rescue`: the workspace's commits stay in the store. The same
+  window lets a case collision through that the target creates after the check. *Unscheduled; the
+  window is the time between two calls of one command. Found: M15 Task S4c review.*
 
 ## Platforms
 

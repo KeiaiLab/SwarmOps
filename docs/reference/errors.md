@@ -386,7 +386,7 @@ Exit 1. Retryable: no.
 
 Exit 1. Retryable: no.
 
-The tree holds paths the workspace's volume cannot hold: `details.reason` says why (`case_collision`, `windows_name`, `reserved_name`: a path component named `.swarmws` at any depth, in any ASCII case) and `details.paths` names them. Nothing was written.
+The tree holds paths the workspace's volume cannot hold: `details.reason` says why (`case_collision`, `windows_name`, `reserved_name`: a path component named `.swarmws` at any depth, in any ASCII case) and `details.paths` names them. Nothing was written, unless a target gained the path between the check and the store's call: `ws delete --rescue`.
 
 ## E_WS_OUTSIDE_PREFIXES
 

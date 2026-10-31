@@ -1253,8 +1253,8 @@ paths in the store with a commit, or create the workspace with `--prefix` paths 
 out; a `ws rebase`, `ws land` or `ws materialize` that would bring such a path in, or a `ws discard`
 or `ws resolve --take` that would restore one, refuses the same way, before the store records
 anything and with no pending record left. A target that gains the path after that check and before
-the store's call has recorded it when the refusal comes: `ws delete <name> --rescue` removes the
-workspace, and its commits stay in the store.
+the store's call has recorded it when the refusal comes, and the pending record stays for the
+replay: `ws delete <name> --rescue` removes the workspace, and its commits stay in the store.
 
 ### `E_WS_OUTSIDE_PREFIXES`
 

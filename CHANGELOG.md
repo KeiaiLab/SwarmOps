@@ -205,9 +205,9 @@ collects the changes on `stable` that no release holds yet, until the next relea
   leaves its pending record behind; the next `ws land` refused with "a ws commit … was cut short:
   run it again first", which could not succeed. A record an older build left that way goes with
   the next `ws commit` that finds nothing to commit.
-- The scripting guide names `E_REF_NOT_FOUND` and `E_WS_STALE` as the codes not raised yet, as
-  Troubleshooting does; it named `E_AUTH`, `E_POLICY_DENIED` and `E_MAINTENANCE_BUSY` too, which
-  `swarmops serve` and the maintenance commands raise.
+- The scripting guide names `E_REF_NOT_FOUND` as the one code not raised yet, as Troubleshooting
+  does; it named `E_AUTH`, `E_POLICY_DENIED` and `E_MAINTENANCE_BUSY` too, which `swarmops serve`
+  and the maintenance commands raise. `E_WS_STALE` is raised by `ws land`.
 - In a sparse workspace, a `.worktreeinclude` copy or build output that only an ignore file above
   the prefixes names, at the root or in a directory above a prefix, no longer blocks `ws commit`,
   `ws land`, `ws delete --rescue` and the `worktree-remove` hook with `E_WS_OUTSIDE_PREFIXES`. One
