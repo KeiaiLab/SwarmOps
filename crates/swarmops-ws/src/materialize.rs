@@ -322,8 +322,11 @@ fn moves_of(ctx: &Ctx<'_>, ws: &Workspace, edits: &[scan::Change]) -> Result<Mov
     //    not a new one.
     for edit in edits {
         match edit.kind {
-            WsChangeKind::Added if moves.deleted.remove(&edit.path) => {}
-            WsChangeKind::Added => moves.added.push(edit.path.clone()),
+            WsChangeKind::Added => {
+                if !moves.deleted.remove(&edit.path) {
+                    moves.added.push(edit.path.clone());
+                }
+            }
             WsChangeKind::Deleted if moves.added.contains(&edit.path) => {
                 moves.added.retain(|path| *path != edit.path);
             }
