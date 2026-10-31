@@ -360,7 +360,7 @@ ancestor of it; any other branch stops the export with `E_GIT_EXPORT_DIVERGED` (
 | **`branch_ahead`** | Commits were made in git on top of the export of the head itself. | Bring them in with `git import`, then export again. `--force` replaces them instead. |
 | **`both_moved`** | Commits were made in git on top of an older export, and the source ref moved too. | Nothing is merged. `git log` shows the git side. `--force` replaces it. |
 | **`branch_moved`** | The branch names a commit that is no export of this history. | `git log` shows what the branch holds. `--force` replaces it with the export. |
-| **`source_moved_back`** | The source ref's head is behind the export the branch holds, after an `op undo` or a `ref set` backwards. | `so op log` names what moved the ref. `--force` moves the branch back to the export of its head. |
+| **`source_moved_back`** | The source ref's head is behind the export the branch holds, after an `op undo` or a `ref set` that took a `release/<name>` source back (on `main` both are refused with `E_REF_PROTECTED`). | `so op log` names what moved the ref. `--force` moves the branch back to the export of its head. |
 | **`lossy_history`** | The branch holds the original commits of a history imported lossily, which the export would replace. | Export to another branch (`--branch <name>`), or `--force` replaces the original commits. |
 | **`moved_during_export`** | Another writer moved the branch while this export wrote. | Run the same export again. What it wrote stays. |
 

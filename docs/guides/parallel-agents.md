@@ -284,7 +284,8 @@ Every write names its agent, `<family>/<instance>` such as `agent/worker-1`. The
 it, and the journal records who moved each ref. `so op log` lists the store's operations, newest
 first, each with its `id`. `so op undo <id>` moves every ref that operation moved back to what it
 named before, all of them or none, by compare-and-swap, and refuses if another operation has moved
-one since.
+one since. It never moves `main` back (`E_REF_PROTECTED`): to take back a land on `main`, land a
+change that reverts it.
 
 ### Claude Code and MCP
 

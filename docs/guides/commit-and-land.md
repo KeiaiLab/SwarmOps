@@ -1117,7 +1117,8 @@ truncated: true
 ```
 
 `op log` records who moved the ref, and `swarmops op undo <id>` of that operation's `id` moves it
-back.
+back. `main` moves only forward: an undo that would take it back is refused (`E_REF_PROTECTED`),
+and the way back is a land of a change that reverts it.
 
 Give `--expect` as the full id you read. A ref name, or a relative revision such as `main~1`, is
 read when the command runs, so it does not pin what you saw: the ref's own name always matches,

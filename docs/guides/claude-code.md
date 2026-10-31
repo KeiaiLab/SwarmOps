@@ -224,7 +224,7 @@ annotations say whether it changes the store and how.
 - **`undo`**
 
   Moves every ref an operation of `op_log` moved back to what it named before, all of them or none.
-  Changesets are never removed.
+  `main` moves only forward (`E_REF_PROTECTED`). Changesets are never removed.
 
 - **`fetch`**
 

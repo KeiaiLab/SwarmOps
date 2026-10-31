@@ -444,10 +444,10 @@ departures, each a decision of its design:
 - **Credentials** are git's (helpers, ssh keys), or a token in an environment variable the remote
   names (`--token-env`); no `GH_TOKEN` or `GITHUB_TOKEN` is picked up unasked.
 - **`sync` moves `main` before it pushes**, so a refused push leaves `main` landed on the remote's
-  head (`details.main_moved`, and `op undo` takes it back); `sync --no-push` serves branches that
-  take pull requests only. A change GitHub holds is recognised by any of three trailer lines
-  (`SwarmOps-Changeset`, `SwarmOps-Squashed-From`, `SwarmOps-Land-Key`), indented or bulleted as a
-  squash message lists them, or by merging as no change.
+  head (`details.main_moved`; landing a change that reverts it takes it back); `sync --no-push`
+  serves branches that take pull requests only. A change GitHub holds is recognised by any of
+  three trailer lines (`SwarmOps-Changeset`, `SwarmOps-Squashed-From`, `SwarmOps-Land-Key`),
+  indented or bulleted as a squash message lists them, or by merging as no change.
 - **The per-identity address** is the store's `authors.toml`, keyed by agent family; it changes
   what new changesets record, and not the export's rendering (version 1 of `git_oid`).
 - **`E_REMOTE_REJECTED` exits 5** (a rule or a credential), and the MCP tools are `remote_list`,

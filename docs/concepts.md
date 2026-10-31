@@ -153,7 +153,8 @@ moves: the [journal](#journal-and-frame), shown a frame each.
 `op undo <id>` moves every ref that operation moved back to what it named before, all of them or
 none, by compare-and-swap; if another operation has moved one of them since, it refuses with
 `E_CAS_MISMATCH` and writes nothing. An undo is an operation of its own, which another undo takes
-back.
+back. `main` moves only forward: an undo or a `ref set` that would take it off its first-parent
+history refuses with `E_REF_PROTECTED`, and the way back is a land of a change that reverts it.
 
 Explained in: [README, First commands](../README.md#first-commands) ·
 [architecture, Concurrency](architecture.md#concurrency).

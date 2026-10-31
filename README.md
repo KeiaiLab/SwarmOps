@@ -229,12 +229,14 @@ one write transaction, numbered in commit order (`op`) and named by an `id` (`<o
 or none, by compare-and-swap: if
 another operation has moved one of them since, it refuses with `E_CAS_MISMATCH` and writes
 nothing. Changesets are never removed, and an undo is an operation of its own, which another
-undo takes back. Here an operator takes back the resolved land above:
+undo takes back. `main` moves only forward: an undo that would take it off its first-parent
+history, the undo of a land for one, refuses with `E_REF_PROTECTED` and writes nothing; to take
+`main` back, land a change that reverts it. A `release/<name>` ref moves either way. Here an
+operator tries to take back the resolved land above:
 
 ```sh
 so --human op log -n 1
 so --as operator/ada --human op undo 20:c41e9a07
-so --human cat main:src/lib.rs --lines 2-2
 ```
 
 ```text
@@ -249,19 +251,13 @@ ops[0].ref_moves[0].old: 31528945…
 ops[0].ref_moves[0].new: e1b27d16…
 ops[0].ref_moves[0].actor: agent/worker-2
 …
-undone: 20
-op: 21
-id: 21:5b07d3e8
-ref_moves[0].name: main
-ref_moves[0].old: e1b27d16…
-ref_moves[0].new: 31528945…
-ref_moves[0].actor: operator/ada
-ref_moves[0].at: 1792626687
-already_applied: false
-…
-content: |
-      2
-…
+error: E_REF_PROTECTED: main moves only forward: e1b27d16… is not a first-parent ancestor of 31528945… (the undo of operation 20:c41e9a07), so nothing was written
+details.changeset: e1b27d16…
+details.id: 20:c41e9a07
+details.name: main
+details.op: 20
+details.target: 31528945…
+hint: main moves only forward: land a change that takes it back
 ```
 
 [History and undo](docs/guides/history-and-undo.md) is the guide.

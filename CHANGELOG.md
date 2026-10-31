@@ -22,6 +22,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
   number is `E_INVALID_ARG`. What to do: read `id` from `op log` or from the response that
   recorded the operation.
 
+- `ref set` and `op undo` refuse to move `main` off its first-parent history (`E_REF_PROTECTED`).
+  What to do: land a change that reverts it. The error's details name the head the move would
+  drop (`changeset`) and its `target`, and an undo's its `op` and `id`; nothing is written, and
+  `release/<name>` refs move either way (the M15 design §4,
+  [Troubleshooting](docs/troubleshooting.md#e_ref_protected)).
+
 ### Added
 
 - Every `op log` entry and every `undo` result that wrote an operation carry its `id`: the number

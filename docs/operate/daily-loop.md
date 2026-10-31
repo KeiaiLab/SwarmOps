@@ -225,7 +225,9 @@ ops[0].ref_moves[0].actor: agent/worker-2
 ```
 
 `op log` lists every write transaction with its id; `swarmops op undo <id>` moves the refs one of
-them moved back, by compare-and-swap, all or none ([README](../../README.md#first-commands)).
+them moved back, by compare-and-swap, all or none, and `main` only forward: the undo of this land
+is refused (`E_REF_PROTECTED`), and a change that reverts it is landed instead
+([README](../../README.md#first-commands)).
 
 ## 4. Send it to git for review
 
@@ -325,8 +327,9 @@ message does. The sync recognised both changes by those lines (`by: "trailer"`),
 rather than land them twice, and moved `main` to the squash commit's changeset. A rebase keeps the
 lines too; a merge commit needs none, since the trunk then holds the exported commits themselves.
 A squash whose message lost the lines is recognised when what is left of the store's changes
-merges onto the trunk's head as no change (`by: "no_op"`). A dropped change stays in the store's
-history, and `swarmops op undo` of the sync's move of `main` brings it back.
+merges onto the trunk's head as no change (`by: "no_op"`). A dropped change stays in the store,
+readable by id; an undo of the sync's move of `main` is refused (`E_REF_PROTECTED`), so a change
+that restores it is landed instead.
 
 When agents landed more while the review ran, the same sync lands those changes on top of the
 trunk's head (`landed_locally`), and the next `swarmops push origin main:review` sends them for the

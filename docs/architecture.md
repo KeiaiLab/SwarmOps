@@ -715,6 +715,11 @@ What an agent sees (operations §4):
   what it named before, which is skipped); a ref moved since by another operation refuses it
   with `E_CAS_MISMATCH`, and nothing is written. It reads the operation's frame under its own
   write's lock, so it never undoes a frame that a failed sync took back.
+- `main` moves only forward (the M15 design §4): `ref set` and `op undo` refuse, with
+  `E_REF_PROTECTED` and nothing written, a move of `main` whose head is not a first-parent
+  ancestor of the new target. `ref set` judges it on its snapshot before the compare-and-swap;
+  `op undo` judges each move of `main` it queued on a snapshot read under its write's lock. The way
+  back is a land of a change that reverts it.
 - `land` publishes a change made on an older head: it merges the change three-way onto the
   target's head (`main` or a `release/*` ref), and inserts the result, one squashed changeset whose
   parent is that head, with the target's compare-and-swap to it in one transaction, the frame a
@@ -735,7 +740,7 @@ not know, so versions can differ (operations §0). `StoreOps` has nineteen opera
 `path_history`, `diff`, `ref_list`, `ref_set`, `ref_delete`, `op_log`, `undo`, `verify` and
 `derive`; `init`, `whoami` and `schema` live in the CLI. `op_log` shows the journal as the store's
 operations, a frame each (storage §3), and `undo` moves an operation's refs back by
-compare-and-swap.
+compare-and-swap, `main` only forward.
 
 Every run of `swarmops` prints exactly one envelope on stdout (only `--help` and `--version` print
 plain text, `mcp`, below, speaks MCP there instead, `serve` git's protocol, and `derive --follow`

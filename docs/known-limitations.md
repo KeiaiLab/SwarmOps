@@ -221,9 +221,11 @@ left).
   earlier land of the same key on the target's first-parent chain, from its head down to the
   land's base, so a land made on an old base walks the changesets landed since. *Target: M9 (an
   index of commit keys, if measurements ask for one). Found: M4 Task 12's hand-off.*
-- **`undo` does not take back a land that later lands built on.** It moves refs back only while
-  they still name what the operation set; under later lands that is `E_CAS_MISMATCH`, and no
-  `revert` lands the inverse change. *Unscheduled. Found: M4 Decision 10.*
+- **`undo` does not take back a land on `main`, nor one that later lands built on.** `main`
+  moves only forward, so the undo of a land on it is `E_REF_PROTECTED` (the M15 design §4). On a
+  `release/<name>` ref an undo moves refs back only while they still name what the operation set;
+  under later lands that is `E_CAS_MISMATCH`. No `revert` lands the inverse change: it is written
+  and landed by hand. *Unscheduled. Found: M4 Decision 10.*
 - **No hooks or annotations after a land.** A land records no post-land verification, and
   `land`'s result has no `verification` field: annotations need a journal record the current
   `FORMAT` lacks. Agents check a landed tree with `read_file` and their own runs. *Target: M7, on
@@ -244,13 +246,19 @@ left).
   resolves when the command runs, so it matches whatever the ref holds by then (it fails only
   if the ref is gone); give an id for an expectation that can fail, or be replayed.
   *Documented (`--expect` help). Found: M1 Task 5; final review, question 13.*
-- **Only `main` is protected.** `ref delete main`, and an `op undo` that would delete `main`, fail
-  with `E_REF_PROTECTED` in every format, with nothing written. Any other ref, `release/<x>`, a
-  tag, a branch, can be deleted by whoever gives its value to `--expect`, and `op undo` of its
-  move takes it back: the published procedures delete `release/*` refs as their normal flow, and
-  a FORMAT 1 store takes no other name, so protecting them would leave it no deletable ref.
+- **Only `main` is protected.** `ref delete main`, an `op undo` that would delete `main`, and a
+  `ref set` or `op undo` that would move `main` off its first-parent history fail with
+  `E_REF_PROTECTED` in every format, with nothing written (the M15 design §4). Any other ref,
+  `release/<x>`, a tag, a branch, can be deleted or moved back by whoever gives its value to
+  `--expect`, and `op undo` of its move takes it back: the published procedures delete
+  `release/*` refs as their normal flow, and a FORMAT 1 store takes no other name, so protecting
+  them would leave it no deletable ref. No setting names other protected refs.
   *Unscheduled: a configured set of protected refs (the v0.6.0 design, decision 8). Found: the
   2026-10-27 completeness report (B23).*
+- **A sync or a git import can still move `main` back.** The forward-only rule guards `ref set`
+  and `op undo`; `sync`'s own move of `main` to the remote's head, and `git import --into main`,
+  are not judged by it. *Unscheduled: with the configured set of protected refs. Found: the M15
+  design §4.*
 - **A commit holds its contents in memory.** All of them, up to the 1 GiB they may hold
   together, and up to about two to three times that while their objects are encoded in
   parallel, besides the request's text (at most 64 MiB). `blob put` (`blob_put`) and

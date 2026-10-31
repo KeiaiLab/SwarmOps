@@ -268,7 +268,8 @@ with `--no-push`, `landed_locally`.
 
 `main` moves before the push, so a push that fails after it (refused by a rule, the network) leaves
 `main` landed on the remote's head; the error says so (`details.main_moved`), and the next sync
-pushes what is left. `swarmops op undo` of the sync's operation takes `main` back.
+pushes what is left. `main` moves only forward, so `swarmops op undo` of the sync's operation is
+refused (`E_REF_PROTECTED`) and writes nothing: to take `main` back, land a change that reverts it.
 
 ### Branches that take pull requests only
 
@@ -328,8 +329,9 @@ or after a list bullet (`* `, `- `) included, as GitHub's default squash message
 squashed commits' messages (`by: "trailer"`); or when, of the changes left, the oldest ones merge
 onto the remote's head as no change at all (`by: "no_op"`): a squash whose message lost the lines,
 or a change someone made again by hand. A merge commit needs neither, since the remote then holds
-the exported commits themselves. A dropped change stays in the store's history, and
-`swarmops op undo` of the sync's move brings it back to `main`.
+the exported commits themselves. A dropped change stays in the store, readable by id; an
+`op undo` of the sync's move is refused (`E_REF_PROTECTED`), so to bring the change back to `main`,
+land a change that restores it.
 
 A line is taken as it stands: anyone who can push to the remote can name a change in a commit
 message, and sync then drops that change without checking the commit's content.

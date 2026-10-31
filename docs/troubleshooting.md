@@ -63,6 +63,7 @@ retry advice; this is that table. Two codes are in the schema but no operation r
 | `E_NOTHING_TO_LAND` | 1 | no | The target holds the change already. | [Landing and undo](#e_nothing_to_land) |
 | `E_CAS_RETRY_EXHAUSTED` | 4 | yes | The target moved before every land attempt. | [Landing and undo](#e_cas_retry_exhausted) |
 | `E_NOTHING_TO_UNDO` | 1 | no | The operation moved no ref. | [Landing and undo](#e_nothing_to_undo) |
+| `E_REF_PROTECTED` | 1 | no | `main` would be deleted or moved back. | [Landing and undo](#e_ref_protected) |
 | `E_BUSY` | 4 | yes | Another writer held the store's lock for the whole 10 s wait. | [A busy store](#e_busy) |
 | `E_STORE_CORRUPT` | 1 | no | Stored data failed verification. | [A damaged store](#e_store_corrupt) |
 | `E_IO` | 1 | no | The filesystem refused an operation. | [A damaged store](#e_io) |
@@ -755,6 +756,21 @@ Exit 1, not retryable. `op undo` of an operation that moved no ref, such as a pl
 
 Find the operation that moved the ref with `swarmops op log` (its `ref_moves`) and undo that one.
 
+### `E_REF_PROTECTED`
+
+Exit 1, not retryable. `main` is never deleted and moves only forward: `ref delete main`, an
+`op undo` of `main`'s creation, and a `ref set` or `op undo` that would move `main` off its
+first-parent history are refused, and nothing is written. Here the undo of the publish that moved
+`main` from `ce8c4ae3…` to `48b8a4cf…`:
+
+```text
+{"ok":false,"op":"undo","api":1,"error":{"code":"E_REF_PROTECTED","message":"main moves only forward: 48b8a4cf… is not a first-parent ancestor of ce8c4ae3… (the undo of operation 2:97ed2717), so nothing was written","retryable":false,"exit":1,"details":{"changeset":"48b8a4cf…","id":"2:97ed2717","name":"main","op":2,"target":"ce8c4ae3…"},"hint":"main moves only forward: land a change that takes it back"},"meta":{"repo":"acme","elapsed_ms":0,"resolved":{},"auth":"trust"}}
+```
+
+`details.changeset` is the head the move would drop and `details.target` where it would go; an
+undo's adds `op` and `id`, and a deletion's gives `name` only. To take `main` back, land a change
+that reverts it: the history keeps both changes. A `release/<name>` ref moves either way.
+
 ## A busy store
 
 ### `E_BUSY`
@@ -1129,7 +1145,7 @@ to do:
 | `branch_ahead` | Commits made in git on top of the export. | Import them first: `swarmops git import PATH --ref <branch>`. |
 | `both_moved` | Git and the store both moved past the last export. | Merge in git, as for [`E_GIT_IMPORT_DIVERGED`](#e_git_import_diverged). |
 | `branch_moved` | The branch names a commit that is no export of this history. | Export to another branch, or `--force`. |
-| `source_moved_back` | The ref is behind the export the branch holds, after an undo or a `ref set` backwards. | `swarmops op log`, then decide; `--force` moves the branch back. |
+| `source_moved_back` | The ref is behind the export the branch holds, after an undo or a `ref set` backwards (`main` itself only moves forward). | `swarmops op log`, then decide; `--force` moves the branch back. |
 | `lossy_history` | The branch holds the original commits of a history imported lossily. | Export to another branch, or `--force`. |
 | `moved_during_export` | Another writer moved the branch while this export wrote. | Run the export again; what it wrote stays. |
 

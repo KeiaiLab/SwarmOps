@@ -598,27 +598,34 @@ entries[0].title: add a guide
 truncated: false
 ```
 
-A deletion is an entry too. Here `610647075821` is a changeset made later in this guide, which
+A deletion is an entry too. Here `e8974b4bb892` is a changeset made later in this guide, which
 deletes `README.md` (see [Undo an operation](#undo-an-operation)):
 
 ```sh
-so history 610647075821:README.md --human
+so history e8974b4bb892:README.md --human
 ```
 
 ```text
 path: README.md
-entries[0].changeset: 610647075821…
+entries[0].changeset: e8974b4bb892…
 entries[0].op: delete
 entries[0].author_agent: agent/worker-1
 entries[0].created_at: 1792626486000
 entries[0].title: drop the readme
-entries[1].changeset: 3ba35c44081b…
+entries[1].changeset: 48b8a4cf3ca9…
 entries[1].op: put
 entries[1].kind: file
-entries[1].id: 745ffc98a5d4…
+entries[1].id: a7a064662799…
 entries[1].author_agent: agent/worker-1
 entries[1].created_at: 1792626460000
-entries[1].title: first
+entries[1].title: add a guide
+entries[2].changeset: 3ba35c44081b…
+entries[2].op: put
+entries[2].kind: file
+entries[2].id: 745ffc98a5d4…
+entries[2].author_agent: agent/worker-1
+entries[2].created_at: 1792626460000
+entries[2].title: first
 truncated: false
 ```
 
@@ -761,12 +768,12 @@ cursor: docs/guide.md
 Diff the changeset against its first parent, `X~1`:
 
 ```sh
-so diff 610647075821~1 610647075821 --human
+so diff e8974b4bb892~1 e8974b4bb892 --human
 ```
 
 ```text
-from: e1ff8dd6a805…
-to: 610647075821…
+from: 48b8a4cf3ca9…
+to: e8974b4bb892…
 files[0].path: README.md
 files[0].status: deleted
 truncated: false
@@ -811,16 +818,32 @@ a frame of the store's journal, numbered from 0 in commit order. Each gives its 
 changesets it recorded and the ref moves it made, with who made each move and when (`at`, in
 Unix seconds).
 
-Here an agent moves `main` back two changesets by mistake, and the op log shows it as
-operation 4:
+`main` moves only forward: `ref set` refuses to move it off its first-parent history, with
+`E_REF_PROTECTED` (exit 1), and writes nothing. `details.changeset` is the head the move would
+drop:
 
 ```sh
 so ref set main main~2 --expect 48b8a4cf3ca95a01caec61568a22e7f4f0ad89ef71b7d1c9ac85e57544b3b641 --human
 ```
 
 ```text
-name: main
-old: 48b8a4cf3ca9…
+error: E_REF_PROTECTED: main moves only forward: 48b8a4cf3ca95a01caec61568a22e7f4f0ad89ef71b7d1c9ac85e57544b3b641 is not a first-parent ancestor of 3ba35c44081b8f1773b4e013f0fd3b7af5f59d67d9faa6e0d42aad4016916cfb, so nothing was written
+details.changeset: 48b8a4cf3ca95a01caec61568a22e7f4f0ad89ef71b7d1c9ac85e57544b3b641
+details.name: main
+details.target: 3ba35c44081b8f1773b4e013f0fd3b7af5f59d67d9faa6e0d42aad4016916cfb
+hint: main moves only forward: land a change that takes it back
+```
+
+A release ref moves either way. Here an agent moves `release/1.0` back one changeset by mistake,
+and the op log shows it as operation 4:
+
+```sh
+so ref set release/1.0 main~2 --expect ce8c4ae3579542fb110b8bec045e1b1fb0655de9389d7a2256b72e16daabb8cb --human
+```
+
+```text
+name: release/1.0
+old: ce8c4ae35795…
 new: 3ba35c44081b…
 already_applied: false
 ```
@@ -835,8 +858,8 @@ ops[0].id: 4:3d1f09a2
 ops[0].kind: ref_move
 ops[0].changesets: []
 ops[0].changesets_total: 0
-ops[0].ref_moves[0].name: main
-ops[0].ref_moves[0].old: 48b8a4cf3ca9…
+ops[0].ref_moves[0].name: release/1.0
+ops[0].ref_moves[0].old: ce8c4ae35795…
 ops[0].ref_moves[0].new: 3ba35c44081b…
 ops[0].ref_moves[0].actor: agent/worker-1
 ops[0].ref_moves[0].at: 1792626486
@@ -909,11 +932,12 @@ truncated: true
 transaction: all of them or none. `ID` is the operation's `id` in `op log`, `<op>:<crc>`: its number
 and the checksum of what it recorded, so an id names one operation and no other. It is a write, so
 it needs an identity. It never removes a changeset: what the ref named stays in the store, readable
-by id.
+by id. An undo moves `main` only forward too: an undo that would take it back is refused (see
+[What an undo refuses](#what-an-undo-refuses)).
 
 ### Take back a mistaken ref move
 
-Operation 4 moved `main` from `48b8a4cf3ca9…` to `3ba35c44081b…`. Undo it:
+Operation 4 moved `release/1.0` from `ce8c4ae35795…` to `3ba35c44081b…`. Undo it:
 
 ```sh
 so op undo 4:3d1f09a2 --human
@@ -923,15 +947,15 @@ so op undo 4:3d1f09a2 --human
 undone: 4
 op: 5
 id: 5:e8a3b617
-ref_moves[0].name: main
+ref_moves[0].name: release/1.0
 ref_moves[0].old: 3ba35c44081b…
-ref_moves[0].new: 48b8a4cf3ca9…
+ref_moves[0].new: ce8c4ae35795…
 ref_moves[0].actor: agent/worker-1
 ref_moves[0].at: 1792626486
 already_applied: false
 ```
 
-`main` names `48b8a4cf3ca9…` again. The undo is an operation of its own, operation 5.
+`release/1.0` names `ce8c4ae35795…` again. The undo is an operation of its own, operation 5.
 
 ### Run an undo again
 
@@ -951,7 +975,7 @@ already_applied: true
 ### Undo an undo
 
 An undo is an operation like any other, so another undo takes it back. Undoing operation 5
-moves `main` to `3ba35c44081b…` again:
+moves `release/1.0` to `3ba35c44081b…` again:
 
 ```sh
 so op undo 5:e8a3b617 --human
@@ -961,8 +985,8 @@ so op undo 5:e8a3b617 --human
 undone: 5
 op: 6
 id: 6:47c2d9e0
-ref_moves[0].name: main
-ref_moves[0].old: 48b8a4cf3ca9…
+ref_moves[0].name: release/1.0
+ref_moves[0].old: ce8c4ae35795…
 ref_moves[0].new: 3ba35c44081b…
 ref_moves[0].actor: agent/worker-1
 ref_moves[0].at: 1792626486
@@ -971,11 +995,11 @@ already_applied: false
 
 ### When a ref moved since
 
-Each ref must still name what the operation set it to. Here an agent publishes on `main`
-(operation 7), and then operation 6 is undone:
+Each ref must still name what the operation set it to. Here an agent publishes on
+`release/1.0` (operation 7), and then operation 6 is undone:
 
 ```sh
-so commit -m 'add notes' --changes c4.json --advance main --human
+so commit -m 'add notes' --changes c4.json --advance release/1.0 --human
 ```
 
 ```text
@@ -984,14 +1008,14 @@ parent: 3ba35c44081b…
 root: 56bce18a5de6…
 files_changed: 1
 blobs_written: 1
-advanced.name: main
+advanced.name: release/1.0
 advanced.old: 3ba35c44081b…
 advanced.new: e1ff8dd6a805…
 advanced.already_applied: false
 replayed: false
 ```
 
-`c4.json` puts one file, `NOTES.md`. `main` no longer names what operation 6 set it to, so the
+`c4.json` puts one file, `NOTES.md`. `release/1.0` no longer names what operation 6 set it to, so the
 undo refuses with `E_CAS_MISMATCH` (exit 4) and writes nothing. `details.actual` is what the ref
 names now:
 
@@ -1000,9 +1024,9 @@ so op undo 6:47c2d9e0 --human
 ```
 
 ```text
-error: E_CAS_MISMATCH: ref main has moved since operation 6 set it to 3ba35c44081b…: it names e1ff8dd6a805… now, so this undo wrote nothing; undo the operations that moved it since, newest first, then this one again, or land a change that reverses operation 6
+error: E_CAS_MISMATCH: ref release/1.0 has moved since operation 6 set it to 3ba35c44081b…: it names e1ff8dd6a805… now, so this undo wrote nothing; undo the operations that moved it since, newest first, then this one again, or land a change that reverses operation 6
 details.actual: e1ff8dd6a805…
-details.name: main
+details.name: release/1.0
 details.op: 6
 retryable: true
 hint: swarmops op log
@@ -1021,9 +1045,9 @@ so commit -m 'drop the readme' --changes c5.json --parent main --human
 ```
 
 ```text
-changeset: 610647075821…
-parent: e1ff8dd6a805…
-root: 1a5912881d21…
+changeset: e8974b4bb892…
+parent: 48b8a4cf3ca9…
+root: 9b9529c18264…
 files_changed: 1
 blobs_written: 0
 replayed: false
@@ -1038,6 +1062,26 @@ error: E_NOTHING_TO_UNDO: operation 8 moved no ref, so there is nothing to undo
 details.op: 8
 hint: swarmops op log
 ```
+
+An undo that would move `main` off its first-parent history is `E_REF_PROTECTED` (exit 1), and
+writes nothing. Operation 2 moved `main` forward to `48b8a4cf3ca9…`, so its undo would take
+`main` back; `details.op` and `details.id` name the operation:
+
+```sh
+so op undo 2:b27e94c5 --human
+```
+
+```text
+error: E_REF_PROTECTED: main moves only forward: 48b8a4cf3ca95a01caec61568a22e7f4f0ad89ef71b7d1c9ac85e57544b3b641 is not a first-parent ancestor of ce8c4ae3579542fb110b8bec045e1b1fb0655de9389d7a2256b72e16daabb8cb (the undo of operation 2:b27e94c5), so nothing was written
+details.changeset: 48b8a4cf3ca95a01caec61568a22e7f4f0ad89ef71b7d1c9ac85e57544b3b641
+details.id: 2:b27e94c5
+details.name: main
+details.op: 2
+details.target: ce8c4ae3579542fb110b8bec045e1b1fb0655de9389d7a2256b72e16daabb8cb
+hint: main moves only forward: land a change that takes it back
+```
+
+To take `main` back, land a change that reverses what the operation did.
 
 An id whose number is past the last operation is `E_OP_NOT_FOUND` (exit 6), and so is one whose
 checksum is not that operation's (`details.reason: checksum`):
@@ -1084,12 +1128,12 @@ hint: pass --as <family>/<instance> or set SWARMOPS_AGENT, e.g. --as agent/worke
 An undo of a deletion creates the ref again. Operation 9 deleted `release/1.0`:
 
 ```sh
-so ref delete release/1.0 --expect ce8c4ae3579542fb110b8bec045e1b1fb0655de9389d7a2256b72e16daabb8cb --human
+so ref delete release/1.0 --expect e1ff8dd6a8059696005d423d858775dc83b2618a2dc104030fdfbfd6afb2f541 --human
 ```
 
 ```text
 name: release/1.0
-old: ce8c4ae35795…
+old: e1ff8dd6a805…
 already_applied: false
 ```
 
@@ -1102,7 +1146,7 @@ undone: 9
 op: 10
 id: 10:a2c7f480
 ref_moves[0].name: release/1.0
-ref_moves[0].new: ce8c4ae35795…
+ref_moves[0].new: e1ff8dd6a805…
 ref_moves[0].actor: agent/worker-1
 ref_moves[0].at: 1792626486
 already_applied: false
@@ -1110,7 +1154,7 @@ already_applied: false
 
 ### Recover from a refusal
 
-Back to the refusal of operation 6: `main` moved since, by operation 7. Undo the later
+Back to the refusal of operation 6: `release/1.0` moved since, by operation 7. Undo the later
 move first, newest first, then operation 6:
 
 ```sh
@@ -1121,7 +1165,7 @@ so op undo 7:9b05e3f4 --human
 undone: 7
 op: 11
 id: 11:1f93b6d2
-ref_moves[0].name: main
+ref_moves[0].name: release/1.0
 ref_moves[0].old: e1ff8dd6a805…
 ref_moves[0].new: 3ba35c44081b…
 ref_moves[0].actor: agent/worker-1
@@ -1137,15 +1181,15 @@ so op undo 6:47c2d9e0 --human
 undone: 6
 op: 12
 id: 12:c6e05a17
-ref_moves[0].name: main
+ref_moves[0].name: release/1.0
 ref_moves[0].old: 3ba35c44081b…
-ref_moves[0].new: 48b8a4cf3ca9…
+ref_moves[0].new: ce8c4ae35795…
 ref_moves[0].actor: agent/worker-1
 ref_moves[0].at: 1792626544
 already_applied: false
 ```
 
-That takes `main` off the changeset operation 7 published, and the changeset stays in the
+That takes `release/1.0` off the changeset operation 7 published, and the changeset stays in the
 store:
 
 ```sh
@@ -1190,7 +1234,7 @@ so ref list --human
 ```text
 refs[0].name: main
 refs[0].target: 48b8a4cf3ca9…
-refs[0].version: 9
+refs[0].version: 3
 ```
 
 ## Check the store
@@ -1399,7 +1443,7 @@ The exit code is the envelope's `error.exit`, and 0 on success.
 | Exit | Meaning | From the commands in this guide |
 | --- | --- | --- |
 | 0 | Success, including an undo that was already applied. | |
-| 1 | The operation failed. | `E_IS_DIR`, `E_AMBIGUOUS_ID`, `E_NOTHING_TO_UNDO`, `E_STORE_CORRUPT` |
+| 1 | The operation failed. | `E_IS_DIR`, `E_AMBIGUOUS_ID`, `E_NOTHING_TO_UNDO`, `E_REF_PROTECTED`, `E_STORE_CORRUPT` |
 | 2 | A malformed request or command line. | `E_INVALID_ARG`: a bad revision, cursor, flag value or `SWARMOPS_FORMAT` |
 | 3 | A conflict with what a change lands on. | None here: `land`, `git import` and `git export` raise it. |
 | 4 | Retryable: running it again can succeed, after re-reading what the error names. | `E_CAS_MISMATCH` |

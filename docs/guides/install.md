@@ -363,8 +363,8 @@ the download install nothing, and neither does a failed download or checksum.
 
 ## What next?
 
-The [quick start](quick-start.md) creates a store, lands work from several agents and undoes an
-operation, and [Concepts](../concepts.md) defines the nouns these guides use.
+The [quick start](quick-start.md) creates a store, lands work from several agents and reads the
+operation log, and [Concepts](../concepts.md) defines the nouns these guides use.
 
 ## Sources
 
