@@ -581,9 +581,10 @@ helpers, `SSH_AUTH_SOCK`, `GIT_SSH_COMMAND` and proxy variables pass through. A 
 base64 form, from whatever git prints before it enters an error. A failure is classified by one
 table, from git's exit status, push's porcelain and git's messages under `LC_ALL=C`, into
 `E_REMOTE_UNREACHABLE` (retryable), `E_REMOTE_REJECTED` and `E_REMOTE_DIVERGED`; a failure the table
-does not know is `E_REMOTE_REJECTED` with the reason `unclassified`, never retried; an object
-git's fsck refuses, or one a fetched ref reaches and the mirror lacks, is `bad_objects`. SwarmOps has no
-network crate and writes no pack: gix stays on the disk side.
+does not know is `E_REMOTE_REJECTED` with the reason `unclassified`, never retried; an object git's
+fsck refuses, a pack whose checksum does not match, or one a fetched ref reaches and the mirror
+lacks, is `bad_objects`. SwarmOps has no network crate and writes no pack: gix stays on the
+disk side.
 
 **The mirror.** `git/mirror.git` is a cache that SwarmOps alone writes: fetched packs land in it,
 the import reads it (`GixSource`), and a push's export is written into it (`GixSink`). A remote's

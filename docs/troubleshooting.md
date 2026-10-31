@@ -1249,7 +1249,7 @@ check:
 | `auth` | No credential, or one the remote refuses. | Check the credential git uses for the remote, or the variable `--token-env` names ([Credentials](guides/github-remote.md#credentials)). |
 | `not_found` | The remote says the repository is not there. | Check the URL: a host such as GitHub answers so for a private repository the credential cannot see. |
 | `declined` | A hook or a rule of the remote's refused. | `details.refs` and `details.remote_messages` give the remote's reason. |
-| `bad_objects` | A fetch received an object git's fsck refuses, or one its refs reach is missing; no tracking ref moved. | Fix the remote's history. |
+| `bad_objects` | A fetch received an object git's fsck refuses, a pack whose checksum does not match, or one its refs reach is missing; no tracking ref moved. | Fix the remote's history. |
 | `unclassified` | A failure git's messages do not explain; never retried. | `details.stderr_tail` gives what git said. |
 
 `details` also names the `remote` and what git said (`refs`, `remote_messages`, `git_exit`,
