@@ -482,14 +482,14 @@ left).
   scope). Found: M15 Task S5b.*
 - **Access is granted by ref, not by path.** `access.toml` grants `read`, and `push`, `force` and
   `land` by ref name; no rule limits the paths a push or a land may change, so a land attempt
-  checks only the `land` grant of its target. *Unscheduled (the M15 design §6 leaves path write
-  rules out of scope). Found: the 2026-10-30 completeness report (E11).*
+  checks only the `land` grant of its target. *Unscheduled (path write rules are outside M15's
+  scope). Found: the 2026-10-30 completeness report (E11).*
 - **A push to `serve` has no damaged-object test of its own.** git's receive-pack checks a pushed
   pack in its quarantine (`receive.fsckObjects`, connectivity), and the hook's import checks each
   object it reads, those of the commits the store does not hold yet, against its id before any
   store ref moves. No test pushes a damaged pack or object to `serve`, as the fetch tests do with
-  a remote, and the objects of a refused push stay in `serve.git` (above). *Unscheduled (the M15
-  design §3 leaves it out of scope). Found: the 2026-10-30 completeness report (D45).*
+  a remote, and the objects of a refused push stay in `serve.git` (above). *Unscheduled (outside
+  M15's scope). Found: the 2026-10-30 completeness report (D45).*
 - **The first connection to a large store exports its whole history.** `serve` exports every
   served ref into `serve.git` before it advertises; a store whose history no export has reached
   yet pays that once, as loose objects: on 12,000 commits the first clone took 1,195.6 s,
@@ -787,8 +787,8 @@ left).
 - **Sparse workspaces' latencies are not measured.** G9's cases (`ws status`, `ws create`, the
   update, `ws commit`) run on workspaces of the whole tree, last in v0.6.0; none times a sparse
   workspace, whose commit, land and scans also walk the disk outside the prefixes and compare the
-  tree with it, nor a sparse create of 10,000 files from a 1,000,000-file tree. *Unscheduled (the M15
-  design §5 leaves it out of scope). Found: the 2026-10-27 completeness report (A28).*
+  tree with it, nor a sparse create of 10,000 files from a 1,000,000-file tree. *Unscheduled
+  (outside M15's scope). Found: the 2026-10-27 completeness report (A28).*
 - **The reserved name is matched in ASCII case, and only Linux runs the refusal.** A component is
   `.swarmws` when it equals that name with ASCII letters folded; other letters are not folded, so
   `.ſwarmws` (U+017F, which a case-insensitive volume of macOS or Windows may fold to `s`) is
@@ -816,8 +816,8 @@ left).
   slow suite) and checks that each confirmed land is on `main` once with its checked tree, but no
   test aims its kills at the window between a land's journal append and its last file write, 10 per
   format and 500 in the slow suite, and checks after the update that the workspace's files equal its
-  head plus every edit made before the kill. *Unscheduled (the M15 design §5 leaves them out of
-  scope). Found: the 2026-10-27 completeness report (B3); M15 Task S4c.*
+  head plus every edit made before the kill. *Unscheduled (both are outside M15's scope). Found: the
+  2026-10-27 completeness report (B3); M15 Task S4c.*
 - **A target that gains a reserved path after the check is not refused.** `ws land` and `ws rebase`
   check the target's paths for names the files cannot hold (`E_WS_UNPORTABLE`) before the store
   call. A target that gains a path with a component named `.swarmws` between that check and the
