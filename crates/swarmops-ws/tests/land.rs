@@ -2428,3 +2428,52 @@ fn an_unsettled_edit_without_a_message_is_dirty() {
     let refused = swarmops_ws::land(&f.ctx(), land_of("w", None)).unwrap_err();
     assert_eq!(refused.code, "E_WS_DIRTY", "{refused:?}");
 }
+
+/// A path the chain modified is none the chain adds: where the target renames it by case, the
+/// land meets the store's conflict, not a case collision of the chain's own.
+#[test]
+fn a_modified_path_renamed_by_case_is_a_conflict() {
+    // 1. The workspace modifies `src/readme`; the target renames it `src/README`.
+    let f = Fixture::new();
+    let b = folding(
+        &f,
+        &[
+            Put::File("src/a.txt", "a\n"),
+            Put::File("src/readme", "r\n"),
+        ],
+    );
+    write(&f.beside("w"), "src/readme", "mine\n");
+    commit_w(&f, "mine");
+    let renamed = f.commit(
+        Some(&b),
+        &[Put::Gone("src/readme"), Put::File("src/README", "R\n")],
+    );
+    f.point("release/r", &renamed);
+
+    // 2. The store refuses the land: a conflict on the modified path.
+    let watched = Watched::new(&f.ops);
+    let refused = swarmops_ws::land(&f.ctx_over(&watched), land_of("w", None)).unwrap_err();
+    assert_eq!(refused.code, "E_CONFLICT", "{refused:?}");
+    assert_eq!(watched.count("land"), 1);
+}
+
+/// On a volume that folds case, the land counts the chain's own new paths against the
+/// portability rules too: one under a directory of the workspace's reserved name is
+/// `E_WS_UNPORTABLE`, and nothing is landed.
+#[test]
+fn a_chain_path_of_the_reserved_name_is_refused() {
+    // 1. The chain adds `src/.swarmws/x`.
+    let f = Fixture::new();
+    folding(&f, &[Put::File("src/a.txt", "a\n")]);
+    write(&f.beside("w"), "src/.swarmws/x", "x\n");
+    commit_w(&f, "reserved");
+
+    // 2. The land is refused before the store's call.
+    let watched = Watched::new(&f.ops);
+    let refused = swarmops_ws::land(&f.ctx_over(&watched), land_of("w", None)).unwrap_err();
+    assert_eq!(refused.code, "E_WS_UNPORTABLE", "{refused:?}");
+    assert_eq!(refused.details["reason"], "reserved_name", "{refused:?}");
+    let paths = serde_json::json!(["src/.swarmws/x"]);
+    assert_eq!(refused.details["paths"], paths, "{refused:?}");
+    assert_eq!(watched.count("land"), 0);
+}

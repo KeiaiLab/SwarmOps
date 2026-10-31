@@ -1,6 +1,8 @@
 //! Materialisation: what an update writes, what it never overwrites, and the volume's rules.
 
-use swarmops_api::{StatusAfter, WsCommitReq, WsCreateReq, WsDiscardReq, WsMaterializeReq};
+use swarmops_api::{
+    StatusAfter, WsCommitReq, WsCreateReq, WsDiscardReq, WsListReq, WsMaterializeReq,
+};
 use swarmops_ws::state::{self, SWARMWS_DIR, Volume};
 use swarmops_ws::{RealFs, lock, materialize};
 
@@ -419,8 +421,8 @@ const RESERVED_TREES: [(&str, &str); 3] = [
 /// directory.
 #[test]
 fn the_swarmws_name_is_reserved_at_any_depth_and_case() {
-    // 1. Each reserved tree alone, in a store of its own: refused, naming the path, nothing
-    //    written.
+    // 1. Each reserved tree alone, in a store of its own: refused, naming the path, with no
+    //    directory made and no workspace registered.
     for (_, path) in RESERVED_TREES {
         let f = Fixture::new();
         let base = f.commit(None, &[Put::File(path, "x\n"), Put::File("lib/a", "a\n")]);
@@ -433,7 +435,9 @@ fn the_swarmws_name_is_reserved_at_any_depth_and_case() {
             serde_json::json!([path]),
             "{path}"
         );
-        assert!(!f.beside(name).join("lib").exists(), "{path}");
+        assert!(!f.beside(name).exists(), "{path}");
+        let listed = swarmops_ws::list(&f.ctx(), WsListReq::default()).unwrap();
+        assert!(listed.workspaces.is_empty(), "{path}: {listed:?}");
     }
 
     // 2. Names that only resemble it are written.

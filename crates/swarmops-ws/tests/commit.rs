@@ -338,6 +338,67 @@ fn an_old_refusal_record_goes_on_commit() {
     }
 }
 
+/// An empty `ws commit` takes only a record it would have redone: a commit cut short, on a
+/// commit of every path. One of named paths, or a land's or a rebase's record, stays as it was.
+#[test]
+fn an_empty_commit_keeps_a_record_it_cannot_redo() {
+    for (op, named) in [("commit", true), ("land", false), ("rebase", false)] {
+        // 1. An untouched workspace with the record of a cut `op`.
+        let f = Fixture::new();
+        let base = f.commit(None, &[Put::File("src/a.txt", "a\n")]);
+        f.create("w", &base, &[]);
+        let dir = f.beside("w");
+        let record = serde_json::json!({
+            "op": op,
+            "key": "0192f6c4-0000-7000-8000-000000000000",
+            "head": standing(&dir).0,
+            "target": "main",
+            "attempt": 1,
+            "state": "cut",
+        });
+        std::fs::write(pending_of(&dir), record.to_string()).unwrap();
+
+        // 2. `ws commit`, of `src/a.txt` for the commit record: nothing to commit, the record
+        //    unchanged.
+        let mut req = commit_of("w", "again");
+        if named {
+            req.paths = vec!["src/a.txt".to_owned()];
+        }
+        let refused = swarmops_ws::commit(&f.ctx(), req).unwrap_err();
+        assert_eq!(refused.code, "E_EMPTY_COMMIT", "{op}: {refused:?}");
+        let kept = std::fs::read_to_string(pending_of(&dir)).unwrap();
+        assert_eq!(kept, record.to_string(), "{op}");
+    }
+}
+
+/// A refused commit whose pending record cannot be removed reports that failure, not the
+/// refusal: the record left would stop the next `ws land`.
+#[test]
+fn a_refusal_whose_record_stays_is_an_io_error() {
+    use swarmops_store::FsMethod;
+    use swarmops_testkit::fs::FailingFs;
+
+    // 1. A workspace with an edit; the pending record's removal fails.
+    let f = Fixture::new();
+    let base = f.commit(None, &[Put::File("src/a.txt", "a\n")]);
+    f.create("w", &base, &["src"]);
+    let dir = f.beside("w");
+    write(&dir, "src/a.txt", "edited\n");
+    let fs = FailingFs::new(|method, p| {
+        method == FsMethod::Remove && p.ends_with("journal/pending.json")
+    });
+    let mut watched = Watched::new(&f.ops);
+    watched.refuse_commit = Some(ErrorCode::InvalidArg);
+    let mut ctx = f.ctx_with(Arc::new(RealHost::default()), Arc::new(fs));
+    ctx.store = &watched;
+
+    // 2. The store refuses: the failed removal comes back, and the record stays.
+    let failed = swarmops_ws::commit(&ctx, commit_of("w", "edit")).unwrap_err();
+    assert_eq!(failed.code, "E_IO", "{failed:?}");
+    assert_eq!(watched.count("commit"), 1);
+    assert!(pending_of(&dir).exists());
+}
+
 /// A file past the 512 MiB an object holds is `E_TOO_LARGE`, naming it, before the store is
 /// asked anything that writes (a sparse file: nothing is read).
 #[cfg(not(windows))]
@@ -936,6 +997,108 @@ fn a_root_swarmws_in_the_tree_is_not_refused() {
     .unwrap();
     assert!(deleted.rescued.is_some(), "{deleted:?}");
     assert!(!dir.exists());
+}
+
+/// Only the root's `.swarmws` is the workspace's own directory, under any ASCII case: a root
+/// `.SWARMWS` of the tree, which a volume that folds case finds as that directory, is skipped,
+/// and a `.swarmws` below the root, on disk off the prefixes, is refused.
+#[test]
+fn only_a_root_swarmws_is_skipped_under_any_case() {
+    // 1. A workspace of `lib` on a tree holding `.SWARMWS/x`, on a host that folds its case:
+    //    the commit goes through.
+    let f = Fixture::new();
+    let base = f.commit(
+        None,
+        &[Put::File(".SWARMWS/x", "x\n"), Put::File("lib/a", "a\n")],
+    );
+    f.create("w", &base, &["lib"]);
+    write(&f.beside("w"), "lib/a", "edited\n");
+    let ctx = f.ctx_on(Arc::new(FoldingHost::default()));
+    swarmops_ws::commit(&ctx, commit_of("w", "edit")).unwrap();
+
+    // 2. A workspace of `a/b` on a tree holding `a/.swarmws/x`, which the root `.gitignore`
+    //    hides from the walk; the file on disk.
+    let base = f.commit(
+        None,
+        &[
+            Put::File(".gitignore", ".swarmws\n"),
+            Put::File("a/.swarmws/x", "x\n"),
+            Put::File("a/b/f", "f\n"),
+        ],
+    );
+    f.create("v", &base, &[".gitignore", "a/b"]);
+    let dir = f.beside("v");
+    write(&dir, "a/.swarmws/x", "x\n");
+    write(&dir, "a/b/f", "edited\n");
+
+    // 3. Refused, naming it.
+    let refused = swarmops_ws::commit(&f.ctx(), commit_of("v", "edit")).unwrap_err();
+    assert_eq!(refused.code, "E_WS_OUTSIDE_PREFIXES", "{refused:?}");
+    assert_eq!(refused_paths(&refused), ["a/.swarmws"]);
+}
+
+/// The real host on a volume that folds case, for the workspace's own directory only: a path
+/// naming it under any ASCII case is looked up as it.
+#[derive(Default)]
+struct FoldingHost {
+    /// The host under it.
+    inner: RealHost,
+}
+
+/// `path` with each component that names [`SWARMWS_DIR`] under any ASCII case spelled as it.
+fn folded(path: &Utf8Path) -> Utf8PathBuf {
+    (path.components())
+        .map(|part| match part.as_str() {
+            name if name.eq_ignore_ascii_case(SWARMWS_DIR) => SWARMWS_DIR,
+            name => name,
+        })
+        .collect()
+}
+
+impl HostFs for FoldingHost {
+    fn write_file(&self, path: &Utf8Path, bytes: &[u8]) -> io::Result<()> {
+        self.inner.write_file(path, bytes)
+    }
+
+    fn symlink(&self, target: &str, path: &Utf8Path) -> io::Result<()> {
+        self.inner.symlink(target, path)
+    }
+
+    fn symlink_metadata(&self, path: &Utf8Path) -> io::Result<Option<HostMeta>> {
+        self.inner.symlink_metadata(&folded(path))
+    }
+
+    fn read_file(&self, path: &Utf8Path) -> io::Result<Vec<u8>> {
+        self.inner.read_file(path)
+    }
+
+    fn read_dir(&self, path: &Utf8Path) -> io::Result<Vec<String>> {
+        self.inner.read_dir(path)
+    }
+
+    fn remove_file(&self, path: &Utf8Path) -> io::Result<()> {
+        self.inner.remove_file(path)
+    }
+
+    fn remove_dir_if_empty(&self, path: &Utf8Path) -> io::Result<bool> {
+        self.inner.remove_dir_if_empty(path)
+    }
+
+    fn create_dir_all(&self, path: &Utf8Path) -> io::Result<()> {
+        self.inner.create_dir_all(path)
+    }
+
+    fn rename(&self, from: &Utf8Path, to: &Utf8Path) -> io::Result<()> {
+        self.inner.rename(from, to)
+    }
+
+    fn read_link(&self, path: &Utf8Path) -> io::Result<String> {
+        self.inner.read_link(path)
+    }
+
+    fn set_mode(&self, path: &Utf8Path, mode: u32) -> io::Result<()> {
+        self.inner.set_mode(path, mode)
+    }
 }
 
 /// A directory named `.gitignore` off the prefixes is no ignore file the walk lacks: a commit

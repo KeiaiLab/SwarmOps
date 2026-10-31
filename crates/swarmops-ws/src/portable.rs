@@ -202,7 +202,7 @@ mod tests {
             reserved.details["paths"],
             json!([".swarmws/x", "src/.SwarmWs/z", ".SWARMWS"])
         );
-        let lookalikes = owned(&["src/swarmws/y", "src/.swarmws.bak/y", "src/.swarmwş/y"]);
+        let lookalikes = owned(&["src/swarmws/y", "src/.swarmws.bak/y", "src/.swarmwſ/y"]);
         check(&lookalikes, None, Platform::Other).unwrap();
 
         // 2. Windows names, on Windows.
