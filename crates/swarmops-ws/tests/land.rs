@@ -752,13 +752,16 @@ fn a_whole_tree_is_not_walked_before_land() {
     }
 }
 
-/// What a refused stale land must leave as it was: the workspace's files and state, the pending
+/// What a refused land must leave as it was: the workspace's files and state, the pending
 /// record, and the store's journal.
+#[derive(PartialEq)]
 struct Snapshot {
     /// The workspace's files.
     files: Vec<(String, char, String)>,
     /// Its `workspace.json`.
     state: state::WorkspaceFile,
+    /// The pending record's bytes, if there is one.
+    pending: Option<Vec<u8>>,
     /// The newest operation's number.
     op: u64,
 }
@@ -770,6 +773,7 @@ impl Snapshot {
         Snapshot {
             files: tree_of(&dir),
             state: state::read(&RealFs::new(), &dir).unwrap(),
+            pending: std::fs::read(pending_in(&dir)).ok(),
             op: f.last_op(),
         }
     }
@@ -831,8 +835,7 @@ fn a_land_after_a_move_back_is_stale() {
 
     // 3. Every file, the state and the journal as they were; no record.
     let after = Snapshot::of(&f, "w");
-    assert!(after.files == before.files && after.state == before.state);
-    assert_eq!(after.op, before.op);
+    assert!(after == before, "the refused land wrote something");
     assert!(!pending_in(&f.beside("w")).exists());
 }
 
@@ -876,8 +879,8 @@ fn a_rewritten_target_is_stale() {
     assert_eq!(refused.details["base_op"], serde_json::json!(base_op));
     assert_eq!(refused.details["moved_op"], serde_json::json!(moved_op));
     let after = Snapshot::of(&f, "w");
-    assert!(after.files == before.files && after.state == before.state);
-    assert_eq!(after.op, before.op);
+    assert!(after == before, "the refused land wrote something");
+    assert!(!pending_in(&f.beside("w")).exists());
 }
 
 /// An `op undo` of the move that put the target on the base takes it off again: stale.
@@ -903,26 +906,33 @@ fn a_land_after_an_undo_is_stale() {
     assert_eq!(refused.details["base_op"], serde_json::json!(base_op));
     assert_eq!(refused.details["moved_op"], serde_json::json!(moved_op));
     let after = Snapshot::of(&f, "w");
-    assert!(after.files == before.files && after.state == before.state);
-    assert_eq!(after.op, before.op);
+    assert!(after == before, "the refused land wrote something");
+    assert!(!pending_in(&f.beside("w")).exists());
 }
 
 /// A base no operation put on the target (a changeset the workspace was made from, off the
 /// target's history) is not stale: the land proceeds.
 #[test]
 fn a_workspace_from_a_side_changeset_is_not_stale() {
-    // 1. A workspace on a side changeset; `main` has other work.
+    // 1. A workspace on a side changeset, its target `release/r`, which has other work.
     let f = Fixture::new();
     let p = f.commit(None, &[Put::File("src/a.txt", "a\n")]);
     let side = f.side(Some(&p), &[Put::File("src/s.txt", "s\n")]);
-    f.commit(Some(&p), &[Put::File("src/m.txt", "m\n")]);
+    let other = f.side(Some(&p), &[Put::File("src/m.txt", "m\n")]);
+    f.point("release/r", &p);
+    f.point("release/r", &other);
     f.create("w", &side, &[]);
-    write(&f.beside("w"), "src/a.txt", "mine\n");
+    let dir = f.beside("w");
+    let mut file = state::read(&RealFs::new(), &dir).unwrap();
+    file.target = "release/r".to_owned();
+    state::replace(&RealFs::new(), &dir, &file).unwrap();
+    write(&dir, "src/a.txt", "mine\n");
 
-    // 2. Landed on `main`.
+    // 2. Landed on `release/r`.
     let done = swarmops_ws::land(&f.ctx(), land_with_message()).unwrap();
     assert_eq!(done.land.status, LandStatus::Landed);
-    assert_eq!(main_of(&f), done.land.landed);
+    let head = f.ops.resolve_rev(ResolveRevReq::new("release/r"));
+    assert_eq!(head.unwrap().id, done.land.landed);
 }
 
 /// The outside refusal comes first, then the stale one, then the dirty one.
@@ -954,7 +964,8 @@ fn a_stale_refusal_sits_between_the_outside_and_the_dirty_ones() {
 }
 
 /// A target that gained a name the workspace's volume cannot hold is refused before the store
-/// lands anything: the target stays where it was, and no pending record is left.
+/// lands anything: the target stays where it was, no store call writes, no pending record is
+/// left and the workspace is as it was.
 #[test]
 fn a_land_onto_a_reserved_name_moves_nothing() {
     for reserved in ["src/.SwarmWs/z", ".swarmws/x"] {
@@ -967,12 +978,100 @@ fn a_land_onto_a_reserved_name_moves_nothing() {
         write(&dir, "src/a.txt", "mine\n");
         let gained = f.side(Some(&b), &[Put::File(reserved, "z\n")]);
         f.point("release/r", &gained);
+        let before = Snapshot::of(&f, "w");
+        let watched = Watched::new(&f.ops);
 
         // 2. The land is refused as unportable, and nothing was written.
-        let refused = swarmops_ws::land(&f.ctx(), land_with_message()).unwrap_err();
+        let refused = swarmops_ws::land(&f.ctx_over(&watched), land_with_message()).unwrap_err();
         assert_eq!(refused.code, "E_WS_UNPORTABLE", "{reserved}: {refused:?}");
         let head = f.ops.resolve_rev(ResolveRevReq::new("release/r"));
         assert_eq!(head.unwrap().id, gained, "{reserved}: the target moved");
+        let writes = watched.count("land") + watched.count("commit");
+        assert_eq!(writes, 0, "{reserved}: a store write");
+        assert!(Snapshot::of(&f, "w") == before, "{reserved}: a write");
         assert!(!pending_in(&dir).exists(), "{reserved}: a pending record");
     }
+}
+
+/// The land of a workspace whose base is off the target (the target moved back) is not refused
+/// as stale when it names another target: only the workspace's own target is judged.
+#[test]
+fn only_the_workspaces_own_target_is_judged_stale() {
+    for other in ["main", "release/x"] {
+        // 1. `release/r` moved back off the base; `other` is `main`, or a ref that held the base
+        //    and moved off it too.
+        let f = Fixture::new();
+        let (p, b, _) = on_release(&f);
+        if other != "main" {
+            f.point(other, &b);
+            f.point(other, &p);
+        }
+        f.point("release/r", &p);
+
+        // 2. Landed on `other`: not refused as stale.
+        let mut req = land_with_message();
+        req.target = Some(other.to_owned());
+        let done = swarmops_ws::land(&f.ctx(), req).unwrap_or_else(|e| panic!("{other}: {e:?}"));
+        assert_eq!(done.land.status, LandStatus::Landed, "{other}");
+    }
+}
+
+/// A history longer than the cap leaves the question open: not stale, and the journal is not
+/// read.
+#[test]
+fn a_history_past_the_cap_is_not_stale() {
+    // 1. A workspace of `main`'s old head; `main` ahead of it, its history reading 20 000 long.
+    let f = Fixture::new();
+    let base = f.commit(None, &[Put::File("src/a.txt", "a\n")]);
+    f.create("w", &base, &[]);
+    write(&f.beside("w"), "src/a.txt", "mine\n");
+    f.commit(Some(&base), &[Put::File("src/b.txt", "b\n")]);
+    let mut watched = Watched::new(&f.ops);
+    watched.fake_history = Some(20_000);
+
+    // 2. Landed, the journal unread.
+    let done = swarmops_ws::land(&f.ctx_over(&watched), land_with_message()).unwrap();
+    assert_eq!(done.land.status, LandStatus::Landed);
+    assert_eq!(watched.count("op_log"), 0);
+}
+
+/// A sparse workspace is refused only for the names under its own prefixes: a name the target
+/// gained elsewhere does not stop its land.
+#[test]
+fn a_reserved_name_outside_the_prefixes_lands() {
+    // 1. A workspace of `src`; `release/r` gains a reserved name under `docs`.
+    let f = Fixture::new();
+    let p = f.commit(
+        None,
+        &[Put::File("docs/d", "d\n"), Put::File("src/a", "a\n")],
+    );
+    f.point("release/r", &p);
+    f.create("w", "release/r", &["src"]);
+    write(&f.beside("w"), "src/a", "mine\n");
+    let gained = f.side(Some(&p), &[Put::File("docs/.swarmws/x", "z\n")]);
+    f.point("release/r", &gained);
+
+    // 2. Landed.
+    let done = swarmops_ws::land(&f.ctx(), land_with_message()).unwrap();
+    assert_eq!(done.land.status, LandStatus::Landed);
+}
+
+/// `moved_op` is the newest move of the target to its head, not the first.
+#[test]
+fn the_stale_refusal_names_the_newest_move_to_the_head() {
+    // 1. `release/r` moved to `p`, away, and back to `p`.
+    let f = Fixture::new();
+    let (p, _, _) = on_release(&f);
+    f.point("release/r", &p);
+    let first = f.last_op();
+    let away = f.side(Some(&p), &[Put::File("src/o.txt", "o\n")]);
+    f.point("release/r", &away);
+    f.point("release/r", &p);
+    let newest = f.last_op();
+
+    // 2. The refusal names the last of the two moves.
+    let refused = swarmops_ws::land(&f.ctx(), land_of("w", None)).unwrap_err();
+    assert_eq!(refused.code, "E_WS_STALE", "{refused:?}");
+    assert_ne!(refused.details["moved_op"], serde_json::json!(first));
+    assert_eq!(refused.details["moved_op"], serde_json::json!(newest));
 }

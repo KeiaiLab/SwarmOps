@@ -440,3 +440,28 @@ fn a_rebase_onto_a_reserved_name_leaves_no_record() {
         assert_eq!((saved.head, saved.base), (head, b.clone()), "{reserved}");
     }
 }
+
+/// The preflight of a rebase reads the head of `--onto`, not the workspace's target: a ref that
+/// gained a reserved name refuses it, and no store frame is written.
+#[test]
+fn a_rebase_preflight_checks_onto() {
+    // 1. A workspace on `release/r` with a commit; `release/o` holds a reserved name.
+    let f = Fixture::new();
+    let b = f.commit(None, &[Put::File("src/a.txt", "a\n")]);
+    f.point("release/r", &b);
+    f.create("w", "release/r", &[]);
+    write(&f.beside("w"), "src/a.txt", "mine\n");
+    let head = commit_all(&f, "w", "mine");
+    let reserved = f.side(Some(&b), &[Put::File("src/.SwarmWs/z", "z\n")]);
+    f.point("release/o", &reserved);
+    let recorded = f.last_op();
+
+    // 2. Rebased onto `release/o`: refused, nothing recorded; the target is clean.
+    let mut req = rebase_of("w", WsRebaseAction::Start);
+    req.onto = "release/o".to_owned();
+    let refused = swarmops_ws::rebase(&f.ctx(), req).unwrap_err();
+    assert_eq!(refused.code, "E_WS_UNPORTABLE", "{refused:?}");
+    assert_eq!(f.last_op(), recorded, "a store frame");
+    let saved = state::read(&RealFs::new(), &f.beside("w")).unwrap();
+    assert_eq!(saved.head, head);
+}

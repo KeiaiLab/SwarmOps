@@ -1338,3 +1338,30 @@ fn a_restore_of_a_reserved_name_is_refused() {
     assert_eq!(refused.code, "E_WS_UNPORTABLE", "{refused:?}");
     assert!(!dir.join("src/.swarmws").exists());
 }
+
+/// A refused restore clears nothing: the agent's file under another named path stays.
+#[test]
+fn a_refused_restore_clears_nothing() {
+    // 1. As above, and a file the agent added elsewhere under `src`.
+    let f = Fixture::new();
+    let base = f.commit(None, &[Put::File("src/a", "a\n")]);
+    f.create("w", &base, &[]);
+    let dir = f.beside("w");
+    write(&dir, "src/.swarmws/y", "y\n");
+    let mut req = WsCommitReq::new("w".to_owned(), "reserved".to_owned());
+    req.status_after = StatusAfter::None;
+    swarmops_ws::commit(&f.ctx(), req).unwrap();
+    std::fs::remove_dir_all(dir.join("src/.swarmws")).unwrap();
+    write(&dir, "src/new.txt", "new\n");
+
+    // 2. Both named in one discard: refused, and the file added is still there.
+    let mut req = WsDiscardReq::new("w".to_owned());
+    req.paths = vec!["src/.swarmws/y".to_owned(), "src/new.txt".to_owned()];
+    req.status_after = StatusAfter::None;
+    let refused = swarmops_ws::discard(&f.ctx(), req).unwrap_err();
+    assert_eq!(refused.code, "E_WS_UNPORTABLE", "{refused:?}");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("src/new.txt")).unwrap(),
+        "new\n"
+    );
+}
