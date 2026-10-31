@@ -597,7 +597,7 @@ Kind: enumeration. `swarmops schema DropReason` prints its JSON Schema.
 
 ## DroppedChange
 
-An unpublished change a sync dropped, since the remote holds it already. It stays in the store, and an undo of the sync's ref move brings it back on `main`.
+An unpublished change a sync dropped, since the remote holds it already. It stays in the store; `main` moves only forward, so to bring it back there, land a change that restores it.
 
 Kind: object. `swarmops schema DroppedChange` prints its JSON Schema.
 

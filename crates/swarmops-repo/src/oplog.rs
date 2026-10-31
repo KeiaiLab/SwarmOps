@@ -198,8 +198,9 @@ pub struct UndoOutcome {
     pub warnings: Vec<String>,
     /// What the write transaction's recovery repaired before the undo, of what earlier writers
     /// left ([`swarmops_store::MetaWrite::recovered`]): on every outcome, and with
-    /// [`RepoError::OpNotFound`], [`RepoError::NothingToUndo`] and [`RepoError::UndoBlocked`]
-    /// too. It is no warning, and it is lost when the call fails otherwise after the repair.
+    /// [`RepoError::OpNotFound`], [`RepoError::NothingToUndo`], [`RepoError::UndoBlocked`] and
+    /// [`RepoError::HistoryProtected`] too. It is no warning, and it is lost when the call fails
+    /// otherwise after the repair.
     pub recovered: Recovered,
 }
 
@@ -233,8 +234,9 @@ impl<O: ObjectStore> Repo<O> {
     /// before it, in one write transaction of its own, all of them or none (see [the module
     /// documentation](self)). [`RepoError::OpNotFound`] for an operation the journal does not
     /// hold, [`RepoError::NothingToUndo`] for one that left every ref where it found it, and
-    /// [`RepoError::UndoBlocked`] when a ref it moved names something else now: nothing is
-    /// written then.
+    /// [`RepoError::UndoBlocked`] when a ref it moved names something else now, and
+    /// [`RepoError::HistoryProtected`] when it would move `main` off its first-parent history
+    /// (the M15 design §4): nothing is written then.
     ///
     /// A journal append that fails ([`StoreError::NotCommitted`]) is returned as it is: nothing
     /// was undone, and the same undo made again undoes it.

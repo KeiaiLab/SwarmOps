@@ -568,7 +568,7 @@ expression: listed
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Moves every ref an operation of op_log moved back to what it named before, by compare-and-swap in one transaction: all of them or none. It takes the operation's id from op_log (4:9f3a01c2); a bare number is E_INVALID_ARG. A ref moved since stops it (E_CAS_MISMATCH, nothing written: undo the later operations first); an undo run again is a replay (already_applied). Changesets are never removed.",
+      "description": "Moves every ref an operation of op_log moved back to what it named before, by compare-and-swap in one transaction: all of them or none. It takes the operation's id from op_log (4:9f3a01c2); a bare number is E_INVALID_ARG. A ref moved since stops it (E_CAS_MISMATCH, nothing written: undo the later operations first, or on main land a change that reverts it); an undo run again is a replay (already_applied). main moves only forward: an undo that would move it back is E_REF_PROTECTED, nothing written. Changesets are never removed.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "`undo` (CLI `op undo`): restore every ref an operation moved to what it named before, by\ncompare-and-swap, in one transaction: all of them or none. Changesets are never removed.",

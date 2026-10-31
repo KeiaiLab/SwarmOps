@@ -250,10 +250,11 @@ refuses all three. To publish a changeset, land it: land merges it three-way ont
 moves main in one step, and on E_CONFLICT details.report says what to resolve. A read \
 may show a commit that a failed sync then takes back; a mutation that names it fails under the \
 lock instead of building on it. op_log lists the store's transactions, newest first; undo \
-restores the refs one moved while they still hold what it set. Clients limit long tool results: \
-ask for little, as each tool's description says. A {\"file\": path} content is read by this \
-server, not by your client: give an absolute path (a relative one, or the server's own stdin or \
-stdout, is refused). Every change is recorded for the agent the server runs as.";
+restores the refs one moved while they still hold what it set; main moves only forward: land \
+a revert. Clients limit long tool results: ask for little, as each tool's description says. A \
+{\"file\": path} content is read by this server, not by your client: give an absolute path (a \
+relative one, or the server's own stdin or stdout, is refused). Every change is recorded for the \
+agent the server runs as.";
 
 /// The most characters of a `read_file` result that Claude Code keeps in the conversation
 /// instead of saving it to a file, which `read_file`'s entry in `tools/list` declares under
@@ -423,7 +424,9 @@ static TOOLS: [Spec; 27] = [
                       by compare-and-swap in one transaction: all of them or none. It takes the \
                       operation's id from op_log (4:9f3a01c2); a bare number is E_INVALID_ARG. \
                       A ref moved since stops it (E_CAS_MISMATCH, nothing written: undo the \
-                      later operations first); an undo run again is a replay (already_applied). \
+                      later operations first, or on main land a change that reverts it); an \
+                      undo run again is a replay (already_applied). main moves only forward: an \
+                      undo that would move it back is E_REF_PROTECTED, nothing written. \
                       Changesets are never removed.",
         effect: Effect::Moves,
         result_chars: None,

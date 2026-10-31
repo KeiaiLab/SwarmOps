@@ -190,7 +190,8 @@ pub enum RepoError {
     },
     /// `undo` found a ref the operation moved naming neither what the operation set it to nor
     /// what it named before: a later operation moved it. Nothing was written, the moves of the
-    /// operation's other refs included; undo the later operations first.
+    /// operation's other refs included; undo the later operations first, or, on `main`, which
+    /// moves only forward, land a change that reverses the operation.
     #[error(
         "ref {name} has moved since operation {op} set it to {}: it names {} now, so nothing was \
          undone",

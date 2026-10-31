@@ -2542,7 +2542,7 @@ expression: s.redact(&all)
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "An unpublished change a sync dropped, since the remote holds it already. It stays in the\nstore, and an undo of the sync's ref move brings it back on `main`.",
+      "description": "An unpublished change a sync dropped, since the remote holds it already. It stays in the\nstore; `main` moves only forward, so to bring it back there, land a change that restores it.",
       "properties": {
         "by": {
           "$ref": "#/$defs/DropReason",
@@ -8182,7 +8182,7 @@ expression: s.redact(&all)
           ]
         },
         "DroppedChange": {
-          "description": "An unpublished change a sync dropped, since the remote holds it already. It stays in the\nstore, and an undo of the sync's ref move brings it back on `main`.",
+          "description": "An unpublished change a sync dropped, since the remote holds it already. It stays in the\nstore; `main` moves only forward, so to bring it back there, land a change that restores it.",
           "properties": {
             "by": {
               "$ref": "#/$defs/DropReason",

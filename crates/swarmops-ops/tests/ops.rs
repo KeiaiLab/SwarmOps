@@ -1076,6 +1076,42 @@ fn ref_set_moving_main_back_is_refused() {
     assert_eq!(ref_target(&ops, "release/r"), c1);
 }
 
+/// The undo of a move of `main` that a later move left behind is `E_CAS_MISMATCH`, as on any
+/// ref, and nothing is written; its message gives `main`'s one way back, a land, since undoing
+/// the later move first would take `main` back too (the M15 design §4).
+#[test]
+fn undo_of_main_moved_since_is_blocked() {
+    let (_dir, root, ops) = new_store();
+    let who = agent();
+    let c1 = commit(&ops, None, vec![text("f", "1")]);
+    let c2 = commit(&ops, Some(&c1), vec![text("f", "2")]);
+    let c3 = commit(&ops, Some(&c2), vec![text("f", "3")]);
+    ops.ref_set(&who, set("main", &c1, None, true)).unwrap();
+    ops.ref_set(&who, set("main", &c2, Some(&c1), false))
+        .unwrap();
+    let listed = ops.op_log(OpLogReq::default()).unwrap().ops.remove(0);
+    ops.ref_set(&who, set("main", &c3, Some(&c2), false))
+        .unwrap();
+    let frames = frame_count(&root);
+
+    let refused = ops.undo(&who, UndoReq::new(&listed.id));
+    let err = expect_err(refused, ErrorCode::CasMismatch);
+    let op = listed.op;
+    let expected = json!({"name": "main", "actual": c3, "op": op});
+    assert_eq!(Value::Object(err.details.clone()), expected, "{err:?}");
+    assert_eq!(
+        err.message,
+        format!(
+            "ref main has moved since operation {op} set it to {c2}: it names {c3} now, so this \
+             undo wrote nothing; main moves only forward, so land a change that reverses \
+             operation {op}"
+        )
+    );
+    assert_eq!(err.hint.as_deref(), Some("swarmops op log"));
+    assert_eq!(ref_target(&ops, "main"), c3);
+    assert_eq!(frame_count(&root), frames, "nothing written");
+}
+
 /// An undo of a land would take `main` back: it is `E_REF_PROTECTED` naming the operation, its
 /// id as asked, the landed head and the head before (the M15 design §4). Nothing is written,
 /// and what the undo's write repaired first is recorded.

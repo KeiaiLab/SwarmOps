@@ -1122,6 +1122,9 @@ pub enum RefCommand {
         prefix: Option<String>,
     },
     /// Point ref NAME at REV: move it from --expect, or --create it.
+    ///
+    /// main moves only forward: unless its head is a first-parent ancestor of REV, the move is
+    /// E_REF_PROTECTED, and nothing is written; land a change that reverts it instead.
     #[command(group(ArgGroup::new("from").required(true).args(["expect", "create"])))]
     Set {
         #[arg(help = REF_SET_NAME_HELP)]
@@ -1310,6 +1313,9 @@ pub enum OpCommand {
     /// Each ref must still name what the operation set it to (or what it named before, which
     /// is skipped): one that was moved since stops the undo with E_CAS_MISMATCH, and nothing is
     /// written. An undo run again is a replay (already_applied). Changesets are never removed.
+    ///
+    /// main moves only forward: an undo that would move it back is E_REF_PROTECTED, and nothing
+    /// is written; land a change that reverts it instead.
     Undo {
         // Help given as `help` rather than a doc comment: rustdoc would take `<op>` for HTML.
         #[arg(

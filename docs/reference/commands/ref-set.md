@@ -4,6 +4,8 @@
 
 Point ref NAME at REV: move it from --expect, or --create it.
 
+main moves only forward: unless its head is a first-parent ancestor of REV, the move is E\_REF\_PROTECTED, and nothing is written; land a change that reverts it instead.
+
 ```yaml
 title: "swarmops ref set"
 description: "Point ref NAME at REV: move it from --expect, or --create it."

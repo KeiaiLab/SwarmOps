@@ -564,7 +564,7 @@ pub enum DropReason {
 }
 
 /// An unpublished change a sync dropped, since the remote holds it already. It stays in the
-/// store, and an undo of the sync's ref move brings it back on `main`.
+/// store; `main` moves only forward, so to bring it back there, land a change that restores it.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DroppedChange {

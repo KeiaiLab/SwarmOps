@@ -26,7 +26,10 @@ collects the changes on `stable` that no release holds yet, until the next relea
   What to do: land a change that reverts it. The error's details name the head the move would
   drop (`changeset`) and its `target`, and an undo's its `op` and `id`; nothing is written, and
   `release/<name>` refs move either way (the M15 design §4,
-  [Troubleshooting](docs/troubleshooting.md#e_ref_protected)).
+  [Troubleshooting](docs/troubleshooting.md#e_ref_protected)). An undo that a later move of `main`
+  blocks (`E_CAS_MISMATCH`) says to land a change that reverses the operation, no longer to undo
+  the later operations first; the `op undo` and `ref set` help, the MCP `undo` tool and the MCP
+  server instructions state the rule.
 
 ### Added
 

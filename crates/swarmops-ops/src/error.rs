@@ -21,7 +21,7 @@ use swarmops_git::{
     Unsupported,
 };
 use swarmops_repo::{MergeConflicts, OpId, OpNotFoundReason, RepoError, StoreError};
-use swarmops_store::{IoFailure, Layout, LimitKind, MAX_OBJECT_LEN};
+use swarmops_store::{IoFailure, Layout, LimitKind, MAX_OBJECT_LEN, RefKind};
 
 use crate::local;
 
@@ -531,9 +531,9 @@ fn op_not_found(id: OpId, last: Option<u64>, reason: OpNotFoundReason, message: 
 
 /// An `undo` of operation `op` that found ref `name` at `actual` (`None`: it does not exist), not
 /// at `expected`, what the operation set it to, so that the undo wrote nothing: `E_CAS_MISMATCH`
-/// `{name, actual, op}`, whose message says to undo the operations that moved the ref since
-/// first, or to land a change that reverses this one, and whose hint only reads: the operation
-/// log.
+/// `{name, actual, op}`, whose hint only reads: the operation log. Its message says to undo the
+/// operations that moved the ref since first, or to land a change that reverses this one; for
+/// `main`, which moves only forward (the M15 design §4), only the land.
 fn undo_blocked(
     op: u64,
     name: &str,
@@ -543,10 +543,17 @@ fn undo_blocked(
     let shown = |target: Option<ChangesetId>| {
         target.map_or_else(|| "nothing".to_owned(), |id| id.to_string())
     };
+    let remedy = if swarmops_store::ref_kind(name) == Some(RefKind::Main) {
+        format!("main moves only forward, so land a change that reverses operation {op}")
+    } else {
+        format!(
+            "undo the operations that moved it since, newest first, then this one again, or land \
+             a change that reverses operation {op}"
+        )
+    };
     let message = format!(
         "ref {name} has moved since operation {op} set it to {}: it names {} now, so this undo \
-         wrote nothing; undo the operations that moved it since, newest first, then this one \
-         again, or land a change that reverses operation {op}",
+         wrote nothing; {remedy}",
         shown(expected),
         shown(actual)
     );
@@ -554,6 +561,9 @@ fn undo_blocked(
     error.details.insert("op".to_owned(), op.into());
     error
 }
+
+/// The hint of an `E_REF_PROTECTED` move of `main` back: its one way back (the M15 design §4).
+const FORWARD_HINT: &str = "main moves only forward: land a change that takes it back";
 
 /// A move of `main` from `head` to `target` off its first-parent history, asked by a ref set or
 /// by the undo of operation `undone` (the M15 design §4): `E_REF_PROTECTED` `{name, changeset,
@@ -576,7 +586,7 @@ fn history_protected(
     }
     error(ErrorCode::RefProtected, message)
         .with_details(found)
-        .with_hint("main moves only forward: land a change that takes it back")
+        .with_hint(FORWARD_HINT)
 }
 
 fn ref_name_invalid(name: String, message: String) -> OpError {
@@ -1866,8 +1876,7 @@ mod tests {
         assert_eq!(set.code, ErrorCode::RefProtected.as_str());
         assert_eq!((set.exit, set.retryable), (1, false));
         assert_eq!(set.details, details(moved.clone()));
-        let hint = "main moves only forward: land a change that takes it back";
-        assert_eq!(set.hint.as_deref(), Some(hint));
+        assert_eq!(set.hint.as_deref(), Some(FORWARD_HINT));
 
         // 2. An undo.
         let undo = refused(Some(swarmops_repo::OpId::new(6, 0xab)));

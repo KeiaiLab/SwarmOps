@@ -60,7 +60,8 @@ Before the comparison:
 
 `E_CAS_MISMATCH` here carries `details.name` (the ref), `details.actual` (what it names now,
 `null` when it does not exist) and `details.op`; the hint is `swarmops op log`, which only reads.
-A later operation moved the ref, so the message gives two ways on:
+A later operation moved the ref, so the message gives two ways on (for `main`, only the second,
+since `main` moves only forward):
 
 - **Undo the later operations first, newest first, then `OP` again.** Each undo is checked the
   same way, so this works only while nothing else moved the ref meanwhile.
@@ -114,7 +115,8 @@ already; otherwise `ref_moves` lists each move made, and `op` and `id` are the u
 ### Through MCP
 
 The MCP tool is `undo`, with `id`. Its description says the same: a ref moved since stops it,
-undo the later operations first, and a second run is a replay.
+undo the later operations first (on `main`, land a revert), an undo that would move `main` back
+is `E_REF_PROTECTED`, and a second run is a replay.
 
 ### Guides
 
