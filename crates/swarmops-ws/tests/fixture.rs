@@ -180,6 +180,26 @@ impl Fixture {
         }
     }
 
+    /// The number of the operation that recorded changeset `id`.
+    pub fn op_recording(&self, id: &str) -> u64 {
+        let mut before = None;
+        loop {
+            let mut req = OpLogReq::default();
+            req.before = before;
+            req.limit = 100;
+            let page = self.ops.op_log(req).unwrap();
+            let found = page
+                .ops
+                .iter()
+                .find(|op| op.changesets.iter().any(|c| c.id == id));
+            if let Some(op) = found {
+                return op.op;
+            }
+            assert!(page.truncated, "no operation recorded {id}");
+            before = page.ops.last().map(|op| op.op);
+        }
+    }
+
     /// Makes workspace `name` beside the store, on `base`, holding `prefixes` (the whole tree
     /// when empty), through `ctx`.
     pub fn create_in(
@@ -410,6 +430,10 @@ pub struct Watched<'a> {
     /// `op_log` answers this many made-up operations, numbered above the store's newest and
     /// moving no ref, before the store's own.
     pub fake_ops: Option<u64>,
+    /// `op_log` answers the store's own operations numbered this many higher, after this many
+    /// made-up ones, numbered from 0 and moving no ref: a long journal whose newest operations
+    /// are the store's. Not for use with [`Watched::fake_ops`].
+    pub fake_older_ops: Option<u64>,
     /// Where each call to `commit`, `rebase` and `land` is also noted, in order with the file
     /// layers' events (the sweep driver's order checker).
     #[cfg(feature = "test-hooks")]
@@ -428,6 +452,7 @@ impl<'a> Watched<'a> {
             fake_history: None,
             fake_history_of: None,
             fake_ops: None,
+            fake_older_ops: None,
             #[cfg(feature = "test-hooks")]
             trace: None,
         }
@@ -504,6 +529,59 @@ impl<'a> Watched<'a> {
         out.cursor = (end < total).then(|| id(end - 1));
         out
     }
+}
+
+impl Watched<'_> {
+    /// `op_log` over the store's operations shifted up by `older`, with `older` made-up ones
+    /// below them: the number of a made-up operation is under `older`.
+    fn op_log_over(&self, older: u64, req: &OpLogReq) -> Result<OpLogPage, OpError> {
+        let limit = u64::try_from(req.limit).unwrap();
+
+        // 1. A page that starts among the store's own operations: theirs, in the shifted
+        //    numbers, whose last page is followed by the made-up ones.
+        let mut ops = Vec::new();
+        let mut from = older;
+        if req.before.is_none_or(|before| before > older) {
+            let mut real = req.clone();
+            real.before = req.before.map(|before| before - older);
+            let page = self.inner.op_log(real)?;
+            let truncated = page.truncated;
+            ops = (page.ops.into_iter())
+                .map(|mut op| {
+                    op.op += older;
+                    op
+                })
+                .collect();
+            if truncated {
+                return Ok(OpLogPage::new(ops, true));
+            }
+        } else {
+            from = req.before.unwrap_or(older);
+        }
+
+        // 2. The made-up operations that fit the page.
+        let room = limit.saturating_sub(u64::try_from(ops.len()).unwrap());
+        let lo = from.saturating_sub(room);
+        ops.extend(made_up_ops(lo..from));
+        Ok(OpLogPage::new(ops, lo > 0))
+    }
+}
+
+/// Made-up operations numbered `range`, newest first, moving no ref.
+fn made_up_ops(range: std::ops::Range<u64>) -> Vec<swarmops_api::OperationOut> {
+    range
+        .rev()
+        .map(|n| {
+            swarmops_api::OperationOut::new(
+                n,
+                format!("{n}:00000000"),
+                swarmops_api::OperationKind::Commit,
+                Vec::new(),
+                0,
+                Vec::new(),
+            )
+        })
+        .collect()
 }
 
 impl StoreOps for Watched<'_> {
@@ -614,36 +692,32 @@ impl StoreOps for Watched<'_> {
 
     fn op_log(&self, req: OpLogReq) -> Result<OpLogPage, OpError> {
         self.saw("op_log");
+        if let Some(older) = self.fake_older_ops {
+            return self.op_log_over(older, &req);
+        }
         let Some(extra) = self.fake_ops else {
             return self.inner.op_log(req);
         };
+
+        // 1. The made-up operations stand above the store's newest.
         let mut newest = OpLogReq::default();
         newest.limit = 1;
         let top = (self.inner.op_log(newest)?.ops.first()).map_or(0, |op| op.op + 1);
         let end = top + extra;
         let before = req.before.unwrap_or(end).min(end);
+
+        // 2. A page that starts among the store's own operations is the store's.
         if before <= top {
             let mut real = req;
             real.before = Some(before);
             return self.inner.op_log(real);
         }
+
+        // 3. Else a page of made-up ones: the store's follow, so more pages remain.
         let lo = before
             .saturating_sub(u64::try_from(req.limit).unwrap())
             .max(top);
-        let ops = (lo..before)
-            .rev()
-            .map(|n| {
-                swarmops_api::OperationOut::new(
-                    n,
-                    format!("{n}:00000000"),
-                    swarmops_api::OperationKind::Commit,
-                    Vec::new(),
-                    0,
-                    Vec::new(),
-                )
-            })
-            .collect();
-        Ok(OpLogPage::new(ops, true))
+        Ok(OpLogPage::new(made_up_ops(lo..before), true))
     }
 
     fn undo(&self, who: &Identity, req: UndoReq) -> Result<UndoResp, OpError> {

@@ -1412,11 +1412,12 @@ fn commit_w(f: &Fixture, message: &str) -> String {
     swarmops_ws::commit(&f.ctx(), req).unwrap().changeset
 }
 
-/// A cut land the journal cannot place within its operation cap is not known to be absent: the
-/// record stays, and `ws rebase` says to finish the land first.
+/// A cut land whose head's operation lies past the journal's operation cap is not known to be
+/// absent: the record stays, and `ws rebase` says to finish the land first.
 #[test]
 fn a_cut_land_the_journal_cannot_place_is_left() {
-    // 1. A land cut before its frame, the target moved back; the journal long past its cap.
+    // 1. A land cut before its frame, the target moved back; the cap spent above the store's
+    //    own operations.
     let f = Fixture::new();
     let (p, _, _) = on_release(&f);
     let hooked = Hooked::new(&f.ops);
@@ -2004,23 +2005,81 @@ fn a_key_on_an_older_changeset_is_held() {
     assert_eq!(done.land.landed, first);
 }
 
-/// A cut land the journal names within its cap, but not on the target, is not known to be
-/// missing while the journal runs on past the cap: an older copy of its key may be on the
-/// target. The record stays.
+/// A cut land is placed back to the operation that made the record's head, however long the
+/// journal runs on below it: the land was never recorded, or the target moved back past it, and
+/// `ws rebase` takes the record over.
 #[test]
-fn a_cut_land_with_a_capped_journal_is_left() {
-    // 1. A land cut after its frame, the target moved back; the journal's cap reached just
-    //    after the land's operation.
+fn a_cut_land_is_placed_in_a_long_journal() {
+    for cut in [Cut::Before, Cut::After] {
+        // 1. A land cut short, the target moved back; 10,050 older operations below the head's.
+        let f = Fixture::new();
+        let (p, _, _) = on_release(&f);
+        let hooked = Hooked::new(&f.ops);
+        cut_land(&f, &hooked, cut);
+        f.point("release/r", &p);
+        let mut watched = Watched::new(&hooked);
+        watched.fake_older_ops = Some(JOURNAL_CAP + 50);
+
+        // 2. The rebase takes the record over.
+        rebase_w(&f.ctx_over(&watched)).unwrap_or_else(|e| panic!("{cut:?}: {e:?}"));
+        assert!(!pending_in(&f.beside("w")).exists(), "{cut:?}: a record");
+    }
+}
+
+/// A land the target holds stays the land's to finish in a long journal: `ws rebase` leaves the
+/// record, and `ws land` replays it.
+#[test]
+fn a_held_cut_land_is_finished_in_a_long_journal() {
+    // 1. A land cut after its frame, which the target holds; 10,050 older operations below.
     let f = Fixture::new();
-    let (p, _, _) = on_release(&f);
+    on_release(&f);
     let hooked = Hooked::new(&f.ops);
     cut_land(&f, &hooked, Cut::After);
-    f.point("release/r", &p);
+    let first = hooked.lands()[0].landed.clone();
     let mut watched = Watched::new(&hooked);
-    watched.fake_ops = Some(JOURNAL_CAP - 3);
+    watched.fake_older_ops = Some(JOURNAL_CAP + 50);
+    let ctx = f.ctx_over(&watched);
 
-    // 2. The rebase does not take the record over.
-    let refused = rebase_w(&f.ctx_over(&watched)).unwrap_err();
+    // 2. The rebase leaves the record; the land replays.
+    let refused = rebase_w(&ctx).unwrap_err();
     assert_eq!(refused.code, "E_INVALID_ARG", "{refused:?}");
     assert!(pending_in(&f.beside("w")).exists(), "the record went");
+    let done = swarmops_ws::land(&ctx, land_of("w", None)).unwrap();
+    assert_eq!(done.land.status, LandStatus::Replayed);
+    assert_eq!(done.land.landed, first);
+}
+
+/// The search for a cut land stops at the operation that made the record's head, if that is
+/// the last of the journal's cap: one operation more above it, the land is not known to be
+/// missing, and the record stays.
+#[test]
+fn a_cut_land_is_placed_up_to_the_cap() {
+    for pad in [0, 1] {
+        // 1. A land cut after its frame, the target moved back; the head's operation, with
+        //    the ones above it, `pad` short of the cap or past it.
+        let f = Fixture::new();
+        let (p, _, _) = on_release(&f);
+        let hooked = Hooked::new(&f.ops);
+        let head = cut_land(&f, &hooked, Cut::After);
+        let land = hooked.lands()[0].landed.clone();
+        f.point("release/r", &p);
+        let newest = f.last_op();
+        let depth = newest - f.op_recording(&head) + 1;
+        assert!(
+            newest - f.op_recording(&land) < depth,
+            "the land is above the head"
+        );
+        let mut watched = Watched::new(&hooked);
+        watched.fake_ops = Some(JOURNAL_CAP - depth + pad);
+
+        // 2. Within the cap the rebase takes the record over; past it, it stays.
+        let taken = rebase_w(&f.ctx_over(&watched));
+        let kept = pending_in(&f.beside("w")).exists();
+        if pad == 0 {
+            assert!(taken.is_ok() && !kept, "{taken:?} kept={kept}");
+            continue;
+        }
+        assert_eq!(taken.unwrap_err().code, "E_INVALID_ARG");
+        assert!(kept, "the record went");
+    }
 }

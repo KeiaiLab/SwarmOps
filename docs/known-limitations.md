@@ -776,9 +776,13 @@ left).
   the target to it. A land onto another `--target` is not checked, and neither are `ws commit`,
   `ws status` and `ws rebase`; a target whose first-parent history is longer than 10,000 commits
   (`BEHIND_CAP`), or a base with no such operation among the last 10,000, lands as it did before
-  the check. A land cut short whose key the journal's last 10,000 operations or the target's last
-  10,000 commits cannot place keeps its pending record: `ws land` and `ws rebase` both refuse,
-  and `ws delete <name> --rescue` is the way out. `ws rebase` of a stale workspace takes no
+  the check. `ws rebase` leaves the pending record of a land cut short that it cannot place, and
+  answers "run it again first": the journal names the land's changeset and the target's
+  history is longer than the last 10,000 commits, which do not hold it, or the operation that
+  made the record's head is not among the journal's newest 10,000 (a land is looked for no
+  further back than that operation). `ws land` is refused only
+  by the rules above, so it can land such a record on the stale base; `ws delete <name>
+  --rescue` is the way out of the record. `ws rebase` of a stale workspace takes no
   snapshot of the edits it moves onto the new head, and no test kills a land in the middle of
   the check and the update (the M15 design's third SIGKILL acceptance). *Unscheduled (the M15
   design §5 leaves them out of scope). Found: M15 Task S4c.*

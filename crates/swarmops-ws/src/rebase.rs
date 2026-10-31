@@ -135,7 +135,7 @@ fn left_land(ctx: &Ctx<'_>, ws: &Workspace) -> Result<Option<Pending>, OpError> 
 
     // 2. Held, or not known not to be: it stays.
     let target = cut.target.as_deref().unwrap_or(&ws.file.target);
-    if status::landed(ctx.store, target, &cut.key)? != Landed::Absent {
+    if status::landed(ctx.store, target, &cut.key, &cut.head)? != Landed::Absent {
         return Ok(None);
     }
     Ok(Some(cut))

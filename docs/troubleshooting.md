@@ -1286,10 +1286,13 @@ A land cut short and then left behind by its target (the land was never recorded
 moved back past it) is refused the same way, and `ws rebase` takes it over: it drops the land's
 record and rebases as usual, unless the rebase is refused first (`E_WS_UNPORTABLE`), which leaves
 the record. A land the target still holds is not taken over: `ws land` again finishes it, and
-`ws rebase` answers `E_INVALID_ARG` until it has. A land the check cannot place, because the
-journal's last 10,000 operations or the target's last 10,000 commits do not settle whether the
-target holds it, is not taken over either: `ws land` refuses it as stale and `ws rebase` leaves
-the record, so `ws delete <name> --rescue` is the way out, and its commits stay in the store.
+`ws rebase` answers `E_INVALID_ARG` until it has. A land `ws rebase` cannot place is not taken
+over either, and the record stays: the journal names the land's changeset and the target's
+history is longer than the last 10,000 commits, which do not hold it, or the operation that made
+the record's head is not among the journal's newest 10,000 (a land is looked for no further back
+than that operation, so a recent one is placed in a journal of any length). `ws land` is refused as stale only by the rules below, so it can land
+that record; `ws delete <name> --rescue` is the way out of it, and its commits stay in the
+store.
 
 The check runs for a land onto the workspace's own target, and lets a land through that it cannot
 place: a target whose first-parent history is longer than 10,000 commits, or a base with no

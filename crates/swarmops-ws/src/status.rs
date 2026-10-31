@@ -371,16 +371,25 @@ pub(crate) enum Landed {
 }
 
 /// Whether a land with `key` is on the first-parent history of ref `target`: any changeset the
-/// journal's newest [`OP_CAP`] operations name as a land of that key, looked for on the history
-/// within [`BEHIND_CAP`] changesets, as the store's own search for a key does. A key no
-/// operation made is [`Landed::Absent`].
-pub(crate) fn landed(store: &dyn StoreOps, target: &str, key: &str) -> Result<Landed, OpError> {
-    // 1. The journal: every changeset a land of the key made.
+/// journal names as a land of that key, looked for on the history within [`BEHIND_CAP`]
+/// changesets, as the store's own search for a key does. The journal is read back from its
+/// newest operation to the one that made `head`, the changeset the record stands on: no land of
+/// the key can be older, and the read ends there however long the journal is. When that
+/// operation is not among the newest [`OP_CAP`] (or no operation made `head`), a key no
+/// changeset of the cap's operations carries is not known to be missing. A key no operation
+/// made is [`Landed::Absent`] once the journal is read back to `head`.
+pub(crate) fn landed(
+    store: &dyn StoreOps,
+    target: &str,
+    key: &str,
+    head: &str,
+) -> Result<Landed, OpError> {
+    // 1. The journal back to the head's operation: every changeset a land of the key made.
     let mut made = HashSet::new();
     let scanned = scan_ops(store, |op| {
         let lands = (op.changesets.iter()).filter(|c| c.land_key.as_deref() == Some(key));
         made.extend(lands.map(|c| c.id.clone()));
-        false
+        op.changesets.iter().any(|c| c.id == head)
     })?;
     let capped = matches!(scanned, Scanned::Capped);
     if made.is_empty() {

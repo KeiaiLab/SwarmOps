@@ -342,7 +342,7 @@ fn replays(ctx: &Ctx<'_>, ws: &Workspace, target: &str) -> Result<bool, OpError>
     if cut.op != PendingOp::Land || cut.head != ws.file.head {
         return Ok(false);
     }
-    Ok(status::landed(ctx.store, target, &cut.key)? == Landed::Held)
+    Ok(status::landed(ctx.store, target, &cut.key, &cut.head)? == Landed::Held)
 }
 
 /// The record of a `ws land` cut short on workspace `ws`'s head, in either state.

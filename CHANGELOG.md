@@ -80,10 +80,13 @@ collects the changes on `stable` that no release holds yet, until the next relea
   before. A land cut short whose target then left the base is refused the same way, and `ws
   rebase` takes over its record when no land of its key is on the target (the record would
   otherwise refuse the rebase: "run it again first"); a land the target holds is finished by `ws
-  land`, and it replays past a reserved name the target gained since. A land the check cannot
-  place (the journal's last 10,000 operations or the target's last 10,000 commits are not
-  enough) keeps its record, and `ws land` and `ws rebase` both refuse: `ws delete <name>
-  --rescue` is the way out ([Troubleshooting](docs/troubleshooting.md#e_ws_stale)).
+  land`, and it replays past a reserved name the target gained since. `ws rebase` leaves the
+  record of a land it cannot place, with the same "run it again first": the journal names the
+  land's changeset and the target's history is longer than the last 10,000 commits, which do not
+  hold it, or the operation that made the record's head is not among the journal's newest 10,000
+  (the journal is read back no further than that operation, so a recent land is placed in a
+  journal of any length); `ws delete <name> --rescue` is the way out. `ws land` is refused as stale only by the rules above, so it can land such a record
+  ([Troubleshooting](docs/troubleshooting.md#e_ws_stale)).
 - Golden envelopes pin 54 of the 55 error codes, eight more than before: `E_AMBIGUOUS_ID`,
   `E_IO_TRANSIENT`, `E_INTERNAL`, `E_BUSY`, `E_CAS_RETRY_EXHAUSTED`, `E_UNKNOWN_PARENT` as an
   error object, `E_WS_OUTSIDE_PREFIXES` and `E_WS_STALE`.
