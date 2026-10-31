@@ -921,6 +921,27 @@ fn undo_moving_main_forward_is_allowed() {
     assert_eq!(target(&repo, "main"), Some(c2));
 }
 
+/// The undo of a frame that moved `main` and another ref, `main` back already by a move from
+/// before the rule: `main` is skipped, unjudged, and the other ref moves back alone.
+#[test]
+fn undo_with_main_back_already_moves_the_rest() {
+    let (_dir, root, repo) = new_repo();
+    let [c1, c2, _] = chain(&repo);
+    cas(&repo, "main", None, Some(c1)); // op 3
+    cas(&repo, "release/r", None, Some(c1)); // op 4
+
+    // 1. One frame moves both forward; main goes back on its own.
+    let op = two_ref_move(&root, ["main", "release/r"], c1, c2);
+    main_moved_raw(&root, c2, c1);
+
+    // 2. The undo moves release/r alone.
+    let undone = undo(&repo, op);
+    let moved = [("release/r".to_owned(), Some(c2), Some(c1))];
+    assert_eq!(moves_of(&undone), moved);
+    let both = (target(&repo, "main"), target(&repo, "release/r"));
+    assert_eq!(both, (Some(c1), Some(c1)));
+}
+
 /// The undo of a move of `main` that later moves left behind is blocked, not protected: the
 /// forward rule judges only a move the compare-and-swap would make (the M15 design §4).
 #[test]
