@@ -11,8 +11,7 @@
 //!   timed: the next window
 //! ```
 //!
-//! A kill counts wherever it hits, before the run wrote anything included: about 1 kill of a land
-//! in 5 hit there, measured over 200 kills a format.
+//! A kill counts wherever it hits, before the run wrote anything included.
 //!
 //! The land variant (the M15 design §6) kills `land --key` instead and runs the same land again
 //! with the same key: the key lands its change exactly once, whatever moment the kill hit.
@@ -193,7 +192,7 @@ per_format! {
 
 per_format! {
     /// The slow variant: [`SLOW_KILLS`] kills per format.
-    #[ignore = "slow, ~220 s per format, 310 s at load 270: 500 kills, each with verify --deep and log"]
+    #[ignore = "slow, ~218 s for format_1, 310 s for format_2 at load rising 3 to 267: 500 kills, each with verify --deep and log"]
     fn sigkill_mid_commit_500_times(format) {
         kill_commits(format, SLOW_KILLS);
     }
