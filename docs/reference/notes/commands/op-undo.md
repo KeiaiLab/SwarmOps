@@ -106,8 +106,8 @@ already; otherwise `ref_moves` lists each move made, and `op` and `id` are the u
 - **It is not a revert.** An undo moves refs; it does not record a change that reverses the
   files. After it, the changesets `OP` added are on no ref, yet still in the store.
 - **Land keys.** A keyed land looks for an earlier land of its key on the target's
-  first-parent chain. A land that an undo took off a `release/<name>` ref is no longer there, so the same
-  `land --key` run again lands once more (`status: landed`, not `replayed`).
+  first-parent chain. An undo never takes a land off `main`; one it took off a `release/<name>`
+  ref is no longer on that chain, so the same `land --key` run again does not replay it.
 - **Durability and the lock** work as for [`ref set`](../../commands/ref-set.md#after-the-move):
   the undo commits when its frame is durable, `warnings` reports a later step that failed, and a
   lock wait past 10 s is `E_BUSY`.

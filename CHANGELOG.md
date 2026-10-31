@@ -31,6 +31,14 @@ collects the changes on `stable` that no release holds yet, until the next relea
   the later operations first; the `op undo` and `ref set` help, the MCP `undo` tool and the MCP
   server instructions state the rule.
 
+- `ws commit` in a sparse workspace no longer widens its prefixes; an edit outside them is
+  `E_WS_OUTSIDE_PREFIXES`. What to do: `ws materialize <path>` first. A path named outside the
+  prefixes, and any file or directory the walk meets outside them that no `.gitignore` or
+  `.swarmignore` on disk names, is refused, nothing changed; `details.paths` lists them, sorted,
+  the first 20. `ws land` refuses the same before anything else; `ws rebase -m` commits the edits
+  under the prefixes as before (the M15 design §5,
+  [Troubleshooting](docs/troubleshooting.md#e_ws_outside_prefixes)).
+
 ### Added
 
 - Every `op log` entry and every `undo` result that wrote an operation carry its `id`: the number
@@ -63,16 +71,6 @@ collects the changes on `stable` that no release holds yet, until the next relea
 - Golden envelopes pin 53 of the 55 error codes, seven more than before: `E_AMBIGUOUS_ID`,
   `E_IO_TRANSIENT`, `E_INTERNAL`, `E_BUSY`, `E_CAS_RETRY_EXHAUSTED`, `E_UNKNOWN_PARENT` as an
   error object, and `E_WS_OUTSIDE_PREFIXES`.
-
-### Changed (breaking)
-
-- `ws commit` in a sparse workspace no longer widens its prefixes; an edit outside them is
-  `E_WS_OUTSIDE_PREFIXES`. What to do: `ws materialize <path>` first. A path named outside the
-  prefixes, and any file or directory the walk meets outside them that no `.gitignore` or
-  `.swarmignore` on disk names, is refused, nothing changed; `details.paths` lists them, sorted,
-  the first 20. `ws land` refuses the same before anything else; `ws rebase -m` commits the edits
-  under the prefixes as before (the M15 design §5,
-  [Troubleshooting](docs/troubleshooting.md#e_ws_outside_prefixes)).
 
 ### Changed
 

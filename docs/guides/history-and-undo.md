@@ -1015,9 +1015,9 @@ advanced.already_applied: false
 replayed: false
 ```
 
-`c4.json` puts one file, `NOTES.md`. `release/1.0` no longer names what operation 6 set it to, so the
-undo refuses with `E_CAS_MISMATCH` (exit 4) and writes nothing. `details.actual` is what the ref
-names now:
+`c4.json` puts one file, `NOTES.md`. `release/1.0` no longer names what operation 6 set it to, so
+the undo refuses with `E_CAS_MISMATCH` (exit 4) and writes nothing. `details.actual` is what the
+ref names now:
 
 ```sh
 so op undo 6:47c2d9e0 --human

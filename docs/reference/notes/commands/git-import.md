@@ -153,8 +153,8 @@ runs it end to end.
 **Take back an import's move.** `swarmops op log` shows the target's move as a `ref_move` operation,
 and `swarmops op undo <id>` of its `id` moves the target back to what it named before, or deletes it
 if the import created it. On `main` the undo is refused (`E_REF_PROTECTED`) unless it moves `main`
-forward: land a change that reverts the import instead. The changesets stay in the store, so the same import run again writes no
-changeset and moves the target again.
+forward: land a change that reverts the import instead. The changesets stay in the store, so the
+same import run again writes no changeset and moves the target again.
 
 ### Interruptions and concurrency
 

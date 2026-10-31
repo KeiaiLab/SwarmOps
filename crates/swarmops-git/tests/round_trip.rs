@@ -2,9 +2,10 @@
 //! store, changes landed on it, and the history exported back. Every faithful fixture keeps its
 //! commits byte for byte and gains one single-parent commit per land, signed by the agent that
 //! made the change and by the lander, its message ending in SwarmOps' trailers, its tree the
-//! store's; the undo of a land on `main` after its export is refused (the M15 design §4). And umbrella §13's single-writer layout (M8 decisions 4 and 7): one host lands and
-//! exports to a git remote and another imports it, each step taking only what is new; when both
-//! write, both stop, and nothing is merged.
+//! store's; the undo of a land on `main` after its export is refused (the M15 design §4). And
+//! umbrella §13's single-writer layout (M8 decisions 4 and 7): one host lands and exports to a
+//! git remote and another imports it, each step taking only what is new; when both write, both
+//! stop, and nothing is merged.
 //!
 //! Every test owns fresh stores, with `ExportOid` registered as every `LocalOps` registers it, on
 //! a filesystem that never flushes: the subject is what crosses to git and back, not what a store
