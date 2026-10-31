@@ -147,6 +147,14 @@ window, for v0.6.0's code as for M14's (579.5–594.6 ms in v0.6.0's). G17's pus
 clone is not (49.6 s against 1 s). The benchmark gate (condition 3) runs in the weekly Scheduled
 run.
 
+**Condition 5 (M15, not released).** Not met yet. M15 closes the in-scope acceptance of the twelve
+data-safety and contract rows the 2026-10-27 completeness report put on condition 5: 54 of the 55
+error codes pinned by a golden envelope, operation ids an undo cannot redirect, a fetch that
+imports before it moves a tracking ref, `main` moved forward only, three workspace refusals, a
+land key scoped to the store and the land grant checked again on each attempt. What each row
+leaves is recorded in [known limitations](known-limitations.md); the rows are scored again after
+M15 lands.
+
 Deferred past usable, with what stands in until then:
 
 | Milestone | Why it waits | Stand-in |
