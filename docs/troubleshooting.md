@@ -1253,8 +1253,9 @@ paths in the store with a commit, or create the workspace with `--prefix` paths 
 out; a `ws rebase`, `ws land` or `ws materialize` that would bring such a path in, or a `ws discard`
 or `ws resolve --take` that would restore one, refuses the same way, before the store records
 anything and with no pending record left. A target that gains the path after that check and before
-the store's call has recorded it when the refusal comes, and the pending record stays for the
-replay: `ws delete <name> --rescue` removes the workspace, and its commits stay in the store.
+the store's call has recorded it when the refusal comes, and the pending record stays: a re-run
+is refused the same way while the target holds the path, and rebases again once it does not.
+`ws delete <name> --rescue` removes the workspace, and its commits stay in the store.
 
 ### `E_WS_OUTSIDE_PREFIXES`
 
@@ -1281,8 +1282,12 @@ again. The refusal comes after `E_WS_OUTSIDE_PREFIXES` and before `E_WS_DIRTY`.
 
 A land cut short and then left behind by its target (the land was never recorded, or the target
 moved back past it) is refused the same way, and `ws rebase` takes it over: it drops the land's
-record and rebases as usual. A land the target still holds is not taken over: `ws land` again
-finishes it, and `ws rebase` answers `E_INVALID_ARG` until it has.
+record and rebases as usual, unless the rebase is refused first (`E_WS_UNPORTABLE`), which leaves
+the record. A land the target still holds is not taken over: `ws land` again finishes it, and
+`ws rebase` answers `E_INVALID_ARG` until it has. A land the check cannot place, because the
+journal's last 10,000 operations or the target's last 10,000 commits do not settle whether the
+target holds it, is not taken over either: `ws land` refuses it as stale and `ws rebase` leaves
+the record, so `ws delete <name> --rescue` is the way out, and its commits stay in the store.
 
 The check runs for a land onto the workspace's own target, and lets a land through that it cannot
 place: a target whose first-parent history is longer than 10,000 commits, or a base with no

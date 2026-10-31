@@ -80,8 +80,10 @@ collects the changes on `stable` that no release holds yet, until the next relea
   before. A land cut short whose target then left the base is refused the same way, and `ws
   rebase` takes over its record when no land of its key is on the target (the record would
   otherwise refuse the rebase: "run it again first"); a land the target holds is finished by `ws
-  land`, and it replays past a reserved name the target gained since
-  ([Troubleshooting](docs/troubleshooting.md#e_ws_stale)).
+  land`, and it replays past a reserved name the target gained since. A land the check cannot
+  place (the journal's last 10,000 operations or the target's last 10,000 commits are not
+  enough) keeps its record, and `ws land` and `ws rebase` both refuse: `ws delete <name>
+  --rescue` is the way out ([Troubleshooting](docs/troubleshooting.md#e_ws_stale)).
 - Golden envelopes pin 54 of the 55 error codes, eight more than before: `E_AMBIGUOUS_ID`,
   `E_IO_TRANSIENT`, `E_INTERNAL`, `E_BUSY`, `E_CAS_RETRY_EXHAUSTED`, `E_UNKNOWN_PARENT` as an
   error object, `E_WS_OUTSIDE_PREFIXES` and `E_WS_STALE`.
@@ -150,9 +152,9 @@ collects the changes on `stable` that no release holds yet, until the next relea
   `.swarmws` component (`src/.SwarmWs/z`) was rebased in the store, answered `E_WS_UNPORTABLE`
   and kept its record, so `ws land` and `ws rebase --abort` then answered `E_INVALID_ARG`; now no
   operation is recorded and the workspace is as it was (the M15 design §5). A target that gains
-  such a path between the check and the store's call keeps the record the refusal leaves, so a
-  re-run replays the same rebase and makes no second one; `ws land --check` and `ws rebase
-  --continue` likewise.
+  such a path between the check and the store's call keeps the record the refusal leaves: a
+  re-run is refused while the target holds the path, and rebases again once it does not; `ws land
+  --check` and `ws rebase --continue` likewise.
 - `ws land` checks the paths its target gained against the workspace's volume before the store
   lands anything. A target that gained a path with a `.swarmws` component (`src/.SwarmWs/z`) moved
   to the landed changeset, and then `ws land` answered `E_WS_UNPORTABLE` "nothing was written"
@@ -223,11 +225,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
   rules, so a commit left such edits out without a word. A root `.swarmws` of the tree, under
   any ASCII case, is no such path: the workspace's own directory stands there (the M15 design
   §5a).
-- On a volume that folds case, a case collision between a path the workspace's chain adds and a
-  path the target adds (`src/Readme` and `src/README`) is refused before `ws land` or `ws rebase`
-  reaches the store, with `E_WS_UNPORTABLE` (`reason: "case_collision"`) and nothing written. The
-  check saw only the target's paths against the files on disk, so the store landed or rebased
-  first, and the files then could not follow
+- On a volume that folds case, a case collision between a path the workspace's chain adds (or
+  the edits `-m` commits) and a path the target adds (`src/Readme` and `src/README`) is refused
+  before `ws land` or `ws rebase` reaches the store, with `E_WS_UNPORTABLE` (`reason:
+  "case_collision"`) and nothing written. The check saw only the target's paths against the files
+  on disk, so the store landed or rebased first, and the files then could not follow. A path the
+  chain deletes is not in the tree it leaves, so a rename that only changes case lands
   ([Troubleshooting](docs/troubleshooting.md#e_ws_unportable)).
 
 ## [0.7.0] - 2026-10-29

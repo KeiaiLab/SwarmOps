@@ -776,18 +776,20 @@ left).
   the target to it. A land onto another `--target` is not checked, and neither are `ws commit`,
   `ws status` and `ws rebase`; a target whose first-parent history is longer than 10,000 commits
   (`BEHIND_CAP`), or a base with no such operation among the last 10,000, lands as it did before
-  the check. `ws rebase` of a stale workspace takes no snapshot of the edits it moves onto the new
-  head, and no test kills a land in the middle of the check and the update (the M15 design's
-  third SIGKILL acceptance). *Unscheduled (the M15 design §5 leaves them out of scope). Found:
-  M15 Task S4c.*
+  the check. A land cut short whose key the journal's last 10,000 operations or the target's last
+  10,000 commits cannot place keeps its pending record: `ws land` and `ws rebase` both refuse,
+  and `ws delete <name> --rescue` is the way out. `ws rebase` of a stale workspace takes no
+  snapshot of the edits it moves onto the new head, and no test kills a land in the middle of
+  the check and the update (the M15 design's third SIGKILL acceptance). *Unscheduled (the M15
+  design §5 leaves them out of scope). Found: M15 Task S4c.*
 - **A target that gains a reserved path after the check is not refused.** `ws land` and `ws rebase`
   check the target's paths for names the files cannot hold (`E_WS_UNPORTABLE`) before the store
-  call. A target that gains a path with a component named
-  `.swarmws` between that check and the store's call is landed or rebased onto, and the
-  materialisation then refuses it with the pending record kept, so a re-run fails the same way. The
-  way out is `ws delete <name> --rescue`: the workspace's commits stay in the store. The same
-  window lets a case collision through that the target creates after the check. *Unscheduled; the
-  window is the time between two calls of one command. Found: M15 Task S4c review.*
+  call. A target that gains a path with a component named `.swarmws` between that check and the
+  store's call is landed or rebased onto, and the materialisation then refuses it with the pending
+  record kept: a re-run is refused the same way while the target holds the path. The way out is
+  `ws delete <name> --rescue`: the workspace's commits stay in the store. The same window lets a
+  case collision through that the target creates after the check. *Unscheduled (the window is the
+  time between two calls of one command). Found: M15 Task S4c review.*
 
 ## Platforms
 
