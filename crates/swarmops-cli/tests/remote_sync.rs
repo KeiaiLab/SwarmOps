@@ -710,16 +710,17 @@ fn read_only_refuses(dir: &Path) -> bool {
 }
 
 /// A directory made writable again (mode 755) when dropped, so that a failed test leaves no
-/// read-only directory behind; one that does not exist is left as it is.
+/// read-only directory behind; one that does not exist is left as it is. A failure to set the
+/// mode is ignored: a drop during a panic must not panic again.
 #[cfg(unix)]
 struct Writable(PathBuf);
 
 #[cfg(unix)]
 impl Drop for Writable {
     fn drop(&mut self) {
-        if self.0.exists() {
-            set_mode(&self.0, WRITABLE);
-        }
+        use std::os::unix::fs::PermissionsExt as _;
+        let writable = fs::Permissions::from_mode(WRITABLE);
+        let _ = fs::set_permissions(&self.0, writable);
     }
 }
 
