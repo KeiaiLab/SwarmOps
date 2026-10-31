@@ -824,12 +824,13 @@ left).
   re-run depends on the target. While it holds the landed changeset, which holds the path for good,
   `ws land` replays it and is refused again, even after the target drops the path, and `ws rebase`
   answers `E_INVALID_ARG`; the way out is `ws delete <name> --rescue`: the workspace's commits stay
-  in the store. A target moved back below the landed changeset has left the land: `ws land` lands it
-  anew and `ws rebase` takes the record over, unless the target still holds the path (moved back to
-  the commit that added it), when both answer `E_WS_UNPORTABLE` before any store call until the
-  target drops it. The same window lets a case collision through that the target creates after the
-  check. *Unscheduled (the window is the time between two calls of one command). Found: M15 Task S4c
-  review.*
+  in the store. A target moved back below the landed changeset but not off the workspace's base has
+  left the land: `ws land` lands it anew and `ws rebase` takes the record over, unless the target
+  still holds the path (moved back to the commit that added it), when both answer `E_WS_UNPORTABLE`
+  before the store lands or rebases anything, until the target drops it. A target moved back off the
+  base makes `ws land` answer `E_WS_STALE`, and `ws rebase` takes the record over. The same window
+  lets a case collision through that the target creates after the check. *Unscheduled (the window is
+  the time between two calls of one command). Found: M15 Task S4c review.*
 
 ## Platforms
 

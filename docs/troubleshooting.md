@@ -1339,9 +1339,11 @@ the store's land (`ws land`, the land step of `ws land --check`) a re-run depend
 While it holds the landed changeset, which holds the path for good, `ws land` replays it and is
 refused again, even after the target drops the path, and `ws rebase` answers `E_INVALID_ARG` ("run
 it again first"); `ws delete <name> --rescue` removes the workspace, and its commits stay in the
-store. A target moved back below the landed changeset has left the land: `ws land` lands it anew and
-`ws rebase` takes the record over, unless the target still holds the path (moved back to the commit
-that added it): then both answer `E_WS_UNPORTABLE` before any store call until the target drops it.
+store. A target moved back below the landed changeset but not off the workspace's base has left the
+land: `ws land` lands it anew and `ws rebase` takes the record over, unless the target still holds
+the path (moved back to the commit that added it): then both answer `E_WS_UNPORTABLE` before the
+store lands or rebases anything, until the target drops it. A target moved back off the base makes
+`ws land` answer `E_WS_STALE`, and `ws rebase` takes the record over ([`E_WS_STALE`](#e_ws_stale)).
 
 ### `E_WS_OUTSIDE_PREFIXES`
 

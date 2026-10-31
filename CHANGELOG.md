@@ -168,10 +168,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
   target that gains such a path between the check and the land still takes the old way out,
   `ws delete --rescue`: while the target holds the landed changeset, which holds the path for good,
   a re-run of `ws land` replays it and is refused again, even after the target drops the path, and
-  `ws rebase` answers `E_INVALID_ARG`. A target moved back below it is a land the target left, which
-  `ws land` lands anew and `ws rebase` takes over, unless the target still holds the path (moved
-  back to the commit that added it): then both answer `E_WS_UNPORTABLE` before any store call until
-  the target drops the path ([Troubleshooting](docs/troubleshooting.md#e_ws_unportable)).
+  `ws rebase` answers `E_INVALID_ARG`. A target moved back below it but not off the workspace's base
+  is a land the target left, which `ws land` lands anew and `ws rebase` takes over, unless the
+  target still holds the path (moved back to the commit that added it): then both answer
+  `E_WS_UNPORTABLE` before the store lands or rebases anything, until the target drops the path. A
+  target moved back off the base makes `ws land` answer `E_WS_STALE`, and `ws rebase` takes the
+  record over ([Troubleshooting](docs/troubleshooting.md#e_ws_unportable)).
 - `ws status`'s `behind_by` counts the changesets the target holds that the workspace's base lacks
   when the base is not on the target's history: 1 after a sync replaced the base with its
   squash-merged copy, and 0 when the target moved back onto the base's first-parent history,
