@@ -45,9 +45,10 @@ worktrees is not on the roadmap. SwarmOps' own measurements are in
 - **Use SwarmOps** where many agents on one host commit into one repository at once and need
   machine-readable answers, a single order of writes, no stale locks and a land that merges and
   retries by itself.
-- **Keep git** for everything around it: review, CI, deployment, hosting, tags, hooks, signing,
-  submodules and LFS. The store imports from git and exports to it, so git stays the system of
-  record ([the daily loop](/docs/operations/#the-daily-loop)).
+- **Keep git** for everything around it: review, CI, deployment, hosting, annotated tags (a
+  `FORMAT 2` store holds lightweight ones), hooks, signing, submodules and LFS. The store imports
+  from git and exports to it, so git stays the system of record
+  ([the daily loop](/docs/operations/#the-daily-loop)).
 - **Expect to pay in throughput and disk**: writers take turns under one lock with full fsync, and
   objects are stored one file each, with no packs.
 
