@@ -489,7 +489,7 @@ left).
   object it reads, those of the commits the store does not hold yet, against its id before any
   store ref moves. No test pushes a damaged pack or object to `serve`, as the fetch tests do with
   a remote, and the objects of a refused push stay in `serve.git` (above). *Unscheduled (the M15
-  design §3 leaves it out of scope). Found: the 2026-10-27 completeness report (D45).*
+  design §3 leaves it out of scope). Found: the 2026-10-30 completeness report (D45).*
 - **The first connection to a large store exports its whole history.** `serve` exports every
   served ref into `serve.git` before it advertises; a store whose history no export has reached
   yet pays that once, as loose objects: on 12,000 commits the first clone took 1,195.6 s,
@@ -674,7 +674,7 @@ left).
   other bytes stays unnoticed until a new commit of the followed branch reaches it. One that the
   import reads fails every fetch with `E_GIT_READ` (`details.reason: "corrupt"`,
   `details.object`) until `git/mirror.git` is moved aside; the next fetch makes it again.
-  *Documented. Found: the 2026-10-27 completeness report (D45); narrowed by M15 Task S2.*
+  *Documented. Found: the 2026-10-30 completeness report (D45); narrowed by M15 Task S2.*
 - **A server that cuts git's first HTTP response inside its headers looks like an empty remote.**
   git then falls back to the old "dumb" HTTP protocol, finds no refs and succeeds: the fetch reports
   no branches and prunes the mirror's tracking refs, and a clone ends with no `main`. Nothing is

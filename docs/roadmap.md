@@ -148,7 +148,7 @@ clone is not (49.6 s against 1 s). The benchmark gate (condition 3) runs in the 
 run.
 
 **Condition 5 (M15, not released).** Not met yet. M15 closes the in-scope acceptance of the twelve
-data-safety and contract rows the 2026-10-27 completeness report put on condition 5: 54 of the 55
+data-safety and contract rows the 2026-10-30 completeness report put on condition 5: 54 of the 55
 error codes pinned by a golden envelope, operation ids an undo cannot redirect, a fetch that
 imports before it moves a tracking ref, `main` moved forward only, three workspace refusals, a
 land key scoped to the store and the land grant checked again on each attempt. What each row
