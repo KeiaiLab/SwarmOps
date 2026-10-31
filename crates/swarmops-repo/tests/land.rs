@@ -122,6 +122,16 @@ fn main_head(repo: &LocalRepo) -> ChangesetId {
     repo.get_ref("main").unwrap().expect("main exists").target
 }
 
+/// How many object files the store at `root` holds: the files of its fan-out directories.
+fn object_count(root: &Utf8Path) -> usize {
+    let fanouts = std::fs::read_dir(root.join("objects")).unwrap();
+    let fanouts = fanouts
+        .map(Result::unwrap)
+        .filter(|dir| dir.file_name() != "tmp");
+    let files = fanouts.map(|dir| std::fs::read_dir(dir.path()).unwrap().count());
+    files.sum()
+}
+
 /// How many frames the journal of the store at `root` lists.
 fn frame_count(root: &Utf8Path) -> u64 {
     Journal::open(&layout_of(root), Arc::new(RealFs::new()))
@@ -1541,18 +1551,25 @@ fn gated_race() -> (TempDir, Utf8PathBuf, LocalRepo, Arc<Racer>, ChangesetId) {
 }
 
 /// A gate that closes before the second attempt stops the land there (the M15 design §6): the
-/// refusal comes back as it is, nothing of the land is recorded, and `main` names the racer's
-/// changeset.
+/// refusal comes back as it is, nothing of the land is recorded, the refused attempt writes no
+/// object, and `main` names the racer's changeset.
 #[test]
 fn a_gate_closed_after_a_lost_race_stops_the_land() {
     let (_dir, root, repo, racer, head) = gated_race();
     let frames = frame_count(&root);
 
-    // 1. The gate refuses from the second attempt on.
-    let gate = |n: u32| if n >= 2 { Err("revoked") } else { Ok(()) };
+    // 1. The gate refuses from the second attempt on, counting the objects as it does.
+    let mut at_refusal = None;
+    let gate = |n: u32| {
+        if n < 2 {
+            return Ok(());
+        }
+        at_refusal = Some(object_count(&root));
+        Err("revoked")
+    };
     let refused = repo.land_gated(landing(head), gate);
 
-    // 2. The refusal, and only the race's frame.
+    // 2. The refusal, only the race's frame, and no object since.
     let gained = racer.landed();
     assert_eq!(gained.len(), 1, "one race");
     match refused {
@@ -1561,6 +1578,39 @@ fn a_gate_closed_after_a_lost_race_stops_the_land() {
     }
     assert_eq!(main_head(&repo), gained[0]);
     assert_eq!(frame_count(&root), frames + 1, "the race's frame alone");
+    let at_refusal = at_refusal.expect("the gate refused the second attempt");
+    assert_eq!(
+        object_count(&root),
+        at_refusal,
+        "the refused attempt wrote no object"
+    );
+}
+
+/// A gate that refuses the first attempt stops the land before it reads or writes anything: the
+/// refusal as it is, no frame, no object, `main` where it was.
+#[test]
+fn a_gate_closed_before_the_first_attempt_writes_nothing() {
+    let (_dir, root, repo, racer, head) = gated_race();
+    let (frames, objects, main) = (frame_count(&root), object_count(&root), main_head(&repo));
+
+    // 1. The gate refuses the first attempt.
+    let mut seen = Vec::new();
+    let gate = |n: u32| {
+        seen.push(n);
+        Err("revoked")
+    };
+    let refused = repo.land_gated(landing(head), gate);
+
+    // 2. The refusal, asked once, and the store as it was: the race never ran.
+    match refused {
+        Err(Gated::Refused(reason)) => assert_eq!(reason, "revoked"),
+        other => panic!("expected the gate's refusal, got {other:?}"),
+    }
+    assert_eq!(seen, [1]);
+    assert!(racer.landed().is_empty(), "no attempt wrote, so no race");
+    assert_eq!(main_head(&repo), main);
+    assert_eq!(frame_count(&root), frames, "no frame");
+    assert_eq!(object_count(&root), objects, "no object");
 }
 
 /// A gate that stays open is asked before each attempt, the first included: the land that lost
