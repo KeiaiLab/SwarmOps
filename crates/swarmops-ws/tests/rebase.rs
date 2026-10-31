@@ -407,3 +407,36 @@ fn ws_rebase_updates_a_stale_workspace() {
     assert_eq!(head.unwrap().id, landed.land.landed);
     assert_eq!(tree_of(&dir), [file("src/a.txt", "mine\n")]);
 }
+
+/// A `ws rebase` onto a target that gained a name the workspace's volume cannot hold is refused
+/// before the store rebases: no operation is recorded, no pending record is left, and the
+/// workspace stays on its head, so the next command is not wedged.
+#[test]
+fn a_rebase_onto_a_reserved_name_leaves_no_record() {
+    for reserved in ["src/.SwarmWs/z", ".swarmws/x"] {
+        // 1. A workspace on `release/r` with a commit; `release/r` then gains `reserved`.
+        let f = Fixture::new();
+        let b = f.commit(None, &[Put::File("src/a.txt", "a\n")]);
+        f.point("release/r", &b);
+        f.create("w", "release/r", &[]);
+        let dir = f.beside("w");
+        write(&dir, "src/a.txt", "mine\n");
+        let head = commit_all(&f, "w", "mine");
+        let gained = f.side(Some(&b), &[Put::File(reserved, "z\n")]);
+        f.point("release/r", &gained);
+        let recorded = f.last_op();
+
+        // 2. The rebase is refused as unportable.
+        let mut req = rebase_of("w", WsRebaseAction::Start);
+        req.onto = "release/r".to_owned();
+        let refused = swarmops_ws::rebase(&f.ctx(), req).unwrap_err();
+        assert_eq!(refused.code, "E_WS_UNPORTABLE", "{reserved}: {refused:?}");
+
+        // 3. Nothing recorded: no operation, no pending record, the state as it was.
+        assert_eq!(f.last_op(), recorded, "{reserved}: a store frame");
+        let pending = dir.join(SWARMWS_DIR).join("journal/pending.json");
+        assert!(!pending.exists(), "{reserved}: a pending record");
+        let saved = state::read(&RealFs::new(), &dir).unwrap();
+        assert_eq!((saved.head, saved.base), (head, b.clone()), "{reserved}");
+    }
+}

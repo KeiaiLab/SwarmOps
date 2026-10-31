@@ -1645,7 +1645,7 @@ expression: transcript
         "result": {
           "content": [
             {
-              "text": "{\"api\":1,\"error\":{\"code\":\"E_CONFLICT\",\"details\":{\"report\":{\"base\":\"[landed]\",\"files\":[{\"base_blob\":\"[id6]\",\"hunks\":[{\"base\":{\"first\":1,\"last\":1,\"text\":\"pub fn g() {}\\n\"},\"id\":0,\"ours\":{\"first\":1,\"last\":1,\"text\":\"pub fn mine() {}\\n\"},\"theirs\":{\"first\":1,\"last\":1,\"text\":\"pub fn theirs() {}\\n\"}}],\"kind\":\"content\",\"ours_blob\":\"[id8]\",\"path\":\"src/lib.rs\",\"theirs_agent\":\"agent/worker-17\",\"theirs_blob\":\"[id12]\",\"theirs_changeset\":\"[id10]\"}],\"kinds\":[\"content\"],\"ours\":\"[id9]\",\"theirs\":\"[id10]\",\"truncated\":false}},\"exit\":3,\"hint\":\"swarmops cat [id10]:src/lib.rs, then swarmops land [id9] --resolve <file> (resolutions over MCP) with each path's resolution and against = [id10]\",\"message\":\"1 path(s) of the change conflict with the target's head [id10]: nothing was recorded\",\"retryable\":false},\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[id9]\":\"[id9]\",\"[landed]\":\"[landed]\",\"main\":\"[id10]\"}},\"ok\":false,\"op\":\"ws_rebase\"}",
+              "text": "{\"api\":1,\"error\":{\"code\":\"E_CONFLICT\",\"details\":{\"report\":{\"base\":\"[landed]\",\"files\":[{\"base_blob\":\"[id6]\",\"hunks\":[{\"base\":{\"first\":1,\"last\":1,\"text\":\"pub fn g() {}\\n\"},\"id\":0,\"ours\":{\"first\":1,\"last\":1,\"text\":\"pub fn mine() {}\\n\"},\"theirs\":{\"first\":1,\"last\":1,\"text\":\"pub fn theirs() {}\\n\"}}],\"kind\":\"content\",\"ours_blob\":\"[id8]\",\"path\":\"src/lib.rs\",\"theirs_agent\":\"agent/worker-17\",\"theirs_blob\":\"[id12]\",\"theirs_changeset\":\"[id10]\"}],\"kinds\":[\"content\"],\"ours\":\"[id9]\",\"theirs\":\"[id10]\",\"truncated\":false}},\"exit\":3,\"hint\":\"swarmops cat [id10]:src/lib.rs, then swarmops land [id9] --resolve <file> (resolutions over MCP) with each path's resolution and against = [id10]\",\"message\":\"1 path(s) of the change conflict with the target's head [id10]: nothing was recorded\",\"retryable\":false},\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[id10]\":\"[id10]\",\"[id9]\":\"[id9]\",\"[landed]\":\"[landed]\",\"main\":\"[id10]\"}},\"ok\":false,\"op\":\"ws_rebase\"}",
               "type": "text"
             }
           ],
@@ -1706,6 +1706,7 @@ expression: transcript
               "elapsed_ms": "[elapsed_ms]",
               "repo": "[tmp]/store",
               "resolved": {
+                "[id10]": "[id10]",
                 "[id9]": "[id9]",
                 "[landed]": "[landed]",
                 "main": "[id10]"

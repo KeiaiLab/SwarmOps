@@ -146,6 +146,7 @@ swarmops --repo [tmp]/store --as agent/worker-17 ws rebase --ws w2 --onto releas
     "resolved": {
       "[c1]": "[c1]",
       "[id14]": "[id14]",
+      "[id15]": "[id15]",
       "release/ws": "[id15]"
     },
     "auth": "trust"

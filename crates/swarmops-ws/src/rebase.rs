@@ -3,6 +3,7 @@
 //!
 //! ```text
 //!  start     lock → edits committed (-m) or E_WS_DIRTY → journal/pending.json {key} (WS1)
+//!            → names onto's head holds that the files cannot: E_WS_UNPORTABLE, the record removed
 //!            → rebase{head, base, onto, key}
 //!              ├─ H' → files from `materialized` to H' with workspace.json {head: H', base: T,
 //!              │       onto: T} (WS2) → the pending record removed
@@ -25,8 +26,8 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 use swarmops_api::{
     BlobPutReq, ConflictReport, ContentInput, DEFAULT_MAX_CONFLICT_BYTES, ErrorCode, ModeInput,
-    OpError, RebaseReq, RebaseResp, ResolutionInput, ResolutionsInput, Side, WsRebaseAction,
-    WsRebaseReq, WsRebaseResp,
+    OpError, RebaseReq, RebaseResp, ResolutionInput, ResolutionsInput, ResolveRevReq, Side,
+    WsRebaseAction, WsRebaseReq, WsRebaseResp,
 };
 use swarmops_store::FsMethod;
 
@@ -180,7 +181,11 @@ pub(crate) fn rebase_in(
     key: &str,
     resolutions: Option<ResolutionsInput>,
 ) -> Result<RebaseResp, OpError> {
-    // 1. The store's rebase of the chain from the base.
+    // 1. Names the target holds that the files cannot: refused before the store rebases.
+    let head = ctx.store.resolve_rev(ResolveRevReq::new(onto))?;
+    materialize::preflight(ctx, ws, &head.id)?;
+
+    // 2. The store's rebase of the chain from the base.
     let mut req = RebaseReq::new(ws.file.head.as_str());
     req.base = Some(ws.file.base.as_str().into());
     onto.clone_into(&mut req.onto);
@@ -196,7 +201,7 @@ pub(crate) fn rebase_in(
         Err(e) => return Err(e),
     };
 
-    // 2. The workspace moved to it: files and state in one replace of workspace.json (WS2).
+    // 3. The workspace moved to it: files and state in one replace of workspace.json (WS2).
     let rebasing = matches!(ws.file.state, State::Rebasing { .. });
     ws.file.head.clone_from(&done.changeset);
     ws.file.base.clone_from(&done.onto);
@@ -205,7 +210,7 @@ pub(crate) fn rebase_in(
     ws.file.state = State::Clean;
     move_to(ctx, ws, &done.changeset)?;
 
-    // 3. A rebase in progress is over: its records go.
+    // 4. A rebase in progress is over: its records go.
     if rebasing {
         remove_record(ctx, ws, CONFLICTS_JSON)?;
         remove_record(ctx, ws, RESOLVED_JSON)?;
@@ -253,6 +258,7 @@ pub(crate) fn refused(e: &OpError) -> bool {
         ErrorCode::RevNotFound,
         ErrorCode::NothingToLand,
         ErrorCode::CheckFailed,
+        ErrorCode::WsUnportable,
     ]
     .iter()
     .any(|code| e.code == code.as_str())

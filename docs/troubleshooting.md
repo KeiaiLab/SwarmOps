@@ -1250,10 +1250,10 @@ is `case_collision` (two paths that differ only in case, on a case-insensitive v
 component named `.swarmws`, the workspace's own directory, at any depth and in any ASCII case:
 `.SWARMWS/x`, `src/.swarmws/y`; `src/swarmws/y` and `src/.swarmws.bak/y` are fine). Rename the
 paths in the store with a commit, or create the workspace with `--prefix` paths that leave them
-out; a `ws rebase` or `ws materialize` that would bring such a path in refuses the same way. A
-`ws land` refuses before the store lands anything; a target that gains the path after that check
-and before the land has landed when the refusal comes: `ws delete <name> --rescue` removes the
-workspace, and its commits stay in the store.
+out; a `ws rebase`, `ws land` or `ws materialize` that would bring such a path in refuses the same
+way, before the store records anything and with no pending record left. A target that gains the
+path after that check and before the store's call has recorded it when the refusal comes:
+`ws delete <name> --rescue` removes the workspace, and its commits stay in the store.
 
 ### `E_WS_OUTSIDE_PREFIXES`
 

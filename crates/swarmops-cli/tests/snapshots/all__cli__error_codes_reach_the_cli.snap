@@ -1387,6 +1387,7 @@ expression: s.transcript()
         "resolved": {
           "[c1]": "[c1]",
           "[id14]": "[id14]",
+          "[id15]": "[id15]",
           "release/ws": "[id15]"
         },
         "auth": "trust"
