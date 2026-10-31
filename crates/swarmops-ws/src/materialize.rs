@@ -278,6 +278,26 @@ pub(crate) fn preflight(
     portable_over(ctx, ws, &intent, &own).map(|_| ())
 }
 
+/// The tree entries a workspace holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Holds {
+    /// Every one: the workspace holds the whole tree.
+    All,
+    /// Those at, below or above one of its prefixes.
+    Prefixes,
+}
+
+impl Holds {
+    /// What workspace `ws` holds.
+    fn of(ws: &Workspace) -> Self {
+        if ws.file.all {
+            Self::All
+        } else {
+            Self::Prefixes
+        }
+    }
+}
+
 /// The paths a workspace's chain and the edits committed on it add and delete.
 #[derive(Default)]
 struct Moves {
@@ -369,9 +389,9 @@ fn portable_over(
 
         // 3. The tree the land leaves: the paths the chain deletes are not in it, nor the
         //    directories it empties.
-        let mut set = case_set(&new, &roots, ws.file.all, &prefixes)?;
+        let mut set = case_set(&new, &roots, Holds::of(ws), &prefixes)?;
         set.retain(|path| !own.deleted.contains(path));
-        let emptied = emptied_dirs(&new, &set, &own.deleted, ws.file.all, &prefixes)?;
+        let emptied = emptied_dirs(&new, &set, &own.deleted, Holds::of(ws), &prefixes)?;
         set.retain(|path| !emptied.contains(path));
         set.extend(named.iter().cloned());
         Some(set)
@@ -828,11 +848,11 @@ fn between(
 
 /// Every path the workspace will hold that can meet one of `roots` on a case-insensitive
 /// volume: the entries of each directory above each root, in `tree`, that the workspace holds
-/// (`all`, or at, below or above one of `prefixes`).
+/// (as `holds` says, of `prefixes`).
 fn case_set(
     tree: &Tree<'_>,
     roots: &[String],
-    all: bool,
+    holds: Holds,
     prefixes: &[String],
 ) -> Result<Vec<String>, OpError> {
     let mut set = BTreeSet::new();
@@ -850,7 +870,7 @@ fn case_set(
             let listing = tree.listing(&dir)?;
             for entry in listing.iter().flat_map(|entries| entries.iter()) {
                 let path = join(&dir, &entry.name);
-                if all || held_by(&path, prefixes) {
+                if holds == Holds::All || held_by(&path, prefixes) {
                     set.insert(path);
                 }
             }
@@ -866,7 +886,7 @@ fn emptied_dirs(
     tree: &Tree<'_>,
     set: &[String],
     gone: &BTreeSet<String>,
-    all: bool,
+    holds: Holds,
     prefixes: &[String],
 ) -> Result<HashSet<String>, OpError> {
     // 1. The directories above a deleted path that the set names.
@@ -881,7 +901,7 @@ fn emptied_dirs(
     // 2. Those with no file left under them.
     let mut emptied = HashSet::new();
     for dir in candidates {
-        let kept = holds_file(tree, &dir, gone, all, prefixes)?;
+        let kept = holds_file(tree, &dir, gone, holds, prefixes)?;
         if kept == Some(false) {
             emptied.insert(dir);
         }
@@ -895,7 +915,7 @@ fn holds_file(
     tree: &Tree<'_>,
     dir: &str,
     gone: &BTreeSet<String>,
-    all: bool,
+    holds: Holds,
     prefixes: &[String],
 ) -> Result<Option<bool>, OpError> {
     let Some(entries) = tree.listing(dir)? else {
@@ -903,7 +923,7 @@ fn holds_file(
     };
     for entry in entries.iter() {
         let path = join(dir, &entry.name);
-        if !all && !held_by(&path, prefixes) {
+        if holds == Holds::Prefixes && !held_by(&path, prefixes) {
             continue;
         }
         if entry.kind != EntryKindOut::Dir {
@@ -912,7 +932,7 @@ fn holds_file(
             }
             return Ok(Some(true));
         }
-        if holds_file(tree, &path, gone, all, prefixes)? == Some(true) {
+        if holds_file(tree, &path, gone, holds, prefixes)? == Some(true) {
             return Ok(Some(true));
         }
     }
@@ -966,7 +986,7 @@ fn check_new(
     // 2. The case set only where the volume folds case, over the prefixes after the request.
     let case_set = if ws.file.volume.case_insensitive {
         let after = tidy(ws.file.prefixes.iter().chain(added).cloned().collect());
-        let mut set = case_set(tree, new, ws.file.all, &after)?;
+        let mut set = case_set(tree, new, Holds::of(ws), &after)?;
         set.extend(new.iter().cloned());
         Some(set)
     } else {
