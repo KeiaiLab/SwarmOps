@@ -2,7 +2,8 @@
 //! result; on a conflict, the workspace rebasing with markers written.
 //!
 //! ```text
-//!  start     lock → edits committed (-m) or E_WS_DIRTY → journal/pending.json {key} (WS1)
+//!  start     lock → a land cut short that the target does not hold: its record dropped
+//!            → edits committed (-m) or E_WS_DIRTY → journal/pending.json {key} (WS1)
 //!            → names onto's head holds that the files cannot: E_WS_UNPORTABLE, the record removed
 //!            → rebase{head, base, onto, key}
 //!              ├─ H' → files from `materialized` to H' with workspace.json {head: H', base: T,
@@ -15,7 +16,10 @@
 //! ```
 //!
 //! A rebase cut short after the store's frame leaves its pending record: the same call again
-//! takes its key, and the store replays the same `H'`.
+//! takes its key, and the store replays the same `H'`. The record of a land cut short is taken
+//! over only when no land of its key is on the target (`status::landed`): its target left the
+//! base since, and `ws land` answers `E_WS_STALE`; a land the target holds is finished by
+//! `ws land`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -32,12 +36,13 @@ use swarmops_api::{
 use swarmops_store::FsMethod;
 
 use crate::hostfs::HostKind;
+use crate::land::REBASING;
 use crate::materialize;
 use crate::pending::{self, Pending, PendingOp};
 use crate::resolve::{self, RESOLVED_JSON, Resolved};
 use crate::scan::Want;
 use crate::state::{self, SWARMWS_DIR, State};
-use crate::status::{self, CONFLICTS_JSON};
+use crate::status::{self, CONFLICTS_JSON, Landed};
 use crate::volume::EXEC_BITS;
 use crate::workspace::{self, Locate, Workspace};
 use crate::{Ctx, after, commit, discard, io_error, markers};
@@ -88,20 +93,52 @@ fn start(
         );
     }
 
-    // 2. A rebase cut short: its key; else the edits settled first.
+    // 2. A land cut short that its target no longer holds goes.
+    let landed_key = take_over(ctx, ws, onto)?;
+
+    // 3. A rebase cut short: its key; else the edits settled first.
     let cut = cut_short(ctx, ws, PendingOp::Rebase, STARTING)?;
     if cut.is_none() {
         settle_edits(ctx, ws, message, &BTreeSet::new())?;
     }
 
-    // 3. The pending record, durable before the store call (WS1); then the call.
-    let key = cut.map_or_else(new_key, |cut| cut.key);
+    // 4. The pending record, durable before the store call (WS1); then the call.
+    let key = (cut.map(|cut| cut.key))
+        .or(landed_key)
+        .unwrap_or_else(new_key);
     let record = record(PendingOp::Rebase, &key, None, ws, onto, STARTING);
     pending::write_pending(ctx.fs.as_ref(), &ws.dir, &record)?;
     let done = rebase_in(ctx, ws, onto, &key, None);
     let done = finish_call(ctx, ws, done)?;
     pending::remove_pending(ctx.fs.as_ref(), &ws.dir)?;
     Ok(response(&done))
+}
+
+/// Takes over a `ws land` cut short on workspace `ws`'s head whose land the ref its record names
+/// does not hold: no land of its key is on that history, so no re-run could finish it, and the
+/// record only stands in the way. It goes, and the rebase key its attempt made is returned when
+/// that attempt may have been written, onto the same ref, so the store replays it. A land the
+/// ref holds is left to the land that finishes it.
+fn take_over(ctx: &Ctx<'_>, ws: &Workspace, onto: &str) -> Result<Option<String>, OpError> {
+    // 1. A land cut short on this head, and the ref it lands on.
+    let Some(cut) = pending::read_pending(ctx.fs.as_ref(), &ws.dir)? else {
+        return Ok(None);
+    };
+    if cut.op != PendingOp::Land || cut.head != ws.file.head {
+        return Ok(None);
+    }
+    let target = cut.target.as_deref().unwrap_or(&ws.file.target);
+
+    // 2. Held, or not known not to be: it stays.
+    if status::landed(ctx.store, target, &cut.key)? != Landed::Absent {
+        return Ok(None);
+    }
+
+    // 3. The record gone; its rebase's key, if its attempt was at the rebase.
+    pending::remove_pending(ctx.fs.as_ref(), &ws.dir)?;
+    Ok(cut
+        .rebase_key
+        .filter(|_| cut.state == REBASING && target == onto))
 }
 
 /// Continues workspace `ws`'s rebase with its resolutions: refused while a conflict is

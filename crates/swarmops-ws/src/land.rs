@@ -6,6 +6,8 @@
 //!    (E_WS_OUTSIDE_PREFIXES, before any store call but the workspace's open), no command for
 //!    --check (E_INVALID_ARG missing "check")
 //!  lock → a base the target left, on the workspace's own target (E_WS_STALE, nothing written)
+//!       → names the target gained that the files cannot hold (E_WS_UNPORTABLE, nothing
+//!         written), unless the store only replays a land the target holds
 //!       → edits committed (-m) or E_WS_DIRTY → the land key K
 //!
 //!  without --check (mode merge by default):
@@ -42,12 +44,12 @@ use crate::pending::{self, Pending, PendingOp};
 use crate::rebase;
 use crate::scan;
 use crate::state::State;
-use crate::status::{self, Stale};
+use crate::status::{self, Landed, Stale};
 use crate::workspace::{self, Locate, Workspace};
 use crate::{Ctx, after};
 
 /// The pending record's state before an attempt's rebase.
-const REBASING: &str = "rebasing";
+pub(crate) const REBASING: &str = "rebasing";
 
 /// The pending record's state before the store's land.
 const LANDING: &str = "landing";
@@ -145,9 +147,12 @@ pub fn land(ctx: &Ctx<'_>, req: WsLandReq) -> Result<WsLandResp, OpError> {
         }
     }
 
-    // 4. Names the target gained that the files cannot hold: refused before the store lands.
-    let head = ctx.store.resolve_rev(ResolveRevReq::new(target.as_str()))?;
-    materialize::preflight(ctx, &ws, &head.id)?;
+    // 4. Names the target gained that the files cannot hold: refused before the store lands,
+    //    unless the store only replays a land cut short that the target holds.
+    if !replays(ctx, &ws, &target)? {
+        let head = ctx.store.resolve_rev(ResolveRevReq::new(target.as_str()))?;
+        materialize::preflight(ctx, &ws, &head.id)?;
+    }
 
     // 5. A land cut short: its keys; else the edits settled and something to land.
     let cut = cut_land(ctx, &ws)?;
@@ -322,6 +327,18 @@ impl Landing<'_, '_> {
 /// The status after the land, as `want` asks.
 fn attached(landing: &Landing<'_, '_>, want: StatusAfter) -> Option<swarmops_api::WsStatus> {
     after::attach(landing.ctx, &landing.ws, want)
+}
+
+/// Whether the record of a `ws land` cut short on workspace `ws`'s head names a land that
+/// `target` holds, which the store then answers as a replay and writes nothing for.
+fn replays(ctx: &Ctx<'_>, ws: &Workspace, target: &str) -> Result<bool, OpError> {
+    let Some(cut) = pending::read_pending(ctx.fs.as_ref(), &ws.dir)? else {
+        return Ok(false);
+    };
+    if cut.op != PendingOp::Land || cut.head != ws.file.head {
+        return Ok(false);
+    }
+    Ok(status::landed(ctx.store, target, &cut.key)? == Landed::Held)
 }
 
 /// The record of a `ws land` cut short on workspace `ws`'s head, in either state.

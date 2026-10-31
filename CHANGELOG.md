@@ -77,7 +77,11 @@ collects the changes on `stable` that no release holds yet, until the next relea
   moves the workspace onto the head. A land onto another `--target`, `ws commit`, `ws status`
   and `ws rebase` are not refused; a base the check cannot place (a first-parent walk of more
   than 10,000 commits, or no operation in the last 10,000 that moved the target to it) lands as
-  before ([Troubleshooting](docs/troubleshooting.md#e_ws_stale)).
+  before. A land cut short whose target then left the base is refused the same way, and `ws
+  rebase` takes over its record when no land of its key is on the target (the record would
+  otherwise refuse the rebase: "run it again first"); a land the target holds is finished by `ws
+  land`, and it replays past a reserved name the target gained since
+  ([Troubleshooting](docs/troubleshooting.md#e_ws_stale)).
 - Golden envelopes pin 54 of the 55 error codes, eight more than before: `E_AMBIGUOUS_ID`,
   `E_IO_TRANSIENT`, `E_INTERNAL`, `E_BUSY`, `E_CAS_RETRY_EXHAUSTED`, `E_UNKNOWN_PARENT` as an
   error object, `E_WS_OUTSIDE_PREFIXES` and `E_WS_STALE`.

@@ -1279,6 +1279,11 @@ the changes the target dropped along. `details` names the `target`, the `base`, 
 that moved it to `head`, or `null`). `swarmops ws rebase` moves the workspace onto the head; land
 again. The refusal comes after `E_WS_OUTSIDE_PREFIXES` and before `E_WS_DIRTY`.
 
+A land cut short and then left behind by its target (the land was never recorded, or the target
+moved back past it) is refused the same way, and `ws rebase` takes it over: it drops the land's
+record and rebases as usual. A land the target still holds is not taken over: `ws land` again
+finishes it, and `ws rebase` answers `E_INVALID_ARG` until it has.
+
 The check runs for a land onto the workspace's own target, and lets a land through that it cannot
 place: a target whose first-parent history is longer than 10,000 commits, or a base with no
 operation among the last 10,000 that moved the target to it. `ws commit`, `ws status` and

@@ -31,6 +31,8 @@ struct Hooked<'a> {
     inner: &'a dyn StoreOps,
     /// Run once, before the first `land` reaches the store.
     before_land: Mutex<Option<Box<dyn FnOnce() + Send + 'a>>>,
+    /// The next `land` fails before the store sees it.
+    crash_before_land: AtomicBool,
     /// The next `land` is recorded, then fails.
     crash_after_land: AtomicBool,
     /// The next `rebase` is recorded, then fails.
@@ -47,6 +49,7 @@ impl<'a> Hooked<'a> {
         Hooked {
             inner,
             before_land: Mutex::new(None),
+            crash_before_land: AtomicBool::new(false),
             crash_after_land: AtomicBool::new(false),
             crash_after_rebase: AtomicBool::new(false),
             lands: Mutex::new(Vec::new()),
@@ -86,7 +89,10 @@ impl StoreOps for Hooked<'_> {
             hook();
         }
 
-        // 2. The land, recorded; a crash after it, if asked for.
+        // 2. A crash before the store, if asked for; else the land, recorded, and a crash after it.
+        if self.crash_before_land.swap(false, Ordering::SeqCst) {
+            return Err(killed());
+        }
         let done = self.inner.land(who, req)?;
         self.lands.lock().unwrap().push(done.clone());
         if self.crash_after_land.swap(false, Ordering::SeqCst) {
@@ -1074,4 +1080,175 @@ fn the_stale_refusal_names_the_newest_move_to_the_head() {
     assert_eq!(refused.code, "E_WS_STALE", "{refused:?}");
     assert_ne!(refused.details["moved_op"], serde_json::json!(first));
     assert_eq!(refused.details["moved_op"], serde_json::json!(newest));
+}
+
+/// Cuts a `ws land -m` of workspace `w` short, before the store's land (`Cut::Before`) or after
+/// its frame (`Cut::After`); the workspace's head then.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Cut {
+    /// The store never sees the land.
+    Before,
+    /// The store records the land, then the call fails.
+    After,
+}
+
+/// The cut land, and the workspace's head after it.
+fn cut_land(f: &Fixture, store: &Hooked<'_>, cut: Cut) -> String {
+    let flag = match cut {
+        Cut::Before => &store.crash_before_land,
+        Cut::After => &store.crash_after_land,
+    };
+    flag.store(true, Ordering::SeqCst);
+    let cut = swarmops_ws::land(&f.ctx_over(store), land_with_message()).unwrap_err();
+    assert_eq!(cut.code, "E_IO", "{cut:?}");
+    assert!(pending_in(&f.beside("w")).exists());
+    state::read(&RealFs::new(), &f.beside("w")).unwrap().head
+}
+
+/// `ws rebase` of workspace `w` onto `release/r`.
+fn rebase_w(ctx: &swarmops_ws::Ctx<'_>) -> Result<swarmops_api::WsRebaseResp, OpError> {
+    let mut req = WsRebaseReq::new("w".to_owned());
+    req.action = WsRebaseAction::Start;
+    "release/r".clone_into(&mut req.onto);
+    req.status_after = StatusAfter::None;
+    swarmops_ws::rebase(ctx, req)
+}
+
+/// A land cut short whose target then left the base is not a dead end: `ws land` refuses as
+/// stale and writes nothing, `ws rebase` takes over the record and moves the workspace, and the
+/// land after it goes through. Whether the store's frame was written does not matter: no land
+/// of the record's key is on the target.
+#[test]
+fn a_cut_land_the_target_left_is_taken_over_by_a_rebase() {
+    for cut in [Cut::After, Cut::Before] {
+        // 1. A land cut short; the target moved back to `p`, off the base `b`.
+        let f = Fixture::new();
+        let (p, _, _) = on_release(&f);
+        let store = Hooked::new(&f.ops);
+        let head = cut_land(&f, &store, cut);
+        f.point("release/r", &p);
+        let ctx = f.ctx_over(&store);
+        let dir = f.beside("w");
+        let before = Snapshot::of(&f, "w");
+
+        // 2. The land is refused as stale; the record and the rest as they were.
+        let refused = swarmops_ws::land(&ctx, land_of("w", None)).unwrap_err();
+        assert_eq!(refused.code, "E_WS_STALE", "{cut:?}: {refused:?}");
+        assert!(Snapshot::of(&f, "w") == before, "{cut:?}: a write");
+        assert_eq!(
+            store.lands().len(),
+            usize::from(cut == Cut::After),
+            "{cut:?}"
+        );
+
+        // 3. The rebase takes the record over: the workspace on `p`, the record gone.
+        let done = rebase_w(&ctx).unwrap_or_else(|e| panic!("{cut:?}: {e:?}"));
+        assert_eq!(done.onto, p, "{cut:?}");
+        let saved = state::read(&RealFs::new(), &dir).unwrap();
+        assert_eq!((&saved.base, &saved.target), (&p, &"release/r".to_owned()));
+        assert_ne!(saved.head, head, "{cut:?}: not rebased");
+        assert!(!pending_in(&dir).exists(), "{cut:?}: a record");
+
+        // 4. The next land goes through, onto `p`.
+        let landed = swarmops_ws::land(&ctx, land_of("w", None)).unwrap();
+        assert_eq!(landed.land.status, LandStatus::Landed, "{cut:?}");
+        assert_eq!(
+            show(&f, &landed.land.landed).parents,
+            std::slice::from_ref(&p),
+            "{cut:?}"
+        );
+    }
+}
+
+/// A land cut short after the store's frame, with the target still holding it, is the land's to
+/// finish: `ws rebase` leaves the record, and the land replays the same changeset, the target
+/// holding one land of it, wherever the target moved on after it.
+#[test]
+fn a_cut_land_the_target_holds_is_finished_not_taken_over() {
+    for moved_on in [false, true] {
+        // 1. The land recorded, then cut short; the target, maybe, moved on from it.
+        let f = Fixture::new();
+        let (_, b, _) = on_release(&f);
+        let store = Hooked::new(&f.ops);
+        cut_land(&f, &store, Cut::After);
+        let first = store.lands()[0].landed.clone();
+        if moved_on {
+            let next = f.side(Some(&first), &[Put::File("src/n.txt", "n\n")]);
+            f.point("release/r", &next);
+        }
+        let ctx = f.ctx_over(&store);
+        let dir = f.beside("w");
+
+        // 2. `ws rebase` is told to finish the land first; the record stays.
+        let refused = rebase_w(&ctx).unwrap_err();
+        assert_eq!(refused.code, "E_INVALID_ARG", "{moved_on}: {refused:?}");
+        assert!(pending_in(&dir).exists(), "{moved_on}");
+
+        // 3. The land replays: the same changeset, the workspace on it.
+        let done = swarmops_ws::land(&ctx, land_of("w", None)).unwrap();
+        assert_eq!(done.land.status, LandStatus::Replayed, "{moved_on}");
+        assert_eq!(done.land.landed, first, "{moved_on}");
+        let landed: Vec<_> = store.lands().iter().map(|l| l.landed.clone()).collect();
+        assert_eq!(landed, [first.clone(), first.clone()], "{moved_on}");
+        assert_eq!(show(&f, &first).parents, [b], "{moved_on}");
+        assert_eq!(state::read(&RealFs::new(), &dir).unwrap().head, first);
+        assert!(!pending_in(&dir).exists(), "{moved_on}");
+    }
+}
+
+/// A land cut short after its frame, which the target holds, finishes though the target then
+/// gained a name the volume cannot hold: the replay writes nothing to the store, and the files
+/// move to the land itself.
+#[test]
+fn a_held_land_replays_past_a_reserved_name() {
+    // 1. The land cut short; the target moved on from it to a changeset with a reserved name.
+    let f = Fixture::new();
+    on_release(&f);
+    let store = Hooked::new(&f.ops);
+    cut_land(&f, &store, Cut::After);
+    let first = store.lands()[0].landed.clone();
+    let gained = f.side(Some(&first), &[Put::File("src/.swarmws/x", "z\n")]);
+    f.point("release/r", &gained);
+
+    // 2. The re-run replays the land and the workspace stands on it.
+    let ctx = f.ctx_over(&store);
+    let done = swarmops_ws::land(&ctx, land_of("w", None)).unwrap();
+    assert_eq!(done.land.status, LandStatus::Replayed);
+    let dir = f.beside("w");
+    assert_eq!(state::read(&RealFs::new(), &dir).unwrap().head, first);
+    assert!(!pending_in(&dir).exists());
+}
+
+/// A land cut short whose land is not on the target, which then gained a reserved name above
+/// the base: the land is refused as unportable and writes nothing; `ws rebase` takes the record
+/// over and gives the same refusal, so nothing is left to wedge, and the land goes through once
+/// the target is fixed.
+#[test]
+fn a_cut_land_and_a_reserved_name_leave_no_dead_end() {
+    // 1. The land cut short after its frame; the target set to a child of the base with a
+    //    reserved name, which does not hold the land.
+    let f = Fixture::new();
+    let (_, b, _) = on_release(&f);
+    let store = Hooked::new(&f.ops);
+    cut_land(&f, &store, Cut::After);
+    let gained = f.side(Some(&b), &[Put::File("src/.swarmws/x", "z\n")]);
+    f.point("release/r", &gained);
+    let ctx = f.ctx_over(&store);
+    let dir = f.beside("w");
+    let before = Snapshot::of(&f, "w");
+
+    // 2. The land is refused as unportable, the record kept as it was.
+    let refused = swarmops_ws::land(&ctx, land_of("w", None)).unwrap_err();
+    assert_eq!(refused.code, "E_WS_UNPORTABLE", "{refused:?}");
+    assert!(Snapshot::of(&f, "w") == before);
+
+    // 3. The rebase takes the record over; the unportable name is its refusal now.
+    let refused = rebase_w(&ctx).unwrap_err();
+    assert_eq!(refused.code, "E_WS_UNPORTABLE", "{refused:?}");
+    assert!(!pending_in(&dir).exists());
+
+    // 4. The target fixed: the land goes through.
+    f.point("release/r", &b);
+    let done = swarmops_ws::land(&ctx, land_of("w", None)).unwrap();
+    assert_eq!(done.land.status, LandStatus::Landed);
 }

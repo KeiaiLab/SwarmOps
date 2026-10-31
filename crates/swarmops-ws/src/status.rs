@@ -9,14 +9,18 @@
 //!
 //!  stale (for `ws land`): base off main's history, history ended short of the cap
 //!  op_log{before…}                   until the operation that put the target on the base
+//!
+//!  landed (for `ws rebase`): the operation of a land key, then the target's history
+//!  op_log{before…}                   until the changeset the key landed
+//!  log{target, 100, cursor}…         until that changeset: held; ended: absent
 //! ```
 
 use std::collections::HashMap;
 
 use serde_json::{Map, Value};
 use swarmops_api::{
-    ConflictReport, ErrorCode, LogReq, OpError, OpLogReq, ResolveRevReq, StoreOps, WsChange,
-    WsRebasing, WsState, WsStatus, WsStatusReq,
+    ConflictReport, ErrorCode, LogReq, OpError, OpLogReq, OperationOut, ResolveRevReq, StoreOps,
+    WsChange, WsRebasing, WsState, WsStatus, WsStatusReq,
 };
 
 use crate::Ctx;
@@ -32,7 +36,7 @@ pub const BEHIND_CAP: u64 = 10_000;
 const LOG_PAGE: usize = 100;
 
 /// The most operations the search for a stale base reads.
-pub const OP_CAP: u64 = 10_000;
+pub(crate) const OP_CAP: u64 = 10_000;
 
 /// The operations one `op_log` page of that search asks for.
 const OP_PAGE: usize = 100;
@@ -272,6 +276,51 @@ pub(crate) struct Stale {
     pub(crate) moved_op: Option<u64>,
 }
 
+/// How a read of the journal, newest operation first, stopped.
+enum Scanned {
+    /// The caller's `stop` said so.
+    Stopped,
+    /// The journal ended.
+    Ended,
+    /// [`OP_CAP`] operations were read.
+    Capped,
+}
+
+/// Visits the journal's operations, newest first, a page at a time, until `stop` says so, the
+/// journal ends or [`OP_CAP`] operations were visited.
+fn scan_ops(
+    store: &dyn StoreOps,
+    mut stop: impl FnMut(&OperationOut) -> bool,
+) -> Result<Scanned, OpError> {
+    let mut visited = 0;
+    let mut before = None;
+    loop {
+        // 1. The next page of operations.
+        let mut req = OpLogReq::default();
+        req.before = before;
+        req.limit = OP_PAGE;
+        req.max_changesets = OP_CHANGESETS;
+        let page = store.op_log(req)?;
+
+        // 2. Each operation, until the stop or the cap.
+        for op in &page.ops {
+            if visited == OP_CAP {
+                return Ok(Scanned::Capped);
+            }
+            visited += 1;
+            if stop(op) {
+                return Ok(Scanned::Stopped);
+            }
+        }
+
+        // 3. The next page, while there is one.
+        before = page.ops.last().map(|op| op.op);
+        if !page.truncated || before.is_none() {
+            return Ok(Scanned::Ended);
+        }
+    }
+}
+
 /// Whether `base` has left ref `target`'s history: the first-parent history from the target's
 /// head, read to its end within [`BEHIND_CAP`], lacks it, and the journal's newest [`OP_CAP`]
 /// operations hold one that moved the target to it. A base no operation put on the target (a
@@ -289,43 +338,62 @@ pub(crate) fn stale(
 
     // 2. The journal, newest first: the move to the head, then the move to the base.
     let mut moved_op = None;
-    let mut visited = 0;
-    let mut before = None;
-    loop {
-        // 3. The next page of operations.
-        let mut req = OpLogReq::default();
-        req.before = before;
-        req.limit = OP_PAGE;
-        req.max_changesets = OP_CHANGESETS;
-        let page = store.op_log(req)?;
-
-        // 4. Each operation's moves of the target, until the cap.
-        for op in &page.ops {
-            if visited == OP_CAP {
-                return Ok(None);
-            }
-            visited += 1;
-            let moves = |to: &str| {
-                (op.ref_moves.iter()).any(|m| m.name == target && m.new.as_deref() == Some(to))
-            };
-            if moved_op.is_none() && moves(&placed.head) {
-                moved_op = Some(op.op);
-            }
-            if moves(base) {
-                return Ok(Some(Stale {
-                    head: placed.head,
-                    base_op: op.op,
-                    moved_op,
-                }));
-            }
+    let mut base_op = None;
+    scan_ops(store, |op| {
+        let moves = |to: &str| {
+            (op.ref_moves.iter()).any(|m| m.name == target && m.new.as_deref() == Some(to))
+        };
+        if moved_op.is_none() && moves(&placed.head) {
+            moved_op = Some(op.op);
         }
-
-        // 5. The next page, while there is one.
-        before = page.ops.last().map(|op| op.op);
-        if !page.truncated || before.is_none() {
-            return Ok(None);
+        if moves(base) {
+            base_op = Some(op.op);
         }
-    }
+        base_op.is_some()
+    })?;
+    Ok(base_op.map(|base_op| Stale {
+        head: placed.head,
+        base_op,
+        moved_op,
+    }))
+}
+
+/// Whether a land with a given key is on a ref's history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Landed {
+    /// Its changeset is on the history: the store replays the land.
+    Held,
+    /// No changeset of the key is on it, or none was ever made: the store lands anew.
+    Absent,
+    /// The journal or the history is longer than its cap: not known.
+    Unknown,
+}
+
+/// Whether the land with `key` is on the first-parent history of ref `target`: the changeset the
+/// journal's newest [`OP_CAP`] operations name as that key's land, looked for on the history
+/// within [`BEHIND_CAP`] changesets. A key no operation made is [`Landed::Absent`].
+pub(crate) fn landed(store: &dyn StoreOps, target: &str, key: &str) -> Result<Landed, OpError> {
+    // 1. The journal: the changeset the key's land made.
+    let mut made = None;
+    let scanned = scan_ops(store, |op| {
+        let land = (op.changesets.iter()).find(|c| c.land_key.as_deref() == Some(key));
+        made = land.map(|c| c.id.clone());
+        made.is_some()
+    })?;
+    let Some(made) = made else {
+        return Ok(match scanned {
+            Scanned::Capped => Landed::Unknown,
+            _ => Landed::Absent,
+        });
+    };
+
+    // 2. The target's history: met, or ended without it, or cut at the cap.
+    let walked = walk(store, target, |id| id == made)?;
+    Ok(match walked {
+        Walked::Stopped => Landed::Held,
+        Walked::Ended => Landed::Absent,
+        Walked::Capped => Landed::Unknown,
+    })
 }
 
 /// The conflicting paths of workspace `ws`'s rebase, from its conflict report; none when it has
