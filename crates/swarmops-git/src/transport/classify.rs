@@ -358,9 +358,9 @@ mod tests {
         }
     }
 
-    /// The first needle of `rows` that holds a needle read before it, and that needle. One in
-    /// a row above takes its every match to that row's verdict; one before it in its row leaves
-    /// it no match of its own, the verdict the same.
+    /// A needle read before, and the first needle of `rows` that holds it. One in a row above takes
+    /// its every match to that row's verdict; one before it in its row leaves it no match of its
+    /// own, the verdict the same.
     fn first_shadowed<'a>(rows: &[(&[&'a str], Verdict)]) -> Option<(&'a str, &'a str)> {
         let needles: Vec<&str> = rows
             .iter()
