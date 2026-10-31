@@ -17,7 +17,7 @@ use std::fs;
 use std::ops::Index;
 
 use assert_cmd::Command;
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 use serde::de::{self, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde::ser::{SerializeMap, SerializeSeq, Serializer};
 use serde::{Deserialize, Serialize};
@@ -1795,14 +1795,22 @@ fn error_codes_reach_the_cli() {
     insta::assert_json_snapshot!(s.transcript());
 }
 
-/// How many error codes there are, and how many goldens pin: the counts the known limitations
-/// and the goals state ("54 of the 55").
+/// How many error codes there are, and how many goldens pin: the counts the known limitations,
+/// the changelog and the goals state, which [`check_doc_counts`] reads.
 const CODE_COUNT: usize = 55;
 const PINNED_COUNT: usize = 54;
 
+/// The documents that state [`CODE_COUNT`] and [`PINNED_COUNT`], from the repository's root.
+const KNOWN_LIMITATIONS: &str = "docs/known-limitations.md";
+const CHANGELOG: &str = "CHANGELOG.md";
+const GOALS: &str = "docs/goals.md";
+
+/// How the goals' row of the agent contract, which states the counts, starts.
+const G6_ROW: &str = "| G6 |";
+
 /// Checks [`NOT_RAISED`]: each code listed is one the table has, and each reason names a test
-/// that exists and pins its code, but those of [`UNPINNED`], each listed and unpinned; and the
-/// counts of [`CODE_COUNT`] and [`PINNED_COUNT`].
+/// that pins its code, but those of [`UNPINNED`], each listed and unpinned; and the counts of
+/// [`CODE_COUNT`] and [`PINNED_COUNT`], in the table and in the documents.
 fn check_not_raised() {
     // 1. Each code known; pinned unless unpinned.
     for (code, why) in NOT_RAISED {
@@ -1821,14 +1829,16 @@ fn check_not_raised() {
         assert!(listed, "{code} is unpinned but not listed as not raised");
     }
 
-    // 3. The counts the documents state.
+    // 3. The counts, and the documents that state them.
     assert_eq!(ErrorCode::ALL.len(), CODE_COUNT, "error codes");
     assert_eq!(CODE_COUNT - UNPINNED.len(), PINNED_COUNT, "pinned codes");
+    check_doc_counts();
 }
 
-/// Checks that the test reason `why` names before "pins" is defined: `<crate>'s
-/// <module>::…::<name>` in that crate's `src/<module>.rs`, `<file>::<name>` in this crate's
-/// `tests/<file>.rs`, and a bare name in `tests/cli.rs`.
+/// Checks that the test reason `why` names before "pins" is a test that pins `code`:
+/// `<crate>'s <module>::…::<name>` in that crate's `src/<module>.rs`, `<file>::<name>` in this
+/// crate's `tests/<file>.rs`, and a bare name in `tests/cli.rs`; a `#[test]` whose body, or a
+/// snapshot of it beside that file, holds the code.
 fn check_pin_exists(code: &str, why: &str) {
     // 1. The test's path, and the crate that holds it if another.
     let words: Vec<&str> = why.split_whitespace().collect();
@@ -1847,10 +1857,116 @@ fn check_pin_exists(code: &str, why: &str) {
     }
     .join(format!("{first}.rs"));
 
-    // 3. The test defined there.
+    // 3. The function defined there, a test: `fn x(` under its attributes, `#[test]` among them.
     let source = fs::read_to_string(&file).unwrap_or_else(|e| panic!("{code}: {file}: {e}"));
-    let defined = source.contains(&format!("fn {name}("));
-    assert!(defined, "{code}: no test {path} in {file}");
+    let at = source.find(&format!("fn {name}("));
+    let at = at.unwrap_or_else(|| panic!("{code}: no test {path} in {file}"));
+    let line = source[..at].rfind('\n').map_or(0, |end| end + 1);
+    let test = attributes_of(&source[..line])
+        .iter()
+        .any(|attribute| attribute.trim() == "#[test]");
+    assert!(test, "{code}: {path} in {file} is not a test");
+
+    // 4. Its body, or a snapshot of it, holds the code.
+    let body = body_of(&source[line..]);
+    let snapshots = snapshots_of(&file, &format!("{module}::{name}"));
+    let held = holds_code(body, code) || snapshots.iter().any(|snap| holds_code(snap, code));
+    assert!(
+        held,
+        "{code}: neither {path} nor a snapshot of it holds the code"
+    );
+}
+
+/// The attribute lines right above an item that starts after `above`, which ends with a line
+/// break: the lines up to a blank one, a comment or the end of another item. For example
+/// `#[test]` and `#[ignore = "…"]`, its reason continued on a second line.
+fn attributes_of(above: &str) -> Vec<&str> {
+    above
+        .lines()
+        .rev()
+        .take_while(|line| {
+            let line = line.trim();
+            let ended = line.ends_with(['}', ';', '{']);
+            !(line.is_empty() || line.starts_with("//") || ended)
+        })
+        .collect()
+}
+
+/// The body of the item `item` starts with, up to the closing brace at the item's indent.
+fn body_of(item: &str) -> &str {
+    let indent = item.len() - item.trim_start().len();
+    let close = format!("\n{}}}\n", &item[..indent]);
+    item.find(&close).map_or(item, |end| &item[..end])
+}
+
+/// The insta snapshots beside `file` of test `path` (`<module>::<name>`): their names end in
+/// `__<module>__<name>`, or that and `-<n>` for a test's further ones.
+fn snapshots_of(file: &Utf8Path, path: &str) -> Vec<String> {
+    // 1. The snapshot directory beside the file; none, no snapshots.
+    let dir = file
+        .parent()
+        .expect("a file in a directory")
+        .join("snapshots");
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+
+    // 2. Those of the test, read.
+    let suffix = format!("__{}", path.replace("::", "__"));
+    let mut found = Vec::new();
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|e| panic!("{dir}: {e}"));
+        let file_name = entry.file_name().into_string().unwrap_or_default();
+        let Some(stem) = file_name.strip_suffix(".snap") else {
+            continue;
+        };
+        let numbered = stem
+            .rsplit_once('-')
+            .filter(|(_, n)| n.parse::<u32>().is_ok());
+        let stem = numbered.map_or(stem, |(first, _)| first);
+        if stem.ends_with(&suffix) {
+            found.push(fs::read_to_string(entry.path()).unwrap());
+        }
+    }
+    found
+}
+
+/// Whether `text` holds error code `code` whole: `E_IO_TRANSIENT` holds no `E_IO`.
+fn holds_code(text: &str, code: &str) -> bool {
+    text.match_indices(code).any(|(at, _)| {
+        let next = text[at + code.len()..].chars().next();
+        !next.is_some_and(|c| c.is_ascii_uppercase() || c == '_')
+    })
+}
+
+/// Checks that the documents state [`PINNED_COUNT`] and [`CODE_COUNT`]: the known limitations
+/// and the changelog as "54 of the 55 error codes", the goals' G6 row as "55 codes, 54 pinned".
+fn check_doc_counts() {
+    // 1. The repository's root, two directories above this crate.
+    let root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let read = |name: &str| {
+        let file = root.join(name);
+        fs::read_to_string(&file).unwrap_or_else(|e| panic!("{file}: {e}"))
+    };
+
+    // 2. The known limitations and the changelog.
+    let pinned = format!("{PINNED_COUNT} of the {CODE_COUNT} error codes");
+    for name in [KNOWN_LIMITATIONS, CHANGELOG] {
+        assert!(
+            read(name).contains(&pinned),
+            "{name} does not state {pinned:?}"
+        );
+    }
+
+    // 3. The goals' G6 row.
+    let goals = read(GOALS);
+    let row = goals.lines().find(|line| line.starts_with(G6_ROW));
+    let row = row.unwrap_or_else(|| panic!("{GOALS}: no G6 row"));
+    let counted = format!("{CODE_COUNT} codes, {PINNED_COUNT} pinned");
+    assert!(
+        row.contains(&counted),
+        "{GOALS}'s G6 row does not state {counted:?}"
+    );
 }
 
 /// The failing commands of [`error_codes_reach_the_cli`], each with the code it must raise,
