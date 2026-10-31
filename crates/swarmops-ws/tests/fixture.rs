@@ -196,6 +196,17 @@ pub enum Bare {
 /// Both ways a [`Bare`] workspace stands on disk.
 pub const BARE: [Bare; 2] = [Bare::Made, Bare::OldFile];
 
+/// Whether changeset `id`'s tree holds a file at `path`.
+pub fn tree_holds(f: &Fixture, id: &str, path: &str) -> bool {
+    let mut req = ReadFileReq::new(id, path);
+    req.max_bytes = 1024;
+    match f.ops.read_file(req) {
+        Ok(_) => true,
+        Err(e) if e.code == "E_PATH_NOT_FOUND" => false,
+        Err(e) => panic!("{path}: {e:?}"),
+    }
+}
+
 /// The files below `dir`, by repository path, with what each is (`f` a file, `x` an executable,
 /// `l` a symlink) and holds: `.swarmws/` left out.
 pub fn tree_of(dir: &Utf8Path) -> Vec<(String, char, String)> {

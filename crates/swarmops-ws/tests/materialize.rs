@@ -4,7 +4,7 @@ use swarmops_api::{StatusAfter, WsCommitReq, WsCreateReq, WsDiscardReq, WsMateri
 use swarmops_ws::state::{self, SWARMWS_DIR, Volume};
 use swarmops_ws::{RealFs, lock, materialize};
 
-use crate::fixture::{BARE, Fixture, Put, exec, file, link, tree_of, write};
+use crate::fixture::{BARE, Fixture, Put, exec, file, link, tree_holds, tree_of, write};
 
 /// A volume as this host's, which holds all three.
 const LINUX: Volume = Volume::new(false, true, true);
@@ -911,18 +911,6 @@ fn a_bare_workspace_holds_the_whole_tree() {
     }
 }
 
-/// Whether changeset `id`'s tree holds a file at `path`.
-fn tree_holds(f: &Fixture, id: &str, path: &str) -> bool {
-    use swarmops_api::{ReadFileReq, StoreOps};
-    let mut req = ReadFileReq::new(id, path);
-    req.max_bytes = 1024;
-    match f.ops.read_file(req) {
-        Ok(_) => true,
-        Err(e) if e.code == "E_PATH_NOT_FOUND" => false,
-        Err(e) => panic!("{path}: {e:?}"),
-    }
-}
-
 /// The intent file of workspace `dir`.
 fn intent_of(dir: &camino::Utf8Path) -> camino::Utf8PathBuf {
     dir.join(SWARMWS_DIR).join("journal/materialize.json")
@@ -1074,10 +1062,12 @@ fn a_new_path_meets_the_portability_rules() {
     f.create("w", &base, &["src"]);
     let dir = f.beside("w");
     write(&dir, ".SWARMWS", "x\n");
+    let files = tree_of(&dir);
     let saved = std::fs::read(state::path_in(&dir)).unwrap();
     let refused = swarmops_ws::materialize(&f.ctx(), expand("w", &[".SWARMWS"])).unwrap_err();
     assert_eq!(refused.code, "E_WS_UNPORTABLE", "{refused:?}");
     assert_eq!(refused.details["reason"], "reserved_name");
+    assert_eq!(tree_of(&dir), files);
     assert_eq!(std::fs::read(state::path_in(&dir)).unwrap(), saved);
     assert!(!intent_of(&dir).exists());
 
@@ -1096,6 +1086,86 @@ fn a_new_path_meets_the_portability_rules() {
     assert_eq!(tree_of(&dir), files);
     assert_eq!(std::fs::read(state::path_in(&dir)).unwrap(), saved);
     assert!(!intent_of(&dir).exists());
+}
+
+/// A new path whose case folds onto a tree path the same request adds collides on a volume that
+/// folds case, though the workspace does not hold that tree path yet; nothing is written.
+#[test]
+fn a_new_path_collides_with_a_path_the_request_adds() {
+    // 1. A workspace of `src` on a volume that folds case; the agent's `Notes.txt` beside the
+    //    tree's `notes.txt`, which is off the prefixes.
+    let f = Fixture::new();
+    let base = f.commit(
+        None,
+        &[Put::File("src/a.rs", "a\n"), Put::File("notes.txt", "n\n")],
+    );
+    f.create("c", &base, &["src"]);
+    let mut volume = LINUX;
+    volume.case_insensitive = true;
+    f.simulate("c", volume);
+    let dir = f.beside("c");
+    write(&dir, "Notes.txt", "N\n");
+    let files = tree_of(&dir);
+    let saved = std::fs::read(state::path_in(&dir)).unwrap();
+
+    // 2. Both in one request: a case collision naming the two; nothing changed.
+    let both = expand("c", &["notes.txt", "Notes.txt"]);
+    let refused = swarmops_ws::materialize(&f.ctx(), both).unwrap_err();
+    assert_eq!(refused.code, "E_WS_UNPORTABLE", "{refused:?}");
+    assert_eq!(refused.details["reason"], "case_collision");
+    assert_eq!(
+        refused.details["paths"],
+        serde_json::json!([["Notes.txt", "notes.txt"]])
+    );
+    assert_eq!(tree_of(&dir), files);
+    assert_eq!(std::fs::read(state::path_in(&dir)).unwrap(), saved);
+    assert!(!intent_of(&dir).exists());
+}
+
+/// A new path below the agent's own file is not on disk: `E_PATH_NOT_FOUND` naming it, and
+/// nothing changes.
+#[test]
+fn a_new_path_below_a_file_on_disk_is_not_found() {
+    // 1. A workspace of `src`; the agent's new file `notes.txt` at the root.
+    let f = Fixture::new();
+    let base = f.commit(None, &[Put::File("src/a.rs", "a\n")]);
+    f.create("w", &base, &["src"]);
+    let dir = f.beside("w");
+    write(&dir, "notes.txt", "n\n");
+    let files = tree_of(&dir);
+    let saved = std::fs::read(state::path_in(&dir)).unwrap();
+
+    // 2. `notes.txt/x` refused as not found; nothing changed.
+    let refused = swarmops_ws::materialize(&f.ctx(), expand("w", &["notes.txt/x"])).unwrap_err();
+    assert_eq!(refused.code, "E_PATH_NOT_FOUND", "{refused:?}");
+    assert_eq!(refused.details["path"], "notes.txt/x");
+    assert_eq!(tree_of(&dir), files);
+    assert_eq!(std::fs::read(state::path_in(&dir)).unwrap(), saved);
+    assert!(!intent_of(&dir).exists());
+}
+
+/// A directory named `.gitignore` above a prefix is no ignore file: a create leaves it out of the
+/// prefixes and off disk, and holds the real ignore file beside it.
+#[test]
+fn create_skips_a_directory_named_as_an_ignore_file() {
+    // 1. A root `.swarmignore`, a directory `.gitignore`, and `src`.
+    let f = Fixture::new();
+    let base = f.commit(
+        None,
+        &[
+            Put::File(".swarmignore", "*.tmp\n"),
+            Put::File(".gitignore/x", "x\n"),
+            Put::File("src/a.txt", "a\n"),
+        ],
+    );
+
+    // 2. A workspace of `src`: `.swarmignore` joins, the directory does not.
+    let info = f.create("w", &base, &["src"]);
+    assert_eq!(info.prefixes, [".swarmignore", "src"]);
+    assert_eq!(
+        tree_of(&f.beside("w")),
+        [file(".swarmignore", "*.tmp\n"), file("src/a.txt", "a\n")]
+    );
 }
 
 /// An agent's file where an ignore file above the new prefix goes refuses the materialize with
@@ -1132,7 +1202,8 @@ fn a_dirty_ignore_file_above_refuses_the_materialize() {
 }
 
 /// A new-path materialize killed at each call of the durable files' layer ends whole on the
-/// next open: the path is a prefix or not, no intent is left, and the agent's file is intact.
+/// next open: the path is a prefix exactly when the intent was durable, no intent is left, and
+/// the agent's file is intact.
 #[test]
 #[cfg(feature = "test-hooks")]
 fn a_killed_new_path_materialize_ends_whole() {
@@ -1195,13 +1266,22 @@ mod new_path_killed {
                     .env(CUT, format!("{k}:{name}")),
             );
             assert!(!out.status.success(), "{name}: the child was not killed");
+
+            // A durable intent rolls forward; without one, the open changes nothing.
+            let intended = intent_of(&dir).exists();
+            let before = state::read(&RealFs::new(), &dir).unwrap().prefixes;
             let ws = Workspace::open(&f.ctx(), Locate::Name(name.clone())).unwrap();
-            let prefixes = ws.file.prefixes.clone();
+            let end = if intended {
+                vec![NEW.to_owned(), "src".to_owned()]
+            } else {
+                before
+            };
+            assert_eq!(ws.file.prefixes, end, "{name}: intent {intended}");
             let ends = [
                 vec!["src".to_owned()],
                 vec![NEW.to_owned(), "src".to_owned()],
             ];
-            assert!(ends.contains(&prefixes), "{name}: {prefixes:?}");
+            assert!(ends.contains(&end), "{name}: {end:?}");
             assert!(!intent_of(&dir).exists(), "{name}");
             assert_eq!(std::fs::read_to_string(dir.join(NEW)).unwrap(), TEXT);
         }

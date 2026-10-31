@@ -9,15 +9,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use camino::{Utf8Path, Utf8PathBuf};
 
 use swarmops_api::{
-    ChangeOp, ContentInput, DiffFormat, DiffReq, ErrorCode, ModeInput, OpError, ReadFileReq,
-    ReadTreeReq, StatusAfter, StoreOps, WsCommitReq, WsDeleteReq, WsDiffReq, WsLandReq,
-    WsMaterializeReq, WsRebaseReq,
+    ChangeOp, ContentInput, DiffFormat, DiffReq, ErrorCode, ModeInput, OpError, ReadTreeReq,
+    StatusAfter, StoreOps, WsCommitReq, WsDeleteReq, WsDiffReq, WsLandReq, WsMaterializeReq,
+    WsRebaseReq,
 };
 use swarmops_ws::hostfs::HostMeta;
 use swarmops_ws::state::{self, SWARMWS_DIR, Volume};
 use swarmops_ws::{HostFs, RealFs, RealHost};
 
-use crate::fixture::{BARE, Fixture, Put, Watched, changes, remove, write};
+use crate::fixture::{BARE, Fixture, Put, Watched, changes, remove, tree_holds, write};
 
 /// The request committing every change of workspace `name` with `message`.
 fn commit_of(name: &str, message: &str) -> WsCommitReq {
@@ -768,17 +768,6 @@ fn rebased(f: &Fixture, name: &str) {
     swarmops_ws::rebase(&f.ctx(), req).unwrap();
 }
 
-/// Whether changeset `id`'s tree holds a file at `path`.
-fn tree_holds(f: &Fixture, id: &str, path: &str) -> bool {
-    let mut req = ReadFileReq::new(id, path);
-    req.max_bytes = 1024;
-    match f.ops.read_file(req) {
-        Ok(_) => true,
-        Err(e) if e.code == "E_PATH_NOT_FOUND" => false,
-        Err(e) => panic!("{path}: {e:?}"),
-    }
-}
-
 /// The path a refusal's hint widens to.
 fn hinted(refused: &OpError) -> &str {
     let hint = refused.hint.as_deref().unwrap_or_default();
@@ -788,7 +777,7 @@ fn hinted(refused: &OpError) -> &str {
 
 /// A workspace made before its base had the root `.gitignore` meets the copy that file names as
 /// an outside edit; the hint's materialize adds the copy and the `.gitignore`, and the next
-/// commit leaves the copy out (the M15 design §5a, I3).
+/// commit leaves the copy out.
 #[test]
 fn an_older_workspace_follows_the_hint_without_committing_a_copy() {
     // 1. A workspace of `src` on a base without `.gitignore`; main gains one naming `.env`.
@@ -949,9 +938,33 @@ fn a_root_swarmws_in_the_tree_is_not_refused() {
     assert!(!dir.exists());
 }
 
+/// A directory named `.gitignore` off the prefixes is no ignore file the walk lacks: a commit
+/// inside the prefixes under a held `.swarmignore` is not refused for it.
+#[test]
+fn a_directory_named_as_an_ignore_file_is_not_refused() {
+    // 1. A workspace of `src` under the root `.swarmignore`; the tree's `.gitignore/` is a
+    //    directory.
+    let f = Fixture::new();
+    let base = f.commit(
+        None,
+        &[
+            Put::File(".swarmignore", "*.tmp\n"),
+            Put::File(".gitignore/x", "x\n"),
+            Put::File("src/a.txt", "a\n"),
+        ],
+    );
+    f.create("w", &base, &[".swarmignore", "src"]);
+    let dir = f.beside("w");
+    write(&dir, "src/a.txt", "edited\n");
+
+    // 2. Committed: the edit.
+    let done = swarmops_ws::commit(&f.ctx(), commit_of("w", "edit")).unwrap();
+    assert!(tree_holds(&f, &done.changeset, "src/a.txt"));
+}
+
 /// An ignore file the base gained above the prefixes after the create, missing from disk under
 /// one the workspace holds, is refused, so its `!` cannot be lost; following the hints twice
-/// commits the file it lets through (the M15 design §5a, H2).
+/// commits the file it lets through.
 #[test]
 fn a_negation_the_base_gained_above_the_prefixes_is_refused() {
     // 1. A workspace of `crates/a` under the root `.gitignore` naming `*.log`; main gains

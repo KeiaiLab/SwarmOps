@@ -15,7 +15,7 @@ use swarmops_ws::registry::{Entry, Registry};
 use swarmops_ws::state::{self, SWARMWS_DIR};
 use swarmops_ws::{Ctx, RealFs};
 
-use crate::fixture::{Fixture, Put, file, tree_of, write};
+use crate::fixture::{Fixture, Put, file, tree_holds, tree_of, write};
 
 /// The `WorktreeCreate` input of the hooks reference.
 const CREATE_JSON: &[u8] = include_bytes!("fixtures/hooks/worktree_create.json");
@@ -565,20 +565,8 @@ fn bootstrap_refuses_copies_past_the_file_limit() {
     assert_eq!(tree_of(&kept), [file("a.txt", "a\n")]);
 }
 
-/// Whether changeset `id`'s tree holds a file at `path`.
-fn tree_holds(f: &Fixture, id: &str, path: &str) -> bool {
-    let mut req = ReadFileReq::new(id, path);
-    req.max_bytes = 1024;
-    match f.ops.read_file(req) {
-        Ok(_) => true,
-        Err(e) if e.code == "E_PATH_NOT_FOUND" => false,
-        Err(e) => panic!("{path}: {e:?}"),
-    }
-}
-
 /// A hook-made sparse workspace holds the root `.gitignore`, so the `.env` the bootstrap copies
-/// is ignored: an edit commits and lands without it, and the remove hook deletes the directory
-/// (the M15 design §5a, I3).
+/// is ignored: an edit commits and lands without it, and the remove hook deletes the directory.
 #[cfg(unix)]
 #[test]
 fn a_hook_sparse_workspace_with_copies_commits_lands_and_is_removed() {

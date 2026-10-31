@@ -297,7 +297,7 @@ fn every_ws_mutation_returns_status_after() {
 }
 
 /// The hint of a commit refused for a new file at the root, run as it is inside the workspace,
-/// widens the prefixes; the next commit holds the file (the M15 design §5a, I4).
+/// widens the prefixes; the next commit holds the file.
 #[test]
 fn ws_follows_the_outside_hint_for_a_new_root_file() {
     // 1. A workspace of `src`; a new file at its root.
