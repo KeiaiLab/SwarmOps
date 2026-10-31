@@ -98,9 +98,11 @@ collects the changes on `stable` that no release holds yet, until the next relea
 - A sparse workspace holds the `.gitignore` and `.swarmignore` files of the directories above
   its prefixes: `ws create --prefix` writes them out and `ws materialize` adds them with each
   path. `ws materialize` takes a path the tree lacks when it is on disk and its parent is the
-  root, a directory of the tree or one above a prefix, writing nothing, so the next commit stores
-  it; a path absent from disk or without such a parent is still `E_PATH_NOT_FOUND` (the M15
-  design §5a).
+  root, a directory of the tree or one above a prefix, writing only the ignore files above it
+  that the workspace lacks, so the next commit stores it; a path absent from disk or without such
+  a parent is still `E_PATH_NOT_FOUND` (the M15 design §5a).
+- The `meta.resolved` of a sparse workspace's `ws` envelopes also names its materialized
+  changeset, which the commands read to compare the tree with the disk (the M15 design §5a).
 
 ### Fixed
 
@@ -153,12 +155,14 @@ collects the changes on `stable` that no release holds yet, until the next relea
 - The scripting guide names `E_REF_NOT_FOUND` and `E_WS_STALE` as the codes not raised yet, as
   Troubleshooting does; it named `E_AUTH`, `E_POLICY_DENIED` and `E_MAINTENANCE_BUSY` too, which
   `swarmops serve` and the maintenance commands raise.
-- In a sparse workspace, a `.worktreeinclude` copy or build output outside the prefixes that only
-  an ignore file above them names no longer blocks `ws commit`, `ws land`, `ws delete --rescue`
-  and the `worktree-remove` hook with `E_WS_OUTSIDE_PREFIXES`, and a path under the prefixes that
-  only such a file names is no longer committed; a new file at the root, which the refusal's hint
-  names, now materialises instead of failing with `E_PATH_NOT_FOUND`
-  ([Troubleshooting](docs/troubleshooting.md#e_ws_outside_prefixes)).
+- In a sparse workspace, a `.worktreeinclude` copy or build output that only an ignore file above
+  the prefixes names, at the root or in a directory above a prefix, no longer blocks `ws commit`,
+  `ws land`, `ws delete --rescue` and the `worktree-remove` hook with `E_WS_OUTSIDE_PREFIXES`. One
+  in another directory off the prefixes is still refused as that directory (`config` for
+  `config/master.key`): `ws materialize config` clears it, and the ignore file keeps the copy out of
+  the commit. A path under the prefixes that only such a file names is no longer committed; a new
+  file at the root, which the refusal's hint names, now materialises instead of failing with
+  `E_PATH_NOT_FOUND` ([Troubleshooting](docs/troubleshooting.md#e_ws_outside_prefixes)).
 - In a sparse workspace, `ws commit`, `ws land`, `ws delete --rescue` and the `worktree-remove`
   hook refuse (`E_WS_OUTSIDE_PREFIXES`) an edit to a tree path outside the prefixes that is on
   disk, and a tree ignore file off the prefixes and missing from disk under an ignore file the

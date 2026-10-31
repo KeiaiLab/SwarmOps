@@ -823,6 +823,8 @@ pub(crate) fn with_ignores(
             }
         }
     }
+
+    // 3. With the paths themselves: sorted, without repeats or a path below another.
     found.extend(paths);
     Ok(tidy(found))
 }

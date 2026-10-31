@@ -699,22 +699,26 @@ left).
   path. A directory off the prefixes whose contents alone are ignored (`build/` holding only
   `*.o`) is still refused as `build`; after the hint, nothing under it is committed.
   *Documented (the M15 design §5a). Found: M15 Task S4b; narrowed by M15 Task S4b3.*
-- **A new path materialises only when it is on disk with a parent.** A commit no longer widens
-  the prefixes; `ws materialize` does, and takes a path the tree lacks only when it is on disk and
-  its parent is the root, a directory of the tree or a directory above a prefix: nothing is
-  written, and the next commit stores it. A path absent from disk (a typo) or without such a
-  parent (`nope/deeper/x` where the tree has no `nope`) is `E_PATH_NOT_FOUND`: materialise its
-  topmost new directory instead, the path the refusal's hint names. *Documented (the M15 design
-  §5a). Found: M15 Task S4b; narrowed by M15 Task S4b3.*
-- **A `.worktreeinclude` copy no ignore file of the tree names blocks a sparse workspace.** A new
-  workspace gets the copies (`.env` and the like, which the tree does not hold) at their paths
-  whatever its prefixes. One an ignore file of the tree names (the root `.gitignore` naming
-  `.env`) is ignored, as in a workspace of the whole tree. Any other copy outside the prefixes is
-  an edit outside them: `ws commit`, `ws land`, `ws delete --rescue` and the `worktree-remove`
-  hook refuse it (`E_WS_OUTSIDE_PREFIXES`), the directory and its edits kept, and following the
-  hint makes the next commit store the copy, which may be a secret, in the store for good
-  ([`gc` collects no object](#verification-and-repair)). Delete the copy or name it in an ignore
-  file first, then `ws delete --rescue <name>` for a workspace the hook could not remove.
+- **A new path materialises only when it is on disk with a parent.** A commit no longer widens the
+  prefixes; `ws materialize` does, and takes a path the tree lacks only when it is on disk and its
+  parent is the root, a directory of the tree or a directory above a prefix: only the ignore files
+  above it that the workspace lacks are written, and the next commit stores it. A path absent from
+  disk (a typo) or without such a parent (`nope/deeper/x` where the tree has no `nope`) is
+  `E_PATH_NOT_FOUND`: materialise its topmost new directory instead, the path the refusal's hint
+  names. *Documented (the M15 design §5a). Found: M15 Task S4b; narrowed by M15 Task S4b3.*
+- **A `.worktreeinclude` copy off the prefixes can block a sparse workspace.** A new workspace
+  gets the copies (`.env` and the like, which the tree does not hold) at their paths whatever its
+  prefixes. One an ignore file of the tree names (the root `.gitignore` naming `.env`), at the
+  root or in a directory above a prefix, is ignored, as in a workspace of the whole tree. Any
+  other copy outside the prefixes is an edit outside them: `ws commit`, `ws land`,
+  `ws delete --rescue` and the `worktree-remove` hook refuse it (`E_WS_OUTSIDE_PREFIXES`), the
+  directory and its edits kept. A copy inside another directory is refused as that directory
+  whatever the ignore files say (`config` for `config/master.key`, when the tree has `config/`):
+  `ws materialize config` clears it, and an ignore file naming the copy keeps it out of the
+  commit. For a copy no ignore file names, following the hint makes the next commit store it,
+  which may be a secret, in the store for good ([`gc` collects no
+  object](#verification-and-repair)): delete the copy or name it in an ignore file first. Then
+  run `ws delete --rescue <name>` for a workspace the hook could not remove.
   *Documented (the M15 design §5a). Found: M15 Task S4b review; narrowed by M15 Tasks S4b2 and
   S4b3.*
 - **A tree path outside the prefixes the agent wrote first loops the hints.** When the agent
@@ -731,6 +735,15 @@ left).
   that an ignore file names and an edit under an ignore file the base gained above the prefixes.
   Use this release's binary on such workspaces. *Documented (the M15 design §5a). Found: M15 Task
   S4b3 design review.*
+- **A plain `ws delete` drops the edits outside a sparse workspace's prefixes.** Without
+  `--rescue`, `ws delete` refuses an edit under the prefixes (`E_WS_DIRTY`), but an edit outside
+  them, which `ws delete --rescue` refuses, goes with the directory. *Unscheduled (the M15 design
+  §5a leaves it out of scope). Found: M15 Task S4b3 review.*
+- **A command that scans a sparse workspace can fail on the tree check.** `ws status`, `ws diff`,
+  `ws discard`, `ws rebase` and a plain `ws delete` scan the workspace as a commit does, the tree
+  check included, though they refuse nothing it finds: an lstat error on a tree path off the
+  prefixes fails them with `E_IO`, and leaves out the `status_after` page other commands attach.
+  *Unscheduled. Found: M15 Task S4b3 review.*
 - **`ws status` lists no change in a sparse workspace that a commit refuses.** `ws status` lists
   the changes under the prefixes only, so its `changes` list can be empty while `ws commit` and
   `ws land` refuse an entry outside them; the refusal's `details.paths` names those entries.

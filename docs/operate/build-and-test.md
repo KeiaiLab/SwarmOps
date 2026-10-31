@@ -32,12 +32,12 @@ all: true
 created: true
 ```
 
-The same command again is the same workspace (`created: false`). Without `--all`, give
-`--prefix <path>` once for each subtree to write out, with the `.gitignore` and `.swarmignore`
-files of the directories above it: the rest of the tree is absent, not deleted, and
-`ws materialize <path>` writes more of it later. A new workspace also gets the files that
-`.worktreeinclude` lists, copied from `--from <dir>` (gitignored files such as `.env`), and runs the
-repository's bootstrap command, `bootstrap.argv` of `.swarmops/workspaces.json`;
+The same command again is the same workspace (`created: false`). `--all`, or neither flag, writes
+out the whole tree. Give `--prefix <path>` once for each subtree to write out instead, with the
+`.gitignore` and `.swarmignore` files of the directories above it: the rest of the tree is absent,
+not deleted, and `ws materialize <path>` writes more of it later. A new workspace also gets the
+files that `.worktreeinclude` lists, copied from `--from <dir>` (gitignored files such as `.env`),
+and runs the repository's bootstrap command, `bootstrap.argv` of `.swarmops/workspaces.json`;
 `SWARMOPS_WS_BOOTSTRAP=skip` skips both.
 
 A command run inside the workspace finds its store through `.swarmws/workspace.json`. The

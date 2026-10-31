@@ -303,12 +303,15 @@ repository. `so ws hook config` prints the settings to merge into `.claude/setti
   another session's workspace of the same name gets a suffix. A new workspace gets the files `.worktreeinclude` lists, copied from the session's
   directory, and runs the repository's bootstrap command (`bootstrap.argv` of
   `.swarmops/workspaces.json`); `SWARMOPS_WS_BOOTSTRAP=skip` skips both. The hook prints the
-  workspace's path, and a failure is an envelope on stderr. In a workspace with prefixes, which holds
-  the `.gitignore` and `.swarmignore` files of the directories above them, a copy those files name
-  is ignored. Any other copy outside the prefixes is an edit outside them: `ws commit`, `ws land`
-  and the remove hook refuse it (`E_WS_OUTSIDE_PREFIXES`, the directory and its edits kept), and
-  following the hint's `ws materialize <path>` makes the next commit store the copy, which may be
-  a secret, in the store for good. Deleting the copy or naming it in an ignore file clears it
+  workspace's path, and a failure is an envelope on stderr. In a workspace with prefixes, which
+  holds the `.gitignore` and `.swarmignore` files of the directories above them, a copy those
+  files name is ignored at the root or in a directory above a prefix. Any other copy outside the
+  prefixes is an edit outside them: `ws commit`, `ws land` and the remove hook refuse it
+  (`E_WS_OUTSIDE_PREFIXES`, the directory and its edits kept). A copy inside another directory is
+  refused as that directory (`config` for `config/master.key`): `ws materialize config` clears
+  it, and an ignore file naming the copy keeps it out of the commit. For a copy no ignore file
+  names, following the hint's `ws materialize <path>` makes the next commit store the copy, which
+  may be a secret, in the store for good; delete the copy or name it in an ignore file first
   ([known limitations](../known-limitations.md#workspaces)).
 - **Remove.** Uncommitted edits are kept as a rescue changeset on the workspace's head (no ref
   moves), its id printed on stderr; then the directory and its registry entry go. A directory that
