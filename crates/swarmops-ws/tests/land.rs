@@ -2518,3 +2518,60 @@ fn a_record_of_an_old_head_is_judged_anew() {
     assert_eq!(watched.count("commit"), 0);
     assert_eq!(watched.count("land"), 0);
 }
+
+/// A path the chain turned into a symlink is none the chain adds either: where the target renames
+/// it by case, the land meets the store's conflict.
+#[cfg(unix)]
+#[test]
+fn a_type_changed_path_renamed_by_case_is_a_conflict() {
+    // 1. The workspace turns `src/readme` into a symlink; the target renames it `src/README`.
+    let f = Fixture::new();
+    let b = folding(
+        &f,
+        &[
+            Put::File("src/a.txt", "a\n"),
+            Put::File("src/readme", "r\n"),
+        ],
+    );
+    let dir = f.beside("w");
+    std::fs::remove_file(dir.join("src/readme")).unwrap();
+    std::os::unix::fs::symlink("a.txt", dir.join("src/readme")).unwrap();
+    commit_w(&f, "link");
+    let renamed = f.commit(
+        Some(&b),
+        &[Put::Gone("src/readme"), Put::File("src/README", "R\n")],
+    );
+    f.point("release/r", &renamed);
+
+    // 2. The store refuses the land: a conflict on the changed path.
+    let watched = Watched::new(&f.ops);
+    let refused = swarmops_ws::land(&f.ctx_over(&watched), land_of("w", None)).unwrap_err();
+    assert_eq!(refused.code, "E_CONFLICT", "{refused:?}");
+    assert_eq!(watched.count("land"), 1);
+}
+
+/// A path the chain modified stays on disk: a case twin the target adds beside it is a case
+/// collision, refused before the store lands.
+#[test]
+fn a_modified_path_meets_a_case_twin() {
+    // 1. The workspace modifies `src/readme`; the target adds `src/README` and keeps it.
+    let f = Fixture::new();
+    let b = folding(
+        &f,
+        &[
+            Put::File("src/a.txt", "a\n"),
+            Put::File("src/readme", "r\n"),
+        ],
+    );
+    write(&f.beside("w"), "src/readme", "mine\n");
+    commit_w(&f, "mine");
+    let twin = f.commit(Some(&b), &[Put::File("src/README", "R\n")]);
+    f.point("release/r", &twin);
+
+    // 2. Refused as a case collision; nothing landed.
+    let watched = Watched::new(&f.ops);
+    let refused = swarmops_ws::land(&f.ctx_over(&watched), land_of("w", None)).unwrap_err();
+    assert_eq!(refused.code, "E_WS_UNPORTABLE", "{refused:?}");
+    assert_eq!(refused.details["reason"], "case_collision", "{refused:?}");
+    assert_eq!(watched.count("land"), 0);
+}
