@@ -2461,7 +2461,7 @@ fn a_modified_path_renamed_by_case_is_a_conflict() {
 /// portability rules too: one under a directory of the workspace's reserved name is
 /// `E_WS_UNPORTABLE`, and nothing is landed.
 #[test]
-fn a_chain_path_of_the_reserved_name_is_refused() {
+fn a_reserved_chain_path_is_refused_on_a_folding_volume() {
     // 1. The chain adds `src/.swarmws/x`.
     let f = Fixture::new();
     folding(&f, &[Put::File("src/a.txt", "a\n")]);
