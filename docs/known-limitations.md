@@ -1,6 +1,6 @@
 # Known limitations
 
-What SwarmOps does not do yet, or does less well than it should, as of M14, and the milestone
+What SwarmOps does not do yet, or does less well than it should, as of M15, and the milestone
 meant to change it. The items come from the M1 and M1.5 reviews and the 2026-10-16 code review:
 the carry-overs their tasks handed to later milestones, the deferred minors that are still open,
 and the rulings of M1's final review, which left 14 questions to the maintainer (the table at the
@@ -15,8 +15,10 @@ M4 merge and landing · M8 git export · M12 portability · M13 git remotes · M
 M6 verify, crash safety and fuzzing · M14 git clients against a store · M7 blame and review ·
 M9 simulation and a benchmark gate · M11 remote sync, offline-first.
 M0, M1, M1.5, M1.6, M2, M3, M4 and M8 make the first release, 0.1.0; M13 makes 0.2.0, M5
-0.3.0 and M6 0.4.0; 0.5.0 adds no milestone: it holds the pilot, the measurements and the first v0.6 fixes; 0.6.0 holds the fixes the measurements asked for, and M14 makes 0.7.0. M1.5, the hardening milestone after M1, closed a few, and M1.6, the code-review follow-ups after it,
-closed more. "Deferred
+0.3.0 and M6 0.4.0; 0.5.0 adds no milestone: it holds the pilot, the measurements and the first
+v0.6 fixes; 0.6.0 holds the fixes the measurements asked for, M14 makes 0.7.0, and M15, the
+data-safety and contract follow-ups, is not released yet. M1.5, the hardening milestone after M1,
+closed a few, and M1.6, the code-review follow-ups after it, closed more. "Deferred
 until after the pilot" marks a delivered milestone's task that waits until SwarmOps has been
 piloted on a real repository ([pilot.md](pilot.md)): the measurements that need a quiet host,
 and the tests that read the maintainers' service repositories. "Unscheduled" means no milestone
@@ -229,7 +231,7 @@ left).
   targets at the same time can both land: the search is outside the store's lock. The cost grows
   with the refs a land has to walk. *Target: M9 (an index of commit keys, if measurements ask for
   one; it closes all three bounds). Found: M4 Task 12's hand-off; the other-ref search, M15
-  S5a.*
+  Task S5a.*
 - **`undo` does not take back a land on `main`, nor one that later lands built on.** `main`
   moves only forward, so the undo of a land on it is `E_REF_PROTECTED` (the M15 design §4). On a
   `release/<name>` ref an undo moves refs back only while they still name what the operation set;
@@ -261,9 +263,10 @@ left).
   `release/<x>`, a tag, a branch, can be deleted or moved back by whoever gives its value to
   `--expect`, and `op undo` of its move takes it back: the published procedures delete
   `release/*` refs as their normal flow, and a FORMAT 1 store takes no other name, so protecting
-  them would leave it no deletable ref. No setting names other protected refs.
-  *Unscheduled: a configured set of protected refs (the v0.6.0 design, decision 8). Found: the
-  2026-10-27 completeness report (B23).*
+  them would leave it no deletable ref. No setting names other protected refs. No request rewrites
+  a changeset a ref holds (an edit, a split, a squash or a drop of history), so only ref moves are
+  judged. *Unscheduled: a configured set of protected refs (the v0.6.0 design, decision 8). Found:
+  the 2026-10-27 completeness report (B23); narrowed by M15 Task S3.*
 - **A sync or a git import can still move `main` back.** The forward-only rule guards `ref set`
   and `op undo`; `sync`'s own move of `main` to the remote's head, and `git import --into main`,
   are not judged by it. *Unscheduled: with the configured set of protected refs. Found: the M15
@@ -477,6 +480,16 @@ left).
   grant removed after an attempt's check and before its publish does not stop that attempt: it
   can still land, lose its race or conflict. *Unscheduled (the M15 design §6 leaves it out of
   scope). Found: M15 Task S5b.*
+- **Access is granted by ref, not by path.** `access.toml` grants `read`, and `push`, `force` and
+  `land` by ref name; no rule limits the paths a push or a land may change, so a land attempt
+  checks only the `land` grant of its target. *Unscheduled (the M15 design §6 leaves path write
+  rules out of scope). Found: the 2026-10-30 completeness report (E11).*
+- **A push to `serve` has no damaged-object test of its own.** git's receive-pack checks a pushed
+  pack in its quarantine (`receive.fsckObjects`, connectivity), and the hook's import checks each
+  object it reads, those of the commits the store does not hold yet, against its id before any
+  store ref moves. No test pushes a damaged pack or object to `serve`, as the fetch tests do with
+  a remote, and the objects of a refused push stay in `serve.git` (above). *Unscheduled (the M15
+  design §3 leaves it out of scope). Found: the 2026-10-27 completeness report (D45).*
 - **The first connection to a large store exports its whole history.** `serve` exports every
   served ref into `serve.git` before it advertises; a store whose history no export has reached
   yet pays that once, as loose objects: on 12,000 commits the first clone took 1,195.6 s,
@@ -653,15 +666,15 @@ left).
   imported and no tracking ref moved, and every later fetch fails the same way until the remote's
   history changes. There is no `fsck.<id>` override and no way to skip the check. *Documented
   (the v0.6.0 design, decision 9). Found: the 2026-10-27 completeness report (A3).*
-- **A damaged mirror object that only a non-followed branch or tag reaches is not caught.** A
-  fetch reads, and checks against its id, every object the followed branch reaches before it
-  moves any tracking ref; the other branches and the tags are checked by git's fsck on receive
-  and by the closure check (every object is there), not by an id check. A mirror object that
-  holds other bytes and sits under such a ref stays unnoticed until the followed branch reaches
-  it. One that the followed branch reaches fails every fetch with
-  `E_GIT_READ` (`details.reason: "corrupt"`, `details.object`) until `git/mirror.git` is moved
-  aside; the next fetch makes it again. *Documented (the M15 design §3). Found: the 2026-10-27
-  completeness report (D45).*
+- **A damaged mirror object the import does not read is not caught.** Before it moves any
+  tracking ref, a fetch reads, and checks against its id, each object of the followed branch's
+  commits that the store does not hold yet. The objects only commits the store already holds
+  reach, and those of the other branches and the tags, are checked by git's fsck on receive and by
+  the closure check (every object is there), not by an id check: a mirror object there that holds
+  other bytes stays unnoticed until a new commit of the followed branch reaches it. One that the
+  import reads fails every fetch with `E_GIT_READ` (`details.reason: "corrupt"`,
+  `details.object`) until `git/mirror.git` is moved aside; the next fetch makes it again.
+  *Documented. Found: the 2026-10-27 completeness report (D45); narrowed by M15 Task S2.*
 - **A server that cuts git's first HTTP response inside its headers looks like an empty remote.**
   git then falls back to the old "dumb" HTTP protocol, finds no refs and succeeds: the fetch reports
   no branches and prunes the mirror's tracking refs, and a clone ends with no `main`. Nothing is
@@ -771,6 +784,16 @@ left).
   the changes under the prefixes only, so its `changes` list can be empty while `ws commit` and
   `ws land` refuse an entry outside them; the refusal's `details.paths` names those entries.
   *Documented (the M15 design §5 leaves the display out of scope). Found: M15 Task S4b review.*
+- **Sparse workspaces' latencies are not measured.** G9's cases (`ws status`, `ws create`, the
+  update, `ws commit`) run on workspaces of the whole tree, last in v0.6.0; none times a sparse
+  workspace, whose commit, land and scans also walk the disk outside the prefixes and compare the
+  tree with it, nor a sparse create of 10,000 files from a 1,000,000-file tree. *Unscheduled (the M15
+  design §5 leaves it out of scope). Found: the 2026-10-27 completeness report (A28).*
+- **The reserved name is matched in ASCII case, and only Linux runs the refusal.** A component is
+  `.swarmws` when it equals that name with ASCII letters folded; other letters are not folded, so
+  `.ſwarmws` (U+017F, which a case-insensitive volume of macOS or Windows may fold to `s`) is
+  written. The refusal's tests run on Linux: macOS and Windows are M12's. *Target: M12. Found:
+  the 2026-10-30 completeness report (E38); M15 Task S4a review.*
 - **`ws land` checks a stale base only against its own target, and only so far.** `E_WS_STALE` needs
   the workspace's base gone from its target's history and an operation in the log that moved the
   target to it. A land onto another `--target` is not checked, and neither are `ws commit`, `ws
@@ -783,23 +806,30 @@ left).
   operation). `ws land` lands such a record unless its own stale check refuses it: that check also
   answers `E_WS_STALE` when the target was moved back to the base (`op undo`, `ref set`) within the
   journal's newest 10,000 operations. `ws delete <name> --rescue` is the way out when both refuse.
-  `ws rebase` of a stale workspace takes no snapshot of the edits it moves onto the new head, and no
-  test kills a land in the middle of the check and the update (the M15 design's third SIGKILL
-  acceptance). *Unscheduled (the M15 design §5 leaves them out of scope). Found: M15 Task S4c.*
+  *Unscheduled (the M15 design §5 leaves it out of scope). Found: M15 Task S4c.*
+- **A stale workspace's update takes no snapshot.** `ws rebase` refuses edits on disk
+  (`E_WS_DIRTY`) unless `-m` commits them onto the old head first, and one that conflicts with the
+  new head leaves the workspace rebasing, with markers in the files, until `ws resolve` and
+  `ws rebase --continue`, or `ws rebase --abort`. No update sets the edits aside by itself, and no
+  test kills a `ws land` at random points between its journal append and its last file write.
+  *Unscheduled (the M15 design §5 leaves them out of scope). Found: the 2026-10-27 completeness
+  report (B3); M15 Task S4c.*
 - **A target that gains a reserved path after the check is not refused.** `ws land` and `ws rebase`
   check the target's paths for names the files cannot hold (`E_WS_UNPORTABLE`) before the store
   call. A target that gains a path with a component named `.swarmws` between that check and the
   store's call is landed or rebased onto, and the materialisation then refuses it with the pending
-  record kept. After the store's rebase (`ws rebase`, `ws rebase --continue`, the rebase step of `ws
-  land --check`) a re-run is refused the same way while the target holds the path, and rebases again
-  once it does not. After the store's land (`ws land`, the land step of `ws land --check`) a re-run
-  depends on the target. While it holds the landed changeset, which holds the path for good, `ws
-  land` replays it and is refused again, even after the target drops the path, and `ws rebase`
+  record kept. After the store's rebase (`ws rebase`, `ws rebase --continue`, the rebase step of
+  `ws land --check`) a re-run is refused the same way while the target holds the path, and rebases
+  again once it does not. After the store's land (`ws land`, the land step of `ws land --check`) a
+  re-run depends on the target. While it holds the landed changeset, which holds the path for good,
+  `ws land` replays it and is refused again, even after the target drops the path, and `ws rebase`
   answers `E_INVALID_ARG`; the way out is `ws delete <name> --rescue`: the workspace's commits stay
   in the store. A target moved back below the landed changeset has left the land: `ws land` lands it
-  anew and `ws rebase` takes the record over. The same window lets a case collision through that the
-  target creates after the check. *Unscheduled (the window is the time between two calls of one
-  command). Found: M15 Task S4c review.*
+  anew and `ws rebase` takes the record over, unless the target still holds the path (moved back to
+  the commit that added it), when both answer `E_WS_UNPORTABLE` before any store call until the
+  target drops it. The same window lets a case collision through that the target creates after the
+  check. *Unscheduled (the window is the time between two calls of one command). Found: M15 Task S4c
+  review.*
 
 ## Platforms
 
@@ -886,16 +916,17 @@ These do not change what SwarmOps does, only how well the tests can see it.
   `journal.off` a writer cut is tested only at the journal's level. *Target: M9 (the metadata
   read paths through `FsOps`, umbrella spec §14; the M6 design, decision D4). Found: M1.5 Task 3 review (M3); M1.5 final
   review (D5).*
-- **Golden envelopes cover 54 of the 55 error codes.** `error_codes_reach_the_cli` pins the
-  envelope of 42, the nine workspace codes (M5), `E_WS_OUTSIDE_PREFIXES` and `E_WS_STALE` (M15),
+- **Golden envelopes cover 54 of the 55 error codes.** `error_codes_reach_the_cli` pins the envelope
+  of 42, the nine workspace codes (M5), `E_WS_OUTSIDE_PREFIXES` and `E_WS_STALE` (M15),
   `E_FORMAT_REQUIRED` (M6), `E_AUTH` and `E_POLICY_DENIED` (M14) among them;
-  `remote_error_codes_golden` the four `E_REMOTE_*` codes over smart HTTP and ssh (M13); the FORMAT 2 goldens `E_TAG_IMMUTABLE` and `E_MAINTENANCE_BUSY` (M6);
-  and goldens of their own six the first test cannot raise (M15): `E_AMBIGUOUS_ID`,
-  `E_IO_TRANSIENT`, `E_INTERNAL`, `E_CAS_RETRY_EXHAUSTED`, `E_BUSY` in the slow
-  `op_log_behind_a_held_lock_is_e_busy`, and `E_UNKNOWN_PARENT` as an error object, since every
-  operation resolves a parent first. The other is in the first test's `NOT_RAISED` list:
-  `E_REF_NOT_FOUND`, which no operation raises. *Unscheduled (`E_IO` joined in M1.6, the six
-  `E_GIT_*` codes in M3, `E_WS_STALE` in M15). Found: the 2026-10-16 comparison.*
+  `remote_error_codes_golden` the four `E_REMOTE_*` codes over smart HTTP and ssh (M13); the
+  FORMAT 2 goldens `E_TAG_IMMUTABLE` and `E_MAINTENANCE_BUSY` (M6); and goldens of their own six
+  the first test cannot raise (M15): `E_AMBIGUOUS_ID`, `E_IO_TRANSIENT`, `E_INTERNAL`,
+  `E_CAS_RETRY_EXHAUSTED`, `E_BUSY` in the slow `op_log_behind_a_held_lock_is_e_busy`, and
+  `E_UNKNOWN_PARENT` as an error object, since every operation resolves a parent first. The other is
+  in the first test's `NOT_RAISED` list: `E_REF_NOT_FOUND`, which no operation raises. *Unscheduled
+  (`E_IO` joined in M1.6, the six `E_GIT_*` codes in M3, `E_WS_OUTSIDE_PREFIXES` and `E_WS_STALE` in
+  M15). Found: the 2026-10-16 comparison.*
 - **The git remotes' reference pages have no recorded example.** The pages of `clone`,
   `remote add|remove|list`, `fetch`, `push`, `sync` and `sync status`, and of their five MCP tools,
   say "No recorded example yet": no golden step runs them, since they need a remote. *Unscheduled.
