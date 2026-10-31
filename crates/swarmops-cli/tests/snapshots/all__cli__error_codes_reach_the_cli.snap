@@ -1715,6 +1715,8 @@ expression: s.transcript()
         "repo": "[tmp]/store",
         "elapsed_ms": "[elapsed_ms]",
         "resolved": {
+          "[c1]": "[c1]",
+          "[id13]": "[id13]",
           "main": "[c1]"
         },
         "auth": "trust"

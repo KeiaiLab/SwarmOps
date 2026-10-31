@@ -31,12 +31,13 @@ use std::time::Duration;
 use serde_json::{Map, Value};
 use swarmops_api::{
     DEFAULT_MAX_CONFLICT_BYTES, ErrorCode, LandMode, LandReq, LandResp, MAX_LAND_ATTEMPTS, OpError,
-    StatusAfter, WsCheckInput, WsLandReq, WsLandResp,
+    ResolveRevReq, StatusAfter, WsCheckInput, WsLandReq, WsLandResp,
 };
 
 use crate::check::{self, Subject};
 use crate::commit;
 use crate::io_error::unknown_variant;
+use crate::materialize;
 use crate::pending::{self, Pending, PendingOp};
 use crate::rebase;
 use crate::scan;
@@ -144,7 +145,11 @@ pub fn land(ctx: &Ctx<'_>, req: WsLandReq) -> Result<WsLandResp, OpError> {
         }
     }
 
-    // 4. A land cut short: its keys; else the edits settled and something to land.
+    // 4. Names the target gained that the files cannot hold: refused before the store lands.
+    let head = ctx.store.resolve_rev(ResolveRevReq::new(target.as_str()))?;
+    materialize::preflight(ctx, &ws, &head.id)?;
+
+    // 5. A land cut short: its keys; else the edits settled and something to land.
     let cut = cut_land(ctx, &ws)?;
     if cut.is_none() {
         rebase::settle_edits(ctx, &mut ws, message.clone(), &BTreeSet::new())?;
@@ -156,7 +161,7 @@ pub fn land(ctx: &Ctx<'_>, req: WsLandReq) -> Result<WsLandResp, OpError> {
         }
     }
 
-    // 5. The land, checked or not; then the status after it.
+    // 6. The land, checked or not; then the status after it.
     let key = (cut.as_ref().map(|cut| cut.key.clone()))
         .or(idempotency_key)
         .unwrap_or_else(rebase::new_key);

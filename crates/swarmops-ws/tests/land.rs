@@ -952,3 +952,27 @@ fn a_stale_refusal_sits_between_the_outside_and_the_dirty_ones() {
     let refused = swarmops_ws::land(&f.ctx(), land_of("w", None)).unwrap_err();
     assert_eq!(refused.code, "E_WS_STALE", "{refused:?}");
 }
+
+/// A target that gained a name the workspace's volume cannot hold is refused before the store
+/// lands anything: the target stays where it was, and no pending record is left.
+#[test]
+fn a_land_onto_a_reserved_name_moves_nothing() {
+    for reserved in ["src/.SwarmWs/z", ".swarmws/x"] {
+        // 1. A workspace on `release/r` with an edit; `release/r` then gains `reserved`.
+        let f = Fixture::new();
+        let b = f.commit(None, &[Put::File("src/a.txt", "a\n")]);
+        f.point("release/r", &b);
+        f.create("w", "release/r", &[]);
+        let dir = f.beside("w");
+        write(&dir, "src/a.txt", "mine\n");
+        let gained = f.side(Some(&b), &[Put::File(reserved, "z\n")]);
+        f.point("release/r", &gained);
+
+        // 2. The land is refused as unportable, and nothing was written.
+        let refused = swarmops_ws::land(&f.ctx(), land_with_message()).unwrap_err();
+        assert_eq!(refused.code, "E_WS_UNPORTABLE", "{reserved}: {refused:?}");
+        let head = f.ops.resolve_rev(ResolveRevReq::new("release/r"));
+        assert_eq!(head.unwrap().id, gained, "{reserved}: the target moved");
+        assert!(!pending_in(&dir).exists(), "{reserved}: a pending record");
+    }
+}

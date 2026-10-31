@@ -236,6 +236,38 @@ pub(crate) fn prepare(
     intent: &Intent,
     start: Start,
 ) -> Result<Prepared, OpError> {
+    // 1. The portability rules over what it adds.
+    let changes = portable_over(ctx, ws, intent)?;
+
+    // 2. Each path on the host, against the trees.
+    check_host(ctx.host.as_ref(), &ws.dir, ws.file.volume, changes, start)
+}
+
+/// The portability rules over the paths workspace `ws`'s files would gain moving to changeset
+/// `to`, as `update` checks them: `E_WS_UNPORTABLE`, nothing written. A land or a rebase calls
+/// it before its store call, so that the store never records a move the files cannot follow.
+pub(crate) fn preflight(ctx: &Ctx<'_>, ws: &Workspace, to: &str) -> Result<(), OpError> {
+    // 1. Nothing to do when the files stand for `to` already.
+    if ws.file.materialized == to {
+        return Ok(());
+    }
+
+    // 2. The rules over what the move adds.
+    let intent = Intent {
+        from: Some(ws.file.materialized.clone()),
+        to: to.to_owned(),
+        prefixes: if ws.file.all {
+            Vec::new()
+        } else {
+            ws.file.prefixes.clone()
+        },
+    };
+    portable_over(ctx, ws, &intent).map(|_| ())
+}
+
+/// The changes `intent` makes to workspace `ws`, after the portability rules over what it adds:
+/// the case set only where the volume folds case.
+fn portable_over(ctx: &Ctx<'_>, ws: &Workspace, intent: &Intent) -> Result<Vec<Change>, OpError> {
     // 1. The changes: a whole tree, or the difference of two.
     let new = Tree::new(ctx.store, &intent.to);
     let (changes, added) = match &intent.from {
@@ -243,7 +275,7 @@ pub(crate) fn prepare(
         Some(from) => between(ctx.store, &new, from, intent)?,
     };
 
-    // 2. What it adds, against the volume: the case set only where the volume folds case.
+    // 2. What it adds, against the volume.
     let prefixes = after_intent(ws, intent);
     let case_set = if ws.file.volume.case_insensitive {
         let roots = match &intent.from {
@@ -257,9 +289,7 @@ pub(crate) fn prepare(
         None
     };
     portable::check(&added, case_set.as_deref(), HOST)?;
-
-    // 3. Each path on the host, against the trees.
-    check_host(ctx.host.as_ref(), &ws.dir, ws.file.volume, changes, start)
+    Ok(changes)
 }
 
 /// Applies `prepared` to workspace `ws`, whose intent `intent` is durable already: removals, then

@@ -132,6 +132,8 @@ swarmops --repo [tmp]/store --as agent/worker-17 ws land --ws w3 --mode exact
     "repo": "[tmp]/store",
     "elapsed_ms": "[elapsed_ms]",
     "resolved": {
+      "[c1]": "[c1]",
+      "[id13]": "[id13]",
       "main": "[c1]"
     },
     "auth": "trust"

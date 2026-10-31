@@ -137,6 +137,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
   `access_file_invalid`, or `E_AUTH`), reported on the `ng` line, and writes nothing. An attempt
   already checked is not stopped by the check: it can still land, lose its race or conflict (the
   M15 design §6).
+- `ws land` checks the paths its target gained against the workspace's volume before the store
+  lands anything. A target that gained a path with a `.swarmws` component (`src/.SwarmWs/z`) moved
+  to the landed changeset, and then `ws land` answered `E_WS_UNPORTABLE` "nothing was written"
+  and kept its pending record; now it answers first, the target stays where it was and no record
+  is left (the M15 design §5). A target that gains such a path between the check and the land
+  still takes the old way out, `ws delete --rescue`.
 - `ws status`'s `behind_by` counts the changesets the target holds that the workspace's base lacks
   when the base is not on the target's history: 1 after a sync replaced the base with its
   squash-merged copy, and 0 when the target moved back onto the base's first-parent history,
