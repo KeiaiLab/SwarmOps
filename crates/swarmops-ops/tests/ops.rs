@@ -1228,6 +1228,62 @@ fn a_refused_undo_records_what_its_write_repaired() {
     assert_eq!(resolved.take_recovered(), None, "nothing left to repair");
 }
 
+/// An undo that `main`'s history refuses, and an undo that is made, record what their write
+/// repaired first, as a refused undo of another kind does.
+#[test]
+fn a_protected_or_done_undo_records_its_repair() {
+    use std::sync::Arc;
+    use swarmops_testkit::fs::FailingFs;
+
+    let (_dir, root, ops) = new_store();
+    let who = agent();
+    let c1 = commit(&ops, None, vec![text("f", "1")]); // op 0
+    let c2 = commit(&ops, Some(&c1), vec![text("f", "2")]); // op 1
+    ops.ref_set(&who, set("main", &c1, None, true)).unwrap(); // op 2
+    ops.ref_set(&who, set("main", &c2, Some(&c1), false))
+        .unwrap(); // op 3
+    ops.ref_set(&who, set("release/r", &c1, None, true))
+        .unwrap(); // op 4
+    ops.ref_set(&who, set("release/r", &c2, Some(&c1), false))
+        .unwrap(); // op 5
+    let id = |hex: &str| ChangesetId::new(hex.parse().unwrap());
+
+    // 1. Read before the unlisted moves: a listing takes the lock, and so repairs what they leave.
+    let forward = op_id(&ops, 3);
+    let release = op_id(&ops, 5);
+
+    // 2. A move of `release/s` committed and not listed: its listing in the `.off` file fails.
+    let unlisted = |old: Option<&str>, new: &str| {
+        let fs = FailingFs::new(|method, p| {
+            method == "append_durable" && p.extension().is_some_and(|ext| ext == "off")
+        });
+        let repo = LocalRepo::open_with_fs(&root, Arc::new(fs)).unwrap();
+        let moved = repo
+            .cas_ref("release/s", old.map(id), Some(id(new)), "agent/one")
+            .unwrap();
+        assert_eq!(moved.warnings.len(), 1, "{moved:?}");
+    };
+
+    // 3. The undo of main's forward move is refused, and records the repair.
+    unlisted(None, &c1);
+    let resolved = Resolved::default();
+    let refused = ops.recording(&resolved).undo(&who, UndoReq::new(&forward));
+    expect_err(refused, ErrorCode::RefProtected);
+    let recovered = resolved.take_recovered().expect("its write repaired");
+    assert_eq!(recovered.frames_listed, 1, "{recovered:?}");
+
+    // 4. The undo of release/r's move is made, and records the repair.
+    unlisted(Some(&c1), &c2);
+    let resolved = Resolved::default();
+    let undone = ops
+        .recording(&resolved)
+        .undo(&who, UndoReq::new(&release))
+        .unwrap();
+    assert_eq!(ref_target(&ops, "release/r"), c1, "{undone:?}");
+    let recovered = resolved.take_recovered().expect("its write repaired");
+    assert_eq!(recovered.frames_listed, 1, "{recovered:?}");
+}
+
 /// The id `op log` lists for operation `op`.
 fn op_id(ops: &LocalOps, op: u64) -> String {
     let mut req = OpLogReq::default();
