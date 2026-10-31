@@ -2,7 +2,7 @@
 
 This page goes from what you see to why it happens and what to run. It covers the installer, the
 MCP server, where a store may live, a busy store, a damaged store, git import and export,
-workspaces, and every `E_*` error code that a command or a tool call can return.
+remotes, workspaces, and every `E_*` error code that a command or a tool call can return.
 
 Every example was run on 2026-10-22: the commands with the binary built from this repository
 (`swarmops 0.1.0`), in a scratch directory that holds the store `acme` (`SWARMOPS_REPO=acme`); the
@@ -39,7 +39,8 @@ the process aborts, and says why on stderr ([The server exits](#the-server-exits
 ## Every error code
 
 `ErrorCode` in `crates/swarmops-api/src/error.rs` is the one table of codes, exit codes and
-retry advice; this is that table. One code is in the schema but no operation raises it yet.
+retry advice; this is that table, all 55 codes. One code is in the schema but no operation
+raises it yet.
 
 | Code | Exit | Retryable | Means | Section |
 | --- | --- | --- | --- | --- |
@@ -53,6 +54,8 @@ retry advice; this is that table. One code is in the schema but no operation rai
 | `E_PATH_NOT_FOUND` | 6 | no | Nothing is at that path at that revision. | [Arguments and revisions](#e_path_not_found) |
 | `E_IS_DIR` | 1 | no | A file read named a directory. | [Arguments and revisions](#e_is_dir) |
 | `E_REF_NAME_INVALID` | 1 | no | A ref name that is not `main` or `release/<name>`. | [Arguments and revisions](#e_ref_name_invalid) |
+| `E_FORMAT_REQUIRED` | 1 | no | A ref name a later store format takes, but not this store's. | [Arguments and revisions](#e_format_required) |
+| `E_TAG_IMMUTABLE` | 1 | no | A tag would move to another target. | [Arguments and revisions](#e_tag_immutable) |
 | `E_OP_NOT_FOUND` | 6 | no | No operation with that id. | [Arguments and revisions](#e_op_not_found) |
 | `E_EMPTY_COMMIT` | 1 | no | The change list changes nothing. | [Commits](#e_empty_commit) |
 | `E_TYPE_CONFLICT` | 1 | no | A file and a directory at the same path. | [Commits](#e_type_conflict) |
@@ -77,6 +80,10 @@ retry advice; this is that table. One code is in the schema but no operation rai
 | `E_GIT_IMPORT_DIVERGED` | 3 | no | The store's ref and the git history went separate ways. | [Git import](#e_git_import_diverged) |
 | `E_GIT_EXPORT_DIVERGED` | 3 | no | The git branch holds commits that are no export of the ref. | [Git export](#e_git_export_diverged) |
 | `E_GIT_WRITE` | 1 | no | The git repository could not be written. | [Git export](#e_git_write) |
+| `E_REMOTE_DIVERGED` | 3 | no | The remote branch is elsewhere than a push or a sync can move it from. | [Remotes](#e_remote_diverged) |
+| `E_REMOTE_REJECTED` | 5 | no | The remote or git refused. | [Remotes](#e_remote_rejected) |
+| `E_REMOTE_UNREACHABLE` | 4 | yes | The network or the remote's host did not answer. | [Remotes](#e_remote_unreachable) |
+| `E_REMOTE_NOT_FOUND` | 6 | no | The store records no remote of that name. | [Remotes](#e_remote_not_found) |
 | `E_WS_EXISTS` | 1 | no | A workspace of that name exists, made with other arguments. | [Workspaces](#e_ws_exists) |
 | `E_WS_NOT_FOUND` | 6 | no | No workspace by that name, or around that directory. | [Workspaces](#e_ws_not_found) |
 | `E_WS_LOCKED` | 4 | yes | Another mutation held the workspace's lock for the whole 5 s wait. | [Workspaces](#e_ws_locked) |
@@ -93,8 +100,9 @@ retry advice; this is that table. One code is in the schema but no operation rai
 | `E_POLICY_DENIED` | 5 | no | The store's `access.toml` grants the caller no such action, or the file is invalid. | [Serve over ssh](operate/serve-over-ssh.md#refusals-a-client-sees) |
 | `E_MAINTENANCE_BUSY` | 4 | yes | Another `gc`, `repair` or `upgrade` holds the store's maintenance lease. | [Making room](operate/making-room.md#2-remove-the-leftovers-of-interrupted-writes) |
 
-`git import` and `git export` are commands only, so the `E_GIT_*` codes never come from a tool
-call; `init` is a command only too. Every other code can come from both.
+`init`, `git import` and `git export` are commands only. `fetch`, `push` and `sync` are tools
+too, and give `E_GIT_*` codes of their own, such as a missing git (`E_GIT_UNSUPPORTED`) or an
+import the store refuses. Every other code can come from both.
 
 ## The installer
 
@@ -539,6 +547,23 @@ An agent's own line of work needs no ref: it commits on a parent and lands the h
 `release/<name>` for a ref of your own, such as `release/feature-x`, or in a FORMAT 2 store a
 branch such as `feature/x`. `git export` gives this code
 too for a branch name git does not take; its hint is `git check-ref-format --branch`.
+
+### `E_FORMAT_REQUIRED`
+
+Exit 1, not retryable. A later store format takes the name, but this store's does not: a branch,
+a tag or a remote-tracking ref in a FORMAT 1 store. `details` names the `name`, `needs` (the first
+format that takes it) and `store` (the store's format). `swarmops upgrade` moves the store to
+FORMAT 2, which takes the name
+([Upgrade to a release with a new FORMAT](operate/install-and-upgrade.md#upgrade-to-a-release-with-a-new-format)).
+A push of a branch or a tag to `swarmops serve` gets this code from a FORMAT 1 store too.
+
+### `E_TAG_IMMUTABLE`
+
+Exit 1, not retryable. A tag was asked to move from one target to another: a tag is created and
+deleted, never moved (`details.name`), and nothing was written. To move it, delete it with
+`swarmops ref delete`, then create it again at the new target. A push to `swarmops serve` that
+moves a tag gets this code too: delete the tag with a push the `force` grant covers, then push it
+again ([Serve over ssh](operate/serve-over-ssh.md#refusals-a-client-sees)).
 
 ### `E_OP_NOT_FOUND`
 
@@ -1193,6 +1218,56 @@ swarmops git export acme.git --branch review
 Remove the lock file only once no git process runs in the repository, as the hint says. The run
 after it wrote no object (`objects_written: 0`), since the failed run had written them, and moved
 the branch. An export that dies while it moves the branch leaves such a file too.
+
+## Remotes
+
+`clone`, `fetch`, `push` and `sync` reach a remote by running your git
+([GitHub as a remote](guides/github-remote.md)).
+
+### `E_REMOTE_DIVERGED`
+
+Exit 3, not retryable as it is. A push or a sync found the remote branch elsewhere than it can
+move from, and nothing was sent. `details` names the `remote`, the `branch`, the `reason` and,
+where known, `expected` and `main_moved`; the hint names the command to run:
+
+| `reason` | Means | What to do |
+| --- | --- | --- |
+| `remote_moved` | The branch moved since the last fetch, so the push's compare-and-swap sent nothing. | `swarmops fetch <remote>`, then push again, or sync. |
+| `not_fast_forward` | The remote refused a push that is not a fast-forward. | `swarmops sync <remote>`. |
+| `behind` | The store ref is behind the remote branch. | `swarmops sync <remote>`. |
+| `diverged` | The store ref and the remote branch went separate ways. | `swarmops sync <remote>`. |
+| `lossy_history` | The branch holds the original commits of a history imported lossily. | `swarmops sync <remote>`. |
+| `no_common_base` | The sync found no changeset that both hold within 10,000 changesets. | `swarmops sync status <remote>` says how far each is. |
+
+### `E_REMOTE_REJECTED`
+
+Exit 5, not retryable. The remote or git refused. `details.reason` says why, and the hint what to
+check:
+
+| `reason` | Means | What to do |
+| --- | --- | --- |
+| `auth` | No credential, or one the remote refuses. | Check the credential git uses for the remote, or the variable `--token-env` names ([Credentials](guides/github-remote.md#credentials)). |
+| `not_found` | The remote says the repository is not there. | Check the URL: a host such as GitHub answers so for a private repository the credential cannot see. |
+| `declined` | A hook or a rule of the remote's refused. | `details.refs` and `details.remote_messages` give the remote's reason. |
+| `bad_objects` | A fetch received an object git's fsck refuses, or one its refs reach is missing; no tracking ref moved. | Fix the remote's history. |
+| `unclassified` | A failure git's messages do not explain; never retried. | `details.stderr_tail` gives what git said. |
+
+`details` also names the `remote` and what git said (`refs`, `remote_messages`, `git_exit`,
+`stderr_tail`, the token removed), and `token_env_unset` when the variable `--token-env` names is
+not set.
+
+### `E_REMOTE_UNREACHABLE`
+
+Exit 4, retryable. The network or the remote's host did not answer: `details.phase` is `fetch`,
+`push` or `ls_remote`, and `details.cause` is `dns`, `connect`, `timeout`, `tls`, `disconnected` or
+`ssh`. Nothing changed in the store: run the command again once the network is back. Local
+commands keep working meanwhile ([When sync stops](guides/github-remote.md#when-sync-stops)).
+
+### `E_REMOTE_NOT_FOUND`
+
+Exit 6, not retryable. The store records no remote of that name (`details.remote`), named to
+`fetch`, `push`, `sync`, `sync status` or `remote remove`. `swarmops remote list` names the
+remotes, and `swarmops remote add` records one.
 
 ## Workspaces
 
