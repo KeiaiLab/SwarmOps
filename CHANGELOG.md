@@ -220,6 +220,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
   rules, so a commit left such edits out without a word. A root `.swarmws` of the tree, under
   any ASCII case, is no such path: the workspace's own directory stands there (the M15 design
   §5a).
+- On a volume that folds case, a case collision between a path the workspace's chain adds and a
+  path the target adds (`src/Readme` and `src/README`) is refused before `ws land` or `ws rebase`
+  reaches the store, with `E_WS_UNPORTABLE` (`reason: "case_collision"`) and nothing written. The
+  check saw only the target's paths against the files on disk, so the store landed or rebased
+  first, and the files then could not follow
+  ([Troubleshooting](docs/troubleshooting.md#e_ws_unportable)).
 
 ## [0.7.0] - 2026-10-29
 

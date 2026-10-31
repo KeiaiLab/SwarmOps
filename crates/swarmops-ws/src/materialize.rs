@@ -237,7 +237,7 @@ pub(crate) fn prepare(
     start: Start,
 ) -> Result<Prepared, OpError> {
     // 1. The portability rules over what it adds.
-    let changes = portable_over(ctx, ws, intent)?;
+    let changes = portable_over(ctx, ws, intent, &[])?;
 
     // 2. Each path on the host, against the trees.
     check_host(ctx.host.as_ref(), &ws.dir, ws.file.volume, changes, start)
@@ -246,13 +246,15 @@ pub(crate) fn prepare(
 /// The portability rules over the paths workspace `ws`'s files would gain moving to changeset
 /// `to`, as `update` checks them: `E_WS_UNPORTABLE`, nothing written. A land or a rebase calls
 /// it before its store call, so that the store never records a move the files cannot follow.
+/// What the store makes of the workspace's chain on `to` holds the chain's new paths as well:
+/// on a volume that folds case they count against the target's.
 pub(crate) fn preflight(ctx: &Ctx<'_>, ws: &Workspace, to: &str) -> Result<(), OpError> {
     // 1. Nothing to do when the files stand for `to` already.
     if ws.file.materialized == to {
         return Ok(());
     }
 
-    // 2. The rules over what the move adds.
+    // 2. The rules over what the move adds, and the chain's own new paths where case folds.
     let intent = Intent {
         from: Some(ws.file.materialized.clone()),
         to: to.to_owned(),
@@ -262,12 +264,49 @@ pub(crate) fn preflight(ctx: &Ctx<'_>, ws: &Workspace, to: &str) -> Result<(), O
             ws.file.prefixes.clone()
         },
     };
-    portable_over(ctx, ws, &intent).map(|_| ())
+    let own = if ws.file.volume.case_insensitive {
+        added_by_chain(ctx, ws)?
+    } else {
+        Vec::new()
+    };
+    portable_over(ctx, ws, &intent, &own).map(|_| ())
 }
 
-/// The changes `intent` makes to workspace `ws`, after the portability rules over what it adds:
-/// the case set only where the volume folds case.
-fn portable_over(ctx: &Ctx<'_>, ws: &Workspace, intent: &Intent) -> Result<Vec<Change>, OpError> {
+/// The paths workspace `ws`'s chain adds, from its base to its head, under its prefixes.
+fn added_by_chain(ctx: &Ctx<'_>, ws: &Workspace) -> Result<Vec<String>, OpError> {
+    let mut added = Vec::new();
+    let mut cursor = None;
+    loop {
+        let mut req = DiffReq::new(ws.file.base.as_str(), ws.file.head.as_str());
+        if !ws.file.all {
+            req.paths.clone_from(&ws.file.prefixes);
+        }
+        req.format = DiffFormat::Names;
+        req.limit = PAGE;
+        req.cursor = cursor.take();
+        let page = ctx.store.diff(req)?;
+        let files = page.files.into_iter();
+        added.extend(
+            files
+                .filter(|f| f.status == DiffStatus::Added)
+                .map(|f| f.path),
+        );
+        if !page.truncated {
+            return Ok(added);
+        }
+        cursor = page.cursor;
+    }
+}
+
+/// The changes `intent` makes to workspace `ws`, after the portability rules over what it adds
+/// and over `own`, the paths the workspace's chain adds: the case set only where the volume
+/// folds case.
+fn portable_over(
+    ctx: &Ctx<'_>,
+    ws: &Workspace,
+    intent: &Intent,
+    own: &[String],
+) -> Result<Vec<Change>, OpError> {
     // 1. The changes: a whole tree, or the difference of two.
     let new = Tree::new(ctx.store, &intent.to);
     let (changes, added) = match &intent.from {
@@ -277,18 +316,20 @@ fn portable_over(ctx: &Ctx<'_>, ws: &Workspace, intent: &Intent) -> Result<Vec<C
 
     // 2. What it adds, against the volume.
     let prefixes = after_intent(ws, intent);
+    let named: BTreeSet<String> = added.iter().chain(own).cloned().collect();
+    let named: Vec<String> = named.into_iter().collect();
     let case_set = if ws.file.volume.case_insensitive {
         let roots = match &intent.from {
             None => intent.prefixes.clone(),
-            Some(_) => added.clone(),
+            Some(_) => named.clone(),
         };
         let mut set = case_set(&new, &roots, ws.file.all, &prefixes)?;
-        set.extend(added.iter().cloned());
+        set.extend(named.iter().cloned());
         Some(set)
     } else {
         None
     };
-    portable::check(&added, case_set.as_deref(), HOST)?;
+    portable::check(&named, case_set.as_deref(), HOST)?;
     Ok(changes)
 }
 

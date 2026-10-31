@@ -15,7 +15,7 @@ use swarmops_api::{
     ResolveRevReq, ResolvedRev, ShowReq, StatusAfter, StoreOps, TreeListing, UndoReq, UndoResp,
     VerifyReport, VerifyReq, WsCheckInput, WsCommitReq, WsLandReq, WsRebaseAction, WsRebaseReq,
 };
-use swarmops_ws::state::{self, SWARMWS_DIR};
+use swarmops_ws::state::{self, SWARMWS_DIR, Volume};
 use swarmops_ws::{RealFs, lock};
 
 use crate::fixture::{BARE, Fixture, Put, Watched, changes, file, tree_of, write};
@@ -1251,4 +1251,59 @@ fn a_cut_land_and_a_reserved_name_leave_no_dead_end() {
     f.point("release/r", &b);
     let done = swarmops_ws::land(&ctx, land_of("w", None)).unwrap();
     assert_eq!(done.land.status, LandStatus::Landed);
+}
+
+/// A workspace `w` on `release/r` at `b` with a commit adding `src/Readme`, on a volume that
+/// folds case; `release/r` then gains `src/README`. `b`, `w`'s head and the target's head.
+fn collision(f: &Fixture) -> (String, String, String) {
+    let b = f.commit(None, &[Put::File("src/a.txt", "a\n")]);
+    f.point("release/r", &b);
+    f.create("w", "release/r", &[]);
+    let mut volume = Volume::new(false, true, true);
+    volume.case_insensitive = true;
+    f.simulate("w", volume);
+    write(&f.beside("w"), "src/Readme", "mine\n");
+    let mut req = WsCommitReq::new("w".to_owned(), "mine".to_owned());
+    req.status_after = StatusAfter::None;
+    let head = swarmops_ws::commit(&f.ctx(), req).unwrap().changeset;
+    let gained = f.side(Some(&b), &[Put::File("src/README", "theirs\n")]);
+    f.point("release/r", &gained);
+    (b, head, gained)
+}
+
+/// A case collision between the workspace's new path and the target's is refused before the
+/// store lands: the target stays, no store write is made, and no record is left.
+#[test]
+fn a_land_onto_a_case_collision_moves_nothing() {
+    // 1. `src/Readme` of the workspace, `src/README` of the target.
+    let f = Fixture::new();
+    let (_, _, gained) = collision(&f);
+    let before = Snapshot::of(&f, "w");
+    let watched = Watched::new(&f.ops);
+
+    // 2. Refused as unportable, nothing written.
+    let refused = swarmops_ws::land(&f.ctx_over(&watched), land_of("w", None)).unwrap_err();
+    assert_eq!(refused.code, "E_WS_UNPORTABLE", "{refused:?}");
+    assert_eq!(refused.details["reason"], "case_collision");
+    assert_eq!(watched.count("land"), 0);
+    assert_eq!(main_or(&f, "release/r"), gained);
+    assert!(Snapshot::of(&f, "w") == before);
+}
+
+/// The same for `ws rebase`: refused before the store rebases, so no changeset is recorded and no
+/// record is left.
+#[test]
+fn a_rebase_onto_a_case_collision_records_nothing() {
+    let f = Fixture::new();
+    collision(&f);
+    let before = Snapshot::of(&f, "w");
+
+    let refused = rebase_w(&f.ctx()).unwrap_err();
+    assert_eq!(refused.code, "E_WS_UNPORTABLE", "{refused:?}");
+    assert!(Snapshot::of(&f, "w") == before);
+}
+
+/// The head of `name`.
+fn main_or(f: &Fixture, name: &str) -> String {
+    f.ops.resolve_rev(ResolveRevReq::new(name)).unwrap().id
 }
