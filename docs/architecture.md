@@ -750,7 +750,7 @@ prints one envelope a line for each run that derived something):
 {"ok": …, "op": …, "api": 1, "result": … | "error": {code, message, retryable, exit, details, hint}, "meta": {repo, elapsed_ms, resolved, auth, recovered}}
 ```
 
-A failure's `code` is one of 50 stable `E_*` codes, from one table that also fixes each code's
+A failure's `code` is one of 55 stable `E_*` codes, from one table that also fixes each code's
 exit code (0 success, 1 error, 2 usage, 3 conflict, 4 retryable, 5 identity or policy, 6 not
 found) and whether retrying can help. `hint` is often the next command to run.
 `swarmops schema` prints the JSON Schema of 162 types, and its snapshot test is where contract
