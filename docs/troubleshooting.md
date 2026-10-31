@@ -339,8 +339,8 @@ on.
 
 A store must live on a local, native Linux filesystem: ext4 with its journal (what SwarmOps is
 tested and measured on), XFS or btrfs. A store directory of mode `0700`, owned by the one user
-every agent, server and command runs as, is the layout [operations.md](operations.md#before-you-start)
-recommends:
+every agent, server and command runs as, is the layout
+[operations.md](operations.md#before-you-start) recommends:
 
 ```sh
 install -d -m 0700 ~/.local/state/swarmops/repos
@@ -930,8 +930,9 @@ meets the damage fails with this code too, and a metadata file that does not par
 
 What to run: stop every writer, keep the damaged store aside, and restore it
 ([below](#restore-from-a-backup)). Run `verify --deep` after a crash or a power loss, on every
-backup, before an upgrade and on a schedule. [known-limitations.md](known-limitations.md#verification-and-repair)
-lists the kinds of damage no writer repairs.
+backup, before an upgrade and on a schedule.
+[known-limitations.md](known-limitations.md#verification-and-repair) lists the kinds of damage no
+writer repairs.
 
 ### `E_IO`
 
@@ -1240,7 +1241,8 @@ The workspace is rebasing, and `details.paths` still conflict: `ws status` lists
 ### `E_MARKERS_PRESENT`
 
 `ws resolve` found a line that starts with `<<<<<<< ours`, `||||||| base` or `>>>>>>>` still in a
-file it was asked to mark resolved. Remove the markers, or give `--force` if the file really holds such a line.
+file it was asked to mark resolved. Remove the markers, or give `--force` if the file really holds
+such a line.
 
 ### `E_WS_UNPORTABLE`
 
@@ -1263,7 +1265,8 @@ While it holds the landed changeset, which holds the path for good, `ws land` re
 refused again, even after the target drops the path, and `ws rebase` answers `E_INVALID_ARG` ("run
 it again first"); `ws delete <name> --rescue` removes the workspace, and its commits stay in the
 store. A target moved back below the landed changeset has left the land: `ws land` lands it anew and
-`ws rebase` takes the record over.
+`ws rebase` takes the record over, unless the target still holds the path (moved back to the commit
+that added it): then both answer `E_WS_UNPORTABLE` before any store call until the target drops it.
 
 ### `E_WS_OUTSIDE_PREFIXES`
 
@@ -1321,5 +1324,5 @@ A check that needs more than 900 s takes `--check-timeout`.
 `E_REF_NOT_FOUND` (exit 6) is in the schema so that a client can match it now, but no
 operation raises it: no operation looks a ref up by name (a missing ref is `E_REV_NOT_FOUND`).
 `E_AUTH` and `E_POLICY_DENIED` are raised by `swarmops serve` since M14
-([Serve over ssh](operate/serve-over-ssh.md#refusals-a-client-sees)). A client that meets a code newer
-than its own table reads `exit` and `retryable` from the error itself.
+([Serve over ssh](operate/serve-over-ssh.md#refusals-a-client-sees)). A client that meets a code
+newer than its own table reads `exit` and `retryable` from the error itself.
