@@ -465,3 +465,62 @@ fn a_rebase_preflight_checks_onto() {
     let saved = state::read(&RealFs::new(), &f.beside("w")).unwrap();
     assert_eq!(saved.head, head);
 }
+
+/// `--continue` onto a target that gained a reserved name since the conflict is refused before
+/// the store, and leaves no record.
+#[test]
+fn a_continue_checks_the_target() {
+    // 1. A conflicting rebase, resolved; the target gains a reserved name.
+    let f = Fixture::new();
+    let (_, main) = conflicting(&f);
+    let ctx = f.ctx();
+    let dir = f.beside("w");
+    swarmops_ws::rebase(&ctx, rebase_of("w", WsRebaseAction::Start)).unwrap_err();
+    write(&dir, "src/a.txt", "1\nboth\n3\n");
+    swarmops_ws::resolve(&ctx, resolve_of("w", &["src/a.txt"], None, false)).unwrap();
+    swarmops_ws::resolve(
+        &ctx,
+        resolve_of("w", &["src/bin"], Some(Side::Theirs), false),
+    )
+    .unwrap();
+    f.commit(Some(&main), &[Put::File("src/.swarmws/x", "z\n")]);
+    let recorded = f.last_op();
+
+    // 2. Refused as unportable: no store frame, no record.
+    let refused = swarmops_ws::rebase(&ctx, rebase_of("w", WsRebaseAction::Continue)).unwrap_err();
+    assert_eq!(refused.code, "E_WS_UNPORTABLE", "{refused:?}");
+    assert_eq!(f.last_op(), recorded, "a store frame");
+    assert!(
+        !dir.join(SWARMWS_DIR).join("journal/pending.json").exists(),
+        "a record"
+    );
+}
+
+/// A rebase with edits to settle onto a ref with a reserved name is refused before the edits
+/// are committed: no store frame, the head as it was.
+#[test]
+fn a_refused_rebase_settles_nothing() {
+    // 1. A workspace with a commit and an unsettled edit; `release/o` holds a reserved name.
+    let f = Fixture::new();
+    let b = f.commit(None, &[Put::File("src/a.txt", "a\n")]);
+    f.point("release/r", &b);
+    f.create("w", "release/r", &[]);
+    write(&f.beside("w"), "src/a.txt", "mine\n");
+    let head = commit_all(&f, "w", "mine");
+    write(&f.beside("w"), "src/a.txt", "unsettled\n");
+    let reserved = f.side(Some(&b), &[Put::File("src/.SwarmWs/z", "z\n")]);
+    f.point("release/o", &reserved);
+    let recorded = f.last_op();
+
+    // 2. Refused as unportable before `-m` commits the edit.
+    let mut req = rebase_of("w", WsRebaseAction::Start);
+    req.onto = "release/o".to_owned();
+    req.message = Some("settle".to_owned());
+    let refused = swarmops_ws::rebase(&f.ctx(), req).unwrap_err();
+    assert_eq!(refused.code, "E_WS_UNPORTABLE", "{refused:?}");
+    assert_eq!(f.last_op(), recorded, "a store frame");
+    assert_eq!(
+        state::read(&RealFs::new(), &f.beside("w")).unwrap().head,
+        head
+    );
+}

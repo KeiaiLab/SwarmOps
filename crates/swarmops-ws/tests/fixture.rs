@@ -407,6 +407,9 @@ pub struct Watched<'a> {
     /// `log` of this changeset (a workspace's base) answers this many made-up changesets, as
     /// [`Watched::fake_history`] does for `main`'s head.
     pub fake_history_of: Option<(String, u64)>,
+    /// `op_log` answers this many made-up operations, numbered above the store's newest and
+    /// moving no ref, before the store's own.
+    pub fake_ops: Option<u64>,
     /// Where each call to `commit`, `rebase` and `land` is also noted, in order with the file
     /// layers' events (the sweep driver's order checker).
     #[cfg(feature = "test-hooks")]
@@ -424,6 +427,7 @@ impl<'a> Watched<'a> {
             refuse_commit: None,
             fake_history: None,
             fake_history_of: None,
+            fake_ops: None,
             #[cfg(feature = "test-hooks")]
             trace: None,
         }
@@ -610,7 +614,36 @@ impl StoreOps for Watched<'_> {
 
     fn op_log(&self, req: OpLogReq) -> Result<OpLogPage, OpError> {
         self.saw("op_log");
-        self.inner.op_log(req)
+        let Some(extra) = self.fake_ops else {
+            return self.inner.op_log(req);
+        };
+        let mut newest = OpLogReq::default();
+        newest.limit = 1;
+        let top = (self.inner.op_log(newest)?.ops.first()).map_or(0, |op| op.op + 1);
+        let end = top + extra;
+        let before = req.before.unwrap_or(end).min(end);
+        if before <= top {
+            let mut real = req;
+            real.before = Some(before);
+            return self.inner.op_log(real);
+        }
+        let lo = before
+            .saturating_sub(u64::try_from(req.limit).unwrap())
+            .max(top);
+        let ops = (lo..before)
+            .rev()
+            .map(|n| {
+                swarmops_api::OperationOut::new(
+                    n,
+                    format!("{n}:00000000"),
+                    swarmops_api::OperationKind::Commit,
+                    Vec::new(),
+                    0,
+                    Vec::new(),
+                )
+            })
+            .collect();
+        Ok(OpLogPage::new(ops, true))
     }
 
     fn undo(&self, who: &Identity, req: UndoReq) -> Result<UndoResp, OpError> {

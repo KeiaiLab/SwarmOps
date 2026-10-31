@@ -16,6 +16,7 @@ use swarmops_api::{
     VerifyReport, VerifyReq, WsCheckInput, WsCommitReq, WsLandReq, WsRebaseAction, WsRebaseReq,
 };
 use swarmops_ws::state::{self, SWARMWS_DIR, Volume};
+use swarmops_ws::status::BEHIND_CAP as HISTORY_CAP;
 use swarmops_ws::{RealFs, lock};
 
 use crate::fixture::{BARE, Fixture, Put, Watched, changes, file, tree_of, write};
@@ -410,7 +411,7 @@ fn a_check_past_its_timeout_is_e_check_failed_with_timed_out() {
 
 /// A `ws land --check` killed after the land's frame, before `workspace.json`, and one killed
 /// after an attempt's rebase frame: each re-run takes the pending record's keys, so the store
-/// replays the same `H'` and the same land, and main holds one land.
+/// replays the same `H'` and the same land while main has not moved, and main holds one land.
 #[cfg(unix)]
 #[test]
 fn a_killed_ws_land_resumes_by_its_key() {
@@ -1263,16 +1264,12 @@ fn a_cut_land_and_a_reserved_name_leave_no_dead_end() {
 /// A workspace `w` on `release/r` at `b` with a commit adding `src/Readme`, on a volume that
 /// folds case; `release/r` then gains `src/README`. `b`, `w`'s head and the target's head.
 fn collision(f: &Fixture) -> (String, String, String) {
-    let b = f.commit(None, &[Put::File("src/a.txt", "a\n")]);
-    f.point("release/r", &b);
-    f.create("w", "release/r", &[]);
-    let mut volume = Volume::new(false, true, true);
-    volume.case_insensitive = true;
-    f.simulate("w", volume);
+    // 1. The workspace on a volume that folds case, with a commit adding `src/Readme`.
+    let b = folding(f, &[Put::File("src/a.txt", "a\n")]);
     write(&f.beside("w"), "src/Readme", "mine\n");
-    let mut req = WsCommitReq::new("w".to_owned(), "mine".to_owned());
-    req.status_after = StatusAfter::None;
-    let head = swarmops_ws::commit(&f.ctx(), req).unwrap().changeset;
+    let head = commit_w(f, "mine");
+
+    // 2. The target gains `src/README` beside it.
     let gained = f.side(Some(&b), &[Put::File("src/README", "theirs\n")]);
     f.point("release/r", &gained);
     (b, head, gained)
@@ -1293,7 +1290,7 @@ fn a_land_onto_a_case_collision_moves_nothing() {
     assert_eq!(refused.code, "E_WS_UNPORTABLE", "{refused:?}");
     assert_eq!(refused.details["reason"], "case_collision");
     assert_eq!(watched.count("land"), 0);
-    assert_eq!(main_or(&f, "release/r"), gained);
+    assert_eq!(head_of(&f, "release/r"), gained);
     assert!(Snapshot::of(&f, "w") == before);
 }
 
@@ -1301,63 +1298,419 @@ fn a_land_onto_a_case_collision_moves_nothing() {
 /// record is left.
 #[test]
 fn a_rebase_onto_a_case_collision_records_nothing() {
+    // 1. `src/Readme` of the workspace, `src/README` of the target.
     let f = Fixture::new();
     collision(&f);
     let before = Snapshot::of(&f, "w");
+    let watched = Watched::new(&f.ops);
 
-    let refused = rebase_w(&f.ctx()).unwrap_err();
+    // 2. Refused as unportable: no store write, no changeset, no record.
+    let refused = rebase_w(&f.ctx_over(&watched)).unwrap_err();
     assert_eq!(refused.code, "E_WS_UNPORTABLE", "{refused:?}");
+    assert_eq!(watched.count("rebase"), 0);
     assert!(Snapshot::of(&f, "w") == before);
 }
 
-/// The head of `name`.
-fn main_or(f: &Fixture, name: &str) -> String {
+/// The head of ref `name`.
+fn head_of(f: &Fixture, name: &str) -> String {
     f.ops.resolve_rev(ResolveRevReq::new(name)).unwrap().id
 }
 
+/// The call a refusal after the store's rebase is made by.
+#[derive(Clone, Copy, Debug)]
+enum Via {
+    /// `ws rebase`.
+    Rebase,
+    /// `ws land --check`, whose rebase is the first step.
+    CheckedLand,
+}
+
 /// A target that gains a reserved name between the preflight and the store's rebase (a race the
-/// preflight cannot see): the store has rebased, the files cannot follow, and the record stays,
-/// so a re-run replays the same rebase instead of making another. `ws rebase` and a checked land
-/// alike.
-#[cfg(unix)]
+/// preflight cannot see): the store has rebased, the files cannot follow, and the record stays.
+/// A re-run is refused before the store while the target holds the name, so it adds no rebase.
+fn keeps_the_record(via: Via) {
+    // 1. A workspace one commit above `b`; the target a commit ahead, and about to gain a
+    //    reserved name as the store is called.
+    let f = Fixture::new();
+    let (_, b, _) = on_release(&f);
+    write(&f.beside("w"), "src/a.txt", "mine\n");
+    let c = f.side(Some(&b), &[Put::File("src/c.txt", "c\n")]);
+    f.point("release/r", &c);
+    let store = Hooked::new(&f.ops);
+    let fixture = &f;
+    let racer = c.clone();
+    *store.before_rebase.lock().unwrap() = Some(Box::new(move || {
+        let d = fixture.side(Some(&racer), &[Put::File("src/.swarmws/x", "z\n")]);
+        fixture.point("release/r", &d);
+    }));
+    let ctx = f.ctx_over(&store);
+    let dir = f.beside("w");
+    let call = || match via {
+        Via::Rebase => rebase_w(&ctx).unwrap_err(),
+        Via::CheckedLand => {
+            swarmops_ws::land(&ctx, land_of("w", Some(&sh("true", &[])))).unwrap_err()
+        }
+    };
+
+    // 2. The call is refused as unportable, after the store's rebase.
+    let refused = call();
+    assert_eq!(refused.code, "E_WS_UNPORTABLE", "{via:?}: {refused:?}");
+    assert_eq!(store.rebases().len(), 1, "{via:?}");
+
+    // 3. The record stays; a re-run is refused before the store, and adds no rebase.
+    assert!(pending_in(&dir).exists(), "{via:?}: the record went");
+    let again = call();
+    assert_eq!(again.code, "E_WS_UNPORTABLE", "{via:?}: {again:?}");
+    assert_eq!(store.rebases().len(), 1, "{via:?}: a second rebase");
+    assert!(pending_in(&dir).exists(), "{via:?}");
+}
+
+/// `ws rebase`: see [`keeps_the_record`].
 #[test]
 fn a_refusal_after_the_store_rebase_keeps_the_record() {
-    for checked in [false, true] {
-        // 1. A workspace one commit above `b`; the target a commit ahead, and about to gain a
-        //    reserved name as the store is called.
-        let f = Fixture::new();
-        let (_, b, _) = on_release(&f);
-        write(&f.beside("w"), "src/a.txt", "mine\n");
-        let c = f.side(Some(&b), &[Put::File("src/c.txt", "c\n")]);
-        f.point("release/r", &c);
-        let store = Hooked::new(&f.ops);
-        let fixture = &f;
-        let racer = c.clone();
-        *store.before_rebase.lock().unwrap() = Some(Box::new(move || {
-            let d = fixture.side(Some(&racer), &[Put::File("src/.swarmws/x", "z\n")]);
-            fixture.point("release/r", &d);
-        }));
-        let ctx = f.ctx_over(&store);
-        let dir = f.beside("w");
+    keeps_the_record(Via::Rebase);
+}
 
-        // 2. The call is refused as unportable, after the store's rebase.
-        let refused = if checked {
-            swarmops_ws::land(&ctx, land_of("w", Some(&sh("true", &[])))).unwrap_err()
-        } else {
-            rebase_w(&ctx).unwrap_err()
-        };
-        assert_eq!(refused.code, "E_WS_UNPORTABLE", "{checked}: {refused:?}");
-        assert_eq!(store.rebases().len(), 1, "{checked}");
+/// `ws land --check`: see [`keeps_the_record`].
+#[cfg(unix)]
+#[test]
+fn a_refusal_after_the_checked_rebase_keeps_the_record() {
+    keeps_the_record(Via::CheckedLand);
+}
 
-        // 3. The record stays; a re-run is refused before the store, and adds no rebase.
-        assert!(pending_in(&dir).exists(), "{checked}: the record went");
-        let again = if checked {
-            swarmops_ws::land(&ctx, land_of("w", Some(&sh("true", &[])))).unwrap_err()
-        } else {
-            rebase_w(&ctx).unwrap_err()
-        };
-        assert_eq!(again.code, "E_WS_UNPORTABLE", "{checked}: {again:?}");
-        assert_eq!(store.rebases().len(), 1, "{checked}: a second rebase");
-        assert!(pending_in(&dir).exists(), "{checked}");
+/// The operations the search for a stale base or a land's key reads, as the library caps it
+/// (`status::OP_CAP`, not public).
+const JOURNAL_CAP: u64 = 10_000;
+
+/// A workspace `w` on `release/r` at a commit of `files`, on a volume that folds case. The
+/// commit.
+fn folding(f: &Fixture, files: &[Put<'_>]) -> String {
+    let b = f.commit(None, files);
+    f.point("release/r", &b);
+    f.create("w", "release/r", &[]);
+    let mut volume = Volume::new(false, true, true);
+    volume.case_insensitive = true;
+    f.simulate("w", volume);
+    b
+}
+
+/// Commits every edit of workspace `w` with `message`; the new head.
+fn commit_w(f: &Fixture, message: &str) -> String {
+    let mut req = WsCommitReq::new("w".to_owned(), message.to_owned());
+    req.status_after = StatusAfter::None;
+    swarmops_ws::commit(&f.ctx(), req).unwrap().changeset
+}
+
+/// A cut land the journal cannot place within its operation cap is not known to be absent: the
+/// record stays, and `ws rebase` says to finish the land first.
+#[test]
+fn a_cut_land_the_journal_cannot_place_is_left() {
+    // 1. A land cut before its frame, the target moved back; the journal long past its cap.
+    let f = Fixture::new();
+    let (p, _, _) = on_release(&f);
+    let hooked = Hooked::new(&f.ops);
+    cut_land(&f, &hooked, Cut::Before);
+    f.point("release/r", &p);
+    let mut watched = Watched::new(&hooked);
+    watched.fake_ops = Some(JOURNAL_CAP);
+
+    // 2. The rebase does not take the record over.
+    let refused = rebase_w(&f.ctx_over(&watched)).unwrap_err();
+    assert_eq!(refused.code, "E_INVALID_ARG", "{refused:?}");
+    assert!(pending_in(&f.beside("w")).exists(), "the record went");
+}
+
+/// The same when the target's history is longer than its cap: the land's changeset is not found
+/// within it, and not known to be missing.
+#[test]
+fn a_cut_land_the_history_cannot_place_is_left() {
+    let f = Fixture::new();
+    on_release(&f);
+    let hooked = Hooked::new(&f.ops);
+    cut_land(&f, &hooked, Cut::After);
+    let mut watched = Watched::new(&hooked);
+    watched.fake_history_of = Some(("release/r".to_owned(), HISTORY_CAP * 2));
+
+    let refused = rebase_w(&f.ctx_over(&watched)).unwrap_err();
+    assert_eq!(refused.code, "E_INVALID_ARG", "{refused:?}");
+    assert!(pending_in(&f.beside("w")).exists(), "the record went");
+}
+
+/// A cut land not known to be held keeps the reserved-name preflight: it is not replayed past
+/// a name the target gained.
+#[test]
+fn an_unplaced_land_keeps_the_preflight() {
+    // 1. A land cut after its frame; the target moved on to a reserved name; its history too long.
+    let f = Fixture::new();
+    on_release(&f);
+    let hooked = Hooked::new(&f.ops);
+    cut_land(&f, &hooked, Cut::After);
+    let first = hooked.lands()[0].landed.clone();
+    let gained = f.side(Some(&first), &[Put::File("src/.swarmws/x", "z\n")]);
+    f.point("release/r", &gained);
+    let mut watched = Watched::new(&hooked);
+    watched.fake_history_of = Some(("release/r".to_owned(), HISTORY_CAP * 2));
+
+    // 2. The land is refused as unportable.
+    let refused = swarmops_ws::land(&f.ctx_over(&watched), land_of("w", None)).unwrap_err();
+    assert_eq!(refused.code, "E_WS_UNPORTABLE", "{refused:?}");
+}
+
+/// A journal past the operation cap is not read to its end: a base it cannot be shown to have
+/// left is not stale.
+#[test]
+fn a_journal_past_the_cap_is_not_stale() {
+    let f = Fixture::new();
+    let (p, _, _) = on_release(&f);
+    f.point("release/r", &p);
+    let mut watched = Watched::new(&f.ops);
+    watched.fake_ops = Some(JOURNAL_CAP);
+
+    let done = swarmops_ws::land(&f.ctx_over(&watched), land_with_message()).unwrap();
+    assert_eq!(done.land.status, LandStatus::Landed);
+}
+
+/// A base move under the cap is found past many newer operations: the land is stale.
+#[test]
+fn a_journal_under_the_cap_is_read() {
+    let f = Fixture::new();
+    let (p, _, _) = on_release(&f);
+    f.point("release/r", &p);
+    let mut watched = Watched::new(&f.ops);
+    watched.fake_ops = Some(JOURNAL_CAP / 2);
+
+    let refused = swarmops_ws::land(&f.ctx_over(&watched), land_with_message()).unwrap_err();
+    assert_eq!(refused.code, "E_WS_STALE", "{refused:?}");
+}
+
+/// Only the record's key counts as the cut land: another workspace's land on the target since
+/// does not make it held.
+#[test]
+fn another_workspaces_land_is_not_the_cut_one() {
+    // 1. A land cut before its frame; another workspace lands on the target.
+    let f = Fixture::new();
+    on_release(&f);
+    let store = Hooked::new(&f.ops);
+    cut_land(&f, &store, Cut::Before);
+    f.create("v", "release/r", &[]);
+    write(&f.beside("v"), "src/v.txt", "v\n");
+    let mut req = land_of("v", None);
+    req.message = Some("v".to_owned());
+    let done = swarmops_ws::land(&f.ctx(), req).unwrap();
+    assert_eq!(done.land.status, LandStatus::Landed);
+
+    // 2. The rebase takes the cut land's record over.
+    rebase_w(&f.ctx_over(&store)).unwrap();
+    assert!(!pending_in(&f.beside("w")).exists());
+}
+
+/// A checked land of `w` with `-m` whose command succeeds, cut where `arm` says; asserts the cut.
+#[cfg(unix)]
+fn cut_checked(f: &Fixture, store: &Hooked<'_>, arm: &AtomicBool) {
+    arm.store(true, Ordering::SeqCst);
+    let mut req = land_of("w", Some(&sh("true", &[])));
+    req.message = Some("settle".to_owned());
+    let cut = swarmops_ws::land(&f.ctx_over(store), req).unwrap_err();
+    assert_eq!(cut.code, "E_IO", "{cut:?}");
+    assert!(pending_in(&f.beside("w")).exists());
+}
+
+/// `ws rebase` of workspace `w` onto `onto`, with no `-m`.
+#[cfg(unix)]
+fn rebase_onto(
+    ctx: &swarmops_ws::Ctx<'_>,
+    onto: &str,
+) -> Result<swarmops_api::WsRebaseResp, OpError> {
+    let mut req = WsRebaseReq::new("w".to_owned());
+    req.action = WsRebaseAction::Start;
+    onto.clone_into(&mut req.onto);
+    req.status_after = StatusAfter::None;
+    swarmops_ws::rebase(ctx, req)
+}
+
+/// The key a changeset was committed under.
+#[cfg(unix)]
+fn commit_key(f: &Fixture, id: &str) -> Option<String> {
+    show(f, id).metadata.get("commit_key").cloned()
+}
+
+/// A checked land cut after the store's rebase, which `ws rebase` onto the same ref takes over,
+/// replays that rebase: the same changeset, and no new frame.
+#[cfg(unix)]
+#[test]
+fn a_takeover_replays_the_cut_rebase() {
+    // 1. A checked land cut after the store's rebase onto `c`.
+    let f = Fixture::new();
+    let (_, b, _) = on_release(&f);
+    let c = f.side(Some(&b), &[Put::File("src/c.txt", "c\n")]);
+    f.point("release/r", &c);
+    let store = Hooked::new(&f.ops);
+    cut_checked(&f, &store, &store.crash_after_rebase);
+    let first = store.rebases()[0].clone();
+    let recorded = f.last_op();
+
+    // 2. The rebase replays it.
+    let done = rebase_w(&f.ctx_over(&store)).unwrap();
+    assert_eq!(done.changeset, first.changeset);
+    assert_eq!(store.rebases()[1].status, RebaseStatus::Replayed);
+    assert_eq!(f.last_op(), recorded, "a new frame");
+    assert!(!pending_in(&f.beside("w")).exists());
+}
+
+/// A land cut at `landing`, after its rebase, is rebased anew by the takeover onto the target's
+/// head now, under a new key.
+#[cfg(unix)]
+#[test]
+fn a_takeover_of_a_landing_cut_takes_a_new_key() {
+    // 1. A checked land cut after the rebase, before the land; the target moved on.
+    let f = Fixture::new();
+    let (_, b, _) = on_release(&f);
+    let c = f.side(Some(&b), &[Put::File("src/c.txt", "c\n")]);
+    f.point("release/r", &c);
+    let store = Hooked::new(&f.ops);
+    cut_checked(&f, &store, &store.crash_before_land);
+    let first = commit_key(&f, &store.rebases()[0].changeset);
+    assert!(first.is_some());
+    let d = f.side(Some(&c), &[Put::File("src/d.txt", "d\n")]);
+    f.point("release/r", &d);
+
+    // 2. The takeover rebases onto `d` under another key.
+    let done = rebase_w(&f.ctx_over(&store)).unwrap();
+    assert_eq!(done.onto, d);
+    assert_eq!(
+        store.rebases().last().unwrap().status,
+        RebaseStatus::Rebased
+    );
+    assert_ne!(
+        commit_key(&f, &done.changeset),
+        first,
+        "the cut rebase's key"
+    );
+}
+
+/// A takeover `--onto` another ref than the cut land's rebased onto commits under a new key.
+#[cfg(unix)]
+#[test]
+fn a_takeover_onto_another_ref_takes_a_new_key() {
+    // 1. A checked land cut after the store's rebase onto `release/r`; another ref `release/o`.
+    let f = Fixture::new();
+    let (_, b, _) = on_release(&f);
+    let c = f.side(Some(&b), &[Put::File("src/c.txt", "c\n")]);
+    f.point("release/r", &c);
+    let store = Hooked::new(&f.ops);
+    cut_checked(&f, &store, &store.crash_after_rebase);
+    let first = commit_key(&f, &store.rebases()[0].changeset);
+    assert!(first.is_some());
+    let o = f.side(Some(&b), &[Put::File("src/o.txt", "o\n")]);
+    f.point("release/o", &o);
+
+    // 2. The takeover rebases onto `release/o` under another key.
+    let done = rebase_onto(&f.ctx_over(&store), "release/o").unwrap();
+    assert_eq!(done.onto, o);
+    assert_eq!(
+        store.rebases().last().unwrap().status,
+        RebaseStatus::Rebased
+    );
+    assert_ne!(
+        commit_key(&f, &done.changeset),
+        first,
+        "the cut rebase's key"
+    );
+}
+
+/// A land onto another ref than the workspace's, cut after its frame and held there, is not
+/// taken over by `ws rebase`: the record names the ref it landed on.
+#[cfg(unix)]
+#[test]
+fn a_takeover_reads_the_records_target() {
+    // 1. A land onto `release/o`, cut after its frame; `release/o` holds it.
+    let f = Fixture::new();
+    let (_, b, _) = on_release(&f);
+    f.point("release/o", &b);
+    let store = Hooked::new(&f.ops);
+    store.crash_after_land.store(true, Ordering::SeqCst);
+    let mut req = land_with_message();
+    req.target = Some("release/o".to_owned());
+    let cut = swarmops_ws::land(&f.ctx_over(&store), req).unwrap_err();
+    assert_eq!(cut.code, "E_IO", "{cut:?}");
+
+    // 2. The rebase leaves the record: its land is held, though not by the workspace's target.
+    let refused = rebase_w(&f.ctx_over(&store)).unwrap_err();
+    assert_eq!(refused.code, "E_INVALID_ARG", "{refused:?}");
+    assert!(pending_in(&f.beside("w")).exists(), "the record taken over");
+}
+
+/// A checked land whose target gains a reserved name before the land retries is refused before
+/// the retry's rebase and its record.
+#[cfg(unix)]
+#[test]
+fn a_retry_checks_the_target() {
+    // 1. A checked land; the target gains a reserved name as its land is about to run.
+    let f = Fixture::new();
+    let (_, b, _) = on_release(&f);
+    let store = Hooked::new(&f.ops);
+    let fixture = &f;
+    let racer = b.clone();
+    *store.before_land.lock().unwrap() = Some(Box::new(move || {
+        let d = fixture.side(Some(&racer), &[Put::File("src/.swarmws/x", "z\n")]);
+        fixture.point("release/r", &d);
+    }));
+    let mut req = land_of("w", Some(&sh("true", &[])));
+    req.message = Some("settle".to_owned());
+
+    // 2. The retry is refused before a second rebase, and leaves no record.
+    let refused = swarmops_ws::land(&f.ctx_over(&store), req).unwrap_err();
+    assert_eq!(refused.code, "E_WS_UNPORTABLE", "{refused:?}");
+    assert_eq!(store.rebases().len(), 1, "a second rebase");
+    assert!(!pending_in(&f.beside("w")).exists(), "a record");
+}
+
+/// A path the workspace deleted is not its new one: a target that renamed it by case lands on a
+/// volume that folds case.
+#[test]
+fn a_deleted_path_is_not_a_new_one() {
+    // 1. The workspace deletes `src/Readme`; the target renames it to `src/README`.
+    let f = Fixture::new();
+    let b = folding(
+        &f,
+        &[
+            Put::File("src/a.txt", "a\n"),
+            Put::File("src/Readme", "r\n"),
+        ],
+    );
+    std::fs::remove_file(f.beside("w").join("src/Readme")).unwrap();
+    write(&f.beside("w"), "src/a.txt", "mine\n");
+    commit_w(&f, "gone");
+    let renamed = f.commit(
+        Some(&b),
+        &[Put::Gone("src/Readme"), Put::File("src/README", "R\n")],
+    );
+    f.point("release/r", &renamed);
+
+    // 2. The land goes through.
+    let done = swarmops_ws::land(&f.ctx(), land_of("w", None)).unwrap();
+    assert_eq!(done.land.status, LandStatus::Landed);
+}
+
+/// The chain's new paths are read past the first page of the diff: a collision on the second
+/// page is refused before the store lands.
+#[test]
+fn a_chain_is_read_past_one_page() {
+    // 1. A chain of 1,000 new files and `src/z/Readme`; the target gains `src/z/README`.
+    let f = Fixture::new();
+    let b = folding(&f, &[Put::File("src/a.txt", "a\n")]);
+    let dir = f.beside("w");
+    for i in 0..1000 {
+        write(&dir, &format!("src/a/f{i:04}"), "x\n");
     }
+    write(&dir, "src/z/Readme", "mine\n");
+    commit_w(&f, "many");
+    let gained = f.side(Some(&b), &[Put::File("src/z/README", "theirs\n")]);
+    f.point("release/r", &gained);
+    let watched = Watched::new(&f.ops);
+
+    // 2. Refused as a case collision, before the store lands.
+    let refused = swarmops_ws::land(&f.ctx_over(&watched), land_of("w", None)).unwrap_err();
+    assert_eq!(refused.code, "E_WS_UNPORTABLE", "{refused:?}");
+    assert_eq!(watched.count("land"), 0);
 }
