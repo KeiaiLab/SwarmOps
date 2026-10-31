@@ -581,6 +581,9 @@ fn a_key_landed_on_another_target_is_refused() {
     let (_dir, root, repo) = new_store();
     let t0 = advance(&repo, ACTOR, &[], vec![put("a", b"a\n")]);
     create_ref(&repo, "release/1", t0);
+
+    // The key lands one change onto `release/1`; another change is then given the same key for
+    // `main`.
     let one = commit_by(&repo, ACTOR, &[t0], vec![put("b", b"b\n")]);
     let landed = repo
         .land(keyed_on(one, "release/1", "key-1"))
@@ -589,7 +592,20 @@ fn a_key_landed_on_another_target_is_refused() {
     let two = commit_by(&repo, ACTOR, &[t0], vec![put("c", b"c\n")]);
     let frames = frame_count(&root);
 
-    assert_reused(repo.land(keyed(two, "key-1")), "key-1", landed, "release/1");
+    // It is refused, with a message that names the target of the first land, and writes nothing.
+    let refused = repo.land(keyed(two, "key-1"));
+    let message = refused.as_ref().err().map(ToString::to_string);
+    assert_reused(refused, "key-1", landed, "release/1");
+    assert_eq!(
+        message.as_deref(),
+        Some(
+            format!(
+                "land key \"key-1\" landed already, as {landed} on release/1: another change or \
+                 target takes a key of its own"
+            )
+            .as_str()
+        )
+    );
     assert_eq!((frame_count(&root), main_head(&repo)), (frames, t0));
 }
 
@@ -607,6 +623,7 @@ fn the_same_change_on_another_target_is_refused() {
         .landed;
     let frames = frame_count(&root);
 
+    // The land of the same head onto `main` is no replay: the key is `release/1`'s.
     assert_reused(
         repo.land(keyed(head, "key-1")),
         "key-1",
@@ -625,9 +642,11 @@ fn a_key_on_a_branch_cut_after_it_landed_replays() {
     let t0 = advance(&repo, ACTOR, &[], vec![put("a", b"a\n")]);
     let head = commit_by(&repo, ACTOR, &[t0], vec![put("b", b"b\n")]);
     let landed = repo.land(keyed(head, "key-1")).unwrap().landed;
+    // `release/2` is cut at the landed changeset, so it holds the key too.
     create_ref(&repo, "release/2", landed);
     let frames = frame_count(&root);
 
+    // The target is judged first: its own land is found, and replayed.
     let again = repo.land(keyed(head, "key-1")).unwrap();
     assert_eq!((again.status, again.landed), (LandStatus::Replayed, landed));
     assert_eq!((frame_count(&root), main_head(&repo)), (frames, landed));
@@ -644,9 +663,11 @@ fn a_key_below_the_base_on_the_target_is_not_another_target() {
     let keyed_land = repo.land(keyed(old, "key-1")).unwrap().landed;
     let t2 = advance(&repo, ACTOR, &[keyed_land], vec![put("c", b"c\n")]);
     let t3 = advance(&repo, ACTOR, &[t2], vec![put("d", b"d\n")]);
+    // `release/2` holds the keyed land, which `main`'s head reaches; the land's base is above it.
     create_ref(&repo, "release/2", keyed_land);
     let head = commit_by(&repo, ACTOR, &[t3], vec![put("e", b"e\n")]);
 
+    // The hit on `release/2` is `main`'s own history, passed over: the land goes on.
     let out = repo.land(keyed(head, "key-1")).unwrap();
     assert_eq!((out.status, out.rebased_onto), (LandStatus::Landed, t3));
 }
@@ -678,10 +699,161 @@ fn a_key_below_the_base_on_another_target_is_not_found() {
     }
     let head = commit_by(&repo, ACTOR, &[top], vec![put("h", b"h\n")]);
 
+    // The walk of `release/1` stops above the keyed land: the key is not found.
     let out = repo.land(keyed(head, "key-1")).unwrap();
     assert_eq!(
         (out.status, out.rebased_onto, out.base),
         (LandStatus::Landed, top, top)
+    );
+}
+
+/// Lands a change keyed `key-1` onto `release/1` (cut from `t0`), then moves `release/1` up by
+/// `above` changesets, and builds `main` up to generation `main_gen` (`t0` is generation 1).
+/// Returns the keyed land, `main`'s head, and a change off that head. The keyed land has
+/// generation 2.
+fn key_on_release(
+    repo: &LocalRepo,
+    above: u32,
+    main_gen: u32,
+) -> (ChangesetId, ChangesetId, ChangesetId) {
+    let t0 = advance(repo, ACTOR, &[], vec![put("a", b"a\n")]);
+    create_ref(repo, "release/1", t0);
+    let one = commit_by(repo, ACTOR, &[t0], vec![put("b", b"b\n")]);
+    let keyed_land = repo
+        .land(keyed_on(one, "release/1", "key-1"))
+        .unwrap()
+        .landed;
+    let mut at = keyed_land;
+    for n in 0..above {
+        let next = commit_by(repo, OTHER, &[at], vec![put(&format!("r{n}"), b"r\n")]);
+        move_ref(repo, "release/1", at, next);
+        at = next;
+    }
+    let mut top = t0;
+    for n in 1..main_gen {
+        top = advance(repo, ACTOR, &[top], vec![put(&format!("m{n}"), b"m\n")]);
+    }
+    let head = commit_by(repo, ACTOR, &[top], vec![put("h", b"h\n")]);
+    (keyed_land, top, head)
+}
+
+/// The walk of another ref visits the changeset at the floor's generation: a key landed there,
+/// on a ref that has moved on above it, is found.
+#[test]
+fn a_key_at_the_base_generation_on_another_target_is_found() {
+    let (_dir, _root, repo) = new_store();
+    // The floor is `main`'s generation 2; the keyed land (generation 2) has `release/1`'s head
+    // (generation 3) above it.
+    let (landed, _top, head) = key_on_release(&repo, 1, 2);
+
+    assert_reused(
+        repo.land(keyed(head, "key-1")),
+        "key-1",
+        landed,
+        "release/1",
+    );
+}
+
+/// A key one generation below the floor, with the ref's head above the floor, is not found.
+#[test]
+fn a_key_one_below_the_base_generation_is_not_found() {
+    let (_dir, _root, repo) = new_store();
+    // The floor is `main`'s generation 3; the keyed land (generation 2) is under `release/1`'s
+    // generation 3 and 4.
+    let (_landed, top, head) = key_on_release(&repo, 2, 3);
+
+    let out = repo.land(keyed(head, "key-1")).unwrap();
+    assert_eq!((out.status, out.rebased_onto), (LandStatus::Landed, top));
+}
+
+/// A ref whose head is the keyed land itself, however far below the floor, is read to its head
+/// and refuses the key: the walk visits a changeset before it checks the floor.
+#[test]
+fn a_ref_headed_by_the_key_below_the_base_generation_refuses() {
+    let (_dir, _root, repo) = new_store();
+    let (landed, _top, head) = key_on_release(&repo, 0, 4);
+
+    assert_reused(
+        repo.land(keyed(head, "key-1")),
+        "key-1",
+        landed,
+        "release/1",
+    );
+}
+
+/// A key `main` holds is replayed from `main`, though another ref holds a land of that key too:
+/// the target is judged before the other refs. Both lands were made while the other was not on a
+/// ref, as two concurrent lands of one key onto two targets can be.
+#[test]
+fn the_target_is_judged_before_other_refs() {
+    let (_dir, _root, repo) = new_store();
+    let t0 = advance(&repo, ACTOR, &[], vec![put("a", b"a\n")]);
+    let head = commit_by(&repo, ACTOR, &[t0], vec![put("b", b"b\n")]);
+    create_ref(&repo, "release/tmp", t0);
+    let on_main = repo
+        .land(keyed_on(head, "release/tmp", "key-1"))
+        .unwrap()
+        .landed;
+    repo.cas_ref("release/tmp", Some(on_main), None, ACTOR)
+        .unwrap();
+    create_ref(&repo, "release/1", t0);
+    let other = commit_by(&repo, OTHER, &[t0], vec![put("c", b"c\n")]);
+    let on_release = repo
+        .land(keyed_on(other, "release/1", "key-1"))
+        .unwrap()
+        .landed;
+    move_ref(&repo, "main", t0, on_main);
+    assert_ne!(on_main, on_release);
+
+    let again = repo.land(keyed(head, "key-1")).unwrap();
+    assert_eq!(
+        (again.status, again.landed),
+        (LandStatus::Replayed, on_main)
+    );
+}
+
+/// Tags and remote-tracking refs are not landable: a land of the key held by one only goes on.
+#[test]
+fn tags_and_remote_refs_are_not_walked() {
+    for held in ["tags/v1", "remote/origin/main"] {
+        let (_dir, _root, repo) = new_store();
+        let t0 = advance(&repo, ACTOR, &[], vec![put("a", b"a\n")]);
+        create_ref(&repo, "release/tmp", t0);
+        let one = commit_by(&repo, ACTOR, &[t0], vec![put("b", b"b\n")]);
+        let landed = repo
+            .land(keyed_on(one, "release/tmp", "key-1"))
+            .unwrap()
+            .landed;
+        create_ref(&repo, held, landed);
+        repo.cas_ref("release/tmp", Some(landed), None, ACTOR)
+            .unwrap();
+        let head = commit_by(&repo, ACTOR, &[t0], vec![put("c", b"c\n")]);
+
+        let out = repo.land(keyed(head, "key-1")).unwrap();
+        assert_eq!(out.status, LandStatus::Landed, "{held} was walked");
+    }
+}
+
+/// `main` and a branch are walked as other targets are: a key that landed on `feat/x` refuses a
+/// land onto `main`, and one that landed on `main` refuses a land onto `release/1`.
+#[test]
+fn main_and_branches_are_walked() {
+    let (_dir, _root, repo) = new_store();
+    let t0 = advance(&repo, ACTOR, &[], vec![put("a", b"a\n")]);
+    create_ref(&repo, "feat/x", t0);
+    let one = commit_by(&repo, ACTOR, &[t0], vec![put("b", b"b\n")]);
+    let on_branch = repo.land(keyed_on(one, "feat/x", "key-1")).unwrap().landed;
+    let two = commit_by(&repo, ACTOR, &[t0], vec![put("c", b"c\n")]);
+    assert_reused(repo.land(keyed(two, "key-1")), "key-1", on_branch, "feat/x");
+
+    create_ref(&repo, "release/1", t0);
+    let on_main = repo.land(keyed(two, "key-2")).unwrap().landed;
+    let three = commit_by(&repo, ACTOR, &[t0], vec![put("d", b"d\n")]);
+    assert_reused(
+        repo.land(keyed_on(three, "release/1", "key-2")),
+        "key-2",
+        on_main,
+        "main",
     );
 }
 
@@ -859,6 +1031,19 @@ impl Watch for ObjectReads {
 /// changeset objects.
 #[test]
 fn a_keyed_land_with_a_base_off_the_target_stops_at_its_generation() {
+    keyed_land_reads(false);
+}
+
+/// The same land with another ref, `release/x`, whose head is a changeset the target's walk reads:
+/// the ref's head is not read again, so the land still reads at most 6 of the changesets.
+#[test]
+fn a_keyed_land_reads_a_changeset_once_with_other_refs() {
+    keyed_land_reads(true);
+}
+
+/// Lands the keyed change of the two tests above, with `release/x` at the changeset of generation
+/// 999 when `other_ref`, and asserts the reads of the target's changesets.
+fn keyed_land_reads(other_ref: bool) {
     let dir = tempfile::tempdir().unwrap();
     let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
     let repo = LocalRepo::create_with_fs(&root, "test", Arc::new(NoSyncFs)).unwrap();
@@ -876,6 +1061,9 @@ fn a_keyed_land_with_a_base_off_the_target_stops_at_its_generation() {
     // 997, three below the target's head (1,000), is the base.
     let base = commit_by(&repo, OTHER, &[chain[995]], vec![put("g", b"g\n")]);
     let head = commit_by(&repo, OTHER, &[base], vec![put("h", b"h\n")]);
+    if other_ref {
+        create_ref(&repo, "release/x", chain[998]);
+    }
     drop(repo);
 
     let reads = Arc::new(ObjectReads::default());

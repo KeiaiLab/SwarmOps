@@ -133,18 +133,32 @@ impl TargetWalk {
         &mut self,
         read: &RepoRead<'_, O>,
         top: &StoredChangeset,
+        visit: impl FnMut(ChangesetId, &Walked) -> bool,
+    ) -> Result<(), RepoError> {
+        self.walk_from(read, top.id, Some(top), visit)
+    }
+
+    /// [`Self::walk`] from changeset `start`, whose object is `known` when the caller has read it:
+    /// otherwise it is read here, unless the walk kept it.
+    fn walk_from<O: ObjectStore>(
+        &mut self,
+        read: &RepoRead<'_, O>,
+        start: ChangesetId,
+        known: Option<&StoredChangeset>,
         mut visit: impl FnMut(ChangesetId, &Walked) -> bool,
     ) -> Result<(), RepoError> {
-        let mut at = Some(top.id);
+        let mut at = Some(start);
         while let Some(id) = at {
             if let Entry::Vacant(vacant) = self.walked.entry(id) {
-                let walked = if id == top.id {
-                    Walked::of(top)
-                } else {
+                let walked = match known {
+                    Some(top) if id == top.id => Walked::of(top),
+                    _ if id == start => Walked::of(&stored(read, id)?),
                     // A first parent of a changeset the snapshot holds: one it lacks is a
                     // damaged index.
-                    let stored = read.changeset(id)?.ok_or(StoreError::MissingParent(id))?;
-                    Walked::of(&stored)
+                    _ => {
+                        let stored = read.changeset(id)?.ok_or(StoreError::MissingParent(id))?;
+                        Walked::of(&stored)
+                    }
                 };
                 vacant.insert(walked);
             }
@@ -199,19 +213,20 @@ impl TargetWalk {
         theirs: &StoredChangeset,
     ) -> Result<Option<(String, ChangesetId)>, RepoError> {
         for (name, state) in read.list_refs()? {
-            // 1. Only the refs a land publishes to; the target was walked already.
-            let landable = matches!(
+            // 1. Not the target, walked already, nor a ref no land publishes to: a tag never
+            // moves and a remote-tracking ref only a fetch moves. Any other kind is walked.
+            let unlandable = matches!(
                 ref_kind(&name),
-                Some(RefKind::Main | RefKind::Release | RefKind::Branch)
+                Some(RefKind::Tag | RefKind::RemoteTracking)
             );
-            if name == target || !landable {
+            if name == target || unlandable {
                 continue;
             }
 
-            // 2. The ref's chain, down to the floor, for the key.
-            let top = stored(read, state.target)?;
+            // 2. The ref's chain, down to the floor, for the key; a head the walk kept is not
+            // read again.
             let mut hit = None;
-            self.walk(read, &top, |id, walked| {
+            self.walk_from(read, state.target, None, |id, walked| {
                 if walked.land_key.as_deref() != Some(key.as_bytes()) {
                     return true;
                 }

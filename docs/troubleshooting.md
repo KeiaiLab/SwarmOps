@@ -473,9 +473,9 @@ swarmops log -n 0
 A usage error of the command line is this code too, with the usage line as its hint. Other causes
 met in practice: a change list that is not a JSON array of changes (the hint gives an example, and
 `swarmops schema ChangeInput` the rest), a change that names by id a blob the store does not hold
-(the hint is `swarmops blob put <file>`), a `land --key` that landed another change, or landed on
-another ref, already (`details.target` names the ref; give each change and each target a key of
-its own), a `git export` to a branch checked out in a work tree
+(the hint is `swarmops blob put <file>`), a `land --key` whose key landed another change already,
+or landed on another ref (`details.target` names the ref; give each change and each target a key
+of its own), a `git export` to a branch checked out in a work tree
 ([Git export](#exporting-to-a-checked-out-branch)), and the
 [MCP server's own rules](#a-tool-call-fails-with-e_invalid_arg).
 
