@@ -135,7 +135,13 @@ The releases that get there:
 | v0.5.0 | Prove and measure | The pilot ran on a real repository of 993 commits, with condition 1's checks and condition 4's exercises recorded in [docs/pilot.md](pilot.md); G1 at 50 processes, G2 without syncs, G4 and G17 measured in [docs/perf.md](perf.md), met or not; the tests that read this host's repositories run in the Scheduled workflow; this section |
 | v0.6.0 | Fix what the measurements miss | G1, G2, G4 and G17 met in [docs/perf.md](perf.md); the benchmark gate (condition 3), pulled forward from M9, in CI. Candidates, chosen by the measurements: the landing retry model; incremental export, fetch, push and sync; batched journal syncs only if G2 justifies them, and no `--durability fast` without a measurement in [docs/perf.md](perf.md) |
 | v0.7.0 | M14 | Topology 1's acceptance criteria 1 to 5 pass in CI ([Topology 1](#topology-1-local-git-remote-swarmops)) |
-| v0.8.0 | Operations | The open soft findings triaged, none left touching data safety or the contract (condition 5); packages beyond the install script |
+| v0.8.0 | Safety and contract, first part | M15: 54 of 55 codes pinned, op ids an undo cannot redirect, a fetch that imports before it moves a tracking ref, `main` forward only, three workspace refusals, a land key scoped to the store, the land grant checked on each attempt; `.deb` and `.rpm` packages |
+| v0.9.0 | Safety and load | M16: condition 5's remaining core rows closed in scope; G4 re-measured with one lock pass per land (condition 2 if its p99 is under 500 ms) |
+| v0.10.0 | Serve under load | M17: G18–G23 measured; served reads off the writer lock; the first clone at most 2× git's own server |
+| v0.11.0 | Take back, workspaces | M18 and M19; group commit, one journal flush for several lands, if G4's p99 is still over 500 ms (condition 2) |
+
+SwarmOps is declared usable at the first release where all seven conditions hold; condition 6
+counts from the last release that shipped a data-safety fix.
 
 **Status (2026-10-29).** v0.7.0 is released: M14 serves topology 1 (condition 7), its criteria 1
 to 5 pass in `just check` and in the Scheduled run's git matrix, and G16 is met
@@ -159,10 +165,17 @@ Deferred past usable, with what stands in until then:
 
 | Milestone | Why it waits | Stand-in |
 | --- | --- | --- |
-| M7, blame and review | No condition needs it, and its annotations need a `FORMAT 3` | Review in GitHub pull requests (topology 2); `so log` and `so diff`; `git blame` on the export |
-| M9's simulator | No condition needs it; only the benchmark gate is pulled forward, into v0.6.0 | M6's literal `SIGKILL` test, power-loss images, crash sweeps and fuzz targets |
-| M11, native sync (topology 3) | No condition needs it, and it needs M14 and M9 first | Sync through a git remote, one writing host at a time ([Topology 3 today](#topology-3-today-local-swarmops-remote-swarmops)) |
+| M7, blame and review | No condition needs it, and its annotations need `FORMAT 3` (M20) | Review in GitHub pull requests (topology 2); `so log` and `so diff`; `git blame` on the export |
+| M9's simulator | No condition needs it; only the benchmark gate is pulled forward, into v0.6.0; it needs M20 | M6's literal `SIGKILL` test, power-loss images, crash sweeps and fuzz targets |
+| M11, native sync (topology 3) | No condition needs it, and it needs M14, M9 and M24 first | Sync through a git remote, one writing host at a time ([Topology 3 today](#topology-3-today-local-swarmops-remote-swarmops)) |
 | M12, macOS and Windows | The pilot and CI run on Linux | The Linux releases; M12 is developed separately |
+| M20, `FORMAT 3` | One layout decision serves M7's records, the queue, withdrawal, lineage and the manifest that takes compaction out of the write; its design comes first | `FORMAT 2`; compaction inside the write |
+| M21, health, drift and housekeeping | It reads the records M17 adds | `info`'s exit status; the counts in [docs/perf.md](perf.md) |
+| M22, the landing queue | Its checks are the gate M7 builds, on `FORMAT 3` | `ws land --check` in each process; the lock's own queue |
+| M23, withdrawal and erasure | Its records need `FORMAT 3` | None: unreachable objects are counted, not removed |
+| M24, rewriting with lineage | Its lineage id needs `FORMAT 3` | `rebase` and `op undo` |
+| M25, moving onto a store without a pause | It needs M17's serve path | Follow a git remote, then switch (M13) |
+| M26, an identity per agent from a short-lived credential | After 1.0, only when a pilot asks | ssh keys and web logins, one per identity |
 
 ## What the three share
 
@@ -615,20 +628,27 @@ Several upstreams merging with each other, partial replicas and a caching tier.
 
 ## Milestones
 
-Milestone ids are never renumbered. Two are new: M13 (topology 2) and M14 (topology 1); M11
-(topology 3) takes `so clone`, `so remote` and `so sync`.
+Milestone ids are never renumbered. M13 (topology 2) and M14 (topology 1) were added for the
+GitHub goal, M15 to M25 by the plan of 2026-11-05; M11 (topology 3) takes `so clone`,
+`so remote` and `so sync`.
 
 **Settled:** M0 to M4 and M8 are delivered, in v0.1.0, M13 in v0.2.0, M5 in v0.3.0, M6 in
-v0.4.0 and M14 in v0.7.0, ahead of M12, which is developed separately.
-**Provisional:** after M6 the order follows [To usable](#to-usable): v0.5.0 and v0.6.0 prove and
-fix, M14 is v0.7.0, and M7, M9's simulator, M11 and M12 wait until SwarmOps is usable; the order
-below is the plan:
+v0.4.0, M14 in v0.7.0 and M15 on `stable` for v0.8.0, ahead of M12, which is developed separately.
+**Provisional:** after M15 the order follows [To usable](#to-usable): M16 closes condition 5
+and measures condition 2, M17 serves under load, M18 and M19 need no new format, one `FORMAT 3` (M20)
+then serves review, the queue, withdrawal and lineage, and topology 3 stays after the simulator;
+the order below is the plan:
 
 ```text
-order   M12 → M13 → M5 → M6 → M14 → M7 → M9 → M11
+order   M13 → M5 → M6 → M14 → M15 → M16 → M17 → M18 ∥ M19 → M20 ∥ M21 → M7 → M22 ∥ M23
+        → M9 → M11 ∥ M24 → M25
+        M12 apart, developed separately; M26 after 1.0, if a pilot asks
 needs   M13  ← M3, M4, M8                 packs, the mirror, the sync engine
         M14  ← M13, M6                    FORMAT 2: branch names and tags
-        M11  ← M13, M14, M6, M7, M9       the sync engine, the server entry, the simulator
+        M20  ← its design                 the manifest, record kinds
+        M7   ← M20                        annotations, check results
+        M22  ← M7, M20                    the gate's checks, queue entries
+        M11  ← M9, M7, M13, M14, M24      the simulator, approvals, lineage
 ```
 
 | Milestone | Topology | Deliverable | Depends on | Exit criteria |
@@ -639,13 +659,26 @@ needs   M13  ← M3, M4, M8                 packs, the mirror, the sync engine
 | ✅ M5 | — | Workspaces, with an adapter for Claude Code's worktree hooks; `rebase`, `land --expect-target`, `blob get`; eleven MCP workspace tools; v0.3.0 | M4 | As the README states it (delivered: [CHANGELOG](../CHANGELOG.md)) |
 | ✅ M6 | 1, 3 | Verify, crash safety, fuzzing, gc, and FORMAT 2 with the ref names M11 and M14 need (remote-tracking refs, branches, tags); gc keeps what the mirror's refs reach; v0.4.0 | | As the README states it, plus a FORMAT 2 store holding a free-form branch and a tag (delivered: [CHANGELOG](../CHANGELOG.md)) |
 | ✅ M14 | 1 | `swarmops serve` over ssh and CGI; upload-pack and receive-pack; `refs/land/`; the access file; v0.7.0 | M13, M6 | Topology 1's acceptance criteria 1 to 5 pass (delivered: [CHANGELOG](../CHANGELOG.md)) |
-| 📋 M7 | — | Blame and review | A `FORMAT 3` (annotations, a new record kind) | As the README states it |
-| 📋 M9 | — | Simulation and a benchmark gate | | As the README states it |
-| 📋 M11 | 3 | Native sync over `so://`, extending M13's sync engine and M14's entry | M3, M4, M6, M7, M8, M9, M13, M14 | Topology 3's acceptance criteria 1 to 3 pass |
+| ✅ M15 | — | Safety and contract: codes pinned, op ids, fetch integrity, `main` forward only, workspace refusals, land keys; v0.8.0 | M14 | Its twelve rows' acceptance in scope |
+| 📋 M16 | — | Safety and load: no-follow workspace writes, kill tests for readers and ref moves, sync and import forward only, one lock pass per land, `ancestry`, the land key under the lock, refusal inside the quarantine | M15 | The M16 plan's acceptance; G4 re-measured |
+| 📋 M17 | 1 | Serve under load: reads off the writer lock, history prepared at land and import, one pack per identical read, pushes in bounded memory, records per request, a differential suite against git's own server | M16 | G18–G23 measured, G19, G20, G22 met |
+| 📋 M18 | — | Take back and stay current: revert, `ref log`, the first sync after a clone, conflict attribution, group commit if needed | M16 | 55 of 55 codes pinned; first sync < 1 s on 12,000 commits |
+| 📋 M19 | — | Workspaces, second round: stale workspaces everywhere, edit snapshots, the update's latency | M16 | G9's misses met |
+| 📋 M20 | — | `FORMAT 3`: the sorted views under a manifest, the new record kinds, `upgrade` | its design | G18 at 1,000,000 records |
+| 📋 M21 | — | Health, drift and housekeeping | M17 | G24 |
+| 📋 M7 | — | Blame and review | M20 (`FORMAT 3`) | As the README states it |
+| 📋 M22 | — | The landing queue | M7, M20 | Queue durable; checks never under the lock |
+| 📋 M23 | — | Withdrawal and erasure | M20 | Every id kept |
+| 📋 M9 | — | Simulation and a benchmark gate | M20 | As the README states it |
+| 📋 M11 | 3 | Native sync over `so://`, extending M13's sync engine and M14's entry | M3, M4, M6, M7, M8, M9, M13, M14, M24 | Topology 3's acceptance criteria 1 to 3 pass |
+| 📋 M24 | 3 | Rewriting with lineage | M20 | Lineage kept through every rewrite and upstream land |
+| 📋 M25 | 1, 2 | Moving onto a store without a pause: pushes passed on while following, archives | M17 | The switch recorded; archives byte-identical |
 
-Why this order: topology 2 is what a team on GitHub needs first, and it needs no new `FORMAT`, so
-M13 comes right after portability. Topology 1 needs branch names and tags, so M14 follows M6.
-Topology 3 needs the simulator for its tests, so M11 stays last. The pilot may move any of these.
+Why this order: data safety and G4 come first (conditions 5 and 2). Serving under load follows,
+because topology 1's reads queue behind lands today and its first clone is the largest measured
+cost. The take-back and workspace rows need no new format and come next. One `FORMAT 3` then
+serves review, the queue, withdrawal and lineage at once. Topology 3 needs the simulator, so it
+stays after M9. The pilot may move any of these.
 
 ## Open items of the delivered and planned milestones
 

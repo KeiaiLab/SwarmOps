@@ -566,7 +566,7 @@ design, acceptance criteria and targets. Command names of planned work are provi
 | 2. Local SwarmOps, remote GitHub | ✅ M13: `so clone https://github.com/…`, `so fetch`, `so push`, `so sync`, with no hand-run git ([GitHub as a remote](docs/guides/github-remote.md)) | Opening pull requests from SwarmOps |
 | 3. Local SwarmOps, remote SwarmOps | Through a git remote, one writing host at a time (M8) | M11: `so clone so://host/…` and `so sync`, offline-first |
 
-The milestones of the umbrella spec (§13), in the order they are built. ✅ delivered · 📋 planned.
+The milestones, in the order they are built. ✅ delivered · 📋 planned.
 
 | Status | Milestone | Scope |
 | --- | --- | --- |
@@ -583,9 +583,16 @@ The milestones of the umbrella spec (§13), in the order they are built. ✅ del
 | ✅ | M5 | Workspaces, with an adapter for Claude Code's worktree hooks, so that an agent builds and tests a change on disk before it lands it: `so ws`, `rebase`, `land --expect-target`, `blob get` and eleven MCP workspace tools. |
 | ✅ | M6 | Verify, crash safety and fuzzing: `repair`, `gc`, detection of unsupported filesystems by `statfs`, bounded reads of store files, a capped `verify` report, a literal `SIGKILL` test, four more fuzz targets, and store `FORMAT 2`, with branch names, tags and remote-tracking refs, and `upgrade` to it. |
 | ✅ | M14 | Git clients against a store (topology 1): `swarmops serve` over ssh and HTTP, run per connection; pushes by compare-and-swap or that land; access control (`access.toml`, `E_AUTH`, `E_POLICY_DENIED`). |
+| ✅ | M15 | Safety and contract: 54 of 55 error codes pinned, operation ids an undo cannot redirect, a fetch that imports before it moves a tracking ref, `main` moved forward only, three workspace refusals, land keys scoped to the store and checked on each attempt. |
+| 📋 | M16 | Safety and load: the remaining data-safety rows, one lock pass per land, G4 re-measured. |
+| 📋 | M17 | Serve under load: served reads off the writer lock, history prepared when it lands, one pack per identical read, pushes checked in bounded memory, a differential suite against git's own server. |
+| 📋 | M18, M19 | Take back and stay current (revert, `ref log`, a fast first sync); workspaces, second round. |
+| 📋 | M20, M21 | Store `FORMAT 3` (a manifest, new record kinds); health, drift and housekeeping. |
 | 📋 | M7 | Blame and review. |
+| 📋 | M22, M23 | The landing queue; withdrawal and erasure. |
 | 📋 | M9 | Simulation and a benchmark gate: the store's own code under a deterministic simulator and in real processes killed at random, and benchmarks that fail on a regression. |
-| 📋 | M11 | Remote sync, offline-first (topology 3): a full store on every host, `so clone so://…`, `fetch`, `push`, `sync` and `sync status` against one upstream, over ssh. |
+| 📋 | M11, M24 | Remote sync, offline-first (topology 3): a full store on every host, `so clone so://…`, `fetch`, `push`, `sync` and `sync status` against one upstream, over ssh; rewriting with lineage. |
+| 📋 | M25 | Moving onto a store without a pause. |
 
 M0, M1, M1.5, M1.6, M2, M3, M4 and M8 make the first release, 0.1.0, together with the security
 fixes in its [changelog](CHANGELOG.md), an [operations guide](docs/operations.md) and a
@@ -609,7 +616,8 @@ measured and met; a benchmark gate in CI fails a regression of more than 20 %; b
 `repair` and the rollback to git are exercised in that pilot; no open soft finding touches data
 safety or the contract; two releases in a row ship no data-safety fix; and, for teams without
 GitHub, M14. v0.5.0 runs the pilot and the measurements, v0.6.0 fixes what they miss, v0.7.0 is
-M14 and v0.8.0 is operations. M7, M9's simulator, M11 and M12 wait until then.
+M14, v0.8.0 is M15, v0.9.0 M16, v0.10.0 M17 and v0.11.0 M18 and M19. M7, M9's simulator, M11
+and M12 wait until then.
 
 When it is usable (umbrella spec §1): by one agent from M1; by a swarm, landing through MCP,
 from M4; on an existing git repository, its history imported and its landed work exported back
