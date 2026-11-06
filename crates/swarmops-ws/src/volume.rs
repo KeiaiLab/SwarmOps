@@ -39,29 +39,29 @@ pub fn probe(host: &dyn HostFs, swarmws: &Utf8Path) -> io::Result<Volume> {
     // 1. Leftovers of a killed probe out of the way.
     let file = swarmws.join(PROBE);
     let link = swarmws.join(PROBE_LINK);
-    remove_if_there(host, &link)?;
-    remove_if_there(host, &file)?;
+    remove_if_there(host, swarmws, PROBE_LINK)?;
+    remove_if_there(host, swarmws, PROBE)?;
 
     // 2. Case: the file, looked up by another case.
-    host.write_file(&file, b"probe")?;
+    host.write_file(swarmws, PROBE, b"probe")?;
     let case_insensitive = host.symlink_metadata(&swarmws.join(PROBE_UPPER))?.is_some();
 
     // 3. The executable bit, set and read back; Windows has none.
     let exec_bit = cfg!(unix) && {
-        host.set_mode(&file, EXEC_MODE)?;
+        host.set_mode(swarmws, PROBE, EXEC_MODE)?;
         let meta = host.symlink_metadata(&file)?;
         meta.is_some_and(|meta| meta.mode & EXEC_BITS == EXEC_BITS)
     };
 
     // 4. Symlinks: one made, and seen to be one; Windows without the privilege makes none.
-    let symlinks = host.symlink(PROBE, &link).is_ok()
+    let symlinks = host.symlink(swarmws, PROBE_LINK, PROBE).is_ok()
         && host
             .symlink_metadata(&link)?
             .is_some_and(|meta| meta.kind == HostKind::Symlink);
 
     // 5. The probe's files gone.
-    remove_if_there(host, &link)?;
-    remove_if_there(host, &file)?;
+    remove_if_there(host, swarmws, PROBE_LINK)?;
+    remove_if_there(host, swarmws, PROBE)?;
     Ok(Volume {
         case_insensitive,
         exec_bit,
@@ -69,9 +69,9 @@ pub fn probe(host: &dyn HostFs, swarmws: &Utf8Path) -> io::Result<Volume> {
     })
 }
 
-/// Removes the file or symlink at `path` if one is there.
-fn remove_if_there(host: &dyn HostFs, path: &Utf8Path) -> io::Result<()> {
-    match host.remove_file(path) {
+/// Removes the file or symlink `name` in `swarmws` if one is there.
+fn remove_if_there(host: &dyn HostFs, swarmws: &Utf8Path, name: &str) -> io::Result<()> {
+    match host.remove_file(swarmws, name) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
     }

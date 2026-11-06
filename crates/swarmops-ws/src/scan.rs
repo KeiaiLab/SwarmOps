@@ -725,11 +725,11 @@ mod tests {
     }
 
     impl HostFs for SlowReads {
-        fn write_file(&self, path: &Utf8Path, bytes: &[u8]) -> io::Result<()> {
-            RealHost.write_file(path, bytes)
+        fn write_file(&self, root: &Utf8Path, rel: &str, bytes: &[u8]) -> io::Result<()> {
+            RealHost.write_file(root, rel, bytes)
         }
-        fn symlink(&self, target: &str, path: &Utf8Path) -> io::Result<()> {
-            RealHost.symlink(target, path)
+        fn symlink(&self, root: &Utf8Path, rel: &str, target: &str) -> io::Result<()> {
+            RealHost.symlink(root, rel, target)
         }
         fn symlink_metadata(&self, path: &Utf8Path) -> io::Result<Option<HostMeta>> {
             RealHost.symlink_metadata(path)
@@ -746,23 +746,23 @@ mod tests {
         fn read_dir(&self, path: &Utf8Path) -> io::Result<Vec<String>> {
             RealHost.read_dir(path)
         }
-        fn remove_file(&self, path: &Utf8Path) -> io::Result<()> {
-            RealHost.remove_file(path)
+        fn remove_file(&self, root: &Utf8Path, rel: &str) -> io::Result<()> {
+            RealHost.remove_file(root, rel)
         }
-        fn remove_dir_if_empty(&self, path: &Utf8Path) -> io::Result<bool> {
-            RealHost.remove_dir_if_empty(path)
+        fn remove_dir_if_empty(&self, root: &Utf8Path, rel: &str) -> io::Result<bool> {
+            RealHost.remove_dir_if_empty(root, rel)
         }
-        fn create_dir_all(&self, path: &Utf8Path) -> io::Result<()> {
-            RealHost.create_dir_all(path)
+        fn create_dir_all(&self, root: &Utf8Path, rel: &str) -> io::Result<()> {
+            RealHost.create_dir_all(root, rel)
         }
-        fn rename(&self, from: &Utf8Path, to: &Utf8Path) -> io::Result<()> {
-            RealHost.rename(from, to)
+        fn rename(&self, root: &Utf8Path, from: &str, to: &str) -> io::Result<()> {
+            RealHost.rename(root, from, to)
         }
         fn read_link(&self, path: &Utf8Path) -> io::Result<String> {
             RealHost.read_link(path)
         }
-        fn set_mode(&self, path: &Utf8Path, mode: u32) -> io::Result<()> {
-            RealHost.set_mode(path, mode)
+        fn set_mode(&self, root: &Utf8Path, rel: &str, mode: u32) -> io::Result<()> {
+            RealHost.set_mode(root, rel, mode)
         }
     }
 

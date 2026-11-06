@@ -14,12 +14,12 @@
 use std::io;
 use std::sync::Arc;
 
-use camino::Utf8Path;
+use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::{Map, Value};
 use swarmops_api::{ErrorCode, OpError, StatusAfter, WsCommitReq, WsDeleteReq, WsDeleteResp};
 use swarmops_store::FsMethod;
 
-use crate::hostfs::{HostFs, HostKind};
+use crate::hostfs::{self, HostFs, HostKind};
 use crate::lock::LOCK_FILE;
 use crate::materialize;
 use crate::registry::Registry;
@@ -28,6 +28,9 @@ use crate::state::{self, SWARMWS_DIR, WORKSPACE_JSON};
 use crate::status;
 use crate::workspace::{self, Locate};
 use crate::{Ctx, commit, io_error};
+
+/// The path below the workspace's directory that names the directory itself.
+const ROOT: &str = "";
 
 /// The message of a rescue changeset of workspace `name`.
 pub(crate) fn rescue_message(name: &str) -> String {
@@ -77,8 +80,8 @@ pub fn delete(ctx: &Ctx<'_>, req: WsDeleteReq) -> Result<WsDeleteResp, OpError> 
     let host = ctx.host.as_ref();
     let swarmws = ws.dir.join(SWARMWS_DIR);
     let keep = [SWARMWS_DIR];
-    remove_below(host, &ws.dir, &keep)?;
-    remove_below(host, &swarmws, &[WORKSPACE_JSON, LOCK_FILE])?;
+    remove_below(host, &ws.dir, ROOT, &keep)?;
+    remove_below(host, &ws.dir, SWARMWS_DIR, &[WORKSPACE_JSON, LOCK_FILE])?;
     let state_file = state::path_in(&ws.dir);
     (ctx.fs.remove(state_file.as_std_path()))
         .map_err(|e| io_error::io_failed(FsMethod::Remove, &shown(WORKSPACE_JSON), &e))?;
@@ -87,8 +90,8 @@ pub fn delete(ctx: &Ctx<'_>, req: WsDeleteReq) -> Result<WsDeleteResp, OpError> 
 
     // 5. The lock dropped, then what is left of the directory, then the entry (WS4).
     drop(held);
-    remove_below(host, &ws.dir, &[])?;
-    remove_dir(host, &ws.dir)?;
+    remove_below(host, &ws.dir, ROOT, &[])?;
+    remove_root(host, &ws.dir)?;
     Registry::open(&ctx.store_root, Arc::clone(&ctx.fs)).delete(&name)?;
     let mut out = WsDeleteResp::new(name, ws.file.head);
     out.rescued = rescued;
@@ -122,8 +125,8 @@ fn orphan(ctx: &Ctx<'_>, name: &str, gone: OpError) -> Result<WsDeleteResp, OpEr
     let dir = Utf8Path::new(&entry.path);
     match host.read_dir(dir) {
         Ok(names) if names.iter().all(|n| n == SWARMWS_DIR) => {
-            remove_below(host, dir, &[])?;
-            remove_dir(host, dir)?;
+            remove_below(host, dir, ROOT, &[])?;
+            remove_root(host, dir)?;
         }
         Ok(_) => return Err(gone),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -135,10 +138,16 @@ fn orphan(ctx: &Ctx<'_>, name: &str, gone: OpError) -> Result<WsDeleteResp, OpEr
     Ok(WsDeleteResp::new(name.to_owned(), String::new()))
 }
 
-/// Removes everything below directory `dir` but the names `keep` directly in it; a symlink is
-/// removed, never followed.
-fn remove_below(host: &dyn HostFs, dir: &Utf8Path, keep: &[&str]) -> Result<(), OpError> {
-    let names = match host.read_dir(dir) {
+/// Removes everything below directory `rel` of `root` (the root itself for [`ROOT`]) but the
+/// names `keep` directly in it; a symlink is removed, never followed.
+fn remove_below(
+    host: &dyn HostFs,
+    root: &Utf8Path,
+    rel: &str,
+    keep: &[&str],
+) -> Result<(), OpError> {
+    let dir = full(root, rel);
+    let names = match host.read_dir(&dir) {
         Ok(names) => names,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(materialize::host_failed(dir.as_str(), &e)),
@@ -147,29 +156,54 @@ fn remove_below(host: &dyn HostFs, dir: &Utf8Path, keep: &[&str]) -> Result<(), 
         if keep.contains(&name.as_str()) {
             continue;
         }
-        remove_all(host, &dir.join(name))?;
+        let below = if rel == ROOT {
+            name
+        } else {
+            format!("{rel}/{name}")
+        };
+        remove_all(host, root, &below)?;
     }
     Ok(())
 }
 
-/// Removes `path` and, when it is a directory (not a symlink to one), everything below it.
-fn remove_all(host: &dyn HostFs, path: &Utf8Path) -> Result<(), OpError> {
+/// Removes `rel` below `root` and, when it is a directory (not a symlink to one), everything
+/// below it.
+fn remove_all(host: &dyn HostFs, root: &Utf8Path, rel: &str) -> Result<(), OpError> {
+    let path = full(root, rel);
     let meta =
-        (host.symlink_metadata(path)).map_err(|e| materialize::host_failed(path.as_str(), &e))?;
+        (host.symlink_metadata(&path)).map_err(|e| materialize::host_failed(path.as_str(), &e))?;
     let Some(meta) = meta else {
         return Ok(());
     };
     if meta.kind != HostKind::Dir {
-        return (host.remove_file(path)).map_err(|e| materialize::host_failed(path.as_str(), &e));
+        return (host.remove_file(root, rel))
+            .map_err(|e| materialize::host_failed(path.as_str(), &e));
     }
-    remove_below(host, path, &[])?;
-    remove_dir(host, path)
+    remove_below(host, root, rel, &[])?;
+    remove_dir(host, root, rel)
 }
 
-/// Removes the directory at `path`, emptied before: `E_IO` when something was put in it
-/// meanwhile.
-fn remove_dir(host: &dyn HostFs, path: &Utf8Path) -> Result<(), OpError> {
-    match host.remove_dir_if_empty(path) {
+/// Removes the workspace's directory `dir` itself, emptied before, from its parent.
+fn remove_root(host: &dyn HostFs, dir: &Utf8Path) -> Result<(), OpError> {
+    let (parent, name) =
+        hostfs::split_root(dir).map_err(|e| materialize::host_failed(dir.as_str(), &e))?;
+    remove_dir(host, parent, name)
+}
+
+/// `rel` below `root`, the root itself for [`ROOT`].
+fn full(root: &Utf8Path, rel: &str) -> Utf8PathBuf {
+    if rel == ROOT {
+        root.to_owned()
+    } else {
+        root.join(rel)
+    }
+}
+
+/// Removes the directory `rel` below `root`, emptied before: `E_IO` when something was put in
+/// it meanwhile.
+fn remove_dir(host: &dyn HostFs, root: &Utf8Path, rel: &str) -> Result<(), OpError> {
+    let path = full(root, rel);
+    match host.remove_dir_if_empty(root, rel) {
         Ok(true) => Ok(()),
         Ok(false) => Err(OpError::new(
             ErrorCode::Io,

@@ -698,7 +698,7 @@ Kind: enumeration. `swarmops schema ErrorCode` prints its JSON Schema.
 | `"E_WS_EXISTS"` | `ws create` found a workspace of that name already, made by other arguments (`details.name`, `details.path` of the existing one). |
 | `"E_WS_NOT_FOUND"` | No workspace by that name, or at that path (`details.name` when named). |
 | `"E_WS_LOCKED"` | Another mutation held the workspace's lock for the whole wait (`details.holder`, when it is known); running the operation again can succeed. |
-| `"E_WS_DIRTY"` | The workspace holds edits the operation would overwrite or lose (`details.paths`, the first 20); the hint names the command that commits or discards them. |
+| `"E_WS_DIRTY"` | The workspace holds edits the operation would overwrite or lose (`details.paths`, the first 20); the hint names the command that commits or discards them. Also a directory or file below the workspace's root that became a symlink, a file of more than one link, or a non-directory after the check, before a write through it (`details.paths` names it): nothing is written outside the workspace. |
 | `"E_PATH_NOT_EMPTY"` | `ws create` was given a directory that holds something already (`details.path`). |
 | `"E_UNRESOLVED_CONFLICTS"` | A rebase still has conflicting paths no one resolved (`details.paths`). |
 | `"E_MARKERS_PRESENT"` | `ws resolve` found a conflict marker line still in a file (`details.paths`). |

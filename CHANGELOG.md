@@ -244,6 +244,15 @@ collects the changes on `stable` that no release holds yet, until the next relea
   to `src/lib`). A path the chain added and the edits `-m` commits then delete or rename is no
   new path of the land, nor is a path the chain deleted and the edits add back
   ([Troubleshooting](docs/troubleshooting.md#e_ws_unportable)).
+- On Unix a workspace's tree is written from its root without following a link below it. A
+  directory or file swapped for a symlink (or a file hard-linked elsewhere) after the check and
+  before a write through it was written through: `ws materialize`, `ws rebase` and `ws land` could
+  write outside the workspace or change an outside file's mode. Such a write is now refused with
+  `E_WS_DIRTY` naming the swapped path, and nothing outside changes; its hint says to move the
+  path aside. Until then every command on the workspace answers the same, and the first one after
+  finishes the interrupted update. A directory that cannot be opened is `E_IO` whose
+  `details.path` names the directory, no longer the file below it. Windows and the other targets
+  still write by full path ([Known limitations](docs/known-limitations.md)).
 
 ## [0.7.0] - 2026-10-29
 

@@ -161,14 +161,15 @@ fn copy_included(ctx: &Ctx<'_>, ws: &Workspace, from: &Utf8Path) -> Result<(), O
 
     // 3. Each copied, its directories made, its permission bits kept.
     for copy in copies {
-        let dest = ws.dir.join(&copy.rel);
-        if let Some(parent) = dest.parent() {
-            (host.create_dir_all(parent)).map_err(|e| materialize::host_failed(&copy.rel, &e))?;
+        let rel = copy.rel.as_str();
+        if let Some((parent, _)) = rel.rsplit_once('/') {
+            (host.create_dir_all(&ws.dir, parent))
+                .map_err(|e| materialize::host_failed(rel, &e))?;
         }
-        let content = (host.read_file(&from.join(&copy.rel)))
-            .map_err(|e| materialize::host_failed(&copy.rel, &e))?;
-        (host.write_file(&dest, &content)).map_err(|e| materialize::host_failed(&copy.rel, &e))?;
-        (host.set_mode(&dest, copy.mode)).map_err(|e| materialize::host_failed(&copy.rel, &e))?;
+        let content =
+            (host.read_file(&from.join(rel))).map_err(|e| materialize::host_failed(rel, &e))?;
+        (host.write_file(&ws.dir, rel, &content)).map_err(|e| materialize::host_failed(rel, &e))?;
+        (host.set_mode(&ws.dir, rel, copy.mode)).map_err(|e| materialize::host_failed(rel, &e))?;
     }
     Ok(())
 }

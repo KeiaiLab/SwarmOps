@@ -22,10 +22,10 @@ use serde_json::{Map, Value};
 use swarmops_api::{ErrorCode, InfoReq, OpError, ResolveRevReq, RevKind, WsCreateReq, WsInfo};
 use swarmops_store::FsMethod;
 
-use crate::hostfs::HostFs;
+use crate::hostfs::{self, HostFs};
 use crate::list;
 use crate::materialize::{self, Start};
-use crate::pending::{self, Intent};
+use crate::pending::{self, Intent, JOURNAL_DIR};
 use crate::registry::{ENTRY_FORMAT, Entry, Linked, Registry};
 use crate::state::{self, SWARMWS_DIR, State, WORKSPACE_FORMAT, WorkspaceFile};
 use crate::workspace::{self, Locate, Workspace};
@@ -208,17 +208,17 @@ fn undo(
     linked: &Linked,
     name: &str,
 ) -> Result<(), OpError> {
-    // 1. The directories, if empty.
+    // 1. The directories, if empty: the workspace's own from its parent.
     let host = ctx.host.as_ref();
-    let swarmws = dir.join(SWARMWS_DIR);
-    for (path, shown) in [
-        (pending::journal_in(dir), SWARMWS_DIR),
-        (swarmws.clone(), SWARMWS_DIR),
-    ] {
-        (host.remove_dir_if_empty(&path)).map_err(|e| materialize::host_failed(shown, &e))?;
+    let journal = format!("{SWARMWS_DIR}/{JOURNAL_DIR}");
+    for rel in [journal.as_str(), SWARMWS_DIR] {
+        (host.remove_dir_if_empty(dir, rel))
+            .map_err(|e| materialize::host_failed(SWARMWS_DIR, &e))?;
     }
     if made_dir {
-        (host.remove_dir_if_empty(dir)).map_err(|e| materialize::host_failed(".", &e))?;
+        let (parent, name) =
+            hostfs::split_root(dir).map_err(|e| materialize::host_failed(".", &e))?;
+        (host.remove_dir_if_empty(parent, name)).map_err(|e| materialize::host_failed(".", &e))?;
     }
 
     // 2. The entry, if this create made it.

@@ -189,12 +189,12 @@ impl EditAfterRead {
 }
 
 impl HostFs for EditAfterRead {
-    fn write_file(&self, path: &Utf8Path, bytes: &[u8]) -> io::Result<()> {
-        self.inner.write_file(path, bytes)
+    fn write_file(&self, root: &Utf8Path, rel: &str, bytes: &[u8]) -> io::Result<()> {
+        self.inner.write_file(root, rel, bytes)
     }
 
-    fn symlink(&self, target: &str, path: &Utf8Path) -> io::Result<()> {
-        self.inner.symlink(target, path)
+    fn symlink(&self, root: &Utf8Path, rel: &str, target: &str) -> io::Result<()> {
+        self.inner.symlink(root, rel, target)
     }
 
     fn symlink_metadata(&self, path: &Utf8Path) -> io::Result<Option<HostMeta>> {
@@ -214,28 +214,28 @@ impl HostFs for EditAfterRead {
         self.inner.read_dir(path)
     }
 
-    fn remove_file(&self, path: &Utf8Path) -> io::Result<()> {
-        self.inner.remove_file(path)
+    fn remove_file(&self, root: &Utf8Path, rel: &str) -> io::Result<()> {
+        self.inner.remove_file(root, rel)
     }
 
-    fn remove_dir_if_empty(&self, path: &Utf8Path) -> io::Result<bool> {
-        self.inner.remove_dir_if_empty(path)
+    fn remove_dir_if_empty(&self, root: &Utf8Path, rel: &str) -> io::Result<bool> {
+        self.inner.remove_dir_if_empty(root, rel)
     }
 
-    fn create_dir_all(&self, path: &Utf8Path) -> io::Result<()> {
-        self.inner.create_dir_all(path)
+    fn create_dir_all(&self, root: &Utf8Path, rel: &str) -> io::Result<()> {
+        self.inner.create_dir_all(root, rel)
     }
 
-    fn rename(&self, from: &Utf8Path, to: &Utf8Path) -> io::Result<()> {
-        self.inner.rename(from, to)
+    fn rename(&self, root: &Utf8Path, from: &str, to: &str) -> io::Result<()> {
+        self.inner.rename(root, from, to)
     }
 
     fn read_link(&self, path: &Utf8Path) -> io::Result<String> {
         self.inner.read_link(path)
     }
 
-    fn set_mode(&self, path: &Utf8Path, mode: u32) -> io::Result<()> {
-        self.inner.set_mode(path, mode)
+    fn set_mode(&self, root: &Utf8Path, rel: &str, mode: u32) -> io::Result<()> {
+        self.inner.set_mode(root, rel, mode)
     }
 }
 
@@ -1056,12 +1056,12 @@ fn folded(path: &Utf8Path) -> Utf8PathBuf {
 }
 
 impl HostFs for FoldingHost {
-    fn write_file(&self, path: &Utf8Path, bytes: &[u8]) -> io::Result<()> {
-        self.inner.write_file(path, bytes)
+    fn write_file(&self, root: &Utf8Path, rel: &str, bytes: &[u8]) -> io::Result<()> {
+        self.inner.write_file(root, rel, bytes)
     }
 
-    fn symlink(&self, target: &str, path: &Utf8Path) -> io::Result<()> {
-        self.inner.symlink(target, path)
+    fn symlink(&self, root: &Utf8Path, rel: &str, target: &str) -> io::Result<()> {
+        self.inner.symlink(root, rel, target)
     }
 
     fn symlink_metadata(&self, path: &Utf8Path) -> io::Result<Option<HostMeta>> {
@@ -1076,28 +1076,28 @@ impl HostFs for FoldingHost {
         self.inner.read_dir(path)
     }
 
-    fn remove_file(&self, path: &Utf8Path) -> io::Result<()> {
-        self.inner.remove_file(path)
+    fn remove_file(&self, root: &Utf8Path, rel: &str) -> io::Result<()> {
+        self.inner.remove_file(root, rel)
     }
 
-    fn remove_dir_if_empty(&self, path: &Utf8Path) -> io::Result<bool> {
-        self.inner.remove_dir_if_empty(path)
+    fn remove_dir_if_empty(&self, root: &Utf8Path, rel: &str) -> io::Result<bool> {
+        self.inner.remove_dir_if_empty(root, rel)
     }
 
-    fn create_dir_all(&self, path: &Utf8Path) -> io::Result<()> {
-        self.inner.create_dir_all(path)
+    fn create_dir_all(&self, root: &Utf8Path, rel: &str) -> io::Result<()> {
+        self.inner.create_dir_all(root, rel)
     }
 
-    fn rename(&self, from: &Utf8Path, to: &Utf8Path) -> io::Result<()> {
-        self.inner.rename(from, to)
+    fn rename(&self, root: &Utf8Path, from: &str, to: &str) -> io::Result<()> {
+        self.inner.rename(root, from, to)
     }
 
     fn read_link(&self, path: &Utf8Path) -> io::Result<String> {
         self.inner.read_link(path)
     }
 
-    fn set_mode(&self, path: &Utf8Path, mode: u32) -> io::Result<()> {
-        self.inner.set_mode(path, mode)
+    fn set_mode(&self, root: &Utf8Path, rel: &str, mode: u32) -> io::Result<()> {
+        self.inner.set_mode(root, rel, mode)
     }
 }
 

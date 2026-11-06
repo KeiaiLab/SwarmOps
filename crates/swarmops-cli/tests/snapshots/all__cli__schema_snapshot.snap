@@ -3079,7 +3079,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_WS_DIRTY",
-          "description": "The workspace holds edits the operation would overwrite or lose (`details.paths`, the\nfirst 20); the hint names the command that commits or discards them.",
+          "description": "The workspace holds edits the operation would overwrite or lose (`details.paths`, the\nfirst 20); the hint names the command that commits or discards them. Also a directory or\nfile below the workspace's root that became a symlink, a file of more than one link, or\na non-directory after the check, before a write through it (`details.paths` names it):\nnothing is written outside the workspace.",
           "type": "string"
         },
         {
