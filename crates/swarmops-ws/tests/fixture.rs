@@ -968,14 +968,14 @@ pub mod sweep {
     }
 
     impl HostFs for TraceHost {
-        fn write_file(&self, path: &Utf8Path, bytes: &[u8]) -> io::Result<()> {
-            self.note("write_file", path)?;
-            self.inner.write_file(path, bytes)
+        fn write_file(&self, root: &Utf8Path, rel: &str, bytes: &[u8]) -> io::Result<()> {
+            self.note("write_file", &root.join(rel))?;
+            self.inner.write_file(root, rel, bytes)
         }
 
-        fn symlink(&self, target: &str, path: &Utf8Path) -> io::Result<()> {
-            self.note("symlink", path)?;
-            self.inner.symlink(target, path)
+        fn symlink(&self, root: &Utf8Path, rel: &str, target: &str) -> io::Result<()> {
+            self.note("symlink", &root.join(rel))?;
+            self.inner.symlink(root, rel, target)
         }
 
         fn symlink_metadata(&self, path: &Utf8Path) -> io::Result<Option<HostMeta>> {
@@ -990,31 +990,31 @@ pub mod sweep {
             self.inner.read_dir(path)
         }
 
-        fn remove_file(&self, path: &Utf8Path) -> io::Result<()> {
-            self.note("remove_file", path)?;
-            self.inner.remove_file(path)
+        fn remove_file(&self, root: &Utf8Path, rel: &str) -> io::Result<()> {
+            self.note("remove_file", &root.join(rel))?;
+            self.inner.remove_file(root, rel)
         }
 
-        fn remove_dir_if_empty(&self, path: &Utf8Path) -> io::Result<bool> {
-            self.inner.remove_dir_if_empty(path)
+        fn remove_dir_if_empty(&self, root: &Utf8Path, rel: &str) -> io::Result<bool> {
+            self.inner.remove_dir_if_empty(root, rel)
         }
 
-        fn create_dir_all(&self, path: &Utf8Path) -> io::Result<()> {
-            self.inner.create_dir_all(path)
+        fn create_dir_all(&self, root: &Utf8Path, rel: &str) -> io::Result<()> {
+            self.inner.create_dir_all(root, rel)
         }
 
-        fn rename(&self, from: &Utf8Path, to: &Utf8Path) -> io::Result<()> {
-            self.note("rename", to)?;
-            self.inner.rename(from, to)
+        fn rename(&self, root: &Utf8Path, from: &str, to: &str) -> io::Result<()> {
+            self.note("rename", &root.join(to))?;
+            self.inner.rename(root, from, to)
         }
 
         fn read_link(&self, path: &Utf8Path) -> io::Result<String> {
             self.inner.read_link(path)
         }
 
-        fn set_mode(&self, path: &Utf8Path, mode: u32) -> io::Result<()> {
-            self.note("set_mode", path)?;
-            self.inner.set_mode(path, mode)
+        fn set_mode(&self, root: &Utf8Path, rel: &str, mode: u32) -> io::Result<()> {
+            self.note("set_mode", &root.join(rel))?;
+            self.inner.set_mode(root, rel, mode)
         }
     }
 

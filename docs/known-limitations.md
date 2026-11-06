@@ -835,6 +835,22 @@ left).
   base makes `ws land` answer `E_WS_STALE`, and `ws rebase` takes the record over. The same window
   lets a case collision through that the target creates after the check. *Unscheduled (the window is
   the time between two calls of one command). Found: M15 Task S4c review.*
+- **A workspace's reads still follow links.** Since M16 the tree's writes go from the workspace's
+  root without following a link below it, and a component replaced after the check is
+  `E_WS_DIRTY`. The reads (the check before a write, `ws status`, `ws diff`, a commit's scan) go by
+  full path: a directory swapped for a link while they run is read through it. A read never
+  writes, and the writes after it refuse the link, so nothing outside the workspace changes; the
+  check can count the outside files as edits and refuse. *Unscheduled (the M16 design §1). Found:
+  the 2026-11-01 completeness report (F8).*
+- **Other targets than Unix write a workspace's tree by full path.** The writes that refuse a
+  swapped link use the Unix calls that open from a directory without following links. On Windows
+  and the other targets the tree is written by full path after the check, as before M16: a
+  directory swapped for a link between the check and the write is written through, not refused.
+  Windows is not built yet. *Target: M12. Found: the 2026-11-01 completeness report (F7).*
+- **The check log is written by full path.** `ws land --check` writes its log to
+  `.swarmws/checks/<attempt>.log` by full path, as the other `.swarmws` records are written: a
+  `.swarmws` swapped for a link is written through. The tree's files are not. *Unscheduled (the
+  M16 design §1). Found: M16 Task S1.*
 
 ## Platforms
 

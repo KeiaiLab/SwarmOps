@@ -132,7 +132,7 @@ fn discard_added(
         .symlink_metadata(&abs)
         .map_err(|e| materialize::host_failed(path, &e))?;
     if there.is_some_and(|meta| meta.kind != HostKind::Dir) {
-        (host.remove_file(&abs)).map_err(|e| materialize::host_failed(path, &e))?;
+        (host.remove_file(&ws.dir, path)).map_err(|e| materialize::host_failed(path, &e))?;
         discarded.insert(path.to_owned());
     }
     Ok(())
@@ -162,7 +162,8 @@ fn clear_way(
             None => return Ok(()),
             Some(HostKind::Dir) => {}
             Some(_) if materialize::covered(&ancestor, &[named.to_owned()]) => {
-                (host.remove_file(&abs)).map_err(|e| materialize::host_failed(&ancestor, &e))?;
+                (host.remove_file(&ws.dir, &ancestor))
+                    .map_err(|e| materialize::host_failed(&ancestor, &e))?;
                 discarded.insert(ancestor);
                 return Ok(());
             }

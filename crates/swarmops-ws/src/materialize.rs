@@ -38,7 +38,7 @@ use swarmops_api::{
 };
 use swarmops_core::{ObjectKind, RepoPath};
 
-use crate::hostfs::{HostFs, HostKind, HostMeta};
+use crate::hostfs::{self, HostFs, HostKind, HostMeta};
 use crate::pending::{self, Intent};
 use crate::portable::{self, HOST};
 use crate::scan;
@@ -415,8 +415,7 @@ pub(crate) fn apply(
     let host = ctx.host.as_ref();
     let Prepared { removes, puts } = prepared;
     for path in &removes {
-        let abs = ws.dir.join(path);
-        match host.remove_file(&abs) {
+        match host.remove_file(&ws.dir, path) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(host_failed(path, &e)),
             _ => {}
         }
@@ -459,7 +458,7 @@ pub(crate) fn put_all(
             .filter_map(|put| put.item.path.rsplit_once('/').map(|(parent, _)| parent))
             .collect();
         for parent in parents {
-            (ctx.host.create_dir_all(&dir.join(parent))).map_err(|e| host_failed(parent, &e))?;
+            (ctx.host.create_dir_all(dir, parent)).map_err(|e| host_failed(parent, &e))?;
         }
 
         // 3. Its files, in parallel.
@@ -486,10 +485,9 @@ fn put_one(
 ) -> Result<(), OpError> {
     // 1. An emptied directory where a file goes, removed; one still holding files is an edit.
     let Put { item, there } = put;
-    let abs = dir.join(&item.path);
     if *there == Some(HostKind::Dir) {
         let removed = host
-            .remove_dir_if_empty(&abs)
+            .remove_dir_if_empty(dir, &item.path)
             .map_err(|e| host_failed(&item.path, &e))?;
         if !removed {
             return Err(dirty(vec![item.path.clone()]));
@@ -505,15 +503,15 @@ fn put_one(
             )
         })?;
         if there.is_some_and(|kind| kind != HostKind::Dir) {
-            (host.remove_file(&abs)).map_err(|e| host_failed(&item.path, &e))?;
+            (host.remove_file(dir, &item.path)).map_err(|e| host_failed(&item.path, &e))?;
         }
-        return (host.symlink(target, &abs)).map_err(|e| host_failed(&item.path, &e));
+        return (host.symlink(dir, &item.path, target)).map_err(|e| host_failed(&item.path, &e));
     }
 
     // 3. A file, the bit set where the volume keeps it.
-    (host.write_file(&abs, bytes)).map_err(|e| host_failed(&item.path, &e))?;
+    (host.write_file(dir, &item.path, bytes)).map_err(|e| host_failed(&item.path, &e))?;
     if item.kind == FileKind::Exec && volume.exec_bit {
-        (host.set_mode(&abs, EXEC_MODE)).map_err(|e| host_failed(&item.path, &e))?;
+        (host.set_mode(dir, &item.path, EXEC_MODE)).map_err(|e| host_failed(&item.path, &e))?;
     }
     Ok(())
 }
@@ -532,8 +530,7 @@ pub(crate) fn holds(
         if meta.kind != HostKind::Symlink {
             return Ok(false);
         }
-        let target = host.read_link(abs)?;
-        return Ok(blob_id(target.as_bytes()) == item.blob);
+        return same_blob(host.read_link(abs), &item.blob);
     }
 
     // 2. Else a file, of the kind's mode where the volume keeps the bit.
@@ -548,7 +545,7 @@ pub(crate) fn holds(
     }
 
     // 3. Its bytes.
-    Ok(blob_id(&host.read_file(abs)?) == item.blob)
+    same_blob(host.read_file(abs), &item.blob)
 }
 
 /// Whether the host's `meta` at `abs` is a file holding executable `item`'s bytes without its
@@ -566,10 +563,17 @@ fn bytes_held(
     if meta.kind != HostKind::File || meta.size != item.size {
         return Ok(false);
     }
-    let bytes = host
-        .read_file(abs)
-        .map_err(|e| host_failed(&item.path, &e))?;
-    Ok(blob_id(&bytes) == item.blob)
+    same_blob(host.read_file(abs), &item.blob).map_err(|e| host_failed(&item.path, &e))
+}
+
+/// Whether `read` gave the bytes of blob `blob`. A path gone since its metadata was read (a
+/// directory above it swapped meanwhile) holds nothing: the caller counts it as an edit.
+fn same_blob(read: io::Result<impl AsRef<[u8]>>, blob: &str) -> io::Result<bool> {
+    match read {
+        Ok(bytes) => Ok(blob_id(bytes.as_ref()) == blob),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 /// The id of the blob holding `bytes`.
@@ -752,7 +756,7 @@ fn only_removed(
 fn prune(host: &dyn HostFs, dir: &Utf8Path, path: &str) -> Result<(), OpError> {
     let mut at = path;
     while let Some((parent, _)) = at.rsplit_once('/') {
-        match host.remove_dir_if_empty(&dir.join(parent)) {
+        match host.remove_dir_if_empty(dir, parent) {
             Ok(true) => {}
             Ok(false) => return Ok(()),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -1382,8 +1386,22 @@ pub(crate) fn dirty(mut paths: Vec<String>) -> OpError {
     .with_hint("swarmops ws commit -m <message>, or swarmops ws discard <path>…")
 }
 
-/// `E_IO` for a host call on the workspace's `path` that failed with `e`.
+/// The error of a host call on the workspace's `path` that failed with `e`: `E_WS_DIRTY` naming
+/// the path a write found swapped below the root, else `E_IO` naming the directory that would
+/// not open, or `path` (the M16 design §1).
 pub(crate) fn host_failed(path: &str, e: &io::Error) -> OpError {
+    // 1. A directory or file replaced during the write: the agent's change, in the way. An
+    //    update's intent stays, so every command refuses until it is moved aside.
+    if let Some(swapped) = hostfs::swapped_path(e) {
+        let hint = format!(
+            "move {swapped} aside: it changed while a write went through it; then run the \
+             command again"
+        );
+        return dirty(vec![swapped.to_owned()]).with_hint(hint);
+    }
+
+    // 2. Else the directory that would not open, or the path itself.
+    let path = hostfs::unopened_dir(e).unwrap_or(path);
     OpError::new(ErrorCode::Io, format!("{path}: {e}"))
         .with_details(Map::from_iter([("path".to_owned(), Value::from(path))]))
 }

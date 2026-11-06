@@ -17,7 +17,19 @@
 //! `CrashAtHost`, and added the two calls the frozen list lacked: [`HostFs::read_link`] (a
 //! symlink's target, which status and the edit check compare) and [`HostFs::set_mode`] (the
 //! executable bit, which a materialisation and the volume probe write).
+//!
+//! Every write names a root and a path below it (the M16 design §1). On Unix `RealHost` walks
+//! down from the root one directory at a time and never follows a link below it:
+//!
+//! ```text
+//! root (followed) ─openat(NOFOLLOW)─▶ d1 ─openat(NOFOLLOW)─▶ d2 ─▶ temp, renameat │ unlinkat │ …
+//!                       │ a link or a file: Swapped(path) → E_WS_DIRTY
+//!                       └ another failure: Unopened(dir)  → E_IO naming the directory
+//! ```
+//!
+//! Other platforms write by the full path after the caller's pre-write check.
 
+use std::fmt;
 use std::io;
 #[cfg(feature = "test-hooks")]
 use std::sync::Mutex;
@@ -58,14 +70,16 @@ pub struct HostMeta {
     pub mode: u32,
 }
 
-/// The calls a workspace makes on its materialised tree, and no others.
+/// The calls a workspace makes on its materialised tree, and no others. A write names the
+/// workspace's `root` and a `rel` path below it (`/`-separated); a read names a full path.
 pub trait HostFs: Send + Sync {
-    /// Writes `bytes` to `path`: a temp file in the same directory, then a rename over the path,
-    /// so that a reader never sees half a file. No sync.
-    fn write_file(&self, path: &Utf8Path, bytes: &[u8]) -> io::Result<()>;
+    /// Writes `bytes` to `rel` below `root`: a temp file in the same directory, then a rename
+    /// over the path, so that a reader never sees half a file. Missing directories are made.
+    /// No sync.
+    fn write_file(&self, root: &Utf8Path, rel: &str, bytes: &[u8]) -> io::Result<()>;
 
-    /// Makes a symlink at `path` holding `target`.
-    fn symlink(&self, target: &str, path: &Utf8Path) -> io::Result<()>;
+    /// Makes a symlink at `rel` below `root` holding `target`; missing directories are made.
+    fn symlink(&self, root: &Utf8Path, rel: &str, target: &str) -> io::Result<()>;
 
     /// `path`'s metadata, without following a symlink; `None` when nothing is there.
     fn symlink_metadata(&self, path: &Utf8Path) -> io::Result<Option<HostMeta>>;
@@ -76,24 +90,119 @@ pub trait HostFs: Send + Sync {
     /// The names in the directory at `path`, in no order.
     fn read_dir(&self, path: &Utf8Path) -> io::Result<Vec<String>>;
 
-    /// Removes the file or symlink at `path`.
-    fn remove_file(&self, path: &Utf8Path) -> io::Result<()>;
+    /// Removes the file or symlink at `rel` below `root`.
+    fn remove_file(&self, root: &Utf8Path, rel: &str) -> io::Result<()>;
 
-    /// Removes the directory at `path` if it is empty; whether it did.
-    fn remove_dir_if_empty(&self, path: &Utf8Path) -> io::Result<bool>;
+    /// Removes the directory at `rel` below `root` if it is empty; whether it did.
+    fn remove_dir_if_empty(&self, root: &Utf8Path, rel: &str) -> io::Result<bool>;
 
-    /// Makes the directory at `path` and every missing parent.
-    fn create_dir_all(&self, path: &Utf8Path) -> io::Result<()>;
+    /// Makes the directory at `rel` below `root` and every missing parent.
+    fn create_dir_all(&self, root: &Utf8Path, rel: &str) -> io::Result<()>;
 
-    /// Renames `from` to `to`, replacing what `to` names.
-    fn rename(&self, from: &Utf8Path, to: &Utf8Path) -> io::Result<()>;
+    /// Renames `from` to `to`, both below `root`, replacing what `to` names.
+    fn rename(&self, root: &Utf8Path, from: &str, to: &str) -> io::Result<()>;
 
     /// The target of the symlink at `path`, never followed.
     fn read_link(&self, path: &Utf8Path) -> io::Result<String>;
 
-    /// Sets the permission bits of the file at `path` to `mode` (`0o755`, say); a no-op where
-    /// the platform has none.
-    fn set_mode(&self, path: &Utf8Path, mode: u32) -> io::Result<()>;
+    /// Sets the permission bits of the file at `rel` below `root` to `mode` (`0o755`, say); a
+    /// no-op where the platform has none. On Unix a file that is not a regular one with one
+    /// link is refused as swapped: a hard link would carry the mode outside the root.
+    fn set_mode(&self, root: &Utf8Path, rel: &str, mode: u32) -> io::Result<()>;
+}
+
+/// A write that met, below the root, something other than a directory where it walks down, or
+/// other than a regular file with one link where it sets a mode: the path below the root.
+#[derive(Debug)]
+struct Swapped(String);
+
+impl fmt::Display for Swapped {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} was replaced during the write", self.0)
+    }
+}
+
+impl std::error::Error for Swapped {}
+
+/// A directory a write walks through that would not open: its path below the root (`.` for
+/// the root) and why.
+#[derive(Debug)]
+struct Unopened {
+    /// The directory.
+    dir: String,
+    /// Why it would not open.
+    source: io::Error,
+}
+
+impl fmt::Display for Unopened {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.dir, self.source)
+    }
+}
+
+impl std::error::Error for Unopened {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// The error of a write that met a swapped `rel`.
+fn swapped(rel: &str) -> io::Error {
+    io::Error::other(Swapped(rel.to_owned()))
+}
+
+/// The error of directory `dir` that would not open, of `source`'s kind.
+fn unopened(dir: &str, source: io::Error) -> io::Error {
+    let kind = source.kind();
+    io::Error::new(
+        kind,
+        Unopened {
+            dir: dir.to_owned(),
+            source,
+        },
+    )
+}
+
+/// The path below the root that `e` found swapped, if that is what `e` is.
+pub(crate) fn swapped_path(e: &io::Error) -> Option<&str> {
+    let swapped = e.get_ref()?.downcast_ref::<Swapped>()?;
+    Some(&swapped.0)
+}
+
+/// The directory below the root that `e` could not open, if that is what `e` is.
+pub(crate) fn unopened_dir(e: &io::Error) -> Option<&str> {
+    let unopened = e.get_ref()?.downcast_ref::<Unopened>()?;
+    Some(&unopened.dir)
+}
+
+/// `dir`'s parent and its last name: the root and the path a write that removes `dir` itself
+/// names (a parent of `""` is `.`).
+pub(crate) fn split_root(dir: &Utf8Path) -> io::Result<(&Utf8Path, &str)> {
+    let name = dir.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{dir} names no directory"),
+        )
+    })?;
+    let parent = match dir.parent() {
+        Some(parent) if !parent.as_str().is_empty() => parent,
+        _ => Utf8Path::new("."),
+    };
+    Ok((parent, name))
+}
+
+/// `rel`'s directories and its last name; an empty name, `.` or `..` is refused, as no write
+/// below the root goes through one.
+fn split(rel: &str) -> io::Result<(Vec<&str>, &str)> {
+    let mut parts: Vec<&str> = rel.split('/').collect();
+    if parts.iter().any(|part| matches!(*part, "" | "." | "..")) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{rel} is not a path below the workspace"),
+        ));
+    }
+    let name = parts.pop().unwrap_or_default();
+    Ok((parts, name))
 }
 
 /// The suffix of the temp a [`RealHost::write_file`] writes beside its path: one name per path,
@@ -107,29 +216,12 @@ const TEMP_SUFFIX: &str = ".swarmws-tmp";
 pub struct RealHost;
 
 impl HostFs for RealHost {
-    fn write_file(&self, path: &Utf8Path, bytes: &[u8]) -> io::Result<()> {
-        // 1. The temp beside the path; one a killed write left is removed, never followed.
-        let name = path.file_name().ok_or_else(|| no_name(path))?;
-        let temp = path.with_file_name(format!(".{name}{TEMP_SUFFIX}"));
-        match std::fs::remove_file(&temp) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
-        }
-
-        // 2. Made new (`O_EXCL`: a symlink put there in between is refused), written, renamed
-        //    over the path. No sync: the store holds the bytes durably.
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)?;
-        io::Write::write_all(&mut file, bytes)?;
-        drop(file);
-        std::fs::rename(&temp, path)
+    fn write_file(&self, root: &Utf8Path, rel: &str, bytes: &[u8]) -> io::Result<()> {
+        walk::write_file(root, rel, bytes)
     }
 
-    fn symlink(&self, target: &str, path: &Utf8Path) -> io::Result<()> {
-        make_symlink(target, path)
+    fn symlink(&self, root: &Utf8Path, rel: &str, target: &str) -> io::Result<()> {
+        walk::symlink(root, rel, target)
     }
 
     fn symlink_metadata(&self, path: &Utf8Path) -> io::Result<Option<HostMeta>> {
@@ -159,24 +251,20 @@ impl HostFs for RealHost {
         Ok(names)
     }
 
-    fn remove_file(&self, path: &Utf8Path) -> io::Result<()> {
-        std::fs::remove_file(path)
+    fn remove_file(&self, root: &Utf8Path, rel: &str) -> io::Result<()> {
+        walk::remove_file(root, rel)
     }
 
-    fn remove_dir_if_empty(&self, path: &Utf8Path) -> io::Result<bool> {
-        match std::fs::remove_dir(path) {
-            Ok(()) => Ok(true),
-            Err(e) if e.kind() == io::ErrorKind::DirectoryNotEmpty => Ok(false),
-            Err(e) => Err(e),
-        }
+    fn remove_dir_if_empty(&self, root: &Utf8Path, rel: &str) -> io::Result<bool> {
+        walk::remove_dir_if_empty(root, rel)
     }
 
-    fn create_dir_all(&self, path: &Utf8Path) -> io::Result<()> {
-        std::fs::create_dir_all(path)
+    fn create_dir_all(&self, root: &Utf8Path, rel: &str) -> io::Result<()> {
+        walk::create_dir_all(root, rel)
     }
 
-    fn rename(&self, from: &Utf8Path, to: &Utf8Path) -> io::Result<()> {
-        std::fs::rename(from, to)
+    fn rename(&self, root: &Utf8Path, from: &str, to: &str) -> io::Result<()> {
+        walk::rename(root, from, to)
     }
 
     fn read_link(&self, path: &Utf8Path) -> io::Result<String> {
@@ -192,46 +280,301 @@ impl HostFs for RealHost {
         })
     }
 
-    fn set_mode(&self, path: &Utf8Path, mode: u32) -> io::Result<()> {
-        set_permissions(path, mode)
+    fn set_mode(&self, root: &Utf8Path, rel: &str, mode: u32) -> io::Result<()> {
+        walk::set_mode(root, rel, mode)
     }
 }
 
-/// The error of a path without a file name (`/`, `..`), which no file is written at.
-fn no_name(path: &Utf8Path) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidInput, format!("{path} names no file"))
-}
-
-/// A symlink at `path` holding `target`.
+/// The writes of `RealHost`: rooted and never following a link below the root on Unix, by the
+/// full path elsewhere.
 #[cfg(unix)]
-fn make_symlink(target: &str, path: &Utf8Path) -> io::Result<()> {
-    std::os::unix::fs::symlink(target, path)
-}
+use nofollow as walk;
 
-/// A symlink at `path` holding `target`: a file symlink, which needs a privilege Windows does
-/// not give by default (the volume probe finds out).
-#[cfg(windows)]
-fn make_symlink(target: &str, path: &Utf8Path) -> io::Result<()> {
-    std::os::windows::fs::symlink_file(target, path)
-}
-
-/// No symlinks on this platform.
-#[cfg(not(any(unix, windows)))]
-fn make_symlink(_target: &str, _path: &Utf8Path) -> io::Result<()> {
-    Err(io::Error::from(io::ErrorKind::Unsupported))
-}
-
-/// The permission bits of the file at `path` set to `mode`.
-#[cfg(unix)]
-fn set_permissions(path: &Utf8Path, mode: u32) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-}
-
-/// No permission bits on this platform: nothing to set.
+/// The writes of `RealHost`: rooted and never following a link below the root on Unix, by the
+/// full path elsewhere.
 #[cfg(not(unix))]
-fn set_permissions(_path: &Utf8Path, _mode: u32) -> io::Result<()> {
-    Ok(())
+use fullpath as walk;
+
+/// `RealHost`'s writes on Unix: each directory below the root opened with `O_NOFOLLOW` from the
+/// one above it, the write made relative to the last one.
+#[cfg(unix)]
+mod nofollow {
+    use std::io;
+    use std::os::fd::OwnedFd;
+
+    use camino::Utf8Path;
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+    use rustix::io::Errno;
+
+    use super::{TEMP_SUFFIX, split, swapped, unopened};
+
+    /// How the root is opened: links above and at it followed.
+    const ROOT_FLAGS: OFlags = OFlags::RDONLY
+        .union(OFlags::DIRECTORY)
+        .union(OFlags::CLOEXEC);
+
+    /// How a directory below the root is opened: never through a link.
+    const DIR_FLAGS: OFlags = ROOT_FLAGS.union(OFlags::NOFOLLOW);
+
+    /// How a temp is made: new, never through a link.
+    const TEMP_FLAGS: OFlags = OFlags::WRONLY
+        .union(OFlags::CREATE)
+        .union(OFlags::EXCL)
+        .union(OFlags::NOFOLLOW)
+        .union(OFlags::CLOEXEC);
+
+    /// How a file is opened to set its mode: never through a link, never blocking on a FIFO.
+    const MODE_FLAGS: OFlags = OFlags::RDONLY
+        .union(OFlags::NOFOLLOW)
+        .union(OFlags::NONBLOCK)
+        .union(OFlags::CLOEXEC);
+
+    /// The mode a new file or directory asks for, before the umask.
+    const NEW_FILE_MODE: u32 = 0o666;
+
+    /// The mode a new directory asks for, before the umask.
+    const NEW_DIR_MODE: u32 = 0o777;
+
+    /// What a walk does with a directory that is missing.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Missing {
+        /// Makes it: a write.
+        Make,
+        /// Fails with `NotFound`: a removal or a rename.
+        Fail,
+    }
+
+    /// The directory `parents` names below `root`: the root opened as it is, then each of
+    /// `parents` from the one above it, never through a link.
+    pub(super) fn descend(
+        root: &Utf8Path,
+        parents: &[&str],
+        missing: Missing,
+    ) -> io::Result<OwnedFd> {
+        // 1. The root, followed.
+        let mut fd = rustix::fs::open(root.as_std_path(), ROOT_FLAGS, Mode::empty())
+            .map_err(|e| unopened(".", e.into()))?;
+
+        // 2. Each directory below it, never followed; a missing one made when asked.
+        for (n, name) in parents.iter().enumerate() {
+            let shown = parents[..=n].join("/");
+            fd = open_dir(&fd, name, &shown, missing)?;
+        }
+        Ok(fd)
+    }
+
+    /// Directory `name` in `dir` (`shown` below the root), never through a link.
+    fn open_dir(dir: &OwnedFd, name: &str, shown: &str, missing: Missing) -> io::Result<OwnedFd> {
+        // 1. Opened as it is; a link or a file is a swap.
+        match rustix::fs::openat(dir, name, DIR_FLAGS, Mode::empty()) {
+            Ok(fd) => return Ok(fd),
+            Err(Errno::NOENT) if missing == Missing::Make => {}
+            Err(e) => return Err(dir_failed(shown, e)),
+        }
+
+        // 2. Missing: made (or made meanwhile by another write), then opened.
+        match rustix::fs::mkdirat(dir, name, Mode::from_raw_mode(NEW_DIR_MODE)) {
+            Ok(()) | Err(Errno::EXIST) => {}
+            Err(e) => return Err(unopened(shown, e.into())),
+        }
+        rustix::fs::openat(dir, name, DIR_FLAGS, Mode::empty()).map_err(|e| dir_failed(shown, e))
+    }
+
+    /// Why directory `shown` would not open: swapped for a link (`ELOOP`, `EMLINK` on FreeBSD)
+    /// or for a file (`ENOTDIR`), else unopened.
+    fn dir_failed(shown: &str, e: Errno) -> io::Error {
+        if is_swap(e) {
+            return swapped(shown);
+        }
+        unopened(shown, e.into())
+    }
+
+    /// Whether an `O_NOFOLLOW` open failed on a link or on a file where a directory was.
+    fn is_swap(e: Errno) -> bool {
+        e == Errno::LOOP || e == Errno::MLINK || e == Errno::NOTDIR
+    }
+
+    /// The directory above `rel` below `root`, and `rel`'s last name.
+    fn parent_of<'r>(
+        root: &Utf8Path,
+        rel: &'r str,
+        missing: Missing,
+    ) -> io::Result<(OwnedFd, &'r str)> {
+        let (parents, name) = split(rel)?;
+        Ok((descend(root, &parents, missing)?, name))
+    }
+
+    /// See `HostFs::write_file`.
+    pub(super) fn write_file(root: &Utf8Path, rel: &str, bytes: &[u8]) -> io::Result<()> {
+        // 1. The temp beside the path; one a killed write left is removed, never followed.
+        let (dir, name) = parent_of(root, rel, Missing::Make)?;
+        let temp = format!(".{name}{TEMP_SUFFIX}");
+        match rustix::fs::unlinkat(&dir, temp.as_str(), AtFlags::empty()) {
+            Ok(()) | Err(Errno::NOENT) => {}
+            Err(e) => return Err(e.into()),
+        }
+
+        // 2. Made new (`O_EXCL`, `O_NOFOLLOW`), written, renamed over the path in the same
+        //    directory. No sync: the store holds the bytes durably.
+        let fd = rustix::fs::openat(
+            &dir,
+            temp.as_str(),
+            TEMP_FLAGS,
+            Mode::from_raw_mode(NEW_FILE_MODE),
+        )?;
+        let mut file = std::fs::File::from(fd);
+        io::Write::write_all(&mut file, bytes)?;
+        drop(file);
+        rustix::fs::renameat(&dir, temp.as_str(), &dir, name)?;
+        Ok(())
+    }
+
+    /// See `HostFs::symlink`.
+    pub(super) fn symlink(root: &Utf8Path, rel: &str, target: &str) -> io::Result<()> {
+        let (dir, name) = parent_of(root, rel, Missing::Make)?;
+        rustix::fs::symlinkat(target, &dir, name)?;
+        Ok(())
+    }
+
+    /// See `HostFs::remove_file`.
+    pub(super) fn remove_file(root: &Utf8Path, rel: &str) -> io::Result<()> {
+        let (dir, name) = parent_of(root, rel, Missing::Fail)?;
+        rustix::fs::unlinkat(&dir, name, AtFlags::empty())?;
+        Ok(())
+    }
+
+    /// See `HostFs::remove_dir_if_empty`; a file or a link where the directory was is a swap.
+    pub(super) fn remove_dir_if_empty(root: &Utf8Path, rel: &str) -> io::Result<bool> {
+        let (dir, name) = parent_of(root, rel, Missing::Fail)?;
+        match rustix::fs::unlinkat(&dir, name, AtFlags::REMOVEDIR) {
+            Ok(()) => Ok(true),
+            Err(Errno::NOTEMPTY | Errno::EXIST) => Ok(false),
+            Err(Errno::NOTDIR) => Err(swapped(rel)),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// See `HostFs::create_dir_all`.
+    pub(super) fn create_dir_all(root: &Utf8Path, rel: &str) -> io::Result<()> {
+        let (mut parents, name) = split(rel)?;
+        parents.push(name);
+        descend(root, &parents, Missing::Make).map(drop)
+    }
+
+    /// See `HostFs::rename`.
+    pub(super) fn rename(root: &Utf8Path, from: &str, to: &str) -> io::Result<()> {
+        let (from_dir, from_name) = parent_of(root, from, Missing::Fail)?;
+        let (to_dir, to_name) = parent_of(root, to, Missing::Fail)?;
+        rustix::fs::renameat(&from_dir, from_name, &to_dir, to_name)?;
+        Ok(())
+    }
+
+    /// See `HostFs::set_mode`: the file opened without following a link, checked to be a
+    /// regular file with one link, then its mode set through the descriptor.
+    pub(super) fn set_mode(root: &Utf8Path, rel: &str, mode: u32) -> io::Result<()> {
+        // 1. The file itself, never a link.
+        let (dir, name) = parent_of(root, rel, Missing::Fail)?;
+        let fd = match rustix::fs::openat(&dir, name, MODE_FLAGS, Mode::empty()) {
+            Ok(fd) => fd,
+            Err(e) if is_swap(e) => return Err(swapped(rel)),
+            Err(e) => return Err(e.into()),
+        };
+
+        // 2. A regular file with one link: else the mode would reach another path.
+        let stat = rustix::fs::fstat(&fd)?;
+        let regular = FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile;
+        if !regular || stat.st_nlink != 1 {
+            return Err(swapped(rel));
+        }
+        rustix::fs::fchmod(&fd, Mode::from_raw_mode(mode))?;
+        Ok(())
+    }
+}
+
+/// `RealHost`'s writes where the rooted walk is not built: by the full path, after the
+/// caller's pre-write check (the M16 design §1).
+#[cfg(not(unix))]
+mod fullpath {
+    use std::io;
+
+    use camino::Utf8Path;
+
+    use super::{TEMP_SUFFIX, split};
+
+    /// `rel` below `root`, checked to name a path below it.
+    fn full(root: &Utf8Path, rel: &str) -> io::Result<camino::Utf8PathBuf> {
+        split(rel)?;
+        Ok(root.join(rel))
+    }
+
+    /// See `HostFs::write_file`.
+    pub(super) fn write_file(root: &Utf8Path, rel: &str, bytes: &[u8]) -> io::Result<()> {
+        // 1. The temp beside the path; one a killed write left is removed.
+        let path = full(root, rel)?;
+        let (_, name) = split(rel)?;
+        let temp = path.with_file_name(format!(".{name}{TEMP_SUFFIX}"));
+        match std::fs::remove_file(&temp) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+
+        // 2. Made new, written, renamed over the path. No sync.
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        io::Write::write_all(&mut file, bytes)?;
+        drop(file);
+        std::fs::rename(&temp, path)
+    }
+
+    /// See `HostFs::symlink`.
+    pub(super) fn symlink(root: &Utf8Path, rel: &str, target: &str) -> io::Result<()> {
+        make_symlink(target, &full(root, rel)?)
+    }
+
+    /// See `HostFs::remove_file`.
+    pub(super) fn remove_file(root: &Utf8Path, rel: &str) -> io::Result<()> {
+        std::fs::remove_file(full(root, rel)?)
+    }
+
+    /// See `HostFs::remove_dir_if_empty`.
+    pub(super) fn remove_dir_if_empty(root: &Utf8Path, rel: &str) -> io::Result<bool> {
+        match std::fs::remove_dir(full(root, rel)?) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == io::ErrorKind::DirectoryNotEmpty => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// See `HostFs::create_dir_all`.
+    pub(super) fn create_dir_all(root: &Utf8Path, rel: &str) -> io::Result<()> {
+        std::fs::create_dir_all(full(root, rel)?)
+    }
+
+    /// See `HostFs::rename`.
+    pub(super) fn rename(root: &Utf8Path, from: &str, to: &str) -> io::Result<()> {
+        std::fs::rename(full(root, from)?, full(root, to)?)
+    }
+
+    /// See `HostFs::set_mode`: no permission bits on these platforms, nothing to set.
+    pub(super) fn set_mode(root: &Utf8Path, rel: &str, _mode: u32) -> io::Result<()> {
+        full(root, rel).map(drop)
+    }
+
+    /// A symlink at `path` holding `target`: a file symlink, which needs a privilege Windows
+    /// does not give by default (the volume probe finds out).
+    #[cfg(windows)]
+    fn make_symlink(target: &str, path: &Utf8Path) -> io::Result<()> {
+        std::os::windows::fs::symlink_file(target, path)
+    }
+
+    /// No symlinks on this platform.
+    #[cfg(not(windows))]
+    fn make_symlink(_target: &str, _path: &Utf8Path) -> io::Result<()> {
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
 }
 
 /// What `meta` says of its path.
@@ -310,7 +653,8 @@ pub enum HostMethod {
     SetMode,
 }
 
-/// One call [`RecordingHost`] saw: the method and the path it named (`from` for a rename).
+/// One call [`RecordingHost`] saw: the method and the path it named, a write's root joined to
+/// its path below it (`from` for a rename).
 #[cfg(feature = "test-hooks")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -372,14 +716,14 @@ impl<H: HostFs> RecordingHost<H> {
 
 #[cfg(feature = "test-hooks")]
 impl<H: HostFs> HostFs for RecordingHost<H> {
-    fn write_file(&self, path: &Utf8Path, bytes: &[u8]) -> io::Result<()> {
-        self.record(HostMethod::WriteFile, path);
-        self.inner.write_file(path, bytes)
+    fn write_file(&self, root: &Utf8Path, rel: &str, bytes: &[u8]) -> io::Result<()> {
+        self.record(HostMethod::WriteFile, &root.join(rel));
+        self.inner.write_file(root, rel, bytes)
     }
 
-    fn symlink(&self, target: &str, path: &Utf8Path) -> io::Result<()> {
-        self.record(HostMethod::Symlink, path);
-        self.inner.symlink(target, path)
+    fn symlink(&self, root: &Utf8Path, rel: &str, target: &str) -> io::Result<()> {
+        self.record(HostMethod::Symlink, &root.join(rel));
+        self.inner.symlink(root, rel, target)
     }
 
     fn symlink_metadata(&self, path: &Utf8Path) -> io::Result<Option<HostMeta>> {
@@ -397,24 +741,24 @@ impl<H: HostFs> HostFs for RecordingHost<H> {
         self.inner.read_dir(path)
     }
 
-    fn remove_file(&self, path: &Utf8Path) -> io::Result<()> {
-        self.record(HostMethod::RemoveFile, path);
-        self.inner.remove_file(path)
+    fn remove_file(&self, root: &Utf8Path, rel: &str) -> io::Result<()> {
+        self.record(HostMethod::RemoveFile, &root.join(rel));
+        self.inner.remove_file(root, rel)
     }
 
-    fn remove_dir_if_empty(&self, path: &Utf8Path) -> io::Result<bool> {
-        self.record(HostMethod::RemoveDirIfEmpty, path);
-        self.inner.remove_dir_if_empty(path)
+    fn remove_dir_if_empty(&self, root: &Utf8Path, rel: &str) -> io::Result<bool> {
+        self.record(HostMethod::RemoveDirIfEmpty, &root.join(rel));
+        self.inner.remove_dir_if_empty(root, rel)
     }
 
-    fn create_dir_all(&self, path: &Utf8Path) -> io::Result<()> {
-        self.record(HostMethod::CreateDirAll, path);
-        self.inner.create_dir_all(path)
+    fn create_dir_all(&self, root: &Utf8Path, rel: &str) -> io::Result<()> {
+        self.record(HostMethod::CreateDirAll, &root.join(rel));
+        self.inner.create_dir_all(root, rel)
     }
 
-    fn rename(&self, from: &Utf8Path, to: &Utf8Path) -> io::Result<()> {
-        self.record(HostMethod::Rename, from);
-        self.inner.rename(from, to)
+    fn rename(&self, root: &Utf8Path, from: &str, to: &str) -> io::Result<()> {
+        self.record(HostMethod::Rename, &root.join(from));
+        self.inner.rename(root, from, to)
     }
 
     fn read_link(&self, path: &Utf8Path) -> io::Result<String> {
@@ -422,9 +766,9 @@ impl<H: HostFs> HostFs for RecordingHost<H> {
         self.inner.read_link(path)
     }
 
-    fn set_mode(&self, path: &Utf8Path, mode: u32) -> io::Result<()> {
-        self.record(HostMethod::SetMode, path);
-        self.inner.set_mode(path, mode)
+    fn set_mode(&self, root: &Utf8Path, rel: &str, mode: u32) -> io::Result<()> {
+        self.record(HostMethod::SetMode, &root.join(rel));
+        self.inner.set_mode(root, rel, mode)
     }
 }
 
@@ -475,14 +819,14 @@ impl<H: HostFs> CrashAtHost<H> {
 
 #[cfg(feature = "test-hooks")]
 impl<H: HostFs> HostFs for CrashAtHost<H> {
-    fn write_file(&self, path: &Utf8Path, bytes: &[u8]) -> io::Result<()> {
+    fn write_file(&self, root: &Utf8Path, rel: &str, bytes: &[u8]) -> io::Result<()> {
         self.tick();
-        self.inner.write_file(path, bytes)
+        self.inner.write_file(root, rel, bytes)
     }
 
-    fn symlink(&self, target: &str, path: &Utf8Path) -> io::Result<()> {
+    fn symlink(&self, root: &Utf8Path, rel: &str, target: &str) -> io::Result<()> {
         self.tick();
-        self.inner.symlink(target, path)
+        self.inner.symlink(root, rel, target)
     }
 
     fn symlink_metadata(&self, path: &Utf8Path) -> io::Result<Option<HostMeta>> {
@@ -500,24 +844,24 @@ impl<H: HostFs> HostFs for CrashAtHost<H> {
         self.inner.read_dir(path)
     }
 
-    fn remove_file(&self, path: &Utf8Path) -> io::Result<()> {
+    fn remove_file(&self, root: &Utf8Path, rel: &str) -> io::Result<()> {
         self.tick();
-        self.inner.remove_file(path)
+        self.inner.remove_file(root, rel)
     }
 
-    fn remove_dir_if_empty(&self, path: &Utf8Path) -> io::Result<bool> {
+    fn remove_dir_if_empty(&self, root: &Utf8Path, rel: &str) -> io::Result<bool> {
         self.tick();
-        self.inner.remove_dir_if_empty(path)
+        self.inner.remove_dir_if_empty(root, rel)
     }
 
-    fn create_dir_all(&self, path: &Utf8Path) -> io::Result<()> {
+    fn create_dir_all(&self, root: &Utf8Path, rel: &str) -> io::Result<()> {
         self.tick();
-        self.inner.create_dir_all(path)
+        self.inner.create_dir_all(root, rel)
     }
 
-    fn rename(&self, from: &Utf8Path, to: &Utf8Path) -> io::Result<()> {
+    fn rename(&self, root: &Utf8Path, from: &str, to: &str) -> io::Result<()> {
         self.tick();
-        self.inner.rename(from, to)
+        self.inner.rename(root, from, to)
     }
 
     fn read_link(&self, path: &Utf8Path) -> io::Result<String> {
@@ -525,8 +869,8 @@ impl<H: HostFs> HostFs for CrashAtHost<H> {
         self.inner.read_link(path)
     }
 
-    fn set_mode(&self, path: &Utf8Path, mode: u32) -> io::Result<()> {
+    fn set_mode(&self, root: &Utf8Path, rel: &str, mode: u32) -> io::Result<()> {
         self.tick();
-        self.inner.set_mode(path, mode)
+        self.inner.set_mode(root, rel, mode)
     }
 }

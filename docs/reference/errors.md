@@ -362,7 +362,7 @@ Another mutation held the workspace's lock for the whole wait (`details.holder`,
 
 Exit 1. Retryable: no.
 
-The workspace holds edits the operation would overwrite or lose (`details.paths`, the first 20); the hint names the command that commits or discards them.
+The workspace holds edits the operation would overwrite or lose (`details.paths`, the first 20); the hint names the command that commits or discards them. Also a directory or file below the workspace's root that became a symlink, a file of more than one link, or a non-directory after the check, before a write through it (`details.paths` names it): nothing is written outside the workspace.
 
 ## E_PATH_NOT_EMPTY
 

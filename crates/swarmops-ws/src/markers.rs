@@ -218,12 +218,12 @@ fn put(ctx: &Ctx<'_>, ws: &Workspace, path: &str, bytes: &[u8]) -> Result<(), Op
 
     // 2. The file, its directory made if the head had none there (an add/add).
     if let Some((parent, _)) = path.rsplit_once('/') {
-        (host.create_dir_all(&ws.dir.join(parent)))
-            .map_err(|e| materialize::host_failed(parent, &e))?;
+        (host.create_dir_all(&ws.dir, parent)).map_err(|e| materialize::host_failed(parent, &e))?;
     }
-    (host.write_file(&abs, bytes)).map_err(|e| materialize::host_failed(path, &e))?;
+    (host.write_file(&ws.dir, path, bytes)).map_err(|e| materialize::host_failed(path, &e))?;
     if exec {
-        (host.set_mode(&abs, EXEC_MODE)).map_err(|e| materialize::host_failed(path, &e))?;
+        (host.set_mode(&ws.dir, path, EXEC_MODE))
+            .map_err(|e| materialize::host_failed(path, &e))?;
     }
     Ok(())
 }

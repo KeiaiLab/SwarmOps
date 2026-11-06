@@ -247,7 +247,10 @@ error_codes! {
     /// is known); running the operation again can succeed.
     WsLocked => "E_WS_LOCKED", EXIT_RETRYABLE, true;
     /// The workspace holds edits the operation would overwrite or lose (`details.paths`, the
-    /// first 20); the hint names the command that commits or discards them.
+    /// first 20); the hint names the command that commits or discards them. Also a directory or
+    /// file below the workspace's root that became a symlink, a file of more than one link, or
+    /// a non-directory after the check, before a write through it (`details.paths` names it):
+    /// nothing is written outside the workspace.
     WsDirty => "E_WS_DIRTY", EXIT_ERROR, false;
     /// `ws create` was given a directory that holds something already (`details.path`).
     PathNotEmpty => "E_PATH_NOT_EMPTY", EXIT_ERROR, false;

@@ -1369,3 +1369,570 @@ fn a_refused_restore_clears_nothing() {
         "new\n"
     );
 }
+
+/// Writes that meet a directory or file swapped between the pre-write check and the write (the
+/// M16 design §1): refused, and nothing outside the workspace changes.
+#[cfg(unix)]
+mod swap {
+    use std::io;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::{Arc, Mutex};
+
+    use camino::{Utf8Path, Utf8PathBuf};
+    use swarmops_api::{OpError, WsStatusReq};
+    use swarmops_ws::hostfs::{HostFs, HostMeta};
+    use swarmops_ws::{RealHost, lock, materialize};
+
+    use crate::fixture::{Fixture, Put};
+
+    /// The mode of a file outside the workspace, which no write may change.
+    const OUTSIDE_MODE: u32 = 0o644;
+    /// The hint of a write refused because `d1` was swapped.
+    const MOVE_D1_ASIDE: &str = "move d1 aside: it changed while a write went through it; \
+                                 then run the command again";
+
+    /// What a [`Swapper`] does to the workspace before the write it waits for.
+    #[derive(Debug, Clone)]
+    enum Swap {
+        /// The directory becomes a symlink to `outside`, an empty directory.
+        DirToLink {
+            dir: Utf8PathBuf,
+            outside: Utf8PathBuf,
+        },
+        /// The file becomes a symlink to the file `outside`.
+        FileToLink {
+            file: Utf8PathBuf,
+            outside: Utf8PathBuf,
+        },
+        /// The file becomes a hard link of the file `outside`.
+        FileToHardLink {
+            file: Utf8PathBuf,
+            outside: Utf8PathBuf,
+        },
+        /// The directory loses every permission bit.
+        DirUnopenable { dir: Utf8PathBuf },
+    }
+
+    /// The write calls a [`Swapper`] can wait for.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Write {
+        /// Any write at or below the swapped path.
+        Any,
+        /// A `set_mode` of the swapped path.
+        SetMode,
+    }
+
+    /// A host that makes its swap once, just before the first write `on` at or below the
+    /// swapped path, then forwards every call to the real host.
+    struct Swapper {
+        swap: Mutex<Option<Swap>>,
+        on: Write,
+        inner: RealHost,
+    }
+
+    impl Swapper {
+        /// A host that makes `swap` before the first write `on`.
+        fn new(swap: Swap, on: Write) -> Arc<Swapper> {
+            Arc::new(Swapper {
+                swap: Mutex::new(Some(swap)),
+                on,
+                inner: RealHost::default(),
+            })
+        }
+
+        /// Makes the swap if `method` on `path` is the write it waits for.
+        fn hit(&self, method: Write, path: &Utf8Path) {
+            // 1. Not the write it waits for, or swapped already: nothing.
+            if self.on != Write::Any && self.on != method {
+                return;
+            }
+            let mut swap = self.swap.lock().unwrap();
+            let Some(at) = swap.as_ref().map(target) else {
+                return;
+            };
+            if !path.starts_with(at) {
+                return;
+            }
+
+            // 2. The swap, once.
+            match swap.take().unwrap() {
+                Swap::DirToLink { dir, outside } => {
+                    let aside = outside.with_file_name("aside");
+                    std::fs::rename(&dir, aside).unwrap();
+                    std::os::unix::fs::symlink(&outside, &dir).unwrap();
+                }
+                Swap::FileToLink { file, outside } => {
+                    std::fs::remove_file(&file).unwrap();
+                    std::os::unix::fs::symlink(&outside, &file).unwrap();
+                }
+                Swap::FileToHardLink { file, outside } => {
+                    std::fs::remove_file(&file).unwrap();
+                    std::fs::hard_link(&outside, &file).unwrap();
+                }
+                Swap::DirUnopenable { dir } => set_mode(&dir, 0),
+            }
+        }
+    }
+
+    /// The path a swap replaces.
+    fn target(swap: &Swap) -> &Utf8Path {
+        match swap {
+            Swap::DirToLink { dir, .. } | Swap::DirUnopenable { dir } => dir,
+            Swap::FileToLink { file, .. } | Swap::FileToHardLink { file, .. } => file,
+        }
+    }
+
+    impl HostFs for Swapper {
+        fn write_file(&self, root: &Utf8Path, rel: &str, bytes: &[u8]) -> io::Result<()> {
+            self.hit(Write::Any, &root.join(rel));
+            self.inner.write_file(root, rel, bytes)
+        }
+
+        fn symlink(&self, root: &Utf8Path, rel: &str, target: &str) -> io::Result<()> {
+            self.hit(Write::Any, &root.join(rel));
+            self.inner.symlink(root, rel, target)
+        }
+
+        fn symlink_metadata(&self, path: &Utf8Path) -> io::Result<Option<HostMeta>> {
+            self.inner.symlink_metadata(path)
+        }
+
+        fn read_file(&self, path: &Utf8Path) -> io::Result<Vec<u8>> {
+            self.inner.read_file(path)
+        }
+
+        fn read_dir(&self, path: &Utf8Path) -> io::Result<Vec<String>> {
+            self.inner.read_dir(path)
+        }
+
+        fn remove_file(&self, root: &Utf8Path, rel: &str) -> io::Result<()> {
+            self.hit(Write::Any, &root.join(rel));
+            self.inner.remove_file(root, rel)
+        }
+
+        fn remove_dir_if_empty(&self, root: &Utf8Path, rel: &str) -> io::Result<bool> {
+            self.hit(Write::Any, &root.join(rel));
+            self.inner.remove_dir_if_empty(root, rel)
+        }
+
+        fn create_dir_all(&self, root: &Utf8Path, rel: &str) -> io::Result<()> {
+            self.hit(Write::Any, &root.join(rel));
+            self.inner.create_dir_all(root, rel)
+        }
+
+        fn rename(&self, root: &Utf8Path, from: &str, to: &str) -> io::Result<()> {
+            self.hit(Write::Any, &root.join(to));
+            self.inner.rename(root, from, to)
+        }
+
+        fn read_link(&self, path: &Utf8Path) -> io::Result<String> {
+            self.inner.read_link(path)
+        }
+
+        fn set_mode(&self, root: &Utf8Path, rel: &str, mode: u32) -> io::Result<()> {
+            self.hit(Write::SetMode, &root.join(rel));
+            self.inner.set_mode(root, rel, mode)
+        }
+    }
+
+    /// Sets the permission bits of `path` to `mode`.
+    fn set_mode(path: &Utf8Path, mode: u32) {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// The permission bits of `path`.
+    fn mode_of(path: &Utf8Path) -> u32 {
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o7777
+    }
+
+    /// Moves workspace `name` of `f` to changeset `to` over `host`, under its lock.
+    fn update_on(f: &Fixture, host: Arc<Swapper>, name: &str, to: &str) -> Result<(), OpError> {
+        let ctx = f.ctx_on(host);
+        let mut ws = Fixture::open(&ctx, name);
+        let _held = lock::acquire(&ws.dir).unwrap();
+        materialize::update(&ctx, &mut ws, to).map(|_| ())
+    }
+
+    /// The paths an `E_WS_DIRTY` names.
+    fn dirty_paths(e: &OpError) -> Vec<String> {
+        assert_eq!(e.code, "E_WS_DIRTY", "{e:?}");
+        (e.details["paths"].as_array().unwrap().iter())
+            .map(|path| path.as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    /// A workspace of `base` (`d1/a` and the file `run.sh`) and a next changeset that adds
+    /// `d1/b` and makes `run.sh` executable; the workspace's directory and the next id.
+    fn two_trees(f: &Fixture) -> (Utf8PathBuf, String) {
+        let base = f.commit(
+            None,
+            &[Put::File("d1/a", "a\n"), Put::File("run.sh", "#!/bin/sh\n")],
+        );
+        f.create("w", &base, &[]);
+        let next = f.commit(
+            Some(&base),
+            &[Put::File("d1/b", "b\n"), Put::Exec("run.sh", "#!/bin/sh\n")],
+        );
+        (f.beside("w"), next)
+    }
+
+    /// A directory swapped for a link to an outside directory after the check: the write into
+    /// it is `E_WS_DIRTY` naming the directory, and the outside directory stays empty.
+    #[test]
+    fn a_dir_swapped_mid_write_is_refused() {
+        // 1. The workspace; an empty directory outside it.
+        let f = Fixture::new();
+        let (dir, next) = two_trees(&f);
+        let outside = f.beside("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+
+        // 2. `d1` becomes a link to it just before the first write below it.
+        let swap = Swap::DirToLink {
+            dir: dir.join("d1"),
+            outside: outside.clone(),
+        };
+        let result = update_on(&f, Swapper::new(swap, Write::Any), "w", &next);
+
+        // 3. Nothing written outside; refused, naming `d1`, saying how to go on.
+        let written: Vec<_> = std::fs::read_dir(&outside).unwrap().collect();
+        assert!(written.is_empty(), "{written:?} {result:?}");
+        let refused = result.unwrap_err();
+        assert_eq!(dirty_paths(&refused), ["d1"]);
+        assert_eq!(refused.hint.as_deref(), Some(MOVE_D1_ASIDE), "{refused:?}");
+
+        // 4. The next command finishes the update once `d1` is moved aside, and not before.
+        let held = swarmops_ws::status(&f.ctx(), WsStatusReq::new("w")).unwrap_err();
+        assert_eq!(dirty_paths(&held), ["d1"]);
+        std::fs::remove_file(dir.join("d1")).unwrap();
+        swarmops_ws::status(&f.ctx(), WsStatusReq::new("w")).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("d1/b")).unwrap(), "b\n");
+    }
+
+    /// A file swapped for a link to an outside file before its mode is set: `E_WS_DIRTY`
+    /// naming the file, and the outside file keeps its mode.
+    #[test]
+    fn a_file_swapped_before_set_mode_keeps_outside_mode() {
+        // 1. The workspace; a file outside it.
+        let f = Fixture::new();
+        let (dir, next) = two_trees(&f);
+        let outside = f.beside("outside.sh");
+        std::fs::write(&outside, "outside\n").unwrap();
+        set_mode(&outside, OUTSIDE_MODE);
+
+        // 2. `run.sh` becomes a link to it just before its mode is set.
+        let swap = Swap::FileToLink {
+            file: dir.join("run.sh"),
+            outside: outside.clone(),
+        };
+        let result = update_on(&f, Swapper::new(swap, Write::SetMode), "w", &next);
+
+        // 3. The outside file's mode unchanged; refused, naming `run.sh`.
+        assert_eq!(mode_of(&outside), OUTSIDE_MODE, "{result:?}");
+        assert_eq!(dirty_paths(&result.unwrap_err()), ["run.sh"]);
+    }
+
+    /// A file swapped for a hard link of an outside file before its mode is set: `E_WS_DIRTY`
+    /// naming the file, and the outside file keeps its mode.
+    #[test]
+    fn a_hard_linked_exec_file_is_refused() {
+        // 1. The workspace; a file outside it, on the same volume.
+        let f = Fixture::new();
+        let (dir, next) = two_trees(&f);
+        let outside = f.beside("outside.sh");
+        std::fs::write(&outside, "outside\n").unwrap();
+        set_mode(&outside, OUTSIDE_MODE);
+
+        // 2. `run.sh` becomes a hard link of it just before its mode is set.
+        let swap = Swap::FileToHardLink {
+            file: dir.join("run.sh"),
+            outside: outside.clone(),
+        };
+        let result = update_on(&f, Swapper::new(swap, Write::SetMode), "w", &next);
+
+        // 3. The outside file's mode unchanged; refused, naming `run.sh`.
+        assert_eq!(mode_of(&outside), OUTSIDE_MODE, "{result:?}");
+        assert_eq!(dirty_paths(&result.unwrap_err()), ["run.sh"]);
+    }
+
+    /// A directory that cannot be opened when a file below it is written: `E_IO` whose
+    /// `details.path` names the directory, not the file. Skipped as root, which opens it.
+    #[test]
+    fn an_unopenable_parent_names_the_dir() {
+        // 1. Root reads a directory without permission bits: nothing to test.
+        let f = Fixture::new();
+        let probe = f.beside("probe");
+        std::fs::create_dir_all(&probe).unwrap();
+        set_mode(&probe, 0);
+        let as_root = std::fs::read_dir(&probe).is_ok();
+        set_mode(&probe, 0o755);
+        if as_root {
+            eprintln!("skipped: run as root, which opens a directory of mode 000");
+            return;
+        }
+
+        // 2. `d1` loses its permission bits just before the first write below it.
+        let (dir, next) = two_trees(&f);
+        let swap = Swap::DirUnopenable {
+            dir: dir.join("d1"),
+        };
+        let failed = update_on(&f, Swapper::new(swap, Write::Any), "w", &next).unwrap_err();
+        set_mode(&dir.join("d1"), 0o755);
+
+        // 3. `E_IO` naming `d1`.
+        assert_eq!(failed.code, "E_IO", "{failed:?}");
+        assert_eq!(failed.details["path"], "d1", "{failed:?}");
+    }
+}
+
+/// A thread swaps one `dN` for a link to an outside directory and back while `ws update` moves
+/// 1,000 files over `d0..d9` between two trees. Linux only: each swap is one
+/// `renameat2(RENAME_EXCHANGE)`, so the directory is never missing between the two states.
+#[cfg(target_os = "linux")]
+mod swap_race {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread::{self, JoinHandle};
+    use std::time::{Duration, Instant};
+
+    use camino::Utf8Path;
+    use rustix::fs::{CWD, RenameFlags, renameat_with};
+    use swarmops_api::{OpError, WsStatusReq};
+    use swarmops_ws::{RealFs, RealHost, lock, materialize, pending};
+
+    use crate::fixture::{Fixture, Put};
+
+    /// The directories the files spread over, `d0..d9`.
+    const DIRS: usize = 10;
+    /// The files in each directory: 1,000 in all.
+    const FILES_PER_DIR: usize = 100;
+    /// The runs of the fast race.
+    const FAST_RUNS: usize = 20;
+    /// The runs of the slow race.
+    const SLOW_RUNS: usize = 1_000;
+    /// How long the swapping thread holds each state.
+    const SWAP_PAUSE: Duration = Duration::from_micros(200);
+    /// The first swaps start at `n / START_STEPS` of an update's time, `n` cycling through
+    /// `0..=START_STEPS + 1`: in the check, in the writes, and after the update.
+    const START_STEPS: u32 = 6;
+    /// The file in the outside directory, which no run may change.
+    const KEEP: &str = "keep";
+    /// What [`KEEP`] holds.
+    const KEEP_TEXT: &str = "outside\n";
+    /// A status page that holds every change of the 1,010 paths.
+    const STATUS_LIMIT: usize = 5_000;
+
+    #[test]
+    fn swap_race_keeps_writes_inside() {
+        swap_race(FAST_RUNS);
+    }
+
+    #[test]
+    #[ignore = "slow, ~95 s: 1,000 updates of 1,000 files under a swapping thread; ~91 s idle"]
+    fn swap_race_1000_runs() {
+        swap_race(SLOW_RUNS);
+    }
+
+    /// Where a swapped directory stands.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Place {
+        /// The workspace holds the directory.
+        Dir,
+        /// The workspace holds the link to the outside directory.
+        Link,
+    }
+
+    /// How the runs ended.
+    #[derive(Debug, Default)]
+    struct Tally {
+        /// Updates that finished.
+        done: usize,
+        /// Refused by the check, before any write.
+        checked: usize,
+        /// Refused by a write, the update's intent left to finish.
+        mid_write: usize,
+    }
+
+    /// `runs` updates, each to the other tree while one `dN` swaps: each succeeds or is
+    /// `E_WS_DIRTY` naming `dN`, the outside directory never changes, and after a refusal
+    /// `ws status` lists `dN`. Some refusal must come from a write, else the race missed them.
+    fn swap_race(runs: usize) {
+        // 1. Two trees, the workspace at the first; outside it a directory and a link to it.
+        let f = Fixture::new();
+        let trees = two_trees(&f);
+        let began = Instant::now();
+        f.create("w", &trees[0], &[]);
+        let mut slowest = began.elapsed();
+        let dir = f.beside("w");
+        let outside = f.beside("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join(KEEP), KEEP_TEXT).unwrap();
+        let link = f.beside("link");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        let mut tally = Tally::default();
+        let mut at = trees[0].clone();
+        for run in 0..runs {
+            // 2. An update to the other tree while `dN` swaps, from a point of the update's
+            //    time on (the slowest update yet sets that time).
+            let name = format!("d{}", run % DIRS);
+            let swapped = dir.join(&name);
+            let to = if at == trees[0] { &trees[1] } else { &trees[0] };
+            let step = u32::try_from(run).unwrap() % (START_STEPS + 2);
+            let swapping = Swapping::start(&swapped, &link, slowest * step / START_STEPS);
+            let began = Instant::now();
+            let result = update(&f, to);
+            slowest = slowest.max(began.elapsed());
+            let place = swapping.stop();
+
+            // 3. Nothing outside changed.
+            let outside_now = listing(&outside);
+            assert_eq!(outside_now, [KEEP], "run {run}: {result:?}");
+            let kept = std::fs::read_to_string(outside.join(KEEP)).unwrap();
+            assert_eq!(kept, KEEP_TEXT, "run {run}: {result:?}");
+
+            // 4. A refusal names `dN`, and so does `ws status` while the link stands.
+            if let Err(e) = &result {
+                assert_eq!(e.code, "E_WS_DIRTY", "run {run}: {e:?}");
+                let paths = dirty_paths(e);
+                assert!(
+                    paths.iter().all(|p| below(p, &name)),
+                    "run {run}: {paths:?}"
+                );
+                if intent_left(&dir) {
+                    tally.mid_write += 1;
+                } else {
+                    tally.checked += 1;
+                }
+                put(place, Place::Link, &swapped, &link);
+                assert!(status_lists(&f, &name), "run {run}: status misses {name}");
+                put(Place::Link, Place::Dir, &swapped, &link);
+            } else {
+                tally.done += 1;
+                put(place, Place::Dir, &swapped, &link);
+            }
+
+            // 5. With the directory back, the workspace settles on a whole tree.
+            at = Fixture::open(&f.ctx(), "w").file.materialized;
+            assert!(at == trees[0] || at == trees[1], "run {run}: at {at}");
+        }
+        assert!(tally.mid_write > 0, "no swap met a write: {tally:?}");
+    }
+
+    /// Two trees of the same 1,000 paths over `d0..d9` with other contents, the second with
+    /// one more file in each directory.
+    fn two_trees(f: &Fixture) -> [String; 2] {
+        let paths: Vec<String> = (0..DIRS)
+            .flat_map(|d| (0..FILES_PER_DIR).map(move |i| format!("d{d}/f{i}")))
+            .collect();
+        let extra: Vec<String> = (0..DIRS).map(|d| format!("d{d}/extra")).collect();
+
+        let first: Vec<_> = paths.iter().map(|p| Put::File(p, "first\n")).collect();
+        let base = f.commit(None, &first);
+        let second: Vec<_> = (paths.iter().map(|p| Put::File(p, "second\n")))
+            .chain(extra.iter().map(|p| Put::File(p, "extra\n")))
+            .collect();
+        let next = f.commit(Some(&base), &second);
+        [base, next]
+    }
+
+    /// Moves workspace `w` of `f` to changeset `to` over the real host, under its lock.
+    fn update(f: &Fixture, to: &str) -> Result<(), OpError> {
+        let ctx = f.ctx_on(Arc::new(RealHost::default()));
+        let mut ws = Fixture::open(&ctx, "w");
+        let _held = lock::acquire(&ws.dir).unwrap();
+        materialize::update(&ctx, &mut ws, to).map(|_| ())
+    }
+
+    /// Whether workspace directory `dir` holds an update's intent, left by a refused write.
+    fn intent_left(dir: &Utf8Path) -> bool {
+        pending::read_intent(&RealFs::new(), dir).unwrap().is_some()
+    }
+
+    /// A thread that exchanges a directory and a link until stopped.
+    struct Swapping {
+        stop: Arc<AtomicBool>,
+        thread: JoinHandle<Place>,
+    }
+
+    impl Swapping {
+        /// Starts exchanging `dir` and `link` after `delay`, the directory in the workspace
+        /// first.
+        fn start(dir: &Utf8Path, link: &Utf8Path, delay: Duration) -> Self {
+            let stop = Arc::new(AtomicBool::new(false));
+            let (dir, link, stopped) = (dir.to_owned(), link.to_owned(), stop.clone());
+            let thread = thread::spawn(move || {
+                let began = Instant::now();
+                let mut place = Place::Dir;
+                while !stopped.load(Ordering::Relaxed) {
+                    if began.elapsed() >= delay {
+                        exchange(&dir, &link);
+                        place = flip(place);
+                    }
+                    thread::sleep(SWAP_PAUSE);
+                }
+                place
+            });
+            Self { stop, thread }
+        }
+
+        /// Stops the thread; where it left the directory.
+        fn stop(self) -> Place {
+            self.stop.store(true, Ordering::Relaxed);
+            self.thread.join().unwrap()
+        }
+    }
+
+    /// The other place.
+    fn flip(place: Place) -> Place {
+        match place {
+            Place::Dir => Place::Link,
+            Place::Link => Place::Dir,
+        }
+    }
+
+    /// Swaps `dir` and `link` in one call.
+    fn exchange(dir: &Utf8Path, link: &Utf8Path) {
+        let (dir, link) = (dir.as_str(), link.as_str());
+        renameat_with(CWD, dir, CWD, link, RenameFlags::EXCHANGE).unwrap();
+    }
+
+    /// Moves the swapped directory from place `now` to place `want`.
+    fn put(now: Place, want: Place, dir: &Utf8Path, link: &Utf8Path) {
+        if now != want {
+            exchange(dir, link);
+        }
+    }
+
+    /// The names in directory `dir`, sorted.
+    fn listing(dir: &Utf8Path) -> Vec<String> {
+        let mut names: Vec<String> = (std::fs::read_dir(dir).unwrap())
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The paths an `E_WS_DIRTY` names.
+    fn dirty_paths(e: &OpError) -> Vec<String> {
+        (e.details["paths"].as_array().unwrap().iter())
+            .map(|path| path.as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    /// Whether `path` is `name` or below it.
+    fn below(path: &str, name: &str) -> bool {
+        path == name || path.starts_with(&format!("{name}/"))
+    }
+
+    /// Whether `ws status` of workspace `w` names `name` or a path below it: as a change, or
+    /// in the `E_WS_DIRTY` of the update it finishes first.
+    fn status_lists(f: &Fixture, name: &str) -> bool {
+        let mut req = WsStatusReq::new("w");
+        req.limit = STATUS_LIMIT;
+        match swarmops_ws::status(&f.ctx(), req) {
+            Ok(status) => status.changes.iter().any(|c| below(&c.path, name)),
+            Err(e) if e.code == "E_WS_DIRTY" => dirty_paths(&e).iter().any(|p| below(p, name)),
+            Err(e) => panic!("status: {e:?}"),
+        }
+    }
+}
