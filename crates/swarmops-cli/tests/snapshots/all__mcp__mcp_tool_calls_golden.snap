@@ -1220,12 +1220,68 @@ expression: transcript
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
+          "arguments": {
+            "limit": 2,
+            "name": "release/v1"
+          },
+          "name": "ref_log"
+        }
+      },
+      "response": {
+        "id": 23,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"ref_log\",\"result\":{\"moves\":[{\"actor\":\"agent/worker-17\",\"at\":\"[at]\",\"new\":\"[c1]\",\"op\":8},{\"actor\":\"agent/worker-17\",\"at\":\"[at]\",\"old\":\"[c1]\",\"op\":7}],\"name\":\"release/v1\",\"truncated\":true}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {}
+            },
+            "ok": true,
+            "op": "ref_log",
+            "result": {
+              "moves": [
+                {
+                  "actor": "agent/worker-17",
+                  "at": "[at]",
+                  "new": "[c1]",
+                  "op": 8
+                },
+                {
+                  "actor": "agent/worker-17",
+                  "at": "[at]",
+                  "old": "[c1]",
+                  "op": 7
+                }
+              ],
+              "name": "release/v1",
+              "truncated": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 24,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
           "arguments": {},
           "name": "ref_list"
         }
       },
       "response": {
-        "id": 23,
+        "id": 24,
         "jsonrpc": "2.0",
         "result": {
           "content": [
@@ -1267,7 +1323,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 24,
+        "id": 25,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -1282,7 +1338,7 @@ expression: transcript
         }
       },
       "response": {
-        "id": 24,
+        "id": 25,
         "jsonrpc": "2.0",
         "result": {
           "content": [
@@ -1331,7 +1387,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 25,
+        "id": 26,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -1342,7 +1398,7 @@ expression: transcript
         }
       },
       "response": {
-        "id": 25,
+        "id": 26,
         "jsonrpc": "2.0",
         "result": {
           "content": [
@@ -1387,7 +1443,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 26,
+        "id": 27,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -1399,7 +1455,7 @@ expression: transcript
         }
       },
       "response": {
-        "id": 26,
+        "id": 27,
         "jsonrpc": "2.0",
         "result": {
           "content": [
@@ -1464,7 +1520,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 27,
+        "id": 28,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -1477,7 +1533,7 @@ expression: transcript
         }
       },
       "response": {
-        "id": 27,
+        "id": 28,
         "jsonrpc": "2.0",
         "result": {
           "content": [
@@ -1513,7 +1569,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 28,
+        "id": 29,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -1527,7 +1583,7 @@ expression: transcript
         }
       },
       "response": {
-        "id": 28,
+        "id": 29,
         "jsonrpc": "2.0",
         "result": {
           "content": [
@@ -1572,7 +1628,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 29,
+        "id": 30,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -1586,7 +1642,7 @@ expression: transcript
         }
       },
       "response": {
-        "id": 29,
+        "id": 30,
         "jsonrpc": "2.0",
         "result": {
           "content": [
@@ -1630,7 +1686,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 30,
+        "id": 31,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -1652,7 +1708,7 @@ expression: transcript
         }
       },
       "response": {
-        "id": 30,
+        "id": 31,
         "jsonrpc": "2.0",
         "result": {
           "content": [
@@ -1694,7 +1750,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 31,
+        "id": 32,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -1705,7 +1761,7 @@ expression: transcript
         }
       },
       "response": {
-        "id": 31,
+        "id": 32,
         "jsonrpc": "2.0",
         "result": {
           "content": [
@@ -1785,7 +1841,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 32,
+        "id": 33,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -1799,7 +1855,7 @@ expression: transcript
         }
       },
       "response": {
-        "id": 32,
+        "id": 33,
         "jsonrpc": "2.0",
         "result": {
           "content": [
@@ -1855,7 +1911,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 33,
+        "id": 34,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -1867,7 +1923,7 @@ expression: transcript
         }
       },
       "response": {
-        "id": 33,
+        "id": 34,
         "jsonrpc": "2.0",
         "result": {
           "content": [
@@ -1914,7 +1970,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 34,
+        "id": 35,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -1926,7 +1982,7 @@ expression: transcript
         }
       },
       "response": {
-        "id": 34,
+        "id": 35,
         "jsonrpc": "2.0",
         "result": {
           "content": [
@@ -1983,7 +2039,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 35,
+        "id": 36,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -1992,7 +2048,7 @@ expression: transcript
         }
       },
       "response": {
-        "id": 35,
+        "id": 36,
         "jsonrpc": "2.0",
         "result": {
           "content": [
@@ -2029,7 +2085,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 36,
+        "id": 37,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -2040,7 +2096,7 @@ expression: transcript
         }
       },
       "response": {
-        "id": 36,
+        "id": 37,
         "jsonrpc": "2.0",
         "result": {
           "content": [
@@ -2090,7 +2146,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 37,
+        "id": 38,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -2099,7 +2155,7 @@ expression: transcript
         }
       },
       "response": {
-        "id": 37,
+        "id": 38,
         "jsonrpc": "2.0",
         "result": {
           "content": [

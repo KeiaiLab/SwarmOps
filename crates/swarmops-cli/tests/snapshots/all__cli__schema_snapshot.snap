@@ -7062,6 +7062,149 @@ expression: s.redact(&all)
       "title": "RefListResp",
       "type": "object"
     },
+    "RefLogEntryOut": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One move of a ref in its log.",
+      "properties": {
+        "actor": {
+          "description": "Who moved it.",
+          "type": "string"
+        },
+        "at": {
+          "description": "When it moved, in Unix seconds, as its writer recorded it.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "new": {
+          "description": "What it names after; omitted for the move that deleted it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "old": {
+          "description": "What the ref named before; omitted for the move that created it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "op": {
+          "description": "The operation that made it, as `op_log` numbers it; `op_log` with `before` one more and\n`limit` 1 gives its id.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "op",
+        "actor",
+        "at"
+      ],
+      "title": "RefLogEntryOut",
+      "type": "object"
+    },
+    "RefLogPage": {
+      "$defs": {
+        "RefLogEntryOut": {
+          "description": "One move of a ref in its log.",
+          "properties": {
+            "actor": {
+              "description": "Who moved it.",
+              "type": "string"
+            },
+            "at": {
+              "description": "When it moved, in Unix seconds, as its writer recorded it.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "new": {
+              "description": "What it names after; omitted for the move that deleted it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "old": {
+              "description": "What the ref named before; omitted for the move that created it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "op": {
+              "description": "The operation that made it, as `op_log` numbers it; `op_log` with `before` one more and\n`limit` 1 gives its id.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "op",
+            "actor",
+            "at"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ref_log` (CLI `ref log`): a page of one ref's moves, newest first.",
+      "properties": {
+        "moves": {
+          "description": "Its moves.",
+          "items": {
+            "$ref": "#/$defs/RefLogEntryOut"
+          },
+          "type": "array"
+        },
+        "name": {
+          "description": "The ref.",
+          "type": "string"
+        },
+        "truncated": {
+          "description": "Whether older moves follow this page: give the last one's `op` as `before` to read them.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "moves",
+        "truncated"
+      ],
+      "title": "RefLogPage",
+      "type": "object"
+    },
+    "RefLogReq": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ref_log` (CLI `ref log`): one ref's moves, newest first, a page at a time, as the journal\nrecorded them: the op log filtered to the ref. A deleted ref lists its moves; a name the\njournal records no move of is `E_REF_NOT_FOUND`.",
+      "properties": {
+        "before": {
+          "description": "Start below this operation: the page holds the moves of operations numbered less than\nit, so the last `op` of a page reads on from there. When omitted, from the newest.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "limit": {
+          "default": 50,
+          "description": "The most moves to return: at least 1 (0 is `E_INVALID_ARG`).",
+          "format": "uint",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "name": {
+          "description": "The ref.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "RefLogReq",
+      "type": "object"
+    },
     "RefMoveOut": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "A move of a ref, as the journal recorded it.",

@@ -27,6 +27,7 @@ use swarmops_api::{BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp};
 use swarmops_api::{ContentInput, ModeInput, ResolutionInput, ResolutionsInput};
 use swarmops_api::{GcReq, GcResp, RepairReq, RepairResp, UpgradeReq, UpgradeResp};
 use swarmops_api::{LandReq, LandResp, LandStatus, MAX_LAND_ATTEMPTS};
+use swarmops_api::{RefLogEntryOut, RefLogPage, RefLogReq};
 use swarmops_api::{ResolveRevReq, ResolvedRev, RevKind};
 use swarmops_core::bytes;
 use swarmops_core::{
@@ -274,6 +275,11 @@ const MAX_LAND_KEY: usize = 64;
 ///   `max_changesets` of its changesets (each read from its object for its agent, time, title
 ///   and land key; `changesets_total` counts them all) and its ref moves. A page is `truncated`
 ///   when older operations follow its last.
+/// - `ref_log` lists one ref's moves, newest first, below `before`, from the committed snapshot
+///   `op_log` reads: the op log filtered to the ref. A deleted ref lists its moves, the newest
+///   with no `new`; a name the journal records no move of is `E_REF_NOT_FOUND` `{name}`, found
+///   by reading the whole journal (there is no per-ref index). A page is `truncated` when older
+///   moves follow its last.
 /// - `undo` moves every ref an operation moved back to what it named before the operation, for
 ///   the caller's agent, by compare-and-swap in one transaction of its own, all of them or none:
 ///   a ref that names that already is skipped, and one that names neither that nor what the
@@ -2173,6 +2179,30 @@ impl StoreOps for Recording<'_> {
     fn upgrade(&self, req: UpgradeReq) -> Result<UpgradeResp, OpError> {
         crate::upgrade::run(self, req)
     }
+
+    fn ref_log(&self, req: RefLogReq) -> Result<RefLogPage, OpError> {
+        let RefLogReq {
+            name,
+            before,
+            limit,
+            ..
+        } = req;
+        at_least_one("limit", limit)?;
+
+        // 1. The moves, from the committed snapshot the op log reads.
+        let listed = self
+            .ops
+            .repo
+            .ref_log(&name, before, limit)
+            .map_err(error::op)?;
+
+        // 2. A name the journal records no move of never existed.
+        let Some((moves, older)) = listed else {
+            return Err(ref_not_found(&name));
+        };
+        let moves = moves.into_iter().map(ref_log_entry).collect();
+        Ok(RefLogPage::new(name, moves, older))
+    }
 }
 
 /// Each operation as a request of its own, whose resolved revisions go unrecorded: to report
@@ -2276,6 +2306,10 @@ impl StoreOps for LocalOps {
 
     fn upgrade(&self, req: UpgradeReq) -> Result<UpgradeResp, OpError> {
         self.recording(&Resolved::default()).upgrade(req)
+    }
+
+    fn ref_log(&self, req: RefLogReq) -> Result<RefLogPage, OpError> {
+        self.recording(&Resolved::default()).ref_log(req)
     }
 }
 
@@ -2451,6 +2485,24 @@ pub(crate) fn cas_mismatch(name: &str, actual: Option<ChangesetId>, message: Str
     error::error(ErrorCode::CasMismatch, message)
         .with_details(error::details([("name", name.into()), ("actual", actual)]))
         .with_hint(next)
+}
+
+/// `E_REF_NOT_FOUND` `{name}`: the journal records no move of ref `name`, so it never existed.
+fn ref_not_found(name: &str) -> OpError {
+    error::error(
+        ErrorCode::RefNotFound,
+        format!("ref {name:?} never existed: the journal records no move of it"),
+    )
+    .with_details(error::details([("name", name.into())]))
+    .with_hint("swarmops ref list names the refs")
+}
+
+/// `entry` as `ref_log` lists it.
+fn ref_log_entry(entry: swarmops_store::RefMoveEntry) -> RefLogEntryOut {
+    let mut out = RefLogEntryOut::new(entry.seq, entry.actor, entry.ts);
+    out.old = entry.old.map(|id| id.to_string());
+    out.new = entry.new.map(|id| id.to_string());
+    out
 }
 
 /// `E_INVALID_ARG` unless `value`, the request's `field`, is at least 1.

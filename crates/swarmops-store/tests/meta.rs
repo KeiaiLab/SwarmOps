@@ -5520,6 +5520,57 @@ fn reflog_walks_back_past_256_frames() {
     assert_eq!(reflog_moves(&read, "release/old", 10), old);
 }
 
+/// `reflog_page` with no `before` is `reflog`; with one, it lists the moves of frames below it,
+/// newest first, across the 256-frame batches and the frames past the checkpoint: pages of 7
+/// concatenated give every move once. A name `reflog` refuses it refuses the same way.
+#[test]
+fn reflog_page_equals_reflog_when_unpaged() {
+    let (_dir, root) = new_root();
+    let store = MetaStore::create_with_fs(&root, checked(NoSyncFs)).unwrap();
+    insert(&store, &[cs(1, &[]), cs(2, &[])]);
+
+    // 1. 400 frames, every fourth a move of main, the others of release/busy.
+    let (mut main, mut busy) = (None, None);
+    for seq in 1..=400 {
+        let (name, at) = if seq % 4 == 0 {
+            ("main", &mut main)
+        } else {
+            ("release/busy", &mut busy)
+        };
+        let new = if *at == Some(1) { 2 } else { 1 };
+        cas(&store, name, *at, Some(new));
+        *at = Some(new);
+    }
+    let read = store.read().unwrap();
+    let all = read.reflog("main", usize::MAX).unwrap();
+    assert_eq!(all.len(), 100);
+
+    // 2. Unpaged, it is reflog, at any limit.
+    for limit in [0, 1, 7, 100, usize::MAX] {
+        assert_eq!(
+            read.reflog_page("main", None, limit).unwrap(),
+            read.reflog("main", limit).unwrap()
+        );
+    }
+
+    // 3. Pages of 7 by `before` concatenate to the whole log.
+    let mut paged = Vec::new();
+    let mut before = None;
+    loop {
+        let page = read.reflog_page("main", before, 7).unwrap();
+        let Some(last) = page.last() else {
+            break;
+        };
+        before = Some(last.seq);
+        paged.extend(page);
+    }
+    assert_eq!(paged, all);
+
+    // 4. A `before` at or under the first move lists nothing; a bad name is refused.
+    assert_eq!(read.reflog_page("main", Some(all[99].seq), 10).unwrap(), []);
+    assert_ref_name(read.reflog_page("../main", Some(5), 1), "../main");
+}
+
 /// Set only in the children of `crash_at_any_replay_call_recovers_to_the_journal`: the store
 /// root.
 #[cfg(feature = "test-hooks")]

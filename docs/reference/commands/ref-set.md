@@ -258,5 +258,6 @@ Any command that opens a store may also fail with a store error, such as [`E_NOT
 - [Operating SwarmOps: One writer per trunk](../../operations.md#one-writer-per-trunk)
 - [`swarmops ref list`](ref-list.md)
 - [`swarmops ref delete`](ref-delete.md)
+- [`swarmops ref log`](ref-log.md)
 - [CLI reference](../cli.md)
 - [Error codes](../errors.md)

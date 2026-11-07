@@ -2,7 +2,7 @@
 
 # Schema types
 
-The 166 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
+The 169 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
 
 ## Index
 
@@ -102,6 +102,9 @@ The 166 request, response and value types of the API, as `swarmops schema` print
 | [`RefKind`](#refkind) | enumeration | What a ref's name names. |
 | [`RefListReq`](#reflistreq) | object | `ref list`: list every ref, or those whose names start with a prefix. |
 | [`RefListResp`](#reflistresp) | object | `ref list`: every ref. |
+| [`RefLogEntryOut`](#reflogentryout) | object | One move of a ref in its log. |
+| [`RefLogPage`](#reflogpage) | object | `ref_log` (CLI `ref log`): a page of one ref's moves, newest first. |
+| [`RefLogReq`](#reflogreq) | object | `ref_log` (CLI `ref log`): one ref's moves, newest first, a page at a time, as the journal recorded them: the op log filtered to the ref. |
 | [`RefMoveOut`](#refmoveout) | object | A move of a ref, as the journal recorded it. |
 | [`RefOut`](#refout) | object | One ref. |
 | [`RefSetReq`](#refsetreq) | object | `ref set`: move a ref, or create one, by compare-and-swap. |
@@ -1501,6 +1504,44 @@ Kind: object. `swarmops schema RefListResp` prints its JSON Schema.
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
 | `refs` | array of [`RefOut`](#refout) | yes | The refs. |
+
+## RefLogEntryOut
+
+One move of a ref in its log.
+
+Kind: object. `swarmops schema RefLogEntryOut` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `actor` | `string` | yes | Who moved it. |
+| `at` | `integer` (int64) | yes | When it moved, in Unix seconds, as its writer recorded it. |
+| `new` | `string` or `null` | no | What it names after; omitted for the move that deleted it. |
+| `old` | `string` or `null` | no | What the ref named before; omitted for the move that created it. |
+| `op` | `integer` (uint64) | yes | The operation that made it, as `op_log` numbers it; `op_log` with `before` one more and `limit` 1 gives its id. |
+
+## RefLogPage
+
+`ref_log` (CLI `ref log`): a page of one ref's moves, newest first.
+
+Kind: object. `swarmops schema RefLogPage` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `moves` | array of [`RefLogEntryOut`](#reflogentryout) | yes | Its moves. |
+| `name` | `string` | yes | The ref. |
+| `truncated` | `boolean` | yes | Whether older moves follow this page: give the last one's `op` as `before` to read them. |
+
+## RefLogReq
+
+`ref_log` (CLI `ref log`): one ref's moves, newest first, a page at a time, as the journal recorded them: the op log filtered to the ref. A deleted ref lists its moves; a name the journal records no move of is `E_REF_NOT_FOUND`.
+
+Kind: object. `swarmops schema RefLogReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `before` | `integer` (uint64) or `null` | no | Start below this operation: the page holds the moves of operations numbered less than it, so the last `op` of a page reads on from there. When omitted, from the newest. |
+| `limit` | `integer` (uint) | no | The most moves to return: at least 1 (0 is `E_INVALID_ARG`). Default: `50`. At least 1. |
+| `name` | `string` | yes | The ref. |
 
 ## RefMoveOut
 

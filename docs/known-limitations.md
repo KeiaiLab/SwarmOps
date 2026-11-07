@@ -172,8 +172,8 @@ left).
   (which the writer then cuts back), can take back state it returned (operations spec §4 says what
   agents may rely on). Readers whose results leave the host (M8's git export, M11's `serve`) take a
   committed snapshot under the lock instead, `MetaStore::read_committed`, which neither can take
-  back, at the cost of a wait behind the writer that holds the lock. So does `op log`, the one
-  local reader that does, so that a number it lists is never given to another operation.
+  back, at the cost of a wait behind the writer that holds the lock. So do `op log` and `ref log`,
+  the local readers that do, so that a number they list is never given to another operation.
   `serve` takes it only when the store moved since `serve.git`'s last export: a connection whose
   lock-free read of the store refs and `serve.git`'s refs both match `git/serve.state` advertises
   that export, committed, with no lock. One case remains: a frame not yet synced that moves a
@@ -182,8 +182,8 @@ left).
   and what a cut of the frame could take back is the ref's position, never data (the M17 design
   §4.2). *Documented (storage spec §3). Found: M1 Task 2c; final review, question 2.*
 - **A committed read fails on a read-only filesystem.** `MetaStore::read_committed` (the git
-  export, `push`, `serve`, `op log`) opens `meta/lock` for writing before its tail check, as a
-  writer does, so on a read-only mount it fails with `E_IO` at `open meta/lock`, even where the
+  export, `push`, `serve`, `op log`, `ref log`) opens `meta/lock` for writing before its tail
+  check, as a writer does, so on a read-only mount it fails with `E_IO` at `open meta/lock`, even where the
   tail needs no repair. The lock-free reads work there, and so does a `serve` connection whose
   store has not moved since `serve.git`'s last export (it reads `git/serve.state` and takes no
   lock); a store that moved still needs the committed read. *Unscheduled. Found: M8 area A
@@ -958,6 +958,14 @@ left).
 - **A blob is stored whole.** Each version of a file is one object (zstd-compressed past a
   small size), with no chunks or deltas, so a small edit to a large file stores it again.
   *Unscheduled (content-defined chunking). Found: the 2026-10-27 completeness report.*
+- **`ref log` of a name that never moved reads the whole journal.** A ref's log is the journal's
+  moves of it, read back from the end; there is no per-ref index, so a valid name the journal
+  records no move of (`E_REF_NOT_FOUND`), or a page below a ref's first move, is answered only
+  after every frame is read. Reading back is the `history` bench's reflog case: `main`'s last 100
+  moves, 100 frames, take 30.9 ms on a 200,000-changeset chain and 154 ms on a 1,000,000-changeset
+  one (criterion median, [perf.md](perf.md)); the bench has no case of 1,000,000 frames, and no
+  case of a name that never moved. *Target: a per-ref index, which needs a layout (M20, FORMAT 3;
+  the M18 design §3.2). Found: the M18 design.*
 - **Small object-store costs.** A put that creates a fan-out directory checks for it under the
   store's mutex. *Unscheduled. Found: M1 Task 1.*
 
@@ -989,17 +997,18 @@ These do not change what SwarmOps does, only how well the tests can see it.
   `journal.off` a writer cut is tested only at the journal's level. *Target: M9 (the metadata
   read paths through `FsOps`, umbrella spec §14; the M6 design, decision D4). Found: M1.5 Task 3 review (M3); M1.5 final
   review (D5).*
-- **Golden envelopes cover 54 of the 55 error codes.** `error_codes_reach_the_cli` pins the envelope
-  of 42, the nine workspace codes (M5), `E_WS_OUTSIDE_PREFIXES` and `E_WS_STALE` (M15),
-  `E_FORMAT_REQUIRED` (M6), `E_AUTH` and `E_POLICY_DENIED` (M14) among them;
-  `remote_error_codes_golden` the four `E_REMOTE_*` codes over smart HTTP and ssh (M13); the
-  FORMAT 2 goldens `E_TAG_IMMUTABLE` and `E_MAINTENANCE_BUSY` (M6); and goldens of their own six
-  the first test cannot raise (M15): `E_AMBIGUOUS_ID`, `E_IO_TRANSIENT`, `E_INTERNAL`,
-  `E_CAS_RETRY_EXHAUSTED`, `E_BUSY` in the slow `op_log_behind_a_held_lock_is_e_busy`, and
-  `E_UNKNOWN_PARENT` as an error object, since every operation resolves a parent first. The other is
-  in the first test's `NOT_RAISED` list: `E_REF_NOT_FOUND`, which no operation raises. *Unscheduled
-  (`E_IO` joined in M1.6, the six `E_GIT_*` codes in M3, `E_WS_OUTSIDE_PREFIXES` and `E_WS_STALE` in
-  M15). Found: the 2026-10-16 comparison.*
+- **Golden envelopes cover 55 of the 55 error codes.** `error_codes_reach_the_cli` pins the envelope
+  of 43, the nine workspace codes (M5), `E_WS_OUTSIDE_PREFIXES` and `E_WS_STALE` (M15),
+  `E_FORMAT_REQUIRED` (M6), `E_AUTH` and `E_POLICY_DENIED` (M14) and `E_REF_NOT_FOUND` (`ref log`
+  of a name that never moved, M18) among them; `remote_error_codes_golden` the four `E_REMOTE_*`
+  codes over smart HTTP and ssh (M13); the FORMAT 2 goldens `E_TAG_IMMUTABLE` and
+  `E_MAINTENANCE_BUSY` (M6); and goldens of their own six the first test cannot raise (M15):
+  `E_AMBIGUOUS_ID`, `E_IO_TRANSIENT`, `E_INTERNAL`, `E_CAS_RETRY_EXHAUSTED`, `E_BUSY` in the slow
+  `op_log_behind_a_held_lock_is_e_busy`, and `E_UNKNOWN_PARENT` as an error object, since every
+  operation resolves a parent first. What remains: a code a later milestone adds joins the same
+  test, which fails until it is pinned or listed. *Closed for today's codes in M18 (the M18 design
+  §3.2; `E_IO` joined in M1.6, the six `E_GIT_*` codes in M3, `E_WS_OUTSIDE_PREFIXES` and
+  `E_WS_STALE` in M15). Found: the 2026-10-16 comparison.*
 - **The git remotes' reference pages have no recorded example.** The pages of `clone`,
   `remote add|remove|list`, `fetch`, `push`, `sync` and `sync status`, and of their five MCP tools,
   say "No recorded example yet": no golden step runs them, since they need a remote. *Unscheduled.

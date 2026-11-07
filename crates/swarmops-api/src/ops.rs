@@ -2971,6 +2971,90 @@ impl OpLogPage {
     }
 }
 
+/// `ref_log` (CLI `ref log`): one ref's moves, newest first, a page at a time, as the journal
+/// recorded them: the op log filtered to the ref. A deleted ref lists its moves; a name the
+/// journal records no move of is `E_REF_NOT_FOUND`.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RefLogReq {
+    /// The ref.
+    pub name: String,
+    /// Start below this operation: the page holds the moves of operations numbered less than
+    /// it, so the last `op` of a page reads on from there. When omitted, from the newest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before: Option<u64>,
+    /// The most moves to return: at least 1 (0 is `E_INVALID_ARG`).
+    #[serde(default = "default_op_log_limit")]
+    #[schemars(range(min = 1))]
+    pub limit: usize,
+}
+
+impl RefLogReq {
+    /// The newest moves of ref `name`, at most the default limit.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            before: None,
+            limit: default_op_log_limit(),
+        }
+    }
+}
+
+/// `ref_log` (CLI `ref log`): a page of one ref's moves, newest first.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RefLogPage {
+    /// The ref.
+    pub name: String,
+    /// Its moves.
+    pub moves: Vec<RefLogEntryOut>,
+    /// Whether older moves follow this page: give the last one's `op` as `before` to read them.
+    pub truncated: bool,
+}
+
+impl RefLogPage {
+    /// Takes every field.
+    pub fn new(name: impl Into<String>, moves: Vec<RefLogEntryOut>, truncated: bool) -> Self {
+        Self {
+            name: name.into(),
+            moves,
+            truncated,
+        }
+    }
+}
+
+/// One move of a ref in its log.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RefLogEntryOut {
+    /// The operation that made it, as `op_log` numbers it; `op_log` with `before` one more and
+    /// `limit` 1 gives its id.
+    pub op: u64,
+    /// What the ref named before; omitted for the move that created it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old: Option<String>,
+    /// What it names after; omitted for the move that deleted it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new: Option<String>,
+    /// Who moved it.
+    pub actor: String,
+    /// When it moved, in Unix seconds, as its writer recorded it.
+    pub at: i64,
+}
+
+impl RefLogEntryOut {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(op: u64, actor: impl Into<String>, at: i64) -> Self {
+        Self {
+            op,
+            old: None,
+            new: None,
+            actor: actor.into(),
+            at,
+        }
+    }
+}
+
 /// One operation: a write transaction, as the journal recorded it.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -4310,6 +4394,13 @@ pub trait StoreOps {
     fn upgrade(&self, req: UpgradeReq) -> Result<UpgradeResp, OpError> {
         let _ = req;
         Err(not_built("upgrade"))
+    }
+
+    /// One ref's moves, newest first, a page at a time (CLI `ref log`). A read of the store. A
+    /// store that does not have it answers `E_INVALID_ARG`.
+    fn ref_log(&self, req: RefLogReq) -> Result<RefLogPage, OpError> {
+        let _ = req;
+        Err(not_built("ref_log"))
     }
 }
 

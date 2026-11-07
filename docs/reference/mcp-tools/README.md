@@ -23,6 +23,7 @@ In `tools/list`'s order.
 | [`ref_list`](ref-list.md) | List refs | [`swarmops ref list`](../commands/ref-list.md) | no | no |
 | [`ref_set`](ref-set.md) | Move a ref | [`swarmops ref set`](../commands/ref-set.md) | moves refs | yes |
 | [`ref_delete`](ref-delete.md) | Delete a ref | [`swarmops ref delete`](../commands/ref-delete.md) | moves refs | yes |
+| [`ref_log`](ref-log.md) | List a ref's moves | [`swarmops ref log`](../commands/ref-log.md) | no | no |
 | [`undo`](undo.md) | Undo an operation | [`swarmops op undo`](../commands/op-undo.md) | moves refs | yes |
 | [`commit`](commit.md) | Commit a changeset | [`swarmops commit`](../commands/commit.md) | adds to it | yes |
 | [`land`](land.md) | Land a change | [`swarmops land`](../commands/land.md) | adds a changeset and moves the target | yes |
@@ -106,7 +107,7 @@ Both are the server's, never a call's; no tool argument names either.
 - The store is `--repo`, else `SWARMOPS_REPO`, opened anew for each call, so that a call sees what other processes committed. A store that is not there is each call's `E_NOT_A_REPO`, and the server serves on.
 - The identity is `--as`, else `SWARMOPS_AGENT`, with `SWARMOPS_RUN_ID`, as for the CLI. Every change is recorded for it.
 - These tools need it, and without one fail with `E_IDENTITY_REQUIRED`: `ref_set`, `ref_delete`, `undo`, `commit`, `land`, `rebase`, `blob_put`, `sync`.
-- These need none: `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `ancestry`, `path_history`, `diff`, `op_log`, `ref_list`, `blob_has`, `verify`, `gc`, `repair`, `upgrade`, `remote_list`, `fetch`, `push`, `sync_status`.
+- These need none: `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `ancestry`, `path_history`, `diff`, `op_log`, `ref_list`, `ref_log`, `blob_has`, `verify`, `gc`, `repair`, `upgrade`, `remote_list`, `fetch`, `push`, `sync_status`.
 - The output flags (`--json`, `--human`, `--pretty`) do not apply.
 
 ## Result size limits

@@ -1617,7 +1617,7 @@ fn cat_truncates_to_max_bytes() {
 }
 
 /// The codes of [`NOT_RAISED`] no golden pins: no operation raises them yet.
-const UNPINNED: &[&str] = &["E_REF_NOT_FOUND"];
+const UNPINNED: &[&str] = &[];
 
 /// Codes [`error_codes_reach_the_cli`] does not raise, and why: each names the test whose golden
 /// pins it, but those of [`UNPINNED`].
@@ -1631,7 +1631,6 @@ const NOT_RAISED: &[(&str, &str)] = &[
         "a parent is resolved first (E_REV_NOT_FOUND): swarmops-ops's \
          error::tests::unknown_parent_golden pins its error object",
     ),
-    ("E_REF_NOT_FOUND", "no operation raises it"),
     (
         "E_IO_TRANSIENT",
         "needs a journal append that fails: faults::fault_codes_golden pins it",
@@ -1798,7 +1797,7 @@ fn error_codes_reach_the_cli() {
 /// How many error codes there are, and how many goldens pin: the counts the known limitations,
 /// the changelog and the goals state, which [`check_doc_counts`] reads.
 const CODE_COUNT: usize = 55;
-const PINNED_COUNT: usize = 54;
+const PINNED_COUNT: usize = 55;
 
 /// The documents that state [`CODE_COUNT`] and [`PINNED_COUNT`], from the repository's root.
 const KNOWN_LIMITATIONS: &str = "docs/known-limitations.md";
@@ -1966,7 +1965,7 @@ fn holds_code_whole() {
 }
 
 /// Checks that the documents state [`PINNED_COUNT`] and [`CODE_COUNT`]: the known limitations
-/// and the changelog as "54 of the 55 error codes", the goals' G6 row as "55 codes, 54 pinned".
+/// and the changelog as "55 of the 55 error codes", the goals' G6 row as "55 codes, 55 pinned".
 fn check_doc_counts() {
     // 1. The repository's root, two directories above this crate.
     let root = Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -2049,6 +2048,7 @@ fn error_cases(
         ),
         ("E_IDENTITY_REQUIRED", anonymous),
         ("E_REV_NOT_FOUND", on(&["show", "release/none"])),
+        ("E_REF_NOT_FOUND", on(&["ref", "log", "release/never"])),
         ("E_PATH_NOT_FOUND", on(&["cat", "main:src/none.rs"])),
         ("E_IS_DIR", on(&["cat", "main:src"])),
         ("E_TOO_LARGE", commit(&too_large)),
@@ -2580,6 +2580,242 @@ fn op_log_pages_with_before() {
     let args = ["--repo", store.as_str(), "op", "log", "-n", "0"];
     let zero = s.run(&args);
     assert_eq!((zero.exit, zero.code()), (2, "E_INVALID_ARG"));
+}
+
+/// Runs `ref log <name>` on `store` with `args` after it, as [`AGENT`]; checks it succeeded.
+fn ref_log(s: &mut Session, store: &str, name: &str, args: &[&str]) -> Reply {
+    let mut line = vec!["--repo", store, "ref", "log", name];
+    line.extend_from_slice(args);
+    let reply = s.run(&line);
+    assert_eq!(reply.exit, 0, "{line:?}: {}", reply.json);
+    reply
+}
+
+/// Every move of ref `name` of `store`, newest first, read a page of `n` at a time with
+/// `--before`: each page but the last says older moves follow.
+fn ref_log_paged(s: &mut Session, store: &str, name: &str, n: usize) -> Vec<Value> {
+    let n = n.to_string();
+    let mut moves = Vec::new();
+    let mut before: Option<String> = None;
+    loop {
+        // 1. One page, below the last move of the page before.
+        let mut args = vec!["-n", n.as_str()];
+        if let Some(before) = &before {
+            args.extend(["--before", before.as_str()]);
+        }
+        let reply = ref_log(s, store, name, &args);
+        assert_eq!(reply["op"], "ref_log");
+        assert_eq!(reply["result"]["name"], name);
+        let page = reply["result"]["moves"].as_array().unwrap().clone();
+
+        // 2. Read on from its last move while older ones follow.
+        let truncated = reply["result"]["truncated"] == true;
+        before = page.last().map(|last| last["op"].to_string());
+        moves.extend(page);
+        if !truncated {
+            return moves;
+        }
+    }
+}
+
+/// Moves ref `name` of `store` to `rev`, from `expect` or created (`None`), as [`AGENT`].
+fn move_ref(s: &mut Session, store: &str, name: &str, rev: &str, expect: Option<&str>) {
+    let mut args = vec!["--repo", store, "--as", AGENT, "ref", "set", name, rev];
+    match expect {
+        Some(old) => args.extend(["--expect", old]),
+        None => args.push("--create"),
+    }
+    let reply = s.run(&args);
+    assert_eq!(reply.exit, 0, "{args:?}: {}", reply.json);
+}
+
+/// `ref log` lists a ref's moves newest first, each with its operation, old and new value,
+/// actor and time; a page holds at most `-n` moves below `--before` and says when older ones
+/// follow; `-n 0` is refused, as op log's is.
+#[test]
+fn ref_log_pages_with_before() {
+    let mut s = Session::new();
+    let store = s.store();
+    s.run(&["init", &store]);
+    let c1 = s.commit(&store, None, "a.txt", "a\n", "c1"); // op 0
+    let c2 = s.commit(&store, Some(&c1), "a.txt", "b\n", "c2"); // op 1
+    move_ref(&mut s, &store, "release/r", &c1, None); // op 2
+    move_ref(&mut s, &store, "release/r", &c2, Some(&c1)); // op 3
+    move_ref(&mut s, &store, "release/r", &c1, Some(&c2)); // op 4
+
+    // 1. The whole log, newest first.
+    let all = ref_log(&mut s, &store, "release/r", &[]);
+    assert_eq!(all["result"]["truncated"], false);
+    let moves = all["result"]["moves"].as_array().unwrap();
+    let ops: Vec<u64> = moves.iter().map(|m| m["op"].as_u64().unwrap()).collect();
+    assert_eq!(ops, [4, 3, 2]);
+    let at = moves[0]["at"].as_i64().unwrap();
+    assert!(at > 1_700_000_000, "a time of the clock's: {at}");
+    let newest = json!({"op": 4, "old": c2, "new": c1, "actor": AGENT, "at": at});
+    assert_eq!(moves[0], newest);
+    assert!(moves[2].get("old").is_none(), "a creation: {}", moves[2]);
+
+    // 2. A page at a time, below --before.
+    let page = |s: &mut Session, args: &[&str]| -> (Vec<u64>, bool) {
+        let reply = ref_log(s, &store, "release/r", args);
+        let moves = reply["result"]["moves"].as_array().unwrap();
+        let ops = moves.iter().map(|m| m["op"].as_u64().unwrap()).collect();
+        (ops, reply["result"]["truncated"] == true)
+    };
+    assert_eq!(page(&mut s, &["-n", "2"]), (vec![4, 3], true));
+    assert_eq!(
+        page(&mut s, &["--before", "3", "-n", "1"]),
+        (vec![2], false)
+    );
+    assert_eq!(page(&mut s, &["--before", "4"]), (vec![3, 2], false));
+    assert_eq!(page(&mut s, &["--before", "2"]), (vec![], false));
+    assert_eq!(page(&mut s, &["--before", "99"]), (vec![4, 3, 2], false));
+    let paged = ref_log_paged(&mut s, &store, "release/r", 1);
+    assert_eq!(&paged, moves);
+
+    // 3. A page of no moves is refused.
+    let zero = s.run(&["--repo", &store, "ref", "log", "release/r", "-n", "0"]);
+    assert_eq!((zero.exit, zero.code()), (2, "E_INVALID_ARG"));
+}
+
+/// The ref log of each ref is the op log's moves of that ref, in the same order with the same
+/// fields: 40 moves on two refs, read 7 at a time.
+#[test]
+fn ref_log_equals_the_op_log_filtered() {
+    const MOVES: usize = 40;
+    let mut s = Session::new();
+    let store = s.store();
+    s.run(&["init", &store]);
+    let c1 = s.commit(&store, None, "a.txt", "a\n", "c1");
+    let c2 = s.commit(&store, Some(&c1), "a.txt", "b\n", "c2");
+
+    // 1. 40 moves, alternating between the refs, each between c1 and c2.
+    let names = ["release/a", "release/b"];
+    let mut at: [Option<String>; 2] = [None, None];
+    for n in 0..MOVES {
+        let which = n % 2;
+        let to = if at[which].as_deref() == Some(c1.as_str()) {
+            &c2
+        } else {
+            &c1
+        };
+        move_ref(&mut s, &store, names[which], to, at[which].as_deref());
+        at[which] = Some(to.clone());
+    }
+
+    // 2. The op log's moves of each ref, as ref log lists them.
+    let listed = s.run(&["--repo", &store, "op", "log", "-n", "1000"]);
+    assert_eq!(listed["result"]["truncated"], false, "{}", listed.json);
+    let ops = listed["result"]["ops"].as_array().unwrap();
+    for name in names {
+        let filtered: Vec<Value> = ops
+            .iter()
+            .flat_map(|op| {
+                let moves = op["ref_moves"].as_array().unwrap().iter();
+                moves
+                    .filter(move |m| m["name"] == name)
+                    .map(move |m| {
+                        let mut entry = m.clone();
+                        let entry_obj = entry.as_object_mut().unwrap();
+                        entry_obj.remove("name");
+                        entry_obj.insert("op".to_owned(), op["op"].clone());
+                        entry
+                    })
+                    .rev()
+            })
+            .collect();
+        assert_eq!(filtered.len(), MOVES / 2, "{name}");
+        assert_eq!(ref_log_paged(&mut s, &store, name, 7), filtered, "{name}");
+    }
+}
+
+/// A deleted ref lists its moves, the newest with no `new`; a valid name the journal records no
+/// move of is `E_REF_NOT_FOUND` (exit 6) naming it, at any `--before`; a name no format takes
+/// is `E_REF_NAME_INVALID`.
+#[test]
+fn ref_log_of_a_deleted_ref_lists_its_moves() {
+    let mut s = Session::new();
+    let store = s.store();
+    s.run(&["init", &store]);
+    let c1 = s.commit(&store, None, "a.txt", "a\n", "c1");
+    let c2 = s.commit(&store, Some(&c1), "a.txt", "b\n", "c2");
+    move_ref(&mut s, &store, "release/d", &c1, None);
+    move_ref(&mut s, &store, "release/d", &c2, Some(&c1));
+    let delete = [
+        "--repo",
+        &store,
+        "--as",
+        AGENT,
+        "ref",
+        "delete",
+        "release/d",
+    ];
+    let deleted = s.run(&[&delete[..], &["--expect", &c2]].concat());
+    assert_eq!(deleted.exit, 0, "{}", deleted.json);
+
+    // 1. Its three moves, the deletion first.
+    let log = ref_log(&mut s, &store, "release/d", &[]);
+    let moves = log["result"]["moves"].as_array().unwrap();
+    assert_eq!(moves.len(), 3, "{}", log.json);
+    assert_eq!(moves[0]["old"], c2.as_str());
+    assert!(moves[0].get("new").is_none(), "a deletion: {}", moves[0]);
+    assert_eq!(moves[2]["new"], c1.as_str());
+
+    // 2. A name that never moved, also below an operation.
+    for args in [&[][..], &["--before", "1"][..]] {
+        let line = [&["--repo", &store, "ref", "log", "release/never"][..], args].concat();
+        let never = s.run(&line);
+        assert_eq!(
+            (never.exit, never.code()),
+            (6, "E_REF_NOT_FOUND"),
+            "{}",
+            never.json
+        );
+        assert_eq!(never["error"]["details"]["name"], "release/never");
+    }
+
+    // 3. A name no format takes.
+    let bad = s.run(&["--repo", &store, "ref", "log", "../main"]);
+    assert_eq!(bad.code(), "E_REF_NAME_INVALID", "{}", bad.json);
+}
+
+/// `gc` shortens no ref log: every ref's log, a deleted one's too, reads the same after it.
+#[test]
+fn gc_keeps_every_ref_log() {
+    let mut s = Session::new();
+    let store = s.store();
+    s.run(&["init", &store]);
+    let c1 = s.commit(&store, None, "a.txt", "a\n", "c1");
+    let c2 = s.commit(&store, Some(&c1), "a.txt", "b\n", "c2");
+    move_ref(&mut s, &store, "release/kept", &c1, None);
+    move_ref(&mut s, &store, "release/kept", &c2, Some(&c1));
+    move_ref(&mut s, &store, "release/gone", &c2, None);
+    let delete = [
+        "--repo",
+        &store,
+        "--as",
+        AGENT,
+        "ref",
+        "delete",
+        "release/gone",
+    ];
+    let deleted = s.run(&[&delete[..], &["--expect", &c2]].concat());
+    assert_eq!(deleted.exit, 0, "{}", deleted.json);
+
+    // 1. The logs before gc.
+    let names = ["release/kept", "release/gone"];
+    let before: Vec<Value> = names
+        .iter()
+        .map(|name| ref_log(&mut s, &store, name, &[])["result"].clone())
+        .collect();
+
+    // 2. gc, then the same logs.
+    let gc = s.run(&["--repo", &store, "gc"]);
+    assert_eq!(gc.exit, 0, "{}", gc.json);
+    for (name, was) in names.iter().zip(&before) {
+        let now = ref_log(&mut s, &store, name, &[]);
+        assert_eq!(&now["result"], was, "{name}");
+    }
 }
 
 /// `ancestry` answers along every parent and pages `from..to` newest first: `-n` caps a page,

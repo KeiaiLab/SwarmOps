@@ -70,7 +70,7 @@ Its entry in `tools/list` carries no `_meta`.
 
 ```json
 {
-  "id": 23,
+  "id": 24,
   "jsonrpc": "2.0",
   "method": "tools/call",
   "params": {
@@ -82,7 +82,7 @@ Its entry in `tools/list` carries no `_meta`.
 
 ```json
 {
-  "id": 23,
+  "id": 24,
   "jsonrpc": "2.0",
   "result": {
     "content": [

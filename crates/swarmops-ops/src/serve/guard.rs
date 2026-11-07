@@ -19,9 +19,10 @@ use swarmops_api::{
     CommitReq, CommitResp, ContentInput, DeriveReq, DeriveResp, Diff, DiffReq, ErrorCode,
     FileContent, GcReq, GcResp, Identity, InfoReq, LandReq, LandResp, LogPage, LogReq, OpError,
     OpLogPage, OpLogReq, PathHistoryPage, PathHistoryReq, ReadFileReq, ReadTreeReq, RebaseReq,
-    RebaseResp, RefDeleteReq, RefListReq, RefListResp, RefSetReq, RefSetResp, RepairReq,
-    RepairResp, RepoInfo, ResolutionsInput, ResolveRevReq, ResolvedRev, ShowReq, StoreOps,
-    TreeListing, UndoReq, UndoResp, UpgradeReq, UpgradeResp, VerifyReport, VerifyReq,
+    RebaseResp, RefDeleteReq, RefListReq, RefListResp, RefLogPage, RefLogReq, RefSetReq,
+    RefSetResp, RepairReq, RepairResp, RepoInfo, ResolutionsInput, ResolveRevReq, ResolvedRev,
+    ShowReq, StoreOps, TreeListing, UndoReq, UndoResp, UpgradeReq, UpgradeResp, VerifyReport,
+    VerifyReq,
 };
 
 use super::refused;
@@ -272,6 +273,11 @@ impl<O: StoreOps> StoreOps for ServerOps<O> {
     fn upgrade(&self, req: UpgradeReq) -> Result<UpgradeResp, OpError> {
         self.pass(self.inner.upgrade(req))
     }
+
+    // A read of the store, passed as `log` is.
+    fn ref_log(&self, req: RefLogReq) -> Result<RefLogPage, OpError> {
+        self.pass(self.inner.ref_log(req))
+    }
 }
 
 #[cfg(test)]
@@ -384,6 +390,9 @@ mod tests {
         }
         fn upgrade(&self, _: UpgradeReq) -> Result<UpgradeResp, OpError> {
             self.call("upgrade")
+        }
+        fn ref_log(&self, _: RefLogReq) -> Result<RefLogPage, OpError> {
+            self.call("ref_log")
         }
     }
 
@@ -562,6 +571,8 @@ mod tests {
         assert_passed(&s, "diff", s.diff(DiffReq::new("main", "main")).map(drop));
         assert_passed(&s, "ref_list", s.ref_list(RefListReq::default()).map(drop));
         assert_passed(&s, "op_log", s.op_log(OpLogReq::default()).map(drop));
+        let ref_log = RefLogReq::new("main");
+        assert_passed(&s, "ref_log", s.ref_log(ref_log).map(drop));
         assert_passed(&s, "verify", s.verify(VerifyReq::default()).map(drop));
     }
 

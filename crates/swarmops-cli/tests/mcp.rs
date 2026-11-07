@@ -56,7 +56,7 @@ type Startup<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)]);
 /// The tools, one per `StoreOps` operation and then one per client-side operation of the git
 /// remotes (M13), in the order `tools/list` gives them, each with the request type its arguments
 /// are.
-const TOOLS: [(&str, &str); 39] = [
+const TOOLS: [(&str, &str); 40] = [
     ("repo_info", "InfoReq"),
     ("resolve_rev", "ResolveRevReq"),
     ("read_file", "ReadFileReq"),
@@ -70,6 +70,7 @@ const TOOLS: [(&str, &str); 39] = [
     ("ref_list", "RefListReq"),
     ("ref_set", "RefSetReq"),
     ("ref_delete", "RefDeleteReq"),
+    ("ref_log", "RefLogReq"),
     ("undo", "UndoReq"),
     ("commit", "CommitReq"),
     ("land", "LandReq"),
@@ -133,7 +134,7 @@ const COUNTED: [&str; 4] = ["README.md", "docs", "web/app", "web/components"];
 /// The private design notes under `docs/`, which are not part of the repository.
 const PRIVATE: &str = "docs/superpowers";
 
-/// Every count of the tools a page states is [`TOOLS`]'s: "39 tools", "The 39 MCP tools", "28
+/// Every count of the tools a page states is [`TOOLS`]'s: "40 tools", "The 40 MCP tools", "29
 /// store operations", "11 workspace operations". They drifted when `ancestry` was added (38 for
 /// 39).
 #[test]
@@ -339,7 +340,8 @@ fn mcp_session_golden() {
 
 /// A golden call of every tool, each succeeding, in a session on one store: blobs stored and
 /// found, commits, main created, reads of every kind, a land onto what main gained, a ref made,
-/// deleted and the deletion undone, the operations listed, and the store verified.
+/// deleted and the deletion undone, the operations and the ref's moves listed, and the store
+/// verified.
 #[test]
 fn mcp_tool_calls_golden() {
     let store = Store::init();
@@ -413,6 +415,7 @@ fn mcp_tool_calls_golden() {
     assert_eq!(deleted["ref_moves"][0]["name"], "release/v1", "{ops}");
     let id = deleted["id"].as_str().unwrap().to_owned();
     golden.ok("undo", json!({"id": id}));
+    golden.ok("ref_log", json!({"name": "release/v1", "limit": 2}));
     golden.ok("ref_list", json!({}));
 
     // 6. A workspace: made, edited, diffed and committed; more of the tree written out and an

@@ -22,6 +22,7 @@ use serde_json::{Map, Value};
 use swarmops_api::AncestryReq;
 use swarmops_api::LandReq;
 use swarmops_api::RebaseReq;
+use swarmops_api::RefLogReq;
 use swarmops_api::ResolutionsInput;
 use swarmops_api::ResolveRevReq;
 use swarmops_api::remote::DEFAULT_PUSH_SOURCE;
@@ -630,6 +631,20 @@ fn run_ref(ctx: &Ctx<'_>, op: &'static str, command: RefCommand) -> Printed {
                 Ok((context::mutator(agent, ctx.env)?, req))
             },
             |ops, (who, req)| ops.ref_delete(&who, req),
+        ),
+        RefCommand::Log {
+            name,
+            before,
+            limit,
+        } => ctx.on_store(
+            op,
+            || {
+                let mut req = RefLogReq::new(name);
+                req.before = before;
+                req.limit = limit;
+                Ok(req)
+            },
+            |ops, req| ops.ref_log(req),
         ),
     }
 }

@@ -116,7 +116,7 @@ SwarmOps records an identity and does not verify it: every envelope's `meta.auth
 treats every agent that runs against a store as a trusted local user acting for the same owner, and
 the store directory's permissions are the access boundary.
 
-## The 39 MCP tools
+## The 40 MCP tools
 
 A changeset is what a commit records, and a ref, such as `main`, is a name that points at one.
 `swarmops mcp` lists one tool for each store operation but `derive`, which `swarmops derive` runs
@@ -127,7 +127,7 @@ A tool's arguments are the operation's request. Its result is the envelope the C
 request, as `structuredContent` and as text, and a failed operation sets `isError`. A tool's
 annotations say whether it changes the store and how.
 
-### Fifteen tools read
+### Sixteen tools read
 
 - **`repo_info`**
 
@@ -177,6 +177,11 @@ annotations say whether it changes the store and how.
 - **`ref_list`**
 
   Every ref, the changeset it points at, and how many moves it has had.
+
+- **`ref_log`**
+
+  One ref's moves, newest first: the `op_log` entries that moved it. A deleted ref lists its moves;
+  a name that never moved is `E_REF_NOT_FOUND`.
 
 - **`blob_has`**
 
@@ -363,7 +368,7 @@ little:
 | `read_tree`, `log`, `path_history` | `limit` of 100 | `cursor` |
 | `diff` | `limit` of 100, and `max_bytes` of 32768 for `unified` | `cursor` |
 | `show` | `max_changes` of 100 | none |
-| `op_log` | `limit` of 20 | `before` |
+| `op_log`, `ref_log` | `limit` of 20 | `before` |
 
 The tools' descriptions say so, and the operations' own defaults stay as they are. `read_file` alone
 raises Claude Code's limit for itself: its entry in `tools/list` carries

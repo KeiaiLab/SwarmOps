@@ -70,6 +70,7 @@ List refs, or move one by compare-and-swap.
 - [`swarmops ref list`](commands/ref-list.md): List every ref, or those whose names start with --prefix, each with its kind.
 - [`swarmops ref set`](commands/ref-set.md): Point ref NAME at REV: move it from --expect, or --create it.
 - [`swarmops ref delete`](commands/ref-delete.md): Delete ref NAME.
+- [`swarmops ref log`](commands/ref-log.md): List ref NAME's moves, newest first: the op log filtered to the ref.
 
 ## Operations
 

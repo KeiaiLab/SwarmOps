@@ -657,6 +657,48 @@ expression: golden.transcript()
             },
             {
               "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": true
+              },
+              "description": "One ref's moves, newest first: the op_log entries that moved it, each with its op, old and new value, actor and time; a deleted ref lists its moves, and a name that never moved is E_REF_NOT_FOUND. Pass a limit of 20 or less and page on with before, since clients limit long tool results.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`ref_log` (CLI `ref log`): one ref's moves, newest first, a page at a time, as the journal\nrecorded them: the op log filtered to the ref. A deleted ref lists its moves; a name the\njournal records no move of is `E_REF_NOT_FOUND`.",
+                "properties": {
+                  "before": {
+                    "description": "Start below this operation: the page holds the moves of operations numbered less than\nit, so the last `op` of a page reads on from there. When omitted, from the newest.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "limit": {
+                    "default": 50,
+                    "description": "The most moves to return: at least 1 (0 is `E_INVALID_ARG`).",
+                    "format": "uint",
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "name": {
+                    "description": "The ref.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "title": "RefLogReq",
+                "type": "object"
+              },
+              "name": "ref_log",
+              "title": "List a ref's moves"
+            },
+            {
+              "annotations": {
                 "destructiveHint": true,
                 "idempotentHint": true,
                 "openWorldHint": false,

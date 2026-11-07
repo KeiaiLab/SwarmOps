@@ -189,6 +189,31 @@ expression: s.transcript()
     }
   },
   {
+    "args": "--repo [tmp]/store --as agent/worker-17 ref log release/never",
+    "exit": 6,
+    "stdout": {
+      "ok": false,
+      "op": "ref_log",
+      "api": 1,
+      "error": {
+        "code": "E_REF_NOT_FOUND",
+        "message": "ref \"release/never\" never existed: the journal records no move of it",
+        "retryable": false,
+        "exit": 6,
+        "details": {
+          "name": "release/never"
+        },
+        "hint": "swarmops ref list names the refs"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
     "args": "--repo [tmp]/store --as agent/worker-17 cat main:src/none.rs",
     "exit": 6,
     "stdout": {

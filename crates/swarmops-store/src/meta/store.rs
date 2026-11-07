@@ -739,24 +739,44 @@ impl MetaRead<'_> {
 
     /// The last `limit` moves of ref `name`, newest first: the journal's `RefMove` records
     /// for it, read back from the end of the snapshot (`O(frames)` until `limit` are found).
+    /// [`MetaRead::reflog_page`] with no `before`.
     pub fn reflog(&self, name: &str, limit: usize) -> Result<Vec<RefMoveEntry>, StoreError> {
+        self.reflog_page(name, None, limit)
+    }
+
+    /// Up to `limit` moves of ref `name` recorded in frames whose seq is below `before` (all
+    /// for `None`), newest first: [`MetaRead::reflog`] a page at a time, `before` the seq of
+    /// the last move of the page before. The frames past the checkpoint, then those before it
+    /// from `journal.off`, 256 at a time, as [`MetaRead::frames_before`] reads them.
+    pub fn reflog_page(
+        &self,
+        name: &str,
+        before: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<RefMoveEntry>, StoreError> {
         self.store.check_ref_name(name)?;
+        let below = before.unwrap_or(u64::MAX);
+
+        // 1. The frames past the checkpoint, below `before`.
         let mut log = Vec::new();
-        collect_moves(self.frames.iter().rev(), name, limit, &mut log);
-        // Then the frames before the checkpoint, a batch at a time; with no frames past the
+        let past = self.frames.iter().rev().filter(|frame| frame.seq < below);
+        collect_moves(past, name, limit, &mut log);
+
+        // 2. Then the frames before the checkpoint, a batch at a time; with no frames past the
         // checkpoint, frames listed since the snapshot was taken are skipped.
         let mut end = match self.frames.first() {
             Some(frame) => frame.seq,
             None => self.store.journal.frame_count()?,
-        };
+        }
+        .min(below);
         while log.len() < limit && end > 0 {
             let start = end.saturating_sub(REFLOG_BATCH);
             let batch = self
                 .store
                 .journal
                 .frames_from(start, to_usize(end - start))?;
-            let before = batch.iter().rev().filter(|frame| frame.offset < self.ckpt);
-            collect_moves(before, name, limit, &mut log);
+            let before_ckpt = batch.iter().rev().filter(|frame| frame.offset < self.ckpt);
+            collect_moves(before_ckpt, name, limit, &mut log);
             end = start;
         }
         Ok(log)

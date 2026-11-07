@@ -688,8 +688,8 @@ pub enum Command {
     /// Serve the store's operations to an agent as an MCP server on stdin and stdout.
     ///
     /// One tool per operation (repo_info, resolve_rev, read_file, read_tree, show, log, ancestry,
-    /// path_history, diff, op_log, ref_list, ref_set, ref_delete, undo, commit, land, blob_put,
-    /// blob_has, verify, the maintenance's gc, repair and upgrade, and the git remotes'
+    /// path_history, diff, op_log, ref_list, ref_set, ref_delete, ref_log, undo, commit, land,
+    /// blob_put, blob_has, verify, the maintenance's gc, repair and upgrade, and the git remotes'
     /// remote_list, fetch, push, sync and sync_status), each taking the operation's request as
     /// its arguments and returning the envelope the other commands print. The store and the
     /// identity are the server's, --repo and --as or their variables, never a call's. Speaks MCP 2026-07-28, and 2025-11-25 and
@@ -1216,6 +1216,21 @@ pub enum RefCommand {
         #[arg(long, value_name = "REV", help = EXPECT_HELP, long_help = DELETE_EXPECT_LONG_HELP)]
         expect: String,
     },
+    /// List ref NAME's moves, newest first: the op log filtered to the ref.
+    ///
+    /// A deleted ref lists its moves, the newest with no new value. A name the journal records
+    /// no move of is E_REF_NOT_FOUND; finding that reads the whole journal.
+    Log {
+        /// The ref.
+        name: String,
+        /// List the moves of operations numbered below OP: the last op of a page reads on from
+        /// there.
+        #[arg(long, value_name = "OP")]
+        before: Option<u64>,
+        /// The most moves to list.
+        #[arg(short = 'n', long, value_name = "N", default_value_t = DEFAULT_OP_LOG_LIMIT)]
+        limit: usize,
+    },
 }
 
 /// `git`'s operations.
@@ -1553,6 +1568,7 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["ref", "list"] => "ref_list",
         ["ref", "set"] => "ref_set",
         ["ref", "delete"] => "ref_delete",
+        ["ref", "log"] => "ref_log",
         ["op", "log"] => "op_log",
         ["op", "undo"] => "undo",
         ["verify"] => "verify",
@@ -1699,10 +1715,10 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 53);
+        assert_eq!(ops.len(), 54);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 53, "two subcommands name one op");
+        assert_eq!(ops.len(), 54, "two subcommands name one op");
         assert_eq!(op_name(&["ref"]), None);
         assert_eq!(op_name(&["blob"]), None);
         assert_eq!(op_name(&["ws"]), None);

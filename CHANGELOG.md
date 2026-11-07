@@ -18,6 +18,14 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 ## [Unreleased]
 
+### Added
+
+- `swarmops ref log NAME [--before OP] [-n N]` and the MCP tool `ref_log` list one ref's moves,
+  newest first, a page at a time: the op log filtered to the ref, from the same committed snapshot.
+  A deleted ref lists its moves; a name the journal records no move of is `E_REF_NOT_FOUND`, so
+  golden envelopes now pin 55 of the 55 error codes (the M18 design §3.2). `swarmops mcp` lists 40
+  tools, and `swarmops schema` 169 types.
+
 ### Changed
 
 - `just check-slow` runs the measurement cases (`check-ci-perf`'s) in a second, optimized run;

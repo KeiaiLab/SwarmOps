@@ -66,7 +66,7 @@
 //!
 //! One tool per [`StoreOps`] operation, named as the envelope's `op` is: `repo_info`,
 //! `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `ancestry`, `path_history`, `diff`, `op_log`,
-//! `ref_list`, `ref_set`, `ref_delete`, `undo`, `commit`, `land`, `blob_put`, `blob_has`,
+//! `ref_list`, `ref_set`, `ref_delete`, `ref_log`, `undo`, `commit`, `land`, `blob_put`, `blob_has`,
 //! `verify` and the maintenance's `gc`, `repair` and `upgrade` (M6), in `tools/list`'s order; then the git remotes' client-side operations (M13), which
 //! no [`StoreOps`] has: `remote_list`, `fetch`, `push`, `sync` and `sync_status`, run on the
 //! store's own operations ([`operate_local`]) and taking a remote by its name only, never a URL
@@ -166,6 +166,7 @@ use serde_json::{Map, Number, Value, json};
 use swarmops_api::AncestryReq;
 use swarmops_api::LandReq;
 use swarmops_api::RebaseReq;
+use swarmops_api::RefLogReq;
 use swarmops_api::ResolveRevReq;
 use swarmops_api::{BlobHasReq, BlobPutReq};
 use swarmops_api::{
@@ -276,7 +277,7 @@ const READ_FILE_RESULT_CHARS: u32 = 200_000;
 const RESULT_CHARS_KEY: &str = "anthropic/maxResultSizeChars";
 
 /// The tools, in the order `tools/list` gives them.
-static TOOLS: [Spec; 28] = [
+static TOOLS: [Spec; 29] = [
     Spec {
         tool: Tool::RepoInfo,
         name: "repo_info",
@@ -435,6 +436,18 @@ static TOOLS: [Spec; 28] = [
                       the id you read, and so is an id prefix, which stops resolving once another \
                       changeset shares it.",
         effect: Effect::Moves,
+        result_chars: None,
+    },
+    Spec {
+        tool: Tool::RefLog,
+        name: "ref_log",
+        request: "RefLogReq",
+        title: "List a ref's moves",
+        description: "One ref's moves, newest first: the op_log entries that moved it, each \
+                      with its op, old and new value, actor and time; a deleted ref lists its \
+                      moves, and a name that never moved is E_REF_NOT_FOUND. Pass a limit of 20 \
+                      or less and page on with before, since clients limit long tool results.",
+        effect: Effect::Reads,
         result_chars: None,
     },
     Spec {
@@ -1427,6 +1440,7 @@ fn operate<O: Operate>(tool: Tool, how: O) -> O::Done {
         Tool::RefList => how.read(|ops, req| ops.ref_list(req)),
         Tool::RefSet => how.mutate(|ops, who, req| ops.ref_set(who, req)),
         Tool::RefDelete => how.mutate(|ops, who, req| ops.ref_delete(who, req)),
+        Tool::RefLog => how.read(|ops, req| ops.ref_log(req)),
         Tool::Undo => how.mutate(|ops, who, req| ops.undo(who, req)),
         Tool::Commit => how.mutate(|ops, who, req| ops.commit(who, req)),
         Tool::Land => how.mutate(|ops, who, req| ops.land(who, req)),
@@ -1753,6 +1767,7 @@ impl Refuse for PathHistoryReq {}
 impl Refuse for DiffReq {}
 impl Refuse for OpLogReq {}
 impl Refuse for RefListReq {}
+impl Refuse for RefLogReq {}
 impl Refuse for UndoReq {}
 impl Refuse for VerifyReq {}
 impl Refuse for swarmops_api::GcReq {}
@@ -2319,6 +2334,7 @@ enum Tool {
     RefList,
     RefSet,
     RefDelete,
+    RefLog,
     Undo,
     Commit,
     Land,
@@ -2553,8 +2569,8 @@ pub(crate) mod probe {
     use swarmops_api::ResolvedRev;
     use swarmops_api::{
         BlobHasResp, BlobPutResp, ChangesetDetail, CommitResp, DeriveReq, DeriveResp, FileContent,
-        LogPage, OpLogPage, PathHistoryPage, RefListResp, RefSetResp, RepoInfo, TreeListing,
-        UndoResp, VerifyReport,
+        LogPage, OpLogPage, PathHistoryPage, RefListResp, RefLogPage, RefSetResp, RepoInfo,
+        TreeListing, UndoResp, VerifyReport,
     };
 
     use super::*;
@@ -2801,6 +2817,10 @@ pub(crate) mod probe {
             _: swarmops_api::UpgradeReq,
         ) -> Result<swarmops_api::UpgradeResp, OpError> {
             self.called("upgrade", "UpgradeReq")
+        }
+
+        fn ref_log(&self, _: RefLogReq) -> Result<RefLogPage, OpError> {
+            self.called("ref_log", "RefLogReq")
         }
     }
 }

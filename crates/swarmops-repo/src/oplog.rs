@@ -1,6 +1,7 @@
 //! The operation log and `undo` (storage spec §3): the journal's frames read back as the store's
 //! operations, newest first ([`Repo::op_log`]), and an operation's ref moves restored by
-//! compare-and-swap in one transaction ([`Repo::undo`]).
+//! compare-and-swap in one transaction ([`Repo::undo`]). One ref's moves are its log
+//! ([`Repo::ref_log`]), from the same committed snapshot.
 //!
 //! The log lists only operations that are committed and listed: it reads the committed snapshot
 //! ([`swarmops_store::MetaStore::read_committed`]), so it waits for the store's lock as a write
@@ -48,7 +49,7 @@ use std::str::FromStr;
 
 use swarmops_core::ChangesetId;
 use swarmops_store::{
-    CasResult, Frame, ObjectStore, Record, Recovered, RefKind, StoreError, ref_kind,
+    CasResult, Frame, ObjectStore, Record, Recovered, RefKind, RefMoveEntry, StoreError, ref_kind,
 };
 
 use crate::error::RepoError;
@@ -228,6 +229,39 @@ impl<O: ObjectStore> Repo<O> {
             .map(operation)
             .collect::<Result<_, _>>()?;
         Ok((ops, older))
+    }
+
+    /// Up to `limit` moves of ref `name` recorded below operation `before` (from the newest
+    /// for `None`), newest first, from one committed snapshot of the metadata, as
+    /// [`Repo::op_log`] reads it; and whether older moves follow them in it. `None` when the
+    /// journal records no move of `name` at all: a name that never existed. A deleted ref
+    /// lists its moves. [`RepoError::RefName`] for a name no format takes.
+    ///
+    /// A name that never moved reads the whole journal: there is no per-ref index.
+    pub fn ref_log(
+        &self,
+        name: &str,
+        before: Option<u64>,
+        limit: usize,
+    ) -> Result<Option<(Vec<RefMoveEntry>, bool)>, RepoError> {
+        // 1. The committed snapshot, as for the op log: its repair is no warning.
+        let (snapshot, _repair) = self.meta.read_committed()?;
+
+        // 2. One more than the page, to know whether older moves follow.
+        let mut moves = snapshot
+            .reflog_page(name, before, limit.saturating_add(1))
+            .map_err(repo::ref_error)?;
+        let older = moves.len() > limit;
+        moves.truncate(limit);
+
+        // 3. An empty page below `before` is the end of the log, unless the name never moved;
+        // with no `before`, the page read the whole journal already.
+        let never = moves.is_empty()
+            && (before.is_none() || snapshot.reflog_page(name, None, 1)?.is_empty());
+        if never {
+            return Ok(None);
+        }
+        Ok(Some((moves, older)))
     }
 
     /// Undoes operation `id` for `actor`: moves every ref it moved back to what the ref named
