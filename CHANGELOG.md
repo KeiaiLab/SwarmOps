@@ -27,6 +27,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
   share, push and fetch p99 and a first clone beside the agents (the M17 design §7). The weekly
   measurement job now also runs it and the landing lanes, which leave the weekly slow suite.
 
+### Changed
+
+- docs/goals.md adds G18 (short writer holds), G19 (identical reads served once), G20 (readers
+  pay only for what they read) and G22 (a push checked in bounded memory), each with the
+  measurement in docs/perf.md that shows the gap it closes.
+
 ### Fixed
 
 - `serve_perf`'s seeded cases wait for the preparation their import and lands start before a

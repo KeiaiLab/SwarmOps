@@ -1590,22 +1590,35 @@ The first clone exports the whole history before git advertises it (v0.7.0: 1,19
 prepares `serve.git` ahead of the first connection. The fixtures' clone ratios are the fixed
 start-up cost v0.7.0 recorded (1.99–2.40).
 
-## M17 baselines — 2026-11-07 (not measured yet)
+## M17 baselines — 2026-11-07
 
-Baselines of the M17 targets on the code before any M17 change, so that each later M17 slice is a
-measured difference. The cases are written (`serve_perf`'s `fifty_clones_at_once_and_apart`,
-`fetch_k_behind` and `push_one_and_two_gib`, `intake_perf`'s `commits_beside_an_import`, and
-`clone_against_git`'s new import line); the values come from the first `just perf` after the
-slice lands, run under the heavy lock, and replace the dashes below. Each row records the host
-state of its run (the 1-minute load at its start and end, from `perf: load average` lines) and
-the verdict against its target (met, or missed with the figure).
+The M17 targets' cases (`serve_perf`'s `fifty_clones_at_once_and_apart`, `fetch_k_behind` and
+`push_one_and_two_gib`, `intake_perf`'s `commits_beside_an_import`, and `clone_against_git`'s
+import line). No `just perf` ran between M17-1 and the slices after it, so these are not figures
+of the code before M17: they come from the first runs of the cases, on code that holds every M17
+slice but M17-8b, and each later M17 section reads its values from them.
+
+- v0.9.0's `just perf` at `b4337977`, 2026-11-07 12:36:42Z to 16:11:08Z. Two steps failed.
+  `serve_perf` stopped at `fetch_k_behind`'s first clone on 12,000 commits with `E_BUSY` on
+  `git/serve.lock`: the import's detached `serve --prepare` held it past the 10 s wait, a race of
+  the harness, fixed in `9316aea6` and, for the cold cases, `4ccce313`. The store's
+  `contention::thirty_two_processes_thousand_transactions_each` failed with 12 `Busy` (446.1 s,
+  71.7 transactions/s) at a 1-minute load of 30.55 at its start and 23.56 at its end: the
+  load-only failure "The slow suite" above records, which passed alone at load 9.
+- `serve_perf` run again alone at `4ccce313`, under the heavy lock: all seven cases passed in
+  6,884.349 s, ending 2026-11-07 18:36Z. `4ccce313` differs from `b4337977` in tests, the
+  justfile, the Scheduled workflow and docs only, so it measures v0.9.0's product code. Its log
+  records no load average.
+
+Each row names its run and, for `b4337977`, the 1-minute load at its step's start and end
+(`perf: load average` lines), with the verdict against its target.
 
 Server CPU and peak memory come from process accounting: the ssh stand-in runs `swarmops serve`
 inside a shell whose `times` builtin reports the user and system time of `serve` and every
 process it waited for, and a sampler beside that shell reads the largest `VmHWM` of the tree
-every 50 ms (the M17 design §1). `serve.git` is seeded with the history's objects before the
-first connection, so that each case fits the profile's kill; the 1,195.6 s first refresh is
-`clone_against_git`'s, which cannot be split.
+every 50 ms (the M17 design §1). `times` counts in ticks of 10 ms, so 0.000 s is under 10 ms.
+`serve.git` is seeded with the history's objects before the first connection, so that each case
+fits the profile's kill; the first refresh is `clone_against_git`'s, which cannot be split.
 
 ### R-3, G19: 50 clones against one
 
@@ -1614,13 +1627,13 @@ apart from `swarmops serve`, and 50 at once from git's `upload-pack`.
 
 | Figure | Value | Target |
 | --- | --- | --- |
-| Server CPU of one clone alone | — | — |
-| Server CPU of 50 clones at once | — | at most 4× one clone's |
-| Server CPU of 50 clones 10 s apart | — | at most 4× one clone's |
-| Clone time at once, `serve` median and longest | — | at most 2× git's |
-| Clone time at once, git `upload-pack` median and longest | — | — |
-| Peak memory of the server tree, 50 at once | — | recorded |
-| Host state | — | — |
+| Server CPU of one clone alone | 0.010 s (the clone 0.286 s) | — |
+| Server CPU of 50 clones at once | 0.580 s over 50 connections, 58× one clone's (0.012 s a connection) | at most 4× one clone's: missed |
+| Server CPU of 50 clones 10 s apart | 0.410 s over 50 connections, 41× one clone's (0.008 s a connection) | at most 4× one clone's: missed |
+| Clone time at once, `serve` median and longest | 0.770 s and 1.112 s (10 s apart: 0.292 s and 0.349 s) | at most 2× git's: met |
+| Clone time at once, git `upload-pack` median and longest | 1.682 s and 1.965 s | — |
+| Peak memory of the server tree, 50 at once | 9.7 MiB | recorded |
+| Host state | `4ccce313`; load not recorded | — |
 
 ### R-5, G20: a fetch k lands behind
 
@@ -1629,10 +1642,10 @@ behind on 1,000 commits and on 12,000, and on 12,000 for 1, 10, 100 and 1,000 la
 
 | Figure | Value | Target |
 | --- | --- | --- |
-| Server CPU, 1 land behind, 1,000 commits | — | — |
-| Server CPU, 1 land behind, 12,000 commits | — | at most 1.5× the 1,000 figure |
-| CPU per byte sent, 1 / 10 / 100 / 1,000 lands behind | — | within 1.5× across the four |
-| Host state | — | — |
+| Server CPU, 1 land behind, 1,000 commits | 0.000 s (0.081 s, 626 bytes sent, peak 9.5 MiB); `b4337977`: 0.010 s (0.076 s, 624 bytes, peak 9.2 MiB) | — |
+| Server CPU, 1 land behind, 12,000 commits | 0.000 s (0.074 s, 624 bytes sent, peak 9.5 MiB) | at most 1.5× the 1,000 figure: not shown, both under 10 ms |
+| CPU per byte sent, 1 / 10 / 100 / 1,000 lands behind | 0.000 / 0.000 / 0.859 / 0.800 ms per KiB (CPU 0.000, 0.000, 0.040 and 0.500 s; 624, 4,126, 47,675 and 640,280 bytes; 1,000 behind 0.480 s, peak 29.5 MiB) | within 1.5× across the four: not shown for 1 and 10, under 10 ms; 100 and 1,000 within 1.07× |
+| Host state | `4ccce313`; load not recorded. `b4337977`'s line: 4.97 to 15.20 | — |
 
 ### R-6, G22: a push in bounded memory
 
@@ -1642,44 +1655,64 @@ behind on 1,000 commits and on 12,000, and on 12,000 for 1, 10, 100 and 1,000 la
 
 | Figure | Value | Target |
 | --- | --- | --- |
-| Peak memory, 1 GiB push | — | recorded |
-| Peak memory, 2 GiB push | — | at most 256 MiB |
-| Time, 1 GiB and 2 GiB push | — | the 2 GiB at most 2.2× the 1 GiB |
-| Refused push of 2,048 blobs: ref moved | — | none |
-| Host state | — | — |
+| Peak memory, 1 GiB push | 1,194.6 MiB (server CPU 20.260 s) | recorded |
+| Peak memory, 2 GiB push | 3,228.8 MiB (server CPU 44.450 s) | at most 256 MiB: missed |
+| Time, 1 GiB and 2 GiB push | 46.677 s and 82.230 s, 1.76× | the 2 GiB at most 2.2× the 1 GiB: met |
+| Refused push of 2,048 blobs: ref moved | none (56.443 s, peak 9.3 MiB) | none: met |
+| Host state | `4ccce313`; load not recorded | — |
 
 ### R-2, A39, G18: commits beside an import
 
 `intake_perf::commits_beside_an_import`: 8 committers (`commit`, no ref moved) in a loop and a
 reader of `main` beside `git import` of 12,000 commits; the import's peak memory on 1,000 and on
-12,000 commits.
+12,000 commits. A commit's wait is its wall time from spawn to exit, which holds its queue behind
+the other 7 committers and its own syncs as well as the import's holds; an uncontended commit
+through the binary took 48.3 ms at the median in the same run (`b4337977`'s 32-process CLI
+contention, its 100 commits after).
 
 | Figure | Value | Target |
 | --- | --- | --- |
-| Longest wait of a commit beside the import | — | at most 100 ms |
-| `E_BUSY` count and longest | — | recorded |
-| Reads of `main` that saw the new head before the import's end | — | none |
-| Import peak memory, 1,000 commits | — | recorded |
-| Import peak memory, 12,000 commits | — | recorded |
-| Host state | — | — |
+| Longest wait of a commit beside the import | 0.796 s, median 0.207 s, over 109,659 commits | at most 100 ms: missed |
+| `E_BUSY` count and longest | 0, 0.000 s | recorded |
+| Reads of `main` that saw the new head before the import's end | none of 13,781 | none: met |
+| Import peak memory, 1,000 commits | 16.2 MiB (3.009 s) | recorded |
+| Import peak memory, 12,000 commits | 60.2 MiB (2,793.937 s beside the committers) | recorded |
+| Host state | `b4337977`, 15.20 to 6.44 | — |
+
+G18's step at 100,000 records, in the same run's benches (21.08 to 5.42):
+`compaction/compact/100k` 53.3 ms at the median and 80.5 ms at most, under 100 ms;
+`compaction/compact/1M` 189.8 ms and 207.7 ms, which M20 takes out of the write. No case measures
+the journal transactions and syncs of the intake's final ref move.
 
 ### R-4: the cold first clone
 
-`serve_perf::clone_against_git` now prints the import's own time (`import of 12,000 commits into
+`serve_perf::clone_against_git` prints the import's own time (`import of 12,000 commits into
 the store`) beside the first clone (1,195.6 s against 0.362 s in "v0.7.0 — 2026-10-29"), which
-pays the first refresh and is not split.
+pays the first refresh and is not split. Since `4ccce313` no preparation runs before it, so the
+first clone exports the whole history itself.
 
 | Figure | Value | Target |
 | --- | --- | --- |
-| Import of 12,000 commits into the store | — | recorded |
-| First clone, `serve` and git `upload-pack` | — | at most 2× git's (M17-4a) |
-| Host state | — | — |
+| Import of 12,000 commits into the store | 368.574 s; `b4337977`: 339.936 s | recorded |
+| First clone, `serve` and git `upload-pack` | 1,286.376 s against 0.568 s; `b4337977`: 1,126.501 s against 0.398 s | at most 2× git's (M17-4a): missed by a store never prepared; the prepared first clone is M17-4a's case |
+| Host state | `4ccce313`, load not recorded; `b4337977`: 4.97 to 15.20 | — |
+
+The next clone: 0.364 s against 0.452 s, 0.81× (`b4337977`: 0.293 s against 0.402 s, 0.73×).
 
 ### The `perf-cases` timeout
 
 `scheduled.yml`'s `perf-cases` timeout is recomputed by its comment's rule from the sum of the
-measured case times, the nine before M17 (7,541 s), the four above and M17-4a's
-`first_clone_after_import`: sum — s, timeout — minutes.
+measured case times. Measured so far: `serve_perf`'s seven at `4ccce313` (`clone_against_git`
+1,663.850 s, `fetch_k_behind` 535.904 s, `fifty_clones_at_once_and_apart` 884.173 s,
+`first_clone_after_import` 475.601 s, `land_push_on_12000` 1,422.381 s, `noop_fetch_against_git`
+1,535.259 s, `push_one_and_two_gib` 367.178 s); at `b4337977`, `intake_perf` 2,815.376 s,
+`remote_perf`'s five on 12,000 commits 628.719, 340.071, 308.260, 357.074 and 315.330 s, the
+checked land on 12,000 changesets 757.543 s, and the landing lanes 760.496 s at 32 processes and
+1,069.684 s at 50. `serve_load`'s two cases have not run under `just perf`, so the sum and the
+timeout wait for that run; the timeout stays 320 minutes. Two cases ran past half the `ci-perf`
+kill (27.5 minutes, 1,650 s): `intake_perf::commits_beside_an_import` (2,815.376 s, from a start
+load of 15.20), which the rule asks to split, and `clone_against_git` (1,663.850 s; 1,650.0 s in
+v0.7.0).
 
 ## M17-3: an import in short steps — 2026-11-07 (not measured yet)
 
