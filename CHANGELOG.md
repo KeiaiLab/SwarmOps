@@ -27,6 +27,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
   share, push and fetch p99 and a first clone beside the agents (the M17 design §7). The weekly
   measurement job now also runs it and the landing lanes, which leave the weekly slow suite.
 
+### Fixed
+
+- `serve_perf`'s seeded cases wait for the preparation their import and lands start before a
+  client connects: on 12,000 commits the import's detached `serve --prepare` held
+  `git/serve.lock` past the 10 s wait, and `fetch_k_behind`'s clone failed with `E_BUSY`.
+
 ## [0.9.0] - 2026-11-07
 
 Safety and load. The 0.9.0 release holds M16: workspace writes that never follow a link below the

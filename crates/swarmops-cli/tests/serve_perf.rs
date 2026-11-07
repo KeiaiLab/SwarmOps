@@ -26,6 +26,10 @@ use std::sync::Barrier;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use camino::Utf8Path;
+use swarmops_git::serve::repo::ServeRepo;
+use swarmops_ops::LocalOps;
+use swarmops_ops::serve::refresh::{Freshness, freshness};
 use swarmops_testkit::accounting::{Accounting, Spent, ledger_dir, spent_since};
 use swarmops_testkit::remote::{GitServer, SshMode};
 use swarmops_testkit::serve::ServeSite;
@@ -59,6 +63,15 @@ const ROUNDS: usize = 5;
 
 /// How long the import of [`LONG`] commits may take: a loaded host takes minutes.
 const SLOW_RUN: Duration = Duration::from_secs(3_600);
+
+/// How often `serve.git` is looked at while a preparation runs.
+const POLL: Duration = Duration::from_millis(100);
+
+/// The mark a preparation that found `serve.lock` held leaves for its holder.
+const SERVE_DIRTY: &str = "git/serve.dirty";
+
+/// The file every export writes beside `serve.git`.
+const SERVE_STATE: &str = "git/serve.state";
 
 /// Where a push names the branch it lands onto.
 const LAND_MAIN: &str = "HEAD:refs/land/main";
@@ -183,7 +196,11 @@ impl Bench {
         let started = Instant::now();
         support::run_within(&line, &[], SLOW_RUN).ok();
         let imported = started.elapsed();
+
+        // 5. Seeded: the import's detached preparation ended first, so that no seed fetch runs
+        //    beside its repack and no case connects behind its serve.lock.
         if matches!(start, Start::Seeded) {
+            settle(&store, Some(&bare));
             site.seed_serve_git(REPO, &bare);
         }
         Bench {
@@ -268,6 +285,45 @@ pub(crate) fn fast_import(server: &GitServer, bare: &Path, commits: usize) {
         .expect("feed fast-import");
     drop(stdin);
     assert!(child.wait().expect("git fast-import").success());
+}
+
+/// Waits until no preparation is at the store at `root`: one run of `serve --prepare` (seeded
+/// from `seed`) to its end, again while a detached one holds `serve.lock`, then no mark left,
+/// `serve.git` current and its lock free. The detached runs are the writer's cost (the M17
+/// design §1), never a case's.
+fn settle(root: &Path, seed: Option<&Path>) {
+    // 1. One preparation to its end: past the detached ones, whatever they left marked.
+    let mut line = vec!["--repo", path_str(root), "serve", "--prepare"];
+    if let Some(seed) = seed {
+        line.extend(["--seed-from", path_str(seed)]);
+    }
+    let deadline = Instant::now() + SLOW_RUN;
+    loop {
+        let run = support::run_within(&line, &[], SLOW_RUN);
+        if !run.busy() || Instant::now() >= deadline {
+            run.ok();
+            break;
+        }
+    }
+
+    // 2. Nothing marked, serve.git current, serve.lock free.
+    let root = Utf8Path::from_path(root).expect("a UTF-8 store path");
+    let ops = LocalOps::open(root).expect("open the store");
+    let repo = ServeRepo::open(root).expect("open serve.git");
+    let idle = || {
+        let fresh = freshness(&ops, &repo).expect("read the freshness");
+        !root.join(SERVE_DIRTY).exists()
+            && root.join(SERVE_STATE).exists()
+            && matches!(fresh, Freshness::Current)
+            && repo.lock(Duration::ZERO).is_ok()
+    };
+    while !idle() {
+        assert!(
+            Instant::now() < deadline,
+            "serve.git not prepared within {SLOW_RUN:?}"
+        );
+        thread::sleep(POLL);
+    }
 }
 
 /// `path` as text.
@@ -721,6 +777,7 @@ fn fetch_k_behind() {
                 land_one(&bench, n);
             }
             landed += k;
+            settle(&bench.store(), None);
             let (time, spent, bytes, seen) = fetch_behind(&bench, &dir, k);
             assert_eq!(
                 seen,
@@ -895,4 +952,24 @@ fn seeded_serve_git_exports_nothing() {
         "serve-perf: first clone on 200 seeded commits: {:.3} s",
         first.as_secs_f64()
     );
+}
+
+/// A seeded bench hands its cases a `serve.git` no preparation is still at: the detached one the
+/// import started has ended, so the first connection never waits for `serve.lock` behind it (a
+/// 12,000-commit preparation outlasts the 10 s wait: `E_BUSY`).
+#[test]
+fn seeded_bench_waits_for_its_preparation() {
+    let bench = Bench::build(200, Start::Seeded);
+    let root = bench.store();
+    let root = Utf8Path::from_path(&root).expect("a UTF-8 store path");
+    assert!(
+        !root.join(SERVE_DIRTY).exists(),
+        "a preparation mark is left"
+    );
+    assert!(root.join(SERVE_STATE).exists(), "no export ran");
+    let repo = ServeRepo::open(root).expect("open serve.git");
+    assert!(repo.lock(Duration::ZERO).is_ok(), "serve.lock is held");
+    let ops = LocalOps::open(root).expect("open the store");
+    let fresh = freshness(&ops, &repo).expect("read the freshness");
+    assert!(matches!(fresh, Freshness::Current), "serve.git is stale");
 }
