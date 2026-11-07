@@ -4,6 +4,8 @@
 //! `swarmops-ops` and `swarmops-cli`, for their integration tests (and the operations' unit
 //! tests), never a dependency of a product crate.
 //!
+//! - [`differential`]: one scripted git session against `swarmops serve` and against git's own
+//!   server, compared step by step apart from the listed differences (the M17 design §2).
 //! - [`fs`]: [`FsOps`](swarmops_store::FsOps) doubles on real files, to record, fail or hold
 //!   calls over any filesystem ([`fs::Watched`], [`fs::RecordingFs`], [`fs::FailingFs`]), skip
 //!   every flush while failing where the real filesystem fails ([`fs::NoSyncFs`]), or tell calls
@@ -55,6 +57,8 @@
 pub mod child;
 #[cfg(feature = "cli")]
 pub mod cli;
+#[cfg(feature = "cli")]
+pub mod differential;
 pub mod faults;
 pub mod formats;
 pub mod fs;

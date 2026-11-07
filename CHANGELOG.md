@@ -38,6 +38,11 @@ collects the changes on `stable` that no release holds yet, until the next relea
   ([git import](docs/reference/commands/git-import.md)).
 - `E_REF_PROTECTED` from `sync` names the remote in `details.remote`, beside `name`, `changeset`
   (the floor) and `target` (the remote head's changeset).
+- A test of the build runs one scripted git session against `swarmops serve` and against git's
+  own server on a bare copy of the same history, and fails on any difference in a command's exit
+  status, its refs or the client's objects that the new page does not list with its reason; so
+  far it lists the land refs and a refused push's status
+  ([Serve differences](docs/operate/serve-differences.md)).
 
 ### Changed
 
