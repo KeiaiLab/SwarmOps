@@ -31,6 +31,10 @@ git (client) ──ssh──▶ sshd ──forced command──▶ swarmops serv
                                                  │   unless git/serve.state shows nothing moved
                                                  ▼
                                     git upload-pack | git receive-pack on serve.git
+                                                 │ a fetch: swarmops serve --hook
+                                                 │ pack-objects sends the pack, from
+                                                 │ git/serve-cache/ when an identical
+                                                 │ request was answered before
                                                  │ a push: git checks the pack in its
                                                  │ quarantine, then runs
                                                  ▼
@@ -50,9 +54,19 @@ the commit of each export; a connection whose store refs and `serve.git` refs bo
 advertises `serve.git` as it is, taking neither the store's writer lock nor `git/serve.lock`, so a
 fetch with nothing new does not wait behind the agents' lands. Anything else (a ref moved, the file
 missing or damaged, a `serve.git` ref moved by hand) refreshes first, as before.
-`git/serve.git`, `git/SERVE`, `git/serve.lock`, `git/serve.state` and `git/serve-hooks/` in the
-store are a cache of that export: deleted, the next connection makes them again, and a backup may
-leave them out.
+
+git hands each fetch's pack to `serve --hook pack-objects` (its `uploadpack.packObjectsHook`,
+which `serve` sets in git's environment). It sends only commits a served ref is or reaches: a
+want of anything else, such as the commit of a refused push that git kept in `serve.git`, is
+refused before any byte, with either protocol. Identical requests (the same wants, haves, depth
+and options, the same git) share one pack in `git/serve-cache/`: the first produces it, and
+the others are sent it, after its header's BLAKE3 digest is checked against its bytes; an entry
+that fails the check is removed and the pack produced again. The cache keeps at most 4 GiB a
+store, the least recently used removed first.
+
+`git/serve.git`, `git/SERVE`, `git/serve.lock`, `git/serve.state`, `git/serve-hooks/` and
+`git/serve-cache/` in the store are a cache of that export: deleted, the next connection makes
+them again, and a backup may leave them out.
 
 ## The serving account
 
@@ -242,6 +256,7 @@ check, to another push or a land conflict, is refused alone: `! [remote rejected
 | `E_NOT_A_REPO: no store named nope is served` | No such store under `--root` | Check the name with the operator |
 | `E_INVALID_ARG: serve runs git-upload-pack and git-receive-pack alone` | `ssh so-host <command>`, or `git archive --remote` | Clone, fetch, pull or push with git |
 | `E_BUSY: …` | Another connection's refresh held `git/serve.lock` for 10 s | Connect again |
+| `remote: {"ok":false,…"E_POLICY_DENIED",…"not_served"…}`, then git's `bad pack header` | A fetch by id of an object no served ref reaches | Fetch a branch or a tag |
 | `non-fast-forward: main moves along first parents; push to refs/land/main` | A push to `main` that is not forward along first parents, such as the merge `git pull --no-rebase` makes | `git pull --rebase`, or push to `refs/land/main` |
 | `! [rejected] … (non-fast-forward)` | A branch moved backwards without `--force` | `--force`, if `force` covers the branch |
 | `stale: refs/heads/feature/y moved; fetch first` | Another push moved the ref after this client's fetch | Fetch, then push again |
@@ -261,6 +276,10 @@ check, to another push or a land conflict, is refused alone: `! [remote rejected
   that, every ref is refused with `too_many_commands`.
 - The serve lock waits 10 s, the store's writer lock wait; a refresh moves each served ref at most
   8 times against a concurrent writer before the connection is refused.
+- The pack cache holds at most 4 GiB a store
+  ([Serve pack cache](../reference/limits.md#internal-values)); a larger pack is sent and not
+  kept. A fetch waits at most 10 s for another connection producing the same pack, then
+  produces its own.
 
 ## Not served
 

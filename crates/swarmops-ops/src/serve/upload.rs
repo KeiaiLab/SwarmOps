@@ -4,11 +4,13 @@
 //! ```text
 //! 1 store under --root ─▶ 2 memo key ─▶ 3 access.toml: read ─▶ 4 serve.git refreshed
 //!                                       5 warnings to stderr ─▶ 6 git upload-pack
+//!      ── a pack ──▶ pack-objects hook (SWARMOPS_SERVE_EXE · _STORE · _IDENTITY)
 //! ```
 //!
 //! Each step before git starts refuses with no protocol byte written, its texts masked by the
 //! [`Redactor`] of `--root`.
 
+use std::ffi::OsString;
 use std::io::Write as _;
 use std::os::unix::process::ExitStatusExt as _;
 use std::process::ExitStatus;
@@ -22,7 +24,9 @@ use super::access::{Access, Action};
 use super::entry::{SshRequest, store_under};
 use super::guard::Redactor;
 use super::refresh::{Freshness, Refreshed, Scope, freshness, refresh, serve_error};
-use super::{ServeInvocation, Served};
+use super::{
+    SWARMOPS_SERVE_EXE, SWARMOPS_SERVE_IDENTITY, SWARMOPS_SERVE_STORE, ServeInvocation, Served,
+};
 use crate::LocalOps;
 use crate::error;
 
@@ -39,13 +43,24 @@ pub fn run(
     request: &SshRequest,
 ) -> Result<Served, OpError> {
     let redactor = Redactor::new(&[invocation.root.as_std_path()]);
-    let repo =
+    let (repo, store) =
         prepare(invocation, who, request, &redactor).map_err(|e| redactor.redact_error(e))?;
 
-    // 6. git upload-pack, on the connection's stdin and stdout.
+    // 6. git upload-pack, on the connection's stdin and stdout; the pack-objects hook it runs
+    //    learns the binary, the store and the caller from its parent.
     let git = GitCli::find().map_err(|e| git_error(e, &redactor))?;
     let mut env = ChildEnv::new();
     env.git_protocol = invocation.git_protocol.clone().map(Into::into);
+    if let Some(exe) = &invocation.exe {
+        env.vars
+            .insert(SWARMOPS_SERVE_EXE.to_owned(), exe.clone().into_os_string());
+    }
+    env.vars
+        .insert(SWARMOPS_SERVE_STORE.to_owned(), OsString::from(store));
+    env.vars.insert(
+        SWARMOPS_SERVE_IDENTITY.to_owned(),
+        OsString::from(who.agent()),
+    );
     let status = child::run(&git, Service::UploadPack, &repo, &env)
         .map_err(|e| redactor.redact_error(serve_error(e)))?;
     Ok(Served::new(exit_code(status)))
@@ -53,13 +68,13 @@ pub fn run(
 
 /// Steps 1 to 5: the store `request` names opened with its memo key, `who`'s read checked, and
 /// its `serve.git` refreshed; what the refresh warns of goes to stderr, masked by `redactor`.
-/// The store is closed again before git starts.
+/// The serving repository and the store's path; the store is closed again before git starts.
 fn prepare(
     invocation: &ServeInvocation,
     who: &Identity,
     request: &SshRequest,
     redactor: &Redactor,
-) -> Result<ServeRepo, OpError> {
+) -> Result<(ServeRepo, String), OpError> {
     // 1. The store, under the root.
     let store = store_under(&invocation.root, &request.store)?;
     let ops = LocalOps::open(&store)?;
@@ -87,7 +102,7 @@ fn prepare(
     for warning in refreshed.warnings {
         let _ = writeln!(stderr, "warning: {}", redactor.redact(&warning));
     }
-    Ok(repo)
+    Ok((repo, store.into_string()))
 }
 
 /// The error of finding no git to run, masked.

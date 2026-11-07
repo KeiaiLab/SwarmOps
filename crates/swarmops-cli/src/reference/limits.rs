@@ -675,7 +675,7 @@ static DEFAULTS: [DefaultRow; 13] = [
 
 /// Values that tune the implementation, or bound the store's layout where no request reaches:
 /// no option sets them, and they are not part of the contract.
-static INTERNAL: [Limit; 20] = [
+static INTERNAL: [Limit; 21] = [
     internal_value(
         "Writer lock wait",
         declared(
@@ -916,6 +916,19 @@ static INTERNAL: [Limit; 20] = [
         Unit::Count("attempts"),
         "How many times `serve` reads a store ref again when the move of its export in \
              `serve.git` met another writer's, before the connection is refused.",
+    ),
+    internal_value(
+        "Serve pack cache",
+        code(
+            "swarmops_ops::serve::MAX_PACK_CACHE_BYTES",
+            "crates/swarmops-ops/src/serve/packcache.rs",
+            "pub const MAX_PACK_CACHE_BYTES: u64 = 4 << 30;",
+            || swarmops_ops::serve::MAX_PACK_CACHE_BYTES,
+        ),
+        Unit::Bytes,
+        "The packs `serve` keeps together in a store's `git/serve-cache/`, one for each \
+             request of a fetch it answered: past it the least recently used are removed, \
+             and a larger pack is sent and not kept.",
     ),
 ];
 

@@ -6,7 +6,8 @@
 //! which checks the order of its writes (the test kit's runner sets it for every run),
 //! `SWARMOPS_TEST_NOW=<unix seconds>`, which fixes the time it signs changesets at, and
 //! `SWARMOPS_TEST_GITHUB_HOSTS=<host[:port],…>`, which makes a push count those hosts as
-//! GitHub's and check GitHub's file limits there.
+//! GitHub's and check GitHub's file limits there, and `SWARMOPS_TEST_SERVE_CACHE=bound=<bytes>`
+//! or `=no-reach-check`, which bounds `serve`'s pack cache or skips its reachability check.
 //!
 //! The test exists only in a build without the feature, as `cargo build --release` is. `just
 //! check` and `scripts/check.sh` run it in a release build and require it to run
@@ -179,4 +180,47 @@ fn absolute(program: &std::path::Path) -> std::path::PathBuf {
         .map(|dir| dir.join(program))
         .find(|candidate| candidate.is_file())
         .expect("git on PATH")
+}
+
+/// `SWARMOPS_TEST_SERVE_CACHE=bound=0` on `serve`: a build with the test hooks keeps no pack
+/// (`serve_fetch::the_cache_stays_under_its_bound`); this build keeps a clone's under
+/// `MAX_PACK_CACHE_BYTES`, as it would without the hook.
+#[test]
+fn a_build_without_the_feature_ignores_the_serve_cache_hook() {
+    use std::fs;
+
+    use swarmops_testkit::git::fixture;
+    use swarmops_testkit::serve::ServeSite;
+
+    // 1. A served store holding the `linear` fixture, which person/ada reads.
+    let site =
+        ServeSite::new::<support::Swarmops>().with_env(&[("SWARMOPS_TEST_SERVE_CACHE", "bound=0")]);
+    let store = site.init("acme");
+    let access = "version = 1\n\n[[grant]]\nwho = [\"person/ada\"]\nread = true\n";
+    fs::write(store.join("access.toml"), access).unwrap();
+    let linear = fixture("linear");
+    let source = linear.repo.as_deref().unwrap().to_str().unwrap();
+    let import = ["git", "import", source, "--ref", "HEAD", "--into", "main"];
+    let line = [
+        &["--repo", store.to_str().unwrap(), "--as", "agent/worker-1"][..],
+        &import,
+    ]
+    .concat();
+    run_bin(BIN, &line, &[], "").ok();
+
+    // 2. A clone through serve: its pack kept all the same.
+    let work = tempfile::tempdir().unwrap();
+    let cloned = site
+        .command()
+        .env("GIT_SSH_COMMAND", site.ssh_command("person/ada"))
+        .current_dir(work.path())
+        .args(["clone", "--quiet", &site.ssh_url("acme"), "clone"])
+        .output()
+        .unwrap();
+    assert!(cloned.status.success(), "{cloned:?}");
+    let kept = fs::read_dir(store.join("git/serve-cache"))
+        .unwrap()
+        .filter(|entry| entry.as_ref().unwrap().path().extension() == Some("pack".as_ref()))
+        .count();
+    assert_eq!(kept, 1, "the hook is ignored: the clone's pack is kept");
 }

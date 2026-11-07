@@ -7,7 +7,8 @@
 //! swarmops-ops serve ──▶ repo (serve.git, its lock and hook) ──▶ child (host git, one builder)
 //!                    ├─▶ refmap (store ref ↔ git ref)
 //!                    ├─▶ pkt, proc_receive (the hook's protocol)
-//!                    └─▶ land_key (refs/land/<target>)
+//!                    ├─▶ land_key (refs/land/<target>)
+//!                    └─▶ pack_key (the pack cache's key and digest)
 //! ```
 //!
 //! The contracts are frozen here; each module's body comes with the M14 plan's task that owns it,
@@ -16,6 +17,7 @@
 
 pub mod child;
 pub mod land_key;
+pub mod pack_key;
 pub mod pkt;
 pub mod proc_receive;
 pub mod refmap;

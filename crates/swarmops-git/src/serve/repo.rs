@@ -52,6 +52,12 @@ pub const PRE_RECEIVE_SCRIPT: &str = "#!/bin/sh
 exec \"$SWARMOPS_SERVE_EXE\" serve --hook pre-receive
 ";
 
+/// The command git runs instead of `pack-objects` when it answers a fetch (its
+/// `uploadpack.packObjectsHook`, set in the child's environment, which git counts as protected
+/// configuration): git appends the `git pack-objects …` line it would run, and the binary that
+/// serves answers from its pack cache (the M17 design §5).
+pub const PACK_OBJECTS_HOOK: &str = "\"$SWARMOPS_SERVE_EXE\" serve --hook pack-objects";
+
 /// The store's git directory, which the mirror shares: `<store>/git`.
 const GIT: &str = "git";
 

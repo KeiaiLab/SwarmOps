@@ -488,18 +488,6 @@ left).
   on as it is. One such line names a host path: when the hook's program is gone (the serving
   binary replaced or removed), `sh` names the hook file `<store>/git/serve-hooks/pre-receive`,
   and the client prints it as a `remote:` line. *Unscheduled. Found: M14 Task S3.*
-- **A pushed object `proc-receive` refused can be fetched over protocol v2.** Since M16 the
-  `pre-receive` hook judges every command inside git's quarantine and refuses the whole push when
-  it refuses one, so the objects of a push it refuses never enter `serve.git`. A command it
-  accepts that `proc-receive` then refuses keeps its objects in `serve.git`, unreferenced, until
-  `gc --auto` prunes them after git's grace period: a land that conflicts or loses its
-  compare-and-swap, a `stale` old value, and a command that lost a race to another push between
-  the two hooks. `uploadpack.allowAnySHA1InWant=false` keeps them from protocol v0 clients, but
-  protocol v2's `fetch` takes any object the repository holds as a want (gitprotocol-v2), so a v2
-  client that knows the id fetches it. Every caller of `upload-pack` holds the store's `read`
-  grant, which covers the whole store, so no grant is crossed. *Open: receive-pack into an object
-  directory of its own (the M14 design's risk R-2); narrowed by the M16 design §7. Found: M14 Task
-  S3.*
 - **A land through `refs/land/<target>` does not move the client's tracking branch.** The landed
   commit is a squash the server made, so the client holds none of its objects, and git would
   refuse to move `origin/<target>` onto it (`update_ref failed … nonexistent object`, git 2.43.0).

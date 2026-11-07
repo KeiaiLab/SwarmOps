@@ -73,6 +73,14 @@ collects the changes on `stable` that no release holds yet, until the next relea
   with no stdio, nobody waits for it, and the MCP server reaps it; a spawn or a preparation that
   fails changes neither the operation's envelope nor its exit code, and the next connection
   refreshes as before (the M17 design §4.3).
+- `serve` answers identical fetches with one pack: git hands each fetch's pack to `serve --hook
+  pack-objects` (its `uploadpack.packObjectsHook`, set in git's environment), which keeps it in
+  the store's `git/serve-cache/` under a BLAKE3 key of the request (wants, haves, depth, options
+  and git's version), and sends it to the next identical request after its header's digest is
+  checked; a damaged entry is removed and the pack produced again. The cache keeps at most 4 GiB
+  a store (`MAX_PACK_CACHE_BYTES`, [limits](docs/reference/limits.md#internal-values)), the least
+  recently used removed first ([Serve over ssh](docs/operate/serve-over-ssh.md#how-it-works), the
+  M17 design §5).
 
 ### Changed
 
@@ -121,6 +129,11 @@ collects the changes on `stable` that no release holds yet, until the next relea
   between commits (the M17 design §3.2): one commit of many large files is held a batch at a time,
   not whole. A commit refused after a batch was stored leaves those objects unreferenced, as a
   failed commit does ([Known limitations](docs/known-limitations.md)).
+- A `serve` fetch by id of an object no served ref reaches is refused, over protocol v2 as over
+  v0: the commit of a push `proc-receive` refused, which git keeps in `serve.git` unreferenced
+  until `gc` prunes it, is no longer sent to a v2 client that names it. The pack-objects hook
+  sends only commits a served ref is or reaches, and refuses anything else before any byte
+  (`E_POLICY_DENIED`, `details.reason` `not_served`; the M17 design §5).
 
 ## [0.8.0] - 2026-11-07
 

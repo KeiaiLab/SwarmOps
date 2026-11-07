@@ -25,13 +25,13 @@ mcp_tool: ""
 envelope_op: "serve"
 exit_codes: [0]
 errors: []
-syntax: "swarmops serve [OPTIONS]"
+syntax: "swarmops serve [OPTIONS] [GIT_ARGS]..."
 ```
 
 ## Syntax
 
 ```text
-swarmops serve [OPTIONS]
+swarmops serve [OPTIONS] [GIT_ARGS]...
 ```
 
 ## Required arguments
@@ -64,7 +64,13 @@ With --cgi: name the caller &lt;FAMILY&gt;/$REMOTE\_USER, the user the web serve
 
 Syntax: `--hook <HOOK>`.
 
-Run as a hook git runs inside a push: pre-receive or proc-receive, from the hook files serve writes. Values: `pre-receive`: git's `pre-receive`: it refuses the whole push while its objects are quarantined; `proc-receive`: git's `proc-receive`: it decides each command of a push.
+Run as a hook git runs inside a push (pre-receive, proc-receive: from the hook files serve writes) or a fetch (pack-objects: from the setting serve gives git). Values: `pre-receive`: git's `pre-receive`: it refuses the whole push while its objects are quarantined; `proc-receive`: git's `proc-receive`: it decides each command of a push; `pack-objects`: git's pack-objects hook: it answers a fetch's pack from the pack cache.
+
+### `GIT_ARGS`
+
+Syntax: `<GIT_ARGS>`.
+
+With --hook pack-objects: the pack-objects line git appends.
 
 ### `--stdio`
 

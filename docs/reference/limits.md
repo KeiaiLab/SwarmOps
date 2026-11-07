@@ -280,6 +280,7 @@ Not part of the contract: these tune the implementation, or bound the store's la
 | Read window | 4,096 entries | `swarmops_store::meta::READ_WINDOW` | How many entries of `journal.off`, an index column or a sorted view one read of the store takes, so that no read allocates by a file's length. |
 | Lookup hits | 4,096 changesets | `swarmops_store::meta::MAX_LOOKUP_HITS` | The most changesets a lookup by id prefix or by delta hash gathers before it says its answer was cut. |
 | Serve refresh attempts | 8 attempts | `swarmops_ops::serve::refresh::SERVE_REFRESH_ATTEMPTS` | How many times `serve` reads a store ref again when the move of its export in `serve.git` met another writer's, before the connection is refused. |
+| Serve pack cache | 4,294,967,296 bytes (4 GiB) | `swarmops_ops::serve::MAX_PACK_CACHE_BYTES` | The packs `serve` keeps together in a store's `git/serve-cache/`, one for each request of a fetch it answered: past it the least recently used are removed, and a larger pack is sent and not kept. |
 
 ## Details
 

@@ -96,6 +96,8 @@ enum Channel {
     Git,
     /// A CGI response on stdout: a `Status:` header and the text.
     Cgi,
+    /// Nothing on stdout, where git reads a pack: the envelope alone, which git relays.
+    Pack,
 }
 
 /// Runs `serve`, operation `op`, with `args`: the connection served, or refused before any
@@ -104,7 +106,11 @@ pub(super) fn run(ctx: &Ctx<'_>, op: &'static str, args: ServeArgs) -> Printed {
     if args.prepare {
         return run_prepare(ctx, op, &args);
     }
-    let channel = if args.cgi { Channel::Cgi } else { Channel::Git };
+    let channel = match (args.cgi, args.hook) {
+        (true, _) => Channel::Cgi,
+        (false, Some(HookKind::PackObjects)) => Channel::Pack,
+        (false, _) => Channel::Git,
+    };
     let served = invocation(ctx.global.agent.as_deref(), ctx.env, args)
         .and_then(|invocation| swarmops_ops::serve::run(&invocation));
     match served {
@@ -131,10 +137,24 @@ fn invocation(
         ));
     }
 
-    // 2. The caller and the entry: the hook's from its parent, the others' from the line.
+    // 2. The caller and the entry: the hook's from its parent, the others' from the line;
+    //    git's line after the pack-objects hook alone.
+    if !(args.hook_args.is_empty() || args.hook == Some(HookKind::PackObjects)) {
+        return Err(reason(
+            ErrorCode::InvalidArg,
+            "not_from_git",
+            "serve --hook takes git's line after pack-objects alone",
+        ));
+    }
     let (identity, entry) = match args.hook {
         Some(HookKind::PreReceive) => (hook_identity(agent, env)?, Entry::PreReceive),
         Some(HookKind::ProcReceive) => (hook_identity(agent, env)?, Entry::Hook),
+        Some(HookKind::PackObjects) => (
+            hook_identity(agent, env)?,
+            Entry::PackObjects {
+                args: args.hook_args,
+            },
+        ),
         None => (
             line_identity(agent, args.user_family)?,
             entry(env, args.cgi)?,
@@ -347,6 +367,7 @@ fn refuse(ctx: &Ctx<'_>, op: &'static str, channel: Channel, error: OpError) -> 
     let _ = match channel {
         Channel::Git => write_refusal(&mut stdout, &error),
         Channel::Cgi => write_cgi(&mut stdout, &error),
+        Channel::Pack => Ok(()),
     };
 
     // 2. The envelope.

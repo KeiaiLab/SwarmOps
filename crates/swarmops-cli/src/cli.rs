@@ -750,10 +750,18 @@ pub struct ServeArgs {
         help = SERVE_USER_FAMILY_HELP
     )]
     pub user_family: Option<String>,
-    /// Run as a hook git runs inside a push: pre-receive or proc-receive, from the hook files
-    /// serve writes.
+    /// Run as a hook git runs inside a push (pre-receive, proc-receive: from the hook files
+    /// serve writes) or a fetch (pack-objects: from the setting serve gives git).
     #[arg(long, value_enum, value_name = "HOOK", conflicts_with = "stdio")]
     pub hook: Option<HookKind>,
+    /// With --hook pack-objects: the pack-objects line git appends.
+    #[arg(
+        value_name = "GIT_ARGS",
+        requires = "hook",
+        trailing_var_arg = true,
+        allow_hyphen_values = true
+    )]
+    pub hook_args: Vec<OsString>,
     /// Serve the store-to-store sync on stdin and stdout: not served yet.
     #[arg(long)]
     pub stdio: bool,
@@ -793,6 +801,8 @@ pub enum HookKind {
     PreReceive,
     /// git's `proc-receive`: it decides each command of a push.
     ProcReceive,
+    /// git's pack-objects hook: it answers a fetch's pack from the pack cache.
+    PackObjects,
 }
 
 /// `blob`'s operations.

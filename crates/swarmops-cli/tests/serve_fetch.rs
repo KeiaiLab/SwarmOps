@@ -5,7 +5,8 @@
 //! the caller is named by `--as` alone, never by `SWARMOPS_AGENT`; nothing a client is sent names
 //! the served root. A fetch whose store has not moved since the last export reads `serve.git`
 //! without the store's writer lock (`git/serve.state`, the M17 design §4.2), and `serve --prepare`
-//! makes the first clone after an import write no object (§4.3).
+//! makes the first clone after an import write no object (§4.3). Identical requests share one
+//! pack of `git/serve-cache/`, and no object a served ref does not reach is sent (§5).
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -862,4 +863,226 @@ fn prepare_without_the_memo_key_does_nothing() {
         .unwrap();
     assert_eq!(text(&refs.stdout), "");
     assert!(!site.state_file().exists());
+}
+
+/// The pack cache beside `serve.git` (the M17 design §5), and what its entries end in.
+const SERVE_CACHE: &str = "git/serve-cache";
+const ENTRY_SUFFIX: &str = ".pack";
+
+/// The test hook of the pack cache: its bound, or its reachability check skipped.
+#[cfg(feature = "test-hooks")]
+const SERVE_CACHE_ENV: &str = "SWARMOPS_TEST_SERVE_CACHE";
+
+/// The access file of the unreferenced-object test: [`AGENT`] reads, pushes and lands `main`.
+const LANDER: &str = r#"version = 1
+
+[[grant]]
+who = ["person/ada"]
+read = true
+push = ["main"]
+land = ["main"]
+"#;
+
+impl Site {
+    /// An empty store, served by `serve`s that get `env` too.
+    #[cfg(feature = "test-hooks")]
+    fn with_env(env: &[(&str, &str)]) -> Site {
+        let mut site = Site::new();
+        site.served = site.served.with_env(env);
+        site
+    }
+
+    /// The pack cache's entries, by path, with their sizes.
+    fn entries(&self) -> Vec<(PathBuf, u64)> {
+        let dir = self.served.store(STORE).join(SERVE_CACHE);
+        let Ok(listed) = fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut entries: Vec<(PathBuf, u64)> = listed
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.to_str().is_some_and(|p| p.ends_with(ENTRY_SUFFIX)))
+            .map(|path| {
+                let size = fs::metadata(&path).unwrap().len();
+                (path, size)
+            })
+            .collect();
+        entries.sort();
+        entries
+    }
+
+    /// The one entry of the pack cache, with its inode: a new entry is a new file.
+    fn only_entry(&self) -> (PathBuf, u64) {
+        let entries = self.entries();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        let path = entries[0].0.clone();
+        let inode = std::os::unix::fs::MetadataExt::ino(&fs::metadata(&path).unwrap());
+        (path, inode)
+    }
+
+    /// `git fsck --strict` in the clone `dir`.
+    fn fsck(&self, dir: &Path) {
+        self.git(dir, Protocol::V2, &["fsck", "--strict", "--no-dangling"]);
+    }
+
+    /// A push of `HEAD` from `dir` to `refs/land/main` that conflicts with `main`, which
+    /// `proc-receive` refuses after git moved its objects into `serve.git`; the pushed tip.
+    fn refused_land(&self, dir: &Path, other: &Path) -> String {
+        // 1. main changes a file; the change to land changes the same line.
+        fs::write(other.join("shared.txt"), "theirs\n").unwrap();
+        self.git(other, Protocol::V2, &["add", "shared.txt"]);
+        self.git(other, Protocol::V2, &["commit", "--quiet", "-m", "theirs"]);
+        self.git(
+            other,
+            Protocol::V2,
+            &["push", "--quiet", "origin", "HEAD:main"],
+        );
+        fs::write(dir.join("shared.txt"), "ours\n").unwrap();
+        self.git(dir, Protocol::V2, &["add", "shared.txt"]);
+        self.git(dir, Protocol::V2, &["commit", "--quiet", "-m", "ours"]);
+
+        // 2. The land: refused, its commit in serve.git, which no ref names.
+        let line = ["push", "origin", "HEAD:refs/land/main"];
+        let pushed = self.git_as(AGENT, dir, Protocol::V2, &line);
+        let stderr = text(&pushed.stderr);
+        assert!(!pushed.status.success(), "{stderr}");
+        assert!(stderr.contains("(conflict)"), "{stderr}");
+        self.rev(dir, "HEAD")
+    }
+}
+
+/// Two clones of one revision share one pack: the first produces the cache's one entry, the
+/// second is sent from it (the same file), and both pass `git fsck --strict`.
+#[test]
+fn identical_clones_pack_once() {
+    let site = Site::new().with_linear();
+    let first = site.clone("first", Protocol::V2, &[]);
+    let entry = site.only_entry();
+
+    let second = site.clone("second", Protocol::V2, &[]);
+    assert_eq!(site.only_entry(), entry, "the second clone packed again");
+    for clone in [&first, &second] {
+        site.fsck(clone);
+        assert_eq!(
+            site.rev(clone, "origin/main"),
+            site.served("refs/heads/main")
+        );
+    }
+}
+
+/// A fetch with other haves than a clone's is its own request: it gets its own entry, and
+/// brings what it asked for.
+#[test]
+fn different_requests_do_not_share() {
+    let site = Site::new().with_linear();
+    let behind = site.clone("behind", Protocol::V2, &[]);
+    site.land("moved.txt");
+    site.clone("fresh", Protocol::V2, &[]);
+    assert_eq!(site.entries().len(), 2, "{:?}", site.entries());
+
+    site.git(&behind, Protocol::V2, &["fetch", "--quiet"]);
+    assert_eq!(site.entries().len(), 3, "{:?}", site.entries());
+    assert_eq!(
+        site.rev(&behind, "origin/main"),
+        site.served("refs/heads/main")
+    );
+    site.fsck(&behind);
+}
+
+/// An entry whose bytes no longer match its header is never sent: the clone succeeds from a
+/// pack produced again, and the entry is replaced by one the next clone is sent from.
+#[test]
+fn a_damaged_entry_is_never_sent() {
+    let site = Site::new().with_linear();
+    site.clone("first", Protocol::V2, &[]);
+    let (entry, _) = site.only_entry();
+
+    // 1. The entry's last byte flipped.
+    let mut bytes = fs::read(&entry).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xff;
+    fs::write(&entry, &bytes).unwrap();
+
+    // 2. The next clone: whole, from a fresh pack; the entry written again.
+    let second = site.clone("second", Protocol::V2, &[]);
+    site.fsck(&second);
+    let replaced = site.only_entry();
+    assert_ne!(
+        fs::read(&replaced.0).unwrap(),
+        bytes,
+        "the damaged entry is kept"
+    );
+
+    // 3. The replacement is sent as it is.
+    let third = site.clone("third", Protocol::V2, &[]);
+    site.fsck(&third);
+    assert_eq!(site.only_entry(), replaced);
+}
+
+/// The cache holds at most its bound: five requests of different depths, under a bound that
+/// holds about half of their packs, leave fewer than five entries, whose total is under it.
+#[cfg(feature = "test-hooks")]
+#[test]
+fn the_cache_stays_under_its_bound() {
+    let clones = |site: &Site| {
+        for depth in ["1", "2", "3", "4"] {
+            site.clone(&format!("depth-{depth}"), Protocol::V2, &["--depth", depth]);
+        }
+        site.clone("whole", Protocol::V2, &[]);
+    };
+
+    // 1. The five packs' sizes, without a bound.
+    let unbounded = Site::new().with_linear();
+    clones(&unbounded);
+    let sizes: Vec<u64> = unbounded.entries().iter().map(|(_, size)| *size).collect();
+    assert_eq!(sizes.len(), 5, "five requests, five entries: {sizes:?}");
+    let bound = sizes.iter().sum::<u64>() / 2;
+
+    // 2. The same five under the bound.
+    let bound_env = format!("bound={bound}");
+    let site = Site::with_env(&[(SERVE_CACHE_ENV, &bound_env)]).with_linear();
+    clones(&site);
+    let entries = site.entries();
+    let total: u64 = entries.iter().map(|(_, size)| size).sum();
+    assert!(!entries.is_empty() && entries.len() < 5, "{entries:?}");
+    assert!(total <= bound, "{total} past {bound}: {entries:?}");
+}
+
+/// A commit only a refused land holds, unreferenced in `serve.git`, is not sent to a protocol
+/// v2 client that asks for it by id: the fetch is refused.
+#[test]
+fn an_unreferenced_object_is_not_sent() {
+    let site = Site::new().with_linear();
+    site.grant(LANDER);
+    let ours = site.clone("ours", Protocol::V2, &[]);
+    let theirs = site.clone("theirs", Protocol::V2, &[]);
+    let tip = site.refused_land(&ours, &theirs);
+
+    let fresh = site.clone("fresh", Protocol::V2, &[]);
+    let line = ["-c", "protocol.version=2", "fetch", "origin", &tip];
+    let fetched = site.git_as(AGENT, &fresh, Protocol::V2, &line);
+    let stderr = text(&fetched.stderr);
+    assert!(
+        !fetched.status.success(),
+        "the refused land's commit was sent: {stderr}"
+    );
+    assert!(stderr.contains("not_served"), "{stderr}");
+}
+
+/// The self-check of [`an_unreferenced_object_is_not_sent`]: with the reachability check
+/// skipped, the same fetch brings the refused land's commit, so the check is what refuses it.
+#[cfg(feature = "test-hooks")]
+#[test]
+fn an_unreferenced_object_is_sent_unchecked() {
+    let site = Site::with_env(&[(SERVE_CACHE_ENV, "no-reach-check")]).with_linear();
+    site.grant(LANDER);
+    let ours = site.clone("ours", Protocol::V2, &[]);
+    let theirs = site.clone("theirs", Protocol::V2, &[]);
+    let tip = site.refused_land(&ours, &theirs);
+
+    let fresh = site.clone("fresh", Protocol::V2, &[]);
+    let line = ["-c", "protocol.version=2", "fetch", "origin", &tip];
+    let fetched = site.git_as(AGENT, &fresh, Protocol::V2, &line);
+    assert!(fetched.status.success(), "{}", text(&fetched.stderr));
+    let kind = site.git(&fresh, Protocol::V2, &["cat-file", "-t", &tip]);
+    assert_eq!(kind.trim(), "commit");
 }

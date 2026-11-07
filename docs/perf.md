@@ -1712,3 +1712,25 @@ behind" above, the fetch now off the writer lock when nothing moved.
 | Server CPU, 1 land behind, 1,000 and 12,000 commits | — | the 12,000 at most 1.5× the 1,000 |
 | CPU per byte sent, 1 / 10 / 100 / 1,000 lands behind | — | within 1.5× across the four |
 | Host state | — | — |
+
+## M17-5 — one pack per identical read (not measured yet)
+
+The case after the M17 design §5: `serve` hands each fetch's pack to its pack-objects hook, which
+produces it once per identical request and keeps it in `git/serve-cache/` (at most 4 GiB a store),
+and sends only commits a served ref reaches. The values come from the first `just perf` after the
+slice lands, run under the heavy lock, and replace the dashes below, each with its host state and
+its verdict.
+
+### R-3, G19: 50 clones against one, from the pack cache
+
+`serve_perf::fifty_clones_at_once_and_apart` run again on this slice: the same rows as "R-3, G19:
+50 clones against one" above, every clone after the first sent from the cache's one entry.
+
+| Figure | Value | Target |
+| --- | --- | --- |
+| Server CPU of one clone alone | — | — |
+| Server CPU of 50 clones at once | — | at most 4× one clone's |
+| Server CPU of 50 clones 10 s apart | — | at most 4× one clone's |
+| Clone time at once, `serve` median and longest | — | at most 2× git's |
+| Peak memory of the server tree, 50 at once | — | recorded |
+| Host state | — | — |

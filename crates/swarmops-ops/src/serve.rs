@@ -24,6 +24,7 @@ pub mod entry;
 pub mod guard;
 pub mod hook;
 pub mod land;
+mod packcache;
 pub mod prepare;
 pub mod push;
 pub mod receive;
@@ -31,12 +32,15 @@ pub mod refresh;
 pub mod upload;
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use camino::Utf8PathBuf;
 use swarmops_api::{ErrorCode, Identity, OpError};
 use swarmops_git::MemoKey;
 use swarmops_git::serve::child::Service;
+
+pub use packcache::MAX_PACK_CACHE_BYTES;
 
 /// The variable the parent `serve` names its own binary in, for the hook file to run.
 pub const SWARMOPS_SERVE_EXE: &str = "SWARMOPS_SERVE_EXE";
@@ -70,6 +74,12 @@ pub enum Entry {
     /// git's `pre-receive` hook, inside a push the parent `serve` runs, while the push's objects
     /// are in git's quarantine.
     PreReceive,
+    /// git's pack-objects hook, inside a fetch the parent `serve` runs: the pack answered from
+    /// the store's pack cache (the M17 design §5).
+    PackObjects {
+        /// The line git appended: `git [--shallow-file <file>] pack-objects <options>`.
+        args: Vec<OsString>,
+    },
 }
 
 /// Who the caller is, as the command line names them.
@@ -155,7 +165,7 @@ pub fn run(invocation: &ServeInvocation) -> Result<Served, OpError> {
     // 1. The caller: --as, or a web server's user under --user-family.
     let remote_user = match &invocation.entry {
         Entry::Cgi { vars } => vars.get(REMOTE_USER).map(String::as_str),
-        Entry::Ssh { .. } | Entry::Hook | Entry::PreReceive => None,
+        Entry::Ssh { .. } | Entry::Hook | Entry::PreReceive | Entry::PackObjects { .. } => None,
     };
     let who = access::resolve_identity(&invocation.identity, remote_user)?;
 
@@ -172,6 +182,7 @@ pub fn run(invocation: &ServeInvocation) -> Result<Served, OpError> {
         Entry::Cgi { .. } => cgi::run(invocation, &who),
         Entry::Hook => hook::run(invocation, &who),
         Entry::PreReceive => hook::pre_receive(invocation, &who),
+        Entry::PackObjects { args } => hook::pack_objects(invocation, &who, args),
     }
 }
 

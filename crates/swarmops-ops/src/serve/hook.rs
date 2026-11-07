@@ -1,8 +1,9 @@
 //! `serve --hook pre-receive` and `serve --hook proc-receive` (M14 design §2.4, §6; M16 design
-//! §7): the hooks git runs inside a push. Both judge each command with one `judge`, which
-//! moves no ref and writes nothing to `serve.git`; `pre-receive` judges alone, while the push's
-//! objects are in git's quarantine, and `proc-receive` judges again, then moves the ref by
-//! compare-and-swap, or lands it.
+//! §7): the hooks git runs inside a push; and `serve --hook pack-objects`, the one it runs
+//! inside a fetch, which answers from the pack cache (the M17 design §5, [`pack_objects`]). The
+//! push hooks judge each command with one `judge`, which moves no ref and writes nothing to
+//! `serve.git`; `pre-receive` judges alone, while the push's objects are in git's quarantine,
+//! and `proc-receive` judges again, then moves the ref by compare-and-swap, or lands it.
 //!
 //! ```text
 //! 1 from git? SWARMOPS_SERVE_STORE set, GIT_DIR = that store's serve.git (canonical)
@@ -23,7 +24,8 @@
 //! between. A failure after `proc-receive`'s handshake refuses every command (`ng`) rather than
 //! the connection, so that the client reads why.
 
-use std::io::{self, BufRead, Read, Write};
+use std::ffi::OsString;
+use std::io::{self, BufRead, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use swarmops_api::{ErrorCode, Identity, OpError};
@@ -38,7 +40,7 @@ use swarmops_store::RefKind;
 use super::access::Access;
 use super::guard::Redactor;
 use super::refresh::serve_error;
-use super::{ServeInvocation, Served, land, push, refused};
+use super::{ServeInvocation, Served, land, packcache, push, refused};
 use crate::LocalOps;
 use crate::error;
 
@@ -216,6 +218,36 @@ pub fn run(invocation: &ServeInvocation, who: &Identity) -> Result<Served, OpErr
     Ok(Served::new(0))
 }
 
+/// Runs the pack-objects hook for `who`, the caller its parent resolved: `args` the line git
+/// appended, stdin what git fed it, the pack on stdout, from the store's pack cache (the M17
+/// design §5). An error, its texts masked, comes before any byte of the pack.
+pub fn pack_objects(
+    invocation: &ServeInvocation,
+    who: &Identity,
+    args: &[OsString],
+) -> Result<Served, OpError> {
+    let _ = who;
+
+    // 1. Run by git, inside a fetch serve started: GIT_DIR, else the working directory, is
+    //    serve.git.
+    let cwd = std::env::current_dir().ok();
+    let store = served_store_in(invocation, cwd.as_deref())?;
+    let redactor = Redactor::new(&[Path::new(&store)]);
+
+    // 2. What git asked for, then the pack.
+    let repo = ServeRepo::open(camino::Utf8Path::new(&store)).map_err(serve_error);
+    let repo = repo.map_err(|e| redactor.redact_error(e))?;
+    let mut stdin = Vec::new();
+    io::stdin()
+        .lock()
+        .read_to_end(&mut stdin)
+        .map_err(|e| protocol(&e))?;
+    let mut out = BufWriter::new(io::stdout().lock());
+    packcache::send(&repo, args, &stdin, &mut out).map_err(|e| redactor.redact_error(e))?;
+    out.flush().map_err(|e| protocol(&e))?;
+    Ok(Served::new(0))
+}
+
 /// The refusal of a hook run that did not come from git, `why`.
 fn not_from_git(why: &str) -> OpError {
     refused(
@@ -260,7 +292,13 @@ fn quarantine(invocation: &ServeInvocation, store: &str) -> Result<PathBuf, OpEr
 /// The store the parent served, refused `not_from_git` unless both `SWARMOPS_SERVE_STORE` and
 /// `GIT_DIR` are given and `GIT_DIR` is that store's `serve.git`.
 fn served_store(invocation: &ServeInvocation) -> Result<String, OpError> {
-    let (Some(store), Some(git_dir)) = (&invocation.serve_store, &invocation.git_dir) else {
+    served_store_in(invocation, None)
+}
+
+/// [`served_store`], with `cwd` standing for the `GIT_DIR` git did not give.
+fn served_store_in(invocation: &ServeInvocation, cwd: Option<&Path>) -> Result<String, OpError> {
+    let git_dir = invocation.git_dir.as_deref().or(cwd);
+    let (Some(store), Some(git_dir)) = (&invocation.serve_store, git_dir) else {
         return Err(not_from_git("no store or GIT_DIR from its parent"));
     };
 

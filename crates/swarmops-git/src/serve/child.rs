@@ -4,17 +4,21 @@
 //!
 //! ```text
 //! client ══ stdin/stdout ══▶ git <service> (GIT_DIR = serve.git, config in GIT_CONFIG_*)
-//!                                 │ stderr
-//!                                 ▼
-//!                       the store's paths masked ──▶ serve's stderr
+//!                                 │ stderr        │ a fetch's pack: PACK_OBJECTS_HOOK
+//!                                 ▼               ▼
+//!                       the store's paths masked  serve --hook pack-objects
+//!                       ──▶ serve's stderr        ├─ check_wants, git_version
+//!                                                 └─ pack_objects on a miss
 //! ```
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, BufRead as _, BufReader, Read, Write};
-use std::process::{ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::thread;
 
-use super::repo::{ServeError, ServeRepo};
+use super::repo::{PACK_OBJECTS_HOOK, ServeError, ServeRepo};
+use crate::oid::GitOid;
 use crate::transport::GitCli;
 
 /// What `upload-pack` serves: no partial clone filter (M14 design §1), and no object that no
@@ -41,6 +45,13 @@ const HTTP_CONFIG: [(&str, &str); 1] = [("http.receivepack", "true")];
 
 /// The setting that points git at the serving hooks.
 const HOOKS_PATH: &str = "core.hooksPath";
+
+/// The setting that hands a fetch's `pack-objects` to [`PACK_OBJECTS_HOOK`]: git honours it in
+/// protected configuration alone, which the environment's is.
+const PACK_HOOK: &str = "uploadpack.packObjectsHook";
+
+/// What `cat-file --batch-check` prints for a wanted object that may be sent.
+const COMMIT: &str = "commit";
 
 /// The variable that carries the client's protocol.
 const GIT_PROTOCOL: &str = "GIT_PROTOCOL";
@@ -96,8 +107,10 @@ pub fn run(
     let fixed = service_config(service)
         .into_iter()
         .map(|(key, value)| (key, OsStr::new(value)));
+    let pack_hook = pack_hook(service).map(|hook| (PACK_HOOK, OsStr::new(hook)));
     let added = (env.config.iter()).map(|(key, value)| (key.as_str(), value.as_os_str()));
     let config: Vec<(&str, &OsStr)> = fixed
+        .chain(pack_hook)
         .chain([(HOOKS_PATH, hooks.as_os_str())])
         .chain(added)
         .collect();
@@ -133,6 +146,106 @@ fn service_config(service: Service) -> Vec<(&'static str, &'static str)> {
             [&UPLOAD_CONFIG[..], &RECEIVE_CONFIG[..], &HTTP_CONFIG[..]].concat()
         }
     }
+}
+
+/// The pack-objects hook `service` runs with: every service that answers a fetch.
+fn pack_hook(service: Service) -> Option<&'static str> {
+    match service {
+        Service::UploadPack | Service::HttpBackend => Some(PACK_OBJECTS_HOOK),
+        Service::ReceivePack => None,
+    }
+}
+
+/// Whether the objects a fetch wants may be sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Wants {
+    /// Each is a commit a ref of `serve.git` is or reaches.
+    Served,
+    /// One is not: another type, an object no ref reaches, or none at all.
+    NotServed,
+}
+
+/// Whether each of `wants` is a commit a ref of `repo` is or reaches (the M17 design §5 step
+/// 2): their types from one `cat-file --batch-check`, then one `rev-list --count`, from the
+/// wants and not from any ref, that must count none. A git that fails says
+/// [`Wants::NotServed`].
+pub fn check_wants(git: &GitCli, repo: &ServeRepo, wants: &[GitOid]) -> Result<Wants, ServeError> {
+    if wants.is_empty() {
+        return Ok(Wants::NotServed);
+    }
+    let listed: String = wants.iter().map(|oid| oid.to_string() + "\n").collect();
+
+    // 1. Each a commit.
+    let mut cat_file = git.serve_command(repo.git_dir().as_std_path(), &[]);
+    cat_file.args(["cat-file", "--batch-check=%(objecttype)"]);
+    let typed = with_input(cat_file, listed.clone().into_bytes())?;
+    let commits = String::from_utf8_lossy(&typed.stdout)
+        .lines()
+        .filter(|line| *line == COMMIT)
+        .count();
+    if !typed.status.success() || commits != wants.len() {
+        return Ok(Wants::NotServed);
+    }
+
+    // 2. None past what the refs reach: the wants from stdin, every ref after --not.
+    let mut reach = git.serve_command(repo.git_dir().as_std_path(), &[]);
+    reach.args(["rev-list", "--count", "--stdin", "--not", "--all"]);
+    let counted = with_input(reach, listed.into_bytes())?;
+    let count = String::from_utf8_lossy(&counted.stdout).trim().to_owned();
+    if counted.status.success() && count == "0" {
+        return Ok(Wants::Served);
+    }
+    Ok(Wants::NotServed)
+}
+
+/// `git --version`'s line, as the git that packs prints it.
+pub fn git_version(git: &GitCli, repo: &ServeRepo) -> Result<String, ServeError> {
+    let mut version = git.serve_command(repo.git_dir().as_std_path(), &[]);
+    version.arg("--version");
+    let ran = with_input(version, Vec::new())?;
+    if !ran.status.success() {
+        return Err(failed(&io::Error::other("git --version failed")));
+    }
+    Ok(String::from_utf8_lossy(&ran.stdout).trim_end().to_owned())
+}
+
+/// git's `pack-objects` on `repo`, started as `upload-pack` would have run it, `args` the line
+/// after `git` (`[--shallow-file <file>] pack-objects …`): stdin and stdout piped to the caller,
+/// stderr git's progress, which `upload-pack` reads.
+pub fn pack_objects(
+    git: &GitCli,
+    repo: &ServeRepo,
+    args: &[OsString],
+) -> Result<Child, ServeError> {
+    let mut command = git.serve_command(repo.git_dir().as_std_path(), &[]);
+    command
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit());
+    command.spawn().map_err(|e| failed(&e))
+}
+
+/// Runs `command` with `input` on its stdin, written beside the reading of its output so that
+/// neither pipe blocks the other; its output, its stderr dropped.
+fn with_input(mut command: Command, input: Vec<u8>) -> Result<Output, ServeError> {
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().map_err(|e| failed(&e))?;
+
+    // A git that exits early closes its stdin: the write's error is its exit's to say.
+    let stdin = child.stdin.take();
+    let writer = thread::spawn(move || {
+        if let Some(mut stdin) = stdin {
+            let _ = stdin.write_all(&input);
+        }
+    });
+    let output = child.wait_with_output().map_err(|e| failed(&e));
+    let _ = writer.join();
+    output
 }
 
 /// git's arguments for `service`. `upload-pack` and `receive-pack` take the repository, `.`,
