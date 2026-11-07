@@ -89,6 +89,7 @@
 //! first attempt without the key walk and the publication: the same chain walk (step 2), merge
 //! (step 4), conflict report and writer of `L` (step 5), then `L`'s insert alone, moving no ref.
 
+mod batch;
 mod detached;
 mod key;
 mod landing;

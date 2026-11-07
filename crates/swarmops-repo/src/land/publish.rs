@@ -50,7 +50,7 @@ use swarmops_merge::tree_diff::TreeRead;
 use swarmops_merge::tree_merge;
 use swarmops_store::{
     CasResult, ChangesetMeta, MetaWrite, ObjectStat, ObjectStore, Record, Recovered, RefKind,
-    StoreError, ref_kind,
+    Serve, StoreError, Turn, ref_kind,
 };
 
 use crate::commit::{self, Draft, WrittenChangeset};
@@ -59,6 +59,7 @@ use crate::merge;
 use crate::oplog::OpId;
 use crate::repo::{self, Repo};
 
+use super::batch;
 use super::key::{self, KeyFound, Ours};
 
 /// The most first-parent steps a publish walks from the target's head back to a land's `onto`:
@@ -211,13 +212,17 @@ impl<O: ObjectStore> Repo<O> {
     /// the store no longer holds (a frame a failed sync took back), [`RepoError::UnknownParent`].
     /// A failure after the commit point is a warning; a journal append that fails
     /// ([`StoreError::NotCommitted`]) is returned as it is.
+    ///
+    /// The transaction is a turn at the store's write queue (the M18 D2 design §3): with the
+    /// lock taken, `p` waits as a request, and the next lock holder plans it in a batch of its
+    /// own and answers it; holding the lock, this publish leads such a batch
+    /// ([`super::batch`]).
     pub(crate) fn publish(&self, p: &Publication) -> Result<Published, RepoError> {
-        let mut write = self.meta.write()?;
-
-        // Returning `Done` drops the write: what it queued with it, no frame, the lock released.
-        match plan_publish(&mut write, &self.objects, p)? {
-            PublishPlan::Done(published) => Ok(published),
-            PublishPlan::Queued(queued) => commit(write, p, queued),
+        let body = batch::encode_publish(p)?;
+        match self.meta.take_turn(&body, Serve::Queue)? {
+            Turn::Answered(answer) => self.answered(&answer, p),
+            Turn::Lead(lead) => self.lead(lead, p),
+            _ => Err(RepoError::unknown_variant("Turn")),
         }
     }
 }
@@ -489,37 +494,29 @@ fn queue(
     }))
 }
 
-/// Commits `write`, the frame of `queued`, the land of `p`: [`Published::Landed`]. A failure past
-/// its commit point is a warning.
-fn commit(write: MetaWrite<'_>, p: &Publication, queued: Queued) -> Result<Published, RepoError> {
-    let mut warnings = Vec::new();
-    match write.commit() {
-        Ok(_) => {}
-        Err(StoreError::PostCommit {
-            frame_seq,
-            frame_crc,
-            source,
-        }) => {
-            let what = format!(
-                "the landed changeset {} and the move of ref {}",
-                queued.id, p.target
-            );
-            warnings.push(repo::post_commit_warning(
-                &what,
-                OpId::new(frame_seq, frame_crc),
-                &source,
-            ));
+impl Queued {
+    /// [`Published::Landed`] of this land, committed, with `warnings`.
+    pub(crate) fn landed(self, warnings: Vec<String>) -> Published {
+        Published::Landed {
+            id: self.id,
+            onto: self.onto,
+            relocated: self.relocated,
+            merged_in_lock: self.merged_in_lock,
+            files_changed: self.files_changed,
+            warnings,
         }
-        Err(e) => return Err(e.into()),
     }
-    Ok(Published::Landed {
-        id: queued.id,
-        onto: queued.onto,
-        relocated: queued.relocated,
-        merged_in_lock: queued.merged_in_lock,
-        files_changed: queued.files_changed,
-        warnings,
-    })
+
+    /// The warning of this land of `p`, committed as operation `op`, when a step after its commit
+    /// point failed with `source`.
+    pub(crate) fn warning(&self, p: &Publication, op: OpId, source: &StoreError) -> String {
+        repo::post_commit_warning(&landed_what(self.id, &p.target), op, source)
+    }
+}
+
+/// What a land of `id` on `target` commits, as its post-commit warning names it.
+pub(crate) fn landed_what(id: ChangesetId, target: &str) -> String {
+    format!("the landed changeset {id} and the move of ref {target}")
 }
 
 /// Queues the insert of `changeset`, whose id is `id`, in `write`: a parent the store no longer
