@@ -75,9 +75,9 @@ check-slow:
 # `check-slow` without the two 32-process contention measurements (`thirty_two_processes_*`),
 # which `just perf` runs: each takes minutes of fsync'd work on this host, and their assertions
 # (no `Busy`) assume a disk at most about a third slower than its own, far too heavy a load for a
-# 2-vCPU hosted runner. Nor the nine measurement cases on 12,000 or 13,000 commits or 12,000
-# changesets (`ci_perf_cases`), which need a longer kill than the `ci-slow` profile's 20 minutes:
-# in the Scheduled run of 2026-10-28 on `c7baf861` four ran into it and the other five took 775
+# 2-vCPU hosted runner. Nor the measurement cases on 12,000 or 13,000 commits or 12,000
+# changesets and the load lanes (`ci_perf_cases`), which need a longer kill than the `ci-slow`
+# profile's 20 minutes: in the Scheduled run of 2026-10-28 on `c7baf861` four ran into it and the other five took 775
 # to 912 s, and three take over 20 minutes even optimized; `check-ci-perf` runs them under a
 # profile of their own. The crash sweeps and the other ignored tests stay. CI runs it with
 # `NEXTEST_PROFILE=ci-slow` (.config/nextest.toml).
@@ -86,18 +86,20 @@ check-ci-slow:
     PROPTEST_CASES=2000 cargo nextest run --locked --workspace --all-features --run-ignored all -E 'not test(regenerate_golden) and not test(regenerate_git_fixtures) and not test(check_git_fixtures) and not test(thirty_two_processes) and not ({{ ci_perf_cases }})'
 
 # The measurement cases on 12,000 or 13,000 commits or 12,000 changesets: `remote_perf`'s five,
-# `serve_perf`'s six, `intake_perf`'s one and the workspace's checked land. `check-ci-slow` leaves
-# them out, `check-ci-perf` runs them, `check-slow` keeps them. swarmops-core's `supply_chain` tests fail a
+# `serve_perf`'s six, `intake_perf`'s one, `serve_load`'s two and the workspace's checked land;
+# and G4's landing lanes (`landing::perf::landing_under_load`, four lanes of 2 minutes, about 9 to
+# 11 minutes in all), past half the ci-slow kill. `check-ci-slow` leaves them out,
+# `check-ci-perf` runs them, `check-slow` keeps them. swarmops-core's `supply_chain` tests fail a
 # case `check-ci-slow` leaves out that no scheduled job runs optimized and one at a time.
-ci_perf_cases := 'test(=remote_perf::clone_cost_on_12000_commits) | test(=remote_perf::fetch_and_push_scale_with_history) | test(=remote_perf::fetch_phases_scale_with_history) | test(=remote_perf::sync_of_one_land_on_12000_commits) | test(=remote_perf::sync_phases_scale_with_history) | test(/^serve_perf::/) | test(/^intake_perf::/) | test(=ws_processes::perf::perf_checked_land_overhead_on_12000_changesets)'
+ci_perf_cases := 'test(=remote_perf::clone_cost_on_12000_commits) | test(=remote_perf::fetch_and_push_scale_with_history) | test(=remote_perf::fetch_phases_scale_with_history) | test(=remote_perf::sync_of_one_land_on_12000_commits) | test(=remote_perf::sync_phases_scale_with_history) | test(/^serve_perf::/) | test(/^intake_perf::/) | test(/^serve_load::/) | test(=landing::perf::landing_under_load) | test(=ws_processes::perf::perf_checked_land_overhead_on_12000_changesets)'
 
 # `ci_perf_cases` optimized and one at a time (`--no-capture`), as `perf` runs them, printing their
-# `remote-perf: `, `serve-perf: `, `intake-perf: ` and `ws-perf: ` lines. They assert what they ran,
-# never its time.
+# `remote-perf: `, `serve-perf: `, `intake-perf: `, `serve-load: `, `landing-perf: ` and `ws-perf: `
+# lines. They assert what they ran, never its time.
 # Measured optimized on this host: the clone cost 850.5 s and `serve_perf`'s three 1,599.3 to
 # 1,650.0 s (docs/perf.md, "v0.7.0"), the other four `remote_perf` cases 346.0 to 389.5 s in the
 # same window, the checked land 313.5 s in v0.5.0's; 7,541.4 s in all before the M17 cases, whose
-# measured times docs/perf.md "M17 baselines" records. No match fails.
+# measured times docs/perf.md "M17 baselines" and "M17-8b" record. No match fails.
 # scheduled.yml runs it weekly under the heavy lock, with `NEXTEST_PROFILE=ci-perf`.
 # The weekly CI measurement cases (scheduled.yml): what check-ci-slow leaves out, optimized.
 check-ci-perf:
@@ -135,7 +137,8 @@ _bench-fresh:
 # between them; target/perf/ keeps the full output. docs/perf.md records what they print.
 # The M5 workspace cases (ws_processes::perf::*: the 50,000-file tree's status, edits, commits
 # and update, the 10,000-file create, the checked land on 12,000 changesets) print `ws-perf: `
-# lines.
+# lines. The served-load cases (`serve_load::*`: 50 git clients through `serve` beside 50
+# landing agents and against git's own server, 10 minutes each) print `serve-load: ` lines.
 # The CLI contention test and G4's landing measurement (`landing::perf::landing_under_load`,
 # open loop: one land per agent every 2 s for 120 s) run at 32 and at 50 processes
 # (`SWARMOPS_PERF_PROCESSES` lists others; the landing store under the bench directory), and
@@ -188,6 +191,11 @@ perf:
     cargo nextest run --locked --release -p swarmops-cli --all-features --run-ignored ignored-only \
         -E 'test(/^intake_perf::/)' --no-capture 2>&1 | tee target/perf/intake.log \
         | grep --line-buffered '^intake-perf: '
+    [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
+    load between
+    cargo nextest run --locked --release -p swarmops-cli --all-features --run-ignored ignored-only \
+        -E 'test(/^serve_load::/)' --no-capture 2>&1 | tee target/perf/serve-load.log \
+        | grep --line-buffered '^serve-load: '
     [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
     load between
     cargo nextest run --locked --release -p swarmops-cli --all-features --run-ignored ignored-only \

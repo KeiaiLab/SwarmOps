@@ -35,6 +35,7 @@ mod serve_differential;
 mod serve_fetch;
 mod serve_http;
 mod serve_land;
+mod serve_load;
 mod serve_perf;
 mod serve_prepare;
 mod serve_push;

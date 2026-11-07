@@ -1818,3 +1818,44 @@ dashes below, with the host state.
 in M14's run); `just perf` does not set it. A debug-build smoke run (4 agents and 4 movers, one
 step a second for 12 s, probe on, load 34 to 41) passed in 51 s: no retryable or other attempt,
 R-1's ratio 1.58, G20's 0.61, `U` 0.09 to 0.13. It checks the lanes, not the targets.
+
+## M17-8b: served git traffic under load — 2026-11-07 (not measured yet)
+
+`serve_load` (the M17 design §7, G21): 50 git clients, each with a clone of its own, push a
+`release/client-<n>` branch of their own and then fetch `main` every 2 s for 10 minutes, on the
+landing cases' open-loop slots. `served_traffic_under_load` runs them through `swarmops serve`
+(the ssh stand-in) on a store holding 12,000 imported commits, prepared from the bare copy, beside
+50 agents that land on its `main` at G4's rate; `git_traffic_under_load` runs the same clients
+against git's own `upload-pack` and `receive-pack` on the bare copy, with no agents (git's server
+has none), so that its `main` never moves and its fetches find nothing new, where serve's carry
+the agents' lands: G21's fetch ratio is read with that in mind. Two cases, so that each stays under half the `ci-perf` kill. A command that ends
+retryable runs again, at most 8 times. Each attempt counts per 10 s window (`serve-load-window: `
+lines) as a success, a retryable refusal (an error envelope with `retryable: true`, a code and a
+hint, bare or behind `remote: `) or another failure; a refusal in a ref's report line carries no
+hint and counts as another failure. Asserted: no window with another failure, the windows adding
+up to the run, every client's branch at its last acknowledged push, every land on `main` once and
+a clean `verify --deep` (the landing gate's rules apart from its 30 s bound), every clone
+`git fsck --strict`.
+
+G20's second first-clone cell is this case's too: 10 s after the agents start and before the
+clients, one first clone of the store through `serve` is timed against git's own clone of the
+bare copy, under the same agents (`serve-load: g20` line).
+
+| Figure | Value | Target |
+| --- | --- | --- |
+| Commands that succeeded at the first attempt, push and fetch (G21) | — | at least 99.9 % |
+| Other failures, any window | — | 0 |
+| Push p99, `serve` beside 50 agents and git's own server, and their ratio (G21) | — | at most 2× |
+| Fetch p99, `serve` beside 50 agents and git's own server, and their ratio (G21) | — | at most 2× |
+| Land p99 and lands/s of the 50 agents beside the clients | — | recorded |
+| First clone beside 50 agents, `serve` and git's own server, and their ratio (G20) | — | at most 2× |
+| Host state | — | — |
+
+A push that waits out `serve.lock` inside its hooks is refused in its ref's report line, which
+carries no hint, so it fails the case as another failure, as the design asserts: a finding, not
+the harness's. A G21 push p99 that misses is recorded against the lock ruling (the direction
+design §1) in docs/known-limitations.md, never met by a lower bound. The values come from the first `just perf`
+after the slice lands, run under the heavy lock, and replace the dashes, with the case times that
+recompute the `perf-cases` timeout. A debug-build smoke run (200 commits, 4 clients and 4 agents,
+20 s, load 133 to 233) passed: git's side in 21 s, serve's in 41 s, every attempt a success at the
+first try, no window flagged. It checks the lanes, not the targets.

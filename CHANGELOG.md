@@ -17,6 +17,16 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 ## [Unreleased]
 
+### Added
+
+- `just perf` runs served git traffic under load (`serve_load`): 50 git clients each pushing a
+  branch of their own and fetching `main` every 2 s for 10 minutes, through `swarmops serve`
+  beside 50 landing agents and against git's own server. It counts each command's attempts per
+  10 s window, a refusal retryable only with a retryable code and a hint, fails on any other
+  failure, a lost push, a land not on `main` once or a dirty store, and prints the first-attempt
+  share, push and fetch p99 and a first clone beside the agents (the M17 design §7). The weekly
+  measurement job now also runs it and the landing lanes, which leave the weekly slow suite.
+
 ## [0.9.0] - 2026-11-07
 
 Safety and load. The 0.9.0 release holds M16: workspace writes that never follow a link below the

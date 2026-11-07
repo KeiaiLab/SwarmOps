@@ -491,9 +491,11 @@ jobs:
       contents: read
     # The lock wait's 60 minutes, plus twice the cases' 7,541 s (251 minutes) and 5 for the
     # optimized build (62 s cold on this host at load 650), rounded up to 5 minutes, 320 (60 + 251
-    # + 5 = 316). That sum is the nine cases before M17; M17-1 added four and M17-4a one
-    # (`first_clone_after_import`) whose times `just perf` has not measured yet, so the value waits
-    # for that run: it is then recomputed by this rule from the new sum, never set by a guess.
+    # + 5 = 316). That sum is the nine cases before M17; M17-1 added four, M17-4a one
+    # (`first_clone_after_import`), and M17-8b `serve_load`'s two and G4's landing lanes
+    # (`landing::perf::landing_under_load`, moved here from the weekly slow suite), whose times
+    # `just perf` has not measured yet, so the value waits for that run: it is then recomputed by
+    # this rule from the new sum, never set by a guess.
     timeout-minutes: 320
     env:
       CARGO_TERM_COLOR: always

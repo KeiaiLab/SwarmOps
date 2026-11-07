@@ -36,6 +36,8 @@
 //!   forced-command stand-in and as a CGI script behind [`remote`]'s loopback server.
 //! - [`accounting`]: what a served connection cost the server, CPU and peak memory, read off the
 //!   ssh stand-in (M17).
+//! - [`served_load`]: git clients that push their own branch and fetch the trunk on a schedule,
+//!   each command's outcome read off git's output, for served traffic under load (M17).
 //! - [`ws`]: the workspaces' synthetic trees and edit driver (M5).
 //!
 //! It depends on no crate above `swarmops-repo`: the operations' unit tests use it, and a
@@ -77,5 +79,7 @@ pub mod remote;
 pub mod repo;
 #[cfg(feature = "cli")]
 pub mod serve;
+#[cfg(all(feature = "cli", feature = "repo"))]
+pub mod served_load;
 pub mod store;
 pub mod ws;
