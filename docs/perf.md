@@ -1714,25 +1714,24 @@ kill (27.5 minutes, 1,650 s): `intake_perf::commits_beside_an_import` (2,815.376
 load of 15.20), which the rule asks to split, and `clone_against_git` (1,663.850 s; 1,650.0 s in
 v0.7.0).
 
-## M17-3: an import in short steps — 2026-11-07 (not measured yet)
+## M17-3: an import in short steps — 2026-11-07
 
 The import's frames are sized by time (the M17 design §3.1): the first holds 64 changesets, and
 each next one as many as fit in a 100 ms hold of the writer lock (`IMPORT_STEP_BUDGET`) at the
 last one's cost, at most twice the last and 8,192. `intake_perf::commits_beside_an_import` is run
 again on that code, and now also prints the longest hold of the writer lock during the import of
 1,000 commits alone, as a probe that tries the lock every millisecond without waiting sees it:
-the import's longest frame commit or flush. The values come from the first `just perf` after the
-slice lands, run under the heavy lock, and replace the dashes below, with the verdict against
-G18.
+the import's longest frame commit or flush. Measured in v0.9.0's run at `b4337977` ("M17
+baselines"), which holds the slice; no run measured the import before it.
 
 | Figure | Value | Target |
 | --- | --- | --- |
-| Longest wait of a commit beside the import of 12,000 commits (G18) | — | at most 100 ms |
-| `E_BUSY` count and longest | — | recorded |
-| Reads of `main` that saw the new head before the import's end | — | none |
-| Longest writer-lock hold, import of 1,000 commits alone | — | recorded |
-| Import of 12,000 commits beside the committers | — | recorded (against the M17 baseline) |
-| Host state | — | — |
+| Longest wait of a commit beside the import of 12,000 commits (G18) | 0.796 s, median 0.207 s, spawn to exit | at most 100 ms: missed |
+| `E_BUSY` count and longest | 0, 0.000 s | recorded |
+| Reads of `main` that saw the new head before the import's end | none of 13,781 | none: met |
+| Longest writer-lock hold, import of 1,000 commits alone | 0.067 s, over 10 holds | recorded |
+| Import of 12,000 commits beside the committers | 2,793.937 s | recorded |
+| Host state | `b4337977`, 15.20 to 6.44 | — |
 
 A frame whose commit finds the index's tail past 1,024 records, and a flush that does, also
 compacts the index under the lock: 173 ms at 1,000,000 records ("v0.6.0 — 2026-10-28",
@@ -1746,21 +1745,20 @@ now with no step budget so that its frames stay fixed (19: 64 to 4,096 doubling,
 and one of 1,760), imported 100,000 commits in 60.9 s with 15 compactions and a peak of
 155,848 KiB resident, at a load of 39 to 44.
 
-## M17-6: a commit's blobs in batches — 2026-11-07 (not measured yet)
+## M17-6: a commit's blobs in batches — 2026-11-07
 
 The import stores a commit's new trees and blobs whenever 64 MiB of them gather
 (`DEFAULT_OBJECT_BATCH_BYTES`), inside one commit too (the M17 design §3.2).
-`serve_perf::push_one_and_two_gib` is run again on that code, unchanged; the values come from the
-first `just perf` after the slice lands, run under the heavy lock, and replace the dashes below,
-with the verdict against G22.
+`serve_perf::push_one_and_two_gib` is run on that code, unchanged, at `4ccce313` ("M17
+baselines"); no run measured the push before the slice.
 
 | Figure | Value | Target |
 | --- | --- | --- |
-| Peak memory, 1 GiB push | — | recorded (against the M17 baseline) |
-| Peak memory, 2 GiB push (G22) | — | at most 256 MiB |
-| Time, 1 GiB and 2 GiB push (G22) | — | the 2 GiB at most 2.2× the 1 GiB |
-| Refused push of 2,048 blobs: ref moved | — | none |
-| Host state | — | — |
+| Peak memory, 1 GiB push | 1,194.6 MiB | recorded |
+| Peak memory, 2 GiB push (G22) | 3,228.8 MiB | at most 256 MiB: missed |
+| Time, 1 GiB and 2 GiB push (G22) | 46.677 s and 82.230 s, 1.76× | the 2 GiB at most 2.2× the 1 GiB: met |
+| Refused push of 2,048 blobs: ref moved | none | none: met |
+| Host state | `4ccce313`; load not recorded | — |
 
 A debug build's push of one commit of 200 incompressible files of 1 MiB through `serve`, sampled
 per process on this host (32 cores, one run, beside other work): the server tree's peak `VmHWM`
@@ -1771,12 +1769,11 @@ rest (160 MiB) is the batch and the store's compression buffers on every core: 7
 200 files of 1 MiB with batches of 16 MiB grew the import's peak by 43 MiB, against 207 MiB
 before.
 
-## M17-4a — served reads off the writer lock, preparation (not measured yet)
+## M17-4a — served reads off the writer lock, preparation
 
 The cases after the M17 design §4.2 and §4.3: a connection whose store has not moved takes no lock
 (`git/serve.state`), and `serve --prepare --seed-from` makes the first clone after an import
-write nothing. The values come from the first `just perf` after the slice lands, run under the
-heavy lock, and replace the dashes below, each with its host state and its verdict.
+write nothing. Measured at `4ccce313` ("M17 baselines"), whose product code holds the slice.
 
 ### R-4, G20: the first clone after import, prepared
 
@@ -1787,10 +1784,10 @@ same commit, `git fsck --strict` passes.
 
 | Figure | Value | Target |
 | --- | --- | --- |
-| Import of 12,000 commits into the store | — | recorded |
-| `serve --prepare --seed-from` | — | recorded |
-| First clone, `serve` and git `upload-pack` | — | at most 2× git's |
-| Host state | — | — |
+| Import of 12,000 commits into the store | 380.515 s | recorded |
+| `serve --prepare --seed-from` | 91.210 s | recorded |
+| First clone, `serve` and git `upload-pack` | 0.366 s against 0.512 s, 0.72× | at most 2× git's: met |
+| Host state | `4ccce313`; load not recorded | — |
 
 ### R-5, G20: a fetch k lands behind, without the writer lock
 
@@ -1799,17 +1796,16 @@ behind" above, the fetch now off the writer lock when nothing moved.
 
 | Figure | Value | Target |
 | --- | --- | --- |
-| Server CPU, 1 land behind, 1,000 and 12,000 commits | — | the 12,000 at most 1.5× the 1,000 |
-| CPU per byte sent, 1 / 10 / 100 / 1,000 lands behind | — | within 1.5× across the four |
-| Host state | — | — |
+| Server CPU, 1 land behind, 1,000 and 12,000 commits | 0.000 s and 0.000 s | the 12,000 at most 1.5× the 1,000: not shown, both under 10 ms |
+| CPU per byte sent, 1 / 10 / 100 / 1,000 lands behind | 0.000 / 0.000 / 0.859 / 0.800 ms per KiB | within 1.5× across the four: not shown for 1 and 10; 100 and 1,000 within 1.07× |
+| Host state | `4ccce313`; load not recorded | — |
 
-## M17-5 — one pack per identical read (not measured yet)
+## M17-5 — one pack per identical read
 
 The case after the M17 design §5: `serve` hands each fetch's pack to its pack-objects hook, which
 produces it once per identical request and keeps it in `git/serve-cache/` (at most 4 GiB a store),
-and sends only commits a served ref reaches. The values come from the first `just perf` after the
-slice lands, run under the heavy lock, and replace the dashes below, each with its host state and
-its verdict.
+and sends only commits a served ref reaches. Measured at `4ccce313` ("M17 baselines"), whose
+product code holds the slice; no run measured the clones before it.
 
 ### R-3, G19: 50 clones against one, from the pack cache
 
@@ -1818,14 +1814,17 @@ its verdict.
 
 | Figure | Value | Target |
 | --- | --- | --- |
-| Server CPU of one clone alone | — | — |
-| Server CPU of 50 clones at once | — | at most 4× one clone's |
-| Server CPU of 50 clones 10 s apart | — | at most 4× one clone's |
-| Clone time at once, `serve` median and longest | — | at most 2× git's |
-| Peak memory of the server tree, 50 at once | — | recorded |
-| Host state | — | — |
+| Server CPU of one clone alone | 0.010 s | — |
+| Server CPU of 50 clones at once | 0.580 s, 58× | at most 4× one clone's: missed |
+| Server CPU of 50 clones 10 s apart | 0.410 s, 41× | at most 4× one clone's: missed |
+| Clone time at once, `serve` median and longest | 0.770 s and 1.112 s, against git's 1.682 s and 1.965 s | at most 2× git's: met |
+| Peak memory of the server tree, 50 at once | 9.7 MiB | recorded |
+| Host state | `4ccce313`; load not recorded | — |
 
-## M17-8a: landing lanes — 2026-11-07 (not measured yet)
+Each connection still costs about one clone's CPU (0.012 s at once, 0.008 s apart, against
+0.010 s), so the 50 add up to 41 to 58 times one, not at most 4.
+
+## M17-8a: landing lanes — 2026-11-07
 
 `landing::perf::landing_under_load` now runs four lanes one after another, each on a store of its
 own (the M17 design §7): `landers` (the agents alone, as G4 has always run), `prepared` (the same
@@ -1836,16 +1835,22 @@ Each lane's records are cut into 10 s windows (`landing-window: ` lines), counte
 success, retryable refusal or other failure. Asserted: no window with another failure, the windows
 adding up to the lane, every land once with the gate's rules, every mover's branch at its last
 acknowledged move, `serve.git` current after the prepared lane and untouched in the others, and a
-clean `verify --deep`. The case takes about 4 × 120 s and the setup at 50 processes. The values
-come from the first `just perf` after the slice lands, run under the heavy lock, and replace the
-dashes below, with the host state.
+clean `verify --deep`. The case takes about 4 × 120 s and the setup at 50 processes. Measured in
+v0.9.0's run at `b4337977` ("M17 baselines"), at 50 processes and at 32, with the lock probe on
+(its `lock` lines are printed): every lane passed, no window flagged, 0 % retries and nothing
+lost.
 
 | Figure | Value | Target |
 | --- | --- | --- |
-| Branch-move p99 alone and beside 50 landers, and their ratio (R-1) | — | recorded |
-| `U`: lands/s × the median lock hold of a `land` (lock probe on) | — | recorded |
-| Land p99 without and with preparation, and their ratio (G20) | — | at most 1.1× |
-| Host state | — | — |
+| Branch-move p99 alone and beside 50 landers, and their ratio (R-1) | 1,258.849 ms and 7,533.542 ms, 5.984; beside 32: 419.194 ms and 5,371.478 ms, 12.814 | recorded |
+| `U`: lands/s × the median lock hold of a `land` (lock probe on) | 2.042 landers, 2.131 prepared, 1.670 beside; at 32: 1.332, 1.310, 0.964 | recorded |
+| Land p99 without and with preparation, and their ratio (G20) | 5,193.593 ms and 5,806.319 ms, 1.118; at 32: 3,483.695 ms and 3,241.190 ms, 0.930 | at most 1.1×: missed at 50, met at 32 |
+| Host state | 50: landers 9.31 to 10.67, prepared 9.90 to 20.52; 32: 8.98 to 14.28, 13.46 to 11.96 | — |
+
+The `landers` lane is G4's harness: at 50 processes 25.000 lands/s with a p99 of 5,193.593 ms,
+a land holding the lock 81.7 ms at the median and the lock held 99.9 % of the samples; at 32,
+16.000 lands/s, p99 3,483.695 ms, hold 83.2 ms. A `U` above 1 means the lands ask for more lock
+time than a second holds, so they queue.
 
 `U` is printed only when the lock probe runs (`SWARMOPS_TEST_CLI_LANDING_LOCK_SAMPLE_US`, 1,000
 in M14's run); `just perf` does not set it. A debug-build smoke run (4 agents and 4 movers, one
@@ -1853,6 +1858,9 @@ step a second for 12 s, probe on, load 34 to 41) passed in 51 s: no retryable or
 R-1's ratio 1.58, G20's 0.61, `U` 0.09 to 0.13. It checks the lanes, not the targets.
 
 ## M17-8b: served git traffic under load — 2026-11-07 (not measured yet)
+
+The case landed after v0.9.0's run (`bdcf538a`, after `b4337977`), and no `just perf` has run it
+yet.
 
 `serve_load` (the M17 design §7, G21): 50 git clients, each with a clone of its own, push a
 `release/client-<n>` branch of their own and then fetch `main` every 2 s for 10 minutes, on the

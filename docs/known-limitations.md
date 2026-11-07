@@ -516,14 +516,16 @@ sets the tail on a loaded host. A `ws land` record
   scope). Found: the 2026-10-30 completeness report (E11).*
 - **The first connection to a large store exports its whole history.** `serve` exports every
   served ref into `serve.git` before it advertises; a store whose history no export has reached
-  yet pays that once, as loose objects: on 12,000 commits the first clone took 1,195.6 s,
-  against 0.36 s from git's own server ([perf.md](perf.md#v070--2026-10-29)). The connections
-  after it export only what moved. `serve --prepare --seed-from <the import's source>` pays it
-  before any client connects, with no object written: the import's objects fetched as one pack
-  ([Serve over ssh](operate/serve-over-ssh.md#the-serving-account)); a store prepared without a
-  seed, or never prepared, still pays it at its first connection. *Narrowed by the M17 design
-  §4.3; closed once `just perf` measures G20's first clone after import within 2× git's
-  (perf.md, "M17-4a"). Found: M14 Task Q1.*
+  yet pays that once, as loose objects: on 12,000 commits the first clone of a store never
+  prepared took 1,286.376 s, against 0.568 s from git's own server
+  ([perf.md](perf.md#m17-baselines--2026-11-07)). The connections after it export only what
+  moved. `serve --prepare --seed-from <the import's source>` pays it before any client connects,
+  with no object written: the import's objects fetched as one pack
+  ([Serve over ssh](operate/serve-over-ssh.md#the-serving-account)); so prepared, the first clone
+  after an import of 12,000 commits took 0.366 s against git's 0.512 s (perf.md, "M17-4a"). A
+  store prepared without a seed, or never prepared, still pays it at its first connection.
+  *Unscheduled; narrowed by the M17 design §4.3 (G20's first clone after import, prepared, within
+  2× git's). Found: M14 Task Q1.*
 - **A request takes the memory its type holds.** The MCP server reads of a message line, at
   most 64 MiB, only the members it serves, and a tool's arguments only as their request type,
   so what else a line holds costs it nothing beyond the line's bytes (operations spec §0). A
@@ -555,8 +557,13 @@ sets the tail on a loaded host. A `ws land` record
   frame whose commit finds the index's tail past 1,024 records, or a metadata flush before the
   target's move that does, also rewrites the sorted views under the lock ("Compaction rewrites both sorted views under the
   writer lock" below): at 1,000,000 records that rewrite alone takes 173 ms, so a commit or a land
-  beside the import can wait that long once per compaction. *Target: compaction out of the
-  write (M20). Found: the M17 design §3.1.*
+  beside the import can wait that long once per compaction. Beside the import of 12,000 commits,
+  the longest of 109,659 commits by 8 committers took 0.796 s from spawn to exit (median
+  0.207 s), against G18's 100 ms; that figure holds the committers' queue behind each other and
+  their own syncs, which the case does not separate from the import's holds (the import of 1,000
+  commits alone held the lock 0.067 s at most;
+  [perf.md](perf.md#m17-baselines--2026-11-07)). *Target: compaction out of the write (M20).
+  Found: the M17 design §3.1.*
 - **A git import or export reports what it repaired only when it succeeds.** An import's
   `meta.recovered` adds up what its frames' and its ref move's write transactions repaired of what
   earlier writers left. An import that fails reports none of it (the import's error carries no such
@@ -633,9 +640,11 @@ sets the tail on a loaded host. A `ws land` record
   push still peaks above that: its reader maps the quarantine's pack, whose pages count in its
   resident memory as they are read, and the store compresses a batch on every core, each thread
   with buffers of its own. A push of 200 incompressible files of 1 MiB peaked at 374 MiB in a
-  debug build on 32 cores (222 MiB of it the mapped pack; 71 MiB anonymous on one thread). A
-  commit refused after a batch was stored leaves that batch's objects unreferenced, counted as
-  `orphan_objects`. *Unscheduled. Found: the 2026-10-20 security review; narrowed by M17-6.*
+  debug build on 32 cores (222 MiB of it the mapped pack; 71 MiB anonymous on one thread). In a
+  release build the server tree peaked at 1,194.6 MiB for a push of 1,024 files of 1 MiB and
+  3,228.8 MiB for 2,040, against G22's 256 MiB at 2 GiB
+  ([perf.md](perf.md#m17-baselines--2026-11-07)). A commit refused after a batch was stored
+  leaves that batch's objects unreferenced, counted as `orphan_objects`. *Unscheduled. Found: the 2026-10-20 security review; narrowed by M17-6.*
 - **A commit an earlier import took with a loss is reused without `--lossy`.** A commit the store
   already holds is reused as it is, so a later import without `--lossy` that reaches one an
   earlier import took with a loss reports `lossy_total` 0 and skips it rather than refusing, as

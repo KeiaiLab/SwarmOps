@@ -32,6 +32,11 @@ collects the changes on `stable` that no release holds yet, until the next relea
 - docs/goals.md adds G18 (short writer holds), G19 (identical reads served once), G20 (readers
   pay only for what they read) and G22 (a push checked in bounded memory), each with the
   measurement in docs/perf.md that shows the gap it closes.
+- docs/goals.md adds G21 (served git traffic under a swarm's load), not measured yet, and G23
+  (served git answers as git's own server), with the differential suite that shows the gap it
+  closes. G18, G19, G20 and G22 carry M17's measured values (docs/perf.md, "M17 baselines" and
+  the M17 slices' sections): G18's commit wait, G19's server CPU, G20's land p99 at 50
+  processes and G22's peak memory miss their targets.
 
 ### Fixed
 
