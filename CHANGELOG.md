@@ -10,12 +10,30 @@ SwarmOps 0.1.0 is the first release, tagged `v0.1.0`, 0.2.0 the second, with the
 and FORMAT 2 (M6), 0.5.0 the fifth, with the pilot on a real repository and the goal measurements,
 0.6.0 the sixth, with the fixes those measurements asked for, 0.7.0 the seventh, with stock git
 against a store (M14), 0.8.0 the eighth, with data safety and the contract (M15),
-and 0.9.0 the ninth, with safety and load (M16); no crate is published (`publish = false`). The 0.1.0 section holds every
+0.9.0 the ninth, with safety and load (M16), and 0.10.0 the tenth, with serving under load (M17);
+no crate is published (`publish = false`). The 0.1.0 section holds every
 change up to it, grouped by milestone of the design (umbrella spec §13). From here, **Unreleased**
 collects the changes on `stable` that no release holds yet, until the next release
 ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ## [Unreleased]
+
+## [0.10.0] - 2026-11-07
+
+Serving under load. The 0.10.0 release completes M17's slices: served reads off the writer lock
+with preparation, one pack per identical read, per-request serve records, a commit's blobs stored
+in batches, landing lanes and the served-load harness (`serve_load`). M17's goals are measured in
+[docs/perf.md](docs/perf.md) ("M17 baselines" and the M17 slices' sections), G21 apart: the
+prepared first clone after an import took 0.366 s against git's 0.512 s and 50 clones at once
+0.770 s at the median against git's 1.682 s (both met); G18's commit wait beside an import
+(0.796 s against 100 ms), G19's server CPU for 50 clones (58× and 41× one clone's, against 4×),
+G20's land p99 with preparation at 50 processes (1.118× against 1.1×) and G22's peak memory for a
+2 GiB push (3,228.8 MiB against 256 MiB) are missed. G21, served git traffic under load, is not
+measured yet: `serve_load` has not run under `just perf`. G23's differential session against
+git's own server passes in `just check`. M18 starts: lands and commits that find the writer lock
+taken wait in the store's write queue and are committed in batches, one `journal.log` sync for
+several (group commit, the M18 D2 design, slices D2-1 to D2-7); G4 is not measured again on
+batching yet (docs/perf.md, "D2 baseline": the host was never quiet).
 
 ### Added
 
@@ -2216,7 +2234,8 @@ fixes the measurements and the pilot asked for.
   ([docs/known-limitations.md](docs/known-limitations.md), "An import onto a target reads the
   head's whole tree, and onto a native head the whole history below it").
 
-[Unreleased]: https://github.com/KeiaiLab/SwarmOps/compare/v0.9.0...stable
+[Unreleased]: https://github.com/KeiaiLab/SwarmOps/compare/v0.10.0...stable
+[0.10.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.6.0...v0.7.0

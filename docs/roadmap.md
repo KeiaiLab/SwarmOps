@@ -137,13 +137,13 @@ The releases that get there:
 | v0.7.0 | M14 | Topology 1's acceptance criteria 1 to 5 pass in CI ([Topology 1](#topology-1-local-git-remote-swarmops)) |
 | v0.8.0 | Safety and contract, first part | M15: 54 of 55 codes pinned, op ids an undo cannot redirect, a fetch that imports before it moves a tracking ref, `main` forward only, three workspace refusals, a land key scoped to the store, the land grant checked on each attempt; `.deb` and `.rpm` packages |
 | v0.9.0 | Safety and load | M16: condition 5's remaining core rows closed in scope; G4 re-measured with one lock pass per land: p99 under 500 ms at 50 processes in one of two runs, so condition 2 is not met robustly ([perf.md](perf.md#m16--2026-11-07)) |
-| v0.10.0 | Serve under load | M17: G18–G23 measured; served reads off the writer lock; the first clone at most 2× git's own server |
+| v0.10.0 | Serve under load | M17: served reads off the writer lock, preparation, one pack per identical read; the prepared first clone 0.72× git's own server; G18's commit wait, G19's CPU, G20's land p99 at 50 processes and G22's memory missed, G21 not measured yet ([perf.md](perf.md#m17-baselines--2026-11-07)) |
 | v0.11.0 | Take back, workspaces | M18 and M19; group commit, one journal flush for several lands, for G4's p99 (condition 2) |
 
 SwarmOps is declared usable at the first release where all seven conditions hold; condition 6
 counts from the last release that shipped a data-safety fix.
 
-**Status (2026-11-07).** v0.9.0 is released (M16, safety and load), after v0.8.0 (M15); v0.7.0 has M14, which serves topology 1 (condition 7), its criteria 1
+**Status (2026-11-07).** v0.10.0 is released (M17, serving under load), after v0.9.0 (M16) and v0.8.0 (M15); v0.7.0 has M14, which serves topology 1 (condition 7), its criteria 1
 to 5 pass in `just check` and in the Scheduled run's git matrix, and G16 is met
 ([docs/perf.md](perf.md#v070--2026-10-29): a clone 0.97× and a no-op fetch 1.82× git's own
 server on 12,000 commits). G1 and G2 are met. G4 is met but for its p99 at 50 processes: 25
@@ -152,7 +152,9 @@ window, for v0.6.0's code as for M14's (579.5–594.6 ms in v0.6.0's). M16 lands
 commit in one lock pass (`land --changes`), and G4's harness lands so: at 50 processes its p99 was
 441.7 ms in one run and 1,483.5 ms in another that started at twice the load, with 25.0 lands/s,
 0 % retries and nothing lost in both ([perf.md](perf.md#m16--2026-11-07)). Condition 2 is not met
-robustly, so group commit (D2, M18) is next, and its design starts now. G17's push and fetch are met
+robustly, so M18 starts with group commit (D2): lands and commits that wait on the writer lock are
+committed in batches (D2-1 to D2-7, in v0.10.0); G4 is not measured on batching yet, D2-8 measures
+it ([perf.md](perf.md#d2-baseline--2026-11-08-not-measured-the-host-was-never-quiet)). G17's push and fetch are met
 (1.02× and 1.34×, the fetch with the mirror's commit-graph); the sync of one land right after a
 clone is not (49.6 s against 1 s). The benchmark gate (condition 3) runs in the weekly Scheduled
 run.
@@ -645,8 +647,8 @@ GitHub goal, M15 to M25 by the plan of 2026-11-05; M11 (topology 3) takes `so cl
 `so remote` and `so sync`.
 
 **Settled:** M0 to M4 and M8 are delivered, in v0.1.0, M13 in v0.2.0, M5 in v0.3.0, M6 in
-v0.4.0, M14 in v0.7.0 and M15 in v0.8.0, ahead of M12, which is developed separately.
-**Provisional:** after M16, delivered in v0.9.0, the order follows
+v0.4.0, M14 in v0.7.0, M15 in v0.8.0 and M16 in v0.9.0, ahead of M12, which is developed separately.
+**Provisional:** after M16, delivered in v0.9.0, with M17's slices in v0.10.0 and its exit criteria open, the order follows
 [To usable](#to-usable): M17 serves under load, M18 and M19 need no new format, one `FORMAT 3` (M20)
 then serves review, the queue, withdrawal and lineage, and topology 3 stays after the simulator;
 the order below is the plan:
@@ -673,8 +675,8 @@ needs   M13  ← M3, M4, M8                 packs, the mirror, the sync engine
 | ✅ M14 | 1 | `swarmops serve` over ssh and CGI; upload-pack and receive-pack; `refs/land/`; the access file; v0.7.0 | M13, M6 | Topology 1's acceptance criteria 1 to 5 pass (delivered: [CHANGELOG](../CHANGELOG.md)) |
 | ✅ M15 | — | Safety and contract: codes pinned, op ids, fetch integrity, `main` forward only, workspace refusals, land keys; v0.8.0 | M14 | Its twelve rows' acceptance in scope |
 | ✅ M16 | — | Safety and load: no-follow workspace writes, kill tests for readers and ref moves, sync and import forward only, one lock pass per land, `ancestry`, the land key under the lock, refusal inside the quarantine; v0.9.0 | M15 | The M16 plan's acceptance; G4 re-measured ([perf.md](perf.md#m16--2026-11-07)) |
-| 📋 M17 | 1 | Serve under load: reads off the writer lock, history prepared at land and import, one pack per identical read, pushes in bounded memory, records per request, a differential suite against git's own server | M16 | G18–G23 measured, G19, G20, G22 met. So far G18's commit wait beside an import, G19's CPU, G20's land p99 at 50 processes and G22's memory miss, and G21 has not run ([perf.md](perf.md#m17-baselines--2026-11-07)) |
-| 📋 M18 | — | Take back and stay current: revert, `ref log`, the first sync after a clone, conflict attribution, group commit if needed | M16 | 55 of 55 codes pinned; first sync < 1 s on 12,000 commits |
+| 📋 M17 | 1 | Serve under load: reads off the writer lock, history prepared at land and import, one pack per identical read, pushes in bounded memory, records per request, a differential suite against git's own server; its slices in v0.10.0 | M16 | G18–G23 measured, G19, G20, G22 met. So far G18's commit wait beside an import, G19's CPU, G20's land p99 at 50 processes and G22's memory miss, and G21 has not run ([perf.md](perf.md#m17-baselines--2026-11-07)) |
+| 📋 M18 | — | Take back and stay current: revert, `ref log`, the first sync after a clone, conflict attribution, group commit if needed | M16 | 55 of 55 codes pinned; first sync < 1 s on 12,000 commits. So far group commit, D2-1 to D2-7, in v0.10.0; G4 on batching not measured yet (D2-8) |
 | 📋 M19 | — | Workspaces, second round: stale workspaces everywhere, edit snapshots, the update's latency | M16 | G9's misses met |
 | 📋 M20 | — | `FORMAT 3`: the sorted views under a manifest, the new record kinds, `upgrade` | its design | G18 at 1,000,000 records |
 | 📋 M21 | — | Health, drift and housekeeping | M17 | G24 |
