@@ -6,8 +6,8 @@
 //! Absent options in these types are omitted, never written as null (unlike `OpError.hint`,
 //! which is always written). Ids are lowercase hex. A response that could grow without bound is
 //! capped by its request (`max_bytes`, `limit`, `max_changes`) and says when it was cut
-//! (`truncated`, `changes_truncated`, `hunks_truncated`); `read_tree`, `log`, `path_history` and
-//! `diff` also return a `cursor` that resumes after the page, and `read_file` a `next_offset`. The
+//! (`truncated`, `changes_truncated`, `hunks_truncated`); `read_tree`, `log`, `ancestry`,
+//! `path_history` and `diff` also return a `cursor` that resumes after the page, and `read_file` a `next_offset`. The
 //! cursor of `read_tree` or `diff`, and a `next_offset`, name a place, not a revision: page at the
 //! full ids the first page resolved. The default page of `read_tree`, `show`, `log`,
 //! `path_history` and `diff` stays within the operations spec's 64 KiB target for a default
@@ -42,6 +42,12 @@ pub const DEFAULT_MAX_BYTES: u64 = 1024 * 1024;
 /// The default [`LogReq::limit`]: 50 changesets, a page of about 13 KB with titles of typical
 /// length.
 pub const DEFAULT_LOG_LIMIT: usize = 50;
+
+/// The default [`AncestryReq::limit`]: 50 changesets, as [`LogReq::limit`]'s.
+pub const DEFAULT_ANCESTRY_LIMIT: usize = 50;
+
+/// The most [`AncestryReq::limit`]: 1,000 changesets.
+pub const MAX_ANCESTRY_LIMIT: usize = 1000;
 
 /// The default [`PathHistoryReq::limit`]: 50 changesets, a page of about 16 KB with titles of
 /// typical length.
@@ -85,6 +91,10 @@ fn default_max_bytes() -> u64 {
 
 fn default_log_limit() -> usize {
     DEFAULT_LOG_LIMIT
+}
+
+fn default_ancestry_limit() -> usize {
+    DEFAULT_ANCESTRY_LIMIT
 }
 
 fn default_path_history_limit() -> usize {
@@ -1110,6 +1120,84 @@ impl ChangesetSummary {
             author_agent: author_agent.into(),
             created_at,
             title: title.into(),
+        }
+    }
+}
+
+/// `ancestry`: two revisions' ancestry along every parent, and a page of the changesets the
+/// second reaches and the first does not.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AncestryReq {
+    /// The first revision: the one asked to be an ancestor, and the one `entries` leave out.
+    pub from: Rev,
+    /// The second revision: the one whose ancestors `entries` list.
+    pub to: Rev,
+    /// The most entries to return, 0 to 1,000 (more is `E_INVALID_ARG`): 0 gives
+    /// `is_ancestor` and `merge_bases` alone.
+    #[serde(default = "default_ancestry_limit")]
+    #[schemars(range(max = 1000))]
+    pub limit: usize,
+    /// Resume the entries: the previous page's `cursor`. Pass it back exactly as returned, with
+    /// the same `from` and `to`; do not construct it (cursors are opaque). It holds the full ids
+    /// the first page resolved: once a ref among `from` and `to` moves, it is `E_INVALID_ARG`,
+    /// and the listing starts over.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+impl AncestryReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(from: impl Into<Rev>, to: impl Into<Rev>) -> Self {
+        Self {
+            from: from.into(),
+            to: to.into(),
+            limit: default_ancestry_limit(),
+            cursor: None,
+        }
+    }
+}
+
+/// `ancestry`: the answers, and a page of `from..to`, by generation descending, then id
+/// ascending.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct AncestryResp {
+    /// The full id `from` named.
+    pub from: String,
+    /// The full id `to` named.
+    pub to: String,
+    /// Whether `from` is an ancestor of `to` along any parents; a changeset is its own.
+    pub is_ancestor: bool,
+    /// The merge bases: the common ancestors that no other common ancestor reaches, at most 64;
+    /// `from` alone when it is an ancestor of `to`, none when the two share no history.
+    pub merge_bases: Vec<String>,
+    /// Whether there are more merge bases than the 64 listed.
+    pub merge_bases_truncated: bool,
+    /// The changesets `to` reaches and `from` does not, after the request's cursor.
+    pub entries: Vec<ChangesetSummary>,
+    /// When more entries follow: where the next page continues. Opaque: pass it back as given,
+    /// as the next request's `cursor`, with the same `from` and `to`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+impl AncestryResp {
+    /// Takes the answers; the page is empty.
+    pub fn new(
+        from: impl Into<String>,
+        to: impl Into<String>,
+        is_ancestor: bool,
+        merge_bases: Vec<String>,
+    ) -> Self {
+        Self {
+            from: from.into(),
+            to: to.into(),
+            is_ancestor,
+            merge_bases,
+            merge_bases_truncated: false,
+            entries: Vec::new(),
+            cursor: None,
         }
     }
 }
@@ -4164,6 +4252,11 @@ pub trait StoreOps {
     /// History along first parents, newest first (CLI `log`); with `paths`, only the changesets
     /// that change them.
     fn log(&self, req: LogReq) -> Result<LogPage, OpError>;
+
+    /// Whether one revision is an ancestor of another along every parent, their merge bases,
+    /// and a page of the changesets the second reaches and the first does not (CLI `ancestry`).
+    /// Required, with no default body: one would pass by the access checks of a wrapping store.
+    fn ancestry(&self, req: AncestryReq) -> Result<AncestryResp, OpError>;
 
     /// The changesets that changed what a path holds, newest first, along first parents (CLI
     /// `history`).

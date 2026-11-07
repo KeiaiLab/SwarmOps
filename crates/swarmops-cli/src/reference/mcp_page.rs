@@ -401,7 +401,8 @@ fn tools_table(out: &mut String, commands: &[Vec<String>]) {
     let _ = writeln!(
         out,
         "These commands have no tool: {}. An operator or a script runs them as commands; \
-         `derive` runs beside the store as maintenance, deriving values ahead of readers.\n",
+         `derive` only fills ahead of time a cache that each read fills itself, so it changes \
+         no result an agent reads.\n",
         without.join(", ")
     );
 }

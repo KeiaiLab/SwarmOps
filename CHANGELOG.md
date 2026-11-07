@@ -50,6 +50,13 @@ collects the changes on `stable` that no release holds yet, until the next relea
   same head. `ws land -m` without `--check` lands the workspace's edits so, with no commit of its
   own; its rerun after a cut carries them again, and a file edited in between makes the key
   `E_INVALID_ARG`. `op log` calls such a frame a `land` (the M16 design §4).
+- `ancestry <from> <to> [-n N] [--cursor C]` (MCP `ancestry`, `StoreOps::ancestry`) follows every
+  parent, a merge's other parents too: whether `from` is an ancestor of `to`, their merge bases (at
+  most 64, `merge_bases_truncated` past them), and a page of the changesets `to` reaches and `from`
+  does not, by generation, newest first. `-n` is 0 to 1,000 (default 50; 0 gives the two answers
+  alone); the cursor holds both full ids, so a cursor for other revisions, or after a ref among
+  them moved, is `E_INVALID_ARG`. It reads only. `log` and `history` still follow first parents
+  ([ancestry](docs/reference/commands/ancestry.md)).
 
 ### Changed
 

@@ -19,12 +19,12 @@ use base64::engine::general_purpose::STANDARD;
 use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::{Value, json};
 use swarmops_api::{
-    Attribution, ChangeInput, ChangeOp, ChangeOut, ChangesetSummary, CommitReq, ContentEncoding,
-    ContentInput, DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES,
-    DEFAULT_READ_TREE_LIMIT, EntryKindOut, ErrorCode, FileContent, FileKind, Identity,
-    IdentityInfo, InfoReq, LogPage, LogReq, ModeInput, OpError, OpLogReq, ReadFileReq, ReadTreeReq,
-    RefDeleteReq, RefListReq, RefOut, RefSetReq, RefSetResp, Rev, ShowReq, StoreOps, TreeEntryOut,
-    UndoReq, VerifyReq,
+    AncestryReq, AncestryResp, Attribution, ChangeInput, ChangeOp, ChangeOut, ChangesetSummary,
+    CommitReq, ContentEncoding, ContentInput, DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES,
+    DEFAULT_MAX_CHANGES, DEFAULT_READ_TREE_LIMIT, EntryKindOut, ErrorCode, FileContent, FileKind,
+    Identity, IdentityInfo, InfoReq, LogPage, LogReq, ModeInput, OpError, OpLogReq, ReadFileReq,
+    ReadTreeReq, RefDeleteReq, RefListReq, RefOut, RefSetReq, RefSetResp, Rev, ShowReq, StoreOps,
+    TreeEntryOut, UndoReq, VerifyReq,
 };
 use swarmops_core::{
     ChangesetId, LeafKind, ObjectId, ObjectKind, RepoPath, Signature, hash_object,
@@ -5812,4 +5812,78 @@ mod formats {
         let format = fs::read(root.join("FORMAT")).unwrap();
         assert_eq!(format, b"swarmops-store 2\n");
     }
+}
+
+/// `ancestry` pages `from..to` with a cursor bound to the two full ids: a cursor given for
+/// other revisions, one that is not a cursor, and a limit over 1,000 are `E_INVALID_ARG`, and
+/// so is a cursor once a ref among the two moves.
+#[test]
+fn ancestry_refuses_a_cursor_for_other_revs() {
+    let (_dir, _root, ops) = new_store();
+    let on_main = |parent: Option<&str>, content: &str| {
+        let mut req = commit_req(parent, vec![text("a", content)]);
+        req.advance = Some("main".to_owned());
+        ops.commit(&agent(), req).unwrap().changeset
+    };
+    let c1 = on_main(None, "1");
+    let c2 = on_main(Some(&c1), "2");
+    let c3 = on_main(Some(&c2), "3");
+    let b = commit(&ops, Some(&c1), vec![text("b", "b")]);
+    let ancestry = |from: &str, to: &str, limit: usize, cursor: Option<&str>| {
+        let mut req = AncestryReq::new(from, to);
+        req.limit = limit;
+        req.cursor = cursor.map(str::to_owned);
+        ops.ancestry(req)
+    };
+
+    // 1. c1..main, one changeset a page, newest first.
+    let first = ancestry(&c1, "main", 1, None).unwrap();
+    assert_eq!(
+        (first.from.as_str(), first.to.as_str()),
+        (c1.as_str(), c3.as_str())
+    );
+    assert!(first.is_ancestor);
+    assert_eq!(first.merge_bases, std::slice::from_ref(&c1));
+    let ids = |resp: &AncestryResp| {
+        resp.entries
+            .iter()
+            .map(|e| e.id.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&first), std::slice::from_ref(&c3));
+    let cursor = first.cursor.clone().expect("a cursor: c2 follows");
+    let second = ancestry(&c1, "main", 1, Some(&cursor)).unwrap();
+    assert_eq!((ids(&second), second.cursor), (vec![c2.clone()], None));
+
+    // 2. The cursor for other revisions, or no cursor at all, is refused.
+    for (from, to, given) in [
+        (&b, &c3, cursor.as_str()),
+        (&c1, &b, &cursor),
+        (&c1, &c3, "zz"),
+    ] {
+        let err = expect_err(ancestry(from, to, 1, Some(given)), ErrorCode::InvalidArg);
+        assert_eq!(err.details["cursor"], given);
+        assert_eq!(
+            err.hint.as_deref(),
+            Some("pass the previous page's cursor as it was given, or none to start over")
+        );
+    }
+
+    // 3. Once main moves, its cursor starts over.
+    let c4 = on_main(Some(&c3), "4");
+    let moved = expect_err(
+        ancestry(&c1, "main", 1, Some(&cursor)),
+        ErrorCode::InvalidArg,
+    );
+    assert_eq!(moved.details["cursor"], cursor.as_str());
+    assert_eq!(ancestry(&c1, "main", 1, None).unwrap().to, c4);
+
+    // 4. A limit: 0 gives the answers alone, over 1,000 is refused.
+    let bare = ancestry(&c3, &b, 0, None).unwrap();
+    assert!(!bare.is_ancestor);
+    assert_eq!(bare.merge_bases, std::slice::from_ref(&c1));
+    assert!(bare.entries.is_empty() && bare.cursor.is_none());
+    let over = expect_err(ancestry(&c3, &b, 1001, None), ErrorCode::InvalidArg);
+    assert_eq!(over.details["limit"], 1001);
+    assert_eq!(ids(&ancestry(&c3, &b, 50, None).unwrap()), [b]);
 }

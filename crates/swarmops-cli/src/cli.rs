@@ -10,12 +10,13 @@ use clap::{
     ArgGroup, ArgMatches, Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum,
 };
 use swarmops_api::remote::{DEFAULT_REMOTE, DEFAULT_SYNC_STATUS_LIMIT};
-use swarmops_api::{DEFAULT_BLOB_GET_MAX_BYTES, DEFAULT_CHECK_TIMEOUT_S, DEFAULT_WS_STATUS_LIMIT};
 use swarmops_api::{
-    DEFAULT_DIFF_CONTEXT, DEFAULT_DIFF_LIMIT, DEFAULT_DIFF_MAX_BYTES, DEFAULT_LOG_LIMIT,
-    DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, DEFAULT_MAX_CHANGESETS, DEFAULT_OP_LOG_LIMIT,
-    DEFAULT_PATH_HISTORY_LIMIT, DEFAULT_READ_TREE_LIMIT, LineRange, LossyClass,
+    DEFAULT_ANCESTRY_LIMIT, DEFAULT_DIFF_CONTEXT, DEFAULT_DIFF_LIMIT, DEFAULT_DIFF_MAX_BYTES,
+    DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, DEFAULT_MAX_CHANGESETS,
+    DEFAULT_OP_LOG_LIMIT, DEFAULT_PATH_HISTORY_LIMIT, DEFAULT_READ_TREE_LIMIT, LineRange,
+    LossyClass,
 };
+use swarmops_api::{DEFAULT_BLOB_GET_MAX_BYTES, DEFAULT_CHECK_TIMEOUT_S, DEFAULT_WS_STATUS_LIMIT};
 use swarmops_api::{DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_CONFLICT_BYTES};
 
 use crate::output;
@@ -544,6 +545,21 @@ pub enum Command {
         #[arg(long = "path", value_name = "PATH")]
         paths: Vec<String>,
     },
+    /// Compare two revisions' ancestry along every parent: whether FROM is an ancestor of TO,
+    /// their merge bases, and a page of the changesets TO reaches and FROM does not.
+    Ancestry {
+        /// The first revision: the ancestor asked about, and the side the list leaves out.
+        from: String,
+        /// The second revision: the side whose changesets the list holds.
+        to: String,
+        /// The most changesets to list, 0 to 1,000: 0 lists none.
+        #[arg(short = 'n', long, value_name = "N", default_value_t = DEFAULT_ANCESTRY_LIMIT)]
+        limit: usize,
+        /// Resume the list: the previous page's cursor, exactly as it was returned, with the same
+        /// FROM and TO.
+        #[arg(long)]
+        cursor: Option<String>,
+    },
     /// List the changesets that changed a path, newest first, along first parents.
     History {
         // Split at the first ':' as `cat`'s target is (see there).
@@ -666,7 +682,7 @@ pub enum Command {
     },
     /// Serve the store's operations to an agent as an MCP server on stdin and stdout.
     ///
-    /// One tool per operation (repo_info, resolve_rev, read_file, read_tree, show, log,
+    /// One tool per operation (repo_info, resolve_rev, read_file, read_tree, show, log, ancestry,
     /// path_history, diff, op_log, ref_list, ref_set, ref_delete, undo, commit, land, blob_put,
     /// blob_has, verify, the maintenance's gc, repair and upgrade, and the git remotes'
     /// remote_list, fetch, push, sync and sync_status), each taking the operation's request as
@@ -1484,6 +1500,7 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["ls"] => "read_tree",
         ["show"] => "show",
         ["log"] => "log",
+        ["ancestry"] => "ancestry",
         ["history"] => "path_history",
         ["diff"] => "diff",
         ["ref", "list"] => "ref_list",
@@ -1635,10 +1652,10 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 52);
+        assert_eq!(ops.len(), 53);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 52, "two subcommands name one op");
+        assert_eq!(ops.len(), 53, "two subcommands name one op");
         assert_eq!(op_name(&["ref"]), None);
         assert_eq!(op_name(&["blob"]), None);
         assert_eq!(op_name(&["ws"]), None);

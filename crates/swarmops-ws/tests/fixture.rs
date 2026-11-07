@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use camino::{Utf8Path, Utf8PathBuf};
+use swarmops_api::{AncestryReq, AncestryResp};
 use swarmops_api::{
     BlobGetReq, BlobGetResp, BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp, ChangeInput,
     ChangeOp, ChangesetDetail, ChangesetSummary, CommitReq, CommitResp, ContentInput, DeriveReq,
@@ -663,6 +664,11 @@ impl StoreOps for Watched<'_> {
             Some(total) => Ok(Watched::made_up(total, &req)),
             None => self.inner.log(req),
         }
+    }
+
+    fn ancestry(&self, req: AncestryReq) -> Result<AncestryResp, OpError> {
+        self.saw("ancestry");
+        self.inner.ancestry(req)
     }
 
     fn path_history(&self, req: PathHistoryReq) -> Result<PathHistoryPage, OpError> {

@@ -261,8 +261,17 @@ left).
   and a changeset's changes are those against its first parent: what a merge brought in from its
   other parents shows as the merge's own change, and the changesets on those parents are never
   listed. Native histories have no merge (`main` is linear, workspaces land squashed); git
-  import's do. *Unscheduled: when imported merge histories need it (`LogReq.first_parent`).
-  Found: M2 Task 15 (M2 Decision 8).*
+  import's do. `ancestry` answers along every parent (is one an ancestor, the merge bases, the
+  changesets between two revisions; the M16 design §5), but `log` has no all-parent mode and
+  `history` no path history along other parents. *Unscheduled: when imported merge histories need
+  it (`LogReq.first_parent`). Found: M2 Task 15 (M2 Decision 8).*
+- **`ancestry` is measured only in part.** Its benches (`ancestry/{20k,200k}/…`, merge-rich
+  histories) are not yet baselined, so `bench/thresholds.toml` skips them and `docs/perf.md` has
+  no p99 of theirs; a linear history, 1M changesets, a p99 bound of 1 ms, a bound on the growth
+  from 20k to 200k, and the answers against git's on the same history are not measured. Each read
+  walks every changeset `to` reaches down to where nothing more can be found, reading its object:
+  far-apart revisions on a long history cost a walk of most of it. *Target: the M16 fan-in
+  (baselines and p99s); the rest unscheduled. Found: the M16 design §5.*
 - **`--expect` with a ref name cannot detect a move.** A ref name given as the expected target
   resolves when the command runs, so it matches whatever the ref holds by then (it fails only
   if the ref is gone); give an id for an expectation that can fail, or be replayed.

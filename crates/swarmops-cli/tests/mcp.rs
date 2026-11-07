@@ -56,13 +56,14 @@ type Startup<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)]);
 /// The tools, one per `StoreOps` operation and then one per client-side operation of the git
 /// remotes (M13), in the order `tools/list` gives them, each with the request type its arguments
 /// are.
-const TOOLS: [(&str, &str); 38] = [
+const TOOLS: [(&str, &str); 39] = [
     ("repo_info", "InfoReq"),
     ("resolve_rev", "ResolveRevReq"),
     ("read_file", "ReadFileReq"),
     ("read_tree", "ReadTreeReq"),
     ("show", "ShowReq"),
     ("log", "LogReq"),
+    ("ancestry", "AncestryReq"),
     ("path_history", "PathHistoryReq"),
     ("diff", "DiffReq"),
     ("op_log", "OpLogReq"),
@@ -317,6 +318,7 @@ fn mcp_tool_calls_golden() {
     // 4. The history: the land's changeset, main's log, a path's history, a diff.
     golden.ok("show", json!({"rev": landed}));
     golden.ok("log", json!({"rev": "main"}));
+    golden.ok("ancestry", json!({"from": c1, "to": "main", "limit": 1}));
     golden.ok("path_history", json!({"path": "src/lib.rs"}));
     golden.ok("diff", json!({"from": c1, "to": "main", "format": "stat"}));
 

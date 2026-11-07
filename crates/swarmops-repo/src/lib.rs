@@ -37,6 +37,7 @@
 //! store ([`Repo::derived`]; the [`derive`](mod@derive) module). A path's history chases one of
 //! them, the changeset that last touched the path ([`LastModified`]; the [`path_history`] module).
 
+pub mod ancestry;
 pub mod commit;
 pub mod derive;
 pub mod diff;

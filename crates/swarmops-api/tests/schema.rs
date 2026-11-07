@@ -18,6 +18,7 @@ use swarmops_api::{
 
 /// Requests and the input types inside them.
 const REQUESTS: &[&str] = &[
+    "AncestryReq",
     "BlobGetReq",
     "BlobHasReq",
     "BlobPutReq",
@@ -76,6 +77,7 @@ const REQUESTS: &[&str] = &[
 /// Responses and the output types inside them.
 const RESPONSES: &[&str] = &[
     "Advanced",
+    "AncestryResp",
     "Attribution",
     "BlobGetResp",
     "BlobHasResp",
@@ -272,6 +274,8 @@ fn store_ops_signatures<S: StoreOps + ?Sized>() {
     let _: fn(&S, ReadTreeReq) -> Result<TreeListing, OpError> = S::read_tree;
     let _: fn(&S, ShowReq) -> Result<ChangesetDetail, OpError> = S::show;
     let _: fn(&S, LogReq) -> Result<LogPage, OpError> = S::log;
+    let _: fn(&S, swarmops_api::AncestryReq) -> Result<swarmops_api::AncestryResp, OpError> =
+        S::ancestry;
     let _: fn(&S, swarmops_api::PathHistoryReq) -> Result<swarmops_api::PathHistoryPage, OpError> =
         S::path_history;
     let _: fn(&S, swarmops_api::DiffReq) -> Result<swarmops_api::Diff, OpError> = S::diff;
@@ -723,6 +727,19 @@ fn assert_ignores_unknown_fields<T: DeserializeOwned + PartialEq + Debug>(
     let extended: T = serde_json::from_value(with_unknown_field(minimal))
         .unwrap_or_else(|e| panic!("{name} must ignore unknown fields: {e}"));
     assert_eq!(extended, plain, "{name}");
+}
+
+/// `ancestry`'s request and response read past fields they do not know, as the others do.
+#[test]
+fn ancestry_types_ignore_unknown_fields() {
+    assert_ignores_unknown_fields::<swarmops_api::AncestryReq>(
+        "AncestryReq",
+        json!({"from": "main", "to": "main"}),
+    );
+    assert_ignores_unknown_fields::<swarmops_api::AncestryResp>(
+        "AncestryResp",
+        json!({"from": "a", "to": "b", "is_ancestor": false, "merge_bases": [], "merge_bases_truncated": false, "entries": []}),
+    );
 }
 
 #[test]

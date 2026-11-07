@@ -60,6 +60,8 @@ swarmops schema NoSuchType
       "name": "NoSuchType",
       "types": [
         "Advanced",
+        "AncestryReq",
+        "AncestryResp",
         "Attribution",
         "BlobGetReq",
         "BlobGetResp",

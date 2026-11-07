@@ -3,6 +3,7 @@
 //! target from `tests/` (`autotests = false` in `Cargo.toml`): a new test file is a `mod` line
 //! here.
 
+mod ancestry;
 mod commit;
 mod damaged_index;
 mod derive;

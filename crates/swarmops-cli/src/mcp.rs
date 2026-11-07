@@ -65,7 +65,7 @@
 //! # The tools
 //!
 //! One tool per [`StoreOps`] operation, named as the envelope's `op` is: `repo_info`,
-//! `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `path_history`, `diff`, `op_log`,
+//! `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `ancestry`, `path_history`, `diff`, `op_log`,
 //! `ref_list`, `ref_set`, `ref_delete`, `undo`, `commit`, `land`, `blob_put`, `blob_has`,
 //! `verify` and the maintenance's `gc`, `repair` and `upgrade` (M6), in `tools/list`'s order; then the git remotes' client-side operations (M13), which
 //! no [`StoreOps`] has: `remote_list`, `fetch`, `push`, `sync` and `sync_status`, run on the
@@ -156,6 +156,7 @@ use serde::de::{
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use serde_json::{Map, Number, Value, json};
+use swarmops_api::AncestryReq;
 use swarmops_api::LandReq;
 use swarmops_api::RebaseReq;
 use swarmops_api::ResolveRevReq;
@@ -267,7 +268,7 @@ const READ_FILE_RESULT_CHARS: u32 = 200_000;
 const RESULT_CHARS_KEY: &str = "anthropic/maxResultSizeChars";
 
 /// The tools, in the order `tools/list` gives them.
-static TOOLS: [Spec; 27] = [
+static TOOLS: [Spec; 28] = [
     Spec {
         tool: Tool::RepoInfo,
         name: "repo_info",
@@ -338,6 +339,19 @@ static TOOLS: [Spec; 27] = [
         description: "History along first parents, newest first, from main unless rev says \
                       otherwise; pass a limit of 100 or less and page on with the cursor, since \
                       clients limit long tool results.",
+        effect: Effect::Reads,
+        result_chars: None,
+    },
+    Spec {
+        tool: Tool::Ancestry,
+        name: "ancestry",
+        request: "AncestryReq",
+        title: "Compare two revisions' ancestry",
+        description: "Along every parent, a merge's other parents too: whether from is an \
+                      ancestor of to, their merge bases, and the changesets to reaches and from \
+                      does not, newest generation first; pass a limit of 100 or less and page on \
+                      with the cursor and the same from and to, since clients limit long tool \
+                      results. limit 0 gives the two answers alone.",
         effect: Effect::Reads,
         result_chars: None,
     },
@@ -1351,6 +1365,7 @@ fn operate<O: Operate>(tool: Tool, how: O) -> O::Done {
         Tool::ReadTree => how.read(|ops, req| ops.read_tree(req)),
         Tool::Show => how.read(|ops, req| ops.show(req)),
         Tool::Log => how.read(|ops, req| ops.log(req)),
+        Tool::Ancestry => how.read(|ops, req| ops.ancestry(req)),
         Tool::PathHistory => how.read(|ops, req| ops.path_history(req)),
         Tool::Diff => how.read(|ops, req| ops.diff(req)),
         Tool::OpLog => how.read(|ops, req| ops.op_log(req)),
@@ -1655,6 +1670,7 @@ impl Refuse for ReadFileReq {}
 impl Refuse for ReadTreeReq {}
 impl Refuse for ShowReq {}
 impl Refuse for LogReq {}
+impl Refuse for AncestryReq {}
 impl Refuse for PathHistoryReq {}
 impl Refuse for DiffReq {}
 impl Refuse for OpLogReq {}
@@ -2218,6 +2234,7 @@ enum Tool {
     ReadTree,
     Show,
     Log,
+    Ancestry,
     PathHistory,
     Diff,
     OpLog,
@@ -2454,6 +2471,7 @@ mod mcp_ws;
 pub(crate) mod probe {
     use std::cell::RefCell;
 
+    use swarmops_api::AncestryResp;
     use swarmops_api::ResolvedRev;
     use swarmops_api::{
         BlobHasResp, BlobPutResp, ChangesetDetail, CommitResp, DeriveReq, DeriveResp, FileContent,
@@ -2631,6 +2649,10 @@ pub(crate) mod probe {
 
         fn log(&self, _: LogReq) -> Result<LogPage, OpError> {
             self.called("log", "LogReq")
+        }
+
+        fn ancestry(&self, _: AncestryReq) -> Result<AncestryResp, OpError> {
+            self.called("ancestry", "AncestryReq")
         }
 
         fn path_history(&self, _: PathHistoryReq) -> Result<PathHistoryPage, OpError> {

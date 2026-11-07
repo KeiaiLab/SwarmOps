@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::{Map, Value};
 use swarmops_api::VERIFY_MAX_FINDINGS;
+use swarmops_api::{AncestryReq, AncestryResp, MAX_ANCESTRY_LIMIT};
 use swarmops_api::{
     Attribution, ChangeOp, ChangeOut, ChangesetDetail, ChangesetSummary, CommitReq, CommitResp,
     DeriveReq, DeriveResp, Diff, DiffFormat, DiffHunk, DiffLineOut, DiffReq, DiffStatus,
@@ -198,6 +199,12 @@ const MAX_LAND_KEY: usize = 64;
 ///   path, one trailing `/` taken), it lists only the changesets whose delta has an entry at one
 ///   of them or below it, by the chase of each path's last modifier (the derived value
 ///   `LastModified`), and a page is `truncated` exactly when another such changeset follows.
+/// - `ancestry` walks every parent from `from` and `to` (the M16 design §5): `is_ancestor`,
+///   the merge bases (at most 64, `merge_bases_truncated` past them), and a page of at most
+///   `limit` (0 to 1,000, else `E_INVALID_ARG`) of the changesets `to` reaches and `from` does
+///   not, all by generation descending, then id ascending. Its cursor names the page's last
+///   entry and the two full ids: one given for other revisions, or after a ref among them
+///   moved, is `E_INVALID_ARG`.
 /// - `path_history` lists the changesets that changed what `path` holds (a file's content or
 ///   kind, or anything below a directory; one trailing `/` taken), newest first, from `rev`
 ///   (`main` when omitted) or after a `cursor` as `log` does, each with what the path holds after
@@ -767,6 +774,66 @@ fn after_cursor(read: &Snapshot<'_>, cursor: &str) -> Result<Option<ChangesetId>
         .map_err(error::op)?
         .ok_or_else(|| bad("the store holds no such changeset"))?;
     Ok(stored.changeset.parents.first().copied())
+}
+
+/// The separator of an `ancestry` cursor's four fields.
+const ANCESTRY_CURSOR_SEP: char = '.';
+
+/// The cursor of an `ancestry` page whose last entry is `last`, for the walk from `from` to
+/// `to`: `<generation>.<id>.<from>.<to>`, opaque to the caller.
+fn ancestry_cursor(last: &StoredChangeset, from: ChangesetId, to: ChangesetId) -> String {
+    let sep = ANCESTRY_CURSOR_SEP;
+    format!("{}{sep}{}{sep}{from}{sep}{to}", last.generation, last.id)
+}
+
+/// Where an `ancestry` page resumes after `cursor` ([`ancestry_cursor`]): the generation and the
+/// id of the page before's last entry. `E_INVALID_ARG` for a cursor that is none, or one given
+/// for another `from` or `to` than these full ids.
+fn ancestry_after(
+    cursor: &str,
+    from: ChangesetId,
+    to: ChangesetId,
+) -> Result<(u64, ChangesetId), OpError> {
+    let bad = |why: &str| {
+        error::error(
+            ErrorCode::InvalidArg,
+            format!("{cursor:?} is not an ancestry cursor: {why}"),
+        )
+        .with_details(error::details([("cursor", cursor.into())]))
+        .with_hint("pass the previous page's cursor as it was given, or none to start over")
+    };
+    let id = |hex: &str| ObjectId::from_hex(hex).map(ChangesetId::new).ok();
+
+    // 1. Four fields: a generation and three full ids.
+    let fields: Vec<&str> = cursor.split(ANCESTRY_CURSOR_SEP).collect();
+    let [generation, last, of_from, of_to] = fields[..] else {
+        return Err(bad("an ancestry cursor has four fields"));
+    };
+    let (Ok(generation), Some(last), Some(of_from), Some(of_to)) =
+        (generation.parse::<u64>(), id(last), id(of_from), id(of_to))
+    else {
+        return Err(bad("an ancestry cursor is a generation and three full ids"));
+    };
+
+    // 2. Bound to the walk it came from.
+    if (of_from, of_to) != (from, to) {
+        return Err(bad(
+            "it was given for other revisions, or a ref among them moved",
+        ));
+    }
+    Ok((generation, last))
+}
+
+/// `E_INVALID_ARG` unless an `ancestry` `limit` is at most [`MAX_ANCESTRY_LIMIT`].
+fn at_most_ancestry_limit(limit: usize) -> Result<(), OpError> {
+    if limit <= MAX_ANCESTRY_LIMIT {
+        return Ok(());
+    }
+    Err(error::error(
+        ErrorCode::InvalidArg,
+        format!("limit must be at most {MAX_ANCESTRY_LIMIT}"),
+    )
+    .with_details(error::details([("limit", limit.into())])))
 }
 
 /// The paths a `diff` looks at, from its request's `paths`: every path for none, else those at
@@ -1730,6 +1797,36 @@ impl StoreOps for Recording<'_> {
         Ok(out)
     }
 
+    fn ancestry(&self, req: AncestryReq) -> Result<AncestryResp, OpError> {
+        let AncestryReq {
+            from,
+            to,
+            limit,
+            cursor,
+            ..
+        } = req;
+        at_most_ancestry_limit(limit)?;
+
+        // 1. Both revisions in one snapshot, and where the page resumes.
+        let read = self.snapshot()?;
+        let from = self.resolve(&read, &from)?;
+        let to = self.resolve(&read, &to)?;
+        let after = (cursor.as_deref())
+            .map(|cursor| ancestry_after(cursor, from, to))
+            .transpose()?;
+
+        // 2. One walk; the cursor names the page's last entry and the two ids.
+        let found = read.ancestry(from, to, limit, after).map_err(error::op)?;
+        let bases = found.merge_bases.iter().map(ToString::to_string).collect();
+        let mut out = AncestryResp::new(from.to_string(), to.to_string(), found.is_ancestor, bases);
+        out.merge_bases_truncated = found.merge_bases_truncated;
+        out.entries = found.entries.iter().map(summary).collect();
+        out.cursor = (found.entries.last())
+            .filter(|_| found.more)
+            .map(|last| ancestry_cursor(last, from, to));
+        Ok(out)
+    }
+
     fn path_history(&self, req: PathHistoryReq) -> Result<PathHistoryPage, OpError> {
         let PathHistoryReq {
             rev,
@@ -2127,6 +2224,10 @@ impl StoreOps for LocalOps {
 
     fn log(&self, req: LogReq) -> Result<LogPage, OpError> {
         self.recording(&Resolved::default()).log(req)
+    }
+
+    fn ancestry(&self, req: AncestryReq) -> Result<AncestryResp, OpError> {
+        self.recording(&Resolved::default()).ancestry(req)
     }
 
     fn path_history(&self, req: PathHistoryReq) -> Result<PathHistoryPage, OpError> {

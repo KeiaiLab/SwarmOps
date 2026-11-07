@@ -35,6 +35,7 @@ pub use ops::{
     Signatures, StoreOps, TreeEntryOut, TreeListing, UndoReq, UndoResp, VerifyFinding,
     VerifyReport, VerifyReq,
 };
+pub use ops::{AncestryReq, AncestryResp, DEFAULT_ANCESTRY_LIMIT, MAX_ANCESTRY_LIMIT};
 pub use ops::{
     BlobGetReq, BlobGetResp, BlobOut, DEFAULT_BLOB_GET_MAX_BYTES, DEFAULT_CHECK_TIMEOUT_S,
     DEFAULT_WS_STATUS_LIMIT, LandMode, RebaseReq, RebaseResp, RebaseStatus, StatusAfter, WsChange,

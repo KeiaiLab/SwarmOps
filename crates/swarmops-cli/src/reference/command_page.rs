@@ -220,7 +220,7 @@ struct Meta {
 
 /// Every command, in the grammar's order. `meta_matches_the_code` checks each column it can
 /// against the code.
-const META: [Meta; 52] = [
+const META: [Meta; 53] = [
     meta("init", Group::Store, true, false, Returns::Type("RepoInfo")),
     meta(
         "info",
@@ -387,6 +387,13 @@ const META: [Meta; 52] = [
         Returns::Type("ChangesetDetail"),
     ),
     meta("log", Group::Read, false, false, Returns::Type("LogPage")),
+    meta(
+        "ancestry",
+        Group::Read,
+        false,
+        false,
+        Returns::Type("AncestryResp"),
+    ),
     meta(
         "history",
         Group::Read,
@@ -1334,7 +1341,7 @@ fn source(path: &str) -> String {
 }
 
 /// Where each result type is returned: the file, and the function whose signature names it.
-const RETURN_SITES: [(&str, &str, &str); 48] = [
+const RETURN_SITES: [(&str, &str, &str); 49] = [
     ("init", "src/commands/run.rs", "fn init("),
     ("info", "../swarmops-api/src/ops.rs", "fn repo_info("),
     (
@@ -1397,6 +1404,7 @@ const RETURN_SITES: [(&str, &str, &str); 48] = [
     ("ls", "../swarmops-api/src/ops.rs", "fn read_tree("),
     ("show", "../swarmops-api/src/ops.rs", "fn show("),
     ("log", "../swarmops-api/src/ops.rs", "fn log("),
+    ("ancestry", "../swarmops-api/src/ops.rs", "fn ancestry("),
     ("history", "../swarmops-api/src/ops.rs", "fn path_history("),
     ("diff", "../swarmops-api/src/ops.rs", "fn diff("),
     ("ref list", "../swarmops-api/src/ops.rs", "fn ref_list("),

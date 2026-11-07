@@ -39,6 +39,140 @@ expression: s.redact(&all)
       "title": "Advanced",
       "type": "object"
     },
+    "AncestryReq": {
+      "$defs": {
+        "Rev": {
+          "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ancestry`: two revisions' ancestry along every parent, and a page of the changesets the\nsecond reaches and the first does not.",
+      "properties": {
+        "cursor": {
+          "description": "Resume the entries: the previous page's `cursor`. Pass it back exactly as returned, with\nthe same `from` and `to`; do not construct it (cursors are opaque). It holds the full ids\nthe first page resolved: once a ref among `from` and `to` moves, it is `E_INVALID_ARG`,\nand the listing starts over.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "from": {
+          "$ref": "#/$defs/Rev",
+          "description": "The first revision: the one asked to be an ancestor, and the one `entries` leave out."
+        },
+        "limit": {
+          "default": 50,
+          "description": "The most entries to return, 0 to 1,000 (more is `E_INVALID_ARG`): 0 gives\n`is_ancestor` and `merge_bases` alone.",
+          "format": "uint",
+          "maximum": 1000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "to": {
+          "$ref": "#/$defs/Rev",
+          "description": "The second revision: the one whose ancestors `entries` list."
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "title": "AncestryReq",
+      "type": "object"
+    },
+    "AncestryResp": {
+      "$defs": {
+        "ChangesetSummary": {
+          "description": "One changeset of a log.",
+          "properties": {
+            "author_agent": {
+              "description": "The agent that wrote it, as `show` gives `author.agent`.",
+              "type": "string"
+            },
+            "created_at": {
+              "description": "When it was recorded: the committer signature's time, in Unix milliseconds.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "id": {
+              "description": "The changeset's id.",
+              "type": "string"
+            },
+            "parents": {
+              "description": "The parents' ids, mainline parent first.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "title": {
+              "description": "The message's first line.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "parents",
+            "author_agent",
+            "created_at",
+            "title"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ancestry`: the answers, and a page of `from..to`, by generation descending, then id\nascending.",
+      "properties": {
+        "cursor": {
+          "description": "When more entries follow: where the next page continues. Opaque: pass it back as given,\nas the next request's `cursor`, with the same `from` and `to`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "entries": {
+          "description": "The changesets `to` reaches and `from` does not, after the request's cursor.",
+          "items": {
+            "$ref": "#/$defs/ChangesetSummary"
+          },
+          "type": "array"
+        },
+        "from": {
+          "description": "The full id `from` named.",
+          "type": "string"
+        },
+        "is_ancestor": {
+          "description": "Whether `from` is an ancestor of `to` along any parents; a changeset is its own.",
+          "type": "boolean"
+        },
+        "merge_bases": {
+          "description": "The merge bases: the common ancestors that no other common ancestor reaches, at most 64;\n`from` alone when it is an ancestor of `to`, none when the two share no history.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "merge_bases_truncated": {
+          "description": "Whether there are more merge bases than the 64 listed.",
+          "type": "boolean"
+        },
+        "to": {
+          "description": "The full id `to` named.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "to",
+        "is_ancestor",
+        "merge_bases",
+        "merge_bases_truncated",
+        "entries"
+      ],
+      "title": "AncestryResp",
+      "type": "object"
+    },
     "Attribution": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "Whom a changeset is attributed to (operations spec §5).",

@@ -234,6 +234,7 @@ The bounds `swarmops schema` states on a field, beside the integer formats' own.
 
 | Type | Field | Bound |
 | --- | --- | --- |
+| [`AncestryReq`](schema-types.md#ancestryreq) | `limit` | at most 1000 |
 | [`DiffReq`](schema-types.md#diffreq) | `limit` | at least 1 |
 | [`DiffReq`](schema-types.md#diffreq) | `max_bytes` | at least 1 |
 | [`Identity`](schema-types.md#identity) | `agent` | at most 255 characters; matches `^[a-z0-9-]+/[A-Za-z0-9_-][A-Za-z0-9._-]*$` |

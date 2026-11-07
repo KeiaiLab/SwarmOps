@@ -2,13 +2,15 @@
 
 # Schema types
 
-The 162 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
+The 164 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
 
 ## Index
 
 | Type | Kind | Description |
 | --- | --- | --- |
 | [`Advanced`](#advanced) | object | `commit` with `advance`: the ref's move, made in the commit's own transaction. |
+| [`AncestryReq`](#ancestryreq) | object | `ancestry`: two revisions' ancestry along every parent, and a page of the changesets the second reaches and the first does not. |
+| [`AncestryResp`](#ancestryresp) | object | `ancestry`: the answers, and a page of `from..to`, by generation descending, then id ascending. |
 | [`Attribution`](#attribution) | object | Whom a changeset is attributed to. |
 | [`BlobGetReq`](#blobgetreq) | object | `blob_get` (M5): blobs by id, for a client that writes them out (a workspace's materialisation). |
 | [`BlobGetResp`](#blobgetresp) | object | `blob_get`: the blobs found, in the order asked, and the ids the store holds no blob under. |
@@ -183,6 +185,35 @@ Kind: object. `swarmops schema Advanced` prints its JSON Schema.
 | `name` | `string` | yes | The ref. |
 | `new` | `string` | yes | What it holds now: the changeset. |
 | `old` | `string` or `null` | no | What the ref held before: the changeset's parent; omitted for a root commit, whose move created the ref. |
+
+## AncestryReq
+
+`ancestry`: two revisions' ancestry along every parent, and a page of the changesets the second reaches and the first does not.
+
+Kind: object. `swarmops schema AncestryReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `cursor` | `string` or `null` | no | Resume the entries: the previous page's `cursor`. Pass it back exactly as returned, with the same `from` and `to`; do not construct it (cursors are opaque). It holds the full ids the first page resolved: once a ref among `from` and `to` moves, it is `E_INVALID_ARG`, and the listing starts over. |
+| `from` | [`Rev`](#rev) | yes | The first revision: the one asked to be an ancestor, and the one `entries` leave out. |
+| `limit` | `integer` (uint) | no | The most entries to return, 0 to 1,000 (more is `E_INVALID_ARG`): 0 gives `is_ancestor` and `merge_bases` alone. Default: `50`. At most 1000. |
+| `to` | [`Rev`](#rev) | yes | The second revision: the one whose ancestors `entries` list. |
+
+## AncestryResp
+
+`ancestry`: the answers, and a page of `from..to`, by generation descending, then id ascending.
+
+Kind: object. `swarmops schema AncestryResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `cursor` | `string` or `null` | no | When more entries follow: where the next page continues. Opaque: pass it back as given, as the next request's `cursor`, with the same `from` and `to`. |
+| `entries` | array of [`ChangesetSummary`](#changesetsummary) | yes | The changesets `to` reaches and `from` does not, after the request's cursor. |
+| `from` | `string` | yes | The full id `from` named. |
+| `is_ancestor` | `boolean` | yes | Whether `from` is an ancestor of `to` along any parents; a changeset is its own. |
+| `merge_bases` | array of `string` | yes | The merge bases: the common ancestors that no other common ancestor reaches, at most 64; `from` alone when it is an ancestor of `to`, none when the two share no history. |
+| `merge_bases_truncated` | `boolean` | yes | Whether there are more merge bases than the 64 listed. |
+| `to` | `string` | yes | The full id `to` named. |
 
 ## Attribution
 

@@ -520,7 +520,7 @@ impl<O: ObjectStore> RepoRead<'_, O> {
 
     /// The index record of changeset `id`, where a walk starts: [`RepoError::NotFound`] if the
     /// snapshot does not hold it.
-    fn walk_start(&self, id: ChangesetId) -> Result<ChangesetMeta, RepoError> {
+    pub(crate) fn walk_start(&self, id: ChangesetId) -> Result<ChangesetMeta, RepoError> {
         self.meta
             .changeset(id)?
             .ok_or_else(|| RepoError::NotFound(id.to_string()))
@@ -528,7 +528,7 @@ impl<O: ObjectStore> RepoRead<'_, O> {
 
     /// The index record of changeset `id`, a first-parent ancestor of a changeset the snapshot
     /// holds: one it lacks is a damaged index.
-    fn walk_record(&self, id: ChangesetId) -> Result<ChangesetMeta, RepoError> {
+    pub(crate) fn walk_record(&self, id: ChangesetId) -> Result<ChangesetMeta, RepoError> {
         Ok(self
             .meta
             .changeset(id)?
@@ -576,7 +576,7 @@ impl<O: ObjectStore> RepoRead<'_, O> {
 }
 
 /// The error of an index record whose generation is not 1 + the largest of its parents'.
-fn wrong_generation() -> RepoError {
+pub(crate) fn wrong_generation() -> RepoError {
     StoreError::IndexCorrupt {
         what: "a changeset's generation is not 1 + the largest of its parents'",
     }

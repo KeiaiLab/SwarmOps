@@ -274,6 +274,7 @@ Any command that opens a store may also fail with a store error, such as [`E_NOT
 - [`swarmops ls`](ls.md)
 - [`swarmops show`](show.md)
 - [`swarmops log`](log.md)
+- [`swarmops ancestry`](ancestry.md)
 - [`swarmops history`](history.md)
 - [CLI reference](../cli.md)
 - [Error codes](../errors.md)

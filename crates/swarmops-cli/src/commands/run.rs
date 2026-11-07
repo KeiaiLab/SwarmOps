@@ -19,6 +19,7 @@ use base64::engine::general_purpose::STANDARD;
 use camino::Utf8Path;
 use serde::Serialize;
 use serde_json::{Map, Value};
+use swarmops_api::AncestryReq;
 use swarmops_api::LandReq;
 use swarmops_api::RebaseReq;
 use swarmops_api::ResolutionsInput;
@@ -194,6 +195,12 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
             cursor,
             paths,
         } => log(ctx, op, rev, limit, cursor, paths),
+        Command::Ancestry {
+            from,
+            to,
+            limit,
+            cursor,
+        } => ancestry(ctx, op, from, to, limit, cursor),
         Command::History {
             target,
             limit,
@@ -275,6 +282,22 @@ fn log(
     req.cursor = cursor;
     req.paths = paths;
     ctx.on_store(op, || Ok(req), |ops, req| ops.log(req))
+}
+
+/// Runs `ancestry`, which names operation `op`: the ancestry of `from` and `to`, and `limit`
+/// changesets of `from..to`, after `cursor`.
+fn ancestry(
+    ctx: &Ctx<'_>,
+    op: &'static str,
+    from: String,
+    to: String,
+    limit: usize,
+    cursor: Option<String>,
+) -> Printed {
+    let mut req = AncestryReq::new(from, to);
+    req.limit = limit;
+    req.cursor = cursor;
+    ctx.on_store(op, || Ok(req), |ops, req| ops.ancestry(req))
 }
 
 /// Runs `history`, which names operation `op`: `limit` changesets of the history of `target`'s

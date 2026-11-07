@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use camino::Utf8Path;
+use swarmops_api::{AncestryReq, AncestryResp};
 use swarmops_api::{
     BlobGetReq, BlobGetResp, BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp, ChangesetDetail,
     CommitReq, CommitResp, DeriveReq, DeriveResp, Diff, DiffReq, ErrorCode, FileContent, Identity,
@@ -148,6 +149,10 @@ impl StoreOps for Hooked<'_> {
 
     fn log(&self, req: LogReq) -> Result<LogPage, OpError> {
         self.inner.log(req)
+    }
+
+    fn ancestry(&self, req: AncestryReq) -> Result<AncestryResp, OpError> {
+        self.inner.ancestry(req)
     }
 
     fn path_history(&self, req: PathHistoryReq) -> Result<PathHistoryPage, OpError> {

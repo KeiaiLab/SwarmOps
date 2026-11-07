@@ -52,3 +52,9 @@ harness = false
 [[bench]]
 name = "commit_latency"
 harness = false
+
+# The all-parent ancestry read on merge-rich histories of 20k and 200k changesets (the M16
+# design §5).
+[[bench]]
+name = "ancestry"
+harness = false

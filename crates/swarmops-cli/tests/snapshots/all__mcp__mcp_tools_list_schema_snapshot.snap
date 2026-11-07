@@ -281,6 +281,52 @@ expression: listed
         "openWorldHint": false,
         "readOnlyHint": true
       },
+      "description": "Along every parent, a merge's other parents too: whether from is an ancestor of to, their merge bases, and the changesets to reaches and from does not, newest generation first; pass a limit of 100 or less and page on with the cursor and the same from and to, since clients limit long tool results. limit 0 gives the two answers alone.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "`ancestry`: two revisions' ancestry along every parent, and a page of the changesets the\nsecond reaches and the first does not.",
+        "properties": {
+          "cursor": {
+            "description": "Resume the entries: the previous page's `cursor`. Pass it back exactly as returned, with\nthe same `from` and `to`; do not construct it (cursors are opaque). It holds the full ids\nthe first page resolved: once a ref among `from` and `to` moves, it is `E_INVALID_ARG`,\nand the listing starts over.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "from": {
+            "description": "The first revision: the one asked to be an ancestor, and the one `entries` leave out. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+            "type": "string"
+          },
+          "limit": {
+            "default": 50,
+            "description": "The most entries to return, 0 to 1,000 (more is `E_INVALID_ARG`): 0 gives\n`is_ancestor` and `merge_bases` alone.",
+            "format": "uint",
+            "maximum": 1000,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "to": {
+            "description": "The second revision: the one whose ancestors `entries` list. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "from",
+          "to"
+        ],
+        "title": "AncestryReq",
+        "type": "object"
+      },
+      "name": "ancestry",
+      "title": "Compare two revisions' ancestry"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
       "description": "The changesets that changed a file, or anything below a directory, newest first along first parents from main unless rev says otherwise, each with what the path holds after it (the CLI command is history); pass a limit of 100 or less and page on with the cursor, since clients limit long tool results.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

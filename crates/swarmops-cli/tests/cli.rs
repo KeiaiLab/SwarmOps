@@ -2582,6 +2582,59 @@ fn op_log_pages_with_before() {
     assert_eq!((zero.exit, zero.code()), (2, "E_INVALID_ARG"));
 }
 
+/// `ancestry` answers along every parent and pages `from..to` newest first: `-n` caps a page,
+/// `--cursor` resumes it for the same two revisions, and a limit over 1,000 is refused.
+#[test]
+fn ancestry_pages_between_two_revs() {
+    let mut s = Session::new();
+    let store = s.store();
+    s.run(&["init", &store]);
+    let c1 = s.commit(&store, None, "a.txt", "1\n", "c1");
+    let c2 = s.commit(&store, Some(&c1), "a.txt", "2\n", "c2");
+    let c3 = s.commit(&store, Some(&c2), "a.txt", "3\n", "c3");
+    let b = s.commit(&store, Some(&c1), "b.txt", "b\n", "b");
+    let mut ancestry = |args: &[&str]| {
+        let mut line = vec!["--repo", store.as_str(), "ancestry"];
+        line.extend_from_slice(args);
+        s.run(&line)
+    };
+    let entries = |reply: &Reply| -> Vec<String> {
+        let entries = reply["result"]["entries"].as_array().unwrap();
+        entries
+            .iter()
+            .map(|e| e["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    // 1. c1..c3, a changeset a page, then the rest after the cursor.
+    let first = ancestry(&[&c1, &c3, "-n", "1"]);
+    assert_eq!(
+        (first.exit, &first["op"]),
+        (0, &json!("ancestry")),
+        "{}",
+        first.json
+    );
+    assert_eq!(first["result"]["is_ancestor"], true);
+    assert_eq!(first["result"]["merge_bases"], json!([c1]));
+    assert_eq!(entries(&first), std::slice::from_ref(&c3));
+    let cursor = first["result"]["cursor"].as_str().unwrap().to_owned();
+    let rest = ancestry(&[&c1, &c3, "-n", "1", "--cursor", &cursor]);
+    assert_eq!(entries(&rest), std::slice::from_ref(&c2));
+    assert!(rest["result"].get("cursor").is_none(), "{}", rest.json);
+
+    // 2. A branch beside main: not an ancestor, one merge base, itself listed.
+    let beside = ancestry(&[&c3, &b]);
+    assert_eq!(beside["result"]["is_ancestor"], false);
+    assert_eq!(beside["result"]["merge_bases"], json!([c1]));
+    assert_eq!(entries(&beside), [b]);
+
+    // 3. The cursor for other revisions, and a page over 1,000, are refused.
+    let other = ancestry(&[&c1, &c2, "--cursor", &cursor]);
+    assert_eq!((other.exit, other.code()), (2, "E_INVALID_ARG"));
+    let over = ancestry(&[&c1, &c3, "-n", "1001"]);
+    assert_eq!((over.exit, over.code()), (2, "E_INVALID_ARG"));
+}
+
 /// `op log` waits for the store's lock as a write does: behind a lock held for the whole of the
 /// store's 10 s timeout it is `E_BUSY` (exit 4, retryable), never a lock-free listing.
 #[test]

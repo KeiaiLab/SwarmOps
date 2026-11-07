@@ -51,6 +51,7 @@ Store content as a blob for a commit to name by its id, or ask which blobs the s
 - [`swarmops ls`](commands/ls.md): List one directory at a revision (the root without a PATH), and with --depth the directories below it.
 - [`swarmops show`](commands/show.md): Show one changeset.
 - [`swarmops log`](commands/log.md): List history along first parents, newest first.
+- [`swarmops ancestry`](commands/ancestry.md): Compare two revisions' ancestry along every parent: whether FROM is an ancestor of TO, their merge bases, and a page of the changesets TO reaches and FROM does not.
 - [`swarmops history`](commands/history.md): List the changesets that changed a path, newest first, along first parents.
 - [`swarmops diff`](commands/diff.md): List the files that differ between two revisions, a page at a time.
 

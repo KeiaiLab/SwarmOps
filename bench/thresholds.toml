@@ -708,3 +708,21 @@ reason = "spread 33.5 % between the two baseline runs"
 
 [skip."remerge/incremental/10x100"]
 reason = "spread 14.5 % between the two baseline runs"
+
+[skip."ancestry/20k/is_ancestor_far"]
+reason = "new in M16 (task S5): no two quiet baseline runs yet; the heavy lock was busy when the bench was written"
+
+[skip."ancestry/20k/merge_base_100"]
+reason = "new in M16 (task S5): no two quiet baseline runs yet; the heavy lock was busy when the bench was written"
+
+[skip."ancestry/20k/between_page_50"]
+reason = "new in M16 (task S5): no two quiet baseline runs yet; the heavy lock was busy when the bench was written"
+
+[skip."ancestry/200k/is_ancestor_far"]
+reason = "new in M16 (task S5): no two quiet baseline runs yet; the heavy lock was busy when the bench was written"
+
+[skip."ancestry/200k/merge_base_100"]
+reason = "new in M16 (task S5): no two quiet baseline runs yet; the heavy lock was busy when the bench was written"
+
+[skip."ancestry/200k/between_page_50"]
+reason = "new in M16 (task S5): no two quiet baseline runs yet; the heavy lock was busy when the bench was written"

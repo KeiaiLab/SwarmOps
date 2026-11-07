@@ -44,6 +44,9 @@ impl StoreOps for Older {
     fn log(&self, _: LogReq) -> Result<LogPage, OpError> {
         unreachable!("not called")
     }
+    fn ancestry(&self, _: AncestryReq) -> Result<AncestryResp, OpError> {
+        unreachable!("not called")
+    }
     fn path_history(&self, _: PathHistoryReq) -> Result<PathHistoryPage, OpError> {
         unreachable!("not called")
     }

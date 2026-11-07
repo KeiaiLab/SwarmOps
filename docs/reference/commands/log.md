@@ -226,6 +226,7 @@ Any command that opens a store may also fail with a store error, such as [`E_NOT
 - [`swarmops cat`](cat.md)
 - [`swarmops ls`](ls.md)
 - [`swarmops show`](show.md)
+- [`swarmops ancestry`](ancestry.md)
 - [`swarmops history`](history.md)
 - [`swarmops diff`](diff.md)
 - [CLI reference](../cli.md)

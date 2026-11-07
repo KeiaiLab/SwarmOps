@@ -13,6 +13,7 @@
 use std::path::Path;
 
 use serde_json::Value;
+use swarmops_api::{AncestryReq, AncestryResp};
 use swarmops_api::{
     BlobGetReq, BlobGetResp, BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp, ChangesetDetail,
     CommitReq, CommitResp, ContentInput, DeriveReq, DeriveResp, Diff, DiffReq, ErrorCode,
@@ -220,6 +221,10 @@ impl<O: StoreOps> StoreOps for ServerOps<O> {
         self.pass(self.inner.log(req))
     }
 
+    fn ancestry(&self, req: AncestryReq) -> Result<AncestryResp, OpError> {
+        self.pass(self.inner.ancestry(req))
+    }
+
     fn path_history(&self, req: PathHistoryReq) -> Result<PathHistoryPage, OpError> {
         self.pass(self.inner.path_history(req))
     }
@@ -340,6 +345,9 @@ mod tests {
         }
         fn log(&self, _: LogReq) -> Result<LogPage, OpError> {
             self.call("log")
+        }
+        fn ancestry(&self, _: AncestryReq) -> Result<AncestryResp, OpError> {
+            self.call("ancestry")
         }
         fn path_history(&self, _: PathHistoryReq) -> Result<PathHistoryPage, OpError> {
             self.call("path_history")
@@ -547,6 +555,8 @@ mod tests {
         );
         assert_passed(&s, "show", s.show(ShowReq::new("main")).map(drop));
         assert_passed(&s, "log", s.log(LogReq::default()).map(drop));
+        let ancestry = AncestryReq::new("main", "main");
+        assert_passed(&s, "ancestry", s.ancestry(ancestry).map(drop));
         let history = PathHistoryReq::new("a");
         assert_passed(&s, "path_history", s.path_history(history).map(drop));
         assert_passed(&s, "diff", s.diff(DiffReq::new("main", "main")).map(drop));

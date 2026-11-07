@@ -16,6 +16,7 @@ In `tools/list`'s order.
 | [`read_tree`](read-tree.md) | List a directory | [`swarmops ls`](../commands/ls.md) | no | no |
 | [`show`](show.md) | Show a changeset | [`swarmops show`](../commands/show.md) | no | no |
 | [`log`](log.md) | List history | [`swarmops log`](../commands/log.md) | no | no |
+| [`ancestry`](ancestry.md) | Compare two revisions' ancestry | [`swarmops ancestry`](../commands/ancestry.md) | no | no |
 | [`path_history`](path-history.md) | List a path's history | [`swarmops history`](../commands/history.md) | no | no |
 | [`diff`](diff.md) | Diff two revisions | [`swarmops diff`](../commands/diff.md) | no | no |
 | [`op_log`](op-log.md) | List operations | [`swarmops op log`](../commands/op-log.md) | no | no |
@@ -38,7 +39,7 @@ In `tools/list`'s order.
 | [`sync`](sync.md) | Sync with a git remote | [`swarmops sync`](../commands/sync.md) | lands onto a git remote's head, moves main and pushes | yes |
 | [`sync_status`](sync-status.md) | Show sync status | [`swarmops sync status`](../commands/sync-status.md) | no | no |
 
-These commands have no tool: [`swarmops init`](../commands/init.md), [`swarmops whoami`](../commands/whoami.md), [`swarmops schema`](../commands/schema.md), [`swarmops blob get`](../commands/blob-get.md), [`swarmops ws delete`](../commands/ws-delete.md), [`swarmops ws hook`](../commands/ws-hook.md), [`swarmops git import`](../commands/git-import.md), [`swarmops git export`](../commands/git-export.md), [`swarmops clone`](../commands/clone.md), [`swarmops remote add`](../commands/remote-add.md), [`swarmops remote remove`](../commands/remote-remove.md), [`swarmops mcp`](../commands/mcp.md), [`swarmops serve`](../commands/serve.md), [`swarmops derive`](../commands/derive.md). An operator or a script runs them as commands; `derive` runs beside the store as maintenance, deriving values ahead of readers.
+These commands have no tool: [`swarmops init`](../commands/init.md), [`swarmops whoami`](../commands/whoami.md), [`swarmops schema`](../commands/schema.md), [`swarmops blob get`](../commands/blob-get.md), [`swarmops ws delete`](../commands/ws-delete.md), [`swarmops ws hook`](../commands/ws-hook.md), [`swarmops git import`](../commands/git-import.md), [`swarmops git export`](../commands/git-export.md), [`swarmops clone`](../commands/clone.md), [`swarmops remote add`](../commands/remote-add.md), [`swarmops remote remove`](../commands/remote-remove.md), [`swarmops mcp`](../commands/mcp.md), [`swarmops serve`](../commands/serve.md), [`swarmops derive`](../commands/derive.md). An operator or a script runs them as commands; `derive` only fills ahead of time a cache that each read fills itself, so it changes no result an agent reads.
 
 ## Protocol versions
 
@@ -105,7 +106,7 @@ Both are the server's, never a call's; no tool argument names either.
 - The store is `--repo`, else `SWARMOPS_REPO`, opened anew for each call, so that a call sees what other processes committed. A store that is not there is each call's `E_NOT_A_REPO`, and the server serves on.
 - The identity is `--as`, else `SWARMOPS_AGENT`, with `SWARMOPS_RUN_ID`, as for the CLI. Every change is recorded for it.
 - These tools need it, and without one fail with `E_IDENTITY_REQUIRED`: `ref_set`, `ref_delete`, `undo`, `commit`, `land`, `rebase`, `blob_put`, `sync`.
-- These need none: `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `path_history`, `diff`, `op_log`, `ref_list`, `blob_has`, `verify`, `gc`, `repair`, `upgrade`, `remote_list`, `fetch`, `push`, `sync_status`.
+- These need none: `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `ancestry`, `path_history`, `diff`, `op_log`, `ref_list`, `blob_has`, `verify`, `gc`, `repair`, `upgrade`, `remote_list`, `fetch`, `push`, `sync_status`.
 - The output flags (`--json`, `--human`, `--pretty`) do not apply.
 
 ## Result size limits
