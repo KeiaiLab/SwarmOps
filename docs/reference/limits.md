@@ -260,7 +260,7 @@ Not part of the contract: these tune the implementation, or bound the store's la
 
 | Value | Amount | Constant | What it does |
 | --- | --- | --- | --- |
-| Writer lock wait | 10 s | `swarmops_store::meta::store::DEFAULT_LOCK_TIMEOUT` | How long a write waits for the store's lock; a write that waits it out fails with `E_BUSY`. |
+| Writer lock wait | 10 s | `swarmops_store::meta::store::DEFAULT_LOCK_TIMEOUT` | How long a write waits for the store's lock; a write that waits it out with its request still unclaimed in the write queue fails with `E_BUSY`, and nothing of it is recorded. A write that the lock's holder claimed into its batch waits past it for its answer. |
 | Index sync threads | 5 threads | `swarmops_store::meta::store::DEFAULT_PARALLELISM` | How many threads a write transaction syncs the five index files from. |
 | Import frame | 8,192 changesets | `swarmops_git::import::DEFAULT_FRAME_CHANGESETS` | How many changesets a journal frame of `git import` holds at most. |
 | Import step budget | 100 ms | `swarmops_git::import::IMPORT_STEP_BUDGET` | How long one frame's commit of `git import`, and of the objects-only import of a fetch or a `serve` push, may hold the writer lock: each frame after the first is sized from the last one's cost to take about this long. |
@@ -282,6 +282,11 @@ Not part of the contract: these tune the implementation, or bound the store's la
 | Serve refresh attempts | 8 attempts | `swarmops_ops::serve::refresh::SERVE_REFRESH_ATTEMPTS` | How many times `serve` reads a store ref again when the move of its export in `serve.git` met another writer's, before the connection is refused. |
 | Serve pack cache | 4,294,967,296 bytes (4 GiB) | `swarmops_ops::serve::MAX_PACK_CACHE_BYTES` | The packs `serve` keeps together in a store's `git/serve-cache/`, one for each request of a fetch it answered: past it the least recently used are removed, and a larger pack is sent and not kept. |
 | Serve records | 67,108,864 bytes (64 MiB) | `swarmops_ops::serve::MAX_SERVE_RECORDS_BYTES` | The records `serve` appends to a store's `git/serve-records.jsonl`, a line per request it served: past it the file becomes `serve-records.1.jsonl`, replacing the one older file. |
+| Batch members | 32 members | `swarmops_store::meta::queue::MAX_BATCH` | The most writes the lock's holder commits in one batch, its own included, a journal frame each, with one sync of the journal. |
+| Batch planning budget | 50 ms | `swarmops_store::meta::queue::PLAN_BUDGET` | How long the lock's holder plans the writes waiting in the queue, from the end of its recovery: a write it has not planned by then waits for the next holder. |
+| Queue request | 65,536 bytes (64 KiB) | `swarmops_store::meta::queue::REQUEST_MAX` | The longest request a write leaves in `meta/queue/` while it waits for the lock; a longer one waits for the lock alone. |
+| Queue answer | 1,048,576 bytes (1 MiB) | `swarmops_store::meta::queue::ANSWER_MAX` | The longest answer the lock's holder writes to a write it committed for it; a write whose answer would be longer is declined, and runs alone. |
+| Answer poll | 1 ms | `swarmops_store::meta::queue::ANSWER_POLL` | How often a write waiting in the queue looks for its answer. |
 
 ## Details
 

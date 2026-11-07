@@ -6,8 +6,10 @@
 //! which checks the order of its writes (the test kit's runner sets it for every run),
 //! `SWARMOPS_TEST_NOW=<unix seconds>`, which fixes the time it signs changesets at, and
 //! `SWARMOPS_TEST_GITHUB_HOSTS=<host[:port],…>`, which makes a push count those hosts as
-//! GitHub's and check GitHub's file limits there, and `SWARMOPS_TEST_SERVE_CACHE=bound=<bytes>`
-//! or `=no-reach-check`, which bounds `serve`'s pack cache or skips its reachability check.
+//! GitHub's and check GitHub's file limits there, `SWARMOPS_TEST_SERVE_CACHE=bound=<bytes>`
+//! or `=no-reach-check`, which bounds `serve`'s pack cache or skips its reachability check, and
+//! `SWARMOPS_TEST_LEAD_WAIT=<n>`, which makes a writer that leads the write queue wait for n other
+//! requests (and panics on a value that is no number).
 //!
 //! The test exists only in a build without the feature, as `cargo build --release` is. `just
 //! check` and `scripts/check.sh` run it in a release build and require it to run
@@ -31,7 +33,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use support::{BIN, SO, Store, agent, run_bin};
 use swarmops_ops::NOW_ENV;
-use swarmops_store::{CRASH_AT_ENV, FAIL_AT_ENV, FS_CALLS_ENV};
+use swarmops_store::{CRASH_AT_ENV, FAIL_AT_ENV, FS_CALLS_ENV, LEAD_WAIT_ENV};
 
 /// The time the commit asks to be signed at: September 2001, in Unix seconds.
 const NOW: u64 = 1_000_000_000;
@@ -48,14 +50,16 @@ fn a_build_without_the_feature_ignores_the_test_hooks() {
             "{bin}: the crash hook is ignored: {init}"
         );
 
-        // SWARMOPS_TEST_FS_CALLS, SWARMOPS_TEST_FAIL_AT and SWARMOPS_TEST_NOW, on a commit: the
-        // failure hook would fail its first call and every mutating one after it.
+        // SWARMOPS_TEST_FS_CALLS, SWARMOPS_TEST_FAIL_AT, SWARMOPS_TEST_NOW and
+        // SWARMOPS_TEST_LEAD_WAIT, on a commit: the failure hook would fail its first call and
+        // every mutating one after it, and the lead-wait hook would panic on its value.
         let calls = store.tmp().join("fs-calls");
         let now = NOW.to_string();
         let env = [
             (FS_CALLS_ENV, calls.to_str().unwrap()),
             (FAIL_AT_ENV, "1:persistent"),
             (NOW_ENV, now.as_str()),
+            (LEAD_WAIT_ENV, "not-a-number"),
         ];
         let changes = store.changes("hooks", "hooks.txt", "the test hooks\n");
         let before = SystemTime::now()

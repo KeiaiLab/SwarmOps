@@ -18,6 +18,9 @@
 //!
 //! A fifth, `SWARMOPS_TEST_NOW=<unix seconds>`, has `swarmops-ops` sign changesets at that time:
 //! a commit then writes the same objects in every run, so call k is the same call in every run.
+//! A sixth, `SWARMOPS_TEST_LEAD_WAIT=<n>`, has a writer that leads the write queue wait for `n`
+//! other requests before it plans (see [`LEAD_WAIT_ENV`]); [`FsOps::crash_point`] is where a
+//! `CrashAtFs` may end a queue step.
 //!
 //! The hooks act only in a build with the `test-hooks` feature (this crate's, which the
 //! `test-hooks` features of `swarmops-repo`, `swarmops-ops`, `swarmops-cli` and
@@ -104,6 +107,13 @@ pub const FAIL_AT_ENV: &str = "SWARMOPS_TEST_FAIL_AT";
 /// call (an `OrderCheckFs`; see [`HookedFs::from_env`]) and panics at the first call that
 /// breaks one. Any other value leaves the check off.
 pub const ORDER_CHECK_ENV: &str = "SWARMOPS_TEST_ORDER_CHECK";
+
+/// Test hook, in a build with the `test-hooks` feature: with `SWARMOPS_TEST_LEAD_WAIT=<n>` set,
+/// a writer that leads the write queue of `meta/queue/` (`MetaStore::take_turn` with
+/// `Serve::Queue`) waits up to 10 s for `n` other requests to be pending before it plans any
+/// (the M18 D2 design §3.6), so that a test gathers a batch. Read on every such lead, an
+/// uncontended one included; a value that is not a number panics, as a mistake in the test.
+pub const LEAD_WAIT_ENV: &str = "SWARMOPS_TEST_LEAD_WAIT";
 
 /// What [`FsOps::link_noclobber`] found at its target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -339,6 +349,12 @@ pub trait FsOps: Send + Sync {
     /// file or the new one), then flushes `to`'s directory to stable storage, making the new
     /// name durable. `from`'s data must be durable already, or `to` may lose it in a crash.
     fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()>;
+
+    /// A point at which a crash test may end the process: the store calls it before each step
+    /// of the write queue of `meta/queue/` (the M18 D2 design §3.5), whose files it handles
+    /// without this seam. It does nothing and cannot fail; `CrashAtFs` counts it as a call, and
+    /// every wrapper forwards it.
+    fn crash_point(&self) {}
 }
 
 /// The real filesystem.
@@ -706,6 +722,10 @@ impl<F: FsOps + ?Sized> FsOps for Arc<F> {
     fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
         (**self).rename_durable(from, to)
     }
+
+    fn crash_point(&self) {
+        (**self).crash_point();
+    }
 }
 
 /// Operations chosen at run time: the test hooks stack their wrappers so.
@@ -764,6 +784,10 @@ impl<F: FsOps + ?Sized> FsOps for Box<F> {
 
     fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
         (**self).rename_durable(from, to)
+    }
+
+    fn crash_point(&self) {
+        (**self).crash_point();
     }
 }
 
@@ -994,6 +1018,11 @@ impl<F: FsOps> FsOps for CrashAtFs<F> {
     fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
         self.tick();
         self.inner.rename_durable(from, to)
+    }
+
+    fn crash_point(&self) {
+        self.tick();
+        self.inner.crash_point();
     }
 }
 
@@ -1256,6 +1285,10 @@ impl<F: FsOps> FsOps for FailAtFs<F> {
         self.call(FsMethod::RenameDurable, to, || {
             self.inner.rename_durable(from, to)
         })
+    }
+
+    fn crash_point(&self) {
+        self.inner.crash_point();
     }
 }
 

@@ -675,7 +675,7 @@ static DEFAULTS: [DefaultRow; 13] = [
 
 /// Values that tune the implementation, or bound the store's layout where no request reaches:
 /// no option sets them, and they are not part of the contract.
-static INTERNAL: [Limit; 22] = [
+static INTERNAL: [Limit; 27] = [
     internal_value(
         "Writer lock wait",
         declared(
@@ -685,8 +685,10 @@ static INTERNAL: [Limit; 22] = [
             || 10,
         ),
         Unit::Seconds,
-        "How long a write waits for the store's lock; a write that waits it out fails \
-             with `E_BUSY`.",
+        "How long a write waits for the store's lock; a write that waits it out with its \
+             request still unclaimed in the write queue fails with `E_BUSY`, and nothing of it \
+             is recorded. A write that the lock's holder claimed into its batch waits past it \
+             for its answer.",
     ),
     internal_value(
         "Index sync threads",
@@ -942,6 +944,65 @@ static INTERNAL: [Limit; 22] = [
         "The records `serve` appends to a store's `git/serve-records.jsonl`, a line per \
              request it served: past it the file becomes `serve-records.1.jsonl`, replacing \
              the one older file.",
+    ),
+    internal_value(
+        "Batch members",
+        code(
+            "swarmops_store::meta::queue::MAX_BATCH",
+            "crates/swarmops-store/src/meta/queue.rs",
+            "pub const MAX_BATCH: usize = 32;",
+            || bytes::to_u64(swarmops_store::MAX_BATCH),
+        ),
+        Unit::Count("members"),
+        "The most writes the lock's holder commits in one batch, its own included, a journal \
+             frame each, with one sync of the journal.",
+    ),
+    internal_value(
+        "Batch planning budget",
+        code(
+            "swarmops_store::meta::queue::PLAN_BUDGET",
+            "crates/swarmops-store/src/meta/queue.rs",
+            "pub const PLAN_BUDGET: Duration = Duration::from_millis(50);",
+            || u64::try_from(swarmops_store::PLAN_BUDGET.as_millis()).unwrap_or(u64::MAX),
+        ),
+        Unit::Millis,
+        "How long the lock's holder plans the writes waiting in the queue, from the end of \
+             its recovery: a write it has not planned by then waits for the next holder.",
+    ),
+    internal_value(
+        "Queue request",
+        code(
+            "swarmops_store::meta::queue::REQUEST_MAX",
+            "crates/swarmops-store/src/meta/queue.rs",
+            "pub const REQUEST_MAX: usize = 64 * 1024;",
+            || bytes::to_u64(swarmops_store::REQUEST_MAX),
+        ),
+        Unit::Bytes,
+        "The longest request a write leaves in `meta/queue/` while it waits for the lock; a \
+             longer one waits for the lock alone.",
+    ),
+    internal_value(
+        "Queue answer",
+        code(
+            "swarmops_store::meta::queue::ANSWER_MAX",
+            "crates/swarmops-store/src/meta/queue.rs",
+            "pub const ANSWER_MAX: usize = 1024 * 1024;",
+            || bytes::to_u64(swarmops_store::ANSWER_MAX),
+        ),
+        Unit::Bytes,
+        "The longest answer the lock's holder writes to a write it committed for it; a write \
+             whose answer would be longer is declined, and runs alone.",
+    ),
+    internal_value(
+        "Answer poll",
+        code(
+            "swarmops_store::meta::queue::ANSWER_POLL",
+            "crates/swarmops-store/src/meta/queue.rs",
+            "pub const ANSWER_POLL: Duration = Duration::from_millis(1);",
+            || u64::try_from(swarmops_store::ANSWER_POLL.as_millis()).unwrap_or(u64::MAX),
+        ),
+        Unit::Millis,
+        "How often a write waiting in the queue looks for its answer.",
     ),
 ];
 

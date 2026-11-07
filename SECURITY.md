@@ -76,7 +76,8 @@ filesystem permissions are the access boundary. Within that model, these are vul
   file's length) before a byte of them is read, and again as each content is converted, in list
   order, for a file that grows meanwhile.
 - **Test hooks in a release build.** The `SWARMOPS_TEST_*` variables make a process crash or
-  fail at a chosen filesystem call, count its calls, or pin its clock. A build without the
+  fail at a chosen filesystem call, count its calls, pin its clock, or hold the writer lock
+  while it waits for other writers' requests. A build without the
   `test-hooks` feature, as `cargo build --release` is, must ignore them; one that honours them
   is a vulnerability.
 - **The git import (M3).** Importing a git repository brings in content and paths that

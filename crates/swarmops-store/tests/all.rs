@@ -19,6 +19,7 @@ mod layout;
 mod lock;
 mod meta;
 mod objects;
+mod queue;
 mod refs2;
 // Every test of it builds its store with the sweeps' harness, which needs the hooks.
 #[cfg(feature = "test-hooks")]

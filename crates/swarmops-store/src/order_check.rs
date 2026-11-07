@@ -1296,6 +1296,10 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
         }
         result
     }
+
+    fn crash_point(&self) {
+        self.inner.crash_point();
+    }
 }
 
 /// W4 after a view file of `meta` was renamed into place: the four files' entry counts must

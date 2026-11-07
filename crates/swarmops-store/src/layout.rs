@@ -88,6 +88,13 @@ impl Layout {
         self.meta_path("lock")
     }
 
+    /// `<root>/meta/queue`, the write queue's ephemeral files (requests, answers, manifests),
+    /// in every format: never synced, and read by nothing but the queue (the M18 D2 design
+    /// §3.4).
+    pub fn queue_dir(&self) -> Utf8PathBuf {
+        self.meta_path("queue")
+    }
+
     /// `<root>/meta/journal.log` (FORMAT 2: `journal2.log`), the append-only journal of
     /// metadata frames.
     pub fn journal_log(&self) -> Utf8PathBuf {

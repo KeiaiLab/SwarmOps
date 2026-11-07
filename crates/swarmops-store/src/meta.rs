@@ -7,6 +7,8 @@
 //!   metadata file is a projection of it.
 //! - [`Record`] and [`Frame`]: what the journal holds, in a fixed byte layout.
 //! - [`MetaLock`] (`meta/lock`): the flock that serializes writers and committed readers.
+//! - [`queue`] (`meta/queue/`): the write queue, which batches the transactions of writers that
+//!   find the lock taken into their next holder's ([`MetaStore::take_turn`]).
 //! - [`Index`] (`meta/idx/*.col`, `meta/parents.log`, `meta/sorted/`): the columnar
 //!   changeset index, one [`ChangesetMeta`] record per changeset in journal order, with
 //!   [`SortedView`]s by id and by delta hash for `O(log n)` lookups.
@@ -39,6 +41,7 @@ pub mod index;
 pub mod journal;
 pub mod lock;
 mod parents;
+pub mod queue;
 pub mod refs;
 mod replay;
 pub mod sorted;
@@ -60,6 +63,7 @@ pub use fsck::Rebuilt;
 pub use index::{ChangesetMeta, Index};
 pub use journal::{Journal, LogCut, TailRepair};
 pub use lock::MetaLock;
+pub use queue::{Answer, FrameUse, Lead, Outcome, Planned, Request, RequestId, Serve, Turn, Whose};
 pub use refs::{RefFile, RefKind, RefState};
 pub use sorted::SortedView;
 pub use store::{

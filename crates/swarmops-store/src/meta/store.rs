@@ -72,8 +72,9 @@ use crate::format::{self, StoreFormat};
 use crate::fs_ops::{FsOps, RealFs, StoreFs};
 use crate::layout::Layout;
 
-/// How many write transactions [`MetaStore::write`] began in this process: the lock probe of the
-/// M16 design §4 (a land takes the lock once), which the test hooks alone count.
+/// How many write transactions [`MetaStore::write`] and the write queue's leads began in this
+/// process: the lock probe of the M16 design §4 (a land takes the lock once), which the test
+/// hooks alone count.
 #[cfg(feature = "test-hooks")]
 static WRITE_CALLS: AtomicU64 = AtomicU64::new(0);
 
@@ -306,8 +307,9 @@ impl RefMoveEntry {
 }
 
 impl MetaStore {
-    /// How many times [`MetaStore::write`] was called in this process, by any store: a test
-    /// compares two readings around the calls it counts. The test hooks alone keep the count.
+    /// How many write transactions [`MetaStore::write`] and the leads of
+    /// [`MetaStore::take_turn`] began in this process, by any store: a test compares two
+    /// readings around the calls it counts. The test hooks alone keep the count.
     #[cfg(feature = "test-hooks")]
     pub fn write_calls() -> u64 {
         WRITE_CALLS.load(Ordering::Relaxed)
@@ -539,9 +541,16 @@ impl MetaStore {
     /// write them afresh, or cannot list them, the error is [`StoreError::NotCommitted`] (storage
     /// spec §2 rule 3 (c), (b)): the transaction never began, and running it again lists them.
     pub fn write(&self) -> Result<MetaWrite<'_>, StoreError> {
+        let lock = MetaLock::acquire(&self.layout, self.lock_timeout)?;
+        self.write_locked(lock)
+    }
+
+    /// [`MetaStore::write`] once `lock` is held: the recovery, then the transaction. A write
+    /// queue's lead ([`MetaStore::take_turn`]) begins here too, so the lock probe
+    /// (`MetaStore::write_calls`) counts each plain write and each lead once.
+    pub(crate) fn write_locked(&self, lock: MetaLock) -> Result<MetaWrite<'_>, StoreError> {
         #[cfg(feature = "test-hooks")]
         WRITE_CALLS.fetch_add(1, Ordering::Relaxed);
-        let lock = MetaLock::acquire(&self.layout, self.lock_timeout)?;
         let tail = self.journal.repair_tail()?;
         let ckpt = self.journal.ckpt()?;
         // The frames past the checkpoint vouch for the index's records past it, and are
@@ -578,7 +587,7 @@ impl MetaStore {
                 records_replayed: replayed.records,
                 refs_replayed: replayed.refs,
             },
-            _lock: lock,
+            lock: Some(lock),
         })
     }
 
@@ -608,6 +617,11 @@ impl MetaStore {
     /// Refuses a ref name this store's format does not take ([`refs::check_ref_name_in`]).
     pub fn check_ref_name(&self, name: &str) -> Result<(), StoreError> {
         refs::check_ref_name_in(self.layout.format(), name)
+    }
+
+    /// How long a writer waits for [`MetaLock`] ([`MetaStore::with_lock_timeout`]).
+    pub(super) fn lock_timeout(&self) -> Duration {
+        self.lock_timeout
     }
 
     fn from_parts(layout: Layout, fs: StoreFs, journal: Journal) -> MetaStore {
@@ -891,7 +905,9 @@ pub struct MetaWrite<'a> {
     moved: HashMap<String, Option<ChangesetId>>,
     /// What [`MetaStore::write`] repaired before it returned this transaction.
     recovered: Recovered,
-    _lock: MetaLock,
+    /// Held until the transaction ends, unless a write queue's lead took it to hold past the
+    /// commit, for its answers ([`MetaWrite::take_lock`]).
+    lock: Option<MetaLock>,
 }
 
 impl MetaWrite<'_> {
@@ -1152,6 +1168,28 @@ impl MetaWrite<'_> {
         self.closed.truncate(n);
         self.forget_from(at);
         Ok(())
+    }
+
+    /// The lock, taken out of the transaction so that a write queue's lead holds it past the
+    /// commit while it answers its members (the M18 D2 design §3.1, step 14).
+    pub(super) fn take_lock(&mut self) -> Option<MetaLock> {
+        self.lock.take()
+    }
+
+    /// How many frames are closed ([`MetaWrite::begin_frame`]).
+    pub(super) fn closed_frames(&self) -> usize {
+        self.closed.len()
+    }
+
+    /// The seq the transaction's first frame takes: the journal's frame count.
+    pub(super) fn next_seq(&self) -> Result<u64, StoreError> {
+        self.store.journal.frame_count()
+    }
+
+    /// Up to `limit` of the journal's listed frames from seq `first` on, this transaction's not
+    /// among them.
+    pub(super) fn listed_frames(&self, first: u64, limit: usize) -> Result<Vec<Frame>, StoreError> {
+        self.store.journal.frames_from(first, limit)
     }
 
     /// The records this transaction has queued, in order: the frames [`MetaWrite::commit`]
