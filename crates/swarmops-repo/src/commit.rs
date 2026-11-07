@@ -367,6 +367,29 @@ impl<O: ObjectStore> Repo<O> {
         seen: Option<&RepoRead<'_, O>>,
         req: CommitRequest,
     ) -> Result<CommitOutcome, RepoError> {
+        let (written, advance) = self.write_commit(seen, req)?;
+        let (insert, advanced, warnings, recovered) = self.record(written.meta(), advance)?;
+        Ok(CommitOutcome {
+            id: written.id,
+            root: written.changeset.root,
+            files_changed: written.changeset.delta.len(),
+            blobs_written: written.blobs_written,
+            trees_written: written.trees_written,
+            insert,
+            advanced,
+            warnings,
+            recovered,
+        })
+    }
+
+    /// Steps 1 to 4 of [the module documentation](self) for `req`, the parents looked up in
+    /// `seen` if given: the changeset written and flushed, not recorded, with the ref `req`
+    /// advances. A land that carries changes writes its `C` so ([`crate::land`]).
+    pub(crate) fn write_commit(
+        &self,
+        seen: Option<&RepoRead<'_, O>>,
+        req: CommitRequest,
+    ) -> Result<(WrittenChangeset, Option<Advance>), RepoError> {
         let CommitRequest {
             parents,
             changes,
@@ -405,18 +428,7 @@ impl<O: ObjectStore> Repo<O> {
             metadata,
             allow_empty,
         })?;
-        let (insert, advanced, warnings, recovered) = self.record(written.meta(), advance)?;
-        Ok(CommitOutcome {
-            id: written.id,
-            root: written.changeset.root,
-            files_changed: written.changeset.delta.len(),
-            blobs_written: written.blobs_written,
-            trees_written: written.trees_written,
-            insert,
-            advanced,
-            warnings,
-            recovered,
-        })
+        Ok((written, advance))
     }
 
     /// Writes the changeset `draft` describes, and records nothing (the module documentation's

@@ -1949,6 +1949,10 @@ fn holds_code_whole() {
     assert!(!holds_code("E_MAINTENANCE_BUSY", "E_BUSY"));
     assert!(!holds_code("raised E_TYPE_CONFLICT", "E_CONFLICT"));
 
+    // A longer code that starts with the code holds none: a letter or a digit after it.
+    assert!(!holds_code("E_IO_TRANSIENT", "E_IO"));
+    assert!(!holds_code("E_BUSY2", "E_BUSY"));
+
     // The code alone, before a period, in backticks, at either end.
     for text in [
         "E_BUSY",
@@ -3094,6 +3098,111 @@ fn a_replayed_land_reports_replayed() {
     assert_eq!((unkeyed.exit, unkeyed.code()), (1, "E_NOTHING_TO_LAND"));
     assert_eq!(unkeyed["error"]["details"], json!({"reason": "no_changes"}));
     assert_eq!(newest(&mut s), before);
+}
+
+/// `land --changes` commits the changes on HEAD and lands them in one call (the M16 design §4):
+/// one operation, a land, where commit then land write two; `squashed_from` ends at the
+/// changeset it made, `C`, whose parent is HEAD and whose message is the land's. HEAD may be
+/// main's head itself. The same call again replays and writes nothing.
+#[test]
+fn land_with_changes_writes_one_frame() {
+    let mut s = Session::new();
+    let store = s.store();
+    s.run(&["init", &store]);
+    let t0 = s.commit(&store, None, "a.txt", "a\n", "t0");
+    s.run(&[
+        "--repo", &store, "--as", AGENT, "ref", "set", "main", &t0, "--create",
+    ]);
+    let ops = |s: &mut Session| {
+        let listed = s.run(&["--repo", &store, "op", "log", "-n", "2"]);
+        let ops = listed["result"]["ops"].as_array().unwrap().clone();
+        (ops.iter())
+            .map(|op| (op["op"].clone(), op["kind"].clone()))
+            .collect::<Vec<_>>()
+    };
+    let before = ops(&mut s)[0].clone();
+    let changes = s.file(
+        "changes.json",
+        &json!([{"path": "b.txt", "op": "put", "content": {"inline": "b\n"}}]).to_string(),
+    );
+    let land: [&str; 12] = [
+        "--repo",
+        &store,
+        "--as",
+        AGENT,
+        "land",
+        &t0,
+        "--changes",
+        &changes,
+        "-m",
+        "the change",
+        "--key",
+        "land-8",
+    ];
+
+    // 1. One operation, a land.
+    let landed = s.run(&land);
+    assert_eq!(landed.exit, 0, "{}", landed.json);
+    let after = ops(&mut s);
+    assert_eq!(after[0].1, json!("land"), "{after:?}");
+    assert_eq!(after[1], before, "one operation: {after:?}");
+
+    // 2. C on HEAD, at the end of the squashed chain; main holds the change.
+    let squashed = landed["result"]["squashed_from"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(squashed.len(), 1, "{}", landed.json);
+    let made = s.run(&["--repo", &store, "show", squashed[0].as_str().unwrap()]);
+    assert_eq!(made["result"]["parents"], json!([t0]), "{}", made.json);
+    assert_eq!(made["result"]["message"], "the change");
+    let id = landed["result"]["landed"].as_str().unwrap().to_owned();
+    assert_eq!(main_target(&mut s, &store), id.as_str());
+    let cat = s.run(&["--repo", &store, "cat", "main:b.txt"]);
+    assert_eq!(cat["result"]["content"], "b\n");
+
+    // 3. Again: a replay, nothing written.
+    let again = s.run(&land);
+    assert_eq!(again["result"]["status"], "replayed", "{}", again.json);
+    assert_eq!(again["result"]["landed"], id.as_str());
+    assert_eq!(ops(&mut s), after);
+    assert_eq!(s.run(&["--repo", &store, "verify", "--deep"]).exit, 0);
+}
+
+/// `land --changes` without `-m` is `E_INVALID_ARG` (exit 2), `details.missing` `message`, and
+/// records nothing.
+#[test]
+fn land_with_changes_needs_a_message() {
+    let mut s = Session::new();
+    let store = s.store();
+    s.run(&["init", &store]);
+    let t0 = s.commit(&store, None, "a.txt", "a\n", "t0");
+    s.run(&[
+        "--repo", &store, "--as", AGENT, "ref", "set", "main", &t0, "--create",
+    ]);
+    let changes = s.file(
+        "changes.json",
+        &json!([{"path": "b.txt", "op": "put", "content": {"inline": "b\n"}}]).to_string(),
+    );
+
+    let refused = s.run(&[
+        "--repo",
+        &store,
+        "--as",
+        AGENT,
+        "land",
+        &t0,
+        "--changes",
+        &changes,
+    ]);
+    assert_eq!(
+        (refused.exit, refused.code()),
+        (2, "E_INVALID_ARG"),
+        "{}",
+        refused.json
+    );
+    assert_eq!(refused["error"]["details"], json!({"missing": "message"}));
+    assert_eq!(main_target(&mut s, &store), t0.as_str());
 }
 
 /// A land that conflicts is resolved without a checkout: from the report of its `E_CONFLICT`

@@ -4397,6 +4397,61 @@ expression: s.redact(&all)
     },
     "LandReq": {
       "$defs": {
+        "ChangeInput": {
+          "description": "One change of a commit.",
+          "properties": {
+            "content": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ContentInput"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The new content, at most 512 MiB (more is `E_TOO_LARGE` with `scope` `put`); a `put` needs\nit, a `delete` takes none."
+            },
+            "mode": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ModeInput"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The kind of entry a `put` writes; `file` when omitted."
+            },
+            "op": {
+              "$ref": "#/$defs/ChangeOp",
+              "description": "Whether to write the path or remove it."
+            },
+            "path": {
+              "description": "The repository path: `/`-separated, relative to the root.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "op"
+          ],
+          "type": "object"
+        },
+        "ChangeOp": {
+          "description": "What a change does to its path, in a commit's change list and a changeset's changes alike.",
+          "oneOf": [
+            {
+              "const": "put",
+              "description": "Write the content at the path, creating or replacing the entry.",
+              "type": "string"
+            },
+            {
+              "const": "delete",
+              "description": "Remove the path.",
+              "type": "string"
+            }
+          ]
+        },
         "ContentInput": {
           "description": "A `put`'s content, as an object with one key.",
           "oneOf": [
@@ -4571,6 +4626,16 @@ expression: s.redact(&all)
             }
           ],
           "description": "Where the change starts: a first-parent ancestor of `head`, whose own changes are not part\nof it (anything else is `E_INVALID_ARG`). It need not be on the target. When omitted, the\nmerge base of `head` and the target's head, along first parents."
+        },
+        "changes": {
+          "description": "Changes to commit on `head` first, as a commit's `changes` (the same shape, the same 1\nGiB limit, the same `{\"file\": path}` rule): the land makes that changeset, `C`, with\n`head` its parent, the lander its author and committer and `message` its message\n(required: without it `E_INVALID_ARG`, `details.missing` `message`), and lands the chain\nsince `base` with `C` at its end. `C` and the landed changeset are recorded in one\ntransaction, or neither is; `squashed_from` ends at `C`. `base` may be `head` itself. A\nkeyed land run again replays when the land it finds squashed a changeset on `head` with\nthe tree these changes make, however late it was signed. A list that changes nothing is\n`E_EMPTY_COMMIT`.",
+          "items": {
+            "$ref": "#/$defs/ChangeInput"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "expect_target": {
           "anyOf": [
@@ -5367,7 +5432,7 @@ expression: s.redact(&all)
             },
             {
               "const": "land",
-              "description": "It recorded one changeset that names a lander and moved a ref to it (`land`).",
+              "description": "It recorded one changeset that names a lander and moved a ref to it (`land`), with the\nchangeset it committed first when the land carried changes.",
               "type": "string"
             },
             {
@@ -5543,7 +5608,7 @@ expression: s.redact(&all)
         },
         {
           "const": "land",
-          "description": "It recorded one changeset that names a lander and moved a ref to it (`land`).",
+          "description": "It recorded one changeset that names a lander and moved a ref to it (`land`), with the\nchangeset it committed first when the land carried changes.",
           "type": "string"
         },
         {
@@ -5618,7 +5683,7 @@ expression: s.redact(&all)
             },
             {
               "const": "land",
-              "description": "It recorded one changeset that names a lander and moved a ref to it (`land`).",
+              "description": "It recorded one changeset that names a lander and moved a ref to it (`land`), with the\nchangeset it committed first when the land carried changes.",
               "type": "string"
             },
             {

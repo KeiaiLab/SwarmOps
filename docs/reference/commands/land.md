@@ -95,6 +95,12 @@ Syntax: `--expect-target <ID>`.
 
 Publish only while the ref names this changeset, a full id: one attempt, and a ref that moved is E\_CAS\_MISMATCH with nothing written.
 
+### `--changes`
+
+Syntax: `--changes <FILE>`.
+
+A JSON file holding an array of changes to commit on HEAD first, or - for stdin: at most 64 MiB. The land commits them and lands that changeset in one transaction; needs --message, which both changesets take.
+
 ## Examples
 
 ### CLI

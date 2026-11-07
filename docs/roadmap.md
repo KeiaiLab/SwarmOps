@@ -148,7 +148,9 @@ to 5 pass in `just check` and in the Scheduled run's git matrix, and G16 is met
 ([docs/perf.md](perf.md#v070--2026-10-29): a clone 0.97× and a no-op fetch 1.82× git's own
 server on 12,000 commits). G1 and G2 are met. G4 is met but for its p99 at 50 processes: 25
 lands/s, 0 % retries and nothing lost, with a p99 of 2.5–2.7 s on the ext4 bench disk in M14's
-window, for v0.6.0's code as for M14's (579.5–594.6 ms in v0.6.0's). G17's push and fetch are met
+window, for v0.6.0's code as for M14's (579.5–594.6 ms in v0.6.0's). M16 lands a change with its
+commit in one lock pass (`land --changes`), and G4's harness lands so; its p99 is measured again
+after that lands, and if it stays over 500 ms, group commit (D2) is next. G17's push and fetch are met
 (1.02× and 1.34×, the fetch with the mirror's commit-graph); the sync of one land right after a
 clone is not (49.6 s against 1 s). The benchmark gate (condition 3) runs in the weekly Scheduled
 run.

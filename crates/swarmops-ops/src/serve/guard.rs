@@ -169,7 +169,10 @@ impl<O: StoreOps> StoreOps for ServerOps<O> {
     }
 
     fn land(&self, who: &Identity, req: LandReq) -> Result<LandResp, OpError> {
-        if resolves_from_file(req.resolutions.as_ref()) {
+        let changes = req.changes.as_deref().unwrap_or_default();
+        if resolves_from_file(req.resolutions.as_ref())
+            || changes.iter().any(|c| is_file(c.content.as_ref()))
+        {
             return Err(file_refused());
         }
         self.pass(self.inner.land(who, req))
@@ -488,6 +491,18 @@ mod tests {
         let mut rebase = RebaseReq::new("x");
         rebase.resolutions = Some(resolutions);
         assert_refused(&served, &served.rebase(&who(), rebase).unwrap_err());
+    }
+
+    /// A land's changes refuse a client file, as a commit's do.
+    #[test]
+    fn land_refuses_file_changes() {
+        let served = served();
+        let mut change = ChangeInput::new("a.txt", ChangeOp::Put);
+        change.content = Some(file());
+        let mut land = LandReq::new("x");
+        land.message = Some("m".to_owned());
+        land.changes = Some(vec![change]);
+        assert_refused(&served, &served.land(&who(), land).unwrap_err());
     }
 
     /// Content the client sends as bytes reaches the inner store.

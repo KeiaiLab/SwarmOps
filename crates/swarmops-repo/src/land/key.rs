@@ -18,7 +18,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 
-use swarmops_core::{ChangesetId, ObjectId, RepoPath};
+use swarmops_core::{ChangesetId, ObjectId, RepoPath, TreeId};
 use swarmops_store::{ObjectStore, RefKind, StoreError, ref_kind};
 
 use super::landing::stored;
@@ -96,6 +96,23 @@ pub(super) enum KeyFound {
     Reused(ChangesetId),
 }
 
+/// What a keyed land's change is, which a changeset carrying its key must have squashed to be
+/// this land made before.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Ours {
+    /// The chain ending at this head: the found land's `squashed_from` ends there.
+    Chain(ChangesetId),
+    /// A change committed on `head` with tree `root` (a land with changes, the M16 design §4):
+    /// the found land's `squashed_from` ends at a changeset whose first parent is `head` and whose
+    /// tree is `root`, however late it was signed.
+    Commit {
+        /// The land's head.
+        head: ChangesetId,
+        /// `C`'s tree.
+        root: TreeId,
+    },
+}
+
 /// The land a replay found.
 pub(super) struct Replayed {
     /// The changeset.
@@ -106,6 +123,25 @@ pub(super) struct Replayed {
     pub(super) squashed_from: Vec<ChangesetId>,
     /// How many paths it changes.
     pub(super) files_changed: usize,
+}
+
+/// Whether `last`, the last changeset a land carrying the key squashed, is `ours`: the head
+/// itself, or a changeset on the head with `C`'s tree, as `read` holds it.
+fn squashed_ours<O: ObjectStore>(
+    read: &RepoRead<'_, O>,
+    last: ChangesetId,
+    ours: Ours,
+) -> Result<bool, RepoError> {
+    match ours {
+        Ours::Chain(head) => Ok(last == head),
+        Ours::Commit { head, root } => {
+            let Some(made) = read.changeset(last)? else {
+                return Ok(false);
+            };
+            let on_head = made.changeset.parents.first() == Some(&head);
+            Ok(on_head && made.changeset.root == root)
+        }
+    }
 }
 
 /// A land's walk down its target's first parents, which each attempt continues from the head it
@@ -172,32 +208,40 @@ impl TargetWalk {
     }
 
     /// The newest changeset on the walk from `top` whose `land_key` is `key`, if any: a replay if
-    /// its `squashed_from` ends at `head`, else a key reused.
+    /// its `squashed_from` ends as `ours` says, else a key reused.
     pub(super) fn find_key<O: ObjectStore>(
         &mut self,
         read: &RepoRead<'_, O>,
         top: &StoredChangeset,
         key: &str,
-        head: ChangesetId,
+        ours: Ours,
     ) -> Result<Option<KeyFound>, RepoError> {
-        let mut found = None;
+        // 1. The newest changeset carrying the key.
+        let mut hit = None;
         self.walk(read, top, |id, walked| {
             if walked.land_key.as_deref() != Some(key.as_bytes()) {
                 return true;
             }
-            let squashed_from = walked.squashed();
-            found = Some(match (squashed_from.last(), walked.parent) {
-                (Some(&last), Some(parent)) if last == head => KeyFound::Replay(Replayed {
-                    id,
-                    parent,
-                    squashed_from,
-                    files_changed: walked.paths.len(),
-                }),
-                _ => KeyFound::Reused(id),
-            });
+            hit = Some((id, walked.parent, walked.squashed(), walked.paths.len()));
             false
         })?;
-        Ok(found)
+        let Some((id, parent, squashed_from, files_changed)) = hit else {
+            return Ok(None);
+        };
+
+        // 2. This land made before, or another change.
+        let (Some(&last), Some(parent)) = (squashed_from.last(), parent) else {
+            return Ok(Some(KeyFound::Reused(id)));
+        };
+        if !squashed_ours(read, last, ours)? {
+            return Ok(Some(KeyFound::Reused(id)));
+        }
+        Ok(Some(KeyFound::Replay(Replayed {
+            id,
+            parent,
+            squashed_from,
+            files_changed,
+        })))
     }
 
     /// The newest changeset whose `land_key` is `key` on the first-parent chain of a ref other

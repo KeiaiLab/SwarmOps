@@ -15,13 +15,13 @@ use swarmops_merge::diff3;
 use swarmops_merge::tree_merge::FileConflict;
 use swarmops_store::{ObjectStore, Recovered};
 
-use crate::commit::{Draft, WrittenChangeset};
+use crate::commit::{CommitRequest, Draft, WrittenChangeset};
 use crate::error::RepoError;
 use crate::merge::MergeOutcome;
 use crate::read::{RepoRead, StoredChangeset};
 use crate::repo::{self, Repo};
 
-use super::key::{KeyFound, TargetWalk};
+use super::key::{KeyFound, Ours, TargetWalk};
 use super::resolve::Resolving;
 use super::{Publication, Published, Relocate, Resolutions};
 
@@ -80,6 +80,12 @@ pub struct LandRequest {
     /// each attempt applies to its merge before its conflict check ([`Resolutions`]); `None`:
     /// none.
     pub resolutions: Option<Resolutions>,
+    /// A change to commit on `head` first, `C` (the M16 design §4): its parents `[head]`, no
+    /// `advance` ([`RepoError::LandCommit`] otherwise). The land writes `C` once, outside the
+    /// lock, squashes the chain with `C` at its end, and records `C` and `L` in its one frame;
+    /// an attempt that lands nothing records neither. A keyed land with one replays the land
+    /// whose last squashed changeset is on `head` with `C`'s tree. `None`: the head as it is.
+    pub commit: Option<CommitRequest>,
 }
 
 impl LandRequest {
@@ -98,6 +104,7 @@ impl LandRequest {
             max_attempts: MAX_ATTEMPTS,
             expect_target: None,
             resolutions: None,
+            commit: None,
         }
     }
 }
@@ -394,14 +401,21 @@ impl<O: ObjectStore> Repo<O> {
                 })?,
         };
         let base = stored(&read, base)?;
+
+        // The change committed on the head, written once for every attempt.
+        let made = (req.commit.take())
+            .map(|commit| self.write_made(&read, req.head, commit))
+            .transpose()?;
+        let ours = made.as_ref().map_or(head.changeset.root, |(_, c)| c.root);
         let resolving = (req.resolutions.take())
-            .map(|resolutions| Resolving::new(self, &read, resolutions, head.changeset.root))
+            .map(|resolutions| Resolving::new(self, &read, resolutions, ours))
             .transpose()?;
         let landing = Landing {
             repo: self,
             walk: TargetWalk::new(base.generation),
             req,
             head,
+            made,
             base,
             squashed: None,
             prior: None,
@@ -413,6 +427,22 @@ impl<O: ObjectStore> Repo<O> {
             read,
             theirs,
         })
+    }
+
+    /// `C`, the change `commit` of a land of `head`, written and flushed outside the lock, not
+    /// recorded; its parents are looked up in `read`. [`RepoError::LandCommit`] unless its
+    /// parents are `[head]` and it moves no ref.
+    fn write_made(
+        &self,
+        read: &RepoRead<'_, O>,
+        head: ChangesetId,
+        commit: CommitRequest,
+    ) -> Result<(ChangesetId, Changeset), RepoError> {
+        if commit.parents != [head] || commit.advance.is_some() {
+            return Err(RepoError::LandCommit { head });
+        }
+        let (written, _) = self.write_commit(Some(read), commit)?;
+        Ok((written.id, written.changeset))
     }
 
     /// What ref `target` names under the store's lock, after the write's tail check, which makes
@@ -536,6 +566,9 @@ struct Landing<'r, O: ObjectStore> {
     req: LandRequest,
     /// The change's head.
     head: StoredChangeset,
+    /// `C`, the change committed on the head, written: what the land squashes last and records
+    /// before `L`. `None` for a land without changes.
+    made: Option<(ChangesetId, Changeset)>,
     /// The base the change was taken from.
     base: StoredChangeset,
     /// The chain the land squashes, oldest first, once an attempt has walked it.
@@ -582,8 +615,8 @@ impl<O: ObjectStore> Landing<'_, O> {
     /// Steps 2 to 4 of [the module documentation](super), in `read`, whose target names
     /// `theirs`: what the land has to do there, or the merge to record.
     fn prepare(&mut self, read: &RepoRead<'_, O>, theirs: ChangesetId) -> Result<Prep, RepoError> {
-        // 1. A head on the target's chain.
-        if read.is_ancestor(self.req.head, theirs)? {
+        // 1. A head on the target's chain, unless the land commits a change on it.
+        if self.made.is_none() && read.is_ancestor(self.req.head, theirs)? {
             return Ok(Prep::Nothing(theirs, NothingToLandReason::OnTarget));
         }
         let chain = self.squashed()?;
@@ -591,7 +624,7 @@ impl<O: ObjectStore> Landing<'_, O> {
 
         // 2. The key's walk: a replay, or a key reused, on the target or on another ref.
         if let Some(key) = &self.req.key {
-            match self.walk.find_key(read, &theirs, key, self.req.head)? {
+            match self.walk.find_key(read, &theirs, key, self.ours())? {
                 Some(KeyFound::Replay(found)) => {
                     let replay = LandOutcome {
                         status: LandStatus::Replayed,
@@ -713,7 +746,8 @@ impl<O: ObjectStore> Landing<'_, O> {
         if let Some(squashed) = &self.squashed {
             return Ok(squashed.clone());
         }
-        let chain = chain(self.repo, self.base.id, self.head.id)?;
+        let mut chain = chain(self.repo, self.base.id, self.head.id)?;
+        chain.extend(self.made.as_ref().map(|(id, _)| *id));
         self.squashed = Some(chain.clone());
         Ok(chain)
     }
@@ -732,7 +766,26 @@ impl<O: ObjectStore> Landing<'_, O> {
                 return Ok(again);
             }
         }
-        merge_chain(self.repo, &self.base, &self.head, theirs)
+        merge_tip(self.repo, &self.base, self.tip(), theirs)
+    }
+
+    /// The change's last changeset: `C` for a land with changes, else the head.
+    fn tip(&self) -> &Changeset {
+        self.made
+            .as_ref()
+            .map_or(&self.head.changeset, |(_, made)| made)
+    }
+
+    /// What a changeset carrying the land's key must have squashed to be this land's
+    /// ([`Ours`]).
+    fn ours(&self) -> Ours {
+        match &self.made {
+            Some((_, made)) => Ours::Commit {
+                head: self.head.id,
+                root: made.root,
+            },
+            None => Ours::Chain(self.head.id),
+        }
     }
 
     /// The error of a merge onto `theirs` that conflicts, or whose resolutions of `stale` did not
@@ -762,7 +815,7 @@ impl<O: ObjectStore> Landing<'_, O> {
         new_blobs: BTreeMap<BlobId, Vec<u8>>,
         squashed: &[ChangesetId],
     ) -> Result<Publication, RepoError> {
-        let head = &self.head.changeset;
+        let head = self.tip();
         let recorded = Recorded {
             key: self.req.key.as_deref(),
             lander: &self.req.lander,
@@ -792,6 +845,7 @@ impl<O: ObjectStore> Landing<'_, O> {
             changeset: written.changeset,
             actor: String::from_utf8_lossy(&self.req.lander.name).into_owned(),
             relocate,
+            first: self.made.clone(),
         })
     }
 
@@ -883,11 +937,17 @@ pub(super) fn merge_chain<O: ObjectStore>(
     head: &StoredChangeset,
     theirs: &StoredChangeset,
 ) -> Result<MergeOutcome, RepoError> {
-    let roots = [
-        base.changeset.root,
-        head.changeset.root,
-        theirs.changeset.root,
-    ];
+    merge_tip(repo, base, &head.changeset, theirs)
+}
+
+/// [`merge_chain`] of a change whose last changeset is `tip`: the head, or a land's `C`.
+fn merge_tip<O: ObjectStore>(
+    repo: &Repo<O>,
+    base: &StoredChangeset,
+    tip: &Changeset,
+    theirs: &StoredChangeset,
+) -> Result<MergeOutcome, RepoError> {
+    let roots = [base.changeset.root, tip.root, theirs.changeset.root];
     repo.merge_roots(roots, &diff3::merge_content)
 }
 

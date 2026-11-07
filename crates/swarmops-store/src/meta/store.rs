@@ -50,6 +50,8 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
+#[cfg(feature = "test-hooks")]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use camino::Utf8Path;
@@ -66,6 +68,11 @@ use crate::error::{FileOp, LimitKind, StoreError};
 use crate::format::{self, StoreFormat};
 use crate::fs_ops::{FsOps, RealFs, StoreFs};
 use crate::layout::Layout;
+
+/// How many write transactions [`MetaStore::write`] began in this process: the lock probe of the
+/// M16 design §4 (a land takes the lock once), which the test hooks alone count.
+#[cfg(feature = "test-hooks")]
+static WRITE_CALLS: AtomicU64 = AtomicU64::new(0);
 
 /// How long [`MetaStore::write`] waits for [`MetaLock`] unless
 /// [`MetaStore::with_lock_timeout`] says otherwise.
@@ -291,6 +298,13 @@ impl RefMoveEntry {
 }
 
 impl MetaStore {
+    /// How many times [`MetaStore::write`] was called in this process, by any store: a test
+    /// compares two readings around the calls it counts. The test hooks alone keep the count.
+    #[cfg(feature = "test-hooks")]
+    pub fn write_calls() -> u64 {
+        WRITE_CALLS.load(Ordering::Relaxed)
+    }
+
     /// How many rounds [`MetaStore::read`] makes at most. A round reads every ref file and the
     /// frames past the checkpoint again, and a snapshot takes one more only when the metadata
     /// changed during the last: a commit landed, or a writer cut an entry of `journal.off` as
@@ -501,6 +515,8 @@ impl MetaStore {
     /// write them afresh, or cannot list them, the error is [`StoreError::NotCommitted`] (storage
     /// spec §2 rule 3 (c), (b)): the transaction never began, and running it again lists them.
     pub fn write(&self) -> Result<MetaWrite<'_>, StoreError> {
+        #[cfg(feature = "test-hooks")]
+        WRITE_CALLS.fetch_add(1, Ordering::Relaxed);
         let lock = MetaLock::acquire(&self.layout, self.lock_timeout)?;
         let tail = self.journal.repair_tail()?;
         let ckpt = self.journal.ckpt()?;

@@ -3,9 +3,9 @@
 //! double nothing.
 //!
 //! Each agent is a thread of this test that runs one process of the binary at a time
-//! (testkit's `CliLander`), as an agent does: it reads `main`, commits its change on the head it
-//! read, and lands the commit with its key, running a land that ended retryable again with the
-//! same key. Every run of the binary has a deadline and is killed and reaped however the test
+//! (testkit's `CliLander`), as an agent does: it reads `main`, and lands its change on the head
+//! it read with its key in one `land --changes` (the M16 design §4), running a land that ended
+//! retryable again with the same key. Every run of the binary has a deadline and is killed and reaped however the test
 //! ends (testkit's `cli` runner), and runs under the store's order checker. The test owns its
 //! store, and ends with `verify --deep` through the binary.
 

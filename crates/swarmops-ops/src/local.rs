@@ -1310,10 +1310,18 @@ impl<'a> Recording<'a> {
             max_conflict_bytes,
             expect_target,
             resolutions,
+            changes,
             ..
         } = req;
         // The request's own rules are checked before anything is resolved or read.
         check_ref_use(&target, RefUse::Publish)?;
+        if changes.is_some() && message.is_none() {
+            return Err(error::error(
+                ErrorCode::InvalidArg,
+                "a land with changes needs a message: the changeset it commits takes it",
+            )
+            .with_details(error::details([("missing", "message".into())])));
+        }
         if let Some(key) = &idempotency_key {
             land_key(key)?;
         }
@@ -1346,7 +1354,15 @@ impl<'a> Recording<'a> {
             let run_id = run_id.as_bytes().to_vec();
             lander_metadata.push((LANDER_RUN_ID_KEY.to_owned(), run_id));
         }
-        let mut land = LandRequest::new(head, &target, self.ops.native_signature(who, None)?);
+        let signature = self.ops.native_signature(who, None)?;
+        let commit = (changes.zip(message.clone()))
+            .map(|(changes, message)| {
+                commit_request(who, Some(head), changes, message, None, signature.clone())
+            })
+            .transpose()?;
+        let (commit, named) = commit.unzip();
+        let mut land = LandRequest::new(head, &target, signature);
+        land.commit = commit;
         land.base = base;
         land.key = idempotency_key;
         land.message = message.map(String::into_bytes);
@@ -1363,7 +1379,7 @@ impl<'a> Recording<'a> {
                 if let RepoError::CasMismatch { recovered, .. } = &e {
                     self.resolved.record_recovered(**recovered);
                 }
-                return Err(merge_error(e, max_conflict_bytes));
+                return Err(land_change_error(e, named.as_ref(), max_conflict_bytes));
             }
             Err(_) => return Err(error::unknown_variant("Gated")),
         };
@@ -1440,36 +1456,13 @@ impl StoreOps for Recording<'_> {
         {
             return Ok(replay);
         }
-        let changes = content::changes(changes)?;
-        // Where each blob named by id is in the list, to say which change names one the store
-        // lacks.
-        let named: BTreeMap<RepoPath, usize> = (changes.iter().enumerate())
-            .filter(|(_, change)| matches!(change.op, swarmops_repo::ChangeOp::PutBlob { .. }))
-            .map(|(index, change)| (change.path.clone(), index))
-            .collect();
         let signature = self
             .ops
             .native_signature(who, key.as_ref().map(|key| key.secs))?;
-        // In ascending key order, as a changeset's metadata must be.
-        let mut metadata = vec![("agent".to_owned(), who.agent().as_bytes().to_vec())];
-        if let Some(key) = &key {
-            metadata.push((COMMIT_KEY.to_owned(), key.text.clone().into_bytes()));
-        }
-        if let Some(run_id) = who.run_id() {
-            metadata.push(("run_id".to_owned(), run_id.as_bytes().to_vec()));
-        }
-        content::check_metadata(&metadata)?;
-        let advance = advance.map(|name| swarmops_repo::Advance::new(&name, who.agent()));
-        let request = CommitRequest::new(
-            parent.into_iter().collect(),
-            changes,
-            signature.clone(),
-            signature,
-            message.into_bytes(),
-            metadata,
-            allow_empty,
-            advance,
-        );
+        let (mut request, named) =
+            commit_request(who, parent, changes, message, key.as_ref(), signature)?;
+        request.allow_empty = allow_empty;
+        request.advance = advance.map(|name| swarmops_repo::Advance::new(&name, who.agent()));
         // The parent is checked in the snapshot it was resolved in, which is not read after the
         // commit.
         let outcome = self.ops.repo.commit_in(&read, request).map_err(|e| {
@@ -1478,18 +1471,7 @@ impl StoreOps for Recording<'_> {
             if let RepoError::RefMoved { recovered, .. } = &e {
                 self.resolved.record_recovered(**recovered);
             }
-            // A blob the list names that the store lacks is said of its change, as the list's
-            // other refusals are.
-            let at = match &e {
-                RepoError::MissingBlob { path, .. } => named
-                    .get(path)
-                    .map(|&index| (index, path.as_str().to_owned())),
-                _ => None,
-            };
-            match at {
-                Some((index, path)) => content::in_change(error::op(e), index, &path),
-                None => error::op(e),
-            }
+            change_error(e, &named)
         })?;
         self.resolved.record_recovered(outcome.recovered);
         // The store held the changeset already, and the ref it advances, if any, named it: an
@@ -2534,6 +2516,78 @@ fn land_key(key: &str) -> Result<(), OpError> {
     .with_hint("make a new uuid v7 for each land, and give it again only to retry that land"))
 }
 
+/// The repository request of a commit of `changes` on `parent` by `who`, signed `signature`,
+/// with `message`, its key recorded if given ([`content`]'s rules for the list), and where
+/// each blob named by id is in the list. It moves no ref and refuses an empty change: a
+/// commit sets both as asked; a land with changes commits so ([`LandRequest::commit`]).
+fn commit_request(
+    who: &Identity,
+    parent: Option<ChangesetId>,
+    changes: Vec<swarmops_api::ChangeInput>,
+    message: String,
+    key: Option<&CommitKey>,
+    signature: Signature,
+) -> Result<(CommitRequest, Named), OpError> {
+    // 1. The list, and where each blob named by id is in it, to say which change names one
+    //    the store lacks.
+    let changes = content::changes(changes)?;
+    let named: Named = (changes.iter().enumerate())
+        .filter(|(_, change)| matches!(change.op, swarmops_repo::ChangeOp::PutBlob { .. }))
+        .map(|(index, change)| (change.path.clone(), index))
+        .collect();
+
+    // 2. The metadata, in ascending key order, as a changeset's must be.
+    let mut metadata = vec![("agent".to_owned(), who.agent().as_bytes().to_vec())];
+    if let Some(key) = key {
+        metadata.push((COMMIT_KEY.to_owned(), key.text.clone().into_bytes()));
+    }
+    if let Some(run_id) = who.run_id() {
+        metadata.push(("run_id".to_owned(), run_id.as_bytes().to_vec()));
+    }
+    content::check_metadata(&metadata)?;
+    let request = CommitRequest::new(
+        parent.into_iter().collect(),
+        changes,
+        signature.clone(),
+        signature,
+        message.into_bytes(),
+        metadata,
+        false,
+        None,
+    );
+    Ok((request, named))
+}
+
+/// Where each blob a change list names by id is in the list, by path.
+type Named = BTreeMap<RepoPath, usize>;
+
+/// The operations error of a commit's `e`: a blob the list names that the store lacks is said of
+/// its change, by where `named` puts it, as the list's other refusals are.
+fn change_error(e: RepoError, named: &Named) -> OpError {
+    let at = match &e {
+        RepoError::MissingBlob { path, .. } => named
+            .get(path)
+            .map(|&index| (index, path.as_str().to_owned())),
+        _ => None,
+    };
+    match at {
+        Some((index, path)) => content::in_change(error::op(e), index, &path),
+        None => error::op(e),
+    }
+}
+
+/// [`merge_error`] of a land, whose changes, if it carries any, `named` describes
+/// ([`change_error`]): changes that change nothing on the head are said so, as a land has no
+/// `allow_empty`.
+fn land_change_error(e: RepoError, named: Option<&Named>, max_conflict_bytes: u64) -> OpError {
+    match (e, named) {
+        (RepoError::EmptyChanges, Some(_)) => error::op(RepoError::EmptyChanges)
+            .with_hint("the changes change nothing on the head: land the head without them"),
+        (e @ RepoError::MissingBlob { .. }, Some(named)) => change_error(e, named),
+        (e, _) => merge_error(e, max_conflict_bytes),
+    }
+}
+
 /// A land's or a rebase's error `e` as an [`OpError`]: a conflict's report carries at most
 /// `max_conflict_bytes` of hunk text.
 fn merge_error(e: RepoError, max_conflict_bytes: u64) -> OpError {
@@ -2762,9 +2816,10 @@ fn operation_out(
 
 /// What an operation that recorded `records` did: one changeset and a move of a ref to it is a
 /// land when `lands` says the changeset's metadata names a lander (every land's does; its
-/// `land_key` is optional), else a publish; changesets alone a commit; ref moves alone a ref
-/// move; a compaction marker alone a compaction; anything else a mix. `lands` is asked only of
-/// that one changeset.
+/// `land_key` is optional), else a publish; two changesets and a move of a ref to the second are
+/// a land when it names a lander (a land that committed its change first, the M16 design §4),
+/// else a mix; changesets alone a commit; ref moves alone a ref move; a compaction marker alone
+/// a compaction; anything else a mix. `lands` is asked only of the changeset moved to.
 fn operation_kind(
     records: &[OpRecord],
     lands: impl FnOnce(ChangesetId) -> Result<bool, OpError>,
@@ -2780,14 +2835,22 @@ fn operation_kind(
             _ => return Err(error::unknown_variant("OpRecord")),
         }
     }
+
+    // 1. A ref moved to the last changeset of one or two: a land, a publish, or a mix.
+    if let ([.., last], [Some(to)], 0) = (&changesets[..], &moved_to[..], compactions)
+        && to == last
+        && changesets.len() <= 2
+    {
+        let lander = lands(*last)?;
+        return Ok(match (lander, changesets.len()) {
+            (true, _) => OperationKind::Land,
+            (false, 1) => OperationKind::Publish,
+            (false, _) => OperationKind::Mixed,
+        });
+    }
+
+    // 2. Anything else.
     Ok(match (&changesets[..], &moved_to[..], compactions) {
-        ([id], [Some(to)], 0) if to == id => {
-            if lands(*id)? {
-                OperationKind::Land
-            } else {
-                OperationKind::Publish
-            }
-        }
         ([_, ..], [], 0) => OperationKind::Commit,
         ([], [_, ..], 0) => OperationKind::RefMove,
         ([], [], 1) => OperationKind::Compaction,
@@ -3105,6 +3168,9 @@ mod tests {
         assert_eq!(kind(&publish, true), OperationKind::Land);
         let moved_first = [moved(Some(a)), inserted(a)];
         assert_eq!(kind(&moved_first, true), OperationKind::Land);
+        let committed_first = [inserted(b), inserted(a), moved(Some(a))];
+        assert_eq!(kind(&committed_first, true), OperationKind::Land);
+        assert_eq!(kind(&committed_first, false), OperationKind::Mixed);
         for (records, want) in [
             (&[inserted(a)][..], OperationKind::Commit),
             (&[inserted(a), inserted(b)], OperationKind::Commit),

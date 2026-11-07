@@ -161,9 +161,9 @@ use swarmops_api::RebaseReq;
 use swarmops_api::ResolveRevReq;
 use swarmops_api::{BlobHasReq, BlobPutReq};
 use swarmops_api::{
-    CommitReq, ContentInput, DiffReq, Envelope, ErrorCode, Identity, InfoReq, LogReq, OpError,
-    OpLogReq, PathHistoryReq, ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq, RefSetReq, Rev,
-    ShowReq, StoreOps, UndoReq, VerifyReq,
+    ChangeInput, CommitReq, ContentInput, DiffReq, Envelope, ErrorCode, Identity, InfoReq, LogReq,
+    OpError, OpLogReq, PathHistoryReq, ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq,
+    RefSetReq, Rev, ShowReq, StoreOps, UndoReq, VerifyReq,
 };
 use swarmops_api::{
     FetchReq, FetchResp, PushReq, PushResp, RemoteList, RemoteListReq, SyncReq, SyncResp,
@@ -460,7 +460,9 @@ static TOOLS: [Spec; 27] = [
                       transaction; on E_CONFLICT, details.report lists each conflict: resolve them \
                       with resolutions, against the report's theirs, its full 64-hex id (a path \
                       the target changed since comes back in the report's stale). Give \
-                      idempotency_key to make a retry safe.",
+                      idempotency_key to make a retry safe. With changes (a commit's list) and \
+                      message it commits them on head first and lands that changeset in the \
+                      same transaction: one call, one record.",
         effect: Effect::Lands,
         result_chars: None,
     },
@@ -1682,29 +1684,35 @@ impl Refuse for CommitReq {
         if let Some(name) = &self.advance {
             full_parent(name, self.parent.as_ref())?;
         }
-        for (index, change) in self.changes.iter().enumerate() {
-            let Some(ContentInput::File(file)) = &change.content else {
-                continue;
-            };
-            let Some(why) = unreadable(file) else {
-                continue;
-            };
-            return Err(OpError::new(
-                ErrorCode::InvalidArg,
-                output::printable(&format!(
-                    "change {index} ({:?}): the client file {file:?} {why}: name a regular file \
-                     by its absolute path, or send the bytes as inline or base64 content",
-                    change.path
-                )),
-            )
-            .with_details(Map::from_iter([
-                ("index".to_owned(), Value::from(index)),
-                ("path".to_owned(), Value::from(change.path.as_str())),
-                ("file".to_owned(), Value::from(file.as_str())),
-            ])));
-        }
-        Ok(())
+        refuse_files(&self.changes)
     }
+}
+
+/// The first change of `changes` whose client file this server refuses to read ([`unreadable`]),
+/// as `E_INVALID_ARG` naming its index, its path and the file: a commit's, or a land's.
+fn refuse_files(changes: &[ChangeInput]) -> Result<(), OpError> {
+    for (index, change) in changes.iter().enumerate() {
+        let Some(ContentInput::File(file)) = &change.content else {
+            continue;
+        };
+        let Some(why) = unreadable(file) else {
+            continue;
+        };
+        return Err(OpError::new(
+            ErrorCode::InvalidArg,
+            output::printable(&format!(
+                "change {index} ({:?}): the client file {file:?} {why}: name a regular file by \
+                 its absolute path, or send the bytes as inline or base64 content",
+                change.path
+            )),
+        )
+        .with_details(Map::from_iter([
+            ("index".to_owned(), Value::from(index)),
+            ("path".to_owned(), Value::from(change.path.as_str())),
+            ("file".to_owned(), Value::from(file.as_str())),
+        ])));
+    }
+    Ok(())
 }
 
 /// A blob's client file is read by this server as a commit's is, so the same rules hold
@@ -1756,12 +1764,13 @@ fn unreadable(file: &str) -> Option<&'static str> {
 /// A land's resolutions apply while the target holds each path as `against` did, so `against`
 /// is a full changeset id ([`concrete_against`]); a resolution's client file is read by this
 /// server as a commit's is, so the same rules hold ([`unreadable`]); the refusal names the
-/// resolution's `path` and the `file`.
+/// resolution's `path` and the `file`. A land's changes follow a commit's ([`refuse_files`]).
 impl Refuse for LandReq {
     fn refuse(&self) -> Result<(), OpError> {
         if let Some(expected) = &self.expect_target {
             full_rev("expect_target", expected)?;
         }
+        refuse_files(self.changes.as_deref().unwrap_or_default())?;
         let Some(resolutions) = &self.resolutions else {
             return Ok(());
         };

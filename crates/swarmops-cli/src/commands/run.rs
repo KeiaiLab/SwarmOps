@@ -312,6 +312,7 @@ fn run_land(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
         max_conflict_bytes,
         resolve,
         expect_target,
+        changes,
     } = command
     else {
         unreachable!("run passes land its own command alone");
@@ -329,6 +330,7 @@ fn run_land(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
             req.max_conflict_bytes = max_conflict_bytes;
             req.expect_target = expect_target.map(Rev::from);
             req.resolutions = resolve.as_deref().map(read_resolutions).transpose()?;
+            req.changes = changes.as_deref().map(read_changes).transpose()?;
             Ok((who, req))
         },
         |ops, (who, req)| ops.land(&who, req),

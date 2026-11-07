@@ -42,8 +42,9 @@ pub(crate) const OP_CAP: u64 = 10_000;
 const OP_PAGE: usize = 100;
 
 /// The changesets of an operation the searches ask to list: `stale` reads ref moves only, and
-/// `landed` the land key of the one changeset each operation lists.
-const OP_CHANGESETS: usize = 1;
+/// `landed` the land keys of those each operation lists: a land's one, or the two of a land that
+/// carried changes, the changeset it committed first (the M16 design §4).
+const OP_CHANGESETS: usize = 2;
 
 /// The conflict report of a rebase in progress, in [`SWARMWS_DIR`].
 pub const CONFLICTS_JSON: &str = "conflicts.json";

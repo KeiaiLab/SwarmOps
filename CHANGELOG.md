@@ -43,6 +43,13 @@ collects the changes on `stable` that no release holds yet, until the next relea
   status, its refs or the client's objects that the new page does not list with its reason; so
   far it lists the land refs and a refused push's status
   ([Serve differences](docs/operate/serve-differences.md)).
+- `land --changes FILE|-` (MCP `land` `changes`, `LandReq.changes`) commits a change list on the
+  head and lands it in one call: one lock pass and one journal frame where `commit` then `land`
+  took two, the same changesets as that pair. It needs `-m` (`E_INVALID_ARG`,
+  `details.missing: "message"`); a keyed rerun replays while the changes make the same tree on the
+  same head. `ws land -m` without `--check` lands the workspace's edits so, with no commit of its
+  own; its rerun after a cut carries them again, and a file edited in between makes the key
+  `E_INVALID_ARG`. `op log` calls such a frame a `land` (the M16 design §4).
 
 ### Changed
 

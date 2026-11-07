@@ -317,6 +317,14 @@ pub enum RepoError {
         /// The target's head.
         theirs: ChangesetId,
     },
+    /// A land's change to commit on its head ([`crate::LandRequest::commit`]) is not one on the
+    /// head alone, or moves a ref: a land's `C` has the head as its one parent, and only the land
+    /// moves its target. Nothing was written.
+    #[error("a land's commit must have {head} as its one parent and move no ref")]
+    LandCommit {
+        /// The land's head.
+        head: ChangesetId,
+    },
     /// [`crate::Repo::derive_eager`] was given an `after` past the journal's last frame: no
     /// call of it read that frame, so it is no frame to go on after.
     #[error("frame {after} is past the journal's end")]

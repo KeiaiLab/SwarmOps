@@ -458,6 +458,62 @@ fn a_killed_ws_land_resumes_by_its_key() {
     assert_eq!(main_of(&g), done.land.landed);
 }
 
+/// `ws land -m` without a check carries the edits as its land's changes (the M16 design §4):
+/// the store records their changeset `C` and the landed `L` in one land, with the pending record
+/// holding the key written first. Cut after the store's frame, the re-run with the files as they
+/// were replays that land: one land on main, the workspace on it. A file edited between the cut
+/// and the re-run is another change under the key: `E_INVALID_ARG`, and nothing more lands.
+#[test]
+fn a_cut_ws_land_with_message_replays() {
+    let carried = || {
+        let mut req = land_of("w", None);
+        req.message = Some("carried".to_owned());
+        req
+    };
+
+    // 1. Cut after the frame, then run again.
+    let f = Fixture::new();
+    let (head, main) = behind(&f);
+    let dir = f.beside("w");
+    write(&dir, "src/c.txt", "c\n");
+    let store = Hooked::new(&f.ops);
+    store.crash_after_land.store(true, Ordering::SeqCst);
+    let ctx = f.ctx_over(&store);
+    swarmops_ws::land(&ctx, carried()).unwrap_err();
+    assert!(pending_in(&dir).exists());
+    let first = store.lands()[0].clone();
+    let done = swarmops_ws::land(&ctx, carried()).unwrap();
+    assert_eq!(done.land.status, LandStatus::Replayed);
+    assert_eq!(done.land.landed, first.landed);
+    assert_eq!(
+        (main_of(&f), show(&f, &first.landed).parents),
+        (first.landed.clone(), vec![main])
+    );
+    let made = first.squashed_from.last().expect("C").clone();
+    assert_eq!(first.squashed_from, [head.clone(), made.clone()]);
+    assert_eq!(show(&f, &made).parents, [head]);
+    assert_eq!(
+        state::read(&RealFs::new(), &dir).unwrap().head,
+        first.landed
+    );
+    assert!(!pending_in(&dir).exists());
+
+    // 2. A file edited between the cut and the re-run.
+    let g = Fixture::new();
+    behind(&g);
+    let dir = g.beside("w");
+    write(&dir, "src/c.txt", "c\n");
+    let store = Hooked::new(&g.ops);
+    store.crash_after_land.store(true, Ordering::SeqCst);
+    let ctx = g.ctx_over(&store);
+    swarmops_ws::land(&ctx, carried()).unwrap_err();
+    let landed = store.lands()[0].landed.clone();
+    write(&dir, "src/c.txt", "c 2\n");
+    let refused = swarmops_ws::land(&ctx, carried()).unwrap_err();
+    assert_eq!(refused.code, "E_INVALID_ARG", "{refused:?}");
+    assert_eq!((main_of(&g), store.lands().len()), (landed, 1));
+}
+
 /// Without a check, `ws land` is the store's land of the workspace's chain, merged onto main's
 /// head wherever it moved, and the workspace then stands on what landed.
 #[test]
@@ -1159,8 +1215,9 @@ fn a_cut_land_the_target_left_is_taken_over_by_a_rebase() {
             "{cut:?}"
         );
 
-        // 3. The rebase takes the record over: the workspace on `p`, the record gone.
-        let done = rebase_w(&ctx).unwrap_or_else(|e| panic!("{cut:?}: {e:?}"));
+        // 3. The rebase takes the record over, committing the edits the land carried: the
+        //    workspace on `p`, the record gone.
+        let done = rebase_settling(&ctx).unwrap_or_else(|e| panic!("{cut:?}: {e:?}"));
         assert_eq!(done.onto, p, "{cut:?}");
         let saved = state::read(&RealFs::new(), &dir).unwrap();
         assert_eq!((&saved.base, &saved.target), (&p, &"release/r".to_owned()));
@@ -1202,8 +1259,8 @@ fn a_cut_land_the_target_holds_is_finished_not_taken_over() {
         assert_eq!(refused.code, "E_INVALID_ARG", "{moved_on}: {refused:?}");
         assert!(pending_in(&dir).exists(), "{moved_on}");
 
-        // 3. The land replays: the same changeset, the workspace on it.
-        let done = swarmops_ws::land(&ctx, land_of("w", None)).unwrap();
+        // 3. The land run again replays: the same changeset, the workspace on it.
+        let done = swarmops_ws::land(&ctx, land_with_message()).unwrap();
         assert_eq!(done.land.status, LandStatus::Replayed, "{moved_on}");
         assert_eq!(done.land.landed, first, "{moved_on}");
         let landed: Vec<_> = store.lands().iter().map(|l| l.landed.clone()).collect();
@@ -1230,7 +1287,7 @@ fn a_held_land_replays_past_a_reserved_name() {
 
     // 2. The re-run replays the land and the workspace stands on it.
     let ctx = f.ctx_over(&store);
-    let done = swarmops_ws::land(&ctx, land_of("w", None)).unwrap();
+    let done = swarmops_ws::land(&ctx, land_with_message()).unwrap();
     assert_eq!(done.land.status, LandStatus::Replayed);
     let dir = f.beside("w");
     assert_eq!(state::read(&RealFs::new(), &dir).unwrap().head, first);
@@ -1524,7 +1581,7 @@ fn another_workspaces_land_is_not_the_cut_one() {
     assert_eq!(done.land.status, LandStatus::Landed);
 
     // 2. The rebase takes the cut land's record over.
-    rebase_w(&f.ctx_over(&store)).unwrap();
+    rebase_settling(&f.ctx_over(&store)).unwrap();
     assert!(!pending_in(&f.beside("w")).exists());
 }
 
@@ -2192,7 +2249,7 @@ fn a_key_on_an_older_changeset_is_held() {
     let other = f.side(Some(&p), &[Put::File("src/x.txt", "x\n")]);
     f.point("release/x", &other);
     store.crash_after_land.store(true, Ordering::SeqCst);
-    let mut req = land_of("w", None);
+    let mut req = land_with_message();
     req.target = Some("release/x".to_owned());
     let cut = swarmops_ws::land(&f.ctx_over(&store), req).unwrap_err();
     assert_eq!(cut.code, "E_IO", "{cut:?}");
@@ -2208,7 +2265,7 @@ fn a_key_on_an_older_changeset_is_held() {
     assert!(pending_in(&dir).exists(), "the record went");
 
     // 3. The land replays the first changeset.
-    let done = swarmops_ws::land(&ctx, land_of("w", None)).unwrap();
+    let done = swarmops_ws::land(&ctx, land_with_message()).unwrap();
     assert_eq!(done.land.status, LandStatus::Replayed);
     assert_eq!(done.land.landed, first);
 }
@@ -2229,7 +2286,7 @@ fn a_cut_land_is_placed_in_a_long_journal() {
         watched.fake_older_ops = Some(JOURNAL_CAP + 50);
 
         // 2. The rebase takes the record over.
-        rebase_w(&f.ctx_over(&watched)).unwrap_or_else(|e| panic!("{cut:?}: {e:?}"));
+        rebase_settling(&f.ctx_over(&watched)).unwrap_or_else(|e| panic!("{cut:?}: {e:?}"));
         assert!(!pending_in(&f.beside("w")).exists(), "{cut:?}: a record");
     }
 }
@@ -2252,7 +2309,7 @@ fn a_held_cut_land_is_finished_in_a_long_journal() {
     let refused = rebase_w(&ctx).unwrap_err();
     assert_eq!(refused.code, "E_INVALID_ARG", "{refused:?}");
     assert!(pending_in(&f.beside("w")).exists(), "the record went");
-    let done = swarmops_ws::land(&ctx, land_of("w", None)).unwrap();
+    let done = swarmops_ws::land(&ctx, land_with_message()).unwrap();
     assert_eq!(done.land.status, LandStatus::Replayed);
     assert_eq!(done.land.landed, first);
 }
@@ -2281,7 +2338,7 @@ fn a_cut_land_is_placed_up_to_the_cap() {
         watched.fake_ops = Some(JOURNAL_CAP - depth + pad);
 
         // 2. Within the cap the rebase takes the record over; past it, it stays.
-        let taken = rebase_w(&f.ctx_over(&watched));
+        let taken = rebase_settling(&f.ctx_over(&watched));
         let kept = pending_in(&f.beside("w")).exists();
         if pad == 0 {
             assert!(taken.is_ok() && !kept, "{taken:?} kept={kept}");
@@ -2391,10 +2448,10 @@ fn an_unsettled_case_rename_is_not_a_collision() {
     }
 }
 
-/// The re-run of a land cut short commits no edit, so one made since is not judged: the store
-/// is called, as the record's own land.
+/// The re-run of a land cut short carries the edits again (the M16 design §4), so one made since
+/// is judged with them: a name the target holds in another case is refused before the store.
 #[test]
-fn a_rerun_of_a_cut_land_judges_no_new_edit() {
+fn a_rerun_of_a_cut_land_judges_a_new_edit() {
     // 1. A land with `-m` cut before the store; then a new `src/Readme`, the target holding
     //    `src/README`.
     let f = Fixture::new();
@@ -2406,9 +2463,10 @@ fn a_rerun_of_a_cut_land_judges_no_new_edit() {
     cut_land(&f, &store, Cut::Before);
     write(&f.beside("w"), "src/Readme", "mine\n");
 
-    // 2. The re-run reaches the store.
-    let again = swarmops_ws::land(&f.ctx_over(&store), land_with_message());
-    assert_eq!(store.lands().len(), 1, "{again:?}");
+    // 2. The re-run is refused before the store.
+    let again = swarmops_ws::land(&f.ctx_over(&store), land_with_message()).unwrap_err();
+    assert_eq!(again.code, "E_WS_UNPORTABLE", "{again:?}");
+    assert!(store.lands().is_empty(), "{again:?}");
 }
 
 /// Without `-m` the edits are not committed: a colliding one leaves the workspace dirty, as it

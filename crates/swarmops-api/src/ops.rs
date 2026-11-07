@@ -2488,6 +2488,17 @@ pub struct LandReq {
     /// an `against` that is not a full 64-hex id (`E_INVALID_ARG`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolutions: Option<ResolutionsInput>,
+    /// Changes to commit on `head` first, as a commit's `changes` (the same shape, the same 1
+    /// GiB limit, the same `{"file": path}` rule): the land makes that changeset, `C`, with
+    /// `head` its parent, the lander its author and committer and `message` its message
+    /// (required: without it `E_INVALID_ARG`, `details.missing` `message`), and lands the chain
+    /// since `base` with `C` at its end. `C` and the landed changeset are recorded in one
+    /// transaction, or neither is; `squashed_from` ends at `C`. `base` may be `head` itself. A
+    /// keyed land run again replays when the land it finds squashed a changeset on `head` with
+    /// the tree these changes make, however late it was signed. A list that changes nothing is
+    /// `E_EMPTY_COMMIT`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changes: Option<Vec<ChangeInput>>,
 }
 
 impl LandReq {
@@ -2503,6 +2514,7 @@ impl LandReq {
             max_conflict_bytes: default_max_conflict_bytes(),
             expect_target: None,
             resolutions: None,
+            changes: None,
         }
     }
 }
@@ -2921,7 +2933,8 @@ pub enum OperationKind {
     Commit,
     /// It recorded one changeset and moved a ref to it (`commit` with `advance`).
     Publish,
-    /// It recorded one changeset that names a lander and moved a ref to it (`land`).
+    /// It recorded one changeset that names a lander and moved a ref to it (`land`), with the
+    /// changeset it committed first when the land carried changes.
     Land,
     /// It moved refs and recorded no changeset (`ref set`, `ref delete`, `undo`).
     RefMove,

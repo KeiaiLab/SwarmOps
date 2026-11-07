@@ -22,7 +22,7 @@
 //!   `docs/perf.md` gives them.
 //! - [`load1`] and [`fdatasync_probe`]: the host, as `docs/perf.md`'s tables record it.
 //! - [`CliLander`], with the `cli` feature: a lander through the `swarmops` binary, as an agent
-//!   lands, which commits each change on the head it read, lands it with `land --key`
+//!   lands, which lands each change on the head it read with one `land --changes --key`
 //!   ([`land_key`]), runs a land that ended retryable again with the same key, and reads each
 //!   envelope into a [`LandRecord`].
 
@@ -1462,13 +1462,13 @@ pub fn land_key(lander: usize, land: usize) -> String {
 ///
 /// 1. `cat <target>:REGISTRY`, whose `meta.resolved` names the target's head, and whose result is
 ///    [`REGISTRY`] as that head holds it;
-/// 2. `commit --parent <head>` of the change: its files, and [`REGISTRY`] with the change's line
-///    replaced by the land's [`registry_text`] when it has one ([`with_line`]);
-/// 3. `land <commit> --key <key>` ([`land_key`]): a land that ends retryable, `E_BUSY` or
-///    `E_CAS_RETRY_EXHAUSTED`, runs again with the same key, as an agent would, at most
-///    [`LAND_RERUNS`] times.
+/// 2. `land <head> --changes <file> --key <key> -m <message>` ([`land_key`]), one call that
+///    commits the change on the head and lands it (the M16 design §4): its files, and
+///    [`REGISTRY`] with the change's line replaced by the land's [`registry_text`] when it has
+///    one ([`with_line`]). A land that ends retryable, `E_BUSY` or `E_CAS_RETRY_EXHAUSTED`, runs
+///    again with the same key and changes, as an agent would, at most [`LAND_RERUNS`] times.
 ///
-/// A read or a commit that meets `E_BUSY` runs again too ([`retry_busy`](cli::retry_busy)).
+/// A read that meets `E_BUSY` runs again too ([`retry_busy`](cli::retry_busy)).
 /// Each land's envelope is read into its [`LandRecord`]: the changeset a run that landed or
 /// replayed names, the attempts of every run summed, whether it was relocated, conflicted
 /// (`E_CONFLICT`) or ended exhausted, the `E_BUSY`s it met, and its latency from the read to the
@@ -1534,9 +1534,19 @@ impl<'s, P: Program> CliLander<'s, P> {
             let text = registry_text(self.lander, land);
             puts.push((REGISTRY.to_owned(), with_line(&registry, line, &text)));
         }
-        let commit = self.commit(land, &puts, &head);
         let key = land_key(self.lander, land);
-        let args = ["land", commit.as_str(), "--key", key.as_str()];
+        let changes = self.changes(land, &puts);
+        let message = format!("lander {} land {land}", self.lander);
+        let args = [
+            "land",
+            head.as_str(),
+            "--changes",
+            changes.as_str(),
+            "--key",
+            key.as_str(),
+            "-m",
+            message.as_str(),
+        ];
         let mut record = LandRecord::default();
         let mut reruns = 0;
         let end = loop {
@@ -1584,8 +1594,8 @@ impl<'s, P: Program> CliLander<'s, P> {
         }
     }
 
-    /// Commits `puts`, the files of this lander's land `land`, on `head`: the changeset's id.
-    fn commit(&self, land: usize, puts: &[(String, Vec<u8>)], head: &str) -> String {
+    /// The file of the change list of `puts`, the files of this lander's land `land`.
+    fn changes(&self, land: usize, puts: &[(String, Vec<u8>)]) -> String {
         let texts: Vec<(&str, &str)> = puts
             .iter()
             .map(|(path, content)| {
@@ -1593,23 +1603,7 @@ impl<'s, P: Program> CliLander<'s, P> {
                 (path.as_str(), text)
             })
             .collect();
-        let changes = (self.store).changes_of(&land_key(self.lander, land), &texts);
-        let message = format!("lander {} land {land}", self.lander);
-        let args = [
-            "commit",
-            "-m",
-            &message,
-            "--changes",
-            &changes,
-            "--parent",
-            head,
-        ];
-        let commit = || self.store.run_as(&self.agent, &args, &[]);
-        let run = cli::retry_busy(commit(), commit);
-        let result = run.ok();
-        let id = result["changeset"].as_str();
-        id.unwrap_or_else(|| panic!("a changeset id: {run}"))
-            .to_owned()
+        (self.store).changes_of(&land_key(self.lander, land), &texts)
     }
 }
 

@@ -271,6 +271,23 @@ instead.
 | `--max-attempts N` | 8 | How many times to try to publish before `E_CAS_RETRY_EXHAUSTED`: 1 to 32. |
 | `--max-conflict-bytes N` | 32768 | The most bytes of hunk text a conflict report carries. |
 | `--resolve FILE` | none | Resolutions for a conflict report, as JSON, or `-` for stdin. |
+| `--changes FILE` | none | A change list to commit on HEAD first, or `-` for stdin: the land commits it and lands that changeset in one transaction. Needs `-m`. |
+
+### Commit and land in one call
+
+`land --changes` takes the change list a commit takes and lands it on HEAD in one call: the land
+commits the changes as a changeset whose parent is HEAD, and lands it, in one transaction and one
+journal frame. The result is the same as `commit` then `land` at the same time by the same caller:
+`squashed_from` ends at the committed changeset, which `show` lists. `-m` is required, as both
+changesets take it (`E_INVALID_ARG` with `details.missing: "message"` otherwise); HEAD may be the
+target's head itself. Run again with the same `--key`, the land replays while the changes make the
+same tree on the same HEAD, whenever it runs; other changes under the key are refused.
+
+```sh
+swarmops land "$BASE" --changes log.json -m "add a changelog" --key "$(uuid7)" --human
+```
+
+`ws land -m` without `--check` lands a workspace's edits so: one call, with no commit of its own.
 
 ## Write a change list
 

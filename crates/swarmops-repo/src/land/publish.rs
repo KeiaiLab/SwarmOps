@@ -84,6 +84,9 @@ pub struct Publication {
     pub actor: String,
     /// Whether the lock holder may make it anew on a target that moved.
     pub relocate: Relocate,
+    /// The changeset recorded before it in the same frame, its objects durable: a land's `C`,
+    /// the change it committed on its head (the M16 design §4). `None` for a land without one.
+    pub first: Option<(ChangesetId, Changeset)>,
 }
 
 /// What a publish did.
@@ -301,19 +304,12 @@ fn record(
     p: &Publication,
     frame: Frame<'_>,
 ) -> Result<Published, RepoError> {
-    // 1. The insert, and the target's compare-and-swap.
+    // 1. The inserts, `C` before `L` when the land made one, and the target's compare-and-swap.
+    if let Some((id, made)) = &p.first {
+        insert(&mut write, *id, made)?;
+    }
     let changeset = frame.changeset;
-    let meta = ChangesetMeta::new(
-        frame.id,
-        0,
-        0,
-        changeset.delta_hash()?,
-        changeset.parents.clone(),
-    );
-    write.insert_changeset(meta).map_err(|e| match e {
-        StoreError::MissingParent(parent) => RepoError::UnknownParent(parent),
-        other => other.into(),
-    })?;
+    insert(&mut write, frame.id, changeset)?;
     match write
         .cas_ref(&p.target, Some(frame.onto), Some(frame.id), &p.actor)
         .map_err(repo::ref_error)?
@@ -361,6 +357,21 @@ fn record(
         files_changed: changeset.delta.len(),
         warnings,
     })
+}
+
+/// Queues the insert of `changeset`, whose id is `id`, in `write`: a parent the store no longer
+/// holds is [`RepoError::UnknownParent`].
+fn insert(
+    write: &mut MetaWrite<'_>,
+    id: ChangesetId,
+    changeset: &Changeset,
+) -> Result<(), RepoError> {
+    let meta = ChangesetMeta::new(id, 0, 0, changeset.delta_hash()?, changeset.parents.clone());
+    write.insert_changeset(meta).map_err(|e| match e {
+        StoreError::MissingParent(parent) => RepoError::UnknownParent(parent),
+        other => other.into(),
+    })?;
+    Ok(())
 }
 
 /// The changesets on `actual`'s first-parent line down to `onto`, `actual` first and `onto`

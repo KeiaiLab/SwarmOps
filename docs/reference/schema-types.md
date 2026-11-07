@@ -989,6 +989,7 @@ Kind: object. `swarmops schema LandReq` prints its JSON Schema.
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
 | `base` | [`Rev`](#rev) or `null` | no | Where the change starts: a first-parent ancestor of `head`, whose own changes are not part of it (anything else is `E_INVALID_ARG`). It need not be on the target. When omitted, the merge base of `head` and the target's head, along first parents. |
+| `changes` | array of [`ChangeInput`](#changeinput) or `null` | no | Changes to commit on `head` first, as a commit's `changes` (the same shape, the same 1 GiB limit, the same `{"file": path}` rule): the land makes that changeset, `C`, with `head` its parent, the lander its author and committer and `message` its message (required: without it `E_INVALID_ARG`, `details.missing` `message`), and lands the chain since `base` with `C` at its end. `C` and the landed changeset are recorded in one transaction, or neither is; `squashed_from` ends at `C`. `base` may be `head` itself. A keyed land run again replays when the land it finds squashed a changeset on `head` with the tree these changes make, however late it was signed. A list that changes nothing is `E_EMPTY_COMMIT`. |
 | `expect_target` | [`Rev`](#rev) or `null` | no | Publish only while the target names this changeset (M5): one attempt, and a target that names another is `E_CAS_MISMATCH`, nothing written; `max_attempts` does not apply. With a `head` rebased onto it, the landed tree is the rebased tree. `swarmops mcp` refuses one that is not a full 64-hex id (`E_INVALID_ARG`). |
 | `head` | [`Rev`](#rev) | yes | The changeset to land: the change's head. |
 | `idempotency_key` | `string` or `null` | no | Makes a retry of this land safe: 1 to 64 letters, digits and `-`, such as a uuid v7. A land with a key first looks down the target's first parents, to `base`, for a changeset that landed with the same key: one squashed from this `head` is the replay, which writes nothing (`status` is `replayed`); one from another head is `E_INVALID_ARG`, a key used for another change. A key not found there is looked for on the other `main`, `release/<name>` and branch refs: one that landed on another target is `E_INVALID_ARG` too, and `details.target` names the ref. |
@@ -1217,7 +1218,7 @@ Kind: enumeration. `swarmops schema OperationKind` prints its JSON Schema.
 | --- | --- |
 | `"commit"` | It recorded changesets and moved no ref (`commit`). |
 | `"publish"` | It recorded one changeset and moved a ref to it (`commit` with `advance`). |
-| `"land"` | It recorded one changeset that names a lander and moved a ref to it (`land`). |
+| `"land"` | It recorded one changeset that names a lander and moved a ref to it (`land`), with the changeset it committed first when the land carried changes. |
 | `"ref_move"` | It moved refs and recorded no changeset (`ref set`, `ref delete`, `undo`). |
 | `"compaction"` | It recorded a compaction of the changeset index, and nothing else. |
 | `"mixed"` | Any other mix of changesets, ref moves and compactions. |

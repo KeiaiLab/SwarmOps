@@ -98,7 +98,7 @@ fn start(
     // 2. The names onto's head holds that the files cannot, and those of the edits `-m`
     //    commits, are refused before anything is dropped, settled or recorded.
     let left = left_land(ctx, ws)?;
-    let edits = unsettled(ctx, ws, message.as_deref(), PendingOp::Rebase)?;
+    let edits = unsettled(ctx, ws, message.as_deref(), PendingOp::Rebase, Rerun::Waits)?;
     check_onto(ctx, ws, onto, &edits)?;
     let landed_key = take_over(ctx, ws, left, onto)?;
 
@@ -497,15 +497,25 @@ pub(crate) fn settle_edits(
     }
 }
 
-/// The edits of workspace `ws` that a call `op` with `message` commits before it moves the
-/// workspace, where their names are judged: a volume that folds case. None when the call has no
-/// message, the files stand for another changeset (see [`settle_edits`]), or its own cut record
-/// is there to re-run instead.
+/// What the re-run of a call's own cut record does with the workspace's edits ([`unsettled`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Rerun {
+    /// Settles none: they wait for the next call.
+    Waits,
+    /// Carries them: a `ws land -m` without a check sends them as its land's changes.
+    Carries,
+}
+
+/// The edits of workspace `ws` that a call `op` with `message` commits, or carries, before it
+/// moves the workspace, where their names are judged: a volume that folds case. None when the
+/// call has no message, the files stand for another changeset (see [`settle_edits`]), or its own
+/// cut record is there to re-run instead and `rerun` says the re-run settles none.
 pub(crate) fn unsettled(
     ctx: &Ctx<'_>,
     ws: &Workspace,
     message: Option<&str>,
     op: PendingOp,
+    rerun: Rerun,
 ) -> Result<Vec<Change>, OpError> {
     // 1. Nothing is committed without a message, on files of another changeset, or where case
     //    is not folded.
@@ -514,9 +524,9 @@ pub(crate) fn unsettled(
         return Ok(Vec::new());
     }
 
-    // 2. Nor when the call's own record is re-run, which settles nothing.
+    // 2. Nor when the call's own record is re-run, unless that re-run carries them.
     let cut = pending::read_pending(ctx.fs.as_ref(), &ws.dir)?;
-    if cut.is_some_and(|cut| cut.op == op && cut.head == ws.file.head) {
+    if rerun == Rerun::Waits && cut.is_some_and(|cut| cut.op == op && cut.head == ws.file.head) {
         return Ok(Vec::new());
     }
 

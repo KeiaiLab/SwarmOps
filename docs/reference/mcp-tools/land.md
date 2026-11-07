@@ -2,7 +2,7 @@
 
 # land
 
-Merges head (with its first-parent chain since base) three-way onto target, main by default, and publishes the result as one changeset in one transaction; on E\_CONFLICT, details.report lists each conflict: resolve them with resolutions, against the report's theirs, its full 64-hex id (a path the target changed since comes back in the report's stale). Give idempotency\_key to make a retry safe.
+Merges head (with its first-parent chain since base) three-way onto target, main by default, and publishes the result as one changeset in one transaction; on E\_CONFLICT, details.report lists each conflict: resolve them with resolutions, against the report's theirs, its full 64-hex id (a path the target changed since comes back in the report's stale). Give idempotency\_key to make a retry safe. With changes (a commit's list) and message it commits them on head first and lands that changeset in the same transaction: one call, one record.
 
 ```yaml
 title: "land"
@@ -24,6 +24,7 @@ max_result_chars: null
 | Field | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
 | `base` | string or null | no |  | Where the change starts: a first-parent ancestor of `head`, whose own changes are not part of it (anything else is `E_INVALID_ARG`). It need not be on the target. When omitted, the merge base of `head` and the target's head, along first parents. |
+| `changes` | array of object or null | no |  | Changes to commit on `head` first, as a commit's `changes` (the same shape, the same 1 GiB limit, the same `{"file": path}` rule): the land makes that changeset, `C`, with `head` its parent, the lander its author and committer and `message` its message (required: without it `E_INVALID_ARG`, `details.missing` `message`), and lands the chain since `base` with `C` at its end. `C` and the landed changeset are recorded in one transaction, or neither is; `squashed_from` ends at `C`. `base` may be `head` itself. A keyed land run again replays when the land it finds squashed a changeset on `head` with the tree these changes make, however late it was signed. A list that changes nothing is `E_EMPTY_COMMIT`. |
 | `expect_target` | string or null | no |  | Publish only while the target names this changeset (M5): one attempt, and a target that names another is `E_CAS_MISMATCH`, nothing written; `max_attempts` does not apply. With a `head` rebased onto it, the landed tree is the rebased tree. `swarmops mcp` refuses one that is not a full 64-hex id (`E_INVALID_ARG`). |
 | `head` | string | yes |  | The changeset to land: the change's head. A revision as the caller wrote it, for the store to resolve: a ref name (`main`, `release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, optionally followed by `~N` for the N-th first-parent ancestor. |
 | `idempotency_key` | string or null | no |  | Makes a retry of this land safe: 1 to 64 letters, digits and `-`, such as a uuid v7. A land with a key first looks down the target's first parents, to `base`, for a changeset that landed with the same key: one squashed from this `head` is the replay, which writes nothing (`status` is `replayed`); one from another head is `E_INVALID_ARG`, a key used for another change. A key not found there is looked for on the other `main`, `release/<name>` and branch refs: one that landed on another target is `E_INVALID_ARG` too, and `details.target` names the ref. |
@@ -54,6 +55,135 @@ Its descriptions' citations of the design documents are left out here.
         }
       ],
       "description": "Where the change starts: a first-parent ancestor of `head`, whose own changes are not part\nof it (anything else is `E_INVALID_ARG`). It need not be on the target. When omitted, the\nmerge base of `head` and the target's head, along first parents."
+    },
+    "changes": {
+      "description": "Changes to commit on `head` first, as a commit's `changes` (the same shape, the same 1\nGiB limit, the same `{\"file\": path}` rule): the land makes that changeset, `C`, with\n`head` its parent, the lander its author and committer and `message` its message\n(required: without it `E_INVALID_ARG`, `details.missing` `message`), and lands the chain\nsince `base` with `C` at its end. `C` and the landed changeset are recorded in one\ntransaction, or neither is; `squashed_from` ends at `C`. `base` may be `head` itself. A\nkeyed land run again replays when the land it finds squashed a changeset on `head` with\nthe tree these changes make, however late it was signed. A list that changes nothing is\n`E_EMPTY_COMMIT`.",
+      "items": {
+        "description": "One change of a commit.",
+        "properties": {
+          "content": {
+            "anyOf": [
+              {
+                "description": "A `put`'s content, as an object with one key.",
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "description": "UTF-8 text, verbatim.",
+                    "properties": {
+                      "inline": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "inline"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "description": "Bytes in standard, padded base64.",
+                    "properties": {
+                      "base64": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "base64"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "description": "A blob the store holds already, by its id (64 hex digits), as `blob_put` returns it: the\ncommit neither sends nor reads its bytes. An id the store holds no blob under (none, or\na tree's or a changeset's) is `E_INVALID_ARG`, and nothing is written. `blob_put` takes\nthe other forms only.",
+                    "properties": {
+                      "blob": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "blob"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "description": "A file on the client's machine. The client reads it and sends its bytes, so the store is\nnever asked to read a path.",
+                    "properties": {
+                      "file": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "file"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The new content, at most 512 MiB (more is `E_TOO_LARGE` with `scope` `put`); a `put` needs\nit, a `delete` takes none."
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "description": "The kind of entry a `put` writes.",
+                "oneOf": [
+                  {
+                    "const": "file",
+                    "description": "A regular file (git mode 100644).",
+                    "type": "string"
+                  },
+                  {
+                    "const": "exec",
+                    "description": "An executable file (git mode 100755).",
+                    "type": "string"
+                  },
+                  {
+                    "const": "symlink",
+                    "description": "A symlink; the content is the link's target.",
+                    "type": "string"
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The kind of entry a `put` writes; `file` when omitted."
+          },
+          "op": {
+            "description": "Whether to write the path or remove it. What a change does to its path, in a commit's change list and a changeset's changes alike.",
+            "oneOf": [
+              {
+                "const": "put",
+                "description": "Write the content at the path, creating or replacing the entry.",
+                "type": "string"
+              },
+              {
+                "const": "delete",
+                "description": "Remove the path.",
+                "type": "string"
+              }
+            ]
+          },
+          "path": {
+            "description": "The repository path: `/`-separated, relative to the root.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "op"
+        ],
+        "type": "object"
+      },
+      "type": [
+        "array",
+        "null"
+      ]
     },
     "expect_target": {
       "anyOf": [

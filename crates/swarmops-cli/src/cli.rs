@@ -435,6 +435,11 @@ pub enum Command {
         resolve: Option<String>,
         #[arg(long, value_name = "ID", help = EXPECT_TARGET_HELP)]
         expect_target: Option<String>,
+        /// A JSON file holding an array of changes to commit on HEAD first, or - for stdin: at
+        /// most 64 MiB. The land commits them and lands that changeset in one transaction; needs
+        /// --message, which both changesets take.
+        #[arg(long, value_name = "FILE")]
+        changes: Option<String>,
     },
     /// Merge a change three-way onto a ref's head and record the result there as one changeset,
     /// moving no ref.

@@ -125,7 +125,8 @@ pub(crate) fn repo_error(e: RepoError, during: During<'_>) -> OpError {
         | RepoError::KeyReused { .. }
         | RepoError::MergeChangeset(_)
         | RepoError::BaseNotAncestor { .. }
-        | RepoError::NoMergeBase { .. }) => land_error(e, message),
+        | RepoError::NoMergeBase { .. }
+        | RepoError::LandCommit { .. }) => land_error(e, message),
         RepoError::MissingObject { id, .. } => {
             corrupt(message, during, "swarmops verify").with_details(object(id))
         }
@@ -236,6 +237,8 @@ fn land_error(e: RepoError, message: String) -> OpError {
                 ("theirs", theirs.to_string().into()),
             ]))
             .with_hint(hint(format!("swarmops log {head}"))),
+        RepoError::LandCommit { head } => error(ErrorCode::InvalidArg, message)
+            .with_details(details([("head", head.to_string().into())])),
         other => repo_error(other, During::Op),
     }
 }

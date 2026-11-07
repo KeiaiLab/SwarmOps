@@ -112,6 +112,60 @@ pub(crate) fn commit_in(
     commit_with(ctx, ws, message, named, modes, OffPrefixes::Leave)
 }
 
+/// A workspace's edits, scanned and hashed, before anything is sent: what a commit takes, and
+/// what `ws land -m` carries as its land's changes (the M16 design §4).
+pub(crate) struct Edits {
+    /// The paths written or removed, sorted.
+    entries: Vec<Entry>,
+    /// The scan that found them, whose index learns them once a changeset holds them.
+    scanned: scan::Scanned,
+}
+
+impl Edits {
+    /// The change list of the edits, the blobs the store lacks inline under the budget and put
+    /// alone past it.
+    pub(crate) fn changes(
+        &self,
+        ctx: &Ctx<'_>,
+        ws: &Workspace,
+    ) -> Result<Vec<ChangeInput>, OpError> {
+        let sent = upload(ctx, ws, &self.entries, INLINE_BYTES)?;
+        (self.entries.iter())
+            .map(|entry| change_input(entry, &sent))
+            .collect()
+    }
+
+    /// Workspace `ws` standing on `changeset`, which holds the edits on its head: `workspace.json`
+    /// (WS2), then the index learns them.
+    pub(crate) fn settle(
+        self,
+        ctx: &Ctx<'_>,
+        ws: &mut Workspace,
+        changeset: &str,
+    ) -> Result<(), OpError> {
+        let mut file = ws.file.clone();
+        changeset.clone_into(&mut file.head);
+        changeset.clone_into(&mut file.materialized);
+        file.onto = None;
+        state::replace(ctx.fs.as_ref(), &ws.dir, &file)?;
+        ws.file = file;
+        let Edits {
+            entries,
+            mut scanned,
+        } = self;
+        learn(&mut scanned.index, &entries);
+        scanned.keep(&ws.dir, &scan::binding_of(ws), Keep::Always);
+        Ok(())
+    }
+}
+
+/// The edits of workspace `ws` that `ws land -m` lands, every path, those off a sparse
+/// workspace's prefixes left as they are; `None` when there are none.
+pub(crate) fn edits(ctx: &Ctx<'_>, ws: &Workspace) -> Result<Option<Edits>, OpError> {
+    let edits = stage(ctx, ws, &[], &BTreeMap::new(), OffPrefixes::Leave)?;
+    Ok((!edits.entries.is_empty()).then_some(edits))
+}
+
 /// [`commit_in`], doing with the edits the scan meets off the prefixes what `off` says.
 fn commit_with(
     ctx: &Ctx<'_>,
@@ -121,6 +175,68 @@ fn commit_with(
     modes: &BTreeMap<String, FileKind>,
     off: OffPrefixes,
 ) -> Result<WsCommitResp, OpError> {
+    // 1. Steps 1 to 6: the edits, or nothing, an empty commit, and on a whole scan no commit
+    //    cut short left to redo.
+    let edits = stage(ctx, ws, named, modes, off)?;
+    if edits.entries.is_empty() {
+        if named.is_empty() {
+            drop_cut_commit(ctx, ws)?;
+        }
+        return Err(OpError::new(
+            ErrorCode::EmptyCommit,
+            "the workspace has no change to commit",
+        ));
+    }
+
+    // 7. The pending record, durable before the store hears of the commit (WS1).
+    let key = pending_key(ctx, ws)?;
+
+    // 8. The blobs the store lacks: inline under the budget, put alone past it.
+    let sent = upload(ctx, ws, &edits.entries, INLINE_BYTES)?;
+    let puts = (sent.values())
+        .filter(|sent| matches!(sent, Sent::Put(true)))
+        .count();
+
+    // 9. The commit, by blob id or inline, on the head's full id.
+    let changes = (edits.entries.iter())
+        .map(|entry| change_input(entry, &sent))
+        .collect::<Result<_, _>>()?;
+    let mut req = CommitReq::new(changes, message);
+    req.parent = Some(ws.file.head.as_str().into());
+    req.idempotency_key = Some(key);
+    let done = match ctx.store.commit(&ws.who, req) {
+        // A refusal wrote nothing: its record has nothing to replay.
+        Err(e) if refused(&e) => {
+            pending::remove_pending(ctx.fs.as_ref(), &ws.dir)?;
+            return Err(e);
+        }
+        done => done?,
+    };
+    let blobs_written = u64::try_from(puts).unwrap_or(u64::MAX) + done.blobs_written;
+
+    // 10. The workspace stands on it (WS2); the index learns it; the record goes.
+    let parent = ws.file.head.clone();
+    edits.settle(ctx, ws, &done.changeset)?;
+    pending::remove_pending(ctx.fs.as_ref(), &ws.dir)?;
+
+    Ok(WsCommitResp::new(
+        done.changeset,
+        parent,
+        done.files_changed,
+        blobs_written,
+        done.replayed,
+    ))
+}
+
+/// Steps 1 to 6 of [`commit_with`]: the edits under `named` (every path when empty) with
+/// `modes`, scanned, checked and hashed; none sent.
+fn stage(
+    ctx: &Ctx<'_>,
+    ws: &Workspace,
+    named: &[String],
+    modes: &BTreeMap<String, FileKind>,
+    off: OffPrefixes,
+) -> Result<Edits, OpError> {
     // 1. Not rebasing; a mode only where the volume drops the bit.
     if let State::Rebasing { .. } = ws.file.state {
         return Err(OpError::new(
@@ -154,20 +270,10 @@ fn commit_with(
         refuse_outside(scanned.outside.clone())?;
     }
 
-    // 4. The entries: each change, and each mode asked for; nothing, an empty commit, and on a
-    //    whole scan no commit cut short left to redo.
+    // 4. The entries: each change, and each mode asked for.
     let mut entries = entries_of(&scanned.changes, modes);
     entries.extend(mode_only(&scanned.index, &scanned.changes, modes));
     entries.sort_by(|a, b| a.path.cmp(&b.path));
-    if entries.is_empty() {
-        if named.is_empty() {
-            drop_cut_commit(ctx, ws)?;
-        }
-        return Err(OpError::new(
-            ErrorCode::EmptyCommit,
-            "the workspace has no change to commit",
-        ));
-    }
 
     // 5. No file past what an object holds, before anything is read or sent.
     if let Some(entry) =
@@ -179,53 +285,7 @@ fn commit_with(
 
     // 6. The bytes the scan did not hash, hashed under the budget.
     hash_missing(ctx, ws, &mut entries)?;
-
-    // 7. The pending record, durable before the store hears of the commit (WS1).
-    let key = pending_key(ctx, ws)?;
-
-    // 8. The blobs the store lacks: inline under the budget, put alone past it.
-    let sent = upload(ctx, ws, &entries, INLINE_BYTES)?;
-    let puts = (sent.values())
-        .filter(|sent| matches!(sent, Sent::Put(true)))
-        .count();
-
-    // 9. The commit, by blob id or inline, on the head's full id.
-    let changes = (entries.iter())
-        .map(|entry| change_input(entry, &sent))
-        .collect::<Result<_, _>>()?;
-    let mut req = CommitReq::new(changes, message);
-    req.parent = Some(ws.file.head.as_str().into());
-    req.idempotency_key = Some(key);
-    let done = match ctx.store.commit(&ws.who, req) {
-        // A refusal wrote nothing: its record has nothing to replay.
-        Err(e) if refused(&e) => {
-            pending::remove_pending(ctx.fs.as_ref(), &ws.dir)?;
-            return Err(e);
-        }
-        done => done?,
-    };
-    let blobs_written = u64::try_from(puts).unwrap_or(u64::MAX) + done.blobs_written;
-
-    // 10. The workspace stands on it (WS2); the index learns it; the record goes.
-    let parent = ws.file.head.clone();
-    let mut file = ws.file.clone();
-    file.head.clone_from(&done.changeset);
-    file.materialized.clone_from(&done.changeset);
-    file.onto = None;
-    state::replace(ctx.fs.as_ref(), &ws.dir, &file)?;
-    ws.file = file;
-    let mut scanned = scanned;
-    learn(&mut scanned.index, &entries);
-    scanned.keep(&ws.dir, &scan::binding_of(ws), Keep::Always);
-    pending::remove_pending(ctx.fs.as_ref(), &ws.dir)?;
-
-    Ok(WsCommitResp::new(
-        done.changeset,
-        parent,
-        done.files_changed,
-        blobs_written,
-        done.replayed,
-    ))
+    Ok(Edits { entries, scanned })
 }
 
 /// The modes asked for, by repository path: `exec` or `file` only.

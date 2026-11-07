@@ -1230,6 +1230,63 @@ fn mcp_land_publishes_and_reports() {
     store.assert_clean("after the lands");
 }
 
+/// The `land` tool carries changes (the M16 design §4): it commits them on `head` and lands that
+/// changeset, `C`, in one operation; `squashed_from` ends at `C`. A client file among the
+/// changes names a relative path: refused before the store is called, as a commit's is; no
+/// message: `E_INVALID_ARG`, `details.missing` `message`.
+#[test]
+fn mcp_land_with_changes_lands_in_one_op() {
+    let store = Store::init();
+    let mut server = Server::start(&["--repo", store.path(), "--as", AGENT], &[]);
+    server.initialize();
+    let first = json!({"message": "t0", "changes": [{"path": "t0", "op": "put",
+                                                    "content": {"inline": "t0"}}]});
+    let t0 = server.ok("commit", first)["result"]["changeset"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    server.ok(
+        "ref_set",
+        json!({"name": "main", "new": t0, "create": true}),
+    );
+    let ops = |server: &mut Server| {
+        server.ok("op_log", json!({"limit": 10}))["result"]["ops"]
+            .as_array()
+            .unwrap()
+            .len()
+    };
+    let before = ops(&mut server);
+
+    // 1. Refused: a relative client file, then no message.
+    let relative = json!({"head": t0, "message": "m", "changes": [{"path": "b", "op": "put",
+                                                                  "content": {"file": "b"}}]});
+    server.err("land", relative, "E_INVALID_ARG");
+    let unsaid = json!({"head": t0, "changes": [{"path": "b", "op": "put",
+                                                 "content": {"inline": "b"}}]});
+    let refused = server.err("land", unsaid, "E_INVALID_ARG");
+    assert_eq!(
+        refused["error"]["details"],
+        json!({"missing": "message"}),
+        "{refused}"
+    );
+
+    // 2. Landed in one operation.
+    let arguments = json!({"head": t0, "message": "the change", "idempotency_key": "mcp-land-2",
+                           "changes": [{"path": "b", "op": "put", "content": {"inline": "b"}}]});
+    let landed = server.ok("land", arguments);
+    let squashed = landed["result"]["squashed_from"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let made = server.ok("show", json!({"rev": squashed[0]}));
+    assert_eq!(made["result"]["parents"], json!([t0]), "{made}");
+    assert_eq!(ops(&mut server), before + 1);
+    let newest = server.ok("op_log", json!({"limit": 1}));
+    assert_eq!(newest["result"]["ops"][0]["kind"], "land", "{newest}");
+    server.finish_clean();
+    store.assert_clean("after the land");
+}
+
 /// A land whose change conflicts is a failed call (`isError`) whose envelope's error is
 /// `E_CONFLICT` (exit 3, not retryable), with the conflict report in `details.report` and a hint
 /// that reads the target's side first; nothing is recorded. `max_conflict_bytes` bounds the

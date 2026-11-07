@@ -122,12 +122,16 @@ left).
   conflict), or the target moved off the first-parent line through the head the land read, or
   more than 256 changesets along it; a land with `expect_target` (`ws land --check`) never
   relocates. An agent that meets
-  `E_CAS_RETRY_EXHAUSTED` lands again with the same key, or asks for more attempts. Each land
-  takes the lock twice, for its `commit` and for its `land`, about 25 ms together, so at 25 lands
-  a second the lock is held about 62 % of the time and the tail is the queue's wait, not the hold
-  (on the bench disk in M14's window the two took about 42 ms at the median, the lock was held
-  99.6 % of the run and the p99 rose to 2.5–2.7 s, for v0.6.0's code as for M14's;
-  [perf.md](perf.md#v070--2026-10-29)). *Open: G4's p99 (goals.md). Found: the 2026-10-20 plan
+  `E_CAS_RETRY_EXHAUSTED` lands again with the same key, or asks for more attempts. Up to
+  v0.8.0 each land took the lock twice, for its `commit` and for its `land`, about 25 ms together,
+  so at 25 lands a second the lock was held about 62 % of the time and the tail was the queue's
+  wait, not the hold (on the bench disk in M14's window the two took about 42 ms at the median,
+  the lock was held 99.6 % of the run and the p99 rose to 2.5–2.7 s, for v0.6.0's code as for
+  M14's; [perf.md](perf.md#v070--2026-10-29)). A land with `changes` (`land --changes`, `ws land
+  -m` without `--check`) now takes it once, its commit and its land in one frame (the M16 design
+  §4); G4's harness lands so, and its p99 is measured again after this lands. A `ws land` record
+  left on the parent of the workspace's head is taken over when its key landed on its target (a
+  land that carried edits, cut once the workspace stood on their changeset). *Open: G4's p99 (goals.md). Found: the 2026-10-20 plan
   triage; narrowed by v0.6.0; its cause measured in M14.*
 - **Recovery after a crash walks all of a FORMAT 1 `journal.off` under the lock.** Before it cuts
   or lists anything, the first writer after a crash checks every entry of a FORMAT 1 store's

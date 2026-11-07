@@ -8,10 +8,12 @@
 //!  lock → a base the target left, on the workspace's own target (E_WS_STALE, nothing written)
 //!       → names the target gained that the files cannot hold (E_WS_UNPORTABLE, nothing
 //!         written), unless the store only replays a land the target holds
-//!       → edits committed (-m) or E_WS_DIRTY → the land key K
+//!       → edits carried (-m without --check), committed (-m with it) or E_WS_DIRTY → the
+//!         land key K
 //!
 //!  without --check (mode merge by default):
-//!    pending {K, landing} → land{head, base, key: K[, expect_target: onto]} → files to L
+//!    pending {K, landing} → land{head, base, key: K[, expect_target: onto][, changes: the
+//!    edits]} → the workspace on C, the edits' changeset, when it carried them → files to L
 //!
 //!  with --check (mode exact by default), attempt n = 1..max_attempts:
 //!    pending {K, rebase_key R_n, rebasing} → rebase{key: R_n} → H' on T, files moved
@@ -25,7 +27,9 @@
 //!
 //! A land cut short keeps its pending record: a re-run takes its keys, so the store replays the
 //! same `H'` (the attempt's rebase key) and the same land (`K`); one cut after its land's frame
-//! goes straight to that land, which the store answers `replayed`.
+//! goes straight to that land, which the store answers `replayed`. A land that carried the edits
+//! (the M16 design §4) carries them again: the store replays it while they make the same tree on
+//! the same head, and refuses the key (`E_INVALID_ARG`) once a file changed in between.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -33,15 +37,15 @@ use std::time::Duration;
 use serde_json::{Map, Value};
 use swarmops_api::{
     DEFAULT_MAX_CONFLICT_BYTES, ErrorCode, LandMode, LandReq, LandResp, MAX_LAND_ATTEMPTS, OpError,
-    ResolveRevReq, StatusAfter, WsCheckInput, WsLandReq, WsLandResp,
+    ResolveRevReq, ShowReq, StatusAfter, WsCheckInput, WsLandReq, WsLandResp,
 };
 
 use crate::check::{self, Subject};
-use crate::commit;
+use crate::commit::{self, Edits};
 use crate::io_error::unknown_variant;
 use crate::materialize;
 use crate::pending::{self, Pending, PendingOp};
-use crate::rebase;
+use crate::rebase::{self, Rerun};
 use crate::scan;
 use crate::state::State;
 use crate::status::{self, Landed, Stale};
@@ -96,6 +100,9 @@ struct Landing<'c, 'a> {
     mode: LandMode,
     /// The attempts a checked land makes; the store's own for an unchecked merge.
     max_attempts: u32,
+    /// The edits the land carries as its changes (`-m` without `--check`); none when there are
+    /// none, or the land commits them first.
+    edits: Option<Edits>,
 }
 
 /// `ws_land` in the workspace `req` names.
@@ -148,17 +155,26 @@ pub fn land(ctx: &Ctx<'_>, req: WsLandReq) -> Result<WsLandResp, OpError> {
     }
 
     // 4. Names the target gained that the files cannot hold, and those of the edits `-m`
-    //    commits: refused before the store lands, unless the store only replays a land cut
-    //    short that the target holds.
+    //    commits or carries: refused before the store lands, unless the store only replays a
+    //    land cut short that the target holds.
+    let rerun = match (&check, &message) {
+        (None, Some(_)) => Rerun::Carries,
+        _ => Rerun::Waits,
+    };
     if !replays(ctx, &ws, &target)? {
         let head = ctx.store.resolve_rev(ResolveRevReq::new(target.as_str()))?;
-        let edits = rebase::unsettled(ctx, &ws, message.as_deref(), PendingOp::Land)?;
+        let edits = rebase::unsettled(ctx, &ws, message.as_deref(), PendingOp::Land, rerun)?;
         materialize::preflight(ctx, &ws, &head.id, &edits)?;
     }
 
-    // 5. A land cut short: its keys; else the edits settled and something to land.
+    // 5. A land cut short: its keys. `-m` without `--check`: the edits carried, if any, the
+    //    land's run again too (the M16 design §4). Else the edits settled and something to land.
     let cut = cut_land(ctx, &ws)?;
-    if cut.is_none() {
+    let edits = match rerun {
+        Rerun::Carries if ws.file.materialized == ws.file.head => commit::edits(ctx, &ws)?,
+        _ => None,
+    };
+    if cut.is_none() && edits.is_none() {
         rebase::settle_edits(ctx, &mut ws, message.clone(), &BTreeSet::new())?;
         if ws.file.head == ws.file.base {
             return Err(OpError::new(
@@ -180,6 +196,7 @@ pub fn land(ctx: &Ctx<'_>, req: WsLandReq) -> Result<WsLandResp, OpError> {
         message,
         mode,
         max_attempts,
+        edits,
     };
     let record = if cut.is_some() {
         Record::Written
@@ -199,8 +216,11 @@ impl Landing<'_, '_> {
     /// The land without a check: one store land, exact onto the recorded `onto` or merged.
     /// `record`: whether its pending record is there already.
     fn once(&mut self, record: Record) -> Result<LandResp, OpError> {
-        // 1. Exact: onto the target's head the last rebase merged onto, which a commit clears.
-        let exact = self.mode == LandMode::Exact && self.ws.file.target == self.target;
+        // 1. Exact: onto the target's head the last rebase merged onto, which a commit clears,
+        //    as edits carried would.
+        let exact = self.mode == LandMode::Exact
+            && self.ws.file.target == self.target
+            && self.edits.is_none();
         let expect = self.ws.file.onto.clone().filter(|_| exact);
         if self.mode == LandMode::Exact && expect.is_none() {
             return Err(no_rebase());
@@ -300,10 +320,21 @@ impl Landing<'_, '_> {
         req.max_attempts = self.max_attempts;
         req.max_conflict_bytes = DEFAULT_MAX_CONFLICT_BYTES;
         req.expect_target = expect.map(Into::into);
+        let edits = self.edits.take();
+        if let Some(edits) = &edits {
+            req.changes = Some(edits.changes(ctx, &self.ws)?);
+        }
         let done = ctx.store.land(&self.ws.who, req);
         let done = rebase::finish_call(ctx, &self.ws, done)?;
 
-        // 2. The workspace on it: files, then workspace.json (WS2); the record goes.
+        // 2. Edits carried: the workspace on C, which holds them, as their commit leaves it; the
+        //    record follows it there, so that a re-run cut short after this replays L from C.
+        if let (Some(edits), Some(made)) = (edits, done.squashed_from.last()) {
+            edits.settle(ctx, &mut self.ws, made)?;
+            self.write(None, 1, LANDING)?;
+        }
+
+        // 3. The workspace on L: files, then workspace.json (WS2); the record goes.
         let ws = &mut self.ws;
         ws.file.head.clone_from(&done.landed);
         ws.file.base.clone_from(&done.landed);
@@ -346,14 +377,48 @@ fn replays(ctx: &Ctx<'_>, ws: &Workspace, target: &str) -> Result<bool, OpError>
     Ok(status::landed(ctx.store, target, &cut.key, &cut.head)? == Landed::Held)
 }
 
-/// The record of a `ws land` cut short on workspace `ws`'s head, in either state.
+/// The record of a `ws land` cut short on workspace `ws`'s head, in either state; one a land
+/// that carried edits left on the head before them is taken onto `ws`'s head ([`trailing`]).
 fn cut_land(ctx: &Ctx<'_>, ws: &Workspace) -> Result<Option<Pending>, OpError> {
     let found = pending::read_pending(ctx.fs.as_ref(), &ws.dir)?;
+    if let Some(cut) = &found
+        && trailing(ctx, ws, cut)?
+    {
+        let mut cut = cut.clone();
+        cut.head.clone_from(&ws.file.head);
+        pending::write_pending(ctx.fs.as_ref(), &ws.dir, &cut)?;
+        return Ok(Some(cut));
+    }
     let state = match &found {
         Some(cut) if cut.op == PendingOp::Land => cut.state.clone(),
         _ => LANDING.to_owned(),
     };
     rebase::cut_short(ctx, ws, PendingOp::Land, &state)
+}
+
+/// Whether `cut` is the record of a land that carried edits, cut once the workspace stood on
+/// `C` and before the record followed it there (the M16 design §4): a land record on the
+/// workspace's head's parent, the files standing for the head, and the record's key landed on
+/// its target. Its re-run lands the head with that key: the store's replay.
+fn trailing(ctx: &Ctx<'_>, ws: &Workspace, cut: &Pending) -> Result<bool, OpError> {
+    // 1. A land record one step behind a head the files stand for.
+    let behind = cut.op == PendingOp::Land
+        && cut.state == LANDING
+        && cut.head != ws.file.head
+        && ws.file.materialized == ws.file.head;
+    if !behind {
+        return Ok(false);
+    }
+    let mut req = ShowReq::new(ws.file.head.as_str());
+    req.max_changes = 1;
+    let head = ctx.store.show(req)?;
+    if head.parents.first() != Some(&cut.head) {
+        return Ok(false);
+    }
+
+    // 2. Its key landed on its target.
+    let target = cut.target.as_deref().unwrap_or(&ws.file.target);
+    Ok(status::landed(ctx.store, target, &cut.key, &ws.file.head)? == Landed::Held)
 }
 
 /// The check `input` asks for, of workspace `seen` landing on `target`: its command, or the

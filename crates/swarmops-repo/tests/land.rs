@@ -548,6 +548,160 @@ fn a_key_reused_for_another_head_is_refused() {
     assert_eq!((frame_count(&root), main_head(&repo)), (frames, landed));
 }
 
+/// The change a land with changes commits on `head`: `b` put, by [`ACTOR`], signed at `secs`.
+fn change_on(head: ChangesetId, content: &[u8], secs: i64) -> CommitRequest {
+    let mut change = by(ACTOR, &[head], vec![put("b", content)]);
+    let signed = Signature::new(
+        ACTOR.as_bytes().to_vec(),
+        b"agent@test.swarmops.local".to_vec(),
+        secs,
+        0,
+        false,
+    )
+    .unwrap();
+    change.author = signed.clone();
+    change.committer = signed;
+    change.message = b"the change\n".to_vec();
+    change
+}
+
+/// [`keyed`], the land committing `change` on its head first.
+fn keyed_with(head: ChangesetId, key: &str, change: CommitRequest) -> LandRequest {
+    let mut land = keyed(head, key);
+    land.commit = Some(change);
+    land
+}
+
+/// A store whose `main` moved past the head a change is made on: `(t0, head)`, `main` on a
+/// changeset of [`OTHER`]'s on `t0`, so that a land of the change merges.
+fn moved_store(repo: &LocalRepo) -> ChangesetId {
+    let t0 = advance(repo, ACTOR, &[], vec![put("a", b"a\n")]);
+    let head = commit_by(repo, ACTOR, &[t0], vec![put("h", b"h\n")]);
+    advance(repo, OTHER, &[t0], vec![put("c", b"c\n")]);
+    head
+}
+
+/// A land with changes is a commit, then a land, in one frame (the M16 design §4): two stores of
+/// the same history, one committing the change and landing it, the other landing it with the
+/// change, make the same `C` and the same `L`, `squashed_from` ending in `C`; the first writes two
+/// frames, the second one.
+#[test]
+fn a_land_with_changes_equals_commit_then_land() {
+    let (_a_dir, a_root, a) = new_store();
+    let (_b_dir, b_root, b) = new_store();
+    let head = moved_store(&a);
+    assert_eq!(moved_store(&b), head);
+    let change = change_on(head, b"b\n", 1_760_000_050);
+
+    // 1. Commit, then land.
+    let a_frames = frame_count(&a_root);
+    let c = a.commit(change.clone()).unwrap().id;
+    let two_calls = a.land(keyed(c, "key-1")).unwrap();
+    assert_eq!(frame_count(&a_root), a_frames + 2);
+
+    // 2. One land that carries the change.
+    let b_frames = frame_count(&b_root);
+    let one_call = b.land(keyed_with(head, "key-1", change)).unwrap();
+    assert_eq!(frame_count(&b_root), b_frames + 1);
+    assert_eq!(one_call, two_calls);
+    assert_eq!(one_call.squashed_from.last(), Some(&c));
+    assert_eq!(main_head(&b), one_call.landed);
+    let made = b.changeset(c).unwrap().expect("C is recorded");
+    assert_eq!(made.changeset.parents, [head]);
+    assert_eq!(
+        records_past(&b_root, b_frames),
+        [
+            (b_frames, "changeset", c.0.0.to_vec()),
+            (b_frames, "changeset", one_call.landed.0.0.to_vec()),
+            (b_frames, "ref_move", b"main".to_vec())
+        ]
+    );
+}
+
+/// A keyed land with changes run again replays, though its change is signed later and so is
+/// another `C`: the landed `C'` is on the same head with the same tree. Other changes under the
+/// key are another change: [`RepoError::KeyReused`]. Neither writes a frame.
+#[test]
+fn a_rerun_with_changes_replays_after_the_clock_moves() {
+    let (_dir, root, repo) = new_store();
+    let head = moved_store(&repo);
+    let first = (repo.land(keyed_with(
+        head,
+        "key-1",
+        change_on(head, b"b\n", 1_760_000_050),
+    )))
+    .unwrap();
+    let frames = frame_count(&root);
+
+    // 1. The same changes, a minute later.
+    let later = change_on(head, b"b\n", 1_760_000_110);
+    let again = repo.land(keyed_with(head, "key-1", later)).unwrap();
+    assert_eq!(again.status, LandStatus::Replayed);
+    assert_eq!(
+        (again.landed, again.squashed_from),
+        (first.landed, first.squashed_from)
+    );
+
+    // 2. Other changes under the key.
+    let other = change_on(head, b"b 2\n", 1_760_000_110);
+    assert_reused(
+        repo.land(keyed_with(head, "key-1", other)),
+        "key-1",
+        first.landed,
+        "main",
+    );
+    assert_eq!(
+        (frame_count(&root), main_head(&repo)),
+        (frames, first.landed)
+    );
+}
+
+/// A land's change must be made on its head alone and move no ref ([`RepoError::LandCommit`]),
+/// and must change something ([`RepoError::EmptyChanges`]); each refusal writes no frame.
+#[test]
+fn a_land_commit_off_its_head_or_empty_is_refused() {
+    let (_dir, root, repo) = new_store();
+    let head = moved_store(&repo);
+    let t0 = first_parent(&repo, head).unwrap();
+    let frames = frame_count(&root);
+
+    // 1. Another parent, then a ref to advance.
+    let mut off = change_on(head, b"b\n", 1_760_000_050);
+    off.parents = vec![t0];
+    let mut advancing = change_on(head, b"b\n", 1_760_000_050);
+    advancing.advance = Some(Advance::new("main", ACTOR));
+    for change in [off, advancing] {
+        match repo.land(keyed_with(head, "key-1", change)) {
+            Err(RepoError::LandCommit { head: named }) => assert_eq!(named, head),
+            other => panic!("expected LandCommit, got {other:?}"),
+        }
+    }
+
+    // 2. Changes that change nothing.
+    let mut empty = change_on(head, b"b\n", 1_760_000_050);
+    empty.changes = vec![put("h", b"h\n")];
+    match repo.land(keyed_with(head, "key-1", empty)) {
+        Err(RepoError::EmptyChanges) => {}
+        other => panic!("expected EmptyChanges, got {other:?}"),
+    }
+    assert_eq!(frame_count(&root), frames);
+}
+
+/// A land with changes takes the store's lock once, uncontended: one write transaction, one
+/// frame (the M16 design §4), counted by the store's test hooks.
+#[test]
+#[cfg(feature = "test-hooks")]
+fn a_land_with_changes_takes_the_lock_once() {
+    let (_dir, root, repo) = new_store();
+    let head = moved_store(&repo);
+    let (frames, writes) = (frame_count(&root), MetaStore::write_calls());
+
+    let land = keyed_with(head, "key-1", change_on(head, b"b\n", 1_760_000_050));
+    repo.land(land).unwrap();
+    assert_eq!(MetaStore::write_calls() - writes, 1, "write transactions");
+    assert_eq!(frame_count(&root) - frames, 1, "frames");
+}
+
 /// Creates ref `name` at `id`.
 #[track_caller]
 fn create_ref(repo: &LocalRepo, name: &str, id: ChangesetId) {
