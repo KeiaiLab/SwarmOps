@@ -618,13 +618,15 @@ left).
   a fetch of some hundreds of thousands of refs, or a `SQUASH_MSG` of a squash of very many
   commits, can pass it: remove that file, which git keeps only for its next command, and run the
   import or export again. *Documented (storage spec §7). Found: 2026-10-20.*
-- **An import holds each commit's new files in memory together.** The import stores the trees and
-  blobs it converts each time 64 MiB of them have gathered (`ImportRequest::object_batch_bytes`),
-  but only between commits: the new files of one commit are all held until that commit is converted,
-  each up to 512 MiB, however many the commit adds, so a commit that adds large files takes their
-  size together in memory, and more (about 400 MiB at its peak for one commit of 384 MiB of new
-  files). *Unscheduled: storing a commit's objects as they gather, within the commit, would bound
-  it. Found: the 2026-10-20 security review.*
+- **A served push's hook peaks above one batch.** Since M17 the import stores a commit's trees
+  and blobs every 64 MiB (`ImportRequest::object_batch_bytes`) inside one commit too, so it holds
+  one batch and the file it converts (the M17 design §3.2). The `pre-receive` hook that imports a
+  push still peaks above that: its reader maps the quarantine's pack, whose pages count in its
+  resident memory as they are read, and the store compresses a batch on every core, each thread
+  with buffers of its own. A push of 200 incompressible files of 1 MiB peaked at 374 MiB in a
+  debug build on 32 cores (222 MiB of it the mapped pack; 71 MiB anonymous on one thread). A
+  commit refused after a batch was stored leaves that batch's objects unreferenced, counted as
+  `orphan_objects`. *Unscheduled. Found: the 2026-10-20 security review; narrowed by M17-6.*
 - **A commit an earlier import took with a loss is reused without `--lossy`.** A commit the store
   already holds is reused as it is, so a later import without `--lossy` that reaches one an
   earlier import took with a loss reports `lossy_total` 0 and skips it rather than refusing, as

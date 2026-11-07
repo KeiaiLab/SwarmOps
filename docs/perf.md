@@ -1654,3 +1654,28 @@ debug build at a 1-minute load of 35 to 65; `sweeps::a_hundred_thousand_commit_i
 now with no step budget so that its frames stay fixed (19: 64 to 4,096 doubling, 11 of 8,192
 and one of 1,760), imported 100,000 commits in 60.9 s with 15 compactions and a peak of
 155,848 KiB resident, at a load of 39 to 44.
+
+## M17-6: a commit's blobs in batches — 2026-11-07 (not measured yet)
+
+The import stores a commit's new trees and blobs whenever 64 MiB of them gather
+(`DEFAULT_OBJECT_BATCH_BYTES`), inside one commit too (the M17 design §3.2).
+`serve_perf::push_one_and_two_gib` is run again on that code, unchanged; the values come from the
+first `just perf` after the slice lands, run under the heavy lock, and replace the dashes below,
+with the verdict against G22.
+
+| Figure | Value | Target |
+| --- | --- | --- |
+| Peak memory, 1 GiB push | — | recorded (against the M17 baseline) |
+| Peak memory, 2 GiB push (G22) | — | at most 256 MiB |
+| Time, 1 GiB and 2 GiB push (G22) | — | the 2 GiB at most 2.2× the 1 GiB |
+| Refused push of 2,048 blobs: ref moved | — | none |
+| Host state | — | — |
+
+A debug build's push of one commit of 200 incompressible files of 1 MiB through `serve`, sampled
+per process on this host (32 cores, one run, beside other work): the server tree's peak `VmHWM`
+fell from 519 MiB to 374 MiB, the `pre-receive` hook's, which runs the import. Of the 374 MiB,
+222 MiB are file pages of the quarantine's pack, which the hook's reader maps, and the anonymous
+rest (160 MiB) is the batch and the store's compression buffers on every core: 71 MiB with
+`RAYON_NUM_THREADS=1`. The `proc-receive` hook peaked at 26 MiB. In the git crate, one commit of
+200 files of 1 MiB with batches of 16 MiB grew the import's peak by 43 MiB, against 207 MiB
+before.

@@ -39,16 +39,16 @@
 //!    the walk did not meet, only reached, may be a commit the source lacks (one the tip
 //!    descends from through the head's export instead): then nothing is seeded.
 //! 5. The frames: each run of commits is converted, its new trees and blobs stored
-//!    ([`Repo::put_objects`]) whenever [`ImportRequest::object_batch_bytes`] of them accumulate
-//!    and at its end, then recorded as one journal frame ([`Repo::raw_batch`]; a parent is a
-//!    changeset of this run, the base or the index's), then its commits' external ids are
-//!    recorded ([`Repo::record_external_ids`]), after the frame is durable (storage spec §2 rule
-//!    4, W8). Frames are sized by time (the M17 design §3.1), so that each frame's commit holds
-//!    the writer lock about [`ImportRequest::step_budget`] and other writers commit between
-//!    frames: the first holds [`IMPORT_FIRST_FRAME`] changesets, and after a frame of `n` whose
-//!    commit took `t`, its lock wait included, the next holds `budget × n / t`, at least one and
-//!    at most `2n` and [`ImportRequest::frame_changesets`]. A compaction runs at most once a
-//!    frame.
+//!    ([`Repo::put_objects`]) whenever [`ImportRequest::object_batch_bytes`] of them accumulate,
+//!    inside one commit too (the M17 design §3.2), and at its end, then recorded as one journal
+//!    frame ([`Repo::raw_batch`]; a parent is a changeset of this run, the base or the index's),
+//!    then its commits' external ids are recorded ([`Repo::record_external_ids`]), after the
+//!    frame is durable (storage spec §2 rule 4, W8). Frames are sized by time (the M17 design
+//!    §3.1), so that each frame's commit holds the writer lock about
+//!    [`ImportRequest::step_budget`] and other writers commit between frames: the first holds
+//!    [`IMPORT_FIRST_FRAME`] changesets, and after a frame of `n` whose commit took `t`, its lock
+//!    wait included, the next holds `budget × n / t`, at least one and at most `2n` and
+//!    [`ImportRequest::frame_changesets`]. A compaction runs at most once a frame.
 //! 6. The metadata is flushed ([`Repo::flush_metadata`]: the checkpoint moves to the journal's
 //!    end, so that no reader parses the import's frames again), and the target moved from its
 //!    head to the tip's changeset by compare-and-swap ([`Repo::cas_ref`]). A swap that finds the
@@ -1083,6 +1083,62 @@ fn child_path(dir: Option<&RepoPath>, name: &[u8]) -> Option<RepoPath> {
     RepoPath::new(path).ok()
 }
 
+/// The trees and blobs a frame's conversion made that are not stored yet: stored whenever `limit`
+/// bytes of them gather, so that one commit of many files is held a batch at a time (the M17
+/// design §3.2). The conversion makes children before the trees that name them, so each batch
+/// names only what it or an earlier one holds.
+struct Batch<'a> {
+    repo: &'a LocalRepo,
+    limit: usize,
+    objects: Vec<(ObjectKind, Vec<u8>)>,
+    gathered: usize,
+    /// A store that failed: nothing more is stored, and the import stops at this commit.
+    failed: Option<RepoError>,
+}
+
+impl<'a> Batch<'a> {
+    /// An empty batch of `repo`'s, stored every `limit` bytes.
+    fn new(repo: &'a LocalRepo, limit: usize) -> Batch<'a> {
+        Batch {
+            repo,
+            limit,
+            objects: Vec::new(),
+            gathered: 0,
+            failed: None,
+        }
+    }
+
+    /// Takes one object, and stores the batch once it holds `limit` bytes.
+    fn add(&mut self, kind: ObjectKind, bytes: Vec<u8>) {
+        if self.failed.is_some() {
+            return;
+        }
+        self.gathered += bytes.len();
+        self.objects.push((kind, bytes));
+        if self.gathered < self.limit {
+            return;
+        }
+        if let Err(error) = self.store() {
+            self.failed = Some(error);
+        }
+    }
+
+    /// Stores what the batch holds, if anything.
+    fn store(&mut self) -> Result<(), RepoError> {
+        self.gathered = 0;
+        let objects = std::mem::take(&mut self.objects);
+        if objects.is_empty() {
+            return Ok(());
+        }
+        self.repo.put_objects(objects).map(drop)
+    }
+
+    /// The failure of a store [`Batch::add`] made, once.
+    fn failure(&mut self) -> Result<(), RepoError> {
+        self.failed.take().map_or(Ok(()), Err)
+    }
+}
+
 /// An import as it runs, from the frames on (steps 5 and 6 of [the module
 /// documentation](self)).
 struct Run<'a, 's> {
@@ -1200,34 +1256,22 @@ impl<'a, 's> Run<'a, 's> {
     }
 
     /// `commits` converted, in order; their new trees and blobs stored whenever
-    /// [`ImportRequest::object_batch_bytes`] of them gather, and at the end.
+    /// [`ImportRequest::object_batch_bytes`] of them gather, inside a commit too (the M17 design
+    /// §3.2), and at the end.
     fn convert(&mut self, commits: &[GitOid]) -> Result<Vec<Converted>, ImportError> {
         let mut converted = Vec::with_capacity(commits.len());
-        let mut objects: Vec<(ObjectKind, Vec<u8>)> = Vec::new();
-        let mut gathered = 0;
+        let mut batch = Batch::new(self.repo, self.req.object_batch_bytes);
         for &oid in commits {
-            let made = objects.len();
-            converted.push(self.converter.commit(oid, &mut objects)?);
-            gathered += objects[made..]
-                .iter()
-                .map(|(_, bytes)| bytes.len())
-                .sum::<usize>();
-            if gathered >= self.req.object_batch_bytes {
-                self.put(std::mem::take(&mut objects))?;
-                gathered = 0;
-            }
-        }
-        self.put(objects)?;
-        Ok(converted)
-    }
+            let made = self
+                .converter
+                .commit_to(oid, &mut |kind, bytes| batch.add(kind, bytes));
 
-    /// Stores `objects`, if any.
-    fn put(&self, objects: Vec<(ObjectKind, Vec<u8>)>) -> Result<(), ImportError> {
-        if objects.is_empty() {
-            return Ok(());
+            // A failed store stops the import before the commit's own refusal, if any.
+            batch.failure().map_err(|source| self.stopped(source))?;
+            converted.push(made?);
         }
-        let put = self.repo.put_objects(objects);
-        put.map(drop).map_err(|source| self.stopped(source))
+        batch.store().map_err(|source| self.stopped(source))?;
+        Ok(converted)
     }
 
     /// The changesets of `parents`, the parents of commit `oid`: each recorded by this import

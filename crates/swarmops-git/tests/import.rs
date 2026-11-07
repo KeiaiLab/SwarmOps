@@ -1215,6 +1215,124 @@ fn frames_split_at_the_step_budget() {
     }
 }
 
+/// How many files of 1 MiB the many-files commit holds.
+const MANY_FILES: usize = 200;
+
+/// One mebibyte.
+const MIB: usize = 1 << 20;
+
+/// One commit of 200 files of 1 MiB, imported with batches of 16 MiB, is stored while it is
+/// converted (the M17 design §3.2): the store's objects grow at least 12 times between the
+/// conversion's reads, and the import's peak memory stays under 64 MiB above what it was before.
+#[test]
+fn one_commit_of_many_files_is_stored_in_batches() {
+    let (_dir, root, repo) = unsynced_repo();
+
+    // 1. The commit: distinct bytes in each file, held under an id of its number, since hashing
+    //    200 MiB in an unoptimized build takes seconds.
+    let mut source = MemSource::default();
+    let mut entries = Vec::with_capacity(MANY_FILES);
+    for n in 0..MANY_FILES {
+        let blob = oid(&format!("{:040x}", n + 1));
+        source.forge(blob, RawKind::Blob, filled(n, MIB));
+        entries.push((format!("f{n:03}"), blob));
+    }
+    let named: Vec<(&str, &[u8], GitOid)> = (entries.iter())
+        .map(|(name, blob)| ("100644", name.as_bytes(), *blob))
+        .collect();
+    let tree = source.tree(&named);
+    let tip = source.commit(tree, &[], "many files\n");
+    let watched = Watched::new(&source, &root);
+
+    // 2. The import, in batches of 16 MiB.
+    let mut req = request(&tip.to_string());
+    req.object_batch_bytes = 16 * MIB;
+    let start = peak_kib();
+    let report = import(&repo, &watched, &req).unwrap();
+    let grown = peak_kib() - start;
+    assert_eq!(report.imported, 1);
+
+    // 3. Stored as the conversion read: one count of objects per batch stored before a read.
+    let seen = watched.seen.borrow();
+    assert!(
+        seen.len() >= 12,
+        "object counts seen by the reads: {seen:?}; the peak grew by {grown} KiB"
+    );
+    assert!(grown < 64 * 1024, "the import grew the peak by {grown} KiB");
+}
+
+/// `len` bytes that differ from every other `n`'s: zeros, `n`'s bytes at the start of every 4 KiB.
+fn filled(n: usize, len: usize) -> Vec<u8> {
+    let mut bytes = vec![0; len];
+    let stamp = n.to_le_bytes();
+    for page in bytes.chunks_mut(4096) {
+        let end = stamp.len().min(page.len());
+        page[..end].copy_from_slice(&stamp[..end]);
+    }
+    bytes
+}
+
+/// This process's peak resident memory (`VmHWM` in `/proc/self/status`), in KiB.
+fn peak_kib() -> u64 {
+    let status = fs::read_to_string("/proc/self/status").expect("read /proc/self/status");
+    (status.lines())
+        .find_map(|line| line.strip_prefix("VmHWM:"))
+        .and_then(|value| value.trim().strip_suffix("kB")?.trim().parse().ok())
+        .expect("VmHWM in /proc/self/status")
+}
+
+/// A source that, at each blob it is asked for, notes how many object files the store holds.
+struct Watched<'s> {
+    inner: &'s MemSource,
+    objects: Utf8PathBuf,
+    seen: RefCell<BTreeSet<usize>>,
+}
+
+impl<'s> Watched<'s> {
+    /// `inner`, watching the store at `root`.
+    fn new(inner: &'s MemSource, root: &Utf8Path) -> Watched<'s> {
+        Watched {
+            inner,
+            objects: root.join("objects"),
+            seen: RefCell::new(BTreeSet::new()),
+        }
+    }
+
+    /// The object files in the fan-out directories, by their names alone.
+    fn stored(&self) -> usize {
+        let Ok(dirs) = fs::read_dir(&self.objects) else {
+            return 0;
+        };
+        (dirs.filter_map(Result::ok))
+            .filter(|dir| dir.file_name().len() == 2)
+            .filter_map(|dir| fs::read_dir(dir.path()).ok())
+            .map(Iterator::count)
+            .sum()
+    }
+}
+
+impl GitSource for Watched<'_> {
+    fn object_format(&self) -> ObjectFormat {
+        self.inner.object_format()
+    }
+
+    fn resolve(&self, name: &str) -> Result<GitOid, SourceError> {
+        self.inner.resolve(name)
+    }
+
+    fn header(&self, oid: GitOid) -> Result<(RawKind, u64), SourceError> {
+        self.inner.header(oid)
+    }
+
+    fn read(&self, oid: GitOid) -> Result<(RawKind, Vec<u8>), SourceError> {
+        let read = self.inner.read(oid)?;
+        if read.0 == RawKind::Blob {
+            self.seen.borrow_mut().insert(self.stored());
+        }
+        Ok(read)
+    }
+}
+
 /// The import's last step, the metadata's flush, the target's move and the flush after it, costs
 /// as many write transactions and flushes to stable storage for 1 commit as for 2,000 (the M17
 /// design §3.1). With no step budget the 2,000 are frames of 64, 128, 256, 512, 1,024 and 16, so

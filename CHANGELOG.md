@@ -94,6 +94,11 @@ collects the changes on `stable` that no release holds yet, until the next relea
 - `just perf` builds the store's contention test again: since v0.7.0 the store's test binary
   did not compile without the test hooks, so the store-level contention numbers went unmeasured.
   `just check` now builds every target without them.
+- `git import`, and the objects-only import of a fetch or a `serve` push, store a commit's new
+  trees and blobs every 64 MiB (`object_batch_bytes`) while the commit is converted, not only
+  between commits (the M17 design §3.2): one commit of many large files is held a batch at a time,
+  not whole. A commit refused after a batch was stored leaves those objects unreferenced, as a
+  failed commit does ([Known limitations](docs/known-limitations.md)).
 
 ## [0.8.0] - 2026-11-07
 

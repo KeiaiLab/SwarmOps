@@ -215,13 +215,12 @@ struct TreeMemo {
 }
 
 /// What one commit's conversion made: the converter takes it once the conversion succeeds, so a
-/// refused commit leaves the converter and its `out` as they were.
-#[derive(Default)]
-struct Pending {
+/// refused commit leaves the converter as it was. Its objects go to `sink` as they are made.
+struct Pending<'k> {
     trees: HashMap<GitOid, TreeMemo>,
     blobs: HashMap<GitOid, BlobId>,
     made: HashSet<TreeId>,
-    objects: Vec<(ObjectKind, Vec<u8>)>,
+    sink: &'k mut dyn FnMut(ObjectKind, Vec<u8>),
 }
 
 /// A git tree the walk is in: the entries it has not looked at, and what it keeps so far.
@@ -304,12 +303,34 @@ impl<'s> Converter<'s> {
         oid: GitOid,
         out: &mut Vec<(ObjectKind, Vec<u8>)>,
     ) -> Result<Converted, ConvertError> {
-        let mut pending = Pending::default();
+        let mut made = Vec::new();
+        let converted = self.commit_to(oid, &mut |kind, bytes| made.push((kind, bytes)))?;
+        out.append(&mut made);
+        Ok(converted)
+    }
+
+    /// Converts the commit `oid` as [`Converter::commit`] does, but hands each blob and tree to
+    /// `sink` as it is made, children before the trees that name them, so that the caller can
+    /// store them while the commit's tree is still walked and never holds them all (the M17
+    /// design §3.2).
+    ///
+    /// A refused commit leaves the converter as it was; what `sink` took before the refusal it
+    /// keeps.
+    pub fn commit_to(
+        &mut self,
+        oid: GitOid,
+        sink: &mut dyn FnMut(ObjectKind, Vec<u8>),
+    ) -> Result<Converted, ConvertError> {
+        let mut pending = Pending {
+            trees: HashMap::new(),
+            blobs: HashMap::new(),
+            made: HashSet::new(),
+            sink,
+        };
         let converted = self.convert(&mut pending, oid)?;
         self.trees.extend(pending.trees);
         self.blobs.extend(pending.blobs);
         self.made.extend(pending.made);
-        out.append(&mut pending.objects);
         Ok(converted)
     }
 
@@ -334,7 +355,7 @@ impl<'s> Converter<'s> {
         self.blobs.insert(git, blob);
     }
 
-    fn convert(&self, pending: &mut Pending, oid: GitOid) -> Result<Converted, ConvertError> {
+    fn convert(&self, pending: &mut Pending<'_>, oid: GitOid) -> Result<Converted, ConvertError> {
         let (kind, raw) = source::read_bounded(self.source, oid)?;
         if kind != RawKind::Commit {
             return Err(ConvertError::Malformed {
@@ -409,7 +430,7 @@ impl<'s> Converter<'s> {
     /// depth first, on a stack of its own, each tree converted before taken as it converted then.
     fn tree(
         &self,
-        pending: &mut Pending,
+        pending: &mut Pending<'_>,
         commit: GitOid,
         root: GitOid,
     ) -> Result<TreeMemo, ConvertError> {
@@ -537,7 +558,7 @@ impl<'s> Converter<'s> {
     /// the git tree it renders back to.
     fn close(
         &self,
-        pending: &mut Pending,
+        pending: &mut Pending<'_>,
         commit: GitOid,
         oid: GitOid,
         mut kept: Vec<(TreeEntry, GitOid)>,
@@ -608,8 +629,13 @@ impl<'s> Converter<'s> {
     }
 
     /// The blob the git blob `oid` at `at` converts to: its bytes, read once its header says it
-    /// is a blob an object holds, and appended to the objects unless converted before.
-    fn blob(&self, pending: &mut Pending, oid: GitOid, at: At<'_>) -> Result<BlobId, ConvertError> {
+    /// is a blob an object holds, and handed to the sink unless converted before.
+    fn blob(
+        &self,
+        pending: &mut Pending<'_>,
+        oid: GitOid,
+        at: At<'_>,
+    ) -> Result<BlobId, ConvertError> {
         if let Some(&id) = (pending.blobs.get(&oid)).or_else(|| self.blobs.get(&oid)) {
             return Ok(id);
         }
@@ -639,7 +665,7 @@ impl<'s> Converter<'s> {
         }
         let id = BlobId::new(swarmops_core::hash_object(ObjectKind::Blob, &bytes));
         pending.blobs.insert(oid, id);
-        pending.objects.push((ObjectKind::Blob, bytes));
+        (pending.sink)(ObjectKind::Blob, bytes);
         Ok(id)
     }
 
@@ -684,17 +710,17 @@ impl<'s> Converter<'s> {
 
     /// What the git tree `oid` converted to before, in this commit's conversion or an earlier
     /// one.
-    fn known_tree(&self, pending: &Pending, oid: GitOid) -> Option<TreeMemo> {
+    fn known_tree(&self, pending: &Pending<'_>, oid: GitOid) -> Option<TreeMemo> {
         (pending.trees.get(&oid))
             .or_else(|| self.trees.get(&oid))
             .copied()
     }
 
-    /// Appends the tree whose id is `id` and whose bytes are `bytes` to the objects the commit's
-    /// conversion makes, unless it was made before.
-    fn add_tree(&self, pending: &mut Pending, id: TreeId, bytes: Vec<u8>) {
+    /// Hands the tree whose id is `id` and whose bytes are `bytes` to the sink of the commit's
+    /// conversion, unless it was made before.
+    fn add_tree(&self, pending: &mut Pending<'_>, id: TreeId, bytes: Vec<u8>) {
         if !self.made.contains(&id) && pending.made.insert(id) {
-            pending.objects.push((ObjectKind::Tree, bytes));
+            (pending.sink)(ObjectKind::Tree, bytes);
         }
     }
 }
