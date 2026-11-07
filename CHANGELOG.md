@@ -25,6 +25,11 @@ collects the changes on `stable` that no release holds yet, until the next relea
   `refs/published/<remote>/<branch>`; a fast-forward to a head that holds it only as a merge's
   second parent is refused too. Nothing moves and nothing is sent; the fetch's tracking ref moves
   ([GitHub as a remote](docs/guides/github-remote.md#when-sync-stops)).
+- A `serve` push with one refused ref is refused whole: every ref gets `ng <ref> pre-receive hook
+  declined` and no received object enters `serve.git` (the store may keep the pushed changesets,
+  which no ref names). What to do: push refs that must land independently in separate pushes.
+  A `remote:` line per ref gives the reason; `serve` writes a `pre-receive` hook beside
+  `proc-receive` ([Serve over ssh](docs/operate/serve-over-ssh.md#refusals-a-client-sees)).
 
 ### Added
 

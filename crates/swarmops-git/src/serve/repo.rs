@@ -1,7 +1,7 @@
 //! The serving repository, `<store>/git/serve.git` (M14 design §0.2): bare, SHA-1, written by
-//! SwarmOps and host git alone, apart from the M13 mirror, with its own lock and the one
-//! `proc-receive` hook in `<store>/git/serve-hooks/`. A cache: one that is missing is made again
-//! and exported again.
+//! SwarmOps and host git alone, apart from the M13 mirror, with its own lock and the
+//! `pre-receive` and `proc-receive` hooks in `<store>/git/serve-hooks/`. A cache: one that is
+//! missing is made again and exported again.
 //!
 //! ```text
 //! <store>/git/
@@ -9,11 +9,12 @@
 //!   serve.lock                the lock a ref of serve.git moves under (waited for, bounded)
 //!   serve.git/                bare, SHA-1, HEAD → refs/heads/main
 //!   serve.git.broken-<ms>     one set aside: an unknown marker, or one gix could not open
-//!   serve-hooks/proc-receive  HOOK_SCRIPT, mode 0755, replaced whole when it differs
+//!   serve-hooks/pre-receive   PRE_RECEIVE_SCRIPT, mode 0755, replaced whole when it differs
+//!   serve-hooks/proc-receive  HOOK_SCRIPT, the same
 //! ```
 //!
 //! [`ServeRepo::open`] looks without the lock first: a repository under the known marker that
-//! gix opens, with the hook as it should be, is taken as it is. Anything else is made, set aside
+//! gix opens, with the hooks as they should be, is taken as it is. Anything else is made, set aside
 //! or replaced under the lock, after a second look, so that two connections opening at once do
 //! the work once. The lock is waited for, up to what the caller gives ([`ServeRepo::lock`]):
 //! unlike the mirror's, which a fetch holds for its whole run, it is held only while refs move.
@@ -37,11 +38,18 @@ use crate::sink::{BranchUpdate, SinkError};
 /// The bytes of `<store>/git/SERVE`, the serving repository's layout and its version.
 pub const SERVE_MARKER: &[u8] = b"swarmops-git-serve 1\n";
 
-/// The one hook file, `<store>/git/serve-hooks/proc-receive`. git runs a hook as a file, so this
+/// The hook file `<store>/git/serve-hooks/proc-receive`. git runs a hook as a file, so this
 /// one is POSIX `sh`: it hands the hook to the binary that serves, which the parent named.
 pub const HOOK_SCRIPT: &str = "#!/bin/sh
 # git runs hooks as files: this one hands proc-receive to the swarmops that serves.
 exec \"$SWARMOPS_SERVE_EXE\" serve --hook proc-receive
+";
+
+/// The hook file `<store>/git/serve-hooks/pre-receive`, as [`HOOK_SCRIPT`]: git runs it while
+/// the push's objects are still in its quarantine, so that a refusal keeps them out.
+pub const PRE_RECEIVE_SCRIPT: &str = "#!/bin/sh
+# git runs hooks as files: this one hands pre-receive to the swarmops that serves.
+exec \"$SWARMOPS_SERVE_EXE\" serve --hook pre-receive
 ";
 
 /// The store's git directory, which the mirror shares: `<store>/git`.
@@ -55,9 +63,12 @@ const SERVE_GIT: &str = "serve.git";
 /// The prefix of the name a broken repository is set aside as, in `git/`.
 const BROKEN: &str = "serve.git.broken-";
 
-/// The hooks directory, in `git/`, and its one hook.
+/// The hooks directory, in `git/`, and its hooks: each file's name and bytes.
 const HOOKS: &str = "serve-hooks";
-const HOOK: &str = "proc-receive";
+const HOOK_FILES: [(&str, &str); 2] = [
+    ("pre-receive", PRE_RECEIVE_SCRIPT),
+    ("proc-receive", HOOK_SCRIPT),
+];
 
 /// The hook's mode: git runs it, so it is executable.
 const HOOK_MODE: u32 = 0o755;
@@ -226,24 +237,32 @@ impl ServeRepo {
     }
 
     /// Whether the repository is as [`ServeRepo::open`] leaves it: the known marker, a
-    /// `serve.git` gix opens, and the hook's bytes and mode.
+    /// `serve.git` gix opens, and each hook's bytes and mode.
     fn sound(&self) -> Result<bool, ServeError> {
         let marked = read_marker(self.git().as_std_path()).map_err(io_failed(MARKER_FILE))?;
         let opens = GixSink::open(self.git_dir.as_std_path()).is_ok();
-        Ok(marked && opens && self.hook_sound()?)
+        if !(marked && opens) {
+            return Ok(false);
+        }
+        for (name, script) in HOOK_FILES {
+            if !self.hook_sound(name, script)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
-    /// Whether the hook file holds [`HOOK_SCRIPT`] with [`HOOK_MODE`].
-    fn hook_sound(&self) -> Result<bool, ServeError> {
-        let path = self.hooks_dir.join(HOOK);
+    /// Whether the hook file `name` holds `script` with [`HOOK_MODE`].
+    fn hook_sound(&self, name: &str, script: &str) -> Result<bool, ServeError> {
+        let path = self.hooks_dir.join(name);
         let found = match fs::symlink_metadata(&path) {
             Ok(found) => found,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(io_failed(&hook_name())(error)),
+            Err(error) => return Err(io_failed(&hook_name(name))(error)),
         };
         let mode_ok = found.is_file() && found.permissions().mode() & 0o777 == HOOK_MODE;
-        let bytes = fs::read(&path).map_err(io_failed(&hook_name()))?;
-        Ok(mode_ok && bytes == HOOK_SCRIPT.as_bytes())
+        let bytes = fs::read(&path).map_err(io_failed(&hook_name(name)))?;
+        Ok(mode_ok && bytes == script.as_bytes())
     }
 
     /// Makes, sets aside or replaces what is not sound, under the lock: `serve.git` and its
@@ -265,21 +284,19 @@ impl ServeRepo {
             write_atomic(git, MARKER_FILE, SERVE_MARKER, None).map_err(io_failed(MARKER_FILE))?;
         }
 
-        // 2. The hook: its directory, then the file replaced whole when it differs.
-        if self.hook_sound()? {
-            return Ok(());
-        }
+        // 2. The hooks: their directory, then each file replaced whole when it differs.
         if make_dir(self.hooks_dir.as_std_path()).map_err(io_failed(HOOKS))? {
             sync_dir(git).map_err(io_failed(""))?;
         }
-        let mode = Some(Permissions::from_mode(HOOK_MODE));
-        write_atomic(
-            self.hooks_dir.as_std_path(),
-            HOOK,
-            HOOK_SCRIPT.as_bytes(),
-            mode,
-        )
-        .map_err(io_failed(&hook_name()))
+        for (name, script) in HOOK_FILES {
+            if self.hook_sound(name, script)? {
+                continue;
+            }
+            let mode = Some(Permissions::from_mode(HOOK_MODE));
+            write_atomic(self.hooks_dir.as_std_path(), name, script.as_bytes(), mode)
+                .map_err(io_failed(&hook_name(name)))?;
+        }
+        Ok(())
     }
 
     /// Renames `serve.git` aside as `serve.git.broken-<unix ms>`, a name not yet taken; never
@@ -302,9 +319,9 @@ impl ServeRepo {
     }
 }
 
-/// `serve-hooks/proc-receive`, as an error names it.
-fn hook_name() -> String {
-    format!("{HOOKS}/{HOOK}")
+/// `serve-hooks/<name>`, as an error names it.
+fn hook_name(name: &str) -> String {
+    format!("{HOOKS}/{name}")
 }
 
 /// The [`ServeError::Io`] of `what`, relative to `git/`, for an io error.

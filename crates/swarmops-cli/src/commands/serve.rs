@@ -25,7 +25,7 @@ use swarmops_ops::serve::{
 };
 
 use super::run::{Ctx, failed};
-use crate::cli::ServeArgs;
+use crate::cli::{HookKind, ServeArgs};
 use crate::context::{self, Env};
 use crate::output::Printed;
 
@@ -37,6 +37,9 @@ const GIT_PROTOCOL: &str = "GIT_PROTOCOL";
 
 /// The repository git runs the hook in.
 const GIT_DIR: &str = "GIT_DIR";
+
+/// The object directory git keeps a push's objects in while `pre-receive` runs.
+const GIT_QUARANTINE_PATH: &str = "GIT_QUARANTINE_PATH";
 
 /// The CGI metavariables (RFC 3875 §4.1), and the HTTP headers `git http-backend` reads.
 const CGI_VARS: [&str; 19] = [
@@ -117,13 +120,13 @@ fn invocation(
     }
 
     // 2. The caller and the entry: the hook's from its parent, the others' from the line.
-    let (identity, entry) = if args.hook.is_some() {
-        (hook_identity(agent, env)?, Entry::Hook)
-    } else {
-        (
+    let (identity, entry) = match args.hook {
+        Some(HookKind::PreReceive) => (hook_identity(agent, env)?, Entry::PreReceive),
+        Some(HookKind::ProcReceive) => (hook_identity(agent, env)?, Entry::Hook),
+        None => (
             line_identity(agent, args.user_family)?,
             entry(env, args.cgi)?,
-        )
+        ),
     };
 
     // 3. The rest of what the connection names, read once.
@@ -133,6 +136,8 @@ fn invocation(
     invocation.exe = std::env::current_exe().ok();
     invocation.serve_store = var(env, SWARMOPS_SERVE_STORE)?;
     invocation.git_dir = env(GIT_DIR).filter(|dir| !dir.is_empty()).map(Into::into);
+    invocation.quarantine =
+        (env(GIT_QUARANTINE_PATH).filter(|dir| !dir.is_empty())).map(Into::into);
     Ok(invocation)
 }
 

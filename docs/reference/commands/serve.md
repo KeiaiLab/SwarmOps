@@ -8,9 +8,9 @@ Over ssh, an authorized\_keys line runs it: command="swarmops serve --root /srv/
 
 The caller is named by --as alone, or with --cgi by --user-family &lt;family&gt; as &lt;family&gt;/$REMOTE\_USER: the global --as default, $SWARMOPS\_AGENT, does not apply to serve, nor does $SWARMOPS\_RUN\_ID, so that the serving account's environment names no caller. A connection that names none is refused with E\_AUTH (details.reason no\_identity), whatever it asks for. The store's access.toml grants read, push, force and land; a caller it names but does not grant is refused with E\_POLICY\_DENIED.
 
-The branches are served as refs/heads/&lt;name&gt;, main among them, and the tags as refs/tags/&lt;path&gt;. A push moves a store ref by compare-and-swap: main only forward along first parents. A push to refs/land/&lt;target&gt; lands its commits onto &lt;target&gt; as swarmops land does, and reports a conflict on git's remote: lines.
+The branches are served as refs/heads/&lt;name&gt;, main among them, and the tags as refs/tags/&lt;path&gt;. A push moves a store ref by compare-and-swap: main only forward along first parents. A push with one refused ref is refused whole, inside git's quarantine: every ref gets pre-receive hook declined, a remote: line per ref says why, and no object of it enters serve.git. A push to refs/land/&lt;target&gt; lands its commits onto &lt;target&gt; as swarmops land does, and reports a conflict on git's remote: lines.
 
-A refusal before git starts prints one ERR pkt-line on stdout, which git shows as remote error: &lt;CODE&gt;: &lt;message&gt;, and the envelope on stderr; with --cgi, a Status: header and the same text. --hook proc-receive is the entry git runs inside a push, from the hook file serve writes; it takes no --as. --stdio, the store-to-store sync, is not served yet.
+A refusal before git starts prints one ERR pkt-line on stdout, which git shows as remote error: &lt;CODE&gt;: &lt;message&gt;, and the envelope on stderr; with --cgi, a Status: header and the same text. --hook pre-receive and --hook proc-receive are the entries git runs inside a push, from the hook files serve writes; they take no --as. --stdio, the store-to-store sync, is not served yet.
 
 ```yaml
 title: "swarmops serve"
@@ -62,7 +62,7 @@ With --cgi: name the caller &lt;FAMILY&gt;/$REMOTE\_USER, the user the web serve
 
 Syntax: `--hook <HOOK>`.
 
-Run as the hook git runs inside a push: proc-receive, from the hook file serve writes. Values: `proc-receive`: git's `proc-receive`: it decides each command of a push.
+Run as a hook git runs inside a push: pre-receive or proc-receive, from the hook files serve writes. Values: `pre-receive`: git's `pre-receive`: it refuses the whole push while its objects are quarantined; `proc-receive`: git's `proc-receive`: it decides each command of a push.
 
 ### `--stdio`
 

@@ -221,6 +221,41 @@ impl GitCli {
         command
     }
 
+    /// Whether `ancestor` is `descendant` or one of its ancestors in the bare repository
+    /// `git_dir`, with the objects of a push git holds in `quarantine` seen first: its
+    /// `pre-receive` hook's view (`GIT_OBJECT_DIRECTORY` the quarantine, `git_dir`'s objects
+    /// its alternate). [`Transport::is_ancestor`] clears both variables, so it sees no
+    /// quarantined commit (git 2.43.0 exits 128 on one).
+    pub fn quarantine_is_ancestor(
+        &self,
+        git_dir: &Path,
+        quarantine: &Path,
+        ancestor: GitOid,
+        descendant: GitOid,
+    ) -> Result<bool, TransportError> {
+        let call = Call {
+            mirror: Some(git_dir),
+            remote: None,
+        };
+        let args = args(
+            &["merge-base", "--is-ancestor", END_OF_OPTIONS],
+            [ancestor, descendant].map(|oid| OsString::from(oid.to_string())),
+        );
+        let objects = git_dir.join(OBJECTS);
+        let env = [
+            (OBJECT_DIRECTORY, quarantine.as_os_str()),
+            (ALTERNATE_OBJECT_DIRECTORIES, objects.as_os_str()),
+        ];
+
+        // Exit 0: an ancestor; 1: not one; anything else: git failed.
+        let ran = self.spawn_env(&call, &args, &Input::Null, &env)?;
+        match ran.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(self.failure(&call, &ran)),
+        }
+    }
+
     /// The token `cred` names, when its variable is set, not empty and UTF-8.
     fn token(&self, cred: &Credential) -> Option<String> {
         let name = cred.token_env.as_deref()?;
@@ -290,10 +325,22 @@ impl GitCli {
         args: &[OsString],
         input: &Input,
     ) -> Result<Ran, TransportError> {
+        self.spawn_env(call, args, input, &[])
+    }
+
+    /// [`GitCli::spawn`], with `env` set after the cleaned environment.
+    fn spawn_env(
+        &self,
+        call: &Call<'_>,
+        args: &[OsString],
+        input: &Input,
+        env: &[(&str, &OsStr)],
+    ) -> Result<Ran, TransportError> {
         let Child {
             mut command,
             secrets,
         } = self.command(call, args)?;
+        command.envs(env.iter().copied());
         let mut ran = run(&mut command, input)?;
         ran.stderr = secrets.redact(&ran.stderr);
         ran.porcelain = secrets.redact(&String::from_utf8_lossy(&ran.stdout));
@@ -813,6 +860,13 @@ const HEADS: &str = "refs/heads/";
 /// The user name a token goes with over HTTPS (GitHub's for an installation token; a personal
 /// token takes any).
 const TOKEN_USER: &str = "x-access-token";
+
+/// A repository's object directory, in its git directory.
+const OBJECTS: &str = "objects";
+
+/// The variables that point git at a push's quarantine ([`GitCli::quarantine_is_ancestor`]).
+const OBJECT_DIRECTORY: &str = "GIT_OBJECT_DIRECTORY";
+const ALTERNATE_OBJECT_DIRECTORIES: &str = "GIT_ALTERNATE_OBJECT_DIRECTORIES";
 
 /// The mirror's directory of hooks, which does not exist: no hook runs.
 const HOOKS_NONE: &str = "hooks-none";

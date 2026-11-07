@@ -543,20 +543,25 @@ fn http_push_refusals() {
     assert_eq!(stderr.matches("E_POLICY_DENIED").count(), 2, "{stderr}");
     assert_eq!(site.refs(), before);
 
-    // 4. One push, one ref refused and the other moved.
+    // 4. One push, one ref refused: the other refused with it (M16 design §7).
     let mixed = site.push_as(AGENT, &work, &["HEAD:refs/heads/main", "HEAD:refs/notes/x"]);
-    assert_rejected(&mixed, &["refs/notes/x", "is not served"]);
+    assert_rejected(
+        &mixed,
+        &["refs/notes/x", "is not served", "pre-receive hook declined"],
+    );
     assert!(
-        site.serves(&next, "refs/heads/main"),
+        !site.serves(&next, "refs/heads/main"),
         "{}",
         site.served_refs()
     );
     assert!(!site.served_refs().contains("refs/notes/x"));
+    assert_eq!(site.refs(), before);
 }
 
 /// Criterion 3 over HTTP: a push whose old value is stale, because another clone pushed between
 /// its advertisement and its commands, moves nothing and exits non-zero; the store verifies
-/// clean.
+/// clean. Its commit does not reach the other clone's, so `pre-receive` refuses it as a
+/// non-fast-forward of `main`.
 #[test]
 fn http_push_refuses_a_stale_old() {
     let site = Site::new().with_linear();
@@ -578,7 +583,13 @@ fn http_push_refuses_a_stale_old() {
 
     // 2. The second push: stale, refused; main is the first clone's, and the store is whole.
     let stale = site.push_as(AGENT, &second, &["main"]);
-    assert_rejected(&stale, &["stale: refs/heads/main moved; fetch first"]);
+    assert_rejected(
+        &stale,
+        &[
+            "pre-receive hook declined",
+            "refs/heads/main non-fast-forward",
+        ],
+    );
     assert!(
         site.serves(&won, "refs/heads/main"),
         "{}",

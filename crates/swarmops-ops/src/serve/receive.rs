@@ -1,13 +1,15 @@
 //! The push side over ssh (M14 design §6): the store opened, its read checked, `serve.git`
-//! refreshed and its hook in place, then git's `receive-pack` on it, which runs the hook.
+//! refreshed and its hooks in place, then git's `receive-pack` on it, which runs the hooks.
 //!
 //! ```text
 //! 1 store under --root ─▶ 2 memo key ─▶ 3 access.toml: read ─▶ 4 serve.git refreshed
-//! 5 git receive-pack ── quarantine, fsck, connectivity ──▶ proc-receive hook (serve --hook)
+//! 5 git receive-pack ── quarantine, fsck, connectivity ──▶ pre-receive hook (serve --hook)
+//!      ── the quarantine moved into serve.git ──▶ proc-receive hook (serve --hook)
 //!      SWARMOPS_SERVE_EXE · SWARMOPS_SERVE_STORE · SWARMOPS_SERVE_IDENTITY
 //! ```
 //!
-//! receive-pack moves no ref itself: every command goes to the hook
+//! receive-pack moves no ref itself: `pre-receive` refuses the whole push while its objects are
+//! quarantined, and every command it accepts goes to `proc-receive`
 //! (`receive.procReceiveRefs=refs/`), which decides it ([`super::hook`]). A caller who may not
 //! read the store is refused before git starts; what it may push is decided per ref.
 

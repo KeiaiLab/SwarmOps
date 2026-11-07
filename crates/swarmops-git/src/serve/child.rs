@@ -25,7 +25,8 @@ const UPLOAD_CONFIG: [(&str, &str); 2] = [
 ];
 
 /// What `receive-pack` takes (M14 design §6): every command handed to the `proc-receive` hook,
-/// every object checked, and no atomic push, push options or shallow update advertised.
+/// after the `pre-receive` hook, which git always runs, accepted the push (M16 design §7), every
+/// object checked, and no atomic push, push options or shallow update advertised.
 const RECEIVE_CONFIG: [(&str, &str); 5] = [
     ("receive.procReceiveRefs", "refs/"),
     ("receive.fsckObjects", "true"),

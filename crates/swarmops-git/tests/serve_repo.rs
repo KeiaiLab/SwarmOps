@@ -12,7 +12,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use camino::Utf8Path;
-use swarmops_git::serve::repo::{HOOK_SCRIPT, SERVE_MARKER, ServeError, ServeRepo};
+use swarmops_git::serve::repo::{
+    HOOK_SCRIPT, PRE_RECEIVE_SCRIPT, SERVE_MARKER, ServeError, ServeRepo,
+};
 use swarmops_git::{BranchUpdate, GitSink, GixSink, GixSource, RawKind, Stored};
 use tempfile::TempDir;
 
@@ -46,6 +48,11 @@ impl Root {
     /// `<root>/git/serve-hooks/proc-receive`.
     fn hook(&self) -> PathBuf {
         self.git().join("serve-hooks").join("proc-receive")
+    }
+
+    /// `<root>/git/serve-hooks/pre-receive`.
+    fn pre_receive(&self) -> PathBuf {
+        self.git().join("serve-hooks").join("pre-receive")
     }
 
     fn open(&self) -> ServeRepo {
@@ -324,4 +331,45 @@ fn git(git_dir: &std::path::Path, args: &[&str]) -> String {
         .expect("UTF-8")
         .trim()
         .to_owned()
+}
+
+/// The `pre-receive` hook beside `proc-receive`: its bytes pinned (it hands the hook to the
+/// serving binary), mode 0755, and replaced whole when it differs, as `proc-receive` is.
+#[test]
+fn the_pre_receive_hook_is_pinned() {
+    let root = Root::new();
+    root.open();
+
+    // 1. Its bytes and mode.
+    let pinned = "#!/bin/sh\n\
+                  # git runs hooks as files: this one hands pre-receive to the swarmops that \
+                  serves.\n\
+                  exec \"$SWARMOPS_SERVE_EXE\" serve --hook pre-receive\n";
+    assert_eq!(PRE_RECEIVE_SCRIPT, pinned);
+    assert_eq!(
+        fs::read(root.pre_receive()).expect("read"),
+        pinned.as_bytes()
+    );
+    let mode = fs::metadata(root.pre_receive())
+        .expect("the hook")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o755);
+
+    // 2. Changed, then gone: replaced whole each time, proc-receive left as it is.
+    let before = fs::metadata(root.hook()).expect("proc-receive").ino();
+    fs::write(root.pre_receive(), "#!/bin/sh\nexit 0\n").expect("change the hook");
+    root.open();
+    assert_eq!(
+        fs::read(root.pre_receive()).expect("read"),
+        pinned.as_bytes()
+    );
+    fs::remove_file(root.pre_receive()).expect("remove the hook");
+    root.open();
+    assert_eq!(
+        fs::read(root.pre_receive()).expect("read"),
+        pinned.as_bytes()
+    );
+    let after = fs::metadata(root.hook()).expect("proc-receive").ino();
+    assert_eq!(after, before, "proc-receive was rewritten");
 }

@@ -31,12 +31,16 @@ use crate::{GitOid, GitSource, ObjectFormat, RawKind, SourceError, Unsupported};
 #[non_exhaustive]
 pub struct GixSource {
     repo: gix::Repository,
+    /// The objects of a push git holds apart, looked in before the repository's
+    /// ([`GixSource::open_quarantine`]).
+    quarantine: Option<gix::odb::Handle>,
 }
 
 impl fmt::Debug for GixSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GixSource")
             .field("git_dir", &self.repo.git_dir())
+            .field("quarantine", &self.quarantine.as_ref().map(|_| "objects"))
             .finish()
     }
 }
@@ -51,6 +55,24 @@ impl GixSource {
     pub fn open(path: &Path) -> Result<GixSource, SourceError> {
         Ok(GixSource {
             repo: open_repository(path)?,
+            quarantine: None,
+        })
+    }
+
+    /// Opens the bare repository `git_dir` as [`GixSource::open`] does, its objects looked up in
+    /// `quarantine` first: the object directory git's receive-pack keeps a push's objects in
+    /// until its `pre-receive` hook accepts them (`GIT_QUARANTINE_PATH`). gix reads alternates
+    /// only from `objects/info/alternates`, and no object-directory variable, so the quarantine
+    /// is opened on its own (`gix::odb::at`); nothing is written into it.
+    pub fn open_quarantine(git_dir: &Path, quarantine: &Path) -> Result<GixSource, SourceError> {
+        let repo = open_repository(git_dir)?;
+        let objects =
+            gix::odb::at(quarantine, gix::hash::Kind::Sha1).map_err(|error| SourceError::Io {
+                reason: format!("opening the quarantine: {error}"),
+            })?;
+        Ok(GixSource {
+            repo,
+            quarantine: Some(objects),
         })
     }
 
@@ -119,6 +141,15 @@ impl GitSource for GixSource {
     }
 
     fn header(&self, oid: GitOid) -> Result<(RawKind, u64), SourceError> {
+        // 1. The quarantine's objects first, when there is one.
+        if let Some(quarantine) = &self.quarantine {
+            let found = gix::objs::FindHeader::try_header(quarantine, &to_gix(oid));
+            if let Some(header) = found.map_err(|error| damaged(oid, &error))? {
+                return Ok((raw_kind(header.kind), header.size));
+            }
+        }
+
+        // 2. The repository's.
         let header = self
             .repo
             .try_find_header(to_gix(oid))
@@ -128,6 +159,17 @@ impl GitSource for GixSource {
     }
 
     fn read(&self, oid: GitOid) -> Result<(RawKind, Vec<u8>), SourceError> {
+        // 1. The quarantine's objects first, when there is one.
+        if let Some(quarantine) = &self.quarantine {
+            let mut buffer = Vec::new();
+            let found = gix::objs::Find::try_find(quarantine, &to_gix(oid), &mut buffer);
+            if let Some(data) = found.map_err(|error| damaged(oid, &error))? {
+                let kind = raw_kind(data.kind);
+                return checked(oid, kind, data.data.to_vec());
+            }
+        }
+
+        // 2. The repository's.
         let object = self
             .repo
             .try_find_object(to_gix(oid))

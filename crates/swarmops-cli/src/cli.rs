@@ -295,13 +295,15 @@ refused with E_POLICY_DENIED.
 
 The branches are served as refs/heads/<name>, main among them, and the tags as \
 refs/tags/<path>. A push moves a store ref by compare-and-swap: main only forward along first \
-parents. A push to refs/land/<target> lands its commits onto <target> as swarmops land does, \
+parents. A push with one refused ref is refused whole, inside git's quarantine: every ref gets \
+pre-receive hook declined, a remote: line per ref says why, and no object of it enters \
+serve.git. A push to refs/land/<target> lands its commits onto <target> as swarmops land does, \
 and reports a conflict on git's remote: lines.
 
 A refusal before git starts prints one ERR pkt-line on stdout, which git shows as remote error: \
 <CODE>: <message>, and the envelope on stderr; with --cgi, a Status: header and the same text. \
---hook proc-receive is the entry git runs inside a push, from the hook file serve writes; it \
-takes no --as. --stdio, the store-to-store sync, is not served yet.";
+--hook pre-receive and --hook proc-receive are the entries git runs inside a push, from the \
+hook files serve writes; they take no --as. --stdio, the store-to-store sync, is not served yet.";
 
 /// `serve --user-family`'s help.
 const SERVE_USER_FAMILY_HELP: &str = "With --cgi: name the caller <FAMILY>/$REMOTE_USER, the user \
@@ -722,7 +724,8 @@ pub struct ServeArgs {
         help = SERVE_USER_FAMILY_HELP
     )]
     pub user_family: Option<String>,
-    /// Run as the hook git runs inside a push: proc-receive, from the hook file serve writes.
+    /// Run as a hook git runs inside a push: pre-receive or proc-receive, from the hook files
+    /// serve writes.
     #[arg(long, value_enum, value_name = "HOOK", conflicts_with = "stdio")]
     pub hook: Option<HookKind>,
     /// Serve the store-to-store sync on stdin and stdout: not served yet.
@@ -733,6 +736,8 @@ pub struct ServeArgs {
 /// The hooks `serve --hook` runs as.
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookKind {
+    /// git's `pre-receive`: it refuses the whole push while its objects are quarantined.
+    PreReceive,
     /// git's `proc-receive`: it decides each command of a push.
     ProcReceive,
 }

@@ -16,8 +16,9 @@ which reuses this page's access file and refusals.
   `[a-z0-9][a-z0-9._-]{0,62}`, here `acme`.
 - A `FORMAT 2` store for branches beyond `main` and `release/<name>`, and for tags
   (`swarmops init --format 2`, or [`swarmops upgrade`](../reference/commands/upgrade.md)).
-- A filesystem that lets the serving account run files: git runs the hook `serve` writes in the
-  store (`git/serve-hooks/proc-receive`), so a store mounted `noexec` refuses every push.
+- A filesystem that lets the serving account run files: git runs the hooks `serve` writes in the
+  store (`git/serve-hooks/pre-receive` and `git/serve-hooks/proc-receive`), so a store mounted
+  `noexec` refuses every push.
 
 ## How it works
 
@@ -29,10 +30,15 @@ git (client) ──ssh──▶ sshd ──forced command──▶ swarmops serv
                                                  │ 4 git/serve.git refreshed from the store
                                                  ▼
                                     git upload-pack | git receive-pack on serve.git
-                                                 │ a push: git checks the pack, then runs
+                                                 │ a push: git checks the pack in its
+                                                 │ quarantine, then runs
                                                  ▼
-                                    swarmops serve --hook proc-receive: per ref, access,
-                                    import, compare-and-swap of the store ref, or a land
+                                    swarmops serve --hook pre-receive: per ref, access,
+                                    forward or force, import; one refused ref refuses the
+                                    push, and git drops the quarantine
+                                                 ▼
+                                    swarmops serve --hook proc-receive: per ref, the same,
+                                    then compare-and-swap of the store ref, or a land
 ```
 
 `serve` runs once per connection and ends with it; there is no daemon. The pack protocol is the
@@ -197,8 +203,12 @@ fatal: remote error: E_AUTH: the store has no access.toml: serve grants nothing 
 {"ok":false,"op":"serve","api":1,"error":{"code":"E_AUTH","message":"the store has no access.toml: serve grants nothing without one","retryable":false,"exit":5,"details":{"reason":"no_access_file"},"hint":"the operator writes access.toml in the store's root: version = 1, then one [[grant]] per set of callers (who, read, push, force, land)"},"meta":{"elapsed_ms":1,"resolved":{},"auth":"trust"}}
 ```
 
-A push refused for one ref is `! [remote rejected] <ref> (<reason>)`; the push's other refs are
-decided on their own, since pushes are not atomic. No text names a path of the server.
+A push with one refused ref is refused whole, before any of its objects enters `serve.git`: every
+ref is `! [remote rejected] <ref> (pre-receive hook declined)`, and a `remote:` line per ref gives
+the reason, `<ref> <CODE>: <message>` (a ref refused only with the others reads `accepted alone`).
+Push refs that must land independently in separate pushes. A ref that loses a race after that
+check, to another push or a land conflict, is refused alone: `! [remote rejected] <ref>
+(<reason>)`. No text names a path of the server.
 
 | The client sees | Why | What to do |
 | --- | --- | --- |

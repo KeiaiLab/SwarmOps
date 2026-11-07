@@ -1,9 +1,11 @@
-//! One command of a push that moves a ref (M14 design §6): mapped, its access checked, its
-//! objects imported, then the store ref moved by compare-and-swap.
+//! One command of a push that moves a ref (M14 design §6, M16 design §7): judged (mapped, its
+//! access checked, its objects imported, forward or forced), then the store ref moved by
+//! compare-and-swap.
 //!
 //! ```text
-//! 1 refmap::from_git ─▶ 2 access: push ─▶ 3 import the tip from serve.git, objects only
-//!   ── serve.lock ──────────────────────────────────────────────────────────────────
+//! judge: 1 refmap::from_git ─▶ 2 access: push ─▶ 3 import the tip, objects only
+//!        ─▶ 3b the store's move rules ─▶ 3c forward from the head now? (else force)
+//! apply: ── serve.lock ─────────────────────────────────────────────────────────────
 //!   4 the ref's head exported ─▶ 5 old = that export? ─▶ 6 fast-forward? (else force)
 //!   ─▶ 7 store CAS ─▶ 8 the moved ref exported ─▶ ok
 //!
@@ -11,10 +13,14 @@
 //!   ─▶ 8 serve.git's ref deleted ─▶ ok
 //! ```
 //!
-//! git has checked the pack (fsck, connectivity) and moved it into `serve.git` before the hook
-//! runs, so the import reads the tip there. `main` moves only forward along first parents: the
-//! land replay and the conflict report walk them, so a merge whose second parent is the old
-//! `main` would hide earlier lands from them. Another branch moves forward along any parent.
+//! `pre-receive` judges inside git's quarantine, reading the tip there; git has checked the pack
+//! (fsck, connectivity) first. The judge reads each head without exporting it: `main` as the
+//! store ref, another branch as the commit `serve.git`'s ref names now. `proc-receive` judges
+//! again once git has moved the pack into `serve.git`, then applies under the lock.
+//!
+//! `main` moves only forward along first parents: the land replay and the conflict report walk
+//! them, so a merge whose second parent is the old `main` would hide earlier lands from them.
+//! Another branch moves forward along any parent.
 //! Steps 4 to 8 hold `serve.lock`, so that no refresh moves the ref between the compare and the
 //! export; the store's own compare-and-swap is the one that decides. Its move rules (`main`
 //! never deleted, a tag never moved) are the store's `check_move`, called, not restated: a tag
@@ -30,14 +36,14 @@ use swarmops_git::serve::refmap::{Mapped, Refusal, from_git};
 use swarmops_git::serve::repo::{ServeError, ServeLock};
 use swarmops_git::transport::{GitCli, Transport as _};
 use swarmops_git::{
-    BranchUpdate, DivergedReason, ExportError, ExportRequest, GitOid, GitSource as _, GixSink,
-    GixSource, ImportError, ImportRequest, RawKind, SinkError, export, import,
+    BranchUpdate, DivergedReason, ExportError, ExportRequest, GitOid, GitSink as _, GitSource as _,
+    GixSink, ImportError, ImportRequest, RawKind, SinkError, export, import,
 };
 use swarmops_repo::RepoError;
 use swarmops_store::{RefKind, check_move};
 
 use super::access::Action;
-use super::hook::{HookCtx, ng};
+use super::hook::{HookCtx, Judged, Objects, ng};
 use super::refresh::{SERVE_REFRESH_ATTEMPTS, serve_error};
 use crate::error;
 
@@ -67,36 +73,122 @@ const NEW_OID: &str = "new-oid";
 /// A store ref's head and the commit it exports to.
 type Head = (ChangesetId, GitOid);
 
-/// What the hook reports on `command`.
-pub fn decide(ctx: &HookCtx<'_>, command: &Command) -> Report {
-    match push(ctx, command) {
-        Ok(report) => report,
-        Err(e) => ng(&command.refname, &e),
+/// The judge's steps 1 to 3c of [the module documentation](self) on `command`, its objects
+/// read through `objects`: what to apply, or the report that refuses it.
+pub(crate) fn judge(
+    ctx: &HookCtx<'_>,
+    command: &Command,
+    objects: Objects<'_>,
+) -> Result<Judged, Report> {
+    judged(ctx, command, objects).map_err(|e| match e {
+        Refused::Report(report) => report,
+        Refused::Error(e) => ng(&command.refname, &e),
+    })
+}
+
+/// Why the judge refused a command: a report of its own, or an error.
+enum Refused {
+    /// `ng` with this reason.
+    Report(Report),
+    /// `ng <CODE>: <message>`.
+    Error(OpError),
+}
+
+impl From<OpError> for Refused {
+    fn from(e: OpError) -> Refused {
+        Refused::Error(e)
     }
 }
 
-/// Steps 1 to 8 of [the module documentation](self): the report of a move, or why it was
-/// refused.
-fn push(ctx: &HookCtx<'_>, command: &Command) -> Result<Report, OpError> {
-    // 1. The store ref; a deletion has its own path.
-    let (store, kind) = match from_git(ctx.ops.repo.format(), &command.refname) {
+/// [`judge`]'s steps.
+fn judged(ctx: &HookCtx<'_>, command: &Command, objects: Objects<'_>) -> Result<Judged, Refused> {
+    // 1. The store ref; a deletion has its own steps.
+    let format = ctx.ops.repo.format();
+    let (store, kind) = match from_git(format, &command.refname) {
         Mapped::Ref { store, kind } => (store, kind),
-        Mapped::Refused(refusal) => return Err(refused(&command.refname, refusal)),
-        _ => return Err(error::unknown_variant("Mapped")),
+        Mapped::Refused(refusal) => return Err(refused(&command.refname, refusal).into()),
+        _ => return Err(error::unknown_variant("Mapped").into()),
     };
+    let now = ctx.ops.repo.get_ref(&store).map_err(error::op)?;
+    let now = now.map(|state| state.target);
     let Some(new) = command.new else {
-        return delete(ctx, command, &store, kind);
+        // 1, 2. A ref no grant may delete (main) is refused as protected, before any grant.
+        let protected = check_move(format, &store, now, None);
+        protected.map_err(|e| error::op(RepoError::from(e)))?;
+        ctx.access.check(ctx.who, Action::Delete, &store)?;
+        return Ok(Judged::Delete { store, kind });
     };
 
     // 2. The caller may push it.
     ctx.access.check(ctx.who, Action::Push, &store)?;
 
     // 3. The tip's history into the store, no ref moved.
-    let tip = import_tip(ctx, new)?;
+    let tip = import_tip(ctx, objects, new)?;
+
+    // 3b. The store's own move rules: a tag never moves.
+    let rules = check_move(format, &store, now, Some(tip));
+    rules.map_err(|e| error::op(RepoError::from(e)))?;
+
+    // 3c. Forward from the head now, read without exporting: main along first parents in the
+    //     store, another branch along any parent from the commit serve.git names.
+    let Some(head) = now.filter(|_| kind != RefKind::Tag) else {
+        return Ok(Judged::Move { store, kind, tip });
+    };
+    if store == MAIN {
+        let read = ctx.ops.repo.snapshot().map_err(error::op)?;
+        if !read.is_ancestor(head, tip).map_err(error::op)? {
+            let report = Report::ng(command.refname.clone(), MAIN_NOT_FORWARD);
+            return Err(Refused::Report(report));
+        }
+        return Ok(Judged::Move { store, kind, tip });
+    }
+    let short = command
+        .refname
+        .strip_prefix(HEADS)
+        .unwrap_or(&command.refname);
+    let failed = |e| error::transport_error(e, SERVE_GIT, error::Phase::Push);
+    let sink = GixSink::open(ctx.repo.git_dir().as_std_path())
+        .map_err(|e| serve_error(ServeError::Sink(e)))?;
+    let served = sink
+        .branch(short)
+        .map_err(|e| serve_error(ServeError::Sink(e)))?;
+    if let Some(served) = served
+        && !objects.is_ancestor(ctx.repo, served, new).map_err(failed)?
+    {
+        ctx.access.check(ctx.who, Action::Force, &store)?;
+    }
+    Ok(Judged::Move { store, kind, tip })
+}
+
+/// What `proc-receive` reports on `command`, which [`judge`] found to do `judged`.
+pub(crate) fn apply(ctx: &HookCtx<'_>, command: &Command, judged: Judged) -> Report {
+    let applied = match judged {
+        Judged::Move { store, kind, tip } => push(ctx, command, &store, kind, tip),
+        Judged::Delete { store, kind } => delete(ctx, command, &store, kind),
+        Judged::Land { .. } => Err(error::unknown_variant("Judged")),
+    };
+    match applied {
+        Ok(report) => report,
+        Err(e) => ng(&command.refname, &e),
+    }
+}
+
+/// Steps 4 to 8 of [the module documentation](self) for the store ref `store` of kind `kind`,
+/// moved to the changeset `tip`: the report of a move, or why it was refused.
+fn push(
+    ctx: &HookCtx<'_>,
+    command: &Command,
+    store: &str,
+    kind: RefKind,
+    tip: ChangesetId,
+) -> Result<Report, OpError> {
+    let Some(new) = command.new else {
+        return Err(error::unknown_variant("Command"));
+    };
 
     // 4. Under serve.lock: the head now, as its export.
     let _lock = ctx.repo.lock(SERVE_LOCK_WAIT).map_err(serve_error)?;
-    let head = export_ref(ctx, &command.refname, &store, kind)?;
+    let head = export_ref(ctx, &command.refname, store, kind)?;
 
     // 5. The client's old value is that export, or the ref is new on both sides.
     if head.map(|(_, oid)| oid) != command.old {
@@ -107,16 +199,16 @@ fn push(ctx: &HookCtx<'_>, command: &Command) -> Result<Report, OpError> {
     //    A tag never moves: step 7's store refuses it, whatever the grants.
     if let Some((id, oid)) = head
         && kind != RefKind::Tag
-        && !forward(ctx, &store, (id, oid), (tip, new))?
+        && !forward(ctx, store, (id, oid), (tip, new))?
     {
         if store == MAIN {
             return Ok(Report::ng(command.refname.clone(), MAIN_NOT_FORWARD));
         }
-        ctx.access.check(ctx.who, Action::Force, &store)?;
+        ctx.access.check(ctx.who, Action::Force, store)?;
     }
 
     // 7. The store ref moved from the head read, by compare-and-swap.
-    let mut req = RefSetReq::new(store.clone(), Rev::from(tip.to_string()));
+    let mut req = RefSetReq::new(store.to_owned(), Rev::from(tip.to_string()));
     match head {
         Some((id, _)) => req.expected_old = Some(Rev::from(id.to_string())),
         None => req.create = true,
@@ -127,7 +219,7 @@ fn push(ctx: &HookCtx<'_>, command: &Command) -> Result<Report, OpError> {
     };
 
     // 8. serve.git's ref at the move's export: the pushed commit, unless its import was lossy.
-    let moved = export_ref(ctx, &command.refname, &store, kind)?;
+    let moved = export_ref(ctx, &command.refname, store, kind)?;
     let mut report = Report::ok(command.refname.clone());
     if let (Some((_, oid)), Report::Ok { options, .. }) = (moved, &mut report)
         && oid != new
@@ -137,22 +229,15 @@ fn push(ctx: &HookCtx<'_>, command: &Command) -> Result<Report, OpError> {
     Ok(report)
 }
 
-/// A deletion of the store ref `store` of kind `kind`, from the export the client last saw:
-/// steps 1, 2, 4, 5 and 7 of [the module documentation](self), then `serve.git`'s ref deleted.
+/// A deletion of the store ref `store` of kind `kind`, which [`judge`] found protected by no
+/// rule and granted, from the export the client last saw: steps 4, 5 and 7 of [the module
+/// documentation](self), then `serve.git`'s ref deleted.
 fn delete(
     ctx: &HookCtx<'_>,
     command: &Command,
     store: &str,
     kind: RefKind,
 ) -> Result<Report, OpError> {
-    // 1. A ref no grant may delete (main) is refused as protected, before any grant is read.
-    let now = ctx.ops.repo.get_ref(store).map_err(error::op)?;
-    let protected = check_move(ctx.ops.repo.format(), store, now.map(|s| s.target), None);
-    protected.map_err(|e| error::op(RepoError::from(e)))?;
-
-    // 2. The caller may delete it: the `force` grant.
-    ctx.access.check(ctx.who, Action::Delete, store)?;
-
     // 4, 5. Under serve.lock: the head now, as its export, is the client's old value.
     let lock = ctx.repo.lock(SERVE_LOCK_WAIT).map_err(serve_error)?;
     let head = export_ref(ctx, &command.refname, store, kind)?;
@@ -189,13 +274,17 @@ fn unset(ctx: &HookCtx<'_>, lock: &ServeLock, full: &str, oid: GitOid) -> Result
     }
 }
 
-/// The changeset of the commit `new`, which git moved into `serve.git`, its history imported
-/// into the store objects-only. An annotated tag is refused (`annotated_tag`): it is no
-/// changeset, and the import would peel it to its commit.
-fn import_tip(ctx: &HookCtx<'_>, new: GitOid) -> Result<ChangesetId, OpError> {
+/// The changeset of the commit `new`, read through `objects`, its history imported into the
+/// store objects-only. An annotated tag is refused (`annotated_tag`): it is no changeset, and
+/// the import would peel it to its commit.
+fn import_tip(
+    ctx: &HookCtx<'_>,
+    objects: Objects<'_>,
+    new: GitOid,
+) -> Result<ChangesetId, OpError> {
     let hex = new.to_string();
     let failed = |e: ImportError| error::git_import_error(e, SERVE_GIT, &hex);
-    let source = GixSource::open(ctx.repo.git_dir().as_std_path()).map_err(|e| failed(e.into()))?;
+    let source = objects.source(ctx.repo).map_err(|e| failed(e.into()))?;
     let (object, _) = source.header(new).map_err(|e| failed(e.into()))?;
     if object == RawKind::Tag {
         return Err(super::refused(

@@ -2,13 +2,17 @@
 //! with the push's land key, and a conflict reported on the side band.
 //!
 //! ```text
-//! 1 a commit to land, and access: land ─▶ 2 import the tip from serve.git, objects only
-//! ─▶ 3 LocalOps::land_gated, keyed by who pushed which tip where, access: land read again
+//! judge: 1 a commit to land, and access: land ─▶ 2 import the tip, objects only
+//! apply: 3 LocalOps::land_gated, keyed by who pushed which tip where, access: land read again
 //!      before each attempt
 //!      landed | replayed ─▶ 4 target exported ─▶ ok, and the landed commit on stderr
 //!      E_CONFLICT        ─▶ 4 target exported ─▶ ng conflict, the report on stderr
 //!      any other error   ─▶ ng <CODE>: <message>
 //! ```
+//!
+//! `pre-receive` judges steps 1 and 2 inside git's quarantine, `proc-receive` again once git has
+//! moved the pack into `serve.git` (M16 design §7): a conflict or a lost race is step 3's, an
+//! `ng` of this command alone, its objects left in `serve.git` with no ref naming them.
 //!
 //! Each attempt of step 3 reads `access.toml` again first (the M15 design §6): a `land` grant taken
 //! away while an attempt loses its race stops the land before the next, with the connection's
@@ -44,7 +48,7 @@ use swarmops_git::{
 
 use super::access::{Access, Action};
 use super::guard::Redactor;
-use super::hook::{HookCtx, ng};
+use super::hook::{HookCtx, Judged, Objects, ng};
 use super::refresh::{SERVE_REFRESH_ATTEMPTS, serve_error};
 use crate::{LocalOps, error};
 
@@ -67,18 +71,27 @@ const SHORT_OID: usize = 7;
 /// A store ref's head and the commit it exports to.
 type Head = (ChangesetId, GitOid);
 
-/// What the hook reports on `command`, a push to `refs/land/<target>`.
-pub fn run(ctx: &HookCtx<'_>, command: &Command, target: &str) -> Report {
-    match land(ctx, command, target) {
-        Ok(report) => report,
-        Err(e) => ng(&command.refname, &e),
-    }
+/// The judge's steps 1 and 2 of [the module documentation](self) on `command`, a push to
+/// `refs/land/<target>`, its objects read through `objects`: the land to apply, or the report
+/// that refuses it.
+pub(crate) fn judge(
+    ctx: &HookCtx<'_>,
+    command: &Command,
+    target: &str,
+    objects: Objects<'_>,
+) -> Result<Judged, Report> {
+    judged(ctx, command, target, objects).map_err(|e| ng(&command.refname, &e))
 }
 
-/// Steps 1 to 4 of [the module documentation](self): the report of a land, or why it failed.
-fn land(ctx: &HookCtx<'_>, command: &Command, target: &str) -> Result<Report, OpError> {
+/// [`judge`]'s steps.
+fn judged(
+    ctx: &HookCtx<'_>,
+    command: &Command,
+    target: &str,
+    objects: Objects<'_>,
+) -> Result<Judged, OpError> {
     // 1. A commit to land, onto a target the caller may land onto.
-    let Some(tip) = command.new else {
+    let Some(new) = command.new else {
         return Err(super::refused(
             ErrorCode::InvalidArg,
             "land_deletion",
@@ -91,7 +104,37 @@ fn land(ctx: &HookCtx<'_>, command: &Command, target: &str) -> Result<Report, Op
     ctx.access.check(ctx.who, Action::Land, target)?;
 
     // 2. The tip's history into the store, no ref moved.
-    let head = import_tip(ctx, tip)?;
+    let tip = import_tip(ctx, objects, new)?;
+    Ok(Judged::Land {
+        target: target.to_owned(),
+        tip,
+    })
+}
+
+/// What `proc-receive` reports on `command`, a push to `refs/land/<target>` that [`judge`]
+/// found to land the changeset `head`.
+pub(crate) fn apply(
+    ctx: &HookCtx<'_>,
+    command: &Command,
+    target: &str,
+    head: ChangesetId,
+) -> Report {
+    match land(ctx, command, target, head) {
+        Ok(report) => report,
+        Err(e) => ng(&command.refname, &e),
+    }
+}
+
+/// Steps 3 and 4 of [the module documentation](self): the report of a land, or why it failed.
+fn land(
+    ctx: &HookCtx<'_>,
+    command: &Command,
+    target: &str,
+    head: ChangesetId,
+) -> Result<Report, OpError> {
+    let Some(tip) = command.new else {
+        return Err(error::unknown_variant("Command"));
+    };
 
     // 3. The land, keyed by who pushed which tip where: the same push again replays it.
     let mut req = LandReq::new(Rev::from(head.to_string()));
@@ -234,12 +277,16 @@ fn lines(side: &LinesOut) -> String {
     format!("{}-{}", side.first, side.last)
 }
 
-/// The changeset of the commit `new`, which git moved into `serve.git`, its history imported
-/// into the store objects-only.
-fn import_tip(ctx: &HookCtx<'_>, new: GitOid) -> Result<ChangesetId, OpError> {
+/// The changeset of the commit `new`, read through `objects`, its history imported into the
+/// store objects-only.
+fn import_tip(
+    ctx: &HookCtx<'_>,
+    objects: Objects<'_>,
+    new: GitOid,
+) -> Result<ChangesetId, OpError> {
     let hex = new.to_string();
     let failed = |e: ImportError| error::git_import_error(e, SERVE_GIT, &hex);
-    let source = GixSource::open(ctx.repo.git_dir().as_std_path()).map_err(|e| failed(e.into()))?;
+    let source = objects.source(ctx.repo).map_err(|e| failed(e.into()))?;
     let mut request = ImportRequest::objects_only(hex.as_str());
     request.memo_key.clone_from(&ctx.ops.memo_key);
     let report = import(&ctx.ops.repo, &source, &request).map_err(failed)?;
@@ -426,9 +473,9 @@ mod tests {
         use swarmops_testkit::store::layout_of;
         use tempfile::TempDir;
 
-        use super::super::{land, land_onto};
+        use super::super::{judged, land, land_onto};
         use crate::serve::access::Access;
-        use crate::serve::hook::HookCtx;
+        use crate::serve::hook::{HookCtx, Judged, Objects};
         use crate::{LocalOps, Resolved};
 
         /// Who lands.
@@ -584,7 +631,11 @@ mod tests {
             let repo = ServeRepo::open(&root).unwrap();
             let who = Identity::parse(LANDER).unwrap();
             let ctx = HookCtx::new(ops, &repo, &who, access);
-            land(&ctx, &Command::new(None, Some(tip), LAND_REF), "main")
+            let command = Command::new(None, Some(tip), LAND_REF);
+            match judged(&ctx, &command, "main", Objects::Served)? {
+                Judged::Land { target, tip } => land(&ctx, &command, &target, tip),
+                other => panic!("a land judged {other:?}"),
+            }
         }
 
         /// A land onto `main` that loses its first race, with the race doing `meanwhile`:

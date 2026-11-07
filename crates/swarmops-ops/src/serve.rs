@@ -1,6 +1,6 @@
 //! `swarmops serve` (M14 design §2): a store of a directory of stores served to stock git, one
 //! process per connection, over ssh as a forced command, as a CGI program behind a web server, or
-//! as the `proc-receive` hook git runs inside a push.
+//! as the `pre-receive` and `proc-receive` hooks git runs inside a push.
 //!
 //! ```text
 //! ServeInvocation ─▶ run: 1 identity ─▶ 2 request ─▶ upload | receive (ssh) · cgi · hook
@@ -66,6 +66,9 @@ pub enum Entry {
     },
     /// git's `proc-receive` hook, inside a push the parent `serve` runs.
     Hook,
+    /// git's `pre-receive` hook, inside a push the parent `serve` runs, while the push's objects
+    /// are in git's quarantine.
+    PreReceive,
 }
 
 /// Who the caller is, as the command line names them.
@@ -101,6 +104,8 @@ pub struct ServeInvocation {
     pub serve_store: Option<String>,
     /// For the hook: the `GIT_DIR` git gave it.
     pub git_dir: Option<PathBuf>,
+    /// For `pre-receive`: the quarantine git gave it (`GIT_QUARANTINE_PATH`).
+    pub quarantine: Option<PathBuf>,
     /// The memo key of a store, by its id.
     pub memo_keys: MemoKeys,
 }
@@ -122,6 +127,7 @@ impl ServeInvocation {
             exe: None,
             serve_store: None,
             git_dir: None,
+            quarantine: None,
             memo_keys,
         }
     }
@@ -148,7 +154,7 @@ pub fn run(invocation: &ServeInvocation) -> Result<Served, OpError> {
     // 1. The caller: --as, or a web server's user under --user-family.
     let remote_user = match &invocation.entry {
         Entry::Cgi { vars } => vars.get(REMOTE_USER).map(String::as_str),
-        Entry::Ssh { .. } | Entry::Hook => None,
+        Entry::Ssh { .. } | Entry::Hook | Entry::PreReceive => None,
     };
     let who = access::resolve_identity(&invocation.identity, remote_user)?;
 
@@ -164,6 +170,7 @@ pub fn run(invocation: &ServeInvocation) -> Result<Served, OpError> {
         }
         Entry::Cgi { .. } => cgi::run(invocation, &who),
         Entry::Hook => hook::run(invocation, &who),
+        Entry::PreReceive => hook::pre_receive(invocation, &who),
     }
 }
 

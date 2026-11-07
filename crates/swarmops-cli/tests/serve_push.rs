@@ -1,11 +1,13 @@
 //! Pushes to `swarmops serve` (M14 design §2.4, §6), as stock git makes them over ssh through the
 //! test kit's forced-command stand-in: receive-pack hands every command to the `proc-receive`
 //! hook, which imports the pushed commits from `serve.git` and moves the store ref by
-//! compare-and-swap, as the caller `--as` names. The hook runs only inside a push `serve`
-//! started, and a push it cannot decide moves nothing. The push rules: branches and lightweight
-//! tags created, a tag never moved, `main` never deleted and moved only forward along first
-//! parents, another branch's backward move and every deletion by the `force` grant, a stale old
-//! value refused, each command of a push decided on its own.
+//! compare-and-swap, as the caller `--as` names. The `pre-receive` hook judges the same rules
+//! first, inside git's quarantine, and refuses the whole push when it refuses one ref, so that
+//! no object of it enters `serve.git` (M16 design §7). The hooks run only inside a push `serve`
+//! started, and a push they cannot decide moves nothing. The push rules: branches and
+//! lightweight tags created, a tag never moved, `main` never deleted and moved only forward
+//! along first parents, another branch's backward move and every deletion by the `force` grant,
+//! a stale old value refused, a push with one refused ref refused whole.
 
 use std::fs;
 use std::io::Write as _;
@@ -68,6 +70,9 @@ const SERVE_IDENTITY: &str = "SWARMOPS_SERVE_IDENTITY";
 
 /// What the hook is asked to run as.
 const HOOK: [&str; 3] = ["serve", "--hook", "proc-receive"];
+
+/// What the hook is asked to run as inside git's quarantine.
+const PRE_RECEIVE: [&str; 3] = ["serve", "--hook", "pre-receive"];
 
 /// receive-pack's side of an empty push to the hook: the version line, a flush, no command, a
 /// flush.
@@ -268,7 +273,12 @@ fn hook(dir: &Path, args: &[&str], env: &[(&str, &str)], input: &[u8]) -> Output
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child.stdin.take().unwrap().write_all(input).unwrap();
+
+    // A hook that refuses before it reads closes its stdin: the refusal is what is asserted.
+    let written = child.stdin.take().unwrap().write_all(input);
+    if let Err(e) = written {
+        assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe, "{e}");
+    }
     Child::adopt(child).wait(Instant::now() + CHILD_TIMEOUT)
 }
 
@@ -473,8 +483,8 @@ fn serve_push_refuses_a_gitlink() {
     assert!(!fetched.status.success(), "{}", text(&fetched.stderr));
 }
 
-/// receive-pack moves no ref itself: with the hook's program gone, a push is rejected, and
-/// neither `serve.git` nor the store changes.
+/// receive-pack moves no ref itself: with the hooks' program gone, a push is rejected (by
+/// `pre-receive`, the first to run), and neither `serve.git` nor the store changes.
 #[test]
 fn hook_unrunnable_moves_nothing() {
     let site = Site::new();
@@ -506,7 +516,7 @@ fn hook_unrunnable_moves_nothing() {
     assert!(!pushed.status.success(), "{stderr}");
     assert!(!copy.exists(), "the pre-push hook ran");
     assert!(stderr.contains("[remote rejected]"), "{stderr}");
-    assert!(stderr.contains("proc-receive"), "{stderr}");
+    assert!(stderr.contains("pre-receive"), "{stderr}");
 
     // 3. Nothing moved.
     let after = (site.newest_op()["op"].clone(), site.served_refs());
@@ -642,6 +652,8 @@ fn serve_push_deletes_with_force() {
 
 /// Criterion 3: a push whose old value is stale, because another clone pushed between its
 /// advertisement and its commands, moves nothing and exits non-zero; the store verifies clean.
+/// Its commit does not reach the other clone's, so `pre-receive` refuses it as a
+/// non-fast-forward of `main`.
 #[test]
 fn serve_push_refuses_a_stale_old() {
     let site = Site::new();
@@ -663,7 +675,10 @@ fn serve_push_refuses_a_stale_old() {
 
     // 2. The second push: stale, refused.
     let stale = site.git_out(&second, &["push", "origin", "main"]);
-    assert_rejected(&stale, &["stale: refs/heads/main moved; fetch first"]);
+    assert_rejected(
+        &stale,
+        &[PRE_RECEIVE_DECLINED, "refs/heads/main non-fast-forward"],
+    );
 
     // 3. main is the first clone's commit, in the store and in serve.git; the store is whole.
     assert!(
@@ -798,8 +813,8 @@ fn serve_push_bounds_its_commands() {
 }
 
 /// Criterion 5: an identity with `read` only is refused each ref it pushes
-/// (`E_POLICY_DENIED`); and the commands of one push are decided each on its own, so a refused
-/// one does not stop another from moving.
+/// (`E_POLICY_DENIED`); and a push with one refused ref is refused whole (M16 design §7): the
+/// ref that would move alone does not.
 #[test]
 fn serve_push_decides_each_ref() {
     let site = Site::new();
@@ -820,7 +835,7 @@ fn serve_push_decides_each_ref() {
     assert_eq!(stderr.matches("E_POLICY_DENIED").count(), 2, "{stderr}");
     assert_eq!(site.refs(), before);
 
-    // 2. One push, one ref refused and the other moved.
+    // 2. One push, one ref refused: the other refused with it, nothing moved.
     let line = [
         "push",
         "origin",
@@ -828,15 +843,427 @@ fn serve_push_decides_each_ref() {
         "HEAD:refs/notes/x",
     ];
     let mixed = site.git_out(&work, &line);
-    assert_rejected(&mixed, &["refs/notes/x", "is not served"]);
+    assert_rejected(
+        &mixed,
+        &["refs/notes/x", "is not served", PRE_RECEIVE_DECLINED],
+    );
+    let stderr = text(&mixed.stderr);
+    assert_eq!(stderr.matches(PRE_RECEIVE_DECLINED).count(), 2, "{stderr}");
     assert!(
-        site.serves(&tip, "refs/heads/main"),
+        stderr.contains("refs/heads/main accepted alone"),
+        "{stderr}"
+    );
+    assert!(
+        !site.serves(&tip, "refs/heads/main"),
         "{}",
         site.served_refs()
     );
+    assert_eq!(site.refs(), before);
+}
+
+/// What git's `pre-receive` refusal gives every ref of a push it refuses whole.
+const PRE_RECEIVE_DECLINED: &str = "pre-receive hook declined";
+
+impl Site {
+    /// `serve.git`'s object counts (`git count-objects -v`), to see that no object came in.
+    fn objects(&self) -> String {
+        let output = self
+            .served
+            .command()
+            .arg("--git-dir")
+            .arg(self.serve_git())
+            .args(["count-objects", "-v"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", text(&output.stderr));
+        text(&output.stdout)
+    }
+
+    /// git with `args` in `dir` as [`AGENT`], `input` on its stdin, which must succeed; its
+    /// stdout, trimmed.
+    fn git_stdin(&self, dir: &Path, args: &[&str], input: &[u8]) -> String {
+        let mut child = self
+            .served
+            .command()
+            .current_dir(dir)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(input).unwrap();
+        let output = Child::adopt(child).wait(Instant::now() + CHILD_TIMEOUT);
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            text(&output.stderr)
+        );
+        text(&output.stdout).trim().to_owned()
+    }
+
+    /// Every ref move the store's op log holds, newest first.
+    fn ref_moves(&self) -> Vec<Value> {
+        let listed = self.so(&["op", "log", "-n", "1000"]);
+        let ops = listed["ops"].as_array().unwrap().iter();
+        ops.flat_map(|op| op["ref_moves"].as_array().unwrap().clone())
+            .collect()
+    }
+
+    /// Everything a refused push must leave as it was: the store's refs, its op log's ref
+    /// moves, `serve.git`'s refs and its objects. The changesets the judge imported before it
+    /// refused stay in the store, which no ref names (the M16 design §0).
+    fn untouched(&self) -> (Value, Vec<Value>, String, String) {
+        (
+            self.so(&["ref", "list"])["refs"].clone(),
+            self.ref_moves(),
+            self.served_refs(),
+            self.objects(),
+        )
+    }
+
+    /// A protocol v2 fetch of `oid` by id into the clone `dir`; whether it fetched it.
+    fn fetches_v2(&self, dir: &Path, oid: &str) -> bool {
+        let line = ["-c", "protocol.version=2", "fetch", "origin", oid];
+        self.git_out(dir, &line).status.success()
+    }
+
+    /// The objects `revs` name in the clone `dir`, packed as one stream (`git pack-objects
+    /// --stdout`): with `walk`, everything they reach (`--revs`), else those objects alone.
+    fn pack(&self, dir: &Path, revs: &[&str], walk: Walk) -> Vec<u8> {
+        let mut command = self.served.command();
+        command
+            .current_dir(dir)
+            .args(["pack-objects", "--stdout", "-q"]);
+        if walk == Walk::Reachable {
+            command.arg("--revs");
+        }
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let input = revs.join("\n") + "\n";
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = Child::adopt(child).wait(Instant::now() + CHILD_TIMEOUT);
+        assert!(output.status.success(), "{}", text(&output.stderr));
+        output.stdout
+    }
+
+    /// One push spoken by hand to `git-receive-pack` through [`AGENT`]'s forced command: each of
+    /// `commands` (`<old> <new> <ref>`), then `pack` as it is. What the connection gave back.
+    fn raw_push(&self, commands: &[String], pack: &[u8]) -> Output {
+        // 1. The commands as pkt-lines, report-status asked on the first, a flush, the pack.
+        let mut input = Vec::new();
+        for (n, command) in commands.iter().enumerate() {
+            let line = match n {
+                0 => format!("{command}\0report-status\n"),
+                _ => format!("{command}\n"),
+            };
+            input.extend(format!("{:04x}", line.len() + 4).as_bytes());
+            input.extend(line.as_bytes());
+        }
+        input.extend(b"0000");
+        input.extend(pack);
+
+        // 2. The forced command, as ssh would start it; receive-pack's advertisement is small
+        //    enough for the pipe, so the input goes in whole before any of it is read.
+        let ssh = self.served.ssh_command(AGENT);
+        let line = format!("{ssh} git@remote.invalid \"git-receive-pack '/{STORE}.git'\"");
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", &line])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(&input).unwrap();
+        Child::adopt(child).wait(Instant::now() + CHILD_TIMEOUT)
+    }
+}
+
+/// What [`Site::pack`] puts in the stream.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Walk {
+    /// Everything the revisions reach.
+    Reachable,
+    /// The named objects alone.
+    Named,
+}
+
+/// A push of two refs, each refused (a land without the `land` grant, a non-fast-forward
+/// `main`), is refused whole by `pre-receive`, inside git's quarantine: both refs `pre-receive
+/// hook declined`, a `remote:` line naming each one's reason, and no object of it in
+/// `serve.git` (its counts as they were, its tip not fetched over protocol v2); the store's refs
+/// and the op log's ref moves as they were, and the store whole.
+#[test]
+fn refused_push_leaves_no_objects() {
+    let site = Site::new();
+    let work = site.clone("work");
+    let fresh = site.clone("fresh");
+    site.git(
+        &work,
+        &["commit", "--quiet", "--amend", "--message", "rewritten"],
+    );
+    fs::write(work.join("new.txt"), "new\n").unwrap();
+    site.git(&work, &["add", "new.txt"]);
+    site.git(&work, &["commit", "--quiet", "--amend", "--no-edit"]);
+    let tip = site.rev(&work, "HEAD");
+    let before = site.untouched();
+
+    // 1. One push: a land the caller has no grant for, and main rewritten.
+    let line = [
+        "push",
+        "origin",
+        "HEAD:refs/land/main",
+        "+HEAD:refs/heads/main",
+    ];
+    let pushed = site.git_out(&work, &line);
+    assert_rejected(&pushed, &[PRE_RECEIVE_DECLINED]);
+    let stderr = text(&pushed.stderr);
+    assert_eq!(stderr.matches(PRE_RECEIVE_DECLINED).count(), 2, "{stderr}");
+    let remote = |needle: &str| {
+        stderr
+            .lines()
+            .any(|line| line.starts_with("remote:") && line.contains(needle))
+    };
+    assert!(remote("refs/land/main E_POLICY_DENIED"), "{stderr}");
+    assert!(remote("refs/heads/main non-fast-forward"), "{stderr}");
+
+    // 2. Nothing came in: refs, op log, serve.git's refs and objects; the tip is not fetched.
+    assert_eq!(site.untouched(), before);
     assert!(
-        !site.served_refs().contains("refs/notes/x"),
+        !site.fetches_v2(&fresh, &tip),
+        "the refused tip was fetched"
+    );
+    site.so(&["verify", "--deep"]);
+}
+
+/// A damaged pack (its trailing checksum flipped), a damaged object (a tree git's fsck refuses)
+/// and a commit whose tree the pack lacks are each refused by receive-pack before any hook: no
+/// object of them in `serve.git`, nothing moved, the store whole.
+#[test]
+fn damaged_pack_object_missing_push_leave_no_objects() {
+    let site = Site::new();
+    let work = site.clone("work");
+    let old = site.rev(&work, "HEAD");
+    let tip = site.commit(&work, "damaged.txt");
+    let main = |new: &str| vec![format!("{old} {new} refs/heads/main")];
+    let before = site.untouched();
+
+    // 1. The pack's trailing checksum flipped.
+    let mut pack = site.pack(&work, &[&tip, &format!("^{old}")], Walk::Reachable);
+    *pack.last_mut().unwrap() ^= 0xff;
+    let pushed = site.raw_push(&main(&tip), &pack);
+    assert!(
+        !text(&pushed.stdout).contains("ok refs/heads/main"),
+        "{pushed:?}"
+    );
+    assert_eq!(site.untouched(), before);
+
+    // 2. A tree whose entry has no name, and a commit of it.
+    let bad_tree = site.git_stdin(
+        &work,
+        &["hash-object", "-w", "--literally", "-t", "tree", "--stdin"],
+        b"100644 \0aaaaaaaaaaaaaaaaaaaa",
+    );
+    let commit = format!(
+        "tree {bad_tree}\nparent {old}\nauthor a <a@a> 0 +0000\ncommitter a <a@a> 0 +0000\n\nbad\n"
+    );
+    let bad = site.git_stdin(
+        &work,
+        &["hash-object", "-w", "-t", "commit", "--stdin"],
+        commit.as_bytes(),
+    );
+    let pack = site.pack(&work, &[&bad, &bad_tree], Walk::Named);
+    let pushed = site.raw_push(&main(&bad), &pack);
+    assert!(
+        !text(&pushed.stdout).contains("ok refs/heads/main"),
+        "{pushed:?}"
+    );
+    assert_eq!(site.untouched(), before);
+
+    // 3. The commit without its tree.
+    let pack = site.pack(&work, &[&tip], Walk::Named);
+    let pushed = site.raw_push(&main(&tip), &pack);
+    assert!(
+        !text(&pushed.stdout).contains("ok refs/heads/main"),
+        "{pushed:?}"
+    );
+    assert_eq!(site.untouched(), before);
+    site.so(&["verify", "--deep"]);
+}
+
+/// `pre-receive` runs only inside a push `serve` started, its quarantine alive: with no
+/// `GIT_QUARANTINE_PATH`, or one that is no `tmp_objdir-incoming-*` directory directly in the
+/// store's `serve.git/objects`, it is refused `not_from_git`; with one, a push is judged. A push
+/// that only deletes, for which git makes no quarantine, is judged without one.
+#[test]
+fn pre_receive_refuses_without_the_quarantine() {
+    let site = Site::new();
+    site.git(
+        site.work.path(),
+        &["ls-remote", &site.served.ssh_url(STORE)],
+    );
+    let store = site.store();
+    let objects = site.serve_git().join("objects");
+    let quarantine = objects.join("tmp_objdir-incoming-test");
+    fs::create_dir(&quarantine).unwrap();
+    let other = other_bare(&site, site.work.path()).join("objects/tmp_objdir-incoming-other");
+    fs::create_dir(&other).unwrap();
+    let a_file = objects.join("tmp_objdir-incoming-file");
+    fs::write(&a_file, "").unwrap();
+    let zero = "0".repeat(40);
+    let main = site.served_refs().split(' ').next().unwrap().to_owned();
+    let deletion = format!("{main} {zero} refs/heads/feature/gone\n");
+    let creation = format!("{zero} {main} refs/heads/feature/new\n");
+    let run = |path: Option<&Path>, input: &str| {
+        let mut env = vec![
+            (SERVE_IDENTITY, AGENT),
+            (SERVE_STORE, store.as_str()),
+            ("GIT_DIR", "."),
+        ];
+        if let Some(path) = path {
+            env.push(("GIT_QUARANTINE_PATH", path.to_str().unwrap()));
+        }
+        let line: Vec<&str> = PRE_RECEIVE.to_vec();
+        let mut command = support::swarmops(&line, &env);
+        let mut child = command
+            .current_dir(site.serve_git())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(input.as_bytes()).unwrap();
+        drop(stdin);
+        Child::adopt(child).wait(Instant::now() + CHILD_TIMEOUT)
+    };
+
+    // 1. None, serve.git's objects, another repository's quarantine, another name, a file.
+    let refused = [
+        None,
+        Some(objects.as_path()),
+        Some(other.as_path()),
+        Some(&*objects.join("pack")),
+        Some(a_file.as_path()),
+    ];
+    for path in refused {
+        assert_not_from_git(&run(path, &creation));
+    }
+    assert_not_from_git(&run(None, ""));
+
+    // 2. The quarantine, as git names it (`<serve.git>/./objects/…`): a branch created from a
+    //    commit serve.git holds, accepted.
+    let named = site.serve_git().join("./objects/tmp_objdir-incoming-test");
+    let accepted = run(Some(&named), &creation);
+    assert!(accepted.status.success(), "{}", text(&accepted.stderr));
+
+    // 3. A deletion alone, without a quarantine: judged, and granted to the caller.
+    let deleted = run(None, &deletion);
+    assert!(deleted.status.success(), "{}", text(&deleted.stderr));
+}
+
+/// The judges' answers differ only by a race: a commit that `pre-receive` accepts as a
+/// fast-forward of `main`, whose old value another push makes stale before `proc-receive`, is
+/// refused `stale` by `proc-receive` alone; `main` stays where the other push put it.
+#[test]
+fn a_race_lost_after_pre_receive_is_ng() {
+    let site = Site::new();
+    let work = site.clone("work");
+    let won = site.commit(&work, "won.txt");
+    let lost = site.commit(&work, "lost.txt");
+
+    // 1. The pre-push hook, which runs after the advertisement, pushes the first commit.
+    let pre_push = work.join(".git/hooks/pre-push");
+    let race = format!(
+        "#!/bin/sh\nunset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX\n\
+         exec git push --no-verify --quiet origin {won}:refs/heads/main\n"
+    );
+    fs::write(&pre_push, race).unwrap();
+    fs::set_permissions(&pre_push, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // 2. The second commit: forward from the first, so pre-receive accepts it; stale for
+    //    proc-receive.
+    let pushed = site.git_out(
+        &work,
+        &["push", "origin", &format!("{lost}:refs/heads/main")],
+    );
+    assert_rejected(&pushed, &["stale: refs/heads/main moved; fetch first"]);
+    let stderr = text(&pushed.stderr);
+    assert!(!stderr.contains(PRE_RECEIVE_DECLINED), "{stderr}");
+    assert!(
+        site.serves(&won, "refs/heads/main"),
         "{}",
         site.served_refs()
+    );
+    site.so(&["verify", "--deep"]);
+}
+
+/// Another branch moves forward along any parent, or with the `force` grant: a fast-forward and
+/// a forced push to an existing branch are accepted and move it; a backward push without
+/// `force`, in one push with a ref that alone is accepted, is refused whole, and no object of it
+/// enters `serve.git`.
+#[test]
+fn serve_push_moves_other_branches() {
+    let site = Site::new();
+    let work = site.clone("work");
+    let base = site.rev(&work, "HEAD");
+    site.git(
+        &work,
+        &["push", "--quiet", "origin", "HEAD:refs/heads/feature/x"],
+    );
+
+    // 1. A fast-forward of feature/x: accepted.
+    let ahead = site.commit(&work, "ahead.txt");
+    site.git(
+        &work,
+        &["push", "--quiet", "origin", "HEAD:refs/heads/feature/x"],
+    );
+    assert!(
+        site.serves(&ahead, "refs/heads/feature/x"),
+        "{}",
+        site.served_refs()
+    );
+
+    // 2. A rewrite of it, forced by the caller with the force grant: accepted.
+    site.git(&work, &["reset", "--quiet", "--hard", &base]);
+    let forced = site.commit(&work, "forced.txt");
+    site.git(
+        &work,
+        &["push", "--quiet", "origin", "+HEAD:refs/heads/feature/x"],
+    );
+    assert!(
+        site.serves(&forced, "refs/heads/feature/x"),
+        "{}",
+        site.served_refs()
+    );
+
+    // 3. Another rewrite by a caller without force, beside a new branch: refused whole.
+    site.git(&work, &["reset", "--quiet", "--hard", &base]);
+    let rewritten = site.commit(&work, "rewritten.txt");
+    let before = site.untouched();
+    let line = [
+        "push",
+        "origin",
+        "+HEAD:refs/heads/feature/x",
+        "HEAD:refs/heads/feature/y",
+    ];
+    let denied = site.git_as(PUSHER, &work, &line);
+    assert_rejected(&denied, &["E_POLICY_DENIED", PRE_RECEIVE_DECLINED]);
+    let stderr = text(&denied.stderr);
+    assert_eq!(stderr.matches(PRE_RECEIVE_DECLINED).count(), 2, "{stderr}");
+    assert_eq!(site.untouched(), before);
+    let fresh = site.clone("fresh");
+    assert!(
+        !site.fetches_v2(&fresh, &rewritten),
+        "the refused tip was fetched"
     );
 }
