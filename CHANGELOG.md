@@ -28,13 +28,14 @@ collects the changes on `stable` that no release holds yet, until the next relea
   measurement job now also runs it and the landing lanes, which leave the weekly slow suite.
 - The store's write transaction can hold several frames, committed with one `journal.log` sync and
   listed one 512 B sector of entries at a time (`Journal::append_frames`; `MetaWrite::begin_frame`,
-  `drop_frame`, `keep_frames`, `commit_frames`); no caller batches yet (the M18 D2 design §3.6).
+  `drop_frame`, `keep_frames`, `commit_frames`); the write queue's batches use it (the M18 D2
+  design §3.6).
 - The store has a write queue (`MetaStore::take_turn`, `meta/queue/`). A writer that finds the
   writer lock taken leaves a small request and waits. The lock's next holder commits up to 32 of
   the waiting writers' transactions, each in its own journal frame, with one journal sync, and
   answers each writer after the commit point. A request still unclaimed at the lock timeout is
-  `E_BUSY` and records nothing (the M18 D2 design §3). Nothing calls it yet: lands and commits keep
-  their current path.
+  `E_BUSY` and records nothing (the M18 D2 design §3). A land's publish and a commit's insert
+  take their turn there.
 
 ### Changed
 
@@ -49,6 +50,19 @@ collects the changes on `stable` that no release holds yet, until the next relea
 - A land's publish now plans over any object store and can stage the changeset it relocates in
   memory before writing it, the groundwork for batched lands (the D2 group-commit design §3.3,
   slice D2-3); behaviour and on-disk calls are unchanged.
+- A land that finds the store's writer lock taken now waits in the write queue, and the next lock
+  holder commits it in a batch with the other waiting lands. Each land gets its own frame and is
+  moved onto the land before it. A batch makes one `journal.log` sync, one object flush and one
+  replace of each moved ref. Each land is still one operation that `op undo` reverts alone. An
+  uncontended land makes the same filesystem calls as before.
+- A commit whose insert finds the store's lock taken now waits in the store's write queue, as a
+  land's publish does: the lock holder, a commit or a land, commits it in the same batch with one
+  sync of `journal.log`. Each batched advance is compared against what the members before it left. A
+  commit already recorded is answered without a frame. A commit the leader cannot plan runs again
+  alone and meets its own error (the M18 D2 design §3.3).
+- docs/architecture.md describes the batched writers (Writing, Concurrency), SECURITY.md the
+  bounds checked before a write queue file is read, and docs/known-limitations.md's "Landing under
+  a burst queues on the lock" the batch, its measurement pending.
 
 ### Fixed
 

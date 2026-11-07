@@ -112,31 +112,35 @@ left).
   read it is made anew on the new head by the writer that holds the lock (metalog merge: its delta
   where no path overlaps, overlapping regular files of at most 1 MiB merged three-way), so a burst
   no longer costs retries: at 50 processes each landing once every 2 s, every land landed, 25 a
-  second, with 0 % retries and nothing lost, against 116–133 % retries in v0.5.0. What remains is
-  the wait for the lock, which each publish holds for its move and its merge: the p99 is
-  579.5–594.6 ms at 50 processes and 207–216 ms at 32. The umbrella spec's target (§15) for 50
-  landing processes is 20 lands/s or more, a p99 under 500 ms, a retry rate under 5 % and nothing
-  lost; the p99 is the one part missed ([perf.md](perf.md#v060--2026-10-28)). A land still goes
-  back to its lander, and is merged again outside the lock, when a path overlaps in a way the
-  lock's merge does not take (anything but a regular file of at most 1 MiB on every side, or a
-  conflict), or the target moved off the first-parent line through the head the land read, or
-  more than 256 changesets along it; a land with `expect_target` (`ws land --check`) never
-  relocates. An agent that meets
-  `E_CAS_RETRY_EXHAUSTED` lands again with the same key, or asks for more attempts. Up to
-  v0.8.0 each land took the lock twice, for its `commit` and for its `land`, about 25 ms together,
-  so at 25 lands a second the lock was held about 62 % of the time and the tail was the queue's
-  wait, not the hold (on the bench disk in M14's window the two took about 42 ms at the median,
-  the lock was held 99.6 % of the run and the p99 rose to 2.5–2.7 s, for v0.6.0's code as for
-  M14's; [perf.md](perf.md#v070--2026-10-29)). A land with `changes` (`land --changes`, `ws land
-  -m` without `--check`) now takes it once, its commit and its land in one frame (the M16 design
-  §4); G4's harness lands so. With it, at 50 processes, the p99 was 441.7 ms in one run (start load
-10.33) and 1,483.5 ms in another (20.88), with 25.0 lands/s, 0 % retries and nothing lost in both
-([perf.md](perf.md#m16--2026-11-07)): under 500 ms in one of two runs, so the lock's queue still
-sets the tail on a loaded host. A `ws land` record
-  left on the parent of the workspace's head is taken over when its key landed on its target (a
-  land that carried edits, cut once the workspace stood on their changeset). *Target: M18 (group commit, D2: one journal flush for several
-  lands). Found: the 2026-10-20 plan triage; narrowed by v0.6.0 and M16 Task S4; its cause measured
-  in M14.*
+  second, with 0 % retries and nothing lost, against 116–133 % retries in v0.5.0. What remained
+  was the wait for the lock, which each publish held for its own syncs, its move and its merge:
+  the p99 was 579.5–594.6 ms at 50 processes and 207–216 ms at 32. The umbrella spec's target
+  (§15) for 50 landing processes is 20 lands/s or more, a p99 under 500 ms, a retry rate under
+  5 % and nothing lost; the p99 is the one part missed ([perf.md](perf.md#v060--2026-10-28)). Up
+  to v0.8.0 each land took the lock twice, for its `commit` and for its `land`, about 25 ms
+  together, so at 25 lands a second the lock was held about 62 % of the time and the tail was
+  the queue's wait, not the hold (on the bench disk in M14's window the two took about 42 ms at
+  the median, the lock was held 99.6 % of the run and the p99 rose to 2.5–2.7 s, for v0.6.0's
+  code as for M14's; [perf.md](perf.md#v070--2026-10-29)). A land with `changes` (`land
+  --changes`, `ws land -m` without `--check`) takes it once, its commit and its land in one frame
+  (the M16 design §4); G4's harness lands so. With it, at 50 processes, the p99 was 441.7 ms in
+  one run (start load 10.33) and 1,483.5 ms in another (20.88), with 25.0 lands/s, 0 % retries
+  and nothing lost in both ([perf.md](perf.md#m16--2026-11-07)). Since M18 the lands and commits
+  that find the lock taken wait in the store's write queue, and the lock's next holder commits
+  them in one batch, a frame each, with one sync of `journal.log`, one object flush and one
+  replace of each moved ref (the M18 D2 design §3; [architecture](architecture.md#writing), "Batched
+  writers"). The lock is still held for each batch's recovery, planning (at most 50 ms) and
+  syncs, and lands are still ordered by their compare-and-swap; G4's p99 and the batch's hold
+  under it are not measured yet (pending M18 D2-8). A land still goes back to its lander, and is
+  merged again outside the lock, when a path overlaps in a way the lock's merge does not take
+  (anything but a regular file of at most 1 MiB on every side, or a conflict), or the target
+  moved off the first-parent line through the head the land read, or more than 256 changesets
+  along it; a land with `expect_target` (`ws land --check`) never relocates. An agent that meets
+  `E_CAS_RETRY_EXHAUSTED` lands again with the same key, or asks for more attempts. A `ws land`
+  record left on the parent of the workspace's head is taken over when its key landed on its
+  target (a land that carried edits, cut once the workspace stood on their changeset). *Target:
+  M18 (D2-8 measures G4 with group commit). Found: the 2026-10-20 plan triage; narrowed by v0.6.0,
+  M16 Task S4 and M18 D2 (group commit); its cause measured in M14.*
 - **Recovery after a crash walks all of a FORMAT 1 `journal.off` under the lock.** Before it cuts
   or lists anything, the first writer after a crash checks every entry of a FORMAT 1 store's
   `journal.off`. On a long journal that walk could approach `lock_timeout` for the writers queued

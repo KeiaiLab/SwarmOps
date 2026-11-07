@@ -297,12 +297,16 @@ one chain.
 3. A metadata write transaction takes `meta/lock` (below), repairs what a crashed writer may
    have left (it cuts a torn journal tail, repairs the index tail, and replays the frames past
    `journal.ckpt` into the index and the ref files; what that repair did comes back in the
-   envelope's `meta.recovered`), and queues the changeset for the index.
+   envelope's `meta.recovered`), and queues the changeset for the index. When the lock is
+   taken, the commit waits in the store's write queue instead, and the lock's next holder does
+   steps 3 to 6 for it in a batch (below, "Batched writers").
 4. It appends one frame to `journal.log` and `fdatasync`s it: **this is the commit point**. A
    commit that returns survives a power loss. The frame's offset then goes into `journal.off`,
-   synced too.
+   synced too. A batch appends every member's frame with one write and one `fdatasync`, the
+   commit point of all, then lists their offsets one 512 B sector of `journal.off` at a time.
 5. It materializes the frame: index records are appended without a sync, and the file of each
-   ref the frame moves is replaced (temp file, fsync, rename, directory fsync).
+   ref the frame moves is replaced (temp file, fsync, rename, directory fsync). A batch
+   materializes once: each ref its frames move is replaced once, with the last target.
 6. Housekeeping, still under the lock: every 32 frames past the checkpoint (and on an explicit
    flush), the five index files are synced and `journal.ckpt` moves to the end of the journal.
    When more than 1,024 index records sit past the sorted views, a compaction merges them into
@@ -314,6 +318,7 @@ The same steps, with what a failure on each side of the commit point leaves:
 flowchart TD
   start(["A commit"]) --> objs["Write the new objects, no lock:<br/>temp file, sync_all, link;<br/>fsync the fan-out directories"]
   objs --> lock["Take meta/lock, an flock<br/>(E_BUSY after 10 s)"]
+  lock -. "the lock taken" .-> queued["Wait in meta/queue/:<br/>the next lock holder runs<br/>the steps below for it<br/>in a batch"]
   lock --> repair["Repair what a crash left:<br/>cut a torn frame, list the<br/>whole frames journal.off<br/>misses, repair the index tail"]
   repair --> replay["Replay the frames past<br/>journal.ckpt into the index<br/>and the ref files"]
   replay --> append["Append one frame to<br/>journal.log, fdatasync it:<br/>the commit point"]
@@ -402,6 +407,34 @@ and flushed under the lock, before the frame that names them. A longer or backwa
 other overlap and a conflict drop the transaction instead: the lander merges again and retries.
 A land with an expected target (`ws land --check`) is never made anew, so what lands is the tree
 it checked. A relocated land holds the lock one object round longer.
+
+**Batched writers** (the M18 D2 design §3). A land's publish and a commit's insert take a turn
+at the store's write queue, `meta/queue/`; every other write (`ref set`, `op undo`, the git
+import's frames) takes `meta/lock` as before. A writer that finds the lock free leads at once,
+with its request in memory and no queue file, so an uncontended write makes the filesystem
+calls it made before. One that finds it taken writes a small request of ids and fields (the
+changesets it names are flushed already, so durable before any frame names them), holds an
+`flock` on it as its sign of life, and waits for the lock while it polls for its answer every
+millisecond; a waiter that gets the lock with its request still unclaimed leads in turn. The
+lock's holder, a commit or a land, repairs what a crash left and settles what a dead leader
+left, then plans its own request as frame 0 and the waiting requests oldest
+first, each in a frame of its own, as a lone publish or insert plans it, on what the members
+before it queued: a land is relocated onto the land before it, through an in-memory overlay
+of the objects that member made, and an advance is compared against the target the member
+before it left. A batch holds at most 32 members and plans for at most 50 ms
+([limits](reference/limits.md#internal-values)). With another member planned, the leader
+writes a manifest of the members, their frames and their answers, so that the next holder can
+answer or put back the claims a dead leader left, and only then claims them. The staged
+objects are then put and flushed once, and every frame is committed with one sync of
+`journal.log` (above): however many members, a batch makes one object flush, one
+`journal.log` sync, one `journal.off` sync per sector of entries and one replace of each moved
+ref. Each member keeps its own frame, so `op undo` reverts one
+land alone. A member that recorded nothing (a target moved where the rule does not follow, a
+keyed land already landed, a commit whose changeset and move are already recorded) is
+answered without a frame. A member the leader cannot plan (its key reused, its target or a
+parent missing, an answer past its bound) is declined before the claim, and its writer runs
+it again alone within what is left of its first lock wait, where it meets its own error. Each
+waiter's answer is written only after the commit point and read without the lock.
 
 ## Reading
 
@@ -631,8 +664,8 @@ that never ran.
 
 The price is measured in [perf.md](perf.md): about 4 ms per fsync on the reference host, and
 about 21 ms for an uncontended durable commit through the binary. The umbrella spec's commit
-target (5 ms plus 0.3 ms per file) counts no syncs; batching syncs is to be reconsidered by M2's
-journal-sync decision, which waits until after the pilot.
+target (5 ms plus 0.3 ms per file) counts no syncs. Since M18 the writers waiting on the lock
+share one batch's syncs (above, "Batched writers"); an uncontended write pays its own.
 
 Crash safety rests on four invariants (storage §3): a changeset enters the index only after its
 parents (I1), and only after every object it references is durable; refs change only by
@@ -690,17 +723,27 @@ sweep runs once per `FORMAT`.
   helper thread and gives up after `lock_timeout` (10 s), with the retryable `E_BUSY`. The queue
   is not strictly first-in, first-out, but the wait is bounded: with 32 processes making 1,000
   commits each through the binary, none got `E_BUSY` and the slowest commit took 918 ms
-  ([perf.md](perf.md)).
+  ([perf.md](perf.md), before batching).
+- **Lands and commits waiting on the lock** wait in the write queue too (above, "Batched
+  writers"): the lock's holder commits them in its batch and answers each, and the waiter reads
+  its answer without the lock. A batch plans its waiting requests in submission order; the
+  `flock` behind it still is not first-in, first-out, and lands are still ordered by their
+  compare-and-swap and relocation, not by the queue. `E_BUSY` means the request was still
+  unclaimed at `lock_timeout`: the writer withdraws it and nothing of it is recorded. A request
+  the holder claimed waits past `lock_timeout` for its answer. `meta.recovered` reports what the
+  leader's recovery repaired; a waiter answered by a leader reports none. A crashed leader's
+  manifest lets the next holder answer each claimed member whose frame is in the journal and
+  put the others back in the queue, so a member is answered once or runs again, never both.
 - **Readers** take no lock (above). Under commits that land during every one of its 32 rounds,
   a snapshot gives up with the retryable `E_BUSY` instead of reading on.
 
 What an agent sees (operations §4):
 
 - `commit` only appends, and does not fail because of another agent: concurrent commits both
-  succeed (short of a lock wait past `lock_timeout`, or a snapshot of its parents that meets a
-  new commit in every one of its 32 rounds: the retryable `E_BUSY`). A commit with `advance`
-  publishes, and so fails with `E_CAS_MISMATCH`, recording nothing, when its ref no longer names
-  its parent.
+  succeed (short of a write still waiting, unclaimed, at `lock_timeout`, or a snapshot of its
+  parents that meets a new commit in every one of its 32 rounds: the retryable `E_BUSY`). A
+  commit with `advance` publishes, and so fails with `E_CAS_MISMATCH`, recording nothing, when
+  its ref no longer names its parent.
 - Refs move only by compare-and-swap. When several agents expect the same target, exactly one
   wins each round; the others get `E_CAS_MISMATCH` and `details.actual`.
 - A read by changeset id is immutable, lock-free and cacheable. A ref named in a request is

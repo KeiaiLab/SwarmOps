@@ -41,9 +41,16 @@ filesystem permissions are the access boundary. Within that model, these are vul
   its id on every read), the journal (`meta/journal.log`, `journal.off`, `journal.ckpt`), the
   changeset index (`meta/idx/*.col`, `meta/parents.log`, `meta/sorted/*`), ref files
   (`meta/refs/*`), derived values (`meta/derived/*`, a cache whose files carry a checksum
-  over their slot and value, not a signature) and external id entries (`meta/external_ids/*`,
+  over their slot and value, not a signature), external id entries (`meta/external_ids/*`,
   a cache that maps a git commit to its changeset, whose files carry a checksum, not a
-  signature). These cases are known and tracked
+  signature) and the write queue's files (`meta/queue/*`: requests, answers and batch manifests
+  that writers leave for the lock's holder and that nothing else reads). A queue file is opened
+  as `meta/lock` is, a regular file only and no symlink followed, and its length is checked
+  against its bound (64 KiB for a request, 1 MiB for an answer, the manifest's for a manifest)
+  before a byte of it is read; each record starts with a magic and a version and ends in a
+  checksum. A request that is torn or past its bound is left unplanned; one of another version,
+  or whose body does not decode, is declined, and its writer runs it again alone. An answer that
+  does not decode is an error to its waiter, never run again. These cases are known and tracked
   ([docs/known-limitations.md](docs/known-limitations.md), "Hostile input"): an object whose
   zstd frame really decompresses to a large size (a compression bomb) is decompressed in full
   before its hash is checked, so reading it takes 512 MiB of payload, the most an object holds,
