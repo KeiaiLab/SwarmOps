@@ -40,6 +40,12 @@
 //! `land --key` run again through the binary lands the change exactly once, a replay of the
 //! recorded land while the target names it.
 //!
+//! A run of its own (`batch_loss`, the M18 D2 design §4, D1) lands three changes in one batch:
+//! three landers queue behind the lock, the one that takes it leads the others, and the three
+//! frames go to `journal.log` in one write and one sync. In every image the landed keys on
+//! `main` are a prefix of the batch's frames, and a power loss after a lander's land returned
+//! never takes its frame back.
+//!
 //! One more run, of its own (`committed_read`), checks that a committed snapshot
 //! (`MetaStore::read_committed`, storage spec §3) holds nothing a power loss after it can take
 //! back, where a lock-free snapshot may; its images are read with the library, as the snapshot
@@ -2633,6 +2639,364 @@ mod committed_read {
              after {returned}; {images} distinct images from its return",
             run.calls,
             run.timeline.steps()
+        );
+    }
+    }
+}
+
+mod batch_loss {
+    //! Power loss in a batch of lands (the M18 D2 design §3, §4 D1 to D3):
+    //!
+    //! ```text
+    //!  test             lander 0       lander 1       lander 2
+    //!  holds meta/lock
+    //!                   prepares, queues <rid>.req
+    //!                                  prepares, queues
+    //!                                                 prepares, queues
+    //!  lets the lock go -> one of them leads the other two: three frames, one write, one sync
+    //!                   each returns once answered: mark `returned <n>`
+    //! ```
+
+    use std::collections::{BTreeMap, HashMap};
+    use std::fs;
+    use std::path::Path;
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use camino::{Utf8Path, Utf8PathBuf};
+    use swarmops_core::{ChangesetId, LeafKind, RepoPath};
+    use swarmops_repo::{CasResult, Change, ChangeOp, CommitRequest, LandRequest, LocalRepo};
+    use swarmops_store::{FsOps, Journal, Layout, MetaLock, RealFs, StoreFormat};
+    use swarmops_testkit::per_format;
+    use swarmops_testkit::power::{
+        ImageRecordingFs, Keep, KeepAllBut, RecordedCall, SECTOR, Seeded, Timeline,
+    };
+    use swarmops_testkit::store::layout_of;
+
+    use super::{AT_ONCE, ask, clean, log, signature};
+
+    /// How many lands the batch holds: the leader's own and two queued behind it.
+    const LANDERS: usize = 3;
+
+    /// How long the run waits for a request to be queued before it fails.
+    const PATIENCE: Duration = Duration::from_secs(10);
+
+    /// The seeds each cut is checked with: 0 the least the disk can hold, 1 the most, the rest
+    /// at random ([`Seeded`]).
+    const SEEDS: [u64; 6] = [0, 1, 2, 3, 4, 5];
+
+    /// Who makes the changes the batch lands.
+    const ACTOR: &str = "test-power/worker-1";
+
+    /// The idempotency key of land `n`.
+    fn key(n: usize) -> String {
+        format!("batch-{n}")
+    }
+
+    /// What the run recorded.
+    struct Run {
+        timeline: Timeline,
+        /// `main`'s target before the batch.
+        t0: String,
+        /// The keys in the order of the batch's frames.
+        keys: Vec<String>,
+        /// The step the batch's run starts at: the first lander's preparation.
+        from: usize,
+        /// The steps of the batch's one append to `journal.log`: its write, then its sync.
+        append: std::ops::Range<usize>,
+        /// Each key, and the step at which its land had returned.
+        returned: BTreeMap<String, usize>,
+        /// `journal.log`, relative to the base.
+        log: String,
+    }
+
+    /// The requests waiting in the queue of the store at `root`.
+    fn requests(root: &Utf8Path) -> usize {
+        let dir = Layout::new(root).queue_dir();
+        let Ok(entries) = fs::read_dir(dir.as_std_path()) else {
+            return 0;
+        };
+        (entries.flatten())
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                !name.starts_with('.') && name.ends_with(".req")
+            })
+            .count()
+    }
+
+    /// Waits until the queue of the store at `root` holds `n` requests.
+    fn wait_requests(root: &Utf8Path, n: usize) {
+        let limit = Instant::now() + PATIENCE;
+        while requests(root) < n {
+            assert!(Instant::now() < limit, "{n} requests never queued");
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// A one-file commit of `path` on `parent`.
+    fn one_file(path: &str, parent: Option<ChangesetId>) -> CommitRequest {
+        let change = Change::new(
+            RepoPath::new(path).expect("a repo path"),
+            ChangeOp::Put {
+                kind: LeafKind::File,
+                content: format!("{path}\n").into_bytes(),
+            },
+        );
+        CommitRequest::new(
+            parent.into_iter().collect(),
+            vec![change],
+            signature(),
+            signature(),
+            path.as_bytes().to_vec(),
+            Vec::new(),
+            false,
+            None,
+        )
+    }
+
+    /// A one-thread pool: a lander's objects are written, and directories synced, one at a time.
+    fn one_thread() -> rayon::ThreadPool {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("a one-thread pool")
+    }
+
+    /// The keys of the lands on `main` of the store at `store`, oldest first, down to `t0`.
+    fn keys_on_main(store: &str, t0: &str) -> Result<Vec<String>, String> {
+        let mut ids = log(store, "main")?;
+        if ids.pop().as_deref() != Some(t0) {
+            return Err(format!("main does not end at t0: {ids:?}"));
+        }
+        let mut keys = Vec::new();
+        for id in ids.iter().rev() {
+            let shown = ask(&["--repo", store, "show", id])?;
+            let key = shown.ok()?["land_key"].as_str().map(str::to_owned);
+            keys.push(key.ok_or_else(|| format!("{id} on main carries no key"))?);
+        }
+        Ok(keys)
+    }
+
+    /// Records the run: `init`, `t0` on `main` and a change on it per lander, then the batch
+    /// (the module documentation).
+    fn record_run(format: StoreFormat) -> (tempfile::TempDir, Run) {
+        let dir = tempfile::tempdir().expect("make a temp dir");
+        let base = dir.path().canonicalize().expect("the temp dir's path");
+        let root = Utf8PathBuf::from_path_buf(base.join("store")).expect("UTF-8 temp paths");
+        let layout = Layout::with_format(&root, format);
+        let fs = Arc::new(ImageRecordingFs::new());
+        let shared = Arc::clone(&fs) as Arc<dyn FsOps>;
+
+        // 1. The store, `t0` on main, a change on `t0` per lander.
+        let pool = one_thread();
+        let heads: Vec<ChangesetId> = pool.install(|| {
+            let repo = LocalRepo::create_with_fs_as(&root, "power", format, Arc::clone(&shared))
+                .expect("init");
+            let t0 = repo.commit(one_file("t0", None)).expect("commit").id;
+            let moved = repo
+                .cas_ref("main", None, Some(t0), ACTOR)
+                .expect("cas_ref");
+            assert!(matches!(moved.result, CasResult::Applied { .. }));
+            let heads = (0..LANDERS).map(|n| {
+                let change = one_file(&format!("f{n}"), Some(t0));
+                repo.commit(change).expect("commit").id
+            });
+            std::iter::once(t0).chain(heads).collect()
+        });
+        let (t0, heads) = (heads[0], &heads[1..]);
+        let frames_before = frame_count(&root);
+        fs.mark("before");
+
+        // 2. The lock held while the landers queue, one after the other, then let go.
+        let recorder = &*fs;
+        let shared = &shared;
+        let root_ref = &root;
+        thread::scope(|scope| {
+            let lock = MetaLock::acquire(&layout, PATIENCE).expect("the lock");
+            let landers: Vec<_> = (heads.iter().enumerate())
+                .map(|(n, &head)| {
+                    let lander = scope.spawn(move || {
+                        let mut request = LandRequest::new(head, "main", signature());
+                        request.key = Some(key(n));
+                        let repo = LocalRepo::open_with_fs(root_ref, Arc::clone(shared));
+                        let landed = one_thread().install(|| repo.and_then(|r| r.land(request)));
+                        recorder.mark(&format!("returned {n}"));
+                        landed
+                    });
+                    wait_requests(root_ref, n + 1);
+                    lander
+                })
+                .collect();
+            drop(lock);
+            for (n, lander) in landers.into_iter().enumerate() {
+                let landed = lander.join().expect("a lander");
+                let landed = landed.unwrap_or_else(|e| panic!("land {n}: {e:?}"));
+                assert!(landed.warnings.is_empty(), "land {n}: {landed:?}");
+            }
+        });
+        assert_eq!(frame_count(&root) - frames_before, 3, "a frame per land");
+
+        // 3. The batch's one append of its frames, and when each land returned.
+        let calls = fs.calls();
+        let timeline = Timeline::new(&base, &calls);
+        let from = timeline.mark("before");
+        let log_path = layout.journal_log().into_std_path_buf();
+        let appends: Vec<usize> = (calls.iter().enumerate())
+            .filter(|&(at, _)| timeline.steps_of(at).start >= from)
+            .filter_map(|(at, call)| match call {
+                RecordedCall::AppendDurable { path, .. } if *path == log_path => Some(at),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            appends.len(),
+            1,
+            "the three frames in one append: {appends:?}"
+        );
+        let append = timeline.steps_of(appends[0]);
+        let returned = (0..LANDERS)
+            .map(|n| (key(n), timeline.mark(&format!("returned {n}"))))
+            .collect();
+        let keys = keys_on_main(root.as_str(), &t0.to_string()).expect("the batch's keys");
+        let log = log_path.strip_prefix(&base).expect("under the base");
+        let run = Run {
+            timeline,
+            t0: t0.to_string(),
+            keys,
+            from,
+            append,
+            returned,
+            log: log.to_str().expect("a UTF-8 path").to_owned(),
+        };
+        (dir, run)
+    }
+
+    /// How many frames the journal of the store at `root` lists.
+    fn frame_count(root: &Utf8Path) -> u64 {
+        let journal = Journal::open(&layout_of(root), Arc::new(RealFs::new()));
+        journal
+            .expect("the journal")
+            .frame_count()
+            .expect("its frames")
+    }
+
+    /// The keys the store in `image` landed on `main`, once `verify --deep` found it clean.
+    fn found_in(run: &Run, image: &swarmops_testkit::power::Image) -> Result<Vec<String>, String> {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        image.materialize(dir.path()).map_err(|e| e.to_string())?;
+        let store = dir.path().join("store");
+        let store = store.to_str().expect("a UTF-8 path");
+        clean(store, "after the power loss")?;
+        keys_on_main(store, &run.t0)
+    }
+
+    /// `Ok` if `keys` is what the image of a power failure after the first `cut` steps may hold:
+    /// a prefix of the batch's frames, none before its append, all of them after its sync, and
+    /// every land that had returned.
+    fn allowed(run: &Run, cut: usize, keys: &[String]) -> Result<(), String> {
+        if !run.keys.starts_with(keys) {
+            return Err(format!("{keys:?} is no prefix of {:?}", run.keys));
+        }
+        if cut <= run.append.start && !keys.is_empty() {
+            return Err(format!("{keys:?} before the batch's write"));
+        }
+        if cut >= run.append.end && keys.len() < LANDERS {
+            return Err(format!("{keys:?} after the batch's sync"));
+        }
+        let lost: Vec<&String> = (run.returned.iter())
+            .filter(|&(key, &at)| cut >= at && !keys.contains(key))
+            .map(|(key, _)| key)
+            .collect();
+        if !lost.is_empty() {
+            return Err(format!("the answered lands {lost:?} are gone: {keys:?}"));
+        }
+        Ok(())
+    }
+
+    per_format! {
+    /// A batch of three lands loses no answered member to a power loss (the M18 D2 design §4,
+    /// D1): over every cut from the first lander's preparation and [`SEEDS`], and two torn
+    /// writes of the batch's frames (the bytes before its first or second 512 B boundary
+    /// kept), each image verifies clean, holds a prefix of the batch's frames on `main`, none
+    /// before their write, all of them after its sync, and every land whose call had returned.
+    /// Images that hold the same files are checked once.
+    fn power_loss_in_a_batch_never_loses_an_answered_member(format) {
+        let (_dir, run) = record_run(format);
+
+        // 1. Every cut and seed, each distinct image once.
+        let mut distinct: HashMap<u64, (usize, u64)> = HashMap::new();
+        for cut in run.from..=run.timeline.steps() {
+            for seed in SEEDS {
+                let image = run.timeline.image(cut, &mut Seeded::new(seed, cut));
+                distinct.entry(image.digest()).or_insert((cut, seed));
+            }
+        }
+        let mut images: Vec<(usize, u64)> = distinct.into_values().collect();
+        images.sort_unstable();
+        let mut failures = Vec::new();
+        let mut counts = Vec::new();
+        for batch in images.chunks(AT_ONCE) {
+            thread::scope(|scope| {
+                let checks: Vec<_> = (batch.iter())
+                    .map(|&(cut, seed)| {
+                        let run = &run;
+                        scope.spawn(move || {
+                            let image = run.timeline.image(cut, &mut Seeded::new(seed, cut));
+                            let found = found_in(run, &image);
+                            let judged = found.and_then(|keys| {
+                                allowed(run, cut, &keys).map(|()| keys.len())
+                            });
+                            judged.map_err(|why| format!("cut {cut}, seed {seed}: {why}"))
+                        })
+                    })
+                    .collect();
+                for check in checks {
+                    match check.join().unwrap_or_else(|p| std::panic::resume_unwind(p)) {
+                        Ok(count) => counts.push(count),
+                        Err(why) => failures.push(why),
+                    }
+                }
+            });
+        }
+
+        // 2. The batch's write torn at its first or second 512 B boundary, all else kept.
+        let log = Path::new(&run.log);
+        for pick in 0..2 {
+            let torn = |file: &Path| {
+                (file == log).then_some(Keep::Prefix {
+                    granule: SECTOR,
+                    pick,
+                })
+            };
+            let cut = run.append.start + 1;
+            let image = run.timeline.image(cut, &mut KeepAllBut(torn));
+            let judged = found_in(&run, &image)
+                .and_then(|keys| allowed(&run, cut, &keys).map(|()| keys.len()));
+            match judged {
+                Ok(count) => counts.push(count),
+                Err(why) => failures.push(format!("torn at boundary {pick}: {why}")),
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} images failed; the first ones:\n{}",
+            failures.len(),
+            failures[..failures.len().min(5)].join("\n")
+        );
+
+        // 3. The sweep reached no frame, some of them, and all of them.
+        assert!(counts.contains(&0), "{counts:?}");
+        assert!(counts.iter().any(|&n| 0 < n && n < LANDERS), "{counts:?}");
+        assert!(counts.contains(&LANDERS), "{counts:?}");
+        println!(
+            "batch loss {format:?}: {} steps from the batch's start, {} distinct images, the \
+             append at {:?}, returned at {:?}",
+            run.timeline.steps() - run.from,
+            images.len(),
+            run.append,
+            run.returned
         );
     }
     }

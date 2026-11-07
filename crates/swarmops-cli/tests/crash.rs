@@ -24,26 +24,33 @@
 //!   every unsynced write, the state a process crash leaves, at every cut of it. `just check-slow`
 //!   and the weekly `just check-ci-slow` run it; `just check` does not.
 //!
+//! - A batch of lands (the M18 D2 design §3) is swept through the binary too: a land leads two
+//!   requests that killed `land` runs queued, kept alive by this test's flocks, and crashes at
+//!   each of its calls; every key then lands once.
+//!
 //! Each test owns its temp dirs, and the tests share nothing.
 
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use swarmops_ops::NOW_ENV;
-use swarmops_store::{CRASH_AT_ENV, FS_CALLS_ENV, Journal, RealFs, StoreFormat};
+use swarmops_store::{
+    CRASH_AT_ENV, FS_CALLS_ENV, Journal, LEAD_WAIT_ENV, MetaLock, RealFs, StoreFormat,
+};
 
+use swarmops_testkit::child::Child;
 use swarmops_testkit::per_format;
 
 use crate::support::sweep::{
     DryRun, NOW, SWEPT_PUTS, TEMPLATE_FRAMES, calls_file, commit_template, dry_commit, dry_init,
     init_again, init_args, reported_calls, sweep, swept_commit,
 };
-use crate::support::{Run, Store, agent, run};
+use crate::support::{Run, Store, agent, run, swarmops};
 
 /// `SWARMOPS_TEST_NOW=<unix seconds>`: a commit signs its changeset at that time, not the
 /// clock's, so that the same commit made twice is the same changeset, whenever it runs; unset,
@@ -396,6 +403,242 @@ fn a_land_crashing_at_any_call_lands_once_through_the_binary(format) {
         published.iter().any(|&replayed| !replayed),
         "some before it"
     );
+}
+}
+
+/// How many requests the batch sweep seeds behind its leader.
+const SEEDS: usize = 2;
+
+/// How long the batch sweep waits for a request to be queued.
+const QUEUE_PATIENCE: Duration = Duration::from_secs(10);
+
+/// The idempotency key of the batch sweep's land `n`: 0 the leader's, then the seeds'.
+fn batch_key(n: usize) -> String {
+    format!("crash-batch-{n}")
+}
+
+/// The names in the queue of `store`, sorted; none if it has no queue.
+fn queue_names(store: &Store) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(store.layout().queue_dir().as_std_path()) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = (entries.flatten())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// How many calls past its dry run's count the batch sweep crashes the leader at: a run's count
+/// varies by one or so.
+const CALLS_SLACK: u64 = 3;
+
+/// Whether queue file `name` has extension `ext`: `req`, `com` or `ans`.
+fn is_kind(name: &str, ext: &str) -> bool {
+    !name.starts_with('.') && Path::new(name).extension().is_some_and(|e| e == ext)
+}
+
+/// The batch sweep's template: a store whose `main` is `t0`, a change on `t0` per land (the
+/// leader's first), and each seed's request as a killed `land --key` queued it.
+struct Seeded {
+    template: Store,
+    t0: String,
+    heads: Vec<String>,
+    /// Each seed's request file: its name and bytes.
+    requests: Vec<(String, Vec<u8>)>,
+}
+
+/// The arguments of the batch sweep's land `n` on `store`, as `agent(n)`.
+fn batch_land(store: &Store, seeded: &Seeded, n: usize) -> Vec<String> {
+    let key = batch_key(n);
+    store.args(&agent(n), &["land", &seeded.heads[n], "--key", &key])
+}
+
+/// Builds [`Seeded`] of `format`: each seed's land run behind the lock this test holds, its
+/// request read once queued, the run killed and its request removed.
+fn seeded_template(format: StoreFormat) -> Seeded {
+    let now = NOW.to_string();
+    let template = Store::init_as(format).with_env(&[(NOW_ENV, &now)]);
+    let t0 = template.commit(&agent(0), "base.txt", "the base\n", None);
+    let create = ["ref", "set", "main", t0.as_str(), "--create"];
+    template.run_as(&agent(0), &create, &[]).ok();
+    let heads = (0..=SEEDS)
+        .map(|n| {
+            let path = format!("change-{n}.txt");
+            template.commit(&agent(0), &path, &format!("{n}\n"), Some(&t0))
+        })
+        .collect();
+    let mut seeded = Seeded {
+        template,
+        t0,
+        heads,
+        requests: Vec::new(),
+    };
+
+    let queue = seeded.template.layout().queue_dir();
+    for n in 1..=SEEDS {
+        // 1. The lock held, the seed's land queued behind it.
+        let lock = MetaLock::acquire(&seeded.template.layout(), QUEUE_PATIENCE).expect("the lock");
+        let args = batch_land(&seeded.template, &seeded, n);
+        let waiter = Child::spawn(&mut swarmops(&args, &[(NOW_ENV, &now)]));
+        let limit = Instant::now() + QUEUE_PATIENCE;
+        let name = loop {
+            let found = queue_names(&seeded.template);
+            if let Some(name) = found.into_iter().find(|name| is_kind(name, "req")) {
+                break name;
+            }
+            assert!(Instant::now() < limit, "seed {n} never queued");
+            thread::sleep(Duration::from_millis(1));
+        };
+
+        // 2. The seed killed, its request kept apart.
+        drop(waiter);
+        let path = queue.join(&name);
+        let bytes = fs::read(path.as_std_path()).expect("the request");
+        fs::remove_file(path.as_std_path()).expect("remove the request");
+        seeded.requests.push((name, bytes));
+        drop(lock);
+    }
+    seeded
+}
+
+/// What one run of the batch sweep left: whether the leader finished, and the queue's files
+/// when it ended.
+struct BatchRun {
+    finished: bool,
+    left: Vec<String>,
+}
+
+/// One run of the batch sweep on a copy of the template: the seeds' requests in its queue,
+/// flocked by this test as their live waiters would, the leader's land run with `hooks` (the
+/// lead-wait hook asking for the two). Then the seeds' flocks go, and each land runs again:
+/// the store verifies clean after the crash and after, `main` holds each key once, in the
+/// batch's order, and the next write's janitor empties the queue.
+fn batch_run(seeded: &Seeded, what: &str, hooks: &[(&str, &str)]) -> BatchRun {
+    let store = Store::copy_of(&seeded.template);
+
+    // 1. The seeds, alive: their requests in place, flocked.
+    let queue = store.layout().queue_dir();
+    fs::create_dir_all(queue.as_std_path()).expect("the queue");
+    let alive: Vec<File> = (seeded.requests.iter())
+        .map(|(name, bytes)| {
+            let path = queue.join(name);
+            fs::write(path.as_std_path(), bytes).expect("a seed's request");
+            let file = File::open(path.as_std_path()).expect("open a seed's request");
+            file.lock().expect("a seed's flock");
+            file
+        })
+        .collect();
+
+    // 2. The leader.
+    let seeds = SEEDS.to_string();
+    let mut env = vec![(LEAD_WAIT_ENV, seeds.as_str())];
+    env.extend_from_slice(hooks);
+    let land = batch_land(&store, seeded, 0);
+    let land: Vec<&str> = land.iter().map(String::as_str).collect();
+    let led = run(&land, &env);
+    let finished = !led.aborted();
+    let left = queue_names(&store);
+    drop(alive);
+    if finished {
+        assert_eq!(led.ok()["status"], "landed", "{what}: {led}");
+    }
+    store.assert_clean(&format!("{what}: after the leader"));
+
+    // 3. Every land again: each replays one the batch committed, or lands.
+    for n in 0..=SEEDS {
+        let args = batch_land(&store, seeded, n);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let again = run(&args, &[]).ok();
+        let status = again["status"].as_str();
+        let want: &[&str] = if finished {
+            &["replayed"]
+        } else {
+            &["landed", "replayed"]
+        };
+        assert!(
+            status.is_some_and(|s| want.contains(&s)),
+            "{what}: land {n} again: {again}"
+        );
+    }
+
+    // 4. Each key once on main, in the batch's order; the queue empty.
+    let log = store.read(&["log", "main"]).ok();
+    let on_main: Vec<String> = (log["entries"].as_array().expect("log entries").iter())
+        .map(|entry| entry["id"].as_str().expect("an id").to_owned())
+        .collect();
+    let keys: Vec<Value> = on_main
+        .iter()
+        .map(|id| store.show(id)["land_key"].clone())
+        .collect();
+    let want: Vec<Value> = (0..=SEEDS).rev().map(|n| json!(batch_key(n))).collect();
+    assert_eq!(
+        (&keys[..=SEEDS], on_main.last()),
+        (&want[..], Some(&seeded.t0)),
+        "{what}: main {on_main:?}"
+    );
+    assert_eq!(on_main.len(), SEEDS + 2, "{what}: main {on_main:?}");
+    store.assert_clean(&format!("{what}: after the lands again"));
+
+    // 5. A replay takes no turn: the next write's janitor empties the queue.
+    store.commit(&agent(0), "after.txt", "after\n", Some(&seeded.t0));
+    assert_eq!(
+        queue_names(&store),
+        Vec::<String>::new(),
+        "{what}: the queue"
+    );
+    BatchRun { finished, left }
+}
+
+/// How many of the seeds `ran`'s leader answered.
+fn answered(ran: &BatchRun) -> usize {
+    ran.left.iter().filter(|name| is_kind(name, "ans")).count()
+}
+
+per_format! {
+/// A batch led through the binary lands each member once whatever call crashes it (the M18 D2
+/// design §5.1): the leader's `land --key`, `SWARMOPS_TEST_LEAD_WAIT=2`, leads the requests of
+/// two waiting `land --key` runs (seeded, [`seeded_template`]) and crashes at each call k of
+/// the N its dry run makes, and of [`CALLS_SLACK`] more. The leader's count of calls is not
+/// the same in every run: on a loaded host one run made one call fewer than another (92 and
+/// 93), so a run may finish a little before N or crash a little past it. After each, every
+/// land run again leaves the three keys on `main` once, in the batch's order (the leader's,
+/// then the seeds' oldest first), the store clean, and the queue empty after the next write.
+/// The dry run answered both seeds (their answers stay: no waiter reads them); the sweep
+/// crashes up to about N, finishes at its end, and reaches a crash that left claimed requests
+/// (`.com`) and one that left an answer (`.ans`).
+fn a_batch_led_through_the_binary_crashing_at_any_call_lands_each_once(format) {
+    let seeded = seeded_template(format);
+
+    // 1. The dry run: its calls counted; it answers both seeds.
+    let file = calls_file(&seeded.template);
+    let file = file.to_str().expect("a UTF-8 path").to_owned();
+    let dry = batch_run(&seeded, "the dry run", &[(FS_CALLS_ENV, &file)]);
+    assert!(dry.finished, "the dry run crashed");
+    assert_eq!(answered(&dry), SEEDS, "the dry run left {:?}", dry.left);
+    let calls = reported_calls(Path::new(&file));
+    assert!(calls > 40, "a batch of three lands makes many calls: {calls}");
+
+    // 2. A crash at each call, and a few past the dry run's count.
+    let runs = sweep(1..=calls + CALLS_SLACK, |k| {
+        let crash_at = k.to_string();
+        let ran = batch_run(&seeded, &format!("k={k} of {calls}"), &[(CRASH_AT_ENV, &crash_at)]);
+        (k, ran)
+    });
+    let first_finished = runs.iter().find(|(_, ran)| ran.finished).map(|&(k, _)| k);
+    assert!(
+        first_finished.is_some_and(|k| k + CALLS_SLACK > calls),
+        "the first run to finish crashed at k={first_finished:?} of {calls}"
+    );
+    assert!(runs.last().is_some_and(|(_, ran)| ran.finished), "a crash after the end");
+    let left_a = |suffix: &str| {
+        (runs.iter())
+            .filter(|(_, ran)| !ran.finished)
+            .any(|(_, ran)| ran.left.iter().any(|name| is_kind(name, suffix)))
+    };
+    assert!(left_a("com"), "no crash left a claimed request");
+    assert!(left_a("ans"), "no crash left an answer");
+    println!("batch sweep {format:?}: {calls} calls, the first finished at {first_finished:?}");
 }
 }
 

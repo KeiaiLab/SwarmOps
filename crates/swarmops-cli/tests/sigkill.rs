@@ -20,6 +20,10 @@
 //! kill the ref names its old or its new target, the op log holds every operation once and in
 //! order, and the same operation run again is recorded once.
 //!
+//! The batch variant (the M18 D2 design §5.1) lands eight changes at once, queued behind the
+//! lock and then batched, and kills one of the eight landers, leader or waiter, at a random
+//! moment of the batch; every key lands once after the lands run again.
+//!
 //! Two reader processes run beside every loop ([`Readers`]): `ref list`, then `show` and `cat`
 //! of what each ref names. What a ref they read reaches is never missing (`E_REV_NOT_FOUND`,
 //! `E_PATH_NOT_FOUND`, `E_STORE_CORRUPT`); the documented `E_IO` after a cut is counted apart.
@@ -29,6 +33,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::process::ExitStatusExt;
+use std::path::Path;
 use std::process::Output;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -38,7 +43,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use swarmops_core::ObjectId;
-use swarmops_store::StoreFormat;
+use swarmops_store::{DEFAULT_INIT_FORMAT, LEAD_WAIT_ENV, MetaLock, StoreFormat};
 use swarmops_testkit::child::Child;
 use swarmops_testkit::per_format;
 use swarmops_testkit::ws::Rng;
@@ -587,6 +592,305 @@ per_format! {
     fn sigkill_mid_land_200_times(format) {
         kill_lands(format, SLOW_LAND_KILLS);
     }
+}
+
+/// How many landers each round of the batch variant starts.
+const BATCH_LANDERS: usize = 8;
+
+/// The kills the fast batch variant makes, one per round (`just check`).
+const FAST_BATCH_KILLS: usize = 3;
+
+/// The kills the slow batch variant makes, one per round.
+const SLOW_BATCH_KILLS: usize = 200;
+
+/// The seed of the batch test's victims and delays, apart from the other tests'.
+const BATCH_SEED: u64 = 0xba7c_4e11;
+
+/// How many rounds per kill the batch test may spend: a victim that ends before its delay is no
+/// kill, and shrinks the window ([`WINDOW_SHRINK`]).
+const BATCH_ROUNDS_PER_KILL: usize = 4;
+
+/// What every lander of a round asks of the lead-wait hook: one other request waiting. The
+/// round queues all eight before any of them leads, so the hook holds no batch back; a leader
+/// left alone after a kill waits the hook's 10 s at most, and its waiters may end `E_BUSY`.
+const BATCH_LEAD_WAIT: &str = "1";
+
+/// How long a round waits for its landers to queue, and for those it does not kill to end.
+const BATCH_PATIENCE: Duration = Duration::from_secs(60);
+
+/// The idempotency key of the batch test's `n`-th land.
+fn batch_key(n: usize) -> String {
+    format!("kill-batch-{n}")
+}
+
+/// The arguments of the batch test's land of `head` under its `n`-th key.
+fn batch_land_args(store: &Store, head: &str, n: usize) -> Vec<String> {
+    let key = batch_key(n);
+    store.args(&agent(0), &["land", head, "--key", &key])
+}
+
+/// The names in `store`'s queue; none if it has no queue.
+fn queue_names(store: &Store) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(store.layout().queue_dir().as_std_path()) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = (entries.flatten())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// How a lander of a round ended.
+enum Landed {
+    /// It landed: the changeset.
+    Exited(String),
+    /// It gave up waiting for the lock (`E_BUSY`), recording nothing.
+    Busy,
+    /// SIGKILL hit it; its changeset if it printed its envelope whole.
+    Killed(Option<String>),
+}
+
+/// How the `n`-th lander's run ended, `output` its run; `victim` if the test killed it.
+fn landed_as(n: usize, output: &Output, victim: bool) -> Landed {
+    let Output { status, stdout, .. } = output;
+
+    // 1. A signal ends only the victim.
+    if status.signal() == Some(SIGKILL) {
+        assert!(victim, "lander {n} killed: {output:?}");
+        return Landed::Killed(landed(stdout));
+    }
+
+    // 2. A busy run recorded nothing; any other failure fails the test.
+    if !status.success() {
+        let envelope: Option<Value> = serde_json::from_slice(stdout).ok();
+        let code = envelope.as_ref().map(|e| e["error"]["code"].clone());
+        assert_eq!(code, Some("E_BUSY".into()), "lander {n}: {output:?}");
+        return Landed::Busy;
+    }
+    let id = landed(stdout).unwrap_or_else(|| panic!("lander {n}: no envelope: {output:?}"));
+    Landed::Exited(id)
+}
+
+/// Whether queue file `name` has extension `ext`: `req`, `com` or `ans`.
+fn is_kind(name: &str, ext: &str) -> bool {
+    !name.starts_with('.') && Path::new(name).extension().is_some_and(|e| e == ext)
+}
+
+/// The batch variant's state across its rounds.
+struct Batches {
+    format: StoreFormat,
+    store: Store,
+    rng: Rng,
+    /// Each changeset on `main` seen so far, and its land key.
+    keys: BTreeMap<String, Option<String>>,
+    /// The delays' bound, in microseconds: set by the first round, unkilled.
+    window: Option<u64>,
+    /// How many lands the rounds made so far.
+    lands: usize,
+    killed: usize,
+    rounds: usize,
+    /// Landers that ended `E_BUSY`.
+    busy: usize,
+    /// Rounds whose victim left a claimed request (`.com`).
+    claimed_left: usize,
+}
+
+impl Batches {
+    /// A store of `format` whose `main` names a base commit.
+    fn new(format: StoreFormat) -> Batches {
+        let store = Store::init_as(format);
+        let base = store.commit(&agent(0), "base.txt", "base\n", None);
+        let create = ["ref", "set", MAIN, &base, "--create"];
+        store.run_as(&agent(0), &create, &[]).ok();
+        Batches {
+            format,
+            store,
+            rng: Rng::new(BATCH_SEED ^ u64::from(format.version())),
+            keys: BTreeMap::from([(base, None)]),
+            window: None,
+            lands: 0,
+            killed: 0,
+            rounds: 0,
+            busy: 0,
+            claimed_left: 0,
+        }
+    }
+
+    /// One round: [`BATCH_LANDERS`] changes off `main`, their lands queued behind the lock this
+    /// test holds, the lock let go and one lander, chosen at random, SIGKILLed a random delay
+    /// within the window later. The changes and how each land ended.
+    fn round(&mut self) -> (Vec<String>, Vec<Landed>, String) {
+        let store = &self.store;
+        let first = self.lands;
+
+        // 1. The round's changes, and their lands queued behind the lock.
+        let heads: Vec<String> = (first..first + BATCH_LANDERS)
+            .map(|n| change_off_main(store, n))
+            .collect();
+        let lock = MetaLock::acquire(&store.layout(), BATCH_PATIENCE).expect("the lock");
+        let mut landers: Vec<Child> = (heads.iter().zip(first..))
+            .map(|(head, n)| {
+                let args = batch_land_args(store, head, n);
+                Child::spawn(&mut swarmops(&args, &[(LEAD_WAIT_ENV, BATCH_LEAD_WAIT)]))
+            })
+            .collect();
+        let limit = Instant::now() + BATCH_PATIENCE;
+        let queued = || {
+            queue_names(store)
+                .iter()
+                .filter(|n| is_kind(n, "req"))
+                .count()
+        };
+        while queued() < BATCH_LANDERS {
+            assert!(
+                Instant::now() < limit,
+                "round {}: never queued",
+                self.rounds
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        // 2. The lock let go; the victim waited for until its delay, then the rest.
+        let victim = self.rng.below(BATCH_LANDERS);
+        let delay = (self.window).map(|w| Duration::from_micros(self.rng.next_u64() % w));
+        let what = format!(
+            "{:?} seed {BATCH_SEED:#x} round {} victim {victim} delay {delay:?}",
+            self.format, self.rounds
+        );
+        drop(lock);
+        let start = Instant::now();
+        let (output, _) = landers[victim].finish(start + delay.unwrap_or(BATCH_PATIENCE));
+        let victim_end = landed_as(first + victim, &output, true);
+        let mut ends = Vec::with_capacity(BATCH_LANDERS);
+        for (at, lander) in landers.iter_mut().enumerate() {
+            if at == victim {
+                continue;
+            }
+            let (output, overdue) = lander.finish(start + BATCH_PATIENCE);
+            assert!(!overdue, "{what}: lander {at} past its deadline");
+            ends.push(landed_as(first + at, &output, false));
+        }
+        ends.insert(victim, victim_end);
+        let took = u64::try_from(start.elapsed().as_micros()).expect("a short round");
+        let left = queue_names(store);
+        self.claimed_left += usize::from(left.iter().any(|name| is_kind(name, "com")));
+
+        // 3. The kill counted, or the window set or shrunk.
+        match (&ends[victim], self.window) {
+            (Landed::Killed(_), _) => self.killed += 1,
+            (_, None) => self.window = Some(took),
+            (_, Some(w)) => self.window = Some(w - w / WINDOW_SHRINK),
+        }
+        (heads, ends, what)
+    }
+
+    /// Every land of the round again under its key, then the checks: a reported land is the one
+    /// kept and an `E_BUSY` one lands anew; `main` holds the base and each key once; the store
+    /// verifies clean; the next write's janitor empties the queue.
+    fn check(&mut self, heads: &[String], ends: &[Landed], what: &str) {
+        let store = &self.store;
+        let first = self.lands;
+
+        // 1. Every land again.
+        for (at, end) in ends.iter().enumerate() {
+            let args = batch_land_args(store, &heads[at], first + at);
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            let result = crate::support::run(&args, &[]).ok();
+            let again = result["landed"].as_str().expect("a landed changeset");
+            match end {
+                Landed::Exited(id) | Landed::Killed(Some(id)) => {
+                    assert_eq!(id, again, "{what}: lander {at}: the reported land is kept");
+                }
+                Landed::Busy => {
+                    // An `E_BUSY` land was in no frame: it lands now, no replay.
+                    assert_eq!(result["status"], "landed", "{what}: lander {at}: {result}");
+                    self.busy += 1;
+                }
+                Landed::Killed(None) => {}
+            }
+        }
+        self.lands += BATCH_LANDERS;
+
+        // 2. Main holds the base and each key once; the store verifies clean.
+        store.assert_clean(what);
+        let asked = (self.lands + 1 + LOG_SURPLUS).to_string();
+        let log = store.read(&["log", MAIN, "-n", &asked]).ok();
+        let on_main: Vec<&str> = (log["entries"].as_array().expect("log entries").iter())
+            .map(|entry| entry["id"].as_str().expect("an id"))
+            .collect();
+        assert_eq!(
+            on_main.len(),
+            self.lands + 1,
+            "{what}: main's log: {on_main:?}"
+        );
+        for id in on_main {
+            (self.keys)
+                .entry(id.to_owned())
+                .or_insert_with(|| key_of(store, id));
+        }
+        for n in first..self.lands {
+            let key = batch_key(n);
+            let count = self.keys.values().flatten().filter(|&k| *k == key).count();
+            assert_eq!(count, 1, "{what}: changesets with key {key}");
+        }
+
+        // 3. A replay takes no turn: the next write's janitor empties the queue.
+        let round = self.rounds.to_string();
+        store.commit(&agent(0), "janitor.txt", &round, None);
+        assert_eq!(
+            queue_names(store),
+            Vec::<String>::new(),
+            "{what}: the queue"
+        );
+    }
+}
+
+/// Rounds of the batch variant on a store of `format` until `kills` landers were killed
+/// ([`Batches::round`], [`Batches::check`]). Returns in how many rounds the killed lander left
+/// a claimed request (`.com`): a member killed after its leader claimed it.
+fn kill_batches(format: StoreFormat, kills: usize) -> usize {
+    let mut batches = Batches::new(format);
+    while batches.killed < kills {
+        batches.rounds += 1;
+        let Batches { killed, rounds, .. } = batches;
+        assert!(
+            rounds <= 1 + kills * BATCH_ROUNDS_PER_KILL,
+            "{killed} kills in {rounds} rounds"
+        );
+        let (heads, ends, what) = batches.round();
+        batches.check(&heads, &ends, &what);
+    }
+    let Batches {
+        killed,
+        rounds,
+        busy,
+        claimed_left,
+        window,
+        ..
+    } = batches;
+    println!(
+        "{format:?}: {killed} kills in {rounds} rounds of {BATCH_LANDERS} lands, {busy} busy, \
+         {claimed_left} left a claimed request, window {window:?} us"
+    );
+    claimed_left
+}
+
+/// The fast batch variant: [`FAST_BATCH_KILLS`] kills, one per round of [`BATCH_LANDERS`]
+/// lands, on a store of the default format.
+#[test]
+fn sigkill_mid_batch_keeps_one_land_per_key() {
+    kill_batches(DEFAULT_INIT_FORMAT, FAST_BATCH_KILLS);
+}
+
+/// The slow batch variant: [`SLOW_BATCH_KILLS`] kills, one per round of [`BATCH_LANDERS`] lands, on
+/// a store of the default format; some kill hits a member after its claim.
+#[test]
+#[ignore = "slow, ~220 s: 200 kills in ~270 rounds of 8 batched lands, each with the lands \
+            again, verify --deep and a log; estimated from the fast variant, 0.6 s a round"]
+fn sigkill_mid_batch_200_times() {
+    let claimed_left = kill_batches(DEFAULT_INIT_FORMAT, SLOW_BATCH_KILLS);
+    assert!(claimed_left > 0, "no kill hit a claimed member");
 }
 
 /// The kills of each of `ref set` and `op undo` the fast ref variant makes per format
