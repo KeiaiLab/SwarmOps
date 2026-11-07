@@ -64,12 +64,11 @@ use swarmops_core::{
     RepoPath, Signature, TreeId,
 };
 use swarmops_store::{
-    ChangesetMeta, InsertOutcome, LimitKind, ObjectStat, ObjectStore, PutOutcome, Recovered,
-    StoreError,
+    ChangesetMeta, InsertOutcome, LimitKind, MetaWrite, ObjectStat, ObjectStore, PutOutcome,
+    Recovered, Serve, StoreError, Turn,
 };
 
 use crate::error::RepoError;
-use crate::oplog::OpId;
 use crate::read::RepoRead;
 use crate::repo::{self, Repo};
 use crate::tree_edit::{Encoded, TreeEdit};
@@ -525,85 +524,108 @@ impl<O: ObjectStore> Repo<O> {
     /// ref from the changeset's first parent to it, and commits it if it queued anything: see
     /// [the module documentation](self). Returns what the insert did, the move, a warning if a
     /// step after the commit point failed, and what the transaction's recovery repaired.
-    fn record(
-        &self,
-        meta: ChangesetMeta,
-        advance: Option<Advance>,
-    ) -> Result<(InsertOutcome, Option<Advanced>, Vec<String>, Recovered), RepoError> {
-        use swarmops_store::CasResult;
-
-        // The move expects the first parent, never a value of its own: an expectation of
-        // another head would drop that head from the ref's first-parent history.
-        let (id, expected) = (meta.id, meta.parents.first().copied());
-        let mut write = self.meta.write()?;
-        let recovered = write.recovered();
-        let insert = write.insert_changeset(meta).map_err(|e| match e {
-            StoreError::MissingParent(parent) => RepoError::UnknownParent(parent),
-            other => other.into(),
-        })?;
-        let advanced = match advance {
-            None => None,
-            Some(Advance { name, actor }) => {
-                let moved = write
-                    .cas_ref(&name, expected, Some(id), &actor)
-                    .map_err(repo::ref_error)?;
-                let already_applied = match moved {
-                    CasResult::Applied { .. } => false,
-                    // The ref names the changeset already: an identical request committed it,
-                    // so the insert found it too.
-                    CasResult::Mismatch { actual } if actual == Some(id) => true,
-                    // Another move came first. Returning drops the write, which appends nothing
-                    // and releases the lock: neither the changeset nor the move is recorded.
-                    CasResult::Mismatch { actual } => {
-                        return Err(RepoError::RefMoved {
-                            name,
-                            actual,
-                            recovered: Box::new(recovered),
-                        });
-                    }
-                    // Fail closed: an outcome this build cannot read moves nothing it records.
-                    _ => return Err(RepoError::unknown_variant("CasResult")),
-                };
-                Some(Advanced {
-                    name,
-                    old: expected,
-                    already_applied,
-                })
-            }
-        };
-        let inserted = matches!(insert, InsertOutcome::Inserted { .. });
-        let moved = advanced
-            .as_ref()
-            .filter(|advanced| !advanced.already_applied);
-        let mut warnings = Vec::new();
-        // An insert that found the changeset, and a move the ref had made already, queued
-        // nothing: then dropping the write releases the lock and appends nothing.
-        if inserted || moved.is_some() {
-            match write.commit() {
-                Ok(_) => {}
-                Err(StoreError::PostCommit {
-                    frame_seq,
-                    frame_crc,
-                    source,
-                }) => {
-                    let what = match moved {
-                        Some(moved) if inserted => {
-                            format!("the changeset and the move of ref {}", moved.name)
-                        }
-                        Some(moved) => format!("the move of ref {}", moved.name),
-                        None => "the changeset".to_owned(),
-                    };
-                    warnings.push(repo::post_commit_warning(
-                        &what,
-                        OpId::new(frame_seq, frame_crc),
-                        &source,
-                    ));
-                }
-                Err(e) => return Err(e.into()),
-            }
+    ///
+    /// The transaction is a turn at the store's write queue (the M18 D2 design §3): with the
+    /// lock taken, the insert waits as a request, and the next lock holder plans it in a batch
+    /// of its own ([`plan_insert`]) and answers it, its recovery then none; holding the lock,
+    /// this insert leads such a batch.
+    fn record(&self, meta: ChangesetMeta, advance: Option<Advance>) -> Result<Recorded, RepoError> {
+        let body = Self::insert_body(&meta, advance.as_ref())?;
+        match self.meta.take_turn(&body, Serve::Queue)? {
+            Turn::Answered(answer) => self.answered_insert(&answer),
+            Turn::Lead(lead) => self.lead_insert(lead, meta, advance),
+            _ => Err(RepoError::unknown_variant("Turn")),
         }
-        Ok((insert, advanced, warnings, recovered))
     }
+}
+
+/// What [`Repo::record`] gives: what the insert did, the move, a warning per step after the
+/// commit point that failed, and what the transaction's recovery repaired.
+pub(crate) type Recorded = (InsertOutcome, Option<Advanced>, Vec<String>, Recovered);
+
+/// What [`plan_insert`] queued in its transaction.
+pub(crate) struct InsertPlan {
+    /// What the insert did.
+    pub(crate) insert: InsertOutcome,
+    /// The move of the ref the request advances, if any.
+    pub(crate) advanced: Option<Advanced>,
+}
+
+impl InsertPlan {
+    /// Whether it queued anything to commit: the changeset, or a move the ref had not made.
+    /// An insert that found the changeset, and a move made already, queued nothing.
+    pub(crate) fn queued(&self) -> bool {
+        matches!(self.insert, InsertOutcome::Inserted { .. }) || self.moved().is_some()
+    }
+
+    /// The move it queued, if any.
+    fn moved(&self) -> Option<&Advanced> {
+        (self.advanced.as_ref()).filter(|advanced| !advanced.already_applied)
+    }
+
+    /// What its commit records, as a post-commit warning names it.
+    pub(crate) fn what(&self) -> String {
+        let inserted = matches!(self.insert, InsertOutcome::Inserted { .. });
+        match self.moved() {
+            Some(moved) if inserted => {
+                format!("the changeset and the move of ref {}", moved.name)
+            }
+            Some(moved) => format!("the move of ref {}", moved.name),
+            None => "the changeset".to_owned(),
+        }
+    }
+}
+
+/// Queues the insert of `meta` in `write`, with `advance` beside the move of that ref from the
+/// changeset's first parent to it: what [`Repo::record`] commits, if it queued anything
+/// ([`InsertPlan::queued`]). Fails as [`Repo::record`] does before its commit, the queued
+/// insert left for the caller to drop.
+pub(crate) fn plan_insert(
+    write: &mut MetaWrite<'_>,
+    meta: ChangesetMeta,
+    advance: Option<Advance>,
+) -> Result<InsertPlan, RepoError> {
+    use swarmops_store::CasResult;
+
+    // The move expects the first parent, never a value of its own: an expectation of
+    // another head would drop that head from the ref's first-parent history.
+    let (id, expected) = (meta.id, meta.parents.first().copied());
+    let insert = write.insert_changeset(meta).map_err(|e| match e {
+        StoreError::MissingParent(parent) => RepoError::UnknownParent(parent),
+        other => other.into(),
+    })?;
+    let advanced = match advance {
+        None => None,
+        Some(Advance { name, actor }) => {
+            let moved = write
+                .cas_ref(&name, expected, Some(id), &actor)
+                .map_err(repo::ref_error)?;
+            let already_applied = match moved {
+                CasResult::Applied { .. } => false,
+                // The ref names the changeset already: an identical request committed it,
+                // so the insert found it too.
+                CasResult::Mismatch { actual } if actual == Some(id) => true,
+                // Another move came first. The caller drops what this queued: neither the
+                // changeset nor the move is recorded.
+                CasResult::Mismatch { actual } => {
+                    let recovered = write.recovered();
+                    return Err(RepoError::RefMoved {
+                        name,
+                        actual,
+                        recovered: Box::new(recovered),
+                    });
+                }
+                // Fail closed: an outcome this build cannot read moves nothing it records.
+                _ => return Err(RepoError::unknown_variant("CasResult")),
+            };
+            Some(Advanced {
+                name,
+                old: expected,
+                already_applied,
+            })
+        }
+    };
+    Ok(InsertPlan { insert, advanced })
 }
 
 /// A changeset encoded with the objects it needs, none of them written yet

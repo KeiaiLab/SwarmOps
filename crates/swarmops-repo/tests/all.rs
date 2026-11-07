@@ -5,6 +5,7 @@
 
 mod ancestry;
 mod commit;
+mod commit_batch;
 mod damaged_index;
 mod derive;
 mod diff;

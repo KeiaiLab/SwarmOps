@@ -1,16 +1,21 @@
-//! Batched lands (the M18 D2 design §3.3, slice D2-4): a publish that finds the store's lock
-//! taken waits as a request in the store's write queue ([`MetaStore::take_turn`]); the next lock
-//! holder leads a batch of them ([`Repo::lead`]), each planned in a frame of its own over one
-//! write transaction and committed with one sync of `journal.log`.
+//! Batched lands and commits (the M18 D2 design §3.3, slices D2-4 and D2-5): a publish or a
+//! commit's insert that finds the store's lock taken waits as a request in the store's write
+//! queue ([`MetaStore::take_turn`]); the next lock holder leads a batch of them ([`Repo::lead`],
+//! [`Repo::lead_insert`]), each planned in a frame of its own over one write transaction and
+//! committed with one sync of `journal.log`.
 //!
 //! ```text
-//!   own publication   ──▶ frame 0, planned as a lone publish plans it
+//!   own request       ──▶ frame 0, planned as a lone publish or insert plans it
 //!   request 1 (by id) ──▶ frame 1, on what frame 0 queued (its moves, its key)
 //!   request 2 (by id) ──▶ frame 2, on what frames 0 and 1 queued
 //!   claim ──▶ the staged objects, one put and one flush ──▶ one append of every frame
-//!   answers: Landed (a frame), Moved or Replayed (none); a member the leader cannot plan is
-//!   declined, and its lander publishes it again alone
+//!   answers: Landed or an insert that queued (a frame); Moved, Replayed, or an insert that
+//!   queued nothing (none); a member the leader cannot plan is declined, and its writer makes
+//!   it again alone
 //! ```
+//!
+//! An insert's request is its changeset's index record and the ref it advances: the changeset's
+//! objects are durable since its committer flushed them before it asked (I1).
 //!
 //! A request carries ids and small fields only: the leader reads the member's `L` (and `C`) by
 //! id, durable since its lander flushed them before it asked (I1). Each member's changesets are
@@ -27,9 +32,11 @@
 use serde::{Deserialize, Serialize};
 use swarmops_core::{Changeset, ChangesetId, ObjectId, ObjectKind, RepoPath};
 use swarmops_store::{
-    Answer, FrameUse, Lead, MetaWrite, ObjectStore, Outcome, Planned, StoreError,
+    Answer, ChangesetMeta, FrameUse, InsertOutcome, Lead, MetaWrite, ObjectStore, Outcome, Planned,
+    Recovered, StoreError,
 };
 
+use crate::commit::{self, Advance, Advanced, InsertPlan, Recorded};
 use crate::error::RepoError;
 use crate::oplog::OpId;
 use crate::repo::{self, Repo};
@@ -48,6 +55,8 @@ type Id = [u8; 32];
 enum Request {
     /// A land's publish.
     Publish(PublishRequest),
+    /// A commit's insert.
+    Insert(InsertRequest),
 }
 
 /// A publish's request: every field of [`Publication`] but its two changesets, named by id.
@@ -63,6 +72,33 @@ struct PublishRequest {
     key: Option<String>,
     next_seq: u64,
     head: Id,
+}
+
+/// An insert's request: the changeset's index record but the numbers the store gives it, and
+/// the ref it advances.
+#[derive(Serialize, Deserialize)]
+struct InsertRequest {
+    id: Id,
+    delta_hash: [u8; 32],
+    parents: Vec<Id>,
+    /// [`Advance`]: the ref and who moves it.
+    advance: Option<(String, String)>,
+}
+
+/// An insert's answer body: what [`commit::plan_insert`] did.
+#[derive(Serialize, Deserialize)]
+struct InsertAnswer {
+    /// The seq of [`InsertOutcome::Inserted`]; `None` for [`InsertOutcome::AlreadyPresent`].
+    inserted: Option<u64>,
+    advanced: Option<AdvancedWire>,
+}
+
+/// [`Advanced`] on the wire.
+#[derive(Serialize, Deserialize)]
+struct AdvancedWire {
+    name: String,
+    old: Option<Id>,
+    already_applied: bool,
 }
 
 /// An answer body: what a member's publish did, but the warnings only its commit gives and the
@@ -90,12 +126,33 @@ enum PublishAnswer {
 
 /// How a member's planning ended.
 enum Member {
-    /// Its inserts and move queued in a frame of its own, closed.
+    /// A publish: its inserts and move queued in a frame of its own, closed.
     Queued(Queued),
-    /// Nothing to record: [`Published::Moved`] or [`Published::Replayed`].
+    /// A publish with nothing to record: [`Published::Moved`] or [`Published::Replayed`].
     Done(Published),
+    /// An insert: its frame closed if it queued anything ([`InsertPlan::queued`]), else
+    /// dropped.
+    Inserted(InsertPlan),
     /// It failed: its frame dropped.
     Failed(RepoError),
+}
+
+impl Member {
+    /// Whether it holds a frame.
+    fn framed(&self) -> bool {
+        match self {
+            Member::Queued(_) => true,
+            Member::Inserted(plan) => plan.queued(),
+            Member::Done(_) | Member::Failed(_) => false,
+        }
+    }
+}
+
+/// What a lead did for its own request: how its planning ended, and the batch's commit, if it
+/// had anything to commit.
+struct Led {
+    mine: Member,
+    committed: Option<Result<Answer, StoreError>>,
 }
 
 impl<O: ObjectStore> Repo<O> {
@@ -108,63 +165,12 @@ impl<O: ObjectStore> Repo<O> {
     /// publish makes the same filesystem calls in the same order as before the queue. An error of
     /// `own`'s planning is returned once the batch committed; a batch with nothing to commit is
     /// dropped, as a lone publish that records nothing drops its write.
-    pub(crate) fn lead(
-        &self,
-        mut lead: Lead<'_>,
-        own: &Publication,
-    ) -> Result<Published, RepoError> {
-        let staged = Staged::new(&self.objects);
-
-        // 1. The own publication, frame 0.
-        let own_rid = lead.requests()[0].rid.clone();
-        let mine = plan_member(lead.write(), &staged, own);
-        let own_framed = matches!(mine, Member::Queued(_));
-        let own_frame = if own_framed {
-            FrameUse::Frame(0)
-        } else {
-            FrameUse::NoFrame
-        };
-        let mut plans = vec![Planned::new(own_rid, own_frame, Vec::new())];
-
-        // 2. The waiting requests, oldest first, each on what the ones before it queued.
-        let mut frames = usize::from(own_framed);
-        while lead.may_plan() {
-            let request = lead.requests()[plans.len()].clone();
-            let member =
-                match decode_request(&request.body).and_then(|wire| publication(&staged, wire)) {
-                    Ok(p) => plan_member(lead.write(), &staged, &p),
-                    Err(e) => Member::Failed(e),
-                };
-            let (frame, body) = match member {
-                Member::Queued(queued) => {
-                    let body = encode_answer(&wire_of(&queued.landed(Vec::new())))?;
-                    frames += 1;
-                    (FrameUse::Frame(frames - 1), body)
-                }
-                Member::Done(published) => {
-                    (FrameUse::NoFrame, encode_answer(&wire_of(&published))?)
-                }
-                Member::Failed(_) => (FrameUse::Declined, Vec::new()),
-            };
-            plans.push(Planned::new(request.rid, frame, body));
-        }
-
-        // 3. The claim; a batch of the own publish alone that records nothing is dropped.
-        let held = lead.claim(plans)?;
-        if held == 1 && !own_framed {
-            drop(lead);
+    pub(crate) fn lead(&self, lead: Lead<'_>, own: &Publication) -> Result<Published, RepoError> {
+        let Led { mine, committed } =
+            self.lead_with(lead, |write, staged| plan_member(write, staged, own))?;
+        let Some(committed) = committed else {
             return own_end(mine);
-        }
-
-        // 4. The objects every frame names, durable before the append (I1, W5).
-        let objects = staged.into_objects();
-        if !objects.is_empty() {
-            self.objects.put_hashed_batch(objects)?;
-            self.objects.flush()?;
-        }
-
-        // 5. The commit point of every member; the own outcome.
-        let committed = lead.commit();
+        };
         let Member::Queued(queued) = mine else {
             return own_end(mine);
         };
@@ -180,6 +186,127 @@ impl<O: ObjectStore> Repo<O> {
             }
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// [`Repo::lead`] for a commit's insert of `meta`, with `advance`: what
+    /// [`commit::plan_insert`] did, committed, with the warning of a step after the commit point
+    /// that failed and what the lead's recovery repaired. A lone insert makes the same
+    /// filesystem calls in the same order as before the queue.
+    pub(crate) fn lead_insert(
+        &self,
+        lead: Lead<'_>,
+        meta: ChangesetMeta,
+        advance: Option<Advance>,
+    ) -> Result<Recorded, RepoError> {
+        let recovered = lead.recovered();
+        let Led { mine, committed } =
+            self.lead_with(lead, |write, _| plan_insert_member(write, meta, advance))?;
+        let plan = match mine {
+            Member::Inserted(plan) => plan,
+            Member::Failed(e) => return Err(e),
+            Member::Queued(_) | Member::Done(_) => {
+                return Err(RepoError::Internal(
+                    "an insert's lead planned a publish".to_owned(),
+                ));
+            }
+        };
+
+        // Nothing queued: nothing of the batch's commit is the insert's.
+        let mut warnings = Vec::new();
+        match committed {
+            Some(Err(StoreError::PostCommit {
+                frame_seq,
+                frame_crc,
+                source,
+            })) if plan.queued() => warnings.push(repo::post_commit_warning(
+                &plan.what(),
+                OpId::new(frame_seq, frame_crc),
+                &source,
+            )),
+            Some(Err(e)) if plan.queued() => return Err(e.into()),
+            _ => {}
+        }
+        Ok((plan.insert, plan.advanced, warnings, recovered))
+    }
+
+    /// Leads a batch with `lead`, its own request planned by `own` as frame 0: then each waiting
+    /// request [`Lead::may_plan`] grants, the claim, the objects the members made written and
+    /// flushed, and the commit. A batch of the own request alone that records nothing is
+    /// dropped, its commit none.
+    fn lead_with<F>(&self, mut lead: Lead<'_>, own: F) -> Result<Led, RepoError>
+    where
+        F: FnOnce(&mut MetaWrite<'_>, &Staged<'_, O>) -> Member,
+    {
+        let staged = Staged::new(&self.objects);
+
+        // 1. The own request, frame 0.
+        let own_rid = lead.requests()[0].rid.clone();
+        let mine = own(lead.write(), &staged);
+        let own_framed = mine.framed();
+        let own_frame = if own_framed {
+            FrameUse::Frame(0)
+        } else {
+            FrameUse::NoFrame
+        };
+        let mut plans = vec![Planned::new(own_rid, own_frame, Vec::new())];
+
+        // 2. The waiting requests, oldest first, each on what the ones before it queued.
+        let mut frames = usize::from(own_framed);
+        while lead.may_plan() {
+            let request = lead.requests()[plans.len()].clone();
+            let member = match decode_request(&request.body) {
+                Ok(Request::Publish(wire)) => match publication(&staged, wire) {
+                    Ok(p) => plan_member(lead.write(), &staged, &p),
+                    Err(e) => Member::Failed(e),
+                },
+                Ok(Request::Insert(wire)) => {
+                    let (meta, advance) = insert_of(wire);
+                    plan_insert_member(lead.write(), meta, advance)
+                }
+                Err(e) => Member::Failed(e),
+            };
+            let has_frame = member.framed();
+            let body = match member {
+                Member::Queued(queued) => {
+                    Some(encode_answer(&wire_of(&queued.landed(Vec::new())))?)
+                }
+                Member::Done(published) => Some(encode_answer(&wire_of(&published))?),
+                Member::Inserted(plan) => Some(encode(&insert_answer(&plan)?)?),
+                Member::Failed(_) => None,
+            };
+            let (frame, body) = match body {
+                Some(body) if has_frame => {
+                    frames += 1;
+                    (FrameUse::Frame(frames - 1), body)
+                }
+                Some(body) => (FrameUse::NoFrame, body),
+                None => (FrameUse::Declined, Vec::new()),
+            };
+            plans.push(Planned::new(request.rid, frame, body));
+        }
+
+        // 3. The claim; a batch of the own request alone that records nothing is dropped.
+        let held = lead.claim(plans)?;
+        if held == 1 && !own_framed {
+            drop(lead);
+            return Ok(Led {
+                mine,
+                committed: None,
+            });
+        }
+
+        // 4. The objects every frame names, durable before the append (I1, W5).
+        let objects = staged.into_objects();
+        if !objects.is_empty() {
+            self.objects.put_hashed_batch(objects)?;
+            self.objects.flush()?;
+        }
+
+        // 5. The commit point of every member.
+        Ok(Led {
+            mine,
+            committed: Some(lead.commit()),
+        })
     }
 
     /// What `answer`, a leader's answer to the publish of `p`, says the publish did. The frame's
@@ -207,6 +334,39 @@ impl<O: ObjectStore> Repo<O> {
                 "a publish's answer whose outcome does not match its body".to_owned(),
             )),
         }
+    }
+
+    /// What `answer`, a leader's answer to a commit's insert, says the insert did; the recovery
+    /// is the leader's to report, none here.
+    pub(crate) fn answered_insert(&self, answer: &Answer) -> Result<Recorded, RepoError> {
+        let plan = plan_of(decode(&answer.body, "answer")?);
+        let warnings = match (&answer.outcome, plan.queued()) {
+            (Outcome::Committed { .. }, true) | (Outcome::NoFrame, false) => Vec::new(),
+            (Outcome::PostCommit { frame_seq, warning }, true) => {
+                vec![self.member_warning(&plan.what(), *frame_seq, warning)]
+            }
+            _ => {
+                return Err(RepoError::Internal(
+                    "an insert's answer whose outcome does not match its body".to_owned(),
+                ));
+            }
+        };
+        Ok((plan.insert, plan.advanced, warnings, Recovered::default()))
+    }
+
+    /// The request body of the insert of `meta` with `advance`: its version, then the index
+    /// record's fields but the numbers the store gives it, and the ref.
+    pub(crate) fn insert_body(
+        meta: &ChangesetMeta,
+        advance: Option<&Advance>,
+    ) -> Result<Vec<u8>, RepoError> {
+        let wire = Request::Insert(InsertRequest {
+            id: bytes(meta.id),
+            delta_hash: meta.delta_hash,
+            parents: meta.parents.iter().map(|id| bytes(*id)).collect(),
+            advance: advance.map(|a| (a.name.clone(), a.actor.clone())),
+        });
+        encode(&wire)
     }
 
     /// The warning of a member's land (`what`) committed in frame `seq`, whose step after the
@@ -247,6 +407,70 @@ fn plan_member<S: ObjectStore>(write: &mut MetaWrite<'_>, objects: &S, p: &Publi
     }
 }
 
+/// Plans the insert of `meta`, with `advance`, in a frame of its own of `write`: closed if it
+/// queued anything, else dropped, as on a failure.
+fn plan_insert_member(
+    write: &mut MetaWrite<'_>,
+    meta: ChangesetMeta,
+    advance: Option<Advance>,
+) -> Member {
+    match commit::plan_insert(write, meta, advance) {
+        // Closed now, so that the next member sees it.
+        Ok(plan) if plan.queued() => match write.begin_frame() {
+            Ok(()) => Member::Inserted(plan),
+            Err(e) => {
+                write.drop_frame();
+                Member::Failed(e.into())
+            }
+        },
+        Ok(plan) => {
+            write.drop_frame();
+            Member::Inserted(plan)
+        }
+        Err(e) => {
+            write.drop_frame();
+            Member::Failed(e)
+        }
+    }
+}
+
+/// The insert `wire` asks for: the index record, numbered by the store, and the advance.
+fn insert_of(wire: InsertRequest) -> (ChangesetMeta, Option<Advance>) {
+    let parents = wire.parents.into_iter().map(id_of).collect();
+    let meta = ChangesetMeta::new(id_of(wire.id), 0, 0, wire.delta_hash, parents);
+    let advance = wire
+        .advance
+        .map(|(name, actor)| Advance::new(&name, &actor));
+    (meta, advance)
+}
+
+/// The answer body of `plan`.
+fn insert_answer(plan: &InsertPlan) -> Result<InsertAnswer, RepoError> {
+    let inserted = match plan.insert {
+        InsertOutcome::Inserted { seq } => Some(seq),
+        InsertOutcome::AlreadyPresent => None,
+        // Fail closed: an outcome this build cannot answer ends the lead, nothing claimed.
+        _ => return Err(RepoError::unknown_variant("InsertOutcome")),
+    };
+    let advanced = plan.advanced.as_ref().map(|a| AdvancedWire {
+        name: a.name.clone(),
+        old: a.old.map(bytes),
+        already_applied: a.already_applied,
+    });
+    Ok(InsertAnswer { inserted, advanced })
+}
+
+/// The plan `wire` answers.
+fn plan_of(wire: InsertAnswer) -> InsertPlan {
+    let insert = match wire.inserted {
+        Some(seq) => InsertOutcome::Inserted { seq },
+        None => InsertOutcome::AlreadyPresent,
+    };
+    let advanced =
+        (wire.advanced).map(|a| Advanced::new(&a.name, a.old.map(id_of), a.already_applied));
+    InsertPlan { insert, advanced }
+}
+
 /// The own publish's end, when it committed no frame of its own.
 fn own_end(mine: Member) -> Result<Published, RepoError> {
     match mine {
@@ -254,6 +478,9 @@ fn own_end(mine: Member) -> Result<Published, RepoError> {
         Member::Failed(e) => Err(e),
         Member::Queued(_) => Err(RepoError::Internal(
             "a queued publish ended without its commit".to_owned(),
+        )),
+        Member::Inserted(_) => Err(RepoError::Internal(
+            "a publish's lead planned an insert".to_owned(),
         )),
     }
 }
@@ -279,10 +506,8 @@ pub(crate) fn encode_publish(p: &Publication) -> Result<Vec<u8>, RepoError> {
 }
 
 /// The request `body` encodes, of this version.
-fn decode_request(body: &[u8]) -> Result<PublishRequest, RepoError> {
-    match decode(body, "request")? {
-        Request::Publish(publish) => Ok(publish),
-    }
+fn decode_request(body: &[u8]) -> Result<Request, RepoError> {
+    decode(body, "request")
 }
 
 /// The publication `wire` names, its changesets read by id from `objects`.
@@ -487,7 +712,9 @@ mod tests {
     #[test]
     fn a_publish_request_decodes_to_its_fields() {
         let p = publication_of(Some("key-1"));
-        let wire = decode_request(&encode_publish(&p).unwrap()).unwrap();
+        let Request::Publish(wire) = decode_request(&encode_publish(&p).unwrap()).unwrap() else {
+            panic!("not a publish's request");
+        };
         assert_eq!(
             (wire.target.as_str(), wire.onto, wire.id, wire.relocate),
             ("main", [1; 32], [3; 32], 1)
