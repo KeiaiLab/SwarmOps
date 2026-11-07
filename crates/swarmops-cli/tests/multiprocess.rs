@@ -471,12 +471,16 @@ const KEY_TARGETS: [&str; 2] = ["main", "release/1"];
 /// key or its publish did, under the lock. Each target's head is then its own winners' last land,
 /// and the store verifies clean. A lander that meets `E_BUSY` runs again ([`retry_busy`]).
 #[test]
-#[ignore = "slow, ~60 s: 1,000 two-process rounds"]
+#[ignore = "slow, ~300 s idle: 1,000 two-process rounds"]
 fn same_key_two_targets_1000_rounds() {
     let store = Store::init();
     let t0 = store.commit(ACTOR_KEY, "a", "a\n", None);
-    let release = ["ref", "set", KEY_TARGETS[1], &t0, "--create"];
-    store.run_as(ACTOR_KEY, &release, &[]).ok();
+
+    // Both targets start at `t0`: a commit moves no ref.
+    for target in KEY_TARGETS {
+        let create = ["ref", "set", target, &t0, "--create"];
+        store.run_as(ACTOR_KEY, &create, &[]).ok();
+    }
     let mut heads = [t0.clone(), t0.clone()];
 
     for round in 0..KEY_ROUNDS {
