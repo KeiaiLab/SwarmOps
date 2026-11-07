@@ -19,6 +19,8 @@ mod lock;
 mod meta;
 mod objects;
 mod refs2;
+// Every test of it builds its store with the sweeps' harness, which needs the hooks.
+#[cfg(feature = "test-hooks")]
 mod upgrade;
 
 /// Every test file is a module here: with `autotests = false` Cargo builds no target from a file

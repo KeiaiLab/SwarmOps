@@ -85,6 +85,9 @@ collects the changes on `stable` that no release holds yet, until the next relea
   land's snapshot: a land of the key on another ref is `E_INVALID_ARG` with `details.target`, one
   on the target is replayed, or `E_INVALID_ARG` for another change; either writes nothing
   ([Troubleshooting](docs/troubleshooting.md#e_invalid_arg)).
+- `just perf` builds the store's contention test again: since v0.7.0 the store's test binary
+  did not compile without the test hooks, so the store-level contention numbers went unmeasured.
+  `just check` now builds every target without them.
 
 ## [0.8.0] - 2026-11-07
 

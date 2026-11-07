@@ -21,6 +21,8 @@ mod read;
 mod rebase;
 mod repair;
 mod store_fs;
+// Its template, crash and failure tests share the fault doubles, which need the hooks.
+#[cfg(feature = "test-hooks")]
 mod upgrade;
 mod verify;
 

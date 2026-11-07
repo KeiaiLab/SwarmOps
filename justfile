@@ -11,7 +11,9 @@ default: check
 # as `cargo build --release` is, and checks that it ignores them.
 # That test exists only without the feature, so `--no-tests=fail` fails a build that turns it
 # on all the same. The all-features clippy run compiles that test to nothing, so the clippy
-# step after it lints it, and the library crates it builds, without the feature. The docs run
+# step after it lints it, and the library crates it builds, without the feature. The check after
+# that builds every target without the feature, as `just perf` and the benches do, so that a test
+# that needs the hooks and is not gated on them fails here, not in the perf run. The docs run
 # twice: as `cargo doc` builds by default, and with `--all-features`, which renders and
 # link-checks the code behind `test-hooks` (the order checker and the fault doubles) that the
 # first run leaves out. A doc of the default build cannot link to that code, or the first run
@@ -46,6 +48,7 @@ check:
     cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
     cargo clippy --locked --workspace --lib --bins --all-features -- -D warnings -D clippy::unwrap_used -D clippy::missing_assert_message -D clippy::mod_module_files -D clippy::rc_buffer
     cargo clippy --locked -p swarmops-cli --test test_hooks -- -D warnings
+    cargo check --locked --workspace --all-targets
     cargo clippy --locked --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
     cargo metadata --locked --format-version 1 --manifest-path bench/compare/Cargo.toml >/dev/null
     cargo nextest run --locked --workspace --all-features --no-tests=warn

@@ -26,10 +26,13 @@ use std::time::{Duration, Instant};
 use camino::Utf8PathBuf;
 use proptest::prelude::*;
 use swarmops_core::{ChangesetId, ObjectId};
+#[cfg(feature = "test-hooks")]
+use swarmops_store::MetaStore;
+#[cfg(feature = "test-hooks")]
 use swarmops_store::meta::upgrade;
 use swarmops_store::{
-    BadRecord, Frame, FsMethod, FsOps, Journal, Layout, LimitKind, LogCut, MetaLock, MetaStore,
-    RealFs, Record, StoreError, StoreFormat, TailRepair,
+    BadRecord, Frame, FsMethod, FsOps, Journal, Layout, LimitKind, LogCut, MetaLock, RealFs,
+    Record, StoreError, StoreFormat, TailRepair,
 };
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, CrashAtFs};
@@ -37,6 +40,7 @@ use swarmops_store::{CRASH_AT_ENV, CrashAtFs};
 use swarmops_testkit::child::{SIGABRT, run, this_test};
 use swarmops_testkit::faults::{FsyncModelFs, checked};
 use swarmops_testkit::fs::{Call, Hook, RecordingFs, Watch, Watched, When};
+#[cfg(feature = "test-hooks")]
 use swarmops_testkit::store::sweep;
 use swarmops_testkit::store::{append_bytes, file_len, new_root, real_fs, set_len};
 #[cfg(feature = "test-hooks")]
@@ -451,6 +455,7 @@ fn append_frame_assigns_sequential_seq_and_offsets() {
 
 /// The payload CRC its header holds: the 4 bytes after the length, at the frame's offset in
 /// `journal.log`, in either format.
+#[cfg(feature = "test-hooks")]
 fn header_crc(layout: &Layout, frame: &Frame) -> u32 {
     let log = fs::read(layout.journal_log()).unwrap();
     let at = usize::try_from(frame.offset).unwrap() + 4;
@@ -460,6 +465,7 @@ fn header_crc(layout: &Layout, frame: &Frame) -> u32 {
 /// A frame carries the payload CRC of its header (the operation id's checksum, the M15 design
 /// §2): as appended, as read back by every reader and in both formats, as a commit reports it,
 /// and unchanged by `upgrade`, which moves payloads byte for byte.
+#[cfg(feature = "test-hooks")]
 #[test]
 fn a_frame_carries_its_payload_crc() {
     // 1. Appended and read back, in FORMAT 1 and 2: the header's CRC, the payload's crc32.
@@ -546,6 +552,7 @@ fn frames_from_is_inclusive_and_starts_at_frame_zero() {
 }
 
 /// A FORMAT `format` store with `commits` frames, each a changeset and `main`'s move to it.
+#[cfg(feature = "test-hooks")]
 fn store_with(format: StoreFormat, commits: u64) -> (tempfile::TempDir, MetaStore) {
     let (dir, plain) = new_root();
     let layout = Layout::with_format(plain.root(), format);
@@ -559,6 +566,7 @@ fn store_with(format: StoreFormat, commits: u64) -> (tempfile::TempDir, MetaStor
 }
 
 /// Commits changeset `n` of [`sweep::changeset`]'s line, `main` moved to it.
+#[cfg(feature = "test-hooks")]
 fn commit_next(store: &MetaStore, n: u64) {
     let mut write = store.write().unwrap();
     write.insert_changeset(sweep::changeset(n)).unwrap();
@@ -572,6 +580,7 @@ fn commit_next(store: &MetaStore, n: u64) {
 /// A snapshot names the seq of the first frame it does not hold (the M16 design §6): past the
 /// frames it read beyond the checkpoint, or, with none there, the frames before the checkpoint;
 /// later commits do not change it.
+#[cfg(feature = "test-hooks")]
 #[test]
 fn a_snapshot_names_its_next_seq() {
     for format in [StoreFormat::V1, StoreFormat::V2] {
@@ -597,6 +606,7 @@ fn a_snapshot_names_its_next_seq() {
 
 /// A writer reads the frames from a seq on, under its lock (the M16 design §6): the frames a
 /// snapshot did not hold, across a checkpoint, as the journal lists them; none past the end.
+#[cfg(feature = "test-hooks")]
 #[test]
 fn a_writer_reads_frames_from_a_seq() {
     for format in [StoreFormat::V1, StoreFormat::V2] {
