@@ -1533,6 +1533,63 @@ all. Unoptimized, in the weekly `just check-ci-slow` (the Scheduled run of 2026-
 them optimized, last, in a job of their own (`just check-ci-perf`): its timeout is twice their sum
 plus the build, and the `ci-perf` profile kills a case after 55 minutes, twice the longest.
 
+## M16 — 2026-11-07
+
+M16's fan-in: G4 after S4's one-lock land, the slow suite on M16's code, and the figures of the
+v0.8.0 release run that a loaded host left usable. Same host as v0.7.0; during the slow suite
+another workload on the shared host took its load to 100–350, so each figure carries its load.
+
+### G4: 50 landing processes, one lock pass per land
+
+`landing::perf::landing_under_load`, release build, open loop, 120 s, in the bench directory, at
+`stable` `8fae4fe0`: S4's one-lock land (`land --changes`, one lock pass and one journal frame per
+land), which G4's harness lands with.
+
+| Run | Start load | Lands/s | p50 / p99 | Retries | Lost |
+| --- | --- | --- | --- | --- | --- |
+| 50, run 1 | 10.33 | **25.0** | 144.8 / **441.7 ms** | 0 % | 0 |
+| 50, run 2 | 20.88 | **25.0** | 195.6 / **1,483.5 ms** | 0 % | 0 |
+| 32, run 1 | 10.51 | 16.0 | 1,275.7 / 3,087.3 ms | 0 % | 0 |
+| 32, run 2 | 10.24 | 16.0 | 66.9 / 217.9 ms | 0 % | 0 |
+
+v0.7.0's p99 at 50 was 2.5–2.7 s. G4's p99 under 500 ms at 50 is met in one of two runs, and the
+other run started at twice the first's load: the p99 depends on the host's load, so condition 2
+is not met robustly. Lands/s, retries and lost lands are met in every run. Per the roadmap design
+(§3.1), group commit (D2, M18) is next, and its design starts now.
+
+### The slow suite
+
+`just check-slow` (`PROPTEST_CASES=2000`, `--no-fail-fast`) at `bf0b0e0c`: 2,154 tests run, 2,148
+passed, 6 failed, in 4,655.7 s. One failure was a defect:
+`multiprocess::same_key_two_targets_1000_rounds` never created `main`; fixed in `95b9fcec`, it ran
+1,000 of 1,000 rounds in 297.7 s on an idle host. Five failed only under load and passed run
+alone:
+
+| Test | Load when run alone | Note |
+| --- | --- | --- |
+| store `meta::multi_process_inserts_all_persist` | 41 | |
+| store `upgrade::the_upgrade_of_a_large_journal_is_measured` | 159 | |
+| CLI `landing::perf::landing_under_load` | 7 | |
+| CLI `contention::thirty_two_processes_thousand_commits_each` | 17 | |
+| store `contention::thirty_two_processes_thousand_transactions_each` | 9 | failed alone at load 197 with 5 `Busy`; passed at load 9 in 671 s |
+
+### The v0.8.0 release run
+
+`just perf` for v0.8.0, at `258e8cd1`, on a loaded host. Its 50-process CLI contention failed with
+223 `E_BUSY` (the 1-minute load 16.99–182.51 during it), and the store contention step did not
+compile (fixed in `bf0b0e0c`). The figures still usable, each with the 1-minute load at its step's
+start:
+
+| Case | `swarmops` | git | Ratio | Target | Start load |
+| --- | --- | --- | --- | --- | --- |
+| `serve_perf` first clone on 12,000 commits | 3,983.7 s | 1.327 s | — | — | 4.00 |
+| `serve_perf` clone on 12,000 commits | 1.186 s | 1.035 s | 1.15 | at most 2× (met) | 4.00 |
+| `remote_perf` clone of the committed fixtures (linear, merges, roots) | — | — | 2.23–2.76 | at most 1.10 | 13.07 |
+
+The first clone exports the whole history before git advertises it (v0.7.0: 1,195.6 s); M17
+prepares `serve.git` ahead of the first connection. The fixtures' clone ratios are the fixed
+start-up cost v0.7.0 recorded (1.99–2.40).
+
 ## M17 baselines — 2026-11-07 (not measured yet)
 
 Baselines of the M17 targets on the code before any M17 change, so that each later M17 slice is a

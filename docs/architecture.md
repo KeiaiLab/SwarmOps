@@ -786,8 +786,8 @@ next one (a `unified` diff's page also within `max_bytes` of its files, 32 KiB b
 pages at the full ids the first page resolved.
 
 `swarmops mcp` (M1.5) serves the same operations to agents over the Model Context Protocol, on
-stdio: one tool per `StoreOps` operation but `derive`, maintenance that `swarmops derive` runs
-beside the store, and from M13 the five git remote operations that take a remote by its name
+stdio: one tool per `StoreOps` operation but `derive`, which only fills ahead of time a cache
+that each read fills itself, so it changes no result an agent reads, and from M13 the five git remote operations that take a remote by its name
 (`remote_list`, `fetch`, `push`, `sync`, `sync_status`; `clone` and `remote add|remove` stay in
 the CLI); a tool's input schema is the request type's JSON Schema, kept a plain object (a
 rule across fields that the type's schema states with a top-level `oneOf` goes into the description

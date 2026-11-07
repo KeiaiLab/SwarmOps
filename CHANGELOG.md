@@ -111,6 +111,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
   store's writer lock once per served ref and once more. A refresh reads every ref in one
   committed snapshot, and a push's or a land's export keeps the file current. A missing or
   damaged file, or a `serve.git` ref moved by hand, refreshes as before (the M17 design §4.2).
+- M16 is delivered ([roadmap](docs/roadmap.md#milestones)). G4 measured again with one lock pass
+  per land: at 50 processes 25.0 lands/s, 0 % retries and nothing lost, and a p99 of 441.7 ms in
+  one run and 1,483.5 ms in another started at twice the load, so condition 2 is not met robustly
+  and group commit (D2, M18) is next ([perf.md](docs/perf.md#m16--2026-11-07), with the slow
+  suite's outcome and the v0.8.0 release run's figures). docs/goals.md takes that value for G4,
+  and counts 39 MCP tools and 164 schema types for G6.
 
 ### Fixed
 

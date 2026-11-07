@@ -1,6 +1,6 @@
 # Known limitations
 
-What SwarmOps does not do yet, or does less well than it should, as of M15, and the milestone
+What SwarmOps does not do yet, or does less well than it should, as of M16, and the milestone
 meant to change it. The items come from the M1 and M1.5 reviews and the 2026-10-16 code review:
 the carry-overs their tasks handed to later milestones, the deferred minors that are still open,
 and the rulings of M1's final review, which left 14 questions to the maintainer (the table at the
@@ -17,7 +17,7 @@ M9 simulation and a benchmark gate · M11 remote sync, offline-first.
 M0, M1, M1.5, M1.6, M2, M3, M4 and M8 make the first release, 0.1.0; M13 makes 0.2.0, M5
 0.3.0 and M6 0.4.0; 0.5.0 adds no milestone: it holds the pilot, the measurements and the first
 v0.6 fixes; 0.6.0 holds the fixes the measurements asked for, M14 makes 0.7.0, and M15, the
-data-safety and contract follow-ups, 0.8.0. M1.5, the hardening milestone after M1,
+data-safety and contract follow-ups, 0.8.0; M16, safety and load, is on `stable` for 0.9.0. M1.5, the hardening milestone after M1,
 closed a few, and M1.6, the code-review follow-ups after it, closed more. "Deferred
 until after the pilot" marks a delivered milestone's task that waits until SwarmOps has been
 piloted on a real repository ([pilot.md](pilot.md)): the measurements that need a quiet host,
@@ -129,10 +129,14 @@ left).
   the lock was held 99.6 % of the run and the p99 rose to 2.5–2.7 s, for v0.6.0's code as for
   M14's; [perf.md](perf.md#v070--2026-10-29)). A land with `changes` (`land --changes`, `ws land
   -m` without `--check`) now takes it once, its commit and its land in one frame (the M16 design
-  §4); G4's harness lands so, and its p99 is measured again after this lands. A `ws land` record
+  §4); G4's harness lands so. With it, at 50 processes, the p99 was 441.7 ms in one run (start load
+10.33) and 1,483.5 ms in another (20.88), with 25.0 lands/s, 0 % retries and nothing lost in both
+([perf.md](perf.md#m16--2026-11-07)): under 500 ms in one of two runs, so the lock's queue still
+sets the tail on a loaded host. A `ws land` record
   left on the parent of the workspace's head is taken over when its key landed on its target (a
-  land that carried edits, cut once the workspace stood on their changeset). *Open: G4's p99 (goals.md). Found: the 2026-10-20 plan
-  triage; narrowed by v0.6.0; its cause measured in M14.*
+  land that carried edits, cut once the workspace stood on their changeset). *Target: M18 (group commit, D2: one journal flush for several
+  lands). Found: the 2026-10-20 plan triage; narrowed by v0.6.0 and M16 Task S4; its cause measured
+  in M14.*
 - **Recovery after a crash walks all of a FORMAT 1 `journal.off` under the lock.** Before it cuts
   or lists anything, the first writer after a crash checks every entry of a FORMAT 1 store's
   `journal.off`. On a long journal that walk could approach `lock_timeout` for the writers queued
@@ -278,10 +282,13 @@ left).
 - **`ancestry` is measured only in part.** Its benches (`ancestry/{20k,200k}/…`, merge-rich
   histories) are not yet baselined, so `bench/thresholds.toml` skips them and `docs/perf.md` has
   no p99 of theirs; a linear history, 1M changesets, a p99 bound of 1 ms, a bound on the growth
-  from 20k to 200k, and the answers against git's on the same history are not measured. Each read
-  walks every changeset `to` reaches down to where nothing more can be found, reading its object:
-  far-apart revisions on a long history cost a walk of most of it. *Target: the M16 fan-in
-  (baselines and p99s); the rest unscheduled. Found: the M16 design §5.*
+  from 20k to 200k, a latency at 100,000 changesets, and the answers against git's on the same
+  history are not measured. Each read walks every changeset `to` reaches down to where nothing
+  more can be found, reading its object: far-apart revisions on a long history cost a walk of most
+  of it. A keyed land does not use it: its search still walks first parents (see "A keyed land
+  searches first parents, not a key index"), and no test counts the records it reads. *Unscheduled: M16's fan-in
+  did not measure them; the baselines and p99s wait for a `just perf` window. Found: the M16 design
+  §5.*
 - **`--expect` with a ref name cannot detect a move.** A ref name given as the expected target
   resolves when the command runs, so it matches whatever the ref holds by then (it fails only
   if the ref is gone); give an id for an expectation that can fail, or be replayed.

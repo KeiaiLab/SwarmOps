@@ -584,7 +584,7 @@ The milestones, in the order they are built. ✅ delivered · 📋 planned.
 | ✅ | M6 | Verify, crash safety and fuzzing: `repair`, `gc`, detection of unsupported filesystems by `statfs`, bounded reads of store files, a capped `verify` report, a literal `SIGKILL` test, four more fuzz targets, and store `FORMAT 2`, with branch names, tags and remote-tracking refs, and `upgrade` to it. |
 | ✅ | M14 | Git clients against a store (topology 1): `swarmops serve` over ssh and HTTP, run per connection; pushes by compare-and-swap or that land; access control (`access.toml`, `E_AUTH`, `E_POLICY_DENIED`). |
 | ✅ | M15 | Safety and contract: 54 of 55 error codes pinned, operation ids an undo cannot redirect, a fetch that imports before it moves a tracking ref, `main` moved forward only, three workspace refusals, land keys scoped to the store and checked on each attempt. |
-| 📋 | M16 | Safety and load: the remaining data-safety rows, one lock pass per land, G4 re-measured. |
+| ✅ | M16 | Safety and load: the remaining data-safety rows, one lock pass per land, G4 re-measured. |
 | 📋 | M17 | Serve under load: served reads off the writer lock, history prepared when it lands, one pack per identical read, pushes checked in bounded memory, a differential suite against git's own server. |
 | 📋 | M18, M19 | Take back and stay current (revert, `ref log`, a fast first sync); workspaces, second round. |
 | 📋 | M20, M21 | Store `FORMAT 3` (a manifest, new record kinds); health, drift and housekeeping. |
