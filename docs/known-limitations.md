@@ -31,16 +31,22 @@ left).
 ## Durability
 
 - **The power-loss model is a model.** The sweeps abort the process at a chosen filesystem call,
-  which leaves the kernel's page cache intact, and since M6 a literal `SIGKILL` kills
-  `commit --advance` at random points on a real disk, on both formats. A power loss is modelled by
-  the images of `crates/swarmops-cli/tests/power_loss.rs`: for one recorded run, what a disk may
-  hold after the power fails at each of its steps (unsynced data dropped, cut at 512 B or 4 KiB,
-  zero-filled, or with its first sector lost; directory entries that no fsync covered reverted),
-  each of which the binary must recover. What stays open: the images come from a model of the
-  disk, not a real device, and the recorded run is short (its journal ends at 2,016 B), so a cut
-  at 4 KiB is in the model but never differs from dropping there; only the slow variant's bulk
-  frame (1,025 changeset records, about 76 KB) reaches past a 4 KiB boundary. *Unscheduled. Found:
-  M1 Task 6; final review, question 11; narrowed by M1.5 Task 3, M1.6 Task 4 and M6 Task K1.*
+  which leaves the kernel's page cache intact, and a literal `SIGKILL` kills `commit --advance`
+  (since M6), `land --key` (M15), `ref set` and `op undo` (M16) at random points on a real disk, on
+  both formats, while two reader processes read what the refs name and never find it missing. A
+  power loss is modelled by the images of `crates/swarmops-cli/tests/power_loss.rs`: for one
+  recorded run, what a disk may hold after the power fails at each of its steps (unsynced data
+  dropped, cut at 512 B or 4 KiB, zero-filled, or with its first sector lost; directory entries that
+  no fsync covered reverted), each of which the binary must recover; a second run adds a keyed land
+  and its undo, each whole or absent in every image, the land run again landing once. What stays
+  open: the images come from a model of the disk, not a real device; the runs are recorded through
+  the library the binary calls, not the binary; the readers run on the writer's host, so they read
+  frames the page cache holds before their fdatasync, which only a power loss can take back; no
+  image covers a revert, a check result or an approval (none exists yet); and the recorded run is
+  short (its journal ends at 2,016 B), so a cut at 4 KiB is in the model but never differs from
+  dropping there; only the slow variant's bulk frame (1,025 changeset records, about 76 KB) reaches
+  past a 4 KiB boundary. *Unscheduled. Found: M1 Task 6; final review, question 11; narrowed by M1.5
+  Task 3, M1.6 Task 4, M6 Task K1 and M16 Task S2.*
 - **A reader can get `E_IO` after such a cut.** A snapshot that counted the records a writer
   then cut fails with an I/O error until the reader takes a new one. A snapshot that opens while
   the cut is made counts every record the checkpoint passed or the sorted views cover and reads

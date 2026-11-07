@@ -16,6 +16,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 ## [Unreleased]
 
+### Changed
+
+- Crash tests (the M16 design §2): a literal `SIGKILL` now also kills `ref set` and `op undo` on
+  `release/1`, two reader processes (`ref list`, `show`, `cat`) run beside every kill loop and
+  never find a missing object, and the power-loss images cover a keyed `land` and its undo.
+
 ### Fixed
 
 - On Unix a workspace's tree is written from its root without following a link below it. A

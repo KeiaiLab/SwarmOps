@@ -16,20 +16,34 @@
 //! The land variant (the M15 design §6) kills `land --key` instead and runs the same land again
 //! with the same key: the key lands its change exactly once, whatever moment the kill hit.
 //!
+//! The ref variant (the M16 design §2) kills `ref set` and `op undo` on `release/1`: after each
+//! kill the ref names its old or its new target, the op log holds every operation once and in
+//! order, and the same operation run again is recorded once.
+//!
+//! Two reader processes run beside every loop ([`Readers`]): `ref list`, then `show` and `cat`
+//! of what each ref names. What a ref they read reaches is never missing (`E_REV_NOT_FOUND`,
+//! `E_PATH_NOT_FOUND`, `E_STORE_CORRUPT`); the documented `E_IO` after a cut is counted apart.
+//!
 //! Each test owns its temp dir; the tests share nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::os::unix::process::ExitStatusExt;
 use std::process::Output;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
+use swarmops_core::ObjectId;
 use swarmops_store::StoreFormat;
 use swarmops_testkit::child::Child;
 use swarmops_testkit::per_format;
 use swarmops_testkit::ws::Rng;
 
-use crate::support::{Store, agent, swarmops};
+use crate::support::{Run, Store, agent, swarmops};
 
 /// The signal `Child::kill` sends on Unix.
 const SIGKILL: i32 = 9;
@@ -51,6 +65,158 @@ const MAIN: &str = "main";
 
 /// The ref the land test's last step lands onto.
 const RELEASE: &str = "release/1";
+
+/// How many reader processes run beside every kill loop.
+const READERS: usize = 2;
+
+/// How many violations a [`Tally`] keeps the message of.
+const KEPT: usize = 5;
+
+/// What readers counted, over all their passes.
+#[derive(Debug, Default)]
+struct Tally {
+    /// Reads that succeeded.
+    reads: usize,
+    /// Reads that met the documented `E_IO` after a writer's cut (storage spec §3).
+    io_after_cut: usize,
+    /// Reads whose snapshot gave up on writers landing meanwhile (`E_BUSY`, retryable): neither
+    /// a read nor a violation.
+    busy: usize,
+    /// Reads that failed otherwise: what a ref reached was missing, or any other error.
+    violations: usize,
+    /// The first [`KEPT`] violations.
+    seen: Vec<String>,
+}
+
+impl Tally {
+    /// Adds `other`'s counts to these.
+    fn add(&mut self, other: Tally) {
+        self.reads += other.reads;
+        self.io_after_cut += other.io_after_cut;
+        self.busy += other.busy;
+        self.violations += other.violations;
+        let room = KEPT.saturating_sub(self.seen.len());
+        self.seen.extend(other.seen.into_iter().take(room));
+    }
+
+    /// Counts `run`; the result of a read that succeeded.
+    fn judge(&mut self, run: &Run) -> Option<Value> {
+        // 1. A read that succeeded.
+        let envelope: Option<Value> = serde_json::from_str(run.stdout.trim()).ok();
+        if run.status.success()
+            && let Some(mut envelope) = envelope
+        {
+            self.reads += 1;
+            return Some(envelope["result"].take());
+        }
+
+        // 2. The allowed failures, then every other one.
+        let code = envelope.as_ref().and_then(|e| e["error"]["code"].as_str());
+        match code {
+            Some("E_IO") => self.io_after_cut += 1,
+            Some("E_BUSY") => self.busy += 1,
+            _ => {
+                self.violations += 1;
+                if self.seen.len() < KEPT {
+                    self.seen.push(run.to_string());
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Reader processes beside a kill loop, until [`Readers::stop`].
+struct Readers {
+    /// Set to end the readers' loops.
+    done: Arc<AtomicBool>,
+    /// The reader threads, each spawning its reads one at a time.
+    threads: Vec<JoinHandle<Tally>>,
+}
+
+impl Readers {
+    /// Starts [`READERS`] readers on `store`, each making passes ([`Readers::pass`]) until
+    /// stopped, one pass at least.
+    fn start(store: &Store) -> Readers {
+        let done = Arc::new(AtomicBool::new(false));
+        let threads = (0..READERS)
+            .map(|_| {
+                let (path, done) = (store.path().to_owned(), Arc::clone(&done));
+                thread::spawn(move || {
+                    let mut tally = Tally::default();
+                    loop {
+                        tally.add(Readers::pass(&path));
+                        if done.load(Ordering::Relaxed) {
+                            return tally;
+                        }
+                    }
+                })
+            })
+            .collect();
+        Readers { done, threads }
+    }
+
+    /// One pass over the store at `path`: `ref list`, then `show` of each target it read and
+    /// `cat` of the first file that changeset puts.
+    fn pass(path: &str) -> Tally {
+        let mut tally = Tally::default();
+        let read = |args: &[&str]| crate::support::run(&[&["--repo", path], args].concat(), &[]);
+
+        // 1. The refs; a ref read as absent is no read of it.
+        let Some(listed) = tally.judge(&read(&["ref", "list"])) else {
+            return tally;
+        };
+        let refs = listed["refs"].as_array().cloned().unwrap_or_default();
+        let targets: BTreeSet<String> = (refs.iter())
+            .filter_map(|entry| entry["target"].as_str().map(str::to_owned))
+            .collect();
+
+        // 2. What each target reaches: the changeset, and a file it puts.
+        for target in &targets {
+            let Some(shown) = tally.judge(&read(&["show", target])) else {
+                continue;
+            };
+            let changes = shown["changes"].as_array().cloned().unwrap_or_default();
+            let put = (changes.iter())
+                .find(|change| change["op"] == "put")
+                .and_then(|change| change["path"].as_str());
+            if let Some(file) = put {
+                tally.judge(&read(&["cat", &format!("{target}:{file}")]));
+            }
+        }
+        tally
+    }
+
+    /// Ends the readers after their current pass; what they counted.
+    fn stop(mut self) -> Tally {
+        self.done.store(true, Ordering::Relaxed);
+        let mut tally = Tally::default();
+        for thread in std::mem::take(&mut self.threads) {
+            let counted = thread
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            tally.add(counted);
+        }
+        tally
+    }
+}
+
+impl Drop for Readers {
+    /// A test that failed before [`Readers::stop`] still ends and reaps its readers.
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::Relaxed);
+        for thread in std::mem::take(&mut self.threads) {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Stops `readers` and asserts they met no violation; `what` names the loop.
+fn assert_read_clean(readers: Readers, what: &str) {
+    let tally = readers.stop();
+    println!("{what}: readers {tally:?}");
+    assert_eq!(tally.violations, 0, "{what}: {:#?}", tally.seen);
+}
 
 /// How one killed run ended.
 enum Ended {
@@ -143,6 +309,7 @@ fn kill_commits(format: StoreFormat, kills: usize) {
     //    round's last commit times it again, so it follows the host's load as it rises or falls.
     let (first, mut window) = commit(&store, 0);
     read.insert(first);
+    let readers = Readers::start(&store);
 
     let mut killed = 0;
     let mut runs = 0;
@@ -180,6 +347,7 @@ fn kill_commits(format: StoreFormat, kills: usize) {
     }
 
     println!("{format:?}: {killed} kills in {runs} runs, last window {window} us");
+    assert_read_clean(readers, &format!("{format:?} commits"));
     store.assert_clean("after the last commit");
 }
 
@@ -192,8 +360,8 @@ per_format! {
 
 per_format! {
     /// The slow variant: [`SLOW_KILLS`] kills per format.
-    #[ignore = "slow, ~218 s for format_1, 310 s for format_2 at load rising 3 to 267: \
-                500 kills, each with verify --deep and log"]
+    #[ignore = "slow, ~600 s: 500 kills per format, each with verify --deep and log; \
+                218-310 s idle, 577-599 s in a loaded check-slow"]
     fn sigkill_mid_commit_500_times(format) {
         kill_commits(format, SLOW_KILLS);
     }
@@ -322,6 +490,7 @@ fn kill_lands(format: StoreFormat, kills: usize) {
     let mut window = u64::try_from(start.elapsed().as_micros()).expect("a short land");
     keys.insert(landed, Some(land_key(0)));
     keys.insert(base.clone(), None);
+    let readers = Readers::start(&store);
 
     let mut killed = 0;
     let mut n = 0;
@@ -400,6 +569,7 @@ fn kill_lands(format: StoreFormat, kills: usize) {
     assert_eq!(refs(), before, "no ref moved");
 
     println!("{format:?}: {killed} kills in {n} lands, window {window} us");
+    assert_read_clean(readers, &format!("{format:?} lands"));
     store.assert_clean("after the last land");
 }
 
@@ -412,8 +582,302 @@ per_format! {
 
 per_format! {
     /// The slow land variant: [`SLOW_LAND_KILLS`] kills per format.
-    #[ignore = "slow, ~30 s per format, 180 s at load 900: 200 kills, each with verify --deep and a log"]
+    #[ignore = "slow, ~115 s: 200 kills per format, each with verify --deep and a log; \
+                ~30 s idle, 112-113 s loaded"]
     fn sigkill_mid_land_200_times(format) {
         kill_lands(format, SLOW_LAND_KILLS);
     }
+}
+
+/// The kills of each of `ref set` and `op undo` the fast ref variant makes per format
+/// (`just check`).
+const FAST_REF_KILLS: usize = 8;
+
+/// The kills of each the slow ref variant makes per format.
+const SLOW_REF_KILLS: usize = 200;
+
+/// The seed of the ref test's delays, apart from the other tests'.
+const REF_SEED: u64 = 0x4ef5_e7d0;
+
+/// The newest operations the ref test compares with its model after each step: the round's two
+/// and the two before them.
+const TAIL: usize = 4;
+
+/// How a killed run of any command ended.
+enum Cut {
+    /// SIGKILL hit it; its result, if it printed one whole, successful envelope.
+    Killed(Option<Value>),
+    /// It exited before the delay, with a whole, successful envelope.
+    Exited,
+}
+
+/// The result of `stdout` if it holds one whole, successful envelope.
+fn result_of(stdout: &[u8]) -> Option<Value> {
+    let text = std::str::from_utf8(stdout).ok()?;
+    if !text.ends_with('\n') {
+        return None;
+    }
+
+    let mut envelope: Value = serde_json::from_str(text).ok()?;
+    assert_eq!(envelope["ok"], true, "an envelope: {text}");
+    Some(envelope["result"].take())
+}
+
+/// Runs `args` and SIGKILLs the run `delay` after its spawn, unless it ended before.
+fn kill_run(args: &[String], delay: Duration) -> Cut {
+    let mut child = Child::spawn(&mut swarmops(args, &[]));
+    let (output, _) = child.finish(Instant::now() + delay);
+    let Output { status, stdout, .. } = &output;
+
+    // 1. A signal ends only a killed run; the kill may land after the envelope was printed.
+    if status.signal() == Some(SIGKILL) {
+        return Cut::Killed(result_of(stdout));
+    }
+
+    // 2. A run that beat its delay must have succeeded.
+    assert!(
+        status.success(),
+        "{args:?} ended {status} unkilled: {output:?}"
+    );
+    assert!(result_of(stdout).is_some(), "no envelope: {output:?}");
+    Cut::Exited
+}
+
+/// What `release/1` names.
+fn release_head(store: &Store) -> String {
+    let listed = store.read(&["ref", "list"]).ok();
+    let refs = listed["refs"].as_array().expect("a ref list");
+    let release = refs.iter().find(|entry| entry["name"] == RELEASE);
+    let target = release.and_then(|entry| entry["target"].as_str());
+    target.expect("release/1 exists").to_owned()
+}
+
+/// One operation as the ref test models it: each ref it moved and where to, in its order.
+fn moves_of(op: &Value) -> String {
+    let moves = op["ref_moves"].as_array().expect("an op's ref moves");
+    let named: Vec<String> = (moves.iter())
+        .map(|moved| format!("{}={}", moved["name"], moved["new"]))
+        .collect();
+    named.join(",")
+}
+
+/// The newest [`TAIL`] operations, oldest first, and the newest one's id. The operations are
+/// numbered one after another from 0, so the newest one's number is how many there are, less
+/// one: the op log holds no other.
+fn ops_tail(store: &Store) -> (Vec<(u64, String)>, String) {
+    let listed = store.read(&["op", "log", "-n", &TAIL.to_string()]).ok();
+    let ops = listed["ops"].as_array().expect("an op list");
+    let mut tail: Vec<(u64, String)> = (ops.iter())
+        .map(|op| (op["op"].as_u64().expect("an op number"), moves_of(op)))
+        .collect();
+    tail.reverse();
+    let newest = ops[0]["id"].as_str().expect("an op id").to_owned();
+    (tail, newest)
+}
+
+/// Asserts that the op log ends as `model` does, once and in order, and holds no other
+/// operation; `what` says when.
+#[track_caller]
+fn assert_ops(store: &Store, model: &[String], what: &str) {
+    let (tail, _) = ops_tail(store);
+    let from = model.len().saturating_sub(TAIL);
+    let expected: Vec<(u64, String)> = (from..model.len())
+        .map(|n| (u64::try_from(n).expect("a short log"), model[n].clone()))
+        .collect();
+    assert_eq!(tail, expected, "{what}: the op log's tail");
+}
+
+/// The model's line for a move of `release/1` to `target`.
+fn release_move(target: &str) -> String {
+    format!("{RELEASE:?}={target:?}")
+}
+
+/// Where the ref test's kills stand.
+struct RefKills {
+    /// Kills of `ref set` and of `op undo` so far.
+    set: usize,
+    undo: usize,
+    /// The runs of each that made their move before they ended, killed or not.
+    set_made: usize,
+    undo_made: usize,
+    /// The windows the delays of each are drawn from, in microseconds.
+    set_window: u64,
+    undo_window: u64,
+}
+
+/// The ref test's first move of `release/1` by `set`, and its undo, run whole and timed: the
+/// model of the op log after them, and the first windows.
+fn first_round(store: &Store, set: &[String]) -> (Vec<String>, RefKills) {
+    // 1. The move and its undo, each timed.
+    let start = Instant::now();
+    crate::support::run(set, &[]).ok();
+    let set_window = u64::try_from(start.elapsed().as_micros()).expect("a short move");
+    let (_, moved) = ops_tail(store);
+    let start = Instant::now();
+    store.run_as(&agent(0), &["op", "undo", &moved], &[]).ok();
+    let undo_window = u64::try_from(start.elapsed().as_micros()).expect("a short undo");
+
+    // 2. The model: the setup's operations before the tail stay unmodelled (empty).
+    let (tail, _) = ops_tail(store);
+    let mut model: Vec<String> = Vec::new();
+    model.resize(
+        usize::try_from(tail[0].0).expect("a short log"),
+        String::new(),
+    );
+    model.extend(tail.into_iter().map(|(_, moves)| moves));
+    let cuts = RefKills {
+        set: 0,
+        undo: 0,
+        set_made: 0,
+        undo_made: 0,
+        set_window,
+        undo_window,
+    };
+    (model, cuts)
+}
+
+/// `kills` SIGKILLs each of `ref set` and `op undo` on `release/1` of a store of `format`,
+/// readers beside them. Each round moves `release/1` from `a` to `b` and undoes the move: it
+/// kills the move, checks, runs the move again, then kills the undo, checks, runs the undo
+/// again. Each check: the ref names its old or its new target (the new one if the killed run's
+/// envelope was read), the op log is the model with the killed operation once or not at all,
+/// `verify --deep` finds nothing wrong; the run again succeeds, a replay exactly when the killed
+/// run had made its move, and the op log holds the operation once.
+fn kill_ref_moves(format: StoreFormat, kills: usize) {
+    let store = Store::init_as(format);
+    let mut rng = Rng::new(REF_SEED ^ u64::from(format.version()));
+    let me = agent(0);
+
+    // 1. Two changesets on main's history, `release/1` at the first.
+    let a = store.commit(&me, "a.txt", "a\n", None);
+    store
+        .run_as(&me, &["ref", "set", MAIN, &a, "--create"], &[])
+        .ok();
+    let b = store.commit(&me, "b.txt", "b\n", Some(&a));
+    store
+        .run_as(&me, &["ref", "set", RELEASE, &a, "--create"], &[])
+        .ok();
+    let set = store.args(&me, &["ref", "set", RELEASE, &b, "--expect", &a]);
+
+    // 2. A first whole move and undo, timed: the first windows.
+    let (mut model, mut cuts) = first_round(&store, &set);
+    let readers = Readers::start(&store);
+
+    let mut rounds = 0;
+    while cuts.set < kills || cuts.undo < kills {
+        rounds += 1;
+        assert!(
+            rounds <= kills * LAND_RUNS_PER_KILL,
+            "{} and {} kills in {rounds} rounds",
+            cuts.set,
+            cuts.undo
+        );
+        let what = format!("{format:?} seed {REF_SEED:#x} round {rounds}");
+
+        // 3. Kill the move; release/1 names a or b, b if the envelope was read.
+        let delay = Duration::from_micros(rng.next_u64() % cuts.set_window);
+        let acked = match kill_run(&set, delay) {
+            Cut::Killed(result) => {
+                cuts.set += 1;
+                result.is_some()
+            }
+            Cut::Exited => {
+                cuts.set_window -= cuts.set_window / WINDOW_SHRINK;
+                true
+            }
+        };
+        let head = release_head(&store);
+        assert!(head == a || head == b, "{what}: release/1 at {head}");
+        assert!(!acked || head == b, "{what}: an acknowledged move kept");
+        let made = head == b;
+        cuts.set_made += usize::from(made);
+        let mut seen = model.clone();
+        seen.extend(made.then(|| release_move(&b)));
+        assert_ops(&store, &seen, &format!("{what}, the move killed"));
+        store.assert_clean(&format!("{what}, the move killed"));
+
+        // 4. The move again: a replay exactly when the killed run made it; recorded once.
+        let again = crate::support::run(&set, &[]).ok();
+        assert_eq!(again["already_applied"], made, "{what}: {again}");
+        model.push(release_move(&b));
+        assert_ops(&store, &model, &format!("{what}, the move again"));
+        let (_, moved) = ops_tail(&store);
+        let undo = store.args(&me, &["op", "undo", &moved]);
+
+        // 5. Kill the undo; release/1 names b or a, a if the envelope was read.
+        let delay = Duration::from_micros(rng.next_u64() % cuts.undo_window);
+        let acked = match kill_run(&undo, delay) {
+            Cut::Killed(result) => {
+                cuts.undo += 1;
+                result.is_some()
+            }
+            Cut::Exited => {
+                cuts.undo_window -= cuts.undo_window / WINDOW_SHRINK;
+                true
+            }
+        };
+        let head = release_head(&store);
+        assert!(head == a || head == b, "{what}: release/1 at {head}");
+        assert!(!acked || head == a, "{what}: an acknowledged undo kept");
+        let undone = head == a;
+        cuts.undo_made += usize::from(undone);
+        let mut seen = model.clone();
+        seen.extend(undone.then(|| release_move(&a)));
+        assert_ops(&store, &seen, &format!("{what}, the undo killed"));
+        store.assert_clean(&format!("{what}, the undo killed"));
+
+        // 6. The undo again: a replay exactly when the killed run made it; recorded once.
+        let again = crate::support::run(&undo, &[]).ok();
+        assert_eq!(again["already_applied"], undone, "{what}: {again}");
+        model.push(release_move(&a));
+        assert_ops(&store, &model, &format!("{what}, the undo again"));
+    }
+
+    println!(
+        "{format:?}: {} and {} kills in {rounds} rounds ({} and {} made), windows {} and {} us",
+        cuts.set, cuts.undo, cuts.set_made, cuts.undo_made, cuts.set_window, cuts.undo_window
+    );
+    assert_read_clean(readers, &format!("{format:?} ref moves"));
+    store.assert_clean("after the last undo");
+}
+
+per_format! {
+    /// The fast ref variant: [`FAST_REF_KILLS`] kills of each per format.
+    fn sigkill_mid_ref_move_keeps_the_store(format) {
+        kill_ref_moves(format, FAST_REF_KILLS);
+    }
+}
+
+per_format! {
+    /// The slow ref variant: [`SLOW_REF_KILLS`] kills of each per format.
+    #[ignore = "slow, ~230 s: 200 kills per format of ref set and op undo each, every one with verify --deep and the op log"]
+    fn sigkill_mid_ref_move_200_times(format) {
+        kill_ref_moves(format, SLOW_REF_KILLS);
+    }
+}
+
+/// The readers' own check: one pass over a store whose one reachable blob file was removed
+/// counts exactly one violation, the `cat` of that file; started readers count it too.
+#[test]
+fn readers_flag_a_missing_object() {
+    let store = Store::init();
+    let id = store.commit(&agent(0), "a.txt", "a\n", None);
+    store
+        .run_as(&agent(0), &["ref", "set", MAIN, &id, "--create"], &[])
+        .ok();
+
+    // 1. Remove the file's blob, which `main` reaches.
+    let read = store.read(&["cat", &format!("{id}:a.txt")]).ok();
+    let blob = read["blob"].as_str().expect("a blob id");
+    let blob = ObjectId::from_str(blob).expect("a hex object id");
+    fs::remove_file(store.layout().object_path(blob)).expect("remove the blob");
+
+    // 2. One pass: `ref list` and `show` read, the `cat` is the violation.
+    let tally = Readers::pass(store.path());
+    assert_eq!(tally.violations, 1, "{tally:?}");
+    assert_eq!(tally.reads, 2, "{tally:?}");
+
+    // 3. The started readers make at least one pass each.
+    let tally = Readers::start(&store).stop();
+    assert!(tally.violations >= READERS, "{tally:?}");
 }
