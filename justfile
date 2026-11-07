@@ -68,9 +68,18 @@ check:
 # The test hooks are on (`--all-features`), as in `just check`. The ignored switches that rewrite
 # or rebuild fixtures on purpose (`regenerate_golden`, `regenerate_git_fixtures`,
 # `check_git_fixtures`) are left out.
+# The measurement cases (`ci_perf_cases`) run in a second, optimized run: they are sized for
+# optimized builds, and unoptimized on 2026-11-08 `serve_load::served_traffic_under_load` ran past
+# 13,300 s and `landing::perf::landing_under_load` failed its 30 s land bound. Both runs go; either
+# failing fails the recipe.
 # Slow suite: more proptest cases plus the ignored tests (multi-process, crash, perf-ratio).
 check-slow:
-    PROPTEST_CASES=2000 cargo nextest run --locked --workspace --all-features --run-ignored all -E 'not test(regenerate_golden) and not test(regenerate_git_fixtures) and not test(check_git_fixtures)'
+    #!/usr/bin/env bash
+    set -uo pipefail
+    status=0
+    PROPTEST_CASES=2000 cargo nextest run --locked --workspace --all-features --run-ignored all -E 'not test(regenerate_golden) and not test(regenerate_git_fixtures) and not test(check_git_fixtures) and not ({{ ci_perf_cases }})' || status=1
+    PROPTEST_CASES=2000 cargo nextest run --locked --release --workspace --all-features --run-ignored all --no-tests=fail -E '({{ ci_perf_cases }}) and not test(regenerate_golden) and not test(regenerate_git_fixtures) and not test(check_git_fixtures)' || status=1
+    exit "$status"
 
 # `check-slow` without the two 32-process contention measurements (`thirty_two_processes_*`),
 # which `just perf` runs: each takes minutes of fsync'd work on this host, and their assertions
@@ -89,7 +98,7 @@ check-ci-slow:
 # `serve_perf`'s six, `intake_perf`'s one, `serve_load`'s two and the workspace's checked land;
 # and G4's landing lanes (`landing::perf::landing_under_load`, four lanes of 2 minutes, about 9 to
 # 11 minutes in all), past half the ci-slow kill. `check-ci-slow` leaves them out,
-# `check-ci-perf` runs them, `check-slow` keeps them. swarmops-core's `supply_chain` tests fail a
+# `check-ci-perf` runs them, `check-slow` runs them optimized. swarmops-core's `supply_chain` tests fail a
 # case `check-ci-slow` leaves out that no scheduled job runs optimized and one at a time.
 ci_perf_cases := 'test(=remote_perf::clone_cost_on_12000_commits) | test(=remote_perf::fetch_and_push_scale_with_history) | test(=remote_perf::fetch_phases_scale_with_history) | test(=remote_perf::sync_of_one_land_on_12000_commits) | test(=remote_perf::sync_phases_scale_with_history) | test(/^serve_perf::/) | test(/^intake_perf::/) | test(/^serve_load::/) | test(=landing::perf::landing_under_load) | test(=ws_processes::perf::perf_checked_land_overhead_on_12000_changesets)'
 

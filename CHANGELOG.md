@@ -18,6 +18,11 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 ## [Unreleased]
 
+### Changed
+
+- `just check-slow` runs the measurement cases (`check-ci-perf`'s) in a second, optimized run;
+  the rest of the suite stays unoptimized.
+
 ## [0.10.0] - 2026-11-07
 
 Serving under load. The 0.10.0 release completes M17's slices: served reads off the writer lock
