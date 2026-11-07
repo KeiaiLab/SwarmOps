@@ -89,6 +89,11 @@
 //! derived values that each read fills itself, so it changes no result an agent reads, and
 //! `swarmops serve` serves stock git to git clients.
 //!
+//! A call that moved a ref of a store holding `access.toml` (the CLI's `PREPARE_AFTER`, the M17
+//! design §4.3) starts a detached `serve --prepare --prepare-wait zero` once its response line is
+//! written and flushed; the server keeps each such child and reaps it, without waiting, before
+//! each request and when stdin ends.
+//!
 //! A call runs as one command of the CLI does. Its arguments are the request: a field the type
 //! does not know is ignored, and arguments that do not fit the type, a field of it named twice
 //! among them included (as the CLI refuses one in a change list), are `E_INVALID_ARG`, as is
@@ -140,11 +145,13 @@
 //! mcp`) is a plain usage error of the CLI, whose envelope goes to stdout with exit code 2, and
 //! no server starts either.
 
+use std::cell::RefCell;
 use std::fmt;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
+use std::process::Child;
 use std::str;
 use std::time::Instant;
 
@@ -174,6 +181,7 @@ use swarmops_ops::Recording;
 use swarmops_ops::content::MAX_REQUEST_BYTES;
 
 use crate::cli::Global;
+use crate::commands::prepare::{self, Advance, After};
 use crate::commands::{self, Ctx, Used};
 use crate::context::{self, Env};
 use crate::output::{self, Format, Layout, Printed};
@@ -625,7 +633,9 @@ static TOOLS: [Spec; 28] = [
 /// the exit code.
 pub fn serve(global: &Global, env: Env<'_>) -> Printed {
     let mut server = Server::new(global, env);
-    let exit = match server.serve(io::stdin().lock(), io::stdout().lock()) {
+    let ended = server.serve(io::stdin().lock(), io::stdout().lock());
+    server.reap();
+    let exit = match ended {
         Ok(()) => 0,
         Err(e) => {
             log(&format!("stopped: {e}"));
@@ -651,6 +661,10 @@ struct Server<'a> {
     session: Option<&'static str>,
     /// The most bytes a message line may hold: [`MAX_REQUEST_BYTES`], or less in a test.
     max_line: u64,
+    /// The preparation the last call asked for, started once its response line is out.
+    pending: RefCell<Option<After>>,
+    /// The preparations started and not yet reaped.
+    children: Vec<Child>,
 }
 
 /// The rules a request is served by.
@@ -715,7 +729,36 @@ impl<'a> Server<'a> {
             tools,
             session: None,
             max_line,
+            pending: RefCell::new(None),
+            children: Vec::new(),
         }
+    }
+
+    /// Notes the preparation after tool `op`'s call on `arguments`, which `used` ran, when the
+    /// call moved a ref: its `envelope` is a success's, and `op` one of the CLI's
+    /// `PREPARE_AFTER`.
+    fn note_after<T>(&self, op: &str, arguments: &str, used: &Used, envelope: &Envelope<T>) {
+        if !envelope.ok || !prepare::wanted(op, advance_in(arguments)) {
+            return;
+        }
+        used.note_after(None);
+        self.pending.replace(used.take_after());
+    }
+
+    /// Starts the preparation the last call asked for, and keeps the child to reap.
+    fn start_after(&mut self) {
+        let Some(after) = self.pending.take() else {
+            return;
+        };
+        if let Some(child) = prepare::spawn(&after) {
+            self.children.push(child);
+        }
+    }
+
+    /// Reaps the preparations that ended, without waiting for the others.
+    fn reap(&mut self) {
+        self.children
+            .retain_mut(|child| matches!(child.try_wait(), Ok(None)));
     }
 
     /// Answers each message `input` holds, a line each, on `output`, until `input` ends. A line
@@ -724,6 +767,7 @@ impl<'a> Server<'a> {
     fn serve(&mut self, mut input: impl BufRead, mut output: impl Write) -> io::Result<()> {
         let mut line = Vec::new();
         loop {
+            self.reap();
             line.clear();
             line.shrink_to(LINE_KEEP);
             let cap = self.max_line.saturating_add(1);
@@ -752,6 +796,7 @@ impl<'a> Server<'a> {
                 output.write_all(b"\n")?;
                 output.flush()?;
             }
+            self.start_after();
         }
     }
 
@@ -1181,6 +1226,16 @@ fn is_null(json: &RawValue) -> bool {
     json.get() == "null"
 }
 
+/// Whether a call's `arguments`, the JSON text of an object, name a ref to advance: a commit's
+/// `advance`, not null.
+fn advance_in(arguments: &str) -> Advance {
+    let advance = members(arguments, ["advance"]).and_then(|[advance]| advance);
+    match advance {
+        Some(advance) if !is_null(advance) => Advance::Named,
+        _ => Advance::Not,
+    }
+}
+
 /// The request id that the JSON text `json` holds: a string or an integer, else `None`.
 fn request_id(json: &RawValue) -> Option<Value> {
     let text = json.get();
@@ -1426,7 +1481,14 @@ impl Operate for Call<'_, '_> {
             reply,
             arguments,
         } = self;
-        run(server, spec, reply, || request_of(spec, arguments), call)
+        run(
+            server,
+            spec,
+            reply,
+            arguments,
+            || request_of(spec, arguments),
+            call,
+        )
     }
 
     /// The arguments as the request, then the server's identity, then `call` on the store as
@@ -1446,6 +1508,7 @@ impl Operate for Call<'_, '_> {
             server,
             spec,
             reply,
+            arguments,
             || {
                 let req = request_of(spec, arguments)?;
                 Ok((context::mutator(agent, env)?, req))
@@ -1469,6 +1532,7 @@ impl Operate for Call<'_, '_> {
             server,
             spec,
             reply,
+            arguments,
             || request_of(spec, arguments),
             |ops, req| call(&ops, req),
         )
@@ -1491,6 +1555,7 @@ impl Operate for Call<'_, '_> {
             server,
             spec,
             reply,
+            arguments,
             || {
                 let req = request_of(spec, arguments)?;
                 Ok((context::mutator(agent, env)?, req))
@@ -1544,7 +1609,10 @@ impl Operate for Call<'_, '_> {
             call(&ops, root, who.as_ref(), how, req)
         };
         match panic::catch_unwind(AssertUnwindSafe(|| ctx.envelope_at_root(op, prepare, run))) {
-            Ok(envelope) => reply.tool_result(&envelope),
+            Ok(envelope) => {
+                server.note_after(op, arguments, &ctx.used, &envelope);
+                reply.tool_result(&envelope)
+            }
             Err(payload) => {
                 let bug = commands::panicked(&*payload);
                 let envelope = commands::failed_envelope(op, bug, &ctx.used, ctx.started);
@@ -1556,11 +1624,13 @@ impl Operate for Call<'_, '_> {
 
 /// Runs tool `spec` for `server` as a command runs ([`Ctx::envelope_on_store`]): `prepare`
 /// builds its input, then `call` runs on the store, opened; a panic in either is `E_INTERNAL`.
-/// The tool result that holds the envelope, answered as `reply`.
+/// The tool result that holds the envelope, answered as `reply`; a call on `arguments` that
+/// moved a ref noted for the preparation after it ([`Server::note_after`]).
 fn run<P, T: Serialize>(
     server: &Server<'_>,
     spec: &dyn Named,
     reply: Reply<'_>,
+    arguments: &str,
     prepare: impl FnOnce() -> Result<P, OpError>,
     call: impl FnOnce(&dyn StoreOps, P) -> Result<T, OpError>,
 ) -> String {
@@ -1577,7 +1647,10 @@ fn run<P, T: Serialize>(
     match panic::catch_unwind(AssertUnwindSafe(|| {
         ctx.envelope_on_store(op, prepare, call)
     })) {
-        Ok(envelope) => reply.tool_result(&envelope),
+        Ok(envelope) => {
+            server.note_after(op, arguments, &ctx.used, &envelope);
+            reply.tool_result(&envelope)
+        }
         Err(payload) => {
             let bug = commands::panicked(&*payload);
             let envelope = commands::failed_envelope(op, bug, &ctx.used, ctx.started);
@@ -1589,11 +1662,13 @@ fn run<P, T: Serialize>(
 /// Runs the client-side tool `spec` for `server` as a client-side command runs
 /// ([`Ctx::envelope_on_local`]): `prepare` builds its input, then `call` runs on the store's own
 /// operations, opened; a panic in either is `E_INTERNAL`. The tool result that holds the
-/// envelope, answered as `reply`.
+/// envelope, answered as `reply`; a call on `arguments` that moved a ref noted as [`run`] notes
+/// it.
 fn run_local<P, T: Serialize>(
     server: &Server<'_>,
     spec: &dyn Named,
     reply: Reply<'_>,
+    arguments: &str,
     prepare: impl FnOnce() -> Result<P, OpError>,
     call: impl FnOnce(Recording<'_>, P) -> Result<T, OpError>,
 ) -> String {
@@ -1610,7 +1685,10 @@ fn run_local<P, T: Serialize>(
     match panic::catch_unwind(AssertUnwindSafe(|| {
         ctx.envelope_on_local(op, prepare, call)
     })) {
-        Ok(envelope) => reply.tool_result(&envelope),
+        Ok(envelope) => {
+            server.note_after(op, arguments, &ctx.used, &envelope);
+            reply.tool_result(&envelope)
+        }
         Err(payload) => {
             let bug = commands::panicked(&*payload);
             let envelope = commands::failed_envelope(op, bug, &ctx.used, ctx.started);
@@ -3226,6 +3304,7 @@ mod tests {
             &server,
             spec,
             reply,
+            NO_ARGUMENTS,
             || Ok(()),
             |ops, ()| -> Result<(), OpError> {
                 let mut req = ShowReq::new("main");

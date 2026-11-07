@@ -111,10 +111,11 @@ impl Site {
             served,
             work: TempDir::new().unwrap(),
         };
-        fs::write(site.served.store(STORE).join("access.toml"), ACCESS).unwrap();
         let linear = fixture("linear");
         let source = linear.repo.as_deref().unwrap().to_str().unwrap();
         site.so(&["git", "import", source, "--ref", "HEAD", "--into", "main"]);
+        // Written after the import, so that no preparation runs beside the test's connections.
+        fs::write(site.served.store(STORE).join("access.toml"), ACCESS).unwrap();
         site
     }
 

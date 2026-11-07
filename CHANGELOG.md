@@ -65,6 +65,14 @@ collects the changes on `stable` that no release holds yet, until the next relea
   Without the store's memo key, on a store whose `main` head is no imported commit, it exports
   nothing and warns (`skipped`). Run it as the account the agents and `serve` run as
   ([Serve over ssh](docs/operate/serve-over-ssh.md#the-serving-account), the M17 design §4.3).
+- After `land`, `commit --advance`, `ref set`, `ref delete`, `op undo`, `sync`, `fetch`,
+  `git import` or `ws land` succeeds on a store that holds `access.toml`, and after the MCP tools
+  of the same operations, a detached `serve --prepare --prepare-wait zero` starts once the
+  response is out (`git import`'s with `--seed-from` its source), so that the next `serve`
+  connection finds `serve.git` current and takes no lock. It runs in a process group of its own
+  with no stdio, nobody waits for it, and the MCP server reaps it; a spawn or a preparation that
+  fails changes neither the operation's envelope nor its exit code, and the next connection
+  refreshes as before (the M17 design §4.3).
 
 ### Changed
 

@@ -28,6 +28,7 @@
 //! `whoami` prints `IdentityInfo` as the API writes it: for a caller without an identity,
 //! `{"auth":"anonymous"}`, with `agent` omitted rather than null.
 
+pub(crate) mod prepare;
 mod run;
 mod serve;
 pub(crate) mod ws;

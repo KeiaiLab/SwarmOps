@@ -42,6 +42,7 @@ use swarmops_ops::identity::{self, AUTH_TRUST};
 use swarmops_ops::{LocalOps, Recording, Resolved};
 use swarmops_ws::workspace::Locate;
 
+use super::prepare::{self, After};
 use super::{serve, ws};
 use crate::cli::{
     self, BlobCommand, Command, DiffArgs, DiffFormatArg, GitCommand, Global, OpCommand, RefCommand,
@@ -98,6 +99,9 @@ pub struct Used {
     /// What the command's operation resolved and repaired: its request's record, and no
     /// other's.
     pub(super) resolved: Resolved,
+    /// The preparation of `serve.git` to start once the envelope is out: noted after an
+    /// operation of [`prepare::PREPARE_AFTER`] succeeded.
+    after: RefCell<Option<After>>,
 }
 
 impl Used {
@@ -116,10 +120,38 @@ impl Used {
             self.resolved.take_recovered(),
         )
     }
+
+    /// Notes that the operation moved a ref of the store it named: its `serve.git` is to be
+    /// prepared, seeded from `seed`. Nothing when no store was named.
+    pub(crate) fn note_after(&self, seed: Option<String>) {
+        let store = self.repo.borrow().clone();
+        self.after
+            .replace(store.map(|store| After::new(store, seed)));
+    }
+
+    /// The preparation noted ([`Used::note_after`]), taken.
+    pub(crate) fn take_after(&self) -> Option<After> {
+        self.after.take()
+    }
 }
 
-/// Runs `command`, which names operation `op`, and renders its envelope.
+/// Runs `command`, which names operation `op`, and renders its envelope. An operation that moved
+/// a ref, and succeeded, is noted in [`Ctx::used`] for the preparation after it.
 pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
+    // 1. Whether a preparation follows, read before the command is taken apart.
+    let wanted = prepare::wanted(op, prepare::advance_of(&command));
+    let seed = prepare::seed_of(&command);
+
+    // 2. The command; its success noted.
+    let printed = dispatch(ctx, op, command);
+    if wanted && printed.exit == 0 {
+        ctx.used.note_after(seed);
+    }
+    printed
+}
+
+/// Runs `command`, which names operation `op`, and renders its envelope: [`run`]'s dispatch.
+fn dispatch(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
     let agent = ctx.global.agent.as_deref();
     match command {
         Command::Init { dir, name, format } => {

@@ -1,8 +1,10 @@
 //! The program's entry ([`run`]): the command line read and answered, a panic turned into an
-//! `E_INTERNAL` envelope, and the envelope written to stdout with the exit code.
+//! `E_INTERNAL` envelope, and the envelope written to stdout with the exit code. After an
+//! operation that moved a ref, once the envelope is out, `serve.git` is prepared, detached
+//! (`commands::prepare`, the M17 design §4.3).
 //!
 //! ```text
-//! run ─▶ guarded(respond) ─▶ cli::parse ─▶ answer ─▶ guarded(commands::run) ─▶ emit
+//! run ─▶ guarded(respond) ─▶ cli::parse ─▶ answer ─▶ guarded(commands::run) ─▶ emit ─▶ spawn
 //! ```
 
 use std::ffi::OsString;
@@ -12,6 +14,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use crate::cli::Parsed;
+use crate::commands::prepare::{self, After};
 use crate::commands::{Ctx, Used};
 use crate::output::{Format, Printed, Stdout};
 use crate::{cli, commands, context};
@@ -25,8 +28,9 @@ pub fn run() -> ExitCode {
     } else {
         Stdout::Other
     };
-    // This guard catches a panic before the operation is known, while the line is read; the
-    // one in `respond` a panic while the operation runs, and names it.
+    // 1. This guard catches a panic before the operation is known, while the line is read; the
+    //    one in `respond` a panic while the operation runs, and names it.
+    let mut after = None;
     let printed = guarded(
         cli::NO_OP,
         Format::Json {
@@ -34,35 +38,48 @@ pub fn run() -> ExitCode {
         },
         started,
         None,
-        || respond(started, stdout),
+        || {
+            let (printed, then) = respond(started, stdout);
+            after = then;
+            printed
+        },
     );
-    emit(&printed)
+    let code = emit(&printed);
+
+    // 2. The preparation after a ref move, once the envelope is out: never waited for, and
+    //    what becomes of it changes neither the envelope nor the exit code.
+    if let Some(after) = after {
+        let _ = prepare::spawn(&after);
+    }
+    code
 }
 
 /// What the command line asks for, done: the envelope to print, or nothing more for help or
-/// the version, which clap has printed. For a line that runs `mcp`, the envelope has gone to
-/// stderr ([`on_stderr`]).
-fn respond(started: Instant, stdout: Stdout) -> Printed {
+/// the version, which clap has printed, and the preparation to start once it is out. For a line
+/// that runs `mcp`, the envelope has gone to stderr ([`on_stderr`]).
+fn respond(started: Instant, stdout: Stdout) -> (Printed, Option<After>) {
     let args: Vec<OsString> = std::env::args_os().collect();
     let parsed = cli::parse(&args);
     if parsed.runs_mcp() {
-        on_stderr(answer(parsed, started, stdout))
+        let (printed, after) = answer(parsed, started, stdout);
+        (on_stderr(printed), after)
     } else {
         answer(parsed, started, stdout)
     }
 }
 
 /// What `parsed` asks for, done: [`respond`] before it says where the envelope goes.
-fn answer(parsed: Parsed, started: Instant, stdout: Stdout) -> Printed {
+fn answer(parsed: Parsed, started: Instant, stdout: Stdout) -> (Printed, Option<After>) {
     let env = |name: &str| std::env::var_os(name);
     match parsed {
         Parsed::Text(text) => {
             // Text for a person, not an envelope, so a write that fails is not reported.
             let _ = text.print();
-            Printed {
+            let printed = Printed {
                 stdout: String::new(),
                 exit: 0,
-            }
+            };
+            (printed, None)
         }
         Parsed::Usage {
             error,
@@ -72,7 +89,8 @@ fn answer(parsed: Parsed, started: Instant, stdout: Stdout) -> Printed {
         } => {
             let format = context::format(&global, &env, stdout)
                 .unwrap_or_else(|_| context::json_format(&global, stdout));
-            commands::usage(&error, bin.as_deref(), &path, format, started)
+            let printed = commands::usage(&error, bin.as_deref(), &path, format, started);
+            (printed, None)
         }
         Parsed::Run(cli, op) => match context::format(&cli.global, &env, stdout) {
             Ok(format) => {
@@ -84,13 +102,14 @@ fn answer(parsed: Parsed, started: Instant, stdout: Stdout) -> Printed {
                     started,
                     used: Used::default(),
                 };
-                guarded(op, format, started, Some(&ctx.used), || {
+                let printed = guarded(op, format, started, Some(&ctx.used), || {
                     commands::run(&ctx, op, cli.command)
-                })
+                });
+                (printed, ctx.used.take_after())
             }
             Err(error) => {
                 let format = context::json_format(&cli.global, stdout);
-                commands::failed(op, error, format, started)
+                (commands::failed(op, error, format, started), None)
             }
         },
     }

@@ -172,8 +172,18 @@ impl Site {
 
     /// The `git import` of the repository at `source`'s `git_ref` into `into`.
     fn import(&self, source: &Path, git_ref: &str, into: &str) {
+        // Imported with the access file set aside, so that no preparation runs beside the
+        // test's connections.
+        let access = self.served.store(STORE).join("access.toml");
+        let kept = fs::read(&access).ok();
+        if kept.is_some() {
+            fs::remove_file(&access).unwrap();
+        }
         let source = source.to_str().unwrap();
         self.so(&["git", "import", source, "--ref", git_ref, "--into", into]);
+        if let Some(text) = kept {
+            fs::write(&access, text).unwrap();
+        }
     }
 
     /// An agent's change of `path` landed on `main`, as [`WRITER`].

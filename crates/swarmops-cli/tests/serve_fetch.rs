@@ -255,8 +255,18 @@ impl Site {
 
     /// The `git import` of the fixture repository at `source`'s `git_ref` into `into`.
     fn import(&self, source: &Path, git_ref: &str, into: &str) {
+        // Imported with the access file set aside, so that no preparation runs beside the
+        // test's connections.
+        let access = self.served.store(STORE).join("access.toml");
+        let kept = fs::read(&access).ok();
+        if kept.is_some() {
+            fs::remove_file(&access).unwrap();
+        }
         let source = source.to_str().unwrap();
         self.so(&["git", "import", source, "--ref", git_ref, "--into", into]);
+        if let Some(text) = kept {
+            fs::write(&access, text).unwrap();
+        }
     }
 
     /// The `linear` fixture imported as `main`.
@@ -813,15 +823,19 @@ fn prepare_without_the_memo_key_does_nothing() {
         changes.to_str().unwrap(),
     ]);
     let id = commit["changeset"].as_str().unwrap();
-    site.so(&["ref", "set", "main", id, "--create"]);
 
-    // 1. No memo key: no key directory, no state directory.
+    // 1. No memo key: no key directory, no state directory, also for the preparation that
+    //    follows the ref move.
     let store = site.store();
     let no_key = [
         ("SWARMOPS_MEMO_KEY_DIR", ""),
         ("HOME", ""),
         ("XDG_STATE_HOME", ""),
     ];
+    let line = [
+        "--repo", &store, "--as", WRITER, "ref", "set", "main", id, "--create",
+    ];
+    support::run(&line, &no_key).ok();
     let run = support::run(&["--repo", &store, "serve", "--prepare"], &no_key);
     let prepared = run.ok();
     assert!(prepared["skipped"].is_string(), "{run}");
