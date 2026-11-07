@@ -269,10 +269,12 @@ error_codes! {
     /// (`details.paths`, sorted, the first 20). Nothing changed; the hint names
     /// `swarmops ws materialize <path>`, which widens the prefixes.
     WsOutsidePrefixes => "E_WS_OUTSIDE_PREFIXES", EXIT_ERROR, false;
-    /// `ws land` found the workspace's base gone from its target's history
+    /// `ws status`, `ws diff`, `ws commit`, `ws materialize`, `ws land` (onto any target) or
+    /// `ws rebase --continue` found the workspace's base gone from its target's history
     /// (`details.target`, `base`, `head`; `base_op`, the operation that moved the target to
     /// the base; `moved_op`, the latest that moved it to `head`, or null when not found).
-    /// Nothing changed; the hint names `swarmops ws rebase`.
+    /// Nothing changed; the hint names `swarmops ws rebase` (after a continue,
+    /// `swarmops ws rebase --abort` first).
     WsStale => "E_WS_STALE", EXIT_ERROR, false;
     /// A workspace's check or bootstrap command failed or ran past its time
     /// (`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its

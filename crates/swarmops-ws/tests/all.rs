@@ -11,6 +11,7 @@ mod materialize;
 mod rebase;
 mod registry;
 mod run;
+mod stale;
 mod status;
 #[cfg(feature = "test-hooks")]
 mod sweeps;

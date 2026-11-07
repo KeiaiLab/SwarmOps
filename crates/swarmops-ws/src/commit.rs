@@ -2,7 +2,8 @@
 //! uploaded, one keyed commit on the workspace's head, then `workspace.json`.
 //!
 //! ```text
-//!  lock → scan → sizes (E_TOO_LARGE) → hashes, bounded → journal/pending.json {key} (WS1)
+//!  lock → a base the target left (E_WS_STALE, nothing written) → scan → sizes (E_TOO_LARGE)
+//!       → hashes, bounded → journal/pending.json {key} (WS1)
 //!       → blob_has; what is missing inline up to INLINE_BYTES, blob_put past it
 //!       → commit{parent: head, {blob: id} | {inline}…, key}
 //!       → workspace.json head (WS2) → index → the pending record removed
@@ -36,6 +37,7 @@ use crate::pending::{self, Pending, PendingOp};
 use crate::rebase;
 use crate::scan::{self, Blob, Change, HASH_BYTES_IN_FLIGHT, HostFile, Keep, Want};
 use crate::state::{self, State};
+use crate::status;
 use crate::workspace::{self, Locate, Workspace};
 use crate::{Ctx, after};
 
@@ -91,6 +93,7 @@ pub fn commit(ctx: &Ctx<'_>, req: WsCommitReq) -> Result<WsCommitResp, OpError> 
     let named = materialize::normalize(paths)?;
     let modes = modes_of(modes)?;
     let (mut ws, _held) = workspace::open_locked(ctx, &Locate::Name(workspace))?;
+    status::refuse_stale(ctx.store, &ws.file)?;
 
     // 2. The commit, then the status after it.
     let mut done = commit_with(ctx, &mut ws, message, &named, &modes, OffPrefixes::Refuse)?;

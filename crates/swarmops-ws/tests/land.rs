@@ -1068,8 +1068,8 @@ fn a_land_onto_a_reserved_name_moves_nothing() {
     }
 }
 
-/// The land of a workspace whose base is off the target (the target moved back) is not refused
-/// as stale when it names another target: only the workspace's own target is judged.
+/// The land of a workspace whose base is off the target (the target moved back) is refused as
+/// stale whatever target it names: the workspace's own target is judged (the M19 design §3.4).
 #[test]
 fn only_the_workspaces_own_target_is_judged_stale() {
     for other in ["main", "release/x"] {
@@ -1083,16 +1083,17 @@ fn only_the_workspaces_own_target_is_judged_stale() {
         }
         f.point("release/r", &p);
 
-        // 2. Landed on `other`: not refused as stale.
+        // 2. Refused on `other`, naming the workspace's own target.
         let mut req = land_with_message();
         req.target = Some(other.to_owned());
-        let done = swarmops_ws::land(&f.ctx(), req).unwrap_or_else(|e| panic!("{other}: {e:?}"));
-        assert_eq!(done.land.status, LandStatus::Landed, "{other}");
+        let refused = swarmops_ws::land(&f.ctx(), req).unwrap_err();
+        assert_eq!(refused.code, "E_WS_STALE", "{other}: {refused:?}");
+        assert_eq!(refused.details["target"], "release/r", "{other}");
     }
 }
 
-/// A history longer than the cap leaves the question open: not stale, and the journal is not
-/// read.
+/// A history longer than the old walk's cap is no question for `ancestry`: not stale, and the
+/// journal is not read before the land (after it, for the operation that moved the target).
 #[test]
 fn a_history_past_the_cap_is_not_stale() {
     // 1. A workspace of `main`'s old head; `main` ahead of it, its history reading 20 000 long.
@@ -1104,10 +1105,12 @@ fn a_history_past_the_cap_is_not_stale() {
     let mut watched = Watched::new(&f.ops);
     watched.fake_history = Some(20_000);
 
-    // 2. Landed, the journal unread.
+    // 2. Landed, the journal unread before the land.
     let done = swarmops_ws::land(&f.ctx_over(&watched), land_with_message()).unwrap();
     assert_eq!(done.land.status, LandStatus::Landed);
-    assert_eq!(watched.count("op_log"), 0);
+    let calls = watched.calls();
+    let land = calls.iter().position(|call| *call == "land").unwrap();
+    assert!(!calls[..land].contains(&"op_log"), "{calls:?}");
 }
 
 /// A sparse workspace is refused only for the names under its own prefixes: a name the target
@@ -1538,14 +1541,20 @@ fn an_unplaced_land_keeps_the_preflight() {
 }
 
 /// A journal past the operation cap is not read to its end: a base it cannot be shown to have
-/// left is not stale.
+/// left, in a `workspace.json` that records no `base_op` (an older build's), is not stale.
 #[test]
 fn a_journal_past_the_cap_is_not_stale() {
     // 1. The target moved back off the base; the cap spent on made-up operations above the
-    //    move.
+    //    move; the state without `base_op`.
     let f = Fixture::new();
     let (p, _, _) = on_release(&f);
     f.point("release/r", &p);
+    let dir = f.beside("w");
+    let path = state::path_in(&dir);
+    let mut wire: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    wire.as_object_mut().unwrap().remove("base_op");
+    std::fs::write(&path, wire.to_string()).unwrap();
     let mut watched = Watched::new(&f.ops);
     watched.fake_ops = Some(JOURNAL_CAP);
 
@@ -2244,13 +2253,15 @@ fn an_unsettled_edit_is_judged_before_the_store() {
 /// first land. `ws rebase` leaves the record, and the land replays the first changeset.
 #[test]
 fn a_key_on_an_older_changeset_is_held() {
-    // 1. The land on `release/r` cut; `release/r` back; the resume onto `release/x` cut too.
+    // 1. The land on `release/r` cut; `release/r` aside, still above the base (a move back
+    //    would make the workspace stale); the resume onto `release/x` cut too.
     let f = Fixture::new();
-    let (p, _, _) = on_release(&f);
+    let (p, b, _) = on_release(&f);
     let store = Hooked::new(&f.ops);
     cut_land(&f, &store, Cut::After);
     let first = store.lands()[0].landed.clone();
-    f.point("release/r", &p);
+    let aside = f.side(Some(&b), &[Put::File("src/r.txt", "r\n")]);
+    f.point("release/r", &aside);
     let other = f.side(Some(&p), &[Put::File("src/x.txt", "x\n")]);
     f.point("release/x", &other);
     store.crash_after_land.store(true, Ordering::SeqCst);
@@ -2395,13 +2406,15 @@ fn a_takeover_key_follows_the_records_ref() {
 /// `a_key_on_an_older_changeset_is_held`.
 #[test]
 fn a_key_on_the_newest_changeset_is_held() {
-    // 1. The land on `release/r` cut; `release/r` back; the resume onto `release/x` cut too.
+    // 1. The land on `release/r` cut; `release/r` aside, still above the base (a move back
+    //    would make the workspace stale); the resume onto `release/x` cut too.
     let f = Fixture::new();
-    let (p, _, _) = on_release(&f);
+    let (p, b, _) = on_release(&f);
     let store = Hooked::new(&f.ops);
     cut_land(&f, &store, Cut::After);
     let first = store.lands()[0].landed.clone();
-    f.point("release/r", &p);
+    let aside = f.side(Some(&b), &[Put::File("src/r.txt", "r\n")]);
+    f.point("release/r", &aside);
     let other = f.side(Some(&p), &[Put::File("src/x.txt", "x\n")]);
     f.point("release/x", &other);
     store.crash_after_land.store(true, Ordering::SeqCst);

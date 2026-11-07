@@ -358,6 +358,71 @@ fn status_after_none_leaves_it_out() {
     assert!(committed["changeset"].is_string(), "{committed}");
 }
 
+/// B3's first acceptance (the M19 design §3): a workspace whose head another process's undo
+/// takes back answers its next command `E_WS_STALE` (exit 1) and leaves every file's bytes as
+/// they were; the update then gives it the target's head with the edit on disk.
+#[test]
+fn a_workspace_whose_head_was_undone_is_stale() {
+    // 1. `release/x` at `main`'s head, then moved to H by an operation; W on it, with an edit.
+    let lab = Lab::new();
+    let c1 = main_of(&lab);
+    let made = ["ref", "set", "release/x", c1.as_str(), "--create"];
+    lab.store.run_as(AGENT, &made, &[]).ok();
+    let h = lab
+        .store
+        .commit(AGENT, "src/lib.rs", "pub fn g() {}\n", Some(&c1));
+    let moved = [
+        "ref",
+        "set",
+        "release/x",
+        h.as_str(),
+        "--expect",
+        c1.as_str(),
+    ];
+    lab.store.run_as(AGENT, &moved, &[]).ok();
+    let newest = lab.store.read(&["op", "log", "-n", "1"]).ok();
+    let op = newest["ops"][0]["id"].as_str().unwrap().to_owned();
+    let dir = lab.beside("w");
+    let path = dir.to_str().unwrap();
+    let args = [
+        "ws",
+        "create",
+        "w",
+        "--path",
+        path,
+        "--base",
+        "release/x",
+        "--all",
+    ];
+    lab.so(&args).ok();
+    write(&dir, "README.md", "# edited\n");
+    let bytes = |dir: &Path| {
+        ["README.md", "src/lib.rs", "docs/guide.md"].map(|rel| fs::read(dir.join(rel)).unwrap())
+    };
+    let before = bytes(&dir);
+
+    // 2. Another process undoes the move to H; the next command in W is refused.
+    lab.store.run_as(AGENT, &["op", "undo", &op], &[]).ok();
+    let refused = inside(&dir, &["ws", "status"]);
+    let error = refused.err("E_WS_STALE", 1);
+    assert_eq!(error["details"]["base"], h.as_str(), "{refused}");
+    assert_eq!(error["details"]["head"], c1.as_str(), "{refused}");
+    assert_eq!(bytes(&dir), before, "a refused command wrote a file");
+
+    // 3. The update: W on the target's head, the edit on disk.
+    let updated = inside(&dir, &["ws", "rebase", "--onto", "release/x", "-m", "keep"]).ok();
+    assert_eq!(updated["onto"], c1.as_str(), "{updated}");
+    assert_eq!(
+        fs::read_to_string(dir.join("README.md")).unwrap(),
+        "# edited\n"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("src/lib.rs")).unwrap(),
+        "pub fn f() {}\n"
+    );
+    inside(&dir, &["ws", "status"]).ok();
+}
+
 /// The hook JSON for `event`, standing in `cwd`.
 fn hook_json(event: &str, cwd: &Path, extra: &Value) -> String {
     let mut input = json!({

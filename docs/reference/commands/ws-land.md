@@ -168,7 +168,7 @@ Exit codes:
 ## Errors
 
 - [`E_INVALID_ARG`](../errors.md#e_invalid_arg) (exit 2): A malformed argument or request, including a command-line usage error.
-- [`E_WS_STALE`](../errors.md#e_ws_stale) (exit 1): `ws land` found the workspace's base gone from its target's history (`details.target`, `base`, `head`; `base_op`, the operation that moved the target to the base; `moved_op`, the latest that moved it to `head`, or null when not found).
+- [`E_WS_STALE`](../errors.md#e_ws_stale) (exit 1): `ws status`, `ws diff`, `ws commit`, `ws materialize`, `ws land` (onto any target) or `ws rebase --continue` found the workspace's base gone from its target's history (`details.target`, `base`, `head`; `base_op`, the operation that moved the target to the base; `moved_op`, the latest that moved it to `head`, or null when not found).
 - [`E_CHECK_FAILED`](../errors.md#e_check_failed) (exit 1): A workspace's check or bootstrap command failed or ran past its time (`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its output, `log`, `changeset`).
 
 Any command that opens a store may also fail with a store error, such as [`E_NOT_A_REPO`](../errors.md#e_not_a_repo), [`E_IO`](../errors.md#e_io) or [`E_STORE_CORRUPT`](../errors.md#e_store_corrupt); a command line the grammar refuses is [`E_INVALID_ARG`](../errors.md#e_invalid_arg) (exit 2).

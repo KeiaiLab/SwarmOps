@@ -6,7 +6,8 @@ use swarmops_api::{
     ChangeInput, ChangeOp, CommitReq, ContentInput, Identity, RefSetReq, StatusAfter, StoreOps,
     WsDiscardReq, WsState, WsStatusReq,
 };
-use swarmops_ws::state::SWARMWS_DIR;
+use swarmops_ws::RealFs;
+use swarmops_ws::state::{self, SWARMWS_DIR};
 
 use crate::fixture::{AGENT, Fixture, Put, Watched, change, changes, remove, tree_of, write};
 
@@ -457,9 +458,9 @@ fn a_corrupt_index_is_rebuilt_by_hashing() {
     assert_eq!(changes(&ctx, "w", false), [change("src/b.txt", Modified)]);
 }
 
-/// `behind_by` reads the target's head once, no history when it is the base, history 100
-/// changesets a page until the base, and never past 10,000 changesets; a history without the
-/// base, then the base's own, a page here.
+/// `behind_by` reads the target's head once (the stale check before it reads it too), no history
+/// when it is the base, history 100 changesets a page until the base, and never past 10,000
+/// changesets; a history without the base, then the base's own, a page here.
 #[test]
 fn behind_by_reads_pages_until_base_and_stops_at_the_cap() {
     // 1. A workspace on the target's head: one ref read, no log.
@@ -469,7 +470,7 @@ fn behind_by_reads_pages_until_base_and_stops_at_the_cap() {
     let watched = Watched::new(&f.ops);
     let page = swarmops_ws::status(&f.ctx_over(&watched), page_of("w")).unwrap();
     assert_eq!((page.main.as_str(), page.behind_by), (&*base, 0));
-    assert_eq!((watched.count("resolve_rev"), watched.count("log")), (1, 0));
+    assert_eq!((watched.count("resolve_rev"), watched.count("log")), (2, 0));
 
     // 2. The target three changesets ahead: one page finds the base.
     let mut head = base.clone();
@@ -479,7 +480,7 @@ fn behind_by_reads_pages_until_base_and_stops_at_the_cap() {
     watched.clear();
     let page = swarmops_ws::status(&f.ctx_over(&watched), page_of("w")).unwrap();
     assert_eq!((page.main.as_str(), page.behind_by), (&*head, 3));
-    assert_eq!((watched.count("resolve_rev"), watched.count("log")), (1, 1));
+    assert_eq!((watched.count("resolve_rev"), watched.count("log")), (2, 1));
 
     // 3. A history of 250 changesets without the base: three pages, all counted, then the
     //    base's page, which shares none of them.
@@ -487,14 +488,14 @@ fn behind_by_reads_pages_until_base_and_stops_at_the_cap() {
     long.fake_history = Some(250);
     let page = swarmops_ws::status(&f.ctx_over(&long), page_of("w")).unwrap();
     assert_eq!(page.behind_by, 250);
-    assert_eq!((long.count("resolve_rev"), long.count("log")), (1, 4));
+    assert_eq!((long.count("resolve_rev"), long.count("log")), (2, 4));
 
     // 4. One of 20,000: the cap, after 100 pages and the base's.
     let mut longer = Watched::new(&f.ops);
     longer.fake_history = Some(20_000);
     let page = swarmops_ws::status(&f.ctx_over(&longer), page_of("w")).unwrap();
     assert_eq!(page.behind_by, 10_000);
-    assert_eq!((longer.count("resolve_rev"), longer.count("log")), (1, 101));
+    assert_eq!((longer.count("resolve_rev"), longer.count("log")), (2, 101));
 }
 
 /// The ref the workspaces below land on: it moves back or aside, as `sync` takes `main`, which
@@ -521,14 +522,22 @@ fn commit_aside(f: &Fixture, parent: &str, text: &str) -> String {
     f.ops.commit(&who, req).unwrap().changeset
 }
 
-/// Workspace `w` on [`TARGET`], made to name `base` first.
-fn create_on_target(f: &Fixture, base: &str) {
-    move_target(f, None, base);
-    f.create("w", TARGET, &["src"]);
+/// Workspace `w` of changeset `base`, landing on [`TARGET`], made at `at`: a base no operation
+/// put on the target (the move of `main` to it no longer its `base_op`), which is never stale
+/// (the M19 design §3.1), so that its status reads both histories. A base the target moved off
+/// is stale: `ws status` refuses it.
+fn create_beside_target(f: &Fixture, base: &str, at: &str) {
+    move_target(f, None, at);
+    f.create("w", base, &["src"]);
+    let dir = f.beside("w");
+    let mut file = state::read(&RealFs::new(), &dir).unwrap();
+    TARGET.clone_into(&mut file.target);
+    file.base_op = None;
+    state::replace(&RealFs::new(), &dir, &file).unwrap();
 }
 
-/// A base the target's history lost to a squash-like replacement (R <- X <- A in the workspace,
-/// the target moved to X <- B): `behind_by` counts B alone, from where the histories first meet,
+/// A side base beside a squash-like replacement (R <- X <- A in the workspace, the target moved
+/// to X <- B): `behind_by` counts B alone, from where the histories first meet,
 /// X, not where they last do, R; from both histories' first page.
 #[test]
 fn behind_by_counts_past_a_replaced_base() {
@@ -537,10 +546,9 @@ fn behind_by_counts_past_a_replaced_base() {
     let root = f.commit(None, &[Put::File("src/a.txt", "r\n")]);
     let x = f.commit(Some(&root), &[Put::File("src/a.txt", "x\n")]);
     let a = f.commit(Some(&x), &[Put::File("src/a.txt", "a\n")]);
-    create_on_target(&f, &a);
+    create_beside_target(&f, &a, &x);
 
-    // 2. The target moved back to X, then on to B in A's place.
-    move_target(&f, Some(&a), &x);
+    // 2. The target on X, then on B in A's place.
     let b = commit_aside(&f, &x, "b\n");
     move_target(&f, Some(&x), &b);
 
@@ -548,7 +556,7 @@ fn behind_by_counts_past_a_replaced_base() {
     let watched = Watched::new(&f.ops);
     let page = swarmops_ws::status(&f.ctx_over(&watched), page_of("w")).unwrap();
     assert_eq!((page.main.as_str(), page.behind_by), (&*b, 1));
-    assert_eq!((watched.count("resolve_rev"), watched.count("log")), (1, 2));
+    assert_eq!((watched.count("resolve_rev"), watched.count("log")), (2, 2));
 }
 
 /// `n` changesets on `from`, each editing `src/a.txt`; the last one.
@@ -571,10 +579,9 @@ fn behind_by_pages_the_base_history_until_it_meets() {
     let f = Fixture::new();
     let x = chain(&f, None, 101, "r");
     let a = chain(&f, Some(&x), 100, "a");
-    create_on_target(&f, &a);
+    create_beside_target(&f, &a, &x);
 
-    // 2. The target moved back to X, then on to B in A1's place.
-    move_target(&f, Some(&a), &x);
+    // 2. The target on X, then on B in A1's place.
     let b = commit_aside(&f, &x, "b\n");
     move_target(&f, Some(&x), &b);
 
@@ -583,36 +590,34 @@ fn behind_by_pages_the_base_history_until_it_meets() {
     let watched = Watched::new(&f.ops);
     let page = swarmops_ws::status(&f.ctx_over(&watched), page_of("w")).unwrap();
     assert_eq!((page.main.as_str(), page.behind_by), (&*b, 1));
-    assert_eq!((watched.count("resolve_rev"), watched.count("log")), (1, 4));
+    assert_eq!((watched.count("resolve_rev"), watched.count("log")), (2, 4));
 }
 
-/// A target moved back to an ancestor of the base (X <- A in the workspace, the target at X):
-/// `behind_by` is 0.
+/// A target at an ancestor of a side base (X <- A in the workspace, the target at X): `behind_by`
+/// is 0.
 #[test]
 fn behind_by_is_zero_for_a_target_moved_back() {
-    // 1. A workspace on A, on X; the target moved back to X.
+    // 1. A workspace on A, on X; the target at X.
     let f = Fixture::new();
     let x = f.commit(None, &[Put::File("src/a.txt", "x\n")]);
     let a = f.commit(Some(&x), &[Put::File("src/a.txt", "a\n")]);
-    create_on_target(&f, &a);
-    move_target(&f, Some(&a), &x);
+    create_beside_target(&f, &a, &x);
 
     // 2. Nothing to catch up.
     let page = swarmops_ws::status(&f.ctx(), page_of("w")).unwrap();
     assert_eq!((page.main.as_str(), page.behind_by), (&*x, 0));
 }
 
-/// The base's own history stops at the cap too (X <- A in the workspace, the target moved back
-/// to X, A's history made up: 20,000 changesets without X): a page of the target's history, then
+/// The base's own history stops at the cap too (X <- A in the workspace, the target at X, A's
+/// history made up: 20,000 changesets without X): a page of the target's history, then
 /// 100 of the base's.
 #[test]
 fn behind_by_caps_the_base_walk() {
-    // 1. A workspace on A, on X; the target moved back to X.
+    // 1. A workspace on A, on X; the target at X.
     let f = Fixture::new();
     let x = f.commit(None, &[Put::File("src/a.txt", "x\n")]);
     let a = f.commit(Some(&x), &[Put::File("src/a.txt", "a\n")]);
-    create_on_target(&f, &a);
-    move_target(&f, Some(&a), &x);
+    create_beside_target(&f, &a, &x);
 
     // 2. The histories never meet: X counted, from the target's page and the base's first 10,000.
     let mut watched = Watched::new(&f.ops);
@@ -621,7 +626,7 @@ fn behind_by_caps_the_base_walk() {
     assert_eq!((page.main.as_str(), page.behind_by), (&*x, 1));
     assert_eq!(
         (watched.count("resolve_rev"), watched.count("log")),
-        (1, 101)
+        (2, 101)
     );
 }
 

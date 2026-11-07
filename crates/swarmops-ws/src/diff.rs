@@ -40,8 +40,10 @@ pub fn diff(ctx: &Ctx<'_>, req: WsDiffReq) -> Result<Diff, OpError> {
     at_least_one("max_bytes", max_bytes)?;
     let paths = materialize::normalize(paths)?;
 
-    // 2. The changes after the cursor, by a scan without the lock: a read.
+    // 2. A base the target left: refused before the scan. Then the changes after the cursor,
+    //    by a scan without the lock: a read.
     let ws = Workspace::open(ctx, Locate::Name(workspace))?;
+    status::refuse_stale(ctx.store, &ws.file)?;
     let want = Want { paths, full: false };
     let changes = status::changes_of(ctx, &ws, &want)?;
     let rest: Vec<&Change> = (changes.iter())

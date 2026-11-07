@@ -11,7 +11,8 @@
 //!              │       onto: T} (WS2) → the pending record removed
 //!              └─ E_CONFLICT → conflicts.json, workspace.json rebasing{onto: T, against},
 //!                              markers in the conflicting text files; nothing else moves
-//!  continue  every conflict resolved (ws resolve) → rebase{…, resolutions{against, files}}
+//!  continue  onto still reached by the target (E_WS_STALE, nothing written), every conflict
+//!            resolved (ws resolve) → rebase{…, resolutions{against, files}}
 //!            → as start: H', or a new report (the target moved), still rebasing
 //!  abort     the conflicting paths restored from the head → clean
 //! ```
@@ -54,6 +55,9 @@ const STARTING: &str = "starting";
 
 /// The pending record's state of a rebase that continues with resolutions.
 const CONTINUING: &str = "continuing";
+
+/// The hint of a continue whose `onto` the target left: the rebase left, then the update.
+const LEAVE_THEN_UPDATE: &str = "swarmops ws rebase --abort, then swarmops ws rebase";
 
 /// `ws_rebase` in the workspace `req` names.
 pub fn rebase(ctx: &Ctx<'_>, req: WsRebaseReq) -> Result<WsRebaseResp, OpError> {
@@ -176,10 +180,14 @@ pub(crate) fn check_onto(
 /// Continues workspace `ws`'s rebase with its resolutions: refused while a conflict is
 /// unresolved.
 fn resume(ctx: &Ctx<'_>, ws: &mut Workspace) -> Result<WsRebaseResp, OpError> {
-    // 1. Rebasing, with every conflict resolved.
-    let State::Rebasing { against, .. } = &ws.file.state else {
+    // 1. Rebasing, onto a head the target has not left, with every conflict resolved.
+    let State::Rebasing { onto, against } = &ws.file.state else {
         return Err(not_rebasing());
     };
+    if let Some(left) = status::stale(ctx.store, &ws.file)? {
+        let refused = status::stale_error(&ws.file.target, onto, &left);
+        return Err(refused.with_hint(LEAVE_THEN_UPDATE));
+    }
     let against = against.clone();
     let report = resolve::conflicts(ctx, ws)?;
     if !report.files.is_empty() {
@@ -269,10 +277,13 @@ pub(crate) fn rebase_in(
         Err(e) => return Err(e),
     };
 
-    // 2. The workspace moved to it: files and state in one replace of workspace.json (WS2).
+    // 2. The workspace moved to it, its base the target's head with the operation that put it
+    //    there: files and state in one replace of workspace.json (WS2).
+    let base_op = status::base_op(ctx.store, onto, &done.onto)?;
     let rebasing = matches!(ws.file.state, State::Rebasing { .. });
     ws.file.head.clone_from(&done.changeset);
     ws.file.base.clone_from(&done.onto);
+    ws.file.base_op = base_op;
     ws.file.onto = Some(done.onto.clone());
     onto.clone_into(&mut ws.file.target);
     ws.file.state = State::Clean;

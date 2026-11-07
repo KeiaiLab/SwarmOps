@@ -1663,7 +1663,9 @@ expression: s.transcript()
       "meta": {
         "repo": "[tmp]/store",
         "elapsed_ms": "[elapsed_ms]",
-        "resolved": {},
+        "resolved": {
+          "release/ws": "[id15]"
+        },
         "auth": "trust"
       }
     }
@@ -1810,7 +1812,8 @@ expression: s.transcript()
         "repo": "[tmp]/store",
         "elapsed_ms": "[elapsed_ms]",
         "resolved": {
-          "[c1]": "[c1]"
+          "[c1]": "[c1]",
+          "main": "[c1]"
         },
         "auth": "trust"
       }
@@ -1842,6 +1845,7 @@ expression: s.transcript()
         "elapsed_ms": "[elapsed_ms]",
         "resolved": {
           "[c1]": "[c1]",
+          "[stale_base]": "[stale_base]",
           "release/stale": "[c1]"
         },
         "auth": "trust"

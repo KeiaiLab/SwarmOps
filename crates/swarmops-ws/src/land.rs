@@ -5,7 +5,8 @@
 //!  refusals before the lock: an edit off a sparse workspace's prefixes
 //!    (E_WS_OUTSIDE_PREFIXES, before any store call but the workspace's open), no command for
 //!    --check (E_INVALID_ARG missing "check")
-//!  lock → a base the target left, on the workspace's own target (E_WS_STALE, nothing written)
+//!  lock → a base the workspace's own target left, whatever target it lands on (E_WS_STALE,
+//!         nothing written)
 //!       → names the target gained that the files cannot hold (E_WS_UNPORTABLE, nothing
 //!         written), unless the store only replays a land the target holds
 //!       → edits carried (-m without --check), committed (-m with it) or E_WS_DIRTY → the
@@ -48,7 +49,7 @@ use crate::pending::{self, Pending, PendingOp};
 use crate::rebase::{self, Rerun};
 use crate::scan;
 use crate::state::State;
-use crate::status::{self, Landed, Stale};
+use crate::status::{self, Landed};
 use crate::workspace::{self, Locate, Workspace};
 use crate::{Ctx, after};
 
@@ -146,13 +147,9 @@ pub fn land(ctx: &Ctx<'_>, req: WsLandReq) -> Result<WsLandResp, OpError> {
         .with_hint("swarmops ws rebase --continue, or swarmops ws rebase --abort"));
     }
 
-    // 3. A base the target left: refused before anything is settled or landed.
-    if target == ws.file.target {
-        let left = status::stale(ctx.store, &target, &ws.file.base)?;
-        if let Some(stale) = left {
-            return Err(stale_error(&target, &ws.file.base, &stale));
-        }
-    }
+    // 3. A base the workspace's own target left: refused before anything is settled or landed,
+    //    onto any target, which the land would bring the work taken back to.
+    status::refuse_stale(ctx.store, &ws.file)?;
 
     // 4. Names the target gained that the files cannot hold, and those of the edits `-m`
     //    commits or carries: refused before the store lands, unless the store only replays a
@@ -334,10 +331,13 @@ impl Landing<'_, '_> {
             self.write(None, 1, LANDING)?;
         }
 
-        // 3. The workspace on L: files, then workspace.json (WS2); the record goes.
+        // 3. The workspace on L, with the operation that moved the target there: files, then
+        //    workspace.json (WS2); the record goes.
+        let base_op = status::base_op(ctx.store, &self.target, &done.landed)?;
         let ws = &mut self.ws;
         ws.file.head.clone_from(&done.landed);
         ws.file.base.clone_from(&done.landed);
+        ws.file.base_op = base_op;
         ws.file.onto = None;
         ws.file.target.clone_from(&self.target);
         rebase::move_to(ctx, ws, &done.landed)?;
@@ -474,27 +474,6 @@ fn backoff(attempt: u32, seed: &[u8]) -> Duration {
     let [a, b, c, d, ..] = *hasher.finalize().as_bytes();
     let unit = f64::from(u32::from_le_bytes([a, b, c, d])) / 4_294_967_296.0;
     step.mul_f64(0.5 + unit)
-}
-
-/// `E_WS_STALE`: the workspace's `base` is gone from the history of `target`, which `stale`
-/// says moved off it. Nothing was changed; `ws rebase` brings the workspace onto the target.
-fn stale_error(target: &str, base: &str, stale: &Stale) -> OpError {
-    OpError::new(
-        ErrorCode::WsStale,
-        format!(
-            "the workspace's base {base} is no longer on {target}'s history: \
-             {target} moved to {head}",
-            head = stale.head,
-        ),
-    )
-    .with_details(Map::from_iter([
-        ("target".to_owned(), Value::from(target)),
-        ("base".to_owned(), Value::from(base)),
-        ("head".to_owned(), Value::from(stale.head.as_str())),
-        ("base_op".to_owned(), Value::from(stale.base_op)),
-        ("moved_op".to_owned(), Value::from(stale.moved_op)),
-    ]))
-    .with_hint("swarmops ws rebase")
 }
 
 /// `E_INVALID_ARG{details.missing: "rebase"}`: an exact land of a workspace not rebased onto

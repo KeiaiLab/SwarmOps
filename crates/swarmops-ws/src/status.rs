@@ -7,8 +7,10 @@
 //!  log{base, 100, cursor}…           base not met: until a changeset main's log held
 //!  scan (the index, the walker) ──▶ changes, a page after `cursor`, `limit` long
 //!
-//!  stale (for `ws land`): base off main's history, history ended short of the cap
-//!  op_log{before…}                   until the operation that put the target on the base
+//!  stale (each command that reads or writes against the base, the M19 design §3):
+//!  resolve_rev{target}, ancestry{base, head, limit 0}   the head reaches the base: current
+//!  op_log{before…}                   until the move to the head, and the base's operation
+//!                                    when `workspace.json` records none
 //!
 //!  landed (for `ws rebase`): the operations of a land key, then the target's history
 //!  op_log{before…}                   to the journal's end: every changeset the key landed
@@ -19,14 +21,14 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::{Map, Value};
 use swarmops_api::{
-    ConflictReport, ErrorCode, LogReq, OpError, OpLogReq, OperationOut, ResolveRevReq, StoreOps,
-    WsChange, WsRebasing, WsState, WsStatus, WsStatusReq,
+    AncestryReq, ConflictReport, ErrorCode, LogReq, OpError, OpLogReq, OperationOut, ResolveRevReq,
+    StoreOps, WsChange, WsRebasing, WsState, WsStatus, WsStatusReq,
 };
 
 use crate::Ctx;
 use crate::materialize;
 use crate::scan::{self, Change, Keep, Want};
-use crate::state::{SWARMWS_DIR, State};
+use crate::state::{SWARMWS_DIR, State, WorkspaceFile};
 use crate::workspace::{Locate, Workspace};
 
 /// The most changesets `behind_by` counts: past it, the count stops there.
@@ -35,7 +37,7 @@ pub const BEHIND_CAP: u64 = 10_000;
 /// The changesets one `log` page of `behind_by` asks for.
 const LOG_PAGE: usize = 100;
 
-/// The most operations the search for a stale base reads.
+/// The most operations a search of the journal reads.
 pub(crate) const OP_CAP: u64 = 10_000;
 
 /// The operations one `op_log` page of that search asks for.
@@ -82,7 +84,9 @@ pub(crate) fn page(
     limit: usize,
     cursor: Option<&str>,
 ) -> Result<WsStatus, OpError> {
-    // 1. Where the target stands, read first.
+    // 1. A base the target left: refused before anything is read further. Then where the
+    //    target stands.
+    refuse_stale(ctx.store, &ws.file)?;
     let (main, behind_by) = behind(ctx.store, &ws.file.target, &ws.file.base)?;
 
     // 2. The changes, the index kept for the next scan.
@@ -323,41 +327,113 @@ fn scan_ops(
     }
 }
 
-/// Whether `base` has left ref `target`'s history: the first-parent history from the target's
-/// head, read to its end within [`BEHIND_CAP`], lacks it, and the journal's newest [`OP_CAP`]
-/// operations hold one that moved the target to it. A base no operation put on the target (a
-/// workspace made of a side changeset) and a history longer than the cap are not stale.
-pub(crate) fn stale(
-    store: &dyn StoreOps,
-    target: &str,
-    base: &str,
-) -> Result<Option<Stale>, OpError> {
-    // 1. On the history, or not known to be off it: not stale, and the journal is not read.
-    let placed = place(store, target, base)?;
-    if placed.standing != Standing::Off {
+/// Whether workspace `file`'s base has left its target: the target's head does not reach it
+/// along any parent (`ancestry`), and the operation that put the target on it is known, the one
+/// `base_op` records or, without one, the newest of the journal's first [`OP_CAP`] that moved
+/// the target there. A base no operation put on the target (a workspace made of a side
+/// changeset) is not stale. While a rebase is in progress, its `onto` is the base judged.
+pub(crate) fn stale(store: &dyn StoreOps, file: &WorkspaceFile) -> Result<Option<Stale>, OpError> {
+    // 1. The target's head reaches the base: not stale, and the journal is not read.
+    let (base, recorded) = judged(file);
+    let target = file.target.as_str();
+    let head = store.resolve_rev(ResolveRevReq::new(target))?.id;
+    if head == base {
+        return Ok(None);
+    }
+    let mut req = AncestryReq::new(base, head.as_str());
+    req.limit = 0;
+    if store.ancestry(req)?.is_ancestor {
         return Ok(None);
     }
 
-    // 2. The journal, newest first: the move to the head, then the move to the base.
+    // 2. The journal, newest first: the move to the head, down to the recorded base's
+    //    operation; without one, until the move to the base.
     let mut moved_op = None;
-    let mut base_op = None;
+    let mut base_op = recorded;
     scan_ops(store, |op| {
-        let moves = |to: &str| {
-            (op.ref_moves.iter()).any(|m| m.name == target && m.new.as_deref() == Some(to))
-        };
-        if moved_op.is_none() && moves(&placed.head) {
+        if recorded.is_some_and(|at| op.op <= at) {
+            return true;
+        }
+        if moved_op.is_none() && moves(op, target, &head) {
             moved_op = Some(op.op);
         }
-        if moves(base) {
+        if recorded.is_none() && moves(op, target, base) {
             base_op = Some(op.op);
         }
-        base_op.is_some()
+        match recorded {
+            Some(_) => moved_op.is_some(),
+            None => base_op.is_some(),
+        }
     })?;
     Ok(base_op.map(|base_op| Stale {
-        head: placed.head,
+        head,
         base_op,
         moved_op,
     }))
+}
+
+/// The base [`stale`] judges in workspace `file`, and its recorded operation: while a rebase is
+/// in progress, its `onto` (the target's head it merges onto, no operation recorded); else the
+/// base.
+fn judged(file: &WorkspaceFile) -> (&str, Option<u64>) {
+    match &file.state {
+        State::Rebasing { onto, .. } => (onto.as_str(), None),
+        State::Clean => (file.base.as_str(), file.base_op),
+    }
+}
+
+/// Whether operation `op` moved ref `target` to `to`.
+fn moves(op: &OperationOut, target: &str, to: &str) -> bool {
+    (op.ref_moves.iter()).any(|m| m.name == target && m.new.as_deref() == Some(to))
+}
+
+/// `E_WS_STALE` when workspace `file`'s base has left its target ([`stale`]): what each command
+/// that reads or writes against the base answers first.
+pub(crate) fn refuse_stale(store: &dyn StoreOps, file: &WorkspaceFile) -> Result<(), OpError> {
+    let Some(left) = stale(store, file)? else {
+        return Ok(());
+    };
+    Err(stale_error(&file.target, judged(file).0, &left))
+}
+
+/// The newest operation that moved ref `target` to `base`, among the journal's first
+/// [`OP_CAP`]: what `workspace.json` records once a command set its base. None for a base no
+/// operation put there.
+pub(crate) fn base_op(
+    store: &dyn StoreOps,
+    target: &str,
+    base: &str,
+) -> Result<Option<u64>, OpError> {
+    let mut found = None;
+    scan_ops(store, |op| {
+        let moved = moves(op, target, base);
+        if moved {
+            found = Some(op.op);
+        }
+        moved
+    })?;
+    Ok(found)
+}
+
+/// `E_WS_STALE`: the workspace's `base` is gone from the history of `target`, which `stale`
+/// says moved off it. Nothing was changed; `ws rebase` brings the workspace onto the target.
+pub(crate) fn stale_error(target: &str, base: &str, stale: &Stale) -> OpError {
+    OpError::new(
+        ErrorCode::WsStale,
+        format!(
+            "the workspace's base {base} is no longer on {target}'s history: \
+             {target} moved to {head}",
+            head = stale.head,
+        ),
+    )
+    .with_details(Map::from_iter([
+        ("target".to_owned(), Value::from(target)),
+        ("base".to_owned(), Value::from(base)),
+        ("head".to_owned(), Value::from(stale.head.as_str())),
+        ("base_op".to_owned(), Value::from(stale.base_op)),
+        ("moved_op".to_owned(), Value::from(stale.moved_op)),
+    ]))
+    .with_hint("swarmops ws rebase")
 }
 
 /// Whether a land with a given key is on a ref's history.

@@ -29,7 +29,7 @@ use crate::pending::{self, Intent, JOURNAL_DIR};
 use crate::registry::{ENTRY_FORMAT, Entry, Linked, Registry};
 use crate::state::{self, SWARMWS_DIR, State, WORKSPACE_FORMAT, WorkspaceFile};
 use crate::workspace::{self, Locate, Workspace};
-use crate::{Ctx, after, io_error, volume};
+use crate::{Ctx, after, io_error, status, volume};
 
 /// The ref a workspace lands on when its base names no ref.
 const DEFAULT_TARGET: &str = "main";
@@ -59,7 +59,8 @@ pub fn create(ctx: &Ctx<'_>, req: WsCreateReq) -> Result<WsInfo, OpError> {
     }
     let mut prefixes = materialize::normalize(req.prefixes)?;
 
-    // 2. The store's side: the base's changeset, the ref it lands on, the store's id.
+    // 2. The store's side: the base's changeset, the ref it lands on, the store's id, the
+    //    operation that put the base on that ref (none for a side changeset).
     let resolved = ctx
         .store
         .resolve_rev(ResolveRevReq::new(req.base.clone()))?;
@@ -69,6 +70,7 @@ pub fn create(ctx: &Ctx<'_>, req: WsCreateReq) -> Result<WsInfo, OpError> {
         _ => return Err(io_error::unknown_variant("RevKind")),
     };
     let repo_id = ctx.store.repo_info(InfoReq::default())?.repo_id;
+    let base_op = status::base_op(ctx.store, &target, &resolved.id)?;
 
     // A sparse workspace also holds the ignore files above its prefixes, so its walk reads what
     // the whole tree's would.
@@ -119,6 +121,7 @@ pub fn create(ctx: &Ctx<'_>, req: WsCreateReq) -> Result<WsInfo, OpError> {
         repo: ctx.store_root.to_string(),
         repo_id,
         base: resolved.id.clone(),
+        base_op,
         head: resolved.id.clone(),
         prefixes: prefixes.clone(),
         all: req.all || prefixes.is_empty(),

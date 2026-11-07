@@ -3243,7 +3243,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_WS_STALE",
-          "description": "`ws land` found the workspace's base gone from its target's history\n(`details.target`, `base`, `head`; `base_op`, the operation that moved the target to\nthe base; `moved_op`, the latest that moved it to `head`, or null when not found).\nNothing changed; the hint names `swarmops ws rebase`.",
+          "description": "`ws status`, `ws diff`, `ws commit`, `ws materialize`, `ws land` (onto any target) or\n`ws rebase --continue` found the workspace's base gone from its target's history\n(`details.target`, `base`, `head`; `base_op`, the operation that moved the target to\nthe base; `moved_op`, the latest that moved it to `head`, or null when not found).\nNothing changed; the hint names `swarmops ws rebase` (after a continue,\n`swarmops ws rebase --abort` first).",
           "type": "string"
         },
         {
@@ -8434,7 +8434,7 @@ expression: s.redact(&all)
             },
             {
               "const": "E_WS_STALE",
-              "description": "`ws land` found the workspace's base gone from its target's history\n(`details.target`, `base`, `head`; `base_op`, the operation that moved the target to\nthe base; `moved_op`, the latest that moved it to `head`, or null when not found).\nNothing changed; the hint names `swarmops ws rebase`.",
+              "description": "`ws status`, `ws diff`, `ws commit`, `ws materialize`, `ws land` (onto any target) or\n`ws rebase --continue` found the workspace's base gone from its target's history\n(`details.target`, `base`, `head`; `base_op`, the operation that moved the target to\nthe base; `moved_op`, the latest that moved it to `head`, or null when not found).\nNothing changed; the hint names `swarmops ws rebase` (after a continue,\n`swarmops ws rebase --abort` first).",
               "type": "string"
             },
             {

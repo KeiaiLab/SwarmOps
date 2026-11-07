@@ -37,6 +37,10 @@ pub struct WorkspaceFile {
     pub repo_id: String,
     /// The target's changeset the chain starts from.
     pub base: String,
+    /// The newest operation that moved `target` to `base`, found when `base` was set (the M19
+    /// design §3.2); none for a base made off the target, and in a file an older build wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_op: Option<u64>,
     /// The chain's last changeset; `base` when nothing is committed. Local edits are against
     /// its tree.
     pub head: String,
@@ -64,10 +68,11 @@ pub struct WorkspaceFile {
 
 impl WorkspaceFile {
     /// The state of workspace `name` in [`WORKSPACE_FORMAT`], which a read checks again; no
-    /// `onto`. The fields are those of the struct, in its order.
+    /// `base_op`, no `onto`. The fields are those of the struct, in its order.
     #[allow(
         clippy::too_many_arguments,
-        reason = "every field but `onto` is required; a `Default` would need a made-up state"
+        reason = "every field but `base_op` and `onto` is required; a `Default` would need a \
+                  made-up state"
     )]
     pub fn new(
         name: String,
@@ -90,6 +95,7 @@ impl WorkspaceFile {
             repo,
             repo_id,
             base,
+            base_op: None,
             head,
             prefixes,
             all,
@@ -230,6 +236,7 @@ pub(crate) mod tests {
             repo: "/stores/acme".to_owned(),
             repo_id: "0".repeat(32),
             base: id('b'),
+            base_op: None,
             head: id('c'),
             prefixes: vec!["src".to_owned(), "docs".to_owned()],
             all: false,
@@ -248,8 +255,9 @@ pub(crate) mod tests {
     }
 
     /// `workspace.json` is written whole and read back equal, in its wire form (the state a
-    /// tagged object, `onto` omitted when none); a format this build does not know is refused,
-    /// and so is a file that does not parse; a workspace without one is not found.
+    /// tagged object, `base_op` and `onto` omitted when none); a format this build does not
+    /// know is refused, and so is a file that does not parse; a workspace without one is not
+    /// found.
     #[test]
     fn workspace_json_round_trips_and_rejects_an_unknown_format() {
         // 1. A workspace directory with its .swarmws/.
@@ -267,7 +275,9 @@ pub(crate) mod tests {
         assert_eq!(wire["format"], 1);
         assert_eq!(wire["state"], json!({"kind": "clean"}));
         assert!(wire.get("onto").is_none(), "{wire}");
+        assert!(wire.get("base_op").is_none(), "{wire}");
         let rebasing = WorkspaceFile {
+            base_op: Some(7),
             onto: Some("d".repeat(64)),
             state: State::Rebasing {
                 onto: "d".repeat(64),

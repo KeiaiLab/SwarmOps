@@ -43,6 +43,7 @@ use crate::pending::{self, Intent};
 use crate::portable::{self, HOST};
 use crate::scan;
 use crate::state::{self, Volume};
+use crate::status;
 use crate::volume::{EXEC_BITS, EXEC_MODE};
 use crate::workspace::{self, Locate, Workspace};
 use crate::{Ctx, after, io_error};
@@ -125,7 +126,7 @@ pub(crate) struct Prepared {
 /// for. A path that tree lacks joins as it is, nothing written, when it is on disk and its parent
 /// is the root, a directory of the tree or one above a prefix; else `E_PATH_NOT_FOUND`.
 pub fn materialize(ctx: &Ctx<'_>, req: WsMaterializeReq) -> Result<WsMaterializeResp, OpError> {
-    // 1. The paths, then the workspace under its lock.
+    // 1. The paths, then the workspace under its lock, whose base its target has not left.
     let WsMaterializeReq {
         workspace,
         paths,
@@ -140,6 +141,7 @@ pub fn materialize(ctx: &Ctx<'_>, req: WsMaterializeReq) -> Result<WsMaterialize
     }
     let asked = normalize(paths)?;
     let (mut ws, _held) = workspace::open_locked(ctx, &Locate::Name(workspace))?;
+    status::refuse_stale(ctx.store, &ws.file)?;
 
     // 2. The ones it does not hold yet: each one the tree has, or a new path on disk whose
     //    parent the workspace can hold.
