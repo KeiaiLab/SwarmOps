@@ -53,8 +53,9 @@ use swarmops_store::{
     StoreError, ref_kind,
 };
 
-use crate::commit::{Draft, WrittenChangeset};
+use crate::commit::{self, Draft, WrittenChangeset};
 use crate::error::RepoError;
+use crate::merge;
 use crate::oplog::OpId;
 use crate::repo::{self, Repo};
 
@@ -168,7 +169,31 @@ struct Frame<'a> {
     merged_in_lock: Vec<RepoPath>,
 }
 
-/// `L` made anew by the lock holder on the target's head ([`Repo::relocated`]).
+/// What [`plan_publish`] left in its write transaction.
+pub(crate) enum PublishPlan {
+    /// Nothing to commit: the publish's outcome, [`Published::Moved`] or [`Published::Replayed`].
+    /// What it queued, if anything, is the caller's to drop.
+    Done(Published),
+    /// The inserts and the target's move, queued: committed, they are this land.
+    Queued(Queued),
+}
+
+/// The land a [`PublishPlan::Queued`] queued: [`Published::Landed`]'s fields but its warnings,
+/// which only its commit makes.
+pub(crate) struct Queued {
+    /// The changeset the target is moved to.
+    id: ChangesetId,
+    /// Its parent: the head it lands on.
+    onto: ChangesetId,
+    /// Whether the lock holder made it anew on a head the target had moved to.
+    relocated: bool,
+    /// The paths the lock holder merged under the lock into new content, sorted.
+    merged_in_lock: Vec<RepoPath>,
+    /// How many paths its delta changes.
+    files_changed: usize,
+}
+
+/// `L` made anew by the lock holder on the target's head ([`relocated`]).
 struct Relocated {
     /// The new changeset, written and flushed.
     written: WrittenChangeset,
@@ -187,255 +212,286 @@ impl<O: ObjectStore> Repo<O> {
     /// A failure after the commit point is a warning; a journal append that fails
     /// ([`StoreError::NotCommitted`]) is returned as it is.
     pub(crate) fn publish(&self, p: &Publication) -> Result<Published, RepoError> {
-        let write = self.meta.write()?;
+        let mut write = self.meta.write()?;
 
-        // 1. The key, among the moves since the land's snapshot, before any relocation or swap.
-        if let Some(replayed) = self.key_since(&write, p)? {
-            return Ok(replayed);
+        // Returning `Done` drops the write: what it queued with it, no frame, the lock released.
+        match plan_publish(&mut write, &self.objects, p)? {
+            PublishPlan::Done(published) => Ok(published),
+            PublishPlan::Queued(queued) => commit(write, p, queued),
         }
-
-        // 2. The target, read under the lock: at `onto`, or moved and made anew there.
-        if p.relocate == Relocate::Allow {
-            let actual = write
-                .get_ref(&p.target)
-                .map_err(repo::ref_error)?
-                .ok_or_else(|| RepoError::NotFound(p.target.clone()))?;
-            if actual != p.onto {
-                let Some(made) = self.relocated(&write, &p.changeset, p.onto, actual)? else {
-                    let recovered = write.recovered();
-                    return Ok(Published::Moved { actual, recovered });
-                };
-                let frame = Frame {
-                    id: made.written.id,
-                    changeset: &made.written.changeset,
-                    onto: actual,
-                    relocated: true,
-                    merged_in_lock: made.merged,
-                };
-                return record(write, p, frame);
-            }
-        }
-
-        // 3. `L` itself, by compare-and-swap from `onto`.
-        let frame = Frame {
-            id: p.id,
-            changeset: &p.changeset,
-            onto: p.onto,
-            relocated: false,
-            merged_in_lock: Vec::new(),
-        };
-        record(write, p, frame)
-    }
-
-    /// `p`'s key among the ref moves committed since its land's snapshot, under the lock `write`
-    /// holds (the M16 design §6): the first move, in journal order, of a ref a land publishes to
-    /// onto a changeset carrying the key. On the target, the land made before
-    /// ([`Published::Replayed`]) or [`RepoError::KeyReused`]; on another ref,
-    /// [`RepoError::KeyReused`] naming it. `None`: no such move, or no key. Each move read costs
-    /// its changeset's object.
-    fn key_since(
-        &self,
-        write: &MetaWrite<'_>,
-        p: &Publication,
-    ) -> Result<Option<Published>, RepoError> {
-        let Some(key) = &p.key else {
-            return Ok(None);
-        };
-        let ours = match &p.first {
-            Some((_, made)) => Ours::Commit {
-                head: p.head,
-                root: made.root,
-            },
-            None => Ours::Chain(p.head),
-        };
-        let load = |id| self.changeset_object(id).map(Some);
-
-        for frame in write.frames_from(p.next_seq)? {
-            for record in frame.records {
-                // 1. A move onto a changeset, of a ref a land publishes to: a tag never moves,
-                //    and a remote-tracking ref only a fetch moves.
-                let Record::RefMove {
-                    name,
-                    new: Some(moved),
-                    ..
-                } = record
-                else {
-                    continue;
-                };
-                let kind = ref_kind(&name);
-                if matches!(kind, Some(RefKind::Tag | RefKind::RemoteTracking)) {
-                    continue;
-                }
-
-                // 2. Its changeset, if it carries the key.
-                let changeset = self.changeset_object(moved)?;
-                let Some(found) = key::landed_key(moved, &changeset, key, ours, &load)? else {
-                    continue;
-                };
-
-                // 3. Another ref's land of the key, this land on the target, or another change.
-                let reused = |landed| RepoError::KeyReused {
-                    key: key.clone(),
-                    landed,
-                    target: name.clone(),
-                };
-                if name != p.target {
-                    return Err(reused(moved));
-                }
-                return match found {
-                    KeyFound::Replay(found) => Ok(Some(Published::Replayed {
-                        id: found.id,
-                        onto: found.parent,
-                        squashed_from: found.squashed_from,
-                        files_changed: found.files_changed,
-                    })),
-                    KeyFound::Reused(landed) => Err(reused(landed)),
-                };
-            }
-        }
-        Ok(None)
-    }
-
-    /// `l`, made on `onto`, made anew on `actual`, the target's head, under the lock `write`
-    /// holds (steps 1 to 4 of [the module documentation](self)): written and flushed, not
-    /// queued. `None` when the rule gives the land back to its lander.
-    fn relocated(
-        &self,
-        write: &MetaWrite<'_>,
-        l: &Changeset,
-        onto: ChangesetId,
-        actual: ChangesetId,
-    ) -> Result<Option<Relocated>, RepoError> {
-        // 1. What the target gained since `onto`.
-        let Some(gained) = gained_since(write, onto, actual)? else {
-            return Ok(None);
-        };
-        let mut paths = BTreeSet::new();
-        for id in gained {
-            for entry in self.changeset_object(id)?.delta {
-                paths.insert(entry.path.as_str().to_owned());
-            }
-        }
-
-        // 2. `L`'s delta split: the paths that overlap what the target gained, and the rest.
-        let (overlapping, mut changes): (Vec<DeltaEntry>, Vec<DeltaEntry>) = (l.delta.iter())
-            .cloned()
-            .partition(|entry| overlaps_any(&entry.path, &paths));
-
-        // 3. The overlapping paths merged three-way, each a small file on every side.
-        let actual_root = self.changeset_object(actual)?.root;
-        let mut contents = BTreeMap::new();
-        let mut merged = Vec::new();
-        if !overlapping.is_empty() {
-            let onto_root = self.changeset_object(onto)?.root;
-            let trees = Trees(&self.objects);
-            for entry in &overlapping {
-                if !self.mergeable(&trees, [onto_root, actual_root], entry)? {
-                    return Ok(None);
-                }
-            }
-            let at: Vec<RepoPath> = overlapping.into_iter().map(|entry| entry.path).collect();
-            let merge =
-                self.merge_trees_with(onto_root, l.root, actual_root, &at, &diff3::merge_content)?;
-            if !merge.conflicts.is_empty() {
-                return Ok(None);
-            }
-            changes.extend(merge.delta);
-            changes.sort_by(|a, b| a.path.cmp(&b.path));
-            for bytes in merge.new_blobs.into_values() {
-                let blob = Hashed::new(ObjectKind::Blob, bytes);
-                contents.insert(blob.id(), blob);
-            }
-            merged = merge.auto_merged;
-        }
-
-        // 4. `L'` on `actual`, its objects flushed before any frame names them (I1).
-        let draft = Draft {
-            onto: Some(actual_root),
-            changes,
-            contents,
-            parents: vec![actual],
-            author: l.author.clone(),
-            committer: l.committer.clone(),
-            message: l.message.clone(),
-            metadata: l.metadata.clone(),
-            allow_empty: false,
-        };
-        match self.write_changeset(draft) {
-            Ok(written) => Ok(Some(Relocated { written, merged })),
-            Err(RepoError::EmptyChanges) => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-
-    /// Whether the lock holder may merge `entry`, a path of `L`'s delta: `L` puts a regular file
-    /// there, and the trees `[onto, actual]` hold one, each side at most [`MAX_MERGE_BYTES`].
-    fn mergeable(
-        &self,
-        trees: &Trees<'_, O>,
-        roots: [TreeId; 2],
-        entry: &DeltaEntry,
-    ) -> Result<bool, RepoError> {
-        let DeltaOp::Put {
-            kind: LeafKind::File,
-            id,
-        } = entry.op
-        else {
-            return Ok(false);
-        };
-        let mut blobs = vec![id];
-        for root in roots {
-            match tree_merge::entry_in(trees, root, &entry.path)? {
-                Some(EntryTarget::Leaf(LeafKind::File, blob)) => blobs.push(blob),
-                _ => return Ok(false),
-            }
-        }
-        for blob in blobs {
-            let small = matches!(
-                self.objects.stat(blob.0)?,
-                Some(ObjectStat { kind: ObjectKind::Blob, size, .. }) if size <= MAX_MERGE_BYTES
-            );
-            if !small {
-                return Ok(false);
-            }
-        }
-        Ok(true)
     }
 }
 
-/// Queues `frame`'s changeset and the move of `p`'s target from `frame.onto` to it in `write`,
-/// and commits both: [`Published::Landed`]; or, the target elsewhere, drops the write:
+/// Steps 1 and 2 of [`Repo::publish`] and its inserts and compare-and-swap, under the lock `write`
+/// holds, every object read from `objects` and `L'` written there: what is left to do is the
+/// commit ([`PublishPlan::Queued`]), or nothing ([`PublishPlan::Done`]). Fails as
+/// [`Repo::publish`] does before its commit.
+pub(crate) fn plan_publish<S: ObjectStore>(
+    write: &mut MetaWrite<'_>,
+    objects: &S,
+    p: &Publication,
+) -> Result<PublishPlan, RepoError> {
+    // 1. The key, among the moves since the land's snapshot, before any relocation or swap.
+    if let Some(replayed) = key_since(write, objects, p)? {
+        return Ok(PublishPlan::Done(replayed));
+    }
+
+    // 2. The target, read under the lock: at `onto`, or moved and made anew there.
+    if p.relocate == Relocate::Allow {
+        let actual = write
+            .get_ref(&p.target)
+            .map_err(repo::ref_error)?
+            .ok_or_else(|| RepoError::NotFound(p.target.clone()))?;
+        if actual != p.onto {
+            let Some(made) = relocated(write, objects, &p.changeset, p.onto, actual)? else {
+                let recovered = write.recovered();
+                return Ok(PublishPlan::Done(Published::Moved { actual, recovered }));
+            };
+            let frame = Frame {
+                id: made.written.id,
+                changeset: &made.written.changeset,
+                onto: actual,
+                relocated: true,
+                merged_in_lock: made.merged,
+            };
+            return queue(write, p, frame);
+        }
+    }
+
+    // 3. `L` itself, by compare-and-swap from `onto`.
+    let frame = Frame {
+        id: p.id,
+        changeset: &p.changeset,
+        onto: p.onto,
+        relocated: false,
+        merged_in_lock: Vec::new(),
+    };
+    queue(write, p, frame)
+}
+
+/// `p`'s key among the ref moves committed since its land's snapshot, under the lock `write`
+/// holds (the M16 design §6): the first move, in journal order, of a ref a land publishes to
+/// onto a changeset carrying the key. On the target, the land made before
+/// ([`Published::Replayed`]) or [`RepoError::KeyReused`]; on another ref,
+/// [`RepoError::KeyReused`] naming it. `None`: no such move, or no key. Each move read costs
+/// its changeset's object, read from `objects`.
+fn key_since<S: ObjectStore>(
+    write: &MetaWrite<'_>,
+    objects: &S,
+    p: &Publication,
+) -> Result<Option<Published>, RepoError> {
+    let Some(key) = &p.key else {
+        return Ok(None);
+    };
+    let ours = match &p.first {
+        Some((_, made)) => Ours::Commit {
+            head: p.head,
+            root: made.root,
+        },
+        None => Ours::Chain(p.head),
+    };
+    let load = |id| changeset_in(objects, id).map(Some);
+
+    for frame in write.frames_from(p.next_seq)? {
+        for record in frame.records {
+            // 1. A move onto a changeset, of a ref a land publishes to: a tag never moves,
+            //    and a remote-tracking ref only a fetch moves.
+            let Record::RefMove {
+                name,
+                new: Some(moved),
+                ..
+            } = record
+            else {
+                continue;
+            };
+            let kind = ref_kind(&name);
+            if matches!(kind, Some(RefKind::Tag | RefKind::RemoteTracking)) {
+                continue;
+            }
+
+            // 2. Its changeset, if it carries the key.
+            let changeset = changeset_in(objects, moved)?;
+            let Some(found) = key::landed_key(moved, &changeset, key, ours, &load)? else {
+                continue;
+            };
+
+            // 3. Another ref's land of the key, this land on the target, or another change.
+            let reused = |landed| RepoError::KeyReused {
+                key: key.clone(),
+                landed,
+                target: name.clone(),
+            };
+            if name != p.target {
+                return Err(reused(moved));
+            }
+            return match found {
+                KeyFound::Replay(found) => Ok(Some(Published::Replayed {
+                    id: found.id,
+                    onto: found.parent,
+                    squashed_from: found.squashed_from,
+                    files_changed: found.files_changed,
+                })),
+                KeyFound::Reused(landed) => Err(reused(landed)),
+            };
+        }
+    }
+    Ok(None)
+}
+
+/// `l`, made on `onto`, made anew on `actual`, the target's head, under the lock `write`
+/// holds (steps 1 to 4 of [the module documentation](self)): read from `objects`, written and
+/// flushed there, not queued. `None` when the rule gives the land back to its lander.
+fn relocated<S: ObjectStore>(
+    write: &MetaWrite<'_>,
+    objects: &S,
+    l: &Changeset,
+    onto: ChangesetId,
+    actual: ChangesetId,
+) -> Result<Option<Relocated>, RepoError> {
+    // 1. What the target gained since `onto`.
+    let Some(gained) = gained_since(write, onto, actual)? else {
+        return Ok(None);
+    };
+    let mut paths = BTreeSet::new();
+    for id in gained {
+        for entry in changeset_in(objects, id)?.delta {
+            paths.insert(entry.path.as_str().to_owned());
+        }
+    }
+
+    // 2. `L`'s delta split: the paths that overlap what the target gained, and the rest.
+    let (overlapping, mut changes): (Vec<DeltaEntry>, Vec<DeltaEntry>) = (l.delta.iter())
+        .cloned()
+        .partition(|entry| overlaps_any(&entry.path, &paths));
+
+    // 3. The overlapping paths merged three-way, each a small file on every side.
+    let actual_root = changeset_in(objects, actual)?.root;
+    let mut contents = BTreeMap::new();
+    let mut merged = Vec::new();
+    if !overlapping.is_empty() {
+        let onto_root = changeset_in(objects, onto)?.root;
+        let trees = Trees(objects);
+        for entry in &overlapping {
+            if !mergeable(&trees, [onto_root, actual_root], entry)? {
+                return Ok(None);
+            }
+        }
+        let at: Vec<RepoPath> = overlapping.into_iter().map(|entry| entry.path).collect();
+        let roots = [onto_root, l.root, actual_root];
+        let merge = merge::merge_trees_in(objects, roots, &at, &diff3::merge_content)?;
+        if !merge.conflicts.is_empty() {
+            return Ok(None);
+        }
+        changes.extend(merge.delta);
+        changes.sort_by(|a, b| a.path.cmp(&b.path));
+        for bytes in merge.new_blobs.into_values() {
+            let blob = Hashed::new(ObjectKind::Blob, bytes);
+            contents.insert(blob.id(), blob);
+        }
+        merged = merge.auto_merged;
+    }
+
+    // 4. `L'` on `actual`, its objects flushed before any frame names them (I1).
+    let draft = Draft {
+        onto: Some(actual_root),
+        changes,
+        contents,
+        parents: vec![actual],
+        author: l.author.clone(),
+        committer: l.committer.clone(),
+        message: l.message.clone(),
+        metadata: l.metadata.clone(),
+        allow_empty: false,
+    };
+    match commit::write_changeset_in(objects, draft) {
+        Ok(written) => Ok(Some(Relocated { written, merged })),
+        Err(RepoError::EmptyChanges) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether the lock holder may merge `entry`, a path of `L`'s delta: `L` puts a regular file
+/// there, and the trees `[onto, actual]` hold one, each side at most [`MAX_MERGE_BYTES`], as the
+/// headers of `trees`' objects record it.
+fn mergeable<S: ObjectStore>(
+    trees: &Trees<'_, S>,
+    roots: [TreeId; 2],
+    entry: &DeltaEntry,
+) -> Result<bool, RepoError> {
+    let DeltaOp::Put {
+        kind: LeafKind::File,
+        id,
+    } = entry.op
+    else {
+        return Ok(false);
+    };
+    let mut blobs = vec![id];
+    for root in roots {
+        match tree_merge::entry_in(trees, root, &entry.path)? {
+            Some(EntryTarget::Leaf(LeafKind::File, blob)) => blobs.push(blob),
+            _ => return Ok(false),
+        }
+    }
+    for blob in blobs {
+        let small = matches!(
+            trees.0.stat(blob.0)?,
+            Some(ObjectStat { kind: ObjectKind::Blob, size, .. }) if size <= MAX_MERGE_BYTES
+        );
+        if !small {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Changeset `id`, decoded from `objects`: [`Repo::changeset_object`] over any object store.
+fn changeset_in<S: ObjectStore>(objects: &S, id: ChangesetId) -> Result<Changeset, RepoError> {
+    let payload = repo::object(objects, id.0, ObjectKind::Changeset)?;
+    Ok(Changeset::decode(&payload)?)
+}
+
+/// Queues `frame`'s changeset and the move of `p`'s target from `frame.onto` to it in `write`:
+/// [`PublishPlan::Queued`]; or, the target elsewhere, [`PublishPlan::Done`] with
 /// [`Published::Moved`].
-fn record(
-    mut write: MetaWrite<'_>,
+fn queue(
+    write: &mut MetaWrite<'_>,
     p: &Publication,
     frame: Frame<'_>,
-) -> Result<Published, RepoError> {
-    // 1. The inserts, `C` before `L` when the land made one, and the target's compare-and-swap.
+) -> Result<PublishPlan, RepoError> {
+    // The inserts, `C` before `L` when the land made one, and the target's compare-and-swap.
     if let Some((id, made)) = &p.first {
-        insert(&mut write, *id, made)?;
+        insert(write, *id, made)?;
     }
     let changeset = frame.changeset;
-    insert(&mut write, frame.id, changeset)?;
+    insert(write, frame.id, changeset)?;
     match write
         .cas_ref(&p.target, Some(frame.onto), Some(frame.id), &p.actor)
         .map_err(repo::ref_error)?
     {
         CasResult::Applied { .. } => {}
-        // Returning drops the write: the queued insert with it, no frame, the lock released.
         CasResult::Mismatch {
             actual: Some(actual),
         } => {
             let recovered = write.recovered();
-            return Ok(Published::Moved { actual, recovered });
+            return Ok(PublishPlan::Done(Published::Moved { actual, recovered }));
         }
         CasResult::Mismatch { actual: None } => {
             return Err(RepoError::NotFound(p.target.clone()));
         }
         _ => return Err(RepoError::unknown_variant("CasResult")),
     }
+    Ok(PublishPlan::Queued(Queued {
+        id: frame.id,
+        onto: frame.onto,
+        relocated: frame.relocated,
+        merged_in_lock: frame.merged_in_lock,
+        files_changed: changeset.delta.len(),
+    }))
+}
 
-    // 2. The frame; a failure past its commit point is a warning.
+/// Commits `write`, the frame of `queued`, the land of `p`: [`Published::Landed`]. A failure past
+/// its commit point is a warning.
+fn commit(write: MetaWrite<'_>, p: &Publication, queued: Queued) -> Result<Published, RepoError> {
     let mut warnings = Vec::new();
     match write.commit() {
         Ok(_) => {}
@@ -446,7 +502,7 @@ fn record(
         }) => {
             let what = format!(
                 "the landed changeset {} and the move of ref {}",
-                frame.id, p.target
+                queued.id, p.target
             );
             warnings.push(repo::post_commit_warning(
                 &what,
@@ -457,11 +513,11 @@ fn record(
         Err(e) => return Err(e.into()),
     }
     Ok(Published::Landed {
-        id: frame.id,
-        onto: frame.onto,
-        relocated: frame.relocated,
-        merged_in_lock: frame.merged_in_lock,
-        files_changed: changeset.delta.len(),
+        id: queued.id,
+        onto: queued.onto,
+        relocated: queued.relocated,
+        merged_in_lock: queued.merged_in_lock,
+        files_changed: queued.files_changed,
         warnings,
     })
 }
@@ -544,7 +600,7 @@ fn overlaps_any(path: &RepoPath, gained: &BTreeSet<String>) -> bool {
         .is_some_and(|next| overlaps(path, &next))
 }
 
-/// The trees of a store, read for [`tree_merge::entry_in`].
+/// The trees of an object store, read for [`tree_merge::entry_in`].
 struct Trees<'o, O: ObjectStore>(&'o O);
 
 impl<O: ObjectStore> TreeRead for Trees<'_, O> {

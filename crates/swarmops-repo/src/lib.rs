@@ -54,6 +54,11 @@ pub mod read;
 pub mod rebase;
 pub mod repair;
 pub mod repo;
+#[allow(
+    dead_code,
+    reason = "the batched lands (the D2 design, slice D2-4) use it"
+)]
+mod staged;
 mod tree_edit;
 pub mod upgrade;
 pub mod verify;

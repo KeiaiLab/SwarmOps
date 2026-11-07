@@ -126,9 +126,7 @@ impl<O: ObjectStore> Repo<O> {
         paths: &[RepoPath],
         content: ContentMerger<'_>,
     ) -> Result<MergeOutcome, RepoError> {
-        let reads = Reads::new(&self.objects);
-        let roots = [base, ours, theirs];
-        merge_trees(&reads, roots, paths.to_vec(), content, Bound::None)
+        merge_trees_in(&self.objects, [base, ours, theirs], paths, content)
     }
 
     /// [`Repo::merge_with`] with the three-way text merge, [`merge_content`] (diff3): the merge a
@@ -188,6 +186,18 @@ impl<O: ObjectStore> Repo<O> {
         let paths = changed.into_iter().map(|change| change.path).collect();
         merge_trees(&reads, roots, paths, content, bound)
     }
+}
+
+/// [`Repo::merge_trees_with`] over `objects`, the roots `[base, ours, theirs]`: a lock holder's
+/// re-merge onto trees that may be staged and not yet written ([`crate::staged::Staged`]).
+pub(crate) fn merge_trees_in<S: ObjectStore>(
+    objects: &S,
+    roots: [TreeId; 3],
+    paths: &[RepoPath],
+    content: ContentMerger<'_>,
+) -> Result<MergeOutcome, RepoError> {
+    let reads = Reads::new(objects);
+    merge_trees(&reads, roots, paths.to_vec(), content, Bound::None)
 }
 
 /// Whether a merge may decide a path from its blobs' headers alone.
@@ -578,6 +588,48 @@ mod tests {
             (0..3, b"t0\nt1\nt2\n".as_slice())
         );
         assert_eq!(held.hold(vec![hunk(5)], sides), [hunk(5)]);
+    }
+
+    /// A re-merge over an overlay reads the trees and blobs put there, which the store beneath
+    /// lacks: the merge over that store alone cannot find them.
+    #[test]
+    fn merge_trees_in_reads_staged_puts() {
+        use swarmops_core::TreeEntry;
+        use swarmops_store::{FsObjectStore, Layout, RealFs};
+
+        use crate::staged::Staged;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        let base = FsObjectStore::open(Layout::new(root), Box::new(RealFs::new()));
+        let staged = Staged::new(&base);
+
+        // 1. `f` in three trees: the base's in the store, ours and theirs staged only.
+        let tree_of = |objects: &dyn ObjectStore, text: &[u8]| {
+            let blob = BlobId::new(objects.put(ObjectKind::Blob, text).unwrap());
+            let tree = Tree::new(vec![TreeEntry::leaf("f", LeafKind::File, blob)]).unwrap();
+            TreeId::new(objects.put(ObjectKind::Tree, &tree.encode()).unwrap())
+        };
+        let roots = [
+            tree_of(&base, b"a\nb\nc\n"),
+            tree_of(&staged, b"A\nb\nc\n"),
+            tree_of(&staged, b"a\nb\nC\n"),
+        ];
+        let paths = [RepoPath::new("f").unwrap()];
+
+        // 2. Merged over the overlay: one clean put of both edits.
+        let merged = merge_trees_in(&staged, roots, &paths, &diff3::merge_content).unwrap();
+        assert!(merged.conflicts.is_empty(), "the edits do not overlap");
+        assert_eq!(merged.delta.len(), 1, "one path merged");
+        let blobs: Vec<&Vec<u8>> = merged.new_blobs.values().collect();
+        assert_eq!(blobs, [&b"A\nb\nC\n".to_vec()], "both edits kept");
+
+        // 3. Over the store beneath, ours and theirs are missing.
+        let lacking = merge_trees_in(&base, roots, &paths, &diff3::merge_content);
+        assert!(
+            matches!(lacking, Err(RepoError::MissingObject { .. })),
+            "the store beneath lacks the staged trees"
+        );
     }
 
     /// The bytes of lines: a last line without its `\n` is a line, and lines past the end, or

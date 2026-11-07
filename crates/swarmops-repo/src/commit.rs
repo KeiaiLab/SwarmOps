@@ -443,70 +443,7 @@ impl<O: ObjectStore> Repo<O> {
     /// and nothing is written then. A commit records what it wrote ([`Repo::commit`]); a land
     /// publishes it ([`crate::land`]).
     pub(crate) fn write_changeset(&self, draft: Draft) -> Result<WrittenChangeset, RepoError> {
-        let Draft {
-            onto,
-            changes,
-            mut contents,
-            parents,
-            author,
-            committer,
-            message,
-            metadata,
-            allow_empty,
-        } = draft;
-        let mut edit = match onto {
-            Some(root) => TreeEdit::new(&self.objects, root)?,
-            None => TreeEdit::empty(&self.objects),
-        };
-        let effective = edit.apply(&changes)?;
-        let delta: Vec<DeltaEntry> = changes
-            .into_iter()
-            .zip(effective)
-            .filter_map(|(entry, effective)| effective.then_some(entry))
-            .collect();
-        if delta.is_empty() && !allow_empty {
-            return Err(RepoError::EmptyChanges);
-        }
-        let Encoded {
-            root,
-            changed: trees,
-        } = edit.finish()?;
-        let put: BTreeSet<ObjectId> = delta
-            .iter()
-            .filter_map(|entry| entry.op.put())
-            .map(|(_, id)| id.0)
-            .collect();
-        contents.retain(|id, _| put.contains(id));
-        let changeset = Changeset::new(
-            parents,
-            root,
-            delta,
-            author,
-            committer,
-            message,
-            Vec::new(),
-            metadata,
-        )?;
-        let (object, delta_hash) = changeset.encode_hashed()?;
-        let id = ChangesetId::new(object.id());
-
-        let (blob_count, tree_count) = (contents.len(), trees.len());
-        let mut batch = Vec::with_capacity(blob_count + tree_count + 1);
-        batch.extend(contents.into_values());
-        batch.extend(trees);
-        batch.push(object);
-        let outcomes = self.objects.put_hashed_batch(batch)?;
-        let placed = |outcomes: &[PutOutcome]| outcomes.iter().filter(|o| o.written).count();
-        let (blobs, trees) = outcomes.split_at(blob_count);
-        let (blobs_written, trees_written) = (placed(blobs), placed(&trees[..tree_count]));
-        self.objects.flush()?;
-        Ok(WrittenChangeset {
-            id,
-            changeset,
-            delta_hash,
-            blobs_written,
-            trees_written,
-        })
+        write_changeset_in(&self.objects, draft)
     }
 
     /// Stores `content` as a blob, outside any transaction: hashed once, written unless the
@@ -667,6 +604,127 @@ impl<O: ObjectStore> Repo<O> {
         }
         Ok((insert, advanced, warnings, recovered))
     }
+}
+
+/// A changeset encoded with the objects it needs, none of them written yet
+/// ([`stage_changeset`]).
+pub(crate) struct StagedChangeset {
+    /// The changeset's id.
+    id: ChangesetId,
+    /// The changeset.
+    changeset: Changeset,
+    /// Its delta hash, from its one encoding.
+    delta_hash: [u8; 32],
+    /// The blobs the delta puts, then the changed trees, then the changeset object.
+    objects: Vec<Hashed>,
+    /// How many of `objects` are blobs.
+    blob_count: usize,
+    /// How many of `objects` are trees, after the blobs.
+    tree_count: usize,
+}
+
+impl StagedChangeset {
+    /// Writes the objects into `objects` in one `put_hashed_batch`, then flushes: every object is
+    /// durable when it returns, before any metadata names it (I1).
+    fn put<S: ObjectStore>(self, objects: &S) -> Result<WrittenChangeset, RepoError> {
+        let (blob_count, tree_count) = (self.blob_count, self.tree_count);
+        let outcomes = objects.put_hashed_batch(self.objects)?;
+        let placed = |outcomes: &[PutOutcome]| outcomes.iter().filter(|o| o.written).count();
+        let (blobs, trees) = outcomes.split_at(blob_count);
+        let (blobs_written, trees_written) = (placed(blobs), placed(&trees[..tree_count]));
+        objects.flush()?;
+        Ok(WrittenChangeset {
+            id: self.id,
+            changeset: self.changeset,
+            delta_hash: self.delta_hash,
+            blobs_written,
+            trees_written,
+        })
+    }
+}
+
+/// [`Repo::write_changeset`] over `objects`: [`stage_changeset`], then the objects written and
+/// flushed. The one writer of a changeset's objects; over a [`crate::staged::Staged`] overlay
+/// nothing reaches the store beneath it.
+pub(crate) fn write_changeset_in<S: ObjectStore>(
+    objects: &S,
+    draft: Draft,
+) -> Result<WrittenChangeset, RepoError> {
+    stage_changeset(objects, draft)?.put(objects)
+}
+
+/// The changeset `draft` describes and its objects, encoded and hashed from the trees `objects`
+/// holds, and nothing written: [`Repo::write_changeset`] without its put and flush, failing as
+/// it does.
+pub(crate) fn stage_changeset<S: ObjectStore>(
+    objects: &S,
+    draft: Draft,
+) -> Result<StagedChangeset, RepoError> {
+    let Draft {
+        onto,
+        changes,
+        mut contents,
+        parents,
+        author,
+        committer,
+        message,
+        metadata,
+        allow_empty,
+    } = draft;
+
+    // 1. The changes applied to `onto`: those that change nothing stay out of the delta.
+    let mut edit = match onto {
+        Some(root) => TreeEdit::new(objects, root)?,
+        None => TreeEdit::empty(objects),
+    };
+    let effective = edit.apply(&changes)?;
+    let delta: Vec<DeltaEntry> = changes
+        .into_iter()
+        .zip(effective)
+        .filter_map(|(entry, effective)| effective.then_some(entry))
+        .collect();
+    if delta.is_empty() && !allow_empty {
+        return Err(RepoError::EmptyChanges);
+    }
+
+    // 2. The changed trees, the blobs the delta puts, and the changeset, each encoded once.
+    let Encoded {
+        root,
+        changed: trees,
+    } = edit.finish()?;
+    let put: BTreeSet<ObjectId> = delta
+        .iter()
+        .filter_map(|entry| entry.op.put())
+        .map(|(_, id)| id.0)
+        .collect();
+    contents.retain(|id, _| put.contains(id));
+    let changeset = Changeset::new(
+        parents,
+        root,
+        delta,
+        author,
+        committer,
+        message,
+        Vec::new(),
+        metadata,
+    )?;
+    let (object, delta_hash) = changeset.encode_hashed()?;
+    let id = ChangesetId::new(object.id());
+
+    // 3. The batch: blobs, then trees, then the changeset object.
+    let (blob_count, tree_count) = (contents.len(), trees.len());
+    let mut batch = Vec::with_capacity(blob_count + tree_count + 1);
+    batch.extend(contents.into_values());
+    batch.extend(trees);
+    batch.push(object);
+    Ok(StagedChangeset {
+        id,
+        changeset,
+        delta_hash,
+        objects: batch,
+        blob_count,
+        tree_count,
+    })
 }
 
 /// Refuses `metadata` with a key that ends in [`RESERVED_METADATA_KEY_SUFFIX`]:
