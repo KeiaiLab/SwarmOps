@@ -34,6 +34,12 @@
 //!
 //! Images that hold the same files are checked once.
 //!
+//! A run of its own ([`LAND_UNDO_RUN`], the M16 design §2) lands a change onto `release/1` with an
+//! idempotency key ([`Op::Land`]) and then undoes that land ([`Op::Undo`]): in every image the land
+//! is whole (its changeset and the target's move to it) or absent, and so is the undo; and the same
+//! `land --key` run again through the binary lands the change exactly once, a replay of the
+//! recorded land while the target names it.
+//!
 //! One more run, of its own (`committed_read`), checks that a committed snapshot
 //! (`MetaStore::read_committed`, storage spec §3) holds nothing a power loss after it can take
 //! back, where a lock-free snapshot may; its images are read with the library, as the snapshot
@@ -50,7 +56,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::{Value, json};
 use swarmops_core::bytes::to_u64;
 use swarmops_core::{Changeset, ChangesetId, LeafKind, ObjectKind, RepoPath, Signature, Tree};
-use swarmops_repo::{CasResult, Change, ChangeOp, CommitRequest, LocalRepo};
+use swarmops_repo::{CasResult, Change, ChangeOp, CommitRequest, LandRequest, LocalRepo};
 use swarmops_store::{
     ChangesetMeta, DEFAULT_INIT_FORMAT, FsObjectStore, FsOps, Index, Journal, Layout, MetaLock,
     MetaStore, ObjectStore, RealFs, Record, StoreFormat,
@@ -127,6 +133,17 @@ enum Op {
     /// with commit number `merge`. Their trees and blobs are put first (`Repo::put_objects`), and
     /// made durable by the batch's flush, with the changesets' objects, before its frame.
     Batch { merge: usize },
+    /// A land of commit number `head`'s change onto ref `target` with idempotency key `key`,
+    /// through `Repo::land` as the binary's `land --key` calls it: its frame holds the landed
+    /// changeset and the target's move to it, together.
+    Land {
+        key: &'static str,
+        head: usize,
+        target: &'static str,
+    },
+    /// The undo of the frame of op number `op` of the run (`Repo::undo`, as `op undo` calls it):
+    /// its frame holds the move of each ref that frame moved back.
+    Undo { op: usize },
 }
 
 /// How many changesets [`Op::Batch`] records in its one frame.
@@ -251,6 +268,47 @@ const RUN: &[Op] = &[
     Op::Batch { merge: 4 },
 ];
 
+/// The ref [`LAND_UNDO_RUN`] lands on and undoes on: `main` moves only forward (the M15
+/// design §4).
+const RELEASE: &str = "release/1";
+
+/// The key of [`LAND_UNDO_RUN`]'s land.
+const LAND_KEY: &str = "power-land";
+
+/// The run of a keyed land and its undo: commit 0 on `main` and `release/1`, commit 1 its child
+/// (the change), a checkpoint, the land of commit 1 onto `release/1` (commit 2, op 5), and the
+/// undo of that land, which moves `release/1` back to commit 0. Six frames, the last two the
+/// land's and the undo's.
+const LAND_UNDO_RUN: &[Op] = &[
+    Op::Commit {
+        parent: None,
+        puts: &[("README.md", "# land\n")],
+    },
+    Op::Cas {
+        name: "main",
+        expected: None,
+        new: Some(0),
+        actor: "test-power/worker-1",
+    },
+    Op::Cas {
+        name: RELEASE,
+        expected: None,
+        new: Some(0),
+        actor: "test-power/worker-1",
+    },
+    Op::Commit {
+        parent: Some(0),
+        puts: &[("src/lib.rs", "pub fn landed() {}\n")],
+    },
+    Op::Flush,
+    Op::Land {
+        key: LAND_KEY,
+        head: 1,
+        target: RELEASE,
+    },
+    Op::Undo { op: 5 },
+];
+
 /// What one transaction of the run records in its frame.
 #[derive(Debug, Clone, Copy)]
 enum Txn {
@@ -267,6 +325,8 @@ enum Txn {
     CommitAdvance { name: &'static str },
     /// [`Op::Batch`]'s [`BATCHED`] changesets, in one frame.
     Batch,
+    /// [`Op::Land`]'s landed changeset and the move of its target `name` to it, in one frame.
+    Land { name: &'static str },
 }
 
 /// One frame of the run, in journal order.
@@ -299,6 +359,8 @@ struct Recorded {
     init: usize,
     /// The external ids [`Op::ExternalIds`] recorded.
     external: Vec<External>,
+    /// The keyed lands [`Op::Land`] made.
+    lands: Vec<Landed>,
     /// The calls, as recorded.
     calls: Vec<RecordedCall>,
 }
@@ -312,6 +374,16 @@ struct External {
     commit: usize,
     /// How many steps came before its put returned.
     returned: usize,
+}
+
+/// A keyed land the run made ([`Op::Land`]).
+#[derive(Debug, Clone)]
+struct Landed {
+    key: &'static str,
+    /// The change's head and the landed changeset, in hex.
+    head: String,
+    changeset: String,
+    target: &'static str,
 }
 
 /// A fixed signature, so that a commit makes the same changeset in every run.
@@ -360,6 +432,7 @@ fn record_ops(format: StoreFormat, ops: &[Op]) -> Recorded {
         parents,
         named,
         keys,
+        lands: LandsMade { undos, lands, .. },
     } = pool.install(|| run(&root, &fs, format, ops));
     let calls = fs.calls();
     let timeline = Timeline::new(&base, &calls);
@@ -368,12 +441,15 @@ fn record_ops(format: StoreFormat, ops: &[Op]) -> Recorded {
         .into_std_path_buf();
     // Each frame's transaction, in order; `None` for the `Compacted` frame that follows a bulk
     // transaction, which is no transaction's.
+    let mut undos = undos.into_iter();
     let mut whats = ops.iter().flat_map(|op| match *op {
         Op::Commit { .. } | Op::CommitBlob { .. } => vec![Some(Txn::Commit)],
         Op::Cas { name, new, .. } => vec![Some(Txn::Cas { name, new })],
         Op::Bulk => vec![Some(Txn::Bulk), None],
         Op::CommitAdvance { name, .. } => vec![Some(Txn::CommitAdvance { name })],
         Op::Batch { .. } => vec![Some(Txn::Batch)],
+        Op::Land { target, .. } => vec![Some(Txn::Land { name: target })],
+        Op::Undo { .. } => vec![Some(undos.next().expect("a move per undo"))],
         Op::Compact | Op::Flush | Op::ExternalIds { .. } => Vec::new(),
     });
     let (mut frames, mut compacted) = (Vec::new(), Vec::new());
@@ -409,6 +485,15 @@ fn record_ops(format: StoreFormat, ops: &[Op]) -> Recorded {
         format,
         init: timeline.mark("init"),
         external,
+        lands: lands
+            .into_iter()
+            .map(|(key, head, landed, target)| Landed {
+                key,
+                head: commits[head].to_string(),
+                changeset: commits[landed].to_string(),
+                target,
+            })
+            .collect(),
         timeline,
         commits: commits.iter().map(ToString::to_string).collect(),
         parents,
@@ -429,6 +514,58 @@ struct Ran {
     named: Vec<(usize, swarmops_core::ObjectId)>,
     /// The keys of the external ids [`Op::ExternalIds`] recorded, in their order.
     keys: Vec<Vec<u8>>,
+    /// The lands and undos.
+    lands: LandsMade,
+}
+
+/// What [`Op::Land`] and [`Op::Undo`] made in [`run`].
+#[derive(Default)]
+struct LandsMade {
+    /// Each [`Op::Undo`]'s frame, as the oracle models it: the move of the ref back.
+    undos: Vec<Txn>,
+    /// Each [`Op::Land`]: its key, the numbers of its head and of the landed commit, its target.
+    lands: Vec<(&'static str, usize, usize, &'static str)>,
+    /// Each land's frame by op number, for the undo that names it: its id, its target, and the
+    /// number of the commit the target named before.
+    frames: HashMap<usize, (swarmops_repo::OpId, &'static str, usize)>,
+}
+
+impl LandsMade {
+    /// Makes op number `n`, `op`, an [`Op::Land`] or an [`Op::Undo`], on `repo`, whose commits
+    /// so far are `commits` and their first parents `parents`.
+    fn make(
+        &mut self,
+        repo: &LocalRepo,
+        (n, op): (usize, Op),
+        commits: &mut Vec<ChangesetId>,
+        parents: &mut Vec<Option<usize>>,
+    ) {
+        match op {
+            Op::Land { key, head, target } => {
+                // 1. The land, its target's head the landed changeset's parent.
+                let (id, onto) = land(repo, commits[head], target, key);
+                let onto = commits.iter().position(|&c| c == onto);
+                let onto = onto.expect("a target on the run's commits");
+                self.lands.push((key, head, commits.len(), target));
+                commits.push(id);
+                parents.push(Some(onto));
+
+                // 2. Its frame's id, the newest operation, for an undo of it.
+                let (newest, _) = repo.op_log(None, 1).expect("op_log");
+                let op = swarmops_repo::OpId::new(newest[0].seq, newest[0].crc);
+                self.frames.insert(n, (op, target, onto));
+            }
+            Op::Undo { op } => {
+                let (id, name, back) = self.frames[&op];
+                let outcome = repo.undo(id, "test-power/worker-1").expect("undo");
+                assert!(!outcome.already_applied, "{outcome:?}");
+                assert!(outcome.warnings.is_empty(), "{outcome:?}");
+                let new = Some(back);
+                self.undos.push(Txn::Cas { name, new });
+            }
+            other => panic!("no land or undo: {other:?}"),
+        }
+    }
 }
 
 /// The run itself, `init` of a store of `format` then `ops`.
@@ -438,7 +575,7 @@ fn run(root: &Utf8Path, fs: &Arc<ImageRecordingFs>, format: StoreFormat, ops: &[
         LocalRepo::create_with_fs_as(root, "power", format, Arc::clone(&shared)).expect("init");
     fs.mark("init");
     let (mut commits, mut parents, mut named) = (Vec::new(), Vec::new(), Vec::new());
-    let mut keys = Vec::new();
+    let (mut keys, mut lands) = (Vec::new(), LandsMade::default());
     for (n, op) in ops.iter().enumerate() {
         match *op {
             Op::Commit { parent, puts } | Op::CommitAdvance { parent, puts, .. } => {
@@ -520,6 +657,9 @@ fn run(root: &Utf8Path, fs: &Arc<ImageRecordingFs>, format: StoreFormat, ops: &[
                 commits.extend(raw_batch(&repo, merged));
                 parents.extend([None, Some(first), Some(first + 1)]);
             }
+            Op::Land { .. } | Op::Undo { .. } => {
+                lands.make(&repo, (n, *op), &mut commits, &mut parents);
+            }
         }
         fs.mark(&format!("op {n}"));
     }
@@ -528,7 +668,23 @@ fn run(root: &Utf8Path, fs: &Arc<ImageRecordingFs>, format: StoreFormat, ops: &[
         parents,
         named,
         keys,
+        lands,
     }
+}
+
+/// [`Op::Land`] on `repo`: the change whose head is `head` landed onto `target` with `key`, as
+/// [`signature`]. The landed changeset, and the target's head it landed on.
+fn land(
+    repo: &LocalRepo,
+    head: ChangesetId,
+    target: &str,
+    key: &str,
+) -> (ChangesetId, ChangesetId) {
+    let mut request = LandRequest::new(head, target, signature());
+    request.key = Some(key.to_owned());
+    let outcome = repo.land(request).expect("land");
+    assert!(outcome.warnings.is_empty(), "{outcome:?}");
+    (outcome.landed, outcome.rebased_onto)
 }
 
 /// [`Op::Compact`] on the store of `layout`, its calls through `shared`: the index compacted, the
@@ -809,7 +965,7 @@ impl Recorded {
                     name,
                     new: Some(new),
                 } => self.move_ref(&mut state, name, new),
-                Txn::CommitAdvance { name } => {
+                Txn::CommitAdvance { name } | Txn::Land { name } => {
                     let new = state.changesets;
                     state.changesets += 1;
                     self.move_ref(&mut state, name, new);
@@ -1037,6 +1193,9 @@ struct Observed {
     /// whole and naming its commit, which the store holds. An entry the image holds otherwise
     /// fails the image whatever the cut.
     held: Vec<bool>,
+    /// What each keyed land of the run did when run again ([`lands_once`]): `landed` or
+    /// `replayed`; empty for a land not run again.
+    relanded: Vec<String>,
 }
 
 /// [`observed_in`], with the external ids judged at `cut` ([`externals_allowed`]): for a check
@@ -1063,6 +1222,7 @@ fn observed_in(rec: &Recorded, image: &Image, cut: usize) -> Result<Observed, St
         (_, Some("E_NOT_A_REPO")) if !formatted => Ok(Observed {
             found: no_store(store)?,
             held: vec![false; rec.external.len()],
+            relanded: Vec::new(),
         }),
         (0, _) if formatted => a_store(rec, store, info.ok()?, dir.path(), cut),
         _ => Err(format!("info, with FORMAT {formatted}: {}", info.run)),
@@ -1250,6 +1410,7 @@ fn a_store(
         .map_err(|why| format!("{why}: {}", commit.run))?;
     clean(store, "after the next commit")?;
     let state = rec.state_after(frames);
+    let relanded = lands_once(rec, store, &state)?;
     let mut history = vec![new.to_owned()];
     if let Some((main, _)) = state.refs.get("main") {
         history.extend(rec.history(main));
@@ -1258,11 +1419,79 @@ fn a_store(
         logged if logged == history => Ok(Observed {
             found: Found::Prefix(frames),
             held,
+            relanded,
         }),
         logged => Err(format!(
             "log of the next commit: {logged:?}, not {history:?}"
         )),
     }
+}
+
+/// `Ok` if each keyed land of the run, run again through the binary on the store at `store`, in
+/// the state `state` of a prefix of the run, lands its change exactly once: a replay of the
+/// recorded land while its target names it, a land otherwise; run once more, a replay of that;
+/// and the target's first-parent history holds one changeset with the key. A land whose head or
+/// target the state does not hold yet is no retry, and is not run.
+fn lands_once(rec: &Recorded, store: &str, state: &State) -> Result<Vec<String>, String> {
+    let mut relanded = Vec::new();
+    for land in &rec.lands {
+        let head = rec.commits.iter().position(|c| *c == land.head);
+        let in_store = head.is_some_and(|n| n < state.changesets);
+        if !in_store || !state.refs.contains_key(land.target) {
+            continue;
+        }
+        let args = ["--repo", store, "--as", AGENT, "land", &land.head];
+        let args = [&args[..], &["--key", land.key, "--target", land.target]].concat();
+
+        // 1. The land again: a replay of the recorded land while the target names it.
+        let names_it =
+            (state.refs.get(land.target)).is_some_and(|(target, _)| *target == land.changeset);
+        let first = landed_by(&args)?;
+        let expected = if names_it { "replayed" } else { "landed" };
+        if first.0 != expected || (names_it && first.1 != land.changeset) {
+            return Err(format!(
+                "land --key {} again: {first:?}, not {expected} (the recorded land {})",
+                land.key, land.changeset
+            ));
+        }
+
+        // 2. Once more: a replay of that land.
+        let second = landed_by(&args)?;
+        if second != ("replayed".to_owned(), first.1.clone()) {
+            return Err(format!(
+                "land --key {} once more: {second:?}, after {first:?}",
+                land.key
+            ));
+        }
+
+        // 3. The target's history holds one changeset with the key.
+        let mut keyed = 0;
+        for id in log(store, land.target)? {
+            let shown = ask(&["--repo", store, "show", &id])?;
+            keyed += usize::from(shown.ok()?["land_key"] == land.key);
+        }
+        if keyed != 1 {
+            return Err(format!(
+                "{keyed} changesets with key {} on {}",
+                land.key, land.target
+            ));
+        }
+        relanded.push(first.0);
+    }
+    Ok(relanded)
+}
+
+/// The status and the landed changeset of the land the binary runs with `args`.
+fn landed_by(args: &[&str]) -> Result<(String, String), String> {
+    let asked = ask(args)?;
+    let result = asked.ok()?;
+    let field = |name: &str| {
+        let value = result[name].as_str();
+        value
+            .map(str::to_owned)
+            .ok_or_else(|| format!("no {name}: {}", asked.run))
+    };
+    Ok((field("status")?, field("landed")?))
 }
 
 /// One distinct image a sweep checked: the cuts and seeds whose images hold its files, and
@@ -1280,6 +1509,8 @@ struct Swept {
     found: BTreeMap<Option<usize>, usize>,
     /// Which external ids they held, each set seen ([`Observed::held`]).
     held: BTreeSet<Vec<bool>>,
+    /// What the keyed lands did when run again, each set seen ([`Observed::relanded`]).
+    relanded: BTreeSet<Vec<String>>,
 }
 
 /// Checks the image of every cut of `cuts` for every seed of `seeds` ([`Seeded`]): the binary
@@ -1323,6 +1554,7 @@ fn sweep(rec: &Recorded, cuts: &[usize], seeds: &[u64]) -> Swept {
     let mut failures = Vec::new();
     let mut found = BTreeMap::new();
     let mut held = BTreeSet::new();
+    let mut relanded = BTreeSet::new();
     for Checked {
         uses,
         found: result,
@@ -1345,6 +1577,7 @@ fn sweep(rec: &Recorded, cuts: &[usize], seeds: &[u64]) -> Swept {
             };
             *found.entry(prefix).or_default() += 1;
             held.insert(result.held.clone());
+            relanded.insert(result.relanded.clone());
         }
     }
     assert!(
@@ -1359,6 +1592,7 @@ fn sweep(rec: &Recorded, cuts: &[usize], seeds: &[u64]) -> Swept {
         images: checked.len(),
         found,
         held,
+        relanded,
     }
 }
 
@@ -1428,6 +1662,54 @@ fn power_loss_images_recover_a_prefix_with_every_acknowledged_commit(format) {
     for held in [vec![false; externals], vec![true; externals]] {
         assert!(swept.held.contains(&held), "no image held {held:?}: {:?}", swept.held);
     }
+}
+}
+
+/// [`sweep`]s [`LAND_UNDO_RUN`] at every cut for `seeds`, and asserts that its images held each
+/// prefix of its frames and no store: the land's and the undo's frames whole or absent, and the
+/// land run again landing once ([`lands_once`]).
+fn sweep_land_undo(format: StoreFormat, seeds: &[u64]) {
+    let rec = record_ops(format, LAND_UNDO_RUN);
+    let cuts: Vec<usize> = (0..=rec.timeline.steps()).collect();
+    let swept = sweep(&rec, &cuts, seeds);
+    println!(
+        "power loss, land and undo: {} calls in {} steps, {} frames; {} distinct images, by the \
+         frames they held: {:?}",
+        rec.calls(),
+        rec.timeline.steps(),
+        rec.frames.len(),
+        swept.images,
+        swept.found
+    );
+    for frames in 0..=rec.frames.len() {
+        assert!(swept.found.contains_key(&Some(frames)), "{:?}", swept.found);
+    }
+    assert!(swept.found.contains_key(&None), "no image without a store");
+
+    // Images where the land run again replayed the recorded land, and images where it landed.
+    for status in ["landed", "replayed"] {
+        let seen = vec![status.to_owned()];
+        assert!(swept.relanded.contains(&seen), "{:?}", swept.relanded);
+    }
+}
+
+per_format! {
+/// The power fails after any step of [`LAND_UNDO_RUN`], a keyed land onto `release/1` and its
+/// undo, and the disk keeps nothing that was not durable (seed 0): every image holds the land
+/// whole or not at all, and the undo too, and the same `land --key` run again lands the change
+/// exactly once (the M16 design §2).
+fn power_loss_images_keep_a_keyed_land_and_an_undo(format) {
+    sweep_land_undo(format, &[0]);
+}
+}
+
+per_format! {
+/// [`power_loss_images_keep_a_keyed_land_and_an_undo`] for ten seeds: nothing kept, everything
+/// kept, and eight at random.
+#[ignore = "slow, ~90 s: images of every cut of the land and undo run x 10 seeds through the binary"]
+fn power_loss_images_keep_a_keyed_land_and_an_undo_10_seeds(format) {
+    let seeds: Vec<u64> = (0..10).collect();
+    sweep_land_undo(format, &seeds);
 }
 }
 
@@ -1797,6 +2079,45 @@ fn the_prefix_oracle_takes_an_advancing_commit_s_changeset_and_move_together() {
     assert_eq!(rec.state_after(1), both);
 }
 
+/// The prefix oracle's own check for [`LAND_UNDO_RUN`]: after the land's frame, the store holds
+/// the landed changeset and `release/1` names it, together; after the undo's, `release/1` names
+/// commit 0 again, one version on.
+#[test]
+fn the_prefix_oracle_takes_a_land_and_its_undo_whole() {
+    let rec = record_ops(DEFAULT_INIT_FORMAT, LAND_UNDO_RUN);
+    let at = |n: usize, version: u64| (rec.commits[n].clone(), version);
+    let before = State {
+        changesets: 2,
+        refs: BTreeMap::from([
+            ("main".to_owned(), at(0, 1)),
+            (RELEASE.to_owned(), at(0, 1)),
+        ]),
+    };
+    assert_eq!(rec.state_after(4), before);
+    let landed = State {
+        changesets: 3,
+        refs: BTreeMap::from([
+            ("main".to_owned(), at(0, 1)),
+            (RELEASE.to_owned(), at(2, 2)),
+        ]),
+    };
+    assert_eq!(rec.state_after(5), landed);
+    let undone = State {
+        changesets: 3,
+        refs: BTreeMap::from([
+            ("main".to_owned(), at(0, 1)),
+            (RELEASE.to_owned(), at(0, 3)),
+        ]),
+    };
+    assert_eq!(rec.state_after(6), undone);
+    assert_eq!(rec.frames.len(), 6);
+    assert_eq!(
+        rec.parents[2],
+        Some(0),
+        "the land's parent is release/1's head"
+    );
+}
+
 /// The recovery oracle's own check ([`recovered_as_imaged`]): it takes a report of exactly what
 /// the next commit's write repaired, and refuses one that misstates the cut or the frames listed,
 /// or that lists a frame the run had not begun to write by the cut.
@@ -1862,6 +2183,7 @@ fn the_external_id_oracle_judges_each_cut() {
         Ok(Observed {
             found: Found::Prefix(1),
             held: vec![held],
+            relanded: Vec::new(),
         })
     };
     assert_eq!(allowed(&rec, returned - 1, &observed(false)), Ok(()));

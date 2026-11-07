@@ -530,7 +530,7 @@ const TAKE_BACKS: u64 = 1_000;
 /// and the undo by A's id is not found (`checksum`) and leaves B's move. The op log then lists
 /// every number once, and no id that was taken back.
 #[test]
-#[ignore = "slow, ~25 s: 1,000 take-backs"]
+#[ignore = "slow, ~130 s: 1,000 take-backs; ~25 s idle, 128 s loaded"]
 fn take_backs_never_reuse_an_id() {
     let (_dir, root, repo) = new_repo();
     let chain = chain(&repo);

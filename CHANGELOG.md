@@ -129,6 +129,9 @@ collects the changes on `stable` that no release holds yet, until the next relea
   ([Build and test a change](docs/operate/build-and-test.md#1-create-a-workspace)).
 - The `meta.resolved` of a sparse workspace's `ws` envelopes also names its materialized
   changeset, which the commands read to compare the tree with the disk.
+- Crash tests (the M16 design §2): a literal `SIGKILL` now also kills `ref set` and `op undo` on
+  `release/1`, two reader processes (`ref list`, `show`, `cat`) run beside every kill loop and
+  never find a missing object, and the power-loss images cover a keyed `land` and its undo.
 
 ### Fixed
 
