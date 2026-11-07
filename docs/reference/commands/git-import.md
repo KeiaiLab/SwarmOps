@@ -321,14 +321,15 @@ gives both costs. The [performance ledger](../../perf.md) has no measurement of 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `git_head_sha` | `string` | yes | `git_ref`'s commit: its git id, 40 lowercase hex digits. |
-| `head_changeset` | `string` | yes | The changeset of `git_ref`'s commit, which `target_ref` names now. |
+| `head_changeset` | `string` | yes | The changeset `target_ref` names now: that of `git_ref`'s commit, or the target's head when it descends from that commit's changeset already (`tip_changeset`). |
 | `imported` | `integer` | yes | How many commits became changesets in this import. |
 | `lossy` | `array of LossyCommitOut` | yes | The commits this import took lossily, as the request's `lossy` allowed: the first 100, in the order imported. `lossy_total` counts them all. |
 | `lossy_total` | `integer` | yes | How many commits this import took lossily, the ones past the first 100 included. |
 | `old_head` | `string or null` | no | What `target_ref` named when the import started; omitted when it did not exist, and the import created it. |
-| `ref_moved` | `boolean` | yes | Whether this import moved `target_ref`, or created it; `false` when the ref named `head_changeset` already, after an earlier import of the same commit or a concurrent one. |
+| `ref_moved` | `boolean` | yes | Whether this import moved `target_ref`, or created it; `false` when the ref named `head_changeset` already, after an earlier import of the same commit or a concurrent one, or descends from `git_ref`'s commit (`tip_changeset`). |
 | `skipped` | `integer` | yes | How many commits the import found in the store already, where its walk stopped: the commit of the target's head, or commits an earlier import made. Importing the commit the target names already imports 0 and skips 1. |
 | `target_ref` | `string` | yes | The ref the import moved, or found at `head_changeset` already. |
+| `tip_changeset` | `string or null` | no | The changeset of `git_ref`'s commit when `target_ref`'s head descends from it already, over every parent: the import wrote nothing and moved nothing, and `head_changeset` is the target's head. Omitted otherwise. |
 | `warnings` | `array of string` | no | Problems the import met that did not stop it, such as failed housekeeping after the target's move became durable; the import itself succeeded. Omitted when empty. |
 
 Envelope `op`: `git_import`.

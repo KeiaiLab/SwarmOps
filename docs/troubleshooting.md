@@ -799,6 +799,13 @@ first-parent history are refused, and nothing is written. Here the undo of the p
 undo's adds `op` and `id`, and a deletion's gives `name` only. To take `main` back, land a change
 that reverts it: the history keeps both changes. A `release/<name>` ref moves either way.
 
+`sync` refuses the same way, adding `details.remote`, when the remote's head does not hold on its
+first-parent history the commit the last sync or push of `main` matched it to: after a force push
+on the remote, or for a merge that keeps that commit only as a second parent. `details.changeset`
+is that commit's changeset and `details.target` the remote head's; the fetch's tracking ref moved,
+nothing else did. Have the remote push a merge that keeps its old head as the first parent, then
+sync again ([GitHub as a remote](guides/github-remote.md#when-sync-stops)).
+
 ## A busy store
 
 ### `E_BUSY`

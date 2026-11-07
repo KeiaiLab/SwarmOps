@@ -2999,7 +2999,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_REF_PROTECTED",
-          "description": "`main` was asked to be deleted, or moved off its first-parent history by `ref set` or\n`op undo`: it is never deleted, and moves only forward (`details.name`). A move adds\n`changeset` (the head it would drop) and `target`; an undo adds `op` and `id`. Nothing was\nwritten; to take `main` back, land a change that reverts it.",
+          "description": "`main` was asked to be deleted, or moved off its first-parent history by `ref set` or\n`op undo`: it is never deleted, and moves only forward (`details.name`). A move adds\n`changeset` (the head it would drop) and `target`; an undo adds `op` and `id`. Nothing was\nwritten; to take `main` back, land a change that reverts it. `sync` refuses a remote head\nthat does not hold what it last published on its first-parent history, adding `remote`;\nthe remote's way back is a merge that keeps its old head as the first parent.",
           "type": "string"
         },
         {
@@ -4134,7 +4134,7 @@ expression: s.redact(&all)
           "type": "string"
         },
         "head_changeset": {
-          "description": "The changeset of `git_ref`'s commit, which `target_ref` names now.",
+          "description": "The changeset `target_ref` names now: that of `git_ref`'s commit, or the target's head\nwhen it descends from that commit's changeset already (`tip_changeset`).",
           "type": "string"
         },
         "imported": {
@@ -4164,7 +4164,7 @@ expression: s.redact(&all)
           ]
         },
         "ref_moved": {
-          "description": "Whether this import moved `target_ref`, or created it; `false` when the ref named\n`head_changeset` already, after an earlier import of the same commit or a concurrent one.",
+          "description": "Whether this import moved `target_ref`, or created it; `false` when the ref named\n`head_changeset` already, after an earlier import of the same commit or a concurrent one,\nor descends from `git_ref`'s commit (`tip_changeset`).",
           "type": "boolean"
         },
         "skipped": {
@@ -4176,6 +4176,13 @@ expression: s.redact(&all)
         "target_ref": {
           "description": "The ref the import moved, or found at `head_changeset` already.",
           "type": "string"
+        },
+        "tip_changeset": {
+          "description": "The changeset of `git_ref`'s commit when `target_ref`'s head descends from it already, over\nevery parent: the import wrote nothing and moved nothing, and `head_changeset` is the\ntarget's head. Omitted otherwise.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "warnings": {
           "description": "Problems the import met that did not stop it, such as failed housekeeping after the\ntarget's move became durable; the import itself succeeded. Omitted when empty.",

@@ -2125,19 +2125,26 @@ pub struct GitImportResp {
     /// commit of the target's head, or commits an earlier import made. Importing the commit the
     /// target names already imports 0 and skips 1.
     pub skipped: u64,
-    /// The changeset of `git_ref`'s commit, which `target_ref` names now.
+    /// The changeset `target_ref` names now: that of `git_ref`'s commit, or the target's head
+    /// when it descends from that commit's changeset already (`tip_changeset`).
     pub head_changeset: String,
     /// `git_ref`'s commit: its git id, 40 lowercase hex digits.
     pub git_head_sha: String,
     /// The ref the import moved, or found at `head_changeset` already.
     pub target_ref: String,
     /// Whether this import moved `target_ref`, or created it; `false` when the ref named
-    /// `head_changeset` already, after an earlier import of the same commit or a concurrent one.
+    /// `head_changeset` already, after an earlier import of the same commit or a concurrent one,
+    /// or descends from `git_ref`'s commit (`tip_changeset`).
     pub ref_moved: bool,
     /// What `target_ref` named when the import started; omitted when it did not exist, and the
     /// import created it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub old_head: Option<String>,
+    /// The changeset of `git_ref`'s commit when `target_ref`'s head descends from it already, over
+    /// every parent: the import wrote nothing and moved nothing, and `head_changeset` is the
+    /// target's head. Omitted otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tip_changeset: Option<String>,
     /// The commits this import took lossily, as the request's `lossy` allowed: the first 100,
     /// in the order imported. `lossy_total` counts them all.
     pub lossy: Vec<LossyCommitOut>,
@@ -2171,6 +2178,7 @@ impl GitImportResp {
             target_ref: target_ref.into(),
             ref_moved,
             old_head: None,
+            tip_changeset: None,
             lossy,
             lossy_total,
             warnings: Vec::new(),

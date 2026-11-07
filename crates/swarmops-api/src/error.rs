@@ -156,7 +156,9 @@ error_codes! {
     /// `main` was asked to be deleted, or moved off its first-parent history by `ref set` or
     /// `op undo`: it is never deleted, and moves only forward (`details.name`). A move adds
     /// `changeset` (the head it would drop) and `target`; an undo adds `op` and `id`. Nothing was
-    /// written; to take `main` back, land a change that reverts it.
+    /// written; to take `main` back, land a change that reverts it. `sync` refuses a remote head
+    /// that does not hold what it last published on its first-parent history, adding `remote`;
+    /// the remote's way back is a merge that keeps its old head as the first parent.
     RefProtected => "E_REF_PROTECTED", EXIT_ERROR, false;
     // `git import` (M3): the source repository and its history.
     /// `git import` found no git repository it can open at `git_path` (`details.git_path`).

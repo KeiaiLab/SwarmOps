@@ -682,7 +682,7 @@ Kind: enumeration. `swarmops schema ErrorCode` prints its JSON Schema.
 | `"E_MAINTENANCE_BUSY"` | Another gc, repair or upgrade holds the store's maintenance lease; nothing was done, and running the operation again once it is done can succeed. |
 | `"E_FORMAT_REQUIRED"` | The ref name is one the store's format does not take but a later one does: `details` names `name`, `needs` (the format that takes it) and `store` (the store's); `swarmops upgrade` moves the store to it. |
 | `"E_TAG_IMMUTABLE"` | A tag was asked to move from one target to another: a tag is created and deleted, never moved (`details.name`). Nothing was written. |
-| `"E_REF_PROTECTED"` | `main` was asked to be deleted, or moved off its first-parent history by `ref set` or `op undo`: it is never deleted, and moves only forward (`details.name`). A move adds `changeset` (the head it would drop) and `target`; an undo adds `op` and `id`. Nothing was written; to take `main` back, land a change that reverts it. |
+| `"E_REF_PROTECTED"` | `main` was asked to be deleted, or moved off its first-parent history by `ref set` or `op undo`: it is never deleted, and moves only forward (`details.name`). A move adds `changeset` (the head it would drop) and `target`; an undo adds `op` and `id`. Nothing was written; to take `main` back, land a change that reverts it. `sync` refuses a remote head that does not hold what it last published on its first-parent history, adding `remote`; the remote's way back is a merge that keeps its old head as the first parent. |
 | `"E_GIT_NOT_A_REPO"` | `git import` found no git repository it can open at `git_path` (`details.git_path`). |
 | `"E_GIT_REF_NOT_FOUND"` | `git import`: the source repository has no `git_ref`, or it names no commit (`details.git_ref`; `details.kind` the object it names instead, such as a tree). |
 | `"E_GIT_IMPORT_DIVERGED"` | `git import`: the target ref's head is not the import of `git_ref`'s commit or of an ancestor of it, because the source was rewritten, `git_ref` is behind the commit the head holds, or a native changeset was committed on the target, so nothing was written; there is no silent merge. `details` names `target_ref`, `target_head`, `git_head` and `base`, the git commit the head stands for (the one it holds, or for a native head the one it exports to); and `external_id` (`commit`, `changeset`) where the import passed over an external id entry whose changeset stands for another commit, which `verify --deep` reports. |
@@ -889,14 +889,15 @@ Kind: object. `swarmops schema GitImportResp` prints its JSON Schema.
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
 | `git_head_sha` | `string` | yes | `git_ref`'s commit: its git id, 40 lowercase hex digits. |
-| `head_changeset` | `string` | yes | The changeset of `git_ref`'s commit, which `target_ref` names now. |
+| `head_changeset` | `string` | yes | The changeset `target_ref` names now: that of `git_ref`'s commit, or the target's head when it descends from that commit's changeset already (`tip_changeset`). |
 | `imported` | `integer` (uint64) | yes | How many commits became changesets in this import. |
 | `lossy` | array of [`LossyCommitOut`](#lossycommitout) | yes | The commits this import took lossily, as the request's `lossy` allowed: the first 100, in the order imported. `lossy_total` counts them all. |
 | `lossy_total` | `integer` (uint64) | yes | How many commits this import took lossily, the ones past the first 100 included. |
 | `old_head` | `string` or `null` | no | What `target_ref` named when the import started; omitted when it did not exist, and the import created it. |
-| `ref_moved` | `boolean` | yes | Whether this import moved `target_ref`, or created it; `false` when the ref named `head_changeset` already, after an earlier import of the same commit or a concurrent one. |
+| `ref_moved` | `boolean` | yes | Whether this import moved `target_ref`, or created it; `false` when the ref named `head_changeset` already, after an earlier import of the same commit or a concurrent one, or descends from `git_ref`'s commit (`tip_changeset`). |
 | `skipped` | `integer` (uint64) | yes | How many commits the import found in the store already, where its walk stopped: the commit of the target's head, or commits an earlier import made. Importing the commit the target names already imports 0 and skips 1. |
 | `target_ref` | `string` | yes | The ref the import moved, or found at `head_changeset` already. |
+| `tip_changeset` | `string` or `null` | no | The changeset of `git_ref`'s commit when `target_ref`'s head descends from it already, over every parent: the import wrote nothing and moved nothing, and `head_changeset` is the target's head. Omitted otherwise. |
 | `warnings` | array of `string` | no | Problems the import met that did not stop it, such as failed housekeeping after the target's move became durable; the import itself succeeded. Omitted when empty. |
 
 ## HeadMove

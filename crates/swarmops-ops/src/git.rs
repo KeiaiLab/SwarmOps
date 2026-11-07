@@ -233,6 +233,7 @@ fn response(report: ImportReport) -> GitImportResp {
         target_ref,
         old_head,
         ref_moved,
+        tip,
         lossy,
         lossy_total,
         warnings,
@@ -259,6 +260,7 @@ fn response(report: ImportReport) -> GitImportResp {
         lossy_total,
     );
     out.old_head = old_head.map(|id| id.to_string());
+    out.tip_changeset = tip.map(|id| id.to_string());
     out.warnings = warnings;
     out
 }
@@ -300,7 +302,7 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let report = ImportReport::new(
+        let mut report = ImportReport::new(
             3,
             1,
             head,
@@ -313,6 +315,7 @@ mod tests {
             vec!["a warning".to_owned()],
             Recovered::default(),
         );
+        report.tip = Some(old);
         let mut expected = GitImportResp::new(
             3,
             1,
@@ -328,6 +331,7 @@ mod tests {
             7,
         );
         expected.old_head = Some(old.to_string());
+        expected.tip_changeset = Some(old.to_string());
         expected.warnings = vec!["a warning".to_owned()];
         assert_eq!(response(report), expected);
     }

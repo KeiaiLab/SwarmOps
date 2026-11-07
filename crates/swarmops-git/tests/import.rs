@@ -637,51 +637,113 @@ fn parents(repo: &LocalRepo, id: ChangesetId) -> Vec<ChangesetId> {
     stored.expect("the changeset is stored").changeset.parents
 }
 
-/// A native changeset on the target that was never exported: the import goes on from the commit
-/// it exports to (M8 decision 7), which the tip does not reach, so the import is diverged with
-/// that commit as its base, and writes nothing but the derived values it made to find it.
+/// A tip the target's head descends from moves nothing (the M16 design §3): `linear` imported, a
+/// native changeset committed on `main` above it, and `linear`'s tip imported again, with
+/// `ExportOid` registered and without. The import succeeds and writes nothing: `main` stays at
+/// the native head, the report names the tip's changeset, and no frame or file but the derived
+/// store's is written.
 #[test]
-fn an_import_onto_an_unexported_native_head_is_diverged() {
-    use swarmops_git::{ExportOid, register};
+fn an_ancestor_tip_moves_nothing() {
+    use swarmops_git::register;
 
-    let fixture = git::fixture("linear");
-    let source = open(&fixture);
-    let (_dir, root, mut repo) = new_repo();
-    register(&mut repo).unwrap();
-    import(&repo, &source, &request("HEAD")).unwrap();
-    let native = native_on_main(&repo);
+    for registered in [true, false] {
+        let fixture = git::fixture("linear");
+        let source = open(&fixture);
+        let (_dir, root, mut repo) = new_repo();
+        if registered {
+            register(&mut repo).unwrap();
+        }
+        let first = import(&repo, &source, &request("HEAD")).unwrap();
+        let native = native_on_main(&repo);
+        let (log_len, before) = (journal_len(&root), files_but_derived(&root));
+
+        let again = import(&repo, &source, &request("HEAD"))
+            .unwrap_or_else(|error| panic!("registered {registered}: {error:?}"));
+        assert!(!again.ref_moved, "registered {registered}");
+        assert_eq!((again.imported, again.skipped), (0, 1));
+        assert_eq!((again.head, again.old_head), (native, Some(native)));
+        assert_eq!(
+            (again.tip, again.git_head),
+            (Some(first.head), first.git_head)
+        );
+        assert_eq!(main_head(&repo), native);
+        assert_eq!(
+            journal_len(&root),
+            log_len,
+            "registered {registered}: a frame"
+        );
+        assert_eq!(files_but_derived(&root), before, "nothing written");
+    }
+}
+
+/// F9's case: a history of 100 commits imported, three native changesets landed on `main` above
+/// it, and its old tip imported again. Nothing moves and nothing is written but the derived
+/// values the native head's base takes.
+#[test]
+fn f9_import_under_three_lands_moves_nothing() {
+    const COMMITS: u64 = 100;
+    const LANDS: usize = 3;
+
+    // 1. The history, one file changed by each commit.
+    let mut source = MemSource::default();
+    let mut tip: Option<GitOid> = None;
+    for i in 0..COMMITS {
+        let blob = source.blob(format!("{i}\n").as_bytes());
+        let tree = source.tree(&[("100644", b"n.txt", blob)]);
+        tip = Some(source.commit(tree, tip.as_slice(), &format!("Commit {i}\n")));
+    }
+    let tip = tip.expect("a history").to_string();
+
+    // 2. Imported, then three lands on main.
+    let (_dir, root, repo) = unsynced_repo();
+    let imported = import(&repo, &source, &request(&tip)).unwrap();
+    assert_eq!(imported.imported, COMMITS);
+    let mut head = imported.head;
+    for i in 0..LANDS {
+        let file = format!("land-{i}.txt");
+        let landed = commit(&repo, &[head], vec![put(&file, b"landed\n")]);
+        let moved = repo
+            .cas_ref("main", Some(head), Some(landed), ACTOR)
+            .unwrap();
+        assert!(matches!(moved.result, CasResult::Applied { .. }));
+        head = landed;
+    }
     let (log_len, before) = (journal_len(&root), files_but_derived(&root));
 
-    let error = import(&repo, &source, &request("HEAD")).unwrap_err();
-    let exported = repo.derived::<ExportOid>(native, &()).unwrap().git_oid();
-    assert!(
-        matches!(
-            error,
-            ImportError::Diverged { base: Some(base), target_head, .. }
-                if base == exported && target_head == native
-        ),
-        "{error:?}"
+    // 3. The old tip again: nothing.
+    let again = import(&repo, &source, &request(&tip)).unwrap();
+    assert!(!again.ref_moved);
+    assert_eq!(
+        (again.imported, again.head, again.old_head),
+        (0, head, Some(head))
     );
-    assert_eq!(journal_len(&root), log_len);
+    assert_eq!(again.tip, Some(imported.head));
+    assert_eq!(main_head(&repo), head);
+    assert_eq!(journal_len(&root), log_len, "a frame was written");
     assert_eq!(files_but_derived(&root), before, "nothing written");
 }
 
 /// The base of a native head is the commit it exports to, which the import derives from the
-/// store's objects itself, as the export does: on a repository without `ExportOid` registered, an
-/// import onto a native head that was never exported is diverged from the commit a registered
-/// handle derives for it, and writes nothing but the derived values it made to find it.
+/// store's objects itself, as the export does: on a repository without `ExportOid` registered, a
+/// commit made in git on `linear`'s tip, imported onto a native head that was never exported, is
+/// diverged from the commit a registered handle derives for that head, and the import writes
+/// nothing but the derived values it made to find it.
 #[test]
 fn an_import_onto_a_native_head_needs_no_export_oid_registered() {
     use swarmops_git::{ExportOid, register};
 
     let fixture = git::fixture("linear");
-    let source = open(&fixture);
+    let dir = fixture
+        .repo
+        .clone()
+        .expect("the fixture holds a repository");
     let (_dir, root, repo) = new_repo();
-    import(&repo, &source, &request("HEAD")).unwrap();
+    let first = import(&repo, &open(&fixture), &request("HEAD")).unwrap();
     let native = native_on_main(&repo);
+    commit_in_git(&dir, first.git_head, "git.txt");
     let (log_len, before) = (journal_len(&root), files_but_derived(&root));
 
-    let error = import(&repo, &source, &request("HEAD")).unwrap_err();
+    let error = import(&repo, &open(&fixture), &request("main")).unwrap_err();
     let ImportError::Diverged {
         base: Some(base),
         target_head,

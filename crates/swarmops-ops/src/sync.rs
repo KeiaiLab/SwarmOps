@@ -15,6 +15,7 @@
 //!     M = main                           read first; the compare-and-swap below guards it
 //!     fetch (its locked form)            → C_R; skipped after a lost move of main
 //!     no main          → main := C_R                           fast_forwarded
+//!     P off C_R's first parents → E_REF_PROTECTED, nothing moved
 //!     M = C_R          → nothing                               up_to_date
 //!     nothing above B  → main: M → C_R                         fast_forwarded
 //!     B = C_R          → H = M (the remote did not move)
@@ -23,8 +24,17 @@
 //!     mode local       → stop                                  landed_locally
 //!     push main (its locked form)          (lease lost: again, with a fetch)
 //!                                                              pushed
+//!   done → refs/published/<remote>/<branch> := the remote commit main holds as first parent
 //!   used up → E_CAS_RETRY_EXHAUSTED or E_REMOTE_DIVERGED remote_moved, with main_moved
 //! ```
+//!
+//! The floor (the M16 design §3) is `P`, the changeset of the commit
+//! `refs/published/<remote>/<branch>` names, when it is on `M`'s first-parent chain: `C_R` must
+//! hold it on its own first-parent chain, so a remote forced below what a sync or push published
+//! is refused, as is a fast-forward to a head that holds a published `M` only as a merge's second
+//! parent. Without `P` (a first sync, a rebuilt mirror) the floor is the base `B`, which `C_R`
+//! reaches by the plan's construction (the M15 level): a pull request merged by a merge commit
+//! holds unpublished work only as its second parent and still fast-forwards.
 
 use serde_json::Value;
 use swarmops_api::{
@@ -41,6 +51,7 @@ use swarmops_store::SYSTEM_GIT;
 
 use crate::error;
 use crate::local::{LocalOps, Recording, Resolved};
+use crate::push::mark_published;
 
 /// The store ref a sync lands onto the remote's head and publishes.
 const MAIN: &str = "main";
@@ -392,21 +403,22 @@ impl Syncing<'_, '_> {
             if !self.move_main(None, theirs)? {
                 return Ok(Step::MainMoved);
             }
-            let done = self.response(SyncStatusKind::FastForwarded, attempt, sha, theirs);
+            let done = self.finish(SyncStatusKind::FastForwarded, attempt, sha, theirs);
             return Ok(Step::Done(done));
         };
 
         // 3. Nothing unpublished: up to date, or a fast-forward to the remote's head.
         let plan = engine::plan(&self.rec.ops.repo, main, theirs).map_err(|e| self.engine(e))?;
+        self.above_floor(main, theirs)?;
         if plan.unpublished.is_empty() {
             if main == theirs {
-                let done = self.response(SyncStatusKind::UpToDate, attempt, sha, main);
+                let done = self.finish(SyncStatusKind::UpToDate, attempt, sha, main);
                 return Ok(Step::Done(done));
             }
             if !self.move_main(Some(main), theirs)? {
                 return Ok(Step::MainMoved);
             }
-            let done = self.response(SyncStatusKind::FastForwarded, attempt, sha, theirs);
+            let done = self.finish(SyncStatusKind::FastForwarded, attempt, sha, theirs);
             return Ok(Step::Done(done));
         }
 
@@ -432,7 +444,7 @@ impl Syncing<'_, '_> {
             } else {
                 SyncStatusKind::LandedLocally
             };
-            let mut done = self.response(kind, attempt, sha, landed.head);
+            let mut done = self.finish(kind, attempt, sha, landed.head);
             done.published = published;
             done.dropped = landed.dropped;
             return Ok(Step::Done(done));
@@ -444,7 +456,7 @@ impl Syncing<'_, '_> {
             Err(e) if remote_moved(&e) => return Ok(Step::RemoteMoved(e)),
             Err(e) => return Err(e),
         };
-        let mut done = self.response(SyncStatusKind::Pushed, attempt, new, landed.head);
+        let mut done = self.finish(SyncStatusKind::Pushed, attempt, new, landed.head);
         done.published = published;
         done.dropped = landed.dropped;
         Ok(Step::Done(done))
@@ -479,12 +491,33 @@ impl Syncing<'_, '_> {
             Err(e) if remote_moved(&e) => return Ok(Step::RemoteMoved(e)),
             Err(e) => return Err(e),
         };
-        Ok(Step::Done(self.response(
-            SyncStatusKind::Pushed,
-            attempt,
-            new,
-            main,
-        )))
+        let done = self.finish(SyncStatusKind::Pushed, attempt, new, main);
+        Ok(Step::Done(done))
+    }
+
+    /// Refuses a sync whose remote head `theirs` does not hold `P` on its first-parent history
+    /// when `P` is on `main`'s first-parent chain (the M16 design §3). Without such a `P` the
+    /// floor is the plan's base, which `theirs` reaches already.
+    fn above_floor(&self, main: ChangesetId, theirs: ChangesetId) -> Result<(), OpError> {
+        // 1. P: what main was last matched to, if the store knows it.
+        let remote = &self.remote.name;
+        let marked = (self.mirror)
+            .published(remote, &self.remote.branch)
+            .map_err(error::mirror_error)?;
+        let Some(published) = (match marked {
+            Some(oid) => self.rec.known(oid)?,
+            None => None,
+        }) else {
+            return Ok(());
+        };
+
+        // 2. P counts only on main's first-parent chain, and the remote's head holds it there.
+        let read = self.rec.ops.repo.snapshot().map_err(error::op)?;
+        let on_chain = |below, above| read.is_ancestor(below, above).map_err(error::op);
+        if !on_chain(published, main)? || on_chain(published, theirs)? {
+            return Ok(());
+        }
+        Err(error::below_floor(remote, published, theirs))
     }
 
     /// Drops the changes of `plan` the remote at `theirs` holds, and lands the rest onto it.
@@ -564,6 +597,24 @@ impl Syncing<'_, '_> {
             ));
         }
         Ok(published)
+    }
+
+    /// [`Syncing::response`], after `refs/published/<remote>/<branch>` is set to `remote_new`,
+    /// the remote commit `main` now holds as its first parent: the next sync's floor. A failed
+    /// write is a warning: the floor falls back to the base, as before the first sync.
+    fn finish(
+        &mut self,
+        kind: SyncStatusKind,
+        attempt: u32,
+        remote_new: GitOid,
+        main_new: ChangesetId,
+    ) -> SyncResp {
+        let (remote, branch) = (&self.remote.name, &self.remote.branch);
+        if let Err(e) = mark_published(self.mirror, remote, branch, remote_new) {
+            let failed = error::mirror_error(e);
+            (self.warnings).push(format!("published_ref_failed: {}", failed.message));
+        }
+        self.response(kind, attempt, remote_new, main_new)
     }
 
     /// The response of a sync that ended as `kind` in `attempt`, the remote at `remote_new` and

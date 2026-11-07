@@ -267,10 +267,15 @@ left).
   a changeset a ref holds (an edit, a split, a squash or a drop of history), so only ref moves are
   judged. *Unscheduled: a configured set of protected refs (the v0.6.0 design, decision 8). Found:
   the 2026-10-27 completeness report (B23); narrowed by M15 Task S3.*
-- **A sync or a git import can still move `main` back.** The forward-only rule guards `ref set`
-  and `op undo`; `sync`'s own move of `main` to the remote's head, and `git import --into main`,
-  are not judged by it. *Unscheduled: with the configured set of protected refs. Found: the M15
-  design §4.*
+- **A rebuilt mirror lowers the sync's floor.** `sync` refuses a remote head that does not hold
+  on its first-parent history the commit the last sync or push of `main` matched it to, recorded
+  in the mirror as `refs/published/<remote>/<branch>` (the M16 design §3). A rebuilt mirror, or a
+  remote removed and added again, loses `refs/published/*`; until the next successful sync the
+  floor is the sync base B (the M15 level), so a remote forced below published work then has that
+  work landed again on top of it. A `git import --into main` moves `main` only forward over every
+  parent: an ancestor tip moves nothing, and a tip off the head's history is
+  `E_GIT_IMPORT_DIVERGED`. *Documented (the M16 design §3). Found: the M15 design §4; narrowed by
+  M16 Task S3.*
 - **A commit holds its contents in memory.** All of them, up to the 1 GiB they may hold
   together, and up to about two to three times that while their objects are encoded in
   parallel, besides the request's text (at most 64 MiB). `blob put` (`blob_put`) and

@@ -27,6 +27,9 @@
 //!    base, and the one the tip descends from is the base. Otherwise [`ImportError::Diverged`],
 //!    naming the head's `git.oid`, else the commit a native head exports to, and the first entry
 //!    the walk passed over whose changeset stands for another commit, and nothing is written.
+//!    A known tip whose changeset the head descends from, over every parent, is checked first:
+//!    nothing is written, the target stays, and the report names the tip's changeset
+//!    ([`ImportReport::tip`], the M16 design §3).
 //! 4. A base whose tree the head's root holds without loss (a `git.oid` without `git.lossy`, or
 //!    the head's export, which is its root rendered) seeds the conversion: the head's root and
 //!    the base commit's git tree are walked together, entries matched by name and kind, and a
@@ -212,6 +215,9 @@ pub struct ImportReport {
     /// Whether this import moved the target (or created it); `false` when it named the tip's
     /// changeset already, and for an objects-only import, which moves no ref.
     pub ref_moved: bool,
+    /// The tip's changeset when it is the target's head's ancestor (the M16 design §3): the
+    /// import moved nothing and `head` stays the target's head; `None` otherwise.
+    pub tip: Option<ChangesetId>,
     /// The first [`MAX_LOSSY_LISTED`] commits recorded with a loss, in the order recorded.
     pub lossy: Vec<LossyCommit>,
     /// How many commits were recorded with a loss.
@@ -252,6 +258,7 @@ impl ImportReport {
             target_ref,
             old_head,
             ref_moved,
+            tip: None,
             lossy,
             lossy_total,
             warnings,
@@ -490,20 +497,9 @@ pub fn import(
                     external_id: walk.mismatched.map(Box::new),
                 });
             }
-            Some(Leads::Tip) => {
-                return Ok(ImportReport {
-                    imported: 0,
-                    skipped: bytes::to_u64(walk.known.len()),
-                    head: base.head,
-                    git_head: tip,
-                    target_ref: req.target_ref.clone(),
-                    old_head,
-                    ref_moved: false,
-                    lossy: Vec::new(),
-                    lossy_total: 0,
-                    warnings: walk.warnings,
-                    recovered: Recovered::default(),
-                });
+            Some(Leads::Tip) => return Ok(unmoved(base.head, tip, None, req, walk)),
+            Some(Leads::Behind(changeset)) => {
+                return Ok(unmoved(base.head, tip, Some(changeset), req, walk));
             }
             Some(Leads::Met(commit)) => seeds = commit.seeds.then_some((commit.oid, Meeting::Met)),
             Some(Leads::Reached) => {
@@ -530,6 +526,31 @@ pub fn import(
         run.frame(commits)?;
     }
     run.finish(tip, old_head)
+}
+
+/// The report of an import that found the target's head at the tip, or past it (`behind`, the
+/// tip's changeset): nothing written, the target unmoved.
+fn unmoved(
+    head: ChangesetId,
+    tip: GitOid,
+    behind: Option<ChangesetId>,
+    req: &ImportRequest,
+    walk: Walk,
+) -> ImportReport {
+    ImportReport {
+        imported: 0,
+        skipped: bytes::to_u64(walk.known.len()),
+        head,
+        git_head: tip,
+        target_ref: req.target_ref.clone(),
+        old_head: Some(head),
+        ref_moved: false,
+        tip: behind,
+        lossy: Vec::new(),
+        lossy_total: 0,
+        warnings: walk.warnings,
+        recovered: Recovered::default(),
+    }
 }
 
 /// The target's head when the import starts, and the git commits it stands for: what the import
@@ -570,6 +591,9 @@ enum Leads {
     /// The walk met none of them, but stopped at a known commit whose changeset descends from the
     /// head in the store.
     Reached,
+    /// The tip is known as this changeset, which the head descends from over every parent: there
+    /// is nothing to import, and the target stays (the M16 design §3).
+    Behind(ChangesetId),
 }
 
 impl Base {
@@ -626,6 +650,20 @@ impl Base {
         if self.stands_for(tip) {
             return Ok(Some(Leads::Tip));
         }
+
+        // A known tip the head descends from: the target stays, before an imported head's other
+        // export is derived.
+        if let Some(&changeset) = walk.known.get(&tip) {
+            let at_start = |source| stopped(source, 0, None);
+            let meta = repo.changeset_meta(changeset).map_err(at_start)?;
+            if let Some(meta) = meta {
+                let behind = ancestry::reaches(repo, [self.head], changeset, meta.generation);
+                if behind.map_err(at_start)? {
+                    return Ok(Some(Leads::Behind(changeset)));
+                }
+            }
+        }
+
         let mut commits = self.commits.iter();
         if let Some(&met) = commits.find(|commit| walk.known.contains_key(&commit.oid)) {
             return Ok(Some(Leads::Met(met)));
@@ -1254,6 +1292,7 @@ impl<'a, 's> Run<'a, 's> {
             target_ref: self.req.target_ref.clone(),
             old_head,
             ref_moved,
+            tip: None,
             lossy: self.lossy,
             lossy_total: self.lossy_total,
             warnings: self.warnings,

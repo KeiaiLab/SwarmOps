@@ -486,7 +486,9 @@ changesets (`Repo::raw_batch`), objects and external id index:
 3. The base must be the tip, and then nothing is written, or an ancestor of it: met by the walk,
    or found below the commits it stopped at through the store's own parents, pruned by
    generation. Otherwise the import fails with `E_GIT_IMPORT_DIVERGED`, and nothing is written.
-   A base the tip reaches only through a merge's second parent is no divergence.
+   A base the tip reaches only through a merge's second parent is no divergence. Nor is a known
+   tip whose changeset the target's head descends from, over every parent: nothing is written,
+   the target stays, and the response names the tip's changeset (`tip_changeset`).
 4. It converts the commits it did not know, parents first (`Converter`: each git tree and blob
    once, the base's own taken as converted already, so that an incremental run reads only what
    changed), stores their trees and blobs, and records them 8,192 changesets to a journal frame.
