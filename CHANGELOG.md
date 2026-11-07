@@ -8,13 +8,60 @@ pre-1.0 way).
 SwarmOps 0.1.0 is the first release, tagged `v0.1.0`, 0.2.0 the second, with the git remotes (M13),
 0.3.0 the third, with the workspaces (M5), 0.4.0 the fourth, with verify, crash safety, fuzzing, gc
 and FORMAT 2 (M6), 0.5.0 the fifth, with the pilot on a real repository and the goal measurements,
-0.6.0 the sixth, with the fixes those measurements asked for, and 0.7.0 the seventh, with stock git
-against a store (M14); no crate is published (`publish = false`). The 0.1.0 section holds every
+0.6.0 the sixth, with the fixes those measurements asked for, 0.7.0 the seventh, with stock git
+against a store (M14), and 0.8.0 the eighth, with data safety and the contract (M15); no crate is published (`publish = false`). The 0.1.0 section holds every
 change up to it, grouped by milestone of the design (umbrella spec §13). From here, **Unreleased**
 collects the changes on `stable` that no release holds yet, until the next release
 ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ## [Unreleased]
+
+### Changed (breaking)
+
+- `sync` refuses to move `main` below its floor after a remote force push (`E_REF_PROTECTED`,
+  `details.remote`). What to do: have the remote push a merge that keeps the old head as its first
+  parent, then sync again. The floor is the remote commit the last successful sync, or push of
+  `main` to the followed branch, matched `main` to, kept in the mirror as
+  `refs/published/<remote>/<branch>`; a fast-forward to a head that holds it only as a merge's
+  second parent is refused too. Nothing moves and nothing is sent; the fetch's tracking ref moves
+  ([GitHub as a remote](docs/guides/github-remote.md#when-sync-stops)).
+
+### Added
+
+- `git import`'s response carries `tip_changeset` when the target's head descends from the
+  imported commit already: that commit's changeset, with `head_changeset` the target's head
+  ([git import](docs/reference/commands/git-import.md)).
+- `E_REF_PROTECTED` from `sync` names the remote in `details.remote`, beside `name`, `changeset`
+  (the floor) and `target` (the remote head's changeset).
+
+### Changed
+
+- Crash tests (the M16 design §2): a literal `SIGKILL` now also kills `ref set` and `op undo` on
+  `release/1`, two reader processes (`ref list`, `show`, `cat`) run beside every kill loop and
+  never find a missing object, and the power-loss images cover a keyed `land` and its undo.
+
+### Fixed
+
+- On Unix a workspace's tree is written from its root without following a link below it. A
+  directory or file swapped for a symlink (or a file hard-linked elsewhere) after the check and
+  before a write through it was written through: `ws materialize`, `ws rebase` and `ws land` could
+  write outside the workspace or change an outside file's mode. Such a write is now refused with
+  `E_WS_DIRTY` naming the swapped path, and nothing outside changes; its hint says to move the
+  path aside. Until then every command on the workspace answers the same, and the first one after
+  finishes the interrupted update. A directory that cannot be opened is `E_IO` whose
+  `details.path` names the directory, no longer the file below it. Windows and the other targets
+  still write by full path ([Known limitations](docs/known-limitations.md)).
+- `git import --into <ref>` of a commit whose changeset the target's head already descends from,
+  over every parent, moves nothing and writes nothing: an older tip imported again after native
+  lands on top was `E_GIT_IMPORT_DIVERGED`. `ref_moved` is false, `head_changeset` the target's
+  head, and `tip_changeset` the commit's changeset.
+
+## [0.8.0] - 2026-11-07
+
+Safety and the contract. The 0.8.0 release holds M15: 54 of the 55 error codes pinned by a golden
+envelope, operation ids that an undo cannot redirect, a fetch that imports before it moves a
+tracking ref, `main` moved forward only, three workspace refusals, a land key scoped to the store
+and the land grant checked again on each attempt; and the first `.deb` and `.rpm` packages.
 
 ### Changed (breaking)
 
@@ -37,13 +84,6 @@ collects the changes on `stable` that no release holds yet, until the next relea
   sorted, the first 20. `ws land` refuses the same before anything else; `ws rebase -m` commits
   the edits under the prefixes as before
   ([Troubleshooting](docs/troubleshooting.md#e_ws_outside_prefixes)).
-- `sync` refuses to move `main` below its floor after a remote force push (`E_REF_PROTECTED`,
-  `details.remote`). What to do: have the remote push a merge that keeps the old head as its first
-  parent, then sync again. The floor is the remote commit the last successful sync, or push of
-  `main` to the followed branch, matched `main` to, kept in the mirror as
-  `refs/published/<remote>/<branch>`; a fast-forward to a head that holds it only as a merge's
-  second parent is refused too. Nothing moves and nothing is sent; the fetch's tracking ref moves
-  ([GitHub as a remote](docs/guides/github-remote.md#when-sync-stops)).
 
 ### Added
 
@@ -97,11 +137,6 @@ collects the changes on `stable` that no release holds yet, until the next relea
 - Golden envelopes pin 54 of the 55 error codes, eight more than before: `E_AMBIGUOUS_ID`,
   `E_IO_TRANSIENT`, `E_INTERNAL`, `E_BUSY`, `E_CAS_RETRY_EXHAUSTED`, `E_UNKNOWN_PARENT` as an
   error object, `E_WS_OUTSIDE_PREFIXES` and `E_WS_STALE`.
-- `git import`'s response carries `tip_changeset` when the target's head descends from the
-  imported commit already: that commit's changeset, with `head_changeset` the target's head
-  ([git import](docs/reference/commands/git-import.md)).
-- `E_REF_PROTECTED` from `sync` names the remote in `details.remote`, beside `name`, `changeset`
-  (the floor) and `target` (the remote head's changeset).
 
 ### Changed
 
@@ -141,9 +176,6 @@ collects the changes on `stable` that no release holds yet, until the next relea
   ([Build and test a change](docs/operate/build-and-test.md#1-create-a-workspace)).
 - The `meta.resolved` of a sparse workspace's `ws` envelopes also names its materialized
   changeset, which the commands read to compare the tree with the disk.
-- Crash tests (the M16 design §2): a literal `SIGKILL` now also kills `ref set` and `op undo` on
-  `release/1`, two reader processes (`ref list`, `show`, `cat`) run beside every kill loop and
-  never find a missing object, and the power-loss images cover a keyed `land` and its undo.
 
 ### Fixed
 
@@ -259,19 +291,6 @@ collects the changes on `stable` that no release holds yet, until the next relea
   to `src/lib`). A path the chain added and the edits `-m` commits then delete or rename is no
   new path of the land, nor is a path the chain deleted and the edits add back
   ([Troubleshooting](docs/troubleshooting.md#e_ws_unportable)).
-- On Unix a workspace's tree is written from its root without following a link below it. A
-  directory or file swapped for a symlink (or a file hard-linked elsewhere) after the check and
-  before a write through it was written through: `ws materialize`, `ws rebase` and `ws land` could
-  write outside the workspace or change an outside file's mode. Such a write is now refused with
-  `E_WS_DIRTY` naming the swapped path, and nothing outside changes; its hint says to move the
-  path aside. Until then every command on the workspace answers the same, and the first one after
-  finishes the interrupted update. A directory that cannot be opened is `E_IO` whose
-  `details.path` names the directory, no longer the file below it. Windows and the other targets
-  still write by full path ([Known limitations](docs/known-limitations.md)).
-- `git import --into <ref>` of a commit whose changeset the target's head already descends from,
-  over every parent, moves nothing and writes nothing: an older tip imported again after native
-  lands on top was `E_GIT_IMPORT_DIVERGED`. `ref_moved` is false, `head_changeset` the target's
-  head, and `tip_changeset` the commit's changeset.
 
 ## [0.7.0] - 2026-10-29
 
@@ -2031,7 +2050,8 @@ fixes the measurements and the pilot asked for.
   ([docs/known-limitations.md](docs/known-limitations.md), "An import onto a target reads the
   head's whole tree, and onto a native head the whole history below it").
 
-[Unreleased]: https://github.com/KeiaiLab/SwarmOps/compare/v0.7.0...stable
+[Unreleased]: https://github.com/KeiaiLab/SwarmOps/compare/v0.8.0...stable
+[0.8.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.4.0...v0.5.0
