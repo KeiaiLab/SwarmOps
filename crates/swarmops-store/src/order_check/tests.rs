@@ -439,6 +439,29 @@ fn w5_objects_are_durable_before_the_frame_that_names_them() {
     fs.append_durable(&log, &changeset()).unwrap();
 }
 
+/// An append of several frames, a batch, is judged frame by frame: a changeset recorded in its
+/// second frame, behind a `Compacted` one, breaks W5 while an object is not durable, as it would
+/// alone; once the object is, the same append passes.
+#[test]
+fn w5_is_judged_on_every_frame_of_an_append() {
+    let (_dir, root) = root();
+    let log = root.join("meta/journal.log");
+    let fs = OrderCheckFs::new(RealFs);
+    let temp = fs
+        .write_durable_temp(&root.join("objects/tmp"), b"object")
+        .unwrap();
+    fs.link_noclobber(&temp, &root.join("objects/ab/cdef"))
+        .unwrap();
+    let batch = [compacted(), changeset()].concat();
+    fs.append_durable(&log, &[compacted(), compacted()].concat())
+        .unwrap(); // records no changeset
+    assert_breaks("W5", || {
+        fs.append_durable(&log, &batch).unwrap();
+    });
+    fs.fsync_dir(&root.join("objects/ab")).unwrap();
+    fs.append_durable(&log, &batch).unwrap();
+}
+
 #[test]
 fn w6_a_directory_is_renamed_only_once_its_tree_is_durable() {
     let (_dir, root) = root();

@@ -4,10 +4,12 @@
 //! `meta/journal.ckpt` holds the offset up to which the metadata files are materialized.
 //!
 //! A frame is appended with one `append_durable` to `journal.log`, then one to
-//! `journal.off`, so a crash leaves at most one torn frame at the tail, or one whole frame
-//! that `journal.off` does not list yet; [`Journal::truncate_torn_tail`] repairs either,
-//! syncing `journal.log` before it lists such a frame. So every frame `journal.off` lists was
-//! whole and durable before it was listed, and damage to a listed frame is reported as
+//! `journal.off`; a batch of frames ([`Journal::append_frames`]) with one to `journal.log`, then
+//! one to `journal.off` per 512 B sector its entries touch. So a crash leaves at the tail a torn
+//! frame (a batch's first torn one, and what follows it), or whole frames that `journal.off`
+//! does not list yet; [`Journal::truncate_torn_tail`] repairs either, cutting at the first torn
+//! frame and syncing `journal.log` before it lists such frames. So every frame `journal.off`
+//! lists was whole and durable before it was listed, and damage to a listed frame is reported as
 //! [`StoreError::JournalCorrupt`], never cut away.
 //!
 //! An append that fails leaves nothing a later sync could make look durable (storage spec §2
@@ -84,6 +86,11 @@ pub(crate) const ENTRY_LEN_V2: u64 = 16;
 /// The size of `journal2.ckpt` (FORMAT 2, the M6 design §2.2): `u64le offset | u64le seq |
 /// u32le crc32(the 16 bytes before)`.
 const CKPT_LEN_V2: usize = 20;
+
+/// The sector of `journal.off` one append of a batch's entries writes within
+/// ([`Journal::append_frames`]): a power loss leaves zeroed or partial entries in the last one
+/// only (storage spec §2 rule 3).
+const ENTRY_SECTOR: u64 = 512;
 
 /// How many times [`Journal::frames_from`] and [`Journal::tail_frames_from`] start over when
 /// `journal.off` holds fewer entries when they read them than when they measured it. Only a
@@ -338,50 +345,143 @@ impl Journal {
     /// durable after it, a hole a power loss would leave among the listed frames. A cut that
     /// fails too is reported beside the append's error.
     pub fn append_frame(&self, records: &[Record]) -> Result<Frame, StoreError> {
-        let mut bytes = frame::encode_frame_in(self.format, records, 0, 0)?;
+        let mut frames = self.append_frames(&[records])?;
+        Ok(frames.remove(0))
+    }
+
+    /// Appends `frames` as consecutive frames, one per transaction, and returns them: a batch
+    /// (the M18 D2 design §3.6). Each frame's bytes are the ones [`Journal::append_frame`] would
+    /// write for it alone at its seq, its FORMAT 2 place chained from the frame before it. All of
+    /// them go to `journal.log` in one `append_durable`, the commit point of every one; then
+    /// their entries go to `journal.off`, one `append_durable` per 512 B sector of the file they
+    /// touch, so that a power loss leaves zeroed or partial entries in the last sector only. One
+    /// frame makes the calls [`Journal::append_frame`] makes, in the same order.
+    ///
+    /// What [`Journal::append_frame`] says of the lock, the tail check and the records holds for
+    /// each frame; no frames at all is [`StoreError::BadCall`]. A failed append of the frames is
+    /// [`StoreError::NotCommitted`], every one of them cut back off `journal.log` as one frame
+    /// is. A failed append of a sector's entries is [`StoreError::PostCommit`] at the first
+    /// frame's seq: every frame is durable, and the next tail check lists those left unlisted.
+    /// What reached `journal.off` of that append is cut back off it, never below the entries
+    /// synced before it in this call.
+    pub fn append_frames(&self, frames: &[&[Record]]) -> Result<Vec<Frame>, StoreError> {
+        if frames.is_empty() {
+            return Err(StoreError::BadCall(
+                "a batch holds at least one frame".to_owned(),
+            ));
+        }
+        let mut encoded = (frames.iter())
+            .map(|records| frame::encode_frame_in(self.format, records, 0, 0))
+            .collect::<Result<Vec<_>, _>>()?;
         let mut tail = self.tail();
         if !self.still_ends_at(&tail)? {
             tail.checked = false;
-            // Unreported: see above.
+            // Unreported: see Journal::append_frame.
             (*tail, _) = self.check_tail()?;
         }
         tail.checked = false; // a failed append can leave part of a frame or an entry behind
 
-        // FORMAT 2: the header names the frame's place, which the tail check has found.
-        if self.format == StoreFormat::V2 {
-            frame::set_place(&mut bytes, tail.frames, tail.last_crc);
+        // 1. Each frame's place (FORMAT 2: its header names it), chained from the tail.
+        let mut crcs = Vec::with_capacity(encoded.len());
+        let mut prev_crc = tail.last_crc;
+        for (seq, bytes) in (tail.frames..).zip(&mut encoded) {
+            if self.format == StoreFormat::V2 {
+                frame::set_place(bytes, seq, prev_crc);
+            }
+            prev_crc = frame::payload_crc(bytes);
+            crcs.push(prev_crc);
         }
-        let crc = frame::payload_crc(&bytes);
-        let offset = match self.fs.append_durable(self.log_path.as_std_path(), &bytes) {
+
+        // 2. The frames, with one write and one sync: the commit point of every one.
+        let joined;
+        let log_bytes: &[u8] = if let [one] = encoded.as_slice() {
+            one
+        } else {
+            joined = encoded.concat();
+            &joined
+        };
+        let offset = match self
+            .fs
+            .append_durable(self.log_path.as_std_path(), log_bytes)
+        {
             Ok(offset) => offset,
             Err(e) => return Err(self.cut_failed_frame(tail.len, e)),
         };
-        // The commit point: the frame is whole and durable.
-        let entry = self.entry_bytes(tail.frames, offset, crc);
-        let entry_at = match self.fs.append_durable(self.off_path.as_std_path(), &entry) {
-            Ok(entry_at) => entry_at,
-            Err(e) => {
-                let source = self.cut_failed_entries(tail.frames, e);
-                return Err(StoreError::PostCommit {
-                    frame_seq: tail.frames,
-                    frame_crc: crc,
-                    source: Box::new(source.into()),
-                });
-            }
-        };
-        let seq = entry_at / self.entry_len();
+        let mut offsets = Vec::with_capacity(encoded.len());
+        let mut at = offset;
+        for bytes in &encoded {
+            offsets.push(at);
+            at += bytes::to_u64(bytes.len());
+        }
+
+        // 3. Their entries, one append per sector of journal.off they touch.
+        let first_seq = self.append_entries(&mut tail, &offsets, &crcs)?;
         *tail = Tail {
-            len: offset + bytes::to_u64(bytes.len()),
-            frames: seq + 1,
+            len: at,
+            frames: first_seq + bytes::to_u64(encoded.len()),
             checked: true,
-            last_crc: crc,
+            last_crc: prev_crc,
         };
-        Ok(Frame {
-            seq,
-            offset,
-            records: records.to_vec(),
-            crc,
-        })
+        let frames = (first_seq..)
+            .zip(frames.iter().zip(offsets.iter().zip(crcs)))
+            .map(|(seq, (records, (&offset, crc)))| Frame {
+                seq,
+                offset,
+                records: records.to_vec(),
+                crc,
+            })
+            .collect();
+        Ok(frames)
+    }
+
+    /// Lists the frames at `offsets`, whose payload CRCs are `crcs`, durable in `journal.log`
+    /// and following on from the `tail.frames` frames listed: one `append_durable` per 512 B
+    /// sector of `journal.off` their entries touch. Returns the seq of the first, where its
+    /// entry landed. A failed append is [`StoreError::PostCommit`] at the first frame's seq,
+    /// once what reached the file of that append is cut back off it; `tail` then counts the
+    /// entries synced before it, unchecked.
+    fn append_entries(
+        &self,
+        tail: &mut Tail,
+        offsets: &[u64],
+        crcs: &[u32],
+    ) -> Result<u64, StoreError> {
+        let entry_len = self.entry_len();
+        let mut first_seq = None;
+        let mut next = 0;
+        while next < offsets.len() {
+            // The entries from `next` up to the end of the sector the first of them lies in.
+            let seq = tail.frames + bytes::to_u64(next);
+            let room = (ENTRY_SECTOR - (seq * entry_len) % ENTRY_SECTOR) / entry_len;
+            let end = offsets
+                .len()
+                .min(next + usize::try_from(room).unwrap_or(usize::MAX));
+            let mut entries = Vec::new();
+            for (at, (&offset, &crc)) in
+                (seq..).zip(offsets[next..end].iter().zip(&crcs[next..end]))
+            {
+                entries.extend(self.entry_bytes(at, offset, crc));
+            }
+            match self
+                .fs
+                .append_durable(self.off_path.as_std_path(), &entries)
+            {
+                Ok(entry_at) => {
+                    first_seq.get_or_insert(entry_at / entry_len);
+                }
+                Err(e) => {
+                    let source = self.cut_failed_entries(seq, e);
+                    tail.frames = seq;
+                    return Err(StoreError::PostCommit {
+                        frame_seq: first_seq.unwrap_or(seq),
+                        frame_crc: crcs[0],
+                        source: Box::new(source.into()),
+                    });
+                }
+            }
+            next = end;
+        }
+        Ok(first_seq.unwrap_or(tail.frames))
     }
 
     /// Up to `limit` frames in journal order after frame `seq`: the frames `journal.off`

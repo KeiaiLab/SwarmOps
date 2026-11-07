@@ -28,11 +28,11 @@
 //! ```
 //!
 //! A ref's version counts the writes of its file since the ref was created, from 1. A
-//! transaction writes the file of each ref it moves once, with the target its last move
-//! leaves, and only if that differs from the file's: so the version grows by one per
-//! transaction that changes the target, however many moves the transaction made, and
-//! applying a frame again to a file that already shows its target changes nothing. That is
-//! what makes replay idempotent.
+//! materialization (a transaction's frame, or a batch of frames appended at once) writes the
+//! file of each ref it moves once, with the target its last move leaves, and only if that
+//! differs from the file's: so the version grows by one per materialization that changes the
+//! target, however many moves its frames made, and applying a frame again to a file that
+//! already shows its target changes nothing. That is what makes replay idempotent.
 //!
 //! [`FsOps::atomic_replace`]: crate::FsOps::atomic_replace
 //! [`FsOps::read`]: crate::FsOps::read

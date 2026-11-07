@@ -18,7 +18,10 @@
 //! [`MetaWrite::commit`] appends them as one frame ([`Journal::append_frame`]: the commit
 //! point), materializes the frame (its changesets with one [`Index::append_batch`], a ref file per
 //! moved ref), and, in §3's batches or on [`MetaStore::flush`], syncs the index and moves the
-//! checkpoint.
+//! checkpoint. A transaction may hold several frames, one per transaction it carries
+//! ([`MetaWrite::begin_frame`], [`MetaWrite::drop_frame`], [`MetaWrite::keep_frames`]), each
+//! seeing what the ones before it queued: [`MetaWrite::commit_frames`] appends them as a batch
+//! ([`Journal::append_frames`]) and materializes them once (the M18 D2 design §3.3).
 //!
 //! An error says which side of the commit point it fell on. After [`StoreError::NotCommitted`]
 //! nothing of the transaction is in the store. After [`StoreError::PostCommit`] the frame is
@@ -57,7 +60,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use camino::Utf8Path;
 use swarmops_core::{ChangesetId, bytes};
 
-use super::frame::{Frame, MAX_RECORDS, Record};
+use super::frame::{self, Frame, MAX_RECORDS, Record};
 use super::index::{ChangesetMeta, Index};
 use super::journal::{Journal, LogCut, PastFrames, TailRepair};
 use super::lock::MetaLock;
@@ -562,6 +565,7 @@ impl MetaStore {
             index,
             uncheckpointed: bytes::to_u64(frames.len()),
             records: Vec::new(),
+            closed: Vec::new(),
             queued: HashMap::new(),
             moved: HashMap::new(),
             recovered: Recovered {
@@ -875,8 +879,12 @@ pub struct MetaWrite<'a> {
     checkpointed_records: u64,
     /// How many frames lie past the checkpoint, not counting this transaction's.
     uncheckpointed: u64,
-    /// The records queued, in order: the frame [`MetaWrite::commit`] appends.
+    /// The records queued, in order: the frames [`MetaWrite::commit_frames`] appends, the closed
+    /// ones first, then the open one.
     records: Vec<Record>,
+    /// The frames closed so far ([`MetaWrite::begin_frame`]), in order: the open frame holds the
+    /// records after the last of them.
+    closed: Vec<Closed>,
     /// The generation of each changeset queued.
     queued: HashMap<ChangesetId, u64>,
     /// The target each ref moved so far is left at.
@@ -1022,7 +1030,7 @@ impl MetaWrite<'_> {
     /// Queues what `staged` holds, if the transaction's frame has room for it: else
     /// [`StoreError::Limit`], and nothing is queued.
     fn queue(&mut self, staged: Staged) -> Result<(), StoreError> {
-        let records = self.records.len() + staged.records.len();
+        let records = self.open_len() + staged.records.len();
         if records > MAX_RECORDS {
             return Err(StoreError::Limit {
                 what: LimitKind::Records,
@@ -1086,11 +1094,67 @@ impl MetaWrite<'_> {
     /// [`MetaRead::next_seq`] gives those it did not hold (the M16 design §6). Read under the
     /// lock, after [`MetaStore::write`]'s tail check, so every whole frame is listed and no other
     /// writer appends one meanwhile; it reads [`Journal::frames_from`] and writes nothing.
+    ///
+    /// Then this transaction's closed frames ([`MetaWrite::begin_frame`]) whose seq is `first` or
+    /// greater, each with the seq, offset and payload CRC it takes once committed: so a frame of a
+    /// batch sees the frames before it as if they were committed (the M18 D2 design §3.3, D12).
+    /// The open frame is not among them.
     pub fn frames_from(&self, first: u64) -> Result<Vec<Frame>, StoreError> {
-        self.store.journal.frames_from(first, usize::MAX)
+        let journal = &self.store.journal;
+        let mut frames = journal.frames_from(first, usize::MAX)?;
+        if self.closed.is_empty() {
+            return Ok(frames);
+        }
+
+        // The closed frames follow the journal's last, in order.
+        let mut offset = journal.len();
+        let mut start = 0;
+        for (seq, closed) in (journal.frame_count()?..).zip(&self.closed) {
+            if seq >= first {
+                frames.push(Frame {
+                    seq,
+                    offset,
+                    records: self.records[start..closed.end].to_vec(),
+                    crc: closed.crc,
+                });
+            }
+            offset += closed.len;
+            start = closed.end;
+        }
+        Ok(frames)
     }
 
-    /// The records this transaction has queued, in order: the frame [`MetaWrite::commit`]
+    /// Closes the open frame, if it holds any record, and opens the next: what is queued from
+    /// now on goes to a frame of its own, which sees every record queued before it (the M18 D2
+    /// design §3.3). A transaction that never calls it commits one frame. A closed frame is
+    /// encoded, so that [`MetaWrite::frames_from`] gives it with its payload CRC; records that
+    /// no frame holds are [`StoreError::Limit`], as [`MetaWrite::commit`] would find them.
+    pub fn begin_frame(&mut self) -> Result<(), StoreError> {
+        self.close_frame()
+    }
+
+    /// Discards what the open frame queued: its changesets and its ref moves, each ref left as
+    /// the frames before it leave it. The closed frames stay.
+    pub fn drop_frame(&mut self) {
+        let start = self.open_start();
+        self.forget_from(start);
+    }
+
+    /// Closes the open frame, if it holds any record, then keeps the first `n` frames and
+    /// discards the rest, as [`MetaWrite::drop_frame`] discards one; `n` past the frames there
+    /// are keeps them all. Errors as [`MetaWrite::begin_frame`].
+    pub fn keep_frames(&mut self, n: usize) -> Result<(), StoreError> {
+        self.close_frame()?;
+        if n >= self.closed.len() {
+            return Ok(());
+        }
+        let at = n.checked_sub(1).map_or(0, |last| self.closed[last].end);
+        self.closed.truncate(n);
+        self.forget_from(at);
+        Ok(())
+    }
+
+    /// The records this transaction has queued, in order: the frames [`MetaWrite::commit`]
     /// appends, each ref move with the time it records. A refused move queued none. It reads
     /// nothing.
     pub fn queued(&self) -> &[Record] {
@@ -1107,14 +1171,40 @@ impl MetaWrite<'_> {
     /// the frame cut back off the journal; any other error before it means the transaction did
     /// not commit either. With nothing queued, errors are the housekeeping's own.
     pub fn commit(self) -> Result<CommitInfo, StoreError> {
+        // One info at least: the frame's, or the empty transaction's.
+        self.finish(Settle::Batched).map(|infos| infos[0])
+    }
+
+    /// Commits every frame of the transaction ([`MetaWrite::begin_frame`]) as a batch, with one
+    /// [`Journal::append_frames`]: the commit point of all of them. Then it materializes them
+    /// once (each moved ref's file replaced once, with the target the last move leaves) and
+    /// settles as [`MetaWrite::commit`] does, and unlocks. Returns what each frame committed, in
+    /// order; with no frame, the one [`CommitInfo`] of [`MetaWrite::commit`]'s empty
+    /// transaction. [`MetaWrite::commit`] is this of one frame.
+    ///
+    /// Errors as [`MetaWrite::commit`]'s, for every frame at once: a failed append of the frames
+    /// is [`StoreError::NotCommitted`], none of them committed; once they are durable, every
+    /// error is [`StoreError::PostCommit`] at the first frame's seq.
+    pub fn commit_frames(self) -> Result<Vec<CommitInfo>, StoreError> {
         self.finish(Settle::Batched)
     }
 
-    /// [`MetaWrite::commit`]; [`Settle::Flush`] also syncs and checkpoints any frame past the
-    /// checkpoint.
-    fn finish(mut self, settle: Settle) -> Result<CommitInfo, StoreError> {
+    /// [`MetaWrite::commit_frames`]; [`Settle::Flush`] also syncs and checkpoints any frame past
+    /// the checkpoint.
+    fn finish(mut self, settle: Settle) -> Result<Vec<CommitInfo>, StoreError> {
         let store = self.store;
-        if self.records.is_empty() {
+
+        // 1. The frames: the closed ones, then the open one if it holds any record.
+        let mut start = 0;
+        let mut slices = Vec::with_capacity(self.closed.len() + 1);
+        for closed in &self.closed {
+            slices.push(&self.records[start..closed.end]);
+            start = closed.end;
+        }
+        if start < self.records.len() {
+            slices.push(&self.records[start..]);
+        }
+        if slices.is_empty() {
             let info = CommitInfo {
                 frame_seq: store.journal.frame_count()?,
                 frame_crc: None,
@@ -1122,22 +1212,31 @@ impl MetaWrite<'_> {
                 moved_refs: 0,
                 checkpointed: false,
             };
-            return self.settle(info, settle);
+            let checkpointed = self.settle(settle)?;
+            return Ok(vec![CommitInfo {
+                checkpointed,
+                ..info
+            }]);
         }
-        let frame = store.journal.append_frame(&self.records)?; // the commit point
-        self.uncheckpointed += 1;
-        let info = CommitInfo {
-            frame_seq: frame.seq,
-            frame_crc: Some(frame.crc),
-            inserted: bytes::to_u64(self.queued.len()),
-            moved_refs: bytes::to_u64(self.records.len() - self.queued.len()),
-            checkpointed: false,
-        };
-        replay::materialize(&mut self.index, &store.layout, &store.fs, &frame)
-            .and_then(|()| self.settle(info, settle))
+
+        // 2. The commit point of every frame.
+        let frames = store.journal.append_frames(&slices)?;
+        self.uncheckpointed += bytes::to_u64(frames.len());
+        let mut infos: Vec<CommitInfo> = frames.iter().map(commit_info).collect();
+
+        // 3. One materialization of them all, then the batched durability.
+        let first = &frames[0];
+        replay::materialize(&mut self.index, &store.layout, &store.fs, &frames)
+            .and_then(|()| self.settle(settle))
+            .map(|checkpointed| {
+                for info in &mut infos {
+                    info.checkpointed = checkpointed;
+                }
+                infos
+            })
             .map_err(|source| StoreError::PostCommit {
-                frame_seq: frame.seq,
-                frame_crc: frame.crc,
+                frame_seq: first.seq,
+                frame_crc: first.crc,
                 source: Box::new(source),
             })
     }
@@ -1147,13 +1246,14 @@ impl MetaWrite<'_> {
     /// frame; else, at 32 frames past the checkpoint or for a flush with any, an index sync.
     /// Then the checkpoint moves to the end of the journal; a failed sync or compaction
     /// returns first, so it never moves past what is not durable, and a failed sync cuts the
-    /// index back to the checkpoint first ([`MetaWrite::sync_index`]).
-    fn settle(&mut self, mut info: CommitInfo, settle: Settle) -> Result<CommitInfo, StoreError> {
+    /// index back to the checkpoint first ([`MetaWrite::sync_index`]). Returns whether the
+    /// checkpoint moved.
+    fn settle(&mut self, settle: Settle) -> Result<bool, StoreError> {
         let compact = self.index.tail_len() > Index::COMPACT_THRESHOLD;
         let flush = settle == Settle::Flush;
         let due = self.uncheckpointed >= CHECKPOINT_EVERY || (flush && self.uncheckpointed > 0);
         if !compact && !due {
-            return Ok(info);
+            return Ok(false);
         }
         // Before a compaction too, which syncs the index again itself: a failure of that sync
         // could not be told from one writing the views, and would cut nothing.
@@ -1166,8 +1266,7 @@ impl MetaWrite<'_> {
                 .map_err(marker_error)?;
         }
         journal.set_ckpt(journal.len())?;
-        info.checkpointed = true;
-        Ok(info)
+        Ok(true)
     }
 
     /// [`Index::sync`]; if it fails, first cuts the index back to the records the checkpoint
@@ -1196,17 +1295,59 @@ impl MetaWrite<'_> {
         })
     }
 
-    /// Refuses, with [`StoreError::Limit`], a record past what the transaction's one frame
-    /// holds.
+    /// Refuses, with [`StoreError::Limit`], a record past what the open frame holds.
     fn check_room(&self) -> Result<(), StoreError> {
-        if self.records.len() < MAX_RECORDS {
+        if self.open_len() < MAX_RECORDS {
             Ok(())
         } else {
             Err(StoreError::Limit {
                 what: LimitKind::Records,
                 max: bytes::to_u64(MAX_RECORDS),
-                got: bytes::to_u64(self.records.len()) + 1,
+                got: bytes::to_u64(self.open_len()) + 1,
             })
+        }
+    }
+
+    /// Where the open frame's records start in `records`.
+    fn open_start(&self) -> usize {
+        self.closed.last().map_or(0, |closed| closed.end)
+    }
+
+    /// How many records the open frame holds.
+    fn open_len(&self) -> usize {
+        self.records.len() - self.open_start()
+    }
+
+    /// Closes the open frame, if it holds any record: encodes it, so that its payload CRC and
+    /// length are final ([`MetaWrite::frames_from`]).
+    fn close_frame(&mut self) -> Result<(), StoreError> {
+        let start = self.open_start();
+        if start == self.records.len() {
+            return Ok(());
+        }
+        let format = self.store.layout.format();
+        let bytes = frame::encode_frame_in(format, &self.records[start..], 0, 0)?;
+        self.closed.push(Closed {
+            end: self.records.len(),
+            len: bytes::to_u64(bytes.len()),
+            crc: frame::payload_crc(&bytes),
+        });
+        Ok(())
+    }
+
+    /// Forgets the records from `at` on: the changesets they queue and the moves they make.
+    /// What each ref is left at is folded again from the records kept.
+    fn forget_from(&mut self, at: usize) {
+        for record in self.records.drain(at..) {
+            if let Record::Changeset { id, .. } = record {
+                self.queued.remove(&id);
+            }
+        }
+        self.moved.clear();
+        for record in &self.records {
+            if let Record::RefMove { name, new, .. } = record {
+                self.moved.insert(name.clone(), *new);
+            }
         }
     }
 
@@ -1256,6 +1397,33 @@ impl fmt::Debug for MetaWrite<'_> {
             .field("records_queued", &self.records.len())
             .field("recovered", &self.recovered)
             .finish_non_exhaustive()
+    }
+}
+
+/// A frame of a write transaction, closed ([`MetaWrite::begin_frame`]): encoded, its bytes
+/// final but for its place, which [`Journal::append_frames`] writes.
+struct Closed {
+    /// Where its records end in the transaction's records: they start where the frame before
+    /// it ends.
+    end: usize,
+    /// Its length in `journal.log`.
+    len: u64,
+    /// Its payload CRC.
+    crc: u32,
+}
+
+/// What `frame`, just appended, committed: its seq and payload CRC, the changesets it inserts
+/// and the moves it records.
+fn commit_info(frame: &Frame) -> CommitInfo {
+    let inserted = (frame.records.iter())
+        .filter(|record| matches!(record, Record::Changeset { .. }))
+        .count();
+    CommitInfo {
+        frame_seq: frame.seq,
+        frame_crc: Some(frame.crc),
+        inserted: bytes::to_u64(inserted),
+        moved_refs: bytes::to_u64(frame.records.len() - inserted),
+        checkpointed: false,
     }
 }
 

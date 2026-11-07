@@ -503,7 +503,7 @@ impl State {
     }
 
     /// W1 and W5 for an append of `frame` to `log`, the `journal.log` of `meta`: the rule
-    /// broken, and how.
+    /// broken, and how. `frame` may hold several frames, a batch: W5 judges every one.
     fn frame(
         &self,
         log: &Path,
@@ -520,13 +520,15 @@ impl State {
                 ),
             ));
         }
-        let Parsed::Whole { records, .. } = parse_any(format, frame) else {
-            return None;
-        };
-        if !records
-            .iter()
-            .any(|record| matches!(record, Record::Changeset { .. }))
-        {
+        // Whether any whole frame of the append records a changeset.
+        let mut at = 0;
+        let mut records_changeset = false;
+        while let Parsed::Whole { records, size, .. } = parse_any(format, &frame[at..]) {
+            at += size;
+            records_changeset |=
+                (records.iter()).any(|record| matches!(record, Record::Changeset { .. }));
+        }
+        if !records_changeset {
             return None;
         }
         let objects = meta.parent()?.join("objects");

@@ -11,13 +11,13 @@
 //! (one lookup when it holds them all, the usual case) and appends the rest, a frame's with
 //! one [`Index::append_batch`].
 //!
-//! Every frame past the checkpoint but the last is materialized: a writer appends its frame
-//! only after replaying all the others. Each ref those frames move ends at the target of its
+//! Every frame past the checkpoint but the last batch's (the frames one writer appended at once,
+//! one frame on its own the most common) is materialized: a writer appends its frames only after
+//! replaying all the others. Each ref those frames move ends at the target of its
 //! last move; a ref file is brought there as [`refs::write`] does, which leaves alone a file
 //! that is there already, so replaying a frame twice changes nothing.
 
 use std::collections::{BTreeMap, HashMap};
-use std::slice;
 
 use swarmops_core::{ChangesetId, bytes};
 
@@ -78,15 +78,16 @@ pub(crate) fn replay(
     })
 }
 
-/// [`replay`] of the one frame a writer has just appended: its materialization, which is no
-/// recovery, so what it changed goes unreported.
+/// [`replay`] of the frames a writer has just appended, one or a batch: their materialization,
+/// which is no recovery, so what it changed goes unreported. Each ref they move has its file
+/// replaced once, with the target the last move leaves.
 pub(crate) fn materialize(
     index: &mut Index,
     layout: &Layout,
     fs: &StoreFs,
-    frame: &Frame,
+    frames: &[Frame],
 ) -> Result<(), StoreError> {
-    replay(index, layout, fs, slice::from_ref(frame)).map(drop)
+    replay(index, layout, fs, frames).map(drop)
 }
 
 /// What a reader's snapshot adds to an index handle and the ref files: the frames past the
@@ -104,7 +105,8 @@ pub(crate) struct Overlay {
 impl Overlay {
     /// The overlay of `frames`, the frames past the checkpoint in journal order, on `index`
     /// and `files`, the ref files. The files must show no frame after `frames`, and every
-    /// frame of `frames` but the last; then each ref ends up as it will once materialized.
+    /// frame of `frames` but the last batch's; then each ref ends up as it will once
+    /// materialized.
     pub(crate) fn new(
         index: &Index,
         frames: &[Frame],
@@ -249,6 +251,7 @@ fn ref_targets(
 
 #[cfg(test)]
 mod tests {
+    use std::slice;
     use std::sync::Arc;
 
     use camino::Utf8Path;
