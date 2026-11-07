@@ -152,6 +152,8 @@ collects the changes on `stable` that no release holds yet, until the next relea
   until `gc` prunes it, is no longer sent to a v2 client that names it. The pack-objects hook
   sends only commits a served ref is or reaches, and refuses anything else before any byte
   (`E_POLICY_DENIED`, `details.reason` `not_served`; the M17 design §5).
+- The docs and the site count `swarmops mcp`'s 39 tools (28 store operations) since `ancestry`
+  joined them, and a test holds every stated count to the tools listed.
 
 ## [0.8.0] - 2026-11-07
 

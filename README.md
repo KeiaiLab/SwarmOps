@@ -200,8 +200,8 @@ exit 5
 
 ### An MCP server for agents
 
-`swarmops mcp` serves the store to an agent as an MCP server on stdin and stdout: 38 tools, one
-per operation (27 store operations and 11 workspace operations), each taking the operation's
+`swarmops mcp` serves the store to an agent as an MCP server on stdin and stdout: 39 tools, one
+per operation (28 store operations and 11 workspace operations), each taking the operation's
 request and returning the envelope the CLI prints.
 Register it with Claude Code, one identity per agent process:
 
@@ -633,7 +633,7 @@ milestone takes each item.
 ## MCP
 
 `swarmops mcp` serves the store's operations to an agent as an MCP server on stdin and stdout:
-38 tools, one per operation (27 store operations and 11 workspace operations), each taking the
+39 tools, one per operation (28 store operations and 11 workspace operations), each taking the
 operation's request and returning the envelope the CLI prints. [MCP integration](docs/develop/mcp.md) is the reference,
 [MCP tools](docs/reference/mcp-tools/README.md) has a page per tool, and
 [Claude Code](docs/guides/claude-code.md) is the guide.

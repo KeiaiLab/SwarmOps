@@ -127,7 +127,84 @@ const UNSUPPORTED_PROTOCOL_VERSION: i64 = -32022;
 // The tests.
 // ---------------------------------------------------------------------------------------------
 
-/// Every revision lists the same eighteen tools: `initialize` negotiates 2025-11-25 or 2025-06-18
+/// The pages, from the repository's root, that may state how many tools `swarmops mcp` lists.
+const COUNTED: [&str; 4] = ["README.md", "docs", "web/app", "web/components"];
+
+/// The private design notes under `docs/`, which are not part of the repository.
+const PRIVATE: &str = "docs/superpowers";
+
+/// Every count of the tools a page states is [`TOOLS`]'s: "39 tools", "The 39 MCP tools", "28
+/// store operations", "11 workspace operations". They drifted when `ancestry` was added (38 for
+/// 39).
+#[test]
+fn the_docs_count_the_tools() {
+    let workspace = TOOLS
+        .iter()
+        .filter(|(name, _)| name.starts_with("ws_"))
+        .count();
+    let counts = [
+        ("tools", TOOLS.len()),
+        ("MCP tools", TOOLS.len()),
+        ("store operations", TOOLS.len() - workspace),
+        ("workspace operations", workspace),
+    ];
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+    // 1. Collect every page: Markdown and TSX, below each counted path but the private notes.
+    let mut pages = Vec::new();
+    let mut pending: Vec<_> = COUNTED.iter().map(|path| root.join(path)).collect();
+    while let Some(path) = pending.pop() {
+        if path.ends_with(PRIVATE) || path.ends_with("node_modules") {
+            continue;
+        }
+        if path.is_dir() {
+            pending.extend(
+                fs::read_dir(&path)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path()),
+            );
+            continue;
+        }
+        if path
+            .extension()
+            .is_some_and(|ext| ext == "md" || ext == "tsx")
+        {
+            pages.push(path);
+        }
+    }
+
+    // 2. Read each number followed by a counted noun, across line breaks.
+    let mut stated = 0;
+    let mut wrong = Vec::new();
+    for page in &pages {
+        let text = fs::read_to_string(page).unwrap();
+        let words: Vec<&str> = text.split_whitespace().collect();
+        for (at, word) in words.iter().enumerate() {
+            let Ok(number) = word.trim_start_matches(['(', '*']).parse::<usize>() else {
+                continue;
+            };
+            for (noun, count) in counts {
+                let nouns = noun.split(' ').count();
+                let Some(after) = words.get(at + 1..at + 1 + nouns) else {
+                    continue;
+                };
+                let after = after.join(" ");
+                if after.trim_end_matches(|c: char| !c.is_alphabetic()) != noun {
+                    continue;
+                }
+                stated += 1;
+                if number != count {
+                    let page = page.strip_prefix(&root).unwrap().display();
+                    wrong.push(format!("{page}: \"{number} {after}\", not {count}"));
+                }
+            }
+        }
+    }
+    assert!(stated > 0, "no page states a tool count");
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// Every revision lists the same tools: `initialize` negotiates 2025-11-25 or 2025-06-18
 /// (2025-11-25 for a client that asks for a version it does not serve), `server/discover`
 /// advertises all three, and each tool's schema is its request type's, standing alone.
 #[test]
