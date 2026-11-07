@@ -38,13 +38,17 @@
 //!    nor converted again, and no git object is taken for a store object of other bytes. A base
 //!    the walk did not meet, only reached, may be a commit the source lacks (one the tip
 //!    descends from through the head's export instead): then nothing is seeded.
-//! 5. The frames: each run of [`ImportRequest::frame_changesets`] commits is converted, its new
-//!    trees and blobs stored ([`Repo::put_objects`]) whenever
-//!    [`ImportRequest::object_batch_bytes`] of them accumulate and at its end, then recorded as
-//!    one journal frame ([`Repo::raw_batch`]; a parent is a changeset of this run, the base or
-//!    the index's), then its commits' external ids are recorded ([`Repo::record_external_ids`]),
-//!    after the frame is durable (storage spec §2 rule 4, W8). A compaction runs at most once a
-//!    frame, so about ⌈m/N⌉ times for m commits in frames of N.
+//! 5. The frames: each run of commits is converted, its new trees and blobs stored
+//!    ([`Repo::put_objects`]) whenever [`ImportRequest::object_batch_bytes`] of them accumulate
+//!    and at its end, then recorded as one journal frame ([`Repo::raw_batch`]; a parent is a
+//!    changeset of this run, the base or the index's), then its commits' external ids are
+//!    recorded ([`Repo::record_external_ids`]), after the frame is durable (storage spec §2 rule
+//!    4, W8). Frames are sized by time (the M17 design §3.1), so that each frame's commit holds
+//!    the writer lock about [`ImportRequest::step_budget`] and other writers commit between
+//!    frames: the first holds [`IMPORT_FIRST_FRAME`] changesets, and after a frame of `n` whose
+//!    commit took `t`, its lock wait included, the next holds `budget × n / t`, at least one and
+//!    at most `2n` and [`ImportRequest::frame_changesets`]. A compaction runs at most once a
+//!    frame.
 //! 6. The metadata is flushed ([`Repo::flush_metadata`]: the checkpoint moves to the journal's
 //!    end, so that no reader parses the import's frames again), and the target moved from its
 //!    head to the tip's changeset by compare-and-swap ([`Repo::cas_ref`]). A swap that finds the
@@ -86,6 +90,7 @@
 //! [`Repo::cas_ref`]: swarmops_repo::Repo::cas_ref
 
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use swarmops_core::bytes;
 use swarmops_core::{
@@ -107,6 +112,14 @@ use crate::{ancestry, export, export_oid, source};
 /// How many changesets a frame of the import holds unless asked otherwise: issue 6 Stage 1's
 /// N, past the index's compaction threshold, so that a compaction runs once a frame at most.
 pub const DEFAULT_FRAME_CHANGESETS: usize = 8_192;
+
+/// How long one frame's commit may hold the writer lock, unless asked otherwise: 100 ms, so that
+/// a commit or a land beside an import waits about that long behind it.
+pub const IMPORT_STEP_BUDGET: Duration = Duration::from_millis(100);
+
+/// How many changesets the first frame of an import holds: the frames after it are sized from
+/// its cost.
+pub const IMPORT_FIRST_FRAME: usize = 64;
 
 /// How many bytes of new trees and blobs the import gathers before it stores them, unless asked
 /// otherwise: 64 MiB.
@@ -132,9 +145,14 @@ pub struct ImportRequest {
     pub lossy: LossySet,
     /// Who moves the target ref, as the reflog records it.
     pub actor: String,
-    /// How many changesets a journal frame holds: 1 to 65,535
+    /// How many changesets a journal frame holds at most: 1 to 65,535
     /// ([`swarmops_repo::MAX_RAW_BATCH`]), a number outside taken as the nearer bound.
     pub frame_changesets: usize,
+    /// How long one frame's commit may hold the writer lock: the frames after the first are
+    /// sized from the last one's cost to take about this long. [`Duration::ZERO`] gives frames
+    /// of one changeset after the first, [`Duration::MAX`] frames that double up to
+    /// [`ImportRequest::frame_changesets`].
+    pub step_budget: Duration,
     /// How many bytes of new trees and blobs the import gathers before it stores them.
     pub object_batch_bytes: usize,
     /// The key that authenticates the export oid memos ([`MemoKey`]): with one, a memo whose MAC
@@ -156,8 +174,8 @@ enum Mode {
 
 impl ImportRequest {
     /// A request to import `git_ref` into `target_ref` for `actor`, allowing no lossy class,
-    /// [`DEFAULT_FRAME_CHANGESETS`] to a frame, objects stored every
-    /// [`DEFAULT_OBJECT_BATCH_BYTES`].
+    /// frames of at most [`DEFAULT_FRAME_CHANGESETS`] sized by [`IMPORT_STEP_BUDGET`], objects
+    /// stored every [`DEFAULT_OBJECT_BATCH_BYTES`].
     pub fn new(
         git_ref: impl Into<String>,
         target_ref: impl Into<String>,
@@ -169,6 +187,7 @@ impl ImportRequest {
             lossy: LossySet::empty(),
             actor: actor.into(),
             frame_changesets: DEFAULT_FRAME_CHANGESETS,
+            step_budget: IMPORT_STEP_BUDGET,
             object_batch_bytes: DEFAULT_OBJECT_BATCH_BYTES,
             memo_key: None,
             mode: Mode::IntoRef,
@@ -519,13 +538,36 @@ pub fn import(
     }
     // Nothing is read in the snapshot past here: the frames' own writes follow.
     drop(oids);
-    for commits in walk
-        .unknown
-        .chunks(req.frame_changesets.clamp(1, MAX_RAW_BATCH))
-    {
-        run.frame(commits)?;
+
+    // The frames, each sized from the cost of the last one's commit.
+    let ceiling = req.frame_changesets.clamp(1, MAX_RAW_BATCH);
+    let mut rest = walk.unknown.as_slice();
+    let mut size = first_frame(ceiling);
+    while !rest.is_empty() {
+        let (commits, after) = rest.split_at(size.min(rest.len()));
+        let took = run.frame(commits)?;
+        size = next_frame(req.step_budget, commits.len(), took, ceiling);
+        rest = after;
     }
     run.finish(tip, old_head)
+}
+
+/// How many changesets the first frame holds under a `ceiling` of
+/// [`ImportRequest::frame_changesets`].
+fn first_frame(ceiling: usize) -> usize {
+    IMPORT_FIRST_FRAME.min(ceiling)
+}
+
+/// How many changesets the frame after one of `last` changesets whose commit took `took` holds:
+/// as many as `budget` allows at that cost, at least one and at most twice `last` and `ceiling`.
+/// Computed in nanoseconds, saturating, a commit taking at least one: no budget overflows it.
+fn next_frame(budget: Duration, last: usize, took: Duration, ceiling: usize) -> usize {
+    let most = last.saturating_mul(2).min(ceiling).max(1);
+    let took = took.as_nanos().max(1);
+    let allowed = budget.as_nanos().saturating_mul(last as u128) / took;
+    usize::try_from(allowed)
+        .unwrap_or(usize::MAX)
+        .clamp(1, most)
 }
 
 /// The report of an import that found the target's head at the tip, or past it (`behind`, the
@@ -1091,8 +1133,9 @@ impl<'a, 's> Run<'a, 's> {
     }
 
     /// One frame: `commits` converted, their objects stored, their changesets recorded in one
-    /// journal frame, then their external ids.
-    fn frame(&mut self, commits: &[GitOid]) -> Result<(), ImportError> {
+    /// journal frame, then their external ids. How long the frame's commit took, its lock wait
+    /// and its retries included: what sizes the next frame.
+    fn frame(&mut self, commits: &[GitOid]) -> Result<Duration, ImportError> {
         let converted = self.convert(commits)?;
         let repo = self.repo;
         let mut batch = repo.raw_batch();
@@ -1131,11 +1174,13 @@ impl<'a, 's> Run<'a, 's> {
         }
         // A batch is gone once it commits: a retry records the same raws again.
         let mut batch = Some(batch);
+        let started = Instant::now();
         let outcome = retry_busy(|| match batch.take() {
             Some(batch) => batch.commit(),
             None => repo.commit_raw_batch(raws.clone()),
         })
         .map_err(|source| self.stopped(source))?;
+        let took = started.elapsed();
         absorb(&mut self.recovered, outcome.recovered);
         self.imported += bytes::to_u64(commits.len());
         self.last = commits.last().copied();
@@ -1151,7 +1196,7 @@ impl<'a, 's> Run<'a, 's> {
         for key in put.conflicts {
             self.conflict(&key);
         }
-        Ok(())
+        Ok(took)
     }
 
     /// `commits` converted, in order; their new trees and blobs stored whenever
@@ -1383,6 +1428,37 @@ mod tests {
         });
         assert!(matches!(other, Err(RepoError::NotFound(_))));
         assert_eq!(calls.get(), 1);
+    }
+
+    /// A frame after one of `n` changesets whose commit took `t` holds what the step budget
+    /// allows at that cost, at least one and at most twice `n` and the ceiling; the arithmetic
+    /// saturates, so that no budget, no cost and no count overflows it.
+    #[test]
+    fn frames_follow_the_budget() {
+        let ms = Duration::from_millis;
+        let budget = IMPORT_STEP_BUDGET;
+        let ceiling = DEFAULT_FRAME_CHANGESETS;
+
+        // 1. The budget at the last frame's cost, within one and twice the last.
+        assert_eq!(next_frame(budget, 64, ms(80), ceiling), 80);
+        assert_eq!(next_frame(budget, 64, ms(400), ceiling), 16);
+        assert_eq!(next_frame(budget, 64, ms(50), ceiling), 128);
+        assert_eq!(next_frame(budget, 64, ms(10_000), ceiling), 1);
+
+        // 2. A budget of zero gives frames of one; no budget doubles them up to the ceiling.
+        assert_eq!(next_frame(Duration::ZERO, 64, ms(1), ceiling), 1);
+        assert_eq!(next_frame(Duration::MAX, 64, ms(1), ceiling), 128);
+        assert_eq!(next_frame(Duration::MAX, 6_000, ms(1), ceiling), ceiling);
+        assert_eq!(next_frame(Duration::MAX, 64, ms(1), 100), 100);
+
+        // 3. A commit that took no time counts as one nanosecond; nothing overflows.
+        assert_eq!(next_frame(budget, 1, Duration::ZERO, ceiling), 2);
+        let most = usize::MAX;
+        assert_eq!(next_frame(Duration::MAX, most, Duration::ZERO, most), most);
+
+        // 4. The first frame: 64, or fewer when the ceiling is lower.
+        assert_eq!(first_frame(ceiling), IMPORT_FIRST_FRAME);
+        assert_eq!(first_frame(2), 2);
     }
 
     /// What several write transactions repaired adds up: counts summed, the views rebuilt if

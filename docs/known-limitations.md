@@ -541,6 +541,13 @@ left).
   export. It lands no change on them, and passes over a partial clone, whose objects are not all
   on the host. *Target: M8's round trip of them with lands (its plan's Task 11), in the pilot.
   Found: M1, final review, question 14; narrowed by the host-repository tests (v0.5.0).*
+- **An import's step can hold the writer lock past 100 ms at 1,000,000 records.** Each frame of
+  an import is sized so that its commit holds the lock about 100 ms (the M17 design §3.1), but a
+  frame whose commit finds the index's tail past 1,024 records, or a metadata flush before the
+  target's move that does, also rewrites the sorted views under the lock ("Compaction rewrites both sorted views under the
+  writer lock" below): at 1,000,000 records that rewrite alone takes 173 ms, so a commit or a land
+  beside the import can wait that long once per compaction. *Target: compaction out of the
+  write (M20). Found: the M17 design §3.1.*
 - **A git import or export reports what it repaired only when it succeeds.** An import's
   `meta.recovered` adds up what its frames' and its ref move's write transactions repaired of what
   earlier writers left. An import that fails reports none of it (the import's error carries no such
@@ -626,7 +633,7 @@ left).
 - **A refused import does not say how far it got.** An import stops before the frame that would
   hold a commit it refuses (`E_GIT_IMPORT_LOSSY`, `E_GIT_UNSUPPORTED`, `E_GIT_READ` for an
   object it cannot read, `E_TOO_LARGE` for one past the store's object size, or `E_INTERNAL` for
-  a fault of the conversion), and the frames before it, 8,192 commits each, stay recorded with their
+  a fault of the conversion), and the frames before it, up to 8,192 commits each, stay recorded with their
   external ids; but the error carries no `details.imported` or `details.last_commit`, which only a
   store failure and a failure after a frame's commit point report. An `E_CAS_MISMATCH` after the
   last frame, which recorded every commit, carries neither. The same import run again, once

@@ -63,6 +63,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
 - Crash tests (the M16 design §2): a literal `SIGKILL` now also kills `ref set` and `op undo` on
   `release/1`, two reader processes (`ref list`, `show`, `cat`) run beside every kill loop and
   never find a missing object, and the power-loss images cover a keyed `land` and its undo.
+- `git import`, and the objects-only import of a fetch or a `serve` push, size their journal
+  frames by time (the M17 design §3.1): the first holds 64 changesets, and each next one as many
+  as fit in a 100 ms hold of the writer lock at the last one's cost, at most twice the last and
+  8,192. A commit or a land beside a long import waits about one such step, not a whole 8,192
+  frame. The target ref still moves once, at the end, and the changesets are the same
+  ([limits](docs/reference/limits.md#internal-values)).
 
 ### Fixed
 

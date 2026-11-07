@@ -1622,3 +1622,35 @@ pays the first refresh and is not split.
 
 `scheduled.yml`'s `perf-cases` timeout is recomputed by its comment's rule from the sum of the
 measured case times, the nine before M17 (7,541 s) and the four above: sum — s, timeout — minutes.
+
+## M17-3: an import in short steps — 2026-11-07 (not measured yet)
+
+The import's frames are sized by time (the M17 design §3.1): the first holds 64 changesets, and
+each next one as many as fit in a 100 ms hold of the writer lock (`IMPORT_STEP_BUDGET`) at the
+last one's cost, at most twice the last and 8,192. `intake_perf::commits_beside_an_import` is run
+again on that code, and now also prints the longest hold of the writer lock during the import of
+1,000 commits alone, as a probe that tries the lock every millisecond without waiting sees it:
+the import's longest frame commit or flush. The values come from the first `just perf` after the
+slice lands, run under the heavy lock, and replace the dashes below, with the verdict against
+G18.
+
+| Figure | Value | Target |
+| --- | --- | --- |
+| Longest wait of a commit beside the import of 12,000 commits (G18) | — | at most 100 ms |
+| `E_BUSY` count and longest | — | recorded |
+| Reads of `main` that saw the new head before the import's end | — | none |
+| Longest writer-lock hold, import of 1,000 commits alone | — | recorded |
+| Import of 12,000 commits beside the committers | — | recorded (against the M17 baseline) |
+| Host state | — | — |
+
+A frame whose commit finds the index's tail past 1,024 records, and a flush that does, also
+compacts the index under the lock: 173 ms at 1,000,000 records ("v0.6.0 — 2026-10-28",
+`compaction/compact/1M`), past the step budget, which M20 takes out of the write (the known
+limitation "An import's step can hold the writer lock past 100 ms at 1,000,000 records").
+
+The slow `sweeps::a_12000_import_killed_and_resumed` (12,000 synthetic commits, the import
+killed at its fourth frame and run again, beside an uninterrupted import) took 44.5 s in a
+debug build at a 1-minute load of 35 to 65; `sweeps::a_hundred_thousand_commit_import_stays_within_its_budget`,
+now with no step budget so that its frames stay fixed (19: 64 to 4,096 doubling, 11 of 8,192
+and one of 1,760), imported 100,000 commits in 60.9 s with 15 compactions and a peak of
+155,848 KiB resident, at a load of 39 to 44.

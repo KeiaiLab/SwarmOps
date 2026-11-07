@@ -3,8 +3,9 @@
 //! A 12,000-commit history is imported into `main` of a store while 8 committers each run
 //! `commit` (a commit that moves no ref) in a loop and a reader samples `main`. The longest wait
 //! of a committer, its `E_BUSY` count, whether a reader saw the new head before the import ended,
-//! and the import's peak resident memory on 1,000 and on 12,000 commits print as `intake-perf: `
-//! lines. The case asserts only what it ran (every command exits 0 or retries an `E_BUSY`, the
+//! the import's peak resident memory on 1,000 and on 12,000 commits, and the longest hold of the
+//! writer lock during the import of 1,000 commits alone, which is its longest frame commit or
+//! flush (the M17 design §3.1), print as `intake-perf: ` lines. The case asserts only what it ran (every command exits 0 or retries an `E_BUSY`, the
 //! readers see the old head until the import's end, the store verifies), never the time: a
 //! missed target is recorded in `docs/perf.md`. It is ignored in `just check`; `just perf` runs it
 //! in a release build.
@@ -22,6 +23,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
+use swarmops_store::{MetaLock, StoreError};
 use swarmops_testkit::accounting::PeakWatch;
 use swarmops_testkit::child::Child;
 use swarmops_testkit::remote::GitServer;
@@ -54,6 +56,9 @@ const READ_TAIL: Duration = Duration::from_secs(2);
 
 /// The agent that imports.
 const IMPORTER: &str = "agent/importer";
+
+/// How often the lock probe tries the writer lock: the resolution of the longest hold it sees.
+const PROBE_EVERY: Duration = Duration::from_millis(1);
 
 /// A bare repository of `commits` commits on `main`.
 fn bare(commits: usize) -> (GitServer, std::path::PathBuf) {
@@ -91,6 +96,39 @@ fn import(store: &str, bare: &Path) -> (Duration, u64) {
         String::from_utf8_lossy(&output.stderr)
     );
     (elapsed, peak)
+}
+
+/// The longest the writer lock of the store at `store` stayed held, and how many holds, as a
+/// probe that tries it every [`PROBE_EVERY`] without waiting sees them until `done`: holds back
+/// to back count as one, and each is seen to about a period. The probe holds the lock for no
+/// longer than a try.
+fn lock_holds(store: &str, done: &AtomicBool) -> (Duration, usize) {
+    let layout = swarmops_testkit::store::layout_of(store);
+    let mut longest = Duration::ZERO;
+    let mut holds = 0;
+    let mut since: Option<Instant> = None;
+    while !done.load(Ordering::Relaxed) {
+        let now = Instant::now();
+        match MetaLock::acquire(&layout, Duration::ZERO) {
+            // 1. Held: a hold starts, unless one is under way.
+            Err(StoreError::Busy) => {
+                if since.is_none() {
+                    since = Some(now);
+                    holds += 1;
+                }
+            }
+            // 2. Free: the hold under way, if any, ended.
+            Ok(lock) => {
+                drop(lock);
+                if let Some(start) = since.take() {
+                    longest = longest.max(now - start);
+                }
+            }
+            Err(error) => panic!("the lock probe: {error}"),
+        }
+        thread::sleep(PROBE_EVERY);
+    }
+    (longest, holds)
 }
 
 /// What one committer saw.
@@ -175,14 +213,23 @@ fn longest_median(times: &[Duration]) -> (Duration, Duration) {
 fn commits_beside_an_import() {
     let work = TempDir::new().expect("a temp dir");
 
-    // 1. The import's memory on the short history, alone.
+    // 1. The import's memory and its longest hold of the writer lock on the short history,
+    //    alone.
     let (_short_server, short) = bare(SHORT);
     let alone = store(work.path(), "short");
-    let (elapsed, peak) = import(&alone, &short);
+    let probed = AtomicBool::new(false);
+    let ((elapsed, peak), (longest_hold, holds)) = thread::scope(|scope| {
+        let probe = scope.spawn(|| lock_holds(&alone, &probed));
+        let imported = import(&alone, &short);
+        probed.store(true, Ordering::Relaxed);
+        (imported, probe.join().expect("the lock probe ran"))
+    });
     println!(
-        "intake-perf: import of {SHORT} commits: {:.3} s, peak memory {:.1} MiB",
+        "intake-perf: import of {SHORT} commits: {:.3} s, peak memory {:.1} MiB; longest \
+         writer-lock hold {:.3} s of {holds}",
         elapsed.as_secs_f64(),
-        mib(peak)
+        mib(peak),
+        longest_hold.as_secs_f64(),
     );
 
     // 2. The long history, with the committers and the reader running beside it.

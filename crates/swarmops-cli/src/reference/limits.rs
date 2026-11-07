@@ -675,7 +675,7 @@ static DEFAULTS: [DefaultRow; 13] = [
 
 /// Values that tune the implementation, or bound the store's layout where no request reaches:
 /// no option sets them, and they are not part of the contract.
-static INTERNAL: [Limit; 18] = [
+static INTERNAL: [Limit; 20] = [
     internal_value(
         "Writer lock wait",
         declared(
@@ -708,7 +708,35 @@ static INTERNAL: [Limit; 18] = [
             || bytes::to_u64(swarmops_git::import::DEFAULT_FRAME_CHANGESETS),
         ),
         Unit::Count("changesets"),
-        "How many changesets a journal frame of `git import` holds.",
+        "How many changesets a journal frame of `git import` holds at most.",
+    ),
+    internal_value(
+        "Import step budget",
+        code(
+            "swarmops_git::import::IMPORT_STEP_BUDGET",
+            "crates/swarmops-git/src/import.rs",
+            "pub const IMPORT_STEP_BUDGET: Duration = Duration::from_millis(100);",
+            || {
+                u64::try_from(swarmops_git::import::IMPORT_STEP_BUDGET.as_millis())
+                    .unwrap_or(u64::MAX)
+            },
+        ),
+        Unit::Millis,
+        "How long one frame's commit of `git import`, and of the objects-only import of a \
+             fetch or a `serve` push, may hold the writer lock: each frame after the first is \
+             sized from the last one's cost to take about this long.",
+    ),
+    internal_value(
+        "Import first frame",
+        code(
+            "swarmops_git::import::IMPORT_FIRST_FRAME",
+            "crates/swarmops-git/src/import.rs",
+            "pub const IMPORT_FIRST_FRAME: usize = 64;",
+            || bytes::to_u64(swarmops_git::import::IMPORT_FIRST_FRAME),
+        ),
+        Unit::Count("changesets"),
+        "How many changesets the first journal frame of `git import` holds: the frames \
+             after it are sized by the step budget.",
     ),
     internal_value(
         "Import object batch",

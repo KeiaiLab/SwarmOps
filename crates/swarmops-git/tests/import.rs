@@ -10,6 +10,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
+use std::time::Duration;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::ChangesetId;
@@ -1131,22 +1132,16 @@ fn no_write_after_the_move_s_failed_listing() {
 }
 
 /// A frame holds at most `frame_changesets` changesets, and the index compacts about once a
-/// frame: 3,300 commits in frames of 1,100 are three frames, and at most ⌈3,300 / 1,100⌉ + 1
-/// compactions.
+/// frame: 3,300 commits with no step budget to stop the doubling are frames of 64, 128, 256,
+/// 512 and 1,024, then of 1,100, the most, and the 216 left, with at most four compactions.
 #[test]
 fn frames_hold_at_most_their_size_and_compactions_stay_few() {
-    let mut source = MemSource::default();
-    let mut parent: Option<GitOid> = None;
-    for n in 1..=3_300 {
-        let blob = source.blob(format!("{n}\n").as_bytes());
-        let tree = source.tree(&[("100644", b"count.txt", blob)]);
-        let message = format!("count to {n}\n");
-        parent = Some(source.commit(tree, parent.as_slice(), &message));
-    }
-    let tip = parent.expect("3,300 commits");
+    let (source, chain) = counting(3_300);
+    let tip = chain[chain.len() - 1];
     let (_dir, root, repo) = unsynced_repo();
     let mut req = request(&tip.to_string());
     req.frame_changesets = 1_100;
+    req.step_budget = Duration::MAX;
 
     let report = import(&repo, &source, &req).unwrap();
     assert_eq!(report.imported, 3_300);
@@ -1159,11 +1154,161 @@ fn frames_hold_at_most_their_size_and_compactions_stay_few() {
         changesets
     };
     let changeset_frames: Vec<usize> = frames.iter().map(holding).filter(|&n| n > 0).collect();
-    assert_eq!(changeset_frames, [1_100, 1_100, 1_100]);
+    assert_eq!(changeset_frames, [64, 128, 256, 512, 1_024, 1_100, 216]);
     let compactions = (frames.iter())
         .filter(|frame| matches!(frame.records[..], [Record::Compacted { .. }]))
         .count();
     assert!((1..=4).contains(&compactions), "{compactions} compactions");
+}
+
+/// A source of `commits` linear commits that each change one file: their ids, oldest first.
+fn counting(commits: usize) -> (MemSource, Vec<GitOid>) {
+    let mut source = MemSource::default();
+    let mut chain: Vec<GitOid> = Vec::with_capacity(commits);
+    for n in 1..=commits {
+        let blob = source.blob(format!("{n}\n").as_bytes());
+        let tree = source.tree(&[("100644", b"count.txt", blob)]);
+        let message = format!("count to {n}\n");
+        let parent = chain.last().copied();
+        chain.push(source.commit(tree, parent.as_slice(), &message));
+    }
+    (source, chain)
+}
+
+/// How many changesets each journal frame of the store at `root` that holds any holds, in order.
+fn changeset_frames(root: &Utf8Path) -> Vec<usize> {
+    (frames(root).iter())
+        .map(|frame| {
+            (frame.records.iter())
+                .filter(|record| matches!(record, Record::Changeset { .. }))
+                .count()
+        })
+        .filter(|&changesets| changesets > 0)
+        .collect()
+}
+
+/// A frame's size follows the time its commit took (the M17 design §3.1): the first holds 64
+/// changesets, and each next one as many as the step budget allows at the last one's cost, at
+/// most twice the last. 300 commits with a budget of zero are a frame of 64, then 236 of one;
+/// with no budget, frames of 64, 128 and the 108 left. Either way the store ends as the default
+/// import leaves it.
+#[test]
+fn frames_split_at_the_step_budget() {
+    let (source, chain) = counting(300);
+    let tip = chain[chain.len() - 1].to_string();
+    let (_whole_dir, whole_root, whole) = unsynced_repo();
+    let default = import(&whole, &source, &request(&tip)).unwrap();
+    let mut by_one = vec![64];
+    by_one.resize(1 + 236, 1);
+
+    for (budget, expected) in [
+        (Duration::ZERO, by_one),
+        (Duration::MAX, vec![64, 128, 108]),
+    ] {
+        let (_dir, root, repo) = unsynced_repo();
+        let mut req = request(&tip);
+        req.step_budget = budget;
+        let report = import(&repo, &source, &req).unwrap();
+        assert_eq!(changeset_frames(&root), expected, "a budget of {budget:?}");
+        assert_eq!(report.head, default.head, "a budget of {budget:?}");
+        assert_eq!(state(&root), state(&whole_root), "a budget of {budget:?}");
+    }
+}
+
+/// The import's last step, the metadata's flush, the target's move and the flush after it, costs
+/// as many write transactions and flushes to stable storage for 1 commit as for 2,000 (the M17
+/// design §3.1). With no step budget the 2,000 are frames of 64, 128, 256, 512, 1,024 and 16, so
+/// that the compaction runs in the 1,024 frame's commit and the last step meets a short tail, as
+/// the import of one commit does. Each frame begins one write transaction; a flush is counted
+/// for the last step once its first transaction began.
+#[cfg(feature = "test-hooks")]
+#[test]
+fn the_final_move_costs_the_same_for_1_and_2000() {
+    use swarmops_store::MetaStore;
+
+    let cost = |commits: usize| -> (Vec<usize>, u64, usize) {
+        let (source, chain) = counting(commits);
+        let (_dir, root, repo) = new_repo();
+        drop(repo);
+
+        // 1. Every flush, with how many write transactions had begun when it ran.
+        let flushes = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&flushes);
+        let watching = FailingFs::new(move |method, _| {
+            if method.flushes() {
+                seen.lock().unwrap().push(MetaStore::write_calls());
+            }
+            false
+        });
+        let repo = LocalRepo::open_with_fs(&root, Arc::new(watching)).unwrap();
+
+        // 2. The import, with no budget to stop the doubling.
+        let mut req = request(&chain[commits - 1].to_string());
+        req.step_budget = Duration::MAX;
+        let before = MetaStore::write_calls();
+        import(&repo, &source, &req).unwrap();
+        let writes = MetaStore::write_calls() - before;
+
+        // 3. What came after the frames' own transactions.
+        let frames = changeset_frames(&root);
+        let frame_writes = u64::try_from(frames.len()).unwrap();
+        let flushes = flushes.lock().unwrap();
+        let last_step = (flushes.iter())
+            .filter(|&&at| at > before + frame_writes)
+            .count();
+        (frames, writes - frame_writes, last_step)
+    };
+
+    let (one_frames, one_writes, one_flushes) = cost(1);
+    let (many_frames, many_writes, many_flushes) = cost(2_000);
+    assert_eq!(one_frames, [1]);
+    assert_eq!(many_frames, [64, 128, 256, 512, 1_024, 16]);
+    assert_eq!(
+        many_writes, one_writes,
+        "write transactions of the last step"
+    );
+    assert_eq!(many_flushes, one_flushes, "flushes of the last step");
+}
+
+/// Every reader sees the target's old head until the import's last step moves it, then only the
+/// new one: a thread reading `main` throughout an import of 500 commits in frames of one sees
+/// the base's changeset, then the tip's, and nothing else.
+#[test]
+fn readers_see_the_old_head_until_the_move() {
+    let (source, chain) = counting(501);
+    let (_dir, root, repo) = unsynced_repo();
+    let old = import(&repo, &source, &request(&chain[0].to_string()))
+        .unwrap()
+        .head;
+    let mut req = request(&chain[500].to_string());
+    req.step_budget = Duration::ZERO;
+    let done = AtomicBool::new(false);
+    let started = Barrier::new(2);
+
+    // 1. The reader reads once before the import starts, then until after it ended.
+    let (report, seen) = std::thread::scope(|scope| {
+        let reader = scope.spawn(|| {
+            let repo = LocalRepo::open(&root).unwrap();
+            let mut seen = vec![main_head(&repo)];
+            started.wait();
+            loop {
+                let ended = done.load(Ordering::SeqCst);
+                seen.push(main_head(&repo));
+                if ended {
+                    return seen;
+                }
+            }
+        });
+        started.wait();
+        let report = import(&repo, &source, &req).unwrap();
+        done.store(true, Ordering::SeqCst);
+        (report, reader.join().expect("the reader ran"))
+    });
+
+    // 2. The old head, then the new, each read at least once.
+    let mut heads = seen.clone();
+    heads.dedup();
+    assert_eq!(heads, [old, report.head], "{} reads", seen.len());
 }
 
 /// An import whose second frame fails to commit stops after the first, saying so; run again on
@@ -1185,6 +1330,7 @@ fn a_crashed_import_resumes_past_its_committed_frames() {
     let repo = LocalRepo::open_with_fs(&root, Arc::new(failing)).unwrap();
     let mut req = request("newer");
     req.frame_changesets = 2;
+    req.step_budget = Duration::MAX;
 
     let error = import(&repo, &source, &req).unwrap_err();
     let second = first_parents(manifest, &tip(manifest, "newer"))[4];
@@ -1233,6 +1379,7 @@ fn a_frame_failing_after_its_commit_point_stops_the_import() {
     let repo = LocalRepo::open_with_fs(&root, Arc::new(failing)).unwrap();
     let mut req = request("newer");
     req.frame_changesets = 2;
+    req.step_budget = Duration::MAX;
     let chain = first_parents(manifest, &tip(manifest, "newer"));
 
     let error = import(&repo, &source, &req).unwrap_err();

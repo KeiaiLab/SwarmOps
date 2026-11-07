@@ -2,7 +2,8 @@
 //! plan's Review Focus 3): an import crashed (`SWARMOPS_TEST_CRASH_AT`) or failed
 //! (`SWARMOPS_TEST_FAIL_AT`) at any call leaves a store that verifies clean, and the same import
 //! run again ends with the changesets, the target and the external ids an uninterrupted import
-//! leaves; and 100,000 commits import in 13 frames within a memory budget. The sweeps drive the
+//! leaves; 100,000 commits import in 19 frames within a memory budget; and an import of 12,000
+//! killed in its middle frame resumes to the tip. The sweeps drive the
 //! store's test hooks, so `all.rs` holds this module only with the `test-hooks` feature, which the
 //! workspace's gates turn on (`--all-features`).
 //!
@@ -54,13 +55,13 @@ use swarmops_git::{GitOid, GixSource, ImportError, ImportReport, ImportRequest, 
 use swarmops_repo::{Depth, LocalRepo};
 use swarmops_store::external_ids::lower_hex;
 use swarmops_store::{
-    CRASH_AT_ENV, ExternalEntry, ExternalIds, FAIL_AT_ENV, FS_CALLS_ENV, Frame, Journal,
+    CRASH_AT_ENV, ExternalEntry, ExternalIds, FAIL_AT_ENV, FS_CALLS_ENV, Frame, FsMethod, Journal,
     ORDER_CHECK_ENV, RealFs, Record, SYSTEM_GIT, StoreFormat,
 };
 use swarmops_testkit::child::{Child, SIGABRT, run, this_test};
 use swarmops_testkit::faults::checked;
 use swarmops_testkit::formats::test_of;
-use swarmops_testkit::fs::{NoSyncFs, copy_dir};
+use swarmops_testkit::fs::{FailingFs, NoSyncFs, copy_dir};
 use swarmops_testkit::git::{self, GitFixture};
 use swarmops_testkit::{per_format, test_name};
 use tempfile::TempDir;
@@ -76,6 +77,9 @@ const SOURCE_ENV: &str = "SWARMOPS_TEST_GIT_SWEEP_SOURCE";
 
 /// Set only in the child of the scale test: the store it creates and imports into.
 const SCALE_ENV: &str = "SWARMOPS_TEST_GIT_SCALE_STORE";
+
+/// Set only in the child of the killed import: the store it imports into.
+const KILL_ENV: &str = "SWARMOPS_TEST_GIT_KILL_STORE";
 
 /// How a child reports to its parent, among the test harness's output.
 const REPORT: &str = "git-sweep-child: ";
@@ -108,10 +112,27 @@ const SCALE_PEAK_KIB: u64 = 1 << 20;
 /// How long the scale test's child may run.
 const SCALE_TIMEOUT: Duration = Duration::from_mins(30);
 
-/// The import the sweeps cut short: `newer` into `main`, [`FRAME_CHANGESETS`] to a frame.
+/// The killed import's history.
+const KILL_COMMITS: usize = 12_000;
+
+/// How many of [`KILL_COMMITS`] the store holds before the killed import, `main` at the last.
+const KILL_BASE: usize = 100;
+
+/// Which append to the journal kills the import's child: the fourth frame's, of the eight that
+/// [`KILL_COMMITS`] less [`KILL_BASE`] make with no step budget (64, 128, 256, 512, 1,024,
+/// 2,048, 4,096 and 3,772 changesets), so that three frames are committed and five are not.
+const KILL_AT_APPEND: usize = 4;
+
+/// How many changesets the frames before [`KILL_AT_APPEND`] hold.
+const KILL_COMMITTED: u64 = 64 + 128 + 256;
+
+/// The import the sweeps cut short: `newer` into `main`, [`FRAME_CHANGESETS`] to a frame, with
+/// no step budget, so that a slow commit does not shrink a frame and call k is the same call in
+/// every run.
 fn request() -> ImportRequest {
     let mut req = ImportRequest::new("newer", "main", ACTOR);
     req.frame_changesets = FRAME_CHANGESETS;
+    req.step_budget = Duration::MAX;
     req
 }
 
@@ -752,7 +773,7 @@ fn peak_resident_kib() -> u64 {
 }
 
 /// The scale test's child: a [`MemSource`] of [`SCALE_COMMITS`] linear commits that each change
-/// one file, imported with the default request into a fresh store at `root` that never flushes
+/// one file, imported with the default request but no step budget into a fresh store at `root` that never flushes
 /// to stable storage ([`NoSyncFs`]: what the store holds is the subject, not what survives a
 /// power loss). Reports the commits imported, the import's wall time in milliseconds and the
 /// process's peak resident memory in KiB, the source's included.
@@ -767,7 +788,8 @@ fn import_at_scale(root: &Utf8Path) {
     }
     let tip = parent.expect("commits");
     let repo = LocalRepo::create_with_fs(root, "scale", Arc::new(NoSyncFs)).expect("create");
-    let req = ImportRequest::new(tip.to_string(), "main", ACTOR);
+    let mut req = ImportRequest::new(tip.to_string(), "main", ACTOR);
+    req.step_budget = Duration::MAX;
     let started = Instant::now();
     let report = import(&repo, &source, &req).expect("the import");
     let wall = started.elapsed().as_millis();
@@ -775,8 +797,8 @@ fn import_at_scale(root: &Utf8Path) {
     println!("{REPORT}scale {} {wall} {peak}", report.imported);
 }
 
-/// 100,000 commits import in 13 frames of at most 8,192 changesets, the index compacting at
-/// most once a frame and once more, and the importing process's peak resident memory stays under
+/// 100,000 commits with no step budget import in 19 frames, 64 to 4,096 changesets doubling, 11
+/// of 8,192 and one of 1,760, the index compacting at most once a frame and once more, and the importing process's peak resident memory stays under
 /// 1 GiB. The import runs in a child of its own, so that the peak is its own; the test prints the
 /// wall time.
 #[test]
@@ -819,10 +841,18 @@ fn a_hundred_thousand_commit_import_stays_within_its_budget() {
         })
         .filter(|&changesets| changesets > 0)
         .collect();
-    let full = usize::try_from(SCALE_COMMITS).expect("fits") / DEFAULT_FRAME_CHANGESETS;
-    let mut expected = vec![DEFAULT_FRAME_CHANGESETS; full];
-    expected.push(usize::try_from(SCALE_COMMITS).expect("fits") % DEFAULT_FRAME_CHANGESETS);
-    assert_eq!(sizes, expected, "13 frames: 12 of 8,192 and one of 1,696");
+    let doubling = [64, 128, 256, 512, 1_024, 2_048, 4_096];
+    let mut expected = doubling.to_vec();
+    expected.extend([DEFAULT_FRAME_CHANGESETS; 11]);
+    expected.push(1_760);
+    assert_eq!(
+        expected.iter().sum::<usize>(),
+        usize::try_from(SCALE_COMMITS).expect("fits")
+    );
+    assert_eq!(
+        sizes, expected,
+        "19 frames: doubling, 11 of 8,192 and one of 1,760"
+    );
     let compactions = (journal.iter())
         .filter(|frame| matches!(frame.records[..], [Record::Compacted { .. }]))
         .count();
@@ -840,6 +870,110 @@ fn a_hundred_thousand_commit_import_stays_within_its_budget() {
          compactions, a peak of {peak_kib} KiB resident",
         sizes.len()
     );
+}
+
+/// A [`MemSource`] of `commits` linear commits that each change one file: their ids, oldest
+/// first.
+fn counting(commits: usize) -> (MemSource, Vec<GitOid>) {
+    let mut source = MemSource::default();
+    let mut chain: Vec<GitOid> = Vec::with_capacity(commits);
+    for n in 1..=commits {
+        let blob = source.blob(format!("{n}\n").as_bytes());
+        let tree = source.tree(&[("100644", b"count.txt", blob)]);
+        let message = format!("count to {n}\n");
+        let parent = chain.last().copied();
+        chain.push(source.commit(tree, parent.as_slice(), &message));
+    }
+    (source, chain)
+}
+
+/// The killed import's child: imports [`KILL_COMMITS`] into the store at `root` with no step
+/// budget, and aborts the process at its [`KILL_AT_APPEND`]-th append to the journal, before
+/// that frame is written.
+fn import_killed(root: &Utf8Path) {
+    let (source, chain) = counting(KILL_COMMITS);
+    let appends = AtomicUsize::new(0);
+    let journal = layout_of(root).journal_log().into_std_path_buf();
+    let killing = FailingFs::new(move |method, path| {
+        let append = method == FsMethod::AppendDurable && path == journal;
+        if append && appends.fetch_add(1, Ordering::SeqCst) + 1 == KILL_AT_APPEND {
+            std::process::abort();
+        }
+        false
+    });
+    let repo = LocalRepo::open_with_fs(root, Arc::new(killing)).expect("open the store");
+    let mut req = ImportRequest::new(chain[KILL_COMMITS - 1].to_string(), "main", ACTOR);
+    req.step_budget = Duration::MAX;
+    let imported = import(&repo, &source, &req);
+    panic!("the import was not killed: {imported:?}");
+}
+
+/// An import of 12,000 commits killed in its middle frame leaves `main` at its old head and the
+/// frames before it committed with their external ids; run again, it takes only the commits
+/// those frames left out, and ends where an uninterrupted import ends (D43, the M17 design
+/// §3.1). The kill is a process abort in a child at the fourth frame's journal append.
+#[test]
+#[ignore = "slow, ~45 s: three imports of 12,000 synthetic commits"]
+fn a_12000_import_killed_and_resumed() {
+    if let Some(root) = std::env::var_os(KILL_ENV) {
+        import_killed(&utf8(PathBuf::from(root)));
+        return;
+    }
+    let (source, chain) = counting(KILL_COMMITS);
+    let tip = chain[KILL_COMMITS - 1].to_string();
+
+    // 1. A store at the base: `main` names the 100th commit.
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let root = utf8(dir.path().join("store"));
+    let repo = LocalRepo::create(&root, "killed").expect("create");
+    let base = ImportRequest::new(chain[KILL_BASE - 1].to_string(), "main", ACTOR);
+    let old = import(&repo, &source, &base).expect("the base").head;
+    drop(repo);
+
+    // 2. The import of the rest, killed in a child at its fourth frame.
+    let test = test_name!("a_12000_import_killed_and_resumed");
+    let mut command = this_test(&test);
+    command.env(KILL_ENV, &root);
+    let output = Child::spawn(&mut command).wait(Instant::now() + SCALE_TIMEOUT);
+    assert_eq!(
+        output.status.signal(),
+        Some(SIGABRT),
+        "{:?}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // 3. `main` at its old head; the three frames before the kill and their ids kept.
+    let left = State::of(&root);
+    let held = to_u64(KILL_BASE) + KILL_COMMITTED;
+    assert_eq!(left.main, Some(old));
+    assert_eq!((left.changesets, to_u64(left.entries.len())), (held, held));
+
+    // 4. Run again, it takes the rest and moves `main` to the tip, as an uninterrupted import.
+    let repo = LocalRepo::open(&root).expect("open the store");
+    assert_eq!(repo.verify(Depth::Deep).expect("verify").problems, []);
+    let resumed = import(
+        &repo,
+        &source,
+        &ImportRequest::new(tip.as_str(), "main", ACTOR),
+    )
+    .expect("the import again");
+    assert_eq!(resumed.imported, to_u64(KILL_COMMITS) - held);
+    assert_eq!(resumed.old_head, Some(old));
+    assert!(resumed.ref_moved);
+    let other_dir = tempfile::tempdir().expect("a temp dir");
+    let other = utf8(other_dir.path().join("store"));
+    let fresh = LocalRepo::create_with_fs(&other, "whole", Arc::new(NoSyncFs)).expect("create");
+    import(&fresh, &source, &base).expect("the base");
+    let whole = import(
+        &fresh,
+        &source,
+        &ImportRequest::new(tip.as_str(), "main", ACTOR),
+    )
+    .expect("the uninterrupted import");
+    assert_eq!(resumed.head, whole.head);
+    assert_eq!(State::of(&root), State::of(&other));
+    assert_eq!(repo.verify(Depth::Deep).expect("verify").problems, []);
 }
 
 /// The git export cut short at each of its git-side calls (the M8 plan's Review Focus 3): an export

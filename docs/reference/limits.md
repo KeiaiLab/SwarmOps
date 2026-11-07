@@ -262,7 +262,9 @@ Not part of the contract: these tune the implementation, or bound the store's la
 | --- | --- | --- | --- |
 | Writer lock wait | 10 s | `swarmops_store::meta::store::DEFAULT_LOCK_TIMEOUT` | How long a write waits for the store's lock; a write that waits it out fails with `E_BUSY`. |
 | Index sync threads | 5 threads | `swarmops_store::meta::store::DEFAULT_PARALLELISM` | How many threads a write transaction syncs the five index files from. |
-| Import frame | 8,192 changesets | `swarmops_git::import::DEFAULT_FRAME_CHANGESETS` | How many changesets a journal frame of `git import` holds. |
+| Import frame | 8,192 changesets | `swarmops_git::import::DEFAULT_FRAME_CHANGESETS` | How many changesets a journal frame of `git import` holds at most. |
+| Import step budget | 100 ms | `swarmops_git::import::IMPORT_STEP_BUDGET` | How long one frame's commit of `git import`, and of the objects-only import of a fetch or a `serve` push, may hold the writer lock: each frame after the first is sized from the last one's cost to take about this long. |
+| Import first frame | 64 changesets | `swarmops_git::import::IMPORT_FIRST_FRAME` | How many changesets the first journal frame of `git import` holds: the frames after it are sized by the step budget. |
 | Import object batch | 67,108,864 bytes (64 MiB) | `swarmops_git::import::DEFAULT_OBJECT_BATCH_BYTES` | How many bytes of new trees and blobs `git import` gathers before it stores them. |
 | Import busy retries | 3 retries | `swarmops_git::import::BUSY_RETRIES` | How many times `git import` makes a store call again that found the writer lock held for its whole wait. |
 | Raw batch | 65,535 changesets | `swarmops_repo::MAX_RAW_BATCH` | The most changesets one journal frame of `git import` holds, whatever its frame size asks. |
