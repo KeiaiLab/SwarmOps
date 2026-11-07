@@ -9,12 +9,23 @@ SwarmOps 0.1.0 is the first release, tagged `v0.1.0`, 0.2.0 the second, with the
 0.3.0 the third, with the workspaces (M5), 0.4.0 the fourth, with verify, crash safety, fuzzing, gc
 and FORMAT 2 (M6), 0.5.0 the fifth, with the pilot on a real repository and the goal measurements,
 0.6.0 the sixth, with the fixes those measurements asked for, 0.7.0 the seventh, with stock git
-against a store (M14), and 0.8.0 the eighth, with data safety and the contract (M15); no crate is published (`publish = false`). The 0.1.0 section holds every
+against a store (M14), 0.8.0 the eighth, with data safety and the contract (M15),
+and 0.9.0 the ninth, with safety and load (M16); no crate is published (`publish = false`). The 0.1.0 section holds every
 change up to it, grouped by milestone of the design (umbrella spec §13). From here, **Unreleased**
 collects the changes on `stable` that no release holds yet, until the next release
 ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ## [Unreleased]
+
+## [0.9.0] - 2026-11-07
+
+Safety and load. The 0.9.0 release holds M16: workspace writes that never follow a link below the
+root, kill and power-loss tests for readers, ref moves and keyed lands, `sync` and `git import`
+moving `main` forward only, `land` carrying its changes in one lock pass, the `ancestry` read over
+every parent, the land key judged under the lock and a `serve` push refused inside git's
+quarantine; and the first M17 pieces: served-read baselines, a differential suite against git's
+own server, import frames sized by time, served reads off the writer lock with preparation, one
+pack per identical read, per-request serve records and landing lanes.
 
 ### Changed (breaking)
 
@@ -2149,7 +2160,8 @@ fixes the measurements and the pilot asked for.
   ([docs/known-limitations.md](docs/known-limitations.md), "An import onto a target reads the
   head's whole tree, and onto a native head the whole history below it").
 
-[Unreleased]: https://github.com/KeiaiLab/SwarmOps/compare/v0.8.0...stable
+[Unreleased]: https://github.com/KeiaiLab/SwarmOps/compare/v0.9.0...stable
+[0.9.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.5.0...v0.6.0

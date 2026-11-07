@@ -143,7 +143,7 @@ The releases that get there:
 SwarmOps is declared usable at the first release where all seven conditions hold; condition 6
 counts from the last release that shipped a data-safety fix.
 
-**Status (2026-11-07).** v0.7.0 is released: M14 serves topology 1 (condition 7), its criteria 1
+**Status (2026-11-07).** v0.9.0 is released (M16, safety and load), after v0.8.0 (M15); v0.7.0 has M14, which serves topology 1 (condition 7), its criteria 1
 to 5 pass in `just check` and in the Scheduled run's git matrix, and G16 is met
 ([docs/perf.md](perf.md#v070--2026-10-29): a clone 0.97× and a no-op fetch 1.82× git's own
 server on 12,000 commits). G1 and G2 are met. G4 is met but for its p99 at 50 processes: 25
@@ -646,7 +646,7 @@ GitHub goal, M15 to M25 by the plan of 2026-11-05; M11 (topology 3) takes `so cl
 
 **Settled:** M0 to M4 and M8 are delivered, in v0.1.0, M13 in v0.2.0, M5 in v0.3.0, M6 in
 v0.4.0, M14 in v0.7.0 and M15 in v0.8.0, ahead of M12, which is developed separately.
-**Provisional:** after M16, delivered on `stable` for v0.9.0, the order follows
+**Provisional:** after M16, delivered in v0.9.0, the order follows
 [To usable](#to-usable): M17 serves under load, M18 and M19 need no new format, one `FORMAT 3` (M20)
 then serves review, the queue, withdrawal and lineage, and topology 3 stays after the simulator;
 the order below is the plan:
