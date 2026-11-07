@@ -1621,7 +1621,8 @@ pays the first refresh and is not split.
 ### The `perf-cases` timeout
 
 `scheduled.yml`'s `perf-cases` timeout is recomputed by its comment's rule from the sum of the
-measured case times, the nine before M17 (7,541 s) and the four above: sum — s, timeout — minutes.
+measured case times, the nine before M17 (7,541 s), the four above and M17-4a's
+`first_clone_after_import`: sum — s, timeout — minutes.
 
 ## M17-3: an import in short steps — 2026-11-07 (not measured yet)
 
@@ -1679,3 +1680,35 @@ rest (160 MiB) is the batch and the store's compression buffers on every core: 7
 `RAYON_NUM_THREADS=1`. The `proc-receive` hook peaked at 26 MiB. In the git crate, one commit of
 200 files of 1 MiB with batches of 16 MiB grew the import's peak by 43 MiB, against 207 MiB
 before.
+
+## M17-4a — served reads off the writer lock, preparation (not measured yet)
+
+The cases after the M17 design §4.2 and §4.3: a connection whose store has not moved takes no lock
+(`git/serve.state`), and `serve --prepare --seed-from` makes the first clone after an import
+write nothing. The values come from the first `just perf` after the slice lands, run under the
+heavy lock, and replace the dashes below, each with its host state and its verdict.
+
+### R-4, G20: the first clone after import, prepared
+
+`serve_perf::first_clone_after_import`: `git import` of 12,000 commits, then `serve --prepare
+--seed-from` the bare source, then the first clone from `swarmops serve` against git's own first
+clone of that bare copy. Asserted: the preparation and the clone write no object, both serve the
+same commit, `git fsck --strict` passes.
+
+| Figure | Value | Target |
+| --- | --- | --- |
+| Import of 12,000 commits into the store | — | recorded |
+| `serve --prepare --seed-from` | — | recorded |
+| First clone, `serve` and git `upload-pack` | — | at most 2× git's |
+| Host state | — | — |
+
+### R-5, G20: a fetch k lands behind, without the writer lock
+
+`serve_perf::fetch_k_behind` run again on this slice: the same rows as "R-5, G20: a fetch k lands
+behind" above, the fetch now off the writer lock when nothing moved.
+
+| Figure | Value | Target |
+| --- | --- | --- |
+| Server CPU, 1 land behind, 1,000 and 12,000 commits | — | the 12,000 at most 1.5× the 1,000 |
+| CPU per byte sent, 1 / 10 / 100 / 1,000 lands behind | — | within 1.5× across the four |
+| Host state | — | — |

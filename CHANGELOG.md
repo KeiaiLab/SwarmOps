@@ -57,6 +57,14 @@ collects the changes on `stable` that no release holds yet, until the next relea
   alone); the cursor holds both full ids, so a cursor for other revisions, or after a ref among
   them moved, is `E_INVALID_ARG`. It reads only. `log` and `history` still follow first parents
   ([ancestry](docs/reference/commands/ancestry.md)).
+- `serve --prepare [--seed-from GIT_DIR] [--prepare-wait zero|bounded]` makes `serve.git` of the
+  store `--repo` names ready before a client connects, then exits, printing a `serve_prepare`
+  envelope on stdout; it needs no `--root`. `--seed-from`, the repository `git import` read,
+  fetches the imported commits' objects into `serve.git` first, so that neither the preparation
+  nor the first clone after an import writes an object, then packs the history with a bitmap.
+  Without the store's memo key, on a store whose `main` head is no imported commit, it exports
+  nothing and warns (`skipped`). Run it as the account the agents and `serve` run as
+  ([Serve over ssh](docs/operate/serve-over-ssh.md#the-serving-account), the M17 design §4.3).
 
 ### Changed
 
@@ -69,6 +77,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
   8,192. A commit or a land beside a long import waits about one such step, not a whole 8,192
   frame. The target ref still moves once, at the end, and the changesets are the same
   ([limits](docs/reference/limits.md#internal-values)).
+- A `serve` connection whose store has not moved since `serve.git`'s last export takes no lock:
+  `git/serve.state` names each served ref's last committed export, and a fetch or clone whose
+  store refs and `serve.git` refs both match it starts git at once, where it waited behind the
+  store's writer lock once per served ref and once more. A refresh reads every ref in one
+  committed snapshot, and a push's or a land's export keeps the file current. A missing or
+  damaged file, or a `serve.git` ref moved by hand, refreshes as before (the M17 design §4.2).
 
 ### Fixed
 

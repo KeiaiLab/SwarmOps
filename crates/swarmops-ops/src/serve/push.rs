@@ -27,8 +27,6 @@
 //! skips step 6 so that its move reaches the store's refusal (`E_TAG_IMMUTABLE`). An annotated
 //! tag is no changeset, so its push is refused before the import (`annotated_tag`).
 
-use std::time::Duration;
-
 use swarmops_api::{ErrorCode, OpError, RefDeleteReq, RefSetReq, Rev, StoreOps as _};
 use swarmops_core::ChangesetId;
 use swarmops_git::serve::proc_receive::{Command, Report};
@@ -44,11 +42,10 @@ use swarmops_store::{RefKind, check_move};
 
 use super::access::Action;
 use super::hook::{HookCtx, Judged, Objects, ng};
-use super::refresh::{SERVE_REFRESH_ATTEMPTS, serve_error};
+use super::refresh::{
+    SERVE_LOCK_WAIT, SERVE_REFRESH_ATTEMPTS, StateUpdates, serve_error, write_state,
+};
 use crate::error;
-
-/// How long a push waits for `git/serve.lock`: the store's writer lock wait, never more.
-const SERVE_LOCK_WAIT: Duration = Duration::from_secs(10);
 
 /// Where a branch is in git.
 const HEADS: &str = "refs/heads/";
@@ -187,8 +184,9 @@ fn push(
     };
 
     // 4. Under serve.lock: the head now, as its export.
-    let _lock = ctx.repo.lock(SERVE_LOCK_WAIT).map_err(serve_error)?;
+    let lock = ctx.repo.lock(SERVE_LOCK_WAIT).map_err(serve_error)?;
     let head = export_ref(ctx, &command.refname, store, kind)?;
+    record(ctx, &lock, &command.refname, head);
 
     // 5. The client's old value is that export, or the ref is new on both sides.
     if head.map(|(_, oid)| oid) != command.old {
@@ -220,6 +218,7 @@ fn push(
 
     // 8. serve.git's ref at the move's export: the pushed commit, unless its import was lossy.
     let moved = export_ref(ctx, &command.refname, store, kind)?;
+    record(ctx, &lock, &command.refname, moved);
     let mut report = Report::ok(command.refname.clone());
     if let (Some((_, oid)), Report::Ok { options, .. }) = (moved, &mut report)
         && oid != new
@@ -241,6 +240,7 @@ fn delete(
     // 4, 5. Under serve.lock: the head now, as its export, is the client's old value.
     let lock = ctx.repo.lock(SERVE_LOCK_WAIT).map_err(serve_error)?;
     let head = export_ref(ctx, &command.refname, store, kind)?;
+    record(ctx, &lock, &command.refname, head);
     let Some((id, oid)) = head.filter(|(_, oid)| Some(*oid) == command.old) else {
         return Ok(stale(command));
     };
@@ -254,7 +254,16 @@ fn delete(
 
     // 8. serve.git's ref, which step 4 wrote, deleted.
     unset(ctx, &lock, &command.refname, oid)?;
+    record(ctx, &lock, &command.refname, None);
     Ok(Report::ok(command.refname.clone()))
+}
+
+/// Records in `git/serve.state` that `full` names the export `head` now (`None`: no ref), under
+/// `lock`, after the export or the deletion that moved it. A write that fails is passed over:
+/// the old state then names what `serve.git` no longer does, and the next connection refreshes.
+fn record(ctx: &HookCtx<'_>, lock: &ServeLock, full: &str, head: Option<Head>) {
+    let updates = StateUpdates::from([(full.to_owned(), head)]);
+    let _ = write_state(ctx.repo, lock, &updates);
 }
 
 /// Deletes `full` from `serve.git`, where it names `oid`, under `lock`.

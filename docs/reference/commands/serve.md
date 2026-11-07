@@ -12,6 +12,8 @@ The branches are served as refs/heads/&lt;name&gt;, main among them, and the tag
 
 A refusal before git starts prints one ERR pkt-line on stdout, which git shows as remote error: &lt;CODE&gt;: &lt;message&gt;, and the envelope on stderr; with --cgi, a Status: header and the same text. --hook pre-receive and --hook proc-receive are the entries git runs inside a push, from the hook files serve writes; they take no --as. --stdio, the store-to-store sync, is not served yet.
 
+A connection whose store has not moved since serve.git's last export takes no lock: git/serve.state names that export. serve --prepare makes serve.git ready for the store --repo names before a client connects, so that the connection finds it current and exports nothing; it needs no --root. With --seed-from &lt;GIT\_DIR&gt;, the repository a git import read, it first fetches the imported commits' objects from it and packs them with a bitmap, so that the first clone after an import writes no object. --prepare-wait zero gives up at once when another refresh holds serve.git's lock, and marks it for that one to run again. It prints {"op": "serve\_prepare", ...} on stdout, and exits 0 when it was skipped or found the lock held. Without the store's memo key, on a store whose main head is no imported commit, it exports nothing and warns: run it as the account the agents and serve run as.
+
 ```yaml
 title: "swarmops serve"
 description: "Serve the stores under --root to stock git: fetch, clone and push over ssh as a forced command, or over smart HTTP as a CGI program."
@@ -69,6 +71,25 @@ Run as a hook git runs inside a push: pre-receive or proc-receive, from the hook
 Syntax: `--stdio`.
 
 Serve the store-to-store sync on stdin and stdout: not served yet.
+
+### `--prepare`
+
+Syntax: `--prepare`.
+
+Make serve.git of the store --repo names ready before a client connects, then exit.
+
+### `--seed-from`
+
+Syntax: `--seed-from <GIT_DIR>`.
+
+With --prepare: the git repository an import read, to take the history's objects from.
+
+### `--prepare-wait`
+
+Syntax: `--prepare-wait <WAIT>`.
+Default: `bounded`.
+
+With --prepare: how long to wait for serve.git's lock. Values: `zero`: Not at all: a held lock is marked for its holder to run again; `bounded`: As long as a refresh waits, then E\_BUSY.
 
 ## Examples
 

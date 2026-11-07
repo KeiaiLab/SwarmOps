@@ -31,7 +31,6 @@
 
 use std::io::{self, Write as _};
 use std::path::Path;
-use std::time::Duration;
 
 use swarmops_api::{
     ConflictKindOut, ConflictReport, ErrorCode, FileConflictOut, Identity, LandReq, LandResp,
@@ -49,18 +48,19 @@ use swarmops_git::{
 use super::access::{Access, Action};
 use super::guard::Redactor;
 use super::hook::{HookCtx, Judged, Objects, ng};
-use super::refresh::{SERVE_REFRESH_ATTEMPTS, serve_error};
+use super::refresh::{
+    SERVE_LOCK_WAIT, SERVE_REFRESH_ATTEMPTS, StateUpdates, serve_error, write_state,
+};
 use crate::{LocalOps, error};
 
 /// The most conflicting paths a land's report lists, then `… and <k> more`.
 pub const MAX_CONFLICT_LINES: usize = 50;
 
-/// How long a land waits for `git/serve.lock` to export its target: the store's writer lock
-/// wait, never more.
-const SERVE_LOCK_WAIT: Duration = Duration::from_secs(10);
-
 /// The name the texts give the serving repository: never its host path.
 const SERVE_GIT: &str = "serve.git";
+
+/// Where a branch is in git: a land's target is one.
+const HEADS: &str = "refs/heads/";
 
 /// The reason of the `ng` of a land that conflicts: the report follows on stderr.
 const CONFLICT: &str = "conflict";
@@ -334,7 +334,7 @@ fn served_oid(ctx: &HookCtx<'_>, target: &str, id: ChangesetId) -> Result<Option
 /// `serve.lock`, again while another writer moves it, [`SERVE_REFRESH_ATTEMPTS`] times at most:
 /// its head and that head's export, or `None` when the store has no such branch.
 fn export_target(ctx: &HookCtx<'_>, target: &str) -> Result<Option<Head>, OpError> {
-    let _lock = ctx.repo.lock(SERVE_LOCK_WAIT).map_err(serve_error)?;
+    let lock = ctx.repo.lock(SERVE_LOCK_WAIT).map_err(serve_error)?;
     let mut req = ExportRequest::new(target, target);
     req.force = true;
     req.memo_key.clone_from(&ctx.ops.memo_key);
@@ -347,7 +347,14 @@ fn export_target(ctx: &HookCtx<'_>, target: &str) -> Result<Option<Head>, OpErro
         let mut sink = GixSink::open(ctx.repo.git_dir().as_std_path())
             .map_err(|e| serve_error(ServeError::Sink(e)))?;
         match export(&ctx.ops.repo, &mut sink, &req) {
-            Ok(report) => return Ok(Some((report.head, report.head_oid))),
+            Ok(report) => {
+                // The state names the export, written last: a write that fails is passed
+                // over, and the next connection refreshes.
+                let head = (report.head, report.head_oid);
+                let full = format!("{HEADS}{target}");
+                let _ = write_state(ctx.repo, &lock, &StateUpdates::from([(full, Some(head))]));
+                return Ok(Some(head));
+            }
             Err(ExportError::SourceRef(_)) => return Ok(None),
             Err(ExportError::Diverged {
                 reason: DivergedReason::MovedDuringExport { .. },

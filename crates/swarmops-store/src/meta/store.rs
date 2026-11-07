@@ -74,6 +74,11 @@ use crate::layout::Layout;
 #[cfg(feature = "test-hooks")]
 static WRITE_CALLS: AtomicU64 = AtomicU64::new(0);
 
+/// How many committed snapshots [`MetaStore::read_committed`] began in this process: the probe
+/// of the M17 design §4.2 (a refresh takes one), which the test hooks alone count.
+#[cfg(feature = "test-hooks")]
+static READ_COMMITTED_CALLS: AtomicU64 = AtomicU64::new(0);
+
 /// How long [`MetaStore::write`] waits for [`MetaLock`] unless
 /// [`MetaStore::with_lock_timeout`] says otherwise.
 const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
@@ -305,6 +310,14 @@ impl MetaStore {
         WRITE_CALLS.load(Ordering::Relaxed)
     }
 
+    /// How many times [`MetaStore::read_committed`] was called in this process, by any store: a
+    /// test compares two readings around the calls it counts. The test hooks alone keep the
+    /// count.
+    #[cfg(feature = "test-hooks")]
+    pub fn read_committed_calls() -> u64 {
+        READ_COMMITTED_CALLS.load(Ordering::Relaxed)
+    }
+
     /// How many rounds [`MetaStore::read`] makes at most. A round reads every ref file and the
     /// frames past the checkpoint again, and a snapshot takes one more only when the metadata
     /// changed during the last: a commit landed, or a writer cut an entry of `journal.off` as
@@ -506,6 +519,8 @@ impl MetaStore {
     /// listed, and the next committed read lists the frame. A cut that fails too aborts the
     /// process, as a writer's does ([`Journal::repair_tail`]).
     pub fn read_committed(&self) -> Result<(MetaRead<'_>, TailRepair), StoreError> {
+        #[cfg(feature = "test-hooks")]
+        READ_COMMITTED_CALLS.fetch_add(1, Ordering::Relaxed);
         let _lock = MetaLock::acquire(&self.layout, self.lock_timeout)?;
         let repair = self.journal.repair_tail()?;
         // Under the lock no frame lands, nor is any cut, while it reads: one round.

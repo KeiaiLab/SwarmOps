@@ -1,34 +1,52 @@
 //! What `serve.git` advertises is the committed snapshot's export (M14 design §4): before each
 //! advertisement, every served store ref exported into it, and a ref the store no longer has
-//! removed.
+//! removed, unless `git/serve.state` shows nothing moved since the last export (the M17 design
+//! §4.2).
 //!
 //! ```text
-//! 1 serve.lock (bounded wait, E_BUSY)   4 each served ref: export(force) into serve.git,
-//! 2 the committed snapshot's refs          a no-op where it names the export already;
-//!   → git refs (refmap::to_git)            again on a concurrent move, 8 times at most
-//! 3 git refs no store ref maps to:      5 git gc --auto once objects were written
+//! freshness, lock-free: the store refs (Repo::snapshot) ─┐
+//!                       git/serve.state ──────────────────┼─ equal: Current, no lock taken
+//!                       serve.git's refs ─────────────────┘   else: Stale, then refresh:
+//!
+//! 1 serve.lock (bounded wait, E_BUSY)   4 each served ref: export_in(force) into serve.git on
+//!   git locks swept; Current? done        that snapshot, a no-op where it names the export
+//! 2 one committed snapshot's refs         already; again on a concurrent move, 8 times at most
+//!   → git refs (refmap::to_git)         5 git/serve.state written last (write_state)
+//! 3 git refs no store ref maps to:      6 git gc --auto once objects were written
 //!   deleted by compare-and-swap
 //! ```
 //!
-//! The export is `git export`'s own ([`swarmops_git::export()`]), forced: `serve.git` is
-//! SwarmOps' cache, and a store ref that moved back (`op undo`) is advertised where it is. Each
-//! export reads its head in a committed snapshot of its own, so nothing a power loss or a failed
-//! sync's cut could take back is advertised. A store name git takes no ref for, and one under a
-//! served branch's name (`a/b` beside `a`, which git's files cannot hold both of), is left out
-//! with a warning.
+//! The export is `git export`'s own ([`swarmops_git::export::export_in`]), forced: `serve.git` is
+//! SwarmOps' cache, and a store ref that moved back (`op undo`) is advertised where it is. Every
+//! export reads its head in one committed snapshot, so nothing a power loss or a failed sync's
+//! cut could take back is advertised. A store name git takes no ref for, and one under a served
+//! branch's name (`a/b` beside `a`, which git's files cannot hold both of), is left out with a
+//! warning.
+//!
+//! `git/serve.state` lists, for each served git ref, the changeset and the commit of its last
+//! committed export; only an export under `serve.lock` writes it, after the refs it names moved,
+//! and it keeps no entry `serve.git` no longer names. A connection whose lock-free reads of the
+//! store refs and of `serve.git`'s refs both equal it advertises a committed export with no lock
+//! taken. A file missing, cut short or of another first line is `Stale`.
 
 use std::collections::BTreeMap;
+use std::fs::{self, File};
+use std::io::{self, Write as _};
 use std::time::Duration;
 
+use camino::Utf8PathBuf;
 use swarmops_api::{ErrorCode, OpError};
+use swarmops_core::{ChangesetId, ObjectId};
+use swarmops_git::export::export_in;
 use swarmops_git::serve::refmap::to_git;
 use swarmops_git::serve::repo::{ServeError, ServeLock, ServeRepo};
 use swarmops_git::transport::{GitCli, Transport as _};
 use swarmops_git::{
-    BranchUpdate, DivergedReason, ExportError, ExportReport, ExportRequest, GixSink, SinkError,
-    export,
+    BranchUpdate, DivergedReason, ExportError, ExportReport, ExportRequest, GitOid, GixSink,
+    SinkError,
 };
-use swarmops_store::{RefKind, ref_kind};
+use swarmops_repo::RepoRead;
+use swarmops_store::{FsObjectStore, RefKind, TailRepair, ref_kind};
 
 use super::not_built;
 use crate::LocalOps;
@@ -37,9 +55,16 @@ use crate::error;
 /// How many times a refresh reads a ref again after its compare-and-swap in `serve.git` failed.
 pub const SERVE_REFRESH_ATTEMPTS: u32 = 8;
 
-/// How long a refresh waits for `git/serve.lock`: the store's writer lock wait (the limits
-/// page's "Writer lock wait"), never more.
-const SERVE_LOCK_WAIT: Duration = Duration::from_secs(10);
+/// How long a refresh, a push's or a land's export, and a preparation wait for
+/// `git/serve.lock`: the store's writer lock wait (the limits page's "Writer lock wait"), never
+/// more. The one copy (the M17 design §10, D1).
+pub(crate) const SERVE_LOCK_WAIT: Duration = Duration::from_secs(10);
+
+/// The served refs' table beside `serve.git`, in `git/`, the temp file it is written through,
+/// and its first line.
+const STATE_FILE: &str = "serve.state";
+const STATE_TEMP: &str = "serve.state.new";
+const STATE_HEADER: &str = "swarmops-serve-state 1";
 
 /// Where a branch and a tag are in git.
 const HEADS: &str = "refs/heads/";
@@ -73,27 +98,104 @@ pub struct Refreshed {
     pub warnings: Vec<String>,
 }
 
+/// Whether `serve.git` advertises the store's refs as they are ([`freshness`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Freshness {
+    /// The store refs, `git/serve.state` and `serve.git`'s refs agree: advertise as it is.
+    Current,
+    /// Something moved, or the state cannot be read: refresh first.
+    Stale,
+}
+
 /// A served store ref: its name and kind.
 type ServedRef = (String, RefKind);
 
-/// Exports `scope`'s refs of the store `ops` serves into `repo`, from its committed snapshot.
+/// A served git ref's last committed export: its changeset and its commit.
+type Exported = (ChangesetId, GitOid);
+
+/// What `git/serve.state` says, by git ref.
+type State = BTreeMap<String, Exported>;
+
+/// What [`write_state`] changes, by git ref: the export a ref names now, or `None` for one
+/// removed.
+pub(crate) type StateUpdates = BTreeMap<String, Option<Exported>>;
+
+/// Whether `repo` advertises the store `ops` serves as it is, read without the store's writer
+/// lock or `serve.lock`: the served store refs of a lock-free snapshot and `serve.git`'s refs,
+/// each against `git/serve.state` as a whole set. A state file that is missing or damaged, or a
+/// `serve.git` whose refs cannot be read, is [`Freshness::Stale`].
+pub fn freshness(ops: &LocalOps, repo: &ServeRepo) -> Result<Freshness, OpError> {
+    let Some(state) = read_state(repo) else {
+        return Ok(Freshness::Stale);
+    };
+
+    // 1. The served store refs, as `refresh` maps them, against the state's changesets.
+    let read = ops.repo.snapshot().map_err(error::op)?;
+    let listed = read.list_refs().map_err(error::op)?;
+    drop(read);
+    let heads: BTreeMap<String, ChangesetId> = (listed.into_iter())
+        .map(|(name, ref_state)| (name, ref_state.target))
+        .collect();
+    let mut ignored = Refreshed::default();
+    let wanted = served(heads.keys().cloned(), &mut ignored);
+    let store: BTreeMap<&str, ChangesetId> = (wanted.iter())
+        .map(|(full, (name, _))| (full.as_str(), heads[name]))
+        .collect();
+    let named: BTreeMap<&str, ChangesetId> = (state.iter())
+        .map(|(full, (id, _))| (full.as_str(), *id))
+        .collect();
+    if store != named {
+        return Ok(Freshness::Stale);
+    }
+
+    // 2. serve.git's refs against the state's commits.
+    let Ok(git) = repo.refs() else {
+        return Ok(Freshness::Stale);
+    };
+    let exported: BTreeMap<String, GitOid> = (state.into_iter())
+        .map(|(full, (_, oid))| (full, oid))
+        .collect();
+    if git != exported {
+        return Ok(Freshness::Stale);
+    }
+    Ok(Freshness::Current)
+}
+
+/// Exports `scope`'s refs of the store `ops` serves into `repo`, from one committed snapshot,
+/// under `serve.lock`; with [`Scope::All`], nothing when [`freshness`] finds it current once the
+/// lock is held (another connection refreshed meanwhile).
 pub fn refresh(ops: &LocalOps, repo: &ServeRepo, scope: &Scope) -> Result<Refreshed, OpError> {
     let lock = repo.lock(SERVE_LOCK_WAIT).map_err(serve_error)?;
+    refresh_locked(ops, repo, &lock, scope)
+}
+
+/// [`refresh`] under `lock`, which the caller holds: a preparation's rounds.
+pub(crate) fn refresh_locked(
+    ops: &LocalOps,
+    repo: &ServeRepo,
+    lock: &ServeLock,
+    scope: &Scope,
+) -> Result<Refreshed, OpError> {
     let mut refreshed = Refreshed::default();
 
-    // 1. What a dead process left in serve.git, cleared before any ref moves.
-    let swept = repo.sweep_git_locks(&lock).map_err(serve_error)?;
+    // 1. What a dead process left in serve.git, cleared before any ref moves; then nothing more
+    //    to do when everything is current.
+    let swept = repo.sweep_git_locks(lock).map_err(serve_error)?;
     let swept = swept
         .into_iter()
         .map(|file| format!("git_lock_removed: {file}"));
     refreshed.warnings.extend(swept);
+    if *scope == Scope::All && freshness(ops, repo)? == Freshness::Current {
+        return Ok(refreshed);
+    }
 
-    // 2. The store's refs, committed, mapped to the git refs they are served as.
-    let (read, _) = ops.repo.snapshot_committed().map_err(error::op)?;
+    // 2. The store's refs, in one committed snapshot, mapped to the git refs they are served as.
+    let (read, recovered) = ops.repo.snapshot_committed().map_err(error::op)?;
     let listed = read.list_refs().map_err(error::op)?;
-    drop(read);
     let names = listed.into_iter().map(|(name, _)| name);
     let wanted = served(names.filter(|name| in_scope(scope, name)), &mut refreshed);
+    let mut updates = StateUpdates::new();
 
     // 3. Each git ref in scope no store ref is served as: deleted, before an export needs its
     // place (`a` gone, `a/b` made).
@@ -105,27 +207,40 @@ pub fn refresh(ops: &LocalOps, repo: &ServeRepo, scope: &Scope) -> Result<Refres
     };
     for (full, oid) in repo.refs().map_err(serve_error)? {
         if in_scope_git(&full) && !wanted.contains_key(&full) {
-            delete(repo, &lock, &full, oid)?;
+            delete(repo, lock, &full, oid)?;
+            updates.insert(full, None);
             refreshed.removed += 1;
         }
     }
 
-    // 4. Each served ref exported; one the store deleted meanwhile is deleted in git too.
+    // 4. Each served ref exported on that snapshot; one the store deleted meanwhile is deleted
+    //    in git too.
+    let snapshot = (&read, recovered);
     for (full, (store, kind)) in &wanted {
-        let Some(report) = export_one(ops, repo, full, store, *kind)? else {
+        let Some(report) = export_one(ops, repo, snapshot, full, (store, *kind))? else {
             let current = repo.refs().map_err(serve_error)?;
             if let Some(oid) = current.get(full) {
-                delete(repo, &lock, full, *oid)?;
+                delete(repo, lock, full, *oid)?;
                 refreshed.removed += 1;
             }
+            updates.insert(full.clone(), None);
             continue;
         };
+        updates.insert(full.clone(), Some((report.head, report.head_oid)));
         refreshed.moved += u64::from(report.branch_moved);
         refreshed.objects += report.objects_written;
         refreshed.warnings.extend(report.warnings);
     }
+    drop(read);
 
-    // 5. git's own housekeeping, once objects were written: a failure is a warning.
+    // 5. The state, last: a failure leaves the next connection a slow path, and is a warning.
+    if let Err(e) = write_state(repo, lock, &updates) {
+        refreshed
+            .warnings
+            .push(format!("state_not_written: {}", e.message));
+    }
+
+    // 6. git's own housekeeping, once objects were written: a failure is a warning.
     if refreshed.objects > 0 {
         let gc = GitCli::find().and_then(|git| git.gc_auto(repo.git_dir().as_std_path()));
         if let Err(e) = gc {
@@ -201,14 +316,15 @@ fn git_ref_of(name: &str) -> Option<String> {
 }
 
 /// Exports the store ref `store` of kind `kind` into `full` of `repo`, forced, by
-/// compare-and-swap, again while another writer moves it, [`SERVE_REFRESH_ATTEMPTS`] times at
-/// most; `None` when the store no longer has the ref.
+/// compare-and-swap, on `snapshot` (a committed one and its tail repair), again on a fresh
+/// committed snapshot while another writer moves it, [`SERVE_REFRESH_ATTEMPTS`] times at most;
+/// `None` when the store no longer has the ref.
 fn export_one(
     ops: &LocalOps,
     repo: &ServeRepo,
+    snapshot: (&RepoRead<'_, FsObjectStore>, TailRepair),
     full: &str,
-    store: &str,
-    kind: RefKind,
+    (store, kind): (&str, RefKind),
 ) -> Result<Option<ExportReport>, OpError> {
     let short = full
         .strip_prefix(HEADS)
@@ -222,13 +338,21 @@ fn export_one(
     req.memo_key.clone_from(&ops.memo_key);
     let failed = |e: ExportError| error::git_export_error(e, SERVE_GIT, store, short);
 
-    // Each attempt opens serve.git afresh: what gix cached of its refs is not read again.
+    // Each attempt opens serve.git afresh: what gix cached of its refs is not read again. The
+    // first exports on the caller's snapshot, a retry on a committed snapshot of its own.
+    let (read, recovered) = snapshot;
     let mut attempt = 0;
     loop {
         attempt += 1;
         let mut sink = GixSink::open(repo.git_dir().as_std_path())
             .map_err(|e| serve_error(ServeError::Sink(e)))?;
-        match export(&ops.repo, &mut sink, &req) {
+        let exported = if attempt == 1 {
+            export_in(&ops.repo, read, recovered, &mut sink, &req)
+        } else {
+            let (fresh, repaired) = ops.repo.snapshot_committed().map_err(error::op)?;
+            export_in(&ops.repo, &fresh, repaired, &mut sink, &req)
+        };
+        match exported {
             Ok(report) => return Ok(Some(report)),
             Err(ExportError::SourceRef(_)) => return Ok(None),
             Err(ExportError::Diverged {
@@ -263,6 +387,96 @@ fn delete(
         }
         _ => Err(error::error(ErrorCode::Internal, "an unknown ref update")),
     }
+}
+
+/// Writes `git/serve.state` under `lock`, after the `serve.git` refs `updates` names moved: the
+/// old state's entries that `serve.git` still names, then `updates` applied, kept only where
+/// `serve.git` names their commit now, so that it never claims more than `serve.git` holds.
+/// Replaced whole: a temp file in `git/` synced, renamed over it, and `git/` synced. A state that
+/// cannot be read counts as empty. The refresh, a push's export and a land's export call it.
+pub(crate) fn write_state(
+    repo: &ServeRepo,
+    lock: &ServeLock,
+    updates: &StateUpdates,
+) -> Result<(), OpError> {
+    let _ = lock;
+
+    // 1. The old state and the updates, against what serve.git names now.
+    let mut state = read_state(repo).unwrap_or_default();
+    for (full, update) in updates {
+        match update {
+            Some(exported) => state.insert(full.clone(), *exported),
+            None => state.remove(full),
+        };
+    }
+    let names = repo.refs().map_err(serve_error)?;
+    state.retain(|full, (_, oid)| names.get(full) == Some(oid));
+
+    // 2. The bytes: the header, then a line per ref in name order.
+    let lines = (state.iter()).map(|(full, (id, oid))| format!("{full} {id} {oid}\n"));
+    let text: String = std::iter::once(format!("{STATE_HEADER}\n"))
+        .chain(lines)
+        .collect();
+
+    // 3. Replaced whole, durably.
+    let dir = state_dir(repo);
+    let failed = |what: &str| {
+        let what = what.to_owned();
+        move |e: io::Error| {
+            serve_error(ServeError::Io {
+                what: what.clone(),
+                reason: e.kind().to_string(),
+            })
+        }
+    };
+    let temp = dir.join(STATE_TEMP);
+    let mut file = File::create(temp.as_std_path()).map_err(failed(STATE_TEMP))?;
+    file.write_all(text.as_bytes())
+        .map_err(failed(STATE_TEMP))?;
+    file.sync_data().map_err(failed(STATE_TEMP))?;
+    drop(file);
+    let path = dir.join(STATE_FILE);
+    fs::rename(temp.as_std_path(), path.as_std_path()).map_err(failed(STATE_FILE))?;
+    File::open(dir.as_std_path())
+        .and_then(|dir| dir.sync_all())
+        .map_err(failed(""))
+}
+
+/// What `git/serve.state` says; `None` when it is missing, cannot be read, has another first
+/// line, or a line that is no `<git ref> <changeset> <commit>` in name order.
+fn read_state(repo: &ServeRepo) -> Option<State> {
+    let text = fs::read_to_string(state_dir(repo).join(STATE_FILE)).ok()?;
+    let body = text.strip_prefix(STATE_HEADER)?.strip_prefix('\n')?;
+    if !(body.is_empty() || body.ends_with('\n')) {
+        return None;
+    }
+
+    // Each line whole, in strictly rising name order.
+    let mut state = State::new();
+    for line in body.lines() {
+        let mut fields = line.split(' ');
+        let (Some(full), Some(id), Some(oid), None) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            return None;
+        };
+        let id = ChangesetId::new(ObjectId::from_hex(id).ok()?);
+        let oid = GitOid::from_hex(oid.as_bytes())?;
+        if state
+            .last_key_value()
+            .is_some_and(|(last, _)| last.as_str() >= full)
+        {
+            return None;
+        }
+        state.insert(full.to_owned(), (id, oid));
+    }
+    Some(state)
+}
+
+/// `git/`, which holds `serve.git` and the state.
+fn state_dir(repo: &ServeRepo) -> Utf8PathBuf {
+    let git_dir = repo.git_dir();
+    git_dir.parent().unwrap_or(git_dir).to_owned()
 }
 
 /// The operations-spec error of a failure of the serving repository: `E_BUSY` for its lock
@@ -616,6 +830,23 @@ mod tests {
             .map(|(store, git)| ((*git).to_owned(), site.exported(store)))
             .collect();
         assert_eq!(site.served(), expected);
+    }
+
+    /// A refresh reads its refs and their heads in one committed snapshot: four served refs, one
+    /// of them moved, take one `read_committed`.
+    #[cfg(feature = "test-hooks")]
+    #[test]
+    fn a_refresh_takes_one_committed_snapshot() {
+        use swarmops_store::MetaStore;
+
+        let site = Site::new();
+        refresh(&site.ops, &site.repo, &Scope::All).expect("refresh");
+        site.commit("d", Some("release/1"));
+
+        let before = MetaStore::read_committed_calls();
+        let done = refresh(&site.ops, &site.repo, &Scope::All).expect("refresh");
+        assert_eq!(done.moved, 1, "{done:?}");
+        assert_eq!(MetaStore::read_committed_calls() - before, 1);
     }
 
     /// A ref of `serve.git` no store ref is served as (one put there by hand) is deleted.

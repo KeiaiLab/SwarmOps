@@ -31,7 +31,7 @@ use super::access::{Access, Action};
 use super::entry::store_under;
 use super::guard::Redactor;
 use super::receive::MAX_PUSH_BYTES;
-use super::refresh::{Scope, refresh, serve_error};
+use super::refresh::{Freshness, Refreshed, Scope, freshness, refresh, serve_error};
 use super::{
     Entry, SWARMOPS_SERVE_EXE, SWARMOPS_SERVE_IDENTITY, SWARMOPS_SERVE_STORE, ServeInvocation,
     Served, refused,
@@ -167,9 +167,13 @@ fn prepare(
     // 4. The caller may read it: what it may push is the hook's to decide, ref by ref.
     Access::load(&ops)?.check(who, Action::Read, &request.store)?;
 
-    // 5. Its serving repository, refreshed from the committed snapshot.
+    // 5. Its serving repository, refreshed from the committed snapshot,
+    //    unless nothing moved since its last export (no lock taken then).
     let repo = ServeRepo::open(&store).map_err(serve_error)?;
-    let refreshed = refresh(&ops, &repo, &Scope::All)?;
+    let refreshed = match freshness(&ops, &repo)? {
+        Freshness::Current => Refreshed::default(),
+        Freshness::Stale => refresh(&ops, &repo, &Scope::All)?,
+    };
     let mut stderr = std::io::stderr().lock();
     for warning in refreshed.warnings {
         let _ = writeln!(stderr, "warning: {}", redactor.redact(&warning));

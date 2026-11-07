@@ -21,7 +21,7 @@ use swarmops_git::transport::GitCli;
 use super::access::{Access, Action};
 use super::entry::{SshRequest, store_under};
 use super::guard::Redactor;
-use super::refresh::{Scope, refresh, serve_error};
+use super::refresh::{Freshness, Refreshed, Scope, freshness, refresh, serve_error};
 use super::{ServeInvocation, Served};
 use crate::LocalOps;
 use crate::error;
@@ -74,9 +74,13 @@ fn prepare(
     // 3. The caller may read it.
     Access::load(&ops)?.check(who, Action::Read, &request.store)?;
 
-    // 4. Its serving repository, refreshed from the committed snapshot.
+    // 4. Its serving repository, refreshed from the committed snapshot,
+    //    unless nothing moved since its last export (no lock taken then).
     let repo = ServeRepo::open(&store).map_err(serve_error)?;
-    let refreshed = refresh(&ops, &repo, &Scope::All)?;
+    let refreshed = match freshness(&ops, &repo)? {
+        Freshness::Current => Refreshed::default(),
+        Freshness::Stale => refresh(&ops, &repo, &Scope::All)?,
+    };
 
     // 5. What the refresh left out, said on stderr: over ssh the client's terminal.
     let mut stderr = std::io::stderr().lock();

@@ -3,16 +3,22 @@
 //! v0, the round trip of an imported repository, and the refusals before git starts. A refusal is
 //! one `ERR` pkt-line on stdout, which git prints as `remote error:`, and the envelope on stderr;
 //! the caller is named by `--as` alone, never by `SWARMOPS_AGENT`; nothing a client is sent names
-//! the served root.
+//! the served root. A fetch whose store has not moved since the last export reads `serve.git`
+//! without the store's writer lock (`git/serve.state`, the M17 design §4.2), and `serve --prepare`
+//! makes the first clone after an import write no object (§4.3).
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Output;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use swarmops_store::MetaLock;
 use swarmops_testkit::git::fixture;
+use swarmops_testkit::remote::GitServer;
 use swarmops_testkit::serve::ServeSite;
+use swarmops_testkit::store::layout_of;
 use tempfile::TempDir;
 
 use crate::support::{self, Run, Swarmops};
@@ -594,4 +600,252 @@ fn serve_refuses_readers_before_git() {
     let closed = refused(AGENT, &url);
     assert!(closed.contains("remote error: E_AUTH"), "{closed}");
     assert!(closed.contains("no_access_file"), "{closed}");
+}
+
+/// How long `serve` waits for `git/serve.lock`, and the store for its writer lock: a fetch that
+/// waited for a held writer lock ends after it, refused.
+const SERVE_LOCK_WAIT: Duration = Duration::from_secs(10);
+
+/// The served refs' table `serve` keeps beside `serve.git`, and its first line.
+const SERVE_STATE: &str = "git/serve.state";
+const STATE_HEADER: &str = "swarmops-serve-state 1\n";
+
+/// The access file of a test that pushes: [`AGENT`] reads and pushes `main`.
+const PUSHER: &str = r#"version = 1
+
+[[grant]]
+who = ["person/ada"]
+read = true
+push = ["main"]
+"#;
+
+/// The commits of the history `serve --prepare` seeds from.
+const SEEDED_COMMITS: usize = 200;
+
+impl Site {
+    /// The store's writer lock, held by the test until dropped.
+    fn hold_writer_lock(&self) -> MetaLock {
+        let root = camino::Utf8PathBuf::from(self.store());
+        MetaLock::acquire(&layout_of(root), Duration::from_secs(1)).expect("take meta/lock")
+    }
+
+    /// The path of `git/serve.state`.
+    fn state_file(&self) -> PathBuf {
+        self.served.store(STORE).join(SERVE_STATE)
+    }
+
+    /// A `git fetch` in `dir` while the test holds the store's writer lock: it succeeds, and
+    /// ends inside [`SERVE_LOCK_WAIT`].
+    fn fetch_while_locked(&self, dir: &Path) {
+        let held = self.hold_writer_lock();
+        let started = Instant::now();
+        let output = self.git_as(AGENT, dir, Protocol::V2, &["fetch", "--quiet"]);
+        let took = started.elapsed();
+        drop(held);
+        assert!(
+            output.status.success(),
+            "a fetch behind the writer lock: {}",
+            text(&output.stderr)
+        );
+        assert!(took < SERVE_LOCK_WAIT, "the fetch took {took:?}");
+    }
+}
+
+/// A fetch of a store that has not moved since the last export takes no writer lock: it ends
+/// while the test holds `meta/lock`.
+#[test]
+fn a_noop_fetch_takes_no_writer_lock() {
+    let site = Site::new().with_linear();
+    let clone = site.clone("unlocked", Protocol::V2, &[]);
+    site.git(&clone, Protocol::V2, &["fetch", "--quiet"]);
+    let before = site.rev(&clone, "origin/main");
+
+    site.fetch_while_locked(&clone);
+    assert_eq!(site.rev(&clone, "origin/main"), before);
+}
+
+/// A land acknowledged before a fetch starts is what the fetch brings: the client's
+/// `origin/main` is the land's export.
+#[test]
+fn a_land_acknowledged_before_a_fetch_is_advertised() {
+    let site = Site::new().with_linear();
+    let clone = site.clone("after-land", Protocol::V2, &[]);
+    site.git(&clone, Protocol::V2, &["fetch", "--quiet"]);
+    let before = site.rev(&clone, "origin/main");
+
+    site.land("acknowledged.txt");
+    site.git(&clone, Protocol::V2, &["fetch", "--quiet"]);
+    let after = site.rev(&clone, "origin/main");
+    assert_ne!(after, before, "the land was not fetched");
+    assert_eq!(after, site.served("refs/heads/main"));
+}
+
+/// A state file removed, cut short or of another first line reads as not current: the fetch
+/// refreshes, and the file is written again as a refresh writes it. A `serve.git` ref moved by
+/// hand is moved back to its export before it is advertised.
+#[test]
+fn a_missing_or_damaged_state_file_refreshes_as_before() {
+    let site = Site::new().with_linear();
+    let clone = site.clone("damaged", Protocol::V2, &[]);
+    let file = site.state_file();
+    let good = fs::read_to_string(&file).expect("the clone wrote git/serve.state");
+    assert!(good.starts_with(STATE_HEADER), "{good:?}");
+
+    // 1. Removed, cut short mid-line, of another first line: each refreshed and written again.
+    let damages: [(&str, Option<String>); 3] = [
+        ("removed", None),
+        ("truncated", Some(good[..good.len() - 7].to_owned())),
+        (
+            "another first line",
+            Some(good.replacen(STATE_HEADER, "swarmops-serve-state 2\n", 1)),
+        ),
+    ];
+    for (what, damaged) in damages {
+        match damaged {
+            Some(bytes) => fs::write(&file, bytes).unwrap(),
+            None => fs::remove_file(&file).unwrap(),
+        }
+        site.git(&clone, Protocol::V2, &["fetch", "--quiet"]);
+        let again = fs::read_to_string(&file).unwrap_or_default();
+        assert_eq!(again, good, "{what}");
+    }
+
+    // 2. serve.git's main moved back by hand: the next fetch serves main's export again.
+    let main = site.served("refs/heads/main");
+    let parent = site.served("refs/heads/main~1");
+    let serve_git = site.served.store(STORE).join("git/serve.git");
+    let moved = site
+        .served
+        .command()
+        .arg("--git-dir")
+        .arg(&serve_git)
+        .args(["update-ref", "refs/heads/main", &parent])
+        .output()
+        .unwrap();
+    assert!(moved.status.success(), "{}", text(&moved.stderr));
+    let fresh = site.clone("after-hand-move", Protocol::V2, &[]);
+    assert_eq!(site.rev(&fresh, "origin/main"), main);
+    assert_eq!(site.served("refs/heads/main"), main);
+}
+
+/// A push's export keeps the state current: after a push to `main`, the next fetch finds nothing
+/// to refresh, and ends while the test holds `meta/lock`.
+#[test]
+fn a_push_keeps_the_state_current() {
+    let site = Site::new().with_linear();
+    site.grant(PUSHER);
+    let clone = site.clone("pusher", Protocol::V2, &[]);
+    fs::write(clone.join("pushed.txt"), "pushed\n").unwrap();
+    site.git(&clone, Protocol::V2, &["add", "pushed.txt"]);
+    site.git(&clone, Protocol::V2, &["commit", "--quiet", "-m", "pushed"]);
+    site.git(
+        &clone,
+        Protocol::V2,
+        &["push", "--quiet", "origin", "HEAD:main"],
+    );
+    let pushed = site.rev(&clone, "HEAD");
+
+    site.fetch_while_locked(&clone);
+    assert_eq!(site.rev(&clone, "origin/main"), pushed);
+}
+
+/// The loose objects under `objects`: files of its two-hex-digit directories.
+fn loose(objects: &Path) -> Vec<PathBuf> {
+    let in_fan_out = |path: &&PathBuf| {
+        let dir = path.parent().and_then(Path::file_name);
+        dir.and_then(|name| name.to_str())
+            .is_some_and(|name| name.len() == 2 && name.bytes().all(|b| b.is_ascii_hexdigit()))
+    };
+    walk(objects).iter().filter(in_fan_out).cloned().collect()
+}
+
+/// After a `git import` of [`SEEDED_COMMITS`] commits, `serve --prepare --seed-from <source>`
+/// leaves the first clone nothing to write: `serve.git` holds no loose object after it, and the
+/// clone has the source's `main`.
+#[test]
+fn prepare_after_import_writes_no_object_at_first_clone() {
+    // 1. The source, imported.
+    let server = GitServer::new();
+    let source = server.create("source");
+    crate::serve_perf::fast_import(&server, &source, SEEDED_COMMITS);
+    let site = Site::new();
+    site.import(&source, "main", "main");
+
+    // 2. The preparation, seeded from the source.
+    let store = site.store();
+    let seed = source.to_str().unwrap();
+    let line = ["--repo", &store, "serve", "--prepare", "--seed-from", seed];
+    let run = support::run(&line, &[]);
+    let prepared = run.ok();
+    assert_eq!(run.envelope()["op"], "serve_prepare", "{run}");
+    assert_eq!(prepared["seeded"], 1, "{run}");
+    assert_eq!(prepared["refreshed"]["objects"], 0, "{run}");
+    assert_eq!(prepared["skipped"], Value::Null, "{run}");
+
+    // 3. The first clone writes nothing.
+    let clone = site.clone("first", Protocol::V2, &[]);
+    let objects = site.served.store(STORE).join("git/serve.git/objects");
+    assert_eq!(loose(&objects), Vec::<PathBuf>::new());
+    let tip = server
+        .command()
+        .arg("--git-dir")
+        .arg(&source)
+        .args(["rev-parse", "--verify", "main"])
+        .output()
+        .unwrap();
+    assert_eq!(site.rev(&clone, "origin/main"), text(&tip.stdout).trim());
+}
+
+/// Without the memo key, on a store whose `main` head is native, `serve --prepare` exports
+/// nothing: `skipped` is set, one warning says why, and `serve.git` holds no ref, no object and
+/// no state.
+#[test]
+fn prepare_without_the_memo_key_does_nothing() {
+    let site = Site::new();
+    let changes = site.work.path().join("native.json");
+    let list = json!([{"path": "native.txt", "op": "put", "content": {"inline": "native\n"}}]);
+    fs::write(&changes, list.to_string()).unwrap();
+    let commit = site.so(&[
+        "commit",
+        "-m",
+        "native",
+        "--changes",
+        changes.to_str().unwrap(),
+    ]);
+    let id = commit["changeset"].as_str().unwrap();
+    site.so(&["ref", "set", "main", id, "--create"]);
+
+    // 1. No memo key: no key directory, no state directory.
+    let store = site.store();
+    let no_key = [
+        ("SWARMOPS_MEMO_KEY_DIR", ""),
+        ("HOME", ""),
+        ("XDG_STATE_HOME", ""),
+    ];
+    let run = support::run(&["--repo", &store, "serve", "--prepare"], &no_key);
+    let prepared = run.ok();
+    assert!(prepared["skipped"].is_string(), "{run}");
+    assert_eq!(
+        prepared["warnings"].as_array().map(Vec::len),
+        Some(1),
+        "{run}"
+    );
+
+    // 2. Nothing written.
+    let serve_git = site.served.store(STORE).join("git/serve.git");
+    let objects: Vec<PathBuf> = walk(&serve_git.join("objects"))
+        .into_iter()
+        .filter(|path| !path.ends_with("info/packs"))
+        .collect();
+    assert_eq!(objects, Vec::<PathBuf>::new());
+    let refs = site
+        .served
+        .command()
+        .arg("--git-dir")
+        .arg(&serve_git)
+        .arg("for-each-ref")
+        .output()
+        .unwrap();
+    assert_eq!(text(&refs.stdout), "");
+    assert!(!site.state_file().exists());
 }

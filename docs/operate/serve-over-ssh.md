@@ -27,7 +27,8 @@ git (client) ──ssh──▶ sshd ──forced command──▶ swarmops serv
                                                  │ 1 the caller: --as alone
                                                  │ 2 the store named by the client's path
                                                  │ 3 access.toml: may the caller read?
-                                                 │ 4 git/serve.git refreshed from the store
+                                                 │ 4 git/serve.git refreshed from the store,
+                                                 │   unless git/serve.state shows nothing moved
                                                  ▼
                                     git upload-pack | git receive-pack on serve.git
                                                  │ a push: git checks the pack in its
@@ -44,9 +45,14 @@ git (client) ──ssh──▶ sshd ──forced command──▶ swarmops serv
 `serve` runs once per connection and ends with it; there is no daemon. The pack protocol is the
 host git's, so every git client that talks to GitHub talks to it. What git advertises is the
 export of each store ref's committed head, made again before every connection, so a client never
-fetches what a crash could take back. `git/serve.git`, `git/SERVE`, `git/serve.lock` and
-`git/serve-hooks/` in the store are a cache of that export: deleted, the next connection makes them
-again, and a backup may leave them out.
+fetches what a crash could take back. `git/serve.state` names the store ref, the changeset and
+the commit of each export; a connection whose store refs and `serve.git` refs both match it
+advertises `serve.git` as it is, taking neither the store's writer lock nor `git/serve.lock`, so a
+fetch with nothing new does not wait behind the agents' lands. Anything else (a ref moved, the file
+missing or damaged, a `serve.git` ref moved by hand) refreshes first, as before.
+`git/serve.git`, `git/SERVE`, `git/serve.lock`, `git/serve.state` and `git/serve-hooks/` in the
+store are a cache of that export: deleted, the next connection makes them again, and a backup may
+leave them out.
 
 ## The serving account
 
@@ -63,8 +69,23 @@ directory it stays correct but walks the history every time. Give the account a 
 can write ([Backup and restore](backup-and-restore.md) says what the key is).
 
 **Its first connection** exports the store's whole history into `serve.git`, as loose objects that
-`git gc --auto` packs later ([known limitations](../known-limitations.md#git-import-and-export)):
-make it yourself before people clone a large store, with any read the account is granted.
+`git gc --auto` packs later ([known limitations](../known-limitations.md#git-import-and-export)).
+Prepare a large store before people clone it, as the serving account:
+
+```console
+$ swarmops --repo /srv/so/acme serve --prepare --seed-from /srv/import/acme.git
+{"ok":true,"op":"serve_prepare","api":1,"result":{"refreshed":{"moved":1,"removed":0,"objects":0},"rounds":1,"seeded":1,"skipped":null,"warnings":[]},...}
+```
+
+`--seed-from` names the repository `git import` read: `serve --prepare` fetches the imported
+commits' objects from it into `serve.git`, exports (finding every commit there, so writing none),
+and packs the whole history with a bitmap. Without `--seed-from` it exports what `serve.git`
+lacks. It needs no `--root`; it waits for `git/serve.lock` as a connection does (`--prepare-wait
+zero` gives up at once and marks the lock's holder to run again), and exits 0 when it finds
+nothing to do. It helps only when it runs as the account that serves the store and that the agents
+run as: it writes `serve.git` and uses that account's memo key. Without the memo key, on a store
+whose `main` head is no imported commit, it exports nothing and says so in `warnings`; the next
+connection then refreshes as before.
 
 ## Write `access.toml`
 

@@ -165,11 +165,20 @@ left).
   committed snapshot under the lock instead, `MetaStore::read_committed`, which neither can take
   back, at the cost of a wait behind the writer that holds the lock. So does `op log`, the one
   local reader that does, so that a number it lists is never given to another operation.
-  *Documented (storage spec §3). Found: M1 Task 2c; final review, question 2.*
+  `serve` takes it only when the store moved since `serve.git`'s last export: a connection whose
+  lock-free read of the store refs and `serve.git`'s refs both match `git/serve.state` advertises
+  that export, committed, with no lock. One case remains: a frame not yet synced that moves a
+  served ref back to the value of the last export (an `op undo` racing the connection) makes the
+  lock-free read match, and that earlier export is advertised; its commit and objects are durable,
+  and what a cut of the frame could take back is the ref's position, never data (the M17 design
+  §4.2). *Documented (storage spec §3). Found: M1 Task 2c; final review, question 2.*
 - **A committed read fails on a read-only filesystem.** `MetaStore::read_committed` (the git
   export, `push`, `serve`, `op log`) opens `meta/lock` for writing before its tail check, as a
   writer does, so on a read-only mount it fails with `E_IO` at `open meta/lock`, even where the
-  tail needs no repair. The lock-free reads work there. *Unscheduled. Found: M8 area A review.*
+  tail needs no repair. The lock-free reads work there, and so does a `serve` connection whose
+  store has not moved since `serve.git`'s last export (it reads `git/serve.state` and takes no
+  lock); a store that moved still needs the committed read. *Unscheduled. Found: M8 area A
+  review.*
 - **A commit acknowledged with a warning can vanish for a moment.** When a tail check
   writes unlisted frames afresh after a failed sync (storage spec §2 rule 3 (c)), a reader that
   reads between the cut and the rewrite does not see them: a changeset whose commit was
@@ -514,7 +523,12 @@ left).
   served ref into `serve.git` before it advertises; a store whose history no export has reached
   yet pays that once, as loose objects: on 12,000 commits the first clone took 1,195.6 s,
   against 0.36 s from git's own server ([perf.md](perf.md#v070--2026-10-29)). The connections
-  after it export only what moved. *Unscheduled (one pack per export; the M14 design's risk R-3). Found: M14 Task Q1.*
+  after it export only what moved. `serve --prepare --seed-from <the import's source>` pays it
+  before any client connects, with no object written: the import's objects fetched as one pack
+  ([Serve over ssh](operate/serve-over-ssh.md#the-serving-account)); a store prepared without a
+  seed, or never prepared, still pays it at its first connection. *Narrowed by the M17 design
+  §4.3; closed once `just perf` measures G20's first clone after import within 2× git's
+  (perf.md, "M17-4a"). Found: M14 Task Q1.*
 - **A request takes the memory its type holds.** The MCP server reads of a message line, at
   most 64 MiB, only the members it serves, and a tool's arguments only as their request type,
   so what else a line holds costs it nothing beyond the line's bytes (operations spec §0). A

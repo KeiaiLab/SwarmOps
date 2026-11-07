@@ -26,7 +26,7 @@ use swarmops_git::transport::GitCli;
 use super::access::{Access, Action};
 use super::entry::{SshRequest, store_under};
 use super::guard::Redactor;
-use super::refresh::{Scope, refresh, serve_error};
+use super::refresh::{Freshness, Refreshed, Scope, freshness, refresh, serve_error};
 use super::{
     SWARMOPS_SERVE_EXE, SWARMOPS_SERVE_IDENTITY, SWARMOPS_SERVE_STORE, ServeInvocation, Served,
 };
@@ -103,9 +103,13 @@ fn prepare(
     // 3. The caller may read it: what it may push is the hook's to decide, ref by ref.
     Access::load(&ops)?.check(who, Action::Read, &request.store)?;
 
-    // 4. Its serving repository, refreshed: the old values a push names are these exports.
+    // 4. Its serving repository, refreshed: the old values a push names are these exports,
+    //    unless nothing moved since its last export (no lock taken then).
     let repo = ServeRepo::open(&store).map_err(serve_error)?;
-    let refreshed = refresh(&ops, &repo, &Scope::All)?;
+    let refreshed = match freshness(&ops, &repo)? {
+        Freshness::Current => Refreshed::default(),
+        Freshness::Stale => refresh(&ops, &repo, &Scope::All)?,
+    };
     let mut stderr = std::io::stderr().lock();
     for warning in refreshed.warnings {
         let _ = writeln!(stderr, "warning: {}", redactor.redact(&warning));

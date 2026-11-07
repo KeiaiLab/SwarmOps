@@ -361,6 +361,35 @@ pub fn export(
     sink: &mut dyn GitSink,
     req: &ExportRequest,
 ) -> Result<ExportReport, ExportError> {
+    check_request(repo, sink, req)?;
+    let (read, recovered) = repo.snapshot_committed()?;
+    export_on(repo, &read, recovered, sink, req)
+}
+
+/// [`export()`]'s steps 2 to 9 on `read`, a committed snapshot the caller took
+/// ([`Repo::snapshot_committed`]), whose tail repair is `recovered`: step 1's checks run as in
+/// [`export()`], and the head is read in `read`. A caller exporting several refs of one snapshot
+/// (`serve`'s refresh, the M17 design §4.2) waits for the writer lock once, not once a ref.
+///
+/// [`Repo::snapshot_committed`]: swarmops_repo::Repo::snapshot_committed
+pub fn export_in(
+    repo: &LocalRepo,
+    read: &RepoRead<'_, FsObjectStore>,
+    recovered: TailRepair,
+    sink: &mut dyn GitSink,
+    req: &ExportRequest,
+) -> Result<ExportReport, ExportError> {
+    check_request(repo, sink, req)?;
+    export_on(repo, read, recovered, sink, req)
+}
+
+/// Step 1's checks: the source ref's name, the sink's object format, and a branch a work tree
+/// has checked out.
+fn check_request(
+    repo: &LocalRepo,
+    sink: &dyn GitSink,
+    req: &ExportRequest,
+) -> Result<(), ExportError> {
     match check_store_ref(repo, &req.source_ref) {
         Err(RepoError::RefName(name)) => return Err(ExportError::RefName(name)),
         checked => checked?,
@@ -376,13 +405,24 @@ pub fn export(
             branch: req.branch.clone(),
         });
     }
-    let (read, recovered) = repo.snapshot_committed()?;
+    Ok(())
+}
+
+/// Steps 2 to 9 on `read`, checked by [`check_request`]: the one body of [`export()`] and
+/// [`export_in`].
+fn export_on(
+    repo: &LocalRepo,
+    read: &RepoRead<'_, FsObjectStore>,
+    recovered: TailRepair,
+    sink: &mut dyn GitSink,
+    req: &ExportRequest,
+) -> Result<ExportReport, ExportError> {
     let Some(state) = read.get_ref(&req.source_ref)? else {
         return Err(ExportError::SourceRef(req.source_ref.clone()));
     };
     let head = state.target;
     let old = target_at(sink, req)?;
-    let mut run = Run::new(repo, &read, sink, (head, req.memo_key.as_ref()));
+    let mut run = Run::new(repo, read, sink, (head, req.memo_key.as_ref()));
     let head_oid = run.export_of(head)?.git_oid();
     let mut report = ExportReport {
         head,

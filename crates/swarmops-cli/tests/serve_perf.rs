@@ -413,6 +413,62 @@ fn land_push_on_12000() {
     );
 }
 
+/// The first clone after `git import` of [`LONG`] commits and `serve --prepare --seed-from` the
+/// import's source (the M17 design §4.3, G20 alone): `swarmops serve`'s against git's own first
+/// clone of the bare copy, target at most 2×. Asserted: the preparation wrote no object, the
+/// clone writes none, both serve the same commit, and the clone passes `git fsck --strict`.
+#[test]
+#[ignore = "slow, ~8 min (estimated from the import's share of the cases above; `just perf` \
+            measures it): imports 12,000 commits, then the seeded preparation"]
+fn first_clone_after_import() {
+    let bench = Bench::new();
+    let store = bench.store();
+    let git_dir = store.join("git/serve.git");
+
+    // 1. The preparation, seeded from the import's source.
+    let bare = bench.server.bare(REPO);
+    let line = [
+        "--repo",
+        path_str(&store),
+        "serve",
+        "--prepare",
+        "--seed-from",
+        path_str(&bare),
+    ];
+    let mut run = None;
+    let prepared = timed(|| run = Some(support::run_within(&line, &[], SLOW_RUN)));
+    let result = run.expect("ran").ok();
+    assert_eq!(
+        result["refreshed"]["objects"], 0,
+        "the preparation wrote objects"
+    );
+    assert_eq!(
+        loose_objects(&git_dir),
+        0,
+        "the preparation left loose objects"
+    );
+
+    // 2. Both first clones, timed; the served one writes nothing.
+    let (serve, git) = (bench.serve(), bench.git());
+    let (serve_dir, git_dir_clone) = (bench.dir("serve-first"), bench.dir("git-first"));
+    let serve_first = timed(|| clone_into(&serve, &serve_dir));
+    let git_first = timed(|| clone_into(&git, &git_dir_clone));
+    assert_eq!(loose_objects(&git_dir), 0, "the first clone wrote objects");
+    serve.run(&serve_dir, &["fsck", "--strict"]);
+    assert_eq!(
+        serve.rev(&serve_dir, "origin/main"),
+        git.rev(&git_dir_clone, "origin/main"),
+        "the two servers serve different commits"
+    );
+    println!(
+        "serve-perf: import of {LONG} commits into the store: {:.3} s; serve --prepare \
+         --seed-from: {:.3} s",
+        bench.imported.as_secs_f64(),
+        prepared.as_secs_f64()
+    );
+    print_ratio("first clone after import", serve_first, git_first);
+}
+
 // ---------------------------------------------------------------------------------------------
 // M17 baselines (the M17 design §1): server CPU and peak memory from process accounting.
 // ---------------------------------------------------------------------------------------------

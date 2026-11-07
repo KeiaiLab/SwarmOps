@@ -28,6 +28,9 @@ pub const NO_OP: &str = "swarmops";
 /// it goes to stderr.
 const PROTOCOL_OPS: [&str; 2] = ["mcp", "serve"];
 
+/// The operation `serve --prepare` names: no protocol on its stdout.
+pub const SERVE_PREPARE: &str = "serve_prepare";
+
 // The help of `--expect`, as `help` (`-h`) and `long_help` (`--help`) strings rather than doc
 // comments, which rustdoc would read `<actual>` in as HTML.
 
@@ -304,7 +307,9 @@ and reports a conflict on git's remote: lines.
 A refusal before git starts prints one ERR pkt-line on stdout, which git shows as remote error: \
 <CODE>: <message>, and the envelope on stderr; with --cgi, a Status: header and the same text. \
 --hook pre-receive and --hook proc-receive are the entries git runs inside a push, from the \
-hook files serve writes; they take no --as. --stdio, the store-to-store sync, is not served yet.";
+hook files serve writes; they take no --as. --stdio, the store-to-store sync, is not served yet.
+
+A connection whose store has not moved since serve.git's last export takes no lock: git/serve.state names that export. serve --prepare makes serve.git ready for the store --repo names before a client connects, so that the connection finds it current and exports nothing; it needs no --root. With --seed-from <GIT_DIR>, the repository a git import read, it first fetches the imported commits' objects from it and packs them with a bitmap, so that the first clone after an import writes no object. --prepare-wait zero gives up at once when another refresh holds serve.git's lock, and marks it for that one to run again. It prints {\"op\": \"serve_prepare\", ...} on stdout, and exits 0 when it was skipped or found the lock held. Without the store's memo key, on a store whose main head is no imported commit, it exports nothing and warns: run it as the account the agents and serve run as.";
 
 /// `serve --user-family`'s help.
 const SERVE_USER_FAMILY_HELP: &str = "With --cgi: name the caller <FAMILY>/$REMOTE_USER, the user \
@@ -732,7 +737,7 @@ pub enum Command {
 #[derive(Args, Debug)]
 pub struct ServeArgs {
     /// The directory whose subdirectories are the stores served, each by its name.
-    #[arg(long, value_name = "DIR", required_unless_present = "hook")]
+    #[arg(long, value_name = "DIR", required_unless_present_any = ["hook", "prepare"])]
     pub root: Option<Utf8PathBuf>,
     /// Serve one CGI request: smart HTTP behind a web server.
     #[arg(long, conflicts_with_all = ["hook", "stdio"])]
@@ -752,6 +757,33 @@ pub struct ServeArgs {
     /// Serve the store-to-store sync on stdin and stdout: not served yet.
     #[arg(long)]
     pub stdio: bool,
+    /// Make serve.git of the store --repo names ready before a client connects, then exit.
+    #[arg(
+        long,
+        conflicts_with_all = ["cgi", "hook", "stdio", "agent", "user_family"]
+    )]
+    pub prepare: bool,
+    /// With --prepare: the git repository an import read, to take the history's objects from.
+    #[arg(long, value_name = "GIT_DIR", requires = "prepare")]
+    pub seed_from: Option<Utf8PathBuf>,
+    /// With --prepare: how long to wait for serve.git's lock.
+    #[arg(
+        long,
+        value_enum,
+        value_name = "WAIT",
+        default_value = "bounded",
+        requires = "prepare"
+    )]
+    pub prepare_wait: PrepareWait,
+}
+
+/// How long `serve --prepare` waits for `serve.git`'s lock.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrepareWait {
+    /// Not at all: a held lock is marked for its holder to run again.
+    Zero,
+    /// As long as a refresh waits, then E_BUSY.
+    Bounded,
 }
 
 /// The hooks `serve --hook` runs as.
@@ -1412,7 +1444,12 @@ pub fn parse(args: &[OsString]) -> Parsed {
         Ok((mut cli, path)) => {
             settle_format(&mut cli.global, args);
             // Every leaf names an operation (a unit test checks), so NO_OP is never used here.
-            Parsed::Run(cli, op_name(&path).unwrap_or(NO_OP))
+            // `serve --prepare` is a store command of its own, its envelope on stdout.
+            let op = match &cli.command {
+                Command::Serve(serve) if serve.prepare => SERVE_PREPARE,
+                _ => op_name(&path).unwrap_or(NO_OP),
+            };
+            Parsed::Run(cli, op)
         }
         Err(error)
             if matches!(
@@ -1898,7 +1935,13 @@ mod tests {
         ] {
             assert!(parse(&args(line)).runs_mcp(), "{line:?}");
         }
-        for line in [&["info"][..], &["mcp", "--help"], &["frobnicate"], &[]] {
+        for line in [
+            &["info"][..],
+            &["mcp", "--help"],
+            &["frobnicate"],
+            &[],
+            &["serve", "--prepare"],
+        ] {
             assert!(!parse(&args(line)).runs_mcp(), "{line:?}");
         }
     }

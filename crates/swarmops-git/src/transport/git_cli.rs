@@ -256,6 +256,56 @@ impl GitCli {
         }
     }
 
+    /// Fetches the objects `tip` reaches from the repository `source` into the bare repository
+    /// `git_dir`, checked by git's fsck, over protocol v2; no ref is written, and nothing but the
+    /// local `file` transport is allowed. `serve --prepare`'s seed (the M17 design §4.3).
+    pub fn fetch_objects(
+        &self,
+        git_dir: &Path,
+        source: &Path,
+        tip: GitOid,
+    ) -> Result<(), TransportError> {
+        let call = Call {
+            mirror: Some(git_dir),
+            remote: None,
+        };
+        let values = [
+            source.as_os_str().to_owned(),
+            OsString::from(tip.to_string()),
+        ];
+        let args = args(&SEED_FLAGS, values);
+        let env = [(ALLOW_PROTOCOL, OsStr::new(FILE_PROTOCOL))];
+        let ran = self.spawn_env(&call, &args, &Input::Null, &env)?;
+        if ran.status.success() {
+            return Ok(());
+        }
+        Err(self.failure(&call, &ran))
+    }
+
+    /// Packs every object of the bare repository `git_dir` into one pack with a reachability
+    /// bitmap, the loose ones and the older packs removed (`git repack -a -d -b`).
+    pub fn repack_full(&self, git_dir: &Path) -> Result<(), TransportError> {
+        let call = Call {
+            mirror: Some(git_dir),
+            remote: None,
+        };
+        let args = args(&["repack", "-a", "-d", "-b", "-q"], []);
+        self.git(&call, &args, &Input::Null)?;
+        Ok(())
+    }
+
+    /// Adds a layer of git's commit-graph for the commits the refs of the bare repository
+    /// `git_dir` reach (`git commit-graph write --reachable --split`).
+    pub fn write_commit_graph(&self, git_dir: &Path) -> Result<(), TransportError> {
+        let call = Call {
+            mirror: Some(git_dir),
+            remote: None,
+        };
+        let args = args(&["commit-graph", "write", "--reachable", "--split"], []);
+        self.git(&call, &args, &Input::Null)?;
+        Ok(())
+    }
+
     /// The token `cred` names, when its variable is set, not empty and UTF-8.
     fn token(&self, cred: &Credential) -> Option<String> {
         let name = cred.token_env.as_deref()?;
@@ -949,6 +999,24 @@ const FETCH_FLAGS: [&str; 8] = [
     "--no-show-forced-updates",
     END_OF_OPTIONS,
 ];
+
+/// `git fetch`'s fixed options for a seed from a local repository, up to its path: no tag, no
+/// `FETCH_HEAD`, no housekeeping, the objects kept as a pack whatever their number.
+const SEED_FLAGS: [&str; 9] = [
+    "-c",
+    "transfer.unpackLimit=1",
+    "fetch",
+    "--quiet",
+    "--no-tags",
+    "--no-write-fetch-head",
+    "--no-auto-gc",
+    "--no-recurse-submodules",
+    END_OF_OPTIONS,
+];
+
+/// The variable naming the transports git may use, and the local one a seed takes.
+const ALLOW_PROTOCOL: &str = "GIT_ALLOW_PROTOCOL";
+const FILE_PROTOCOL: &str = "file";
 
 /// `git rev-list`'s closure check of a fetch's tips (read on stdin): every object they reach,
 /// minus what the refs outside `refs/incoming/` reach; a missing one fails it, and no object is
