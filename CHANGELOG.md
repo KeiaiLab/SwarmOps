@@ -26,6 +26,15 @@ collects the changes on `stable` that no release holds yet, until the next relea
   failure, a lost push, a land not on `main` once or a dirty store, and prints the first-attempt
   share, push and fetch p99 and a first clone beside the agents (the M17 design §7). The weekly
   measurement job now also runs it and the landing lanes, which leave the weekly slow suite.
+- The store's write transaction can hold several frames, committed with one `journal.log` sync and
+  listed one 512 B sector of entries at a time (`Journal::append_frames`; `MetaWrite::begin_frame`,
+  `drop_frame`, `keep_frames`, `commit_frames`); no caller batches yet (the M18 D2 design §3.6).
+- The store has a write queue (`MetaStore::take_turn`, `meta/queue/`). A writer that finds the
+  writer lock taken leaves a small request and waits. The lock's next holder commits up to 32 of
+  the waiting writers' transactions, each in its own journal frame, with one journal sync, and
+  answers each writer after the commit point. A request still unclaimed at the lock timeout is
+  `E_BUSY` and records nothing (the M18 D2 design §3). Nothing calls it yet: lands and commits keep
+  their current path.
 
 ### Changed
 
@@ -37,6 +46,9 @@ collects the changes on `stable` that no release holds yet, until the next relea
   closes. G18, G19, G20 and G22 carry M17's measured values (docs/perf.md, "M17 baselines" and
   the M17 slices' sections): G18's commit wait, G19's server CPU, G20's land p99 at 50
   processes and G22's peak memory miss their targets.
+- A land's publish now plans over any object store and can stage the changeset it relocates in
+  memory before writing it, the groundwork for batched lands (the D2 group-commit design §3.3,
+  slice D2-3); behaviour and on-disk calls are unchanged.
 
 ### Fixed
 
