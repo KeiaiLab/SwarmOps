@@ -86,16 +86,18 @@ check-ci-slow:
     PROPTEST_CASES=2000 cargo nextest run --locked --workspace --all-features --run-ignored all -E 'not test(regenerate_golden) and not test(regenerate_git_fixtures) and not test(check_git_fixtures) and not test(thirty_two_processes) and not ({{ ci_perf_cases }})'
 
 # The measurement cases on 12,000 or 13,000 commits or 12,000 changesets: `remote_perf`'s five,
-# `serve_perf`'s three and the workspace's checked land. `check-ci-slow` leaves them out,
-# `check-ci-perf` runs them, `check-slow` keeps them. swarmops-core's `supply_chain` tests fail a
+# `serve_perf`'s six, `intake_perf`'s one and the workspace's checked land. `check-ci-slow` leaves
+# them out, `check-ci-perf` runs them, `check-slow` keeps them. swarmops-core's `supply_chain` tests fail a
 # case `check-ci-slow` leaves out that no scheduled job runs optimized and one at a time.
-ci_perf_cases := 'test(=remote_perf::clone_cost_on_12000_commits) | test(=remote_perf::fetch_and_push_scale_with_history) | test(=remote_perf::fetch_phases_scale_with_history) | test(=remote_perf::sync_of_one_land_on_12000_commits) | test(=remote_perf::sync_phases_scale_with_history) | test(/^serve_perf::/) | test(=ws_processes::perf::perf_checked_land_overhead_on_12000_changesets)'
+ci_perf_cases := 'test(=remote_perf::clone_cost_on_12000_commits) | test(=remote_perf::fetch_and_push_scale_with_history) | test(=remote_perf::fetch_phases_scale_with_history) | test(=remote_perf::sync_of_one_land_on_12000_commits) | test(=remote_perf::sync_phases_scale_with_history) | test(/^serve_perf::/) | test(/^intake_perf::/) | test(=ws_processes::perf::perf_checked_land_overhead_on_12000_changesets)'
 
 # `ci_perf_cases` optimized and one at a time (`--no-capture`), as `perf` runs them, printing their
-# `remote-perf: `, `serve-perf: ` and `ws-perf: ` lines. They assert what they ran, never its time.
+# `remote-perf: `, `serve-perf: `, `intake-perf: ` and `ws-perf: ` lines. They assert what they ran,
+# never its time.
 # Measured optimized on this host: the clone cost 850.5 s and `serve_perf`'s three 1,599.3 to
 # 1,650.0 s (docs/perf.md, "v0.7.0"), the other four `remote_perf` cases 346.0 to 389.5 s in the
-# same window, the checked land 313.5 s in v0.5.0's; 7,541.4 s in all. No match fails.
+# same window, the checked land 313.5 s in v0.5.0's; 7,541.4 s in all before the M17 cases, whose
+# measured times docs/perf.md "M17 baselines" records. No match fails.
 # scheduled.yml runs it weekly under the heavy lock, with `NEXTEST_PROFILE=ci-perf`.
 # The weekly CI measurement cases (scheduled.yml): what check-ci-slow leaves out, optimized.
 check-ci-perf:
@@ -181,6 +183,11 @@ perf:
     cargo nextest run --locked --release -p swarmops-cli --all-features --run-ignored ignored-only \
         -E 'test(/^serve_perf::/)' --no-capture 2>&1 | tee target/perf/serve.log \
         | grep --line-buffered '^serve-perf: '
+    [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
+    load between
+    cargo nextest run --locked --release -p swarmops-cli --all-features --run-ignored ignored-only \
+        -E 'test(/^intake_perf::/)' --no-capture 2>&1 | tee target/perf/intake.log \
+        | grep --line-buffered '^intake-perf: '
     [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
     load between
     cargo nextest run --locked --release -p swarmops-cli --all-features --run-ignored ignored-only \

@@ -471,8 +471,8 @@ jobs:
           retention-days: 14
 
   # The measurement cases that `just check-ci-slow` leaves out (`just check-ci-perf`):
-  # `remote_perf`'s five and `serve_perf`'s three, on 12,000 or 13,000 commits, and the checked
-  # land on 12,000 changesets. They need a longer kill than the ci-slow profile's 20 minutes: in
+  # `remote_perf`'s five, `serve_perf`'s six and `intake_perf`'s one, on 12,000 or 13,000 commits,
+  # and the checked land on 12,000 changesets. They need a longer kill than the ci-slow profile's 20 minutes: in
   # the slow suite four ran into it and the other five took 65-76 % of it, and three take over 20
   # minutes even optimized. Optimized and one at a time, as `just perf` runs them, they took
   # 7,541 s in all, the longest 1,650 s (justfile, `check-ci-perf`). They fail on what they ran,
@@ -490,7 +490,10 @@ jobs:
     permissions:
       contents: read
     # The lock wait's 60 minutes, plus twice the cases' 7,541 s (251 minutes) and 5 for the
-    # optimized build (62 s cold on this host at load 650), rounded up to 5 minutes, 260.
+    # optimized build (62 s cold on this host at load 650), rounded up to 5 minutes, 320 (60 + 251
+    # + 5 = 316). That sum is the nine cases before M17; M17-1 added four whose times `just perf`
+    # has not measured yet, so the value waits for that run: it is then recomputed by this rule
+    # from the new sum, never set by a guess.
     timeout-minutes: 320
     env:
       CARGO_TERM_COLOR: always

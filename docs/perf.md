@@ -1532,3 +1532,93 @@ all. Unoptimized, in the weekly `just check-ci-slow` (the Scheduled run of 2026-
 `c7baf861`), all four ran into the `ci-slow` profile's 20-minute kill. The weekly run now runs
 them optimized, last, in a job of their own (`just check-ci-perf`): its timeout is twice their sum
 plus the build, and the `ci-perf` profile kills a case after 55 minutes, twice the longest.
+
+## M17 baselines — 2026-11-07 (not measured yet)
+
+Baselines of the M17 targets on the code before any M17 change, so that each later M17 slice is a
+measured difference. The cases are written (`serve_perf`'s `fifty_clones_at_once_and_apart`,
+`fetch_k_behind` and `push_one_and_two_gib`, `intake_perf`'s `commits_beside_an_import`, and
+`clone_against_git`'s new import line); the values come from the first `just perf` after the
+slice lands, run under the heavy lock, and replace the dashes below. Each row records the host
+state of its run (the 1-minute load at its start and end, from `perf: load average` lines) and
+the verdict against its target (met, or missed with the figure).
+
+Server CPU and peak memory come from process accounting: the ssh stand-in runs `swarmops serve`
+inside a shell whose `times` builtin reports the user and system time of `serve` and every
+process it waited for, and a sampler beside that shell reads the largest `VmHWM` of the tree
+every 50 ms (the M17 design §1). `serve.git` is seeded with the history's objects before the
+first connection, so that each case fits the profile's kill; the 1,195.6 s first refresh is
+`clone_against_git`'s, which cannot be split.
+
+### R-3, G19: 50 clones against one
+
+`serve_perf::fifty_clones_at_once_and_apart`: 12,000 commits, 50 clones at once and 50 clones 10 s
+apart from `swarmops serve`, and 50 at once from git's `upload-pack`.
+
+| Figure | Value | Target |
+| --- | --- | --- |
+| Server CPU of one clone alone | — | — |
+| Server CPU of 50 clones at once | — | at most 4× one clone's |
+| Server CPU of 50 clones 10 s apart | — | at most 4× one clone's |
+| Clone time at once, `serve` median and longest | — | at most 2× git's |
+| Clone time at once, git `upload-pack` median and longest | — | — |
+| Peak memory of the server tree, 50 at once | — | recorded |
+| Host state | — | — |
+
+### R-5, G20: a fetch k lands behind
+
+`serve_perf::fetch_k_behind`: the server CPU, time and bytes of the pack sent, for a fetch 1 land
+behind on 1,000 commits and on 12,000, and on 12,000 for 1, 10, 100 and 1,000 lands behind.
+
+| Figure | Value | Target |
+| --- | --- | --- |
+| Server CPU, 1 land behind, 1,000 commits | — | — |
+| Server CPU, 1 land behind, 12,000 commits | — | at most 1.5× the 1,000 figure |
+| CPU per byte sent, 1 / 10 / 100 / 1,000 lands behind | — | within 1.5× across the four |
+| Host state | — | — |
+
+### R-6, G22: a push in bounded memory
+
+`serve_perf::push_one_and_two_gib`: one commit of 1,024 and one of 2,040 incompressible blobs of
+1 MiB pushed to `refs/land/main`, and one of 2,048 blobs that git's input bound
+(`receive.maxInputSize` = `MAX_PUSH_BYTES`, 2 GiB) refuses.
+
+| Figure | Value | Target |
+| --- | --- | --- |
+| Peak memory, 1 GiB push | — | recorded |
+| Peak memory, 2 GiB push | — | at most 256 MiB |
+| Time, 1 GiB and 2 GiB push | — | the 2 GiB at most 2.2× the 1 GiB |
+| Refused push of 2,048 blobs: ref moved | — | none |
+| Host state | — | — |
+
+### R-2, A39, G18: commits beside an import
+
+`intake_perf::commits_beside_an_import`: 8 committers (`commit`, no ref moved) in a loop and a
+reader of `main` beside `git import` of 12,000 commits; the import's peak memory on 1,000 and on
+12,000 commits.
+
+| Figure | Value | Target |
+| --- | --- | --- |
+| Longest wait of a commit beside the import | — | at most 100 ms |
+| `E_BUSY` count and longest | — | recorded |
+| Reads of `main` that saw the new head before the import's end | — | none |
+| Import peak memory, 1,000 commits | — | recorded |
+| Import peak memory, 12,000 commits | — | recorded |
+| Host state | — | — |
+
+### R-4: the cold first clone
+
+`serve_perf::clone_against_git` now prints the import's own time (`import of 12,000 commits into
+the store`) beside the first clone (1,195.6 s against 0.362 s in "v0.7.0 — 2026-10-29"), which
+pays the first refresh and is not split.
+
+| Figure | Value | Target |
+| --- | --- | --- |
+| Import of 12,000 commits into the store | — | recorded |
+| First clone, `serve` and git `upload-pack` | — | at most 2× git's (M17-4a) |
+| Host state | — | — |
+
+### The `perf-cases` timeout
+
+`scheduled.yml`'s `perf-cases` timeout is recomputed by its comment's rule from the sum of the
+measured case times, the nine before M17 (7,541 s) and the four above: sum — s, timeout — minutes.

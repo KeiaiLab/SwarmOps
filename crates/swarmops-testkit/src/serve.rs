@@ -20,12 +20,13 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tempfile::TempDir;
 
+use crate::accounting::{self, Accounting};
 use crate::cli::{Program, run_bin, swarmops};
 use crate::remote::{
     Backend, GIT_ENV, GitServer, HttpAuth, HttpServer, SSH_HOST, path_str, sh_quote, write_script,
@@ -55,6 +56,8 @@ pub struct ServeSite {
     extra: Vec<(OsString, OsString)>,
     /// The stand-ins written so far, for the next one's directory.
     stand_ins: AtomicU64,
+    /// How the stand-ins run `serve` ([`ServeSite::with_accounting`]).
+    accounting: Accounting,
 }
 
 impl ServeSite {
@@ -65,7 +68,7 @@ impl ServeSite {
     }
 
     /// An empty root served by `program`.
-    fn with_program(program: PathBuf) -> ServeSite {
+    pub(crate) fn with_program(program: PathBuf) -> ServeSite {
         let dir = tempfile::tempdir().expect("create the site's directory");
         for sub in ["root", "home"] {
             fs::create_dir(dir.path().join(sub)).expect("create a site directory");
@@ -76,7 +79,24 @@ impl ServeSite {
             git: GitServer::new(),
             extra: Vec::new(),
             stand_ins: AtomicU64::new(0),
+            accounting: Accounting::Off,
         }
+    }
+
+    /// The site's temporary directory.
+    pub(crate) fn dir(&self) -> &Path {
+        self.dir.path()
+    }
+
+    /// The stand-ins made from now on run `serve` as `accounting` says: with [`Accounting::Cpu`]
+    /// each connection leaves a file in [`accounting::ledger_dir`].
+    #[must_use]
+    pub fn with_accounting(mut self, accounting: Accounting) -> ServeSite {
+        if accounting == Accounting::Cpu {
+            fs::create_dir_all(accounting::ledger_dir(&self)).expect("create the ledger");
+        }
+        self.accounting = accounting;
+        self
     }
 
     /// `env` added to the environment of every `swarmops` the site starts from now on.
@@ -105,6 +125,70 @@ impl ServeSite {
         let program = path_str(&self.program);
         run_bin(program, &["init", path_str(&path)], &[], "").ok();
         path
+    }
+
+    /// Makes `serve.git` of store `name` by one `git ls-remote` as `identity` (who may read it):
+    /// the first connection creates it. Do this while the store holds no ref, so that the
+    /// refresh has nothing to export; [`ServeSite::seed_serve_git`] needs it.
+    pub fn open_serve_git(&self, name: &str, identity: &str) {
+        let output = self
+            .command()
+            .env("GIT_SSH_COMMAND", self.ssh_command(identity))
+            .args(["ls-remote", &self.ssh_url(name)])
+            .output()
+            .expect("run git ls-remote");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "git ls-remote: {stderr}");
+        assert!(
+            self.store(name).join("git/serve.git").is_dir(),
+            "no serve.git after a connection"
+        );
+    }
+
+    /// Brings the objects of `source`'s `main` into `serve.git` of store `store` before the
+    /// first refresh that has refs to export, so that it finds them there and writes none (the
+    /// M17 design §1): `git fetch --no-tags <source> <tip>` with `fetch.fsckObjects=true`, kept
+    /// as a pack whatever its size. `serve.git` must exist ([`ServeSite::open_serve_git`]); no
+    /// ref is written.
+    pub fn seed_serve_git(&self, store: &str, source: &Path) {
+        let git_dir = self.store(store).join("git/serve.git");
+        assert!(git_dir.is_dir(), "seed_serve_git: open_serve_git first");
+
+        // 1. The tip of the source's main.
+        let tip = self
+            .command()
+            .arg("--git-dir")
+            .arg(source)
+            .args(["rev-parse", "--verify", "refs/heads/main"])
+            .output()
+            .expect("run git rev-parse");
+        assert!(
+            tip.status.success(),
+            "{}",
+            String::from_utf8_lossy(&tip.stderr)
+        );
+        let tip = String::from_utf8_lossy(&tip.stdout).trim().to_owned();
+
+        // 2. Its history, fetched into serve.git, checked.
+        let fetched = self
+            .command()
+            .arg("--git-dir")
+            .arg(&git_dir)
+            .args([
+                "-c",
+                "fetch.fsckObjects=true",
+                "-c",
+                "transfer.unpackLimit=1",
+                "fetch",
+                "--quiet",
+                "--no-tags",
+            ])
+            .arg(source)
+            .arg(&tip)
+            .output()
+            .expect("run git fetch");
+        let stderr = String::from_utf8_lossy(&fetched.stderr);
+        assert!(fetched.status.success(), "git fetch: {stderr}");
     }
 
     /// A client git command in the pinned environment ([`GitServer::command`]).
@@ -180,6 +264,19 @@ impl ServeSite {
             env.push_str(&sh_quote(&format!("{name}={value}")));
             env.push(' ');
         }
+        // The server's command: the cleared environment, the original command, the forced one.
+        let serve = format!(
+            "env -i {env}SSH_ORIGINAL_COMMAND=\"$original\" \
+             ${{GIT_PROTOCOL+\"GIT_PROTOCOL=$GIT_PROTOCOL\"}} \
+             {program} serve --root {root} --as {identity}",
+            program = sh_quote(path_str(&self.program)),
+            root = sh_quote(path_str(&self.root())),
+            identity = sh_quote(identity),
+        );
+        let run = match self.accounting {
+            Accounting::Off => format!("exec {serve}\n"),
+            Accounting::Cpu => accounting::counted(&accounting::ledger_dir(self), &serve),
+        };
         format!(
             "#!/bin/sh\n\
              # ssh's options: -o, -p, -l and -i take a value; -4 and -6 none.\n\
@@ -194,12 +291,7 @@ impl ServeSite {
              shift\n\
              original=\"$*\"\n\
              # sshd's environment, not the client's: GIT_PROTOCOL alone crosses (AcceptEnv).\n\
-             exec env -i {env}SSH_ORIGINAL_COMMAND=\"$original\" \
-             ${{GIT_PROTOCOL+\"GIT_PROTOCOL=$GIT_PROTOCOL\"}} \
-             {program} serve --root {root} --as {identity}\n",
-            program = sh_quote(path_str(&self.program)),
-            root = sh_quote(path_str(&self.root())),
-            identity = sh_quote(identity),
+             {run}"
         )
     }
 }

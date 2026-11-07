@@ -34,6 +34,8 @@
 //!   an ssh stand-in.
 //! - [`serve`]: `swarmops serve`'s test site (M14), a root of stores served through an ssh
 //!   forced-command stand-in and as a CGI script behind [`remote`]'s loopback server.
+//! - [`accounting`]: what a served connection cost the server, CPU and peak memory, read off the
+//!   ssh stand-in (M17).
 //! - [`ws`]: the workspaces' synthetic trees and edit driver (M5).
 //!
 //! It depends on no crate above `swarmops-repo`: the operations' unit tests use it, and a
@@ -54,6 +56,8 @@
     clippy::exhaustive_structs
 )]
 
+#[cfg(feature = "cli")]
+pub mod accounting;
 pub mod child;
 #[cfg(feature = "cli")]
 pub mod cli;

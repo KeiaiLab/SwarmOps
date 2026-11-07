@@ -18,6 +18,7 @@ mod faults;
 mod format2;
 mod git;
 mod github_live;
+mod intake_perf;
 mod landing;
 mod mcp;
 mod mcp_ws;
