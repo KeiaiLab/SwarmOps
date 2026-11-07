@@ -1900,3 +1900,27 @@ after the slice lands, run under the heavy lock, and replace the dashes, with th
 recompute the `perf-cases` timeout. A debug-build smoke run (200 commits, 4 clients and 4 agents,
 20 s, load 133 to 233) passed: git's side in 21 s, serve's in 41 s, every attempt a success at the
 first try, no window flagged. It checks the lanes, not the targets.
+
+## D2 baseline — 2026-11-08 (not measured: the host was never quiet)
+
+The group-commit design's slice D2-0 (its §11 steps 1–3, §12 "D2-0"): `U`, the held share, the
+land hold p50/p99 and the relocated count of G4 at 50 processes on the code before batched lands,
+`stable` `76f48a5b` (the store's queue behind the lock holder, before D2-4), release build, open
+loop, `landing::perf::landing_under_load` as `just perf` runs it (bench directory, 50 landers).
+Two steps: one run with the lock probe at 1,000 µs, one with the probe off.
+
+Each step waits for the measurement plan's gate (1-minute load < 2 and 5-minute < 6, both held
+5 minutes, no SwarmOps CI job, the soak service idle and its next run past the step's end plus
+2 minutes) at most 30 minutes, then is skipped with its load recorded. Neither step passed it:
+
+| Step | Wait | Max load (1 / 5 min) | Last reading (1 / 5 min, CI job) | End load |
+| --- | --- | --- | --- | --- |
+| 50 open, probe 1,000 µs | 05:23–05:53, 30 min | 102.09 / 55.69 | 10.29 / 12.28, yes | 10.67 12.32 22.00 |
+| 50 open, probe off | 05:53–06:23, 30 min | 85.53 / 40.34 | 10.00 / 12.31, no | 10.64 12.40 17.99 |
+
+Another workload on the shared host kept the load at 10 to 102, so `U`, the held share, the land
+hold p50/p99 and the relocated count stay unmeasured on `76f48a5b`; no run started outside the
+gate and no gate, target, timeout or case parameter changed. The nearest figures are M17-8a's
+landers lane at `b4337977` (`U` 2.042, the lock held 99.9 % of the samples, a land's hold 81.7 ms
+at the median, load 9.31 to 10.67, outside the gate) and M16's relocations at `8fae4fe0` (2,537
+and 2,655 of 3,000 lands at 50). D2-8 measures the same steps in a gated window after D2.
