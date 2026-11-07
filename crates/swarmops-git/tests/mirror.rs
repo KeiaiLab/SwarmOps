@@ -291,6 +291,41 @@ fn tracking_ref_moves_only_from_the_expected_value() {
     assert!(!lock.exists());
 }
 
+/// `set_published` moves `refs/published/<remote>/<branch>` by compare-and-swap, as
+/// `set_tracking` moves a tracking ref; none before the first: the sync's floor is its base
+/// then (the M16 design §3).
+#[test]
+fn published_ref_moves_only_from_the_expected_value() {
+    let root = Root::new();
+    let (mirror, _lock) = made(&root);
+    let [first, second] = two_blobs(&mirror);
+    assert_eq!(mirror.published(REMOTE, BRANCH).expect("read"), None);
+
+    // From absent, then from its value; the tracking ref apart.
+    mirror
+        .set_published(REMOTE, BRANCH, None, first)
+        .expect("create");
+    assert_eq!(mirror.published(REMOTE, BRANCH).expect("read"), Some(first));
+    assert_eq!(mirror.tracking(REMOTE, BRANCH).expect("read"), None);
+    mirror
+        .set_published(REMOTE, BRANCH, Some(first), second)
+        .expect("move");
+    assert_eq!(
+        mirror.published(REMOTE, BRANCH).expect("read"),
+        Some(second)
+    );
+
+    // From another value: refused, the ref as it was.
+    for stale in [None, Some(first)] {
+        let refused = mirror.set_published(REMOTE, BRANCH, stale, first);
+        assert!(refused.is_err(), "{refused:?}");
+        assert_eq!(
+            mirror.published(REMOTE, BRANCH).expect("read"),
+            Some(second)
+        );
+    }
+}
+
 /// The tracking ref's move is durable as the export's branch move is: the value written to the
 /// lock is synced before the rename, and the ref's directory, with each directory the move made,
 /// after it.
@@ -356,7 +391,7 @@ fn seed_staging_to_none_deletes_it() {
 }
 
 /// `remove_remote` deletes the remote's tracking refs, tags and staging branches, and counts
-/// them, and its incoming refs; another remote's refs stay.
+/// them, and its incoming and published refs; another remote's refs stay.
 #[test]
 fn remove_remote_drops_its_refs_only() {
     let root = Root::new();
@@ -369,15 +404,22 @@ fn remove_remote_drops_its_refs_only() {
         "refs/remote-tags/origin/v1",
         "refs/heads/push/origin/main",
         "refs/incoming/origin/heads/main",
+        "refs/published/origin/main",
         "refs/remotes/upstream/main",
+        "refs/published/upstream/main",
     ] {
         let made = sink.cas_ref(full, None, Some(first)).expect(full);
         assert_eq!(made, swarmops_git::BranchUpdate::Applied, "{full}");
     }
 
-    // The incoming refs go too, uncounted: a fetch's scratch, not the remote's refs.
+    // The incoming and published refs go too, uncounted: not the remote's refs.
     assert_eq!(mirror.remove_remote(REMOTE).expect("remove"), 4);
     assert!(mirror.incoming(REMOTE).expect("incoming").is_empty());
+    assert_eq!(mirror.published(REMOTE, BRANCH).expect("read"), None);
+    assert_eq!(
+        mirror.published("upstream", BRANCH).expect("read"),
+        Some(first)
+    );
     assert_eq!(mirror.tracking(REMOTE, BRANCH).expect("read"), None);
     assert_eq!(
         mirror.tracking("upstream", BRANCH).expect("read"),

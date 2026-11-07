@@ -17,7 +17,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
-use swarmops_testkit::remote::{GitServer, HttpAuth, HttpServer};
+use swarmops_testkit::remote::{GitServer, HttpAuth, HttpServer, MergeMethod};
 use tempfile::TempDir;
 
 use crate::support::{BIN, Run, Store, run, run_bin};
@@ -606,6 +606,186 @@ fn sync_conflict_moves_nothing() {
     assert_eq!(error["details"]["onto"], changeset_of(&store).as_str());
     assert_eq!(main_at(&store), Some(mine));
     assert_eq!(remote.head(), theirs);
+}
+
+/// `envelope` without its `meta`, each id of `ids` replaced by its name: ids that change from
+/// run to run, kept out of a golden.
+fn masked(mut envelope: Value, ids: &[(&str, &str)]) -> Value {
+    let meta = envelope.as_object_mut().expect("an object").remove("meta");
+    assert!(meta.is_some(), "{envelope}");
+    let mut text = envelope.to_string();
+    for (id, name) in ids {
+        text = text.replace(id, name);
+    }
+    serde_json::from_str(&text).expect("JSON")
+}
+
+/// A sync that the remote's state refuses moves nothing: `main` and the remote as they were,
+/// no frame (the fetch before it imported the remote's head already).
+fn refused_whole(remote: &Remote, store: &Store, main: &str, head: &str) -> Run {
+    let journal = store.journal_len();
+    let failed = sync(store, &[]);
+    failed.err("E_REF_PROTECTED");
+    assert_eq!(main_at(store).as_deref(), Some(main), "{failed}");
+    assert_eq!(remote.head(), head, "{failed}");
+    assert_eq!(store.journal_len(), journal, "{failed}");
+    failed
+}
+
+/// The remote's `main` forced back to `to`, then on to a commit of another writer; that commit.
+fn forced_back(remote: &Remote, to: &str) -> String {
+    remote.server.move_to(REPO, "next", to);
+    let files = [("forced.txt", "forced\n")];
+    let forced = (remote.server).commit_on(REPO, "next", "forced", &files);
+    remote.server.move_to(REPO, "main", &forced);
+    forced
+}
+
+/// A remote forced back below a change a sync published: the next sync refuses to move `main`
+/// below what it published (the M16 design §3), `E_REF_PROTECTED` naming the remote; nothing
+/// moves, the fetch's tracking ref stays, and a rerun refuses again. A merge on the remote that
+/// keeps the old head as its first parent lets the sync go on.
+#[test]
+fn sync_refuses_after_a_remote_force_push() {
+    // 1. A change published by a sync.
+    let remote = Remote::new();
+    let store = remote.cloned();
+    let before = remote.head();
+    let mine = land(&store, "mine.txt", "mine\n");
+    let synced = sync(&store, &[]).ok();
+    assert_eq!(synced["status"], "pushed", "{synced}");
+    let published = remote.head();
+
+    // 2. The remote forced back to the commit below it, then on to another.
+    let forced = forced_back(&remote, &before);
+    let target = changeset_of(&store);
+
+    // 3. Refused whole, naming main's change, the remote's head and the remote; again on a rerun.
+    let failed = refused_whole(&remote, &store, &mine, &forced);
+    let error = failed.err("E_REF_PROTECTED");
+    assert_eq!(
+        (&error["exit"], &error["retryable"]),
+        (&1.into(), &false.into())
+    );
+    let details = json!({"name": "main", "changeset": mine, "target": target, "remote": ORIGIN});
+    assert_eq!(error["details"], details, "{failed}");
+    let again = refused_whole(&remote, &store, &mine, &forced);
+    assert_eq!(again.err("E_REF_PROTECTED")["details"], details, "{again}");
+
+    // 4. The fetch's result stays: the tracking ref names the forced head.
+    let status = store.read(&["sync", "status", ORIGIN]).ok();
+    assert_eq!(status["remote_head"]["sha"], forced.as_str(), "{status}");
+
+    // 5. The golden.
+    let ids = [(mine.as_str(), "[main]"), (target.as_str(), "[target]")];
+    insta::assert_json_snapshot!(masked(failed.envelope(), &ids));
+
+    // 6. The way on: a merge that keeps the old head as its first parent.
+    remote.server.move_to(REPO, "main", &published);
+    let merged = (remote.server).merge(REPO, MergeMethod::Commit, "next", "main");
+    let synced = sync(&store, &[]).ok();
+    assert_eq!(synced["status"], "fast_forwarded", "{synced}");
+    assert_eq!(remote.head(), merged);
+    assert_eq!(parents(&store, &main_at(&store).expect("main"))[0], mine);
+}
+
+/// A `push` of `main` to the followed branch sets the floor as a sync does: forced back below
+/// it, the remote is refused by the next sync (the M16 design §3).
+#[test]
+fn sync_refuses_after_a_pushed_main_was_forced_back() {
+    let remote = Remote::new();
+    let store = remote.cloned();
+    let before = remote.head();
+    let mine = land(&store, "mine.txt", "mine\n");
+    let pushed = store.read(&["push", ORIGIN, "main"]).ok();
+    assert_eq!(pushed["status"], "pushed", "{pushed}");
+    let forced = forced_back(&remote, &before);
+    changeset_of(&store);
+
+    let failed = refused_whole(&remote, &store, &mine, &forced);
+    let error = failed.err("E_REF_PROTECTED");
+    assert_eq!(error["details"]["changeset"], mine.as_str(), "{failed}");
+}
+
+/// Without the published ref (dropped here with its remote by `remote remove`, lost as a rebuilt
+/// mirror loses it) the floor is the sync's base (the M16 design §3): after a remote force push
+/// the sync lands `main`'s change again onto the forced head, as before.
+#[test]
+fn sync_without_a_published_ref_keeps_the_base_floor() {
+    // 1. A change published by a sync, the remote forced below it.
+    let remote = Remote::new();
+    let store = remote.cloned();
+    let before = remote.head();
+    land(&store, "mine.txt", "mine\n");
+    let synced = sync(&store, &[]).ok();
+    assert_eq!(synced["status"], "pushed", "{synced}");
+    let forced = forced_back(&remote, &before);
+
+    // 2. The remote removed and added again: its mirror refs, the published one too, are gone.
+    store.read(&["remote", "remove", ORIGIN]).ok();
+    let url = remote.url();
+    let line = ["remote", "add", ORIGIN, url.as_str(), "--branch", "main"];
+    store.read(&line).ok();
+
+    // 3. The sync lands main's change onto the forced head.
+    let synced = sync(&store, &[]).ok();
+    assert_eq!(synced["status"], "pushed", "{synced}");
+    assert_eq!(remote.first_parents()[1], forced);
+}
+
+/// With nothing unpublished, a remote head that holds the published `main` only as a merge's
+/// second parent is refused: a fast-forward there would take `main` off its first-parent history
+/// (the M16 design §3).
+#[test]
+fn sync_refuses_a_fast_forward_that_drops_main_to_a_second_parent() {
+    // 1. main published by an up-to-date sync; the remote's head then a merge whose first parent
+    //    is a side commit cut below main.
+    let remote = Remote::new();
+    let store = remote.cloned();
+    let main = main_at(&store).expect("main");
+    let synced = sync(&store, &[]).ok();
+    assert_eq!(synced["status"], "up_to_date", "{synced}");
+    let below = remote.first_parents()[1].clone();
+    remote.server.move_to(REPO, "next", &below);
+    (remote.server).commit_on(REPO, "next", "side", &[("side.txt", "side\n")]);
+    let merged = (remote.server).merge(REPO, MergeMethod::Commit, "main", "next");
+    remote.server.move_to(REPO, "main", &merged);
+    let target = changeset_of(&store);
+
+    // 2. Refused whole, naming main itself.
+    let failed = refused_whole(&remote, &store, &main, &merged);
+    let error = failed.err("E_REF_PROTECTED");
+    let details = json!({"name": "main", "changeset": main, "target": target, "remote": ORIGIN});
+    assert_eq!(error["details"], details, "{failed}");
+    let ids = [(main.as_str(), "[main]"), (target.as_str(), "[target]")];
+    insta::assert_json_snapshot!(masked(failed.envelope(), &ids));
+}
+
+/// A pull request merged by a merge commit above what a sync published: the merge holds the
+/// unpublished lands only as its second parent and the published head on its first-parent
+/// chain, so the sync fast-forwards (the M16 design §3).
+#[test]
+fn sync_fast_forwards_a_merge_commit_above_the_published_head() {
+    // 1. A change published by a sync, then two pushed to a feature branch only.
+    let remote = Remote::new();
+    let store = remote.cloned();
+    land(&store, "mine.txt", "mine\n");
+    let synced = sync(&store, &[]).ok();
+    assert_eq!(synced["status"], "pushed", "{synced}");
+    land(&store, "feature/one.txt", "one\n");
+    let feature = land(&store, "feature/two.txt", "two\n");
+    store.read(&["push", ORIGIN, "main:feature"]).ok();
+
+    // 2. Another writer on main, then the feature merged by a merge commit.
+    let files = [("theirs.txt", "theirs\n")];
+    (remote.server).commit_on(REPO, "main", "theirs", &files);
+    let merged = (remote.server).merge(REPO, MergeMethod::Commit, "feature", "main");
+
+    // 3. A fast-forward to the merge, the feature kept as its second parent.
+    let synced = sync(&store, &[]).ok();
+    assert_eq!(synced["status"], "fast_forwarded", "{synced}");
+    assert_eq!(remote.head(), merged);
+    assert_eq!(parents(&store, &main_at(&store).expect("main"))[1], feature);
 }
 
 /// A sync moves `main`, so it needs an identity.

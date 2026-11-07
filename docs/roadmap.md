@@ -209,8 +209,10 @@ the remote's head with M4's three-way merge, in order, and pushes the result by 
 against the head it fetched; a remote that moved meanwhile makes it fetch and land again, up to the
 attempt limit `land` already has (`--max-attempts`, 8 by default). A conflict stops it with
 `E_CONFLICT` and the report `land` gives today. Afterwards the store's `main` names the remote's
-head, a move the op log records. Against GitHub the client does the landing; against a store the
-remote does (M11).
+head, a move the op log records. `main` moves only forward there too (M16): a remote head that
+does not hold, on its first-parent history, the commit the last sync or push matched `main` to is
+refused with `E_REF_PROTECTED`, and a `git import --into main` of an ancestor tip moves nothing.
+Against GitHub the client does the landing; against a store the remote does (M11).
 
 **One server entry (M14).** `swarmops serve` runs per connection, started by ssh or by a web server
 as a CGI program, so it adds no daemon. Under ssh, a key's line in the server's `authorized_keys`

@@ -36,6 +36,41 @@ use swarmops_store::{Recovered, SYSTEM_GIT, TailRepair};
 use crate::error::{self, Phase};
 use crate::local::{LocalOps, Recording, Resolved};
 
+/// Marks `new` as what `main` was last matched to on `remote`'s `branch` (the sync's floor, the
+/// M16 design §3) when `source_ref` is `main` and `branch` the one the remote follows; a failed
+/// write is a warning in `warnings`, the floor falling back to the sync's base.
+fn main_published(
+    mirror: &Mirror,
+    remote: &RemoteInfo,
+    source_ref: &str,
+    branch: &str,
+    new: GitOid,
+    warnings: &mut Vec<String>,
+) {
+    if source_ref != MAIN || branch != remote.branch {
+        return;
+    }
+    if let Err(e) = mark_published(mirror, &remote.name, branch, new) {
+        let failed = error::mirror_error(e);
+        warnings.push(format!("published_ref_failed: {}", failed.message));
+    }
+}
+
+/// Sets `refs/published/<remote>/<branch>` to `at` from what it names, under the mirror's lock,
+/// which the caller holds; nothing when it names `at` already.
+pub(crate) fn mark_published(
+    mirror: &Mirror,
+    remote: &str,
+    branch: &str,
+    at: GitOid,
+) -> Result<(), MirrorError> {
+    let old = mirror.published(remote, branch)?;
+    if old == Some(at) {
+        return Ok(());
+    }
+    mirror.set_published(remote, branch, old, at)
+}
+
 /// The mirror as errors name it: relative to the store's root, never a host path.
 const MIRROR_GIT: &str = "git/mirror.git";
 
@@ -98,6 +133,7 @@ impl Recording<'_> {
 
         // 5. Nothing to send: no git runs.
         if Some(new) == seen {
+            main_published(&mirror, remote, &source_ref, &branch, new, &mut warnings);
             return Ok(response(
                 remote,
                 &branch,
@@ -144,6 +180,7 @@ impl Recording<'_> {
         mirror
             .set_tracking(name, &branch, seen, new)
             .map_err(error::mirror_error)?;
+        main_published(&mirror, remote, &source_ref, &branch, new, &mut warnings);
         if let Err(e) = git.gc_auto(mirror.git_dir()) {
             warnings.push(format!("gc_auto_failed: {}", failed(e).message));
         }

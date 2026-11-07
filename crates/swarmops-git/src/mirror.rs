@@ -12,6 +12,7 @@
 //!     refs/remotes/<remote>/<branch>    what the last fetch saw of each remote branch, checked
 //!     refs/remote-tags/<remote>/<tag>   the remote's tags, never imported
 //!     refs/heads/push/<remote>/<branch> the branch a push's export writes
+//!     refs/published/<remote>/<branch>  the commit main was last matched to: the sync's floor
 //!     hooks-none/                       empty: git runs no hook here
 //! ```
 //!
@@ -20,10 +21,12 @@
 //! when the followed branch has an incoming ref, the import took its commits from it; a fetch
 //! that brought no such ref imports nothing and promotes all the same.
 //!
-//! The mirror is a cache: it holds nothing the store and the remote cannot give again, and one
-//! that is missing, of an unknown version or that gix cannot open is set aside and made again by
-//! the next fetch. Its lock is taken once per command and passed down by reference
-//! ([`MirrorLock`]): it is not re-entrant, and a held lock is refused at once, never waited for.
+//! The mirror is a cache: it holds nothing the store and the remote cannot give again, except
+//! `refs/published/<remote>/<branch>`, a hint that lowers the sync's floor to its base when lost
+//! (the M16 design §3); one that is missing, of an unknown version or that gix cannot open is
+//! set aside and made again by the next fetch. Its lock is taken once per command and passed
+//! down by reference ([`MirrorLock`]): it is not re-entrant, and a held lock is refused at once,
+//! never waited for.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions, TryLockError};
@@ -59,6 +62,10 @@ const BROKEN: &str = "mirror.git.broken-";
 const TRACKING: &str = "refs/remotes";
 const REMOTE_TAGS: &str = "refs/remote-tags";
 const STAGING: &str = "push";
+
+/// Where the commit `main` was last matched to on each remote branch is: written by a sync and
+/// by a push of `main`, never by a fetch.
+const PUBLISHED: &str = "refs/published";
 
 /// Where a fetch writes a remote's refs before they are checked: `refs/incoming/<remote>/`,
 /// its branches under `heads/`, its tags under `tags/`.
@@ -332,6 +339,30 @@ impl Mirror {
         }
     }
 
+    /// The commit `main` was last matched to on `remote`'s `branch`, by a sync or a push of
+    /// `main`: `refs/published/<remote>/<branch>`.
+    pub fn published(&self, remote: &str, branch: &str) -> Result<Option<GitOid>, MirrorError> {
+        let sink = GixSink::open(&self.git_dir)?;
+        Ok(sink.reference(&published_ref(remote, branch))?)
+    }
+
+    /// Moves `refs/published/<remote>/<branch>` from `old` to `new` by compare-and-swap, as
+    /// [`Mirror::set_tracking`] moves a tracking ref.
+    pub fn set_published(
+        &self,
+        remote: &str,
+        branch: &str,
+        old: Option<GitOid>,
+        new: GitOid,
+    ) -> Result<(), MirrorError> {
+        let full = published_ref(remote, branch);
+        let mut sink = GixSink::open(&self.git_dir)?;
+        match sink.cas_ref(&full, old, Some(new))? {
+            BranchUpdate::Applied => Ok(()),
+            BranchUpdate::Mismatch { actual } => Err(moved(full, old, actual)),
+        }
+    }
+
     /// Sets the staging branch `refs/heads/push/<remote>/<branch>` to `to`, or deletes it when
     /// `to` is `None`, durably; gives the branch's short name.
     pub fn seed_staging(
@@ -356,7 +387,8 @@ impl Mirror {
     }
 
     /// Removes the mirror's refs of `remote` (its tracking refs, its tags and its staging
-    /// branches), and gives how many; its incoming refs go too, uncounted (a fetch's scratch).
+    /// branches), and gives how many; its incoming refs (a fetch's scratch) and its published
+    /// refs go too, uncounted.
     pub fn remove_remote(&self, remote: &str) -> Result<u64, MirrorError> {
         let mut sink = GixSink::open(&self.git_dir)?;
         let prefixes = [
@@ -364,9 +396,10 @@ impl Mirror {
             (format!("{REMOTE_TAGS}/{remote}/"), 1),
             (format!("refs/heads/{STAGING}/{remote}/"), 1),
             (format!("{INCOMING}/{remote}/"), 0),
+            (format!("{PUBLISHED}/{remote}/"), 0),
         ];
 
-        // Each ref under the four prefixes, deleted from the value it names.
+        // Each ref under the five prefixes, deleted from the value it names.
         let mut removed = 0;
         for (prefix, counted) in &prefixes {
             for (full, oid) in sink.references_under(prefix)? {
@@ -441,6 +474,11 @@ pub fn inside_store_git(path: &Path) -> bool {
 /// `refs/remotes/<remote>/<branch>`.
 fn tracking_ref(remote: &str, branch: &str) -> String {
     format!("{TRACKING}/{remote}/{branch}")
+}
+
+/// `refs/published/<remote>/<branch>`.
+fn published_ref(remote: &str, branch: &str) -> String {
+    format!("{PUBLISHED}/{remote}/{branch}")
 }
 
 /// The error for a ref `full` of the mirror that named `actual` where `expected` was.

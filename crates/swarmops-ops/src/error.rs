@@ -594,6 +594,25 @@ fn history_protected(
         .with_hint(FORWARD_HINT)
 }
 
+/// A sync of `remote` refused because the remote's head, changeset `target`, does not hold the
+/// sync's floor `floor` on its first-parent history (the M16 design §3): `E_REF_PROTECTED`
+/// `{name, changeset, target, remote}`, hinting at the remote's way back.
+pub(crate) fn below_floor(remote: &str, floor: ChangesetId, target: ChangesetId) -> OpError {
+    let message = format!(
+        "the head of {remote} does not hold {floor} on its first-parent history: main would \
+         move back, so nothing moved"
+    );
+    let mut refused = history_protected("main".to_owned(), floor, target, None, message);
+    refused
+        .details
+        .insert("remote".to_owned(), remote.to_owned().into());
+    let remote = shell_word(remote);
+    refused.with_hint(hint(format!(
+        "have the remote push a merge that keeps its old head as the first parent, then \
+         swarmops sync {remote} again"
+    )))
+}
+
 fn ref_name_invalid(name: String, message: String) -> OpError {
     error(ErrorCode::RefNameInvalid, message)
         .with_details(details([("name", name.into())]))
@@ -1893,6 +1912,25 @@ mod tests {
         want.insert("id".to_owned(), "6:000000ab".into());
         assert_eq!(undo.details, want);
         assert!(undo.message.contains("operation 6:000000ab"), "{undo:?}");
+    }
+
+    /// A sync below its floor (the M16 design §3) is `E_REF_PROTECTED` (exit 1, not retryable)
+    /// naming the floor, the remote's head and the remote; the hint is the remote's way back.
+    #[test]
+    fn a_sync_below_its_floor_is_ref_protected() {
+        let (floor, target) = (id(), ChangesetId::new(ObjectId::new([2; 32])));
+        let refused = below_floor("origin", floor, target);
+        assert_eq!(refused.code, ErrorCode::RefProtected.as_str());
+        assert_eq!((refused.exit, refused.retryable), (1, false));
+        let want = details([
+            ("name", "main".into()),
+            ("changeset", floor.to_string().into()),
+            ("target", target.to_string().into()),
+            ("remote", "origin".into()),
+        ]);
+        assert_eq!(refused.details, want);
+        let hint = refused.hint.expect("a hint");
+        assert!(hint.ends_with("swarmops sync origin again"), "{hint}");
     }
 
     #[test]

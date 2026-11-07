@@ -392,6 +392,16 @@ so sync origin
 The land takes every unpublished change at once, as one changeset, and the sync then pushes it.
 The [Commit and land](commit-and-land.md) guide explains resolutions.
 
+**After a remote force push.** Each sync that ends well, and each push of `main` to the followed
+branch, records the remote commit `main` now holds on its first-parent history. A remote head that
+does not hold that commit on its own first-parent history, because the branch was forced back
+below it or is a merge that keeps it only as a second parent, stops the sync with
+`E_REF_PROTECTED` (exit 1, `details.remote`): `main` would move back, so nothing moved and nothing
+was sent; the fetch's tracking ref names the new head. A rerun refuses again. To go on, have the
+remote push a merge that keeps its old head as the first parent, then sync again. A rebuilt
+mirror, or a remote removed and added again, has no such record until its next sync, and then
+follows the forced head as before.
+
 **On a change it does not recognise.** A pull request squashed with a message that lost the
 `SwarmOps-` lines, whose lines were then edited again on GitHub before the sync, matches neither
 rule: the sync stops with `E_CONFLICT` naming that change. When `so sync status origin` and the
