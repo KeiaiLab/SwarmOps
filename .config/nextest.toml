@@ -29,6 +29,13 @@ slow-timeout = { period = "60s", terminate-after = 10 }
 [profile.ci.junit]
 path = "junit.xml"
 
+# `sigkill::sigkill_mid_commit_500_times` (both formats) took 577-599 s in a loaded check-slow on
+# this host, at the profile's 10-minute kill, before the M16 design §2 ran two reader processes
+# beside it: it gets 20 periods.
+[[profile.ci.overrides]]
+filter = 'test(sigkill_mid_commit_500_times)'
+slow-timeout = { period = "60s", terminate-after = 20 }
+
 # The weekly slow suite's profile (scheduled.yml runs `just check-ci-slow` with
 # `NEXTEST_PROFILE=ci-slow`): the ci profile, with a test killed after 20 minutes instead. Its
 # longest tests, `faults::fail_at_every_call_reports_honestly`,
