@@ -1734,3 +1734,30 @@ its verdict.
 | Clone time at once, `serve` median and longest | — | at most 2× git's |
 | Peak memory of the server tree, 50 at once | — | recorded |
 | Host state | — | — |
+
+## M17-8a: landing lanes — 2026-11-07 (not measured yet)
+
+`landing::perf::landing_under_load` now runs four lanes one after another, each on a store of its
+own (the M17 design §7): `landers` (the agents alone, as G4 has always run), `prepared` (the same
+with an `access.toml` in the store, so that every land starts a detached `serve --prepare`),
+`movers` (50 processes, each moving a `release/mover-<n>` branch of its own with one `ref set
+--expect` every 2 s on the agents' open-loop slots) and `beside` (the movers beside the agents).
+Each lane's records are cut into 10 s windows (`landing-window: ` lines), counted per attempt as
+success, retryable refusal or other failure. Asserted: no window with another failure, the windows
+adding up to the lane, every land once with the gate's rules, every mover's branch at its last
+acknowledged move, `serve.git` current after the prepared lane and untouched in the others, and a
+clean `verify --deep`. The case takes about 4 × 120 s and the setup at 50 processes. The values
+come from the first `just perf` after the slice lands, run under the heavy lock, and replace the
+dashes below, with the host state.
+
+| Figure | Value | Target |
+| --- | --- | --- |
+| Branch-move p99 alone and beside 50 landers, and their ratio (R-1) | — | recorded |
+| `U`: lands/s × the median lock hold of a `land` (lock probe on) | — | recorded |
+| Land p99 without and with preparation, and their ratio (G20) | — | at most 1.1× |
+| Host state | — | — |
+
+`U` is printed only when the lock probe runs (`SWARMOPS_TEST_CLI_LANDING_LOCK_SAMPLE_US`, 1,000
+in M14's run); `just perf` does not set it. A debug-build smoke run (4 agents and 4 movers, one
+step a second for 12 s, probe on, load 34 to 41) passed in 51 s: no retryable or other attempt,
+R-1's ratio 1.58, G20's 0.61, `U` 0.09 to 0.13. It checks the lanes, not the targets.

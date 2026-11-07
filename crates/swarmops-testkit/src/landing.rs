@@ -12,7 +12,9 @@
 //!   lander's in its own order, every move of the target a one-step fast-forward, no merge on
 //!   the chain, a clean deep `verify`, no op-head ref left and no land past [`MAX_LATENCY`].
 //! - [`Stats`]: a run's numbers (lands/s, latency, retry rate, conflicts, lock hold and its
-//!   sync shares, relocations), with the summary line a run prints and reads back.
+//!   sync shares, relocations), with the summary line a run prints and reads back;
+//!   [`Stats::per_window`]: the same per [`Window`] of the run (the M17 design §7), each
+//!   attempt's [`Outcome`] counted, and [`flagged`] the windows with a failure.
 //! - [`backoff`]: ops spec §3 step 7's jittered backoff, its jitter from
 //!   [`mix`](measure::mix); [`slot`] and [`open_loop_lands`]: when an open loop's lands are due.
 //! - [`Cell`] and [`Run`]: a cell of the measurement, and one run of one model in it, with the
@@ -24,7 +26,8 @@
 //! - [`CliLander`], with the `cli` feature: a lander through the `swarmops` binary, as an agent
 //!   lands, which lands each change on the head it read with one `land --changes --key`
 //!   ([`land_key`]), runs a land that ended retryable again with the same key, and reads each
-//!   envelope into a [`LandRecord`].
+//!   envelope into a [`LandRecord`]; [`CliMover`]: a process that moves a branch of its own
+//!   with `ref set --expect`, beside the landers.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
@@ -332,10 +335,32 @@ pub struct LandRecord {
     /// How many times a write transaction of it gave up waiting for the lock (`Busy`) and was
     /// tried again.
     pub busy: u32,
+    /// When it began, in microseconds after the run's go: the [`Window`] it falls in.
+    pub at_us: u64,
+    /// How each of its attempts ended, in order: one per run of the binary.
+    pub outcomes: Vec<Outcome>,
+}
+
+/// How one attempt of a land or a branch move ended (the M17 design §7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    /// It landed, or moved the branch.
+    Success,
+    /// It was refused with a code the contract marks retryable (`E_BUSY`,
+    /// `E_CAS_RETRY_EXHAUSTED`): run again, it can succeed.
+    Retryable {
+        /// The `E_*` code.
+        code: String,
+        /// The envelope's hint; `None` when it gives none.
+        hint: Option<String>,
+    },
+    /// Any other end: a failure the run must not have.
+    Other,
 }
 
 impl LandRecord {
-    /// The record as one line of `key=value` fields, which [`LandRecord::parse`] reads back.
+    /// The record as one line of `key=value` fields, which [`LandRecord::parse`] reads back:
+    /// all but [`LandRecord::at_us`] and [`LandRecord::outcomes`], which the line leaves out.
     pub fn to_line(&self) -> String {
         let holds: Vec<String> = self.lock_hold_us.iter().map(u64::to_string).collect();
         format!(
@@ -389,6 +414,7 @@ impl LandRecord {
             journal_sync_us: number("journal_sync_us")?,
             ref_sync_us: number("ref_sync_us")?,
             busy: u32::try_from(number("busy")?).ok()?,
+            ..LandRecord::default()
         })
     }
 }
@@ -726,6 +752,19 @@ pub struct Stats {
     pub ref_share: f64,
     /// How many lands landed relocated.
     pub relocations: u64,
+    /// How many attempts ended retryable ([`Outcome::Retryable`]).
+    pub retryable: u64,
+    /// How many attempts ended in another failure ([`Outcome::Other`]).
+    pub other: u64,
+}
+
+/// A stretch of a run: from `start` after the go, `len` long ([`Stats::per_window`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Window {
+    /// Its start, after the run's go.
+    pub start: Duration,
+    /// Its length.
+    pub len: Duration,
 }
 
 impl Stats {
@@ -754,6 +793,10 @@ impl Stats {
         let journal: u64 = all().map(|record| record.journal_sync_us).sum();
         let refs: u64 = all().map(|record| record.ref_sync_us).sum();
         let landed_count = bytes::to_u64(landed.len());
+        let outcomes = |pick: fn(&Outcome) -> bool| {
+            let all = all().flat_map(|record| &record.outcomes);
+            bytes::to_u64(all.filter(|outcome| pick(outcome)).count())
+        };
         Stats {
             landed: landed_count,
             lands_per_s: as_f64(landed_count) / wall.as_secs_f64(),
@@ -768,7 +811,43 @@ impl Stats {
             journal_share: ratio(journal, held),
             ref_share: ratio(refs, held),
             relocations: count(|record| record.relocated),
+            retryable: outcomes(|outcome| matches!(outcome, Outcome::Retryable { .. })),
+            other: outcomes(|outcome| matches!(outcome, Outcome::Other)),
         }
+    }
+
+    /// The numbers of `records` (each lander's lands) per `window` of the run, in order: a
+    /// record is in the window its [`LandRecord::at_us`] falls in (one on an edge in the later
+    /// one), and the windows run from the go up to the one the last record began in, empty ones
+    /// included, so that their counts add up to the run's. Each window's lands/s are over its
+    /// length. None for no record, or a window of 0.
+    ///
+    /// ```text
+    /// go   10 s   20 s   30 s
+    /// |------|------|------|
+    ///  a  b     c       d      a, b in [0, 10 s); c in [10, 20 s); d in [20, 30 s)
+    /// ```
+    pub fn per_window(records: &[Vec<LandRecord>], window: Duration) -> Vec<(Window, Stats)> {
+        // 1. How many windows: up to the last record's.
+        let width = window.as_micros();
+        let index = |record: &LandRecord| u128::from(record.at_us) / width;
+        let last = records.iter().flatten().map(index).max();
+        let (Some(last), false) = (last, window.is_zero()) else {
+            return Vec::new();
+        };
+
+        // 2. Each window's records, by lander, then their numbers.
+        (0..=last)
+            .map(|at| {
+                let of_window: Vec<Vec<LandRecord>> = (records.iter())
+                    .map(|lands| lands.iter().filter(|r| index(r) == at).cloned().collect())
+                    .collect();
+                let steps = u32::try_from(at).expect("a run's windows fit in u32");
+                let start = window.saturating_mul(steps);
+                let len = window;
+                (Window { start, len }, Stats::from(&of_window, window))
+            })
+            .collect()
     }
 
     /// The numbers as one line of `key=value` fields, which [`Stats::parse`] reads back:
@@ -777,7 +856,7 @@ impl Stats {
         format!(
             "landed={} lands_per_s={:.3} latency_p50_us={} latency_p99_us={} retry_pct={:.3} \
              conflicts={} exhausted={} busy={} lock_p50_us={} lock_p99_us={} journal_pct={:.3} \
-             ref_pct={:.3} relocations={}",
+             ref_pct={:.3} relocations={} retryable={} other={}",
             self.landed,
             self.lands_per_s,
             self.latency_p50_us,
@@ -791,6 +870,8 @@ impl Stats {
             self.journal_share * 100.0,
             self.ref_share * 100.0,
             self.relocations,
+            self.retryable,
+            self.other,
         )
     }
 
@@ -814,8 +895,19 @@ impl Stats {
             journal_share: real("journal_pct")? / 100.0,
             ref_share: real("ref_pct")? / 100.0,
             relocations: number("relocations")?,
+            retryable: number("retryable")?,
+            other: number("other")?,
         })
     }
+}
+
+/// The windows of `windows` ([`Stats::per_window`]) with an attempt that ended in another
+/// failure ([`Outcome::Other`]): retries and resolved refusals flag none.
+pub fn flagged(windows: &[(Window, Stats)]) -> Vec<Window> {
+    (windows.iter())
+        .filter(|(_, stats)| stats.other > 0)
+        .map(|(window, _)| *window)
+        .collect()
 }
 
 /// The nearest-rank `percent` percentile of `sorted`, in microseconds; 0 for no samples.
@@ -1500,12 +1592,17 @@ enum LandEnd {
         relocated: bool,
     },
     /// `E_BUSY`: it recorded nothing.
-    Busy,
+    Busy {
+        /// The envelope's hint.
+        hint: Option<String>,
+    },
     /// `E_CAS_RETRY_EXHAUSTED`: the target moved before each of its attempts could publish, and
     /// it recorded nothing.
     Exhausted {
         /// How many times it tried.
         attempts: u32,
+        /// The envelope's hint.
+        hint: Option<String>,
     },
     /// `E_CONFLICT`: the change conflicts with the target's head, and it recorded nothing.
     Conflicted,
@@ -1552,13 +1649,14 @@ impl<'s, P: Program> CliLander<'s, P> {
         let end = loop {
             let end = land_end(&self.store.run_as(&self.agent, &args, &[]));
             match &end {
-                LandEnd::Landed { attempts, .. } | LandEnd::Exhausted { attempts } => {
+                LandEnd::Landed { attempts, .. } | LandEnd::Exhausted { attempts, .. } => {
                     record.attempts += attempts;
                 }
-                LandEnd::Busy => record.busy += 1,
+                LandEnd::Busy { .. } => record.busy += 1,
                 LandEnd::Conflicted => record.attempts += 1,
             }
-            let retryable = matches!(end, LandEnd::Busy | LandEnd::Exhausted { .. });
+            record.outcomes.push(end.outcome());
+            let retryable = matches!(end, LandEnd::Busy { .. } | LandEnd::Exhausted { .. });
             if !retryable || reruns == LAND_RERUNS {
                 break end;
             }
@@ -1571,7 +1669,7 @@ impl<'s, P: Program> CliLander<'s, P> {
             }
             LandEnd::Exhausted { .. } => record.exhausted = true,
             LandEnd::Conflicted => record.conflicted = true,
-            LandEnd::Busy => {}
+            LandEnd::Busy { .. } => {}
         }
         record.latency_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
         record
@@ -1607,12 +1705,45 @@ impl<'s, P: Program> CliLander<'s, P> {
     }
 }
 
+#[cfg(feature = "cli")]
+impl LandEnd {
+    /// The attempt's [`Outcome`]: a conflict the lander cannot merge is no retryable refusal.
+    fn outcome(&self) -> Outcome {
+        let retryable = |code: &str, hint: &Option<String>| Outcome::Retryable {
+            code: code.to_owned(),
+            hint: hint.clone(),
+        };
+        match self {
+            LandEnd::Landed { .. } => Outcome::Success,
+            LandEnd::Busy { hint } => retryable(BUSY, hint),
+            LandEnd::Exhausted { hint, .. } => retryable(EXHAUSTED, hint),
+            LandEnd::Conflicted => Outcome::Other,
+        }
+    }
+}
+
+/// The contract's code for a lock that stayed taken, or a snapshot that met a commit in each of
+/// its rounds.
+#[cfg(feature = "cli")]
+const BUSY: &str = "E_BUSY";
+
+/// The contract's code for a land whose target moved before each of its attempts.
+#[cfg(feature = "cli")]
+const EXHAUSTED: &str = "E_CAS_RETRY_EXHAUSTED";
+
+/// The hint of `run`'s error envelope, if its stdout is one and it gives one.
+#[cfg(feature = "cli")]
+fn hint_of(run: &crate::cli::Run) -> Option<String> {
+    let envelope: serde_json::Value = serde_json::from_str(&run.stdout).ok()?;
+    envelope["error"]["hint"].as_str().map(str::to_owned)
+}
+
 /// How `run`, a run of `land`, ended ([`LandEnd`]); one that ended in any other way fails the
 /// test with the run.
 #[cfg(feature = "cli")]
 fn land_end(run: &crate::cli::Run) -> LandEnd {
     if run.busy() {
-        return LandEnd::Busy;
+        return LandEnd::Busy { hint: hint_of(run) };
     }
     let envelope = run.envelope();
     let attempts = |value: &serde_json::Value| {
@@ -1630,10 +1761,247 @@ fn land_end(run: &crate::cli::Run) -> LandEnd {
                 relocated: result["relocated"] == true,
             }
         }
-        Some("E_CAS_RETRY_EXHAUSTED") => LandEnd::Exhausted {
+        Some(EXHAUSTED) => LandEnd::Exhausted {
             attempts: attempts(&envelope["error"]["details"]["attempts"]),
+            hint: hint_of(run),
         },
         Some("E_CONFLICT") => LandEnd::Conflicted,
         Some(_) => panic!("a land ended neither landed nor retryable nor conflicted: {run}"),
+    }
+}
+
+/// The branch mover `mover` (from 0) moves ([`CliMover`]): `release/mover-<mover>`. A store of
+/// FORMAT 1 takes `main` and `release/<name>` only, and a move back belongs on a release ref.
+pub fn mover_branch(mover: usize) -> String {
+    format!("release/mover-{mover}")
+}
+
+/// Checks that each `(branch, acknowledged)` of `moved` names, in the store at `store`, the
+/// changeset (full hex) its mover's last acknowledged move set it to: no move lost, none made
+/// that its mover was not told of. The error names the first branch that does not.
+pub fn check_moved(store: &Utf8Path, moved: &[(String, String)]) -> Result<(), String> {
+    let repo = LocalRepo::open(store).map_err(|e| format!("the store: open it: {e}"))?;
+    for (branch, acknowledged) in moved {
+        let held = repo
+            .get_ref(branch)
+            .map_err(|e| format!("the store: read {branch}: {e}"))?
+            .map(|state| state.target.to_string());
+        if held.as_deref() != Some(acknowledged.as_str()) {
+            return Err(format!(
+                "lost move: {branch} holds {held:?}, and its last acknowledged move set it to \
+                 {acknowledged}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A process that moves a branch of its own beside the landers (the M17 design §7, R-1): mover
+/// `n` of a run, as an agent the caller names, on [`mover_branch`]`(n)` of a [`Store`]. Made
+/// ([`CliMover::create`]) with a changeset of its own on the base and its branch at the base,
+/// each move ([`CliMover::shift`]) is one `ref set <branch> <other> --expect <held>`, from the
+/// value its last acknowledged move set to the other of the two, run again with the same
+/// arguments after `E_BUSY` at most [`LAND_RERUNS`] times. Any other refusal is an
+/// [`Outcome::Other`]: nobody else moves the branch, so even `E_CAS_MISMATCH` is a failure here.
+#[cfg(feature = "cli")]
+pub struct CliMover<'s, P> {
+    /// The store it moves a branch of.
+    store: &'s Store<P>,
+    /// The agent it runs the binary as.
+    agent: String,
+    /// Its branch.
+    branch: String,
+    /// The base and its own changeset, in full hex: the two values it moves between.
+    values: [String; 2],
+    /// Which of [`CliMover::values`] its last acknowledged move set.
+    held: usize,
+}
+
+#[cfg(feature = "cli")]
+impl<'s, P: Program> CliMover<'s, P> {
+    /// Mover `mover` (from 0) on `store`, as `agent`: commits `movers/<mover>.txt` on `base`
+    /// (full hex), which moves no ref, then creates its branch at `base`.
+    pub fn create(store: &'s Store<P>, mover: usize, agent: &str, base: &str) -> CliMover<'s, P> {
+        // 1. Its own changeset on the base.
+        let file = format!("movers/{mover}.txt");
+        let changes = store.changes(
+            &format!("mover-{mover}"),
+            &file,
+            &format!("mover {mover}\n"),
+        );
+        let commit = [
+            "commit",
+            "-m",
+            file.as_str(),
+            "--changes",
+            &changes,
+            "--parent",
+            base,
+        ];
+        let own = store.run_as(agent, &commit, &[]).ok()["changeset"]
+            .as_str()
+            .unwrap_or_else(|| panic!("mover {mover}'s changeset"))
+            .to_owned();
+
+        // 2. Its branch, at the base.
+        let branch = mover_branch(mover);
+        let create = ["ref", "set", branch.as_str(), base, "--create"];
+        store.run_as(agent, &create, &[]).ok();
+        CliMover {
+            store,
+            agent: agent.to_owned(),
+            branch,
+            values: [base.to_owned(), own],
+            held: 0,
+        }
+    }
+
+    /// Its branch.
+    pub fn branch(&self) -> &str {
+        &self.branch
+    }
+
+    /// What its last acknowledged move set its branch to, in full hex.
+    pub fn acknowledged(&self) -> &str {
+        &self.values[self.held]
+    }
+
+    /// One move of its branch to the other value, by the steps the type's documentation gives:
+    /// its record, `id` the value set when it moved, its latency from the first run to the end
+    /// of the last.
+    pub fn shift(&mut self) -> LandRecord {
+        let started = Instant::now();
+        let next = 1 - self.held;
+        let args = [
+            "ref",
+            "set",
+            self.branch.as_str(),
+            self.values[next].as_str(),
+            "--expect",
+            self.values[self.held].as_str(),
+        ];
+        let mut record = LandRecord::default();
+        for _ in 0..=LAND_RERUNS {
+            let run = self.store.run_as(&self.agent, &args, &[]);
+            record.attempts += 1;
+            if run.busy() {
+                record.busy += 1;
+                let hint = hint_of(&run);
+                let code = BUSY.to_owned();
+                record.outcomes.push(Outcome::Retryable { code, hint });
+                continue;
+            }
+            if run.status.code() == Some(0) {
+                run.ok();
+                record.outcomes.push(Outcome::Success);
+                self.held = next;
+                record.id = Some(self.values[next].clone());
+            } else {
+                record.outcomes.push(Outcome::Other);
+            }
+            break;
+        }
+        record.latency_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        record
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The window the self-checks cut runs into.
+    const TEN_S: Duration = Duration::from_secs(10);
+
+    /// A landed record that began `at_s` seconds after the go, its attempts ending as `outcomes`.
+    fn landed(at_s: f64, outcomes: Vec<Outcome>) -> LandRecord {
+        LandRecord {
+            id: Some("00".repeat(32)),
+            attempts: u32::try_from(outcomes.len()).expect("fits"),
+            latency_us: 1_000,
+            at_us: u64::try_from(Duration::from_secs_f64(at_s).as_micros()).expect("fits"),
+            outcomes,
+            ..LandRecord::default()
+        }
+    }
+
+    /// A retryable `E_BUSY`, with no hint.
+    fn busy() -> Outcome {
+        Outcome::Retryable {
+            code: "E_BUSY".to_owned(),
+            hint: None,
+        }
+    }
+
+    /// Records of two landers over 25 s: one window of two, one of one, one of one; one
+    /// conflicted land, one busy attempt.
+    fn run() -> Vec<Vec<LandRecord>> {
+        let conflicted = LandRecord {
+            conflicted: true,
+            attempts: 1,
+            at_us: 12_000_000,
+            outcomes: vec![Outcome::Other],
+            ..LandRecord::default()
+        };
+        vec![
+            vec![
+                landed(0.0, vec![Outcome::Success]),
+                landed(9.999, vec![busy(), Outcome::Success]),
+            ],
+            vec![conflicted, landed(25.0, vec![Outcome::Success])],
+        ]
+    }
+
+    /// Every record falls in one window, and the windows' counts sum to the run's: landed,
+    /// conflicts, retryable and other attempts. The windows follow one another from the go,
+    /// each [`TEN_S`] long, up to the one the last record began in.
+    #[test]
+    fn windows_add_up_to_the_run() {
+        let records = run();
+        let whole = Stats::from(&records, Duration::from_secs(30));
+        let windows = Stats::per_window(&records, TEN_S);
+
+        // 1. Three windows, 0-10 s, 10-20 s, 20-30 s: the last record began at 25 s.
+        let starts: Vec<Duration> = windows.iter().map(|(window, _)| window.start).collect();
+        let secs = Duration::from_secs;
+        assert_eq!(starts, [secs(0), secs(10), secs(20)]);
+        assert!(windows.iter().all(|(window, _)| window.len == TEN_S));
+
+        // 2. The counts add up; a record on a window's edge is in the later one.
+        let sum =
+            |pick: fn(&Stats) -> u64| windows.iter().map(|(_, stats)| pick(stats)).sum::<u64>();
+        assert_eq!(sum(|s| s.landed), whole.landed);
+        assert_eq!(sum(|s| s.conflicts), whole.conflicts);
+        assert_eq!(sum(|s| s.retryable), whole.retryable);
+        assert_eq!(sum(|s| s.other), whole.other);
+        let landed: Vec<u64> = windows.iter().map(|(_, stats)| stats.landed).collect();
+        assert_eq!(landed, [2, 0, 1]);
+        assert_eq!((whole.landed, whole.retryable, whole.other), (3, 1, 1));
+
+        // 3. A window's lands per second are over its own length.
+        assert!((windows[0].1.lands_per_s - 0.2).abs() < 1e-9);
+
+        // 4. No record, no window.
+        assert_eq!(Stats::per_window(&[Vec::new()], TEN_S), []);
+    }
+
+    /// The window an attempt that ended neither landed nor retryable began in is flagged, and
+    /// no other: retries and conflicts the lander resolved are not failures.
+    #[test]
+    fn a_window_with_an_other_failure_is_flagged() {
+        let mut records = run();
+        let windows = Stats::per_window(&records, TEN_S);
+        let flagged = flagged(&windows);
+        assert_eq!(flagged.len(), 1, "{flagged:?}");
+        assert_eq!(flagged[0].start, Duration::from_secs(10));
+
+        // A run whose only failure was retried flags nothing.
+        records[1].remove(0);
+        assert_eq!(flagged_of(&records), []);
+    }
+
+    /// The windows of `records` that [`flagged`] flags.
+    fn flagged_of(records: &[Vec<LandRecord>]) -> Vec<Window> {
+        flagged(&Stats::per_window(records, TEN_S))
     }
 }

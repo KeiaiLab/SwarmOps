@@ -81,6 +81,11 @@ collects the changes on `stable` that no release holds yet, until the next relea
   a store (`MAX_PACK_CACHE_BYTES`, [limits](docs/reference/limits.md#internal-values)), the least
   recently used removed first ([Serve over ssh](docs/operate/serve-over-ssh.md#how-it-works), the
   M17 design §5).
+- `just perf`'s landing case runs four lanes: the agents alone, the agents with every land
+  followed by `serve --prepare`, 50 branch movers alone and beside the agents. Each lane counts
+  successes, retryable refusals and other failures per 10 s window, fails on any other failure,
+  and prints the move p99 ratio and the land p99 ratio with and without preparation
+  (the M17 design §7).
 
 ### Changed
 
