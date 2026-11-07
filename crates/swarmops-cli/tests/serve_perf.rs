@@ -73,6 +73,12 @@ const SERVE_DIRTY: &str = "git/serve.dirty";
 /// The file every export writes beside `serve.git`.
 const SERVE_STATE: &str = "git/serve.state";
 
+/// The repository every preparation and export writes.
+const SERVE_GIT: &str = "git/serve.git";
+
+/// How long a test watches for a detached preparation that must not start (`serve_prepare`'s).
+const QUIET_FOR: Duration = Duration::from_secs(2);
+
 /// Where a push names the branch it lands onto.
 const LAND_MAIN: &str = "HEAD:refs/land/main";
 
@@ -165,14 +171,17 @@ impl Bench {
         let bare = server.create(REPO);
         fast_import(&server, &bare, commits);
 
-        // 2. serve's side: the store and its access file.
+        // 2. serve's side: the store; seeded, its access file now, so that the import prepares.
         let site = ServeSite::new::<Swarmops>();
         let site = match start {
             Start::Cold => site,
             Start::Seeded => site.with_accounting(Accounting::Cpu),
         };
         let store = site.init(REPO);
-        fs::write(store.join("access.toml"), ACCESS).expect("write the access file");
+        let access = store.join("access.toml");
+        if matches!(start, Start::Seeded) {
+            fs::write(&access, ACCESS).expect("write the access file");
+        }
 
         // 3. A seeded serve.git exists before the store holds a ref, and takes the objects.
         if matches!(start, Start::Seeded) {
@@ -202,6 +211,15 @@ impl Bench {
         if matches!(start, Start::Seeded) {
             settle(&store, Some(&bare));
             site.seed_serve_git(REPO, &bare);
+        }
+
+        // 6. Cold: the access file after the import, which therefore started no preparation;
+        //    the first clone exports the whole history.
+        if matches!(start, Start::Cold) {
+            for path in [SERVE_GIT, SERVE_STATE, SERVE_DIRTY] {
+                assert!(!store.join(path).exists(), "a preparation wrote {path}");
+            }
+            fs::write(&access, ACCESS).expect("write the access file");
         }
         Bench {
             server,
@@ -972,4 +990,20 @@ fn seeded_bench_waits_for_its_preparation() {
     let ops = LocalOps::open(root).expect("open the store");
     let fresh = freshness(&ops, &repo).expect("read the freshness");
     assert!(matches!(fresh, Freshness::Current), "serve.git is stale");
+}
+
+/// A cold bench hands its cases a store no preparation has touched: the import ran before the
+/// access file existed, so it started no detached `serve --prepare` that a first clone would
+/// race for `serve.lock` (`E_BUSY`) or find done.
+#[test]
+fn cold_bench_starts_no_preparation() {
+    let bench = Bench::build(200, Start::Cold);
+    let root = bench.store();
+    let deadline = Instant::now() + QUIET_FOR;
+    while Instant::now() < deadline {
+        for path in [SERVE_GIT, SERVE_STATE, SERVE_DIRTY] {
+            assert!(!root.join(path).exists(), "a preparation wrote {path}");
+        }
+        thread::sleep(POLL);
+    }
 }

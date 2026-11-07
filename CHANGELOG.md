@@ -32,6 +32,9 @@ collects the changes on `stable` that no release holds yet, until the next relea
 - `serve_perf`'s seeded cases wait for the preparation their import and lands start before a
   client connects: on 12,000 commits the import's detached `serve --prepare` held
   `git/serve.lock` past the 10 s wait, and `fetch_k_behind`'s clone failed with `E_BUSY`.
+- `serve_perf`'s cold cases write the access file after the import, so that the import starts no
+  detached `serve --prepare`: their first clone raced it for `serve.lock`, and
+  `first_clone_after_import`'s own preparation could end `E_BUSY`.
 
 ## [0.9.0] - 2026-11-07
 
