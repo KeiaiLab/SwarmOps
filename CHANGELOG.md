@@ -8,13 +8,20 @@ pre-1.0 way).
 SwarmOps 0.1.0 is the first release, tagged `v0.1.0`, 0.2.0 the second, with the git remotes (M13),
 0.3.0 the third, with the workspaces (M5), 0.4.0 the fourth, with verify, crash safety, fuzzing, gc
 and FORMAT 2 (M6), 0.5.0 the fifth, with the pilot on a real repository and the goal measurements,
-0.6.0 the sixth, with the fixes those measurements asked for, and 0.7.0 the seventh, with stock git
-against a store (M14); no crate is published (`publish = false`). The 0.1.0 section holds every
+0.6.0 the sixth, with the fixes those measurements asked for, 0.7.0 the seventh, with stock git
+against a store (M14), and 0.8.0 the eighth, with data safety and the contract (M15); no crate is published (`publish = false`). The 0.1.0 section holds every
 change up to it, grouped by milestone of the design (umbrella spec §13). From here, **Unreleased**
 collects the changes on `stable` that no release holds yet, until the next release
 ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ## [Unreleased]
+
+## [0.8.0] - 2026-11-07
+
+Safety and the contract. The 0.8.0 release holds M15: 54 of the 55 error codes pinned by a golden
+envelope, operation ids that an undo cannot redirect, a fetch that imports before it moves a
+tracking ref, `main` moved forward only, three workspace refusals, a land key scoped to the store
+and the land grant checked again on each attempt; and the first `.deb` and `.rpm` packages.
 
 ### Changed (breaking)
 
@@ -2003,7 +2010,8 @@ fixes the measurements and the pilot asked for.
   ([docs/known-limitations.md](docs/known-limitations.md), "An import onto a target reads the
   head's whole tree, and onto a native head the whole history below it").
 
-[Unreleased]: https://github.com/KeiaiLab/SwarmOps/compare/v0.7.0...stable
+[Unreleased]: https://github.com/KeiaiLab/SwarmOps/compare/v0.8.0...stable
+[0.8.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.4.0...v0.5.0

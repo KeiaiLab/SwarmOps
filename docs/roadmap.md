@@ -153,7 +153,7 @@ window, for v0.6.0's code as for M14's (579.5–594.6 ms in v0.6.0's). G17's pus
 clone is not (49.6 s against 1 s). The benchmark gate (condition 3) runs in the weekly Scheduled
 run.
 
-**Condition 5 (M15, not released).** Not met yet. M15 closes the in-scope acceptance of the twelve
+**Condition 5 (M15, in v0.8.0).** Not met yet. M15 closes the in-scope acceptance of the twelve
 data-safety and contract rows the 2026-10-30 completeness report put on condition 5: 54 of the 55
 error codes pinned by a golden envelope, operation ids an undo cannot redirect, a fetch that
 imports before it moves a tracking ref, `main` moved forward only, three workspace refusals, a
@@ -633,7 +633,7 @@ GitHub goal, M15 to M25 by the plan of 2026-11-05; M11 (topology 3) takes `so cl
 `so remote` and `so sync`.
 
 **Settled:** M0 to M4 and M8 are delivered, in v0.1.0, M13 in v0.2.0, M5 in v0.3.0, M6 in
-v0.4.0, M14 in v0.7.0 and M15 on `stable` for v0.8.0, ahead of M12, which is developed separately.
+v0.4.0, M14 in v0.7.0 and M15 in v0.8.0, ahead of M12, which is developed separately.
 **Provisional:** after M15 the order follows [To usable](#to-usable): M16 closes condition 5
 and measures condition 2, M17 serves under load, M18 and M19 need no new format, one `FORMAT 3` (M20)
 then serves review, the queue, withdrawal and lineage, and topology 3 stays after the simulator;
