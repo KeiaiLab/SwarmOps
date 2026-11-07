@@ -1,0 +1,22 @@
+---
+source: crates/swarmops-cli/tests/remote_sync.rs
+expression: "masked(failed.envelope(), &ids)"
+---
+{
+  "api": 1,
+  "error": {
+    "code": "E_REF_PROTECTED",
+    "details": {
+      "changeset": "[main]",
+      "name": "main",
+      "remote": "origin",
+      "target": "[target]"
+    },
+    "exit": 1,
+    "hint": "have the remote push a merge that keeps its old head as the first parent, then swarmops sync origin again",
+    "message": "the head of origin does not hold [main] on its first-parent history: main would move back, so nothing moved",
+    "retryable": false
+  },
+  "ok": false,
+  "op": "sync"
+}

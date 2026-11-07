@@ -16,6 +16,24 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 ## [Unreleased]
 
+### Changed (breaking)
+
+- `sync` refuses to move `main` below its floor after a remote force push (`E_REF_PROTECTED`,
+  `details.remote`). What to do: have the remote push a merge that keeps the old head as its first
+  parent, then sync again. The floor is the remote commit the last successful sync, or push of
+  `main` to the followed branch, matched `main` to, kept in the mirror as
+  `refs/published/<remote>/<branch>`; a fast-forward to a head that holds it only as a merge's
+  second parent is refused too. Nothing moves and nothing is sent; the fetch's tracking ref moves
+  ([GitHub as a remote](docs/guides/github-remote.md#when-sync-stops)).
+
+### Added
+
+- `git import`'s response carries `tip_changeset` when the target's head descends from the
+  imported commit already: that commit's changeset, with `head_changeset` the target's head
+  ([git import](docs/reference/commands/git-import.md)).
+- `E_REF_PROTECTED` from `sync` names the remote in `details.remote`, beside `name`, `changeset`
+  (the floor) and `target` (the remote head's changeset).
+
 ### Changed
 
 - Crash tests (the M16 design §2): a literal `SIGKILL` now also kills `ref set` and `op undo` on
@@ -33,6 +51,10 @@ collects the changes on `stable` that no release holds yet, until the next relea
   finishes the interrupted update. A directory that cannot be opened is `E_IO` whose
   `details.path` names the directory, no longer the file below it. Windows and the other targets
   still write by full path ([Known limitations](docs/known-limitations.md)).
+- `git import --into <ref>` of a commit whose changeset the target's head already descends from,
+  over every parent, moves nothing and writes nothing: an older tip imported again after native
+  lands on top was `E_GIT_IMPORT_DIVERGED`. `ref_moved` is false, `head_changeset` the target's
+  head, and `tip_changeset` the commit's changeset.
 
 ## [0.8.0] - 2026-11-07
 

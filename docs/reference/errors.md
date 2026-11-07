@@ -266,7 +266,7 @@ A tag was asked to move from one target to another: a tag is created and deleted
 
 Exit 1. Retryable: no.
 
-`main` was asked to be deleted, or moved off its first-parent history by `ref set` or `op undo`: it is never deleted, and moves only forward (`details.name`). A move adds `changeset` (the head it would drop) and `target`; an undo adds `op` and `id`. Nothing was written; to take `main` back, land a change that reverts it.
+`main` was asked to be deleted, or moved off its first-parent history by `ref set` or `op undo`: it is never deleted, and moves only forward (`details.name`). A move adds `changeset` (the head it would drop) and `target`; an undo adds `op` and `id`. Nothing was written; to take `main` back, land a change that reverts it. `sync` refuses a remote head that does not hold what it last published on its first-parent history, adding `remote`; the remote's way back is a merge that keeps its old head as the first parent.
 
 ## E_GIT_NOT_A_REPO
 

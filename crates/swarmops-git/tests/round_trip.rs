@@ -673,8 +673,8 @@ fn the_single_writer_layout_round_trips_through_a_git_remote() {
 }
 
 /// Two hosts writing to `main` in the single-writer layout stop rather than merge. B lands
-/// natively: its import of R is diverged, its head a native changeset R does not build on, and it
-/// writes no frame; B's export to R finds R's `main` at the export of its head's parent, so it is
+/// natively: its import of R moves nothing, R's `main` being its head's ancestor (the M16 design
+/// §3), and it writes no frame; B's export to R finds R's `main` at the export of its head's parent, so it is
 /// incremental and R moves. Then A lands and exports: R's history holds the export of A's older
 /// land, so both moved, and nothing is written; and A's import of R is diverged too, A's head
 /// being its own land, never exported. Nothing is merged: each `main` stays where its own host
@@ -692,17 +692,19 @@ fn two_writers_stop() {
         "Host B's change\n",
     );
     let op = last_op(b);
-    let error = import_fails(b, remote);
-    let b_base = export_oid(b, on_b.landed);
-    assert!(
-        matches!(
-            error,
-            ImportError::Diverged { target_head, base: Some(base), git_head, .. }
-                if target_head == on_b.landed && base == b_base && git_head == from_a
+    let behind = imported(b, remote, "main");
+    assert_eq!(
+        (
+            behind.ref_moved,
+            behind.imported,
+            behind.head,
+            behind.git_head
         ),
-        "{error:?}"
+        (false, 0, on_b.landed, from_a)
     );
+    assert_eq!(behind.tip, Some(hosts.imported.head));
     assert_eq!((main_head(b), last_op(b)), (on_b.landed, op));
+    let b_base = export_oid(b, on_b.landed);
 
     let from_b = exported(b, &mut gix(remote), &main_branch());
     assert_eq!((from_b.head, from_b.head_oid), (on_b.landed, b_base));
