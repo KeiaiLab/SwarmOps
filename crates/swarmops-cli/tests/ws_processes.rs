@@ -417,6 +417,34 @@ mod perf {
         let (out, took) = timed(&dir, &["ws", "rebase", "--status-after", "none"]);
         out.ok();
         say("update after a land of 10 files", took, "(target < 100 ms)");
+
+        // 6. The same update as a median of 20: each round a fresh land of the same 10 paths
+        //    with new bytes, then the update, which must rebase onto that land.
+        let update = ["ws", "rebase", "--status-after", "none"];
+        let times: Vec<Duration> = (0..ROUNDS)
+            .map(|round| {
+                let version = 100 + u32::try_from(round).unwrap();
+                let changes = (0..LANDED_FILES)
+                    .map(|i| {
+                        change(
+                            path_of(i + 1_000, TREE_DIRS),
+                            content_of(i + 1_000, version),
+                        )
+                    })
+                    .collect();
+                let landed = put(&ops, Some(ops_head(&ops)), changes);
+                let (out, took) = timed(&dir, &update);
+                let done = out.ok();
+                assert_eq!(done["status"], "rebased", "round {round}: {done}");
+                assert_eq!(done["onto"], landed.as_str(), "round {round}: {done}");
+                took
+            })
+            .collect();
+        say(
+            &format!("update after a land of {LANDED_FILES} files, median of {ROUNDS}"),
+            median(times),
+            "(target < 100 ms)",
+        );
     }
 
     /// The workspaces created, and the lands made, for the percentiles of G9's open and land.

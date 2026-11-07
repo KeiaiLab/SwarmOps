@@ -2149,3 +2149,36 @@ remote-perf: second sync 12000 nokey git.gc 3.0 (count 2)
 remote-perf: second sync 12000 nokey git.merge-base 1.9 (count 1)
 remote-perf: second sync 12000 nokey git.push 23.4 (count 1)
 ```
+
+## M19 baselines — 2026-11-08 (not measured: the host was never quiet)
+
+The M19 design §2: G9's workspace cases (`ws_processes::perf::*`, release build) on the code
+before any M19 fix, `stable` `f3ed2a82` (v0.10.0), and a span profile with the sync count of one
+update and one 1-file commit. `perf_tree_of_50000_files` now times the update twice: the single
+run after one land, as before, and the median of 20 rounds, each a fresh land of the same 10
+paths then the update (`update after a land of 10 files, median of 20`). Neither replaces the
+other; the single run keeps its verdict rule.
+
+The run waits for the design's gate (a 1-minute load under 6 held for a minute, no CI job on
+this host's runners) at most 30 minutes, then is skipped with its load recorded. It did not pass:
+
+| Wait | Max load (1 / 5 min) | Lowest 1-minute load | CI job | End load |
+| --- | --- | --- | --- | --- |
+| 08:15:48–08:45:58, 30 min, 180 readings | 242.52 / 155.95 | 26.83 | in every reading | 72.01 87.17 93.85 |
+
+So the cases, the span profile and the sync count stay unmeasured on `f3ed2a82`; no gate,
+target, timeout or case parameter changed. One run of `perf_tree_of_50000_files` under the heavy
+lock proved the new rounds green (every update rebased onto its round's land), at a 1-minute load
+of 84.95 at its start and 57.91 at its end, with this slice's own build in the same window. Its
+lines, loaded, with no verdict:
+
+| Case | Result |
+| --- | --- |
+| `ws status`, nothing changed (median of 20) | 63.2 ms |
+| `ws status` after 100 edits (median of 20) | 69.7 ms |
+| `ws commit` of 1 / 10 / 100 changed files | 102.1 / 101.5 / 151.2 ms (`meta.elapsed_ms` 98 / 97 / 147) |
+| update after a land of 10 files | 240.0 ms |
+| update after a land of 10 files, median of 20 | 644.6 ms |
+
+The figures follow as a docs-only commit from the first gated window; the M19 fix slices measure
+against them.
