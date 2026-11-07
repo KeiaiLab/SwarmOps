@@ -86,6 +86,13 @@ collects the changes on `stable` that no release holds yet, until the next relea
   successes, retryable refusals and other failures per 10 s window, fails on any other failure,
   and prints the move p99 ratio and the land p99 ratio with and without preparation
   (the M17 design §7).
+- `serve` appends a record of each request it served to the store's `git/serve-records.jsonl`:
+  a `ServeRecord` JSON line (new schema types `ServeRecord`, `ServeService`) with when the
+  connection started, the caller, `clone`, `fetch` or `push`, the milliseconds spent preparing and
+  sending, the pack's bytes, the exit code and a refusal's code. The pack-objects and pre-receive
+  hooks split the connection's time for it; the lines are not synced, hold no path, and past 64 MiB
+  (`MAX_SERVE_RECORDS_BYTES`, [limits](docs/reference/limits.md#internal-values)) move to the one
+  older file ([Serve over ssh](docs/operate/serve-over-ssh.md#records), the M17 design §6).
 
 ### Changed
 

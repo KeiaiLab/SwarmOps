@@ -66,7 +66,9 @@ store, the least recently used removed first.
 
 `git/serve.git`, `git/SERVE`, `git/serve.lock`, `git/serve.state`, `git/serve-hooks/` and
 `git/serve-cache/` in the store are a cache of that export: deleted, the next connection makes
-them again, and a backup may leave them out.
+them again, and a backup may leave them out. `git/serve-records.jsonl`, its older file and
+`git/serve-split/` are [records](#records) of the requests served, which a backup may leave out
+too.
 
 ## The serving account
 
@@ -100,6 +102,16 @@ nothing to do. It helps only when it runs as the account that serves the store a
 run as: it writes `serve.git` and uses that account's memo key. Without the memo key, on a store
 whose `main` head is no imported commit, it exports nothing and says so in `warnings`; the next
 connection then refreshes as before.
+
+**After every ref move** of a store that holds `access.toml` (`land`, `commit --advance`, `ref
+set`, `ref delete`, `op undo`, `sync`, `fetch`, `git import` and `ws land`, from the command line
+or as an MCP tool) `swarmops` starts `swarmops serve --prepare --prepare-wait zero` for that store
+once its response is out (after `git import`, with `--seed-from` the repository it read). That
+run is detached: its own process group, no stdin, stdout or stderr, and nobody waits for it; the
+MCP server reaps the ones it started. When another refresh holds `git/serve.lock` it leaves
+`git/serve.dirty` for that one and exits, so a burst of lands costs one preparation running at a
+time. A preparation that fails changes nothing the operation returned; the next connection
+refreshes as before. It helps only when the agents run as the same account as `serve`.
 
 ## Write `access.toml`
 
@@ -268,6 +280,35 @@ check, to another push or a land conflict, is refused alone: `! [remote rejected
 | `E_FORMAT_REQUIRED: refs/heads/feature/z needs a store of format 2: …` | A branch or tag in a `FORMAT 1` store | Operator: `swarmops upgrade` |
 | `E_GIT_IMPORT_LOSSY: …` | The pushed history holds what the store cannot keep, such as a submodule | Push a history without it |
 
+## Records
+
+`serve` appends one JSON line to the store's `git/serve-records.jsonl` for each request it served
+from the store on: a clone, a fetch, a push, or a refusal after the store was found. Each line is a
+`ServeRecord` (`swarmops schema ServeRecord`):
+
+```console
+$ tail -n 1 /srv/so/acme/git/serve-records.jsonl
+{"at":1794048398609,"identity":"person/ada","service":"clone","prepare_ms":50,"send_ms":6335,"bytes":6293595,"exit":0}
+```
+
+`at` is when the connection started (Unix milliseconds) and `identity` the caller `serve`
+resolved. `service` is `clone` for a fetch that excludes nothing (no have, no excluded commit, no
+shallow client), else `fetch` (a fetch with nothing new too), or `push`. For a fetch,
+`prepare_ms` runs to the pack's first byte (the refresh, the negotiation, the pack produced or
+found in the cache) and `send_ms` from there to the end, so a slow client shows as `send_ms`; for
+a push, `send_ms` runs to the start of the push's check (receiving it and git's own checks) and
+`prepare_ms` from there to the end (judging, importing, landing, exporting). A request that sent
+no pack, or a push that never reached its check, is all `prepare_ms`. `bytes` counts the pack sent
+or received, `exit` is git's (`128 + signal` for a git a signal ended) or the refusal's, and
+`code` names a refusal's error code, a push's first refused ref among them.
+
+The hooks pass their split to the parent `serve` in `git/serve-split/<connection>`, which it
+removes after reading. Lines are not synced: the records are diagnostics, a reader skips a torn
+last line, and nothing reads them for correctness. A record that cannot be written is a `warning:`
+line on stderr; the request stands. Records hold no path and nothing of the serving account's
+environment. Past 64 MiB the file is renamed `serve-records.1.jsonl`, replacing the one older
+file.
+
 ## Limits
 
 - A push sends at most 2 GiB (`receive.maxInputSize`, [Push size](../reference/limits.md#push-size));
@@ -280,6 +321,8 @@ check, to another push or a land conflict, is refused alone: `! [remote rejected
   ([Serve pack cache](../reference/limits.md#internal-values)); a larger pack is sent and not
   kept. A fetch waits at most 10 s for another connection producing the same pack, then
   produces its own.
+- The records of a store take at most 64 MiB before they move to the one older file
+  ([Serve records](../reference/limits.md#internal-values)).
 
 ## Not served
 

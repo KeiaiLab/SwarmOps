@@ -14,6 +14,7 @@ pub mod ops;
 pub mod remote;
 pub mod rev;
 mod schema;
+pub mod serve;
 
 pub use envelope::{API_VERSION, Envelope, LogCutOut, Meta, RecoveredOut};
 pub use error::{ErrorCode, OpError};
@@ -59,3 +60,4 @@ pub use remote::{
 };
 pub use rev::Rev;
 pub use schema::schema_for_all;
+pub use serve::{ServeRecord, ServeService};

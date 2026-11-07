@@ -22,13 +22,13 @@ use swarmops_api::{
     RebaseReq, RebaseResp, RebaseStatus, RefDeleteReq, RefListReq, RefListResp, RefMoveOut, RefOut,
     RefSetReq, RefSetResp, RemoteAddReq, RemoteHead, RemoteInfo, RemoteList, RemoteListReq,
     RemoteRemoveReq, RemoteRemoveResp, RepoInfo, ResolutionInput, ResolutionsInput, ResolveRevReq,
-    ResolvedRev, RevKind, ShowReq, SignatureOut, Signatures, SyncReq, SyncResp, SyncStatus,
-    SyncStatusKind, SyncStatusReq, TreeEntryOut, TreeListing, UndoReq, UndoResp, VerifyFinding,
-    VerifyReport, VerifyReq, WsChange, WsChangeKind, WsCheckInput, WsCommitReq, WsCommitResp,
-    WsCreateReq, WsDeleteReq, WsDeleteResp, WsDiffReq, WsDiscardReq, WsDiscardResp, WsInfo,
-    WsInfoReq, WsLandReq, WsLandResp, WsList, WsListReq, WsMaterializeReq, WsMaterializeResp,
-    WsRebaseReq, WsRebaseResp, WsRebasing, WsResolveReq, WsResolveResp, WsState, WsStatus,
-    WsStatusReq,
+    ResolvedRev, RevKind, ServeRecord, ServeService, ShowReq, SignatureOut, Signatures, SyncReq,
+    SyncResp, SyncStatus, SyncStatusKind, SyncStatusReq, TreeEntryOut, TreeListing, UndoReq,
+    UndoResp, VerifyFinding, VerifyReport, VerifyReq, WsChange, WsChangeKind, WsCheckInput,
+    WsCommitReq, WsCommitResp, WsCreateReq, WsDeleteReq, WsDeleteResp, WsDiffReq, WsDiscardReq,
+    WsDiscardResp, WsInfo, WsInfoReq, WsLandReq, WsLandResp, WsList, WsListReq, WsMaterializeReq,
+    WsMaterializeResp, WsRebaseReq, WsRebaseResp, WsRebasing, WsResolveReq, WsResolveResp, WsState,
+    WsStatus, WsStatusReq,
 };
 
 /// `built`, written as JSON, cut to its schema's required fields and read back, is unchanged.
@@ -271,6 +271,7 @@ fn every_shared_new_fills_the_serde_defaults() {
     reads_back(&RemoteList::new(Vec::new()));
     reads_back(&RepoInfo::new("x", "x", 7, 7, 7));
     reads_back(&ResolvedRev::new("x", RevKind::Ref));
+    reads_back(&ServeRecord::new(7, "x", ServeService::Clone));
     reads_back(&Signatures::new(
         SignatureOut::new("x", "x", 7, 7),
         SignatureOut::new("x", "x", 7, 7),

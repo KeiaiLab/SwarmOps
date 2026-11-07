@@ -19,14 +19,15 @@ macro_rules! schemas {
 /// [`Envelope`](crate::Envelope) is listed as `Envelope<serde_json::Value>`: its `result` is an operation's
 /// response, whose type has its own entry.
 pub fn schema_for_all() -> serde_json::Value {
-    // The store's operations' types, then ancestry's, the maintenance's, the git remotes' and
-    // the workspaces'.
+    // The store's operations' types, then ancestry's, the maintenance's, the git remotes', the
+    // workspaces' and serve's records.
     let mut all = store_schemas();
     let groups = [
         ancestry_schemas(),
         maintenance_schemas(),
         remote_schemas(),
         workspace_schemas(),
+        serve_schemas(),
     ];
     for more in groups {
         if let (serde_json::Value::Object(all), serde_json::Value::Object(more)) = (&mut all, more)
@@ -244,4 +245,9 @@ fn workspace_schemas() -> serde_json::Value {
         WsDeleteReq,
         WsDeleteResp,
     ]
+}
+
+/// The schemas of the records `serve` writes of each request it served (the M17 design §6).
+fn serve_schemas() -> serde_json::Value {
+    schemas![ServeRecord, ServeService]
 }

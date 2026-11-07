@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use swarmops_api::{ErrorCode, OpError};
+use swarmops_api::{ErrorCode, OpError, ServeService};
 use swarmops_git::GitOid;
 use swarmops_git::mirror::STALE_LOCK_AGE;
 use swarmops_git::serve::child::{self, Wants};
@@ -248,6 +248,26 @@ fn wants(stdin: &[u8]) -> Result<Vec<GitOid>, OpError> {
         wants.push(oid);
     }
     Ok(wants)
+}
+
+/// What the request `args` (the line git appended) with `stdin` serves (the M17 design §6): a
+/// clone when it excludes nothing (no `^<oid>` line, no have after `--not`, no shallow file),
+/// else a fetch.
+pub(crate) fn service_of(args: &[OsString], stdin: &[u8]) -> ServeService {
+    // 1. A shallow client: git names its shallow file, empty for a client that is not.
+    let shallow = args
+        .windows(2)
+        .any(|pair| pair[0] == SHALLOW_FILE && !pair[1].is_empty());
+
+    // 2. An excluded commit, or a have after `--not`.
+    let text = String::from_utf8_lossy(stdin);
+    let excluded = text.lines().any(|line| line.starts_with('^'));
+    let mut after_not = text.lines().skip_while(|line| *line != NOT_LINE).skip(1);
+    let haves = after_not.any(|line| !line.is_empty());
+    if shallow || excluded || haves {
+        return ServeService::Fetch;
+    }
+    ServeService::Clone
 }
 
 /// The key of the request `line` with `stdin`, the shallow file's bytes in place of its path
@@ -551,7 +571,8 @@ mod tests {
     use std::fs;
 
     use super::{
-        Found, HEADER_LEN, PackDigest, evict, header, look_up, pack_line, parse_header, wants,
+        Found, HEADER_LEN, PackDigest, evict, header, look_up, pack_line, parse_header, service_of,
+        wants,
     };
 
     /// The line `upload-pack` appends is taken, with or without the shallow file; anything else
@@ -657,5 +678,34 @@ mod tests {
             .collect();
         left.sort();
         assert_eq!(left, ["mid.pack", "new.pack"]);
+    }
+
+    /// A request that excludes nothing is a clone; a have, an excluded commit or a shallow file
+    /// makes it a fetch.
+    #[test]
+    fn a_clone_excludes_nothing() {
+        let args = |shallow: &str| -> Vec<OsString> {
+            ["git", "--shallow-file", shallow, "pack-objects", "--stdout"]
+                .iter()
+                .map(OsString::from)
+                .collect()
+        };
+        let want = "0123456789012345678901234567890123456789";
+        let have = "abcdefabcdefabcdefabcdefabcdefabcdefabcd";
+        let clone = swarmops_api::ServeService::Clone;
+        let fetch = swarmops_api::ServeService::Fetch;
+        for (shallow, stdin, service) in [
+            ("", format!("{want}\n--not\n\n"), clone),
+            ("", format!("{want}\n"), clone),
+            ("", format!("{want}\n--not\n{have}\n\n"), fetch),
+            ("", format!("{want}\n^{have}\n"), fetch),
+            ("shallow", format!("{want}\n--not\n\n"), fetch),
+        ] {
+            assert_eq!(
+                service_of(&args(shallow), stdin.as_bytes()),
+                service,
+                "{stdin:?}"
+            );
+        }
     }
 }

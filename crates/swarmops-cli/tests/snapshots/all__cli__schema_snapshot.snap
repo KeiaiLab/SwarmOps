@@ -8162,6 +8162,395 @@ expression: s.redact(&all)
       ],
       "title": "RevKind"
     },
+    "ServeRecord": {
+      "$defs": {
+        "ErrorCode": {
+          "description": "Why an operation failed: a stable code with a fixed exit code and retry advice.\n\nSerialized as its `E_*` string, which `OpError.code` carries too, so a client can read\ncodes newer than its copy of this enum.",
+          "oneOf": [
+            {
+              "const": "E_EXISTS",
+              "description": "`init` found a store at the target path already.",
+              "type": "string"
+            },
+            {
+              "const": "E_NOT_A_REPO",
+              "description": "No store at the given path, or no store was named.",
+              "type": "string"
+            },
+            {
+              "const": "E_IDENTITY_REQUIRED",
+              "description": "A mutation was asked for without an identity.",
+              "type": "string"
+            },
+            {
+              "const": "E_REV_NOT_FOUND",
+              "description": "A revision names no changeset.",
+              "type": "string"
+            },
+            {
+              "const": "E_AMBIGUOUS_ID",
+              "description": "An id prefix matches more than one changeset; give more digits.",
+              "type": "string"
+            },
+            {
+              "const": "E_PATH_NOT_FOUND",
+              "description": "The path does not exist at that revision.",
+              "type": "string"
+            },
+            {
+              "const": "E_IS_DIR",
+              "description": "A file operation named a directory.",
+              "type": "string"
+            },
+            {
+              "const": "E_TOO_LARGE",
+              "description": "The content is larger than the operation allows. `details` has one of four shapes:\n`{size, limit, scope}` for a limit of SwarmOps (`scope` `put` for one content, `commit`\nfor a commit's contents together, `request` for a request's text, with the flag that\nnamed it as `changes` or `resolve`), where a commit adds the change's `index` and `path`,\nand `file` for a client file; `{scope, size, limit, remote}` for a push past a remote's\nlimit (`scope` `remote_file`, which adds `path`, or `remote_push`); `{store_limit, max,\ngot}` for an object longer than an object holds (`store_limit` `object_bytes`); and from\n`git import`, `{commit, path, size, max}` for a blob and `{object, kind, size, max}` for a\ncommit, a tree or a tag.",
+              "type": "string"
+            },
+            {
+              "const": "E_EMPTY_COMMIT",
+              "description": "The commit changes nothing and `allow_empty` is off.",
+              "type": "string"
+            },
+            {
+              "const": "E_TYPE_CONFLICT",
+              "description": "A change puts an entry below a file, or a file onto a directory.",
+              "type": "string"
+            },
+            {
+              "const": "E_UNKNOWN_PARENT",
+              "description": "The parent changeset is not in the store.",
+              "type": "string"
+            },
+            {
+              "const": "E_CAS_MISMATCH",
+              "description": "The ref no longer holds the expected target (or, with `create`, exists at another one);\n`details.actual` holds what it does, `null` when the ref does not exist.",
+              "type": "string"
+            },
+            {
+              "const": "E_REF_NOT_FOUND",
+              "description": "No ref by that name.",
+              "type": "string"
+            },
+            {
+              "const": "E_REF_NAME_INVALID",
+              "description": "The ref name is one no store format takes, or one the operation does not move:\n`details.reason` is `reserved` for a `remote/` name, which only a fetch writes, and `tag`\nfor a tag named as the target of a land or a commit's `advance`.",
+              "type": "string"
+            },
+            {
+              "const": "E_STORE_CORRUPT",
+              "description": "Stored data failed verification. A metadata file that does not parse also names\n`details.fs_op` and `details.store_file`.",
+              "type": "string"
+            },
+            {
+              "const": "E_INVALID_ARG",
+              "description": "A malformed argument or request, including a command-line usage error.",
+              "type": "string"
+            },
+            {
+              "const": "E_UNSUPPORTED_FS",
+              "description": "The store path is not on a native Linux filesystem (for example WSL's `/mnt/*`).",
+              "type": "string"
+            },
+            {
+              "const": "E_IO",
+              "description": "The filesystem refused an operation: `details.fs_op` names it, and `details.store_file`\nthe file of the store it was on, relative to the store's root. A journal append it\nrefused for want of permission or as a read-only filesystem also says\n`details.committed: false`: nothing was committed, and running the same operation again\nfails the same way until the hint's cause is fixed. `git import` also gives it for a\nframe that committed but failed after its commit point, with `details.committed: true`,\n`details.warnings` and no `fs_op`: the import stopped there, `details.imported` and\n`details.last_commit` say what it recorded, and the hint is to run it again, which\ncontinues after them.",
+              "type": "string"
+            },
+            {
+              "const": "E_IO_TRANSIENT",
+              "description": "A journal append failed, and the store cut what it wrote back off the journal\n(`details.committed` is `false`): nothing was committed, so running the same operation\nagain is safe. A failure after the commit point is no error: the operation succeeds,\nwith a warning (but in `git import`, which stops there: `E_IO`). `details.fs_op` and `details.store_file` name the append that failed.",
+              "type": "string"
+            },
+            {
+              "const": "E_BUSY",
+              "description": "Another writer held the store's metadata lock for the whole wait, or commits landed during\nevery one of a read's attempts to take a snapshot; nothing was committed (a commit's\nflushed objects may remain, for GC), and running the operation again can succeed.",
+              "type": "string"
+            },
+            {
+              "const": "E_INTERNAL",
+              "description": "A bug in SwarmOps, such as a caught panic.",
+              "type": "string"
+            },
+            {
+              "const": "E_CONFLICT",
+              "description": "The change conflicts with the target: `details.report` lists each conflicting file with\nits kind, its hunks and who changed it on the target. Nothing was recorded; resolve the\nconflicts, then land again (the `hint` says how).",
+              "type": "string"
+            },
+            {
+              "const": "E_CAS_RETRY_EXHAUSTED",
+              "description": "The target moved before every one of the land's attempts could publish; nothing was\nrecorded, and running the land again can succeed.",
+              "type": "string"
+            },
+            {
+              "const": "E_NOTHING_TO_LAND",
+              "description": "The land has nothing to add to the target: its head is on the target already, or its\nchange is (`details.reason` says which).",
+              "type": "string"
+            },
+            {
+              "const": "E_NOTHING_TO_UNDO",
+              "description": "The operation moved no ref, so there is nothing to restore.",
+              "type": "string"
+            },
+            {
+              "const": "E_OP_NOT_FOUND",
+              "description": "The store has no operation with that id.",
+              "type": "string"
+            },
+            {
+              "const": "E_AUTH",
+              "description": "The serving entry could not name the caller, or no grant of the store's access file\nnames it.",
+              "type": "string"
+            },
+            {
+              "const": "E_POLICY_DENIED",
+              "description": "The store's access file grants this identity no such action.",
+              "type": "string"
+            },
+            {
+              "const": "E_MAINTENANCE_BUSY",
+              "description": "Another gc, repair or upgrade holds the store's maintenance lease; nothing was done, and\nrunning the operation again once it is done can succeed.",
+              "type": "string"
+            },
+            {
+              "const": "E_FORMAT_REQUIRED",
+              "description": "The ref name is one the store's format does not take but a later one does: `details`\nnames `name`, `needs` (the format that takes it) and `store` (the store's); `swarmops\nupgrade` moves the store to it.",
+              "type": "string"
+            },
+            {
+              "const": "E_TAG_IMMUTABLE",
+              "description": "A tag was asked to move from one target to another: a tag is created and deleted, never\nmoved (`details.name`). Nothing was written.",
+              "type": "string"
+            },
+            {
+              "const": "E_REF_PROTECTED",
+              "description": "`main` was asked to be deleted, or moved off its first-parent history by `ref set` or\n`op undo`: it is never deleted, and moves only forward (`details.name`). A move adds\n`changeset` (the head it would drop) and `target`; an undo adds `op` and `id`. Nothing was\nwritten; to take `main` back, land a change that reverts it. `sync` refuses a remote head\nthat does not hold what it last published on its first-parent history, adding `remote`;\nthe remote's way back is a merge that keeps its old head as the first parent.",
+              "type": "string"
+            },
+            {
+              "const": "E_GIT_NOT_A_REPO",
+              "description": "`git import` found no git repository it can open at `git_path` (`details.git_path`).",
+              "type": "string"
+            },
+            {
+              "const": "E_GIT_REF_NOT_FOUND",
+              "description": "`git import`: the source repository has no `git_ref`, or it names no commit\n(`details.git_ref`; `details.kind` the object it names instead, such as a tree).",
+              "type": "string"
+            },
+            {
+              "const": "E_GIT_IMPORT_DIVERGED",
+              "description": "`git import`: the target ref's head is not the import of `git_ref`'s commit or of an\nancestor of it, because the source was rewritten, `git_ref` is behind the commit the\nhead holds, or a native changeset was committed on the target, so nothing was written; there is no silent merge. `details` names\n`target_ref`, `target_head`, `git_head` and `base`, the git commit the head stands for\n(the one it holds, or for a native head the one it exports to); and `external_id`\n(`commit`, `changeset`) where the import passed over an external id entry whose changeset\nstands for another commit, which `verify --deep` reports.",
+              "type": "string"
+            },
+            {
+              "const": "E_GIT_IMPORT_LOSSY",
+              "description": "`git import`: a commit holds content a changeset cannot keep as git has it; `details`\nnames the `commit`, the `path` (also as `path_base64` when it is not UTF-8) and the\nlossy `class`, which the request's `lossy` can allow. The import stops before that\ncommit, and the target ref does not move.",
+              "type": "string"
+            },
+            {
+              "const": "E_GIT_UNSUPPORTED",
+              "description": "`git import` does not read the source: a SHA-256 repository, reftable refs, a shallow\nclone, a FIFO, a socket or a device where it reads a file of the git directory, a file it\nreads whole there that is longer than 16 MiB, a commit of more than 255 distinct parents\n(a parent listed twice counts once), or an\nentry whose mode is no kind of entry; `details.reason` says which (`object_format`,\n`ref_storage`, `shallow`, `special_file`, `file_too_long`, `parents`, `mode`),\n`details.file` names the file of `special_file` and `file_too_long` by its path in the git\ndirectory (`details.size` and `details.max` give the long one's length and the limit), and\n`details.commit` names the commit of `parents` and `mode`.",
+              "type": "string"
+            },
+            {
+              "const": "E_GIT_READ",
+              "description": "`git import` could not read the source: an object is missing (as in a partial clone),\ndoes not hash to its id or does not parse, or the filesystem refused a read\n(`details.reason`; `details.object` names the object when there is one).",
+              "type": "string"
+            },
+            {
+              "const": "E_GIT_EXPORT_DIVERGED",
+              "description": "`git export`: the branch holds commits that are not the export of the source ref's head\nor of an ancestor of it, so the branch did not move; there is no silent merge, and the\nrequest's `force` moves it anyway. `details.reason` says why: `branch_ahead` (commits\nmade in git on top of the export of the head itself, which `git import` brings in),\n`both_moved` (commits made in git on top of an older export, while the source ref moved\ntoo), `branch_moved` (the branch names a commit that is no export of this history),\n`source_moved_back` (the source ref's head is behind the export the branch holds, after\nan `undo` or a `ref set` backwards), `lossy_history` (the branch holds the original\ncommits of a history imported lossily, which the export would replace) or\n`moved_during_export` (another writer moved the branch while this export wrote; running\nthe export again settles it, and what it wrote stays). The first five are found before\nanything is written. `details` also names `branch`, `git_head` (the commit the branch\nholds), `head_changeset` and, when the branch holds the export of a changeset,\n`exported_changeset`.",
+              "type": "string"
+            },
+            {
+              "const": "E_GIT_WRITE",
+              "description": "`git export` could not write the repository; `details.reason` says what failed: `io` (the\nfilesystem refused a write; `details.path` names the file, relative to the git\ndirectory), `ref_locked` (the branch's lock file, `refs/heads/<branch>.lock`, exists:\nanother git process holds it, or an earlier export died holding it, and git itself says\nto remove it once no git process runs; `details.path` names it) or `ref_name_conflict`\n(an existing ref stands where the branch's name needs a directory, or the other way\nround; `details.branch`). Running the export again after the cause is gone writes what\nis still missing.",
+              "type": "string"
+            },
+            {
+              "const": "E_REMOTE_DIVERGED",
+              "description": "A push or a sync found the remote branch elsewhere than it can move from: `details.reason`\nsays why (`remote_moved`: it moved since the last fetch, and the push's compare-and-swap\nsent nothing; `not_fast_forward`; `behind`: the store ref is behind the remote;\n`diverged`; `lossy_history`; `no_common_base`: the sync found no changeset both hold),\nwith `remote`, `branch` and, where known, `expected` and `main_moved`. Nothing was sent;\nthe hint names the fetch or the sync to run.",
+              "type": "string"
+            },
+            {
+              "const": "E_REMOTE_REJECTED",
+              "description": "The remote or git refused: `details.reason` is `auth`, `not_found`, `declined` (a hook or\na rule of the remote's), `bad_objects` (a fetch received an object git's fsck refuses, a\npack whose checksum does not match, or one its refs reach is missing; no tracking ref\nmoved) or `unclassified` (a failure git's messages do not explain, never retried), with\n`remote` and what git said (`refs`, `remote_messages`, `git_exit`, `stderr_tail`, the\ntoken redacted).",
+              "type": "string"
+            },
+            {
+              "const": "E_REMOTE_UNREACHABLE",
+              "description": "The network or the remote's host did not answer: `details.phase` (`fetch`, `push`,\n`ls_remote`) and `details.cause` (`dns`, `connect`, `timeout`, `tls`, `disconnected`,\n`ssh`). Nothing changed in the store; running the command again can succeed.",
+              "type": "string"
+            },
+            {
+              "const": "E_REMOTE_NOT_FOUND",
+              "description": "The store records no remote of that name (`details.remote`).",
+              "type": "string"
+            },
+            {
+              "const": "E_WS_EXISTS",
+              "description": "`ws create` found a workspace of that name already, made by other arguments\n(`details.name`, `details.path` of the existing one).",
+              "type": "string"
+            },
+            {
+              "const": "E_WS_NOT_FOUND",
+              "description": "No workspace by that name, or at that path (`details.name` when named).",
+              "type": "string"
+            },
+            {
+              "const": "E_WS_LOCKED",
+              "description": "Another mutation held the workspace's lock for the whole wait (`details.holder`, when it\nis known); running the operation again can succeed.",
+              "type": "string"
+            },
+            {
+              "const": "E_WS_DIRTY",
+              "description": "The workspace holds edits the operation would overwrite or lose (`details.paths`, the\nfirst 20); the hint names the command that commits or discards them. Also a directory or\nfile below the workspace's root that became a symlink, a file of more than one link, or\na non-directory after the check, before a write through it (`details.paths` names it):\nnothing is written outside the workspace.",
+              "type": "string"
+            },
+            {
+              "const": "E_PATH_NOT_EMPTY",
+              "description": "`ws create` was given a directory that holds something already (`details.path`).",
+              "type": "string"
+            },
+            {
+              "const": "E_UNRESOLVED_CONFLICTS",
+              "description": "A rebase still has conflicting paths no one resolved (`details.paths`).",
+              "type": "string"
+            },
+            {
+              "const": "E_MARKERS_PRESENT",
+              "description": "`ws resolve` found a conflict marker line still in a file (`details.paths`).",
+              "type": "string"
+            },
+            {
+              "const": "E_WS_UNPORTABLE",
+              "description": "The tree holds paths the workspace's volume cannot hold: `details.reason` says why\n(`case_collision`, `windows_name`, `reserved_name`: a path component named `.swarmws` at\nany depth, in any ASCII case) and `details.paths` names them. Nothing was written, unless a\ntarget gained the path between the check and the store's call: `ws delete --rescue`.",
+              "type": "string"
+            },
+            {
+              "const": "E_WS_OUTSIDE_PREFIXES",
+              "description": "A sparse workspace's `ws commit` or `ws land` met edits outside its prefixes\n(`details.paths`, sorted, the first 20). Nothing changed; the hint names\n`swarmops ws materialize <path>`, which widens the prefixes.",
+              "type": "string"
+            },
+            {
+              "const": "E_WS_STALE",
+              "description": "`ws land` found the workspace's base gone from its target's history\n(`details.target`, `base`, `head`; `base_op`, the operation that moved the target to\nthe base; `moved_op`, the latest that moved it to `head`, or null when not found).\nNothing changed; the hint names `swarmops ws rebase`.",
+              "type": "string"
+            },
+            {
+              "const": "E_CHECK_FAILED",
+              "description": "A workspace's check or bootstrap command failed or ran past its time\n(`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its\noutput, `log`, `changeset`). Nothing was landed.",
+              "type": "string"
+            }
+          ]
+        },
+        "ServeService": {
+          "description": "What a served request asked for.",
+          "oneOf": [
+            {
+              "const": "clone",
+              "description": "A fetch that excluded nothing: no have, no excluded commit, no shallow client.",
+              "type": "string"
+            },
+            {
+              "const": "fetch",
+              "description": "Any other fetch: with haves, an excluded commit or a shallow client, one that sent no\npack, and a fetch's HTTP advertisement.",
+              "type": "string"
+            },
+            {
+              "const": "push",
+              "description": "A push.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One served request: when it started, its caller and service, and how its time split.\n\nFor a fetch, `prepare_ms` runs from the connection's start to the pack's first byte and\n`send_ms` from there to its end. For a push, `send_ms` runs from the start to the push's\ncheck (receiving and git's checks) and `prepare_ms` from there to the end (judging,\nimporting, landing, exporting). A request that sent no pack or reached no check is all\n`prepare_ms`.",
+      "properties": {
+        "at": {
+          "description": "When the connection started, in Unix milliseconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "bytes": {
+          "default": 0,
+          "description": "The pack's bytes: sent by a fetch, received by a push.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "code": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ErrorCode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The code of a SwarmOps refusal; absent when there was none."
+        },
+        "exit": {
+          "default": 0,
+          "description": "The connection's exit code: git's, `128 + signal` for a git a signal ended, or a\nrefusal's.",
+          "format": "int32",
+          "type": "integer"
+        },
+        "identity": {
+          "description": "The caller `serve` resolved.",
+          "type": "string"
+        },
+        "prepare_ms": {
+          "default": 0,
+          "description": "The milliseconds spent preparing.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "send_ms": {
+          "default": 0,
+          "description": "The milliseconds spent sending a fetch's pack, or receiving a push's.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "service": {
+          "$ref": "#/$defs/ServeService",
+          "description": "What it asked for."
+        }
+      },
+      "required": [
+        "at",
+        "identity",
+        "service"
+      ],
+      "title": "ServeRecord",
+      "type": "object"
+    },
+    "ServeService": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "What a served request asked for.",
+      "oneOf": [
+        {
+          "const": "clone",
+          "description": "A fetch that excluded nothing: no have, no excluded commit, no shallow client.",
+          "type": "string"
+        },
+        {
+          "const": "fetch",
+          "description": "Any other fetch: with haves, an excluded commit or a shallow client, one that sent no\npack, and a fetch's HTTP advertisement.",
+          "type": "string"
+        },
+        {
+          "const": "push",
+          "description": "A push.",
+          "type": "string"
+        }
+      ],
+      "title": "ServeService"
+    },
     "ShowReq": {
       "$defs": {
         "Rev": {

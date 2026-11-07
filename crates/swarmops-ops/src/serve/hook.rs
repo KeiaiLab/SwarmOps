@@ -39,6 +39,7 @@ use swarmops_store::RefKind;
 
 use super::access::Access;
 use super::guard::Redactor;
+use super::records::{self, Split};
 use super::refresh::serve_error;
 use super::{ServeInvocation, Served, land, packcache, push, refused};
 use crate::LocalOps;
@@ -55,6 +56,10 @@ const OBJECTS: &str = "objects";
 
 /// How git 2.43.0 names a push's quarantine in `serve.git/objects`.
 const QUARANTINE_PREFIX: &str = "tmp_objdir-incoming-";
+
+/// A quarantine's pack directory, and what its packs' names end in.
+const PACK_DIR: &str = "pack";
+const PACK_EXT: &str = "pack";
 
 /// The exit of a `pre-receive` that refuses the push: git then drops its quarantine.
 const PRE_RECEIVE_REFUSED: i32 = 1;
@@ -163,7 +168,8 @@ impl<'a> HookCtx<'a> {
 /// git's side band, which the client prints after `remote:`) and exit 1, so that git drops the
 /// push's quarantine and no object of it enters `serve.git`.
 pub fn pre_receive(invocation: &ServeInvocation, who: &Identity) -> Result<Served, OpError> {
-    // 1. Run by git, inside a push serve started.
+    // 1. Run by git, inside a push serve started: the start of the push's check.
+    let start_us = records::now_us();
     let store = served_store(invocation)?;
     let redactor = Redactor::new(&[Path::new(&store)]);
 
@@ -179,8 +185,15 @@ pub fn pre_receive(invocation: &ServeInvocation, who: &Identity) -> Result<Serve
         .as_deref()
         .map_or(Objects::Served, Objects::Quarantine);
 
-    // 3. Each command judged with those objects.
+    // 3. Each command judged with those objects; the split of the connection's time at the
+    //    check's start, with what was received and the first refusal's code, for its record.
     let verdicts = judge_all(invocation, &store, who, &commands, objects);
+    let received = quarantine.as_deref().map_or(0, received_bytes);
+    let code = verdicts
+        .iter()
+        .find_map(|(_, verdict)| refusal_code(verdict));
+    let split = Split::pushed(start_us, received, code);
+    records::write_split(Path::new(&store), &split);
     if verdicts.iter().all(|(_, verdict)| verdict.is_ok()) {
         return Ok(Served::new(0));
     }
@@ -242,10 +255,90 @@ pub fn pack_objects(
         .lock()
         .read_to_end(&mut stdin)
         .map_err(|e| protocol(&e))?;
-    let mut out = BufWriter::new(io::stdout().lock());
-    packcache::send(&repo, args, &stdin, &mut out).map_err(|e| redactor.redact_error(e))?;
-    out.flush().map_err(|e| protocol(&e))?;
+    let mut meter = Meter::new(io::stdout().lock());
+    let mut out = BufWriter::new(&mut meter);
+    let sent = packcache::send(&repo, args, &stdin, &mut out).map_err(|e| redactor.redact_error(e));
+    let flushed = out.flush().map_err(|e| protocol(&e));
+    drop(out);
+
+    // 3. The split of the connection's time at the pack's first byte, for its record.
+    if let Some(first_us) = meter.first_us {
+        let service = packcache::service_of(args, &stdin);
+        records::write_split(
+            Path::new(&store),
+            &Split::sent(first_us, meter.bytes, service),
+        );
+    }
+    sent?;
+    flushed?;
     Ok(Served::new(0))
+}
+
+/// A writer that notes when its first byte went out and how many did.
+struct Meter<W> {
+    /// Where the bytes go.
+    inner: W,
+    /// The unix µs of the first byte written, once one was.
+    first_us: Option<u64>,
+    /// The bytes written.
+    bytes: u64,
+}
+
+impl<W: Write> Meter<W> {
+    /// `inner`, nothing written yet.
+    fn new(inner: W) -> Meter<W> {
+        Meter {
+            inner,
+            first_us: None,
+            bytes: 0,
+        }
+    }
+}
+
+impl<W: Write> Write for Meter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.first_us.is_none() && !buf.is_empty() {
+            self.first_us = Some(records::now_us());
+        }
+        let written = self.inner.write(buf)?;
+        self.bytes += written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// The bytes a push left in its `quarantine`: its packs, and the loose objects git unpacked a
+/// small push into.
+fn received_bytes(quarantine: &Path) -> u64 {
+    // 1. The packs.
+    let size = |path: PathBuf| std::fs::metadata(path).map_or(0, |meta| meta.len());
+    let files = |dir: PathBuf| std::fs::read_dir(dir).into_iter().flatten().flatten();
+    let packs = files(quarantine.join(PACK_DIR))
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == PACK_EXT))
+        .map(size)
+        .sum::<u64>();
+
+    // 2. The loose objects, in their two-hex-digit directories.
+    let fanout = |name: &str| name.len() == 2 && name.bytes().all(|b| b.is_ascii_hexdigit());
+    let loose = files(quarantine.to_path_buf())
+        .filter(|entry| entry.file_name().to_str().is_some_and(fanout))
+        .flat_map(|entry| files(entry.path()))
+        .map(|entry| size(entry.path()))
+        .sum::<u64>();
+    packs + loose
+}
+
+/// The code of `verdict` when it refused: the `<CODE>` its report begins with.
+fn refusal_code(verdict: &Result<Judged, Report>) -> Option<ErrorCode> {
+    let Err(Report::Ng { reason, .. }) = verdict else {
+        return None;
+    };
+    let (code, _) = reason.split_once(':')?;
+    records::code_of(code)
 }
 
 /// The refusal of a hook run that did not come from git, `why`.

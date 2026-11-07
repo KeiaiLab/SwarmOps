@@ -675,7 +675,7 @@ static DEFAULTS: [DefaultRow; 13] = [
 
 /// Values that tune the implementation, or bound the store's layout where no request reaches:
 /// no option sets them, and they are not part of the contract.
-static INTERNAL: [Limit; 21] = [
+static INTERNAL: [Limit; 22] = [
     internal_value(
         "Writer lock wait",
         declared(
@@ -929,6 +929,19 @@ static INTERNAL: [Limit; 21] = [
         "The packs `serve` keeps together in a store's `git/serve-cache/`, one for each \
              request of a fetch it answered: past it the least recently used are removed, \
              and a larger pack is sent and not kept.",
+    ),
+    internal_value(
+        "Serve records",
+        code(
+            "swarmops_ops::serve::MAX_SERVE_RECORDS_BYTES",
+            "crates/swarmops-ops/src/serve/records.rs",
+            "pub const MAX_SERVE_RECORDS_BYTES: u64 = 64 << 20;",
+            || swarmops_ops::serve::MAX_SERVE_RECORDS_BYTES,
+        ),
+        Unit::Bytes,
+        "The records `serve` appends to a store's `git/serve-records.jsonl`, a line per \
+             request it served: past it the file becomes `serve-records.1.jsonl`, replacing \
+             the one older file.",
     ),
 ];
 

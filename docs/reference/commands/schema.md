@@ -174,6 +174,8 @@ swarmops schema NoSuchType
         "ResolvedRev",
         "Rev",
         "RevKind",
+        "ServeRecord",
+        "ServeService",
         "ShowReq",
         "Side",
         "SignatureOut",

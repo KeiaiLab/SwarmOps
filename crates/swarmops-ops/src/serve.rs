@@ -28,6 +28,7 @@ mod packcache;
 pub mod prepare;
 pub mod push;
 pub mod receive;
+mod records;
 pub mod refresh;
 pub mod upload;
 
@@ -41,6 +42,7 @@ use swarmops_git::MemoKey;
 use swarmops_git::serve::child::Service;
 
 pub use packcache::MAX_PACK_CACHE_BYTES;
+pub use records::MAX_SERVE_RECORDS_BYTES;
 
 /// The variable the parent `serve` names its own binary in, for the hook file to run.
 pub const SWARMOPS_SERVE_EXE: &str = "SWARMOPS_SERVE_EXE";

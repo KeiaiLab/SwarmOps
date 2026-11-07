@@ -2,7 +2,7 @@
 
 # Schema types
 
-The 164 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
+The 166 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
 
 ## Index
 
@@ -123,6 +123,8 @@ The 164 request, response and value types of the API, as `swarmops schema` print
 | [`ResolvedRev`](#resolvedrev) | object | `resolve_rev` (CLI `resolve`): the changeset a revision names, and what kind of revision it is. |
 | [`Rev`](#rev) | string | A revision as the caller wrote it, for the store to resolve: a ref name (`main`, `release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, optionally followed by `~N` for the N-th first-parent ancestor. |
 | [`RevKind`](#revkind) | enumeration | What kind of revision `resolve_rev` resolved. |
+| [`ServeRecord`](#serverecord) | object | One served request: when it started, its caller and service, and how its time split. |
+| [`ServeService`](#serveservice) | enumeration | What a served request asked for. |
 | [`ShowReq`](#showreq) | object | `show`: one changeset in full. |
 | [`Side`](#side) | enumeration | One side of a land's merge. |
 | [`SignatureOut`](#signatureout) | object | A git signature: who, and when. |
@@ -1747,6 +1749,37 @@ Kind: enumeration. `swarmops schema RevKind` prints its JSON Schema.
 | --- | --- |
 | `"ref"` | Exactly a ref's name (`main`, `release/<name>`): `id` is what the ref names now, and moves when the ref does. |
 | `"changeset"` | Any other revision: a full changeset id, a unique prefix of one, or a revision followed by `~N` suffixes, a ref's name among them. |
+
+## ServeRecord
+
+One served request: when it started, its caller and service, and how its time split.
+
+For a fetch, `prepare_ms` runs from the connection's start to the pack's first byte and `send_ms` from there to its end. For a push, `send_ms` runs from the start to the push's check (receiving and git's checks) and `prepare_ms` from there to the end (judging, importing, landing, exporting). A request that sent no pack or reached no check is all `prepare_ms`.
+
+Kind: object. `swarmops schema ServeRecord` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `at` | `integer` (uint64) | yes | When the connection started, in Unix milliseconds. |
+| `bytes` | `integer` (uint64) | no | The pack's bytes: sent by a fetch, received by a push. Default: `0`. |
+| `code` | [`ErrorCode`](#errorcode) or `null` | no | The code of a SwarmOps refusal; absent when there was none. |
+| `exit` | `integer` (int32) | no | The connection's exit code: git's, `128 + signal` for a git a signal ended, or a refusal's. Default: `0`. |
+| `identity` | `string` | yes | The caller `serve` resolved. |
+| `prepare_ms` | `integer` (uint64) | no | The milliseconds spent preparing. Default: `0`. |
+| `send_ms` | `integer` (uint64) | no | The milliseconds spent sending a fetch's pack, or receiving a push's. Default: `0`. |
+| `service` | [`ServeService`](#serveservice) | yes | What it asked for. |
+
+## ServeService
+
+What a served request asked for.
+
+Kind: enumeration. `swarmops schema ServeService` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"clone"` | A fetch that excluded nothing: no have, no excluded commit, no shallow client. |
+| `"fetch"` | Any other fetch: with haves, an excluded commit or a shallow client, one that sent no pack, and a fetch's HTTP advertisement. |
+| `"push"` | A push. |
 
 ## ShowReq
 

@@ -6,6 +6,7 @@
 //! 2 store under --root ─▶ 3 memo key ─▶ 4 access.toml: read ─▶ 5 serve.git refreshed
 //! 6 git http-backend: GIT_PROJECT_ROOT=<store>/git, PATH_INFO=/serve.git/git-upload-pack
 //!      ── receive-pack ──▶ proc-receive hook (SWARMOPS_SERVE_EXE · _STORE · _IDENTITY)
+//! 7 its record, from step 2 on: git/serve-records.jsonl
 //! ```
 //!
 //! The web server terminates TLS and authenticates; `serve` names the caller (`--as`, or
@@ -22,6 +23,8 @@ use std::io::Write as _;
 use std::os::unix::process::ExitStatusExt as _;
 use std::process::ExitStatus;
 
+use camino::Utf8Path;
+
 use swarmops_api::{ErrorCode, Identity, OpError};
 use swarmops_git::serve::child::{self, ChildEnv, Service};
 use swarmops_git::serve::repo::ServeRepo;
@@ -31,6 +34,7 @@ use super::access::{Access, Action};
 use super::entry::store_under;
 use super::guard::Redactor;
 use super::receive::MAX_PUSH_BYTES;
+use super::records::{Connection, SWARMOPS_SERVE_CONNECTION, Side};
 use super::refresh::{Freshness, Refreshed, Scope, freshness, refresh, serve_error};
 use super::{
     Entry, SWARMOPS_SERVE_EXE, SWARMOPS_SERVE_IDENTITY, SWARMOPS_SERVE_STORE, ServeInvocation,
@@ -53,6 +57,14 @@ const GIT_HTTP_EXPORT_ALL: &str = "GIT_HTTP_EXPORT_ALL";
 
 /// The requests of git's smart HTTP, after the store's segment.
 const SMART_PATHS: [&str; 3] = ["info/refs", "git-upload-pack", "git-receive-pack"];
+
+/// The CGI metavariable of the request's query.
+const QUERY_STRING: &str = "QUERY_STRING";
+
+/// The smart HTTP requests of a push: its advertisement's query, and the push itself.
+const RECEIVE_ADVERTISEMENT: &str = "service=git-receive-pack";
+const RECEIVE_PACK: &str = "git-receive-pack";
+const INFO_REFS: &str = "info/refs";
 
 /// The suffix a repository path usually ends in.
 const GIT_SUFFIX: &str = ".git";
@@ -88,19 +100,62 @@ pub fn run(invocation: &ServeInvocation, who: &Identity) -> Result<Served, OpErr
         ));
     };
 
-    // 1-5. The request, the store, the read, serve.git refreshed.
+    // 1-2. The request and the store; from here on, the request is recorded.
+    let connection = Connection::start();
     let path_info = vars.get(PATH_INFO).map_or("", String::as_str);
     let request = parse_path(path_info)?;
-    let (repo, store) =
-        prepare(invocation, who, &request, &redactor).map_err(|e| redactor.redact_error(e))?;
+    let store = store_under(&invocation.root, &request.store);
+    let store = store.map_err(|e| redactor.redact_error(e))?;
+    let served = serve(
+        invocation,
+        who,
+        vars,
+        &request,
+        &store,
+        &connection,
+        &redactor,
+    );
+    connection.finish(&store, who, side_of(&request, vars), &served, &redactor);
+    served
+}
+
+/// Serves `request` of the store at `store`, with the metavariables `vars`, to `who` on
+/// `connection`.
+fn serve(
+    invocation: &ServeInvocation,
+    who: &Identity,
+    vars: &BTreeMap<String, String>,
+    request: &CgiRequest,
+    store: &Utf8Path,
+    connection: &Connection,
+    redactor: &Redactor,
+) -> Result<Served, OpError> {
+    // 3-5. The memo key, the read, serve.git refreshed.
+    let repo = prepare(invocation, who, request, store, redactor);
+    let repo = repo.map_err(|e| redactor.redact_error(e))?;
 
     // 6. git http-backend on stdin and stdout: the request's variables but its paths, then
-    //    serve.git as the one repository, and for a push the hook's three variables.
-    let git = GitCli::find().map_err(|e| git_error(e, &redactor))?;
-    let env = child_env(invocation, who, vars, &repo, &request, store);
+    //    serve.git as the one repository, and for a push the hook's variables.
+    let git = GitCli::find().map_err(|e| git_error(e, redactor))?;
+    let mut env = child_env(invocation, who, vars, &repo, request, store);
+    env.vars.insert(
+        SWARMOPS_SERVE_CONNECTION.to_owned(),
+        OsString::from(connection.id()),
+    );
     let status = child::run(&git, Service::HttpBackend, &repo, &env)
         .map_err(|e| redactor.redact_error(serve_error(e)))?;
     Ok(Served::new(exit_code(status)))
+}
+
+/// The side `request` serves: a push's `git-receive-pack`, and its advertisement
+/// (`info/refs?service=git-receive-pack`); else a fetch's.
+fn side_of(request: &CgiRequest, vars: &BTreeMap<String, String>) -> Side {
+    let query = vars.get(QUERY_STRING).map_or("", String::as_str);
+    let advertised = query.split('&').any(|pair| pair == RECEIVE_ADVERTISEMENT);
+    if request.rest == RECEIVE_PACK || (request.rest == INFO_REFS && advertised) {
+        return Side::Push;
+    }
+    Side::Fetch
 }
 
 /// The request `path_info` makes: `/<name>[.git]/<smart path>`. A first segment that is no
@@ -143,19 +198,19 @@ fn not_smart_http() -> OpError {
     .with_hint(PATH_HINT)
 }
 
-/// Steps 2 to 5: the store `request` names opened with its memo key, `who`'s read checked, and
-/// its `serve.git` refreshed (its hook made or replaced on the way); what the refresh warns of
-/// goes to stderr, the web server's log, masked by `redactor`. The serving repository and the
-/// store's path; the store is closed again before git starts.
+/// Steps 2 to 5: the store at `store`, which `request` names, opened with its memo key, `who`'s
+/// read checked, and its `serve.git` refreshed (its hook made or replaced on the way); what the
+/// refresh warns of goes to stderr, the web server's log, masked by `redactor`. The serving
+/// repository; the store is closed again before git starts.
 fn prepare(
     invocation: &ServeInvocation,
     who: &Identity,
     request: &CgiRequest,
+    store: &Utf8Path,
     redactor: &Redactor,
-) -> Result<(ServeRepo, String), OpError> {
-    // 2. The store, under the root.
-    let store = store_under(&invocation.root, &request.store)?;
-    let ops = LocalOps::open(&store)?;
+) -> Result<ServeRepo, OpError> {
+    // 2. The store, which the request named under the root.
+    let ops = LocalOps::open(store)?;
 
     // 3. Its memo key, kept by the serving account outside the store.
     let repo_id = ops.repo.info().map_err(error::op)?.repo_id;
@@ -169,7 +224,7 @@ fn prepare(
 
     // 5. Its serving repository, refreshed from the committed snapshot,
     //    unless nothing moved since its last export (no lock taken then).
-    let repo = ServeRepo::open(&store).map_err(serve_error)?;
+    let repo = ServeRepo::open(store).map_err(serve_error)?;
     let refreshed = match freshness(&ops, &repo)? {
         Freshness::Current => Refreshed::default(),
         Freshness::Stale => refresh(&ops, &repo, &Scope::All)?,
@@ -178,7 +233,7 @@ fn prepare(
     for warning in refreshed.warnings {
         let _ = writeln!(stderr, "warning: {}", redactor.redact(&warning));
     }
-    Ok((repo, store.into_string()))
+    Ok(repo)
 }
 
 /// What `http-backend` gets: the request's metavariables but its paths, `serve.git` as the
@@ -189,7 +244,7 @@ fn child_env(
     vars: &BTreeMap<String, String>,
     repo: &ServeRepo,
     request: &CgiRequest,
-    store: String,
+    store: &Utf8Path,
 ) -> ChildEnv {
     // 1. The request: its method, query, body's type and length, protocol, user.
     let mut env = ChildEnv::new();
@@ -210,7 +265,7 @@ fn child_env(
             OsString::from(format!("/{name}/{}", request.rest)),
         ),
         (GIT_HTTP_EXPORT_ALL, OsString::from("1")),
-        (SWARMOPS_SERVE_STORE, OsString::from(store)),
+        (SWARMOPS_SERVE_STORE, OsString::from(store.as_str())),
         (SWARMOPS_SERVE_IDENTITY, OsString::from(who.agent())),
     ];
     for (key, value) in vars {
