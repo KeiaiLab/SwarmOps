@@ -55,6 +55,15 @@ advertises `serve.git` as it is, taking neither the store's writer lock nor `git
 fetch with nothing new does not wait behind the agents' lands. Anything else (a ref moved, the file
 missing or damaged, a `serve.git` ref moved by hand) refreshes first, as before.
 
+Refreshes coalesce. `git/serve.state` (version 2) also says `covered`: how far into the store's
+journal the last full refresh read. A connection that started before that point finds `serve.git`
+current even when the store has moved since, because that refresh already holds every land
+acknowledged before the connection started; a refresh that finds such a newer export once it has
+the lock writes nothing. A refresh lets `git/serve.lock` go while it waits for the store's writer
+lock, and a preparation lets it go between its rounds, so connections and pushes do not wait
+behind the agents' lands. A state of version 1 (an older `swarmops`) is read as not current: the
+next connection refreshes and writes version 2.
+
 git hands each fetch's pack to `serve --hook pack-objects` (its `uploadpack.packObjectsHook`,
 which `serve` sets in git's environment). It sends only commits a served ref is or reaches: a
 want of anything else, such as the commit of a refused push that git kept in `serve.git`, is

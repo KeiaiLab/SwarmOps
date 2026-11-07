@@ -619,7 +619,7 @@ const SERVE_LOCK_WAIT: Duration = Duration::from_secs(10);
 
 /// The served refs' table `serve` keeps beside `serve.git`, and its first line.
 const SERVE_STATE: &str = "git/serve.state";
-const STATE_HEADER: &str = "swarmops-serve-state 1\n";
+const STATE_HEADER: &str = "swarmops-serve-state 2\n";
 
 /// The access file of a test that pushes: [`AGENT`] reads and pushes `main`.
 const PUSHER: &str = r#"version = 1
@@ -708,7 +708,7 @@ fn a_missing_or_damaged_state_file_refreshes_as_before() {
         ("truncated", Some(good[..good.len() - 7].to_owned())),
         (
             "another first line",
-            Some(good.replacen(STATE_HEADER, "swarmops-serve-state 2\n", 1)),
+            Some(good.replacen(STATE_HEADER, "swarmops-serve-state 1\n", 1)),
         ),
     ];
     for (what, damaged) in damages {

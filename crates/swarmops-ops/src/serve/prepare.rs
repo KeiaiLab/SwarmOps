@@ -6,9 +6,13 @@
 //! 1 serve.lock: Zero ─ busy ─▶ git/serve.dirty marked, done (the holder runs again)
 //!               Bounded ─ SERVE_LOCK_WAIT, then E_BUSY
 //! 2 Seed::GitDir: the imported tip's objects fetched from it, kept as a pack, no ref written
-//! 3 the refresh (freshness first)  ─▶ 4 objects written? commit-graph layer (gc --auto in 3)
+//! 3 the refresh (gc --auto in it), serve.lock let go around its committed snapshot
 //!   after a seed's first round: one full repack with a bitmap, and a commit-graph layer
-//! 5 git/serve.dirty there? removed, 3-4 again; SERVE_REFRESH_ATTEMPTS rounds in all
+//!   serve.lock let go at the round's end
+//! 4 git/serve.dirty there? serve.lock again, zero wait (busy ─▶ marked, done), removed, 3
+//!   again; SERVE_REFRESH_ATTEMPTS rounds in all
+//! 5 objects written? one commit-graph layer, under serve.lock taken at once (busy: skipped,
+//!   the next run's layer holds the commits)
 //! ```
 //!
 //! The seed's export finds every lossless commit in the fetched pack and writes none. The full
@@ -17,10 +21,11 @@
 //!
 //! A mark left after the last round, or made after the holder's last look, costs the next
 //! connection one slow path, never a wrong advertisement: the connection's own freshness check
-//! decides what it advertises.
+//! decides what it advertises. Between rounds, connections and pushes take `serve.lock`.
 
 use std::fs::OpenOptions;
 use std::io;
+use std::time::Duration;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_api::OpError;
@@ -90,6 +95,32 @@ impl Prepared {
     }
 }
 
+/// What [`claim`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Claim {
+    /// `serve.lock` was free, and is again: a preparation may start.
+    Free,
+    /// `serve.lock` was held: `git/serve.dirty` is marked for its holder.
+    Marked,
+}
+
+/// Tries `serve.lock` of `repo` once, without waiting: held, the mark is left for its holder
+/// ([`Claim::Marked`]); free, it is let go again ([`Claim::Free`]).
+pub fn claim(repo: &ServeRepo) -> Result<Claim, OpError> {
+    match repo.lock(Duration::ZERO) {
+        Ok(lock) => {
+            drop(lock);
+            Ok(Claim::Free)
+        }
+        Err(ServeError::Busy) => {
+            mark_dirty(repo).map_err(|e| io_error(DIRTY_FILE, &e))?;
+            Ok(Claim::Marked)
+        }
+        Err(e) => Err(serve_error(e)),
+    }
+}
+
 /// The serving repository of the store at `root`, made when it is missing
 /// ([`ServeRepo::open`]), its failures as the operations spec's errors.
 pub fn serve_repo(root: &Utf8Path) -> Result<ServeRepo, OpError> {
@@ -126,8 +157,8 @@ pub fn prepare(
     }
 
     // 1. serve.lock, or the mark for its holder.
-    let lock = match lock(repo, wait) {
-        Ok(lock) => lock,
+    let held = match lock(repo, wait) {
+        Ok(held) => held,
         Err(ServeError::Busy) if wait == LockWait::Zero => {
             mark_dirty(repo).map_err(|e| io_error(DIRTY_FILE, &e))?;
             return Ok(prepared);
@@ -147,38 +178,52 @@ pub fn prepare(
     }
     drop(read);
 
-    // 3-5. Rounds while a mark says another run found the lock held; after a seed's first,
-    //      the full repack.
+    // 3-4. Rounds while a mark says another run found the lock held, each with the lock of its
+    //      own: round 1's, then one taken at once; after a seed's first, the full repack.
+    let mut first = Some(held);
     loop {
+        let held = match first.take() {
+            Some(held) => held,
+            None => match lock(repo, LockWait::Zero) {
+                Ok(held) => held,
+                Err(ServeError::Busy) => {
+                    mark_dirty(repo).map_err(|e| io_error(DIRTY_FILE, &e))?;
+                    break;
+                }
+                Err(e) => return Err(serve_error(e)),
+            },
+        };
         prepared.rounds += 1;
         let _ = clear_dirty(repo);
-        let mut done = round(ops, repo, &lock)?;
+        let (held, mut done) = refresh_locked(ops, repo, held, &Scope::All)?;
         if prepared.rounds == 1 && prepared.seeded > 0 {
             done.warnings.extend(repack(repo));
         }
+        drop(held);
         prepared.refreshed.moved += done.moved;
         prepared.refreshed.removed += done.removed;
         prepared.refreshed.objects += done.objects;
         prepared.refreshed.warnings.extend(done.warnings);
         if prepared.rounds >= SERVE_REFRESH_ATTEMPTS || !dirty(repo) {
-            return Ok(prepared);
+            break;
         }
     }
+
+    // 5. One commit-graph layer for every round's objects.
+    if prepared.refreshed.objects > 0 {
+        prepared.refreshed.warnings.extend(graph(repo));
+    }
+    Ok(prepared)
 }
 
-/// Steps 3 and 4: the refresh, then a commit-graph layer once it wrote objects (a failure is a
-/// warning).
-fn round(ops: &LocalOps, repo: &ServeRepo, lock: &ServeLock) -> Result<Refreshed, OpError> {
-    let mut done = refresh_locked(ops, repo, lock, &Scope::All)?;
-    if done.objects == 0 {
-        return Ok(done);
-    }
+/// Step 5: a commit-graph layer under `serve.lock` taken at once; held, none (the next run's
+/// layer holds the commits). What failed, as a warning.
+fn graph(repo: &ServeRepo) -> Option<String> {
+    let held = lock(repo, LockWait::Zero).ok()?;
     let graph = GitCli::find().and_then(|git| git.write_commit_graph(repo.git_dir().as_std_path()));
-    if let Err(e) = graph {
-        done.warnings
-            .push(format!("commit_graph_failed: {}", git_error(e).message));
-    }
-    Ok(done)
+    drop(held);
+    let e = graph.err()?;
+    Some(format!("commit_graph_failed: {}", git_error(e).message))
 }
 
 /// One full repack with a bitmap, then a commit-graph layer, once the seed's export moved the
@@ -198,7 +243,7 @@ fn repack(repo: &ServeRepo) -> Vec<String> {
 /// `serve.lock`, waiting as `wait` says.
 fn lock(repo: &ServeRepo, wait: LockWait) -> Result<ServeLock, ServeError> {
     match wait {
-        LockWait::Zero => repo.lock(std::time::Duration::ZERO),
+        LockWait::Zero => repo.lock(Duration::ZERO),
         LockWait::Bounded => repo.lock(SERVE_LOCK_WAIT),
     }
 }
@@ -272,4 +317,34 @@ fn io_error(what: &str, e: &io::Error) -> OpError {
 /// The error of a git that failed on `serve.git`.
 fn git_error(e: TransportError) -> OpError {
     error::transport_error(e, SERVE_GIT, error::Phase::Fetch)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use camino::Utf8PathBuf;
+
+    use super::{Claim, claim, dirty, serve_repo};
+    use crate::LocalOps;
+
+    /// `claim` finds a free `serve.lock` free and leaves it so, with no mark; a held one it
+    /// marks for its holder.
+    #[test]
+    fn claim_marks_a_held_lock() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).expect("UTF-8");
+        LocalOps::init_as(&root, "acme", Some(2)).expect("init");
+        let repo = serve_repo(&root).expect("open serve.git");
+
+        // 1. Free: no mark, and the lock free again.
+        assert_eq!(claim(&repo).expect("claim"), Claim::Free);
+        assert!(!dirty(&repo));
+        let held = repo.lock(Duration::ZERO).expect("serve.lock free again");
+
+        // 2. Held: the mark.
+        assert_eq!(claim(&repo).expect("claim"), Claim::Marked);
+        assert!(dirty(&repo));
+        drop(held);
+    }
 }

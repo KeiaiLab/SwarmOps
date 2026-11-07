@@ -72,6 +72,106 @@ const WRITABLE: u32 = 0o755;
 /// The mark a preparation that found `serve.lock` held leaves for its holder.
 const SERVE_DIRTY: &str = "git/serve.dirty";
 
+/// How long a connection started during a preparation's first round waits for `serve.lock`:
+/// past that round's end on a loaded host, short of the writer lock wait a round that kept the
+/// lock would hold it for.
+const ROUND_WAIT: Duration = Duration::from_secs(8);
+
+/// What git runs to add a commit-graph layer.
+const GRAPH_WRITE: &str = "commit-graph write";
+
+/// How many times the stand-in looks for the test's go, 50 ms apart, before it goes anyway.
+const GO_POLLS: u32 = 1200;
+
+/// A git that logs each command line, and on the first `gc --auto` lands on `main`, leaves the
+/// mark, and waits for the test's go: a land acknowledged during a preparation's first round,
+/// seen by its holder.
+struct Stand {
+    /// The stand-in's directory: the program, its log and its marks.
+    dir: TempDir,
+}
+
+impl Stand {
+    /// The stand-in for `site`, running the client side's git.
+    fn new(site: &Site) -> Stand {
+        let dir = TempDir::new().unwrap();
+        let path = |name: &str| dir.path().join(name).to_str().unwrap().to_owned();
+        let root = site.served.store(STORE);
+        let (access, dirty) = (root.join("access.toml"), root.join(SERVE_DIRTY));
+        let (access, dirty) = (access.to_str().unwrap(), dirty.to_str().unwrap());
+        let changes = site.changes("during.txt");
+
+        // The land goes without access.toml: no preparation of its own starts.
+        let script = format!(
+            "#!/bin/sh\n\
+             printf '%s\\n' \"$*\" >> '{log}'\n\
+             case \"$*\" in *'gc --auto'*)\n\
+               if [ ! -e '{acted}' ]; then\n\
+                 : > '{acted}'\n\
+                 mv '{access}' '{access}.off'\n\
+                 '{bin}' --repo '{store}' --as {WRITER} land main --base main --target main \
+                   -m during --changes '{changes}' >/dev/null 2>&1\n\
+                 mv '{access}.off' '{access}'\n\
+                 : > '{dirty}'\n\
+                 : > '{landed}'\n\
+                 n=0\n\
+                 while [ ! -e '{go}' ] && [ $n -lt {GO_POLLS} ]; do sleep 0.05; n=$((n+1)); done\n\
+               fi;;\n\
+             esac\n\
+             exec '{git}' \"$@\"\n",
+            log = path("log"),
+            acted = path("acted"),
+            landed = path("landed"),
+            go = path("go"),
+            bin = support::BIN,
+            store = site.store(),
+            git = real_git(site).display(),
+        );
+        let program = path("git");
+        let written = std::process::Command::new("sh")
+            .args(["-c", r#"printf '%s' "$2" > "$1" && chmod 755 "$1""#, "sh"])
+            .args([&program, &script])
+            .status()
+            .unwrap();
+        assert!(written.success(), "write the stand-in");
+        Stand { dir }
+    }
+
+    /// The program, for `SWARMOPS_GIT`.
+    fn program(&self) -> String {
+        self.dir.path().join("git").to_str().unwrap().to_owned()
+    }
+
+    /// Whether the stand-in landed and left the mark.
+    fn acted(&self) -> bool {
+        self.dir.path().join("landed").exists()
+    }
+
+    /// Lets the first `gc --auto` go on.
+    fn go(&self) {
+        fs::write(self.dir.path().join("go"), "").unwrap();
+    }
+
+    /// How many command lines it ran that hold `what`.
+    fn count(&self, what: &str) -> usize {
+        let log = fs::read_to_string(self.dir.path().join("log")).unwrap_or_default();
+        log.lines().filter(|line| line.contains(what)).count()
+    }
+}
+
+/// The client side's git, as a path.
+fn real_git(site: &Site) -> PathBuf {
+    let program = PathBuf::from(site.served.command().get_program());
+    if program.is_absolute() {
+        return program;
+    }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(&program))
+        .find(|candidate| candidate.is_file())
+        .expect("git on PATH")
+}
+
 /// A served root with the store [`STORE`] under [`ACCESS`], the `linear` fixture imported as
 /// `main`, and a directory for clients.
 struct Site {
@@ -279,6 +379,22 @@ impl Site {
             assert!(!self.dirty(), "{what}: a preparation started");
             thread::sleep(POLL);
         }
+    }
+
+    /// A land whose preparation finds `serve.lock` held: `serve.git` is behind the store, with
+    /// the mark left.
+    fn land_behind(&self, path: &str) {
+        let held = self.hold_serve_lock();
+        self.land(path).ok();
+        self.wait_dirty();
+        drop(held);
+    }
+
+    /// `serve --prepare` with `stand` as its git: the result.
+    fn prepare_with(&self, stand: &Stand) -> Value {
+        let store = self.store();
+        let line = ["--repo", store.as_str(), "serve", "--prepare"];
+        support::run(&line, &[("SWARMOPS_GIT", &stand.program())]).ok()
     }
 
     /// A `git fetch` in `dir` while the test holds the store's writer lock: it succeeds, and
@@ -527,4 +643,63 @@ fn no_prepare_without_access_or_success() {
     site.land("served.txt").ok();
     site.wait_dirty();
     drop(held);
+}
+
+/// A connection started during a preparation's first round takes `serve.lock` before a second
+/// round ends: the rounds let it go in between, and around their wait for the writer lock.
+#[test]
+fn rounds_let_go_between_rounds() {
+    let site = Site::new();
+    site.clone("rounds");
+    site.wait_current();
+    site.land_behind("behind.txt");
+    let stand = Stand::new(&site);
+
+    thread::scope(|scope| {
+        let preparing = scope.spawn(|| site.prepare_with(&stand));
+
+        // 1. During the first round: a land and its mark, then the writer lock held, so that
+        //    a second round cannot end while the test looks.
+        let deadline = Instant::now() + PREPARED_WITHIN;
+        while !stand.acted() {
+            assert!(Instant::now() < deadline, "the first round ran no gc");
+            thread::sleep(POLL);
+        }
+        let root = Utf8PathBuf::from(site.store());
+        let writer = MetaLock::acquire(&layout_of(root), SERVE_LOCK_WAIT).expect("meta/lock");
+
+        // 2. The connection, started before the first round ends: serve.lock, while serve.git
+        //    is still behind the land.
+        let connecting = scope.spawn(|| {
+            let lock = site.serve_repo().lock(ROUND_WAIT);
+            let current = site.current();
+            (lock, current)
+        });
+        thread::sleep(POLL);
+        stand.go();
+        let (lock, current) = connecting.join().unwrap();
+        let lock = lock.expect("serve.lock held past the first round");
+        assert!(!current, "a second round ended before the connection");
+        drop(lock);
+        drop(writer);
+        let prepared = preparing.join().unwrap();
+        assert!(prepared["rounds"].as_u64().unwrap() <= 2, "{prepared}");
+    });
+}
+
+/// A preparation of two rounds, each writing objects, writes one commit-graph layer.
+#[test]
+fn the_graph_is_written_once_a_run() {
+    let site = Site::new();
+    site.clone("graph");
+    site.wait_current();
+    site.land_behind("behind.txt");
+    let stand = Stand::new(&site);
+    stand.go();
+
+    let prepared = site.prepare_with(&stand);
+    assert_eq!(prepared["rounds"], 2, "{prepared}");
+    assert!(stand.acted());
+    assert_eq!(stand.count(GRAPH_WRITE), 1, "{prepared}");
+    assert!(site.current());
 }
