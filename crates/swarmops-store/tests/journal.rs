@@ -545,6 +545,85 @@ fn frames_from_is_inclusive_and_starts_at_frame_zero() {
     }
 }
 
+/// A FORMAT `format` store with `commits` frames, each a changeset and `main`'s move to it.
+fn store_with(format: StoreFormat, commits: u64) -> (tempfile::TempDir, MetaStore) {
+    let (dir, plain) = new_root();
+    let layout = Layout::with_format(plain.root(), format);
+    MetaStore::create_in(layout.clone(), real_fs()).unwrap();
+    fs::write(layout.format_file(), format.marker()).unwrap();
+    let store = MetaStore::open(layout.root()).unwrap();
+    for n in 0..commits {
+        commit_next(&store, n);
+    }
+    (dir, store)
+}
+
+/// Commits changeset `n` of [`sweep::changeset`]'s line, `main` moved to it.
+fn commit_next(store: &MetaStore, n: u64) {
+    let mut write = store.write().unwrap();
+    write.insert_changeset(sweep::changeset(n)).unwrap();
+    let old = n.checked_sub(1).map(sweep::id);
+    write
+        .cas_ref("main", old, Some(sweep::id(n)), "test/agent")
+        .unwrap();
+    write.commit().unwrap();
+}
+
+/// A snapshot names the seq of the first frame it does not hold (the M16 design §6): past the
+/// frames it read beyond the checkpoint, or, with none there, the frames before the checkpoint;
+/// later commits do not change it.
+#[test]
+fn a_snapshot_names_its_next_seq() {
+    for format in [StoreFormat::V1, StoreFormat::V2] {
+        // 1. No frame yet, then three past the checkpoint.
+        let (_dir, store) = store_with(format, 0);
+        assert_eq!(store.read().unwrap().next_seq(), 0, "{format:?}");
+        for n in 0..3 {
+            commit_next(&store, n);
+        }
+        assert_eq!(store.read().unwrap().next_seq(), 3, "{format:?}");
+
+        // 2. Checkpointed at the journal's end: no frame past it, and the same seq.
+        store.flush().unwrap();
+        let read = store.read().unwrap();
+        assert_eq!(read.next_seq(), 3, "{format:?}, after a flush");
+
+        // 3. A commit after the snapshot shows in the next one only.
+        commit_next(&store, 3);
+        assert_eq!(read.next_seq(), 3, "{format:?}, the old snapshot");
+        assert_eq!(store.read().unwrap().next_seq(), 4, "{format:?}");
+    }
+}
+
+/// A writer reads the frames from a seq on, under its lock (the M16 design §6): the frames a
+/// snapshot did not hold, across a checkpoint, as the journal lists them; none past the end.
+#[test]
+fn a_writer_reads_frames_from_a_seq() {
+    for format in [StoreFormat::V1, StoreFormat::V2] {
+        let (_dir, store) = store_with(format, 2);
+        let since = store.read().unwrap().next_seq();
+        commit_next(&store, 2);
+        store.flush().unwrap();
+        commit_next(&store, 3);
+
+        let write = store.write().unwrap();
+        let frames = write.frames_from(since).unwrap();
+        let seqs: Vec<u64> = frames.iter().map(|frame| frame.seq).collect();
+        assert_eq!(seqs, [2, 3], "{format:?}");
+        let move_of = |frame: &Frame| {
+            frame.records.iter().find_map(|record| match record {
+                Record::RefMove { name, new, .. } => Some((name.clone(), *new)),
+                _ => None,
+            })
+        };
+        let moves: Vec<_> = frames.iter().map(move_of).collect();
+        let main_at = |n| Some(("main".to_owned(), Some(sweep::id(n))));
+        assert_eq!(moves, [main_at(2), main_at(3)], "{format:?}");
+        assert_eq!(write.frames_from(0).unwrap().len(), 4, "{format:?}");
+        assert_eq!(write.frames_from(4).unwrap(), [], "{format:?}");
+    }
+}
+
 #[test]
 fn a_first_frame_that_does_not_start_at_zero_is_journal_corrupt() {
     // journal.off lists the frame at 19 as frame 0: the bytes before it are no frame.

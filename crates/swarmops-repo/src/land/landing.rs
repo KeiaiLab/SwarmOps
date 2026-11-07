@@ -607,9 +607,11 @@ impl<O: ObjectStore> Landing<'_, O> {
             Prep::Merged(prepared) => *prepared,
         };
 
-        // 2. Steps 5 and 6. The snapshot is not read past the land's own write.
+        // 2. Steps 5 and 6. The snapshot is not read past the land's own write; the publish
+        //    reads the frames it does not hold, for the key.
+        let next_seq = read.next_seq();
         drop(read);
-        self.publish(prepared, attempt)
+        self.publish(prepared, attempt, next_seq)
     }
 
     /// Steps 2 to 4 of [the module documentation](super), in `read`, whose target names
@@ -695,8 +697,14 @@ impl<O: ObjectStore> Landing<'_, O> {
     }
 
     /// Steps 5 and 6 of [the module documentation](super): writes `L` from `prepared`, then
-    /// publishes it.
-    fn publish(&mut self, prepared: Prepared, attempt: u32) -> Result<Attempt, RepoError> {
+    /// publishes it, checking the key against the frames from `next_seq` on, which the snapshot
+    /// `prepared` was prepared in does not hold.
+    fn publish(
+        &mut self,
+        prepared: Prepared,
+        attempt: u32,
+        next_seq: u64,
+    ) -> Result<Attempt, RepoError> {
         let Prepared {
             draft,
             theirs,
@@ -704,7 +712,8 @@ impl<O: ObjectStore> Landing<'_, O> {
             ..
         } = prepared;
         self.auto_merged.extend(draft.auto_merged);
-        let publication = self.write(&theirs, draft.delta, draft.new_blobs, &chain)?;
+        let (delta, blobs) = (draft.delta, draft.new_blobs);
+        let publication = self.write(&theirs, delta, blobs, &chain, next_seq)?;
         match self.repo.publish(&publication)? {
             Published::Landed {
                 id,
@@ -728,6 +737,23 @@ impl<O: ObjectStore> Landing<'_, O> {
                     warnings,
                 }))
             }
+            Published::Replayed {
+                id,
+                onto,
+                squashed_from,
+                files_changed,
+            } => Ok(Attempt::Done(LandOutcome {
+                status: LandStatus::Replayed,
+                landed: id,
+                rebased_onto: onto,
+                base: self.base.id,
+                attempts: attempt,
+                relocated: false,
+                squashed_from,
+                files_changed,
+                auto_merged: Vec::new(),
+                warnings: Vec::new(),
+            })),
             Published::Moved { actual, recovered } => {
                 self.prior = Some(Prior {
                     onto: theirs.changeset.root,
@@ -807,13 +833,15 @@ impl<O: ObjectStore> Landing<'_, O> {
     }
 
     /// Writes the changeset the land publishes, `L`, and flushes it (step 5): `delta` applied to
-    /// `theirs`' tree, the merged contents `new_blobs` among its blobs.
+    /// `theirs`' tree, the merged contents `new_blobs` among its blobs; its publication checks the
+    /// key against the frames from `next_seq` on.
     fn write(
         &self,
         theirs: &StoredChangeset,
         delta: Vec<DeltaEntry>,
         new_blobs: BTreeMap<BlobId, Vec<u8>>,
         squashed: &[ChangesetId],
+        next_seq: u64,
     ) -> Result<Publication, RepoError> {
         let head = self.tip();
         let recorded = Recorded {
@@ -846,6 +874,9 @@ impl<O: ObjectStore> Landing<'_, O> {
             actor: String::from_utf8_lossy(&self.req.lander.name).into_owned(),
             relocate,
             first: self.made.clone(),
+            key: self.req.key.clone(),
+            next_seq,
+            head: self.head.id,
         })
     }
 

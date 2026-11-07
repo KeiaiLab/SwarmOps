@@ -260,6 +260,12 @@ impl<O: ObjectStore> Repo<O> {
 }
 
 impl<O: ObjectStore> RepoRead<'_, O> {
+    /// The seq of the first journal frame the snapshot does not hold ([`MetaRead::next_seq`]):
+    /// where a writer's read of the frames committed since the snapshot starts.
+    pub fn next_seq(&self) -> u64 {
+        self.meta.next_seq()
+    }
+
     /// Changeset `id`, if the snapshot holds it.
     pub fn changeset(&self, id: ChangesetId) -> Result<Option<StoredChangeset>, RepoError> {
         match self.meta.changeset(id)? {

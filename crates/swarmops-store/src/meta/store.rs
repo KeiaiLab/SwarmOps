@@ -59,7 +59,7 @@ use swarmops_core::{ChangesetId, bytes};
 
 use super::frame::{Frame, MAX_RECORDS, Record};
 use super::index::{ChangesetMeta, Index};
-use super::journal::{Journal, LogCut, TailRepair};
+use super::journal::{Journal, LogCut, PastFrames, TailRepair};
 use super::lock::MetaLock;
 use super::parents::MAX_PARENTS;
 use super::refs::{self, RefFile, RefState};
@@ -432,15 +432,18 @@ impl MetaStore {
             // index files before the checkpoint moved past it. The frames past it, read once the
             // index files are measured, vouch for the index's records past it. A journal.off that
             // a writer cut as they were read takes the round.
-            let (index, frames) = if let Some(opened) = opened.take() {
+            let (index, past) = if let Some(opened) = opened.take() {
                 opened
             } else {
+                let mut first = 0;
                 let past = || {
-                    let frames = self.journal.tail_frames_from_unless_shrunk(ckpt)?;
-                    frames.ok_or(NotOpened::Shrunk)
+                    let past = self.journal.tail_frames_from_unless_shrunk(ckpt)?;
+                    let past = past.ok_or(NotOpened::Shrunk)?;
+                    first = past.first;
+                    Ok(past.frames)
                 };
                 match Index::open_with_past(&self.layout, self.fs.clone(), past) {
-                    Ok(opened) => opened,
+                    Ok((index, frames)) => (index, PastFrames { first, frames }),
                     Err(NotOpened::Shrunk) => continue,
                     Err(NotOpened::Failed(e)) => return Err(e),
                 }
@@ -452,18 +455,21 @@ impl MetaStore {
             // show none past `frames`. A journal.off cut as they were read again says nothing
             // about the files, and takes the round all the same.
             match self.journal.tail_frames_from_unless_shrunk(ckpt)? {
-                Some(again) if again == frames => {
+                Some(again) if again == past => {
+                    let PastFrames { first, frames } = past;
                     let overlay = Overlay::new(&index, &frames, files)?;
+                    let next_seq = frames.last().map_or(first, |frame| frame.seq + 1);
                     return Ok(MetaRead {
                         store: self,
                         ckpt,
+                        next_seq,
                         index,
                         frames,
                         overlay,
                     });
                 }
                 Some(again) => opened = Some((index, again)),
-                None => opened = Some((index, frames)),
+                None => opened = Some((index, past)),
             }
         }
         Err(StoreError::SnapshotContended {
@@ -614,6 +620,8 @@ pub struct MetaRead<'a> {
     store: &'a MetaStore,
     /// The checkpoint the snapshot was taken at: `frames` start there.
     ckpt: u64,
+    /// The seq of the first frame the snapshot does not hold.
+    next_seq: u64,
     index: Index,
     /// The frames past the checkpoint, in journal order.
     frames: Vec<Frame>,
@@ -810,6 +818,13 @@ impl MetaRead<'_> {
         }
         let listed = self.store.journal.frames_from(seq, 1)?;
         Ok(listed.into_iter().find(|frame| frame.offset < self.ckpt))
+    }
+
+    /// The seq of the first frame the snapshot does not hold (the M16 design §6): the last seq it
+    /// read past the checkpoint + 1, else the number of frames `journal.off` listed before the
+    /// checkpoint when it was taken. It reads nothing.
+    pub fn next_seq(&self) -> u64 {
+        self.next_seq
     }
 
     /// How many changesets the store holds.
@@ -1050,6 +1065,14 @@ impl MetaWrite<'_> {
         });
         self.moved.insert(name.to_owned(), new);
         Ok(CasResult::Applied { old: current })
+    }
+
+    /// The committed frames whose seq is `first` or greater, in journal order: a snapshot's
+    /// [`MetaRead::next_seq`] gives those it did not hold (the M16 design §6). Read under the
+    /// lock, after [`MetaStore::write`]'s tail check, so every whole frame is listed and no other
+    /// writer appends one meanwhile; it reads [`Journal::frames_from`] and writes nothing.
+    pub fn frames_from(&self, first: u64) -> Result<Vec<Frame>, StoreError> {
+        self.store.journal.frames_from(first, usize::MAX)
     }
 
     /// The records this transaction has queued, in order: the frame [`MetaWrite::commit`]

@@ -226,10 +226,10 @@ struct Ckpt {
 }
 
 /// What one read of the frames ([`Journal::frames_from`], [`Journal::tail_frames_from`]) gives
-/// when it does not fail.
-enum Attempt {
+/// when it does not fail: `T`, the frames, or [`PastFrames`].
+enum Attempt<T = Vec<Frame>> {
     /// The frames.
-    Read(Vec<Frame>),
+    Read(T),
     /// `journal.off` held fewer entries when they were read than it did when measured: a writer
     /// has cut entries that were never genuine since the measurement, and the read starts over.
     /// Past [`OFF_REREADS`], [`StoreError::JournalCorrupt`] at `offset`.
@@ -237,6 +237,17 @@ enum Attempt {
         /// Where the read reports the journal corrupt once it gives up.
         offset: u64,
     },
+}
+
+/// The frames past an offset ([`Journal::tail_frames_from`]), and the seq of the first of them:
+/// the number of frames `journal.off` lists before the offset, which a read that finds none past
+/// it gives all the same.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PastFrames {
+    /// The seq the read starts at.
+    pub(crate) first: u64,
+    /// The frames, in journal order.
+    pub(crate) frames: Vec<Frame>,
 }
 
 impl Journal {
@@ -511,25 +522,27 @@ impl Journal {
     /// no damage, as [`Journal::frames_from`] says: the read starts over, up to three times, and
     /// a shrink every time is reported at `offset`.
     pub fn tail_frames_from(&self, offset: u64) -> Result<Vec<Frame>, StoreError> {
-        reread(|| self.tail_frames_once(offset))
+        let past = reread(|| self.tail_frames_once(offset))?;
+        Ok(past.frames)
     }
 
-    /// [`Journal::tail_frames_from`] read once: `None` where `journal.off` holds fewer entries
-    /// when they are read than it did when measured, for a caller that counts such a shrink
-    /// itself ([`crate::MetaStore::read`] takes another of its rounds).
+    /// [`Journal::tail_frames_from`] read once, with the seq it starts at: `None` where
+    /// `journal.off` holds fewer entries when they are read than it did when measured, for a
+    /// caller that counts such a shrink itself ([`crate::MetaStore::read`] takes another of its
+    /// rounds).
     pub(crate) fn tail_frames_from_unless_shrunk(
         &self,
         offset: u64,
-    ) -> Result<Option<Vec<Frame>>, StoreError> {
+    ) -> Result<Option<PastFrames>, StoreError> {
         match self.tail_frames_once(offset)? {
-            Attempt::Read(frames) => Ok(Some(frames)),
+            Attempt::Read(past) => Ok(Some(past)),
             Attempt::Shrunk { .. } => Ok(None),
         }
     }
 
     /// One read of [`Journal::tail_frames_from`]: [`Attempt::Shrunk`] where `journal.off` holds
     /// fewer entries when they are read than it did when measured.
-    fn tail_frames_once(&self, offset: u64) -> Result<Attempt, StoreError> {
+    fn tail_frames_once(&self, offset: u64) -> Result<Attempt<PastFrames>, StoreError> {
         // journal.off cut since it was measured: entries of the snapshot are gone.
         let shrunk = || Ok(Attempt::Shrunk { offset });
         let Some(listed) = self.listed()? else {
@@ -619,7 +632,7 @@ impl Journal {
                 offset: entry.offset,
             });
         }
-        Ok(Attempt::Read(frames))
+        Ok(Attempt::Read(PastFrames { first, frames }))
     }
 
     /// Brings the journal to a clean end after a crash, and returns where `journal.log`
@@ -1491,11 +1504,11 @@ fn listing(whole: u64, from: u64, entries: &[u64]) -> Result<u64, StoreError> {
 /// [`OFF_REREADS`] times more; a shrink past that is [`StoreError::JournalCorrupt`] at the
 /// offset the last one names. Each read starts with its own measurement of `journal.off`, and
 /// finds the shrink before it measures `journal.log`.
-fn reread(read: impl Fn() -> Result<Attempt, StoreError>) -> Result<Vec<Frame>, StoreError> {
+fn reread<T>(read: impl Fn() -> Result<Attempt<T>, StoreError>) -> Result<T, StoreError> {
     let mut rereads = 0;
     loop {
         match read()? {
-            Attempt::Read(frames) => return Ok(frames),
+            Attempt::Read(read) => return Ok(read),
             Attempt::Shrunk { offset } if rereads == OFF_REREADS => {
                 return Err(StoreError::JournalCorrupt { offset });
             }

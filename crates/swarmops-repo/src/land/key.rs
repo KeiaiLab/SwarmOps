@@ -9,6 +9,9 @@
 //! A changeset it finds there that the target's head reaches is the target's own, below its walk's
 //! floor, and is passed over.
 //!
+//! A key a land publishes after the snapshot the walk read is the publish's to find, under the
+//! lock ([`landed_key`], the M16 design §6), judged as the walk judges what it finds.
+//!
 //! The walk starts at the head an attempt read, and ends at the first changeset at or below the
 //! base's generation: the base itself, when it is on the target; for a base off the target (M11's
 //! form), the changeset of the target's chain where a land of the change could have landed at the
@@ -18,7 +21,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 
-use swarmops_core::{ChangesetId, ObjectId, RepoPath, TreeId};
+use swarmops_core::{Changeset, ChangesetId, ObjectId, RepoPath, TreeId};
 use swarmops_store::{ObjectStore, RefKind, StoreError, ref_kind};
 
 use super::landing::stored;
@@ -49,7 +52,11 @@ struct Walked {
 impl Walked {
     /// What the walk keeps of `stored`.
     fn of(stored: &StoredChangeset) -> Walked {
-        let changeset = &stored.changeset;
+        Walked::object(&stored.changeset, stored.generation)
+    }
+
+    /// What the walk keeps of `changeset`, whose generation is `generation`.
+    fn object(changeset: &Changeset, generation: u64) -> Walked {
         let value = |key: &str| {
             (changeset.metadata.iter())
                 .find(|(name, _)| name == key)
@@ -57,7 +64,7 @@ impl Walked {
         };
         Walked {
             parent: changeset.parents.first().copied(),
-            generation: stored.generation,
+            generation,
             agent: value(AGENT).map_or_else(String::new, |agent| {
                 String::from_utf8_lossy(&agent).into_owned()
             }),
@@ -125,23 +132,64 @@ pub(super) struct Replayed {
     pub(super) files_changed: usize,
 }
 
+/// Reads a changeset's object for a key's judgement: `None` for one the store does not hold.
+pub(super) type Load<'a> = dyn Fn(ChangesetId) -> Result<Option<Changeset>, RepoError> + 'a;
+
 /// Whether `last`, the last changeset a land carrying the key squashed, is `ours`: the head
-/// itself, or a changeset on the head with `C`'s tree, as `read` holds it.
-fn squashed_ours<O: ObjectStore>(
-    read: &RepoRead<'_, O>,
-    last: ChangesetId,
-    ours: Ours,
-) -> Result<bool, RepoError> {
+/// itself, or a changeset on the head with `C`'s tree, as `load` reads it.
+fn squashed_ours(last: ChangesetId, ours: Ours, load: &Load<'_>) -> Result<bool, RepoError> {
     match ours {
         Ours::Chain(head) => Ok(last == head),
         Ours::Commit { head, root } => {
-            let Some(made) = read.changeset(last)? else {
+            let Some(made) = load(last)? else {
                 return Ok(false);
             };
-            let on_head = made.changeset.parents.first() == Some(&head);
-            Ok(on_head && made.changeset.root == root)
+            let on_head = made.parents.first() == Some(&head);
+            Ok(on_head && made.root == root)
         }
     }
+}
+
+/// What `id`, a changeset carrying a land's key, of which `walked` is kept, is to that land: a
+/// replay if its `squashed_from` ends as `ours` says, else a key reused. The one judgement of
+/// the walk ([`TargetWalk::find_key`]) and of the publish ([`landed_key`]).
+fn judge(
+    id: ChangesetId,
+    walked: &Walked,
+    ours: Ours,
+    load: &Load<'_>,
+) -> Result<KeyFound, RepoError> {
+    let squashed_from = walked.squashed();
+    let (Some(&last), Some(parent)) = (squashed_from.last(), walked.parent) else {
+        return Ok(KeyFound::Reused(id));
+    };
+    if !squashed_ours(last, ours, load)? {
+        return Ok(KeyFound::Reused(id));
+    }
+    Ok(KeyFound::Replay(Replayed {
+        id,
+        parent,
+        squashed_from,
+        files_changed: walked.paths.len(),
+    }))
+}
+
+/// What `changeset`, `id`, is to a land of `key` whose change is `ours`, as the walk judges what
+/// it finds: `None` unless it carries the key. The publish's judgement of a changeset a ref moved
+/// to after the land's snapshot (the M16 design §6).
+pub(super) fn landed_key(
+    id: ChangesetId,
+    changeset: &Changeset,
+    key: &str,
+    ours: Ours,
+    load: &Load<'_>,
+) -> Result<Option<KeyFound>, RepoError> {
+    // The judgement reads no generation.
+    let walked = Walked::object(changeset, 0);
+    if walked.land_key.as_deref() != Some(key.as_bytes()) {
+        return Ok(None);
+    }
+    judge(id, &walked, ours, load).map(Some)
 }
 
 /// A land's walk down its target's first parents, which each attempt continues from the head it
@@ -222,26 +270,16 @@ impl TargetWalk {
             if walked.land_key.as_deref() != Some(key.as_bytes()) {
                 return true;
             }
-            hit = Some((id, walked.parent, walked.squashed(), walked.paths.len()));
+            hit = Some(id);
             false
         })?;
-        let Some((id, parent, squashed_from, files_changed)) = hit else {
+        let Some(id) = hit else {
             return Ok(None);
         };
 
         // 2. This land made before, or another change.
-        let (Some(&last), Some(parent)) = (squashed_from.last(), parent) else {
-            return Ok(Some(KeyFound::Reused(id)));
-        };
-        if !squashed_ours(read, last, ours)? {
-            return Ok(Some(KeyFound::Reused(id)));
-        }
-        Ok(Some(KeyFound::Replay(Replayed {
-            id,
-            parent,
-            squashed_from,
-            files_changed,
-        })))
+        let load = |last| Ok(read.changeset(last)?.map(|stored| stored.changeset));
+        judge(id, &self.walked[&id], ours, &load).map(Some)
     }
 
     /// The newest changeset whose `land_key` is `key` on the first-parent chain of a ref other

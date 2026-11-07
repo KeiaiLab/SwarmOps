@@ -1605,6 +1605,134 @@ fn a_publish_whose_walk_passes_its_bound_is_moved() {
     );
 }
 
+/// How many rounds [`same_key_two_targets_race_lands_once`] races.
+const KEY_ROUNDS: usize = 100;
+
+/// The key of round `n` of [`same_key_two_targets_race_lands_once`].
+fn round_key(n: usize) -> String {
+    format!("key-{n}")
+}
+
+/// The same change under the same key, landed onto `main` and onto `release/1` at once, lands
+/// once (the M16 design §6): the land onto `release/1` publishes while the land onto `main` is
+/// held after its snapshot (it writes `L`'s objects), and that one finds the key's move among the
+/// frames its snapshot does not hold, under the lock: [`RepoError::KeyReused`] naming
+/// `release/1`, and `main` stays where it was. 100 rounds, a change and a key each.
+#[test]
+fn same_key_two_targets_race_lands_once() {
+    let (_dir, root, repo) = new_store();
+    let t0 = advance(&repo, ACTOR, &[], vec![put("a", b"a\n")]);
+    create_ref(&repo, "release/1", t0);
+    let heads: Vec<ChangesetId> = (0..KEY_ROUNDS)
+        .map(|n| commit_by(&repo, ACTOR, &[t0], vec![put(&format!("f{n}"), b"f\n")]))
+        .collect();
+    drop(repo);
+
+    // 1. Round n's race: the same head and key onto `release/1`, through another handle.
+    let racing = heads.clone();
+    let racer = Racer::acting(&root, KEY_ROUNDS, move |other, n| {
+        let land = keyed_on(racing[n], "release/1", &round_key(n));
+        other.land(land).unwrap().landed
+    });
+    let repo = racer.open();
+
+    // 2. Each land onto `main` is refused, naming the race's land; `main` never moves.
+    for (n, &head) in heads.iter().enumerate() {
+        let key = round_key(n);
+        let refused = repo.land(keyed(head, &key));
+        let landed = racer.landed();
+        assert_eq!(landed.len(), n + 1, "round {n} raced");
+        assert_reused(refused, &key, landed[n], "release/1");
+    }
+    assert_eq!(main_head(&repo), t0);
+}
+
+/// A key landed on the target after the land's snapshot, by the same change, is a replay found
+/// under the lock (the M16 design §6): the land makes one attempt, and the journal gains the
+/// racer's frame alone.
+#[test]
+fn a_key_landed_after_the_snapshot_replays() {
+    let (_dir, root, repo) = new_store();
+    let t0 = advance(&repo, ACTOR, &[], vec![put("a", b"a\n")]);
+    let head = commit_by(&repo, ACTOR, &[t0], vec![put("b", b"b\n")]);
+    drop(repo);
+    let racer = Racer::acting(&root, 1, move |other, _| {
+        other.land(keyed(head, "key-1")).unwrap().landed
+    });
+    let repo = racer.open();
+    let frames = frame_count(&root);
+
+    let out = repo.land(keyed(head, "key-1")).unwrap();
+    let landed = racer.landed();
+    assert_eq!(landed.len(), 1, "one race");
+    assert_eq!(
+        (out.status, out.landed, out.rebased_onto, out.attempts),
+        (LandStatus::Replayed, landed[0], t0, 1)
+    );
+    assert_eq!(out.squashed_from, [head]);
+    assert_eq!(
+        (frame_count(&root), main_head(&repo)),
+        (frames + 1, landed[0])
+    );
+}
+
+/// A key landed on the target after the land's snapshot by another change refuses the land under
+/// the lock, which records nothing.
+#[test]
+fn a_key_reused_on_the_target_after_the_snapshot_is_refused() {
+    let (_dir, root, repo) = new_store();
+    let t0 = advance(&repo, ACTOR, &[], vec![put("a", b"a\n")]);
+    let head = commit_by(&repo, ACTOR, &[t0], vec![put("b", b"b\n")]);
+    let other_head = commit_by(&repo, ACTOR, &[t0], vec![put("c", b"c\n")]);
+    drop(repo);
+    let racer = Racer::acting(&root, 1, move |other, _| {
+        other.land(keyed(other_head, "key-1")).unwrap().landed
+    });
+    let repo = racer.open();
+    let frames = frame_count(&root);
+
+    let refused = repo.land(keyed(head, "key-1"));
+    let landed = racer.landed();
+    assert_eq!(landed.len(), 1, "one race");
+    assert_reused(refused, "key-1", landed[0], "main");
+    assert_eq!(
+        (frame_count(&root), main_head(&repo)),
+        (frames + 1, landed[0])
+    );
+}
+
+/// A snapshot taken right after a checkpoint holds no frame past it, and still names where the
+/// frames it does not hold start: a key landed onto another target between the snapshot and the
+/// lock is found there, and refuses the land.
+#[test]
+fn a_key_landed_right_after_a_checkpoint_is_found() {
+    let (_dir, root, repo) = new_store();
+    let t0 = advance(&repo, ACTOR, &[], vec![put("a", b"a\n")]);
+    create_ref(&repo, "release/1", t0);
+    let head = commit_by(&repo, ACTOR, &[t0], vec![put("b", b"b\n")]);
+    repo.flush_metadata().unwrap();
+    drop(repo);
+
+    // 1. The checkpoint is at the journal's end: no frame lies past it.
+    let journal = Journal::open(&layout_of(&root), Arc::new(RealFs::new())).unwrap();
+    assert_eq!(journal.ckpt().unwrap(), journal.len());
+
+    // 2. The same head and key land onto `release/1` after the land's snapshot.
+    let racer = Racer::acting(&root, 1, move |other, _| {
+        other
+            .land(keyed_on(head, "release/1", "key-1"))
+            .unwrap()
+            .landed
+    });
+    let repo = racer.open();
+    let frames = frame_count(&root);
+    let refused = repo.land(keyed(head, "key-1"));
+    let landed = racer.landed();
+    assert_eq!(landed.len(), 1, "one race");
+    assert_reused(refused, "key-1", landed[0], "release/1");
+    assert_eq!((frame_count(&root), main_head(&repo)), (frames + 1, t0));
+}
+
 /// A file both the land and the target's gain edited, at separate lines, is merged by the lock
 /// holder (diff3), and the land lands relocated in its one attempt, the file among its merged
 /// paths.

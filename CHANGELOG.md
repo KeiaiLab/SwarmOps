@@ -79,6 +79,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
   over every parent, moves nothing and writes nothing: an older tip imported again after native
   lands on top was `E_GIT_IMPORT_DIVERGED`. `ref_moved` is false, `head_changeset` the target's
   head, and `tip_changeset` the commit's changeset.
+- Two lands of one key onto different targets at the same time land once: `land --key K` onto
+  `main` and onto `release/1` could both land when each searched for the key before the other
+  published. The publish now looks, under the store's lock, at the ref moves committed since the
+  land's snapshot: a land of the key on another ref is `E_INVALID_ARG` with `details.target`, one
+  on the target is replayed, or `E_INVALID_ARG` for another change; either writes nothing
+  ([Troubleshooting](docs/troubleshooting.md#e_invalid_arg)).
 
 ## [0.8.0] - 2026-11-07
 

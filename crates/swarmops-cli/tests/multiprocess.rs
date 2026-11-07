@@ -41,6 +41,9 @@ const OP_LOG_PAGE: &str = "200";
 /// The page of [`main_moves`]'s own test: small enough that main's first move is on page 2.
 const SMALL_PAGE: &str = "2";
 
+/// Who makes the changes the key test lands.
+const ACTOR_KEY: &str = "test/agent";
+
 /// How many rounds the ref tests race: in the `ref set` race the first creates main and each
 /// other one moves it; the `commit --advance` race makes main first, and each round moves it.
 const ROUNDS: u64 = 4;
@@ -454,6 +457,72 @@ fn main_moves_reads_past_its_first_page() {
 
     // 2. Both moves, read over three pages.
     assert_eq!(main_moves(&store, SMALL_PAGE), [c3, c1]);
+}
+
+/// How many rounds [`same_key_two_targets_1000_rounds`] races.
+const KEY_ROUNDS: usize = 1_000;
+
+/// The targets the two landers of each round of [`same_key_two_targets_1000_rounds`] land on.
+const KEY_TARGETS: [&str; 2] = ["main", "release/1"];
+
+/// Two processes land the same change under the same key at once, one onto `main` and one onto
+/// `release/1` (the M16 design §6): each of 1,000 rounds exactly one exits 0 with `landed`, and
+/// the other is `E_INVALID_ARG` naming the winner's land and target, whether its walk found the
+/// key or its publish did, under the lock. Each target's head is then its own winners' last land,
+/// and the store verifies clean. A lander that meets `E_BUSY` runs again ([`retry_busy`]).
+#[test]
+#[ignore = "slow, ~60 s: 1,000 two-process rounds"]
+fn same_key_two_targets_1000_rounds() {
+    let store = Store::init();
+    let t0 = store.commit(ACTOR_KEY, "a", "a\n", None);
+    let release = ["ref", "set", KEY_TARGETS[1], &t0, "--create"];
+    store.run_as(ACTOR_KEY, &release, &[]).ok();
+    let mut heads = [t0.clone(), t0.clone()];
+
+    for round in 0..KEY_ROUNDS {
+        // 1. The round's change on `t0`, landed onto both targets at once under one key.
+        let head = store.commit(ACTOR_KEY, &format!("f{round}"), "f\n", Some(&t0));
+        let key = format!("key-{round}");
+        let mut landers = Racers::new(store.tmp());
+        let setups: Vec<Vec<String>> = (KEY_TARGETS.iter())
+            .enumerate()
+            .map(|(n, target)| {
+                let line = ["land", &head, "--key", &key, "--target", target];
+                store.args(&agent(n), &line)
+            })
+            .collect();
+        for args in &setups {
+            landers.spawn(args, &[]);
+        }
+        let runs: Vec<Run> = (landers.race().into_iter())
+            .zip(&setups)
+            .map(|(first, args)| retry_busy(first, || run(args, &[])))
+            .collect();
+
+        // 2. One winner; the other names its land and its target.
+        let won: Vec<usize> = (0..KEY_TARGETS.len())
+            .filter(|&n| runs[n].exit() == 0)
+            .collect();
+        let [winner] = won[..] else {
+            let shown: Vec<String> = runs.iter().map(ToString::to_string).collect();
+            panic!("round {round}: winners {won:?}:\n{}", shown.join("\n"));
+        };
+        let landed = runs[winner].ok()["landed"].as_str().unwrap().to_owned();
+        let error = runs[1 - winner].err("E_INVALID_ARG");
+        let details = json!({"key": key, "landed": landed, "target": KEY_TARGETS[winner]});
+        assert_eq!(error["details"], details, "round {round}");
+        heads[winner] = landed;
+    }
+
+    // 3. Each target ends at its winners' last land.
+    let refs = store.read(&["ref", "list"]).ok();
+    for (target, head) in KEY_TARGETS.iter().zip(&heads) {
+        let listed = (refs["refs"].as_array().unwrap().iter())
+            .find(|listed| listed["name"] == *target)
+            .expect("the target is listed");
+        assert_eq!(listed["target"], head.as_str(), "{target}");
+    }
+    store.assert_clean("after the rounds");
 }
 
 // ---------------------------------------------------------------------------------------------

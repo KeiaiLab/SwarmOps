@@ -2,7 +2,16 @@
 //! target moved to it in one write transaction, one journal frame, by the landing model the M4
 //! measurement chose (umbrella decision 10: metalog merge).
 //!
-//! Under the lock the publish reads the target again (`MetaWrite::get_ref`). At the head `L` was
+//! Under the lock a keyed land's publish first reads the ref moves committed since the snapshot
+//! its land's key walk read (`MetaWrite::frames_from`, the M16 design §6): a move onto a
+//! changeset carrying the key, of a ref a land publishes to (not a tag, nor a remote-tracking
+//! ref), decides the land before anything is relocated or swapped. On the target it is the land
+//! made before ([`Published::Replayed`]) or [`RepoError::KeyReused`], as the walk judges what it
+//! finds; on another ref, [`RepoError::KeyReused`] naming that ref. Either records nothing. The
+//! walk and this check meet at the snapshot's `next_seq`: the walk sees the frames before it,
+//! the check those from it on.
+//!
+//! Then the publish reads the target again (`MetaWrite::get_ref`). At the head `L` was
 //! made on, `onto`, it commits `L` by compare-and-swap. Moved, to `actual`, the lock holder makes
 //! the land anew there when the rule allows it ([`Relocate::Allow`]):
 //!
@@ -40,13 +49,16 @@ use swarmops_merge::diff3;
 use swarmops_merge::tree_diff::TreeRead;
 use swarmops_merge::tree_merge;
 use swarmops_store::{
-    CasResult, ChangesetMeta, MetaWrite, ObjectStat, ObjectStore, Recovered, StoreError,
+    CasResult, ChangesetMeta, MetaWrite, ObjectStat, ObjectStore, Record, Recovered, RefKind,
+    StoreError, ref_kind,
 };
 
 use crate::commit::{Draft, WrittenChangeset};
 use crate::error::RepoError;
 use crate::oplog::OpId;
 use crate::repo::{self, Repo};
+
+use super::key::{self, KeyFound, Ours};
 
 /// The most first-parent steps a publish walks from the target's head back to a land's `onto`:
 /// past them, the land goes back to its lander.
@@ -87,6 +99,14 @@ pub struct Publication {
     /// The changeset recorded before it in the same frame, its objects durable: a land's `C`,
     /// the change it committed on its head (the M16 design §4). `None` for a land without one.
     pub first: Option<(ChangesetId, Changeset)>,
+    /// The land's idempotency key, which the publish looks for among the ref moves committed
+    /// since `next_seq` (the M16 design §6); `None` for a land without one.
+    pub key: Option<String>,
+    /// The seq of the first frame that the snapshot the land's key walk read does not hold.
+    pub next_seq: u64,
+    /// The change's head: a land of the key is this land made before when its `squashed_from`
+    /// ends there, or, with `first`, at a changeset on it with `first`'s tree.
+    pub head: ChangesetId,
 }
 
 /// What a publish did.
@@ -120,6 +140,18 @@ pub enum Published {
         /// earlier writers left: those repairs stay made.
         recovered: Recovered,
     },
+    /// A land of the publication's key moved its target since the land's snapshot, and is this
+    /// land made before (the M16 design §6): nothing was recorded.
+    Replayed {
+        /// The changeset it landed.
+        id: ChangesetId,
+        /// Its parent: the head it landed on.
+        onto: ChangesetId,
+        /// The chain it records it squashed, oldest first.
+        squashed_from: Vec<ChangesetId>,
+        /// How many paths its delta changes.
+        files_changed: usize,
+    },
 }
 
 /// The changeset a publish records, and how it was made.
@@ -149,14 +181,20 @@ impl<O: ObjectStore> Repo<O> {
     /// queues the changeset it lands (found there already, it queues nothing) and the move of
     /// its target to it, by compare-and-swap, and commits both as one frame. A target that moved
     /// where the rule does not follow drops the write, which appends nothing:
-    /// [`Published::Moved`]. A target that does not exist is [`RepoError::NotFound`]; a parent
+    /// [`Published::Moved`]. A land of `p`'s key since the land's snapshot drops it too:
+    /// [`Published::Replayed`] or [`RepoError::KeyReused`]. A target that does not exist is [`RepoError::NotFound`]; a parent
     /// the store no longer holds (a frame a failed sync took back), [`RepoError::UnknownParent`].
     /// A failure after the commit point is a warning; a journal append that fails
     /// ([`StoreError::NotCommitted`]) is returned as it is.
     pub(crate) fn publish(&self, p: &Publication) -> Result<Published, RepoError> {
         let write = self.meta.write()?;
 
-        // 1. The target, read under the lock: at `onto`, or moved and made anew there.
+        // 1. The key, among the moves since the land's snapshot, before any relocation or swap.
+        if let Some(replayed) = self.key_since(&write, p)? {
+            return Ok(replayed);
+        }
+
+        // 2. The target, read under the lock: at `onto`, or moved and made anew there.
         if p.relocate == Relocate::Allow {
             let actual = write
                 .get_ref(&p.target)
@@ -178,7 +216,7 @@ impl<O: ObjectStore> Repo<O> {
             }
         }
 
-        // 2. `L` itself, by compare-and-swap from `onto`.
+        // 3. `L` itself, by compare-and-swap from `onto`.
         let frame = Frame {
             id: p.id,
             changeset: &p.changeset,
@@ -187,6 +225,75 @@ impl<O: ObjectStore> Repo<O> {
             merged_in_lock: Vec::new(),
         };
         record(write, p, frame)
+    }
+
+    /// `p`'s key among the ref moves committed since its land's snapshot, under the lock `write`
+    /// holds (the M16 design §6): the first move, in journal order, of a ref a land publishes to
+    /// onto a changeset carrying the key. On the target, the land made before
+    /// ([`Published::Replayed`]) or [`RepoError::KeyReused`]; on another ref,
+    /// [`RepoError::KeyReused`] naming it. `None`: no such move, or no key. Each move read costs
+    /// its changeset's object.
+    fn key_since(
+        &self,
+        write: &MetaWrite<'_>,
+        p: &Publication,
+    ) -> Result<Option<Published>, RepoError> {
+        let Some(key) = &p.key else {
+            return Ok(None);
+        };
+        let ours = match &p.first {
+            Some((_, made)) => Ours::Commit {
+                head: p.head,
+                root: made.root,
+            },
+            None => Ours::Chain(p.head),
+        };
+        let load = |id| self.changeset_object(id).map(Some);
+
+        for frame in write.frames_from(p.next_seq)? {
+            for record in frame.records {
+                // 1. A move onto a changeset, of a ref a land publishes to: a tag never moves,
+                //    and a remote-tracking ref only a fetch moves.
+                let Record::RefMove {
+                    name,
+                    new: Some(moved),
+                    ..
+                } = record
+                else {
+                    continue;
+                };
+                let kind = ref_kind(&name);
+                if matches!(kind, Some(RefKind::Tag | RefKind::RemoteTracking)) {
+                    continue;
+                }
+
+                // 2. Its changeset, if it carries the key.
+                let changeset = self.changeset_object(moved)?;
+                let Some(found) = key::landed_key(moved, &changeset, key, ours, &load)? else {
+                    continue;
+                };
+
+                // 3. Another ref's land of the key, this land on the target, or another change.
+                let reused = |landed| RepoError::KeyReused {
+                    key: key.clone(),
+                    landed,
+                    target: name.clone(),
+                };
+                if name != p.target {
+                    return Err(reused(moved));
+                }
+                return match found {
+                    KeyFound::Replay(found) => Ok(Some(Published::Replayed {
+                        id: found.id,
+                        onto: found.parent,
+                        squashed_from: found.squashed_from,
+                        files_changed: found.files_changed,
+                    })),
+                    KeyFound::Reused(landed) => Err(reused(landed)),
+                };
+            }
+        }
+        Ok(None)
     }
 
     /// `l`, made on `onto`, made anew on `actual`, the target's head, under the lock `write`
