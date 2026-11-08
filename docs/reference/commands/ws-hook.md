@@ -2,13 +2,13 @@
 
 # swarmops ws hook
 
-The Claude Code hooks: read the hook's JSON on stdin, print what the hook expects.
+The agent hosts' hooks: read the hook's JSON on stdin, print what the hook expects.
 
-worktree-create makes the session's workspace and prints its path on stdout; worktree-remove keeps uncommitted edits as a rescue changeset and deletes the workspace; config prints the settings entries that register both. Errors go to stderr as an envelope, with its exit code.
+worktree-create makes the session's workspace and prints its path on stdout; worktree-remove keeps uncommitted edits as a rescue changeset and deletes the workspace; config prints the settings entries that register both. Errors go to stderr as an envelope, with its exit code. The opencode-\* verbs serve OpenCode: each prints one JSON object on stdout, its answer or the error's envelope with its exit code.
 
 ```yaml
 title: "swarmops ws hook"
-description: "The Claude Code hooks: read the hook's JSON on stdin, print what the hook expects."
+description: "The agent hosts' hooks: read the hook's JSON on stdin, print what the hook expects."
 group: "workspaces"
 since: "0.3.0"
 mutates: true
@@ -32,7 +32,7 @@ swarmops ws hook [OPTIONS] <VERB>
 
 Syntax: `<VERB>`.
 
-Which hook. Values: `worktree-create`: The `WorktreeCreate` hook; `worktree-remove`: The `WorktreeRemove` hook; `config`: The settings entries that register both.
+Which hook. Values: `worktree-create`: The `WorktreeCreate` hook; `worktree-remove`: The `WorktreeRemove` hook; `config`: The settings entries that register both; `opencode-create`: OpenCode's create: {source, destination, ref?, name?} to {path, name, head}; `opencode-remove`: OpenCode's remove: {directory, force?} to {removed, name, head, rescued}; `opencode-list`: OpenCode's list: {source} to {entries: \[{path, kind}\]}.
 
 ## Optional arguments
 

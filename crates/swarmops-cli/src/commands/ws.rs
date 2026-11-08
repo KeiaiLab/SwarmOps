@@ -9,6 +9,7 @@
 //!
 //! so ws hook worktree-create < json ─▶ stdout: the path   (errors: an envelope on stderr)
 //! so ws hook worktree-remove < json ─▶ stderr: head, rescue
+//! so ws hook opencode-<verb> < json ─▶ stdout: one JSON object, the answer or the envelope
 //! ```
 
 use std::collections::BTreeMap;
@@ -18,6 +19,7 @@ use std::sync::Arc;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use serde::Serialize;
+use serde_json::{Value, json};
 use swarmops_api::{
     DiffFormat, ErrorCode, Identity, InfoReq, LandMode, ModeInput, OpError, Side, StatusAfter,
     StoreOps, WsCheckInput, WsCommitReq, WsCreateReq, WsDeleteReq, WsDiffReq, WsDiscardReq, WsInfo,
@@ -25,7 +27,7 @@ use swarmops_api::{
     WsSnapshotReq, WsStatusReq,
 };
 use swarmops_ops::LocalOps;
-use swarmops_ws::hook::{self, Bootstrap, MAX_HOOK_INPUT};
+use swarmops_ws::hook::{self, Bootstrap, HookRemove, MAX_HOOK_INPUT, opencode};
 use swarmops_ws::workspace::{self, Locate, Workspace};
 use swarmops_ws::{Ctx as WsCtx, RealFs, RealHost, bootstrap};
 
@@ -518,6 +520,9 @@ fn hook_command(ctx: &Ctx<'_>, op: &'static str, verb: HookVerb) -> Printed {
         }
         HookVerb::WorktreeCreate => hook_create(ctx),
         HookVerb::WorktreeRemove => hook_remove(ctx),
+        HookVerb::OpencodeCreate => return host_printed(ctx, op, host_create(ctx)),
+        HookVerb::OpencodeRemove => return host_printed(ctx, op, host_remove(ctx)),
+        HookVerb::OpencodeList => return host_printed(ctx, op, host_list(ctx)),
     };
     match said {
         Ok(Said::Stdout(line)) => Printed {
@@ -558,31 +563,15 @@ fn read_stdin() -> Result<Vec<u8>, OpError> {
 /// inherits its parent's), else `--repo` / `SWARMOPS_REPO`; both naming different stores is
 /// refused (M5 design §7.1 step 2).
 fn hook_create(ctx: &Ctx<'_>) -> Result<Said, OpError> {
-    // 1. The input, and the two places a store can come from.
+    // 1. The input, and the store: the parent workspace's, else the one named.
     let input = hook::read_create(&read_stdin()?)?;
-    let parent = match workspace::find(&Locate::Cwd(input.cwd.clone()), None, &RealFs::new()) {
-        Ok(found) => Some(found.file),
-        Err(e) if e.code == ErrorCode::WsNotFound.as_str() => None,
-        Err(e) => return Err(e),
-    };
-    let named = context::store_named(ctx.global.repo.as_deref(), ctx.env)?;
+    let store = store_from(ctx, &input.cwd)?;
 
-    // 2. The parent's store wins; a different store named beside it is refused.
-    let store = match (&parent, named) {
-        (Some(file), Some(named)) => {
-            refuse_other_store(&file.repo_id, &file.repo, &named)?;
-            file.repo.clone()
-        }
-        (Some(file), None) => file.repo.clone(),
-        (None, Some(named)) => named,
-        (None, None) => return Err(context::no_store_named(ctx.global.repo.as_deref())),
-    };
-
-    // 3. Where workspaces go, whether to bootstrap, and as whom.
+    // 2. Where workspaces go, whether to bootstrap, and as whom.
     let ws_root = context::ws_root(ctx.env)?;
     let how = context::bootstrap(ctx.env)?;
 
-    // 4. The workspace, made on that store.
+    // 3. The workspace, made on that store.
     let path = on_store(ctx, &store, |wctx| {
         hook::worktree_create(wctx, &input, &ws_root, how)
     })?;
@@ -616,6 +605,94 @@ fn hook_remove(ctx: &Ctx<'_>) -> Result<Said, OpError> {
         ),
     };
     Ok(Said::Stderr(note))
+}
+
+/// The store of a hook standing in `dir`: the one `dir`'s workspace names (a subagent inherits
+/// its parent's), else `--repo` / `SWARMOPS_REPO`; both naming different stores is refused.
+fn store_from(ctx: &Ctx<'_>, dir: &Utf8Path) -> Result<String, OpError> {
+    // 1. The two places a store can come from.
+    let parent = match workspace::find(&Locate::Cwd(dir.to_owned()), None, &RealFs::new()) {
+        Ok(found) => Some(found.file),
+        Err(e) if e.code == ErrorCode::WsNotFound.as_str() => None,
+        Err(e) => return Err(e),
+    };
+    let named = context::store_named(ctx.global.repo.as_deref(), ctx.env)?;
+
+    // 2. The parent's store wins; a different store named beside it is refused.
+    match (parent, named) {
+        (Some(file), Some(named)) => {
+            refuse_other_store(&file.repo_id, &file.repo, &named)?;
+            Ok(file.repo)
+        }
+        (Some(file), None) => Ok(file.repo),
+        (None, Some(named)) => Ok(named),
+        (None, None) => Err(context::no_store_named(ctx.global.repo.as_deref())),
+    }
+}
+
+/// What an `opencode-*` verb prints: one JSON object on stdout, its answer or the envelope of
+/// its error with that error's exit code.
+fn host_printed(ctx: &Ctx<'_>, op: &'static str, said: Result<Value, OpError>) -> Printed {
+    match said {
+        Ok(answer) => Printed {
+            stdout: format!("{answer}\n"),
+            exit: 0,
+        },
+        Err(failed) => ctx.finish(op, ctx.used.meta(), Err::<(), _>(failed)),
+    }
+}
+
+/// `opencode-create`: the workspace made at the destination, on the source's store.
+fn host_create(ctx: &Ctx<'_>) -> Result<Value, OpError> {
+    let input = opencode::read_create(&read_stdin()?)?;
+    let store = store_from(ctx, &input.source)?;
+    let how = context::bootstrap(ctx.env)?;
+    let made = on_store(ctx, &store, |wctx| opencode::create(wctx, &input, how))?;
+    Ok(json!({"path": made.path.as_str(), "name": made.name, "head": made.head}))
+}
+
+/// `opencode-remove`: a directory that is no workspace is left alone (`removed: false`, exit 0);
+/// else the workspace is removed on the store it names.
+fn host_remove(ctx: &Ctx<'_>) -> Result<Value, OpError> {
+    // 1. The input, and whether the directory is a workspace; no store is opened to ask.
+    let input = opencode::read_remove(&read_stdin()?)?;
+    let at = HookRemove::new(input.directory.clone());
+    let Some(found) = hook::ours(&at, &RealFs::new())? else {
+        return Ok(json!({"removed": false}));
+    };
+
+    // 2. Removed on its store.
+    let report = on_store(ctx, &found.file.repo, |wctx| opencode::remove(wctx, &input))?;
+    Ok(json!({
+        "removed": true,
+        "name": found.file.name,
+        "head": report.head.to_string(),
+        "rescued": report.rescued.map(|id| id.to_string()),
+    }))
+}
+
+/// `opencode-list`: the source and the family's workspaces, on the source's store.
+fn host_list(ctx: &Ctx<'_>) -> Result<Value, OpError> {
+    let source = opencode::read_list(&read_stdin()?)?;
+    let store = store_from(ctx, &source)?;
+    let shown = on_store(ctx, &store, |wctx| opencode::list(wctx, &source))?;
+    let mut entries = Vec::with_capacity(shown.len());
+    for one in shown {
+        entries.push(json!({"path": one.path.as_str(), "kind": kind_name(one.kind)?}));
+    }
+    Ok(json!({ "entries": entries }))
+}
+
+/// The wire name of a listed directory's kind.
+fn kind_name(kind: opencode::Kind) -> Result<&'static str, OpError> {
+    match kind {
+        opencode::Kind::Root => Ok("root"),
+        opencode::Kind::Workspace => Ok("workspace"),
+        _ => Err(OpError::new(
+            ErrorCode::Internal,
+            "a listed directory's kind this build does not name",
+        )),
+    }
 }
 
 /// `E_INVALID_ARG{workspace_repo_id, store_repo_id}` when the store at `named` is not the one

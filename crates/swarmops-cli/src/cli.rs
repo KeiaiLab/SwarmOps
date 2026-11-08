@@ -1140,12 +1140,13 @@ pub enum WsCommand {
         #[arg(long)]
         rescue: bool,
     },
-    /// The Claude Code hooks: read the hook's JSON on stdin, print what the hook expects.
+    /// The agent hosts' hooks: read the hook's JSON on stdin, print what the hook expects.
     ///
     /// worktree-create makes the session's workspace and prints its path on stdout;
     /// worktree-remove keeps uncommitted edits as a rescue changeset and deletes the
     /// workspace; config prints the settings entries that register both. Errors go to stderr as
-    /// an envelope, with its exit code.
+    /// an envelope, with its exit code. The opencode-* verbs serve OpenCode: each prints one
+    /// JSON object on stdout, its answer or the error's envelope with its exit code.
     Hook {
         /// Which hook.
         #[arg(value_enum)]
@@ -1221,6 +1222,12 @@ pub enum HookVerb {
     WorktreeRemove,
     /// The settings entries that register both.
     Config,
+    /// OpenCode's create: {source, destination, ref?, name?} to {path, name, head}.
+    OpencodeCreate,
+    /// OpenCode's remove: {directory, force?} to {removed, name, head, rescued}.
+    OpencodeRemove,
+    /// OpenCode's list: {source} to {entries: [{path, kind}]}.
+    OpencodeList,
 }
 
 /// `ws commit --mode`: PATH=KIND.

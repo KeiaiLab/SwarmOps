@@ -10,7 +10,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_api::{
     OpError, ReadFileReq, ShowReq, StatusAfter, StoreOps, WsCommitReq, WsDeleteReq, WsLandReq,
 };
-use swarmops_ws::hook::{self, Bootstrap, HookCreate, HookRemove, MAX_HOOK_INPUT};
+use swarmops_ws::hook::{self, Bootstrap, HookCreate, HookRemove, MAX_HOOK_INPUT, opencode};
 use swarmops_ws::registry::{Entry, Registry};
 use swarmops_ws::state::{self, SWARMWS_DIR};
 use swarmops_ws::{Ctx, RealFs};
@@ -612,4 +612,443 @@ fn a_hook_sparse_workspace_with_copies_commits_lands_and_is_removed() {
     // 4. The remove hook deletes the directory.
     hook::worktree_remove(&ctx, &HookRemove::new(path.clone())).unwrap();
     assert!(!path.exists());
+}
+
+// ---- The second host's family (the M19 design §9.2) ----
+
+/// The second host's create input: from `source` into `destination`, with a starting ref and
+/// a name when given.
+fn host_asking(
+    source: &Utf8Path,
+    destination: &Utf8Path,
+    start: Option<&str>,
+    name: Option<&str>,
+) -> opencode::Create {
+    let mut input = opencode::Create::new(source.to_owned(), destination.to_owned());
+    input.start = start.map(str::to_owned);
+    input.name = name.map(str::to_owned);
+    input
+}
+
+/// What a refusal must leave as it was: the op log's length and every registry file's bytes.
+fn written(f: &Fixture) -> (u64, Vec<(String, Vec<u8>)>) {
+    let dir = f.root.join("workspaces");
+    let mut files: Vec<(String, Vec<u8>)> = match std::fs::read_dir(&dir) {
+        Ok(listed) => listed
+            .map(|item| item.unwrap().path())
+            .filter(|path| path.is_file())
+            .map(|path| {
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                (name, std::fs::read(&path).unwrap())
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    files.sort();
+    (f.last_op(), files)
+}
+
+/// The workspace names the store's registry holds.
+fn names(f: &Fixture) -> Vec<String> {
+    entries(f).into_iter().map(|e| e.name).collect()
+}
+
+/// The family's parsers: one JSON object of at most 64 KiB with an absolute source and
+/// destination; and a workspace made without an identity is the family's own.
+#[test]
+fn host_create_is_the_family_s_own_and_parses_strictly() {
+    // 1. A store; a create from a directory into a destination.
+    let f = Fixture::new();
+    f.commit(None, &[Put::File("a.txt", "a\n")]);
+    let source = made(&f, "session");
+    let dest = f.beside("dest");
+    let ctx = anonymous(&f);
+    let input = host_asking(&source, &dest, None, Some("Task One"));
+    let made_ws = opencode::create(&ctx, &input, Bootstrap::Skip).unwrap();
+    let [entry] = entries(&f).try_into().unwrap();
+    assert_eq!(entry.created_by, format!("opencode/{}", made_ws.name));
+    assert_eq!(made_ws.name, "task-one");
+
+    // 2. Input past 64 KiB: E_INVALID_ARG naming its size and the limit, nothing written.
+    let before = written(&f);
+    let head = br#"{"source":"/s","destination":"/d","pad":""#;
+    let mut long = head.to_vec();
+    long.resize(MAX_HOOK_INPUT + 1 - 2, b'p');
+    long.extend_from_slice(b"\"}");
+    assert_eq!(long.len(), MAX_HOOK_INPUT + 1);
+    let refused = opencode::read_create(&long).unwrap_err();
+    assert_eq!(refused.code, "E_INVALID_ARG", "{refused:?}");
+    assert_eq!(refused.details["size"], MAX_HOOK_INPUT + 1);
+    assert_eq!(refused.details["max"], MAX_HOOK_INPUT);
+    let refused = opencode::read_remove(&long).unwrap_err();
+    assert_eq!(refused.code, "E_INVALID_ARG", "{refused:?}");
+    let refused = opencode::read_list(&long).unwrap_err();
+    assert_eq!(refused.code, "E_INVALID_ARG", "{refused:?}");
+
+    // 3. Not JSON, a field missing, a relative path: each E_INVALID_ARG.
+    let bad: [&[u8]; 6] = [
+        b"not json",
+        br#"{"destination":"/d"}"#,
+        br#"{"source":"/s"}"#,
+        br#"{"source":"s","destination":"/d"}"#,
+        br#"{"source":"/s","destination":"d"}"#,
+        br#"{"source":"/s","destination":"/d","ref":3}"#,
+    ];
+    for input in bad {
+        let refused = opencode::read_create(input).unwrap_err();
+        assert_eq!(refused.code, "E_INVALID_ARG", "{input:?}");
+    }
+    assert_eq!(written(&f), before);
+
+    // 4. The fields a create reads; an empty ref or name counts as none.
+    let read = opencode::read_create(
+        br#"{"source":"/s","destination":"/d","ref":"","name":"","extra":1}"#,
+    )
+    .unwrap();
+    assert_eq!(read, host_asking("/s".into(), "/d".into(), None, None));
+    let read =
+        opencode::read_create(br#"{"source":"/s","destination":"/d","ref":"dev","name":"n"}"#)
+            .unwrap();
+    assert_eq!(
+        read,
+        host_asking("/s".into(), "/d".into(), Some("dev"), Some("n"))
+    );
+}
+
+/// The base: the workspace the source lies in (its head and prefixes), else the starting ref,
+/// else `main`; a ref given inside a workspace wins over its head; a workspace of another store
+/// is refused.
+#[test]
+fn host_create_starts_from_the_workspace_the_ref_or_main() {
+    // 1. `main` and a ref `release/x` on two changesets; a parent workspace of `src`, committed.
+    let f = Fixture::new();
+    let old = f.commit(
+        None,
+        &[Put::File("src/a.txt", "a\n"), Put::File("docs/d.md", "d\n")],
+    );
+    let main = f.commit(Some(&old), &[Put::File("src/a.txt", "main\n")]);
+    f.point("release/x", &old);
+    f.create("parent", &main, &["src"]);
+    let parent = f.beside("parent");
+    write(&parent, "src/a.txt", "committed\n");
+    let mut req = WsCommitReq::new("parent".to_owned(), "parent's work".to_owned());
+    req.status_after = StatusAfter::None;
+    let head = swarmops_ws::commit(&f.ctx(), req).unwrap().changeset;
+    let outside = made(&f, "session");
+    let ctx = anonymous(&f);
+    let create = |source: &Utf8Path, dest: &str, start: Option<&str>| {
+        let input = host_asking(source, &f.beside(dest), start, None);
+        opencode::create(&ctx, &input, Bootstrap::Skip)
+    };
+
+    // 2. In the workspace: its head and prefixes.
+    let child = create(&parent.join("src"), "in-ws", None).unwrap();
+    assert_eq!(child.head, head);
+    assert_eq!(
+        state::read(&RealFs::new(), &child.path).unwrap().prefixes,
+        ["src"]
+    );
+
+    // 3. Outside, with a ref and without one (an empty one is none).
+    assert_eq!(
+        create(&outside, "with-ref", Some("release/x"))
+            .unwrap()
+            .head,
+        old
+    );
+    assert_eq!(create(&outside, "no-ref", None).unwrap().head, main);
+    assert_eq!(create(&outside, "empty-ref", Some("")).unwrap().head, main);
+
+    // 4. A ref given inside the workspace wins over its head.
+    let ruled = create(&parent, "in-ws-ref", Some("release/x")).unwrap();
+    assert_eq!(ruled.head, old);
+
+    // 5. A workspace of another store: refused, nothing written.
+    let other = Fixture::new();
+    let theirs = other.commit(None, &[Put::File("b.txt", "b\n")]);
+    other.create("theirs", &theirs, &[]);
+    let before = written(&f);
+    let refused = create(&other.beside("theirs"), "stray", None).unwrap_err();
+    assert_eq!(refused.code, "E_INVALID_ARG", "{refused:?}");
+    assert_eq!(written(&f), before);
+    assert!(!f.beside("stray").exists());
+}
+
+/// A starting ref the store does not hold is `E_REF_NOT_FOUND` naming it; no other base is
+/// taken and nothing is written.
+#[test]
+fn host_create_with_an_unknown_ref_writes_nothing() {
+    let f = Fixture::new();
+    f.commit(None, &[Put::File("a.txt", "a\n")]);
+    let source = made(&f, "session");
+    let dest = f.beside("dest");
+    let before = written(&f);
+
+    let input = host_asking(&source, &dest, Some("no-such-ref"), None);
+    let refused = opencode::create(&anonymous(&f), &input, Bootstrap::Run).unwrap_err();
+    assert_eq!(refused.code, "E_REF_NOT_FOUND", "{refused:?}");
+    assert_eq!(refused.details["ref"], "no-such-ref");
+    assert!(!dest.exists());
+    assert_eq!(written(&f), before);
+}
+
+/// The workspace is made at the destination, named after the host's name or the destination's
+/// last component; a destination that exists already is `E_WS_EXISTS`; one name at two
+/// destinations takes the suffix.
+#[test]
+fn host_create_is_made_at_the_destination_under_its_name() {
+    // 1. A create with a destination and no name.
+    let f = Fixture::new();
+    f.commit(None, &[Put::File("a.txt", "a\n")]);
+    let source = made(&f, "session");
+    let ctx = anonymous(&f);
+    let dest = f.beside("Bold Oak");
+    let first = opencode::create(
+        &ctx,
+        &host_asking(&source, &dest, None, None),
+        Bootstrap::Skip,
+    )
+    .unwrap();
+    assert_eq!(
+        (first.path.as_path(), first.name.as_str()),
+        (dest.as_path(), "bold-oak")
+    );
+
+    // 2. The same destination from another source: E_WS_EXISTS, nothing written.
+    let elsewhere = made(&f, "elsewhere");
+    let before = written(&f);
+    let again = host_asking(&elsewhere, &dest, None, None);
+    let refused = opencode::create(&ctx, &again, Bootstrap::Skip).unwrap_err();
+    assert_eq!(refused.code, "E_WS_EXISTS", "{refused:?}");
+    assert_eq!(written(&f), before);
+
+    // 3. A plain directory there: E_WS_EXISTS, left as it was.
+    let plain = made(&f, "plain");
+    write(&plain, "keep.txt", "keep\n");
+    let input = host_asking(&source, &plain, None, None);
+    let refused = opencode::create(&ctx, &input, Bootstrap::Skip).unwrap_err();
+    assert_eq!(refused.code, "E_WS_EXISTS", "{refused:?}");
+    assert_eq!(tree_of(&plain), [file("keep.txt", "keep\n")]);
+    assert_eq!(written(&f), before);
+
+    // 4. One name, two destinations: the second's name takes the 7-hex suffix.
+    let one = host_asking(&source, &f.beside("d1"), None, Some("feature"));
+    let two = host_asking(&source, &f.beside("d2"), None, Some("feature"));
+    let one = opencode::create(&ctx, &one, Bootstrap::Skip).unwrap();
+    let two = opencode::create(&ctx, &two, Bootstrap::Skip).unwrap();
+    assert_eq!(one.name, "feature");
+    let suffix = two.name.strip_prefix("feature-").unwrap();
+    assert_eq!(suffix.len(), 7);
+    assert!(
+        suffix.bytes().all(|b| b.is_ascii_hexdigit()),
+        "{}",
+        two.name
+    );
+}
+
+/// The same request again (same source, same destination) is the same workspace: one entry,
+/// the bootstrap run once.
+#[cfg(unix)]
+#[test]
+fn host_create_twice_is_one_workspace_bootstrapped_once() {
+    // 1. A repository whose bootstrap appends a line to a file outside the workspace.
+    let f = Fixture::new();
+    let base = f.commit(None, &[Put::File("a.txt", "a\n")]);
+    let ran = f.beside("ran.txt");
+    let json = format!(r#"{{"bootstrap": {{"argv": ["sh", "-c", "echo once >> {ran}"]}}}}"#);
+    with_config(&f, &base, &json);
+    let source = made(&f, "session");
+    let input = host_asking(&source, &f.beside("dest"), None, Some("w"));
+
+    // 2. Twice: one path, one workspace, one bootstrap.
+    let ctx = anonymous(&f);
+    let first = opencode::create(&ctx, &input, Bootstrap::Run).unwrap();
+    let again = opencode::create(&ctx, &input, Bootstrap::Run).unwrap();
+    assert_eq!((first.path, first.name), (again.path, again.name));
+    assert_eq!(names(&f), ["w"]);
+    assert_eq!(std::fs::read_to_string(&ran).unwrap(), "once\n");
+}
+
+/// The answer's path is an existing directory holding the base's files; a bootstrap that fails
+/// fails the create, and the workspace it made is gone, directory and entry.
+#[cfg(unix)]
+#[test]
+fn host_create_answers_its_path_and_takes_back_a_failed_bootstrap() {
+    // 1. A create: the path, the name, the head.
+    let f = Fixture::new();
+    let base = f.commit(None, &[Put::File("a.txt", "a\n")]);
+    let source = made(&f, "session");
+    let ctx = anonymous(&f);
+    let input = host_asking(&source, &f.beside("ok"), None, None);
+    let ok = opencode::create(&ctx, &input, Bootstrap::Run).unwrap();
+    assert!(ok.path.is_absolute() && ok.path.is_dir(), "{}", ok.path);
+    assert_eq!(tree_of(&ok.path), [file("a.txt", "a\n")]);
+    assert_eq!((ok.name.as_str(), ok.head.as_str()), ("ok", base.as_str()));
+
+    // 2. A failing bootstrap: its code, and nothing of the workspace left.
+    let json = r#"{"bootstrap": {"argv": ["sh", "-c", "touch made.txt; exit 3"]}}"#;
+    with_config(&f, &base, json);
+    let dest = f.beside("failed");
+    let input = host_asking(&source, &dest, None, None);
+    let failed = opencode::create(&ctx, &input, Bootstrap::Run).unwrap_err();
+    assert_eq!(failed.code, "E_CHECK_FAILED", "{failed:?}");
+    assert_eq!(failed.details["stage"], "bootstrap");
+    assert!(!dest.exists());
+    assert_eq!(names(&f), ["ok"]);
+}
+
+/// The remove input: an absolute directory and a force choice, off when absent.
+#[test]
+fn host_remove_reads_a_directory_and_a_force_choice() {
+    let read = opencode::read_remove(br#"{"directory":"/w"}"#).unwrap();
+    assert_eq!(
+        read,
+        opencode::Remove::new("/w".into(), opencode::Force::Off)
+    );
+    let read = opencode::read_remove(br#"{"directory":"/w","force":true}"#).unwrap();
+    assert_eq!(
+        read,
+        opencode::Remove::new("/w".into(), opencode::Force::On)
+    );
+    let read = opencode::read_remove(br#"{"directory":"/w","force":false}"#).unwrap();
+    assert_eq!(read.force, opencode::Force::Off);
+
+    let bad: [&[u8]; 4] = [
+        br#"{"directory":"w"}"#,
+        br#"{"directory":"/w","force":"yes"}"#,
+        br#"{"directory":"/w","force":1}"#,
+        br#"{"force":true}"#,
+    ];
+    for input in bad {
+        let refused = opencode::read_remove(input).unwrap_err();
+        assert_eq!(refused.code, "E_INVALID_ARG", "{input:?}");
+    }
+}
+
+/// Remove leaves alone what the family did not make: a plain directory is not ours (the CLI
+/// exits 0 on that), a workspace of the `claude-code` family is refused and still lists.
+#[test]
+fn host_remove_leaves_what_the_family_did_not_make() {
+    // 1. A plain directory: not a workspace.
+    let f = Fixture::new();
+    f.commit(None, &[Put::File("a.txt", "a\n")]);
+    let plain = made(&f, "plain");
+    let input = HookRemove::new(plain.clone());
+    assert_eq!(hook::ours(&input, &RealFs::new()).unwrap(), None);
+    assert!(plain.is_dir());
+
+    // 2. A `claude-code` workspace: refused, kept.
+    let ctx = anonymous(&f);
+    let ws_root = made(&f, "workspaces");
+    let claude = asking("abc123", "theirs", &plain);
+    let path = hook::worktree_create(&ctx, &claude, &ws_root, Bootstrap::Skip).unwrap();
+    let before = written(&f);
+    let input = opencode::Remove::new(path.clone(), opencode::Force::On);
+    let refused = opencode::remove(&ctx, &input).unwrap_err();
+    assert_eq!(refused.code, "E_INVALID_ARG", "{refused:?}");
+    assert!(path.is_dir());
+    assert_eq!(written(&f), before);
+    assert_eq!(names(&f), ["theirs"]);
+
+    // 3. A hand-made one: refused too.
+    let base = f.commit(None, &[Put::File("b.txt", "b\n")]);
+    f.create("by-hand", &base, &[]);
+    let input = opencode::Remove::new(f.beside("by-hand"), opencode::Force::On);
+    let refused = opencode::remove(&ctx, &input).unwrap_err();
+    assert_eq!(refused.code, "E_INVALID_ARG", "{refused:?}");
+    assert!(f.beside("by-hand").is_dir());
+}
+
+/// A clean workspace goes whatever the force choice; a dirty one is `E_WS_DIRTY` without force
+/// (its details say force would proceed) and, with it, goes with its edits kept as a rescue.
+#[test]
+fn host_remove_deletes_clean_refuses_dirty_and_rescues_forced() {
+    // 1. Three of the family's workspaces, one clean, two with an edit; one committed past
+    //    its base, which is no edit.
+    let f = Fixture::new();
+    let base = f.commit(None, &[Put::File("a.txt", "a\n")]);
+    let source = made(&f, "session");
+    let ctx = anonymous(&f);
+    let make = |dest: &str| {
+        let input = host_asking(&source, &f.beside(dest), None, None);
+        opencode::create(&ctx, &input, Bootstrap::Skip)
+            .unwrap()
+            .path
+    };
+    let (clean, dirty) = (make("clean"), make("dirty"));
+    let mut req = WsCommitReq::new("clean".to_owned(), "work".to_owned());
+    req.status_after = StatusAfter::None;
+    write(&clean, "a.txt", "work\n");
+    let worked = swarmops_ws::commit(&f.ctx(), req).unwrap().changeset;
+    write(&dirty, "a.txt", "edited\n");
+    let remove = |dir: &Utf8Path, force| {
+        opencode::remove(&ctx, &opencode::Remove::new(dir.to_owned(), force))
+    };
+
+    // 2. Clean, force off: gone, its head reported.
+    let report = remove(&clean, opencode::Force::Off).unwrap();
+    assert_eq!((report.head.to_string(), report.rescued), (worked, None));
+    assert!(!clean.exists());
+
+    // 3. Dirty, force off: refused, the force field true, nothing changed.
+    let before = written(&f);
+    let refused = remove(&dirty, opencode::Force::Off).unwrap_err();
+    assert_eq!(refused.code, "E_WS_DIRTY", "{refused:?}");
+    assert_eq!(refused.details["force"], true);
+    assert_eq!(
+        std::fs::read_to_string(dirty.join("a.txt")).unwrap(),
+        "edited\n"
+    );
+    assert_eq!(written(&f), before);
+
+    // 4. Dirty, force on: gone, the rescue on the head holding the edit.
+    let report = remove(&dirty, opencode::Force::On).unwrap();
+    assert!(!dirty.exists());
+    let rescued = report.rescued.expect("a rescue").to_string();
+    assert_eq!(report.head.to_string(), rescued);
+    let shown = f.ops.show(ShowReq::new(rescued.as_str())).unwrap();
+    assert_eq!(shown.parents, std::slice::from_ref(&base));
+    let mut read = ReadFileReq::new(rescued.as_str(), "a.txt");
+    read.max_bytes = 1024;
+    assert_eq!(f.ops.read_file(read).unwrap().content, "edited\n");
+    assert_eq!(names(&f), Vec::<String>::new());
+}
+
+/// List: the source itself, then the family's workspaces whose directory exists, by path;
+/// another family's and a gone one's are left out, and nothing is written.
+#[test]
+fn host_list_shows_the_root_and_the_family_s_live_workspaces() {
+    // 1. Three of the family's workspaces (one's directory deleted), one of `claude-code`.
+    let f = Fixture::new();
+    f.commit(None, &[Put::File("a.txt", "a\n")]);
+    let source = made(&f, "session");
+    let ctx = anonymous(&f);
+    for dest in ["w-c", "w-a", "w-b"] {
+        let input = host_asking(&source, &f.beside(dest), None, None);
+        opencode::create(&ctx, &input, Bootstrap::Skip).unwrap();
+    }
+    std::fs::remove_dir_all(f.beside("w-b")).unwrap();
+    let ws_root = made(&f, "workspaces");
+    let claude = asking("abc123", "theirs", &source);
+    hook::worktree_create(&ctx, &claude, &ws_root, Bootstrap::Skip).unwrap();
+
+    // 2. The root, then the two live ones in path order; nothing written.
+    let before = written(&f);
+    let listed = opencode::list(&ctx, &source).unwrap();
+    let shown: Vec<(Utf8PathBuf, opencode::Kind)> =
+        listed.into_iter().map(|s| (s.path, s.kind)).collect();
+    assert_eq!(
+        shown,
+        [
+            (source.clone(), opencode::Kind::Root),
+            (f.beside("w-a"), opencode::Kind::Workspace),
+            (f.beside("w-c"), opencode::Kind::Workspace),
+        ]
+    );
+    assert_eq!(written(&f), before);
+
+    // 3. The list input: an absolute source.
+    assert_eq!(opencode::read_list(br#"{"source":"/s"}"#).unwrap(), "/s");
+    let refused = opencode::read_list(br#"{"source":"s"}"#).unwrap_err();
+    assert_eq!(refused.code, "E_INVALID_ARG", "{refused:?}");
 }

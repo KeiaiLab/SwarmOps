@@ -140,7 +140,7 @@ Work in a directory of your own: a workspace holds a sparse copy of a changeset'
 - [`swarmops ws list`](commands/ws-list.md): List the store's workspaces.
 - [`swarmops ws info`](commands/ws-info.md): Describe one workspace: its directory, base, head and prefixes.
 - [`swarmops ws delete`](commands/ws-delete.md): Remove a workspace's directory, then its entry.
-- [`swarmops ws hook`](commands/ws-hook.md): The Claude Code hooks: read the hook's JSON on stdin, print what the hook expects.
+- [`swarmops ws hook`](commands/ws-hook.md): The agent hosts' hooks: read the hook's JSON on stdin, print what the hook expects.
 
 ## Server
 
