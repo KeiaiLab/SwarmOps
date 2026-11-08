@@ -95,7 +95,8 @@ check-ci-slow:
     PROPTEST_CASES=2000 cargo nextest run --locked --workspace --all-features --run-ignored all -E 'not test(regenerate_golden) and not test(regenerate_git_fixtures) and not test(check_git_fixtures) and not test(thirty_two_processes) and not ({{ ci_perf_cases }})'
 
 # The measurement cases on 12,000 or 13,000 commits or 12,000 changesets: `remote_perf`'s five,
-# `serve_perf`'s six, `intake_perf`'s one, `serve_load`'s two and the workspace's checked land;
+# `serve_perf`'s six, `intake_perf`'s three (`commits_beside_an_import`, its control lane
+# `committers_alone` and `import_memory`), `serve_load`'s two and the workspace's checked land;
 # and G4's landing lanes (`landing::perf::landing_under_load`, four lanes of 2 minutes, about 9 to
 # 11 minutes in all), past half the ci-slow kill. `check-ci-slow` leaves them out,
 # `check-ci-perf` runs them, `check-slow` runs them optimized. swarmops-core's `supply_chain` tests fail a
@@ -148,6 +149,8 @@ _bench-fresh:
 # and update, the 10,000-file create, the checked land on 12,000 changesets) print `ws-perf: `
 # lines. The served-load cases (`serve_load::*`: 50 git clients through `serve` beside 50
 # landing agents and against git's own server, 10 minutes each) print `serve-load: ` lines.
+# The intake cases (`intake_perf::*`: the import beside 8 committers, the committers alone,
+# the import's memory alone) print `intake-perf: ` lines.
 # The CLI contention test and G4's landing measurement (`landing::perf::landing_under_load`,
 # open loop: one land per agent every 2 s for 120 s) run at 32 and at 50 processes
 # (`SWARMOPS_PERF_PROCESSES` lists others; the landing store under the bench directory), and

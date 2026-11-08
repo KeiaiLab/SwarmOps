@@ -1333,52 +1333,56 @@ impl GitSource for Watched<'_> {
     }
 }
 
+/// What an import of `commits` counted commits costs with no step budget: the changesets of each
+/// frame, the write transactions after the frames' own, and the flushes of the last step. Each
+/// frame begins one write transaction; a flush is counted for the last step once its first
+/// transaction began.
+#[cfg(feature = "test-hooks")]
+fn final_move_cost(commits: usize) -> (Vec<usize>, u64, usize) {
+    use swarmops_store::MetaStore;
+
+    let (source, chain) = counting(commits);
+    let (_dir, root, repo) = new_repo();
+    drop(repo);
+
+    // 1. Every flush, with how many write transactions had begun when it ran.
+    let flushes = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&flushes);
+    let watching = FailingFs::new(move |method, _| {
+        if method.flushes() {
+            seen.lock().unwrap().push(MetaStore::write_calls());
+        }
+        false
+    });
+    let repo = LocalRepo::open_with_fs(&root, Arc::new(watching)).unwrap();
+
+    // 2. The import, with no budget to stop the doubling.
+    let mut req = request(&chain[commits - 1].to_string());
+    req.step_budget = Duration::MAX;
+    let before = MetaStore::write_calls();
+    import(&repo, &source, &req).unwrap();
+    let writes = MetaStore::write_calls() - before;
+
+    // 3. What came after the frames' own transactions.
+    let frames = changeset_frames(&root);
+    let frame_writes = u64::try_from(frames.len()).unwrap();
+    let flushes = flushes.lock().unwrap();
+    let last_step = (flushes.iter())
+        .filter(|&&at| at > before + frame_writes)
+        .count();
+    (frames, writes - frame_writes, last_step)
+}
+
 /// The import's last step, the metadata's flush, the target's move and the flush after it, costs
 /// as many write transactions and flushes to stable storage for 1 commit as for 2,000 (the M17
 /// design §3.1). With no step budget the 2,000 are frames of 64, 128, 256, 512, 1,024 and 16, so
 /// that the compaction runs in the 1,024 frame's commit and the last step meets a short tail, as
-/// the import of one commit does. Each frame begins one write transaction; a flush is counted
-/// for the last step once its first transaction began.
+/// the import of one commit does.
 #[cfg(feature = "test-hooks")]
 #[test]
 fn the_final_move_costs_the_same_for_1_and_2000() {
-    use swarmops_store::MetaStore;
-
-    let cost = |commits: usize| -> (Vec<usize>, u64, usize) {
-        let (source, chain) = counting(commits);
-        let (_dir, root, repo) = new_repo();
-        drop(repo);
-
-        // 1. Every flush, with how many write transactions had begun when it ran.
-        let flushes = Arc::new(Mutex::new(Vec::new()));
-        let seen = Arc::clone(&flushes);
-        let watching = FailingFs::new(move |method, _| {
-            if method.flushes() {
-                seen.lock().unwrap().push(MetaStore::write_calls());
-            }
-            false
-        });
-        let repo = LocalRepo::open_with_fs(&root, Arc::new(watching)).unwrap();
-
-        // 2. The import, with no budget to stop the doubling.
-        let mut req = request(&chain[commits - 1].to_string());
-        req.step_budget = Duration::MAX;
-        let before = MetaStore::write_calls();
-        import(&repo, &source, &req).unwrap();
-        let writes = MetaStore::write_calls() - before;
-
-        // 3. What came after the frames' own transactions.
-        let frames = changeset_frames(&root);
-        let frame_writes = u64::try_from(frames.len()).unwrap();
-        let flushes = flushes.lock().unwrap();
-        let last_step = (flushes.iter())
-            .filter(|&&at| at > before + frame_writes)
-            .count();
-        (frames, writes - frame_writes, last_step)
-    };
-
-    let (one_frames, one_writes, one_flushes) = cost(1);
-    let (many_frames, many_writes, many_flushes) = cost(2_000);
+    let (one_frames, one_writes, one_flushes) = final_move_cost(1);
+    let (many_frames, many_writes, many_flushes) = final_move_cost(2_000);
     assert_eq!(one_frames, [1]);
     assert_eq!(many_frames, [64, 128, 256, 512, 1_024, 16]);
     assert_eq!(
@@ -1386,6 +1390,35 @@ fn the_final_move_costs_the_same_for_1_and_2000() {
         "write transactions of the last step"
     );
     assert_eq!(many_flushes, one_flushes, "flushes of the last step");
+}
+
+/// I10 (the M17 closure design §3.1): the import's last step costs as many write transactions
+/// for 12,000 commits, the roadmap's history, as for 1, and no more flushes, with no step
+/// budget. The flushes are not equal: after the last frame of the 12,000 (3,872 changesets) the
+/// last step's first transaction, the metadata flush, flushed nothing, against 6 after the one
+/// commit's frame (measured on `f3ed2a82`: 9 flushes against 15, 3 transactions each). Which
+/// frame's commit compacts depends on the history's length; 2,000 was picked so that it is not
+/// the last. The figures print.
+#[cfg(feature = "test-hooks")]
+#[test]
+#[ignore = "slow, ~45 s (15.3 s and 43.5 s at load 116 and 141, idle not measured): imports 12,000 commits in process"]
+fn the_final_move_costs_the_same_for_1_and_12000() {
+    let (one_frames, one_writes, one_flushes) = final_move_cost(1);
+    let (many_frames, many_writes, many_flushes) = final_move_cost(12_000);
+    println!(
+        "final move: 1 commit {one_writes} transactions, {one_flushes} flushes; 12,000 commits \
+         (frames {many_frames:?}) {many_writes} transactions, {many_flushes} flushes"
+    );
+    assert_eq!(one_frames, [1]);
+    assert_eq!(many_frames.iter().sum::<usize>(), 12_000, "{many_frames:?}");
+    assert_eq!(
+        many_writes, one_writes,
+        "write transactions of the last step"
+    );
+    assert!(
+        many_flushes <= one_flushes,
+        "flushes of the last step: {many_flushes} against {one_flushes}"
+    );
 }
 
 /// Every reader sees the target's old head until the import's last step moves it, then only the

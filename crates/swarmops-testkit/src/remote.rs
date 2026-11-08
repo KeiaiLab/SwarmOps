@@ -193,6 +193,9 @@ pub struct GitServer {
     ticks: AtomicU64,
     /// The declined branches of each repository: `(repository, branch)` to the message.
     declines: Mutex<BTreeMap<(String, String), String>>,
+    /// How the [`SshMode::Serve`] stand-in runs git's service.
+    #[cfg(feature = "cli")]
+    accounting: crate::accounting::Accounting,
 }
 
 impl GitServer {
@@ -223,6 +226,8 @@ impl GitServer {
             format,
             ticks: AtomicU64::new(0),
             declines: Mutex::new(BTreeMap::new()),
+            #[cfg(feature = "cli")]
+            accounting: crate::accounting::Accounting::Off,
         };
 
         // 2. The git it runs is there and new enough, or the test fails naming GIT_ENV.
@@ -466,6 +471,27 @@ impl GitServer {
         commit
     }
 
+    /// The [`SshMode::Serve`] stand-in made from now on runs git's service as `accounting`
+    /// says, with the same script as [`crate::serve::ServeSite::with_accounting`]'s: with
+    /// [`crate::accounting::Accounting::Cpu`] each connection leaves a file in
+    /// [`GitServer::ledger_dir`].
+    #[cfg(feature = "cli")]
+    #[must_use]
+    pub fn with_accounting(mut self, accounting: crate::accounting::Accounting) -> GitServer {
+        if accounting == crate::accounting::Accounting::Cpu {
+            fs::create_dir_all(self.ledger_dir()).expect("create the ledger");
+        }
+        self.accounting = accounting;
+        self
+    }
+
+    /// Where the per-connection files of the accounted stand-in go, for
+    /// [`crate::accounting::spent_since`].
+    #[cfg(feature = "cli")]
+    pub fn ledger_dir(&self) -> PathBuf {
+        self.root.path().join("ledger")
+    }
+
     /// The ssh stand-in in `mode`: the value for `GIT_SSH_COMMAND`. Its URLs are
     /// [`GitServer::ssh_url`]'s.
     pub fn ssh_command(&self, mode: SshMode) -> String {
@@ -540,11 +566,25 @@ impl GitServer {
                  eval \"set -- $*\"\n\
                  service=${{1#git-}}\n\
                  path=${{2#/}}\n\
-                 exec {git} \"$service\" {repos}/\"$path\"\n",
-                git = sh_quote(path_str(&self.git)),
-                repos = sh_quote(path_str(&self.repos())),
+                 {run}",
+                run = self.serve_run(),
             ),
         }
+    }
+
+    /// The tail of the [`SshMode::Serve`] stand-in: git's service on the mapped path, exec'd or
+    /// counted.
+    fn serve_run(&self) -> String {
+        let service = format!(
+            "{git} \"$service\" {repos}/\"$path\"",
+            git = sh_quote(path_str(&self.git)),
+            repos = sh_quote(path_str(&self.repos())),
+        );
+        #[cfg(feature = "cli")]
+        if self.accounting == crate::accounting::Accounting::Cpu {
+            return crate::accounting::counted(&self.ledger_dir(), &service);
+        }
+        format!("exec {service}\n")
     }
 
     /// The message of a squash of `head` onto `base`.
@@ -1611,6 +1651,25 @@ mod tests {
         let server = served();
         let ssh = server.ssh_command(SshMode::Serve);
         clone_and_push(&server, &server.ssh_url(REPO), &[("GIT_SSH_COMMAND", &ssh)]);
+    }
+
+    /// The accounted stand-in serves as the plain one does (nothing reaches the transport but
+    /// git's bytes), and leaves one ledger file a connection. A connection this short may end
+    /// between two samples, so which processes its record names is not asserted.
+    #[cfg(feature = "cli")]
+    #[test]
+    fn accounted_git_clones_pushes_and_counts() {
+        use crate::accounting::{Accounting, spent_since};
+
+        let server = served().with_accounting(Accounting::Cpu);
+        let ssh = server.ssh_command(SshMode::Serve);
+        let script = std::fs::read_to_string(ssh.trim_matches('\'')).expect("the stand-in");
+        assert!(script.contains("times"), "{script}");
+        clone_and_push(&server, &server.ssh_url(REPO), &[("GIT_SSH_COMMAND", &ssh)]);
+
+        // The clone and the push: a file each.
+        let spent = spent_since(&server.ledger_dir(), 0);
+        assert!(spent.len() >= 2, "{spent:?}");
     }
 
     #[test]

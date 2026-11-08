@@ -16,6 +16,7 @@
 //!   ServeSite: store repo ──▶ git/serve.git ◀── swarmops serve (ssh stand-in) ◀── client git
 //! ```
 
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::fs;
@@ -30,7 +31,7 @@ use camino::Utf8Path;
 use swarmops_git::serve::repo::ServeRepo;
 use swarmops_ops::LocalOps;
 use swarmops_ops::serve::refresh::{Freshness, freshness};
-use swarmops_testkit::accounting::{Accounting, Spent, ledger_dir, spent_since};
+use swarmops_testkit::accounting::{Accounting, Peak, Spent, ledger_dir, spent_since};
 use swarmops_testkit::remote::{GitServer, SshMode};
 use swarmops_testkit::serve::ServeSite;
 use tempfile::TempDir;
@@ -140,7 +141,7 @@ enum Start {
     /// Empty: the first connection exports the whole history (the v0.7.0 cases).
     Cold,
     /// Holding the history's objects already, and the server's CPU and memory accounted
-    /// (`ServeSite::seed_serve_git`, `Accounting::Cpu`): the M17 cases.
+    /// (`ServeSite::seed_serve_git`, `Accounting::Cpu`), git's own server's too: the M17 cases.
     Seeded,
 }
 
@@ -166,8 +167,11 @@ impl Bench {
     /// `commits` commits on `main` of a bare repository, imported into the store [`REPO`]; the
     /// server's `serve.git` starts as `start` says.
     fn build(commits: usize, start: Start) -> Bench {
-        // 1. git's side: the history, written by fast-import.
-        let server = GitServer::new();
+        // 1. git's side: the history, written by fast-import; seeded, accounted as serve's is.
+        let server = match start {
+            Start::Cold => GitServer::new(),
+            Start::Seeded => GitServer::new().with_accounting(Accounting::Cpu),
+        };
         let bare = server.create(REPO);
         fast_import(&server, &bare, commits);
 
@@ -238,6 +242,16 @@ impl Bench {
     /// What the connections finished after `mark` cost the server.
     fn spent(&self, mark: usize) -> Vec<Spent> {
         spent_since(&ledger_dir(&self.site), mark)
+    }
+
+    /// [`Bench::mark`] for git's own server.
+    fn git_mark(&self) -> usize {
+        spent_since(&self.server.ledger_dir(), 0).len()
+    }
+
+    /// [`Bench::spent`] for git's own server.
+    fn git_spent(&self, mark: usize) -> Vec<Spent> {
+        spent_since(&self.server.ledger_dir(), mark)
     }
 
     /// The store's path.
@@ -553,6 +567,10 @@ const CLIENTS: usize = 50;
 /// The gap between the starts of two clones that do not overlap.
 const APART: Duration = Duration::from_secs(10);
 
+/// How many clones one after another make the unit "one clone alone": their mean CPU, to half
+/// a millisecond, where one clone's is a tick or two of 10 ms.
+const UNIT_CLONES: usize = 20;
+
 /// How many clones `git fsck` checks at a time.
 const FSCK_AT_ONCE: usize = 8;
 
@@ -579,6 +597,55 @@ fn cpu(spent: &[Spent]) -> Duration {
 /// The largest peak of `spent`, in KiB.
 fn peak(spent: &[Spent]) -> u64 {
     spent.iter().map(|one| one.peak_kib).max().unwrap_or(0)
+}
+
+/// The per-name record of `spent`, merged over its connections, largest `VmHWM` first:
+/// `swarmops 1194.6 MiB (anon 160.2, file 1030.1 MiB, 35 threads), git …; peak in swarmops`.
+fn by_name(spent: &[Spent]) -> String {
+    // 1. Each name's largest figures over every connection.
+    let mut names: BTreeMap<&str, Peak> = BTreeMap::new();
+    for (name, one) in spent.iter().flat_map(|one| &one.by_name) {
+        names.entry(name).or_default().merge(one);
+    }
+    let mut names: Vec<_> = names.into_iter().collect();
+    names.sort_by_key(|(_, one)| std::cmp::Reverse(one.hwm_kib));
+
+    // 2. The line, and the name that peaked.
+    let mut line = String::new();
+    for (name, one) in names {
+        let sep = if line.is_empty() { "" } else { ", " };
+        write!(
+            line,
+            "{sep}{name} {:.1} MiB (anon {:.1}, file {:.1} MiB, {} threads)",
+            mib(one.hwm_kib),
+            mib(one.anon_kib),
+            mib(one.file_kib),
+            one.threads,
+        )
+        .expect("write to a string");
+    }
+    let top = spent.iter().max_by_key(|one| one.peak_kib);
+    let top = top.map_or("-", |one| one.peak_name.as_str());
+    format!("{line}; peak in {top}")
+}
+
+/// The mean CPU of `spent`'s connections.
+fn mean_cpu(spent: &[Spent]) -> Duration {
+    cpu(spent) / u32::try_from(spent.len().max(1)).expect("a small count")
+}
+
+/// [`UNIT_CLONES`] clones of `side` one after another into `<label>-<n>`: their mean time and
+/// directories.
+fn one_by_one(bench: &Bench, side: &Side, label: &str) -> (Duration, Vec<PathBuf>) {
+    let mut total = Duration::ZERO;
+    let mut dirs = Vec::new();
+    for n in 0..UNIT_CLONES {
+        let dir = bench.dir(&format!("{label}-{n}"));
+        total += timed(|| clone_into(side, &dir));
+        dirs.push(dir);
+    }
+    let count = u32::try_from(UNIT_CLONES).expect("a small count");
+    (total / count, dirs)
 }
 
 /// The median and the largest of `times`.
@@ -633,7 +700,8 @@ fn check_clones(side: &Side, dirs: &[PathBuf], expected: &str) {
 }
 
 /// Prints one `serve-perf: ` line for 50 clones: `server` is the figures of the served side, the
-/// accounted CPU and peak memory of its connections; `one` is one clone alone.
+/// accounted CPU and peak memory of its connections; `one` is one clone alone (the mean CPU and
+/// time of [`UNIT_CLONES`]).
 fn print_clones(
     what: &str,
     serve: &[Duration],
@@ -666,35 +734,59 @@ fn print_clones(
 }
 
 /// 50 clones at once, and 50 clones 10 s apart, from `swarmops serve`: the server's CPU of each
-/// against one clone's, and each clone's time against git's `upload-pack` under the same 50
-/// (R-3).
+/// against one clone's (the mean of 20 one after another), and each clone's time against git's
+/// `upload-pack` under the same 50 (R-3); git's own server's CPU for one clone and for 50 at
+/// once, its per-connection floor, beside it (the M17 closure design §3.2).
 #[test]
-#[ignore = "slow, ~20 min (estimate): imports 12,000 commits, 150 clones, run by `just perf`"]
+#[ignore = "slow, ~20 min (estimate): imports 12,000 commits, 190 clones, run by `just perf`"]
 fn fifty_clones_at_once_and_apart() {
     let bench = Bench::build(LONG, Start::Seeded);
     let (serve, git) = (bench.serve(), bench.git());
 
-    // 1. One clone alone, after a clone that pays the first refresh: its CPU is the unit.
+    // 1. One clone alone, after a clone that pays the first refresh: the mean CPU of
+    //    UNIT_CLONES one after another is the unit, git's own server's beside it.
     let first = timed(|| clone_into(&serve, &bench.dir("first")));
     let mark = bench.mark();
-    let solo_dir = bench.dir("solo");
-    let solo = timed(|| clone_into(&serve, &solo_dir));
-    let one = (cpu(&bench.spent(mark)), solo);
-    let expected = serve.rev(&solo_dir, "origin/main");
+    let (solo, solo_dirs) = one_by_one(&bench, &serve, "solo");
+    let spent = bench.spent(mark);
+    assert!(
+        spent.len() >= UNIT_CLONES,
+        "{} connections were accounted",
+        spent.len()
+    );
+    let one = (mean_cpu(&spent), solo);
+    let git_mark = bench.git_mark();
+    let (git_solo, git_dirs) = one_by_one(&bench, &git, "git-solo");
+    let git_spent = bench.git_spent(git_mark);
+    assert!(
+        git_spent.len() >= UNIT_CLONES,
+        "{} git connections were accounted",
+        git_spent.len()
+    );
+    let git_unit = mean_cpu(&git_spent);
+    let expected = serve.rev(&solo_dirs[0], "origin/main");
     println!(
         "serve-perf: first clone on {LONG} commits from a seeded serve.git: {:.3} s; one clone \
-         alone: {:.3} s, server CPU {:.3} s",
+         alone (mean of {UNIT_CLONES}): {:.3} s, server CPU {:.4} s; git upload-pack {:.3} s, \
+         server CPU {:.4} s",
         first.as_secs_f64(),
         solo.as_secs_f64(),
-        one.0.as_secs_f64()
+        one.0.as_secs_f64(),
+        git_solo.as_secs_f64(),
+        git_unit.as_secs_f64(),
     );
-    check_clones(&serve, &[bench.dir("first"), solo_dir], &expected);
+    let mut dirs = solo_dirs;
+    dirs.push(bench.dir("first"));
+    check_clones(&serve, &dirs, &expected);
+    check_clones(&git, &git_dirs, &expected);
 
-    // 2. 50 at once: from serve, then from git's upload-pack.
+    // 2. 50 at once: from serve, then from git's upload-pack, each accounted.
     let mark = bench.mark();
     let at_once = together(&bench, &serve, "serve-at-once", CLIENTS, Duration::ZERO);
     let spent = bench.spent(mark);
+    let git_mark = bench.git_mark();
     let git_once = together(&bench, &git, "git-at-once", CLIENTS, Duration::ZERO);
+    let git_spent = bench.git_spent(git_mark);
     let serve_times: Vec<_> = at_once.iter().map(|(time, _)| *time).collect();
     let git_times: Vec<_> = git_once.iter().map(|(time, _)| *time).collect();
     assert!(
@@ -702,12 +794,36 @@ fn fifty_clones_at_once_and_apart() {
         "{} connections were accounted",
         spent.len()
     );
+    assert!(
+        git_spent.len() >= CLIENTS,
+        "{} git connections were accounted",
+        git_spent.len()
+    );
     print_clones(
         "at once",
         &serve_times,
         Some(&git_times),
         &spent,
         (one.0, solo),
+    );
+
+    // The per-connection floor: each server's 50 against 50 times its own one clone.
+    let times_one = |total: Duration, unit: Duration| {
+        total.as_secs_f64() / (unit.as_secs_f64() * count(CLIENTS)).max(0.000_001)
+    };
+    println!(
+        "serve-perf: g19 floor on {LONG} commits, {CLIENTS} clones at once: swarmops serve CPU \
+         {:.3} s against one clone's {:.4} s (x{:.2} of {CLIENTS} times it, x{:.1} one clone); \
+         git upload-pack CPU {:.3} s against one clone's {:.4} s (x{:.2} of {CLIENTS} times it, \
+         x{:.1} one clone) (target at most x4.0 one clone)",
+        cpu(&spent).as_secs_f64(),
+        one.0.as_secs_f64(),
+        times_one(cpu(&spent), one.0),
+        times_one(cpu(&spent), one.0) * count(CLIENTS),
+        cpu(&git_spent).as_secs_f64(),
+        git_unit.as_secs_f64(),
+        times_one(cpu(&git_spent), git_unit),
+        times_one(cpu(&git_spent), git_unit) * count(CLIENTS),
     );
     let dirs: Vec<_> = at_once.into_iter().map(|(_, dir)| dir).collect();
     check_clones(&serve, &dirs, &expected);
@@ -897,6 +1013,10 @@ fn push_one_and_two_gib() {
             mib(peak(&spent)),
             cpu(&spent).as_secs_f64(),
         );
+        println!(
+            "serve-perf: push of {count} blobs of 1 MiB, by process: {}",
+            by_name(&spent)
+        );
 
         // The client takes the landed commit; main names it.
         side.run(&dir, &["fetch", "--quiet", "origin"]);
@@ -918,6 +1038,10 @@ fn push_one_and_two_gib() {
          memory {:.1} MiB",
         time.as_secs_f64(),
         mib(peak(&spent)),
+    );
+    println!(
+        "serve-perf: push of {OVER_BOUND_BLOBS} blobs of 1 MiB (refused), by process: {}",
+        by_name(&spent)
     );
 
     // 3. The store is whole.
