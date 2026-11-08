@@ -45,6 +45,11 @@ pub const HASH_BYTES_IN_FLIGHT: u64 = 1 << 30;
 /// lead for the parallel stat (the M19 design §8.1); a constant, not a setting.
 const SCAN_THREADS: usize = 8;
 
+/// The walks again a scan makes when a path the walk listed as a file or a symlink is another
+/// kind when the scan looks at it (the M19 design §8.3): 3 more walks after the first, then
+/// `E_IO_TRANSIENT` naming the path. A constant, not a setting.
+const KIND_RETRIES: usize = 3;
+
 /// The custom ignore file, read beside each `.gitignore`, in its syntax.
 pub const SWARMIGNORE: &str = ".swarmignore";
 
@@ -374,18 +379,30 @@ fn look(
     stale_ns: i64,
     want: &Want,
 ) -> Result<Look, OpError> {
-    // 1. The stat; nothing, a directory or no file at all reads as gone.
     let meta = host
         .symlink_metadata(&ws.dir.join(&row.path))
         .map_err(|e| materialize::host_failed(&row.path, &e))?;
+    Ok(judged(ws, row, at, meta, stale_ns, want))
+}
+
+/// What stat `meta` of `row`, the `at`-th, says, as [`look`] does.
+fn judged(
+    ws: &Workspace,
+    row: &Row,
+    at: usize,
+    meta: Option<HostMeta>,
+    stale_ns: i64,
+    want: &Want,
+) -> Look {
+    // 1. Nothing, a directory or no file at all reads as gone.
     let Some(meta) = meta.filter(|meta| matches!(meta.kind, HostKind::File | HostKind::Symlink))
     else {
-        return Ok(Look {
+        return Look {
             at,
             file: None,
             same_kind: false,
             hash: false,
-        });
+        };
     };
 
     // 2. Its kind as recorded; another kind needs no hash to be a change, but a commit needs one.
@@ -404,12 +421,12 @@ fn look(
         && meta.inode == row.inode
         && meta.mtime_ns < stale_ns;
     let hash = same_kind && (want.full || !known);
-    Ok(Look {
+    Look {
         at,
         file,
         same_kind,
         hash,
-    })
+    }
 }
 
 /// Forgets the stat of `row`, unconfirmed by this scan, when it is at or after `stale_ns`, the
@@ -555,6 +572,16 @@ enum Met {
     Added(Found),
     /// Neither: a directory, an unwanted row, a file gone since the walk listed it.
     Nothing,
+    /// Another kind than the walk listed (a file become a directory): this path, walked again.
+    Swapped(String),
+}
+
+/// How one walk of a scan ended.
+enum Walk {
+    /// Every entry met as the walk listed it.
+    Done(Walked),
+    /// The first path met as another kind than listed.
+    Swapped(String),
 }
 
 /// One scan's walk over workspace `ws` and the rows of `index`, written at `stale_ns`.
@@ -583,11 +610,25 @@ impl Pass<'_> {
         look(self.host, self.ws, row, at, self.stale_ns, self.want)
     }
 
+    /// [`Pass::walk_once`], walked again while a path changes kind under it, up to
+    /// [`KIND_RETRIES`] times; then `E_IO_TRANSIENT` naming that path.
+    fn walk(&self, threads: usize) -> Result<Walked, OpError> {
+        let mut swapped = String::new();
+        for _ in 0..=KIND_RETRIES {
+            match self.walk_once(threads)? {
+                Walk::Done(walked) => return Ok(walked),
+                Walk::Swapped(path) => swapped = path,
+            }
+        }
+        Err(kind_changed(&swapped))
+    }
+
     /// The walk below the workspace's root, under its prefixes, on `threads` threads: each
     /// wanted row stat'd where the walk meets its entry, else apart; each file no row names and
     /// no ignore file names, with its stat; the topmost entries off the prefixes. Paths that are
-    /// not UTF-8 are passed over (a repository path is UTF-8).
-    fn walk(&self, threads: usize) -> Result<Walked, OpError> {
+    /// not UTF-8 are passed over (a repository path is UTF-8). A directory it cannot read is
+    /// `E_IO` naming it; a path met as another kind than listed ends it as [`Walk::Swapped`].
+    fn walk_once(&self, threads: usize) -> Result<Walk, OpError> {
         // 1. The walk, in parallel, noting what lies off the prefixes.
         let ws = self.ws;
         let prefixes = if ws.file.all {
@@ -600,6 +641,7 @@ impl Pass<'_> {
         let found = Mutex::new(Vec::new());
         let failed = Mutex::new(None);
         let refused = Mutex::new(None);
+        let swapped = Mutex::new(None);
         let mut walk = configured(&ws.dir, &prefixes, Some(Arc::clone(&strays)));
         walk.threads(threads);
         walk.build_parallel().run(|| {
@@ -607,10 +649,7 @@ impl Pass<'_> {
                 let entry = match entry {
                     Ok(entry) => entry,
                     Err(e) => {
-                        failed
-                            .lock()
-                            .expect("no walker panicked")
-                            .get_or_insert(e.to_string());
+                        failed.lock().expect("no walker panicked").get_or_insert(e);
                         return WalkState::Quit;
                     }
                 };
@@ -618,6 +657,13 @@ impl Pass<'_> {
                     Ok(Met::Row(look)) => met.lock().expect("no walker panicked").push(look),
                     Ok(Met::Added(file)) => found.lock().expect("no walker panicked").push(file),
                     Ok(Met::Nothing) => {}
+                    Ok(Met::Swapped(path)) => {
+                        swapped
+                            .lock()
+                            .expect("no walker panicked")
+                            .get_or_insert(path);
+                        return WalkState::Quit;
+                    }
                     Err(e) => {
                         refused.lock().expect("no walker panicked").get_or_insert(e);
                         return WalkState::Quit;
@@ -629,8 +675,16 @@ impl Pass<'_> {
         if let Some(e) = refused.into_inner().expect("no walker panicked") {
             return Err(e);
         }
+        if let Some(path) = swapped.into_inner().expect("no walker panicked") {
+            return Ok(Walk::Swapped(path));
+        }
 
-        // 2. The wanted rows it did not meet: under an ignored directory, named by an ignore
+        // 2. A directory it could not read, named, before its rows are stat'd apart.
+        if let Some(e) = failed.into_inner().expect("no walker panicked") {
+            return Err(unwalked(&ws.dir, &e));
+        }
+
+        // 3. The wanted rows it did not meet: under an ignored directory, named by an ignore
         //    rule, gone or no longer a file. Stat'd apart, on as many threads.
         let mut looks = met.into_inner().expect("no walker panicked");
         let rows = &self.index.rows;
@@ -643,39 +697,50 @@ impl Pass<'_> {
             .collect();
         looks.extend(self.look_apart(&apart, threads)?);
         looks.sort_by_key(|look| look.at);
-        walk_failed(failed)?;
 
-        // 3. In path order.
+        // 4. In path order.
         let mut added: Vec<Found> = found.into_inner().expect("no walker panicked");
         added.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(Walked {
+        Ok(Walk::Done(Walked {
             looks,
             added,
             strays: sorted(&strays),
-        })
+        }))
     }
 
-    /// What the walk makes of `entry`: a wanted row's stat, an untracked file's, or nothing.
+    /// What the walk makes of `entry`: a wanted row's stat, an untracked file's, nothing, or a
+    /// path swapped for another kind since the walk listed it.
     fn meet(&self, entry: &ignore::DirEntry) -> Result<Met, OpError> {
         // 1. Files and symlinks below the root alone.
-        let is_file = (entry.file_type()).is_some_and(|kind| kind.is_file() || kind.is_symlink());
-        let Some(rel) = relative(&self.ws.dir, entry.path()).filter(|_| is_file) else {
+        let listed = match entry.file_type() {
+            Some(kind) if kind.is_symlink() => HostKind::Symlink,
+            Some(kind) if kind.is_file() => HostKind::File,
+            _ => return Ok(Met::Nothing),
+        };
+        let Some(rel) = relative(&self.ws.dir, entry.path()) else {
             return Ok(Met::Nothing);
         };
 
-        // 2. A tracked row: stat'd here when the scan wants it.
-        if let Some(at) = self.index.find(&rel) {
-            if !self.wanted(&rel) {
-                return Ok(Met::Nothing);
-            }
-            return self.look_at(at).map(Met::Row);
+        // 2. A tracked row the scan does not want is not looked at.
+        let row = self.index.find(&rel);
+        if row.is_some() && !self.wanted(&rel) {
+            return Ok(Met::Nothing);
         }
 
-        // 3. An untracked file, through the host layer; one gone since is not there.
+        // 3. The look, through the host layer: another kind than listed is walked again.
         let meta = (self.host)
             .symlink_metadata(&self.ws.dir.join(&rel))
             .map_err(|e| materialize::host_failed(&rel, &e))?;
-        let meta = meta.filter(|m| matches!(m.kind, HostKind::File | HostKind::Symlink));
+        if meta.is_some_and(|meta| meta.kind != listed) {
+            return Ok(Met::Swapped(rel));
+        }
+
+        // 4. A tracked row's change, or an untracked file; one gone since is not there.
+        if let Some(at) = row {
+            let row = &self.index.rows[at];
+            let look = judged(self.ws, row, at, meta, self.stale_ns, self.want);
+            return Ok(Met::Row(look));
+        }
         Ok(meta.map_or(Met::Nothing, |meta| Met::Added((rel, meta))))
     }
 
@@ -714,6 +779,49 @@ fn walk_failed(failed: Mutex<Option<String>>) -> Result<(), OpError> {
         ".",
         &io::Error::other(e),
     ))
+}
+
+/// `E_IO` for error `e` of a walk below `root`: `details.file` names the directory (or file) it
+/// could not read, `.` for the root or an error naming no path.
+fn unwalked(root: &Utf8Path, e: &ignore::Error) -> OpError {
+    let file = failed_path(e)
+        .and_then(|path| relative(root, path))
+        .unwrap_or_else(|| ".".to_owned());
+    let method = swarmops_store::FsMethod::Read;
+    if let Some(io) = e.io_error() {
+        return io_error::io_failed(method, &file, io);
+    }
+
+    // Not an I/O error: its display would hold the host's path.
+    io_error::io_failed(
+        method,
+        &file,
+        &io::Error::other("the walk could not read it"),
+    )
+}
+
+/// The path walk error `e` names, below its wrappings.
+fn failed_path(e: &ignore::Error) -> Option<&std::path::Path> {
+    match e {
+        ignore::Error::WithPath { path, .. } => Some(path),
+        ignore::Error::WithDepth { err, .. } | ignore::Error::WithLineNumber { err, .. } => {
+            failed_path(err)
+        }
+        ignore::Error::Partial(errs) => errs.iter().find_map(failed_path),
+        _ => None,
+    }
+}
+
+/// `E_IO_TRANSIENT` for `path`, another kind at every look than the walk listed.
+fn kind_changed(path: &str) -> OpError {
+    OpError::new(
+        swarmops_api::ErrorCode::IoTransient,
+        format!("{path} changed kind while the scan walked it: run the command again"),
+    )
+    .with_details(serde_json::Map::from_iter([(
+        "path".to_owned(),
+        serde_json::Value::from(path),
+    )]))
 }
 
 /// The entries a walk noted in `strays`, in path order.

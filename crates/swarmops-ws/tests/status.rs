@@ -1,14 +1,16 @@
 //! `ws status` and `ws discard` without paths: the scan, the index, the racy rule, the ignore
 //! files, and how far the target has moved.
 
+use std::sync::Arc;
+
 use swarmops_api::WsChangeKind::{Added, Deleted, ModeChanged, Modified, TypeChanged};
 use swarmops_api::{
     ChangeInput, ChangeOp, CommitReq, ContentInput, Identity, RefSetReq, StatusAfter, StoreOps,
     WsCommitReq, WsDiscardReq, WsState, WsStatusReq,
 };
-use swarmops_ws::RealFs;
 use swarmops_ws::state::{self, SWARMWS_DIR};
 use swarmops_ws::status::MAX_STATUS_OUTSIDE;
+use swarmops_ws::{HostFs, HostMeta, RealFs, RealHost};
 
 use crate::fixture::{AGENT, Fixture, Put, Watched, change, changes, remove, tree_of, write};
 
@@ -738,6 +740,224 @@ fn discard_without_paths_restores_every_change() {
     expected.sort();
     assert_eq!(tree_of(&dir), expected);
     assert_eq!(changes(&ctx, "w", true), []);
+}
+
+/// The mode bits of a directory made unreadable, given back when dropped.
+#[cfg(unix)]
+struct Unreadable(camino::Utf8PathBuf);
+
+#[cfg(unix)]
+impl Unreadable {
+    /// Directory `dir`, made unreadable (`000`).
+    fn new(dir: camino::Utf8PathBuf) -> Unreadable {
+        set_mode(&dir, 0o000);
+        Unreadable(dir)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Unreadable {
+    fn drop(&mut self) {
+        set_mode(&self.0, 0o755);
+    }
+}
+
+/// Sets the permission bits of `path` to `mode`.
+#[cfg(unix)]
+fn set_mode(path: &camino::Utf8Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// A tracked directory the scan cannot read (`000`) stops `ws status` and `ws commit` with
+/// `E_IO` naming that directory in `details.file`, not `.` (the M19 design §8.3), and neither
+/// records anything: no index written, no store call that writes, the journal and
+/// `workspace.json` as they were. Skipped where an unreadable directory can still be read (as
+/// root).
+#[cfg(unix)]
+#[test]
+fn an_unreadable_directory_is_named_and_records_nothing() {
+    // 1. A workspace of the whole tree, its index written; `src/locked` made unreadable.
+    let f = Fixture::new();
+    let base = f.commit(
+        None,
+        &[
+            Put::File("README", "readme\n"),
+            Put::File("src/locked/f", "f\n"),
+        ],
+    );
+    f.create("w", &base, &[]);
+    let dir = f.beside("w");
+    write(&dir, "README", "edited\n");
+    assert_eq!(changes(&f.ctx(), "w", false), [change("README", Modified)]);
+    let index = std::fs::read(index_of(&dir)).unwrap();
+    let state = std::fs::read(dir.join(SWARMWS_DIR).join("workspace.json")).unwrap();
+    let op = f.last_op();
+    let locked = dir.join("src/locked");
+    let held = Unreadable::new(locked.clone());
+    if std::fs::read_dir(&locked).is_ok() {
+        eprintln!("skipped: an unreadable directory can be read here (root)");
+        return;
+    }
+
+    // 2. Status and commit: `E_IO` naming the directory.
+    let watched = Watched::new(&f.ops);
+    let ctx = f.ctx_over(&watched);
+    let status = swarmops_ws::status(&ctx, page_of("w"));
+    let req = WsCommitReq::new("w".to_owned(), "locked".to_owned());
+    let commit = swarmops_ws::commit(&ctx, req);
+    drop(held);
+    for refused in [status.unwrap_err(), commit.unwrap_err()] {
+        assert_eq!(refused.code, "E_IO", "{refused:?}");
+        assert_eq!(refused.details["file"], "src/locked", "{refused:?}");
+    }
+
+    // 3. Nothing recorded.
+    assert_eq!(watched.count("commit"), 0, "{:?}", watched.calls());
+    assert_eq!(f.last_op(), op);
+    assert_eq!(std::fs::read(index_of(&dir)).unwrap(), index);
+    let after = std::fs::read(dir.join(SWARMWS_DIR).join("workspace.json")).unwrap();
+    assert_eq!(after, state);
+}
+
+/// When [`SwapHost`] swaps its file for a directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Swap {
+    /// At the first stat, for good: a directory holding a file, `inner`, stays.
+    Once,
+    /// At every stat, and back: each walk lists a file, each look finds a directory.
+    EveryLook,
+}
+
+/// The file below a swapped path [`Swap::Once`] leaves.
+const INNER: &str = "inner";
+
+/// The walks a scan makes of a path that changes kind at every look before it gives up: its
+/// first and `KIND_RETRIES` (3) more (the M19 design §8.3).
+const WALKS: usize = 4;
+
+/// The real host, but a stat of `path` (a file) swaps it for a directory first, as an agent
+/// would between the walk's listing and the scan's look.
+struct SwapHost {
+    /// The full path swapped.
+    path: camino::Utf8PathBuf,
+    /// When.
+    how: Swap,
+    /// The swaps made.
+    swaps: std::sync::atomic::AtomicUsize,
+}
+
+impl SwapHost {
+    /// A host swapping `path` as `how` says.
+    fn new(path: camino::Utf8PathBuf, how: Swap) -> SwapHost {
+        SwapHost {
+            path,
+            how,
+            swaps: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// The swaps made so far.
+    fn swaps(&self) -> usize {
+        self.swaps.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The swap of a file at `path`, as `how` says, and the stat it gives; else the plain stat.
+    fn swap(&self, path: &camino::Utf8Path) -> std::io::Result<Option<HostMeta>> {
+        // 1. Only the swapped path while a file is there; once only when asked.
+        let is_file = std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file());
+        let first = self.swaps() == 0;
+        if path != self.path || !is_file || (self.how == Swap::Once && !first) {
+            return RealHost::default().symlink_metadata(path);
+        }
+
+        // 2. The file swapped for a directory, which the stat finds.
+        let bytes = std::fs::read(path)?;
+        std::fs::remove_file(path)?;
+        std::fs::create_dir(path)?;
+        self.swaps.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let meta = RealHost::default().symlink_metadata(path);
+
+        // 3. Once: a file in it stays; every look: the file back for the next walk.
+        match self.how {
+            Swap::Once => std::fs::write(path.join(INNER), "inner\n")?,
+            Swap::EveryLook => {
+                std::fs::remove_dir(path)?;
+                std::fs::write(path, bytes)?;
+            }
+        }
+        meta
+    }
+}
+
+impl HostFs for SwapHost {
+    fn write_file(&self, root: &camino::Utf8Path, rel: &str, bytes: &[u8]) -> std::io::Result<()> {
+        RealHost::default().write_file(root, rel, bytes)
+    }
+    fn symlink(&self, root: &camino::Utf8Path, rel: &str, target: &str) -> std::io::Result<()> {
+        RealHost::default().symlink(root, rel, target)
+    }
+    fn symlink_metadata(&self, path: &camino::Utf8Path) -> std::io::Result<Option<HostMeta>> {
+        self.swap(path)
+    }
+    fn read_file(&self, path: &camino::Utf8Path) -> std::io::Result<Vec<u8>> {
+        RealHost::default().read_file(path)
+    }
+    fn read_dir(&self, path: &camino::Utf8Path) -> std::io::Result<Vec<String>> {
+        RealHost::default().read_dir(path)
+    }
+    fn remove_file(&self, root: &camino::Utf8Path, rel: &str) -> std::io::Result<()> {
+        RealHost::default().remove_file(root, rel)
+    }
+    fn remove_dir_if_empty(&self, root: &camino::Utf8Path, rel: &str) -> std::io::Result<bool> {
+        RealHost::default().remove_dir_if_empty(root, rel)
+    }
+    fn create_dir_all(&self, root: &camino::Utf8Path, rel: &str) -> std::io::Result<()> {
+        RealHost::default().create_dir_all(root, rel)
+    }
+    fn rename(&self, root: &camino::Utf8Path, from: &str, to: &str) -> std::io::Result<()> {
+        RealHost::default().rename(root, from, to)
+    }
+    fn read_link(&self, path: &camino::Utf8Path) -> std::io::Result<String> {
+        RealHost::default().read_link(path)
+    }
+    fn set_mode(&self, root: &camino::Utf8Path, rel: &str, mode: u32) -> std::io::Result<()> {
+        RealHost::default().set_mode(root, rel, mode)
+    }
+}
+
+/// A file swapped for a directory between the walk's listing and the scan's look is walked
+/// again (the M19 design §8.3): swapped once, the next walk finds the directory and the file in
+/// it; swapped at every look, the scan gives up after its retries with `E_IO_TRANSIENT` naming
+/// the path, and writes no index.
+#[test]
+fn a_kind_change_mid_walk_is_walked_again() {
+    // 1. A workspace of `src`, its index written.
+    let f = Fixture::new();
+    let base = f.commit(
+        None,
+        &[Put::File("src/a.txt", "a\n"), Put::File("src/x", "x\n")],
+    );
+    f.create("w", &base, &["src"]);
+    let dir = f.beside("w");
+    assert_eq!(changes(&f.ctx(), "w", false), []);
+    let index = std::fs::read(index_of(&dir)).unwrap();
+
+    // 2. Swapped at every look: `E_IO_TRANSIENT` after the retries, nothing written.
+    let every = Arc::new(SwapHost::new(dir.join("src/x"), Swap::EveryLook));
+    let refused = swarmops_ws::status(&f.ctx_on(every.clone()), page_of("w")).unwrap_err();
+    assert_eq!(refused.code, "E_IO_TRANSIENT", "{refused:?}");
+    assert_eq!(refused.details["path"], "src/x", "{refused:?}");
+    assert_eq!(every.swaps(), WALKS);
+    assert_eq!(std::fs::read(index_of(&dir)).unwrap(), index);
+    assert_eq!(changes(&f.ctx(), "w", false), []);
+
+    // 3. Swapped once: walked again, the directory and its file found.
+    let once = Arc::new(SwapHost::new(dir.join("src/x"), Swap::Once));
+    let found = changes(&f.ctx_on(once.clone()), "w", false);
+    assert_eq!(once.swaps(), 1);
+    let inner = format!("src/x/{INNER}");
+    assert_eq!(found, [change("src/x", Deleted), change(&inner, Added)]);
 }
 
 /// After any sequence of edits, renames over a file, same-size writes and deletions, the status
