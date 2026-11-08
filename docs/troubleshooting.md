@@ -93,9 +93,9 @@ raises it yet.
 | `E_MARKERS_PRESENT` | 1 | no | `ws resolve` found a conflict marker line in a file. | [Workspaces](#e_markers_present) |
 | `E_WS_UNPORTABLE` | 1 | no | The tree holds paths the workspace's volume cannot hold. | [Workspaces](#e_ws_unportable) |
 | `E_WS_OUTSIDE_PREFIXES` | 1 | no | A sparse workspace holds edits outside its prefixes. | [Workspaces](#e_ws_outside_prefixes) |
-| `E_WS_STALE` | 1 | no | `ws land` found a workspace's base gone from its target's history. | [Workspaces](#e_ws_stale) |
+| `E_WS_STALE` | 1 | no | A workspace's base is gone from its target's history. | [Workspaces](#e_ws_stale) |
 | `E_CHECK_FAILED` | 1 | no | A workspace's check or bootstrap command failed or timed out. | [Workspaces](#e_check_failed) |
-| `E_REF_NOT_FOUND` | 6 | no | Not raised yet. | [Codes not raised yet](#codes-not-raised-yet) |
+| `E_REF_NOT_FOUND` | 6 | no | `ref log` names a ref the journal records no move of, or an OpenCode hook a start the store does not hold. | [Arguments and revisions](#e_ref_not_found) |
 | `E_AUTH` | 5 | no | `swarmops serve` names no caller, or no grant of the store's `access.toml` names it. | [Serve over ssh](operate/serve-over-ssh.md#refusals-a-client-sees) |
 | `E_POLICY_DENIED` | 5 | no | The store's `access.toml` grants the caller no such action, or the file is invalid. | [Serve over ssh](operate/serve-over-ssh.md#refusals-a-client-sees) |
 | `E_MAINTENANCE_BUSY` | 4 | yes | Another `gc`, `repair` or `upgrade` holds the store's maintenance lease. | [Making room](operate/making-room.md#2-remove-the-leftovers-of-interrupted-writes) |
@@ -547,6 +547,22 @@ An agent's own line of work needs no ref: it commits on a parent and lands the h
 `release/<name>` for a ref of your own, such as `release/feature-x`, or in a FORMAT 2 store a
 branch such as `feature/x`. `git export` gives this code
 too for a branch name git does not take; its hint is `git check-ref-format --branch`.
+
+### `E_REF_NOT_FOUND`
+
+Exit 6, not retryable. `ref log` of a name the journal records no move of: no such ref ever
+existed (a deleted ref still lists its moves). `swarmops ref list` names the refs there are.
+
+```sh
+swarmops ref log release/none
+```
+
+```text
+{"ok":false,"op":"ref_log","api":1,"error":{"code":"E_REF_NOT_FOUND","message":"ref \"release/none\" never existed: the journal records no move of it","retryable":false,"exit":6,"details":{"name":"release/none"},"hint":"swarmops ref list names the refs"},"meta":{"repo":"acme","elapsed_ms":2,"resolved":{},"auth":"trust"}}
+```
+
+The OpenCode hook's create answers the same, `details.ref` naming the start, when the store holds
+no ref or changeset by that name.
 
 ### `E_FORMAT_REQUIRED`
 
@@ -1368,8 +1384,9 @@ first ([known limitations](known-limitations.md#workspaces)).
 
 ### `E_WS_STALE`
 
-`ws land` refuses a workspace whose base left its target's history (an `op undo`, a restore, a
-`ref set` or a sync moved the target back, or rewrote it), changing nothing: landing would carry
+`ws status`, `ws diff`, `ws commit`, `ws materialize`, `ws land` onto any target and
+`ws rebase --continue` refuse a workspace whose base left its own target's history (an `op undo`,
+a restore, a `ref set` or a sync moved the target back, or rewrote it), changing nothing: landing would carry
 the changes the target dropped along. `details` names the `target`, the `base`, the target's
 `head`, `base_op` (the operation that moved the target to the base) and `moved_op` (the latest
 that moved it to `head`, or `null`). `swarmops ws rebase` moves the workspace onto the head; land
@@ -1389,10 +1406,11 @@ the target was moved back to the base (`op undo`, `ref set`) within the journal'
 operations. `ws delete <name> --rescue` is the way out when both refuse, and its commits stay in
 the store.
 
-The check runs for a land onto the workspace's own target, and lets a land through that it cannot
-place: a target whose first-parent history is longer than 10,000 commits, or a base with no
-operation among the last 10,000 that moved the target to it. `ws commit`, `ws status` and
-`ws rebase` do not refuse a stale base ([known limitations](known-limitations.md#workspaces)).
+The check follows every parent, so a base a merge's second parent reaches is not stale, and no
+history cap applies; `workspace.json` records `base_op`, so no journal cap applies either. A
+workspace an older build wrote, without `base_op`, is checked only against the journal's newest
+10,000 operations ([known limitations](known-limitations.md#workspaces)). `ws rebase` is not
+refused: it is the way out.
 
 ### `E_CHECK_FAILED`
 
@@ -1403,10 +1421,9 @@ the workspace. After a failed check nothing landed, and the workspace stands on 
 changeset (`details.changeset`), where the failure reproduces: fix, `ws commit`, and land again.
 A check that needs more than 900 s takes `--check-timeout`.
 
-## Codes not raised yet
+## Codes a client does not know
 
-`E_REF_NOT_FOUND` (exit 6) is in the schema so that a client can match it now, but no
-operation raises it: no operation looks a ref up by name (a missing ref is `E_REV_NOT_FOUND`).
-`E_AUTH` and `E_POLICY_DENIED` are raised by `swarmops serve` since M14
+Every code is raised by some command: `E_REF_NOT_FOUND` by `ref log` since M18, and `E_AUTH` and
+`E_POLICY_DENIED` by `swarmops serve` since M14
 ([Serve over ssh](operate/serve-over-ssh.md#refusals-a-client-sees)). A client that meets a code
 newer than its own table reads `exit` and `retryable` from the error itself.

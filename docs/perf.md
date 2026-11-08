@@ -2579,3 +2579,26 @@ reading, not a baseline and not a verdict: `bench/thresholds.toml` skips both be
 quiet runs give their medians, and the bench gate reads them in a Scheduled run after that. The
 two sizes cost about the same. The case on 1,000,000 changesets is not measured: it joins M21's
 bundle (the M18 design §0.2, row 28A3).
+
+## M19 fan-in — 2026-11-09 (not measured)
+
+The M19 design §11: `just check-slow` and `just perf` on the last M19 sha, for G9's rows against
+the M19 baselines. Neither ran at the fan-in: they run after the landing, and every G9 run waits
+for the design's gate (a 1-minute load under 6 held for a minute, no CI job on this host's
+runners), which no window met on 2026-11-08 ("M19 baselines", "M19-6", "M19-8" above). Queued for
+the next gated window, each under the heavy lock:
+
+| Run | Rows | State |
+| --- | --- | --- |
+| `ws_processes::perf::perf_tree_of_50000_files` (status, the update's single run and median of 20, `ws commit` of 1, 10 and 100 files) | G9, decision D5 | not measured |
+| the `ws_commit` bench, `nosync/<k>` and hashing apart | G9 commit row, decision D1 | not measured |
+| the create of 10,000 files, the open loop of lands, the checked land on 12,000 changesets | G9 | not measured |
+| `perf_sparse_workspace_of_1000000_files` | A28 | not measured |
+| `perf_status_of_500000_files` | B36 | not measured |
+| `perf_fifty_creates_at_once` | A31 | not measured |
+| `perf_update_across_1000_lands` | 28A1 | not measured |
+| `ws_sigkill::sigkill_ws_land_500_times` (slow suite) | B3 | not run whole |
+
+So no G9 row takes a verdict from M19 yet. The update row keeps v0.6.0's miss (116.6 ms) until a
+gated single run says otherwise; the commit row stays missed until a change feed exists (the M19
+design, decision D1: no target changed). No gate, target, timeout or case parameter changed.

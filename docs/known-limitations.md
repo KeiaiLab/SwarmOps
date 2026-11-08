@@ -1,6 +1,6 @@
 # Known limitations
 
-What SwarmOps does not do yet, or does less well than it should, as of M18, and the milestone
+What SwarmOps does not do yet, or does less well than it should, as of M19, and the milestone
 meant to change it. The items come from the M1 and M1.5 reviews and the 2026-10-16 code review:
 the carry-overs their tasks handed to later milestones, the deferred minors that are still open,
 and the rulings of M1's final review, which left 14 questions to the maintainer (the table at the
@@ -776,8 +776,10 @@ left).
 - **A power cut can leave a workspace's files torn.** Materialised files are not synced: the store
   holds them durably, and `workspace.json`, the registry and the intent records are synced. After a
   power cut a file written just before it can be torn; `ws status` shows it as an edit, and
-  `ws discard <path>` restores it from the head. *Documented (the M5 design's decision 4). Found:
-  M5 design.*
+  `ws discard <path>` restores it from the head. An update with edits records them in the store,
+  synced, before it moves any file: after a power cut they are held by the snapshot's id (the
+  update's `snapshot`, or `.swarmws/snapshot.json`). *Documented (the M5 design's decision 4).
+  Found: M5 design.*
 - **A checked land takes two lock passes.** `ws land --check` commits the rebased changeset, runs
   the check outside the lock, then publishes only if the target has not moved: on a busy target a
   check of minutes may rebase and run again until `--max-attempts` (`E_CAS_RETRY_EXHAUSTED`,
@@ -812,7 +814,10 @@ left).
   `timeout_s` of `.swarmops/workspaces.json`'s `check` is not read (the request's, 900 s by
   default, applies), and a `--check-timeout` too large for the clock aborts the command;
   `blob get` takes `--max-bytes 0` as one blob, and caps neither the ids nor the bytes it holds.
-  *Unscheduled. Found: M5 Tasks W3, W7 and W10 reviews.*
+  A `ws land -m` cut after the store's land and run again after further edits replays the land
+  only while the operation that made the workspace's head is among the journal's newest 10,000;
+  past them it lands the head without the edits under the key and can answer `E_INVALID_ARG`.
+  *Unscheduled. Found: M5 Tasks W3, W7 and W10 reviews; M19-9's fix review.*
 - **An older sparse workspace lacks the ignore files above its prefixes.** A sparse workspace
   holds the `.gitignore` and `.swarmignore` files of the directories above its prefixes, so its
   walk ignores what a workspace of the whole tree does. One made before that, or an ignore file
@@ -867,44 +872,67 @@ left).
   check included, though they refuse nothing it finds: an lstat error on a tree path off the
   prefixes fails them with `E_IO`, and leaves out the `status_after` page other commands attach.
   *Unscheduled. Found: M15 Task S4b3 review.*
-- **`ws status` lists no change in a sparse workspace that a commit refuses.** `ws status` lists
-  the changes under the prefixes only, so its `changes` list can be empty while `ws commit` and
-  `ws land` refuse an entry outside them; the refusal's `details.paths` names those entries.
-  *Documented (the M15 design §5 leaves the display out of scope). Found: M15 Task S4b review.*
-- **Sparse workspaces' latencies are not measured.** G9's cases (`ws status`, `ws create`, the
-  update, `ws commit`) run on workspaces of the whole tree, last in v0.6.0; none times a sparse
-  workspace, whose commit, land and scans also walk the disk outside the prefixes and compare the
-  tree with it, nor a sparse create of 10,000 files from a 1,000,000-file tree. *Unscheduled
-  (outside M15's scope). Found: the 2026-10-27 completeness report (A28).*
+- **Sparse workspaces' latencies are not measured yet.** G9's whole-tree cases ran last in
+  v0.6.0. Since M19, `just perf` times a sparse create of 10,000 files from a 1,000,000-file
+  tree, its status, a 1-file commit and the update, the status of 500,000 files, 50 creates at
+  once and an update across 1,000 lands; they have run only on a loaded host, which gives no
+  verdict ([perf.md](perf.md#m19-8--2026-11-08-not-measured-the-host-was-never-quiet)).
+  *Deferred to a quiet window. Found: the 2026-10-27 completeness report (A28); narrowed: M19-8.*
 - **The reserved name is matched in ASCII case, and only Linux runs the refusal.** A component is
   `.swarmws` when it equals that name with ASCII letters folded; other letters are not folded, so
   `.ſwarmws` (U+017F, which a case-insensitive volume of macOS or Windows may fold to `s`) is
   written. The refusal's tests run on Linux: macOS and Windows are M12's. *Target: M12. Found:
   the 2026-10-30 completeness report (E38); M15 Task S4a review.*
-- **`ws land` checks a stale base only against its own target, and only so far.** `E_WS_STALE` needs
-  the workspace's base gone from its target's history and an operation in the log that moved the
-  target to it. A land onto another `--target` is not checked, and neither are `ws commit`, `ws
-  status` and `ws rebase`; a target whose first-parent history is longer than 10,000 commits
-  (`BEHIND_CAP`), or a base with no such operation among the last 10,000, lands as it did before the
-  check. `ws rebase` leaves the pending record of a land cut short that it cannot place, and answers
-  "run it again first": the journal names the land's changeset and the target's history is longer
-  than the last 10,000 commits, which do not hold it, or the operation that made the record's head
-  is not among the journal's newest 10,000 (a land is looked for no further back than that
-  operation). `ws land` lands such a record unless its own stale check refuses it: that check also
-  answers `E_WS_STALE` when the target was moved back to the base (`op undo`, `ref set`) within the
-  journal's newest 10,000 operations. `ws delete <name> --rescue` is the way out when both refuse.
-  *Unscheduled (the M15 design §5 leaves it out of scope). Found: M15 Task S4c.*
-- **A stale workspace's update takes no snapshot.** `ws rebase` refuses edits on disk
-  (`E_WS_DIRTY`) unless `-m` commits them onto the old head first, and one that conflicts with the
-  new head leaves the workspace rebasing, with markers in the files, until `ws resolve` and
-  `ws rebase --continue`, or `ws rebase --abort`. No update sets the edits aside by itself. The kill
-  test this needs is missing too: `eight_checked_lands_land_once_each_with_the_checked_tree` kills
-  one of eight `ws land --check` processes at a random moment within 600 ms (twelve rounds in the
-  slow suite) and checks that each confirmed land is on `main` once with its checked tree, but no
-  test aims its kills at the window between a land's journal append and its last file write, 10 per
-  format and 500 in the slow suite, and checks after the update that the workspace's files equal its
-  head plus every edit made before the kill. *Unscheduled (both are outside M15's scope). Found: the
-  2026-10-27 completeness report (B3); M15 Task S4c.*
+- **A workspace written by an older build is checked only so far.** A `workspace.json` without
+  `base_op` (written before 0.11, or rewritten by an older binary, which drops the field) is
+  stale only when an operation that moved the target to the base is among the journal's newest
+  10,000; past them, it is not refused. So is a base whose move was past the newest 10,000
+  operations when `ws create`, `ws rebase` or `ws land` recorded it. `ws rebase` leaves the
+  pending record of a land cut short that it cannot place, and answers "run it again first": the
+  journal names the land's changeset and the target's history is longer than the last 10,000
+  commits, which do not hold it, or the operation that made the record's head is not among the
+  journal's newest 10,000. `ws delete <name> --rescue` is the way out when both refuse.
+  *Unscheduled. Found: M15 Task S4c; narrowed: M19-2.*
+- **An update whose chain conflicts leaves the workspace rebasing.** `ws rebase` snapshots edits
+  on disk before it updates (the M19 design §4) and carries those that apply; one whose chain
+  conflicts with the new head still leaves the workspace rebasing, with markers in the files and
+  the snapshot recorded, until `ws resolve` and `ws rebase --continue`, or `ws rebase --abort`.
+  The kill sweep of `ws land -m` runs 10 kills per format in `just check`; its 500 kills per
+  format are in the slow suite and have not run whole yet. *Unscheduled. Found: the 2026-10-27
+  completeness report (B3); M15 Task S4c; narrowed: M19-3, M19-9.*
+- **An edit at a conflicting path is held only by the snapshot.** When the chain conflicts, the
+  markers overwrite that file; the snapshot holds the edit, `--continue` returns it as `kept`,
+  `--abort` restores the head's file. *Documented. Found: M19-3.*
+- **An update with edits leaves unlanded changesets.** Each `ws rebase` with edits records a
+  snapshot and, when edits carry, a second changeset on the new head; neither is on a ref, and
+  `gc` never removes a changeset, as with `ws commit`. *Documented (the M19 design, risk R6).
+  Found: M19 design.*
+- **An update cut after its snapshot refuses an edit made since.** Run again, it takes the
+  snapshot its record names instead of scanning again, so an edit made after the cut is in the
+  way of the update (`E_WS_DIRTY`) on each re-run until it is committed or discarded. Nothing is
+  written before the refusal. *Unscheduled. Found: M19-3 review.*
+- **Snapshots are taken on demand and by an update only.** `ws snapshot` and `ws rebase` record a
+  workspace's edits by id; `ws status` and `ws diff` take none. A snapshot has no revision name
+  (`ws info` gives the latest id), and there is no list of earlier snapshots and no restore from
+  one. *Unscheduled (the M19 design, decision D4). Found: the 2026-10-27 completeness report (B1,
+  D22).*
+- **An older binary reads an update's carried edits as committed.** Workspace records stay
+  format 1 with new fields. An older binary ignores `base_op`, the pending record's snapshot
+  fields and `.swarmws/snapshot.json`, and drops `base_op` when it rewrites `workspace.json`. If
+  it finds an update's materialisation record that stands for the new head, it takes the carried
+  edits' changeset as the workspace's files: its next status shows those edits as committed in
+  no changeset. Use this release's binary on workspaces it updated. *Documented (the M19 design,
+  decision D3). Found: M19 design.*
+- **The land's walk names `.` when it fails.** Since M19 a scan that cannot read a directory names
+  it in `E_IO`'s `details.file`; the walk `ws land` makes of the disk outside a sparse
+  workspace's prefixes still names `.`. A directory that becomes a file while the walk reads it
+  is `E_IO` naming it, not walked again as a file or link that changes kind is.
+  *Unscheduled. Found: M19-7 review.*
+- **The OpenCode adapter is the commands only.** `ws hook opencode-create`, `opencode-remove` and
+  `opencode-list` are what an OpenCode plugin calls to make and remove an agent's workspace; the
+  plugin itself, which OpenCode loads, is not part of SwarmOps. Of the other agent hosts whose
+  public documentation was read on 2026-11-08, none makes or removes an agent's directory through
+  a hook; two were inconclusive and two not examined. *Unscheduled. Found: M19-D, M19-DA.*
 - **A target that gains a reserved path after the check is not refused.** `ws land` and `ws rebase`
   check the target's paths for names the files cannot hold (`E_WS_UNPORTABLE`) before the store
   call. A target that gains a path with a component named `.swarmws` between that check and the

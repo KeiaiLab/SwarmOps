@@ -18,6 +18,16 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 ## [Unreleased]
 
+### Changed (breaking)
+
+- `ws rebase` without `-m` on a workspace with edits no longer answers `E_WS_DIRTY`. It records
+  the edits as a changeset on the old head first (its id in the response's `snapshot`), rebases,
+  and carries each edit onto the new head: kept where the new head left the path, merged where
+  both changed different lines of a text file. An edit that does not apply is dropped from disk,
+  the path takes the new head's bytes, and the response names it in `dropped` with the snapshot as
+  `kept`. Agents that relied on the refusal to stop an update now get a success that can drop
+  conflicting edits from disk, held by id. `-m` keeps its meaning (the M19 design §4).
+
 ### Added
 
 - `swarmops ref log NAME [--before OP] [-n N]` and the MCP tool `ref_log` list one ref's moves,
@@ -68,6 +78,19 @@ collects the changes on `stable` that no release holds yet, until the next relea
   before its current one, `main@{at=<unix seconds>}` the value set by its newest move recorded at or
   before that instant, either followed by `~N`; past the oldest move, before the first or at a
   deletion it is `E_REV_NOT_FOUND` (the M18 design §3.3).
+- `swarmops ws snapshot` and the MCP tool `ws_snapshot`: a workspace's edits recorded as a
+  changeset on its head that moves no ref, readable by id from any process; the same edits on
+  the same head again write nothing (`written: "same"`), none answer `"clean"`. `ws info` names
+  the latest snapshot (`snapshot`) (the M19 design §5).
+- `.swarmws/snapshot.json` names a workspace's latest snapshot; the same edits on the same head
+  reuse it without a store call.
+- `swarmops ws hook opencode-create`, `opencode-remove` and `opencode-list`: an OpenCode adapter
+  beside the Claude Code hooks; workspaces made at the host's directory as `opencode/<name>`, a
+  failed bootstrap taken back, removal refusing uncommitted edits unless forced (then rescued)
+  (the M19 design §9.2).
+- `just perf` and the weekly measurement cases time a sparse workspace of a 1,000,000-file tree,
+  the status of 500,000 files, 50 workspace creates at once and an update across 1,000 lands
+  (the M19 design §8.4).
 
 ### Changed
 
@@ -77,6 +100,20 @@ collects the changes on `stable` that no release holds yet, until the next relea
   and blob it converts without loss once their frame is durable, so that the first sync or push
   after a clone stops at the imported head instead of deriving the history below it (the M18
   design §2.3).
+- `ws status`, `ws diff`, `ws commit`, `ws materialize`, `ws land` onto any `--target` and
+  `ws rebase --continue` answer `E_WS_STALE` (exit 1, nothing changed) for a workspace whose base
+  its own target no longer reaches; `ws rebase` stays the way out. The check follows every parent
+  (`ancestry`), so a base reached through a merge's second parent is not stale and no history
+  cap applies, and `workspace.json` records `base_op`, the operation that moved the target to the
+  base, so no journal cap applies either. These commands' `meta.resolved` now names the target
+  ref, and a stale land's the base too (the M19 design §3).
+- `ws status` of a sparse workspace lists the edits outside its prefixes that `ws commit` and
+  `ws land` refuse with `E_WS_OUTSIDE_PREFIXES`: `outside`, the topmost such entries, in the
+  refusal's order, and `outside_truncated` past the first 1,000; both are left out when empty
+  (the M19 design §6).
+- `ws status`, `ws commit`, `ws land` and the update walk the workspace once, on 8 threads: each
+  tracked file is checked where the walk meets it, instead of a second pass over every directory
+  (the M19 design §8.1).
 
 ### Fixed
 
@@ -84,6 +121,20 @@ collects the changes on `stable` that no release holds yet, until the next relea
   lock wait and left the first one's helper thread parked on `meta/lock`, which could take the
   lock for an instant after the write returned and hold up the next writer. The rerun now waits
   on its first lock wait, so a declined turn leaves no helper behind.
+- `ws rebase` found an ignored file at a path the target adds only after the store had recorded
+  the snapshot and the rebased changeset. It now checks the paths the target changed against the
+  disk before any store call: `E_WS_DIRTY`, nothing recorded. A file standing where the target
+  puts a directory is `E_WS_DIRTY` naming the file, no longer `E_IO` (the M19 design §4.3).
+- `ws status`, `ws commit` and every command that scans: a directory the walk cannot read is named
+  in `E_IO`'s `details.file` (not `.`). A path that changes kind mid-scan is walked again, up to
+  three times, then `E_IO_TRANSIENT` names it (the M19 design §8.3).
+- A `ws land -m` killed after the store recorded its land, and run again after more edits,
+  answered `E_INVALID_ARG` (the key landed another change) instead of finishing. The re-run of a
+  land its target holds now stands the workspace on the changeset that land made and replays it;
+  the later edits stay on disk as edits against what landed (the M19 design §7).
+- That re-run, when the key had made two lands carrying edits (one on each of two targets, both
+  cut), could take the land of the other target and answer `E_INVALID_ARG`. It now takes the land
+  its own target's history holds.
 
 ## [0.10.0] - 2026-11-07
 
