@@ -195,9 +195,9 @@ A response past these leaves the rest out, and says so in its fields; nothing fa
 | Limit | Value | Constant | Commands |
 | --- | --- | --- | --- |
 | [Lossy commits listed](#lossy-commits-listed) | 100 commits | `swarmops_git::import::MAX_LOSSY_LISTED` | [`git import`](commands/git-import.md) |
-| [Line diff lines](#line-diff-lines) | 49,152 lines | `swarmops_merge::line_diff::MAX_DIFF_LINES` | [`diff`](commands/diff.md), [`land`](commands/land.md) |
-| [Line diff bytes](#line-diff-bytes) | 8,388,608 bytes (8 MiB) | `swarmops_merge::line_diff::MAX_DIFF_BYTES` | [`diff`](commands/diff.md), [`land`](commands/land.md) |
-| [Text probe](#text-probe) | 8,000 bytes | `swarmops_merge::line_diff::TEXT_PROBE` | [`diff`](commands/diff.md), [`land`](commands/land.md) |
+| [Line diff lines](#line-diff-lines) | 49,152 lines | `swarmops_merge::line_diff::MAX_DIFF_LINES` | [`diff`](commands/diff.md), [`merge-base`](commands/merge-base.md), [`land`](commands/land.md) |
+| [Line diff bytes](#line-diff-bytes) | 8,388,608 bytes (8 MiB) | `swarmops_merge::line_diff::MAX_DIFF_BYTES` | [`diff`](commands/diff.md), [`merge-base`](commands/merge-base.md), [`land`](commands/land.md) |
+| [Text probe](#text-probe) | 8,000 bytes | `swarmops_merge::line_diff::TEXT_PROBE` | [`diff`](commands/diff.md), [`merge-base`](commands/merge-base.md), [`land`](commands/land.md) |
 | [Conflict report entries](#conflict-report-entries) | 24,576 bytes (24 KiB) | `swarmops_ops::conflict::MAX_ENTRY_BYTES` | [`land`](commands/land.md) |
 | [Conflict touches listed](#conflict-touches-listed) | 16 changesets | `swarmops_repo::land::MAX_TOUCHES_PER_FILE` | [`land`](commands/land.md), [`revert`](commands/revert.md) |
 | [Land check paths listed](#land-check-paths-listed) | 1,000 paths | `swarmops_repo::land::MAX_CHECK_PATHS` | [`land-check`](commands/land-check.md), [`land`](commands/land.md) |
@@ -218,7 +218,7 @@ The most lines a side of a file may have to be diffed by lines. Past it, `diff` 
 
 - Value: 49,152 lines.
 - Constant: `swarmops_merge::line_diff::MAX_DIFF_LINES`, in `crates/swarmops-merge/src/line_diff.rs`.
-- Commands: [`diff`](commands/diff.md), [`land`](commands/land.md).
+- Commands: [`diff`](commands/diff.md), [`merge-base`](commands/merge-base.md), [`land`](commands/land.md).
 
 ### Line diff bytes
 
@@ -226,7 +226,7 @@ The most bytes a side of a file may have to be diffed by lines, as for the lines
 
 - Value: 8,388,608 bytes (8 MiB).
 - Constant: `swarmops_merge::line_diff::MAX_DIFF_BYTES`, in `crates/swarmops-merge/src/line_diff.rs`.
-- Commands: [`diff`](commands/diff.md), [`land`](commands/land.md).
+- Commands: [`diff`](commands/diff.md), [`merge-base`](commands/merge-base.md), [`land`](commands/land.md).
 
 ### Text probe
 
@@ -234,7 +234,7 @@ How many leading bytes are searched for a NUL, as git does: a side that is not U
 
 - Value: 8,000 bytes.
 - Constant: `swarmops_merge::line_diff::TEXT_PROBE`, in `crates/swarmops-merge/src/line_diff.rs`.
-- Commands: [`diff`](commands/diff.md), [`land`](commands/land.md).
+- Commands: [`diff`](commands/diff.md), [`merge-base`](commands/merge-base.md), [`land`](commands/land.md).
 
 ### Conflict report entries
 
@@ -290,6 +290,8 @@ What a paged request takes when it does not say. The command line's flag has the
 | [`diff`](commands/diff.md) | `--limit` | [`DiffReq`](schema-types.md#diffreq) `limit` | 500 files | `swarmops_api::DEFAULT_DIFF_LIMIT` |
 | [`diff`](commands/diff.md) | `--max-bytes` | [`DiffReq`](schema-types.md#diffreq) `max_bytes` | 32,768 bytes (32 KiB) | `swarmops_api::DEFAULT_DIFF_MAX_BYTES` |
 | [`diff`](commands/diff.md) | `--context` | [`DiffReq`](schema-types.md#diffreq) `context` | 3 lines | `swarmops_api::DEFAULT_DIFF_CONTEXT` |
+| [`merge-base`](commands/merge-base.md) | `--limit` | [`MergeBaseReq`](schema-types.md#mergebasereq) `limit` | 500 files | `swarmops_api::DEFAULT_DIFF_LIMIT` |
+| [`merge-base`](commands/merge-base.md) | `--max-bytes` | [`MergeBaseReq`](schema-types.md#mergebasereq) `max_bytes` | 32,768 bytes (32 KiB) | `swarmops_api::DEFAULT_DIFF_MAX_BYTES` |
 | [`land`](commands/land.md) | `--max-attempts` | [`LandReq`](schema-types.md#landreq) `max_attempts` | 8 attempts | `swarmops_api::DEFAULT_MAX_ATTEMPTS` |
 | [`land`](commands/land.md) | `--max-conflict-bytes` | [`LandReq`](schema-types.md#landreq) `max_conflict_bytes` | 32,768 bytes (32 KiB) | `swarmops_api::DEFAULT_MAX_CONFLICT_BYTES` |
 | [`op log`](commands/op-log.md) | `--limit` | [`OpLogReq`](schema-types.md#oplogreq) `limit` | 50 operations | `swarmops_api::DEFAULT_OP_LOG_LIMIT` |
@@ -310,6 +312,8 @@ The bounds `swarmops schema` states on a field, beside the integer formats' own.
 | [`LineRange`](schema-types.md#linerange) | `first` | at least 1 |
 | [`LineRange`](schema-types.md#linerange) | `last` | at least 1 |
 | [`LogReq`](schema-types.md#logreq) | `limit` | at least 1 |
+| [`MergeBaseReq`](schema-types.md#mergebasereq) | `limit` | at least 1 |
+| [`MergeBaseReq`](schema-types.md#mergebasereq) | `max_bytes` | at least 1 |
 | [`OpLogReq`](schema-types.md#oplogreq) | `limit` | at least 1 |
 | [`PathHistoryReq`](schema-types.md#pathhistoryreq) | `limit` | at least 1 |
 | [`ReadFileReq`](schema-types.md#readfilereq) | `max_bytes` | at least 1 |

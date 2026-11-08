@@ -56,7 +56,7 @@ type Startup<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)]);
 /// The tools, one per `StoreOps` operation and then one per client-side operation of the git
 /// remotes (M13), in the order `tools/list` gives them, each with the request type its arguments
 /// are.
-const TOOLS: [(&str, &str); 45] = [
+const TOOLS: [(&str, &str); 46] = [
     ("repo_info", "InfoReq"),
     ("resolve_rev", "ResolveRevReq"),
     ("read_file", "ReadFileReq"),
@@ -66,6 +66,7 @@ const TOOLS: [(&str, &str); 45] = [
     ("ancestry", "AncestryReq"),
     ("path_history", "PathHistoryReq"),
     ("diff", "DiffReq"),
+    ("merge_base", "MergeBaseReq"),
     ("op_log", "OpLogReq"),
     ("ref_list", "RefListReq"),
     ("ref_set", "RefSetReq"),
@@ -400,12 +401,8 @@ fn mcp_tool_calls_golden() {
     let landed = golden.ok("land", json!({"head": head, "idempotency_key": "land-7"}));
     let landed = golden.name_at(&landed, "/result/landed", "landed");
 
-    // 4. The history: the land's changeset, main's log, a path's history, a diff.
-    golden.ok("show", json!({"rev": landed}));
-    golden.ok("log", json!({"rev": "main"}));
-    golden.ok("ancestry", json!({"from": c1, "to": "main", "limit": 1}));
-    golden.ok("path_history", json!({"path": "src/lib.rs"}));
-    golden.ok("diff", json!({"from": c1, "to": "main", "format": "stat"}));
+    // 4. The history: the land's changeset, main's log, a path's history, a diff, a merge base.
+    history_calls(&mut golden, [&c1, &head, &landed]);
 
     // 5. A ref made and deleted; the deletion, the newest operation, undone.
     golden.ok(
@@ -469,6 +466,18 @@ fn mcp_tool_calls_golden() {
         assert_eq!(called, !UNCALLED.contains(&tool), "the call of {tool}");
     }
     insta::assert_json_snapshot!(transcript);
+}
+
+/// [`mcp_tool_calls_golden`]'s reads of the history: `landed`, main's log and its ancestry from
+/// `c1`, a path's history, the diff from `c1`, and where the change `head` forked from main.
+fn history_calls(golden: &mut Golden, [c1, head, landed]: [&str; 3]) {
+    golden.ok("show", json!({"rev": landed}));
+    golden.ok("log", json!({"rev": "main"}));
+    golden.ok("ancestry", json!({"from": c1, "to": "main", "limit": 1}));
+    golden.ok("path_history", json!({"path": "src/lib.rs"}));
+    golden.ok("diff", json!({"from": c1, "to": "main", "format": "stat"}));
+    let base = json!({"rev": head, "onto": "main", "limit": 1});
+    golden.ok("merge_base", base);
 }
 
 /// [`mcp_tool_calls_golden`]'s transactions: `release/a` and `release/b` made at `from` in

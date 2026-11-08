@@ -1578,6 +1578,72 @@ pub enum LineOp {
     Remove,
 }
 
+/// `merge_base` (CLI `merge-base`): where `rev` forks from `onto` along first parents, and the
+/// first page of what `rev` changed since, in one snapshot.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MergeBaseReq {
+    /// The change's side: the diff's new side.
+    pub rev: Rev,
+    /// The side it would land on, such as `main`.
+    pub onto: Rev,
+    /// The most files of the diff's first page, as `diff`'s `limit`: at least 1 (0 is
+    /// `E_INVALID_ARG`).
+    #[serde(default = "default_diff_limit")]
+    #[schemars(range(min = 1))]
+    pub limit: usize,
+    /// The most bytes of the first page's files, as `diff`'s `max_bytes`: at least 1 (0 is
+    /// `E_INVALID_ARG`).
+    #[serde(default = "default_diff_max_bytes")]
+    #[schemars(range(min = 1))]
+    pub max_bytes: u64,
+}
+
+impl MergeBaseReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(rev: impl Into<Rev>, onto: impl Into<Rev>) -> Self {
+        Self {
+            rev: rev.into(),
+            onto: onto.into(),
+            limit: default_diff_limit(),
+            max_bytes: default_diff_max_bytes(),
+        }
+    }
+}
+
+/// `merge_base`: the base, both revisions as full ids, and the first page of the `unified`
+/// diff from the base to `rev`. Read later pages with `diff`, giving `base` as `from`, `rev` as
+/// `to` and the page's `cursor`: the ids keep the pages on this base when a ref moves.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MergeBaseResp {
+    /// The newest changeset on the first-parent chains of both `rev` and `onto`.
+    pub base: String,
+    /// The changeset `rev` named.
+    pub rev: String,
+    /// The changeset `onto` named.
+    pub onto: String,
+    /// The first page of the diff from `base` to `rev`.
+    pub diff: Diff,
+}
+
+impl MergeBaseResp {
+    /// Takes every field.
+    pub fn new(
+        base: impl Into<String>,
+        rev: impl Into<String>,
+        onto: impl Into<String>,
+        diff: Diff,
+    ) -> Self {
+        Self {
+            base: base.into(),
+            rev: rev.into(),
+            onto: onto.into(),
+            diff,
+        }
+    }
+}
+
 /// `ref list`: list every ref, or those whose names start with a prefix.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -5011,6 +5077,14 @@ pub trait StoreOps {
     fn ref_txn(&self, who: &Identity, req: RefTxnReq) -> Result<RefTxnResp, OpError> {
         let _ = (who, req);
         Err(not_built("ref_txn"))
+    }
+
+    /// Where a revision forks from another along first parents, and the first page of what it
+    /// changed since (CLI `merge-base`). A read of the store. A store that does not have it
+    /// answers `E_INVALID_ARG`.
+    fn merge_base(&self, req: MergeBaseReq) -> Result<MergeBaseResp, OpError> {
+        let _ = req;
+        Err(not_built("merge_base"))
     }
 }
 

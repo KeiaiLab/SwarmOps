@@ -25,6 +25,7 @@ use swarmops_api::{
     VerifyReq,
 };
 use swarmops_api::{LandCheckReq, LandCheckResp, LandGroupReq, LandGroupResp};
+use swarmops_api::{MergeBaseReq, MergeBaseResp};
 use swarmops_api::{RefTxnReq, RefTxnResp};
 use swarmops_api::{RevertReq, RevertResp};
 
@@ -302,6 +303,11 @@ impl<O: StoreOps> StoreOps for ServerOps<O> {
     fn ref_txn(&self, who: &Identity, req: RefTxnReq) -> Result<RefTxnResp, OpError> {
         self.pass(self.inner.ref_txn(who, req))
     }
+
+    // A read of the store, passed as `diff` is.
+    fn merge_base(&self, req: MergeBaseReq) -> Result<MergeBaseResp, OpError> {
+        self.pass(self.inner.merge_base(req))
+    }
 }
 
 #[cfg(test)]
@@ -429,6 +435,9 @@ mod tests {
         }
         fn ref_txn(&self, _: &Identity, _: RefTxnReq) -> Result<RefTxnResp, OpError> {
             self.call("ref_txn")
+        }
+        fn merge_base(&self, _: MergeBaseReq) -> Result<MergeBaseResp, OpError> {
+            self.call("merge_base")
         }
     }
 
@@ -611,6 +620,8 @@ mod tests {
         assert_passed(&s, "ref_log", s.ref_log(ref_log).map(drop));
         let check = LandCheckReq::new(vec![swarmops_api::LandItemIn::new("main")]);
         assert_passed(&s, "land_check", s.land_check(check).map(drop));
+        let base = MergeBaseReq::new("main", "main");
+        assert_passed(&s, "merge_base", s.merge_base(base).map(drop));
         assert_passed(&s, "verify", s.verify(VerifyReq::default()).map(drop));
     }
 

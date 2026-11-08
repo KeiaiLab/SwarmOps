@@ -496,7 +496,7 @@ static BOUNDS: [Limit; 9] = [
             || bytes::to_u64(swarmops_repo::merge::line_diff::MAX_DIFF_LINES),
         ),
         unit: Unit::Count("lines"),
-        commands: &["diff", "land"],
+        commands: &["diff", "merge-base", "land"],
         errors: &[],
         what: "The most lines a side of a file may have to be diffed by lines. Past it, \
                    `diff` gives the file no line counts and no hunks, with `hunks_truncated`, \
@@ -511,7 +511,7 @@ static BOUNDS: [Limit; 9] = [
             || bytes::to_u64(swarmops_repo::merge::line_diff::MAX_DIFF_BYTES),
         ),
         unit: Unit::Bytes,
-        commands: &["diff", "land"],
+        commands: &["diff", "merge-base", "land"],
         errors: &[],
         what: "The most bytes a side of a file may have to be diffed by lines, as for the \
                    lines above.",
@@ -525,7 +525,7 @@ static BOUNDS: [Limit; 9] = [
             || 8_000,
         ),
         unit: Unit::Bytes,
-        commands: &["diff", "land"],
+        commands: &["diff", "merge-base", "land"],
         errors: &[],
         what: "How many leading bytes are searched for a NUL, as git does: a side that is \
                    not UTF-8, or holds a NUL there, is binary, which gets no line counts and no \
@@ -608,7 +608,7 @@ static BOUNDS: [Limit; 9] = [
 ];
 
 /// The paging defaults a request takes when it does not say.
-static DEFAULTS: [DefaultRow; 13] = [
+static DEFAULTS: [DefaultRow; 15] = [
     paged(
         "ReadFileReq",
         "max_bytes",
@@ -712,6 +712,32 @@ static DEFAULTS: [DefaultRow; 13] = [
         Unit::Count("lines"),
         "diff",
         Some("context"),
+    ),
+    paged(
+        "MergeBaseReq",
+        "limit",
+        code(
+            "swarmops_api::DEFAULT_DIFF_LIMIT",
+            API,
+            "pub const DEFAULT_DIFF_LIMIT: usize = 500;",
+            || bytes::to_u64(swarmops_api::DEFAULT_DIFF_LIMIT),
+        ),
+        Unit::Count("files"),
+        "merge-base",
+        Some("limit"),
+    ),
+    paged(
+        "MergeBaseReq",
+        "max_bytes",
+        code(
+            "swarmops_api::DEFAULT_DIFF_MAX_BYTES",
+            API,
+            "pub const DEFAULT_DIFF_MAX_BYTES: u64 = 32_768;",
+            || swarmops_api::DEFAULT_DIFF_MAX_BYTES,
+        ),
+        Unit::Bytes,
+        "merge-base",
+        Some("max-bytes"),
     ),
     paged(
         "LandReq",

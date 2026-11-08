@@ -25,6 +25,7 @@ use swarmops_api::{
 use swarmops_api::{BlobGetReq, BlobGetResp, RebaseReq, RebaseResp};
 use swarmops_api::{BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp};
 use swarmops_api::{ContentInput, ModeInput, ResolutionInput, ResolutionsInput};
+use swarmops_api::{DEFAULT_DIFF_CONTEXT, MergeBaseReq, MergeBaseResp};
 use swarmops_api::{GcReq, GcResp, RepairReq, RepairResp, UpgradeReq, UpgradeResp};
 use swarmops_api::{ItemOutcome, LandCheckItemOut, LandCheckReq, LandCheckResp, PathSummaryOut};
 use swarmops_api::{LandGroupItemOut, LandGroupReq, LandGroupResp};
@@ -898,6 +899,47 @@ fn diff_cursor(cursor: &str) -> Result<RepoPath, OpError> {
         .with_details(error::details([("cursor", cursor.into())]))
         .with_hint("pass the previous page's cursor as it was given, or none to start over")
     })
+}
+
+/// What a `diff` page says of each file, and how much of it: the request's `format`,
+/// `context`, `limit` and `max_bytes`.
+#[derive(Clone, Copy)]
+struct DiffShape {
+    format: DiffFormat,
+    context: u32,
+    limit: usize,
+    max_bytes: u64,
+}
+
+/// The `diff` page from `old` to `new` in `read`, both resolved: the files within `filter`
+/// after the path `after`, as `shape` says, and the cursor of the next page.
+fn diff_in(
+    read: &Snapshot<'_>,
+    [old, new]: [ChangesetId; 2],
+    filter: &PathFilter,
+    after: Option<RepoPath>,
+    shape: DiffShape,
+) -> Result<Diff, OpError> {
+    let DiffShape {
+        format,
+        context,
+        limit,
+        max_bytes,
+    } = shape;
+    let changes = read.diff(old, new, filter).map_err(error::op)?;
+    let start = after.map_or(0, |after| {
+        changes.partition_point(|change| change.path <= after)
+    });
+    let rest = &changes[start..];
+    let files = diff_page(read, rest, format, context, limit, max_bytes)?;
+    let truncated = files.len() < rest.len();
+    let cursor = files
+        .last()
+        .filter(|_| truncated)
+        .map(|last| last.path.clone());
+    let mut out = Diff::new(old.to_string(), new.to_string(), files, truncated);
+    out.cursor = cursor;
+    Ok(out)
 }
 
 /// A `diff` page of `changes`, the changes after the request's cursor: at most `limit` files,
@@ -2345,20 +2387,44 @@ impl StoreOps for Recording<'_> {
         // Both revisions resolve in one snapshot, which every read of the diff is made in.
         let read = self.snapshot()?;
         let (old, new) = (self.resolve(&read, &from)?, self.resolve(&read, &to)?);
-        let changes = read.diff(old, new, &filter).map_err(error::op)?;
-        let start = after.map_or(0, |after| {
-            changes.partition_point(|change| change.path <= after)
-        });
-        let rest = &changes[start..];
-        let files = diff_page(&read, rest, format, context, limit, max_bytes)?;
-        let truncated = files.len() < rest.len();
-        let cursor = files
-            .last()
-            .filter(|_| truncated)
-            .map(|last| last.path.clone());
-        let mut out = Diff::new(old.to_string(), new.to_string(), files, truncated);
-        out.cursor = cursor;
-        Ok(out)
+        let shape = DiffShape {
+            format,
+            context,
+            limit,
+            max_bytes,
+        };
+        diff_in(&read, [old, new], &filter, after, shape)
+    }
+
+    fn merge_base(&self, req: MergeBaseReq) -> Result<MergeBaseResp, OpError> {
+        let MergeBaseReq {
+            rev,
+            onto,
+            limit,
+            max_bytes,
+            ..
+        } = req;
+        at_least_one("limit", limit)?;
+        at_least_one_byte(max_bytes)?;
+
+        // 1. Both revisions and their base along first parents, in one snapshot.
+        let read = self.snapshot()?;
+        let (head, theirs) = (self.resolve(&read, &rev)?, self.resolve(&read, &onto)?);
+        let base = read.merge_base(head, theirs).map_err(error::op)?;
+        let Some(base) = base else {
+            return Err(error::op(RepoError::NoMergeBase { head, theirs }));
+        };
+
+        // 2. The first unified page of what `rev` changed since, as `diff base rev` gives it.
+        let shape = DiffShape {
+            format: DiffFormat::Unified,
+            context: DEFAULT_DIFF_CONTEXT,
+            limit,
+            max_bytes,
+        };
+        let diff = diff_in(&read, [base, head], &PathFilter::all(), None, shape)?;
+        let (base, head, theirs) = (base.to_string(), head.to_string(), theirs.to_string());
+        Ok(MergeBaseResp::new(base, head, theirs, diff))
     }
 
     fn ref_list(&self, req: RefListReq) -> Result<RefListResp, OpError> {
@@ -2797,6 +2863,10 @@ impl StoreOps for LocalOps {
 
     fn ref_txn(&self, who: &Identity, req: RefTxnReq) -> Result<RefTxnResp, OpError> {
         self.recording(&Resolved::default()).ref_txn(who, req)
+    }
+
+    fn merge_base(&self, req: MergeBaseReq) -> Result<MergeBaseResp, OpError> {
+        self.recording(&Resolved::default()).merge_base(req)
     }
 }
 

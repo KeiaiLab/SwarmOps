@@ -658,6 +658,25 @@ pub enum Command {
     },
     /// List the files that differ between two revisions, a page at a time.
     Diff(DiffArgs),
+    /// Find where REV forks from ONTO along first parents, and list what REV changed since.
+    ///
+    /// Prints the merge base, both revisions as full ids, and the first page of the unified
+    /// diff from the base to REV, read in one snapshot. Read the next pages with diff BASE
+    /// REV-ID --format unified --cursor C: the ids keep them on this base when a ref moves.
+    /// Revisions that share no first-parent ancestor are E_INVALID_ARG.
+    MergeBase {
+        /// The change's side: the revision whose changes the diff lists.
+        rev: String,
+        /// The side it would land on, such as main.
+        onto: String,
+        /// The most files of the first page.
+        #[arg(long, value_name = "N", default_value_t = DEFAULT_DIFF_LIMIT)]
+        limit: usize,
+        /// The most bytes of the first page's files, as JSON (the first file comes all the
+        /// same, its hunks cut to fit).
+        #[arg(long, value_name = "N", default_value_t = DEFAULT_DIFF_MAX_BYTES)]
+        max_bytes: u64,
+    },
     /// List refs, or move one by compare-and-swap.
     #[command(subcommand)]
     Ref(RefCommand),
@@ -766,7 +785,7 @@ pub enum Command {
     /// Serve the store's operations to an agent as an MCP server on stdin and stdout.
     ///
     /// One tool per operation (repo_info, resolve_rev, read_file, read_tree, show, log, ancestry,
-    /// path_history, diff, op_log, ref_list, ref_set, ref_delete, ref_log, undo, commit, land,
+    /// path_history, diff, merge_base, op_log, ref_list, ref_set, ref_delete, ref_log, undo, commit, land,
     /// revert, land_check, land_group, blob_put, blob_has, verify, the maintenance's gc, repair and upgrade, and the git
     /// remotes' remote_list, fetch, push, sync and sync_status), each taking the operation's
     /// request as its arguments and returning the envelope the other commands print. The store and the
@@ -1703,6 +1722,7 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["ancestry"] => "ancestry",
         ["history"] => "path_history",
         ["diff"] => "diff",
+        ["merge-base"] => "merge_base",
         ["ref", "list"] => "ref_list",
         ["ref", "set"] => "ref_set",
         ["ref", "delete"] => "ref_delete",
@@ -1854,10 +1874,10 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 59);
+        assert_eq!(ops.len(), 60);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 59, "two subcommands name one op");
+        assert_eq!(ops.len(), 60, "two subcommands name one op");
         assert_eq!(op_name(&["ref"]), None);
         assert_eq!(op_name(&["blob"]), None);
         assert_eq!(op_name(&["ws"]), None);

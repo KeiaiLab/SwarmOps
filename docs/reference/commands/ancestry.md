@@ -101,5 +101,6 @@ Any command that opens a store may also fail with a store error, such as [`E_NOT
 - [`swarmops log`](log.md)
 - [`swarmops history`](history.md)
 - [`swarmops diff`](diff.md)
+- [`swarmops merge-base`](merge-base.md)
 - [CLI reference](../cli.md)
 - [Error codes](../errors.md)

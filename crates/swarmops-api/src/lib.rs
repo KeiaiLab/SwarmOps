@@ -57,6 +57,7 @@ pub use ops::{
 };
 pub use ops::{LandGroupItemOut, LandGroupReq, LandGroupResp};
 pub use ops::{MAX_REF_TXN_MOVES, RefTxnMoveIn, RefTxnReq, RefTxnResp};
+pub use ops::{MergeBaseReq, MergeBaseResp};
 pub use ops::{RefLogEntryOut, RefLogPage, RefLogReq};
 pub use ops::{ResolutionInput, ResolutionsInput, Side};
 pub use ops::{ResolveRevReq, ResolvedRev, RevKind};

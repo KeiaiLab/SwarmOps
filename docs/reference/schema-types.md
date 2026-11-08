@@ -2,7 +2,7 @@
 
 # Schema types
 
-The 188 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
+The 190 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
 
 ## Index
 
@@ -85,6 +85,8 @@ The 188 request, response and value types of the API, as `swarmops schema` print
 | [`LogReq`](#logreq) | object | `log`: history along first parents, a page at a time. |
 | [`LossyClass`](#lossyclass) | enumeration | A class of git content that a changeset cannot hold as git has it. |
 | [`LossyCommitOut`](#lossycommitout) | object | `git import`: a commit taken lossily, and what it lost. |
+| [`MergeBaseReq`](#mergebasereq) | object | `merge_base` (CLI `merge-base`): where `rev` forks from `onto` along first parents, and the first page of what `rev` changed since, in one snapshot. |
+| [`MergeBaseResp`](#mergebaseresp) | object | `merge_base`: the base, both revisions as full ids, and the first page of the `unified` diff from the base to `rev`. |
 | [`Meta`](#meta) | object | What the envelope reports besides the outcome. |
 | [`ModeInput`](#modeinput) | enumeration | The kind of entry a `put` writes. |
 | [`OpChangesetOut`](#opchangesetout) | object | A changeset an operation recorded. |
@@ -1294,6 +1296,32 @@ Kind: object. `swarmops schema LossyCommitOut` prints its JSON Schema.
 | `changeset` | `string` | yes | The changeset made of it, whose `git.lossy` metadata names the same classes. |
 | `classes` | array of [`LossyClass`](#lossyclass) | yes | The classes dropped or normalized in it, ordered by name, as `git.lossy` lists them. |
 | `commit` | `string` | yes | The git commit: its id, 40 lowercase hex digits. |
+
+## MergeBaseReq
+
+`merge_base` (CLI `merge-base`): where `rev` forks from `onto` along first parents, and the first page of what `rev` changed since, in one snapshot.
+
+Kind: object. `swarmops schema MergeBaseReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `limit` | `integer` (uint) | no | The most files of the diff's first page, as `diff`'s `limit`: at least 1 (0 is `E_INVALID_ARG`). Default: `500`. At least 1. |
+| `max_bytes` | `integer` (uint64) | no | The most bytes of the first page's files, as `diff`'s `max_bytes`: at least 1 (0 is `E_INVALID_ARG`). Default: `32768`. At least 1. |
+| `onto` | [`Rev`](#rev) | yes | The side it would land on, such as `main`. |
+| `rev` | [`Rev`](#rev) | yes | The change's side: the diff's new side. |
+
+## MergeBaseResp
+
+`merge_base`: the base, both revisions as full ids, and the first page of the `unified` diff from the base to `rev`. Read later pages with `diff`, giving `base` as `from`, `rev` as `to` and the page's `cursor`: the ids keep the pages on this base when a ref moves.
+
+Kind: object. `swarmops schema MergeBaseResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `base` | `string` | yes | The newest changeset on the first-parent chains of both `rev` and `onto`. |
+| `diff` | [`Diff`](#diff) | yes | The first page of the diff from `base` to `rev`. |
+| `onto` | `string` | yes | The changeset `onto` named. |
+| `rev` | `string` | yes | The changeset `rev` named. |
 
 ## Meta
 

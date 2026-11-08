@@ -300,9 +300,11 @@ left).
   history are not measured. Each read walks every changeset `to` reaches down to where nothing
   more can be found, reading its object: far-apart revisions on a long history cost a walk of most
   of it. A keyed land does not use it: its search still walks first parents (see "A keyed land
-  searches first parents, not a key index"), and no test counts the records it reads. *Unscheduled: M16's fan-in
-  did not measure them; the baselines and p99s wait for a `just perf` window. Found: the M16 design
-  §5.*
+  searches first parents, not a key index"), and no test counts the records it reads. `merge_base`'s
+  benches (`merge_base/{20k,200k}`, the same histories) are skipped by the gate as well, and its
+  case on 1,000,000 changesets is not measured. *Unscheduled: M16's fan-in
+  did not measure them; the baselines and p99s wait for a `just perf` window; `merge_base` on
+  1,000,000 changesets joins M21's bundle. Found: the M16 design §5; the M18 design §8.*
 - **`--expect` with a ref name cannot detect a move.** A ref name given as the expected target
   resolves when the command runs, so it matches whatever the ref holds by then (it fails only
   if the ref is gone); give an id for an expectation that can fail, or be replayed.

@@ -29,6 +29,7 @@ pub fn schema_for_all() -> serde_json::Value {
         land_check_schemas(),
         land_group_schemas(),
         ref_txn_schemas(),
+        merge_base_schemas(),
         conflict_schemas(),
         maintenance_schemas(),
         remote_schemas(),
@@ -205,6 +206,11 @@ fn land_group_schemas() -> serde_json::Value {
 /// The schemas of multi-ref transactions' types (the M18 design §7).
 fn ref_txn_schemas() -> serde_json::Value {
     schemas![RefTxnReq, RefTxnMoveIn, RefTxnResp]
+}
+
+/// The schemas of merge base's types (the M18 design §8).
+fn merge_base_schemas() -> serde_json::Value {
+    schemas![MergeBaseReq, MergeBaseResp]
 }
 
 /// The schemas of the maintenance's types (M6): gc, repair and upgrade.

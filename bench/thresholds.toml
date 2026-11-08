@@ -744,3 +744,9 @@ reason = "new in M19 (task M19-6): no two quiet baseline runs yet"
 
 [skip."ws_commit/hashing/100"]
 reason = "new in M19 (task M19-6): no two quiet baseline runs yet"
+
+[skip."merge_base/20k"]
+reason = "new in M18 (task M18-11): no two quiet baseline runs yet; the host was never quiet when the bench was written"
+
+[skip."merge_base/200k"]
+reason = "new in M18 (task M18-11): no two quiet baseline runs yet; the host was never quiet when the bench was written"

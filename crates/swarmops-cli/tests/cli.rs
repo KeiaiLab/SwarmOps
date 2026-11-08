@@ -3057,6 +3057,147 @@ fn ancestry_pages_between_two_revs() {
     assert_eq!((over.exit, over.code()), (2, "E_INVALID_ARG"));
 }
 
+/// A store for `merge_base`: main `c1 - c2`, `release/f` at `b3` on the branch `c1 - b1 - b2 -
+/// b3`, which adds three files, and a root changeset `root` of its own.
+struct BaseStore {
+    store: String,
+    c1: String,
+    c2: String,
+    b3: String,
+    root: String,
+}
+
+impl BaseStore {
+    fn new(s: &mut Session) -> BaseStore {
+        let store = s.store();
+        s.run(&["init", &store]);
+        let c1 = s.commit(&store, None, "a.txt", "1\n", "c1");
+        let root = s.commit(&store, None, "r.txt", "r\n", "root");
+        let c2 = s.commit(&store, Some(&c1), "a.txt", "2\n", "c2");
+        let b1 = s.commit(&store, Some(&c1), "x.txt", "x\n", "b1");
+        let b2 = s.commit(&store, Some(&b1), "y.txt", "y\n", "b2");
+        let b3 = s.commit(&store, Some(&b2), "z.txt", "z\n", "b3");
+        move_ref(s, &store, "main", &c2, None);
+        move_ref(s, &store, "release/f", &b3, None);
+        BaseStore {
+            store,
+            c1,
+            c2,
+            b3,
+            root,
+        }
+    }
+}
+
+/// `merge-base REV ONTO` answers what `ancestry` and `diff` answer apart: the merge base along
+/// first parents, both revisions as full ids, and the first page of the unified diff from the
+/// base to REV, within the same `--limit` and `--max-bytes`. Revisions with no common ancestor,
+/// and a limit of 0, are `E_INVALID_ARG`.
+#[test]
+fn merge_base_equals_base_plus_diff() {
+    let mut s = Session::new();
+    let BaseStore {
+        store,
+        c1,
+        c2,
+        b3,
+        root,
+    } = BaseStore::new(&mut s);
+
+    // 1. The base, the ids and the first page, at the defaults and at one file a page.
+    for page in [&[][..], &["--limit", "1"][..]] {
+        let mut line = vec!["--repo", store.as_str(), "merge-base", "release/f", "main"];
+        line.extend_from_slice(page);
+        let got = s.run(&line);
+        assert_eq!(
+            (got.exit, &got["op"]),
+            (0, &json!("merge_base")),
+            "{}",
+            got.json
+        );
+        let result = &got["result"];
+        assert_eq!((&result["base"], &result["rev"]), (&json!(c1), &json!(b3)));
+        assert_eq!(result["onto"], json!(c2));
+        let ancestry = s.run(&["--repo", &store, "ancestry", &b3, &c2, "-n", "0"]);
+        assert_eq!(ancestry["result"]["merge_bases"], json!([c1]));
+        let mut diff = vec!["--repo", store.as_str(), "diff", &c1, &b3];
+        diff.extend_from_slice(&["--format", "unified"]);
+        diff.extend_from_slice(page);
+        let diff = s.run(&diff);
+        assert_eq!(result["diff"], diff["result"], "{page:?}");
+    }
+
+    // 2. Two roots share no base; a page of no file is refused.
+    let none = s.run(&["--repo", &store, "merge-base", &root, "main"]);
+    assert_eq!(
+        (none.exit, none.code()),
+        (2, "E_INVALID_ARG"),
+        "{}",
+        none.json
+    );
+    let zero = s.run(&[
+        "--repo",
+        &store,
+        "merge-base",
+        "release/f",
+        "main",
+        "--limit",
+        "0",
+    ]);
+    assert_eq!(
+        (zero.exit, zero.code()),
+        (2, "E_INVALID_ARG"),
+        "{}",
+        zero.json
+    );
+}
+
+/// The ids `merge-base` returns pin its later pages: once `release/f` has moved onto `main`,
+/// whose head is now its base, `diff BASE REV --cursor` with the first answer's ids still pages
+/// the first base's diff, as it paged before the move.
+#[test]
+fn pages_stay_on_the_first_base_after_the_ref_moves() {
+    let mut s = Session::new();
+    let BaseStore {
+        store, c1, c2, b3, ..
+    } = BaseStore::new(&mut s);
+    let page = |s: &mut Session, from: &str, to: &str, cursor: &str| {
+        let line = ["--repo", &store, "diff", from, to, "--format", "unified"];
+        let line = [&line[..], &["--limit", "1", "--cursor", cursor]].concat();
+        s.run(&line)["result"].clone()
+    };
+
+    // 1. The first page, and the second before the move.
+    let first = s.run(&[
+        "--repo",
+        &store,
+        "merge-base",
+        "release/f",
+        "main",
+        "--limit",
+        "1",
+    ]);
+    let result = first["result"].clone();
+    let (base, rev) = (
+        result["base"].as_str().unwrap(),
+        result["rev"].as_str().unwrap(),
+    );
+    assert_eq!((base, rev), (c1.as_str(), b3.as_str()));
+    let cursor = result["diff"]["cursor"].as_str().unwrap().to_owned();
+    let before = page(&mut s, base, rev, &cursor);
+    assert_eq!(before["files"][0]["path"], "y.txt", "{before}");
+
+    // 2. release/f moves onto main: its merge base is main's head now.
+    let moved = s.commit(&store, Some(&c2), "x.txt", "moved\n", "m1");
+    move_ref(&mut s, &store, "release/f", &moved, Some(&b3));
+    let now = s.run(&["--repo", &store, "merge-base", "release/f", "main"]);
+    assert_eq!(now["result"]["base"], json!(c2), "{}", now.json);
+
+    // 3. The first answer's ids page on as before; the ref pages another diff.
+    assert_eq!(page(&mut s, base, rev, &cursor), before);
+    assert_ne!(page(&mut s, base, "release/f", &cursor), before);
+}
+
 /// `op log` waits for the store's lock as a write does: behind a lock held for the whole of the
 /// store's 10 s timeout it is `E_BUSY` (exit 4, retryable), never a lock-free listing.
 #[test]

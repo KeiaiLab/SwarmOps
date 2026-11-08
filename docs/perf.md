@@ -2494,3 +2494,26 @@ beside its lines. The `perf-cases` timeout stays 320 minutes: its rule sums time
 measures, which these loaded runs are not, and M17-8b's cases wait for the same run. No gate,
 target, timeout or case parameter changed. The verdicts follow as a docs-only commit from the
 first gated window.
+
+## M18-11: `merge_base`'s store reads — 2026-11-08 (not a baseline)
+
+The M18 design §8 puts `merge_base` in the contract and asks for its cost beside `ancestry`'s:
+`merge_base/{20k,200k}` in `crates/swarmops-repo/benches/ancestry.rs`, on the same merge-rich
+histories (a merge every 16 mainline changesets). Each call takes a snapshot, finds the base of a
+change on a branch 100 mainline changesets below the tip against the tip along first parents
+(`RepoRead::merge_base`), and diffs the trees from that base to the change (one file); the
+operation's hunks and JSON are not in it. One run, `cargo bench --locked -p swarmops-repo --bench
+ancestry -- '^merge_base/'`, release build, under the heavy lock, on the tree committed as the
+M18-11 slice (stacked on `524da808`), 28 s of wall time with both stores' builds:
+
+| Bench | Criterion estimate | p50 | p90 | p99 | max | Calls |
+| --- | --- | --- | --- | --- | --- | --- |
+| `merge_base/20k` | 1.278 ms | 1.193 ms | 1.517 ms | 2.144 ms | 5.578 ms | 4,983 |
+| `merge_base/200k` | 1.333 ms | 1.224 ms | 1.710 ms | 2.391 ms | 3.410 ms | 4,983 |
+
+The host was not quiet: the 1-minute load was 26.82 when the run started and 23.64 when it ended
+(5-minute 54.70 and 51.35), with other worktrees' builds and tests beside it. These figures are a
+reading, not a baseline and not a verdict: `bench/thresholds.toml` skips both benches until two
+quiet runs give their medians, and the bench gate reads them in a Scheduled run after that. The
+two sizes cost about the same. The case on 1,000,000 changesets is not measured: it joins M21's
+bundle (the M18 design §0.2, row 28A3).

@@ -19,6 +19,7 @@ In `tools/list`'s order.
 | [`ancestry`](ancestry.md) | Compare two revisions' ancestry | [`swarmops ancestry`](../commands/ancestry.md) | no | no |
 | [`path_history`](path-history.md) | List a path's history | [`swarmops history`](../commands/history.md) | no | no |
 | [`diff`](diff.md) | Diff two revisions | [`swarmops diff`](../commands/diff.md) | no | no |
+| [`merge_base`](merge-base.md) | Find a merge base | [`swarmops merge-base`](../commands/merge-base.md) | no | no |
 | [`op_log`](op-log.md) | List operations | [`swarmops op log`](../commands/op-log.md) | no | no |
 | [`ref_list`](ref-list.md) | List refs | [`swarmops ref list`](../commands/ref-list.md) | no | no |
 | [`ref_set`](ref-set.md) | Move a ref | [`swarmops ref set`](../commands/ref-set.md) | moves refs | yes |
@@ -111,7 +112,7 @@ Both are the server's, never a call's; no tool argument names either.
 - The store is `--repo`, else `SWARMOPS_REPO`, opened anew for each call, so that a call sees what other processes committed. A store that is not there is each call's `E_NOT_A_REPO`, and the server serves on.
 - The identity is `--as`, else `SWARMOPS_AGENT`, with `SWARMOPS_RUN_ID`, as for the CLI. Every change is recorded for it.
 - These tools need it, and without one fail with `E_IDENTITY_REQUIRED`: `ref_set`, `ref_delete`, `ref_txn`, `undo`, `commit`, `land`, `revert`, `land_group`, `rebase`, `blob_put`, `sync`.
-- These need none: `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `ancestry`, `path_history`, `diff`, `op_log`, `ref_list`, `ref_log`, `land_check`, `blob_has`, `verify`, `gc`, `repair`, `upgrade`, `remote_list`, `fetch`, `push`, `sync_status`.
+- These need none: `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `ancestry`, `path_history`, `diff`, `merge_base`, `op_log`, `ref_list`, `ref_log`, `land_check`, `blob_has`, `verify`, `gc`, `repair`, `upgrade`, `remote_list`, `fetch`, `push`, `sync_status`.
 - The output flags (`--json`, `--human`, `--pretty`) do not apply.
 
 ## Result size limits

@@ -58,6 +58,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
   one is `E_CAS_MISMATCH` listing every failed ref in `details.mismatches`, nothing written. Each
   move keeps `ref set`'s and `ref delete`'s rules; `op undo` of the operation restores every ref at
   once (the M18 design §7). `swarmops mcp` lists 45 tools, and `swarmops schema` 188 types.
+- `swarmops merge-base REV ONTO [--limit N] [--max-bytes N]` and the MCP tool `merge_base` say
+  where REV forks from ONTO along first parents, with both revisions as full ids and the first
+  page of the unified diff from that base to REV, read in one snapshot; `diff` from the base to
+  REV's id with the page's cursor reads the next pages, which stay on that base when a ref moves.
+  Revisions that share no first-parent ancestor are `E_INVALID_ARG` (the M18 design §8).
+  `swarmops mcp` lists 46 tools, and `swarmops schema` 190 types.
 
 ### Changed
 

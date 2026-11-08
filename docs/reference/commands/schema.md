@@ -136,6 +136,8 @@ swarmops schema NoSuchType
         "LogReq",
         "LossyClass",
         "LossyCommitOut",
+        "MergeBaseReq",
+        "MergeBaseResp",
         "Meta",
         "ModeInput",
         "OpChangesetOut",

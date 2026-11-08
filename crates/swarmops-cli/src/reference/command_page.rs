@@ -220,7 +220,7 @@ struct Meta {
 
 /// Every command, in the grammar's order. `meta_matches_the_code` checks each column it can
 /// against the code.
-const META: [Meta; 59] = [
+const META: [Meta; 60] = [
     meta("init", Group::Store, true, false, Returns::Type("RepoInfo")),
     meta(
         "info",
@@ -430,6 +430,13 @@ const META: [Meta; 59] = [
         Returns::Type("PathHistoryPage"),
     ),
     meta("diff", Group::Read, false, false, Returns::Type("Diff")),
+    meta(
+        "merge-base",
+        Group::Read,
+        false,
+        false,
+        Returns::Type("MergeBaseResp"),
+    ),
     meta(
         "ref list",
         Group::Refs,
@@ -1383,7 +1390,7 @@ fn source(path: &str) -> String {
 }
 
 /// Where each result type is returned: the file, and the function whose signature names it.
-const RETURN_SITES: [(&str, &str, &str); 55] = [
+const RETURN_SITES: [(&str, &str, &str); 56] = [
     ("init", "src/commands/run.rs", "fn init("),
     ("info", "../swarmops-api/src/ops.rs", "fn repo_info("),
     (
@@ -1457,6 +1464,7 @@ const RETURN_SITES: [(&str, &str, &str); 55] = [
     ("ancestry", "../swarmops-api/src/ops.rs", "fn ancestry("),
     ("history", "../swarmops-api/src/ops.rs", "fn path_history("),
     ("diff", "../swarmops-api/src/ops.rs", "fn diff("),
+    ("merge-base", "../swarmops-api/src/ops.rs", "fn merge_base("),
     ("ref list", "../swarmops-api/src/ops.rs", "fn ref_list("),
     ("ref set", "../swarmops-api/src/ops.rs", "fn ref_set("),
     ("ref delete", "../swarmops-api/src/ops.rs", "fn ref_delete("),

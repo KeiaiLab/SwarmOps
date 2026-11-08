@@ -126,7 +126,7 @@ ids for compare-and-swap, `land` to publish, small pages):
 {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"swarmops","title":"SwarmOps","version":"0.2.0"},"instructions":"SwarmOps is source control for coding-agent swarms: many agents commit to one store at once. …"}}
 ```
 
-**`tools/list`.** One page of 45 tools. Each entry holds `name`, `title`, `description`,
+**`tools/list`.** One page of 46 tools. Each entry holds `name`, `title`, `description`,
 `inputSchema` and `annotations`; `read_file` alone also carries `_meta`:
 
 ```sh
@@ -142,6 +142,7 @@ sed -n 2p answers.jsonl | jq -c '.result.tools[] | {name, title, annotations} + 
 {"name":"log","title":"List history","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
 {"name":"path_history","title":"List a path's history","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
 {"name":"diff","title":"Diff two revisions","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
+{"name":"merge_base","title":"Find a merge base","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
 {"name":"op_log","title":"List operations","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
 {"name":"ref_list","title":"List refs","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
 {"name":"ref_set","title":"Move a ref","annotations":{"destructiveHint":true,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":false}}
@@ -283,6 +284,7 @@ the CLI command's request; `swarmops schema <Request>` prints the type.
 | `log` | `swarmops log [REV]` | `LogReq` | no |
 | `path_history` | `swarmops history REV:PATH` | `PathHistoryReq` | no |
 | `diff` | `swarmops diff FROM TO` | `DiffReq` | no |
+| `merge_base` | `swarmops merge-base REV ONTO` | `MergeBaseReq` | no |
 | `op_log` | `swarmops op log` | `OpLogReq` | no |
 | `ref_list` | `swarmops ref list` | `RefListReq` | no |
 | `ref_set` | `swarmops ref set NAME REV` | `RefSetReq` | moves a ref |
@@ -432,6 +434,7 @@ it cuts only the text of an error. Each result holds its envelope twice, so ask 
 | `read_tree` | `limit` of 100 or less | `cursor` |
 | `log`, `path_history` | `limit` of 100 or less | `cursor` |
 | `diff` | `limit` of 100 or less; `max_bytes` of 32768 or less for `unified` | `cursor` |
+| `merge_base` | `limit` of 100 or less; `max_bytes` of 32768 or less | `diff` from `base` to `rev` with the `cursor` |
 | `show` | `max_changes` of 100 or less | |
 | `op_log`, `ref_log` | `limit` of 20 or less | `before` |
 

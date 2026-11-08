@@ -21,6 +21,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use swarmops_api::AncestryReq;
 use swarmops_api::LandReq;
+use swarmops_api::MergeBaseReq;
 use swarmops_api::RebaseReq;
 use swarmops_api::RefLogReq;
 use swarmops_api::RefTxnReq;
@@ -243,7 +244,7 @@ fn dispatch(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
             limit,
             cursor,
         } => history(ctx, op, &target, limit, cursor),
-        Command::Diff(args) => diff(ctx, op, args),
+        diffs @ (Command::Diff(_) | Command::MergeBase { .. }) => run_diff(ctx, op, diffs),
         Command::Ref(command) => run_ref(ctx, op, command),
         Command::Op(command) => run_op(ctx, op, command),
         integrity @ (Command::Verify { .. }
@@ -698,6 +699,32 @@ fn diff(ctx: &Ctx<'_>, op: &'static str, args: DiffArgs) -> Printed {
     req.cursor = cursor;
     req.max_bytes = max_bytes;
     ctx.on_store(op, || Ok(req), |ops, req| ops.diff(req))
+}
+
+/// Runs `diff` or `merge-base`, which names operation `op`: `command` is its arguments.
+fn run_diff(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
+    match command {
+        Command::Diff(args) => diff(ctx, op, args),
+        base => merge_base(ctx, op, base),
+    }
+}
+
+/// Runs `merge-base`, which names operation `op`: where its REV forks from its ONTO, and the
+/// first page of what REV changed since; `command` is its arguments.
+fn merge_base(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
+    let Command::MergeBase {
+        rev,
+        onto,
+        limit,
+        max_bytes,
+    } = command
+    else {
+        unreachable!("run passes merge-base its own command alone");
+    };
+    let mut req = MergeBaseReq::new(rev, onto);
+    req.limit = limit;
+    req.max_bytes = max_bytes;
+    ctx.on_store(op, || Ok(req), |ops, req| ops.merge_base(req))
 }
 
 /// Runs `resolve`, which names operation `op`: the changeset `rev` names, and its kind.

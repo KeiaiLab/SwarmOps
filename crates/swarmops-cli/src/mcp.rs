@@ -65,7 +65,7 @@
 //! # The tools
 //!
 //! One tool per [`StoreOps`] operation, named as the envelope's `op` is: `repo_info`,
-//! `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `ancestry`, `path_history`, `diff`, `op_log`,
+//! `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `ancestry`, `path_history`, `diff`, `merge_base`, `op_log`,
 //! `ref_list`, `ref_set`, `ref_delete`, `ref_log`, `ref_txn`, `undo`, `commit`, `land`, `revert`, `land_check`, `land_group`, `blob_put`, `blob_has`,
 //! `verify` and the maintenance's `gc`, `repair` and `upgrade` (M6), in `tools/list`'s order; then the git remotes' client-side operations (M13), which
 //! no [`StoreOps`] has: `remote_list`, `fetch`, `push`, `sync` and `sync_status`, run on the
@@ -278,7 +278,7 @@ const READ_FILE_RESULT_CHARS: u32 = 200_000;
 const RESULT_CHARS_KEY: &str = "anthropic/maxResultSizeChars";
 
 /// The tools, in the order `tools/list` gives them.
-static TOOLS: [Spec; 33] = [
+static TOOLS: [Spec; 34] = [
     Spec {
         tool: Tool::RepoInfo,
         name: "repo_info",
@@ -389,6 +389,19 @@ static TOOLS: [Spec; 33] = [
                       max_bytes at 32768 or less for unified, and page on with the cursor and the \
                       first page's from and to (full ids), since clients limit long tool results \
                       and a cursor pins no revision.",
+        effect: Effect::Reads,
+        result_chars: None,
+    },
+    Spec {
+        tool: Tool::MergeBase,
+        name: "merge_base",
+        request: "MergeBaseReq",
+        title: "Find a merge base",
+        description: "Where rev forks from onto along first parents: the base, both revisions \
+                      as full ids, and the first page of the unified diff from the base to rev; \
+                      pass a limit of 100 or less and keep max_bytes at 32768 or less, then page \
+                      on with diff from the base to the rev id with the page's cursor, since \
+                      clients limit long tool results and the ids keep the pages on this base.",
         effect: Effect::Reads,
         result_chars: None,
     },
@@ -1496,6 +1509,7 @@ fn operate<O: Operate>(tool: Tool, how: O) -> O::Done {
         Tool::Ancestry => how.read(|ops, req| ops.ancestry(req)),
         Tool::PathHistory => how.read(|ops, req| ops.path_history(req)),
         Tool::Diff => how.read(|ops, req| ops.diff(req)),
+        Tool::MergeBase => how.read(|ops, req| ops.merge_base(req)),
         Tool::OpLog => how.read(|ops, req| ops.op_log(req)),
         Tool::RefList => how.read(|ops, req| ops.ref_list(req)),
         Tool::RefSet => how.mutate(|ops, who, req| ops.ref_set(who, req)),
@@ -1829,6 +1843,7 @@ impl Refuse for LogReq {}
 impl Refuse for AncestryReq {}
 impl Refuse for PathHistoryReq {}
 impl Refuse for DiffReq {}
+impl Refuse for swarmops_api::MergeBaseReq {}
 impl Refuse for OpLogReq {}
 impl Refuse for RefListReq {}
 impl Refuse for RefLogReq {}
@@ -2439,6 +2454,7 @@ enum Tool {
     Ancestry,
     PathHistory,
     Diff,
+    MergeBase,
     OpLog,
     RefList,
     RefSet,
@@ -2716,6 +2732,7 @@ pub(crate) mod probe {
             "reason": "r",
             "from": "main",
             "to": "main",
+            "onto": "main",
             "path": "a",
             "name": "main",
             "new": "main",
@@ -2964,6 +2981,13 @@ pub(crate) mod probe {
             _: swarmops_api::LandGroupReq,
         ) -> Result<swarmops_api::LandGroupResp, OpError> {
             self.called("land_group", "LandGroupReq")
+        }
+
+        fn merge_base(
+            &self,
+            _: swarmops_api::MergeBaseReq,
+        ) -> Result<swarmops_api::MergeBaseResp, OpError> {
+            self.called("merge_base", "MergeBaseReq")
         }
     }
 }
