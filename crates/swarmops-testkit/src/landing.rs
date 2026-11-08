@@ -15,6 +15,8 @@
 //!   sync shares, relocations), with the summary line a run prints and reads back;
 //!   [`Stats::per_window`]: the same per [`Window`] of the run (the M17 design §7), each
 //!   attempt's [`Outcome`] counted, and [`flagged`] the windows with a failure.
+//! - [`Hold`] and [`Holds`]: the holds of `meta/lock` a lock probe saw, each with the answers
+//!   its holder wrote, and their batch size `b`, hold and `U` (the M18 D2 design §8).
 //! - [`backoff`]: ops spec §3 step 7's jittered backoff, its jitter from
 //!   [`mix`](measure::mix); [`slot`] and [`open_loop_lands`]: when an open loop's lands are due.
 //! - [`Cell`] and [`Run`]: a cell of the measurement, and one run of one model in it, with the
@@ -908,6 +910,106 @@ pub fn flagged(windows: &[(Window, Stats)]) -> Vec<Window> {
         .filter(|(_, stats)| stats.other > 0)
         .map(|(window, _)| *window)
         .collect()
+}
+
+/// One hold of `meta/lock` as a lock probe outside the binary saw it (the M18 D2 design §8):
+/// how long it lasted and how many answers its holder wrote, one per waiter whose request it
+/// claimed into its batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hold {
+    /// How long it lasted, in microseconds.
+    pub us: u64,
+    /// How many other members' answers its holder wrote.
+    pub answers: u32,
+}
+
+impl Hold {
+    /// The members of its batch, `b`: the holder's own and one per answer, so a hold with no
+    /// answers reads 1.
+    pub fn members(&self) -> u64 {
+        1 + u64::from(self.answers)
+    }
+
+    /// Its lock time per member, in microseconds: the hold over `b`.
+    pub fn per_member_us(&self) -> u64 {
+        self.us / self.members()
+    }
+}
+
+/// The holds of a run ([`Hold`]) summed up for the probe's `lock` line (the M18 D2 design §8).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Holds {
+    /// How many holds.
+    pub count: u64,
+    /// The answers their holders wrote, summed.
+    pub answers: u64,
+    /// `b`, the members of a hold's batch, nearest-rank p50.
+    pub b_p50: u64,
+    /// The same, p99.
+    pub b_p99: u64,
+    /// The hold, nearest-rank p50, in microseconds.
+    pub hold_p50_us: u64,
+    /// The same, p99.
+    pub hold_p99_us: u64,
+    /// The longest hold, in microseconds.
+    pub hold_max_us: u64,
+    /// The hold over `b`, nearest-rank p50, in microseconds: `U`'s lock time per land.
+    pub per_member_p50_us: u64,
+}
+
+impl Holds {
+    /// The numbers of `holds`; `None` for none.
+    pub fn of(holds: &[Hold]) -> Option<Holds> {
+        // 1. Each figure's values, sorted for the percentiles.
+        let sorted = |pick: fn(&Hold) -> u64| {
+            let mut values: Vec<u64> = holds.iter().map(pick).collect();
+            values.sort_unstable();
+            values
+        };
+        let members = sorted(Hold::members);
+        let lengths = sorted(|hold| hold.us);
+        let per_member = sorted(Hold::per_member_us);
+        let max = *lengths.last()?;
+
+        // 2. The nearest-rank percentiles of each.
+        let at = |values: &[u64], percent: usize| {
+            let durations: Vec<Duration> =
+                values.iter().copied().map(Duration::from_micros).collect();
+            micros(&durations, percent)
+        };
+        Some(Holds {
+            count: bytes::to_u64(holds.len()),
+            answers: holds.iter().map(|hold| u64::from(hold.answers)).sum(),
+            b_p50: at(&members, 50),
+            b_p99: at(&members, 99),
+            hold_p50_us: at(&lengths, 50),
+            hold_p99_us: at(&lengths, 99),
+            hold_max_us: max,
+            per_member_p50_us: at(&per_member, 50),
+        })
+    }
+
+    /// `U` at `lands_per_s`: the lands/s times the median hold over `b`.
+    pub fn u(&self, lands_per_s: f64) -> f64 {
+        lands_per_s * Duration::from_micros(self.per_member_p50_us).as_secs_f64()
+    }
+
+    /// The numbers as one line of `key=value` fields, holds in milliseconds to one decimal.
+    pub fn line(&self) -> String {
+        let ms = |us: u64| Duration::from_micros(us).as_secs_f64() * 1_000.0;
+        format!(
+            "holds={} answers={} b_p50={} b_p99={} hold_p50_ms={:.1} hold_p99_ms={:.1} \
+             hold_max_ms={:.1} per_land_p50_ms={:.1}",
+            self.count,
+            self.answers,
+            self.b_p50,
+            self.b_p99,
+            ms(self.hold_p50_us),
+            ms(self.hold_p99_us),
+            ms(self.hold_max_us),
+            ms(self.per_member_p50_us),
+        )
+    }
 }
 
 /// The nearest-rank `percent` percentile of `sorted`, in microseconds; 0 for no samples.

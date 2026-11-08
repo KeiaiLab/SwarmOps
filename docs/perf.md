@@ -1924,3 +1924,51 @@ gate and no gate, target, timeout or case parameter changed. The nearest figures
 landers lane at `b4337977` (`U` 2.042, the lock held 99.9 % of the samples, a land's hold 81.7 ms
 at the median, load 9.31 to 10.67, outside the gate) and M16's relocations at `8fae4fe0` (2,537
 and 2,655 of 3,000 lands at 50). D2-8 measures the same steps in a gated window after D2.
+
+## D2-8: G4 on batched lands — 2026-11-08 (not measured: the host was never quiet)
+
+The group-commit design's slice D2-8 (its §10–§12, the M18 plan's Task D2-8): G4 on the code with
+batched lands and commits, `stable` `f3ed2a82` (v0.10.0) with this slice's probe change, release
+build, `landing::perf::landing_under_load` as `just perf` runs it, its lanes but `landers` off
+(`SWARMOPS_TEST_CLI_LANDING_LANES=landers`), as the verdict runs ask; then G4 with all four lanes
+beside, the v0.8.0 tag in the same window, and G1 at 50 × 1,000.
+
+The lock probe (`SWARMOPS_TEST_CLI_LANDING_LOCK_SAMPLE_US`) now also lists `meta/queue/` at each
+sample: a request first seen claimed counts as one answer of the hold that claimed it, so each hold
+has its batch size `b` = 1 + its answers. It prints `answers=` on each `landing-lock: ` line, a
+`landing-perf: lock batch` line per subcommand (holds, answers, `b` p50/p99, the hold's
+p50/p99/max, the hold over `b` at the median) and the lane's `U` as the group-commit design §8
+defines it, lands/s × the median hold over `b`, with the held share of samples and the former `U`
+(`u_process`, lands/s × a `land` process's median hold) beside it. Each lane also prints what its
+store's `meta/queue/` held at its end (`queue_left=`).
+
+Each step waits for the measurement plan's gate (1-minute load < 2 and 5-minute < 6, both held
+5 minutes, no SwarmOps CI job, the soak service idle and its next run past the step's end plus
+2 minutes) at most 30 minutes, then is skipped with its load recorded. None passed it:
+
+| Step | Wait (KST) | Max load (1 / 5 min) | Last reading (1 / 5 min, CI job) | End load |
+| --- | --- | --- | --- | --- |
+| 50 open, run 1 | 08:30–09:00 | 245.96 / 156.01 | 8.97 / 25.94, no | 8.41 25.54 57.25 |
+| 50 open, run 2 | 09:00–09:30 | 129.50 / 53.81 | 16.79 / 18.72, no | 15.61 18.44 30.60 |
+| 50 open, probe 1,000 µs | 09:30–10:00 | 77.45 / 35.51 | 14.36 / 15.34, no | 14.58 15.37 15.91 |
+| 32 open, run 1 | 10:00–10:30 | 51.84 / 24.66 | 2.05 / 2.16, no | 2.21 2.19 5.40 |
+| 32 open, run 2 | 10:30–11:00 | 30.30 / 8.77 | 2.36 / 2.89, no | 2.33 2.88 4.52 |
+| 50 closed | 11:00–11:30 | 24.93 / 10.61 | 2.83 / 4.64, no | 2.68 4.58 5.72 |
+| 50 open, `/data` | 11:30–12:00 | 13.28 / 7.30 | 2.02 / 3.68, no | 1.44 3.44 4.14 |
+| 50 open, v0.8.0 | 12:00–12:30 | 16.45 / 5.66 | 2.10 / 1.92, no | 1.64 1.83 2.44 |
+| G1, 50 × 1,000 | 12:30–13:00 | 17.84 / 5.47 | 2.31 / 1.92, no | 2.37 1.94 2.14 |
+| 50 open, four lanes | 13:00–13:30 | 6.98 / 2.98 | 2.00 / 1.89, no | 2.12 1.90 1.97 |
+
+Other workloads on the shared host kept the 1-minute load at 1.4 to 246; from 10:00 it sat near 2,
+the gate's bound, with spikes to 6 to 52, and never stayed under it for 5 minutes. So G4's p99 at 50
+and 32 processes, `U`, the held share, `b`, the batch hold against G18's 100 ms, the in-run sync
+samples and the jbd2 and discard deltas stay unmeasured on batched lands, and so does G1 at 50 ×
+1,000; no run started outside the gate and no gate, target, timeout, seed or case parameter changed.
+The group-commit design's §10 verdict stays open, and its §8 trigger is not judged.
+
+A debug-build smoke run of the probe (8 agents, one land each every 100 ms for 10 s, the
+`landers` lane, probe at 1,000 µs, load 40 to 45) passed in 17 s: 800 lands, 0 % retries, 440
+holds with 570 answers, `b` 1 at the median and 5 at the p99, a hold of 28.0 ms at the median and
+164.1 ms at most, 9.6 ms over `b`; `U` 0.771 against a `u_process` of 0.088 (most lands are
+answered without holding the lock), the lock held 98.5 % of the samples, `queue_left=0`. It checks
+the probe, not the targets.

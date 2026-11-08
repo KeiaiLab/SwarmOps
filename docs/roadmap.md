@@ -153,8 +153,9 @@ commit in one lock pass (`land --changes`), and G4's harness lands so: at 50 pro
 441.7 ms in one run and 1,483.5 ms in another that started at twice the load, with 25.0 lands/s,
 0 % retries and nothing lost in both ([perf.md](perf.md#m16--2026-11-07)). Condition 2 is not met
 robustly, so M18 starts with group commit (D2): lands and commits that wait on the writer lock are
-committed in batches (D2-1 to D2-7, in v0.10.0); G4 is not measured on batching yet, D2-8 measures
-it ([perf.md](perf.md#d2-baseline--2026-11-08-not-measured-the-host-was-never-quiet)). G17's push and fetch are met
+committed in batches (D2-1 to D2-7, in v0.10.0); G4 is not measured on batching yet: D2-8's gated
+runs found the shared host never quiet, so condition 2 stays open
+([perf.md](perf.md#d2-8-g4-on-batched-lands--2026-11-08-not-measured-the-host-was-never-quiet)). G17's push and fetch are met
 (1.02× and 1.34×, the fetch with the mirror's commit-graph); the sync of one land right after a
 clone is not (49.6 s against 1 s). The benchmark gate (condition 3) runs in the weekly Scheduled
 run.

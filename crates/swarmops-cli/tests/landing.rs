@@ -277,15 +277,20 @@ fn assert_every_change_on_main(store: &Store) {
 /// ([`flagged`]), which must be none. The movers' branches end at their last acknowledged move
 /// ([`check_moved`]). In `prepared` the detached preparations after the lands
 /// (`serve --prepare`) must have left `serve.git` current within [`PREPARED_WITHIN`]; the other
-/// lanes must have prepared nothing. The last two lines give R-1's ratio and G20's.
+/// lanes must have prepared nothing. The last two lines give R-1's ratio and G20's, each when
+/// both its lanes ran: [`LANES_VAR`] names the lanes to run (G4's verdict runs `landers` alone),
+/// all four when unset.
 ///
 /// With [`LOCK_SAMPLE_VAR`] set, a thread samples `meta/lock`'s holder and waiters in the
 /// kernel's `/proc/locks` every that many microseconds while the agents land ([`locks`]): the
 /// binary reports no lock times of its own, neither in its envelope nor in a log. It prints a
 /// `landing-lock: ` line per process that waited for or held the lock (its subcommand, its wait,
-/// its hold), then a `landing-perf: lock` line per subcommand with their p50 and p99, the share
-/// of samples the lock was held in and the mean queue, and the lane's `U`: lands/s times the
-/// median hold of a `land` process. Unset, the lanes run without it.
+/// its hold, the answers its holds wrote), then a `landing-perf: lock` line per subcommand with
+/// their p50 and p99 and a `lock batch` line with the batch size `b` per hold and the hold
+/// ([`Holds`](swarmops_testkit::landing::Holds)), the share of samples the lock was held in and
+/// the mean queue, and the lane's `U`: lands/s times the median hold over `b` of a `land`'s hold
+/// (the M18 D2 design §8), beside the held share and the former `U` of a `land` process's median
+/// hold. Unset, the lanes run without it.
 mod perf {
     use std::fs;
     use std::path::Path;
@@ -325,6 +330,9 @@ mod perf {
     /// How many lands each agent makes in a closed loop.
     const LANDS_VAR: &str = "SWARMOPS_TEST_CLI_LANDING_LANDS";
 
+    /// The lanes to run, by name, comma-separated ([`Lane::name`]); unset: all four.
+    const LANES_VAR: &str = "SWARMOPS_TEST_CLI_LANDING_LANES";
+
     /// The seed of the open loop's slots.
     const SEED: u64 = 1;
 
@@ -353,6 +361,9 @@ mod perf {
 
     /// The file every export writes beside `serve.git`: there only once one ran.
     const SERVE_STATE: &str = "git/serve.state";
+
+    /// The store's write queue (the M18 D2 design §3.4).
+    const QUEUE: &str = "meta/queue";
 
     /// `name`'s value as a number, or `default`.
     fn var(name: &str, default: u64) -> u64 {
@@ -393,6 +404,28 @@ mod perf {
                 Lane::Movers => "movers",
                 Lane::Beside => "beside",
             }
+        }
+
+        /// The lane named `name`, if one is.
+        fn from_name(name: &str) -> Option<Lane> {
+            Lane::ALL.into_iter().find(|lane| lane.name() == name)
+        }
+
+        /// The lanes [`LANES_VAR`] names, in [`Lane::ALL`]'s order; all of them if it is unset.
+        /// A name that is no lane's fails the run.
+        fn chosen() -> Vec<Lane> {
+            let Ok(list) = std::env::var(LANES_VAR) else {
+                return Lane::ALL.to_vec();
+            };
+            let named: Vec<Lane> = (list.split(','))
+                .map(|name| {
+                    Lane::from_name(name.trim()).unwrap_or_else(|| panic!("no lane {name:?}"))
+                })
+                .collect();
+            Lane::ALL
+                .into_iter()
+                .filter(|lane| named.contains(lane))
+                .collect()
         }
 
         /// Whether the agents land in it.
@@ -521,9 +554,10 @@ mod perf {
                 .ok()
                 .map(|us| Duration::from_micros(us.parse().expect("a number"))),
         };
+        let chosen = Lane::chosen();
         let mut land_p99 = [0_u64; 2];
         let mut move_p99 = [0_u64; 2];
-        for lane in Lane::ALL {
+        for &lane in &chosen {
             let (lands, moves) = run_lane(lane, &shape);
             match lane {
                 Lane::Landers => land_p99[0] = lands.latency_p99_us,
@@ -534,23 +568,28 @@ mod perf {
         }
 
         // 2. R-1's ratio (a move's p99 beside the agents over alone) and G20's (a land's p99
-        //    prepared over unprepared): recorded, never asserted.
+        //    prepared over unprepared), each when both its lanes ran: recorded, never asserted.
         let ratio = |of: [u64; 2]| {
             let secs = |us: u64| Duration::from_micros(us).as_secs_f64();
             secs(of[1]) / secs(of[0].max(1))
         };
-        println!(
-            "{TAG}r1 move_p99_alone_us={} move_p99_beside_us={} ratio={:.3}",
-            move_p99[0],
-            move_p99[1],
-            ratio(move_p99)
-        );
-        println!(
-            "{TAG}g20 land_p99_unprepared_us={} land_p99_prepared_us={} ratio={:.3}",
-            land_p99[0],
-            land_p99[1],
-            ratio(land_p99)
-        );
+        let ran = |pair: [Lane; 2]| pair.iter().all(|lane| chosen.contains(lane));
+        if ran([Lane::Movers, Lane::Beside]) {
+            println!(
+                "{TAG}r1 move_p99_alone_us={} move_p99_beside_us={} ratio={:.3}",
+                move_p99[0],
+                move_p99[1],
+                ratio(move_p99)
+            );
+        }
+        if ran([Lane::Landers, Lane::Prepared]) {
+            println!(
+                "{TAG}g20 land_p99_unprepared_us={} land_p99_prepared_us={} ratio={:.3}",
+                land_p99[0],
+                land_p99[1],
+                ratio(land_p99)
+            );
+        }
     }
 
     /// Runs `lane` at `shape` on a fresh store, prints its lines and asserts what it ran: its
@@ -579,14 +618,22 @@ mod perf {
         let moves = Stats::from(&measured.moves, over);
         let name = lane.name();
 
-        // 3. The lines: a lane's lands, its moves, and its lock times when sampled.
+        // 3. The lines: a lane's lands, its moves, and its lock times when sampled. `U` is the
+        //    lands/s times the median hold of a land's batch over its members (the M18 D2
+        //    design §8); `u_process` the same times a land process's median hold, as before.
         print_side(lane, shape, Side::Lands, &measured, &lands);
         print_side(lane, shape, Side::Moves, &measured, &moves);
         if let Some(lock_times) = &measured.lock {
             lock_times.print(TAG);
-            if let Some(hold) = lock_times.hold_p50("land") {
-                let u = lands.lands_per_s * hold.as_secs_f64();
-                println!("{TAG}lane={name} u={u:.3}");
+            if let (Some(hold), Some(batches)) =
+                (lock_times.hold_p50("land"), lock_times.holds_of("land"))
+            {
+                let u_process = lands.lands_per_s * hold.as_secs_f64();
+                println!(
+                    "{TAG}lane={name} u={:.3} held_share={:.3} u_process={u_process:.3}",
+                    batches.u(lands.lands_per_s),
+                    lock_times.held_share(),
+                );
             }
         }
 
@@ -624,6 +671,11 @@ mod perf {
             panic!("lane {name}: {rule}");
         }
         store.assert_clean("after the lane");
+
+        // 7. What the write queue left once every process ended (the M18 D2 design §10: none),
+        //    recorded, not asserted.
+        let left = fs::read_dir(root.join(QUEUE)).map_or(0, Iterator::count);
+        println!("{TAG}lane={name} queue_left={left}");
         (lands, moves)
     }
 
@@ -819,13 +871,25 @@ mod perf {
     ///
     /// A process's wait and hold are the time from the sample that first saw it waiting (or
     /// holding) to the first that did not, summed over its turns: exact to one interval.
+    ///
+    /// Each sample also lists `meta/queue/` (the M18 D2 design §3.4, §8): a request first seen
+    /// claimed (`<rid>.com`) is one answer of the hold that claimed it, the one of the leader its
+    /// manifest (`<rid>.batch`) names, else of the holder, else of the last one. A hold's batch
+    /// is then `b` = 1 + its answers.
+    ///
+    /// ```text
+    /// <ns>-4242-<nonce>.batch   the manifest of pid 4242's batch
+    /// <ns>-4243-<nonce>.com     a request claimed into it: one answer of 4242's hold
+    /// ```
     mod locks {
-        use std::collections::BTreeMap;
+        use std::collections::{BTreeMap, BTreeSet};
         use std::os::unix::fs::MetadataExt as _;
         use std::path::Path;
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::thread;
         use std::time::{Duration, Instant};
+
+        use swarmops_testkit::landing::{Hold, Holds};
 
         use crate::support::Store;
 
@@ -858,25 +922,80 @@ mod perf {
             hold: Duration,
             /// How many times it took the lock.
             holds: u32,
+            /// The answers its holds wrote ([`Sampled::claim`]).
+            answers: u32,
+            /// Its current or last hold, in [`Sampled::holds`].
+            last: Option<usize>,
         }
 
         impl Track {
-            /// Ends what the last sample saw at `now` and starts `seen`.
-            fn move_to(&mut self, seen: Seen, now: Instant) {
+            /// Ends what the last sample saw at `now` and starts `seen`; a hold that ends is
+            /// timed in `holds`, one that starts is added to it.
+            fn move_to(&mut self, seen: Seen, now: Instant, holds: &mut Vec<(&'static str, Hold)>) {
                 let (was, since) = self.seen;
                 if was == seen {
                     return;
                 }
+
+                // 1. What ends.
                 match was {
                     Seen::Waiting => self.wait += now - since,
-                    Seen::Holding => self.hold += now - since,
+                    Seen::Holding => {
+                        self.hold += now - since;
+                        if let Some((_, hold)) = self.last.and_then(|at| holds.get_mut(at)) {
+                            hold.us = u64::try_from((now - since).as_micros()).unwrap_or(u64::MAX);
+                        }
+                    }
                     Seen::Gone => {}
                 }
+
+                // 2. What starts: a hold gets its entry.
                 if seen == Seen::Holding {
                     self.holds += 1;
+                    self.last = Some(holds.len());
+                    holds.push((self.kind, Hold { us: 0, answers: 0 }));
                 }
                 self.seen = (seen, now);
             }
+        }
+
+        /// What one sample saw in `meta/queue/`.
+        #[derive(Default)]
+        struct Queued {
+            /// The pid of the leader a manifest names, if one is there.
+            leader: Option<u32>,
+            /// The requests claimed, by id.
+            claimed: Vec<String>,
+        }
+
+        /// The pid a request id names: `<ns>-<pid>-<nonce>`.
+        fn pid_of(rid: &str) -> Option<u32> {
+            rid.split('-').nth(1)?.parse().ok()
+        }
+
+        /// What the names of `meta/queue/`'s entries show ([`Queued`]); temporary files and
+        /// other names are passed over.
+        fn on_queue<'n>(names: impl Iterator<Item = &'n str>) -> Queued {
+            let mut queued = Queued::default();
+            for name in names {
+                if let Some(rid) = name.strip_suffix(".batch") {
+                    queued.leader = queued.leader.or_else(|| pid_of(rid));
+                    continue;
+                }
+                if let Some(rid) = name.strip_suffix(".com") {
+                    queued.claimed.push(rid.to_owned());
+                }
+            }
+            queued
+        }
+
+        /// The names in `dir`, none if it is not there.
+        fn names(dir: &Path) -> Vec<String> {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return Vec::new();
+            };
+            let names = entries.filter_map(|entry| entry.ok()?.file_name().into_string().ok());
+            names.collect()
         }
 
         /// What [`sample`] saw.
@@ -889,26 +1008,37 @@ mod perf {
             held: u32,
             /// The waiters it saw, summed over the samples.
             waiters: u32,
+            /// Every hold, with its holder's subcommand, in the order they started.
+            holds: Vec<(&'static str, Hold)>,
+            /// The requests seen claimed so far.
+            claimed: BTreeSet<String>,
+            /// The pid that held the lock last.
+            last_holder: Option<u32>,
         }
 
         /// Samples `store`'s `meta/lock` every `every` until `stop`.
         pub(super) fn sample(store: &Store, every: Duration, stop: &AtomicBool) -> Sampled {
-            let lock = Path::new(store.path()).join("meta").join("lock");
-            let ino = std::fs::metadata(&lock).expect("meta/lock").ino();
-            let mut sampled = Sampled {
-                tracks: BTreeMap::new(),
-                samples: 0,
-                held: 0,
-                waiters: 0,
-            };
+            let meta = Path::new(store.path()).join("meta");
+            let ino = std::fs::metadata(meta.join("lock"))
+                .expect("meta/lock")
+                .ino();
+            let queue = meta.join("queue");
+            let mut sampled = Sampled::new();
             while !stop.load(Ordering::Relaxed) {
                 let now = Instant::now();
                 let table = std::fs::read_to_string(PROC_LOCKS).expect("/proc/locks");
                 let current = on_lock(&table, ino);
-                sampled.add(&current, now);
+                let listed = names(&queue);
+                let queued = on_queue(listed.iter().map(String::as_str));
+                sampled.add(&current, &queued, now, kind_of);
                 thread::sleep(every.saturating_sub(now.elapsed()));
             }
-            sampled.add(&BTreeMap::new(), Instant::now());
+            sampled.add(
+                &BTreeMap::new(),
+                &Queued::default(),
+                Instant::now(),
+                kind_of,
+            );
             sampled
         }
 
@@ -948,8 +1078,28 @@ mod perf {
         }
 
         impl Sampled {
-            /// Adds one sample, `current`, taken at `now`.
-            fn add(&mut self, current: &BTreeMap<u32, Seen>, now: Instant) {
+            /// Nothing sampled yet.
+            fn new() -> Sampled {
+                Sampled {
+                    tracks: BTreeMap::new(),
+                    samples: 0,
+                    held: 0,
+                    waiters: 0,
+                    holds: Vec::new(),
+                    claimed: BTreeSet::new(),
+                    last_holder: None,
+                }
+            }
+
+            /// Adds one sample taken at `now`: `current` from `/proc/locks`, `queued` from
+            /// `meta/queue/`; `kind` names a pid's subcommand ([`KINDS`]).
+            fn add(
+                &mut self,
+                current: &BTreeMap<u32, Seen>,
+                queued: &Queued,
+                now: Instant,
+                kind: fn(u32) -> &'static str,
+            ) {
                 // 1. The lock's state in this sample.
                 self.samples += 1;
                 let holding = current.values().filter(|&&s| s == Seen::Holding).count();
@@ -960,21 +1110,62 @@ mod perf {
                 // 2. Each process seen before and not now has let go or stopped waiting.
                 for (pid, track) in &mut self.tracks {
                     if !current.contains_key(pid) {
-                        track.move_to(Seen::Gone, now);
+                        track.move_to(Seen::Gone, now, &mut self.holds);
                     }
                 }
 
                 // 3. Each process seen now, met for the first time or not.
                 for (&pid, &seen) in current {
                     let track = self.tracks.entry(pid).or_insert_with(|| Track {
-                        kind: kind_of(pid),
+                        kind: kind(pid),
                         seen: (Seen::Gone, now),
                         wait: Duration::ZERO,
                         hold: Duration::ZERO,
                         holds: 0,
+                        answers: 0,
+                        last: None,
                     });
-                    track.move_to(seen, now);
+                    track.move_to(seen, now, &mut self.holds);
                 }
+
+                // 4. The requests claimed since the last sample, each an answer of its hold.
+                let holder = current.iter().find(|(_, s)| **s == Seen::Holding);
+                self.last_holder = holder.map(|(&pid, _)| pid).or(self.last_holder);
+                for rid in &queued.claimed {
+                    if self.claimed.insert(rid.clone()) {
+                        self.claim(queued.leader);
+                    }
+                }
+            }
+
+            /// Counts one answer for the hold of `leader`, the manifest's, if it was seen; else
+            /// for the current or last holder's.
+            fn claim(&mut self, leader: Option<u32>) {
+                let seen = leader.filter(|pid| self.tracks.contains_key(pid));
+                let Some(pid) = seen.or(self.last_holder) else {
+                    return;
+                };
+                let Some(track) = self.tracks.get_mut(&pid) else {
+                    return;
+                };
+                let Some((_, hold)) = track.last.and_then(|at| self.holds.get_mut(at)) else {
+                    return;
+                };
+                hold.answers += 1;
+                track.answers += 1;
+            }
+
+            /// The holds of the processes of subcommand `kind` ([`KINDS`]), summed up; `None`
+            /// if none was seen.
+            pub(super) fn holds_of(&self, kind: &str) -> Option<Holds> {
+                let of_kind = self.holds.iter().filter(|(k, _)| *k == kind);
+                let holds: Vec<Hold> = of_kind.map(|(_, hold)| *hold).collect();
+                Holds::of(&holds)
+            }
+
+            /// The share of samples the lock was held in, from 0 to 1.
+            pub(super) fn held_share(&self) -> f64 {
+                f64::from(self.held) / f64::from(self.samples.max(1))
             }
 
             /// The median hold of the processes of subcommand `kind` ([`KINDS`]), each its
@@ -992,11 +1183,13 @@ mod perf {
                 let ms = |d: Duration| d.as_secs_f64() * 1_000.0;
                 for (pid, track) in &self.tracks {
                     println!(
-                        "landing-lock: pid={pid} cmd={} wait_ms={:.1} hold_ms={:.1} holds={}",
+                        "landing-lock: pid={pid} cmd={} wait_ms={:.1} hold_ms={:.1} holds={} \
+                         answers={}",
                         track.kind,
                         ms(track.wait),
                         ms(track.hold),
-                        track.holds
+                        track.holds,
+                        track.answers
                     );
                 }
                 let share = |n: u32| f64::from(n) / f64::from(self.samples.max(1));
@@ -1019,6 +1212,9 @@ mod perf {
                         ms(at(&holds, 50)),
                         ms(at(&holds, 99)),
                     );
+                    if let Some(batches) = self.holds_of(kind) {
+                        println!("{tag}lock batch cmd={kind} {}", batches.line());
+                    }
                 }
                 println!(
                     "{tag}lock samples={} held_pct={:.1} mean_waiters={:.2}",
@@ -1027,6 +1223,68 @@ mod perf {
                     share(self.waiters)
                 );
             }
+        }
+
+        /// The subcommand every pid of the tests below runs.
+        fn land(_: u32) -> &'static str {
+            "land"
+        }
+
+        /// One sample of the tests below: `holder` holding the lock, if any, and `names` in
+        /// `meta/queue/`, at `ms` after `go`.
+        fn step(sampled: &mut Sampled, go: Instant, ms: u64, holder: Option<u32>, names: &[&str]) {
+            let current: BTreeMap<u32, Seen> =
+                holder.map(|pid| (pid, Seen::Holding)).into_iter().collect();
+            let queued = on_queue(names.iter().copied());
+            sampled.add(&current, &queued, go + Duration::from_millis(ms), land);
+        }
+
+        /// The probe's `b` per hold: pid 10 leads a batch whose manifest it names and claims
+        /// two requests, then a third seen claimed only after it let go; pid 20 leads the next
+        /// and claims one, beside a claim of 10's batch not yet removed. The `lock batch` line
+        /// reads 2 holds, 4 answers, `b` 4 and 2.
+        #[test]
+        fn a_lock_line_counts_answers_per_hold() {
+            let mut sampled = Sampled::new();
+            let go = Instant::now();
+            let ten = ["1-10-a.batch", "1-11-a.com", "1-12-a.com"];
+            step(&mut sampled, go, 0, Some(10), &ten);
+            step(&mut sampled, go, 1, Some(10), &ten);
+            step(&mut sampled, go, 3, None, &["1-11-a.com", "1-13-a.com"]);
+            step(
+                &mut sampled,
+                go,
+                4,
+                Some(20),
+                &["1-13-a.com", "2-20-a.batch", "2-21-a.com"],
+            );
+            step(&mut sampled, go, 6, None, &[]);
+
+            let holds: Vec<(u64, u64)> = (sampled.holds.iter())
+                .map(|(_, hold)| (hold.us, hold.members()))
+                .collect();
+            assert_eq!(holds, [(3_000, 4), (2_000, 2)]);
+            let line = sampled.holds_of("land").expect("holds").line();
+            assert!(
+                line.starts_with("holds=2 answers=4 b_p50=2 b_p99=4 "),
+                "{line}"
+            );
+            assert_eq!(sampled.tracks[&10].answers, 3);
+        }
+
+        /// The self-check of the one above: a hold whose queue shows no claim reads `b` = 1.
+        #[test]
+        fn a_hold_without_answers_reads_one() {
+            let mut sampled = Sampled::new();
+            let go = Instant::now();
+            step(&mut sampled, go, 0, Some(30), &["1-31-a.req"]);
+            step(&mut sampled, go, 2, None, &[]);
+
+            let line = sampled.holds_of("land").expect("holds").line();
+            assert!(
+                line.starts_with("holds=1 answers=0 b_p50=1 b_p99=1 hold_p50_ms=2.0 "),
+                "{line}"
+            );
         }
     }
 }

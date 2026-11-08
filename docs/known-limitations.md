@@ -131,7 +131,8 @@ left).
   replace of each moved ref (the M18 D2 design §3; [architecture](architecture.md#writing), "Batched
   writers"). The lock is still held for each batch's recovery, planning (at most 50 ms) and
   syncs, and lands are still ordered by their compare-and-swap; G4's p99 and the batch's hold
-  under it are not measured yet (pending M18 D2-8). A land still goes back to its lander, and is
+  under it are not measured yet: M18 D2-8's gated runs found the shared host never quiet
+  ([perf.md](perf.md#d2-8-g4-on-batched-lands--2026-11-08-not-measured-the-host-was-never-quiet)). A land still goes back to its lander, and is
   merged again outside the lock, when a path overlaps in a way the lock's merge does not take
   (anything but a regular file of at most 1 MiB on every side, or a conflict), or the target
   moved off the first-parent line through the head the land read, or more than 256 changesets
@@ -139,7 +140,7 @@ left).
   `E_CAS_RETRY_EXHAUSTED` lands again with the same key, or asks for more attempts. A `ws land`
   record left on the parent of the workspace's head is taken over when its key landed on its
   target (a land that carried edits, cut once the workspace stood on their changeset). *Target:
-  M18 (D2-8 measures G4 with group commit). Found: the 2026-10-20 plan triage; narrowed by v0.6.0,
+  M18 (G4 with group commit, measured in a quiet window). Found: the 2026-10-20 plan triage; narrowed by v0.6.0,
   M16 Task S4 and M18 D2 (group commit); its cause measured in M14.*
 - **Recovery after a crash walks all of a FORMAT 1 `journal.off` under the lock.** Before it cuts
   or lists anything, the first writer after a crash checks every entry of a FORMAT 1 store's
