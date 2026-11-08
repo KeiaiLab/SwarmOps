@@ -66,7 +66,7 @@
 //!
 //! One tool per [`StoreOps`] operation, named as the envelope's `op` is: `repo_info`,
 //! `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `ancestry`, `path_history`, `diff`, `op_log`,
-//! `ref_list`, `ref_set`, `ref_delete`, `ref_log`, `undo`, `commit`, `land`, `revert`, `land_check`, `land_group`, `blob_put`, `blob_has`,
+//! `ref_list`, `ref_set`, `ref_delete`, `ref_log`, `ref_txn`, `undo`, `commit`, `land`, `revert`, `land_check`, `land_group`, `blob_put`, `blob_has`,
 //! `verify` and the maintenance's `gc`, `repair` and `upgrade` (M6), in `tools/list`'s order; then the git remotes' client-side operations (M13), which
 //! no [`StoreOps`] has: `remote_list`, `fetch`, `push`, `sync` and `sync_status`, run on the
 //! store's own operations ([`operate_local`]) and taking a remote by its name only, never a URL
@@ -278,7 +278,7 @@ const READ_FILE_RESULT_CHARS: u32 = 200_000;
 const RESULT_CHARS_KEY: &str = "anthropic/maxResultSizeChars";
 
 /// The tools, in the order `tools/list` gives them.
-static TOOLS: [Spec; 32] = [
+static TOOLS: [Spec; 33] = [
     Spec {
         tool: Tool::RepoInfo,
         name: "repo_info",
@@ -449,6 +449,20 @@ static TOOLS: [Spec; 32] = [
                       moves, and a name that never moved is E_REF_NOT_FOUND. Pass a limit of 20 \
                       or less and page on with before, since clients limit long tool results.",
         effect: Effect::Reads,
+        result_chars: None,
+    },
+    Spec {
+        tool: Tool::RefTxn,
+        name: "ref_txn",
+        request: "RefTxnReq",
+        title: "Move several refs at once",
+        description: "Moves 1 to 64 refs as one operation, each by compare-and-swap, all of them \
+                      or none: each move names its ref, expect (the full 64-hex changeset id it \
+                      holds when you read it; omitted to create it) and to (omitted to delete \
+                      it). Every expectation is checked first: any stale one is E_CAS_MISMATCH, \
+                      every failed ref in details.mismatches, nothing written. undo of its id \
+                      restores every ref at once.",
+        effect: Effect::Moves,
         result_chars: None,
     },
     Spec {
@@ -1487,6 +1501,7 @@ fn operate<O: Operate>(tool: Tool, how: O) -> O::Done {
         Tool::RefSet => how.mutate(|ops, who, req| ops.ref_set(who, req)),
         Tool::RefDelete => how.mutate(|ops, who, req| ops.ref_delete(who, req)),
         Tool::RefLog => how.read(|ops, req| ops.ref_log(req)),
+        Tool::RefTxn => how.mutate(|ops, who, req| ops.ref_txn(who, req)),
         Tool::Undo => how.mutate(|ops, who, req| ops.undo(who, req)),
         Tool::Commit => how.mutate(|ops, who, req| ops.commit(who, req)),
         Tool::Land => how.mutate(|ops, who, req| ops.land(who, req)),
@@ -2049,6 +2064,37 @@ impl Refuse for RefDeleteReq {
     }
 }
 
+/// Each move of a transaction names the target it expects by its full id, as `ref_set` does
+/// ([`concrete_expectation`]), unless it creates the ref.
+impl Refuse for swarmops_api::RefTxnReq {
+    fn refuse(&self) -> Result<(), OpError> {
+        for (at, moved) in self.moves.iter().enumerate() {
+            let Some(expect) = &moved.expect else {
+                continue;
+            };
+            if is_full_id(expect.as_str()) {
+                continue;
+            }
+            return Err(OpError::new(
+                ErrorCode::InvalidArg,
+                output::printable(&format!(
+                    "moves[{at}].expect {:?} is not a full changeset id, which a \
+                     compare-and-swap needs, as ref_set's expected_old; pass the 64-hex id {} \
+                     held when you read it",
+                    expect.as_str(),
+                    moved.name
+                )),
+            )
+            .with_details(Map::from_iter([
+                ("name".to_owned(), Value::from(moved.name.as_str())),
+                ("expect".to_owned(), Value::from(expect.as_str())),
+            ]))
+            .with_hint("swarmops ref list"));
+        }
+        Ok(())
+    }
+}
+
 /// How many hex digits a full changeset id has.
 const FULL_ID_DIGITS: usize = 64;
 
@@ -2189,6 +2235,7 @@ fn tool_input_schema(spec: &Spec, all: &Value) -> Value {
     let mut request = all[spec.request].clone();
     let pinned = match spec.tool {
         Tool::RefSet | Tool::RefDelete => Some("/properties/expected_old"),
+        Tool::RefTxn => Some("/$defs/RefTxnMoveIn/properties/expect"),
         Tool::Land | Tool::Revert => Some("/properties/expect_target"),
         _ => None,
     };
@@ -2397,6 +2444,7 @@ enum Tool {
     RefSet,
     RefDelete,
     RefLog,
+    RefTxn,
     Undo,
     Commit,
     Land,
@@ -2680,6 +2728,7 @@ pub(crate) mod probe {
             "remote": "origin",
             "workspace": "probe",
             "paths": [],
+            "moves": [],
         })
     }
 
@@ -2888,6 +2937,14 @@ pub(crate) mod probe {
 
         fn ref_log(&self, _: RefLogReq) -> Result<RefLogPage, OpError> {
             self.called("ref_log", "RefLogReq")
+        }
+
+        fn ref_txn(
+            &self,
+            _: &Identity,
+            _: swarmops_api::RefTxnReq,
+        ) -> Result<swarmops_api::RefTxnResp, OpError> {
+            self.called("ref_txn", "RefTxnReq")
         }
 
         fn revert(&self, _: &Identity, _: RevertReq) -> Result<swarmops_api::RevertResp, OpError> {
@@ -3218,6 +3275,38 @@ mod tests {
         }
         let new = schema("ref_set")["new"]["description"].as_str().unwrap();
         assert!(new.ends_with(revision), "{new}");
+    }
+
+    /// A transaction's `expect` asks for a full id in the schema as `ref_set`'s `expected_old`
+    /// does, its `to` keeping the revision's description; the server refuses any other
+    /// expectation before the store sees it, and takes a creation.
+    #[test]
+    fn a_txn_asks_for_a_full_id_in_each_move() {
+        let all = swarmops_api::schema_for_all();
+        let revision = all["Rev"]["description"].as_str().unwrap();
+        let tools = listed();
+        let txn = tools.iter().find(|tool| tool.name == "ref_txn").unwrap();
+        let fields = &txn.input_schema["properties"]["moves"]["items"]["properties"];
+        assert_eq!(
+            fields["expect"]["anyOf"],
+            json!([{"type": "string", "pattern": "^[0-9a-fA-F]{64}$"}, {"type": "null"}])
+        );
+        let to = &fields["to"]["anyOf"][0];
+        assert_eq!(to["description"], revision, "{to}");
+        assert!(to.get("pattern").is_none(), "{to}");
+
+        // The refusal: a ref name as the expectation, then a creation and a full id.
+        let req = |expect: Option<&str>| {
+            let mut moved = swarmops_api::RefTxnMoveIn::new("release/1");
+            moved.expect = expect.map(swarmops_api::Rev::from);
+            swarmops_api::RefTxnReq::new(vec![moved])
+        };
+        let refused = req(Some("main")).refuse().unwrap_err();
+        assert_eq!(refused.code, ErrorCode::InvalidArg.as_str());
+        assert_eq!(refused.details["expect"], "main");
+        let id = "0123456789abcdef".repeat(4);
+        assert!(req(None).refuse().is_ok());
+        assert!(req(Some(&id)).refuse().is_ok());
     }
 
     /// One rule says what a full id is: the pattern the schema publishes and the refusal the

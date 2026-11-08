@@ -232,6 +232,33 @@ pub enum CasResult {
     },
 }
 
+/// An expectation [`MetaWrite::expect_refs`] found false: the ref names another target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RefMismatch {
+    /// The ref.
+    pub name: String,
+    /// What the caller expected it to name; `None` for a ref expected not to exist.
+    pub expected: Option<ChangesetId>,
+    /// What it names; `None` if it does not exist.
+    pub actual: Option<ChangesetId>,
+}
+
+impl RefMismatch {
+    /// Ref `name`, expected at `expected`, found at `actual`.
+    pub fn new(
+        name: String,
+        expected: Option<ChangesetId>,
+        actual: Option<ChangesetId>,
+    ) -> RefMismatch {
+        RefMismatch {
+            name,
+            expected,
+            actual,
+        }
+    }
+}
+
 /// What stopped an index open of [`MetaStore::read`] before it gave the index.
 enum NotOpened {
     /// `journal.off` held fewer entries when the frames past the checkpoint were read than it
@@ -1124,6 +1151,26 @@ impl MetaWrite<'_> {
         });
         self.moved.insert(name.to_owned(), new);
         Ok(CasResult::Applied { old: current })
+    }
+
+    /// Every expectation of `expected` (a ref and the target it should name; `None` for absent)
+    /// that is false, in order: each compared as [`MetaWrite::cas_ref`] compares, against the
+    /// last move this transaction queued of the ref or else its file, under the lock. It queues
+    /// nothing, so a caller checks every ref of a multi-ref move before it queues any (the M18
+    /// design §7). A name no format takes is [`StoreError::RefName`], one only a later format
+    /// takes [`StoreError::FormatRequired`].
+    pub fn expect_refs(
+        &self,
+        expected: &[(&str, Option<ChangesetId>)],
+    ) -> Result<Vec<RefMismatch>, StoreError> {
+        let mut mismatches = Vec::new();
+        for &(name, want) in expected {
+            let actual = self.get_ref(name)?;
+            if actual != want {
+                mismatches.push(RefMismatch::new(name.to_owned(), want, actual));
+            }
+        }
+        Ok(mismatches)
     }
 
     /// The committed frames whose seq is `first` or greater, in journal order: a snapshot's

@@ -2520,12 +2520,147 @@ expression: transcript
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
+          "arguments": {
+            "moves": [
+              {
+                "name": "release/a",
+                "to": "[c1]"
+              },
+              {
+                "name": "release/b",
+                "to": "[c1]"
+              }
+            ]
+          },
+          "name": "ref_txn"
+        }
+      },
+      "response": {
+        "id": 44,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[c1]\":\"[c1]\"}},\"ok\":true,\"op\":\"ref_txn\",\"result\":{\"id\":\"18:[crc]\",\"moves\":[{\"actor\":\"agent/worker-17\",\"at\":\"[at]\",\"name\":\"release/a\",\"new\":\"[c1]\"},{\"actor\":\"agent/worker-17\",\"at\":\"[at]\",\"name\":\"release/b\",\"new\":\"[c1]\"}],\"op\":18}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "[c1]": "[c1]"
+              }
+            },
+            "ok": true,
+            "op": "ref_txn",
+            "result": {
+              "id": "18:[crc]",
+              "moves": [
+                {
+                  "actor": "agent/worker-17",
+                  "at": "[at]",
+                  "name": "release/a",
+                  "new": "[c1]"
+                },
+                {
+                  "actor": "agent/worker-17",
+                  "at": "[at]",
+                  "name": "release/b",
+                  "new": "[c1]"
+                }
+              ],
+              "op": 18
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 45,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "moves": [
+              {
+                "expect": "[c1]",
+                "name": "release/a",
+                "to": "[grouped]"
+              },
+              {
+                "expect": "[c1]",
+                "name": "release/b"
+              }
+            ]
+          },
+          "name": "ref_txn"
+        }
+      },
+      "response": {
+        "id": 45,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[c1]\":\"[c1]\",\"[grouped]\":\"[grouped]\"}},\"ok\":true,\"op\":\"ref_txn\",\"result\":{\"id\":\"19:[crc]\",\"moves\":[{\"actor\":\"agent/worker-17\",\"at\":\"[at]\",\"name\":\"release/a\",\"new\":\"[grouped]\",\"old\":\"[c1]\"},{\"actor\":\"agent/worker-17\",\"at\":\"[at]\",\"name\":\"release/b\",\"old\":\"[c1]\"}],\"op\":19}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "[c1]": "[c1]",
+                "[grouped]": "[grouped]"
+              }
+            },
+            "ok": true,
+            "op": "ref_txn",
+            "result": {
+              "id": "19:[crc]",
+              "moves": [
+                {
+                  "actor": "agent/worker-17",
+                  "at": "[at]",
+                  "name": "release/a",
+                  "new": "[grouped]",
+                  "old": "[c1]"
+                },
+                {
+                  "actor": "agent/worker-17",
+                  "at": "[at]",
+                  "name": "release/b",
+                  "old": "[c1]"
+                }
+              ],
+              "op": 19
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 46,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
           "arguments": {},
           "name": "verify"
         }
       },
       "response": {
-        "id": 44,
+        "id": 46,
         "jsonrpc": "2.0",
         "result": {
           "content": [

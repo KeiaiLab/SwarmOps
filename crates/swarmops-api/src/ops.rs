@@ -1773,6 +1773,84 @@ impl RefDeleteReq {
     }
 }
 
+/// The most moves one [`RefTxnReq`] takes: 64.
+pub const MAX_REF_TXN_MOVES: usize = 64;
+
+/// `ref_txn` (CLI `ref txn`): move several refs as one operation, each by compare-and-swap, all
+/// of them or none. Every expectation is checked under the store's lock
+/// before any move is made: one or more that fail make it `E_CAS_MISMATCH`, every failed ref in
+/// `details.mismatches`, and nothing is written. Each move follows `ref set`'s and `ref
+/// delete`'s rules: `main` only along its first parents and never deleted (`E_REF_PROTECTED`), a
+/// tag never moved (`E_TAG_IMMUTABLE`), no remote-tracking ref (`E_REF_NAME_INVALID`).
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RefTxnReq {
+    /// The moves: 1 to 64 (`E_INVALID_ARG` for none, `E_TOO_LARGE` past 64), each ref once.
+    pub moves: Vec<RefTxnMoveIn>,
+}
+
+impl RefTxnReq {
+    /// Takes every field.
+    pub fn new(moves: Vec<RefTxnMoveIn>) -> Self {
+        Self { moves }
+    }
+}
+
+/// One move of a `ref_txn`: ref `name` from `expect` to `to`. A move that changes nothing
+/// (`expect` and `to` the same, or both omitted) is `E_INVALID_ARG`.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RefTxnMoveIn {
+    /// The ref: `main`, `release/<name>` or a tag.
+    pub name: String,
+    /// The target the caller last saw, by its full changeset id, as `ref set`'s `expected_old`;
+    /// omitted to create the ref, which must not exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect: Option<Rev>,
+    /// The revision to point it at; omitted to delete it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<Rev>,
+}
+
+impl RefTxnMoveIn {
+    /// Takes the ref; `expect` and `to` are omitted.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            expect: None,
+            to: None,
+        }
+    }
+}
+
+/// `ref_txn`: the operation that made the moves, and the moves.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RefTxnResp {
+    /// The operation that recorded every move: its number in `op_log`.
+    pub op: u64,
+    /// Its id, which `undo` takes to restore every ref at once.
+    pub id: String,
+    /// The moves, in the request's order.
+    pub moves: Vec<RefMoveOut>,
+    /// Problems found after the moves became durable, such as failed housekeeping; the moves
+    /// themselves succeeded. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+impl RefTxnResp {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(op: u64, id: impl Into<String>, moves: Vec<RefMoveOut>) -> Self {
+        Self {
+            op,
+            id: id.into(),
+            moves,
+            warnings: Vec::new(),
+        }
+    }
+}
+
 /// `verify`: check the whole store's consistency.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -4926,6 +5004,13 @@ pub trait StoreOps {
     fn land_group(&self, who: &Identity, req: LandGroupReq) -> Result<LandGroupResp, OpError> {
         let _ = (who, req);
         Err(not_built("land_group"))
+    }
+
+    /// Moves several refs as one operation, each by compare-and-swap, all of them or none (CLI
+    /// `ref txn`). A store that does not have it answers `E_INVALID_ARG`.
+    fn ref_txn(&self, who: &Identity, req: RefTxnReq) -> Result<RefTxnResp, OpError> {
+        let _ = (who, req);
+        Err(not_built("ref_txn"))
     }
 }
 

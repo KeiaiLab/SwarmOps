@@ -25,6 +25,7 @@ The limits of the SwarmOps contract: what a request may hold, with the error a r
 | [Revert reason](#revert-reason) | 4,096 bytes (4 KiB) | `swarmops_repo::MAX_REVERT_REASON_BYTES` | [`E_INVALID_ARG`](errors.md#e_invalid_arg) |
 | [Land check changes](#land-check-changes) | 32 changes | `swarmops_repo::land::MAX_GROUP_CHANGES` | [`E_TOO_LARGE`](errors.md#e_too_large) |
 | [Group land changes](#group-land-changes) | 32 changes | `swarmops_repo::land::MAX_GROUP_CHANGES` | [`E_TOO_LARGE`](errors.md#e_too_large) |
+| [Ref transaction moves](#ref-transaction-moves) | 64 moves | `swarmops_api::MAX_REF_TXN_MOVES` | [`E_TOO_LARGE`](errors.md#e_too_large) |
 
 ### Request text
 
@@ -95,16 +96,16 @@ The agent name of `--as` or `SWARMOPS_AGENT`, `<family>/<instance>`, which a ref
 
 - Value: 255 bytes.
 - Constant: `swarmops_api::identity::MAX_AGENT_LEN`, in `crates/swarmops-api/src/identity.rs`.
-- Commands: [`whoami`](commands/whoami.md), [`commit`](commands/commit.md), [`land`](commands/land.md), [`land-group`](commands/land-group.md), [`rebase`](commands/rebase.md), [`revert`](commands/revert.md), [`blob put`](commands/blob-put.md), [`ref set`](commands/ref-set.md), [`ref delete`](commands/ref-delete.md), [`op undo`](commands/op-undo.md), [`git import`](commands/git-import.md), [`clone`](commands/clone.md), [`ws create`](commands/ws-create.md), [`sync`](commands/sync.md), [`mcp`](commands/mcp.md), [`serve`](commands/serve.md).
+- Commands: [`whoami`](commands/whoami.md), [`commit`](commands/commit.md), [`land`](commands/land.md), [`land-group`](commands/land-group.md), [`rebase`](commands/rebase.md), [`revert`](commands/revert.md), [`blob put`](commands/blob-put.md), [`ref set`](commands/ref-set.md), [`ref delete`](commands/ref-delete.md), [`ref txn`](commands/ref-txn.md), [`op undo`](commands/op-undo.md), [`git import`](commands/git-import.md), [`clone`](commands/clone.md), [`ws create`](commands/ws-create.md), [`sync`](commands/sync.md), [`mcp`](commands/mcp.md), [`serve`](commands/serve.md).
 - Error: [`E_INVALID_ARG`](errors.md#e_invalid_arg).
 
 ### Ref name
 
-A ref's name, `main` or `release/<x>`, which a ref move records with a one-byte length: `commit --advance`, `land --target`, `ref set`, `ref delete`, `git import --into` and `git export --ref`.
+A ref's name, `main` or `release/<x>`, which a ref move records with a one-byte length: `commit --advance`, `land --target`, `ref set`, `ref delete`, `ref txn --move`, `git import --into` and `git export --ref`.
 
 - Value: 255 bytes.
 - Constant: `swarmops_store::meta::refs::MAX_NAME_LEN`, in `crates/swarmops-store/src/meta/refs.rs`.
-- Commands: [`commit`](commands/commit.md), [`land`](commands/land.md), [`ref set`](commands/ref-set.md), [`ref delete`](commands/ref-delete.md), [`git import`](commands/git-import.md), [`git export`](commands/git-export.md).
+- Commands: [`commit`](commands/commit.md), [`land`](commands/land.md), [`ref set`](commands/ref-set.md), [`ref delete`](commands/ref-delete.md), [`ref txn`](commands/ref-txn.md), [`git import`](commands/git-import.md), [`git export`](commands/git-export.md).
 - Error: [`E_REF_NAME_INVALID`](errors.md#e_ref_name_invalid).
 
 ### Repository name
@@ -176,6 +177,15 @@ The changes one `land-group` (`changes`) lands in order as one operation: more a
 - Value: 32 changes.
 - Constant: `swarmops_repo::land::MAX_GROUP_CHANGES`, in `crates/swarmops-repo/src/land/plan.rs`.
 - Commands: [`land-group`](commands/land-group.md).
+- Error: [`E_TOO_LARGE`](errors.md#e_too_large).
+
+### Ref transaction moves
+
+The refs one `ref txn` (`moves`) moves as one operation: more are refused before anything is resolved or read, with `details.max_moves`; none is `E_INVALID_ARG`.
+
+- Value: 64 moves.
+- Constant: `swarmops_api::MAX_REF_TXN_MOVES`, in `crates/swarmops-api/src/ops.rs`.
+- Commands: [`ref txn`](commands/ref-txn.md).
 - Error: [`E_TOO_LARGE`](errors.md#e_too_large).
 
 ## Bounds without an error

@@ -174,5 +174,6 @@ Any command that opens a store may also fail with a store error, such as [`E_NOT
 - [`swarmops ref set`](ref-set.md)
 - [`swarmops ref delete`](ref-delete.md)
 - [`swarmops ref log`](ref-log.md)
+- [`swarmops ref txn`](ref-txn.md)
 - [CLI reference](../cli.md)
 - [Error codes](../errors.md)

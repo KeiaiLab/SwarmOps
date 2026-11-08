@@ -22,7 +22,7 @@ use swarmops_git::{
     Unsupported,
 };
 use swarmops_repo::{MergeConflicts, OpId, OpNotFoundReason, RepoError, StoreError};
-use swarmops_store::{IoFailure, Layout, LimitKind, MAX_OBJECT_LEN, RefKind};
+use swarmops_store::{IoFailure, Layout, LimitKind, MAX_OBJECT_LEN, RefKind, RefMismatch};
 
 use crate::local;
 
@@ -612,6 +612,31 @@ fn history_protected(
     error(ErrorCode::RefProtected, message)
         .with_details(found)
         .with_hint(FORWARD_HINT)
+}
+
+/// A `ref_txn` refused because `mismatches`, one or more of its expectations, failed under the
+/// lock (the M18 design §7): `E_CAS_MISMATCH` with `details.mismatches`, each `{name, expected,
+/// actual}`, `null` for a ref expected or found absent; nothing moved.
+pub(crate) fn txn_mismatch(mismatches: &[RefMismatch]) -> OpError {
+    let id = |id: Option<ChangesetId>| id.map_or(Value::Null, |id| id.to_string().into());
+    let listed: Vec<Value> = (mismatches.iter())
+        .map(|m| {
+            Value::Object(details([
+                ("name", m.name.as_str().into()),
+                ("expected", id(m.expected)),
+                ("actual", id(m.actual)),
+            ]))
+        })
+        .collect();
+    let names: Vec<&str> = mismatches.iter().map(|m| m.name.as_str()).collect();
+    let message = format!(
+        "{} of the transaction's refs no longer name what it expects ({}), so no ref moved",
+        mismatches.len(),
+        names.join(", ")
+    );
+    error(ErrorCode::CasMismatch, message)
+        .with_details(details([("mismatches", listed.into())]))
+        .with_hint("swarmops ref list")
 }
 
 /// A sync of `remote` refused because the remote's head, changeset `target`, does not hold the

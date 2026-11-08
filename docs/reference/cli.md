@@ -74,6 +74,7 @@ List refs, or move one by compare-and-swap.
 - [`swarmops ref set`](commands/ref-set.md): Point ref NAME at REV: move it from --expect, or --create it.
 - [`swarmops ref delete`](commands/ref-delete.md): Delete ref NAME.
 - [`swarmops ref log`](commands/ref-log.md): List ref NAME's moves, newest first: the op log filtered to the ref.
+- [`swarmops ref txn`](commands/ref-txn.md): Move several refs as one operation, each by compare-and-swap: all of them or none.
 
 ## Operations
 

@@ -56,7 +56,7 @@ expression: s.transcript()
       "api": 1,
       "error": {
         "code": "E_INVALID_ARG",
-        "message": "'swarmops ref' requires a subcommand but one was not provided [subcommands: list, set, delete, log, help]",
+        "message": "'swarmops ref' requires a subcommand but one was not provided [subcommands: list, set, delete, log, txn, help]",
         "retryable": false,
         "exit": 2,
         "details": {},
@@ -395,6 +395,9 @@ expression: s.transcript()
             "RefOut",
             "RefSetReq",
             "RefSetResp",
+            "RefTxnMoveIn",
+            "RefTxnReq",
+            "RefTxnResp",
             "RemoteAddReq",
             "RemoteHead",
             "RemoteInfo",

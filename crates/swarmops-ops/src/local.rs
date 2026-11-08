@@ -29,6 +29,7 @@ use swarmops_api::{GcReq, GcResp, RepairReq, RepairResp, UpgradeReq, UpgradeResp
 use swarmops_api::{ItemOutcome, LandCheckItemOut, LandCheckReq, LandCheckResp, PathSummaryOut};
 use swarmops_api::{LandGroupItemOut, LandGroupReq, LandGroupResp};
 use swarmops_api::{LandReq, LandResp, LandStatus, MAX_LAND_ATTEMPTS};
+use swarmops_api::{MAX_REF_TXN_MOVES, RefTxnReq, RefTxnResp};
 use swarmops_api::{RefLogEntryOut, RefLogPage, RefLogReq};
 use swarmops_api::{ResolveRevReq, ResolvedRev, RevKind};
 use swarmops_api::{RevertReq, RevertResp};
@@ -39,6 +40,7 @@ use swarmops_core::{
 };
 use swarmops_git::MemoKey;
 use swarmops_repo::LandRequest;
+use swarmops_repo::TxnResult;
 use swarmops_repo::land::{
     Gated, GroupItem, LandCheckRequest, LandGroupRequest, MAX_GROUP_CHANGES, More, PathChange,
     PlanItem, PlanOutcome, Planned,
@@ -190,6 +192,12 @@ const MAX_LAND_KEY: usize = 64;
 ///   landed changesets with one move of the target, a conflicting one reported and passed over;
 ///   `max_attempts` is a land's, and a group with no clean change is `E_NOTHING_TO_LAND`, each
 ///   change's outcome in `details.items`.
+/// - `ref_txn` moves 1 to 64 refs as one operation (the M18 design §7), each named once and by
+///   `ref_set`'s and `ref_delete`'s rules (no remote-tracking ref, `main` along its first parents
+///   and never deleted, a tag never moved), each revision resolved in one snapshot; every
+///   expectation is compared under the store's lock before any move is queued, and any that
+///   fails is `E_CAS_MISMATCH` listing each in `details.mismatches`, with nothing written. A move
+///   that changes nothing is `E_INVALID_ARG`: a transaction always writes one frame.
 /// - `blob_put` stores its content as a blob, by the change list's rules for content (`blob`
 ///   content aside, which names a blob already stored), durable when it returns, and says
 ///   whether it placed it (`written`). It needs an identity, which it records nowhere.
@@ -1679,6 +1687,95 @@ impl Recording<'_> {
     }
 }
 
+impl Recording<'_> {
+    /// [`StoreOps::ref_txn`] (the M18 design §7): the request's own rules, its revisions resolved
+    /// in one snapshot, then [`swarmops_repo::Repo::ref_txn`] under one lock.
+    fn ref_txn_with(&self, who: &Identity, req: RefTxnReq) -> Result<RefTxnResp, OpError> {
+        let RefTxnReq { moves, .. } = req;
+
+        // 1. The request's own rules, before anything is resolved or read.
+        txn_size(moves.len())?;
+        let mut names = BTreeSet::new();
+        for spec in &moves {
+            check_ref_use(&spec.name, RefUse::Move)?;
+            if !names.insert(spec.name.as_str()) {
+                return Err(txn_refused(&spec.name, "is moved twice"));
+            }
+        }
+
+        // 2. Every revision resolved in one snapshot; a move must change the ref.
+        let read = self.snapshot()?;
+        let mut resolved = Vec::with_capacity(moves.len());
+        for spec in moves {
+            let resolve = |rev: &Option<Rev>| rev.as_ref().map(|r| self.resolve(&read, r));
+            let expected = resolve(&spec.expect).transpose()?;
+            let to = resolve(&spec.to).transpose()?;
+            if expected == to {
+                return Err(txn_refused(&spec.name, "would be left where it is"));
+            }
+            resolved.push((spec.name, expected, to));
+        }
+
+        // 3. The transaction: every expectation, then every move, under one lock.
+        let outcome = (self.ops.repo.ref_txn(&resolved, who.agent())).map_err(error::op)?;
+        self.resolved.record_recovered(outcome.recovered);
+        let (frame_seq, frame_crc, made) = match outcome.result {
+            TxnResult::Committed {
+                frame_seq,
+                frame_crc,
+                moves,
+            } => (frame_seq, frame_crc, moves),
+            TxnResult::Mismatched(mismatches) => return Err(error::txn_mismatch(&mismatches)),
+            _ => return Err(error::unknown_variant("TxnResult")),
+        };
+        let moves = (made.into_iter())
+            .map(|(name, old, new, at)| {
+                let mut moved = RefMoveOut::new(name, who.agent(), at);
+                moved.old = old.map(|id| id.to_string());
+                moved.new = new.map(|id| id.to_string());
+                moved
+            })
+            .collect();
+        let id = OpId::new(frame_seq, frame_crc).to_string();
+        let mut resp = RefTxnResp::new(frame_seq, id, moves);
+        resp.warnings = outcome.warnings;
+        Ok(resp)
+    }
+}
+
+/// `E_INVALID_ARG` for a transaction of no move, `E_TOO_LARGE` for one of more than
+/// [`MAX_REF_TXN_MOVES`].
+fn txn_size(moves: usize) -> Result<(), OpError> {
+    if moves == 0 {
+        return Err(error::error(
+            ErrorCode::InvalidArg,
+            "a ref transaction needs at least one move",
+        )
+        .with_details(error::details([("moves", 0_u64.into())])));
+    }
+    if moves > MAX_REF_TXN_MOVES {
+        return Err(error::error(
+            ErrorCode::TooLarge,
+            format!("a ref transaction takes at most {MAX_REF_TXN_MOVES} moves, not {moves}"),
+        )
+        .with_details(error::details([(
+            "max_moves",
+            bytes::to_u64(MAX_REF_TXN_MOVES).into(),
+        )]))
+        .with_hint("split the moves into transactions of at most 64"));
+    }
+    Ok(())
+}
+
+/// `E_INVALID_ARG` for a transaction's move of ref `name`, which `why` says is wrong.
+fn txn_refused(name: &str, why: &str) -> OpError {
+    error::error(
+        ErrorCode::InvalidArg,
+        format!("ref txn: {name} {why}; name each ref once, moving it somewhere new"),
+    )
+    .with_details(error::details([("name", name.into())]))
+}
+
 /// Which operation a group of changes is for: what its errors name it.
 #[derive(Clone, Copy)]
 enum Group {
@@ -2573,6 +2670,10 @@ impl StoreOps for Recording<'_> {
     fn land_group(&self, who: &Identity, req: LandGroupReq) -> Result<LandGroupResp, OpError> {
         self.land_group_with(who, req)
     }
+
+    fn ref_txn(&self, who: &Identity, req: RefTxnReq) -> Result<RefTxnResp, OpError> {
+        self.ref_txn_with(who, req)
+    }
 }
 
 /// Each operation as a request of its own, whose resolved revisions go unrecorded: to report
@@ -2692,6 +2793,10 @@ impl StoreOps for LocalOps {
 
     fn land_group(&self, who: &Identity, req: LandGroupReq) -> Result<LandGroupResp, OpError> {
         self.recording(&Resolved::default()).land_group(who, req)
+    }
+
+    fn ref_txn(&self, who: &Identity, req: RefTxnReq) -> Result<RefTxnResp, OpError> {
+        self.recording(&Resolved::default()).ref_txn(who, req)
     }
 }
 

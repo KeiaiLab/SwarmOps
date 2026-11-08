@@ -25,6 +25,7 @@ use swarmops_api::{
     VerifyReq,
 };
 use swarmops_api::{LandCheckReq, LandCheckResp, LandGroupReq, LandGroupResp};
+use swarmops_api::{RefTxnReq, RefTxnResp};
 use swarmops_api::{RevertReq, RevertResp};
 
 use super::refused;
@@ -295,6 +296,12 @@ impl<O: StoreOps> StoreOps for ServerOps<O> {
     fn land_group(&self, who: &Identity, req: LandGroupReq) -> Result<LandGroupResp, OpError> {
         self.pass(self.inner.land_group(who, req))
     }
+
+    // Ref moves, passed as `ref_set` is: the store checks every name as `ref set` does, all
+    // before its transaction opens.
+    fn ref_txn(&self, who: &Identity, req: RefTxnReq) -> Result<RefTxnResp, OpError> {
+        self.pass(self.inner.ref_txn(who, req))
+    }
 }
 
 #[cfg(test)]
@@ -419,6 +426,9 @@ mod tests {
         }
         fn land_group(&self, _: &Identity, _: LandGroupReq) -> Result<LandGroupResp, OpError> {
             self.call("land_group")
+        }
+        fn ref_txn(&self, _: &Identity, _: RefTxnReq) -> Result<RefTxnResp, OpError> {
+            self.call("ref_txn")
         }
     }
 
@@ -643,6 +653,8 @@ mod tests {
             s.ref_delete(&w, RefDeleteReq::new("r", "x")).map(drop),
         );
         assert_passed(&s, "undo", s.undo(&w, UndoReq::new("1:00000000")).map(drop));
+        let txn = RefTxnReq::new(vec![RefTxnMoveIn::new("r")]);
+        assert_passed(&s, "ref_txn", s.ref_txn(&w, txn).map(drop));
     }
 
     /// Derivation and maintenance reach the inner store, their errors masked.

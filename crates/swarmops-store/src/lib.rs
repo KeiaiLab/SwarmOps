@@ -52,8 +52,9 @@ pub use meta::refs::{
 pub use meta::{
     Answer, BadRecord, CasResult, ChangesetMeta, CommitInfo, DerivedSlot, DerivedStore, Frame,
     FrameUse, Index, InsertOutcome, Journal, JournalEntry, Lead, ListedValue, LogCut, MetaLock,
-    MetaRead, MetaStore, MetaWrite, Outcome, Planned, Record, Recovered, RefFile, RefMoveEntry,
-    RefState, Request, RequestId, Serve, SortedView, StoredValue, TailRepair, Turn, Whose,
+    MetaRead, MetaStore, MetaWrite, Outcome, Planned, Record, Recovered, RefFile, RefMismatch,
+    RefMoveEntry, RefState, Request, RequestId, Serve, SortedView, StoredValue, TailRepair, Turn,
+    Whose,
 };
 pub use meta::{MetaCheck, Rebuilt, Upgraded};
 #[cfg(feature = "test-hooks")]

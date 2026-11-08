@@ -136,7 +136,7 @@ export function AtAGlance({ className }: { className?: string }) {
       detail: (
         <>
           The <code className={CODE}>swarmops</code> and <code className={CODE}>so</code> commands; an MCP server
-          with 44 tools
+          with 45 tools
         </>
       ),
     },

@@ -68,6 +68,6 @@ pub use refs::{RefFile, RefKind, RefState};
 pub use sorted::SortedView;
 pub use store::{
     CasResult, CommitInfo, InsertOutcome, JournalEntry, MetaRead, MetaStore, MetaWrite, Recovered,
-    RefMoveEntry,
+    RefMismatch, RefMoveEntry,
 };
 pub use upgrade::Upgraded;

@@ -56,7 +56,7 @@ type Startup<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)]);
 /// The tools, one per `StoreOps` operation and then one per client-side operation of the git
 /// remotes (M13), in the order `tools/list` gives them, each with the request type its arguments
 /// are.
-const TOOLS: [(&str, &str); 44] = [
+const TOOLS: [(&str, &str); 45] = [
     ("repo_info", "InfoReq"),
     ("resolve_rev", "ResolveRevReq"),
     ("read_file", "ReadFileReq"),
@@ -71,6 +71,7 @@ const TOOLS: [(&str, &str); 44] = [
     ("ref_set", "RefSetReq"),
     ("ref_delete", "RefDeleteReq"),
     ("ref_log", "RefLogReq"),
+    ("ref_txn", "RefTxnReq"),
     ("undo", "UndoReq"),
     ("commit", "CommitReq"),
     ("land", "LandReq"),
@@ -451,7 +452,10 @@ fn mcp_tool_calls_golden() {
     let group = json!({"changes": [{"head": heads[0], "idempotency_key": "group-1"},
                                    {"head": heads[1], "idempotency_key": "group-2"}]});
     let grouped = golden.ok("land_group", group);
-    golden.name_at(&grouped, "/result/head", "grouped");
+    let grouped = golden.name_at(&grouped, "/result/head", "grouped");
+
+    // 9. Two release refs made at once, then moved together, and the store verified.
+    ref_txn_calls(&mut golden, &c1, &grouped);
     golden.ok("verify", json!({}));
 
     // Every tool has its call, but those of UNCALLED.
@@ -465,6 +469,17 @@ fn mcp_tool_calls_golden() {
         assert_eq!(called, !UNCALLED.contains(&tool), "the call of {tool}");
     }
     insta::assert_json_snapshot!(transcript);
+}
+
+/// [`mcp_tool_calls_golden`]'s transactions: `release/a` and `release/b` made at `from` in
+/// one, then `release/a` moved to `to` and `release/b` deleted in another.
+fn ref_txn_calls(golden: &mut Golden, from: &str, to: &str) {
+    let made = json!({"moves": [{"name": "release/a", "to": from},
+                                {"name": "release/b", "to": from}]});
+    golden.ok("ref_txn", made);
+    let moved = json!({"moves": [{"name": "release/a", "expect": from, "to": to},
+                                 {"name": "release/b", "expect": from}]});
+    golden.ok("ref_txn", moved);
 }
 
 /// [`mcp_tool_calls_golden`]'s workspace: every workspace tool called, on `main` at `landed`.
@@ -2726,9 +2741,8 @@ fn check_tool(name: &str, request: &str, tool: &Value, all: &Value) {
         | "ws_materialize" | "ws_snapshot" => (false, false, true, false),
         // A workspace's discard (M5) overwrites edits as these overwrite refs, and the
         // maintenance (M6) removes or replaces store files; run again, each finds its work done.
-        "ref_set" | "ref_delete" | "undo" | "ws_discard" | "gc" | "repair" | "upgrade" => {
-            (false, true, true, false)
-        }
+        "ref_set" | "ref_delete" | "ref_txn" | "undo" | "ws_discard" | "gc" | "repair"
+        | "upgrade" => (false, true, true, false),
         // The git remotes' (M13): a fetch or a push run again moves nothing new; a sync run
         // again after the remote moved lands again; all three reach the remote.
         "fetch" | "push" => (false, false, true, true),

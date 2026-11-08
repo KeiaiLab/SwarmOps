@@ -82,6 +82,7 @@ pub use land::{
 };
 pub use merge::MergeOutcome;
 pub use oplog::{OpId, OpIdError, OpNotFoundReason, OpRecord, Operation, UndoOutcome};
+pub use oplog::{TxnMove, TxnOutcome, TxnResult};
 pub use path_history::PathEvent;
 pub use raw::{MAX_RAW_BATCH, RawBatch, RawBatchOutcome, RawChangeset, RawOutcome};
 pub use read::{FileSpan, FileSpanRead, ListedEntry, RepoRead, StoredChangeset, TreePage};

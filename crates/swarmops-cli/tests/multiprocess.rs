@@ -529,6 +529,93 @@ fn same_key_two_targets_1000_rounds() {
     store.assert_clean("after the rounds");
 }
 
+/// The refs [`thousand_three_ref_txns_race_a_snapshot_reader`] moves together.
+const TXN_REFS: [&str; 3] = ["release/a", "release/b", "release/c"];
+
+/// How many transactions it makes.
+const TXN_ROUNDS: usize = 1_000;
+
+/// 1,000 `ref txn`s, each moving three release refs together from one changeset to the other,
+/// race a reader that lists the refs over and over (the M18 design §7): every snapshot it reads
+/// shows the three refs at one target, never a mix, and the store verifies clean.
+#[test]
+#[ignore = "slow, ~30 s: 1,000 three-ref transactions beside a reader"]
+fn thousand_three_ref_txns_race_a_snapshot_reader() {
+    let store = Store::init();
+    let c1 = store.commit(ACTOR_KEY, "a", "1\n", None);
+    let c2 = store.commit(ACTOR_KEY, "a", "2\n", Some(&c1));
+    for name in TXN_REFS {
+        let create = ["ref", "set", name, &c1, "--create"];
+        store.run_as(ACTOR_KEY, &create, &[]).ok();
+    }
+
+    // Each listing's targets of the three refs, by name.
+    let targets = |store: &Store| -> Vec<String> {
+        let refs = store.read(&["ref", "list"]).ok();
+        let refs = refs["refs"].as_array().unwrap();
+        (TXN_REFS.iter())
+            .map(|name| {
+                let listed = refs.iter().find(|r| r["name"] == *name).expect("listed");
+                listed["target"].as_str().unwrap().to_owned()
+            })
+            .collect()
+    };
+    let done = AtomicBool::new(false);
+
+    let reads = std::thread::scope(|scope| {
+        // 1. The reader: every listing until the writer is done shows one target.
+        let reader = scope.spawn(|| {
+            let mut reads = 0_u64;
+            while !done.load(Ordering::Acquire) {
+                let seen = targets(&store);
+                assert!(!mixed(&seen), "a mixed snapshot: {seen:?}");
+                reads += 1;
+            }
+            reads
+        });
+
+        // 2. The writer: the three refs between c1 and c2, one transaction each round.
+        let (mut from, mut to) = (&c1, &c2);
+        for round in 0..TXN_ROUNDS {
+            let moves: Vec<String> = TXN_REFS
+                .iter()
+                .map(|n| format!("{n}={from}:{to}"))
+                .collect();
+            let mut line = vec!["ref", "txn"];
+            for spec in &moves {
+                line.extend(["--move", spec.as_str()]);
+            }
+            let run = store.run_as(ACTOR_KEY, &line, &[]);
+            assert_eq!(
+                run.ok()["moves"].as_array().unwrap().len(),
+                3,
+                "round {round}"
+            );
+            (from, to) = (to, from);
+        }
+        done.store(true, Ordering::Release);
+        reader.join().expect("the reader saw no mixed snapshot")
+    });
+
+    // 3. The reader raced the writer, and every ref ends where the last transaction left it.
+    assert!(reads > 10, "the reader read {reads} snapshots");
+    assert_eq!(targets(&store), [c1.as_str(); 3]);
+    store.assert_clean("after the transactions");
+
+    // 4. The check's own: one ref moved alone is a mixed state.
+    let alone = ["ref", "set", TXN_REFS[0], &c2, "--expect", &c1];
+    store.run_as(ACTOR_KEY, &alone, &[]).ok();
+    assert!(
+        mixed(&targets(&store)),
+        "one ref moved alone reads as mixed"
+    );
+}
+
+/// Whether `targets` name more than one changeset.
+fn mixed(targets: &[String]) -> bool {
+    targets.iter().any(|t| *t != targets[0])
+}
+
 // ---------------------------------------------------------------------------------------------
 // The harness's own deadlines.
 // ---------------------------------------------------------------------------------------------

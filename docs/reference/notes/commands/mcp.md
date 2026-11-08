@@ -45,9 +45,9 @@ are not served. The results of `server/discover` and `tools/list` may be kept fo
 
 ### Tools
 
-`tools/list` gives 44 tools, one per operation, named as the envelope's `op` is: the 32 store
+`tools/list` gives 45 tools, one per operation, named as the envelope's `op` is: the 33 store
 operations `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `ancestry`,
-`path_history`, `diff`, `op_log`, `ref_list`, `ref_set`, `ref_delete`, `ref_log`, `undo`, `commit`,
+`path_history`, `diff`, `op_log`, `ref_list`, `ref_set`, `ref_delete`, `ref_log`, `ref_txn`, `undo`, `commit`,
 `land`, `revert`, `land_check`, `land_group`, `rebase`, `blob_put`, `blob_has`, `verify`, `gc`, `repair`, `upgrade`, `remote_list`,
 `fetch`, `push`, `sync` and `sync_status`, then the 12 workspace operations `ws_create`, `ws_status`, `ws_diff`,
 `ws_commit`, `ws_rebase`, `ws_resolve`, `ws_land`, `ws_materialize`, `ws_discard`, `ws_snapshot`,
@@ -58,7 +58,7 @@ every reference inlined so that it stands alone. Its annotations say what it doe
 | --- | --- | --- | --- | --- |
 | The 17 store reads, `land_check`, `blob_has`, `verify`, `remote_list` and `sync_status` among them; `ws_status`, `ws_diff`, `ws_list`, `ws_info` | `true` | `false` | `true` | `false` |
 | `commit`, `rebase`, `blob_put`, `ws_commit` | `false` | `false` | `false` | `false` |
-| `ref_set`, `ref_delete`, `undo`, `gc`, `repair`, `upgrade` | `false` | `true` | `true` | `false` |
+| `ref_set`, `ref_delete`, `ref_txn`, `undo`, `gc`, `repair`, `upgrade` | `false` | `true` | `true` | `false` |
 | `land`, `revert`, `land_group`, `ws_create`, `ws_rebase`, `ws_resolve`, `ws_land`, `ws_materialize` | `false` | `false` | `true` | `false` |
 | `ws_discard` | `false` | `true` | `true` | `false` |
 | `fetch`, `push` | `false` | `false` | `true` | `true` |

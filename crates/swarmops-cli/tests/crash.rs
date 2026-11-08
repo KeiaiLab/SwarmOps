@@ -27,6 +27,7 @@
 //! - A revert (the M18 design §4), a land of the inverse change, is swept as a land is.
 //! - A group land (the M18 design §6.3) is swept as a land is: its chain lands whole or not at
 //!   all.
+//! - A ref transaction (the M18 design §7) is swept as a ref move: every ref moves or none does.
 //! - A batch of lands (the M18 D2 design §3) is swept through the binary too: a land leads two
 //!   requests that killed `land` runs queued, kept alive by this test's flocks, and crashes at
 //!   each of its calls; every key then lands once.
@@ -558,6 +559,82 @@ fn a_group_land_crashing_at_any_call_lands_all_or_none_through_the_binary(format
         "some crash came after the group's commit point"
     );
     assert!(published.iter().any(|&landed| !landed), "some before it");
+}
+}
+
+per_format! {
+/// A ref transaction crashed at any filesystem call moves every ref or none (the M18 design
+/// §7), through the binary: on a store whose main and `release/a` are at `t0`, `ref txn` of main
+/// and `release/a` to `t1` and of a new `release/b` at `t1`, crashed at each call k of the N its
+/// dry run makes, leaves the store verifying clean with every ref where it was or every ref
+/// moved; and the same command run again moves them where none had moved, or is
+/// `E_CAS_MISMATCH` where all had. Both sides of the commit point are reached.
+fn a_txn_crashing_at_any_call_moves_all_or_none(format) {
+    let template = Store::init_as(format).with_env(&[(NOW_ENV, &NOW.to_string())]);
+    let t0 = advance_main(&template, &agent(0), "base.txt", "the base\n");
+    let t1 = template.commit(&agent(0), "one.txt", "one\n", Some(&t0));
+    let create = ["ref", "set", "release/a", t0.as_str(), "--create"];
+    template.run_as(&agent(0), &create, &[]).ok();
+    let moves = [
+        format!("main={t0}:{t1}"),
+        format!("release/a={t0}:{t1}"),
+        format!("release/b=new:{t1}"),
+    ];
+    let mut txn = vec!["ref", "txn"];
+    for spec in &moves {
+        txn.extend(["--move", spec.as_str()]);
+    }
+    let refs = |store: &Store| -> Value { store.read(&["ref", "list"]).ok()["refs"].clone() };
+    let targets = |store: &Store| -> Vec<(String, String)> {
+        (refs(store).as_array().unwrap().iter())
+            .map(|r| {
+                let name = r["name"].as_str().unwrap().to_owned();
+                (name, r["target"].as_str().unwrap().to_owned())
+            })
+            .collect()
+    };
+    let pair = |name: &str, at: &str| (name.to_owned(), at.to_owned());
+    let before = vec![pair("main", &t0), pair("release/a", &t0)];
+    let after = vec![pair("main", &t1), pair("release/a", &t1), pair("release/b", &t1)];
+
+    // 1. The dry run, its calls counted: every ref moved.
+    let dry = Store::copy_of(&template);
+    let file = calls_file(&dry);
+    let result = dry.run_as(&agent(1), &txn, &[(FS_CALLS_ENV, file.to_str().unwrap())]);
+    assert_eq!(result.ok()["moves"].as_array().unwrap().len(), 3);
+    assert_eq!(targets(&dry), after);
+    let calls = reported_calls(&file);
+    assert!(calls > 5, "a transaction makes several calls: {calls}");
+
+    // 2. Each call crashed: every ref where it was, or every ref moved; then the same again.
+    let moved = sweep(1..=calls + 1, |k| {
+        let store = Store::copy_of(&template);
+        let crash_at = k.to_string();
+        let run = store.run_as(&agent(1), &txn, &[(CRASH_AT_ENV, &crash_at)]);
+        if k <= calls {
+            assert!(run.aborted(), "k={k} of {calls}: {run}");
+        } else {
+            run.ok();
+        }
+        store.assert_clean(&format!("k={k}: after the crash"));
+        let crashed = targets(&store);
+        let moved = crashed == after;
+        assert!(moved || crashed == before, "k={k}: a mixed state: {crashed:?}");
+        let again = store.run_as(&agent(1), &txn, &[]);
+        if moved {
+            again.err("E_CAS_MISMATCH");
+        } else {
+            again.ok();
+        }
+        assert_eq!(targets(&store), after, "k={k}");
+        store.assert_clean(&format!("k={k}: after the same transaction again"));
+        moved
+    });
+    assert!(
+        moved.iter().any(|&moved| moved),
+        "some crash came after the transaction's commit point"
+    );
+    assert!(moved.iter().any(|&moved| !moved), "some before it");
 }
 }
 

@@ -50,7 +50,8 @@ use std::str::FromStr;
 
 use swarmops_core::ChangesetId;
 use swarmops_store::{
-    CasResult, Frame, ObjectStore, Record, Recovered, RefKind, RefMoveEntry, StoreError, ref_kind,
+    CasResult, Frame, ObjectStore, Record, Recovered, RefKind, RefMismatch, RefMoveEntry,
+    StoreError, check_move, ref_kind,
 };
 
 use crate::error::RepoError;
@@ -203,6 +204,42 @@ pub struct UndoOutcome {
     /// [`RepoError::OpNotFound`], [`RepoError::NothingToUndo`], [`RepoError::UndoBlocked`] and
     /// [`RepoError::HistoryProtected`] too. It is no warning, and it is lost when the call fails
     /// otherwise after the repair.
+    pub recovered: Recovered,
+}
+
+/// One move of [`Repo::ref_txn`]: the ref, the target it expects (`None`: it must not exist),
+/// and the one it moves to (`None` deletes it).
+pub type TxnMove = (String, Option<ChangesetId>, Option<ChangesetId>);
+
+/// What [`Repo::ref_txn`] decided under the lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TxnResult {
+    /// Every expectation held: every move is committed, in one frame.
+    Committed {
+        /// The seq of the frame: the transaction's operation.
+        frame_seq: u64,
+        /// The frame's payload CRC-32: with `frame_seq`, its [`OpId`].
+        frame_crc: u32,
+        /// The moves, in the request's order: the ref, its target before and after, and the
+        /// time the frame records for the move.
+        moves: Vec<(String, Option<ChangesetId>, Option<ChangesetId>, i64)>,
+    },
+    /// These expectations failed, every one of them, in the request's order: nothing is written.
+    Mismatched(Vec<RefMismatch>),
+}
+
+/// What [`Repo::ref_txn`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TxnOutcome {
+    /// What it decided.
+    pub result: TxnResult,
+    /// Steps after the commit point that failed, one line each: the moves are committed all
+    /// the same.
+    pub warnings: Vec<String>,
+    /// What the write transaction's recovery repaired first, of what earlier writers left
+    /// ([`swarmops_store::MetaWrite::recovered`]), on either result.
     pub recovered: Recovered,
 }
 
@@ -383,6 +420,107 @@ impl<O: ObjectStore> Repo<O> {
             frame_crc,
             moves: made,
             already_applied: false,
+            warnings,
+            recovered,
+        })
+    }
+
+    /// Moves every ref of `moves` for `actor` in one write transaction, all of them or none (the
+    /// M18 design §7). Names must be distinct; the caller checks that.
+    ///
+    /// 1. Each move is judged by its kind's rules on the pair it names: a bad name is
+    ///    [`RepoError::RefName`], a deletion of `main` [`StoreError::RefProtected`], a tag's move
+    ///    [`StoreError::TagImmutable`], a move of `main` off its first parents
+    ///    [`RepoError::HistoryProtected`] (on a snapshot read under the lock).
+    /// 2. Every expectation is compared under the lock ([`swarmops_store::MetaWrite::expect_refs`]):
+    ///    any that fails is [`TxnResult::Mismatched`], each listed.
+    /// 3. Else every move is queued and committed as one frame, the commit point; a failure after
+    ///    it is a warning, as for [`Repo::cas_ref`].
+    ///
+    /// Every refusal drops the transaction, so nothing is written. A journal append that fails
+    /// ([`StoreError::NotCommitted`]) is returned as it is: no ref moved.
+    pub fn ref_txn(&self, moves: &[TxnMove], actor: &str) -> Result<TxnOutcome, RepoError> {
+        let mut write = self.meta.write()?;
+        let recovered = write.recovered();
+
+        // 1. Each move's own rules, before any expectation is read.
+        let format = self.format();
+        let read = self.snapshot()?;
+        for (name, expected, new) in moves {
+            self.meta.check_ref_name(name).map_err(repo::ref_error)?;
+            check_move(format, name, *expected, *new).map_err(repo::ref_error)?;
+            read.check_forward(name, *expected, *new)?;
+        }
+
+        // 2. Every expectation, none queued: one that fails refuses them all.
+        let expected: Vec<(&str, Option<ChangesetId>)> = (moves.iter())
+            .map(|(name, expected, _)| (name.as_str(), *expected))
+            .collect();
+        let mismatches = write.expect_refs(&expected)?;
+        if !mismatches.is_empty() {
+            return Ok(TxnOutcome {
+                result: TxnResult::Mismatched(mismatches),
+                warnings: Vec::new(),
+                recovered,
+            });
+        }
+
+        // 3. Every move queued; each holds, as compared just now under the same lock.
+        for (name, expected, new) in moves {
+            let result = write
+                .cas_ref(name, *expected, *new, actor)
+                .map_err(repo::ref_error)?;
+            if let CasResult::Mismatch { actual } = result {
+                let mismatch = RefMismatch::new(name.clone(), *expected, actual);
+                return Ok(TxnOutcome {
+                    result: TxnResult::Mismatched(vec![mismatch]),
+                    warnings: Vec::new(),
+                    recovered,
+                });
+            }
+        }
+        let made: Vec<(String, Option<ChangesetId>, Option<ChangesetId>, i64)> = write
+            .queued()
+            .iter()
+            .filter_map(|record| match record {
+                Record::RefMove {
+                    name, old, new, ts, ..
+                } => Some(Ok((name.clone(), *old, *new, *ts))),
+                Record::Changeset { .. } | Record::Compacted { .. } => None,
+                _ => Some(Err(RepoError::unknown_variant("Record"))),
+            })
+            .collect::<Result<_, _>>()?;
+
+        // 4. One frame, the commit point.
+        let mut warnings = Vec::new();
+        let (frame_seq, frame_crc) = match write.commit() {
+            Ok(info) => {
+                let crc = info
+                    .frame_crc
+                    .ok_or_else(|| RepoError::unknown_variant("CommitInfo"))?;
+                (info.frame_seq, crc)
+            }
+            Err(StoreError::PostCommit {
+                frame_seq,
+                frame_crc,
+                source,
+            }) => {
+                let committed = OpId::new(frame_seq, frame_crc);
+                warnings.push(repo::post_commit_warning(
+                    "the ref moves",
+                    committed,
+                    &source,
+                ));
+                (frame_seq, frame_crc)
+            }
+            Err(e) => return Err(e.into()),
+        };
+        Ok(TxnOutcome {
+            result: TxnResult::Committed {
+                frame_seq,
+                frame_crc,
+                moves: made,
+            },
             warnings,
             recovered,
         })

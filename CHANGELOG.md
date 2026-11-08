@@ -52,6 +52,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
   each change's outcome in `details.items`; a ref that moves after the plan makes the group plan
   again, never relocated under the lock. `op log` reads the operation as a `land` (the M18 design
   §6.3). `swarmops mcp` lists 44 tools, and `swarmops schema` 185 types.
+- `swarmops ref txn --move NAME=EXPECT:TO ...` and the MCP tool `ref_txn` move 1 to 64 refs as
+  one operation, each by compare-and-swap (`new` creates a ref, `delete` deletes one), all of them
+  or none: every expectation is checked under the store's lock before any ref moves, and any stale
+  one is `E_CAS_MISMATCH` listing every failed ref in `details.mismatches`, nothing written. Each
+  move keeps `ref set`'s and `ref delete`'s rules; `op undo` of the operation restores every ref at
+  once (the M18 design §7). `swarmops mcp` lists 45 tools, and `swarmops schema` 188 types.
 
 ### Changed
 

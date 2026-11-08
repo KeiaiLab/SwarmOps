@@ -116,7 +116,7 @@ SwarmOps records an identity and does not verify it: every envelope's `meta.auth
 treats every agent that runs against a store as a trusted local user acting for the same owner, and
 the store directory's permissions are the access boundary.
 
-## The 44 MCP tools
+## The 45 MCP tools
 
 A changeset is what a commit records, and a ref, such as `main`, is a name that points at one.
 `swarmops mcp` lists one tool for each store operation but `derive`, which `swarmops derive` runs
@@ -207,7 +207,7 @@ annotations say whether it changes the store and how.
   How `main` and a remote's branch stand, as the last fetch saw it: the changes the remote lacks
   and the commits `main` lacks. Offline.
 
-### Twelve tools write
+### Thirteen tools write
 
 - **`commit`**
 
@@ -249,6 +249,11 @@ annotations say whether it changes the store and how.
 - **`ref_delete`**
 
   Removes a ref by compare-and-swap.
+
+- **`ref_txn`**
+
+  Moves several refs as one operation, each by compare-and-swap, all of them or none: any stale
+  expectation is `E_CAS_MISMATCH`, every failed ref in `details.mismatches`, and nothing moves.
 
 - **`undo`**
 
@@ -364,7 +369,7 @@ Two rules matter more to an agent than to a person at the CLI.
 
 ### Give compare-and-swap a full changeset id
 
-`ref_set` and `ref_delete` take `expected_old` as the full changeset id, 64 hex digits, that the ref
+`ref_set` and `ref_delete` take `expected_old`, and `ref_txn` each move's `expect`, as the full changeset id, 64 hex digits, that the ref
 held when the agent read it, from `ref_list`, `show`, `log` or a commit's result. A `commit` with
 `advance` takes its `parent` by the same rule, and so does a `land` for the changeset its
 `resolutions` were decided `against`.

@@ -220,7 +220,7 @@ struct Meta {
 
 /// Every command, in the grammar's order. `meta_matches_the_code` checks each column it can
 /// against the code.
-const META: [Meta; 58] = [
+const META: [Meta; 59] = [
     meta("init", Group::Store, true, false, Returns::Type("RepoInfo")),
     meta(
         "info",
@@ -457,6 +457,13 @@ const META: [Meta; 58] = [
         false,
         false,
         Returns::Type("RefLogPage"),
+    ),
+    meta(
+        "ref txn",
+        Group::Refs,
+        true,
+        true,
+        Returns::Type("RefTxnResp"),
     ),
     meta(
         "op log",
@@ -1376,7 +1383,7 @@ fn source(path: &str) -> String {
 }
 
 /// Where each result type is returned: the file, and the function whose signature names it.
-const RETURN_SITES: [(&str, &str, &str); 54] = [
+const RETURN_SITES: [(&str, &str, &str); 55] = [
     ("init", "src/commands/run.rs", "fn init("),
     ("info", "../swarmops-api/src/ops.rs", "fn repo_info("),
     (
@@ -1454,6 +1461,7 @@ const RETURN_SITES: [(&str, &str, &str); 54] = [
     ("ref set", "../swarmops-api/src/ops.rs", "fn ref_set("),
     ("ref delete", "../swarmops-api/src/ops.rs", "fn ref_delete("),
     ("ref log", "../swarmops-api/src/ops.rs", "fn ref_log("),
+    ("ref txn", "../swarmops-api/src/ops.rs", "fn ref_txn("),
     ("op log", "../swarmops-api/src/ops.rs", "fn op_log("),
     ("op undo", "../swarmops-api/src/ops.rs", "fn undo("),
     ("verify", "../swarmops-api/src/ops.rs", "fn verify("),

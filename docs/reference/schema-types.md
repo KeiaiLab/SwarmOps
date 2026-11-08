@@ -2,7 +2,7 @@
 
 # Schema types
 
-The 185 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
+The 188 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
 
 ## Index
 
@@ -119,6 +119,9 @@ The 185 request, response and value types of the API, as `swarmops schema` print
 | [`RefOut`](#refout) | object | One ref. |
 | [`RefSetReq`](#refsetreq) | object | `ref set`: move a ref, or create one, by compare-and-swap. |
 | [`RefSetResp`](#refsetresp) | object | `ref set` and `ref delete`: the move that was made. |
+| [`RefTxnMoveIn`](#reftxnmovein) | object | One move of a `ref_txn`: ref `name` from `expect` to `to`. |
+| [`RefTxnReq`](#reftxnreq) | object | `ref_txn` (CLI `ref txn`): move several refs as one operation, each by compare-and-swap, all of them or none. |
+| [`RefTxnResp`](#reftxnresp) | object | `ref_txn`: the operation that made the moves, and the moves. |
 | [`RemoteAddReq`](#remoteaddreq) | object | `remote add`: record a git remote in the store. |
 | [`RemoteHead`](#remotehead) | object | A remote branch's head: its commit, and the changeset that commit is in the store. |
 | [`RemoteInfo`](#remoteinfo) | object | A remote the store records. |
@@ -1753,6 +1756,41 @@ Kind: object. `swarmops schema RefSetResp` prints its JSON Schema.
 | `new` | `string` or `null` | no | Its target after; omitted when the ref was deleted. |
 | `old` | `string` or `null` | no | What the ref held before a move that was applied. On a replay (`already_applied`) it is `expected_old` as resolved, which the ref need not have held; omitted when `create` was given. |
 | `warnings` | array of `string` | no | Problems found after the move became durable, such as failed housekeeping; the move itself succeeded. Omitted when empty. |
+
+## RefTxnMoveIn
+
+One move of a `ref_txn`: ref `name` from `expect` to `to`. A move that changes nothing (`expect` and `to` the same, or both omitted) is `E_INVALID_ARG`.
+
+Kind: object. `swarmops schema RefTxnMoveIn` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `expect` | [`Rev`](#rev) or `null` | no | The target the caller last saw, by its full changeset id, as `ref set`'s `expected_old`; omitted to create the ref, which must not exist. |
+| `name` | `string` | yes | The ref: `main`, `release/<name>` or a tag. |
+| `to` | [`Rev`](#rev) or `null` | no | The revision to point it at; omitted to delete it. |
+
+## RefTxnReq
+
+`ref_txn` (CLI `ref txn`): move several refs as one operation, each by compare-and-swap, all of them or none. Every expectation is checked under the store's lock before any move is made: one or more that fail make it `E_CAS_MISMATCH`, every failed ref in `details.mismatches`, and nothing is written. Each move follows `ref set`'s and `ref delete`'s rules: `main` only along its first parents and never deleted (`E_REF_PROTECTED`), a tag never moved (`E_TAG_IMMUTABLE`), no remote-tracking ref (`E_REF_NAME_INVALID`).
+
+Kind: object. `swarmops schema RefTxnReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `moves` | array of [`RefTxnMoveIn`](#reftxnmovein) | yes | The moves: 1 to 64 (`E_INVALID_ARG` for none, `E_TOO_LARGE` past 64), each ref once. |
+
+## RefTxnResp
+
+`ref_txn`: the operation that made the moves, and the moves.
+
+Kind: object. `swarmops schema RefTxnResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `id` | `string` | yes | Its id, which `undo` takes to restore every ref at once. |
+| `moves` | array of [`RefMoveOut`](#refmoveout) | yes | The moves, in the request's order. |
+| `op` | `integer` (uint64) | yes | The operation that recorded every move: its number in `op_log`. |
+| `warnings` | array of `string` | no | Problems found after the moves became durable, such as failed housekeeping; the moves themselves succeeded. Omitted when empty. |
 
 ## RemoteAddReq
 

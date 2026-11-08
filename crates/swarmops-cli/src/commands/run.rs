@@ -23,6 +23,7 @@ use swarmops_api::AncestryReq;
 use swarmops_api::LandReq;
 use swarmops_api::RebaseReq;
 use swarmops_api::RefLogReq;
+use swarmops_api::RefTxnReq;
 use swarmops_api::ResolutionsInput;
 use swarmops_api::ResolveRevReq;
 use swarmops_api::RevertReq;
@@ -750,6 +751,11 @@ fn run_ref(ctx: &Ctx<'_>, op: &'static str, command: RefCommand) -> Printed {
                 Ok(req)
             },
             |ops, req| ops.ref_log(req),
+        ),
+        RefCommand::Txn { moves } => ctx.on_store(
+            op,
+            || Ok((context::mutator(agent, ctx.env)?, RefTxnReq::new(moves))),
+            |ops, (who, req)| ops.ref_txn(&who, req),
         ),
     }
 }

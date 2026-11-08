@@ -175,7 +175,7 @@ const fn internal_value(
 // ---- The tables ----
 
 /// The limits a request is refused past, with the error it gets.
-static CONTRACT: [Limit; 17] = [
+static CONTRACT: [Limit; 18] = [
     Limit {
         name: "Request text",
         constant: code(
@@ -301,6 +301,7 @@ static CONTRACT: [Limit; 17] = [
             "blob put",
             "ref set",
             "ref delete",
+            "ref txn",
             "op undo",
             "git import",
             "clone",
@@ -328,13 +329,14 @@ static CONTRACT: [Limit; 17] = [
             "land",
             "ref set",
             "ref delete",
+            "ref txn",
             "git import",
             "git export",
         ],
         errors: &[ErrorCode::RefNameInvalid],
         what: "A ref's name, `main` or `release/<x>`, which a ref move records with a \
                    one-byte length: `commit --advance`, `land --target`, `ref set`, `ref \
-                   delete`, `git import --into` and `git export --ref`.",
+                   delete`, `ref txn --move`, `git import --into` and `git export --ref`.",
     },
     Limit {
         name: "Repository name",
@@ -451,6 +453,21 @@ static CONTRACT: [Limit; 17] = [
         what: "The changes one `land-group` (`changes`) lands in order as one operation: more \
                    are refused before anything is resolved or read, with \
                    `details.max_changes`; none is `E_INVALID_ARG`.",
+    },
+    Limit {
+        name: "Ref transaction moves",
+        constant: code(
+            "swarmops_api::MAX_REF_TXN_MOVES",
+            "crates/swarmops-api/src/ops.rs",
+            "pub const MAX_REF_TXN_MOVES: usize = 64;",
+            || bytes::to_u64(swarmops_api::MAX_REF_TXN_MOVES),
+        ),
+        unit: Unit::Count("moves"),
+        commands: &["ref txn"],
+        errors: &[ErrorCode::TooLarge],
+        what: "The refs one `ref txn` (`moves`) moves as one operation: more are refused \
+                   before anything is resolved or read, with `details.max_moves`; none is \
+                   `E_INVALID_ARG`.",
     },
 ];
 

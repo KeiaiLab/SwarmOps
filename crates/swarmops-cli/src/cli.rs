@@ -18,6 +18,7 @@ use swarmops_api::{
 };
 use swarmops_api::{DEFAULT_BLOB_GET_MAX_BYTES, DEFAULT_CHECK_TIMEOUT_S, DEFAULT_WS_STATUS_LIMIT};
 use swarmops_api::{DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_CONFLICT_BYTES};
+use swarmops_api::{RefTxnMoveIn, Rev};
 
 use crate::output;
 
@@ -1327,6 +1328,43 @@ pub enum RefCommand {
         #[arg(short = 'n', long, value_name = "N", default_value_t = DEFAULT_OP_LOG_LIMIT)]
         limit: usize,
     },
+    /// Move several refs as one operation, each by compare-and-swap: all of them or none.
+    ///
+    /// Each --move is NAME=EXPECT:TO: EXPECT the full id NAME names now, or new to create it;
+    /// TO the revision to point it at, or delete. Every expectation is checked under the store's
+    /// lock before any ref moves: one or more stale ones are E_CAS_MISMATCH, each listed in
+    /// details.mismatches, and nothing is written. Each move follows ref set's and ref delete's
+    /// rules. op undo of the operation restores every ref at once.
+    Txn {
+        /// One move, NAME=EXPECT:TO, such as release/1=new:main; 1 to 64, each ref once.
+        #[arg(long = "move", value_name = "NAME=EXPECT:TO", required = true, value_parser = txn_move)]
+        moves: Vec<RefTxnMoveIn>,
+    },
+}
+
+/// What `ref txn --move` takes for an EXPECT of a ref to create.
+const TXN_CREATE: &str = "new";
+
+/// What `ref txn --move` takes for a TO of a ref to delete.
+const TXN_DELETE: &str = "delete";
+
+/// `ref txn --move`: NAME=EXPECT:TO, split at the first `=` and then the first `:`. EXPECT
+/// [`TXN_CREATE`] creates the ref, TO [`TXN_DELETE`] deletes it.
+fn txn_move(text: &str) -> Result<RefTxnMoveIn, String> {
+    const FORM: &str = "expected NAME=EXPECT:TO, such as release/1=new:main";
+    let Some((name, pair)) = text.split_once('=') else {
+        return Err(FORM.to_owned());
+    };
+    let Some((expect, to)) = pair.split_once(':') else {
+        return Err(FORM.to_owned());
+    };
+    if name.is_empty() || expect.is_empty() || to.is_empty() {
+        return Err(FORM.to_owned());
+    }
+    let mut moved = RefTxnMoveIn::new(name);
+    moved.expect = (expect != TXN_CREATE).then(|| Rev::from(expect));
+    moved.to = (to != TXN_DELETE).then(|| Rev::from(to));
+    Ok(moved)
 }
 
 /// `git`'s operations.
@@ -1669,6 +1707,7 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["ref", "set"] => "ref_set",
         ["ref", "delete"] => "ref_delete",
         ["ref", "log"] => "ref_log",
+        ["ref", "txn"] => "ref_txn",
         ["op", "log"] => "op_log",
         ["op", "undo"] => "undo",
         ["verify"] => "verify",
@@ -1815,10 +1854,10 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 58);
+        assert_eq!(ops.len(), 59);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 58, "two subcommands name one op");
+        assert_eq!(ops.len(), 59, "two subcommands name one op");
         assert_eq!(op_name(&["ref"]), None);
         assert_eq!(op_name(&["blob"]), None);
         assert_eq!(op_name(&["ws"]), None);
@@ -1862,6 +1901,21 @@ mod tests {
                 (human, !human),
                 "{line:?}"
             );
+        }
+    }
+
+    /// `ref txn --move` splits at the first `=` and then the first `:`; `new` creates and
+    /// `delete` deletes; any other shape is refused.
+    #[test]
+    fn a_txn_move_reads_name_expect_and_to() {
+        let moved = super::txn_move("release/1=abc:main~1").unwrap();
+        assert_eq!(moved.name, "release/1");
+        assert_eq!(moved.expect.as_ref().map(Rev::as_str), Some("abc"));
+        assert_eq!(moved.to.as_ref().map(Rev::as_str), Some("main~1"));
+        let made = super::txn_move("tags/v1=new:delete").unwrap();
+        assert_eq!((made.expect, made.to), (None, None));
+        for bad in ["release/1", "release/1=abc", "=abc:def", "r=:def", "r=abc:"] {
+            assert!(super::txn_move(bad).is_err(), "{bad}");
         }
     }
 

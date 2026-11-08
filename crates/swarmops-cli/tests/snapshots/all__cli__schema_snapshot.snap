@@ -9309,6 +9309,185 @@ expression: s.redact(&all)
       "title": "RefSetResp",
       "type": "object"
     },
+    "RefTxnMoveIn": {
+      "$defs": {
+        "Rev": {
+          "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One move of a `ref_txn`: ref `name` from `expect` to `to`. A move that changes nothing\n(`expect` and `to` the same, or both omitted) is `E_INVALID_ARG`.",
+      "properties": {
+        "expect": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Rev"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The target the caller last saw, by its full changeset id, as `ref set`'s `expected_old`;\nomitted to create the ref, which must not exist."
+        },
+        "name": {
+          "description": "The ref: `main`, `release/<name>` or a tag.",
+          "type": "string"
+        },
+        "to": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Rev"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The revision to point it at; omitted to delete it."
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "RefTxnMoveIn",
+      "type": "object"
+    },
+    "RefTxnReq": {
+      "$defs": {
+        "RefTxnMoveIn": {
+          "description": "One move of a `ref_txn`: ref `name` from `expect` to `to`. A move that changes nothing\n(`expect` and `to` the same, or both omitted) is `E_INVALID_ARG`.",
+          "properties": {
+            "expect": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Rev"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The target the caller last saw, by its full changeset id, as `ref set`'s `expected_old`;\nomitted to create the ref, which must not exist."
+            },
+            "name": {
+              "description": "The ref: `main`, `release/<name>` or a tag.",
+              "type": "string"
+            },
+            "to": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Rev"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The revision to point it at; omitted to delete it."
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "type": "object"
+        },
+        "Rev": {
+          "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ref_txn` (CLI `ref txn`): move several refs as one operation, each by compare-and-swap, all\nof them or none. Every expectation is checked under the store's lock\nbefore any move is made: one or more that fail make it `E_CAS_MISMATCH`, every failed ref in\n`details.mismatches`, and nothing is written. Each move follows `ref set`'s and `ref\ndelete`'s rules: `main` only along its first parents and never deleted (`E_REF_PROTECTED`), a\ntag never moved (`E_TAG_IMMUTABLE`), no remote-tracking ref (`E_REF_NAME_INVALID`).",
+      "properties": {
+        "moves": {
+          "description": "The moves: 1 to 64 (`E_INVALID_ARG` for none, `E_TOO_LARGE` past 64), each ref once.",
+          "items": {
+            "$ref": "#/$defs/RefTxnMoveIn"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "moves"
+      ],
+      "title": "RefTxnReq",
+      "type": "object"
+    },
+    "RefTxnResp": {
+      "$defs": {
+        "RefMoveOut": {
+          "description": "A move of a ref, as the journal recorded it.",
+          "properties": {
+            "actor": {
+              "description": "Who moved it.",
+              "type": "string"
+            },
+            "at": {
+              "description": "When it moved, in Unix seconds, as its writer recorded it.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "name": {
+              "description": "The ref.",
+              "type": "string"
+            },
+            "new": {
+              "description": "What it names after; omitted for the move that deleted it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "old": {
+              "description": "What it named before; omitted for the move that created it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "name",
+            "actor",
+            "at"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ref_txn`: the operation that made the moves, and the moves.",
+      "properties": {
+        "id": {
+          "description": "Its id, which `undo` takes to restore every ref at once.",
+          "type": "string"
+        },
+        "moves": {
+          "description": "The moves, in the request's order.",
+          "items": {
+            "$ref": "#/$defs/RefMoveOut"
+          },
+          "type": "array"
+        },
+        "op": {
+          "description": "The operation that recorded every move: its number in `op_log`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "warnings": {
+          "description": "Problems found after the moves became durable, such as failed housekeeping; the moves\nthemselves succeeded. Omitted when empty.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "op",
+        "id",
+        "moves"
+      ],
+      "title": "RefTxnResp",
+      "type": "object"
+    },
     "RemoteAddReq": {
       "$defs": {
         "LossyClass": {

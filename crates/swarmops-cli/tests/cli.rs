@@ -2818,6 +2818,192 @@ fn gc_keeps_every_ref_log() {
     }
 }
 
+/// Runs `ref txn` on `store` as [`AGENT`], one `--move` per entry of `moves`.
+fn ref_txn(s: &mut Session, store: &str, moves: &[&str]) -> Reply {
+    let mut line = vec!["--repo", store, "--as", AGENT, "ref", "txn"];
+    for spec in moves {
+        line.extend(["--move", spec]);
+    }
+    s.run(&line)
+}
+
+/// Every ref of `store` with its target, by name; and how many operations its log holds.
+fn refs_and_ops(s: &mut Session, store: &str) -> (Value, usize) {
+    let refs = s.run(&["--repo", store, "ref", "list"]);
+    let listed = (refs["result"]["refs"].as_array().unwrap().iter())
+        .map(|r| (r["name"].as_str().unwrap().to_owned(), r["target"].clone()))
+        .collect::<serde_json::Map<_, _>>();
+    let log = s.run(&["--repo", store, "op", "log", "-n", "1000"]);
+    let ops = log["result"]["ops"].as_array().unwrap().len();
+    (Value::Object(listed), ops)
+}
+
+/// A store with changesets `c1` and `c2` (main at `c2`) and refs `release/a` and `release/b` at
+/// `c1`: the store, `c1` and `c2`.
+fn txn_store(s: &mut Session) -> (String, String, String) {
+    let store = s.store();
+    s.run(&["init", &store]);
+    let c1 = s.commit(&store, None, "a.txt", "a\n", "c1");
+    let c2 = s.commit(&store, Some(&c1), "a.txt", "b\n", "c2");
+    move_ref(s, &store, "main", &c2, None);
+    move_ref(s, &store, "release/a", &c1, None);
+    move_ref(s, &store, "release/b", &c1, None);
+    (store, c1, c2)
+}
+
+/// A `ref txn` whose one expectation of two is stale moves no ref and writes no operation:
+/// `E_CAS_MISMATCH` (exit 4, retryable), naming the stale ref, what it expected and what it
+/// names, in `details.mismatches`.
+#[test]
+fn a_txn_with_one_stale_expectation_changes_nothing_and_names_it() {
+    let mut s = Session::new();
+    let (store, c1, c2) = txn_store(&mut s);
+    let before = refs_and_ops(&mut s, &store);
+
+    // 1. release/a as expected, release/b expected at c2 but at c1.
+    let a = format!("release/a={c1}:{c2}");
+    let b = format!("release/b={c2}:{c1}");
+    let failed = ref_txn(&mut s, &store, &[&a, &b]);
+    assert_eq!(
+        (failed.exit, failed.code()),
+        (4, "E_CAS_MISMATCH"),
+        "{}",
+        failed.json
+    );
+    assert_eq!(failed["error"]["retryable"], true);
+    let want = json!([{"name": "release/b", "expected": c2, "actual": c1}]);
+    assert_eq!(failed["error"]["details"]["mismatches"], want);
+
+    // 2. Nothing moved, nothing recorded.
+    assert_eq!(refs_and_ops(&mut s, &store), before);
+}
+
+/// Every failed expectation is listed, in the request's order, whatever its kind: a ref expected
+/// absent that exists, one expected that does not, one at another target. Nothing is written.
+#[test]
+fn a_txn_lists_every_failed_ref() {
+    let mut s = Session::new();
+    let (store, c1, c2) = txn_store(&mut s);
+    let before = refs_and_ops(&mut s, &store);
+
+    // 1. One good move among three stale ones.
+    let moves = [
+        format!("release/a=new:{c2}"),
+        format!("release/b={c1}:{c2}"),
+        format!("release/none={c1}:delete"),
+        format!("main={c1}:{c2}"),
+    ];
+    let moves: Vec<&str> = moves.iter().map(String::as_str).collect();
+    let failed = ref_txn(&mut s, &store, &moves);
+    assert_eq!(failed.code(), "E_CAS_MISMATCH", "{}", failed.json);
+    let want = json!([
+        {"name": "release/a", "expected": null, "actual": c1},
+        {"name": "release/none", "expected": c1, "actual": null},
+        {"name": "main", "expected": c1, "actual": c2},
+    ]);
+    assert_eq!(failed["error"]["details"]["mismatches"], want);
+    assert_eq!(refs_and_ops(&mut s, &store), before);
+}
+
+/// A `ref txn` that moves, creates and deletes release refs is one operation, a ref move in op
+/// log with every move; `op undo` of its id restores every ref at once, and undoing that undo
+/// makes them all again.
+#[test]
+fn a_txn_is_one_operation_and_undoes_whole() {
+    let mut s = Session::new();
+    let (store, c1, c2) = txn_store(&mut s);
+    let (before, ops) = refs_and_ops(&mut s, &store);
+
+    // 1. Move release/a, create release/c, delete release/b: one operation.
+    let a = format!("release/a={c1}:{c2}");
+    let c = format!("release/c=new:{c1}");
+    let b = format!("release/b={c1}:delete");
+    let done = ref_txn(&mut s, &store, &[&a, &c, &b]);
+    assert_eq!(
+        (done.exit, &done["op"]),
+        (0, &json!("ref_txn")),
+        "{}",
+        done.json
+    );
+    let result = &done["result"];
+    let at = result["moves"][0]["at"].clone();
+    let moved = json!([
+        {"name": "release/a", "old": c1, "new": c2, "actor": AGENT, "at": at},
+        {"name": "release/c", "new": c1, "actor": AGENT, "at": at},
+        {"name": "release/b", "old": c1, "actor": AGENT, "at": at},
+    ]);
+    assert_eq!(result["moves"], moved);
+    let (after, ops_after) = refs_and_ops(&mut s, &store);
+    assert_eq!(ops_after, ops + 1);
+    let want = json!({"main": c2, "release/a": c2, "release/c": c1});
+    assert_eq!(after, want);
+
+    // 2. op log lists it as one ref move with the three moves, under the id it returned.
+    let log = s.run(&["--repo", &store, "op", "log", "-n", "1"]);
+    let op = &log["result"]["ops"][0];
+    assert_eq!(op["op"], result["op"]);
+    assert_eq!(op["id"], result["id"]);
+    assert_eq!(op["kind"], "ref_move");
+    assert_eq!(op["ref_moves"], moved);
+
+    // 3. Undone whole, then the undo undone.
+    let id = result["id"].as_str().unwrap().to_owned();
+    let undo = s.run(&["--repo", &store, "--as", AGENT, "op", "undo", &id]);
+    assert_eq!(undo.exit, 0, "{}", undo.json);
+    assert_eq!(undo["result"]["ref_moves"].as_array().unwrap().len(), 3);
+    assert_eq!(refs_and_ops(&mut s, &store).0, before);
+    let again = undo["result"]["id"].as_str().unwrap().to_owned();
+    let redo = s.run(&["--repo", &store, "--as", AGENT, "op", "undo", &again]);
+    assert_eq!(redo.exit, 0, "{}", redo.json);
+    assert_eq!(refs_and_ops(&mut s, &store).0, want);
+}
+
+/// A `ref txn` is refused before its lock, writing nothing, for a malformed move (exit 2), a ref
+/// named twice, a move that changes nothing, a remote-tracking ref, and more than 64 moves; and
+/// under it for a move of main off its first parents and a deletion of main, `E_REF_PROTECTED`.
+#[test]
+fn a_txn_refuses_bad_moves_writing_nothing() {
+    let mut s = Session::new();
+    let (store, c1, c2) = txn_store(&mut s);
+    let before = refs_and_ops(&mut s, &store);
+    let a = format!("release/a={c1}:{c2}");
+
+    // 1. Each refusal, with its exit and code.
+    let many: Vec<String> = (0..65).map(|n| format!("release/n{n}=new:{c1}")).collect();
+    let cases: Vec<(Vec<String>, i32, &str)> = vec![
+        (vec![format!("release/a{c1}")], 2, "E_INVALID_ARG"),
+        (vec![format!("release/a={c1}")], 2, "E_INVALID_ARG"),
+        (vec![a.clone(), a.clone()], 2, "E_INVALID_ARG"),
+        (vec![format!("release/a={c1}:{c1}")], 2, "E_INVALID_ARG"),
+        (vec!["release/a=new:delete".to_owned()], 2, "E_INVALID_ARG"),
+        (
+            vec![format!("remote/o/main=new:{c1}")],
+            1,
+            "E_REF_NAME_INVALID",
+        ),
+        (many, 1, "E_TOO_LARGE"),
+        (
+            vec![a.clone(), format!("main={c2}:{c1}")],
+            1,
+            "E_REF_PROTECTED",
+        ),
+        (
+            vec![a.clone(), format!("main={c2}:delete")],
+            1,
+            "E_REF_PROTECTED",
+        ),
+    ];
+    for (moves, exit, code) in cases {
+        let moves: Vec<&str> = moves.iter().map(String::as_str).collect();
+        let refused = ref_txn(&mut s, &store, &moves);
+        assert_eq!(code, refused.code(), "{moves:?}: {}", refused.json);
+        assert_eq!(exit, refused.exit, "{moves:?}: {}", refused.json);
+    }
+
+    // 2. Nothing moved, nothing recorded.
+    assert_eq!(refs_and_ops(&mut s, &store), before);
+}
+
 /// `ancestry` answers along every parent and pages `from..to` newest first: `-n` caps a page,
 /// `--cursor` resumes it for the same two revisions, and a limit over 1,000 is refused.
 #[test]

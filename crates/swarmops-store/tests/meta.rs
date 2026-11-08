@@ -23,7 +23,7 @@ use swarmops_store::{CRASH_AT_ENV, CrashAtFs, FailAt, FailAtFs, FailMode, Inject
 use swarmops_store::{
     CasResult, ChangesetMeta, CommitInfo, Frame, FsOps, Index, InsertOutcome, Journal,
     JournalEntry, Layout, LimitKind, LogCut, MetaLock, MetaRead, MetaStore, RealFs, Record,
-    Recovered, RefMoveEntry, RefState, StoreError, StoreFormat,
+    Recovered, RefMismatch, RefMoveEntry, RefState, StoreError, StoreFormat,
 };
 use swarmops_testkit::child::{CHILD_TIMEOUT, Child, SIGABRT, run, test_args, this_test};
 use swarmops_testkit::faults::checked;
@@ -5569,6 +5569,61 @@ fn reflog_page_equals_reflog_when_unpaged() {
     // 4. A `before` at or under the first move lists nothing; a bad name is refused.
     assert_eq!(read.reflog_page("main", Some(all[99].seq), 10).unwrap(), []);
     assert_ref_name(read.reflog_page("../main", Some(5), 1), "../main");
+}
+
+/// `expect_refs` compares every expectation against what the transaction sees (the ref files,
+/// then the moves it queued) and lists each that fails, in the request's order; it queues
+/// nothing, so a commit after it appends no frame. A bad name is refused as `cas_ref` refuses it.
+#[test]
+fn expect_refs_lists_every_mismatch_and_queues_nothing() {
+    let (_dir, root) = new_root();
+    let store = MetaStore::create_with_fs(&root, checked(NoSyncFs)).unwrap();
+    insert(&store, &[cs(1, &[]), cs(2, &[1])]);
+    cas(&store, "main", None, Some(1));
+    cas(&store, "release/a", None, Some(1));
+    let frames = store.read().unwrap().next_seq();
+
+    // 1. Two stale expectations of four: a moved ref, and one expected that does not exist.
+    let mut write = store.write().unwrap();
+    let mismatches = write
+        .expect_refs(&[
+            ("main", Some(id(1))),
+            ("release/a", Some(id(2))),
+            ("release/b", None),
+            ("release/c", Some(id(1))),
+        ])
+        .unwrap();
+    let got: Vec<_> = (mismatches.iter())
+        .map(|m| (m.name.as_str(), m.expected, m.actual))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("release/a", Some(id(2)), Some(id(1))),
+            ("release/c", Some(id(1)), None),
+        ]
+    );
+
+    // 2. A move queued in the transaction is what the next comparison sees.
+    write
+        .cas_ref("main", Some(id(1)), Some(id(2)), ACTOR)
+        .unwrap();
+    let after = write.expect_refs(&[("main", Some(id(1)))]).unwrap();
+    assert_eq!(
+        after,
+        [RefMismatch::new(
+            "main".to_owned(),
+            Some(id(1)),
+            Some(id(2))
+        )]
+    );
+    write.drop_frame();
+
+    // 3. Nothing queued by it: the commit appends no frame; a bad name is refused.
+    assert_ref_name(write.expect_refs(&[("../main", None)]), "../main");
+    assert!(write.queued().is_empty(), "{:?}", write.queued());
+    write.commit().unwrap();
+    assert_eq!(store.read().unwrap().next_seq(), frames);
 }
 
 /// Set only in the children of `crash_at_any_replay_call_recovers_to_the_journal`: the store

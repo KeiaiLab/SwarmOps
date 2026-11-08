@@ -704,6 +704,69 @@ expression: golden.transcript()
                 "openWorldHint": false,
                 "readOnlyHint": false
               },
+              "description": "Moves 1 to 64 refs as one operation, each by compare-and-swap, all of them or none: each move names its ref, expect (the full 64-hex changeset id it holds when you read it; omitted to create it) and to (omitted to delete it). Every expectation is checked first: any stale one is E_CAS_MISMATCH, every failed ref in details.mismatches, nothing written. undo of its id restores every ref at once.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`ref_txn` (CLI `ref txn`): move several refs as one operation, each by compare-and-swap, all\nof them or none. Every expectation is checked under the store's lock\nbefore any move is made: one or more that fail make it `E_CAS_MISMATCH`, every failed ref in\n`details.mismatches`, and nothing is written. Each move follows `ref set`'s and `ref\ndelete`'s rules: `main` only along its first parents and never deleted (`E_REF_PROTECTED`), a\ntag never moved (`E_TAG_IMMUTABLE`), no remote-tracking ref (`E_REF_NAME_INVALID`).",
+                "properties": {
+                  "moves": {
+                    "description": "The moves: 1 to 64 (`E_INVALID_ARG` for none, `E_TOO_LARGE` past 64), each ref once.",
+                    "items": {
+                      "description": "One move of a `ref_txn`: ref `name` from `expect` to `to`. A move that changes nothing\n(`expect` and `to` the same, or both omitted) is `E_INVALID_ARG`.",
+                      "properties": {
+                        "expect": {
+                          "anyOf": [
+                            {
+                              "pattern": "^[0-9a-fA-F]{64}$",
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "description": "The target the caller last saw, by its full changeset id, as `ref set`'s `expected_old`;\nomitted to create the ref, which must not exist."
+                        },
+                        "name": {
+                          "description": "The ref: `main`, `release/<name>` or a tag.",
+                          "type": "string"
+                        },
+                        "to": {
+                          "anyOf": [
+                            {
+                              "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "description": "The revision to point it at; omitted to delete it."
+                        }
+                      },
+                      "required": [
+                        "name"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "moves"
+                ],
+                "title": "RefTxnReq",
+                "type": "object"
+              },
+              "name": "ref_txn",
+              "title": "Move several refs at once"
+            },
+            {
+              "annotations": {
+                "destructiveHint": true,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": false
+              },
               "description": "Moves every ref an operation of op_log moved back to what it named before, by compare-and-swap in one transaction: all of them or none. It takes the operation's id from op_log (4:[crc]); a bare number is E_INVALID_ARG. A ref moved since stops it (E_CAS_MISMATCH, nothing written: undo the later operations first, or on main land a change that reverts it); an undo run again is a replay (already_applied). main moves only forward: an undo that would move it back is E_REF_PROTECTED, nothing written. Changesets are never removed.",
               "inputSchema": {
                 "$schema": "https://json-schema.org/draft/2020-12/schema",

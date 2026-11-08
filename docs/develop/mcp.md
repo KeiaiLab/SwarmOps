@@ -126,7 +126,7 @@ ids for compare-and-swap, `land` to publish, small pages):
 {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"swarmops","title":"SwarmOps","version":"0.2.0"},"instructions":"SwarmOps is source control for coding-agent swarms: many agents commit to one store at once. …"}}
 ```
 
-**`tools/list`.** One page of 44 tools. Each entry holds `name`, `title`, `description`,
+**`tools/list`.** One page of 45 tools. Each entry holds `name`, `title`, `description`,
 `inputSchema` and `annotations`; `read_file` alone also carries `_meta`:
 
 ```sh
@@ -147,6 +147,7 @@ sed -n 2p answers.jsonl | jq -c '.result.tools[] | {name, title, annotations} + 
 {"name":"ref_set","title":"Move a ref","annotations":{"destructiveHint":true,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":false}}
 {"name":"ref_delete","title":"Delete a ref","annotations":{"destructiveHint":true,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":false}}
 {"name":"ref_log","title":"List a ref's moves","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
+{"name":"ref_txn","title":"Move several refs at once","annotations":{"destructiveHint":true,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":false}}
 {"name":"undo","title":"Undo an operation","annotations":{"destructiveHint":true,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":false}}
 {"name":"commit","title":"Commit a changeset","annotations":{"destructiveHint":false,"idempotentHint":false,"openWorldHint":false,"readOnlyHint":false}}
 {"name":"land","title":"Land a change","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":false}}
@@ -287,6 +288,7 @@ the CLI command's request; `swarmops schema <Request>` prints the type.
 | `ref_set` | `swarmops ref set NAME REV` | `RefSetReq` | moves a ref |
 | `ref_delete` | `swarmops ref delete NAME` | `RefDeleteReq` | moves a ref |
 | `ref_log` | `swarmops ref log NAME` | `RefLogReq` | no |
+| `ref_txn` | `swarmops ref txn --move NAME=EXPECT:TO...` | `RefTxnReq` | moves refs, all or none |
 | `undo` | `swarmops op undo ID` | `UndoReq` | moves refs |
 | `commit` | `swarmops commit` | `CommitReq` | adds a changeset; with `advance`, moves a ref |
 | `land` | `swarmops land HEAD` | `LandReq` | adds a changeset and moves the target |
@@ -322,7 +324,7 @@ as `swarmops verify` is.
 
 Rules the server adds to the request types, each refused with `E_INVALID_ARG`:
 
-- **Full ids for compare-and-swap.** `ref_set`'s and `ref_delete`'s `expected_old`, a `commit`'s
+- **Full ids for compare-and-swap.** `ref_set`'s and `ref_delete`'s `expected_old`, each `expect` of `ref_txn`'s moves, a `commit`'s
   `parent` when it has `advance`, and `land`'s `resolutions.against` must be the full 64-hex
   changeset id you read. A ref name or a relative revision such as `main~1` is read when the call
   runs, so the compare-and-swap would protect nothing; an id prefix stops resolving once another
