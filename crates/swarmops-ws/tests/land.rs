@@ -2333,6 +2333,45 @@ fn a_key_on_an_older_changeset_is_held() {
     assert_eq!(done.land.landed, first);
 }
 
+/// Of two lands of one key that carried different edits, the re-run replays the one the target
+/// holds, though the other is newer: the first cut on `release/r`, a file edited, the resume onto
+/// `release/x` cut too, `release/r` restored to the first land. The edit stays on disk.
+#[test]
+fn a_held_land_is_found_among_newer() {
+    // 1. Two lands of the key, cut after their frames, whose changesets `C` differ.
+    let f = Fixture::new();
+    let (p, b, _) = on_release(&f);
+    let store = Hooked::new(&f.ops);
+    cut_land(&f, &store, Cut::After);
+    let first = store.lands()[0].landed.clone();
+    let aside = f.side(Some(&b), &[Put::File("src/r.txt", "r\n")]);
+    f.point("release/r", &aside);
+    let other = f.side(Some(&p), &[Put::File("src/x.txt", "x\n")]);
+    f.point("release/x", &other);
+    let dir = f.beside("w");
+    write(&dir, "src/a.txt", "unsettled 2\n");
+    store.crash_after_land.store(true, Ordering::SeqCst);
+    let mut req = land_with_message();
+    req.target = Some("release/x".to_owned());
+    let cut = swarmops_ws::land(&f.ctx_over(&store), req).unwrap_err();
+    assert_eq!(cut.code, "E_IO", "{cut:?}");
+    let made = |i: usize| store.lands()[i].squashed_from.last().cloned();
+    assert_ne!(made(0), made(1));
+
+    // 2. `release/r` restored: the first land replays, the edit an edit against it.
+    f.point("release/r", &first);
+    let done = swarmops_ws::land(&f.ctx_over(&store), land_with_message()).unwrap();
+    assert_eq!(
+        (done.land.status, &done.land.landed),
+        (LandStatus::Replayed, &first)
+    );
+    let saved = state::read(&RealFs::new(), &dir).unwrap();
+    assert_eq!((&saved.head, &saved.materialized), (&first, &first));
+    assert!(!pending_in(&dir).exists());
+    let edited = vec![("src/a.txt".to_owned(), WsChangeKind::Modified)];
+    assert_eq!(changes(&f.ctx(), "w", true), edited);
+}
+
 /// A cut land is placed back to the operation that made the record's head, however long the
 /// journal runs on below it: the land was never recorded, or the target moved back past it, and
 /// `ws rebase` takes the record over.

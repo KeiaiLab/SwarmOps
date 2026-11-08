@@ -480,6 +480,27 @@ pub(crate) fn landed(
     key: &str,
     head: &str,
 ) -> Result<Landed, OpError> {
+    find(store, target, key, head).map(|(landed, _)| landed)
+}
+
+/// The changeset of a land with `key` that ref `target`'s history holds, found as [`landed`]
+/// finds it: of two lands of one key, the one on the target, not the newer.
+pub(crate) fn held(
+    store: &dyn StoreOps,
+    target: &str,
+    key: &str,
+    head: &str,
+) -> Result<Option<String>, OpError> {
+    find(store, target, key, head).map(|(_, held)| held)
+}
+
+/// [`landed`]'s answer, and the changeset of the key the target's history met, if any.
+fn find(
+    store: &dyn StoreOps,
+    target: &str,
+    key: &str,
+    head: &str,
+) -> Result<(Landed, Option<String>), OpError> {
     // 1. The journal back to the head's operation: every changeset a land of the key made.
     let mut made = HashSet::new();
     let scanned = scan_ops(store, |op| {
@@ -489,22 +510,33 @@ pub(crate) fn landed(
     })?;
     let capped = matches!(scanned, Scanned::Capped);
     if made.is_empty() {
-        return Ok(if capped {
-            Landed::Unknown
-        } else {
-            Landed::Absent
-        });
+        return Ok((
+            if capped {
+                Landed::Unknown
+            } else {
+                Landed::Absent
+            },
+            None,
+        ));
     }
 
     // 2. The target's history: one of them met, or ended without (an older copy past the
     //    journal's cap may be on it), or cut at the cap.
-    let walked = walk(store, target, |id| made.contains(id))?;
-    Ok(match walked {
+    let mut met = None;
+    let walked = walk(store, target, |id| {
+        let found = made.contains(id);
+        if found {
+            met = Some(id.to_owned());
+        }
+        found
+    })?;
+    let landed = match walked {
         Walked::Stopped => Landed::Held,
         Walked::Ended if capped => Landed::Unknown,
         Walked::Ended => Landed::Absent,
         Walked::Capped => Landed::Unknown,
-    })
+    };
+    Ok((landed, met))
 }
 
 /// The conflicting paths of workspace `ws`'s rebase, from its conflict report; none when it has

@@ -39,7 +39,7 @@ use std::time::Duration;
 use serde_json::{Map, Value};
 use swarmops_api::{
     DEFAULT_MAX_CONFLICT_BYTES, ErrorCode, LandMode, LandReq, LandResp, MAX_LAND_ATTEMPTS, OpError,
-    OpLogReq, ResolveRevReq, ShowReq, StatusAfter, WsCheckInput, WsLandReq, WsLandResp,
+    ResolveRevReq, ShowReq, StatusAfter, WsCheckInput, WsLandReq, WsLandResp,
 };
 
 use crate::check::{self, Subject};
@@ -50,7 +50,7 @@ use crate::pending::{self, Pending, PendingOp};
 use crate::rebase::{self, Rerun};
 use crate::scan;
 use crate::state::{self, State};
-use crate::status::{self, Landed, OP_CAP};
+use crate::status::{self, Landed};
 use crate::workspace::{self, Locate, Workspace};
 use crate::{Ctx, after};
 
@@ -68,12 +68,6 @@ const WAIT_STEP: Duration = Duration::from_millis(25);
 
 /// The longest wait's step: 2 s.
 const WAIT_MAX: Duration = Duration::from_secs(2);
-
-/// The operations one `op_log` page of the search for a held land's changesets asks for.
-const OP_PAGE: usize = 100;
-
-/// The changesets per operation that search reads: a land that carried edits records two.
-const OP_CHANGESETS: usize = 2;
 
 /// A checked land's command and how long it may run.
 struct Check {
@@ -450,7 +444,7 @@ fn stand_on_held(
     if cut.state != LANDING || !replays(ctx, ws, target)? {
         return Ok(false);
     }
-    let Some(made) = carried_head(ctx, ws, &cut.key)? else {
+    let Some(made) = carried_head(ctx, ws, &cut.key, target)? else {
         return Ok(true);
     };
 
@@ -467,39 +461,18 @@ fn stand_on_held(
 }
 
 /// The changeset `C` a land with `key` made of the edits it carried on workspace `ws`'s head:
-/// the last of the `squashed_from` of a changeset the journal names as a land of the key, read
-/// newest first within [`OP_CAP`] operations; none when the land carried no edits.
-fn carried_head(ctx: &Ctx<'_>, ws: &Workspace, key: &str) -> Result<Option<String>, OpError> {
-    let mut visited = 0;
-    let mut before = None;
-    loop {
-        // 1. The next page of operations.
-        let mut req = OpLogReq::default();
-        req.before = before;
-        req.limit = OP_PAGE;
-        req.max_changesets = OP_CHANGESETS;
-        let page = ctx.store.op_log(req)?;
-
-        // 2. Each land of the key: the head it squashed, if made on `ws`'s head.
-        for op in &page.ops {
-            if visited == OP_CAP {
-                return Ok(None);
-            }
-            visited += 1;
-            let lands = (op.changesets.iter()).filter(|c| c.land_key.as_deref() == Some(key));
-            for land in lands {
-                if let Some(made) = made_on(ctx, &land.id, &ws.file.head)? {
-                    return Ok(Some(made));
-                }
-            }
-        }
-
-        // 3. The next page, while there is one.
-        before = page.ops.last().map(|op| op.op);
-        if !page.truncated || before.is_none() {
-            return Ok(None);
-        }
-    }
+/// the last of the `squashed_from` of the land's changeset `target` holds, not a newer land of
+/// the key elsewhere; none when the land carried no edits.
+fn carried_head(
+    ctx: &Ctx<'_>,
+    ws: &Workspace,
+    key: &str,
+    target: &str,
+) -> Result<Option<String>, OpError> {
+    let Some(landed) = status::held(ctx.store, target, key, &ws.file.head)? else {
+        return Ok(None);
+    };
+    made_on(ctx, &landed, &ws.file.head)
 }
 
 /// The last changeset landed changeset `landed` squashed, when its first parent is `head`.
