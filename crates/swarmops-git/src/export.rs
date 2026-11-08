@@ -62,6 +62,10 @@
 //! [`Repo::snapshot_committed`]: swarmops_repo::Repo::snapshot_committed
 
 use std::collections::{BinaryHeap, HashMap, HashSet};
+#[cfg(feature = "test-hooks")]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "test-hooks")]
+use std::time::{Duration, Instant};
 
 use swarmops_core::bytes;
 use swarmops_core::{BlobId, Changeset, ChangesetId, EntryTarget, Tree, TreeEntry, TreeId};
@@ -74,6 +78,66 @@ use crate::{
     OidCache, RawCommit, RawKind, SinkError, Stored, Unsupported,
 };
 use crate::{ancestry, export_oid, native, oid, render};
+
+/// The nanoseconds each of the nine steps took in this process, by any export (test hooks).
+#[cfg(feature = "test-hooks")]
+static STEP_NANOS: [AtomicU64; STEPS] = [const { AtomicU64::new(0) }; STEPS];
+
+/// How many steps [`export()`] goes in: the module documentation's nine.
+#[cfg(feature = "test-hooks")]
+const STEPS: usize = 9;
+
+/// How long each of [`export()`]'s nine steps took in this process, by any export, in the
+/// module documentation's order: a test compares two readings around the export it times. Step 1
+/// is [`export_in`]'s checks alone, as the caller took its snapshot. A step an export ended in
+/// with an error is not counted. The test hooks alone keep the clock.
+#[cfg(feature = "test-hooks")]
+pub fn step_times() -> [Duration; STEPS] {
+    std::array::from_fn(|i| Duration::from_nanos(STEP_NANOS[i].load(Ordering::Relaxed)))
+}
+
+/// The steps of the module documentation, as the step clock counts them.
+#[derive(Clone, Copy)]
+enum Step {
+    Check,
+    Derive,
+    UpToDate,
+    Base,
+    Commits,
+    Write,
+    Sync,
+    Record,
+    Move,
+}
+
+/// The step clock: each lap adds the time since the last to its step (test hooks); nothing
+/// without them.
+struct Clock {
+    #[cfg(feature = "test-hooks")]
+    last: Instant,
+}
+
+impl Clock {
+    fn start() -> Clock {
+        Clock {
+            #[cfg(feature = "test-hooks")]
+            last: Instant::now(),
+        }
+    }
+
+    /// Ends `step`: its time since the last lap is counted.
+    fn lap(&mut self, step: Step) {
+        #[cfg(feature = "test-hooks")]
+        {
+            let now = Instant::now();
+            let nanos = u64::try_from((now - self.last).as_nanos()).unwrap_or(u64::MAX);
+            STEP_NANOS[step as usize].fetch_add(nanos, Ordering::Relaxed);
+            self.last = now;
+        }
+        #[cfg(not(feature = "test-hooks"))]
+        let _ = (self, step);
+    }
+}
 
 /// How many first parents of the branch's commit step 4 reads in the repository, looking for the
 /// export of the head or of an ancestor of it, before it says the branch moved.
@@ -361,9 +425,11 @@ pub fn export(
     sink: &mut dyn GitSink,
     req: &ExportRequest,
 ) -> Result<ExportReport, ExportError> {
+    let mut clock = Clock::start();
     check_request(repo, sink, req)?;
     let (read, recovered) = repo.snapshot_committed()?;
-    export_on(repo, &read, recovered, sink, req)
+    clock.lap(Step::Check);
+    export_on(repo, &read, recovered, sink, req, clock)
 }
 
 /// [`export()`]'s steps 2 to 9 on `read`, a committed snapshot the caller took
@@ -379,8 +445,10 @@ pub fn export_in(
     sink: &mut dyn GitSink,
     req: &ExportRequest,
 ) -> Result<ExportReport, ExportError> {
+    let mut clock = Clock::start();
     check_request(repo, sink, req)?;
-    export_on(repo, read, recovered, sink, req)
+    clock.lap(Step::Check);
+    export_on(repo, read, recovered, sink, req, clock)
 }
 
 /// Step 1's checks: the source ref's name, the sink's object format, and a branch a work tree
@@ -409,13 +477,14 @@ fn check_request(
 }
 
 /// Steps 2 to 9 on `read`, checked by [`check_request`]: the one body of [`export()`] and
-/// [`export_in`].
+/// [`export_in`], timed by `clock`.
 fn export_on(
     repo: &LocalRepo,
     read: &RepoRead<'_, FsObjectStore>,
     recovered: TailRepair,
     sink: &mut dyn GitSink,
     req: &ExportRequest,
+    mut clock: Clock,
 ) -> Result<ExportReport, ExportError> {
     let Some(state) = read.get_ref(&req.source_ref)? else {
         return Err(ExportError::SourceRef(req.source_ref.clone()));
@@ -424,6 +493,7 @@ fn export_on(
     let old = target_at(sink, req)?;
     let mut run = Run::new(repo, read, sink, (head, req.memo_key.as_ref()));
     let head_oid = run.export_of(head)?.git_oid();
+    clock.lap(Step::Derive);
     let mut report = ExportReport {
         head,
         head_oid,
@@ -438,7 +508,9 @@ fn export_on(
         recovered,
         warnings: Vec::new(),
     };
-    if old == Some(head_oid) {
+    let up_to_date = old == Some(head_oid);
+    clock.lap(Step::UpToDate);
+    if up_to_date {
         report.base = Some(head);
         return Ok(report);
     }
@@ -465,12 +537,16 @@ fn export_on(
             }
         };
     }
+    clock.lap(Step::Base);
     let commits = run.commits(report.base)?;
+    clock.lap(Step::Commits);
     run.write(&commits)?;
+    clock.lap(Step::Write);
     if !run.pending.is_empty() {
         let pending = std::mem::take(&mut run.pending);
         run.sink.sync(&pending)?;
     }
+    clock.lap(Step::Sync);
     run.record(&commits)?;
     let rewritten = (commits.iter())
         .filter(|commit| run.nodes[&commit.id].imported && !commit.exported.kept)
@@ -484,6 +560,7 @@ fn export_on(
             report.rewritten
         ));
     }
+    clock.lap(Step::Record);
     report.branch_moved = match move_target(run.sink, req, old, head_oid)? {
         BranchUpdate::Applied => true,
         // Another export of the same head moved it first.
@@ -497,6 +574,7 @@ fn export_on(
             });
         }
     };
+    clock.lap(Step::Move);
     report.commits_written = run.commits_written;
     report.objects_written = run.objects_written;
     report.objects_checked = run.objects_checked;

@@ -2416,3 +2416,119 @@ mod mac_memos {
         assert_eq!(subjects, [("git_oid_mac", b.0)]);
     }
 }
+
+/// The export's step clock (the M17 closure design §3.6): the time each of the nine steps of the
+/// module documentation of `export` took, kept by the test hooks for the whole process, read
+/// before and after an export. Histories of `count.txt` changed once a commit, imported from a
+/// `MemSource`, then exported into an empty bare repository.
+#[cfg(feature = "test-hooks")]
+mod by_step {
+    use std::time::Instant;
+
+    use swarmops_git::MemoKey;
+    use swarmops_git::export::step_times;
+
+    use super::*;
+    use crate::support::MemSource;
+
+    /// The steps' names, in the module documentation's order.
+    const STEPS: [&str; 9] = [
+        "check",
+        "derive",
+        "up-to-date",
+        "base",
+        "commits",
+        "write",
+        "sync",
+        "record",
+        "move",
+    ];
+
+    /// The history of [`export_of_12000_by_step`]: the roadmap's 12,000 commits.
+    const COMMITS: usize = 12_000;
+
+    /// A source of `commits` linear commits that each change one file: the tip.
+    fn counting(commits: usize) -> (MemSource, GitOid) {
+        let mut source = MemSource::default();
+        let mut tip: Option<GitOid> = None;
+        for n in 1..=commits {
+            let blob = source.blob(format!("{n}\n").as_bytes());
+            let tree = source.tree(&[("100644", b"count.txt", blob)]);
+            let message = format!("count to {n}\n");
+            tip = Some(source.commit(tree, tip.as_slice(), &message));
+        }
+        (source, tip.expect("one commit at least"))
+    }
+
+    /// Imports `commits` counting commits into `repo` as `main`, under `key` when there is one.
+    fn import_counting(repo: &LocalRepo, commits: usize, key: Option<&MemoKey>) {
+        let (source, tip) = counting(commits);
+        let mut req = ImportRequest::new(tip.to_string(), "main", ACTOR);
+        req.memo_key = key.cloned();
+        import(repo, &source, &req).expect("import");
+    }
+
+    /// Exports `main` into an empty bare repository, under `key` when there is one: what each
+    /// step took, the export's wall time, and how many commits it wrote.
+    fn timed_export(repo: &LocalRepo, key: Option<&MemoKey>) -> ([Duration; 9], Duration, u64) {
+        let destination = git::empty_repository();
+        let mut sink = gix(&destination.dir);
+        let mut req = main_branch();
+        req.memo_key = key.cloned();
+
+        // The steps' clocks around the one export.
+        let before = step_times();
+        let start = Instant::now();
+        let report = export(repo, &mut sink, &req).expect("export");
+        let wall = start.elapsed();
+        let after = step_times();
+        assert!(report.branch_moved, "the export moved main");
+
+        let steps = std::array::from_fn(|i| after[i].saturating_sub(before[i]));
+        (steps, wall, report.commits_written)
+    }
+
+    /// The nine steps' times of one small export (200 commits) add up to its wall time, within
+    /// 5 %: the clock leaves out nothing but the report's assembly.
+    #[test]
+    fn step_times_add_up() {
+        let store = store();
+        import_counting(&store.repo, 200, None);
+        let (steps, wall, _) = timed_export(&store.repo, None);
+        let sum: Duration = steps.iter().sum();
+        assert!(sum <= wall, "the steps {sum:?} against the wall {wall:?}");
+        assert!(
+            sum >= wall.saturating_sub(wall / 20),
+            "the steps {sum:?} against the wall {wall:?}: {steps:?}"
+        );
+    }
+
+    /// A cold export of 12,000 imported commits into an empty bare repository, by step: once
+    /// without a memo key, once from a store imported and exported under one, each a store of its
+    /// own on the host's filesystem, fsync'd as by default. It prints an `export-steps: ` line a
+    /// step and one for the whole, and asserts only that every commit was written.
+    #[test]
+    #[ignore = "slow, ~430 s (429.2 s at load 100 to 147, idle not measured): two imports and two exports of 12,000 commits"]
+    fn export_of_12000_by_step() {
+        let key = MemoKey::from_bytes([7; 32]);
+        for (case, key) in [("no-key", None), ("memo-key", Some(&key))] {
+            let dir = tempfile::tempdir().expect("a temp dir");
+            let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).expect("UTF-8");
+            let mut repo = LocalRepo::create(&root, "test").expect("create");
+            register(&mut repo).expect("register ExportOid");
+            import_counting(&repo, COMMITS, key);
+
+            // The export, a line a step, then its wall time.
+            let (steps, wall, written) = timed_export(&repo, key);
+            assert_eq!(written, u64::try_from(COMMITS).unwrap(), "{case}");
+            for (name, took) in STEPS.iter().zip(steps) {
+                println!("export-steps: {case} {name} {:.3} ms", millis(took));
+            }
+            println!("export-steps: {case} wall {:.3} ms", millis(wall));
+        }
+    }
+
+    fn millis(took: Duration) -> f64 {
+        took.as_secs_f64() * 1_000.0
+    }
+}
