@@ -664,3 +664,172 @@ fn ws_create_runs_the_bootstrap_through_the_binary_and_the_tool() {
     );
     crate::mcp_ws::bootstrap_through_the_tool(&lab);
 }
+
+/// The number of operations `lab`'s store has recorded: the newest's number, plus one.
+fn ops_of(lab: &Lab) -> u64 {
+    let newest = lab.store.read(&["op", "log", "-n", "1"]).ok();
+    newest["ops"][0]["op"].as_u64().unwrap() + 1
+}
+
+/// R-B1's first acceptance (the M19 design §5): a snapshot's id, which another process finds by
+/// `ws info`, reads the edits by `cat`; the workspace keeps its head and its edits.
+#[test]
+fn a_snapshot_reads_the_edits_from_another_process() {
+    // 1. A workspace with an edit and a new file; the snapshot.
+    let lab = Lab::new();
+    let dir = lab.workspace("w1");
+    write(&dir, "README.md", "# edited\n");
+    write(&dir, "notes.txt", "new\n");
+    let taken = inside(&dir, &["ws", "snapshot"]).ok();
+    assert_eq!(taken["written"], "new", "{taken}");
+    let id = taken["snapshot"].as_str().unwrap().to_owned();
+
+    // 2. Another process, beside the workspace: `ws info` names it, `cat` reads the edits.
+    let info = lab.so(&["ws", "info", "--ws", "w1"]).ok();
+    assert_eq!(info["snapshot"], id.as_str(), "{info}");
+    assert_eq!(info["head"], main_of(&lab).as_str(), "{info}");
+    for (path, text) in [("README.md", "# edited\n"), ("notes.txt", "new\n")] {
+        let shown = lab.so(&["cat", &format!("{id}:{path}")]).ok();
+        assert_eq!(shown["content"], text, "{shown}");
+    }
+
+    // 3. The edits stay edits.
+    let status = inside(&dir, &["ws", "status"]).ok();
+    assert_eq!(status["changes"].as_array().unwrap().len(), 2, "{status}");
+}
+
+/// R-B1's second acceptance: the same edits on the same head again write nothing, neither an
+/// object nor an operation, and answer the same id; with the test hooks, the store makes the
+/// calls of a clean workspace's snapshot, which writes nothing.
+#[test]
+fn a_second_snapshot_writes_nothing() {
+    // 1. A snapshot of an edit.
+    let lab = Lab::new();
+    let dir = lab.workspace("w1");
+    write(&dir, "README.md", "# edited\n");
+    let first = inside(&dir, &["ws", "snapshot"]).ok();
+    let ops = ops_of(&lab);
+
+    // 2. Again: the same id, nothing written.
+    let again = inside(&dir, &["ws", "snapshot", "--status-after", "none"]).ok();
+    assert_eq!(again["written"], "same", "{again}");
+    assert_eq!(again["snapshot"], first["snapshot"], "{again}");
+    assert_eq!(ops_of(&lab), ops, "a second snapshot recorded an operation");
+
+    // 3. The store's calls: those of a clean workspace's snapshot.
+    #[cfg(feature = "test-hooks")]
+    {
+        let clean = lab.workspace("w2");
+        let calls = |dir: &Path| {
+            let file = lab.beside("calls");
+            let env = [(swarmops_store::FS_CALLS_ENV, file.to_str().unwrap())];
+            let args = ["--as", AGENT, "ws", "snapshot", "--status-after", "none"];
+            let taken = run_in(dir, &env, &args, None).ok();
+            let calls: u64 = fs::read_to_string(&file).unwrap().trim().parse().unwrap();
+            (taken["written"].clone(), calls)
+        };
+        let (same, same_calls) = calls(&dir);
+        let (none, clean_calls) = calls(&clean);
+        assert_eq!((same, none), (json!("same"), json!("clean")));
+        assert_eq!(same_calls, clean_calls, "a same snapshot's store calls");
+    }
+}
+
+/// I5: a snapshot moves no ref; its operation records one changeset, on the workspace's head.
+#[test]
+fn a_snapshot_moves_no_ref() {
+    let lab = Lab::new();
+    let dir = lab.workspace("w1");
+    let refs = lab.store.read(&["ref", "list"]).ok();
+    write(&dir, "src/lib.rs", "pub fn f() { 1 }\n");
+    let taken = inside(&dir, &["ws", "snapshot"]).ok();
+
+    let newest = lab.store.read(&["op", "log", "-n", "1"]).ok();
+    let op = &newest["ops"][0];
+    assert_eq!(op["ref_moves"], json!([]), "{newest}");
+    assert_eq!(op["changesets"][0]["id"], taken["snapshot"], "{newest}");
+    assert_eq!(lab.store.read(&["ref", "list"]).ok(), refs);
+    let shown = lab.so(&["show", taken["snapshot"].as_str().unwrap()]).ok();
+    assert_eq!(shown["parents"], json!([main_of(&lab)]), "{shown}");
+}
+
+/// R-B1's third acceptance: a snapshot that returned survives the kill of the next command,
+/// wherever the kill falls; the next snapshot completes and holds the newer edits.
+#[test]
+fn a_snapshot_survives_sigkill_after_it_returned() {
+    // 1. A snapshot of one edit; a second edit.
+    let lab = Lab::new();
+    let dir = lab.workspace("w1");
+    write(&dir, "README.md", "# one\n");
+    let first = inside(&dir, &["ws", "snapshot"]).ok();
+    let id = first["snapshot"].as_str().unwrap().to_owned();
+    write(&dir, "README.md", "# two\n");
+
+    // 2. The next snapshot killed at a few moments; each time, the first reads as it was.
+    for wait in [0, 5, 20, 80] {
+        let args = ["--as", AGENT, "ws", "snapshot"];
+        let mut child = support::swarmops(&args, &[])
+            .current_dir(&dir)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start swarmops");
+        std::thread::sleep(std::time::Duration::from_millis(wait));
+        child.kill().expect("kill the snapshot");
+        child.wait().expect("reap the snapshot");
+        let shown = lab.so(&["cat", &format!("{id}:README.md")]).ok();
+        assert_eq!(shown["content"], "# one\n", "after a kill at {wait} ms");
+        let info = lab.so(&["ws", "info", "--ws", "w1"]).ok();
+        assert!(info["snapshot"].is_string(), "{info}");
+    }
+
+    // 3. The next one completes, with the second edit.
+    let last = inside(&dir, &["ws", "snapshot"]).ok();
+    let newer = last["snapshot"].as_str().unwrap();
+    assert_ne!(newer, id, "{last}");
+    let shown = lab.so(&["cat", &format!("{newer}:README.md")]).ok();
+    assert_eq!(shown["content"], "# two\n", "{shown}");
+}
+
+/// R-B1's fourth: a workspace without edits snapshots nothing, and `ws info` names none.
+#[test]
+fn a_clean_workspace_snapshot_is_clean() {
+    let lab = Lab::new();
+    let dir = lab.workspace("w1");
+    let ops = ops_of(&lab);
+
+    let taken = inside(&dir, &["ws", "snapshot"]).ok();
+    assert_eq!(taken["written"], "clean", "{taken}");
+    assert!(taken.get("snapshot").is_none(), "{taken}");
+    assert_eq!(taken["status_after"]["state"], "clean", "{taken}");
+    assert_eq!(ops_of(&lab), ops, "a clean snapshot recorded an operation");
+    let info = lab.so(&["ws", "info", "--ws", "w1"]).ok();
+    assert!(info.get("snapshot").is_none(), "{info}");
+}
+
+/// A snapshot cut short after it was recorded leaves its pending record: the next snapshot of
+/// the same edits answers `same` and removes it, so the other commands are not held by it.
+#[test]
+fn a_same_snapshot_drops_a_cut_snapshot_record() {
+    // 1. A snapshot; then the record a kill after its `snapshot.json` leaves.
+    let lab = Lab::new();
+    let dir = lab.workspace("w1");
+    write(&dir, "README.md", "# edited\n");
+    let first = inside(&dir, &["ws", "snapshot"]).ok();
+    let record = dir.join(".swarmws/journal/pending.json");
+    let cut = json!({
+        "op": "snapshot",
+        "key": "0190f5e2-0000-7000-8000-000000000000",
+        "head": main_of(&lab),
+        "attempt": 1,
+        "state": "snapshotting",
+        "edits": "x",
+    });
+    fs::write(&record, cut.to_string()).unwrap();
+
+    // 2. The same snapshot again: nothing written, the record gone, a commit goes through.
+    let again = inside(&dir, &["ws", "snapshot", "--status-after", "none"]).ok();
+    assert_eq!(again["snapshot"], first["snapshot"], "{again}");
+    assert!(!record.exists(), "the cut snapshot's record stayed");
+    inside(&dir, &["ws", "commit", "-m", "edit"]).ok();
+}

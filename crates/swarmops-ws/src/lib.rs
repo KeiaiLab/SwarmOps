@@ -18,9 +18,9 @@
 //!
 //! One function per operation, each `(&Ctx, request) -> Result<response, OpError>`:
 //! [`create()`], [`status()`], [`diff()`], [`commit()`], [`rebase()`], [`resolve()`],
-//! [`land()`], [`materialize()`], [`discard()`], [`list()`], [`info()`] and [`delete()`]. The
-//! crate reads no environment variable: what the CLI reads from the environment arrives in
-//! [`Ctx`] or as an argument.
+//! [`land()`], [`materialize()`], [`discard()`], [`snapshot()`], [`list()`], [`info()`] and
+//! [`delete()`]. The crate reads no environment variable: what the CLI reads from the
+//! environment arrives in [`Ctx`] or as an argument.
 //!
 //! The M5 plan's task W1 froze these names; its later tasks write the bodies, which until then
 //! fail with `E_INVALID_ARG` naming the task.
@@ -70,6 +70,7 @@ pub use list::list;
 pub use materialize::materialize;
 pub use rebase::rebase;
 pub use resolve::resolve;
+pub use snapshot::snapshot;
 pub use status::status;
 pub use swarmops_store::{FsOps, RealFs};
 pub use workspace::{Found, Locate, Workspace};

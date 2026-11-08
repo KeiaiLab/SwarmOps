@@ -17,6 +17,16 @@
 //!
 //! `.swarmws/snapshot.json` `{format: 1, head, snapshot, edits, at}` names the latest snapshot,
 //! replaced whole; one this build cannot read is no snapshot, and the next one is new.
+//!
+//! `ws snapshot` (the M19 design §5) takes one on demand, under the workspace's lock:
+//!
+//! ```text
+//!  lock → not rebasing, files of the head → scan → Clean | Same: nothing written (a cut
+//!         snapshot's record dropped)
+//!       → journal/pending.json {op: snapshot, key, edits: D(E)} (WS1; a cut record of the same
+//!         edits on this head gives its key, so that the store replays its commit)
+//!       → take → the record removed
+//! ```
 
 use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -25,18 +35,20 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 use swarmops_api::{
-    ChangeInput, ChangeOp, ContentInput, DiffFormat, DiffReq, EntryKindOut, ModeInput, OpError,
-    TreeEntryOut,
+    ChangeInput, ChangeOp, ContentInput, DiffFormat, DiffReq, EntryKindOut, ErrorCode, ModeInput,
+    OpError, SnapshotWrite, TreeEntryOut, WsSnapshotReq, WsSnapshotResp,
 };
 use swarmops_core::ObjectId;
 use swarmops_merge::conflict::ContentMerge;
 use swarmops_merge::diff3;
 
 use crate::materialize::{self, Tree};
+use crate::pending::{self, Pending, PendingOp};
 use crate::rebase;
 use crate::scan::{self, Change, Keep, Want};
-use crate::workspace::Workspace;
-use crate::{Ctx, commit};
+use crate::state::State;
+use crate::workspace::{self, Locate, Workspace};
+use crate::{Ctx, after, commit};
 
 /// The latest snapshot's record, in `.swarmws/`.
 pub(crate) const SNAPSHOT_JSON: &str = "snapshot.json";
@@ -49,6 +61,9 @@ const MESSAGE: &str = "snapshot of the workspace's edits";
 
 /// The entries one `diff` page asks for.
 const PAGE: usize = 1000;
+
+/// The state of `ws snapshot`'s pending record.
+const SNAPSHOTTING: &str = "snapshotting";
 
 /// What [`take`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,20 +133,140 @@ pub(crate) fn scan(ctx: &Ctx<'_>, ws: &Workspace) -> Result<Found, OpError> {
 /// has made `scanned.key` durable.
 pub(crate) fn take(ctx: &Ctx<'_>, ws: &Workspace, scanned: &Found) -> Result<Taken, OpError> {
     // 1. None, or those of the latest snapshot on this head: nothing written.
-    if scanned.changes.is_empty() {
-        return Ok(Taken::Clean);
-    }
-    if let Some(latest) = latest(ctx, ws)
-        && latest.head == ws.file.head
-        && latest.edits == scanned.digest
-    {
-        return Ok(Taken::Same(latest.snapshot));
+    if let Some(taken) = unwritten(ctx, ws, scanned) {
+        return Ok(taken);
     }
 
     // 2. The keyed commit on the head; then the record names it.
     let id = commit::record(ctx, ws, &scanned.changes, MESSAGE, &scanned.key)?;
     write_latest(ctx, ws, &ws.file.head, &id, &scanned.digest)?;
     Ok(Taken::New(id))
+}
+
+/// What [`take`] makes of the edits `scanned` of workspace `ws` without writing: none is
+/// `Clean`, those the latest snapshot holds on this head are `Same`; else none.
+fn unwritten(ctx: &Ctx<'_>, ws: &Workspace, scanned: &Found) -> Option<Taken> {
+    if scanned.changes.is_empty() {
+        return Some(Taken::Clean);
+    }
+    let latest = latest(ctx, ws)?;
+    (latest.head == ws.file.head && latest.edits == scanned.digest)
+        .then_some(Taken::Same(latest.snapshot))
+}
+
+/// `ws_snapshot`: the edits of the workspace `req` names, recorded as a changeset on its head
+/// that moves no ref, unless there are none or its latest snapshot holds them on this head.
+/// The workspace's head, files and refs stay as they are.
+pub fn snapshot(ctx: &Ctx<'_>, req: WsSnapshotReq) -> Result<WsSnapshotResp, OpError> {
+    // 1. The workspace under its lock: not rebasing, its files those of its head.
+    let WsSnapshotReq {
+        workspace,
+        status_after,
+        ..
+    } = req;
+    let (ws, _held) = workspace::open_locked(ctx, &Locate::Name(workspace))?;
+    refuse_unsettled(&ws)?;
+
+    // 2. The edits; nothing written for none, or for those of the latest snapshot, but the
+    //    record of a snapshot cut short after it was recorded, which would hold every other
+    //    command.
+    let found = scan(ctx, &ws)?;
+    let taken = match unwritten(ctx, &ws, &found) {
+        Some(taken) => {
+            drop_cut(ctx, &ws)?;
+            taken
+        }
+        None => recorded(ctx, &ws, found)?,
+    };
+
+    // 3. The answer, then the status after it.
+    let mut out = match taken {
+        Taken::New(id) => WsSnapshotResp::new(Some(id), SnapshotWrite::New),
+        Taken::Same(id) => WsSnapshotResp::new(Some(id), SnapshotWrite::Same),
+        Taken::Clean => WsSnapshotResp::new(None, SnapshotWrite::Clean),
+    };
+    out.status_after = after::attach(ctx, &ws, status_after);
+    Ok(out)
+}
+
+/// The latest snapshot of workspace `ws`, on whichever head it was taken: what `ws info`
+/// reports.
+pub(crate) fn latest_id(ctx: &Ctx<'_>, ws: &Workspace) -> Option<String> {
+    latest(ctx, ws).map(|latest| latest.snapshot)
+}
+
+/// Refuses a snapshot of workspace `ws` while it rebases, as `ws commit` does, and while its
+/// files stand for another changeset than its head, whose edits are not the head's.
+fn refuse_unsettled(ws: &Workspace) -> Result<(), OpError> {
+    if let State::Rebasing { .. } = ws.file.state {
+        return Err(OpError::new(
+            ErrorCode::UnresolvedConflicts,
+            "the workspace is rebasing: finish the rebase before taking a snapshot",
+        )
+        .with_hint("swarmops ws rebase --continue, or swarmops ws rebase --abort"));
+    }
+    if ws.file.materialized != ws.file.head {
+        return Err(OpError::new(
+            ErrorCode::InvalidArg,
+            "the workspace's files stand for another changeset than its head: nothing to snapshot",
+        ));
+    }
+    Ok(())
+}
+
+/// Takes the snapshot of the edits `found` of workspace `ws` behind a pending record of its own,
+/// durable before the store call (WS1): a cut record of the same edits on this head gives its
+/// key, so that the store replays its commit. The record goes once the snapshot is taken, or
+/// when the store refused it outright.
+fn recorded(ctx: &Ctx<'_>, ws: &Workspace, mut found: Found) -> Result<Taken, OpError> {
+    // 1. The key: a cut snapshot's of the same edits on this head, else the new one.
+    let fs = ctx.fs.as_ref();
+    let cut = rebase::cut_short(ctx, ws, PendingOp::Snapshot, SNAPSHOTTING)?;
+    if let Some(cut) = cut.filter(|cut| cut.edits.as_deref() == Some(found.digest.as_str())) {
+        found.key = cut.key;
+    }
+
+    // 2. The record, durable before the store hears of the commit.
+    let record = Pending {
+        op: PendingOp::Snapshot,
+        key: found.key.clone(),
+        rebase_key: None,
+        head: ws.file.head.clone(),
+        target: None,
+        attempt: 1,
+        state: SNAPSHOTTING.to_owned(),
+        snapshot_key: None,
+        edits: Some(found.digest.clone()),
+        snapshot: None,
+        edits_key: None,
+    };
+    pending::write_pending(fs, &ws.dir, &record)?;
+
+    // 3. The snapshot; a refusal wrote nothing, so its record has nothing to replay.
+    let taken = match take(ctx, ws, &found) {
+        Err(e) if refused(&e) => {
+            pending::remove_pending(fs, &ws.dir)?;
+            return Err(e);
+        }
+        taken => taken?,
+    };
+    pending::remove_pending(fs, &ws.dir)?;
+    Ok(taken)
+}
+
+/// Removes the pending record of a snapshot cut short in workspace `ws`: when the edits are
+/// none or the latest snapshot's, a re-run has nothing of it to replay.
+fn drop_cut(ctx: &Ctx<'_>, ws: &Workspace) -> Result<(), OpError> {
+    let fs = ctx.fs.as_ref();
+    match pending::read_pending(fs, &ws.dir)? {
+        Some(cut) if cut.op == PendingOp::Snapshot => pending::remove_pending(fs, &ws.dir),
+        _ => Ok(()),
+    }
+}
+
+/// Whether the store, or the size check before it, refused a snapshot's commit outright.
+fn refused(e: &OpError) -> bool {
+    rebase::refused(e) || e.code == ErrorCode::TooLarge.as_str()
 }
 
 /// The digest of `changes`: BLAKE3 over each one's path, kind and blob (none for a removal), in

@@ -2699,6 +2699,48 @@ expression: golden.transcript()
                 "destructiveHint": false,
                 "idempotentHint": true,
                 "openWorldHint": false,
+                "readOnlyHint": false
+              },
+              "description": "Records a workspace's edits as a changeset on its head that moves no ref, readable by id from any process; the workspace stays as it is, and the same edits again write nothing (written same).",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`ws_snapshot` (client-side): record a workspace's edits as a changeset on its head, which\nmoves no ref and leaves the workspace as it is.",
+                "properties": {
+                  "status_after": {
+                    "default": "page",
+                    "description": "Whether the response carries the status after the mutation. Whether a workspace mutation's response carries the workspace's status after it.",
+                    "oneOf": [
+                      {
+                        "const": "page",
+                        "description": "The first page of the status, up to 100 changes.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "none",
+                        "description": "No status.",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "workspace": {
+                    "description": "The workspace, by name.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "workspace"
+                ],
+                "title": "WsSnapshotReq",
+                "type": "object"
+              },
+              "name": "ws_snapshot",
+              "title": "Snapshot a workspace's edits"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
                 "readOnlyHint": true
               },
               "description": "The store's workspaces, from its registry; with check, a workspace whose directory is gone is reported as an orphan.",

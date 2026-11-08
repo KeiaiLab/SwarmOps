@@ -135,6 +135,7 @@ Work in a directory of your own: a workspace holds a sparse copy of a changeset'
 - [`swarmops ws land`](commands/ws-land.md): Land a workspace's chain on its target; with --check, rebase, check and land the checked tree.
 - [`swarmops ws materialize`](commands/ws-materialize.md): Write out more of a workspace's tree: the paths join its prefixes.
 - [`swarmops ws discard`](commands/ws-discard.md): Restore paths of a workspace from its head, every changed one without a PATH: the edits are lost.
+- [`swarmops ws snapshot`](commands/ws-snapshot.md): Record a workspace's edits as a changeset on its head, which moves no ref.
 - [`swarmops ws list`](commands/ws-list.md): List the store's workspaces.
 - [`swarmops ws info`](commands/ws-info.md): Describe one workspace: its directory, base, head and prefixes.
 - [`swarmops ws delete`](commands/ws-delete.md): Remove a workspace's directory, then its entry.

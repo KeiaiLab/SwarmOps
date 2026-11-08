@@ -1,4 +1,4 @@
-//! The workspace tools of `swarmops mcp` (M5): eleven tools, one per workspace operation but
+//! The workspace tools of `swarmops mcp` (M5): twelve tools, one per workspace operation but
 //! `ws_delete`, which removes a directory tree (an agent ends its own workspace by landing it,
 //! and the hook adapter removes it). Each names its workspace by `workspace`, a registry name,
 //! and runs the `swarmops_ws` function of its name on the store the server opens for the call.
@@ -22,7 +22,7 @@ use camino::Utf8Path;
 use serde_json::{Value, json};
 use swarmops_api::{
     Identity, StoreOps, WsCommitReq, WsCreateReq, WsDiffReq, WsDiscardReq, WsInfoReq, WsLandReq,
-    WsListReq, WsMaterializeReq, WsRebaseReq, WsResolveReq, WsStatusReq,
+    WsListReq, WsMaterializeReq, WsRebaseReq, WsResolveReq, WsSnapshotReq, WsStatusReq,
 };
 use swarmops_ws::Ctx as WsCtx;
 
@@ -30,7 +30,7 @@ use super::{Named, Operate, Refuse};
 use crate::commands::ws;
 
 /// The workspace tools, in the order `tools/list` gives them, after the store's.
-pub(super) static WS_TOOLS: [WsSpec; 11] = [
+pub(super) static WS_TOOLS: [WsSpec; 12] = [
     WsSpec {
         tool: WsTool::Create,
         name: "ws_create",
@@ -110,6 +110,15 @@ pub(super) static WS_TOOLS: [WsSpec; 11] = [
                       is given; the edits are lost.",
     },
     WsSpec {
+        tool: WsTool::Snapshot,
+        name: "ws_snapshot",
+        request: "WsSnapshotReq",
+        title: "Snapshot a workspace's edits",
+        description: "Records a workspace's edits as a changeset on its head that moves no ref, \
+                      readable by id from any process; the workspace stays as it is, and the \
+                      same edits again write nothing (written same).",
+    },
+    WsSpec {
         tool: WsTool::List,
         name: "ws_list",
         request: "WsListReq",
@@ -160,6 +169,7 @@ pub(super) enum WsTool {
     Land,
     Materialize,
     Discard,
+    Snapshot,
     List,
     Info,
 }
@@ -173,8 +183,10 @@ impl WsTool {
             // A commit run again records another changeset, or finds nothing to commit.
             WsTool::Commit => (false, false, false),
             // Run again with the same arguments, each finds its work done: the same workspace,
-            // a rebase up to date, paths resolved or materialised, the change landed.
+            // a rebase up to date, paths resolved or materialised, the change landed, the edits
+            // snapshotted.
             WsTool::Create
+            | WsTool::Snapshot
             | WsTool::Rebase
             | WsTool::Resolve
             | WsTool::Land
@@ -223,6 +235,9 @@ pub(super) fn operate_ws<O: Operate>(tool: WsTool, how: O) -> O::Done {
         WsTool::Discard => how.workspace(|store, root, who, _, req| {
             swarmops_ws::discard(&ws_ctx(store, root, who), req)
         }),
+        WsTool::Snapshot => how.workspace(|store, root, who, _, req| {
+            swarmops_ws::snapshot(&ws_ctx(store, root, who), req)
+        }),
         WsTool::List => how.workspace(|store, root, who, _, req| {
             swarmops_ws::list(&ws_ctx(store, root, who), req)
         }),
@@ -249,6 +264,7 @@ impl Refuse for WsResolveReq {}
 impl Refuse for WsLandReq {}
 impl Refuse for WsMaterializeReq {}
 impl Refuse for WsDiscardReq {}
+impl Refuse for WsSnapshotReq {}
 impl Refuse for WsListReq {}
 impl Refuse for WsInfoReq {}
 
@@ -263,7 +279,7 @@ mod tests {
     /// One tool per workspace operation but `ws_delete`, each running the function of its name
     /// on the store the server opens, with the root it opened it at.
     #[test]
-    fn the_ws_tools_are_the_eleven_workspace_operations() {
+    fn the_ws_tools_are_the_twelve_workspace_operations() {
         // 1. One tool per Ws*Req, but WsDeleteReq.
         let all = swarmops_api::schema_for_all();
         let requests: BTreeSet<&str> = all
@@ -276,7 +292,7 @@ mod tests {
             .collect();
         let advertised: BTreeSet<&str> = WS_TOOLS.iter().map(|spec| spec.request).collect();
         assert_eq!(advertised, requests, "one tool per workspace request type");
-        assert_eq!(WS_TOOLS.len(), 11);
+        assert_eq!(WS_TOOLS.len(), 12);
 
         // 2. Each arm runs the function of its name, which answers as it does on a store
         //    without workspaces.
@@ -306,6 +322,7 @@ mod tests {
             | WsTool::Diff
             | WsTool::Commit
             | WsTool::Discard
+            | WsTool::Snapshot
             | WsTool::Rebase
             | WsTool::Resolve
             | WsTool::Land => r#"the store has no workspace named "probe""#,

@@ -10125,6 +10125,28 @@ expression: s.redact(&all)
       "title": "Signatures",
       "type": "object"
     },
+    "SnapshotWrite": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "What a `ws_snapshot` wrote.",
+      "oneOf": [
+        {
+          "const": "new",
+          "description": "A new changeset holds the edits.",
+          "type": "string"
+        },
+        {
+          "const": "same",
+          "description": "The latest snapshot holds these edits on this head already: nothing written.",
+          "type": "string"
+        },
+        {
+          "const": "clean",
+          "description": "No edits: nothing written.",
+          "type": "string"
+        }
+      ],
+      "title": "SnapshotWrite"
+    },
     "StatusAfter": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "Whether a workspace mutation's response carries the workspace's status after it.",
@@ -12256,6 +12278,13 @@ expression: s.redact(&all)
           },
           "type": "array"
         },
+        "snapshot": {
+          "description": "Its latest snapshot (`ws_snapshot`, or an update's), on whichever head it was taken;\n`ws_info` only, omitted when there is none.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "status_after": {
           "anyOf": [
             {
@@ -12814,6 +12843,13 @@ expression: s.redact(&all)
                 "type": "string"
               },
               "type": "array"
+            },
+            "snapshot": {
+              "description": "Its latest snapshot (`ws_snapshot`, or an update's), on whichever head it was taken;\n`ws_info` only, omitted when there is none.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "status_after": {
               "anyOf": [
@@ -13915,6 +13951,273 @@ expression: s.redact(&all)
         "remaining"
       ],
       "title": "WsResolveResp",
+      "type": "object"
+    },
+    "WsSnapshotReq": {
+      "$defs": {
+        "StatusAfter": {
+          "description": "Whether a workspace mutation's response carries the workspace's status after it.",
+          "oneOf": [
+            {
+              "const": "page",
+              "description": "The first page of the status, up to 100 changes.",
+              "type": "string"
+            },
+            {
+              "const": "none",
+              "description": "No status.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ws_snapshot` (client-side): record a workspace's edits as a changeset on its head, which\nmoves no ref and leaves the workspace as it is.",
+      "properties": {
+        "status_after": {
+          "$ref": "#/$defs/StatusAfter",
+          "default": "page",
+          "description": "Whether the response carries the status after the mutation."
+        },
+        "workspace": {
+          "description": "The workspace, by name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace"
+      ],
+      "title": "WsSnapshotReq",
+      "type": "object"
+    },
+    "WsSnapshotResp": {
+      "$defs": {
+        "SnapshotWrite": {
+          "description": "What a `ws_snapshot` wrote.",
+          "oneOf": [
+            {
+              "const": "new",
+              "description": "A new changeset holds the edits.",
+              "type": "string"
+            },
+            {
+              "const": "same",
+              "description": "The latest snapshot holds these edits on this head already: nothing written.",
+              "type": "string"
+            },
+            {
+              "const": "clean",
+              "description": "No edits: nothing written.",
+              "type": "string"
+            }
+          ]
+        },
+        "WsChange": {
+          "description": "One changed path of a workspace.",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/WsChangeKind",
+              "description": "What changed."
+            },
+            "path": {
+              "description": "The repository path.",
+              "type": "string"
+            },
+            "size": {
+              "description": "The file's size now; omitted for a deleted path.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "path",
+            "kind"
+          ],
+          "type": "object"
+        },
+        "WsChangeKind": {
+          "description": "What changed at a workspace path.",
+          "oneOf": [
+            {
+              "const": "added",
+              "description": "A file the head does not hold.",
+              "type": "string"
+            },
+            {
+              "const": "modified",
+              "description": "Its content changed.",
+              "type": "string"
+            },
+            {
+              "const": "deleted",
+              "description": "It is gone.",
+              "type": "string"
+            },
+            {
+              "const": "type_changed",
+              "description": "A file became a symlink, or the other way round.",
+              "type": "string"
+            },
+            {
+              "const": "mode_changed",
+              "description": "Its executable bit changed.",
+              "type": "string"
+            }
+          ]
+        },
+        "WsRebasing": {
+          "description": "A workspace's rebase in progress.",
+          "properties": {
+            "conflicts": {
+              "description": "The paths that still conflict.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "onto": {
+              "description": "The target's head it rebases onto.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "onto",
+            "conflicts"
+          ],
+          "type": "object"
+        },
+        "WsState": {
+          "description": "A workspace's state.",
+          "oneOf": [
+            {
+              "const": "clean",
+              "description": "No rebase in progress.",
+              "type": "string"
+            },
+            {
+              "const": "rebasing",
+              "description": "A rebase stopped on conflicts.",
+              "type": "string"
+            }
+          ]
+        },
+        "WsStatus": {
+          "description": "A workspace's status: its changes against its head, a page at a time, and how far its target\nhas moved since its base.",
+          "properties": {
+            "base": {
+              "description": "The target's changeset its chain starts from.",
+              "type": "string"
+            },
+            "behind_by": {
+              "description": "How many changesets the target's first-parent history holds that `base`'s lacks: those\npast `base` when it is on that history; otherwise (a sync dropped it, or the target moved\nback) those before where the two histories meet, 0 when the target head is on `base`'s\nfirst-parent history fewer than 10,000 changesets behind `base`. At most 10,000.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "changes": {
+              "description": "The changes, by path.",
+              "items": {
+                "$ref": "#/$defs/WsChange"
+              },
+              "type": "array"
+            },
+            "cursor": {
+              "description": "Where this page stopped.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "head": {
+              "description": "Its chain's last changeset.",
+              "type": "string"
+            },
+            "main": {
+              "description": "The head of the workspace's target ref (`main`, or `release/<name>`), read first.",
+              "type": "string"
+            },
+            "name": {
+              "description": "The workspace's name.",
+              "type": "string"
+            },
+            "outside": {
+              "description": "A sparse workspace's topmost entries off its prefixes, in path order: edits `ws commit`\nand `ws land` refuse until `ws materialize` widens the prefixes. At most the first 1,000,\non every page.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "outside_truncated": {
+              "description": "Whether `outside` stopped at 1,000 entries.",
+              "type": "boolean"
+            },
+            "rebasing": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WsRebasing"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The rebase in progress, when `state` is `rebasing`."
+            },
+            "state": {
+              "$ref": "#/$defs/WsState",
+              "description": "Whether the workspace is rebasing."
+            },
+            "truncated": {
+              "description": "Whether more changes follow: give `cursor` to read them.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "name",
+            "base",
+            "head",
+            "main",
+            "behind_by",
+            "state",
+            "changes",
+            "truncated"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ws_snapshot`: the changeset that holds the edits.",
+      "properties": {
+        "snapshot": {
+          "description": "The snapshot, readable by id from any process; omitted when there were no edits.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status_after": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WsStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The status after the mutation; omitted when the request said `none`."
+        },
+        "written": {
+          "$ref": "#/$defs/SnapshotWrite",
+          "description": "Whether this call wrote it."
+        }
+      },
+      "required": [
+        "written"
+      ],
+      "title": "WsSnapshotResp",
       "type": "object"
     },
     "WsState": {

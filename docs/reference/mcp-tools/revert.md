@@ -141,7 +141,7 @@ Its entry in `tools/list` carries no `_meta`.
 
 ```json
 {
-  "id": 39,
+  "id": 40,
   "jsonrpc": "2.0",
   "method": "tools/call",
   "params": {
@@ -157,12 +157,12 @@ Its entry in `tools/list` carries no `_meta`.
 
 ```json
 {
-  "id": 39,
+  "id": 40,
   "jsonrpc": "2.0",
   "result": {
     "content": [
       {
-        "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[theirs]\":\"[theirs]\",\"main\":\"[id14]\"}},\"ok\":true,\"op\":\"revert\",\"result\":{\"land\":{\"attempts\":1,\"base\":\"[theirs]\",\"files_changed\":1,\"landed\":\"[reverted]\",\"rebased_onto\":\"[id14]\",\"relocated\":false,\"squashed_from\":[\"[id15]\"],\"status\":\"landed\",\"target\":\"main\"},\"reverted\":[\"[theirs]\"]}}",
+        "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[theirs]\":\"[theirs]\",\"main\":\"[id15]\"}},\"ok\":true,\"op\":\"revert\",\"result\":{\"land\":{\"attempts\":1,\"base\":\"[theirs]\",\"files_changed\":1,\"landed\":\"[reverted]\",\"rebased_onto\":\"[id15]\",\"relocated\":false,\"squashed_from\":[\"[id16]\"],\"status\":\"landed\",\"target\":\"main\"},\"reverted\":[\"[theirs]\"]}}",
         "type": "text"
       }
     ],
@@ -175,7 +175,7 @@ Its entry in `tools/list` carries no `_meta`.
         "repo": "[tmp]/store",
         "resolved": {
           "[theirs]": "[theirs]",
-          "main": "[id14]"
+          "main": "[id15]"
         }
       },
       "ok": true,
@@ -186,10 +186,10 @@ Its entry in `tools/list` carries no `_meta`.
           "base": "[theirs]",
           "files_changed": 1,
           "landed": "[reverted]",
-          "rebased_onto": "[id14]",
+          "rebased_onto": "[id15]",
           "relocated": false,
           "squashed_from": [
-            "[id15]"
+            "[id16]"
           ],
           "status": "landed",
           "target": "main"

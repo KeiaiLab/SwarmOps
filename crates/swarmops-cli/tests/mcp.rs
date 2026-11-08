@@ -56,7 +56,7 @@ type Startup<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)]);
 /// The tools, one per `StoreOps` operation and then one per client-side operation of the git
 /// remotes (M13), in the order `tools/list` gives them, each with the request type its arguments
 /// are.
-const TOOLS: [(&str, &str); 42] = [
+const TOOLS: [(&str, &str); 43] = [
     ("repo_info", "InfoReq"),
     ("resolve_rev", "ResolveRevReq"),
     ("read_file", "ReadFileReq"),
@@ -97,6 +97,7 @@ const TOOLS: [(&str, &str); 42] = [
     ("ws_land", "WsLandReq"),
     ("ws_materialize", "WsMaterializeReq"),
     ("ws_discard", "WsDiscardReq"),
+    ("ws_snapshot", "WsSnapshotReq"),
     ("ws_list", "WsListReq"),
     ("ws_info", "WsInfoReq"),
 ];
@@ -463,12 +464,13 @@ fn workspace_calls(golden: &mut Golden, tmp: &Path, landed: &str) {
         json!({"workspace": "ws1", "message": "mine", "status_after": "none"}),
     );
 
-    // 2. More of the tree written out; an edit there is lost on purpose.
+    // 2. More of the tree written out; an edit there snapshotted, then lost on purpose.
     golden.ok(
         "ws_materialize",
         json!({"workspace": "ws1", "paths": ["docs.md"]}),
     );
     fs::write(dir.join("docs.md"), "scribbles\n").unwrap();
+    golden.ok("ws_snapshot", json!({"workspace": "ws1"}));
     golden.ok(
         "ws_discard",
         json!({"workspace": "ws1", "paths": ["docs.md"]}),
@@ -2700,7 +2702,7 @@ fn check_tool(name: &str, request: &str, tool: &Value, all: &Value) {
         "commit" | "rebase" | "blob_put" | "ws_commit" => (false, false, false, false),
         // A land and a revert, and the workspaces' that find their work done when run again (M5).
         "land" | "revert" | "ws_create" | "ws_rebase" | "ws_resolve" | "ws_land"
-        | "ws_materialize" => (false, false, true, false),
+        | "ws_materialize" | "ws_snapshot" => (false, false, true, false),
         // A workspace's discard (M5) overwrites edits as these overwrite refs, and the
         // maintenance (M6) removes or replaces store files; run again, each finds its work done.
         "ref_set" | "ref_delete" | "undo" | "ws_discard" | "gc" | "repair" | "upgrade" => {

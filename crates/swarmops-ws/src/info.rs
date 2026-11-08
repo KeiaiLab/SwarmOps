@@ -8,7 +8,7 @@ use swarmops_api::{Identity, OpError, StatusAfter, WsInfo, WsInfoReq};
 use crate::list;
 use crate::registry::Registry;
 use crate::workspace::{self, Locate, Workspace};
-use crate::{Ctx, after};
+use crate::{Ctx, after, snapshot};
 
 /// `ws_info`: the workspace `req` names, with its status. `E_WS_NOT_FOUND` for a name the
 /// registry does not hold, or a workspace whose state is gone.
@@ -27,13 +27,15 @@ pub fn info(ctx: &Ctx<'_>, req: WsInfoReq) -> Result<WsInfo, OpError> {
         None => Identity::parse(&found.file.created_by)?,
     };
 
-    // 3. What it holds, and its status through the one function that builds it.
+    // 3. What it holds, its latest snapshot, and its status through the one function that
+    //    builds it.
     let mut info = list::described(&name, &found.dir, &found.file);
     let ws = Workspace {
         dir: found.dir,
         file: found.file,
         who,
     };
+    info.snapshot = snapshot::latest_id(ctx, &ws);
     info.status_after = after::attach(ctx, &ws, StatusAfter::Page);
     Ok(info)
 }

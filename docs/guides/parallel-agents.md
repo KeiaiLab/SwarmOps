@@ -290,7 +290,7 @@ change that reverts it.
 ### Claude Code and MCP
 
 `swarmops mcp` serves 35 operations to an agent as MCP tools, among them `read_file`, `commit`,
-`land` and the eleven workspace tools. Register it with Claude Code:
+`land` and the twelve workspace tools. Register it with Claude Code:
 `claude mcp add swarmops -- so mcp --repo <store> --as <agent>`. By default Claude Code starts one
 server per session and the session's subagents share it, so their commits are recorded for the
 session's agent. An agent that needs an identity of its own runs as its own Claude Code process,

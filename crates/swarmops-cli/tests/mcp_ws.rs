@@ -1,4 +1,4 @@
-//! The workspace tools of `swarmops mcp` (M5): eleven tools, each naming its workspace by
+//! The workspace tools of `swarmops mcp` (M5): twelve tools, each naming its workspace by
 //! `workspace`, the registry name, on the store and identity the server was started with.
 //!
 //! A small client of the stateless revision, 2026-07-28: each request names its version in
@@ -187,6 +187,30 @@ fn mcp_ws_tools_address_workspaces_by_name() {
         json!(["scratch.txt"]),
         "{discarded}"
     );
+}
+
+/// `ws_snapshot` records a workspace's edits by id, the same edits again write nothing, and
+/// `ws_info` names the snapshot (the M19 design §5).
+#[test]
+fn ws_snapshot_records_the_edits_by_id() {
+    // 1. A workspace with an edit; its snapshot, then the same again.
+    let lab = Lab::new();
+    let mut server = Client::start(&lab, &[]);
+    let dir = lab.workspace("w1");
+    write(&dir, "src/lib.rs", "pub fn f() { 1 }\n");
+    let taken = server.ok("ws_snapshot", json!({"workspace": "w1"}));
+    assert_eq!(taken["written"], "new", "{taken}");
+    assert_eq!(taken["status_after"]["changes"][0]["path"], "src/lib.rs");
+    let again = server.ok(
+        "ws_snapshot",
+        json!({"workspace": "w1", "status_after": "none"}),
+    );
+    assert_eq!(again["written"], "same", "{again}");
+    assert_eq!(again["snapshot"], taken["snapshot"], "{again}");
+
+    // 2. `ws_info` names it.
+    let info = server.ok("ws_info", json!({"workspace": "w1"}));
+    assert_eq!(info["snapshot"], taken["snapshot"], "{info}");
 }
 
 /// `ws_create` without `path` makes the workspace named after it in the server's working

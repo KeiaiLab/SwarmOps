@@ -30,6 +30,7 @@ use swarmops_api::{
     WsMaterializeResp, WsRebaseReq, WsRebaseResp, WsRebasing, WsResolveReq, WsResolveResp, WsState,
     WsStatus, WsStatusReq,
 };
+use swarmops_api::{SnapshotWrite, WsSnapshotReq, WsSnapshotResp};
 
 /// `built`, written as JSON, cut to its schema's required fields and read back, is unchanged.
 #[track_caller]
@@ -98,6 +99,7 @@ fn every_request_new_fills_the_serde_defaults() {
     reads_back(&WsMaterializeReq::new("x", Vec::new()));
     reads_back(&WsRebaseReq::new("x"));
     reads_back(&WsResolveReq::new("x"));
+    reads_back(&WsSnapshotReq::new("x"));
     reads_back(&WsStatusReq::new("x"));
 }
 
@@ -181,6 +183,7 @@ fn every_response_new_fills_the_serde_defaults() {
     reads_back(&WsMaterializeResp::new(Vec::new(), 7));
     reads_back(&WsRebaseResp::new("x", "x"));
     reads_back(&WsResolveResp::new(Vec::new(), Vec::new()));
+    reads_back(&WsSnapshotResp::new(None, SnapshotWrite::Clean));
 }
 
 /// The `*Out` items of responses and the envelope.

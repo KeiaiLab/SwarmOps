@@ -3875,6 +3875,10 @@ pub struct WsInfo {
     /// The status after the mutation; omitted when the request said `none`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status_after: Option<WsStatus>,
+    /// Its latest snapshot (`ws_snapshot`, or an update's), on whichever head it was taken;
+    /// `ws_info` only, omitted when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<String>,
 }
 
 impl WsInfo {
@@ -3895,6 +3899,7 @@ impl WsInfo {
             created: false,
             orphan: false,
             status_after: None,
+            snapshot: None,
         }
     }
 }
@@ -4511,6 +4516,66 @@ impl WsDiscardResp {
     pub fn new(discarded: Vec<String>) -> Self {
         Self {
             discarded,
+            status_after: None,
+        }
+    }
+}
+
+/// `ws_snapshot` (client-side): record a workspace's edits as a changeset on its head, which
+/// moves no ref and leaves the workspace as it is.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct WsSnapshotReq {
+    /// The workspace, by name.
+    pub workspace: String,
+    /// Whether the response carries the status after the mutation.
+    #[serde(default)]
+    pub status_after: StatusAfter,
+}
+
+impl WsSnapshotReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(workspace: impl Into<String>) -> Self {
+        Self {
+            workspace: workspace.into(),
+            status_after: StatusAfter::default(),
+        }
+    }
+}
+
+/// What a `ws_snapshot` wrote.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SnapshotWrite {
+    /// A new changeset holds the edits.
+    New,
+    /// The latest snapshot holds these edits on this head already: nothing written.
+    Same,
+    /// No edits: nothing written.
+    Clean,
+}
+
+/// `ws_snapshot`: the changeset that holds the edits.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct WsSnapshotResp {
+    /// The snapshot, readable by id from any process; omitted when there were no edits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<String>,
+    /// Whether this call wrote it.
+    pub written: SnapshotWrite,
+    /// The status after the mutation; omitted when the request said `none`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_after: Option<WsStatus>,
+}
+
+impl WsSnapshotResp {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(snapshot: Option<String>, written: SnapshotWrite) -> Self {
+        Self {
+            snapshot,
+            written,
             status_after: None,
         }
     }

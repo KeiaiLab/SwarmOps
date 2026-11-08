@@ -417,6 +417,7 @@ expression: s.transcript()
             "Side",
             "SignatureOut",
             "Signatures",
+            "SnapshotWrite",
             "StatusAfter",
             "SyncMode",
             "SyncReq",
@@ -460,6 +461,8 @@ expression: s.transcript()
             "WsRebasing",
             "WsResolveReq",
             "WsResolveResp",
+            "WsSnapshotReq",
+            "WsSnapshotResp",
             "WsState",
             "WsStatus",
             "WsStatusReq"

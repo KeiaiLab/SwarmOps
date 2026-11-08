@@ -75,6 +75,7 @@ const REQUESTS: &[&str] = &[
     "WsMaterializeReq",
     "WsRebaseReq",
     "WsResolveReq",
+    "WsSnapshotReq",
     "WsStatusReq",
 ];
 
@@ -169,6 +170,7 @@ const RESPONSES: &[&str] = &[
     "WsRebaseResp",
     "WsRebasing",
     "WsResolveResp",
+    "WsSnapshotResp",
     "WsStatus",
 ];
 
@@ -199,6 +201,7 @@ const SCALARS: &[&str] = &[
     "RevKind",
     "ServeService",
     "Side",
+    "SnapshotWrite",
     "StatusAfter",
     "SyncMode",
     "SyncStatusKind",

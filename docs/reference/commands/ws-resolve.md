@@ -148,6 +148,7 @@ Any command that opens a store may also fail with a store error, such as [`E_NOT
 - [`swarmops ws land`](ws-land.md)
 - [`swarmops ws materialize`](ws-materialize.md)
 - [`swarmops ws discard`](ws-discard.md)
+- [`swarmops ws snapshot`](ws-snapshot.md)
 - [`swarmops ws list`](ws-list.md)
 - [`swarmops ws info`](ws-info.md)
 - [`swarmops ws delete`](ws-delete.md)

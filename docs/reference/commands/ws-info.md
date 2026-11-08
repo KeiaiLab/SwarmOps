@@ -96,6 +96,7 @@ No recorded example yet.
 | `orphan` | `boolean` | no | Whether its directory is gone while its entry stays (`ws_list` with `check`). |
 | `path` | `string` | yes | Its directory on the caller's host. |
 | `prefixes` | `array of string` | no | The repository paths written out. |
+| `snapshot` | `string or null` | no | Its latest snapshot (`ws_snapshot`, or an update's), on whichever head it was taken; `ws_info` only, omitted when there is none. |
 | `status_after` | `WsStatus or null` | no | The status after the mutation; omitted when the request said `none`. |
 
 Envelope `op`: `ws_info`.
@@ -122,6 +123,7 @@ Any command that opens a store may also fail with a store error, such as [`E_NOT
 - [`swarmops ws land`](ws-land.md)
 - [`swarmops ws materialize`](ws-materialize.md)
 - [`swarmops ws discard`](ws-discard.md)
+- [`swarmops ws snapshot`](ws-snapshot.md)
 - [`swarmops ws list`](ws-list.md)
 - [`swarmops ws delete`](ws-delete.md)
 - [`swarmops ws hook`](ws-hook.md)

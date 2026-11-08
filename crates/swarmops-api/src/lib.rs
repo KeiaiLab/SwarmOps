@@ -59,6 +59,7 @@ pub use ops::{RefLogEntryOut, RefLogPage, RefLogReq};
 pub use ops::{ResolutionInput, ResolutionsInput, Side};
 pub use ops::{ResolveRevReq, ResolvedRev, RevKind};
 pub use ops::{RevertReq, RevertResp};
+pub use ops::{SnapshotWrite, WsSnapshotReq, WsSnapshotResp};
 pub use remote::{
     BranchUpdate, CloneReq, CloneResp, DropReason, DroppedChange, FetchReq, FetchResp, HeadMove,
     PublishedChange, PushReq, PushResp, PushStatus, RemoteAddReq, RemoteHead, RemoteInfo,

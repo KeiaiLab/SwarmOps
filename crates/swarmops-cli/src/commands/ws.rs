@@ -22,7 +22,7 @@ use swarmops_api::{
     DiffFormat, ErrorCode, Identity, InfoReq, LandMode, ModeInput, OpError, Side, StatusAfter,
     StoreOps, WsCheckInput, WsCommitReq, WsCreateReq, WsDeleteReq, WsDiffReq, WsDiscardReq, WsInfo,
     WsInfoReq, WsLandReq, WsListReq, WsMaterializeReq, WsRebaseAction, WsRebaseReq, WsResolveReq,
-    WsStatusReq,
+    WsSnapshotReq, WsStatusReq,
 };
 use swarmops_ops::LocalOps;
 use swarmops_ws::hook::{self, Bootstrap, MAX_HOOK_INPUT};
@@ -270,6 +270,17 @@ fn run_tree(ctx: &Ctx<'_>, op: &'static str, command: WsCommand) -> Printed {
                 req
             },
             swarmops_ws::discard,
+        ),
+        WsCommand::Snapshot { at, after } => on_named(
+            ctx,
+            op,
+            at,
+            |workspace| {
+                let mut req = WsSnapshotReq::new(workspace);
+                req.status_after = status_after(after);
+                req
+            },
+            swarmops_ws::snapshot,
         ),
         other => unreachable!("{other:?} is run by another function of this module"),
     }

@@ -41,6 +41,8 @@ pub enum PendingOp {
     Rebase,
     /// `ws land`'s `land`, with its rebases under `--check`.
     Land,
+    /// `ws snapshot`'s `commit`, which moves nothing of the workspace.
+    Snapshot,
 }
 
 /// A mutation's store call in flight: written before the call, with the key the call uses, so

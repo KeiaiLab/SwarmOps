@@ -1082,6 +1082,16 @@ pub enum WsCommand {
         #[command(flatten)]
         after: WsAfter,
     },
+    /// Record a workspace's edits as a changeset on its head, which moves no ref.
+    ///
+    /// The workspace keeps its head, its files and its edits. The same edits on the same head
+    /// again write nothing and answer the same id; ws info names the latest.
+    Snapshot {
+        #[command(flatten)]
+        at: WsAt,
+        #[command(flatten)]
+        after: WsAfter,
+    },
     /// List the store's workspaces.
     List {
         /// Also open each, and report one whose directory is gone as an orphan.
@@ -1612,6 +1622,7 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["ws", "land"] => "ws_land",
         ["ws", "materialize"] => "ws_materialize",
         ["ws", "discard"] => "ws_discard",
+        ["ws", "snapshot"] => "ws_snapshot",
         ["ws", "list"] => "ws_list",
         ["ws", "info"] => "ws_info",
         ["ws", "delete"] => "ws_delete",
@@ -1773,10 +1784,10 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 56);
+        assert_eq!(ops.len(), 57);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 56, "two subcommands name one op");
+        assert_eq!(ops.len(), 57, "two subcommands name one op");
         assert_eq!(op_name(&["ref"]), None);
         assert_eq!(op_name(&["blob"]), None);
         assert_eq!(op_name(&["ws"]), None);

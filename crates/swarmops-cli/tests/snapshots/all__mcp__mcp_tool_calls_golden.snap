@@ -1693,6 +1693,66 @@ expression: transcript
         "method": "tools/call",
         "params": {
           "arguments": {
+            "workspace": "ws1"
+          },
+          "name": "ws_snapshot"
+        }
+      },
+      "response": {
+        "id": 31,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[id9]\":\"[id9]\",\"main\":\"[landed]\"}},\"ok\":true,\"op\":\"ws_snapshot\",\"result\":{\"snapshot\":\"[id10]\",\"status_after\":{\"base\":\"[landed]\",\"behind_by\":0,\"changes\":[{\"kind\":\"modified\",\"path\":\"docs.md\",\"size\":10}],\"head\":\"[id9]\",\"main\":\"[landed]\",\"name\":\"ws1\",\"state\":\"clean\",\"truncated\":false},\"written\":\"new\"}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "[id9]": "[id9]",
+                "main": "[landed]"
+              }
+            },
+            "ok": true,
+            "op": "ws_snapshot",
+            "result": {
+              "snapshot": "[id10]",
+              "status_after": {
+                "base": "[landed]",
+                "behind_by": 0,
+                "changes": [
+                  {
+                    "kind": "modified",
+                    "path": "docs.md",
+                    "size": 10
+                  }
+                ],
+                "head": "[id9]",
+                "main": "[landed]",
+                "name": "ws1",
+                "state": "clean",
+                "truncated": false
+              },
+              "written": "new"
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 32,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
             "paths": [
               "docs.md"
             ],
@@ -1702,7 +1762,7 @@ expression: transcript
         }
       },
       "response": {
-        "id": 31,
+        "id": 32,
         "jsonrpc": "2.0",
         "result": {
           "content": [
@@ -1746,7 +1806,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 32,
+        "id": 33,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -1768,12 +1828,12 @@ expression: transcript
         }
       },
       "response": {
-        "id": 32,
+        "id": 33,
         "jsonrpc": "2.0",
         "result": {
           "content": [
             {
-              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[landed]\":\"[landed]\"}},\"ok\":true,\"op\":\"commit\",\"result\":{\"advanced\":{\"already_applied\":false,\"name\":\"main\",\"new\":\"[id10]\",\"old\":\"[landed]\"},\"blobs_written\":1,\"changeset\":\"[id10]\",\"files_changed\":1,\"parent\":\"[landed]\",\"replayed\":false,\"root\":\"[id11]\"}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[landed]\":\"[landed]\"}},\"ok\":true,\"op\":\"commit\",\"result\":{\"advanced\":{\"already_applied\":false,\"name\":\"main\",\"new\":\"[id11]\",\"old\":\"[landed]\"},\"blobs_written\":1,\"changeset\":\"[id11]\",\"files_changed\":1,\"parent\":\"[landed]\",\"replayed\":false,\"root\":\"[id12]\"}}",
               "type": "text"
             }
           ],
@@ -1794,15 +1854,15 @@ expression: transcript
               "advanced": {
                 "already_applied": false,
                 "name": "main",
-                "new": "[id10]",
+                "new": "[id11]",
                 "old": "[landed]"
               },
               "blobs_written": 1,
-              "changeset": "[id10]",
+              "changeset": "[id11]",
               "files_changed": 1,
               "parent": "[landed]",
               "replayed": false,
-              "root": "[id11]"
+              "root": "[id12]"
             }
           }
         }
@@ -1810,7 +1870,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 33,
+        "id": 34,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -1821,12 +1881,12 @@ expression: transcript
         }
       },
       "response": {
-        "id": 33,
+        "id": 34,
         "jsonrpc": "2.0",
         "result": {
           "content": [
             {
-              "text": "{\"api\":1,\"error\":{\"code\":\"E_CONFLICT\",\"details\":{\"report\":{\"base\":\"[landed]\",\"files\":[{\"base_blob\":\"[id6]\",\"hunks\":[{\"base\":{\"first\":1,\"last\":1,\"text\":\"pub fn g() {}\\n\"},\"id\":0,\"ours\":{\"first\":1,\"last\":1,\"text\":\"pub fn mine() {}\\n\"},\"theirs\":{\"first\":1,\"last\":1,\"text\":\"pub fn theirs() {}\\n\"}}],\"kind\":\"content\",\"ours_blob\":\"[id8]\",\"path\":\"src/lib.rs\",\"theirs_agent\":\"agent/worker-17\",\"theirs_blob\":\"[id12]\",\"theirs_changeset\":\"[id10]\",\"theirs_changesets\":[{\"agent\":\"agent/worker-17\",\"changeset\":\"[id10]\"}]}],\"kinds\":[\"content\"],\"ours\":\"[id9]\",\"theirs\":\"[id10]\",\"truncated\":false}},\"exit\":3,\"hint\":\"swarmops cat [id10]:src/lib.rs, then swarmops land [id9] --resolve <file> (resolutions over MCP) with each path's resolution and against = [id10]\",\"message\":\"1 path(s) of the change conflict with the target's head [id10]: nothing was recorded\",\"retryable\":false},\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[id10]\":\"[id10]\",\"[id9]\":\"[id9]\",\"[landed]\":\"[landed]\",\"main\":\"[id10]\"}},\"ok\":false,\"op\":\"ws_rebase\"}",
+              "text": "{\"api\":1,\"error\":{\"code\":\"E_CONFLICT\",\"details\":{\"report\":{\"base\":\"[landed]\",\"files\":[{\"base_blob\":\"[id6]\",\"hunks\":[{\"base\":{\"first\":1,\"last\":1,\"text\":\"pub fn g() {}\\n\"},\"id\":0,\"ours\":{\"first\":1,\"last\":1,\"text\":\"pub fn mine() {}\\n\"},\"theirs\":{\"first\":1,\"last\":1,\"text\":\"pub fn theirs() {}\\n\"}}],\"kind\":\"content\",\"ours_blob\":\"[id8]\",\"path\":\"src/lib.rs\",\"theirs_agent\":\"agent/worker-17\",\"theirs_blob\":\"[id13]\",\"theirs_changeset\":\"[id11]\",\"theirs_changesets\":[{\"agent\":\"agent/worker-17\",\"changeset\":\"[id11]\"}]}],\"kinds\":[\"content\"],\"ours\":\"[id9]\",\"theirs\":\"[id11]\",\"truncated\":false}},\"exit\":3,\"hint\":\"swarmops cat [id11]:src/lib.rs, then swarmops land [id9] --resolve <file> (resolutions over MCP) with each path's resolution and against = [id11]\",\"message\":\"1 path(s) of the change conflict with the target's head [id11]: nothing was recorded\",\"retryable\":false},\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[id11]\":\"[id11]\",\"[id9]\":\"[id9]\",\"[landed]\":\"[landed]\",\"main\":\"[id11]\"}},\"ok\":false,\"op\":\"ws_rebase\"}",
               "type": "text"
             }
           ],
@@ -1865,12 +1925,12 @@ expression: transcript
                       "ours_blob": "[id8]",
                       "path": "src/lib.rs",
                       "theirs_agent": "agent/worker-17",
-                      "theirs_blob": "[id12]",
-                      "theirs_changeset": "[id10]",
+                      "theirs_blob": "[id13]",
+                      "theirs_changeset": "[id11]",
                       "theirs_changesets": [
                         {
                           "agent": "agent/worker-17",
-                          "changeset": "[id10]"
+                          "changeset": "[id11]"
                         }
                       ]
                     }
@@ -1879,13 +1939,13 @@ expression: transcript
                     "content"
                   ],
                   "ours": "[id9]",
-                  "theirs": "[id10]",
+                  "theirs": "[id11]",
                   "truncated": false
                 }
               },
               "exit": 3,
-              "hint": "swarmops cat [id10]:src/lib.rs, then swarmops land [id9] --resolve <file> (resolutions over MCP) with each path's resolution and against = [id10]",
-              "message": "1 path(s) of the change conflict with the target's head [id10]: nothing was recorded",
+              "hint": "swarmops cat [id11]:src/lib.rs, then swarmops land [id9] --resolve <file> (resolutions over MCP) with each path's resolution and against = [id11]",
+              "message": "1 path(s) of the change conflict with the target's head [id11]: nothing was recorded",
               "retryable": false
             },
             "meta": {
@@ -1893,10 +1953,10 @@ expression: transcript
               "elapsed_ms": "[elapsed_ms]",
               "repo": "[tmp]/store",
               "resolved": {
-                "[id10]": "[id10]",
+                "[id11]": "[id11]",
                 "[id9]": "[id9]",
                 "[landed]": "[landed]",
-                "main": "[id10]"
+                "main": "[id11]"
               }
             },
             "ok": false,
@@ -1907,7 +1967,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 34,
+        "id": 35,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -1921,12 +1981,12 @@ expression: transcript
         }
       },
       "response": {
-        "id": 34,
+        "id": 35,
         "jsonrpc": "2.0",
         "result": {
           "content": [
             {
-              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[id10]\":\"[id10]\",\"[id9]\":\"[id9]\",\"main\":\"[id10]\"}},\"ok\":true,\"op\":\"ws_resolve\",\"result\":{\"remaining\":[],\"resolved\":[\"src/lib.rs\"],\"status_after\":{\"base\":\"[landed]\",\"behind_by\":1,\"changes\":[{\"kind\":\"modified\",\"path\":\"src/lib.rs\",\"size\":17}],\"head\":\"[id9]\",\"main\":\"[id10]\",\"name\":\"ws1\",\"rebasing\":{\"conflicts\":[],\"onto\":\"[id10]\"},\"state\":\"rebasing\",\"truncated\":false}}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[id11]\":\"[id11]\",\"[id9]\":\"[id9]\",\"main\":\"[id11]\"}},\"ok\":true,\"op\":\"ws_resolve\",\"result\":{\"remaining\":[],\"resolved\":[\"src/lib.rs\"],\"status_after\":{\"base\":\"[landed]\",\"behind_by\":1,\"changes\":[{\"kind\":\"modified\",\"path\":\"src/lib.rs\",\"size\":17}],\"head\":\"[id9]\",\"main\":\"[id11]\",\"name\":\"ws1\",\"rebasing\":{\"conflicts\":[],\"onto\":\"[id11]\"},\"state\":\"rebasing\",\"truncated\":false}}}",
               "type": "text"
             }
           ],
@@ -1938,9 +1998,9 @@ expression: transcript
               "elapsed_ms": "[elapsed_ms]",
               "repo": "[tmp]/store",
               "resolved": {
-                "[id10]": "[id10]",
+                "[id11]": "[id11]",
                 "[id9]": "[id9]",
-                "main": "[id10]"
+                "main": "[id11]"
               }
             },
             "ok": true,
@@ -1961,11 +2021,11 @@ expression: transcript
                   }
                 ],
                 "head": "[id9]",
-                "main": "[id10]",
+                "main": "[id11]",
                 "name": "ws1",
                 "rebasing": {
                   "conflicts": [],
-                  "onto": "[id10]"
+                  "onto": "[id11]"
                 },
                 "state": "rebasing",
                 "truncated": false
@@ -1977,7 +2037,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 35,
+        "id": 36,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -1989,12 +2049,12 @@ expression: transcript
         }
       },
       "response": {
-        "id": 35,
+        "id": 36,
         "jsonrpc": "2.0",
         "result": {
           "content": [
             {
-              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[id10]\":\"[id10]\",\"[id13]\":\"[id13]\",\"[id9]\":\"[id9]\",\"[landed]\":\"[landed]\",\"main\":\"[id10]\"}},\"ok\":true,\"op\":\"ws_rebase\",\"result\":{\"changeset\":\"[id13]\",\"onto\":\"[id10]\",\"status\":\"rebased\",\"status_after\":{\"base\":\"[id10]\",\"behind_by\":0,\"changes\":[],\"head\":\"[id13]\",\"main\":\"[id10]\",\"name\":\"ws1\",\"state\":\"clean\",\"truncated\":false}}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[id11]\":\"[id11]\",\"[id14]\":\"[id14]\",\"[id9]\":\"[id9]\",\"[landed]\":\"[landed]\",\"main\":\"[id11]\"}},\"ok\":true,\"op\":\"ws_rebase\",\"result\":{\"changeset\":\"[id14]\",\"onto\":\"[id11]\",\"status\":\"rebased\",\"status_after\":{\"base\":\"[id11]\",\"behind_by\":0,\"changes\":[],\"head\":\"[id14]\",\"main\":\"[id11]\",\"name\":\"ws1\",\"state\":\"clean\",\"truncated\":false}}}",
               "type": "text"
             }
           ],
@@ -2006,25 +2066,25 @@ expression: transcript
               "elapsed_ms": "[elapsed_ms]",
               "repo": "[tmp]/store",
               "resolved": {
-                "[id10]": "[id10]",
-                "[id13]": "[id13]",
+                "[id11]": "[id11]",
+                "[id14]": "[id14]",
                 "[id9]": "[id9]",
                 "[landed]": "[landed]",
-                "main": "[id10]"
+                "main": "[id11]"
               }
             },
             "ok": true,
             "op": "ws_rebase",
             "result": {
-              "changeset": "[id13]",
-              "onto": "[id10]",
+              "changeset": "[id14]",
+              "onto": "[id11]",
               "status": "rebased",
               "status_after": {
-                "base": "[id10]",
+                "base": "[id11]",
                 "behind_by": 0,
                 "changes": [],
-                "head": "[id13]",
-                "main": "[id10]",
+                "head": "[id14]",
+                "main": "[id11]",
                 "name": "ws1",
                 "state": "clean",
                 "truncated": false
@@ -2036,7 +2096,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 36,
+        "id": 37,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -2048,12 +2108,12 @@ expression: transcript
         }
       },
       "response": {
-        "id": 36,
+        "id": 37,
         "jsonrpc": "2.0",
         "result": {
           "content": [
             {
-              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[id10]\":\"[id10]\",\"[id13]\":\"[id13]\",\"[id14]\":\"[id14]\",\"main\":\"[id14]\"}},\"ok\":true,\"op\":\"ws_land\",\"result\":{\"attempts\":1,\"land\":{\"attempts\":1,\"base\":\"[id10]\",\"files_changed\":1,\"landed\":\"[id14]\",\"rebased_onto\":\"[id10]\",\"relocated\":false,\"squashed_from\":[\"[id13]\"],\"status\":\"landed\",\"target\":\"main\"},\"status_after\":{\"base\":\"[id14]\",\"behind_by\":0,\"changes\":[],\"head\":\"[id14]\",\"main\":\"[id14]\",\"name\":\"ws1\",\"state\":\"clean\",\"truncated\":false}}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[id11]\":\"[id11]\",\"[id14]\":\"[id14]\",\"[id15]\":\"[id15]\",\"main\":\"[id15]\"}},\"ok\":true,\"op\":\"ws_land\",\"result\":{\"attempts\":1,\"land\":{\"attempts\":1,\"base\":\"[id11]\",\"files_changed\":1,\"landed\":\"[id15]\",\"rebased_onto\":\"[id11]\",\"relocated\":false,\"squashed_from\":[\"[id14]\"],\"status\":\"landed\",\"target\":\"main\"},\"status_after\":{\"base\":\"[id15]\",\"behind_by\":0,\"changes\":[],\"head\":\"[id15]\",\"main\":\"[id15]\",\"name\":\"ws1\",\"state\":\"clean\",\"truncated\":false}}}",
               "type": "text"
             }
           ],
@@ -2065,10 +2125,10 @@ expression: transcript
               "elapsed_ms": "[elapsed_ms]",
               "repo": "[tmp]/store",
               "resolved": {
-                "[id10]": "[id10]",
-                "[id13]": "[id13]",
+                "[id11]": "[id11]",
                 "[id14]": "[id14]",
-                "main": "[id14]"
+                "[id15]": "[id15]",
+                "main": "[id15]"
               }
             },
             "ok": true,
@@ -2077,23 +2137,23 @@ expression: transcript
               "attempts": 1,
               "land": {
                 "attempts": 1,
-                "base": "[id10]",
+                "base": "[id11]",
                 "files_changed": 1,
-                "landed": "[id14]",
-                "rebased_onto": "[id10]",
+                "landed": "[id15]",
+                "rebased_onto": "[id11]",
                 "relocated": false,
                 "squashed_from": [
-                  "[id13]"
+                  "[id14]"
                 ],
                 "status": "landed",
                 "target": "main"
               },
               "status_after": {
-                "base": "[id14]",
+                "base": "[id15]",
                 "behind_by": 0,
                 "changes": [],
-                "head": "[id14]",
-                "main": "[id14]",
+                "head": "[id15]",
+                "main": "[id15]",
                 "name": "ws1",
                 "state": "clean",
                 "truncated": false
@@ -2105,7 +2165,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 37,
+        "id": 38,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -2114,7 +2174,7 @@ expression: transcript
         }
       },
       "response": {
-        "id": 37,
+        "id": 38,
         "jsonrpc": "2.0",
         "result": {
           "content": [
@@ -2151,7 +2211,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 38,
+        "id": 39,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -2162,12 +2222,12 @@ expression: transcript
         }
       },
       "response": {
-        "id": 38,
+        "id": 39,
         "jsonrpc": "2.0",
         "result": {
           "content": [
             {
-              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[id14]\":\"[id14]\",\"main\":\"[id14]\"}},\"ok\":true,\"op\":\"ws_info\",\"result\":{\"base\":\"[id14]\",\"created\":false,\"head\":\"[id14]\",\"name\":\"ws1\",\"path\":\"[tmp]/ws1\",\"prefixes\":[\"docs.md\",\"src\"],\"status_after\":{\"base\":\"[id14]\",\"behind_by\":0,\"changes\":[],\"head\":\"[id14]\",\"main\":\"[id14]\",\"name\":\"ws1\",\"state\":\"clean\",\"truncated\":false}}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[id15]\":\"[id15]\",\"main\":\"[id15]\"}},\"ok\":true,\"op\":\"ws_info\",\"result\":{\"base\":\"[id15]\",\"created\":false,\"head\":\"[id15]\",\"name\":\"ws1\",\"path\":\"[tmp]/ws1\",\"prefixes\":[\"docs.md\",\"src\"],\"snapshot\":\"[id10]\",\"status_after\":{\"base\":\"[id15]\",\"behind_by\":0,\"changes\":[],\"head\":\"[id15]\",\"main\":\"[id15]\",\"name\":\"ws1\",\"state\":\"clean\",\"truncated\":false}}}",
               "type": "text"
             }
           ],
@@ -2179,28 +2239,29 @@ expression: transcript
               "elapsed_ms": "[elapsed_ms]",
               "repo": "[tmp]/store",
               "resolved": {
-                "[id14]": "[id14]",
-                "main": "[id14]"
+                "[id15]": "[id15]",
+                "main": "[id15]"
               }
             },
             "ok": true,
             "op": "ws_info",
             "result": {
-              "base": "[id14]",
+              "base": "[id15]",
               "created": false,
-              "head": "[id14]",
+              "head": "[id15]",
               "name": "ws1",
               "path": "[tmp]/ws1",
               "prefixes": [
                 "docs.md",
                 "src"
               ],
+              "snapshot": "[id10]",
               "status_after": {
-                "base": "[id14]",
+                "base": "[id15]",
                 "behind_by": 0,
                 "changes": [],
-                "head": "[id14]",
-                "main": "[id14]",
+                "head": "[id15]",
+                "main": "[id15]",
                 "name": "ws1",
                 "state": "clean",
                 "truncated": false
@@ -2212,7 +2273,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 39,
+        "id": 40,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -2225,12 +2286,12 @@ expression: transcript
         }
       },
       "response": {
-        "id": 39,
+        "id": 40,
         "jsonrpc": "2.0",
         "result": {
           "content": [
             {
-              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[theirs]\":\"[theirs]\",\"main\":\"[id14]\"}},\"ok\":true,\"op\":\"revert\",\"result\":{\"land\":{\"attempts\":1,\"base\":\"[theirs]\",\"files_changed\":1,\"landed\":\"[reverted]\",\"rebased_onto\":\"[id14]\",\"relocated\":false,\"squashed_from\":[\"[id15]\"],\"status\":\"landed\",\"target\":\"main\"},\"reverted\":[\"[theirs]\"]}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[theirs]\":\"[theirs]\",\"main\":\"[id15]\"}},\"ok\":true,\"op\":\"revert\",\"result\":{\"land\":{\"attempts\":1,\"base\":\"[theirs]\",\"files_changed\":1,\"landed\":\"[reverted]\",\"rebased_onto\":\"[id15]\",\"relocated\":false,\"squashed_from\":[\"[id16]\"],\"status\":\"landed\",\"target\":\"main\"},\"reverted\":[\"[theirs]\"]}}",
               "type": "text"
             }
           ],
@@ -2243,7 +2304,7 @@ expression: transcript
               "repo": "[tmp]/store",
               "resolved": {
                 "[theirs]": "[theirs]",
-                "main": "[id14]"
+                "main": "[id15]"
               }
             },
             "ok": true,
@@ -2254,10 +2315,10 @@ expression: transcript
                 "base": "[theirs]",
                 "files_changed": 1,
                 "landed": "[reverted]",
-                "rebased_onto": "[id14]",
+                "rebased_onto": "[id15]",
                 "relocated": false,
                 "squashed_from": [
-                  "[id15]"
+                  "[id16]"
                 ],
                 "status": "landed",
                 "target": "main"
@@ -2272,7 +2333,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 40,
+        "id": 41,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -2281,12 +2342,12 @@ expression: transcript
         }
       },
       "response": {
-        "id": 40,
+        "id": 41,
         "jsonrpc": "2.0",
         "result": {
           "content": [
             {
-              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"verify\",\"result\":{\"changesets_checked\":11,\"findings\":[],\"found\":0,\"objects_checked\":31,\"problems\":[],\"truncated\":false}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"verify\",\"result\":{\"changesets_checked\":12,\"findings\":[],\"found\":0,\"objects_checked\":34,\"problems\":[],\"truncated\":false}}",
               "type": "text"
             }
           ],
@@ -2302,10 +2363,10 @@ expression: transcript
             "ok": true,
             "op": "verify",
             "result": {
-              "changesets_checked": 11,
+              "changesets_checked": 12,
               "findings": [],
               "found": 0,
-              "objects_checked": 31,
+              "objects_checked": 34,
               "problems": [],
               "truncated": false
             }

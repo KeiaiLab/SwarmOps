@@ -192,6 +192,7 @@ swarmops schema NoSuchType
         "Side",
         "SignatureOut",
         "Signatures",
+        "SnapshotWrite",
         "StatusAfter",
         "SyncMode",
         "SyncReq",
@@ -235,6 +236,8 @@ swarmops schema NoSuchType
         "WsRebasing",
         "WsResolveReq",
         "WsResolveResp",
+        "WsSnapshotReq",
+        "WsSnapshotResp",
         "WsState",
         "WsStatus",
         "WsStatusReq"

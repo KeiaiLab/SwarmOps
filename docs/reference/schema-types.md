@@ -2,7 +2,7 @@
 
 # Schema types
 
-The 179 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
+The 182 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
 
 ## Index
 
@@ -141,6 +141,7 @@ The 179 request, response and value types of the API, as `swarmops schema` print
 | [`Side`](#side) | enumeration | One side of a land's merge. |
 | [`SignatureOut`](#signatureout) | object | A git signature: who, and when. |
 | [`Signatures`](#signatures) | object | A changeset's git signatures: git-fidelity data for import and export. |
+| [`SnapshotWrite`](#snapshotwrite) | enumeration | What a `ws_snapshot` wrote. |
 | [`StatusAfter`](#statusafter) | enumeration | Whether a workspace mutation's response carries the workspace's status after it. |
 | [`SyncMode`](#syncmode) | enumeration | Whether `sync` sends what it landed. |
 | [`SyncReq`](#syncreq) | object | `sync`: fetch a remote, land `main`'s unpublished changes onto the remote's head, move `main` there and push it. |
@@ -184,6 +185,8 @@ The 179 request, response and value types of the API, as `swarmops schema` print
 | [`WsRebasing`](#wsrebasing) | object | A workspace's rebase in progress. |
 | [`WsResolveReq`](#wsresolvereq) | object | `ws_resolve` (client-side): mark conflicting paths of a rebase resolved. |
 | [`WsResolveResp`](#wsresolveresp) | object | `ws_resolve`: the paths resolved and those left. |
+| [`WsSnapshotReq`](#wssnapshotreq) | object | `ws_snapshot` (client-side): record a workspace's edits as a changeset on its head, which moves no ref and leaves the workspace as it is. |
+| [`WsSnapshotResp`](#wssnapshotresp) | object | `ws_snapshot`: the changeset that holds the edits. |
 | [`WsState`](#wsstate) | enumeration | A workspace's state. |
 | [`WsStatus`](#wsstatus) | object | A workspace's status: its changes against its head, a page at a time, and how far its target has moved since its base. |
 | [`WsStatusReq`](#wsstatusreq) | object | `ws_status` (client-side): what changed in a workspace against its head. |
@@ -2001,6 +2004,18 @@ Kind: object. `swarmops schema Signatures` prints its JSON Schema.
 | `author` | [`SignatureOut`](#signatureout) | yes | The git author. |
 | `committer` | [`SignatureOut`](#signatureout) | yes | The git committer; its time is `created_at`. |
 
+## SnapshotWrite
+
+What a `ws_snapshot` wrote.
+
+Kind: enumeration. `swarmops schema SnapshotWrite` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"new"` | A new changeset holds the edits. |
+| `"same"` | The latest snapshot holds these edits on this head already: nothing written. |
+| `"clean"` | No edits: nothing written. |
+
 ## StatusAfter
 
 Whether a workspace mutation's response carries the workspace's status after it.
@@ -2397,6 +2412,7 @@ Kind: object. `swarmops schema WsInfo` prints its JSON Schema.
 | `orphan` | `boolean` | no | Whether its directory is gone while its entry stays (`ws_list` with `check`). |
 | `path` | `string` | yes | Its directory on the caller's host. |
 | `prefixes` | array of `string` | no | The repository paths written out. |
+| `snapshot` | `string` or `null` | no | Its latest snapshot (`ws_snapshot`, or an update's), on whichever head it was taken; `ws_info` only, omitted when there is none. |
 | `status_after` | [`WsStatus`](#wsstatus) or `null` | no | The status after the mutation; omitted when the request said `none`. |
 
 ## WsInfoReq
@@ -2561,6 +2577,29 @@ Kind: object. `swarmops schema WsResolveResp` prints its JSON Schema.
 | `remaining` | array of `string` | yes | The paths that still conflict. |
 | `resolved` | array of `string` | yes | The paths this request resolved. |
 | `status_after` | [`WsStatus`](#wsstatus) or `null` | no | The status after the mutation; omitted when the request said `none`. |
+
+## WsSnapshotReq
+
+`ws_snapshot` (client-side): record a workspace's edits as a changeset on its head, which moves no ref and leaves the workspace as it is.
+
+Kind: object. `swarmops schema WsSnapshotReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `status_after` | [`StatusAfter`](#statusafter) | no | Whether the response carries the status after the mutation. Default: `"page"`. |
+| `workspace` | `string` | yes | The workspace, by name. |
+
+## WsSnapshotResp
+
+`ws_snapshot`: the changeset that holds the edits.
+
+Kind: object. `swarmops schema WsSnapshotResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `snapshot` | `string` or `null` | no | The snapshot, readable by id from any process; omitted when there were no edits. |
+| `status_after` | [`WsStatus`](#wsstatus) or `null` | no | The status after the mutation; omitted when the request said `none`. |
+| `written` | [`SnapshotWrite`](#snapshotwrite) | yes | Whether this call wrote it. |
 
 ## WsState
 

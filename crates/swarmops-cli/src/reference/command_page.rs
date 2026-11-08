@@ -220,7 +220,7 @@ struct Meta {
 
 /// Every command, in the grammar's order. `meta_matches_the_code` checks each column it can
 /// against the code.
-const META: [Meta; 56] = [
+const META: [Meta; 57] = [
     meta("init", Group::Store, true, false, Returns::Type("RepoInfo")),
     meta(
         "info",
@@ -349,6 +349,13 @@ const META: [Meta; 56] = [
         true,
         false,
         Returns::Type("WsDiscardResp"),
+    ),
+    meta(
+        "ws snapshot",
+        Group::Workspaces,
+        true,
+        false,
+        Returns::Type("WsSnapshotResp"),
     ),
     meta(
         "ws list",
@@ -1362,7 +1369,7 @@ fn source(path: &str) -> String {
 }
 
 /// Where each result type is returned: the file, and the function whose signature names it.
-const RETURN_SITES: [(&str, &str, &str); 52] = [
+const RETURN_SITES: [(&str, &str, &str); 53] = [
     ("init", "src/commands/run.rs", "fn init("),
     ("info", "../swarmops-api/src/ops.rs", "fn repo_info("),
     (
@@ -1414,6 +1421,11 @@ const RETURN_SITES: [(&str, &str, &str); 52] = [
         "ws discard",
         "../swarmops-ws/src/discard.rs",
         "pub fn discard(",
+    ),
+    (
+        "ws snapshot",
+        "../swarmops-ws/src/snapshot.rs",
+        "pub fn snapshot(",
     ),
     ("ws list", "../swarmops-ws/src/list.rs", "pub fn list("),
     ("ws info", "../swarmops-ws/src/info.rs", "pub fn info("),
@@ -1555,13 +1567,14 @@ const FLAG_IDENTITY_CLI: &str = "src/commands/serve.rs";
 /// a mutation without one acts as the workspace's `created_by` (M5 design §2.6), where the
 /// workspace is opened. Exceptions to [`CHANGE_RULE`], but `ws create`, which records who made
 /// the workspace and so needs one.
-const WORKSPACE_ACTS_AS: [&str; 8] = [
+const WORKSPACE_ACTS_AS: [&str; 9] = [
     "ws commit",
     "ws rebase",
     "ws resolve",
     "ws land",
     "ws materialize",
     "ws discard",
+    "ws snapshot",
     "ws delete",
     "ws hook",
 ];
