@@ -10,6 +10,8 @@
 //! - [`source`]: [`GitSource`], what the import reads from a repository: refs resolved to
 //!   commits, and objects' raw bytes, each checked against its id.
 //! - [`gix_source`]: [`GixSource`], the [`GitSource`] of a repository on disk.
+//! - [`CatFileSource`]: the [`GitSource`] of a bare repository whose objects one
+//!   `git cat-file` child reads, its pack maps bounded ([`CAT_FILE_MAPPED`]).
 //! - [`lossy`]: the classes of git content a changeset cannot hold as git has it ([`LossyClass`]),
 //!   and sets of them ([`LossySet`]).
 //! - [`render`]: the git objects a changeset renders to, [`tree_bytes`] and [`commit_bytes`].
@@ -53,6 +55,7 @@
 //! change.
 
 mod ancestry;
+mod cat_file_source;
 pub mod convert;
 pub mod export;
 pub mod export_oid;
@@ -74,6 +77,7 @@ pub mod source;
 pub mod sync;
 pub mod transport;
 
+pub use cat_file_source::{CAT_FILE_MAPPED, CAT_FILE_WINDOW, CatFileSource};
 pub use convert::{ConvertError, Converted, Converter, GIT_LOSSY, GIT_OID};
 pub use export::{DivergedReason, ExportError, ExportReport, ExportRequest, export};
 pub use export_oid::{

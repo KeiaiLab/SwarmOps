@@ -1268,3 +1268,82 @@ fn serve_push_moves_other_branches() {
         "the refused tip was fetched"
     );
 }
+
+/// The blobs of [`a_large_push_maps_a_bounded_pack`]'s push: 512 of 1 MiB.
+const LARGE_PUSH_BLOBS: usize = 512;
+const LARGE_PUSH_BLOB: usize = 1 << 20;
+
+/// The most of its pack a push's hook keeps resident, in KiB: the hook's reader maps at most
+/// 64 MiB of it (`CAT_FILE_MAPPED`), and the rest is slack for the binary's own file pages.
+const HOOK_FILE_KIB: u64 = 128 << 10;
+
+/// The name of the hook's processes (and `serve`'s) in the accounting's per-name record.
+const SWARMOPS_NAME: &str = "swarmops";
+
+/// The access file of [`a_large_push_maps_a_bounded_pack`]: [`AGENT`] pushes and lands `main`.
+const LAND_ACCESS: &str = r#"version = 1
+
+[[grant]]
+who = ["person/ada"]
+push = ["main"]
+land = ["main"]
+"#;
+
+/// A land of one commit of 512 incompressible 1 MiB blobs: the land lands, and no `swarmops`
+/// process of the connection, the hooks among them, keeps more than [`HOOK_FILE_KIB`] of file
+/// pages resident, though the hooks read every blob of the push's pack (the M17 closure design
+/// §3.5, I7).
+#[test]
+#[ignore = "slow, ~160 s at load 100 (debug): pushes and lands 512 MiB of random blobs"]
+fn a_large_push_maps_a_bounded_pack() {
+    use std::io::Read as _;
+
+    use swarmops_testkit::accounting::{self, Accounting};
+
+    let site = Site::on(ServeSite::new::<Swarmops>().with_accounting(Accounting::Cpu));
+    fs::write(site.served.store(STORE).join("access.toml"), LAND_ACCESS).unwrap();
+    let work = site.clone("work");
+
+    // 1. One commit of the blobs, random so that git's pack holds them whole.
+    let mut random = fs::File::open("/dev/urandom").unwrap();
+    let under = work.join("big");
+    fs::create_dir_all(&under).unwrap();
+    let mut bytes = vec![0_u8; LARGE_PUSH_BLOB];
+    for n in 0..LARGE_PUSH_BLOBS {
+        random.read_exact(&mut bytes).unwrap();
+        fs::write(under.join(format!("b{n:04}")), &bytes).unwrap();
+    }
+    site.git(&work, &["add", "--", "big"]);
+    site.git(&work, &["commit", "--quiet", "-m", "big"]);
+
+    // 2. The land, its connection accounted.
+    let ledger = accounting::ledger_dir(&site.served);
+    let mark = accounting::spent_since(&ledger, 0).len();
+    site.git(&work, &["push", "--quiet", "origin", "HEAD:refs/land/main"]);
+    let spent = accounting::spent_since(&ledger, mark);
+    assert!(!spent.is_empty(), "the push was not accounted");
+
+    // 3. main holds every blob.
+    site.git(&work, &["fetch", "--quiet", "origin"]);
+    let listed = site.git(
+        &work,
+        &["ls-tree", "-r", "--name-only", "origin/main", "big"],
+    );
+    assert_eq!(
+        listed.lines().count(),
+        LARGE_PUSH_BLOBS,
+        "the land did not land"
+    );
+
+    // 4. The hooks' file pages: bounded, not the pack's 512 MiB.
+    let file_kib = (spent.iter())
+        .filter_map(|one| one.by_name.get(SWARMOPS_NAME))
+        .map(|peak| peak.file_kib)
+        .max()
+        .expect("no swarmops process was sampled");
+    println!("serve-push: large push, swarmops RssFile peak {file_kib} KiB");
+    assert!(
+        file_kib < HOOK_FILE_KIB,
+        "a swarmops process kept {file_kib} KiB of file pages resident"
+    );
+}

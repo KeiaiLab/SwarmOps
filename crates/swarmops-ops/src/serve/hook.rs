@@ -34,7 +34,7 @@ use swarmops_git::serve::proc_receive::{self, Command, Report};
 use swarmops_git::serve::refmap::{self, Mapped};
 use swarmops_git::serve::repo::ServeRepo;
 use swarmops_git::transport::{GitCli, Transport as _, TransportError};
-use swarmops_git::{GitOid, GixSource, SourceError};
+use swarmops_git::{CatFileSource, GitOid, SourceError};
 use swarmops_store::RefKind;
 
 use super::access::Access;
@@ -77,12 +77,13 @@ pub(crate) enum Objects<'a> {
 }
 
 impl Objects<'_> {
-    /// The objects of `repo` as these hold them, to import from.
-    pub(crate) fn source(self, repo: &ServeRepo) -> Result<GixSource, SourceError> {
+    /// The objects of `repo` as these hold them, to import from: read by git, its pack maps
+    /// bounded, however large the push's pack.
+    pub(crate) fn source(self, repo: &ServeRepo) -> Result<CatFileSource, SourceError> {
         let git_dir = repo.git_dir().as_std_path();
         match self {
-            Objects::Served => GixSource::open(git_dir),
-            Objects::Quarantine(quarantine) => GixSource::open_quarantine(git_dir, quarantine),
+            Objects::Served => CatFileSource::open(git_dir),
+            Objects::Quarantine(quarantine) => CatFileSource::open_quarantine(git_dir, quarantine),
         }
     }
 

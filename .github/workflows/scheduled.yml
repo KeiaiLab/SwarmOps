@@ -271,12 +271,13 @@ jobs:
             cargo nextest run --locked --all-features -p swarmops-testkit -p swarmops-git \
             --run-ignored ignored-only -E 'test(check_git_fixtures)' --no-capture
       # The testkit's fixture tests and the git import's (`raw`, `source`, and `convert` and
-      # `import` once they exist), on the fixtures this git made.
+      # `import` once they exist), on the fixtures this git made; `cat_file_source`'s and the
+      # `source` tests of `CatFileSource` with this git as the product's.
       - name: The git import's tests on the fixtures git ${{ matrix.git }} made
         run: |
-          SWARMOPS_GIT_FIXTURES_DIR="$RUNNER_TEMP/fx" \
+          SWARMOPS_GIT="$GIT_PREFIX/bin/git" SWARMOPS_GIT_FIXTURES_DIR="$RUNNER_TEMP/fx" \
             cargo nextest run --locked --all-features -p swarmops-testkit -p swarmops-git \
-            -E 'test(/^git::/) | test(/^(raw|source|convert|import)::/)' --no-capture
+            -E 'test(/^git::/) | test(/^(raw|source|cat_file_source|convert|import)::/)' --no-capture
       # The round trip's exports in this git's own words: `exported_repositories_pass_git_fsck`
       # runs git (so it is ignored in the default gate) on the committed archives, not on the
       # fixtures this git made, so that every git checks the same repositories. It refuses a git

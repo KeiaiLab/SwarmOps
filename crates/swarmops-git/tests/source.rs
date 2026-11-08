@@ -1,11 +1,14 @@
 //! The repository the import reads, through gix: every object of the fixtures read by its id, refs
 //! resolved to commits as git resolves them, replacement refs never followed, and the repositories
-//! it does not read refused when it opens them.
+//! it does not read refused when it opens them. And through `git cat-file` ([`CatFileSource`]):
+//! the same objects as gix reads, a quarantine's first, a damaged one `Corrupt`.
 
 use std::fs;
 use std::path::Path;
 
-use swarmops_git::{GitOid, GitSource, GixSource, ObjectFormat, RawKind, SourceError, Unsupported};
+use swarmops_git::{
+    CatFileSource, GitOid, GitSource, GixSource, ObjectFormat, RawKind, SourceError, Unsupported,
+};
 use swarmops_testkit::git::{self, GitFixture, Manifest};
 
 fn oid(hex: &str) -> GitOid {
@@ -367,5 +370,147 @@ fn the_real_unsupported_fixtures_are_refused() {
     assert!(
         matches!(source.read(damaged), Err(SourceError::Corrupt { oid, .. }) if oid == damaged),
         "{damaged}"
+    );
+}
+
+/// The fixtures both sources read: SHA-1, not shallow, refs kept as files.
+fn readable(manifest: &Manifest, repo: &Path) -> bool {
+    manifest.object_format == "sha1" && !manifest.shallow && !repo.join("reftable").is_dir()
+}
+
+/// Every object of every fixture both sources read reads the same through `git cat-file` as
+/// through gix: its header and its bytes, or the same refusal (`corrupt_object`'s); `HEAD` resolves alike; an absent id is missing from
+/// both, and no blob a partial clone lacks is read.
+#[test]
+fn cat_file_source_reads_what_gix_reads() {
+    let (mut read, mut lacked) = (0, 0);
+    for name in git::names() {
+        let fixture = git::fixture(&name);
+        let (Some(repo), Some(manifest)) = (&fixture.repo, &fixture.manifest) else {
+            continue;
+        };
+        if !readable(manifest, repo) {
+            continue;
+        }
+        let gix = GixSource::open(repo).unwrap_or_else(|error| panic!("{name}: {error}"));
+        let cat = CatFileSource::open(repo).unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(cat.object_format(), ObjectFormat::Sha1, "{name}");
+        assert_eq!(cat.resolve("HEAD"), gix.resolve("HEAD"), "{name}");
+
+        // 1. Every object the manifest names, header and bytes.
+        let commits = manifest.commits.iter().map(|commit| oid(&commit.oid));
+        let trees = manifest.trees.keys().map(|hex| oid(hex));
+        let blobs = manifest.blobs.keys().map(|hex| oid(hex));
+        for id in commits.chain(trees).chain(blobs) {
+            assert_eq!(cat.header(id), gix.header(id), "{name}: {id}");
+            let got = cat.read(id);
+            assert!(got == gix.read(id), "{name}: {id}");
+            read += usize::from(got.is_ok());
+        }
+
+        // 2. An id no object has.
+        let absent = oid("0123456789abcdef0123456789abcdef01234567");
+        let missing = SourceError::Missing { oid: absent };
+        assert_eq!(cat.header(absent), Err(missing.clone()), "{name}");
+        assert_eq!(cat.read(absent), Err(missing), "{name}");
+
+        // 3. The blobs a partial clone lacks: never read, never fetched (missing with git 2.45
+        //    or newer; an older git ends on the first, the promisor remote out of reach).
+        for bytes in manifest.trees.values() {
+            let entries = swarmops_git::RawTree::parse(bytes).unwrap().entries;
+            for entry in entries.iter().filter(|entry| entry.mode == b"100644") {
+                if manifest.blobs.contains_key(&entry.oid.to_string()) {
+                    continue;
+                }
+                let got = cat.header(entry.oid);
+                let refused = matches!(
+                    got,
+                    Err(SourceError::Missing { .. }
+                        | SourceError::Corrupt { .. }
+                        | SourceError::Io { .. })
+                );
+                assert!(refused, "{name}: {}: {got:?}", entry.oid);
+                lacked += 1;
+            }
+        }
+    }
+    assert!(lacked > 0, "no partial clone's blob was looked for");
+    assert!(read > 0, "no fixture object was read");
+}
+
+/// The objects of a quarantine are found (by git) and read (loose, by gix) before the
+/// repository's, and the repository's still through it; the repository alone lacks the
+/// quarantine's.
+#[test]
+fn cat_file_source_reads_a_quarantine() {
+    let repository = git::empty_repository();
+    let held = git::empty_repository();
+    let quarantine = held.dir.join("objects");
+
+    // 1. One blob in each.
+    let mut ids = Vec::new();
+    for (dir, content) in [
+        (&repository.dir, &b"served\n"[..]),
+        (&held.dir, b"pushed\n"),
+    ] {
+        let id = swarmops_git::git_hash(RawKind::Blob, content);
+        let mut file = format!("blob {}\0", content.len()).into_bytes();
+        file.extend_from_slice(content);
+        git::write_loose_object(dir, &id.to_string(), &file);
+        ids.push((id, content.to_vec()));
+    }
+    let [(served, served_bytes), (pushed, pushed_bytes)] = <[_; 2]>::try_from(ids).unwrap();
+
+    // 2. Both, through the quarantine; the pushed one missing without it.
+    let both = CatFileSource::open_quarantine(&repository.dir, &quarantine)
+        .unwrap_or_else(|error| panic!("open: {error}"));
+    let size = u64::try_from(pushed_bytes.len()).unwrap();
+    assert_eq!(both.header(pushed), Ok((RawKind::Blob, size)));
+    assert_eq!(both.read(pushed), Ok((RawKind::Blob, pushed_bytes)));
+    assert_eq!(both.read(served), Ok((RawKind::Blob, served_bytes)));
+    let alone = CatFileSource::open(&repository.dir).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(
+        alone.header(pushed),
+        Err(SourceError::Missing { oid: pushed })
+    );
+}
+
+/// A loose blob whose file holds another blob is `Corrupt` through `git cat-file`, as through
+/// gix, and the source reads on after it; so is one whose header claims more than it holds.
+#[test]
+fn a_damaged_object_is_corrupt() {
+    use swarmops_git::RawTree;
+
+    // 1. The fixture's blob that holds another's bytes.
+    let corrupt = git::fixture("corrupt_object");
+    let (held, repo) = (manifest(&corrupt), repo(&corrupt));
+    let source = CatFileSource::open(repo).unwrap_or_else(|error| panic!("open: {error}"));
+    let tree = &held.trees[&held.commits[1].tree];
+    let damaged = (RawTree::parse(tree).unwrap().entries.into_iter())
+        .find(|entry| entry.name == b"damaged.txt")
+        .expect("the second commit adds damaged.txt")
+        .oid;
+    let got = source.read(damaged);
+    assert!(
+        matches!(got, Err(SourceError::Corrupt { oid, .. }) if oid == damaged),
+        "{damaged}: {got:?}"
+    );
+    let commit = oid(&held.commits[1].oid);
+    let kind = source.read(commit).map(|(kind, _)| kind);
+    assert_eq!(kind, Ok(RawKind::Commit));
+
+    // 2. A loose blob whose header says it is longer than what follows: git's `cat-file` streams
+    //    what follows and waits for its next request, so a reader of the rest would wait too.
+    let repository = git::empty_repository();
+    let content = b"short";
+    let id = swarmops_git::git_hash(RawKind::Blob, content);
+    let mut file = format!("blob {}\0", content.len() + 5).into_bytes();
+    file.extend_from_slice(content);
+    git::write_loose_object(&repository.dir, &id.to_string(), &file);
+    let source = CatFileSource::open(&repository.dir).unwrap_or_else(|error| panic!("{error}"));
+    let got = source.read(id);
+    assert!(
+        matches!(got, Err(SourceError::Corrupt { oid, .. }) if oid == id),
+        "{id}: {got:?}"
     );
 }

@@ -41,7 +41,7 @@ use swarmops_git::serve::land_key::land_key;
 use swarmops_git::serve::proc_receive::{Command, Report};
 use swarmops_git::serve::repo::ServeError;
 use swarmops_git::{
-    DivergedReason, ExportError, ExportRequest, GitOid, GitSource as _, GixSink, GixSource,
+    CatFileSource, DivergedReason, ExportError, ExportRequest, GitOid, GitSource as _, GixSink,
     ImportError, ImportRequest, RawCommit, export, import,
 };
 
@@ -365,14 +365,14 @@ fn export_target(ctx: &HookCtx<'_>, target: &str) -> Result<Option<Head>, OpErro
     }
 }
 
-/// `serve.git`, to read commits from.
-fn serve_source(ctx: &HookCtx<'_>) -> Result<GixSource, OpError> {
-    GixSource::open(ctx.repo.git_dir().as_std_path())
+/// `serve.git`, to read commits from, its pack maps bounded.
+fn serve_source(ctx: &HookCtx<'_>) -> Result<CatFileSource, OpError> {
+    CatFileSource::open(ctx.repo.git_dir().as_std_path())
         .map_err(|e| error::git_import_error(e.into(), SERVE_GIT, "HEAD"))
 }
 
 /// The first parent of the commit `oid` in `source`, `None` for a root.
-fn first_parent(source: &GixSource, oid: GitOid) -> Result<Option<GitOid>, OpError> {
+fn first_parent(source: &CatFileSource, oid: GitOid) -> Result<Option<GitOid>, OpError> {
     let hex = oid.to_string();
     let failed = |e: ImportError| error::git_import_error(e, SERVE_GIT, &hex);
     let (_, bytes) = source.read(oid).map_err(|e| failed(e.into()))?;
