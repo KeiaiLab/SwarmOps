@@ -6,7 +6,8 @@
 //! the served root. A fetch whose store has not moved since the last export reads `serve.git`
 //! without the store's writer lock (`git/serve.state`, the M17 design §4.2), and `serve --prepare`
 //! makes the first clone after an import write no object (§4.3). Identical requests share one
-//! pack of `git/serve-cache/`, and no object a served ref does not reach is sent (§5).
+//! pack of `git/serve-cache/`, and no object a served ref does not reach is sent (§5); a request
+//! the cache answers runs no git in its hook (the M17 closure design §3.2).
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -17,7 +18,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use swarmops_store::MetaLock;
 use swarmops_testkit::git::fixture;
-use swarmops_testkit::remote::GitServer;
+use swarmops_testkit::remote::{GIT_ENV, GitServer};
 use swarmops_testkit::serve::ServeSite;
 use swarmops_testkit::store::layout_of;
 use tempfile::TempDir;
@@ -1085,4 +1086,125 @@ fn an_unreferenced_object_is_sent_unchecked() {
     assert!(fetched.status.success(), "{}", text(&fetched.stderr));
     let kind = site.git(&fresh, Protocol::V2, &["cat-file", "-t", &tip]);
     assert_eq!(kind.trim(), "commit");
+}
+
+/// What the pack-objects hook's command line holds: a git whose parent's does was started by
+/// the hook.
+const PACK_HOOK_LINE: &str = "serve --hook pack-objects";
+
+/// A [`GIT_ENV`] stand-in that logs each git it runs, its parent's command line and its
+/// arguments, then runs the site's git.
+struct GitLog {
+    /// The stand-in, `git`, and its log, `log`.
+    dir: TempDir,
+}
+
+impl GitLog {
+    /// The stand-in of `site`'s git.
+    fn new(site: &ServeSite) -> GitLog {
+        let dir = TempDir::new().unwrap();
+        let real = site.command().get_program().to_str().unwrap().to_owned();
+        let log = dir.path().join("log");
+        let script = format!(
+            "#!/bin/sh\n\
+             parent=$(tr '\\000' ' ' < /proc/$PPID/cmdline)\n\
+             printf '%s\\t%s\\n' \"$parent\" \"$*\" >> '{}'\n\
+             exec '{real}' \"$@\"\n",
+            log.display()
+        );
+        let wrapper = dir.path().join("git");
+        fs::write(&wrapper, script).unwrap();
+        let mode = std::os::unix::fs::PermissionsExt::from_mode(0o755);
+        fs::set_permissions(&wrapper, mode).unwrap();
+        GitLog { dir }
+    }
+
+    /// The stand-in's path.
+    fn program(&self) -> String {
+        self.dir.path().join("git").to_str().unwrap().to_owned()
+    }
+
+    /// The arguments of each git the pack-objects hook started since the last [`GitLog::clear`].
+    fn hook_spawns(&self) -> Vec<String> {
+        let log = fs::read_to_string(self.dir.path().join("log")).unwrap_or_default();
+        log.lines()
+            .filter_map(|line| line.split_once('\t'))
+            .filter(|(parent, _)| parent.contains(PACK_HOOK_LINE))
+            .map(|(_, args)| args.to_owned())
+            .collect()
+    }
+
+    /// The log emptied.
+    fn clear(&self) {
+        let _ = fs::remove_file(self.dir.path().join("log"));
+    }
+}
+
+impl Site {
+    /// The `linear` fixture served by `serve`s whose git is `log`'s stand-in.
+    fn logged() -> (Site, GitLog) {
+        let mut site = Site::new();
+        let log = GitLog::new(&site.served);
+        site.served = site.served.with_env(&[(GIT_ENV, &log.program())]);
+        (site.with_linear(), log)
+    }
+}
+
+/// A clone the pack cache answers starts no git in its hook: the wants are checked against the
+/// served tips in process, and the key names the git binary without running it.
+#[test]
+fn a_cached_clone_runs_no_git_in_its_hook() {
+    let (site, log) = Site::logged();
+
+    // 1. The first clone packs: the hook's git is the stand-in.
+    site.clone("first", Protocol::V2, &[]);
+    let entry = site.only_entry();
+    let packed = log.hook_spawns();
+    assert!(
+        packed.iter().any(|args| args.contains("pack-objects")),
+        "the hook ran no logged git: {packed:?}"
+    );
+
+    // 2. The second, identical, is sent from the entry, and the hook starts nothing.
+    log.clear();
+    let second = site.clone("second", Protocol::V2, &[]);
+    assert_eq!(site.only_entry(), entry, "the second clone packed again");
+    assert_eq!(log.hook_spawns(), Vec::<String>::new());
+    site.fsck(&second);
+}
+
+/// A served ref on a tree is no tip the in-process check takes: git's own check runs, and
+/// refuses the clone `not_served`.
+#[test]
+fn a_tree_tip_falls_back_to_git_s_check() {
+    let (site, log) = Site::logged();
+    site.clone("first", Protocol::V2, &[]);
+
+    // 1. serve.git's main moved by hand onto its tree, and the state with it: still current.
+    //    git's update-ref puts no tree on a branch, so the loose ref is written.
+    let commit = site.served("refs/heads/main");
+    let tree = site.served("refs/heads/main^{tree}");
+    let main = site
+        .served
+        .store(STORE)
+        .join("git/serve.git/refs/heads/main");
+    fs::write(main, format!("{tree}\n")).unwrap();
+    let state = fs::read_to_string(site.state_file()).unwrap();
+    assert!(state.contains(&commit), "{state:?}");
+    fs::write(site.state_file(), state.replace(&commit, &tree)).unwrap();
+
+    // 2. The clone: refused after git's check ran in the hook.
+    log.clear();
+    let url = site.served.ssh_url(STORE);
+    let line = ["clone", "--quiet", url.as_str(), "tree"];
+    let cloned = site.git_as(AGENT, site.work.path(), Protocol::V2, &line);
+    let stderr = text(&cloned.stderr);
+    assert!(!cloned.status.success(), "the tree was sent: {stderr}");
+    assert!(stderr.contains("not_served"), "{stderr}");
+    let spawns = log.hook_spawns();
+    assert!(
+        spawns.iter().any(|args| args.starts_with("cat-file")),
+        "git's check did not run: {spawns:?}"
+    );
+    assert_eq!(site.served("refs/heads/main"), tree);
 }

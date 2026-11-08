@@ -3,28 +3,30 @@
 //! BLAKE3 hash of an entry's pack, which its header carries.
 //!
 //! ```text
-//! BLAKE3("swarmops:serve-pack:v1\0" ‖ part(git --version) ‖ count(args) ‖ part(arg)… ‖ part(stdin))
+//! BLAKE3("swarmops:serve-pack:v2\0" ‖ part(git identity) ‖ count(args) ‖ part(arg)… ‖ part(stdin))
 //!   part(x) = x's length, 8 bytes little-endian ‖ x        ─▶ 64 lowercase hex
 //! ```
 //!
 //! A cache key outside the store's format, never its hash contract: the parts are framed by
-//! their lengths, so no two requests share a key, and a change of them is a new domain.
+//! their lengths, so no two requests share a key, and a change of them is a new domain. Version
+//! 1's first part was `git --version`'s line; version 2's names the binary without running it
+//! (the M17 closure design §3.2), and version 1's entries leave by the cache's bound.
 
 use std::io::{self, Read};
 
 /// What every pack key's hash starts with: its domain and version.
-const DOMAIN: &[u8] = b"swarmops:serve-pack:v1\0";
+const DOMAIN: &[u8] = b"swarmops:serve-pack:v2\0";
 
 /// How much of an entry [`PackDigest::of`] reads at once.
 const CHUNK: usize = 64 << 10;
 
-/// The cache key of a pack request: `git_version` (`git --version`'s line), `args` (the line
-/// `upload-pack` appended, the bytes of the file `--shallow-file` names in place of its path)
-/// and `stdin` (what it fed `pack-objects`).
-pub fn pack_key(git_version: &str, args: &[&[u8]], stdin: &[u8]) -> String {
+/// The cache key of a pack request: `git_identity` (the git binary that packs, as its file is:
+/// no two binaries share one), `args` (the line `upload-pack` appended, the bytes of the file
+/// `--shallow-file` names in place of its path) and `stdin` (what it fed `pack-objects`).
+pub fn pack_key(git_identity: &str, args: &[&[u8]], stdin: &[u8]) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(DOMAIN);
-    part(&mut hasher, git_version.as_bytes());
+    part(&mut hasher, git_identity.as_bytes());
     hasher.update(&to_u64(args.len()).to_le_bytes());
     for arg in args {
         part(&mut hasher, arg);
@@ -89,7 +91,7 @@ impl PackDigest {
 
 #[cfg(test)]
 mod tests {
-    use super::{PackDigest, pack_key};
+    use super::{DOMAIN, PackDigest, pack_key};
 
     /// Each part of a request moves the key, and parts framed by their lengths never run into
     /// each other: `["ab", "c"]` is not `["a", "bc"]`.
@@ -112,6 +114,30 @@ mod tests {
             pack_key("v", &[b"ab", b"c"], b""),
             pack_key("v", &[b"a", b"bc"], b"")
         );
+    }
+
+    /// The recipe is the second one: identities replaced `git --version` in the first part.
+    #[test]
+    fn the_domain_is_v2() {
+        assert_eq!(DOMAIN, b"swarmops:serve-pack:v2\0");
+    }
+
+    /// Two git binaries never share a key: their identities differ by path, or by the file a
+    /// path names.
+    #[test]
+    fn two_binaries_get_two_keys() {
+        let args: [&[u8]; 2] = [b"pack-objects", b"--revs"];
+        let identities = [
+            "64769 1201 3456 1700000000000000000 /usr/bin/git",
+            "64769 1202 3456 1700000000000000000 /usr/bin/git",
+            "64769 1201 3456 1700000000000000000 /opt/git/bin/git",
+        ];
+        let keys: Vec<String> = (identities.iter())
+            .map(|identity| pack_key(identity, &args, b"w\n"))
+            .collect();
+        assert_ne!(keys[0], keys[1]);
+        assert_ne!(keys[0], keys[2]);
+        assert_ne!(keys[1], keys[2]);
     }
 
     /// The digest of chunks is the digest of their bytes read at once.

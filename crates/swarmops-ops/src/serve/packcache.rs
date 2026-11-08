@@ -3,8 +3,9 @@
 //!
 //! ```text
 //! git <args> on stdin ─▶ 1 the line: git [--shallow-file F] pack-objects --…
-//!                        2 the wants: each a commit a ref of serve.git reaches, else refused
-//!                        3 the key: pack_key(git --version, args with F's bytes, stdin)
+//!                        2 the wants: each a served tip on a commit (in process), else git's
+//!                          check: each a commit a ref of serve.git reaches, else refused
+//!                        3 the key: pack_key(git's identity, args with F's bytes, stdin)
 //!                        4 git/serve-cache/<key>.pack, its header checked ─▶ sent
 //!                        5 a miss: <key>.lock, then git pack-objects, teed to the client and
 //!                          to <key>.tmp-<pid>, synced, renamed into place
@@ -21,6 +22,7 @@ use std::ffi::OsString;
 use std::fs::{self, File, TryLockError};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStrExt as _;
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
@@ -57,6 +59,9 @@ const HEADER_LEN: usize = HEADER_PREFIX.len() + DIGEST_HEX + 1 + LEN_DIGITS + 1;
 
 /// How much of a pack is read and written at once.
 const CHUNK: usize = 64 << 10;
+
+/// Nanoseconds in a second: a modification time's unit in git's identity.
+const NANOS_PER_SEC: i128 = 1_000_000_000;
 
 /// How often a follower looks whether the producer of its key let the lock go.
 const LOCK_POLL: Duration = Duration::from_millis(10);
@@ -158,15 +163,13 @@ pub(crate) fn send(
     let git =
         GitCli::find().map_err(|e| error::transport_error(e, "serve.git", error::Phase::Fetch))?;
     let wants = wants(stdin)?;
-    if settings.reach == Reach::Check
-        && child::check_wants(&git, repo, &wants).map_err(serve_error)? != Wants::Served
-    {
+    if settings.reach == Reach::Check && !served(&git, repo, &wants)? {
         return Err(not_served());
     }
 
     // 3. The key, of everything the pack depends on.
-    let version = child::git_version(&git, repo).map_err(serve_error)?;
-    let key = request_key(&version, line, stdin)?;
+    let identity = git_identity(&git)?;
+    let key = request_key(&identity, line, stdin)?;
 
     // 4. The entry, when it is there and sound; without a cache directory, the pack alone.
     let Ok(dir) = cache_dir(repo) else {
@@ -201,6 +204,35 @@ pub(crate) fn send(
     let _ = evict(&dir, settings.bound);
     drop(lock);
     Ok(())
+}
+
+/// Whether each of `wants` may be sent: the served tips, read in process, decide what they
+/// know; git's two children what they do not. Nothing else is served.
+fn served(git: &GitCli, repo: &ServeRepo, wants: &[GitOid]) -> Result<bool, OpError> {
+    let checked = match child::check_tips(repo, wants).map_err(serve_error)? {
+        Wants::Served => return Ok(true),
+        Wants::Unknown => child::check_wants(git, repo, wants).map_err(serve_error)?,
+        _ => return Ok(false),
+    };
+    Ok(checked == Wants::Served)
+}
+
+/// The identity of the git binary `git` runs, which the key names in place of its version: its
+/// canonical path, length, modification time in nanoseconds, device and inode. A binary
+/// replaced or moved has another.
+fn git_identity(git: &GitCli) -> Result<String, OpError> {
+    let unread =
+        |e: io::Error| OpError::new(ErrorCode::Io, format!("git: its binary: {}", e.kind()));
+    let path = fs::canonicalize(git.binary()).map_err(unread)?;
+    let meta = fs::metadata(&path).map_err(unread)?;
+    let mtime_ns = i128::from(meta.mtime()) * NANOS_PER_SEC + i128::from(meta.mtime_nsec());
+    Ok(format!(
+        "{} {} {} {mtime_ns} {}",
+        meta.dev(),
+        meta.ino(),
+        meta.len(),
+        path.to_string_lossy()
+    ))
 }
 
 /// The line after `git` in `args`, which must be `git [--shallow-file <file>] pack-objects`
@@ -272,7 +304,7 @@ pub(crate) fn service_of(args: &[OsString], stdin: &[u8]) -> ServeService {
 
 /// The key of the request `line` with `stdin`, the shallow file's bytes in place of its path
 /// (none when git names none, as it does for a client that is not shallow).
-fn request_key(version: &str, line: &[OsString], stdin: &[u8]) -> Result<String, OpError> {
+fn request_key(identity: &str, line: &[OsString], stdin: &[u8]) -> Result<String, OpError> {
     let mut parts: Vec<Vec<u8>> = Vec::with_capacity(line.len());
     let mut shallow_next = false;
     for arg in line {
@@ -291,7 +323,7 @@ fn request_key(version: &str, line: &[OsString], stdin: &[u8]) -> Result<String,
         parts.push(file);
     }
     let borrowed: Vec<&[u8]> = parts.iter().map(Vec::as_slice).collect();
-    Ok(pack_key(version, &borrowed, stdin))
+    Ok(pack_key(identity, &borrowed, stdin))
 }
 
 /// The cache's directory, made when it is missing.

@@ -7,18 +7,20 @@
 //!                                 │ stderr        │ a fetch's pack: PACK_OBJECTS_HOOK
 //!                                 ▼               ▼
 //!                       the store's paths masked  serve --hook pack-objects
-//!                       ──▶ serve's stderr        ├─ check_wants, git_version
+//!                       ──▶ serve's stderr        ├─ check_tips, check_wants on Unknown
 //!                                                 └─ pack_objects on a miss
 //! ```
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::io::{self, BufRead as _, BufReader, Read, Write};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::thread;
 
 use super::repo::{PACK_OBJECTS_HOOK, ServeError, ServeRepo};
-use crate::oid::GitOid;
+use crate::GixSource;
+use crate::oid::{GitOid, RawKind};
+use crate::source::GitSource as _;
 use crate::transport::GitCli;
 
 /// What `upload-pack` serves: no partial clone filter (M14 design §1), and no object that no
@@ -164,6 +166,32 @@ pub enum Wants {
     Served,
     /// One is not: another type, an object no ref reaches, or none at all.
     NotServed,
+    /// Not known in process: [`check_wants`] decides.
+    Unknown,
+}
+
+/// Whether each of `wants` is a tip of `repo` on a commit (the M17 closure design §3.2), read in
+/// process: `serve.git`'s refs, then each want's object header. [`Wants::Served`] when it is,
+/// else [`Wants::Unknown`], for [`check_wants`] to decide: none, a want no ref names, one on
+/// another type, an object that cannot be read.
+pub fn check_tips(repo: &ServeRepo, wants: &[GitOid]) -> Result<Wants, ServeError> {
+    // 1. Each a tip: none is no tip.
+    let tips: BTreeSet<GitOid> = repo.refs()?.into_values().collect();
+    if wants.is_empty() || !wants.iter().all(|want| tips.contains(want)) {
+        return Ok(Wants::Unknown);
+    }
+
+    // 2. Each a commit, by its header; a repository or an object not read is not known.
+    let Ok(source) = GixSource::open(repo.git_dir().as_std_path()) else {
+        return Ok(Wants::Unknown);
+    };
+    let commits = wants
+        .iter()
+        .all(|want| matches!(source.header(*want), Ok((RawKind::Commit, _))));
+    if !commits {
+        return Ok(Wants::Unknown);
+    }
+    Ok(Wants::Served)
 }
 
 /// Whether each of `wants` is a commit a ref of `repo` is or reaches (the M17 design §5 step
@@ -197,17 +225,6 @@ pub fn check_wants(git: &GitCli, repo: &ServeRepo, wants: &[GitOid]) -> Result<W
         return Ok(Wants::Served);
     }
     Ok(Wants::NotServed)
-}
-
-/// `git --version`'s line, as the git that packs prints it.
-pub fn git_version(git: &GitCli, repo: &ServeRepo) -> Result<String, ServeError> {
-    let mut version = git.serve_command(repo.git_dir().as_std_path(), &[]);
-    version.arg("--version");
-    let ran = with_input(version, Vec::new())?;
-    if !ran.status.success() {
-        return Err(failed(&io::Error::other("git --version failed")));
-    }
-    Ok(String::from_utf8_lossy(&ran.stdout).trim_end().to_owned())
 }
 
 /// git's `pack-objects` on `repo`, started as `upload-pack` would have run it, `args` the line
@@ -309,7 +326,11 @@ fn failed(e: &io::Error) -> ServeError {
 
 #[cfg(test)]
 mod tests {
-    use super::{Service, copy_masked, service_args, service_config};
+    use std::time::Duration;
+
+    use super::{Service, Wants, check_tips, copy_masked, service_args, service_config};
+    use crate::serve::repo::ServeRepo;
+    use crate::{GitSink as _, GixSink, RawKind};
 
     /// Each service's configuration: upload-pack's for reading, receive-pack's for pushing,
     /// both and `http.receivepack` behind a web server.
@@ -348,5 +369,41 @@ mod tests {
             String::from_utf8(out).unwrap(),
             "fatal: <store>/git/serve.git: broken\nlast <store>"
         );
+    }
+
+    /// Only wants that are each a served tip on a commit are served in process; anything else,
+    /// a tip on a tree, a commit no ref names, none at all, is left to git's check.
+    #[test]
+    fn only_commit_tips_are_served() {
+        // 1. serve.git with a commit on main, its tree on another ref, and a commit no ref names.
+        let root = tempfile::tempdir().unwrap();
+        let repo = ServeRepo::open(camino::Utf8Path::from_path(root.path()).unwrap()).unwrap();
+        let mut sink = GixSink::open(repo.git_dir().as_std_path()).unwrap();
+        let tree = sink.write_object(RawKind::Tree, b"").unwrap();
+        let commit = |message: &str| {
+            let bytes = format!(
+                "tree {tree}\nauthor A <a@b> 0 +0000\ncommitter A <a@b> 0 +0000\n\n{message}\n"
+            );
+            bytes.into_bytes()
+        };
+        let tip = sink.write_object(RawKind::Commit, &commit("tip")).unwrap();
+        let loose = sink
+            .write_object(RawKind::Commit, &commit("loose"))
+            .unwrap();
+        sink.sync(&[tree, tip, loose]).unwrap();
+        let lock = repo.lock(Duration::ZERO).unwrap();
+        for (name, oid) in [("refs/heads/main", tip), ("refs/heads/tree", tree)] {
+            repo.set_ref(&lock, name, None, Some(oid)).unwrap();
+        }
+
+        // 2. The tip alone is served; the rest are unknown.
+        assert_eq!(check_tips(&repo, &[tip]).unwrap(), Wants::Served);
+        for wants in [&[tree][..], &[loose], &[], &[tip, tree]] {
+            assert_eq!(
+                check_tips(&repo, wants).unwrap(),
+                Wants::Unknown,
+                "{wants:?}"
+            );
+        }
     }
 }
