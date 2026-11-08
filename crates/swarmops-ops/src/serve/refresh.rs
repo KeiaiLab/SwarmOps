@@ -15,7 +15,9 @@
 //!   git locks swept; Current? done        each served ref: export_in(force) into serve.git on
 //! c serve.lock let go; one committed      that snapshot, again on a concurrent move, 8 times
 //!   snapshot (the writer lock's wait);    at most; git/serve.state last, covered = next_seq
-//!   serve.lock again in what is left      git gc --auto once objects were written
+//!   serve.lock again in what is left;     git gc --auto once objects were written
+//!   serve.git or its state written
+//!   meanwhile? a snapshot again, held
 //! ```
 //!
 //! The export is `git export`'s own ([`swarmops_git::export::export_in`]), forced: `serve.git` is
@@ -36,7 +38,7 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, Write as _};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use camino::Utf8PathBuf;
 use swarmops_api::{ErrorCode, OpError};
@@ -235,13 +237,23 @@ fn covered(repo: &ServeRepo, seq: u64) -> bool {
 /// snapshot at least as new as the committed one once the lock is held again (another
 /// connection refreshed meanwhile). The lock is waited for `SERVE_LOCK_WAIT` (10 s) in all.
 pub fn refresh(ops: &LocalOps, repo: &ServeRepo, scope: &Scope) -> Result<Refreshed, OpError> {
+    refresh_with(ops, repo, scope, || {})
+}
+
+/// [`refresh`], running `between` after the committed snapshot, with `serve.lock` let go.
+fn refresh_with(
+    ops: &LocalOps,
+    repo: &ServeRepo,
+    scope: &Scope,
+    between: impl FnOnce(),
+) -> Result<Refreshed, OpError> {
     // 1. What a connection started after this one must see: the store's seq, lock-free.
     let deadline = Instant::now() + SERVE_LOCK_WAIT;
     let seq = ops.repo.snapshot().map_err(error::op)?.next_seq();
 
     // 2. serve.lock, then the refresh with it.
     let lock = repo.lock(SERVE_LOCK_WAIT).map_err(serve_error)?;
-    let (_lock, refreshed) = refresh_held(ops, repo, lock, scope, (seq, deadline))?;
+    let (_lock, refreshed) = refresh_held(ops, repo, lock, scope, (seq, deadline), between)?;
     Ok(refreshed)
 }
 
@@ -255,17 +267,19 @@ pub(crate) fn refresh_locked(
 ) -> Result<(ServeLock, Refreshed), OpError> {
     let deadline = Instant::now() + SERVE_LOCK_WAIT;
     let seq = ops.repo.snapshot().map_err(error::op)?.next_seq();
-    refresh_held(ops, repo, lock, scope, (seq, deadline))
+    refresh_held(ops, repo, lock, scope, (seq, deadline), || {})
 }
 
 /// Steps (b) to (d) of a refresh under `lock`: `seq` is the store's seq read before it, and
-/// `deadline` ends the wait for `serve.lock` taken again.
+/// `deadline` ends the wait for `serve.lock` taken again; `between` runs after the committed
+/// snapshot, with `serve.lock` let go.
 fn refresh_held(
     ops: &LocalOps,
     repo: &ServeRepo,
     lock: ServeLock,
     scope: &Scope,
     (seq, deadline): (u64, Instant),
+    between: impl FnOnce(),
 ) -> Result<(ServeLock, Refreshed), OpError> {
     let mut refreshed = Refreshed::default();
 
@@ -282,14 +296,42 @@ fn refresh_held(
 
     // 2. The committed snapshot with serve.lock let go: its wait for the store's writer lock
     //    holds no other connection back. Then serve.lock again, within what is left of the wait.
+    let before = written(repo);
     drop(lock);
     let (read, recovered) = ops.repo.snapshot_committed().map_err(error::op)?;
+    between();
     let left = deadline.saturating_duration_since(Instant::now());
     let lock = repo.lock(left).map_err(serve_error)?;
 
-    // 3. The export of that snapshot.
+    // 3. An export meanwhile (a push's, a land's, another refresh's) may have read a newer
+    //    snapshot than this one, which must not move serve.git back: a snapshot again, held.
+    let moved = before.1.is_none() || written(repo) != before;
+    let (read, recovered) = if moved {
+        drop(read);
+        ops.repo.snapshot_committed().map_err(error::op)?
+    } else {
+        (read, recovered)
+    };
+
+    // 4. The export of that snapshot.
     export_from(ops, repo, &lock, (&read, recovered), scope, &mut refreshed)?;
     Ok((lock, refreshed))
+}
+
+/// What an export into `repo` changes: `git/serve.state`'s bytes and modification time
+/// (`None` when it cannot be read), and `serve.git`'s refs (`None` likewise).
+type Written = (
+    Option<(String, SystemTime)>,
+    Option<BTreeMap<String, GitOid>>,
+);
+
+/// [`Written`], read now.
+fn written(repo: &ServeRepo) -> Written {
+    let path = state_dir(repo).join(STATE_FILE);
+    let text = fs::read_to_string(&path).ok();
+    let modified = fs::metadata(&path).and_then(|meta| meta.modified()).ok();
+    let state = text.zip(modified);
+    (state, repo.refs().ok())
 }
 
 /// Exports `scope`'s refs into `repo` from the committed snapshot `read`, under `lock`; with
@@ -303,9 +345,11 @@ fn export_from(
     scope: &Scope,
     refreshed: &mut Refreshed,
 ) -> Result<(), OpError> {
-    // 1. A newer export there already: another connection's, made while this one waited.
+    // 1. A newer export there already: another connection's, made while this one waited. A
+    //    full refresh's past this snapshot is newer even where serve.git moved past its state.
     let seq = read.next_seq();
-    if *scope == Scope::All && covered(repo, seq) {
+    let past = read_state(repo).is_some_and(|state| state.covered > seq);
+    if *scope == Scope::All && (past || covered(repo, seq)) {
         return Ok(());
     }
 
@@ -677,7 +721,9 @@ mod tests {
     use swarmops_testkit::fs::HoldThenFail;
     use tempfile::TempDir;
 
-    use super::{Freshness, Refreshed, Scope, export_from, freshness, freshness_with, refresh};
+    use super::{
+        Freshness, Refreshed, Scope, export_from, freshness, freshness_with, refresh, refresh_with,
+    };
     use crate::LocalOps;
 
     /// The refs the served store holds, and the git refs they are served as.
@@ -1195,5 +1241,112 @@ mod tests {
         assert_eq!(site.served(), served);
         assert_eq!(site.state(), state);
         assert_eq!(files(site.repo.git_dir().as_std_path()), files_before);
+    }
+
+    /// The `covered` line of `git/serve.state`.
+    fn covered_of(state: &str) -> u64 {
+        let line = state.lines().nth(1).expect("a covered line");
+        let seq = line.strip_prefix("covered ").expect("covered");
+        seq.parse().expect("a seq")
+    }
+
+    /// A land's export of `main` made while a refresh waits with `serve.lock` let go, after its
+    /// snapshot: the refresh, from that older snapshot, never moves `main` back.
+    #[test]
+    fn a_land_in_the_let_go_is_kept() {
+        let site = Site::new();
+        refresh(&site.ops, &site.repo, &Scope::All).expect("refresh");
+        site.commit("d", Some("main"));
+
+        // The land: commit e, then its export under serve.lock (a Covered::Keep write).
+        let between = || {
+            site.commit("e", Some("main"));
+            let lock = site.repo.lock(Duration::ZERO).expect("serve.lock");
+            let (fresh, repaired) = site.ops.repo.snapshot_committed().expect("a snapshot");
+            let scope = Scope::Refs(vec!["main".to_owned()]);
+            let mut done = Refreshed::default();
+            export_from(
+                &site.ops,
+                &site.repo,
+                &lock,
+                (&fresh, repaired),
+                &scope,
+                &mut done,
+            )
+            .expect("the land's export");
+        };
+        let done = refresh_with(&site.ops, &site.repo, &Scope::All, between).expect("refresh");
+        assert_eq!(
+            site.served()["refs/heads/main"],
+            site.exported("main"),
+            "{done:?}"
+        );
+        assert!(site.current());
+    }
+
+    /// A ref a push made while a refresh waits with `serve.lock` let go, after its snapshot:
+    /// the refresh, from that older snapshot, never deletes it.
+    #[test]
+    fn a_push_in_the_let_go_is_kept() {
+        let site = Site::new();
+        refresh(&site.ops, &site.repo, &Scope::All).expect("refresh");
+        site.commit("d", Some("main"));
+
+        // The push: topic made, then its export under serve.lock (a Covered::Keep write).
+        let between = || {
+            let head = site.ops.repo.get_ref("main").expect("read").expect("main");
+            site.create("topic", &head.target.to_string());
+            let lock = site.repo.lock(Duration::ZERO).expect("serve.lock");
+            let (fresh, repaired) = site.ops.repo.snapshot_committed().expect("a snapshot");
+            let scope = Scope::Refs(vec!["topic".to_owned()]);
+            let mut done = Refreshed::default();
+            export_from(
+                &site.ops,
+                &site.repo,
+                &lock,
+                (&fresh, repaired),
+                &scope,
+                &mut done,
+            )
+            .expect("the push's export");
+        };
+        let done = refresh_with(&site.ops, &site.repo, &Scope::All, between).expect("refresh");
+        assert_eq!(done.removed, 0, "{done:?}");
+        assert_eq!(site.served()["refs/heads/topic"], site.exported("topic"));
+        assert!(site.current());
+    }
+
+    /// An export from a snapshot older than the last full refresh's, with `serve.git` no longer
+    /// as its state says (a state write that failed), never lowers `covered` nor moves a ref
+    /// back.
+    #[test]
+    fn covered_never_goes_down() {
+        let site = Site::new();
+        let (older, repaired) = site.ops.repo.snapshot_committed().expect("a snapshot");
+        site.commit("d", Some("main"));
+        refresh(&site.ops, &site.repo, &Scope::All).expect("the newer refresh");
+        let was = covered_of(&site.state());
+
+        // serve.git's main moved past its state: the state names it no more.
+        let lock = site.repo.lock(Duration::ZERO).expect("serve.lock");
+        let main = site.served()["refs/heads/main"];
+        let other = site.served()["refs/heads/feature/x"];
+        site.repo
+            .set_ref(&lock, "refs/heads/main", Some(main), Some(other))
+            .expect("move main");
+
+        let mut done = Refreshed::default();
+        export_from(
+            &site.ops,
+            &site.repo,
+            &lock,
+            (&older, repaired),
+            &Scope::All,
+            &mut done,
+        )
+        .expect("the older export");
+        drop(lock);
+        assert!(covered_of(&site.state()) >= was, "{done:?}");
+        assert_eq!(site.served()["refs/heads/main"], other, "{done:?}");
     }
 }
