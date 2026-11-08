@@ -60,6 +60,11 @@ const GITIGNORE: &str = ".gitignore";
 /// The ignore files a walk reads in each directory.
 const IGNORE_FILES: [&str; 2] = [GITIGNORE, scan::SWARMIGNORE];
 
+/// The hint of a write refused over what the host holds: an edit is committed or discarded; a
+/// file no commit takes (an ignored one), or one in a path's way, is moved aside or deleted.
+const IN_THE_WAY: &str = "swarmops ws commit -m <message>, or swarmops ws discard <path>…; an \
+                          ignored file, or one in the way: move the file aside, or delete it";
+
 /// What a materialisation did on the host.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -312,6 +317,82 @@ pub(crate) fn preflight(
         Moves::default()
     };
     portable_over(ctx, ws, &intent, &own).map(|_| ())
+}
+
+/// Refuses, before an update of workspace `ws` calls the store, what the host holds in the way
+/// of the paths changeset `to` changed since the base, but those of `carried`, the edits the
+/// update snapshots or commits and carries: an ignored file, or a file where a directory goes
+/// (the M19 design §4.3). The check `prepare` makes again before it writes, by the same body.
+/// `E_WS_DIRTY`, nothing written.
+pub(crate) fn obstacles(
+    ctx: &Ctx<'_>,
+    ws: &Workspace,
+    to: &str,
+    carried: &BTreeSet<String>,
+) -> Result<(), OpError> {
+    // 1. Files of another changeset are the materialisation's own to check; `to` the base
+    //    moves nothing.
+    if ws.file.materialized != ws.file.head || ws.file.base == to {
+        return Ok(());
+    }
+
+    // 2. Each path `to` changed since the base under the prefixes, from the tree the files
+    //    hold to `to`'s, a page at a time.
+    let (old, new) = (
+        Tree::new(ctx.store, &ws.file.materialized),
+        Tree::new(ctx.store, to),
+    );
+    let mut changes = Vec::new();
+    let mut cursor = None;
+    loop {
+        let mut req = DiffReq::new(ws.file.base.as_str(), to);
+        if !ws.file.all {
+            req.paths.clone_from(&ws.file.prefixes);
+        }
+        req.format = DiffFormat::Names;
+        req.limit = PAGE;
+        req.cursor = cursor.take();
+        let page = ctx.store.diff(req)?;
+        for file in page.files {
+            if carried.contains(&file.path) {
+                continue;
+            }
+            changes.extend(change_at(&old, &new, &file.path)?);
+        }
+        if !page.truncated {
+            break;
+        }
+        cursor = page.cursor;
+    }
+
+    // 3. Against the host, as the write checks them.
+    check_host(
+        ctx.host.as_ref(),
+        &ws.dir,
+        ws.file.volume,
+        changes,
+        Start::Fresh,
+    )
+    .map(|_| ())
+}
+
+/// The change at `path` from tree `old` to tree `new`: a write of `new`'s file, a removal of
+/// `old`'s, or none where neither holds a file there.
+fn change_at(old: &Tree<'_>, new: &Tree<'_>, path: &str) -> Result<Option<Change>, OpError> {
+    let change = match (file_in(new, path)?, file_in(old, path)?) {
+        (Some(new), old) => Some(Change::Write { new, old }),
+        (None, Some(old)) => Some(Change::Delete { old }),
+        (None, None) => None,
+    };
+    Ok(change)
+}
+
+/// The file `tree` holds at `path`, if any: a directory is none.
+fn file_in(tree: &Tree<'_>, path: &str) -> Result<Option<Item>, OpError> {
+    match tree.entry(path)? {
+        Some(entry) if entry.kind != EntryKindOut::Dir => item(path, &entry).map(Some),
+        _ => Ok(None),
+    }
 }
 
 /// The tree entries a workspace holds.
@@ -662,10 +743,12 @@ fn check_host(
             continue;
         }
 
+        // A file above a written path holds nothing there: the blocker below names it.
         let abs = dir.join(&path);
-        let there = host
-            .symlink_metadata(&abs)
-            .map_err(|e| host_failed(&path, &e))?;
+        let there = match host.symlink_metadata(&abs) {
+            Err(e) if e.kind() == io::ErrorKind::NotADirectory => None,
+            there => there.map_err(|e| host_failed(&path, &e))?,
+        };
         let held = |item: &Item, meta: HostMeta| {
             holds(host, &abs, meta, item, volume).map_err(|e| host_failed(&item.path, &e))
         };
@@ -712,9 +795,9 @@ fn check_host(
         }
     }
 
-    // 3. Any edit in the way refuses the whole materialisation.
+    // 3. Any edit or file in the way refuses the whole materialisation.
     if !dirt.is_empty() {
-        return Err(dirty(dirt));
+        return Err(dirty(dirt).with_hint(IN_THE_WAY));
     }
     prepared.puts.sort_by(|a, b| a.item.path.cmp(&b.item.path));
     Ok(prepared)

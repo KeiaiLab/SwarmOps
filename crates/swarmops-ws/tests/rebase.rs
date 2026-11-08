@@ -831,3 +831,120 @@ fn an_open_after_the_state_names_the_update_drops_its_intent() {
     let saved = state::read(&RealFs::new(), &dir).unwrap();
     assert_eq!(saved.materialized, done.changeset);
 }
+
+/// A base that ignores `build/`, with `a.txt`; workspace `w` of the whole tree on it; `main` then
+/// adding `build/out.txt` and `gen/x.txt`.
+fn adds_under_ignores(f: &Fixture) {
+    let base = f.commit(
+        None,
+        &[
+            Put::File(".gitignore", "build/\n"),
+            Put::File("a.txt", "a\n"),
+        ],
+    );
+    f.create("w", &base, &[]);
+    f.commit(
+        Some(&base),
+        &[
+            Put::File("build/out.txt", "theirs\n"),
+            Put::File("gen/x.txt", "x\n"),
+        ],
+    );
+}
+
+/// What a refused update must leave as it was: the newest operation, `workspace.json`'s bytes,
+/// whether a pending record is there, and the files of workspace `w`.
+fn untouched(f: &Fixture) -> (u64, String, bool, Vec<(String, char, String)>) {
+    let dir = f.beside("w");
+    let swarmws = dir.join(SWARMWS_DIR);
+    (
+        f.last_op(),
+        std::fs::read_to_string(swarmws.join("workspace.json")).unwrap(),
+        swarmws.join("journal/pending.json").exists(),
+        tree_of(&dir),
+    )
+}
+
+/// An ignored file at a path `main` adds is no edit the update snapshots: the update refuses it
+/// before any store call (neither the snapshot nor the rebase is recorded), writes nothing, and
+/// its hint names the way out.
+#[test]
+fn an_ignored_obstacle_is_refused_before_the_store_rebase() {
+    // 1. An edit, which the update would snapshot, and an ignored file where `main` adds one.
+    let f = Fixture::new();
+    adds_under_ignores(&f);
+    let dir = f.beside("w");
+    write(&dir, "a.txt", "mine\n");
+    write(&dir, "build/out.txt", "mine\n");
+    let before = untouched(&f);
+
+    // 2. Refused, naming the ignored file; nothing recorded or written.
+    let refused = swarmops_ws::rebase(&f.ctx(), rebase_of("w", WsRebaseAction::Start)).unwrap_err();
+    assert_eq!(refused.code, "E_WS_DIRTY", "{refused:?}");
+    assert_eq!(
+        refused.details["paths"],
+        serde_json::json!(["build/out.txt"])
+    );
+    let hint = refused.hint.clone().unwrap_or_default();
+    assert!(hint.contains("move the file aside, or delete it"), "{hint}");
+    assert_eq!(untouched(&f), before);
+}
+
+/// Every obstacle is named in one refusal: an ignored file at a path `main` adds, and a file the
+/// agent added where `main` adds a directory, which no carry can put beside it.
+#[test]
+fn an_ignored_and_an_untracked_obstacle_are_both_listed() {
+    let f = Fixture::new();
+    adds_under_ignores(&f);
+    let dir = f.beside("w");
+    write(&dir, "build/out.txt", "mine\n");
+    write(&dir, "gen", "mine\n");
+    let before = untouched(&f);
+    let refused = swarmops_ws::rebase(&f.ctx(), rebase_of("w", WsRebaseAction::Start)).unwrap_err();
+    assert_eq!(refused.code, "E_WS_DIRTY", "{refused:?}");
+    assert_eq!(
+        refused.details["paths"],
+        serde_json::json!(["build/out.txt", "gen"])
+    );
+    assert_eq!(untouched(&f), before);
+}
+
+/// An ignored file that holds the bytes `main` adds at its path is no obstacle: the update goes
+/// through, the edit carried, the file as it was.
+#[test]
+fn a_file_holding_the_target_bytes_passes() {
+    let f = Fixture::new();
+    adds_under_ignores(&f);
+    let dir = f.beside("w");
+    write(&dir, "a.txt", "mine\n");
+    write(&dir, "build/out.txt", "theirs\n");
+    let done = swarmops_ws::rebase(&f.ctx(), rebase_of("w", WsRebaseAction::Start)).unwrap();
+    assert!(done.snapshot.is_some());
+    let files = tree_of(&dir);
+    for held in [
+        file("a.txt", "mine\n"),
+        file("build/out.txt", "theirs\n"),
+        file("gen/x.txt", "x\n"),
+    ] {
+        assert!(files.contains(&held), "{held:?} in {files:?}");
+    }
+}
+
+/// The edits `-m` commits are no obstacle at a path `main` changed too: the early check leaves
+/// them to the rebase, which merges them.
+#[test]
+fn a_message_commits_edits_main_changed_too() {
+    let f = Fixture::new();
+    moved_under_edits(&f);
+    let dir = f.beside("w");
+    write(&dir, "src/c.txt", "one\n2\n3\n4\n5\n");
+    let mut req = rebase_of("w", WsRebaseAction::Start);
+    req.message = Some("mine".to_owned());
+    let done = swarmops_ws::rebase(&f.ctx(), req).unwrap();
+    assert_eq!(done.snapshot, None);
+    assert_eq!(
+        text_at(&f, &done.changeset, "src/c.txt"),
+        "one\n2\n3\n4\nfive\n"
+    );
+    assert!(tree_of(&dir).contains(&file("src/c.txt", "one\n2\n3\n4\nfive\n")));
+}

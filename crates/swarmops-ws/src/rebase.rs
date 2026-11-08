@@ -4,6 +4,9 @@
 //! ```text
 //!  start     lock → names onto's head holds that the files cannot (and those of the edits -m
 //!            commits): E_WS_UNPORTABLE, nothing written
+//!            → what the host holds in the way of onto's changes that the update does not
+//!              carry (an ignored file, a file where a directory goes): E_WS_DIRTY, nothing
+//!              written
 //!            → a land cut short that the target does not hold: its record dropped
 //!            → edits committed (-m), or else snapshotted: journal/pending.json {key,
 //!              snapshot_key, edits, edits_key} (WS1) → S = commit{parent: head, edits}
@@ -118,6 +121,7 @@ fn start(
         .as_ref()
         .map_or(&edits[..], |found| &found.changes[..]);
     check_onto(ctx, ws, onto, named)?;
+    check_way(ctx, ws, onto, message.as_deref(), found.as_ref())?;
     let landed_key = take_over(ctx, ws, left, onto)?;
 
     // 3. A rebase cut short: its key and its snapshot; else the edits `-m` commits first.
@@ -331,6 +335,50 @@ pub(crate) fn check_onto(
 ) -> Result<(), OpError> {
     let head = ctx.store.resolve_rev(ResolveRevReq::new(onto))?;
     materialize::preflight(ctx, ws, &head.id, edits)
+}
+
+/// Refuses an update of workspace `ws` onto ref `onto` where the host holds, at a path onto's
+/// head changed, something the update does not carry (an ignored file, a file where a directory
+/// goes), before any store call: nothing is recorded (the M19 design §4.3). `found` holds the
+/// edits it snapshots; with `message`, it commits every edit; a cut record's snapshot holds
+/// those it carries.
+fn check_way(
+    ctx: &Ctx<'_>,
+    ws: &Workspace,
+    onto: &str,
+    message: Option<&str>,
+    found: Option<&Found>,
+) -> Result<(), OpError> {
+    // 1. Files of another changeset are left to the materialisation's own check.
+    if ws.file.materialized != ws.file.head {
+        return Ok(());
+    }
+
+    // 2. The paths the update carries.
+    let carried: BTreeSet<String> = if let Some(found) = found {
+        (found.changes.iter())
+            .map(|change| change.path.clone())
+            .collect()
+    } else if message.is_some() {
+        let edits = status::changes_of(ctx, ws, &Want::default())?;
+        edits.into_iter().map(|change| change.path).collect()
+    } else {
+        let cut = pending::read_pending(ctx.fs.as_ref(), &ws.dir)?;
+        let snap = cut
+            .filter(|cut| cut.op == PendingOp::Rebase && cut.head == ws.file.head)
+            .filter(|cut| cut.state == STARTING)
+            .and_then(|cut| Snap::of(&cut));
+        match snap {
+            Some(snap) => snapshot::edited(ctx, &ws.file.head, &snap.snapshot)?
+                .into_iter()
+                .collect(),
+            None => BTreeSet::new(),
+        }
+    };
+
+    // 3. The rest of what onto's head changed, against the host.
+    let head = ctx.store.resolve_rev(ResolveRevReq::new(onto))?;
+    materialize::obstacles(ctx, ws, &head.id, &carried)
 }
 
 /// Continues workspace `ws`'s rebase with its resolutions: refused while a conflict is

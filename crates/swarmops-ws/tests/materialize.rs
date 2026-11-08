@@ -1936,3 +1936,24 @@ mod swap_race {
         }
     }
 }
+
+/// An ignored file in the way of an update is refused with a hint that names what frees the
+/// path: no commit takes an ignored file, so the file is moved aside or deleted.
+#[test]
+fn the_hint_names_moving_the_file() {
+    // 1. A base that ignores `*.log`; the next changeset adds `x.log`; the agent's own is there.
+    let f = Fixture::new();
+    let base = f.commit(None, &[Put::File(".gitignore", "*.log\n")]);
+    f.create("w", &base, &[]);
+    let next = f.commit(Some(&base), &[Put::File("x.log", "theirs\n")]);
+    write(&f.beside("w"), "x.log", "mine\n");
+
+    // 2. Refused, the hint naming the way out.
+    let ctx = f.ctx();
+    let mut ws = Fixture::open(&ctx, "w");
+    let _held = lock::acquire(&ws.dir).unwrap();
+    let refused = materialize::update(&ctx, &mut ws, &next).unwrap_err();
+    assert_eq!(refused.code, "E_WS_DIRTY", "{refused:?}");
+    let hint = refused.hint.unwrap_or_default();
+    assert!(hint.contains("move the file aside, or delete it"), "{hint}");
+}
