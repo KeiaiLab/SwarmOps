@@ -2441,6 +2441,8 @@ Kind: object. `swarmops schema WsStatus` prints its JSON Schema.
 | `head` | `string` | yes | Its chain's last changeset. |
 | `main` | `string` | yes | The head of the workspace's target ref (`main`, or `release/<name>`), read first. |
 | `name` | `string` | yes | The workspace's name. |
+| `outside` | array of `string` | no | A sparse workspace's topmost entries off its prefixes, in path order: edits `ws commit` and `ws land` refuse until `ws materialize` widens the prefixes. At most the first 1,000, on every page. |
+| `outside_truncated` | `boolean` | no | Whether `outside` stopped at 1,000 entries. |
 | `rebasing` | [`WsRebasing`](#wsrebasing) or `null` | no | The rebase in progress, when `state` is `rebasing`. |
 | `state` | [`WsState`](#wsstate) | yes | Whether the workspace is rebasing. |
 | `truncated` | `boolean` | yes | Whether more changes follow: give `cursor` to read them. |

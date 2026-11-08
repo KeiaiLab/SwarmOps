@@ -4,10 +4,11 @@
 use swarmops_api::WsChangeKind::{Added, Deleted, ModeChanged, Modified, TypeChanged};
 use swarmops_api::{
     ChangeInput, ChangeOp, CommitReq, ContentInput, Identity, RefSetReq, StatusAfter, StoreOps,
-    WsDiscardReq, WsState, WsStatusReq,
+    WsCommitReq, WsDiscardReq, WsState, WsStatusReq,
 };
 use swarmops_ws::RealFs;
 use swarmops_ws::state::{self, SWARMWS_DIR};
+use swarmops_ws::status::MAX_STATUS_OUTSIDE;
 
 use crate::fixture::{AGENT, Fixture, Put, Watched, change, changes, remove, tree_of, write};
 
@@ -628,6 +629,58 @@ fn behind_by_caps_the_base_walk() {
         (watched.count("resolve_rev"), watched.count("log")),
         (2, 101)
     );
+}
+
+/// A sparse workspace's status lists the edits off its prefixes that `ws commit` refuses, the
+/// same paths as the refusal's `details.paths`; the edit inside stays a change. At most the
+/// first 1,000 are listed, `outside_truncated` past them.
+#[test]
+fn status_lists_an_outside_edit_that_commit_refuses() {
+    // 1. A workspace of `src`: an edit inside, a directory and a file outside.
+    let f = Fixture::new();
+    let base = f.commit(None, &[Put::File("src/a.txt", "a\n")]);
+    f.create("w", &base, &["src"]);
+    let dir = f.beside("w");
+    write(&dir, "src/x", "x\n");
+    write(&dir, "docs/a", "doc\n");
+    write(&dir, "README", "readme\n");
+
+    // 2. Status: the edit inside as a change, the topmost entries outside listed apart.
+    let page = swarmops_ws::status(&f.ctx(), page_of("w")).unwrap();
+    let listed: Vec<_> = (page.changes.iter())
+        .map(|c| (c.path.clone(), c.kind))
+        .collect();
+    assert_eq!(listed, [change("src/x", Added)]);
+    assert_eq!(page.outside, ["README", "docs"]);
+    assert!(!page.outside_truncated);
+
+    // 3. The commit refuses the same paths.
+    let req = WsCommitReq::new("w".to_owned(), "outside".to_owned());
+    let refused = swarmops_ws::commit(&f.ctx(), req).unwrap_err();
+    assert_eq!(refused.code, "E_WS_OUTSIDE_PREFIXES", "{refused:?}");
+    let paths: Vec<&str> = (refused.details["paths"].as_array().unwrap().iter())
+        .map(|path| path.as_str().unwrap())
+        .collect();
+    assert_eq!(page.outside, paths);
+
+    // 4. 1,001 entries outside: the first 1,000 listed, marked truncated.
+    let more: Vec<String> = (0..999).map(|i| format!("o{i:04}")).collect();
+    for path in &more {
+        write(&dir, path, "o\n");
+    }
+    let page = swarmops_ws::status(&f.ctx(), page_of("w")).unwrap();
+    let mut all: Vec<String> = ["README", "docs"].map(str::to_owned).into();
+    all.extend(more);
+    all.sort();
+    assert_eq!(MAX_STATUS_OUTSIDE, 1_000);
+    assert_eq!(page.outside, all[..1_000]);
+    assert!(page.outside_truncated);
+
+    // 5. Exactly 1,000: listed whole.
+    std::fs::remove_file(dir.join("README")).unwrap();
+    let page = swarmops_ws::status(&f.ctx(), page_of("w")).unwrap();
+    assert_eq!(page.outside.len(), 1_000);
+    assert!(!page.outside_truncated);
 }
 
 /// `ws discard` without paths restores every change status finds: edits, deletions, kinds and

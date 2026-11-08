@@ -6,6 +6,7 @@
 //!  log{main, 100, cursor}…           until base, at most 10,000 counted
 //!  log{base, 100, cursor}…           base not met: until a changeset main's log held
 //!  scan (the index, the walker) ──▶ changes, a page after `cursor`, `limit` long
+//!                                   and the edits off the prefixes, the first 1,000
 //!
 //!  stale (each command that reads or writes against the base, the M19 design §3):
 //!  resolve_rev{target}, ancestry{base, head, limit 0}   the head reaches the base: current
@@ -33,6 +34,10 @@ use crate::workspace::{Locate, Workspace};
 
 /// The most changesets `behind_by` counts: past it, the count stops there.
 pub const BEHIND_CAP: u64 = 10_000;
+
+/// The most entries off a sparse workspace's prefixes a status lists: past it,
+/// `outside_truncated`.
+pub const MAX_STATUS_OUTSIDE: usize = 1_000;
 
 /// The changesets one `log` page of `behind_by` asks for.
 const LOG_PAGE: usize = 100;
@@ -89,8 +94,11 @@ pub(crate) fn page(
     refuse_stale(ctx.store, &ws.file)?;
     let (main, behind_by) = behind(ctx.store, &ws.file.target, &ws.file.base)?;
 
-    // 2. The changes, the index kept for the next scan.
-    let changes = changes_of(ctx, ws, want)?;
+    // 2. The changes, the index kept for the next scan; the edits off the prefixes a commit
+    //    refuses, the first of them.
+    let mut scanned = scan::scan(ctx, ws, want)?;
+    let (outside, outside_truncated) = capped(std::mem::take(&mut scanned.outside));
+    let changes = scanned.keep(&ws.dir, &scan::binding_of(ws), Keep::IfChanged);
 
     // 3. The page after the cursor.
     let rest: Vec<&Change> = (changes.iter())
@@ -128,7 +136,16 @@ pub(crate) fn page(
     );
     out.rebasing = rebasing;
     out.cursor = cursor;
+    out.outside = outside;
+    out.outside_truncated = outside_truncated;
     Ok(out)
+}
+
+/// The first [`MAX_STATUS_OUTSIDE`] of `outside`, and whether more followed.
+fn capped(mut outside: Vec<String>) -> (Vec<String>, bool) {
+    let truncated = outside.len() > MAX_STATUS_OUTSIDE;
+    outside.truncate(MAX_STATUS_OUTSIDE);
+    (outside, truncated)
 }
 
 /// Every change of workspace `ws` that `want` asks for, by path; its index kept.

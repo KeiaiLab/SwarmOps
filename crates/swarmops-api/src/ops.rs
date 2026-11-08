@@ -3660,6 +3660,14 @@ pub struct WsStatus {
     /// Where this page stopped.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
+    /// A sparse workspace's topmost entries off its prefixes, in path order: edits `ws commit`
+    /// and `ws land` refuse until `ws materialize` widens the prefixes. At most the first 1,000,
+    /// on every page.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outside: Vec<String>,
+    /// Whether `outside` stopped at 1,000 entries.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub outside_truncated: bool,
 }
 
 impl WsStatus {
@@ -3687,6 +3695,8 @@ impl WsStatus {
             rebasing: None,
             truncated,
             cursor: None,
+            outside: Vec::new(),
+            outside_truncated: false,
         }
     }
 }

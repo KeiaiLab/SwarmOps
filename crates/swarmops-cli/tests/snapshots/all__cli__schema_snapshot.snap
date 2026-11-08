@@ -10169,6 +10169,17 @@ expression: s.redact(&all)
               "description": "The workspace's name.",
               "type": "string"
             },
+            "outside": {
+              "description": "A sparse workspace's topmost entries off its prefixes, in path order: edits `ws commit`\nand `ws land` refuse until `ws materialize` widens the prefixes. At most the first 1,000,\non every page.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "outside_truncated": {
+              "description": "Whether `outside` stopped at 1,000 entries.",
+              "type": "boolean"
+            },
             "rebasing": {
               "anyOf": [
                 {
@@ -10634,6 +10645,17 @@ expression: s.redact(&all)
               "description": "The workspace's name.",
               "type": "string"
             },
+            "outside": {
+              "description": "A sparse workspace's topmost entries off its prefixes, in path order: edits `ws commit`\nand `ws land` refuse until `ws materialize` widens the prefixes. At most the first 1,000,\non every page.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "outside_truncated": {
+              "description": "Whether `outside` stopped at 1,000 entries.",
+              "type": "boolean"
+            },
             "rebasing": {
               "anyOf": [
                 {
@@ -10828,6 +10850,17 @@ expression: s.redact(&all)
             "name": {
               "description": "The workspace's name.",
               "type": "string"
+            },
+            "outside": {
+              "description": "A sparse workspace's topmost entries off its prefixes, in path order: edits `ws commit`\nand `ws land` refuse until `ws materialize` widens the prefixes. At most the first 1,000,\non every page.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "outside_truncated": {
+              "description": "Whether `outside` stopped at 1,000 entries.",
+              "type": "boolean"
             },
             "rebasing": {
               "anyOf": [
@@ -11286,6 +11319,17 @@ expression: s.redact(&all)
               "description": "The workspace's name.",
               "type": "string"
             },
+            "outside": {
+              "description": "A sparse workspace's topmost entries off its prefixes, in path order: edits `ws commit`\nand `ws land` refuse until `ws materialize` widens the prefixes. At most the first 1,000,\non every page.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "outside_truncated": {
+              "description": "Whether `outside` stopped at 1,000 entries.",
+              "type": "boolean"
+            },
             "rebasing": {
               "anyOf": [
                 {
@@ -11544,6 +11588,17 @@ expression: s.redact(&all)
               "description": "The workspace's name.",
               "type": "string"
             },
+            "outside": {
+              "description": "A sparse workspace's topmost entries off its prefixes, in path order: edits `ws commit`\nand `ws land` refuse until `ws materialize` widens the prefixes. At most the first 1,000,\non every page.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "outside_truncated": {
+              "description": "Whether `outside` stopped at 1,000 entries.",
+              "type": "boolean"
+            },
             "rebasing": {
               "anyOf": [
                 {
@@ -11784,6 +11839,17 @@ expression: s.redact(&all)
             "name": {
               "description": "The workspace's name.",
               "type": "string"
+            },
+            "outside": {
+              "description": "A sparse workspace's topmost entries off its prefixes, in path order: edits `ws commit`\nand `ws land` refuse until `ws materialize` widens the prefixes. At most the first 1,000,\non every page.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "outside_truncated": {
+              "description": "Whether `outside` stopped at 1,000 entries.",
+              "type": "boolean"
             },
             "rebasing": {
               "anyOf": [
@@ -12108,6 +12174,17 @@ expression: s.redact(&all)
               "description": "The workspace's name.",
               "type": "string"
             },
+            "outside": {
+              "description": "A sparse workspace's topmost entries off its prefixes, in path order: edits `ws commit`\nand `ws land` refuse until `ws materialize` widens the prefixes. At most the first 1,000,\non every page.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "outside_truncated": {
+              "description": "Whether `outside` stopped at 1,000 entries.",
+              "type": "boolean"
+            },
             "rebasing": {
               "anyOf": [
                 {
@@ -12417,6 +12494,17 @@ expression: s.redact(&all)
               "description": "The workspace's name.",
               "type": "string"
             },
+            "outside": {
+              "description": "A sparse workspace's topmost entries off its prefixes, in path order: edits `ws commit`\nand `ws land` refuse until `ws materialize` widens the prefixes. At most the first 1,000,\non every page.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "outside_truncated": {
+              "description": "Whether `outside` stopped at 1,000 entries.",
+              "type": "boolean"
+            },
             "rebasing": {
               "anyOf": [
                 {
@@ -12637,6 +12725,17 @@ expression: s.redact(&all)
         "name": {
           "description": "The workspace's name.",
           "type": "string"
+        },
+        "outside": {
+          "description": "A sparse workspace's topmost entries off its prefixes, in path order: edits `ws commit`\nand `ws land` refuse until `ws materialize` widens the prefixes. At most the first 1,000,\non every page.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "outside_truncated": {
+          "description": "Whether `outside` stopped at 1,000 entries.",
+          "type": "boolean"
         },
         "rebasing": {
           "anyOf": [
