@@ -2364,4 +2364,50 @@ remote-perf: second sync 12000 nokey git.rev-list 6.0 (count 1)
 remote-perf: second sync 12000 nokey git.gc 2.9 (count 2)
 remote-perf: second sync 12000 nokey git.merge-base 1.9 (count 1)
 remote-perf: second sync 12000 nokey git.push 25.0 (count 1)
+
+## M18 continuous-sync lane — 2026-11-08
+
+The M18 design §2.4 (requirement R-2026-10-28-A4): `sync_load::sync_keeps_pace_with_landing`,
+release build with the test hooks (`--all-features`), on the M18-3 code over `stable`
+`25a853f6`, alone under the heavy lock. 50 agents land on `main` through the binary, open loop,
+one land each every 2.5 s (20 lands/s offered) for 10 minutes, files of their own (no
+conflicts); one syncer runs `sync origin` again as soon as one ends, against the test kit's
+loopback server, which only receives; a sampler reads the lag once a second: the lands on `main`
+above the changeset the remote's head carries. The case took 655.0 s, at a 1-minute load of
+263.35 at its start and 117.68 at its end: other workloads on the shared host, not a quiet one.
+
+| Figure | Value |
+| --- | --- |
+| Lag ratio, last minute's mean over the first's (target ≤ 1.5) | 0.520 (met) |
+| Lag, first and last sample | 0, 568 |
+| Lag mean by minute, 0 to 9 | 253.0, 164.2, 6.3, 43.9, 135.8, 4.4, 4.0, 4.8, 6.9, 122.2 |
+| Lands landed, unlanded; lands/s | 12,000, 0; 20.00 |
+| Land p99 beside the syncer | 3.013 s |
+| Syncs run | 1,981 |
+
+Reading: the lag does not grow over the run, so a sync keeps pace with 20 lands/s on average,
+but it is bursty: 4 to 7 lands in the quiet minutes, hundreds where the host's load stalled the
+syncer. The ratio reads two such stretches, the first minute (mean 253.0) and the last (about 131.6,
+minute 9 and the final sample); it is below 1 because the first was the larger, so it says no
+growth, not a steady lag.
+Every land reached the remote's first parents exactly once, no sync rewrote an imported commit,
+and `verify --deep` stayed clean (the case's assertions). The land p99 is not G4's case (that is
+`landing::perf::landing_under_load`); this lane does not change it. The case joins
+`ci_perf_cases` and `just perf`, and `scheduled.yml`'s `perf-cases` timeout goes from 370 to 390
+minutes by its rule (60 + twice 9,693 s + 5, rounded up to 5). A run on a quiet host is still
+owed.
+
+```text
+sync-load: lag first 0 last 568 ratio 0.520 samples=601 syncs=1981 landed=12000 unlanded=0 lands_per_s=20.00 land_p99_us=3013493 wall_ms=601000 load_start=263.35 load_end=117.68
+sync-load: minute 0 lag_mean 253.03
+sync-load: minute 1 lag_mean 164.20
+sync-load: minute 2 lag_mean 6.33
+sync-load: minute 3 lag_mean 43.92
+sync-load: minute 4 lag_mean 135.82
+sync-load: minute 5 lag_mean 4.37
+sync-load: minute 6 lag_mean 3.98
+sync-load: minute 7 lag_mean 4.75
+sync-load: minute 8 lag_mean 6.85
+sync-load: minute 9 lag_mean 122.15
+sync-load: minute 10 lag_mean 568.00
 ```

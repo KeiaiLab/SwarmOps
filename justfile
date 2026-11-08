@@ -98,14 +98,15 @@ check-ci-slow:
 # `serve_perf`'s six, `intake_perf`'s three (`commits_beside_an_import`, its control lane
 # `committers_alone` and `import_memory`), `serve_load`'s two and the workspace's checked land;
 # and G4's landing lanes (`landing::perf::landing_under_load`, four lanes of 2 minutes, about 9 to
-# 11 minutes in all), past half the ci-slow kill. `check-ci-slow` leaves them out,
-# `check-ci-perf` runs them, `check-slow` runs them optimized. swarmops-core's `supply_chain` tests fail a
+# 11 minutes in all), and the continuous-sync lane (`sync_load::sync_keeps_pace_with_landing`, 50
+# agents for 10 minutes beside a syncer), past half the ci-slow kill. `check-ci-slow` leaves them
+# out, `check-ci-perf` runs them, `check-slow` runs them optimized. swarmops-core's `supply_chain` tests fail a
 # case `check-ci-slow` leaves out that no scheduled job runs optimized and one at a time.
-ci_perf_cases := 'test(=remote_perf::clone_cost_on_12000_commits) | test(=remote_perf::fetch_and_push_scale_with_history) | test(=remote_perf::fetch_phases_scale_with_history) | test(=remote_perf::sync_of_one_land_on_12000_commits) | test(=remote_perf::sync_phases_scale_with_history) | test(=remote_perf::first_sync_phases) | test(/^serve_perf::/) | test(/^intake_perf::/) | test(/^serve_load::/) | test(=landing::perf::landing_under_load) | test(=ws_processes::perf::perf_checked_land_overhead_on_12000_changesets)'
+ci_perf_cases := 'test(=remote_perf::clone_cost_on_12000_commits) | test(=remote_perf::fetch_and_push_scale_with_history) | test(=remote_perf::fetch_phases_scale_with_history) | test(=remote_perf::sync_of_one_land_on_12000_commits) | test(=remote_perf::sync_phases_scale_with_history) | test(=remote_perf::first_sync_phases) | test(/^serve_perf::/) | test(/^intake_perf::/) | test(/^serve_load::/) | test(=landing::perf::landing_under_load) | test(=sync_load::sync_keeps_pace_with_landing) | test(=ws_processes::perf::perf_checked_land_overhead_on_12000_changesets)'
 
 # `ci_perf_cases` optimized and one at a time (`--no-capture`), as `perf` runs them, printing their
-# `remote-perf: `, `serve-perf: `, `intake-perf: `, `serve-load: `, `landing-perf: ` and `ws-perf: `
-# lines. They assert what they ran, never its time.
+# `remote-perf: `, `serve-perf: `, `intake-perf: `, `serve-load: `, `landing-perf: `, `sync-load: `
+# and `ws-perf: ` lines. They assert what they ran, never its time.
 # Measured optimized on this host: the clone cost 850.5 s and `serve_perf`'s three 1,599.3 to
 # 1,650.0 s (docs/perf.md, "v0.7.0"), the other four `remote_perf` cases 346.0 to 389.5 s in the
 # same window, the checked land 313.5 s in v0.5.0's; 7,541.4 s in all before the M17 cases, whose
@@ -151,6 +152,9 @@ _bench-fresh:
 # landing agents and against git's own server, 10 minutes each) print `serve-load: ` lines.
 # The intake cases (`intake_perf::*`: the import beside 8 committers, the committers alone,
 # the import's memory alone) print `intake-perf: ` lines.
+# The continuous-sync lane (`sync_load::sync_keeps_pace_with_landing`: 50 agents at 20 lands/s
+# for 10 minutes beside one syncer, the remote's lag read every second) prints `sync-load: `
+# lines.
 # The CLI contention test and G4's landing measurement (`landing::perf::landing_under_load`,
 # open loop: one land per agent every 2 s for 120 s) run at 32 and at 50 processes
 # (`SWARMOPS_PERF_PROCESSES` lists others; the landing store under the bench directory), and
@@ -208,6 +212,11 @@ perf:
     cargo nextest run --locked --release -p swarmops-cli --all-features --run-ignored ignored-only \
         -E 'test(/^serve_load::/)' --no-capture 2>&1 | tee target/perf/serve-load.log \
         | grep --line-buffered '^serve-load: '
+    [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
+    load between
+    cargo nextest run --locked --release -p swarmops-cli --all-features --run-ignored ignored-only \
+        -E 'test(=sync_load::sync_keeps_pace_with_landing)' --no-capture 2>&1 \
+        | tee target/perf/sync-load.log | grep --line-buffered '^sync-load: '
     [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
     load between
     cargo nextest run --locked --release -p swarmops-cli --all-features --run-ignored ignored-only \

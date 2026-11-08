@@ -42,6 +42,7 @@ mod serve_push;
 mod serve_records;
 mod sigkill;
 mod so;
+mod sync_load;
 mod ws;
 mod ws_processes;
 

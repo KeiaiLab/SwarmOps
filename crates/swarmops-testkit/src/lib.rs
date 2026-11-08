@@ -38,6 +38,8 @@
 //!   ssh stand-in (M17).
 //! - [`served_load`]: git clients that push their own branch and fetch the trunk on a schedule,
 //!   each command's outcome read off git's output, for served traffic under load (M17).
+//! - [`sync_load`]: landers through the binary beside a syncer, the remote's lag read once a
+//!   second, and the lag's last-minute over first-minute ratio (the M18 design §2.4).
 //! - [`ws`]: the workspaces' synthetic trees and edit driver (M5).
 //!
 //! It depends on no crate above `swarmops-repo`: the operations' unit tests use it, and a
@@ -82,4 +84,6 @@ pub mod serve;
 #[cfg(all(feature = "cli", feature = "repo"))]
 pub mod served_load;
 pub mod store;
+#[cfg(all(feature = "cli", feature = "repo"))]
+pub mod sync_load;
 pub mod ws;

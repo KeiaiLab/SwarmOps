@@ -498,8 +498,10 @@ jobs:
     # `just perf` has not measured yet, so the value waits for that run: it is then recomputed by
     # this rule from the new sum, never set by a guess. M18-1 added `remote_perf::first_sync_phases`,
     # measured at 1,497 s (docs/perf.md, "M18 first sync profile"): 60 + twice 9,038 s (301
-    # minutes) + 5 = 366, rounded up to 370.
-    timeout-minutes: 370
+    # minutes) + 5 = 366, rounded up to 370. M18-3 added `sync_load::sync_keeps_pace_with_landing`,
+    # measured at 655 s (docs/perf.md, "M18 continuous-sync lane"): 60 + twice 9,693 s (323.1
+    # minutes) + 5 = 388.1, rounded up to 390.
+    timeout-minutes: 390
     env:
       CARGO_TERM_COLOR: always
       HEAVY_LOCK: /data/swarmops/locks/heavy.lock
