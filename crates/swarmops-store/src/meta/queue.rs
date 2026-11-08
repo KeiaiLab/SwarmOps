@@ -1800,9 +1800,13 @@ mod tests {
         (rid, file)
     }
 
-    /// Writes `answer` as `rid`'s answer.
+    /// Writes `answer` as `rid`'s answer, renamed into place as a leader's `publish` does: a
+    /// waiter polls the name and reads without the lock, so it must never see it half written.
     fn seed_answer(root: &Utf8PathBuf, rid: &RequestId, answer: &Answer) {
-        fs::write(Kind::Ans.path(&queue(root), rid), encode_answer(answer)).unwrap();
+        let dir = queue(root);
+        let temp = Kind::TempAns.path(&dir, rid);
+        fs::write(&temp, encode_answer(answer)).unwrap();
+        fs::rename(&temp, Kind::Ans.path(&dir, rid)).unwrap();
     }
 
     /// Writes `manifest` as `leader`'s.
