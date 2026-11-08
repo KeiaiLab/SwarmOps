@@ -1,18 +1,24 @@
-//! The scan of `ws status` (§4.1 of the M5 design): the index's tracked paths stat'd through
-//! `HostFs`, the untracked additions found by one configured walker, and the files hashed with
-//! at most [`HASH_BYTES_IN_FLIGHT`] bytes held at once.
+//! The scan of `ws status` (§4.1 of the M5 design): one configured walk over the prefixes, on
+//! `SCAN_THREADS` (8) threads, stats through `HostFs` each tracked row where it meets the row's
+//! entry and finds the untracked additions beside them; the rows it does not meet are stat'd
+//! apart; the files are hashed with at most [`HASH_BYTES_IN_FLIGHT`] bytes held at once (the
+//! M19 design §8.1).
 //!
 //! ```text
-//!  index.bin (or the head's tree, rebuilt) ──▶ rows ──▶ symlink_metadata, in parallel
-//!                                                         │ stat equal, mtime before the index
-//!                                                         ├──────────────▶ unchanged
-//!                                                         └─ else hashed ─▶ unchanged, row
-//!                                                                           refreshed; or changed
-//!  walker(root, prefixes) ──▶ files the rows lack and no ignore file names ──▶ added
-//!                          └─▶ the topmost entries off the prefixes no ignore file names ──▶ outside
+//!  index.bin (or the head's tree, rebuilt) ──▶ rows
+//!                                               │
+//!  walker(root, prefixes) ──▶ a row's entry ────┴─▶ symlink_metadata ──┐
+//!       │                 ──▶ a row it never met (ignored, gone) ──────┤
+//!       │                                                              │ stat equal, mtime
+//!       │                                                              │ before the index
+//!       │                                                              ├──────────▶ unchanged
+//!       │                                                              └─ else hashed ─▶ unchanged,
+//!       │                                                                 row refreshed; or changed
+//!       ├─▶ files the rows lack and no ignore file names ──▶ added
+//!       └─▶ the topmost entries off the prefixes no ignore file names ──▶ outside
 //! ```
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::io;
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -33,6 +39,11 @@ use crate::{Ctx, io_error};
 /// The most bytes of file content the hasher holds at once: a file is read only when its size
 /// fits what is left, else it waits; a larger file runs alone.
 pub const HASH_BYTES_IN_FLIGHT: u64 = 1 << 30;
+
+/// The threads of a scan's walk and of its stats apart: one bounded count in place of rayon's
+/// global pool (a thread per core) and `ignore`'s default. 8 is the figure of the M14 profile's
+/// lead for the parallel stat (the M19 design §8.1); a constant, not a setting.
+const SCAN_THREADS: usize = 8;
 
 /// The custom ignore file, read beside each `.gitignore`, in its syntax.
 pub const SWARMIGNORE: &str = ".swarmignore";
@@ -223,6 +234,11 @@ pub(crate) fn outside(ctx: &Ctx<'_>, ws: &Workspace) -> Result<Vec<String>, OpEr
 
 /// Scans workspace `ws` as `want` says: its changes against its head, and its index refreshed.
 pub(crate) fn scan(ctx: &Ctx<'_>, ws: &Workspace, want: &Want) -> Result<Scanned, OpError> {
+    scan_on(ctx, ws, want, SCAN_THREADS)
+}
+
+/// [`scan`] on `threads` threads.
+fn scan_on(ctx: &Ctx<'_>, ws: &Workspace, want: &Want, threads: usize) -> Result<Scanned, OpError> {
     // 1. The next index's temp first: its mtime is the filesystem's clock before any stat.
     let dir = &ws.dir;
     let temp = tempfile::Builder::new()
@@ -244,13 +260,22 @@ pub(crate) fn scan(ctx: &Ctx<'_>, ws: &Workspace, want: &Want) -> Result<Scanned
     };
     index.written_ns = written_ns;
 
-    // 3. The tracked rows, stat'd in parallel; those whose stat says nothing, hashed.
+    // 3. The one walk: the wanted rows' stats and the untracked files; those rows whose stat
+    //    says nothing, hashed.
     let wanted = |path: &str| want.paths.is_empty() || materialize::covered(path, &want.paths);
     let host = ctx.host.as_ref();
-    let looks: Vec<Look> = (index.rows.par_iter().enumerate())
-        .filter(|(_, row)| wanted(&row.path))
-        .map(|(at, row)| look(host, ws, row, at, stale_ns, want))
-        .collect::<Result<_, _>>()?;
+    let pass = Pass {
+        host,
+        ws,
+        index: &index,
+        stale_ns,
+        want,
+    };
+    let Walked {
+        looks,
+        added,
+        strays,
+    } = pass.walk(threads)?;
     let to_hash: Vec<(String, HostFile)> = (looks.iter())
         .filter(|look| look.hash)
         .filter_map(|look| Some((index.rows[look.at].path.clone(), look.file?)))
@@ -280,12 +305,10 @@ pub(crate) fn scan(ctx: &Ctx<'_>, ws: &Workspace, want: &Want) -> Result<Scanned
         smudge(row, stale_ns);
     }
 
-    // 6. The untracked additions under the prefixes; what lies off them, noted, with the tree
-    //    paths off them a walk does not see.
-    let tracked: HashSet<&str> = index.rows.iter().map(|row| row.path.as_str()).collect();
-    let (added, walked) = untracked(ctx.host.as_ref(), ws, &tracked)?;
+    // 6. The untracked additions the walk found; what lies off the prefixes, noted, with the
+    //    tree paths off them a walk does not see.
     let tree = materialize::tree_outside(ctx.store, ctx.host.as_ref(), ws)?;
-    let outside = joined(walked, tree);
+    let outside = joined(strays, tree);
     for (path, meta) in added {
         if !wanted(&path) {
             continue;
@@ -514,63 +537,171 @@ pub(crate) fn blob_of(hex: &str) -> Result<Blob, OpError> {
     })
 }
 
-/// The files and symlinks below the root of workspace `ws`, under its prefixes, that `tracked`
-/// lacks and no ignore file names, with their stat; paths that are not UTF-8 are passed over (a
-/// repository path is UTF-8). Beside them, sorted, the topmost entries off the prefixes no
-/// ignore file names.
-fn untracked(
-    host: &dyn HostFs,
-    ws: &Workspace,
-    tracked: &HashSet<&str>,
-) -> Result<(Vec<Found>, Vec<String>), OpError> {
-    // 1. The walk, in parallel, keeping what no row names and noting what lies off the prefixes.
-    let prefixes = if ws.file.all {
-        Vec::new()
-    } else {
-        ws.file.prefixes.clone()
-    };
-    let strays = Strays::default();
-    let found = Mutex::new(Vec::new());
-    let failed = Mutex::new(None);
-    let walk = configured(&ws.dir, &prefixes, Some(Arc::clone(&strays)));
-    walk.build_parallel().run(|| {
-        Box::new(|entry| {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(e) => {
-                    failed
-                        .lock()
-                        .expect("no walker panicked")
-                        .get_or_insert(e.to_string());
-                    return WalkState::Quit;
-                }
-            };
-            let is_file =
-                (entry.file_type()).is_some_and(|kind| kind.is_file() || kind.is_symlink());
-            if let Some(rel) = relative(&ws.dir, entry.path())
-                && is_file
-                && !tracked.contains(rel.as_str())
-            {
-                found.lock().expect("no walker panicked").push(rel);
-            }
-            WalkState::Continue
-        })
-    });
-    walk_failed(failed)?;
+/// What one walk of a scan found.
+struct Walked {
+    /// The stat of each wanted tracked row, in row order.
+    looks: Vec<Look>,
+    /// The files and symlinks no row names and no ignore file names, with their stat, by path.
+    added: Vec<Found>,
+    /// The topmost entries off the prefixes no ignore file names, sorted.
+    strays: Vec<String>,
+}
 
-    // 2. Each one's stat, through the host layer; one gone since is not there.
-    let mut found = found.into_inner().expect("no walker panicked");
-    found.sort();
-    let mut out = Vec::with_capacity(found.len());
-    for path in found {
-        let meta = host
-            .symlink_metadata(&ws.dir.join(&path))
-            .map_err(|e| materialize::host_failed(&path, &e))?;
-        if let Some(meta) = meta.filter(|m| matches!(m.kind, HostKind::File | HostKind::Symlink)) {
-            out.push((path, meta));
-        }
+/// What an entry of the walk is to the scan.
+enum Met {
+    /// A wanted tracked row's, stat'd.
+    Row(Look),
+    /// An untracked file's, with its stat.
+    Added(Found),
+    /// Neither: a directory, an unwanted row, a file gone since the walk listed it.
+    Nothing,
+}
+
+/// One scan's walk over workspace `ws` and the rows of `index`, written at `stale_ns`.
+struct Pass<'a> {
+    /// The host layer every stat goes through.
+    host: &'a dyn HostFs,
+    /// The workspace scanned.
+    ws: &'a Workspace,
+    /// Its rows.
+    index: &'a Index,
+    /// When the index the rows came from was written (the racy rule).
+    stale_ns: i64,
+    /// What the scan looks at.
+    want: &'a Want,
+}
+
+impl Pass<'_> {
+    /// Whether the scan looks at repository path `path`.
+    fn wanted(&self, path: &str) -> bool {
+        self.want.paths.is_empty() || materialize::covered(path, &self.want.paths)
     }
-    Ok((out, sorted(&strays)))
+
+    /// The stat of the `at`-th row.
+    fn look_at(&self, at: usize) -> Result<Look, OpError> {
+        let row = &self.index.rows[at];
+        look(self.host, self.ws, row, at, self.stale_ns, self.want)
+    }
+
+    /// The walk below the workspace's root, under its prefixes, on `threads` threads: each
+    /// wanted row stat'd where the walk meets its entry, else apart; each file no row names and
+    /// no ignore file names, with its stat; the topmost entries off the prefixes. Paths that are
+    /// not UTF-8 are passed over (a repository path is UTF-8).
+    fn walk(&self, threads: usize) -> Result<Walked, OpError> {
+        // 1. The walk, in parallel, noting what lies off the prefixes.
+        let ws = self.ws;
+        let prefixes = if ws.file.all {
+            Vec::new()
+        } else {
+            ws.file.prefixes.clone()
+        };
+        let strays = Strays::default();
+        let met = Mutex::new(Vec::new());
+        let found = Mutex::new(Vec::new());
+        let failed = Mutex::new(None);
+        let refused = Mutex::new(None);
+        let mut walk = configured(&ws.dir, &prefixes, Some(Arc::clone(&strays)));
+        walk.threads(threads);
+        walk.build_parallel().run(|| {
+            Box::new(|entry| {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(e) => {
+                        failed
+                            .lock()
+                            .expect("no walker panicked")
+                            .get_or_insert(e.to_string());
+                        return WalkState::Quit;
+                    }
+                };
+                match self.meet(&entry) {
+                    Ok(Met::Row(look)) => met.lock().expect("no walker panicked").push(look),
+                    Ok(Met::Added(file)) => found.lock().expect("no walker panicked").push(file),
+                    Ok(Met::Nothing) => {}
+                    Err(e) => {
+                        refused.lock().expect("no walker panicked").get_or_insert(e);
+                        return WalkState::Quit;
+                    }
+                }
+                WalkState::Continue
+            })
+        });
+        if let Some(e) = refused.into_inner().expect("no walker panicked") {
+            return Err(e);
+        }
+
+        // 2. The wanted rows it did not meet: under an ignored directory, named by an ignore
+        //    rule, gone or no longer a file. Stat'd apart, on as many threads.
+        let mut looks = met.into_inner().expect("no walker panicked");
+        let rows = &self.index.rows;
+        let mut seen = vec![false; rows.len()];
+        for look in &looks {
+            seen[look.at] = true;
+        }
+        let apart: Vec<usize> = (0..rows.len())
+            .filter(|&at| !seen[at] && self.wanted(&rows[at].path))
+            .collect();
+        looks.extend(self.look_apart(&apart, threads)?);
+        looks.sort_by_key(|look| look.at);
+        walk_failed(failed)?;
+
+        // 3. In path order.
+        let mut added: Vec<Found> = found.into_inner().expect("no walker panicked");
+        added.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(Walked {
+            looks,
+            added,
+            strays: sorted(&strays),
+        })
+    }
+
+    /// What the walk makes of `entry`: a wanted row's stat, an untracked file's, or nothing.
+    fn meet(&self, entry: &ignore::DirEntry) -> Result<Met, OpError> {
+        // 1. Files and symlinks below the root alone.
+        let is_file = (entry.file_type()).is_some_and(|kind| kind.is_file() || kind.is_symlink());
+        let Some(rel) = relative(&self.ws.dir, entry.path()).filter(|_| is_file) else {
+            return Ok(Met::Nothing);
+        };
+
+        // 2. A tracked row: stat'd here when the scan wants it.
+        if let Some(at) = self.index.find(&rel) {
+            if !self.wanted(&rel) {
+                return Ok(Met::Nothing);
+            }
+            return self.look_at(at).map(Met::Row);
+        }
+
+        // 3. An untracked file, through the host layer; one gone since is not there.
+        let meta = (self.host)
+            .symlink_metadata(&self.ws.dir.join(&rel))
+            .map_err(|e| materialize::host_failed(&rel, &e))?;
+        let meta = meta.filter(|m| matches!(m.kind, HostKind::File | HostKind::Symlink));
+        Ok(meta.map_or(Met::Nothing, |meta| Met::Added((rel, meta))))
+    }
+
+    /// The stats of rows `apart`, on a pool of `threads` threads; none for no rows.
+    fn look_apart(&self, apart: &[usize], threads: usize) -> Result<Vec<Look>, OpError> {
+        // 1. Usually none: every row the walk met.
+        if apart.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // 2. The bounded pool, then the stats on it.
+        let pool = (rayon::ThreadPoolBuilder::new())
+            .num_threads(threads)
+            .build()
+            .map_err(|e| {
+                OpError::new(
+                    swarmops_api::ErrorCode::Internal,
+                    format!("the scan's {threads} threads did not start: {e}"),
+                )
+            })?;
+        pool.install(|| {
+            (apart.par_iter())
+                .map(|&at| self.look_at(at))
+                .collect::<Result<_, _>>()
+        })
+    }
 }
 
 /// `E_IO` for the first error a walk met, if any (`failed`, as its threads left it).
@@ -764,6 +895,104 @@ mod tests {
         fn set_mode(&self, root: &Utf8Path, rel: &str, mode: u32) -> io::Result<()> {
             RealHost.set_mode(root, rel, mode)
         }
+    }
+
+    /// The files of the threads test's tree, in directories of 100.
+    const FILES: usize = 5_000;
+
+    /// The scan on [`SCAN_THREADS`] threads finds what a single-thread run finds on a tree of
+    /// 5,000 files with every kind of change (the M19 design §8.1): the same changes, the same
+    /// outside entries, the same rows; for every file, for some paths, and hashing every file.
+    #[test]
+    fn the_scan_on_its_threads_equals_one_thread() {
+        use swarmops_api::{
+            ChangeInput, ChangeOp, CommitReq, ContentInput, Identity, StatusAfter, WsCreateReq,
+        };
+        use swarmops_ops::LocalOps;
+
+        use crate::workspace::Locate;
+        use crate::{RealFs, create};
+
+        // 1. A store of 5,000 files, an ignore file among them, and a workspace of all of it.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(tmp.path()).unwrap().join("store");
+        let (ops, _) = LocalOps::init(&root, "acme").unwrap();
+        let who = Identity::parse("agent/tester").unwrap();
+        let mut puts: Vec<ChangeInput> = (0..FILES)
+            .map(|n| {
+                let mut put = ChangeInput::new(format!("d{:02}/f{n}", n / 100), ChangeOp::Put);
+                put.content = Some(ContentInput::Inline(format!("{n}\n")));
+                put
+            })
+            .collect();
+        let mut ignore = ChangeInput::new(".gitignore".to_owned(), ChangeOp::Put);
+        ignore.content = Some(ContentInput::Inline("d07/\n*.log\n".to_owned()));
+        puts.push(ignore);
+        let base = ops.commit(&who, CommitReq::new(puts, "seed")).unwrap();
+        let ctx = Ctx::new(
+            &ops,
+            root.clone(),
+            Some(who),
+            Arc::new(RealFs::new()),
+            Arc::new(RealHost),
+        );
+        let dir = root.parent().unwrap().join("w");
+        let mut req = WsCreateReq::new("w".to_owned());
+        req.path = Some(dir.to_string());
+        req.base = base.changeset.as_str().into();
+        req.status_after = StatusAfter::None;
+        create(&ctx, req).unwrap();
+
+        // 2. Edits: rewritten, removed, a directory where a file was, untracked and ignored
+        //    additions, and an edit of a tracked file under the ignored directory.
+        std::fs::write(dir.join("d01/f100"), "edited\n").unwrap();
+        std::fs::remove_file(dir.join("d02/f200")).unwrap();
+        std::fs::remove_file(dir.join("d03/f300")).unwrap();
+        std::fs::create_dir(dir.join("d03/f300")).unwrap();
+        std::fs::write(dir.join("d04/new"), "new\n").unwrap();
+        std::fs::write(dir.join("d05/x.log"), "log\n").unwrap();
+        std::fs::write(dir.join("d07/f700"), "under the ignored\n").unwrap();
+        std::fs::create_dir_all(dir.join("added/deep")).unwrap();
+        std::fs::write(dir.join("added/deep/file"), "added\n").unwrap();
+
+        // 3. Each want, on one thread and on the scan's threads: the same answer.
+        let ws = Workspace::open(&ctx, Locate::Name("w".to_owned())).unwrap();
+        let wants = [
+            Want::default(),
+            Want {
+                paths: vec!["d01".to_owned(), "d07".to_owned(), "added".to_owned()],
+                full: false,
+            },
+            Want {
+                paths: Vec::new(),
+                full: true,
+            },
+        ];
+        for want in wants {
+            let one = scan_on(&ctx, &ws, &want, 1).unwrap();
+            let many = scan_on(&ctx, &ws, &want, SCAN_THREADS).unwrap();
+            assert_eq!(one.changes, many.changes, "{want:?}");
+            assert_eq!(one.outside, many.outside, "{want:?}");
+            assert_eq!(one.index.rows, many.index.rows, "{want:?}");
+            assert_eq!(one.refreshed, many.refreshed, "{want:?}");
+        }
+
+        // 4. And the answer is the edits.
+        let found = scan_on(&ctx, &ws, &Want::default(), SCAN_THREADS).unwrap();
+        let paths: Vec<(&str, WsChangeKind)> = (found.changes.iter())
+            .map(|change| (change.path.as_str(), change.kind))
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                ("added/deep/file", WsChangeKind::Added),
+                ("d01/f100", WsChangeKind::Modified),
+                ("d02/f200", WsChangeKind::Deleted),
+                ("d03/f300", WsChangeKind::Deleted),
+                ("d04/new", WsChangeKind::Added),
+                ("d07/f700", WsChangeKind::Modified),
+            ]
+        );
     }
 
     /// The hasher reads no more than its budget at once, however many files there are and

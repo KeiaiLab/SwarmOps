@@ -726,3 +726,21 @@ reason = "new in M16 (task S5): no two quiet baseline runs yet; the heavy lock w
 
 [skip."ancestry/200k/between_page_50"]
 reason = "new in M16 (task S5): no two quiet baseline runs yet; the heavy lock was busy when the bench was written"
+
+[skip."ws_commit/nosync/1"]
+reason = "new in M19 (task M19-6): no two quiet baseline runs yet"
+
+[skip."ws_commit/nosync/10"]
+reason = "new in M19 (task M19-6): no two quiet baseline runs yet"
+
+[skip."ws_commit/nosync/100"]
+reason = "new in M19 (task M19-6): no two quiet baseline runs yet"
+
+[skip."ws_commit/hashing/1"]
+reason = "new in M19 (task M19-6): no two quiet baseline runs yet"
+
+[skip."ws_commit/hashing/10"]
+reason = "new in M19 (task M19-6): no two quiet baseline runs yet"
+
+[skip."ws_commit/hashing/100"]
+reason = "new in M19 (task M19-6): no two quiet baseline runs yet"

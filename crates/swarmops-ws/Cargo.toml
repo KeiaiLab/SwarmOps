@@ -52,7 +52,15 @@ swarmops-ops = { path = "../swarmops-ops", version = "0.10.0" }
 swarmops-testkit = { path = "../swarmops-testkit", version = "0.10.0" }
 proptest.workspace = true
 tempfile.workspace = true
+# The `ws_commit` bench.
+criterion.workspace = true
 
 # One integration-test binary, one link: each file of `tests/` is a module of `tests/all.rs`.
 [[test]]
 name = "all"
+
+# G9's `ws commit` row as G2 is measured: the workspace's files unsynced, the hashing apart (the
+# M19 design §8.2).
+[[bench]]
+name = "ws_commit"
+harness = false

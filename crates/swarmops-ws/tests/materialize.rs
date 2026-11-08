@@ -1957,3 +1957,76 @@ fn the_hint_names_moving_the_file() {
     let hint = refused.hint.unwrap_or_default();
     assert!(hint.contains("move the file aside, or delete it"), "{hint}");
 }
+
+/// The directories below `dir`, by repository path, `.swarmws/` left out: an update prunes the
+/// ones it empties, as a fresh create never makes them.
+fn dirs_of(dir: &camino::Utf8Path) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut todo = vec![dir.to_owned()];
+    while let Some(at) = todo.pop() {
+        for entry in at.read_dir_utf8().unwrap() {
+            let entry = entry.unwrap();
+            let is_dir = entry.file_type().unwrap().is_dir();
+            if !is_dir || entry.file_name() == SWARMWS_DIR {
+                continue;
+            }
+            found.push(entry.path().strip_prefix(dir).unwrap().to_string());
+            todo.push(entry.path().to_owned());
+        }
+    }
+    found.sort();
+    found
+}
+
+/// After an update, the workspace's files equal a fresh workspace's at the new head: every
+/// file's bytes and mode, no directory left over, and the index's status of both empty (the M19
+/// design §8.4, I6).
+#[test]
+fn an_updated_workspace_equals_a_fresh_one() {
+    // 1. A base with each kind of file, a workspace of it.
+    let f = Fixture::new();
+    let base = f.commit(
+        None,
+        &[
+            Put::File("src/a.rs", "a\n"),
+            Put::File("src/b.rs", "b\n"),
+            Put::File("src/mode.sh", "#!/bin/sh\n"),
+            Put::File("src/kind", "plain\n"),
+            Put::Link("src/link", "a.rs"),
+            Put::File("old/deep/gone.rs", "gone\n"),
+        ],
+    );
+    f.create("w", &base, &[]);
+
+    // 2. The next head changes each of them: bytes, mode, kind, a link's target, an added
+    //    directory, a removed one.
+    let next = f.commit(
+        Some(&base),
+        &[
+            Put::File("src/a.rs", "a, changed\n"),
+            Put::Gone("src/b.rs"),
+            Put::Exec("src/mode.sh", "#!/bin/sh\n"),
+            Put::Link("src/kind", "a.rs"),
+            Put::Link("src/link", "mode.sh"),
+            Put::Gone("old/deep/gone.rs"),
+            Put::File("new/deep/added.rs", "added\n"),
+        ],
+    );
+
+    // 3. The update, then a fresh workspace at the same head.
+    let mut req = swarmops_api::WsRebaseReq::new("w");
+    req.status_after = StatusAfter::None;
+    let moved = swarmops_ws::rebase(&f.ctx(), req).unwrap();
+    assert_eq!(moved.changeset, next);
+    f.create("fresh", &next, &[]);
+
+    // 4. The same files and directories, and nothing to report in either.
+    let (updated, fresh) = (f.beside("w"), f.beside("fresh"));
+    assert_eq!(tree_of(&updated), tree_of(&fresh));
+    assert_eq!(dirs_of(&updated), dirs_of(&fresh));
+    let ctx = f.ctx();
+    for name in ["w", "fresh"] {
+        assert_eq!(crate::fixture::changes(&ctx, name, false), [], "{name}");
+        assert_eq!(crate::fixture::changes(&ctx, name, true), [], "{name}");
+    }
+}

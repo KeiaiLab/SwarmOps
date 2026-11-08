@@ -71,6 +71,15 @@ pub(crate) struct Index {
     pub(crate) rows: Vec<Row>,
 }
 
+impl Index {
+    /// The place of the row at `path`, if there is one: the rows are sorted, so a search.
+    pub(crate) fn find(&self, path: &str) -> Option<usize> {
+        (self.rows)
+            .binary_search_by(|row| row.path.as_str().cmp(path))
+            .ok()
+    }
+}
+
 /// What an index's rows describe: the workspace's prefixes or the whole tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Extent {

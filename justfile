@@ -159,7 +159,8 @@ _bench-fresh:
 # open loop: one land per agent every 2 s for 120 s) run at 32 and at 50 processes
 # (`SWARMOPS_PERF_PROCESSES` lists others; the landing store under the bench directory), and
 # G2's commit bench (`swarmops-repo`'s
-# `commit_latency`: with and without syncs) runs last.
+# `commit_latency`: with and without syncs) runs, then G9's (`swarmops-ws`'s `ws_commit`: the
+# workspace's files unsynced, the hashing apart) last.
 # The M1, M13 and M5 measurements in one go: both 32-process contention tests, the remote
 # cases, the workspace cases, then the store benches.
 perf:
@@ -230,6 +231,10 @@ perf:
     load between
     cargo bench --locked -p swarmops-repo --bench commit_latency -- --output-format bencher 2>&1 \
         | tee target/perf/commit-latency.log | grep --line-buffered -E '^(test |percentiles )'
+    [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
+    load between
+    cargo bench --locked -p swarmops-ws --bench ws_commit -- --output-format bencher 2>&1 \
+        | tee target/perf/ws-commit.log | grep --line-buffered -E '^(test |percentiles )'
     [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
     load after
     [ "$status" -eq 0 ] || echo "perf: a step failed; target/perf/ has the full output" >&2

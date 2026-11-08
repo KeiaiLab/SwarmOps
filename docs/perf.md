@@ -2411,3 +2411,35 @@ sync-load: minute 8 lag_mean 6.85
 sync-load: minute 9 lag_mean 122.15
 sync-load: minute 10 lag_mean 568.00
 ```
+
+## M19-6 — 2026-11-08 (not measured: the host was never quiet)
+
+The M19 design §8.1 and §8.2: the update's and the commit's latency on the 50,000-file tree,
+release build. The M19 baselines were not measured, so the changes follow the design's order as
+written, each to be measured alone: the bounded pool (`SCAN_THREADS`, 8 threads, for the walk
+and for the rows stat'd apart), then the one pass (each tracked row stat'd through the host layer
+where the walk meets its entry; the rows it does not meet, under an ignored directory, named by
+an ignore rule or no longer a file, stat'd apart). The two directory syncs of §8.1 item 3 stay:
+both are made by the journal records' removal, which this slice does not own, so it removes
+none and adds no power-loss proof for a removal.
+
+The runs: `ws_processes::perf::perf_tree_of_50000_files` (the status and update lines) on the
+base `f48c141d`, on the pool alone and on both changes; then the new bench `ws_commit`
+(`swarmops-ws`): one `ws commit` of 1, 10 and 100 rewritten files, the workspace's durable files
+on the test kit's `NoSyncFs`, and the hashing of those files apart. The store under the bench
+syncs as the product does (its operations take no other filesystem outside their own tests), so
+`ws_commit/nosync/<k>` is an upper bound of G2's "syncs excluded". Its six ids are in
+bench/thresholds.toml's `[skip]` table until two quiet baselines.
+
+Each run waits for the design's gate (a 1-minute load under 6 held for a minute, no CI job on
+this host's runners) at most 30 minutes, then is skipped with its load recorded. The first did
+not pass, and the rest were not started:
+
+| Wait | Max load (1 / 5 min) | Lowest 1-minute load | CI job | End load |
+| --- | --- | --- | --- | --- |
+| 17:48:51–18:18:54, 30 min, 176 readings | 181.34 / 99.29 | 5.71 | in 173 readings | 41.62 40.94 44.47 |
+
+So the update row (its single run, decision D5) and the commit row (decision D1) take no verdict
+here; no gate, target, timeout or case parameter changed. The equality of the scan on its threads
+and on one thread (5,000 files, every kind of change) and of an updated workspace and a fresh one
+are tests in `just check`. The figures follow as a docs-only commit from the first gated window.
