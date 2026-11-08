@@ -145,6 +145,7 @@ const RESPONSES: &[&str] = &[
     "Signatures",
     "SyncResp",
     "SyncStatus",
+    "TouchOut",
     "TreeEntryOut",
     "TreeListing",
     "UndoResp",

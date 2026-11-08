@@ -3316,6 +3316,7 @@ fn a_conflicting_land_exits_3_with_the_report() {
                        "theirs": side(2, "theirs\n")}],
             "theirs_changeset": theirs,
             "theirs_agent": OTHER,
+            "theirs_changesets": [{"changeset": theirs, "agent": OTHER}],
         }],
         "kinds": ["content"],
         "truncated": false,
@@ -3339,6 +3340,21 @@ fn a_conflicting_land_exits_3_with_the_report() {
         cut["files"][0]["hunks"][0]["ours"],
         json!({"first": 2, "last": 2})
     );
+    assert_eq!(cut["files"][0]["hunks"][0]["truncated"], true);
+
+    // A budget of 7 bytes, short of the hunk's 14: each side's whole lines that fit, in order.
+    let head_cut = s.run(&[&land[..], &["--max-conflict-bytes", "7"][..]].concat());
+    let hunk = &head_cut["error"]["details"]["report"]["files"][0]["hunks"][0];
+    let kept = |line: u64, text: &str| json!({"first": line, "last": line, "text_head": text});
+    assert_eq!(
+        (&hunk["base"], &hunk["ours"], &hunk["theirs"]),
+        (
+            &kept(2, "2\n"),
+            &kept(2, "ours\n"),
+            &json!({"first": 2, "last": 2})
+        ),
+    );
+    assert_eq!(hunk["truncated"], true);
 
     let human = Session::run_raw(&[], &[&["--human"][..], &land[..]].concat(), None);
     assert_eq!(human.exit, 3, "{}", human.stdout);

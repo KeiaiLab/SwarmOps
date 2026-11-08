@@ -3,14 +3,17 @@
 //! ([`MergeConflicts`]).
 //!
 //! Each conflicting file, in path order, comes with its kind, the blob each side holds at its path
-//! (none for a side without a file there), and the newest changeset on the target since the base
-//! that touched the path, with its agent: attribution is per file. A text file both sides edited
+//! (none for a side without a file there), and the changesets on the target since the base that
+//! touched the path, newest first, with their agents, at most [`MAX_TOUCHES_PER_FILE`] and a flag
+//! when there were more: attribution is per file, not per line. A text file both sides edited
 //! has its hunks, each side's lines as `{first, last}`, numbered from 1 with both ends included,
 //! as `read_file` takes `lines` (a side without lines there has `last` one less than `first`: its
 //! place is before line `first`); the merge keeps them 0-based and half-open. The hunks' texts go
 //! in, a hunk's three sides together and in the report's order, while their sum stays within the
 //! request's `max_conflict_bytes`: from the first hunk whose texts would pass it, no hunk carries
-//! its texts, and `truncated` says so. The paths whose resolutions did not apply, since the target
+//! its texts, each such hunk and the report say `truncated`, and that first hunk carries instead
+//! each side's first whole lines that what was left holds (`text_head`). The paths whose
+//! resolutions did not apply, since the target
 //! holds them otherwise than their `against`, are `stale`.
 //!
 //! The files go in, in path order, while their entries stay within [`MAX_ENTRY_BYTES`] as JSON,
@@ -31,9 +34,14 @@
 use std::io;
 use std::ops::Range;
 
-use swarmops_api::{ConflictKindOut, ConflictReport, FileConflictOut, HunkOut, LinesOut, OpError};
+use swarmops_api::{
+    ConflictKindOut, ConflictReport, FileConflictOut, HunkOut, LinesOut, OpError, TouchOut,
+};
 use swarmops_core::bytes;
 use swarmops_repo::MergeConflicts;
+#[cfg(doc)]
+use swarmops_repo::land::MAX_TOUCHES_PER_FILE;
+use swarmops_repo::land::More;
 use swarmops_repo::merge::conflict::{ConflictHunk, ConflictKind};
 use swarmops_repo::merge::tree_diff::Leaf;
 use swarmops_repo::merge::tree_merge::FileConflict;
@@ -146,6 +154,23 @@ impl Budget {
     fn force(&mut self, bytes: u64) {
         self.left = self.left.saturating_sub(bytes);
     }
+
+    /// The first whole lines of `text` that what is left holds, spent; `None` if no line fits.
+    /// A text that fits whole is taken whole, its last line with or without its line end.
+    fn head<'t>(&mut self, text: &'t [u8]) -> Option<&'t [u8]> {
+        let left = usize::try_from(self.left).unwrap_or(usize::MAX);
+        let end = if text.len() <= left {
+            text.len()
+        } else {
+            // Up to the last line end within what is left.
+            text[..left].iter().rposition(|&byte| byte == b'\n')? + 1
+        };
+        if end == 0 {
+            return None;
+        }
+        self.left -= bytes::to_u64(end);
+        Some(&text[..end])
+    }
 }
 
 /// Where a file's entry stands in a report.
@@ -192,6 +217,14 @@ fn file_out(
     out.theirs_blob = blob(file.theirs);
     out.theirs_changeset = touched.map(|(changeset, _)| changeset.to_string());
     out.theirs_agent = touched.map(|(_, named)| agent(named));
+
+    // Every changeset that touched the path, to the walk's bound, newest first.
+    if let Some(touches) = conflicts.touches.get(&file.path) {
+        out.theirs_changesets = (touches.list.iter())
+            .map(|(changeset, named)| TouchOut::new(changeset.to_string(), agent(named)))
+            .collect();
+        out.theirs_changesets_truncated = touches.more == More::Yes;
+    }
 
     // The file's entry as JSON, then each hunk's, made one at a time: a hunk past the budget is
     // never made, nor its texts taken.
@@ -245,12 +278,14 @@ fn spanning(hunks: &[ConflictHunk], id: u32) -> Option<HunkOut> {
     let side = |from: &Range<u32>, to: &Range<u32>| {
         LinesOut::new(u64::from(from.start) + 1, u64::from(to.end))
     };
-    Some(HunkOut::new(
+    let mut out = HunkOut::new(
         id,
         side(&first.base, &last.base),
         side(&first.ours, &last.ours),
         side(&first.theirs, &last.theirs),
-    ))
+    );
+    out.truncated = true;
+    Some(out)
 }
 
 /// An entry's length in a report's list: its JSON's `json` bytes, the `,` before it, and
@@ -259,13 +294,10 @@ fn entry_len(json: u64, keyed: u64) -> u64 {
     json.saturating_add(1).saturating_add(keyed)
 }
 
-/// The bytes of `hunk`'s texts, those it carries: the texts' budget counts them.
+/// The bytes of `hunk`'s texts and text heads, those it carries: the texts' budget counts them.
 fn text_len(hunk: &HunkOut) -> u64 {
-    let text = |side: &LinesOut| {
-        side.text
-            .as_ref()
-            .map_or(0, |text| bytes::to_u64(text.len()))
-    };
+    let len = |text: &Option<String>| text.as_ref().map_or(0, |text| bytes::to_u64(text.len()));
+    let text = |side: &LinesOut| len(&side.text) + len(&side.text_head);
     text(&hunk.base) + text(&hunk.ours) + text(&hunk.theirs)
 }
 
@@ -293,24 +325,38 @@ impl io::Write for Counted {
     }
 }
 
-/// `hunk`, the `id`-th of its file, with its three texts if they go in ([`Budget::take`]).
+/// `hunk`, the `id`-th of its file, with its three texts if they go in ([`Budget::take`]); the
+/// first hunk whose texts do not, with each side's first whole lines that what is left holds
+/// ([`Budget::head`]), in side order.
 fn hunk_out(hunk: &ConflictHunk, id: u32, texts: &mut Budget) -> HunkOut {
-    let bytes = [&hunk.base_text, &hunk.ours_text, &hunk.theirs_text]
-        .map(|text| bytes::to_u64(text.len()))
-        .iter()
-        .sum();
+    let sides = [&hunk.base_text, &hunk.ours_text, &hunk.theirs_text];
+    let bytes = sides.map(|text| bytes::to_u64(text.len())).iter().sum();
+
+    // 1. The texts whole; else, on the first hunk past the budget, their heads.
+    let uncut = !texts.cut;
     let with_texts = texts.take(bytes);
-    let side = |lines: &Range<u32>, text: &[u8]| {
+    let heads = match (with_texts, uncut) {
+        (false, true) => sides.map(|text| texts.head(text)),
+        _ => [None; 3],
+    };
+
+    // 2. The sides, each with its text or its head.
+    let lossy = |text: &[u8]| String::from_utf8_lossy(text).into_owned();
+    let side = |lines: &Range<u32>, text: &[u8], head: Option<&[u8]>| {
         let mut out = LinesOut::new(u64::from(lines.start) + 1, u64::from(lines.end));
-        out.text = with_texts.then(|| String::from_utf8_lossy(text).into_owned());
+        out.text = with_texts.then(|| lossy(text));
+        out.text_head = head.map(lossy);
         out
     };
-    HunkOut::new(
+    let [base, ours, theirs] = heads;
+    let mut out = HunkOut::new(
         id,
-        side(&hunk.base, &hunk.base_text),
-        side(&hunk.ours, &hunk.ours_text),
-        side(&hunk.theirs, &hunk.theirs_text),
-    )
+        side(&hunk.base, &hunk.base_text, base),
+        side(&hunk.ours, &hunk.ours_text, ours),
+        side(&hunk.theirs, &hunk.theirs_text, theirs),
+    );
+    out.truncated = !with_texts;
+    out
 }
 
 #[cfg(test)]
@@ -414,11 +460,14 @@ mod tests {
             panic!("one hunk: {report:?}");
         };
         let lines = |first, last| LinesOut::new(first, last);
+        let mut ours_head = lines(1, 1);
+        ours_head.text_head = Some("a\n".to_owned());
         assert_eq!(
             (&hunk.base, &hunk.ours, &hunk.theirs),
-            (&lines(1, 0), &lines(1, 1), &lines(1, 2)),
-            "6 bytes of text, past a budget of 3"
+            (&lines(1, 0), &ours_head, &lines(1, 2)),
+            "6 bytes of text, past a budget of 3: the change's one line fits"
         );
+        assert!(hunk.truncated);
         assert!(report.truncated);
         let file = &report.files[0];
         let blob = |n| Some(leaf(n).blob.to_string());

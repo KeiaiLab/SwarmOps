@@ -192,6 +192,7 @@ swarmops schema NoSuchType
         "SyncStatus",
         "SyncStatusKind",
         "SyncStatusReq",
+        "TouchOut",
         "TreeEntryOut",
         "TreeListing",
         "UndoReq",

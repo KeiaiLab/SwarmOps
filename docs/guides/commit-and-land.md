@@ -891,11 +891,14 @@ How to read it:
   numbered from 1, both ends included, as `cat --lines` takes them. A side with no lines there
   has `last` one less than `first`.
 - **`theirs_changeset`** and **`theirs_agent`** name the newest changeset on the target that
-  changed the file, and who wrote it: what to read, and whom to ask.
+  changed the file, and who wrote it: what to read, and whom to ask. **`theirs_changesets`**
+  lists every one since the base, newest first, up to 16.
 - **`auto_merged`** lists the paths both sides changed that merged cleanly; it is left out when
   there are none.
 - **`truncated`** is true when hunk texts were left out to stay within `--max-conflict-bytes`
-  (32768 by default). Line numbers and blob ids are always there; read the texts with `cat`.
+  (32768 by default), on the report and on each hunk that lost them; the first such hunk keeps
+  the whole lines that fit (`text_head`). Line numbers and blob ids are always there; read the
+  texts with `cat`.
 
 | `kind` | What happened |
 | --- | --- |

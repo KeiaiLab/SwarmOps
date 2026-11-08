@@ -169,6 +169,7 @@ A response past these leaves the rest out, and says so in its fields; nothing fa
 | [Line diff bytes](#line-diff-bytes) | 8,388,608 bytes (8 MiB) | `swarmops_merge::line_diff::MAX_DIFF_BYTES` | [`diff`](commands/diff.md), [`land`](commands/land.md) |
 | [Text probe](#text-probe) | 8,000 bytes | `swarmops_merge::line_diff::TEXT_PROBE` | [`diff`](commands/diff.md), [`land`](commands/land.md) |
 | [Conflict report entries](#conflict-report-entries) | 24,576 bytes (24 KiB) | `swarmops_ops::conflict::MAX_ENTRY_BYTES` | [`land`](commands/land.md) |
+| [Conflict touches listed](#conflict-touches-listed) | 16 changesets | `swarmops_repo::land::MAX_TOUCHES_PER_FILE` | [`land`](commands/land.md), [`revert`](commands/revert.md) |
 | [Verify findings](#verify-findings) | 1,000 problems | `swarmops_api::VERIFY_MAX_FINDINGS` | [`verify`](commands/verify.md) |
 | [Land conflict lines](#land-conflict-lines) | 50 paths | `swarmops_ops::serve::land::MAX_CONFLICT_LINES` | [`serve`](commands/serve.md) |
 
@@ -211,6 +212,14 @@ The most bytes an `E_CONFLICT` report's files and hunks take as JSON, their text
 - Value: 24,576 bytes (24 KiB).
 - Constant: `swarmops_ops::conflict::MAX_ENTRY_BYTES`, in `crates/swarmops-ops/src/conflict.rs`.
 - Commands: [`land`](commands/land.md).
+
+### Conflict touches listed
+
+The most changesets an `E_CONFLICT` report's file lists in `theirs_changesets`, newest first, of those on the target since the base that touched its path; `theirs_changesets_truncated` says there were more.
+
+- Value: 16 changesets.
+- Constant: `swarmops_repo::land::MAX_TOUCHES_PER_FILE`, in `crates/swarmops-repo/src/land/landing.rs`.
+- Commands: [`land`](commands/land.md), [`revert`](commands/revert.md).
 
 ### Verify findings
 

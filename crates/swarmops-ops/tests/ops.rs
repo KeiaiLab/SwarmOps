@@ -2038,7 +2038,7 @@ mod commit_key {
 mod land {
     use swarmops_api::{
         ConflictKindOut, ConflictReport, DEFAULT_MAX_CONFLICT_BYTES, FileConflictOut, HunkOut,
-        LandReq, LandResp, LandStatus, LineRange, LinesOut, OpLogReq, OperationKind,
+        LandReq, LandResp, LandStatus, LineRange, LinesOut, OpLogReq, OperationKind, TouchOut,
     };
 
     use super::*;
@@ -2186,6 +2186,7 @@ mod land {
             file_conflict_out.hunks = hunks;
             file_conflict_out.theirs_changeset = Some(theirs.clone());
             file_conflict_out.theirs_agent = Some(OTHER.to_owned());
+            file_conflict_out.theirs_changesets = vec![TouchOut::new(theirs.clone(), OTHER)];
             file_conflict_out
         };
         let hunk = HunkOut::new(
@@ -2229,7 +2230,8 @@ mod land {
 
     /// The report holds hunk texts while their sum stays within `max_conflict_bytes`, a hunk's
     /// three sides together and in the report's order; past it, it leaves the texts out and
-    /// says `truncated`, keeping every line position and blob id.
+    /// says `truncated`, keeping every line position and blob id. Its texts and text heads
+    /// together never pass the budget.
     #[test]
     fn a_report_past_its_budget_drops_texts_and_says_truncated() {
         let (_dir, _root, ops) = new_store();
@@ -2259,10 +2261,19 @@ mod land {
             for hunk in &mut report.files[0].hunks {
                 for side in [&mut hunk.base, &mut hunk.ours, &mut hunk.theirs] {
                     side.text = None;
+                    side.text_head = None;
                 }
+                hunk.truncated = false;
             }
             report.truncated = false;
             report
+        };
+        let text_bytes = |report: &ConflictReport| -> u64 {
+            let len = |text: &Option<String>| text.as_ref().map_or(0, String::len);
+            let side = |side: &LinesOut| len(&side.text) + len(&side.text_head);
+            let hunk = |hunk: &HunkOut| side(&hunk.base) + side(&hunk.ours) + side(&hunk.theirs);
+            let all: usize = report.files[0].hunks.iter().map(hunk).sum();
+            all as u64
         };
         for (max, kept) in [
             (16, [false; 6]),
@@ -2273,6 +2284,7 @@ mod land {
         ] {
             let cut = report(max);
             assert_eq!(texts(&cut), kept, "max_conflict_bytes {max}");
+            assert!(text_bytes(&cut) <= max, "max_conflict_bytes {max}: {cut:?}");
             assert_eq!(
                 cut.truncated,
                 kept.contains(&false),
@@ -2280,6 +2292,151 @@ mod land {
             );
             assert_eq!(without_texts(cut), without_texts(full.clone()), "{max}");
         }
+    }
+
+    /// A file that three changesets on main changed since the base, by two agents, among others
+    /// that changed another file: the report lists all three for it, newest first, each with its
+    /// agent, `theirs_changeset` the first, and nothing left out.
+    #[test]
+    fn a_report_lists_every_changeset_that_touched_a_file() {
+        let (_dir, _root, ops) = new_store();
+        let who = agent();
+        let third = Identity::parse("agent/worker-3").expect("a valid agent name");
+        let base = "1\n2\n3\n4\n5\n6\n7\n";
+        let t0 = publish(&ops, &who, None, vec![text("f", base), text("g", "g\n")]);
+        let head = commit(&ops, Some(&t0), vec![text("f", "1\nours\n3\n4\n5\n6\n7\n")]);
+
+        // 1. Main gains three edits of f, an edit of g between them.
+        let p1 = publish(
+            &ops,
+            &other(),
+            Some(&t0),
+            vec![text("f", "1\n2\n3\n4\n5\n6\nA\n")],
+        );
+        let g = publish(&ops, &third, Some(&p1), vec![text("g", "g2\n")]);
+        let p2 = publish(
+            &ops,
+            &third,
+            Some(&g),
+            vec![text("f", "1\n2\n3\n4\nB\n6\nA\n")],
+        );
+        let p3 = publish(
+            &ops,
+            &other(),
+            Some(&p2),
+            vec![text("f", "1\nC\n3\n4\nB\n6\nA\n")],
+        );
+
+        // 2. The report names the three, newest first.
+        let (report, _) = report_of(ops.land(&who, landing(&head)));
+        let [file] = &report.files[..] else {
+            panic!("one file: {report:?}");
+        };
+        assert_eq!(
+            file.theirs_changesets,
+            [
+                TouchOut::new(p3.clone(), OTHER),
+                TouchOut::new(p2, "agent/worker-3"),
+                TouchOut::new(p1, OTHER),
+            ]
+        );
+        assert_eq!(file.theirs_changeset, Some(p3));
+        assert_eq!(file.theirs_agent.as_deref(), Some(OTHER));
+        assert!(!file.theirs_changesets_truncated);
+    }
+
+    /// Main's changesets that touched a file since the base, `n` of them, the last conflicting;
+    /// the report of a land's conflict on it.
+    fn touched_n_times(n: usize) -> (ConflictReport, Vec<String>) {
+        let (_dir, _root, ops) = new_store();
+        let who = agent();
+        let t0 = publish(&ops, &who, None, vec![text("f", "1\n2\n3\n4\n")]);
+        let head = commit(&ops, Some(&t0), vec![text("f", "1\nours\n3\n4\n")]);
+        let mut touched = Vec::new();
+        let mut at = t0;
+        for i in 1..n {
+            let content = format!("1\n2\n3\n{i}\n");
+            at = publish(&ops, &other(), Some(&at), vec![text("f", &content)]);
+            touched.push(at.clone());
+        }
+        let last = publish(
+            &ops,
+            &other(),
+            Some(&at),
+            vec![text("f", "1\nC\n3\nlast\n")],
+        );
+        touched.push(last);
+        touched.reverse();
+        (report_of(ops.land(&who, landing(&head))).0, touched)
+    }
+
+    /// Twenty changesets on main touched the file: the report lists the newest sixteen, newest
+    /// first, and says there were more; at sixteen it lists every one and says nothing.
+    #[test]
+    fn touches_stop_at_their_bound() {
+        let ids = |report: &ConflictReport| -> Vec<String> {
+            (report.files[0].theirs_changesets.iter())
+                .map(|touch| touch.changeset.clone())
+                .collect()
+        };
+
+        let (report, touched) = touched_n_times(20);
+        assert_eq!(ids(&report), touched[..16]);
+        assert!(report.files[0].theirs_changesets_truncated);
+
+        let (report, touched) = touched_n_times(16);
+        assert_eq!(ids(&report), touched);
+        assert!(!report.files[0].theirs_changesets_truncated);
+    }
+
+    /// A budget that the first hunk's texts pass: that hunk says `truncated` and carries, in
+    /// place of its texts, each side's first whole lines that what the budget had left holds,
+    /// in side order (none for a side of which no line fits); the hunk after it says
+    /// `truncated` and carries neither; and the bytes stay within the budget.
+    #[test]
+    fn a_cut_hunk_says_so_and_keeps_whole_lines() {
+        let (_dir, _root, ops) = new_store();
+        let who = agent();
+        let base = "1\n2\n3\n4\n5\n6\n7\n8\n9\n";
+        let t0 = publish(&ops, &who, None, vec![text("f", base)]);
+        let ours = "1\no2\no3\no4\n5\n6\n7\no8\n9\n";
+        let head = commit(&ops, Some(&t0), vec![text("f", ours)]);
+        let theirs = "1\nt2\nt3\nt4\n5\n6\n7\nt8\n9\n";
+        publish(&ops, &other(), Some(&t0), vec![text("f", theirs)]);
+
+        // The first hunk's texts: 6 + 9 + 9 bytes; 14 leave the base whole, then 8 bytes.
+        let max = 14;
+        let mut req = landing(&head);
+        req.max_conflict_bytes = max;
+        let (report, _) = report_of(ops.land(&who, req));
+        let [first, second] = &report.files[0].hunks[..] else {
+            panic!("two hunks: {report:?}");
+        };
+        let heads = |hunk: &HunkOut| {
+            [&hunk.base, &hunk.ours, &hunk.theirs].map(|side| side.text_head.clone())
+        };
+        let texts = |hunk: &HunkOut| [&hunk.base, &hunk.ours, &hunk.theirs].map(|s| s.text.clone());
+        assert_eq!(
+            heads(first),
+            [
+                Some("2\n3\n4\n".to_owned()),
+                Some("o2\no3\n".to_owned()),
+                None
+            ]
+        );
+        assert_eq!(texts(first), [None, None, None]);
+        assert!(first.truncated);
+        assert_eq!(
+            (heads(second), texts(second)),
+            ([None, None, None], [None, None, None])
+        );
+        assert!(second.truncated);
+        assert!(report.truncated);
+        assert_eq!(
+            (first.ours.first, first.ours.last),
+            (2, 4),
+            "positions kept"
+        );
     }
 
     /// The bound a land's conflict report stays within, however large or many the conflicting

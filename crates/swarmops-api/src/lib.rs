@@ -19,6 +19,7 @@ pub mod serve;
 pub use envelope::{API_VERSION, Envelope, LogCutOut, Meta, RecoveredOut};
 pub use error::{ErrorCode, OpError};
 pub use identity::Identity;
+pub use ops::TouchOut;
 pub use ops::{
     Advanced, Attribution, ChangeInput, ChangeOp, ChangeOut, ChangesetDetail, ChangesetSummary,
     CommitReq, CommitResp, ConflictKindOut, ConflictReport, ContentEncoding, ContentInput,

@@ -31,6 +31,13 @@ collects the changes on `stable` that no release holds yet, until the next relea
   the changeset that made it, and a keyed revert run again replays (the M18 design §4). The landed
   changeset records `reverts` and `revert_reason`, which `show` prints and the git export keeps out
   of its trailers. `swarmops mcp` lists 41 tools, and `swarmops schema` 171 types.
+- An `E_CONFLICT` report lists, for each file, every changeset on the target since the base that
+  changed it, newest first, with its agent (`theirs_changesets`, at most 16, and
+  `theirs_changesets_truncated` past them); a hunk that lost its texts to `max_conflict_bytes`
+  says `truncated`, and the first such hunk keeps each side's first whole lines that the budget
+  still holds (`text_head`). A failed land with changes, and so a failed `revert`, no longer
+  leaves its commit's changeset object behind (the M18 design §5). `swarmops schema` lists 172
+  types.
 
 ### Changed
 

@@ -417,6 +417,7 @@ expression: s.transcript()
             "SyncStatus",
             "SyncStatusKind",
             "SyncStatusReq",
+            "TouchOut",
             "TreeEntryOut",
             "TreeListing",
             "UndoReq",

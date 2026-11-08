@@ -98,7 +98,8 @@ mod resolve;
 
 pub use detached::{DetachedLand, DetachedOutcome};
 pub use landing::{
-    Gated, LandOutcome, LandRequest, LandStatus, MergeConflicts, NothingToLandReason, backoff,
+    Gated, LandOutcome, LandRequest, LandStatus, MAX_TOUCHES_PER_FILE, MergeConflicts, More,
+    NothingToLandReason, Touches, backoff,
 };
 use landing::{LAND_KEY, SQUASHED_FROM};
 pub(crate) use landing::{Prep, Prepared};

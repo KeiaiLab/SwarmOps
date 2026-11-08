@@ -424,7 +424,7 @@ static CONTRACT: [Limit; 15] = [
 ];
 
 /// The bounds a response keeps without an error: what it leaves out, and how it says so.
-static BOUNDS: [Limit; 7] = [
+static BOUNDS: [Limit; 8] = [
     Limit {
         name: "Lossy commits listed",
         constant: code(
@@ -498,6 +498,21 @@ static BOUNDS: [Limit; 7] = [
                    texts aside (`--max-conflict-bytes` bounds those). The first file always \
                    goes in; from the first file left out none follows, and `truncated` says \
                    so.",
+    },
+    Limit {
+        name: "Conflict touches listed",
+        constant: code(
+            "swarmops_repo::land::MAX_TOUCHES_PER_FILE",
+            "crates/swarmops-repo/src/land/landing.rs",
+            "pub const MAX_TOUCHES_PER_FILE: usize = 16;",
+            || bytes::to_u64(swarmops_repo::land::MAX_TOUCHES_PER_FILE),
+        ),
+        unit: Unit::Count("changesets"),
+        commands: &["land", "revert"],
+        errors: &[],
+        what: "The most changesets an `E_CONFLICT` report's file lists in \
+                   `theirs_changesets`, newest first, of those on the target since the base \
+                   that touched its path; `theirs_changesets_truncated` says there were more.",
     },
     Limit {
         name: "Verify findings",

@@ -1,7 +1,7 @@
 //! A land's walk down its target's first parents (operations spec §3 step (c)): the replay
-//! search of a keyed land, for the changeset its key landed, and who last touched each path a land
-//! conflicts on (the M4 plan's Decision 6), from one walk that reads each changeset of the target
-//! once per land, however many attempts continue it.
+//! search of a keyed land, for the changeset its key landed, and who touched each path a land
+//! conflicts on, newest first (the M4 plan's Decision 6, the M18 design §5), from one walk that
+//! reads each changeset of the target once per land, however many attempts continue it.
 //!
 //! A key the target's walk does not find is looked for on the other refs a land can publish to
 //! (`main`, `release/<x>` and branches; the M15 design §6): the same walk from each head, to the
@@ -24,13 +24,13 @@ use std::collections::{BTreeMap, HashMap};
 use swarmops_core::{Changeset, ChangesetId, ObjectId, RepoPath, TreeId};
 use swarmops_store::{ObjectStore, RefKind, StoreError, ref_kind};
 
-use super::landing::stored;
+use super::landing::{More, Touches, stored};
 use super::{LAND_KEY, SQUASHED_FROM};
 use crate::error::RepoError;
 use crate::read::{RepoRead, StoredChangeset};
 
-/// The metadata key of who made a change: what a conflict report names for the changeset that
-/// last touched a path.
+/// The metadata key of who made a change: what a conflict report names for each changeset that
+/// touched a path.
 const AGENT: &str = "agent";
 
 /// What a land's walk keeps of each changeset of the target's chain it read.
@@ -328,25 +328,38 @@ impl TargetWalk {
         Ok(None)
     }
 
-    /// For each of `paths`, the newest changeset on the walk from `top`, above the floor (since
-    /// the base), that touches it, with its agent. A path none of them touches is left out.
-    pub(super) fn last_touched<O: ObjectStore>(
+    /// For each of `paths`, the changesets on the walk from `top`, above the floor (since the
+    /// base), that touch it, newest first, with their agents: at most `max` a path, its `more`
+    /// saying whether the walk found others. A path none of them touches is left out. The walk
+    /// stops once every path has seen more than `max`, or at the floor.
+    pub(super) fn touches<O: ObjectStore>(
         &mut self,
         read: &RepoRead<'_, O>,
         top: &StoredChangeset,
         paths: &[RepoPath],
-    ) -> Result<BTreeMap<RepoPath, (ChangesetId, String)>, RepoError> {
+        max: usize,
+    ) -> Result<BTreeMap<RepoPath, Touches>, RepoError> {
         let floor = self.floor;
-        let mut touched = BTreeMap::new();
+        let mut touched: BTreeMap<RepoPath, Touches> = BTreeMap::new();
+        let mut full = 0;
         self.walk(read, top, |id, walked| {
-            if walked.generation > floor {
-                for path in paths {
-                    if !touched.contains_key(path) && walked.touches(path) {
-                        touched.insert(path.clone(), (id, walked.agent.clone()));
-                    }
+            if walked.generation <= floor {
+                return true;
+            }
+
+            // Each path this changeset touches: listed while its list has room, else marked.
+            for path in paths.iter().filter(|path| walked.touches(path)) {
+                let found = touched.entry(path.clone()).or_default();
+                if found.list.len() < max {
+                    found.list.push((id, walked.agent.clone()));
+                    continue;
+                }
+                if found.more == More::No {
+                    found.more = More::Yes;
+                    full += 1;
                 }
             }
-            touched.len() < paths.len()
+            full < paths.len()
         })?;
         Ok(touched)
     }

@@ -127,7 +127,13 @@ swarmops --repo [tmp]/store --as agent/worker-17 ws rebase --ws w2 --onto releas
             "path": "src/lib.rs",
             "theirs_agent": "agent/worker-17",
             "theirs_blob": "[id18]",
-            "theirs_changeset": "[id15]"
+            "theirs_changeset": "[id15]",
+            "theirs_changesets": [
+              {
+                "agent": "agent/worker-17",
+                "changeset": "[id15]"
+              }
+            ]
           }
         ],
         "kinds": [

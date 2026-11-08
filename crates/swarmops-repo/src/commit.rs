@@ -383,12 +383,24 @@ impl<O: ObjectStore> Repo<O> {
 
     /// Steps 1 to 4 of [the module documentation](self) for `req`, the parents looked up in
     /// `seen` if given: the changeset written and flushed, not recorded, with the ref `req`
-    /// advances. A land that carries changes writes its `C` so ([`crate::land`]).
+    /// advances.
     pub(crate) fn write_commit(
         &self,
         seen: Option<&RepoRead<'_, O>>,
         req: CommitRequest,
     ) -> Result<(WrittenChangeset, Option<Advance>), RepoError> {
+        let (staged, advance) = self.stage_commit(seen, req)?;
+        Ok((staged.put(&self.objects)?, advance))
+    }
+
+    /// [`Repo::write_commit`] without its write: the request checked, the blobs it names by id
+    /// retained, and the changeset encoded with its objects, none of them written. A land that
+    /// carries changes stages its `C` so ([`crate::land`]).
+    pub(crate) fn stage_commit(
+        &self,
+        seen: Option<&RepoRead<'_, O>>,
+        req: CommitRequest,
+    ) -> Result<(StagedChangeset, Option<Advance>), RepoError> {
         let CommitRequest {
             parents,
             changes,
@@ -416,18 +428,21 @@ impl<O: ObjectStore> Repo<O> {
             Some(&first) => Some(self.changeset_object(first)?.root),
             None => None,
         };
-        let written = self.write_changeset(Draft {
-            onto,
-            changes: candidates,
-            contents,
-            parents,
-            author,
-            committer,
-            message,
-            metadata,
-            allow_empty,
-        })?;
-        Ok((written, advance))
+        let staged = stage_changeset(
+            &self.objects,
+            Draft {
+                onto,
+                changes: candidates,
+                contents,
+                parents,
+                author,
+                committer,
+                message,
+                metadata,
+                allow_empty,
+            },
+        )?;
+        Ok((staged, advance))
     }
 
     /// Writes the changeset `draft` describes, and records nothing (the module documentation's
@@ -662,6 +677,19 @@ impl StagedChangeset {
             blobs_written,
             trees_written,
         })
+    }
+
+    /// [`Self::put`] of the blobs and trees alone: the changeset object, which nothing else
+    /// names, is returned unwritten, for a land to put with its `L` once it publishes
+    /// ([`crate::land`]), so that a land that publishes nothing leaves no changeset object.
+    pub(crate) fn put_held<S: ObjectStore>(
+        mut self,
+        objects: &S,
+    ) -> Result<(WrittenChangeset, Hashed), RepoError> {
+        // The changeset object is the batch's last ([`stage_changeset`]'s step 3).
+        let held = (self.objects.pop())
+            .ok_or_else(|| RepoError::Internal("a staged changeset without its object".into()))?;
+        Ok((self.put(objects)?, held))
     }
 }
 

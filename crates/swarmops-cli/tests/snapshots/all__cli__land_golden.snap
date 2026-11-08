@@ -269,7 +269,13 @@ expression: s.transcript()
                 "path": "f.txt",
                 "theirs_agent": "agent/worker-18",
                 "theirs_blob": "[id8]",
-                "theirs_changeset": "[theirs2]"
+                "theirs_changeset": "[theirs2]",
+                "theirs_changesets": [
+                  {
+                    "agent": "agent/worker-18",
+                    "changeset": "[theirs2]"
+                  }
+                ]
               }
             ],
             "kinds": [

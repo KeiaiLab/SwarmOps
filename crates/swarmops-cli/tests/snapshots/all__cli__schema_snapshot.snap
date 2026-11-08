@@ -1866,6 +1866,17 @@ expression: s.redact(&all)
                 "string",
                 "null"
               ]
+            },
+            "theirs_changesets": {
+              "description": "Every changeset on the target since the merge base that changed this path, newest first,\n`theirs_changeset` the first: at most 16. Attribution is per file, not per line. Omitted\nwhen there are none.",
+              "items": {
+                "$ref": "#/$defs/TouchOut"
+              },
+              "type": "array"
+            },
+            "theirs_changesets_truncated": {
+              "description": "Whether more changesets changed this path than `theirs_changesets` lists. Omitted when\nfalse.",
+              "type": "boolean"
             }
           },
           "required": [
@@ -1894,6 +1905,10 @@ expression: s.redact(&all)
             "theirs": {
               "$ref": "#/$defs/LinesOut",
               "description": "The target's lines."
+            },
+            "truncated": {
+              "description": "Whether this hunk lost its texts to the report's bounds: past `max_conflict_bytes`, or\nthe hunk that spans the first file's hunks past the report's bound. Omitted when false.",
+              "type": "boolean"
             }
           },
           "required": [
@@ -1925,11 +1940,36 @@ expression: s.redact(&all)
                 "string",
                 "null"
               ]
+            },
+            "text_head": {
+              "description": "The text's first whole lines, on the first hunk whose texts would pass the report's\n`max_conflict_bytes`: as many as what the budget had left holds, `text` omitted. Omitted\nelsewhere, and when no line fits.",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
             "first",
             "last"
+          ],
+          "type": "object"
+        },
+        "TouchOut": {
+          "description": "A changeset that changed a conflicting file on the target: one of a file conflict's\n`theirs_changesets`.",
+          "properties": {
+            "agent": {
+              "description": "The agent that wrote it.",
+              "type": "string"
+            },
+            "changeset": {
+              "description": "The changeset's id.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "changeset",
+            "agent"
           ],
           "type": "object"
         }
@@ -3471,6 +3511,10 @@ expression: s.redact(&all)
             "theirs": {
               "$ref": "#/$defs/LinesOut",
               "description": "The target's lines."
+            },
+            "truncated": {
+              "description": "Whether this hunk lost its texts to the report's bounds: past `max_conflict_bytes`, or\nthe hunk that spans the first file's hunks past the report's bound. Omitted when false.",
+              "type": "boolean"
             }
           },
           "required": [
@@ -3502,11 +3546,36 @@ expression: s.redact(&all)
                 "string",
                 "null"
               ]
+            },
+            "text_head": {
+              "description": "The text's first whole lines, on the first hunk whose texts would pass the report's\n`max_conflict_bytes`: as many as what the budget had left holds, `text` omitted. Omitted\nelsewhere, and when no line fits.",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
             "first",
             "last"
+          ],
+          "type": "object"
+        },
+        "TouchOut": {
+          "description": "A changeset that changed a conflicting file on the target: one of a file conflict's\n`theirs_changesets`.",
+          "properties": {
+            "agent": {
+              "description": "The agent that wrote it.",
+              "type": "string"
+            },
+            "changeset": {
+              "description": "The changeset's id.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "changeset",
+            "agent"
           ],
           "type": "object"
         }
@@ -3563,6 +3632,17 @@ expression: s.redact(&all)
             "string",
             "null"
           ]
+        },
+        "theirs_changesets": {
+          "description": "Every changeset on the target since the merge base that changed this path, newest first,\n`theirs_changeset` the first: at most 16. Attribution is per file, not per line. Omitted\nwhen there are none.",
+          "items": {
+            "$ref": "#/$defs/TouchOut"
+          },
+          "type": "array"
+        },
+        "theirs_changesets_truncated": {
+          "description": "Whether more changesets changed this path than `theirs_changesets` lists. Omitted when\nfalse.",
+          "type": "boolean"
         }
       },
       "required": [
@@ -4398,6 +4478,13 @@ expression: s.redact(&all)
                 "string",
                 "null"
               ]
+            },
+            "text_head": {
+              "description": "The text's first whole lines, on the first hunk whose texts would pass the report's\n`max_conflict_bytes`: as many as what the budget had left holds, `text` omitted. Omitted\nelsewhere, and when no line fits.",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
@@ -4427,6 +4514,10 @@ expression: s.redact(&all)
         "theirs": {
           "$ref": "#/$defs/LinesOut",
           "description": "The target's lines."
+        },
+        "truncated": {
+          "description": "Whether this hunk lost its texts to the report's bounds: past `max_conflict_bytes`, or\nthe hunk that spans the first file's hunks past the report's bound. Omitted when false.",
+          "type": "boolean"
         }
       },
       "required": [
@@ -5026,6 +5117,13 @@ expression: s.redact(&all)
         },
         "text": {
           "description": "The lines' text; omitted from the first hunk whose texts would pass the report's\n`max_conflict_bytes`, and on the hunk that spans the first file's hunks past the\nreport's bound (`truncated`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text_head": {
+          "description": "The text's first whole lines, on the first hunk whose texts would pass the report's\n`max_conflict_bytes`: as many as what the budget had left holds, `text` omitted. Omitted\nelsewhere, and when no line fits.",
           "type": [
             "string",
             "null"
@@ -9458,6 +9556,26 @@ expression: s.redact(&all)
         "remote"
       ],
       "title": "SyncStatusReq",
+      "type": "object"
+    },
+    "TouchOut": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "A changeset that changed a conflicting file on the target: one of a file conflict's\n`theirs_changesets`.",
+      "properties": {
+        "agent": {
+          "description": "The agent that wrote it.",
+          "type": "string"
+        },
+        "changeset": {
+          "description": "The changeset's id.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "changeset",
+        "agent"
+      ],
+      "title": "TouchOut",
       "type": "object"
     },
     "TreeEntryOut": {

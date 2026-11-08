@@ -2918,6 +2918,15 @@ pub struct FileConflictOut {
     /// The agent that wrote `theirs_changeset`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub theirs_agent: Option<String>,
+    /// Every changeset on the target since the merge base that changed this path, newest first,
+    /// `theirs_changeset` the first: at most 16. Attribution is per file, not per line. Omitted
+    /// when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub theirs_changesets: Vec<TouchOut>,
+    /// Whether more changesets changed this path than `theirs_changesets` lists. Omitted when
+    /// false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub theirs_changesets_truncated: bool,
 }
 
 impl FileConflictOut {
@@ -2932,6 +2941,29 @@ impl FileConflictOut {
             hunks: Vec::new(),
             theirs_changeset: None,
             theirs_agent: None,
+            theirs_changesets: Vec::new(),
+            theirs_changesets_truncated: false,
+        }
+    }
+}
+
+/// A changeset that changed a conflicting file on the target: one of a file conflict's
+/// `theirs_changesets`.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TouchOut {
+    /// The changeset's id.
+    pub changeset: String,
+    /// The agent that wrote it.
+    pub agent: String,
+}
+
+impl TouchOut {
+    /// Takes every field.
+    pub fn new(changeset: impl Into<String>, agent: impl Into<String>) -> Self {
+        Self {
+            changeset: changeset.into(),
+            agent: agent.into(),
         }
     }
 }
@@ -2972,16 +3004,21 @@ pub struct HunkOut {
     pub ours: LinesOut,
     /// The target's lines.
     pub theirs: LinesOut,
+    /// Whether this hunk lost its texts to the report's bounds: past `max_conflict_bytes`, or
+    /// the hunk that spans the first file's hunks past the report's bound. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
 }
 
 impl HunkOut {
-    /// Takes every field.
+    /// Takes the required fields; the others get their serde defaults.
     pub fn new(id: u32, base: LinesOut, ours: LinesOut, theirs: LinesOut) -> Self {
         Self {
             id,
             base,
             ours,
             theirs,
+            truncated: false,
         }
     }
 }
@@ -3000,6 +3037,11 @@ pub struct LinesOut {
     /// report's bound (`truncated`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// The text's first whole lines, on the first hunk whose texts would pass the report's
+    /// `max_conflict_bytes`: as many as what the budget had left holds, `text` omitted. Omitted
+    /// elsewhere, and when no line fits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_head: Option<String>,
 }
 
 impl LinesOut {
@@ -3009,6 +3051,7 @@ impl LinesOut {
             first,
             last,
             text: None,
+            text_head: None,
         }
     }
 }

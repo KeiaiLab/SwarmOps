@@ -130,7 +130,13 @@ expression: s.transcript()
                 "path": "gone.txt",
                 "theirs_agent": "agent/worker-18",
                 "theirs_blob": "[id5]",
-                "theirs_changeset": "[theirs]"
+                "theirs_changeset": "[theirs]",
+                "theirs_changesets": [
+                  {
+                    "agent": "agent/worker-18",
+                    "changeset": "[theirs]"
+                  }
+                ]
               },
               {
                 "base_blob": "[id6]",
@@ -138,7 +144,13 @@ expression: s.transcript()
                 "ours_blob": "[id7]",
                 "path": "kept.txt",
                 "theirs_agent": "agent/worker-18",
-                "theirs_changeset": "[theirs]"
+                "theirs_changeset": "[theirs]",
+                "theirs_changesets": [
+                  {
+                    "agent": "agent/worker-18",
+                    "changeset": "[theirs]"
+                  }
+                ]
               },
               {
                 "base_blob": "[logo_base]",
@@ -147,7 +159,13 @@ expression: s.transcript()
                 "path": "logo.bin",
                 "theirs_agent": "agent/worker-18",
                 "theirs_blob": "[logo_theirs]",
-                "theirs_changeset": "[theirs]"
+                "theirs_changeset": "[theirs]",
+                "theirs_changesets": [
+                  {
+                    "agent": "agent/worker-18",
+                    "changeset": "[theirs]"
+                  }
+                ]
               }
             ],
             "kinds": [

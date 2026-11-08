@@ -268,13 +268,6 @@ left).
   inverse change, and keeps what later lands built (the M18 design §4); a range whose changesets
   include merges is taken back against their first parents only. *Unscheduled. Found: M4 Decision
   10; `revert`, M18.*
-- **A land with changes that fails leaves its commit's objects.** A land with changes, and so a
-  `revert`, writes its commit `C`'s trees and changeset object before it merges, outside the
-  store's lock. A land that then conflicts, has nothing to land or loses every attempt records
-  nothing, and no record names those objects, but they stay, counted as `gc`'s `orphan_objects`:
-  a revert's `E_CONFLICT` leaves the store's metadata byte for byte as it was, not its objects,
-  where the M18 design §0.1 asks that it write nothing. *Unscheduled. Found: the M18 revert
-  tests.*
 - **No hooks or annotations after a land.** A land records no post-land verification, and
   `land`'s result has no `verification` field: annotations need a journal record the current
   `FORMAT` lacks. Agents check a landed tree with `read_file` and their own runs. *Target: M7, on
@@ -444,9 +437,15 @@ left).
   the error's message, not in a field of the report, which says `truncated`, and `land --human`
   prints a `conflict:` line for the listed files alone. The report's `auto_merged` and `stale` lists
   have no bound but the paths of the change, and the three-way merge still makes every hunk of a
-  file, within the line diff's bound, before the merge keeps 128 of them. *Unscheduled: a count of
-  the files left out, a field of the report (a schema change). Found: the 2026-10-20 security review
-  of M4.*
+  file, within the line diff's bound, before the merge keeps 128 of them. Past `max_conflict_bytes`
+  a hunk keeps no text but the first such hunk's whole lines that fit (`text_head`), each such hunk
+  says `truncated`, and a file names at most 16 changesets that changed it, newest first
+  (`theirs_changesets_truncated` past them). *Unscheduled: a count of the files left out, a field
+  of the report (a schema change). Found: the 2026-10-20 security review of M4.*
+- **A conflict report names who changed a file, not who changed its lines.** Each conflicting
+  file lists the changesets on the target since the base that changed it, newest first, not the
+  one that wrote each conflicting line: that is blame, line provenance the store does not record.
+  *Target: M7 (blame, G11; the M18 design §5). Found: the M18 design.*
 - **A changeset written outside the repository library can hold both `x` and `x:b64`.** The
   library refuses a metadata key that ends in `:b64` for every writer
   (`swarmops_repo::check_metadata`, which `Repo::commit` runs), so only a store written by other

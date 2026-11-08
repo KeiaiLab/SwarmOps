@@ -1055,7 +1055,13 @@ expression: s.transcript()
                 "path": "src/lib.rs",
                 "theirs_agent": "agent/worker-17",
                 "theirs_blob": "[id12]",
-                "theirs_changeset": "[theirs]"
+                "theirs_changeset": "[theirs]",
+                "theirs_changesets": [
+                  {
+                    "agent": "agent/worker-17",
+                    "changeset": "[theirs]"
+                  }
+                ]
               }
             ],
             "kinds": [
@@ -1393,7 +1399,13 @@ expression: s.transcript()
                 "path": "src/lib.rs",
                 "theirs_agent": "agent/worker-17",
                 "theirs_blob": "[id18]",
-                "theirs_changeset": "[id15]"
+                "theirs_changeset": "[id15]",
+                "theirs_changesets": [
+                  {
+                    "agent": "agent/worker-17",
+                    "changeset": "[id15]"
+                  }
+                ]
               }
             ],
             "kinds": [

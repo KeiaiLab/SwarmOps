@@ -40,6 +40,10 @@ const COPIED: [&str; 2] = ["agent", "run_id"];
 /// The attempts a land makes by default ([`LandRequest::new`]).
 const MAX_ATTEMPTS: u32 = 8;
 
+/// The most changesets a conflict report lists for one path ([`MergeConflicts::touches`]), newest
+/// first (the M18 design §5).
+pub const MAX_TOUCHES_PER_FILE: usize = 16;
+
 /// A land to make ([`Repo::land`]): the change, the first-parent chain from `base` to `head`, onto
 /// the ref `target`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,9 +85,10 @@ pub struct LandRequest {
     /// none.
     pub resolutions: Option<Resolutions>,
     /// A change to commit on `head` first, `C` (the M16 design §4): its parents `[head]`, no
-    /// `advance` ([`RepoError::LandCommit`] otherwise). The land writes `C` once, outside the
-    /// lock, squashes the chain with `C` at its end, and records `C` and `L` in its one frame;
-    /// an attempt that lands nothing records neither. A keyed land with one replays the land
+    /// `advance` ([`RepoError::LandCommit`] otherwise). The land writes `C`'s blobs and trees
+    /// once, outside the lock, and its changeset object with `L`'s, so a land that conflicts or
+    /// has nothing to land writes none; it squashes the chain with `C` at its end, and records
+    /// `C` and `L` in its one frame; an attempt that lands nothing records neither. A keyed land with one replays the land
     /// whose last squashed changeset is on `head` with `C`'s tree. `None`: the head as it is.
     pub commit: Option<CommitRequest>,
 }
@@ -236,6 +241,11 @@ pub struct MergeConflicts {
     /// changeset's `agent` metadata (empty when it names none). A path none of them touched has
     /// none: a base off the target can leave theirs' change below the walk.
     pub last_touched: BTreeMap<RepoPath, (ChangesetId, String)>,
+    /// For each conflicting path, every changeset on the target's first-parent chain since the
+    /// base whose delta touches it, newest first, with its `agent`, up to
+    /// [`MAX_TOUCHES_PER_FILE`]: `last_touched`'s is the first. Empty unless set by
+    /// [`MergeConflicts::with_touches`]; a land's conflict sets it.
+    pub touches: BTreeMap<RepoPath, Touches>,
     /// The paths whose resolutions did not apply, sorted: the target's head holds there what the
     /// resolutions' `against` does not ([`Resolutions`]). Empty for a land without resolutions.
     pub stale: Vec<RepoPath>,
@@ -259,9 +269,46 @@ impl MergeConflicts {
             conflicts,
             auto_merged,
             last_touched,
+            touches: BTreeMap::new(),
             stale,
         }
     }
+
+    /// These conflicts with `touches` ([`MergeConflicts::touches`]).
+    #[must_use]
+    pub fn with_touches(mut self, touches: BTreeMap<RepoPath, Touches>) -> MergeConflicts {
+        self.touches = touches;
+        self
+    }
+}
+
+/// The changesets that touched one conflicting path ([`MergeConflicts::touches`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Touches {
+    /// The changesets, newest first, each with its `agent` metadata (empty when it names none):
+    /// at most [`MAX_TOUCHES_PER_FILE`].
+    pub list: Vec<(ChangesetId, String)>,
+    /// Whether more changesets since the base touched the path than `list` holds.
+    pub more: More,
+}
+
+impl Touches {
+    /// Makes one of the fields given.
+    pub fn new(list: Vec<(ChangesetId, String)>, more: More) -> Touches {
+        Touches { list, more }
+    }
+}
+
+/// Whether a list left something out ([`Touches::more`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum More {
+    /// It holds everything.
+    #[default]
+    No,
+    /// There was more than it holds.
+    Yes,
 }
 
 /// Why a gated land ([`Repo::land_gated`]) failed: the land's own error, or its gate's refusal
@@ -402,10 +449,15 @@ impl<O: ObjectStore> Repo<O> {
         };
         let base = stored(&read, base)?;
 
-        // The change committed on the head, written once for every attempt.
-        let made = (req.commit.take())
-            .map(|commit| self.write_made(&read, req.head, commit))
-            .transpose()?;
+        // The change committed on the head, staged once for every attempt: its changeset object
+        // held until an attempt writes `L`.
+        let (made, c_object) = match req.commit.take() {
+            Some(commit) => {
+                let (id, changeset, object) = self.write_made(&read, req.head, commit)?;
+                (Some((id, changeset)), Some(object))
+            }
+            None => (None, None),
+        };
         let ours = made.as_ref().map_or(head.changeset.root, |(_, c)| c.root);
         let resolving = (req.resolutions.take())
             .map(|resolutions| Resolving::new(self, &read, resolutions, ours))
@@ -416,6 +468,7 @@ impl<O: ObjectStore> Repo<O> {
             req,
             head,
             made,
+            held: c_object,
             base,
             squashed: None,
             prior: None,
@@ -429,20 +482,22 @@ impl<O: ObjectStore> Repo<O> {
         })
     }
 
-    /// `C`, the change `commit` of a land of `head`, written and flushed outside the lock, not
-    /// recorded; its parents are looked up in `read`. [`RepoError::LandCommit`] unless its
-    /// parents are `[head]` and it moves no ref.
+    /// `C`, the change `commit` of a land of `head`, its blobs and trees written and flushed
+    /// outside the lock, not recorded, and its changeset object returned unwritten; its parents
+    /// are looked up in `read`. [`RepoError::LandCommit`] unless its parents are `[head]` and it
+    /// moves no ref.
     fn write_made(
         &self,
         read: &RepoRead<'_, O>,
         head: ChangesetId,
         commit: CommitRequest,
-    ) -> Result<(ChangesetId, Changeset), RepoError> {
+    ) -> Result<(ChangesetId, Changeset, Hashed), RepoError> {
         if commit.parents != [head] || commit.advance.is_some() {
             return Err(RepoError::LandCommit { head });
         }
-        let (written, _) = self.write_commit(Some(read), commit)?;
-        Ok((written.id, written.changeset))
+        let (staged, _) = self.stage_commit(Some(read), commit)?;
+        let (written, object) = staged.put_held(&self.objects)?;
+        Ok((written.id, written.changeset, object))
     }
 
     /// What ref `target` names under the store's lock, after the write's tail check, which makes
@@ -566,9 +621,12 @@ struct Landing<'r, O: ObjectStore> {
     req: LandRequest,
     /// The change's head.
     head: StoredChangeset,
-    /// `C`, the change committed on the head, written: what the land squashes last and records
-    /// before `L`. `None` for a land without changes.
+    /// `C`, the change committed on the head, its blobs and trees written: what the land
+    /// squashes last and records before `L`. `None` for a land without changes.
     made: Option<(ChangesetId, Changeset)>,
+    /// `C`'s changeset object, not yet put: the first attempt that writes `L` puts it. `None`
+    /// once put, and for a land without changes.
+    held: Option<Hashed>,
     /// The base the change was taken from.
     base: StoredChangeset,
     /// The chain the land squashes, oldest first, once an attempt has walked it.
@@ -836,13 +894,20 @@ impl<O: ObjectStore> Landing<'_, O> {
     /// `theirs`' tree, the merged contents `new_blobs` among its blobs; its publication checks the
     /// key against the frames from `next_seq` on.
     fn write(
-        &self,
+        &mut self,
         theirs: &StoredChangeset,
         delta: Vec<DeltaEntry>,
         new_blobs: BTreeMap<BlobId, Vec<u8>>,
         squashed: &[ChangesetId],
         next_seq: u64,
     ) -> Result<Publication, RepoError> {
+        // 1. `C`'s object, put unflushed: `L`'s flush below makes both durable before the
+        //    publish names them (I1).
+        if let Some(object) = self.held.take() {
+            self.repo.objects.put_hashed_batch(vec![object])?;
+        }
+
+        // 2. `L`, on theirs.
         let head = self.tip();
         let recorded = Recorded {
             key: self.req.key.as_deref(),
@@ -861,7 +926,7 @@ impl<O: ObjectStore> Landing<'_, O> {
         };
         let written = write_squash(self.repo, squash)?;
 
-        // An exact land publishes the tree it was checked with, or nothing (M5).
+        // 3. An exact land publishes the tree it was checked with, or nothing (M5).
         let relocate = match self.req.expect_target {
             Some(_) => Relocate::Never,
             None => Relocate::Allow,
@@ -994,8 +1059,8 @@ pub(super) struct Sides<'a> {
 }
 
 /// The error of a merge onto `sides.theirs` that conflicts, or whose resolutions of `stale` did
-/// not apply: its conflicts, with who last touched each path on `theirs`' first-parent chain since
-/// the base, from `walk`, and the stale paths.
+/// not apply: its conflicts, with who touched each path on `theirs`' first-parent chain since the
+/// base, newest first, from `walk`, and the stale paths.
 pub(super) fn conflict_report<O: ObjectStore>(
     walk: &mut TargetWalk,
     read: &RepoRead<'_, O>,
@@ -1006,16 +1071,25 @@ pub(super) fn conflict_report<O: ObjectStore>(
     let paths: Vec<RepoPath> = (merged.conflicts.iter())
         .map(|conflict| conflict.path.clone())
         .collect();
-    let last_touched = walk.last_touched(read, sides.theirs, &paths)?;
-    Ok(RepoError::Conflict(Box::new(MergeConflicts {
-        base: sides.base,
-        ours: sides.ours,
-        theirs: sides.theirs.id,
-        conflicts: merged.conflicts,
-        auto_merged: merged.auto_merged,
+    // 1. Every touch of each path, to its bound; the newest is the one that last touched it.
+    let touches = walk.touches(read, sides.theirs, &paths, MAX_TOUCHES_PER_FILE)?;
+    let last_touched = (touches.iter())
+        .filter_map(|(path, touched)| Some((path.clone(), touched.list.first()?.clone())))
+        .collect();
+
+    // 2. The conflicts, with both.
+    let conflicts = MergeConflicts::new(
+        sides.base,
+        sides.ours,
+        sides.theirs.id,
+        merged.conflicts,
+        merged.auto_merged,
         last_touched,
         stale,
-    })))
+    );
+    Ok(RepoError::Conflict(Box::new(
+        conflicts.with_touches(touches),
+    )))
 }
 
 /// The changeset a land makes, `L`, to write (step 5).

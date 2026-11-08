@@ -2,7 +2,7 @@
 
 # Schema types
 
-The 171 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
+The 172 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
 
 ## Index
 
@@ -141,6 +141,7 @@ The 171 request, response and value types of the API, as `swarmops schema` print
 | [`SyncStatus`](#syncstatus) | object | `sync status`: what is unpublished, and how far behind `main` is. |
 | [`SyncStatusKind`](#syncstatuskind) | enumeration | What a sync did. |
 | [`SyncStatusReq`](#syncstatusreq) | object | `sync status`: how `main` and a remote's followed branch stand, as the last fetch saw the remote. |
+| [`TouchOut`](#touchout) | object | A changeset that changed a conflicting file on the target: one of a file conflict's `theirs_changesets`. |
 | [`TreeEntryOut`](#treeentryout) | object | One entry of a listing. |
 | [`TreeListing`](#treelisting) | object | `read_tree` (CLI `ls`): a page of a directory's entries, in pre-order: a directory, then the entries below it to the request's `depth`, each directory's entries by name bytes (at `depth` 1, the tree's order). |
 | [`UndoReq`](#undoreq) | object | `undo` (CLI `op undo`): restore every ref an operation moved to what it named before, by compare-and-swap, in one transaction: all of them or none. |
@@ -791,6 +792,8 @@ Kind: object. `swarmops schema FileConflictOut` prints its JSON Schema.
 | `theirs_agent` | `string` or `null` | no | The agent that wrote `theirs_changeset`. |
 | `theirs_blob` | `string` or `null` | no | Its blob on the target. |
 | `theirs_changeset` | `string` or `null` | no | The newest changeset on the target since the merge base that changed this path: what to read for the other side's edit. |
+| `theirs_changesets` | array of [`TouchOut`](#touchout) | no | Every changeset on the target since the merge base that changed this path, newest first, `theirs_changeset` the first: at most 16. Attribution is per file, not per line. Omitted when there are none. |
+| `theirs_changesets_truncated` | `boolean` | no | Whether more changesets changed this path than `theirs_changesets` lists. Omitted when false. |
 
 ## FileContent
 
@@ -963,6 +966,7 @@ Kind: object. `swarmops schema HunkOut` prints its JSON Schema.
 | `id` | `integer` (uint32) | yes | Its number in the file, from 0. |
 | `ours` | [`LinesOut`](#linesout) | yes | The change's lines. |
 | `theirs` | [`LinesOut`](#linesout) | yes | The target's lines. |
+| `truncated` | `boolean` | no | Whether this hunk lost its texts to the report's bounds: past `max_conflict_bytes`, or the hunk that spans the first file's hunks past the report's bound. Omitted when false. |
 
 ## Identity
 
@@ -1104,6 +1108,7 @@ Kind: object. `swarmops schema LinesOut` prints its JSON Schema.
 | `first` | `integer` (uint64) | yes | The first line. |
 | `last` | `integer` (uint64) | yes | The last line; `first` minus one when the side has none. |
 | `text` | `string` or `null` | no | The lines' text; omitted from the first hunk whose texts would pass the report's `max_conflict_bytes`, and on the hunk that spans the first file's hunks past the report's bound (`truncated`). |
+| `text_head` | `string` or `null` | no | The text's first whole lines, on the first hunk whose texts would pass the report's `max_conflict_bytes`: as many as what the budget had left holds, `text` omitted. Omitted elsewhere, and when no line fits. |
 
 ## LogCutOut
 
@@ -1994,6 +1999,17 @@ Kind: object. `swarmops schema SyncStatusReq` prints its JSON Schema.
 | --- | --- | --- | --- |
 | `limit` | `integer` (uint) | no | The most unpublished changesets to list. Default: `50`. |
 | `remote` | `string` | yes | The remote, by its name. |
+
+## TouchOut
+
+A changeset that changed a conflicting file on the target: one of a file conflict's `theirs_changesets`.
+
+Kind: object. `swarmops schema TouchOut` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `agent` | `string` | yes | The agent that wrote it. |
+| `changeset` | `string` | yes | The changeset's id. |
 
 ## TreeEntryOut
 

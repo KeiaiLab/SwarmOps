@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use camino::{Utf8Path, Utf8PathBuf};
-use swarmops_core::{ChangesetId, EntryTarget, ObjectId, RepoPath, Signature};
+use swarmops_core::{ChangesetId, EntryTarget, RepoPath, Signature};
 use swarmops_repo::land::{LandStatus, NothingToLandReason};
 use swarmops_repo::{
     Advance, Change, LocalRepo, MAX_REVERT_CHANGESETS, OpId, RepoError, RevertRequest,
@@ -179,8 +179,8 @@ fn a_revert_keeps_later_lands_elsewhere() {
 }
 
 /// A later edit of the lines the reverted changeset changed: `E_CONFLICT`, naming the later
-/// changeset as the one that last touched the file; nothing recorded, the store's files under
-/// `meta/` byte for byte as they were, and under `objects/` only `C`'s object added.
+/// changeset as the one that last touched the file; nothing written, the store's files under
+/// `meta/` and `objects/` byte for byte as they were.
 #[test]
 fn a_revert_over_a_later_edit_names_it() {
     let (_dir, root, repo) = new_store();
@@ -204,34 +204,9 @@ fn a_revert_over_a_later_edit_names_it() {
     );
     assert_eq!(main_head(&repo), later);
 
-    // Nothing recorded: `meta/` byte for byte as it was, and no object file changed or gone. The
-    // land wrote `C`, the inverse committed on A, before it merged (a land with changes writes
-    // it outside the lock): its changeset object is the one file added, which no record names
-    // (known limitations, "A land with changes that fails leaves its commit's objects").
-    let after = store_files(&root);
-    let under = |files: &BTreeMap<String, Vec<u8>>, dir: &str| -> BTreeMap<String, Vec<u8>> {
-        (files.iter())
-            .filter(|(name, _)| name.starts_with(dir))
-            .map(|(name, bytes)| (name.clone(), bytes.clone()))
-            .collect()
-    };
-    assert_eq!(
-        under(&after, "meta/"),
-        under(&before, "meta/"),
-        "meta/ changed"
-    );
-    for (name, bytes) in &before {
-        assert_eq!(after.get(name), Some(bytes), "{name} changed or went");
-    }
-    let added: Vec<&String> = (after.keys())
-        .filter(|name| !before.contains_key(*name))
-        .collect();
-    let [made] = added[..] else {
-        panic!("one object added, C's: {added:?}");
-    };
-    let hex = made.strip_prefix("objects/").unwrap().replace('/', "");
-    let made = ChangesetId::new(ObjectId::from_hex(&hex).unwrap());
-    assert!(repo.changeset(made).unwrap().is_none(), "no record names C");
+    // Nothing written: `meta/` and `objects/` byte for byte as they were. The land holds `C`,
+    // the inverse committed on A, in memory until its publish.
+    assert_eq!(store_files(&root), before, "the store's files changed");
 }
 
 /// A keyed revert run again replays the revert it made, writing nothing: `C`'s tree is a

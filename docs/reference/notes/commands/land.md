@@ -56,16 +56,19 @@ as the other writers left it. `details.report` names:
 - `base`, `ours` (your change's head) and `theirs` (the target's head it was merged with), by
   full id;
 - each conflicting file: its `path`, its `kind`, the blob ids of the sides that hold it, its hunks (each
-  side's lines, numbered from 1, both ends included), and the target's changeset and agent that
-  last changed it (`theirs_changeset`, `theirs_agent`);
+  side's lines, numbered from 1, both ends included), the target's changeset and agent that
+  last changed it (`theirs_changeset`, `theirs_agent`), and every changeset since the base that
+  changed it, newest first, with its agent (`theirs_changesets`, at most 16, and
+  `theirs_changesets_truncated` past them);
 - `kinds`: `content` (the same or adjacent lines of a text file), `binary`, `delete_modify`,
   `modify_delete`, `add_add`, `mode` or `type_change`;
 - `auto_merged`, the paths both sides changed whose contents merged cleanly into a content
   neither side had.
 
 Hunks carry their texts while their sum stays within `--max-conflict-bytes` (32,768 by default):
-from the first hunk whose texts would pass it, no hunk carries its texts, and the report sets
-`truncated`. The hunks' line positions and the blob ids stay, from which
+from the first hunk whose texts would pass it, no hunk carries its texts, each such hunk and the
+report set `truncated`, and that first hunk keeps each side's first whole lines that the rest of
+the budget holds (`text_head`). The hunks' line positions and the blob ids stay, from which
 [`cat`](../../commands/cat.md) reads any side. With `--max-conflict-bytes 0` a report carries no
 hunk text. The files are bounded apart from it, at 24 KiB of entries without their texts
 ([conflict report entries](../../limits.md#conflict-report-entries)): the first file is always
