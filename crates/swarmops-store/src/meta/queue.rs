@@ -95,6 +95,9 @@ const LEAD_WAIT_LIMIT: Duration = Duration::from_secs(10);
 /// The most files a janitor pass removes.
 const JANITOR_MAX: usize = 256;
 
+/// The most times a waiter places its request: again only after a janitor pass took its temp.
+const PLACE_TRIES: usize = 3;
+
 /// What a cut warning ends with.
 const ELLIPSIS: &str = "...";
 
@@ -745,6 +748,16 @@ struct OwnFile {
     _file: File,
 }
 
+/// What one placement of a request did.
+enum Placement {
+    /// The request file, open and flocked.
+    Placed(File),
+    /// A janitor pass took the temp: worth one more placement.
+    Taken,
+    /// Any other failure.
+    Failed,
+}
+
 impl MetaStore {
     /// Takes a turn at the write queue with `body`, a request of the caller's own encoding: see
     /// the module documentation and the M18 D2 design §3.2. With [`Serve::Queue`], a writer that
@@ -831,7 +844,7 @@ impl MetaStore {
     }
 
     /// Writes the request `record` as `.tmp-<rid>`, flocks it and renames it `<rid>.req`;
-    /// `None`, the temp removed, if any of that fails.
+    /// `None`, the temp removed, if any of that fails other than by a janitor pass.
     fn enqueue(&self, own: &RequestId, record: &[u8], seams: &Seams) -> Option<OwnFile> {
         let dir = self.layout.queue_dir();
         let dir = dir.as_std_path();
@@ -843,8 +856,32 @@ impl MetaStore {
         if !usable(dir) {
             return None;
         }
+
+        // A janitor pass may take the temp between its create and its flock (§3.5): placed
+        // again through a temp named by a fresh id, one that pass never listed.
+        let mut temp_id = own.clone();
+        for _ in 0..PLACE_TRIES {
+            match self.place(dir, &temp_id, own, record, seams) {
+                Placement::Placed(file) => return Some(OwnFile { _file: file }),
+                Placement::Taken => temp_id = RequestId::new(),
+                Placement::Failed => return None,
+            }
+        }
+        None
+    }
+
+    /// Writes `record` as `.tmp-<temp_id>`, flocks it and renames it `<own>.req`; the temp is
+    /// removed if any of that fails.
+    fn place(
+        &self,
+        dir: &Path,
+        temp_id: &RequestId,
+        own: &RequestId,
+        record: &[u8],
+        seams: &Seams,
+    ) -> Placement {
         let ops = &*seams.ops;
-        let temp = Kind::Temp.path(dir, own);
+        let temp = Kind::Temp.path(dir, temp_id);
         let placed = ops.create(&temp).and_then(|mut file| {
             ops.try_lock(&file).map_err(io::Error::from)?;
             ops.write(&mut file, record)?;
@@ -852,10 +889,17 @@ impl MetaStore {
             ops.rename(&temp, &Kind::Req.path(dir, own))?;
             Ok(file)
         });
-        if placed.is_err() {
-            let _ = ops.remove(&temp);
+        let e = match placed {
+            Ok(file) => return Placement::Placed(file),
+            Err(e) => e,
+        };
+        let _ = ops.remove(&temp);
+
+        // The janitor's marks: its liveness flock held, or the temp removed under the writer.
+        match e.kind() {
+            io::ErrorKind::WouldBlock | io::ErrorKind::NotFound => Placement::Taken,
+            _ => Placement::Failed,
         }
-        placed.ok().map(|file| OwnFile { _file: file })
     }
 
     /// Waits for the lock or for the answer to request `own` (steps 5, 15–17 of §3.1).
@@ -1903,6 +1947,83 @@ mod tests {
 
         fn remove(&self, path: &Path) -> io::Result<()> {
             self.check(Op::Remove, path)?;
+            RealQueue.remove(path)
+        }
+
+        fn list(&self, dir: &Path) -> io::Result<Vec<String>> {
+            RealQueue.list(dir)
+        }
+    }
+
+    /// What [`Paused`] does once the first request temp is made, before its writer's flock.
+    enum Window {
+        /// Says so on the sender, then waits on the receiver.
+        Pause(mpsc::Sender<()>, mpsc::Receiver<()>),
+        /// Holds the temp's flock, as a janitor's liveness test in flight does.
+        Probe,
+    }
+
+    /// The real queue operations, but the first create of a request temp opens its [`Window`].
+    struct Paused {
+        window: Mutex<Option<Window>>,
+        probes: Mutex<Vec<File>>,
+    }
+
+    impl Paused {
+        fn seams(window: Window) -> Seams {
+            let ops = Paused {
+                window: Mutex::new(Some(window)),
+                probes: Mutex::new(Vec::new()),
+            };
+            Seams {
+                ops: Arc::new(ops),
+                ..Seams::real()
+            }
+        }
+    }
+
+    impl QueueOps for Paused {
+        fn create(&self, path: &Path) -> io::Result<File> {
+            let file = RealQueue.create(path)?;
+            let name = path.file_name().unwrap().to_string_lossy();
+            if !matches!(Kind::of(&name), Some((Kind::Temp, _))) {
+                return Ok(file);
+            }
+
+            // 1. The first temp only: a placement made again passes.
+            let window = self.window.lock().unwrap().take();
+            match window {
+                Some(Window::Pause(made, go)) => {
+                    made.send(()).unwrap();
+                    go.recv_timeout(PATIENCE).unwrap();
+                }
+                Some(Window::Probe) => {
+                    let probe = RealQueue.open(path)?;
+                    probe.try_lock().unwrap();
+                    self.probes.lock().unwrap().push(probe);
+                }
+                None => {}
+            }
+            Ok(file)
+        }
+
+        fn open(&self, path: &Path) -> io::Result<File> {
+            RealQueue.open(path)
+        }
+
+        fn write(&self, file: &mut File, bytes: &[u8]) -> io::Result<()> {
+            RealQueue.write(file, bytes)
+        }
+
+        fn try_lock(&self, file: &File) -> Result<(), TryLockError> {
+            RealQueue.try_lock(file)
+        }
+
+        fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+            RealQueue.rename(from, to)
+        }
+
+        fn remove(&self, path: &Path) -> io::Result<()> {
             RealQueue.remove(path)
         }
 
@@ -2974,6 +3095,55 @@ mod tests {
         ];
         want.sort();
         assert_eq!(left, want, "{dead_req} {dead_com} {dead_tmp} removed");
+    }
+
+    /// A janitor pass between a waiter's temp create and its flock removes the temp as dead;
+    /// the waiter places its request again and keeps its place in the batch.
+    #[test]
+    fn a_waiter_whose_temp_the_janitor_took_stays_queued() {
+        let (_dir, root) = new_store();
+        let store = open(&root);
+        let lock = hold(&store);
+        let (made, on_made) = mpsc::channel();
+        let (go, on_go) = mpsc::channel();
+        let seams = Paused::seams(Window::Pause(made, on_go));
+        thread::scope(|s| {
+            let waiter = s.spawn(|| turn_with(&open(&root), Ask::Frame(2), seams));
+
+            // 1. The janitor runs while the temp is made but not yet flocked.
+            on_made.recv_timeout(PATIENCE).unwrap();
+            assert_eq!(files(&root, Kind::Temp).len(), 1, "the temp is made");
+            janitor(&store, &Seams::real());
+            assert_eq!(files(&root, Kind::Temp), [], "taken as dead");
+            go.send(()).unwrap();
+
+            // 2. The request is still queued, and the lead serves it.
+            wait_files(&root, Kind::Req, 1);
+            let led = lead_all(lead_on(&store, lock, Ask::Frame(1), Seams::real()));
+            assert_eq!((led.requests, led.held), (2, 2));
+            let ended = waiter.join().unwrap().unwrap();
+            assert!(matches!(ended, Ended::Answered(_)), "{ended:?}");
+        });
+        assert_eq!(landed(&store, 2), 1);
+    }
+
+    /// A janitor's liveness test that holds a waiter's temp flock as the waiter tries it: the
+    /// waiter places its request again and keeps its place in the batch.
+    #[test]
+    fn a_waiter_whose_temp_a_probe_holds_stays_queued() {
+        let (_dir, root) = new_store();
+        let store = open(&root);
+        let lock = hold(&store);
+        thread::scope(|s| {
+            let seams = Paused::seams(Window::Probe);
+            let waiter = s.spawn(|| turn_with(&open(&root), Ask::Frame(2), seams));
+            wait_files(&root, Kind::Req, 1);
+            let led = lead_all(lead_on(&store, lock, Ask::Frame(1), Seams::real()));
+            assert_eq!((led.requests, led.held), (2, 2));
+            let ended = waiter.join().unwrap().unwrap();
+            assert!(matches!(ended, Ended::Answered(_)), "{ended:?}");
+        });
+        assert_eq!(landed(&store, 2), 1);
     }
 
     #[test]
