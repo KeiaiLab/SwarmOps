@@ -4,7 +4,7 @@
 
 Serve the store's operations to an agent as an MCP server on stdin and stdout.
 
-One tool per operation (repo\_info, resolve\_rev, read\_file, read\_tree, show, log, ancestry, path\_history, diff, op\_log, ref\_list, ref\_set, ref\_delete, ref\_log, undo, commit, land, blob\_put, blob\_has, verify, the maintenance's gc, repair and upgrade, and the git remotes' remote\_list, fetch, push, sync and sync\_status), each taking the operation's request as its arguments and returning the envelope the other commands print. The store and the identity are the server's, --repo and --as or their variables, never a call's. Speaks MCP 2026-07-28, and 2025-11-25 and 2025-06-18 to clients that open with initialize. Prints no envelope: stdout carries the protocol until stdin ends, and a command line it refuses has its envelope on stderr. The derive command has no tool: it only fills ahead of time a cache that each read fills itself, so it changes no result an agent reads; nor have clone and remote add\|remove, so that an agent cannot point the store at a URL of its choosing.
+One tool per operation (repo\_info, resolve\_rev, read\_file, read\_tree, show, log, ancestry, path\_history, diff, op\_log, ref\_list, ref\_set, ref\_delete, ref\_log, undo, commit, land, revert, blob\_put, blob\_has, verify, the maintenance's gc, repair and upgrade, and the git remotes' remote\_list, fetch, push, sync and sync\_status), each taking the operation's request as its arguments and returning the envelope the other commands print. The store and the identity are the server's, --repo and --as or their variables, never a call's. Speaks MCP 2026-07-28, and 2025-11-25 and 2025-06-18 to clients that open with initialize. Prints no envelope: stdout carries the protocol until stdin ends, and a command line it refuses has its envelope on stderr. The derive command has no tool: it only fills ahead of time a cache that each read fills itself, so it changes no result an agent reads; nor have clone and remote add\|remove, so that an agent cannot point the store at a URL of its choosing.
 
 ```yaml
 title: "swarmops mcp"
@@ -89,10 +89,10 @@ are not served. The results of `server/discover` and `tools/list` may be kept fo
 
 ### Tools
 
-`tools/list` gives 40 tools, one per operation, named as the envelope's `op` is: the 29 store
+`tools/list` gives 41 tools, one per operation, named as the envelope's `op` is: the 30 store
 operations `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `ancestry`,
 `path_history`, `diff`, `op_log`, `ref_list`, `ref_set`, `ref_delete`, `ref_log`, `undo`, `commit`,
-`land`, `rebase`, `blob_put`, `blob_has`, `verify`, `gc`, `repair`, `upgrade`, `remote_list`,
+`land`, `revert`, `rebase`, `blob_put`, `blob_has`, `verify`, `gc`, `repair`, `upgrade`, `remote_list`,
 `fetch`, `push`, `sync` and `sync_status`, then the 11 workspace operations `ws_create`, `ws_status`, `ws_diff`,
 `ws_commit`, `ws_rebase`, `ws_resolve`, `ws_land`, `ws_materialize`, `ws_discard`, `ws_list` and
 `ws_info`. A tool's input schema is its request type's JSON Schema (`swarmops schema <Req>`), with
@@ -103,7 +103,7 @@ every reference inlined so that it stands alone. Its annotations say what it doe
 | The 16 store reads, `blob_has`, `verify`, `remote_list` and `sync_status` among them; `ws_status`, `ws_diff`, `ws_list`, `ws_info` | `true` | `false` | `true` | `false` |
 | `commit`, `rebase`, `blob_put`, `ws_commit` | `false` | `false` | `false` | `false` |
 | `ref_set`, `ref_delete`, `undo`, `gc`, `repair`, `upgrade` | `false` | `true` | `true` | `false` |
-| `land`, `ws_create`, `ws_rebase`, `ws_resolve`, `ws_land`, `ws_materialize` | `false` | `false` | `true` | `false` |
+| `land`, `revert`, `ws_create`, `ws_rebase`, `ws_resolve`, `ws_land`, `ws_materialize` | `false` | `false` | `true` | `false` |
 | `ws_discard` | `false` | `true` | `true` | `false` |
 | `fetch`, `push` | `false` | `false` | `true` | `true` |
 | `sync` | `false` | `false` | `false` | `true` |

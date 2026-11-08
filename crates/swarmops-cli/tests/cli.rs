@@ -3821,6 +3821,104 @@ fn land_golden() {
     insta::assert_json_snapshot!(s.transcript());
 }
 
+/// `revert`, each way it ends (the M18 design §4): a change taken back while what main gained
+/// after it stays, with `--key`; the same revert again, a replay; `show` of the revert, naming
+/// what it took back and why; a revert under a later edit of the same lines, exit 3 with the
+/// report naming that edit; and a changeset off main, `E_INVALID_ARG`.
+#[test]
+fn revert_golden() {
+    let mut s = Session::new();
+    let store = s.store();
+    let init = s.run(&["init", &store]);
+    s.name_at(&init, "/result/repo_id", "repo_id");
+
+    // 1. main: t0, then A (a.txt), then B (b.txt).
+    let t0 = s.file(
+        "t0.json",
+        &json!([{"path": "f.txt", "op": "put", "content": {"inline": "1\n2\n3\n"}}]).to_string(),
+    );
+    let base = s.run(&[
+        "--repo",
+        &store,
+        "--as",
+        AGENT,
+        "commit",
+        "-m",
+        "t0",
+        "--changes",
+        &t0,
+        "--advance",
+        "main",
+    ]);
+    let t0 = s.name_at(&base, "/result/changeset", "t0");
+    let a = publish_as_other(&mut s, &store, &t0, ("a.txt", "a\n"), "a");
+    let b = publish_as_other(&mut s, &store, &a, ("b.txt", "b\n"), "b");
+    s.name(&a[..12], "a_12");
+
+    // 2. A taken back, then the same revert again.
+    let revert: [&str; 10] = [
+        "--repo",
+        &store,
+        "--as",
+        AGENT,
+        "revert",
+        &a,
+        "--reason",
+        "a broke the build",
+        "--key",
+        "revert-1",
+    ];
+    let reverted = s.run(&revert);
+    assert_eq!(reverted.exit, 0, "{}", reverted.json);
+    assert_eq!(reverted["result"]["land"]["rebased_onto"], b.as_str());
+    let r1 = s.name_at(&reverted, "/result/land/landed", "reverted");
+    s.name_at(&reverted, "/result/land/squashed_from/0", "inverse");
+    let replayed = s.run(&revert);
+    assert_eq!(
+        replayed["result"]["land"]["status"], "replayed",
+        "{}",
+        replayed.json
+    );
+
+    // 3. What the revert recorded, and main's tree: b.txt kept, a.txt gone.
+    let shown = s.run(&["--repo", &store, "show", &r1]);
+    assert_eq!(shown["result"]["reverts"], json!([a]));
+    let listed = s.run(&["--repo", &store, "ls", "main"]);
+    let names: Vec<&str> = (listed["result"]["entries"].as_array().unwrap().iter())
+        .map(|entry| entry["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["b.txt", "f.txt"]);
+
+    // 4. A later edit of f.txt's line 2 over C's: the revert of C conflicts, naming it.
+    let c = publish_as_other(&mut s, &store, &r1, ("f.txt", "1\nc\n3\n"), "c");
+    let later = publish_as_other(&mut s, &store, &c, ("f.txt", "1\nlater\n3\n"), "later");
+    let conflict = [
+        "--repo",
+        &store,
+        "--as",
+        AGENT,
+        "revert",
+        &c,
+        "--reason",
+        "c was wrong",
+    ];
+    let refused = s.run(&conflict);
+    assert_eq!((refused.exit, refused.code()), (3, "E_CONFLICT"));
+    let report = &refused["error"]["details"]["report"];
+    assert_eq!(report["files"][0]["theirs_changeset"], later.as_str());
+
+    // 5. A changeset off main.
+    let off = s.commit(&store, Some(&t0), "o.txt", "o\n", "off");
+    let args = [
+        "--repo", &store, "--as", AGENT, "revert", &off, "--reason", "r",
+    ];
+    let off_main = s.run(&args);
+    assert_eq!(off_main.code(), "E_INVALID_ARG");
+    assert_eq!(off_main["error"]["details"]["reason"], "not_on_target");
+
+    insta::assert_json_snapshot!(s.transcript());
+}
+
 /// A land's conflicts other than `content`: a file the change deleted and main changed
 /// (`delete_modify`), one the change changed and main deleted (`modify_delete`), and a file
 /// holding a NUL both changed (`binary`). Each names its blobs, and none has hunks.

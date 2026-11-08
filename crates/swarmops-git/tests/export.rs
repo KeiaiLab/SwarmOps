@@ -24,9 +24,11 @@ use swarmops_core::{
 use swarmops_git::{
     BranchUpdate, DivergedReason, ExportError, ExportOid, ExportReport, ExportRequest, GitOid,
     GitSink, GitSource, GixSink, GixSource, ImportReport, ImportRequest, LossyClass, RawCommit,
-    RawKind, RawTree, commit_bytes, export, git_hash, import, register,
+    RawKind, RawTree, TRAILERS, commit_bytes, export, git_hash, import, register,
 };
-use swarmops_repo::{Advance, CasResult, Change, LocalRepo, RawChangeset, RepoError, StoreError};
+use swarmops_repo::{
+    Advance, CasResult, Change, LocalRepo, RawChangeset, RepoError, RevertRequest, StoreError,
+};
 use swarmops_store::{ExternalEntry, ExternalIds, Layout, RealFs, SYSTEM_GIT, StoreFormat};
 use swarmops_testkit::fs::{HoldThenFail, NoSyncFs};
 use swarmops_testkit::git::{self, GitFixture, Manifest};
@@ -586,6 +588,63 @@ fn native_changesets_export_as_a_linear_history() {
         .collect();
     assert_eq!(modes.get(&b"run.sh"[..]), Some(&&b"100755"[..]));
     assert_eq!(modes.get(&b"link"[..]), Some(&&b"120000"[..]));
+}
+
+/// A revert's commit carries no trailer of its own (the M18 design §0.3 rule 1): its trailer
+/// block holds `SwarmOps-Changeset` and tokens of [`TRAILERS`] alone, the land's key and the
+/// changesets it squashed among them; its `reverts` and `revert_reason` metadata stay in the
+/// store, and its message names what it reverted.
+#[test]
+fn a_revert_exports_no_new_trailer() {
+    let store = store();
+    let repo = &store.repo;
+    let t0 = commit_on_main(repo, vec![put("f", b"f\n")], "t0");
+    let a = commit_on_main(repo, vec![put("a", b"a\n")], "add a");
+    commit_on_main(repo, vec![put("b", b"b\n")], "add b");
+    let mut revert = RevertRequest::new(a, "main", "a was wrong", signature());
+    revert.key = Some("revert-1".to_owned());
+    let reverted = repo.revert(revert).expect("revert").landed;
+    assert_ne!(reverted, t0);
+
+    // 1. The export of main, its head the revert's commit.
+    let destination = git::empty_repository();
+    let report = exported(repo, &mut gix(&destination.dir), &main_branch());
+    assert_eq!(report.head, reverted);
+    let message = commit_at(&destination.dir, report.head_oid).message;
+    let message = String::from_utf8(message).expect("a UTF-8 message");
+
+    // 2. Its trailer block: the last paragraph, each line a token of SwarmOps'.
+    let block = message.trim_end().rsplit("\n\n").next().expect("a block");
+    let allowed: Vec<&str> = std::iter::once("SwarmOps-Changeset")
+        .chain(TRAILERS.iter().map(|&(_, token)| token))
+        .collect();
+    let tokens: Vec<&str> = (block.lines())
+        .map(|line| line.split_once(": ").map_or(line, |(token, _)| token))
+        .collect();
+    assert!(
+        tokens.iter().all(|token| allowed.contains(token)),
+        "{tokens:?} in {message:?}"
+    );
+    assert_eq!(
+        tokens,
+        [
+            "SwarmOps-Changeset",
+            "SwarmOps-Land-Key",
+            "SwarmOps-Squashed-From"
+        ],
+        "{message:?}"
+    );
+    let exported_keys: Vec<&str> = TRAILERS.iter().map(|&(key, _)| key).collect();
+    for key in [
+        swarmops_repo::revert::REVERTS,
+        swarmops_repo::revert::REVERT_REASON,
+    ] {
+        assert!(!exported_keys.contains(&key), "{key} is a trailer");
+    }
+    assert!(message.starts_with(&format!(
+        "Revert {}: add a\n\na was wrong\n",
+        &a.to_string()[..12]
+    )));
 }
 
 /// A second root and a merge of it with `main`'s head, made natively (no `git.oid`), are both

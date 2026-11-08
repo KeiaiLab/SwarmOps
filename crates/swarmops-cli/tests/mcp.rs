@@ -56,7 +56,7 @@ type Startup<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)]);
 /// The tools, one per `StoreOps` operation and then one per client-side operation of the git
 /// remotes (M13), in the order `tools/list` gives them, each with the request type its arguments
 /// are.
-const TOOLS: [(&str, &str); 40] = [
+const TOOLS: [(&str, &str); 41] = [
     ("repo_info", "InfoReq"),
     ("resolve_rev", "ResolveRevReq"),
     ("read_file", "ReadFileReq"),
@@ -74,6 +74,7 @@ const TOOLS: [(&str, &str); 40] = [
     ("undo", "UndoReq"),
     ("commit", "CommitReq"),
     ("land", "LandReq"),
+    ("revert", "RevertReq"),
     ("rebase", "RebaseReq"),
     ("blob_put", "BlobPutReq"),
     ("blob_has", "BlobHasReq"),
@@ -134,7 +135,7 @@ const COUNTED: [&str; 4] = ["README.md", "docs", "web/app", "web/components"];
 /// The private design notes under `docs/`, which are not part of the repository.
 const PRIVATE: &str = "docs/superpowers";
 
-/// Every count of the tools a page states is [`TOOLS`]'s: "40 tools", "The 40 MCP tools", "29
+/// Every count of the tools a page states is [`TOOLS`]'s: "41 tools", "The 41 MCP tools", "30
 /// store operations", "11 workspace operations". They drifted when `ancestry` was added (38 for
 /// 39).
 #[test]
@@ -340,8 +341,8 @@ fn mcp_session_golden() {
 
 /// A golden call of every tool, each succeeding, in a session on one store: blobs stored and
 /// found, commits, main created, reads of every kind, a land onto what main gained, a ref made,
-/// deleted and the deletion undone, the operations and the ref's moves listed, and the store
-/// verified.
+/// deleted and the deletion undone, the operations and the ref's moves listed, a publish
+/// reverted, and the store verified.
 #[test]
 fn mcp_tool_calls_golden() {
     let store = Store::init();
@@ -388,7 +389,7 @@ fn mcp_tool_calls_golden() {
         "changes": [{"path": "docs.md", "op": "put", "content": {"inline": "docs\n"}}],
     });
     let theirs = golden.ok("commit", publish);
-    golden.name_at(&theirs, "/result/changeset", "theirs");
+    let theirs = golden.name_at(&theirs, "/result/changeset", "theirs");
     let rebased = golden.ok("rebase", json!({"head": head}));
     golden.name_at(&rebased, "/result/changeset", "rebased");
     let landed = golden.ok("land", json!({"head": head, "idempotency_key": "land-7"}));
@@ -422,6 +423,12 @@ fn mcp_tool_calls_golden() {
     //    edit discarded; main moves on the same file, so the rebase conflicts; resolved,
     //    continued, and landed exactly; then the listings.
     workspace_calls(&mut golden, store.tmp(), &landed);
+
+    // 7. The publish on main taken back, and the store verified.
+    let revert = json!({"changeset": theirs, "reason": "the docs were wrong",
+                        "idempotency_key": "revert-1"});
+    let reverted = golden.ok("revert", revert);
+    golden.name_at(&reverted, "/result/land/landed", "reverted");
     golden.ok("verify", json!({}));
 
     // Every tool has its call, but those of UNCALLED.
@@ -2689,10 +2696,9 @@ fn check_tool(name: &str, request: &str, tool: &Value, all: &Value) {
     assert_no_references(name, schema);
     let (read_only, destructive, idempotent, open_world) = match name {
         "commit" | "rebase" | "blob_put" | "ws_commit" => (false, false, false, false),
-        // A land, and the workspaces' that find their work done when run again (M5).
-        "land" | "ws_create" | "ws_rebase" | "ws_resolve" | "ws_land" | "ws_materialize" => {
-            (false, false, true, false)
-        }
+        // A land and a revert, and the workspaces' that find their work done when run again (M5).
+        "land" | "revert" | "ws_create" | "ws_rebase" | "ws_resolve" | "ws_land"
+        | "ws_materialize" => (false, false, true, false),
         // A workspace's discard (M5) overwrites edits as these overwrite refs, and the
         // maintenance (M6) removes or replaces store files; run again, each finds its work done.
         "ref_set" | "ref_delete" | "undo" | "ws_discard" | "gc" | "repair" | "upgrade" => {

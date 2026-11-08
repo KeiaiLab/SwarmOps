@@ -66,7 +66,7 @@
 //!
 //! One tool per [`StoreOps`] operation, named as the envelope's `op` is: `repo_info`,
 //! `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `ancestry`, `path_history`, `diff`, `op_log`,
-//! `ref_list`, `ref_set`, `ref_delete`, `ref_log`, `undo`, `commit`, `land`, `blob_put`, `blob_has`,
+//! `ref_list`, `ref_set`, `ref_delete`, `ref_log`, `undo`, `commit`, `land`, `revert`, `blob_put`, `blob_has`,
 //! `verify` and the maintenance's `gc`, `repair` and `upgrade` (M6), in `tools/list`'s order; then the git remotes' client-side operations (M13), which
 //! no [`StoreOps`] has: `remote_list`, `fetch`, `push`, `sync` and `sync_status`, run on the
 //! store's own operations ([`operate_local`]) and taking a remote by its name only, never a URL
@@ -168,6 +168,7 @@ use swarmops_api::LandReq;
 use swarmops_api::RebaseReq;
 use swarmops_api::RefLogReq;
 use swarmops_api::ResolveRevReq;
+use swarmops_api::RevertReq;
 use swarmops_api::{BlobHasReq, BlobPutReq};
 use swarmops_api::{
     ChangeInput, CommitReq, ContentInput, DiffReq, Envelope, ErrorCode, Identity, InfoReq, LogReq,
@@ -277,7 +278,7 @@ const READ_FILE_RESULT_CHARS: u32 = 200_000;
 const RESULT_CHARS_KEY: &str = "anthropic/maxResultSizeChars";
 
 /// The tools, in the order `tools/list` gives them.
-static TOOLS: [Spec; 29] = [
+static TOOLS: [Spec; 30] = [
     Spec {
         tool: Tool::RepoInfo,
         name: "repo_info",
@@ -498,6 +499,21 @@ static TOOLS: [Spec; 29] = [
                       idempotency_key to make a retry safe. With changes (a commit's list) and \
                       message it commits them on head first and lands that changeset in the \
                       same transaction: one call, one record.",
+        effect: Effect::Lands,
+        result_chars: None,
+    },
+    Spec {
+        tool: Tool::Revert,
+        name: "revert",
+        request: "RevertReq",
+        title: "Revert a change",
+        description: "Takes back changeset (with since, the first-parent range after since) on \
+                      target, main by default, by landing its inverse: what the target gained \
+                      since stays, and a later change to the same lines is E_CONFLICT naming the \
+                      changeset that made it, nothing recorded. Give a reason; the landed \
+                      changeset records it and the range (show's reverts and revert_reason). \
+                      Give idempotency_key to make a retry safe, and expect_target as a full \
+                      64-hex id.",
         effect: Effect::Lands,
         result_chars: None,
     },
@@ -1444,6 +1460,7 @@ fn operate<O: Operate>(tool: Tool, how: O) -> O::Done {
         Tool::Undo => how.mutate(|ops, who, req| ops.undo(who, req)),
         Tool::Commit => how.mutate(|ops, who, req| ops.commit(who, req)),
         Tool::Land => how.mutate(|ops, who, req| ops.land(who, req)),
+        Tool::Revert => how.mutate(|ops, who, req| ops.revert(who, req)),
         Tool::Rebase => how.mutate(|ops, who, req| ops.rebase(who, req)),
         Tool::BlobPut => how.mutate(|ops, who, req| ops.blob_put(who, req)),
         Tool::BlobHas => how.read(|ops, req| ops.blob_has(req)),
@@ -1870,6 +1887,17 @@ fn unreadable(file: &str) -> Option<&'static str> {
     }
 }
 
+/// A revert publishes only while its target names `expect_target`, a full changeset id, as a
+/// land's does.
+impl Refuse for RevertReq {
+    fn refuse(&self) -> Result<(), OpError> {
+        match &self.expect_target {
+            Some(expected) => full_rev("expect_target", expected),
+            None => Ok(()),
+        }
+    }
+}
+
 /// A land's resolutions apply while the target holds each path as `against` did, so `against`
 /// is a full changeset id ([`concrete_against`]); a resolution's client file is read by this
 /// server as a commit's is, so the same rules hold ([`unreadable`]); the refusal names the
@@ -2127,7 +2155,7 @@ fn tool_input_schema(spec: &Spec, all: &Value) -> Value {
     let mut request = all[spec.request].clone();
     let pinned = match spec.tool {
         Tool::RefSet | Tool::RefDelete => Some("/properties/expected_old"),
-        Tool::Land => Some("/properties/expect_target"),
+        Tool::Land | Tool::Revert => Some("/properties/expect_target"),
         _ => None,
     };
     if let Some(expected) = pinned.and_then(|at| request.pointer_mut(at)) {
@@ -2338,6 +2366,7 @@ enum Tool {
     Undo,
     Commit,
     Land,
+    Revert,
     Rebase,
     BlobPut,
     BlobHas,
@@ -2599,6 +2628,8 @@ pub(crate) mod probe {
         json!({
             "rev": "main",
             "head": "main",
+            "changeset": "main",
+            "reason": "r",
             "from": "main",
             "to": "main",
             "path": "a",
@@ -2821,6 +2852,10 @@ pub(crate) mod probe {
 
         fn ref_log(&self, _: RefLogReq) -> Result<RefLogPage, OpError> {
             self.called("ref_log", "RefLogReq")
+        }
+
+        fn revert(&self, _: &Identity, _: RevertReq) -> Result<swarmops_api::RevertResp, OpError> {
+            self.called("revert", "RevertReq")
         }
     }
 }

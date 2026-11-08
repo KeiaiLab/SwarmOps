@@ -175,7 +175,7 @@ const fn internal_value(
 // ---- The tables ----
 
 /// The limits a request is refused past, with the error it gets.
-static CONTRACT: [Limit; 13] = [
+static CONTRACT: [Limit; 15] = [
     Limit {
         name: "Request text",
         constant: code(
@@ -296,6 +296,7 @@ static CONTRACT: [Limit; 13] = [
             "commit",
             "land",
             "rebase",
+            "revert",
             "blob put",
             "ref set",
             "ref delete",
@@ -390,6 +391,35 @@ static CONTRACT: [Limit; 13] = [
         errors: &[ErrorCode::InvalidArg],
         what: "The refs one push to `serve` may update: past it, every command of the push is \
                    refused (`ng`), and no ref moves.",
+    },
+    Limit {
+        name: "Revert range",
+        constant: code(
+            "swarmops_repo::MAX_REVERT_CHANGESETS",
+            "crates/swarmops-repo/src/revert.rs",
+            "pub const MAX_REVERT_CHANGESETS: usize = 256;",
+            || bytes::to_u64(swarmops_repo::MAX_REVERT_CHANGESETS),
+        ),
+        unit: Unit::Count("changesets"),
+        commands: &["revert"],
+        errors: &[ErrorCode::TooLarge],
+        what: "The changesets one `revert` takes back, from `--since` (`since`) to its \
+                   changeset: a longer range is refused before anything is written, with \
+                   `details.max_changesets`.",
+    },
+    Limit {
+        name: "Revert reason",
+        constant: code(
+            "swarmops_repo::MAX_REVERT_REASON_BYTES",
+            "crates/swarmops-repo/src/revert.rs",
+            "pub const MAX_REVERT_REASON_BYTES: usize = 4096;",
+            || bytes::to_u64(swarmops_repo::MAX_REVERT_REASON_BYTES),
+        ),
+        unit: Unit::Bytes,
+        commands: &["revert"],
+        errors: &[ErrorCode::InvalidArg],
+        what: "`revert --reason` (`reason`): 1 to this many bytes, checked before anything is \
+                   resolved or read, with `details.reason_bytes`.",
     },
 ];
 

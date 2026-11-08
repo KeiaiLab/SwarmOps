@@ -25,6 +25,7 @@ use swarmops_api::RebaseReq;
 use swarmops_api::RefLogReq;
 use swarmops_api::ResolutionsInput;
 use swarmops_api::ResolveRevReq;
+use swarmops_api::RevertReq;
 use swarmops_api::remote::DEFAULT_PUSH_SOURCE;
 use swarmops_api::{BlobGetReq, BlobHasReq, BlobPutReq};
 use swarmops_api::{
@@ -190,6 +191,7 @@ fn dispatch(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
         ),
         land @ Command::Land { .. } => run_land(ctx, op, land),
         rebase @ Command::Rebase { .. } => run_rebase(ctx, op, rebase),
+        revert @ Command::Revert { .. } => run_revert(ctx, op, revert),
         Command::Blob(command) => run_blob(ctx, op, command),
         Command::Ws(command) => ws::run(ctx, op, command),
         Command::Resolve { rev } => resolve_rev(ctx, op, rev),
@@ -421,6 +423,36 @@ fn run_rebase(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
             Ok((who, req))
         },
         |ops, (who, req)| ops.rebase(&who, req),
+    )
+}
+
+/// Runs `revert`, which names operation `op`.
+fn run_revert(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
+    let Command::Revert {
+        changeset,
+        reason,
+        since,
+        onto,
+        key,
+        message,
+        expect_target,
+    } = command
+    else {
+        unreachable!("run passes revert its own command alone");
+    };
+    ctx.on_store(
+        op,
+        || {
+            let who = context::mutator(ctx.global.agent.as_deref(), ctx.env)?;
+            let mut req = RevertReq::new(changeset, reason);
+            req.since = since.map(Rev::from);
+            req.target = onto;
+            req.idempotency_key = key;
+            req.message = message;
+            req.expect_target = expect_target.map(Rev::from);
+            Ok((who, req))
+        },
+        |ops, (who, req)| ops.revert(&who, req),
     )
 }
 

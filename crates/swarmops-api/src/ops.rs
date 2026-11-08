@@ -874,6 +874,13 @@ pub struct ChangesetDetail {
     /// changeset no land made.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub squashed_from: Vec<String>,
+    /// The changesets a `revert` took back with it, oldest first (its `reverts` metadata).
+    /// Omitted for a changeset no revert made.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reverts: Vec<String>,
+    /// Why, for a changeset a `revert` made (its `revert_reason` metadata).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revert_reason: Option<String>,
     /// What changed relative to the first parent, ordered by path: at most `max_changes`
     /// entries.
     pub changes: Vec<ChangeOut>,
@@ -918,6 +925,8 @@ impl ChangesetDetail {
             message: message.into(),
             land_key: None,
             squashed_from: Vec::new(),
+            reverts: Vec::new(),
+            revert_reason: None,
             changes,
             files_changed,
             changes_truncated,
@@ -2741,6 +2750,86 @@ pub enum LandStatus {
     Replayed,
 }
 
+/// `revert` (CLI `revert`): takes back the first-parent range `(since, changeset]` of `target`
+/// by a land. The land commits the inverse change on `changeset`, every path the range touched
+/// set to what `since` held there, and lands it from `changeset`: what
+/// the target gained since stays, a later change to the same lines is `E_CONFLICT` naming the
+/// changeset that made it, and nothing is recorded then. A range whose changes cancel out, or
+/// one the target took back already, is `E_NOTHING_TO_LAND`. A range whose changesets include
+/// merges is taken back against their first parents.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RevertReq {
+    /// The range's last changeset: on the target's first-parent chain (else `E_INVALID_ARG`,
+    /// `details.reason` `not_on_target`).
+    pub changeset: Rev,
+    /// Where the range starts, exclusive: a first-parent ancestor of `changeset`. When omitted,
+    /// its first parent, so the range is `changeset` alone; a root's is the empty tree. At most
+    /// 256 changesets (`E_TOO_LARGE`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<Rev>,
+    /// The ref to land the revert on: `main` or `release/<name>`, which must exist.
+    #[serde(default = "default_target")]
+    pub target: String,
+    /// Why: 1 to 4,096 bytes, recorded as the landed changeset's `revert_reason` metadata, and
+    /// the default message's body.
+    pub reason: String,
+    /// The landed changeset's message. When omitted, `Revert <12 hex digits of changeset>:
+    /// <its title>` (a range: `Revert <n> changesets <since>..<changeset>`), a blank line and
+    /// the reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Makes a retry safe, as a land's key: the same revert again replays it; the same key for
+    /// another range is `E_INVALID_ARG`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    /// How many times to try to publish before failing with `E_CAS_RETRY_EXHAUSTED`: 1 to 32.
+    #[serde(default = "default_max_attempts")]
+    #[schemars(range(min = 1, max = MAX_LAND_ATTEMPTS))]
+    pub max_attempts: u32,
+    /// The most bytes of hunk text an `E_CONFLICT` report carries, as a land's.
+    #[serde(default = "default_max_conflict_bytes")]
+    pub max_conflict_bytes: u64,
+    /// Publish only while the target names this changeset, as a land's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expect_target: Option<Rev>,
+}
+
+impl RevertReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(changeset: impl Into<Rev>, reason: impl Into<String>) -> Self {
+        Self {
+            changeset: changeset.into(),
+            since: None,
+            target: default_target(),
+            reason: reason.into(),
+            message: None,
+            idempotency_key: None,
+            max_attempts: default_max_attempts(),
+            max_conflict_bytes: default_max_conflict_bytes(),
+            expect_target: None,
+        }
+    }
+}
+
+/// `revert`: what was taken back, and the land that took it back.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RevertResp {
+    /// The changesets taken back, oldest first, as the landed changeset's `reverts` records
+    /// them.
+    pub reverted: Vec<String>,
+    /// The land: `squashed_from` holds the one changeset it committed, the inverse change.
+    pub land: LandResp,
+}
+
+impl RevertResp {
+    /// Takes every field.
+    pub fn new(reverted: Vec<String>, land: LandResp) -> Self {
+        Self { reverted, land }
+    }
+}
+
 /// Why a land could not merge its change onto the target, file by file, or could not apply its
 /// resolutions to it (operations spec §3): the report `E_CONFLICT` carries in `details.report`.
 /// `ours` is the change, `theirs` the target. Ids are full.
@@ -4411,6 +4500,14 @@ pub trait StoreOps {
     fn ref_log(&self, req: RefLogReq) -> Result<RefLogPage, OpError> {
         let _ = req;
         Err(not_built("ref_log"))
+    }
+
+    /// Takes back a range of a ref's first-parent history by landing its inverse (CLI
+    /// `revert`): a land, with a land's conflicts, replays and errors. A store that does not
+    /// have it answers `E_INVALID_ARG`.
+    fn revert(&self, who: &Identity, req: RevertReq) -> Result<RevertResp, OpError> {
+        let _ = (who, req);
+        Err(not_built("revert"))
     }
 }
 

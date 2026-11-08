@@ -2,7 +2,7 @@
 
 # Schema types
 
-The 169 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
+The 171 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
 
 ## Index
 
@@ -126,6 +126,8 @@ The 169 request, response and value types of the API, as `swarmops schema` print
 | [`ResolvedRev`](#resolvedrev) | object | `resolve_rev` (CLI `resolve`): the changeset a revision names, and what kind of revision it is. |
 | [`Rev`](#rev) | string | A revision as the caller wrote it, for the store to resolve: a ref name (`main`, `release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, optionally followed by `~N` for the N-th first-parent ancestor. |
 | [`RevKind`](#revkind) | enumeration | What kind of revision `resolve_rev` resolved. |
+| [`RevertReq`](#revertreq) | object | `revert` (CLI `revert`): takes back the first-parent range `(since, changeset]` of `target` by a land. |
+| [`RevertResp`](#revertresp) | object | `revert`: what was taken back, and the land that took it back. |
 | [`ServeRecord`](#serverecord) | object | One served request: when it started, its caller and service, and how its time split. |
 | [`ServeService`](#serveservice) | enumeration | What a served request asked for. |
 | [`ShowReq`](#showreq) | object | `show`: one changeset in full. |
@@ -378,6 +380,8 @@ Kind: object. `swarmops schema ChangesetDetail` prints its JSON Schema.
 | `message` | `string` | yes | The message. |
 | `metadata` | map of `string` to `string` | yes | SwarmOps metadata, such as `agent` and `run_id`. A value that is not UTF-8 is given in standard, padded base64, under its key with `:b64` appended. A commit refuses a key that ends in `:b64`, so `k:b64` is always the base64 of `k`'s value, which is not UTF-8. |
 | `parents` | array of `string` | yes | The parents' ids; the first is the mainline parent that `changes` are relative to. |
+| `revert_reason` | `string` or `null` | no | Why, for a changeset a `revert` made (its `revert_reason` metadata). |
+| `reverts` | array of `string` | no | The changesets a `revert` took back with it, oldest first (its `reverts` metadata). Omitted for a changeset no revert made. |
 | `root` | `string` | yes | The root tree's id. |
 | `seq` | `integer` (uint64) | yes | Its position in the store's changeset index, in commit order. |
 | `signatures` | [`Signatures`](#signatures) | yes | The git author and committer signatures, kept for git fidelity. |
@@ -1790,6 +1794,35 @@ Kind: enumeration. `swarmops schema RevKind` prints its JSON Schema.
 | --- | --- |
 | `"ref"` | Exactly a ref's name (`main`, `release/<name>`): `id` is what the ref names now, and moves when the ref does. |
 | `"changeset"` | Any other revision: a full changeset id, a unique prefix of one, or a revision followed by `~N` suffixes, a ref's name among them. |
+
+## RevertReq
+
+`revert` (CLI `revert`): takes back the first-parent range `(since, changeset]` of `target` by a land. The land commits the inverse change on `changeset`, every path the range touched set to what `since` held there, and lands it from `changeset`: what the target gained since stays, a later change to the same lines is `E_CONFLICT` naming the changeset that made it, and nothing is recorded then. A range whose changes cancel out, or one the target took back already, is `E_NOTHING_TO_LAND`. A range whose changesets include merges is taken back against their first parents.
+
+Kind: object. `swarmops schema RevertReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `changeset` | [`Rev`](#rev) | yes | The range's last changeset: on the target's first-parent chain (else `E_INVALID_ARG`, `details.reason` `not_on_target`). |
+| `expect_target` | [`Rev`](#rev) or `null` | no | Publish only while the target names this changeset, as a land's. |
+| `idempotency_key` | `string` or `null` | no | Makes a retry safe, as a land's key: the same revert again replays it; the same key for another range is `E_INVALID_ARG`. |
+| `max_attempts` | `integer` (uint32) | no | How many times to try to publish before failing with `E_CAS_RETRY_EXHAUSTED`: 1 to 32. Default: `8`. At least 1. At most 32. |
+| `max_conflict_bytes` | `integer` (uint64) | no | The most bytes of hunk text an `E_CONFLICT` report carries, as a land's. Default: `32768`. |
+| `message` | `string` or `null` | no | The landed changeset's message. When omitted, `Revert <12 hex digits of changeset>: <its title>` (a range: `Revert <n> changesets <since>..<changeset>`), a blank line and the reason. |
+| `reason` | `string` | yes | Why: 1 to 4,096 bytes, recorded as the landed changeset's `revert_reason` metadata, and the default message's body. |
+| `since` | [`Rev`](#rev) or `null` | no | Where the range starts, exclusive: a first-parent ancestor of `changeset`. When omitted, its first parent, so the range is `changeset` alone; a root's is the empty tree. At most 256 changesets (`E_TOO_LARGE`). |
+| `target` | `string` | no | The ref to land the revert on: `main` or `release/<name>`, which must exist. Default: `"main"`. |
+
+## RevertResp
+
+`revert`: what was taken back, and the land that took it back.
+
+Kind: object. `swarmops schema RevertResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `land` | [`LandResp`](#landresp) | yes | The land: `squashed_from` holds the one changeset it committed, the inverse change. |
+| `reverted` | array of `string` | yes | The changesets taken back, oldest first, as the landed changeset's `reverts` records them. |
 
 ## ServeRecord
 

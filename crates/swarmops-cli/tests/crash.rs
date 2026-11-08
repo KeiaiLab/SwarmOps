@@ -24,6 +24,7 @@
 //!   every unsynced write, the state a process crash leaves, at every cut of it. `just check-slow`
 //!   and the weekly `just check-ci-slow` run it; `just check` does not.
 //!
+//! - A revert (the M18 design §4), a land of the inverse change, is swept as a land is.
 //! - A batch of lands (the M18 D2 design §3) is swept through the binary too: a land leads two
 //!   requests that killed `land` runs queued, kept alive by this test's flocks, and crashes at
 //!   each of its calls; every key then lands once.
@@ -398,6 +399,92 @@ fn a_land_crashing_at_any_call_lands_once_through_the_binary(format) {
     assert!(
         published.iter().any(|&replayed| replayed),
         "some crash came after the land's commit point: the same land again replayed it"
+    );
+    assert!(
+        published.iter().any(|&replayed| !replayed),
+        "some before it"
+    );
+}
+}
+
+/// Commits `content` at `path` on main's head as `agent`, moving main to it: the new changeset.
+fn advance_main(store: &Store, agent: &str, path: &str, content: &str) -> String {
+    let changes = store.changes(path, path, content);
+    let args = [
+        "commit",
+        "-m",
+        path,
+        "--changes",
+        &changes,
+        "--advance",
+        "main",
+    ];
+    let result = store.run_as(agent, &args, &[]).ok();
+    result["changeset"]
+        .as_str()
+        .expect("a changeset")
+        .to_owned()
+}
+
+per_format! {
+/// A revert crashed at any filesystem call lands once or not at all (the M18 design §4.3),
+/// through the binary: on a store whose main is `t0`, then A, then B, the keyed revert of A,
+/// crashed at each call k of the N its dry run makes, leaves the store verifying clean; and the
+/// same command run again ends with main at the dry run's landed changeset, on B, the only
+/// changeset on main past it, recording A as what it reverted: replayed where the crashed run
+/// had published it, landed anew otherwise. Both sides of the commit point are reached.
+fn a_revert_crashing_at_any_call_lands_once_through_the_binary(format) {
+    const KEY: &str = "crash-revert-1";
+    let template = Store::init_as(format).with_env(&[(NOW_ENV, &NOW.to_string())]);
+    let t0 = advance_main(&template, &agent(0), "base.txt", "the base\n");
+    let a = advance_main(&template, &agent(0), "a.txt", "a\n");
+    let b = advance_main(&template, &agent(0), "b.txt", "b\n");
+    let revert = ["revert", a.as_str(), "--reason", "a was wrong", "--key", KEY];
+
+    // 1. The dry run, its calls counted.
+    let dry = Store::copy_of(&template);
+    let file = calls_file(&dry);
+    let result = dry.run_as(&agent(1), &revert, &[(FS_CALLS_ENV, file.to_str().unwrap())]);
+    let result = result.ok();
+    assert_eq!(result["land"]["status"], "landed", "{result}");
+    let landed = result["land"]["landed"].as_str().unwrap().to_owned();
+    assert_eq!(dry.show(&landed)["reverts"], json!([a]));
+    let calls = reported_calls(&file);
+    assert!(calls > 20, "a revert makes dozens of calls: {calls}");
+
+    // 2. Each call crashed, then the same revert again.
+    let published = sweep(1..=calls + 1, |k| {
+        let store = Store::copy_of(&template);
+        let crash_at = k.to_string();
+        let run = store.run_as(&agent(1), &revert, &[(CRASH_AT_ENV, &crash_at)]);
+        if k <= calls {
+            assert!(run.aborted(), "k={k} of {calls}: {run}");
+        } else {
+            assert_eq!(run.ok()["land"]["landed"], landed.as_str(), "k={k}");
+        }
+        store.assert_clean(&format!("k={k}: after the crash"));
+        let again = store.run_as(&agent(1), &revert, &[]).ok();
+        let land = &again["land"];
+        assert_eq!(
+            (&land["landed"], &land["rebased_onto"], &again["reverted"]),
+            (&json!(landed), &json!(b), &json!([a])),
+            "k={k}: {again}"
+        );
+        let log = store.read(&["log"]).ok();
+        let on_main: Vec<&str> = (log["entries"].as_array().unwrap().iter())
+            .map(|entry| entry["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(on_main, [&landed, &b, &a, &t0], "k={k}");
+        store.assert_clean(&format!("k={k}: after the same revert again"));
+        match land["status"].as_str() {
+            Some("replayed") => true,
+            Some("landed") => false,
+            _ => panic!("k={k}: {again}"),
+        }
+    });
+    assert!(
+        published.iter().any(|&replayed| replayed),
+        "some crash came after the revert's commit point: the same revert again replayed it"
     );
     assert!(
         published.iter().any(|&replayed| !replayed),

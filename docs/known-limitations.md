@@ -264,8 +264,17 @@ left).
 - **`undo` does not take back a land on `main`, nor one that later lands built on.** `main`
   moves only forward, so the undo of a land on it is `E_REF_PROTECTED` (the M15 design §4). On a
   `release/<name>` ref an undo moves refs back only while they still name what the operation set;
-  under later lands that is `E_CAS_MISMATCH`. No `revert` lands the inverse change: it is written
-  and landed by hand. *Unscheduled. Found: M4 Decision 10.*
+  under later lands that is `E_CAS_MISMATCH`. `revert` takes a land back instead, by landing its
+  inverse change, and keeps what later lands built (the M18 design §4); a range whose changesets
+  include merges is taken back against their first parents only. *Unscheduled. Found: M4 Decision
+  10; `revert`, M18.*
+- **A land with changes that fails leaves its commit's objects.** A land with changes, and so a
+  `revert`, writes its commit `C`'s trees and changeset object before it merges, outside the
+  store's lock. A land that then conflicts, has nothing to land or loses every attempt records
+  nothing, and no record names those objects, but they stay, counted as `gc`'s `orphan_objects`:
+  a revert's `E_CONFLICT` leaves the store's metadata byte for byte as it was, not its objects,
+  where the M18 design §0.1 asks that it write nothing. *Unscheduled. Found: the M18 revert
+  tests.*
 - **No hooks or annotations after a land.** A land records no post-land verification, and
   `land`'s result has no `verification` field: annotations need a journal record the current
   `FORMAT` lacks. Agents check a landed tree with `read_file` and their own runs. *Target: M7, on

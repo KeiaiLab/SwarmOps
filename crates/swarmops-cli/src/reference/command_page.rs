@@ -220,7 +220,7 @@ struct Meta {
 
 /// Every command, in the grammar's order. `meta_matches_the_code` checks each column it can
 /// against the code.
-const META: [Meta; 54] = [
+const META: [Meta; 55] = [
     meta("init", Group::Store, true, false, Returns::Type("RepoInfo")),
     meta(
         "info",
@@ -251,6 +251,13 @@ const META: [Meta; 54] = [
         true,
         true,
         Returns::Type("RebaseResp"),
+    ),
+    meta(
+        "revert",
+        Group::Write,
+        true,
+        true,
+        Returns::Type("RevertResp"),
     ),
     meta(
         "blob put",
@@ -1348,7 +1355,7 @@ fn source(path: &str) -> String {
 }
 
 /// Where each result type is returned: the file, and the function whose signature names it.
-const RETURN_SITES: [(&str, &str, &str); 50] = [
+const RETURN_SITES: [(&str, &str, &str); 51] = [
     ("init", "src/commands/run.rs", "fn init("),
     ("info", "../swarmops-api/src/ops.rs", "fn repo_info("),
     (
@@ -1359,6 +1366,7 @@ const RETURN_SITES: [(&str, &str, &str); 50] = [
     ("commit", "../swarmops-api/src/ops.rs", "fn commit("),
     ("land", "../swarmops-api/src/ops.rs", "fn land("),
     ("rebase", "../swarmops-api/src/ops.rs", "fn rebase("),
+    ("revert", "../swarmops-api/src/ops.rs", "fn revert("),
     ("blob put", "../swarmops-api/src/ops.rs", "fn blob_put("),
     ("blob has", "../swarmops-api/src/ops.rs", "fn blob_has("),
     ("blob get", "../swarmops-api/src/ops.rs", "fn blob_get("),

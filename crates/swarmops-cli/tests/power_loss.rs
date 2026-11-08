@@ -46,6 +46,10 @@
 //! `main` are a prefix of the batch's frames, and a power loss after a lander's land returned
 //! never takes its frame back.
 //!
+//! A run of its own (`revert_loss`, the M18 design §4.3) reverts a changeset on `main` with an
+//! idempotency key: in every image the revert is whole or absent, never absent once it had
+//! returned, and the same `revert --key` run again takes the changeset back exactly once.
+//!
 //! One more run, of its own (`committed_read`), checks that a committed snapshot
 //! (`MetaStore::read_committed`, storage spec §3) holds nothing a power loss after it can take
 //! back, where a lock-free snapshot may; its images are read with the library, as the snapshot
@@ -2996,6 +3000,239 @@ mod batch_loss {
             run.timeline.steps() - run.from,
             images.len(),
             run.append,
+            run.returned
+        );
+    }
+    }
+}
+
+mod revert_loss {
+    //! Power loss in a revert (the M18 design §4.3): main at `t0`, then A, then B; the keyed
+    //! revert of A, a land of its inverse, recorded call by call. Every image verifies clean
+    //! and holds the revert whole or not at all, and holds it once the revert had returned;
+    //! the same `revert --key` run again through the binary takes A back exactly once.
+
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::thread;
+
+    use camino::Utf8PathBuf;
+    use serde_json::json;
+    use swarmops_core::{ChangesetId, LeafKind, RepoPath};
+    use swarmops_repo::{CasResult, Change, ChangeOp, CommitRequest, LocalRepo, RevertRequest};
+    use swarmops_store::{FsOps, StoreFormat};
+    use swarmops_testkit::per_format;
+    use swarmops_testkit::power::{ImageRecordingFs, Seeded, Timeline};
+
+    use super::{AGENT, AT_ONCE, ask, clean, log, signature};
+
+    /// The seeds each cut is checked with: 0 the least the disk can hold, 1 the most, the rest
+    /// at random ([`Seeded`]).
+    const SEEDS: [u64; 4] = [0, 1, 2, 3];
+
+    /// Who moves main in the run.
+    const ACTOR: &str = "test-power/worker-1";
+
+    /// The revert's idempotency key.
+    const KEY: &str = "power-revert";
+
+    /// The revert's reason.
+    const REASON: &str = "a was wrong";
+
+    /// What the run recorded.
+    struct Run {
+        timeline: Timeline,
+        /// A, the changeset reverted, and B, main's head before the revert, in hex.
+        a: String,
+        b: String,
+        /// The revert's landed changeset, in hex.
+        landed: String,
+        /// The step the revert starts at, and the step at which it had returned.
+        from: usize,
+        returned: usize,
+    }
+
+    /// A one-file commit of `path` on `parent`.
+    fn one_file(path: &str, parent: Option<ChangesetId>) -> CommitRequest {
+        let change = Change::new(
+            RepoPath::new(path).expect("a repo path"),
+            ChangeOp::Put {
+                kind: LeafKind::File,
+                content: format!("{path}\n").into_bytes(),
+            },
+        );
+        CommitRequest::new(
+            parent.into_iter().collect(),
+            vec![change],
+            signature(),
+            signature(),
+            path.as_bytes().to_vec(),
+            Vec::new(),
+            false,
+            None,
+        )
+    }
+
+    /// Commits `path` on `parent` and moves main there from it.
+    fn advance(repo: &LocalRepo, path: &str, parent: Option<ChangesetId>) -> ChangesetId {
+        let id = repo.commit(one_file(path, parent)).expect("commit").id;
+        let moved = repo.cas_ref("main", parent, Some(id), ACTOR);
+        let moved = moved.expect("cas_ref");
+        assert!(
+            matches!(moved.result, CasResult::Applied { .. }),
+            "{moved:?}"
+        );
+        id
+    }
+
+    /// Records the run (the module documentation) on one thread.
+    fn record_run(format: StoreFormat) -> (tempfile::TempDir, Run) {
+        let dir = tempfile::tempdir().expect("make a temp dir");
+        let base = dir.path().canonicalize().expect("the temp dir's path");
+        let root = Utf8PathBuf::from_path_buf(base.join("store")).expect("UTF-8 temp paths");
+        let fs = Arc::new(ImageRecordingFs::new());
+        let shared = Arc::clone(&fs) as Arc<dyn FsOps>;
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("a one-thread pool");
+
+        // 1. The store, main at t0, A, B; then the revert of A, its start and return marked.
+        let (a, b, landed) = pool.install(|| {
+            let repo = LocalRepo::create_with_fs_as(&root, "power", format, shared).expect("init");
+            let t0 = advance(&repo, "t0", None);
+            let a = advance(&repo, "a", Some(t0));
+            let b = advance(&repo, "b", Some(a));
+            fs.mark("before");
+            let mut revert = RevertRequest::new(a, "main", REASON, signature());
+            revert.key = Some(KEY.to_owned());
+            let outcome = repo.revert(revert).expect("revert");
+            fs.mark("returned");
+            assert!(outcome.warnings.is_empty(), "{outcome:?}");
+            (a, b, outcome.landed)
+        });
+
+        // 2. The timeline of the calls.
+        let calls = fs.calls();
+        let timeline = Timeline::new(&base, &calls);
+        let run = Run {
+            from: timeline.mark("before"),
+            returned: timeline.mark("returned"),
+            timeline,
+            a: a.to_string(),
+            b: b.to_string(),
+            landed: landed.to_string(),
+        };
+        (dir, run)
+    }
+
+    /// Whether the store in the image of `cut`, `seed` holds the revert, once `verify --deep`
+    /// found it clean: main names B, or the revert, which records A as what it reverted. Then
+    /// the same revert again replays it, or lands it on B: A taken back once.
+    fn revert_in(run: &Run, cut: usize, seed: u64) -> Result<bool, String> {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let image = run.timeline.image(cut, &mut Seeded::new(seed, cut));
+        image.materialize(dir.path()).map_err(|e| e.to_string())?;
+        let store = dir.path().join("store");
+        let store = store.to_str().expect("a UTF-8 path");
+        clean(store, "after the power loss")?;
+
+        // 1. What main names: B, or the revert of A on it.
+        let held = match log(store, "main")?.first().map(String::as_str) {
+            Some(head) if head == run.b => false,
+            Some(head) if head == run.landed => {
+                let shown = ask(&["--repo", store, "show", head])?;
+                let reverts = shown.ok()?["reverts"].clone();
+                if reverts != json!([run.a]) {
+                    return Err(format!("the revert records {reverts}, not A"));
+                }
+                true
+            }
+            head => return Err(format!("main names {head:?}, neither B nor the revert")),
+        };
+        if cut >= run.returned && !held {
+            return Err("the revert had returned, and is gone".to_owned());
+        }
+
+        // 2. The same revert again: a replay of the one held, or a land of it on B.
+        let args = [
+            "--repo", store, "--as", AGENT, "revert", &run.a, "--reason", REASON,
+        ];
+        let args = [&args[..], &["--key", KEY]].concat();
+        let again = ask(&args)?;
+        let land = again.ok()?["land"].clone();
+        let expected = if held { "replayed" } else { "landed" };
+        if land["status"] != expected || land["rebased_onto"] != run.b.as_str() {
+            return Err(format!("revert --key again: {land}, not {expected} on B"));
+        }
+        if held && land["landed"] != run.landed.as_str() {
+            return Err(format!(
+                "revert --key again replayed {land}, not the revert"
+            ));
+        }
+        let ids = log(store, "main")?;
+        if ids.get(1).map(String::as_str) != Some(run.b.as_str()) {
+            return Err(format!("main after the revert again: {ids:?}"));
+        }
+        clean(store, "after the revert again")?;
+        Ok(held)
+    }
+
+    per_format! {
+    /// Every acknowledged revert is in every image (the M18 design §4.3): over every cut from
+    /// the revert's start and [`SEEDS`], each distinct image once, the store verifies clean,
+    /// holds the revert whole or not at all, holds it once the revert had returned, and the
+    /// same `revert --key` run again takes A back exactly once.
+    fn power_loss_images_keep_a_revert(format) {
+        let (_dir, run) = record_run(format);
+
+        // 1. Every cut and seed, each distinct image once.
+        let mut distinct: HashMap<u64, (usize, u64)> = HashMap::new();
+        for cut in run.from..=run.timeline.steps() {
+            for seed in SEEDS {
+                let image = run.timeline.image(cut, &mut Seeded::new(seed, cut));
+                distinct.entry(image.digest()).or_insert((cut, seed));
+            }
+        }
+        let mut images: Vec<(usize, u64)> = distinct.into_values().collect();
+        images.sort_unstable();
+
+        // 2. Each checked, a batch of them at once.
+        let (mut held, mut failures) = (Vec::new(), Vec::new());
+        for batch in images.chunks(AT_ONCE) {
+            thread::scope(|scope| {
+                let checks: Vec<_> = (batch.iter())
+                    .map(|&(cut, seed)| {
+                        let run = &run;
+                        scope.spawn(move || {
+                            let found = revert_in(run, cut, seed);
+                            found.map_err(|why| format!("cut {cut}, seed {seed}: {why}"))
+                        })
+                    })
+                    .collect();
+                for check in checks {
+                    match check.join().unwrap_or_else(|p| std::panic::resume_unwind(p)) {
+                        Ok(found) => held.push(found),
+                        Err(why) => failures.push(why),
+                    }
+                }
+            });
+        }
+        assert!(
+            failures.is_empty(),
+            "{} images failed; the first ones:\n{}",
+            failures.len(),
+            failures[..failures.len().min(5)].join("\n")
+        );
+
+        // 3. The sweep reached images without the revert, and with it.
+        assert!(held.contains(&false), "no image without the revert");
+        assert!(held.contains(&true), "no image with the revert");
+        println!(
+            "revert loss {format:?}: {} steps from the revert's start, {} distinct images, \
+             returned at step {}",
+            run.timeline.steps() - run.from,
+            images.len(),
             run.returned
         );
     }

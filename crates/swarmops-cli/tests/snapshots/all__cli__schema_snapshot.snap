@@ -967,6 +967,20 @@ expression: s.redact(&all)
           },
           "type": "array"
         },
+        "revert_reason": {
+          "description": "Why, for a changeset a `revert` made (its `revert_reason` metadata).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reverts": {
+          "description": "The changesets a `revert` took back with it, oldest first (its `reverts` metadata).\nOmitted for a changeset no revert made.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "root": {
           "description": "The root tree's id.",
           "type": "string"
@@ -8304,6 +8318,202 @@ expression: s.redact(&all)
         }
       ],
       "title": "RevKind"
+    },
+    "RevertReq": {
+      "$defs": {
+        "Rev": {
+          "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`revert` (CLI `revert`): takes back the first-parent range `(since, changeset]` of `target`\nby a land. The land commits the inverse change on `changeset`, every path the range touched\nset to what `since` held there, and lands it from `changeset`: what\nthe target gained since stays, a later change to the same lines is `E_CONFLICT` naming the\nchangeset that made it, and nothing is recorded then. A range whose changes cancel out, or\none the target took back already, is `E_NOTHING_TO_LAND`. A range whose changesets include\nmerges is taken back against their first parents.",
+      "properties": {
+        "changeset": {
+          "$ref": "#/$defs/Rev",
+          "description": "The range's last changeset: on the target's first-parent chain (else `E_INVALID_ARG`,\n`details.reason` `not_on_target`)."
+        },
+        "expect_target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Rev"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Publish only while the target names this changeset, as a land's."
+        },
+        "idempotency_key": {
+          "description": "Makes a retry safe, as a land's key: the same revert again replays it; the same key for\nanother range is `E_INVALID_ARG`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_attempts": {
+          "default": 8,
+          "description": "How many times to try to publish before failing with `E_CAS_RETRY_EXHAUSTED`: 1 to 32.",
+          "format": "uint32",
+          "maximum": 32,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_conflict_bytes": {
+          "default": 32768,
+          "description": "The most bytes of hunk text an `E_CONFLICT` report carries, as a land's.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "message": {
+          "description": "The landed changeset's message. When omitted, `Revert <12 hex digits of changeset>:\n<its title>` (a range: `Revert <n> changesets <since>..<changeset>`), a blank line and\nthe reason.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "Why: 1 to 4,096 bytes, recorded as the landed changeset's `revert_reason` metadata, and\nthe default message's body.",
+          "type": "string"
+        },
+        "since": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Rev"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where the range starts, exclusive: a first-parent ancestor of `changeset`. When omitted,\nits first parent, so the range is `changeset` alone; a root's is the empty tree. At most\n256 changesets (`E_TOO_LARGE`)."
+        },
+        "target": {
+          "default": "main",
+          "description": "The ref to land the revert on: `main` or `release/<name>`, which must exist.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "changeset",
+        "reason"
+      ],
+      "title": "RevertReq",
+      "type": "object"
+    },
+    "RevertResp": {
+      "$defs": {
+        "LandResp": {
+          "description": "`land`: where the change landed. Ids are full.",
+          "properties": {
+            "attempts": {
+              "description": "How many times the land tried to publish.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "auto_merged": {
+              "description": "The paths both sides changed whose contents merged cleanly into a content neither side\nhad. Omitted when empty.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "base": {
+              "description": "The changeset the change was taken from: what `head`'s first-parent chain added after it\nis what landed.",
+              "type": "string"
+            },
+            "files_changed": {
+              "description": "How many paths the landed changeset changes.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "landed": {
+              "description": "The landed changeset: the change squashed into one changeset on the target.",
+              "type": "string"
+            },
+            "rebased_onto": {
+              "description": "The target's head the change landed on: `landed`'s parent.",
+              "type": "string"
+            },
+            "relocated": {
+              "description": "The target moved after the land read it, and the publish put the change on the new head\nitself, without another attempt.",
+              "type": "boolean"
+            },
+            "squashed_from": {
+              "description": "The changesets the land squashed, oldest first: `head`'s first-parent chain after `base`,\nending at `head`.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "status": {
+              "$ref": "#/$defs/LandStatus",
+              "description": "`landed`, or `replayed` when a land with the same `idempotency_key` had landed the change\nalready."
+            },
+            "target": {
+              "description": "The ref it landed on.",
+              "type": "string"
+            },
+            "warnings": {
+              "description": "Problems found after the land became durable, such as failed housekeeping; the land\nitself succeeded. Omitted when empty.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "status",
+            "landed",
+            "rebased_onto",
+            "target",
+            "base",
+            "attempts",
+            "relocated",
+            "files_changed",
+            "squashed_from"
+          ],
+          "type": "object"
+        },
+        "LandStatus": {
+          "description": "How a land ended.",
+          "oneOf": [
+            {
+              "const": "landed",
+              "description": "This request landed the change.",
+              "type": "string"
+            },
+            {
+              "const": "replayed",
+              "description": "A land with the same `idempotency_key` had landed it already; nothing was written.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`revert`: what was taken back, and the land that took it back.",
+      "properties": {
+        "land": {
+          "$ref": "#/$defs/LandResp",
+          "description": "The land: `squashed_from` holds the one changeset it committed, the inverse change."
+        },
+        "reverted": {
+          "description": "The changesets taken back, oldest first, as the landed changeset's `reverts` records\nthem.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "reverted",
+        "land"
+      ],
+      "title": "RevertResp",
+      "type": "object"
     },
     "ServeRecord": {
       "$defs": {

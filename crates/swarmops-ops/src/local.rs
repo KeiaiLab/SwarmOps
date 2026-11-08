@@ -29,6 +29,7 @@ use swarmops_api::{GcReq, GcResp, RepairReq, RepairResp, UpgradeReq, UpgradeResp
 use swarmops_api::{LandReq, LandResp, LandStatus, MAX_LAND_ATTEMPTS};
 use swarmops_api::{RefLogEntryOut, RefLogPage, RefLogReq};
 use swarmops_api::{ResolveRevReq, ResolvedRev, RevKind};
+use swarmops_api::{RevertReq, RevertResp};
 use swarmops_core::bytes;
 use swarmops_core::{
     ChangesetId, DeltaEntry, DeltaOp, EntryKind, EntryTarget, LeafKind, ObjectId, RepoPath,
@@ -39,10 +40,12 @@ use swarmops_repo::LandRequest;
 use swarmops_repo::land::Gated;
 use swarmops_repo::merge::line_diff::{self, DiffLine, UnifiedHunk};
 use swarmops_repo::merge::tree_diff::{ChangeKind, Leaf, PathFilter, TreeChange};
+use swarmops_repo::revert::{REVERT_REASON, REVERTS};
 use swarmops_repo::{
     CasResult, CommitRequest, Depth, FileSpan, ListedEntry, LocalRepo, MismatchCause, OpId,
     OpIdError, OpRecord, Operation, PathEvent, RepoError, RepoRead, StoredChangeset, VerifyProblem,
 };
+use swarmops_repo::{MAX_REVERT_REASON_BYTES, RevertRequest};
 use swarmops_repo::{Resolution, Resolutions};
 use swarmops_store::external_ids;
 use swarmops_store::{FsObjectStore, LogCut, Recovered, RefKind, StoreError, StoreFormat};
@@ -163,6 +166,15 @@ const MAX_LAND_KEY: usize = 64;
 ///   the change list's rules, each error said of its resolution's path. Each attempt applies a
 ///   resolution while the target holds its path as `against` does; a path it holds otherwise comes
 ///   back in the `E_CONFLICT` report's `stale`.
+/// - `revert` takes back the first-parent range `(since, changeset]` of `target` (the M18 design
+///   §4): a land, from `changeset`, of the inverse change committed on it, with the land's key,
+///   attempts, expected target, conflicts and replays; `C` and the landed changeset are signed
+///   and attributed as a land with changes's are, and the landed one records `reverts` and
+///   `revert_reason`. A reason that is not 1 to 4,096 bytes is `E_INVALID_ARG`
+///   (`details.reason_bytes`), checked before anything is resolved; a changeset off the target's
+///   first-parent chain is `E_INVALID_ARG` (`details.reason` `not_on_target`), a range of more
+///   than 256 changesets `E_TOO_LARGE` (`details.max_changesets`), and one whose changes cancel
+///   out, or that the target took back already, `E_NOTHING_TO_LAND`.
 /// - `blob_put` stores its content as a blob, by the change list's rules for content (`blob`
 ///   content aside, which names a blob already stored), durable when it returns, and says
 ///   whether it placed it (`written`). It needs an identity, which it records nowhere.
@@ -1456,30 +1468,130 @@ impl<'a> Recording<'a> {
             }
             Err(_) => return Err(error::unknown_variant("Gated")),
         };
-        let status = match outcome.status {
-            swarmops_repo::LandStatus::Landed => LandStatus::Landed,
-            swarmops_repo::LandStatus::Replayed => LandStatus::Replayed,
-            _ => return Err(error::unknown_variant("LandStatus")),
-        };
-        let mut out = LandResp::new(
-            status,
-            outcome.landed.to_string(),
-            outcome.rebased_onto.to_string(),
-            target,
-            outcome.base.to_string(),
-            outcome.attempts,
-            outcome.relocated,
-            bytes::to_u64(outcome.files_changed),
-            (outcome.squashed_from.iter())
-                .map(ToString::to_string)
-                .collect(),
-        );
-        out.auto_merged = (outcome.auto_merged.iter())
-            .map(ToString::to_string)
-            .collect();
-        out.warnings = outcome.warnings;
-        Ok(out)
+        land_resp(outcome, target)
     }
+
+    /// [`StoreOps::revert`] (the M18 design §4): the request's own rules, its revisions resolved
+    /// in one snapshot, then [`swarmops_repo::Repo::revert`], signed and attributed as a land
+    /// with changes is: `C` carries the caller's `agent` and `run_id`, the landed changeset its
+    /// `lander_run_id`.
+    fn revert_with(&self, who: &Identity, req: RevertReq) -> Result<RevertResp, OpError> {
+        let RevertReq {
+            changeset,
+            since,
+            target,
+            reason,
+            message,
+            idempotency_key,
+            max_attempts,
+            max_conflict_bytes,
+            expect_target,
+            ..
+        } = req;
+
+        // 1. The request's own rules, before anything is resolved or read.
+        check_ref_use(&target, RefUse::Publish)?;
+        revert_reason(&reason)?;
+        if let Some(key) = &idempotency_key {
+            land_key(key)?;
+        }
+        if !(1..=MAX_LAND_ATTEMPTS).contains(&max_attempts) {
+            return Err(error::error(
+                ErrorCode::InvalidArg,
+                format!("max_attempts is {max_attempts}, not 1 to {MAX_LAND_ATTEMPTS}"),
+            )
+            .with_details(error::details([("max_attempts", max_attempts.into())])));
+        }
+
+        // 2. The range's ends and the expected target, resolved in one snapshot.
+        let ResolvedChange {
+            head,
+            base,
+            expected,
+            ..
+        } = self.change(
+            &changeset,
+            since.as_ref(),
+            expect_target.as_ref(),
+            &target,
+            None,
+        )?;
+
+        // 3. The revert, signed and attributed as a land with changes is.
+        let signature = self.ops.native_signature(who, None)?;
+        let mut metadata = vec![("agent".to_owned(), who.agent().as_bytes().to_vec())];
+        let mut lander_metadata = Vec::new();
+        if let Some(run_id) = who.run_id() {
+            let run_id = run_id.as_bytes().to_vec();
+            lander_metadata.push((LANDER_RUN_ID_KEY.to_owned(), run_id.clone()));
+            metadata.push(("run_id".to_owned(), run_id));
+        }
+        let mut revert = RevertRequest::new(head, &target, reason, signature);
+        revert.since = base;
+        revert.message = message.map(String::into_bytes);
+        revert.key = idempotency_key;
+        revert.max_attempts = max_attempts;
+        revert.expect_target = expected;
+        revert.metadata = metadata;
+        revert.lander_metadata = lander_metadata;
+        let outcome =
+            (self.ops.repo.revert(revert)).map_err(|e| merge_error(e, max_conflict_bytes))?;
+
+        // 4. What the landed changeset took back, as it records it: a replay's too.
+        let read = self.snapshot()?;
+        let landed = stored(&read, outcome.landed)?;
+        let reverted = metadata_text(&landed.changeset.metadata, REVERTS)
+            .map(|ids| ids.split_whitespace().map(str::to_owned).collect())
+            .unwrap_or_default();
+        drop(read);
+        Ok(RevertResp::new(reverted, land_resp(outcome, target)?))
+    }
+}
+
+/// A land's `outcome` onto `target` as `land` answers it.
+fn land_resp(outcome: swarmops_repo::LandOutcome, target: String) -> Result<LandResp, OpError> {
+    let status = match outcome.status {
+        swarmops_repo::LandStatus::Landed => LandStatus::Landed,
+        swarmops_repo::LandStatus::Replayed => LandStatus::Replayed,
+        _ => return Err(error::unknown_variant("LandStatus")),
+    };
+    let mut out = LandResp::new(
+        status,
+        outcome.landed.to_string(),
+        outcome.rebased_onto.to_string(),
+        target,
+        outcome.base.to_string(),
+        outcome.attempts,
+        outcome.relocated,
+        bytes::to_u64(outcome.files_changed),
+        (outcome.squashed_from.iter())
+            .map(ToString::to_string)
+            .collect(),
+    );
+    out.auto_merged = (outcome.auto_merged.iter())
+        .map(ToString::to_string)
+        .collect();
+    out.warnings = outcome.warnings;
+    Ok(out)
+}
+
+/// `E_INVALID_ARG` unless a revert's `reason` holds 1 to [`MAX_REVERT_REASON_BYTES`] bytes,
+/// `details.reason_bytes` its length.
+fn revert_reason(reason: &str) -> Result<(), OpError> {
+    if (1..=MAX_REVERT_REASON_BYTES).contains(&reason.len()) {
+        return Ok(());
+    }
+    Err(error::error(
+        ErrorCode::InvalidArg,
+        format!(
+            "a revert's reason is {} bytes, not 1 to {MAX_REVERT_REASON_BYTES}",
+            reason.len()
+        ),
+    )
+    .with_details(error::details([(
+        "reason_bytes",
+        bytes::to_u64(reason.len()).into(),
+    )])))
 }
 
 impl StoreOps for Recording<'_> {
@@ -1757,6 +1869,10 @@ impl StoreOps for Recording<'_> {
         out.squashed_from = (metadata_text(&changeset.metadata, SQUASHED_FROM_KEY))
             .map(|chain| chain.split_whitespace().map(str::to_owned).collect())
             .unwrap_or_default();
+        out.reverts = (metadata_text(&changeset.metadata, REVERTS))
+            .map(|ids| ids.split_whitespace().map(str::to_owned).collect())
+            .unwrap_or_default();
+        out.revert_reason = metadata_text(&changeset.metadata, REVERT_REASON);
         Ok(out)
     }
 
@@ -2203,6 +2319,10 @@ impl StoreOps for Recording<'_> {
         let moves = moves.into_iter().map(ref_log_entry).collect();
         Ok(RefLogPage::new(name, moves, older))
     }
+
+    fn revert(&self, who: &Identity, req: RevertReq) -> Result<RevertResp, OpError> {
+        self.revert_with(who, req)
+    }
 }
 
 /// Each operation as a request of its own, whose resolved revisions go unrecorded: to report
@@ -2310,6 +2430,10 @@ impl StoreOps for LocalOps {
 
     fn ref_log(&self, req: RefLogReq) -> Result<RefLogPage, OpError> {
         self.recording(&Resolved::default()).ref_log(req)
+    }
+
+    fn revert(&self, who: &Identity, req: RevertReq) -> Result<RevertResp, OpError> {
+        self.recording(&Resolved::default()).revert(who, req)
     }
 }
 

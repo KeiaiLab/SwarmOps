@@ -11,6 +11,7 @@ use base64::engine::general_purpose::STANDARD;
 use camino::Utf8Path;
 use serde_json::{Map, Value};
 use swarmops_api::{DEFAULT_MAX_CONFLICT_BYTES, ErrorCode, OpError};
+use swarmops_core::bytes;
 use swarmops_core::{ChangesetId, ObjectId, RepoPath};
 use swarmops_git::limits::LimitExceeded;
 use swarmops_git::mirror::MirrorError;
@@ -126,7 +127,9 @@ pub(crate) fn repo_error(e: RepoError, during: During<'_>) -> OpError {
         | RepoError::MergeChangeset(_)
         | RepoError::BaseNotAncestor { .. }
         | RepoError::NoMergeBase { .. }
-        | RepoError::LandCommit { .. }) => land_error(e, message),
+        | RepoError::LandCommit { .. }
+        | RepoError::RevertOffTarget { .. }
+        | RepoError::RevertTooLong { .. }) => land_error(e, message),
         RepoError::MissingObject { id, .. } => {
             corrupt(message, during, "swarmops verify").with_details(object(id))
         }
@@ -196,9 +199,9 @@ fn derive_error(e: RepoError, message: String, during: During<'_>) -> OpError {
 }
 
 /// The operations-spec error for a land's error `e`, whose message is `message`: [`repo_error`]'s
-/// table, a land's rows (M4). E_CONFLICT's report holds hunk texts within the default
-/// `max_conflict_bytes` here; `land` gives it its request's ([`conflict`]). Any other error is
-/// [`repo_error`]'s.
+/// table, a land's rows (M4) and a revert's (M18). E_CONFLICT's report holds hunk texts within
+/// the default `max_conflict_bytes` here; `land` gives it its request's ([`conflict`]). Any other
+/// error is [`repo_error`]'s.
 fn land_error(e: RepoError, message: String) -> OpError {
     match e {
         RepoError::Conflict(conflicts) => conflict(&conflicts, message, DEFAULT_MAX_CONFLICT_BYTES),
@@ -239,6 +242,20 @@ fn land_error(e: RepoError, message: String) -> OpError {
             .with_hint(hint(format!("swarmops log {head}"))),
         RepoError::LandCommit { head } => error(ErrorCode::InvalidArg, message)
             .with_details(details([("head", head.to_string().into())])),
+        // A revert's (the M18 design §4.2).
+        RepoError::RevertOffTarget { changeset, target } => error(ErrorCode::InvalidArg, message)
+            .with_details(details([
+                ("reason", "not_on_target".into()),
+                ("changeset", changeset.to_string().into()),
+                ("target", target.clone().into()),
+            ]))
+            .with_hint(hint(format!("swarmops log {target}"))),
+        RepoError::RevertTooLong { changeset, max } => error(ErrorCode::TooLarge, message)
+            .with_details(details([
+                ("changeset", changeset.to_string().into()),
+                ("max_changesets", bytes::to_u64(max).into()),
+            ]))
+            .with_hint("revert a shorter range: give --since a later changeset"),
         other => repo_error(other, During::Op),
     }
 }

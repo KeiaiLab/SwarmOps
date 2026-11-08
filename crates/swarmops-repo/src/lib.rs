@@ -26,7 +26,8 @@
 //! transaction; a lost race re-merges and tries again, and a keyed land run again replays
 //! ([`Repo::land`]; the [`land`] module). A rebase merges a change the same way and records the
 //! result as one changeset on the ref's head, moving no ref ([`Repo::rebase`]; the [`rebase`]
-//! module).
+//! module). A revert lands the inverse of a range of a ref's history as a land with changes
+//! ([`Repo::revert`]; the [`revert`] module).
 //!
 //! [`LocalRepo`] is the repository on the local filesystem: the loose object files and the
 //! native metadata store of `swarmops-store`, which own durability. The operations take and
@@ -54,6 +55,7 @@ pub mod read;
 pub mod rebase;
 pub mod repair;
 pub mod repo;
+pub mod revert;
 #[allow(
     dead_code,
     reason = "the batched lands (the D2 design, slice D2-4) use it"
@@ -86,6 +88,7 @@ pub use read::{FileSpan, FileSpanRead, ListedEntry, RepoRead, StoredChangeset, T
 pub use rebase::{RebaseOutcome, RebaseRequest, RebaseStatus};
 pub use repair::{RepairAction, RepairKind, RepairReport, RepairRequest};
 pub use repo::{CasOutcome, LocalRepo, Repo, RepoInfo};
+pub use revert::{MAX_REVERT_CHANGESETS, MAX_REVERT_REASON_BYTES, RevertRequest};
 pub use swarmops_store::{CasResult, InsertOutcome, RefKind, RefState, StoreError, StoreFormat};
 pub use upgrade::UpgradeReport;
 pub use verify::{Depth, MismatchCause, VerifyProblem, VerifyReport};

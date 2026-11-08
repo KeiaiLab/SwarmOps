@@ -33,8 +33,9 @@
 //!   included;
 //! - a move of `main` that takes it off its first-parent history refuses the undo the same way
 //!   ([`RepoError::HistoryProtected`], the M15 design §4): the undo of a land, of
-//!   `commit --advance` or of a forward `ref set` takes `main` back. It is judged on a snapshot
-//!   read under the lock, only for a move the compare-and-swap queued;
+//!   `commit --advance` or of a forward `ref set` takes `main` back, and so does the undo of a
+//!   revert, a land too ([`Repo::revert`] is how `main` takes a change back). It is judged on a
+//!   snapshot read under the lock, only for a move the compare-and-swap queued;
 //! - with every ref skipped, nothing is written either: the undo is a replay
 //!   ([`UndoOutcome::already_applied`]).
 //!

@@ -21,6 +21,8 @@ The limits of the SwarmOps contract: what a request may hold, with the error a r
 | [Access file](#access-file) | 1,048,576 bytes (1 MiB) | `swarmops_ops::serve::access::MAX_ACCESS_BYTES` | [`E_POLICY_DENIED`](errors.md#e_policy_denied) |
 | [Push size](#push-size) | 2,147,483,648 bytes (2 GiB) | `swarmops_ops::serve::receive::MAX_PUSH_BYTES` | git's own |
 | [Push commands](#push-commands) | 1,000 commands | `swarmops_ops::serve::hook::MAX_PUSH_COMMANDS` | [`E_INVALID_ARG`](errors.md#e_invalid_arg) |
+| [Revert range](#revert-range) | 256 changesets | `swarmops_repo::MAX_REVERT_CHANGESETS` | [`E_TOO_LARGE`](errors.md#e_too_large) |
+| [Revert reason](#revert-reason) | 4,096 bytes (4 KiB) | `swarmops_repo::MAX_REVERT_REASON_BYTES` | [`E_INVALID_ARG`](errors.md#e_invalid_arg) |
 
 ### Request text
 
@@ -91,7 +93,7 @@ The agent name of `--as` or `SWARMOPS_AGENT`, `<family>/<instance>`, which a ref
 
 - Value: 255 bytes.
 - Constant: `swarmops_api::identity::MAX_AGENT_LEN`, in `crates/swarmops-api/src/identity.rs`.
-- Commands: [`whoami`](commands/whoami.md), [`commit`](commands/commit.md), [`land`](commands/land.md), [`rebase`](commands/rebase.md), [`blob put`](commands/blob-put.md), [`ref set`](commands/ref-set.md), [`ref delete`](commands/ref-delete.md), [`op undo`](commands/op-undo.md), [`git import`](commands/git-import.md), [`clone`](commands/clone.md), [`ws create`](commands/ws-create.md), [`sync`](commands/sync.md), [`mcp`](commands/mcp.md), [`serve`](commands/serve.md).
+- Commands: [`whoami`](commands/whoami.md), [`commit`](commands/commit.md), [`land`](commands/land.md), [`rebase`](commands/rebase.md), [`revert`](commands/revert.md), [`blob put`](commands/blob-put.md), [`ref set`](commands/ref-set.md), [`ref delete`](commands/ref-delete.md), [`op undo`](commands/op-undo.md), [`git import`](commands/git-import.md), [`clone`](commands/clone.md), [`ws create`](commands/ws-create.md), [`sync`](commands/sync.md), [`mcp`](commands/mcp.md), [`serve`](commands/serve.md).
 - Error: [`E_INVALID_ARG`](errors.md#e_invalid_arg).
 
 ### Ref name
@@ -136,6 +138,24 @@ The refs one push to `serve` may update: past it, every command of the push is r
 - Value: 1,000 commands.
 - Constant: `swarmops_ops::serve::hook::MAX_PUSH_COMMANDS`, in `crates/swarmops-ops/src/serve/hook.rs`.
 - Commands: [`serve`](commands/serve.md).
+- Error: [`E_INVALID_ARG`](errors.md#e_invalid_arg).
+
+### Revert range
+
+The changesets one `revert` takes back, from `--since` (`since`) to its changeset: a longer range is refused before anything is written, with `details.max_changesets`.
+
+- Value: 256 changesets.
+- Constant: `swarmops_repo::MAX_REVERT_CHANGESETS`, in `crates/swarmops-repo/src/revert.rs`.
+- Commands: [`revert`](commands/revert.md).
+- Error: [`E_TOO_LARGE`](errors.md#e_too_large).
+
+### Revert reason
+
+`revert --reason` (`reason`): 1 to this many bytes, checked before anything is resolved or read, with `details.reason_bytes`.
+
+- Value: 4,096 bytes (4 KiB).
+- Constant: `swarmops_repo::MAX_REVERT_REASON_BYTES`, in `crates/swarmops-repo/src/revert.rs`.
+- Commands: [`revert`](commands/revert.md).
 - Error: [`E_INVALID_ARG`](errors.md#e_invalid_arg).
 
 ## Bounds without an error
@@ -248,6 +268,7 @@ The bounds `swarmops schema` states on a field, beside the integer formats' own.
 | [`ReadTreeReq`](schema-types.md#readtreereq) | `depth` | 1 to 64 |
 | [`ReadTreeReq`](schema-types.md#readtreereq) | `limit` | at least 1 |
 | [`RefLogReq`](schema-types.md#reflogreq) | `limit` | at least 1 |
+| [`RevertReq`](schema-types.md#revertreq) | `max_attempts` | 1 to 32 |
 | [`ShowReq`](schema-types.md#showreq) | `max_changes` | at least 1 |
 | [`SyncReq`](schema-types.md#syncreq) | `max_attempts` | 1 to 32 |
 | [`UndoReq`](schema-types.md#undoreq) | `id` | matches `^[0-9]{1,20}:[0-9a-f]{8}$` |

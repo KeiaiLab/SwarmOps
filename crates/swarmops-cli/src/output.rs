@@ -15,7 +15,8 @@
 //! A land prints one line in place of its result's lines,
 //! `landed <id> on <target> (onto <head>, attempt <n>)` (with `, relocated` before the closing
 //! parenthesis when the publish moved it onto a newer head) or `replayed <id>`, then its warnings
-//! as `warnings[i]` lines. An `E_CONFLICT` prints one `conflict: <kind> <path>` line for each
+//! as `warnings[i]` lines; a revert prints its land's line after `reverted <n> changeset(s): `.
+//! An `E_CONFLICT` prints one `conflict: <kind> <path>` line for each
 //! conflicting file in place of its details, the report.
 
 use std::fmt;
@@ -117,10 +118,15 @@ fn human<T: Serialize>(envelope: &Envelope<T>) -> String {
         if let Some(sentence) = summary(&envelope.op, &result) {
             line(&mut out, "", &printable(&sentence));
         }
-        match landed(&envelope.op, &result) {
+        // A revert's line is its land's, after what it took back.
+        let (op, land, prefix) = match (envelope.op.as_str(), result.get("land")) {
+            ("revert", Some(land)) => ("land", land, reverted(&result)),
+            (op, _) => (op, &result, String::new()),
+        };
+        match landed(op, land) {
             Some(summary) => {
-                line(&mut out, "", &summary);
-                if let Some(warnings) = result.get("warnings") {
+                line(&mut out, "", &format!("{prefix}{summary}"));
+                if let Some(warnings) = land.get("warnings") {
                     lines(&mut out, "warnings", warnings);
                 }
             }
@@ -183,6 +189,14 @@ fn landed(op: &str, result: &Tree) -> Option<String> {
             ))
         }
         _ => None,
+    }
+}
+
+/// What a revert's `result` took back, as its line starts: `reverted <n> changeset(s): `.
+fn reverted(result: &Tree) -> String {
+    match result.get("reverted") {
+        Some(Tree::Array(ids)) => format!("reverted {} changeset(s): ", ids.len()),
+        _ => String::new(),
     }
 }
 
@@ -564,7 +578,7 @@ mod tests {
     }
 
     /// `land` prints one line in human text: where it landed, or that it replayed, then any
-    /// warnings; and a conflict prints each conflicting path with its kind, one a line, in place
+    /// warnings, and `revert` its land's line after what it took back; and a conflict prints each conflicting path with its kind, one a line, in place
     /// of the report.
     #[test]
     fn human_text_of_a_land() {
@@ -591,6 +605,10 @@ mod tests {
         let mut replayed = landed.clone();
         replayed["status"] = json!("replayed");
         assert_eq!(human(&replayed).stdout, "replayed l1\n");
+        // A revert's line is its land's.
+        let revert = json!({"reverted": ["x1", "x2"], "land": replayed});
+        let revert = render(&Envelope::ok("revert", &revert, meta()), Format::Human);
+        assert_eq!(revert.stdout, "reverted 2 changeset(s): replayed l1\n");
         // Another operation's result keeps its key: value lines.
         let other = render(&Envelope::ok("show", &landed, meta()), Format::Human);
         assert!(

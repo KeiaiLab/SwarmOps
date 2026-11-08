@@ -116,7 +116,7 @@ SwarmOps records an identity and does not verify it: every envelope's `meta.auth
 treats every agent that runs against a store as a trusted local user acting for the same owner, and
 the store directory's permissions are the access boundary.
 
-## The 40 MCP tools
+## The 41 MCP tools
 
 A changeset is what a commit records, and a ref, such as `main`, is a name that points at one.
 `swarmops mcp` lists one tool for each store operation but `derive`, which `swarmops derive` runs
@@ -200,7 +200,7 @@ annotations say whether it changes the store and how.
   How `main` and a remote's branch stand, as the last fetch saw it: the changes the remote lacks
   and the commits `main` lacks. Offline.
 
-### Ten tools write
+### Eleven tools write
 
 - **`commit`**
 
@@ -212,6 +212,12 @@ annotations say whether it changes the store and how.
   Merges a change three-way onto `main`, or another `target`, and publishes the result as one
   changeset in one transaction. On `E_CONFLICT`, `details.report` lists each conflict, and
   `resolutions` settle them.
+
+- **`revert`**
+
+  Takes back a changeset, or a range with `since`, by landing its inverse: what the target gained
+  since stays, and a later change to the same lines is `E_CONFLICT`, naming the changeset that made
+  it. `show` of the landed changeset gives `reverts` and `revert_reason`.
 
 - **`rebase`**
 

@@ -325,6 +325,26 @@ pub enum RepoError {
         /// The land's head.
         head: ChangesetId,
     },
+    /// A revert's changeset is not on its target's first-parent chain ([`crate::Repo::revert`]):
+    /// only what the target landed is taken back there. Nothing was written.
+    #[error(
+        "{changeset} is not on the first-parent chain of {target}: a revert takes back what the target holds"
+    )]
+    RevertOffTarget {
+        /// The changeset to revert.
+        changeset: ChangesetId,
+        /// The target.
+        target: String,
+    },
+    /// A revert's range holds more than `max` changesets ([`crate::revert::MAX_REVERT_CHANGESETS`]):
+    /// revert a shorter one, or several. Nothing was written.
+    #[error("the range to revert, ending at {changeset}, holds more than {max} changesets")]
+    RevertTooLong {
+        /// The range's last changeset.
+        changeset: ChangesetId,
+        /// The most changesets a revert takes.
+        max: usize,
+    },
     /// [`crate::Repo::derive_eager`] was given an `after` past the journal's last frame: no
     /// call of it read that frame, so it is no frame to go on after.
     #[error("frame {after} is past the journal's end")]

@@ -126,7 +126,7 @@ ids for compare-and-swap, `land` to publish, small pages):
 {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"swarmops","title":"SwarmOps","version":"0.2.0"},"instructions":"SwarmOps is source control for coding-agent swarms: many agents commit to one store at once. …"}}
 ```
 
-**`tools/list`.** One page of 40 tools. Each entry holds `name`, `title`, `description`,
+**`tools/list`.** One page of 41 tools. Each entry holds `name`, `title`, `description`,
 `inputSchema` and `annotations`; `read_file` alone also carries `_meta`:
 
 ```sh
@@ -150,6 +150,7 @@ sed -n 2p answers.jsonl | jq -c '.result.tools[] | {name, title, annotations} + 
 {"name":"undo","title":"Undo an operation","annotations":{"destructiveHint":true,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":false}}
 {"name":"commit","title":"Commit a changeset","annotations":{"destructiveHint":false,"idempotentHint":false,"openWorldHint":false,"readOnlyHint":false}}
 {"name":"land","title":"Land a change","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":false}}
+{"name":"revert","title":"Revert a change","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":false}}
 {"name":"blob_put","title":"Store a blob","annotations":{"destructiveHint":false,"idempotentHint":false,"openWorldHint":false,"readOnlyHint":false}}
 {"name":"blob_has","title":"Find stored blobs","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
 {"name":"verify","title":"Verify the store","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
@@ -287,6 +288,7 @@ the CLI command's request; `swarmops schema <Request>` prints the type.
 | `undo` | `swarmops op undo ID` | `UndoReq` | moves refs |
 | `commit` | `swarmops commit` | `CommitReq` | adds a changeset; with `advance`, moves a ref |
 | `land` | `swarmops land HEAD` | `LandReq` | adds a changeset and moves the target |
+| `revert` | `swarmops revert REV` | `RevertReq` | adds a changeset and moves the target |
 | `rebase` | `swarmops rebase HEAD` | `RebaseReq` | adds a changeset |
 | `blob_put` | `swarmops blob put` | `BlobPutReq` | adds a blob |
 | `blob_has` | `swarmops blob has` | `BlobHasReq` | no |

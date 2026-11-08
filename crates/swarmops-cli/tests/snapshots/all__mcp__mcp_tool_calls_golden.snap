@@ -2150,8 +2150,12 @@ expression: transcript
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
-          "arguments": {},
-          "name": "verify"
+          "arguments": {
+            "changeset": "[theirs]",
+            "idempotency_key": "revert-1",
+            "reason": "the docs were wrong"
+          },
+          "name": "revert"
         }
       },
       "response": {
@@ -2160,7 +2164,63 @@ expression: transcript
         "result": {
           "content": [
             {
-              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"verify\",\"result\":{\"changesets_checked\":9,\"findings\":[],\"found\":0,\"objects_checked\":28,\"problems\":[],\"truncated\":false}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[theirs]\":\"[theirs]\",\"main\":\"[id14]\"}},\"ok\":true,\"op\":\"revert\",\"result\":{\"land\":{\"attempts\":1,\"base\":\"[theirs]\",\"files_changed\":1,\"landed\":\"[reverted]\",\"rebased_onto\":\"[id14]\",\"relocated\":false,\"squashed_from\":[\"[id15]\"],\"status\":\"landed\",\"target\":\"main\"},\"reverted\":[\"[theirs]\"]}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "[theirs]": "[theirs]",
+                "main": "[id14]"
+              }
+            },
+            "ok": true,
+            "op": "revert",
+            "result": {
+              "land": {
+                "attempts": 1,
+                "base": "[theirs]",
+                "files_changed": 1,
+                "landed": "[reverted]",
+                "rebased_onto": "[id14]",
+                "relocated": false,
+                "squashed_from": [
+                  "[id15]"
+                ],
+                "status": "landed",
+                "target": "main"
+              },
+              "reverted": [
+                "[theirs]"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 39,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {},
+          "name": "verify"
+        }
+      },
+      "response": {
+        "id": 39,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"verify\",\"result\":{\"changesets_checked\":11,\"findings\":[],\"found\":0,\"objects_checked\":31,\"problems\":[],\"truncated\":false}}",
               "type": "text"
             }
           ],
@@ -2176,10 +2236,10 @@ expression: transcript
             "ok": true,
             "op": "verify",
             "result": {
-              "changesets_checked": 9,
+              "changesets_checked": 11,
               "findings": [],
               "found": 0,
-              "objects_checked": 28,
+              "objects_checked": 31,
               "problems": [],
               "truncated": false
             }

@@ -16,6 +16,9 @@
 //! The land variant (the M15 design §6) kills `land --key` instead and runs the same land again
 //! with the same key: the key lands its change exactly once, whatever moment the kill hit.
 //!
+//! The revert variant (the M18 design §4.3) kills `revert --key` of a change just made on main
+//! and runs it again: the change is taken back exactly once, whatever moment the kill hit.
+//!
 //! The ref variant (the M16 design §2) kills `ref set` and `op undo` on `release/1`: after each
 //! kill the ref names its old or its new target, the op log holds every operation once and in
 //! order, and the same operation run again is recorded once.
@@ -591,6 +594,180 @@ per_format! {
                 ~30 s idle, 112-113 s loaded"]
     fn sigkill_mid_land_200_times(format) {
         kill_lands(format, SLOW_LAND_KILLS);
+    }
+}
+
+/// The kills the slow revert variant makes per format.
+const SLOW_REVERT_KILLS: usize = 200;
+
+/// The seed of the revert test's delays, apart from the other tests'.
+const REVERT_SEED: u64 = 0x2e7e_2711;
+
+/// The idempotency key of the `n`-th revert.
+fn revert_key(n: usize) -> String {
+    format!("kill-revert-{n}")
+}
+
+/// Commits a new file on main's head and moves main to it: the changeset to revert.
+fn change_on_main(store: &Store, n: usize) -> String {
+    let path = format!("revert-{n}.txt");
+    let changes = store.changes(&path, &path, &format!("{n}\n"));
+    let args = [
+        "commit",
+        "-m",
+        &path,
+        "--changes",
+        &changes,
+        "--advance",
+        MAIN,
+    ];
+    let result = store.run_as(&agent(0), &args, &[]).ok();
+    result["changeset"]
+        .as_str()
+        .expect("a changeset")
+        .to_owned()
+}
+
+/// The arguments of the revert of `changeset` under the `n`-th key.
+fn revert_args(store: &Store, changeset: &str, n: usize) -> Vec<String> {
+    let key = revert_key(n);
+    let args = ["revert", changeset, "--reason", "killed", "--key", &key];
+    store.args(&agent(0), &args)
+}
+
+/// The changeset a revert's `stdout` reports landed, if it holds one whole, successful envelope.
+fn reverted(stdout: &[u8]) -> Option<String> {
+    let result = result_of(stdout)?;
+    let id = result["land"]["landed"].as_str();
+    Some(id.expect("a landed changeset").to_owned())
+}
+
+/// Runs the revert of `changeset` under the `n`-th key and SIGKILLs it `delay` after its spawn,
+/// unless it ended before.
+fn kill_revert_after(store: &Store, changeset: &str, n: usize, delay: Duration) -> Ended {
+    let mut child = Child::spawn(&mut swarmops(&revert_args(store, changeset, n), &[]));
+    let (output, _) = child.finish(Instant::now() + delay);
+    let Output { status, stdout, .. } = &output;
+
+    // 1. A signal ends only a killed run; the kill may land after the envelope was printed.
+    if status.signal() == Some(SIGKILL) {
+        return Ended::Killed(reverted(stdout));
+    }
+
+    // 2. A run that beat its delay must have landed.
+    assert!(
+        status.success(),
+        "revert {n} ended {status} unkilled: {output:?}"
+    );
+    let id = reverted(stdout).unwrap_or_else(|| panic!("revert {n}: no envelope: {output:?}"));
+    Ended::Exited(id)
+}
+
+/// Reverts the `n`-th change again under its key, as an agent retries a revert that died: the
+/// landed changeset, which the revert made now or a replay found.
+fn revert_again(store: &Store, changeset: &str, n: usize) -> String {
+    let args = revert_args(store, changeset, n);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let result = crate::support::run(&args, &[]).ok();
+    let status = result["land"]["status"].as_str().expect("a land's status");
+    assert!(
+        matches!(status, "landed" | "replayed"),
+        "revert {n}: {result}"
+    );
+    result["land"]["landed"]
+        .as_str()
+        .expect("a landed changeset")
+        .to_owned()
+}
+
+/// `kills` SIGKILLs of `revert --key` on a store of `format` (the M18 design §4.3), each of a
+/// change made on main just before, then the same revert again and the checks: the store
+/// verifies clean, main's log holds the base and, per round, the change and one revert of it,
+/// the reported revert is the one main holds, the key is on one changeset, and main no longer
+/// holds the change's file. Every SIGKILL counts (the module documentation).
+fn kill_reverts(format: StoreFormat, kills: usize) {
+    let store = Store::init_as(format);
+    let mut rng = Rng::new(REVERT_SEED ^ u64::from(format.version()));
+    let mut keys: BTreeMap<String, Option<String>> = BTreeMap::new();
+
+    // 1. The base, and the first revert, whose wall time is the window.
+    let base = store.commit(&agent(0), "base.txt", "base\n", None);
+    let create = ["ref", "set", MAIN, &base, "--create"];
+    store.run_as(&agent(0), &create, &[]).ok();
+    let first = change_on_main(&store, 0);
+    let start = Instant::now();
+    revert_again(&store, &first, 0);
+    let mut window = u64::try_from(start.elapsed().as_micros()).expect("a short revert");
+    let readers = Readers::start(&store);
+
+    let mut killed = 0;
+    let mut n = 0;
+    while killed < kills {
+        n += 1;
+        assert!(
+            n <= kills * LAND_RUNS_PER_KILL,
+            "{killed} kills in {n} reverts"
+        );
+        let change = change_on_main(&store, n);
+        let delay = Duration::from_micros(rng.next_u64() % window);
+        let what = format!("{format:?} seed {REVERT_SEED:#x} revert {n} delay {delay:?}");
+
+        // 2. Kill a revert, then run it again under the same key.
+        let reported = match kill_revert_after(&store, &change, n, delay) {
+            Ended::Killed(reported) => {
+                killed += 1;
+                reported
+            }
+            Ended::Exited(id) => {
+                window -= window / WINDOW_SHRINK;
+                Some(id)
+            }
+        };
+        let again = revert_again(&store, &change, n);
+        if let Some(reported) = reported {
+            assert_eq!(
+                reported, again,
+                "{what}: the reported revert is the one kept"
+            );
+        }
+
+        // 3. The store verifies clean; main holds the base, then a change and its revert per
+        //    round; the key is on one changeset; the change's file is gone.
+        store.assert_clean(&what);
+        let rounds = 2 * (n + 1);
+        let log = store
+            .read(&["log", MAIN, "-n", &(rounds + 1 + LOG_SURPLUS).to_string()])
+            .ok();
+        let on_main: Vec<&str> = (log["entries"].as_array().expect("log entries").iter())
+            .map(|entry| entry["id"].as_str().expect("an id"))
+            .collect();
+        assert_eq!(on_main.len(), rounds + 1, "{what}: main's log: {on_main:?}");
+        assert_eq!(on_main[0], again, "{what}: {again} is not main's head");
+        for id in on_main {
+            keys.entry(id.to_owned())
+                .or_insert_with(|| key_of(&store, id));
+        }
+        let reverts = keys
+            .values()
+            .flatten()
+            .filter(|&k| *k == revert_key(n))
+            .count();
+        assert_eq!(reverts, 1, "{what}: changesets with key {n}");
+        let file = format!("{MAIN}:revert-{n}.txt");
+        store.read(&["cat", &file]).err("E_PATH_NOT_FOUND");
+    }
+
+    println!("{format:?}: {killed} kills in {n} reverts, window {window} us");
+    assert_read_clean(readers, &format!("{format:?} reverts"));
+    store.assert_clean("after the last revert");
+}
+
+per_format! {
+    /// The slow revert variant: [`SLOW_REVERT_KILLS`] kills per format.
+    #[ignore = "slow, ~30 s: 200 kills per format, each with verify --deep, a log and a cat; \
+                29-30 s at load 9"]
+    fn sigkill_mid_revert_200_times(format) {
+        kill_reverts(format, SLOW_REVERT_KILLS);
     }
 }
 

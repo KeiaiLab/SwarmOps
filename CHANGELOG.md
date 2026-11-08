@@ -25,6 +25,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
   A deleted ref lists its moves; a name the journal records no move of is `E_REF_NOT_FOUND`, so
   golden envelopes now pin 55 of the 55 error codes (the M18 design §3.2). `swarmops mcp` lists 40
   tools, and `swarmops schema` 169 types.
+- `swarmops revert REV --reason TEXT [--since REV] [--onto REF] [--key KEY]` and the MCP tool
+  `revert` take back a changeset, or the first-parent range after `--since`, by landing its inverse
+  change: what the ref gained since stays, a later change to the same lines is `E_CONFLICT` naming
+  the changeset that made it, and a keyed revert run again replays (the M18 design §4). The landed
+  changeset records `reverts` and `revert_reason`, which `show` prints and the git export keeps out
+  of its trailers. `swarmops mcp` lists 41 tools, and `swarmops schema` 171 types.
 
 ### Changed
 

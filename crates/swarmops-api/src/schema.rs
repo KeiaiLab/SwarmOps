@@ -19,12 +19,13 @@ macro_rules! schemas {
 /// [`Envelope`](crate::Envelope) is listed as `Envelope<serde_json::Value>`: its `result` is an operation's
 /// response, whose type has its own entry.
 pub fn schema_for_all() -> serde_json::Value {
-    // The store's operations' types, then ancestry's, ref log's, the maintenance's, the git
-    // remotes', the workspaces' and serve's records.
+    // The store's operations' types, then ancestry's, ref log's, revert's, the maintenance's,
+    // the git remotes', the workspaces' and serve's records.
     let mut all = store_schemas();
     let groups = [
         ancestry_schemas(),
         ref_log_schemas(),
+        revert_schemas(),
         maintenance_schemas(),
         remote_schemas(),
         workspace_schemas(),
@@ -167,6 +168,11 @@ fn ancestry_schemas() -> serde_json::Value {
 /// The schemas of ref log's types (the M18 design §3.2).
 fn ref_log_schemas() -> serde_json::Value {
     schemas![RefLogReq, RefLogPage, RefLogEntryOut]
+}
+
+/// The schemas of revert's types (the M18 design §4).
+fn revert_schemas() -> serde_json::Value {
+    schemas![RevertReq, RevertResp]
 }
 
 /// The schemas of the maintenance's types (M6): gc, repair and upgrade.

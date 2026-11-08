@@ -24,6 +24,7 @@ use swarmops_api::{
     ShowReq, StoreOps, TreeListing, UndoReq, UndoResp, UpgradeReq, UpgradeResp, VerifyReport,
     VerifyReq,
 };
+use swarmops_api::{RevertReq, RevertResp};
 
 use super::refused;
 
@@ -278,6 +279,11 @@ impl<O: StoreOps> StoreOps for ServerOps<O> {
     fn ref_log(&self, req: RefLogReq) -> Result<RefLogPage, OpError> {
         self.pass(self.inner.ref_log(req))
     }
+
+    // A land, served as `land` is: it names no content, so no client file to refuse.
+    fn revert(&self, who: &Identity, req: RevertReq) -> Result<RevertResp, OpError> {
+        self.pass(self.inner.revert(who, req))
+    }
 }
 
 #[cfg(test)]
@@ -393,6 +399,9 @@ mod tests {
         }
         fn ref_log(&self, _: RefLogReq) -> Result<RefLogPage, OpError> {
             self.call("ref_log")
+        }
+        fn revert(&self, _: &Identity, _: RevertReq) -> Result<RevertResp, OpError> {
+            self.call("revert")
         }
     }
 
@@ -574,6 +583,23 @@ mod tests {
         let ref_log = RefLogReq::new("main");
         assert_passed(&s, "ref_log", s.ref_log(ref_log).map(drop));
         assert_passed(&s, "verify", s.verify(VerifyReq::default()).map(drop));
+    }
+
+    /// A revert is served as the land it is: it reaches the inner store with the caller after
+    /// the same checks, and its error comes back masked as a land's does.
+    #[test]
+    fn serve_gates_a_revert_as_a_land() {
+        let s = served();
+        let w = who();
+        let land = s.land(&w, LandReq::new("x")).unwrap_err();
+        let revert = s.revert(&w, RevertReq::new("x", "a reason")).unwrap_err();
+        assert_eq!(*s.inner().calls.borrow(), ["land", "revert"]);
+        assert_eq!(
+            (revert.code.as_str(), revert.hint.as_deref()),
+            (land.code.as_str(), land.hint.as_deref())
+        );
+        assert_eq!(revert.details, land.details);
+        assert_passed(&s, "revert", Err(revert));
     }
 
     /// Every mutation reaches the inner store with the caller, its error masked.

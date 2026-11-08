@@ -207,6 +207,8 @@ ref file. See
 | `message` | `string` | yes | The message. |
 | `metadata` | `object` | yes | SwarmOps metadata, such as `agent` and `run_id`. A value that is not UTF-8 is given in standard, padded base64, under its key with `:b64` appended. A commit refuses a key that ends in `:b64`, so `k:b64` is always the base64 of `k`'s value, which is not UTF-8. |
 | `parents` | `array of string` | yes | The parents' ids; the first is the mainline parent that `changes` are relative to. |
+| `revert_reason` | `string or null` | no | Why, for a changeset a `revert` made (its `revert_reason` metadata). |
+| `reverts` | `array of string` | no | The changesets a `revert` took back with it, oldest first (its `reverts` metadata). Omitted for a changeset no revert made. |
 | `root` | `string` | yes | The root tree's id. |
 | `seq` | `integer` | yes | Its position in the store's changeset index, in commit order. |
 | `signatures` | `Signatures` | yes | The git author and committer signatures, kept for git fidelity. |

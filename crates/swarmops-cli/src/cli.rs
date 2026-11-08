@@ -476,6 +476,37 @@ pub enum Command {
         #[arg(long, value_name = "FILE", help = RESOLVE_HELP, long_help = RESOLVE_LONG_HELP)]
         resolve: Option<String>,
     },
+    /// Take back a changeset, or a range of a ref's history, by landing its inverse.
+    ///
+    /// The land commits, on REV, every path the range (SINCE, REV] touched set to what SINCE held
+    /// there, and lands that change from REV onto the ref: what the ref gained since stays, and
+    /// a later change to the same lines is E_CONFLICT (exit 3), naming the changeset that made
+    /// it, with nothing recorded. The landed changeset records the range as reverts and the
+    /// reason as revert_reason; show prints both. Merges in the range are taken back against
+    /// their first parents.
+    Revert {
+        /// The changeset to take back, the range's last: on the ref's first-parent chain.
+        #[arg(value_name = "REV")]
+        changeset: String,
+        /// Why, 1 to 4,096 bytes: recorded, and the default message's body.
+        #[arg(long, value_name = "TEXT")]
+        reason: String,
+        /// Take back the range after this first-parent ancestor of REV, at most 256 changesets
+        /// (default: REV alone).
+        #[arg(long, value_name = "REV")]
+        since: Option<String>,
+        /// The ref to land the revert on: main or a release ref (release/NAME).
+        #[arg(long, value_name = "REF", default_value = "main")]
+        onto: String,
+        #[arg(long, value_name = "KEY", help = LAND_KEY_HELP, long_help = LAND_KEY_LONG_HELP)]
+        key: Option<String>,
+        /// The landed changeset's message (default: "Revert", 12 hex digits of REV and its
+        /// title, then the reason).
+        #[arg(short, long, value_name = "MSG")]
+        message: Option<String>,
+        #[arg(long, value_name = "ID", help = EXPECT_TARGET_HELP)]
+        expect_target: Option<String>,
+    },
     /// Store content as a blob for a commit to name by its id, or ask which blobs the store
     /// holds.
     #[command(subcommand)]
@@ -689,9 +720,9 @@ pub enum Command {
     ///
     /// One tool per operation (repo_info, resolve_rev, read_file, read_tree, show, log, ancestry,
     /// path_history, diff, op_log, ref_list, ref_set, ref_delete, ref_log, undo, commit, land,
-    /// blob_put, blob_has, verify, the maintenance's gc, repair and upgrade, and the git remotes'
-    /// remote_list, fetch, push, sync and sync_status), each taking the operation's request as
-    /// its arguments and returning the envelope the other commands print. The store and the
+    /// revert, blob_put, blob_has, verify, the maintenance's gc, repair and upgrade, and the git
+    /// remotes' remote_list, fetch, push, sync and sync_status), each taking the operation's
+    /// request as its arguments and returning the envelope the other commands print. The store and the
     /// identity are the server's, --repo and --as or their variables, never a call's. Speaks MCP 2026-07-28, and 2025-11-25 and
     /// 2025-06-18 to clients that open with initialize. Prints no envelope: stdout carries the
     /// protocol until stdin ends, and a command line it refuses has its envelope on stderr. The
@@ -1541,6 +1572,7 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["commit"] => "commit",
         ["land"] => "land",
         ["rebase"] => "rebase",
+        ["revert"] => "revert",
         ["resolve"] => "resolve_rev",
         ["blob", "put"] => "blob_put",
         ["blob", "has"] => "blob_has",
@@ -1715,10 +1747,10 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 54);
+        assert_eq!(ops.len(), 55);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 54, "two subcommands name one op");
+        assert_eq!(ops.len(), 55, "two subcommands name one op");
         assert_eq!(op_name(&["ref"]), None);
         assert_eq!(op_name(&["blob"]), None);
         assert_eq!(op_name(&["ws"]), None);

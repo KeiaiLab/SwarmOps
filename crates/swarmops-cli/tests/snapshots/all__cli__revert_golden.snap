@@ -1,0 +1,478 @@
+---
+source: crates/swarmops-cli/tests/cli.rs
+expression: s.transcript()
+---
+[
+  {
+    "args": "init [tmp]/store",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "repo_init",
+      "api": 1,
+      "result": {
+        "repo_id": "[repo_id]",
+        "name": "store",
+        "store_version": 2,
+        "changesets": 0,
+        "refs": 0
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m t0 --changes [tmp]/t0.json --advance main",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[t0]",
+        "root": "[id1]",
+        "files_changed": 1,
+        "blobs_written": 1,
+        "advanced": {
+          "name": "main",
+          "new": "[t0]",
+          "already_applied": false
+        },
+        "replayed": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-18 commit -m a --changes [tmp]/a.json --parent [t0] --advance main",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[a]",
+        "parent": "[t0]",
+        "root": "[id2]",
+        "files_changed": 1,
+        "blobs_written": 1,
+        "advanced": {
+          "name": "main",
+          "old": "[t0]",
+          "new": "[a]",
+          "already_applied": false
+        },
+        "replayed": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[t0]": "[t0]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-18 commit -m b --changes [tmp]/b.json --parent [a] --advance main",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[b]",
+        "parent": "[a]",
+        "root": "[id3]",
+        "files_changed": 1,
+        "blobs_written": 1,
+        "advanced": {
+          "name": "main",
+          "old": "[a]",
+          "new": "[b]",
+          "already_applied": false
+        },
+        "replayed": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[a]": "[a]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 revert [a] --reason 'a broke the build' --key revert-1",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "revert",
+      "api": 1,
+      "result": {
+        "reverted": [
+          "[a]"
+        ],
+        "land": {
+          "status": "landed",
+          "landed": "[reverted]",
+          "rebased_onto": "[b]",
+          "target": "main",
+          "base": "[a]",
+          "attempts": 1,
+          "relocated": false,
+          "files_changed": 1,
+          "squashed_from": [
+            "[inverse]"
+          ]
+        }
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[a]": "[a]",
+          "main": "[b]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 revert [a] --reason 'a broke the build' --key revert-1",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "revert",
+      "api": 1,
+      "result": {
+        "reverted": [
+          "[a]"
+        ],
+        "land": {
+          "status": "replayed",
+          "landed": "[reverted]",
+          "rebased_onto": "[b]",
+          "target": "main",
+          "base": "[a]",
+          "attempts": 1,
+          "relocated": false,
+          "files_changed": 1,
+          "squashed_from": [
+            "[inverse]"
+          ]
+        }
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[a]": "[a]",
+          "main": "[reverted]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store show [reverted]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "show",
+      "api": 1,
+      "result": {
+        "id": "[reverted]",
+        "seq": 4,
+        "parents": [
+          "[b]"
+        ],
+        "root": "[id4]",
+        "author": {
+          "agent": "agent/worker-17"
+        },
+        "lander": {
+          "agent": "agent/worker-17"
+        },
+        "created_at": "[created_at]",
+        "message": "Revert [a_12]: a\n\na broke the build\n",
+        "land_key": "revert-1",
+        "squashed_from": [
+          "[inverse]"
+        ],
+        "reverts": [
+          "[a]"
+        ],
+        "revert_reason": "a broke the build",
+        "changes": [
+          {
+            "path": "a.txt",
+            "op": "delete"
+          }
+        ],
+        "files_changed": 1,
+        "changes_truncated": false,
+        "metadata": {
+          "agent": "agent/worker-17",
+          "land_key": "revert-1",
+          "lander": "agent/worker-17",
+          "revert_reason": "a broke the build",
+          "reverts": "[a]",
+          "squashed_from": "[inverse]"
+        },
+        "signatures": {
+          "author": {
+            "name": "agent/worker-17",
+            "email": "worker-17@agent.swarmops.local",
+            "secs": "[secs]",
+            "offset_secs": 0
+          },
+          "committer": {
+            "name": "agent/worker-17",
+            "email": "worker-17@agent.swarmops.local",
+            "secs": "[secs]",
+            "offset_secs": 0
+          }
+        }
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[reverted]": "[reverted]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store ls main",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "read_tree",
+      "api": 1,
+      "result": {
+        "entries": [
+          {
+            "name": "b.txt",
+            "kind": "file",
+            "size": 2,
+            "id": "[id5]"
+          },
+          {
+            "name": "f.txt",
+            "kind": "file",
+            "size": 6,
+            "id": "[id6]"
+          }
+        ],
+        "truncated": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[reverted]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-18 commit -m c --changes [tmp]/c.json --parent [reverted] --advance main",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[c]",
+        "parent": "[reverted]",
+        "root": "[id7]",
+        "files_changed": 1,
+        "blobs_written": 1,
+        "advanced": {
+          "name": "main",
+          "old": "[reverted]",
+          "new": "[c]",
+          "already_applied": false
+        },
+        "replayed": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[reverted]": "[reverted]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-18 commit -m later --changes [tmp]/later.json --parent [c] --advance main",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[later]",
+        "parent": "[c]",
+        "root": "[id8]",
+        "files_changed": 1,
+        "blobs_written": 1,
+        "advanced": {
+          "name": "main",
+          "old": "[c]",
+          "new": "[later]",
+          "already_applied": false
+        },
+        "replayed": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c]": "[c]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 revert [c] --reason 'c was wrong'",
+    "exit": 3,
+    "stdout": {
+      "ok": false,
+      "op": "revert",
+      "api": 1,
+      "error": {
+        "code": "E_CONFLICT",
+        "message": "1 path(s) of the change conflict with the target's head [later]: nothing was recorded",
+        "retryable": false,
+        "exit": 3,
+        "details": {
+          "report": {
+            "base": "[c]",
+            "files": [
+              {
+                "base_blob": "[id9]",
+                "hunks": [
+                  {
+                    "base": {
+                      "first": 2,
+                      "last": 2,
+                      "text": "c\n"
+                    },
+                    "id": 0,
+                    "ours": {
+                      "first": 2,
+                      "last": 2,
+                      "text": "2\n"
+                    },
+                    "theirs": {
+                      "first": 2,
+                      "last": 2,
+                      "text": "later\n"
+                    }
+                  }
+                ],
+                "kind": "content",
+                "ours_blob": "[id6]",
+                "path": "f.txt",
+                "theirs_agent": "agent/worker-18",
+                "theirs_blob": "[id10]",
+                "theirs_changeset": "[later]"
+              }
+            ],
+            "kinds": [
+              "content"
+            ],
+            "ours": "[c]",
+            "theirs": "[later]",
+            "truncated": false
+          }
+        },
+        "hint": "swarmops cat [later]:f.txt, then swarmops land [c] --resolve <file> (resolutions over MCP) with each path's resolution and against = [later]"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c]": "[c]",
+          "main": "[later]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m off --changes [tmp]/off.json --parent [t0]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[off]",
+        "parent": "[t0]",
+        "root": "[id11]",
+        "files_changed": 1,
+        "blobs_written": 1,
+        "replayed": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[t0]": "[t0]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 revert [off] --reason r",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "revert",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "[off] is not on the first-parent chain of main: a revert takes back what the target holds",
+        "retryable": false,
+        "exit": 2,
+        "details": {
+          "changeset": "[off]",
+          "reason": "not_on_target",
+          "target": "main"
+        },
+        "hint": "swarmops log main"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[off]": "[off]",
+          "main": "[later]"
+        },
+        "auth": "trust"
+      }
+    }
+  }
+]
