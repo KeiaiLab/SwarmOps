@@ -54,9 +54,10 @@ use swarmops_core::{
     BlobId, Changeset, ChangesetId, EntryTarget, ObjectId, Tree, TreeEntry, TreeId,
 };
 use swarmops_repo::{Derivation, DeriveCtx, DeriveError, Repo, RepoError, RepoRead, Subject};
-use swarmops_store::{DerivedSlot, DerivedStore, ObjectStore, SYSTEM_GIT};
+use swarmops_store::{DerivedSlot, DerivedStore, ObjectStore, SYSTEM_GIT, StoreError};
 
 use crate::memo_key::{MAC_LEN, MEMO_KEY_ID_LEN};
+use crate::phase::{self, Phase, Span};
 use crate::{ExternalIdMismatch, GIT_LOSSY, GIT_OID, GitOid, MemoKey, RawKind};
 use crate::{native, oid, render};
 
@@ -152,6 +153,8 @@ impl Derivation for ExportOid {
         subject: Subject<'_>,
         (): &(),
     ) -> Result<ExportedOid, DeriveError> {
+        // The phase log's derive (the test hooks only): this changeset, and those below it.
+        let _span = Span::start(Phase::ExportDerive);
         let cs = subject.changeset;
         let recorded = native::metadata(cs, GIT_OID);
         let mut parents = Vec::with_capacity(cs.parents.len());
@@ -162,6 +165,7 @@ impl Derivation for ExportOid {
             && let Some(own) = recorded.and_then(lowercase_oid)
             && imported_and_kept(ctx, &cs.parents, &parents)?
         {
+            phase::derived();
             return Ok(ExportedOid {
                 oid: own.0,
                 kept: true,
@@ -173,6 +177,7 @@ impl Derivation for ExportOid {
         let bytes = native::render_commit(subject.id, cs, &parents, tree);
         let oid = hashed(RawKind::Commit, &bytes, ExportOid::NAME, subject.id.0)?;
         let kept = recorded.is_none_or(|hex| hex == oid.to_string().as_bytes());
+        phase::derived();
         Ok(ExportedOid { oid: oid.0, kept })
     }
 }
@@ -493,6 +498,7 @@ fn blob_git_oid(
         return Ok(oid);
     }
     let real = hashed(RawKind::Blob, &objects.blob(blob)?, BLOB_MEMO, blob.0)?;
+    phase::derived();
     memos.computed(objects, (BLOB_MEMO, BLOB_MAC_MEMO), blob.0, real)?;
     cache.insert(blob.0, real);
     Ok(real)
@@ -536,6 +542,7 @@ fn tree_git_oid(
                 let bytes = render::tree_bytes(&done.tree, |entry| done.oid_of(entry))
                     .ok_or_else(|| unknown_variant("EntryTarget"))?;
                 let oid = hashed(RawKind::Tree, &bytes, TREE_MEMO, done.id.0)?;
+                phase::derived();
                 memos.computed(objects, (TREE_MEMO, TREE_MAC_MEMO), done.id.0, oid)?;
                 cache.insert(done.id.0, oid);
                 if stack.is_empty() {
@@ -583,7 +590,7 @@ fn trusted_oid(
     about: ChangesetId,
 ) -> Trusted {
     let id = key.id();
-    let Some(value) = memo.get(&mac_slot(name, subject, &id))? else {
+    let Some(value) = memo_get(memo, &mac_slot(name, subject, &id))? else {
         return Ok(None);
     };
     if value.len() != OID_MAC_MEMO_LEN || !key.checks(name, subject, &value[..20], &value[20..]) {
@@ -611,7 +618,7 @@ fn mac_refused(name: &str, about: ChangesetId, subject: ObjectId, len: usize) ->
 fn memoize_mac(memo: &DerivedStore, name: &str, key: &MemoKey, subject: ObjectId, value: &[u8]) {
     let mut bytes = value.to_vec();
     bytes.extend_from_slice(key.mac(name, subject, value).as_bytes());
-    let _ = memo.put(&mac_slot(name, subject, &key.id()), &bytes);
+    let _ = memo_put(memo, &mac_slot(name, subject, &key.id()), &bytes);
 }
 
 /// Checks the git oid the derived store memoized for `subject` under `name` against `real`, the oid
@@ -707,7 +714,7 @@ fn memoized(
     name: &str,
     subject: ObjectId,
 ) -> Result<Option<GitOid>, RepoError> {
-    let Some(value) = memo.get(&slot(name, subject))? else {
+    let Some(value) = memo_get(memo, &slot(name, subject))? else {
         return Ok(None);
     };
     match <[u8; 20]>::try_from(value.as_slice()) {
@@ -722,7 +729,23 @@ fn memoized(
 /// Memoizes `oid` for `subject` under `name`. A put that fails is dropped: the oid is the same,
 /// and a later call computes it again.
 fn memoize(memo: &DerivedStore, name: &str, subject: ObjectId, oid: GitOid) {
-    let _ = memo.put(&slot(name, subject), &oid.0);
+    let _ = memo_put(memo, &slot(name, subject), &oid.0);
+}
+
+/// `slot`'s value in `memo`, if it holds one: one memo read for the phase log.
+fn memo_get(memo: &DerivedStore, slot: &DerivedSlot<'_>) -> Result<Option<Vec<u8>>, StoreError> {
+    let span = Span::start(Phase::ExportMemo);
+    let value = memo.get(slot);
+    span.end(1);
+    value
+}
+
+/// Puts `value` in `slot` of `memo`: one memo write for the phase log.
+fn memo_put(memo: &DerivedStore, slot: &DerivedSlot<'_>, value: &[u8]) -> Result<bool, StoreError> {
+    let span = Span::start(Phase::ExportMemo);
+    let put = memo.put(slot, value);
+    span.end(1);
+    put
 }
 
 /// The git oid of `bytes`, object `subject` rendered as a git `kind`, for memo `name`.
@@ -1040,7 +1063,7 @@ fn stored_export_oid(
     store: &DerivedStore,
     id: ChangesetId,
 ) -> Result<Option<ExportedOid>, RepoError> {
-    let Some(value) = store.get(&export_slot(id))? else {
+    let Some(value) = memo_get(store, &export_slot(id))? else {
         return Ok(None);
     };
     if value.len() != EXPORT_MEMO_LEN {
@@ -1095,7 +1118,7 @@ fn check_export_memo(
         }),
         Some(_) => Ok(()),
         None => {
-            let _ = memo.put(&export_slot(id), &export_memo(real));
+            let _ = memo_put(memo, &export_slot(id), &export_memo(real));
             Ok(())
         }
     }
@@ -1189,6 +1212,9 @@ impl ExportOids {
         if let Some(&known) = self.known.get(&id) {
             return Ok(known);
         }
+
+        // The phase log's derive (the test hooks only): id, and what is below it.
+        let _span = Span::start(Phase::ExportDerive);
         if let Some(known) = self.trusted(objects.memo(), id)? {
             self.known.insert(id, known);
             return Ok(known);
@@ -1260,6 +1286,7 @@ impl ExportOids {
             value,
             imported: recorded.is_some(),
         };
+        phase::derived();
         match &self.on_memo {
             OnMemo::Check => check_export_memo(objects.memo(), id, value)?,
             OnMemo::Trusted(key) => {
@@ -1280,7 +1307,7 @@ impl ExportOids {
             return Ok(None);
         };
         let key_id = key.id();
-        let Some(bytes) = memo.get(&mac_slot(EXPORT_MAC_MEMO, id.0, &key_id))? else {
+        let Some(bytes) = memo_get(memo, &mac_slot(EXPORT_MAC_MEMO, id.0, &key_id))? else {
             return Ok(None);
         };
         let decoded = decode_export_mac(&bytes).filter(|_| {

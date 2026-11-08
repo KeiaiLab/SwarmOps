@@ -94,14 +94,14 @@ check-slow:
 check-ci-slow:
     PROPTEST_CASES=2000 cargo nextest run --locked --workspace --all-features --run-ignored all -E 'not test(regenerate_golden) and not test(regenerate_git_fixtures) and not test(check_git_fixtures) and not test(thirty_two_processes) and not ({{ ci_perf_cases }})'
 
-# The measurement cases on 12,000 or 13,000 commits or 12,000 changesets: `remote_perf`'s five,
+# The measurement cases on 12,000 or 13,000 commits or 12,000 changesets: `remote_perf`'s six,
 # `serve_perf`'s six, `intake_perf`'s three (`commits_beside_an_import`, its control lane
 # `committers_alone` and `import_memory`), `serve_load`'s two and the workspace's checked land;
 # and G4's landing lanes (`landing::perf::landing_under_load`, four lanes of 2 minutes, about 9 to
 # 11 minutes in all), past half the ci-slow kill. `check-ci-slow` leaves them out,
 # `check-ci-perf` runs them, `check-slow` runs them optimized. swarmops-core's `supply_chain` tests fail a
 # case `check-ci-slow` leaves out that no scheduled job runs optimized and one at a time.
-ci_perf_cases := 'test(=remote_perf::clone_cost_on_12000_commits) | test(=remote_perf::fetch_and_push_scale_with_history) | test(=remote_perf::fetch_phases_scale_with_history) | test(=remote_perf::sync_of_one_land_on_12000_commits) | test(=remote_perf::sync_phases_scale_with_history) | test(/^serve_perf::/) | test(/^intake_perf::/) | test(/^serve_load::/) | test(=landing::perf::landing_under_load) | test(=ws_processes::perf::perf_checked_land_overhead_on_12000_changesets)'
+ci_perf_cases := 'test(=remote_perf::clone_cost_on_12000_commits) | test(=remote_perf::fetch_and_push_scale_with_history) | test(=remote_perf::fetch_phases_scale_with_history) | test(=remote_perf::sync_of_one_land_on_12000_commits) | test(=remote_perf::sync_phases_scale_with_history) | test(=remote_perf::first_sync_phases) | test(/^serve_perf::/) | test(/^intake_perf::/) | test(/^serve_load::/) | test(=landing::perf::landing_under_load) | test(=ws_processes::perf::perf_checked_land_overhead_on_12000_changesets)'
 
 # `ci_perf_cases` optimized and one at a time (`--no-capture`), as `perf` runs them, printing their
 # `remote-perf: `, `serve-perf: `, `intake-perf: `, `serve-load: `, `landing-perf: ` and `ws-perf: `

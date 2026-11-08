@@ -35,6 +35,7 @@ use swarmops_store::{Recovered, SYSTEM_GIT, TailRepair};
 
 use crate::error::{self, Phase};
 use crate::local::{LocalOps, Recording, Resolved};
+use crate::phase::{self, Span};
 
 /// Marks `new` as what `main` was last matched to on `remote`'s `branch` (the sync's floor, the
 /// M16 design §3) when `source_ref` is `main` and `branch` the one the remote follows; a failed
@@ -91,7 +92,11 @@ impl Recording<'_> {
         let remote = self.named_remote(&req.remote)?;
         let mirror = Mirror::open(self.ops.store_path()).map_err(error::mirror_error)?;
         let lock = mirror.lock().map_err(error::mirror_error)?;
-        self.push_locked(&lock, &remote, req)
+        let pushed = self.push_locked(&lock, &remote, req);
+
+        // The phase log's git totals (the test hooks only).
+        phase::write_git();
+        pushed
     }
 
     /// `push` to `remote` under the mirror's `lock`, which the caller holds.
@@ -119,6 +124,7 @@ impl Recording<'_> {
             .map_err(|e| branch_error(e, &branch))?;
 
         // 3. The seen commit's changeset in the store, so that the export recognises it.
+        let span = Span::start(phase::Phase::PushExport);
         if let Some(seen) = seen {
             self.know(&mirror, remote, &branch, seen)?;
         }
@@ -130,6 +136,7 @@ impl Recording<'_> {
         let report = self.export_into(&mirror, &source_ref, &staging, name, &branch)?;
         let new = report.head_oid;
         warnings.extend(report.warnings.iter().cloned());
+        span.end(usize::try_from(report.commits_written).unwrap_or(usize::MAX));
 
         // 5. Nothing to send: no git runs.
         if Some(new) == seen {
@@ -145,6 +152,7 @@ impl Recording<'_> {
         }
 
         // 6. A fast-forward of `seen`, by construction; anything else is a bug, never sent.
+        let span = Span::start(phase::Phase::PushGit);
         let git = GitCli::find().map_err(|e| error::transport_error(e, name, Phase::Push))?;
         let failed = |e| error::transport_error(e, name, Phase::Push);
         if let Some(seen) = seen {
@@ -184,6 +192,7 @@ impl Recording<'_> {
         if let Err(e) = git.gc_auto(mirror.git_dir()) {
             warnings.push(format!("gc_auto_failed: {}", failed(e).message));
         }
+        span.end(1);
         let status = match (outcome, seen) {
             (PushOutcome::AlreadyThere, _) => PushStatus::UpToDate,
             (PushOutcome::Sent, None) => PushStatus::Created,

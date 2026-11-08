@@ -102,6 +102,7 @@ use swarmops_repo::{
 use swarmops_store::{ExternalEntry, FsObjectStore, Recovered, SYSTEM_GIT};
 
 use crate::export_oid::{ExportOids, OnMemo};
+use crate::phase::{Phase, Span};
 use crate::{
     ConvertError, Converted, Converter, ExportReader, GIT_LOSSY, GIT_OID, GitOid, GitSource,
     LossySet, MemoKey, ObjectFormat, OidCache, RawCommit, RawError, RawKind, RawTree, SourceError,
@@ -539,16 +540,19 @@ pub fn import(
     // Nothing is read in the snapshot past here: the frames' own writes follow.
     drop(oids);
 
-    // The frames, each sized from the cost of the last one's commit.
+    // The frames, each sized from the cost of the last one's commit; the phase log's
+    // conversion (the test hooks only), counted in commits.
     let ceiling = req.frame_changesets.clamp(1, MAX_RAW_BATCH);
     let mut rest = walk.unknown.as_slice();
     let mut size = first_frame(ceiling);
+    let span = Span::start(Phase::ImportConvert);
     while !rest.is_empty() {
         let (commits, after) = rest.split_at(size.min(rest.len()));
         let took = run.frame(commits)?;
         size = next_frame(req.step_budget, commits.len(), took, ceiling);
         rest = after;
     }
+    span.end(bytes::to_u64(walk.unknown.len()));
     run.finish(tip, old_head)
 }
 

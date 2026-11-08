@@ -35,6 +35,7 @@ mod gc;
 mod git;
 pub mod identity;
 mod local;
+mod phase;
 mod push;
 mod rebase;
 mod remote;

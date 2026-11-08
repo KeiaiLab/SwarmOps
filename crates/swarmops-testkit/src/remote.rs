@@ -1516,6 +1516,107 @@ pub(crate) fn write_script(path: &Path, script: &str) {
     assert!(status.success(), "write {}: {status}", path.display());
 }
 
+/// A stand-in for git that keeps a ledger of the children it runs (the M18 design §2.2): each
+/// run of it runs the real git and appends `<subcommand> <microseconds>` to the ledger, so that a
+/// measurement splits git's own time from SwarmOps'. Its [`GitLedger::program`] is the value for
+/// [`GIT_ENV`]; the ledger path and the real git are written into the script, as the product
+/// cleans its children's environment.
+///
+/// ```text
+///   so ── SWARMOPS_GIT=<dir>/git ── the stand-in ── <real git> "$@"
+///                                       └── >> ledger: "fetch 81234"
+/// ```
+#[derive(Debug)]
+pub struct GitLedger {
+    /// The stand-in (`git`) and the ledger (`ledger`).
+    dir: TempDir,
+}
+
+/// One child the stand-in ran: git's subcommand (`none` for a run with none) and its wall time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitChild {
+    /// The subcommand: the first argument that is no option, an option's value passed over.
+    pub subcommand: String,
+    /// Its wall time, from the stand-in's start of git to git's exit.
+    pub wall: Duration,
+}
+
+impl GitLedger {
+    /// A stand-in for the git `server` runs, with an empty ledger.
+    pub fn new(server: &GitServer) -> GitLedger {
+        let dir = tempfile::tempdir().expect("a temp dir for the git ledger");
+        let real = absolute_git(server);
+        let ledger = dir.path().join("ledger");
+        fs::write(&ledger, "").expect("an empty git ledger");
+
+        // 1. The subcommand: the first word that is no option, the values of git's global
+        //    options that take one passed over.
+        // 2. git itself, timed in nanoseconds; its status is the stand-in's.
+        let script = format!(
+            "#!/bin/sh
+             sub=none
+             skip=
+             for a in \"$@\"; do
+             \x20 if [ -n \"$skip\" ]; then skip=; continue; fi
+             \x20 case \"$a\" in
+             \x20   -c|-C|--git-dir|--work-tree|--namespace|--exec-path) skip=1 ;;
+             \x20   -*) ;;
+             \x20   *) sub=$a; break ;;
+             \x20 esac
+             done
+             start=$(date +%s%N)
+             {} \"$@\"
+             status=$?
+             end=$(date +%s%N)
+             printf '%s %s\\n' \"$sub\" \"$(( (end - start) / 1000 ))\" >> {}
+             exit $status
+",
+            sh_quote(path_str(&real)),
+            sh_quote(path_str(&ledger)),
+        );
+        write_script(&dir.path().join("git"), &script);
+        GitLedger { dir }
+    }
+
+    /// The stand-in: the value for [`GIT_ENV`].
+    pub fn program(&self) -> PathBuf {
+        self.dir.path().join("git")
+    }
+
+    /// Each child run since the ledger was made or last [`GitLedger::clear`]ed, in the order they
+    /// ended.
+    pub fn children(&self) -> Vec<GitChild> {
+        let ledger = fs::read_to_string(self.dir.path().join("ledger")).expect("the git ledger");
+        ledger
+            .lines()
+            .map(|line| {
+                let (subcommand, us) = line.rsplit_once(' ').expect("`<subcommand> <us>`");
+                let us = us.parse().expect("microseconds");
+                GitChild {
+                    subcommand: subcommand.to_owned(),
+                    wall: Duration::from_micros(us),
+                }
+            })
+            .collect()
+    }
+
+    /// Empties the ledger.
+    pub fn clear(&self) {
+        fs::write(self.dir.path().join("ledger"), "").expect("an empty git ledger");
+    }
+}
+
+/// The absolute path of the git `server` runs: its own, or the first `git` on its `PATH`.
+fn absolute_git(server: &GitServer) -> PathBuf {
+    if server.git.is_absolute() {
+        return server.git.clone();
+    }
+    std::env::split_paths(&server.path)
+        .map(|dir| dir.join(&server.git))
+        .find(|candidate| candidate.is_file())
+        .expect("git on the server's PATH")
+}
+
 /// `mutex`'s guard, a poisoned one taken as is: a test thread's panic is reported on its own.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -2130,5 +2231,43 @@ mod tests {
                 });
             }
         });
+    }
+
+    /// The ledger names each child by its subcommand, past git's global options and their
+    /// values, records a failing child too, and passes git's status on.
+    #[test]
+    fn a_git_ledger_records_each_child() {
+        let server = GitServer::new();
+        let ledger = super::GitLedger::new(&server);
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let git = |args: &[&str]| {
+            std::process::Command::new(ledger.program())
+                .args(args)
+                .current_dir(dir.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .output()
+                .expect("run the stand-in")
+        };
+
+        // 1. A version, an init behind two global options, and a failing rev-parse.
+        assert!(git(&["version"]).status.success());
+        let repo = dir.path().join("r.git");
+        let repo = repo.to_str().expect("UTF-8");
+        assert!(
+            git(&["-c", "init.defaultBranch=main", "init", "--bare", repo])
+                .status
+                .success()
+        );
+        let failed = git(&["--git-dir", repo, "rev-parse", "--verify", "nothing"]);
+        assert!(!failed.status.success(), "git's status passed on");
+
+        // 2. Three children, by subcommand, in order.
+        let named: Vec<String> = (ledger.children().into_iter())
+            .map(|child| child.subcommand)
+            .collect();
+        assert_eq!(named, ["version", "init", "rev-parse"]);
+        ledger.clear();
+        assert_eq!(ledger.children(), Vec::new());
     }
 }

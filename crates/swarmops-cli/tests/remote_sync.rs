@@ -1082,3 +1082,85 @@ fn mcp_sync_and_sync_status() {
         remote.head().as_str()
     );
 }
+
+/// The test hook that names the phase log (`SWARMOPS_TEST_PHASE_LOG`).
+#[cfg(feature = "test-hooks")]
+const PHASE_LOG_ENV: &str = "SWARMOPS_TEST_PHASE_LOG";
+
+/// Every phase the phase log names, in the M18 design §2.2's order.
+#[cfg(feature = "test-hooks")]
+const PHASES: [&str; 10] = [
+    "sync.fetch",
+    "sync.plan",
+    "sync.recognise",
+    "sync.relocate",
+    "sync.move",
+    "push.export",
+    "push.git",
+    "export.derive",
+    "export.memo",
+    "import.convert",
+];
+
+/// The commits the remote's history holds for the phase log's sync.
+#[cfg(feature = "test-hooks")]
+const PHASE_LOG_COMMITS: usize = 20;
+
+/// The phase log's self-check (the M18 design §2.2): one sync of a land onto a remote that moved,
+/// on 20 commits, writes one `<phase> <microseconds> <count>` line for each phase, a sync
+/// without the variable writes nothing, and a push alone writes the push's phases.
+#[cfg(feature = "test-hooks")]
+#[test]
+fn a_phase_log_names_every_phase() {
+    let remote = Remote::new();
+    for n in 2..PHASE_LOG_COMMITS {
+        let path = format!("c{n}.txt");
+        remote.commit(&format!("c{n}"), &[(path.as_str(), "c\n")]);
+    }
+    let store = remote.cloned();
+
+    // 1. Both sides move, and the sync runs with the log.
+    land(&store, "mine.txt", "mine\n");
+    remote.commit("theirs", &[("theirs.txt", "theirs\n")]);
+    let log = store.tmp().join("phases.log");
+    let log_text = path_text(&log);
+    let hook = [(PHASE_LOG_ENV, log_text.as_str())];
+    let synced = sync_with(&remote, &store, &[], &hook).ok();
+    assert_eq!(synced["status"], "pushed", "{synced}");
+
+    // 2. One line a phase, each `<phase> <microseconds> <count>`.
+    let written = fs::read_to_string(&log).expect("the phase log is written");
+    let mut named: Vec<&str> = Vec::new();
+    for line in written.lines() {
+        let fields: Vec<&str> = line.split(' ').collect();
+        assert_eq!(fields.len(), 3, "{line:?} in {written}");
+        assert!(fields[1].parse::<u64>().is_ok(), "{line:?}: microseconds");
+        assert!(fields[2].parse::<u64>().is_ok(), "{line:?}: a count");
+        named.push(fields[0]);
+    }
+    for phase in PHASES {
+        let lines = named.iter().filter(|&&name| name == phase).count();
+        assert_eq!(lines, 1, "{phase} once in {written}");
+    }
+    assert_eq!(named.len(), PHASES.len(), "no other line: {written}");
+
+    // 3. Both sides move again; a sync without the variable appends nothing.
+    land(&store, "mine2.txt", "mine 2\n");
+    remote.commit("theirs 2", &[("theirs2.txt", "theirs 2\n")]);
+    let again = sync(&store, &[]).ok();
+    assert_eq!(again["status"], "pushed", "{again}");
+    let after = fs::read_to_string(&log).expect("the phase log");
+    assert_eq!(after, written, "no line without the variable");
+
+    // 4. A push alone: its two phases and the export's, once each.
+    land(&store, "mine3.txt", "mine 3\n");
+    let pushed_log = store.tmp().join("push-phases.log");
+    let pushed_text = path_text(&pushed_log);
+    let line = ["--repo", store.path(), "--as", AGENT, "push", ORIGIN];
+    let hook = [(PHASE_LOG_ENV, pushed_text.as_str())];
+    run(&line, &remote.vars(&hook)).ok();
+    let pushed = fs::read_to_string(&pushed_log).expect("the push's phase log");
+    let named: Vec<&str> = pushed.lines().filter_map(|l| l.split(' ').next()).collect();
+    let expected = ["push.export", "push.git", "export.derive", "export.memo"];
+    assert_eq!(named, expected, "{pushed}");
+}

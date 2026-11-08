@@ -65,6 +65,7 @@ pub mod memo_key;
 pub mod mirror;
 pub mod native;
 pub mod oid;
+mod phase;
 pub mod raw;
 pub mod render;
 pub mod serve;
@@ -89,6 +90,9 @@ pub use lossy::{LossyClass, LossySet};
 pub use memo_key::{MEMO_KEY_LEN, MemoKey};
 pub use native::{TRAILERS, export_message, render_commit};
 pub use oid::{GitOid, ObjectFormat, ParseGitOidError, RawKind, git_hash};
+/// The phase log's git totals written (the test hooks only, the M18 design §2.2).
+#[cfg(feature = "test-hooks")]
+pub use phase::write_phases;
 pub use raw::{RawCommit, RawError, RawIdent, RawTree, RawTreeEntry};
 pub use render::{commit_bytes, tree_bytes};
 pub use sink::{BranchUpdate, GitSink, SinkError, Stored};

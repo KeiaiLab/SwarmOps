@@ -51,6 +51,7 @@ use swarmops_store::SYSTEM_GIT;
 
 use crate::error;
 use crate::local::{LocalOps, Recording, Resolved};
+use crate::phase::{self, Phase, Span};
 use crate::push::mark_published;
 
 /// The store ref a sync lands onto the remote's head and publishes.
@@ -107,7 +108,11 @@ impl Recording<'_> {
             landed: None,
             warnings: Vec::new(),
         };
-        syncing.run(max_attempts)
+        let synced = syncing.run(max_attempts);
+
+        // 3. The phase log's git totals (the test hooks only).
+        phase::write_git();
+        synced
     }
 
     /// `sync status`: how `main` and the remote's followed branch stand, from the store and the
@@ -366,8 +371,10 @@ impl Syncing<'_, '_> {
     /// The fetch's locked form; the followed branch's head and its changeset, if the remote has
     /// the branch.
     fn fetch(&mut self) -> Result<Option<(GitOid, ChangesetId)>, OpError> {
+        let span = Span::start(Phase::SyncFetch);
         let fetched = self.rec.fetch_locked(self.lock, self.remote)?;
         self.warnings.extend(fetched.warnings.unwrap_or_default());
+        span.end(usize::try_from(fetched.imported).unwrap_or(usize::MAX));
 
         // What the fetch left in the tracking ref, as the store knows it.
         let seen = self
@@ -408,7 +415,9 @@ impl Syncing<'_, '_> {
         };
 
         // 3. Nothing unpublished: up to date, or a fast-forward to the remote's head.
+        let span = Span::start(Phase::SyncPlan);
         let plan = engine::plan(&self.rec.ops.repo, main, theirs).map_err(|e| self.engine(e))?;
+        span.end(plan.unpublished.len());
         self.above_floor(main, theirs)?;
         if plan.unpublished.is_empty() {
             if main == theirs {
@@ -525,14 +534,18 @@ impl Syncing<'_, '_> {
         let repo = &self.rec.ops.repo;
 
         // 1. What the remote holds.
+        let span = Span::start(Phase::SyncRecognise);
         let recognised = engine::recognise(repo, plan, theirs).map_err(|e| self.engine(e))?;
+        span.end(recognised.dropped.len());
         let mut dropped: Vec<DroppedChange> = (recognised.dropped.iter())
             .map(|&(id, by)| Ok(held(id, drop_reason(by)?)))
             .collect::<Result<_, OpError>>()?;
 
         // 2. The rest, landed in order; a change that merges as none is dropped too.
+        let span = Span::start(Phase::SyncRelocate);
         let relocated = engine::relocate(repo, &recognised.to_land, theirs, &self.lander)
             .map_err(|e| self.engine(e))?;
+        span.end(relocated.landed.len());
         dropped.extend((relocated.no_ops.iter()).map(|&id| held(id, DropReason::NoOp)));
         Ok(Landed {
             head: relocated.head,
@@ -545,12 +558,14 @@ impl Syncing<'_, '_> {
     /// recorded in the journal and the op log as `ref set` records it; false when `main` named
     /// something else.
     fn move_main(&mut self, old: Option<ChangesetId>, new: ChangesetId) -> Result<bool, OpError> {
+        let span = Span::start(Phase::SyncMove);
         let outcome = self
             .rec
             .ops
             .repo
             .cas_ref(MAIN, old, Some(new), self.who.agent())
             .map_err(error::op)?;
+        span.end(1);
         self.rec.resolved.record_recovered(outcome.recovered);
         self.warnings.extend(outcome.warnings);
 

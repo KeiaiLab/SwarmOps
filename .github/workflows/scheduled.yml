@@ -495,8 +495,10 @@ jobs:
     # (`first_clone_after_import`), and M17-8b `serve_load`'s two and G4's landing lanes
     # (`landing::perf::landing_under_load`, moved here from the weekly slow suite), whose times
     # `just perf` has not measured yet, so the value waits for that run: it is then recomputed by
-    # this rule from the new sum, never set by a guess.
-    timeout-minutes: 320
+    # this rule from the new sum, never set by a guess. M18-1 added `remote_perf::first_sync_phases`,
+    # measured at 1,497 s (docs/perf.md, "M18 first sync profile"): 60 + twice 9,038 s (301
+    # minutes) + 5 = 366, rounded up to 370.
+    timeout-minutes: 370
     env:
       CARGO_TERM_COLOR: always
       HEAVY_LOCK: /data/swarmops/locks/heavy.lock

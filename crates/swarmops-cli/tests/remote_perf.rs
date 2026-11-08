@@ -633,3 +633,223 @@ fn sync_phases_scale_with_history() {
         );
     }
 }
+
+/// The first-sync profile's helpers: they read the phase log, which only a build with the test
+/// hooks writes.
+#[cfg(feature = "test-hooks")]
+mod profile {
+    use std::path::Path;
+
+    use swarmops_testkit::remote::GitLedger;
+
+    use super::{AGENT, ORIGIN, Remote, SLOW_RUN, land, text, timed};
+    use crate::support::{Store, run_within};
+
+    /// The variable that names the phase log (the test hooks only).
+    const PHASE_LOG_ENV: &str = "SWARMOPS_TEST_PHASE_LOG";
+
+    /// The variable that names the memo keys' directory (the CLI's `context::MEMO_KEY_DIR_ENV`).
+    const MEMO_KEY_DIR_ENV: &str = "SWARMOPS_MEMO_KEY_DIR";
+
+    /// The memo-key derivation's directory in a store: present once an export or an import wrote a
+    /// memo under the key.
+    const KEYED_MEMOS: &str = "meta/derived/git_oid_mac";
+
+    /// Whether the store's commands find a memo key.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(super) enum KeyMode {
+        /// [`MEMO_KEY_DIR_ENV`] names a fresh directory, where the first command makes the key.
+        Present,
+        /// No key directory and no state directory: [`MEMO_KEY_DIR_ENV`], `HOME` and
+        /// `XDG_STATE_HOME` empty, which the CLI reads as unset, so it finds no key.
+        Absent,
+    }
+
+    impl KeyMode {
+        /// The mode as the case's lines print it.
+        pub(super) fn label(self) -> &'static str {
+            match self {
+                KeyMode::Present => "key",
+                KeyMode::Absent => "nokey",
+            }
+        }
+    }
+
+    /// One phase of a sync, as the phase log and the git ledger give it.
+    pub(super) struct Timed {
+        /// The phase log's name, or `git.<subcommand>` for git's children.
+        pub(super) phase: String,
+        /// Its time.
+        pub(super) ms: f64,
+        /// Its count (the phase log's; git's children by runs).
+        pub(super) count: u64,
+    }
+
+    /// The phase log of `log`: its lines added up by phase, in their first line's order.
+    fn phase_lines(log: &Path) -> Vec<Timed> {
+        let written = std::fs::read_to_string(log).expect("the phase log");
+        let mut phases: Vec<Timed> = Vec::new();
+        for line in written.lines() {
+            let fields: Vec<&str> = line.split(' ').collect();
+            assert_eq!(fields.len(), 3, "a phase line: {line:?}");
+            let us: f64 = fields[1].parse().expect("microseconds");
+            let count: u64 = fields[2].parse().expect("a count");
+
+            // A phase met again (a second attempt) adds to its first line.
+            match phases.iter_mut().find(|timed| timed.phase == fields[0]) {
+                Some(timed) => {
+                    timed.ms += us / 1_000.0;
+                    timed.count += count;
+                }
+                None => phases.push(Timed {
+                    phase: fields[0].to_owned(),
+                    ms: us / 1_000.0,
+                    count,
+                }),
+            }
+        }
+        phases
+    }
+
+    /// git's children of `ledger`, added up by subcommand, in their first run's order.
+    fn git_lines(ledger: &GitLedger) -> Vec<Timed> {
+        let mut children: Vec<Timed> = Vec::new();
+        for child in ledger.children() {
+            let phase = format!("git.{}", child.subcommand);
+            let ms = child.wall.as_secs_f64() * 1_000.0;
+            match children.iter_mut().find(|timed| timed.phase == phase) {
+                Some(timed) => {
+                    timed.ms += ms;
+                    timed.count += 1;
+                }
+                None => children.push(Timed {
+                    phase,
+                    ms,
+                    count: 1,
+                }),
+            }
+        }
+        children
+    }
+
+    /// A sync of one land after the remote gained commit `n`, on `store`, with `env`: timed by the
+    /// client, with the phase log and the git ledger; its lines, `whole` first.
+    fn profiled_sync(
+        remote: &Remote,
+        ledger: &GitLedger,
+        store: &Store,
+        env: &[(&str, &str)],
+        n: usize,
+    ) -> Vec<Timed> {
+        // 1. Both sides move.
+        remote.commit(n);
+        land(store, &format!("local{n}.txt"), &format!("local {n}\n"));
+
+        // 2. The sync, with an empty ledger and a fresh log.
+        ledger.clear();
+        let log = store.tmp().join(format!("phases-{n}.log"));
+        let log_text = text(&log);
+        let mut hooked = env.to_vec();
+        hooked.push((PHASE_LOG_ENV, log_text.as_str()));
+        let line = ["--repo", store.path(), "--as", AGENT, "sync", ORIGIN];
+        let mut synced = None;
+        let took =
+            timed(|| synced = Some(run_within(&line, &vars_with(remote, &hooked), SLOW_RUN)));
+        let synced = synced.expect("ran").ok();
+        assert_eq!(synced["status"], "pushed", "{synced}");
+
+        // 3. Its lines: the client's time, the phases, git's children.
+        let whole = Timed {
+            phase: "whole".to_owned(),
+            ms: took.as_secs_f64() * 1_000.0,
+            count: 1,
+        };
+        let mut lines = vec![whole];
+        lines.extend(phase_lines(&log));
+        lines.extend(git_lines(ledger));
+        lines
+    }
+
+    /// The first sync after a clone of `commits` commits with the key `mode`, then a second sync on
+    /// the same store: each sync's lines.
+    pub(super) fn first_sync(commits: usize, mode: KeyMode) -> (Vec<Timed>, Vec<Timed>) {
+        let remote = Remote::with_history(commits);
+        let ledger = GitLedger::new(&remote.server);
+        let keys = tempfile::tempdir().expect("a memo keys' directory");
+        let program = text(&ledger.program());
+        let keys_text = text(keys.path());
+
+        // 1. The store's variables: the ledger's git, and the key mode.
+        let mut env = vec![("SWARMOPS_GIT", program.as_str())];
+        match mode {
+            KeyMode::Present => env.push((MEMO_KEY_DIR_ENV, keys_text.as_str())),
+            KeyMode::Absent => {
+                env.extend([(MEMO_KEY_DIR_ENV, ""), ("HOME", ""), ("XDG_STATE_HOME", "")]);
+            }
+        }
+
+        // 2. The clone, as `Remote::cloned` makes one, every command in the mode.
+        let store = Store::init().with_env(&vars_with(&remote, &env));
+        let url = remote.url();
+        store
+            .read(&["remote", "add", ORIGIN, url.as_str(), "--branch", "main"])
+            .ok();
+        let line = ["--repo", store.path(), "--as", AGENT, "fetch", ORIGIN];
+        let fetched = run_within(&line, &vars_with(&remote, &env), SLOW_RUN).ok();
+        let head = fetched["head"]["changeset"].as_str().expect("a head");
+        store
+            .run_as(AGENT, &["ref", "set", "main", head, "--create"], &[])
+            .ok();
+
+        // 3. The first sync, then a second.
+        let first = profiled_sync(&remote, &ledger, &store, &env, 0);
+        let second = profiled_sync(&remote, &ledger, &store, &env, 1);
+
+        // 4. The mode held: memos under a key exist exactly when a key was found.
+        let keyed = Path::new(store.path()).join(KEYED_MEMOS).exists();
+        assert_eq!(
+            keyed,
+            mode == KeyMode::Present,
+            "keyed memos in {}",
+            mode.label()
+        );
+        (first, second)
+    }
+
+    /// `remote`'s variables, then `extra`, which a later reading takes over.
+    fn vars_with<'a>(remote: &'a Remote, extra: &[(&'a str, &'a str)]) -> Vec<(&'a str, &'a str)> {
+        let mut vars = remote.vars();
+        vars.extend_from_slice(extra);
+        vars
+    }
+}
+
+/// The first-sync profile (the M18 design §2.2): on 1,000 and 12,000 commits, with the memo key
+/// present and absent, a clone, a land onto a remote that gained a commit, and one whole `sync`,
+/// timed by the client, by phase (`SWARMOPS_TEST_PHASE_LOG`, which needs the test hooks) and by
+/// git child (the test kit's ledger); then a second sync on the same store. One
+/// `remote-perf: first sync <commits> <key|nokey> <phase> <ms>` line per phase, and the same as
+/// `second sync`.
+#[cfg(feature = "test-hooks")]
+#[test]
+#[ignore = "slow, ~25 min: imports 26,000 commits, four profiled clones, run by `just perf`"]
+fn first_sync_phases() {
+    use profile::KeyMode;
+
+    for commits in [SHORT, LONG] {
+        for mode in [KeyMode::Present, KeyMode::Absent] {
+            let (first, second) = profile::first_sync(commits, mode);
+            for (which, lines) in [("first", &first), ("second", &second)] {
+                for timed in lines {
+                    println!(
+                        "remote-perf: {which} sync {commits} {} {} {:.1} (count {})",
+                        mode.label(),
+                        timed.phase,
+                        timed.ms,
+                        timed.count
+                    );
+                }
+            }
+        }
+    }
+}
