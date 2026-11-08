@@ -303,15 +303,23 @@ fn peak_kib(pid: u32) -> Option<u64> {
 /// ```text
 ///   /proc/locks, every 1 ms:  "21: FLOCK  ADVISORY  WRITE 3182874 09:00:211833246 0 EOF"
 ///                                                           pid   dev     inode of meta/lock
-///   → per pid, the intervals it was seen holding: [first sample seen, first sample not seen)
+///   → per pid, the intervals it was seen holding: [after the last read not seeing it,
+///                                                    after the first read no longer seeing it)
 /// ```
 ///
 /// A line with `->` is a waiter, not a holder. The sampler never opens the lock file for a lock,
-/// so it adds no demand. An interval runs to the first sample that no longer sees it, so a hold
-/// is never undercounted: the figures are upper bounds, to about a sampling period each.
+/// so it adds no demand. Each end of an interval is stamped after a read, never before one, as
+/// the sampler can be preempted between a stamp and its read; so a hold is never undercounted:
+/// the figures are upper bounds, to about a sampling period each.
+///
+/// One `read(2)` of `/proc/locks` returns a page at most, and the next read resumes by list
+/// position: a lock released meanwhile earlier in the list shifts it, and the line at the page
+/// boundary is skipped. So a miss is confirmed by immediate re-reads before it ends or delays an
+/// interval, and a failed read tells nothing.
 mod holders {
     use std::collections::BTreeMap;
     use std::fs;
+    use std::io;
     use std::os::unix::fs::MetadataExt as _;
     use std::path::Path;
     use std::sync::Arc;
@@ -321,6 +329,9 @@ mod holders {
 
     /// How often the sampler reads `/proc/locks`.
     const EVERY: Duration = Duration::from_millis(1);
+
+    /// How many immediate re-reads must also miss a holder before nobody is taken to hold.
+    const RECHECKS: usize = 2;
 
     /// One pid's intervals, oldest first, none overlapping.
     type Spans = Vec<(Instant, Instant)>;
@@ -400,29 +411,51 @@ mod holders {
         let mut holds: BTreeMap<u32, Spans> = BTreeMap::new();
         let mut key: Option<String> = None;
         let mut open: Option<(u32, Instant)> = None;
+        let mut last = Instant::now();
         while !stop.load(Ordering::Relaxed) {
-            let now = Instant::now();
-
             // 1. The lock file's `/proc/locks` key, once the file exists.
             if key.is_none() {
                 key = lock_key(lock);
             }
 
-            // 2. Who holds it now; an interval under way ends when its pid is no longer seen.
-            let holder = key.as_deref().and_then(holder_of);
+            // 2. Who holds it now; a failed read skips the sample.
+            let Some(key) = key.as_deref() else {
+                last = Instant::now();
+                thread::sleep(EVERY);
+                continue;
+            };
+            let Ok(mut holder) = holder_of(key) else {
+                thread::sleep(EVERY);
+                continue;
+            };
+
+            // 3. A miss may be a torn read: re-read before taking it as nobody holding.
+            if holder.is_none() {
+                for _ in 0..RECHECKS {
+                    if let Ok(Some(seen)) = holder_of(key) {
+                        holder = Some(seen);
+                        break;
+                    }
+                }
+            }
+
+            // 4. An interval under way ends, after the reads, when its pid is no longer seen.
             if let Some((pid, since)) = open
                 && holder != Some(pid)
             {
-                holds.entry(pid).or_default().push((since, now));
+                holds.entry(pid).or_default().push((since, Instant::now()));
                 open = None;
             }
             if open.is_none() {
-                open = holder.map(|pid| (pid, now));
+                open = holder.map(|pid| (pid, last));
             }
+
+            // 5. The next interval can start no earlier than this sample's reads.
+            last = Instant::now();
             thread::sleep(EVERY);
         }
 
-        // 3. The interval under way ends at the stop.
+        // 6. The interval under way ends at the stop.
         if let Some((pid, since)) = open {
             holds.entry(pid).or_default().push((since, Instant::now()));
         }
@@ -440,9 +473,9 @@ mod holders {
     }
 
     /// The pid of the `FLOCK` holder of the file `key` names, if any.
-    fn holder_of(key: &str) -> Option<u32> {
-        let locks = fs::read_to_string("/proc/locks").ok()?;
-        locks.lines().find_map(|line| {
+    fn holder_of(key: &str) -> io::Result<Option<u32>> {
+        let locks = fs::read_to_string("/proc/locks")?;
+        let holder = locks.lines().find_map(|line| {
             // `<id>: FLOCK ADVISORY WRITE <pid> <key> 0 EOF`; a waiter has `->` after the id.
             let words: Vec<_> = line.split_whitespace().collect();
             let [_, "FLOCK", _, _, pid, at, ..] = words.as_slice() else {
@@ -452,7 +485,8 @@ mod holders {
                 return None;
             }
             pid.parse().ok()
-        })
+        });
+        Ok(holder)
     }
 }
 
@@ -594,6 +628,12 @@ mod tests {
         assert_eq!(holders.holders(), vec![pid]);
         assert_eq!(holders.longest(pid).1, 1);
         assert_eq!(holders.held_by(pid, before, from), Duration::ZERO);
+
+        // 3. A window that cuts the hold counts only its own part (judge S1, issue #29).
+        let mid = from + (to - from) / 2;
+        let first_half = holders.held_by(pid, from, mid);
+        assert!(first_half <= mid - from, "{first_half:?}");
+        assert_eq!(first_half + holders.held_by(pid, mid, to), held);
     }
 
     #[test]
