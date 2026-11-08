@@ -9,6 +9,9 @@
 //!                                                                     reaped before each request
 //! ```
 //!
+//! Before the spawn, `serve.lock` is tried once without waiting (the M17 closure design §3.4):
+//! held, `git/serve.dirty` is marked for its holder, which runs again, and nothing is spawned.
+//!
 //! The run is its own process group, its stdin, stdout and stderr null, and nobody waits for it.
 //! A spawn that fails is ignored, and so is the run's own failure: the next connection refreshes
 //! as before. Neither changes the operation's envelope or exit code.
@@ -16,6 +19,9 @@
 use std::os::unix::process::CommandExt as _;
 use std::path::Path;
 use std::process::{Child, Command as Process, Stdio};
+
+use camino::Utf8Path;
+use swarmops_ops::serve::prepare::{Claim, claim, serve_repo};
 
 use crate::cli::{Command, GitCommand};
 
@@ -98,10 +104,19 @@ pub(crate) fn seed_of(command: &Command) -> Option<String> {
 }
 
 /// Starts the preparation `after` names, detached; the child, which nobody needs to wait for.
-/// `None` when the store holds no `access.toml`, or the spawn failed.
+/// `None` when the store holds no `access.toml`, its `serve.lock` is held (the mark is left for
+/// the holder), or the spawn failed.
 pub(crate) fn spawn(after: &After) -> Option<Child> {
     // 1. Only a served store.
     if !Path::new(&after.store).join(ACCESS_FILE).is_file() {
+        return None;
+    }
+
+    // 1b. One run per free serve.lock: a held one is marked for its holder. Any other outcome
+    //     spawns as before, since the run itself marks or prepares.
+    if let Ok(repo) = serve_repo(Utf8Path::new(&after.store))
+        && matches!(claim(&repo), Ok(Claim::Marked))
+    {
         return None;
     }
 
@@ -127,7 +142,37 @@ pub(crate) fn spawn(after: &After) -> Option<Child> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::time::Duration;
+
+    use swarmops_git::serve::repo::ServeRepo;
+
     use super::*;
+
+    /// The mark a preparation that found `serve.lock` held leaves, in the store's root.
+    const SERVE_DIRTY: &str = "git/serve.dirty";
+
+    /// A held `serve.lock` spawns nothing and leaves the mark for its holder (closure design
+    /// §3.4, I6); a free one spawns the run.
+    #[test]
+    fn a_held_lock_is_marked_not_spawned() {
+        // 1. A served store: `access.toml` and its serving repository.
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let root = Utf8Path::from_path(dir.path()).expect("a UTF-8 temp dir");
+        fs::write(root.join(ACCESS_FILE), "").expect("write access.toml");
+        let repo = ServeRepo::open(root).expect("open serve.git");
+        let after = After::new(root.to_string(), None);
+
+        // 2. Held: no child, the mark there.
+        let held = repo.lock(Duration::ZERO).expect("take serve.lock");
+        assert!(spawn(&after).is_none(), "a held serve.lock spawned a run");
+        assert!(root.join(SERVE_DIRTY).is_file(), "no serve.dirty left");
+        drop(held);
+
+        // 3. Free: a child, reaped here (the test harness rejects its arguments and ends).
+        let mut child = spawn(&after).expect("a free serve.lock spawned no run");
+        child.wait().expect("reap the run");
+    }
 
     /// The direction design's list, with `git import` and `ws land` (the M17 design §10, D3);
     /// a commit only with `--advance`, and no read.
