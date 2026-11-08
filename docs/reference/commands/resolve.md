@@ -50,14 +50,14 @@ swarmops --repo [tmp]/store resolve main
   "op": "resolve_rev",
   "api": 1,
   "result": {
-    "id": "[c2]",
+    "id": "[t0]",
     "kind": "ref"
   },
   "meta": {
     "repo": "[tmp]/store",
     "elapsed_ms": "[elapsed_ms]",
     "resolved": {
-      "main": "[c2]"
+      "main": "[t0]"
     },
     "auth": "trust"
   }

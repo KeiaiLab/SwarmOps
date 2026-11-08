@@ -56,7 +56,7 @@ type Startup<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)]);
 /// The tools, one per `StoreOps` operation and then one per client-side operation of the git
 /// remotes (M13), in the order `tools/list` gives them, each with the request type its arguments
 /// are.
-const TOOLS: [(&str, &str); 41] = [
+const TOOLS: [(&str, &str); 42] = [
     ("repo_info", "InfoReq"),
     ("resolve_rev", "ResolveRevReq"),
     ("read_file", "ReadFileReq"),
@@ -75,6 +75,7 @@ const TOOLS: [(&str, &str); 41] = [
     ("commit", "CommitReq"),
     ("land", "LandReq"),
     ("revert", "RevertReq"),
+    ("land_check", "LandCheckReq"),
     ("rebase", "RebaseReq"),
     ("blob_put", "BlobPutReq"),
     ("blob_has", "BlobHasReq"),
@@ -374,7 +375,7 @@ fn mcp_tool_calls_golden() {
     golden.ok("read_file", json!({"rev": "main", "path": "README.md"}));
     golden.ok("read_tree", json!({"rev": "main"}));
 
-    // 3. A change on c1, a publish on main since, and the land of the change.
+    // 3. A change on c1, a publish on main since, and the land of the change, checked first.
     let change = json!({
         "message": "change f",
         "parent": c1,
@@ -392,6 +393,7 @@ fn mcp_tool_calls_golden() {
     let theirs = golden.name_at(&theirs, "/result/changeset", "theirs");
     let rebased = golden.ok("rebase", json!({"head": head}));
     golden.name_at(&rebased, "/result/changeset", "rebased");
+    golden.ok("land_check", json!({"changes": [{"head": head}]}));
     let landed = golden.ok("land", json!({"head": head, "idempotency_key": "land-7"}));
     let landed = golden.name_at(&landed, "/result/landed", "landed");
 

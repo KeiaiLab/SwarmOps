@@ -51,6 +51,10 @@ pub use ops::{
     GcCount, GcReq, GcResp, RefKind, RepairAction, RepairReq, RepairResp, UpgradeReq, UpgradeResp,
     VERIFY_MAX_FINDINGS, VerifySummary,
 };
+pub use ops::{
+    ItemOutcome, LandCheckItemOut, LandCheckReq, LandCheckResp, LandItemIn, PathChange,
+    PathSummaryOut,
+};
 pub use ops::{RefLogEntryOut, RefLogPage, RefLogReq};
 pub use ops::{ResolutionInput, ResolutionsInput, Side};
 pub use ops::{ResolveRevReq, ResolvedRev, RevKind};

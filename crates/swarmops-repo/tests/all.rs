@@ -13,6 +13,7 @@ mod gc;
 mod history;
 mod land;
 mod land_batch;
+mod land_check;
 mod land_detached;
 mod land_expect;
 mod merge;

@@ -26,6 +26,7 @@ use swarmops_api::{BlobGetReq, BlobGetResp, RebaseReq, RebaseResp};
 use swarmops_api::{BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp};
 use swarmops_api::{ContentInput, ModeInput, ResolutionInput, ResolutionsInput};
 use swarmops_api::{GcReq, GcResp, RepairReq, RepairResp, UpgradeReq, UpgradeResp};
+use swarmops_api::{ItemOutcome, LandCheckItemOut, LandCheckReq, LandCheckResp, PathSummaryOut};
 use swarmops_api::{LandReq, LandResp, LandStatus, MAX_LAND_ATTEMPTS};
 use swarmops_api::{RefLogEntryOut, RefLogPage, RefLogReq};
 use swarmops_api::{ResolveRevReq, ResolvedRev, RevKind};
@@ -37,7 +38,9 @@ use swarmops_core::{
 };
 use swarmops_git::MemoKey;
 use swarmops_repo::LandRequest;
-use swarmops_repo::land::Gated;
+use swarmops_repo::land::{
+    Gated, LandCheckRequest, MAX_GROUP_CHANGES, More, PathChange, PlanItem, PlanOutcome, Planned,
+};
 use swarmops_repo::merge::line_diff::{self, DiffLine, UnifiedHunk};
 use swarmops_repo::merge::tree_diff::{ChangeKind, Leaf, PathFilter, TreeChange};
 use swarmops_repo::revert::{REVERT_REASON, REVERTS};
@@ -175,6 +178,11 @@ const MAX_LAND_KEY: usize = 64;
 ///   first-parent chain is `E_INVALID_ARG` (`details.reason` `not_on_target`), a range of more
 ///   than 256 changesets `E_TOO_LARGE` (`details.max_changesets`), and one whose changes cancel
 ///   out, or that the target took back already, `E_NOTHING_TO_LAND`.
+/// - `land_check` plans 1 to 32 changes, in order, onto `target`'s head in one snapshot, as
+///   `land` would land them one after another (the M18 design §6.2), and writes nothing: none is
+///   `E_INVALID_ARG` (`details.changes`), more `E_TOO_LARGE` (`details.max_changes`), and a key
+///   given twice `E_INVALID_ARG` (`details.idempotency_key`), each checked before anything is
+///   resolved; a change the land would refuse fails the whole check with the land's error.
 /// - `blob_put` stores its content as a blob, by the change list's rules for content (`blob`
 ///   content aside, which names a blob already stored), durable when it returns, and says
 ///   whether it placed it (`written`). It needs an identity, which it records nowhere.
@@ -1548,6 +1556,118 @@ impl<'a> Recording<'a> {
     }
 }
 
+impl Recording<'_> {
+    /// [`StoreOps::land_check`] (the M18 design §6.2): the request's own rules, its revisions
+    /// resolved in one snapshot, then [`swarmops_repo::Repo::land_check`], each conflict's
+    /// report within `max_conflict_bytes`.
+    fn land_check_with(&self, req: LandCheckReq) -> Result<LandCheckResp, OpError> {
+        let LandCheckReq {
+            target,
+            changes,
+            max_conflict_bytes,
+            ..
+        } = req;
+
+        // 1. The request's own rules, before anything is resolved or read.
+        check_ref_use(&target, RefUse::Publish)?;
+        group_size(changes.len())?;
+        let mut keys = BTreeSet::new();
+        for key in changes.iter().filter_map(|c| c.idempotency_key.as_deref()) {
+            land_key(key)?;
+            if !keys.insert(key) {
+                return Err(error::error(
+                    ErrorCode::InvalidArg,
+                    format!("idempotency_key {key:?} is given to two changes"),
+                )
+                .with_details(error::details([("idempotency_key", key.into())])));
+            }
+        }
+
+        // 2. Every head and base, and the target, resolved in one snapshot.
+        let read = self.snapshot()?;
+        let mut items = Vec::with_capacity(changes.len());
+        for change in changes {
+            let mut item = PlanItem::new(self.resolve(&read, &change.head)?);
+            item.base = (change.base.as_ref())
+                .map(|base| self.resolve(&read, base))
+                .transpose()?;
+            item.message = change.message.map(String::into_bytes);
+            item.key = change.idempotency_key;
+            items.push(item);
+        }
+        self.head(&read, &target)?;
+        drop(read);
+
+        // 3. The check, each item as the API says it.
+        let check = LandCheckRequest::new(&target, items);
+        let checked = (self.ops.repo.land_check(check)).map_err(error::op)?;
+        let items = (checked.items.into_iter())
+            .map(|planned| check_item(planned, max_conflict_bytes))
+            .collect::<Result<Vec<_>, OpError>>()?;
+        Ok(LandCheckResp::new(checked.onto.to_string(), items))
+    }
+}
+
+/// `E_INVALID_ARG` for a `land_check` of no change, `E_TOO_LARGE` for one of more than
+/// [`MAX_GROUP_CHANGES`].
+fn group_size(changes: usize) -> Result<(), OpError> {
+    if changes == 0 {
+        return Err(error::error(
+            ErrorCode::InvalidArg,
+            "a land check needs at least one change",
+        )
+        .with_details(error::details([("changes", 0_u64.into())])));
+    }
+    if changes > MAX_GROUP_CHANGES {
+        return Err(error::error(
+            ErrorCode::TooLarge,
+            format!("a land check takes at most {MAX_GROUP_CHANGES} changes, not {changes}"),
+        )
+        .with_details(error::details([(
+            "max_changes",
+            bytes::to_u64(MAX_GROUP_CHANGES).into(),
+        )]))
+        .with_hint("check the changes in batches of at most 32"));
+    }
+    Ok(())
+}
+
+/// One item's plan as `land_check` answers it, a conflict's report within `max_bytes`.
+fn check_item(planned: Planned, max_bytes: u64) -> Result<LandCheckItemOut, OpError> {
+    let head = planned.head.to_string();
+    let out = match planned.outcome {
+        PlanOutcome::Clean(clean) => {
+            let mut out = LandCheckItemOut::new(head, ItemOutcome::Clean);
+            out.root = Some(clean.root.to_string());
+            out.paths = (clean.paths.iter())
+                .map(|(path, change)| Ok(PathSummaryOut::new(path.as_str(), path_change(*change)?)))
+                .collect::<Result<Vec<_>, OpError>>()?;
+            out.paths_truncated = clean.paths_more == More::Yes;
+            out
+        }
+        PlanOutcome::Replayed(_) => LandCheckItemOut::new(head, ItemOutcome::Replayed),
+        PlanOutcome::NothingToLand(_) => LandCheckItemOut::new(head, ItemOutcome::NothingToLand),
+        PlanOutcome::Conflict(conflicts) => {
+            let mut out = LandCheckItemOut::new(head, ItemOutcome::Conflict);
+            out.report = Some(crate::conflict::report(&conflicts, max_bytes)?);
+            out
+        }
+        _ => return Err(error::unknown_variant("PlanOutcome")),
+    };
+    Ok(out)
+}
+
+/// A planned path's change as the API names it.
+fn path_change(change: PathChange) -> Result<swarmops_api::PathChange, OpError> {
+    Ok(match change {
+        PathChange::Added => swarmops_api::PathChange::Added,
+        PathChange::Modified => swarmops_api::PathChange::Modified,
+        PathChange::Deleted => swarmops_api::PathChange::Deleted,
+        PathChange::Merged => swarmops_api::PathChange::Merged,
+        _ => return Err(error::unknown_variant("PathChange")),
+    })
+}
+
 /// A land's `outcome` onto `target` as `land` answers it.
 fn land_resp(outcome: swarmops_repo::LandOutcome, target: String) -> Result<LandResp, OpError> {
     let status = match outcome.status {
@@ -2323,6 +2443,10 @@ impl StoreOps for Recording<'_> {
     fn revert(&self, who: &Identity, req: RevertReq) -> Result<RevertResp, OpError> {
         self.revert_with(who, req)
     }
+
+    fn land_check(&self, req: LandCheckReq) -> Result<LandCheckResp, OpError> {
+        self.land_check_with(req)
+    }
 }
 
 /// Each operation as a request of its own, whose resolved revisions go unrecorded: to report
@@ -2434,6 +2558,10 @@ impl StoreOps for LocalOps {
 
     fn revert(&self, who: &Identity, req: RevertReq) -> Result<RevertResp, OpError> {
         self.recording(&Resolved::default()).revert(who, req)
+    }
+
+    fn land_check(&self, req: LandCheckReq) -> Result<LandCheckResp, OpError> {
+        self.recording(&Resolved::default()).land_check(req)
     }
 }
 

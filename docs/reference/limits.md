@@ -23,6 +23,7 @@ The limits of the SwarmOps contract: what a request may hold, with the error a r
 | [Push commands](#push-commands) | 1,000 commands | `swarmops_ops::serve::hook::MAX_PUSH_COMMANDS` | [`E_INVALID_ARG`](errors.md#e_invalid_arg) |
 | [Revert range](#revert-range) | 256 changesets | `swarmops_repo::MAX_REVERT_CHANGESETS` | [`E_TOO_LARGE`](errors.md#e_too_large) |
 | [Revert reason](#revert-reason) | 4,096 bytes (4 KiB) | `swarmops_repo::MAX_REVERT_REASON_BYTES` | [`E_INVALID_ARG`](errors.md#e_invalid_arg) |
+| [Land check changes](#land-check-changes) | 32 changes | `swarmops_repo::land::MAX_GROUP_CHANGES` | [`E_TOO_LARGE`](errors.md#e_too_large) |
 
 ### Request text
 
@@ -158,6 +159,15 @@ The changesets one `revert` takes back, from `--since` (`since`) to its changese
 - Commands: [`revert`](commands/revert.md).
 - Error: [`E_INVALID_ARG`](errors.md#e_invalid_arg).
 
+### Land check changes
+
+The changes one `land-check` (`changes`) plans in order: more are refused before anything is resolved or read, with `details.max_changes`; none is `E_INVALID_ARG`.
+
+- Value: 32 changes.
+- Constant: `swarmops_repo::land::MAX_GROUP_CHANGES`, in `crates/swarmops-repo/src/land/plan.rs`.
+- Commands: [`land-check`](commands/land-check.md).
+- Error: [`E_TOO_LARGE`](errors.md#e_too_large).
+
 ## Bounds without an error
 
 A response past these leaves the rest out, and says so in its fields; nothing fails.
@@ -170,6 +180,7 @@ A response past these leaves the rest out, and says so in its fields; nothing fa
 | [Text probe](#text-probe) | 8,000 bytes | `swarmops_merge::line_diff::TEXT_PROBE` | [`diff`](commands/diff.md), [`land`](commands/land.md) |
 | [Conflict report entries](#conflict-report-entries) | 24,576 bytes (24 KiB) | `swarmops_ops::conflict::MAX_ENTRY_BYTES` | [`land`](commands/land.md) |
 | [Conflict touches listed](#conflict-touches-listed) | 16 changesets | `swarmops_repo::land::MAX_TOUCHES_PER_FILE` | [`land`](commands/land.md), [`revert`](commands/revert.md) |
+| [Land check paths listed](#land-check-paths-listed) | 1,000 paths | `swarmops_repo::land::MAX_CHECK_PATHS` | [`land-check`](commands/land-check.md), [`land`](commands/land.md) |
 | [Verify findings](#verify-findings) | 1,000 problems | `swarmops_api::VERIFY_MAX_FINDINGS` | [`verify`](commands/verify.md) |
 | [Land conflict lines](#land-conflict-lines) | 50 paths | `swarmops_ops::serve::land::MAX_CONFLICT_LINES` | [`serve`](commands/serve.md) |
 
@@ -220,6 +231,14 @@ The most changesets an `E_CONFLICT` report's file lists in `theirs_changesets`, 
 - Value: 16 changesets.
 - Constant: `swarmops_repo::land::MAX_TOUCHES_PER_FILE`, in `crates/swarmops-repo/src/land/landing.rs`.
 - Commands: [`land`](commands/land.md), [`revert`](commands/revert.md).
+
+### Land check paths listed
+
+The paths a clean change of `land-check` or `land --dry-run` lists in `paths`, in path order; `paths_truncated` says it changes more.
+
+- Value: 1,000 paths.
+- Constant: `swarmops_repo::land::MAX_CHECK_PATHS`, in `crates/swarmops-repo/src/land/plan.rs`.
+- Commands: [`land-check`](commands/land-check.md), [`land`](commands/land.md).
 
 ### Verify findings
 

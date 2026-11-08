@@ -15,8 +15,8 @@ mutates: true
 identity_required: true
 mcp_tool: "land"
 envelope_op: "land"
-exit_codes: [0, 1, 3]
-errors: [E_CONFLICT, E_NOTHING_TO_LAND]
+exit_codes: [0, 1, 2, 3]
+errors: [E_INVALID_ARG, E_CONFLICT, E_NOTHING_TO_LAND]
 syntax: "swarmops land [OPTIONS] <HEAD>"
 ```
 
@@ -101,12 +101,18 @@ Syntax: `--changes <FILE>`.
 
 A JSON file holding an array of changes to commit on HEAD first, or - for stdin: at most 64 MiB. The land commits them and lands that changeset in one transaction; needs --message, which both changesets take.
 
+### `--dry-run`
+
+Syntax: `--dry-run`.
+
+Write nothing: say what the land would come to, as land-check does for HEAD alone (the envelope's op is land\_check).
+
 ## Examples
 
 ### CLI
 
 ```sh
-swarmops --repo [tmp]/store --as agent/worker-17 land [head] --key land-7
+swarmops --repo [tmp]/store --as agent/worker-17 land [first] --key k-1
 ```
 
 ```json
@@ -117,22 +123,22 @@ swarmops --repo [tmp]/store --as agent/worker-17 land [head] --key land-7
   "result": {
     "status": "landed",
     "landed": "[landed]",
-    "rebased_onto": "[theirs]",
+    "rebased_onto": "[t0]",
     "target": "main",
     "base": "[t0]",
     "attempts": 1,
     "relocated": false,
     "files_changed": 1,
     "squashed_from": [
-      "[head]"
+      "[first]"
     ]
   },
   "meta": {
     "repo": "[tmp]/store",
     "elapsed_ms": "[elapsed_ms]",
     "resolved": {
-      "[head]": "[head]",
-      "main": "[theirs]"
+      "[first]": "[first]",
+      "main": "[t0]"
     },
     "auth": "trust"
   }
@@ -315,10 +321,12 @@ Exit codes:
 
 - `0`: Success.
 - `1`: The operation failed.
+- `2`: The request or the command line is malformed.
 - `3`: The change conflicts with what it lands on: resolve it, then run the operation again.
 
 ## Errors
 
+- [`E_INVALID_ARG`](../errors.md#e_invalid_arg) (exit 2): A malformed argument or request, including a command-line usage error.
 - [`E_CONFLICT`](../errors.md#e_conflict) (exit 3): The change conflicts with the target: `details.report` lists each conflicting file with its kind, its hunks and who changed it on the target.
 - [`E_NOTHING_TO_LAND`](../errors.md#e_nothing_to_land) (exit 1): The land has nothing to add to the target: its head is on the target already, or its change is (`details.reason` says which).
 
@@ -328,6 +336,7 @@ Any command that opens a store may also fail with a store error, such as [`E_NOT
 
 - [Operating SwarmOps: Agents commit and land](../../operations.md#2-agents-commit-and-land)
 - [`swarmops commit`](commit.md)
+- [`swarmops land-check`](land-check.md)
 - [`swarmops rebase`](rebase.md)
 - [`swarmops revert`](revert.md)
 - [`swarmops blob put`](blob-put.md)

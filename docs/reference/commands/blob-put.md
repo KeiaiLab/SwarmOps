@@ -150,6 +150,7 @@ Any command that opens a store may also fail with a store error, such as [`E_NOT
 
 - [`swarmops commit`](commit.md)
 - [`swarmops land`](land.md)
+- [`swarmops land-check`](land-check.md)
 - [`swarmops rebase`](rebase.md)
 - [`swarmops revert`](revert.md)
 - [`swarmops blob has`](blob-has.md)

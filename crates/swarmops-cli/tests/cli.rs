@@ -3935,6 +3935,113 @@ fn revert_golden() {
     insta::assert_json_snapshot!(s.transcript());
 }
 
+/// `land-check` and `land --dry-run` (the M18 design §6.2): three changes made on main's head,
+/// checked in order, the third editing the line the first does: clean, clean, then the third's
+/// conflict, exit 0 and nothing written; one change's dry run, under the op `land_check`; a
+/// keyed land's dry run again, a replay; and the bounds: none, more than 32, and a dry run
+/// beside `--changes`.
+#[test]
+fn land_check_golden() {
+    let mut s = Session::new();
+    let store = s.store();
+    let init = s.run(&["init", &store]);
+    s.name_at(&init, "/result/repo_id", "repo_id");
+
+    // 1. main at t0, and three changes on it.
+    let t0 = s.file(
+        "t0.json",
+        &json!([{"path": "f.txt", "op": "put", "content": {"inline": "1\n2\n3\n"}}]).to_string(),
+    );
+    let base = s.run(&[
+        "--repo",
+        &store,
+        "--as",
+        AGENT,
+        "commit",
+        "-m",
+        "t0",
+        "--changes",
+        &t0,
+        "--advance",
+        "main",
+    ]);
+    let t0 = s.name_at(&base, "/result/changeset", "t0");
+    let first = s.commit(&store, Some(&t0), "f.txt", "1\nA\n3\n", "first");
+    let second = s.commit(&store, Some(&t0), "g.txt", "g\n", "second");
+    let third = s.commit(&store, Some(&t0), "f.txt", "1\nC\n3\n", "third");
+
+    // 2. The three in order: only the third conflicts, and main stays.
+    let args = ["--repo", &store, "land-check", &first, &second, &third];
+    let checked = s.run(&args);
+    assert_eq!(checked.exit, 0, "{}", checked.json);
+    assert_eq!(checked["op"], "land_check");
+    assert_eq!(checked["result"]["onto"], t0.as_str());
+    let outcomes: Vec<&str> = (checked["result"]["items"].as_array().unwrap().iter())
+        .map(|item| item["outcome"].as_str().unwrap())
+        .collect();
+    assert_eq!(outcomes, ["clean", "clean", "conflict"]);
+    let report = &checked["result"]["items"][2]["report"];
+    assert_eq!(report["files"][0]["path"], "f.txt");
+    s.name_at(&checked, "/result/items/0/root", "first_root");
+    s.name_at(&checked, "/result/items/1/root", "second_root");
+    let main = s.run(&["--repo", &store, "resolve", "main"]);
+    assert_eq!(main["result"]["id"], t0.as_str());
+
+    // 3. One change's dry run, then its land: the root it named is the landed one's.
+    let dry = [
+        "--repo",
+        &store,
+        "--as",
+        AGENT,
+        "land",
+        &first,
+        "--dry-run",
+        "--key",
+        "k-1",
+    ];
+    let dry_run = s.run(&dry);
+    assert_eq!((dry_run.exit, &dry_run["op"]), (0, &json!("land_check")));
+    assert_eq!(dry_run["result"]["items"][0]["outcome"], "clean");
+    let land = [
+        "--repo", &store, "--as", AGENT, "land", &first, "--key", "k-1",
+    ];
+    let landed = s.run(&land);
+    let landed_id = s.name_at(&landed, "/result/landed", "landed");
+    let shown = s.run(&["--repo", &store, "show", &landed_id]);
+    assert_eq!(
+        shown["result"]["root"],
+        dry_run["result"]["items"][0]["root"]
+    );
+
+    // 4. The same dry run again: a replay.
+    let replayed = s.run(&dry);
+    assert_eq!(replayed["result"]["items"][0]["outcome"], "replayed");
+
+    // 5. The bounds.
+    let many: Vec<&str> = std::iter::repeat_n(second.as_str(), 33).collect();
+    let mut args = vec!["--repo", store.as_str(), "land-check"];
+    args.extend(many);
+    let too_many = s.run(&args);
+    assert_eq!(too_many.code(), "E_TOO_LARGE", "{}", too_many.json);
+    assert_eq!(too_many["error"]["details"]["max_changes"], 32);
+    let none = s.run(&["--repo", &store, "land-check"]);
+    assert_eq!(none.exit, 2, "{}", none.json);
+    let beside = s.file("beside.json", "[]");
+    let args = [
+        "--repo",
+        &store,
+        "land",
+        &first,
+        "--dry-run",
+        "--changes",
+        &beside,
+    ];
+    let both = s.run(&args);
+    assert_eq!(both.exit, 2, "{}", both.json);
+
+    insta::assert_json_snapshot!(s.transcript());
+}
+
 /// A land's conflicts other than `content`: a file the change deleted and main changed
 /// (`delete_modify`), one the change changed and main deleted (`modify_delete`), and a file
 /// holding a NUL both changed (`binary`). Each names its blobs, and none has hunks.

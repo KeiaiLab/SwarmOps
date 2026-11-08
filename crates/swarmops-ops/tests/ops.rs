@@ -22,9 +22,9 @@ use swarmops_api::{
     AncestryReq, AncestryResp, Attribution, ChangeInput, ChangeOp, ChangeOut, ChangesetSummary,
     CommitReq, ContentEncoding, ContentInput, DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES,
     DEFAULT_MAX_CHANGES, DEFAULT_READ_TREE_LIMIT, EntryKindOut, ErrorCode, FileContent, FileKind,
-    Identity, IdentityInfo, InfoReq, LogPage, LogReq, ModeInput, OpError, OpLogReq, ReadFileReq,
-    ReadTreeReq, RefDeleteReq, RefListReq, RefOut, RefSetReq, RefSetResp, Rev, ShowReq, StoreOps,
-    TreeEntryOut, UndoReq, VerifyReq,
+    Identity, IdentityInfo, InfoReq, ItemOutcome, LandCheckReq, LandItemIn, LogPage, LogReq,
+    ModeInput, OpError, OpLogReq, PathChange, ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq,
+    RefOut, RefSetReq, RefSetResp, Rev, ShowReq, StoreOps, TreeEntryOut, UndoReq, VerifyReq,
 };
 use swarmops_core::{
     ChangesetId, LeafKind, ObjectId, ObjectKind, RepoPath, Signature, hash_object,
@@ -6043,4 +6043,72 @@ fn ancestry_refuses_a_cursor_for_other_revs() {
     let over = expect_err(ancestry(&c3, &b, 1001, None), ErrorCode::InvalidArg);
     assert_eq!(over.details["limit"], 1001);
     assert_eq!(ids(&ancestry(&c3, &b, 50, None).unwrap()), [b]);
+}
+
+/// `land_check`'s own rules, each checked before anything is resolved (the M18 design §6.2):
+/// no change is `E_INVALID_ARG`, more than 32 `E_TOO_LARGE`, a key given to two changes
+/// `E_INVALID_ARG`; a revision not found fails the whole check; and a check of two changes on
+/// main's head says each is clean, with the paths it changes, writing nothing.
+#[test]
+fn land_check_rules_and_answers() {
+    let (_dir, _root, ops) = new_store();
+    let t0 = commit(&ops, None, vec![text("f.txt", "f\n")]);
+    ops.ref_set(&agent(), set("main", &t0, None, true)).unwrap();
+    let a = commit(&ops, Some(&t0), vec![text("a.txt", "a\n")]);
+    let b = commit(&ops, Some(&t0), vec![text("b.txt", "b\n")]);
+    let check = |items: Vec<LandItemIn>| ops.land_check(LandCheckReq::new(items));
+
+    // 1. The bounds.
+    let none = expect_err(check(Vec::new()), ErrorCode::InvalidArg);
+    assert_eq!(none.details["changes"], 0);
+    let many = vec![LandItemIn::new(a.as_str()); 33];
+    let too_many = expect_err(check(many), ErrorCode::TooLarge);
+    assert_eq!(too_many.details["max_changes"], 32);
+
+    // 2. A key twice, and a revision not found: the whole check fails.
+    let keyed = |head: &str| {
+        let mut item = LandItemIn::new(head);
+        item.idempotency_key = Some("k-1".to_owned());
+        item
+    };
+    let twice = expect_err(check(vec![keyed(&a), keyed(&b)]), ErrorCode::InvalidArg);
+    assert_eq!(twice.details["idempotency_key"], "k-1");
+    let missing = LandItemIn::new("0".repeat(64));
+    expect_err(
+        check(vec![LandItemIn::new(a.as_str()), missing]),
+        ErrorCode::RevNotFound,
+    );
+
+    // 3. Both clean, each with its path; main stays at t0.
+    let checked = check(vec![
+        LandItemIn::new(a.as_str()),
+        LandItemIn::new(b.as_str()),
+    ])
+    .unwrap();
+    assert_eq!(checked.onto, t0);
+    let paths: Vec<(ItemOutcome, Vec<(String, PathChange)>)> = (checked.items.iter())
+        .map(|item| {
+            let paths = (item.paths.iter())
+                .map(|p| (p.path.clone(), p.change))
+                .collect();
+            (item.outcome, paths)
+        })
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            (
+                ItemOutcome::Clean,
+                vec![("a.txt".to_owned(), PathChange::Added)]
+            ),
+            (
+                ItemOutcome::Clean,
+                vec![("b.txt".to_owned(), PathChange::Added)]
+            ),
+        ]
+    );
+    let main = ops
+        .resolve_rev(swarmops_api::ResolveRevReq::new("main"))
+        .unwrap();
+    assert_eq!(main.id, t0);
 }

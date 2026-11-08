@@ -1365,6 +1365,83 @@ expression: golden.transcript()
             {
               "annotations": {
                 "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": true
+              },
+              "description": "Says what landing changes (1 to 32, each a head with an optional base and idempotency_key) in order onto target, main by default, would come to, each merged onto what the clean ones before it make, as land would land them one after another: clean (the root tree it lands and the paths it changes), replayed, nothing_to_land, or conflict (land's E_CONFLICT report). Writes nothing. Land with expect_target set to onto to land what it found, or nothing.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`land_check` (CLI `land --dry-run`, `land-check`): what landing `changes`, in order, onto\n`target` would come to, each after the clean ones before it, as `land` would land them one\nafter another. It writes nothing and takes no lock. A head or base not found, a base that\nis no ancestor, a merge in a chain or a key used for another change fails the whole check,\nas it fails a land.",
+                "properties": {
+                  "changes": {
+                    "description": "The changes, in the order they would land: 1 to 32 (`E_INVALID_ARG` for none,\n`E_TOO_LARGE` past 32), each key once.",
+                    "items": {
+                      "description": "One change of a `land_check`: as `land` takes it.",
+                      "properties": {
+                        "base": {
+                          "anyOf": [
+                            {
+                              "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "description": "Where the change starts, as a land's `base`. When omitted, the merge base of `head` and\nthe target's head, along first parents."
+                        },
+                        "head": {
+                          "description": "The change's head. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+                          "type": "string"
+                        },
+                        "idempotency_key": {
+                          "description": "The change's land key, as a land's: one the target holds a land of is `replayed`.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "message": {
+                          "description": "The landed changeset's message, as a land's; a check does not use it.",
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "head"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "max_conflict_bytes": {
+                    "default": 32768,
+                    "description": "The most bytes of hunk text each conflicting change's report carries, as a land's.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "target": {
+                    "default": "main",
+                    "description": "The ref the changes would land on: `main` or `release/<name>`, which must exist.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "changes"
+                ],
+                "title": "LandCheckReq",
+                "type": "object"
+              },
+              "name": "land_check",
+              "title": "Check a land"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
                 "idempotentHint": false,
                 "openWorldHint": false,
                 "readOnlyHint": false

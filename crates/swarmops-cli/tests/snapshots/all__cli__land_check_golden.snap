@@ -1,0 +1,468 @@
+---
+source: crates/swarmops-cli/tests/cli.rs
+expression: s.transcript()
+---
+[
+  {
+    "args": "init [tmp]/store",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "repo_init",
+      "api": 1,
+      "result": {
+        "repo_id": "[repo_id]",
+        "name": "store",
+        "store_version": 2,
+        "changesets": 0,
+        "refs": 0
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m t0 --changes [tmp]/t0.json --advance main",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[t0]",
+        "root": "[id1]",
+        "files_changed": 1,
+        "blobs_written": 1,
+        "advanced": {
+          "name": "main",
+          "new": "[t0]",
+          "already_applied": false
+        },
+        "replayed": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m first --changes [tmp]/first.json --parent [t0]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[first]",
+        "parent": "[t0]",
+        "root": "[first_root]",
+        "files_changed": 1,
+        "blobs_written": 1,
+        "replayed": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[t0]": "[t0]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m second --changes [tmp]/second.json --parent [t0]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[second]",
+        "parent": "[t0]",
+        "root": "[id2]",
+        "files_changed": 1,
+        "blobs_written": 1,
+        "replayed": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[t0]": "[t0]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m third --changes [tmp]/third.json --parent [t0]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[third]",
+        "parent": "[t0]",
+        "root": "[id3]",
+        "files_changed": 1,
+        "blobs_written": 1,
+        "replayed": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[t0]": "[t0]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store land-check [first] [second] [third]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "land_check",
+      "api": 1,
+      "result": {
+        "onto": "[t0]",
+        "items": [
+          {
+            "head": "[first]",
+            "outcome": "clean",
+            "root": "[first_root]",
+            "paths": [
+              {
+                "path": "f.txt",
+                "change": "modified"
+              }
+            ]
+          },
+          {
+            "head": "[second]",
+            "outcome": "clean",
+            "root": "[second_root]",
+            "paths": [
+              {
+                "path": "g.txt",
+                "change": "added"
+              }
+            ]
+          },
+          {
+            "head": "[third]",
+            "outcome": "conflict",
+            "report": {
+              "base": "[t0]",
+              "ours": "[third]",
+              "theirs": "[t0]",
+              "files": [
+                {
+                  "path": "f.txt",
+                  "kind": "content",
+                  "base_blob": "[id4]",
+                  "ours_blob": "[id5]",
+                  "theirs_blob": "[id6]",
+                  "hunks": [
+                    {
+                      "id": 0,
+                      "base": {
+                        "first": 2,
+                        "last": 2,
+                        "text": "2\n"
+                      },
+                      "ours": {
+                        "first": 2,
+                        "last": 2,
+                        "text": "C\n"
+                      },
+                      "theirs": {
+                        "first": 2,
+                        "last": 2,
+                        "text": "A\n"
+                      }
+                    }
+                  ]
+                }
+              ],
+              "kinds": [
+                "content"
+              ],
+              "truncated": false
+            }
+          }
+        ]
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[first]": "[first]",
+          "[second]": "[second]",
+          "[third]": "[third]",
+          "main": "[t0]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store resolve main",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "resolve_rev",
+      "api": 1,
+      "result": {
+        "id": "[t0]",
+        "kind": "ref"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[t0]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 land [first] --dry-run --key k-1",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "land_check",
+      "api": 1,
+      "result": {
+        "onto": "[t0]",
+        "items": [
+          {
+            "head": "[first]",
+            "outcome": "clean",
+            "root": "[first_root]",
+            "paths": [
+              {
+                "path": "f.txt",
+                "change": "modified"
+              }
+            ]
+          }
+        ]
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[first]": "[first]",
+          "main": "[t0]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 land [first] --key k-1",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "land",
+      "api": 1,
+      "result": {
+        "status": "landed",
+        "landed": "[landed]",
+        "rebased_onto": "[t0]",
+        "target": "main",
+        "base": "[t0]",
+        "attempts": 1,
+        "relocated": false,
+        "files_changed": 1,
+        "squashed_from": [
+          "[first]"
+        ]
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[first]": "[first]",
+          "main": "[t0]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store show [landed]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "show",
+      "api": 1,
+      "result": {
+        "id": "[landed]",
+        "seq": 4,
+        "parents": [
+          "[t0]"
+        ],
+        "root": "[first_root]",
+        "author": {
+          "agent": "agent/worker-17"
+        },
+        "lander": {
+          "agent": "agent/worker-17"
+        },
+        "created_at": "[created_at]",
+        "message": "first",
+        "land_key": "k-1",
+        "squashed_from": [
+          "[first]"
+        ],
+        "changes": [
+          {
+            "path": "f.txt",
+            "op": "put",
+            "kind": "file",
+            "blob": "[id6]"
+          }
+        ],
+        "files_changed": 1,
+        "changes_truncated": false,
+        "metadata": {
+          "agent": "agent/worker-17",
+          "land_key": "k-1",
+          "lander": "agent/worker-17",
+          "squashed_from": "[first]"
+        },
+        "signatures": {
+          "author": {
+            "name": "agent/worker-17",
+            "email": "worker-17@agent.swarmops.local",
+            "secs": "[secs]",
+            "offset_secs": 0
+          },
+          "committer": {
+            "name": "agent/worker-17",
+            "email": "worker-17@agent.swarmops.local",
+            "secs": "[secs]",
+            "offset_secs": 0
+          }
+        }
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[landed]": "[landed]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 land [first] --dry-run --key k-1",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "land_check",
+      "api": 1,
+      "result": {
+        "onto": "[landed]",
+        "items": [
+          {
+            "head": "[first]",
+            "outcome": "replayed"
+          }
+        ]
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[first]": "[first]",
+          "main": "[landed]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store land-check [second] [second] [second] [second] [second] [second] [second] [second] [second] [second] [second] [second] [second] [second] [second] [second] [second] [second] [second] [second] [second] [second] [second] [second] [second] [second] [second] [second] [second] [second] [second] [second] [second]",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "land_check",
+      "api": 1,
+      "error": {
+        "code": "E_TOO_LARGE",
+        "message": "a land check takes at most 32 changes, not 33",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "max_changes": 32
+        },
+        "hint": "check the changes in batches of at most 32"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store land-check",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "land_check",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "the following required arguments were not provided: <HEAD>...",
+        "retryable": false,
+        "exit": 2,
+        "details": {},
+        "hint": "Usage: swarmops land-check <HEAD>...\nFor more information, try '--help'."
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store land [first] --dry-run --changes [tmp]/beside.json",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "land",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "the argument '--dry-run' cannot be used with '--changes <FILE>'",
+        "retryable": false,
+        "exit": 2,
+        "details": {},
+        "hint": "Usage: swarmops land --dry-run <HEAD>\nFor more information, try '--help'."
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  }
+]

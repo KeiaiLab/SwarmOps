@@ -4617,6 +4617,926 @@ expression: s.redact(&all)
       "title": "InitReq",
       "type": "object"
     },
+    "ItemOutcome": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "What landing one change would come to: a `land_check` item's `outcome`.",
+      "oneOf": [
+        {
+          "const": "clean",
+          "description": "It merges cleanly: `root` and `paths` say what it lands.",
+          "type": "string"
+        },
+        {
+          "const": "replayed",
+          "description": "A land with its `idempotency_key` landed it before: landing it again replays.",
+          "type": "string"
+        },
+        {
+          "const": "nothing_to_land",
+          "description": "It has nothing to land: its head is on the target, or the target holds its change.",
+          "type": "string"
+        },
+        {
+          "const": "conflict",
+          "description": "It conflicts: `report` says where.",
+          "type": "string"
+        }
+      ],
+      "title": "ItemOutcome"
+    },
+    "LandCheckItemOut": {
+      "$defs": {
+        "ConflictKindOut": {
+          "description": "What kind of conflict a file has. `ours` is the change, `theirs` the target.",
+          "oneOf": [
+            {
+              "const": "content",
+              "description": "Both sides edited the same lines of a text file, or lines next to each other.",
+              "type": "string"
+            },
+            {
+              "const": "binary",
+              "description": "Both sides changed the content of a file that is not text, or of a symlink, differently.",
+              "type": "string"
+            },
+            {
+              "const": "delete_modify",
+              "description": "The change deleted the file, and the target changed it.",
+              "type": "string"
+            },
+            {
+              "const": "modify_delete",
+              "description": "The change changed the file, and the target deleted it.",
+              "type": "string"
+            },
+            {
+              "const": "add_add",
+              "description": "Both sides added the file, with contents that do not merge.",
+              "type": "string"
+            },
+            {
+              "const": "mode",
+              "description": "Both sides changed the file's kind (file, executable or symlink), differently.",
+              "type": "string"
+            },
+            {
+              "const": "type_change",
+              "description": "One side has a file where the other has a directory, or the change deleted a file where\nthe target made a directory.",
+              "type": "string"
+            }
+          ]
+        },
+        "ConflictReport": {
+          "description": "Why a land could not merge its change onto the target, file by file, or could not apply its\nresolutions to it (operations spec §3): the report `E_CONFLICT` carries in `details.report`.\n`ours` is the change, `theirs` the target. Ids are full.",
+          "properties": {
+            "auto_merged": {
+              "description": "The paths both sides changed whose contents merged cleanly into a content neither side\nhad. Omitted when empty.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "base": {
+              "description": "The merge base: the changeset the change starts from.",
+              "type": "string"
+            },
+            "files": {
+              "description": "The files that conflict, in path order, while their entries stay within 24 KiB as JSON,\ntexts aside: the first file always, with at least its first hunk, its hunks past the bound\nas one hunk that spans them, without texts; a later file whole, or else left out with\nevery file after it (`truncated`). The error's message counts every conflicting path.",
+              "items": {
+                "$ref": "#/$defs/FileConflictOut"
+              },
+              "type": "array"
+            },
+            "kinds": {
+              "description": "The kinds of conflict in `files`, each once.",
+              "items": {
+                "$ref": "#/$defs/ConflictKindOut"
+              },
+              "type": "array"
+            },
+            "ours": {
+              "description": "The change's head.",
+              "type": "string"
+            },
+            "stale": {
+              "description": "The paths whose resolutions did not apply, since the target holds there what their\n`against` did not: the target changed them after the report the resolutions answered.\nRead them at `theirs` and resolve them again, against it. Omitted when empty.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "theirs": {
+              "description": "The target's head the change was merged with.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the report left something out: hunk texts, to stay within the request's\n`max_conflict_bytes`, or files and hunks, to stay within the bound of `files`.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "base",
+            "ours",
+            "theirs",
+            "files",
+            "kinds",
+            "truncated"
+          ],
+          "type": "object"
+        },
+        "FileConflictOut": {
+          "description": "One conflicting file. Its blobs are the file's content on each side, which `read_file` reads\nat that side's changeset; a side without a file at the path (deleted, never added, or a\ndirectory there) has none.",
+          "properties": {
+            "base_blob": {
+              "description": "Its blob at the merge base.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "hunks": {
+              "description": "The places where the two sides' edits of its lines meet, in file order: for a text file\nboth sides edited (`content` and `add_add`; contents not all text, or past the line\ndiff's bound of 49,152 lines or 8 MiB a side, conflict as `binary`, with no hunks).\nOmitted when there are none.",
+              "items": {
+                "$ref": "#/$defs/HunkOut"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "$ref": "#/$defs/ConflictKindOut",
+              "description": "What kind of conflict it is."
+            },
+            "ours_blob": {
+              "description": "Its blob in the change.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "path": {
+              "description": "The file's repository path.",
+              "type": "string"
+            },
+            "theirs_agent": {
+              "description": "The agent that wrote `theirs_changeset`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "theirs_blob": {
+              "description": "Its blob on the target.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "theirs_changeset": {
+              "description": "The newest changeset on the target since the merge base that changed this path: what to\nread for the other side's edit.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "theirs_changesets": {
+              "description": "Every changeset on the target since the merge base that changed this path, newest first,\n`theirs_changeset` the first: at most 16. Attribution is per file, not per line. Omitted\nwhen there are none.",
+              "items": {
+                "$ref": "#/$defs/TouchOut"
+              },
+              "type": "array"
+            },
+            "theirs_changesets_truncated": {
+              "description": "Whether more changesets changed this path than `theirs_changesets` lists. Omitted when\nfalse.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "path",
+            "kind"
+          ],
+          "type": "object"
+        },
+        "HunkOut": {
+          "description": "One place where the two sides' edits of a text file meet: each side's lines there. The lines\nare numbered from 1, and each side's range includes both ends, as `read_file` takes a range\nof lines.",
+          "properties": {
+            "base": {
+              "$ref": "#/$defs/LinesOut",
+              "description": "The lines at the merge base."
+            },
+            "id": {
+              "description": "Its number in the file, from 0.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "ours": {
+              "$ref": "#/$defs/LinesOut",
+              "description": "The change's lines."
+            },
+            "theirs": {
+              "$ref": "#/$defs/LinesOut",
+              "description": "The target's lines."
+            },
+            "truncated": {
+              "description": "Whether this hunk lost its texts to the report's bounds: past `max_conflict_bytes`, or\nthe hunk that spans the first file's hunks past the report's bound. Omitted when false.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "base",
+            "ours",
+            "theirs"
+          ],
+          "type": "object"
+        },
+        "ItemOutcome": {
+          "description": "What landing one change would come to: a `land_check` item's `outcome`.",
+          "oneOf": [
+            {
+              "const": "clean",
+              "description": "It merges cleanly: `root` and `paths` say what it lands.",
+              "type": "string"
+            },
+            {
+              "const": "replayed",
+              "description": "A land with its `idempotency_key` landed it before: landing it again replays.",
+              "type": "string"
+            },
+            {
+              "const": "nothing_to_land",
+              "description": "It has nothing to land: its head is on the target, or the target holds its change.",
+              "type": "string"
+            },
+            {
+              "const": "conflict",
+              "description": "It conflicts: `report` says where.",
+              "type": "string"
+            }
+          ]
+        },
+        "LinesOut": {
+          "description": "One side's lines of a hunk: `first` to `last`, numbered from 1, both included. A side without\nlines there has `last` one less than `first`: its place is before line `first`.",
+          "properties": {
+            "first": {
+              "description": "The first line.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "last": {
+              "description": "The last line; `first` minus one when the side has none.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "text": {
+              "description": "The lines' text; omitted from the first hunk whose texts would pass the report's\n`max_conflict_bytes`, and on the hunk that spans the first file's hunks past the\nreport's bound (`truncated`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "text_head": {
+              "description": "The text's first whole lines, on the first hunk whose texts would pass the report's\n`max_conflict_bytes`: as many as what the budget had left holds, `text` omitted. Omitted\nelsewhere, and when no line fits.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "first",
+            "last"
+          ],
+          "type": "object"
+        },
+        "PathChange": {
+          "description": "How a clean change changes one path.",
+          "oneOf": [
+            {
+              "const": "added",
+              "description": "A file where there was none.",
+              "type": "string"
+            },
+            {
+              "const": "modified",
+              "description": "The file there changes: its content, or its kind.",
+              "type": "string"
+            },
+            {
+              "const": "deleted",
+              "description": "The file there is deleted.",
+              "type": "string"
+            },
+            {
+              "const": "merged",
+              "description": "Both the change and the target changed the file, and their contents merge into content\nneither had.",
+              "type": "string"
+            }
+          ]
+        },
+        "PathSummaryOut": {
+          "description": "One path a clean change changes: an entry of a `land_check` item's `paths`.",
+          "properties": {
+            "change": {
+              "$ref": "#/$defs/PathChange",
+              "description": "How it changes."
+            },
+            "path": {
+              "description": "The path.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "change"
+          ],
+          "type": "object"
+        },
+        "TouchOut": {
+          "description": "A changeset that changed a conflicting file on the target: one of a file conflict's\n`theirs_changesets`.",
+          "properties": {
+            "agent": {
+              "description": "The agent that wrote it.",
+              "type": "string"
+            },
+            "changeset": {
+              "description": "The changeset's id.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "changeset",
+            "agent"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One change's outcome in a `land_check`.",
+      "properties": {
+        "head": {
+          "description": "The change's head, a full id.",
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/$defs/ItemOutcome",
+          "description": "What landing it after the clean changes before it would come to."
+        },
+        "paths": {
+          "description": "For `clean`, the paths it changes, in path order: at most 1,000.",
+          "items": {
+            "$ref": "#/$defs/PathSummaryOut"
+          },
+          "type": "array"
+        },
+        "paths_truncated": {
+          "description": "Whether it changes more paths than `paths` lists. Omitted when false.",
+          "type": "boolean"
+        },
+        "report": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConflictReport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "For `conflict`, the report a land gives in `E_CONFLICT`'s `details.report`. Its hunks\nare the merge's with the clean changes before it; `theirs` and the changesets that\ntouched each file are the target's."
+        },
+        "root": {
+          "description": "For `clean`, the root tree its landed changeset would have; for `replayed`, omitted, as\nfor the others.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "head",
+        "outcome"
+      ],
+      "title": "LandCheckItemOut",
+      "type": "object"
+    },
+    "LandCheckReq": {
+      "$defs": {
+        "LandItemIn": {
+          "description": "One change of a `land_check`: as `land` takes it.",
+          "properties": {
+            "base": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Rev"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Where the change starts, as a land's `base`. When omitted, the merge base of `head` and\nthe target's head, along first parents."
+            },
+            "head": {
+              "$ref": "#/$defs/Rev",
+              "description": "The change's head."
+            },
+            "idempotency_key": {
+              "description": "The change's land key, as a land's: one the target holds a land of is `replayed`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "message": {
+              "description": "The landed changeset's message, as a land's; a check does not use it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "head"
+          ],
+          "type": "object"
+        },
+        "Rev": {
+          "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`land_check` (CLI `land --dry-run`, `land-check`): what landing `changes`, in order, onto\n`target` would come to, each after the clean ones before it, as `land` would land them one\nafter another. It writes nothing and takes no lock. A head or base not found, a base that\nis no ancestor, a merge in a chain or a key used for another change fails the whole check,\nas it fails a land.",
+      "properties": {
+        "changes": {
+          "description": "The changes, in the order they would land: 1 to 32 (`E_INVALID_ARG` for none,\n`E_TOO_LARGE` past 32), each key once.",
+          "items": {
+            "$ref": "#/$defs/LandItemIn"
+          },
+          "type": "array"
+        },
+        "max_conflict_bytes": {
+          "default": 32768,
+          "description": "The most bytes of hunk text each conflicting change's report carries, as a land's.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "target": {
+          "default": "main",
+          "description": "The ref the changes would land on: `main` or `release/<name>`, which must exist.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "changes"
+      ],
+      "title": "LandCheckReq",
+      "type": "object"
+    },
+    "LandCheckResp": {
+      "$defs": {
+        "ConflictKindOut": {
+          "description": "What kind of conflict a file has. `ours` is the change, `theirs` the target.",
+          "oneOf": [
+            {
+              "const": "content",
+              "description": "Both sides edited the same lines of a text file, or lines next to each other.",
+              "type": "string"
+            },
+            {
+              "const": "binary",
+              "description": "Both sides changed the content of a file that is not text, or of a symlink, differently.",
+              "type": "string"
+            },
+            {
+              "const": "delete_modify",
+              "description": "The change deleted the file, and the target changed it.",
+              "type": "string"
+            },
+            {
+              "const": "modify_delete",
+              "description": "The change changed the file, and the target deleted it.",
+              "type": "string"
+            },
+            {
+              "const": "add_add",
+              "description": "Both sides added the file, with contents that do not merge.",
+              "type": "string"
+            },
+            {
+              "const": "mode",
+              "description": "Both sides changed the file's kind (file, executable or symlink), differently.",
+              "type": "string"
+            },
+            {
+              "const": "type_change",
+              "description": "One side has a file where the other has a directory, or the change deleted a file where\nthe target made a directory.",
+              "type": "string"
+            }
+          ]
+        },
+        "ConflictReport": {
+          "description": "Why a land could not merge its change onto the target, file by file, or could not apply its\nresolutions to it (operations spec §3): the report `E_CONFLICT` carries in `details.report`.\n`ours` is the change, `theirs` the target. Ids are full.",
+          "properties": {
+            "auto_merged": {
+              "description": "The paths both sides changed whose contents merged cleanly into a content neither side\nhad. Omitted when empty.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "base": {
+              "description": "The merge base: the changeset the change starts from.",
+              "type": "string"
+            },
+            "files": {
+              "description": "The files that conflict, in path order, while their entries stay within 24 KiB as JSON,\ntexts aside: the first file always, with at least its first hunk, its hunks past the bound\nas one hunk that spans them, without texts; a later file whole, or else left out with\nevery file after it (`truncated`). The error's message counts every conflicting path.",
+              "items": {
+                "$ref": "#/$defs/FileConflictOut"
+              },
+              "type": "array"
+            },
+            "kinds": {
+              "description": "The kinds of conflict in `files`, each once.",
+              "items": {
+                "$ref": "#/$defs/ConflictKindOut"
+              },
+              "type": "array"
+            },
+            "ours": {
+              "description": "The change's head.",
+              "type": "string"
+            },
+            "stale": {
+              "description": "The paths whose resolutions did not apply, since the target holds there what their\n`against` did not: the target changed them after the report the resolutions answered.\nRead them at `theirs` and resolve them again, against it. Omitted when empty.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "theirs": {
+              "description": "The target's head the change was merged with.",
+              "type": "string"
+            },
+            "truncated": {
+              "description": "Whether the report left something out: hunk texts, to stay within the request's\n`max_conflict_bytes`, or files and hunks, to stay within the bound of `files`.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "base",
+            "ours",
+            "theirs",
+            "files",
+            "kinds",
+            "truncated"
+          ],
+          "type": "object"
+        },
+        "FileConflictOut": {
+          "description": "One conflicting file. Its blobs are the file's content on each side, which `read_file` reads\nat that side's changeset; a side without a file at the path (deleted, never added, or a\ndirectory there) has none.",
+          "properties": {
+            "base_blob": {
+              "description": "Its blob at the merge base.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "hunks": {
+              "description": "The places where the two sides' edits of its lines meet, in file order: for a text file\nboth sides edited (`content` and `add_add`; contents not all text, or past the line\ndiff's bound of 49,152 lines or 8 MiB a side, conflict as `binary`, with no hunks).\nOmitted when there are none.",
+              "items": {
+                "$ref": "#/$defs/HunkOut"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "$ref": "#/$defs/ConflictKindOut",
+              "description": "What kind of conflict it is."
+            },
+            "ours_blob": {
+              "description": "Its blob in the change.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "path": {
+              "description": "The file's repository path.",
+              "type": "string"
+            },
+            "theirs_agent": {
+              "description": "The agent that wrote `theirs_changeset`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "theirs_blob": {
+              "description": "Its blob on the target.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "theirs_changeset": {
+              "description": "The newest changeset on the target since the merge base that changed this path: what to\nread for the other side's edit.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "theirs_changesets": {
+              "description": "Every changeset on the target since the merge base that changed this path, newest first,\n`theirs_changeset` the first: at most 16. Attribution is per file, not per line. Omitted\nwhen there are none.",
+              "items": {
+                "$ref": "#/$defs/TouchOut"
+              },
+              "type": "array"
+            },
+            "theirs_changesets_truncated": {
+              "description": "Whether more changesets changed this path than `theirs_changesets` lists. Omitted when\nfalse.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "path",
+            "kind"
+          ],
+          "type": "object"
+        },
+        "HunkOut": {
+          "description": "One place where the two sides' edits of a text file meet: each side's lines there. The lines\nare numbered from 1, and each side's range includes both ends, as `read_file` takes a range\nof lines.",
+          "properties": {
+            "base": {
+              "$ref": "#/$defs/LinesOut",
+              "description": "The lines at the merge base."
+            },
+            "id": {
+              "description": "Its number in the file, from 0.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "ours": {
+              "$ref": "#/$defs/LinesOut",
+              "description": "The change's lines."
+            },
+            "theirs": {
+              "$ref": "#/$defs/LinesOut",
+              "description": "The target's lines."
+            },
+            "truncated": {
+              "description": "Whether this hunk lost its texts to the report's bounds: past `max_conflict_bytes`, or\nthe hunk that spans the first file's hunks past the report's bound. Omitted when false.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id",
+            "base",
+            "ours",
+            "theirs"
+          ],
+          "type": "object"
+        },
+        "ItemOutcome": {
+          "description": "What landing one change would come to: a `land_check` item's `outcome`.",
+          "oneOf": [
+            {
+              "const": "clean",
+              "description": "It merges cleanly: `root` and `paths` say what it lands.",
+              "type": "string"
+            },
+            {
+              "const": "replayed",
+              "description": "A land with its `idempotency_key` landed it before: landing it again replays.",
+              "type": "string"
+            },
+            {
+              "const": "nothing_to_land",
+              "description": "It has nothing to land: its head is on the target, or the target holds its change.",
+              "type": "string"
+            },
+            {
+              "const": "conflict",
+              "description": "It conflicts: `report` says where.",
+              "type": "string"
+            }
+          ]
+        },
+        "LandCheckItemOut": {
+          "description": "One change's outcome in a `land_check`.",
+          "properties": {
+            "head": {
+              "description": "The change's head, a full id.",
+              "type": "string"
+            },
+            "outcome": {
+              "$ref": "#/$defs/ItemOutcome",
+              "description": "What landing it after the clean changes before it would come to."
+            },
+            "paths": {
+              "description": "For `clean`, the paths it changes, in path order: at most 1,000.",
+              "items": {
+                "$ref": "#/$defs/PathSummaryOut"
+              },
+              "type": "array"
+            },
+            "paths_truncated": {
+              "description": "Whether it changes more paths than `paths` lists. Omitted when false.",
+              "type": "boolean"
+            },
+            "report": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ConflictReport"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "For `conflict`, the report a land gives in `E_CONFLICT`'s `details.report`. Its hunks\nare the merge's with the clean changes before it; `theirs` and the changesets that\ntouched each file are the target's."
+            },
+            "root": {
+              "description": "For `clean`, the root tree its landed changeset would have; for `replayed`, omitted, as\nfor the others.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "head",
+            "outcome"
+          ],
+          "type": "object"
+        },
+        "LinesOut": {
+          "description": "One side's lines of a hunk: `first` to `last`, numbered from 1, both included. A side without\nlines there has `last` one less than `first`: its place is before line `first`.",
+          "properties": {
+            "first": {
+              "description": "The first line.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "last": {
+              "description": "The last line; `first` minus one when the side has none.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "text": {
+              "description": "The lines' text; omitted from the first hunk whose texts would pass the report's\n`max_conflict_bytes`, and on the hunk that spans the first file's hunks past the\nreport's bound (`truncated`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "text_head": {
+              "description": "The text's first whole lines, on the first hunk whose texts would pass the report's\n`max_conflict_bytes`: as many as what the budget had left holds, `text` omitted. Omitted\nelsewhere, and when no line fits.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "first",
+            "last"
+          ],
+          "type": "object"
+        },
+        "PathChange": {
+          "description": "How a clean change changes one path.",
+          "oneOf": [
+            {
+              "const": "added",
+              "description": "A file where there was none.",
+              "type": "string"
+            },
+            {
+              "const": "modified",
+              "description": "The file there changes: its content, or its kind.",
+              "type": "string"
+            },
+            {
+              "const": "deleted",
+              "description": "The file there is deleted.",
+              "type": "string"
+            },
+            {
+              "const": "merged",
+              "description": "Both the change and the target changed the file, and their contents merge into content\nneither had.",
+              "type": "string"
+            }
+          ]
+        },
+        "PathSummaryOut": {
+          "description": "One path a clean change changes: an entry of a `land_check` item's `paths`.",
+          "properties": {
+            "change": {
+              "$ref": "#/$defs/PathChange",
+              "description": "How it changes."
+            },
+            "path": {
+              "description": "The path.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "change"
+          ],
+          "type": "object"
+        },
+        "TouchOut": {
+          "description": "A changeset that changed a conflicting file on the target: one of a file conflict's\n`theirs_changesets`.",
+          "properties": {
+            "agent": {
+              "description": "The agent that wrote it.",
+              "type": "string"
+            },
+            "changeset": {
+              "description": "The changeset's id.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "changeset",
+            "agent"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`land_check`: each change's outcome, on the target's head it read.",
+      "properties": {
+        "items": {
+          "description": "Each change's outcome, in the request's order.",
+          "items": {
+            "$ref": "#/$defs/LandCheckItemOut"
+          },
+          "type": "array"
+        },
+        "onto": {
+          "description": "The target's head the changes were planned on: a land with `expect_target` set to it\nlands what the check found, or nothing.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "onto",
+        "items"
+      ],
+      "title": "LandCheckResp",
+      "type": "object"
+    },
+    "LandItemIn": {
+      "$defs": {
+        "Rev": {
+          "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One change of a `land_check`: as `land` takes it.",
+      "properties": {
+        "base": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Rev"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where the change starts, as a land's `base`. When omitted, the merge base of `head` and\nthe target's head, along first parents."
+        },
+        "head": {
+          "$ref": "#/$defs/Rev",
+          "description": "The change's head."
+        },
+        "idempotency_key": {
+          "description": "The change's land key, as a land's: one the target holds a land of is `replayed`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "description": "The landed changeset's message, as a land's; a check does not use it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "head"
+      ],
+      "title": "LandItemIn",
+      "type": "object"
+    },
     "LandMode": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "How a workspace lands.",
@@ -6037,6 +6957,33 @@ expression: s.redact(&all)
       "title": "OperationOut",
       "type": "object"
     },
+    "PathChange": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "How a clean change changes one path.",
+      "oneOf": [
+        {
+          "const": "added",
+          "description": "A file where there was none.",
+          "type": "string"
+        },
+        {
+          "const": "modified",
+          "description": "The file there changes: its content, or its kind.",
+          "type": "string"
+        },
+        {
+          "const": "deleted",
+          "description": "The file there is deleted.",
+          "type": "string"
+        },
+        {
+          "const": "merged",
+          "description": "Both the change and the target changed the file, and their contents merge into content\nneither had.",
+          "type": "string"
+        }
+      ],
+      "title": "PathChange"
+    },
     "PathHistoryEntry": {
       "$defs": {
         "ChangeOp": {
@@ -6308,6 +7255,53 @@ expression: s.redact(&all)
         "path"
       ],
       "title": "PathHistoryReq",
+      "type": "object"
+    },
+    "PathSummaryOut": {
+      "$defs": {
+        "PathChange": {
+          "description": "How a clean change changes one path.",
+          "oneOf": [
+            {
+              "const": "added",
+              "description": "A file where there was none.",
+              "type": "string"
+            },
+            {
+              "const": "modified",
+              "description": "The file there changes: its content, or its kind.",
+              "type": "string"
+            },
+            {
+              "const": "deleted",
+              "description": "The file there is deleted.",
+              "type": "string"
+            },
+            {
+              "const": "merged",
+              "description": "Both the change and the target changed the file, and their contents merge into content\nneither had.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One path a clean change changes: an entry of a `land_check` item's `paths`.",
+      "properties": {
+        "change": {
+          "$ref": "#/$defs/PathChange",
+          "description": "How it changes."
+        },
+        "path": {
+          "description": "The path.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "change"
+      ],
+      "title": "PathSummaryOut",
       "type": "object"
     },
     "PublishedChange": {

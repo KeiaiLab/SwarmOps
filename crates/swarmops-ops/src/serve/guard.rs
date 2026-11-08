@@ -24,6 +24,7 @@ use swarmops_api::{
     ShowReq, StoreOps, TreeListing, UndoReq, UndoResp, UpgradeReq, UpgradeResp, VerifyReport,
     VerifyReq,
 };
+use swarmops_api::{LandCheckReq, LandCheckResp};
 use swarmops_api::{RevertReq, RevertResp};
 
 use super::refused;
@@ -284,6 +285,11 @@ impl<O: StoreOps> StoreOps for ServerOps<O> {
     fn revert(&self, who: &Identity, req: RevertReq) -> Result<RevertResp, OpError> {
         self.pass(self.inner.revert(who, req))
     }
+
+    // A read of the store and of the target, passed as `log` is: it names no content.
+    fn land_check(&self, req: LandCheckReq) -> Result<LandCheckResp, OpError> {
+        self.pass(self.inner.land_check(req))
+    }
 }
 
 #[cfg(test)]
@@ -402,6 +408,9 @@ mod tests {
         }
         fn revert(&self, _: &Identity, _: RevertReq) -> Result<RevertResp, OpError> {
             self.call("revert")
+        }
+        fn land_check(&self, _: LandCheckReq) -> Result<LandCheckResp, OpError> {
+            self.call("land_check")
         }
     }
 
@@ -582,6 +591,8 @@ mod tests {
         assert_passed(&s, "op_log", s.op_log(OpLogReq::default()).map(drop));
         let ref_log = RefLogReq::new("main");
         assert_passed(&s, "ref_log", s.ref_log(ref_log).map(drop));
+        let check = LandCheckReq::new(vec![swarmops_api::LandItemIn::new("main")]);
+        assert_passed(&s, "land_check", s.land_check(check).map(drop));
         assert_passed(&s, "verify", s.verify(VerifyReq::default()).map(drop));
     }
 

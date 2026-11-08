@@ -39,6 +39,7 @@ use swarmops_api::{
     SyncMode, SyncReq, SyncStatusReq,
 };
 use swarmops_api::{GcReq, RepairReq, UpgradeReq};
+use swarmops_api::{LandCheckReq, LandItemIn};
 use swarmops_ops::content::{MAX_CONTENT_BYTES, MAX_REQUEST_BYTES};
 use swarmops_ops::identity::{self, AUTH_TRUST};
 use swarmops_ops::{LocalOps, Recording, Resolved};
@@ -189,7 +190,7 @@ fn dispatch(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
             },
             |ops, (who, req)| ops.commit(&who, req),
         ),
-        land @ Command::Land { .. } => run_land(ctx, op, land),
+        land @ (Command::Land { .. } | Command::LandCheck { .. }) => run_land(ctx, op, land),
         rebase @ Command::Rebase { .. } => run_rebase(ctx, op, rebase),
         revert @ Command::Revert { .. } => run_revert(ctx, op, revert),
         Command::Blob(command) => run_blob(ctx, op, command),
@@ -358,8 +359,13 @@ fn history(
     )
 }
 
-/// Runs `land`, which names operation `op`, as the caller: `command` is the land's arguments.
+/// Runs `land`, which names operation `op`, as the caller: `command` is the land's arguments;
+/// with `--dry-run`, the check of its head, which names `land_check`; `land-check`'s, the check.
 fn run_land(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
+    let command = match command {
+        check @ Command::LandCheck { .. } => return run_land_check(ctx, op, check),
+        land => land,
+    };
     let Command::Land {
         head,
         base,
@@ -371,10 +377,23 @@ fn run_land(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
         resolve,
         expect_target,
         changes,
+        dry_run,
     } = command
     else {
         unreachable!("run passes land its own command alone");
     };
+
+    // A dry run is the check of HEAD alone, under the check's op.
+    if dry_run {
+        let mut item = LandItemIn::new(head);
+        item.base = base.map(Rev::from);
+        item.message = message;
+        item.idempotency_key = key;
+        let mut req = LandCheckReq::new(vec![item]);
+        req.target = target;
+        req.max_conflict_bytes = max_conflict_bytes;
+        return ctx.on_store(DRY_RUN_OP, || Ok(req), |ops, req| ops.land_check(req));
+    }
     ctx.on_store(
         op,
         || {
@@ -394,6 +413,25 @@ fn run_land(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
         |ops, (who, req)| ops.land(&who, req),
     )
 }
+
+/// Runs `land-check`, which names operation `op`: a read, as the caller or as no one.
+fn run_land_check(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
+    let Command::LandCheck {
+        heads,
+        onto,
+        max_conflict_bytes,
+    } = command
+    else {
+        unreachable!("run passes land-check its own command alone");
+    };
+    let mut req = LandCheckReq::new(heads.into_iter().map(LandItemIn::new).collect());
+    req.target = onto;
+    req.max_conflict_bytes = max_conflict_bytes;
+    ctx.on_store(op, || Ok(req), |ops, req| ops.land_check(req))
+}
+
+/// The operation `land --dry-run` names: the check's.
+const DRY_RUN_OP: &str = "land_check";
 
 /// Runs `rebase`, which names operation `op`.
 fn run_rebase(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {

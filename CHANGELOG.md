@@ -38,6 +38,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
   still holds (`text_head`). A failed land with changes, and so a failed `revert`, no longer
   leaves its commit's changeset object behind (the M18 design §5). `swarmops schema` lists 172
   types.
+- `swarmops land-check --onto REF HEAD...`, `swarmops land HEAD --dry-run` and the MCP tool
+  `land_check` say what landing 1 to 32 changes in order would come to, each merged onto what the
+  clean ones before it make, as `land` would land them one after another: `clean` with the root
+  tree it lands and the paths it changes (at most 1,000), `replayed`, `nothing_to_land`, or
+  `conflict` with `land`'s report. They take no lock and write nothing (the M18 design §6.2).
+  `swarmops mcp` lists 42 tools, and `swarmops schema` 179 types.
 
 ### Changed
 

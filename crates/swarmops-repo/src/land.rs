@@ -88,11 +88,16 @@
 //! The detached land ([`Repo::land_detached`], operations spec §3, the detached form) is the
 //! first attempt without the key walk and the publication: the same chain walk (step 2), merge
 //! (step 4), conflict report and writer of `L` (step 5), then `L`'s insert alone, moving no ref.
+//!
+//! The dry run ([`Repo::land_check`], the M18 design §6.2) is steps 1 to 4 for one change or
+//! several, in order, each merged onto what the clean ones before it made, in one snapshot: no
+//! lock, no object, no frame.
 
 mod batch;
 mod detached;
 mod key;
 mod landing;
+mod plan;
 mod publish;
 mod resolve;
 
@@ -103,9 +108,40 @@ pub use landing::{
 };
 use landing::{LAND_KEY, SQUASHED_FROM};
 pub(crate) use landing::{Prep, Prepared};
+pub use plan::{
+    CleanPlan, LandCheck, LandCheckRequest, MAX_CHECK_PATHS, MAX_GROUP_CHANGES, PathChange,
+    PlanItem, PlanOutcome, Planned,
+};
 pub use publish::{Publication, Published, Relocate};
 pub use resolve::{Resolution, Resolutions, Side};
 
-// The module documentation's links only.
-#[cfg(doc)]
-use crate::{error::RepoError, repo::Repo};
+use swarmops_store::ObjectStore;
+
+use crate::error::RepoError;
+use crate::repo::Repo;
+use crate::staged::Staged;
+
+impl<O: ObjectStore> Repo<O> {
+    /// Plans `req`'s changes, in order, onto the target's head in one snapshot, as
+    /// [`Repo::land`] would land them one after another ([`plan`](self) of the M18 design
+    /// §6.1), and writes nothing: each clean one's tree is kept in memory for the next to merge
+    /// onto, then dropped. [`RepoError::RefName`] and [`RepoError::NotFound`] for the target
+    /// as a land's; an item's head or base not found, a base that is no ancestor, a merge in a
+    /// chain or a key used for another change fails the whole check, as a land's request fails.
+    /// The operations layer takes 1 to [`MAX_GROUP_CHANGES`] items.
+    pub fn land_check(&self, req: LandCheckRequest) -> Result<LandCheck, RepoError> {
+        // 1. The target's head, in the snapshot every item is read in.
+        let LandCheckRequest { target, items } = req;
+        self.check_ref_name(&target)?;
+        let read = self.snapshot()?;
+        let theirs = read.get_ref(&target)?;
+        let theirs = theirs.ok_or(RepoError::NotFound(target.clone()))?;
+        let onto = landing::stored(&read, theirs.target)?;
+
+        // 2. The plan, its trees staged over the store and dropped with the overlay.
+        let staged = Staged::new(&self.objects);
+        let items = plan::plan(self, &read, &target, &onto, &items, &staged)?;
+        drop(staged);
+        Ok(LandCheck::new(onto.id, items))
+    }
+}

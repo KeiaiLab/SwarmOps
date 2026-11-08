@@ -2830,6 +2830,177 @@ impl RevertResp {
     }
 }
 
+/// `land_check` (CLI `land --dry-run`, `land-check`): what landing `changes`, in order, onto
+/// `target` would come to, each after the clean ones before it, as `land` would land them one
+/// after another. It writes nothing and takes no lock. A head or base not found, a base that
+/// is no ancestor, a merge in a chain or a key used for another change fails the whole check,
+/// as it fails a land.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LandCheckReq {
+    /// The ref the changes would land on: `main` or `release/<name>`, which must exist.
+    #[serde(default = "default_target")]
+    pub target: String,
+    /// The changes, in the order they would land: 1 to 32 (`E_INVALID_ARG` for none,
+    /// `E_TOO_LARGE` past 32), each key once.
+    pub changes: Vec<LandItemIn>,
+    /// The most bytes of hunk text each conflicting change's report carries, as a land's.
+    #[serde(default = "default_max_conflict_bytes")]
+    pub max_conflict_bytes: u64,
+}
+
+impl LandCheckReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(changes: Vec<LandItemIn>) -> Self {
+        Self {
+            target: default_target(),
+            changes,
+            max_conflict_bytes: default_max_conflict_bytes(),
+        }
+    }
+}
+
+/// One change of a `land_check`: as `land` takes it.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LandItemIn {
+    /// The change's head.
+    pub head: Rev,
+    /// Where the change starts, as a land's `base`. When omitted, the merge base of `head` and
+    /// the target's head, along first parents.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base: Option<Rev>,
+    /// The landed changeset's message, as a land's; a check does not use it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// The change's land key, as a land's: one the target holds a land of is `replayed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+impl LandItemIn {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(head: impl Into<Rev>) -> Self {
+        Self {
+            head: head.into(),
+            base: None,
+            message: None,
+            idempotency_key: None,
+        }
+    }
+}
+
+/// `land_check`: each change's outcome, on the target's head it read.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LandCheckResp {
+    /// The target's head the changes were planned on: a land with `expect_target` set to it
+    /// lands what the check found, or nothing.
+    pub onto: String,
+    /// Each change's outcome, in the request's order.
+    pub items: Vec<LandCheckItemOut>,
+}
+
+impl LandCheckResp {
+    /// Takes every field.
+    pub fn new(onto: impl Into<String>, items: Vec<LandCheckItemOut>) -> Self {
+        Self {
+            onto: onto.into(),
+            items,
+        }
+    }
+}
+
+/// One change's outcome in a `land_check`.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LandCheckItemOut {
+    /// The change's head, a full id.
+    pub head: String,
+    /// What landing it after the clean changes before it would come to.
+    pub outcome: ItemOutcome,
+    /// For `clean`, the root tree its landed changeset would have; for `replayed`, omitted, as
+    /// for the others.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
+    /// For `conflict`, the report a land gives in `E_CONFLICT`'s `details.report`. Its hunks
+    /// are the merge's with the clean changes before it; `theirs` and the changesets that
+    /// touched each file are the target's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub report: Option<ConflictReport>,
+    /// For `clean`, the paths it changes, in path order: at most 1,000.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<PathSummaryOut>,
+    /// Whether it changes more paths than `paths` lists. Omitted when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub paths_truncated: bool,
+}
+
+impl LandCheckItemOut {
+    /// Takes the required fields; the others are empty.
+    pub fn new(head: impl Into<String>, outcome: ItemOutcome) -> Self {
+        Self {
+            head: head.into(),
+            outcome,
+            root: None,
+            report: None,
+            paths: Vec::new(),
+            paths_truncated: false,
+        }
+    }
+}
+
+/// What landing one change would come to: a `land_check` item's `outcome`.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ItemOutcome {
+    /// It merges cleanly: `root` and `paths` say what it lands.
+    Clean,
+    /// A land with its `idempotency_key` landed it before: landing it again replays.
+    Replayed,
+    /// It has nothing to land: its head is on the target, or the target holds its change.
+    NothingToLand,
+    /// It conflicts: `report` says where.
+    Conflict,
+}
+
+/// One path a clean change changes: an entry of a `land_check` item's `paths`.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PathSummaryOut {
+    /// The path.
+    pub path: String,
+    /// How it changes.
+    pub change: PathChange,
+}
+
+impl PathSummaryOut {
+    /// Takes every field.
+    pub fn new(path: impl Into<String>, change: PathChange) -> Self {
+        Self {
+            path: path.into(),
+            change,
+        }
+    }
+}
+
+/// How a clean change changes one path.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum PathChange {
+    /// A file where there was none.
+    Added,
+    /// The file there changes: its content, or its kind.
+    Modified,
+    /// The file there is deleted.
+    Deleted,
+    /// Both the change and the target changed the file, and their contents merge into content
+    /// neither had.
+    Merged,
+}
+
 /// Why a land could not merge its change onto the target, file by file, or could not apply its
 /// resolutions to it (operations spec §3): the report `E_CONFLICT` carries in `details.report`.
 /// `ours` is the change, `theirs` the target. Ids are full.
@@ -4565,6 +4736,14 @@ pub trait StoreOps {
     fn revert(&self, who: &Identity, req: RevertReq) -> Result<RevertResp, OpError> {
         let _ = (who, req);
         Err(not_built("revert"))
+    }
+
+    /// What landing changes in order onto a ref would come to, writing nothing (CLI `land
+    /// --dry-run`, `land-check`). A read of the store. A store that does not have it answers
+    /// `E_INVALID_ARG`.
+    fn land_check(&self, req: LandCheckReq) -> Result<LandCheckResp, OpError> {
+        let _ = req;
+        Err(not_built("land_check"))
     }
 }
 

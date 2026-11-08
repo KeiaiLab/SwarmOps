@@ -2,7 +2,7 @@
 
 # Schema types
 
-The 172 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
+The 179 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
 
 ## Index
 
@@ -65,6 +65,11 @@ The 172 request, response and value types of the API, as `swarmops schema` print
 | [`IdentityInfo`](#identityinfo) | object | `whoami`: the identity the caller's mutations carry. |
 | [`InfoReq`](#inforeq) | object | `info`: describe the store. |
 | [`InitReq`](#initreq) | object | `init`: create a store. |
+| [`ItemOutcome`](#itemoutcome) | enumeration | What landing one change would come to: a `land_check` item's `outcome`. |
+| [`LandCheckItemOut`](#landcheckitemout) | object | One change's outcome in a `land_check`. |
+| [`LandCheckReq`](#landcheckreq) | object | `land_check` (CLI `land --dry-run`, `land-check`): what landing `changes`, in order, onto `target` would come to, each after the clean ones before it, as `land` would land them one after another. |
+| [`LandCheckResp`](#landcheckresp) | object | `land_check`: each change's outcome, on the target's head it read. |
+| [`LandItemIn`](#landitemin) | object | One change of a `land_check`: as `land` takes it. |
 | [`LandMode`](#landmode) | enumeration | How a workspace lands. |
 | [`LandReq`](#landreq) | object | `land`: merge a change three-way onto a target ref and publish it there as one new changeset, in one transaction. |
 | [`LandResp`](#landresp) | object | `land`: where the change landed. |
@@ -85,9 +90,11 @@ The 172 request, response and value types of the API, as `swarmops schema` print
 | [`OpLogReq`](#oplogreq) | object | `op_log` (CLI `op log`): the store's operations, newest first, a page at a time. |
 | [`OperationKind`](#operationkind) | enumeration | What an operation did, read from what it recorded. |
 | [`OperationOut`](#operationout) | object | One operation: a write transaction, as the journal recorded it. |
+| [`PathChange`](#pathchange) | enumeration | How a clean change changes one path. |
 | [`PathHistoryEntry`](#pathhistoryentry) | object | One changeset of a path's history, and what the path holds after it. |
 | [`PathHistoryPage`](#pathhistorypage) | object | `path_history` (CLI `history`): a page of a path's history, newest first. |
 | [`PathHistoryReq`](#pathhistoryreq) | object | `path_history` (CLI `history`): the changesets that changed what a path holds, newest first, following first parents, a page at a time. |
+| [`PathSummaryOut`](#pathsummaryout) | object | One path a clean change changes: an entry of a `land_check` item's `paths`. |
 | [`PublishedChange`](#publishedchange) | object | An unpublished change a sync landed onto the remote's head. |
 | [`PushReq`](#pushreq) | object | `push`: send a store ref to a remote branch by compare-and-swap, never forcing: the remote moves only from the head the last fetch saw to a descendant of it. |
 | [`PushResp`](#pushresp) | object | `push`: where the remote branch stands. |
@@ -1013,6 +1020,70 @@ Kind: object. `swarmops schema InitReq` prints its JSON Schema.
 | `name` | `string` | yes | The repository's name: at most 255 bytes of UTF-8. |
 | `path` | `string` | yes | The directory to create the store in. |
 
+## ItemOutcome
+
+What landing one change would come to: a `land_check` item's `outcome`.
+
+Kind: enumeration. `swarmops schema ItemOutcome` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"clean"` | It merges cleanly: `root` and `paths` say what it lands. |
+| `"replayed"` | A land with its `idempotency_key` landed it before: landing it again replays. |
+| `"nothing_to_land"` | It has nothing to land: its head is on the target, or the target holds its change. |
+| `"conflict"` | It conflicts: `report` says where. |
+
+## LandCheckItemOut
+
+One change's outcome in a `land_check`.
+
+Kind: object. `swarmops schema LandCheckItemOut` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `head` | `string` | yes | The change's head, a full id. |
+| `outcome` | [`ItemOutcome`](#itemoutcome) | yes | What landing it after the clean changes before it would come to. |
+| `paths` | array of [`PathSummaryOut`](#pathsummaryout) | no | For `clean`, the paths it changes, in path order: at most 1,000. |
+| `paths_truncated` | `boolean` | no | Whether it changes more paths than `paths` lists. Omitted when false. |
+| `report` | [`ConflictReport`](#conflictreport) or `null` | no | For `conflict`, the report a land gives in `E_CONFLICT`'s `details.report`. Its hunks are the merge's with the clean changes before it; `theirs` and the changesets that touched each file are the target's. |
+| `root` | `string` or `null` | no | For `clean`, the root tree its landed changeset would have; for `replayed`, omitted, as for the others. |
+
+## LandCheckReq
+
+`land_check` (CLI `land --dry-run`, `land-check`): what landing `changes`, in order, onto `target` would come to, each after the clean ones before it, as `land` would land them one after another. It writes nothing and takes no lock. A head or base not found, a base that is no ancestor, a merge in a chain or a key used for another change fails the whole check, as it fails a land.
+
+Kind: object. `swarmops schema LandCheckReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `changes` | array of [`LandItemIn`](#landitemin) | yes | The changes, in the order they would land: 1 to 32 (`E_INVALID_ARG` for none, `E_TOO_LARGE` past 32), each key once. |
+| `max_conflict_bytes` | `integer` (uint64) | no | The most bytes of hunk text each conflicting change's report carries, as a land's. Default: `32768`. |
+| `target` | `string` | no | The ref the changes would land on: `main` or `release/<name>`, which must exist. Default: `"main"`. |
+
+## LandCheckResp
+
+`land_check`: each change's outcome, on the target's head it read.
+
+Kind: object. `swarmops schema LandCheckResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `items` | array of [`LandCheckItemOut`](#landcheckitemout) | yes | Each change's outcome, in the request's order. |
+| `onto` | `string` | yes | The target's head the changes were planned on: a land with `expect_target` set to it lands what the check found, or nothing. |
+
+## LandItemIn
+
+One change of a `land_check`: as `land` takes it.
+
+Kind: object. `swarmops schema LandItemIn` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `base` | [`Rev`](#rev) or `null` | no | Where the change starts, as a land's `base`. When omitted, the merge base of `head` and the target's head, along first parents. |
+| `head` | [`Rev`](#rev) | yes | The change's head. |
+| `idempotency_key` | `string` or `null` | no | The change's land key, as a land's: one the target holds a land of is `replayed`. |
+| `message` | `string` or `null` | no | The landed changeset's message, as a land's; a check does not use it. |
+
 ## LandMode
 
 How a workspace lands.
@@ -1283,6 +1354,19 @@ Kind: object. `swarmops schema OperationOut` prints its JSON Schema.
 | `op` | `integer` (uint64) | yes | Its number: its journal frame's, from 0 in commit order. `before` pages on from it. |
 | `ref_moves` | array of [`RefMoveOut`](#refmoveout) | yes | The ref moves it made, in its order. |
 
+## PathChange
+
+How a clean change changes one path.
+
+Kind: enumeration. `swarmops schema PathChange` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"added"` | A file where there was none. |
+| `"modified"` | The file there changes: its content, or its kind. |
+| `"deleted"` | The file there is deleted. |
+| `"merged"` | Both the change and the target changed the file, and their contents merge into content neither had. |
+
 ## PathHistoryEntry
 
 One changeset of a path's history, and what the path holds after it.
@@ -1324,6 +1408,17 @@ Kind: object. `swarmops schema PathHistoryReq` prints its JSON Schema.
 | `limit` | `integer` (uint) | no | The most entries to return: at least 1 (0 is `E_INVALID_ARG`). Default: `50`. At least 1. |
 | `path` | `string` | yes | The repository path: a file, whose history is that of its content and kind, or a directory, whose history is that of everything below it. One trailing `/` is taken. |
 | `rev` | [`Rev`](#rev) or `null` | no | Where to start; `main` when omitted. |
+
+## PathSummaryOut
+
+One path a clean change changes: an entry of a `land_check` item's `paths`.
+
+Kind: object. `swarmops schema PathSummaryOut` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `change` | [`PathChange`](#pathchange) | yes | How it changes. |
+| `path` | `string` | yes | The path. |
 
 ## PublishedChange
 

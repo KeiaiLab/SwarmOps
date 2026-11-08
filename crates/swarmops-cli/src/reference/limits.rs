@@ -175,7 +175,7 @@ const fn internal_value(
 // ---- The tables ----
 
 /// The limits a request is refused past, with the error it gets.
-static CONTRACT: [Limit; 15] = [
+static CONTRACT: [Limit; 16] = [
     Limit {
         name: "Request text",
         constant: code(
@@ -421,10 +421,25 @@ static CONTRACT: [Limit; 15] = [
         what: "`revert --reason` (`reason`): 1 to this many bytes, checked before anything is \
                    resolved or read, with `details.reason_bytes`.",
     },
+    Limit {
+        name: "Land check changes",
+        constant: code(
+            "swarmops_repo::land::MAX_GROUP_CHANGES",
+            "crates/swarmops-repo/src/land/plan.rs",
+            "pub const MAX_GROUP_CHANGES: usize = 32;",
+            || bytes::to_u64(swarmops_repo::land::MAX_GROUP_CHANGES),
+        ),
+        unit: Unit::Count("changes"),
+        commands: &["land-check"],
+        errors: &[ErrorCode::TooLarge],
+        what: "The changes one `land-check` (`changes`) plans in order: more are refused \
+                   before anything is resolved or read, with `details.max_changes`; none is \
+                   `E_INVALID_ARG`.",
+    },
 ];
 
 /// The bounds a response keeps without an error: what it leaves out, and how it says so.
-static BOUNDS: [Limit; 8] = [
+static BOUNDS: [Limit; 9] = [
     Limit {
         name: "Lossy commits listed",
         constant: code(
@@ -513,6 +528,20 @@ static BOUNDS: [Limit; 8] = [
         what: "The most changesets an `E_CONFLICT` report's file lists in \
                    `theirs_changesets`, newest first, of those on the target since the base \
                    that touched its path; `theirs_changesets_truncated` says there were more.",
+    },
+    Limit {
+        name: "Land check paths listed",
+        constant: code(
+            "swarmops_repo::land::MAX_CHECK_PATHS",
+            "crates/swarmops-repo/src/land/plan.rs",
+            "pub const MAX_CHECK_PATHS: usize = 1000;",
+            || bytes::to_u64(swarmops_repo::land::MAX_CHECK_PATHS),
+        ),
+        unit: Unit::Count("paths"),
+        commands: &["land-check", "land"],
+        errors: &[],
+        what: "The paths a clean change of `land-check` or `land --dry-run` lists in `paths`, \
+                   in path order; `paths_truncated` says it changes more.",
     },
     Limit {
         name: "Verify findings",
