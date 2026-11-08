@@ -43,6 +43,7 @@ mod serve_records;
 mod sigkill;
 mod so;
 mod sync_load;
+mod undo_kinds;
 mod ws;
 mod ws_processes;
 
