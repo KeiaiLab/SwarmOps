@@ -666,8 +666,12 @@ mod profile {
 
     use swarmops_testkit::remote::GitLedger;
 
-    use super::{AGENT, ORIGIN, Remote, SLOW_RUN, land, text, timed};
+    use super::{AGENT, LONG, ORIGIN, Remote, SHORT, SLOW_RUN, land, text, timed};
     use crate::support::{Store, run_within};
+
+    /// The variable that names the sub-cases to run, as `<commits>-<key|nokey>` separated by
+    /// commas (`1000-key,12000-nokey`); all four when unset.
+    const CASES_VAR: &str = "SWARMOPS_TEST_CLI_FIRST_SYNC_CASES";
 
     /// The variable that names the phase log (the test hooks only).
     const PHASE_LOG_ENV: &str = "SWARMOPS_TEST_PHASE_LOG";
@@ -696,6 +700,63 @@ mod profile {
                 KeyMode::Present => "key",
                 KeyMode::Absent => "nokey",
             }
+        }
+    }
+
+    /// One sub-case of the profile: a history length and a key mode.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(super) struct Case {
+        /// The remote's commits.
+        pub(super) commits: usize,
+        /// Whether the store finds a memo key.
+        pub(super) mode: KeyMode,
+    }
+
+    impl Case {
+        /// The four, in the order they run.
+        const ALL: [Case; 4] = [
+            Case::new(SHORT, KeyMode::Present),
+            Case::new(SHORT, KeyMode::Absent),
+            Case::new(LONG, KeyMode::Present),
+            Case::new(LONG, KeyMode::Absent),
+        ];
+
+        /// The sub-case of `commits` commits in `mode`.
+        const fn new(commits: usize, mode: KeyMode) -> Case {
+            Case { commits, mode }
+        }
+
+        /// Its name in [`CASES_VAR`]: `1000-key`.
+        fn name(self) -> String {
+            format!("{}-{}", self.commits, self.mode.label())
+        }
+
+        /// The sub-cases [`CASES_VAR`] names, in [`Case::ALL`]'s order.
+        pub(super) fn chosen() -> Vec<Case> {
+            Case::named(std::env::var(CASES_VAR).ok().as_deref())
+        }
+
+        /// The sub-cases `list` names, in [`Case::ALL`]'s order; all of them if it is `None`. A
+        /// name that is no sub-case's fails the run.
+        fn named(list: Option<&str>) -> Vec<Case> {
+            let Some(list) = list else {
+                return Case::ALL.to_vec();
+            };
+
+            // 1. Every name must be a sub-case's: an unknown one fails before any clone.
+            let named: Vec<Case> = (list.split(','))
+                .map(|name| {
+                    (Case::ALL.into_iter())
+                        .find(|case| case.name() == name.trim())
+                        .unwrap_or_else(|| panic!("no case {name:?} in {CASES_VAR}"))
+                })
+                .collect();
+
+            // 2. The run order stays the full case's.
+            Case::ALL
+                .into_iter()
+                .filter(|case| named.contains(case))
+                .collect()
         }
     }
 
@@ -840,6 +901,38 @@ mod profile {
         (first, second)
     }
 
+    /// Unset, every sub-case runs, in the full case's order.
+    #[test]
+    fn unset_selects_all() {
+        let names: Vec<String> = Case::named(None).into_iter().map(Case::name).collect();
+        assert_eq!(
+            names,
+            ["1000-key", "1000-nokey", "12000-key", "12000-nokey"]
+        );
+    }
+
+    /// A list selects its sub-cases once each, in the full case's order.
+    #[test]
+    fn list_selects_in_order() {
+        let chosen = Case::named(Some("12000-nokey, 1000-key,12000-nokey"));
+        let names: Vec<String> = chosen.into_iter().map(Case::name).collect();
+        assert_eq!(names, ["1000-key", "12000-nokey"]);
+    }
+
+    /// A name that is no sub-case's fails the run.
+    #[test]
+    #[should_panic(expected = "no case")]
+    fn unknown_is_refused() {
+        Case::named(Some("1000-maybe"));
+    }
+
+    /// An empty list names no sub-case and fails the run.
+    #[test]
+    #[should_panic(expected = "no case")]
+    fn empty_is_refused() {
+        Case::named(Some(""));
+    }
+
     /// `remote`'s variables, then `extra`, which a later reading takes over.
     fn vars_with<'a>(remote: &'a Remote, extra: &[(&'a str, &'a str)]) -> Vec<(&'a str, &'a str)> {
         let mut vars = remote.vars();
@@ -853,26 +946,24 @@ mod profile {
 /// timed by the client, by phase (`SWARMOPS_TEST_PHASE_LOG`, which needs the test hooks) and by
 /// git child (the test kit's ledger); then a second sync on the same store. One
 /// `remote-perf: first sync <commits> <key|nokey> <phase> <ms>` line per phase, and the same as
-/// `second sync`.
+/// `second sync`. `SWARMOPS_TEST_CLI_FIRST_SYNC_CASES` (`1000-key,12000-nokey`) runs only the
+/// sub-cases it names, each as the full case runs it.
 #[cfg(feature = "test-hooks")]
 #[test]
-#[ignore = "slow, ~25 min: imports 26,000 commits, four profiled clones, run by `just perf`"]
+#[ignore = "slow, ~30 min: imports 26,000 commits, four profiled clones (under 1 min a \
+            1,000-commit sub-case, about 15 min a 12,000-commit one), run by `just perf`"]
 fn first_sync_phases() {
-    use profile::KeyMode;
-
-    for commits in [SHORT, LONG] {
-        for mode in [KeyMode::Present, KeyMode::Absent] {
-            let (first, second) = profile::first_sync(commits, mode);
-            for (which, lines) in [("first", &first), ("second", &second)] {
-                for timed in lines {
-                    println!(
-                        "remote-perf: {which} sync {commits} {} {} {:.1} (count {})",
-                        mode.label(),
-                        timed.phase,
-                        timed.ms,
-                        timed.count
-                    );
-                }
+    for profile::Case { commits, mode } in profile::Case::chosen() {
+        let (first, second) = profile::first_sync(commits, mode);
+        for (which, lines) in [("first", &first), ("second", &second)] {
+            for timed in lines {
+                println!(
+                    "remote-perf: {which} sync {commits} {} {} {:.1} (count {})",
+                    mode.label(),
+                    timed.phase,
+                    timed.ms,
+                    timed.count
+                );
             }
         }
     }
