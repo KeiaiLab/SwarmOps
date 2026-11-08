@@ -46,6 +46,7 @@ mod sync_load;
 mod undo_kinds;
 mod ws;
 mod ws_processes;
+mod ws_sigkill;
 
 /// Every test file is a module here: with `autotests = false` Cargo builds no target from a file
 /// of `tests/` that no `mod` line names, and its tests would never run (jj's
