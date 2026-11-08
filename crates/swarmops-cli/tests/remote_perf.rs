@@ -97,6 +97,7 @@ impl Remote {
             ("GIT_CONFIG_NOSYSTEM".to_owned(), "1".to_owned()),
             ("GIT_CONFIG_GLOBAL".to_owned(), "/dev/null".to_owned()),
         ];
+
         Remote {
             server,
             http,
@@ -407,6 +408,29 @@ fn sync_of_one_land_on_12000_commits() {
     synced.expect("ran").ok();
     println!(
         "remote-perf: sync of one land: {:.3} s on {LONG} commits (target under 1 s)",
+        took.as_secs_f64()
+    );
+}
+
+/// Target 3's ratio (the M18 design §2.3): the same sync of one land on 1,000 commits, which the
+/// 12,000-commit sync may take at most 1.5 times.
+#[test]
+#[ignore = "slow, ~160 s: imports 1,000 commits, run by `just perf`"]
+fn sync_of_one_land_on_1000_commits() {
+    let remote = Remote::with_history(SHORT);
+    let store = remote.cloned();
+
+    // 1. Both sides move: the remote gains a commit, the store lands one.
+    remote.commit(0);
+    land(&store, "local.txt", "local\n");
+
+    // 2. The sync, timed by the client.
+    let mut synced = None;
+    let took = timed(|| synced = Some(remote.on(&store, &["sync", ORIGIN])));
+    synced.expect("ran").ok();
+    println!(
+        "remote-perf: sync of one land: {:.3} s on {SHORT} commits (the {LONG}-commit sync at \
+         most 1.5 times this)",
         took.as_secs_f64()
     );
 }

@@ -30,6 +30,10 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 - `just check-slow` runs the measurement cases (`check-ci-perf`'s) in a second, optimized run;
   the rest of the suite stays unoptimized.
+- The git import, given the store's memo key, leaves the export oid memos of each commit, tree
+  and blob it converts without loss once their frame is durable, so that the first sync or push
+  after a clone stops at the imported head instead of deriving the history below it (the M18
+  design §2.3).
 
 ## [0.10.0] - 2026-11-07
 

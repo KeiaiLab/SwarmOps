@@ -3012,3 +3012,233 @@ mod objects_only {
         assert_eq!(refs(&repo), [], "no ref made");
     }
 }
+
+/// The memos an import leaves under its memo key (the M18 design §2.3, §2.5): each commit, tree
+/// and blob it converts without loss gets its `_mac` memo after the frame that holds it, so that
+/// the first export after a clone stops its walk at the imported head; a lossy one gets none; and
+/// an import cut off before its memos leaves an export that derives the same oid.
+mod import_memos {
+    use swarmops_core::ObjectId;
+    use swarmops_git::{ExportOid, ExportRequest, MemoKey, export, verify_export_oids_with};
+    use swarmops_store::DerivedSlot;
+    use swarmops_testkit::repo::request as commit_request;
+
+    use super::*;
+    use crate::support::{MemSink, counted_store};
+
+    /// The commits of the imported history.
+    const HISTORY: usize = 200;
+
+    /// The files of `sub/`, which every commit keeps.
+    const KEPT_FILES: usize = 20;
+
+    /// The most object reads the export of one land on the imported head may take.
+    const MAX_READS: u64 = 10;
+
+    /// The memos under a key the import writes, by name.
+    const MAC_MEMOS: [&str; 3] = ["git_oid_mac", "git_tree_oid_mac", "git_blob_oid_mac"];
+
+    /// The test's memo key.
+    fn key() -> MemoKey {
+        MemoKey::from_bytes([5; 32])
+    }
+
+    /// A git history of `n` commits in memory: each changes `f.txt` and keeps `keep.txt` and the
+    /// [`KEPT_FILES`] files of `sub/`. The source, every object it holds, and the tip.
+    fn history(n: usize) -> (MemSource, Vec<GitOid>, GitOid) {
+        let mut source = MemSource::default();
+        let mut made = Vec::new();
+
+        // 1. What every commit keeps.
+        let keep = source.blob(b"kept\n");
+        made.push(keep);
+        let names: Vec<String> = (0..KEPT_FILES).map(|i| format!("s{i:02}.txt")).collect();
+        let mut entries = Vec::new();
+        for (i, name) in names.iter().enumerate() {
+            let blob = source.blob(format!("sub {i}\n").as_bytes());
+            made.push(blob);
+            entries.push(("100644", name.as_bytes(), blob));
+        }
+        let sub = source.tree(&entries);
+        made.push(sub);
+
+        // 2. The commits, each over a new `f.txt`.
+        let mut tip: Option<GitOid> = None;
+        for i in 0..n {
+            let blob = source.blob(format!("{i}\n").as_bytes());
+            let root = source.tree(&[
+                ("100644", b"f.txt", blob),
+                ("100644", b"keep.txt", keep),
+                ("40000", b"sub", sub),
+            ]);
+            let commit = source.commit(root, tip.as_slice(), &format!("{i}\n"));
+            made.extend([blob, root, commit]);
+            tip = Some(commit);
+        }
+        (source, made, tip.expect("one commit at least"))
+    }
+
+    /// A request to import `tip` into `main` under `key`.
+    fn keyed(tip: GitOid, key: &MemoKey) -> ImportRequest {
+        let mut req = request(&tip.to_string());
+        req.memo_key = Some(key.clone());
+        req
+    }
+
+    /// The bytes of `subject`'s memo `name` under `key` in `repo`'s derived store.
+    fn mac_memo(repo: &LocalRepo, name: &str, subject: ObjectId, key: &MemoKey) -> Option<Vec<u8>> {
+        let id = key.id();
+        let slot = DerivedSlot::new(name, 1, subject, &id);
+        repo.derived_store().get(&slot).unwrap()
+    }
+
+    /// A destination that holds every object of `made` and has `main` at `tip`: the remote a
+    /// clone came from.
+    fn remote_of(source: &MemSource, made: &[GitOid], tip: GitOid) -> MemSink {
+        let objects = made.iter().map(|&oid| source.read(oid).expect("held"));
+        let mut sink = MemSink::with_packed(objects);
+        sink.set_branch("main", tip);
+        sink
+    }
+
+    /// Lands one native change on `main` of `repo`: its id.
+    fn land(repo: &LocalRepo) -> ChangesetId {
+        let head = main_head(repo);
+        let changes = vec![put("f.txt", b"landed\n")];
+        let id = repo
+            .commit(commit_request(&[head], changes, "Landed\n"))
+            .expect("commit")
+            .id;
+        let moved = repo.cas_ref("main", Some(head), Some(id), ACTOR).unwrap();
+        assert!(matches!(moved.result, CasResult::Applied { .. }));
+        id
+    }
+
+    /// An import of 200 commits under a key, then one land on it: its export under the key reads
+    /// at most a handful of the store's objects, the import's memos of the head, its tree and its
+    /// blobs standing for the history below, and exports to the commit the keyless derive gives;
+    /// every memo the import wrote is what the store's objects give.
+    #[test]
+    fn an_import_leaves_memos_the_export_trusts() {
+        let (_dir, _root, repo, reads) = counted_store();
+        let (source, made, tip) = history(HISTORY);
+        let key = key();
+        import(&repo, &source, &keyed(tip, &key)).expect("import under the key");
+
+        // 1. The memos are the objects' own.
+        let wrong = verify_export_oids_with(&repo, Some(&key)).expect("verify");
+        assert_eq!(wrong, [], "every memo checks");
+
+        // 2. One land, exported under the key onto the remote the clone came from.
+        let landed = land(&repo);
+        let mut sink = remote_of(&source, &made, tip);
+        let mut req = ExportRequest::new("main", "main");
+        req.memo_key = Some(key.clone());
+        reads.take();
+        let report = export(&repo, &mut sink, &req).expect("export under the key");
+        let with_key = reads.take();
+        assert_eq!(report.commits_written, 1, "{report:?}");
+        assert!(
+            with_key <= MAX_READS,
+            "{with_key} object reads with the import's memos"
+        );
+
+        // 3. The commit the keyless derive gives.
+        let keyless = repo.derived::<ExportOid>(landed, &()).expect("derive");
+        assert_eq!(report.head_oid, keyless.git_oid());
+    }
+
+    /// A commit converted with a loss gets no memo, nor do its tree and its blobs, nor the commit
+    /// above it, which exports to a new commit; the lossless commit below it gets its memos.
+    #[test]
+    fn a_lossy_object_gets_no_memo() {
+        let (_dir, _root, repo, _reads) = counted_store();
+        let mut source = MemSource::default();
+
+        // 1. A lossless root, a commit whose mode git does not write, and one above it.
+        let plain = source.blob(b"plain\n");
+        let odd = source.blob(b"odd mode\n");
+        let first_tree = source.tree(&[("100644", b"a.txt", plain)]);
+        let first = source.commit(first_tree, &[], "First\n");
+        let lossy_tree = source.tree(&[("100644", b"a.txt", plain), ("100664", b"b.txt", odd)]);
+        let lossy = source.commit(lossy_tree, &[first], "Lossy\n");
+        let above_tree = source.tree(&[("100644", b"a.txt", plain)]);
+        let above = source.commit(above_tree, &[lossy], "Above\n");
+        let key = key();
+        let mut req = keyed(above, &key);
+        req.lossy = [LossyClass::Modes].into_iter().collect();
+        let report = import(&repo, &source, &req).expect("import");
+        assert_eq!(report.lossy_total, 1, "{report:?}");
+
+        // 2. The memos by changeset: the first one's, and none above.
+        let ids = main_log(&repo);
+        assert_eq!(ids, [above, lossy, first], "main's commits");
+        let changesets = changesets_by_commit(&repo);
+        let memo = |commit: GitOid| mac_memo(&repo, MAC_MEMOS[0], changesets[&commit].0, &key);
+        assert!(memo(first).is_some(), "the lossless root's memo");
+        assert_eq!(memo(lossy), None, "the lossy commit's");
+        assert_eq!(memo(above), None, "the commit above the lossy one's");
+
+        // 3. The lossy commit's tree and its odd blob: none.
+        let lossy_root = repo
+            .changeset(changesets[&lossy])
+            .unwrap()
+            .unwrap()
+            .changeset
+            .root;
+        assert_eq!(mac_memo(&repo, MAC_MEMOS[1], lossy_root.0, &key), None);
+        let odd_blob = swarmops_testkit::repo::blob(b"odd mode\n");
+        assert_eq!(mac_memo(&repo, MAC_MEMOS[2], odd_blob.0, &key), None);
+        let wrong = verify_export_oids_with(&repo, Some(&key)).expect("verify");
+        assert_eq!(wrong, [], "every memo checks");
+    }
+
+    /// The changeset of each commit `main` reaches, by its `git.oid`.
+    fn changesets_by_commit(repo: &LocalRepo) -> HashMap<GitOid, ChangesetId> {
+        let mut by_commit = HashMap::new();
+        let mut next = Some(main_head(repo));
+        while let Some(id) = next {
+            let stored = repo.changeset(id).unwrap().unwrap().changeset;
+            by_commit.insert(git_oid(repo, id), id);
+            next = stored.parents.first().copied();
+        }
+        by_commit
+    }
+
+    /// An import killed after its last frame, before its memos (§2.5), leaves the frames and none
+    /// of the memos, or some of them: the next export under the key gives the oid an import that
+    /// wrote every memo gives.
+    #[test]
+    fn an_import_killed_before_its_memos_exports_the_same_oid() {
+        let (source, made, tip) = history(HISTORY);
+        let key = key();
+        let exported = |root: &Utf8Path, repo: &LocalRepo, cut: &[&str]| {
+            // What a kill before the memo writes leaves: the memos `cut` names absent.
+            for name in cut {
+                let dir = root.join("meta/derived").join(name);
+                if dir.exists() {
+                    fs::remove_dir_all(&dir).expect("remove the memos");
+                }
+            }
+            land(repo);
+            let mut sink = remote_of(&source, &made, tip);
+            let mut req = ExportRequest::new("main", "main");
+            req.memo_key = Some(key.clone());
+            export(repo, &mut sink, &req).expect("export").head_oid
+        };
+
+        // 1. Every memo written.
+        let (_whole_dir, whole_root, whole, _) = counted_store();
+        import(&whole, &source, &keyed(tip, &key)).expect("import");
+        let expected = exported(&whole_root, &whole, &[]);
+
+        // 2. None of them, and every one but the commits'.
+        for cut in [&MAC_MEMOS[..], &MAC_MEMOS[..1]] {
+            let (_dir, root, repo, _) = counted_store();
+            import(&repo, &source, &keyed(tip, &key)).expect("import");
+            assert_eq!(exported(&root, &repo, cut), expected, "cut {cut:?}");
+            let wrong = verify_export_oids_with(&repo, Some(&key)).expect("verify");
+            assert_eq!(wrong, [], "every memo checks");
+        }
+    }
+}

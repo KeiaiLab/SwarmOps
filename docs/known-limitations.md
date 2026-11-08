@@ -671,13 +671,19 @@ left).
 - **A sync grows with the history.** A push and a fetch no longer do: with the memo key, a
   one-commit push costs 1.02 times on 12,000 commits what it does on 1,000 (3.7 to 3.9 times
   before v0.6.0), and with the mirror's commit-graph (v0.7.0) a one-commit fetch costs 1.34 times
-  (1.65 in v0.6.0), against the roadmap's 1.5. A sync of one land on 12,000 commits, the first
-  after a clone, took 49.6 s, against the roadmap's 1 s (52.9 s in v0.6.0, 8.76 s in M13's loaded
-  run): its land step (10.48 s) and its push (10.13 s) grow with the history the first time after
-  a clone, which the first export oid derive and the first keyed export's memos would explain
-  (inferred from the code, not profiled), and a second sync takes 0.213 s
-  ([perf.md](perf.md#v070--2026-10-29)). *Open: G17's sync (goals.md). Found: the M13 design's
-  risks; measured by M13 Task C11, v0.6.0 and v0.7.0.*
+  (1.65 in v0.6.0), against the roadmap's 1.5. The first sync of one land after a clone of
+  12,000 commits takes 13.081 s and on 1,000 commits 0.694 s (18.8 times), against the roadmap's
+  1 s and 1.5 times (49.6 s in v0.7.0). Since M18 the import leaves the export oid memos under
+  the memo key (the M18 design §2.3), so the sync's push no longer derives the history below the
+  land; what grows is the sync's published-changes step, which stores the export oid of every
+  changeset below the land as a derived value the first time. Both figures run with the test
+  build's write-order checker (`SWARMOPS_TEST_ORDER_CHECK`), which every remote case runs with:
+  on calls it scans the changes it has not seen made durable, and a derived value never is, so
+  its cost grows with the memos a process writes. With it off the same sync takes 1.018 s
+  and 0.257 s (3.96 times), and the clone's import of 3,000 commits 4.6 s with the memos and
+  4.3 s without, against 62 to 78 s and 18 s with it on. A second sync takes 0.213 s
+  ([perf.md](perf.md#m18-first-sync-after-a-clone--2026-11-08)). *Open: G17's sync (goals.md).
+  Found: the M13 design's risks; measured by M13 Task C11, v0.6.0, v0.7.0 and M18.*
 - **A squash that lost its trailer lines, then edited on the remote, stops sync.** Sync
   recognises a change the remote holds by a `SwarmOps-Changeset`, `SwarmOps-Squashed-From` or
   `SwarmOps-Land-Key` line in a remote commit, or by its merging as no change. A pull request

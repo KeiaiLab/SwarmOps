@@ -48,7 +48,11 @@
 //!    [`ImportRequest::step_budget`] and other writers commit between frames: the first holds
 //!    [`IMPORT_FIRST_FRAME`] changesets, and after a frame of `n` whose commit took `t`, its lock
 //!    wait included, the next holds `budget × n / t`, at least one and at most `2n` and
-//!    [`ImportRequest::frame_changesets`]. A compaction runs at most once a frame.
+//!    [`ImportRequest::frame_changesets`]. A compaction runs at most once a frame. Given a memo
+//!    key ([`ImportRequest::memo_key`]), each frame's commits, trees and blobs converted without
+//!    loss then get their memos under the key (the M18 design §2.3; the export oid module's
+//!    documentation), after the frame and its external ids, so that a kill before them leaves
+//!    what an import without a key leaves.
 //! 6. The metadata is flushed ([`Repo::flush_metadata`]: the checkpoint moves to the journal's
 //!    end, so that no reader parses the import's frames again), and the target moved from its
 //!    head to the tip's changeset by compare-and-swap ([`Repo::cas_ref`]). A swap that finds the
@@ -101,7 +105,7 @@ use swarmops_repo::{
 };
 use swarmops_store::{ExternalEntry, FsObjectStore, Recovered, SYSTEM_GIT};
 
-use crate::export_oid::{ExportOids, OnMemo};
+use crate::export_oid::{ExportOids, ImportMemos, OnMemo};
 use crate::phase::{Phase, Span};
 use crate::{
     ConvertError, Converted, Converter, ExportReader, GIT_LOSSY, GIT_OID, GitOid, GitSource,
@@ -535,7 +539,15 @@ pub fn import(
     if let Some(base) = &base
         && let Some((commit, met)) = seeds
     {
-        seed(&oids, source, &mut run.converter, base, commit, met)?;
+        seed(
+            &oids,
+            source,
+            &mut run.converter,
+            &mut run.memos,
+            base,
+            commit,
+            met,
+        )?;
     }
     // Nothing is read in the snapshot past here: the frames' own writes follow.
     drop(oids);
@@ -1011,6 +1023,7 @@ fn seed(
     oids: &Oids<'_>,
     source: &dyn GitSource,
     converter: &mut Converter<'_>,
+    memos: &mut Option<ImportMemos>,
     base: &Base,
     commit: GitOid,
     met: Meeting,
@@ -1024,6 +1037,9 @@ fn seed(
     };
     if oids.tree_oid(base.root)? == git_root {
         converter.remember_tree(git_root, base.root);
+        if let Some(memos) = memos {
+            memos.seeded(base.root.0, git_root);
+        }
     }
     // Each directory to walk: its path in the base's tree (`None` for the root) and its git tree.
     let mut dirs: Vec<(Option<RepoPath>, GitOid)> = vec![(None, git_root)];
@@ -1050,11 +1066,17 @@ fn seed(
                 | (b"120000", EntryTarget::Leaf(LeafKind::Symlink, blob)) => {
                     if oids.blob_oid(blob)? == entry.oid {
                         converter.remember_blob(entry.oid, blob);
+                        if let Some(memos) = memos {
+                            memos.seeded(blob.0, entry.oid);
+                        }
                     }
                 }
                 (DIR_MODE, EntryTarget::Dir(tree)) => {
                     if oids.tree_oid(tree)? == entry.oid {
                         converter.remember_tree(entry.oid, tree);
+                        if let Some(memos) = memos {
+                            memos.seeded(tree.0, entry.oid);
+                        }
                     }
                     if walked.insert(entry.oid)
                         && let Some(path) = child_path(dir.as_ref(), &entry.name)
@@ -1162,6 +1184,8 @@ struct Run<'a, 's> {
     lossy_total: u64,
     warnings: Vec<String>,
     recovered: Recovered,
+    /// The memos under the request's key the frames leave; `None` without a key.
+    memos: Option<ImportMemos>,
 }
 
 impl<'a, 's> Run<'a, 's> {
@@ -1184,6 +1208,7 @@ impl<'a, 's> Run<'a, 's> {
             lossy_total: 0,
             warnings: Vec::new(),
             recovered: Recovered::default(),
+            memos: req.memo_key.clone().map(ImportMemos::new),
         }
     }
 
@@ -1201,6 +1226,7 @@ impl<'a, 's> Run<'a, 's> {
         let mut batch = repo.raw_batch();
         let mut raws = Vec::with_capacity(converted.len());
         let mut entries = Vec::with_capacity(converted.len());
+        let mut memo_commits = Vec::new();
         for commit in converted {
             let Converted {
                 oid,
@@ -1213,8 +1239,9 @@ impl<'a, 's> Run<'a, 's> {
                 lossy,
                 metadata,
             } = commit;
+            let parent_ids = self.changesets(oid, &parents)?;
             let raw = RawChangeset::new(
-                self.changesets(oid, &parents)?,
+                parent_ids.clone(),
                 root,
                 author,
                 committer,
@@ -1227,6 +1254,9 @@ impl<'a, 's> Run<'a, 's> {
                 .map_err(|source| self.stopped(source))?;
             self.ids.insert(oid, id);
             self.note_lossy(oid, id, lossy);
+            if self.memos.is_some() {
+                memo_commits.push((id, (oid, lossy), parent_ids));
+            }
             let faithful = lossy.is_empty();
             let entry = ExternalEntry::new(id, faithful);
             entries.push((oid.0.to_vec(), entry));
@@ -1256,6 +1286,16 @@ impl<'a, 's> Run<'a, 's> {
         for key in put.conflicts {
             self.conflict(&key);
         }
+
+        // The memos under the key, once the frame and its external ids are durable: the trees'
+        // and blobs' first, then each commit's, parents first.
+        if let Some(memos) = &mut self.memos {
+            let store = repo.derived_store();
+            memos.objects(store);
+            for (id, made, parents) in &memo_commits {
+                memos.commit(store, *id, *made, parents);
+            }
+        }
         Ok(took)
     }
 
@@ -1266,13 +1306,22 @@ impl<'a, 's> Run<'a, 's> {
         let mut converted = Vec::with_capacity(commits.len());
         let mut batch = Batch::new(self.repo, self.req.object_batch_bytes);
         for &oid in commits {
-            let made = self
-                .converter
-                .commit_to(oid, &mut |kind, bytes| batch.add(kind, bytes));
+            // Each object made goes to the batch, and its oid to the memos under the key.
+            let memos = &mut self.memos;
+            let made = self.converter.commit_to(oid, &mut |kind, bytes| {
+                if let Some(memos) = memos.as_mut() {
+                    memos.made(kind, &bytes);
+                }
+                batch.add(kind, bytes);
+            });
 
             // A failed store stops the import before the commit's own refusal, if any.
             batch.failure().map_err(|source| self.stopped(source))?;
-            converted.push(made?);
+            let made = made?;
+            if let Some(memos) = &mut self.memos {
+                memos.converted(made.lossy);
+            }
+            converted.push(made);
         }
         batch.store().map_err(|source| self.stopped(source))?;
         Ok(converted)

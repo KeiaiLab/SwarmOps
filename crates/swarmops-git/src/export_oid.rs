@@ -38,6 +38,14 @@
 //! that a value the key authenticates comes from the store's objects by induction. Without a key
 //! no `_mac` memo is read or written.
 //!
+//! Given a key, the import leaves these memos too (the M18 design §2.3): each commit, tree and
+//! blob it converts without loss gets its `_mac` memo once the frame that holds it is durable, its
+//! oid computed from the store's own bytes as the export computes it, so that the first export
+//! after a clone stops its walk at the imported head. A commit converted with a loss gets none,
+//! nor do the trees and blobs it made, nor a commit above one that exports to a new commit. A kill
+//! before the memos leaves what an import without a key leaves: the export derives the same oids
+//! again.
+//!
 //! Export oids read objects and derived values alone, never a ref, the journal or the clock, so a
 //! changeset's export oid never changes. Version 1 fixes git's tree order and modes, the commit
 //! layout, the signatures verbatim and the native trailer block ([`crate::native`]): a change to
@@ -47,18 +55,19 @@
 //! [`tree_bytes`]: render::tree_bytes
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use swarmops_core::{
-    BlobId, Changeset, ChangesetId, EntryTarget, ObjectId, Tree, TreeEntry, TreeId,
+    BlobId, Changeset, ChangesetId, EntryTarget, ObjectId, ObjectKind, Tree, TreeEntry, TreeId,
+    hash_object,
 };
 use swarmops_repo::{Derivation, DeriveCtx, DeriveError, Repo, RepoError, RepoRead, Subject};
 use swarmops_store::{DerivedSlot, DerivedStore, ObjectStore, SYSTEM_GIT, StoreError};
 
 use crate::memo_key::{MAC_LEN, MEMO_KEY_ID_LEN};
 use crate::phase::{self, Phase, Span};
-use crate::{ExternalIdMismatch, GIT_LOSSY, GIT_OID, GitOid, MemoKey, RawKind};
+use crate::{ExternalIdMismatch, GIT_LOSSY, GIT_OID, GitOid, LossySet, MemoKey, RawKind};
 use crate::{native, oid, render};
 
 /// The derived store's name for a tree's memoized git oid ([`tree_oid`]).
@@ -1349,6 +1358,165 @@ fn decode_export_mac(bytes: &[u8]) -> Option<Known> {
             kept: flag(bytes[20])?,
         },
         imported: flag(bytes[21])?,
+    })
+}
+
+/// The memos under a key an import leaves (see [the module documentation](self)): the trees and
+/// blobs each commit made, with the git oids their bytes give, written once the frame that holds
+/// the commit is durable, for a commit converted without loss; then the commit's own, where every
+/// parent exports to its own commit.
+///
+/// ```text
+///   conversion                       frame durable
+///   made(blob), made(tree) ... ──►   objects(): each due tree and blob memo
+///   converted(lost): due or dropped  commit(): the commit's memo, parents kept
+/// ```
+pub(crate) struct ImportMemos {
+    key: MemoKey,
+    /// The git oid of each tree and blob made or seeded in this import, by its id: what a tree
+    /// made later renders over.
+    oids: HashMap<ObjectId, GitOid>,
+    /// The memos of the commit being converted.
+    converting: Vec<ObjectMemo>,
+    /// The memos of the commits converted without loss, written with their frame.
+    due: Vec<ObjectMemo>,
+    /// The changesets this import gave a memo, each exporting to its own commit.
+    kept: HashSet<ChangesetId>,
+}
+
+/// A tree's or a blob's memo under the key: its name, its object and its git oid.
+struct ObjectMemo {
+    name: &'static str,
+    subject: ObjectId,
+    oid: GitOid,
+}
+
+impl ImportMemos {
+    /// The memos an import under `key` leaves, none yet.
+    pub(crate) fn new(key: MemoKey) -> ImportMemos {
+        ImportMemos {
+            key,
+            oids: HashMap::new(),
+            converting: Vec::new(),
+            due: Vec::new(),
+            kept: HashSet::new(),
+        }
+    }
+
+    /// An object the conversion made, of `kind` and `bytes`: its git oid, from its bytes and its
+    /// entries' oids, for the commit being converted. One whose oid is not known (an entry the
+    /// import neither made nor seeded, a kind of entry this build does not know, bytes git's
+    /// collision detection flags) gets no memo, and a tree above it none either.
+    pub(crate) fn made(&mut self, kind: ObjectKind, bytes: &[u8]) {
+        let made = match kind {
+            ObjectKind::Blob => blob_memo(bytes),
+            ObjectKind::Tree => self.tree_memo(bytes),
+            _ => None,
+        };
+        if let Some(memo) = made {
+            self.oids.insert(memo.subject, memo.oid);
+            self.converting.push(memo);
+        }
+    }
+
+    /// The tree or blob `subject`, which the store holds and the import took as git object
+    /// `oid`, its bytes rendering to it: what a tree made later renders over.
+    pub(crate) fn seeded(&mut self, subject: ObjectId, oid: GitOid) {
+        self.oids.insert(subject, oid);
+    }
+
+    /// The commit being converted is done, having lost `lost`: its trees' and blobs' memos are
+    /// due with its frame if it lost nothing, else dropped.
+    pub(crate) fn converted(&mut self, lost: LossySet) {
+        if lost.is_empty() {
+            self.due.append(&mut self.converting);
+        } else {
+            self.converting.clear();
+        }
+    }
+
+    /// Writes the due trees' and blobs' memos into `memo`, a put that fails dropped.
+    pub(crate) fn objects(&mut self, memo: &DerivedStore) {
+        for due in self.due.drain(..) {
+            memoize_mac(memo, due.name, &self.key, due.subject, &due.oid.0);
+        }
+    }
+
+    /// Writes changeset `id`'s memo into `memo`: the commit `own` it was imported from, which
+    /// it exports to when it lost nothing (`lost` empty) and every parent of `parents` exports to
+    /// its own commit, given a memo by this import or holding one under the key that says so.
+    /// Otherwise none: the export derives it.
+    pub(crate) fn commit(
+        &mut self,
+        memo: &DerivedStore,
+        id: ChangesetId,
+        (own, lost): (GitOid, LossySet),
+        parents: &[ChangesetId],
+    ) {
+        if !lost.is_empty() {
+            return;
+        }
+        let kept = |parent: &ChangesetId| self.kept.contains(parent) || self.held(memo, *parent);
+        if !parents.iter().all(kept) {
+            return;
+        }
+
+        // An unchanged import: its own commit, kept, imported.
+        let known = Known {
+            value: ExportedOid {
+                oid: own.0,
+                kept: true,
+            },
+            imported: true,
+        };
+        let value = export_mac_value(known);
+        memoize_mac(memo, EXPORT_MAC_MEMO, &self.key, id.0, &value);
+        self.kept.insert(id);
+    }
+
+    /// Whether changeset `id` holds a memo under the key, its MAC checking, that says it was
+    /// imported and exports to its own commit. A read that fails is no such memo.
+    fn held(&self, memo: &DerivedStore, id: ChangesetId) -> bool {
+        let key_id = self.key.id();
+        let slot = mac_slot(EXPORT_MAC_MEMO, id.0, &key_id);
+        let Ok(Some(bytes)) = memo_get(memo, &slot) else {
+            return false;
+        };
+        let Some(known) = decode_export_mac(&bytes) else {
+            return false;
+        };
+        let (value, mac) = bytes.split_at(EXPORT_MAC_VALUE_LEN);
+        known.imported && known.value.kept && self.key.checks(EXPORT_MAC_MEMO, id.0, value, mac)
+    }
+
+    /// The memo of the tree of `bytes`, rendered over its entries' oids, each made or seeded in
+    /// this import; `None` where one is not known.
+    fn tree_memo(&self, bytes: &[u8]) -> Option<ObjectMemo> {
+        let tree = Tree::decode(bytes).ok()?;
+        let child = |entry: &TreeEntry| match entry.target {
+            EntryTarget::Leaf(_, blob) => self.oids.get(&blob.0).copied(),
+            EntryTarget::Dir(dir) => self.oids.get(&dir.0).copied(),
+            _ => None,
+        };
+        if tree.entries().iter().any(|entry| child(entry).is_none()) {
+            return None;
+        }
+        let rendered = render::tree_bytes(&tree, |entry| child(entry).expect("checked above"))?;
+        Some(ObjectMemo {
+            name: TREE_MAC_MEMO,
+            subject: hash_object(ObjectKind::Tree, bytes),
+            oid: oid::checked_hash(RawKind::Tree, &rendered)?,
+        })
+    }
+}
+
+/// The memo of the blob of `bytes`: the git oid of its bytes; `None` for bytes git's collision
+/// detection flags.
+fn blob_memo(bytes: &[u8]) -> Option<ObjectMemo> {
+    Some(ObjectMemo {
+        name: BLOB_MAC_MEMO,
+        subject: hash_object(ObjectKind::Blob, bytes),
+        oid: oid::checked_hash(RawKind::Blob, bytes)?,
     })
 }
 

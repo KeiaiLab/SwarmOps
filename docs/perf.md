@@ -2182,3 +2182,186 @@ lines, loaded, with no verdict:
 
 The figures follow as a docs-only commit from the first gated window; the M19 fix slices measure
 against them.
+
+## M18 first sync after a clone — 2026-11-08
+
+The M18 design §2.3, the profile's row for `export.derive` with the key present: the import, given
+the store's memo key, now writes the `git_oid_mac`, `git_tree_oid_mac` and `git_blob_oid_mac`
+memos of each commit, tree and blob it converts without loss, after the frame that holds them, so
+that the first export after a clone stops at the imported head. Release build with the test hooks
+(`--all-features`, as `just perf` runs the remote cases), on the M18-2 code over the M18-1 commit
+`f57fe7fc`, each case alone under the heavy lock.
+
+| Case | 1,000 commits | 12,000 commits | Ratio | Target |
+| --- | --- | --- | --- | --- |
+| Sync of one land, the first after a clone (`sync_of_one_land_on_{1000,12000}_commits`) | 0.694 s | 13.081 s | 18.8 | under 1 s and at most 1.5 (missed) |
+| The same, the write-order checker off (diagnostic) | 0.257 s | 1.018 s | 3.96 | — |
+| The same without the import's memos, the checker off (diagnostic) | 0.326 s | 1.715 s | 5.26 | — |
+| `first_sync_phases`, key present: first sync, whole | 0.395 s | 10.714 s | 27.1 | — |
+| `first_sync_phases`, key absent: first sync, whole | 0.414 s | 12.348 s | 29.8 | — |
+
+The verdict cases ran at a load of 193.41 134.35 100.59 (the 1,000-commit case, 162.6 s whole)
+and from 193.41 to 8.95 44.60 60.47 (the 12,000-commit case, 2,048.1 s whole: its clone, which
+imports 12,000 commits, holds nearly all of it); `first_sync_phases` from 9.30 30.09 45.71 to
+3.97 4.18 12.54, 1,784.2 s whole (1,497.0 s in the profile, at a higher load). On 12,000 commits
+with the key, `push.export` went from 43.231 s to 0.033 s and `export.memo` from 43.112 s
+(36,381 memos) to 0.125 s (245): the row did what it said. What is left, 10.5 s of the 10.714 s,
+is outside every phase: the sync's published-changes step (`Syncing::published`), which stores
+the export oid of each of the 12,080 changesets below the land as a derived value the first time
+(the profile's probe put 15.6 s of a 16.2 s keyless sync there). That step is the next phase; the
+M18 design §2.3 names no row for it.
+
+Every remote case runs the binary with the test build's write-order checker on
+(`SWARMOPS_TEST_ORDER_CHECK=1`, which the test kit's runner sets), and the checker scans, on its
+calls, the file and directory changes it has not seen made durable. A derived value is never made
+durable, so its cost grows with the derived values a process writes, which fits the profile's 1.2 ms
+a memo on 12,000 commits against 0.13 ms on 1,000. A diagnostic run of the two verdict cases with
+the checker off (the runner's variable set to `0` through the cases' environment, not committed)
+took the figures in the table's second and third rows, at a load of 9.12 to 17.49; the clone's fetch
+of 3,000 commits took 62.3 s, 77.9 s and 70.9 s with the memos and 18.0 s, 18.4 s and 19.3 s without
+them with the checker on, and 4.558 s and 4.315 s with it off. In-process (git crate, release, no
+checker) an import of 4,000 commits took 6.281 s with the memos (16,070 of them) and 5.649 s without
+(diagnostic, not committed). The verdict stays the cases as they run: 13.081 s against 1 s and 18.8
+against 1.5, missed. Under the checker the import's memos make every remote case that clones with a
+key slower (the 12,000-commit verdict case 2,048.1 s whole), so the Scheduled `perf-cases` timeout,
+recomputed by its rule from the cases' times, needs these figures; `scheduled.yml` is not this
+slice's file, and it is unchanged.
+
+```text
+remote-perf: first sync 1000 key whole 395.3 (count 1)
+remote-perf: first sync 1000 key sync.fetch 98.3 (count 1)
+remote-perf: first sync 1000 key sync.plan 0.5 (count 1)
+remote-perf: first sync 1000 key sync.recognise 0.3 (count 0)
+remote-perf: first sync 1000 key sync.relocate 10.7 (count 1)
+remote-perf: first sync 1000 key sync.move 11.6 (count 1)
+remote-perf: first sync 1000 key push.export 31.1 (count 1)
+remote-perf: first sync 1000 key push.git 41.9 (count 1)
+remote-perf: first sync 1000 key export.derive 26.5 (count 1080)
+remote-perf: first sync 1000 key export.memo 18.1 (count 245)
+remote-perf: first sync 1000 key import.convert 27.4 (count 1)
+remote-perf: first sync 1000 key git.version 1.3 (count 1)
+remote-perf: first sync 1000 key git.fetch 42.7 (count 1)
+remote-perf: first sync 1000 key git.rev-list 2.2 (count 1)
+remote-perf: first sync 1000 key git.gc 2.9 (count 2)
+remote-perf: first sync 1000 key git.merge-base 2.1 (count 1)
+remote-perf: first sync 1000 key git.push 22.2 (count 1)
+remote-perf: second sync 1000 key whole 193.3 (count 1)
+remote-perf: second sync 1000 key sync.fetch 96.7 (count 1)
+remote-perf: second sync 1000 key sync.plan 0.5 (count 1)
+remote-perf: second sync 1000 key sync.recognise 0.3 (count 0)
+remote-perf: second sync 1000 key sync.relocate 11.6 (count 1)
+remote-perf: second sync 1000 key sync.move 11.4 (count 1)
+remote-perf: second sync 1000 key push.export 23.1 (count 1)
+remote-perf: second sync 1000 key push.git 40.6 (count 1)
+remote-perf: second sync 1000 key export.derive 3.0 (count 159)
+remote-perf: second sync 1000 key export.memo 1.9 (count 260)
+remote-perf: second sync 1000 key import.convert 26.3 (count 1)
+remote-perf: second sync 1000 key git.version 1.8 (count 1)
+remote-perf: second sync 1000 key git.fetch 41.6 (count 1)
+remote-perf: second sync 1000 key git.rev-list 2.3 (count 1)
+remote-perf: second sync 1000 key git.gc 2.9 (count 2)
+remote-perf: second sync 1000 key git.merge-base 1.9 (count 1)
+remote-perf: second sync 1000 key git.push 20.8 (count 1)
+remote-perf: first sync 1000 nokey whole 413.9 (count 1)
+remote-perf: first sync 1000 nokey sync.fetch 103.7 (count 1)
+remote-perf: first sync 1000 nokey sync.plan 0.5 (count 1)
+remote-perf: first sync 1000 nokey sync.recognise 0.4 (count 0)
+remote-perf: first sync 1000 nokey sync.relocate 11.9 (count 1)
+remote-perf: first sync 1000 nokey sync.move 9.6 (count 1)
+remote-perf: first sync 1000 nokey push.export 46.8 (count 1)
+remote-perf: first sync 1000 nokey push.git 47.8 (count 1)
+remote-perf: first sync 1000 nokey export.derive 46.7 (count 2154)
+remote-perf: first sync 1000 nokey export.memo 23.9 (count 1227)
+remote-perf: first sync 1000 nokey import.convert 34.2 (count 1)
+remote-perf: first sync 1000 nokey git.version 1.5 (count 1)
+remote-perf: first sync 1000 nokey git.fetch 40.4 (count 1)
+remote-perf: first sync 1000 nokey git.rev-list 2.3 (count 1)
+remote-perf: first sync 1000 nokey git.gc 3.1 (count 2)
+remote-perf: first sync 1000 nokey git.merge-base 2.3 (count 1)
+remote-perf: first sync 1000 nokey git.push 26.1 (count 1)
+remote-perf: second sync 1000 nokey whole 246.3 (count 1)
+remote-perf: second sync 1000 nokey sync.fetch 128.4 (count 1)
+remote-perf: second sync 1000 nokey sync.plan 0.5 (count 1)
+remote-perf: second sync 1000 nokey sync.recognise 0.3 (count 0)
+remote-perf: second sync 1000 nokey sync.relocate 11.7 (count 1)
+remote-perf: second sync 1000 nokey sync.move 9.5 (count 1)
+remote-perf: second sync 1000 nokey push.export 43.2 (count 1)
+remote-perf: second sync 1000 nokey push.git 44.1 (count 1)
+remote-perf: second sync 1000 nokey export.derive 44.7 (count 2315)
+remote-perf: second sync 1000 nokey export.memo 13.5 (count 2317)
+remote-perf: second sync 1000 nokey import.convert 31.1 (count 1)
+remote-perf: second sync 1000 nokey git.version 1.5 (count 1)
+remote-perf: second sync 1000 nokey git.fetch 44.9 (count 1)
+remote-perf: second sync 1000 nokey git.rev-list 2.3 (count 1)
+remote-perf: second sync 1000 nokey git.gc 3.1 (count 2)
+remote-perf: second sync 1000 nokey git.merge-base 1.8 (count 1)
+remote-perf: second sync 1000 nokey git.push 21.7 (count 1)
+remote-perf: first sync 12000 key whole 10713.5 (count 1)
+remote-perf: first sync 12000 key sync.fetch 124.4 (count 1)
+remote-perf: first sync 12000 key sync.plan 1.1 (count 1)
+remote-perf: first sync 12000 key sync.recognise 0.6 (count 0)
+remote-perf: first sync 12000 key sync.relocate 9.2 (count 1)
+remote-perf: first sync 12000 key sync.move 9.5 (count 1)
+remote-perf: first sync 12000 key push.export 32.8 (count 1)
+remote-perf: first sync 12000 key push.git 37.8 (count 1)
+remote-perf: first sync 12000 key export.derive 234.5 (count 12080)
+remote-perf: first sync 12000 key export.memo 124.6 (count 245)
+remote-perf: first sync 12000 key import.convert 29.5 (count 1)
+remote-perf: first sync 12000 key git.version 1.2 (count 1)
+remote-perf: first sync 12000 key git.fetch 63.7 (count 1)
+remote-perf: first sync 12000 key git.rev-list 6.6 (count 1)
+remote-perf: first sync 12000 key git.gc 2.9 (count 2)
+remote-perf: first sync 12000 key git.merge-base 1.7 (count 1)
+remote-perf: first sync 12000 key git.push 20.1 (count 1)
+remote-perf: second sync 12000 key whole 225.5 (count 1)
+remote-perf: second sync 12000 key sync.fetch 126.0 (count 1)
+remote-perf: second sync 12000 key sync.plan 1.1 (count 1)
+remote-perf: second sync 12000 key sync.recognise 0.6 (count 0)
+remote-perf: second sync 12000 key sync.relocate 14.2 (count 1)
+remote-perf: second sync 12000 key sync.move 11.6 (count 1)
+remote-perf: second sync 12000 key push.export 22.3 (count 1)
+remote-perf: second sync 12000 key push.git 41.2 (count 1)
+remote-perf: second sync 12000 key export.derive 2.7 (count 159)
+remote-perf: second sync 12000 key export.memo 1.8 (count 260)
+remote-perf: second sync 12000 key import.convert 26.5 (count 1)
+remote-perf: second sync 12000 key git.version 1.5 (count 1)
+remote-perf: second sync 12000 key git.fetch 68.4 (count 1)
+remote-perf: second sync 12000 key git.rev-list 5.0 (count 1)
+remote-perf: second sync 12000 key git.gc 2.9 (count 2)
+remote-perf: second sync 12000 key git.merge-base 1.7 (count 1)
+remote-perf: second sync 12000 key git.push 21.7 (count 1)
+remote-perf: first sync 12000 nokey whole 12347.6 (count 1)
+remote-perf: first sync 12000 nokey sync.fetch 145.7 (count 1)
+remote-perf: first sync 12000 nokey sync.plan 1.1 (count 1)
+remote-perf: first sync 12000 nokey sync.recognise 0.6 (count 0)
+remote-perf: first sync 12000 nokey sync.relocate 12.4 (count 1)
+remote-perf: first sync 12000 nokey sync.move 12.2 (count 1)
+remote-perf: first sync 12000 nokey push.export 259.0 (count 1)
+remote-perf: first sync 12000 nokey push.git 48.0 (count 1)
+remote-perf: first sync 12000 nokey export.derive 463.4 (count 24154)
+remote-perf: first sync 12000 nokey export.memo 182.0 (count 12227)
+remote-perf: first sync 12000 nokey import.convert 29.0 (count 1)
+remote-perf: first sync 12000 nokey git.version 1.2 (count 1)
+remote-perf: first sync 12000 nokey git.fetch 81.9 (count 1)
+remote-perf: first sync 12000 nokey git.rev-list 5.3 (count 1)
+remote-perf: first sync 12000 nokey git.gc 2.9 (count 2)
+remote-perf: first sync 12000 nokey git.merge-base 2.0 (count 1)
+remote-perf: first sync 12000 nokey git.push 22.1 (count 1)
+remote-perf: second sync 12000 nokey whole 702.3 (count 1)
+remote-perf: second sync 12000 nokey sync.fetch 370.3 (count 1)
+remote-perf: second sync 12000 nokey sync.plan 1.1 (count 1)
+remote-perf: second sync 12000 nokey sync.recognise 0.6 (count 0)
+remote-perf: second sync 12000 nokey sync.relocate 12.4 (count 1)
+remote-perf: second sync 12000 nokey sync.move 10.2 (count 1)
+remote-perf: second sync 12000 nokey push.export 254.4 (count 1)
+remote-perf: second sync 12000 nokey push.git 43.3 (count 1)
+remote-perf: second sync 12000 nokey export.derive 471.9 (count 24315)
+remote-perf: second sync 12000 nokey export.memo 133.9 (count 24317)
+remote-perf: second sync 12000 nokey import.convert 28.4 (count 1)
+remote-perf: second sync 12000 nokey git.version 1.5 (count 1)
+remote-perf: second sync 12000 nokey git.fetch 71.0 (count 1)
+remote-perf: second sync 12000 nokey git.rev-list 6.0 (count 1)
+remote-perf: second sync 12000 nokey git.gc 2.9 (count 2)
+remote-perf: second sync 12000 nokey git.merge-base 1.9 (count 1)
+remote-perf: second sync 12000 nokey git.push 25.0 (count 1)
+```
