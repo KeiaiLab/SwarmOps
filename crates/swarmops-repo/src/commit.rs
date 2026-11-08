@@ -450,14 +450,18 @@ impl<O: ObjectStore> Repo<O> {
     /// delta each put of what its path holds already ([`RepoError::EmptyChanges`] if none is
     /// left, unless `allow_empty`), encodes the changed directories bottom-up and then the
     /// changeset, each hashed once, and writes the blobs the delta puts, the changed trees and
-    /// the changeset object in one `put_hashed_batch`, then flushes: every object is durable when
-    /// it returns, before any metadata names it (I1). A put below a file, or where a directory
-    /// is, or a delete of a directory, is [`RepoError::TypeConflict`]; a delete of a path that is
-    /// no file, [`RepoError::PathNotFound`]; a changeset it cannot encode, [`RepoError::Codec`];
-    /// and nothing is written then. A commit records what it wrote ([`Repo::commit`]); a land
-    /// publishes it ([`crate::land`]).
-    pub(crate) fn write_changeset(&self, draft: Draft) -> Result<WrittenChangeset, RepoError> {
-        write_changeset_in(&self.objects, draft)
+    /// the changeset object in one `put_hashed_batch`, `beside` after them, then flushes: every
+    /// object is durable when it returns, before any metadata names it (I1). A put below a file,
+    /// or where a directory is, or a delete of a directory, is [`RepoError::TypeConflict`]; a
+    /// delete of a path that is no file, [`RepoError::PathNotFound`]; a changeset it cannot
+    /// encode, [`RepoError::Codec`]; and nothing is written then, `beside` included. A land
+    /// publishes what it wrote ([`crate::land`]), its `C`'s object in `beside`.
+    pub(crate) fn write_changeset(
+        &self,
+        draft: Draft,
+        beside: Vec<Hashed>,
+    ) -> Result<WrittenChangeset, RepoError> {
+        stage_changeset(&self.objects, draft)?.put_with(beside, &self.objects)
     }
 
     /// Stores `content` as a blob, outside any transaction: hashed once, written unless the
@@ -677,6 +681,18 @@ impl StagedChangeset {
             blobs_written,
             trees_written,
         })
+    }
+
+    /// [`Self::put`] with `beside`, objects staged elsewhere that nothing names yet, in the same
+    /// batch and flush: a land's `C` beside its `L` ([`crate::land`]).
+    pub(crate) fn put_with<S: ObjectStore>(
+        mut self,
+        beside: Vec<Hashed>,
+        objects: &S,
+    ) -> Result<WrittenChangeset, RepoError> {
+        // After the changeset object: the blobs' and trees' counts stay as they are.
+        self.objects.extend(beside);
+        self.put(objects)
     }
 
     /// [`Self::put`] of the blobs and trees alone: the changeset object, which nothing else

@@ -901,13 +901,10 @@ impl<O: ObjectStore> Landing<'_, O> {
         squashed: &[ChangesetId],
         next_seq: u64,
     ) -> Result<Publication, RepoError> {
-        // 1. `C`'s object, put unflushed: `L`'s flush below makes both durable before the
-        //    publish names them (I1).
-        if let Some(object) = self.held.take() {
-            self.repo.objects.put_hashed_batch(vec![object])?;
-        }
-
-        // 2. `L`, on theirs.
+        // 1. `L` on theirs, `C`'s object in its batch once `L` is staged: one flush makes both
+        //    durable before the publish names them (I1), and a land whose `L` cannot be written
+        //    writes neither.
+        let c_object: Vec<Hashed> = self.held.take().into_iter().collect();
         let head = self.tip();
         let recorded = Recorded {
             key: self.req.key.as_deref(),
@@ -924,9 +921,9 @@ impl<O: ObjectStore> Landing<'_, O> {
             message: self.req.message.clone(),
             metadata: metadata(head, recorded),
         };
-        let written = write_squash(self.repo, squash)?;
+        let written = write_squash_with(self.repo, squash, c_object)?;
 
-        // 3. An exact land publishes the tree it was checked with, or nothing (M5).
+        // 2. An exact land publishes the tree it was checked with, or nothing (M5).
         let relocate = match self.req.expect_target {
             Some(_) => Relocate::Never,
             None => Relocate::Allow,
@@ -1117,6 +1114,16 @@ pub(super) fn write_squash<O: ObjectStore>(
     repo: &Repo<O>,
     squash: Squash<'_>,
 ) -> Result<WrittenChangeset, RepoError> {
+    write_squash_with(repo, squash, Vec::new())
+}
+
+/// [`write_squash`] with `beside`, objects nothing names yet, written in `L`'s batch once `L` is
+/// staged: a land's `C`.
+fn write_squash_with<O: ObjectStore>(
+    repo: &Repo<O>,
+    squash: Squash<'_>,
+    beside: Vec<Hashed>,
+) -> Result<WrittenChangeset, RepoError> {
     let Squash {
         theirs,
         head,
@@ -1150,7 +1157,7 @@ pub(super) fn write_squash<O: ObjectStore>(
 
     // 3. The merge puts only what theirs lacks, and deletes only what it holds: a delta that
     // changes nothing is the change theirs holds already.
-    repo.write_changeset(draft).map_err(|e| match e {
+    repo.write_changeset(draft, beside).map_err(|e| match e {
         RepoError::EmptyChanges => RepoError::NothingToLand(NothingToLandReason::NoChanges),
         other => other,
     })

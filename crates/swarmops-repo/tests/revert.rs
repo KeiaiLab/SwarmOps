@@ -209,6 +209,24 @@ fn a_revert_over_a_later_edit_names_it() {
     assert_eq!(store_files(&root), before, "the store's files changed");
 }
 
+/// A revert whose landed changeset cannot be encoded, its lander's metadata naming a key the
+/// land records itself: [`RepoError::Codec`] when the land writes `L`, after `C` was staged; the
+/// store's files under `meta/` and `objects/` byte for byte as they were.
+#[test]
+fn a_revert_refused_at_its_write_writes_nothing() {
+    let (_dir, root, repo) = new_store();
+    let t0 = advance(&repo, ACTOR, &[], vec![put("f", b"f\n")]);
+    let a = advance(&repo, ACTOR, &[t0], vec![put("a", b"a\n")]);
+    advance(&repo, LATER, &[a], vec![put("b", b"b\n")]);
+    let before = store_files(&root);
+
+    let mut revert = reverting(a);
+    revert.lander_metadata = vec![("lander".to_owned(), b"someone else".to_vec())];
+    let refused = repo.revert(revert);
+    assert!(matches!(refused, Err(RepoError::Codec(_))), "{refused:?}");
+    assert_eq!(store_files(&root), before, "the store's files changed");
+}
+
 /// A keyed revert run again replays the revert it made, writing nothing: `C`'s tree is a
 /// function of the range, though `C` is made again.
 #[test]
