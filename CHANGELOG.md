@@ -44,6 +44,14 @@ collects the changes on `stable` that no release holds yet, until the next relea
   tree it lands and the paths it changes (at most 1,000), `replayed`, `nothing_to_land`, or
   `conflict` with `land`'s report. They take no lock and write nothing (the M18 design §6.2).
   `swarmops mcp` lists 42 tools, and `swarmops schema` 179 types.
+- `swarmops land-group --onto REF HEAD...` and the MCP tool `land_group` land 1 to 32 changes in
+  order as one operation: each merged onto what the clean ones before it make, as `land-check`
+  plans them, the clean ones a chain of landed changesets, each on the one before, recorded with
+  one move of the ref in one journal frame, all of it or none after a crash or a power loss. A
+  conflicting change is reported and passed over; a group with none clean is `E_NOTHING_TO_LAND`,
+  each change's outcome in `details.items`; a ref that moves after the plan makes the group plan
+  again, never relocated under the lock. `op log` reads the operation as a `land` (the M18 design
+  §6.3). `swarmops mcp` lists 44 tools, and `swarmops schema` 185 types.
 
 ### Changed
 

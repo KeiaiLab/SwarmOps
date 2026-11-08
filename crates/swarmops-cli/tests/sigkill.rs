@@ -19,6 +19,9 @@
 //! The revert variant (the M18 design §4.3) kills `revert --key` of a change just made on main
 //! and runs it again: the change is taken back exactly once, whatever moment the kill hit.
 //!
+//! The group variant (the M18 design §6.3) kills `land-group` of two changes and runs it again:
+//! main holds each group's whole chain, never part of one, whatever moment the kill hit.
+//!
 //! The ref variant (the M16 design §2) kills `ref set` and `op undo` on `release/1`: after each
 //! kill the ref names its old or its new target, the op log holds every operation once and in
 //! order, and the same operation run again is recorded once.
@@ -594,6 +597,159 @@ per_format! {
                 ~30 s idle, 112-113 s loaded"]
     fn sigkill_mid_land_200_times(format) {
         kill_lands(format, SLOW_LAND_KILLS);
+    }
+}
+
+/// The kills the slow group variant makes per format.
+const SLOW_GROUP_KILLS: usize = 100;
+
+/// The seed of the group test's delays, apart from the other tests'.
+const GROUP_SEED: u64 = 0x6a0d_5167;
+
+/// The changes each group of the group test lands.
+const GROUP_SIZE: usize = 2;
+
+/// The heads of the `n`-th group: [`GROUP_SIZE`] new files off `main`.
+fn group_heads(store: &Store, n: usize) -> Vec<String> {
+    (0..GROUP_SIZE)
+        .map(|at| {
+            let path = format!("group-{n}-{at}.txt");
+            store.commit(&agent(0), &path, &format!("{n} {at}\n"), None)
+        })
+        .collect()
+}
+
+/// The arguments of the group land of `heads`.
+fn group_args(store: &Store, heads: &[String]) -> Vec<String> {
+    let mut args = vec!["land-group"];
+    args.extend(heads.iter().map(String::as_str));
+    store.args(&agent(0), &args)
+}
+
+/// The head a group land's `stdout` reports, if it holds one whole, successful envelope.
+fn grouped(stdout: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(stdout).ok()?;
+    if !text.ends_with('\n') {
+        return None;
+    }
+
+    let envelope: Value = serde_json::from_str(text).ok()?;
+    assert_eq!(envelope["ok"], true, "a group land's envelope: {text}");
+    let id = envelope["result"]["head"].as_str();
+    Some(id.expect("a group's head").to_owned())
+}
+
+/// Runs the group land of `heads` and SIGKILLs it `delay` after its spawn, unless it ended
+/// before.
+fn kill_group_after(store: &Store, heads: &[String], n: usize, delay: Duration) -> Ended {
+    let mut child = Child::spawn(&mut swarmops(&group_args(store, heads), &[]));
+    let (output, _) = child.finish(Instant::now() + delay);
+    let Output { status, stdout, .. } = &output;
+
+    // 1. A signal ends only a killed run; the kill may land after the envelope was printed.
+    if status.signal() == Some(SIGKILL) {
+        return Ended::Killed(grouped(stdout));
+    }
+
+    // 2. A run that beat its delay must have landed.
+    assert!(
+        status.success(),
+        "group {n} ended {status} unkilled: {output:?}"
+    );
+    let id = grouped(stdout).unwrap_or_else(|| panic!("group {n}: no envelope: {output:?}"));
+    Ended::Exited(id)
+}
+
+/// Lands the group of `heads` again, as an agent retries one that died: the chain's head, which
+/// the land made now, or `main`'s when the group had landed and nothing is left to land.
+fn group_again(store: &Store, heads: &[String]) -> String {
+    let args = group_args(store, heads);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let run = crate::support::run(&args, &[]);
+    if run.status.success() {
+        return run.ok()["head"]
+            .as_str()
+            .expect("a group's head")
+            .to_owned();
+    }
+    run.err("E_NOTHING_TO_LAND");
+    main_head(store)
+}
+
+/// `kills` SIGKILLs of `land-group` on a store of `format`, each followed by the same group again
+/// and the checks: the store verifies clean, `main`'s log holds the base and every group's whole
+/// chain, never part of one, and a reported group is the one `main` holds.
+fn kill_groups(format: StoreFormat, kills: usize) {
+    let store = Store::init_as(format);
+    let mut rng = Rng::new(GROUP_SEED ^ u64::from(format.version()));
+
+    // 1. The base, and the first group, whose wall time is the window.
+    let base = store.commit(&agent(0), "base.txt", "base\n", None);
+    let create = ["ref", "set", MAIN, &base, "--create"];
+    store.run_as(&agent(0), &create, &[]).ok();
+    let first = group_heads(&store, 0);
+    let start = Instant::now();
+    group_again(&store, &first);
+    let mut window = u64::try_from(start.elapsed().as_micros()).expect("a short group land");
+    let readers = Readers::start(&store);
+
+    let mut killed = 0;
+    let mut n = 0;
+    while killed < kills {
+        n += 1;
+        assert!(
+            n <= kills * LAND_RUNS_PER_KILL,
+            "{killed} kills in {n} groups"
+        );
+        let heads = group_heads(&store, n);
+        let delay = Duration::from_micros(rng.next_u64() % window);
+        let what = format!("{format:?} seed {GROUP_SEED:#x} group {n} delay {delay:?}");
+
+        // 2. Kill a group land, then land the group again.
+        let reported = match kill_group_after(&store, &heads, n, delay) {
+            Ended::Killed(reported) => {
+                killed += 1;
+                reported
+            }
+            Ended::Exited(id) => {
+                window -= window / WINDOW_SHRINK;
+                Some(id)
+            }
+        };
+        let again = group_again(&store, &heads);
+        if let Some(reported) = reported {
+            assert_eq!(
+                reported, again,
+                "{what}: the reported group is the one kept"
+            );
+        }
+
+        // 3. The store verifies clean; main holds the base and every group's whole chain.
+        store.assert_clean(&what);
+        let want = 1 + (n + 1) * GROUP_SIZE;
+        let log = store
+            .read(&["log", MAIN, "-n", &(want + LOG_SURPLUS).to_string()])
+            .ok();
+        let on_main = log["entries"].as_array().expect("log entries");
+        assert_eq!(on_main.len(), want, "{what}: main's log: {on_main:?}");
+        assert_eq!(
+            on_main[0]["id"],
+            again.as_str(),
+            "{what}: main is the group's head"
+        );
+    }
+
+    println!("{format:?}: {killed} kills in {n} groups, window {window} us");
+    assert_read_clean(readers, &format!("{format:?} groups"));
+    store.assert_clean("after the last group");
+}
+
+per_format! {
+    /// The slow group variant (the M18 design §6.3): [`SLOW_GROUP_KILLS`] kills per format.
+    #[ignore = "slow, ~40 s: 100 kills per format, each with verify --deep and a log; \
+                37 s at load 6-10"]
+    fn sigkill_mid_group_land_100_times(format) {
+        kill_groups(format, SLOW_GROUP_KILLS);
     }
 }
 

@@ -3001,6 +3001,116 @@ pub enum PathChange {
     Merged,
 }
 
+/// `land_group` (CLI `land-group`): lands `changes`, in order, onto `target` as one operation:
+/// each change merged onto what the clean ones before it make, as
+/// `land_check` plans them, the clean ones recorded as a chain of landed changesets, each on the
+/// one before, with one move of `target` to the last. A conflicting change is reported and
+/// passed over; a replayed one, or one with nothing to land, lands nothing. A group with no
+/// clean change is `E_NOTHING_TO_LAND`, each change's outcome in `details.items`. A target that
+/// moves after the plan makes the group plan again, up to `max_attempts`.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LandGroupReq {
+    /// The ref the changes land on: `main` or `release/<name>`, which must exist.
+    #[serde(default = "default_target")]
+    pub target: String,
+    /// The changes, in the order they land: 1 to 32 (`E_INVALID_ARG` for none, `E_TOO_LARGE`
+    /// past 32), each key once.
+    pub changes: Vec<LandItemIn>,
+    /// How many times the group plans and publishes at most before `E_CAS_RETRY_EXHAUSTED`:
+    /// 1 to 32.
+    #[serde(default = "default_max_attempts")]
+    pub max_attempts: u32,
+    /// The most bytes of hunk text each conflicting change's report carries, as a land's.
+    #[serde(default = "default_max_conflict_bytes")]
+    pub max_conflict_bytes: u64,
+}
+
+impl LandGroupReq {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(changes: Vec<LandItemIn>) -> Self {
+        Self {
+            target: default_target(),
+            changes,
+            max_attempts: default_max_attempts(),
+            max_conflict_bytes: default_max_conflict_bytes(),
+        }
+    }
+}
+
+/// `land_group`: the chain it landed, and each change's outcome.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LandGroupResp {
+    /// The ref the changes landed on.
+    pub target: String,
+    /// The target's head the chain landed on: the first landed changeset's parent.
+    pub rebased_onto: String,
+    /// The last landed changeset: what the target names now.
+    pub head: String,
+    /// The operation that recorded the chain and the move: its number in `op_log`.
+    pub op: u64,
+    /// Each change's outcome, in the request's order.
+    pub items: Vec<LandGroupItemOut>,
+    /// How many times the group planned and published.
+    pub attempts: u32,
+    /// Problems found after the chain became durable; the land itself succeeded. Omitted when
+    /// empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+impl LandGroupResp {
+    /// Takes the required fields; the others get their serde defaults.
+    pub fn new(
+        target: impl Into<String>,
+        rebased_onto: impl Into<String>,
+        head: impl Into<String>,
+        op: u64,
+        items: Vec<LandGroupItemOut>,
+        attempts: u32,
+    ) -> Self {
+        Self {
+            target: target.into(),
+            rebased_onto: rebased_onto.into(),
+            head: head.into(),
+            op,
+            items,
+            attempts,
+            warnings: Vec::new(),
+        }
+    }
+}
+
+/// One change's outcome in a `land_group`.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LandGroupItemOut {
+    /// The change's head, a full id.
+    pub head: String,
+    /// What landing it after the clean changes before it came to: `clean` landed it.
+    pub outcome: ItemOutcome,
+    /// For `clean`, the changeset that landed it, a link of the chain; for `replayed`, the one
+    /// a land with its key made before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub landed: Option<String>,
+    /// For `conflict`, the report a land gives in `E_CONFLICT`'s `details.report`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub report: Option<ConflictReport>,
+}
+
+impl LandGroupItemOut {
+    /// Takes the required fields; the others are empty.
+    pub fn new(head: impl Into<String>, outcome: ItemOutcome) -> Self {
+        Self {
+            head: head.into(),
+            outcome,
+            landed: None,
+            report: None,
+        }
+    }
+}
+
 /// Why a land could not merge its change onto the target, file by file, or could not apply its
 /// resolutions to it (operations spec §3): the report `E_CONFLICT` carries in `details.report`.
 /// `ours` is the change, `theirs` the target. Ids are full.
@@ -4809,6 +4919,13 @@ pub trait StoreOps {
     fn land_check(&self, req: LandCheckReq) -> Result<LandCheckResp, OpError> {
         let _ = req;
         Err(not_built("land_check"))
+    }
+
+    /// Lands changes in order onto a ref as one operation: a chain of landed changesets and one
+    /// move (CLI `land-group`). A store that does not have it answers `E_INVALID_ARG`.
+    fn land_group(&self, who: &Identity, req: LandGroupReq) -> Result<LandGroupResp, OpError> {
+        let _ = (who, req);
+        Err(not_built("land_group"))
     }
 }
 

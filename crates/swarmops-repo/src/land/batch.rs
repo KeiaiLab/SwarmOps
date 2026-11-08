@@ -42,7 +42,9 @@ use crate::oplog::OpId;
 use crate::repo::{self, Repo};
 use crate::staged::Staged;
 
-use super::publish::{self, Publication, PublishPlan, Published, Queued, Relocate};
+use super::publish::{
+    self, GroupPublication, Publication, PublishPlan, Published, Queued, Relocate,
+};
 
 /// The version of the bodies this build encodes and decodes.
 const VERSION: u8 = 1;
@@ -57,6 +59,9 @@ enum Request {
     Publish(PublishRequest),
     /// A commit's insert.
     Insert(InsertRequest),
+    /// A group land's publish (the M18 design §6.3): last, so that the two kinds before it
+    /// keep their encoding.
+    Group(GroupRequest),
 }
 
 /// A publish's request: every field of [`Publication`] but its two changesets, named by id.
@@ -72,6 +77,18 @@ struct PublishRequest {
     key: Option<String>,
     next_seq: u64,
     head: Id,
+}
+
+/// A group land's request: every field of [`GroupPublication`] but its changesets, named by
+/// id, oldest first.
+#[derive(Serialize, Deserialize)]
+struct GroupRequest {
+    target: String,
+    onto: Id,
+    chain: Vec<Id>,
+    actor: String,
+    keys: Vec<(String, Id)>,
+    next_seq: u64,
 }
 
 /// An insert's request: the changeset's index record but the numbers the store gives it, and
@@ -166,26 +183,20 @@ impl<O: ObjectStore> Repo<O> {
     /// `own`'s planning is returned once the batch committed; a batch with nothing to commit is
     /// dropped, as a lone publish that records nothing drops its write.
     pub(crate) fn lead(&self, lead: Lead<'_>, own: &Publication) -> Result<Published, RepoError> {
-        let Led { mine, committed } =
-            self.lead_with(lead, |write, staged| plan_member(write, staged, own))?;
-        let Some(committed) = committed else {
-            return own_end(mine);
-        };
-        let Member::Queued(queued) = mine else {
-            return own_end(mine);
-        };
-        match committed {
-            Ok(_) => Ok(queued.landed(Vec::new())),
-            Err(StoreError::PostCommit {
-                frame_seq,
-                frame_crc,
-                source,
-            }) => {
-                let warning = queued.warning(own, OpId::new(frame_seq, frame_crc), &source);
-                Ok(queued.landed(vec![warning]))
-            }
-            Err(e) => Err(e.into()),
-        }
+        let ended = self.lead_with(lead, |write, staged| plan_member(write, staged, own))?;
+        let (published, _) = own_landed(ended, &own.target)?;
+        Ok(published)
+    }
+
+    /// [`Repo::lead`] for a group land's publish, `own` (the M18 design §6.3): what it did, and
+    /// the seq of the frame that committed it.
+    pub(crate) fn lead_group(
+        &self,
+        lead: Lead<'_>,
+        own: &GroupPublication,
+    ) -> Result<(Published, Option<u64>), RepoError> {
+        let ended = self.lead_with(lead, |write, staged| plan_group_member(write, staged, own))?;
+        own_landed(ended, &own.target)
     }
 
     /// [`Repo::lead`] for a commit's insert of `meta`, with `advance`: what
@@ -263,6 +274,10 @@ impl<O: ObjectStore> Repo<O> {
                     let (meta, advance) = insert_of(wire);
                     plan_insert_member(lead.write(), meta, advance)
                 }
+                Ok(Request::Group(wire)) => match group_publication(&staged, wire) {
+                    Ok(g) => plan_group_member(lead.write(), &staged, &g),
+                    Err(e) => Member::Failed(e),
+                },
                 Err(e) => Member::Failed(e),
             };
             let has_frame = member.framed();
@@ -316,20 +331,41 @@ impl<O: ObjectStore> Repo<O> {
         answer: &Answer,
         p: &Publication,
     ) -> Result<Published, RepoError> {
+        let (published, _) = self.answered_on(answer, &p.target)?;
+        Ok(published)
+    }
+
+    /// [`Repo::answered`] for a group land's publish, `g`: what it did, and the seq of the frame
+    /// that committed it.
+    pub(crate) fn answered_group(
+        &self,
+        answer: &Answer,
+        g: &GroupPublication,
+    ) -> Result<(Published, Option<u64>), RepoError> {
+        self.answered_on(answer, &g.target)
+    }
+
+    /// What `answer`, a leader's answer to a publish onto `target`, says it did, and the seq of
+    /// the frame that committed it.
+    fn answered_on(
+        &self,
+        answer: &Answer,
+        target: &str,
+    ) -> Result<(Published, Option<u64>), RepoError> {
         let wire = decode_answer(&answer.body)?;
         match (&answer.outcome, wire) {
-            (Outcome::Committed { .. }, landed @ PublishAnswer::Landed { .. }) => {
-                published(landed, Vec::new())
+            (Outcome::Committed { frame_seq }, landed @ PublishAnswer::Landed { .. }) => {
+                Ok((published(landed, Vec::new())?, Some(*frame_seq)))
             }
             (Outcome::PostCommit { frame_seq, warning }, landed @ PublishAnswer::Landed { .. }) => {
-                let what = publish::landed_what(answer_id(&landed), &p.target);
+                let what = publish::landed_what(answer_id(&landed), target);
                 let warning = self.member_warning(&what, *frame_seq, warning);
-                published(landed, vec![warning])
+                Ok((published(landed, vec![warning])?, Some(*frame_seq)))
             }
             (
                 Outcome::NoFrame,
                 done @ (PublishAnswer::Moved { .. } | PublishAnswer::Replayed { .. }),
-            ) => published(done, Vec::new()),
+            ) => Ok((published(done, Vec::new())?, None)),
             _ => Err(RepoError::Internal(
                 "a publish's answer whose outcome does not match its body".to_owned(),
             )),
@@ -387,7 +423,26 @@ impl<O: ObjectStore> Repo<O> {
 /// Plans `p` in a frame of its own of `write`, its objects read from and written to `objects`:
 /// queued, its frame closed; or nothing to record, or failed, its frame dropped.
 fn plan_member<S: ObjectStore>(write: &mut MetaWrite<'_>, objects: &S, p: &Publication) -> Member {
-    match publish::plan_publish(write, objects, p) {
+    let planned = publish::plan_publish(write, objects, p);
+    framed(write, planned)
+}
+
+/// Plans the group land's publish `g` in a frame of its own of `write`, as [`plan_member`]
+/// plans a land's: its k inserts and one move, closed; or nothing to record, or failed, its
+/// frame dropped.
+fn plan_group_member<S: ObjectStore>(
+    write: &mut MetaWrite<'_>,
+    objects: &S,
+    g: &GroupPublication,
+) -> Member {
+    let planned = publish::plan_group(write, objects, g);
+    framed(write, planned)
+}
+
+/// The member a publish's plan, `planned`, makes in `write`: its frame closed when it queued
+/// anything, else dropped.
+fn framed(write: &mut MetaWrite<'_>, planned: Result<PublishPlan, RepoError>) -> Member {
+    match planned {
         // Closed now, so that the next member's key check sees it (D12).
         Ok(PublishPlan::Queued(queued)) => match write.begin_frame() {
             Ok(()) => Member::Queued(queued),
@@ -483,6 +538,71 @@ fn own_end(mine: Member) -> Result<Published, RepoError> {
             "a publish's lead planned an insert".to_owned(),
         )),
     }
+}
+
+/// What a lead's own publish onto `target` did, `led`, once its batch committed: with the seq
+/// of the frame that committed it, if it committed one.
+fn own_landed(led: Led, target: &str) -> Result<(Published, Option<u64>), RepoError> {
+    let Led { mine, committed } = led;
+    let Some(committed) = committed else {
+        return Ok((own_end(mine)?, None));
+    };
+    let Member::Queued(queued) = mine else {
+        return Ok((own_end(mine)?, None));
+    };
+    match committed {
+        Ok(answer) => {
+            let seq = match answer.outcome {
+                Outcome::Committed { frame_seq } => Some(frame_seq),
+                _ => None,
+            };
+            Ok((queued.landed(Vec::new()), seq))
+        }
+        Err(StoreError::PostCommit {
+            frame_seq,
+            frame_crc,
+            source,
+        }) => {
+            let warning = queued.warning(target, OpId::new(frame_seq, frame_crc), &source);
+            Ok((queued.landed(vec![warning]), Some(frame_seq)))
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// `g`'s request body: its version, then its fields but the changesets'.
+pub(crate) fn encode_group(g: &GroupPublication) -> Result<Vec<u8>, RepoError> {
+    let wire = Request::Group(GroupRequest {
+        target: g.target.clone(),
+        onto: bytes(g.onto),
+        chain: g.chain.iter().map(|(id, _)| bytes(*id)).collect(),
+        actor: g.actor.clone(),
+        keys: (g.keys.iter())
+            .map(|(key, head)| (key.clone(), bytes(*head)))
+            .collect(),
+        next_seq: g.next_seq,
+    });
+    encode(&wire)
+}
+
+/// The group publication `wire` names, its changesets read by id from `objects`.
+fn group_publication<S: ObjectStore>(
+    objects: &S,
+    wire: GroupRequest,
+) -> Result<GroupPublication, RepoError> {
+    let chain = (wire.chain.into_iter())
+        .map(|id| Ok((id_of(id), changeset_in(objects, id_of(id))?)))
+        .collect::<Result<Vec<_>, RepoError>>()?;
+    Ok(GroupPublication {
+        target: wire.target,
+        onto: id_of(wire.onto),
+        chain,
+        actor: wire.actor,
+        keys: (wire.keys.into_iter())
+            .map(|(key, head)| (key, id_of(head)))
+            .collect(),
+        next_seq: wire.next_seq,
+    })
 }
 
 /// `p`'s request body: its version, then its fields but the changesets'.
@@ -724,6 +844,38 @@ mod tests {
             (Some("key-1"), 7, [4; 32])
         );
         assert_eq!(wire.first, None);
+    }
+
+    #[test]
+    fn a_group_request_decodes_to_its_fields() {
+        let p = publication_of(None);
+        let g = GroupPublication {
+            target: "release/x".to_owned(),
+            onto: id_of([1; 32]),
+            chain: vec![(id_of([3; 32]), p.changeset.clone()); 2],
+            actor: "test/actor".to_owned(),
+            keys: vec![("key-1".to_owned(), id_of([4; 32]))],
+            next_seq: 9,
+        };
+        let Request::Group(wire) = decode_request(&encode_group(&g).unwrap()).unwrap() else {
+            panic!("not a group's request");
+        };
+        assert_eq!(
+            (wire.target.as_str(), wire.onto, wire.chain),
+            ("release/x", [1; 32], vec![[3; 32]; 2])
+        );
+        assert_eq!(
+            (wire.actor.as_str(), wire.keys, wire.next_seq),
+            ("test/actor", vec![("key-1".to_owned(), [4; 32])], 9)
+        );
+    }
+
+    /// The group's kind comes after the two before it: their bodies decode as they did, the
+    /// first byte after the version still naming a publish.
+    #[test]
+    fn a_publish_request_keeps_its_encoding() {
+        let body = encode_publish(&publication_of(None)).unwrap();
+        assert_eq!(body[..2], [VERSION, 0]);
     }
 
     #[test]

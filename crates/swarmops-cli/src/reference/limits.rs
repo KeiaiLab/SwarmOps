@@ -175,7 +175,7 @@ const fn internal_value(
 // ---- The tables ----
 
 /// The limits a request is refused past, with the error it gets.
-static CONTRACT: [Limit; 16] = [
+static CONTRACT: [Limit; 17] = [
     Limit {
         name: "Request text",
         constant: code(
@@ -295,6 +295,7 @@ static CONTRACT: [Limit; 16] = [
             "whoami",
             "commit",
             "land",
+            "land-group",
             "rebase",
             "revert",
             "blob put",
@@ -435,6 +436,21 @@ static CONTRACT: [Limit; 16] = [
         what: "The changes one `land-check` (`changes`) plans in order: more are refused \
                    before anything is resolved or read, with `details.max_changes`; none is \
                    `E_INVALID_ARG`.",
+    },
+    Limit {
+        name: "Group land changes",
+        constant: code(
+            "swarmops_repo::land::MAX_GROUP_CHANGES",
+            "crates/swarmops-repo/src/land/plan.rs",
+            "pub const MAX_GROUP_CHANGES: usize = 32;",
+            || bytes::to_u64(swarmops_repo::land::MAX_GROUP_CHANGES),
+        ),
+        unit: Unit::Count("changes"),
+        commands: &["land-group"],
+        errors: &[ErrorCode::TooLarge],
+        what: "The changes one `land-group` (`changes`) lands in order as one operation: more \
+                   are refused before anything is resolved or read, with \
+                   `details.max_changes`; none is `E_INVALID_ARG`.",
     },
 ];
 

@@ -50,6 +50,10 @@
 //! idempotency key: in every image the revert is whole or absent, never absent once it had
 //! returned, and the same `revert --key` run again takes the changeset back exactly once.
 //!
+//! A run of its own (`group_loss`, the M18 design §6.3) lands three changes as one group: in
+//! every image the chain's three inserts and main's move are all there or none of them, never
+//! gone once the group land had returned.
+//!
 //! One more run, of its own (`committed_read`), checks that a committed snapshot
 //! (`MetaStore::read_committed`, storage spec §3) holds nothing a power loss after it can take
 //! back, where a lock-free snapshot may; its images are read with the library, as the snapshot
@@ -3230,6 +3234,242 @@ mod revert_loss {
         assert!(held.contains(&true), "no image with the revert");
         println!(
             "revert loss {format:?}: {} steps from the revert's start, {} distinct images, \
+             returned at step {}",
+            run.timeline.steps() - run.from,
+            images.len(),
+            run.returned
+        );
+    }
+    }
+}
+
+mod group_loss {
+    //! Power loss in a group land (the M18 design §6.3): main at `t0`, three changes on it, and
+    //! their keyed group land, one frame of three inserts and one move of main, recorded call
+    //! by call. Every image verifies clean and holds the whole chain or none of it, no link
+    //! indexed without the move, and holds it once the group land had returned; the same group
+    //! again through the binary leaves main at a chain of three on `t0`.
+
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::thread;
+
+    use camino::Utf8PathBuf;
+    use swarmops_core::{ChangesetId, LeafKind, RepoPath};
+    use swarmops_repo::land::{LandGroupRequest, PlanItem};
+    use swarmops_repo::{CasResult, Change, ChangeOp, CommitRequest, LocalRepo};
+    use swarmops_store::{FsOps, StoreFormat};
+    use swarmops_testkit::per_format;
+    use swarmops_testkit::power::{ImageRecordingFs, Seeded, Timeline};
+
+    use super::{AGENT, AT_ONCE, ask, clean, log, signature};
+
+    /// The seeds each cut is checked with: 0 the least the disk can hold, 1 the most, the rest
+    /// at random ([`Seeded`]).
+    const SEEDS: [u64; 4] = [0, 1, 2, 3];
+
+    /// Who moves main in the run.
+    const ACTOR: &str = "test-power/worker-1";
+
+    /// The group's changes: each adds a file of its own on `t0`.
+    const CHANGES: [&str; 3] = ["one", "two", "three"];
+
+    /// What the run recorded.
+    struct Run {
+        timeline: Timeline,
+        /// Main's head before the group, in hex.
+        t0: String,
+        /// The changes' heads, in hex.
+        heads: Vec<String>,
+        /// The chain the group landed, oldest first, in hex.
+        chain: Vec<String>,
+        /// The step the group starts at, and the step at which it had returned.
+        from: usize,
+        returned: usize,
+    }
+
+    /// A one-file commit of `path` on `parent`.
+    fn one_file(path: &str, parent: Option<ChangesetId>) -> CommitRequest {
+        let change = Change::new(
+            RepoPath::new(path).expect("a repo path"),
+            ChangeOp::Put {
+                kind: LeafKind::File,
+                content: format!("{path}\n").into_bytes(),
+            },
+        );
+        CommitRequest::new(
+            parent.into_iter().collect(),
+            vec![change],
+            signature(),
+            signature(),
+            path.as_bytes().to_vec(),
+            Vec::new(),
+            false,
+            None,
+        )
+    }
+
+    /// Records the run (the module documentation) on one thread.
+    fn record_run(format: StoreFormat) -> (tempfile::TempDir, Run) {
+        let dir = tempfile::tempdir().expect("make a temp dir");
+        let base = dir.path().canonicalize().expect("the temp dir's path");
+        let root = Utf8PathBuf::from_path_buf(base.join("store")).expect("UTF-8 temp paths");
+        let fs = Arc::new(ImageRecordingFs::new());
+        let shared = Arc::clone(&fs) as Arc<dyn FsOps>;
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("a one-thread pool");
+
+        // 1. The store, main at t0, the changes; then the group land, its start and return
+        //    marked.
+        let (t0, heads, chain) = pool.install(|| {
+            let repo = LocalRepo::create_with_fs_as(&root, "power", format, shared).expect("init");
+            let t0 = repo.commit(one_file("t0", None)).expect("commit").id;
+            let moved = repo
+                .cas_ref("main", None, Some(t0), ACTOR)
+                .expect("cas_ref");
+            assert!(
+                matches!(moved.result, CasResult::Applied { .. }),
+                "{moved:?}"
+            );
+            let heads: Vec<ChangesetId> = (CHANGES.iter())
+                .map(|path| repo.commit(one_file(path, Some(t0))).expect("commit").id)
+                .collect();
+            fs.mark("before");
+            let items = (heads.iter().zip(CHANGES))
+                .map(|(&head, key)| {
+                    let mut item = PlanItem::new(head);
+                    item.key = Some(format!("power-{key}"));
+                    item
+                })
+                .collect();
+            let group = LandGroupRequest::new("main", items, signature());
+            let landed = repo.land_group(&group).expect("land_group");
+            fs.mark("returned");
+            let chain: Vec<ChangesetId> = landed.items.iter().filter_map(|i| i.landed).collect();
+            assert_eq!(chain.len(), CHANGES.len(), "{landed:?}");
+            (t0, heads, chain)
+        });
+
+        // 2. The timeline of the calls.
+        let calls = fs.calls();
+        let timeline = Timeline::new(&base, &calls);
+        let hex = |ids: &[ChangesetId]| ids.iter().map(ToString::to_string).collect();
+        let run = Run {
+            from: timeline.mark("before"),
+            returned: timeline.mark("returned"),
+            timeline,
+            t0: t0.to_string(),
+            heads: hex(&heads),
+            chain: hex(&chain),
+        };
+        (dir, run)
+    }
+
+    /// Whether the store in the image of `cut`, `seed` holds the group, once `verify --deep`
+    /// found it clean: main names the chain's last, on the rest of it and `t0`, or `t0` with no
+    /// link of the chain in the store's index. Then the same group again leaves main at a chain
+    /// of three on `t0`.
+    fn group_in(run: &Run, cut: usize, seed: u64) -> Result<bool, String> {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        let image = run.timeline.image(cut, &mut Seeded::new(seed, cut));
+        image.materialize(dir.path()).map_err(|e| e.to_string())?;
+        let store = dir.path().join("store");
+        let store = store.to_str().expect("a UTF-8 path");
+        clean(store, "after the power loss")?;
+
+        // 1. What main names: the whole chain, or `t0` and no link indexed.
+        let mut whole: Vec<String> = run.chain.iter().rev().cloned().collect();
+        whole.push(run.t0.clone());
+        let on_main = log(store, "main")?;
+        let held = if on_main == whole {
+            true
+        } else if on_main == [run.t0.clone()] {
+            for link in &run.chain {
+                let shown = ask(&["--repo", store, "show", link])?;
+                if shown.ok().is_ok() {
+                    return Err(format!("link {link} is in the store without the move"));
+                }
+            }
+            false
+        } else {
+            return Err(format!(
+                "main is neither t0 nor the whole chain: {on_main:?}"
+            ));
+        };
+        if cut >= run.returned && !held {
+            return Err("the group had returned, and is gone".to_owned());
+        }
+
+        // 2. The same group again: nothing to land where it is held, a chain of three if not.
+        let mut args = vec!["--repo", store, "--as", AGENT, "land-group"];
+        args.extend(run.heads.iter().map(String::as_str));
+        let again = ask(&args)?;
+        match (held, again.code()) {
+            (true, Some("E_NOTHING_TO_LAND")) | (false, None) => {}
+            _ => return Err(format!("land-group again, held {held}: {}", again.run)),
+        }
+        let ids = log(store, "main")?;
+        if ids.len() != whole.len() || ids.last() != Some(&run.t0) {
+            return Err(format!("main after the group again: {ids:?}"));
+        }
+        clean(store, "after the group again")?;
+        Ok(held)
+    }
+
+    per_format! {
+    /// Every image holds a group land's chain whole or not at all (the M18 design §6.3): over
+    /// every cut from the group's start and [`SEEDS`], each distinct image once, the store
+    /// verifies clean, holds all three inserts and the move of main or none of them, holds them
+    /// once the group land had returned, and the same group again lands it once.
+    fn power_loss_images_keep_a_group_whole(format) {
+        let (_dir, run) = record_run(format);
+
+        // 1. Every cut and seed, each distinct image once.
+        let mut distinct: HashMap<u64, (usize, u64)> = HashMap::new();
+        for cut in run.from..=run.timeline.steps() {
+            for seed in SEEDS {
+                let image = run.timeline.image(cut, &mut Seeded::new(seed, cut));
+                distinct.entry(image.digest()).or_insert((cut, seed));
+            }
+        }
+        let mut images: Vec<(usize, u64)> = distinct.into_values().collect();
+        images.sort_unstable();
+
+        // 2. Each checked, a batch of them at once.
+        let (mut held, mut failures) = (Vec::new(), Vec::new());
+        for batch in images.chunks(AT_ONCE) {
+            thread::scope(|scope| {
+                let checks: Vec<_> = (batch.iter())
+                    .map(|&(cut, seed)| {
+                        let run = &run;
+                        scope.spawn(move || {
+                            let found = group_in(run, cut, seed);
+                            found.map_err(|why| format!("cut {cut}, seed {seed}: {why}"))
+                        })
+                    })
+                    .collect();
+                for check in checks {
+                    match check.join().unwrap_or_else(|p| std::panic::resume_unwind(p)) {
+                        Ok(found) => held.push(found),
+                        Err(why) => failures.push(why),
+                    }
+                }
+            });
+        }
+        assert!(
+            failures.is_empty(),
+            "{} images failed; the first ones:\n{}",
+            failures.len(),
+            failures[..failures.len().min(5)].join("\n")
+        );
+
+        // 3. The sweep reached images without the group, and with it.
+        assert!(held.contains(&false), "no image without the group");
+        assert!(held.contains(&true), "no image with the group");
+        println!(
+            "group loss {format:?}: {} steps from the group's start, {} distinct images, \
              returned at step {}",
             run.timeline.steps() - run.from,
             images.len(),

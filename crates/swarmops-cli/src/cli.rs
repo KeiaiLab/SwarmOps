@@ -470,6 +470,29 @@ pub enum Command {
         #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_CONFLICT_BYTES)]
         max_conflict_bytes: u64,
     },
+    /// Land changes in order onto a ref as one operation: one changeset each, one move.
+    ///
+    /// Each HEAD, with its first-parent chain since its merge base with the ref's head, is merged
+    /// onto what the clean ones before it make, as land-check plans them. The clean ones are
+    /// recorded as a chain of landed changesets, each on the one before, with one move of the
+    /// ref to the last: one operation in op log, all of it or none after a crash. A conflicting
+    /// change is reported, as land reports it, and passed over; one with nothing to land lands
+    /// nothing. With no clean change it is E_NOTHING_TO_LAND, each change's outcome in
+    /// details.items. A ref that moves after the plan makes it plan again.
+    LandGroup {
+        /// The changes' heads, in the order they land: 1 to 32.
+        #[arg(value_name = "HEAD", required = true, num_args = 1..)]
+        heads: Vec<String>,
+        /// The ref they land on: main or a release ref (release/NAME).
+        #[arg(long, value_name = "REF", default_value = "main")]
+        onto: String,
+        /// How many times to plan and publish before E_CAS_RETRY_EXHAUSTED: 1 to 32.
+        #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_ATTEMPTS)]
+        max_attempts: u32,
+        /// The most bytes of hunk text each conflicting change's report carries, as land's.
+        #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_CONFLICT_BYTES)]
+        max_conflict_bytes: u64,
+    },
     /// Merge a change three-way onto a ref's head and record the result there as one changeset,
     /// moving no ref.
     ///
@@ -743,7 +766,7 @@ pub enum Command {
     ///
     /// One tool per operation (repo_info, resolve_rev, read_file, read_tree, show, log, ancestry,
     /// path_history, diff, op_log, ref_list, ref_set, ref_delete, ref_log, undo, commit, land,
-    /// revert, land_check, blob_put, blob_has, verify, the maintenance's gc, repair and upgrade, and the git
+    /// revert, land_check, land_group, blob_put, blob_has, verify, the maintenance's gc, repair and upgrade, and the git
     /// remotes' remote_list, fetch, push, sync and sync_status), each taking the operation's
     /// request as its arguments and returning the envelope the other commands print. The store and the
     /// identity are the server's, --repo and --as or their variables, never a call's. Speaks MCP 2026-07-28, and 2025-11-25 and
@@ -1607,6 +1630,7 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["commit"] => "commit",
         ["land"] => "land",
         ["land-check"] => "land_check",
+        ["land-group"] => "land_group",
         ["rebase"] => "rebase",
         ["revert"] => "revert",
         ["resolve"] => "resolve_rev",
@@ -1784,10 +1808,10 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 57);
+        assert_eq!(ops.len(), 58);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 57, "two subcommands name one op");
+        assert_eq!(ops.len(), 58, "two subcommands name one op");
         assert_eq!(op_name(&["ref"]), None);
         assert_eq!(op_name(&["blob"]), None);
         assert_eq!(op_name(&["ws"]), None);

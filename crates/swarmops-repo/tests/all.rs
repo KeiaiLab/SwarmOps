@@ -16,6 +16,7 @@ mod land_batch;
 mod land_check;
 mod land_detached;
 mod land_expect;
+mod land_group;
 mod merge;
 mod oplog;
 mod path_history;

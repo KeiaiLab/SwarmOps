@@ -92,9 +92,14 @@
 //! The dry run ([`Repo::land_check`], the M18 design §6.2) is steps 1 to 4 for one change or
 //! several, in order, each merged onto what the clean ones before it made, in one snapshot: no
 //! lock, no object, no frame.
+//!
+//! The group land ([`Repo::land_group`], the M18 design §6.3) is the dry run's plan written: the
+//! clean changes a chain of `L`s, each on the one before, published in one frame of k inserts and
+//! one move, never made anew under the lock; a target that moved makes it plan again.
 
 mod batch;
 mod detached;
+mod group;
 mod key;
 mod landing;
 mod plan;
@@ -102,6 +107,7 @@ mod publish;
 mod resolve;
 
 pub use detached::{DetachedLand, DetachedOutcome};
+pub use group::{GroupItem, GroupLanded, LandGroup, LandGroupRequest};
 pub use landing::{
     Gated, LandOutcome, LandRequest, LandStatus, MAX_TOUCHES_PER_FILE, MergeConflicts, More,
     NothingToLandReason, Touches, backoff,

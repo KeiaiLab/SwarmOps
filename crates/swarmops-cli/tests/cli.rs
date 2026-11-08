@@ -4042,6 +4042,105 @@ fn land_check_golden() {
     insta::assert_json_snapshot!(s.transcript());
 }
 
+/// `land-group` (the M18 design §6.3): four changes made on main's head, the third editing the
+/// line main changed since, land as one operation: three landed changesets and one move of
+/// main, which `op log` reads as a land; the third's report names its path. The same group
+/// again has nothing clean: `E_NOTHING_TO_LAND`, each change's outcome in `details.items`,
+/// nothing written. More than 32 is `E_TOO_LARGE`.
+#[test]
+fn land_group_lands_one_operation() {
+    let mut s = Session::new();
+    let store = s.store();
+    s.run(&["init", &store]);
+
+    // 1. main at t0 then t1, four changes on t0, the third against t1's line.
+    let t0 = s.file(
+        "t0.json",
+        &json!([{"path": "f.txt", "op": "put", "content": {"inline": "1\n2\n3\n"}}]).to_string(),
+    );
+    let commit = ["--repo", &store, "--as", AGENT, "commit", "-m", "t0"];
+    let base = s.run(&[&commit[..], &["--changes", &t0, "--advance", "main"]].concat());
+    let t0 = base["result"]["changeset"].as_str().unwrap().to_owned();
+    let heads = [
+        s.commit(&store, Some(&t0), "a.txt", "a\n", "a"),
+        s.commit(&store, Some(&t0), "b.txt", "b\n", "b"),
+        s.commit(&store, Some(&t0), "f.txt", "1\nC\n3\n", "c"),
+        s.commit(&store, Some(&t0), "d.txt", "d\n", "d"),
+    ];
+    let t1 = s.file(
+        "t1.json",
+        &json!([{"path": "f.txt", "op": "put", "content": {"inline": "1\nT\n3\n"}}]).to_string(),
+    );
+    let theirs = [
+        &commit[..],
+        &["--changes", &t1, "--parent", &t0, "--advance", "main"],
+    ];
+    let theirs = s.run(&theirs.concat());
+    let t1 = theirs["result"]["changeset"].as_str().unwrap().to_owned();
+
+    // 2. The group: three land, the third conflicts.
+    let mut group = vec!["--repo", store.as_str(), "--as", AGENT, "land-group"];
+    group.extend(heads.iter().map(String::as_str));
+    let landed = s.run(&group);
+    assert_eq!(
+        (landed.exit, &landed["op"]),
+        (0, &json!("land_group")),
+        "{}",
+        landed.json
+    );
+    let result = &landed["result"];
+    assert_eq!(
+        (&result["rebased_onto"], &result["target"]),
+        (&json!(t1), &json!("main"))
+    );
+    let outcomes: Vec<&str> = (result["items"].as_array().unwrap().iter())
+        .map(|item| item["outcome"].as_str().unwrap())
+        .collect();
+    assert_eq!(outcomes, ["clean", "clean", "conflict", "clean"]);
+    assert_eq!(result["items"][2]["report"]["files"][0]["path"], "f.txt");
+
+    // 3. One operation, a land: three changesets and one move of main, to the group's head.
+    let ops = s.run(&["--repo", &store, "op", "log", "-n", "1"]);
+    let op = &ops["result"]["ops"][0];
+    assert_eq!(
+        (&op["kind"], &op["changesets_total"]),
+        (&json!("land"), &json!(3)),
+        "{op}"
+    );
+    assert_eq!(op["ref_moves"].as_array().unwrap().len(), 1, "{op}");
+    assert_eq!(op["ref_moves"][0]["new"], result["head"]);
+    assert_eq!(
+        op["id"].as_str().unwrap().split(':').next(),
+        Some(result["op"].to_string().as_str())
+    );
+
+    // 4. Again: nothing clean, each outcome named, main where it was.
+    let again = s.run(&group);
+    assert_eq!(again.code(), "E_NOTHING_TO_LAND", "{}", again.json);
+    let items = again["error"]["details"]["items"].as_array().unwrap();
+    let outcomes: Vec<&str> = items
+        .iter()
+        .map(|i| i["outcome"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            "nothing_to_land",
+            "nothing_to_land",
+            "conflict",
+            "nothing_to_land"
+        ]
+    );
+    let main = s.run(&["--repo", &store, "resolve", "main"]);
+    assert_eq!(main["result"]["id"], result["head"]);
+
+    // 5. The bound.
+    let mut many = vec!["--repo", store.as_str(), "--as", AGENT, "land-group"];
+    many.extend(std::iter::repeat_n(heads[0].as_str(), 33));
+    let too_many = s.run(&many);
+    assert_eq!(too_many.code(), "E_TOO_LARGE", "{}", too_many.json);
+}
+
 /// A land's conflicts other than `content`: a file the change deleted and main changed
 /// (`delete_modify`), one the change changed and main deleted (`modify_delete`), and a file
 /// holding a NUL both changed (`binary`). Each names its blobs, and none has hunks.

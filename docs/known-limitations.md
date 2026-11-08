@@ -142,6 +142,13 @@ left).
   target (a land that carried edits, cut once the workspace stood on their changeset). *Target:
   M18 (G4 with group commit, measured in a quiet window). Found: the 2026-10-20 plan triage; narrowed by v0.6.0,
   M16 Task S4 and M18 D2 (group commit); its cause measured in M14.*
+- **A group land plans again outside the lock, and can run out of attempts.** `land-group`
+  publishes its chain only while the ref names the head it planned on: a move in between drops
+  the publish, and the next attempt plans and writes the whole group again, up to
+  `--max-attempts` (32 at most), then `E_CAS_RETRY_EXHAUSTED`. The lock's holder never makes a
+  group anew, so a group on a busy ref pays its own retries, and G4's single-land path is not
+  changed by it. Its re-planning under load is not measured. *Documented (the M18 design §6.3,
+  §11 R6). Found: the M18 design.*
 - **Recovery after a crash walks all of a FORMAT 1 `journal.off` under the lock.** Before it cuts
   or lists anything, the first writer after a crash checks every entry of a FORMAT 1 store's
   `journal.off`. On a long journal that walk could approach `lock_timeout` for the writers queued

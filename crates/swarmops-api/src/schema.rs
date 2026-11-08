@@ -27,6 +27,7 @@ pub fn schema_for_all() -> serde_json::Value {
         ref_log_schemas(),
         revert_schemas(),
         land_check_schemas(),
+        land_group_schemas(),
         conflict_schemas(),
         maintenance_schemas(),
         remote_schemas(),
@@ -193,6 +194,11 @@ fn land_check_schemas() -> serde_json::Value {
         PathSummaryOut,
         PathChange
     ]
+}
+
+/// The schemas of group land's types (the M18 design §6.3).
+fn land_group_schemas() -> serde_json::Value {
+    schemas![LandGroupReq, LandGroupResp, LandGroupItemOut]
 }
 
 /// The schemas of the maintenance's types (M6): gc, repair and upgrade.

@@ -36,6 +36,7 @@ Every command takes these, before or after its subcommand.
 - [`swarmops commit`](commands/commit.md): Record a changeset from a list of changes; with --advance, also move that ref to it.
 - [`swarmops land`](commands/land.md): Merge a change three-way onto a ref and publish it there as one new changeset.
 - [`swarmops land-check`](commands/land-check.md): Say what landing changes in order onto a ref would come to, writing nothing.
+- [`swarmops land-group`](commands/land-group.md): Land changes in order onto a ref as one operation: one changeset each, one move.
 - [`swarmops rebase`](commands/rebase.md): Merge a change three-way onto a ref's head and record the result there as one changeset, moving no ref.
 - [`swarmops revert`](commands/revert.md): Take back a changeset, or a range of a ref's history, by landing its inverse.
 

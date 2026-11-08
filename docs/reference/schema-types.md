@@ -2,7 +2,7 @@
 
 # Schema types
 
-The 182 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
+The 185 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
 
 ## Index
 
@@ -69,6 +69,9 @@ The 182 request, response and value types of the API, as `swarmops schema` print
 | [`LandCheckItemOut`](#landcheckitemout) | object | One change's outcome in a `land_check`. |
 | [`LandCheckReq`](#landcheckreq) | object | `land_check` (CLI `land --dry-run`, `land-check`): what landing `changes`, in order, onto `target` would come to, each after the clean ones before it, as `land` would land them one after another. |
 | [`LandCheckResp`](#landcheckresp) | object | `land_check`: each change's outcome, on the target's head it read. |
+| [`LandGroupItemOut`](#landgroupitemout) | object | One change's outcome in a `land_group`. |
+| [`LandGroupReq`](#landgroupreq) | object | `land_group` (CLI `land-group`): lands `changes`, in order, onto `target` as one operation: each change merged onto what the clean ones before it make, as `land_check` plans them, the clean ones recorded as a chain of landed changesets, each on the one before, with one move of `target` to the last. |
+| [`LandGroupResp`](#landgroupresp) | object | `land_group`: the chain it landed, and each change's outcome. |
 | [`LandItemIn`](#landitemin) | object | One change of a `land_check`: as `land` takes it. |
 | [`LandMode`](#landmode) | enumeration | How a workspace lands. |
 | [`LandReq`](#landreq) | object | `land`: merge a change three-way onto a target ref and publish it there as one new changeset, in one transaction. |
@@ -1073,6 +1076,48 @@ Kind: object. `swarmops schema LandCheckResp` prints its JSON Schema.
 | --- | --- | --- | --- |
 | `items` | array of [`LandCheckItemOut`](#landcheckitemout) | yes | Each change's outcome, in the request's order. |
 | `onto` | `string` | yes | The target's head the changes were planned on: a land with `expect_target` set to it lands what the check found, or nothing. |
+
+## LandGroupItemOut
+
+One change's outcome in a `land_group`.
+
+Kind: object. `swarmops schema LandGroupItemOut` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `head` | `string` | yes | The change's head, a full id. |
+| `landed` | `string` or `null` | no | For `clean`, the changeset that landed it, a link of the chain; for `replayed`, the one a land with its key made before. |
+| `outcome` | [`ItemOutcome`](#itemoutcome) | yes | What landing it after the clean changes before it came to: `clean` landed it. |
+| `report` | [`ConflictReport`](#conflictreport) or `null` | no | For `conflict`, the report a land gives in `E_CONFLICT`'s `details.report`. |
+
+## LandGroupReq
+
+`land_group` (CLI `land-group`): lands `changes`, in order, onto `target` as one operation: each change merged onto what the clean ones before it make, as `land_check` plans them, the clean ones recorded as a chain of landed changesets, each on the one before, with one move of `target` to the last. A conflicting change is reported and passed over; a replayed one, or one with nothing to land, lands nothing. A group with no clean change is `E_NOTHING_TO_LAND`, each change's outcome in `details.items`. A target that moves after the plan makes the group plan again, up to `max_attempts`.
+
+Kind: object. `swarmops schema LandGroupReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `changes` | array of [`LandItemIn`](#landitemin) | yes | The changes, in the order they land: 1 to 32 (`E_INVALID_ARG` for none, `E_TOO_LARGE` past 32), each key once. |
+| `max_attempts` | `integer` (uint32) | no | How many times the group plans and publishes at most before `E_CAS_RETRY_EXHAUSTED`: 1 to 32. Default: `8`. |
+| `max_conflict_bytes` | `integer` (uint64) | no | The most bytes of hunk text each conflicting change's report carries, as a land's. Default: `32768`. |
+| `target` | `string` | no | The ref the changes land on: `main` or `release/<name>`, which must exist. Default: `"main"`. |
+
+## LandGroupResp
+
+`land_group`: the chain it landed, and each change's outcome.
+
+Kind: object. `swarmops schema LandGroupResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `attempts` | `integer` (uint32) | yes | How many times the group planned and published. |
+| `head` | `string` | yes | The last landed changeset: what the target names now. |
+| `items` | array of [`LandGroupItemOut`](#landgroupitemout) | yes | Each change's outcome, in the request's order. |
+| `op` | `integer` (uint64) | yes | The operation that recorded the chain and the move: its number in `op_log`. |
+| `rebased_onto` | `string` | yes | The target's head the chain landed on: the first landed changeset's parent. |
+| `target` | `string` | yes | The ref the changes landed on. |
+| `warnings` | array of `string` | no | Problems found after the chain became durable; the land itself succeeded. Omitted when empty. |
 
 ## LandItemIn
 

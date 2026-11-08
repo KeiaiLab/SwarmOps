@@ -25,6 +25,8 @@
 //!   and the weekly `just check-ci-slow` run it; `just check` does not.
 //!
 //! - A revert (the M18 design §4), a land of the inverse change, is swept as a land is.
+//! - A group land (the M18 design §6.3) is swept as a land is: its chain lands whole or not at
+//!   all.
 //! - A batch of lands (the M18 D2 design §3) is swept through the binary too: a land leads two
 //!   requests that killed `land` runs queued, kept alive by this test's flocks, and crashes at
 //!   each of its calls; every key then lands once.
@@ -490,6 +492,72 @@ fn a_revert_crashing_at_any_call_lands_once_through_the_binary(format) {
         published.iter().any(|&replayed| !replayed),
         "some before it"
     );
+}
+}
+
+per_format! {
+/// A group land crashed at any filesystem call lands its whole chain or none of it (the M18
+/// design §6.3), through the binary: on a store whose main is `t0`, with two changes on it,
+/// `land-group` of both, crashed at each call k of the N its dry run makes, leaves the store
+/// verifying clean with main at `t0` or at the whole chain; and the same command run again ends
+/// with main at the dry run's chain, both links on `t0`: landed anew where main had stayed, or
+/// `E_NOTHING_TO_LAND` where the crashed run had published it. Both sides of the commit point
+/// are reached.
+fn a_group_land_crashing_at_any_call_lands_all_or_none_through_the_binary(format) {
+    let template = Store::init_as(format).with_env(&[(NOW_ENV, &NOW.to_string())]);
+    let t0 = advance_main(&template, &agent(0), "base.txt", "the base\n");
+    let one = template.commit(&agent(0), "one.txt", "one\n", Some(&t0));
+    let two = template.commit(&agent(0), "two.txt", "two\n", Some(&t0));
+    let group = ["land-group", one.as_str(), two.as_str()];
+
+    // 1. The dry run, its calls counted: a chain of two on `t0`.
+    let dry = Store::copy_of(&template);
+    let file = calls_file(&dry);
+    let result = dry.run_as(&agent(1), &group, &[(FS_CALLS_ENV, file.to_str().unwrap())]);
+    let result = result.ok();
+    let chain: Vec<String> = (result["items"].as_array().unwrap().iter())
+        .map(|item| item["landed"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(result["head"], chain[1].as_str(), "{result}");
+    let calls = reported_calls(&file);
+    assert!(calls > 20, "a group land makes dozens of calls: {calls}");
+
+    // 2. Each call crashed: main at `t0` or the whole chain; then the same group again.
+    let want = [chain[1].as_str(), chain[0].as_str(), t0.as_str()];
+    let published = sweep(1..=calls + 1, |k| {
+        let store = Store::copy_of(&template);
+        let crash_at = k.to_string();
+        let run = store.run_as(&agent(1), &group, &[(CRASH_AT_ENV, &crash_at)]);
+        if k <= calls {
+            assert!(run.aborted(), "k={k} of {calls}: {run}");
+        } else {
+            assert_eq!(run.ok()["head"], chain[1].as_str(), "k={k}");
+        }
+        store.assert_clean(&format!("k={k}: after the crash"));
+        let main_at = |store: &Store| -> Vec<String> {
+            let log = store.read(&["log"]).ok();
+            (log["entries"].as_array().unwrap().iter())
+                .map(|entry| entry["id"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let crashed = main_at(&store);
+        let landed = crashed.len() == want.len();
+        assert!(landed || crashed == [t0.as_str()], "k={k}: main is part of a chain: {crashed:?}");
+        let again = store.run_as(&agent(1), &group, &[]);
+        if landed {
+            again.err("E_NOTHING_TO_LAND");
+        } else {
+            assert_eq!(again.ok()["head"], chain[1].as_str(), "k={k}");
+        }
+        assert_eq!(main_at(&store), want, "k={k}");
+        store.assert_clean(&format!("k={k}: after the same group again"));
+        landed
+    });
+    assert!(
+        published.iter().any(|&landed| landed),
+        "some crash came after the group's commit point"
+    );
+    assert!(published.iter().any(|&landed| !landed), "some before it");
 }
 }
 

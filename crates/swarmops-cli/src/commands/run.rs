@@ -39,7 +39,7 @@ use swarmops_api::{
     SyncMode, SyncReq, SyncStatusReq,
 };
 use swarmops_api::{GcReq, RepairReq, UpgradeReq};
-use swarmops_api::{LandCheckReq, LandItemIn};
+use swarmops_api::{LandCheckReq, LandGroupReq, LandItemIn};
 use swarmops_ops::content::{MAX_CONTENT_BYTES, MAX_REQUEST_BYTES};
 use swarmops_ops::identity::{self, AUTH_TRUST};
 use swarmops_ops::{LocalOps, Recording, Resolved};
@@ -190,7 +190,7 @@ fn dispatch(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
             },
             |ops, (who, req)| ops.commit(&who, req),
         ),
-        land @ (Command::Land { .. } | Command::LandCheck { .. }) => run_land(ctx, op, land),
+        land if lands(&land) => run_land(ctx, op, land),
         rebase @ Command::Rebase { .. } => run_rebase(ctx, op, rebase),
         revert @ Command::Revert { .. } => run_revert(ctx, op, revert),
         Command::Blob(command) => run_blob(ctx, op, command),
@@ -359,11 +359,21 @@ fn history(
     )
 }
 
+/// Whether `command` is one [`run_land`] runs: `land`, `land-check` or `land-group`.
+fn lands(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Land { .. } | Command::LandCheck { .. } | Command::LandGroup { .. }
+    )
+}
+
 /// Runs `land`, which names operation `op`, as the caller: `command` is the land's arguments;
-/// with `--dry-run`, the check of its head, which names `land_check`; `land-check`'s, the check.
+/// with `--dry-run`, the check of its head, which names `land_check`; `land-check`'s, the check;
+/// `land-group`'s, the group land.
 fn run_land(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
     let command = match command {
         check @ Command::LandCheck { .. } => return run_land_check(ctx, op, check),
+        group @ Command::LandGroup { .. } => return run_land_group(ctx, op, group),
         land => land,
     };
     let Command::Land {
@@ -428,6 +438,31 @@ fn run_land_check(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed 
     req.target = onto;
     req.max_conflict_bytes = max_conflict_bytes;
     ctx.on_store(op, || Ok(req), |ops, req| ops.land_check(req))
+}
+
+/// Runs `land-group`, which names operation `op`, as the caller.
+fn run_land_group(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
+    let Command::LandGroup {
+        heads,
+        onto,
+        max_attempts,
+        max_conflict_bytes,
+    } = command
+    else {
+        unreachable!("run passes land-group its own command alone");
+    };
+    ctx.on_store(
+        op,
+        || {
+            let who = context::mutator(ctx.global.agent.as_deref(), ctx.env)?;
+            let mut req = LandGroupReq::new(heads.into_iter().map(LandItemIn::new).collect());
+            req.target = onto;
+            req.max_attempts = max_attempts;
+            req.max_conflict_bytes = max_conflict_bytes;
+            Ok((who, req))
+        },
+        |ops, (who, req)| ops.land_group(&who, req),
+    )
 }
 
 /// The operation `land --dry-run` names: the check's.

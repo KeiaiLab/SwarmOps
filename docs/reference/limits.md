@@ -24,6 +24,7 @@ The limits of the SwarmOps contract: what a request may hold, with the error a r
 | [Revert range](#revert-range) | 256 changesets | `swarmops_repo::MAX_REVERT_CHANGESETS` | [`E_TOO_LARGE`](errors.md#e_too_large) |
 | [Revert reason](#revert-reason) | 4,096 bytes (4 KiB) | `swarmops_repo::MAX_REVERT_REASON_BYTES` | [`E_INVALID_ARG`](errors.md#e_invalid_arg) |
 | [Land check changes](#land-check-changes) | 32 changes | `swarmops_repo::land::MAX_GROUP_CHANGES` | [`E_TOO_LARGE`](errors.md#e_too_large) |
+| [Group land changes](#group-land-changes) | 32 changes | `swarmops_repo::land::MAX_GROUP_CHANGES` | [`E_TOO_LARGE`](errors.md#e_too_large) |
 
 ### Request text
 
@@ -94,7 +95,7 @@ The agent name of `--as` or `SWARMOPS_AGENT`, `<family>/<instance>`, which a ref
 
 - Value: 255 bytes.
 - Constant: `swarmops_api::identity::MAX_AGENT_LEN`, in `crates/swarmops-api/src/identity.rs`.
-- Commands: [`whoami`](commands/whoami.md), [`commit`](commands/commit.md), [`land`](commands/land.md), [`rebase`](commands/rebase.md), [`revert`](commands/revert.md), [`blob put`](commands/blob-put.md), [`ref set`](commands/ref-set.md), [`ref delete`](commands/ref-delete.md), [`op undo`](commands/op-undo.md), [`git import`](commands/git-import.md), [`clone`](commands/clone.md), [`ws create`](commands/ws-create.md), [`sync`](commands/sync.md), [`mcp`](commands/mcp.md), [`serve`](commands/serve.md).
+- Commands: [`whoami`](commands/whoami.md), [`commit`](commands/commit.md), [`land`](commands/land.md), [`land-group`](commands/land-group.md), [`rebase`](commands/rebase.md), [`revert`](commands/revert.md), [`blob put`](commands/blob-put.md), [`ref set`](commands/ref-set.md), [`ref delete`](commands/ref-delete.md), [`op undo`](commands/op-undo.md), [`git import`](commands/git-import.md), [`clone`](commands/clone.md), [`ws create`](commands/ws-create.md), [`sync`](commands/sync.md), [`mcp`](commands/mcp.md), [`serve`](commands/serve.md).
 - Error: [`E_INVALID_ARG`](errors.md#e_invalid_arg).
 
 ### Ref name
@@ -166,6 +167,15 @@ The changes one `land-check` (`changes`) plans in order: more are refused before
 - Value: 32 changes.
 - Constant: `swarmops_repo::land::MAX_GROUP_CHANGES`, in `crates/swarmops-repo/src/land/plan.rs`.
 - Commands: [`land-check`](commands/land-check.md).
+- Error: [`E_TOO_LARGE`](errors.md#e_too_large).
+
+### Group land changes
+
+The changes one `land-group` (`changes`) lands in order as one operation: more are refused before anything is resolved or read, with `details.max_changes`; none is `E_INVALID_ARG`.
+
+- Value: 32 changes.
+- Constant: `swarmops_repo::land::MAX_GROUP_CHANGES`, in `crates/swarmops-repo/src/land/plan.rs`.
+- Commands: [`land-group`](commands/land-group.md).
 - Error: [`E_TOO_LARGE`](errors.md#e_too_large).
 
 ## Bounds without an error

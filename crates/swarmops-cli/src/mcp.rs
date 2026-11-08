@@ -66,7 +66,7 @@
 //!
 //! One tool per [`StoreOps`] operation, named as the envelope's `op` is: `repo_info`,
 //! `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `ancestry`, `path_history`, `diff`, `op_log`,
-//! `ref_list`, `ref_set`, `ref_delete`, `ref_log`, `undo`, `commit`, `land`, `revert`, `land_check`, `blob_put`, `blob_has`,
+//! `ref_list`, `ref_set`, `ref_delete`, `ref_log`, `undo`, `commit`, `land`, `revert`, `land_check`, `land_group`, `blob_put`, `blob_has`,
 //! `verify` and the maintenance's `gc`, `repair` and `upgrade` (M6), in `tools/list`'s order; then the git remotes' client-side operations (M13), which
 //! no [`StoreOps`] has: `remote_list`, `fetch`, `push`, `sync` and `sync_status`, run on the
 //! store's own operations ([`operate_local`]) and taking a remote by its name only, never a URL
@@ -278,7 +278,7 @@ const READ_FILE_RESULT_CHARS: u32 = 200_000;
 const RESULT_CHARS_KEY: &str = "anthropic/maxResultSizeChars";
 
 /// The tools, in the order `tools/list` gives them.
-static TOOLS: [Spec; 31] = [
+static TOOLS: [Spec; 32] = [
     Spec {
         tool: Tool::RepoInfo,
         name: "repo_info",
@@ -530,6 +530,21 @@ static TOOLS: [Spec; 31] = [
                       report). Writes nothing. Land with expect_target set to onto to land what \
                       it found, or nothing.",
         effect: Effect::Reads,
+        result_chars: None,
+    },
+    Spec {
+        tool: Tool::LandGroup,
+        name: "land_group",
+        request: "LandGroupReq",
+        title: "Land a group",
+        description: "Lands changes (1 to 32, each a head with an optional base and \
+                      idempotency_key) in order onto target, main by default, as one operation: \
+                      each merged onto what the clean ones before it make, as land_check plans \
+                      them, the clean ones a chain of landed changesets with one move of target. \
+                      A conflicting change is reported (items[].report) and passed over; with \
+                      none clean it is E_NOTHING_TO_LAND, each outcome in details.items. Give \
+                      each change an idempotency_key to make a retry safe.",
+        effect: Effect::Lands,
         result_chars: None,
     },
     Spec {
@@ -1477,6 +1492,7 @@ fn operate<O: Operate>(tool: Tool, how: O) -> O::Done {
         Tool::Land => how.mutate(|ops, who, req| ops.land(who, req)),
         Tool::Revert => how.mutate(|ops, who, req| ops.revert(who, req)),
         Tool::LandCheck => how.read(|ops, req| ops.land_check(req)),
+        Tool::LandGroup => how.mutate(|ops, who, req| ops.land_group(who, req)),
         Tool::Rebase => how.mutate(|ops, who, req| ops.rebase(who, req)),
         Tool::BlobPut => how.mutate(|ops, who, req| ops.blob_put(who, req)),
         Tool::BlobHas => how.read(|ops, req| ops.blob_has(req)),
@@ -1802,6 +1818,7 @@ impl Refuse for OpLogReq {}
 impl Refuse for RefListReq {}
 impl Refuse for RefLogReq {}
 impl Refuse for swarmops_api::LandCheckReq {}
+impl Refuse for swarmops_api::LandGroupReq {}
 impl Refuse for UndoReq {}
 impl Refuse for VerifyReq {}
 impl Refuse for swarmops_api::GcReq {}
@@ -2385,6 +2402,7 @@ enum Tool {
     Land,
     Revert,
     LandCheck,
+    LandGroup,
     Rebase,
     BlobPut,
     BlobHas,
@@ -2881,6 +2899,14 @@ pub(crate) mod probe {
             _: swarmops_api::LandCheckReq,
         ) -> Result<swarmops_api::LandCheckResp, OpError> {
             self.called("land_check", "LandCheckReq")
+        }
+
+        fn land_group(
+            &self,
+            _: &Identity,
+            _: swarmops_api::LandGroupReq,
+        ) -> Result<swarmops_api::LandGroupResp, OpError> {
+            self.called("land_group", "LandGroupReq")
         }
     }
 }

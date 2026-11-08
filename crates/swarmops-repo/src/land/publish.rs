@@ -38,6 +38,10 @@
 //! `lander`). With no overlapping path its delta is `L`'s, and so is its delta hash. A land with
 //! an expected target ([`Relocate::Never`], M5) is never made anew: a moved target goes back as
 //! [`Published::Moved`], so that what lands is the tree its lander checked.
+//!
+//! A group land's publish (`Repo::publish_group`, the M18 design §6.3) is made so too: its
+//! chain `L1 … Lk`, k inserts, and the target's move from the head it was planned on to `Lk`,
+//! one frame, never made anew; every item's key is looked for among the moves since its plan.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -109,6 +113,27 @@ pub struct Publication {
     /// The change's head: a land of the key is this land made before when its `squashed_from`
     /// ends there, or, with `first`, at a changeset on it with `first`'s tree.
     pub head: ChangesetId,
+}
+
+/// A group land's chain of changesets, `L1 … Lk`, written and flushed, to publish as one frame
+/// (the M18 design §6.3): its k inserts and one move of the target, never made anew.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GroupPublication {
+    /// The ref it lands on.
+    pub(crate) target: String,
+    /// The target's head the chain was made on, `L1`'s parent: what the publish expects the
+    /// target to name.
+    pub(crate) onto: ChangesetId,
+    /// The chain, oldest first: each one's parent the one before it, the last the target's new
+    /// head. Never empty.
+    pub(crate) chain: Vec<(ChangesetId, Changeset)>,
+    /// Who moves the target, as the reflog names them: at most 255 bytes.
+    pub(crate) actor: String,
+    /// Each keyed change's key and head, looked for among the ref moves committed since
+    /// `next_seq`.
+    pub(crate) keys: Vec<(String, ChangesetId)>,
+    /// The seq of the first frame that the snapshot the group was planned in does not hold.
+    pub(crate) next_seq: u64,
 }
 
 /// What a publish did.
@@ -227,6 +252,84 @@ impl<O: ObjectStore> Repo<O> {
     }
 }
 
+impl<O: ObjectStore> Repo<O> {
+    /// Publishes `g` in one write transaction, one frame: the chain's inserts and the move of
+    /// its target from `g.onto` to the chain's last, by compare-and-swap, never made anew
+    /// ([`Relocate::Never`]). A target that moved, or a land of one of `g`'s keys on it since
+    /// the plan's snapshot, drops the write: [`Published::Moved`], for the group to plan again.
+    /// A key's land on another ref since then is [`RepoError::KeyReused`]. With the published
+    /// outcome, the seq of the frame that committed it.
+    ///
+    /// The transaction is a turn at the store's write queue, as [`Repo::publish`]'s is.
+    pub(crate) fn publish_group(
+        &self,
+        g: &GroupPublication,
+    ) -> Result<(Published, Option<u64>), RepoError> {
+        let body = batch::encode_group(g)?;
+        match self.meta.take_turn(&body, Serve::Queue)? {
+            Turn::Answered(answer) => self.answered_group(&answer, g),
+            Turn::Lead(lead) => self.lead_group(lead, g),
+            _ => Err(RepoError::unknown_variant("Turn")),
+        }
+    }
+}
+
+/// [`Repo::publish_group`]'s checks, inserts and compare-and-swap under the lock `write` holds,
+/// every object read from `objects`: what is left to do is the commit
+/// ([`PublishPlan::Queued`]), or nothing ([`PublishPlan::Done`] with [`Published::Moved`]).
+pub(crate) fn plan_group<S: ObjectStore>(
+    write: &mut MetaWrite<'_>,
+    objects: &S,
+    g: &GroupPublication,
+) -> Result<PublishPlan, RepoError> {
+    // 1. The keys, among the moves since the plan's snapshot: a land of one on the target
+    //    plans the group again, as a moved target does.
+    let keys: Vec<(&String, Ours)> = (g.keys.iter())
+        .map(|(key, head)| (key, Ours::Chain(*head)))
+        .collect();
+    if keys_since(write, objects, &g.target, &keys, g.next_seq)?.is_some() {
+        let actual = write
+            .get_ref(&g.target)
+            .map_err(repo::ref_error)?
+            .ok_or_else(|| RepoError::NotFound(g.target.clone()))?;
+        let recovered = write.recovered();
+        return Ok(PublishPlan::Done(Published::Moved { actual, recovered }));
+    }
+
+    // 2. The k inserts, oldest first, then the target's compare-and-swap to the last.
+    let Some((last, changeset)) = g.chain.last() else {
+        return Err(RepoError::Internal(
+            "a group publish of no changeset".to_owned(),
+        ));
+    };
+    for (id, made) in &g.chain {
+        insert(write, *id, made)?;
+    }
+    let moved = write
+        .cas_ref(&g.target, Some(g.onto), Some(*last), &g.actor)
+        .map_err(repo::ref_error)?;
+    match moved {
+        CasResult::Applied { .. } => {}
+        CasResult::Mismatch {
+            actual: Some(actual),
+        } => {
+            let recovered = write.recovered();
+            return Ok(PublishPlan::Done(Published::Moved { actual, recovered }));
+        }
+        CasResult::Mismatch { actual: None } => {
+            return Err(RepoError::NotFound(g.target.clone()));
+        }
+        _ => return Err(RepoError::unknown_variant("CasResult")),
+    }
+    Ok(PublishPlan::Queued(Queued {
+        id: *last,
+        onto: g.onto,
+        relocated: false,
+        merged_in_lock: Vec::new(),
+        files_changed: changeset.delta.len(),
+    }))
+}
+
 /// Steps 1 and 2 of [`Repo::publish`] and its inserts and compare-and-swap, under the lock `write`
 /// holds, every object read from `objects` and `L'` written there: what is left to do is the
 /// commit ([`PublishPlan::Queued`]), or nothing ([`PublishPlan::Done`]). Fails as
@@ -275,11 +378,7 @@ pub(crate) fn plan_publish<S: ObjectStore>(
 }
 
 /// `p`'s key among the ref moves committed since its land's snapshot, under the lock `write`
-/// holds (the M16 design §6): the first move, in journal order, of a ref a land publishes to
-/// onto a changeset carrying the key. On the target, the land made before
-/// ([`Published::Replayed`]) or [`RepoError::KeyReused`]; on another ref,
-/// [`RepoError::KeyReused`] naming it. `None`: no such move, or no key. Each move read costs
-/// its changeset's object, read from `objects`.
+/// holds (the M16 design §6): [`keys_since`] of its one key. `None`: no such move, or no key.
 fn key_since<S: ObjectStore>(
     write: &MetaWrite<'_>,
     objects: &S,
@@ -295,9 +394,27 @@ fn key_since<S: ObjectStore>(
         },
         None => Ours::Chain(p.head),
     };
+    keys_since(write, objects, &p.target, &[(key, ours)], p.next_seq)
+}
+
+/// `keys` among the ref moves committed from `next_seq` on, under the lock `write` holds (the
+/// M16 design §6): the first move, in journal order, of a ref a land publishes to onto a
+/// changeset carrying one of them. On `target`, the land made before ([`Published::Replayed`])
+/// or [`RepoError::KeyReused`]; on another ref, [`RepoError::KeyReused`] naming it. `None`: no
+/// such move. Each move read costs its changeset's object, read from `objects`.
+fn keys_since<S: ObjectStore>(
+    write: &MetaWrite<'_>,
+    objects: &S,
+    target: &str,
+    keys: &[(&String, Ours)],
+    next_seq: u64,
+) -> Result<Option<Published>, RepoError> {
+    if keys.is_empty() {
+        return Ok(None);
+    }
     let load = |id| changeset_in(objects, id).map(Some);
 
-    for frame in write.frames_from(p.next_seq)? {
+    for frame in write.frames_from(next_seq)? {
         for record in frame.records {
             // 1. A move onto a changeset, of a ref a land publishes to: a tag never moves,
             //    and a remote-tracking ref only a fetch moves.
@@ -314,30 +431,32 @@ fn key_since<S: ObjectStore>(
                 continue;
             }
 
-            // 2. Its changeset, if it carries the key.
+            // 2. Its changeset, if it carries a key.
             let changeset = changeset_in(objects, moved)?;
-            let Some(found) = key::landed_key(moved, &changeset, key, ours, &load)? else {
-                continue;
-            };
+            for &(key, ours) in keys {
+                let Some(found) = key::landed_key(moved, &changeset, key, ours, &load)? else {
+                    continue;
+                };
 
-            // 3. Another ref's land of the key, this land on the target, or another change.
-            let reused = |landed| RepoError::KeyReused {
-                key: key.clone(),
-                landed,
-                target: name.clone(),
-            };
-            if name != p.target {
-                return Err(reused(moved));
+                // 3. Another ref's land of the key, this land on the target, or another change.
+                let reused = |landed| RepoError::KeyReused {
+                    key: key.clone(),
+                    landed,
+                    target: name.clone(),
+                };
+                if name != target {
+                    return Err(reused(moved));
+                }
+                return match found {
+                    KeyFound::Replay(found) => Ok(Some(Published::Replayed {
+                        id: found.id,
+                        onto: found.parent,
+                        squashed_from: found.squashed_from,
+                        files_changed: found.files_changed,
+                    })),
+                    KeyFound::Reused(landed) => Err(reused(landed)),
+                };
             }
-            return match found {
-                KeyFound::Replay(found) => Ok(Some(Published::Replayed {
-                    id: found.id,
-                    onto: found.parent,
-                    squashed_from: found.squashed_from,
-                    files_changed: found.files_changed,
-                })),
-                KeyFound::Reused(landed) => Err(reused(landed)),
-            };
         }
     }
     Ok(None)
@@ -507,10 +626,10 @@ impl Queued {
         }
     }
 
-    /// The warning of this land of `p`, committed as operation `op`, when a step after its commit
-    /// point failed with `source`.
-    pub(crate) fn warning(&self, p: &Publication, op: OpId, source: &StoreError) -> String {
-        repo::post_commit_warning(&landed_what(self.id, &p.target), op, source)
+    /// The warning of this land onto `target`, committed as operation `op`, when a step after
+    /// its commit point failed with `source`.
+    pub(crate) fn warning(&self, target: &str, op: OpId, source: &StoreError) -> String {
+        repo::post_commit_warning(&landed_what(self.id, target), op, source)
     }
 }
 

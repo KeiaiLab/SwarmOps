@@ -56,7 +56,7 @@ type Startup<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)]);
 /// The tools, one per `StoreOps` operation and then one per client-side operation of the git
 /// remotes (M13), in the order `tools/list` gives them, each with the request type its arguments
 /// are.
-const TOOLS: [(&str, &str); 43] = [
+const TOOLS: [(&str, &str); 44] = [
     ("repo_info", "InfoReq"),
     ("resolve_rev", "ResolveRevReq"),
     ("read_file", "ReadFileReq"),
@@ -76,6 +76,7 @@ const TOOLS: [(&str, &str); 43] = [
     ("land", "LandReq"),
     ("revert", "RevertReq"),
     ("land_check", "LandCheckReq"),
+    ("land_group", "LandGroupReq"),
     ("rebase", "RebaseReq"),
     ("blob_put", "BlobPutReq"),
     ("blob_has", "BlobHasReq"),
@@ -432,6 +433,25 @@ fn mcp_tool_calls_golden() {
                         "idempotency_key": "revert-1"});
     let reverted = golden.ok("revert", revert);
     golden.name_at(&reverted, "/result/land/landed", "reverted");
+
+    // 8. Two changes on main, landed as one group, and the store verified.
+    let heads: Vec<String> = ["one", "two"]
+        .into_iter()
+        .map(|name| {
+            let change = json!({
+                "message": format!("add {name}"),
+                "parent": "main",
+                "changes": [{"path": format!("{name}.md"), "op": "put",
+                             "content": {"inline": format!("{name}\n")}}],
+            });
+            let made = golden.ok("commit", change);
+            golden.name_at(&made, "/result/changeset", name)
+        })
+        .collect();
+    let group = json!({"changes": [{"head": heads[0], "idempotency_key": "group-1"},
+                                   {"head": heads[1], "idempotency_key": "group-2"}]});
+    let grouped = golden.ok("land_group", group);
+    golden.name_at(&grouped, "/result/head", "grouped");
     golden.ok("verify", json!({}));
 
     // Every tool has its call, but those of UNCALLED.
@@ -2700,8 +2720,9 @@ fn check_tool(name: &str, request: &str, tool: &Value, all: &Value) {
     assert_no_references(name, schema);
     let (read_only, destructive, idempotent, open_world) = match name {
         "commit" | "rebase" | "blob_put" | "ws_commit" => (false, false, false, false),
-        // A land and a revert, and the workspaces' that find their work done when run again (M5).
-        "land" | "revert" | "ws_create" | "ws_rebase" | "ws_resolve" | "ws_land"
+        // A land, a revert and a group land, and the workspaces' that find their work done when
+        // run again (M5).
+        "land" | "revert" | "land_group" | "ws_create" | "ws_rebase" | "ws_resolve" | "ws_land"
         | "ws_materialize" | "ws_snapshot" => (false, false, true, false),
         // A workspace's discard (M5) overwrites edits as these overwrite refs, and the
         // maintenance (M6) removes or replaces store files; run again, each finds its work done.

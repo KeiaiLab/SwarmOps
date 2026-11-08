@@ -2337,8 +2337,20 @@ expression: transcript
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
-          "arguments": {},
-          "name": "verify"
+          "arguments": {
+            "changes": [
+              {
+                "content": {
+                  "inline": "one\n"
+                },
+                "op": "put",
+                "path": "one.md"
+              }
+            ],
+            "message": "add one",
+            "parent": "main"
+          },
+          "name": "commit"
         }
       },
       "response": {
@@ -2347,7 +2359,178 @@ expression: transcript
         "result": {
           "content": [
             {
-              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"verify\",\"result\":{\"changesets_checked\":12,\"findings\":[],\"found\":0,\"objects_checked\":34,\"problems\":[],\"truncated\":false}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"main\":\"[reverted]\"}},\"ok\":true,\"op\":\"commit\",\"result\":{\"blobs_written\":1,\"changeset\":\"[one]\",\"files_changed\":1,\"parent\":\"[reverted]\",\"replayed\":false,\"root\":\"[id17]\"}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "main": "[reverted]"
+              }
+            },
+            "ok": true,
+            "op": "commit",
+            "result": {
+              "blobs_written": 1,
+              "changeset": "[one]",
+              "files_changed": 1,
+              "parent": "[reverted]",
+              "replayed": false,
+              "root": "[id17]"
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 42,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "changes": [
+              {
+                "content": {
+                  "inline": "two\n"
+                },
+                "op": "put",
+                "path": "two.md"
+              }
+            ],
+            "message": "add two",
+            "parent": "main"
+          },
+          "name": "commit"
+        }
+      },
+      "response": {
+        "id": 42,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"main\":\"[reverted]\"}},\"ok\":true,\"op\":\"commit\",\"result\":{\"blobs_written\":1,\"changeset\":\"[two]\",\"files_changed\":1,\"parent\":\"[reverted]\",\"replayed\":false,\"root\":\"[id18]\"}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "main": "[reverted]"
+              }
+            },
+            "ok": true,
+            "op": "commit",
+            "result": {
+              "blobs_written": 1,
+              "changeset": "[two]",
+              "files_changed": 1,
+              "parent": "[reverted]",
+              "replayed": false,
+              "root": "[id18]"
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 43,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "changes": [
+              {
+                "head": "[one]",
+                "idempotency_key": "group-1"
+              },
+              {
+                "head": "[two]",
+                "idempotency_key": "group-2"
+              }
+            ]
+          },
+          "name": "land_group"
+        }
+      },
+      "response": {
+        "id": 43,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[one]\":\"[one]\",\"[two]\":\"[two]\",\"main\":\"[reverted]\"}},\"ok\":true,\"op\":\"land_group\",\"result\":{\"attempts\":1,\"head\":\"[grouped]\",\"items\":[{\"head\":\"[one]\",\"landed\":\"[id19]\",\"outcome\":\"clean\"},{\"head\":\"[two]\",\"landed\":\"[grouped]\",\"outcome\":\"clean\"}],\"op\":17,\"rebased_onto\":\"[reverted]\",\"target\":\"main\"}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "[one]": "[one]",
+                "[two]": "[two]",
+                "main": "[reverted]"
+              }
+            },
+            "ok": true,
+            "op": "land_group",
+            "result": {
+              "attempts": 1,
+              "head": "[grouped]",
+              "items": [
+                {
+                  "head": "[one]",
+                  "landed": "[id19]",
+                  "outcome": "clean"
+                },
+                {
+                  "head": "[two]",
+                  "landed": "[grouped]",
+                  "outcome": "clean"
+                }
+              ],
+              "op": 17,
+              "rebased_onto": "[reverted]",
+              "target": "main"
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 44,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {},
+          "name": "verify"
+        }
+      },
+      "response": {
+        "id": 44,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"verify\",\"result\":{\"changesets_checked\":16,\"findings\":[],\"found\":0,\"objects_checked\":43,\"problems\":[],\"truncated\":false}}",
               "type": "text"
             }
           ],
@@ -2363,10 +2546,10 @@ expression: transcript
             "ok": true,
             "op": "verify",
             "result": {
-              "changesets_checked": 12,
+              "changesets_checked": 16,
               "findings": [],
               "found": 0,
-              "objects_checked": 34,
+              "objects_checked": 43,
               "problems": [],
               "truncated": false
             }

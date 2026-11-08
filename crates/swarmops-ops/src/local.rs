@@ -27,6 +27,7 @@ use swarmops_api::{BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp};
 use swarmops_api::{ContentInput, ModeInput, ResolutionInput, ResolutionsInput};
 use swarmops_api::{GcReq, GcResp, RepairReq, RepairResp, UpgradeReq, UpgradeResp};
 use swarmops_api::{ItemOutcome, LandCheckItemOut, LandCheckReq, LandCheckResp, PathSummaryOut};
+use swarmops_api::{LandGroupItemOut, LandGroupReq, LandGroupResp};
 use swarmops_api::{LandReq, LandResp, LandStatus, MAX_LAND_ATTEMPTS};
 use swarmops_api::{RefLogEntryOut, RefLogPage, RefLogReq};
 use swarmops_api::{ResolveRevReq, ResolvedRev, RevKind};
@@ -39,7 +40,8 @@ use swarmops_core::{
 use swarmops_git::MemoKey;
 use swarmops_repo::LandRequest;
 use swarmops_repo::land::{
-    Gated, LandCheckRequest, MAX_GROUP_CHANGES, More, PathChange, PlanItem, PlanOutcome, Planned,
+    Gated, GroupItem, LandCheckRequest, LandGroupRequest, MAX_GROUP_CHANGES, More, PathChange,
+    PlanItem, PlanOutcome, Planned,
 };
 use swarmops_repo::merge::line_diff::{self, DiffLine, UnifiedHunk};
 use swarmops_repo::merge::tree_diff::{ChangeKind, Leaf, PathFilter, TreeChange};
@@ -183,6 +185,11 @@ const MAX_LAND_KEY: usize = 64;
 ///   `E_INVALID_ARG` (`details.changes`), more `E_TOO_LARGE` (`details.max_changes`), and a key
 ///   given twice `E_INVALID_ARG` (`details.idempotency_key`), each checked before anything is
 ///   resolved; a change the land would refuse fails the whole check with the land's error.
+/// - `land_group` lands 1 to 32 changes, in order, onto `target` as one operation (the M18 design
+///   §6.3), by `land_check`'s rules for the request and its plan: the clean ones a chain of
+///   landed changesets with one move of the target, a conflicting one reported and passed over;
+///   `max_attempts` is a land's, and a group with no clean change is `E_NOTHING_TO_LAND`, each
+///   change's outcome in `details.items`.
 /// - `blob_put` stores its content as a blob, by the change list's rules for content (`blob`
 ///   content aside, which names a blob already stored), durable when it returns, and says
 ///   whether it placed it (`written`). It needs an identity, which it records nowhere.
@@ -1418,13 +1425,7 @@ impl<'a> Recording<'a> {
         if let Some(key) = &idempotency_key {
             land_key(key)?;
         }
-        if !(1..=MAX_LAND_ATTEMPTS).contains(&max_attempts) {
-            return Err(error::error(
-                ErrorCode::InvalidArg,
-                format!("max_attempts is {max_attempts}, not 1 to {MAX_LAND_ATTEMPTS}"),
-            )
-            .with_details(error::details([("max_attempts", max_attempts.into())])));
-        }
+        attempts_in_range(max_attempts)?;
         let resolutions = resolutions.map(shaped_resolutions).transpose()?;
 
         // 1. The change and the head it expects the target to name, resolved in one snapshot.
@@ -1568,9 +1569,87 @@ impl Recording<'_> {
             ..
         } = req;
 
+        // 1. The request's own rules, then every head and base resolved in one snapshot.
+        let items = self.group_items(&target, changes, Group::Check)?;
+
+        // 2. The check, each item as the API says it.
+        let check = LandCheckRequest::new(&target, items);
+        let checked = (self.ops.repo.land_check(check)).map_err(error::op)?;
+        let items = (checked.items.into_iter())
+            .map(|planned| check_item(planned, max_conflict_bytes))
+            .collect::<Result<Vec<_>, OpError>>()?;
+        Ok(LandCheckResp::new(checked.onto.to_string(), items))
+    }
+}
+
+impl Recording<'_> {
+    /// [`StoreOps::land_group`] (the M18 design §6.3): the request's own rules, its revisions
+    /// resolved in one snapshot, then [`swarmops_repo::Repo::land_group`], signed and attributed
+    /// as a land is, each conflict's report within `max_conflict_bytes`.
+    fn land_group_with(&self, who: &Identity, req: LandGroupReq) -> Result<LandGroupResp, OpError> {
+        let LandGroupReq {
+            target,
+            changes,
+            max_attempts,
+            max_conflict_bytes,
+            ..
+        } = req;
+
+        // 1. The request's own rules, then every head and base resolved in one snapshot.
+        attempts_in_range(max_attempts)?;
+        let items = self.group_items(&target, changes, Group::Land)?;
+
+        // 2. The group land, signed and attributed as a land.
+        let mut group =
+            LandGroupRequest::new(&target, items, self.ops.native_signature(who, None)?);
+        if let Some(run_id) = who.run_id() {
+            let run_id = run_id.as_bytes().to_vec();
+            group
+                .lander_metadata
+                .push((LANDER_RUN_ID_KEY.to_owned(), run_id));
+        }
+        group.max_attempts = max_attempts;
+        let landed =
+            (self.ops.repo.land_group(&group)).map_err(|e| merge_error(e, max_conflict_bytes))?;
+
+        // 3. Each item as the API says it; nothing clean is E_NOTHING_TO_LAND, naming each.
+        let items = (landed.items.into_iter())
+            .map(|item| group_item(item, max_conflict_bytes))
+            .collect::<Result<Vec<_>, OpError>>()?;
+        let Some(chain) = landed.landed else {
+            let listed = serde_json::to_value(&items)
+                .map_err(|e| error::error(ErrorCode::Internal, e.to_string()))?;
+            return Err(error::error(
+                ErrorCode::NothingToLand,
+                format!("none of the {} changes of the group lands", items.len()),
+            )
+            .with_details(error::details([("items", listed)])));
+        };
+        let mut resp = LandGroupResp::new(
+            target,
+            landed.onto.to_string(),
+            chain.head.to_string(),
+            chain.op,
+            items,
+            landed.attempts,
+        );
+        resp.warnings = chain.warnings;
+        Ok(resp)
+    }
+
+    /// The plan items of `changes`, a group of `group`'s onto `target`, by the request's own
+    /// rules: `target` a ref a land publishes to, 1 to [`MAX_GROUP_CHANGES`] changes, each key a
+    /// land's and given once, checked before anything is resolved; then every head and base,
+    /// and the target, resolved in one snapshot.
+    fn group_items(
+        &self,
+        target: &str,
+        changes: Vec<swarmops_api::LandItemIn>,
+        group: Group,
+    ) -> Result<Vec<PlanItem>, OpError> {
         // 1. The request's own rules, before anything is resolved or read.
-        check_ref_use(&target, RefUse::Publish)?;
-        group_size(changes.len())?;
+        check_ref_use(target, RefUse::Publish)?;
+        group_size(changes.len(), group)?;
         let mut keys = BTreeSet::new();
         for key in changes.iter().filter_map(|c| c.idempotency_key.as_deref()) {
             land_key(key)?;
@@ -1595,41 +1674,84 @@ impl Recording<'_> {
             item.key = change.idempotency_key;
             items.push(item);
         }
-        self.head(&read, &target)?;
-        drop(read);
-
-        // 3. The check, each item as the API says it.
-        let check = LandCheckRequest::new(&target, items);
-        let checked = (self.ops.repo.land_check(check)).map_err(error::op)?;
-        let items = (checked.items.into_iter())
-            .map(|planned| check_item(planned, max_conflict_bytes))
-            .collect::<Result<Vec<_>, OpError>>()?;
-        Ok(LandCheckResp::new(checked.onto.to_string(), items))
+        self.head(&read, target)?;
+        Ok(items)
     }
 }
 
-/// `E_INVALID_ARG` for a `land_check` of no change, `E_TOO_LARGE` for one of more than
+/// Which operation a group of changes is for: what its errors name it.
+#[derive(Clone, Copy)]
+enum Group {
+    /// A `land_check`.
+    Check,
+    /// A `land_group`.
+    Land,
+}
+
+impl Group {
+    /// What the errors call it, and what they ask to do in batches.
+    fn words(self) -> (&'static str, &'static str) {
+        match self {
+            Group::Check => ("a land check", "check"),
+            Group::Land => ("a group land", "land"),
+        }
+    }
+}
+
+/// `E_INVALID_ARG` for a group of no change, `E_TOO_LARGE` for one of more than
 /// [`MAX_GROUP_CHANGES`].
-fn group_size(changes: usize) -> Result<(), OpError> {
+fn group_size(changes: usize, group: Group) -> Result<(), OpError> {
+    let (what, verb) = group.words();
     if changes == 0 {
         return Err(error::error(
             ErrorCode::InvalidArg,
-            "a land check needs at least one change",
+            format!("{what} needs at least one change"),
         )
         .with_details(error::details([("changes", 0_u64.into())])));
     }
     if changes > MAX_GROUP_CHANGES {
         return Err(error::error(
             ErrorCode::TooLarge,
-            format!("a land check takes at most {MAX_GROUP_CHANGES} changes, not {changes}"),
+            format!("{what} takes at most {MAX_GROUP_CHANGES} changes, not {changes}"),
         )
         .with_details(error::details([(
             "max_changes",
             bytes::to_u64(MAX_GROUP_CHANGES).into(),
         )]))
-        .with_hint("check the changes in batches of at most 32"));
+        .with_hint(format!("{verb} the changes in batches of at most 32")));
     }
     Ok(())
+}
+
+/// `E_INVALID_ARG` for `max_attempts` outside 1 to [`MAX_LAND_ATTEMPTS`], as a land's.
+fn attempts_in_range(max_attempts: u32) -> Result<(), OpError> {
+    if (1..=MAX_LAND_ATTEMPTS).contains(&max_attempts) {
+        return Ok(());
+    }
+    Err(error::error(
+        ErrorCode::InvalidArg,
+        format!("max_attempts is {max_attempts}, not 1 to {MAX_LAND_ATTEMPTS}"),
+    )
+    .with_details(error::details([("max_attempts", max_attempts.into())])))
+}
+
+/// One item of a group land as `land_group` answers it, a conflict's report within
+/// `max_bytes`.
+fn group_item(item: GroupItem, max_bytes: u64) -> Result<LandGroupItemOut, OpError> {
+    let head = item.head.to_string();
+    let mut out = match item.outcome {
+        PlanOutcome::Clean(_) => LandGroupItemOut::new(head, ItemOutcome::Clean),
+        PlanOutcome::Replayed(_) => LandGroupItemOut::new(head, ItemOutcome::Replayed),
+        PlanOutcome::NothingToLand(_) => LandGroupItemOut::new(head, ItemOutcome::NothingToLand),
+        PlanOutcome::Conflict(conflicts) => {
+            let mut out = LandGroupItemOut::new(head, ItemOutcome::Conflict);
+            out.report = Some(crate::conflict::report(&conflicts, max_bytes)?);
+            out
+        }
+        _ => return Err(error::unknown_variant("PlanOutcome")),
+    };
+    out.landed = item.landed.map(|id| id.to_string());
+    Ok(out)
 }
 
 /// One item's plan as `land_check` answers it, a conflict's report within `max_bytes`.
@@ -2447,6 +2569,10 @@ impl StoreOps for Recording<'_> {
     fn land_check(&self, req: LandCheckReq) -> Result<LandCheckResp, OpError> {
         self.land_check_with(req)
     }
+
+    fn land_group(&self, who: &Identity, req: LandGroupReq) -> Result<LandGroupResp, OpError> {
+        self.land_group_with(who, req)
+    }
 }
 
 /// Each operation as a request of its own, whose resolved revisions go unrecorded: to report
@@ -2562,6 +2688,10 @@ impl StoreOps for LocalOps {
 
     fn land_check(&self, req: LandCheckReq) -> Result<LandCheckResp, OpError> {
         self.recording(&Resolved::default()).land_check(req)
+    }
+
+    fn land_group(&self, who: &Identity, req: LandGroupReq) -> Result<LandGroupResp, OpError> {
+        self.recording(&Resolved::default()).land_group(who, req)
     }
 }
 
@@ -3223,18 +3353,24 @@ fn operation_out(
 /// land when `lands` says the changeset's metadata names a lander (every land's does; its
 /// `land_key` is optional), else a publish; two changesets and a move of a ref to the second are
 /// a land when it names a lander (a land that committed its change first, the M16 design §4),
-/// else a mix; changesets alone a commit; ref moves alone a ref move; a compaction marker alone
-/// a compaction; anything else a mix. `lands` is asked only of the changeset moved to.
+/// else a mix; more changesets, each on the one before, and a move of a ref to the last are a
+/// land when each names a lander (a group land, the M18 design §6.3), else a mix; changesets
+/// alone a commit; ref moves alone a ref move; a compaction marker alone a compaction; anything
+/// else a mix. `lands` is asked only of the changeset moved to, but for a group's chain.
 fn operation_kind(
     records: &[OpRecord],
-    lands: impl FnOnce(ChangesetId) -> Result<bool, OpError>,
+    mut lands: impl FnMut(ChangesetId) -> Result<bool, OpError>,
 ) -> Result<OperationKind, OpError> {
     let mut changesets = Vec::new();
+    let mut first_parents = Vec::new();
     let mut moved_to = Vec::new();
     let mut compactions = 0_usize;
     for record in records {
         match record {
-            OpRecord::Changeset { id, .. } => changesets.push(*id),
+            OpRecord::Changeset { id, parents } => {
+                changesets.push(*id);
+                first_parents.push(parents.first().copied());
+            }
             OpRecord::RefMove { new, .. } => moved_to.push(*new),
             OpRecord::Compacted => compactions += 1,
             _ => return Err(error::unknown_variant("OpRecord")),
@@ -3254,7 +3390,25 @@ fn operation_kind(
         });
     }
 
-    // 2. Anything else.
+    // 2. A group land's chain: each on the one before, the move to the last, each landed.
+    if let ([.., last], [Some(to)], 0) = (&changesets[..], &moved_to[..], compactions)
+        && to == last
+        && changesets.len() > 2
+    {
+        let chained = (changesets.windows(2).zip(&first_parents[1..]))
+            .all(|(pair, parent)| *parent == Some(pair[0]));
+        if !chained {
+            return Ok(OperationKind::Mixed);
+        }
+        for &id in &changesets {
+            if !lands(id)? {
+                return Ok(OperationKind::Mixed);
+            }
+        }
+        return Ok(OperationKind::Land);
+    }
+
+    // 3. Anything else.
     Ok(match (&changesets[..], &moved_to[..], compactions) {
         ([_, ..], [], 0) => OperationKind::Commit,
         ([], [_, ..], 0) => OperationKind::RefMove,
@@ -3600,6 +3754,48 @@ mod tests {
         ] {
             assert_eq!(kind(records, true), want, "{records:?}");
         }
+    }
+
+    /// A group land's operation (the M18 design §6.3) is a land: a chain of more than two
+    /// changesets, each on the one before and each made by a land, and one move of a ref to the
+    /// last. A chain broken, a changeset no land made, or the move elsewhere, is a mix.
+    #[test]
+    fn a_group_land_s_operation_is_a_land() {
+        let id = |n: u8| ChangesetId::new(ObjectId::new([n; 32]));
+        let on = |n: u8, parent: u8| OpRecord::Changeset {
+            id: id(n),
+            parents: vec![id(parent)],
+        };
+        let moved = |n: u8| OpRecord::RefMove {
+            name: "main".to_owned(),
+            old: Some(id(9)),
+            new: Some(id(n)),
+            actor: "test/lander".to_owned(),
+            ts: 0,
+        };
+        let kind = |records: &[OpRecord], not_lander: Option<u8>| {
+            operation_kind(records, |at| Ok(Some(at) != not_lander.map(id))).unwrap()
+        };
+        let chain = [on(1, 9), on(2, 1), on(3, 2), moved(3)];
+        assert_eq!(kind(&chain, None), OperationKind::Land);
+        assert_eq!(
+            kind(&chain, Some(2)),
+            OperationKind::Mixed,
+            "one no land made"
+        );
+        assert_eq!(
+            kind(&chain, Some(3)),
+            OperationKind::Mixed,
+            "the last no land made"
+        );
+        let broken = [on(1, 9), on(2, 9), on(3, 2), moved(3)];
+        assert_eq!(kind(&broken, None), OperationKind::Mixed, "a broken chain");
+        let elsewhere = [on(1, 9), on(2, 1), on(3, 2), moved(2)];
+        assert_eq!(
+            kind(&elsewhere, None),
+            OperationKind::Mixed,
+            "a move to another"
+        );
     }
 
     /// The one warning `warnings` holds, which must name the injected failure.

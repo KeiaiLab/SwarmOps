@@ -126,7 +126,7 @@ ids for compare-and-swap, `land` to publish, small pages):
 {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"swarmops","title":"SwarmOps","version":"0.2.0"},"instructions":"SwarmOps is source control for coding-agent swarms: many agents commit to one store at once. …"}}
 ```
 
-**`tools/list`.** One page of 43 tools. Each entry holds `name`, `title`, `description`,
+**`tools/list`.** One page of 44 tools. Each entry holds `name`, `title`, `description`,
 `inputSchema` and `annotations`; `read_file` alone also carries `_meta`:
 
 ```sh
@@ -152,6 +152,7 @@ sed -n 2p answers.jsonl | jq -c '.result.tools[] | {name, title, annotations} + 
 {"name":"land","title":"Land a change","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":false}}
 {"name":"revert","title":"Revert a change","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":false}}
 {"name":"land_check","title":"Check a land","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
+{"name":"land_group","title":"Land a group","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":false}}
 {"name":"blob_put","title":"Store a blob","annotations":{"destructiveHint":false,"idempotentHint":false,"openWorldHint":false,"readOnlyHint":false}}
 {"name":"blob_has","title":"Find stored blobs","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
 {"name":"verify","title":"Verify the store","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
@@ -291,6 +292,7 @@ the CLI command's request; `swarmops schema <Request>` prints the type.
 | `land` | `swarmops land HEAD` | `LandReq` | adds a changeset and moves the target |
 | `revert` | `swarmops revert REV` | `RevertReq` | adds a changeset and moves the target |
 | `land_check` | `swarmops land-check HEAD...` | `LandCheckReq` | no |
+| `land_group` | `swarmops land-group HEAD...` | `LandGroupReq` | adds a changeset per clean change and moves the target once |
 | `rebase` | `swarmops rebase HEAD` | `RebaseReq` | adds a changeset |
 | `blob_put` | `swarmops blob put` | `BlobPutReq` | adds a blob |
 | `blob_has` | `swarmops blob has` | `BlobHasReq` | no |

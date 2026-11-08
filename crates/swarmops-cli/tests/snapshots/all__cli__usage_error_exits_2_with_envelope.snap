@@ -12,7 +12,7 @@ expression: s.transcript()
       "api": 1,
       "error": {
         "code": "E_INVALID_ARG",
-        "message": "'swarmops' requires a subcommand but one was not provided [subcommands: init, info, whoami, schema, commit, land, land-check, rebase, revert, resolve, cat, ls, show, log, ancestry, history, diff, verify, gc, repair, upgrade, clone, fetch, push, sync, mcp, serve, derive, ref, blob, ws, git, op, remote, help]",
+        "message": "'swarmops' requires a subcommand but one was not provided [subcommands: init, info, whoami, schema, commit, land, land-check, land-group, rebase, revert, resolve, cat, ls, show, log, ancestry, history, diff, verify, gc, repair, upgrade, clone, fetch, push, sync, mcp, serve, derive, ref, blob, ws, git, op, remote, help]",
         "retryable": false,
         "exit": 2,
         "details": {},
@@ -345,6 +345,9 @@ expression: s.transcript()
             "LandCheckItemOut",
             "LandCheckReq",
             "LandCheckResp",
+            "LandGroupItemOut",
+            "LandGroupReq",
+            "LandGroupResp",
             "LandItemIn",
             "LandMode",
             "LandReq",

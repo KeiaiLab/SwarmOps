@@ -24,7 +24,7 @@ use swarmops_api::{
     ShowReq, StoreOps, TreeListing, UndoReq, UndoResp, UpgradeReq, UpgradeResp, VerifyReport,
     VerifyReq,
 };
-use swarmops_api::{LandCheckReq, LandCheckResp};
+use swarmops_api::{LandCheckReq, LandCheckResp, LandGroupReq, LandGroupResp};
 use swarmops_api::{RevertReq, RevertResp};
 
 use super::refused;
@@ -290,6 +290,11 @@ impl<O: StoreOps> StoreOps for ServerOps<O> {
     fn land_check(&self, req: LandCheckReq) -> Result<LandCheckResp, OpError> {
         self.pass(self.inner.land_check(req))
     }
+
+    // A land of heads the store holds: it names no content, passed as `rebase` is.
+    fn land_group(&self, who: &Identity, req: LandGroupReq) -> Result<LandGroupResp, OpError> {
+        self.pass(self.inner.land_group(who, req))
+    }
 }
 
 #[cfg(test)]
@@ -411,6 +416,9 @@ mod tests {
         }
         fn land_check(&self, _: LandCheckReq) -> Result<LandCheckResp, OpError> {
             self.call("land_check")
+        }
+        fn land_group(&self, _: &Identity, _: LandGroupReq) -> Result<LandGroupResp, OpError> {
+            self.call("land_group")
         }
     }
 
@@ -620,6 +628,8 @@ mod tests {
         let w = who();
         assert_passed(&s, "land", s.land(&w, LandReq::new("x")).map(drop));
         assert_passed(&s, "rebase", s.rebase(&w, RebaseReq::new("x")).map(drop));
+        let group = LandGroupReq::new(vec![swarmops_api::LandItemIn::new("x")]);
+        assert_passed(&s, "land_group", s.land_group(&w, group).map(drop));
         let blob = BlobPutReq::new(ContentInput::Base64("eA==".to_owned()));
         assert_passed(&s, "blob_put", s.blob_put(&w, blob).map(drop));
         assert_passed(

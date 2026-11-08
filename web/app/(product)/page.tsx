@@ -427,7 +427,7 @@ const FEATURES: { title: string; text: ReactNode; guide: string; url: string }[]
     title: 'An MCP server for agents',
     text: (
       <>
-        <C>swarmops mcp</C> serves the store to an agent on stdin and stdout: 43 tools, one per operation, each
+        <C>swarmops mcp</C> serves the store to an agent on stdin and stdout: 44 tools, one per operation, each
         returning the envelope the CLI prints.
       </>
     ),
