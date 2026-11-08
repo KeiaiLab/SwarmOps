@@ -436,6 +436,26 @@ parent missing, an answer past its bound) is declined before the claim, and its 
 it again alone within what is left of its first lock wait, where it meets its own error. Each
 waiter's answer is written only after the commit point and read without the lock.
 
+**A revert** (the M18 design §4) is a land with changes. To take back a changeset X on the
+target's first-parent chain, or the range after an older S up to X, it commits on X a change `C`
+that sets every path the range touched back to what S held there, and lands `C` with X as its
+base through the land above: key replay, the conflict report, the batch and the relocation are
+the land's, so what the target gained since X stays, and a later change to the same lines is
+`E_CONFLICT`. A land with changes writes `C`'s changeset object only in `L`'s own object batch,
+once `L` is staged; a revert's trees and blobs are S's, already stored, so a revert that conflicts
+or is refused leaves the store as it was. The landed changeset records `reverts` and
+`revert_reason` in its metadata, which the git export keeps out of its trailers.
+
+**A group land** (`land-group`, the M18 design §6.3) plans 1 to 32 changes in order on one
+snapshot of the target, as `land-check` does without writing: the first merged as a land merges,
+each later one onto the tree the clean ones before it make, through an in-memory overlay. The
+clean ones are written as a chain `L1 … Lk`, each on the one before, `L1` on the head the plan
+read, and their objects are put and flushed once. One frame then records the k inserts and one
+compare-and-swap of the target from that head to `Lk`, through the write queue as one member.
+The lock's holder never makes a group anew: a target that moved drops the publish, and the next
+attempt plans the whole group again, up to its `max_attempts`. A conflicting change is reported
+and passed over; `op log` reads the operation as a `land`.
+
 ## Reading
 
 Readers take no lock (storage §3, "읽기"), `op log` aside (below). `MetaStore::read()` takes a snapshot: it reads
@@ -756,6 +776,10 @@ What an agent sees (operations §4):
   The readers whose results leave the host (M8's git export, M11's `serve`) take a committed
   snapshot instead (`MetaStore::read_committed`): under the lock, after the journal's tail check,
   so that neither can take back what it returns, at the cost of a wait behind the current writer.
+- `ref txn` (the M18 design §7) moves 1 to 64 refs in one transaction. Under the lock it checks
+  each move's own rules (those of `ref set` and `ref delete`), then every expectation; any stale
+  one is `E_CAS_MISMATCH` listing each failed ref in `details.mismatches`, and nothing is
+  written. Otherwise every move goes into one frame, which `op undo` takes back whole.
 - `op undo` is a compare-and-swap too: it moves every ref the operation moved back to what it
   named before, in one transaction, only while each still names what the operation set (or
   what it named before, which is skipped); a ref moved since by another operation refuses it
@@ -775,7 +799,8 @@ What an agent sees (operations §4):
   conflict is `E_CONFLICT`, with a report of each conflicting file, and records nothing. A keyed
   land run again finds its changeset on the target and replays it, decided under the store's
   lock. So an agent that loses a ref race lands its change rather than re-sending whole files,
-  which would overwrite the winner's edits.
+  which would overwrite the winner's edits. `land-check` (`land --dry-run`) plans the same merges
+  on one snapshot, takes no lock and writes nothing.
 
 ## The contract
 

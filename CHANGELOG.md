@@ -78,6 +78,13 @@ collects the changes on `stable` that no release holds yet, until the next relea
   after a clone stops at the imported head instead of deriving the history below it (the M18
   design §2.3).
 
+### Fixed
+
+- A land or commit that the store's write queue declined and ran again alone started a second
+  lock wait and left the first one's helper thread parked on `meta/lock`, which could take the
+  lock for an instant after the write returned and hold up the next writer. The rerun now waits
+  on its first lock wait, so a declined turn leaves no helper behind.
+
 ## [0.10.0] - 2026-11-07
 
 Serving under load. The 0.10.0 release completes M17's slices: served reads off the writer lock

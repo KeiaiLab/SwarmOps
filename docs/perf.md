@@ -1964,7 +1964,8 @@ the gate's bound, with spikes to 6 to 52, and never stayed under it for 5 minute
 and 32 processes, `U`, the held share, `b`, the batch hold against G18's 100 ms, the in-run sync
 samples and the jbd2 and discard deltas stay unmeasured on batched lands, and so does G1 at 50 ×
 1,000; no run started outside the gate and no gate, target, timeout, seed or case parameter changed.
-The group-commit design's §10 verdict stays open, and its §8 trigger is not judged.
+The group-commit design's §10 verdict stays open, and its §8 trigger is not judged. Three of these steps
+ran gated on 2026-11-09 (below, "D2-8 gated runs").
 
 A debug-build smoke run of the probe (8 agents, one land each every 100 ms for 10 s, the
 `landers` lane, probe at 1,000 µs, load 40 to 45) passed in 17 s: 800 lands, 0 % retries, 440
@@ -1972,6 +1973,66 @@ holds with 570 answers, `b` 1 at the median and 5 at the p99, a hold of 28.0 ms 
 164.1 ms at most, 9.6 ms over `b`; `U` 0.771 against a `u_process` of 0.088 (most lands are
 answered without holding the lock), the lock held 98.5 % of the samples, `queue_left=0`. It checks
 the probe, not the targets.
+
+### D2-8 gated runs — 2026-11-09
+
+Three of the measurement plan's steps ran in the night window on this host (the M18 design's
+decision: gated steps run in a recurring low-load window, the gate unchanged): the release build
+of the D2-8 slice's tree, `8a7e1607` (`f3ed2a82` with the probe change, so batched lands without
+the M18 changes landed after it), `landing::perf::landing_under_load` with the `landers` lane
+alone (`SWARMOPS_TEST_CLI_LANDING_LANES=landers`), 50 agents, open loop, one land each every 2 s
+for 120 s, on the bench directory (`~/.local/state/swarmops-bench`, as `just perf` runs it). Each
+step started only after the gate held 5 minutes (1-minute load < 2, 5-minute < 6, no SwarmOps CI
+job, the soak service idle and its next run past the step's end plus 2 minutes); the window, not a
+30-minute wait, bounded the wait. The night runner held `/tmp/swarmops-heavy.lock` for each step,
+not the heavy lock the Scheduled benches take; its gate's CI check covered those jobs.
+
+| Step | Gate (wait, load at it) | Load before / after (1 min) | Lands, lands/s | p50 | p99 | Retries, busy, unlanded | Relocated | Queue left |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 50 open, run 1, probe off | 9,899 s, 1.41 1.61 3.42 | 1.41 / 5.41 | 3,000, 25.000 | 74.230 ms | 157.320 ms | 0 %, 0, 0 | 1,887 | 0 |
+| 50 open, run 2, probe off | 4,835 s, 1.69 1.69 1.84 | 1.69 / 6.45 | 3,000, 25.000 | 72.975 ms | 154.458 ms | 0 %, 0, 0 | 1,848 | 0 |
+| 50 open, probe 1,000 µs | 3,676 s, 1.68 1.67 1.77 | 1.68 / 6.87 | 3,000, 25.000 | 72.914 ms | 151.578 ms | 0 %, 0, 0 | 1,833 | 0 |
+
+Each run took 125 s, passed its windows (12, none flagged) and its chain check, and left
+`meta/queue/` empty. The probe run's lock lines:
+
+| Figure | Value |
+| --- | --- |
+| Batch holds, answers | 2,469, 699 |
+| `b` (members per hold), p50 / p99 | 1 / 4 |
+| Batch hold p50 / p99 / max | 25.9 / 64.0 / 155.7 ms |
+| Hold over `b`, at the median | 20.8 ms |
+| A `land` process's wait p50 / p99, hold p50 / p99 | 8.6 / 81.6 ms, 23.6 / 63.4 ms |
+| Lock held, of 111,186 samples; mean waiters | 54.4 %, 0.44 |
+| `U` (the group-commit design §8), held share, `u_process` | 0.520, 0.544, 0.591 |
+
+```text
+landing-perf: lane=landers what=lands landers=50 pace=open interval_ms=2000 duration_s=120 landed=3000 lands_per_s=25.000 latency_p50_us=74230 latency_p99_us=157320 retry_pct=0.000 conflicts=0 exhausted=0 busy=0 lock_p50_us=0 lock_p99_us=0 journal_pct=0.000 ref_pct=0.000 relocations=1887 retryable=0 other=0 unlanded=0 wall_ms=120021 load_start=1.41 load_end=5.62
+landing-perf: lane=landers what=lands landers=50 pace=open interval_ms=2000 duration_s=120 landed=3000 lands_per_s=25.000 latency_p50_us=72975 latency_p99_us=154458 retry_pct=0.000 conflicts=0 exhausted=0 busy=0 lock_p50_us=0 lock_p99_us=0 journal_pct=0.000 ref_pct=0.000 relocations=1848 retryable=0 other=0 unlanded=0 wall_ms=120034 load_start=1.69 load_end=6.84
+landing-perf: lane=landers what=lands landers=50 pace=open interval_ms=2000 duration_s=120 landed=3000 lands_per_s=25.000 latency_p50_us=72914 latency_p99_us=151578 retry_pct=0.000 conflicts=0 exhausted=0 busy=0 lock_p50_us=0 lock_p99_us=0 journal_pct=0.000 ref_pct=0.000 relocations=1833 retryable=0 other=0 unlanded=0 wall_ms=120027 load_start=1.68 load_end=7.04
+landing-perf: lock cmd=land processes=2999 wait_p50_ms=8.6 wait_p99_ms=81.6 hold_p50_ms=23.6 hold_p99_ms=63.4
+landing-perf: lock batch cmd=land holds=2469 answers=699 b_p50=1 b_p99=4 hold_p50_ms=25.9 hold_p99_ms=64.0 hold_max_ms=155.7 per_land_p50_ms=20.8
+landing-perf: lock samples=111186 held_pct=54.4 mean_waiters=0.44
+landing-perf: lane=landers u=0.520 held_share=0.544 u_process=0.591
+```
+
+Reading: at 50 processes G4 is met in both gated runs, p99 157.320 ms and 154.458 ms against
+500 ms, with 25.0 lands/s, 0 % retries and nothing lost (M16's one lock pass per land: 441.7 ms
+and 1,483.5 ms). The lock was held 54.4 % of the samples, against 99.9 % in M17-8a's landers lane,
+measured on older code outside the gate at a higher load; most holds commit one member (`b` 1 at
+the median), and a busy moment's batch answers up to 4. The batch hold's p99, 64.0 ms, is under G18's 100 ms; its maximum, 155.7 ms, is
+not. The night runner recorded the load and the gate only: the in-run sync samples, the jbd2 and
+discard deltas and the bench directory's sync probe of the measurement plan's step 2 and 3 were
+not taken.
+
+Not measured yet, queued for the next night window: 32 open ×2, 50 closed, 50 open on `/data`,
+the v0.8.0 tag, G4 with the four lanes, and G1 at 50 × 1,000 (at 06:48 the gate did not hold
+and the rest of the window, which ends at 07:00, was too short for them). Not run yet either: the
+group-commit design §10's sweeps (items 2 to 4), which `just check-slow` runs after landing,
+under the heavy lock. So §10's verdict is not
+complete: its 50-process runs are met, its 32-process runs and sweeps are not recorded, and §8's
+trigger is not judged. The gated steps of the first sync after a clone and of the
+continuous-sync lane (sections below) wait for the same window.
 
 ## M18 first sync profile — 2026-11-08
 
@@ -2364,6 +2425,7 @@ remote-perf: second sync 12000 nokey git.rev-list 6.0 (count 1)
 remote-perf: second sync 12000 nokey git.gc 2.9 (count 2)
 remote-perf: second sync 12000 nokey git.merge-base 1.9 (count 1)
 remote-perf: second sync 12000 nokey git.push 25.0 (count 1)
+```
 
 ## M18 continuous-sync lane — 2026-11-08
 

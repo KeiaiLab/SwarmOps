@@ -1,6 +1,6 @@
 # Known limitations
 
-What SwarmOps does not do yet, or does less well than it should, as of M16, and the milestone
+What SwarmOps does not do yet, or does less well than it should, as of M18, and the milestone
 meant to change it. The items come from the M1 and M1.5 reviews and the 2026-10-16 code review:
 the carry-overs their tasks handed to later milestones, the deferred minors that are still open,
 and the rulings of M1's final review, which left 14 questions to the maintainer (the table at the
@@ -32,21 +32,22 @@ left).
 
 - **The power-loss model is a model.** The sweeps abort the process at a chosen filesystem call,
   which leaves the kernel's page cache intact, and a literal `SIGKILL` kills `commit --advance`
-  (since M6), `land --key` (M15), `ref set` and `op undo` (M16) at random points on a real disk, on
-  both formats, while two reader processes read what the refs name and never find it missing. A
+  (since M6), `land --key` (M15), `ref set` and `op undo` (M16), `revert` and `land-group` (M18) at
+  random points on a real disk, on both formats, while two reader processes read what the refs name and never find it missing. A
   power loss is modelled by the images of `crates/swarmops-cli/tests/power_loss.rs`: for one
   recorded run, what a disk may hold after the power fails at each of its steps (unsynced data
   dropped, cut at 512 B or 4 KiB, zero-filled, or with its first sector lost; directory entries that
   no fsync covered reverted), each of which the binary must recover; a second run adds a keyed land
-  and its undo, each whole or absent in every image, the land run again landing once. What stays
+  and its undo, each whole or absent in every image, the land run again landing once, and since
+  M18 a revert's and a group land's runs, each whole or absent in every image. What stays
   open: the images come from a model of the disk, not a real device; the runs are recorded through
   the library the binary calls, not the binary; the readers run on the writer's host, so they read
   frames the page cache holds before their fdatasync, which only a power loss can take back; no
-  image covers a revert, a check result or an approval (none exists yet); and the recorded run is
+  image covers a check result or an approval (neither exists yet); and the recorded run is
   short (its journal ends at 2,016 B), so a cut at 4 KiB is in the model but never differs from
   dropping there; only the slow variant's bulk frame (1,025 changeset records, about 76 KB) reaches
   past a 4 KiB boundary. *Unscheduled. Found: M1 Task 6; final review, question 11; narrowed by M1.5
-  Task 3, M1.6 Task 4, M6 Task K1 and M16 Task S2.*
+  Task 3, M1.6 Task 4, M6 Task K1, M16 Task S2 and M18 (revert, group land).*
 - **A reader can get `E_IO` after such a cut.** A snapshot that counted the records a writer
   then cut fails with an I/O error until the reader takes a new one. A snapshot that opens while
   the cut is made counts every record the checkpoint passed or the sorted views cover and reads
@@ -130,9 +131,14 @@ left).
   them in one batch, a frame each, with one sync of `journal.log`, one object flush and one
   replace of each moved ref (the M18 D2 design §3; [architecture](architecture.md#writing), "Batched
   writers"). The lock is still held for each batch's recovery, planning (at most 50 ms) and
-  syncs, and lands are still ordered by their compare-and-swap; G4's p99 and the batch's hold
-  under it are not measured yet: M18 D2-8's gated runs found the shared host never quiet
-  ([perf.md](perf.md#d2-8-g4-on-batched-lands--2026-11-08-not-measured-the-host-was-never-quiet)). A land still goes back to its lander, and is
+  syncs, and lands are still ordered by their compare-and-swap. With it, in two runs at 50
+  processes started under the measurement gate, the p99 was 157.3 ms and 154.5 ms, with 25.0
+  lands/s, 0 % retries and nothing lost; the lock was held 54.4 % of the samples, a batch took 1
+  member at the median and 4 at the p99, and its hold was 64.0 ms at the p99 and 155.7 ms at most,
+  past G18's 100 ms
+  ([perf.md](perf.md#d2-8-g4-on-batched-lands--2026-11-08-not-measured-the-host-was-never-quiet),
+  "D2-8 gated runs"). The 32-process runs, G1 at 50 × 1,000 on batched commits and the group-commit
+  design's slow sweeps are not recorded yet. A land still goes back to its lander, and is
   merged again outside the lock, when a path overlaps in a way the lock's merge does not take
   (anything but a regular file of at most 1 MiB on every side, or a conflict), or the target
   moved off the first-parent line through the head the land read, or more than 256 changesets
@@ -140,8 +146,9 @@ left).
   `E_CAS_RETRY_EXHAUSTED` lands again with the same key, or asks for more attempts. A `ws land`
   record left on the parent of the workspace's head is taken over when its key landed on its
   target (a land that carried edits, cut once the workspace stood on their changeset). *Target:
-  M18 (G4 with group commit, measured in a quiet window). Found: the 2026-10-20 plan triage; narrowed by v0.6.0,
-  M16 Task S4 and M18 D2 (group commit); its cause measured in M14.*
+  M18 (G4 with group commit: met at 50 processes in two gated runs; its 32-process runs and the
+  sweeps in the next night window). Found: the 2026-10-20 plan triage; narrowed by v0.6.0, M16
+  Task S4 and M18 D2 (group commit); its cause measured in M14.*
 - **A group land plans again outside the lock, and can run out of attempts.** `land-group`
   publishes its chain only while the ref names the head it planned on: a move in between drops
   the publish, and the next attempt plans and writes the whole group again, up to
@@ -500,10 +507,6 @@ left).
   `{"file"}` content anyway (`E_INVALID_ARG` `file_content_refused`); M11's `serve --stdio`,
   which will take requests from another host, is to reuse that guard. *Target: M11. Found: M1
   Task 4b; M1.5 Task 9 review (M11's `serve`); closed for `serve`'s git paths by M14.*
-- **`E_REF_NOT_FOUND` is not raised yet.** No operation looks a ref up by name; the code is in the
-  schema so that an agent can match it before any operation raises it. `E_AUTH` and
-  `E_POLICY_DENIED`, listed here before, are raised by `swarmops serve` since M14. *Documented.
-  Found: the 2026-10-16 comparison; M1.5 Task 9 review.*
 - **One temp-file error names a host path.** When 65,536 temp-file names in a row are taken in
   a directory of the store, the `tempfile` crate gives up with `too many temporary files exist`
   and the directory's absolute path, which an `E_IO` then carries; the names are random, so it
@@ -548,6 +551,11 @@ left).
   store prepared without a seed, or never prepared, still pays it at its first connection.
   *Unscheduled; narrowed by the M17 design §4.3 (G20's first clone after import, prepared, within
   2× git's). Found: M14 Task Q1.*
+- **A revert, a group land and a ref transaction leave `serve.git` to the next connection.** After
+  `land`, `commit --advance`, `ref set`, `ref delete`, `op undo`, `sync`, `fetch`, `git import` and
+  `ws land`, a store with an access file starts a detached preparation that makes `serve.git`
+  current; `revert`, `land-group` and `ref txn` (M18) start none, so the next connection exports
+  what they moved before it advertises. *Unscheduled. Found: the M18 slices' reviews.*
 - **A request takes the memory its type holds.** The MCP server reads of a message line, at
   most 64 MiB, only the members it serves, and a tool's arguments only as their request type,
   so what else a line holds costs it nothing beyond the line's bytes (operations spec §0). A
@@ -699,7 +707,11 @@ left).
   its cost grows with the memos a process writes. With it off the same sync takes 1.018 s
   and 0.257 s (3.96 times), and the clone's import of 3,000 commits 4.6 s with the memos and
   4.3 s without, against 62 to 78 s and 18 s with it on. A second sync takes 0.213 s
-  ([perf.md](perf.md#m18-first-sync-after-a-clone--2026-11-08)). *Open: G17's sync (goals.md).
+  ([perf.md](perf.md#m18-first-sync-after-a-clone--2026-11-08)). A 10-minute sync beside 20
+  lands/s kept pace, its lag over the last minute 0.520 times its lag over the first, but on a
+  host at a 1-minute load of 263 to 118, with bursts of hundreds of lands where the load stalled
+  the syncer; a run on a quiet host is owed
+  ([perf.md](perf.md#m18-continuous-sync-lane--2026-11-08)). *Open: G17's sync (goals.md).
   Found: the M13 design's risks; measured by M13 Task C11, v0.6.0, v0.7.0 and M18.*
 - **A squash that lost its trailer lines, then edited on the remote, stops sync.** Sync
   recognises a change the remote holds by a `SwarmOps-Changeset`, `SwarmOps-Squashed-From` or

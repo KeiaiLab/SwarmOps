@@ -143,7 +143,7 @@ The releases that get there:
 SwarmOps is declared usable at the first release where all seven conditions hold; condition 6
 counts from the last release that shipped a data-safety fix.
 
-**Status (2026-11-07).** v0.10.0 is released (M17, serving under load), after v0.9.0 (M16) and v0.8.0 (M15); v0.7.0 has M14, which serves topology 1 (condition 7), its criteria 1
+**Status (2026-11-09).** v0.10.0 is released (M17, serving under load), after v0.9.0 (M16) and v0.8.0 (M15); v0.7.0 has M14, which serves topology 1 (condition 7), its criteria 1
 to 5 pass in `just check` and in the Scheduled run's git matrix, and G16 is met
 ([docs/perf.md](perf.md#v070--2026-10-29): a clone 0.97× and a no-op fetch 1.82× git's own
 server on 12,000 commits). G1 and G2 are met. G4 is met but for its p99 at 50 processes: 25
@@ -153,12 +153,16 @@ commit in one lock pass (`land --changes`), and G4's harness lands so: at 50 pro
 441.7 ms in one run and 1,483.5 ms in another that started at twice the load, with 25.0 lands/s,
 0 % retries and nothing lost in both ([perf.md](perf.md#m16--2026-11-07)). Condition 2 is not met
 robustly, so M18 starts with group commit (D2): lands and commits that wait on the writer lock are
-committed in batches (D2-1 to D2-7, in v0.10.0); G4 is not measured on batching yet: D2-8's gated
-runs found the shared host never quiet, so condition 2 stays open
-([perf.md](perf.md#d2-8-g4-on-batched-lands--2026-11-08-not-measured-the-host-was-never-quiet)). G17's push and fetch are met
+committed in batches (D2-1 to D2-7, in v0.10.0). On batching, in two runs started under the
+measurement gate in a night window, G4 at 50 processes is met: p99 157.3 ms and 154.5 ms, 25.0
+lands/s, 0 % retries, nothing lost
+([perf.md](perf.md#d2-8-g4-on-batched-lands--2026-11-08-not-measured-the-host-was-never-quiet),
+"D2-8 gated runs"); its 32-process runs, G1 at 50 × 1,000 with batched commits and the group-commit
+design's slow sweeps are not recorded yet, so condition 2 stays open. G17's push and fetch are met
 (1.02× and 1.34×, the fetch with the mirror's commit-graph); the sync of one land right after a
-clone is not (49.6 s against 1 s). The benchmark gate (condition 3) runs in the weekly Scheduled
-run.
+clone, M18's exit criterion, is not: 13.081 s on 12,000 commits and 18.8× the same sync on 1,000,
+against 1 s and 1.5× (49.6 s in v0.7.0;
+[perf.md](perf.md#m18-first-sync-after-a-clone--2026-11-08)). The benchmark gate (condition 3) runs in the weekly Scheduled run.
 
 **Condition 5 (M15, in v0.8.0, and M16).** Not met yet. M15 closes the in-scope acceptance of the twelve
 data-safety and contract rows the 2026-10-30 completeness report put on condition 5: 54 of the 55
@@ -171,8 +175,9 @@ readers, ref moves and keyed lands; `sync` and `git import` moving `main` only f
 with its changes in one lock pass; `ancestry` along every parent; the land key judged under the
 lock; and a `serve` push refused inside git's quarantine. Scored again after M16, 8 rows moved up
 and none down. Still open: a key landed far below the land's base on another ref (M9), `release`
-refs, tags and remote-tracking refs that move back, and crash tests for revert, check results and
-approvals, none of which exists yet ([known limitations](known-limitations.md)).
+refs, tags and remote-tracking refs that move back, and crash tests for check results and
+approvals, neither of which exists yet; revert's crash, kill and power-loss tests came with M18
+([known limitations](known-limitations.md)).
 
 Deferred past usable, with what stands in until then:
 
@@ -677,7 +682,7 @@ needs   M13  ← M3, M4, M8                 packs, the mirror, the sync engine
 | ✅ M15 | — | Safety and contract: codes pinned, op ids, fetch integrity, `main` forward only, workspace refusals, land keys; v0.8.0 | M14 | Its twelve rows' acceptance in scope |
 | ✅ M16 | — | Safety and load: no-follow workspace writes, kill tests for readers and ref moves, sync and import forward only, one lock pass per land, `ancestry`, the land key under the lock, refusal inside the quarantine; v0.9.0 | M15 | The M16 plan's acceptance; G4 re-measured ([perf.md](perf.md#m16--2026-11-07)) |
 | 📋 M17 | 1 | Serve under load: reads off the writer lock, history prepared at land and import, one pack per identical read, pushes in bounded memory, records per request, a differential suite against git's own server; its slices in v0.10.0 | M16 | G18–G23 measured, G19, G20, G22 met. So far G18's commit wait beside an import, G19's CPU, G20's land p99 at 50 processes and G22's memory miss, and G21 has not run ([perf.md](perf.md#m17-baselines--2026-11-07)) |
-| 📋 M18 | — | Take back and stay current: revert, `ref log`, the first sync after a clone, conflict attribution, group commit if needed | M16 | 55 of 55 codes pinned; first sync < 1 s on 12,000 commits. So far group commit, D2-1 to D2-7, in v0.10.0; G4 on batching not measured yet (D2-8) |
+| 📋 M18 | — | Take back and stay current: revert, `ref log`, the first sync after a clone, conflict attribution, group commit if needed | M16 | 55 of 55 codes pinned; first sync < 1 s on 12,000 commits. Built: `revert`, `ref log` (55 of 55 codes pinned), revisions by move and by instant, conflict reports that list every touch, `land-check`, `land-group`, `ref txn`, `merge-base`, the landing-order and undo-per-kind proofs; group commit, D2-1 to D2-7, in v0.10.0. Missed so far: the first sync after a clone, 13.081 s on 12,000 commits and 18.8× on 1,000, against 1 s and 1.5×. G4 on batching met at 50 processes in two gated runs; its 32-process runs, its slow sweeps and the quiet-host run of the sync lag (0.520×, met on a loaded host) not recorded yet ([perf.md](perf.md#d2-8-g4-on-batched-lands--2026-11-08-not-measured-the-host-was-never-quiet)) |
 | 📋 M19 | — | Workspaces, second round: stale workspaces everywhere, edit snapshots, the update's latency | M16 | G9's misses met |
 | 📋 M20 | — | `FORMAT 3`: the sorted views under a manifest, the new record kinds, `upgrade` | its design | G18 at 1,000,000 records |
 | 📋 M21 | — | Health, drift and housekeeping | M17 | G24 |
@@ -703,8 +708,9 @@ was found.
 **Delivered milestones, deferred until after the pilot.** Full fsync is slow on this host (about
 21 ms for an uncontended durable commit through the binary); batching syncs, and whether any
 `--durability fast` flag is justified, is M2's journal-sync decision. A burst of lands no longer retries
-(v0.6.0's landing model), and since M16 a land takes the lock once, but its p99 at 50 processes is
-under 500 ms in one of two runs only (group commit, D2, in M18). Part of each lock pass
+(v0.6.0's landing model), since M16 a land takes the lock once, and with M18's group commit (D2)
+its p99 at 50 processes is under 500 ms in both gated runs; its 32-process runs are not recorded
+yet. Part of each lock pass
 through the binary is unexplained (M1.6's quiet-window runs, then M2's decision). Commit-path costs
 (index tail scans, the reflog walk) wait for M2's measured decision. Compaction rewrites both
 sorted views under the writer lock (50 ms at 100,000 records, 173 ms at 1M; M3's merge outside the lock if
