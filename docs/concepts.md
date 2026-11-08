@@ -54,6 +54,14 @@ A revision is `main`, `release/<name>`, a changeset id or a unique prefix of 12 
 digits, then any number of `~N` (the N-th first parent). `REV:PATH` names a path at a revision, as
 `cat` and `history` take it, and `ls` takes `REV[:PATH]`.
 
+A ref's earlier value is a revision too, read from its moves (`ref log`): `main@{N}` is the value
+`main` held N moves before its current one (`main@{0}` is the current value), and
+`main@{at=<unix seconds>}` the value set by its newest move recorded at or before that instant.
+The instant is the clock of the writer that moved the ref, and moves are read in the order the
+store recorded them, so after a clock went back the form picks the newest move recorded at or
+before the instant. A move past the oldest, an instant before the first move or a move that
+deleted the ref is `E_REV_NOT_FOUND`. Both forms take `~N` after them (`main@{1}~2`).
+
 `resolve REV` gives the full id of the changeset a revision names, and an envelope's
 `meta.resolved` says what each revision named.
 

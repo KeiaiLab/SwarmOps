@@ -139,7 +139,7 @@ The 190 request, response and value types of the API, as `swarmops schema` print
 | [`ResolutionsInput`](#resolutionsinput) | object | A land's resolutions (`land --resolve`): what to make of some paths of the merge of the change onto the target, decided against one of the target's heads. |
 | [`ResolveRevReq`](#resolverevreq) | object | `resolve_rev` (CLI `resolve`): the changeset a revision names, as every operation resolves it. |
 | [`ResolvedRev`](#resolvedrev) | object | `resolve_rev` (CLI `resolve`): the changeset a revision names, and what kind of revision it is. |
-| [`Rev`](#rev) | string | A revision as the caller wrote it, for the store to resolve: a ref name (`main`, `release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, optionally followed by `~N` for the N-th first-parent ancestor. |
+| [`Rev`](#rev) | string | A revision as the caller wrote it, for the store to resolve: a ref name (`main`, `release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, or a ref's earlier value: `<ref>@{N}` the value it held N moves before its current one (`@{0}` is the current value), `<ref>@{at=<unix seconds>}` the value set by its newest move recorded at or before that instant (the writer's clock, moves read in journal order); optionally followed by `~N` for the N-th first-parent ancestor. |
 | [`RevKind`](#revkind) | enumeration | What kind of revision `resolve_rev` resolved. |
 | [`RevertReq`](#revertreq) | object | `revert` (CLI `revert`): takes back the first-parent range `(since, changeset]` of `target` by a land. |
 | [`RevertResp`](#revertresp) | object | `revert`: what was taken back, and the land that took it back. |
@@ -1994,7 +1994,7 @@ Kind: object. `swarmops schema ResolvedRev` prints its JSON Schema.
 
 ## Rev
 
-A revision as the caller wrote it, for the store to resolve: a ref name (`main`, `release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, optionally followed by `~N` for the N-th first-parent ancestor.
+A revision as the caller wrote it, for the store to resolve: a ref name (`main`, `release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, or a ref's earlier value: `<ref>@{N}` the value it held N moves before its current one (`@{0}` is the current value), `<ref>@{at=<unix seconds>}` the value set by its newest move recorded at or before that instant (the writer's clock, moves read in journal order); optionally followed by `~N` for the N-th first-parent ancestor.
 
 Kind: string. `swarmops schema Rev` prints its JSON Schema.
 

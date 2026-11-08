@@ -64,6 +64,10 @@ collects the changes on `stable` that no release holds yet, until the next relea
   REV's id with the page's cursor reads the next pages, which stay on that base when a ref moves.
   Revisions that share no first-parent ancestor are `E_INVALID_ARG` (the M18 design §8).
   `swarmops mcp` lists 46 tools, and `swarmops schema` 190 types.
+- A revision names a ref's earlier value from its moves: `main@{N}` the value `main` held N moves
+  before its current one, `main@{at=<unix seconds>}` the value set by its newest move recorded at or
+  before that instant, either followed by `~N`; past the oldest move, before the first or at a
+  deletion it is `E_REV_NOT_FOUND` (the M18 design §3.3).
 
 ### Changed
 

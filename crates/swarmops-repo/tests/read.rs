@@ -24,7 +24,7 @@ use swarmops_store::{ChangesetMeta, MetaStore, Recovered, StoreError, StoreForma
 use swarmops_testkit::child::{SIGABRT, run, this_test};
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::faults::checked;
-use swarmops_testkit::fs::RecordingFs;
+use swarmops_testkit::fs::{NoSyncFs, RecordingFs};
 use swarmops_testkit::repo::{blob, commit, new_repo, new_repo_as, path, put, put_as, request};
 use swarmops_testkit::store::layout_of;
 #[cfg(feature = "test-hooks")]
@@ -256,6 +256,168 @@ fn resolve_through_a_dangling_ref_is_not_found() {
                 assert!(what.contains(&nowhere.to_string()), "{what}");
             }
             other => panic!("{rev}: expected NotFound, got {other:?}"),
+        }
+    }
+}
+
+/// Waits until the clock is past Unix second `ts`, so that the next move records a later `at`.
+fn after_second(ts: i64) {
+    loop {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        if i64::try_from(now).unwrap() > ts {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// `main` moved five times, to c1 .. c5 in order, with a second between the second move and
+/// the third; and `release/x` set to c2, then deleted. Returns the store's root, the
+/// changesets and the `at` of `main`'s moves, oldest first.
+fn five_moves() -> (
+    tempfile::TempDir,
+    Utf8PathBuf,
+    LocalRepo,
+    [ChangesetId; 5],
+    Vec<i64>,
+) {
+    let (dir, root, repo) = new_repo();
+
+    // 1. A first-parent chain of five changesets.
+    let mut ids = Vec::new();
+    for n in 0..5u8 {
+        let parents: Vec<ChangesetId> = ids.last().copied().into_iter().collect();
+        ids.push(commit(&repo, &parents, vec![put("f", &[b'0' + n])]));
+    }
+    let ids: [ChangesetId; 5] = ids.try_into().unwrap();
+
+    // 2. Five moves of `main`; the clock passes a second between the second and the third.
+    let mut old = None;
+    for (n, &id) in ids.iter().enumerate() {
+        if n == 2 {
+            let store = MetaStore::open(&root).unwrap();
+            after_second(store.read().unwrap().reflog("main", 1).unwrap()[0].ts);
+        }
+        repo.cas_ref("main", old, Some(id), "test/agent").unwrap();
+        old = Some(id);
+    }
+
+    // 3. A release ref set, then deleted.
+    repo.cas_ref("release/x", None, Some(ids[1]), "test/agent")
+        .unwrap();
+    repo.cas_ref("release/x", Some(ids[1]), None, "test/agent")
+        .unwrap();
+
+    // 4. The `at` of `main`'s moves, oldest first.
+    let store = MetaStore::open(&root).unwrap();
+    let mut at: Vec<i64> = store
+        .read()
+        .unwrap()
+        .reflog("main", 10)
+        .unwrap()
+        .iter()
+        .map(|entry| entry.ts)
+        .collect();
+    at.reverse();
+    assert_eq!(at.len(), 5);
+    assert!(at[1] < at[2], "a second between moves 2 and 3: {at:?}");
+    (dir, root, repo, ids, at)
+}
+
+#[test]
+fn revisions_by_move_and_instant() {
+    let (_dir, root, repo, [c1, c2, c3, c4, c5], at) = five_moves();
+    let resolve = |rev: &str| repo.resolve(rev).unwrap();
+
+    // By move: `@{0}` is the current value, `@{N}` the one N moves before it.
+    assert_eq!(resolve("main@{0}"), c5);
+    assert_eq!(resolve("main@{1}"), c4);
+    assert_eq!(resolve("main@{2}"), c3, "after 5 moves, the third value");
+    assert_eq!(resolve("main@{4}"), c1);
+    assert_eq!(resolve("main@{1}~2"), c2, "then `~N`");
+    assert_eq!(resolve("main@{1}~1~1"), c2, "suffixes add up");
+
+    // By instant: the value of the newest move recorded at or before it.
+    let between = at[1];
+    assert_eq!(resolve(&format!("main@{{at={between}}}")), c2);
+    assert_eq!(resolve(&format!("main@{{at={}}}", at[2] - 1)), c2);
+    assert_eq!(resolve(&format!("main@{{at={}}}", at[4])), c5);
+    assert_eq!(resolve(&format!("main@{{at={}}}", i64::MAX)), c5);
+    assert_eq!(resolve(&format!("main@{{at={between}}}~1")), c1);
+
+    // A deleted ref's earlier values are still named.
+    assert_eq!(resolve("release/x@{1}"), c2);
+
+    // Past the first page of moves read at a time (256): 300 moves between c1 and c2, with no
+    // flush, to keep the test fast.
+    let unsynced = LocalRepo::open_with_fs(&root, Arc::new(NoSyncFs)).unwrap();
+    let mut old = None;
+    for n in 0..300 {
+        let new = [c1, c2][n % 2];
+        unsynced
+            .cas_ref("release/many", old, Some(new), "test/agent")
+            .unwrap();
+        old = Some(new);
+    }
+    assert_eq!(resolve("release/many@{0}"), c2);
+    assert_eq!(resolve("release/many@{298}"), c2);
+    assert_eq!(resolve("release/many@{299}"), c1, "the oldest move");
+    assert_not_found(repo.resolve("release/many@{300}"), "release/many@{300}");
+}
+
+#[test]
+fn revisions_by_move_refuse_what_they_cannot_name() {
+    let (_dir, _root, repo, [c1, ..], at) = five_moves();
+
+    // 1. Past the oldest move, before the first, a deletion, a ref that never moved (an id is
+    // a branch name to this format, and no branch moved), a walk past the root: no changeset.
+    let before_first = format!("main@{{at={}}}", at[0] - 1);
+    let id_moved = format!("{c1}@{{0}}");
+    for rev in [
+        "main@{5}",
+        "main@{99}",
+        before_first.as_str(),
+        "main@{at=0}",
+        "release/x@{0}",
+        "release/never@{0}",
+        "release/never@{at=0}",
+        id_moved.as_str(),
+        "main@{4}~1",
+    ] {
+        assert_not_found(repo.resolve(rev), rev);
+    }
+
+    // 2. Malformed forms are no revision at all.
+    for rev in [
+        "main@",
+        "main@{",
+        "main@{}",
+        "main@0",
+        "main@{x}",
+        "main@{-1}",
+        "main@{+1}",
+        "main@{ 1}",
+        "main@{1",
+        "main@{1}x",
+        "main@{1}@{1}",
+        "main@{18446744073709551616}",
+        "main@{at=}",
+        "main@{at=x}",
+        "main@{at=-1}",
+        "main@{at=1",
+        "main@{at=99999999999999999999}",
+        "main@{AT=1}",
+        "main@{0}~",
+        "main~1@{0}",
+        "@{0}",
+        "release/@{0}",
+    ] {
+        match repo.resolve(rev) {
+            Err(RepoError::BadRev(bad)) => assert_eq!(bad, rev),
+            other => panic!("expected BadRev({rev:?}), got {other:?}"),
         }
     }
 }

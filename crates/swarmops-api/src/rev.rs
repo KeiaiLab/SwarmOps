@@ -6,7 +6,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// A revision as the caller wrote it, for the store to resolve: a ref name (`main`,
-/// `release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,
+/// `release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, or a
+/// ref's earlier value: `<ref>@{N}` the value it held N moves before its current one (`@{0}`
+/// is the current value), `<ref>@{at=<unix seconds>}` the value set by its newest move
+/// recorded at or before that instant (the writer's clock, moves read in journal order);
 /// optionally followed by `~N` for the N-th first-parent ancestor.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 #[serde(transparent)]

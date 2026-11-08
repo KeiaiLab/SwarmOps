@@ -27,7 +27,7 @@ max_result_chars: 200000
 | `max_bytes` | integer | no | `1048576` | The most content bytes to return: at least 1 (0 is `E_INVALID_ARG`); more comes back truncated, with the `next_offset` to read on from. |
 | `offset` | integer | no | `0` | Where to start reading, in bytes from the file's start: a truncated read's `next_offset` reads on from where it stopped. An offset past the end gives empty content. Give this or `lines`, not both (`E_INVALID_ARG`). |
 | `path` | string | yes |  | The file's repository path. |
-| `rev` | string | yes |  | The revision to read at. A revision as the caller wrote it, for the store to resolve: a ref name (`main`, `release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, optionally followed by `~N` for the N-th first-parent ancestor. |
+| `rev` | string | yes |  | The revision to read at. A revision as the caller wrote it, for the store to resolve: a ref name (`main`, `release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, or a ref's earlier value: `<ref>@{N}` the value it held N moves before its current one (`@{0}` is the current value), `<ref>@{at=<unix seconds>}` the value set by its newest move recorded at or before that instant (the writer's clock, moves read in journal order); optionally followed by `~N` for the N-th first-parent ancestor. |
 
 ### JSON Schema
 
@@ -87,7 +87,7 @@ As `tools/list` gives it: each `$ref` replaced by its definition, so that it sta
       "type": "string"
     },
     "rev": {
-      "description": "The revision to read at. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+      "description": "The revision to read at. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, or a\nref's earlier value: `<ref>@{N}` the value it held N moves before its current one (`@{0}`\nis the current value), `<ref>@{at=<unix seconds>}` the value set by its newest move\nrecorded at or before that instant (the writer's clock, moves read in journal order);\noptionally followed by `~N` for the N-th first-parent ancestor.",
       "type": "string"
     }
   },

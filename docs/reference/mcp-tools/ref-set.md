@@ -26,7 +26,7 @@ max_result_chars: null
 | `create` | boolean | no | `false` | To create the ref. If it exists at another target, the move fails with `E_CAS_MISMATCH`; if it already holds `new`, nothing is written and the response is a replay (`already_applied`). Give this or `expected_old`, not both. |
 | `expected_old` | string or null | no |  | To move an existing ref: the target the caller last saw, by its full changeset id; if the ref holds another, the move fails with `E_CAS_MISMATCH`. A ref name or a relative revision is read from the store when the move runs instead of pinning the id the caller read: the ref's own name always matches, so the compare-and-swap protects nothing, and `main~1` on `main` never matches. An id prefix pins the id the caller read only until another changeset shares it; then it is `E_AMBIGUOUS_ID`. `swarmops mcp` refuses all three (`E_INVALID_ARG`), and the CLI's `--expect` help warns against them. Give this or `create`, not both. |
 | `name` | string | yes |  | The ref: `main` or `release/<name>`. |
-| `new` | string | yes |  | The revision to point it at. A revision as the caller wrote it, for the store to resolve: a ref name (`main`, `release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, optionally followed by `~N` for the N-th first-parent ancestor. |
+| `new` | string | yes |  | The revision to point it at. A revision as the caller wrote it, for the store to resolve: a ref name (`main`, `release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, or a ref's earlier value: `<ref>@{N}` the value it held N moves before its current one (`@{0}` is the current value), `<ref>@{at=<unix seconds>}` the value set by its newest move recorded at or before that instant (the writer's clock, moves read in journal order); optionally followed by `~N` for the N-th first-parent ancestor. |
 
 ### JSON Schema
 
@@ -59,7 +59,7 @@ As `tools/list` gives it: each `$ref` replaced by its definition, so that it sta
       "type": "string"
     },
     "new": {
-      "description": "The revision to point it at. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+      "description": "The revision to point it at. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, or a\nref's earlier value: `<ref>@{N}` the value it held N moves before its current one (`@{0}`\nis the current value), `<ref>@{at=<unix seconds>}` the value set by its newest move\nrecorded at or before that instant (the writer's clock, moves read in journal order);\noptionally followed by `~N` for the N-th first-parent ancestor.",
       "type": "string"
     }
   },

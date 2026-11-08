@@ -12,9 +12,16 @@
 //! with each leaf's size from its object's header.
 //!
 //! A revision (operations spec §0) is a ref name (`main`, `release/<x>`), a full id (64 hex
-//! digits), or a unique id prefix of 12 to 63 hex digits, either case; followed by any number
-//! of `~N` suffixes, each walking `N` first parents back (`main~2`, `main~1~1`), as
+//! digits), or a unique id prefix of 12 to 63 hex digits, either case; or a ref's earlier value
+//! (the M18 design §3.3): `<ref>@{N}`, the value it held `N` moves before its current one
+//! (`main@{0}` is the current value), or `<ref>@{at=<unix seconds>}`, the value set by its
+//! newest move recorded at or before that instant. Each may be followed by any number of `~N`
+//! suffixes, each walking `N` first parents back (`main~2`, `main~1~1`, `main@{1}~1`), as
 //! [`RepoRead::ancestor`] walks them.
+//!
+//! A move's instant is its writer's clock as the journal records it; the instant form walks the
+//! moves in journal order, newest first, so with a clock that went back it picks the newest move
+//! recorded at or before the instant, not the latest instant.
 
 use swarmops_core::bytes;
 use swarmops_core::{
@@ -277,7 +284,8 @@ impl<O: ObjectStore> RepoRead<'_, O> {
     /// The changeset revision `rev` names in the snapshot: see [the module documentation](self)
     /// for the grammar. [`RepoError::NotFound`] when it names none (a ref that does not exist or
     /// names a changeset the store does not hold, an id or a prefix of none, a `~N` past a root;
-    /// the `~N` suffixes add up to one walk, [`RepoRead::ancestor`]'s),
+    /// the `~N` suffixes add up to one walk, [`RepoRead::ancestor`]'s; a move past a ref's
+    /// oldest, an instant before its first move, a move that deleted it),
     /// [`RepoError::Ambiguous`] for a prefix of more than one, [`RepoError::BadRev`] for anything
     /// that is not a revision. The errors carry `rev` as given (a dangling ref's error adds the
     /// changeset it names).
@@ -293,7 +301,11 @@ impl<O: ObjectStore> RepoRead<'_, O> {
             let n: u64 = part.parse().map_err(|_| bad())?;
             steps = steps.checked_add(n).ok_or_else(bad)?;
         }
-        let id = self.resolve_base(base, rev)?;
+        // A ref's value by move or by instant (`@` is in no ref name), else a ref, id or prefix.
+        let id = match base.split_once('@') {
+            Some((name, pick)) => self.resolve_moved(name, pick, rev)?,
+            None => self.resolve_base(base, rev)?,
+        };
         if steps == 0 {
             return Ok(id);
         }
@@ -595,6 +607,41 @@ impl<O: ObjectStore> RepoRead<'_, O> {
         Ok(self.repo.changeset_object(cs)?.root)
     }
 
+    /// The changeset ref `name` held by `pick`, the `{N}` or `{at=<secs>}` after its `@`: its
+    /// moves, newest first, a page at a time ([`MetaRead::reflog_page`]). The errors carry
+    /// `rev`, the whole revision.
+    fn resolve_moved(&self, name: &str, pick: &str, rev: &str) -> Result<ChangesetId, RepoError> {
+        let bad = || RepoError::BadRev(rev.to_owned());
+        let not_found = || RepoError::NotFound(rev.to_owned());
+        let mut pick = Pick::parse(pick).ok_or_else(bad)?;
+
+        // 1. The moves, newest first, until the one `pick` names; none left names nothing.
+        let mut before = None;
+        let found = 'pages: loop {
+            let page = match self.meta.reflog_page(name, before, MOVE_PAGE) {
+                Ok(page) => page,
+                // A name the store's format does not take names no ref of it.
+                Err(StoreError::RefName(_) | StoreError::FormatRequired { .. }) => {
+                    return Err(bad());
+                }
+                Err(e) => return Err(e.into()),
+            };
+            let Some(last) = page.last() else {
+                return Err(not_found());
+            };
+            before = Some(last.seq);
+            for entry in &page {
+                if pick.takes(entry.ts) {
+                    break 'pages entry.new;
+                }
+            }
+        };
+
+        // 2. A move that deleted the ref names none; any other names a changeset the store holds
+        // (a move's target is checked when it is queued, and changesets are never removed).
+        found.ok_or_else(not_found)
+    }
+
     /// The changeset that `base`, a revision without its `~N` suffixes, names in the snapshot.
     /// The errors carry `rev`, the whole revision.
     fn resolve_base(&self, base: &str, rev: &str) -> Result<ChangesetId, RepoError> {
@@ -632,6 +679,49 @@ impl<O: ObjectStore> RepoRead<'_, O> {
                 _ => Err(RepoError::Ambiguous(rev.to_owned())),
             },
             _ => Err(RepoError::BadRev(rev.to_owned())),
+        }
+    }
+}
+
+/// The moves of a ref [`RepoRead::resolve`] reads at a time, for `@{N}` and `@{at=<secs>}`.
+const MOVE_PAGE: usize = 256;
+
+/// Which of a ref's moves a revision's `@{..}` names, its moves read newest first.
+enum Pick {
+    /// `{N}`: the move `N` before the newest; `N` counts down as moves pass.
+    Back(u64),
+    /// `{at=<secs>}`: the newest move recorded at or before the Unix second.
+    At(i64),
+}
+
+impl Pick {
+    /// The `{N}` or `{at=<secs>}` after a revision's `@`; `None` for any other text.
+    fn parse(text: &str) -> Option<Pick> {
+        let inner = text.strip_prefix('{')?.strip_suffix('}')?;
+        let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+
+        // `{at=<secs>}`, else `{N}`: digits only, no sign, within range.
+        if let Some(secs) = inner.strip_prefix("at=") {
+            if !digits(secs) {
+                return None;
+            }
+            return secs.parse().ok().map(Pick::At);
+        }
+        if !digits(inner) {
+            return None;
+        }
+        inner.parse().ok().map(Pick::Back)
+    }
+
+    /// Whether the next move, recorded at `ts`, is the one named; a `{N}` counts it otherwise.
+    fn takes(&mut self, ts: i64) -> bool {
+        match self {
+            Pick::Back(0) => true,
+            Pick::Back(n) => {
+                *n -= 1;
+                false
+            }
+            Pick::At(at) => ts <= *at,
         }
     }
 }

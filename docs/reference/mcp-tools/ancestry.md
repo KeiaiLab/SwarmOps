@@ -24,9 +24,9 @@ max_result_chars: null
 | Field | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
 | `cursor` | string or null | no |  | Resume the entries: the previous page's `cursor`. Pass it back exactly as returned, with the same `from` and `to`; do not construct it (cursors are opaque). It holds the full ids the first page resolved: once a ref among `from` and `to` moves, it is `E_INVALID_ARG`, and the listing starts over. |
-| `from` | string | yes |  | The first revision: the one asked to be an ancestor, and the one `entries` leave out. A revision as the caller wrote it, for the store to resolve: a ref name (`main`, `release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, optionally followed by `~N` for the N-th first-parent ancestor. |
+| `from` | string | yes |  | The first revision: the one asked to be an ancestor, and the one `entries` leave out. A revision as the caller wrote it, for the store to resolve: a ref name (`main`, `release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, or a ref's earlier value: `<ref>@{N}` the value it held N moves before its current one (`@{0}` is the current value), `<ref>@{at=<unix seconds>}` the value set by its newest move recorded at or before that instant (the writer's clock, moves read in journal order); optionally followed by `~N` for the N-th first-parent ancestor. |
 | `limit` | integer | no | `50` | The most entries to return, 0 to 1,000 (more is `E_INVALID_ARG`): 0 gives `is_ancestor` and `merge_bases` alone. |
-| `to` | string | yes |  | The second revision: the one whose ancestors `entries` list. A revision as the caller wrote it, for the store to resolve: a ref name (`main`, `release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, optionally followed by `~N` for the N-th first-parent ancestor. |
+| `to` | string | yes |  | The second revision: the one whose ancestors `entries` list. A revision as the caller wrote it, for the store to resolve: a ref name (`main`, `release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, or a ref's earlier value: `<ref>@{N}` the value it held N moves before its current one (`@{0}` is the current value), `<ref>@{at=<unix seconds>}` the value set by its newest move recorded at or before that instant (the writer's clock, moves read in journal order); optionally followed by `~N` for the N-th first-parent ancestor. |
 
 ### JSON Schema
 
@@ -45,7 +45,7 @@ As `tools/list` gives it: each `$ref` replaced by its definition, so that it sta
       ]
     },
     "from": {
-      "description": "The first revision: the one asked to be an ancestor, and the one `entries` leave out. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+      "description": "The first revision: the one asked to be an ancestor, and the one `entries` leave out. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, or a\nref's earlier value: `<ref>@{N}` the value it held N moves before its current one (`@{0}`\nis the current value), `<ref>@{at=<unix seconds>}` the value set by its newest move\nrecorded at or before that instant (the writer's clock, moves read in journal order);\noptionally followed by `~N` for the N-th first-parent ancestor.",
       "type": "string"
     },
     "limit": {
@@ -57,7 +57,7 @@ As `tools/list` gives it: each `$ref` replaced by its definition, so that it sta
       "type": "integer"
     },
     "to": {
-      "description": "The second revision: the one whose ancestors `entries` list. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+      "description": "The second revision: the one whose ancestors `entries` list. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, or a\nref's earlier value: `<ref>@{N}` the value it held N moves before its current one (`@{0}`\nis the current value), `<ref>@{at=<unix seconds>}` the value set by its newest move\nrecorded at or before that instant (the writer's clock, moves read in journal order);\noptionally followed by `~N` for the N-th first-parent ancestor.",
       "type": "string"
     }
   },

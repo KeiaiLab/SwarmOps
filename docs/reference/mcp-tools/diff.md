@@ -26,11 +26,11 @@ max_result_chars: null
 | `context` | integer | no | `3` | The unchanged lines around each change in a `unified` hunk. |
 | `cursor` | string or null | no |  | Resume a diff: the previous page's `cursor`. Pass it back exactly as returned; do not construct it (cursors are opaque). This page starts after the file it names. It pins no revision: give the first page's `from` and `to`, full ids, as `from` and `to`, or a ref that moved since pages another diff, with no error. |
 | `format` | string | no | `"names"` | What to say of each file: `names` its path and status; `stat` also whether it is binary and, for text, the lines it inserts and deletes; `unified` also its kinds, its blobs and, for text, its hunks. What `diff` says of each file. |
-| `from` | string | yes |  | The revision to diff from: the old side. A revision as the caller wrote it, for the store to resolve: a ref name (`main`, `release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, optionally followed by `~N` for the N-th first-parent ancestor. |
+| `from` | string | yes |  | The revision to diff from: the old side. A revision as the caller wrote it, for the store to resolve: a ref name (`main`, `release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, or a ref's earlier value: `<ref>@{N}` the value it held N moves before its current one (`@{0}` is the current value), `<ref>@{at=<unix seconds>}` the value set by its newest move recorded at or before that instant (the writer's clock, moves read in journal order); optionally followed by `~N` for the N-th first-parent ancestor. |
 | `limit` | integer | no | `500` | The most files to return: at least 1 (0 is `E_INVALID_ARG`). |
 | `max_bytes` | integer | no | `32768` | The most bytes a `unified` page's files take, as the JSON array `files` they print as: at least 1 (0 is `E_INVALID_ARG`). The page stops before the first file that would take it past this, but always holds one file, whose hunks are cut to the first ones that fit (`hunks_truncated`) when they alone would pass it. A `names` or `stat` page is held by `limit` alone. |
 | `paths` | array of string | no |  | Only the files at or below these repository paths (a file's path takes that file; one trailing `/` is taken); every file when empty or omitted. |
-| `to` | string | yes |  | The revision to diff to: the new side. A revision as the caller wrote it, for the store to resolve: a ref name (`main`, `release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, optionally followed by `~N` for the N-th first-parent ancestor. |
+| `to` | string | yes |  | The revision to diff to: the new side. A revision as the caller wrote it, for the store to resolve: a ref name (`main`, `release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, or a ref's earlier value: `<ref>@{N}` the value it held N moves before its current one (`@{0}` is the current value), `<ref>@{at=<unix seconds>}` the value set by its newest move recorded at or before that instant (the writer's clock, moves read in journal order); optionally followed by `~N` for the N-th first-parent ancestor. |
 
 ### JSON Schema
 
@@ -77,7 +77,7 @@ As `tools/list` gives it: each `$ref` replaced by its definition, so that it sta
       ]
     },
     "from": {
-      "description": "The revision to diff from: the old side. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+      "description": "The revision to diff from: the old side. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, or a\nref's earlier value: `<ref>@{N}` the value it held N moves before its current one (`@{0}`\nis the current value), `<ref>@{at=<unix seconds>}` the value set by its newest move\nrecorded at or before that instant (the writer's clock, moves read in journal order);\noptionally followed by `~N` for the N-th first-parent ancestor.",
       "type": "string"
     },
     "limit": {
@@ -102,7 +102,7 @@ As `tools/list` gives it: each `$ref` replaced by its definition, so that it sta
       "type": "array"
     },
     "to": {
-      "description": "The revision to diff to: the new side. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+      "description": "The revision to diff to: the new side. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, or a\nref's earlier value: `<ref>@{N}` the value it held N moves before its current one (`@{0}`\nis the current value), `<ref>@{at=<unix seconds>}` the value set by its newest move\nrecorded at or before that instant (the writer's clock, moves read in journal order);\noptionally followed by `~N` for the N-th first-parent ancestor.",
       "type": "string"
     }
   },

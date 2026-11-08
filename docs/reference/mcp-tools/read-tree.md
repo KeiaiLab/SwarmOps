@@ -27,7 +27,7 @@ max_result_chars: null
 | `depth` | integer | no | `1` | How many levels to list: 1 for the directory's own entries, 2 for theirs too, and so on, up to 64 (0 or more than 64 is `E_INVALID_ARG`). |
 | `limit` | integer | no | `250` | The most entries to return: at least 1 (0 is `E_INVALID_ARG`). |
 | `path` | string or null | no |  | The directory's repository path; omitted for the root. |
-| `rev` | string | yes |  | The revision to read at. A revision as the caller wrote it, for the store to resolve: a ref name (`main`, `release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, optionally followed by `~N` for the N-th first-parent ancestor. |
+| `rev` | string | yes |  | The revision to read at. A revision as the caller wrote it, for the store to resolve: a ref name (`main`, `release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, or a ref's earlier value: `<ref>@{N}` the value it held N moves before its current one (`@{0}` is the current value), `<ref>@{at=<unix seconds>}` the value set by its newest move recorded at or before that instant (the writer's clock, moves read in journal order); optionally followed by `~N` for the N-th first-parent ancestor. |
 
 ### JSON Schema
 
@@ -68,7 +68,7 @@ As `tools/list` gives it: each `$ref` replaced by its definition, so that it sta
       ]
     },
     "rev": {
-      "description": "The revision to read at. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+      "description": "The revision to read at. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, or a\nref's earlier value: `<ref>@{N}` the value it held N moves before its current one (`@{0}`\nis the current value), `<ref>@{at=<unix seconds>}` the value set by its newest move\nrecorded at or before that instant (the writer's clock, moves read in journal order);\noptionally followed by `~N` for the N-th first-parent ancestor.",
       "type": "string"
     }
   },
