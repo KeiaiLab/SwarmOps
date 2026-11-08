@@ -4,7 +4,7 @@
 
 Move a workspace's chain onto its target's head, and its files with it.
 
-On a conflict the workspace holds markers: edit them, ws resolve, then ws rebase --continue. --abort leaves the rebase and restores the conflicting paths.
+Edits on disk are snapshotted first and carried onto the new head; those that do not apply take the new head's files and stay in the snapshot, named as kept. On a conflict the workspace holds markers: edit them, ws resolve, then ws rebase --continue. --abort leaves the rebase and restores the conflicting paths.
 
 ```yaml
 title: "swarmops ws rebase"
@@ -57,7 +57,7 @@ The ref to rebase onto: main or release/&lt;name&gt;, and in a FORMAT 2 store a 
 
 Syntax: `-m, --message <MSG>`.
 
-Commit the workspace's edits first, with this message (default: edits are E\_WS\_DIRTY).
+Commit the workspace's edits first, with this message (default: a snapshot of them).
 
 ### `--continue`
 
@@ -173,7 +173,10 @@ No recorded example yet.
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `changeset` | `string` | yes | The workspace's head now. |
+| `dropped` | `array of string` | no | The paths whose edits did not apply: the files hold the new head's, `kept` the edits. |
+| `kept` | `string or null` | no | The snapshot again, when some of its edits did not apply to the new head: it keeps them by id. |
 | `onto` | `string` | yes | The target's head it was rebased onto. |
+| `snapshot` | `string or null` | no | The changeset that holds the edits on disk when the update started, on the old head; omitted when there were none. |
 | `status` | `RebaseStatus or null` | no | How the rebase ended; `None` after an abort. |
 | `status_after` | `WsStatus or null` | no | The status after the mutation; omitted when the request said `none`. |
 

@@ -1,15 +1,17 @@
 //! `ws rebase`: the workspace moved onto the rebased changeset, only what changed written; a
 //! conflict's markers and report; `ws resolve`, `--continue` and `--abort`.
 
+use std::sync::atomic::Ordering;
+
 use swarmops_api::{
-    ConflictReport, ShowReq, Side, StatusAfter, StoreOps, WsCommitReq, WsRebaseAction, WsRebaseReq,
-    WsResolveReq, WsState,
+    ConflictReport, ReadFileReq, ShowReq, Side, StatusAfter, StoreOps, WsChangeKind, WsCommitReq,
+    WsRebaseAction, WsRebaseReq, WsResolveReq, WsState,
 };
-use swarmops_ws::RealFs;
 use swarmops_ws::state::{self, SWARMWS_DIR, State};
 use swarmops_ws::status::CONFLICTS_JSON;
+use swarmops_ws::{RealFs, pending};
 
-use crate::fixture::{Fixture, Put, changes, file, tree_of, write};
+use crate::fixture::{Fixture, Put, Watched, change, changes, file, tree_of, write};
 
 /// The request of `ws rebase` of workspace `name` onto `main`, doing `action`.
 fn rebase_of(name: &str, action: WsRebaseAction) -> WsRebaseReq {
@@ -523,4 +525,309 @@ fn a_refused_rebase_settles_nothing() {
         state::read(&RealFs::new(), &f.beside("w")).unwrap().head,
         head
     );
+}
+
+/// The text changeset `id` holds at `path`.
+fn text_at(f: &Fixture, id: &str, path: &str) -> String {
+    let mut req = ReadFileReq::new(id, path);
+    req.max_bytes = 1024;
+    f.ops.read_file(req).unwrap().content
+}
+
+/// The number of operations the store has recorded.
+fn ops_of(f: &Fixture) -> u64 {
+    f.last_op()
+}
+
+/// A workspace `w` of the whole tree at a base of three files, `main` then moved on two of them;
+/// the base.
+fn moved_under_edits(f: &Fixture) -> String {
+    let base = f.commit(
+        None,
+        &[
+            Put::File("src/a.txt", "a\n"),
+            Put::File("src/b.txt", "b\n"),
+            Put::File("src/c.txt", "1\n2\n3\n4\n5\n"),
+        ],
+    );
+    f.create("w", &base, &[]);
+    f.commit(
+        Some(&base),
+        &[
+            Put::File("src/b.txt", "b2\n"),
+            Put::File("src/c.txt", "1\n2\n3\n4\nfive\n"),
+        ],
+    );
+    base
+}
+
+/// An update with edits that apply to the new head snapshots them first and carries them: the
+/// files are the new head plus the edits (a text file both changed merged), the status lists
+/// them against it, and the snapshot holds the old head plus the edits.
+#[test]
+fn an_update_carries_clean_edits() {
+    // 1. Edits of a file main left and of one main changed elsewhere in it.
+    let f = Fixture::new();
+    let base = moved_under_edits(&f);
+    let dir = f.beside("w");
+    write(&dir, "src/a.txt", "mine\n");
+    write(&dir, "src/c.txt", "one\n2\n3\n4\n5\n");
+
+    // 2. The update succeeds, its snapshot named, nothing dropped.
+    let done = swarmops_ws::rebase(&f.ctx(), rebase_of("w", WsRebaseAction::Start)).unwrap();
+    let snapshot = done.snapshot.clone().expect("a snapshot");
+    assert_eq!((done.kept.as_deref(), done.dropped.len()), (None, 0));
+    assert_eq!(parents_of(&f, &snapshot), [base]);
+    assert_eq!(text_at(&f, &snapshot, "src/a.txt"), "mine\n");
+    assert_eq!(text_at(&f, &snapshot, "src/b.txt"), "b\n");
+
+    // 3. The files: the new head plus the edits; the status lists the edits against it.
+    assert_eq!(
+        tree_of(&dir),
+        [
+            file("src/a.txt", "mine\n"),
+            file("src/b.txt", "b2\n"),
+            file("src/c.txt", "one\n2\n3\n4\nfive\n"),
+        ]
+    );
+    let saved = state::read(&RealFs::new(), &dir).unwrap();
+    assert_eq!(
+        (saved.head.as_str(), saved.materialized.as_str()),
+        (&*done.changeset, &*done.changeset)
+    );
+    let edited = [
+        change("src/a.txt", WsChangeKind::Modified),
+        change("src/c.txt", WsChangeKind::Modified),
+    ];
+    assert_eq!(changes(&f.ctx(), "w", false), edited);
+    assert_eq!(changes(&f.ctx(), "w", true), edited);
+    assert!(
+        pending::read_pending(&RealFs::new(), &dir)
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// An edit that does not apply to the new head is not written as markers: its path takes the new
+/// head's bytes, and the snapshot, returned as `kept`, holds it.
+#[test]
+fn an_update_keeps_conflicting_edits_in_a_changeset() {
+    // 1. An edit of the line main changed, and a clean one.
+    let f = Fixture::new();
+    moved_under_edits(&f);
+    let dir = f.beside("w");
+    write(&dir, "src/c.txt", "1\n2\n3\n4\nmine\n");
+    write(&dir, "src/a.txt", "mine\n");
+
+    // 2. Kept by id, the path dropped.
+    let done = swarmops_ws::rebase(&f.ctx(), rebase_of("w", WsRebaseAction::Start)).unwrap();
+    let snapshot = done.snapshot.clone().expect("a snapshot");
+    assert_eq!(done.kept.as_deref(), Some(&*snapshot));
+    assert_eq!(done.dropped, ["src/c.txt"]);
+    assert_eq!(text_at(&f, &snapshot, "src/c.txt"), "1\n2\n3\n4\nmine\n");
+
+    // 3. The files: the new head's at the dropped path, the clean edit carried.
+    assert_eq!(
+        tree_of(&dir),
+        [
+            file("src/a.txt", "mine\n"),
+            file("src/b.txt", "b2\n"),
+            file("src/c.txt", "1\n2\n3\n4\nfive\n"),
+        ]
+    );
+    assert_eq!(
+        changes(&f.ctx(), "w", true),
+        [change("src/a.txt", WsChangeKind::Modified)]
+    );
+}
+
+/// An update cut short after its snapshot was recorded makes the same snapshot again on the next
+/// run, by its key: the store replays it, and the two runs record what one uncut run does.
+#[test]
+fn an_update_with_the_same_edits_replays_its_snapshot() {
+    // 1. What an uncut update records.
+    let uncut = Fixture::new();
+    moved_under_edits(&uncut);
+    write(&uncut.beside("w"), "src/a.txt", "mine\n");
+    let before = ops_of(&uncut);
+    swarmops_ws::rebase(&uncut.ctx(), rebase_of("w", WsRebaseAction::Start)).unwrap();
+    let recorded = ops_of(&uncut) - before;
+
+    // 2. The same update, cut right after the store recorded the snapshot.
+    let f = Fixture::new();
+    moved_under_edits(&f);
+    let dir = f.beside("w");
+    write(&dir, "src/a.txt", "mine\n");
+    let before = ops_of(&f);
+    let watched = Watched::new(&f.ops);
+    watched.crash_after_commit.store(true, Ordering::SeqCst);
+    let cut = swarmops_ws::rebase(&f.ctx_over(&watched), rebase_of("w", WsRebaseAction::Start));
+    assert_eq!(cut.unwrap_err().code, "E_IO");
+    let made = watched.commits()[0]
+        .1
+        .clone()
+        .expect("the snapshot recorded");
+
+    // 3. Run again: the same snapshot, and as many operations as the uncut run.
+    let done = swarmops_ws::rebase(&f.ctx(), rebase_of("w", WsRebaseAction::Start)).unwrap();
+    assert_eq!(done.snapshot.as_deref(), Some(&*made));
+    assert_eq!(ops_of(&f) - before, recorded);
+    assert_eq!(tree_of(&dir)[0], file("src/a.txt", "mine\n"));
+}
+
+/// A file the agent added, which no ignore file names, is snapshotted and stays on disk as an
+/// addition against the new head.
+#[test]
+fn an_untracked_file_is_snapshotted_and_carried() {
+    let f = Fixture::new();
+    moved_under_edits(&f);
+    let dir = f.beside("w");
+    write(&dir, "src/new.txt", "new\n");
+    let done = swarmops_ws::rebase(&f.ctx(), rebase_of("w", WsRebaseAction::Start)).unwrap();
+    let snapshot = done.snapshot.expect("a snapshot");
+    assert_eq!(text_at(&f, &snapshot, "src/new.txt"), "new\n");
+    assert!(tree_of(&dir).contains(&file("src/new.txt", "new\n")));
+    assert_eq!(
+        changes(&f.ctx(), "w", true),
+        [change("src/new.txt", WsChangeKind::Added)]
+    );
+}
+
+/// A file an ignore file names is no edit: the snapshot does not hold it, and it stays on disk.
+#[test]
+fn an_ignored_file_is_not_snapshotted() {
+    // 1. A base that ignores `*.log`; an edit and a log beside it.
+    let f = Fixture::new();
+    let base = f.commit(
+        None,
+        &[
+            Put::File(".gitignore", "*.log\n"),
+            Put::File("a.txt", "a\n"),
+        ],
+    );
+    f.create("w", &base, &[]);
+    f.commit(Some(&base), &[Put::File("b.txt", "b\n")]);
+    let dir = f.beside("w");
+    write(&dir, "a.txt", "mine\n");
+    write(&dir, "build.log", "noise\n");
+
+    // 2. The snapshot holds the edit, not the log, which stays.
+    let done = swarmops_ws::rebase(&f.ctx(), rebase_of("w", WsRebaseAction::Start)).unwrap();
+    let snapshot = done.snapshot.expect("a snapshot");
+    assert_eq!(text_at(&f, &snapshot, "a.txt"), "mine\n");
+    assert!(!crate::fixture::tree_holds(&f, &snapshot, "build.log"));
+    assert!(tree_of(&dir).contains(&file("build.log", "noise\n")));
+}
+
+/// A chain that conflicts leaves the workspace rebasing with its snapshot recorded and the edits
+/// on disk; `--continue` carries them onto the rebased head.
+#[test]
+fn continue_carries_the_edits_after_a_conflict() {
+    // 1. A conflicting chain and an edit of a path the conflict leaves alone.
+    let f = Fixture::new();
+    conflicting(&f);
+    let ctx = f.ctx();
+    let dir = f.beside("w");
+    write(&dir, "src/b.txt", "edited\n");
+    let refused = swarmops_ws::rebase(&ctx, rebase_of("w", WsRebaseAction::Start)).unwrap_err();
+    assert_eq!(refused.code, "E_CONFLICT", "{refused:?}");
+    let record = pending::read_pending(&RealFs::new(), &dir)
+        .unwrap()
+        .expect("a record");
+    let snapshot = record.snapshot.clone().expect("the snapshot recorded");
+    assert_eq!(text_at(&f, &snapshot, "src/b.txt"), "edited\n");
+
+    // 2. Resolved and continued: the edit carried.
+    write(&dir, "src/a.txt", "1\nboth\n3\n");
+    swarmops_ws::resolve(&ctx, resolve_of("w", &["src/a.txt"], None, false)).unwrap();
+    swarmops_ws::resolve(
+        &ctx,
+        resolve_of("w", &["src/bin"], Some(Side::Theirs), false),
+    )
+    .unwrap();
+    let done = swarmops_ws::rebase(&ctx, rebase_of("w", WsRebaseAction::Continue)).unwrap();
+    assert_eq!(done.snapshot.as_deref(), Some(&*snapshot));
+    assert!(tree_of(&dir).contains(&file("src/b.txt", "edited\n")));
+    assert_eq!(
+        changes(&ctx, "w", true),
+        [change("src/b.txt", WsChangeKind::Modified)]
+    );
+}
+
+/// `--abort` after a conflict keeps the edits on disk, and the update again takes the same
+/// snapshot: the same edits on the same head make one changeset.
+#[test]
+fn abort_keeps_the_edits() {
+    // 1. A conflicting chain, an edit beside it, the update stopped on the conflict.
+    let f = Fixture::new();
+    conflicting(&f);
+    let ctx = f.ctx();
+    let dir = f.beside("w");
+    write(&dir, "src/b.txt", "edited\n");
+    swarmops_ws::rebase(&ctx, rebase_of("w", WsRebaseAction::Start)).unwrap_err();
+    let first = pending::read_pending(&RealFs::new(), &dir)
+        .unwrap()
+        .unwrap()
+        .snapshot;
+
+    // 2. Aborted: the edit stays, listed, and the response names the snapshot that holds it.
+    let aborted = swarmops_ws::rebase(&ctx, rebase_of("w", WsRebaseAction::Abort)).unwrap();
+    assert_eq!(aborted.snapshot, first);
+    assert!(tree_of(&dir).contains(&file("src/b.txt", "edited\n")));
+    assert_eq!(
+        changes(&ctx, "w", true),
+        [change("src/b.txt", WsChangeKind::Modified)]
+    );
+
+    // 3. The update again: the same snapshot, no new one.
+    let before = ops_of(&f);
+    swarmops_ws::rebase(&ctx, rebase_of("w", WsRebaseAction::Start)).unwrap_err();
+    let again = pending::read_pending(&RealFs::new(), &dir)
+        .unwrap()
+        .unwrap()
+        .snapshot;
+    assert_eq!(again, first);
+    assert!(first.is_some());
+    assert_eq!(ops_of(&f), before, "a store operation");
+}
+
+/// An update cut after `workspace.json` named the new head and before its intent went: the next
+/// open takes the state's `materialized`, which the intent stands for, as done and only removes
+/// the intent, so an edit the agent made since to a file the update wrote is no obstacle.
+#[test]
+fn an_open_after_the_state_names_the_update_drops_its_intent() {
+    // 1. An update that carried an edit; the snapshot of the carried edits on the new head.
+    let f = Fixture::new();
+    moved_under_edits(&f);
+    let dir = f.beside("w");
+    write(&dir, "src/a.txt", "mine\n");
+    let done = swarmops_ws::rebase(&f.ctx(), rebase_of("w", WsRebaseAction::Start)).unwrap();
+    let latest = std::fs::read(dir.join(SWARMWS_DIR).join("snapshot.json")).unwrap();
+    let latest: serde_json::Value = serde_json::from_slice(&latest).unwrap();
+    let carried = latest["snapshot"].as_str().unwrap().to_owned();
+    assert_ne!(carried, done.changeset);
+
+    // 2. The intent the cut leaves, and an edit of the carried file since.
+    let intent = serde_json::json!({
+        "from": done.snapshot.unwrap(),
+        "to": carried,
+        "prefixes": [],
+        "stands_for": done.changeset,
+    });
+    let journal = dir.join(SWARMWS_DIR).join("journal");
+    std::fs::write(journal.join("materialize.json"), intent.to_string()).unwrap();
+    write(&dir, "src/b.txt", "mine since\n");
+
+    // 3. Opened: the intent gone, the edit kept, the workspace on the new head.
+    assert_eq!(
+        changes(&f.ctx(), "w", true),
+        [
+            change("src/a.txt", WsChangeKind::Modified),
+            change("src/b.txt", WsChangeKind::Modified),
+        ]
+    );
+    assert!(!journal.join("materialize.json").exists());
+    assert!(tree_of(&dir).contains(&file("src/b.txt", "mine since\n")));
+    let saved = state::read(&RealFs::new(), &dir).unwrap();
+    assert_eq!(saved.materialized, done.changeset);
 }

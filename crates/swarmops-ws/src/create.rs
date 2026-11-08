@@ -138,6 +138,7 @@ pub fn create(ctx: &Ctx<'_>, req: WsCreateReq) -> Result<WsInfo, OpError> {
         from: None,
         to: resolved.id,
         prefixes,
+        stands_for: None,
     };
     let prepared = match materialize::prepare(ctx, &ws, &intent, Start::Fresh) {
         Ok(prepared) => prepared,

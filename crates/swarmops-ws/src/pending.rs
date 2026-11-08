@@ -2,8 +2,9 @@
 //! call it names, and `journal/materialize.json`, durable before the first file write.
 //!
 //! ```text
-//! .swarmws/journal/pending.json      {op, key, rebase_key?, head, target?, attempt, state}
-//! .swarmws/journal/materialize.json  {from?, to, prefixes}
+//! .swarmws/journal/pending.json      {op, key, rebase_key?, head, target?, attempt, state,
+//!                                     snapshot_key?, edits?, snapshot?, edits_key?}
+//! .swarmws/journal/materialize.json  {from?, to, prefixes, stands_for?}
 //! ```
 //!
 //! Both are written whole and durably (`FsOps::atomic_replace`) and removed by an unlink and a
@@ -63,6 +64,18 @@ pub struct Pending {
     pub attempt: u32,
     /// Where the mutation stands, as the operation that writes it names it.
     pub state: String,
+    /// An update with edits: the key of the commit that snapshots them on `head`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_key: Option<String>,
+    /// The digest of those edits, by which a re-run tells they are the same.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edits: Option<String>,
+    /// The snapshot, once the store recorded it: a re-run takes it from here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<String>,
+    /// The key of the commit that carries the edits onto the rebased head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edits_key: Option<String>,
 }
 
 /// A materialisation in flight: written before its first file write, removed after the index
@@ -79,6 +92,10 @@ pub struct Intent {
     /// The repository paths written: the workspace's prefixes, or those a `ws materialize` adds;
     /// empty for the whole tree.
     pub prefixes: Vec<String>,
+    /// The changeset `workspace.json`'s `materialized` names once the files are written, when it
+    /// is not `to`: an update's head, whose files hold the edits carried onto it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stands_for: Option<String>,
 }
 
 /// The pending record of the workspace at `dir`, if one is there.
@@ -206,6 +223,10 @@ mod tests {
             target: Some("main".to_owned()),
             attempt: 1,
             state: "landing".to_owned(),
+            snapshot_key: None,
+            edits: None,
+            snapshot: None,
+            edits_key: None,
         };
         assert_eq!(read_pending(&fs, dir).unwrap(), None);
         write_pending(&fs, dir, &pending).unwrap();
@@ -219,10 +240,12 @@ mod tests {
             from: None,
             to: "d".repeat(64),
             prefixes: vec!["src".to_owned()],
+            stands_for: None,
         };
         write_intent(&fs, dir, &intent).unwrap();
         let text = std::fs::read_to_string(journal_in(dir).join(MATERIALIZE_JSON)).unwrap();
         assert!(!text.contains("from"), "{text}");
+        assert!(!text.contains("stands_for"), "{text}");
         assert_eq!(read_intent(&fs, dir).unwrap(), Some(intent));
         remove_intent(&fs, dir).unwrap();
         assert_eq!(read_intent(&fs, dir).unwrap(), None);

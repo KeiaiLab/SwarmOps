@@ -5,12 +5,17 @@
 //!  start     lock → names onto's head holds that the files cannot (and those of the edits -m
 //!            commits): E_WS_UNPORTABLE, nothing written
 //!            → a land cut short that the target does not hold: its record dropped
-//!            → edits committed (-m) or E_WS_DIRTY → journal/pending.json {key} (WS1)
+//!            → edits committed (-m), or else snapshotted: journal/pending.json {key,
+//!              snapshot_key, edits, edits_key} (WS1) → S = commit{parent: head, edits}
+//!              → pending.json {snapshot: S}; none: journal/pending.json {key} (WS1)
 //!            → rebase{head, base, onto, key}
 //!              ├─ H' → files from `materialized` to H' with workspace.json {head: H', base: T,
-//!              │       onto: T} (WS2) → the pending record removed
+//!              │       onto: T} (WS2) → the pending record removed; with a snapshot, the edits
+//!              │       carried per path (snapshot::carry) into S' = commit{parent: H'} and
+//!              │       the files moved from S to S', standing for H' (the M19 design §4.1)
 //!              └─ E_CONFLICT → conflicts.json, workspace.json rebasing{onto: T, against},
-//!                              markers in the conflicting text files; nothing else moves
+//!                              markers in the conflicting text files; nothing else moves;
+//!                              a snapshot's record kept for the continue
 //!  continue  onto still reached by the target (E_WS_STALE, nothing written), every conflict
 //!            resolved (ws resolve) → rebase{…, resolutions{against, files}}
 //!            → as start: H', or a new report (the target moved), still rebasing
@@ -32,9 +37,9 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 use swarmops_api::{
-    BlobPutReq, ConflictReport, ContentInput, DEFAULT_MAX_CONFLICT_BYTES, ErrorCode, ModeInput,
-    OpError, RebaseReq, RebaseResp, ResolutionInput, ResolutionsInput, ResolveRevReq, Side,
-    WsRebaseAction, WsRebaseReq, WsRebaseResp,
+    BlobPutReq, CommitReq, ConflictReport, ContentInput, DEFAULT_MAX_CONFLICT_BYTES, ErrorCode,
+    ModeInput, OpError, RebaseReq, RebaseResp, ResolutionInput, ResolutionsInput, ResolveRevReq,
+    Side, WsRebaseAction, WsRebaseReq, WsRebaseResp,
 };
 use swarmops_store::FsMethod;
 
@@ -44,6 +49,7 @@ use crate::materialize;
 use crate::pending::{self, Pending, PendingOp};
 use crate::resolve::{self, RESOLVED_JSON, Resolved};
 use crate::scan::{Change, Want};
+use crate::snapshot::{self, Found, Taken};
 use crate::state::{self, SWARMWS_DIR, State};
 use crate::status::{self, CONFLICTS_JSON, Landed};
 use crate::volume::EXEC_BITS;
@@ -55,6 +61,9 @@ const STARTING: &str = "starting";
 
 /// The pending record's state of a rebase that continues with resolutions.
 const CONTINUING: &str = "continuing";
+
+/// The message of the changeset that carries an update's edits onto the rebased head.
+const CARRIED: &str = "the workspace's edits, carried onto the rebased head";
 
 /// The hint of a continue whose `onto` the target left: the rebase left, then the update.
 const LEAVE_THEN_UPDATE: &str = "swarmops ws rebase --abort, then swarmops ws rebase";
@@ -100,28 +109,175 @@ fn start(
     }
 
     // 2. The names onto's head holds that the files cannot, and those of the edits `-m`
-    //    commits, are refused before anything is dropped, settled or recorded.
+    //    commits or the update snapshots, are refused before anything is dropped, settled or
+    //    recorded.
     let left = left_land(ctx, ws)?;
     let edits = unsettled(ctx, ws, message.as_deref(), PendingOp::Rebase, Rerun::Waits)?;
-    check_onto(ctx, ws, onto, &edits)?;
+    let found = to_snapshot(ctx, ws, message.as_deref())?;
+    let named = found
+        .as_ref()
+        .map_or(&edits[..], |found| &found.changes[..]);
+    check_onto(ctx, ws, onto, named)?;
     let landed_key = take_over(ctx, ws, left, onto)?;
 
-    // 3. A rebase cut short: its key; else the edits settled first.
+    // 3. A rebase cut short: its key and its snapshot; else the edits `-m` commits first.
     let cut = cut_short(ctx, ws, PendingOp::Rebase, STARTING)?;
-    if cut.is_none() {
+    if cut.is_none() && message.is_some() {
         settle_edits(ctx, ws, message, &BTreeSet::new())?;
     }
 
-    // 4. The pending record, durable before the store call (WS1); then the call.
-    let key = (cut.map(|cut| cut.key))
+    // 4. The pending record, durable before the store calls (WS1); the snapshot first, if any.
+    let key = (cut.as_ref().map(|cut| cut.key.clone()))
         .or(landed_key)
         .unwrap_or_else(new_key);
-    let record = record(PendingOp::Rebase, &key, None, ws, onto, STARTING);
-    pending::write_pending(ctx.fs.as_ref(), &ws.dir, &record)?;
-    let done = rebase_in(ctx, ws, onto, &key, None);
-    let done = finish_call(ctx, ws, done)?;
+    let mut record = record(PendingOp::Rebase, &key, None, ws, onto, STARTING);
+    let snap = match (found, cut.as_ref().and_then(Snap::of)) {
+        (_, Some(snap)) => Some(snap),
+        (Some(found), _) => Some(snapshot_first(ctx, ws, &mut record, found, cut.as_ref())?),
+        (None, None) => {
+            pending::write_pending(ctx.fs.as_ref(), &ws.dir, &record)?;
+            None
+        }
+    };
+
+    // 5. The call; the record goes once the workspace stands on its outcome.
+    let done = rebase_with(ctx, ws, onto, &key, None, snap.as_ref(), &BTreeSet::new());
+    let done = finish_with(ctx, ws, snap.as_ref(), &record, done)?;
     pending::remove_pending(ctx.fs.as_ref(), &ws.dir)?;
     Ok(response(&done))
+}
+
+/// What an update carries onto the rebased head: the snapshot of the edits on the old head, and
+/// the keys and digest its pending record holds.
+#[derive(Debug, Clone)]
+struct Snap {
+    /// The snapshot `S`.
+    snapshot: String,
+    /// The key of the commit that carries the edits onto `H'`.
+    edits_key: String,
+    /// The key `S` was recorded with.
+    snapshot_key: Option<String>,
+    /// The digest of the edits.
+    edits: Option<String>,
+}
+
+impl Snap {
+    /// The snapshot pending record `cut` names, if it names one.
+    fn of(cut: &Pending) -> Option<Snap> {
+        Some(Snap {
+            snapshot: cut.snapshot.clone()?,
+            edits_key: cut.edits_key.clone()?,
+            snapshot_key: cut.snapshot_key.clone(),
+            edits: cut.edits.clone(),
+        })
+    }
+
+    /// `record` naming this snapshot.
+    fn mark(&self, record: &mut Pending) {
+        record.snapshot = Some(self.snapshot.clone());
+        record.edits_key = Some(self.edits_key.clone());
+        record.snapshot_key.clone_from(&self.snapshot_key);
+        record.edits.clone_from(&self.edits);
+    }
+}
+
+/// How a rebase moved the workspace: the store's answer and, with a snapshot, the paths whose
+/// edits did not carry.
+struct Rebased {
+    /// The store's answer.
+    done: RebaseResp,
+    /// The snapshot and the dropped paths, when the update carried edits.
+    carried: Option<(String, Vec<String>)>,
+}
+
+/// The edits an update of workspace `ws` without `message` snapshots: none with a message, on
+/// files of another changeset (see [`settle_edits`]), when the scan finds none, or when a cut
+/// record of this update names its snapshot already (it is taken from there).
+fn to_snapshot(
+    ctx: &Ctx<'_>,
+    ws: &Workspace,
+    message: Option<&str>,
+) -> Result<Option<Found>, OpError> {
+    // 1. Not this update's to take; else the scan: none is today's path, which reads nothing
+    //    more.
+    if message.is_some() || ws.file.materialized != ws.file.head {
+        return Ok(None);
+    }
+    let found = snapshot::scan(ctx, ws)?;
+    if found.changes.is_empty() {
+        return Ok(None);
+    }
+
+    // 2. A cut record of this update that names its snapshot: taken from there.
+    let cut = pending::read_pending(ctx.fs.as_ref(), &ws.dir)?;
+    let cut = cut.filter(|cut| cut.op == PendingOp::Rebase && cut.head == ws.file.head);
+    if cut.is_some_and(|cut| cut.state == STARTING && Snap::of(&cut).is_some()) {
+        return Ok(None);
+    }
+    Ok(Some(found))
+}
+
+/// Snapshots the edits `found` of workspace `ws` before its update calls the store: their keys
+/// and digest in `record`, made durable (WS1); the snapshot; the record naming it. A record
+/// `cut` of the same edits gives its keys, so that the store replays its snapshot.
+fn snapshot_first(
+    ctx: &Ctx<'_>,
+    ws: &Workspace,
+    record: &mut Pending,
+    mut found: Found,
+    cut: Option<&Pending>,
+) -> Result<Snap, OpError> {
+    // 1. The keys: those of a cut record of the same edits, else new; durable first.
+    let same = cut.filter(|cut| cut.edits.as_deref() == Some(found.digest.as_str()));
+    if let Some(key) = same.and_then(|cut| cut.snapshot_key.clone()) {
+        found.key = key;
+    }
+    let edits_key = (same.and_then(|cut| cut.edits_key.clone())).unwrap_or_else(new_key);
+    record.snapshot_key = Some(found.key.clone());
+    record.edits = Some(found.digest.clone());
+    record.edits_key = Some(edits_key.clone());
+    pending::write_pending(ctx.fs.as_ref(), &ws.dir, record)?;
+
+    // 2. The snapshot, then the record naming it.
+    let snapshot = match snapshot::take(ctx, ws, &found)? {
+        Taken::New(id) | Taken::Same(id) => id,
+        Taken::Clean => {
+            return Err(OpError::new(
+                ErrorCode::Internal,
+                "an update snapshotted edits that were not there",
+            ));
+        }
+    };
+    record.snapshot = Some(snapshot.clone());
+    pending::write_pending(ctx.fs.as_ref(), &ws.dir, record)?;
+    Ok(Snap {
+        snapshot,
+        edits_key,
+        snapshot_key: record.snapshot_key.clone(),
+        edits: record.edits.clone(),
+    })
+}
+
+/// [`finish_call`] for a rebase that carries `snap`: a conflict keeps `record`, which names the
+/// snapshot, for the continue, as a start's record, so that the continue makes its own key.
+fn finish_with<T>(
+    ctx: &Ctx<'_>,
+    ws: &Workspace,
+    snap: Option<&Snap>,
+    record: &Pending,
+    done: Result<T, OpError>,
+) -> Result<T, OpError> {
+    match done {
+        Err(e) if snap.is_some() && e.code == ErrorCode::Conflict.as_str() => {
+            if record.state != STARTING {
+                let mut kept = record.clone();
+                STARTING.clone_into(&mut kept.state);
+                pending::write_pending(ctx.fs.as_ref(), &ws.dir, &kept)?;
+            }
+            Err(e)
+        }
+        done => finish_call(ctx, ws, done),
+    }
 }
 
 /// The `ws land` cut short on workspace `ws`'s head whose land the ref its record names does not
@@ -206,21 +362,36 @@ fn resume(ctx: &Ctx<'_>, ws: &mut Workspace) -> Result<WsRebaseResp, OpError> {
     let target = ws.file.target.clone();
     check_onto(ctx, ws, &target, &[])?;
 
-    // 3. A continue cut short: its key; else no edit beside the resolved paths.
+    // 3. A continue cut short: its key; else no edit beside the resolved paths, but those the
+    //    update's snapshot holds.
     let resolved = resolve::read(ctx, ws)?;
+    let conflicted: BTreeSet<String> = resolved.files.keys().cloned().collect();
+    let snap = pending::read_pending(ctx.fs.as_ref(), &ws.dir)?
+        .filter(|cut| cut.op == PendingOp::Rebase && cut.head == ws.file.head)
+        .and_then(|cut| Snap::of(&cut));
     let cut = cut_short(ctx, ws, PendingOp::Rebase, CONTINUING)?;
-    if cut.is_none() {
-        let conflicted: BTreeSet<String> = resolved.files.keys().cloned().collect();
+    if cut.is_none() && snap.is_none() {
         settle_edits(ctx, ws, None, &conflicted)?;
     }
 
     // 4. The resolutions, the pending record (WS1), the call.
     let resolutions = resolutions(ctx, ws, &resolved, &against)?;
     let key = cut.map_or_else(new_key, |cut| cut.key);
-    let record = record(PendingOp::Rebase, &key, None, ws, &target, CONTINUING);
+    let mut record = record(PendingOp::Rebase, &key, None, ws, &target, CONTINUING);
+    if let Some(snap) = &snap {
+        snap.mark(&mut record);
+    }
     pending::write_pending(ctx.fs.as_ref(), &ws.dir, &record)?;
-    let done = rebase_in(ctx, ws, &target, &key, Some(resolutions));
-    let done = finish_call(ctx, ws, done)?;
+    let done = rebase_with(
+        ctx,
+        ws,
+        &target,
+        &key,
+        Some(resolutions),
+        snap.as_ref(),
+        &conflicted,
+    );
+    let done = finish_with(ctx, ws, snap.as_ref(), &record, done)?;
     pending::remove_pending(ctx.fs.as_ref(), &ws.dir)?;
     Ok(response(&done))
 }
@@ -242,12 +413,16 @@ fn abort(ctx: &Ctx<'_>, ws: &mut Workspace) -> Result<WsRebaseResp, OpError> {
     state::replace(ctx.fs.as_ref(), &ws.dir, &ws.file)?;
     remove_record(ctx, ws, CONFLICTS_JSON)?;
     remove_record(ctx, ws, RESOLVED_JSON)?;
-    if (pending::read_pending(ctx.fs.as_ref(), &ws.dir)?).is_some_and(|p| p.op == PendingOp::Rebase)
-    {
+    let cut = pending::read_pending(ctx.fs.as_ref(), &ws.dir)?;
+    let cut = cut.filter(|cut| cut.op == PendingOp::Rebase);
+    if cut.is_some() {
         pending::remove_pending(ctx.fs.as_ref(), &ws.dir)?;
     }
 
-    Ok(WsRebaseResp::new(head, onto))
+    // 3. The update's snapshot, if it took one: the edits stay on disk, and it holds them.
+    let mut out = WsRebaseResp::new(head, onto);
+    out.snapshot = cut.and_then(|cut| cut.snapshot);
+    Ok(out)
 }
 
 /// Rebases workspace `ws`'s chain onto the head of ref `onto` with `key` and `resolutions`, and
@@ -261,6 +436,21 @@ pub(crate) fn rebase_in(
     key: &str,
     resolutions: Option<ResolutionsInput>,
 ) -> Result<RebaseResp, OpError> {
+    let none = BTreeSet::new();
+    rebase_with(ctx, ws, onto, key, resolutions, None, &none).map(|rebased| rebased.done)
+}
+
+/// [`rebase_in`], carrying the edits of `snap`, if any, onto `H'`: the paths in `except` (those
+/// a continue resolved) take `H'`'s.
+fn rebase_with(
+    ctx: &Ctx<'_>,
+    ws: &mut Workspace,
+    onto: &str,
+    key: &str,
+    resolutions: Option<ResolutionsInput>,
+    snap: Option<&Snap>,
+    except: &BTreeSet<String>,
+) -> Result<Rebased, OpError> {
     // 1. The store's rebase of the chain from the base.
     let mut req = RebaseReq::new(ws.file.head.as_str());
     req.base = Some(ws.file.base.as_str().into());
@@ -281,20 +471,76 @@ pub(crate) fn rebase_in(
     //    there: files and state in one replace of workspace.json (WS2).
     let base_op = status::base_op(ctx.store, onto, &done.onto)?;
     let rebasing = matches!(ws.file.state, State::Rebasing { .. });
+    let head = ws.file.head.clone();
     ws.file.head.clone_from(&done.changeset);
     ws.file.base.clone_from(&done.onto);
     ws.file.base_op = base_op;
     ws.file.onto = Some(done.onto.clone());
     onto.clone_into(&mut ws.file.target);
     ws.file.state = State::Clean;
-    move_to(ctx, ws, &done.changeset)?;
 
-    // 3. A rebase in progress is over: its records go.
+    // 3. The files: with the snapshot's edits carried when the head moved, else to H'.
+    let carried = match snap {
+        Some(snap) if done.changeset != head => {
+            Some(carry_onto(ctx, ws, &head, snap, &done.changeset, except)?)
+        }
+        _ => {
+            move_to(ctx, ws, &done.changeset)?;
+            snap.map(|snap| (snap.snapshot.clone(), Vec::new()))
+        }
+    };
+
+    // 4. A rebase in progress is over: its records go.
     if rebasing {
         remove_record(ctx, ws, CONFLICTS_JSON)?;
         remove_record(ctx, ws, RESOLVED_JSON)?;
     }
-    Ok(done)
+    Ok(Rebased { done, carried })
+}
+
+/// Carries the edits snapshot `snap` holds on `head` onto `h2`, workspace `ws`'s new head, whose
+/// state the caller has set in memory: per path from the three trees, the paths of `except`
+/// taking `h2`'s; `S'` committed on `h2` by its key (`h2` itself when nothing carries); the files
+/// moved from `S` to `S'`, standing for `h2`; `snapshot.json` naming `S'`. The snapshot and the
+/// paths dropped.
+fn carry_onto(
+    ctx: &Ctx<'_>,
+    ws: &mut Workspace,
+    head: &str,
+    snap: &Snap,
+    h2: &str,
+    except: &BTreeSet<String>,
+) -> Result<(String, Vec<String>), OpError> {
+    // 1. What carries: decided from the trees, the resolved paths aside.
+    let edits = snapshot::edited(ctx, head, &snap.snapshot)?;
+    let (resolved, edits): (Vec<String>, Vec<String>) =
+        edits.into_iter().partition(|path| except.contains(path));
+    let mut carried = snapshot::carry(ctx, head, &snap.snapshot, h2, &edits)?;
+    carried.dropped.extend(resolved);
+    carried.dropped.sort();
+
+    // 2. S' on H' by its key; H' itself when no edit carries a change.
+    let digest = snapshot::digest_of(&carried.changes)?;
+    let to = if carried.changes.is_empty() {
+        h2.to_owned()
+    } else {
+        let mut req = CommitReq::new(carried.changes, CARRIED.to_owned());
+        req.parent = Some(h2.into());
+        req.idempotency_key = Some(snap.edits_key.clone());
+        ctx.store.commit(&ws.who, req)?.changeset
+    };
+
+    // 3. The files from S to S', standing for H' (a re-run whose files stand for it already
+    //    replaces the state alone, as `move_to` does); then the latest snapshot is S'.
+    let moves = ws.file.materialized != h2;
+    materialize::update_as(ctx, ws, &snap.snapshot, &to, h2)?;
+    if !moves {
+        state::replace(ctx.fs.as_ref(), &ws.dir, &ws.file)?;
+    }
+    if to != h2 {
+        snapshot::write_latest(ctx, ws, h2, &to, &digest)?;
+    }
+    Ok((snap.snapshot.clone(), carried.dropped))
 }
 
 /// Moves the files of workspace `ws`, whose state the caller has set in memory, to changeset
@@ -591,6 +837,10 @@ pub(crate) fn record(
         target: Some(target.to_owned()),
         attempt: 1,
         state: state.to_owned(),
+        snapshot_key: None,
+        edits: None,
+        snapshot: None,
+        edits_key: None,
     }
 }
 
@@ -610,10 +860,17 @@ fn report_of(e: &OpError) -> Result<ConflictReport, OpError> {
     })
 }
 
-/// The response of a rebase that ended with `done`.
-fn response(done: &RebaseResp) -> WsRebaseResp {
+/// The response of a rebase that ended with `rebased`: with its snapshot, and the snapshot
+/// again as `kept` when some of its edits were dropped.
+fn response(rebased: &Rebased) -> WsRebaseResp {
+    let done = &rebased.done;
     let mut out = WsRebaseResp::new(done.changeset.clone(), done.onto.clone());
     out.status = Some(done.status);
+    if let Some((snapshot, dropped)) = &rebased.carried {
+        out.snapshot = Some(snapshot.clone());
+        out.kept = (!dropped.is_empty()).then(|| snapshot.clone());
+        out.dropped.clone_from(dropped);
+    }
     out
 }
 

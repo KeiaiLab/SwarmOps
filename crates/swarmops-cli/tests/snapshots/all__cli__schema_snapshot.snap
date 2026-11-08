@@ -12553,9 +12553,30 @@ expression: s.redact(&all)
           "description": "The workspace's head now.",
           "type": "string"
         },
+        "dropped": {
+          "description": "The paths whose edits did not apply: the files hold the new head's, `kept` the edits.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "kept": {
+          "description": "The snapshot again, when some of its edits did not apply to the new head: it keeps them\nby id.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "onto": {
           "description": "The target's head it was rebased onto.",
           "type": "string"
+        },
+        "snapshot": {
+          "description": "The changeset that holds the edits on disk when the update started, on the old head;\nomitted when there were none.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "status": {
           "anyOf": [

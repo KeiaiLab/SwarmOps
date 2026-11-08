@@ -183,6 +183,7 @@ pub fn materialize(ctx: &Ctx<'_>, req: WsMaterializeReq) -> Result<WsMaterialize
             from: None,
             to: ws.file.materialized.clone(),
             prefixes: added.clone(),
+            stands_for: None,
         };
         let prepared = prepare(ctx, &ws, &intent, Start::Fresh)?;
         pending::write_intent(ctx.fs.as_ref(), &ws.dir, &intent)?;
@@ -213,6 +214,32 @@ pub fn update(ctx: &Ctx<'_>, ws: &mut Workspace, to: &str) -> Result<Written, Op
         } else {
             ws.file.prefixes.clone()
         },
+        stands_for: None,
+    };
+    let prepared = prepare(ctx, ws, &intent, Start::Fresh)?;
+    pending::write_intent(ctx.fs.as_ref(), &ws.dir, &intent)?;
+    apply(ctx, ws, &intent, prepared)
+}
+
+/// Moves the files of workspace `ws` from changeset `from`, which they hold, to `to`, after
+/// which they stand for `stands_for`: an update's carry, the files `S'` while `workspace.json`
+/// names `H'` (the M19 design §4.1). The caller holds the lock and has set the state in memory.
+pub(crate) fn update_as(
+    ctx: &Ctx<'_>,
+    ws: &mut Workspace,
+    from: &str,
+    to: &str,
+    stands_for: &str,
+) -> Result<Written, OpError> {
+    let intent = Intent {
+        from: Some(from.to_owned()),
+        to: to.to_owned(),
+        prefixes: if ws.file.all {
+            Vec::new()
+        } else {
+            ws.file.prefixes.clone()
+        },
+        stands_for: Some(stands_for.to_owned()),
     };
     let prepared = prepare(ctx, ws, &intent, Start::Fresh)?;
     pending::write_intent(ctx.fs.as_ref(), &ws.dir, &intent)?;
@@ -225,6 +252,12 @@ pub(crate) fn finish(ctx: &Ctx<'_>, ws: &mut Workspace) -> Result<(), OpError> {
     let Some(intent) = pending::read_intent(ctx.fs.as_ref(), &ws.dir)? else {
         return Ok(());
     };
+
+    // An intent that stands for another changeset than `to`, which `workspace.json` names
+    // already, was written whole: only its removal was cut.
+    if intent.stands_for.as_ref() == Some(&ws.file.materialized) {
+        return pending::remove_intent(ctx.fs.as_ref(), &ws.dir);
+    }
     let prepared = prepare(ctx, ws, &intent, Start::Resume)?;
     apply(ctx, ws, &intent, prepared).map(|_| ())
 }
@@ -271,6 +304,7 @@ pub(crate) fn preflight(
         } else {
             ws.file.prefixes.clone()
         },
+        stands_for: None,
     };
     let own = if ws.file.volume.case_insensitive {
         moves_of(ctx, ws, edits)?
@@ -428,9 +462,11 @@ pub(crate) fn apply(
     let mut written = put_all(ctx, &ws.dir, ws.file.volume, &puts)?;
     written.removed = to_u64(removes.len());
 
-    // 3. The state names the new tree and the prefixes it added; then the intent goes.
+    // 3. The state names the new tree (or what it stands for) and the prefixes it added; then
+    //    the intent goes.
     let mut file = ws.file.clone();
-    file.materialized.clone_from(&intent.to);
+    file.materialized
+        .clone_from(intent.stands_for.as_ref().unwrap_or(&intent.to));
     file.prefixes = after_intent(ws, intent);
     if file != ws.file {
         state::replace(ctx.fs.as_ref(), &ws.dir, &file)?;

@@ -2422,7 +2422,10 @@ Kind: object. `swarmops schema WsRebaseResp` prints its JSON Schema.
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
 | `changeset` | `string` | yes | The workspace's head now. |
+| `dropped` | array of `string` | no | The paths whose edits did not apply: the files hold the new head's, `kept` the edits. |
+| `kept` | `string` or `null` | no | The snapshot again, when some of its edits did not apply to the new head: it keeps them by id. |
 | `onto` | `string` | yes | The target's head it was rebased onto. |
+| `snapshot` | `string` or `null` | no | The changeset that holds the edits on disk when the update started, on the old head; omitted when there were none. |
 | `status` | [`RebaseStatus`](#rebasestatus) or `null` | no | How the rebase ended; `None` after an abort. |
 | `status_after` | [`WsStatus`](#wsstatus) or `null` | no | The status after the mutation; omitted when the request said `none`. |
 

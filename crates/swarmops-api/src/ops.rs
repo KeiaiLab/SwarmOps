@@ -4068,6 +4068,17 @@ pub struct WsRebaseResp {
     /// The status after the mutation; omitted when the request said `none`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status_after: Option<WsStatus>,
+    /// The changeset that holds the edits on disk when the update started, on the old head;
+    /// omitted when there were none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<String>,
+    /// The snapshot again, when some of its edits did not apply to the new head: it keeps them
+    /// by id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept: Option<String>,
+    /// The paths whose edits did not apply: the files hold the new head's, `kept` the edits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dropped: Vec<String>,
 }
 
 impl WsRebaseResp {
@@ -4078,6 +4089,9 @@ impl WsRebaseResp {
             changeset: changeset.into(),
             onto: onto.into(),
             status_after: None,
+            snapshot: None,
+            kept: None,
+            dropped: Vec::new(),
         }
     }
 }

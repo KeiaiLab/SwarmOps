@@ -956,14 +956,16 @@ pub enum WsCommand {
     },
     /// Move a workspace's chain onto its target's head, and its files with it.
     ///
-    /// On a conflict the workspace holds markers: edit them, ws resolve, then ws rebase
-    /// --continue. --abort leaves the rebase and restores the conflicting paths.
+    /// Edits on disk are snapshotted first and carried onto the new head; those that do not
+    /// apply take the new head's files and stay in the snapshot, named as kept. On a conflict
+    /// the workspace holds markers: edit them, ws resolve, then ws rebase --continue. --abort
+    /// leaves the rebase and restores the conflicting paths.
     Rebase {
         #[command(flatten)]
         at: WsAt,
         #[arg(long, value_name = "REF", default_value = "main", help = ONTO_HELP)]
         onto: String,
-        /// Commit the workspace's edits first, with this message (default: edits are E_WS_DIRTY).
+        /// Commit the workspace's edits first, with this message (default: a snapshot of them).
         #[arg(short, long, value_name = "MSG")]
         message: Option<String>,
         /// Rebase again once the conflicts are resolved.

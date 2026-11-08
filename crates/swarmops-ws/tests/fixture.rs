@@ -794,6 +794,9 @@ pub mod sweep {
         Land,
         /// `ws land --check`, the check `true`.
         LandChecked,
+        /// `ws rebase` without a message of a workspace with edits onto a `main` that moved: a
+        /// clean edit, a conflicting one and an untracked file, snapshotted and carried.
+        UpdateWithEdits,
     }
 
     impl Scenario {
@@ -805,6 +808,7 @@ pub mod sweep {
                 Scenario::Rebase => "rebase",
                 Scenario::Land => "land",
                 Scenario::LandChecked => "land_checked",
+                Scenario::UpdateWithEdits => "update_with_edits",
             }
         }
 
@@ -816,6 +820,7 @@ pub mod sweep {
                 Scenario::Rebase,
                 Scenario::Land,
                 Scenario::LandChecked,
+                Scenario::UpdateWithEdits,
             ]
             .into_iter()
             .find(|s| s.tag() == tag)
@@ -1086,6 +1091,39 @@ pub mod sweep {
         Ok(())
     }
 
+    /// The order rules of an update with edits (the M19 design §4.4), over its events; the broken
+    /// rule's name in the error.
+    ///
+    /// - SN1: the record names the snapshot (a second `pending.json` replace) after the store
+    ///   recorded it and before the store's rebase.
+    /// - SN2: `snapshot.json` names the carried edits after `workspace.json` names the new head.
+    pub fn check_snapshot_order(events: &[Event]) -> Result<(), String> {
+        use FsMethod::AtomicReplace;
+
+        // 1. SN1: a record written between the snapshot's commit and the rebase.
+        let snap = events.iter().position(|e| *e == Event::Store("commit"));
+        let rebase = events.iter().position(|e| *e == Event::Store("rebase"));
+        let (Some(snap), Some(rebase)) = (snap, rebase) else {
+            return Err("SN1: no snapshot commit before a rebase".to_owned());
+        };
+        let named =
+            (events[snap..rebase].iter()).any(|e| is_fs(e, AtomicReplace, pending::PENDING_JSON));
+        if snap > rebase || !named {
+            return Err("SN1: the rebase came before the record named the snapshot".to_owned());
+        }
+
+        // 2. SN2: the last snapshot.json after the last workspace.json.
+        let state = (events.iter()).rposition(|e| is_fs(e, AtomicReplace, state::WORKSPACE_JSON));
+        let latest = (events.iter()).rposition(|e| is_fs(e, AtomicReplace, SNAPSHOT_JSON));
+        if !matches!((state, latest), (Some(s), Some(l)) if s < l) {
+            return Err("SN2: snapshot.json named the edits before workspace.json".to_owned());
+        }
+        Ok(())
+    }
+
+    /// The latest snapshot's record, as the trace names it.
+    pub const SNAPSHOT_JSON: &str = "snapshot.json";
+
     /// `events` with the first event `moved` picks put just after the first event `after` picks:
     /// a rule deliberately broken, for the self-check of the order checker.
     pub fn reordered(
@@ -1196,6 +1234,21 @@ pub mod sweep {
                     write(&dir, "src/b.rs", "uncommitted\n");
                 }
             }
+            Scenario::UpdateWithEdits => {
+                // A clean edit, one of a file `main` changes too, and an untracked file; the
+                // wait keeps the calls of each run the same.
+                write(&dir, "src/a.rs", "mine\n");
+                write(&dir, "src/b.rs", "mine b\n");
+                write(&dir, "src/new.rs", "new\n");
+                std::thread::sleep(PAST_THE_CLOCK_TICK);
+                f.commit(
+                    Some(&base),
+                    &[
+                        Put::File("src/b.rs", "b2\n"),
+                        Put::File("docs/y.md", "y2\n"),
+                    ],
+                );
+            }
         }
     }
 
@@ -1267,7 +1320,7 @@ pub mod sweep {
                 req.status_after = StatusAfter::None;
                 swarmops_ws::commit(ctx, req).map(|_| ())
             }
-            Scenario::Rebase => {
+            Scenario::Rebase | Scenario::UpdateWithEdits => {
                 let mut req = WsRebaseReq::new(WS.to_owned());
                 req.action = WsRebaseAction::Start;
                 req.status_after = StatusAfter::None;
@@ -1498,6 +1551,39 @@ pub mod sweep {
         assert_eq!(changes(&ctx, WS, false), changes(&ctx, WS, true), "{name}");
         registry_is_consistent(&f, &ctx, &name);
         assert_eq!(&outcome(&f, &ctx), expected, "{name}");
+
+        // 5. An update's dropped edit is held by a changeset of the store: its snapshot.
+        if scenario == Scenario::UpdateWithEdits {
+            assert!(
+                held_anywhere(&f, "src/b.rs", "mine b\n"),
+                "{name}: the edit is lost"
+            );
+        }
+    }
+
+    /// Whether a changeset some operation of `f`'s store recorded holds `text` at `path`.
+    pub fn held_anywhere(f: &Fixture, path: &str, text: &str) -> bool {
+        let mut before = None;
+        loop {
+            // 1. A page of operations, newest first.
+            let mut req = OpLogReq::default();
+            req.before = before;
+            req.limit = 100;
+            let page = f.ops.op_log(req).unwrap();
+
+            // 2. Each changeset they recorded, read at the path.
+            for id in page.ops.iter().flat_map(|op| op.changesets.iter()) {
+                let mut req = ReadFileReq::new(id.id.as_str(), path);
+                req.max_bytes = 1024;
+                if f.ops.read_file(req).is_ok_and(|file| file.content == text) {
+                    return true;
+                }
+            }
+            if !page.truncated {
+                return false;
+            }
+            before = page.ops.last().map(|op| op.op);
+        }
     }
 
     /// `ws commit` of every edit of the sweeps' workspace.

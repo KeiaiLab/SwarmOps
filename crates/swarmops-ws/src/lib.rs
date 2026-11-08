@@ -51,6 +51,7 @@ pub mod registry;
 pub mod resolve;
 pub mod run;
 pub mod scan;
+mod snapshot;
 pub mod state;
 pub mod status;
 pub mod volume;

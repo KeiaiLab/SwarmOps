@@ -24,8 +24,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use serde_json::{Map, Value};
 use swarmops_api::{
-    BlobHasReq, BlobPutReq, ChangeInput, ChangeOp, CommitReq, ContentInput, ErrorCode, FileKind,
-    ModeInput, OpError, WsCommitReq, WsCommitResp,
+    BlobHasReq, BlobPutReq, ChangeInput, ChangeOp, CommitReq, CommitResp, ContentInput, ErrorCode,
+    FileKind, ModeInput, OpError, WsCommitReq, WsCommitResp,
 };
 use swarmops_core::ObjectId;
 use swarmops_store::MAX_OBJECT_LEN;
@@ -194,28 +194,16 @@ fn commit_with(
     // 7. The pending record, durable before the store hears of the commit (WS1).
     let key = pending_key(ctx, ws)?;
 
-    // 8. The blobs the store lacks: inline under the budget, put alone past it.
-    let sent = upload(ctx, ws, &edits.entries, INLINE_BYTES)?;
-    let puts = (sent.values())
-        .filter(|sent| matches!(sent, Sent::Put(true)))
-        .count();
-
-    // 9. The commit, by blob id or inline, on the head's full id.
-    let changes = (edits.entries.iter())
-        .map(|entry| change_input(entry, &sent))
-        .collect::<Result<_, _>>()?;
-    let mut req = CommitReq::new(changes, message);
-    req.parent = Some(ws.file.head.as_str().into());
-    req.idempotency_key = Some(key);
-    let done = match ctx.store.commit(&ws.who, req) {
-        // A refusal wrote nothing: its record has nothing to replay.
+    // 8. The upload and the commit; a refusal wrote nothing, so its record has nothing to
+    //    replay.
+    let (done, puts) = match send(ctx, ws, &edits.entries, message, key) {
         Err(e) if refused(&e) => {
             pending::remove_pending(ctx.fs.as_ref(), &ws.dir)?;
             return Err(e);
         }
-        done => done?,
+        sent => sent?,
     };
-    let blobs_written = u64::try_from(puts).unwrap_or(u64::MAX) + done.blobs_written;
+    let blobs_written = puts + done.blobs_written;
 
     // 10. The workspace stands on it (WS2); the index learns it; the record goes.
     let parent = ws.file.head.clone();
@@ -229,6 +217,79 @@ fn commit_with(
         blobs_written,
         done.replayed,
     ))
+}
+
+/// Records `changes`, the edits a scan of workspace `ws` found, as one keyed commit on its head
+/// with `message` and `key`: hashed where the scan did not, the blobs the store lacks uploaded.
+/// The changeset; nothing of the workspace moves (the snapshot of an update, the M19 design §4.2).
+pub(crate) fn record(
+    ctx: &Ctx<'_>,
+    ws: &Workspace,
+    changes: &[Change],
+    message: &str,
+    key: &str,
+) -> Result<String, OpError> {
+    // 1. The entries, none past what an object holds, each hashed.
+    let mut entries = entries_of(changes, &BTreeMap::new());
+    entries.sort_by(|a, b| a.path.cmp(&b.path));
+    if let Some(entry) =
+        (entries.iter()).find(|e| e.host.is_some_and(|h| h.meta.size > MAX_OBJECT_LEN))
+    {
+        let size = entry.host.map_or(0, |host| host.meta.size);
+        return Err(too_large(&entry.path, size));
+    }
+    hash_missing(ctx, ws, &mut entries)?;
+
+    // 2. The upload and the commit.
+    let (done, _) = send(ctx, ws, &entries, message.to_owned(), key.to_owned())?;
+    Ok(done.changeset)
+}
+
+/// Hashes the files of `changes` (of workspace `ws`) whose bytes the scan did not hash, under
+/// the budget: each change then names its blob.
+pub(crate) fn hash_changes(
+    ctx: &Ctx<'_>,
+    ws: &Workspace,
+    changes: &mut [Change],
+) -> Result<(), OpError> {
+    // 1. The entries, hashed.
+    let mut entries = entries_of(changes, &BTreeMap::new());
+    hash_missing(ctx, ws, &mut entries)?;
+
+    // 2. Each blob back on its change, in the same order.
+    for (change, entry) in changes.iter_mut().zip(entries) {
+        if let (Some(new), Some((_, blob))) = (change.new.as_mut(), entry.put) {
+            new.blob = Some(blob);
+        }
+    }
+    Ok(())
+}
+
+/// The blobs of `entries` the store lacks, inline under the budget and put alone past it, then
+/// one commit of them on workspace `ws`'s head with `message` and `key`: the store's answer, and
+/// how many blobs a put wrote first.
+fn send(
+    ctx: &Ctx<'_>,
+    ws: &Workspace,
+    entries: &[Entry],
+    message: String,
+    key: String,
+) -> Result<(CommitResp, u64), OpError> {
+    // 1. The blobs the store lacks: inline under the budget, put alone past it.
+    let sent = upload(ctx, ws, entries, INLINE_BYTES)?;
+    let puts = (sent.values())
+        .filter(|sent| matches!(sent, Sent::Put(true)))
+        .count();
+
+    // 2. The commit, by blob id or inline, on the head's full id.
+    let changes = (entries.iter())
+        .map(|entry| change_input(entry, &sent))
+        .collect::<Result<_, _>>()?;
+    let mut req = CommitReq::new(changes, message);
+    req.parent = Some(ws.file.head.as_str().into());
+    req.idempotency_key = Some(key);
+    let done = ctx.store.commit(&ws.who, req)?;
+    Ok((done, u64::try_from(puts).unwrap_or(u64::MAX)))
 }
 
 /// Steps 1 to 6 of [`commit_with`]: the edits under `named` (every path when empty) with
@@ -464,6 +525,10 @@ fn pending_key(ctx: &Ctx<'_>, ws: &Workspace) -> Result<String, OpError> {
         target: None,
         attempt: 1,
         state: "committing".to_owned(),
+        snapshot_key: None,
+        edits: None,
+        snapshot: None,
+        edits_key: None,
     };
     pending::write_pending(fs, &ws.dir, &record)?;
     Ok(key)

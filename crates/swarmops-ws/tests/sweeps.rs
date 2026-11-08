@@ -13,9 +13,13 @@
 //! in the gate (every third host call, every durable call) and cut at every call in their
 //! `#[ignore]`d twins.
 
+use std::cell::Cell;
+
+use swarmops_store::FsMethod;
+
 use crate::fixture::sweep::{
-    self, Event, Scenario, check_order, intent_removal, intent_write, pending_write, reordered,
-    state_write, store_call, tree_write,
+    self, Event, SNAPSHOT_JSON, Scenario, check_order, check_snapshot_order, intent_removal,
+    intent_write, pending_write, reordered, state_write, store_call, tree_write,
 };
 
 /// The sweep of `scenario` at every `stride`-th host call and every durable call.
@@ -59,6 +63,14 @@ fn a_killed_rebase_finishes() {
     sweep(&test, Scenario::Rebase, 1);
 }
 
+/// An update with edits killed at any call loses no edit: the next run leaves the new head plus
+/// every clean edit on disk, and a changeset holds the dropped one.
+#[test]
+fn a_killed_update_with_edits_loses_none() {
+    let test = swarmops_testkit::test_name!("a_killed_update_with_edits_loses_none");
+    sweep(&test, Scenario::UpdateWithEdits, 1);
+}
+
 /// A land killed at any call lands once.
 #[test]
 fn a_killed_land_lands_once_sampled() {
@@ -99,6 +111,7 @@ fn the_operations_keep_the_write_order() {
         Scenario::Commit,
         Scenario::Rebase,
         Scenario::Land,
+        Scenario::UpdateWithEdits,
     ] {
         let events = sweep::reference(scenario).events;
         assert!(!events.is_empty(), "{scenario:?}");
@@ -135,4 +148,40 @@ fn each_order_detector_finds_its_rule_broken() {
     assert!(check_order(&late_intent).unwrap_err().starts_with("WS3"));
     let early_removal = reordered(&update, intent_removal, |e| matches!(e, Event::Host(..)));
     assert!(check_order(&early_removal).unwrap_err().starts_with("WS3"));
+}
+
+/// The uncut update with edits keeps the snapshot's order rules, and each detector fails on its
+/// rule broken: the record naming the snapshot moved after the rebase (SN1), `snapshot.json`
+/// moved before `workspace.json` (SN2).
+#[test]
+fn each_snapshot_order_detector_finds_its_rule_broken() {
+    // 1. The uncut run passes.
+    let events = sweep::reference(Scenario::UpdateWithEdits).events;
+    assert_eq!(check_snapshot_order(&events), Ok(()), "{events:#?}");
+
+    // 2. SN1: the second pending record after the rebase.
+    let seen = Cell::new(0);
+    let second_pending = |e: &Event| {
+        if !pending_write(e) {
+            return false;
+        }
+        seen.set(seen.get() + 1);
+        seen.get() == 2
+    };
+    let late_name = reordered(&events, second_pending, |e| *e == Event::Store("rebase"));
+    assert!(
+        check_snapshot_order(&late_name)
+            .unwrap_err()
+            .starts_with("SN1")
+    );
+
+    // 3. SN2: the last snapshot.json before the last workspace.json.
+    let latest =
+        |e: &Event| matches!(e, Event::Fs(FsMethod::AtomicReplace, n) if n == SNAPSHOT_JSON);
+    let mut early = events.clone();
+    let at = early.iter().rposition(latest).unwrap();
+    let moved = early.remove(at);
+    let state = early.iter().rposition(state_write).unwrap();
+    early.insert(state, moved);
+    assert!(check_snapshot_order(&early).unwrap_err().starts_with("SN2"));
 }
