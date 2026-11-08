@@ -6,6 +6,7 @@
 //! 5 git receive-pack ── quarantine, fsck, connectivity ──▶ pre-receive hook (serve --hook)
 //!      ── the quarantine moved into serve.git ──▶ proc-receive hook (serve --hook)
 //!      SWARMOPS_SERVE_EXE · SWARMOPS_SERVE_STORE · SWARMOPS_SERVE_IDENTITY · _CONNECTION
+//!      RAYON_NUM_THREADS = SERVE_HOOK_THREADS (4): the hooks' compression threads
 //! 6 its record, from step 1 on: git/serve-records.jsonl
 //! ```
 //!
@@ -39,6 +40,13 @@ use crate::error;
 
 /// The most bytes a push may send: git's `receive.maxInputSize`.
 pub const MAX_PUSH_BYTES: u64 = 2 << 30;
+
+/// The threads a push's hook compresses the store's objects on: rayon's global pool, which
+/// the hooks' object store uses, is otherwise one thread per core, each with its buffers.
+pub(crate) const SERVE_HOOK_THREADS: usize = 4;
+
+/// The variable that sizes rayon's global pool in the hooks receive-pack runs.
+pub(crate) const RAYON_NUM_THREADS: &str = "RAYON_NUM_THREADS";
 
 /// git's setting that bounds what a push sends.
 const MAX_INPUT_SIZE: &str = "receive.maxInputSize";
@@ -97,6 +105,10 @@ fn serve(
     env.vars.insert(
         SWARMOPS_SERVE_CONNECTION.to_owned(),
         OsString::from(connection.id()),
+    );
+    env.vars.insert(
+        RAYON_NUM_THREADS.to_owned(),
+        OsString::from(SERVE_HOOK_THREADS.to_string()),
     );
     env.config.push((
         MAX_INPUT_SIZE.to_owned(),

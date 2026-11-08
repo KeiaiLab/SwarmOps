@@ -33,7 +33,7 @@ use swarmops_git::transport::GitCli;
 use super::access::{Access, Action};
 use super::entry::store_under;
 use super::guard::Redactor;
-use super::receive::MAX_PUSH_BYTES;
+use super::receive::{MAX_PUSH_BYTES, RAYON_NUM_THREADS, SERVE_HOOK_THREADS};
 use super::records::{Connection, SWARMOPS_SERVE_CONNECTION, Side};
 use super::refresh::{Freshness, Refreshed, Scope, freshness, refresh, serve_error};
 use super::{
@@ -237,7 +237,7 @@ fn prepare(
 }
 
 /// What `http-backend` gets: the request's metavariables but its paths, `serve.git` as the
-/// project root's one repository, the hook's variables, and the push bound.
+/// project root's one repository, the hook's variables, the push bound and the hooks' threads.
 fn child_env(
     invocation: &ServeInvocation,
     who: &Identity,
@@ -276,11 +276,15 @@ fn child_env(
             .insert(SWARMOPS_SERVE_EXE.to_owned(), exe.clone().into_os_string());
     }
 
-    // 3. The push bound, as over ssh.
+    // 3. The push bound and the hooks' threads, as over ssh.
     env.config.push((
         MAX_INPUT_SIZE.to_owned(),
         OsString::from(MAX_PUSH_BYTES.to_string()),
     ));
+    env.vars.insert(
+        RAYON_NUM_THREADS.to_owned(),
+        OsString::from(SERVE_HOOK_THREADS.to_string()),
+    );
     env
 }
 

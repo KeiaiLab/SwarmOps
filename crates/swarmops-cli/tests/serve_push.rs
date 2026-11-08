@@ -1347,3 +1347,63 @@ fn a_large_push_maps_a_bounded_pack() {
         "a swarmops process kept {file_kib} KiB of file pages resident"
     );
 }
+
+/// The blobs of [`a_push_s_hook_runs_bounded_threads`]'s push: 64 of 1 MiB, one object batch,
+/// enough compression for the sampler to see the hook's pool.
+const THREADED_PUSH_BLOBS: usize = 64;
+
+/// The threads a push's hook compresses on: `SERVE_HOOK_THREADS`.
+const HOOK_POOL_THREADS: u64 = 4;
+
+/// The hook's threads beside its pool: the main thread, the `cat-file` reader's stderr drain,
+/// a writer-lock wait's helper and the index's five syncs of a commit.
+const HOOK_FIXED_THREADS: u64 = 8;
+
+/// A push of 64 incompressible 1 MiB blobs to `main`: no `swarmops` process of the connection,
+/// the hooks among them, runs more than [`HOOK_POOL_THREADS`] + [`HOOK_FIXED_THREADS`] threads,
+/// on a host of any core count (the M17 closure design §3.5, I9).
+#[test]
+#[ignore = "slow, ~36 s at load 16 to 76 (debug): pushes 64 MiB of random blobs"]
+fn a_push_s_hook_runs_bounded_threads() {
+    use std::io::Read as _;
+
+    use swarmops_testkit::accounting::{self, Accounting};
+
+    let site = Site::on(ServeSite::new::<Swarmops>().with_accounting(Accounting::Cpu));
+    let work = site.clone("work");
+
+    // 1. One commit of the blobs, random so that the store compresses each.
+    let mut random = fs::File::open("/dev/urandom").unwrap();
+    let under = work.join("big");
+    fs::create_dir_all(&under).unwrap();
+    let mut bytes = vec![0_u8; LARGE_PUSH_BLOB];
+    for n in 0..THREADED_PUSH_BLOBS {
+        random.read_exact(&mut bytes).unwrap();
+        fs::write(under.join(format!("b{n:04}")), &bytes).unwrap();
+    }
+    site.git(&work, &["add", "--", "big"]);
+    site.git(&work, &["commit", "--quiet", "-m", "big"]);
+
+    // 2. The push, its connection accounted.
+    let ledger = accounting::ledger_dir(&site.served);
+    let mark = accounting::spent_since(&ledger, 0).len();
+    site.git(&work, &["push", "--quiet", "origin", "main"]);
+    let spent = accounting::spent_since(&ledger, mark);
+    assert!(!spent.is_empty(), "the push was not accounted");
+
+    // 3. The hooks' threads: the bounded pool, not one per core.
+    let threads = (spent.iter())
+        .filter_map(|one| one.by_name.get(SWARMOPS_NAME))
+        .map(|peak| peak.threads)
+        .max()
+        .expect("no swarmops process was sampled");
+    println!("serve-push: threaded push, swarmops Threads peak {threads}");
+    assert!(
+        threads > HOOK_POOL_THREADS,
+        "the hook's pool was not sampled: {threads} threads"
+    );
+    assert!(
+        threads <= HOOK_POOL_THREADS + HOOK_FIXED_THREADS,
+        "a swarmops process ran {threads} threads"
+    );
+}
