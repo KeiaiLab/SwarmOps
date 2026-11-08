@@ -99,10 +99,13 @@ check-ci-slow:
 # `committers_alone` and `import_memory`), `serve_load`'s two and the workspace's checked land;
 # and G4's landing lanes (`landing::perf::landing_under_load`, four lanes of 2 minutes, about 9 to
 # 11 minutes in all), and the continuous-sync lane (`sync_load::sync_keeps_pace_with_landing`, 50
-# agents for 10 minutes beside a syncer), past half the ci-slow kill. `check-ci-slow` leaves them
-# out, `check-ci-perf` runs them, `check-slow` runs them optimized. swarmops-core's `supply_chain` tests fail a
-# case `check-ci-slow` leaves out that no scheduled job runs optimized and one at a time.
-ci_perf_cases := 'test(=remote_perf::clone_cost_on_12000_commits) | test(=remote_perf::fetch_and_push_scale_with_history) | test(=remote_perf::fetch_phases_scale_with_history) | test(=remote_perf::sync_of_one_land_on_12000_commits) | test(=remote_perf::sync_phases_scale_with_history) | test(=remote_perf::first_sync_phases) | test(/^serve_perf::/) | test(/^intake_perf::/) | test(/^serve_load::/) | test(=landing::perf::landing_under_load) | test(=sync_load::sync_keeps_pace_with_landing) | test(=ws_processes::perf::perf_checked_land_overhead_on_12000_changesets)'
+# agents for 10 minutes beside a syncer), past half the ci-slow kill; and the M19 design §8.4's
+# four large workspace cases (the sparse workspace of a 1,000,000-file tree, the status of 500,000
+# files, 50 creates at once, the update across 1,000 lands), each sized under half the ci-perf kill.
+# `check-ci-slow` leaves them out, `check-ci-perf` runs them, `check-slow` runs them optimized.
+# swarmops-core's `supply_chain` tests fail a case `check-ci-slow` leaves out that no scheduled
+# job runs optimized and one at a time.
+ci_perf_cases := 'test(=remote_perf::clone_cost_on_12000_commits) | test(=remote_perf::fetch_and_push_scale_with_history) | test(=remote_perf::fetch_phases_scale_with_history) | test(=remote_perf::sync_of_one_land_on_12000_commits) | test(=remote_perf::sync_phases_scale_with_history) | test(=remote_perf::first_sync_phases) | test(/^serve_perf::/) | test(/^intake_perf::/) | test(/^serve_load::/) | test(=landing::perf::landing_under_load) | test(=sync_load::sync_keeps_pace_with_landing) | test(=ws_processes::perf::perf_checked_land_overhead_on_12000_changesets) | test(=ws_processes::perf::perf_sparse_workspace_of_1000000_files) | test(=ws_processes::perf::perf_status_of_500000_files) | test(=ws_processes::perf::perf_fifty_creates_at_once) | test(=ws_processes::perf::perf_update_across_1000_lands)'
 
 # `ci_perf_cases` optimized and one at a time (`--no-capture`), as `perf` runs them, printing their
 # `remote-perf: `, `serve-perf: `, `intake-perf: `, `serve-load: `, `landing-perf: `, `sync-load: `
@@ -147,9 +150,11 @@ _bench-fresh:
 # store-level test's by their shape, without its per-child JSON lines) and the load average
 # between them; target/perf/ keeps the full output. docs/perf.md records what they print.
 # The M5 workspace cases (ws_processes::perf::*: the 50,000-file tree's status, edits, commits
-# and update, the 10,000-file create, the checked land on 12,000 changesets) print `ws-perf: `
-# lines. The served-load cases (`serve_load::*`: 50 git clients through `serve` beside 50
-# landing agents and against git's own server, 10 minutes each) print `serve-load: ` lines.
+# and update, the 10,000-file create, the checked land on 12,000 changesets; M19's sparse
+# workspace of a 1,000,000-file tree, status of 500,000 files, 50 creates at once and update
+# across 1,000 lands, their stores under the bench directory) print `ws-perf: ` lines. The
+# served-load cases (`serve_load::*`: 50 git clients through `serve` beside 50 landing agents
+# and against git's own server, 10 minutes each) print `serve-load: ` lines.
 # The intake cases (`intake_perf::*`: the import beside 8 committers, the committers alone,
 # the import's memory alone) print `intake-perf: ` lines.
 # The continuous-sync lane (`sync_load::sync_keeps_pace_with_landing`: 50 agents at 20 lands/s

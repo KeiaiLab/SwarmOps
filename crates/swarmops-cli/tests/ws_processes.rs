@@ -261,10 +261,12 @@ fn the_tree_equality_check_fails_on_a_forged_recorded_tree() {
 /// each prints `ws-perf: ` lines and asserts only that its commands succeed, never a target; a
 /// missed target is recorded in `docs/perf.md`. All are ignored in `just check`.
 mod perf {
+    use std::collections::BTreeMap;
     use std::path::Path;
     use std::time::{Duration, Instant};
 
     use camino::Utf8Path;
+    use serde_json::Value;
     use swarmops_api::{
         ChangeInput, ChangeOp, CommitReq, ContentInput, Identity, ModeInput, StoreOps,
     };
@@ -313,13 +315,24 @@ mod perf {
     /// A store at `store` holding the synthetic tree of `files` files in `dirs` directories,
     /// `text(i)` in file `i`, `main` on it.
     fn seed(store: &Store, files: usize, dirs: usize, text: impl Fn(usize) -> String) -> LocalOps {
-        let ops = LocalOps::open(Utf8Path::new(store.path())).unwrap();
+        let paths = |i| path_of(i, dirs);
+        seed_with(store.path(), files, CHUNK, paths, text)
+    }
+
+    /// The store at `repo` holding `files` files, `path(i)` holding `text(i)`, committed
+    /// `chunk` at a time, `main` on the last commit.
+    fn seed_with(
+        repo: &str,
+        files: usize,
+        chunk: usize,
+        path: impl Fn(usize) -> String,
+        text: impl Fn(usize) -> String,
+    ) -> LocalOps {
+        let ops = LocalOps::open(Utf8Path::new(repo)).unwrap();
         let mut head = None;
-        for start in (0..files).step_by(CHUNK) {
-            let end = files.min(start + CHUNK);
-            let changes = (start..end)
-                .map(|i| change(path_of(i, dirs), text(i)))
-                .collect();
+        for start in (0..files).step_by(chunk) {
+            let end = files.min(start + chunk);
+            let changes = (start..end).map(|i| change(path(i), text(i))).collect();
             head = Some(put(&ops, head, changes));
         }
         ops
@@ -345,12 +358,20 @@ mod perf {
 
     /// Makes workspace `name` of all of `store`'s `main` in `dir`; how long the binary took.
     fn create(store: &Store, dir: &Path, name: &str, extra: &[&str]) -> Duration {
+        let mut flags = vec!["--all"];
+        flags.extend(extra);
+        create_at(store.path(), store.tmp(), dir, name, &flags)
+    }
+
+    /// Makes workspace `name` of the store at `repo` in `dir`, run in `cwd` with `flags`
+    /// (`--all`, `--prefix`, `--base`); how long the binary took.
+    fn create_at(repo: &str, cwd: &Path, dir: &Path, name: &str, flags: &[&str]) -> Duration {
         let path = dir.to_str().unwrap();
-        let mut args = vec!["--repo", store.path(), "--as", AGENT];
-        args.extend(["ws", "create", name, "--path", path, "--all"]);
-        args.extend(extra);
+        let mut args = vec!["--repo", repo, "--as", AGENT];
+        args.extend(["ws", "create", name, "--path", path]);
+        args.extend(flags);
         let started = Instant::now();
-        let made = run_in(store.tmp(), &[], &args, None);
+        let made = run_in(cwd, &[], &args, None);
         let took = started.elapsed();
         made.ok();
         took
@@ -584,5 +605,494 @@ mod perf {
             with_check.saturating_sub(base),
             "(target < 1000 ms)",
         );
+    }
+
+    // The M19 design §8.4: large trees and many workspaces. Each case seeds a store of its own
+    // under `SWARMOPS_BENCH_DIR` (a native filesystem, unlike a tmpfs /tmp) and is sized to
+    // finish within half the `ci-perf` profile's 55-minute kill.
+
+    /// The files of the sparse cases' tree.
+    const SPARSE_TREE: usize = 1_000_000;
+
+    /// The files under one top directory of the sparse tree: one `--prefix`.
+    const PREFIX_FILES: usize = 10_000;
+
+    /// The files under one `p/<nnnn>` directory of a prefix.
+    const LEAF_FILES: usize = 100;
+
+    /// The changes in one seeding commit of the large trees: 20 for the sparse tree.
+    const BIG_CHUNK: usize = 50_000;
+
+    /// The files of B36's status case, and its directories (20 files each, as the 50,000-file
+    /// tree's).
+    const LARGE_TREE: usize = 500_000;
+    const LARGE_DIRS: usize = 25_000;
+
+    /// The workspaces A31 creates at once.
+    const AT_ONCE: usize = 50;
+
+    /// 28A1's two histories: the lands between a workspace's base and the target.
+    const NEAR_LANDS: usize = 10;
+    const FAR_LANDS: usize = 1_000;
+
+    /// The paths every land of 28A1 changes between them; each land changes a tenth.
+    const LANDED_PATHS: usize = 100;
+
+    /// How many workspaces 28A1 updates for each history; the median counts.
+    const UPDATE_ROUNDS: usize = 5;
+
+    /// A store of its own in a temp dir under `SWARMOPS_BENCH_DIR` (`<tmp>/store`).
+    struct BenchStore {
+        /// The temp dir: the store and the workspaces.
+        dir: tempfile::TempDir,
+        /// The store's path.
+        path: String,
+    }
+
+    impl BenchStore {
+        /// A fresh store, made with `swarmops init`.
+        fn init() -> BenchStore {
+            let base = swarmops_testkit::measure::base_dir();
+            let dir = tempfile::tempdir_in(base).expect("make a bench temp dir");
+            let path = format!("{}/store", dir.path().to_str().unwrap());
+            crate::support::run(&["init", path.as_str()], &[]).ok();
+            BenchStore { dir, path }
+        }
+
+        /// The store's path.
+        fn path(&self) -> &str {
+            &self.path
+        }
+
+        /// The temp dir.
+        fn tmp(&self) -> &Path {
+            self.dir.path()
+        }
+
+        /// Makes workspace `name` in `<tmp>/<name>` with `flags`; how long the binary took.
+        fn create(&self, name: &str, flags: &[&str]) -> Duration {
+            create_at(self.path(), self.tmp(), &self.tmp().join(name), name, flags)
+        }
+    }
+
+    /// File `i` of the sparse tree: `t<top>/p/<leaf>/f<i>.txt`, each top directory one prefix
+    /// of [`PREFIX_FILES`] files in 100 leaves of [`LEAF_FILES`] (`t00/p/0000/f0000000.txt`).
+    fn sparse_path(i: usize) -> String {
+        let top = i / PREFIX_FILES;
+        let leaf = (i % PREFIX_FILES) / LEAF_FILES;
+        format!("t{top:02}/p/{leaf:04}/f{i:07}.txt")
+    }
+
+    /// Prints how long the seed of `files` (as written: `1,000,000`) took.
+    fn seeded(files: &str, started: Instant) {
+        say(&format!("seed {files} files"), started.elapsed(), "");
+    }
+
+    /// The store's object files: every file under `objects/`, `objects/tmp` apart.
+    fn object_count(repo: &str) -> usize {
+        let objects = swarmops_testkit::store::layout_of(repo).objects_dir();
+        let mut count = 0;
+        for fanout in std::fs::read_dir(objects).unwrap() {
+            let fanout = fanout.unwrap();
+            if fanout.file_name() == "tmp" {
+                continue;
+            }
+            count += std::fs::read_dir(fanout.path()).unwrap().count();
+        }
+        count
+    }
+
+    /// The files below `root`, `.swarmws/` apart: each path's bytes and permission bits.
+    fn tree_of(root: &Path) -> BTreeMap<String, (Vec<u8>, u32)> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut files = BTreeMap::new();
+        let mut dirs = vec![root.to_path_buf()];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                let name = path
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_owned();
+                if name == ".swarmws" {
+                    continue;
+                }
+                let meta = std::fs::symlink_metadata(&path).unwrap();
+                if meta.is_dir() {
+                    dirs.push(path);
+                    continue;
+                }
+                let mode = meta.permissions().mode() & 0o777;
+                files.insert(name, (std::fs::read(&path).unwrap(), mode));
+            }
+        }
+        files
+    }
+
+    /// The first path whose bytes or mode differ between two trees, or that one lacks.
+    fn first_difference(
+        a: &BTreeMap<String, (Vec<u8>, u32)>,
+        b: &BTreeMap<String, (Vec<u8>, u32)>,
+    ) -> Option<String> {
+        let names = a.keys().chain(b.keys());
+        names
+            .into_iter()
+            .find(|name| a.get(*name) != b.get(*name))
+            .cloned()
+    }
+
+    /// 28A1's equality: workspace `dir` holds the files of a fresh workspace of `flags` at its
+    /// own head, byte for byte and mode for mode, and the status of both is empty.
+    fn equals_a_fresh_one(store: &BenchStore, dir: &Path, fresh: &str, flags: &[&str]) {
+        // 1. A fresh workspace at the updated one's head, with the same prefixes.
+        let head = inside(dir, &["ws", "info"]).ok()["head"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut with_base = vec!["--base", head.as_str(), "--status-after", "none"];
+        with_base.extend(flags);
+        store.create(fresh, &with_base);
+
+        // 2. Same files, and nothing changed in either.
+        let other = store.tmp().join(fresh);
+        let differs = first_difference(&tree_of(dir), &tree_of(&other));
+        assert_eq!(differs, None, "{} against {fresh}", dir.display());
+        for root in [dir, other.as_path()] {
+            let status = inside(root, &["ws", "status"]).ok();
+            assert_eq!(status["changes"], Value::Array(Vec::new()), "{status}");
+        }
+    }
+
+    /// The disk a directory takes: the allocated blocks of everything below it.
+    fn disk_of(root: &Path) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+
+        let mut bytes = 0;
+        let mut dirs = vec![root.to_path_buf()];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                let meta = std::fs::symlink_metadata(&path).unwrap();
+                bytes += meta.blocks() * 512;
+                if meta.is_dir() {
+                    dirs.push(path);
+                }
+            }
+        }
+        bytes
+    }
+
+    /// A28: a sparse create of one 10,000-file prefix from a 1,000,000-file tree (the median
+    /// of three), then that workspace's status, a 1-file commit and the update after a land of
+    /// 10 files under the prefix, which leaves the files of a fresh workspace at its head.
+    #[test]
+    #[ignore = "slow, ~372 s: perf, seeds 1,000,000 files and times a sparse workspace"]
+    fn perf_sparse_workspace_of_1000000_files() {
+        // 1. The tree, in 20 commits of 50,000 files.
+        let store = BenchStore::init();
+        let started = Instant::now();
+        let ops = seed_with(store.path(), SPARSE_TREE, BIG_CHUNK, sparse_path, |i| {
+            content_of(i, 0)
+        });
+        seeded("1,000,000", started);
+
+        // 2. Three sparse creates of the prefix `t00`; the first is the one measured on.
+        let sparse = ["--prefix", "t00"];
+        let times: Vec<Duration> = (0..3)
+            .map(|n| store.create(&format!("s{n}"), &sparse))
+            .collect();
+        say(
+            "sparse create of 10,000 of 1,000,000 files",
+            median(times),
+            "(no target; G9's whole tree < 3 s)",
+        );
+        let dir = store.tmp().join("s0");
+
+        // 3. Its status, nothing changed, warm; the median of 20.
+        inside(&dir, &["ws", "status"]).ok();
+        let times: Vec<Duration> = (0..ROUNDS)
+            .map(|_| timed(&dir, &["ws", "status"]).1)
+            .collect();
+        say(
+            "sparse status, nothing changed",
+            median(times),
+            "(no target; G9's whole tree < 100 ms)",
+        );
+
+        // 4. A commit of 1 changed file.
+        std::fs::write(dir.join(sparse_path(0)), content_of(0, 1)).unwrap();
+        let commit = ["ws", "commit", "-m", "perf", "--status-after", "none"];
+        let (out, took) = timed(&dir, &commit);
+        let elapsed = out.envelope()["meta"]["elapsed_ms"].clone();
+        out.ok();
+        say(
+            "sparse commit of 1 changed file",
+            took,
+            &format!("(meta.elapsed_ms {elapsed}; no target; G9's whole tree G2 plus hashing)"),
+        );
+
+        // 5. A land of 10 files under the prefix by someone else, then the update.
+        let changes = (0..LANDED_FILES)
+            .map(|i| change(sparse_path(i + 5_000), content_of(i + 5_000, 99)))
+            .collect();
+        put(&ops, Some(ops_head(&ops)), changes);
+        let (out, took) = timed(&dir, &["ws", "rebase", "--status-after", "none"]);
+        out.ok();
+        say(
+            "sparse update after a land of 10 files",
+            took,
+            "(no target; G9's whole tree < 100 ms)",
+        );
+
+        // 6. The updated workspace is a fresh one at its head.
+        equals_a_fresh_one(&store, &dir, "fresh", &sparse);
+    }
+
+    /// B36: the status of a workspace of 500,000 files, nothing changed and after 100 files
+    /// rewritten in the racy window, each the median of 20.
+    #[test]
+    #[ignore = "slow, ~333 s: perf, seeds 500,000 files and times their status"]
+    fn perf_status_of_500000_files() {
+        // 1. The tree, in 10 commits of 50,000 files, and a workspace of all of it.
+        let store = BenchStore::init();
+        let started = Instant::now();
+        let paths = |i| path_of(i, LARGE_DIRS);
+        seed_with(store.path(), LARGE_TREE, BIG_CHUNK, paths, |i| {
+            content_of(i, 0)
+        });
+        seeded("500,000", started);
+        let took = store.create("large", &["--all", "--status-after", "none"]);
+        say("create 500,000 files", took, "");
+        let dir = store.tmp().join("large");
+
+        // 2. Nothing changed, a warm index.
+        inside(&dir, &["ws", "status"]).ok();
+        let times: Vec<Duration> = (0..ROUNDS)
+            .map(|_| timed(&dir, &["ws", "status"]).1)
+            .collect();
+        say(
+            "status 500,000 files, nothing changed",
+            median(times),
+            "(target < 1 s)",
+        );
+
+        // 3. 100 files rewritten with the same size, straight after a status.
+        rewrite_first(&dir, LARGE_DIRS, 100, 1).unwrap();
+        let times: Vec<Duration> = (0..ROUNDS)
+            .map(|_| {
+                let (out, took) = timed(&dir, &["ws", "status"]);
+                let changes = out.ok()["changes"].as_array().unwrap().len();
+                assert_eq!(changes, 100, "the 100 edits");
+                took
+            })
+            .collect();
+        say(
+            "status 500,000 files after 100 edits",
+            median(times),
+            "(target < 1 s)",
+        );
+    }
+
+    /// A31: 50 creates of all of a 10,000-file tree at once: each create's time, the store's
+    /// objects before and after (the same: a create writes none), the disk each workspace adds.
+    #[test]
+    #[ignore = "slow, ~20 s: perf, seeds 10,000 files and runs 50 creates at once"]
+    fn perf_fifty_creates_at_once() {
+        // 1. The tree, and its objects.
+        let store = BenchStore::init();
+        seed_with(
+            store.path(),
+            CREATE_FILES,
+            CHUNK,
+            |i| path_of(i, TREE_DIRS),
+            |i| content_of(i, 0),
+        );
+        let before = object_count(store.path());
+
+        // 2. The creates, released together; each timed from its start to its exit.
+        let gate = std::sync::Barrier::new(AT_ONCE);
+        let flags = ["--all", "--status-after", "none"];
+        let times: Vec<Duration> = std::thread::scope(|scope| {
+            let runs: Vec<_> = (0..AT_ONCE)
+                .map(|n| {
+                    let (store, gate) = (&store, &gate);
+                    scope.spawn(move || {
+                        gate.wait();
+                        store.create(&format!("w{n}"), &flags)
+                    })
+                })
+                .collect();
+            runs.into_iter().map(|run| run.join().unwrap()).collect()
+        });
+        spread(
+            "50 creates of 10,000 files at once",
+            &times,
+            "(target < 3 s each)",
+        );
+        let slowest = times.iter().max().unwrap();
+        say("slowest of 50 creates at once", *slowest, "(target < 3 s)");
+
+        // 3. No object added (I9), and the disk each workspace takes.
+        assert_eq!(
+            object_count(store.path()),
+            before,
+            "objects after 50 creates"
+        );
+        let mut disk: Vec<u64> = (0..AT_ONCE)
+            .map(|n| disk_of(&store.tmp().join(format!("w{n}"))))
+            .collect();
+        disk.sort_unstable();
+        println!(
+            "ws-perf: disk per workspace: median {} KiB max {} KiB objects {before}",
+            disk[AT_ONCE / 2] / 1024,
+            disk[AT_ONCE - 1] / 1024,
+        );
+    }
+
+    /// One land of 28A1: a tenth of the [`LANDED_PATHS`], in turn, at version `n + 1`.
+    fn land_tenth(ops: &LocalOps, n: usize) {
+        let tenth = LANDED_PATHS / 10;
+        let first = (n % 10) * tenth;
+        let version = u32::try_from(n + 1).unwrap();
+        let changes = (first..first + tenth)
+            .map(|i| {
+                change(
+                    path_of(i + 1_000, TREE_DIRS),
+                    content_of(i + 1_000, version),
+                )
+            })
+            .collect();
+        put(ops, Some(ops_head(ops)), changes);
+    }
+
+    /// Updates the workspaces `<prefix>0..` (`ws rebase`); the median time.
+    fn update_all(store: &BenchStore, prefix: &str) -> Duration {
+        let times = (0..UPDATE_ROUNDS)
+            .map(|r| {
+                let dir = store.tmp().join(format!("{prefix}{r}"));
+                let (out, took) = timed(&dir, &["ws", "rebase", "--status-after", "none"]);
+                out.ok();
+                took
+            })
+            .collect();
+        median(times)
+    }
+
+    /// 28A1: the update of a 50,000-file workspace across 1,000 lands against across 10, the
+    /// same 100 paths changed by both histories (the median of 5 each), and each updated
+    /// workspace equal to a fresh one at its head.
+    #[test]
+    #[ignore = "slow, ~140 s: perf, seeds 50,000 files, 1,000 lands and 10 workspaces"]
+    fn perf_update_across_1000_lands() {
+        // 1. The tree, and five workspaces for each history, all at its first head.
+        let store = BenchStore::init();
+        let ops = seed_with(
+            store.path(),
+            TREE_FILES,
+            CHUNK,
+            |i| path_of(i, TREE_DIRS),
+            |i| content_of(i, 0),
+        );
+        let flags = ["--all", "--status-after", "none"];
+        for r in 0..UPDATE_ROUNDS {
+            for name in [format!("near{r}"), format!("far{r}")] {
+                store.create(&name, &flags);
+
+                // A warm index, as the whole-tree update's: no row in the racy window.
+                inside(&store.tmp().join(&name), &["ws", "status"]).ok();
+            }
+        }
+
+        // 2. 10 lands, every one of the 100 paths changed once; the near workspaces' update.
+        for n in 0..NEAR_LANDS {
+            land_tenth(&ops, n);
+        }
+        let near = update_all(&store, "near");
+        say("update across 10 lands, 100 paths", near, "");
+
+        // 3. 990 lands more over the same paths; the far workspaces' update.
+        for n in NEAR_LANDS..FAR_LANDS {
+            land_tenth(&ops, n);
+        }
+        let far = update_all(&store, "far");
+        say("update across 1,000 lands, 100 paths", far, "");
+        println!(
+            "ws-perf: update ratio 1,000 lands / 10 lands: {:.2} (target <= 1.5)",
+            far.as_secs_f64() / near.as_secs_f64()
+        );
+
+        // 4. Each history's updated workspace is a fresh one at its head.
+        let all = ["--all"];
+        equals_a_fresh_one(&store, &store.tmp().join("near0"), "fresh-near", &all);
+        equals_a_fresh_one(&store, &store.tmp().join("far0"), "fresh-far", &all);
+    }
+
+    /// The sparse tree's layout: a prefix holds exactly 10,000 files in 100 leaves of 100, and
+    /// the next file starts the next prefix.
+    #[test]
+    fn a_sparse_prefix_holds_ten_thousand_files() {
+        assert_eq!(sparse_path(0), "t00/p/0000/f0000000.txt");
+        assert_eq!(sparse_path(9_999), "t00/p/0099/f0009999.txt");
+        assert_eq!(sparse_path(10_000), "t01/p/0000/f0010000.txt");
+        assert_eq!(sparse_path(SPARSE_TREE - 1), "t99/p/0099/f0999999.txt");
+        let in_first = (0..SPARSE_TREE)
+            .filter(|i| sparse_path(*i).starts_with("t00/"))
+            .count();
+        assert_eq!(in_first, PREFIX_FILES);
+    }
+
+    /// Self-check of the tree comparison: equal trees pass, and a changed byte, a changed mode
+    /// or a missing file is named; `.swarmws/` is not compared.
+    #[test]
+    fn the_tree_comparison_names_a_changed_byte_or_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // 1. Two equal trees, one with a `.swarmws/` of its own.
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        for root in [a.path(), b.path()] {
+            std::fs::create_dir_all(root.join("d")).unwrap();
+            std::fs::write(root.join("d/f.txt"), "one\n").unwrap();
+        }
+        std::fs::create_dir(a.path().join(".swarmws")).unwrap();
+        std::fs::write(a.path().join(".swarmws/index"), "x").unwrap();
+        assert_eq!(
+            first_difference(&tree_of(a.path()), &tree_of(b.path())),
+            None
+        );
+
+        // 2. A byte, then the mode, then a file only one side has.
+        std::fs::write(b.path().join("d/f.txt"), "two\n").unwrap();
+        let named = first_difference(&tree_of(a.path()), &tree_of(b.path()));
+        assert_eq!(named.as_deref(), Some("d/f.txt"));
+        std::fs::write(b.path().join("d/f.txt"), "one\n").unwrap();
+        let exec = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(b.path().join("d/f.txt"), exec).unwrap();
+        let named = first_difference(&tree_of(a.path()), &tree_of(b.path()));
+        assert_eq!(named.as_deref(), Some("d/f.txt"));
+        std::fs::write(a.path().join("d/g.txt"), "g\n").unwrap();
+        let named = first_difference(&tree_of(a.path()), &tree_of(b.path()));
+        assert!(named.is_some());
+    }
+
+    /// Self-check of the object count: a commit of a new file adds objects (its blob, its
+    /// trees and its changeset), and a workspace create adds none.
+    #[test]
+    fn the_object_count_grows_with_a_commit_only() {
+        let store = Store::init();
+        let empty = object_count(store.path());
+        seed(&store, 3, 1, |i| content_of(i, 0));
+        let seeded = object_count(store.path());
+        assert!(seeded > empty, "{empty} then {seeded}");
+        create(
+            &store,
+            &store.tmp().join("w"),
+            "w",
+            &["--status-after", "none"],
+        );
+        assert_eq!(object_count(store.path()), seeded);
     }
 }

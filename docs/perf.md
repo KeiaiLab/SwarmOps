@@ -2443,3 +2443,54 @@ So the update row (its single run, decision D5) and the commit row (decision D1)
 here; no gate, target, timeout or case parameter changed. The equality of the scan on its threads
 and on one thread (5,000 files, every kind of change) and of an updated workspace and a fresh one
 are tests in `just check`. The figures follow as a docs-only commit from the first gated window.
+
+## M19-8 — 2026-11-08 (not measured: the host was never quiet)
+
+The M19 design §8.4: four `ws_processes::perf` cases on large trees and many workspaces, release
+build, each store in a temp dir under `SWARMOPS_BENCH_DIR`. Each asserts what it ran, never its
+time: A31's store holds the same object files before and after the creates, and each update ends
+equal to a fresh workspace at its head (every file's bytes and mode, both statuses empty).
+
+- `perf_sparse_workspace_of_1000000_files` (A28): 1,000,000 files in 20 commits of 50,000, laid
+  out so that one top directory holds exactly 10,000 (`t00/p/0000/…` to `t00/p/0099/…`, 100
+  files each); three creates of `--prefix t00` (the median), then that workspace's status (median
+  of 20), a 1-file commit and the update after a land of 10 files under the prefix.
+- `perf_status_of_500000_files` (B36): a workspace of all of a 500,000-file tree, its status
+  with nothing changed and after 100 same-size rewrites, each the median of 20.
+- `perf_fifty_creates_at_once` (A31): 50 `ws create --all` of a 10,000-file tree released
+  together, each timed from its start to its exit; the store's object files counted before and
+  after; the disk each workspace takes.
+- `perf_update_across_1000_lands` (28A1): ten workspaces of the 50,000-file tree at one head,
+  their indexes warm; five updated after 10 lands, five after 1,000, both histories changing the
+  same 100 paths (each land a tenth of them); the medians and their ratio.
+
+Each case waited for the design's gate (a 1-minute load under 6 held for a minute, no CI job on
+this host's runners) at most 30 minutes, under the heavy lock. None passed it:
+
+| Case | Wait | Max load (1 / 5 min) | Last reading (1 / 5 min, CI job) |
+| --- | --- | --- | --- |
+| sparse workspace | 19:02–19:33 | 90.39 / 48.74 | 7.05 / 15.27, yes |
+| status of 500,000 | 19:39–20:09 | 169.56 / 70.25 | 38.13 / 49.78, yes |
+| update across 1,000 lands | 20:15–20:45 | 196.96 / 88.55 | 18.72 / 42.89, yes |
+| 50 creates at once | 20:47–21:17 | 161.9 / 77.57 | 48.4 / 58.29, yes |
+
+So no row takes a verdict. Each case then ran once loaded, to size it against half the
+`ci-perf` kill (27.5 minutes): every one fits, so none is split. The figures below are those
+runs' and are recorded for their size, not as measurements of the targets.
+
+| Case | Load at start → end (1 min) | Case time | Printed |
+| --- | --- | --- | --- |
+| sparse workspace | 6.67 → 28.09 | 371.9 s | seed 331.1 s; create 828.0 ms; status 30.0 ms; commit of 1 file 85.0 ms (`meta.elapsed_ms` 81); update after a land of 10 files 277.4 ms |
+| status of 500,000 | 32.66 → 17.24 | 333.3 s | seed 253.8 s; create 16,937.4 ms; status 644.8 ms; after 100 edits 660.1 ms |
+| 50 creates at once | 41.49 → 34.43 | 19.9 s | p50 3,674.5 ms, p99 4,639.3 ms; 15,004 objects before and after; 50,012 KiB per workspace |
+| update across 1,000 lands | 22.09 → 79.05 | 140.2 s | 10 lands 701.5 ms, 1,000 lands 2,106.7 ms, ratio 3.00 |
+
+The update case's first loaded run (85.0 s, load 16.66 → 15.56) updated workspaces whose index
+had never been refreshed, so every row was in the racy window and hashed: 900.9 and 960.8 ms,
+ratio 1.07. The case now runs one status in each workspace first, as the whole-tree update case
+does; the second run's figures are above. Targets: B36's < 1 s, A31's < 3 s for each create
+(G9's create), 28A1's ratio ≤ 1.5; A28 states none, so G9's whole-tree targets are printed
+beside its lines. The `perf-cases` timeout stays 320 minutes: its rule sums times `just perf`
+measures, which these loaded runs are not, and M17-8b's cases wait for the same run. No gate,
+target, timeout or case parameter changed. The verdicts follow as a docs-only commit from the
+first gated window.

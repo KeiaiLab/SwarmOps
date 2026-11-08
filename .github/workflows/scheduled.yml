@@ -501,6 +501,9 @@ jobs:
     # minutes) + 5 = 366, rounded up to 370. M18-3 added `sync_load::sync_keeps_pace_with_landing`,
     # measured at 655 s (docs/perf.md, "M18 continuous-sync lane"): 60 + twice 9,693 s (323.1
     # minutes) + 5 = 388.1, rounded up to 390.
+    # M19-8 added four (`ws_processes::perf`'s sparse workspace, 500,000-file status, 50 creates at
+    # once and update across 1,000 lands), whose loaded sizing runs (docs/perf.md, "M19-8") are not
+    # `just perf` times; the same run sums them.
     timeout-minutes: 390
     env:
       CARGO_TERM_COLOR: always
