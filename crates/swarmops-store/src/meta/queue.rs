@@ -776,7 +776,7 @@ impl MetaStore {
             && REQUEST_FIXED + body.len() <= REQUEST_MAX
             && usable(dir.as_std_path());
         if !queued {
-            return self.own_only(own, body, deadline, seams);
+            return self.own_only(own, body, None, deadline, seams);
         }
 
         // 1. The zero-timeout try: an uncontended writer leads with its request in memory.
@@ -801,17 +801,23 @@ impl MetaStore {
         self.await_answer(wait, own, body, file, deadline, seams)
     }
 
-    /// A turn that serves no queue: waits for the lock until `deadline`, then leads alone.
+    /// A turn that serves no queue: waits for the lock until `deadline`, on `wait` if it has
+    /// one (a declined rerun's first wait: a new one would leave its helper parked), then leads
+    /// alone.
     fn own_only(
         &self,
         own: RequestId,
         body: &[u8],
+        wait: Option<LockWait>,
         deadline: Instant,
         seams: Seams,
     ) -> Result<Turn<'_>, StoreError> {
-        let lock = match MetaLock::start(&self.layout)? {
-            Started::Held(lock) => lock,
-            Started::Waiting(wait) => locked(&wait, remaining(&seams, deadline))?,
+        let lock = match wait {
+            Some(wait) => locked(&wait, remaining(&seams, deadline))?,
+            None => match MetaLock::start(&self.layout)? {
+                Started::Held(lock) => lock,
+                Started::Waiting(wait) => locked(&wait, remaining(&seams, deadline))?,
+            },
         };
         let write = self.write_locked(lock)?;
         Ok(Turn::Lead(Lead::new(
@@ -871,11 +877,9 @@ impl MetaStore {
                 return self.lead_queue(lock, own, body, Some((file, deadline)), seams);
             }
 
-            // 2. The answer, read without the lock.
+            // 2. The answer, read without the lock; a declined rerun waits on this wait.
             if exists(&Kind::Ans.path(dir, &own)) {
-                // The wait goes first: its helper may hold the lock, which a rerun waits for.
-                drop(wait);
-                return self.answered(&own, body, file, deadline, seams);
+                return self.answered(&own, body, file, Some(wait), deadline, seams);
             }
 
             // 3. The deadline: withdrawn while unclaimed, or claimed and waited for.
@@ -900,12 +904,14 @@ impl MetaStore {
     }
 
     /// Reads the answer to request `own` without the lock, removes the request file, closes
-    /// it, then removes the answer (step 15); a declined request runs again alone.
+    /// it, then removes the answer (step 15); a declined request runs again alone, on `wait`
+    /// if the request still waits for the lock.
     fn answered(
         &self,
         own: &RequestId,
         body: &[u8],
         file: OwnFile,
+        wait: Option<LockWait>,
         deadline: Instant,
         seams: Seams,
     ) -> Result<Turn<'_>, StoreError> {
@@ -931,7 +937,7 @@ impl MetaStore {
             }
         };
         if answer.outcome == Outcome::Declined {
-            return self.own_only(own.clone(), body, deadline, seams);
+            return self.own_only(own.clone(), body, wait, deadline, seams);
         }
         Ok(Turn::Answered(answer))
     }
@@ -965,7 +971,7 @@ impl MetaStore {
         if let Some((file, deadline)) = waiter {
             if exists(&Kind::Ans.path(dir, &own)) {
                 drop(write);
-                return self.answered(&own, body, file, deadline, seams);
+                return self.answered(&own, body, file, None, deadline, seams);
             }
             let req = Kind::Req.path(dir, &own);
             if !exists(&req) {
@@ -2855,11 +2861,12 @@ mod tests {
         });
     }
 
-    /// A declined waiter lets go of its wait before it runs again: the wait's helper, parked in
-    /// `flock`, may take the lock the moment its holder lets go, and would hold it from the
-    /// rerun. Three rounds, each let go once the answer is read.
+    /// A declined waiter runs again on its first wait: the wait's helper, parked in `flock`, may
+    /// take the lock the moment its holder lets go, and hands it to the rerun. Three rounds,
+    /// each let go once the answer is read; a helper the round before left parked would fail
+    /// the next round's zero-timeout hold.
     #[test]
-    fn a_declined_waiter_lets_its_wait_go_first() {
+    fn a_declined_rerun_waits_on_its_first_wait() {
         let (_dir, root) = new_store();
         for round in 0..3 {
             let holder = open(&root);
@@ -2890,6 +2897,54 @@ mod tests {
                 );
             });
         }
+    }
+
+    /// How many lock-wait helper threads (`meta-lock-wait`) this process runs.
+    fn helpers() -> usize {
+        fs::read_dir("/proc/self/task")
+            .unwrap()
+            .filter(|task| {
+                let comm = task.as_ref().unwrap().path().join("comm");
+                fs::read_to_string(comm).is_ok_and(|name| name.trim() == "meta-lock-wait")
+            })
+            .count()
+    }
+
+    /// A declined rerun waits on its first wait's helper and starts no second one: a second
+    /// would leave the first parked in `flock`, to take the lock for an instant after the call
+    /// returned. Checked for 100 ms after the answer is read, while the holder keeps the lock.
+    #[test]
+    fn a_declined_rerun_starts_no_second_helper() {
+        let (_dir, root) = new_store();
+        let holder = open(&root);
+        let lock = hold(&holder);
+        thread::scope(|s| {
+            let waiter = s.spawn(|| {
+                let store = open(&root).with_lock_timeout(Duration::from_secs(5));
+                turn(&store, Ask::Frame(1))
+            });
+            let rid = wait_files(&root, Kind::Req, 1).remove(0);
+            let dir = queue(&root);
+            fs::rename(Kind::Req.path(&dir, &rid), Kind::Com.path(&dir, &rid)).unwrap();
+            seed_answer(&root, &rid, &Answer::new(Outcome::Declined, Vec::new()));
+
+            // 1. The answer read, the rerun waits: one helper the whole time.
+            let deadline = Instant::now() + PATIENCE;
+            while exists(&Kind::Ans.path(&dir, &rid)) {
+                assert!(Instant::now() < deadline, "the answer is read");
+                thread::sleep(Duration::from_millis(1));
+            }
+            let watched = Instant::now() + Duration::from_millis(100);
+            while Instant::now() < watched {
+                assert!(helpers() <= 1, "a second helper");
+                thread::sleep(Duration::from_millis(1));
+            }
+
+            // 2. Let go: the rerun leads.
+            drop(lock);
+            let ended = waiter.join().unwrap();
+            assert!(matches!(ended, Ok(Ended::Led(_))), "{ended:?}");
+        });
     }
 
     #[test]
