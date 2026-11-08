@@ -14,7 +14,8 @@ use swarmops_api::{
     OpLogReq, PathHistoryPage, PathHistoryReq, ReadFileReq, ReadTreeReq, RebaseReq, RebaseResp,
     RebaseStatus, RefDeleteReq, RefListReq, RefListResp, RefSetReq, RefSetResp, RepoInfo,
     ResolveRevReq, ResolvedRev, ShowReq, StatusAfter, StoreOps, TreeListing, UndoReq, UndoResp,
-    VerifyReport, VerifyReq, WsCheckInput, WsCommitReq, WsLandReq, WsRebaseAction, WsRebaseReq,
+    VerifyReport, VerifyReq, WsChangeKind, WsCheckInput, WsCommitReq, WsLandReq, WsRebaseAction,
+    WsRebaseReq,
 };
 use swarmops_ws::state::{self, SWARMWS_DIR, Volume};
 use swarmops_ws::status::BEHIND_CAP as HISTORY_CAP;
@@ -465,9 +466,10 @@ fn a_killed_ws_land_resumes_by_its_key() {
 
 /// `ws land -m` without a check carries the edits as its land's changes (the M16 design §4):
 /// the store records their changeset `C` and the landed `L` in one land, with the pending record
-/// holding the key written first. Cut after the store's frame, the re-run with the files as they
-/// were replays that land: one land on main, the workspace on it. A file edited between the cut
-/// and the re-run is another change under the key: `E_INVALID_ARG`, and nothing more lands.
+/// holding the key written first. Cut after the store's frame, the re-run replays that land: one
+/// land on main, the workspace on it. Edits made between the cut and the re-run are not carried
+/// under the key: they stay on disk, edits against what landed; so too when the cut came after
+/// the workspace stood on `C`.
 #[test]
 fn a_cut_ws_land_with_message_replays() {
     let carried = || {
@@ -503,7 +505,14 @@ fn a_cut_ws_land_with_message_replays() {
     );
     assert!(!pending_in(&dir).exists());
 
-    // 2. A file edited between the cut and the re-run.
+    // 2. A file edited and one added between the cut and the re-run: the held land replays,
+    //    and both stay edits against it.
+    let later = || {
+        vec![
+            ("src/c.txt".to_owned(), WsChangeKind::Modified),
+            ("src/d.txt".to_owned(), WsChangeKind::Added),
+        ]
+    };
     let g = Fixture::new();
     behind(&g);
     let dir = g.beside("w");
@@ -514,9 +523,47 @@ fn a_cut_ws_land_with_message_replays() {
     swarmops_ws::land(&ctx, carried()).unwrap_err();
     let landed = store.lands()[0].landed.clone();
     write(&dir, "src/c.txt", "c 2\n");
-    let refused = swarmops_ws::land(&ctx, carried()).unwrap_err();
-    assert_eq!(refused.code, "E_INVALID_ARG", "{refused:?}");
-    assert_eq!((main_of(&g), store.lands().len()), (landed, 1));
+    write(&dir, "src/d.txt", "d\n");
+    let done = swarmops_ws::land(&ctx, carried()).unwrap();
+    assert_eq!(done.land.status, LandStatus::Replayed);
+    assert_eq!(
+        (main_of(&g), done.land.landed.clone()),
+        (landed.clone(), landed.clone())
+    );
+    let saved = state::read(&RealFs::new(), &dir).unwrap();
+    assert_eq!((&saved.head, &saved.materialized), (&landed, &landed));
+    assert!(!pending_in(&dir).exists());
+    assert_eq!(changes(&g.ctx(), "w", true), later());
+    assert_eq!(
+        std::fs::read_to_string(dir.join("src/c.txt")).unwrap(),
+        "c 2\n"
+    );
+
+    // 3. The same, cut once the workspace stood on `C`, before the record followed it there.
+    let h = Fixture::new();
+    behind(&h);
+    let dir = h.beside("w");
+    write(&dir, "src/c.txt", "c\n");
+    let store = Hooked::new(&h.ops);
+    store.crash_after_land.store(true, Ordering::SeqCst);
+    let ctx = h.ctx_over(&store);
+    swarmops_ws::land(&ctx, carried()).unwrap_err();
+    let first = store.lands()[0].clone();
+    let made = first.squashed_from.last().expect("C").clone();
+    let mut file_on_c = state::read(&RealFs::new(), &dir).unwrap();
+    file_on_c.head.clone_from(&made);
+    file_on_c.materialized.clone_from(&made);
+    state::replace(&RealFs::new(), &dir, &file_on_c).unwrap();
+    write(&dir, "src/c.txt", "c 2\n");
+    write(&dir, "src/d.txt", "d\n");
+    let done = swarmops_ws::land(&ctx, carried()).unwrap();
+    assert_eq!(done.land.status, LandStatus::Replayed);
+    assert_eq!(
+        (main_of(&h), done.land.landed),
+        (first.landed.clone(), first.landed)
+    );
+    assert!(!pending_in(&dir).exists());
+    assert_eq!(changes(&h.ctx(), "w", true), later());
 }
 
 /// Without a check, `ws land` is the store's land of the workspace's chain, merged onto main's

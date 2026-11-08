@@ -29,8 +29,9 @@
 //! A land cut short keeps its pending record: a re-run takes its keys, so the store replays the
 //! same `H'` (the attempt's rebase key) and the same land (`K`); one cut after its land's frame
 //! goes straight to that land, which the store answers `replayed`. A land that carried the edits
-//! (the M16 design §4) carries them again: the store replays it while they make the same tree on
-//! the same head, and refuses the key (`E_INVALID_ARG`) once a file changed in between.
+//! (the M16 design §4) and that its target holds is landed again from the changeset `C` it made
+//! of them, with no changes: the store replays it, and edits made since stay on disk, edits
+//! against what landed (I8). One its target does not hold carries the edits as they are now.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -38,7 +39,7 @@ use std::time::Duration;
 use serde_json::{Map, Value};
 use swarmops_api::{
     DEFAULT_MAX_CONFLICT_BYTES, ErrorCode, LandMode, LandReq, LandResp, MAX_LAND_ATTEMPTS, OpError,
-    ResolveRevReq, ShowReq, StatusAfter, WsCheckInput, WsLandReq, WsLandResp,
+    OpLogReq, ResolveRevReq, ShowReq, StatusAfter, WsCheckInput, WsLandReq, WsLandResp,
 };
 
 use crate::check::{self, Subject};
@@ -48,8 +49,8 @@ use crate::materialize;
 use crate::pending::{self, Pending, PendingOp};
 use crate::rebase::{self, Rerun};
 use crate::scan;
-use crate::state::State;
-use crate::status::{self, Landed};
+use crate::state::{self, State};
+use crate::status::{self, Landed, OP_CAP};
 use crate::workspace::{self, Locate, Workspace};
 use crate::{Ctx, after};
 
@@ -67,6 +68,12 @@ const WAIT_STEP: Duration = Duration::from_millis(25);
 
 /// The longest wait's step: 2 s.
 const WAIT_MAX: Duration = Duration::from_secs(2);
+
+/// The operations one `op_log` page of the search for a held land's changesets asks for.
+const OP_PAGE: usize = 100;
+
+/// The changesets per operation that search reads: a land that carried edits records two.
+const OP_CHANGESETS: usize = 2;
 
 /// A checked land's command and how long it may run.
 struct Check {
@@ -165,10 +172,18 @@ pub fn land(ctx: &Ctx<'_>, req: WsLandReq) -> Result<WsLandResp, OpError> {
     }
 
     // 5. A land cut short: its keys. `-m` without `--check`: the edits carried, if any, the
-    //    land's run again too (the M16 design §4). Else the edits settled and something to land.
+    //    land's run again too (the M16 design §4), unless the target holds it: then the
+    //    workspace stands on the `C` it made, and later edits stay on disk. Else the edits
+    //    settled and something to land.
     let cut = cut_land(ctx, &ws)?;
+    let held = match (&cut, rerun) {
+        (Some(cut), Rerun::Carries) if ws.file.materialized == ws.file.head => {
+            stand_on_held(ctx, &mut ws, cut, &target)?
+        }
+        _ => false,
+    };
     let edits = match rerun {
-        Rerun::Carries if ws.file.materialized == ws.file.head => commit::edits(ctx, &ws)?,
+        Rerun::Carries if !held && ws.file.materialized == ws.file.head => commit::edits(ctx, &ws)?,
         _ => None,
     };
     if cut.is_none() && edits.is_none() {
@@ -419,6 +434,89 @@ fn trailing(ctx: &Ctx<'_>, ws: &Workspace, cut: &Pending) -> Result<bool, OpErro
     // 2. Its key landed on its target.
     let target = cut.target.as_deref().unwrap_or(&ws.file.target);
     Ok(status::landed(ctx.store, target, &cut.key, &ws.file.head)? == Landed::Held)
+}
+
+/// Whether `cut` is a land `target` holds; if so, workspace `ws` stands on the head it landed:
+/// `C`, when the land carried edits, made on `ws`'s head (`workspace.json` first (WS2), then the
+/// record follows). Its re-run then lands that head with no changes, which the store replays,
+/// whatever was edited since (I8).
+fn stand_on_held(
+    ctx: &Ctx<'_>,
+    ws: &mut Workspace,
+    cut: &Pending,
+    target: &str,
+) -> Result<bool, OpError> {
+    // 1. A land the target holds, and the head it landed.
+    if cut.state != LANDING || !replays(ctx, ws, target)? {
+        return Ok(false);
+    }
+    let Some(made) = carried_head(ctx, ws, &cut.key)? else {
+        return Ok(true);
+    };
+
+    // 2. The workspace on `C`, whose files hold its edits; then the record on it too.
+    let mut file = ws.file.clone();
+    file.head.clone_from(&made);
+    file.materialized.clone_from(&made);
+    file.onto = None;
+    state::replace(ctx.fs.as_ref(), &ws.dir, &file)?;
+    ws.file = file;
+    let mut record = cut.clone();
+    record.head = made;
+    pending::write_pending(ctx.fs.as_ref(), &ws.dir, &record).map(|()| true)
+}
+
+/// The changeset `C` a land with `key` made of the edits it carried on workspace `ws`'s head:
+/// the last of the `squashed_from` of a changeset the journal names as a land of the key, read
+/// newest first within [`OP_CAP`] operations; none when the land carried no edits.
+fn carried_head(ctx: &Ctx<'_>, ws: &Workspace, key: &str) -> Result<Option<String>, OpError> {
+    let mut visited = 0;
+    let mut before = None;
+    loop {
+        // 1. The next page of operations.
+        let mut req = OpLogReq::default();
+        req.before = before;
+        req.limit = OP_PAGE;
+        req.max_changesets = OP_CHANGESETS;
+        let page = ctx.store.op_log(req)?;
+
+        // 2. Each land of the key: the head it squashed, if made on `ws`'s head.
+        for op in &page.ops {
+            if visited == OP_CAP {
+                return Ok(None);
+            }
+            visited += 1;
+            let lands = (op.changesets.iter()).filter(|c| c.land_key.as_deref() == Some(key));
+            for land in lands {
+                if let Some(made) = made_on(ctx, &land.id, &ws.file.head)? {
+                    return Ok(Some(made));
+                }
+            }
+        }
+
+        // 3. The next page, while there is one.
+        before = page.ops.last().map(|op| op.op);
+        if !page.truncated || before.is_none() {
+            return Ok(None);
+        }
+    }
+}
+
+/// The last changeset landed changeset `landed` squashed, when its first parent is `head`.
+fn made_on(ctx: &Ctx<'_>, landed: &str, head: &str) -> Result<Option<String>, OpError> {
+    // 1. The head the land squashed last.
+    let mut req = ShowReq::new(landed);
+    req.max_changes = 1;
+    let shown = ctx.store.show(req)?;
+    let Some(made) = shown.squashed_from.last() else {
+        return Ok(None);
+    };
+
+    // 2. Made on `head`.
+    let mut req = ShowReq::new(made.as_str());
+    req.max_changes = 1;
+    let parent = ctx.store.show(req)?;
+    Ok((parent.parents.first().map(String::as_str) == Some(head)).then(|| made.clone()))
 }
 
 /// The check `input` asks for, of workspace `seen` landing on `target`: its command, or the
