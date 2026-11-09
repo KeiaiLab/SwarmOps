@@ -429,6 +429,7 @@ impl Journal {
                 offset,
                 records: records.to_vec(),
                 crc,
+                nonce: None,
             })
             .collect();
         Ok(frames)
@@ -574,6 +575,7 @@ impl Journal {
                         offset,
                         records,
                         crc,
+                        nonce: None,
                     });
                     at += bytes::to_u64(size);
                     prev_crc = crc;
@@ -717,6 +719,7 @@ impl Journal {
                         offset: at,
                         records,
                         crc,
+                        nonce: None,
                     });
                     seq += 1;
                     at += bytes::to_u64(size);

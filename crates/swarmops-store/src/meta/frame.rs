@@ -9,12 +9,16 @@
 //! RefMove   = u8 2 | u8 name_len | name | u8 has_old | old[32]? | u8 has_new | new[32]?
 //!             | u8 actor_len | actor | i64le ts
 //! Compacted = u8 4 | u64le sorted_count
+//! Fact      = u8 kind | u8 type | u16le body_len | subject[32] | other[32] | i64le ts
+//!             | u8 actor_len | actor | body                     (FORMAT 3: kinds 3, 5 to 10)
+//! Nonce     = u8 11 | u64le nonce                     (FORMAT 3: every frame's last record)
 //! ```
 //!
-//! A frame is one transaction: its records commit together. Kinds 3 (`ReviewEvent`) and 5
-//! (`Annotation`) are reserved for later milestones (storage spec §3). Decoding checks every
-//! length against the bytes at hand before it slices, so garbage gives an error, never a
-//! panic.
+//! A frame is one transaction: its records commit together. FORMAT 3 (the FORMAT 3 design §2.7,
+//! §2.8) keeps FORMAT 2's frame layout and adds the fact kinds, whose bodies the design's table
+//! fixes per kind and type, and the nonce, which [`Frame::nonce`] carries rather than
+//! [`Frame::records`]. Decoding checks every length against the bytes at hand before it slices,
+//! so garbage gives an error, never a panic.
 
 use swarmops_core::bytes::{self, Reader};
 use swarmops_core::{ChangesetId, ObjectId};
@@ -47,6 +51,17 @@ pub(crate) const MAX_PAYLOAD_LEN: usize = 2 + MAX_RECORDS * MAX_RECORD_LEN;
 const KIND_CHANGESET: u8 = 1;
 const KIND_REF_MOVE: u8 = 2;
 const KIND_COMPACTED: u8 = 4;
+const KIND_NONCE: u8 = 11;
+
+/// The most caller records of a FORMAT 3 frame: its nonce takes one of [`MAX_RECORDS`].
+pub(crate) const MAX_RECORDS_V3: usize = MAX_RECORDS - 1;
+
+/// The longest fact body, in bytes (the FORMAT 3 design §2.8): with the 77 fixed bytes and the
+/// longest actor, a fact (4,428 bytes) is shorter than the longest changeset record.
+pub const MAX_FACT_BODY: usize = 4_096;
+
+/// What an entity id's hash starts with (the FORMAT 3 design §2.8).
+const ENTITY_DOMAIN: &[u8] = b"swarmops:entity:v1\0";
 
 /// One change to the metadata, as the journal records it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +96,54 @@ pub enum Record {
         /// How many index records the sorted views hold now.
         sorted_count: u64,
     },
+    /// A fact (FORMAT 3 only, the FORMAT 3 design §2.8).
+    Fact(Fact),
+}
+
+/// The kinds of fact a FORMAT 3 journal holds (the FORMAT 3 design §2.7, §2.8): each one
+/// feature's, whose milestone gives it its meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum FactKind {
+    /// Kind 3: a change request's events.
+    Review,
+    /// Kind 5: a note on a changeset, under a key.
+    Annotation,
+    /// Kind 6: a check's state on a tree.
+    Check,
+    /// Kind 7: a land queue entry's events.
+    Queue,
+    /// Kind 8: a blob withdrawn, restored or erased.
+    Withdrawal,
+    /// Kind 9: a changeset's place in its lineage.
+    Lineage,
+    /// Kind 10: where a changeset came from.
+    Provenance,
+}
+
+/// Where a FORMAT 3 frame lies against the journal's base seq: before it, a FORMAT 2 writer
+/// wrote it (an upgraded store's); from it on, a FORMAT 3 writer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Base {
+    /// Before the base seq: FORMAT 2's records, `Compacted` among them; no fact, no nonce.
+    Before,
+    /// From the base seq on: no `Compacted`; facts of the kinds the caller knows.
+    After,
+}
+
+/// One fact: the envelope of the FORMAT 3 design §2.8 around a body whose layout its kind and
+/// type fix. Built only through [`Fact::new`], which checks the body, so every fact encodes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Fact {
+    kind: FactKind,
+    ty: u8,
+    subject: [u8; 32],
+    other: [u8; 32],
+    ts: i64,
+    actor: String,
+    body: Vec<u8>,
 }
 
 /// Bytes that are not a journal record: where [`Record::decode`] stopped in them. A position in
@@ -109,6 +172,9 @@ pub struct Frame {
     /// operation's id. A writer that takes the frame back and gives its seq to another frame
     /// gives that one another CRC unless the payloads collide (2^-32).
     pub crc: u32,
+    /// The nonce a FORMAT 3 frame ends in (the FORMAT 3 design §2.7), which its payload, and so
+    /// its CRC, holds; `None` in FORMAT 1 and 2. Never among `records`.
+    pub nonce: Option<u64>,
 }
 
 impl Frame {
@@ -126,6 +192,28 @@ impl Frame {
             offset,
             records,
             crc,
+            nonce: None,
+        }
+    }
+
+    /// [`Frame::new`] in `format`: the frame `seq` at `offset`, holding `records` and, in FORMAT
+    /// 3, ending in `nonce`. Its `crc` is 0 for what no frame of `format` holds (a FORMAT 3
+    /// frame without a nonce, a FORMAT 1 or 2 frame with one, or [`Frame::new`]'s cases).
+    pub fn new_in(
+        format: StoreFormat,
+        seq: u64,
+        offset: u64,
+        records: Vec<Record>,
+        nonce: Option<u64>,
+    ) -> Frame {
+        let crc = encode_frame_with_nonce(format, &records, nonce, seq, 0)
+            .map_or(0, |bytes| payload_crc(&bytes));
+        Frame {
+            seq,
+            offset,
+            records,
+            crc,
+            nonce,
         }
     }
 }
@@ -161,6 +249,33 @@ impl Record {
             _ => return Err(r.error_at(0)),
         };
         Ok((record, r.pos()))
+    }
+
+    /// [`Record::decode`] in `format`, for a frame on the `base` side of the journal's base seq:
+    /// FORMAT 1 and 2, and FORMAT 3 before the base, decode kinds 1, 2 and 4, as
+    /// [`Record::decode`] does; FORMAT 3 from the base on decodes kinds 1 and 2 and the facts of
+    /// the kinds in `known`. A nonce is no record: the frame's reader takes it.
+    pub fn decode_in(
+        format: StoreFormat,
+        base: Base,
+        known: &[FactKind],
+        buf: &[u8],
+    ) -> Result<(Record, usize), BadRecord> {
+        // 1. Every format's records but FORMAT 3's past the base: kinds 1, 2 and 4.
+        if format != StoreFormat::V3 || base == Base::Before {
+            return Self::decode(buf);
+        }
+
+        // 2. Past the base: no compaction or nonce record, and facts of the kinds known.
+        let code = buf.first().copied().ok_or(bad_record(0))?;
+        match FactKind::from_code(code) {
+            Some(kind) if known.contains(&kind) => {
+                Fact::decode(buf).map(|(fact, used)| (Self::Fact(fact), used))
+            }
+            Some(_) => Err(bad_record(0)),
+            None if matches!(code, KIND_COMPACTED | KIND_NONCE) => Err(bad_record(0)),
+            None => Self::decode(buf),
+        }
     }
 
     /// Appends the record's encoding to `out`. A length that does not fit its `u8` field (more
@@ -206,9 +321,330 @@ impl Record {
                 out.push(KIND_COMPACTED);
                 out.extend_from_slice(&sorted_count.to_le_bytes());
             }
+            Self::Fact(fact) => fact.encode(out),
         }
         Ok(())
     }
+}
+
+/// A field of a fact body (the FORMAT 3 design §2.8): integers little-endian, `id` 32 bytes.
+#[derive(Debug, Clone, Copy)]
+enum Field {
+    U16,
+    U32,
+    U64,
+    I64,
+    Id,
+    /// A `u32` that is 0: a first event's version.
+    Zero32,
+    /// An `i64` that is 0: a time only another type sets.
+    Zero64,
+    /// A `u8` that is 1: the provenance schema.
+    Schema,
+    /// A `u8` below the number: one of an enumeration's values.
+    Enum(u8),
+    /// `u8 len | UTF-8` of at most this many bytes.
+    Str(usize),
+    /// `u16le len | bytes`, of the first to the second number of bytes.
+    Bytes16(usize, usize),
+    /// A comment's anchor: `u8 has_anchor`, then, if 1, `u8 side{0, 1} | u32 start | u32 end |
+    /// str path`.
+    Anchor,
+}
+
+/// A string field of up to 255 bytes, all a `u8` length holds.
+const STR: Field = Field::Str(255);
+
+/// A Check's body, of every type (state).
+const CHECK_BODY: &[Field] = &[Field::Str(128), Field::Id, Field::Id, STR];
+
+/// A Lineage's body, of every type (cause).
+const LINEAGE_BODY: &[Field] = &[Field::Id];
+
+/// A withdrawal's reason; Withdraw, Restore and Erase give one.
+const REASON: Field = Field::Bytes16(1, 1_024);
+
+/// The bodies of each kind, by type (the FORMAT 3 design §2.8 table).
+const REVIEW: &[&[Field]] = {
+    use Field::{Anchor, Enum, Id, U32, U64, Zero32};
+    &[
+        &[Zero32, U64, STR, Id, Id, STR],
+        &[U32, U32, Id, Id, Id, Enum(5)],
+        &[U32, U32, Enum(4), Id, Id],
+        &[U32, U32, Enum(3), Id, Anchor, Id],
+        &[U32],
+        &[U32, Id],
+        &[U32, Enum(4)],
+        &[U32, U32, Enum(3), STR, Id],
+    ]
+};
+const ANNOTATION: &[&[Field]] = &[
+    &[Field::Str(64), Field::Bytes16(0, 1_024)],
+    &[Field::Str(64), Field::Bytes16(0, 0)],
+];
+const CHECK: &[&[Field]] = &[CHECK_BODY; 7];
+const QUEUE: &[&[Field]] = {
+    use Field::{Enum, Id, U16, U32, Zero32};
+    &[
+        &[Zero32, STR, Id, Id],
+        &[U32, Id, Id, Id, U16],
+        &[U32, STR],
+        &[U32, Id],
+        &[U32, Enum(5), STR, Id, Id],
+    ]
+};
+const WITHDRAWAL: &[&[Field]] = {
+    use Field::{Bytes16, I64, Zero64};
+    &[
+        &[I64, REASON],
+        &[Zero64, REASON],
+        &[Zero64, REASON],
+        &[Zero64, Bytes16(0, 1_024)],
+    ]
+};
+const LINEAGE: &[&[Field]] = &[LINEAGE_BODY; 7];
+const PROVENANCE: &[&[Field]] = {
+    use Field::{Id, Schema, U64};
+    &[&[Schema, U64, U64, U64, STR, STR, STR, STR, Id], &[Schema]]
+};
+
+impl FactKind {
+    /// Every kind, in kind number order.
+    pub const ALL: [FactKind; 7] = [
+        Self::Review,
+        Self::Annotation,
+        Self::Check,
+        Self::Queue,
+        Self::Withdrawal,
+        Self::Lineage,
+        Self::Provenance,
+    ];
+
+    /// Its kind number in the journal: 3, or 5 to 10.
+    pub fn code(self) -> u8 {
+        match self {
+            Self::Review => 3,
+            Self::Annotation => 5,
+            Self::Check => 6,
+            Self::Queue => 7,
+            Self::Withdrawal => 8,
+            Self::Lineage => 9,
+            Self::Provenance => 10,
+        }
+    }
+
+    /// The kind whose number is `code`; `None` for a number no fact has.
+    pub fn from_code(code: u8) -> Option<FactKind> {
+        Self::ALL.into_iter().find(|kind| kind.code() == code)
+    }
+
+    /// The id of the entity a fact of this kind creates as record `index` of the frame whose
+    /// nonce is `nonce`: `blake3("swarmops:entity:v1\0" ‖ u8 kind ‖ u64le nonce ‖ u16le index)`
+    /// (the FORMAT 3 design §2.8), unique because every frame's nonce is its own.
+    pub fn entity_id(self, nonce: u64, index: u16) -> [u8; 32] {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(ENTITY_DOMAIN);
+        hasher.update(&[self.code()]);
+        hasher.update(&nonce.to_le_bytes());
+        hasher.update(&index.to_le_bytes());
+        *hasher.finalize().as_bytes()
+    }
+
+    /// The fields of the body of type `ty`; `None` for a type the kind does not have.
+    fn body(self, ty: u8) -> Option<&'static [Field]> {
+        let bodies = match self {
+            Self::Review => REVIEW,
+            Self::Annotation => ANNOTATION,
+            Self::Check => CHECK,
+            Self::Queue => QUEUE,
+            Self::Withdrawal => WITHDRAWAL,
+            Self::Lineage => LINEAGE,
+            Self::Provenance => PROVENANCE,
+        };
+        bodies.get(usize::from(ty)).copied()
+    }
+}
+
+/// Where in a fact `other` starts: after kind, type, body length and subject.
+const OTHER_AT: usize = 36;
+
+impl Fact {
+    /// The fact of `kind` and type `ty` about `subject` (and `other`, all zero for none), made
+    /// at `ts` by `actor`, with `body`. Refuses an actor longer than 255 bytes with
+    /// [`StoreError::Limit`]; a type the kind does not have, a body its type's layout does not
+    /// read as exactly, or a withdrawal naming an `other`, with [`StoreError::BadCall`].
+    pub fn new(
+        kind: FactKind,
+        ty: u8,
+        subject: [u8; 32],
+        other: [u8; 32],
+        ts: i64,
+        actor: String,
+        body: Vec<u8>,
+    ) -> Result<Fact, StoreError> {
+        fits_u8(LimitKind::ActorBytes, actor.len())?;
+        let refused =
+            |why: &str| StoreError::BadCall(format!("a {kind:?} fact of type {ty} {why}"));
+        let fields = kind.body(ty).ok_or_else(|| refused("is no fact"))?;
+        if !other_fits(kind, &other) {
+            return Err(refused("names no other"));
+        }
+        if body.len() > MAX_FACT_BODY || check_body(fields, &body).is_err() {
+            return Err(refused("has another body"));
+        }
+        Ok(Fact {
+            kind,
+            ty,
+            subject,
+            other,
+            ts,
+            actor,
+            body,
+        })
+    }
+
+    /// Its kind.
+    pub fn kind(&self) -> FactKind {
+        self.kind
+    }
+
+    /// Its type, within its kind.
+    pub fn ty(&self) -> u8 {
+        self.ty
+    }
+
+    /// The id the fact is about, which the fact index finds it by.
+    pub fn subject(&self) -> [u8; 32] {
+        self.subject
+    }
+
+    /// The second id the fact index finds it by; all zero for none.
+    pub fn other(&self) -> [u8; 32] {
+        self.other
+    }
+
+    /// When it was queued, in Unix seconds, as the writer recorded it.
+    pub fn ts(&self) -> i64 {
+        self.ts
+    }
+
+    /// Who made it.
+    pub fn actor(&self) -> &str {
+        &self.actor
+    }
+
+    /// Its body, in its type's layout.
+    pub fn body(&self) -> &[u8] {
+        &self.body
+    }
+
+    /// The fact at the start of `buf`, whose kind byte names a fact kind, and how many bytes it
+    /// took.
+    fn decode(buf: &[u8]) -> Result<(Fact, usize), BadRecord> {
+        // 1. The envelope.
+        let mut r = Reader::new(buf, bad_record);
+        let kind = FactKind::from_code(r.u8()?).ok_or(bad_record(0))?;
+        let ty_at = r.pos();
+        let ty = r.u8()?;
+        let len_at = r.pos();
+        let body_len = usize::from(u16::from_le_bytes(r.array()?));
+        let subject = r.array()?;
+        let other = r.array()?;
+        let ts = r.i64_le()?;
+        let actor = r.string()?;
+
+        // 2. The body, which its kind and type lay out, exactly.
+        let fields = kind.body(ty).ok_or(bad_record(ty_at))?;
+        if body_len > MAX_FACT_BODY {
+            return Err(bad_record(len_at));
+        }
+        if !other_fits(kind, &other) {
+            return Err(bad_record(OTHER_AT));
+        }
+        let body_at = r.pos();
+        let body = r.bytes(body_len)?;
+        check_body(fields, body).map_err(|e| bad_record(body_at + e.at))?;
+        let fact = Fact {
+            kind,
+            ty,
+            subject,
+            other,
+            ts,
+            actor,
+            body: body.to_vec(),
+        };
+        Ok((fact, r.pos()))
+    }
+
+    /// Appends its encoding to `out`; [`Fact::new`] checked every length.
+    fn encode(&self, out: &mut Vec<u8>) {
+        let body_len = u16::try_from(self.body.len()).expect("a body of at most 4,096 bytes");
+        let actor_len = u8::try_from(self.actor.len()).expect("an actor of at most 255 bytes");
+        out.push(self.kind.code());
+        out.push(self.ty);
+        out.extend_from_slice(&body_len.to_le_bytes());
+        out.extend_from_slice(&self.subject);
+        out.extend_from_slice(&self.other);
+        out.extend_from_slice(&self.ts.to_le_bytes());
+        out.push(actor_len);
+        out.extend_from_slice(self.actor.as_bytes());
+        out.extend_from_slice(&self.body);
+    }
+}
+
+/// Whether `other` is one a fact of `kind` may name: a withdrawal names none.
+fn other_fits(kind: FactKind, other: &[u8; 32]) -> bool {
+    kind != FactKind::Withdrawal || other.iter().all(|&b| b == 0)
+}
+
+/// Whether `body` is exactly `fields`; [`BadRecord`] at the field in it that is not.
+fn check_body(fields: &[Field], body: &[u8]) -> Result<(), BadRecord> {
+    let mut r = Reader::new(body, bad_record);
+    for &field in fields {
+        read_field(&mut r, field)?;
+    }
+    if r.rest().is_empty() {
+        Ok(())
+    } else {
+        Err(bad_record(r.pos()))
+    }
+}
+
+/// Reads `field` off `r`; [`BadRecord`] at its start when it is not one.
+fn read_field(r: &mut Reader<'_, BadRecord>, field: Field) -> Result<(), BadRecord> {
+    let at = r.pos();
+    let zero = |bytes: &[u8]| bytes.iter().all(|&b| b == 0);
+    let fits = match field {
+        Field::U16 => r.bytes(2).is_ok(),
+        Field::U32 => r.bytes(4).is_ok(),
+        Field::U64 | Field::I64 => r.bytes(8).is_ok(),
+        Field::Id => r.bytes(32).is_ok(),
+        Field::Zero32 => r.bytes(4).is_ok_and(zero),
+        Field::Zero64 => r.bytes(8).is_ok_and(zero),
+        Field::Schema => r.u8()? == 1,
+        Field::Enum(values) => r.u8()? < values,
+        Field::Str(max) => {
+            let len = usize::from(r.u8()?);
+            r.bytes(len)
+                .is_ok_and(|text| std::str::from_utf8(text).is_ok())
+                && len <= max
+        }
+        Field::Bytes16(min, max) => {
+            let len = usize::from(u16::from_le_bytes(r.array()?));
+            r.bytes(len).is_ok() && (min..=max).contains(&len)
+        }
+        Field::Anchor => match r.u8()? {
+            0 => true,
+            1 => {
+                for part in [Field::Enum(2), Field::U32, Field::U32, STR] {
+                    read_field(r, part)?;
+                }
+                true
+            }
+            _ => false,
+        },
+    };
+    if fits { Ok(()) } else { Err(bad_record(at)) }
 }
 
 /// `len` as the `u8` a record's length field holds; past 255, [`StoreError::Limit`] for `what`.
@@ -234,26 +670,36 @@ fn put_optional_id(out: &mut Vec<u8>, id: Option<ChangesetId>) {
 /// whose lengths do not fit the layout, with [`StoreError::Limit`]; no records, which no
 /// transaction appends, with [`StoreError::BadCall`].
 pub(crate) fn encode_frame(records: &[Record]) -> Result<Vec<u8>, StoreError> {
-    encode_behind(HEADER_LEN, records)
+    encode_behind(HEADER_LEN, records, None)
 }
 
-/// The bytes of a frame holding `records` behind a header of `header_len` bytes, of which the
-/// first 8 (`len`, `crc`) are written and the rest left 0: [`encode_frame`]'s checks.
-fn encode_behind(header_len: usize, records: &[Record]) -> Result<Vec<u8>, StoreError> {
+/// The bytes of a frame holding `records`, then the nonce record of `nonce` if there is one,
+/// behind a header of `header_len` bytes, of which the first 8 (`len`, `crc`) are written and the
+/// rest left 0: [`encode_frame`]'s checks.
+fn encode_behind(
+    header_len: usize,
+    records: &[Record],
+    nonce: Option<u64>,
+) -> Result<Vec<u8>, StoreError> {
     if records.is_empty() {
         return Err(StoreError::BadCall(
             "a frame holds at least one record".to_owned(),
         ));
     }
-    let count = u16::try_from(records.len()).map_err(|_| StoreError::Limit {
+    let records_len = records.len() + usize::from(nonce.is_some());
+    let count = u16::try_from(records_len).map_err(|_| StoreError::Limit {
         what: LimitKind::Records,
         max: bytes::to_u64(MAX_RECORDS),
-        got: bytes::to_u64(records.len()),
+        got: bytes::to_u64(records_len),
     })?;
     let mut frame = vec![0; header_len];
     frame.extend_from_slice(&count.to_le_bytes());
     for record in records {
         record.encode(&mut frame)?;
+    }
+    if let Some(nonce) = nonce {
+        frame.push(KIND_NONCE);
+        frame.extend_from_slice(&nonce.to_le_bytes());
     }
     let payload = &frame[header_len..];
     // At most 65,535 records of at most 8,234 bytes (a changeset with 255 parents).
@@ -303,7 +749,7 @@ pub(crate) fn header_len(format: StoreFormat) -> usize {
 /// The bytes of a frame of `format` holding `records`: [`encode_frame`] in FORMAT 1, where
 /// `seq` and `prev_crc` are not written; in FORMAT 2 the frame's seq and the payload CRC of the
 /// frame before it go in its header ([`set_place`]). A FORMAT 3 frame ends in a nonce, which
-/// this takes none of: [`StoreError::BadCall`].
+/// this takes none of: [`StoreError::BadCall`] (see [`encode_frame_with_nonce`]).
 pub(crate) fn encode_frame_in(
     format: StoreFormat,
     records: &[Record],
@@ -313,13 +759,50 @@ pub(crate) fn encode_frame_in(
     match format {
         StoreFormat::V1 => encode_frame(records),
         StoreFormat::V2 => {
-            let mut frame = encode_behind(HEADER_LEN_V2, records)?;
+            let mut frame = encode_behind(HEADER_LEN_V2, records, None)?;
             set_place(&mut frame, seq, prev_crc);
             Ok(frame)
         }
         StoreFormat::V3 => Err(StoreError::BadCall(
             "a FORMAT 3 frame ends in a nonce: encode it with one".to_owned(),
         )),
+    }
+}
+
+/// [`encode_frame_in`] for every format: in FORMAT 3 the frame's records, then the nonce record
+/// of `nonce` (the FORMAT 3 design §2.7), behind FORMAT 2's header. Refuses a FORMAT 3 frame
+/// without a nonce, or a FORMAT 1 or 2 frame with one, with [`StoreError::BadCall`]; a FORMAT 3
+/// frame of more than [`MAX_RECORDS_V3`] records, whose nonce would not fit the count, with
+/// [`StoreError::Limit`].
+pub(crate) fn encode_frame_with_nonce(
+    format: StoreFormat,
+    records: &[Record],
+    nonce: Option<u64>,
+    seq: u64,
+    prev_crc: u32,
+) -> Result<Vec<u8>, StoreError> {
+    match (format, nonce) {
+        (StoreFormat::V1 | StoreFormat::V2, None) => {
+            encode_frame_in(format, records, seq, prev_crc)
+        }
+        (StoreFormat::V1 | StoreFormat::V2, Some(_)) => Err(StoreError::BadCall(
+            "a FORMAT 1 or 2 frame holds no nonce".to_owned(),
+        )),
+        (StoreFormat::V3, None) => Err(StoreError::BadCall(
+            "a FORMAT 3 frame ends in a nonce".to_owned(),
+        )),
+        (StoreFormat::V3, Some(nonce)) => {
+            if records.len() > MAX_RECORDS_V3 {
+                return Err(StoreError::Limit {
+                    what: LimitKind::Records,
+                    max: bytes::to_u64(MAX_RECORDS_V3),
+                    got: bytes::to_u64(records.len()),
+                });
+            }
+            let mut frame = encode_behind(HEADER_LEN_V2, records, Some(nonce))?;
+            set_place(&mut frame, seq, prev_crc);
+            Ok(frame)
+        }
     }
 }
 
@@ -651,6 +1134,135 @@ mod tests {
                 Parsed::BadCrc
             ));
         }
+    }
+
+    /// FORMAT 3's encoder writes the nonce frame's golden bytes (built there from the header
+    /// layout), takes no frame without a nonce, and keeps a place in the count for it.
+    #[test]
+    fn frame3_encodes_with_its_nonce() {
+        // 1. The golden's frame: a RefMove at seq 3, its nonce last.
+        let golden = include_str!("../../tests/golden3/nonce_frame.hex");
+        let line = golden.lines().next().unwrap();
+        let want: Vec<u8> = (0..line.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&line[at..at + 2], 16).unwrap())
+            .collect();
+        let records = [Record::RefMove {
+            name: "main".to_owned(),
+            old: None,
+            new: Some(ChangesetId::new(ObjectId::new([5; 32]))),
+            actor: "agent/one".to_owned(),
+            ts: 1_700_000_123,
+        }];
+        let nonce = Some(0x1122_3344_5566_7788);
+        let got = encode_frame_with_nonce(StoreFormat::V3, &records, nonce, 3, 0xa1b2_c3d4);
+        assert_eq!(got.unwrap(), want);
+
+        // 2. A nonce in FORMAT 3 only, and the old encoder takes none.
+        let bad_call =
+            |got: Result<Vec<u8>, StoreError>| matches!(got, Err(StoreError::BadCall(_)));
+        assert!(bad_call(encode_frame_with_nonce(
+            StoreFormat::V3,
+            &records,
+            None,
+            3,
+            0
+        )));
+        assert!(bad_call(encode_frame_with_nonce(
+            StoreFormat::V2,
+            &records,
+            nonce,
+            3,
+            0
+        )));
+        assert!(bad_call(encode_frame_in(StoreFormat::V3, &records, 3, 0)));
+        assert_eq!(
+            encode_frame_with_nonce(StoreFormat::V2, &records, None, 3, 7).unwrap(),
+            encode_frame_in(StoreFormat::V2, &records, 3, 7).unwrap()
+        );
+
+        // 3. 65,534 records and the nonce fit; one more does not.
+        let mut many = vec![compacted(0); MAX_RECORDS_V3];
+        assert!(encode_frame_with_nonce(StoreFormat::V3, &many, nonce, 0, 0).is_ok());
+        many.push(compacted(0));
+        assert!(matches!(
+            encode_frame_with_nonce(StoreFormat::V3, &many, nonce, 0, 0),
+            Err(StoreError::Limit {
+                what: LimitKind::Records,
+                max: 65_534,
+                got: 65_535
+            })
+        ));
+        assert!(encode_frame_with_nonce(StoreFormat::V2, &many, None, 0, 0).is_ok());
+    }
+
+    /// A fact is built only with a body its kind and type lay out, exactly.
+    #[test]
+    fn a_fact_takes_only_its_types_body() {
+        let new = |kind, ty, other, actor: &str, body: &[u8]| {
+            Fact::new(kind, ty, [1; 32], other, 0, actor.to_owned(), body.to_vec())
+        };
+        let lineage = [7; 32];
+        assert!(new(FactKind::Lineage, 6, [2; 32], "a", &lineage).is_ok());
+
+        // 1. A type the kind has not, a body too short or too long, an actor past 255 bytes.
+        let bad_call = |got: Result<Fact, StoreError>| matches!(got, Err(StoreError::BadCall(_)));
+        assert!(bad_call(new(FactKind::Lineage, 7, [2; 32], "a", &lineage)));
+        assert!(bad_call(new(
+            FactKind::Lineage,
+            0,
+            [2; 32],
+            "a",
+            &lineage[1..]
+        )));
+        assert!(bad_call(new(FactKind::Lineage, 0, [2; 32], "a", &[0; 33])));
+        assert!(matches!(
+            new(FactKind::Lineage, 0, [2; 32], &"a".repeat(256), &lineage),
+            Err(StoreError::Limit {
+                what: LimitKind::ActorBytes,
+                ..
+            })
+        ));
+
+        // 2. Enumerations, fixed values, string bounds and UTF-8; a withdrawal names no other.
+        let review_state = |state: u8| [&[6, 0, 0, 0][..], &[state]].concat();
+        assert!(new(FactKind::Review, 6, [0; 32], "", &review_state(3)).is_ok());
+        assert!(bad_call(new(
+            FactKind::Review,
+            6,
+            [0; 32],
+            "",
+            &review_state(4)
+        )));
+        assert!(bad_call(new(FactKind::Provenance, 1, [0; 32], "", &[2])));
+        let key = |len: usize, byte: u8| {
+            [&[u8::try_from(len).unwrap()][..], &vec![byte; len], &[0, 0]].concat()
+        };
+        assert!(new(FactKind::Annotation, 1, [0; 32], "", &key(64, b'k')).is_ok());
+        assert!(bad_call(new(
+            FactKind::Annotation,
+            1,
+            [0; 32],
+            "",
+            &key(65, b'k')
+        )));
+        assert!(bad_call(new(
+            FactKind::Annotation,
+            1,
+            [0; 32],
+            "",
+            &key(1, 0xff)
+        )));
+        let reason = [&0i64.to_le_bytes()[..], &[1, 0, b'x']].concat();
+        assert!(new(FactKind::Withdrawal, 1, [0; 32], "", &reason).is_ok());
+        assert!(bad_call(new(FactKind::Withdrawal, 1, [3; 32], "", &reason)));
+        assert!(bad_call(new(
+            FactKind::Withdrawal,
+            1,
+            [0; 32],
+            "",
+            &reason[..10]
+        )));
     }
 
     /// A header that checks but announces 0 or more than the bound is refused from the header.

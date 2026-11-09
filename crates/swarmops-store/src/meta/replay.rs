@@ -195,7 +195,7 @@ pub(super) fn changesets(frames: &[Frame]) -> Vec<ChangesetRecord<'_>> {
                 delta_hash,
                 parents,
             }),
-            Record::RefMove { .. } | Record::Compacted { .. } => None,
+            Record::RefMove { .. } | Record::Compacted { .. } | Record::Fact(_) => None,
         })
         .collect()
 }

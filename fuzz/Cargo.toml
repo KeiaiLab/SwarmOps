@@ -85,6 +85,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "frame3_decode"
+path = "fuzz_targets/frame3_decode.rs"
+test = false
+doc = false
+bench = false
+
 # Own workspace: `just fuzz` builds and runs it with nightly; `just check` (and
 # scripts/check.sh) formats and lints it with stable.
 [workspace]

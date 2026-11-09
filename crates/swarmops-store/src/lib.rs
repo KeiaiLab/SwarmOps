@@ -47,6 +47,7 @@ pub use fs_ops::{CrashAtFs, FailAt, FailAtFs, FailMode, InjectedError};
 pub use gc::{GC_TEMP_GRACE, Leftover, LeftoverKind};
 pub use layout::{Layout, is_native_linux_fs};
 pub use maint::MaintLease;
+pub use meta::frame::{Base, Fact, FactKind, MAX_FACT_BODY};
 pub use meta::queue::{ANSWER_MAX, ANSWER_POLL, MAX_BATCH, PLAN_BUDGET, REQUEST_MAX, WARNING_MAX};
 pub use meta::refs::{
     RefKind, check_move, check_ref_name, check_ref_name_in, check_remote_segment, ref_kind,

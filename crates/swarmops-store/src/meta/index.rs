@@ -1524,7 +1524,7 @@ fn last_changeset_before(journal: &Journal, seq: u64) -> Result<Option<Changeset
         let last = frames.iter().rev().find_map(|frame| {
             frame.records.iter().rev().find_map(|record| match record {
                 Record::Changeset { id, .. } => Some(*id),
-                Record::RefMove { .. } | Record::Compacted { .. } => None,
+                Record::RefMove { .. } | Record::Compacted { .. } | Record::Fact(_) => None,
             })
         });
         if last.is_some() {

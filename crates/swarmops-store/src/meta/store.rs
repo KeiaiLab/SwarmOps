@@ -991,7 +991,7 @@ impl MetaWrite<'_> {
                     delta_hash,
                     parents,
                 } => Some((id, generation, delta_hash, parents)),
-                Record::RefMove { .. } | Record::Compacted { .. } => None,
+                Record::RefMove { .. } | Record::Compacted { .. } | Record::Fact(_) => None,
             });
             // The queued changesets take the seqs after the index's, in the queue's order.
             for (at, (queued_id, generation, delta_hash, parents)) in queued.enumerate() {
@@ -1199,6 +1199,7 @@ impl MetaWrite<'_> {
                     offset,
                     records: self.records[start..closed.end].to_vec(),
                     crc: closed.crc,
+                    nonce: None,
                 });
             }
             offset += closed.len;
@@ -1599,6 +1600,7 @@ fn entries(frame: &Frame) -> impl Iterator<Item = JournalEntry> + '_ {
             Record::Changeset { id, .. } => ("changeset", id.0.0.to_vec(), 0),
             Record::RefMove { name, ts, .. } => ("ref_move", name.as_bytes().to_vec(), *ts),
             Record::Compacted { .. } => ("compacted", Vec::new(), 0),
+            Record::Fact(fact) => ("fact", fact.subject().to_vec(), fact.ts()),
         };
         JournalEntry {
             seq: frame.seq,
