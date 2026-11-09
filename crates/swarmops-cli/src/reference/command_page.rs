@@ -95,6 +95,10 @@ const MAINTENANCE_SINCE: &str = "0.4.0";
 const SERVE_COMMAND: &str = "serve";
 const SERVE_SINCE: &str = "0.7.0";
 
+/// The command that reads ancestry over every parent (M16), and the release it first ships in.
+const ANCESTRY_COMMAND: &str = "ancestry";
+const ANCESTRY_SINCE: &str = "0.9.0";
+
 /// The history and landing commands (M18) and the snapshot on demand (M19), and the release
 /// they first ship in.
 const TAKE_BACK_COMMANDS: [&str; 7] = [
@@ -112,6 +116,9 @@ const TAKE_BACK_SINCE: &str = "0.11.0";
 fn since(path: &str) -> &'static str {
     if path == SERVE_COMMAND {
         return SERVE_SINCE;
+    }
+    if path == ANCESTRY_COMMAND {
+        return ANCESTRY_SINCE;
     }
     if REMOTE_COMMANDS.contains(&path) {
         return REMOTE_SINCE;

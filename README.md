@@ -34,8 +34,8 @@ work to and from git, so that CI and deployments keep running.
 
 It is pre-release, at v0.11.0 (milestones through M16, and M17's, M18's and M19's slices): usable by one agent, with a store that
 already takes commits from many processes at once; merging and landing, which a swarm needs, are
-built, and landing under a swarm's load is measured, within its targets but for the p99 at 50
-processes; a store clones,
+built, and landing under a swarm's load is measured, within its targets at 50 processes on batched
+lands, its 32-process runs not recorded yet; a store clones,
 fetches, pushes and syncs with GitHub itself; stock git clones, fetches and pushes a store that
 `swarmops serve` serves; and an agent builds and tests its change in a
 workspace on disk, then lands the tree it tested ([roadmap](#roadmap)).

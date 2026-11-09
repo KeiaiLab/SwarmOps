@@ -8,7 +8,7 @@ Compare two revisions' ancestry along every parent: whether FROM is an ancestor 
 title: "swarmops ancestry"
 description: "Compare two revisions' ancestry along every parent: whether FROM is an ancestor of TO, their merge bases, and a page of the changesets TO reaches and FROM does not."
 group: "read"
-since: "0.1.0"
+since: "0.9.0"
 mutates: false
 identity_required: false
 mcp_tool: "ancestry"

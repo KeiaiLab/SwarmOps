@@ -19,6 +19,11 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 ## [Unreleased]
 
+### Fixed
+
+- The reference pages of the command and the MCP tool `ancestry` give the release it first shipped
+  in, `since: "0.9.0"`, where they said 0.1.0.
+
 ## [0.11.0] - 2026-11-09
 
 Taking back, landing together and safer workspaces. The 0.11.0 release holds M18's and M19's
@@ -26,8 +31,9 @@ slices and M17's closure slices; the exit criteria of all three stay open. M18 a
 `revert`, `land-check`, `land-group`, `ref txn`, `merge-base`, revisions by move and by instant,
 and conflict reports that name every changeset since the base; golden envelopes pin 55 of the 55
 error codes. Group commit, batched in 0.10.0, meets G4 at 50 processes in two runs started under
-the measurement gate: p99 157.320 ms and 154.458 ms against 500 ms, 25.0 lands/s, 0 % retries,
-nothing lost ([docs/perf.md](docs/perf.md), "D2-8 gated runs — 2026-11-09"); its 32-process runs
+the measurement gate on 0.10.0's batching code: p99 157.320 ms and 154.458 ms against 500 ms,
+25.0 lands/s, 0 % retries, nothing lost ([docs/perf.md](docs/perf.md), "D2-8 gated runs —
+2026-11-09"); its 32-process runs
 and the group-commit design's slow sweeps are not recorded yet. M18's first sync after a clone is
 missed: 13.081 s on 12,000 commits against 1 s (docs/perf.md, "M18 first sync after a clone —
 2026-11-08"). M19 refuses a stale workspace in every command that reads or writes one, snapshots a
@@ -36,9 +42,9 @@ one change breaks: `ws rebase` on a workspace with edits snapshots and carries t
 answering `E_WS_DIRTY`. G9's workspace rows are not measured again (docs/perf.md, "M19 fan-in —
 2026-11-09 (not measured)"). M17's closure: a served pack-cache hit runs no git, refreshes
 coalesce and leave `git/serve.lock` free while they wait, a push's hooks map a bounded share of
-the packs and compress on a bounded thread pool, and the export's steps are timed; M17's goals
-are not measured again yet. The store's write queue no longer leaves a declined request's lock
-wait behind, nor loses a request its janitor took.
+the packs and compress on a bounded thread pool, and test builds time the export's steps; M17's
+goals are not measured again yet. The store's write queue no longer leaves a declined request's
+lock wait behind, nor loses a request its janitor took.
 
 ### Changed (breaking)
 
@@ -161,8 +167,8 @@ wait behind, nor loses a request its janitor took.
   on its first lock wait, so a declined turn leaves no helper behind.
 - A request a waiter was placing in the store's write queue could be removed by the leader's
   cleanup in the instant before the waiter locked it; the waiter then waited for the lock alone,
-  and under load could end `E_BUSY`. It now places the request again under a fresh name, at most
-  three times.
+  and under load could end `E_BUSY`. It now places the request again under a fresh name, up to
+  three placements in all.
 - `ws rebase` found an ignored file at a path the target adds only after the store had recorded
   the snapshot and the rebased changeset. It now checks the paths the target changed against the
   disk before any store call: `E_WS_DIRTY`, nothing recorded. A file standing where the target

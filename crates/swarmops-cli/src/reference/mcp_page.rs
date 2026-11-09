@@ -80,6 +80,10 @@ const WORKSPACE_SINCE: &str = "0.3.0";
 const MAINTENANCE_TOOLS: [&str; 3] = ["gc", "repair", "upgrade"];
 const MAINTENANCE_SINCE: &str = "0.4.0";
 
+/// The tool that reads ancestry over every parent (M16), and the release it first ships in.
+const ANCESTRY_TOOL: &str = "ancestry";
+const ANCESTRY_SINCE: &str = "0.9.0";
+
 /// The history and landing tools (M18), and the release they first ship in.
 const TAKE_BACK_TOOLS: [&str; 6] = [
     "ref_log",
@@ -115,6 +119,9 @@ fn since(name: &str) -> &'static str {
     }
     if MAINTENANCE_TOOLS.contains(&name) {
         return MAINTENANCE_SINCE;
+    }
+    if name == ANCESTRY_TOOL {
+        return ANCESTRY_SINCE;
     }
     if TAKE_BACK_TOOLS.contains(&name) {
         return TAKE_BACK_SINCE;

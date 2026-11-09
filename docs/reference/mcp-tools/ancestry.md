@@ -7,7 +7,7 @@ Along every parent, a merge's other parents too: whether from is an ancestor of 
 ```yaml
 title: "ancestry"
 description: "Compare two revisions' ancestry."
-since: "0.1.0"
+since: "0.9.0"
 mutates: false
 identity_required: false
 cli_command: "swarmops ancestry"

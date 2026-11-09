@@ -138,7 +138,7 @@ The releases that get there:
 | v0.8.0 | Safety and contract, first part | M15: 54 of 55 codes pinned, op ids an undo cannot redirect, a fetch that imports before it moves a tracking ref, `main` forward only, three workspace refusals, a land key scoped to the store, the land grant checked on each attempt; `.deb` and `.rpm` packages |
 | v0.9.0 | Safety and load | M16: condition 5's remaining core rows closed in scope; G4 re-measured with one lock pass per land: p99 under 500 ms at 50 processes in one of two runs, so condition 2 is not met robustly ([perf.md](perf.md#m16--2026-11-07)) |
 | v0.10.0 | Serve under load | M17: served reads off the writer lock, preparation, one pack per identical read; the prepared first clone 0.72× git's own server; G18's commit wait, G19's CPU, G20's land p99 at 50 processes and G22's memory missed, G21 not measured yet ([perf.md](perf.md#m17-baselines--2026-11-07)) |
-| v0.11.0 | Take back, workspaces | M18's and M19's slices: `revert`, `ref log` (55 of 55 codes pinned), `land-check`, `land-group`, `ref txn`, `merge-base`; stale workspaces refused everywhere, edits snapshotted before an update; G4 at 50 processes on v0.10.0's batching met in two gated runs (p99 157.3 ms and 154.5 ms), its 32-process runs not recorded; the first sync after a clone missed (13.081 s against 1 s); G9's rows not measured again ([perf.md](perf.md#d2-8-g4-on-batched-lands--2026-11-08-not-measured-the-host-was-never-quiet), [perf.md](perf.md#m19-fan-in--2026-11-09-not-measured)) |
+| v0.11.0 | Take back, workspaces | M18's and M19's slices: `revert`, `ref log` (55 of 55 codes pinned), `land-check`, `land-group`, `ref txn`, `merge-base`; stale workspaces refused everywhere, edits snapshotted before an update; G4 at 50 processes on v0.10.0's batching met in two gated runs (p99 157.3 ms and 154.5 ms), its 32-process runs not recorded; the first sync after a clone missed (13.081 s against 1 s); G9's rows not measured again ([perf.md](perf.md#d2-8-gated-runs--2026-11-09), [perf.md](perf.md#m19-fan-in--2026-11-09-not-measured)) |
 
 SwarmOps is declared usable at the first release where all seven conditions hold; condition 6
 counts from the last release that shipped a data-safety fix.
@@ -156,7 +156,7 @@ robustly, so M18 starts with group commit (D2): lands and commits that wait on t
 committed in batches (D2-1 to D2-7, in v0.10.0). On batching, in two runs started under the
 measurement gate in a night window, G4 at 50 processes is met: p99 157.3 ms and 154.5 ms, 25.0
 lands/s, 0 % retries, nothing lost
-([perf.md](perf.md#d2-8-g4-on-batched-lands--2026-11-08-not-measured-the-host-was-never-quiet),
+([perf.md](perf.md#d2-8-gated-runs--2026-11-09),
 "D2-8 gated runs"); its 32-process runs, G1 at 50 × 1,000 with batched commits and the group-commit
 design's slow sweeps are not recorded yet, so condition 2 stays open. G17's push and fetch are met
 (1.02× and 1.34×, the fetch with the mirror's commit-graph); the sync of one land right after a
