@@ -2816,6 +2816,8 @@ mod batch_loss {
         let (t0, heads) = (heads[0], &heads[1..]);
         let frames_before = frame_count(&root);
         fs.mark("before");
+        // Whoever leads plans the other two, whatever the planning budget (a loaded host).
+        fs.set_lead_wait(LANDERS - 1);
 
         // 2. The lock held while the landers queue, one after the other, then let go.
         let recorder = &*fs;

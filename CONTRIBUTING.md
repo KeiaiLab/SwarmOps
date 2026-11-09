@@ -160,8 +160,8 @@ and binary code, and the page lists what review reads for and the recorded devia
   `SWARMOPS_TEST_NOW`, `SWARMOPS_TEST_GITHUB_HOSTS`, which makes a push count other hosts as
   GitHub's for its limits, `SWARMOPS_TEST_SERVE_CACHE`, which bounds `serve`'s pack cache
   or skips its reachability check, `SWARMOPS_TEST_LEAD_WAIT`, which makes a writer that
-  leads the write queue wait for other requests, and `SWARMOPS_TEST_PHASE_LOG`, which makes a
-  sync and a push append each phase's time to a file), read only under
+  leads the write queue wait for other requests and plan them, and `SWARMOPS_TEST_PHASE_LOG`,
+  which makes a sync and a push append each phase's time to a file), read only under
   `#[cfg(feature = "test-hooks")]`. A test that needs them is marked
   `#[cfg(feature = "test-hooks")]`, or, for a whole file, its `mod` line in `tests/all.rs`
   is (the CLI's `crash` and `faults` modules), so that a plain `cargo test` skips it; the

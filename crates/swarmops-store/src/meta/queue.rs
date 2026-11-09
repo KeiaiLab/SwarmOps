@@ -1212,9 +1212,17 @@ impl<'a> Lead<'a> {
         }
     }
 
+    /// How many other requests the lead-wait hook asks for: the seam's, the filesystem's, or
+    /// the environment's ([`fs_ops::LEAD_WAIT_ENV`]).
+    fn lead_wait(&self) -> Option<usize> {
+        (self.seams.lead_wait)
+            .or_else(|| self.store.fs.ops().lead_wait())
+            .or_else(lead_wait_from_env)
+    }
+
     /// The test hook: waits up to 10 s for as many other pending requests as it asks for.
     fn wait_hook(&self) {
-        let Some(wanted) = self.seams.lead_wait.or_else(lead_wait_from_env) else {
+        let Some(wanted) = self.lead_wait() else {
             return;
         };
         let dir = self.store.layout.queue_dir();
@@ -1284,11 +1292,15 @@ impl<'a> Lead<'a> {
 
     /// Whether the lead may plan the next request of [`Lead::requests`] after those it has
     /// planned: while the batch has room ([`MAX_BATCH`]) and the planning budget
-    /// ([`PLAN_BUDGET`]) lasts. Each `true` grants one more; the own request needs none.
+    /// ([`PLAN_BUDGET`]) lasts, or, with the lead-wait hook, until it planned the requests the
+    /// hook waited for. Each `true` grants one more; the own request needs none.
     pub fn may_plan(&self) -> bool {
         let granted = self.granted.get();
         let room = granted < self.requests.len() && granted < MAX_BATCH;
-        let time = self.seams.now().saturating_duration_since(self.started) < PLAN_BUDGET;
+
+        // The budget, or the hook's requests: a loaded host's test still leads its batch.
+        let waited = self.lead_wait().is_some_and(|wanted| granted <= wanted);
+        let time = waited || self.seams.now().saturating_duration_since(self.started) < PLAN_BUDGET;
         if !(room && time) {
             return false;
         }
@@ -2375,6 +2387,47 @@ mod tests {
             held
         });
         assert_eq!(held, 2);
+        assert!(ends.iter().all(Result::is_ok), "{ends:?}");
+        let store = open(&root);
+        assert!(
+            (10..13).all(|n| landed(&store, n) == 1),
+            "the rest led later"
+        );
+    }
+
+    /// A lead whose lead-wait hook asks for two plans those two once the budget is spent, and
+    /// no third: a loaded host's test still leads the batch it waited for.
+    #[test]
+    fn the_lead_wait_hook_outlasts_the_budget() {
+        let (_dir, root) = new_store();
+        let asks = [Ask::Frame(10), Ask::Frame(11), Ask::Frame(12)];
+        let (ends, held) = with_waiters(&root, &asks, |lock| {
+            let store = open(&root);
+            let (added, clock) = fake_clock();
+            let seams = Seams {
+                clock,
+                lead_wait: Some(2),
+                ..Seams::real()
+            };
+            let mut lead = lead_on(&store, lock, Ask::Frame(1), seams);
+            let mut next = 0;
+            let mut plans = vec![plan(&mut lead, 0, &mut next)];
+
+            // 1. The budget spent before the first other member.
+            added.store(
+                u64::try_from(PLAN_BUDGET.as_millis()).unwrap(),
+                Ordering::SeqCst,
+            );
+            for n in 1..=2 {
+                assert!(lead.may_plan(), "the hook's request {n}");
+                plans.push(plan(&mut lead, n, &mut next));
+            }
+            assert!(!lead.may_plan(), "past the hook, the budget is spent");
+            let held = lead.claim(plans).unwrap();
+            lead.commit().unwrap();
+            held
+        });
+        assert_eq!(held, 3);
         assert!(ends.iter().all(Result::is_ok), "{ends:?}");
         let store = open(&root);
         assert!(

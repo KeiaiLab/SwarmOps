@@ -1303,6 +1303,10 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
     fn crash_point(&self) {
         self.inner.crash_point();
     }
+
+    fn lead_wait(&self) -> Option<usize> {
+        self.inner.lead_wait()
+    }
 }
 
 /// W4 after a view file of `meta` was renamed into place: the four files' entry counts must

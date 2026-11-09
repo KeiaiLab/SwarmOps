@@ -36,6 +36,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{self, Write};
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use swarmops_store::{FsMethod, FsOps, LinkOutcome, RealFs};
@@ -140,6 +141,8 @@ impl RecordedCall {
 pub struct ImageRecordingFs {
     /// The calls and marks so far, in the order they took effect.
     calls: Mutex<Vec<RecordedCall>>,
+    /// What [`FsOps::lead_wait`] answers: 0 for `None`.
+    lead_wait: AtomicUsize,
 }
 
 impl ImageRecordingFs {
@@ -151,6 +154,12 @@ impl ImageRecordingFs {
     /// Marks this point of the run as `label`.
     pub fn mark(&self, label: &str) {
         self.log().push(RecordedCall::Mark(label.to_owned()));
+    }
+
+    /// Has a lead of the write queue on this filesystem wait for `n` other requests, then plan
+    /// them ([`FsOps::lead_wait`]); 0 turns it off.
+    pub fn set_lead_wait(&self, n: usize) {
+        self.lead_wait.store(n, Ordering::SeqCst);
     }
 
     /// The calls (and marks) so far.
@@ -324,6 +333,11 @@ impl FsOps for ImageRecordingFs {
             };
             Ok(((), Some(call)))
         })
+    }
+
+    fn lead_wait(&self) -> Option<usize> {
+        let n = self.lead_wait.load(Ordering::SeqCst);
+        (n > 0).then_some(n)
     }
 }
 
