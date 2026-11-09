@@ -7,7 +7,7 @@ Moves 1 to 64 refs as one operation, each by compare-and-swap, all of them or no
 ```yaml
 title: "ref_txn"
 description: "Move several refs at once."
-since: "0.1.0"
+since: "0.11.0"
 mutates: true
 identity_required: true
 cli_command: "swarmops ref txn"

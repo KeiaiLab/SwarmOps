@@ -7,7 +7,7 @@ Says what landing changes (1 to 32, each a head with an optional base and idempo
 ```yaml
 title: "land_check"
 description: "Check a land."
-since: "0.1.0"
+since: "0.11.0"
 mutates: false
 identity_required: false
 cli_command: "swarmops land-check"

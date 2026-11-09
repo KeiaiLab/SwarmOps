@@ -7,7 +7,7 @@ Takes back changeset (with since, the first-parent range after since) on target,
 ```yaml
 title: "revert"
 description: "Revert a change."
-since: "0.1.0"
+since: "0.11.0"
 mutates: true
 identity_required: true
 cli_command: "swarmops revert"

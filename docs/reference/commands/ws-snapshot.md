@@ -10,7 +10,7 @@ The workspace keeps its head, its files and its edits. The same edits on the sam
 title: "swarmops ws snapshot"
 description: "Record a workspace's edits as a changeset on its head, which moves no ref."
 group: "workspaces"
-since: "0.1.0"
+since: "0.11.0"
 mutates: true
 identity_required: false
 mcp_tool: "ws_snapshot"

@@ -7,7 +7,7 @@ One ref's moves, newest first: the op\_log entries that moved it, each with its 
 ```yaml
 title: "ref_log"
 description: "List a ref's moves."
-since: "0.1.0"
+since: "0.11.0"
 mutates: false
 identity_required: false
 cli_command: "swarmops ref log"

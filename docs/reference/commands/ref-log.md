@@ -10,7 +10,7 @@ A deleted ref lists its moves, the newest with no new value. A name the journal 
 title: "swarmops ref log"
 description: "List ref NAME's moves, newest first: the op log filtered to the ref."
 group: "refs"
-since: "0.1.0"
+since: "0.11.0"
 mutates: false
 identity_required: false
 mcp_tool: "ref_log"

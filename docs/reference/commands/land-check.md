@@ -10,7 +10,7 @@ Each HEAD, with its first-parent chain since its merge base with the ref's head,
 title: "swarmops land-check"
 description: "Say what landing changes in order onto a ref would come to, writing nothing."
 group: "write"
-since: "0.1.0"
+since: "0.11.0"
 mutates: false
 identity_required: false
 mcp_tool: "land_check"

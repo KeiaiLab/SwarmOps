@@ -10,7 +10,7 @@ Prints the merge base, both revisions as full ids, and the first page of the uni
 title: "swarmops merge-base"
 description: "Find where REV forks from ONTO along first parents, and list what REV changed since."
 group: "read"
-since: "0.1.0"
+since: "0.11.0"
 mutates: false
 identity_required: false
 mcp_tool: "merge_base"

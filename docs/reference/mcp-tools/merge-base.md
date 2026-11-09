@@ -7,7 +7,7 @@ Where rev forks from onto along first parents: the base, both revisions as full 
 ```yaml
 title: "merge_base"
 description: "Find a merge base."
-since: "0.1.0"
+since: "0.11.0"
 mutates: false
 identity_required: false
 cli_command: "swarmops merge-base"

@@ -10,7 +10,7 @@ Each HEAD, with its first-parent chain since its merge base with the ref's head,
 title: "swarmops land-group"
 description: "Land changes in order onto a ref as one operation: one changeset each, one move."
 group: "write"
-since: "0.1.0"
+since: "0.11.0"
 mutates: true
 identity_required: true
 mcp_tool: "land_group"

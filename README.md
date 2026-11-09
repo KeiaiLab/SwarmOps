@@ -32,7 +32,7 @@ processes on one host commit into one embedded store at once, and every command 
 JSON envelope. It is one Rust program, with no external database and no daemon, and it moves the
 work to and from git, so that CI and deployments keep running.
 
-It is pre-release, at v0.10.0 (milestones through M16, and M17's slices): usable by one agent, with a store that
+It is pre-release, at v0.11.0 (milestones through M16, and M17's, M18's and M19's slices): usable by one agent, with a store that
 already takes commits from many processes at once; merging and landing, which a swarm needs, are
 built, and landing under a swarm's load is measured, within its targets but for the p99 at 50
 processes; a store clones,
@@ -539,7 +539,7 @@ planned, each with its milestone.
 | Review | Nothing today. 📋 M7: change requests, their classification, approvals and a landing gate. | **Behind** today: git ships patch-review tools, and Gerrit and GitHub add review on top. M7 is **not yet comparable**. |
 | Sync between hosts | ✅ M8: through a git remote, one writing host at a time, with `git import` and `git export`. ✅ M13: a store clones, fetches and pushes a git remote over HTTPS or ssh, by running the user's git; a push is a compare-and-swap, never forced, and `sync` lands the store's unpublished changes onto the remote's head, so several stores can write to one remote. 📋 M11: offline-first sync between stores, `so://`. | **Parity** with git's clone, fetch and push to a git remote over HTTPS and ssh, which SwarmOps runs; **behind** on transports, shallow and partial clones, and bundles. |
 | Ecosystem | ✅ M1: the CLI and `swarmops schema`. ✅ M1.5: an MCP server. ✅ M3: git import. ✅ M8: git export. ✅ M13: git remotes, and GitHub's pull requests merged by any method. No user hooks, signing, submodules or LFS, and no GitHub API calls. | **Behind**, after v1 too: git parity is not a v1 goal, and git has MCP servers as well. |
-| Maturity | Pre-release: v0.1.0 is the first tag, v0.10.0 the latest, and the first spec dates from 2026-10-15. | **Behind**: git has hosted itself since 2005. |
+| Maturity | Pre-release: v0.1.0 is the first tag, v0.11.0 the latest, and the first spec dates from 2026-10-15. | **Behind**: git has hosted itself since 2005. |
 | Landing | ✅ M4: `land` merges an agent's change onto `main` and publishes it as one changeset in one transaction, merging again and retrying by itself when `main` moves, and a retry with the same key replays it. 📋 M4, after the pilot: the landing model chosen by measurement. | **Ahead by design** of git alone, whose push refuses a moved branch and leaves the fetch, the merge and the retry to the pusher; measured under a swarm's load in 0.6.0, with metalog merge: lands/s, retries and nothing lost met, p99 at 50 processes missed ([docs/perf.md](docs/perf.md)). |
 
 No git baseline has been measured: these verdicts come from the design, the code, and git's own
@@ -615,7 +615,12 @@ import, one lock pass per land, `ancestry`, refusal inside the quarantine; G4's 
 reads off the writer lock, preparation, one pack per identical read, serve records; a prepared
 first clone 0.366 s against git's 0.512 s on 12,000 commits; 50 clones' server CPU 58× one
 clone's and a 2 GiB push's peak 3,228.8 MiB, both missed), with M18's first batched lands and
-commits.
+commits. 0.11.0 holds M18's and M19's slices: taking back and landing together (`ref log`,
+`revert`, `land-check`, `land-group`, `ref txn`, `merge-base`; 55 of 55 error codes pinned; G4's
+p99 at 50 batched landers 157.320 ms and 154.458 ms in two gated runs on 0.10.0's batching code;
+the first sync after a clone 13.081 s on 12,000 commits, missed) and workspace safety
+(`E_WS_STALE` from every workspace command, edits snapshotted before an update, `ws snapshot`, an
+OpenCode adapter), with M17's closure slices.
 
 The road to usable ([To usable](docs/roadmap.md#to-usable)): a real repository runs 8 or more
 agents for 3 or more days with no lost commit, a clean `verify --deep`, nothing rewritten and an

@@ -10,7 +10,7 @@ Each --move is NAME=EXPECT:TO: EXPECT the full id NAME names now, or new to crea
 title: "swarmops ref txn"
 description: "Move several refs as one operation, each by compare-and-swap: all of them or none."
 group: "refs"
-since: "0.1.0"
+since: "0.11.0"
 mutates: true
 identity_required: true
 mcp_tool: "ref_txn"

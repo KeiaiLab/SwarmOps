@@ -95,6 +95,19 @@ const MAINTENANCE_SINCE: &str = "0.4.0";
 const SERVE_COMMAND: &str = "serve";
 const SERVE_SINCE: &str = "0.7.0";
 
+/// The history and landing commands (M18) and the snapshot on demand (M19), and the release
+/// they first ship in.
+const TAKE_BACK_COMMANDS: [&str; 7] = [
+    "ref log",
+    "revert",
+    "land-check",
+    "land-group",
+    "ref txn",
+    "merge-base",
+    "ws snapshot",
+];
+const TAKE_BACK_SINCE: &str = "0.11.0";
+
 /// The release the command at `path` first shipped in.
 fn since(path: &str) -> &'static str {
     if path == SERVE_COMMAND {
@@ -108,6 +121,9 @@ fn since(path: &str) -> &'static str {
     }
     if MAINTENANCE_COMMANDS.contains(&path) {
         return MAINTENANCE_SINCE;
+    }
+    if TAKE_BACK_COMMANDS.contains(&path) {
+        return TAKE_BACK_SINCE;
     }
     SINCE
 }

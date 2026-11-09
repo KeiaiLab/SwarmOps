@@ -80,6 +80,17 @@ const WORKSPACE_SINCE: &str = "0.3.0";
 const MAINTENANCE_TOOLS: [&str; 3] = ["gc", "repair", "upgrade"];
 const MAINTENANCE_SINCE: &str = "0.4.0";
 
+/// The history and landing tools (M18), and the release they first ship in.
+const TAKE_BACK_TOOLS: [&str; 6] = [
+    "ref_log",
+    "revert",
+    "land_check",
+    "land_group",
+    "ref_txn",
+    "merge_base",
+];
+const TAKE_BACK_SINCE: &str = "0.11.0";
+
 /// The tools with no recorded call yet: the git remotes' (M13), whose operations answer
 /// `E_INTERNAL` until their tasks land, the M13 plan's task C10 recording their calls; and the
 /// maintenance's (M6), which answer `E_INVALID_ARG` until the M6 plan's tasks build them.
@@ -104,6 +115,9 @@ fn since(name: &str) -> &'static str {
     }
     if MAINTENANCE_TOOLS.contains(&name) {
         return MAINTENANCE_SINCE;
+    }
+    if TAKE_BACK_TOOLS.contains(&name) {
+        return TAKE_BACK_SINCE;
     }
     SINCE
 }

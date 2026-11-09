@@ -10,7 +10,7 @@ The land commits, on REV, every path the range (SINCE, REV\] touched set to what
 title: "swarmops revert"
 description: "Take back a changeset, or a range of a ref's history, by landing its inverse."
 group: "write"
-since: "0.1.0"
+since: "0.11.0"
 mutates: true
 identity_required: true
 mcp_tool: "revert"

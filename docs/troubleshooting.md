@@ -39,8 +39,7 @@ the process aborts, and says why on stderr ([The server exits](#the-server-exits
 ## Every error code
 
 `ErrorCode` in `crates/swarmops-api/src/error.rs` is the one table of codes, exit codes and
-retry advice; this is that table, all 55 codes. One code is in the schema but no operation
-raises it yet.
+retry advice; this is that table, all 55 codes, each raised by some command.
 
 | Code | Exit | Retryable | Means | Section |
 | --- | --- | --- | --- | --- |

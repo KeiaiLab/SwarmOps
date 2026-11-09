@@ -10,13 +10,35 @@ SwarmOps 0.1.0 is the first release, tagged `v0.1.0`, 0.2.0 the second, with the
 and FORMAT 2 (M6), 0.5.0 the fifth, with the pilot on a real repository and the goal measurements,
 0.6.0 the sixth, with the fixes those measurements asked for, 0.7.0 the seventh, with stock git
 against a store (M14), 0.8.0 the eighth, with data safety and the contract (M15),
-0.9.0 the ninth, with safety and load (M16), and 0.10.0 the tenth, with serving under load (M17);
+0.9.0 the ninth, with safety and load (M16), 0.10.0 the tenth, with serving under load (M17),
+and 0.11.0 the eleventh, with taking back and workspace safety (M18's and M19's slices);
 no crate is published (`publish = false`). The 0.1.0 section holds every
 change up to it, grouped by milestone of the design (umbrella spec §13). From here, **Unreleased**
 collects the changes on `stable` that no release holds yet, until the next release
 ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ## [Unreleased]
+
+## [0.11.0] - 2026-11-09
+
+Taking back, landing together and safer workspaces. The 0.11.0 release holds M18's and M19's
+slices and M17's closure slices; the exit criteria of all three stay open. M18 adds `ref log`,
+`revert`, `land-check`, `land-group`, `ref txn`, `merge-base`, revisions by move and by instant,
+and conflict reports that name every changeset since the base; golden envelopes pin 55 of the 55
+error codes. Group commit, batched in 0.10.0, meets G4 at 50 processes in two runs started under
+the measurement gate: p99 157.320 ms and 154.458 ms against 500 ms, 25.0 lands/s, 0 % retries,
+nothing lost ([docs/perf.md](docs/perf.md), "D2-8 gated runs — 2026-11-09"); its 32-process runs
+and the group-commit design's slow sweeps are not recorded yet. M18's first sync after a clone is
+missed: 13.081 s on 12,000 commits against 1 s (docs/perf.md, "M18 first sync after a clone —
+2026-11-08"). M19 refuses a stale workspace in every command that reads or writes one, snapshots a
+workspace's edits before an update moves them, and adds `ws snapshot` and the OpenCode hook family;
+one change breaks: `ws rebase` on a workspace with edits snapshots and carries them instead of
+answering `E_WS_DIRTY`. G9's workspace rows are not measured again (docs/perf.md, "M19 fan-in —
+2026-11-09 (not measured)"). M17's closure: a served pack-cache hit runs no git, refreshes
+coalesce and leave `git/serve.lock` free while they wait, a push's hooks map a bounded share of
+the packs and compress on a bounded thread pool, and the export's steps are timed; M17's goals
+are not measured again yet. The store's write queue no longer leaves a declined request's lock
+wait behind, nor loses a request its janitor took.
 
 ### Changed (breaking)
 
@@ -114,6 +136,22 @@ collects the changes on `stable` that no release holds yet, until the next relea
 - `ws status`, `ws commit`, `ws land` and the update walk the workspace once, on 8 threads: each
   tracked file is checked where the walk meets it, instead of a second pass over every directory
   (the M19 design §8.1).
+- `swarmops serve`'s pack-objects hook runs no git child on a pack-cache hit: it checks the wants
+  against `serve.git`'s refs in process, leaving anything it cannot place to git's check, and keys
+  the cache by the git binary itself instead of its version (key domain `swarmops:serve-pack:v2`;
+  the earlier entries are never read again and leave by the cache's bound) (the M17 closure design
+  §3.2).
+- Served refreshes coalesce: `git/serve.state` moves to version 2, which records how far into the
+  journal the last full refresh read, and a connection that refresh already covers takes none. A
+  refresh lets `git/serve.lock` go while it waits for the store's writer lock and takes its
+  snapshot again when an export moved `serve.git` meanwhile, and a preparation lets it go between
+  its rounds. A version 1 state reads as not current: the next connection refreshes and writes
+  version 2 (the M17 closure design §3.3; [Serve over ssh](docs/operate/serve-over-ssh.md)).
+- A ref move no longer spawns `serve --prepare` while `git/serve.lock` is held: it marks the store
+  for the holder instead (the M17 closure design §3.4).
+- A served push's hooks read its objects through one `git cat-file --batch-command` with bounded
+  pack windows, instead of mapping each pack file whole, and compress on a bounded thread pool
+  instead of one thread per core (the M17 closure design §3.5).
 
 ### Fixed
 
@@ -121,6 +159,10 @@ collects the changes on `stable` that no release holds yet, until the next relea
   lock wait and left the first one's helper thread parked on `meta/lock`, which could take the
   lock for an instant after the write returned and hold up the next writer. The rerun now waits
   on its first lock wait, so a declined turn leaves no helper behind.
+- A request a waiter was placing in the store's write queue could be removed by the leader's
+  cleanup in the instant before the waiter locked it; the waiter then waited for the lock alone,
+  and under load could end `E_BUSY`. It now places the request again under a fresh name, at most
+  three times.
 - `ws rebase` found an ignored file at a path the target adds only after the store had recorded
   the snapshot and the rebased changeset. It now checks the paths the target changed against the
   disk before any store call: `E_WS_DIRTY`, nothing recorded. A file standing where the target
@@ -2352,7 +2394,8 @@ fixes the measurements and the pilot asked for.
   ([docs/known-limitations.md](docs/known-limitations.md), "An import onto a target reads the
   head's whole tree, and onto a native head the whole history below it").
 
-[Unreleased]: https://github.com/KeiaiLab/SwarmOps/compare/v0.10.0...stable
+[Unreleased]: https://github.com/KeiaiLab/SwarmOps/compare/v0.11.0...stable
+[0.11.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.7.0...v0.8.0

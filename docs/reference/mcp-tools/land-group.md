@@ -7,7 +7,7 @@ Lands changes (1 to 32, each a head with an optional base and idempotency\_key) 
 ```yaml
 title: "land_group"
 description: "Land a group."
-since: "0.1.0"
+since: "0.11.0"
 mutates: true
 identity_required: true
 cli_command: "swarmops land-group"
