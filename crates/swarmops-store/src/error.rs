@@ -37,6 +37,16 @@ pub enum StoreError {
     /// The store's `FORMAT` file is missing or names an unsupported version.
     #[error("unsupported store format: {0}")]
     Format(String),
+    /// The store is of a format later than this build's, or lists features this build does not
+    /// have (the FORMAT 3 design §2.1, §2.6): a newer build reads it. Nothing was written; it is
+    /// not damage.
+    #[error("the store is format {format}, features {features:?}: a newer swarmops reads it")]
+    TooNew {
+        /// The format version the store names.
+        format: u32,
+        /// The store's features this build does not have; empty for a later format.
+        features: Vec<String>,
+    },
     /// The store root is not on a native Linux filesystem (for example WSL's `/mnt/*` drvfs).
     #[error("store path {0} is not on a native Linux filesystem")]
     UnsupportedFs(Utf8PathBuf),

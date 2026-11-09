@@ -33,7 +33,9 @@ pub mod order_check;
 
 pub use error::{FileOp, IoFailure, LimitKind, StoreError};
 pub use external_ids::{ExternalEntry, ExternalIds, ExternalPut, ListedEntry, SYSTEM_GIT};
-pub use format::{DEFAULT_INIT_FORMAT, INIT_FORMATS, StoreFormat, UPGRADE_POISON, read_format};
+pub use format::{
+    DEFAULT_INIT_FORMAT, INIT_FORMATS, StoreFormat, UPGRADE_POISON, UPGRADE_POISON_V3, read_format,
+};
 pub use fs_kind::check_supported_fs;
 pub use fs_objects::{FsObjectStore, MAX_OBJECT_LEN, ObjectStat, ObjectStore, PutOutcome};
 pub use fs_ops::{

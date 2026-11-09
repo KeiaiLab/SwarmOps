@@ -6083,7 +6083,7 @@ fn meta_open_reads_the_format_file() {
     assert!(what.contains("journal2.log"), "{what}");
 
     // 3. Any other marker: no format this build reads.
-    fs::write(&format_file, b"swarmops-store 9\n").unwrap();
+    fs::write(&format_file, b"swarmops-store x\n").unwrap();
     let Err(StoreError::Format(what)) = open_checked(&root) else {
         panic!("an unknown format opened");
     };

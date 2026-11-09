@@ -10,6 +10,8 @@
 //! <root>/meta/journal.ckpt      how far the journal is materialized, a u64le offset
 //! <root>/meta/refs/<name>       one file per ref
 //!                               (FORMAT 2: journal2.log, journal2.off, journal2.ckpt, refs2/)
+//!                               (FORMAT 3: FORMAT 2's but journal3.ckpt; sorted3/, views.lock,
+//!                               features, idx/facts.col)
 //! <root>/meta/derived/<name>/<version>/<2hex>/<62hex>[.<16hex>]
 //!                               one derived value: a cache, outside the journal, never synced
 //! <root>/meta/derived/tmp/      temp files of derived values, written before they are linked
@@ -21,7 +23,7 @@
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::ObjectId;
 
-use crate::format::StoreFormat;
+use crate::format::{JournalFamily, StoreFormat};
 use crate::meta::derived::{self, DerivedSlot};
 
 /// The paths of one store, all derived from its root and its format. Computes paths only;
@@ -107,27 +109,53 @@ impl Layout {
         self.journal_file("off")
     }
 
-    /// `<root>/meta/journal.ckpt` (FORMAT 2: `journal2.ckpt`), how far the metadata files are
-    /// materialized: a `u64le` journal offset (FORMAT 2 adds the frame count and a CRC).
+    /// `<root>/meta/journal.ckpt` (FORMAT 2: `journal2.ckpt`; FORMAT 3: `journal3.ckpt`), how
+    /// far the metadata files are materialized: a `u64le` journal offset (FORMAT 2 adds the
+    /// frame count and a CRC; FORMAT 3 the base seq and the synced record counts).
     pub fn journal_ckpt(&self) -> Utf8PathBuf {
-        self.journal_file("ckpt")
+        match self.format {
+            StoreFormat::V3 => self.meta_path("journal3.ckpt"),
+            StoreFormat::V1 | StoreFormat::V2 => self.journal_file("ckpt"),
+        }
     }
 
-    /// `<root>/meta/refs` (FORMAT 2: `refs2`), the directory of the ref files.
+    /// `<root>/meta/refs` (FORMAT 2 and 3: `refs2`), the directory of the ref files.
     pub fn refs_dir(&self) -> Utf8PathBuf {
-        match self.format {
-            StoreFormat::V1 => self.meta_path("refs"),
-            StoreFormat::V2 => self.meta_path("refs2"),
+        match self.format.journal_family() {
+            JournalFamily::One => self.meta_path("refs"),
+            JournalFamily::Two => self.meta_path("refs2"),
         }
     }
 
     /// The journal file of the store's format whose extension is `ext`.
     fn journal_file(&self, ext: &str) -> Utf8PathBuf {
-        let stem = match self.format {
-            StoreFormat::V1 => "journal",
-            StoreFormat::V2 => "journal2",
+        let stem = match self.format.journal_family() {
+            JournalFamily::One => "journal",
+            JournalFamily::Two => "journal2",
         };
         self.meta_path(&format!("{stem}.{ext}"))
+    }
+
+    /// `<root>/meta/sorted3`, FORMAT 3's sorted views: the runs and their `MANIFEST` (the
+    /// FORMAT 3 design §2.4, §2.5). No other format has it.
+    pub fn views_dir(&self) -> Utf8PathBuf {
+        self.meta_path("sorted3")
+    }
+
+    /// `<root>/meta/views.lock`, FORMAT 3's lease of the work on the runs and the manifest.
+    pub fn views_lock(&self) -> Utf8PathBuf {
+        self.meta_path("views.lock")
+    }
+
+    /// `<root>/meta/features`, FORMAT 3's list of the features a store has (the FORMAT 3
+    /// design §2.6).
+    pub fn features_file(&self) -> Utf8PathBuf {
+        self.meta_path("features")
+    }
+
+    /// `<root>/meta/idx/facts.col`, FORMAT 3's column of fact rows (the FORMAT 3 design §2.8).
+    pub fn facts_col(&self) -> Utf8PathBuf {
+        self.meta_path("idx/facts.col")
     }
 
     /// `<root>/meta/derived`, the directory of the derived values (storage spec §3, §5).

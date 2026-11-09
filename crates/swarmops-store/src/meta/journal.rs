@@ -835,6 +835,7 @@ impl Journal {
         match self.format {
             StoreFormat::V1 => self.ckpt_v1(),
             StoreFormat::V2 => Ok(self.ckpt_v2()?.offset),
+            StoreFormat::V3 => Err(ckpt3_unread()),
         }
     }
 
@@ -936,6 +937,7 @@ impl Journal {
         let bytes = match self.format {
             StoreFormat::V1 => offset.to_le_bytes().to_vec(),
             StoreFormat::V2 => ckpt_bytes(offset, self.seq_at(offset)?),
+            StoreFormat::V3 => return Err(ckpt3_unread()),
         };
         self.fs
             .atomic_replace(self.ckpt_path.as_std_path(), &bytes)?;
@@ -1262,6 +1264,7 @@ impl Journal {
         let from = match self.format {
             StoreFormat::V1 => 0,
             StoreFormat::V2 => self.ckpt_v2()?.seq.min(listed),
+            StoreFormat::V3 => return Err(ckpt3_unread()),
         };
         let (mut next, mut prev_crc) = match from.checked_sub(1) {
             None => (0, 0),
@@ -1446,7 +1449,7 @@ impl Journal {
                     .map_err(|e| self.log_failed(FileOp::ReadAt, e))?;
                 (u32::from_le_bytes(len), 0)
             }
-            StoreFormat::V2 => {
+            StoreFormat::V2 | StoreFormat::V3 => {
                 let mut header = [0; HEADER_LEN_V2];
                 (self.log.read_exact_at(&mut header, offset))
                     .map_err(|e| self.log_failed(FileOp::ReadAt, e))?;
@@ -1694,8 +1697,14 @@ fn ends_in_disorder(entries: &[Entry]) -> bool {
 fn entry_len(format: StoreFormat) -> u64 {
     match format {
         StoreFormat::V1 => ENTRY_LEN,
-        StoreFormat::V2 => ENTRY_LEN_V2,
+        StoreFormat::V2 | StoreFormat::V3 => ENTRY_LEN_V2,
     }
+}
+
+/// What reading or writing FORMAT 3's checkpoint, `journal3.ckpt`, is until this build has its
+/// codec: a store format it does not read (no FORMAT 3 store is made yet).
+fn ckpt3_unread() -> StoreError {
+    StoreError::Format("FORMAT 3's journal3.ckpt is not read by this build".to_owned())
 }
 
 /// The checksum of a FORMAT 2 entry: the CRC of `u64le seq | u64le offset | u32le crc`.

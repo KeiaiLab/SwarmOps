@@ -44,7 +44,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, ObjectId};
 
 use crate::error::{FileOp, StoreError};
-use crate::format::StoreFormat;
+use crate::format::{JournalFamily, StoreFormat};
 use crate::fs_ops::{FsMethod, StoreFs};
 use crate::layout::Layout;
 
@@ -155,8 +155,8 @@ pub fn check_remote_segment(remote: &str) -> Result<(), StoreError> {
 /// takes; a name only a later format takes is [`StoreError::FormatRequired`], one no format
 /// takes [`StoreError::RefName`].
 pub fn check_ref_name_in(format: StoreFormat, name: &str) -> Result<(), StoreError> {
-    match format {
-        StoreFormat::V1 => {
+    match format.journal_family() {
+        JournalFamily::One => {
             if check_ref_name(name).is_ok() {
                 return Ok(());
             }
@@ -169,7 +169,7 @@ pub fn check_ref_name_in(format: StoreFormat, name: &str) -> Result<(), StoreErr
                 None => Err(StoreError::RefName(name.to_owned())),
             }
         }
-        StoreFormat::V2 => match ref_kind(name) {
+        JournalFamily::Two => match ref_kind(name) {
             Some(_) => Ok(()),
             None => Err(StoreError::RefName(name.to_owned())),
         },
@@ -296,7 +296,7 @@ pub(crate) struct RefFiles {
 /// files, anything this version does not name) are skipped.
 pub(crate) fn read_all(layout: &Layout, fs: &StoreFs) -> Result<RefFiles, StoreError> {
     let mut refs = BTreeMap::new();
-    if layout.format() == StoreFormat::V2 {
+    if layout.format().journal_family() == JournalFamily::Two {
         for file in read_each(layout, fs)? {
             refs.insert(file.name, file.state?);
         }
@@ -324,7 +324,7 @@ pub(crate) fn read_all(layout: &Layout, fs: &StoreFs) -> Result<RefFiles, StoreE
 /// gave: [`read_all`], except that a damaged file does not fail the rest. The names are the
 /// ones [`read_all`] reads, and a file removed since the listing is skipped the same way.
 pub(crate) fn read_each(layout: &Layout, fs: &StoreFs) -> Result<Vec<RefFile>, StoreError> {
-    if layout.format() == StoreFormat::V2 {
+    if layout.format().journal_family() == JournalFamily::Two {
         return read_each_v2(layout, fs);
     }
     let mut names = vec!["main".to_owned()];
@@ -483,13 +483,13 @@ pub(crate) fn rebuild(
     }
 
     // 2. Every other ref file: a ref no move leaves, or a file under a name it does not hold.
-    let listed: Vec<Utf8PathBuf> = match layout.format() {
-        StoreFormat::V1 => {
+    let listed: Vec<Utf8PathBuf> = match layout.format().journal_family() {
+        JournalFamily::One => {
             let mut names = vec!["main".to_owned()];
             names.extend(release_names(layout, fs)?);
             names.iter().map(|name| path(layout, name)).collect()
         }
-        StoreFormat::V2 => {
+        JournalFamily::Two => {
             let dir = layout.refs_dir();
             let stems = file_stems(fs, &dir)?;
             stems.iter().map(|stem| dir.join(stem)).collect()
@@ -522,9 +522,9 @@ fn put(
         make_dir(fs, dir, &refs)?;
     }
     // FORMAT 2 files hold their name: their own is its hash.
-    let bytes = match layout.format() {
-        StoreFormat::V1 => format!("{}\n{}\n", state.target, state.version),
-        StoreFormat::V2 => format!("{name}\n{}\n{}\n", state.target, state.version),
+    let bytes = match layout.format().journal_family() {
+        JournalFamily::One => format!("{}\n{}\n", state.target, state.version),
+        JournalFamily::Two => format!("{name}\n{}\n{}\n", state.target, state.version),
     };
     fs.atomic_replace(path.as_std_path(), bytes.as_bytes())?;
     Ok(())
@@ -540,9 +540,9 @@ fn remove(fs: &StoreFs, path: &Utf8Path) -> Result<(), StoreError> {
 
 /// The file of ref `name`: `refs/<name>`, or in FORMAT 2 `refs2/<file_stem(name)>`.
 fn path(layout: &Layout, name: &str) -> Utf8PathBuf {
-    match layout.format() {
-        StoreFormat::V1 => layout.refs_dir().join(name),
-        StoreFormat::V2 => layout.refs_dir().join(file_stem(name)),
+    match layout.format().journal_family() {
+        JournalFamily::One => layout.refs_dir().join(name),
+        JournalFamily::Two => layout.refs_dir().join(file_stem(name)),
     }
 }
 
@@ -590,9 +590,9 @@ fn read_file(
         let e = io::Error::new(io::ErrorKind::InvalidData, why);
         StoreError::from(fs.locate(FileOp::Fs(FsMethod::Read), path, e))
     };
-    let (max_len, layout) = match format {
-        StoreFormat::V1 => (MAX_FILE_LEN, r#""<64 hex digits>\n<version>\n""#),
-        StoreFormat::V2 => (MAX_FILE_LEN_V2, r#""<name>\n<64 hex digits>\n<version>\n""#),
+    let (max_len, layout) = match format.journal_family() {
+        JournalFamily::One => (MAX_FILE_LEN, r#""<64 hex digits>\n<version>\n""#),
+        JournalFamily::Two => (MAX_FILE_LEN_V2, r#""<name>\n<64 hex digits>\n<version>\n""#),
     };
     if let Ok(meta) = std::fs::metadata(path)
         && meta.len() > max_len
@@ -607,9 +607,9 @@ fn read_file(
     };
     let parsed = std::str::from_utf8(&bytes).ok().and_then(|text| {
         // 1. FORMAT 2: the name, which the file's own name must be the hash of.
-        let (name, text) = match format {
-            StoreFormat::V1 => (None, text),
-            StoreFormat::V2 => {
+        let (name, text) = match format.journal_family() {
+            JournalFamily::One => (None, text),
+            JournalFamily::Two => {
                 let (name, rest) = text.split_once('\n')?;
                 let named = ref_kind(name).is_some() && path.file_name() == Some(&file_stem(name));
                 (Some(named.then(|| name.to_owned())?), rest)

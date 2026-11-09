@@ -12,6 +12,7 @@ mod fs_kind;
 mod fsck;
 mod fsync_percentiles;
 mod gc;
+mod golden3;
 mod index;
 mod journal;
 mod journal2;

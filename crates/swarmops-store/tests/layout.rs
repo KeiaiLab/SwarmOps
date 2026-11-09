@@ -74,3 +74,34 @@ fn layout_names_files_per_format() {
         assert_eq!(a, b);
     }
 }
+
+/// FORMAT 3 shares FORMAT 2's journal log, offsets and ref files, and names a checkpoint and
+/// the run, feature and fact files of its own (the FORMAT 3 design §2.1); the write queue's
+/// directory is the same in every format.
+#[test]
+fn layout_v3_names_journal2_and_journal3_ckpt() {
+    let v2 = Layout::with_format("/srv/store", StoreFormat::V2);
+    let v3 = Layout::with_format("/srv/store", StoreFormat::V3);
+    assert_eq!(v3.format(), StoreFormat::V3);
+    assert_eq!(v3.journal_log(), "/srv/store/meta/journal2.log");
+    assert_eq!(v3.journal_off(), "/srv/store/meta/journal2.off");
+    assert_eq!(v3.journal_ckpt(), "/srv/store/meta/journal3.ckpt");
+    assert_eq!(v3.refs_dir(), "/srv/store/meta/refs2");
+    assert_eq!(v3.views_dir(), "/srv/store/meta/sorted3");
+    assert_eq!(v3.views_lock(), "/srv/store/meta/views.lock");
+    assert_eq!(v3.features_file(), "/srv/store/meta/features");
+    assert_eq!(v3.facts_col(), "/srv/store/meta/idx/facts.col");
+    assert_ne!(v3.journal_ckpt(), v2.journal_ckpt());
+
+    // The queue's directory, and everything else, is where FORMAT 2 has it.
+    for (a, b) in [
+        (v2.queue_dir(), v3.queue_dir()),
+        (v2.format_file(), v3.format_file()),
+        (v2.meta_lock(), v3.meta_lock()),
+        (v2.derived_dir(), v3.derived_dir()),
+        (v2.objects_tmp(), v3.objects_tmp()),
+    ] {
+        assert_eq!(a, b);
+    }
+    assert_eq!(v3.queue_dir(), "/srv/store/meta/queue");
+}

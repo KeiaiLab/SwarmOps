@@ -21,7 +21,7 @@ use swarmops_core::{ChangesetId, ObjectId};
 use thiserror::Error;
 
 use crate::error::{LimitKind, StoreError};
-use crate::format::StoreFormat;
+use crate::format::{JournalFamily, StoreFormat};
 
 /// A frame header: `u32le len | u32le crc32(payload)`.
 pub(crate) const HEADER_LEN: usize = 8;
@@ -294,15 +294,16 @@ pub(crate) struct FrameHeader {
 
 /// The size of a frame header in `format`.
 pub(crate) fn header_len(format: StoreFormat) -> usize {
-    match format {
-        StoreFormat::V1 => HEADER_LEN,
-        StoreFormat::V2 => HEADER_LEN_V2,
+    match format.journal_family() {
+        JournalFamily::One => HEADER_LEN,
+        JournalFamily::Two => HEADER_LEN_V2,
     }
 }
 
 /// The bytes of a frame of `format` holding `records`: [`encode_frame`] in FORMAT 1, where
 /// `seq` and `prev_crc` are not written; in FORMAT 2 the frame's seq and the payload CRC of the
-/// frame before it go in its header ([`set_place`]).
+/// frame before it go in its header ([`set_place`]). A FORMAT 3 frame ends in a nonce, which
+/// this takes none of: [`StoreError::BadCall`].
 pub(crate) fn encode_frame_in(
     format: StoreFormat,
     records: &[Record],
@@ -316,6 +317,9 @@ pub(crate) fn encode_frame_in(
             set_place(&mut frame, seq, prev_crc);
             Ok(frame)
         }
+        StoreFormat::V3 => Err(StoreError::BadCall(
+            "a FORMAT 3 frame ends in a nonce: encode it with one".to_owned(),
+        )),
     }
 }
 
@@ -337,8 +341,8 @@ pub(crate) fn decode_header_in(
     format: StoreFormat,
     buf: &[u8],
 ) -> Result<Option<FrameHeader>, BadHeader> {
-    match format {
-        StoreFormat::V1 => {
+    match format.journal_family() {
+        JournalFamily::One => {
             let Some((header, _)) = buf.split_first_chunk::<HEADER_LEN>() else {
                 return Ok(None);
             };
@@ -350,7 +354,7 @@ pub(crate) fn decode_header_in(
                 prev_crc: None,
             }))
         }
-        StoreFormat::V2 => {
+        JournalFamily::Two => {
             let Some((header, _)) = buf.split_first_chunk::<HEADER_LEN_V2>() else {
                 return Ok(None);
             };
@@ -452,7 +456,7 @@ pub(crate) fn parse_frame(buf: &[u8]) -> Parsed {
 /// the order checker and the codec's tests.
 #[cfg(any(test, feature = "test-hooks"))]
 pub(crate) fn parse_frame_in(format: StoreFormat, buf: &[u8], place: Place) -> Parsed {
-    if format == StoreFormat::V1 {
+    if format.journal_family() == JournalFamily::One {
         return parse_frame(buf);
     }
     let header = match decode_header_in(format, buf) {

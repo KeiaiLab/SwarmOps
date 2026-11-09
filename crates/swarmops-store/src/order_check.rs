@@ -641,6 +641,9 @@ impl State {
         let len = match format {
             StoreFormat::V1 => 8,
             StoreFormat::V2 => CKPT_LEN_V2,
+            StoreFormat::V3 => {
+                return Some("journal3.ckpt is not checked by this build".to_owned());
+            }
         };
         let Some(offset) = (bytes.len() == len)
             .then(|| bytes.first_chunk::<8>())
@@ -851,7 +854,7 @@ fn frame_end(log: &Path, offset: u64, format: StoreFormat) -> Option<u64> {
     let len = u32::from_le_bytes(len.try_into().ok()?);
     let header_len = match format {
         StoreFormat::V1 => HEADER_LEN,
-        StoreFormat::V2 => HEADER_LEN_V2,
+        StoreFormat::V2 | StoreFormat::V3 => HEADER_LEN_V2,
     };
     Some(offset + header_len + u64::from(len))
 }
@@ -872,7 +875,7 @@ fn parse_any(format: StoreFormat, frame: &[u8]) -> Parsed {
 fn entry_len(format: StoreFormat) -> u64 {
     match format {
         StoreFormat::V1 => ENTRY_LEN,
-        StoreFormat::V2 => ENTRY_LEN_V2,
+        StoreFormat::V2 | StoreFormat::V3 => ENTRY_LEN_V2,
     }
 }
 
@@ -940,7 +943,7 @@ fn journal_file(path: &Path) -> Option<(JournalFile, &Path, StoreFormat)> {
 fn journal_path(meta: &Path, format: StoreFormat, file: JournalFile) -> PathBuf {
     let stem = match format {
         StoreFormat::V1 => "journal",
-        StoreFormat::V2 => "journal2",
+        StoreFormat::V2 | StoreFormat::V3 => "journal2",
     };
     let ext = match file {
         JournalFile::Log => "log",
@@ -954,7 +957,7 @@ fn journal_path(meta: &Path, format: StoreFormat, file: JournalFile) -> PathBuf 
 fn refs_name(format: StoreFormat) -> &'static str {
     match format {
         StoreFormat::V1 => "refs",
-        StoreFormat::V2 => "refs2",
+        StoreFormat::V2 | StoreFormat::V3 => "refs2",
     }
 }
 
