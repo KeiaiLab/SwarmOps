@@ -670,7 +670,25 @@ fn put_optional_id(out: &mut Vec<u8>, id: Option<ChangesetId>) {
 /// whose lengths do not fit the layout, with [`StoreError::Limit`]; no records, which no
 /// transaction appends, with [`StoreError::BadCall`].
 pub(crate) fn encode_frame(records: &[Record]) -> Result<Vec<u8>, StoreError> {
+    refuse_facts(StoreFormat::V1, records)?;
     encode_behind(HEADER_LEN, records, None)
+}
+
+/// Refuses a fact among `records` of a frame of `format`, FORMAT 1 or 2, whose decoder takes
+/// none, with [`StoreError::BadCall`] before anything is encoded: a frame of theirs never holds a
+/// record their readers refuse (the FORMAT 3 design §2.6).
+fn refuse_facts(format: StoreFormat, records: &[Record]) -> Result<(), StoreError> {
+    let fact = records.iter().find_map(|record| match record {
+        Record::Fact(fact) => Some(fact.kind),
+        _ => None,
+    });
+    match fact {
+        Some(kind) => Err(StoreError::BadCall(format!(
+            "a {kind:?} fact in a FORMAT {} frame: facts are FORMAT 3's",
+            format.version()
+        ))),
+        None => Ok(()),
+    }
 }
 
 /// The bytes of a frame holding `records`, then the nonce record of `nonce` if there is one,
@@ -759,6 +777,7 @@ pub(crate) fn encode_frame_in(
     match format {
         StoreFormat::V1 => encode_frame(records),
         StoreFormat::V2 => {
+            refuse_facts(format, records)?;
             let mut frame = encode_behind(HEADER_LEN_V2, records, None)?;
             set_place(&mut frame, seq, prev_crc);
             Ok(frame)
@@ -1194,6 +1213,33 @@ mod tests {
             })
         ));
         assert!(encode_frame_with_nonce(StoreFormat::V2, &many, None, 0, 0).is_ok());
+    }
+
+    /// A fact is FORMAT 3's: a FORMAT 1 or 2 frame refuses it before anything is encoded, so no
+    /// journal of theirs holds a record their decoder refuses.
+    #[test]
+    fn format_1_and_2_frames_refuse_a_fact() {
+        let fact = Fact::new(
+            FactKind::Lineage,
+            0,
+            [1; 32],
+            [0; 32],
+            0,
+            String::new(),
+            vec![7; 32],
+        )
+        .unwrap();
+        let records = [compacted(1), Record::Fact(fact)];
+        let refused = |got: Result<Vec<u8>, StoreError>| matches!(got, Err(StoreError::BadCall(_)));
+        assert!(refused(encode_frame(&records)));
+        for format in [StoreFormat::V1, StoreFormat::V2] {
+            assert!(
+                refused(encode_frame_in(format, &records, 0, 0)),
+                "{format:?}"
+            );
+        }
+        assert_eq!(Frame::new(0, 0, records.to_vec()).crc, 0);
+        assert!(encode_frame_with_nonce(StoreFormat::V3, &records[1..], Some(1), 0, 0).is_ok());
     }
 
     /// A fact is built only with a body its kind and type lay out, exactly.

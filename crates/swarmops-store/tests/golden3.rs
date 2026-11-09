@@ -14,8 +14,8 @@ use std::sync::Arc;
 use camino::Utf8PathBuf;
 use swarmops_core::{ChangesetId, ObjectId};
 use swarmops_store::{
-    Base, Fact, FactKind, Frame, Layout, RealFs, Record, StoreError, StoreFormat, StoreFs,
-    UPGRADE_POISON_V3, read_format,
+    Base, Fact, FactKind, Frame, Layout, MetaStore, MetaWrite, RealFs, Record, StoreError,
+    StoreFormat, StoreFs, UPGRADE_POISON_V3, read_format,
 };
 
 /// The nonce of the nonce frame and the entity id.
@@ -139,6 +139,31 @@ fn a_marker_past_3_is_too_new() {
         );
     }
     assert_eq!(read(b"swarmops-store 3\n").unwrap(), StoreFormat::V3);
+}
+
+/// Until FORMAT 3's checkpoint codec exists, a store whose `FORMAT` names 3 but whose files are
+/// FORMAT 2's is opened at most: its reads and writes fail, and its journal files keep every
+/// byte.
+#[test]
+fn a_store_marked_3_too_early_is_refused_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+    let v2 = Layout::with_format(root.clone(), StoreFormat::V2);
+    let store = MetaStore::create_in(v2.clone(), Arc::new(RealFs::new())).unwrap();
+    store.write().and_then(MetaWrite::commit).unwrap();
+    drop(store);
+    fs::write(v2.format_file(), StoreFormat::V3.marker()).unwrap();
+    let files = [v2.journal_log(), v2.journal_off(), v2.journal_ckpt()];
+    let before: Vec<Vec<u8>> = files.iter().map(|f| fs::read(f).unwrap()).collect();
+
+    // Opened (the journal files are where FORMAT 2 has them), but nothing reads or writes.
+    let store = MetaStore::open(&root).unwrap();
+    assert_eq!(store.format(), StoreFormat::V3);
+    assert!(matches!(store.read(), Err(StoreError::Format(_))));
+    assert!(matches!(store.write(), Err(StoreError::Format(_))));
+    drop(store);
+    let after: Vec<Vec<u8>> = files.iter().map(|f| fs::read(f).unwrap()).collect();
+    assert_eq!(after, before);
 }
 
 #[test]
