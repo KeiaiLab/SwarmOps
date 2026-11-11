@@ -32,7 +32,7 @@
   --accent-foreground: #191b20;
   --destructive: #b42318;
   --border: #e2e2dc;
-  --input: #868b94;
+  --input: #7c818b;
   --ring: #b45309;
   --brand: #5b3ee6;
   --brand-2: #b45309;
@@ -44,6 +44,27 @@
   --sidebar-accent-foreground: #191b20;
   --sidebar-border: #e2e2dc;
   --sidebar-ring: #b45309;
+  /* Ledger verdicts: a word with a mark, never colour alone. */
+  --verdict-met: #1a6b3c;
+  --verdict-missed: var(--destructive);
+  --verdict-open: var(--muted-foreground);
+  --rule-strong: var(--input);
+
+  /* Page geometry: one width, one side margin, two vertical distances, one prose measure. */
+  --page-max: 1120px;
+  --page-x: 32px;
+  --section-y: 96px;
+  --block-y: 40px;
+  --measure: 68ch;
+}
+
+/* Under 640 px: narrower margins and distances. */
+@media (max-width: 639.98px) {
+  :root {
+    --page-x: 20px;
+    --section-y: 56px;
+    --block-y: 32px;
+  }
 }
 
 /* Dark theme: the same tokens, dark values. */
@@ -65,7 +86,7 @@
   --accent-foreground: #eceef2;
   --destructive: #f97066;
   --border: #2a2e36;
-  --input: #646b78;
+  --input: #7a8190;
   --ring: #f5a524;
   --brand: #9783fe;
   --brand-2: #f5a524;
@@ -77,6 +98,7 @@
   --sidebar-accent-foreground: #eceef2;
   --sidebar-border: #2a2e36;
   --sidebar-ring: #f5a524;
+  --verdict-met: #6fd39a;
 }
 
 /* Tailwind utilities for the shadcn components (bg-primary, text-muted-foreground, ...). */
@@ -85,6 +107,23 @@
   --font-mono: ui-monospace, 'SF Mono', 'JetBrains Mono', 'Cascadia Code', Menlo, Consolas, monospace;
   /* Titles and sections: system serifs only, macOS and Windows faces first, Linux fallbacks last. */
   --font-serif: 'Iowan Old Style', Charter, 'Bitstream Charter', 'Sitka Text', Cambria, Georgia, 'Noto Serif', 'DejaVu Serif', serif;
+  /* Eight type sizes under Tailwind's own names, so Fumadocs' classes follow them (size / line). */
+  --text-xs: 0.8125rem; /* 13 / 20 px: captions, table labels */
+  --text-xs--line-height: 1.25rem;
+  --text-sm: 0.875rem; /* 14 / 22 px: controls, sidebar, footer */
+  --text-sm--line-height: 1.375rem;
+  --text-base: 1.0625rem; /* 17 / 28 px: body */
+  --text-base--line-height: 1.75rem;
+  --text-lg: 1.25rem; /* 20 / 30 px: lead paragraph */
+  --text-lg--line-height: 1.875rem;
+  --text-xl: 1.5rem; /* 24 / 32 px: h3 */
+  --text-xl--line-height: 2rem;
+  --text-2xl: 1.875rem; /* 30 / 38 px: h2 */
+  --text-2xl--line-height: 2.375rem;
+  --text-3xl: 2.5rem; /* 40 / 48 px: page titles, h1 under 640 px */
+  --text-3xl--line-height: 3rem;
+  --text-4xl: 3.5rem; /* 56 / 64 px: Home h1 from 640 px */
+  --text-4xl--line-height: 4rem;
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -109,6 +148,38 @@
   --color-ring: var(--ring);
   --color-brand: var(--brand);
   --color-brand-2: var(--brand-2);
+  --color-text: var(--text);
+  --color-verdict-met: var(--verdict-met);
+  --color-verdict-missed: var(--verdict-missed);
+  --color-verdict-open: var(--verdict-open);
+  --color-rule-strong: var(--rule-strong);
+}
+
+/* Ledger utilities: the page column, a section's distance, a row label, a figure. */
+@layer components {
+  .page {
+    width: 100%;
+    max-width: var(--page-max);
+    margin-inline: auto;
+    padding-inline: var(--page-x);
+  }
+
+  .section {
+    padding-block: var(--section-y);
+  }
+
+  .caption {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    line-height: var(--text-xs--line-height);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .figure {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
 }
 
 html {
@@ -160,11 +231,11 @@ html > body[data-scroll-locked] {
   min-height: 44px;
   padding: 10px 16px;
   border: 2px solid var(--ring);
-  border-radius: 8px;
+  border-radius: var(--radius);
   background: var(--background);
   color: var(--foreground);
-  font-size: 15px;
-  line-height: 24px;
+  font-size: var(--text-sm);
+  line-height: var(--text-sm--line-height);
 }
 
 .skip-link:focus {

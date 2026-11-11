@@ -1,22 +1,15 @@
-// The frame of every page outside /docs: theme, header, content, footer.
+// The frame of every page outside /docs: header, content, footer. No theme library: the site
+// script in the root layout sets the theme and drives the header's control.
 import type { ReactNode } from 'react';
+import { SiteFooter } from '@/components/site-footer';
 import { SiteHeader } from '@/components/site-header';
-import { ThemeProvider } from '@/components/theme-provider';
-import { GITHUB_URL } from '@/lib/site';
 
 export function SiteShell({ children }: { children: ReactNode }) {
   return (
-    <ThemeProvider>
+    <>
       <SiteHeader />
       {children}
-      <footer className="mt-auto border-t">
-        <div className="mx-auto flex w-full max-w-5xl flex-wrap gap-4 px-4 py-6 text-sm text-fd-muted-foreground">
-          <span>SwarmOps · MIT licence</span>
-          <a className="hover:text-fd-foreground" href={GITHUB_URL}>
-            Source on GitHub
-          </a>
-        </div>
-      </footer>
-    </ThemeProvider>
+      <SiteFooter />
+    </>
   );
 }

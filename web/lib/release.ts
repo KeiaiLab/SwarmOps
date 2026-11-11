@@ -36,3 +36,17 @@ function readLatest(): Release {
 
 /** The top released section of CHANGELOG.md. */
 export const LATEST_RELEASE: Release = readLatest();
+
+// GitHub's heading slug: lower case, punctuation but `-` dropped, each space a `-`.
+// `[0.11.0] - 2026-11-09` -> `0110---2026-11-09`.
+const SLUG_DROP = /[^\p{L}\p{N}\s_-]/gu;
+
+/** The address of a release's entry in the changelog page. */
+export function releaseUrl(release: Release): string {
+  const heading = `[${release.version}] - ${release.date}`;
+  const anchor = heading
+    .toLowerCase()
+    .replace(SLUG_DROP, '')
+    .replace(/\s/g, '-');
+  return `/docs/changelog#${anchor}`;
+}

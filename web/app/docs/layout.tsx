@@ -1,7 +1,9 @@
-// The docs shell: theme and search, header, sidebar (one tab per docs-nav.json group), search.
+// The docs shell: theme and search, header, sidebar (one tab per docs-nav.json group), search,
+// and the site footer below the layout, the same as on product pages.
 import type { ReactNode } from 'react';
 import { DocsLayout } from 'fumadocs-ui/layouts/docs';
 import { Provider } from '@/components/provider';
+import { SiteFooter } from '@/components/site-footer';
 import { baseOptions } from '@/lib/layout.shared';
 import { source } from '@/lib/source';
 
@@ -11,6 +13,7 @@ export default function Layout({ children }: { children: ReactNode }) {
       <DocsLayout tree={source.getPageTree()} {...baseOptions()}>
         {children}
       </DocsLayout>
+      <SiteFooter />
     </Provider>
   );
 }

@@ -1,6 +1,8 @@
-// The docs header: the logo, Product · Docs · Roadmap · Changelog, and GitHub.
+// The docs frame's header and sidebar links: the same mark, NAV_LINKS and release link as the
+// product header (components/site-header.tsx), and a three-state theme switch.
 import type { BaseLayoutProps } from 'fumadocs-ui/layouts/shared';
-import { GITHUB_URL, NAV_LINKS, SITE_NAME } from './site';
+import { LATEST_RELEASE, releaseUrl } from './release';
+import { NAV_LINKS, SITE_NAME } from './site';
 
 export function baseOptions(): BaseLayoutProps {
   return {
@@ -12,7 +14,16 @@ export function baseOptions(): BaseLayoutProps {
         </>
       ),
     },
-    links: NAV_LINKS.map((link) => ({ ...link, active: 'nested-url' as const })),
-    githubUrl: GITHUB_URL,
+
+    // The five sections, then the release, which leads to its changelog entry.
+    links: [
+      ...NAV_LINKS.map((link) => ({ ...link, active: 'nested-url' as const })),
+      {
+        text: <span className="figure">v{LATEST_RELEASE.version}</span>,
+        url: releaseUrl(LATEST_RELEASE),
+        active: 'none' as const,
+      },
+    ],
+    themeSwitch: { mode: 'light-dark-system' },
   };
 }

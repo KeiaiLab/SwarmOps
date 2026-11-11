@@ -1,22 +1,33 @@
-'use client';
-// Switches between dark and light. Both icons render, and CSS shows the one for the current
-// theme, so the server's HTML matches the client's before the theme is known. A plain button,
-// not the shadcn one, keeps class merging out of the product pages' script.
-import { Moon, Sun } from 'lucide-react';
-import { useTheme } from 'next-themes';
+// The product header's theme control: three buttons (System, Light, Dark), one pressed. Server
+// rendered; the site script (lib/site-script.ts) marks the stored choice and handles the clicks.
+// Under 1024 px each button shows its icon, its name stays readable by assistive technology.
+import { Monitor, Moon, Sun } from 'lucide-react';
+
+const CHOICES = [
+  { theme: 'system', name: 'System', Icon: Monitor },
+  { theme: 'light', name: 'Light', Icon: Sun },
+  { theme: 'dark', name: 'Dark', Icon: Moon },
+] as const;
+
+// The default before the script runs: the system's preference.
+const DEFAULT_THEME = 'system';
 
 export function ThemeToggle() {
-  const { resolvedTheme, setTheme } = useTheme();
-
   return (
-    <button
-      type="button"
-      aria-label="Toggle dark mode"
-      className="inline-flex size-9 items-center justify-center rounded-md text-fd-muted-foreground hover:bg-fd-accent hover:text-fd-accent-foreground [&_svg]:size-4"
-      onClick={() => setTheme(resolvedTheme === 'dark' ? 'light' : 'dark')}
-    >
-      <Sun className="dark:hidden" />
-      <Moon className="hidden dark:block" />
-    </button>
+    <div role="group" aria-label="Theme" className="flex items-center rounded-md border border-input">
+      {CHOICES.map(({ theme, name, Icon }) => (
+        <button
+          key={theme}
+          type="button"
+          data-theme-set={theme}
+          aria-pressed={theme === DEFAULT_THEME}
+          title={name}
+          className="inline-flex min-h-11 min-w-7 items-center justify-center gap-1 px-1 sm:min-w-8 lg:px-2 text-sm text-muted-foreground transition-colors duration-120 hover:text-foreground aria-pressed:bg-muted aria-pressed:text-foreground [&_svg]:size-4"
+        >
+          <Icon aria-hidden="true" />
+          <span className="max-lg:sr-only">{name}</span>
+        </button>
+      ))}
+    </div>
   );
 }
