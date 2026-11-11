@@ -64,6 +64,9 @@ reference and the pages FROZEN_DOCS names.
   no-prompt         No `$ ` or `% ` prompt in a shell code block of a docs page.
   callouts          Docs callouts: `> [!NOTE]`, `> [!WARNING]`, `> [!CAUTION]` only, at most
                     60 words each, 4 a page.
+  perf-citations    Each figure with a unit of time or rate in README.md and docs/goals.md
+                    has, in its table row or sentence, a link to a docs/perf.md anchor or a
+                    quoted docs/perf.md section title (or its start, to a word's end).
 
 A default run enforces the rules ENFORCED names; `selftest` runs them all.
 """
@@ -119,6 +122,7 @@ class Rule(enum.Enum):
     FENCE_LABEL = "fence-label"
     NO_PROMPT = "no-prompt"
     CALLOUTS = "callouts"
+    PERF_CITATIONS = "perf-citations"
 
 
 # The rules a default run enforces. Two wait for the docs to change: spec-citations, until they
@@ -127,6 +131,8 @@ class Rule(enum.Enum):
 # lacks still names the Free plan and the private repository of the time). Three layout rules
 # wait for page fixes: readme-dated-list (README.md names a milestone), guide-next (two guides
 # list four links under `## Next`) and install-failures (a case quotes no installer message).
+# perf-citations waits for docs/goals.md's G15 row: its 56 s live run cites no docs/perf.md
+# section.
 ENFORCED = frozenset({
     Rule.LINKS,
     Rule.HOST_PATHS,
@@ -1047,6 +1053,23 @@ BOLD_ALERT = re.compile(r" {0,3}>[ \t]*\*\*(?:note|warning|caution|tip|important
 QUOTE_LINE = re.compile(r" {0,3}>[ \t]?")
 CALLOUT_MAX_WORDS = 60
 CALLOUTS_PER_PAGE = 4
+
+# Measured figures (peers-28): each in README.md and docs/goals.md cites a docs/perf.md section.
+GOALS = "docs/goals.md"
+PERF = "docs/perf.md"
+FIGURE_PAGES = (README, GOALS)
+TIME_UNIT = r"(?:ns|µs|μs|ms|s|sec|seconds?|min|minutes?|h|hours?)(?![\w/])"
+RATE_UNIT = r"(?:[A-Za-z]+/s|per second)\b"
+FIGURE = re.compile(rf"(?<![\w.,])[0-9][0-9,]*(?:\.[0-9]+)?\s?(?:{TIME_UNIT}|{RATE_UNIT})")
+PERF_LINK = re.compile(r"perf\.md#([^\s)>\"']+)")
+QUOTED = re.compile(r'"([^"]+)"|\u201c([^\u201d]+)\u201d')
+
+
+class Unit(enum.Enum):
+    """The text a figure's citation must share: its table row, or its sentence."""
+
+    ROW = "row"
+    SENTENCE = "sentence"
 
 
 class Need(enum.Enum):
@@ -1981,6 +2004,85 @@ def callout_words(lines: list[str], index: int, cut: int) -> int:
     return word_count(" ".join(texts))
 
 
+def perf_citations(repo: Repo) -> list[Finding]:
+    """Each figure with a unit of time or rate in README.md and docs/goals.md shares its row or
+    sentence with a docs/perf.md section: a link to its anchor, or its title quoted, in full or
+    up to a word's end (`perf.md, "M17 baselines"`) (peers-28)."""
+    titles = perf_sections(repo)
+    anchors = repo.anchors(PERF) if PERF in repo.files else frozenset()
+    found = []
+    for path in FIGURE_PAGES:
+        if path not in repo.files:
+            found += missing(path, Rule.PERF_CITATIONS)
+            continue
+        found += uncited(repo, path, titles, anchors)
+    return found
+
+
+def perf_sections(repo: Repo) -> list[str]:
+    """The titles of docs/perf.md's sections, below the page title."""
+    if PERF not in repo.files:
+        return []
+    return [" ".join(head.title.split()) for head in headings(repo, PERF) if head.level > 1]
+
+
+def uncited(repo: Repo, path: str, titles: list[str], anchors: frozenset[str]) -> list[Finding]:
+    """The rows and sentences of a page with a figure and no perf.md section: the figures are
+    read from the prose, the citations from the text (a quoted title may hold code)."""
+    text = repo.text(path)
+    prose = repo.prose(path)
+    starts = line_starts(prose)
+    found = []
+    for start, end, unit in figure_units(prose):
+        figure = FIGURE.search(prose, start, end)
+        if not figure or cites(text[start:end], titles, anchors):
+            continue
+        shown = " ".join(figure.group().split())
+        message = f"{shown!r} cites no section of {PERF} in its {unit.value}"
+        found.append(Finding(path, line_at(starts, figure.start()), Rule.PERF_CITATIONS, message))
+    return found
+
+
+def figure_units(prose: str) -> list[tuple[int, int, Unit]]:
+    """The (start, end) of each table row, then of each sentence outside the tables."""
+    rows = []
+    offset = 0
+    for line in prose.split("\n"):
+        if TABLE_ROW.match(line):
+            rows.append((offset, offset + len(line), Unit.ROW))
+        offset += len(line) + 1
+
+    # The sentences, the rows blanked so that a row never ends one.
+    rest = blank(prose, [(start, end) for start, end, _ in rows])
+    units = list(rows)
+    for paragraph in PARAGRAPH.finditer(rest):
+        for sentence in SENTENCE.finditer(paragraph.group()):
+            start = paragraph.start() + sentence.start()
+            units.append((start, paragraph.start() + sentence.end(), Unit.SENTENCE))
+    return units
+
+
+def cites(text: str, titles: list[str], anchors: frozenset[str]) -> bool:
+    """Whether a text links a perf.md anchor or quotes a perf.md section's title."""
+    for link in PERF_LINK.finditer(text):
+        if urllib.parse.unquote(link[1]) in anchors:
+            return True
+
+    # A quoted title, `"M17 baselines"` for `M17 baselines — 2026-11-07`.
+    for quote in QUOTED.finditer(text):
+        name = " ".join(plain(quote[1] or quote[2]).split())
+        if any(names_section(title, name) for title in titles):
+            return True
+    return False
+
+
+def names_section(title: str, name: str) -> bool:
+    """Whether a quoted name is the title, or its start up to a word's end."""
+    if not name or not title.startswith(name):
+        return False
+    return len(title) == len(name) or not title[len(name)].isalnum()
+
+
 # The layout rules, each over the whole repository.
 LAYOUT_RULES = {
     Rule.README_SIZE: readme_size,
@@ -1997,6 +2099,7 @@ LAYOUT_RULES = {
     Rule.FENCE_LABEL: fence_label,
     Rule.NO_PROMPT: no_prompt,
     Rule.CALLOUTS: callouts,
+    Rule.PERF_CITATIONS: perf_citations,
 }
 
 
@@ -2101,6 +2204,9 @@ Not links: `[code](missing.md)`, <!-- [a comment](missing.md) -->, f(x)[y](a b).
 Examples write /home/me/store and tests/data/; {ASSISTANT.title()} Code reads
 `{VENDOR}/maxResultSizeChars`, and the store follows {VENDOR.title()}'s Scion design. The
 repository is public, on the Free plan. The docs/reference/ pages are generated.
+
+A commit takes 1.26 ms at the median
+([measured](docs/perf.md#m0-fsync-latency-2026-10-15)), and `10 ms` is code.
 
 ## Install
 
@@ -2272,7 +2378,22 @@ keep a store healthy. Reference pages list every command. Project pages record t
 
 See [the non-goals](goals.md#non-goals) and [the known limitations](known-limitations.md).
 """,
-    "docs/goals.md": "# Goals\n\n## Non-goals\n\nNot a git replacement for everyone; the best.\n",
+    GOALS: """# Goals
+
+| Goal | Measured |
+| --- | --- |
+| G1 | 74.0 commits/s, p99 765 ms (perf.md, "M0 fsync") |
+| G2 | 5.41 ms ([perf.md](perf.md#m0-fsync-latency-2026-10-15)) |
+| G3 | 50 processes, `10 s` in code |
+
+A sentence over two lines measures 1.26
+ms ("M1 `put_batch` fsync scaling"). The next one names no figure.
+
+## Non-goals
+
+Not a git replacement for everyone; the best.
+""",
+    PERF: "# Perf\n\n## M0 fsync latency (2026-10-15)\n\n### M1 `put_batch` fsync scaling\n",
     "docs/known-limitations.md": "# Known limitations\n",
     INSTALL_GUIDE: f"""# Install
 
@@ -2321,6 +2442,8 @@ SELFTEST_README = "\n".join([
     "Status: pre-release, v0.9.0, the latest release.",
     "",
     "The fastest tool for agents.",
+    "",
+    "A commit takes 5 ms.",
     "",
     "- 2026-11-09: M19 is done.",
     "",
@@ -2399,8 +2522,21 @@ SELFTEST_BROKEN = {
 - e
 - f
 """,
-    "docs/goals.md": "# Goals\n\nSwarmOps is a git replacement for nobody; the best.\n",
-    "docs/perf.md": "# Perf\n",
+    GOALS: """# Goals
+
+SwarmOps is a git replacement for nobody; the best.
+
+| Goal | Measured |
+| --- | --- |
+| G1 | 74.0 commits/s (perf.md, "Nowhere") |
+| G2 | every 2 s |
+| G3 | 9 lands/s ("Perf", the page title) |
+| G4 | 3 ms ("M0 fsync") |
+
+It lands in
+3.5 ms. A cited 4 ms ("M0 fsync").
+""",
+    PERF: "# Perf\n\n## M0 fsync latency\n",
     "docs/pages.md": SELFTEST_PAGE,
     "docs/concepts.md": f"""# Concepts
 
@@ -2466,6 +2602,11 @@ SELFTEST_NEEDLES = (
     ("docs/pages.md", "[!NOTE]", Rule.CALLOUTS),
     ("docs/pages.md", "[!CAUTION]", Rule.CALLOUTS),
     ("docs/pages.md", "**Note:**", Rule.CALLOUTS),
+    (README, "takes 5 ms", Rule.PERF_CITATIONS),
+    (GOALS, "Nowhere", Rule.PERF_CITATIONS),
+    (GOALS, "every 2 s", Rule.PERF_CITATIONS),
+    (GOALS, "page title", Rule.PERF_CITATIONS),
+    (GOALS, "3.5 ms", Rule.PERF_CITATIONS),
 )
 
 # The empty tree: every input a layout rule needs is missing, which is a finding.
@@ -2485,6 +2626,8 @@ SELFTEST_EMPTY_FINDINGS = frozenset({
     (DOCS, 1, Rule.FENCE_LABEL),
     (DOCS, 1, Rule.NO_PROMPT),
     (DOCS, 1, Rule.CALLOUTS),
+    (README, 1, Rule.PERF_CITATIONS),
+    (GOALS, 1, Rule.PERF_CITATIONS),
 })
 
 
