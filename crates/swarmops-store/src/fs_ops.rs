@@ -525,7 +525,7 @@ pub use sync_kind::SyncKind;
 use sync_kind::SyncKind;
 
 /// Flushes `file`, opened at `path`, as `kind` says: every sync of [`RealFs`] goes through
-/// here, so that a sync watch ([`watch_syncs`], feature `test-hooks`) sees it, or drops it.
+/// here, so that a sync watch (`watch_syncs`, feature `test-hooks`) sees it, or drops it.
 fn flush(file: &File, path: &Path, kind: SyncKind) -> io::Result<()> {
     if !observe(kind, path) {
         return Ok(());
