@@ -476,7 +476,7 @@ fn fact(kind: FactKind, ty: u8, fill: Fill) -> Fact {
             .str(text("main"))
             .id(some(1))
             .id(some(2))
-            .str(text("Fix")),
+            .id(some(3)),
         (Review, 1) => b.u32(1).u32(2).id(some(1)).id(some(2)).id(some(3)).u8(3),
         (Review, 2) => b.u32(2).u32(2).u8(1).id(some(1)).id(some(2)),
         (Review, 3) => {
@@ -492,8 +492,8 @@ fn fact(kind: FactKind, ty: u8, fill: Fill) -> Fact {
         (Review, 5) => b.u32(5).id(some(1)),
         (Review, 6) => b.u32(6).u8(2),
         (Review, 7) => b.u32(7).u32(2).u8(1).str(text("ci/lint")).id(some(1)),
-        (Annotation, 0) => b.str(text("owner")).bytes16(text("team-a").as_bytes()),
-        (Annotation, 1) => b.str(text("owner")).bytes16(&[]),
+        (Annotation, 0) => b.str(text("owner")).id(some(1)),
+        (Annotation, 1) => b.str(text("owner")).id([0; 32]),
         (Check, _) => b
             .str(text("ci/test"))
             .id(some(1))
@@ -516,9 +516,6 @@ fn fact(kind: FactKind, ty: u8, fill: Fill) -> Fact {
             .u64(200)
             .u64(300)
             .str(text("model"))
-            .str(text("host"))
-            .str(text("session"))
-            .str(text("task"))
             .id(some(1)),
         (Provenance, 1) => b.u8(1),
         other => panic!("no cell {other:?}"),

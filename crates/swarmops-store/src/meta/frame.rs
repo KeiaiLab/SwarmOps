@@ -134,6 +134,7 @@ pub enum Base {
 
 /// One fact: the envelope of the FORMAT 3 design §2.8 around a body whose layout its kind and
 /// type fix. Built only through [`Fact::new`], which checks the body, so every fact encodes.
+/// The envelope is fixed; a kind's bodies are provisional until its feature is released.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Fact {
@@ -339,6 +340,8 @@ enum Field {
     Zero32,
     /// An `i64` that is 0: a time only another type sets.
     Zero64,
+    /// An id that is all zero: a blob a type names none of.
+    ZeroId,
     /// A `u8` that is 1: the provenance schema.
     Schema,
     /// A `u8` below the number: one of an enumeration's values.
@@ -364,11 +367,15 @@ const LINEAGE_BODY: &[Field] = &[Field::Id];
 /// A withdrawal's reason; Withdraw, Restore and Erase give one.
 const REASON: Field = Field::Bytes16(1, 1_024);
 
-/// The bodies of each kind, by type (the FORMAT 3 design §2.8 table).
+/// The bodies of each kind, by type (the FORMAT 3 design §2.8 table, with its amendment of
+/// 2026-11-11): free text a writer could not take back is a blob's id, never inline (a review's
+/// title, an annotation's value, a provenance's host, session and task, which its `doc` holds).
+/// Provisional until the kind's feature is released: a consuming milestone may change them in
+/// place until then.
 const REVIEW: &[&[Field]] = {
     use Field::{Anchor, Enum, Id, U32, U64, Zero32};
     &[
-        &[Zero32, U64, STR, Id, Id, STR],
+        &[Zero32, U64, STR, Id, Id, Id],
         &[U32, U32, Id, Id, Id, Enum(5)],
         &[U32, U32, Enum(4), Id, Id],
         &[U32, U32, Enum(3), Id, Anchor, Id],
@@ -379,8 +386,8 @@ const REVIEW: &[&[Field]] = {
     ]
 };
 const ANNOTATION: &[&[Field]] = &[
-    &[Field::Str(64), Field::Bytes16(0, 1_024)],
-    &[Field::Str(64), Field::Bytes16(0, 0)],
+    &[Field::Str(64), Field::Id],
+    &[Field::Str(64), Field::ZeroId],
 ];
 const CHECK: &[&[Field]] = &[CHECK_BODY; 7];
 const QUEUE: &[&[Field]] = {
@@ -405,7 +412,7 @@ const WITHDRAWAL: &[&[Field]] = {
 const LINEAGE: &[&[Field]] = &[LINEAGE_BODY; 7];
 const PROVENANCE: &[&[Field]] = {
     use Field::{Id, Schema, U64};
-    &[&[Schema, U64, U64, U64, STR, STR, STR, STR, Id], &[Schema]]
+    &[&[Schema, U64, U64, U64, STR, Id], &[Schema]]
 };
 
 impl FactKind {
@@ -621,6 +628,7 @@ fn read_field(r: &mut Reader<'_, BadRecord>, field: Field) -> Result<(), BadReco
         Field::Id => r.bytes(32).is_ok(),
         Field::Zero32 => r.bytes(4).is_ok_and(zero),
         Field::Zero64 => r.bytes(8).is_ok_and(zero),
+        Field::ZeroId => r.bytes(32).is_ok_and(zero),
         Field::Schema => r.u8()? == 1,
         Field::Enum(values) => r.u8()? < values,
         Field::Str(max) => {
@@ -1282,7 +1290,12 @@ mod tests {
         )));
         assert!(bad_call(new(FactKind::Provenance, 1, [0; 32], "", &[2])));
         let key = |len: usize, byte: u8| {
-            [&[u8::try_from(len).unwrap()][..], &vec![byte; len], &[0, 0]].concat()
+            [
+                &[u8::try_from(len).unwrap()][..],
+                &vec![byte; len],
+                &[0; 32],
+            ]
+            .concat()
         };
         assert!(new(FactKind::Annotation, 1, [0; 32], "", &key(64, b'k')).is_ok());
         assert!(bad_call(new(
@@ -1308,6 +1321,32 @@ mod tests {
             [0; 32],
             "",
             &reason[..10]
+        )));
+
+        // 3. Blob ids where text would be: an annotation's value (all zero on Remove), a
+        // review's title, a provenance's free text (the FORMAT 3 design's amendment of
+        // 2026-11-11, G3, G10).
+        let set = [&[5][..], b"owner", &[4; 32]].concat();
+        assert!(new(FactKind::Annotation, 0, [0; 32], "", &set).is_ok());
+        assert!(bad_call(new(FactKind::Annotation, 1, [0; 32], "", &set)));
+        let open = [&[0; 12][..], &[0], &[1; 32], &[2; 32], &[3; 32]].concat();
+        assert!(new(FactKind::Review, 0, [0; 32], "", &open).is_ok());
+        assert!(bad_call(new(
+            FactKind::Review,
+            0,
+            [0; 32],
+            "",
+            &open[..open.len() - 1]
+        )));
+        let model = [&[1][..], &[0; 24], &[1, b'm'], &[5; 32]].concat();
+        assert!(new(FactKind::Provenance, 0, [0; 32], "", &model).is_ok());
+        let free_text = [&model[..27], &[1, b'h'], &model[27..]].concat();
+        assert!(bad_call(new(
+            FactKind::Provenance,
+            0,
+            [0; 32],
+            "",
+            &free_text
         )));
     }
 
