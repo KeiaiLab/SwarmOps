@@ -34,9 +34,10 @@ fi
 # malformed one refused; target/debug's binaries are linked again unstamped after.
 python3 -I scripts/check-stamped.py
 # Both doc runs start from an empty doc directory, as in `just check`; the removal refuses a
-# target directory that is empty or not absolute, which scripts/test-doc-clean.py shows.
+# target directory that is empty, not absolute or the root however written, such as `//`,
+# which scripts/test-doc-clean.py shows.
 python3 -I scripts/test-doc-clean.py
-target="$(cargo metadata --locked --format-version 1 --no-deps | python3 -I -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"; case "$target" in /?*) rm -rf "$target/doc" ;; *) echo "check: cargo metadata gave no absolute target directory; doc not removed" >&2; exit 1 ;; esac
+target="$(cargo metadata --locked --format-version 1 --no-deps | python3 -I -c 'import json, os, sys; t = json.load(sys.stdin)["target_directory"]; n = os.path.normpath(t); print(n if os.path.isabs(t) and n.strip("/") else "")')"; case "$target" in /?*) rm -rf "$target/doc" ;; *) echo "check: cargo metadata gave no absolute target directory below /; doc not removed" >&2; exit 1 ;; esac
 # Twice: the second run, with every feature on, also renders and link-checks the test-hooks code.
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items --all-features

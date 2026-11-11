@@ -19,7 +19,8 @@ default: check
 # first run leaves out. A doc of the default build cannot link to that code, or the first run
 # fails. Both start from an empty doc directory: rustdoc keeps stale entries in the search index
 # it merges into, which on CI's kept target directories reached 192 MB, 6 to 8 minutes a doc run.
-# The removal refuses a target directory that is empty or not absolute (scripts/test-doc-clean.py).
+# The removal refuses a target directory that is empty, not absolute or the root however
+# written, such as `//` (scripts/test-doc-clean.py).
 # Every step that resolves dependencies runs `--locked`: a Cargo.lock (either
 # workspace's) that the manifests no longer match fails the gate instead of being rewritten.
 # bench/compare's lockfile, which the recipe does not build, is resolved `--locked` too
@@ -58,7 +59,7 @@ check:
     cargo nextest run --locked --profile default --release -p swarmops-cli --test test_hooks --no-tests=fail
     python3 -I scripts/check-stamped.py
     python3 -I scripts/test-doc-clean.py
-    target="$(cargo metadata --locked --format-version 1 --no-deps | python3 -I -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"; case "$target" in /?*) rm -rf "$target/doc" ;; *) echo "check: cargo metadata gave no absolute target directory; doc not removed" >&2; exit 1 ;; esac
+    target="$(cargo metadata --locked --format-version 1 --no-deps | python3 -I -c 'import json, os, sys; t = json.load(sys.stdin)["target_directory"]; n = os.path.normpath(t); print(n if os.path.isabs(t) and n.strip("/") else "")')"; case "$target" in /?*) rm -rf "$target/doc" ;; *) echo "check: cargo metadata gave no absolute target directory below /; doc not removed" >&2; exit 1 ;; esac
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items --all-features
     cargo deny --locked check

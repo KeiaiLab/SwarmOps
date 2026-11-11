@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""The gate's doc-directory removal refuses a target directory that is empty or not absolute.
+"""The gate's doc-directory removal refuses a target directory that is empty, not absolute
+or the root however written.
 
 The line is read from the justfile and from scripts/check.sh, which must carry it unchanged, and
 run with stand-ins on PATH: a `cargo` whose `metadata` fails or prints a given target directory,
@@ -59,13 +60,16 @@ def main() -> None:
     lines = {path.name: removal_line(path) for path in paths}
     failures = []
 
-    # 1. Refused: metadata fails, or names an empty, relative or root directory.
+    # 1. Refused: metadata fails, or names an empty or relative directory, or one that
+    #    normalises to the root ("//", "/.", "/a/..").
     refused = {
         "metadata fails": "exit 101\n",
         "empty": prints(""),
         "relative": prints("target"),
         "root": prints("/"),
     }
+    for root in ("//", "///", "/.", "/./", "/..", "//.", "/a/.."):
+        refused[f"root as {root}"] = prints(root)
     for name, line in lines.items():
         for shell in SHELLS:
             for case, body in refused.items():
