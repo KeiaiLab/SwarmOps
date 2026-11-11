@@ -76,6 +76,9 @@ __pycache__/
 *.py[cod]
 .venv/
 node_modules/
+# lint and property-test caches of the scripts/ tests
+.ruff_cache/
+.hypothesis/
 
 # Cloudflare Pages deploys (npx wrangler pages deploy site)
 .wrangler/
