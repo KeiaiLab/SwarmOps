@@ -16,13 +16,12 @@
 //!   which the test support sets for every run): a write that breaks one panics, and the run
 //!   ends in `E_INTERNAL` instead of at its crash point.
 //! - Every test ends with `verify --deep` through the binary, and reads its `problems`.
-//! - No sweep here reaches the index's compaction: the commit template holds 31 frames
-//!   (`support::sweep`), far short of `Index::COMPACT_THRESHOLD` (1,024 records). A crash in a
-//!   writer's compaction past that threshold (the index sync, the views written and renamed into
-//!   place, the `Compacted` frame, the checkpoint) is the slow power-loss variant's cover
-//!   (`power_loss.rs`, `..._at_every_cut`, its run ending in `Op::Bulk`): one of its seeds keeps
-//!   every unsynced write, the state a process crash leaves, at every cut of it. `just check-slow`
-//!   and the weekly `just check-ci-slow` run it; `just check` does not.
+//! - The commit template holds 31 frames (`support::sweep`), far short of
+//!   `Index::COMPACT_THRESHOLD` (1,024 records). The compaction sweep has a template of its own
+//!   that holds the threshold's records, so that its commit compacts: it crashes the index sync,
+//!   the views written and renamed into place, the `Compacted` frame and the checkpoint, in
+//!   `just check`. The slow power-loss variant (`power_loss.rs`, `..._at_every_cut`, its run
+//!   ending in `Op::Bulk`) covers the same calls against a lost power.
 //!
 //! - A revert (the M18 design §4), a land of the inverse change, is swept as a land is.
 //! - A group land (the M18 design §6.3) is swept as a land is: its chain lands whole or not at
@@ -41,10 +40,14 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use camino::Utf8Path;
 use serde_json::{Value, json};
+use swarmops_core::{ObjectKind, Signature, Tree};
 use swarmops_ops::NOW_ENV;
+use swarmops_repo::{LocalRepo, RawChangeset};
 use swarmops_store::{
-    CRASH_AT_ENV, FS_CALLS_ENV, Journal, LEAD_WAIT_ENV, MetaLock, RealFs, StoreFormat,
+    CRASH_AT_ENV, FS_CALLS_ENV, FsOps, Index, Journal, LEAD_WAIT_ENV, MetaLock, RealFs, Record,
+    StoreFormat,
 };
 
 use swarmops_testkit::child::Child;
@@ -252,6 +255,207 @@ fn kill9_during_commit_store_verifies_and_next_commit_succeeds(format) {
         crashes.iter().any(|crash| crash.leftovers > 0),
         "some crash left a temp file in objects/tmp, which verify passed over"
     );
+}
+}
+
+/// How many changesets the compaction sweep's template holds: the index's compaction
+/// threshold, so that the swept commit's record takes the index's tail past it.
+const COMPACT_TEMPLATE: u64 = Index::COMPACT_THRESHOLD;
+
+/// Where the index compaction of a store stands.
+#[derive(Debug, PartialEq, Eq)]
+struct Compaction {
+    /// The whole frames in its `journal.log`.
+    frames: usize,
+    /// How many of them are `Compacted` frames.
+    marked: usize,
+    /// How many records the index's sorted views cover.
+    sorted: u64,
+}
+
+/// Where the index compaction of `store` stands.
+fn compaction(store: &Store) -> Compaction {
+    let fs: Arc<dyn FsOps> = Arc::new(RealFs::new());
+    let journal = Journal::open(&store.layout(), Arc::clone(&fs)).unwrap();
+    let frames = journal.tail_frames_from(0).unwrap();
+    let marked = (frames.iter())
+        .filter(|frame| {
+            (frame.records.iter()).any(|record| matches!(record, Record::Compacted { .. }))
+        })
+        .count();
+    let index = Index::open(&store.layout(), fs).unwrap();
+    Compaction {
+        frames: frames.len(),
+        marked,
+        sorted: index.sorted_count(),
+    }
+}
+
+/// A store of `format` for the compaction sweep: main at a first changeset, then
+/// [`COMPACT_TEMPLATE`] - 1 root changesets in one raw batch frame, so that the index holds
+/// [`COMPACT_TEMPLATE`] records, none compacted. Every command on it signs at [`NOW`].
+fn compaction_template(format: StoreFormat) -> Store {
+    let template = Store::init_as(format).with_env(&[(NOW_ENV, &NOW.to_string())]);
+    let first = template.commit(&agent(0), "README.md", "# compaction\n", None);
+    let create = ["ref", "set", "main", first.as_str(), "--create"];
+    template.run_as(&agent(0), &create, &[]).ok();
+
+    // 1. The batch's changesets share the empty root tree, each its own message.
+    let repo = LocalRepo::open(Utf8Path::new(template.path())).expect("open the repository");
+    let tree = Tree::empty_root();
+    repo.put_objects(vec![(ObjectKind::Tree, tree.encode())])
+        .expect("put the empty tree");
+    let secs = i64::try_from(NOW).unwrap();
+    let signature = Signature::new(b"bulk".to_vec(), b"bulk@test".to_vec(), secs, 0, false);
+    let signature = signature.expect("a signature");
+    let raws = (1..COMPACT_TEMPLATE)
+        .map(|n| {
+            let message = format!("bulk {n}").into_bytes();
+            let (author, committer) = (signature.clone(), signature.clone());
+            RawChangeset::new(
+                Vec::new(),
+                tree.id(),
+                author,
+                committer,
+                message,
+                vec![],
+                vec![],
+            )
+        })
+        .collect();
+    repo.commit_raw_batch(raws).expect("the batch");
+    drop(repo);
+
+    // 2. Every record in the index's tail: the next one compacts.
+    assert_eq!(template.info()["changesets"], COMPACT_TEMPLATE);
+    let compacted = compaction(&template);
+    assert_eq!(
+        (compacted.marked, compacted.sorted),
+        (0, 0),
+        "the template compacted"
+    );
+    template
+}
+
+/// How far a run of the compaction sweep got before it ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompactCut {
+    /// Before the commit point: no changeset.
+    Uncommitted,
+    /// Committed, the index's sorted views not in place.
+    Unsorted,
+    /// The views in place, no `Compacted` frame.
+    Unmarked,
+    /// A whole `Compacted` frame in the journal, the run crashed after it.
+    Marked,
+    /// The run finished.
+    Finished,
+}
+
+/// One run of the compaction sweep: [`swept_commit`] on a copy of `template`, its k-th call
+/// aborting it. The store verifies clean and holds the dry run's changeset or none; sorted views
+/// only if it holds it, a `Compacted` frame only with them. The next commit lands, `show` finds
+/// it, and the views then cover the template's records, with one `Compacted` frame at most: a
+/// crash after the views' renames leaves them in place, and the next writer adopts them.
+fn crash_compaction_at(template: &Store, k: u64, dry: &DryRun) -> CompactCut {
+    let store = Store::copy_of(template);
+    let crash_at = k.to_string();
+    let crash = swept_commit(&store, &[(CRASH_AT_ENV, crash_at.as_str())]);
+    let finished = k > dry.calls;
+    if finished {
+        assert_eq!(crash.ok()["changeset"], dry.changeset.as_str(), "k={k}");
+    } else {
+        assert!(crash.aborted(), "k={k} of {}: {crash}", dry.calls);
+    }
+    store.assert_clean(&format!("k={k}: after the crash"));
+
+    // 1. The changeset, and the compaction only past it.
+    let changesets = store.info()["changesets"].as_u64().unwrap();
+    let committed = match changesets - COMPACT_TEMPLATE {
+        0 => false,
+        1 => true,
+        n => panic!("k={k}: {n} new changesets"),
+    };
+    let shown = store.read(&["show", &dry.changeset]);
+    if committed {
+        shown.ok();
+    } else {
+        shown.err("E_REV_NOT_FOUND");
+    }
+    let crashed = compaction(&store);
+    let (sorted, marked) = (crashed.sorted > 0, crashed.marked > 0);
+    assert!(
+        committed || !sorted,
+        "k={k}: views, not committed: {crashed:?}"
+    );
+    assert!(
+        sorted || !marked,
+        "k={k}: a Compacted frame, no views: {crashed:?}"
+    );
+
+    // 2. The next commit lands, and the index is compacted once.
+    let next = store.commit(&agent(2), "after.txt", &format!("after k={k}\n"), None);
+    assert_eq!(
+        store.show(&next)["changes"][0]["path"],
+        "after.txt",
+        "k={k}"
+    );
+    assert_eq!(store.info()["changesets"], changesets + 1, "k={k}");
+    let after = compaction(&store);
+    assert!(
+        after.sorted >= COMPACT_TEMPLATE,
+        "k={k}: not compacted: {after:?}"
+    );
+    assert!(after.marked <= 1, "k={k}: compacted twice: {after:?}");
+    store.assert_clean(&format!("k={k}: after the next commit"));
+    match (finished, committed, sorted, marked) {
+        (true, ..) => CompactCut::Finished,
+        (_, false, ..) => CompactCut::Uncommitted,
+        (_, _, false, _) => CompactCut::Unsorted,
+        (_, _, _, false) => CompactCut::Unmarked,
+        _ => CompactCut::Marked,
+    }
+}
+
+per_format! {
+/// A commit whose record takes the index's tail past [`Index::COMPACT_THRESHOLD`], crashed at
+/// each of its filesystem calls in turn (issue #16 item 1): the sweep crashes the index sync,
+/// the sorted views written and renamed into place, the `Compacted` frame and the checkpoint.
+/// After each crash the store verifies clean and the next commit lands. The sweep reaches a
+/// crash before the commit point, one before the views are in place (committed, no views), one
+/// between their renames and the `Compacted` frame, and one after that frame (not finished).
+fn crash_sweep_crosses_the_compaction_threshold(format) {
+    let template = compaction_template(format);
+
+    // 1. The dry run: its calls counted; it appends its frame and a `Compacted` one.
+    let store = Store::copy_of(&template);
+    let file = calls_file(&store);
+    let frames = compaction(&store).frames;
+    let result = swept_commit(&store, &[(FS_CALLS_ENV, file.to_str().unwrap())]).ok();
+    let compacted = Compaction {
+        frames: frames + 2,
+        marked: 1,
+        sorted: COMPACT_TEMPLATE + 1,
+    };
+    assert_eq!(compaction(&store), compacted, "the dry run compacts");
+    let dry = DryRun {
+        calls: reported_calls(&file),
+        changeset: result["changeset"].as_str().unwrap().to_owned(),
+    };
+
+    // 2. A crash at each call, and one past the last.
+    let crashes = sweep(1..=dry.calls + 1, |k| crash_compaction_at(&template, k, &dry));
+    let cuts = [
+        CompactCut::Uncommitted,
+        CompactCut::Unsorted,
+        CompactCut::Unmarked,
+        CompactCut::Marked,
+        CompactCut::Finished,
+    ];
+    for cut in cuts {
+        assert!(crashes.contains(&cut), "no run ended {cut:?}: {crashes:?}");
+    }
+    println!("compaction sweep {format:?}: {} calls", dry.calls);
 }
 }
 
