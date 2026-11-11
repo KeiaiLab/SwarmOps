@@ -31,6 +31,7 @@ mod remote_fetch;
 mod remote_perf;
 mod remote_push;
 mod remote_sync;
+mod scale_perf;
 mod serve_differential;
 mod serve_fetch;
 mod serve_http;
