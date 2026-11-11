@@ -17,7 +17,8 @@
 //!   snapshot (the writer lock's wait);    at most; git/serve.state last, covered = next_seq
 //!   serve.lock again in what is left;     git gc --auto once objects were written
 //!   serve.git or its state written
-//!   meanwhile? a snapshot again, held
+//!   meanwhile? c again, 8 rounds at most,
+//!   then E_BUSY
 //! ```
 //!
 //! The export is `git export`'s own ([`swarmops_git::export::export_in`]), forced: `serve.git` is
@@ -58,7 +59,8 @@ use super::not_built;
 use crate::LocalOps;
 use crate::error;
 
-/// How many times a refresh reads a ref again after its compare-and-swap in `serve.git` failed.
+/// How many times a refresh reads a ref again after its compare-and-swap in `serve.git` failed,
+/// and how many rounds it takes its committed snapshot in while exports move `serve.git`.
 pub const SERVE_REFRESH_ATTEMPTS: u32 = 8;
 
 /// How long a refresh, a push's or a land's export, and a preparation wait for
@@ -235,7 +237,8 @@ fn covered(repo: &ServeRepo, seq: u64) -> bool {
 /// under `serve.lock`, which is let go while that snapshot waits for the store's writer lock.
 /// With [`Scope::All`], nothing when `serve.git` is current once the lock is held, or serves a
 /// snapshot at least as new as the committed one once the lock is held again (another
-/// connection refreshed meanwhile). The lock is waited for `SERVE_LOCK_WAIT` (10 s) in all.
+/// connection refreshed meanwhile). The lock is waited for `SERVE_LOCK_WAIT` (10 s) in all;
+/// `E_BUSY` when exports move `serve.git` in each of [`SERVE_REFRESH_ATTEMPTS`] let-go rounds.
 pub fn refresh(ops: &LocalOps, repo: &ServeRepo, scope: &Scope) -> Result<Refreshed, OpError> {
     refresh_with(ops, repo, scope, || {})
 }
@@ -296,26 +299,40 @@ fn refresh_held(
 
     // 2. The committed snapshot with serve.lock let go: its wait for the store's writer lock
     //    holds no other connection back. Then serve.lock again, within what is left of the wait.
-    let before = written(repo);
-    drop(lock);
-    let (read, recovered) = ops.repo.snapshot_committed().map_err(error::op)?;
-    between();
-    let left = deadline.saturating_duration_since(Instant::now());
-    let lock = repo.lock(left).map_err(serve_error)?;
+    //    An export meanwhile (a push's, a land's, another refresh's) may have read a newer
+    //    snapshot, which must not move serve.git back: the round again, serve.lock let go each
+    //    time (I4), SERVE_REFRESH_ATTEMPTS rounds at most, then E_BUSY.
+    let mut between = Some(between);
+    let mut lock = lock;
+    for _ in 0..SERVE_REFRESH_ATTEMPTS {
+        let before = written(repo);
+        drop(lock);
+        let (read, recovered) = ops.repo.snapshot_committed().map_err(error::op)?;
+        if let Some(between) = between.take() {
+            between();
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        lock = repo.lock(left).map_err(serve_error)?;
+        if moved(repo, &before) {
+            continue;
+        }
 
-    // 3. An export meanwhile (a push's, a land's, another refresh's) may have read a newer
-    //    snapshot than this one, which must not move serve.git back: a snapshot again, held.
-    let moved = before.1.is_none() || written(repo) != before;
-    let (read, recovered) = if moved {
-        drop(read);
-        ops.repo.snapshot_committed().map_err(error::op)?
-    } else {
-        (read, recovered)
-    };
+        // 3. The export of that snapshot.
+        export_from(ops, repo, &lock, (&read, recovered), scope, &mut refreshed)?;
+        return Ok((lock, refreshed));
+    }
+    Err(serve_error(ServeError::Busy))
+}
 
-    // 4. The export of that snapshot.
-    export_from(ops, repo, &lock, (&read, recovered), scope, &mut refreshed)?;
-    Ok((lock, refreshed))
+/// Whether an export into `repo` wrote since `before` was read. `serve.git`'s refs unreadable
+/// now is not a move: no export from them follows (`export_from` reads them first and fails).
+/// Unreadable before and readable now is one.
+fn moved(repo: &ServeRepo, before: &Written) -> bool {
+    let now = written(repo);
+    if now.1.is_none() {
+        return false;
+    }
+    before.1.is_none() || now != *before
 }
 
 /// What an export into `repo` changes: `git/serve.state`'s bytes and modification time
@@ -1207,6 +1224,83 @@ mod tests {
             .map(|(store, git)| ((*git).to_owned(), site.exported(store)))
             .collect();
         assert_eq!(site.served(), expected);
+    }
+
+    /// A land's export in the let-go window moves `serve.git` past the refresh's snapshot, and a
+    /// writer then holds the store's lock: the refresh's next snapshot waits for it with
+    /// `serve.lock` let go (I4 on the moved path), and it serves the land, never older.
+    #[cfg(feature = "test-hooks")]
+    #[test]
+    fn refresh_never_exports_older_than_it_read_when_main_moves() {
+        use std::sync::Mutex;
+        use std::time::Instant;
+        use swarmops_store::{MetaLock, MetaStore};
+
+        let site = Site::new();
+        refresh(&site.ops, &site.repo, &Scope::All).expect("refresh");
+        site.commit("d", Some("main"));
+        let layout = Layout::with_format(&site.root, StoreFormat::V2);
+        let writer: Mutex<Option<MetaLock>> = Mutex::new(None);
+        let (said, told) = mpsc::channel();
+
+        // 1. The land in the let-go window: commit e, its export under serve.lock; then the
+        //    writer lock, held by the test.
+        let between = || {
+            site.commit("e", Some("main"));
+            let lock = site.repo.lock(Duration::ZERO).expect("serve.lock");
+            let (fresh, repaired) = site.ops.repo.snapshot_committed().expect("a snapshot");
+            let scope = Scope::Refs(vec!["main".to_owned()]);
+            let mut done = Refreshed::default();
+            export_from(
+                &site.ops,
+                &site.repo,
+                &lock,
+                (&fresh, repaired),
+                &scope,
+                &mut done,
+            )
+            .expect("the land's export");
+            drop((fresh, lock));
+            let held = MetaLock::acquire(&layout, WITHIN).expect("the writer lock");
+            *writer.lock().expect("the writer slot") = Some(held);
+            said.send(MetaStore::read_committed_calls())
+                .expect("say the writer holds");
+        };
+        thread::scope(|scope| {
+            let refreshing =
+                scope.spawn(|| refresh_with(&site.ops, &site.repo, &Scope::All, between));
+
+            // 2. The refresh's next snapshot waits for the writer.
+            let before = told.recv().expect("the writer holds");
+            let deadline = Instant::now() + WITHIN;
+            while MetaStore::read_committed_calls() == before {
+                assert!(
+                    Instant::now() < deadline,
+                    "the refresh never read the store again"
+                );
+                thread::sleep(POLL);
+            }
+
+            // 3. serve.lock is free meanwhile.
+            let deadline = Instant::now() + WITHIN;
+            let taken = loop {
+                if let Ok(lock) = site.repo.lock(Duration::ZERO) {
+                    break lock;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "serve.lock held across the writer wait on the moved path"
+                );
+                thread::sleep(POLL);
+            };
+            drop(taken);
+
+            // 4. The writer lets go: the refresh ends.
+            drop(writer.lock().expect("the writer slot").take());
+            refreshing.join().expect("the refresh").expect("refresh");
+        });
+        assert_eq!(site.served()["refs/heads/main"], site.exported("main"));
+        assert!(site.current());
     }
 
     /// An export from a snapshot older than the one `serve.git` serves writes nothing: no ref
