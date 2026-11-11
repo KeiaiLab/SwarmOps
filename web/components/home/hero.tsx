@@ -4,7 +4,7 @@
 //
 //   Pre-release · v0.11.0 · 2026-11-09 · Linux ... · MIT
 //   # Version control for swarms of coding agents
-//   10 to 50 agent processes ...
+//   Designed for large pools of coding agents ...
 //   [ curl ... | bash        (copy) ]   installs swarmops and so
 //   [Quick start ->] What it is  When   into ~/.local/bin ...
 import { CopyLine } from '@/components/copy-line';
@@ -24,6 +24,8 @@ const INSTALL_GUIDE_URL = '/docs/guides/install';
 const INSTALLER_URL = '/install.sh';
 const GOAL_G8_URL = '/docs/goals#goals';
 const ROADMAP_URL = '/docs/roadmap';
+// The ledger section holding the measured figure beside the benefit sentence.
+const MEASURED_URL = '/docs/perf#d2-8-gated-runs--2026-11-09';
 
 /** `Linux x86_64 (tested) and aarch64 (smoke-tested under emulation)`, from `PLATFORMS`. */
 function platformText(): string {
@@ -107,8 +109,13 @@ export function Hero() {
         {SITE_TITLE}
       </h1>
       <p className="mt-4 max-w-(--measure) text-lg text-(--text)">
-        10 to 50 agent processes on one host commit into one store at once; every command answers in one JSON
-        envelope, and the work goes back to git.
+        Designed for large pools of coding agents: their processes commit into one store at once; every command
+        answers in one JSON envelope, and the work goes back to git. Measured today at 50 concurrent writing
+        processes on one host: 25.0 lands/s, nothing lost (
+        <a className={LINK} href={MEASURED_URL}>
+          perf
+        </a>
+        ).
       </p>
 
       {/* 2. The install line and the action row; the facts beside them on wide screens. */}

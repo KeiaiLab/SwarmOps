@@ -1,8 +1,11 @@
 # SwarmOps documentation
 
-SwarmOps is version control for swarms of coding agents: 10 to 50 agent processes on one host
-commit into one [store](concepts.md#store) at once, every command answers in one JSON
+SwarmOps is version control designed for large pools of coding agents: their processes commit into
+one [store](concepts.md#store) at once, every command answers in one JSON
 [envelope](concepts.md#envelope), and the work goes back to git.
+
+It is measured today at 50 concurrent writing processes on one host: 25.0 lands/s, nothing lost
+([perf.md, "D2-8 gated runs — 2026-11-09"](perf.md#d2-8-gated-runs--2026-11-09)).
 
 ## Start here
 

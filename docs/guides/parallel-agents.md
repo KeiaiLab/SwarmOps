@@ -201,9 +201,11 @@ environment there”. Each agent's worktree needs its own setup.
 
 ## What SwarmOps does: one store, no checkout
 
-SwarmOps is version control for swarms of coding agents. It is designed for 10 to 50 Claude Code or
-LangGraph processes on one host, committing to one repository at once, and it is written in Rust and
-fully embedded: one program, no external database, no daemon. Agents do not check files out of it.
+SwarmOps is version control for swarms of coding agents. It is designed for large pools of Claude
+Code or LangGraph processes committing to one repository at once, and it is written in Rust and
+fully embedded: one program, no external database, no daemon. It is measured today at 50 concurrent
+writing processes on one host: 25.0 lands/s, nothing lost
+([perf.md, "D2-8 gated runs — 2026-11-09"](../perf.md#d2-8-gated-runs--2026-11-09)). Agents do not check files out of it.
 They read a path at a revision, `so cat main:src/lib.rs`, and write a commit from a JSON list of
 whole-file changes. (`so` is the short name of `swarmops`: the same program.)
 
@@ -440,7 +442,7 @@ With worktrees, a few habits keep the integration step small:
 
 Consider SwarmOps when
 
-- many agent processes, 10 to 50 by design, commit to one trunk on one host
+- a large pool of agent processes commits to one trunk on one host
   (Linux today; macOS and Windows next), and the time goes into git locks, overwritten work and
   merge-and-retry loops;
 - you want conflicts and errors as data an agent can act on: an error code that does not change, a
