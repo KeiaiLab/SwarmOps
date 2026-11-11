@@ -6,6 +6,7 @@ import type { VFile } from 'vfile';
 import { defineCollections, defineConfig } from 'fumadocs-mdx/config';
 import { pageSchema } from 'fumadocs-core/source/schema';
 import { z } from 'zod';
+import { remarkAlerts } from './lib/remark-alerts';
 import { remarkRepoLinks } from './lib/remark-repo-links';
 import { firstHeading, firstParagraph } from './lib/markdown-meta';
 
@@ -328,8 +329,12 @@ function rehypeCodeFigures() {
 
 export default defineConfig({
   mdxOptions: {
-    // Links first, so the image plugin sees site URLs.
-    remarkPlugins: (plugins) => [[remarkRepoLinks, { root: REPO_ROOT }], ...plugins],
+    // Links first, so the image plugin sees site URLs; then `> [!NOTE]` quotes as callouts.
+    remarkPlugins: (plugins) => [
+      [remarkRepoLinks, { root: REPO_ROOT }],
+      [remarkAlerts, { root: REPO_ROOT }],
+      ...plugins,
+    ],
     // Code figures after Shiki, which runs first.
     rehypePlugins: (plugins) => [...plugins, rehypeCodeFigures],
     // Offline builds: no remote image is fetched, and an image without a size renders unsized.
