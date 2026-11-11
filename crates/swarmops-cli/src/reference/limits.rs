@@ -828,11 +828,12 @@ static INTERNAL: [Limit; 33] = [
         declared(
             "swarmops_store::meta::store::DEFAULT_PARALLELISM",
             "crates/swarmops-store/src/meta/store.rs",
-            "const DEFAULT_PARALLELISM: usize = 5;",
-            || 5,
+            "const DEFAULT_PARALLELISM: usize = 6;",
+            || 6,
         ),
         Unit::Count("threads"),
-        "How many threads a write transaction syncs the five index files from.",
+        "How many threads a write transaction syncs the index files from: the six of a \
+             FORMAT 3 store, the five of FORMAT 1 and 2.",
     ),
     internal_value(
         "Import frame",

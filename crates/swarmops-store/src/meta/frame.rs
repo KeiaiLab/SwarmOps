@@ -336,6 +336,9 @@ enum Field {
     U64,
     I64,
     Id,
+    /// An id that names a blob, all zero for none: a root of verify and gc, durable before the
+    /// frame (W9).
+    Blob,
     /// A `u32` that is 0: a first event's version.
     Zero32,
     /// An `i64` that is 0: a time only another type sets.
@@ -359,7 +362,7 @@ enum Field {
 const STR: Field = Field::Str(255);
 
 /// A Check's body, of every type (state).
-const CHECK_BODY: &[Field] = &[Field::Str(128), Field::Id, Field::Id, STR];
+const CHECK_BODY: &[Field] = &[Field::Str(128), Field::Id, Field::Blob, STR];
 
 /// A Lineage's body, of every type (cause).
 const LINEAGE_BODY: &[Field] = &[Field::Id];
@@ -371,33 +374,34 @@ const REASON: Field = Field::Bytes16(1, 1_024);
 /// 2026-11-11): free text a writer could not take back is a blob's id, never inline (a review's
 /// title, an annotation's value, a provenance's host, session and task, which its `doc` holds).
 /// Provisional until the kind's feature is released: a consuming milestone may change them in
-/// place until then.
+/// place until then. The fields the table marks "blob" are [`Field::Blob`] (its amendment's
+/// judgement, H6): [`Fact::blob_ids`] reads them, and no other list of them exists.
 const REVIEW: &[&[Field]] = {
-    use Field::{Anchor, Enum, Id, U32, U64, Zero32};
+    use Field::{Anchor, Blob, Enum, Id, U32, U64, Zero32};
     &[
-        &[Zero32, U64, STR, Id, Id, Id],
+        &[Zero32, U64, STR, Id, Blob, Blob],
         &[U32, U32, Id, Id, Id, Enum(5)],
-        &[U32, U32, Enum(4), Id, Id],
-        &[U32, U32, Enum(3), Id, Anchor, Id],
+        &[U32, U32, Enum(4), Id, Blob],
+        &[U32, U32, Enum(3), Id, Anchor, Blob],
         &[U32],
-        &[U32, Id],
+        &[U32, Blob],
         &[U32, Enum(4)],
-        &[U32, U32, Enum(3), STR, Id],
+        &[U32, U32, Enum(3), STR, Blob],
     ]
 };
 const ANNOTATION: &[&[Field]] = &[
-    &[Field::Str(64), Field::Id],
+    &[Field::Str(64), Field::Blob],
     &[Field::Str(64), Field::ZeroId],
 ];
 const CHECK: &[&[Field]] = &[CHECK_BODY; 7];
 const QUEUE: &[&[Field]] = {
-    use Field::{Enum, Id, U16, U32, Zero32};
+    use Field::{Blob, Enum, Id, U16, U32, Zero32};
     &[
         &[Zero32, STR, Id, Id],
         &[U32, Id, Id, Id, U16],
         &[U32, STR],
         &[U32, Id],
-        &[U32, Enum(5), STR, Id, Id],
+        &[U32, Enum(5), STR, Id, Blob],
     ]
 };
 const WITHDRAWAL: &[&[Field]] = {
@@ -411,8 +415,8 @@ const WITHDRAWAL: &[&[Field]] = {
 };
 const LINEAGE: &[&[Field]] = &[LINEAGE_BODY; 7];
 const PROVENANCE: &[&[Field]] = {
-    use Field::{Id, Schema, U64};
-    &[&[Schema, U64, U64, U64, STR, Id], &[Schema]]
+    use Field::{Blob, Schema, U64};
+    &[&[Schema, U64, U64, U64, STR, Blob], &[Schema]]
 };
 
 impl FactKind {
@@ -545,6 +549,33 @@ impl Fact {
     /// Its body, in its type's layout.
     pub fn body(&self) -> &[u8] {
         &self.body
+    }
+
+    /// The blobs it names: the fields of its body its kind and type mark "blob" (the FORMAT 3
+    /// design §2.8 table, with its amendment of 2026-11-11), in body order, all zero ones left
+    /// out. The one list of them: W9's check, gc's roots and verify read it here.
+    pub(crate) fn blob_ids(&self) -> Vec<ObjectId> {
+        let fields = self.kind.body(self.ty).unwrap_or(&[]);
+        let mut r = Reader::new(&self.body, bad_record);
+        let mut ids = Vec::new();
+        for &field in fields {
+            // 1. A blob field: its id, unless all zero (none named).
+            if matches!(field, Field::Blob) {
+                let Ok(id) = r.array::<32>() else {
+                    break;
+                };
+                if id != [0; 32] {
+                    ids.push(ObjectId::new(id));
+                }
+                continue;
+            }
+
+            // 2. Any other field: passed over. Fact::new checked the body whole.
+            if read_field(&mut r, field).is_err() {
+                break;
+            }
+        }
+        ids
     }
 
     /// The fact at the start of `buf`, whose kind byte names a fact kind, and how many bytes it
@@ -685,7 +716,7 @@ fn read_field(r: &mut Reader<'_, BadRecord>, field: Field) -> Result<(), BadReco
         Field::U16 => r.bytes(2).is_ok(),
         Field::U32 => r.bytes(4).is_ok(),
         Field::U64 | Field::I64 => r.bytes(8).is_ok(),
-        Field::Id => r.bytes(32).is_ok(),
+        Field::Id | Field::Blob => r.bytes(32).is_ok(),
         Field::Zero32 => r.bytes(4).is_ok_and(zero),
         Field::Zero64 => r.bytes(8).is_ok_and(zero),
         Field::ZeroId => r.bytes(32).is_ok_and(zero),
@@ -1473,6 +1504,51 @@ mod tests {
             (envelope.body, envelope.actor.as_str()),
             (&[3; 32][..], "a")
         );
+    }
+
+    /// The blob ids a fact names, per kind and type: the fields the design §2.8 table marks
+    /// "blob" (with its amendment of 2026-11-11, `title` and `value`), all zero ones left out.
+    #[test]
+    fn a_fact_names_its_blobs() {
+        let blobs = |kind, ty, body: Vec<u8>| {
+            let fact = Fact::new(kind, ty, [1; 32], [0; 32], 0, String::new(), body).unwrap();
+            fact.blob_ids()
+                .into_iter()
+                .map(|id| id.0[0])
+                .collect::<Vec<u8>>()
+        };
+        let id = |byte: u8| vec![byte; 32];
+        let cat = |parts: &[&[u8]]| parts.concat();
+
+        // 1. Review: open (intent, title), verdict (note), comment (text), intent, set-aside.
+        let open = cat(&[&[0; 12], &[0], &id(20), &id(21), &id(22)]);
+        assert_eq!(blobs(FactKind::Review, 0, open), [21, 22]);
+        let verdict = cat(&[&[0; 8], &[1], &id(20), &id(23)]);
+        assert_eq!(blobs(FactKind::Review, 2, verdict), [23]);
+        let comment = cat(&[&[0; 8], &[0], &id(20), &[0], &id(24)]);
+        assert_eq!(blobs(FactKind::Review, 3, comment), [24]);
+        assert_eq!(blobs(FactKind::Review, 5, cat(&[&[0; 4], &id(25)])), [25]);
+        let aside = cat(&[&[0; 8], &[0], &[1, b'n'], &id(26)]);
+        assert_eq!(blobs(FactKind::Review, 7, aside), [26]);
+        let revise = cat(&[&[0; 8], &id(20), &id(21), &id(22), &[0]]);
+        assert_eq!(blobs(FactKind::Review, 1, revise), Vec::<u8>::new());
+
+        // 2. Annotation's value, Check's output, Queue's report, Provenance's doc.
+        let set = cat(&[&[1, b'k'], &id(27)]);
+        assert_eq!(blobs(FactKind::Annotation, 0, set), [27]);
+        let remove = cat(&[&[1, b'k'], &[0; 32]]);
+        assert_eq!(blobs(FactKind::Annotation, 1, remove), Vec::<u8>::new());
+        let check = cat(&[&[1, b'c'], &id(20), &id(28), &[0]]);
+        assert_eq!(blobs(FactKind::Check, 2, check), [28]);
+        let removed = cat(&[&[0; 4], &[1], &[0], &id(20), &id(29)]);
+        assert_eq!(blobs(FactKind::Queue, 4, removed), [29]);
+        let provenance = cat(&[&[1], &[0; 24], &[1, b'm'], &id(30)]);
+        assert_eq!(blobs(FactKind::Provenance, 0, provenance), [30]);
+
+        // 3. An optional blob left all zero names none; kinds without blobs name none.
+        let no_note = cat(&[&[0; 8], &[1], &id(20), &[0; 32]]);
+        assert_eq!(blobs(FactKind::Review, 2, no_note), Vec::<u8>::new());
+        assert_eq!(blobs(FactKind::Lineage, 0, id(31)), Vec::<u8>::new());
     }
 
     /// A header that checks but announces 0 or more than the bound is refused from the header.

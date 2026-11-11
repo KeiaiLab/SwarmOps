@@ -285,6 +285,12 @@ pub(crate) fn read_manifest(
 /// a manifest changed under every one of [`MetaStore::SNAPSHOT_ROUNDS`] reads
 /// [`StoreError::SnapshotContended`] (retryable).
 pub(crate) fn open_views(layout: &Layout, fs: &StoreFs) -> Result<Views, StoreError> {
+    open_views_with(layout, fs, &mut || {}).map(|(changesets, _)| changesets)
+}
+
+/// [`open_views`], with the views of the fact runs the same manifest names: by subject (`ids`)
+/// and by other (`dh`), in row order (the FORMAT 3 design §2.8).
+pub(crate) fn open_all(layout: &Layout, fs: &StoreFs) -> Result<(Views, Views), StoreError> {
     open_views_with(layout, fs, &mut || {})
 }
 
@@ -294,14 +300,17 @@ fn open_views_with(
     layout: &Layout,
     fs: &StoreFs,
     between: &mut dyn FnMut(),
-) -> Result<Views, StoreError> {
+) -> Result<(Views, Views), StoreError> {
     let mut last: Option<Vec<u8>> = None;
     for _ in 0..MetaStore::SNAPSHOT_ROUNDS {
         let (bytes, manifest) = read_manifest(layout, fs)?;
         between();
-        if let Some(pairs) = open_pairs(layout, fs, &manifest)? {
-            let covered = manifest.covered(Domain::Changesets);
-            return Ok(Views::of_runs(pairs, covered));
+        if let Some([changesets, facts]) = open_pairs(layout, fs, &manifest)? {
+            let views = |pairs, domain| Views::of_runs(pairs, manifest.covered(domain));
+            return Ok((
+                views(changesets, Domain::Changesets),
+                views(facts, Domain::Facts),
+            ));
         }
         if last.as_ref() == Some(&bytes) {
             return Err(StoreError::IndexCorrupt {
@@ -315,23 +324,24 @@ fn open_views_with(
     })
 }
 
-/// The views of each changeset run of `manifest`, in record order, every run it names opened
-/// and its header checked; `None` if one is not there.
+/// The views of each changeset run of `manifest`, then of each fact run, in record order,
+/// every run it names opened and its header checked; `None` if one is not there.
 fn open_pairs(
     layout: &Layout,
     fs: &StoreFs,
     manifest: &Manifest,
-) -> Result<Option<Vec<Pair>>, StoreError> {
-    let mut pairs = Vec::new();
+) -> Result<Option<[Vec<Pair>; 2]>, StoreError> {
+    let (mut changesets, mut facts) = (Vec::new(), Vec::new());
     for run in &manifest.runs {
         let Some(opened) = open_run(layout, fs, run)? else {
             return Ok(None);
         };
-        if run.domain == Domain::Changesets {
-            pairs.push(opened);
+        match run.domain {
+            Domain::Changesets => changesets.push(opened),
+            Domain::Facts => facts.push(opened),
         }
     }
-    Ok(Some(pairs))
+    Ok(Some([changesets, facts]))
 }
 
 /// The two sections of `run`'s file, its header checked against its name and its length before
@@ -538,7 +548,7 @@ mod tests {
                 std::fs::remove_file(run_path(&layout, &run)).unwrap();
             }
         };
-        let read = open_views_with(&layout, &fs, &mut merge).unwrap();
+        let (read, _) = open_views_with(&layout, &fs, &mut merge).unwrap();
         assert_eq!((read.sorted_count(), calls), (0, 2));
 
         // 3. The same manifest naming a missing run, read twice: damage.

@@ -35,6 +35,7 @@
 pub mod check;
 mod column;
 pub mod derived;
+pub(crate) mod facts;
 pub(crate) mod features;
 pub mod frame;
 pub mod fsck;

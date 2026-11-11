@@ -11,6 +11,10 @@
 //! (one lookup when it holds them all, the usual case) and appends the rest, a frame's with
 //! one [`Index::append_batch`].
 //!
+//! In FORMAT 3 the facts of the frames get their rows in `facts.col` the same way, after the
+//! frame's changesets: a writer appends the rows it lacks, and a reader's overlay holds the facts
+//! of the frames past the last row it counts (the FORMAT 3 design §2.8).
+//!
 //! Every frame past the checkpoint but the last batch's (the frames one writer appended at once,
 //! one frame on its own the most common) is materialized: a writer appends its frames only after
 //! replaying all the others. Each ref those frames move ends at the target of its
@@ -21,7 +25,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use swarmops_core::{ChangesetId, bytes};
 
-use super::frame::{Frame, Record};
+use super::facts;
+use super::frame::{Fact, Frame, Record};
 use super::index::{ChangesetMeta, Index};
 use super::refs::{self, RefFiles, RefState};
 use crate::error::StoreError;
@@ -66,6 +71,8 @@ pub(crate) fn replay(
         }
         from = to;
     }
+    // The facts' rows, after the changesets: the ones `facts.col` lacks.
+    index.append_facts(frames)?;
     let mut files = 0;
     for (name, target) in targets {
         if refs::write(layout, fs, name, target)? {
@@ -100,6 +107,8 @@ pub(crate) struct Overlay {
     by_id: HashMap<ChangesetId, usize>,
     /// Every ref the snapshot sees.
     refs: BTreeMap<String, RefState>,
+    /// The facts of those frames that no row the index handle counts names, in journal order.
+    facts: Vec<Fact>,
 }
 
 impl Overlay {
@@ -133,11 +142,23 @@ impl Overlay {
                 None => files.remove(name),
             };
         }
+        // The facts past the last row the index counts.
+        let end = index.facts_end();
+        let facts = (facts::rows_of(frames)?.into_iter())
+            .filter(|(row, _)| row.offset >= end)
+            .map(|(_, fact)| fact.clone())
+            .collect();
         Ok(Overlay {
             extras,
             by_id,
             refs: files,
+            facts,
         })
+    }
+
+    /// The facts the index handle counts no row of, in journal order.
+    pub(crate) fn facts(&self) -> &[Fact] {
+        &self.facts
     }
 
     /// The changesets the index handle does not count, in journal order.

@@ -1,6 +1,7 @@
 //! FORMAT 3's view work (the FORMAT 3 design §2.5 and its 2026-11-11 amendment): [`step`] builds
 //! a run of the records the checkpoint passed past the runs, merges it at [`RUN_FANOUT`], and
-//! publishes the new manifest, under `meta/views.lock` and never under `meta/lock`.
+//! publishes the new manifest, under `meta/views.lock` and never under `meta/lock`; of the
+//! changeset records (domain 0), then of the fact rows (domain 1, §2.8).
 //!
 //! ```text
 //! records the checkpoint passed:  [0 ............................................. records)
@@ -21,6 +22,7 @@ use std::ops::ControlFlow;
 use swarmops_core::bytes;
 
 use super::column::AppendOnlyColumn;
+use super::facts;
 use super::features;
 use super::index::{DHS, IDS};
 use super::journal::Journal;
@@ -51,10 +53,11 @@ pub enum Step {
 ///    was opened, is [`StoreError::TooNew`] before anything is written (G13).
 /// 2. The runs outside the manifest, and what `tmp/` holds, removed: a step or a merge that
 ///    stopped part way left them (rule 7).
-/// 3. With more than [`RUN_MIN`] changeset records past the runs, the run of them built in
-///    `tmp/`, synced and renamed into place, merged with the run before it while that one is
-///    shorter than [`RUN_FANOUT`] times it; the new manifest published by an atomic replace,
-///    and only then the runs it replaced removed.
+/// 3. For each domain, the changeset records and then the fact rows (§2.8), with more than
+///    [`RUN_MIN`] of them past its runs: the run of them built in `tmp/`, synced and renamed
+///    into place, merged with the run before it while that one is shorter than [`RUN_FANOUT`]
+///    times it; the new manifest published by an atomic replace, and only then the runs it
+///    replaced removed.
 ///
 /// A manifest that covers more than the checkpoint passed is [`StoreError::IndexCorrupt`] (M2).
 pub(crate) fn step(layout: &Layout, fs: &StoreFs, journal: &Journal) -> Result<Step, StoreError> {
@@ -70,24 +73,44 @@ pub(crate) fn step(layout: &Layout, fs: &StoreFs, journal: &Journal) -> Result<S
     features::check(layout, fs)?;
 
     // 2. What the checkpoint passed, the manifest, and what earlier steps left.
-    let records = journal.ckpt3()?.records;
-    let (_, manifest) = runs::read_manifest(layout, fs)?;
+    let ckpt = journal.ckpt3()?;
+    let (_, mut manifest) = runs::read_manifest(layout, fs)?;
     sweep(layout, fs, &manifest)?;
 
-    // 3. The tail past the runs, if long enough for a run of its own.
-    let covered = manifest.covered(Domain::Changesets);
-    let Some(tail) = records.checked_sub(covered) else {
+    // 3. Each domain's tail past its runs, if long enough for a run of its own.
+    for (domain, passed) in [
+        (Domain::Changesets, ckpt.records),
+        (Domain::Facts, ckpt.fact_rows),
+    ] {
+        manifest = step_domain(layout, fs, manifest, domain, passed)?;
+    }
+    Ok(Step::Done)
+}
+
+/// [`step`]'s work on `domain`, of which the checkpoint passed `passed` records: none with at
+/// most [`RUN_MIN`] past its runs; else their run built, merged, the manifest after `manifest`
+/// published and the runs it replaced removed. Returns the manifest now in place.
+fn step_domain(
+    layout: &Layout,
+    fs: &StoreFs,
+    manifest: Manifest,
+    domain: Domain,
+    passed: u64,
+) -> Result<Manifest, StoreError> {
+    // 1. The tail past the runs.
+    let covered = manifest.covered(domain);
+    let Some(tail) = passed.checked_sub(covered) else {
         return Err(StoreError::IndexCorrupt {
             what: "the manifest's runs cover records the checkpoint has not passed",
         });
     };
     if tail <= RUN_MIN {
-        return Ok(Step::Done);
+        return Ok(manifest);
     }
-    let (next, replaced) = merged(&manifest, covered, records);
+    let (next, replaced) = merged(&manifest, domain, covered, passed);
 
-    // 4. Built, published, and then the runs it replaced removed.
-    let built = next.runs.iter().find(|run| run.to == records);
+    // 2. Built, published, and then the runs it replaced removed.
+    let built = (next.runs.iter()).find(|run| run.domain == domain && run.to == passed);
     let built = built.expect("the new manifest ends at the checkpoint");
     build(layout, fs, built)?;
     let path = layout.views_dir().join(runs::MANIFEST);
@@ -98,18 +121,19 @@ pub(crate) fn step(layout: &Layout, fs: &StoreFs, journal: &Journal) -> Result<S
     if !replaced.is_empty() {
         fs.fsync_dir(layout.views_dir().as_std_path())?;
     }
-    Ok(Step::Done)
+    Ok(next)
 }
 
-/// The manifest after a run of the changeset records `[covered, records)` is added to `manifest`
+/// The manifest after a run of `domain`'s records `[covered, records)` is added to `manifest`
 /// and merged with the runs before it while each is shorter than [`RUN_FANOUT`] times it (rule
 /// 5), or while the manifest would list more than [`MAX_RUNS`] (which rule 5 alone never
 /// reaches: it keeps a domain within ⌈log₄(n / 1,024)⌉ + 1 runs); and the runs it replaced.
-fn merged(manifest: &Manifest, covered: u64, records: u64) -> (Manifest, Vec<Run>) {
+/// The runs stay in (domain, from) order.
+fn merged(manifest: &Manifest, domain: Domain, covered: u64, records: u64) -> (Manifest, Vec<Run>) {
     let (mut kept, others): (Vec<Run>, Vec<Run>) =
-        (manifest.runs.iter()).partition(|run| run.domain == Domain::Changesets);
+        (manifest.runs.iter()).partition(|run| run.domain == domain);
     let mut new = Run {
-        domain: Domain::Changesets,
+        domain,
         from: covered,
         to: records,
     };
@@ -124,6 +148,7 @@ fn merged(manifest: &Manifest, covered: u64, records: u64) -> (Manifest, Vec<Run
     }
     kept.push(new);
     kept.extend(others);
+    kept.sort_unstable_by_key(|run| (run.domain, run.from));
     let next = Manifest {
         generation: manifest.generation + 1,
         runs: kept,
@@ -131,21 +156,28 @@ fn merged(manifest: &Manifest, covered: u64, records: u64) -> (Manifest, Vec<Run
     (next, replaced)
 }
 
-/// Builds `run`'s file, of changeset records, from the index columns: the id and delta-hash
-/// columns of its records read a window at a time (synced, below the checkpoint: no cut reaches
-/// them), sorted, written to `tmp/` with one append, synced, then renamed into place. The same
-/// records give the same bytes, so a file a crash left under its name is replaced by its equal.
+/// Builds `run`'s file from the index: of changeset records, the id and delta-hash columns of
+/// its records read a window at a time; of fact rows, each row's subject and other, read from its
+/// fact (all synced, below the checkpoint: no cut reaches them). Sorted, written to `tmp/` with
+/// one append, synced, then renamed into place. The same records give the same bytes, so a file
+/// a crash left under its name is replaced by its equal.
 fn build(layout: &Layout, fs: &StoreFs, run: &Run) -> Result<(), StoreError> {
     // 1. The two sections.
-    let mut ids = sorted_column(layout, fs, IDS, run)?;
+    let [mut ids, mut dh] = match run.domain {
+        Domain::Changesets => [
+            sorted_column(layout, fs, IDS, run)?,
+            sorted_column(layout, fs, DHS, run)?,
+        ],
+        Domain::Facts => facts::sections(layout, fs, run.from, run.to)?,
+    };
     ids.sort_unstable();
-    if ids.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+    dh.sort_unstable();
+    let twice = ids.windows(2).any(|pair| pair[0].0 == pair[1].0);
+    if run.domain == Domain::Changesets && twice {
         return Err(StoreError::IndexCorrupt {
             what: "the index holds an id twice",
         });
     }
-    let mut dh = sorted_column(layout, fs, DHS, run)?;
-    dh.sort_unstable();
 
     // 2. Written in tmp/, synced, renamed.
     let tmp_dir = layout.views_dir().join(runs::TMP);

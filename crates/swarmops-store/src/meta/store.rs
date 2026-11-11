@@ -60,8 +60,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use camino::Utf8Path;
 use swarmops_core::{ChangesetId, bytes};
 
+use super::facts::Side;
 use super::features;
-use super::frame::{self, Frame, MAX_RECORDS, MAX_RECORDS_V3, Record};
+use super::frame::{self, Fact, FactKind, Frame, MAX_RECORDS, MAX_RECORDS_V3, Record};
 use super::index::{ChangesetMeta, Index};
 use super::journal::{Journal, LogCut, PastFrames, TailRepair};
 use super::lock::MetaLock;
@@ -90,9 +91,10 @@ static READ_COMMITTED_CALLS: AtomicU64 = AtomicU64::new(0);
 /// [`MetaStore::with_lock_timeout`] says otherwise.
 const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How many threads a write transaction's [`Index::sync`] syncs the five index files from
-/// unless [`MetaStore::set_parallelism`] says otherwise: all five at once.
-const DEFAULT_PARALLELISM: usize = 5;
+/// How many threads a write transaction's [`Index::sync`] syncs the index files from unless
+/// [`MetaStore::set_parallelism`] says otherwise: all at once, the six of FORMAT 3 (`ids.col`,
+/// `gen.col`, `dh.col`, `par.col`, `parents.log`, `facts.col`), the five of FORMAT 1 and 2.
+const DEFAULT_PARALLELISM: usize = 6;
 
 /// How many frames past the checkpoint a commit leaves before it syncs the index and moves
 /// the checkpoint.
@@ -217,6 +219,18 @@ pub enum InsertOutcome {
     },
     /// The store holds the changeset already, or this transaction queued it already.
     AlreadyPresent,
+}
+
+/// What [`MetaWrite::put_fact`] expects of the facts the store holds before it queues one (the
+/// FORMAT 3 design §2.8, the version CAS).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Expect {
+    /// Nothing: the fact is queued whatever the store holds.
+    Any,
+    /// That the store and the transaction hold this many facts of the fact's kind about its
+    /// subject: its version, for a kind whose facts are a subject's events (Review, Queue).
+    Version(u32),
 }
 
 /// What [`MetaWrite::cas_ref`] did.
@@ -461,9 +475,9 @@ impl MetaStore {
         self
     }
 
-    /// Makes the write transactions sync the five index files (their batched
-    /// [`Index::sync`], and the sync a compaction starts with) from `threads` threads at once
-    /// (0: one per available core), at most one per file. 5 unless set. 1 syncs them one after
+    /// Makes the write transactions sync the index files (their batched [`Index::sync`], and the
+    /// sync a compaction starts with) from `threads` threads at once (0: one per available core),
+    /// at most one per file. 6 unless set: FORMAT 3's six files at once. 1 syncs them one after
     /// another, in write order, so that a test counting [`FsOps`] calls (a crash sweep's
     /// `CrashAtFs`) meets the same call at the same count in every run.
     pub fn set_parallelism(&mut self, threads: usize) {
@@ -484,7 +498,7 @@ impl MetaStore {
 
     /// [`MetaStore::read`], its errors as they come.
     fn snapshot(&self) -> Result<MetaRead<'_>, StoreError> {
-        let ckpt = self.journal.ckpt()?;
+        let (ckpt, fact_rows) = self.ckpt_and_facts()?;
         let mut opened = None;
         for _ in 0..Self::SNAPSHOT_ROUNDS {
             features::check(&self.layout, &self.fs)?;
@@ -503,7 +517,7 @@ impl MetaStore {
                     first = past.first;
                     Ok(past.frames)
                 };
-                match Index::open_with_past(&self.layout, self.fs.clone(), past) {
+                match Index::open_with_past(&self.layout, self.fs.clone(), fact_rows, past) {
                     Ok((index, frames)) => (index, PastFrames { first, frames }),
                     Err(NotOpened::Shrunk) => continue,
                     Err(NotOpened::Failed(e)) => return Err(e),
@@ -610,12 +624,12 @@ impl MetaStore {
     /// checked.
     fn recover(&self, lock: MetaLock) -> Result<MetaWrite<'_>, StoreError> {
         let tail = self.journal.repair_tail()?;
-        let ckpt = self.journal.ckpt()?;
+        let (ckpt, fact_rows) = self.ckpt_and_facts()?;
         // The frames past the checkpoint vouch for the index's records past it, and are
         // replayed.
-        let (mut index, frames) = Index::open_with_past(&self.layout, self.fs.clone(), || {
-            self.journal.tail_frames_from(ckpt)
-        })?;
+        let past = || self.journal.tail_frames_from(ckpt);
+        let (mut index, frames) =
+            Index::open_with_past(&self.layout, self.fs.clone(), fact_rows, past)?;
         index.set_parallelism(self.parallelism);
         let repaired = index.repair_tail_with(&frames)?;
         let replayed = replay::replay(&mut index, &self.layout, &self.fs, &frames)?;
@@ -631,6 +645,7 @@ impl MetaStore {
         Ok(MetaWrite {
             store: self,
             checkpointed_records: index.len().saturating_sub(bytes::to_u64(past)),
+            checkpointed_facts: fact_rows,
             index,
             uncheckpointed: bytes::to_u64(frames.len()),
             records: Vec::new(),
@@ -726,6 +741,18 @@ impl MetaStore {
         match self.layout.format() {
             StoreFormat::V3 => MAX_RECORDS_V3,
             _ => MAX_RECORDS,
+        }
+    }
+
+    /// The checkpoint's offset and, in FORMAT 3, the fact rows it passed, read together from
+    /// `journal3.ckpt` (0 rows in the other formats).
+    fn ckpt_and_facts(&self) -> Result<(u64, u64), StoreError> {
+        match self.layout.format() {
+            StoreFormat::V3 => {
+                let ckpt = self.journal.ckpt3()?;
+                Ok((ckpt.offset, ckpt.fact_rows))
+            }
+            _ => Ok((self.journal.ckpt()?, 0)),
         }
     }
 
@@ -985,6 +1012,37 @@ impl MetaRead<'_> {
         self.next_seq
     }
 
+    /// The facts about `subject`, in journal order (the FORMAT 3 design §2.8): the fact index's
+    /// (a search of each fact run, then the rows past them; one `read_at` of the journal per fact
+    /// found, checked against its row and `subject`), then the frames past the checkpoint. None
+    /// below FORMAT 3. [`StoreError::IndexCorrupt`] for a run or a row that names another fact.
+    pub fn facts_by_subject(&self, subject: [u8; 32]) -> Result<Vec<Fact>, StoreError> {
+        self.facts_by(Side::Subject, subject)
+    }
+
+    /// The facts whose other is `other`, in journal order, as [`MetaRead::facts_by_subject`]
+    /// finds them. All zero names no other: no fact is found by it.
+    pub fn facts_by_other(&self, other: [u8; 32]) -> Result<Vec<Fact>, StoreError> {
+        if other == [0; 32] {
+            return Ok(Vec::new());
+        }
+        self.facts_by(Side::Other, other)
+    }
+
+    /// The facts whose `side` is `key`: the index's, then the overlay's.
+    fn facts_by(&self, side: Side, key: [u8; 32]) -> Result<Vec<Fact>, StoreError> {
+        let mut found = self.index.find_facts(side, &key)?;
+        let past = self.overlay.facts().iter();
+        found.extend(past.filter(|fact| side.key_of(fact) == key).cloned());
+        Ok(found)
+    }
+
+    /// How many facts this snapshot's lookups have read from the journal.
+    #[cfg(test)]
+    pub(crate) fn fact_reads(&self) -> u64 {
+        self.index.fact_reads()
+    }
+
     /// How many changesets the store holds.
     pub fn count_changesets(&self) -> Result<u64, StoreError> {
         Ok(self.index.len() + bytes::to_u64(self.overlay.extras().len()))
@@ -1016,6 +1074,8 @@ pub struct MetaWrite<'a> {
     /// How many of the index's records lie before the checkpoint: synced before it moved
     /// past them, so a failed sync never cuts them.
     checkpointed_records: u64,
+    /// How many fact rows the checkpoint passed (FORMAT 3; 0 in the others).
+    checkpointed_facts: u64,
     /// How many frames lie past the checkpoint, not counting this transaction's.
     uncheckpointed: u64,
     /// The records queued, in order: the frames [`MetaWrite::commit_frames`] appends, the closed
@@ -1261,6 +1321,71 @@ impl MetaWrite<'_> {
         Ok(mismatches)
     }
 
+    /// Queues `fact` (the FORMAT 3 design §2.8), if the store holds what `expect` says: with
+    /// [`Expect::Version`], as many facts of its kind about its subject as the version, the
+    /// committed ones (the fact index under the lock) and the ones this transaction queued
+    /// counted together. Otherwise [`CasResult::Mismatch`] (its `actual` `None`: a fact names no
+    /// changeset), and nothing is queued: the version CAS. [`CasResult::Applied`] (`old` `None`)
+    /// when queued; its feature is listed before its frame is appended (W10).
+    ///
+    /// Refused before anything is queued or written: on a FORMAT 1 or 2 store,
+    /// [`StoreError::FormatRequired`] naming its kind's feature (`needs` 3); a kind whose feature
+    /// this build does not support, or a blob it names that the store does not hold (W9: every
+    /// blob a fact names is durable before its frame), [`StoreError::BadCall`]; a frame with no
+    /// room left, [`StoreError::Limit`].
+    pub fn put_fact(&mut self, fact: Fact, expect: Expect) -> Result<CasResult, StoreError> {
+        // 1. A FORMAT 3 record of a kind this build gives a meaning.
+        let kind = fact.kind();
+        let format = self.store.layout.format();
+        if format != StoreFormat::V3 {
+            return Err(StoreError::FormatRequired {
+                name: features::feature_of(kind).to_owned(),
+                needs: StoreFormat::V3.version(),
+                store: format.version(),
+            });
+        }
+        if !features::known_kinds().contains(&kind) {
+            return Err(StoreError::BadCall(format!(
+                "a {kind:?} fact needs the feature {:?}, which this build does not support",
+                features::feature_of(kind)
+            )));
+        }
+
+        // 2. The version CAS, under the lock.
+        if let Expect::Version(version) = expect
+            && self.fact_count(fact.subject(), kind)? != u64::from(version)
+        {
+            return Ok(CasResult::Mismatch { actual: None });
+        }
+
+        // 3. Its blobs durable (W9), and room in the frame.
+        for id in fact.blob_ids() {
+            let path = self.store.layout.object_path(id);
+            if !self.store.fs.exists(path.as_std_path())? {
+                return Err(StoreError::BadCall(format!(
+                    "a {kind:?} fact names blob {}, which the store does not hold",
+                    id.to_hex()
+                )));
+            }
+        }
+        self.check_room()?;
+        self.records.push(Record::Fact(fact));
+        Ok(CasResult::Applied { old: None })
+    }
+
+    /// How many facts of `kind` about `subject` the store and this transaction hold.
+    fn fact_count(&self, subject: [u8; 32], kind: FactKind) -> Result<u64, StoreError> {
+        let held = self.index.find_facts(Side::Subject, &subject)?;
+        let queued = self.records.iter().filter_map(|record| match record {
+            Record::Fact(fact) => Some(fact),
+            _ => None,
+        });
+        let count = (held.iter().chain(queued))
+            .filter(|fact| fact.kind() == kind && fact.subject() == subject)
+            .count();
+        Ok(bytes::to_u64(count))
+    }
+
     /// The committed frames whose seq is `first` or greater, in journal order: a snapshot's
     /// [`MetaRead::next_seq`] gives those it did not hold (the M16 design §6). Read under the
     /// lock, after [`MetaStore::write`]'s tail check, so every whole frame is listed and no other
@@ -1332,16 +1457,20 @@ impl MetaWrite<'_> {
         self.lock.take()
     }
 
-    /// How many changeset records a FORMAT 3 store holds past its runs once this transaction
-    /// commits: the index's tail and the changesets queued (0 below FORMAT 3, which compacts).
+    /// How many records of a domain a FORMAT 3 store holds past its runs once this transaction
+    /// commits, the larger of the two: the index's tail and the changesets queued, or the fact
+    /// rows' tail and the facts queued (0 below FORMAT 3, which compacts).
     pub(super) fn backlog(&self) -> u64 {
         if self.store.layout.format() != StoreFormat::V3 {
             return 0;
         }
-        let queued = (self.records.iter())
-            .filter(|record| matches!(record, Record::Changeset { .. }))
-            .count();
-        self.index.tail_len() + bytes::to_u64(queued)
+        let queued = |of: fn(&Record) -> bool| {
+            bytes::to_u64(self.records.iter().filter(|record| of(record)).count())
+        };
+        let changesets =
+            self.index.tail_len() + queued(|record| matches!(record, Record::Changeset { .. }));
+        let facts = self.index.fact_tail() + queued(|record| matches!(record, Record::Fact(_)));
+        changesets.max(facts)
     }
 
     /// How many frames are closed ([`MetaWrite::begin_frame`]).
@@ -1474,18 +1603,22 @@ impl MetaWrite<'_> {
     /// checkpoint moved.
     ///
     /// A FORMAT 3 writer never compacts, nor appends a `Compacted` frame (the FORMAT 3 design §0
-    /// 3, §2.7): its checkpoint records the index records the sync passed ([`Journal::set_ckpt3`];
-    /// no fact row is materialized yet). It syncs and checkpoints also once more than
-    /// [`RUN_MIN`] records lie past the checkpoint, so that a step can build their run (§2.5,
-    /// the checkpoint's cadence).
+    /// 3, §2.7): its checkpoint records the index records and the fact rows the sync passed
+    /// ([`Journal::set_ckpt3`]). It syncs and checkpoints also once more than [`RUN_MIN`]
+    /// records or rows lie past the checkpoint, so that a step can build their run (§2.5, the
+    /// checkpoint's cadence).
     fn settle(&mut self, settle: Settle) -> Result<bool, StoreError> {
         let v3 = self.store.layout.format() == StoreFormat::V3;
         let compact = !v3 && self.index.tail_len() > Index::COMPACT_THRESHOLD;
         let flush = settle == Settle::Flush;
         let unsynced = self.index.len().saturating_sub(self.checkpointed_records);
+        let unsynced_facts = self
+            .index
+            .fact_rows()
+            .saturating_sub(self.checkpointed_facts);
         let due = self.uncheckpointed >= CHECKPOINT_EVERY
             || (flush && self.uncheckpointed > 0)
-            || (v3 && unsynced > RUN_MIN);
+            || (v3 && unsynced.max(unsynced_facts) > RUN_MIN);
         if !compact && !due {
             return Ok(false);
         }
@@ -1500,7 +1633,7 @@ impl MetaWrite<'_> {
                 .map_err(marker_error)?;
         }
         if v3 {
-            journal.set_ckpt3(journal.len(), self.index.len(), 0)?;
+            journal.set_ckpt3(journal.len(), self.index.len(), self.index.fact_rows())?;
         } else {
             journal.set_ckpt(journal.len())?;
         }
@@ -1661,14 +1794,14 @@ struct Closed {
 /// What `frame`, just appended, committed: its seq and payload CRC, the changesets it inserts
 /// and the moves it records.
 fn commit_info(frame: &Frame) -> CommitInfo {
-    let inserted = (frame.records.iter())
-        .filter(|record| matches!(record, Record::Changeset { .. }))
-        .count();
+    let count = |of: fn(&Record) -> bool| {
+        bytes::to_u64(frame.records.iter().filter(|record| of(record)).count())
+    };
     CommitInfo {
         frame_seq: frame.seq,
         frame_crc: Some(frame.crc),
-        inserted: bytes::to_u64(inserted),
-        moved_refs: bytes::to_u64(frame.records.len() - inserted),
+        inserted: count(|record| matches!(record, Record::Changeset { .. })),
+        moved_refs: count(|record| matches!(record, Record::RefMove { .. })),
         checkpointed: false,
     }
 }

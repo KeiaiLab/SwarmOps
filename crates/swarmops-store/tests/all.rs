@@ -9,6 +9,9 @@ mod contention;
 mod counters;
 mod derived;
 mod external_ids;
+// Every test of it enables its fact kinds with the hooks' `supported_for_tests`.
+#[cfg(feature = "test-hooks")]
+mod facts;
 mod features;
 mod fs_kind;
 mod fsck;

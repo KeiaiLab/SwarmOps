@@ -58,6 +58,7 @@ pub use meta::refs::{
     RefKind, check_move, check_ref_name, check_ref_name_in, check_remote_segment, ref_kind,
 };
 pub use meta::runs::{MAX_RUNS, RUN_BACKLOG_MAX, RUN_FANOUT, RUN_MIN};
+pub use meta::store::Expect;
 pub use meta::views::Step;
 pub use meta::{
     Answer, BadRecord, CasResult, ChangesetMeta, CommitInfo, DerivedSlot, DerivedStore, Frame,

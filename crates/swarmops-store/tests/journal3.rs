@@ -178,6 +178,8 @@ fn ckpt3_keeps_base_through_set_ckpt() {
         layout.views_dir().join("MANIFEST"),
     )
     .unwrap();
+    // And its fact rows: none, as an upgrade writes them.
+    fs::write(layout.facts_col(), b"").unwrap();
 
     // 3. Two writes and a flush: the checkpoint moves to the end, the base stays.
     let store = MetaStore::open_in(layout.clone(), real_fs()).unwrap();

@@ -335,7 +335,7 @@ Not part of the contract: these tune the implementation, or bound the store's la
 | Value | Amount | Constant | What it does |
 | --- | --- | --- | --- |
 | Writer lock wait | 10 s | `swarmops_store::meta::store::DEFAULT_LOCK_TIMEOUT` | How long a write waits for the store's lock; a write that waits it out with its request still unclaimed in the write queue fails with `E_BUSY`, and nothing of it is recorded. A write that the lock's holder claimed into its batch waits past it for its answer. |
-| Index sync threads | 5 threads | `swarmops_store::meta::store::DEFAULT_PARALLELISM` | How many threads a write transaction syncs the five index files from. |
+| Index sync threads | 6 threads | `swarmops_store::meta::store::DEFAULT_PARALLELISM` | How many threads a write transaction syncs the index files from: the six of a FORMAT 3 store, the five of FORMAT 1 and 2. |
 | Import frame | 8,192 changesets | `swarmops_git::import::DEFAULT_FRAME_CHANGESETS` | How many changesets a journal frame of `git import` holds at most. |
 | Import step budget | 100 ms | `swarmops_git::import::IMPORT_STEP_BUDGET` | How long one frame's commit of `git import`, and of the objects-only import of a fetch or a `serve` push, may hold the writer lock: each frame after the first is sized from the last one's cost to take about this long. |
 | Import first frame | 64 changesets | `swarmops_git::import::IMPORT_FIRST_FRAME` | How many changesets the first journal frame of `git import` holds: the frames after it are sized by the step budget. |

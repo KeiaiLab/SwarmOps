@@ -44,6 +44,8 @@
 //! `meta/sorted3/MANIFEST` (the FORMAT 3 design §2.4, §2.5), which `MetaStore::step_views`
 //! builds outside the writer lock. Lookups search each run, then scan the records past the
 //! last; the index never compacts, and never cuts below what `journal3.ckpt` has passed.
+//! `meta/idx/facts.col` is its sixth file (the fact index): synced with the five, cut with
+//! them after a failed sync, and repaired with them by a writer.
 
 use std::num::NonZero;
 use std::ops::{ControlFlow, Range};
@@ -57,7 +59,8 @@ use swarmops_core::{ChangesetId, ObjectId, bytes};
 
 use super::MAX_LOOKUP_HITS;
 use super::column::AppendOnlyColumn;
-use super::frame::{Frame, Record};
+use super::facts::{FactRows, Side};
+use super::frame::{Fact, Frame, Record};
 use super::journal::Journal;
 use super::parents::{self, MAX_PARENTS, MAX_PARENTS_LEN, PARENT_LEN, ParentsAt};
 use super::replay::{self, ChangesetRecord};
@@ -177,6 +180,9 @@ pub struct Index {
     /// The store's paths: the journal past its checkpoint vouches for the records past it
     /// ([`Index::open`]).
     layout: Layout,
+    /// FORMAT 3's sixth index file, `facts.col`, and its runs (the FORMAT 3 design §2.8); none
+    /// in the other formats, and none before the records are counted.
+    facts: Option<FactRows>,
 }
 
 impl Index {
@@ -198,7 +204,8 @@ impl Index {
     /// create's files are named where they are, under `meta.tmp/`.
     ///
     /// In FORMAT 3 the views are `meta/sorted3/`, its `tmp/` and the manifest of no run
-    /// (generation 0) in place of `meta/sorted/`'s four files (the FORMAT 3 design §2.5).
+    /// (generation 0) in place of `meta/sorted/`'s four files (the FORMAT 3 design §2.5), and
+    /// `meta/idx/facts.col` is made empty too (§2.8).
     pub(crate) fn create_in(layout: &Layout, fs: &StoreFs) -> Result<Index, StoreError> {
         let idx = layout.meta_path("idx");
         let sorted = sorted_dir(layout);
@@ -210,7 +217,7 @@ impl Index {
         let columns = [IDS, GENS, DHS, PARS, PARENTS].map(|rel| layout.meta_path(rel));
         let views = match layout.format() {
             StoreFormat::V1 | StoreFormat::V2 => VIEW_FILES.map(|name| sorted.join(name)).to_vec(),
-            StoreFormat::V3 => Vec::new(),
+            StoreFormat::V3 => vec![layout.facts_col()],
         };
         for path in columns.iter().chain(&views) {
             fs.append(path.as_std_path(), &[])?;
@@ -259,8 +266,11 @@ impl Index {
         let mut index = Self::handle(layout, fs)?;
         let lens = index.lens()?;
         let whole = index.whole_of(lens, None)?;
-        index.open_runs()?;
+        let fact_views = index.open_runs()?;
         index.set_count(&whole)?;
+        if let Some(views) = fact_views {
+            index.facts = Some(FactRows::open_alone(&index.layout, &index.fs, views)?);
+        }
         Ok(index)
     }
 
@@ -273,17 +283,25 @@ impl Index {
     /// error is the caller's own type, which the index's errors convert into, so that the
     /// caller can tell its own reasons for stopping from the index's ([`crate::MetaStore::read`]
     /// takes another round when `journal.off` shrank as the frames were read).
+    ///
+    /// In FORMAT 3 the frames vouch for the rows of `facts.col` past `fact_rows`, the rows the
+    /// checkpoint the caller read them from passed (`journal3.ckpt`, read with its offset).
     pub(crate) fn open_with_past<E: From<StoreError>>(
         layout: &Layout,
         fs: StoreFs,
+        fact_rows: u64,
         read_past: impl FnOnce() -> Result<Vec<Frame>, E>,
     ) -> Result<(Index, Vec<Frame>), E> {
         let mut index = Self::handle(layout, fs)?;
         let lens = index.lens()?;
         let past = read_past()?;
         let whole = index.whole_of(lens, Some(&past))?;
-        index.open_runs()?;
+        let fact_views = index.open_runs()?;
         index.set_count(&whole)?;
+        if let Some(views) = fact_views {
+            let facts = FactRows::open(&index.layout, &index.fs, fact_rows, &past, views)?;
+            index.facts = Some(facts);
+        }
         Ok((index, past))
     }
 
@@ -313,16 +331,20 @@ impl Index {
             views,
             sync_threads: 1,
             layout: layout.clone(),
+            facts: None,
         })
     }
 
-    /// Opens a FORMAT 3 index's runs ([`runs::open_views`]); nothing in the other formats, whose
-    /// views [`Index::handle`] opened.
-    fn open_runs(&mut self) -> Result<(), StoreError> {
-        if self.layout.format() == StoreFormat::V3 {
-            self.views = runs::open_views(&self.layout, &self.fs)?;
+    /// Opens a FORMAT 3 index's runs ([`runs::open_all`]) and returns its fact runs' views,
+    /// which `facts.col`'s handle takes; nothing in the other formats, whose views
+    /// [`Index::handle`] opened.
+    fn open_runs(&mut self) -> Result<Option<Views>, StoreError> {
+        if self.layout.format() != StoreFormat::V3 {
+            return Ok(None);
         }
-        Ok(())
+        let (changesets, facts) = runs::open_all(&self.layout, &self.fs)?;
+        self.views = changesets;
+        Ok(Some(facts))
     }
 
     /// Makes what `whole` holds this handle's count, which the views must not cover more of.
@@ -513,6 +535,8 @@ impl Index {
     /// cannot be spawned (the process is out of threads) is synced on the calling thread
     /// instead, so that this step never fails, or panics, for want of a thread. ext4 commits
     /// concurrent fsyncs together: five at once cost about two (docs/perf.md).
+    ///
+    /// In FORMAT 3 `facts.col` is the sixth file, synced with the five (W3).
     pub fn sync(&self) -> Result<(), StoreError> {
         let files = self.write_order();
         let fs = &self.fs;
@@ -969,6 +993,9 @@ impl Index {
         past: Option<&[Frame]>,
     ) -> Result<IndexRepair, StoreError> {
         let dropped = self.catch_up_vouched_by(past)?;
+        if let Some(facts) = &mut self.facts {
+            facts.repair()?;
+        }
         let views_rebuilt = !self.views.in_step();
         if views_rebuilt {
             self.rebuild_views()?;
@@ -1009,9 +1036,14 @@ impl Index {
     ///
     /// In FORMAT 3 the floor is what `journal3.ckpt` has passed rather than what the runs cover,
     /// which may be less: a step builds its runs from the records below the checkpoint without
-    /// the lock, so no cut may reach them (the FORMAT 3 design §2.5 rule 4).
+    /// the lock, so no cut may reach them (the FORMAT 3 design §2.5 rule 4). `facts.col` is cut
+    /// first, back to the rows the checkpoint passed, whatever `records` says.
     pub fn truncate_to(&mut self, records: u64) -> Result<u64, StoreError> {
-        let keep = records.max(self.floor()?);
+        let (floor, fact_floor) = self.floor()?;
+        if let Some(facts) = &mut self.facts {
+            facts.truncate_to(fact_floor)?;
+        }
+        let keep = records.max(floor);
         if keep >= self.len {
             return Ok(self.len);
         }
@@ -1445,13 +1477,15 @@ impl Index {
     }
 
     /// The fewest records [`Index::truncate_to`] keeps: what the sorted views cover; in FORMAT 3
-    /// what `journal3.ckpt` has passed (read on a journal handle of its own).
-    fn floor(&self) -> Result<u64, StoreError> {
+    /// what `journal3.ckpt` has passed (read on a journal handle of its own). With it, the fact
+    /// rows the checkpoint passed (0 below FORMAT 3).
+    fn floor(&self) -> Result<(u64, u64), StoreError> {
         match self.layout.format() {
-            StoreFormat::V1 | StoreFormat::V2 => Ok(self.views.covered()),
+            StoreFormat::V1 | StoreFormat::V2 => Ok((self.views.covered(), 0)),
             StoreFormat::V3 => {
                 let journal = Journal::open(&self.layout, Arc::new(RealFs))?;
-                Ok(journal.ckpt3()?.records.max(self.views.covered()))
+                let ckpt = journal.ckpt3()?;
+                Ok((ckpt.records.max(self.views.covered()), ckpt.fact_rows))
             }
         }
     }
@@ -1478,15 +1512,58 @@ impl Index {
             && self.ids.holds(self.len)?)
     }
 
-    /// The five files in the order [`Index::append`] writes them.
-    fn write_order(&self) -> [&Utf8Path; 5] {
-        [
+    /// The five files in the order [`Index::append`] writes them, then FORMAT 3's `facts.col`,
+    /// which replay appends after them.
+    fn write_order(&self) -> Vec<&Utf8Path> {
+        let mut files = vec![
             self.parents.path(),
             self.pars.path(),
             self.gens.path(),
             self.dhs.path(),
             self.ids.path(),
-        ]
+        ];
+        files.extend(self.facts.as_ref().map(FactRows::path));
+        files
+    }
+
+    /// Appends the rows of the facts of `frames` that `facts.col` lacks (FORMAT 3; nothing in
+    /// the others): replay's, after the frames' changesets. The caller holds [`crate::MetaLock`].
+    pub(crate) fn append_facts(&mut self, frames: &[Frame]) -> Result<(), StoreError> {
+        match &mut self.facts {
+            Some(facts) => facts.append(frames),
+            None => Ok(()),
+        }
+    }
+
+    /// How many fact rows it counts; 0 below FORMAT 3.
+    pub(crate) fn fact_rows(&self) -> u64 {
+        self.facts.as_ref().map_or(0, FactRows::len)
+    }
+
+    /// How many of them no fact run covers.
+    pub(crate) fn fact_tail(&self) -> u64 {
+        self.facts.as_ref().map_or(0, FactRows::tail_len)
+    }
+
+    /// Where the last fact row it counts ends in the journal (0 with none): the facts of the
+    /// frames from there on are a snapshot's to add.
+    pub(crate) fn facts_end(&self) -> u64 {
+        self.facts.as_ref().map_or(0, FactRows::end)
+    }
+
+    /// How many facts its lookups have read from the journal.
+    #[cfg(test)]
+    pub(crate) fn fact_reads(&self) -> u64 {
+        self.facts.as_ref().map_or(0, FactRows::reads)
+    }
+
+    /// The facts whose `side` is `key`, in row order ([`FactRows::find`]); none below FORMAT 3.
+    pub(crate) fn find_facts(&self, side: Side, key: &[u8; 32]) -> Result<Vec<Fact>, StoreError> {
+        let Some(facts) = &self.facts else {
+            return Ok(Vec::new());
+        };
+        let found = facts.find(side, key)?;
+        Ok(found.into_iter().map(|(_, fact)| fact).collect())
     }
 }
 
