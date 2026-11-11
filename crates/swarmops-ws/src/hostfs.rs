@@ -109,7 +109,18 @@ pub trait HostFs: Send + Sync {
     /// no-op where the platform has none. On Unix a file that is not a regular one with one
     /// link is refused as swapped: a hard link would carry the mode outside the root.
     fn set_mode(&self, root: &Utf8Path, rel: &str, mode: u32) -> io::Result<()>;
+
+    /// Writes `bytes` to `rel` below `root` as [`HostFs::write_file`] does, the file readable
+    /// and writable by its owner alone (`0o600`): a file that names an identity, as the
+    /// hold record does. [`RealHost`] makes it with that mode; this default writes, then sets it.
+    fn write_private(&self, root: &Utf8Path, rel: &str, bytes: &[u8]) -> io::Result<()> {
+        self.write_file(root, rel, bytes)?;
+        self.set_mode(root, rel, PRIVATE_MODE)
+    }
 }
+
+/// The permission bits of a file only its owner reads and writes, as the registry's entries.
+const PRIVATE_MODE: u32 = 0o600;
 
 /// A write that met, below the root, something other than a directory where it walks down, or
 /// other than a regular file with one link where it sets a mode: the path below the root.
@@ -283,6 +294,10 @@ impl HostFs for RealHost {
     fn set_mode(&self, root: &Utf8Path, rel: &str, mode: u32) -> io::Result<()> {
         walk::set_mode(root, rel, mode)
     }
+
+    fn write_private(&self, root: &Utf8Path, rel: &str, bytes: &[u8]) -> io::Result<()> {
+        walk::write_private(root, rel, bytes)
+    }
 }
 
 /// The writes of `RealHost`: rooted and never following a link below the root on Unix, by the
@@ -306,7 +321,7 @@ mod nofollow {
     use rustix::fs::{AtFlags, FileType, Mode, OFlags};
     use rustix::io::Errno;
 
-    use super::{TEMP_SUFFIX, split, swapped, unopened};
+    use super::{PRIVATE_MODE, TEMP_SUFFIX, split, swapped, unopened};
 
     /// How the root is opened: links above and at it followed.
     const ROOT_FLAGS: OFlags = OFlags::RDONLY
@@ -406,6 +421,17 @@ mod nofollow {
 
     /// See `HostFs::write_file`.
     pub(super) fn write_file(root: &Utf8Path, rel: &str, bytes: &[u8]) -> io::Result<()> {
+        write_mode(root, rel, bytes, NEW_FILE_MODE)
+    }
+
+    /// See `HostFs::write_private`: the temp made with [`PRIVATE_MODE`], so the path never
+    /// holds the bytes with more.
+    pub(super) fn write_private(root: &Utf8Path, rel: &str, bytes: &[u8]) -> io::Result<()> {
+        write_mode(root, rel, bytes, PRIVATE_MODE)
+    }
+
+    /// Writes `bytes` to `rel` below `root`, a new file asking for `mode` before the umask.
+    fn write_mode(root: &Utf8Path, rel: &str, bytes: &[u8], mode: u32) -> io::Result<()> {
         // 1. The temp beside the path; one a killed write left is removed, never followed.
         let (dir, name) = parent_of(root, rel, Missing::Make)?;
         let temp = format!(".{name}{TEMP_SUFFIX}");
@@ -416,12 +442,7 @@ mod nofollow {
 
         // 2. Made new (`O_EXCL`, `O_NOFOLLOW`), written, renamed over the path in the same
         //    directory. No sync: the store holds the bytes durably.
-        let fd = rustix::fs::openat(
-            &dir,
-            temp.as_str(),
-            TEMP_FLAGS,
-            Mode::from_raw_mode(NEW_FILE_MODE),
-        )?;
+        let fd = rustix::fs::openat(&dir, temp.as_str(), TEMP_FLAGS, Mode::from_raw_mode(mode))?;
         let mut file = std::fs::File::from(fd);
         io::Write::write_all(&mut file, bytes)?;
         drop(file);
@@ -558,6 +579,11 @@ mod fullpath {
         std::fs::rename(full(root, from)?, full(root, to)?)
     }
 
+    /// See `HostFs::write_private`: no permission bits on these platforms, the plain write.
+    pub(super) fn write_private(root: &Utf8Path, rel: &str, bytes: &[u8]) -> io::Result<()> {
+        write_file(root, rel, bytes)
+    }
+
     /// See `HostFs::set_mode`: no permission bits on these platforms, nothing to set.
     pub(super) fn set_mode(root: &Utf8Path, rel: &str, _mode: u32) -> io::Result<()> {
         full(root, rel).map(drop)
@@ -629,7 +655,7 @@ fn inode_and_mode(_meta: &std::fs::Metadata) -> (u64, u32) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum HostMethod {
-    /// [`HostFs::write_file`].
+    /// [`HostFs::write_file`] and [`HostFs::write_private`].
     WriteFile,
     /// [`HostFs::symlink`].
     Symlink,
@@ -770,12 +796,19 @@ impl<H: HostFs> HostFs for RecordingHost<H> {
         self.record(HostMethod::SetMode, &root.join(rel));
         self.inner.set_mode(root, rel, mode)
     }
+
+    fn write_private(&self, root: &Utf8Path, rel: &str, bytes: &[u8]) -> io::Result<()> {
+        self.record(HostMethod::WriteFile, &root.join(rel));
+        self.inner.write_private(root, rel, bytes)
+    }
 }
 
 /// Fault injection for crash tests (feature `test-hooks`), as the store's `CrashAtFs`: forwards
 /// to `inner`, except that the k-th call (counting every [`HostFs`] method, from 1) aborts the
 /// process with [`std::process::abort`] instead of running, as a crash at that exact point
-/// would. It counts every call ([`CrashAtHost::calls`]).
+/// would. It counts every call ([`CrashAtHost::calls`]). A [`HostFs::write_private`] runs as the
+/// trait's default, a write then a mode: two calls, as through a wrapper that does not forward
+/// it.
 #[cfg(feature = "test-hooks")]
 #[non_exhaustive]
 pub struct CrashAtHost<H: HostFs = RealHost> {

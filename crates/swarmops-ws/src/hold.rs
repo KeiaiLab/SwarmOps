@@ -7,7 +7,7 @@
 //!    "target","base","base_op"?,"head","unlanded"?,"snapshot_at"?}
 //!
 //! a mutation that succeeded, its lock still held ─▶ renew: read the last record (FsOps),
-//!   count, write a temp beside it and rename it over (HostFs, no sync)
+//!   count, write a temp beside it, 0600, and rename it over (HostFs, no sync)
 //! ws delete ─▶ remove
 //! ```
 //!
@@ -203,7 +203,7 @@ pub(crate) fn renew(ctx: &Ctx<'_>, ws: &Workspace, done: &Done<'_>) {
     };
     let bytes = serde_json::to_vec(&hold).expect("a hold record serializes");
     let dir = ctx.store_root.join(REGISTRY_DIR);
-    if let Err(e) = ctx.host.write_file(&dir, &rel, &bytes) {
+    if let Err(e) = ctx.host.write_private(&dir, &rel, &bytes) {
         warn(&file.name, "written", &e);
     }
 }

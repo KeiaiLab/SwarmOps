@@ -371,6 +371,38 @@ fn an_older_build_lists_past_the_hold_directory() {
     assert_eq!(names, ["v", "w"]);
 }
 
+/// The record names an identity, so it is the owner's alone from the moment it is made, as the
+/// registry entry beside it is: `0600` after a create and after a commit, never through a
+/// `set_mode` after the write.
+#[cfg(all(unix, feature = "test-hooks"))]
+#[test]
+fn hold_record_is_created_0600() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use swarmops_ws::hostfs::{HostMethod, RecordingHost};
+
+    // 1. A create and a commit over a recording host.
+    let f = Fixture::new();
+    let base = f.commit(None, &[Put::File("src/a.txt", "a\n")]);
+    let host = Arc::new(RecordingHost::new(RealHost::default()));
+    let ctx = f.ctx_on(host.clone());
+    f.create_in(&ctx, "w", &base, &[]).unwrap();
+    let mode = |f: &Fixture| {
+        let meta = std::fs::metadata(hold_path(&f.root, "w")).unwrap();
+        meta.permissions().mode() & 0o777
+    };
+    assert_eq!(mode(&f), 0o600, "after the create");
+    write(&f.beside("w"), "src/a.txt", "mine\n");
+    let mut req = WsCommitReq::new("w".to_owned(), "mine".to_owned());
+    req.status_after = StatusAfter::None;
+    swarmops_ws::commit(&ctx, req).unwrap();
+    assert_eq!(mode(&f), 0o600, "after the commit");
+
+    // 2. Made with the mode, not given it after.
+    let held = hold_path(&f.root, "w");
+    assert!(!host.calls_of(HostMethod::SetMode).contains(&held));
+}
+
 /// No call of the durable files' layer that writes or syncs names the hold record or its
 /// directory: the record is read through `FsOps`, and only read.
 #[test]
