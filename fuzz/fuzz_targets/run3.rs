@@ -1,7 +1,10 @@
 //! FORMAT 3 run files never panic a reader, and never make it answer wrong (the FORMAT 3 design
-//! §2.4, §6): the input, as the run the manifest names, either reads, and then every lookup of
-//! the store's three changesets finds each at its record, or is refused as damage
-//! (`IndexCorrupt`). The store's records are those of the golden run `run_c`, the seed.
+//! §2.4, §6): the input, as the run the manifest names, either reads, and then every changeset a
+//! lookup of the store's three gives is the right one at its record, or is refused as damage
+//! (`IndexCorrupt`). A run whose keys are out of order may hide a record from a lookup, as a
+//! damaged view of FORMAT 1 and 2 may: lookups check what they find against the index columns,
+//! not the run's trailing CRC, which verify reads. The store's records are those of the golden
+//! run `run_c`, the seed.
 #![no_main]
 
 use std::sync::{Arc, OnceLock};
@@ -62,16 +65,23 @@ fuzz_target!(|data: &[u8]| {
         Err(other) => panic!("a run reads, or is refused as damage: {other}"),
     };
 
-    // 2. Every lookup answers right, or refuses.
+    // 2. What every lookup finds is right, or it refuses.
+    let id_of = |byte| swarmops_core::ChangesetId::new(swarmops_core::ObjectId::new([byte; 32]));
     for (rec, (id, dh)) in (0..).zip(RECORDS) {
-        let id = swarmops_core::ChangesetId::new(swarmops_core::ObjectId::new([id; 32]));
-        match read.changeset(id) {
-            Ok(found) => assert_eq!(found.map(|meta| meta.seq), Some(rec)),
+        match read.changeset(id_of(id)) {
+            Ok(found) => assert!(
+                found.as_ref().is_none_or(|meta| meta.seq == rec),
+                "{found:?}"
+            ),
             Err(StoreError::IndexCorrupt { .. }) => {}
             Err(other) => panic!("a lookup by id: {other}"),
         }
+        let holders: Vec<_> = (RECORDS.iter())
+            .filter(|&&(_, held)| held == dh)
+            .map(|&(id, _)| id_of(id))
+            .collect();
         match read.by_delta_hash(&[dh; 32]) {
-            Ok(ids) => assert!(ids.contains(&id), "{ids:?}"),
+            Ok(ids) => assert!(ids.iter().all(|id| holders.contains(id)), "{ids:?}"),
             Err(StoreError::IndexCorrupt { .. }) => {}
             Err(other) => panic!("a lookup by delta hash: {other}"),
         }
