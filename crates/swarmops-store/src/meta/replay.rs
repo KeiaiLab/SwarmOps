@@ -300,6 +300,32 @@ mod tests {
         assert_eq!(state, Some(RefState::new(target, 1)));
     }
 
+    /// On a FORMAT 3 store a branch move applies as on FORMAT 2's, and a fact beside it moves no
+    /// ref and adds no changeset (its row is the fact index's).
+    #[test]
+    fn v3_replays_a_branch_move_beside_a_fact() {
+        let (_dir, layout, fs, mut index) = store(StoreFormat::V3);
+        let (mut frame, target) = moving("feature/x");
+        let lineage = super::super::frame::Fact::new(
+            super::super::frame::FactKind::Lineage,
+            0,
+            [1; 32],
+            [2; 32],
+            0,
+            "a".to_owned(),
+            vec![0; 32],
+        );
+        frame.records.push(Record::Fact(lineage.unwrap()));
+
+        let files = refs::read_all(&layout, &fs).unwrap();
+        let overlay = Overlay::new(&index, slice::from_ref(&frame), files).unwrap();
+        assert_eq!(overlay.refs()["feature/x"], RefState::new(target, 1));
+
+        let replayed = replay(&mut index, &layout, &fs, slice::from_ref(&frame)).unwrap();
+        assert_eq!((replayed.refs, replayed.records), (1, 0));
+        assert_eq!(index.len(), 0);
+    }
+
     /// The same frame on a FORMAT 1 store is no record that store writes: `JournalCorrupt` at
     /// the frame, for the writer and the reader, and no file written.
     #[test]

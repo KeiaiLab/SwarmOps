@@ -303,6 +303,7 @@ dependencies = [
  "blake3",
  "camino",
  "crc32fast",
+ "getrandom",
  "libc",
  "rayon",
  "rustix",

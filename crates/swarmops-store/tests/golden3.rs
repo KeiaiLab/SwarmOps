@@ -14,8 +14,8 @@ use std::sync::Arc;
 use camino::Utf8PathBuf;
 use swarmops_core::{ChangesetId, ObjectId};
 use swarmops_store::{
-    Base, Fact, FactKind, Frame, Layout, MetaStore, MetaWrite, RealFs, Record, StoreError,
-    StoreFormat, StoreFs, UPGRADE_POISON_V3, read_format,
+    Base, Fact, FactKind, Frame, Layout, MetaStore, RealFs, Record, StoreError, StoreFormat,
+    StoreFs, UPGRADE_POISON_V3, read_format,
 };
 
 /// The nonce of the nonce frame and the entity id.
@@ -23,14 +23,7 @@ const NONCE: u64 = 0x1122_3344_5566_7788;
 
 /// The goldens whose codecs later slices write: built from the design's tables here, and checked
 /// byte for byte, but not yet decoded (so not in the flipped-byte check).
-const DECODED_LATER: [&str; 6] = [
-    "ckpt3",
-    "features",
-    "manifest",
-    "run_c",
-    "run_f",
-    "facts_col",
-];
+const DECODED_LATER: [&str; 4] = ["manifest", "run_c", "run_f", "facts_col"];
 
 /// Every (kind, type) cell of the design §2.8 table: 35.
 const CELLS: [(FactKind, u8); 35] = {
@@ -141,16 +134,19 @@ fn a_marker_past_3_is_too_new() {
     assert_eq!(read(b"swarmops-store 3\n").unwrap(), StoreFormat::V3);
 }
 
-/// Until FORMAT 3's checkpoint codec exists, a store whose `FORMAT` names 3 but whose files are
-/// FORMAT 2's is opened at most: its reads and writes fail, and its journal files keep every
-/// byte.
+/// A store whose `FORMAT` names 3 but whose files are FORMAT 2's has no `journal3.ckpt`: its
+/// base seq reads 0, so its FORMAT 2 frame, which ends in no nonce, is damage (the FORMAT 3 design
+/// §2.3: a lost base shows as damage). It is opened at most: its reads and writes fail, and its
+/// journal files keep every byte.
 #[test]
 fn a_store_marked_3_too_early_is_refused_unchanged() {
     let dir = tempfile::tempdir().unwrap();
     let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
     let v2 = Layout::with_format(root.clone(), StoreFormat::V2);
     let store = MetaStore::create_in(v2.clone(), Arc::new(RealFs::new())).unwrap();
-    store.write().and_then(MetaWrite::commit).unwrap();
+    let mut write = store.write().unwrap();
+    write.cas_ref("main", None, None, "test/1").unwrap();
+    write.commit().unwrap();
     drop(store);
     fs::write(v2.format_file(), StoreFormat::V3.marker()).unwrap();
     let files = [v2.journal_log(), v2.journal_off(), v2.journal_ckpt()];
@@ -159,11 +155,15 @@ fn a_store_marked_3_too_early_is_refused_unchanged() {
     // Opened (the journal files are where FORMAT 2 has them), but nothing reads or writes.
     let store = MetaStore::open(&root).unwrap();
     assert_eq!(store.format(), StoreFormat::V3);
-    assert!(matches!(store.read(), Err(StoreError::Format(_))));
-    assert!(matches!(store.write(), Err(StoreError::Format(_))));
+    let corrupt = |result: Result<(), StoreError>| {
+        matches!(result, Err(StoreError::JournalCorrupt { offset: 0 }))
+    };
+    assert!(corrupt(store.read().map(drop)));
+    assert!(corrupt(store.write().map(drop)));
     drop(store);
     let after: Vec<Vec<u8>> = files.iter().map(|f| fs::read(f).unwrap()).collect();
     assert_eq!(after, before);
+    assert!(!fs::exists(Layout::with_format(root, StoreFormat::V3).journal_ckpt()).unwrap());
 }
 
 #[test]
@@ -617,11 +617,53 @@ fn golden_value(name: &str, index: usize, line: &[u8]) -> Option<String> {
         "entity_id" => (line == entity_id_bytes()).then(|| "review 2".to_owned()),
         "nonce_frame" if index == 1 => std::str::from_utf8(line).ok().map(str::to_owned),
         "nonce_frame" => frame_value(line),
+        "ckpt3" => ckpt3_value(line),
+        "features" => features_value(line),
         _ => {
             let (record, used) =
                 Record::decode_in(StoreFormat::V3, Base::After, &FactKind::ALL, line).ok()?;
             (used == line.len()).then(|| format!("{record:?}"))
         }
+    }
+}
+
+thread_local! {
+    /// A FORMAT 3 store the value functions write a file of, one per thread, and its directory.
+    static V3: (tempfile::TempDir, Layout) = {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+        let layout = Layout::with_format(root, StoreFormat::V3);
+        MetaStore::create_in(layout.clone(), Arc::new(RealFs::new())).unwrap();
+        (dir, layout)
+    };
+}
+
+/// The thread's FORMAT 3 store ([`V3`]).
+fn v3_layout() -> Layout {
+    V3.with(|(_, layout)| layout.clone())
+}
+
+/// The checkpoint `bytes` hold as a FORMAT 3 store reads them: its offset, which the store's
+/// empty journal then refuses as no frame boundary; `None` for no checkpoint at all.
+fn ckpt3_value(bytes: &[u8]) -> Option<String> {
+    let layout = v3_layout();
+    fs::write(layout.journal_ckpt(), bytes).unwrap();
+    let journal = swarmops_store::Journal::open(&layout, Arc::new(RealFs::new())).unwrap();
+    match journal.ckpt() {
+        Ok(offset) | Err(StoreError::JournalCorrupt { offset }) => Some(format!("at {offset}")),
+        Err(_) => None,
+    }
+}
+
+/// The feature list `bytes` hold as a FORMAT 3 store reads it: the features its open names as
+/// ones this build lacks (all of them: it supports none); `None` for no list at all.
+fn features_value(bytes: &[u8]) -> Option<String> {
+    let layout = v3_layout();
+    fs::write(layout.features_file(), bytes).unwrap();
+    match MetaStore::open_in(layout, Arc::new(RealFs::new())) {
+        Ok(_) => Some("[]".to_owned()),
+        Err(StoreError::TooNew { features, .. }) => Some(format!("{features:?}")),
+        Err(_) => None,
     }
 }
 

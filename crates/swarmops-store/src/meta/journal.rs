@@ -64,15 +64,18 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::ops::RangeInclusive;
 use std::os::unix::fs::FileExt;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use camino::Utf8PathBuf;
 use swarmops_core::bytes;
 
 use super::READ_WINDOW;
-use super::frame::{self, BadHeader, Frame, HEADER_LEN_V2, MAX_PAYLOAD_LEN, Parsed, Place, Record};
+use super::features;
+use super::frame::{
+    self, BadHeader, Base, FactKind, Frame, HEADER_LEN_V2, MAX_PAYLOAD_LEN, Parsed, Place, Record,
+};
 use crate::error::{FileOp, IoFailure, StoreError};
-use crate::format::StoreFormat;
+use crate::format::{JournalFamily, StoreFormat};
 use crate::fs_ops::{self, FsMethod, FsOps, StoreFs};
 use crate::layout::Layout;
 
@@ -86,6 +89,17 @@ pub(crate) const ENTRY_LEN_V2: u64 = 16;
 /// The size of `journal2.ckpt` (FORMAT 2, the M6 design §2.2): `u64le offset | u64le seq |
 /// u32le crc32(the 16 bytes before)`.
 const CKPT_LEN_V2: usize = 20;
+
+/// The size of `journal3.ckpt` (FORMAT 3, the FORMAT 3 design §2.3): `u64le offset | u64le seq |
+/// u64le base_seq | u64le records | u64le fact_rows | u32le crc32(the 40 bytes before)`.
+const CKPT_LEN_V3: usize = 44;
+
+/// The bytes of a FORMAT 3 checkpoint its CRC covers.
+const CKPT_FIELDS_V3: usize = 40;
+
+/// The kind of the nonce record a FORMAT 3 frame ends in (the FORMAT 3 design §2.7): `u8 11 |
+/// u64le nonce`.
+const KIND_NONCE: u8 = 11;
 
 /// The sector of `journal.off` one append of a batch's entries writes within
 /// ([`Journal::append_frames`]): a power loss leaves zeroed or partial entries in the last one
@@ -134,6 +148,10 @@ pub struct Journal {
     /// checkpoint are laid out.
     format: StoreFormat,
     tail: Mutex<Tail>,
+    /// The store's layout: where FORMAT 3's feature list is ([`features::enable`]).
+    layout: Layout,
+    /// FORMAT 3's base seq ([`Ckpt3::base_seq`]), read once: no writer changes it.
+    base_seq: OnceLock<u64>,
 }
 
 impl fmt::Debug for Journal {
@@ -232,6 +250,69 @@ struct Ckpt {
     seq: u64,
 }
 
+/// A FORMAT 3 checkpoint, `journal3.ckpt` (the FORMAT 3 design §2.3); all zero when there is
+/// none, a new store's.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Ckpt3 {
+    /// Where the journal is materialized and synced to: a frame boundary.
+    pub(crate) offset: u64,
+    /// The seq of the frame at `offset`.
+    pub(crate) seq: u64,
+    /// The seq from which a FORMAT 3 writer wrote the frames, each ending in its nonce: 0 for a
+    /// new store, the frame count at its upgrade for an upgraded one. Never changed once set.
+    pub(crate) base_seq: u64,
+    /// How many changeset index records the checkpoint has passed: synced in every index file.
+    pub(crate) records: u64,
+    /// How many fact rows (`meta/idx/facts.col`) the checkpoint has passed.
+    pub(crate) fact_rows: u64,
+}
+
+impl Ckpt3 {
+    /// Its 44 bytes.
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        let fields = [
+            self.offset,
+            self.seq,
+            self.base_seq,
+            self.records,
+            self.fact_rows,
+        ];
+        let mut bytes: Vec<u8> = fields
+            .iter()
+            .flat_map(|field| field.to_le_bytes())
+            .collect();
+        let crc = crc32fast::hash(&bytes);
+        bytes.extend_from_slice(&crc.to_le_bytes());
+        bytes
+    }
+
+    /// The checkpoint `bytes` hold, or why they hold none: 44 bytes whose CRC checks.
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Ckpt3, String> {
+        let Ok(bytes) = <[u8; CKPT_LEN_V3]>::try_from(bytes) else {
+            let length = if bytes.len() > CKPT_LEN_V3 {
+                format!("more than {CKPT_LEN_V3}")
+            } else {
+                bytes.len().to_string()
+            };
+            return Err(format!(
+                "holds {length} bytes, not an offset, a seq, a base seq, two counts and their CRC"
+            ));
+        };
+        let (fields, crc) = bytes.split_at(CKPT_FIELDS_V3);
+        if crc32fast::hash(fields) != u32::from_le_bytes(crc.try_into().expect("4 bytes")) {
+            return Err("fails its CRC".to_owned());
+        }
+        let at = |i: usize| u64::from_le_bytes(fields[i * 8..i * 8 + 8].try_into().expect("8"));
+        Ok(Ckpt3 {
+            offset: at(0),
+            seq: at(1),
+            base_seq: at(2),
+            records: at(3),
+            fact_rows: at(4),
+        })
+    }
+}
+
 /// What one read of the frames ([`Journal::frames_from`], [`Journal::tail_frames_from`]) gives
 /// when it does not fail: `T`, the frames, or [`PastFrames`].
 enum Attempt<T = Vec<Frame>> {
@@ -312,6 +393,8 @@ impl Journal {
             off,
             format: layout.format(),
             tail: Mutex::new(tail),
+            layout: layout.clone(),
+            base_seq: OnceLock::new(),
         })
     }
 
@@ -364,15 +447,44 @@ impl Journal {
     /// frame's seq: every frame is durable, and the next tail check lists those left unlisted.
     /// What reached `journal.off` of that append is cut back off it, never below the entries
     /// synced before it in this call.
+    ///
+    /// In FORMAT 3 each frame ends in a nonce of its own, drawn here (the FORMAT 3 design §2.7):
+    /// a random source that fails is [`StoreError::NotCommitted`], and nothing is written.
     pub fn append_frames(&self, frames: &[&[Record]]) -> Result<Vec<Frame>, StoreError> {
+        let nonces = (frames.iter())
+            .map(|_| match self.format {
+                StoreFormat::V3 => features::draw_nonce().map(Some),
+                _ => Ok(None),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let frames: Vec<(&[Record], Option<u64>)> = frames.iter().copied().zip(nonces).collect();
+        self.append_frames_in(&frames)
+    }
+
+    /// [`Journal::append_frames`] of `frames`, each of its records and the nonce it ends in
+    /// (FORMAT 3's, `None` in FORMAT 1 and 2): a write transaction drew each frame's when the
+    /// frame opened, and fixed its payload CRC with it (the M20 plan's A2). A FORMAT 3 frame
+    /// without a nonce, or another's with one, is [`StoreError::BadCall`]; one past 65,534
+    /// records, whose nonce takes the 65,535th place, [`StoreError::Limit`].
+    ///
+    /// The feature of every fact kind among the records is durable in `meta/features` before
+    /// the frames are appended ([`features::enable`], W10): a list that cannot be replaced is
+    /// [`StoreError::NotCommitted`], nothing appended.
+    pub(crate) fn append_frames_in(
+        &self,
+        frames: &[(&[Record], Option<u64>)],
+    ) -> Result<Vec<Frame>, StoreError> {
         if frames.is_empty() {
             return Err(StoreError::BadCall(
                 "a batch holds at least one frame".to_owned(),
             ));
         }
         let mut encoded = (frames.iter())
-            .map(|records| frame::encode_frame_in(self.format, records, 0, 0))
+            .map(|&(records, nonce)| {
+                frame::encode_frame_with_nonce(self.format, records, nonce, 0, 0)
+            })
             .collect::<Result<Vec<_>, _>>()?;
+        self.enable_kinds(frames)?;
         let mut tail = self.tail();
         if !self.still_ends_at(&tail)? {
             tail.checked = false;
@@ -385,7 +497,7 @@ impl Journal {
         let mut crcs = Vec::with_capacity(encoded.len());
         let mut prev_crc = tail.last_crc;
         for (seq, bytes) in (tail.frames..).zip(&mut encoded) {
-            if self.format == StoreFormat::V2 {
+            if self.format.journal_family() == JournalFamily::Two {
                 frame::set_place(bytes, seq, prev_crc);
             }
             prev_crc = frame::payload_crc(bytes);
@@ -424,15 +536,36 @@ impl Journal {
         };
         let frames = (first_seq..)
             .zip(frames.iter().zip(offsets.iter().zip(crcs)))
-            .map(|(seq, (records, (&offset, crc)))| Frame {
+            .map(|(seq, (&(records, nonce), (&offset, crc)))| Frame {
                 seq,
                 offset,
                 records: records.to_vec(),
                 crc,
-                nonce: None,
+                nonce,
             })
             .collect();
         Ok(frames)
+    }
+
+    /// Makes the features of the fact kinds `frames` hold durable in the store's list, before
+    /// they are appended (W10); FORMAT 1 and 2 frames hold no fact. A failed write of the list is
+    /// [`StoreError::NotCommitted`]: the frames were never appended.
+    fn enable_kinds(&self, frames: &[(&[Record], Option<u64>)]) -> Result<(), StoreError> {
+        let mut kinds: Vec<FactKind> = Vec::new();
+        for record in frames.iter().flat_map(|(records, _)| records.iter()) {
+            if let Record::Fact(fact) = record
+                && !kinds.contains(&fact.kind())
+            {
+                kinds.push(fact.kind());
+            }
+        }
+        if kinds.is_empty() {
+            return Ok(());
+        }
+        features::enable(&self.layout, &self.fs, &kinds).map_err(|e| match e {
+            StoreError::Io(source) => StoreError::NotCommitted { source },
+            other => other,
+        })
     }
 
     /// Lists the frames at `offsets`, whose payload CRCs are `crcs`, durable in `journal.log`
@@ -569,13 +702,13 @@ impl Journal {
                 prev_crc,
             };
             match self.parse_at(end, offset, place)? {
-                Parsed::Whole { records, size, crc } if entry.lists(crc) => {
+                (Parsed::Whole { records, size, crc }, nonce) if entry.lists(crc) => {
                     frames.push(Frame {
                         seq: frame_seq,
                         offset,
                         records,
                         crc,
-                        nonce: None,
+                        nonce,
                     });
                     at += bytes::to_u64(size);
                     prev_crc = crc;
@@ -706,7 +839,7 @@ impl Journal {
         let mut at = offset;
         while at < log_len {
             match self.parse_at(log_len, at, Place { seq, prev_crc })? {
-                Parsed::Whole { records, size, crc } => {
+                (Parsed::Whole { records, size, crc }, nonce) => {
                     if let Some(entry) = listed_at(seq)
                         && (entry.offset != at || !entry.lists(crc))
                     {
@@ -719,13 +852,13 @@ impl Journal {
                         offset: at,
                         records,
                         crc,
-                        nonce: None,
+                        nonce,
                     });
                     seq += 1;
                     at += bytes::to_u64(size);
                     prev_crc = crc;
                 }
-                parsed if may_be_torn(&parsed, seq, listed) => break,
+                (parsed, _) if may_be_torn(&parsed, seq, listed) => break,
                 _ => return Err(StoreError::JournalCorrupt { offset: at }),
             }
         }
@@ -834,12 +967,35 @@ impl Journal {
     /// both: a file of any length but 20, or failing its CRC, is `InvalidData`; an offset that
     /// the seq's entry of `journal2.off` does not hold (nor, for the seq past the last entry,
     /// the end of the last listed frame) is [`StoreError::JournalCorrupt`] at the offset.
+    ///
+    /// FORMAT 3's `journal3.ckpt` holds the same two and the base seq and two counts too (the
+    /// FORMAT 3 design §2.3), checked the same way: a file of any length but 44 is `InvalidData`.
     pub fn ckpt(&self) -> Result<u64, StoreError> {
         match self.format {
             StoreFormat::V1 => self.ckpt_v1(),
             StoreFormat::V2 => Ok(self.ckpt_v2()?.offset),
-            StoreFormat::V3 => Err(ckpt3_unread()),
+            StoreFormat::V3 => Ok(self.ckpt3()?.offset),
         }
+    }
+
+    /// The FORMAT 3 checkpoint, its offset and seq checked against `journal2.off` as
+    /// [`Journal::ckpt`] checks FORMAT 2's.
+    pub(crate) fn ckpt3(&self) -> Result<Ckpt3, StoreError> {
+        let ckpt = self.read_ckpt3()?;
+        self.check_agrees(Ckpt {
+            offset: ckpt.offset,
+            seq: ckpt.seq,
+        })?;
+        Ok(ckpt)
+    }
+
+    /// The FORMAT 3 checkpoint as `journal3.ckpt` holds it, unchecked against the journal; all
+    /// zero when there is none.
+    fn read_ckpt3(&self) -> Result<Ckpt3, IoFailure> {
+        let Some(bytes) = self.read_ckpt(bytes::to_u64(CKPT_LEN_V3 + 1))? else {
+            return Ok(Ckpt3::default());
+        };
+        Ckpt3::decode(&bytes).map_err(|why| self.ckpt_malformed(why))
     }
 
     /// [`Journal::ckpt`] in FORMAT 1.
@@ -881,7 +1037,13 @@ impl Journal {
             offset: u64::from_le_bytes(offset.try_into().expect("8 bytes")),
             seq: u64::from_le_bytes(seq.try_into().expect("8 bytes")),
         };
+        self.check_agrees(ckpt)?;
+        Ok(ckpt)
+    }
 
+    /// Checks that `journal2.off` holds the checkpoint `ckpt`'s offset at its seq:
+    /// [`StoreError::JournalCorrupt`] at the offset if not (see [`Journal::ckpt`]).
+    fn check_agrees(&self, ckpt: Ckpt) -> Result<(), StoreError> {
         // The entry of the checkpoint's seq holds its offset; past the last listed one, the
         // last listed frame ends there. The zeroed entries a power loss leaves at the end of
         // journal2.off list nothing ([`Journal::frame_count`]): the next frame's, never synced,
@@ -903,7 +1065,7 @@ impl Journal {
                 offset: ckpt.offset,
             });
         }
-        Ok(ckpt)
+        Ok(())
     }
 
     /// The bytes of the checkpoint file, at most `cap` of them; `None` if there is none.
@@ -936,14 +1098,47 @@ impl Journal {
     /// this handle appended or listed, when `offset` is where it saw the journal end; else the
     /// frame `journal2.off` lists there. An offset that is no frame boundary it lists (where a
     /// listed frame starts, or where the last one ends) is [`StoreError::BadCall`].
+    ///
+    /// FORMAT 3 keeps the base seq `journal3.ckpt` holds, and its two counts, but at 0, where
+    /// it sets them to 0 too (the FORMAT 3 design §2.3): a writer that knows what the index has
+    /// synced passes the counts itself. Counts kept as they were never
+    /// say more is synced than is: they only grow.
     pub fn set_ckpt(&self, offset: u64) -> Result<(), StoreError> {
         let bytes = match self.format {
             StoreFormat::V1 => offset.to_le_bytes().to_vec(),
             StoreFormat::V2 => ckpt_bytes(offset, self.seq_at(offset)?),
-            StoreFormat::V3 => return Err(ckpt3_unread()),
+            StoreFormat::V3 => {
+                let old = self.read_ckpt3()?;
+                let (records, fact_rows) = match offset {
+                    0 => (0, 0),
+                    _ => (old.records, old.fact_rows),
+                };
+                return self.set_ckpt3(offset, records, fact_rows);
+            }
         };
         self.fs
             .atomic_replace(self.ckpt_path.as_std_path(), &bytes)?;
+        Ok(())
+    }
+
+    /// Stores the FORMAT 3 checkpoint at `offset` (a frame boundary, as [`Journal::set_ckpt`]
+    /// takes it), past `records` index records and `fact_rows` fact rows, all synced: the base
+    /// seq `journal3.ckpt` holds is kept. Replaced atomically and durably.
+    pub(crate) fn set_ckpt3(
+        &self,
+        offset: u64,
+        records: u64,
+        fact_rows: u64,
+    ) -> Result<(), StoreError> {
+        let ckpt = Ckpt3 {
+            offset,
+            seq: self.seq_at(offset)?,
+            base_seq: self.read_ckpt3()?.base_seq,
+            records,
+            fact_rows,
+        };
+        self.fs
+            .atomic_replace(self.ckpt_path.as_std_path(), &ckpt.encode())?;
         Ok(())
     }
 
@@ -1146,7 +1341,7 @@ impl Journal {
                 seq: listed + bytes::to_u64(unlisted.len()),
                 prev_crc,
             };
-            match self.parse_at(log_len, at, place)? {
+            match self.parse_at(log_len, at, place)?.0 {
                 Parsed::Whole { size, crc, .. } => {
                     unlisted.push((at, crc));
                     at += bytes::to_u64(size);
@@ -1248,7 +1443,7 @@ impl Journal {
             seq: last,
             prev_crc,
         };
-        match self.parse_at(log_len, start, place)? {
+        match self.parse_at(log_len, start, place)?.0 {
             Parsed::Whole { size, crc, .. } if entry.lists(crc) => {
                 Ok((start + bytes::to_u64(size), crc))
             }
@@ -1267,7 +1462,7 @@ impl Journal {
         let from = match self.format {
             StoreFormat::V1 => 0,
             StoreFormat::V2 => self.ckpt_v2()?.seq.min(listed),
-            StoreFormat::V3 => return Err(ckpt3_unread()),
+            StoreFormat::V3 => self.ckpt3()?.seq.min(listed),
         };
         let (mut next, mut prev_crc) = match from.checked_sub(1) {
             None => (0, 0),
@@ -1288,7 +1483,7 @@ impl Journal {
             let Some(end) = self.frame_end(start, log_len)? else {
                 return Err(StoreError::JournalCorrupt { offset: start });
             };
-            match self.parse_at(end, start, Place { seq, prev_crc })? {
+            match self.parse_at(end, start, Place { seq, prev_crc })?.0 {
                 Parsed::Whole { size, crc, .. }
                     if bytes::to_u64(size) == end - start && entry.lists(crc) =>
                 {
@@ -1364,7 +1559,7 @@ impl Journal {
     /// FORMAT 1 does not hold).
     fn entry_bytes(&self, seq: u64, offset: u64, crc: u32) -> Vec<u8> {
         let mut entry = offset.to_le_bytes().to_vec();
-        if self.format == StoreFormat::V2 {
+        if self.format.journal_family() == JournalFamily::Two {
             entry.extend_from_slice(&crc.to_le_bytes());
             entry.extend_from_slice(&entry_crc(seq, offset, crc).to_le_bytes());
         }
@@ -1496,47 +1691,115 @@ impl Journal {
     /// header that fails its CRC or announces a length no writer writes or a place not its own.
     /// A FORMAT 1 header has no CRC of its own: a payload it announces past the largest one this
     /// build decodes is sorted by its CRC as it streams by ([`Journal::stream_crc`]).
-    fn parse_at(&self, end: u64, offset: u64, place: Place) -> Result<Parsed, IoFailure> {
+    ///
+    /// With what it parsed, the nonce a whole FORMAT 3 frame ends in: from the base seq on
+    /// ([`Journal::parse_payload3`]); `None` before it, and in FORMAT 1 and 2.
+    fn parse_at(
+        &self,
+        end: u64,
+        offset: u64,
+        place: Place,
+    ) -> Result<(Parsed, Option<u64>), IoFailure> {
+        Ok(match self.parse_whole(end, offset, place)? {
+            Ok(parsed) => (parsed, None),
+            Err(payload) => self.parse_payload3(place.seq, &payload)?,
+        })
+    }
+
+    /// [`Journal::parse_at`], but for the payload of a whole FORMAT 3 frame that it leaves to
+    /// [`Journal::parse_payload3`]: `Err` of the header's CRC and the payload.
+    fn parse_whole(
+        &self,
+        end: u64,
+        offset: u64,
+        place: Place,
+    ) -> Result<Result<Parsed, (u32, Vec<u8>)>, IoFailure> {
         // 1. The header, which says how long the payload is, and in FORMAT 2 where the frame
         //    belongs. A FORMAT 1 length of 0 is a header that never reached the disk.
         let header_len = frame::header_len(self.format);
         let payload_at = offset.saturating_add(bytes::to_u64(header_len));
         if payload_at > end {
-            return Ok(Parsed::Short);
+            return Ok(Ok(Parsed::Short));
         }
         let header = self.read_log(offset, bytes::to_u64(header_len))?;
         let header = match frame::decode_header_in(self.format, &header) {
             Ok(Some(header)) => header,
-            Ok(None) => return Ok(Parsed::Short),
-            Err(BadHeader::Crc) => return Ok(Parsed::BadCrc),
-            Err(BadHeader::Len) => return Ok(Parsed::Corrupt),
+            Ok(None) => return Ok(Ok(Parsed::Short)),
+            Err(BadHeader::Crc) => return Ok(Ok(Parsed::BadCrc)),
+            Err(BadHeader::Len) => return Ok(Ok(Parsed::Corrupt)),
         };
         if header.len == 0 {
-            return Ok(Parsed::Invalid { zero_len: true });
+            return Ok(Ok(Parsed::Invalid { zero_len: true }));
         }
         if !header.sits_at(place) {
-            return Ok(Parsed::Corrupt);
+            return Ok(Ok(Parsed::Corrupt));
         }
 
         // 2. The payload, if the file holds it all: whole, or streamed past the bound.
         let len = u64::from(header.len);
         if payload_at.saturating_add(len) > end {
-            return Ok(Parsed::Short);
+            return Ok(Ok(Parsed::Short));
         }
         if len > bytes::to_u64(MAX_PAYLOAD_LEN) {
-            return self.stream_crc(payload_at, len, header.crc);
+            return self.stream_crc(payload_at, len, header.crc).map(Ok);
         }
 
         // 3. FORMAT 1: the whole frame, its header again, parsed by its codec as ever.
         if self.format == StoreFormat::V1 {
             let frame = self.read_log(offset, payload_at - offset + len)?;
-            return Ok(frame::parse_frame(&frame));
+            return Ok(Ok(frame::parse_frame(&frame)));
         }
         let payload = self.read_log(payload_at, len)?;
         if bytes::to_u64(payload.len()) < len {
-            return Ok(Parsed::Short);
+            return Ok(Ok(Parsed::Short));
         }
-        Ok(frame::parse_payload(header_len, header.crc, &payload))
+        if self.format == StoreFormat::V3 {
+            return Ok(Err((header.crc, payload)));
+        }
+        Ok(Ok(frame::parse_payload(header_len, header.crc, &payload)))
+    }
+
+    /// Parses `payload`, whose header gives its CRC as `crc`, of the FORMAT 3 frame `seq` (the
+    /// FORMAT 3 design §2.7): before the base seq a FORMAT 2 payload, with no nonce; from it on,
+    /// the records, of FORMAT 2's kinds but `Compacted` and of the fact kinds this build decodes
+    /// ([`features::known_kinds`], never the store's list: judgement H2), then exactly one
+    /// nonce, last. A payload past the base without its nonce, with a second or misplaced one,
+    /// or with nothing but one, is [`Parsed::Invalid`].
+    fn parse_payload3(
+        &self,
+        seq: u64,
+        (crc, payload): &(u32, Vec<u8>),
+    ) -> Result<(Parsed, Option<u64>), IoFailure> {
+        // 1. Before the base: FORMAT 2's frame.
+        if seq < self.base_seq()? {
+            return Ok((frame::parse_payload(HEADER_LEN_V2, *crc, payload), None));
+        }
+
+        // 2. From it on: the records, then the nonce.
+        if crc32fast::hash(payload) != *crc {
+            return Ok((Parsed::BadCrc, None));
+        }
+        Ok(match decode_payload3(payload, &features::known_kinds()) {
+            Some((records, nonce)) => (
+                Parsed::Whole {
+                    records,
+                    size: HEADER_LEN_V2 + payload.len(),
+                    crc: *crc,
+                },
+                Some(nonce),
+            ),
+            None => (Parsed::Invalid { zero_len: false }, None),
+        })
+    }
+
+    /// FORMAT 3's base seq ([`Ckpt3::base_seq`]): read from `journal3.ckpt` once, as it is never
+    /// changed; 0 when there is none.
+    fn base_seq(&self) -> Result<u64, IoFailure> {
+        if let Some(&base) = self.base_seq.get() {
+            return Ok(base);
+        }
+        let base = self.read_ckpt3()?.base_seq;
+        Ok(*self.base_seq.get_or_init(|| base))
     }
 
     /// What the FORMAT 1 payload of `len` bytes at `offset`, longer than any this build decodes,
@@ -1704,10 +1967,30 @@ fn entry_len(format: StoreFormat) -> u64 {
     }
 }
 
-/// What reading or writing FORMAT 3's checkpoint, `journal3.ckpt`, is until this build has its
-/// codec: a store format it does not read (no FORMAT 3 store is made yet).
-fn ckpt3_unread() -> StoreError {
-    StoreError::Format("FORMAT 3's journal3.ckpt is not read by this build".to_owned())
+/// The records and the nonce of a FORMAT 3 payload past the base seq (the FORMAT 3 design
+/// §2.7): a count of 2 at least, that many records less one, of kinds 1 and 2 and the fact kinds
+/// of `known`, then the nonce record, `u8 11 | u64le nonce`, and nothing after it. `None` for
+/// anything else: a nonce missing, second or misplaced ([`Record::decode_in`] takes none), a
+/// frame of a nonce alone, a `Compacted`.
+fn decode_payload3(payload: &[u8], known: &[FactKind]) -> Option<(Vec<Record>, u64)> {
+    // 1. The count: the records and the nonce.
+    let (count, mut rest) = payload.split_first_chunk::<2>()?;
+    let records = usize::from(u16::from_le_bytes(*count))
+        .checked_sub(1)
+        .filter(|&records| records > 0)?;
+
+    // 2. The records, each taking at least a byte.
+    let mut decoded = Vec::with_capacity(records.min(rest.len()));
+    for _ in 0..records {
+        let (record, used) = Record::decode_in(StoreFormat::V3, Base::After, known, rest).ok()?;
+        decoded.push(record);
+        rest = rest.get(used..)?;
+    }
+
+    // 3. The nonce, last.
+    let (&kind, nonce) = rest.split_first()?;
+    let nonce = <[u8; 8]>::try_from(nonce).ok()?;
+    (kind == KIND_NONCE).then_some((decoded, u64::from_le_bytes(nonce)))
 }
 
 /// The checksum of a FORMAT 2 entry: the CRC of `u64le seq | u64le offset | u32le crc`.
@@ -1772,5 +2055,80 @@ mod tests {
             "{refused:?}"
         );
         assert_eq!(read_upto(&file, MAX_READ, 1).unwrap(), [0]);
+    }
+
+    /// The golden checkpoint of the FORMAT 3 design §6 (`ckpt3.hex`): its five fields, its bytes
+    /// again, and no flipped byte that reads as the same checkpoint.
+    #[test]
+    fn ckpt3_matches_its_golden() {
+        // 1. The golden: one line of hex.
+        let golden = include_str!("../../tests/golden3/ckpt3.hex");
+        let line = golden.lines().next().expect("one line");
+        let bytes: Vec<u8> = (0..line.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&line[at..at + 2], 16).expect("hex"))
+            .collect();
+
+        // 2. Decoded, encoded again.
+        let ckpt = Ckpt3::decode(&bytes).expect("the golden decodes");
+        let want = Ckpt3 {
+            offset: 0x0102_0304_0506_0708,
+            seq: 7,
+            base_seq: 3,
+            records: 9,
+            fact_rows: 2,
+        };
+        assert_eq!(ckpt, want);
+        assert_eq!(ckpt.encode(), bytes);
+
+        // 3. Each byte flipped: refused, or another checkpoint; and one byte more or less.
+        for at in 0..bytes.len() {
+            let mut flipped = bytes.clone();
+            flipped[at] ^= 0x01;
+            assert_ne!(Ckpt3::decode(&flipped).ok(), Some(want), "{at}");
+        }
+        assert!(Ckpt3::decode(&bytes[1..]).is_err());
+        assert!(Ckpt3::decode(&[bytes.as_slice(), &[0]].concat()).is_err());
+    }
+
+    /// FORMAT 3's payload past the base: records then exactly one nonce, last.
+    #[test]
+    fn a_v3_payload_ends_in_one_nonce() {
+        let compacted = |n| Record::Compacted { sorted_count: n };
+        let moved = Record::RefMove {
+            name: "main".to_owned(),
+            old: None,
+            new: None,
+            actor: String::new(),
+            ts: 0,
+        };
+        let payload = |records: &[Record], nonces: &[u64]| {
+            let count = u16::try_from(records.len() + nonces.len()).unwrap();
+            let mut bytes = count.to_le_bytes().to_vec();
+            for record in records {
+                record.encode(&mut bytes).unwrap();
+            }
+            for nonce in nonces {
+                bytes.push(KIND_NONCE);
+                bytes.extend_from_slice(&nonce.to_le_bytes());
+            }
+            bytes
+        };
+        let known = FactKind::ALL;
+        let one = std::slice::from_ref(&moved);
+        assert_eq!(
+            decode_payload3(&payload(one, &[7]), &known),
+            Some((one.to_vec(), 7))
+        );
+        assert_eq!(decode_payload3(&payload(one, &[]), &known), None);
+        assert_eq!(decode_payload3(&payload(one, &[7, 8]), &known), None);
+        assert_eq!(decode_payload3(&payload(&[], &[7]), &known), None);
+        assert_eq!(
+            decode_payload3(&payload(&[compacted(1)], &[7]), &known),
+            None
+        );
+        let mut trailing = payload(one, &[7]);
+        trailing.push(0);
+        assert_eq!(decode_payload3(&trailing, &known), None);
     }
 }

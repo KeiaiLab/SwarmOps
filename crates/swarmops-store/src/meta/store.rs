@@ -60,7 +60,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use camino::Utf8Path;
 use swarmops_core::{ChangesetId, bytes};
 
-use super::frame::{self, Frame, MAX_RECORDS, Record};
+use super::features;
+use super::frame::{self, Frame, MAX_RECORDS, MAX_RECORDS_V3, Record};
 use super::index::{ChangesetMeta, Index};
 use super::journal::{Journal, LogCut, PastFrames, TailRepair};
 use super::lock::MetaLock;
@@ -444,6 +445,8 @@ impl MetaStore {
                 "{log} is missing: no metadata store here"
             )));
         }
+        // A FORMAT 3 store that lists a feature this build lacks is refused before anything.
+        features::check(&layout, &fs)?;
         let journal = Journal::open_in(&layout, fs.clone())?;
         Ok(Self::from_parts(layout, fs, journal))
     }
@@ -468,10 +471,21 @@ impl MetaStore {
     /// A snapshot of the metadata as committed now, taken without a lock in at most
     /// [`MetaStore::SNAPSHOT_ROUNDS`] rounds, or [`StoreError::SnapshotContended`] if the
     /// metadata changed during every one: see the module documentation.
+    ///
+    /// A FORMAT 3 store's feature list is read every round: one that lists a feature this build
+    /// lacks is [`StoreError::TooNew`], and so is a frame of a kind this build does not know
+    /// once the list, read again, names such a feature (the FORMAT 3 design §2.6).
     pub fn read(&self) -> Result<MetaRead<'_>, StoreError> {
+        self.snapshot()
+            .map_err(|e| features::too_new_or(&self.layout, &self.fs, e))
+    }
+
+    /// [`MetaStore::read`], its errors as they come.
+    fn snapshot(&self) -> Result<MetaRead<'_>, StoreError> {
         let ckpt = self.journal.ckpt()?;
         let mut opened = None;
         for _ in 0..Self::SNAPSHOT_ROUNDS {
+            features::check(&self.layout, &self.fs)?;
             // The index after the checkpoint, opened in the first round (and again after a round
             // whose open met a cut journal.off): everything before the checkpoint was in the
             // index files before the checkpoint moved past it. The frames past it, read once the
@@ -554,7 +568,10 @@ impl MetaStore {
         #[cfg(feature = "test-hooks")]
         READ_COMMITTED_CALLS.fetch_add(1, Ordering::Relaxed);
         let _lock = MetaLock::acquire(&self.layout, self.lock_timeout)?;
-        let repair = self.journal.repair_tail()?;
+        // Before the tail check, which may write: a store too new is left as it is.
+        features::check(&self.layout, &self.fs)?;
+        let repair = (self.journal.repair_tail())
+            .map_err(|e| features::too_new_or(&self.layout, &self.fs, e))?;
         // Under the lock no frame lands, nor is any cut, while it reads: one round.
         let snapshot = self.read()?;
         Ok((snapshot, repair))
@@ -575,9 +592,21 @@ impl MetaStore {
     /// [`MetaStore::write`] once `lock` is held: the recovery, then the transaction. A write
     /// queue's lead ([`MetaStore::take_turn`]) begins here too, so the lock probe
     /// (`MetaStore::write_calls`) counts each plain write and each lead once.
+    ///
+    /// A FORMAT 3 store that lists a feature this build lacks is [`StoreError::TooNew`] before
+    /// the tail check, which may write (the M20 plan's A3: a lead begins here too); so is a frame
+    /// of a kind this build does not know once the list, read again, names one.
     pub(crate) fn write_locked(&self, lock: MetaLock) -> Result<MetaWrite<'_>, StoreError> {
         #[cfg(feature = "test-hooks")]
         WRITE_CALLS.fetch_add(1, Ordering::Relaxed);
+        features::check(&self.layout, &self.fs)?;
+        self.recover(lock)
+            .map_err(|e| features::too_new_or(&self.layout, &self.fs, e))
+    }
+
+    /// The recovery and the transaction of [`MetaStore::write_locked`], once the feature list is
+    /// checked.
+    fn recover(&self, lock: MetaLock) -> Result<MetaWrite<'_>, StoreError> {
         let tail = self.journal.repair_tail()?;
         let ckpt = self.journal.ckpt()?;
         // The frames past the checkpoint vouch for the index's records past it, and are
@@ -595,6 +624,8 @@ impl MetaStore {
             .flat_map(|frame| &frame.records)
             .filter(|record| matches!(record, Record::Changeset { .. }))
             .count();
+        // The first frame's nonce, drawn as it opens (the M20 plan's A2).
+        let nonce = self.draw_nonce()?;
         Ok(MetaWrite {
             store: self,
             checkpointed_records: index.len().saturating_sub(bytes::to_u64(past)),
@@ -602,6 +633,7 @@ impl MetaStore {
             uncheckpointed: bytes::to_u64(frames.len()),
             records: Vec::new(),
             closed: Vec::new(),
+            nonce,
             queued: HashMap::new(),
             moved: HashMap::new(),
             recovered: Recovered {
@@ -649,6 +681,23 @@ impl MetaStore {
     /// How long a writer waits for [`MetaLock`] ([`MetaStore::with_lock_timeout`]).
     pub(super) fn lock_timeout(&self) -> Duration {
         self.lock_timeout
+    }
+
+    /// A new frame's nonce in a FORMAT 3 store ([`features::draw_nonce`]); `None` in the others.
+    fn draw_nonce(&self) -> Result<Option<u64>, StoreError> {
+        match self.layout.format() {
+            StoreFormat::V3 => features::draw_nonce().map(Some),
+            _ => Ok(None),
+        }
+    }
+
+    /// The most records a frame of this store's holds of a caller's: in FORMAT 3 the nonce takes
+    /// one of the 65,535 places.
+    fn max_records(&self) -> usize {
+        match self.layout.format() {
+            StoreFormat::V3 => MAX_RECORDS_V3,
+            _ => MAX_RECORDS,
+        }
     }
 
     fn from_parts(layout: Layout, fs: StoreFs, journal: Journal) -> MetaStore {
@@ -946,6 +995,9 @@ pub struct MetaWrite<'a> {
     /// The frames closed so far ([`MetaWrite::begin_frame`]), in order: the open frame holds the
     /// records after the last of them.
     closed: Vec<Closed>,
+    /// The open frame's nonce (FORMAT 3; `None` in the others): drawn when the frame opened, and
+    /// kept by [`MetaWrite::drop_frame`], since no frame holding it was written.
+    nonce: Option<u64>,
     /// The generation of each changeset queued.
     queued: HashMap<ChangesetId, u64>,
     /// The target each ref moved so far is left at.
@@ -963,6 +1015,12 @@ impl MetaWrite<'_> {
     /// when they finished cleanly. It reads nothing.
     pub fn recovered(&self) -> Recovered {
         self.recovered
+    }
+
+    /// The nonce the open frame will end in, in a FORMAT 3 store (the FORMAT 3 design §2.7):
+    /// each frame of the transaction has its own, drawn when it opened. `None` below FORMAT 3.
+    pub fn nonce(&self) -> Option<u64> {
+        self.nonce
     }
 
     /// Ref `name` as this transaction compares against it ([`MetaWrite::cas_ref`]): the target
@@ -1094,10 +1152,11 @@ impl MetaWrite<'_> {
     /// [`StoreError::Limit`], and nothing is queued.
     fn queue(&mut self, staged: Staged) -> Result<(), StoreError> {
         let records = self.open_len() + staged.records.len();
-        if records > MAX_RECORDS {
+        let max = self.store.max_records();
+        if records > max {
             return Err(StoreError::Limit {
                 what: LimitKind::Records,
-                max: bytes::to_u64(MAX_RECORDS),
+                max: bytes::to_u64(max),
                 got: bytes::to_u64(records),
             });
         }
@@ -1199,7 +1258,7 @@ impl MetaWrite<'_> {
                     offset,
                     records: self.records[start..closed.end].to_vec(),
                     crc: closed.crc,
-                    nonce: None,
+                    nonce: closed.nonce,
                 });
             }
             offset += closed.len;
@@ -1304,11 +1363,11 @@ impl MetaWrite<'_> {
         let mut start = 0;
         let mut slices = Vec::with_capacity(self.closed.len() + 1);
         for closed in &self.closed {
-            slices.push(&self.records[start..closed.end]);
+            slices.push((&self.records[start..closed.end], closed.nonce));
             start = closed.end;
         }
         if start < self.records.len() {
-            slices.push(&self.records[start..]);
+            slices.push((&self.records[start..], self.nonce));
         }
         if slices.is_empty() {
             let info = CommitInfo {
@@ -1326,7 +1385,7 @@ impl MetaWrite<'_> {
         }
 
         // 2. The commit point of every frame.
-        let frames = store.journal.append_frames(&slices)?;
+        let frames = store.journal.append_frames_in(&slices)?;
         self.uncheckpointed += bytes::to_u64(frames.len());
         let mut infos: Vec<CommitInfo> = frames.iter().map(commit_info).collect();
 
@@ -1354,8 +1413,13 @@ impl MetaWrite<'_> {
     /// returns first, so it never moves past what is not durable, and a failed sync cuts the
     /// index back to the checkpoint first ([`MetaWrite::sync_index`]). Returns whether the
     /// checkpoint moved.
+    ///
+    /// A FORMAT 3 writer never compacts, nor appends a `Compacted` frame (the FORMAT 3 design §0
+    /// 3, §2.7): its checkpoint records the index records the sync passed ([`Journal::set_ckpt3`];
+    /// no fact row is materialized yet).
     fn settle(&mut self, settle: Settle) -> Result<bool, StoreError> {
-        let compact = self.index.tail_len() > Index::COMPACT_THRESHOLD;
+        let v3 = self.store.layout.format() == StoreFormat::V3;
+        let compact = !v3 && self.index.tail_len() > Index::COMPACT_THRESHOLD;
         let flush = settle == Settle::Flush;
         let due = self.uncheckpointed >= CHECKPOINT_EVERY || (flush && self.uncheckpointed > 0);
         if !compact && !due {
@@ -1371,7 +1435,11 @@ impl MetaWrite<'_> {
                 .append_frame(&[Record::Compacted { sorted_count }])
                 .map_err(marker_error)?;
         }
-        journal.set_ckpt(journal.len())?;
+        if v3 {
+            journal.set_ckpt3(journal.len(), self.index.len(), 0)?;
+        } else {
+            journal.set_ckpt(journal.len())?;
+        }
         Ok(true)
     }
 
@@ -1403,12 +1471,13 @@ impl MetaWrite<'_> {
 
     /// Refuses, with [`StoreError::Limit`], a record past what the open frame holds.
     fn check_room(&self) -> Result<(), StoreError> {
-        if self.open_len() < MAX_RECORDS {
+        let max = self.store.max_records();
+        if self.open_len() < max {
             Ok(())
         } else {
             Err(StoreError::Limit {
                 what: LimitKind::Records,
-                max: bytes::to_u64(MAX_RECORDS),
+                max: bytes::to_u64(max),
                 got: bytes::to_u64(self.open_len()) + 1,
             })
         }
@@ -1424,20 +1493,25 @@ impl MetaWrite<'_> {
         self.records.len() - self.open_start()
     }
 
-    /// Closes the open frame, if it holds any record: encodes it, so that its payload CRC and
-    /// length are final ([`MetaWrite::frames_from`]).
+    /// Closes the open frame, if it holds any record: encodes it, with its nonce in FORMAT 3, so
+    /// that its payload CRC and length are final ([`MetaWrite::frames_from`]); then the next
+    /// frame opens with a nonce of its own (the M20 plan's A2).
     fn close_frame(&mut self) -> Result<(), StoreError> {
         let start = self.open_start();
         if start == self.records.len() {
             return Ok(());
         }
         let format = self.store.layout.format();
-        let bytes = frame::encode_frame_in(format, &self.records[start..], 0, 0)?;
+        let records = &self.records[start..];
+        let bytes = frame::encode_frame_with_nonce(format, records, self.nonce, 0, 0)?;
+        let next = self.store.draw_nonce()?;
         self.closed.push(Closed {
             end: self.records.len(),
             len: bytes::to_u64(bytes.len()),
             crc: frame::payload_crc(&bytes),
+            nonce: self.nonce,
         });
+        self.nonce = next;
         Ok(())
     }
 
@@ -1516,6 +1590,8 @@ struct Closed {
     len: u64,
     /// Its payload CRC.
     crc: u32,
+    /// The nonce it ends in (FORMAT 3; `None` in the others).
+    nonce: Option<u64>,
 }
 
 /// What `frame`, just appended, committed: its seq and payload CRC, the changesets it inserts
