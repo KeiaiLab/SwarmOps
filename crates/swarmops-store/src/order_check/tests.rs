@@ -7,6 +7,9 @@ use swarmops_core::{ChangesetId, ObjectId};
 
 use super::*;
 use crate::fs_ops::{FailAt, FailAtFs, FailMode, InjectedError, RealFs};
+use crate::meta::frame::{Fact, FactKind};
+use crate::meta::journal::Ckpt3;
+use crate::meta::runs::{self, Domain, Manifest, Run};
 
 /// A store root in a temp dir, with `meta/`, empty journal files, `meta/refs/` and an
 /// `objects/` fan-out directory, all durable.
@@ -82,12 +85,15 @@ fn assert_breaks_by(rule: &str, method: &str, run: impl FnOnce()) {
     assert!(message.starts_with(&by), "{message:?} is not {by:?}");
 }
 
-/// The rule ids are W1 to W8, the names storage spec §2 rule 4 states the rules under, and
-/// a violation's panic starts with its rule's id.
+/// The rule ids are W1 to W11, the names storage spec §2 rule 4 and the FORMAT 3 design §2.9
+/// state the rules under, and a violation's panic starts with its rule's id.
 #[test]
-fn rule_ids_are_w1_to_w8() {
+fn rule_ids_are_w1_to_w11() {
     let ids: Vec<String> = Rule::ALL.iter().map(ToString::to_string).collect();
-    assert_eq!(ids, ["W1", "W2", "W3", "W4", "W5", "W6", "W7", "W8"]);
+    let expected = [
+        "W1", "W2", "W3", "W4", "W5", "W6", "W7", "W8", "W9", "W10", "W11",
+    ];
+    assert_eq!(ids, expected);
     let off = Path::new("meta/journal.off");
     for (n, rule) in (1..).zip(Rule::ALL) {
         let message = panic_message(|| {
@@ -117,11 +123,43 @@ fn section(spec: &str, n: u32) -> &str {
     &spec[start..start + len]
 }
 
+/// The document that states a rule.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Doc {
+    /// Storage spec §2 rule 4: W1 to W8.
+    Storage,
+    /// The FORMAT 3 design §2.9: the rules FORMAT 3 adds.
+    Format3,
+}
+
+/// Where `rule` is stated.
+fn stated_in(rule: Rule) -> Doc {
+    match rule {
+        Rule::W9 | Rule::W10 | Rule::W11 => Doc::Format3,
+        _ => Doc::Storage,
+    }
+}
+
 /// The rules the checker enforces that §2 of storage spec `spec` does not state under their ids.
 fn unstated(spec: &str) -> Vec<Rule> {
     let disk = section(spec, 2);
     (Rule::ALL.into_iter())
+        .filter(|&rule| stated_in(rule) == Doc::Storage)
         .filter(|rule| !disk.contains(&format!("- {rule} ")))
+        .collect()
+}
+
+/// The rules FORMAT 3 adds that §2.9 of the FORMAT 3 design `design` does not state under their
+/// ids, each as a bullet `- **W<n> `.
+fn unstated_in_format3(design: &str) -> Vec<Rule> {
+    let start = design.find("\n### 2.9 ").expect("the section's heading");
+    let len = design[start + 1..]
+        .find("\n#")
+        .map_or(design.len() - start, |end| end + 1);
+    let rules = &design[start..start + len];
+    (Rule::ALL.into_iter())
+        .filter(|&rule| stated_in(rule) == Doc::Format3)
+        .filter(|rule| !rules.contains(&format!("- **{rule} ")))
         .collect()
 }
 
@@ -147,18 +185,19 @@ fn old_ids_outside_the_reviews(spec: &str) -> Vec<String> {
 /// `specs/` and `plans/`), which the test of the storage spec's text reads.
 const PRIVATE_DOCS: &str = "SWARMOPS_PRIVATE_DOCS";
 
-/// Storage spec §2 rule 4 states every rule the checker enforces, under its id, and the
-/// checker's old ids, R1 to R7, are gone from the spec: R1 to R4 are only §6's review
-/// invariants. A spec that leaves a rule out, or names an old id beside its rule, fails. The
-/// spec is one of the maintainers' private design documents, read from the directory
-/// `SWARMOPS_PRIVATE_DOCS` names; the test is skipped, saying so, when it is unset.
+/// Storage spec §2 rule 4 states every rule the checker enforces, under its id, but those
+/// FORMAT 3 adds, which the FORMAT 3 design §2.9 states; and the checker's old ids, R1 to R7,
+/// are gone from the spec: R1 to R4 are only §6's review invariants. A document that leaves a
+/// rule out, or names an old id beside its rule, fails. Both are the maintainers' private design
+/// documents, read from the directory `SWARMOPS_PRIVATE_DOCS` names; the test is skipped, saying
+/// so, when it is unset.
 #[test]
 fn the_spec_states_every_write_order_rule() {
     let Some(docs) = std::env::var_os(PRIVATE_DOCS).filter(|docs| !docs.is_empty()) else {
         eprintln!("the_spec_states_every_write_order_rule: {PRIVATE_DOCS} is not set; skipped");
         return;
     };
-    let path = PathBuf::from(docs).join("specs/2026-10-15-swarmops-storage-core-design.md");
+    let path = PathBuf::from(&docs).join("specs/2026-10-15-swarmops-storage-core-design.md");
     let spec = fs::read_to_string(&path).unwrap_or_else(|err| panic!("{}: {err}", path.display()));
     assert_eq!(
         unstated(&spec),
@@ -175,6 +214,18 @@ fn the_spec_states_every_write_order_rule() {
     assert_eq!(old_ids_outside_the_reviews(&stale), ["R7"]);
     let stale = spec.replacen("- W1 ", "- W1 (R1) ", 1);
     assert_eq!(old_ids_outside_the_reviews(&stale), ["R1"]);
+
+    // The rules FORMAT 3 adds, in its design; one left out is caught.
+    let path = PathBuf::from(docs).join("specs/2026-11-07-format3-design.md");
+    let design =
+        fs::read_to_string(&path).unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+    assert_eq!(
+        unstated_in_format3(&design),
+        [],
+        "the FORMAT 3 design §2.9 does not state these rules"
+    );
+    let planted = design.replacen("- **W10 ", "- **", 1);
+    assert_eq!(unstated_in_format3(&planted), [Rule::W10]);
 }
 
 /// `RealFs` whose `k`-th call fails with `EIO` once: a flushing call does its work first.
@@ -591,6 +642,287 @@ fn w8_a_frame_a_failed_sync_left_holds_its_entry_back() {
     assert_breaks("W8", || {
         fs.link_noclobber(&temp, &fanout.join("cdef")).unwrap();
     });
+}
+
+/// A FORMAT 3 store root in a temp dir: `FORMAT`, `meta/` with empty `journal2.log` and
+/// `journal2.off`, `meta/refs2/`, `meta/idx/`, `meta/sorted3/tmp/` and an `objects/` fan-out
+/// directory, all made outside the checker, so durable.
+fn root3() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("store");
+    for sub in [
+        "meta/refs2",
+        "meta/idx",
+        "meta/sorted3/tmp",
+        "objects/ab",
+        "objects/tmp",
+    ] {
+        fs::create_dir_all(root.join(sub)).unwrap();
+    }
+    for file in ["meta/journal2.log", "meta/journal2.off"] {
+        File::create(root.join(file)).unwrap();
+    }
+    fs::write(root.join("FORMAT"), StoreFormat::V3.marker()).unwrap();
+    (dir, root)
+}
+
+/// The FORMAT 3 frame `seq` (the first of its journal, so after no CRC) of `records`, ending in
+/// a nonce.
+fn frame3(records: &[Record], seq: u64) -> Vec<u8> {
+    frame::encode_frame_with_nonce(StoreFormat::V3, records, Some(7), seq, 0).unwrap()
+}
+
+/// The FORMAT 3 checkpoint at `offset`, passing `records` changeset records and no fact row.
+fn ckpt3(offset: u64, records: u64) -> Vec<u8> {
+    let ckpt = Ckpt3 {
+        offset,
+        records,
+        ..Ckpt3::default()
+    };
+    ckpt.encode()
+}
+
+/// The FORMAT 3 index files of `meta`: the five, then `facts.col`.
+fn index_files3(meta: &Path) -> Vec<PathBuf> {
+    let mut files = index_files(meta).to_vec();
+    files.push(meta.join("idx/facts.col"));
+    files
+}
+
+/// An annotation that names blob `[4; 32]` as its value.
+fn annotation() -> Record {
+    let body = [&[1, b'k'][..], &[4; 32]].concat();
+    let fact = Fact::new(
+        FactKind::Annotation,
+        0,
+        [8; 32],
+        [0; 32],
+        0,
+        String::new(),
+        body,
+    );
+    Record::Fact(fact.unwrap())
+}
+
+/// W3's FORMAT 3 form: `journal3.ckpt` moves past 0 only once the six index files, `facts.col`
+/// among them, are synced since they last changed; it holds 44 bytes, and no poison.
+#[test]
+fn w3_a_format_3_checkpoint_waits_for_six_index_files() {
+    let (_dir, root) = root3();
+    let meta = root.join("meta");
+    let (log, ckpt) = (meta.join("journal2.log"), meta.join("journal3.ckpt"));
+    let fs = OrderCheckFs::new(RealFs);
+    let rename = Record::RefMove {
+        name: "main".to_owned(),
+        old: None,
+        new: None,
+        actor: String::new(),
+        ts: 0,
+    };
+    let frame = frame3(&[rename], 0);
+    let end = fs.append_durable(&log, &frame).unwrap() + to_u64(frame.len());
+    for path in index_files3(&meta) {
+        fs.append(&path, &[0; 8]).unwrap();
+    }
+
+    // 1. Five synced, facts.col not: refused.
+    for path in index_files(&meta) {
+        fs.sync_data(&path).unwrap();
+    }
+    assert_breaks_by("W3", "atomic_replace", || {
+        fs.atomic_replace(&ckpt, &ckpt3(end, 0)).unwrap();
+    });
+
+    // 2. A checkpoint at 0 covers nothing; one of another length, or the poison, is no
+    //    FORMAT 3 checkpoint.
+    fs.atomic_replace(&ckpt, &ckpt3(0, 0)).unwrap();
+    assert_breaks("W3", || fs.atomic_replace(&ckpt, &[0; 20]).unwrap());
+    assert_breaks("W3", || {
+        fs.atomic_replace(&ckpt, UPGRADE_POISON_V3).unwrap();
+    });
+
+    // 3. All six synced: it moves, but never past the durable journal.
+    fs.sync_data(&meta.join("idx/facts.col")).unwrap();
+    assert_breaks("W3", || {
+        fs.atomic_replace(&ckpt, &ckpt3(end + 1, 0)).unwrap();
+    });
+    fs.atomic_replace(&ckpt, &ckpt3(end, 0)).unwrap();
+}
+
+/// A run file of `meta`'s `sorted3/` of the changeset records `[from, to)`, its sections empty:
+/// the checker reads its header only.
+fn run_bytes(from: u64, to: u64) -> (Run, Vec<u8>) {
+    let run = Run {
+        domain: Domain::Changesets,
+        from,
+        to,
+    };
+    let bytes = runs::encode_run(&run, [&[], &[]]);
+    (run, bytes)
+}
+
+/// Writes `run`'s file in `sorted3/tmp/` through `fs` and syncs it; returns its path there.
+fn temp_run(fs: &OrderCheckFs<RealFs>, meta: &Path, run: &Run, bytes: &[u8]) -> PathBuf {
+    let tmp = meta.join("sorted3/tmp").join(run.name());
+    fs.append(&tmp, bytes).unwrap();
+    fs.sync_data(&tmp).unwrap();
+    tmp
+}
+
+/// The manifest of generation `generation` naming `runs`.
+fn manifest(generation: u64, runs: Vec<Run>) -> Vec<u8> {
+    Manifest { generation, runs }.encode()
+}
+
+/// W4′: a run is built only within what `journal3.ckpt` passed; `MANIFEST` is replaced only
+/// once every run it names is durable; a run it replaced is removed only once a durable
+/// manifest no longer names it.
+#[test]
+fn w4_prime_refuses_a_manifest_before_its_runs() {
+    let (_dir, root) = root3();
+    let meta = root.join("meta");
+    let sorted = meta.join("sorted3");
+    let path = sorted.join("MANIFEST");
+    let fs = OrderCheckFs::new(RealFs);
+    fs.atomic_replace(&meta.join("journal3.ckpt"), &ckpt3(0, 2048))
+        .unwrap();
+    let (first, bytes) = run_bytes(0, 1024);
+
+    // 1. A manifest that names a run not there, or not yet durable: refused.
+    assert_breaks_by("W4", "atomic_replace", || {
+        fs.atomic_replace(&path, &manifest(1, vec![first])).unwrap();
+    });
+    let unsynced = sorted.join(first.name());
+    fs.append(&unsynced, &bytes).unwrap();
+    assert_breaks("W4", || {
+        fs.atomic_replace(&path, &manifest(1, vec![first])).unwrap();
+    });
+    fs.sync_data(&unsynced).unwrap();
+    assert_breaks("W4", || {
+        fs.atomic_replace(&path, &manifest(1, vec![first])).unwrap();
+    });
+    fs.fsync_dir(&sorted).unwrap();
+    fs.atomic_replace(&path, &manifest(1, vec![first])).unwrap();
+
+    // 2. A run past what the checkpoint passed: refused before its rename.
+    let (past, bytes) = run_bytes(1024, 4096);
+    let tmp = temp_run(&fs, &meta, &past, &bytes);
+    assert_breaks_by("W4", "rename_durable", || {
+        fs.rename_durable(&tmp, &sorted.join(past.name())).unwrap();
+    });
+
+    // 3. A run within it, merged with the first, published; then the first removed. Removed
+    //    while the durable manifest names it: refused.
+    let (merged, bytes) = run_bytes(0, 2048);
+    let tmp = temp_run(&fs, &meta, &merged, &bytes);
+    fs.rename_durable(&tmp, &sorted.join(merged.name()))
+        .unwrap();
+    assert_breaks_by("W4", "remove", || {
+        fs.remove(&sorted.join(first.name())).unwrap();
+    });
+    fs.atomic_replace(&path, &manifest(2, vec![merged]))
+        .unwrap();
+    fs.remove(&sorted.join(first.name())).unwrap();
+}
+
+/// W9: a frame holding a fact that names a blob is appended only once every object linked in
+/// this process is durable, as W5 asks of a changeset's frame.
+#[test]
+fn w9_a_fact_frame_waits_for_its_objects() {
+    let (_dir, root) = root3();
+    let meta = root.join("meta");
+    let log = meta.join("journal2.log");
+    fs::write(meta.join("features"), b"swarmops-features 1\nannotation\n").unwrap();
+    let fs = OrderCheckFs::new(RealFs);
+    let temp = fs
+        .write_durable_temp(&root.join("objects/tmp"), b"value")
+        .unwrap();
+    fs.link_noclobber(&temp, &root.join("objects/ab/cdef"))
+        .unwrap();
+    assert_breaks_by("W9", "append_durable", || {
+        fs.append_durable(&log, &frame3(&[annotation()], 0))
+            .unwrap();
+    });
+    fs.fsync_dir(&root.join("objects/ab")).unwrap();
+    fs.append_durable(&log, &frame3(&[annotation()], 0))
+        .unwrap();
+}
+
+/// W10: a frame holding a fact of a kind is appended only once `meta/features` lists the kind's
+/// feature durably.
+#[test]
+fn w10_refuses_a_record_before_its_feature() {
+    let (_dir, root) = root3();
+    let meta = root.join("meta");
+    let (log, features) = (meta.join("journal2.log"), meta.join("features"));
+    let fs = OrderCheckFs::new(RealFs);
+
+    // 1. No list, then a list without the feature, then one written and not synced.
+    assert_breaks_by("W10", "append_durable", || {
+        fs.append_durable(&log, &frame3(&[annotation()], 0))
+            .unwrap();
+    });
+    fs.atomic_replace(&features, b"swarmops-features 1\ncheck\n")
+        .unwrap();
+    assert_breaks("W10", || {
+        fs.append_durable(&log, &frame3(&[annotation()], 0))
+            .unwrap();
+    });
+    fs.remove(&features).unwrap();
+    fs.append(&features, b"swarmops-features 1\nannotation\n")
+        .unwrap();
+    assert_breaks("W10", || {
+        fs.append_durable(&log, &frame3(&[annotation()], 0))
+            .unwrap();
+    });
+
+    // 2. Listed durably: appended.
+    fs.sync_data(&features).unwrap();
+    fs.fsync_dir(&meta).unwrap();
+    fs.append_durable(&log, &frame3(&[annotation()], 0))
+        .unwrap();
+}
+
+/// W11: the poison over `journal2.ckpt` is written only once FORMAT 3's files are durable, and
+/// `FORMAT` names FORMAT 3 only once the poison is.
+#[test]
+fn w11_refuses_format_before_the_poison() {
+    let (_dir, root) = root3();
+    let meta = root.join("meta");
+    fs::write(root.join("FORMAT"), StoreFormat::V2.marker()).unwrap();
+    fs::write(meta.join("journal2.ckpt"), [0; 20]).unwrap();
+    let (poison, format) = (meta.join("journal2.ckpt"), root.join("FORMAT"));
+    let fs = OrderCheckFs::new(RealFs);
+
+    // 1. FORMAT 3 before any poison; the poison before FORMAT 3's files.
+    assert_breaks_by("W11", "atomic_replace", || {
+        fs.atomic_replace(&format, StoreFormat::V3.marker())
+            .unwrap();
+    });
+    assert_breaks_by("W11", "atomic_replace", || {
+        fs.atomic_replace(&poison, UPGRADE_POISON_V3).unwrap();
+    });
+
+    // 2. The files written, `facts.col` not synced: the poison waits still.
+    let facts = meta.join("idx/facts.col");
+    fs.append(&facts, &[0; 24]).unwrap();
+    fs.atomic_replace(&meta.join("sorted3/MANIFEST"), &manifest(1, Vec::new()))
+        .unwrap();
+    fs.atomic_replace(&meta.join("journal3.ckpt"), &ckpt3(0, 0))
+        .unwrap();
+    assert_breaks("W11", || {
+        fs.atomic_replace(&poison, UPGRADE_POISON_V3).unwrap();
+    });
+
+    // 3. All durable, its entry too: the poison, then FORMAT.
+    fs.sync_data(&facts).unwrap();
+    assert_breaks("W11", || {
+        fs.atomic_replace(&poison, UPGRADE_POISON_V3).unwrap();
+    });
+    fs.fsync_dir(&meta.join("idx")).unwrap();
+    fs.atomic_replace(&poison, UPGRADE_POISON_V3).unwrap();
+    fs.atomic_replace(&format, StoreFormat::V3.marker())
+        .unwrap();
 }
 
 fn to_u64(n: usize) -> u64 {

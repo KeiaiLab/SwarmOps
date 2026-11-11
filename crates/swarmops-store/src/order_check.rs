@@ -58,6 +58,24 @@
 //!   not durable. A put of entries takes no lock, so other frames may be on their way meanwhile;
 //!   W2 asks more of a ref change, every byte of `journal.log`.
 //!
+//! FORMAT 3 (the FORMAT 3 design §2.9) applies W1 to W8 to its files and adds:
+//!
+//! - **W3, six index files.** `journal3.ckpt` (44 bytes, its offset first; it takes no poison)
+//!   moves past 0 only when the six index files, `facts.col` among them, are synced as W3 asks.
+//! - **W4′, the runs and the manifest.** A run file of `meta/sorted3/` is renamed into place only
+//!   from a synced temp file (W6) and only within what `journal3.ckpt` passed (its `records` or
+//!   `fact_rows`; before an upgrade has written `journal3.ckpt`, within what the index files hold
+//!   durably). `MANIFEST` is replaced only once every run it names is durable, and a run is
+//!   removed only while the durable `MANIFEST` does not name it. Reported as W4.
+//! - **W9, a fact's objects.** A frame holding a fact that names a blob is appended only once
+//!   every object linked in this process is durable, as W5 asks of a changeset's frame.
+//! - **W10, the features.** A frame holding a fact of a kind is appended only once `meta/features`
+//!   lists the kind's feature durably.
+//! - **W11, the poison.** The poison an upgrade writes over `journal2.ckpt` is written only once
+//!   FORMAT 3's files (`journal3.ckpt`, `MANIFEST` and the runs it names, `facts.col`, and
+//!   `features` if there is one) are durable; `FORMAT` names FORMAT 3 by a replace only once the
+//!   poison is durable.
+//!
 //! # What it knows
 //!
 //! Each process has its own: what a file held when this process first changed it counts as
@@ -74,12 +92,14 @@
 //! so that it changes no call count, and it holds no lock while a call runs, so that calls made
 //! at once stay at once.
 //!
-//! It knows the files of both formats under the same rules: FORMAT 1's `journal.log`,
-//! `journal.off` (8-byte entries), `journal.ckpt` (8 bytes) and `refs/`, and FORMAT 2's
+//! It knows the files of the three formats under the same rules: FORMAT 1's `journal.log`,
+//! `journal.off` (8-byte entries), `journal.ckpt` (8 bytes) and `refs/`, FORMAT 2's
 //! `journal2.log`, `journal2.off` (16-byte entries), `journal2.ckpt` (20 bytes, its offset first)
-//! and `refs2/` (the M6 design §2.2). The poison an upgrade writes over FORMAT 1's checkpoint
-//! (`UPGRADE_POISON`), or over FORMAT 2's (`UPGRADE_POISON_V3`, the FORMAT 3 design §3.1), moves
-//! no checkpoint, and W3 lets it pass.
+//! and `refs2/` (the M6 design §2.2), and FORMAT 3's `journal3.ckpt` beside FORMAT 2's journal
+//! and refs. A frame of `journal2.log` decodes as FORMAT 2's or, ending in a nonce, as FORMAT 3's
+//! (every fact kind). The poison an upgrade writes over FORMAT 1's checkpoint (`UPGRADE_POISON`)
+//! moves no checkpoint, and W3 lets it pass; the one over FORMAT 2's (`UPGRADE_POISON_V3`) is
+//! W11's.
 //!
 //! It judges the order of the calls, and takes each at what [`FsOps`] documents for it, not at
 //! what `RealFs` does inside it: that `atomic_replace` syncs its temp file before the rename and
@@ -94,9 +114,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::{fmt, io};
 
-use crate::format::{StoreFormat, UPGRADE_POISON, UPGRADE_POISON_V3};
+use crate::format::{JournalFamily, StoreFormat, UPGRADE_POISON, UPGRADE_POISON_V3};
 use crate::fs_ops::{FsMethod, FsOps, LinkOutcome};
-use crate::meta::frame::{self, Parsed, Place, Record};
+use crate::meta::facts::ROW_LEN;
+use crate::meta::features::feature_of;
+use crate::meta::frame::{self, Base, FactKind, Parsed, Place, Record};
+use crate::meta::journal::Ckpt3;
+use crate::meta::runs::{self, MANIFEST, Manifest};
 
 /// The size of one `journal.off` entry (FORMAT 1).
 const ENTRY_LEN: u64 = 8;
@@ -115,6 +139,32 @@ const HEADER_LEN_V2: u64 = 24;
 
 /// The size of `journal2.ckpt`: its offset, its seq and their CRC.
 const CKPT_LEN_V2: usize = 20;
+
+/// The size of `journal3.ckpt`: its offset, seq, base seq, two counts and their CRC.
+const CKPT_LEN_V3: usize = 44;
+
+/// The kind byte of the nonce record a FORMAT 3 frame ends in (the FORMAT 3 design §2.7).
+const KIND_NONCE: u8 = 11;
+
+/// The size of a nonce record: its kind, then a `u64le`.
+const NONCE_RECORD_LEN: usize = 9;
+
+/// The size of one entry of the index's id column, `idx/ids.col`.
+const ID_ENTRY_LEN: u64 = 32;
+
+/// Where a run file's header holds its domain (byte 5) and its `to` (`u64le` at 16): the FORMAT
+/// 3 design §2.4.
+const RUN_DOMAIN_AT: usize = 5;
+const RUN_TO_AT: usize = 16;
+
+/// The domain byte of a run of changeset records; 1 is of fact rows.
+const DOMAIN_CHANGESETS: u8 = 0;
+
+/// The bytes of a run file's header the checker reads: through its `to`.
+const RUN_HEADER_READ: usize = 24;
+
+/// The directory of FORMAT 3's runs and manifest in `meta/`.
+const RUNS_DIR: &str = "sorted3";
 
 /// The four view files of `meta/sorted/`, in the order a compaction renames them, with the size
 /// of one entry.
@@ -237,6 +287,24 @@ struct Pending {
     /// Made (created, linked or renamed in), or else removed.
     added: bool,
     generation: u64,
+}
+
+/// The index files a checkpoint waits for: FORMAT 1's and 2's five, or FORMAT 3's six, with
+/// `facts.col`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IndexSet {
+    Five,
+    Six,
+}
+
+impl IndexSet {
+    /// The set of a checkpoint of `format`.
+    fn of(format: StoreFormat) -> IndexSet {
+        match format {
+            StoreFormat::V1 | StoreFormat::V2 => IndexSet::Five,
+            StoreFormat::V3 => IndexSet::Six,
+        }
+    }
 }
 
 /// One of the journal's three files.
@@ -503,8 +571,8 @@ impl State {
         }
     }
 
-    /// W1 and W5 for an append of `frame` to `log`, the `journal.log` of `meta`: the rule
-    /// broken, and how. `frame` may hold several frames, a batch: W5 judges every one.
+    /// W1, W5, W9 and W10 for an append of `frame` to `log`, the `journal.log` of `meta`: the
+    /// rule broken, and how. `frame` may hold several frames, a batch: each is judged.
     fn frame(
         &self,
         log: &Path,
@@ -521,17 +589,37 @@ impl State {
                 ),
             ));
         }
-        // Whether any whole frame of the append records a changeset.
+        // 1. What the whole frames of the append hold: a changeset (W5), a fact that names a
+        //    blob (W9), the kinds of their facts (W10).
         let mut at = 0;
-        let mut records_changeset = false;
+        let mut names_objects = None;
+        let mut kinds = Vec::new();
         while let Parsed::Whole { records, size, .. } = parse_any(format, &frame[at..]) {
             at += size;
-            records_changeset |=
-                (records.iter()).any(|record| matches!(record, Record::Changeset { .. }));
+            for record in &records {
+                match record {
+                    Record::Changeset { .. } => names_objects = Some(Rule::W5),
+                    Record::Fact(fact) => {
+                        kinds.push(fact.kind());
+                        if !fact.blob_ids().is_empty() {
+                            names_objects.get_or_insert(Rule::W9);
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
-        if !records_changeset {
-            return None;
+
+        // 2. Each fact's feature listed durably.
+        if let Some(why) = kinds
+            .iter()
+            .find_map(|&kind| self.feature_listed(meta, kind))
+        {
+            return Some((Rule::W10, why));
         }
+
+        // 3. The objects linked in this process durable.
+        let rule = names_objects?;
         let objects = meta.parent()?.join("objects");
         let tmp = objects.join("tmp");
         for (dir, pending) in &self.dirs {
@@ -544,10 +632,10 @@ impl State {
                 .find(|change| change.added && change.path != tmp)
             {
                 return Some((
-                    Rule::W5,
+                    rule,
                     format!(
-                        "the frame records a changeset while {} is not durable: no fsync of {} \
-                         since it was made",
+                        "the frame names objects while {} is not durable: no fsync of {} since \
+                         it was made",
                         change.path.display(),
                         dir.display()
                     ),
@@ -634,22 +722,30 @@ impl State {
         })
     }
 
-    /// W3 for `journal.ckpt` of `format` in `meta` set to `bytes`.
+    /// W3 for `journal.ckpt` of `format` in `meta` set to `bytes`. The poison over FORMAT 2's,
+    /// W11's, is judged before.
     fn checkpoint(&self, meta: &Path, format: StoreFormat, bytes: &[u8]) -> Option<String> {
+        // 1. A poison moves no checkpoint; FORMAT 3's takes none.
         let poison = match format {
-            StoreFormat::V1 => UPGRADE_POISON,
-            StoreFormat::V2 | StoreFormat::V3 => UPGRADE_POISON_V3,
+            StoreFormat::V1 => Some(UPGRADE_POISON),
+            StoreFormat::V2 => Some(UPGRADE_POISON_V3),
+            StoreFormat::V3 => None,
         };
-        if bytes == poison {
+        if poison == Some(bytes) {
             return None;
         }
+
+        // 2. The offset, first in every format's checkpoint of its length.
         let len = match format {
             StoreFormat::V1 => 8,
             StoreFormat::V2 => CKPT_LEN_V2,
-            StoreFormat::V3 => {
-                return Some("journal3.ckpt is not checked by this build".to_owned());
-            }
+            StoreFormat::V3 => CKPT_LEN_V3,
         };
+        if format == StoreFormat::V3
+            && let Err(why) = Ckpt3::decode(bytes)
+        {
+            return Some(format!("journal3.ckpt would hold no checkpoint: it {why}"));
+        }
         let Some(offset) = (bytes.len() == len)
             .then(|| bytes.first_chunk::<8>())
             .flatten()
@@ -660,7 +756,9 @@ impl State {
         if offset == 0 {
             return None;
         }
-        if let Some(why) = self.index_unsynced(meta) {
+
+        // 3. Past 0: the index, the journal and the refs durable.
+        if let Some(why) = self.index_unsynced(meta, IndexSet::of(format)) {
             return Some(format!("it moves the checkpoint to {offset} while {why}"));
         }
         let durable = self.durable_log_end(meta, format);
@@ -691,10 +789,13 @@ impl State {
         None
     }
 
-    /// Why the five index files of `meta` are not all synced since they last changed in this
+    /// Why the index files `set` of `meta` are not all synced since they last changed in this
     /// process, if they are not; `None` too for a `meta` without index files.
-    fn index_unsynced(&self, meta: &Path) -> Option<String> {
-        let files = index_files(meta);
+    fn index_unsynced(&self, meta: &Path, set: IndexSet) -> Option<String> {
+        let mut files = index_files(meta).to_vec();
+        if set == IndexSet::Six {
+            files.push(meta.join("idx/facts.col"));
+        }
         if !files.iter().any(|path| path.exists()) {
             return None;
         }
@@ -712,6 +813,182 @@ impl State {
                 )),
             }
         })
+    }
+
+    /// Why `path`, under `top`, is not durable, if it is not: missing; holding data not synced,
+    /// or that a failed sync left not durable; or its entry, or that of a directory between it
+    /// and `top`, waiting for an fsync of its directory. What a file held when this process first
+    /// saw it counts as durable.
+    fn not_durable(&self, path: &Path, top: &Path) -> Option<String> {
+        if !path.exists() {
+            return Some(format!("{} is missing", path.display()));
+        }
+        if let Some(file) = self.files.get(path)
+            && (file.dirty || file.lost_from.is_some())
+        {
+            return Some(format!("{} holds data not synced", path.display()));
+        }
+        for entry in path.ancestors().take_while(|entry| *entry != top) {
+            let Some(dir) = entry.parent() else {
+                break;
+            };
+            let pending = self.dirs.get(dir);
+            if pending.is_some_and(|pending| pending.iter().any(|change| change.path == entry)) {
+                return Some(format!(
+                    "the change of {} waits for an fsync of {}",
+                    entry.display(),
+                    dir.display()
+                ));
+            }
+        }
+        None
+    }
+
+    /// W10 for a frame of `meta`'s journal holding a fact of `kind`: `meta/features` lists the
+    /// kind's feature, durably.
+    fn feature_listed(&self, meta: &Path, kind: FactKind) -> Option<String> {
+        let path = meta.join("features");
+        let name = feature_of(kind);
+        let listed = fs::read(&path).is_ok_and(|bytes| {
+            // The names follow the header line, one a line.
+            (bytes.split(|&b| b == b'\n').skip(1)).any(|line| line == name.as_bytes())
+        });
+        if !listed {
+            return Some(format!(
+                "the frame holds a {kind:?} fact while meta/features does not list {name:?}"
+            ));
+        }
+        self.not_durable(&path, meta).map(|why| {
+            format!("the frame holds a {kind:?} fact while the list naming {name:?} is not durable: {why}")
+        })
+    }
+
+    /// W11 for the poison over `journal2.ckpt` of `meta`: FORMAT 3's files are all durable,
+    /// `features` only if there is one (an upgrade makes none).
+    fn format3_files(&self, meta: &Path) -> Option<String> {
+        // 1. The files every FORMAT 3 store has, and the runs its manifest names.
+        let views = meta.join(RUNS_DIR);
+        let manifest_path = views.join(MANIFEST);
+        let mut files = vec![
+            meta.join("journal3.ckpt"),
+            manifest_path.clone(),
+            meta.join("idx/facts.col"),
+        ];
+        if let Ok(bytes) = fs::read(&manifest_path) {
+            let Ok(manifest) = Manifest::decode(&bytes) else {
+                return Some(format!("{} holds no manifest", manifest_path.display()));
+            };
+            files.extend(manifest.runs.iter().map(|run| views.join(run.name())));
+        }
+        let features = meta.join("features");
+        if features.exists() {
+            files.push(features);
+        }
+
+        // 2. Each durable.
+        let why = files.iter().find_map(|path| self.not_durable(path, meta))?;
+        Some(format!(
+            "the poison would end FORMAT 2 while {why}: a power loss could leave FORMAT 3 without it"
+        ))
+    }
+
+    /// W11 for `FORMAT` of `root` replaced by FORMAT 3's marker: FORMAT 2's checkpoint holds the
+    /// poison, durably.
+    fn poison_durable(&self, root: &Path) -> Option<String> {
+        let meta = root.join("meta");
+        let ckpt = meta.join("journal2.ckpt");
+        if fs::read(&ckpt).ok().as_deref() != Some(UPGRADE_POISON_V3) {
+            return Some("journal2.ckpt does not hold the poison".to_owned());
+        }
+        let why = self.not_durable(&ckpt, &meta)?;
+        Some(format!("the poison is not durable: {why}"))
+    }
+
+    /// W4′ for `meta/sorted3/MANIFEST` of `meta` replaced by `bytes`: every run they name is
+    /// durable in `sorted3/`, whose own entry the manifest shares (an upgrade makes it durable
+    /// before its poison, W11).
+    fn manifest(&self, meta: &Path, bytes: &[u8]) -> Option<String> {
+        let Ok(manifest) = Manifest::decode(bytes) else {
+            return Some("it writes no manifest".to_owned());
+        };
+        let views = meta.join(RUNS_DIR);
+        let why = (manifest.runs.iter())
+            .find_map(|run| self.not_durable(&views.join(run.name()), &views))?;
+        Some(format!(
+            "the manifest names a run that is not durable: {why}"
+        ))
+    }
+
+    /// W4′ for the run file `run` renamed into `meta/sorted3/`: it covers no record past what
+    /// `journal3.ckpt` passed, or, before an upgrade has written `journal3.ckpt`, past what the
+    /// index files hold durably.
+    fn run_bound(&self, meta: &Path, run: &Path) -> Option<String> {
+        // 1. Its domain and where it ends, from its header.
+        let Some(header) = read_at(run, 0, RUN_HEADER_READ) else {
+            return Some(format!("{} holds no run header", run.display()));
+        };
+        let domain = header[RUN_DOMAIN_AT];
+        let to = header[RUN_TO_AT..RUN_HEADER_READ]
+            .try_into()
+            .map_or(u64::MAX, u64::from_le_bytes);
+
+        // 2. What the checkpoint passed in that domain.
+        let ckpt = fs::read(meta.join("journal3.ckpt"))
+            .ok()
+            .and_then(|bytes| Ckpt3::decode(&bytes).ok());
+        let passed = match ckpt {
+            Some(ckpt) if domain == DOMAIN_CHANGESETS => ckpt.records,
+            Some(ckpt) => ckpt.fact_rows,
+            None => self.durable_rows(meta, domain),
+        };
+        (to > passed).then(|| {
+            format!(
+                "the run covers records to {to}, past the {passed} the checkpoint passed: a cut \
+                 could take them back"
+            )
+        })
+    }
+
+    /// How many entries of `domain`'s index column of `meta` are durable: of `idx/ids.col` for
+    /// changeset records, of `idx/facts.col` for fact rows.
+    fn durable_rows(&self, meta: &Path, domain: u8) -> u64 {
+        let (path, width) = if domain == DOMAIN_CHANGESETS {
+            (meta.join("idx/ids.col"), ID_ENTRY_LEN)
+        } else {
+            (
+                meta.join("idx/facts.col"),
+                u64::try_from(ROW_LEN).unwrap_or(u64::MAX),
+            )
+        };
+        let durable = self
+            .files
+            .get(&path)
+            .map_or_else(|| real_len(&path), |file| file.durable_to);
+        durable / width
+    }
+
+    /// W4′ for the removal of the run file `run` of `meta`'s FORMAT 3 store: the durable
+    /// manifest does not name it. A store whose `FORMAT` is not FORMAT 3's yet (an upgrade's
+    /// leftovers) has no runs to keep.
+    fn run_removal(&self, meta: &Path, run: &Path) -> Option<String> {
+        let format = meta.parent().map(|root| root.join("FORMAT"));
+        if format.and_then(|path| fs::read(path).ok()).as_deref() != Some(StoreFormat::V3.marker())
+        {
+            return None;
+        }
+        let path = meta.join(RUNS_DIR).join(MANIFEST);
+        let Ok(bytes) = fs::read(&path) else {
+            return None;
+        };
+        if let Some(why) = self.not_durable(&path, meta) {
+            return Some(format!(
+                "the manifest's last replace is not durable ({why}): the one before may name it"
+            ));
+        }
+        let names_it = Manifest::decode(&bytes).map_or(true, |manifest| {
+            (manifest.runs.iter()).any(|named| Some(named.name().as_str()) == name(run))
+        });
+        names_it.then(|| "the durable manifest names it: a reader would miss its run".to_owned())
     }
 
     /// W6 for a rename of `from`, a directory or else a file.
@@ -823,6 +1100,12 @@ rules! {
     W7,
     /// The external ids.
     W8,
+    /// A fact's objects (FORMAT 3).
+    W9,
+    /// The features (FORMAT 3).
+    W10,
+    /// The poison of an upgrade to FORMAT 3.
+    W11,
 }
 
 /// Panics if `violation` holds one: rule `rule` is broken by `method` on `paths`.
@@ -864,7 +1147,8 @@ fn frame_end(log: &Path, offset: u64, format: StoreFormat) -> Option<u64> {
     Some(offset + header_len + u64::from(len))
 }
 
-/// The records of `frame`, a frame of `format` (its place, in FORMAT 2, what its header names).
+/// The records of `frame`, a frame of `format` (its place, in FORMAT 2, what its header names);
+/// one of FORMAT 2's layout that does not decode as FORMAT 2's, as FORMAT 3's ([`parse_v3`]).
 fn parse_any(format: StoreFormat, frame: &[u8]) -> Parsed {
     let place = match frame::decode_header_in(format, frame) {
         Ok(Some(header)) => Place {
@@ -873,7 +1157,42 @@ fn parse_any(format: StoreFormat, frame: &[u8]) -> Parsed {
         },
         _ => return Parsed::Short,
     };
-    frame::parse_frame_in(format, frame, place)
+    let parsed = frame::parse_frame_in(format, frame, place);
+    if format.journal_family() == JournalFamily::One {
+        return parsed;
+    }
+    match parsed {
+        Parsed::Invalid { zero_len: false } => parse_v3(frame).unwrap_or(parsed),
+        parsed => parsed,
+    }
+}
+
+/// The frame at the start of `frame`, whose FORMAT 2 header and payload CRC check, as a FORMAT 3
+/// frame past its base seq (the FORMAT 3 design §2.7): its records, of every fact kind, then the
+/// nonce record, last. `None` if it is not one.
+fn parse_v3(frame: &[u8]) -> Option<Parsed> {
+    // 1. The payload the header announces.
+    let header = frame::decode_header_in(StoreFormat::V3, frame).ok()??;
+    let len = usize::try_from(header.len).ok()?;
+    let header_len = frame::header_len(StoreFormat::V3);
+    let payload = frame.get(header_len..)?.get(..len)?;
+
+    // 2. The count, the records but the nonce, then the nonce.
+    let (count, mut rest) = payload.split_first_chunk::<2>()?;
+    let records = usize::from(u16::from_le_bytes(*count)).checked_sub(1)?;
+    let mut decoded = Vec::with_capacity(records.min(rest.len()));
+    for _ in 0..records {
+        let (record, used) =
+            Record::decode_in(StoreFormat::V3, Base::After, &FactKind::ALL, rest).ok()?;
+        decoded.push(record);
+        rest = rest.get(used..)?;
+    }
+    let nonce = rest.len() == NONCE_RECORD_LEN && rest.first() == Some(&KIND_NONCE);
+    nonce.then_some(Parsed::Whole {
+        records: decoded,
+        size: header_len + len,
+        crc: header.crc,
+    })
 }
 
 /// The size of one entry of `journal.off` in `format`.
@@ -933,6 +1252,7 @@ fn journal_file(path: &Path) -> Option<(JournalFile, &Path, StoreFormat)> {
     let format = match stem {
         "journal" => StoreFormat::V1,
         "journal2" => StoreFormat::V2,
+        "journal3" if ext == "ckpt" => StoreFormat::V3,
         _ => return None,
     };
     let file = match ext {
@@ -944,11 +1264,12 @@ fn journal_file(path: &Path) -> Option<(JournalFile, &Path, StoreFormat)> {
     Some((file, meta, format))
 }
 
-/// The journal file `file` of `format` in `meta`.
+/// The journal file `file` of `format` in `meta`: FORMAT 3's are FORMAT 2's but its checkpoint.
 fn journal_path(meta: &Path, format: StoreFormat, file: JournalFile) -> PathBuf {
-    let stem = match format {
-        StoreFormat::V1 => "journal",
-        StoreFormat::V2 | StoreFormat::V3 => "journal2",
+    let stem = match (format, file) {
+        (StoreFormat::V1, _) => "journal",
+        (StoreFormat::V3, JournalFile::Ckpt) => "journal3",
+        (StoreFormat::V2 | StoreFormat::V3, _) => "journal2",
     };
     let ext = match file {
         JournalFile::Log => "log",
@@ -986,6 +1307,24 @@ fn view_meta(path: &Path) -> Option<&Path> {
         && name(meta)? == "meta"
         && VIEWS.iter().any(|(view, _)| Some(*view) == name(path));
     is_view.then_some(meta)
+}
+
+/// The `meta/` directory of `path`, if it lies right in FORMAT 3's `meta/sorted3/`, and its
+/// name there.
+fn runs_entry(path: &Path) -> Option<(&Path, &str)> {
+    let views = path.parent()?;
+    let meta = views.parent()?;
+    (name(views)? == RUNS_DIR && name(meta)? == "meta").then_some((meta, name(path)?))
+}
+
+/// The `meta/` directory of `path`, if it is FORMAT 3's `meta/sorted3/MANIFEST`.
+fn manifest_meta(path: &Path) -> Option<&Path> {
+    runs_entry(path).and_then(|(meta, file)| (file == MANIFEST).then_some(meta))
+}
+
+/// The `meta/` directory of `path`, if it is a run file of FORMAT 3's `meta/sorted3/`.
+fn run_meta(path: &Path) -> Option<&Path> {
+    runs_entry(path).and_then(|(meta, file)| runs::is_run_name(file).then_some(meta))
 }
 
 /// The `meta/` directory of `path`, if it lies under `meta/refs/` (FORMAT 1) or `meta/refs2/`
@@ -1126,6 +1465,8 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
     fn remove(&self, p: &Path) -> io::Result<()> {
         let violation = ref_meta(p).and_then(|meta| self.state().ref_change(meta));
         verdict(Rule::W2, FsMethod::Remove, &[p], violation);
+        let violation = run_meta(p).and_then(|meta| self.state().run_removal(meta, p));
+        verdict(Rule::W4, FsMethod::Remove, &[p], violation);
         let result = self.inner.remove(p);
         if result.is_ok() {
             let mut state = self.state();
@@ -1190,10 +1531,21 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
     fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
         let violation = {
             let state = self.state();
-            if let Some((JournalFile::Ckpt, meta, format)) = journal_file(path) {
-                state
-                    .checkpoint(meta, format, bytes)
-                    .map(|why| (Rule::W3, why))
+            let checkpoint = journal_file(path).filter(|(file, ..)| *file == JournalFile::Ckpt);
+            let root = path.parent().unwrap_or(Path::new("."));
+            if let Some((_, meta, format)) = checkpoint {
+                // FORMAT 2's checkpoint alone takes the poison of an upgrade to FORMAT 3.
+                if matches!(format, StoreFormat::V2) && bytes == UPGRADE_POISON_V3 {
+                    state.format3_files(meta).map(|why| (Rule::W11, why))
+                } else {
+                    state
+                        .checkpoint(meta, format, bytes)
+                        .map(|why| (Rule::W3, why))
+                }
+            } else if name(path) == Some("FORMAT") && bytes == StoreFormat::V3.marker() {
+                state.poison_durable(root).map(|why| (Rule::W11, why))
+            } else if let Some(meta) = manifest_meta(path) {
+                state.manifest(meta, bytes).map(|why| (Rule::W4, why))
             } else if let Some(meta) = ref_meta(path) {
                 state.ref_change(meta).map(|why| (Rule::W2, why))
             } else {
@@ -1259,17 +1611,23 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
         let view = view_meta(to);
         let violation = {
             let state = self.state();
+            let run = (run_meta(to))
+                .and_then(|meta| state.run_bound(meta, from))
+                .map(|why| (Rule::W4, why));
             match state.rename(from, node) {
                 Some(why) => Some((Rule::W6, why)),
-                None => view.and_then(|meta| state.index_unsynced(meta)).map(|why| {
-                    (
-                        Rule::W4,
-                        format!(
-                            "a sorted view is renamed into place while {why}: it could \
+                None if run.is_some() => run,
+                None => view
+                    .and_then(|meta| state.index_unsynced(meta, IndexSet::Five))
+                    .map(|why| {
+                        (
+                            Rule::W4,
+                            format!(
+                                "a sorted view is renamed into place while {why}: it could \
                                  cover records a power loss takes back"
-                        ),
-                    )
-                }),
+                            ),
+                        )
+                    }),
             }
         };
         if let Some((rule, why)) = violation {
