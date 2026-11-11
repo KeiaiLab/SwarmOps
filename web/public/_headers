@@ -27,6 +27,10 @@
 /api/search
   Content-Type: application/json; charset=utf-8
   Cache-Control: public, max-age=300
+# The exact-name table the search dialog puts first (command, MCP tool, E_* code -> page).
+/api/lookup
+  Content-Type: application/json; charset=utf-8
+  Cache-Control: public, max-age=300
 # The installer, also served at get.swarmops.cc: read as text in a browser, and an update reaches
 # `curl | bash` within minutes.
 # Each docs page's source, beside it (scripts/markdown-twins.mjs).

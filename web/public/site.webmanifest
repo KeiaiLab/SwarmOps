@@ -1,11 +1,11 @@
 {
   "name": "SwarmOps",
   "short_name": "SwarmOps",
-  "description": "A git replacement for coding-agent swarms.",
+  "description": "Version control for swarms of coding agents: many writers, one store, one JSON envelope per command.",
   "start_url": "/",
   "display": "minimal-ui",
-  "background_color": "#0b0e14",
-  "theme_color": "#7c5cff",
+  "background_color": "#fbfbf9",
+  "theme_color": "#fbfbf9",
   "icons": [
     { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
     { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" },
