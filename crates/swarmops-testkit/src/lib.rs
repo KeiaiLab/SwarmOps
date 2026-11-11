@@ -41,6 +41,8 @@
 //! - [`sync_load`]: landers through the binary beside a syncer, the remote's lag read once a
 //!   second, and the lag's last-minute over first-minute ratio (the M18 design §2.4).
 //! - [`ws`]: the workspaces' synthetic trees and edit driver (M5).
+//! - [`schema_check`]: a JSON value checked against its type's JSON Schema, the subset
+//!   `swarmops_api::schema_for_all` emits (M21).
 //!
 //! It depends on no crate above `swarmops-repo`: the operations' unit tests use it, and a
 //! dependency on `swarmops-ops` would build a second copy of the crate under test there. No
@@ -79,6 +81,8 @@ pub mod power;
 pub mod remote;
 #[cfg(feature = "repo")]
 pub mod repo;
+#[cfg(feature = "cli")]
+pub mod schema_check;
 #[cfg(feature = "cli")]
 pub mod serve;
 #[cfg(all(feature = "cli", feature = "repo"))]
