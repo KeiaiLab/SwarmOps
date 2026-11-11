@@ -2,11 +2,12 @@
 //! the write path and reused (the M21 design §2.10; the M21 plan's task M21-2).
 //!
 //! A [`Spec`] names a store: how many changesets and files, and whether its object files are
-//! written raw or zstd. [`build`] makes it under [`measure::base_dir`] (`SWARMOPS_BENCH_DIR`) in
-//! parts and reuses it when the store's `FORMAT` and a fingerprint of what the builder writes
-//! match the ones it was built with; [`Builder::next_part`] adds one part, so a build cut short
-//! goes on where it stopped. [`pair`] is A1's pair: [`Pair::small`] of 1,000 changesets and files,
-//! [`Pair::large`] of 1,000,000 of each. The cases that use the large one are gated by
+//! written raw or zstd. Every fixture lives under [`measure::base_dir`] (`SWARMOPS_BENCH_DIR`) and
+//! is reused when the store's `FORMAT` and a fingerprint of what the builder writes match the
+//! ones it was built with; its `parts.txt` records the parts written, so a build cut short goes on
+//! where it stopped. A1's pair is [`Size`]: [`build_small`] makes the 1,000-changeset store at
+//! once; only [`next_part`] writes the 1,000,000-changeset one, a part a call, and [`open`] never
+//! builds: it is `None` while a part is missing. The cases that use the large one are gated by
 //! [`scale`] (`SWARMOPS_SCALE=1`) and print `scale-perf: ` lines.
 //!
 //! ```text
@@ -68,8 +69,8 @@ pub const HOT_TOUCHES: usize = 10;
 /// The path that [`HOT_TOUCHES`] changesets touch.
 pub const HOT: &str = "hot.txt";
 
-/// The name of the builder's record of its progress, beside the store.
-const STATE: &str = "bulk.state";
+/// The name of the builder's record of its parts, beside the store.
+const PARTS: &str = "parts.txt";
 
 /// What the builder writes, versioned: a change to the shape of a fixture changes this, and every
 /// fixture built before is rebuilt.
@@ -212,31 +213,126 @@ impl Fixture {
     }
 }
 
-/// A's pair: a small and a large store.
-#[derive(Debug, Clone)]
-pub struct Pair {
-    /// 1,000 changesets, 1,000 files.
-    pub small: Fixture,
-    /// 1,000,000 changesets, 1,000,000 files.
-    pub large: Fixture,
+/// A1's two stores.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Size {
+    /// [`SMALL`] changesets and files.
+    Small,
+    /// [`large`] changesets and files: [`LARGE`] unless a trial sets [`LARGE_ENV`].
+    Large,
 }
 
-/// A1's pair, built or found under `SWARMOPS_BENCH_DIR`; the large one takes hours the first time
-/// (`fixture_next_part` goes on a part at a time).
-pub fn pair() -> Pair {
-    Pair {
-        small: build(Spec::new(SMALL, SMALL)),
-        large: build(Spec::new(large(), large())),
+impl Size {
+    /// What the store of this size holds.
+    pub fn spec(self) -> Spec {
+        match self {
+            Size::Small => Spec::new(SMALL, SMALL),
+            Size::Large => Spec::new(large(), large()),
+        }
     }
 }
 
-/// `spec`, built or found under `SWARMOPS_BENCH_DIR`, to the end.
+/// What one call of [`next_part`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Progress {
+    /// It recorded part `part` of `of`; the last one leaves the fixture whole.
+    Built {
+        /// The part recorded, from 1.
+        part: usize,
+        /// The parts of the whole fixture.
+        of: usize,
+    },
+    /// The fixture was whole already: nothing was written.
+    Whole,
+}
+
+/// The small store, built or found under `SWARMOPS_BENCH_DIR`: seconds.
+pub fn build_small() -> Fixture {
+    build(Size::Small.spec())
+}
+
+/// Records the next part of the store of `size` under `SWARMOPS_BENCH_DIR`: the one writer of the
+/// large store (`fixture_next_part` calls it).
+pub fn next_part(size: Size) -> Progress {
+    advance(&measure::base_dir(), size.spec(), real_fs(), PART)
+}
+
+/// The whole store of `size` under `SWARMOPS_BENCH_DIR`, or `None` while a part is missing from
+/// its `parts.txt`. Never builds and writes nothing.
+pub fn open(size: Size) -> Option<Fixture> {
+    open_in(&measure::base_dir(), size.spec())
+}
+
+/// How far the store of `size` is: `(k, n)`, `k` of its `n` parts recorded in `parts.txt`.
+pub fn parts(size: Size) -> (usize, usize) {
+    parts_in(&measure::base_dir(), size.spec(), PART)
+}
+
+/// `spec`, built or found under `SWARMOPS_BENCH_DIR`, to the end: any store but the large one.
+///
+/// # Panics
+///
+/// For [`Size::Large`]'s spec: only [`next_part`] writes it, a part a call.
 pub fn build(spec: Spec) -> Fixture {
+    assert!(
+        spec != Size::Large.spec(),
+        "only next_part writes the large store"
+    );
     build_in(&measure::base_dir(), spec, real_fs())
 }
 
+/// [`next_part`] under `base`, in parts of `part` changesets.
+fn advance(base: &Path, spec: Spec, fs: Arc<dyn FsOps>, part: usize) -> Progress {
+    let mut builder = Builder::open(base, spec, fs).with_part(part);
+    if builder.next_part() == Part::Complete {
+        builder.set_main();
+        return Progress::Whole;
+    }
+
+    // The last part also puts `main` on the head, so that `open` finds the fixture whole.
+    if builder.done == spec.changesets {
+        builder.set_main();
+    }
+    Progress::Built {
+        part: builder.done.div_ceil(part),
+        of: spec.changesets.div_ceil(part),
+    }
+}
+
+/// [`open`] under `base`: the fixture of `spec` when its record is this builder's, every part is
+/// in it and `main` is set.
+fn open_in(base: &Path, spec: Spec) -> Option<Fixture> {
+    let dir = base.join(spec.dir_name());
+    let state = read_state(&dir)?;
+    let whole = state.fingerprint == spec.fingerprint(DEFAULT_INIT_FORMAT)
+        && state.done == spec.changesets
+        && state.main_set;
+    if !whole {
+        return None;
+    }
+    let store = Utf8PathBuf::from_path_buf(dir.join("store")).expect("a UTF-8 bench path");
+    Some(Fixture {
+        store,
+        spec,
+        head: state.head?,
+        samples: state.samples,
+        built: Built::Before,
+    })
+}
+
+/// [`parts`] under `base`, in parts of `part` changesets: a record of another fingerprint counts
+/// none.
+fn parts_in(base: &Path, spec: Spec, part: usize) -> (usize, usize) {
+    let of = spec.changesets.div_ceil(part);
+    let done = match read_state(&base.join(spec.dir_name())) {
+        Some(state) if state.fingerprint == spec.fingerprint(DEFAULT_INIT_FORMAT) => state.done,
+        _ => 0,
+    };
+    (done.div_ceil(part), of)
+}
+
 /// [`build`] under `base`, every filesystem change of the stores going through `fs`.
-pub fn build_in(base: &Path, spec: Spec, fs: Arc<dyn FsOps>) -> Fixture {
+fn build_in(base: &Path, spec: Spec, fs: Arc<dyn FsOps>) -> Fixture {
     let mut builder = Builder::open(base, spec, fs);
     while builder.next_part() == Part::Written {}
     builder.finish()
@@ -244,7 +340,7 @@ pub fn build_in(base: &Path, spec: Spec, fs: Arc<dyn FsOps>) -> Fixture {
 
 /// What one call of [`Builder::next_part`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Part {
+enum Part {
     /// It recorded one more part.
     Written,
     /// The fixture is whole; nothing was written.
@@ -271,7 +367,7 @@ struct Gathered {
 }
 
 /// A fixture in the making: a part at a time.
-pub struct Builder {
+struct Builder {
     spec: Spec,
     dir: PathBuf,
     fingerprint: String,
@@ -298,7 +394,7 @@ impl Builder {
     /// The builder of `spec` under `base`: it reads what the fixture there holds. A fixture whose
     /// fingerprint differs from what this builder writes is removed and made again. Touches
     /// nothing when the fixture is whole.
-    pub fn open(base: &Path, spec: Spec, fs: Arc<dyn FsOps>) -> Builder {
+    fn open(base: &Path, spec: Spec, fs: Arc<dyn FsOps>) -> Builder {
         assert!(
             spec.files > 0 && spec.changesets >= spec.files,
             "a fixture has files, and a changeset for each: {spec:?}"
@@ -361,14 +457,9 @@ impl Builder {
 
     /// Parts of `changesets` changesets from now on: a test's small parts.
     #[must_use]
-    pub fn with_part(mut self, changesets: usize) -> Builder {
+    fn with_part(mut self, changesets: usize) -> Builder {
         self.part = changesets.max(1);
         self
-    }
-
-    /// How many changesets are recorded.
-    pub fn done(&self) -> usize {
-        self.done
     }
 
     /// The store's path.
@@ -396,7 +487,7 @@ impl Builder {
     }
 
     /// Records the next [`PART`] changesets (fewer at the end), then the progress record.
-    pub fn next_part(&mut self) -> Part {
+    fn next_part(&mut self) -> Part {
         if self.done >= self.spec.changesets {
             return Part::Complete;
         }
@@ -456,11 +547,26 @@ impl Builder {
         for (k, id) in &self.samples {
             let _ = writeln!(text, "sample {k} {}", id.0.to_hex());
         }
-        let temp = self.dir.join(format!("{STATE}.new"));
+        let temp = self.dir.join(format!("{PARTS}.new"));
         let mut file = fs::File::create(&temp).expect("create the progress record");
         file.write_all(text.as_bytes()).expect("write it");
         file.sync_all().expect("sync it");
-        fs::rename(&temp, self.dir.join(STATE)).expect("replace the record");
+        fs::rename(&temp, self.dir.join(PARTS)).expect("replace the record");
+    }
+
+    /// Puts `main` on the head of a whole fixture and flushes the metadata, once: the record
+    /// says so after.
+    fn set_main(&mut self) {
+        if self.main_set {
+            return;
+        }
+        let head = self.head.expect("a whole fixture has a head");
+        let repo = self.repo();
+        repo.cas_ref(MAIN, None, Some(head), "bulk")
+            .expect("move main to the head");
+        repo.flush_metadata().expect("flush the metadata");
+        self.main_set = true;
+        self.write_state();
     }
 
     /// Puts `main` on the head and flushes the metadata, once the fixture is whole; the fixture.
@@ -468,7 +574,7 @@ impl Builder {
     /// # Panics
     ///
     /// If the fixture is not whole ([`Part::Complete`] not yet returned).
-    pub fn finish(mut self) -> Fixture {
+    fn finish(mut self) -> Fixture {
         assert!(
             self.done == self.spec.changesets,
             "finish: {} of {} changesets are recorded",
@@ -476,14 +582,7 @@ impl Builder {
             self.spec.changesets
         );
         let head = self.head.expect("a whole fixture has a head");
-        if !self.main_set {
-            let repo = self.repo();
-            repo.cas_ref(MAIN, None, Some(head), "bulk")
-                .expect("move main to the head");
-            repo.flush_metadata().expect("flush the metadata");
-            self.main_set = true;
-            self.write_state();
-        }
+        self.set_main();
         Fixture {
             store: self.store_path(),
             spec: self.spec,
@@ -517,7 +616,7 @@ struct State {
 
 /// The progress record of the fixture in `dir`, or `None` when there is none or it is torn.
 fn read_state(dir: &Path) -> Option<State> {
-    let text = fs::read_to_string(dir.join(STATE)).ok()?;
+    let text = fs::read_to_string(dir.join(PARTS)).ok()?;
     let mut state = State {
         main_set: false,
         fingerprint: String::new(),
@@ -767,7 +866,7 @@ mod tests {
 
         // A fixture built by another generator, or of another FORMAT, carries another
         // fingerprint.
-        let state = base.path().join(spec.dir_name()).join(STATE);
+        let state = base.path().join(spec.dir_name()).join(PARTS);
         let text = fs::read_to_string(&state).unwrap();
         let old = format!("fingerprint {}", spec.fingerprint(DEFAULT_INIT_FORMAT));
         let other = text.replace(&old, "fingerprint 0000");
@@ -788,7 +887,7 @@ mod tests {
         // One part, then the builder is dropped as a cut run would be.
         let mut builder = Builder::open(base.path(), spec, real_fs()).with_part(100);
         assert_eq!(builder.next_part(), Part::Written);
-        assert_eq!(builder.done(), 100);
+        assert_eq!(builder.done, 100);
         drop(builder);
 
         let resumed = build_in(base.path(), spec, real_fs());
@@ -821,6 +920,65 @@ mod tests {
         let (fs, calls) = RecordingFs::new();
         build_in(base.path(), spec, Arc::new(fs));
         assert_eq!(calls(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn open_never_builds_and_waits_for_every_part() {
+        let base = tempfile::tempdir().unwrap();
+        let spec = Spec::new(300, 300);
+
+        // 1. Nothing there: `None`, and nothing made.
+        assert!(open_in(base.path(), spec).is_none());
+        assert_eq!(
+            fs::read_dir(base.path()).unwrap().count(),
+            0,
+            "open made nothing"
+        );
+
+        // 2. One part of three in `parts.txt`: still `None`, the part counted.
+        let mut builder = Builder::open(base.path(), spec, real_fs()).with_part(100);
+        assert_eq!(builder.next_part(), Part::Written);
+        drop(builder);
+        assert!(base.path().join(spec.dir_name()).join(PARTS).exists());
+        assert!(open_in(base.path(), spec).is_none(), "a part is missing");
+
+        // 3. Whole: the fixture, as the build left it.
+        let whole = build_in(base.path(), spec, real_fs());
+        let opened = open_in(base.path(), spec).expect("whole");
+        assert_eq!(opened.head, whole.head);
+        assert_eq!(opened.built, Built::Before);
+    }
+
+    #[test]
+    fn next_part_counts_its_parts_and_ends_whole() {
+        let base = tempfile::tempdir().unwrap();
+        let spec = Spec::new(300, 300);
+
+        // 1. A part a call, counted as `open`'s caller reads it; `None` until the last.
+        for part in 1..=3 {
+            let progress = advance(base.path(), spec, real_fs(), 100);
+            assert_eq!(progress, Progress::Built { part, of: 3 });
+            assert_eq!(parts_in(base.path(), spec, 100), (part, 3));
+            assert_eq!(
+                open_in(base.path(), spec).is_some(),
+                part == 3,
+                "part {part}"
+            );
+        }
+
+        // 2. Whole: the next call writes nothing.
+        let (fs, calls) = RecordingFs::new();
+        assert_eq!(
+            advance(base.path(), spec, Arc::new(fs), 100),
+            Progress::Whole
+        );
+        assert_eq!(calls(), Vec::<String>::new());
+    }
+
+    #[test]
+    #[should_panic(expected = "only next_part writes the large store")]
+    fn build_refuses_the_large_store() {
+        build(Size::Large.spec());
     }
 
     #[test]
