@@ -38,9 +38,7 @@ export function PageMeta({ url, source, sourceUrl, lastChanged }: PageMetaProps)
     >
       {/* 1. The facts: release and date. */}
       <span className="flex flex-wrap items-center gap-x-3">
-        <span>
-          Describes <span className="text-fd-foreground">v{LATEST_RELEASE.version}</span>
-        </span>
+        <span className="text-fd-foreground">{`Describes v${LATEST_RELEASE.version}`}</span>
         {lastChanged !== '' && (
           <>
             <Dot />
