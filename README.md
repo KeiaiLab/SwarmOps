@@ -36,32 +36,29 @@ running it again updates.
 
 ## Quick start
 
-A store, a first commit and a read, in a minute. The commands use `so`; `swarmops` runs the same.
-In the outputs, ids are cut to eight hex digits and `meta` to `{…}`.
+A store, a first commit and a read. The commands use `so`; `swarmops` runs the same.
 
 ```sh
-export SWARMOPS_REPO=~/.local/state/swarmops/repos/acme   # or --repo <store> on each command
-export SWARMOPS_AGENT=agent/worker-1                       # or --as <family>/<instance>
-so init "$SWARMOPS_REPO" --name acme
-cat > change.json <<'JSON'
-[{"path": "src/lib.rs", "op": "put", "content": {"inline": "pub fn f() -> u32 {\n    1\n}\n"}}]
-JSON
-so commit -m "add f" --changes change.json --advance main
-so cat main:src/lib.rs
-so log
+so --version
+so init ./acme --name acme
+printf '%s\n' '[{"path": "hello.txt", "op": "put", "content": {"inline": "hello\n"}}]' > change.json
+so --repo ./acme --as agent/worker-1 commit -m "Add hello" --changes change.json --advance main
+so --repo ./acme cat main:hello.txt
 ```
+
+Output of a 0.11.0 build of `stable` at 6e9dac27, on a busy host:
 
 ```text
-{"ok":true,"op":"repo_init","api":1,"result":{"repo_id":"5357e87f…","name":"acme","store_version":2,"changesets":0,"refs":0},"meta":{…}}
-{"ok":true,"op":"commit","api":1,"result":{"changeset":"4a7bc757…","root":"ca354c25…","files_changed":1,"blobs_written":1,"advanced":{"name":"main","new":"4a7bc757…","already_applied":false},"replayed":false},"meta":{…}}
-{"ok":true,"op":"read_file","api":1,"result":{"blob":"dfa55099…","size":28,"kind":"file","encoding":"utf8","content":"pub fn f() -> u32 {\n    1\n}\n","truncated":false},"meta":{…}}
-{"ok":true,"op":"log","api":1,"result":{"entries":[{"id":"4a7bc757…","parents":[],"author_agent":"agent/worker-1","created_at":1792626681000,"title":"add f"}],"truncated":false},"meta":{…}}
+swarmops 0.11.0+6e9dac27f0ad5098b91fd2156a7e826c9bc5676a
+{"ok":true,"op":"repo_init","api":1,"result":{"repo_id":"e6092c987a444fdf107662f9ec67c1be","name":"acme","store_version":2,"changesets":0,"refs":0},"meta":{"repo":"./acme","elapsed_ms":906,"resolved":{},"auth":"trust"}}
+{"ok":true,"op":"commit","api":1,"result":{"changeset":"5d6a7b500a60e85d18f6ffd05d7c62836086a34afd57a1f3d706dca00397692e","root":"df3040af7381e7e412c6a0c5e9ab8b490ab80d92dedad94530d98340ced54a6e","files_changed":1,"blobs_written":1,"advanced":{"name":"main","new":"5d6a7b500a60e85d18f6ffd05d7c62836086a34afd57a1f3d706dca00397692e","already_applied":false},"replayed":false},"meta":{"repo":"./acme","elapsed_ms":267,"resolved":{},"auth":"trust"}}
+{"ok":true,"op":"read_file","api":1,"result":{"blob":"464418f5a53907c921906843e6f1f4f984f144067b3bf32d69c1ff4c13627464","size":6,"kind":"file","encoding":"utf8","content":"hello\n","truncated":false},"meta":{"repo":"./acme","elapsed_ms":1,"resolved":{"main":"5d6a7b500a60e85d18f6ffd05d7c62836086a34afd57a1f3d706dca00397692e"},"auth":"trust"}}
 ```
 
-`--advance main` made `main` name the new changeset in the commit's own transaction. Reads need
-no identity; a commit, a land, a ref move and an undo need one, from `--as` or
-`SWARMOPS_AGENT`. The [quick start guide](docs/guides/quick-start.md) goes further, and
-[Core features](#core-features) shows landing, conflicts and undo.
+Each store command prints one JSON envelope. `--advance main` moved `main` to the new changeset in the
+commit's own transaction. Reads need no identity; a commit, a land, a ref move and an undo need
+one, from `--as` or `SWARMOPS_AGENT`. The [quick start guide](docs/guides/quick-start.md) goes on
+to a land, a conflict and an undo.
 
 ## Core features
 
