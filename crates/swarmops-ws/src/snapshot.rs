@@ -35,8 +35,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 use swarmops_api::{
-    ChangeInput, ChangeOp, ContentInput, DiffFormat, DiffReq, EntryKindOut, ErrorCode, ModeInput,
-    OpError, SnapshotWrite, TreeEntryOut, WsSnapshotReq, WsSnapshotResp,
+    ChangeInput, ChangeOp, ContentInput, DiffFormat, DiffReq, EntryKindOut, ErrorCode, FileKind,
+    ModeInput, OpError, SnapshotWrite, TreeEntryOut, WsSnapshotReq, WsSnapshotResp,
 };
 use swarmops_core::ObjectId;
 use swarmops_merge::conflict::ContentMerge;
@@ -65,6 +65,13 @@ const PAGE: usize = 1000;
 
 /// The state of `ws snapshot`'s pending record.
 const SNAPSHOTTING: &str = "snapshotting";
+
+/// The name [`digest`] hashes for each file kind; a kind not here is refused.
+const KIND_NAMES: [(FileKind, &str); 3] = [
+    (FileKind::File, "file"),
+    (FileKind::Exec, "exec"),
+    (FileKind::Symlink, "symlink"),
+];
 
 /// What [`take`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,7 +128,7 @@ pub(crate) fn scan(ctx: &Ctx<'_>, ws: &Workspace) -> Result<Found, OpError> {
 
     // 2. Every file's blob, then the digest.
     commit::hash_changes(ctx, ws, &mut changes)?;
-    let digest = digest(&changes);
+    let digest = digest(&changes)?;
     Ok(Found {
         changes,
         digest,
@@ -278,17 +285,18 @@ fn refused(e: &OpError) -> bool {
 }
 
 /// The digest of `changes`: BLAKE3 over each one's path, kind and blob (none for a removal), in
-/// path order. Two scans of the same edits give the same digest.
+/// path order. Two scans of the same edits give the same digest; a kind it has no name for is
+/// refused.
 ///
 /// For example, `src/a.txt` modified to a file of blob `ab…` adds `src/a.txt\0file\0ab…\n`.
-pub(crate) fn digest(changes: &[Change]) -> String {
+pub(crate) fn digest(changes: &[Change]) -> Result<String, OpError> {
     let mut sorted: Vec<&Change> = changes.iter().collect();
     sorted.sort_by(|a, b| a.path.cmp(&b.path));
     let mut hasher = blake3::Hasher::new();
     for change in sorted {
         let (kind, blob) = match change.new {
             Some(host) => (
-                kind_name(host.kind),
+                kind_name(host.kind)?,
                 host.blob.map(|b| ObjectId::new(b).to_hex()),
             ),
             None => ("gone", None),
@@ -300,7 +308,7 @@ pub(crate) fn digest(changes: &[Change]) -> String {
         hasher.update(blob.unwrap_or_default().as_bytes());
         hasher.update(b"\n");
     }
-    hasher.finalize().to_hex().to_string()
+    Ok(hasher.finalize().to_hex().to_string())
 }
 
 /// The digest [`digest`] gives the edits `changes` make on the changeset they apply to, as a
@@ -538,14 +546,18 @@ fn mode_of(kind: EntryKindOut) -> Result<ModeInput, OpError> {
     }
 }
 
-/// The name [`digest`] gives a file's kind.
-fn kind_name(kind: swarmops_api::FileKind) -> &'static str {
-    match kind {
-        swarmops_api::FileKind::File => "file",
-        swarmops_api::FileKind::Exec => "exec",
-        swarmops_api::FileKind::Symlink => "symlink",
-        _ => "other",
-    }
+/// The name [`digest`] gives a file's kind, from [`KIND_NAMES`].
+fn kind_name(kind: FileKind) -> Result<&'static str, OpError> {
+    name_in(&KIND_NAMES, kind)
+}
+
+/// The name `names` gives `kind`: a kind it lacks is refused, so that no two kinds share a
+/// name in a digest.
+fn name_in(names: &[(FileKind, &'static str)], kind: FileKind) -> Result<&'static str, OpError> {
+    (names.iter())
+        .find(|(known, _)| *known == kind)
+        .map(|(_, name)| *name)
+        .ok_or_else(|| crate::io_error::unknown_variant("FileKind"))
 }
 
 #[cfg(test)]
@@ -641,5 +653,18 @@ mod tests {
         let carried = carry_of("1\nmine\n3\n", "1\ntheirs\n3\n");
         assert_eq!(carried.changes, []);
         assert_eq!(carried.dropped, ["a.txt"]);
+    }
+
+    /// A file kind the digest has no name for is refused, not hashed under a shared name; the
+    /// names it has stay those digests were made with.
+    #[test]
+    fn unknown_file_kind_is_refused() {
+        let known = &KIND_NAMES[..2];
+        let refused = name_in(known, FileKind::Symlink).unwrap_err();
+        assert_eq!(refused.code, ErrorCode::Internal.as_str());
+        let names: Vec<&str> = (KIND_NAMES.iter())
+            .map(|(kind, _)| kind_name(*kind).unwrap())
+            .collect();
+        assert_eq!(names, ["file", "exec", "symlink"]);
     }
 }
