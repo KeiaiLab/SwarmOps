@@ -1,5 +1,11 @@
 # One writer per trunk
 
+After this page you can keep one writer on the git side of each trunk, tell a divergence from a
+lagging trunk, and act on each export refusal.
+
+**You need:** SwarmOps 0.1.0 or newer on Linux (`swarmops --version`);
+[The daily loop](daily-loop.md); its git side, `GIT_SIDE` (`git -C "$GIT_SIDE" rev-parse --git-dir`).
+
 Commands and outputs here follow the
 [conventions of the operations guide](../operations.md#how-to-read-these-pages).
 
@@ -149,3 +155,11 @@ made of: export to another branch) and `moved_during_export` (run it again). `--
 branch all the same, with a warning. An export that finds `refs/heads/<branch>.lock` in the git
 side, which a git process holds or a dead one left, fails with `E_GIT_WRITE` (`ref_locked`) until
 the file is removed, once no git process runs.
+
+## Next
+
+**Next:** [Verify and repair](verify-and-repair.md): check a store, and act on what the check
+finds.
+
+- [Git round trip, When an export stops](../guides/git-round-trip.md#when-an-export-stops): each
+  refusal, run command by command.

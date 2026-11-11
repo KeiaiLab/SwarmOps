@@ -1,5 +1,8 @@
 # Code style
 
+After this page you know how SwarmOps keeps its Rust style: what the gate enforces, what review
+reads for, how public types are built, and the few rules the project sets aside.
+
 SwarmOps follows the [Google Rust style guide](https://google.github.io/styleguide/rustguide.html),
 on top of the official Rust style (`rustfmt`) and the Rust API guidelines. This page says how each
 of its rules is kept here: which ones a tool enforces, which ones a reviewer reads for, and the
@@ -85,3 +88,10 @@ Each is a decision of the maintainers, recorded here; a change that lifts one re
 | Descriptive lifetime names | Single letters stay. | The guide allows up to two local single-letter lifetimes; nearly every lifetime here is one, in a signature that relates an input to an output. Renaming them would change thousands of lines for no reader. |
 | Prefer small crates, one file per crate | Ten crates along the layer boundaries of the design. | The crates follow the architecture ([architecture](../architecture.md)); a crate per file would spread the hash contract over dozens of crates. |
 | Return iterators instead of `Vec<T>` | Store-facing APIs return owned, serializable types. | Every operation takes and returns serde types, the future RPC seam (`AGENTS.md`); an iterator cannot cross it. |
+
+## Next
+
+**Next:** [CONTRIBUTING.md](../../CONTRIBUTING.md): the workflow, and `just check`, the definition
+of done.
+
+- [Architecture](../architecture.md): the crates and their layer boundaries.

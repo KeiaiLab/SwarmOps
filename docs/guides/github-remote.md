@@ -1,6 +1,12 @@
 # GitHub as a remote: clone, fetch, push and sync
 
-A store can keep a git remote, GitHub or any git host, and move work to and from it itself:
+After this page a store keeps a git remote, GitHub or any git host: you can clone from it, fetch,
+push and sync, and know what to do when a sync stops.
+
+**You need:** SwarmOps 0.2.0 or newer on Linux (`swarmops --version`);
+[Git round trip](git-round-trip.md); git 2.39 or newer (`git --version`); access to the remote
+(`git ls-remote <url>`).
+
 `so clone` makes a store from a repository, `so fetch` takes in what the remote gained, `so push`
 sends a store ref to a branch, and `so sync` lands the store's unpublished changes on top of the
 remote's head and pushes them. Pull requests, CI and deployments stay on GitHub. This guide runs
@@ -440,3 +446,11 @@ credentials' environment: start it with the ssh agent or the token variable the 
   3.9× what it does on 1,000, and a sync of one land takes 8.8 s against a target of 1 s
   ([perf](../perf.md#git-remotes-m13-the-three-topology-2-targets)).
 - More in the [known limitations](../known-limitations.md#git-remotes).
+
+## Next
+
+**Next:** [The daily loop](../operate/daily-loop.md): the same commands every day, with a person's
+review before the trunk moves.
+
+- [Known limitations](../known-limitations.md#git-remotes): what is still open for remotes.
+- [Serve over ssh](../operate/serve-over-ssh.md): let stock git clone and push the store itself.

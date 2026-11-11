@@ -1,7 +1,10 @@
 # Limits
 
-The ones an operator meets first; [known-limitations.md](../known-limitations.md) lists them all,
-each with the milestone that takes it.
+After this page you know the limits an operator meets first; [known-limitations.md](../known-limitations.md)
+lists them all, each with the milestone that takes it.
+
+**You need:** SwarmOps 0.1.0 or newer on Linux (`swarmops --version`);
+[Operating SwarmOps](../operations.md).
 
 - **One host, one writer per trunk.** No sync between hosts until M11; git carries history between
   them, with one host landing and exporting and the others importing.
@@ -30,3 +33,10 @@ each with the milestone that takes it.
 - **Content git can hold and a changeset cannot** (submodules, names that are not UTF-8, odd modes
   and tree orders) is refused by the import unless `--lossy` allows it, and a history imported with
   a loss exports as new commits.
+
+## Next
+
+**Next:** [Making room](making-room.md): what a store keeps, and what may go.
+
+- [Limits reference](../reference/limits.md): each limit with its value, constant, commands and
+  error.

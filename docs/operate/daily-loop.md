@@ -1,5 +1,12 @@
 # The daily loop
 
+After this page you can move work between the store and the git repository that people, CI and
+deployment use, every day, with a person's review before the trunk moves.
+
+**You need:** SwarmOps 0.2.0 or newer on Linux (`swarmops --version`);
+[Give agents the store](agents.md); git 2.39 or newer (`git --version`); access to the remote
+(`git ls-remote <url>`).
+
 The loop keeps two copies of the history in step: the store, where agents commit and land, and
 the git repository that people, CI and deployment use. The store reaches that repository as a
 git remote: `swarmops fetch`, `push` and `sync` run your own git (2.39 or later) against it, with
@@ -358,3 +365,10 @@ Git then moves every commit between the git side and the remote, and a squash me
 writes a commit that the next import refuses with `E_GIT_IMPORT_DIVERGED`: move the trunk by a
 fast-forward push of the reviewed commit instead (`git push origin review:stable`). The
 [git round trip](../guides/git-round-trip.md) runs it command by command.
+
+## Next
+
+**Next:** [Build and test a change](build-and-test.md): test a change on disk before it lands.
+
+- [One writer per trunk](one-writer-per-trunk.md): the rule for the round trip through a bare
+  clone.

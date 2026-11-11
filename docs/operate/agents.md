@@ -1,5 +1,11 @@
 # Give agents the store
 
+After this page Claude Code agents on the host reach the store through `swarmops mcp`, and a copy
+of every answer they get is kept for monitoring.
+
+**You need:** SwarmOps 0.1.0 or newer on Linux (`swarmops --version`); [Stores](stores.md); a
+store (`swarmops info`); Claude Code as the store's owner (`claude --version`).
+
 `swarmops mcp` serves the store's operations to an agent as an MCP server on stdin and stdout.
 This page registers it with Claude Code, lists what agents can call, and keeps a copy of every
 answer for [monitoring](monitoring.md). Commands and outputs here follow the
@@ -160,4 +166,8 @@ The files hold what the agents read and write, and a `read_file` line holds its 
 grow for as long as the agents work and nothing prunes them: the wrapper makes their directory
 `0700`, and old files are yours to move away between sessions.
 
-Next: [the daily loop](daily-loop.md), and [what to read in these files](monitoring.md).
+## Next
+
+**Next:** [The daily loop](daily-loop.md): move what the agents land between the store and git.
+
+- [Monitoring](monitoring.md): what to read in the files the wrapper keeps.

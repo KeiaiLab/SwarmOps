@@ -1,6 +1,10 @@
 # Monitoring
 
-What to collect from a swarm and what to read in it.
+After this page you know what to collect from a swarm and what to read in it.
+
+**You need:** SwarmOps 0.1.0 or newer on Linux (`swarmops --version`);
+[Give agents the store](agents.md), whose wrapper keeps the envelopes.
+
 Commands and outputs here follow the
 [conventions of the operations guide](../operations.md#how-to-read-these-pages).
 
@@ -119,3 +123,10 @@ the CI runs on the review branch and the deployment runs on the trunk.
 ### `op log`
 
 Who moved which ref, for moves no one expected.
+
+## Next
+
+**Next:** [Troubleshooting](../troubleshooting.md): from a symptom to its cause and the command
+that fixes it.
+
+- [Verify and repair](verify-and-repair.md): check a store, and act on what the check finds.

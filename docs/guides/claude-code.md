@@ -1,8 +1,14 @@
 # Use SwarmOps from Claude Code over MCP
 
-SwarmOps is a git replacement for coding-agent swarms. `swarmops mcp` serves a SwarmOps store to
-Claude Code as MCP tools. An agent reads files, history and diffs from the store, commits to it,
-lands its change with a three-way merge, and undoes an operation.
+SwarmOps is version control for swarms of coding agents. After this page Claude Code agents read,
+commit and land in one store over MCP, one identity per agent process.
+
+**You need:** SwarmOps 0.1.0 or newer, 0.3.0 for the worktree hooks (`swarmops --version`), on
+Linux; [Quick start](quick-start.md); a store (`swarmops info`); Claude Code (`claude --version`).
+
+`swarmops mcp` serves a SwarmOps store to Claude Code as MCP tools. An agent reads files, history
+and diffs from the store, commits to it, lands its change with a three-way merge, and undoes an
+operation.
 
 This guide registers the server, gives each agent process an identity of its own, sets out the
 two rules an agent needs (full ids for compare-and-swap, and small results), and gives
@@ -503,10 +509,11 @@ is `read_file`, `ls` is `read_tree` and `info` is `repo_info`.
   change, so a client should allow for them. The wording of `error.message` and of a `hint` is not
   part of the contract: the `code`, `exit`, `retryable` and the keys of `details` are.
 
-## Go further
+## Next
 
-- The README's [MCP section](../develop/mcp.md) has the full text.
-- [Known limitations](../known-limitations.md) lists what is still open, and which milestone takes
-  each item.
-- [Parallel coding agents on one repository](parallel-agents.md) sets SwarmOps beside git worktrees.
-- The [home page](https://swarmops.cc/#mcp) lists the tools and the two ways to register the server.
+**Next:** [MCP integration](../develop/mcp.md): registration, identity, every tool and its
+failures, for any MCP client.
+
+- [Parallel coding agents on one repository](parallel-agents.md): SwarmOps beside git worktrees.
+- [Known limitations](../known-limitations.md): what is still open, and which milestone takes each
+  item.

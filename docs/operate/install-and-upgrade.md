@@ -1,6 +1,11 @@
 # Install and upgrade
 
-Put `swarmops` and `so` on a host, and move a host and its stores to a new release.
+After this page `swarmops` and `so` run on a host, and you can move the host and its stores to a
+new release.
+
+**You need:** SwarmOps 0.2.0 or newer for the installer, 0.8.0 for the packages; Linux with glibc
+2.34 or newer (`ldd --version`); git for a clone (`git --version`); no prior page.
+
 Commands and outputs here follow the
 [conventions of the operations guide](../operations.md#how-to-read-these-pages).
 
@@ -266,3 +271,10 @@ swarmops --repo "$NEW" git export "$GIT_SIDE" --ref main --branch review
 The export writing nothing (`"exported":0`) is the check: the new store's history is the same
 commits. The hash contract (the byte layouts of blobs, trees and changesets, and the hash recipe)
 never changes: a changeset's id is the same under every `FORMAT`.
+
+## Next
+
+**Next:** [Stores](stores.md): choose where a store lives, and create it.
+
+- [Install SwarmOps on Linux](../guides/install.md): pinning, the packages, checks by hand and what
+  the installer's errors mean.

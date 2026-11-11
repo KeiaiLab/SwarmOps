@@ -1,6 +1,12 @@
 # Stores
 
-Choose where a store lives, protect it, create it, and give every writer an identity.
+After this page you can choose where a store lives, protect it, create it, and give every writer
+an identity.
+
+**You need:** SwarmOps 0.1.0 or newer on Linux (`swarmops --version`);
+[Install and upgrade](install-and-upgrade.md); a directory on a native Linux filesystem
+(`df -T <dir>`).
+
 Commands and outputs here follow the
 [conventions of the operations guide](../operations.md#how-to-read-these-pages).
 
@@ -90,4 +96,8 @@ swarmops --as operator/ada whoami
 {"ok":true,"op":"whoami","api":1,"result":{"agent":"operator/ada","auth":"trust"},"meta":{"elapsed_ms":0,"resolved":{},"auth":"trust"}}
 ```
 
-Next: [give agents the store](agents.md).
+## Next
+
+**Next:** [Give agents the store](agents.md): register `swarmops mcp` for the agents.
+
+- [Concepts, Store](../concepts.md#store): what a store holds on disk.

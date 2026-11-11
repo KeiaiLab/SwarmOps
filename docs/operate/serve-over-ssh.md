@@ -1,8 +1,12 @@
 # Serve over ssh
 
-Let people and CI reach a store with nothing but stock git: `git clone`, `git fetch`, `git pull`
-and `git push` over ssh, through `swarmops serve` as the forced command of an `authorized_keys`
-line. Commands and outputs here follow the
+After this page people and CI reach a store with stock git alone: clone, fetch, pull and push over
+ssh, through `swarmops serve` as the forced command of an `authorized_keys` line.
+
+**You need:** SwarmOps 0.7.0 or newer on Linux (`swarmops --version`); [Stores](stores.md); git
+2.39 or newer on the server (`git --version`); an OpenSSH server (`ssh -V`).
+
+Commands and outputs here follow the
 [conventions of the operations guide](../operations.md#how-to-read-these-pages); the client
 outputs come from a run with git 2.43.0. Over HTTPS instead: [Serve over HTTP](serve-over-http.md),
 which reuses this page's access file and refusals.
@@ -346,3 +350,11 @@ signed pushes, annotated tag objects, SHA-256 repositories, git LFS, submodules,
 hooks, `git daemon`, a web interface, and `swarmops serve --stdio`, the store-to-store sync, which
 is refused with `not_served`. A push to `main` moves it; it does not land: land through
 `refs/land/main`.
+
+## Next
+
+**Next:** [Serve over HTTP](serve-over-http.md): the same store over HTTPS, with the same access
+file.
+
+- [Where serve answers differently from git](serve-differences.md): each difference a client may
+  see.

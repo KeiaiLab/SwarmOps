@@ -1,9 +1,15 @@
 # Keep git: import, land and export
 
-SwarmOps: a git replacement for coding-agent swarms. Git stays at both ends: `git import` brings a
-repository's history into a store, agents commit and land their work there, and `git export` writes
-the result back to a git branch that `git push` sends on, so that the pipeline that watches the
-branch keeps running. This guide runs the round trip command by command, and lists what stops it.
+SwarmOps is version control for swarms of coding agents, and git stays at both ends. After this
+page you can import a git repository, let agents land work, and export it back for CI.
+
+**You need:** SwarmOps 0.1.0 or newer on Linux (`swarmops --version`);
+[Quick start](quick-start.md); git on the host (`git --version`) and a bare clone of your remote.
+
+`git import` brings a repository's history into a store, agents commit and land their work there,
+and `git export` writes the result back to a git branch that `git push` sends on, so that the
+pipeline that watches the branch keeps running. This guide runs the round trip command by command,
+and lists what stops it.
 
 **Pre-1.0** · Linux today; macOS and Windows next · MIT licence
 
@@ -573,16 +579,12 @@ mode is no kind of entry. An object the repository lacks, as a partial clone lac
   renaming it leaves the file, as git does. Every later export of that branch, and git itself,
   refuses the branch until the file is removed by hand, once no git process runs.
 
-## Go further
+## Next
 
-- The README's [Bring a git repository in](../../README.md#bring-a-git-repository-in) and
-  [Send the work back to git](../../README.md#send-the-work-back-to-git) have the full text of both
-  commands.
-- [Git import](../architecture.md#git-import) and [Git export](../architecture.md#git-export) in the
-  architecture overview walk through each step the commands take.
-- [Known limitations](../known-limitations.md#git-import-and-export) lists what is still open for
-  import and export, and [versioning and stability](../policies/versioning-and-stability.md) says
-  what stays compatible.
-- [Use SwarmOps from Claude Code](claude-code.md) registers `swarmops mcp`, and
-  [Parallel coding agents on one repository](parallel-agents.md) sets SwarmOps beside git worktrees.
-- The [home page](https://swarmops.cc/) has the comparison with git and the roadmap.
+**Next:** [GitHub as a remote](github-remote.md): the store reaches the remote itself, with no
+bare clone and no hand-run `git push`.
+
+- [Git import](../architecture.md#git-import) and [Git export](../architecture.md#git-export) in
+  the architecture overview walk through each step the commands take.
+- [Known limitations](../known-limitations.md#git-import-and-export): what is still open for
+  import and export.

@@ -1,7 +1,11 @@
 # Making room
 
-Remove what a store may lose: its leftovers with `swarmops gc`, and its derived values by hand,
-with every writer stopped.
+After this page you can remove what a store may lose: its leftovers with `swarmops gc`, and its
+derived values by hand, with every writer stopped.
+
+**You need:** SwarmOps 0.4.0 or newer on Linux (`swarmops --version`);
+[Backup and restore](backup-and-restore.md); a store (`swarmops info`) whose writers you can stop.
+
 Commands and outputs here follow the
 [conventions of the operations guide](../operations.md#how-to-read-these-pages).
 
@@ -113,3 +117,9 @@ An export into an empty git directory stored its 8,371 values again and wrote th
 export to the branch that already held everything wrote nothing and still stored 2,544 of them. So
 the values trade room for the time a later export spends deriving them, and the objects, most of a
 store, stay.
+
+## Next
+
+**Next:** [Monitoring](monitoring.md): what to collect from a swarm, and what to read in it.
+
+- [Limits](limits.md): why a store only grows.

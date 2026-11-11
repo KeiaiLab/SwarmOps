@@ -1,8 +1,10 @@
 # Commit and land
 
-This guide shows how to publish work into a SwarmOps store: write a change list, commit it, land
-it on `main`, and handle what happens when other agents publish at the same time. It covers
-conflicts, retries, refs and identities, each with a run you can repeat.
+After this page you can publish work into a store: write a change list, commit it, land it on
+`main`, and handle the conflicts and retries that come when other agents publish at once.
+
+**You need:** SwarmOps 0.1.0 or newer on Linux (`swarmops --version`);
+[Quick start](quick-start.md); a store (`swarmops info`) and an identity (`swarmops whoami`).
 
 Agents do the same through the MCP tools `commit`, `land`, `ref_set` and `ref_delete`, which take
 the fields the flags below set (`parent`, `advance`, `idempotency_key`, `allow_empty`,
@@ -1196,3 +1198,13 @@ your old puts would undo the winner's edits to every file you both changed.
 
 `swarmops schema` gives every request and response type, and
 [CLI scripting](../develop/cli-scripting.md#the-envelope) explains the envelope.
+
+## Next
+
+**Next:** [Reading and repairing history](history-and-undo.md): read what landed, and take a
+mistaken ref move back.
+
+- [Parallel coding agents on one repository](parallel-agents.md): many agents landing at once,
+  beside git worktrees.
+- [CLI scripting](../develop/cli-scripting.md): the same commands in a script, with retries and
+  keys.

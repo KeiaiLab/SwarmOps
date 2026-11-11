@@ -1,5 +1,11 @@
 # Where serve answers differently from git
 
+After this page you know each place where `swarmops serve` answers stock git differently from
+git's own server, and why.
+
+**You need:** SwarmOps 0.7.0 or newer on Linux (`swarmops --version`);
+[Serve over ssh](serve-over-ssh.md).
+
 `swarmops serve` speaks git's own protocol, so stock git should not tell it from git's server. A
 test of the build checks that: one scripted session runs against a served store and against
 `git upload-pack` and `git receive-pack` on a bare repository holding the same branches and tags,
@@ -20,3 +26,9 @@ server lists right after the push. Each row covers the ref or object its first c
 | `PushLand` | `refs` | `advertised refs/land/*`: absent on serve; git's server keeps the pushed commit there | a push to `refs/land/<target>` is a land: serve squashes it onto the target and leaves nothing under `refs/land/` ([What a client types](serve-over-ssh.md#what-a-client-types)) |
 | `PushLand` | `refs` | `advertised refs/heads/main`: serve's is the landed commit; git's has not moved | the land moves the target to a new commit whose parent is the old head |
 | `PushLand` | `refs` | `advertised HEAD`: as `refs/heads/main` | `HEAD` names `main` on both |
+
+## Next
+
+**Next:** [Troubleshooting](../troubleshooting.md): what to do about each refusal a client sees.
+
+- [Serve over HTTP](serve-over-http.md): the same answers over HTTPS.

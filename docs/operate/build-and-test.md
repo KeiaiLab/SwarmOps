@@ -1,5 +1,12 @@
 # Build and test a change
 
+After this page an agent can build and test a change on disk in a workspace, then land exactly the
+tree it tested.
+
+**You need:** SwarmOps 0.3.0 or newer on Linux (`swarmops --version`);
+[The daily loop](daily-loop.md); a store with a `main` (`swarmops resolve main`) and an identity
+(`swarmops whoami`).
+
 Commands and outputs here follow the
 [conventions of the operations guide](../operations.md#how-to-read-these-pages).
 
@@ -215,3 +222,10 @@ whatever `main` holds, and let CI on the review branch test the merge.
 - `worktree remove` needs `--force` here, because git sees the agent's edits as uncommitted. A
   killed agent leaves its worktree registered in the git side: `git -C "$GIT_SIDE" worktree list`
   shows it, as `prunable` once its directory is gone, and `worktree prune` forgets it.
+
+## Next
+
+**Next:** [One writer per trunk](one-writer-per-trunk.md): keep one writer on the git side of
+each trunk.
+
+- [Limits](limits.md): the limits of workspaces and checked lands.

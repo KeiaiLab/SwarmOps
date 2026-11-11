@@ -1,5 +1,8 @@
 # The pilot: SwarmOps on its own repository
 
+After this page you can run SwarmOps on its own repository as a first real use: import, one agent
+session, export, CI on the export, then four sessions at once, and roll it all back.
+
 The first real use of SwarmOps is on SwarmOps itself. Its git history goes into a store, one agent
 session commits and lands a small real change through `swarmops mcp`, the store's history goes
 back into a git branch, and this repository's own CI runs on that branch. The loop then runs a

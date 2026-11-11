@@ -1,6 +1,11 @@
 # Verify and repair
 
-Check a store for damage, read what a failed check names, and repair a damaged store.
+After this page you can check a store for damage, read what a failed check names, and repair a
+damaged store.
+
+**You need:** SwarmOps 0.1.0 or newer on Linux, 0.4.0 for `repair` (`swarmops --version`);
+[Stores](stores.md); a store (`swarmops info`).
+
 Commands and outputs here follow the
 [conventions of the operations guide](../operations.md#how-to-read-these-pages).
 
@@ -115,3 +120,11 @@ Where nothing holds the content, restore the store from a backup. `quarantine/` 
 
 Run `verify --deep` after a crash or a power loss, on every backup, before an upgrade,
 and on a schedule: it reads the whole store, and holds the journal and the index in memory.
+
+## Next
+
+**Next:** [Backup and restore](backup-and-restore.md): where nothing holds the content, a backup
+does.
+
+- [Troubleshooting, A damaged store](../troubleshooting.md#a-damaged-store): each symptom of damage
+  and its fix.

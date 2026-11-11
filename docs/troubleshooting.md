@@ -1,8 +1,14 @@
 # Troubleshooting
 
-This page goes from what you see to why it happens and what to run. It covers the installer, the
-MCP server, where a store may live, a busy store, a damaged store, git import and export,
-remotes, workspaces, and every `E_*` error code that a command or a tool call can return.
+After this page you can go from what you see, an error code, a refusal or a server that stops, to
+why it happens and the command that fixes it.
+
+**You need:** SwarmOps 0.11.0 for every code listed (`swarmops --version`), on Linux;
+[Concepts](concepts.md); the envelope the failing command printed.
+
+It covers the installer, the MCP server, where a store may live, a busy store, a damaged store, git
+import and export, remotes, workspaces, and every `E_*` error code that a command or a tool call can
+return.
 
 Every example was run on 2026-10-22: the commands with the binary built from this repository
 (`swarmops 0.1.0`), in a scratch directory that holds the store `acme` (`SWARMOPS_REPO=acme`); the
@@ -1427,3 +1433,11 @@ Every code is raised by some command: `E_REF_NOT_FOUND` by `ref log` since M18, 
 `E_POLICY_DENIED` by `swarmops serve` since M14
 ([Serve over ssh](operate/serve-over-ssh.md#refusals-a-client-sees)). A client that meets a code
 newer than its own table reads `exit` and `retryable` from the error itself.
+
+## Next
+
+**Next:** [Verify and repair](operate/verify-and-repair.md): a store that fails needs a check
+before anything else.
+
+- [Error reference](reference/errors.md): each `E_*` code, its exit code and what to do.
+- [Known limitations](known-limitations.md): what is still open, and which milestone takes it.

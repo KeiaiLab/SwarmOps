@@ -1,7 +1,13 @@
 # Serve over HTTP
 
-Let people and CI reach a store with stock git over HTTPS, through `swarmops serve --cgi` behind a
-web server. Commands and outputs here follow the
+After this page people and CI reach a store with stock git over HTTPS, through
+`swarmops serve --cgi` behind a web server.
+
+**You need:** SwarmOps 0.7.0 or newer on Linux (`swarmops --version`);
+[Serve over ssh](serve-over-ssh.md) and its serving account; a web server that runs CGI, such as
+nginx (`nginx -v`).
+
+Commands and outputs here follow the
 [conventions of the operations guide](../operations.md#how-to-read-these-pages). The two web
 server configurations below are examples to adapt, not copied from a run.
 
@@ -142,3 +148,10 @@ As [over ssh](serve-over-ssh.md#limits): a push of at most 2 GiB and 1,000 refs.
 own body limit must not be smaller (`client_max_body_size 0` above).
 [Not served](serve-over-ssh.md#not-served) applies here too, and so does git's dumb HTTP protocol:
 `serve` answers the smart one alone.
+
+## Next
+
+**Next:** [Where serve answers differently from git](serve-differences.md): each difference a
+client may see, and why.
+
+- [Serve over ssh, Limits](serve-over-ssh.md#limits): the limits both entries share.

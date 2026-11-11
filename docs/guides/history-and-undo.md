@@ -1,10 +1,10 @@
 # Reading and repairing history
 
-This guide shows how to read a store's history without a checkout, and how to take back a ref
-move that should not have happened. It names revisions, reads files and directories, looks at
-changesets, walks the log and one path's history, compares two revisions, lists the store's
-operations, undoes one, and checks the store. The last sections cover the three output formats,
-the envelope and the exit codes.
+After this page you can read a store's history without a checkout, compare two revisions, list
+every write, undo a mistaken ref move and check the store.
+
+**You need:** SwarmOps 0.1.0 or newer on Linux (`swarmops --version`);
+[Commit and land](commit-and-land.md); an identity for the undo examples (`swarmops whoami`).
 
 Every command below was run with the binary built from this repository, against a scratch
 store, and every output is copied from those runs. In the outputs, each 64-digit id is cut to its
@@ -1453,3 +1453,11 @@ The exit code is the envelope's `error.exit`, and 0 on success.
 `so schema` gives every request and response type, and
 [CLI scripting](../develop/cli-scripting.md#the-envelope) explains the envelope; the
 [error reference](../reference/errors.md) lists the codes of every command.
+
+## Next
+
+**Next:** [Parallel coding agents on one repository](parallel-agents.md): what many agents
+writing at once look like, beside git worktrees.
+
+- [CLI scripting](../develop/cli-scripting.md): the envelope and the exit codes in a script.
+- [Verify and repair](../operate/verify-and-repair.md): what to do when the check finds damage.

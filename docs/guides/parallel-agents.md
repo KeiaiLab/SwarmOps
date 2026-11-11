@@ -1,9 +1,16 @@
 # Parallel coding agents on one repository
 
+SwarmOps is version control for swarms of coding agents. After this page you know where agents in
+one checkout or in git worktrees collide, how SwarmOps handles the same changes, and where
+worktrees lead.
+
+**You need:** SwarmOps 0.1.0 or newer, 0.3.0 for workspaces, on Linux (`swarmops --version`);
+git to repeat the git runs (`git --version`).
+
 Run several coding agents, such as Claude Code sessions, on one codebase and they collide in the
 working tree, in git's locks and at merge time. This guide shows each failure with git 2.43, what
-git worktrees fix and what they leave open, how SwarmOps, a git replacement for coding-agent swarms,
-handles the same three changes, and where worktrees are still the better tool.
+git worktrees fix and what they leave open, how SwarmOps handles the same three changes, and where
+worktrees are still the better tool.
 
 **Pre-1.0** · Linux today; macOS and Windows next · MIT licence
 
@@ -194,7 +201,7 @@ environment there”. Each agent's worktree needs its own setup.
 
 ## What SwarmOps does: one store, no checkout
 
-SwarmOps is a git replacement for coding-agent swarms. It is designed for 10 to 50 Claude Code or
+SwarmOps is version control for swarms of coding agents. It is designed for 10 to 50 Claude Code or
 LangGraph processes on one host, committing to one repository at once, and it is written in Rust and
 fully embedded: one program, no external database, no daemon. Agents do not check files out of it.
 They read a path at a revision, `so cat main:src/lib.rs`, and write a commit from a JSON list of
@@ -314,7 +321,8 @@ so land cd32… --key f-returns-3 --resolve resolve.json --as agent/worker-3
 
 `land --resolve` settles paths without a checkout: take a side, give new content, or delete, against
 the report's `theirs`. A path that `main` changed since the report comes back as stale. As above,
-git can find the same conflict without a checkout; the README rates conflicts as parity with
+git can find the same conflict without a checkout; the
+[comparison with git](https://swarmops.cc/product/vs-git) rates conflicts as parity with
 `git merge-tree --write-tree` and notes that resolving without a checkout is one request here, where
 git takes plumbing.
 
@@ -378,8 +386,9 @@ deployment pipelines keep running. Where git still leads is listed next.
 
 ## Where git worktrees still lead
 
-These are the dimensions where SwarmOps stands behind git today. Most come from the README's own
-comparison with git; the platforms row follows from its platform policy.
+These are the dimensions where SwarmOps stands behind git today. Most come from SwarmOps' own
+[comparison with git](https://swarmops.cc/product/vs-git); the platforms row follows from its
+platform policy.
 
 | Dimension | Git worktrees | SwarmOps today |
 |---|---|---|
@@ -395,12 +404,12 @@ comparison with git; the platforms row follows from its platform policy.
 
 ### Where SwarmOps is level or ahead, by design
 
-The README labels each verdict. “Ahead by design” means judged from the design and the code, never
+The comparison with git labels each verdict. “Ahead by design” means judged from the design and the code, never
 measured against git, and no git baseline has been measured.
 
 - **Lost commits and lock failures: level.** Concurrent commits all succeed, short of a lock wait
   past 10 s or a snapshot that meets a new commit in each of its 32 rounds (the retryable `E_BUSY`).
-  The README rates this parity with agents in separate worktrees.
+  The comparison with git rates this parity with agents in separate worktrees.
 - **Stale locks: ahead by design.** The writer lock is an `flock`, which the kernel releases when
   its holder dies.
 - **Conflicts: level.** `land` merges without a checkout and reports typed conflicts, as
@@ -487,11 +496,19 @@ Facts about SwarmOps come from its repository at milestone M8, October 2026. The
   [Run agents in parallel](https://code.claude.com/docs/en/agents) and
   [Create custom subagents](https://code.claude.com/docs/en/sub-agents).
 - GitButler: [Parallel agents](https://docs.gitbutler.com/ai-agents/parallel-agents).
-- SwarmOps README: [SwarmOps and git](../../README.md#swarmops-and-git),
-  [Quick start](../../README.md#quick-start), [MCP](../../README.md#mcp) and
-  [Commands](../../README.md#commands).
+- SwarmOps pages: [SwarmOps and git](https://swarmops.cc/product/vs-git),
+  [Quick start](quick-start.md), [MCP integration](../develop/mcp.md) and
+  [CLI reference](../reference/cli.md).
 - SwarmOps documents: [performance ledger](../perf.md),
   [concurrency](../architecture.md#concurrency), [known limitations](../known-limitations.md),
   [versioning](../policies/versioning-and-stability.md),
   [platforms](../policies/msrv-and-platforms.md) and
   [the operations guide](../operations.md#building-and-testing-a-change).
+
+## Next
+
+**Next:** [Use SwarmOps from Claude Code](claude-code.md): register the server and give each
+agent process its identity.
+
+- [Build and test a change](../operate/build-and-test.md): a workspace on disk, and a land of the
+  tree that was tested.

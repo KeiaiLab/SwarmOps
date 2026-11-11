@@ -1,12 +1,17 @@
 # Operating SwarmOps
 
-This guide is for whoever runs SwarmOps for a swarm of coding agents on one host. It installs the
-binary, creates a store, gives agents the store through MCP, runs the daily loop between the store
-and the git remote that CI and deployment watch (`so fetch`, `so push` and `so sync`, through the
-host's git), with a person's review before the trunk moves,
-checks, backs up and trims the store, and says what an upgrade means, where the limits are and what
-to watch. [pilot.md](pilot.md) runs the same loop once on this repository, as the first real use.
-Each task has a page of its own under [operate/](operate/).
+After this page you can find the task page for running SwarmOps for a swarm of coding agents on
+one host, from the install through the daily loop to backup, upgrade and monitoring.
+
+**You need:** SwarmOps 0.2.0 or newer on Linux (`swarmops --version`); [Install](guides/install.md);
+git 2.39 or newer for the remote commands (`git --version`).
+
+It installs the binary, creates a store, gives agents the store through MCP, runs the daily loop
+between the store and the git remote that CI and deployment watch (`so fetch`, `so push` and
+`so sync`, through the host's git), with a person's review before the trunk moves, checks, backs
+up and trims the store, and says what an upgrade means, where the limits are and what to watch.
+[pilot.md](pilot.md) runs the same loop once on this repository, as the first real use. Each task
+has a page of its own under [operate/](operate/).
 
 ## The pages
 
@@ -147,3 +152,12 @@ keeps its heading here, so that links to it still arrive, and points to where it
 ## What to monitor
 
 [Monitoring](operate/monitoring.md).
+
+## Next
+
+**Next:** [Install and upgrade](operate/install-and-upgrade.md): every other task starts from the
+binary on the host.
+
+- [Pilot](pilot.md): the same loop, run once on this repository as the first real use.
+- [Troubleshooting](troubleshooting.md): from a symptom to its cause and the command that fixes
+  it.

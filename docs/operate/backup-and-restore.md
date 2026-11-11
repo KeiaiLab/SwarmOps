@@ -1,6 +1,12 @@
 # Backup and restore
 
-Copy a store that agents are writing, check the copy, and put it back after damage.
+After this page you can copy a store that agents are writing, check the copy, and put it back
+after damage.
+
+**You need:** SwarmOps 0.1.0 or newer on Linux (`swarmops --version`); [Stores](stores.md); a
+store (`swarmops info`); `flock` (`flock --version`) and, for a large store, `rsync`
+(`rsync --version`).
+
 Commands and outputs here follow the
 [conventions of the operations guide](../operations.md#how-to-read-these-pages).
 
@@ -129,3 +135,9 @@ unlanded commits, lands made since the last export), ref moves, and the operatio
 
 The git side is itself a copy of everything exported. Without any backup, a new store made from it
 (`swarmops init`, then `swarmops git import` of each branch) exports to the same commits.
+
+## Next
+
+**Next:** [Making room](making-room.md): what a store keeps, and how to free space.
+
+- [Verify and repair](verify-and-repair.md): check every backup, and repair a damaged store.
