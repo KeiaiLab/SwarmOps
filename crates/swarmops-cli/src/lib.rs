@@ -37,6 +37,8 @@ mod cli;
 mod commands;
 mod context;
 mod entry;
+#[cfg(test)]
+mod gitlike;
 mod mcp;
 mod output;
 #[cfg(test)]
