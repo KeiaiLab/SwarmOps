@@ -463,6 +463,37 @@ fn push_counted(remote: &Remote, store: &Store, args: &[&str]) -> (Run, Vec<GitC
     (pushed, ledger.children())
 }
 
+/// A remote target under `refs/`, given or defaulted from a store branch of that name, is
+/// `E_INVALID_ARG` `branch_target` before any git: it would go out as `refs/heads/refs/…`.
+#[cfg(unix)]
+#[test]
+fn push_to_a_refs_target_starts_no_git() {
+    let remote = Remote::new();
+    let store = remote.cloned();
+    let head = main_at(&store).expect("main");
+    let line = ["ref", "set", "refs/land/main", head.as_str(), "--create"];
+    store.run_as(AGENT, &line, &[]).ok();
+
+    // 1. Given (`main:refs/…`) and defaulted (the store branch's own name).
+    let targets = [
+        ("main:refs/tags/v1", "refs/tags/v1"),
+        ("main:refs/land/main", "refs/land/main"),
+        ("refs/land/main", "refs/land/main"),
+    ];
+    for (arg, target) in targets {
+        let (failed, children) = push_counted(&remote, &store, &[arg]);
+        let error = failed.err("E_INVALID_ARG");
+        assert_eq!(error["details"]["reason"], "branch_target", "{failed}");
+        assert_eq!(error["details"]["branch"], target, "{failed}");
+        assert_eq!(children, [], "{arg}");
+    }
+
+    // 2. Nothing reached the mirror or the remote.
+    assert_eq!(staging_refs(&remote, &store), "");
+    assert_eq!(remote.head("refs/land/main"), None);
+    assert_eq!(remote.head("refs/tags/v1"), None);
+}
+
 /// A tag of the store is not sent as a branch: `E_INVALID_ARG` `source_kind`, saying tags are
 /// not published yet, before any git.
 #[cfg(unix)]

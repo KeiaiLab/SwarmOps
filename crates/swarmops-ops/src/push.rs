@@ -76,6 +76,9 @@ const MIRROR_GIT: &str = "git/mirror.git";
 /// The store ref a remote's followed branch is the default branch of.
 const MAIN: &str = "main";
 
+/// The prefix of a full git ref name, which a push target never carries.
+const GIT_REFS: &str = "refs/";
+
 impl LocalOps {
     /// `push` as a request of its own ([`Recording::push`]).
     pub fn push(&self, req: PushReq) -> Result<PushResp, OpError> {
@@ -114,6 +117,7 @@ impl Recording<'_> {
         self.source_head(&source_ref)?;
         let url = RemoteUrl::parse(&remote.url).map_err(error::url_refused)?;
         let branch = branch.unwrap_or_else(|| default_branch(remote, &source_ref));
+        check_target(&branch)?;
 
         // 2. The mirror, made or rebuilt, and what the last fetch saw of the branch, which the
         // sink's ref-name rule checks.
@@ -361,6 +365,21 @@ fn check_source_kind(source_ref: &str) -> Result<(), OpError> {
             ("kind", kind.as_str().into()),
         ]))
         .with_hint("swarmops ref list"))
+}
+
+/// Refuses a remote target under `refs/`, which git would make the branch `refs/heads/refs/…`:
+/// `E_INVALID_ARG` `branch_target`. Example: `main:refs/land/main`.
+fn check_target(branch: &str) -> Result<(), OpError> {
+    if !branch.starts_with(GIT_REFS) {
+        return Ok(());
+    }
+    let message = format!("{branch:?} is a full ref name: push sends to a branch of the remote");
+    Err(error::error(ErrorCode::InvalidArg, message)
+        .with_details(error::details([
+            ("reason", "branch_target".into()),
+            ("branch", branch.into()),
+        ]))
+        .with_hint("name the remote branch without refs/heads/, as in main:feature/x"))
 }
 
 /// The store's mirror made or rebuilt under `lock`, its stale git lock files removed; with the
