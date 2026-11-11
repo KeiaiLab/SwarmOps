@@ -128,6 +128,11 @@ installs the same tool versions as `ci.yml`'s: move them together.
    - the envelope's `api` number went up if a response broke;
    - the crates and licenses that `THIRD-PARTY-LICENSES` adds are ones the archives may carry
      (`scripts/third-party-licenses.py` writes it from `Cargo.lock`).
+   - the repository page still matches `.github/repo-settings.json`:
+     `python3 -I scripts/repo-settings.py check` reads the host, so it runs here and not in
+     `just check`;
+   - when a page was added since the last release, `web/addresses.txt` lists it: run
+     `node scripts/check-site.mjs --write-addresses` in `web/` and commit the result.
 4. **Write the changelog.** Move the entries under **Unreleased** in
    [CHANGELOG.md](CHANGELOG.md) to a new `## [X.Y.Z] - YYYY-MM-DD` section, mark breaking
    changes, and leave an empty **Unreleased** section. The section's date is the UTC date of the
@@ -135,7 +140,10 @@ installs the same tool versions as `ci.yml`'s: move them together.
    `[X.Y.Z]: https://github.com/KeiaiLab/SwarmOps/compare/vA.B.C...vX.Y.Z` from the previous
    release `vA.B.C` (`[0.1.0]: https://github.com/KeiaiLab/SwarmOps/releases/tag/v0.1.0` for the
    first), and point `[Unreleased]` at `compare/vX.Y.Z...stable`. The new section is the
-   release's notes: the workflow refuses a tag without one. The first release also brings up to
+   release's notes: the workflow refuses a tag without one. It opens with a summary of at most
+   60 words, in sentences of at most 25, that names no milestone or slice id. Incompatible
+   changes and security fixes each get a group of their own; a release with neither says so in
+   one line. The first release also brings up to
    date what says nothing is released yet: README's status badge, status line, maturity row and
    install section, the README's documentation table, `docs/operations.md`'s install section,
    SECURITY.md's supported versions, CHANGELOG.md's introduction, the
@@ -144,6 +152,8 @@ installs the same tool versions as `ci.yml`'s: move them together.
 5. **Bump the version** in `[workspace.package]` of `Cargo.toml` and in the
    `version = "X.Y.Z"` of every internal dependency in `crates/*/Cargo.toml`,
    `fuzz/Cargo.toml` and `bench/compare/Cargo.toml`; let `cargo check` update `Cargo.lock`.
+   In the same change, update every version in README.md's code blocks to `X.Y.Z`
+   (`scripts/check-docs.py`, rule `readme-version`, compares them with the workspace version).
    The two other workspaces' lockfiles record the path crates' version too and fail `--locked`
    until they are updated:
    `cargo update --manifest-path fuzz/Cargo.toml -p swarmops-core -p swarmops-store -p swarmops-testkit`,
