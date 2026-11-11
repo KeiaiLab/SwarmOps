@@ -2,43 +2,66 @@
   <img src="docs/assets/logo.svg" alt="The SwarmOps logo: four agents' branches merging into one main line" width="112" height="112">
 </p>
 
-<h1 align="center">SwarmOps</h1>
+# SwarmOps
 
-<p align="center">
-  <strong>A git replacement for coding-agent swarms: many writers, one store, one JSON envelope per command.</strong>
-</p>
+SwarmOps is version control for swarms of coding agents: many agent processes commit into one repository at once.
 
-<p align="center">
-  <a href="https://github.com/KeiaiLab/SwarmOps/actions/workflows/ci.yml?query=branch%3Astable"><img src="https://github.com/KeiaiLab/SwarmOps/actions/workflows/ci.yml/badge.svg?branch=stable" alt="CI"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
-  <a href="docs/policies/msrv-and-platforms.md"><img src="https://img.shields.io/badge/rust-1.99-orange" alt="Rust 1.99"></a>
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/status-pre--release-yellow" alt="Status: pre-release"></a>
-</p>
+[![CI](https://github.com/KeiaiLab/SwarmOps/actions/workflows/ci.yml/badge.svg?branch=stable)](https://github.com/KeiaiLab/SwarmOps/actions/workflows/ci.yml?query=branch%3Astable)
+[![Latest release](https://img.shields.io/github/v/release/KeiaiLab/SwarmOps)](https://github.com/KeiaiLab/SwarmOps/releases)
+[![Licence](https://img.shields.io/github/license/KeiaiLab/SwarmOps)](LICENSE)
 
-<p align="center">
-  <a href="https://swarmops.cc">Website</a> ·
-  <a href="#core-features">Features</a> ·
-  <a href="#install">Install</a> ·
-  <a href="#quick-start">Quick start</a> ·
-  <a href="#documentation">Documentation</a> ·
-  <a href="#swarmops-and-git">SwarmOps and git</a> ·
-  <a href="#roadmap">Roadmap</a> ·
-  <a href="#mcp">MCP</a> ·
-  <a href="#commands">Commands</a>
-</p>
+[Documentation](https://swarmops.cc/docs) · [Install](#install) · [Quick start](#quick-start) ·
+[Roadmap](#roadmap) · [Contributing](CONTRIBUTING.md)
 
-SwarmOps is source control for a swarm of coding agents: 10 to 50 Claude Code or LangGraph
-processes on one host commit into one embedded store at once, and every command answers in one
-JSON envelope. It is one Rust program, with no external database and no daemon, and it moves the
-work to and from git, so that CI and deployments keep running.
+SwarmOps is pre-release, at v0.11.0 (2026-11-09). It works today for 10 to 50 agent processes on
+one host that commit, land and sync with git. The [roadmap](docs/roadmap.md) says what comes next.
 
-It is pre-release, at v0.11.0 (milestones through M16, and M17's, M18's and M19's slices): usable by one agent, with a store that
-already takes commits from many processes at once; merging and landing, which a swarm needs, are
-built, and landing under a swarm's load is measured, within its targets at 50 processes on batched
-lands, its 32-process runs not recorded yet; a store clones,
-fetches, pushes and syncs with GitHub itself; stock git clones, fetches and pushes a store that
-`swarmops serve` serves; and an agent builds and tests its change in a
-workspace on disk, then lands the tree it tested ([roadmap](#roadmap)).
+Linux x86_64 (tested) and aarch64 (smoke-tested under emulation), glibc 2.34 or newer; no macOS or Windows build yet
+
+## Install
+
+The recommended path:
+
+```sh
+curl -fsSL https://get.swarmops.cc/install.sh | bash
+```
+
+It installs `swarmops` and `so` into `~/.local/bin` from the latest
+[release](https://github.com/KeiaiLab/SwarmOps/releases), checked against its `SHA256SUMS`, and
+running it again updates.
+
+- `.deb` and `.rpm` packages: [install guide](docs/guides/install.md#how-do-i-install-the-deb-or-rpm-package).
+- Pinning a version: [install guide](docs/guides/install.md#how-do-i-pin-a-version).
+- Building from source: [install guide](docs/guides/install.md#how-do-i-build-from-source).
+
+## Quick start
+
+A store, a first commit and a read, in a minute. The commands use `so`; `swarmops` runs the same.
+In the outputs, ids are cut to eight hex digits and `meta` to `{…}`.
+
+```sh
+export SWARMOPS_REPO=~/.local/state/swarmops/repos/acme   # or --repo <store> on each command
+export SWARMOPS_AGENT=agent/worker-1                       # or --as <family>/<instance>
+so init "$SWARMOPS_REPO" --name acme
+cat > change.json <<'JSON'
+[{"path": "src/lib.rs", "op": "put", "content": {"inline": "pub fn f() -> u32 {\n    1\n}\n"}}]
+JSON
+so commit -m "add f" --changes change.json --advance main
+so cat main:src/lib.rs
+so log
+```
+
+```text
+{"ok":true,"op":"repo_init","api":1,"result":{"repo_id":"5357e87f…","name":"acme","store_version":2,"changesets":0,"refs":0},"meta":{…}}
+{"ok":true,"op":"commit","api":1,"result":{"changeset":"4a7bc757…","root":"ca354c25…","files_changed":1,"blobs_written":1,"advanced":{"name":"main","new":"4a7bc757…","already_applied":false},"replayed":false},"meta":{…}}
+{"ok":true,"op":"read_file","api":1,"result":{"blob":"dfa55099…","size":28,"kind":"file","encoding":"utf8","content":"pub fn f() -> u32 {\n    1\n}\n","truncated":false},"meta":{…}}
+{"ok":true,"op":"log","api":1,"result":{"entries":[{"id":"4a7bc757…","parents":[],"author_agent":"agent/worker-1","created_at":1792626681000,"title":"add f"}],"truncated":false},"meta":{…}}
+```
+
+`--advance main` made `main` name the new changeset in the commit's own transaction. Reads need
+no identity; a commit, a land, a ref move and an undo need one, from `--as` or
+`SWARMOPS_AGENT`. The [quick start guide](docs/guides/quick-start.md) goes further, and
+[Core features](#core-features) shows landing, conflicts and undo.
 
 ## Core features
 
@@ -391,88 +414,6 @@ files, and the operations guide says how to
   <a href="https://github.com/wheresryan22/anatomy">Anatomy</a> (MIT,
   <a href="web/public/THIRD-PARTY-NOTICES.txt">notice</a>).</sub>
 </p>
-
-## Install
-
-```sh
-curl -fsSL https://get.swarmops.cc/install.sh | bash
-```
-
-```text
-swarmops-install: Installing SwarmOps 0.1.0 (x86_64-unknown-linux-gnu) into /home/me/.local/bin.
-swarmops-install: Downloading https://github.com/KeiaiLab/SwarmOps/releases/download/v0.1.0/swarmops-0.1.0-x86_64-unknown-linux-gnu.tar.gz
-swarmops-install: swarmops-0.1.0-x86_64-unknown-linux-gnu.tar.gz matches SHA256SUMS.
-swarmops 0.1.0
-Installed swarmops and so (its short form) in /home/me/.local/bin.
-…
-```
-
-That installs `swarmops` and `so`, the same program by a shorter name, from the latest
-[release](https://github.com/KeiaiLab/SwarmOps/releases), checked against its `SHA256SUMS`, into
-`~/.local/bin` (`/usr/local/bin` as root; `/home/me` above stands for the home directory). Run
-it again to update. `--version`, `--dir` and `--uninstall` go after `bash -s --`; the
-[install guide](docs/guides/install.md) and the operations guide's
-[Install](docs/operations.md#install) cover them, release archives and building from a clone.
-
-From v0.8.0 on, each release also carries a `.deb` and an `.rpm` per architecture (`amd64` and
-`x86_64`, `arm64` and `aarch64`), which install both names into `/usr/bin`. Download one and
-`SHA256SUMS` from the release, check it with `sha256sum --check --ignore-missing SHA256SUMS`,
-then:
-
-```sh
-sudo apt install ./swarmops_0.8.0_amd64.deb      # Debian 12, Ubuntu 22.04 or newer
-sudo dnf install ./swarmops-0.8.0-1.x86_64.rpm   # RHEL 9 and its rebuilds, Fedora
-```
-
-The packages come from no apt or dnf repository, so update by installing the next release's
-package; `sudo apt remove swarmops` or `sudo dnf remove swarmops` removes one
-([install guide](docs/guides/install.md#how-do-i-install-the-deb-or-rpm-package)).
-
-Linux, x86_64 or aarch64, glibc 2.34 or newer (Ubuntu 22.04, Debian 12, RHEL 9). On glibc 2.34
-to 2.38 every start prints one `ld.so` line on stderr, `weak version 'GLIBC_2.39' not found`;
-exit codes, stdout and the MCP protocol are unaffected. The aarch64 build is cross-compiled and
-smoke-tested under QEMU, not on aarch64 hardware. The installer needs no sudo for its default
-directory, sends no telemetry and edits no shell startup file; `bash install.sh --help` lists
-every option. From source, with Rust 1.99 (`rust-toolchain.toml` pins it):
-
-```sh
-cargo install --git https://github.com/KeiaiLab/SwarmOps --tag v0.1.0 --locked swarmops-cli
-```
-
-`cargo install` installs both names (add `--bin swarmops` for the long name alone, if the name
-`so` is taken). A store must live on a local filesystem that the store supports (ext4 with a
-journal, XFS or btrfs): a path under `/mnt/` (where WSL mounts Windows drives) is refused with
-`E_UNSUPPORTED_FS`, and NFS, SMB and FUSE mounts, Docker Desktop's and virtiofs bind mounts among
-them, are neither detected nor supported.
-
-## Quick start
-
-A store, a first commit and a read, in a minute. The commands use `so`; `swarmops` runs the same.
-In the outputs, ids are cut to eight hex digits and `meta` to `{…}`.
-
-```sh
-export SWARMOPS_REPO=~/.local/state/swarmops/repos/acme   # or --repo <store> on each command
-export SWARMOPS_AGENT=agent/worker-1                       # or --as <family>/<instance>
-so init "$SWARMOPS_REPO" --name acme
-cat > change.json <<'JSON'
-[{"path": "src/lib.rs", "op": "put", "content": {"inline": "pub fn f() -> u32 {\n    1\n}\n"}}]
-JSON
-so commit -m "add f" --changes change.json --advance main
-so cat main:src/lib.rs
-so log
-```
-
-```text
-{"ok":true,"op":"repo_init","api":1,"result":{"repo_id":"5357e87f…","name":"acme","store_version":2,"changesets":0,"refs":0},"meta":{…}}
-{"ok":true,"op":"commit","api":1,"result":{"changeset":"4a7bc757…","root":"ca354c25…","files_changed":1,"blobs_written":1,"advanced":{"name":"main","new":"4a7bc757…","already_applied":false},"replayed":false},"meta":{…}}
-{"ok":true,"op":"read_file","api":1,"result":{"blob":"dfa55099…","size":28,"kind":"file","encoding":"utf8","content":"pub fn f() -> u32 {\n    1\n}\n","truncated":false},"meta":{…}}
-{"ok":true,"op":"log","api":1,"result":{"entries":[{"id":"4a7bc757…","parents":[],"author_agent":"agent/worker-1","created_at":1792626681000,"title":"add f"}],"truncated":false},"meta":{…}}
-```
-
-`--advance main` made `main` name the new changeset in the commit's own transaction. Reads need
-no identity; a commit, a land, a ref move and an undo need one, from `--as` or
-`SWARMOPS_AGENT`. The [quick start guide](docs/guides/quick-start.md) goes further, and
-[Core features](#core-features) shows landing, conflicts and undo.
 
 ## Documentation
 
