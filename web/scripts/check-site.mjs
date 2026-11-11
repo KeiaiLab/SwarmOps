@@ -1301,7 +1301,9 @@ function readmeHomeDrift(site) {
   }
   const readme = readFileSync(file, 'utf8');
   const prose = readme.replace(/^(```|~~~)[\s\S]*?^\1/gm, ' ');
-  const home = textOf(mainOf(html).inner);
+  // Home's text without comments: `v<!-- -->0.11.0` reads `v0.11.0`, as a browser renders it.
+  const raw = outText(site, HOME).replace(/<!--[\s\S]*?-->/g, '');
+  const home = textOf(mainOf(raw).inner);
 
   // 1. The install line, 2. the version, 3. the status word.
   const install = readme.split('\n').find((l) => l.includes('get.swarmops.cc/install.sh'))?.trim();
@@ -1467,7 +1469,9 @@ function fixture() {
   const files = new Map();
   const home = [
     '<p>Many agent processes commit into one store at once.</p>',
-    `<p>Pre-release, v${FX_RELEASE}. Linux x86_64 and aarch64; no macOS or Windows build yet.</p>`,
+    // React splits adjacent text nodes with an empty comment: `v<!-- -->0.11.0`.
+    `<p>Pre-release, v<!-- -->${FX_RELEASE}. Linux x86_64 and aarch64; no macOS or Windows build yet.</p>`,
+    '<p>Measured on v0.6.0.</p>',
     `<div><code>${INSTALL_LINE}</code><button type="button" data-copy="${INSTALL_LINE}" aria-label="Copy the install line">Copy</button><span aria-live="polite"></span></div>`,
     '<a data-primary="" href="/docs/guides/quick-start">Quick start</a>',
     `<section id="first-run"><h2>First commands</h2><pre><code>${FX_MCP}</code></pre></section>`,
