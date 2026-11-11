@@ -867,6 +867,11 @@ fn url_rules() {
         ("https://github.com/KeiaiLab/SwarmOps.git", "github.com"),
         ("https://github.com:443/a/b", "github.com"),
         ("https://user@github.com/a/b.git", "github.com"),
+        ("https://first-last-1990@host.example/a.git", "host.example"),
+        (
+            "ssh://deploy0a1b2c3d4e5f6a7b8c9d@host.example/a.git",
+            "host.example",
+        ),
         ("https://github.com", "github.com"),
         ("ssh://git@github.com/a/b.git", "github.com"),
         ("ssh://git@ssh.github.com:443/a/b.git", "ssh.github.com"),
@@ -913,6 +918,14 @@ fn url_rules() {
         ),
         (
             "http://user:pass@127.0.0.1/a.git",
+            UrlRefused::CredentialInUrl,
+        ),
+        (
+            "https://tok_0a1b2c3d4e5f6a7b8c9d@host.example/a.git",
+            UrlRefused::CredentialInUrl,
+        ),
+        (
+            "http://0a1b2c3d4e5f60718293a4b5c6d7e8f901234567@127.0.0.1/a.git",
             UrlRefused::CredentialInUrl,
         ),
         ("--upload-pack=touch /tmp/pwned", UrlRefused::OptionLike),
