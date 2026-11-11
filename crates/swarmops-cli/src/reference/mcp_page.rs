@@ -109,6 +109,69 @@ const UNRECORDED: [&str; 8] = [
     "upgrade",
 ];
 
+/// The commands no tool runs, by subcommand path in the grammar's order, each with the reason
+/// it has none (the M21 design §2.5). A task that adds a command adds a tool for it or its line
+/// here in the same commit: `every_command_is_a_tool_or_has_a_reason` fails otherwise.
+const NOT_A_TOOL: &[(&str, &str)] = &[
+    (
+        "init",
+        "It makes a store, and a server serves the one it was started on",
+    ),
+    (
+        "whoami",
+        "The server's identity is fixed when it starts, so a call would answer the same each time",
+    ),
+    (
+        "schema",
+        "`tools/list` gives each tool's input schema; the whole contract is for a client's code",
+    ),
+    (
+        "blob get",
+        "An agent reads content by revision and path with `read_file`",
+    ),
+    (
+        "ws delete",
+        "It removes a directory on the caller's host, an operator's step; `ws_discard` drops edits",
+    ),
+    (
+        "ws hook",
+        "An agent harness runs it as a command on its own events",
+    ),
+    (
+        "git import",
+        "It reads a git repository by its path on the host, an operator's step",
+    ),
+    (
+        "git export",
+        "It writes a git repository by its path on the host; `push` sends to a remote",
+    ),
+    (
+        "clone",
+        "An agent must not point the store at a URL of its choosing",
+    ),
+    (
+        "remote add",
+        "An agent must not point the store at a URL of its choosing",
+    ),
+    (
+        "remote remove",
+        "A remote is an operator's to add and to remove",
+    ),
+    ("mcp", "It is the server that serves the tools"),
+    (
+        "serve",
+        "It is git's server for the store, a process of its own",
+    ),
+    (
+        "derive",
+        "It only fills ahead of time a cache that each read fills itself, so it changes no result \
+         an agent reads",
+    ),
+];
+
+/// clap's own subcommand, which prints a command's help and runs nothing.
+const HELP: &str = "help";
+
 /// The release tool `name` first shipped in.
 fn since(name: &str) -> &'static str {
     if REMOTE_TOOLS.contains(&name) {
@@ -408,24 +471,23 @@ fn tools_table(out: &mut String, commands: &[Vec<String>]) {
     }
     out.push('\n');
 
-    // 2. The commands no tool runs.
-    let without: Vec<String> = commands
-        .iter()
-        .filter(|path| {
-            let op = cli::op_name(path).unwrap_or_default();
-            let stored = TOOLS.iter().any(|spec| spec.name == op);
-            let in_workspace = WS_TOOLS.iter().any(|spec| spec.name == op);
-            !stored && !in_workspace
-        })
-        .map(|path| format!("[`{BIN} {}`]({})", path.join(" "), command_link(path)))
-        .collect();
+    // 2. The commands no tool runs, each with its reason.
     let _ = writeln!(
         out,
-        "These commands have no tool: {}. An operator or a script runs them as commands; \
-         `derive` only fills ahead of time a cache that each read fills itself, so it changes \
-         no result an agent reads.\n",
-        without.join(", ")
+        "These commands have no tool; an operator or a script runs them as commands.\n"
     );
+    let _ = writeln!(out, "| Command | Why it has no tool |");
+    let _ = writeln!(out, "| --- | --- |");
+    for (path, reason) in NOT_A_TOOL {
+        let words: Vec<String> = path.split(' ').map(str::to_owned).collect();
+        let _ = writeln!(
+            out,
+            "| [`{BIN} {path}`]({}) | {} |",
+            command_link(&words),
+            cell(&sentence(reason))
+        );
+    }
+    out.push('\n');
 }
 
 /// What a tool of `effect` does to the store, in a few words.
@@ -1316,4 +1378,84 @@ fn page_parts_are_sound() {
         uncite("a (x spec \u{a7}3, path (b)). b (kept) c\n(y \u{a7}1)"),
         "a. b (kept) c"
     );
+}
+
+/// Every command runs a tool's operation or has its reason in [`NOT_A_TOOL`], and every line
+/// there is a command no tool runs.
+#[test]
+fn every_command_is_a_tool_or_has_a_reason() {
+    let problems = untooled(&Cli::command(), NOT_A_TOOL);
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// [`every_command_is_a_tool_or_has_a_reason`]'s walk catches a planted command with neither,
+/// and a planted line that names no command.
+#[test]
+fn a_planted_command_is_caught() {
+    let grammar = Cli::command().subcommand(clap::Command::new("planted"));
+    let listed = [NOT_A_TOOL, &[("no such", "planted")]].concat();
+    assert_eq!(
+        untooled(&grammar, &listed),
+        [
+            "planted: no tool runs it, and NOT_A_TOOL gives no reason",
+            "no such: in NOT_A_TOOL, but no command",
+        ]
+    );
+}
+
+/// What in `grammar` breaks the rule against `listed`: a command with neither a tool nor a
+/// line, a command with both, a line that names no command.
+fn untooled(grammar: &clap::Command, listed: &[(&str, &str)]) -> Vec<String> {
+    let mut grammar = grammar.clone();
+    grammar.build();
+    let mut paths = Vec::new();
+    every_command(&grammar, &[], &mut paths);
+    let paths: Vec<String> = paths.iter().map(|path| path.join(" ")).collect();
+    let mut problems = Vec::new();
+
+    // 1. Each command: a tool's, or listed, never both.
+    for path in &paths {
+        let words: Vec<&str> = path.split(' ').collect();
+        let tool = cli::op_name(&words).is_some_and(is_tool);
+        let reason = listed.iter().any(|(listed, _)| listed == path);
+        if tool && reason {
+            problems.push(format!("{path}: a tool runs it, yet NOT_A_TOOL lists it"));
+        }
+        if !tool && !reason {
+            problems.push(format!(
+                "{path}: no tool runs it, and NOT_A_TOOL gives no reason"
+            ));
+        }
+    }
+
+    // 2. Each line: a command.
+    for (listed, _) in listed {
+        if !paths.iter().any(|path| path == listed) {
+            problems.push(format!("{listed}: in NOT_A_TOOL, but no command"));
+        }
+    }
+    problems
+}
+
+/// Every command below `cmd`, whose path is `prefix`, into `out`: each leaf, and each command
+/// that names an operation before its own subcommands (`sync`, then `sync status`); clap's
+/// `help` runs nothing.
+fn every_command(cmd: &clap::Command, prefix: &[String], out: &mut Vec<Vec<String>>) {
+    for sub in cmd.get_subcommands() {
+        if sub.get_name() == HELP {
+            continue;
+        }
+        let mut path = prefix.to_vec();
+        path.push(sub.get_name().to_owned());
+        if !sub.has_subcommands() || cli::op_name(&path).is_some() {
+            out.push(path.clone());
+        }
+        every_command(sub, &path, out);
+    }
+}
+
+/// Whether a tool, of the store's or of the workspaces', runs operation `op`.
+fn is_tool(op: &str) -> bool {
+    let stored = TOOLS.iter().any(|spec| spec.name == op);
+    stored || WS_TOOLS.iter().any(|spec| spec.name == op)
 }

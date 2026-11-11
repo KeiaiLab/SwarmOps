@@ -45,7 +45,24 @@ In `tools/list`'s order.
 | [`sync`](sync.md) | Sync with a git remote | [`swarmops sync`](../commands/sync.md) | lands onto a git remote's head, moves main and pushes | yes |
 | [`sync_status`](sync-status.md) | Show sync status | [`swarmops sync status`](../commands/sync-status.md) | no | no |
 
-These commands have no tool: [`swarmops init`](../commands/init.md), [`swarmops whoami`](../commands/whoami.md), [`swarmops schema`](../commands/schema.md), [`swarmops blob get`](../commands/blob-get.md), [`swarmops ws delete`](../commands/ws-delete.md), [`swarmops ws hook`](../commands/ws-hook.md), [`swarmops git import`](../commands/git-import.md), [`swarmops git export`](../commands/git-export.md), [`swarmops clone`](../commands/clone.md), [`swarmops remote add`](../commands/remote-add.md), [`swarmops remote remove`](../commands/remote-remove.md), [`swarmops mcp`](../commands/mcp.md), [`swarmops serve`](../commands/serve.md), [`swarmops derive`](../commands/derive.md). An operator or a script runs them as commands; `derive` only fills ahead of time a cache that each read fills itself, so it changes no result an agent reads.
+These commands have no tool; an operator or a script runs them as commands.
+
+| Command | Why it has no tool |
+| --- | --- |
+| [`swarmops init`](../commands/init.md) | It makes a store, and a server serves the one it was started on. |
+| [`swarmops whoami`](../commands/whoami.md) | The server's identity is fixed when it starts, so a call would answer the same each time. |
+| [`swarmops schema`](../commands/schema.md) | `tools/list` gives each tool's input schema; the whole contract is for a client's code. |
+| [`swarmops blob get`](../commands/blob-get.md) | An agent reads content by revision and path with `read_file`. |
+| [`swarmops ws delete`](../commands/ws-delete.md) | It removes a directory on the caller's host, an operator's step; `ws_discard` drops edits. |
+| [`swarmops ws hook`](../commands/ws-hook.md) | An agent harness runs it as a command on its own events. |
+| [`swarmops git import`](../commands/git-import.md) | It reads a git repository by its path on the host, an operator's step. |
+| [`swarmops git export`](../commands/git-export.md) | It writes a git repository by its path on the host; `push` sends to a remote. |
+| [`swarmops clone`](../commands/clone.md) | An agent must not point the store at a URL of its choosing. |
+| [`swarmops remote add`](../commands/remote-add.md) | An agent must not point the store at a URL of its choosing. |
+| [`swarmops remote remove`](../commands/remote-remove.md) | A remote is an operator's to add and to remove. |
+| [`swarmops mcp`](../commands/mcp.md) | It is the server that serves the tools. |
+| [`swarmops serve`](../commands/serve.md) | It is git's server for the store, a process of its own. |
+| [`swarmops derive`](../commands/derive.md) | It only fills ahead of time a cache that each read fills itself, so it changes no result an agent reads. |
 
 ## Protocol versions
 
