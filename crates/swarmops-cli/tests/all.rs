@@ -21,6 +21,7 @@ mod github_live;
 mod intake_perf;
 mod landing;
 mod mcp;
+mod mcp_e2e;
 mod mcp_parity;
 mod mcp_ws;
 mod merge_table;

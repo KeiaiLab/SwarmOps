@@ -2547,6 +2547,13 @@ impl Server {
         Server::start_with(Command::new(support::BIN), args, env)
     }
 
+    /// [`Server::start`], with `cwd` as the server's working directory.
+    pub(crate) fn start_in(args: &[&str], env: &[(&str, &str)], cwd: &Path) -> Server {
+        let mut command = Command::new(support::BIN);
+        command.current_dir(cwd);
+        Server::start_with(command, args, env)
+    }
+
     /// Starts `command`, the binary, as [`Server::start`] describes.
     fn start_with(mut command: Command, args: &[&str], env: &[(&str, &str)]) -> Server {
         command.arg("mcp").args(args);
