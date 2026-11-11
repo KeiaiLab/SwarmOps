@@ -27,6 +27,9 @@ mod lock;
 mod meta;
 mod objects;
 mod queue;
+// It watches `RealFs`'s syncs with the hooks' `watch_syncs`.
+#[cfg(feature = "test-hooks")]
+mod realfs_syncs;
 mod refs2;
 mod runs;
 // Every test of it builds its store with the sweeps' harness, which needs the hooks.
