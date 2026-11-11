@@ -44,6 +44,8 @@
 //! - [`ws`]: the workspaces' synthetic trees and edit driver (M5).
 //! - [`schema_check`]: a JSON value checked against its type's JSON Schema, the subset
 //!   `swarmops_api::schema_for_all` emits (M21).
+//! - [`bulk`]: the scale fixtures, stores of 1,000 and 1,000,000 changesets built once, in parts,
+//!   and the gate (`SWARMOPS_SCALE=1`) of the cases that use them (M21).
 //!
 //! It depends on no crate above `swarmops-repo`: the operations' unit tests use it, and a
 //! dependency on `swarmops-ops` would build a second copy of the crate under test there. No
@@ -65,6 +67,8 @@
 
 #[cfg(feature = "cli")]
 pub mod accounting;
+#[cfg(feature = "repo")]
+pub mod bulk;
 pub mod child;
 #[cfg(feature = "cli")]
 pub mod cli;
