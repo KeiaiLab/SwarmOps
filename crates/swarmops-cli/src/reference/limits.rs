@@ -808,7 +808,7 @@ static DEFAULTS: [DefaultRow; 15] = [
 
 /// Values that tune the implementation, or bound the store's layout where no request reaches:
 /// no option sets them, and they are not part of the contract.
-static INTERNAL: [Limit; 29] = [
+static INTERNAL: [Limit; 33] = [
     internal_value(
         "Writer lock wait",
         declared(
@@ -1028,6 +1028,53 @@ static INTERNAL: [Limit; 29] = [
         Unit::Bytes,
         "The longest body of a fact, a FORMAT 3 journal record: its free text lives in a blob \
              it names.",
+    ),
+    internal_value(
+        "Run minimum",
+        code(
+            "swarmops_store::RUN_MIN",
+            "crates/swarmops-store/src/meta/runs.rs",
+            "pub const RUN_MIN: u64 = Index::COMPACT_THRESHOLD;",
+            || swarmops_store::RUN_MIN,
+        ),
+        Unit::Count("records"),
+        "How many index records past a FORMAT 3 store's sorted runs make a run of their own: \
+             fewer stay a tail that lookups scan.",
+    ),
+    internal_value(
+        "Run fan-out",
+        code(
+            "swarmops_store::RUN_FANOUT",
+            "crates/swarmops-store/src/meta/runs.rs",
+            "pub const RUN_FANOUT: u64 = 4;",
+            || swarmops_store::RUN_FANOUT,
+        ),
+        Unit::Count("times"),
+        "How many times longer than the run after it a FORMAT 3 sorted run stays apart; a \
+             shorter one is merged with it.",
+    ),
+    internal_value(
+        "Runs",
+        code(
+            "swarmops_store::MAX_RUNS",
+            "crates/swarmops-store/src/meta/runs.rs",
+            "pub const MAX_RUNS: usize = 64;",
+            || bytes::to_u64(swarmops_store::MAX_RUNS),
+        ),
+        Unit::Count("runs"),
+        "The most sorted runs a FORMAT 3 store's manifest lists.",
+    ),
+    internal_value(
+        "Run backlog",
+        code(
+            "swarmops_store::RUN_BACKLOG_MAX",
+            "crates/swarmops-store/src/meta/runs.rs",
+            "pub const RUN_BACKLOG_MAX: u64 = 8 * RUN_MIN;",
+            || swarmops_store::RUN_BACKLOG_MAX,
+        ),
+        Unit::Count("records"),
+        "How many index records past a FORMAT 3 store's sorted runs a commit leaves before it \
+             builds their run itself, once it unlocked; below it the caller or gc does.",
     ),
     internal_value(
         "Temp file grace",

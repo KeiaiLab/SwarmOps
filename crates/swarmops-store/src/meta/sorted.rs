@@ -16,11 +16,16 @@
 //! made durable before the next. A crash between two renames leaves the files before it new
 //! and the rest old; the entry counts then never grow along that order, so any other shape
 //! is damage, [`StoreError::IndexCorrupt`].
+//!
+//! In FORMAT 3 a view is a section of a run file instead (the FORMAT 3 design §2.4): its keys
+//! and recs lie at offsets of the one file, and it covers the run's records `[from, to)`
+//! (`SortedView::section`); the same search runs over it.
 
 use std::fs::File;
 use std::io;
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -52,6 +57,9 @@ pub struct SortedView<const K: usize> {
     /// The key file and the rec file, read-only; `None` exactly when `len` is 0.
     files: Option<ViewFiles>,
     len: u64,
+    /// The records the view covers: `[0, len)` for a view of `meta/sorted/`, a run's range for
+    /// a run's section.
+    covers: Range<u64>,
     probes: AtomicU64,
     rec_reads: AtomicU64,
     /// The most entries one read of either file has taken: [`SortedView::widest_read`].
@@ -62,10 +70,14 @@ pub struct SortedView<const K: usize> {
 /// failure to read them.
 #[derive(Debug)]
 struct ViewFiles {
-    keys: File,
-    recs: File,
+    keys: Arc<File>,
+    recs: Arc<File>,
     key_path: Utf8PathBuf,
     rec_path: Utf8PathBuf,
+    /// Where key 0 and rec 0 lie in their files: 0 for `meta/sorted/`, a section's offsets in a
+    /// run file.
+    key_base: u64,
+    rec_base: u64,
     fs: StoreFs,
 }
 
@@ -87,6 +99,7 @@ impl<const K: usize> SortedView<K> {
         Self {
             files: None,
             len: 0,
+            covers: 0..0,
             probes: AtomicU64::new(0),
             rec_reads: AtomicU64::new(0),
             widest: AtomicU64::new(0),
@@ -101,13 +114,16 @@ impl<const K: usize> SortedView<K> {
         if len == recs.count && len > 0 {
             Self {
                 files: Some(ViewFiles {
-                    keys: keys.file,
-                    recs: recs.file,
+                    keys: Arc::new(keys.file),
+                    recs: Arc::new(recs.file),
                     key_path: keys.path,
                     rec_path: recs.path,
+                    key_base: 0,
+                    rec_base: 0,
                     fs: fs.clone(),
                 }),
                 len,
+                covers: 0..len,
                 probes: AtomicU64::new(0),
                 rec_reads: AtomicU64::new(0),
                 widest: AtomicU64::new(0),
@@ -117,9 +133,54 @@ impl<const K: usize> SortedView<K> {
         }
     }
 
+    /// The view of `len` entries in a section of the run file `file` at `path`: its keys from
+    /// byte `key_base` on, its recs from `rec_base` on, covering the records `covers` (the
+    /// FORMAT 3 design §2.4). No entry: an empty view.
+    pub(crate) fn section(
+        fs: &StoreFs,
+        file: &Arc<File>,
+        path: &Utf8Path,
+        bases: (u64, u64),
+        len: u64,
+        covers: Range<u64>,
+    ) -> Self {
+        if len == 0 {
+            return Self::empty();
+        }
+        let (key_base, rec_base) = bases;
+        Self {
+            files: Some(ViewFiles {
+                keys: Arc::clone(file),
+                recs: Arc::clone(file),
+                key_path: path.to_owned(),
+                rec_path: path.to_owned(),
+                key_base,
+                rec_base,
+                fs: fs.clone(),
+            }),
+            len,
+            covers,
+            probes: AtomicU64::new(0),
+            rec_reads: AtomicU64::new(0),
+            widest: AtomicU64::new(0),
+        }
+    }
+
     /// How many entries the view holds.
     pub fn len(&self) -> u64 {
         self.len
+    }
+
+    /// Whether the view covers record `rec`: whether a rec it names may be `rec` (a view of
+    /// `meta/sorted/` covers `[0, len)`, a run's section the run's range).
+    pub(crate) fn covers(&self, rec: u64) -> bool {
+        self.covers.contains(&rec)
+    }
+
+    /// The end of the records the view covers: where the records past it start, for a view of
+    /// `meta/sorted/` or the last run's section.
+    pub(crate) fn covers_end(&self) -> u64 {
+        self.covers.end
     }
 
     /// Whether the view holds no entries.
@@ -301,8 +362,8 @@ impl<const K: usize> SortedView<K> {
         self.probes.fetch_add(1, Ordering::Relaxed);
         self.widest
             .fetch_max(bytes::to_u64(buf.len() / K), Ordering::Relaxed);
-        (files.keys.read_exact_at(buf, first * bytes::to_u64(K)))
-            .map_err(|e| files.keys_failed(e))?;
+        let at = files.key_base + first * bytes::to_u64(K);
+        (files.keys.read_exact_at(buf, at)).map_err(|e| files.keys_failed(e))?;
         Ok(())
     }
 
@@ -313,10 +374,8 @@ impl<const K: usize> SortedView<K> {
         self.rec_reads.fetch_add(1, Ordering::Relaxed);
         self.widest
             .fetch_max(bytes::to_u64(buf.len() / REC_LEN), Ordering::Relaxed);
-        (files
-            .recs
-            .read_exact_at(buf, first * bytes::to_u64(REC_LEN)))
-        .map_err(|e| files.recs_failed(e))?;
+        let at = files.rec_base + first * bytes::to_u64(REC_LEN);
+        (files.recs.read_exact_at(buf, at)).map_err(|e| files.recs_failed(e))?;
         Ok(())
     }
 
@@ -334,15 +393,42 @@ impl<const K: usize> SortedView<K> {
     }
 }
 
-/// The two sorted views of the changeset index, by id and by delta hash, as one handle
-/// opened them.
+/// A view by id and a view by delta hash of the same records.
 #[derive(Debug)]
-pub(crate) struct Views {
+pub(crate) struct Pair {
     pub(crate) ids: SortedView<32>,
     pub(crate) dh: SortedView<32>,
+}
+
+impl Pair {
+    /// Two empty views.
+    fn empty() -> Pair {
+        Pair {
+            ids: SortedView::empty(),
+            dh: SortedView::empty(),
+        }
+    }
+
+    /// The view `name`.
+    pub(crate) fn view(&self, name: ViewName) -> &SortedView<32> {
+        match name {
+            ViewName::Ids => &self.ids,
+            ViewName::DeltaHash => &self.dh,
+        }
+    }
+}
+
+/// The sorted views of the changeset index, by id and by delta hash, as one handle opened them:
+/// in FORMAT 1 and 2 the one pair of `meta/sorted/`, in FORMAT 3 a pair per changeset run, in
+/// record order ([`Views::of_runs`]).
+#[derive(Debug)]
+pub(crate) struct Views {
+    pairs: Vec<Pair>,
     /// The entry counts of `ids.key`, `ids.rec`, `dh.key` and `dh.rec`, in the order a
-    /// compaction renames them.
+    /// compaction renames them; in FORMAT 3 the records the runs cover, four times.
     counts: [u64; 4],
+    /// The pair [`Views::first`] gives when there is none: two empty views.
+    none: Pair,
 }
 
 impl Views {
@@ -377,11 +463,43 @@ impl Views {
                 what: "the sorted views are out of the order compaction renames them in",
             });
         }
-        Ok(Views {
+        let pair = Pair {
             ids: SortedView::pair(fs, ids_key, ids_rec),
             dh: SortedView::pair(fs, dh_key, dh_rec),
+        };
+        Ok(Views {
+            pairs: vec![pair],
             counts,
+            none: Pair::empty(),
         })
+    }
+
+    /// The views of FORMAT 3's changeset runs, `pairs` in record order, which split the records
+    /// `[0, covered)` between them (the FORMAT 3 design §2.5 M1).
+    pub(crate) fn of_runs(pairs: Vec<Pair>, covered: u64) -> Views {
+        Views {
+            pairs,
+            counts: [covered; 4],
+            none: Pair::empty(),
+        }
+    }
+
+    /// Every pair, in record order.
+    pub(crate) fn pairs(&self) -> &[Pair] {
+        &self.pairs
+    }
+
+    /// The first pair: `meta/sorted/`'s, or the first run's; two empty views with no run.
+    pub(crate) fn first(&self) -> &Pair {
+        self.pairs.first().unwrap_or(&self.none)
+    }
+
+    /// Where the records past the views of `name` start: the unsorted tail a lookup scans.
+    pub(crate) fn end(&self, name: ViewName) -> u64 {
+        (self.pairs.iter())
+            .map(|pair| pair.view(name).covers_end())
+            .max()
+            .unwrap_or(0)
     }
 
     /// Whether the four files hold two whole views of the same records; false while a
@@ -393,7 +511,7 @@ impl Views {
 
     /// The records both views cover.
     pub(crate) fn sorted_count(&self) -> u64 {
-        self.ids.len().min(self.dh.len())
+        self.end(ViewName::Ids).min(self.end(ViewName::DeltaHash))
     }
 
     /// The most records any of the four files covers, out of step or not: `ids.key`'s count,
@@ -571,7 +689,7 @@ impl<'a, const K: usize> Entries<'a, K> {
         }
         let key = self.keys.as_chunks::<K>().0[self.next];
         let rec = u64::from_le_bytes(self.recs.as_chunks::<REC_LEN>().0[self.next]);
-        if rec >= self.view.len {
+        if !self.view.covers(rec) {
             return Err(StoreError::IndexCorrupt {
                 what: "a sorted view points at a record it does not cover",
             });

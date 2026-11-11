@@ -352,6 +352,10 @@ Not part of the contract: these tune the implementation, or bound the store's la
 | Records | 65,535 records | `swarmops_store::meta::frame::MAX_RECORDS` | The most records one journal frame holds (`details.store_limit` `records`); in a FORMAT 3 store each frame's nonce takes one of them, leaving 65,534 to the caller. |
 | Features | 32 features | `swarmops_store::MAX_FEATURES` | The most features a FORMAT 3 store's `meta/features` lists: the optional record kinds it holds. |
 | Fact body | 4,096 bytes (4 KiB) | `swarmops_store::MAX_FACT_BODY` | The longest body of a fact, a FORMAT 3 journal record: its free text lives in a blob it names. |
+| Run minimum | 1,024 records | `swarmops_store::RUN_MIN` | How many index records past a FORMAT 3 store's sorted runs make a run of their own: fewer stay a tail that lookups scan. |
+| Run fan-out | 4 times | `swarmops_store::RUN_FANOUT` | How many times longer than the run after it a FORMAT 3 sorted run stays apart; a shorter one is merged with it. |
+| Runs | 64 runs | `swarmops_store::MAX_RUNS` | The most sorted runs a FORMAT 3 store's manifest lists. |
+| Run backlog | 8,192 records | `swarmops_store::RUN_BACKLOG_MAX` | How many index records past a FORMAT 3 store's sorted runs a commit leaves before it builds their run itself, once it unlocked; below it the caller or gc does. |
 | Temp file grace | 86,400 s | `swarmops_store::GC_TEMP_GRACE` | How old a temp file in `objects/tmp/` or `meta/derived/tmp/` must be before `gc` removes it: a write in progress holds a younger one. |
 | Read window | 4,096 entries | `swarmops_store::meta::READ_WINDOW` | How many entries of `journal.off`, an index column or a sorted view one read of the store takes, so that no read allocates by a file's length. |
 | Lookup hits | 4,096 changesets | `swarmops_store::meta::MAX_LOOKUP_HITS` | The most changesets a lookup by id prefix or by delta hash gathers before it says its answer was cut. |

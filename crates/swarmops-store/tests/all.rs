@@ -24,6 +24,7 @@ mod meta;
 mod objects;
 mod queue;
 mod refs2;
+mod runs;
 // Every test of it builds its store with the sweeps' harness, which needs the hooks.
 #[cfg(feature = "test-hooks")]
 mod upgrade;

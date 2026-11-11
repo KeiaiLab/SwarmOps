@@ -2377,3 +2377,30 @@ fn resolve_prefix_past_the_cap_is_still_ambiguous() {
             .all(|id| id.0.to_hex().starts_with("abcdef012345"))
     );
 }
+
+/// A FORMAT 3 index never cuts below what `journal3.ckpt` has passed, though no run covers it
+/// yet: its runs may cover less than the checkpoint, and a lock-free run build reads the records
+/// below the checkpoint (the FORMAT 3 design §2.5 rule 4; judgement S5).
+#[test]
+fn v3_truncate_floor_is_the_checkpoint() {
+    let (_dir, layout) = bare_root();
+    let layout = Layout::with_format(layout.root(), swarmops_store::StoreFormat::V3);
+    let store = MetaStore::create_in(layout.clone(), real_fs()).unwrap();
+
+    // 1. 2,000 records the checkpoint passed (past RUN_MIN), then 10 past it; no run built.
+    for range in [0..2_000, 2_000..2_010] {
+        let mut write = store.write().unwrap();
+        let metas = range
+            .map(|n| meta(spread_id(n), 1, [0; 32], vec![]))
+            .collect();
+        write.insert_changesets_batch(metas).unwrap();
+        write.commit().unwrap();
+    }
+
+    // 2. A cut to no record keeps the 2,000.
+    let mut index = open(&layout);
+    assert_eq!(index.len(), 2_010);
+    assert_eq!(index.sorted_count(), 0, "no run covers a record");
+    assert_eq!(index.truncate_to(0).unwrap(), 2_000);
+    assert_eq!(open(&layout).len(), 2_000);
+}

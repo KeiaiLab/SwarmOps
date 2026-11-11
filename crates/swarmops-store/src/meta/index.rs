@@ -37,6 +37,13 @@
 //! [`Index::repair_tail`] runs the compaction again. The one cut of whole records, after a
 //! failed sync, can take records from under a handle opened before it, a reader's snapshot's
 //! included: [`Index::truncate_to`] says which lookups then fail.
+//!
+//! # FORMAT 3
+//!
+//! A FORMAT 3 index has no `meta/sorted/`: its sorted views are the changeset runs of
+//! `meta/sorted3/MANIFEST` (the FORMAT 3 design §2.4, §2.5), which `MetaStore::step_views`
+//! builds outside the writer lock. Lookups search each run, then scan the records past the
+//! last; the index never compacts, and never cuts below what `journal3.ckpt` has passed.
 
 use std::num::NonZero;
 use std::ops::{ControlFlow, Range};
@@ -54,8 +61,10 @@ use super::frame::{Frame, Record};
 use super::journal::Journal;
 use super::parents::{self, MAX_PARENTS, MAX_PARENTS_LEN, PARENT_LEN, ParentsAt};
 use super::replay::{self, ChangesetRecord};
+use super::runs::{self, Manifest};
 use super::sorted::{self, Rebuild, SortedView, VIEW_FILES, ViewName, Views};
 use crate::error::{FileOp, IoFailure, LimitKind, StoreError};
+use crate::format::StoreFormat;
 use crate::fs_ops::{FsMethod, FsOps, RealFs, StoreFs};
 use crate::layout::Layout;
 
@@ -132,9 +141,9 @@ pub(crate) struct IndexRepair {
 }
 
 // The five files, as paths in `meta/`, in the order a fresh index creates them.
-const IDS: &str = "idx/ids.col";
+pub(crate) const IDS: &str = "idx/ids.col";
 const GENS: &str = "idx/gen.col";
-const DHS: &str = "idx/dh.col";
+pub(crate) const DHS: &str = "idx/dh.col";
 const PARS: &str = "idx/par.col";
 const PARENTS: &str = "parents.log";
 
@@ -187,18 +196,34 @@ impl Index {
 
     /// [`Index::create`], through `fs`, whose root may be another than `layout`'s: a staged
     /// create's files are named where they are, under `meta.tmp/`.
+    ///
+    /// In FORMAT 3 the views are `meta/sorted3/`, its `tmp/` and the manifest of no run
+    /// (generation 0) in place of `meta/sorted/`'s four files (the FORMAT 3 design §2.5).
     pub(crate) fn create_in(layout: &Layout, fs: &StoreFs) -> Result<Index, StoreError> {
         let idx = layout.meta_path("idx");
-        let sorted = layout.meta_path("sorted");
+        let sorted = sorted_dir(layout);
         fs.create_dir_all(idx.as_std_path())?;
         fs.create_dir_all(sorted.as_std_path())?;
+
+        // 1. The columns, and FORMAT 1's and 2's view files: empty appends, which create a
+        //    missing file and never truncate an existing one.
         let columns = [IDS, GENS, DHS, PARS, PARENTS].map(|rel| layout.meta_path(rel));
-        for path in columns
-            .iter()
-            .chain(&VIEW_FILES.map(|name| sorted.join(name)))
-        {
-            // An empty append creates a missing file and never truncates an existing one.
+        let views = match layout.format() {
+            StoreFormat::V1 | StoreFormat::V2 => VIEW_FILES.map(|name| sorted.join(name)).to_vec(),
+            StoreFormat::V3 => Vec::new(),
+        };
+        for path in columns.iter().chain(&views) {
             fs.append(path.as_std_path(), &[])?;
+        }
+
+        // 2. FORMAT 3's tmp/ and manifest, unless one is there.
+        if layout.format() == StoreFormat::V3 {
+            fs.create_dir_all(sorted.join(runs::TMP).as_std_path())?;
+            let manifest = sorted.join(runs::MANIFEST);
+            if !fs.exists(manifest.as_std_path())? {
+                fs.append(manifest.as_std_path(), &Manifest::empty().encode())?;
+                fs.sync_data(manifest.as_std_path())?;
+            }
         }
         fs.fsync_dir(idx.as_std_path())?;
         fs.fsync_dir(sorted.as_std_path())?;
@@ -234,6 +259,7 @@ impl Index {
         let mut index = Self::handle(layout, fs)?;
         let lens = index.lens()?;
         let whole = index.whole_of(lens, None)?;
+        index.open_runs()?;
         index.set_count(&whole)?;
         Ok(index)
     }
@@ -256,17 +282,23 @@ impl Index {
         let lens = index.lens()?;
         let past = read_past()?;
         let whole = index.whole_of(lens, Some(&past))?;
+        index.open_runs()?;
         index.set_count(&whole)?;
         Ok((index, past))
     }
 
     /// A handle on the files of `layout`, counting no record yet.
     fn handle(layout: &Layout, fs: StoreFs) -> Result<Index, StoreError> {
-        let sorted_dir = layout.meta_path("sorted");
+        let sorted_dir = sorted_dir(layout);
         // The views before the columns: a compaction covers records that were whole when it
         // ran, and whole records stay, so the columns read afterwards hold all that the
-        // views cover.
-        let views = Views::open(&fs, &sorted_dir)?;
+        // views cover. FORMAT 3's runs cover only records the checkpoint passed, synced and
+        // never cut: they are opened once the records are counted ([`Index::open_runs`]), so
+        // that a damaged journal shows before a damaged view.
+        let views = match layout.format() {
+            StoreFormat::V1 | StoreFormat::V2 => Views::open(&fs, &sorted_dir)?,
+            StoreFormat::V3 => Views::of_runs(Vec::new(), 0),
+        };
         let path = |rel| layout.meta_path(rel);
         Ok(Index {
             ids: AppendOnlyColumn::open(&fs, path(IDS), "meta/idx/ids.col is missing")?,
@@ -282,6 +314,15 @@ impl Index {
             sync_threads: 1,
             layout: layout.clone(),
         })
+    }
+
+    /// Opens a FORMAT 3 index's runs ([`runs::open_views`]); nothing in the other formats, whose
+    /// views [`Index::handle`] opened.
+    fn open_runs(&mut self) -> Result<(), StoreError> {
+        if self.layout.format() == StoreFormat::V3 {
+            self.views = runs::open_views(&self.layout, &self.fs)?;
+        }
+        Ok(())
     }
 
     /// Makes what `whole` holds this handle's count, which the views must not cover more of.
@@ -328,14 +369,14 @@ impl Index {
         self.len.saturating_sub(self.sorted_count())
     }
 
-    /// The sorted view by changeset id.
+    /// The sorted view by changeset id: in FORMAT 3 the first run's (an empty one with none).
     pub fn ids_view(&self) -> &SortedView<32> {
-        &self.views.ids
+        &self.views.first().ids
     }
 
-    /// The sorted view by delta hash.
+    /// The sorted view by delta hash: in FORMAT 3 the first run's (an empty one with none).
     pub fn dh_view(&self) -> &SortedView<32> {
-        &self.views.dh
+        &self.views.first().dh
     }
 
     /// The most entries one read of an index file has taken through this handle: of a column,
@@ -344,16 +385,17 @@ impl Index {
     /// reads more than 4,096 entries (`READ_WINDOW`) at once, whatever the files' lengths, but
     /// the parents of one record (at most 255) in one read.
     pub fn widest_read(&self) -> u64 {
+        let views = (self.views.pairs().iter())
+            .flat_map(|pair| [pair.ids.widest_read(), pair.dh.widest_read()]);
         [
             self.ids.widest(),
             self.gens.widest(),
             self.dhs.widest(),
             self.pars.widest(),
             self.parents.widest() / PARENT_LEN,
-            self.views.ids.widest_read(),
-            self.views.dh.widest_read(),
         ]
         .into_iter()
+        .chain(views)
         .max()
         .unwrap_or(0)
     }
@@ -736,17 +778,22 @@ impl Index {
     /// `ids.col` must hold `id` there, or the view's entry names another changeset's record, as a
     /// damaged or crafted `.rec` file makes it do; [`StoreError::IndexCorrupt`] either way, never
     /// another changeset's rec.
+    ///
+    /// In FORMAT 3 each run's id view is searched in turn, then the records past the last.
     pub fn find(&self, id: ChangesetId) -> Result<Option<u64>, StoreError> {
         let key = id.0.0;
-        let view = &self.views.ids;
-        if let (at, Some(found)) = view.lower_bound_with_key(&key)?
-            && found == key
-        {
-            let rec = covered_by(view, view.rec_at(at)?)?;
-            return holding(&self.ids, rec, |held| *held == key).map(Some);
+        for pair in self.views.pairs() {
+            let view = &pair.ids;
+            if let (at, Some(found)) = view.lower_bound_with_key(&key)?
+                && found == key
+            {
+                let rec = covered_by(view, view.rec_at(at)?)?;
+                return holding(&self.ids, rec, |held| *held == key).map(Some);
+            }
         }
         // The tail, a window at a time: no read takes more than READ_WINDOW ids.
-        self.ids.scan(view.len(), self.len, |first, probes| {
+        let tail = self.views.end(ViewName::Ids);
+        self.ids.scan(tail, self.len, |first, probes| {
             match probes.iter().position(|probe| *probe == key) {
                 Some(i) => ControlFlow::Break(first + bytes::to_u64(i)),
                 None => ControlFlow::Continue(()),
@@ -767,7 +814,7 @@ impl Index {
     /// recs, and a scan of the tail of `ids.col`, each read of at most 4,096 entries.
     pub fn find_prefix_hits(&self, prefix_nibbles: &str) -> Result<LookupHits, StoreError> {
         let prefix = Prefix::parse(prefix_nibbles)?;
-        self.find_all(&self.views.ids, &self.ids, &prefix.low, |key| {
+        self.find_all(ViewName::Ids, &self.ids, &prefix.low, |key| {
             prefix.matches(key)
         })
     }
@@ -784,7 +831,7 @@ impl Index {
     /// [`Index::find_delta_hash`], saying whether the answer was cut at 4,096 recs. Searched like
     /// [`Index::find_prefix_hits`], in the delta-hash view and the tail of `dh.col`.
     pub fn find_delta_hash_hits(&self, dh: &[u8; 32]) -> Result<LookupHits, StoreError> {
-        self.find_all(&self.views.dh, &self.dhs, dh, |key| key == dh)
+        self.find_all(ViewName::DeltaHash, &self.dhs, dh, |key| key == dh)
     }
 
     /// The recs, ascending, of up to [`MAX_LOOKUP_HITS`] records whose key `matches` accepts,
@@ -795,22 +842,34 @@ impl Index {
     /// accepts there ([`holding`]); and no rec may come twice, since a view names each record it
     /// covers once: [`StoreError::IndexCorrupt`] otherwise. More matches than the cap cut the
     /// answer, and it says so: the view's first in key order are kept, then the tail's in rec
-    /// order, and the tail is not read once the view's run fills the cap.
+    /// order, and the tail is not read once the view's run fills the cap. In FORMAT 3 the views
+    /// `name` of the runs are read in record order, the cap counted across them.
     fn find_all(
         &self,
-        view: &SortedView<32>,
+        name: ViewName,
         column: &AppendOnlyColumn<32>,
         low: &[u8; 32],
         matches: impl Fn(&[u8; 32]) -> bool,
     ) -> Result<LookupHits, StoreError> {
-        // 1. The view's run, read one key past the cap: a longer run is cut there.
+        // 1. Each view's run, read one key past what the cap leaves: a longer run is cut there.
         let cap = bytes::to_u64(MAX_LOOKUP_HITS);
-        let start = view.lower_bound(low)?;
-        let end = view.run_end(start, cap + 1, &matches)?;
-        let kept = (end - start).min(cap);
-        let mut recs = view.recs(start..start + kept)?;
-        for &rec in &recs {
-            holding(column, covered_by(view, rec)?, &matches)?;
+        let mut recs = Vec::new();
+        let mut cut = false;
+        for pair in self.views.pairs() {
+            let view = pair.view(name);
+            let room = cap - bytes::to_u64(recs.len());
+            let start = view.lower_bound(low)?;
+            let end = view.run_end(start, room + 1, &matches)?;
+            let kept = (end - start).min(room);
+            let found = view.recs(start..start + kept)?;
+            for &rec in &found {
+                holding(column, covered_by(view, rec)?, &matches)?;
+            }
+            recs.extend(found);
+            if end - start > kept {
+                cut = true;
+                break;
+            }
         }
         recs.sort_unstable();
         if recs.windows(2).any(|pair| pair[0] == pair[1]) {
@@ -818,13 +877,13 @@ impl Index {
                 what: "a sorted view names a record twice",
             });
         }
-        if end - start > kept {
+        if cut {
             return Ok(LookupHits::new(recs, true));
         }
 
-        // 2. The tail's recs follow in order (the view's lie below its end, theirs at or past
+        // 2. The tail's recs follow in order (the views' lie below their end, theirs at or past
         //    it), until a match finds the cap full.
-        let cut = column.scan(view.len(), self.len, |first, keys| {
+        let cut = column.scan(self.views.end(name), self.len, |first, keys| {
             for (rec, key) in (first..).zip(keys) {
                 if !matches(key) {
                     continue;
@@ -852,7 +911,15 @@ impl Index {
     /// files; and renames them into place, `ids.key`, `ids.rec`, `dh.key`, `dh.rec`, each
     /// rename made durable before the next. A crash leaves each view old or new, which
     /// readers handle and which the next compaction finishes: compaction is idempotent.
+    ///
+    /// A FORMAT 3 index has no compaction ([`StoreError::BadCall`]): its runs are built outside
+    /// the writer lock (`MetaStore::step_views`).
     pub fn compact(&mut self) -> Result<u64, StoreError> {
+        if self.layout.format() == StoreFormat::V3 {
+            return Err(StoreError::BadCall(
+                "a FORMAT 3 index does not compact: MetaStore::step_views builds its runs".into(),
+            ));
+        }
         self.catch_up()?;
         self.rebuild_views()?;
         Ok(self.sorted_count())
@@ -939,8 +1006,12 @@ impl Index {
     /// others only those it still finds whole that the journal vouches for (where the journal
     /// cannot vouch, those the cut keeps, counted by their lengths), and fails as one opened
     /// before the cut does only if the files are cut again meanwhile: it never counts fewer.
+    ///
+    /// In FORMAT 3 the floor is what `journal3.ckpt` has passed rather than what the runs cover,
+    /// which may be less: a step builds its runs from the records below the checkpoint without
+    /// the lock, so no cut may reach them (the FORMAT 3 design §2.5 rule 4).
     pub fn truncate_to(&mut self, records: u64) -> Result<u64, StoreError> {
-        let keep = records.max(self.views.covered());
+        let keep = records.max(self.floor()?);
         if keep >= self.len {
             return Ok(self.len);
         }
@@ -980,17 +1051,19 @@ impl Index {
     /// [`Index::catch_up`], `past` vouching for the records this handle does not count, if
     /// given (see [`Index::repair_tail_with`]); else a read of the journal of its own.
     fn catch_up_vouched_by(&mut self, past: Option<&[Frame]>) -> Result<u64, StoreError> {
-        let views = Views::open(&self.fs, &self.sorted_dir)?;
+        let views = open_views(&self.layout, &self.fs)?;
         let (whole, dropped) = self.repair_files(&views, past)?;
         (self.len, self.parents_len) = (whole.records, whole.parents_len);
         self.views = views;
         Ok(dropped)
     }
 
-    /// Rebuilds each sorted view that does not cover every record (see [`Index::compact`]).
+    /// Rebuilds each sorted view that does not cover every record (see [`Index::compact`]):
+    /// FORMAT 1's and 2's, of `meta/sorted/`.
     fn rebuild_views(&mut self) -> Result<(), StoreError> {
-        let ids_stale = self.views.ids.len() < self.len;
-        let dh_stale = self.views.dh.len() < self.len;
+        let first = self.views.first();
+        let ids_stale = first.ids.len() < self.len;
+        let dh_stale = first.dh.len() < self.len;
         if !ids_stale && !dh_stale {
             return Ok(());
         }
@@ -999,15 +1072,15 @@ impl Index {
         if ids_stale {
             rebuilds.push(Rebuild {
                 view: ViewName::Ids,
-                old: &self.views.ids,
-                tail: sorted_tail(&self.ids, self.views.ids.len(), self.len)?,
+                old: &first.ids,
+                tail: sorted_tail(&self.ids, first.ids.len(), self.len)?,
             });
         }
         if dh_stale {
             rebuilds.push(Rebuild {
                 view: ViewName::DeltaHash,
-                old: &self.views.dh,
-                tail: sorted_tail(&self.dhs, self.views.dh.len(), self.len)?,
+                old: &first.dh,
+                tail: sorted_tail(&self.dhs, first.dh.len(), self.len)?,
             });
         }
         sorted::rebuild(&self.fs, &self.sorted_dir, &rebuilds)?;
@@ -1371,6 +1444,18 @@ impl Index {
         Ok(held)
     }
 
+    /// The fewest records [`Index::truncate_to`] keeps: what the sorted views cover; in FORMAT 3
+    /// what `journal3.ckpt` has passed (read on a journal handle of its own).
+    fn floor(&self) -> Result<u64, StoreError> {
+        match self.layout.format() {
+            StoreFormat::V1 | StoreFormat::V2 => Ok(self.views.covered()),
+            StoreFormat::V3 => {
+                let journal = Journal::open(&self.layout, Arc::new(RealFs))?;
+                Ok(journal.ckpt3()?.records.max(self.views.covered()))
+            }
+        }
+    }
+
     /// Refuses a rec this handle does not count: [`StoreError::BadCall`], since the lookups
     /// never give one (they check the recs they read from a sorted view).
     fn check_counted(&self, rec: u64) -> Result<(), StoreError> {
@@ -1417,13 +1502,13 @@ impl fmt::Debug for Index {
     }
 }
 
-/// `rec`, read from `view`, if the view covers it: a view of m entries holds the recs `[0, m)`,
-/// so a rec at or past m is damage (a bit flipped in a `.rec` file), never a record to read. It
-/// would point into the unsorted tail (another changeset's record) or past the index's end. The
-/// same rule as a compaction's when it merges the view; an in-memory comparison, no read. A
-/// wrong rec within `[0, m)` is [`holding`]'s to find.
+/// `rec`, read from `view`, if the view covers it: a view of m entries holds the recs `[0, m)`
+/// (a run's section the run's records), so a rec past them is damage (a bit flipped in a `.rec`
+/// file), never a record to read. It would point into another view, the unsorted tail (another
+/// changeset's record) or past the index's end. The same rule as a compaction's when it merges
+/// the view; an in-memory comparison, no read. A wrong rec within them is [`holding`]'s to find.
 fn covered_by<const K: usize>(view: &SortedView<K>, rec: u64) -> Result<u64, StoreError> {
-    if rec < view.len() {
+    if view.covers(rec) {
         Ok(rec)
     } else {
         Err(StoreError::IndexCorrupt {
@@ -1533,6 +1618,23 @@ fn last_changeset_before(journal: &Journal, seq: u64) -> Result<Option<Changeset
         (end, batch) = (start, (batch * 2).min(256));
     }
     Ok(None)
+}
+
+/// The directory of `layout`'s sorted views: `meta/sorted/`, or FORMAT 3's `meta/sorted3/`.
+fn sorted_dir(layout: &Layout) -> Utf8PathBuf {
+    match layout.format() {
+        StoreFormat::V1 | StoreFormat::V2 => layout.meta_path("sorted"),
+        StoreFormat::V3 => layout.views_dir(),
+    }
+}
+
+/// The sorted views of `layout`: `meta/sorted/`'s ([`Views::open`]), or FORMAT 3's runs as the
+/// manifest names them ([`runs::open_views`]).
+fn open_views(layout: &Layout, fs: &StoreFs) -> Result<Views, StoreError> {
+    match layout.format() {
+        StoreFormat::V1 | StoreFormat::V2 => Views::open(fs, &sorted_dir(layout)),
+        StoreFormat::V3 => runs::open_views(layout, fs),
+    }
 }
 
 /// What the files hold whole.

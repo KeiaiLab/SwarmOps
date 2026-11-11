@@ -68,6 +68,8 @@ use super::lock::MetaLock;
 use super::parents::MAX_PARENTS;
 use super::refs::{self, RefFile, RefState};
 use super::replay::{self, Overlay};
+use super::runs::{RUN_BACKLOG_MAX, RUN_MIN};
+use super::views::{self, Step};
 use crate::error::{FileOp, LimitKind, StoreError};
 use crate::format::{self, StoreFormat};
 use crate::fs_ops::{FsOps, RealFs, StoreFs};
@@ -666,6 +668,32 @@ impl MetaStore {
     /// journal. For callers that need the projections durable at once (tests, closing).
     pub fn flush(&self) -> Result<(), StoreError> {
         self.write()?.finish(Settle::Flush).map(drop)
+    }
+
+    /// One step of a FORMAT 3 store's view work (the FORMAT 3 design §2.5 and its amendment of
+    /// 2026-11-11, G6, G13): with more than [`crate::RUN_MIN`] changeset records past the runs that
+    /// the checkpoint has passed, it builds their run, merges it at [`crate::RUN_FANOUT`] and
+    /// publishes the new manifest, under `meta/views.lock` and never under [`MetaLock`].
+    /// [`Step::Skipped`] at once if another step holds `meta/views.lock`; [`Step::Done`]
+    /// otherwise, and below FORMAT 3, which has no runs.
+    ///
+    /// A commit leaves this work to its caller, who calls it once it has answered (a CLI after
+    /// it wrote its response, a server after it sent one), or to gc; only a commit that leaves
+    /// more than [`crate::RUN_BACKLOG_MAX`] records past the runs steps itself, after it
+    /// unlocked. A step that fails part way leaves the runs a reader reads (the old manifest or
+    /// the new one), and the next step finishes: its error is no failure of the commit before it.
+    pub fn step_views(&self) -> Result<Step, StoreError> {
+        views::step(&self.layout, &self.fs, &self.journal)
+    }
+
+    /// The step a commit that left `backlog` records past the runs owes, once it unlocked: one,
+    /// past [`RUN_BACKLOG_MAX`]. Its error is dropped: the commit stands, and the next step, by a
+    /// caller, gc or the next commit past the bound, does the work (the FORMAT 3 design's
+    /// amendment of 2026-11-11, G12).
+    pub(super) fn step_past(&self, backlog: u64) {
+        if backlog > RUN_BACKLOG_MAX {
+            let _ = self.step_views();
+        }
     }
 
     /// The store's format.
@@ -1303,6 +1331,18 @@ impl MetaWrite<'_> {
         self.lock.take()
     }
 
+    /// How many changeset records a FORMAT 3 store holds past its runs once this transaction
+    /// commits: the index's tail and the changesets queued (0 below FORMAT 3, which compacts).
+    pub(super) fn backlog(&self) -> u64 {
+        if self.store.layout.format() != StoreFormat::V3 {
+            return 0;
+        }
+        let queued = (self.records.iter())
+            .filter(|record| matches!(record, Record::Changeset { .. }))
+            .count();
+        self.index.tail_len() + bytes::to_u64(queued)
+    }
+
     /// How many frames are closed ([`MetaWrite::begin_frame`]).
     pub(super) fn closed_frames(&self) -> usize {
         self.closed.len()
@@ -1355,8 +1395,26 @@ impl MetaWrite<'_> {
     }
 
     /// [`MetaWrite::commit_frames`]; [`Settle::Flush`] also syncs and checkpoints any frame past
-    /// the checkpoint.
+    /// the checkpoint. Then it unlocks, and a commit that leaves a FORMAT 3 store more than
+    /// [`RUN_BACKLOG_MAX`] records past its runs steps the view work once
+    /// ([`MetaStore::step_past`]): only while it still holds the lock, since a write queue's lead
+    /// took it out to answer its members, and steps itself after them (the FORMAT 3 design's
+    /// amendment of 2026-11-11, G12; lock order §2.5 rule 8).
     fn finish(mut self, settle: Settle) -> Result<Vec<CommitInfo>, StoreError> {
+        let backlog = self.backlog();
+        let committed = self.commit_all(settle);
+        let Some(lock) = self.lock.take() else {
+            return committed;
+        };
+        drop(lock);
+        if committed.is_ok() {
+            self.store.step_past(backlog);
+        }
+        committed
+    }
+
+    /// The commit of [`MetaWrite::finish`], under the lock.
+    fn commit_all(&mut self, settle: Settle) -> Result<Vec<CommitInfo>, StoreError> {
         let store = self.store;
 
         // 1. The frames: the closed ones, then the open one if it holds any record.
@@ -1416,12 +1474,17 @@ impl MetaWrite<'_> {
     ///
     /// A FORMAT 3 writer never compacts, nor appends a `Compacted` frame (the FORMAT 3 design §0
     /// 3, §2.7): its checkpoint records the index records the sync passed ([`Journal::set_ckpt3`];
-    /// no fact row is materialized yet).
+    /// no fact row is materialized yet). It syncs and checkpoints also once more than
+    /// [`RUN_MIN`] records lie past the checkpoint, so that a step can build their run (§2.5,
+    /// the checkpoint's cadence).
     fn settle(&mut self, settle: Settle) -> Result<bool, StoreError> {
         let v3 = self.store.layout.format() == StoreFormat::V3;
         let compact = !v3 && self.index.tail_len() > Index::COMPACT_THRESHOLD;
         let flush = settle == Settle::Flush;
-        let due = self.uncheckpointed >= CHECKPOINT_EVERY || (flush && self.uncheckpointed > 0);
+        let unsynced = self.index.len().saturating_sub(self.checkpointed_records);
+        let due = self.uncheckpointed >= CHECKPOINT_EVERY
+            || (flush && self.uncheckpointed > 0)
+            || (v3 && unsynced > RUN_MIN);
         if !compact && !due {
             return Ok(false);
         }

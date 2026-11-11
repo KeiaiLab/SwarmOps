@@ -40,7 +40,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use swarmops_core::bytes::{self, Reader};
 
-use super::frame::{self, Record};
+use super::frame::{self, Frame};
 use super::lock::{self, Create, LockWait, MetaLock, Started};
 use super::store::{CommitInfo, MetaStore, MetaWrite, Recovered};
 use crate::error::{FileOp, IoFailure, StoreError};
@@ -722,11 +722,11 @@ fn cut_warning(warning: &str) -> String {
     format!("{}{ELLIPSIS}", &warning[..end])
 }
 
-/// The blake3 of the payload of a frame of `records` in `store`'s format, as it is appended at
-/// any place (the place is no part of the payload).
-fn payload_hash(store: &MetaStore, records: &[Record]) -> Result<[u8; 32], StoreError> {
+/// The blake3 of the payload of `frame` in `store`'s format, as it is appended at any place (the
+/// place is no part of the payload): its records, and in FORMAT 3 its nonce.
+fn payload_hash(store: &MetaStore, frame: &Frame) -> Result<[u8; 32], StoreError> {
     let format = store.layout.format();
-    let encoded = frame::encode_frame_in(format, records, 0, 0)?;
+    let encoded = frame::encode_frame_with_nonce(format, &frame.records, frame.nonce, 0, 0)?;
     Ok(*blake3::hash(&encoded[frame::header_len(format)..]).as_bytes())
 }
 
@@ -1120,7 +1120,7 @@ fn settle_member(
             .and_then(|mut frames| frames.pop());
         let matches = listed
             .filter(|frame| frame.seq == seq)
-            .and_then(|frame| payload_hash(store, &frame.records).ok())
+            .and_then(|frame| payload_hash(store, &frame).ok())
             .is_some_and(|found| found == hash);
         if matches {
             let answer = Answer::new(Outcome::Committed { frame_seq: seq }, member.body.clone());
@@ -1440,7 +1440,7 @@ impl<'a> Lead<'a> {
                         return Err(StoreError::BadCall(format!("no frame {index}")));
                     };
                     let index = u32::try_from(index).unwrap_or(u32::MAX);
-                    Some((index, payload_hash(self.store, &frame.records)?))
+                    Some((index, payload_hash(self.store, frame)?))
                 }
                 FrameUse::NoFrame | FrameUse::Declined => None,
             };
@@ -1475,6 +1475,7 @@ impl<'a> Lead<'a> {
             .take()
             .expect("a lead holds its write until it commits");
         let lock = write.take_lock();
+        let backlog = write.backlog();
         let committed = write.commit_frames();
 
         // 1. Each other member's answer, after the commit point.
@@ -1484,7 +1485,13 @@ impl<'a> Lead<'a> {
         }
         drop(lock);
 
-        // 2. The own.
+        // 2. The view work a backlog past the bound calls for, after every answer and the
+        //    unlock (the FORMAT 3 design's amendment of 2026-11-11, G12).
+        if committed.is_ok() {
+            self.store.step_past(backlog);
+        }
+
+        // 3. The own.
         let infos = committed?;
         let own = self.own.take();
         let (frame, body) = own.map_or((FrameUse::Frame(0), Vec::new()), |own| {

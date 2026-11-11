@@ -45,9 +45,11 @@ mod parents;
 pub mod queue;
 pub mod refs;
 mod replay;
+pub(crate) mod runs;
 pub mod sorted;
 pub mod store;
 pub mod upgrade;
+pub(crate) mod views;
 
 /// How many entries of `journal.off`, an index column or a sorted view a bounded read takes at
 /// once (the M6 design §5): no read allocates by a file's length.

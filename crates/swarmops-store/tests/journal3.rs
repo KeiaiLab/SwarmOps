@@ -171,6 +171,13 @@ fn ckpt3_keeps_base_through_set_ckpt() {
     drop(store);
     let layout = Layout::with_format(v2.root(), StoreFormat::V3);
     fs::write(layout.journal_ckpt(), ckpt3_bytes([0, 0, 3, 0, 0])).unwrap();
+    // And its views: the new store's manifest of no run.
+    fs::create_dir_all(layout.views_dir()).unwrap();
+    fs::copy(
+        v3.views_dir().join("MANIFEST"),
+        layout.views_dir().join("MANIFEST"),
+    )
+    .unwrap();
 
     // 3. Two writes and a flush: the checkpoint moves to the end, the base stays.
     let store = MetaStore::open_in(layout.clone(), real_fs()).unwrap();
