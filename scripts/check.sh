@@ -33,6 +33,10 @@ fi
 # `--version` in a build stamped with SWARMOPS_BUILD_COMMIT, each pin required to run, and a
 # malformed one refused; target/debug's binaries are linked again unstamped after.
 python3 -I scripts/check-stamped.py
+# Both doc runs start from an empty doc directory, as in `just check`; the removal refuses a
+# target directory that is empty or not absolute, which scripts/test-doc-clean.py shows.
+python3 -I scripts/test-doc-clean.py
+target="$(cargo metadata --locked --format-version 1 --no-deps | python3 -I -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"; case "$target" in /?*) rm -rf "$target/doc" ;; *) echo "check: cargo metadata gave no absolute target directory; doc not removed" >&2; exit 1 ;; esac
 # Twice: the second run, with every feature on, also renders and link-checks the test-hooks code.
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items --all-features
