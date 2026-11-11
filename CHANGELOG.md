@@ -53,6 +53,8 @@ collects the changes on `stable` that no release holds yet, until the next relea
 - `git import` refuses a ref through an annotated tag whose head is not its `object`, `type` and
   `tag` lines ended by a blank line, naming the tag as a corrupt object, where it followed the
   tag's first line.
+- `ws rebase` run again after an update cut short snapshots the edits made since and carries them,
+  where it refused them with `E_WS_DIRTY` until they were discarded (the M19 design §4.4).
 
 ## [0.11.0] - 2026-11-09
 
