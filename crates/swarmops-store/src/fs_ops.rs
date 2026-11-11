@@ -31,6 +31,9 @@
 //! reference to one outside it does not compile. The workspace's gates build the tests with it.
 //! [`HookedFs`] is in every build, since the stores ask it for their filesystem: without the
 //! feature it has none to give.
+//!
+//! One more seam, in-process and for this thread only: `watch_syncs` (feature `test-hooks`)
+//! records each sync [`RealFs`] makes, and drops one when asked.
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -392,7 +395,7 @@ impl FsOps for RealFs {
     fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
         let mut temp = temp_file_in(dir)?;
         temp.as_file_mut().write_all(bytes)?;
-        temp.as_file().sync_all()?;
+        flush(temp.as_file(), temp.path(), SyncKind::File)?;
         let (_file, path) = temp.keep().map_err(|e| e.error)?;
         Ok(path)
     }
@@ -408,7 +411,7 @@ impl FsOps for RealFs {
     }
 
     fn fsync_dir(&self, p: &Path) -> io::Result<()> {
-        File::open(p)?.sync_all()
+        flush(&File::open(p)?, p, SyncKind::Dir)
     }
 
     fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
@@ -431,7 +434,7 @@ impl FsOps for RealFs {
         let mut file = OpenOptions::new().append(true).create(true).open(path)?;
         let offset = file.metadata()?.len();
         file.write_all(bytes)?;
-        file.sync_data()?;
+        flush(&file, path, SyncKind::FileData)?;
         Ok(offset)
     }
 
@@ -446,21 +449,21 @@ impl FsOps for RealFs {
     fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
         let file = OpenOptions::new().write(true).open(path)?;
         file.set_len(len)?;
-        file.sync_data()
+        flush(&file, path, SyncKind::FileData)
     }
 
     fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
         let dir = parent_dir(path);
         let mut temp = temp_file_in(dir)?;
         temp.as_file_mut().write_all(bytes)?;
-        temp.as_file().sync_all()?;
+        flush(temp.as_file(), temp.path(), SyncKind::File)?;
         // On failure the temp file is removed when the returned `NamedTempFile` drops.
         temp.persist(path).map_err(|e| e.error)?;
         self.fsync_dir(dir)
     }
 
     fn sync_data(&self, path: &Path) -> io::Result<()> {
-        File::open(path)?.sync_data()
+        flush(&File::open(path)?, path, SyncKind::FileData)
     }
 
     fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
@@ -499,6 +502,128 @@ fn parent_dir(path: &Path) -> &Path {
         Some(dir) if !dir.as_os_str().is_empty() => dir,
         _ => Path::new("."),
     }
+}
+
+/// The kind of flush, a private module so that only a `test-hooks` build exports it.
+mod sync_kind {
+    /// How [`RealFs`](super::RealFs) flushes something to stable storage.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
+    pub enum SyncKind {
+        /// A file's data and metadata (`sync_all`).
+        File,
+        /// A file's data (`sync_data`).
+        FileData,
+        /// A directory's entries (`sync_all` on the directory).
+        Dir,
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+pub use sync_kind::SyncKind;
+#[cfg(not(feature = "test-hooks"))]
+use sync_kind::SyncKind;
+
+/// Flushes `file`, opened at `path`, as `kind` says: every sync of [`RealFs`] goes through
+/// here, so that a sync watch ([`watch_syncs`], feature `test-hooks`) sees it, or drops it.
+fn flush(file: &File, path: &Path, kind: SyncKind) -> io::Result<()> {
+    if !observe(kind, path) {
+        return Ok(());
+    }
+    match kind {
+        SyncKind::File | SyncKind::Dir => file.sync_all(),
+        SyncKind::FileData => file.sync_data(),
+    }
+}
+
+/// A sync [`RealFs`] made, as a sync watch records it (feature `test-hooks`).
+#[cfg(feature = "test-hooks")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SyncCall {
+    /// How it flushed.
+    pub kind: SyncKind,
+    /// What it flushed: the path `RealFs` opened, as given (a temp file's own path).
+    pub path: PathBuf,
+}
+
+/// A watch on one thread's [`RealFs`] syncs: those made so far, and which one to drop.
+#[cfg(feature = "test-hooks")]
+struct SyncWatch {
+    dropped: Option<usize>,
+    seen: usize,
+    calls: Vec<SyncCall>,
+}
+
+#[cfg(feature = "test-hooks")]
+thread_local! {
+    /// This thread's sync watch, while [`watch_syncs`] runs.
+    static SYNC_WATCH: std::cell::RefCell<Option<SyncWatch>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+/// Runs `run` with this thread's [`RealFs`] syncs watched (feature `test-hooks`), and returns
+/// its result and the syncs made, in order. With `dropped` = `Some(k)` the k-th sync (from 0)
+/// is not made and not returned, as a `RealFs` without it would behave: a test plants a dropped
+/// sync this way. Watches do not nest; a panic in `run` ends the watch.
+#[cfg(feature = "test-hooks")]
+pub fn watch_syncs<T>(dropped: Option<usize>, run: impl FnOnce() -> T) -> (T, Vec<SyncCall>) {
+    /// Ends the watch when dropped, on a panic too.
+    struct End;
+    impl Drop for End {
+        fn drop(&mut self) {
+            SYNC_WATCH.with(|watch| watch.borrow_mut().take());
+        }
+    }
+
+    // 1. Start the watch.
+    SYNC_WATCH.with(|watch| {
+        let mut watch = watch.borrow_mut();
+        assert!(watch.is_none(), "sync watches do not nest");
+        *watch = Some(SyncWatch {
+            dropped,
+            seen: 0,
+            calls: Vec::new(),
+        });
+    });
+    let _end = End;
+
+    // 2. Run, then take what it synced.
+    let out = run();
+    let calls = SYNC_WATCH
+        .with(|watch| watch.borrow_mut().take())
+        .map(|watch| watch.calls)
+        .unwrap_or_default();
+    (out, calls)
+}
+
+/// Records a sync of `kind` on `path` in this thread's watch, if one runs, and whether to make
+/// it: `false` for the one the watch drops.
+#[cfg(feature = "test-hooks")]
+fn observe(kind: SyncKind, path: &Path) -> bool {
+    SYNC_WATCH.with(|watch| {
+        let mut watch = watch.borrow_mut();
+        let Some(watch) = watch.as_mut() else {
+            return true;
+        };
+        let k = watch.seen;
+        watch.seen += 1;
+        if watch.dropped == Some(k) {
+            return false;
+        }
+        watch.calls.push(SyncCall {
+            kind,
+            path: path.to_path_buf(),
+        });
+        true
+    })
+}
+
+/// [`observe`] in a build without the `test-hooks` feature: every sync is made.
+#[cfg(not(feature = "test-hooks"))]
+const fn observe(_kind: SyncKind, _path: &Path) -> bool {
+    true
 }
 
 /// The directory of the object files, under a store's root ([`crate::Layout::objects_dir`]).
