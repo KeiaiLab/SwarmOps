@@ -8,6 +8,8 @@
 //!
 //! a mutation that succeeded, its lock still held ─▶ renew: read the last record (FsOps),
 //!   count, write a temp beside it, 0600, and rename it over (HostFs, no sync)
+//! ws create ─▶ renew_locking: the workspace's lock taken, then renew; a repeated create, which
+//!   changed nothing, writes only a record lost
 //! ws delete ─▶ remove
 //! ```
 //!
@@ -18,12 +20,14 @@
 //! holds no path, content or environment value. An older build's registry listing passes over
 //! `hold/`, as it does over `tmp/`: neither ends in `.json`.
 
+use std::fmt;
 use std::io::{self, Write as _};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
 use crate::Ctx;
+use crate::lock;
 use crate::registry::REGISTRY_DIR;
 use crate::state::WorkspaceFile;
 use crate::status;
@@ -125,6 +129,15 @@ impl<'a> Done<'a> {
     }
 }
 
+/// Whether a renew replaces a record already there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Replace {
+    /// It does: the mutation changed the workspace.
+    Always,
+    /// It does not: a repeated `ws create`, which changed nothing, writes only a record lost.
+    IfMissing,
+}
+
 /// One workspace's hold record. Times are Unix milliseconds.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 struct Hold {
@@ -204,8 +217,29 @@ pub(crate) fn renew(ctx: &Ctx<'_>, ws: &Workspace, done: &Done<'_>) {
     let bytes = serde_json::to_vec(&hold).expect("a hold record serializes");
     let dir = ctx.store_root.join(REGISTRY_DIR);
     if let Err(e) = ctx.host.write_private(&dir, &rel, &bytes) {
-        warn(&file.name, "written", &e);
+        warn(&file.name, "written", &e.kind());
     }
+}
+
+/// Renews workspace `ws`'s hold record as [`renew`] does, taking the workspace's lock for it, as
+/// every other mutation holds it when it renews: `ws create`, which takes none. `replace` says
+/// whether a record there is replaced. A lock not taken is a `warning:` line, never an error.
+pub(crate) fn renew_locking(ctx: &Ctx<'_>, ws: &Workspace, done: &Done<'_>, replace: Replace) {
+    // 1. The lock, so that no other mutation's renew runs beside this one.
+    let name = &ws.file.name;
+    let _held = match lock::acquire(&ws.dir) {
+        Ok(held) => held,
+        Err(e) => {
+            warn(name, "written", &e.code);
+            return;
+        }
+    };
+
+    // 2. A record there kept when asked; else renewed.
+    if replace == Replace::IfMissing && read(ctx, name).is_some() {
+        return;
+    }
+    renew(ctx, ws, done);
 }
 
 /// Removes workspace `name`'s hold record, if there is one; a failure is a `warning:` line.
@@ -217,7 +251,7 @@ pub(crate) fn remove(ctx: &Ctx<'_>, name: &str) {
     match ctx.host.remove_file(&dir, &rel) {
         Ok(()) => {}
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => warn(name, "removed", &e),
+        Err(e) => warn(name, "removed", &e.kind()),
     }
 }
 
@@ -270,13 +304,12 @@ fn rel(name: &str) -> Option<String> {
     one.then(|| format!("{HOLD_DIR}/{name}.json"))
 }
 
-/// Says on stderr that workspace `name`'s record was not `what`: the error's kind, never its
-/// text, which may name a host path.
-fn warn(name: &str, what: &str, e: &io::Error) {
+/// Says on stderr that workspace `name`'s record was not `what`, and `why`: an error's kind or
+/// code, never its text, which may name a host path.
+fn warn(name: &str, what: &str, why: &dyn fmt::Display) {
     let _ = writeln!(
         io::stderr().lock(),
-        "warning: the hold record of workspace {name:?} was not {what}: {}",
-        e.kind()
+        "warning: the hold record of workspace {name:?} was not {what}: {why}"
     );
 }
 

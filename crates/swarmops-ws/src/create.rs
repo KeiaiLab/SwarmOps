@@ -22,7 +22,7 @@ use serde_json::{Map, Value};
 use swarmops_api::{ErrorCode, InfoReq, OpError, ResolveRevReq, RevKind, WsCreateReq, WsInfo};
 use swarmops_store::FsMethod;
 
-use crate::hold::{self, Done, Op};
+use crate::hold::{self, Done, Op, Replace};
 use crate::hostfs::{self, HostFs};
 use crate::list;
 use crate::materialize::{self, Start};
@@ -156,7 +156,8 @@ pub fn create(ctx: &Ctx<'_>, req: WsCreateReq) -> Result<WsInfo, OpError> {
     Ok(answer(ctx, &ws, true, req.status_after))
 }
 
-/// What `ws create` answers for `ws`, its hold record written last.
+/// What `ws create` answers for `ws`, its hold record written last under the workspace's lock;
+/// a create that found the workspace there keeps the record its last mutation wrote.
 fn answer(
     ctx: &Ctx<'_>,
     ws: &Workspace,
@@ -166,7 +167,12 @@ fn answer(
     let mut out = list::described(&ws.file.name, &ws.dir, &ws.file);
     out.created = created;
     out.status_after = after::attach(ctx, ws, status_after);
-    hold::renew(ctx, ws, &Done::new(Op::Create, &ws.file.head));
+    let replace = if created {
+        Replace::Always
+    } else {
+        Replace::IfMissing
+    };
+    hold::renew_locking(ctx, ws, &Done::new(Op::Create, &ws.file.head), replace);
     out
 }
 

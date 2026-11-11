@@ -24,6 +24,9 @@ use crate::fixture::{AGENT, Fixture, Put, write};
 /// The lease of a hold, in milliseconds.
 const LEASE_MS: u64 = swarmops_ws::WS_LEASE_S * 1_000;
 
+/// How long a test holds a workspace's lock while a create runs beside it.
+const LOCK_HELD: std::time::Duration = std::time::Duration::from_millis(300);
+
 /// The environment variable that makes a test the child its parent runs.
 const CHILD: &str = "SWARMOPS_TEST_HOLD_CHILD";
 
@@ -434,4 +437,52 @@ fn no_write_or_sync_names_the_hold() {
         let method = found.unwrap_or_else(|| panic!("unknown method in {call:?}"));
         assert!(!method.is_mutating(), "{call:?} writes or syncs the hold");
     }
+}
+
+/// `ws create` writes the record holding the workspace's lock, as every other mutation does:
+/// while another holds it, no record is written; once it lets go, the create writes it.
+#[test]
+fn ws_create_renew_takes_the_lock() {
+    // 1. The workspace's directory, holding only its `.swarmws/`, its lock held here.
+    let f = Fixture::new();
+    let base = f.commit(None, &[Put::File("src/a.txt", "a\n")]);
+    let dir = f.beside("w");
+    std::fs::create_dir_all(dir.join(".swarmws")).unwrap();
+    let held = swarmops_ws::lock::acquire(&dir).unwrap();
+
+    // 2. The create, beside: no record while the lock is held; one once it is let go.
+    std::thread::scope(|scope| {
+        let create = scope.spawn(|| f.create_in(&f.ctx(), "w", &base, &[]));
+        std::thread::sleep(LOCK_HELD);
+        assert!(
+            !hold_path(&f.root, "w").exists(),
+            "a record written without the lock"
+        );
+        drop(held);
+        create.join().unwrap().unwrap();
+    });
+    assert_eq!(hold(&f, "w")["last_op"], "create");
+}
+
+/// A repeated `ws create` of the same workspace changes nothing, so it leaves the record as the
+/// last mutation wrote it, byte for byte; a record lost is written again.
+#[test]
+fn a_repeated_create_keeps_the_record() {
+    // 1. A workspace whose last mutation is a snapshot.
+    let f = Fixture::new();
+    let base = worked(&f, "w", 1);
+    write(&f.beside("w"), "src/a.txt", "later\n");
+    swarmops_ws::snapshot(&f.ctx(), WsSnapshotReq::new("w")).unwrap();
+    let path = hold_path(&f.root, "w");
+    let before = std::fs::read(&path).unwrap();
+
+    // 2. Created again: `created: false`, the record untouched.
+    let info = f.create("w", &base, &[]);
+    assert!(!info.created);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+
+    // 3. The record lost, created again: written.
+    std::fs::remove_file(&path).unwrap();
+    f.create("w", &base, &[]);
+    assert_eq!(hold(&f, "w")["last_op"], "create");
 }
