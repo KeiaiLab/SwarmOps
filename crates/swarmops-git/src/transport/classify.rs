@@ -8,6 +8,11 @@
 //!                                          !  [rejected] (stale info)              → Stale
 //!                                             [rejected] (non-fast-forward | fetch first)
 //!                                                                                  → NotFastForward
+//!                                             [remote rejected] (stale: … fetch first), or
+//!                                               (failed to update ref) with this ref's lost lock
+//!                                                                                  → Stale
+//!                                             [remote rejected] (unpacker error)  → stderr's row,
+//!                                               but not Disconnected when our pack-objects died
 //!                                             anything else                        → Rejected declined
 //!   no line, or another command:  stderr against ROWS, in order  → Sha256 | Rejected | Unreachable
 //!                                 no row                         → Rejected unclassified
@@ -156,19 +161,29 @@ pub(super) struct Said<'a> {
 
 /// What a failed command's `said` means, by the first row of [`ROWS`] that matches.
 pub(super) fn failure(said: &Said<'_>) -> TransportError {
+    match row(said) {
+        Some(verdict) => judged(verdict, Vec::new(), said),
+        None => rejected(RejectReason::Unclassified, Vec::new(), said),
+    }
+}
+
+/// The verdict of the first row of [`ROWS`] that matches `said`'s stderr.
+fn row(said: &Said<'_>) -> Option<Verdict> {
     let text = format!("\n{}", said.stderr.to_ascii_lowercase());
-    let verdict = ROWS
-        .iter()
+    ROWS.iter()
         .find(|(needles, _)| needles.iter().any(|needle| text.contains(needle)))
-        .map(|(_, verdict)| *verdict);
+        .map(|(_, verdict)| *verdict)
+}
+
+/// The error `verdict` names; a refusal carries `refs`.
+fn judged(verdict: Verdict, refs: Vec<(String, String)>, said: &Said<'_>) -> TransportError {
     match verdict {
-        Some(Verdict::Sha256) => TransportError::Sha256,
-        Some(Verdict::Unreachable(cause)) => TransportError::Unreachable {
+        Verdict::Sha256 => TransportError::Sha256,
+        Verdict::Unreachable(cause) => TransportError::Unreachable {
             cause,
             stderr_tail: tail(said.stderr),
         },
-        Some(Verdict::Rejected(reason)) => rejected(reason, Vec::new(), said),
-        None => rejected(RejectReason::Unclassified, Vec::new(), said),
+        Verdict::Rejected(reason) => rejected(reason, refs, said),
     }
 }
 
@@ -228,7 +243,67 @@ fn refused(summary: &str, dst: &str, branch: &str, said: &Said<'_>) -> Transport
         };
     }
     let refs = vec![(dst.to_owned(), reason.to_owned())];
+    if ours {
+        return rejected(RejectReason::Declined, refs, said);
+    }
+
+    // 1. The remote lost a race for the ref: serve's hook saw it move, or receive-pack lost
+    //    the ref's lock to another push. The lease reads it as stale.
+    let serve_stale = reason.starts_with(SERVE_STALE) && reason.ends_with(FETCH_FIRST);
+    let lock_lost = reason == LOCK_FAILED && lost_lock(said.stderr, dst);
+    if serve_stale || lock_lost {
+        return TransportError::Stale {
+            branch: branch.to_owned(),
+        };
+    }
+
+    // 2. The remote could not unpack what we sent: the stderr says why, unless our own
+    //    pack-objects died (the remote saw the end of a stream nothing cut).
+    if reason == UNPACKER_ERROR {
+        let local = said.stderr.to_ascii_lowercase().contains(PACK_DIED);
+        match row(said) {
+            Some(Verdict::Unreachable(Cause::Disconnected)) if local => {}
+            Some(verdict) => return judged(verdict, refs, said),
+            None => {}
+        }
+    }
     rejected(RejectReason::Declined, refs, said)
+}
+
+/// serve's hook reason for a ref that moved: `stale: <ref> moved; fetch first`.
+const SERVE_STALE: &str = "stale: ";
+const FETCH_FIRST: &str = "fetch first";
+
+/// receive-pack's reason for a ref it could not move; its stderr says why.
+const LOCK_FAILED: &str = "failed to update ref";
+
+/// receive-pack's reason for a pack it could not unpack.
+const UNPACKER_ERROR: &str = "unpacker error";
+
+/// Our own pack-objects' end, lower-cased: `error: pack-objects died of signal 9`.
+const PACK_DIED: &str = "pack-objects died";
+
+/// The lengths of a SHA-1 and a SHA-256 object id in hex.
+const OID_HEX: [usize; 2] = [40, 64];
+
+/// Whether `stderr` says `dst`'s lock was lost to another push:
+/// `cannot lock ref '<dst>': is at <hex> but expected <hex>`.
+fn lost_lock(stderr: &str, dst: &str) -> bool {
+    let head = format!("cannot lock ref '{dst}': is at ");
+    stderr.lines().any(|line| {
+        let Some((_, rest)) = line.split_once(&head) else {
+            return false;
+        };
+        let Some((at, expected)) = rest.split_once(" but expected ") else {
+            return false;
+        };
+        is_oid(at) && is_oid(expected.trim_end())
+    })
+}
+
+/// Whether `text` is an object id in hex.
+fn is_oid(text: &str) -> bool {
+    OID_HEX.contains(&text.len()) && text.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// [`TransportError::Rejected`] for `reason`, with `refs` and what `said` holds.
@@ -507,6 +582,137 @@ fatal: Could not read from remote repository.";
                 ..
             })
         ));
+    }
+
+    /// The branch of the race tests, and its ref.
+    const MAIN: &str = "main";
+    const DST: &str = "refs/heads/main";
+
+    /// What a push refused with `summary` on `DST` gives, `stderr` from a git that exited 1.
+    fn refused_with(summary: &str, stderr: &str) -> Result<PushOutcome, TransportError> {
+        let porcelain = format!("To u\n!\tabc:{DST}\t{summary}\nDone\n");
+        let said = Said {
+            exit: Some(1),
+            stderr,
+            token_env_unset: false,
+        };
+        pushed(&porcelain, DST, MAIN, &said)
+    }
+
+    /// The reason a refused push classifies as, and the refs it names, or a panic.
+    fn declined_refs(summary: &str, stderr: &str) -> (RejectReason, Vec<(String, String)>) {
+        match refused_with(summary, stderr) {
+            Err(TransportError::Rejected { reason, refs, .. }) => (reason, refs),
+            other => panic!("{summary:?} {stderr:?}: {other:?}"),
+        }
+    }
+
+    /// The stale outcome of `MAIN`.
+    fn stale() -> Result<PushOutcome, TransportError> {
+        Err(TransportError::Stale {
+            branch: MAIN.to_owned(),
+        })
+    }
+
+    #[test]
+    fn serve_stale_is_stale() {
+        // serve's pre-receive hook refuses a ref that moved since the advertisement.
+        let summary = "[remote rejected] (stale: refs/heads/main moved; fetch first)";
+        assert_eq!(refused_with(summary, ""), stale());
+    }
+
+    #[test]
+    fn lock_race_is_stale() {
+        // 1. Probe 4e: receive-pack lost the ref lock to another push, SHA-1.
+        let summary = "[remote rejected] (failed to update ref)";
+        let sha1 = "remote: error: cannot lock ref 'refs/heads/main': is at 4b56fe10d1cb715b57e0dd432b24f2a0c613de86 but expected c58be8c9a8644805c530f1f7572f18489cbcaded        \nerror: failed to push some refs to 'ssh://remote.invalid/acme.git'\n";
+        assert_eq!(refused_with(summary, sha1), stale());
+
+        // 2. The same race in a SHA-256 repository.
+        let at = "a".repeat(64);
+        let expected = "b".repeat(64);
+        let sha256 = format!(
+            "remote: error: cannot lock ref 'refs/heads/main': is at {at} but expected {expected}\n"
+        );
+        assert_eq!(refused_with(summary, &sha256), stale());
+
+        // 3. Another ref's race is not this ref's.
+        let other = sha1.replace("refs/heads/main", "refs/heads/other");
+        assert_eq!(
+            declined_refs(summary, &other).0,
+            RejectReason::Declined,
+            "{other:?}"
+        );
+    }
+
+    #[test]
+    fn a_lock_failure_that_is_no_race_stays_declined() {
+        // A lock file left behind, a ref in the way of another, a bare failure, GitHub's wording.
+        let failed = "[remote rejected] (failed to update ref)";
+        let cases = [
+            (
+                failed,
+                "remote: error: cannot lock ref 'refs/heads/main': Unable to create '/srv/r.git/refs/heads/main.lock': File exists.\n",
+            ),
+            (
+                failed,
+                "remote: error: cannot lock ref 'refs/heads/a/b': 'refs/heads/a' exists; cannot create 'refs/heads/a/b'\n",
+            ),
+            (failed, ""),
+            ("[remote rejected] (incorrect old value provided)", ""),
+        ];
+        for (summary, stderr) in cases {
+            assert_eq!(
+                declined_refs(summary, stderr).0,
+                RejectReason::Declined,
+                "{summary:?} {stderr:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cut_send_is_disconnected() {
+        // 1. Probe 7k: the upload cut after 300 KB, the remote alive.
+        let summary = "[remote rejected] (unpacker error)";
+        let cut = "remote: fatal: early EOF        \nerror: remote unpack failed: unpack-objects abnormal exit\nerror: failed to push some refs to 'ssh://remote.invalid/acme.git'\n";
+        assert!(
+            matches!(
+                refused_with(summary, cut),
+                Err(TransportError::Unreachable {
+                    cause: Cause::Disconnected,
+                    ..
+                })
+            ),
+            "{cut:?}"
+        );
+
+        // 2. A pack the remote's fsck refused stays bad objects.
+        let fsck = format!("remote: fatal: fsck error in packed object\n{cut}");
+        assert_eq!(declined_refs(summary, &fsck).0, RejectReason::BadObjects);
+
+        // 3. An unpacker error no row explains stays the remote's reason.
+        let odd = "error: remote unpack failed: index-pack abnormal exit\n";
+        assert_eq!(
+            declined_refs(summary, odd),
+            (
+                RejectReason::Declined,
+                vec![(DST.to_owned(), "unpacker error".to_owned())]
+            )
+        );
+    }
+
+    #[test]
+    fn a_local_pack_failure_is_not_disconnected() {
+        // Our own pack-objects died: the remote saw the stream end, nothing on the wire failed.
+        let summary = "[remote rejected] (unpacker error)";
+        let died = "error: pack-objects died of signal 9\nremote: fatal: early EOF        \nerror: remote unpack failed: unpack-objects abnormal exit\nerror: failed to push some refs to 'ssh://remote.invalid/acme.git'\n";
+        assert_eq!(
+            declined_refs(summary, died),
+            (
+                RejectReason::Declined,
+                vec![(DST.to_owned(), "unpacker error".to_owned())]
+            )
+        );
     }
 
     #[test]
