@@ -551,27 +551,23 @@ impl Fact {
     /// took.
     fn decode(buf: &[u8]) -> Result<(Fact, usize), BadRecord> {
         // 1. The envelope.
-        let mut r = Reader::new(buf, bad_record);
-        let kind = FactKind::from_code(r.u8()?).ok_or(bad_record(0))?;
-        let ty_at = r.pos();
-        let ty = r.u8()?;
-        let len_at = r.pos();
-        let body_len = usize::from(u16::from_le_bytes(r.array()?));
-        let subject = r.array()?;
-        let other = r.array()?;
-        let ts = r.i64_le()?;
-        let actor = r.string()?;
+        let (envelope, used) = Envelope::decode(buf)?;
+        let Envelope {
+            kind,
+            ty,
+            subject,
+            other,
+            ts,
+            actor,
+            body,
+        } = envelope;
 
         // 2. The body, which its kind and type lay out, exactly.
-        let fields = kind.body(ty).ok_or(bad_record(ty_at))?;
-        if body_len > MAX_FACT_BODY {
-            return Err(bad_record(len_at));
-        }
+        let fields = kind.body(ty).ok_or(bad_record(TY_AT))?;
         if !other_fits(kind, &other) {
             return Err(bad_record(OTHER_AT));
         }
-        let body_at = r.pos();
-        let body = r.bytes(body_len)?;
+        let body_at = used - body.len();
         check_body(fields, body).map_err(|e| bad_record(body_at + e.at))?;
         let fact = Fact {
             kind,
@@ -582,10 +578,72 @@ impl Fact {
             actor,
             body: body.to_vec(),
         };
-        Ok((fact, r.pos()))
+        Ok((fact, used))
     }
 
     /// Appends its encoding to `out`; [`Fact::new`] checked every length.
+    fn encode(&self, out: &mut Vec<u8>) {
+        let envelope = Envelope {
+            kind: self.kind,
+            ty: self.ty,
+            subject: self.subject,
+            other: self.other,
+            ts: self.ts,
+            actor: self.actor.clone(),
+            body: &self.body,
+        };
+        envelope.encode(out);
+    }
+}
+
+/// Where in a fact its type byte is, and its body length.
+const TY_AT: usize = 1;
+const BODY_LEN_AT: usize = 2;
+
+/// A fact's envelope (the FORMAT 3 design §2.8, confirmed at v0.12.0), its body taken as bytes
+/// no kind's layout is checked against: `u8 kind | u8 type | u16le body_len | subject[32] |
+/// other[32] | i64le ts | u8 actor_len | actor | body`. [`Fact`]'s codec is this one, then its
+/// body's check; a kind's body layout is provisional, the envelope is not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Envelope<'a> {
+    kind: FactKind,
+    ty: u8,
+    subject: [u8; 32],
+    other: [u8; 32],
+    ts: i64,
+    actor: String,
+    body: &'a [u8],
+}
+
+impl<'a> Envelope<'a> {
+    /// The envelope at the start of `buf`, and how many bytes it took: a kind byte that names
+    /// a fact kind, a body of at most [`MAX_FACT_BODY`] bytes, an actor in UTF-8.
+    fn decode(buf: &'a [u8]) -> Result<(Envelope<'a>, usize), BadRecord> {
+        let mut r = Reader::new(buf, bad_record);
+        let kind = FactKind::from_code(r.u8()?).ok_or(bad_record(0))?;
+        let ty = r.u8()?;
+        let body_len = usize::from(u16::from_le_bytes(r.array()?));
+        if body_len > MAX_FACT_BODY {
+            return Err(bad_record(BODY_LEN_AT));
+        }
+        let subject = r.array()?;
+        let other = r.array()?;
+        let ts = r.i64_le()?;
+        let actor = r.string()?;
+        let body = r.bytes(body_len)?;
+        let envelope = Envelope {
+            kind,
+            ty,
+            subject,
+            other,
+            ts,
+            actor,
+            body,
+        };
+        Ok((envelope, r.pos()))
+    }
+
+    /// Appends its encoding to `out`; the caller checked the body's and the actor's lengths.
     fn encode(&self, out: &mut Vec<u8>) {
         let body_len = u16::try_from(self.body.len()).expect("a body of at most 4,096 bytes");
         let actor_len = u8::try_from(self.actor.len()).expect("an actor of at most 255 bytes");
@@ -597,7 +655,7 @@ impl Fact {
         out.extend_from_slice(&self.ts.to_le_bytes());
         out.push(actor_len);
         out.extend_from_slice(self.actor.as_bytes());
-        out.extend_from_slice(&self.body);
+        out.extend_from_slice(self.body);
     }
 }
 
@@ -1350,6 +1408,71 @@ mod tests {
             "",
             &free_text
         )));
+    }
+
+    /// The envelope golden (`envelope.hex`, the FORMAT 3 design §2.8, confirmed): each line
+    /// decodes by the envelope alone, its body opaque bytes of no kind's layout, and encodes back
+    /// to itself; a flipped byte reads as another envelope or none; a fact's encoding is its
+    /// envelope around its body.
+    #[test]
+    fn the_envelope_matches_its_golden() {
+        // 1. The golden: two lines of hex, an envelope filled and an empty one.
+        let golden = include_str!("../../tests/golden3/envelope.hex");
+        let lines: Vec<Vec<u8>> = (golden.lines())
+            .map(|line| {
+                (0..line.len())
+                    .step_by(2)
+                    .map(|at| u8::from_str_radix(&line[at..at + 2], 16).unwrap())
+                    .collect()
+            })
+            .collect();
+        let wants = [
+            ([9; 32], "agent/one", &b"opaque\x00\xff"[..]),
+            ([0; 32], "", &b""[..]),
+        ];
+        assert_eq!(lines.len(), wants.len());
+
+        // 2. Each decodes to its fields and encodes back.
+        for (line, (other, actor, body)) in lines.iter().zip(wants) {
+            let (envelope, used) = Envelope::decode(line).expect("an envelope");
+            assert_eq!(used, line.len());
+            assert_eq!(line.len(), 77 + actor.len() + body.len());
+            assert_eq!((envelope.kind, envelope.ty), (FactKind::Review, 0));
+            assert_eq!((envelope.subject, envelope.other), ([8; 32], other));
+            assert_eq!(envelope.ts, 1_700_000_123);
+            assert_eq!((envelope.actor.as_str(), envelope.body), (actor, body));
+            let mut again = Vec::new();
+            envelope.encode(&mut again);
+            assert_eq!(&again, line);
+
+            // A flipped byte: refused, or another envelope.
+            for at in 0..line.len() {
+                let mut flipped = line.clone();
+                flipped[at] ^= 0x01;
+                let read = Envelope::decode(&flipped).ok();
+                assert_ne!(read, Some((envelope.clone(), used)));
+            }
+        }
+
+        // 3. A fact's bytes are its envelope around its body.
+        let fact = Fact::new(
+            FactKind::Lineage,
+            2,
+            [1; 32],
+            [2; 32],
+            7,
+            "a".to_owned(),
+            vec![3; 32],
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        fact.encode(&mut bytes);
+        let (envelope, used) = Envelope::decode(&bytes).unwrap();
+        assert_eq!(used, bytes.len());
+        assert_eq!(
+            (envelope.body, envelope.actor.as_str()),
+            (&[3; 32][..], "a")
+        );
     }
 
     /// A header that checks but announces 0 or more than the bound is refused from the header.

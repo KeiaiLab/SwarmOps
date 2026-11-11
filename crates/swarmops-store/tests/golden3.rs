@@ -19,8 +19,8 @@ use std::sync::Arc;
 use camino::Utf8PathBuf;
 use swarmops_core::{ChangesetId, ObjectId};
 use swarmops_store::{
-    Base, Fact, FactKind, Frame, Layout, MAX_FACT_BODY, MetaStore, RealFs, Record,
-    SUPPORTED_FEATURES, StoreError, StoreFormat, StoreFs, UPGRADE_POISON_V3, read_format,
+    Base, Fact, FactKind, Frame, Layout, MetaStore, RealFs, Record, StoreError, StoreFormat,
+    StoreFs, UPGRADE_POISON_V3, read_format,
 };
 
 /// The nonce of the nonce frame and the entity id.
@@ -29,26 +29,11 @@ const NONCE: u64 = 0x1122_3344_5566_7788;
 /// The seq of the nonce frame and the entity id's frame.
 const SEQ: u64 = 3;
 
-/// The goldens whose codecs later slices write: built from the design's tables here, and checked
-/// byte for byte, but not yet decoded (so not in the flipped-byte check).
-const DECODED_LATER: [&str; 4] = ["manifest", "run_c", "run_f", "facts_col"];
-
 /// The directory, under `tests/golden3/`, of the goldens of fact bodies not yet released.
 const PROVISIONAL: &str = "provisional";
 
 /// The confirmed goldens: the design §6 table less the fact cells, plus the envelope.
 const CONFIRMED_COUNT: usize = 10;
-
-/// Each fact kind's feature name (the FORMAT 3 design §2.6).
-const KIND_FEATURES: [(FactKind, &str); 7] = [
-    (FactKind::Review, "review"),
-    (FactKind::Annotation, "annotation"),
-    (FactKind::Check, "check"),
-    (FactKind::Queue, "queue"),
-    (FactKind::Withdrawal, "withdrawal"),
-    (FactKind::Lineage, "lineage"),
-    (FactKind::Provenance, "provenance"),
-];
 
 /// Every (kind, type) cell of the design §2.8 table: 35.
 const CELLS: [(FactKind, u8); 35] = {
@@ -225,9 +210,6 @@ fn a_flipped_byte_in_any_golden_is_refused() {
     let provisional = names.iter().filter(|name| is_provisional(name)).count();
     assert_eq!(provisional, CELLS.len(), "every fact cell provisional");
     for name in &names {
-        if DECODED_LATER.contains(&name.as_str()) {
-            continue;
-        }
         let lines = read_golden(name);
         for (index, line) in lines.iter().enumerate() {
             let value = golden_value(name, index, line);
@@ -243,62 +225,6 @@ fn a_flipped_byte_in_any_golden_is_refused() {
             }
         }
     }
-}
-
-/// The envelope is confirmed whatever its body: the golden's bytes are the design §2.8
-/// envelope around an opaque body, and the encoder lays every cell's fact out the same way.
-#[test]
-fn the_envelope_matches_its_golden() {
-    let lines = read_golden("envelope");
-    assert_eq!(lines, envelopes(), "the golden's bytes");
-
-    // 1. 77 fixed bytes, then the actor, then the body.
-    for (line, (actor, body)) in lines.iter().zip(ENVELOPE_PARTS) {
-        assert_eq!(line.len(), 77 + actor.len() + body.len());
-        let value = envelope_value(line).expect("an envelope");
-        assert!(value.ends_with(&format!("{actor:?} {body:?}")), "{value}");
-    }
-    assert_eq!(MAX_FACT_BODY, 4_096);
-
-    // 2. Every cell's encoding is that envelope around its own body.
-    for (kind, ty) in CELLS {
-        for fill in [Fill::Full, Fill::Empty] {
-            let fact = fact(kind, ty, fill);
-            let mut bytes = Vec::new();
-            Record::Fact(fact.clone()).encode(&mut bytes).unwrap();
-            assert_eq!(bytes, envelope_of(&fact), "{kind:?} {ty}");
-        }
-    }
-}
-
-/// No fact body of a supported feature's kind is still provisional: once a feature is
-/// supported, its bodies are confirmed and their goldens leave `provisional/`.
-#[test]
-fn an_enabled_feature_has_no_provisional_golden() {
-    let offenders = provisional_offenders(SUPPORTED_FEATURES, &golden_names());
-    assert_eq!(offenders, Vec::<String>::new());
-}
-
-/// The detector's self-check: a supported feature whose goldens are still provisional is
-/// caught, and so is a supported feature no kind has (fail closed).
-#[test]
-fn the_provisional_detector_catches_a_planted_one() {
-    let names = golden_names();
-    let caught = provisional_offenders(&["review"], &names);
-    assert_eq!(caught.len(), 8, "{caught:?}");
-    assert!(caught.iter().all(|name| name.contains("fact_3_")));
-    assert_eq!(
-        provisional_offenders(&["nothing"], &names),
-        ["nothing: no fact kind"]
-    );
-
-    // The planted file alone, in a list without the real ones.
-    let planted = [format!("{PROVISIONAL}/fact_10_1")];
-    assert_eq!(provisional_offenders(&["provenance"], &planted), planted);
-    assert_eq!(
-        provisional_offenders(&["lineage"], &planted),
-        Vec::<String>::new()
-    );
 }
 
 /// A FORMAT 3 writer writes no `Compacted`: one past the base is not a record.
@@ -610,20 +536,6 @@ fn envelopes() -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// `fact`'s envelope around its body, built here field by field.
-fn envelope_of(fact: &Fact) -> Vec<u8> {
-    let (kind, ty) = (fact.kind().code(), fact.ty());
-    assert_eq!(fact.ts(), TS);
-    envelope(
-        kind,
-        ty,
-        fact.subject(),
-        fact.other(),
-        fact.actor(),
-        fact.body(),
-    )
-}
-
 /// The design §2.8 envelope: `u8 kind | u8 type | u16le body_len | subject | other | i64le ts |
 /// u8 actor_len | actor | body`, at [`TS`].
 fn envelope(
@@ -795,6 +707,9 @@ fn golden_value(name: &str, index: usize, line: &[u8]) -> Option<String> {
         "ckpt3" => ckpt3_value(line),
         "features" => features_value(line),
         "envelope" => envelope_value(line),
+        "manifest" => manifest_value(line),
+        "run_c" | "run_f" => run_value(line),
+        "facts_col" => facts_col_value(line),
         _ => {
             let (record, used) =
                 Record::decode_in(StoreFormat::V3, Base::After, &FactKind::ALL, line).ok()?;
@@ -872,6 +787,71 @@ fn frame_value(frame: &[u8]) -> Option<String> {
     })
 }
 
+/// A manifest's generation and runs, by the design §2.5 table, if its layout and CRC check.
+/// The store's own decoder is pinned to the same golden by its unit tests.
+fn manifest_value(bytes: &[u8]) -> Option<String> {
+    // 1. Magic, version, zeros; the length the count implies; the CRC of all before it.
+    let (body, crc) = bytes.split_last_chunk::<4>()?;
+    let count = usize::try_from(u32_at(body.get(..20)?, 16)).ok()?;
+    let fixed = body.starts_with(b"SWMF\x01\0\0\0") && body.len() == 20 + 24 * count;
+    if !fixed || u32::from_le_bytes(*crc) != crc32fast::hash(body) {
+        return None;
+    }
+
+    // 2. Each run: a domain byte, seven zero bytes, from, to.
+    let mut runs = Vec::new();
+    for entry in body[20..].chunks(24) {
+        let named = entry[0] <= 1 && entry[1..8] == [0; 7];
+        named.then_some(())?;
+        runs.push(format!(
+            "{} {} {}",
+            entry[0],
+            u64_at(entry, 8),
+            u64_at(entry, 16)
+        ));
+    }
+    Some(format!("gen {}: {}", u64_at(body, 8), runs.join(", ")))
+}
+
+/// A run's header fields, if its header, length and both CRCs check (the design §2.4 table).
+fn run_value(bytes: &[u8]) -> Option<String> {
+    // 1. The header and its CRC.
+    let header = bytes.get(..44)?;
+    let fixed = header.starts_with(b"SWRN\x01") && header[5] <= 1 && header[6..8] == [0, 0];
+    if !fixed || u32_at(header, 40) != crc32fast::hash(&header[..40]) {
+        return None;
+    }
+
+    // 2. The length its counts imply, and the CRC of both sections.
+    let n = u64_at(header, 24).checked_add(u64_at(header, 32))?;
+    let len = n.checked_mul(40)?.checked_add(48)?;
+    let (body, crc) = bytes.split_last_chunk::<4>()?;
+    if u64::try_from(bytes.len()).ok()? != len
+        || u32::from_le_bytes(*crc) != crc32fast::hash(&body[44..])
+    {
+        return None;
+    }
+    let fields: Vec<u64> = (8..40).step_by(8).map(|at| u64_at(header, at)).collect();
+    Some(format!("{} {fields:?}", header[5]))
+}
+
+/// The fact rows `bytes` hold (the design §2.8 `facts.col` table), if each is 24 bytes, names a
+/// fact kind and keeps its two zero bytes.
+fn facts_col_value(bytes: &[u8]) -> Option<String> {
+    let (rows, rest) = bytes.as_chunks::<24>();
+    if !rest.is_empty() {
+        return None;
+    }
+    let mut read = Vec::new();
+    for row in rows {
+        FactKind::from_code(row[12])?;
+        (row[14..16] == [0, 0]).then_some(())?;
+        let (offset, len, seq) = (u64_at(row, 0), u32_at(row, 8), u64_at(row, 16));
+        read.push(format!("{offset}+{len} {}.{} @{seq}", row[12], row[13]));
+    }
+    Some(read.join(", "))
+}
+
 fn records_value(records: &[Record]) -> String {
     format!("{records:?}")
 }
@@ -882,40 +862,24 @@ fn golden_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden3")
 }
 
-/// A cell's golden: under `provisional/` until its kind's feature is supported.
+/// A cell's golden, where it lies: under `provisional/` until its kind's feature is released,
+/// then in `tests/golden3/` (the store's unit test `an_enabled_feature_has_no_provisional_golden`
+/// keeps the two apart). Never in both; a cell in neither is under `provisional/`, where the
+/// regeneration writes it.
 fn fact_file(kind: FactKind, ty: u8) -> String {
     let file = format!("fact_{}_{ty}", kind.code());
-    let supported =
-        (KIND_FEATURES.iter()).any(|&(of, name)| of == kind && SUPPORTED_FEATURES.contains(&name));
-    if supported {
-        file
-    } else {
-        format!("{PROVISIONAL}/{file}")
-    }
+    let provisional = format!("{PROVISIONAL}/{file}");
+    let lies = |name: &str| golden_dir().join(format!("{name}.hex")).exists();
+    assert!(
+        !(lies(&file) && lies(&provisional)),
+        "{file} is both confirmed and provisional"
+    );
+    if lies(&file) { file } else { provisional }
 }
 
 /// Whether golden `name` is a provisional one.
 fn is_provisional(name: &str) -> bool {
     name.starts_with(&format!("{PROVISIONAL}/"))
-}
-
-/// The provisional goldens among `names` of a kind whose feature is in `supported`, and each
-/// supported feature no fact kind has: what [`an_enabled_feature_has_no_provisional_golden`]
-/// refuses.
-fn provisional_offenders(supported: &[&str], names: &[String]) -> Vec<String> {
-    let mut offenders = Vec::new();
-    for feature in supported {
-        // 1. A feature that names no kind: fail closed.
-        let Some((kind, _)) = KIND_FEATURES.iter().find(|(_, name)| name == feature) else {
-            offenders.push(format!("{feature}: no fact kind"));
-            continue;
-        };
-
-        // 2. Its kind's provisional goldens.
-        let stem = format!("{PROVISIONAL}/fact_{}_", kind.code());
-        offenders.extend(names.iter().filter(|name| name.starts_with(&stem)).cloned());
-    }
-    offenders
 }
 
 /// The names of the files of `tests/golden3/` and `tests/golden3/provisional/`, without

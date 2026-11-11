@@ -449,6 +449,75 @@ mod tests {
         assert!(Features::decode(&list(&names[..32])).is_ok());
     }
 
+    /// The directory of the provisional fact body goldens, under `tests/golden3/`.
+    const PROVISIONAL: &str = "provisional";
+
+    /// The provisional goldens among `files` (file names in `tests/golden3/provisional/`) of a
+    /// kind whose feature is in `supported`, and each supported feature no fact kind has: what
+    /// [`an_enabled_feature_has_no_provisional_golden`] refuses. A supported feature's bodies are
+    /// confirmed: its goldens leave `provisional/` (the FORMAT 3 design's amendment of
+    /// 2026-11-11, G9).
+    fn provisional_offenders(supported: &[&str], files: &[String]) -> Vec<String> {
+        let mut offenders = Vec::new();
+        for &feature in supported {
+            // 1. A feature that names no kind: fail closed.
+            let kind = FactKind::ALL
+                .into_iter()
+                .find(|&kind| feature_of(kind) == feature);
+            let Some(kind) = kind else {
+                offenders.push(format!("{feature}: no fact kind"));
+                continue;
+            };
+
+            // 2. Its kind's provisional goldens.
+            let stem = format!("fact_{}_", kind.code());
+            offenders.extend(files.iter().filter(|file| file.starts_with(&stem)).cloned());
+        }
+        offenders
+    }
+
+    /// The file names in `tests/golden3/provisional/`, sorted.
+    fn provisional_files() -> Vec<String> {
+        let dir = format!("{}/tests/golden3/{PROVISIONAL}", env!("CARGO_MANIFEST_DIR"));
+        let mut files: Vec<String> = std::fs::read_dir(dir)
+            .expect("tests/golden3/provisional/")
+            .map(|entry| entry.expect("an entry").file_name().into_string().unwrap())
+            .collect();
+        files.sort();
+        files
+    }
+
+    /// No fact body of a feature this build supports is still provisional: the build constant,
+    /// never the test seam's wider set.
+    #[test]
+    fn an_enabled_feature_has_no_provisional_golden() {
+        let offenders = provisional_offenders(SUPPORTED_FEATURES, &provisional_files());
+        assert_eq!(offenders, Vec::<String>::new());
+        assert_eq!(provisional_files().len(), 35, "the design §2.8's 35 cells");
+    }
+
+    /// The detector's self-check: a supported feature whose goldens are still provisional is
+    /// caught, and so is a supported feature no kind has (fail closed).
+    #[test]
+    fn the_provisional_detector_catches_a_planted_one() {
+        let files = provisional_files();
+        let caught = provisional_offenders(&["review"], &files);
+        assert_eq!(caught.len(), 8, "{caught:?}");
+        assert!(caught.iter().all(|file| file.starts_with("fact_3_")));
+        assert_eq!(
+            provisional_offenders(&["nothing"], &files),
+            ["nothing: no fact kind"]
+        );
+
+        // The planted file alone, in a list without the real ones.
+        let planted = ["fact_10_1.hex".to_owned()];
+        assert_eq!(provisional_offenders(&["provenance"], &planted), planted);
+        assert_eq!(
+            provisional_offenders(&["lineage"], &planted),
+            Vec::<String>::new()
+        );
+    }
+
     /// Each fact kind has a feature name of its own.
     #[test]
     fn each_kind_has_its_feature() {
