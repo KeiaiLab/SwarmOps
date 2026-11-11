@@ -263,6 +263,66 @@ fn remote_add_refuses_each_url_of_3_4() {
     assert!(!Path::new(store.path()).join(REMOTES_TOML).exists());
 }
 
+/// A token shaped as a remote's user name: long, letters and digits.
+const SECRET: &str = "tok0a1b2c3d4e5f6a7b8c9d0e";
+
+/// Every file under `root`, at any depth.
+fn files_under(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in fs::read_dir(&dir).expect("a readable dir") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                dirs.push(path);
+                continue;
+            }
+            files.push(path);
+        }
+    }
+    files
+}
+
+/// A URL holding a secret, as a password or as the user, is refused by `remote add` and by
+/// `clone` (`credential_in_url`); no file under the store or the clone's parent and nothing
+/// either command prints holds the secret's bytes. The same URL without the secret is accepted.
+#[test]
+fn a_secret_in_a_url_reaches_no_file_and_no_output() {
+    let remote = Remote::new();
+    let store = remote.store();
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let into = path_text(&dir.path().join("clone"));
+    let plain = remote.url();
+    let rest = plain.strip_prefix("http://").expect("an http URL");
+
+    // 1. Refused by both commands, each time for the credential; the output holds no secret.
+    for user in [format!("user:{SECRET}"), SECRET.to_owned()] {
+        let url = format!("http://{user}@{rest}");
+        let added = add(&store, ORIGIN, &url, &["--branch", "main"]);
+        let cloned = remote.run(&["--as", AGENT, "clone", &url, "--into", &into], &[]);
+        for refused in [added, cloned] {
+            let error = refused.err("E_INVALID_ARG");
+            assert_eq!(error["details"]["reason"], "credential_in_url", "{refused}");
+            assert!(!refused.stdout.contains(SECRET), "{refused}");
+            assert!(!refused.stderr.contains(SECRET), "{refused}");
+        }
+    }
+
+    // 2. No file of the store or under the clone's parent holds the secret's bytes.
+    let needle = SECRET.as_bytes();
+    for root in [Path::new(store.path()), dir.path()] {
+        for file in files_under(root) {
+            let bytes = fs::read(&file).expect("a readable file");
+            let found = bytes.windows(needle.len()).any(|window| window == needle);
+            assert!(!found, "the secret in {}", file.display());
+        }
+    }
+
+    // 3. The same URL without the secret is accepted.
+    let url = format!("http://user@{rest}");
+    add(&store, ORIGIN, &url, &["--branch", "main"]).ok();
+}
+
 /// `remote remove` drops the remote's line and its mirror refs (tracking refs and tags), and
 /// writes no changeset and moves no store ref; another remote's refs stay. A name the store
 /// does not have is `E_REMOTE_NOT_FOUND`.

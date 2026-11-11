@@ -21,6 +21,8 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 ### Fixed
 
+- `remote add` and `clone` refuse an `http://` or `https://` URL whose user is a token, as they
+  refused a password, with `E_INVALID_ARG` and `details.reason` `credential_in_url`.
 - The reference pages of the command and the MCP tool `ancestry` give the release it first shipped
   in, `since: "0.9.0"`, where they said 0.1.0.
 
