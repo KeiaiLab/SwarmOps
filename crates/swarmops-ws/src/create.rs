@@ -22,6 +22,7 @@ use serde_json::{Map, Value};
 use swarmops_api::{ErrorCode, InfoReq, OpError, ResolveRevReq, RevKind, WsCreateReq, WsInfo};
 use swarmops_store::FsMethod;
 
+use crate::hold::{self, Done, Op};
 use crate::hostfs::{self, HostFs};
 use crate::list;
 use crate::materialize::{self, Start};
@@ -155,7 +156,7 @@ pub fn create(ctx: &Ctx<'_>, req: WsCreateReq) -> Result<WsInfo, OpError> {
     Ok(answer(ctx, &ws, true, req.status_after))
 }
 
-/// What `ws create` answers for `ws`.
+/// What `ws create` answers for `ws`, its hold record written last.
 fn answer(
     ctx: &Ctx<'_>,
     ws: &Workspace,
@@ -165,6 +166,7 @@ fn answer(
     let mut out = list::described(&ws.file.name, &ws.dir, &ws.file);
     out.created = created;
     out.status_after = after::attach(ctx, ws, status_after);
+    hold::renew(ctx, ws, &Done::new(Op::Create, &ws.file.head));
     out
 }
 

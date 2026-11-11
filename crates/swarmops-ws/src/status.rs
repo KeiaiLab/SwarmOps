@@ -288,6 +288,28 @@ fn walk(
     }
 }
 
+/// The changesets on `head`'s first-parent history before `base`, at most [`BEHIND_CAP`]: a
+/// workspace's chain, which a hold record counts (the M21 design §10.4). None when the walk
+/// does not meet `base` within the cap; no store call when `head` is `base`.
+pub(crate) fn chain_len(
+    store: &dyn StoreOps,
+    head: &str,
+    base: &str,
+) -> Result<Option<u64>, OpError> {
+    if head == base {
+        return Ok(Some(0));
+    }
+    let mut count = 0;
+    let walked = walk(store, head, |id| {
+        let met = id == base;
+        if !met {
+            count += 1;
+        }
+        met
+    })?;
+    Ok((walked == Walked::Stopped).then_some(count))
+}
+
 /// A base its target left: the operations that put the target on the base and on its head.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Stale {

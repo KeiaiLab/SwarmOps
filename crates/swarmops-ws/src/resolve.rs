@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use swarmops_api::{ConflictReport, ErrorCode, OpError, Side, WsResolveReq, WsResolveResp};
 
+use crate::hold::{self, Done, Op};
 use crate::hostfs::HostKind;
 use crate::materialize;
 use crate::rebase;
@@ -105,6 +106,9 @@ pub fn resolve(ctx: &Ctx<'_>, req: WsResolveReq) -> Result<WsResolveResp, OpErro
         report.files.into_iter().map(|file| file.path).collect(),
     );
     out.status_after = after::attach(ctx, &ws, status_after);
+
+    // 5. The hold record, the lock still held.
+    hold::renew(ctx, &ws, &Done::new(Op::Resolve, &ws.file.head));
     Ok(out)
 }
 

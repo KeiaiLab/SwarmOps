@@ -5,6 +5,7 @@
 
 mod commit;
 mod fixture;
+mod hold;
 mod hook;
 mod land;
 mod materialize;

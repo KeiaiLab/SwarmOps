@@ -1034,10 +1034,14 @@ pub mod sweep {
         matches!(event, Event::Fs(m, n) if *m == method && n == name)
     }
 
-    /// Whether `event` changes the materialised tree itself (not `.swarmws/`).
+    /// Whether `event` changes the materialised tree itself (not `.swarmws/`, nor the hold
+    /// record beside the store's registry).
     fn is_tree_write(event: &Event) -> bool {
-        matches!(event, Event::Host(_, path) if !path.contains(SWARMWS_DIR))
+        matches!(event, Event::Host(_, path) if !path.contains(SWARMWS_DIR) && !path.contains(HOLD_DIR))
     }
+
+    /// The hold records' directory, as a host path names it.
+    const HOLD_DIR: &str = "/workspaces/hold/";
 
     /// The write-order rules of the M5 design's §2.4 over the events of one operation that
     /// changes the store; the broken rule's name in the error.

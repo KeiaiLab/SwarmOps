@@ -113,12 +113,15 @@ fn rebase_moves_the_workspace_to_h_prime_incrementally() {
     assert_eq!(parents_of(&f, &done.changeset), std::slice::from_ref(&main));
     assert_eq!(done.status_after.unwrap().changes, []);
 
-    // 4. Only main's two files were written, nothing removed.
-    let mut written: Vec<String> = (host.calls_of(HostMethod::WriteFile).iter())
+    // 4. Only main's two files were written, nothing removed; beside them the hold record.
+    let (written, held): (Vec<_>, Vec<_>) =
+        (host.calls_of(HostMethod::WriteFile).into_iter()).partition(|p| p.starts_with(&dir));
+    let mut written: Vec<String> = (written.iter())
         .map(|p| p.strip_prefix(&dir).unwrap().to_string())
         .collect();
     written.sort();
     assert_eq!(written, ["src/m20.rs", "src/new.rs"]);
+    assert_eq!(held, [f.root.join("workspaces/hold/w.json")]);
     assert_eq!(host.calls_of(HostMethod::RemoveFile).len(), 0);
 
     // 5. The workspace stands on H', rebased onto main, its edit kept and main's in.

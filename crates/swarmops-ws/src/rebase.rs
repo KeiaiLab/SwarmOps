@@ -46,6 +46,7 @@ use swarmops_api::{
 };
 use swarmops_store::FsMethod;
 
+use crate::hold::{self, Done, Op};
 use crate::hostfs::HostKind;
 use crate::land::REBASING;
 use crate::materialize;
@@ -83,25 +84,36 @@ pub fn rebase(ctx: &Ctx<'_>, req: WsRebaseReq) -> Result<WsRebaseResp, OpError> 
         ..
     } = req;
     let (mut ws, _held) = workspace::open_locked(ctx, &Locate::Name(workspace))?;
+    let from = ws.file.head.clone();
 
     // 2. The action; then the status after it.
+    let mut made = 0;
     let mut done = match action {
-        WsRebaseAction::Start => start(ctx, &mut ws, &onto, message)?,
+        WsRebaseAction::Start => start(ctx, &mut ws, &onto, message, &mut made)?,
         WsRebaseAction::Continue => resume(ctx, &mut ws)?,
         WsRebaseAction::Abort => abort(ctx, &mut ws)?,
         _ => return Err(io_error::unknown_variant("WsRebaseAction")),
     };
     done.status_after = after::attach(ctx, &ws, status_after);
+
+    // 3. The hold record, the lock still held: the commit `-m` made, the snapshot an update
+    //    took.
+    let mut renewed = Done::new(Op::Rebase, &from).made(made);
+    if done.snapshot.is_some() {
+        renewed = renewed.snapshot();
+    }
+    hold::renew(ctx, &ws, &renewed);
     Ok(done)
 }
 
 /// Starts a rebase of workspace `ws` onto the head of ref `onto`, its edits committed first with
-/// `message`, else refused.
+/// `message`, else refused; `made` counts that commit.
 fn start(
     ctx: &Ctx<'_>,
     ws: &mut Workspace,
     onto: &str,
     message: Option<String>,
+    made: &mut u64,
 ) -> Result<WsRebaseResp, OpError> {
     // 1. Not in a rebase already.
     if let State::Rebasing { .. } = ws.file.state {
@@ -127,7 +139,9 @@ fn start(
     // 3. A rebase cut short: its key and its snapshot; else the edits `-m` commits first.
     let cut = cut_short(ctx, ws, PendingOp::Rebase, STARTING)?;
     if cut.is_none() && message.is_some() {
+        let head = ws.file.head.clone();
         settle_edits(ctx, ws, message, &BTreeSet::new())?;
+        *made = u64::from(ws.file.head != head);
     }
 
     // 4. The pending record, durable before the store calls (WS1); the snapshot first, if any.

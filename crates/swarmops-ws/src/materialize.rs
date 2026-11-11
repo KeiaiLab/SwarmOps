@@ -38,6 +38,7 @@ use swarmops_api::{
 };
 use swarmops_core::{ObjectKind, RepoPath};
 
+use crate::hold::{self, Done, Op};
 use crate::hostfs::{self, HostFs, HostKind, HostMeta};
 use crate::pending::{self, Intent};
 use crate::portable::{self, HOST};
@@ -197,6 +198,9 @@ pub fn materialize(ctx: &Ctx<'_>, req: WsMaterializeReq) -> Result<WsMaterialize
 
     let mut out = WsMaterializeResp::new(added, written.bytes);
     out.status_after = after::attach(ctx, &ws, status_after);
+
+    // 5. The hold record, the lock still held.
+    hold::renew(ctx, &ws, &Done::new(Op::Materialize, &ws.file.head));
     Ok(out)
 }
 

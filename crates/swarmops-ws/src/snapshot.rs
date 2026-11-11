@@ -42,6 +42,7 @@ use swarmops_core::ObjectId;
 use swarmops_merge::conflict::ContentMerge;
 use swarmops_merge::diff3;
 
+use crate::hold::{self, Done, Op};
 use crate::materialize::{self, Tree};
 use crate::pending::{self, Pending, PendingOp};
 use crate::rebase;
@@ -180,12 +181,19 @@ pub fn snapshot(ctx: &Ctx<'_>, req: WsSnapshotReq) -> Result<WsSnapshotResp, OpE
     };
 
     // 3. The answer, then the status after it.
+    let mut renewed = Done::new(Op::Snapshot, &ws.file.head);
     let mut out = match taken {
-        Taken::New(id) => WsSnapshotResp::new(Some(id), SnapshotWrite::New),
+        Taken::New(id) => {
+            renewed = renewed.snapshot();
+            WsSnapshotResp::new(Some(id), SnapshotWrite::New)
+        }
         Taken::Same(id) => WsSnapshotResp::new(Some(id), SnapshotWrite::Same),
         Taken::Clean => WsSnapshotResp::new(None, SnapshotWrite::Clean),
     };
     out.status_after = after::attach(ctx, &ws, status_after);
+
+    // 4. The hold record, the lock still held: the time of a snapshot written.
+    hold::renew(ctx, &ws, &renewed);
     Ok(out)
 }
 

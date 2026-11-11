@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 
 use swarmops_api::{ErrorCode, OpError, WsDiscardReq, WsDiscardResp};
 
+use crate::hold::{self, Done, Op};
 use crate::hostfs::{HostFs, HostKind};
 use crate::materialize::{self, Item, Put, Tree};
 use crate::portable::{self, HOST};
@@ -49,6 +50,9 @@ pub fn discard(ctx: &Ctx<'_>, req: WsDiscardReq) -> Result<WsDiscardResp, OpErro
     let discarded = restore(ctx, &ws, &ws.file.head, &named)?;
     let mut out = WsDiscardResp::new(discarded.into_iter().collect());
     out.status_after = after::attach(ctx, &ws, status_after);
+
+    // 3. The hold record, the lock still held.
+    hold::renew(ctx, &ws, &Done::new(Op::Discard, &ws.file.head));
     Ok(out)
 }
 

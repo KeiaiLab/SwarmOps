@@ -30,6 +30,7 @@ use swarmops_api::{
 use swarmops_core::ObjectId;
 use swarmops_store::MAX_OBJECT_LEN;
 
+use crate::hold::{self, Done, Op};
 use crate::index::{Index, Row, UNCONFIRMED};
 use crate::io_error::unknown_variant;
 use crate::materialize;
@@ -94,10 +95,14 @@ pub fn commit(ctx: &Ctx<'_>, req: WsCommitReq) -> Result<WsCommitResp, OpError> 
     let modes = modes_of(modes)?;
     let (mut ws, _held) = workspace::open_locked(ctx, &Locate::Name(workspace))?;
     status::refuse_stale(ctx.store, &ws.file)?;
+    let from = ws.file.head.clone();
 
     // 2. The commit, then the status after it.
     let mut done = commit_with(ctx, &mut ws, message, &named, &modes, OffPrefixes::Refuse)?;
     done.status_after = after::attach(ctx, &ws, status_after);
+
+    // 3. The hold record, the lock still held.
+    hold::renew(ctx, &ws, &Done::new(Op::Commit, &from).made(1));
     Ok(done)
 }
 

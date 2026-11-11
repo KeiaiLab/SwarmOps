@@ -44,6 +44,7 @@ use swarmops_api::{
 
 use crate::check::{self, Subject};
 use crate::commit::{self, Edits};
+use crate::hold::{self, Done, Op};
 use crate::io_error::unknown_variant;
 use crate::materialize;
 use crate::pending::{self, Pending, PendingOp};
@@ -140,6 +141,7 @@ pub fn land(ctx: &Ctx<'_>, req: WsLandReq) -> Result<WsLandResp, OpError> {
 
     // 2. The workspace under its lock, not rebasing.
     let (mut ws, _held) = workspace::open_locked(ctx, &Locate::Name(workspace))?;
+    let from = ws.file.head.clone();
     if let State::Rebasing { .. } = ws.file.state {
         return Err(OpError::new(
             ErrorCode::UnresolvedConflicts,
@@ -215,6 +217,9 @@ pub fn land(ctx: &Ctx<'_>, req: WsLandReq) -> Result<WsLandResp, OpError> {
     };
     let mut out = WsLandResp::new(land, attempts);
     out.status_after = attached(&landing, status_after);
+
+    // 7. The hold record, the lock still held.
+    hold::renew(ctx, &landing.ws, &Done::new(Op::Land, &from));
     Ok(out)
 }
 

@@ -19,6 +19,7 @@ use serde_json::{Map, Value};
 use swarmops_api::{ErrorCode, OpError, StatusAfter, WsCommitReq, WsDeleteReq, WsDeleteResp};
 use swarmops_store::FsMethod;
 
+use crate::hold;
 use crate::hostfs::{self, HostFs, HostKind};
 use crate::lock::LOCK_FILE;
 use crate::materialize;
@@ -93,6 +94,9 @@ pub fn delete(ctx: &Ctx<'_>, req: WsDeleteReq) -> Result<WsDeleteResp, OpError> 
     remove_below(host, &ws.dir, ROOT, &[])?;
     remove_root(host, &ws.dir)?;
     Registry::open(&ctx.store_root, Arc::clone(&ctx.fs)).delete(&name)?;
+
+    // 6. The hold record, after the entry: a record without one is passed over.
+    hold::remove(ctx, &name);
     let mut out = WsDeleteResp::new(name, ws.file.head);
     out.rescued = rescued;
     Ok(out)
@@ -133,8 +137,9 @@ fn orphan(ctx: &Ctx<'_>, name: &str, gone: OpError) -> Result<WsDeleteResp, OpEr
         Err(e) => return Err(materialize::host_failed(".", &e)),
     }
 
-    // 3. The entry, after the directory (WS4).
+    // 3. The entry, after the directory (WS4); then the hold record.
     registry.delete(name)?;
+    hold::remove(ctx, name);
     Ok(WsDeleteResp::new(name.to_owned(), String::new()))
 }
 
