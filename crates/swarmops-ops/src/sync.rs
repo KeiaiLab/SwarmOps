@@ -662,18 +662,14 @@ impl Syncing<'_, '_> {
     }
 
     /// `e`, an error after this sync moved `main`, saying so; a refusal of the push hints at a
-    /// branch of one's own and a pull request.
+    /// branch of one's own, merged or landed on the remote.
     fn said(&self, mut e: OpError) -> OpError {
         if self.landed.is_none() {
             return e;
         }
         e.details.insert(MAIN_MOVED.to_owned(), Value::Bool(true));
         if e.code == ErrorCode::RemoteRejected.as_str() {
-            let remote = error::shell_word(&self.remote.name);
-            e.hint = Some(error::hint(format!(
-                "main holds the landed changes: swarmops push {remote} main:<a branch of yours>, \
-                 then open a pull request; to take main back, land a change that reverts them"
-            )));
+            e.hint = Some(policy_hint(&self.remote.name));
         }
         e
     }
@@ -744,4 +740,44 @@ fn remote_head(oid: GitOid, changeset: ChangesetId) -> RemoteHead {
 /// `n` as a count on the wire.
 fn to_u64(n: usize) -> u64 {
     u64::try_from(n).unwrap_or(u64::MAX)
+}
+
+/// The hint of a push to `remote` refused after the sync moved `main`. It fits a git host and a
+/// SwarmOps remote alike: neither a pull request nor a land ref is the only way.
+fn policy_hint(remote: &str) -> String {
+    let remote = error::shell_word(remote);
+    error::hint(format!(
+        "main holds the landed changes: swarmops push {remote} main:<a branch of yours>, \
+         then have it merged or landed on the remote (a pull request on a git host; on a \
+         SwarmOps remote, whoever holds the land grant); to take main back, land a change that \
+         reverts them"
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::policy_hint;
+
+    /// The hint names a branch of one's own, then a merge on a git host or a land on a SwarmOps
+    /// remote; no single host's way, and no land ref.
+    #[test]
+    fn the_policy_hint_names_no_single_host() {
+        let hint = policy_hint("origin");
+
+        // 1. The branch of one's own, and the way back.
+        assert!(
+            hint.contains("swarmops push origin main:<a branch of yours>"),
+            "{hint}"
+        );
+        assert!(hint.contains("land a change that reverts them"), "{hint}");
+
+        // 2. Both kinds of remote, neither alone.
+        assert!(hint.contains("a pull request on a git host"), "{hint}");
+        assert!(hint.contains("on a SwarmOps remote"), "{hint}");
+        assert!(hint.contains("land grant"), "{hint}");
+        assert!(!hint.contains("then open a pull request"), "{hint}");
+
+        // 3. No land ref until a push can reach one.
+        assert!(!hint.contains("refs/land"), "{hint}");
+    }
 }

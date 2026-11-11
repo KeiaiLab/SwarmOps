@@ -579,8 +579,9 @@ fn sync_push_refused_leaves_main_landed() {
     // The way back is a land: main moves only forward (the M15 design §4).
     assert_eq!(
         error["hint"],
-        "main holds the landed changes: swarmops push origin main:<a branch of yours>, then open \
-         a pull request; to take main back, land a change that reverts them",
+        "main holds the landed changes: swarmops push origin main:<a branch of yours>, then have \
+         it merged or landed on the remote (a pull request on a git host; on a SwarmOps remote, \
+         whoever holds the land grant); to take main back, land a change that reverts them",
         "{failed}"
     );
 
