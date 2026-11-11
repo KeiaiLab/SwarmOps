@@ -2519,7 +2519,7 @@ fn the_diff_tool_lists_and_runs() {
 /// A running `swarmops mcp`, and the client end of its stdio: requests written to its stdin a
 /// line each, replies read from its stdout a line each. Dropped, it is killed if it still runs,
 /// and reaped either way.
-struct Server {
+pub(crate) struct Server {
     child: Child,
     stdin: Option<ChildStdin>,
     /// The lines the server writes on stdout, as a thread reads them.
@@ -2534,17 +2534,21 @@ struct Server {
 
 /// One tool result, checked: the result itself, its structured content (an envelope), and its
 /// text block.
-struct ToolCall {
-    result: Value,
-    envelope: Value,
-    text: String,
+pub(crate) struct ToolCall {
+    pub(crate) result: Value,
+    pub(crate) envelope: Value,
+    pub(crate) text: String,
 }
 
 impl Server {
     /// `swarmops mcp`, then `args`, with the order check on, `env` set and no other `SWARMOPS_*`
     /// variable.
-    fn start(args: &[&str], env: &[(&str, &str)]) -> Server {
-        let mut command = Command::new(support::BIN);
+    pub(crate) fn start(args: &[&str], env: &[(&str, &str)]) -> Server {
+        Server::start_with(Command::new(support::BIN), args, env)
+    }
+
+    /// Starts `command`, the binary, as [`Server::start`] describes.
+    fn start_with(mut command: Command, args: &[&str], env: &[(&str, &str)]) -> Server {
         command.arg("mcp").args(args);
         for name in support::swarmops_vars() {
             command.env_remove(name);
@@ -2670,7 +2674,7 @@ impl Server {
 
     /// Opens a 2025-11-25 session: `initialize` and its result, then the initialized
     /// notification.
-    fn initialize(&mut self) -> Value {
+    pub(crate) fn initialize(&mut self) -> Value {
         let init = self.result(
             "initialize",
             json!({"protocolVersion": PREVIOUS, "capabilities": {}, "clientInfo": client_info()}),
@@ -2681,7 +2685,7 @@ impl Server {
 
     /// `tools/call` of `tool` with `arguments`, in the session `initialize` opened: the tool
     /// result, checked ([`check_tool_result`]).
-    fn call(&mut self, tool: &str, arguments: Value) -> ToolCall {
+    pub(crate) fn call(&mut self, tool: &str, arguments: Value) -> ToolCall {
         let mut params = json!({"name": tool});
         params["arguments"] = arguments;
         let result = self.result("tools/call", params);
@@ -2703,7 +2707,7 @@ impl Server {
     }
 
     /// The envelope of a call of `tool` that must succeed.
-    fn ok(&mut self, tool: &str, arguments: Value) -> Value {
+    pub(crate) fn ok(&mut self, tool: &str, arguments: Value) -> Value {
         let call = self.call(tool, arguments);
         assert_eq!(call.envelope["ok"], true, "{tool}: {}", call.envelope);
         call.envelope
@@ -2750,7 +2754,7 @@ impl Server {
     }
 
     /// [`Server::finish`], which must end in exit 0 with nothing on stderr.
-    fn finish_clean(self) {
+    pub(crate) fn finish_clean(self) {
         let (status, stderr) = self.finish();
         assert!(status.success(), "{status}: {stderr}");
         assert_eq!(stderr, "", "nothing on stderr");
