@@ -6,7 +6,7 @@
 //   ## Examples                          -> Tabs, one per `### CLI` / `### MCP`
 //   ## Errors                            -> each code a Badge linking to its entry
 //   docs/reference/cli.md command lists  -> CommandIndex, one table with a filter
-import { Fragment, isValidElement, type ComponentProps, type ReactNode } from 'react';
+import { Fragment, isValidElement, type ComponentProps, type ReactElement, type ReactNode } from 'react';
 import Link from 'next/link';
 import defaultMdxComponents from 'fumadocs-ui/mdx';
 import { headings } from '@/components/heading';
@@ -275,9 +275,18 @@ function commandIndex(blocks: Block[]): ReactNode {
   return out;
 }
 
-export function ReferenceBody({ page, kind }: { page: DocsPage; kind: PageKind }) {
+/** The blocks with `extra` after the first `# ` title, or first when there is none. */
+function withAfterTitle(blocks: Block[], extra: ReactElement | undefined): Block[] {
+  if (!extra) {
+    return blocks;
+  }
+  const titleAt = blocks.findIndex((block) => isA(block, base.h1));
+  return [...blocks.slice(0, titleAt + 1), extra as Block, ...blocks.slice(titleAt + 1)];
+}
+
+export function ReferenceBody({ page, kind, afterTitle }: { page: DocsPage; kind: PageKind; afterTitle?: ReactElement }) {
   const MDX = page.data.body;
-  const blocks = blocksOf(MDX({ components: markers }));
+  const blocks = withAfterTitle(blocksOf(MDX({ components: markers })), afterTitle);
 
   if (kind === PageKind.CommandIndex) {
     return <>{commandIndex(blocks)}</>;

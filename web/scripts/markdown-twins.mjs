@@ -10,7 +10,16 @@
 // The pages name their own source (components/view-markdown.tsx), so this script repeats none of
 // the path rules of lib/docs-paths.ts. A page without exactly one such link fails the build,
 // except the generated landing page, which has no source file.
-import { copyFileSync, existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+//
+// Each twin opens with the page's title and one line of facts read from the built page (the
+// `swarmops:release` meta tag and the page-meta line's data attributes), then the file's text:
+//
+//   # Install
+//
+//   > Release: 0.11.0 · Last changed: 2026-11-07 · Source: https://github.com/.../install.md
+//
+//   ...the rest of docs/guides/install.md, unchanged...
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 
 const WEB = path.resolve(import.meta.dirname, '..');
@@ -30,6 +39,16 @@ const SOURCES = /^(docs\/.+\.md|CHANGELOG\.md)$/;
 const LINK_TAG = /<a\s[^>]*data-markdown-source="[^"]*"[^>]*>/g;
 const HREF = /\shref="([^"]*)"/;
 const SOURCE = /\sdata-markdown-source="([^"]*)"/;
+
+// The facts of the twin's header: the release meta tag, then the page-meta line's attributes.
+const RELEASE_META = /<meta\s+name="swarmops:release"\s+content="([^"]*)"/;
+const META_TAG = /<[a-z]+\s[^>]*data-page-meta="[^"]*"[^>]*>/;
+const LAST_CHANGED = /\sdata-last-changed="([^"]*)"/;
+const SOURCE_URL = /\sdata-source-url="([^"]*)"/;
+
+// The source's title line: the first `# ` heading; what comes before it (a generator's comment)
+// is not part of the page.
+const TITLE_LINE = /^# .+$/m;
 
 // An absolute docs link in llms.txt: `](https://host/docs/path)`.
 const LLMS_DOCS_LINK = /\]\((https?:\/\/[^/)\s]+)(\/docs(?:\/[^)#\s]*)?)\)/g;
@@ -78,7 +97,49 @@ function twinOf(page) {
   if (!existsSync(from) || !statSync(from).isFile()) {
     throw new Error(`markdown-twins: ${page} names source ${source}, which does not exist`);
   }
-  return { url: href.slice(0, -MARKDOWN_EXT.length), from, to: path.join(OUT, href.slice(1)) };
+  return { url: href.slice(0, -MARKDOWN_EXT.length), from, to: path.join(OUT, href.slice(1)), facts: factsOf(page, html) };
+}
+
+/** `&amp;` and its kin back to text: attribute values come HTML-escaped. */
+function unescapeHtml(text) {
+  return text
+    .replaceAll('&quot;', '"')
+    .replaceAll('&#x27;', "'")
+    .replaceAll('&#39;', "'")
+    .replaceAll('&lt;', '<')
+    .replaceAll('&gt;', '>')
+    .replaceAll('&amp;', '&');
+}
+
+/** The release, last-change date ('' for a file git does not track yet) and source URL of a page. */
+function factsOf(page, html) {
+  const release = RELEASE_META.exec(html)?.[1];
+  const tag = META_TAG.exec(html)?.[0];
+  const sourceUrl = tag ? SOURCE_URL.exec(tag)?.[1] : undefined;
+  if (!release || !tag || !sourceUrl) {
+    throw new Error(`markdown-twins: ${page} lacks the release meta tag or the page-meta line`);
+  }
+  return {
+    release: unescapeHtml(release),
+    lastChanged: unescapeHtml(LAST_CHANGED.exec(tag)?.[1] ?? ''),
+    sourceUrl: unescapeHtml(sourceUrl),
+  };
+}
+
+/** The twin's text: title, the facts line, then the source after its title, unchanged. */
+function twinText(twin) {
+  const text = readFileSync(twin.from, 'utf8');
+  const title = TITLE_LINE.exec(text);
+  if (!title) {
+    throw new Error(`markdown-twins: ${twin.from} has no # title`);
+  }
+  const facts = [
+    `Release: ${twin.facts.release}`,
+    ...(twin.facts.lastChanged === '' ? [] : [`Last changed: ${twin.facts.lastChanged}`]),
+    `Source: ${twin.facts.sourceUrl}`,
+  ];
+  const body = text.slice(title.index + title[0].length).replace(/^\s*\n/, '');
+  return `${title[0]}\n\n> ${facts.join(' · ')}\n\n${body}`;
 }
 
 /** Points every docs link of llms.txt at its twin; a docs link without one fails. */
@@ -114,9 +175,9 @@ function main() {
     throw new Error('markdown-twins: no docs pages in out/; run `next build` first');
   }
 
-  // 2. Copy each source beside its page.
+  // 2. Write each twin beside its page.
   for (const twin of twins) {
-    copyFileSync(twin.from, twin.to);
+    writeFileSync(twin.to, twinText(twin));
   }
 
   // 3. llms.txt lists the twins.

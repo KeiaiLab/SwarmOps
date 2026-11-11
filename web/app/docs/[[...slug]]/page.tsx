@@ -1,19 +1,40 @@
-// One docs page: the repository Markdown as GitHub shows it (its own `# ` title included), with
-// breadcrumbs, the table of contents and a link to edit the file on GitHub.
+// One docs page: the repository Markdown as GitHub shows it (its own `# ` title included), framed
+// as the design's docs chrome:
+//
+//   Docs > Guides > Commit and land
+//   [GUIDE]
+//   # Commit and land
+//   Describes v0.11.0 · Last changed 2026-11-07 · View as Markdown · Copy Markdown
+//   ...page...
+//   Edit on GitHub · Report a problem with this page
+//   < Previous                                   Next >
+import type { ComponentProps } from 'react';
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
-import { DocsBody, DocsPage, EditOnGitHub } from 'fumadocs-ui/layouts/docs/page';
+import { DocsBody, DocsPage } from 'fumadocs-ui/layouts/docs/page';
 import { getMDXComponents } from '@/components/mdx';
 import { DocsLanding } from '@/components/docs-landing';
+import { KindBadge } from '@/components/docs/kind-badge';
+import { PageActions } from '@/components/docs/page-actions';
+import { PageMeta } from '@/components/docs/page-meta';
+import { headings } from '@/components/heading';
 import { ReferenceBody } from '@/components/reference/reference-body';
-import { ViewMarkdown } from '@/components/view-markdown';
-import { githubUrl } from '@/lib/docs-paths';
+import { twinUrl } from '@/components/view-markdown';
+import { githubUrl, pageKindOf } from '@/lib/docs-paths';
+import { lastChanged } from '@/lib/docs-meta';
 import { nodeText } from '@/lib/node-text';
 import { pageKind } from '@/lib/reference/pages';
+import { LATEST_RELEASE } from '@/lib/release';
 import { repoPath, source } from '@/lib/source';
 
-// The page title is the Markdown's own `# ` heading; the TOC lists the sections below it.
+// The page title is the Markdown's own `# ` heading; the TOC lists the sections below it, and
+// only on a page with enough of them to need one.
 const TOC_MIN_DEPTH = 2;
+const SECTION_DEPTH = 2;
+const TOC_MIN_SECTIONS = 3;
+
+// The twin's media type, for the page's `<link rel="alternate">`.
+const MARKDOWN_TYPE = 'text/markdown';
 
 interface Props {
   params: Promise<{ slug?: string[] }>;
@@ -31,19 +52,50 @@ export default async function Page({ params }: Props) {
     notFound();
   }
 
+  // 1. The page's facts: file, kind, release line, contents.
+  const file = repoPath(page.data);
   const MDX = page.data.body;
-  const kind = pageKind(repoPath(page.data));
+  const kind = pageKind(file);
+  const meta = (
+    <PageMeta key="page-meta" url={page.url} source={file} sourceUrl={githubUrl(file)} lastChanged={lastChanged(file)} />
+  );
   const toc = page.data.toc
     .filter((item) => item.depth >= TOC_MIN_DEPTH)
     .map((item) => ({ ...item, title: nodeText(item.title) }));
+  const sections = toc.filter((item) => item.depth === SECTION_DEPTH).length;
+
+  // 2. The meta line goes under the first `# `, the page's title.
+  let titled = false;
+  function Title(props: ComponentProps<'h1'>) {
+    if (titled) {
+      return <headings.h1 {...props} />;
+    }
+    titled = true;
+    return (
+      <>
+        <headings.h1 {...props} />
+        {meta}
+      </>
+    );
+  }
 
   return (
-    <DocsPage toc={toc} breadcrumb={{ includeRoot: true, includePage: true }}>
-      <ViewMarkdown url={page.url} source={repoPath(page.data)} />
+    <DocsPage
+      toc={toc}
+      tableOfContent={{ enabled: sections >= TOC_MIN_SECTIONS }}
+      tableOfContentPopover={{ enabled: sections >= TOC_MIN_SECTIONS }}
+      breadcrumb={{ includeRoot: true, includePage: true }}
+      footer={{ enabled: true }}
+    >
+      <KindBadge kind={pageKindOf(file)} />
       <DocsBody>
-        {kind ? <ReferenceBody page={page} kind={kind} /> : <MDX components={getMDXComponents()} />}
+        {kind ? (
+          <ReferenceBody page={page} kind={kind} afterTitle={meta} />
+        ) : (
+          <MDX components={getMDXComponents({ h1: Title })} />
+        )}
       </DocsBody>
-      <EditOnGitHub href={githubUrl(repoPath(page.data))} />
+      <PageActions source={file} />
     </DocsPage>
   );
 }
@@ -69,6 +121,7 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   return {
     title: page.data.title,
     description: page.data.description,
-    alternates: { canonical: page.url },
+    alternates: { canonical: page.url, types: { [MARKDOWN_TYPE]: twinUrl(page.url) } },
+    other: { 'swarmops:release': LATEST_RELEASE.version },
   };
 }
