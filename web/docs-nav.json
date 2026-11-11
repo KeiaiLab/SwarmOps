@@ -1,42 +1,88 @@
 {
-  "$comment": "Sidebar groups of /docs. Paths are from the repository root. A page joins the first group that lists it in `files` or holds it under one of its `dirs`; a page no group names joins `fallback`, so a new file under docs/ appears without an edit here. `files` also sets the order; the rest of a group follows alphabetically.",
+  "$comment": "Sidebar groups of /docs. Paths are from the repository root. A page joins the first group that lists it in `files` or holds it under one of its `dirs`; a page no group names joins `fallback`, so a new file under docs/ appears without an edit here. `files` also sets the order; the rest of a group follows alphabetically. `kind` is the page kind every page of the group shows (start, guide, concept, reference, operate, design); `kinds` overrides it for single files.",
   "groups": [
     {
-      "key": "get-started",
-      "title": "Get started",
+      "key": "start",
+      "title": "Start",
       "description": "Install, first commits, the ideas",
+      "kind": "start",
+      "kinds": { "docs/concepts.md": "concept" },
       "files": ["docs/guides/install.md", "docs/guides/quick-start.md", "docs/concepts.md"],
       "dirs": []
+    },
+    {
+      "key": "guides",
+      "title": "Guides",
+      "description": "One task each, start to finish",
+      "kind": "guide",
+      "files": [
+        "docs/guides/commit-and-land.md",
+        "docs/guides/parallel-agents.md",
+        "docs/guides/history-and-undo.md",
+        "docs/guides/git-round-trip.md",
+        "docs/guides/github-remote.md",
+        "docs/guides/claude-code.md"
+      ],
+      "dirs": ["docs/guides/"]
     },
     {
       "key": "develop",
       "title": "Develop",
       "description": "Agents and scripts on a store",
-      "files": [],
-      "dirs": ["docs/develop/", "docs/guides/"]
+      "kind": "guide",
+      "files": [
+        "docs/develop/mcp.md",
+        "docs/develop/cli-scripting.md",
+        "docs/agents.md",
+        "docs/develop/style.md"
+      ],
+      "dirs": ["docs/develop/"]
     },
     {
       "key": "operate",
       "title": "Operate",
       "description": "Run, back up, verify and repair stores",
-      "files": ["docs/operations.md", "docs/troubleshooting.md"],
+      "kind": "operate",
+      "files": [
+        "docs/operations.md",
+        "docs/operate/stores.md",
+        "docs/operate/install-and-upgrade.md",
+        "docs/operate/agents.md",
+        "docs/operate/daily-loop.md",
+        "docs/operate/build-and-test.md",
+        "docs/operate/one-writer-per-trunk.md",
+        "docs/operate/monitoring.md",
+        "docs/operate/limits.md",
+        "docs/operate/making-room.md",
+        "docs/operate/backup-and-restore.md",
+        "docs/operate/verify-and-repair.md",
+        "docs/operate/serve-over-ssh.md",
+        "docs/operate/serve-over-http.md",
+        "docs/operate/serve-differences.md",
+        "docs/troubleshooting.md"
+      ],
       "dirs": ["docs/operate/"]
     },
     {
       "key": "reference",
       "title": "Reference",
       "description": "Commands, MCP tools, errors, types",
+      "kind": "reference",
       "files": [],
       "dirs": ["docs/reference/"]
     },
     {
       "key": "project",
       "title": "Project",
-      "description": "Design, limits, performance, changes",
+      "description": "Goals, design, limits, measurements, changes",
+      "kind": "design",
       "files": [
+        "docs/goals.md",
+        "docs/roadmap.md",
         "docs/architecture.md",
         "docs/known-limitations.md",
         "docs/perf.md",
+        "docs/pilot.md",
         "CHANGELOG.md"
       ],
       "dirs": ["docs/policies/"]

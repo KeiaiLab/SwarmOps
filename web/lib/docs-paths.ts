@@ -26,15 +26,65 @@ export const ASSETS_ROUTE = '/assets/docs/';
 // Kept privately, or inputs another generator splices into pages: never pages themselves.
 const EXCLUDED_DIRS = ['docs/superpowers/', 'docs/reference/notes/', 'docs/examples/'];
 
+/** What a page is for: the badge above its title, the tag of a lookup hit. */
+export enum DocKind {
+  Start = 'Start',
+  Guide = 'Guide',
+  Concept = 'Concept',
+  Reference = 'Reference',
+  Operate = 'Operate',
+  Design = 'Design',
+}
+
+// The kind words of docs-nav.json.
+const KIND_WORDS: Record<string, DocKind> = {
+  start: DocKind.Start,
+  guide: DocKind.Guide,
+  concept: DocKind.Concept,
+  reference: DocKind.Reference,
+  operate: DocKind.Operate,
+  design: DocKind.Design,
+};
+
 export interface NavGroup {
   key: string;
   title: string;
   description: string;
+  kind: DocKind;
+  // Per-file overrides of `kind`: `docs/concepts.md` -> Concept.
+  kinds: Record<string, DocKind>;
   files: string[];
   dirs: string[];
 }
 
-export const NAV_GROUPS: NavGroup[] = nav.groups;
+/** A kind word of docs-nav.json; a missing or unknown word fails the build. */
+function kindOf(word: unknown, where: string): DocKind {
+  const kind = typeof word === 'string' ? KIND_WORDS[word] : undefined;
+  if (kind === undefined) {
+    throw new Error(`docs-nav.json: ${where}: kind ${JSON.stringify(word)} is not one of ${Object.keys(KIND_WORDS).join(', ')}`);
+  }
+  return kind;
+}
+
+/** docs-nav.json's groups, their kind words checked. */
+function navGroups(): NavGroup[] {
+  return nav.groups.map((group: Record<string, unknown>) => {
+    const key = String(group.key);
+    const kinds = Object.entries((group.kinds ?? {}) as Record<string, unknown>)
+      .map(([file, word]) => [file, kindOf(word, `group ${key}, ${file}`)]);
+    return {
+      key,
+      title: String(group.title),
+      description: String(group.description),
+      kind: kindOf(group.kind, `group ${key}`),
+      kinds: Object.fromEntries(kinds),
+      files: group.files as string[],
+      dirs: group.dirs as string[],
+    };
+  });
+}
+
+export const NAV_GROUPS: NavGroup[] = navGroups();
 const FALLBACK_GROUP = nav.fallback;
 
 /** Whether a repository path is a docs page. */
@@ -102,6 +152,21 @@ export function groupPath(repoPath: string): { group: string; path: string } | n
 
   // 3. Anything else: the fallback group, by its path under docs/.
   return { group: FALLBACK_GROUP, path: repoPath.slice(DOCS_DIR.length) };
+}
+
+/** The kind of a docs page: its file's override, else its sidebar group's kind. */
+export function pageKindOf(repoPath: string): DocKind {
+  // The docs index sits outside every group: it is where a reader starts.
+  const placed = groupPath(repoPath);
+  if (!placed) {
+    return DocKind.Start;
+  }
+
+  const group = NAV_GROUPS.find((g) => g.key === placed.group);
+  if (!group) {
+    throw new Error(`docs-nav.json: no group ${placed.group} for ${repoPath}`);
+  }
+  return group.kinds[repoPath] ?? group.kind;
 }
 
 // POSIX-style join and normalise, for repository-relative paths ('..' above the root is dropped).
