@@ -134,7 +134,13 @@ pub fn list_leftovers_of(
 /// then its parent fsynced. One gone already, or partly, is removed as far as it is left: a gc
 /// cut short, run again, finishes.
 pub fn remove(fs: &StoreFs, leftover: &Leftover) -> Result<(), StoreError> {
-    let path = fs.root().join(&leftover.rel);
+    remove_at(fs, &leftover.rel)
+}
+
+/// [`remove`] of what is at `rel`, relative to `fs`'s root: an upgrade clears what an earlier
+/// one left with it too.
+pub(crate) fn remove_at(fs: &StoreFs, rel: &Utf8Path) -> Result<(), StoreError> {
+    let path = fs.root().join(rel);
     let Some(found) = lstat(fs, &path)? else {
         return Ok(());
     };

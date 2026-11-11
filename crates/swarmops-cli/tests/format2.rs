@@ -62,7 +62,7 @@ fn a_format_2_store_holds_a_branch_and_a_tag() {
     let upgraded = old.run_as(&me, &["upgrade"], &[]).ok();
     assert_eq!(
         (&upgraded["from"], &upgraded["to"], &upgraded["upgraded"]),
-        (&1.into(), &2.into(), &true.into()),
+        (&1.into(), &3.into(), &true.into()),
         "{upgraded}"
     );
     assert_eq!(old.run_as(&me, &branch, &[]).ok()["name"], BRANCH);

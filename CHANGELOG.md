@@ -32,6 +32,9 @@ collects the changes on `stable` that no release holds yet, until the next relea
   (`base_seq_lost`) and a fact written before its feature (`feature_unlisted`), and looks for the
   blobs facts name as it looks for those trees name. Repair rebuilds the fact rows and the runs,
   and finds a lost base seq in the journal again. No release makes a FORMAT 3 store yet.
+- `upgrade` takes a FORMAT 2 store to FORMAT 3, and a FORMAT 1 store through FORMAT 2 to FORMAT 3
+  in the same call, keeping every operation id (the FORMAT 3 design §3). Irreversible: v0.11.x and
+  older do not open the store afterwards.
 
 ### Fixed
 

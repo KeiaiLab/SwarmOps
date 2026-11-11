@@ -1,10 +1,12 @@
-//! The upgrade of a FORMAT 1 store to FORMAT 2 (the M6 design §3): the FORMAT 2 files written
-//! beside the FORMAT 1 ones, FORMAT 1's checkpoint poisoned ([`crate::format::UPGRADE_POISON`]),
-//! then `FORMAT` replaced, the commit point. An open that finds the poison under a FORMAT 1
-//! `FORMAT` finishes the upgrade ([`finish_if_poisoned`]).
+//! The upgrades of a store: FORMAT 1 to FORMAT 2 (the M6 design §3), then FORMAT 2 to FORMAT 3
+//! (the FORMAT 3 design §3), one after the other in one call. Each writes the next format's files
+//! beside the old ones, poisons the old checkpoint, then replaces `FORMAT`, its commit point. An
+//! open that finds a poison under the `FORMAT` before it finishes that upgrade
+//! ([`finish_if_poisoned`]).
 //!
 //! ```text
-//! maint.lock, then meta/lock, held throughout
+//! maint.lock, meta/views.lock (waited for), then meta/lock, held throughout
+//! FORMAT 1 to 2:
 //! 1. journal.log     tail repaired                      FORMAT 1 still
 //! 2. journal2.*      removed (an earlier run's), made empty
 //!    journal2.log    every frame again, same payload, its place in its header; synced
@@ -15,12 +17,24 @@
 //!    read back       frames, refs and checkpoint as FORMAT 2 reads them, or the upgrade stops
 //! 5. journal.ckpt    the poison: every FORMAT 1 reader and writer fails closed from here
 //! 6. FORMAT          "swarmops-store 2\n": the commit point
+//! FORMAT 2 to 3:
+//! 1. journal2.*      tail repaired, frames past the checkpoint replayed, index synced,
+//!                    checkpoint at the journal's end                 FORMAT 2 still
+//! 2. FORMAT 3 files  removed (an earlier run's): sorted3/, journal3.ckpt, facts.col, features
+//! 3. idx/facts.col   empty; no feature list
+//!    sorted3/        one run of every index record, the manifest (generation 1) naming it
+//!    journal3.ckpt   the journal's end, its frame count as the base seq, the records synced
+//!    read back       as FORMAT 3 reads them, or the upgrade stops
+//! 4. journal2.ckpt   the poison: every FORMAT 2 reader and writer fails closed from here
+//! 5. FORMAT          "swarmops-store 3\n": the commit point
 //! ```
 //!
-//! A crash before 5 leaves the store FORMAT 1, whole: the next upgrade starts over, and gc
-//! removes what it left. Between 5 and 6 the next open finishes it. The checkpoint is carried
-//! over, not moved: the frames past it are replayed by the next FORMAT 2 write as FORMAT 1's
-//! would have been, and the index files, shared by both formats, are not touched.
+//! A crash before a poison leaves the store in the format before, whole: the next upgrade starts
+//! that step over, and gc removes what it left. Between a poison and its `FORMAT` the next open
+//! finishes it. FORMAT 1's checkpoint is carried over, not moved: the frames past it are replayed
+//! by the next FORMAT 2 write as FORMAT 1's would have been, and the index files, shared by every
+//! format, are not touched. FORMAT 2's journal is not rewritten at all: FORMAT 3 shares its frame,
+//! offset and ref file layouts, so every operation id stays as it was.
 
 use std::collections::BTreeMap;
 use std::io::{self, Read};
@@ -30,20 +44,38 @@ use std::time::Duration;
 use camino::Utf8Path;
 use swarmops_core::bytes;
 
+use std::fs::{File, TryLockError};
+use std::ops::ControlFlow;
+use std::time::Instant;
+
+use super::column::AppendOnlyColumn;
 use super::frame::{self, HEADER_LEN, HEADER_LEN_V2};
-use super::index::Index;
-use super::journal::{ENTRY_LEN_V2, Journal};
-use super::lock::MetaLock;
+use super::index::{DHS, IDS, Index};
+use super::journal::{Ckpt3, ENTRY_LEN_V2, Journal};
+use super::lock::{Create, MetaLock, open_flock_file};
 use super::refs::{self, RefState};
+use super::replay;
+use super::runs::{self, Domain, Manifest, Run};
 use crate::error::{FileOp, StoreError};
-use crate::format::{self, StoreFormat, UPGRADE_POISON};
+use crate::format::{self, StoreFormat, UPGRADE_POISON, UPGRADE_POISON_V3};
 use crate::fs_ops::{self, FsOps, StoreFs};
+use crate::gc;
 use crate::layout::Layout;
 use crate::maint::MaintLease;
 
 /// How long an upgrade, and an open that finishes one, waits for `meta/lock`: a metadata store's
 /// own wait.
 const META_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long an upgrade waits for `meta/views.lock`, which a view step holds while it builds: the
+/// same wait (the FORMAT 3 design §3.1). A step never waits for it.
+const VIEWS_LOCK_TIMEOUT: Duration = META_LOCK_TIMEOUT;
+
+/// How often an upgrade waiting for `meta/views.lock` tries it again.
+const VIEWS_LOCK_POLL: Duration = Duration::from_millis(10);
+
+/// `meta/idx/`, where FORMAT 3's fact column lies beside the changeset index's.
+const IDX_DIR: &str = "idx";
 
 /// How many frames of a journal are read at a time.
 const FRAME_BATCH: usize = 64;
@@ -78,76 +110,145 @@ impl Upgraded {
     }
 }
 
-/// Upgrades the store of `layout` to FORMAT 2; nothing for a FORMAT 2 store. Takes the
-/// maintenance lease ([`StoreError::MaintenanceBusy`] at once if it is held), then `meta/lock`
-/// (waiting up to 10 s, then [`StoreError::Busy`]), and holds both throughout: other writers
-/// wait meanwhile. The steps are the module documentation's; `layout`'s format is not read, the
-/// store's `FORMAT` is, under the lock. A FORMAT 1 store whose files do not read
-/// ([`StoreError::JournalCorrupt`], a damaged ref file) is not upgraded: it stays FORMAT 1.
+/// Upgrades the store of `layout` to FORMAT 3, a FORMAT 1 one through FORMAT 2; nothing for a
+/// FORMAT 3 store. Takes the maintenance lease ([`StoreError::MaintenanceBusy`] at once if it is
+/// held), then `meta/views.lock` and `meta/lock` (waiting up to 10 s for each, then
+/// [`StoreError::Busy`]), and holds all three throughout: writers and view steps wait meanwhile.
+/// The steps are the module documentation's; `layout`'s format is not read, the store's `FORMAT`
+/// is, under the lock. A store whose files do not read ([`StoreError::JournalCorrupt`], a damaged
+/// ref or index file) is not upgraded past its format.
 pub fn upgrade(layout: &Layout, fs: Arc<dyn FsOps>) -> Result<Upgraded, StoreError> {
     let fs = StoreFs::new(fs, layout.root());
 
-    // 1. The lease, then meta/lock (the M6 design §3), both held to the end.
+    // 1. The lease, the view lease, then meta/lock (the FORMAT 3 design §3.1), all held to the
+    //    end: the lock order of §2.5 rule 8.
     let lease = MaintLease::try_acquire(layout)?;
+    let _views = views_lock(layout, &fs)?;
     let _lock = lease.meta_lock(layout, META_LOCK_TIMEOUT)?;
 
-    // 2. What FORMAT says under the lock: only FORMAT 1 is upgraded.
+    // 2. What FORMAT says under the lock: FORMAT 3 is left alone, FORMAT 1 taken to 2 first.
     let from = format::read_format(layout, &fs)?;
-    if from != StoreFormat::V1 {
-        return Ok(Upgraded::new(from, from, false));
+    match from {
+        StoreFormat::V3 => return Ok(Upgraded::new(from, from, false)),
+        StoreFormat::V1 => to_v2(layout.root(), &fs)?,
+        StoreFormat::V2 => {}
     }
 
-    // 3. The FORMAT 2 files, then the poison; a run that stopped after its poison wrote both.
-    let v1 = Layout::with_format(layout.root(), StoreFormat::V1);
-    if !poisoned(&v1) {
-        write_v2(
-            &v1,
-            &Layout::with_format(layout.root(), StoreFormat::V2),
-            &fs,
-        )?;
-        fs.atomic_replace(v1.journal_ckpt().as_std_path(), UPGRADE_POISON)?;
-    }
-
-    // 4. The commit point.
-    fs.atomic_replace(layout.format_file().as_std_path(), StoreFormat::V2.marker())?;
-    Ok(Upgraded::new(StoreFormat::V1, StoreFormat::V2, true))
+    // 3. FORMAT 2 to 3.
+    to_v3(layout.root(), &fs)?;
+    Ok(Upgraded::new(from, StoreFormat::V3, true))
 }
 
-/// Finishes an upgrade of the FORMAT 1 store of `layout` that stopped between its poison and
-/// its commit point: replaces `FORMAT` if FORMAT 1's checkpoint is the poison. Whether it did.
+/// FORMAT 1 to 2, under the locks: the FORMAT 2 files, then the poison, unless a run that
+/// stopped after its poison wrote both; then the commit point.
+fn to_v2(root: &Utf8Path, fs: &StoreFs) -> Result<(), StoreError> {
+    let v1 = Layout::with_format(root, StoreFormat::V1);
+    if !poisoned(&v1.journal_ckpt(), UPGRADE_POISON) {
+        write_v2(&v1, &Layout::with_format(root, StoreFormat::V2), fs)?;
+        fs.atomic_replace(v1.journal_ckpt().as_std_path(), UPGRADE_POISON)?;
+    }
+    fs.atomic_replace(v1.format_file().as_std_path(), StoreFormat::V2.marker())?;
+    Ok(())
+}
+
+/// FORMAT 2 to 3, under the locks: FORMAT 2 brought to its journal's end, FORMAT 3's files, then
+/// the poison, unless a run that stopped after its poison wrote them all (W11); then the commit
+/// point.
+fn to_v3(root: &Utf8Path, fs: &StoreFs) -> Result<(), StoreError> {
+    let v2 = Layout::with_format(root, StoreFormat::V2);
+    let v3 = Layout::with_format(root, StoreFormat::V3);
+    if !poisoned(&v2.journal_ckpt(), UPGRADE_POISON_V3) {
+        let (journal, records) = flush_v2(&v2, fs)?;
+        clear_v3(&v3, fs)?;
+        write_v3(&v3, fs, &journal, records)?;
+        fs.atomic_replace(v2.journal_ckpt().as_std_path(), UPGRADE_POISON_V3)?;
+    }
+    fs.atomic_replace(v3.format_file().as_std_path(), StoreFormat::V3.marker())?;
+    Ok(())
+}
+
+/// `meta/views.lock` of `layout`, held: opened as `meta/lock` is (made if missing), then tried
+/// every [`VIEWS_LOCK_POLL`] until [`VIEWS_LOCK_TIMEOUT`] has passed, then [`StoreError::Busy`].
+/// A view step holds it for one build and merge; it never waits for it.
+fn views_lock(layout: &Layout, fs: &StoreFs) -> Result<File, StoreError> {
+    let path = layout.views_lock();
+    let file = open_flock_file(path.as_std_path(), Create::IfMissing)
+        .map_err(|e| fs.locate(FileOp::Open, &path, e))?;
+    let started = Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(TryLockError::WouldBlock) if started.elapsed() < VIEWS_LOCK_TIMEOUT => {
+                std::thread::sleep(VIEWS_LOCK_POLL);
+            }
+            Err(TryLockError::WouldBlock) => return Err(StoreError::Busy),
+            Err(TryLockError::Error(e)) => return Err(fs.locate(FileOp::Lock, &path, e).into()),
+        }
+    }
+}
+
+/// Finishes an upgrade of the store of `layout`, opened in the format `FORMAT` names, that
+/// stopped between its poison and its commit point: replaces `FORMAT` if that format's
+/// checkpoint is the next one's poison (FORMAT 1's [`UPGRADE_POISON`], FORMAT 2's
+/// [`UPGRADE_POISON_V3`]). Whether it did.
 ///
 /// The checkpoint is looked at first through `std::fs`, no [`FsOps`] call: a store no upgrade
-/// poisoned costs its open one small read. A poisoned one is finished under `meta/lock` (waiting
-/// up to 10 s, then [`StoreError::Busy`]), without the maintenance lease, so that an open never
-/// waits for a gc; the poison is written only once the FORMAT 2 files are durable, so `FORMAT`
-/// is all that is left. Two opens at once both finish it: the second finds `FORMAT` replaced.
+/// poisoned costs its open one small read, a FORMAT 3 one none. A poisoned one is finished under
+/// `meta/lock` (waiting up to 10 s, then [`StoreError::Busy`]), without the maintenance lease, so
+/// that an open never waits for a gc; a poison is written only once the next format's files are
+/// durable, so `FORMAT` is all that is left. Two opens at once both finish it: the second finds
+/// `FORMAT` replaced.
 pub fn finish_if_poisoned(layout: &Layout, fs: Arc<dyn FsOps>) -> Result<bool, StoreError> {
-    let v1 = Layout::with_format(layout.root(), StoreFormat::V1);
-    if !poisoned(&v1) {
+    let Some(next) = poison_of(layout) else {
+        return Ok(false);
+    };
+    if !poisoned(&layout.journal_ckpt(), next) {
         return Ok(false);
     }
 
-    // Under the lock, FORMAT again: another open may have finished it meanwhile.
+    // Under the lock, FORMAT again: another open may have finished it meanwhile. Each commit
+    // point whose poison is down is passed.
     let fs = StoreFs::new(fs, layout.root());
-    let _lock = MetaLock::acquire(&v1, META_LOCK_TIMEOUT)?;
-    if format::read_format(layout, &fs)? == StoreFormat::V1 {
-        fs.atomic_replace(layout.format_file().as_std_path(), StoreFormat::V2.marker())?;
+    let _lock = MetaLock::acquire(layout, META_LOCK_TIMEOUT)?;
+    loop {
+        let format = format::read_format(layout, &fs)?;
+        let at = Layout::with_format(layout.root(), format);
+        let Some(poison) = poison_of(&at) else {
+            return Ok(true);
+        };
+        if !poisoned(&at.journal_ckpt(), poison) {
+            return Ok(true);
+        }
+        let next = match format {
+            StoreFormat::V1 => StoreFormat::V2,
+            StoreFormat::V2 | StoreFormat::V3 => StoreFormat::V3,
+        };
+        fs.atomic_replace(layout.format_file().as_std_path(), next.marker())?;
     }
-    Ok(true)
 }
 
-/// Whether FORMAT 1's checkpoint of `v1` is the poison, read through `std::fs` and capped one
-/// byte past it. A checkpoint that does not read is not the poison: the store's own reads report
-/// it, as they would without an upgrade.
-fn poisoned(v1: &Layout) -> bool {
-    let Ok(file) = fs_ops::open_regular(v1.journal_ckpt()) else {
+/// What an upgrade from `layout`'s format writes over its checkpoint; none for FORMAT 3, the
+/// latest.
+fn poison_of(layout: &Layout) -> Option<&'static [u8]> {
+    match layout.format() {
+        StoreFormat::V1 => Some(UPGRADE_POISON),
+        StoreFormat::V2 => Some(UPGRADE_POISON_V3),
+        StoreFormat::V3 => None,
+    }
+}
+
+/// Whether the checkpoint at `ckpt` is `poison`, read through `std::fs` and capped one byte past
+/// it. A checkpoint that does not read is not the poison: the store's own reads report it, as
+/// they would without an upgrade.
+fn poisoned(ckpt: &Utf8Path, poison: &[u8]) -> bool {
+    let Ok(file) = fs_ops::open_regular(ckpt) else {
         return false;
     };
-    let mut bytes = Vec::with_capacity(UPGRADE_POISON.len() + 1);
+    let mut bytes = Vec::with_capacity(poison.len() + 1);
     let read = file
-        .take(bytes::to_u64(UPGRADE_POISON.len() + 1))
+        .take(bytes::to_u64(poison.len() + 1))
         .read_to_end(&mut bytes);
-    read.is_ok() && bytes == UPGRADE_POISON
+    read.is_ok() && bytes == poison
 }
 
 /// Steps 1 to 4 of the module documentation: the FORMAT 2 files of `v2` from the FORMAT 1 files
@@ -378,5 +479,184 @@ fn unequal(what: &str) -> StoreError {
     StoreError::Internal(format!(
         "the upgrade's FORMAT 2 copy of {what} does not read back as FORMAT 1's; the store is \
          FORMAT 1 still"
+    ))
+}
+
+/// Step 1 of FORMAT 2 to 3: FORMAT 2's journal brought to a clean end, the frames past its
+/// checkpoint replayed into the index and the ref files, the index synced and the checkpoint
+/// moved to the journal's end, as a writer's recovery and a flush do. The caller holds
+/// `meta/lock`. Returns the journal and how many index records it now holds, all synced.
+fn flush_v2(v2: &Layout, fs: &StoreFs) -> Result<(Journal, u64), StoreError> {
+    // 1. The journal's tail, then what lies past the checkpoint.
+    let journal = Journal::open_in(v2, fs.clone())?;
+    journal.repair_tail()?;
+    let ckpt = journal.ckpt()?;
+    let past = || journal.tail_frames_from(ckpt);
+    let (mut index, frames) = Index::open_with_past(v2, fs.clone(), 0, past)?;
+    index.set_parallelism(1);
+    index.repair_tail_with(&frames)?;
+    replay::replay(&mut index, v2, fs, &frames)?;
+
+    // 2. Durable, and passed by the checkpoint.
+    index.sync()?;
+    journal.set_ckpt(journal.len())?;
+    Ok((journal, index.len()))
+}
+
+/// Removes what an earlier upgrade to FORMAT 3 that stopped before its poison left of FORMAT 3's
+/// files (the FORMAT 3 design §3.1 step 4: a rerun starts afresh), each removal durable.
+fn clear_v3(v3: &Layout, fs: &StoreFs) -> Result<(), StoreError> {
+    let files = [
+        v3.views_dir(),
+        v3.journal_ckpt(),
+        v3.facts_col(),
+        v3.features_file(),
+    ];
+    for path in files {
+        let rel = path
+            .strip_prefix(v3.root())
+            .expect("a store's file is under its root");
+        gc::remove_at(fs, rel)?;
+    }
+    Ok(())
+}
+
+/// Step 3 of FORMAT 2 to 3: FORMAT 3's own files beside FORMAT 2's journal of `journal`, whose
+/// `records` index records are all synced; each durable (W4′, W11), then read back.
+fn write_v3(v3: &Layout, fs: &StoreFs, journal: &Journal, records: u64) -> Result<(), StoreError> {
+    // 1. No fact yet, and no feature: an empty column, no list.
+    let facts = v3.facts_col();
+    fs.append(facts.as_std_path(), &[])?;
+    fs.sync_data(facts.as_std_path())?;
+
+    // 2. One run of every changeset record, then the manifest that names it.
+    let views = v3.views_dir();
+    fs.create_dir_all(views.join(runs::TMP).as_std_path())?;
+    let run = (records > 0).then_some(Run {
+        domain: Domain::Changesets,
+        from: 0,
+        to: records,
+    });
+    let built = match &run {
+        Some(run) => Some((*run, write_run(v3, fs, run)?)),
+        None => None,
+    };
+    let manifest = Manifest {
+        generation: 1,
+        runs: run.into_iter().collect(),
+    };
+    fs.atomic_replace(views.join(runs::MANIFEST).as_std_path(), &manifest.encode())?;
+
+    // 3. The checkpoint at the journal's end: every frame before it is FORMAT 2's, without a
+    //    nonce, so the base seq is their count.
+    let frames = journal.frame_count()?;
+    let ckpt = Ckpt3 {
+        offset: journal.len(),
+        seq: frames,
+        base_seq: frames,
+        records,
+        fact_rows: 0,
+    };
+    fs.atomic_replace(v3.journal_ckpt().as_std_path(), &ckpt.encode())?;
+
+    // 4. The entries of the new files durable, then all read back.
+    for dir in [v3.meta_dir(), views, v3.meta_path(IDX_DIR)] {
+        fs.fsync_dir(dir.as_std_path())?;
+    }
+    check_v3(v3, fs, ckpt, &manifest, built)
+}
+
+/// Writes `run`'s file from the index's id and delta-hash columns, read a window at a time and
+/// sorted: in `tmp/`, synced, then renamed into place (W4′). Returns its bytes.
+fn write_run(v3: &Layout, fs: &StoreFs, run: &Run) -> Result<Vec<u8>, StoreError> {
+    // 1. The two sections, each sorted; an id twice is damage.
+    let mut ids = column_entries(v3, fs, IDS, run.to)?;
+    let mut dh = column_entries(v3, fs, DHS, run.to)?;
+    ids.sort_unstable();
+    dh.sort_unstable();
+    if ids.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(StoreError::IndexCorrupt {
+            what: "the index holds an id twice",
+        });
+    }
+
+    // 2. Written in tmp/, synced, renamed.
+    let bytes = runs::encode_run(run, [&ids, &dh]);
+    let tmp = runs::tmp_path(v3, &run.name());
+    fs.append(tmp.as_std_path(), &bytes)?;
+    fs.sync_data(tmp.as_std_path())?;
+    let path = runs::run_path(v3, run);
+    fs.rename_durable(tmp.as_std_path(), path.as_std_path())?;
+    Ok(bytes)
+}
+
+/// The (key, record number) entries of the first `count` records of index column `rel`.
+fn column_entries(
+    v3: &Layout,
+    fs: &StoreFs,
+    rel: &str,
+    count: u64,
+) -> Result<Vec<([u8; 32], u64)>, StoreError> {
+    let column = AppendOnlyColumn::<32>::open(fs, v3.meta_path(rel), "an index column is missing")?;
+    let mut entries = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
+    column.scan(0, count, |first, keys| {
+        entries.extend(keys.iter().zip(first..).map(|(key, rec)| (*key, rec)));
+        ControlFlow::<()>::Continue(())
+    })?;
+    if bytes::to_u64(entries.len()) != count {
+        return Err(StoreError::IndexCorrupt {
+            what: "an index column is shorter than the index counts",
+        });
+    }
+    Ok(entries)
+}
+
+/// Reads FORMAT 3's files back as FORMAT 3 reads them, against what [`write_v3`] wrote: the
+/// checkpoint (checked against `journal2.off` by its read), the manifest, the run's bytes, an
+/// empty fact column, and an index that opens on them and counts the records.
+fn check_v3(
+    v3: &Layout,
+    fs: &StoreFs,
+    ckpt: Ckpt3,
+    manifest: &Manifest,
+    built: Option<(Run, Vec<u8>)>,
+) -> Result<(), StoreError> {
+    // 1. The checkpoint and the manifest.
+    if Journal::open_in(v3, fs.clone())?.ckpt3()? != ckpt {
+        return Err(unequal_v3("its checkpoint"));
+    }
+    if &runs::read_manifest(v3, fs)?.1 != manifest {
+        return Err(unequal_v3("its manifest"));
+    }
+
+    // 2. The run, byte for byte, and the fact column, empty.
+    if let Some((run, bytes)) = built {
+        let path = runs::run_path(v3, &run);
+        let read = std::fs::read(&path).map_err(|e| fs.locate(FileOp::ReadAt, &path, e))?;
+        if read != bytes {
+            return Err(unequal_v3("its run"));
+        }
+    }
+    let facts = v3.facts_col();
+    let facts_len = std::fs::metadata(&facts)
+        .map_err(|e| fs.locate(FileOp::Stat, &facts, e))?
+        .len();
+    if facts_len != 0 {
+        return Err(unequal_v3("its fact column"));
+    }
+
+    // 3. The index, opened on the runs.
+    if Index::open_in(v3, fs.clone())?.len() != ckpt.records {
+        return Err(unequal_v3("its index"));
+    }
+    Ok(())
+}
+
+/// The error of an upgrade whose FORMAT 3 copy of `what` does not read back as it was written: a
+/// defect of this build, found before the poison, so the store is FORMAT 2 still.
+fn unequal_v3(what: &str) -> StoreError {
+    StoreError::Internal(format!(
+        "the upgrade's FORMAT 3 copy of {what} does not read back as written; the store is \
+         FORMAT 2 still"
     ))
 }

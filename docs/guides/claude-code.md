@@ -291,8 +291,8 @@ annotations say whether it changes the store and how.
 
   `gc` removes the store's leftovers and never an object or a changeset; `repair` rebuilds what
   the journal can rebuild, sets damaged objects aside and verifies again; `upgrade` moves a
-  FORMAT 1 store to FORMAT 2, which takes free-form branches and tags, and cannot be undone. While
-  one runs, another fails at once with `E_MAINTENANCE_BUSY` (exit 4): retry
+  FORMAT 1 or 2 store to FORMAT 3, which takes free-form branches and tags, and cannot be
+  undone. While one runs, another fails at once with `E_MAINTENANCE_BUSY` (exit 4): retry
   ([Verify and repair](../operate/verify-and-repair.md), [Making room](../operate/making-room.md)).
 
 ### Twelve workspace tools

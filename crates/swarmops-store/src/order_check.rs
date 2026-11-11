@@ -78,7 +78,8 @@
 //! `journal.off` (8-byte entries), `journal.ckpt` (8 bytes) and `refs/`, and FORMAT 2's
 //! `journal2.log`, `journal2.off` (16-byte entries), `journal2.ckpt` (20 bytes, its offset first)
 //! and `refs2/` (the M6 design §2.2). The poison an upgrade writes over FORMAT 1's checkpoint
-//! (`UPGRADE_POISON`) moves no checkpoint, and W3 lets it pass.
+//! (`UPGRADE_POISON`), or over FORMAT 2's (`UPGRADE_POISON_V3`, the FORMAT 3 design §3.1), moves
+//! no checkpoint, and W3 lets it pass.
 //!
 //! It judges the order of the calls, and takes each at what [`FsOps`] documents for it, not at
 //! what `RealFs` does inside it: that `atomic_replace` syncs its temp file before the rename and
@@ -93,7 +94,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::{fmt, io};
 
-use crate::format::{StoreFormat, UPGRADE_POISON};
+use crate::format::{StoreFormat, UPGRADE_POISON, UPGRADE_POISON_V3};
 use crate::fs_ops::{FsMethod, FsOps, LinkOutcome};
 use crate::meta::frame::{self, Parsed, Place, Record};
 
@@ -635,7 +636,11 @@ impl State {
 
     /// W3 for `journal.ckpt` of `format` in `meta` set to `bytes`.
     fn checkpoint(&self, meta: &Path, format: StoreFormat, bytes: &[u8]) -> Option<String> {
-        if format == StoreFormat::V1 && bytes == UPGRADE_POISON {
+        let poison = match format {
+            StoreFormat::V1 => UPGRADE_POISON,
+            StoreFormat::V2 | StoreFormat::V3 => UPGRADE_POISON_V3,
+        };
+        if bytes == poison {
             return None;
         }
         let len = match format {

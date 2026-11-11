@@ -1,4 +1,4 @@
-//! `upgrade` (the M6 design §3): a FORMAT 1 store moved to FORMAT 2.
+//! `upgrade` (the M6 design §3, the FORMAT 3 design §3): a FORMAT 1 or 2 store moved to FORMAT 3.
 
 use swarmops_api::{OpError, UpgradeReq, UpgradeResp};
 
@@ -7,9 +7,9 @@ use crate::local::Recording;
 
 /// `upgrade` of the store `ops` reads.
 /// It needs no identity: it records nothing, no journal frame and no agent.
-/// A held maintenance lease is `E_MAINTENANCE_BUSY`, at once. The handle `ops` holds reads
-/// FORMAT 1 still: its next operation fails as `E_STORE_CORRUPT`, and one opened afresh reads
-/// FORMAT 2.
+/// A held maintenance lease is `E_MAINTENANCE_BUSY`, at once. The handle `ops` holds reads the
+/// format before still: its next operation fails as `E_STORE_CORRUPT`, and one opened afresh
+/// reads FORMAT 3.
 #[expect(
     clippy::needless_pass_by_value,
     reason = "StoreOps::upgrade hands its request over by value"
@@ -32,8 +32,8 @@ mod tests {
 
     use crate::LocalOps;
 
-    /// An upgrade through the operations: 1 to 2, then nothing; the handle that made it fails
-    /// closed as `E_STORE_CORRUPT` and a reopen reads FORMAT 2; a held lease is
+    /// An upgrade through the operations: 1 to 3, then nothing; the handle that made it fails
+    /// closed as `E_STORE_CORRUPT` and a reopen reads FORMAT 3; a held lease is
     /// `E_MAINTENANCE_BUSY`, retryable.
     #[test]
     fn upgrade_reports_formats_and_leaves_old_handles_failing_closed() {
@@ -51,17 +51,17 @@ mod tests {
 
         // 2. The upgrade, and the handle that made it.
         let resp = ops.upgrade(UpgradeReq::new()).unwrap();
-        assert_eq!(resp, UpgradeResp::new(1, 2, true));
+        assert_eq!(resp, UpgradeResp::new(1, 3, true));
         let stale = ops.repo_info(InfoReq::default()).unwrap_err();
         assert_eq!(stale.code, ErrorCode::StoreCorrupt.as_str(), "{stale:?}");
 
-        // 3. A reopen reads FORMAT 2, and a second upgrade does nothing.
+        // 3. A reopen reads FORMAT 3, and a second upgrade does nothing.
         let fresh = LocalOps::open(&root).unwrap();
         assert_eq!(
             fresh.repo_info(InfoReq::default()).unwrap().store_version,
-            2
+            3
         );
         let again = fresh.upgrade(UpgradeReq::new()).unwrap();
-        assert_eq!(again, UpgradeResp::new(2, 2, false));
+        assert_eq!(again, UpgradeResp::new(3, 3, false));
     }
 }

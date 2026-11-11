@@ -1,9 +1,11 @@
-//! Tests of the upgrade from FORMAT 1 to FORMAT 2 (the M6 design §3): an upgraded store reads as
-//! it did, frames, changesets, refs (targets and versions) and reflogs, and takes FORMAT 2's ref
-//! names; a FORMAT 2 store is left alone; FORMAT 1 readers of an upgraded store, a handle opened
-//! before it among them, fail closed on the poisoned checkpoint; a held maintenance lease refuses
-//! it at once; a crash before any of its calls leaves one whole format, FORMAT 1 (a rerun
-//! completes) or FORMAT 2 (an open finishes it).
+//! Tests of the upgrades from FORMAT 1 to FORMAT 2 (the M6 design §3) and from FORMAT 2 to
+//! FORMAT 3 (the FORMAT 3 design §3), which one call makes in a row: an upgraded store reads as
+//! it did, frames and their operation ids, changesets, refs (targets and versions) and reflogs,
+//! and takes FORMAT 2's ref names; a FORMAT 3 store is left alone; readers of the format before,
+//! a handle opened before the upgrade among them, fail closed on its poisoned checkpoint; a held
+//! maintenance lease refuses it at once, a held `meta/views.lock` makes it wait, then give up; a
+//! crash before any of its calls leaves one whole format (a rerun completes, or an open finishes
+//! it).
 //!
 //! Every test owns a fresh store root (`tempfile::tempdir()`).
 
@@ -16,7 +18,7 @@ use swarmops_store::meta::upgrade::{self, Upgraded};
 use swarmops_store::{
     CrashAtFs, FailAt, FailAtFs, FailMode, FsOps, InjectedError, Journal, Layout, MaintLease,
     MetaLock, MetaStore, RealFs, Record, RefMoveEntry, RefState, StoreError, StoreFormat,
-    UPGRADE_POISON, read_format,
+    UPGRADE_POISON, UPGRADE_POISON_V3, read_format,
 };
 use swarmops_testkit::faults;
 use swarmops_testkit::fs::NoSyncFs;
@@ -37,11 +39,15 @@ const REFS: [&str; 2] = ["main", "release/a"];
 /// A free-form branch: a FORMAT 2 name only.
 const BRANCH: &str = "feature/login";
 
-/// What a store holds, as its own format reads it: every frame's records, the changesets, the
-/// refs and their reflogs.
+/// How long an upgrade waits for `meta/views.lock` before it gives up: a metadata store's own
+/// wait (the FORMAT 3 design §3.1).
+const VIEWS_LOCK_WAIT: Duration = Duration::from_secs(10);
+
+/// What a store holds, as its own format reads it: every frame's operation id (its seq and
+/// payload CRC) and records, the changesets, the refs and their reflogs.
 #[derive(Debug, PartialEq, Eq)]
 struct View {
-    frames: Vec<(u64, Vec<Record>)>,
+    frames: Vec<(u64, u32, Vec<Record>)>,
     changesets: u64,
     refs: Vec<(String, RefState)>,
     reflogs: Vec<Vec<RefMoveEntry>>,
@@ -57,7 +63,7 @@ fn view(root: &Utf8Path) -> View {
     View {
         frames: frames
             .into_iter()
-            .map(|frame| (frame.seq, frame.records))
+            .map(|frame| (frame.seq, frame.crc, frame.records))
             .collect(),
         changesets: read.count_changesets().unwrap(),
         refs: read.list_refs().unwrap(),
@@ -77,9 +83,20 @@ fn format_of(root: &Utf8Path) -> StoreFormat {
 /// A FORMAT 1 store of [`FRAMES`] frames, each a changeset that `main` moves to; `release/a`
 /// moved twice among them, so that its version is 2; frames past the checkpoint.
 fn template() -> (TempDir, Layout) {
+    template_of(StoreFormat::V1)
+}
+
+/// [`template`], in FORMAT 2.
+fn template_v2() -> (TempDir, Layout) {
+    template_of(StoreFormat::V2)
+}
+
+/// [`template`], in `format`.
+fn template_of(format: StoreFormat) -> (TempDir, Layout) {
     let (dir, layout) = new_root();
+    let layout = Layout::with_format(layout.root(), format);
     MetaStore::create_in(layout.clone(), real_fs()).unwrap();
-    std::fs::write(layout.format_file(), StoreFormat::V1.marker()).unwrap();
+    std::fs::write(layout.format_file(), format.marker()).unwrap();
     let store = MetaStore::open(layout.root()).unwrap();
     for n in 0..FRAMES {
         let mut write = store.write().unwrap();
@@ -106,7 +123,8 @@ fn upgrade_checked(root: &Utf8Path) -> Result<Upgraded, StoreError> {
 }
 
 /// The upgraded store holds every frame, changeset, ref (target and version) and reflog it held,
-/// under FORMAT 2's files, and `FORMAT` says 2; it takes a write, and a FORMAT 2 name.
+/// under FORMAT 2's journal and ref files, and `FORMAT` says 3; it takes a write, and a FORMAT 2
+/// name.
 #[test]
 fn an_upgraded_store_reads_as_it_did() {
     let (_dir, layout) = template();
@@ -119,9 +137,9 @@ fn an_upgraded_store_reads_as_it_did() {
     let upgraded = upgrade_checked(root).unwrap();
     assert_eq!(
         upgraded,
-        Upgraded::new(StoreFormat::V1, StoreFormat::V2, true)
+        Upgraded::new(StoreFormat::V1, StoreFormat::V3, true)
     );
-    assert_eq!(format_of(root), StoreFormat::V2);
+    assert_eq!(format_of(root), StoreFormat::V3);
     assert_eq!(view(root), before);
     let v2 = Layout::with_format(root, StoreFormat::V2);
     for file in [v2.journal_log(), v2.journal_off(), v2.journal_ckpt()] {
@@ -131,7 +149,7 @@ fn an_upgraded_store_reads_as_it_did() {
     // A write after it, under the order checker: the frames past the checkpoint replay as
     // FORMAT 1's would, and a free-form branch is a name it takes.
     let store = MetaStore::open_with_fs(root, faults::checked(RealFs::new())).unwrap();
-    assert_eq!(store.format(), StoreFormat::V2);
+    assert_eq!(store.format(), StoreFormat::V3);
     let mut write = store.write().unwrap();
     write.insert_changeset(changeset(FRAMES)).unwrap();
     write
@@ -145,10 +163,10 @@ fn an_upgraded_store_reads_as_it_did() {
     assert_eq!(read.list_refs().unwrap().len(), REFS.len() + 1);
 }
 
-/// A FORMAT 2 store is not upgraded: nothing written, `upgraded` false.
+/// A FORMAT 3 store is not upgraded: nothing written, `upgraded` false.
 #[test]
-fn a_format_2_store_is_left_alone() {
-    let (_dir, layout) = template();
+fn a_v3_store_upgrade_is_a_no_op() {
+    let (_dir, layout) = template_v2();
     let root = layout.root();
     upgrade_checked(root).unwrap();
     let before = view(root);
@@ -157,7 +175,7 @@ fn a_format_2_store_is_left_alone() {
     let again = upgrade::upgrade(&layout, Arc::clone(&counter) as Arc<dyn FsOps>).unwrap();
     assert_eq!(
         again,
-        Upgraded::new(StoreFormat::V2, StoreFormat::V2, false)
+        Upgraded::new(StoreFormat::V3, StoreFormat::V3, false)
     );
     assert_eq!(counter.calls(), 1, "the read of FORMAT, and no write");
     assert_eq!(view(root), before);
@@ -260,13 +278,33 @@ fn an_unpoisoned_store_has_nothing_to_finish() {
 
 /// A crash before each call of the upgrade (the call and every write after it fail before they
 /// do anything, the order checker watching, on a filesystem that never syncs: durability is not
-/// the subject here): before the poison the store is FORMAT 1, whole, and
-/// a second upgrade completes; between the poison and `FORMAT`, an open finishes it; after it, it
-/// is FORMAT 2. Each ends as the store was, in FORMAT 2.
+/// the subject here): before a poison the store is whole in the format it had, and a second
+/// upgrade completes; between a poison and its `FORMAT`, an open finishes it. The last call is
+/// FORMAT 3's commit point, so no crash leaves FORMAT 3. Each ends as the store was, in FORMAT 3.
 #[test]
 fn a_crash_at_any_call_leaves_one_whole_format() {
     let (_template_dir, template) = template();
-    let template = template.root();
+    let (seen, _) = crash_sweep(template.root());
+    assert!(seen[..4].iter().all(|&n| n > 0), "{seen:?}");
+    assert_eq!(seen[4], 0, "{seen:?}");
+}
+
+/// The upgrade of FORMAT 2 to 3 at every call, as [`a_crash_at_any_call_leaves_one_whole_format`]
+/// sweeps the one from FORMAT 1: FORMAT 2 whole (and rerun) or poisoned (and finished by the
+/// next open, as FORMAT 3); every frame's operation id as it was.
+#[test]
+fn upgrade_crash_at_every_call_leaves_2_or_3() {
+    let (_template_dir, template) = template_v2();
+    let (seen, calls) = crash_sweep(template.root());
+    assert_eq!(seen, [0, 0, seen[2], 1, 0], "the poison's state, once");
+    assert_eq!(u64::from(seen[2]) + 1, calls);
+}
+
+/// The store a crash at each call of the upgrade of a copy of `template` left, finished by a
+/// rerun or an open as its state asks, then compared with the template. Returns how many crashes
+/// left each state (FORMAT 1, FORMAT 1 poisoned, FORMAT 2, FORMAT 2 poisoned, FORMAT 3) and how
+/// many calls the upgrade makes.
+fn crash_sweep(template: &Utf8Path) -> ([u32; 5], u64) {
     let before = view(template);
     let calls = {
         let (_dir, root) = copy_of(template);
@@ -276,37 +314,203 @@ fn a_crash_at_any_call_leaves_one_whole_format() {
     };
     assert!(calls > 10, "{calls} calls");
 
-    let mut seen = [0_u32; 3]; // crashes left FORMAT 1, poisoned FORMAT 1, FORMAT 2
+    let mut seen = [0_u32; 5];
     for k in 1..=calls {
+        // 1. The crash.
         let (_dir, root) = copy_of(template);
         let layout = Layout::new(&root);
         let fail = FailAt::new(k, FailMode::Persistent, InjectedError::Enospc);
         let crashed = upgrade::upgrade(&layout, faults::checked(FailAtFs::new(NoSyncFs, fail)));
         assert!(crashed.is_err(), "call {k} of {calls}: {crashed:?}");
 
-        let poisoned = std::fs::read(layout.journal_ckpt()).unwrap() == UPGRADE_POISON;
-        match (format_of(&root), poisoned) {
-            (StoreFormat::V1, false) => {
-                seen[0] += 1;
-                assert_eq!(view(&root), before, "call {k}: FORMAT 1, whole");
-                let rerun = upgrade::upgrade(&layout, faults::checked(NoSyncFs)).unwrap();
-                assert!(rerun.upgraded, "call {k}");
-            }
-            (StoreFormat::V1, true) => {
-                seen[1] += 1;
-                let finished =
-                    upgrade::finish_if_poisoned(&layout, faults::checked(NoSyncFs)).unwrap();
-                assert!(finished, "call {k}");
-            }
-            (format, _) => {
-                seen[2] += 1;
-                assert_eq!(format, StoreFormat::V2, "call {k}");
-            }
+        // 2. What it left, finished as its state asks.
+        let format = format_of(&root);
+        let poison = match format {
+            StoreFormat::V1 => UPGRADE_POISON,
+            _ => UPGRADE_POISON_V3,
+        };
+        let ckpt = Layout::with_format(&root, format).journal_ckpt();
+        let poisoned = std::fs::read(ckpt).is_ok_and(|held| held == poison);
+        let state = match (format, poisoned) {
+            (StoreFormat::V1, false) => 0,
+            (StoreFormat::V1, true) => 1,
+            (StoreFormat::V2, false) => 2,
+            (StoreFormat::V2, true) => 3,
+            _ => 4,
+        };
+        seen[state] += 1;
+        if poisoned {
+            let open = Layout::with_format(&root, format);
+            let finished = upgrade::finish_if_poisoned(&open, faults::checked(NoSyncFs)).unwrap();
+            assert!(finished, "call {k}");
         }
-        assert_eq!(format_of(&root), StoreFormat::V2, "call {k}");
-        assert_eq!(view(&root), before, "call {k}: FORMAT 2, whole");
+        let format = format_of(&root);
+        if format != StoreFormat::V3 {
+            // A FORMAT 1 store finished to 2 by its open is upgraded the rest of the way.
+            assert_eq!(view(&root), before, "call {k}: {format:?}, whole");
+            let rerun = upgrade::upgrade(&layout, faults::checked(NoSyncFs)).unwrap();
+            assert!(rerun.upgraded, "call {k}");
+        }
+
+        // 3. FORMAT 3, holding what the template held.
+        assert_eq!(format_of(&root), StoreFormat::V3, "call {k}");
+        assert_eq!(view(&root), before, "call {k}: FORMAT 3, whole");
     }
-    assert!(seen[0] > 0 && seen[1] > 0, "{seen:?}");
+    (seen, calls)
+}
+
+/// One call takes a FORMAT 1 store through FORMAT 2 to FORMAT 3: both poisons written, each
+/// frame's operation id kept.
+#[test]
+fn upgrade_1_to_3_passes_through_2() {
+    let (_dir, layout) = template();
+    let root = layout.root();
+    let before = view(root);
+
+    let upgraded = upgrade_checked(root).unwrap();
+    assert_eq!(
+        upgraded,
+        Upgraded::new(StoreFormat::V1, StoreFormat::V3, true)
+    );
+    assert_eq!(
+        std::fs::read(layout.journal_ckpt()).unwrap(),
+        UPGRADE_POISON
+    );
+    let v2 = Layout::with_format(root, StoreFormat::V2);
+    assert_eq!(std::fs::read(v2.journal_ckpt()).unwrap(), UPGRADE_POISON_V3);
+    assert_eq!(view(root), before);
+}
+
+/// The upgrade of a FORMAT 2 store keeps every operation id byte for byte: the journal is not
+/// rewritten. FORMAT 3's files are there, the old checkpoint is the poison, and the next write's
+/// frame carries a nonce while the frames before it carry none.
+#[test]
+fn upgrade_2_to_3_keeps_every_op_id() {
+    let (_dir, layout) = template_v2();
+    let root = layout.root();
+    let before = view(root);
+    let log = std::fs::read(layout.journal_log()).unwrap();
+    let off = std::fs::read(layout.journal_off()).unwrap();
+
+    // 1. The upgrade: the journal's bytes untouched, FORMAT 3's files made.
+    let upgraded = upgrade_checked(root).unwrap();
+    assert_eq!(
+        upgraded,
+        Upgraded::new(StoreFormat::V2, StoreFormat::V3, true)
+    );
+    assert_eq!(format_of(root), StoreFormat::V3);
+    assert_eq!(view(root), before);
+    assert_eq!(std::fs::read(layout.journal_log()).unwrap(), log);
+    assert_eq!(std::fs::read(layout.journal_off()).unwrap(), off);
+    assert_eq!(
+        std::fs::read(layout.journal_ckpt()).unwrap(),
+        UPGRADE_POISON_V3
+    );
+    let v3 = Layout::with_format(root, StoreFormat::V3);
+    for file in [
+        v3.journal_ckpt(),
+        v3.views_dir().join("MANIFEST"),
+        v3.facts_col(),
+    ] {
+        assert!(file.is_file(), "{file}");
+    }
+    assert!(!v3.features_file().exists(), "no feature listed");
+
+    // 2. A write after it: a nonce on its frame alone.
+    let store = MetaStore::open(root).unwrap();
+    let mut write = store.write().unwrap();
+    write.insert_changeset(changeset(FRAMES)).unwrap();
+    write
+        .cas_ref(BRANCH, None, Some(id(FRAMES)), ACTOR)
+        .unwrap();
+    write.commit().unwrap();
+    store.flush().unwrap();
+    let frames = Journal::open(&v3, real_fs())
+        .unwrap()
+        .frames_from(0, usize::MAX)
+        .unwrap();
+    let nonces: Vec<bool> = frames.iter().map(|frame| frame.nonce.is_some()).collect();
+    let mut want = vec![false; usize::try_from(FRAMES).unwrap()];
+    want.push(true);
+    assert_eq!(nonces, want);
+    let read = store.read().unwrap();
+    assert_eq!(read.count_changesets().unwrap(), FRAMES + 1);
+    assert_eq!(read.get_ref(BRANCH).unwrap().unwrap().target, id(FRAMES));
+}
+
+/// A handle opened on the FORMAT 2 store before its upgrade, and one opened afresh with a FORMAT
+/// 2 layout (as an older build opens it), read the poison: their reads and writes fail as
+/// `InvalidData`, and write nothing.
+#[test]
+fn an_old_handle_after_upgrade_fails_closed() {
+    let (_dir, layout) = template_v2();
+    let root = layout.root();
+    let old = MetaStore::open(root).unwrap();
+    assert_eq!(old.format(), StoreFormat::V2);
+    upgrade_checked(root).unwrap();
+    let meta = |rel: &str| std::fs::read(layout.meta_path(rel)).unwrap();
+    let files = [
+        "journal2.log",
+        "journal2.off",
+        "journal2.ckpt",
+        "journal3.ckpt",
+    ];
+    let before: Vec<Vec<u8>> = files.iter().map(|rel| meta(rel)).collect();
+
+    let afresh = MetaStore::open_in(layout.clone(), real_fs()).unwrap();
+    for store in [&old, &afresh] {
+        assert_invalid_data(store.read().map(drop));
+        assert_invalid_data(store.write().map(drop));
+    }
+    let after: Vec<Vec<u8>> = files.iter().map(|rel| meta(rel)).collect();
+    assert!(after == before, "a refused handle wrote");
+    assert_eq!(format_of(root), StoreFormat::V3);
+}
+
+/// The upgrade waits for `meta/views.lock`, which a view step holds: held past the wait, it gives
+/// up with `Busy` and the store is FORMAT 2, no FORMAT 3 file written; released during the wait,
+/// it upgrades.
+#[test]
+fn upgrade_waits_on_views_lock_then_busy() {
+    let (_dir, layout) = template_v2();
+    let root = layout.root();
+    let v3 = Layout::with_format(root, StoreFormat::V3);
+    let held = || {
+        let file = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(v3.views_lock())
+            .unwrap();
+        file.lock().unwrap();
+        file
+    };
+
+    // 1. Held throughout: Busy once the wait is over.
+    let step = held();
+    let started = Instant::now();
+    let refused = upgrade_checked(root).unwrap_err();
+    let waited = started.elapsed();
+    assert!(matches!(refused, StoreError::Busy), "{refused:?}");
+    assert!(waited >= VIEWS_LOCK_WAIT, "{waited:?}");
+    assert_eq!(format_of(root), StoreFormat::V2);
+    assert!(!v3.journal_ckpt().exists() && !v3.views_dir().exists());
+
+    // 2. Released a moment into the wait: it upgrades.
+    let started = Instant::now();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(500));
+        drop(step);
+    });
+    let upgraded = upgrade_checked(root).unwrap();
+    release.join().unwrap();
+    assert!(upgraded.upgraded);
+    assert!(
+        started.elapsed() < VIEWS_LOCK_WAIT,
+        "it waited the whole wait"
+    );
+    assert_eq!(format_of(root), StoreFormat::V3);
 }
 
 /// The upgrade's rewrite of a large journal, measured against the 10 s a writer waits for

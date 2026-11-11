@@ -418,7 +418,7 @@ impl LocalRepo {
         let layout = Layout::with_format(root.clone(), format);
         let identity = read_identity(&layout, &store_fs)?;
         // An upgrade that stopped between its poison and its commit point is finished first.
-        if format == StoreFormat::V1
+        if matches!(format, StoreFormat::V1 | StoreFormat::V2)
             && swarmops_store::meta::upgrade::finish_if_poisoned(&layout, Arc::clone(&fs))?
         {
             return Self::open_on(store, fs, threads);
