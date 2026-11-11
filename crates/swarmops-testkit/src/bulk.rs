@@ -183,7 +183,7 @@ pub struct Fixture {
     pub spec: Spec,
     /// The last changeset, on `main`.
     pub head: ChangesetId,
-    /// Changesets spread over its history, each with its index (the first is 0): [`SAMPLES`] at
+    /// Changesets spread over its history, each with its index (the first is 0): 1,000 at
     /// most, for the lookups.
     pub samples: Vec<(usize, ChangesetId)>,
     /// Whether this call built anything: [`Built::Now`], or [`Built::Before`] for one found
