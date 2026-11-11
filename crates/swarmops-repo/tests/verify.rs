@@ -947,7 +947,7 @@ fn set_bogus_ckpt(journal: &Journal, layout: &Layout, offset: u64) {
 }
 
 /// The CRC-32 (IEEE) of `bytes`, which FORMAT 2's journal files carry.
-fn crc32(bytes: &[u8]) -> u32 {
+pub(crate) fn crc32(bytes: &[u8]) -> u32 {
     let mut crc = !0_u32;
     for &b in bytes {
         crc ^= u32::from(b);
@@ -1740,5 +1740,109 @@ fn verify_reports_format_2_seq_prev_crc_and_entry_crc_damage() {
             }],
         );
         assert_eq!(report.changesets_checked, 2, "{kind}");
+    }
+}
+
+/// Verify of a FORMAT 3 store (the FORMAT 3 design §2.8): a fact is no damage, and the blobs facts
+/// name are roots, a missing one a missing object. The store is made FORMAT 2, then turned FORMAT
+/// 3 by hand as an upgrade does (no `init` makes one yet); its fact kinds are enabled with the
+/// test hooks' `supported_for_tests`.
+#[cfg(feature = "test-hooks")]
+mod format_3 {
+    use swarmops_store::{Expect, Fact, FactKind, Guard, supported_for_tests};
+
+    use super::*;
+
+    /// A fresh FORMAT 3 store, its base seq the FORMAT 2 frames it had, the annotation feature
+    /// supported while the guard lives.
+    fn v3_repo() -> (TempDir, Utf8PathBuf, LocalRepo, Guard) {
+        let guard = supported_for_tests(&["annotation"]);
+        let (dir, root, repo) = new_repo_as(StoreFormat::V2);
+        drop(repo);
+        let v2 = Layout::with_format(&root, StoreFormat::V2);
+        let journal = Journal::open(&v2, Arc::new(RealFs::new())).unwrap();
+        let base = journal.frame_count().unwrap();
+        drop(journal);
+
+        // FORMAT, journal3.ckpt, the manifest of no run, facts.col: what an upgrade writes.
+        let v3 = Layout::with_format(&root, StoreFormat::V3);
+        fs::write(v3.format_file(), b"swarmops-store 3\n").unwrap();
+        let fields: [u64; 5] = [0, 0, base, 0, 0];
+        let mut ckpt: Vec<u8> = fields.iter().flat_map(|f| f.to_le_bytes()).collect();
+        ckpt.extend(crc32(&ckpt).to_le_bytes());
+        fs::write(v3.journal_ckpt(), ckpt).unwrap();
+        fs::create_dir_all(v3.views_dir().join("tmp")).unwrap();
+        let mut manifest = b"SWMF\x01\0\0\0".to_vec();
+        manifest.extend([0; 12]);
+        manifest.extend(crc32(&manifest).to_le_bytes());
+        fs::write(v3.views_dir().join("MANIFEST"), manifest).unwrap();
+        fs::write(v3.facts_col(), b"").unwrap();
+        let repo = LocalRepo::open(&root).unwrap();
+        (dir, root, repo, guard)
+    }
+
+    /// An annotation `key` on changeset `on` whose value is the blob `value`.
+    fn annotation(on: ChangesetId, key: &str, value: ObjectId) -> Fact {
+        let mut body = vec![u8::try_from(key.len()).unwrap()];
+        body.extend(key.as_bytes());
+        body.extend(value.0);
+        Fact::new(
+            FactKind::Annotation,
+            0,
+            on.0.0,
+            [9; 32],
+            1_700_000_000,
+            "test/1".to_owned(),
+            body,
+        )
+        .unwrap()
+    }
+
+    /// Commits `facts` in one transaction of the metadata store at `root`.
+    fn put_facts(root: &Utf8Path, facts: Vec<Fact>) {
+        let layout = Layout::with_format(root, StoreFormat::V3);
+        let store = MetaStore::open_in(layout, Arc::new(RealFs::new())).unwrap();
+        let mut write = store.write().unwrap();
+        for fact in facts {
+            write.put_fact(fact, Expect::Any).unwrap();
+        }
+        write.commit().unwrap();
+    }
+
+    /// Changesets, refs and facts naming blobs that are there: no problem, deep or shallow.
+    #[test]
+    fn verify_counts_no_fact_as_damage() {
+        let (_dir, root, repo, _guard) = v3_repo();
+        let first = commit(&repo, &[], vec![put("a.txt", b"one\n")]);
+        repo.cas_ref("main", None, Some(first), "test/1").unwrap();
+        let value = repo.put_blob(b"a note\n".to_vec()).unwrap().id;
+        put_facts(&root, vec![annotation(first, "note", value.0)]);
+        let second = commit(&repo, &[first], vec![put("b.txt", b"two\n")]);
+        repo.cas_ref("main", Some(first), Some(second), "test/1")
+            .unwrap();
+
+        for depth in [Depth::Deep, Depth::Shallow] {
+            let report = repo.verify(depth).unwrap();
+            assert_eq!(report.problems, [], "{depth:?}");
+            assert_eq!(report.changesets_checked, 2, "{depth:?}");
+        }
+    }
+
+    /// A blob only a fact names, gone: a missing object, named against the fact's subject.
+    #[test]
+    fn a_missing_fact_blob_is_a_missing_object() {
+        let (_dir, root, repo, _guard) = v3_repo();
+        let first = commit(&repo, &[], vec![put("a.txt", b"one\n")]);
+        let value = repo.put_blob(b"a note\n".to_vec()).unwrap().id;
+        put_facts(&root, vec![annotation(first, "note", value.0)]);
+        fs::remove_file(object_file(&root, value.0)).unwrap();
+
+        assert_problems(
+            &repo,
+            vec![VerifyProblem::MissingObject {
+                referenced_by: first,
+                id: value.0,
+            }],
+        );
     }
 }

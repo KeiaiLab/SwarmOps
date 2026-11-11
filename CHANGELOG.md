@@ -26,6 +26,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
   yet; unsynced, a failed write is a warning, and `ws delete` removes it.
 - The MCP reference's index lists each command that has no tool with the reason it has none; a
   test fails on a command that has neither a tool nor a reason (the M21 design §2.5).
+- `verify` and `repair` know FORMAT 3 stores (the FORMAT 3 design §2.3, §2.5, §2.8). Verify names
+  a manifest whose runs do not split the records (`broken_partition`), a run file failing its CRC
+  (`run_crc`), a frame without its nonce (`missing_nonce`), a lost `journal3.ckpt`
+  (`base_seq_lost`) and a fact written before its feature (`feature_unlisted`), and looks for the
+  blobs facts name as it looks for those trees name. Repair rebuilds the fact rows and the runs,
+  and finds a lost base seq in the journal again. No release makes a FORMAT 3 store yet.
 
 ### Fixed
 

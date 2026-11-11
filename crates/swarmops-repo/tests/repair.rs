@@ -552,3 +552,203 @@ fn held_maintenance_lease_refuses_repair_at_once() {
     let ok = repo.repair(RepairRequest::new(false)).unwrap();
     assert_eq!(ok.actions, []);
 }
+
+/// Repair of a FORMAT 3 store (the FORMAT 3 design §2.3, §2.5, §2.8): the runs and the fact rows
+/// rebuilt from the journal, and a lost `journal3.ckpt`'s base seq found again in the journal. The
+/// store is made FORMAT 2, then turned FORMAT 3 by hand as an upgrade does (no `init` makes one
+/// yet); its fact kinds are enabled with the test hooks' `supported_for_tests`.
+#[cfg(feature = "test-hooks")]
+mod format_3 {
+    use std::sync::Arc;
+
+    use swarmops_store::{
+        Expect, Fact, FactKind, Guard, Journal, MetaStore, RealFs, Record, Step,
+        supported_for_tests,
+    };
+
+    use super::*;
+    use crate::verify::crc32;
+
+    /// The bytes of a `journal3.ckpt` of `fields`: offset, seq, base seq, records, fact rows.
+    fn ckpt3(fields: [u64; 5]) -> Vec<u8> {
+        let mut bytes: Vec<u8> = fields.iter().flat_map(|f| f.to_le_bytes()).collect();
+        bytes.extend(crc32(&bytes).to_le_bytes());
+        bytes
+    }
+
+    /// A FORMAT 2 repository of `count` commits turned FORMAT 3 by hand, its base seq the frames
+    /// it had (returned), the lineage feature supported while the guard lives.
+    fn v3_repo(count: usize) -> (TempDir, Utf8PathBuf, LocalRepo, u64, Guard) {
+        let guard = supported_for_tests(&["lineage"]);
+        let (dir, root, repo, _ids) = build_repo(StoreFormat::V2, count);
+        drop(repo);
+        let v2 = Layout::with_format(&root, StoreFormat::V2);
+        let base = (Journal::open(&v2, Arc::new(RealFs::new())).unwrap())
+            .frame_count()
+            .unwrap();
+
+        // FORMAT, journal3.ckpt, the manifest of no run, facts.col: what an upgrade writes.
+        let v3 = Layout::with_format(&root, StoreFormat::V3);
+        fs::write(v3.format_file(), b"swarmops-store 3\n").unwrap();
+        fs::write(v3.journal_ckpt(), ckpt3([0, 0, base, 0, 0])).unwrap();
+        fs::create_dir_all(v3.views_dir().join("tmp")).unwrap();
+        let mut manifest = b"SWMF\x01\0\0\0".to_vec();
+        manifest.extend([0; 12]);
+        manifest.extend(crc32(&manifest).to_le_bytes());
+        fs::write(v3.views_dir().join("MANIFEST"), manifest).unwrap();
+        fs::write(v3.facts_col(), b"").unwrap();
+        let repo = LocalRepo::open(&root).unwrap();
+        (dir, root, repo, base, guard)
+    }
+
+    /// A lineage fact of changeset subject `n`, its lineage `n + 1` (no blob).
+    fn lineage(n: u64) -> Fact {
+        let mut subject = [0x5a; 32];
+        subject[..8].copy_from_slice(&n.to_le_bytes());
+        let mut other = subject;
+        other[31] = 0xa5;
+        Fact::new(
+            FactKind::Lineage,
+            1,
+            subject,
+            other,
+            7,
+            ACTOR.to_owned(),
+            vec![3; 32],
+        )
+        .unwrap()
+    }
+
+    /// Commits the facts `range` names, 550 to a transaction, through the store at `root`.
+    fn put_lineages(root: &Utf8Path, range: std::ops::Range<u64>) {
+        let layout = Layout::with_format(root, StoreFormat::V3);
+        let store = MetaStore::open_in(layout, Arc::new(RealFs::new())).unwrap();
+        let ns: Vec<u64> = range.collect();
+        for chunk in ns.chunks(550) {
+            let mut write = store.write().unwrap();
+            for &n in chunk {
+                write.put_fact(lineage(n), Expect::Any).unwrap();
+            }
+            write.commit().unwrap();
+        }
+    }
+
+    /// A fact run removed and a fact row damaged: verify reports both; repair rebuilds the
+    /// index, and the next step the run, as the journal says.
+    #[test]
+    fn repair_v3_rebuilds_runs_and_facts() {
+        let (_dir, root, repo, _base, _guard) = v3_repo(2);
+        put_lineages(&root, 0..1_100);
+        repo.flush_metadata().unwrap();
+        assert_eq!(repo.step_views().unwrap(), Step::Done);
+        let layout = Layout::with_format(&root, StoreFormat::V3);
+        let run = layout
+            .views_dir()
+            .join(format!("f-{:016x}-{:016x}.run", 0, 1_100));
+        let (run_bytes, rows) = (
+            fs::read(&run).unwrap(),
+            fs::read(layout.facts_col()).unwrap(),
+        );
+        assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
+
+        // 1. The damage, which verify sees.
+        fs::remove_file(&run).unwrap();
+        write_at(layout.facts_col(), 24 * 10, &[0xee; 8]);
+        assert_ne!(repo.verify(Depth::Deep).unwrap().found, 0);
+
+        // 2. The repair: the index rebuilt, then the run.
+        let report = repo.repair(RepairRequest::new(false)).unwrap();
+        assert_eq!(
+            report.actions,
+            [RepairAction::new(
+                RepairKind::RebuildIndex,
+                "changeset_index",
+                true
+            )]
+        );
+        assert_eq!(report.after.found, 0, "{:?}", report.after.problems);
+        assert_eq!(fs::read(layout.facts_col()).unwrap(), rows);
+        assert_eq!(fs::read(&run).unwrap(), run_bytes);
+        assert_eq!(repo.repair(RepairRequest::new(false)).unwrap().actions, []);
+    }
+
+    /// The bytes of a frame of `records` with no nonce, a FORMAT 2 frame, at seq `seq` after a
+    /// frame of payload CRC `prev_crc`.
+    fn frame_without_nonce(records: &[Record], seq: u64, prev_crc: u32) -> Vec<u8> {
+        let mut payload = u16::try_from(records.len()).unwrap().to_le_bytes().to_vec();
+        for record in records {
+            record.encode(&mut payload).unwrap();
+        }
+        let mut frame = u32::try_from(payload.len()).unwrap().to_le_bytes().to_vec();
+        frame.extend(crc32(&payload).to_le_bytes());
+        frame.extend(seq.to_le_bytes());
+        frame.extend(prev_crc.to_le_bytes());
+        let hcrc = crc32(&frame);
+        frame.extend(hcrc.to_le_bytes());
+        frame.extend(payload);
+        frame
+    }
+
+    /// A lost `journal3.ckpt`: verify names it `base_seq_lost`; repair takes the first frame that
+    /// ends in a nonce as the base, every frame after it ending in one, and writes the checkpoint
+    /// again. A frame without a nonce past that base is refused, and nothing is written.
+    #[test]
+    fn repair_recovers_base_seq_from_the_journal() {
+        // 1. Three FORMAT 2 frames' commits, then two of FORMAT 3.
+        let (_dir, root, repo, base, _guard) = v3_repo(3);
+        assert!(base > 0);
+        put_lineages(&root, 0..2);
+        let more = commit(&repo, &[], vec![put("c.txt", b"three\n")]);
+        repo.flush_metadata().unwrap();
+        let layout = Layout::with_format(&root, StoreFormat::V3);
+        let before = fs::read(layout.journal_ckpt()).unwrap();
+        assert_eq!(before[16..24], base.to_le_bytes());
+
+        // 2. The checkpoint lost: verify names it.
+        fs::remove_file(layout.journal_ckpt()).unwrap();
+        let found = repo.verify(Depth::Shallow).unwrap();
+        assert!(
+            (found.problems.iter()).any(|p| p
+                .to_string()
+                .starts_with("damaged metadata: base_seq_lost:")),
+            "{:?}",
+            found.problems
+        );
+
+        // 3. The repair: the base found again, the store whole.
+        let report = repo.repair(RepairRequest::new(false)).unwrap();
+        assert_eq!(report.after.found, 0, "{:?}", report.after.problems);
+        let after = fs::read(layout.journal_ckpt()).unwrap();
+        assert_eq!(after[16..24], base.to_le_bytes());
+        assert!(repo.changeset_meta(more).unwrap().is_some());
+
+        // 4. A frame without its nonce past the base, the checkpoint lost again: refused.
+        let journal = Journal::open(&layout, Arc::new(RealFs::new())).unwrap();
+        let last = journal.frames_from(0, 1_000).unwrap().pop().unwrap();
+        drop(journal);
+        let at = fs::metadata(layout.journal_log()).unwrap().len();
+        let record = Record::RefMove {
+            name: "stray".to_owned(),
+            old: None,
+            new: Some(more),
+            actor: ACTOR.to_owned(),
+            ts: 1_700_000_000,
+        };
+        append_bytes(
+            layout.journal_log(),
+            &frame_without_nonce(&[record], last.seq + 1, last.crc),
+        );
+        fs::remove_file(layout.journal_ckpt()).unwrap();
+        let untouched = tree_snapshot(&root);
+        let refused = repo.repair(RepairRequest::new(false));
+        assert!(
+            matches!(refused, Err(RepoError::Store(StoreError::JournalCorrupt { offset })) if offset == at),
+            "{refused:?}"
+        );
+        let mut now = tree_snapshot(&root);
+        now.remove(Utf8Path::new("meta/maint.lock"));
+        let mut was = untouched;
+        was.remove(Utf8Path::new("meta/maint.lock"));
+        assert_eq!(now, was);
+    }
+}

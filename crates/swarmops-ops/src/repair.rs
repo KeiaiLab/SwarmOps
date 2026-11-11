@@ -98,7 +98,9 @@ mod tests {
         let (ops, info) = LocalOps::init(&root, "test").unwrap();
         let format = match info.store_version {
             1 => swarmops_store::StoreFormat::V1,
-            _ => swarmops_store::StoreFormat::V2,
+            2 => swarmops_store::StoreFormat::V2,
+            3 => swarmops_store::StoreFormat::V3,
+            other => panic!("no store format {other}"),
         };
         let layout = Layout::with_format(&root, format);
 

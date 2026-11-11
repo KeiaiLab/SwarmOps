@@ -51,7 +51,9 @@
 //!   a `git.oid` that is not the entry's key a [`VerifyProblem::ExternalIdMismatch`]. A name
 //!   under `meta/external_ids/` that is no entry's is passed over.
 //! - The objects. A blob a tree names that no object file holds is a
-//!   [`VerifyProblem::MissingObject`]. Objects live in the fan-out directories only
+//!   [`VerifyProblem::MissingObject`]; so is a blob a fact of a FORMAT 3 store names (the FORMAT 3
+//!   design §2.8: such blobs are roots), reported against the fact's subject as the changeset
+//!   that references it, unless a tree names it too. Objects live in the fan-out directories only
 //!   (`ObjectStore::list`): the temp files a crash leaves in `objects/tmp/`, and any stray
 //!   entry under `objects/`, are passed over.
 //!
@@ -413,6 +415,8 @@ struct Check<'r, O: ObjectStore> {
     walked: HashSet<ObjectId>,
     /// Every blob a tree names, with the first changeset whose tree does.
     blobs: BTreeMap<ObjectId, ChangesetId>,
+    /// Every blob a fact names, with the fact's subject, in journal order.
+    fact_blobs: Vec<(ObjectId, [u8; 32])>,
     changesets_checked: u64,
     /// Whether the journal read whole or the index opened: what tells which changesets the store
     /// holds, so that what names another (a ref, an external id) is dangling.
@@ -450,6 +454,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
             reported: HashSet::new(),
             walked: HashSet::new(),
             blobs: BTreeMap::new(),
+            fact_blobs: Vec::new(),
             changesets_checked: 0,
             targets_known: false,
             external: Vec::new(),
@@ -470,6 +475,8 @@ impl<'r, O: ObjectStore> Check<'r, O> {
         self.wants_git_oids = (self.external.iter())
             .any(|(system, entries)| system == SYSTEM_GIT && !entries.is_empty());
         let checked = self.repo.meta.check()?;
+        // The blobs facts name, roots as the trees' are: looked for with them, a tree's first.
+        self.fact_blobs = checked.fact_blobs().to_vec();
         for (name, corrupt) in checked.ref_problems() {
             let problem = if *corrupt {
                 VerifyProblem::CorruptRef(name.clone())
@@ -661,9 +668,13 @@ impl<'r, O: ObjectStore> Check<'r, O> {
         Ok(())
     }
 
-    /// Reports the blobs the trees name that no object file holds; a deep check re-hashes
-    /// every object file not re-hashed yet first.
+    /// Reports the blobs the trees and the facts name that no object file holds; a deep check
+    /// re-hashes every object file not re-hashed yet first.
     fn objects(&mut self) -> Result<(), RepoError> {
+        for (id, subject) in std::mem::take(&mut self.fact_blobs) {
+            let by = ChangesetId::new(ObjectId::new(subject));
+            self.blobs.entry(id).or_insert(by);
+        }
         let listed = self.repo.objects.list()?;
         // Deep: the blobs, as their files' headers say. Shallow: whatever has a file.
         let present = if self.depth == Depth::Deep {

@@ -46,6 +46,9 @@ const REF_NAME_HASH_DOMAIN: &[u8] = b"swarmops:refname:v1\0";
 /// How many hex digits of the name's hash name a FORMAT 2 ref file.
 const REF_STEM_LEN: usize = 32;
 
+/// FORMAT 3's checkpoint, by its place in the store.
+const V3_CKPT: &str = "meta/journal3.ckpt";
+
 /// What [`Repo::repair`] is asked to do.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -141,7 +144,8 @@ impl<O: ObjectStore> Repo<O> {
     ///    leaves the journal untouched.
     /// 2. Runs a deep [`Repo::verify`].
     /// 3. Rebuilds the changeset index and its sorted views ([`fsck::rebuild_index`]) if they or
-    ///    the checkpoint are damaged or disagree with the journal.
+    ///    the checkpoint are damaged or disagree with the journal; in FORMAT 3 the fact rows too,
+    ///    and then the runs, by one view step ([`MetaStore::step_views`]).
     /// 4. Rebuilds the ref files ([`fsck::rebuild_refs`]) if any ref file is corrupt, dangling,
     ///    missing or stale against the journal's `RefMove` records.
     /// 5. Quarantines every corrupt object file under `<store>/quarantine/objects/<64 hex>` with
@@ -218,6 +222,8 @@ impl<O: ObjectStore> Repo<O> {
             }
             if needs_rebuild_index {
                 fsck::rebuild_index(&self.layout, Arc::clone(&self.fs))?;
+                // FORMAT 3: the runs of what the replay passed, built again under the lease.
+                MetaStore::open_in(self.layout.clone(), Arc::clone(&self.fs))?.step_views()?;
             } else if offsets_rebuilt || !refs_to_rebuild.is_empty() {
                 MetaStore::open_in(self.layout.clone(), Arc::clone(&self.fs))?.flush()?;
             }
@@ -327,12 +333,22 @@ impl<O: ObjectStore> Repo<O> {
 
     /// Reads all journal frames if `journal.off` is present and consistent with `journal.log`;
     /// returns `StoreError::JournalCorrupt` when `journal.off` is missing (while `journal.log`
-    /// exists) or reading the frames fails as corrupt.
+    /// exists) or reading the frames fails as corrupt. In FORMAT 3 a `journal3.ckpt` that holds
+    /// no checkpoint has lost the base seq the frames are read by: `JournalCorrupt` at 0 too, so
+    /// that [`fsck::rebuild_offsets`] finds the base in the journal again.
     fn check_journal_offsets(&self) -> Result<Vec<Frame>, StoreError> {
         if self.layout.journal_log().exists() && !self.layout.journal_off().exists() {
             return Err(StoreError::JournalCorrupt { offset: 0 });
         }
-        read_all_journal_frames(&self.layout, Arc::clone(&self.fs))
+        match read_all_journal_frames(&self.layout, Arc::clone(&self.fs)) {
+            Err(StoreError::Io(e))
+                if e.kind() == io::ErrorKind::InvalidData
+                    && e.file.as_deref() == Some(Utf8Path::new(V3_CKPT)) =>
+            {
+                Err(StoreError::JournalCorrupt { offset: 0 })
+            }
+            read => read,
+        }
     }
 
     /// Whether the changeset index, its sorted views or the checkpoint need [`fsck::rebuild_index`].
@@ -373,9 +389,13 @@ impl<O: ObjectStore> Repo<O> {
             let Ok(index) = Index::open(effective_layout, Arc::clone(&self.fs)) else {
                 return Ok(true);
             };
-            if index.len() != journal_changesets
-                || index.held()? != journal_changesets
-                || !sorted_views_aligned(effective_layout)
+            // FORMAT 3's runs are checked by verify: no `meta/sorted/` to align.
+            let aligned = match effective_layout.format() {
+                StoreFormat::V1 | StoreFormat::V2 => sorted_views_aligned(effective_layout),
+                StoreFormat::V3 => true,
+                _ => false,
+            };
+            if index.len() != journal_changesets || index.held()? != journal_changesets || !aligned
             {
                 return Ok(true);
             }
@@ -708,7 +728,15 @@ fn stage_dry_run_offsets(layout: &Layout) -> Result<(TempStage, Layout), StoreEr
         )
         .map_err(map_io)?;
     }
-    for sub in ["idx", "sorted", "parents.log", "refs", "refs2"] {
+    for sub in [
+        "idx",
+        "sorted",
+        "sorted3",
+        "features",
+        "parents.log",
+        "refs",
+        "refs2",
+    ] {
         let src = layout.meta_path(sub);
         if src.exists() {
             let dst = staged.meta_path(sub);
@@ -736,11 +764,17 @@ fn restore_staged_ckpt(layout: &Layout, staged: &Layout) -> Result<(), StoreErro
     Ok(())
 }
 
-/// Whether a [`VerifyProblem::MetaCorrupt`] message names a damaged index or checkpoint.
+/// Whether a [`VerifyProblem::MetaCorrupt`] message names a damaged index or checkpoint: in
+/// FORMAT 3 also its fact rows, a manifest that does not split the records (`broken_partition`)
+/// and a run failing its CRC (`run_crc`).
 fn is_index_or_ckpt_corrupt(what: &str) -> bool {
     what.starts_with("the changeset index does not open")
         || what.starts_with("meta/journal.ckpt ")
         || what.starts_with("meta/journal2.ckpt ")
+        || what.starts_with("meta/journal3.ckpt ")
+        || what.starts_with("meta/idx/facts.col ")
+        || what.starts_with("broken_partition: ")
+        || what.starts_with("run_crc: ")
 }
 
 /// Whether all four sorted-view files in `meta/sorted/` have the same entry count and no
@@ -779,7 +813,7 @@ fn expected_ref_states(format: StoreFormat, frames: &[Frame]) -> Result<Expected
                 check_ref_name_in(format, name).map_err(|_| StoreError::JournalCorrupt {
                     offset: frame.offset,
                 })?;
-                if format == StoreFormat::V2 {
+                if format != StoreFormat::V1 {
                     stems.insert(ref_file_stem(name), name.clone());
                 }
                 targets.insert(name.as_str(), *new);
