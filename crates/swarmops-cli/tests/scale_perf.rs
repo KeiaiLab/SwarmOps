@@ -49,6 +49,12 @@ const MID: usize = 100_000;
 /// within the `ci-perf` profile's kill.
 const PART_BUDGET: Duration = Duration::from_mins(20);
 
+/// The changesets of the memory case's smaller store: [`MID`], or a tenth of the large store when
+/// a trial sets its size.
+fn mid() -> usize {
+    MID.min(bulk::large() / 10)
+}
+
 /// The path of `hot.txt`.
 fn hot() -> RepoPath {
     RepoPath::new(bulk::HOT).expect("a valid path")
@@ -125,6 +131,7 @@ fn lookup_snapshot_read_at_1m() {
     }
     let pair = bulk::pair();
     for (name, fixture) in [("1k", &pair.small), ("1m", &pair.large)] {
+        let name = format!("{name} ({} changesets)", fixture.spec.changesets);
         let repo = fixture.open();
 
         // 1. An id lookup: the index record of a changeset, in a snapshot of its own.
@@ -191,6 +198,7 @@ fn path_history_first_page_1k_vs_1m() {
     let pair = bulk::pair();
     let mut took = Vec::new();
     for (name, fixture) in [("1k", &pair.small), ("1m", &pair.large)] {
+        let name = format!("{name} ({} changesets)", fixture.spec.changesets);
         let repo = fixture.open();
         let read = repo.snapshot().unwrap();
 
@@ -227,7 +235,9 @@ fn peak(store: &Path, args: &[&str]) -> u64 {
     let kib = watch.finish();
     assert!(
         output.status.success(),
-        "{args:?}: {}",
+        "{args:?}: {:?} {}{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     kib / 1024
@@ -264,15 +274,16 @@ fn peak_rss_100k_vs_1m() {
     if !runs(CASE) {
         return;
     }
-    let mid = bulk::build(Spec::new(MID, MID));
-    let large = bulk::build(Spec::new(bulk::LARGE, bulk::LARGE));
+    let mid = bulk::build(Spec::new(mid(), mid()));
+    let large = bulk::build(Spec::new(bulk::large(), bulk::large()));
     let scratch = tempfile::tempdir_in(base_dir()).unwrap();
+    let (mid_n, large_n) = (mid.spec.changesets, large.spec.changesets);
     let mibs = |name: &str, run: &dyn Fn(&Fixture, &str) -> u64| {
         let (a, b) = (run(&mid, "100k"), run(&large, "1m"));
         let ratio = hundredths(b, a);
         bulk::say(
             CASE,
-            &format!("{name} 100k={a} MiB 1m={b} MiB ratio {ratio}"),
+            &format!("{name} {mid_n}={a} MiB {large_n}={b} MiB ratio {ratio}"),
         );
     };
     mibs("verify --deep", &|f, _| {
@@ -353,7 +364,7 @@ fn fixture_next_part() {
     if !runs(CASE) {
         return;
     }
-    let spec = Spec::new(bulk::LARGE, bulk::LARGE);
+    let spec = Spec::new(bulk::large(), bulk::large());
     let mut builder = Builder::open(&base_dir(), spec, real_fs());
     let started = Instant::now();
     let before = builder.done();

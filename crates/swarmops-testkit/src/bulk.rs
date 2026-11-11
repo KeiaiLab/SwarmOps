@@ -47,6 +47,18 @@ pub const SMALL: usize = 1_000;
 /// The changesets of A1's large store, and its files.
 pub const LARGE: usize = 1_000_000;
 
+/// The variable that sets the large store's size, for a trial of the cases on a store a tenth of
+/// the size or less: the figures then name that size, not A1's. Unset, it is [`LARGE`].
+pub const LARGE_ENV: &str = "SWARMOPS_SCALE_LARGE";
+
+/// The changesets of the large store this run uses: [`LARGE`], or what [`LARGE_ENV`] says.
+pub fn large() -> usize {
+    match std::env::var(LARGE_ENV) {
+        Ok(value) => value.parse().expect("SWARMOPS_SCALE_LARGE is a count"),
+        Err(_) => LARGE,
+    }
+}
+
 /// The changesets one part of a build records, in one journal frame.
 pub const PART: usize = 2_048;
 
@@ -214,7 +226,7 @@ pub struct Pair {
 pub fn pair() -> Pair {
     Pair {
         small: build(Spec::new(SMALL, SMALL)),
-        large: build(Spec::new(LARGE, LARGE)),
+        large: build(Spec::new(large(), large())),
     }
 }
 
@@ -275,6 +287,11 @@ pub struct Builder {
     wrote: bool,
     /// The changesets of a part.
     part: usize,
+    /// Whether `main` is on the head: the record says so once it is.
+    main_set: bool,
+    /// The lock on the fixture's directory name, held while this builder lives: two cases that
+    /// need one fixture, in two processes, build it one after the other, not at once.
+    _lock: fs::File,
 }
 
 impl Builder {
@@ -288,6 +305,9 @@ impl Builder {
         );
         let format = DEFAULT_INIT_FORMAT;
         let dir = base.join(spec.dir_name());
+        let lock_path = base.join(format!("{}.lock", spec.dir_name()));
+        let lock = fs::File::create(&lock_path).expect("create the fixture's lock file");
+        lock.lock().expect("lock the fixture");
         let fingerprint = spec.fingerprint(format);
         let mut builder = Builder {
             spec,
@@ -302,6 +322,8 @@ impl Builder {
             tree: TreeState::new(spec.files),
             wrote: false,
             part: PART,
+            main_set: false,
+            _lock: lock,
         };
         builder.resume();
         builder
@@ -321,6 +343,7 @@ impl Builder {
         self.done = state.done;
         self.head = state.head;
         self.samples = state.samples;
+        self.main_set = state.main_set;
         for k in 0..self.done {
             self.tree.apply(&self.spec, k);
         }
@@ -427,6 +450,9 @@ impl Builder {
         if let Some(head) = self.head {
             let _ = writeln!(text, "head {}", head.0.to_hex());
         }
+        if self.main_set {
+            text.push_str("main 1\n");
+        }
         for (k, id) in &self.samples {
             let _ = writeln!(text, "sample {k} {}", id.0.to_hex());
         }
@@ -450,11 +476,13 @@ impl Builder {
             self.spec.changesets
         );
         let head = self.head.expect("a whole fixture has a head");
-        if self.wrote {
+        if !self.main_set {
             let repo = self.repo();
             repo.cas_ref(MAIN, None, Some(head), "bulk")
                 .expect("move main to the head");
             repo.flush_metadata().expect("flush the metadata");
+            self.main_set = true;
+            self.write_state();
         }
         Fixture {
             store: self.store_path(),
@@ -480,6 +508,7 @@ fn raw_seam(on: bool) {
 
 /// The progress record, read back.
 struct State {
+    main_set: bool,
     fingerprint: String,
     done: usize,
     head: Option<ChangesetId>,
@@ -490,6 +519,7 @@ struct State {
 fn read_state(dir: &Path) -> Option<State> {
     let text = fs::read_to_string(dir.join(STATE)).ok()?;
     let mut state = State {
+        main_set: false,
         fingerprint: String::new(),
         done: 0,
         head: None,
@@ -499,6 +529,7 @@ fn read_state(dir: &Path) -> Option<State> {
         let mut words = line.split(' ');
         match words.next()? {
             "fingerprint" => words.next()?.clone_into(&mut state.fingerprint),
+            "main" => state.main_set = true,
             "done" => state.done = words.next()?.parse().ok()?,
             "head" => state.head = Some(changeset(words.next()?)?),
             "sample" => {
@@ -769,6 +800,27 @@ mod tests {
             "the resumed build is the whole one"
         );
         assert_eq!(chain_len(&resumed), 300);
+    }
+
+    #[test]
+    fn main_is_set_for_a_store_whose_parts_were_all_written_before() {
+        let base = tempfile::tempdir().unwrap();
+        let spec = Spec::new(200, 200);
+
+        // The last part is written, the builder never finishes (`fixture_next_part` ends so).
+        let mut builder = Builder::open(base.path(), spec, real_fs());
+        while builder.next_part() == Part::Written {}
+        drop(builder);
+
+        // A later build finds every part there, and still puts `main` on the head.
+        let fixture = build_in(base.path(), spec, real_fs());
+        let repo = fixture.open();
+        assert_eq!(repo.resolve(MAIN).unwrap(), fixture.head);
+
+        // Once: the next call writes nothing.
+        let (fs, calls) = RecordingFs::new();
+        build_in(base.path(), spec, Arc::new(fs));
+        assert_eq!(calls(), Vec::<String>::new());
     }
 
     #[test]
