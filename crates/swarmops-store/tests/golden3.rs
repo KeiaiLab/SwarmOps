@@ -1,8 +1,13 @@
-//! FORMAT 3's golden vectors (the FORMAT 3 design §6): the marker, the fact envelope and the
-//! body of every kind and type, the nonce frame and the entity id, written by the encoder once
-//! and pinned here; and the byte layouts of the checkpoint, feature list, manifest, runs and
-//! fact rows, built here from the design's tables so that their codecs (later slices) meet
-//! fixed bytes. FORMAT 1 and 2 keep their own vectors untouched.
+//! FORMAT 3's golden vectors (the FORMAT 3 design §6): the marker, the fact envelope, the body
+//! of every kind and type, the nonce frame and the entity id, written by the encoder once and
+//! pinned here; and the byte layouts of the checkpoint, feature list, manifest, runs and fact
+//! rows, built here from the design's tables so that their codecs (later slices) meet fixed
+//! bytes. FORMAT 1 and 2 keep their own vectors untouched.
+//!
+//! `tests/golden3/` holds the confirmed layouts; `tests/golden3/provisional/` the fact bodies,
+//! which stay provisional until their kind's feature is supported and released (the FORMAT 3
+//! design's amendment of 2026-11-11, G2 and G9): a consuming milestone may change one in place
+//! until then. The envelope around them is confirmed (`envelope.hex`, the body opaque).
 //!
 //! Each file is lines of lowercase hex (the nonce frame's second line is the op id as text).
 //! A fact file holds two facts: every optional field filled, then every one empty.
@@ -14,8 +19,8 @@ use std::sync::Arc;
 use camino::Utf8PathBuf;
 use swarmops_core::{ChangesetId, ObjectId};
 use swarmops_store::{
-    Base, Fact, FactKind, Frame, Layout, MetaStore, RealFs, Record, StoreError, StoreFormat,
-    StoreFs, UPGRADE_POISON_V3, read_format,
+    Base, Fact, FactKind, Frame, Layout, MAX_FACT_BODY, MetaStore, RealFs, Record,
+    SUPPORTED_FEATURES, StoreError, StoreFormat, StoreFs, UPGRADE_POISON_V3, read_format,
 };
 
 /// The nonce of the nonce frame and the entity id.
@@ -24,6 +29,23 @@ const NONCE: u64 = 0x1122_3344_5566_7788;
 /// The goldens whose codecs later slices write: built from the design's tables here, and checked
 /// byte for byte, but not yet decoded (so not in the flipped-byte check).
 const DECODED_LATER: [&str; 4] = ["manifest", "run_c", "run_f", "facts_col"];
+
+/// The directory, under `tests/golden3/`, of the goldens of fact bodies not yet released.
+const PROVISIONAL: &str = "provisional";
+
+/// The confirmed goldens: the design §6 table less the fact cells, plus the envelope.
+const CONFIRMED_COUNT: usize = 10;
+
+/// Each fact kind's feature name (the FORMAT 3 design §2.6).
+const KIND_FEATURES: [(FactKind, &str); 7] = [
+    (FactKind::Review, "review"),
+    (FactKind::Annotation, "annotation"),
+    (FactKind::Check, "check"),
+    (FactKind::Queue, "queue"),
+    (FactKind::Withdrawal, "withdrawal"),
+    (FactKind::Lineage, "lineage"),
+    (FactKind::Provenance, "provenance"),
+];
 
 /// Every (kind, type) cell of the design §2.8 table: 35.
 const CELLS: [(FactKind, u8); 35] = {
@@ -192,7 +214,13 @@ fn every_fact_kind_and_type_matches_its_golden() {
 #[test]
 fn a_flipped_byte_in_any_golden_is_refused() {
     let names = golden_names();
-    assert_eq!(names.len(), 44, "the design §6 table, with 35 fact cells");
+    assert_eq!(
+        names.len(),
+        CONFIRMED_COUNT + CELLS.len(),
+        "the design §6 table, with 35 fact cells, and the envelope"
+    );
+    let provisional = names.iter().filter(|name| is_provisional(name)).count();
+    assert_eq!(provisional, CELLS.len(), "every fact cell provisional");
     for name in &names {
         if DECODED_LATER.contains(&name.as_str()) {
             continue;
@@ -212,6 +240,62 @@ fn a_flipped_byte_in_any_golden_is_refused() {
             }
         }
     }
+}
+
+/// The envelope is confirmed whatever its body: the golden's bytes are the design §2.8
+/// envelope around an opaque body, and the encoder lays every cell's fact out the same way.
+#[test]
+fn the_envelope_matches_its_golden() {
+    let lines = read_golden("envelope");
+    assert_eq!(lines, envelopes(), "the golden's bytes");
+
+    // 1. 77 fixed bytes, then the actor, then the body.
+    for (line, (actor, body)) in lines.iter().zip(ENVELOPE_PARTS) {
+        assert_eq!(line.len(), 77 + actor.len() + body.len());
+        let value = envelope_value(line).expect("an envelope");
+        assert!(value.ends_with(&format!("{actor:?} {body:?}")), "{value}");
+    }
+    assert_eq!(MAX_FACT_BODY, 4_096);
+
+    // 2. Every cell's encoding is that envelope around its own body.
+    for (kind, ty) in CELLS {
+        for fill in [Fill::Full, Fill::Empty] {
+            let fact = fact(kind, ty, fill);
+            let mut bytes = Vec::new();
+            Record::Fact(fact.clone()).encode(&mut bytes).unwrap();
+            assert_eq!(bytes, envelope_of(&fact), "{kind:?} {ty}");
+        }
+    }
+}
+
+/// No fact body of a supported feature's kind is still provisional: once a feature is
+/// supported, its bodies are confirmed and their goldens leave `provisional/`.
+#[test]
+fn an_enabled_feature_has_no_provisional_golden() {
+    let offenders = provisional_offenders(SUPPORTED_FEATURES, &golden_names());
+    assert_eq!(offenders, Vec::<String>::new());
+}
+
+/// The detector's self-check: a supported feature whose goldens are still provisional is
+/// caught, and so is a supported feature no kind has (fail closed).
+#[test]
+fn the_provisional_detector_catches_a_planted_one() {
+    let names = golden_names();
+    let caught = provisional_offenders(&["review"], &names);
+    assert_eq!(caught.len(), 8, "{caught:?}");
+    assert!(caught.iter().all(|name| name.contains("fact_3_")));
+    assert_eq!(
+        provisional_offenders(&["nothing"], &names),
+        ["nothing: no fact kind"]
+    );
+
+    // The planted file alone, in a list without the real ones.
+    let planted = [format!("{PROVISIONAL}/fact_10_1")];
+    assert_eq!(provisional_offenders(&["provenance"], &planted), planted);
+    assert_eq!(
+        provisional_offenders(&["lineage"], &planted),
+        Vec::<String>::new()
+    );
 }
 
 /// A FORMAT 3 writer writes no `Compacted`: one past the base is not a record.
@@ -330,7 +414,7 @@ fn regenerate_golden3() {
         eprintln!("regenerate_golden3: SWARMOPS_REGEN_GOLDEN not set; nothing written");
         return;
     }
-    fs::create_dir_all(golden_dir()).unwrap();
+    fs::create_dir_all(golden_dir().join(PROVISIONAL)).unwrap();
     let write = |name: &str, lines: &[Vec<u8>]| {
         let text: String = lines.iter().map(|line| hex(line) + "\n").collect();
         fs::write(golden_dir().join(format!("{name}.hex")), text).unwrap();
@@ -345,6 +429,7 @@ fn regenerate_golden3() {
         ],
     );
     write("entity_id", &[entity_id_bytes()]);
+    write("envelope", &envelopes());
     for (name, bytes) in later_layouts() {
         write(name, &[bytes]);
     }
@@ -442,7 +527,7 @@ fn fact(kind: FactKind, ty: u8, fill: Fill) -> Fact {
     // The envelope: a withdrawal names no other; an empty fact names none either.
     let other = if kind == Withdrawal { [0; 32] } else { some(9) };
     let actor = text("agent/one").to_owned();
-    Fact::new(kind, ty, id(8), other, 1_700_000_123, actor, b.0).unwrap()
+    Fact::new(kind, ty, id(8), other, TS, actor, b.0).unwrap()
 }
 
 /// A fact body, field by field: integers little-endian, strings `u8 len | UTF-8`.
@@ -491,6 +576,77 @@ impl Body {
         self.0.extend_from_slice(v);
         self
     }
+}
+
+/// The envelope golden's actor and opaque body, filled and empty.
+const ENVELOPE_PARTS: [(&str, &[u8]); 2] = [("agent/one", b"opaque\x00\xff"), ("", b"")];
+
+/// The time every fact here was made at.
+const TS: i64 = 1_700_000_123;
+
+/// The envelope golden's lines: a review fact of type 0 around each opaque body.
+fn envelopes() -> Vec<Vec<u8>> {
+    let others = [id(9), [0; 32]];
+    (ENVELOPE_PARTS.iter().zip(others))
+        .map(|((actor, body), other)| envelope(3, 0, id(8), other, actor, body))
+        .collect()
+}
+
+/// `fact`'s envelope around its body, built here field by field.
+fn envelope_of(fact: &Fact) -> Vec<u8> {
+    let (kind, ty) = (fact.kind().code(), fact.ty());
+    assert_eq!(fact.ts(), TS);
+    envelope(
+        kind,
+        ty,
+        fact.subject(),
+        fact.other(),
+        fact.actor(),
+        fact.body(),
+    )
+}
+
+/// The design §2.8 envelope: `u8 kind | u8 type | u16le body_len | subject | other | i64le ts |
+/// u8 actor_len | actor | body`, at [`TS`].
+fn envelope(
+    kind: u8,
+    ty: u8,
+    subject: [u8; 32],
+    other: [u8; 32],
+    actor: &str,
+    body: &[u8],
+) -> Vec<u8> {
+    let mut bytes = vec![kind, ty];
+    bytes.extend_from_slice(&u16::try_from(body.len()).unwrap().to_le_bytes());
+    bytes.extend_from_slice(&subject);
+    bytes.extend_from_slice(&other);
+    bytes.extend_from_slice(&TS.to_le_bytes());
+    bytes.push(u8::try_from(actor.len()).unwrap());
+    bytes.extend_from_slice(actor.as_bytes());
+    bytes.extend_from_slice(body);
+    bytes
+}
+
+/// What an envelope golden line reads as by the envelope alone: its fields, the body opaque;
+/// `None` for a kind no fact has, a length that does not match, or an actor not UTF-8.
+fn envelope_value(line: &[u8]) -> Option<String> {
+    // 1. The fixed fields.
+    let (kind, rest) = line.split_first()?;
+    FactKind::from_code(*kind)?;
+    let (ty, rest) = rest.split_first()?;
+    let (body_len, rest) = rest.split_first_chunk::<2>()?;
+    let (ids, rest) = rest.split_first_chunk::<64>()?;
+    let (ts, rest) = rest.split_first_chunk::<8>()?;
+
+    // 2. The actor, then a body of exactly `body_len` bytes.
+    let (actor_len, rest) = rest.split_first()?;
+    let (actor, body) = rest.split_at_checked(usize::from(*actor_len))?;
+    let actor = std::str::from_utf8(actor).ok()?;
+    if body.len() != usize::from(u16::from_le_bytes(*body_len)) {
+        return None;
+    }
+    let ts = i64::from_le_bytes(*ts);
+    Some(format!("{kind} {ty} {} {ts} {actor:?} {body:?}", hex(ids)))
 }
 
 /// The nonce frame's records and its bytes, built here from the FORMAT 2 header layout: a
@@ -619,6 +775,7 @@ fn golden_value(name: &str, index: usize, line: &[u8]) -> Option<String> {
         "nonce_frame" => frame_value(line),
         "ckpt3" => ckpt3_value(line),
         "features" => features_value(line),
+        "envelope" => envelope_value(line),
         _ => {
             let (record, used) =
                 Record::decode_in(StoreFormat::V3, Base::After, &FactKind::ALL, line).ok()?;
@@ -706,17 +863,59 @@ fn golden_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden3")
 }
 
+/// A cell's golden: under `provisional/` until its kind's feature is supported.
 fn fact_file(kind: FactKind, ty: u8) -> String {
-    format!("fact_{}_{ty}", kind.code())
+    let file = format!("fact_{}_{ty}", kind.code());
+    let supported =
+        (KIND_FEATURES.iter()).any(|&(of, name)| of == kind && SUPPORTED_FEATURES.contains(&name));
+    if supported {
+        file
+    } else {
+        format!("{PROVISIONAL}/{file}")
+    }
 }
 
-/// The names of the files of `tests/golden3/`, without `.hex`, sorted.
+/// Whether golden `name` is a provisional one.
+fn is_provisional(name: &str) -> bool {
+    name.starts_with(&format!("{PROVISIONAL}/"))
+}
+
+/// The provisional goldens among `names` of a kind whose feature is in `supported`, and each
+/// supported feature no fact kind has: what [`an_enabled_feature_has_no_provisional_golden`]
+/// refuses.
+fn provisional_offenders(supported: &[&str], names: &[String]) -> Vec<String> {
+    let mut offenders = Vec::new();
+    for feature in supported {
+        // 1. A feature that names no kind: fail closed.
+        let Some((kind, _)) = KIND_FEATURES.iter().find(|(_, name)| name == feature) else {
+            offenders.push(format!("{feature}: no fact kind"));
+            continue;
+        };
+
+        // 2. Its kind's provisional goldens.
+        let stem = format!("{PROVISIONAL}/fact_{}_", kind.code());
+        offenders.extend(names.iter().filter(|name| name.starts_with(&stem)).cloned());
+    }
+    offenders
+}
+
+/// The names of the files of `tests/golden3/` and `tests/golden3/provisional/`, without
+/// `.hex`, sorted; a provisional one prefixed with `provisional/`.
 fn golden_names() -> Vec<String> {
-    let mut names: Vec<String> = fs::read_dir(golden_dir())
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-        .filter_map(|file| file.strip_suffix(".hex").map(str::to_owned))
-        .collect();
+    let hex_files = |dir: PathBuf| -> Vec<String> {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter_map(|file| file.strip_suffix(".hex").map(str::to_owned))
+            .collect()
+    };
+    let provisional = hex_files(golden_dir().join(PROVISIONAL));
+    let mut names = hex_files(golden_dir());
+    names.extend(
+        provisional
+            .into_iter()
+            .map(|file| format!("{PROVISIONAL}/{file}")),
+    );
     names.sort();
     names
 }
