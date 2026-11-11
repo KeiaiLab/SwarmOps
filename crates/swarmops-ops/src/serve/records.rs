@@ -16,7 +16,7 @@
 //! `warning:` line on stderr, never a failed request. A record holds the caller `serve`
 //! resolved and numbers: no path, nothing of the environment.
 
-use std::fs::{self, File, TryLockError};
+use std::fs::{self, File};
 use std::io::{self, Write as _};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -28,6 +28,7 @@ use swarmops_git::serve::pack_key::PackDigest;
 
 use super::Served;
 use super::guard::Redactor;
+use crate::records::{self, Files};
 
 /// The most bytes the records' file holds before it is renamed to the one older file.
 pub const MAX_SERVE_RECORDS_BYTES: u64 = 64 << 20;
@@ -39,18 +40,17 @@ pub(crate) const SWARMOPS_SERVE_CONNECTION: &str = "SWARMOPS_SERVE_CONNECTION";
 const GIT: &str = "git";
 
 /// The records' file, the one older file and the lock of its rotation, in the git directory.
-const RECORDS: &str = "serve-records.jsonl";
-const OLDER: &str = "serve-records.1.jsonl";
-const ROTATE_LOCK: &str = "serve-records.lock";
+const FILES: Files = Files {
+    current: "serve-records.jsonl",
+    older: "serve-records.1.jsonl",
+    lock: "serve-records.lock",
+};
 
 /// The hooks' splits, one file per connection, in the git directory.
 const SPLIT_DIR: &str = "serve-split";
 
 /// The hex digits of a connection id.
 const ID_HEX: usize = 16;
-
-/// The longest line appended: one `write` of it is not interleaved with another's.
-const MAX_LINE: usize = 4 << 10;
 
 /// Microseconds in a millisecond.
 const US_PER_MS: u64 = 1_000;
@@ -154,7 +154,7 @@ impl Connection {
         let record = self.record(who, side, split, end_us, outcome);
 
         // 3. Appended: a failure warns and the request stands.
-        if let Err(e) = append(&git, &record, MAX_SERVE_RECORDS_BYTES) {
+        if let Err(e) = records::append(&git, &FILES, &record, MAX_SERVE_RECORDS_BYTES) {
             let mut stderr = io::stderr().lock();
             let warning = redactor.redact(&format!("serve records: {e}"));
             let _ = writeln!(stderr, "warning: {warning}");
@@ -265,57 +265,19 @@ fn ms(us: u64) -> u64 {
     us / US_PER_MS
 }
 
-/// Appends `record` as one line to the records of the git directory `git`, in one `write`;
-/// past `bound` bytes, renamed to the older file by the writer that takes the rotation's lock.
-fn append(git: &Path, record: &ServeRecord, bound: u64) -> io::Result<()> {
-    // 1. The line, short enough that one write of it is whole.
-    let mut line = serde_json::to_vec(record).map_err(io::Error::other)?;
-    line.push(b'\n');
-    if line.len() > MAX_LINE {
-        return Err(io::Error::other("a record past 4 KiB"));
-    }
-
-    // 2. Appended, unsynced: diagnostics.
-    let path = git.join(RECORDS);
-    let mut file = File::options().append(true).create(true).open(&path)?;
-    file.write_all(&line)?;
-    if file.metadata()?.len() <= bound {
-        return Ok(());
-    }
-
-    // 3. Rotated by the writer that takes the lock, no wait; past the bound still, since
-    //    another may have rotated first.
-    rotate(git, &path, bound)
-}
-
-/// Renames the records at `path` to the older file when they are past `bound`, holding the
-/// rotation's lock of `git`; another holder's lock leaves it to them.
-fn rotate(git: &Path, path: &Path, bound: u64) -> io::Result<()> {
-    let lock = File::options()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(git.join(ROTATE_LOCK))?;
-    match lock.try_lock() {
-        Ok(()) => {}
-        Err(TryLockError::WouldBlock) => return Ok(()),
-        Err(TryLockError::Error(e)) => return Err(e),
-    }
-    let len = fs::metadata(path).map_or(0, |meta| meta.len());
-    if len > bound {
-        fs::rename(path, git.join(OLDER))?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
 
     use swarmops_api::{ErrorCode, Identity, OpError, ServeRecord, ServeService};
 
-    use super::{Connection, OLDER, RECORDS, Side, Split, append};
+    use super::{Connection, FILES, Side, Split};
     use crate::serve::Served;
+
+    /// Appends `record` to the serve records of `git`, past `bound` rotated.
+    fn append(git: &std::path::Path, record: &ServeRecord, bound: u64) -> std::io::Result<()> {
+        crate::records::append(git, &FILES, record, bound)
+    }
 
     /// The caller of these records.
     fn ada() -> Identity {
@@ -379,15 +341,39 @@ mod tests {
         for _ in 0..3 {
             append(git.path(), &record, bound).unwrap();
         }
-        assert!(!git.path().join(RECORDS).exists());
-        let older = fs::read_to_string(git.path().join(OLDER)).unwrap();
+        assert!(!git.path().join(FILES.current).exists());
+        let older = fs::read_to_string(git.path().join(FILES.older)).unwrap();
         assert_eq!(older.lines().count(), 3);
         append(git.path(), &record, bound).unwrap();
-        let current = fs::read_to_string(git.path().join(RECORDS)).unwrap();
+        let current = fs::read_to_string(git.path().join(FILES.current)).unwrap();
         assert_eq!(current.lines().count(), 1);
         for line in older.lines().chain(current.lines()) {
             let read: ServeRecord = serde_json::from_str(line).unwrap();
             assert_eq!(read, record);
         }
+    }
+
+    /// An appended record is the line M17 wrote, byte for byte, in the file it named.
+    #[test]
+    fn serve_records_keep_their_bytes() {
+        // 1. A record with every field set.
+        let git = tempfile::tempdir().unwrap();
+        let mut record = ServeRecord::new(1_700_000_000_000, "person/ada", ServeService::Push);
+        record.prepare_ms = 12;
+        record.send_ms = 34;
+        record.bytes = 56;
+        record.exit = 1;
+        record.code = Some(ErrorCode::Auth);
+
+        // 2. Appended twice: two whole lines, the same bytes as before the move.
+        append(git.path(), &record, super::MAX_SERVE_RECORDS_BYTES).unwrap();
+        append(git.path(), &record, super::MAX_SERVE_RECORDS_BYTES).unwrap();
+        let line = concat!(
+            r#"{"at":1700000000000,"identity":"person/ada","service":"push","#,
+            r#""prepare_ms":12,"send_ms":34,"bytes":56,"exit":1,"code":"E_AUTH"}"#,
+            "\n"
+        );
+        let written = fs::read_to_string(git.path().join("serve-records.jsonl")).unwrap();
+        assert_eq!(written, line.repeat(2), "the serve records' bytes");
     }
 }

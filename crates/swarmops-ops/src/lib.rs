@@ -38,6 +38,7 @@ mod local;
 mod phase;
 mod push;
 mod rebase;
+mod records;
 mod remote;
 mod repair;
 pub mod serve;
