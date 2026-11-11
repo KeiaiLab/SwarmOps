@@ -1,0 +1,4 @@
+#!/bin/sh
+# The self-check's planted misconfiguration (sshd's AuthorizedKeysCommand): every key offered is
+# accepted as person/ada's, which is ssh authentication turned off. Never in a real install.
+printf 'restrict,command="swarmops serve --root /srv/so --as person/ada" %s %s\n' "$1" "$2"
