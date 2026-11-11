@@ -23,6 +23,15 @@ being `full_id` of the `new/benchmark.json` beside it (`BenchmarkId::new(name, p
   thresholds    The thresholds file is missing or not TOML.
   no-dir        The criterion directory does not exist.
   empty         The directory holds no estimate at all: nothing was measured.
+  loaded        A regression measured under load that no quiet rerun decided: LOADED, NO VERDICT.
+
+A regression is measured again only if the run ended loaded. `check` then reads `/proc/loadavg`
+once: under the measurement gate (1-minute load < LOAD1_MAX, 5-minute < LOAD5_MAX) the findings
+stand, never best-of-two. Over it, `check` waits at most GATE_WAIT_MAX_S for the gate held HELD_S,
+runs the flagged benches again (`cargo bench --locked --workspace -- --exact <id>`, from the
+working directory) and compares their new medians: still over is REGRESSION, under is CLEARED BY
+A QUIET RERUN, a gate that never opens or a rerun that ends loaded is LOADED, NO VERDICT. Each
+prints both medians and both loads; only a clearance passes.
 
 `baseline` writes a thresholds file from two quiet runs to stdout: a bench whose medians differ by
 less than INCLUSION_SPREAD (of the smaller) enters `[bench]` with their mean, every other one
@@ -37,14 +46,17 @@ only, no network.
 """
 
 import argparse
+import contextlib
+import io
 import json
 import math
+import subprocess
 import sys
 import tempfile
 import time
 import tomllib
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 NAME = "bench-gate"
@@ -68,6 +80,21 @@ FULL_ID = "full_id"
 MEDIAN = "median"
 POINT = "point_estimate"
 
+# The measurement gate (D2 design §11 step 1): 1-minute load under LOAD1_MAX and 5-minute
+# under LOAD5_MAX, both held HELD_S seconds. A loaded run's regression waits at most
+# GATE_WAIT_MAX_S for it, polling every POLL_S, before its benches run again.
+LOAD1_MAX = 2.0
+LOAD5_MAX = 6.0
+HELD_S = 300
+GATE_WAIT_MAX_S = 600
+POLL_S = 10
+LOADAVG = Path("/proc/loadavg")
+
+# The verdicts a rerun prints.
+STILL_OVER = "REGRESSION"
+CLEARED = "CLEARED BY A QUIET RERUN"
+NO_VERDICT = "LOADED, NO VERDICT"
+
 # The thresholds file's tables and keys.
 BENCH_TABLE = "bench"
 SKIP_TABLE = "skip"
@@ -90,15 +117,52 @@ class Finding:
 
 @dataclass
 class Report:
-    """What `check` found: the findings, and the lines it prints for the benches compared."""
+    """What `check` found: the findings, the lines it prints for the benches compared, and
+    their baselines by id."""
 
     findings: list[Finding]
     lines: list[str]
     estimates: int
+    baselines: dict[str, float] = field(default_factory=dict)
 
 
 # Where `check` prints a line.
 Out = Callable[[str], None]
+
+
+@dataclass(frozen=True)
+class Load:
+    """The 1- and 5-minute load averages."""
+
+    one: float
+    five: float
+
+    def quiet(self) -> bool:
+        """Under the measurement gate."""
+        return self.one < LOAD1_MAX and self.five < LOAD5_MAX
+
+    def __str__(self) -> str:
+        return f"load {self.one:.2f} {self.five:.2f}"
+
+
+class Host:
+    """The machine `check` runs on: its load, its clock and the bench runner."""
+
+    def load(self) -> Load:
+        """The load averages `/proc/loadavg` holds now."""
+        one, five = LOADAVG.read_text(encoding="ascii").split()[:2]
+        return Load(float(one), float(five))
+
+    def now(self) -> float:
+        return time.monotonic()
+
+    def sleep(self, seconds: float) -> None:
+        time.sleep(seconds)
+
+    def bench(self, bench_id: str) -> int:
+        """Runs the bench `bench_id` alone, as `just bench-run` would; its exit code."""
+        command = ["cargo", "bench", "--locked", "--workspace", "--", "--exact", bench_id]
+        return subprocess.run(command, check=False).returncode
 
 
 def toml_key(key: str) -> str:
@@ -188,6 +252,7 @@ def check(root: Path, thresholds: Path) -> Report:
 
     # 2. Every listed bench against its baseline.
     lines: list[str] = []
+    baselines: dict[str, float] = {}
     for bench_id, entry in sorted(bench.items()):
         if bench_id not in medians:
             findings.append(Finding("missing", bench_id, "listed, but the run has no estimate"))
@@ -195,6 +260,7 @@ def check(root: Path, thresholds: Path) -> Report:
         baseline = entry.get("median_ns") if isinstance(entry, dict) else None
         if isinstance(baseline, bool) or not isinstance(baseline, (int, float)) or baseline <= 0:
             continue
+        baselines[bench_id] = baseline
         ratio = medians[bench_id] / baseline
         verdict = "ok" if ratio <= REGRESSION else "REGRESSION"
         lines.append(
@@ -209,7 +275,7 @@ def check(root: Path, thresholds: Path) -> Report:
     # 3. Every estimate is accounted for: compared, or skipped for a reason.
     for bench_id in sorted(set(medians) - set(bench) - set(skip)):
         findings.append(Finding("unlisted", bench_id, "in neither `[bench]` nor `[skip]`"))
-    return Report(sorted(set(findings)), lines, len(medians))
+    return Report(sorted(set(findings)), lines, len(medians), baselines)
 
 
 def spread(first: float, second: float) -> float:
@@ -251,7 +317,7 @@ def baseline(first: dict[str, float], second: dict[str, float], measured: str, r
 def write_estimate(root: Path, bench_id: str, median: float) -> None:
     """Writes one estimate as criterion does, under a directory per `/` of the id."""
     new = root.joinpath(*bench_id.split("/"), NEW_DIR)
-    new.mkdir(parents=True)
+    new.mkdir(parents=True, exist_ok=True)
     (new / BENCHMARK).write_text(json.dumps({FULL_ID: bench_id}), encoding="utf-8")
     estimates = {MEDIAN: {POINT: median}, "mean": {POINT: median}}
     (new / ESTIMATES).write_text(json.dumps(estimates), encoding="utf-8")
@@ -327,6 +393,150 @@ def selftest_baseline() -> list[str]:
     return problems
 
 
+class FakeHost(Host):
+    """A host on a virtual clock: `loads(t)` is its load at second t, and a bench takes
+    FAKE_BENCH_S and rewrites its estimate to `rerun[id]`."""
+
+    def __init__(self, root: Path, loads: Callable[[float], Load], rerun: dict[str, float]):
+        self.root = root
+        self.loads = loads
+        self.rerun = rerun
+        self.clock = 0.0
+        self.reads = 0
+        self.benched: list[str] = []
+
+    def load(self) -> Load:
+        self.reads += 1
+        return self.loads(self.clock)
+
+    def now(self) -> float:
+        return self.clock
+
+    def sleep(self, seconds: float) -> None:
+        self.clock += seconds
+
+    def bench(self, bench_id: str) -> int:
+        self.benched.append(bench_id)
+        self.clock += FAKE_BENCH_S
+        write_estimate(self.root, bench_id, self.rerun[bench_id])
+        return CLEAN
+
+
+# How long a fake bench runs.
+FAKE_BENCH_S = 60
+
+QUIET = Load(0.5, 1.2)
+LOADED = Load(9.0, 12.0)
+
+# A run of `group/a/10` 25 % over its baseline.
+SLOW_RUN = CLEAN_RUN | {"group/a/10": 1250.0}
+
+
+def rerun_case(
+    estimates: dict[str, float], loads: Callable[[float], Load], rerun: dict[str, float]
+) -> tuple[int, str, FakeHost]:
+    """`check` on a crafted run with a fake host: its exit code, its output and the host."""
+    with tempfile.TemporaryDirectory(prefix=f"{NAME}-") as name:
+        root = Path(name) / "criterion"
+        root.mkdir()
+        for bench_id, median in estimates.items():
+            write_estimate(root, bench_id, median)
+        thresholds = Path(name) / "thresholds.toml"
+        thresholds.write_text(SELFTEST_THRESHOLDS, encoding="utf-8")
+        host = FakeHost(root, loads, rerun)
+        lines: list[str] = []
+        with contextlib.redirect_stderr(io.StringIO()):
+            code = gate(root, thresholds, host, lines.append)
+    return code, "\n".join(lines), host
+
+
+def loaded_until(second: float) -> Callable[[float], Load]:
+    """Loaded before `second`, quiet from then on."""
+    return lambda t: LOADED if t < second else QUIET
+
+
+def rerun_keeps_a_regression() -> list[str]:
+    """A loaded run's regression that the quiet rerun repeats fails, with both medians."""
+    code, out, host = rerun_case(SLOW_RUN, loaded_until(30), {"group/a/10": 1240.0})
+    if code != FOUND or STILL_OVER not in out or host.benched != ["group/a/10"]:
+        return [f"rerun_keeps_a_regression: exit {code}, reran {host.benched}: {out!r}"]
+    if "1250.0" not in out or "1240.0" not in out:
+        return [f"rerun_keeps_a_regression: not both medians: {out!r}"]
+    return []
+
+
+def rerun_clears_noise_and_prints_both() -> list[str]:
+    """A loaded run's regression that the quiet rerun does not repeat passes, and says so with
+    both medians and both loads."""
+    code, out, host = rerun_case(SLOW_RUN, loaded_until(30), {"group/a/10": 1010.0})
+    if code != CLEAN or CLEARED not in out or host.benched != ["group/a/10"]:
+        return [f"rerun_clears_noise_and_prints_both: exit {code}, reran {host.benched}: {out!r}"]
+    if not all(text in out for text in ("1250.0", "1010.0", str(LOADED), str(QUIET))):
+        return [f"rerun_clears_noise_and_prints_both: not both medians and loads: {out!r}"]
+    return []
+
+
+def loaded_no_verdict_fails() -> list[str]:
+    """A gate that never opens fails without a rerun; so does a rerun that ends loaded."""
+    problems: list[str] = []
+    code, out, host = rerun_case(SLOW_RUN, lambda t: LOADED, {"group/a/10": 1010.0})
+    if code != FOUND or NO_VERDICT not in out or host.benched:
+        problems.append(f"loaded_no_verdict_fails: exit {code}, reran {host.benched}: {out!r}")
+
+    # The gate opens, but the rerun itself ends loaded: under, yet no pass.
+    late = lambda t: QUIET if 30 <= t < 30 + HELD_S + POLL_S else LOADED
+    code, out, host = rerun_case(SLOW_RUN, late, {"group/a/10": 1010.0})
+    if code != FOUND or NO_VERDICT not in out or CLEARED in out:
+        problems.append(f"loaded_no_verdict_fails: loaded rerun: exit {code}: {out!r}")
+    return problems
+
+
+def no_finding_runs_no_rerun() -> list[str]:
+    """A clean run reads no load and runs nothing again."""
+    code, out, host = rerun_case(CLEAN_RUN, lambda t: LOADED, {})
+    if code != CLEAN or host.reads or host.benched:
+        return [f"no_finding_runs_no_rerun: exit {code}, {host.reads} reads, {host.benched}"]
+    return []
+
+
+def a_quiet_first_run_gets_no_rerun() -> list[str]:
+    """A regression measured under the gate stands: one load read, no wait, no rerun."""
+    code, out, host = rerun_case(SLOW_RUN, lambda t: QUIET, {"group/a/10": 1010.0})
+    if code != FOUND or STILL_OVER not in out or host.benched or host.clock or host.reads != 1:
+        return [
+            f"a_quiet_first_run_gets_no_rerun: exit {code}, {host.reads} reads,"
+            f" {host.clock} s, reran {host.benched}: {out!r}"
+        ]
+    return []
+
+
+def the_wait_is_bounded() -> list[str]:
+    """A gate that never opens is given up after GATE_WAIT_MAX_S."""
+    code, out, host = rerun_case(SLOW_RUN, lambda t: LOADED, {"group/a/10": 1010.0})
+    if code != FOUND or not GATE_WAIT_MAX_S <= host.clock <= GATE_WAIT_MAX_S + POLL_S:
+        return [f"the_wait_is_bounded: exit {code} after {host.clock} s"]
+    return []
+
+
+def threshold_is_still_1_20() -> list[str]:
+    """The threshold and the measurement gate are the ones the plan fixed."""
+    fixed = (REGRESSION, LOAD1_MAX, LOAD5_MAX, HELD_S, GATE_WAIT_MAX_S)
+    if fixed != (1.20, 2.0, 6.0, 300, 600):
+        return [f"threshold_is_still_1_20: {fixed}"]
+    return []
+
+
+RERUN_TESTS = (
+    rerun_keeps_a_regression,
+    rerun_clears_noise_and_prints_both,
+    loaded_no_verdict_fails,
+    no_finding_runs_no_rerun,
+    a_quiet_first_run_gets_no_rerun,
+    the_wait_is_bounded,
+    threshold_is_still_1_20,
+)
+
+
 def selftest() -> int:
     """Every case reports exactly its rules, and the clean one nothing."""
     start = time.perf_counter()
@@ -349,6 +559,8 @@ def selftest() -> int:
             if got != case.rules:
                 problems.append(f"{case.name}: reported {sorted(got)}, want {sorted(case.rules)}")
     problems += selftest_baseline()
+    for test in RERUN_TESTS:
+        problems += test()
     for problem in problems:
         print(f"{NAME}: selftest: {problem}")
     if problems:
@@ -356,29 +568,104 @@ def selftest() -> int:
 
     print(
         f"{NAME}: selftest: {len(selftest_cases())} crafted runs, each its rules only, the clean"
-        f" one clean; the inclusion rule ({time.perf_counter() - start:.2f} s)"
+        f" one clean; the inclusion rule; {len(RERUN_TESTS)} rerun cases"
+        f" ({time.perf_counter() - start:.2f} s)"
     )
     return CLEAN
 
 
-def gate(root: Path, thresholds: Path, out: Out) -> int:
-    """`check`: prints the comparison and the findings; exit 1 on any finding."""
+def wait_for_gate(host: Host) -> bool:
+    """Whether the measurement gate held HELD_S within GATE_WAIT_MAX_S."""
+    start = host.now()
+    held_since: float | None = None
+    while True:
+        # 1. Quiet now: the hold goes on (or starts); loaded: it starts again.
+        now = host.now()
+        if host.load().quiet():
+            held_since = now if held_since is None else held_since
+            if now - held_since >= HELD_S:
+                return True
+        else:
+            held_since = None
+
+        # 2. Bounded: the wait never outlasts GATE_WAIT_MAX_S.
+        if now - start >= GATE_WAIT_MAX_S:
+            return False
+        host.sleep(POLL_S)
+
+
+def rerun(root: Path, report: Report, host: Host, out: Out) -> list[Finding]:
+    """The regressions of a loaded run, measured again under the gate: the findings that stand.
+    A regression measured under the gate stands as it is; a cleared one is printed, not kept."""
+    flagged = [finding for finding in report.findings if finding.rule == "regression"]
+    first_load = host.load()
+
+    # 1. Measured under the gate: never best-of-two.
+    if first_load.quiet():
+        out(f"{NAME}: {STILL_OVER}: the run ended under the gate ({first_load}), no rerun")
+        return flagged
+
+    # 2. Loaded: wait for the gate, bounded; a gate that never opens gives no verdict.
+    out(f"{NAME}: the run ended loaded ({first_load}): waiting for the gate")
+    if not wait_for_gate(host):
+        return [
+            Finding("loaded", finding.subject, f"{NO_VERDICT}: the gate stayed shut"
+                    f" {GATE_WAIT_MAX_S} s after a run at {first_load}")
+            for finding in flagged
+        ]
+
+    # 3. Only the flagged benches again, into the same criterion directory.
+    first, _ = read_estimates(root)
+    failed = {finding.subject for finding in flagged if host.bench(finding.subject) != CLEAN}
+    second, _ = read_estimates(root)
+    second_load = host.load()
+
+    # 4. Each one compared again: still over, cleared, or measured under load after all.
+    standing: list[Finding] = []
+    for finding in flagged:
+        bench_id = finding.subject
+        ratio = second[bench_id] / report.baselines[bench_id] if bench_id in second else None
+        both = (
+            f"first {first[bench_id]:.1f} ns ({first_load}),"
+            f" rerun {second.get(bench_id, math.nan):.1f} ns ({second_load})"
+        )
+        if bench_id in failed:
+            standing.append(Finding("regression", bench_id, f"{STILL_OVER}: {both}, rerun failed"))
+        elif ratio is None or ratio > REGRESSION:
+            standing.append(Finding("regression", bench_id, f"{STILL_OVER}: {both}"))
+        elif not second_load.quiet():
+            standing.append(Finding("loaded", bench_id, f"{NO_VERDICT}: {both}"))
+        else:
+            out(f"{NAME}: {CLEARED}: {bench_id}: {both}, {100 * (ratio - 1):+.1f} %")
+    return standing
+
+
+def gate(root: Path, thresholds: Path, host: Host, out: Out) -> int:
+    """`check`: prints the comparison and the findings; exit 1 on any finding. A loaded run's
+    regressions are measured again under the gate first (`rerun`)."""
     report = check(root, thresholds)
     for line in report.lines:
         out(line)
-    for finding in report.findings:
+
+    # 1. Regressions: the load decides whether they stand or run again.
+    findings = report.findings
+    if any(finding.rule == "regression" for finding in findings):
+        others = [finding for finding in findings if finding.rule != "regression"]
+        findings = sorted(set(others + rerun(root, report, host, out)))
+
+    for finding in findings:
         out(f"{NAME}: {finding}")
     print(
         f"{NAME}: {report.estimates} estimates, {len(report.lines)} compared,"
-        f" {len(report.findings)} findings",
+        f" {len(findings)} findings",
         file=sys.stderr,
     )
-    return FOUND if report.findings else CLEAN
+    return FOUND if findings else CLEAN
 
 
 def run_check(root: Path, thresholds: Path) -> int:
     """`check` on this machine, printing to stdout."""
-    return gate(root, thresholds, print)
+    return gate(root, thresholds, Host(), print)
 
 
 def run_baseline(first: Path, second: Path, measured: str, run: str) -> int:
