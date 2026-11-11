@@ -1,0 +1,242 @@
+#!/bin/sh
+# so-kit: the server kit's host steps until the installation records exist.
+# POSIX sh, not Python: it runs on every host the package installs on, minimal images among them,
+# with nothing but the package's dependencies.
+#
+#   so-kit key-line <family>/<instance> <public key file | ->   print the account's key line
+#   so-kit add-key <family>/<instance> <public key file | ->    append it to the key lines
+#   so-kit create-store <name> <family>/<instance>              a store and its access.toml
+#   so-kit page                                                 write the root page
+#   so-kit setup                                                let the web server reach CGI
+#
+# Settings: SO_KIT_CONF, else the kit's settings file. Exit 0 done, 2 refused, with one
+# `so-kit: <reason>` line on stderr and nothing written.
+set -eu
+LC_ALL=C
+export LC_ALL
+umask 077
+
+fail() {
+    printf 'so-kit: %s\n' "$*" >&2
+    exit 2
+}
+
+# 1. Settings: the defaults, then `key=value` lines of known keys; a path is plain characters.
+root=/srv/so
+swarmops=/usr/bin/swarmops
+host_keys=/etc/ssh
+web_root=/var/cache/swarmops-server/www
+authorized_keys=/var/lib/swarmops-server/.ssh/authorized_keys
+web_user=www-data
+terms=
+privacy=
+acceptable_use=
+
+conf=${SO_KIT_CONF:-/etc/swarmops-server/kit.conf}
+[ -r "$conf" ] || fail "cannot read the settings file"
+while IFS= read -r line || [ -n "$line" ]; do
+    case $line in
+    '' | '#'*) continue ;;
+    *=*) ;;
+    *) fail "settings: not key=value: $line" ;;
+    esac
+    key=${line%%=*}
+    value=${line#*=}
+    case $key in
+    root | swarmops | host_keys | web_root | authorized_keys | terms | privacy | acceptable_use)
+        case $value in
+        '') ;;
+        /*[!A-Za-z0-9._/-]* | [!/]*) fail "settings: $key is no plain absolute path" ;;
+        esac
+        ;;
+    web_user)
+        case $value in
+        '' | [!a-z_]* | *[!a-z0-9_-]*) fail "settings: web_user is no account name" ;;
+        esac
+        ;;
+    *) fail "settings: unknown key $key" ;;
+    esac
+    eval "$key=\$value"
+done <"$conf"
+
+# 2. Checks of what a step is given.
+check_identity() {
+    family=${1%%/*}
+    instance=${1#*/}
+    case $1 in
+    */*/* | */ | /*) fail "identity is not <family>/<instance>: $1" ;;
+    */*) ;;
+    *) fail "identity is not <family>/<instance>: $1" ;;
+    esac
+    case $family in
+    *[!a-z0-9-]*) fail "identity family is not [a-z0-9-]: $1" ;;
+    esac
+    case $instance in
+    .* | *[!A-Za-z0-9._-]*) fail "identity instance is not [A-Za-z0-9._-], or starts with a dot: $1" ;;
+    esac
+}
+
+# One public key, without options: sets key_type and key_blob.
+read_key() {
+    if [ "$1" = - ]; then
+        text=$(cat)
+    else
+        [ -r "$1" ] || fail "cannot read the public key"
+        text=$(cat "$1")
+    fi
+    text=$(printf '%s\n' "$text" | grep -v -e '^[[:space:]]*$' -e '^#' || true)
+    [ -n "$text" ] || fail "no public key given"
+    [ "$(printf '%s\n' "$text" | wc -l)" -eq 1 ] || fail "give one public key, not several"
+
+    set -f
+    set -- $text
+    set +f
+    key_type=$1
+    key_blob=${2:-}
+    case $key_type in
+    ssh-ed25519 | ecdsa-sha2-nistp256 | ecdsa-sha2-nistp384 | ecdsa-sha2-nistp521 | ssh-rsa) ;;
+    *) fail "not a public key of type ed25519, ecdsa or rsa, or one with options" ;;
+    esac
+    case $key_blob in
+    '' | *[!A-Za-z0-9+/=]*) fail "the public key's data is not base64" ;;
+    esac
+    printf '%s %s\n' "$key_type" "$key_blob" | ssh-keygen -l -f - >/dev/null 2>&1 ||
+        fail "ssh-keygen does not read the public key"
+}
+
+# The serving account's line for one key: serve forced, as the identity, with `restrict`.
+key_line() {
+    printf 'command="%s serve --root %s --as %s",restrict %s %s %s\n' \
+        "$swarmops" "$root" "$1" "$key_type" "$key_blob" "$1"
+}
+
+html() {
+    sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'
+}
+
+# A section of the root page with an operator's text, when the settings name one.
+text_section() {
+    [ -n "$2" ] || return 0
+    printf '<h2>%s</h2>\n<pre>' "$1"
+    html <"$2"
+    printf '</pre>\n'
+}
+
+# 3. The steps.
+cmd_key_line() {
+    [ $# -eq 2 ] || fail "usage: so-kit key-line <family>/<instance> <public key file | ->"
+    check_identity "$1"
+    read_key "$2"
+    key_line "$1"
+}
+
+cmd_add_key() {
+    [ $# -eq 2 ] || fail "usage: so-kit add-key <family>/<instance> <public key file | ->"
+    check_identity "$1"
+    read_key "$2"
+    [ -w "$authorized_keys" ] || fail "cannot write the key lines"
+
+    # One key, one identity: a key already on a line is refused, whoever it names.
+    if grep -q -F -e " $key_blob " "$authorized_keys"; then
+        fail "the key is on a line already"
+    fi
+    key_line "$1" >>"$authorized_keys"
+}
+
+cmd_create_store() {
+    [ $# -eq 2 ] || fail "usage: so-kit create-store <name> <family>/<instance>"
+    name=$1
+    check_identity "$2"
+    case $name in
+    [a-z0-9]*) ;;
+    *) fail "a store name starts with [a-z0-9]: $name" ;;
+    esac
+    case $name in
+    *[!a-z0-9._-]*) fail "a store name is [a-z0-9._-]: $name" ;;
+    esac
+    [ ${#name} -le 63 ] || fail "a store name has at most 63 characters"
+
+    # The stores' owner runs every serve; a store made by another account is unreadable to it.
+    [ "$(stat -c %u "$root")" = "$(id -u)" ] || fail "run as the owner of the stores' directory"
+    [ ! -e "$root/$name" ] || fail "a store named $name exists"
+
+    "$swarmops" init "$root/$name" --name "$name" >/dev/null || fail "swarmops init failed"
+
+    # The creator reads and lands onto main; more grants are the operator's edit.
+    temporary="$root/$name/.access.toml.$$"
+    cat >"$temporary" <<EOF
+# Who may do what through swarmops serve; read on every connection.
+version = 1
+
+[[grant]]
+who = ["$2"]
+read = true
+land = ["main"]
+EOF
+    mv "$temporary" "$root/$name/access.toml"
+}
+
+cmd_page() {
+    [ $# -eq 0 ] || fail "usage: so-kit page"
+
+    # 1. Each host key's type, size and fingerprint; never its comment, which names the host.
+    rows=
+    for public in "$host_keys"/ssh_host_*_key.pub; do
+        [ -r "$public" ] || continue
+        line=$(ssh-keygen -l -E sha256 -f "$public") || fail "ssh-keygen does not read a host key"
+        bits=${line%% *}
+        rest=${line#* }
+        kind=${line##*(}
+        rows="$rows<tr><td>${kind%)} $bits</td><td><code>${rest%% *}</code></td></tr>
+"
+    done
+    [ -n "$rows" ] || fail "no host key to show"
+    for text in "$terms" "$privacy" "$acceptable_use"; do
+        [ -z "$text" ] || [ -r "$text" ] || fail "cannot read an operator's text the settings name"
+    done
+
+    # 2. The release and the binary's digest, then the page, renamed into place.
+    version=$("$swarmops" --version 2>/dev/null) || fail "swarmops --version failed"
+    version=$(printf '%s\n' "$version" | head -n 1 | html)
+    digest=$(sha256sum <"$swarmops" 2>/dev/null) || fail "cannot read the swarmops binary"
+    digest=${digest%% *}
+    temporary="$web_root/.index.html.$$"
+    {
+        printf '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
+        printf '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        printf '<title>SwarmOps</title>\n</head>\n<body>\n<h1>SwarmOps</h1>\n'
+        printf '<p>git and so reach the repositories of this installation over ssh and HTTPS.</p>\n'
+        printf '<h2>SSH host keys</h2>\n'
+        printf '<p>At the first connection, ssh shows one of these fingerprints.</p>\n'
+        printf '<table>\n<tr><th>Key</th><th>Fingerprint</th></tr>\n%s</table>\n' "$rows"
+        printf '<h2>Release</h2>\n<p><code>%s</code></p>\n' "$version"
+        printf '<p>SHA-256 of the swarmops binary: <code>%s</code></p>\n' "$digest"
+        text_section "Terms of use" "$terms"
+        text_section "Privacy notice" "$privacy"
+        text_section "Acceptable use" "$acceptable_use"
+        printf '</body>\n</html>\n'
+    } >"$temporary" || {
+        rm -f "$temporary"
+        exit 2
+    }
+    chmod 0644 "$temporary"
+    mv "$temporary" "$web_root/index.html"
+}
+
+cmd_setup() {
+    [ $# -eq 0 ] || fail "usage: so-kit setup"
+    [ "$(id -u)" -eq 0 ] || fail "setup runs as root"
+    /usr/sbin/usermod -a -G swarmops-web "$web_user"
+}
+
+[ $# -ge 1 ] || fail "usage: so-kit key-line | add-key | create-store | page | setup"
+step=$1
+shift
+case $step in
+key-line) cmd_key_line "$@" ;;
+add-key) cmd_add_key "$@" ;;
+create-store) cmd_create_store "$@" ;;
+page) cmd_page "$@" ;;
+setup) cmd_setup "$@" ;;
+*) fail "unknown step $step" ;;
+esac

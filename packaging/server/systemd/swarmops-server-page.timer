@@ -1,0 +1,9 @@
+[Unit]
+Description=SwarmOps root page, written again after boot and every hour
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1h
+
+[Install]
+WantedBy=timers.target

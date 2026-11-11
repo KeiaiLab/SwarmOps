@@ -1,0 +1,11 @@
+[Unit]
+Description=SwarmOps CGI socket for the web server
+
+[Socket]
+ListenStream=/run/swarmops-server/fcgiwrap.socket
+SocketUser=so
+SocketGroup=swarmops-web
+SocketMode=0660
+
+[Install]
+WantedBy=sockets.target

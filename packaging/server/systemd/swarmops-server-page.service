@@ -1,0 +1,15 @@
+[Unit]
+Description=SwarmOps root page: host key fingerprints and the release
+After=sshd.service ssh.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/so-kit page
+User=so
+Group=so
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ReadWritePaths=/var/cache/swarmops-server/www

@@ -1,0 +1,21 @@
+# The server kit: what the swarmops-server package installs, and the system paths the kit
+# relies on. `install <kit file> <destination> <mode>`; `uses <path>`. backup/ and status/
+# keep manifests of their own in the same format.
+install kit.conf /etc/swarmops-server/kit.conf 0644
+install bin/so-kit /usr/sbin/so-kit 0755
+install cgi/swarmops-serve.cgi /usr/lib/swarmops-server/swarmops-serve.cgi 0755
+install sshd/swarmops-server.conf /etc/ssh/sshd_config.d/50-swarmops-server.conf 0644
+install nginx/swarmops-server.conf /etc/nginx/conf.d/swarmops-server.conf 0644
+install sysusers.d/swarmops-server.conf /usr/lib/sysusers.d/swarmops-server.conf 0644
+install tmpfiles.d/swarmops-server.conf /usr/lib/tmpfiles.d/swarmops-server.conf 0644
+install systemd/swarmops-fcgiwrap.socket /usr/lib/systemd/system/swarmops-fcgiwrap.socket 0644
+install systemd/swarmops-fcgiwrap.service /usr/lib/systemd/system/swarmops-fcgiwrap.service 0644
+install systemd/swarmops-server-page.service /usr/lib/systemd/system/swarmops-server-page.service 0644
+install systemd/swarmops-server-page.timer /usr/lib/systemd/system/swarmops-server-page.timer 0644
+uses /usr/bin/swarmops
+uses /usr/sbin/fcgiwrap
+uses /usr/sbin/usermod
+uses /bin/sh
+uses /etc/ssh
+uses /run/swarmops-server
+uses /dev/null
