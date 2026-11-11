@@ -2,7 +2,8 @@
 //! `workspace`, the registry name, on the store and identity the server was started with.
 //!
 //! A small client of the stateless revision, 2026-07-28: each request names its version in
-//! `params._meta`, so no handshake. Every reply is checked to be one JSON-RPC response.
+//! `params._meta`, so no handshake. Every reply is checked to be one JSON-RPC response, and its
+//! tool result as `mcp.rs` checks one: the envelope's contract and its schema.
 
 use std::io::{BufRead, BufReader, Write as _};
 use std::path::Path;
@@ -10,8 +11,8 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use serde_json::{Value, json};
 
-use crate::support;
 use crate::ws::{AGENT, Lab, MARKER, bootstrap_config, write};
+use crate::{mcp, support};
 
 /// The revision these requests name.
 const LATEST: &str = "2026-07-28";
@@ -84,9 +85,9 @@ impl Client {
         let reply: Value = serde_json::from_str(&line)
             .unwrap_or_else(|e| panic!("stdout carries JSON-RPC only, not {line:?}: {e}"));
         assert_eq!(reply["id"], self.last_id, "{reply}");
-        let envelope = reply["result"]["structuredContent"].clone();
-        assert_eq!(envelope["op"], tool, "{reply}");
-        envelope
+
+        // The result checked as every MCP test checks one, against its schema too.
+        mcp::checked_envelope(tool, reply["result"].clone())
     }
 
     /// The result of a call of `tool` that must succeed.

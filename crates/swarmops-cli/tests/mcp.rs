@@ -18,10 +18,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::{Barrier, Mutex};
+use std::sync::{Barrier, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -30,6 +30,9 @@ use serde_json::{Value, json};
 use swarmops_api::{ErrorCode, ShowReq, StoreOps, schema_for_all};
 use swarmops_core::{ObjectKind, hash_object};
 use swarmops_ops::{LocalOps, Resolved};
+use swarmops_testkit::remote::{GitServer, HttpAuth, HttpServer};
+use swarmops_testkit::schema_check;
+use tempfile::TempDir;
 
 use crate::support::{self, Store};
 
@@ -55,54 +58,55 @@ type Startup<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)]);
 
 /// The tools, one per `StoreOps` operation and then one per client-side operation of the git
 /// remotes (M13), in the order `tools/list` gives them, each with the request type its arguments
-/// are.
-const TOOLS: [(&str, &str); 46] = [
-    ("repo_info", "InfoReq"),
-    ("resolve_rev", "ResolveRevReq"),
-    ("read_file", "ReadFileReq"),
-    ("read_tree", "ReadTreeReq"),
-    ("show", "ShowReq"),
-    ("log", "LogReq"),
-    ("ancestry", "AncestryReq"),
-    ("path_history", "PathHistoryReq"),
-    ("diff", "DiffReq"),
-    ("merge_base", "MergeBaseReq"),
-    ("op_log", "OpLogReq"),
-    ("ref_list", "RefListReq"),
-    ("ref_set", "RefSetReq"),
-    ("ref_delete", "RefDeleteReq"),
-    ("ref_log", "RefLogReq"),
-    ("ref_txn", "RefTxnReq"),
-    ("undo", "UndoReq"),
-    ("commit", "CommitReq"),
-    ("land", "LandReq"),
-    ("revert", "RevertReq"),
-    ("land_check", "LandCheckReq"),
-    ("land_group", "LandGroupReq"),
-    ("rebase", "RebaseReq"),
-    ("blob_put", "BlobPutReq"),
-    ("blob_has", "BlobHasReq"),
-    ("verify", "VerifyReq"),
-    ("gc", "GcReq"),
-    ("repair", "RepairReq"),
-    ("upgrade", "UpgradeReq"),
-    ("remote_list", "RemoteListReq"),
-    ("fetch", "FetchReq"),
-    ("push", "PushReq"),
-    ("sync", "SyncReq"),
-    ("sync_status", "SyncStatusReq"),
-    ("ws_create", "WsCreateReq"),
-    ("ws_status", "WsStatusReq"),
-    ("ws_diff", "WsDiffReq"),
-    ("ws_commit", "WsCommitReq"),
-    ("ws_rebase", "WsRebaseReq"),
-    ("ws_resolve", "WsResolveReq"),
-    ("ws_land", "WsLandReq"),
-    ("ws_materialize", "WsMaterializeReq"),
-    ("ws_discard", "WsDiscardReq"),
-    ("ws_snapshot", "WsSnapshotReq"),
-    ("ws_list", "WsListReq"),
-    ("ws_info", "WsInfoReq"),
+/// are and the response type its envelope's `result` is. A task that adds a tool adds its line
+/// here and in `mcp_parity.rs`' `PARITY` or `PARITY_EXEMPT`, in the same commit.
+pub(crate) const TOOLS: [(&str, &str, &str); 46] = [
+    ("repo_info", "InfoReq", "RepoInfo"),
+    ("resolve_rev", "ResolveRevReq", "ResolvedRev"),
+    ("read_file", "ReadFileReq", "FileContent"),
+    ("read_tree", "ReadTreeReq", "TreeListing"),
+    ("show", "ShowReq", "ChangesetDetail"),
+    ("log", "LogReq", "LogPage"),
+    ("ancestry", "AncestryReq", "AncestryResp"),
+    ("path_history", "PathHistoryReq", "PathHistoryPage"),
+    ("diff", "DiffReq", "Diff"),
+    ("merge_base", "MergeBaseReq", "MergeBaseResp"),
+    ("op_log", "OpLogReq", "OpLogPage"),
+    ("ref_list", "RefListReq", "RefListResp"),
+    ("ref_set", "RefSetReq", "RefSetResp"),
+    ("ref_delete", "RefDeleteReq", "RefSetResp"),
+    ("ref_log", "RefLogReq", "RefLogPage"),
+    ("ref_txn", "RefTxnReq", "RefTxnResp"),
+    ("undo", "UndoReq", "UndoResp"),
+    ("commit", "CommitReq", "CommitResp"),
+    ("land", "LandReq", "LandResp"),
+    ("revert", "RevertReq", "RevertResp"),
+    ("land_check", "LandCheckReq", "LandCheckResp"),
+    ("land_group", "LandGroupReq", "LandGroupResp"),
+    ("rebase", "RebaseReq", "RebaseResp"),
+    ("blob_put", "BlobPutReq", "BlobPutResp"),
+    ("blob_has", "BlobHasReq", "BlobHasResp"),
+    ("verify", "VerifyReq", "VerifyReport"),
+    ("gc", "GcReq", "GcResp"),
+    ("repair", "RepairReq", "RepairResp"),
+    ("upgrade", "UpgradeReq", "UpgradeResp"),
+    ("remote_list", "RemoteListReq", "RemoteList"),
+    ("fetch", "FetchReq", "FetchResp"),
+    ("push", "PushReq", "PushResp"),
+    ("sync", "SyncReq", "SyncResp"),
+    ("sync_status", "SyncStatusReq", "SyncStatus"),
+    ("ws_create", "WsCreateReq", "WsInfo"),
+    ("ws_status", "WsStatusReq", "WsStatus"),
+    ("ws_diff", "WsDiffReq", "Diff"),
+    ("ws_commit", "WsCommitReq", "WsCommitResp"),
+    ("ws_rebase", "WsRebaseReq", "WsRebaseResp"),
+    ("ws_resolve", "WsResolveReq", "WsResolveResp"),
+    ("ws_land", "WsLandReq", "WsLandResp"),
+    ("ws_materialize", "WsMaterializeReq", "WsMaterializeResp"),
+    ("ws_discard", "WsDiscardReq", "WsDiscardResp"),
+    ("ws_snapshot", "WsSnapshotReq", "WsSnapshotResp"),
+    ("ws_list", "WsListReq", "WsList"),
+    ("ws_info", "WsInfoReq", "WsInfo"),
 ];
 
 /// The tools [`mcp_tool_calls_golden`] does not call: the git remotes' (M13), whose operations
@@ -147,7 +151,7 @@ const PRIVATE: &str = "docs/superpowers";
 fn the_docs_count_the_tools() {
     let workspace = TOOLS
         .iter()
-        .filter(|(name, _)| name.starts_with("ws_"))
+        .filter(|(name, _, _)| name.starts_with("ws_"))
         .count();
     let counts = [
         ("tools", TOOLS.len()),
@@ -243,9 +247,9 @@ fn mcp_initialize_lists_every_operation_as_a_tool() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, TOOLS.map(|(name, _)| name));
+    assert_eq!(names, TOOLS.map(|(name, _, _)| name));
     let all = schema_for_all();
-    for ((name, request), tool) in TOOLS.iter().zip(&tools) {
+    for ((name, request, _), tool) in TOOLS.iter().zip(&tools) {
         check_tool(name, request, tool, &all);
     }
 
@@ -353,6 +357,24 @@ fn mcp_tool_calls_golden() {
     let store = Store::init();
     let mut golden = Golden::start(&store);
     golden.initialize();
+    call_the_store_tools(&mut golden, &store);
+
+    // Every tool has its call, but those of UNCALLED.
+    let transcript = golden.transcript();
+    for (tool, _, _) in TOOLS {
+        let called = transcript["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|step| step["request"]["params"]["name"] == tool);
+        assert_eq!(called, !UNCALLED.contains(&tool), "the call of {tool}");
+    }
+    insta::assert_json_snapshot!(transcript);
+}
+
+/// [`mcp_tool_calls_golden`]'s calls, each succeeding, on `store`, which `golden` serves: every
+/// tool but those of [`UNCALLED`].
+fn call_the_store_tools(golden: &mut Golden, store: &Store) {
     let info = golden.ok("repo_info", json!({}));
     golden.name_at(&info, "/result/repo_id", "repo_id");
 
@@ -402,7 +424,7 @@ fn mcp_tool_calls_golden() {
     let landed = golden.name_at(&landed, "/result/landed", "landed");
 
     // 4. The history: the land's changeset, main's log, a path's history, a diff, a merge base.
-    history_calls(&mut golden, [&c1, &head, &landed]);
+    history_calls(golden, [&c1, &head, &landed]);
 
     // 5. A ref made and deleted; the deletion, the newest operation, undone.
     golden.ok(
@@ -424,7 +446,7 @@ fn mcp_tool_calls_golden() {
     // 6. A workspace: made, edited, diffed and committed; more of the tree written out and an
     //    edit discarded; main moves on the same file, so the rebase conflicts; resolved,
     //    continued, and landed exactly; then the listings.
-    workspace_calls(&mut golden, store.tmp(), &landed);
+    workspace_calls(golden, store.tmp(), &landed);
 
     // 7. The publish on main taken back, and the store verified.
     let revert = json!({"changeset": theirs, "reason": "the docs were wrong",
@@ -452,20 +474,144 @@ fn mcp_tool_calls_golden() {
     let grouped = golden.name_at(&grouped, "/result/head", "grouped");
 
     // 9. Two release refs made at once, then moved together, and the store verified.
-    ref_txn_calls(&mut golden, &c1, &grouped);
+    ref_txn_calls(golden, &c1, &grouped);
     golden.ok("verify", json!({}));
+}
 
-    // Every tool has its call, but those of UNCALLED.
-    let transcript = golden.transcript();
-    for (tool, _) in TOOLS {
-        let called = transcript["steps"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|step| step["request"]["params"]["name"] == tool);
-        assert_eq!(called, !UNCALLED.contains(&tool), "the call of {tool}");
+/// Every tool's result goes through [`check_tool_result`], which checks it against the schema
+/// `schema_for_all` publishes (the M21 design §2.5): sessions call each of [`TOOLS`] at least
+/// once, the golden calls and the maintenance's on one store, the git remotes' on a clone of a
+/// served remote.
+#[test]
+fn every_tool_result_goes_through_the_check() {
+    // 1. The golden calls, then the maintenance's, writing nothing.
+    let store = Store::init();
+    let mut golden = Golden::start(&store);
+    golden.initialize();
+    call_the_store_tools(&mut golden, &store);
+    golden.ok("gc", json!({"dry_run": true}));
+    golden.ok("repair", json!({"dry_run": true}));
+    golden.ok("upgrade", json!({}));
+    golden.transcript();
+
+    // 2. A clone of a served remote: the remote listed, fetched, its state read, synced, and
+    //    main pushed to a branch of its own.
+    let remote = GitRemote::new();
+    let vars = remote.vars();
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let into = dir.path().join("clone");
+    let into = into.to_str().expect("UTF-8 temp paths");
+    let url = remote.url();
+    support::run(&["--as", AGENT, "clone", &url, "--into", into], &vars).ok();
+    let mut server = Server::start(&["--repo", into, "--as", AGENT], &vars);
+    server.initialize();
+    server.ok("remote_list", json!({}));
+    server.ok("fetch", json!({"remote": ORIGIN}));
+    server.ok("sync_status", json!({"remote": ORIGIN}));
+    server.ok("sync", json!({"remote": ORIGIN}));
+    server.ok(
+        "push",
+        json!({"remote": ORIGIN, "source_ref": "main", "branch": "from-the-clone"}),
+    );
+    server.finish_clean();
+
+    // 3. Each tool had a checked call.
+    let names = TOOLS.map(|(name, _, _)| name);
+    let missing = unchecked(&names, &CHECKED.lock().unwrap());
+    assert!(missing.is_empty(), "no checked call of {missing:?}");
+}
+
+/// [`every_tool_result_goes_through_the_check`]'s count catches a tool no call was checked for:
+/// `repo_info` called and checked, a planted name not.
+#[test]
+fn a_tool_without_a_checked_call_is_caught() {
+    let store = Store::init();
+    let mut server = Server::start(&["--repo", store.path(), "--as", AGENT], &[]);
+    server.initialize();
+    server.ok("repo_info", json!({}));
+    server.finish_clean();
+    let missing = unchecked(&["repo_info", "planted_tool"], &CHECKED.lock().unwrap());
+    assert_eq!(missing, ["planted_tool"]);
+}
+
+/// The names of `tools` that `checked` does not hold.
+fn unchecked<'a>(tools: &[&'a str], checked: &BTreeSet<String>) -> Vec<&'a str> {
+    (tools.iter())
+        .filter(|name| !checked.contains(**name))
+        .copied()
+        .collect()
+}
+
+/// The remote's name in the store.
+const ORIGIN: &str = "origin";
+
+/// The repository the remote serves.
+const REMOTE_REPO: &str = "repo";
+
+/// A git repository served over smart HTTP with two commits on `main`, and the git
+/// environment a binary that reaches it runs with.
+struct GitRemote {
+    /// The remote's side, kept for as long as the remote serves.
+    _server: GitServer,
+    /// Its smart HTTP.
+    http: HttpServer,
+    /// git's empty `HOME` for the product's children, removed when the remote is dropped.
+    _home: TempDir,
+    /// The variables a binary that reaches the remote runs with.
+    env: Vec<(String, String)>,
+}
+
+impl GitRemote {
+    /// [`REMOTE_REPO`] served, with two commits on `main`.
+    fn new() -> GitRemote {
+        let server = GitServer::new();
+        server.create(REMOTE_REPO);
+        server.commit_on(REMOTE_REPO, "main", "first", &[("a.txt", "a\n")]);
+        server.commit_on(REMOTE_REPO, "main", "second", &[("b.txt", "b\n")]);
+        let http = server.http(HttpAuth::Anonymous);
+
+        // The real git the server runs, an empty `HOME`, and no git configuration of the
+        // host's.
+        let home = tempfile::tempdir().expect("a temp HOME");
+        let text = |path: &Path| path.to_str().expect("UTF-8 paths").to_owned();
+        let env = vec![
+            ("SWARMOPS_GIT".to_owned(), text(&real_git(&server))),
+            ("HOME".to_owned(), text(home.path())),
+            ("GIT_CONFIG_NOSYSTEM".to_owned(), "1".to_owned()),
+            ("GIT_CONFIG_GLOBAL".to_owned(), "/dev/null".to_owned()),
+        ];
+        GitRemote {
+            _server: server,
+            http,
+            _home: home,
+            env,
+        }
     }
-    insta::assert_json_snapshot!(transcript);
+
+    /// The repository's URL.
+    fn url(&self) -> String {
+        self.http.url(REMOTE_REPO)
+    }
+
+    /// The variables a binary that reaches the remote runs with.
+    fn vars(&self) -> Vec<(&str, &str)> {
+        (self.env.iter())
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect()
+    }
+}
+
+/// The real git `server` runs, as an absolute path.
+fn real_git(server: &GitServer) -> PathBuf {
+    let program = server.git_program();
+    if program.is_absolute() {
+        return program.to_path_buf();
+    }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(program))
+        .find(|candidate| candidate.is_file())
+        .expect("git on PATH")
 }
 
 /// [`mcp_tool_calls_golden`]'s reads of the history: `landed`, main's log and its ancestry from
@@ -2643,6 +2789,9 @@ fn client_info() -> Value {
     json!({"name": "swarmops-tests", "version": "0"})
 }
 
+/// The tools whose results [`check_tool_result`] checked in this test process.
+static CHECKED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
 /// Checks a tool result of `tool`: one text block, whose text is the structured content, an
 /// envelope that keeps the contract (see [`check_envelope`]), and `isError` exactly when the
 /// envelope is a failure's.
@@ -2662,12 +2811,48 @@ fn check_tool_result(tool: &str, mut result: Value) -> ToolCall {
     );
     result["structuredContent"] = envelope.clone();
     check_envelope(tool, &envelope);
+    check_schema(tool, &envelope);
     assert_eq!(result["isError"], envelope["ok"] == false, "{result}");
     ToolCall {
         result,
         envelope,
         text,
     }
+}
+
+/// [`check_tool_result`] for another file's client: the result's envelope, checked.
+pub(crate) fn checked_envelope(tool: &str, result: Value) -> Value {
+    check_tool_result(tool, result).envelope
+}
+
+/// Checks an envelope of `tool` against the schema `schema_for_all` publishes: the whole of it
+/// against `Envelope`'s, and a success's `result` against the response type [`TOOLS`] gives
+/// the tool; then counts the tool as checked ([`CHECKED`]).
+fn check_schema(tool: &str, envelope: &Value) {
+    static ALL: OnceLock<Value> = OnceLock::new();
+    let all = ALL.get_or_init(schema_for_all);
+    let (_, _, response) = TOOLS
+        .iter()
+        .find(|(name, _, _)| *name == tool)
+        .unwrap_or_else(|| panic!("{tool}: not in TOOLS"));
+
+    // 1. The envelope, then a success's result, every error kept.
+    let mut errors = schema_check::check(all, "Envelope", envelope)
+        .err()
+        .unwrap_or_default();
+    if envelope["ok"] == true {
+        let result = schema_check::check(all, response, &envelope["result"]);
+        let result = result.err().unwrap_or_default();
+        errors.extend(result.iter().map(|error| format!("/result{error}")));
+    }
+    assert!(
+        errors.is_empty(),
+        "{tool}: the envelope breaks its schema:\n{}\n{envelope}",
+        errors.join("\n")
+    );
+
+    // 2. Counted.
+    CHECKED.lock().unwrap().insert(tool.to_owned());
 }
 
 /// Checks an envelope of `tool` against the contract, as the CLI tests check the CLI's: `ok`
