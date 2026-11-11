@@ -1,33 +1,33 @@
 # Support
 
-This page says where to get help with SwarmOps: issues for bugs and feature requests, a private
-report for a vulnerability, and email for a conduct problem.
+This page says where to get help with SwarmOps: issue forms for questions, bugs and feature
+requests, a private report for a vulnerability, and email for a conduct problem.
 
 ## Where do I ask a question or report a bug?
 
-In a GitHub issue on `KeiaiLab/SwarmOps`, through its templates: **Bug report** for something
-SwarmOps did wrong, **Feature request** for something it should do. A question that fits neither
-can be a blank issue. The repository has no GitHub Discussions.
+At <https://github.com/KeiaiLab/SwarmOps/issues/new/choose>, through its forms: **Question** for
+anything about using or running SwarmOps, **Bug report** for something SwarmOps did wrong,
+**Feature request** for something it should do. The repository has no GitHub Discussions.
 
 Before you open one, check [docs/known-limitations.md](docs/known-limitations.md): the problem may
 be known already.
 
 ## What should a bug report include?
 
-What you ran and what SwarmOps printed. The **Bug report** form asks for these:
+What you ran and what SwarmOps printed. The **Bug report** form asks for these; the first three
+are required:
 
 | Field | What to give |
 | --- | --- |
-| What happened | What you did, and what SwarmOps did. |
+| What happened | The commands you ran and the JSON envelope each printed (`error.code`, `details` and `hint` matter most). Remove paths or content you cannot share. |
+| Version | What `swarmops --version` prints. |
+| Platform | What `uname -srm` prints. |
 | What you expected | What SwarmOps should have done. |
-| Commands and envelopes | The commands you ran and the JSON envelope each printed (`error.code`, `details` and `hint` matter most). Remove paths or content you cannot share. |
-| `swarmops verify --deep` | Its envelope on the affected store, if a store is involved. |
-| Area | The part of SwarmOps it concerns, from the form's list. |
+| `swarmops verify --deep` | What `swarmops verify --deep` prints on the affected store, if a store is involved. |
+| Area | The part of SwarmOps it concerns: store, cli, mcp, git, remote, workspace, install, docs or site. |
 | Did anything interrupt SwarmOps first? | A killed process, a power loss or a VM or WSL reset, a full disk or I/O errors, nothing, or not sure. |
-| SwarmOps commit | The commit the binary was built from (`git rev-parse --short HEAD`). |
-| Environment | Kernel (`uname -r`), the store's filesystem (`stat -f -c %T <store>`), and how many processes or agents shared the store. |
-
-With a release binary, give the version that `swarmops --version` prints as the SwarmOps commit.
+| SwarmOps commit | For a binary built from source, what `git rev-parse --short HEAD` prints in that checkout. |
+| Environment | The store's filesystem, as `stat -f -c %T <store>` prints it, and how many processes or agents shared the store. |
 
 ## How do I report a security vulnerability?
 
@@ -53,9 +53,8 @@ email.
 
 ## Which versions get fixes?
 
-SwarmOps is pre-1.0, and its security fixes go to the main line, the `stable` branch, and nowhere
-else. The `0.1.0` release is not supported on its own: its fixes go to `stable`
-([Supported versions](SECURITY.md#supported-versions)).
+Fixes land on `stable`, the main line, and ship in the next release; no earlier release gets a
+fix ([SECURITY.md](SECURITY.md#which-versions-get-fixes)).
 
 ## Where is the documentation?
 

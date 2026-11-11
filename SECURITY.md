@@ -1,28 +1,33 @@
 # Security policy
 
-## Reporting a vulnerability
+## How do I report a vulnerability?
 
-Report a vulnerability privately, never in a public issue, pull request, discussion or commit.
+Privately, never in a public issue, pull request, discussion or commit: on the repository's
+**Security** tab, choose **Report a vulnerability**. That opens a draft security advisory that
+only you and the maintainers can see.
 
-The channel is GitHub's private vulnerability reporting: on the repository's **Security** tab,
-choose **Report a vulnerability**. That opens a draft security advisory that only you and the
-maintainers can see; we work out the fix with you there, and publish the advisory once the fix
-has landed.
+## What should a report include?
 
-Please include what you found, how to reproduce it (a store, a command line, a crafted file),
-what it lets an attacker do, and the commit you tested. A fix lands on `stable`, and
-[CHANGELOG.md](CHANGELOG.md) notes it under **Security**.
+What you found, how to reproduce it (a store, a command line, a crafted file), what it lets an
+attacker do, and the commit or `swarmops --version` you tested. A report about a dependency's
+advisory needs evidence that SwarmOps reaches the affected code.
 
-## Supported versions
+## Which versions get fixes?
 
-SwarmOps 0.1.0, 0.2.0, 0.3.0, 0.4.0, 0.5.0, 0.6.0, 0.7.0, 0.8.0, 0.9.0, 0.10.0 and 0.11.0 are released as the tags `v0.1.0`,
-`v0.2.0`, `v0.3.0`, `v0.4.0`, `v0.5.0`, `v0.6.0`, `v0.7.0`, `v0.8.0`, `v0.9.0`, `v0.10.0` and `v0.11.0`, with their archives; no crate is published. Security fixes go to the main line, the `stable` branch, and nowhere else.
+Fixes land on `stable`, the main line, and ship in the next release. No earlier release gets a
+fix. [CHANGELOG.md](CHANGELOG.md) notes each fix under **Security**.
 
-| Version | Supported |
-| --- | --- |
-| `stable` (the main line) | yes |
-| `0.11.0`, `0.10.0`, `0.9.0`, `0.8.0`, `0.7.0`, `0.6.0`, `0.5.0`, `0.4.0`, `0.3.0`, `0.2.0`, `0.1.0` (released; fixes go to `stable`) | no |
-| anything else | no |
+## What answer should I expect?
+
+No time is promised. The maintainers work out the fix with you in the draft advisory, and
+publish the advisory once the fix has landed.
+
+## Which problems are in scope?
+
+A flaw that breaks the local trust model below: a crafted store file, request or git repository
+that makes SwarmOps panic, write outside its bounds or allocate without bound; a credential that
+leaks; a test hook a release build honours; a supply-chain weakness. A local user with write
+access to the store, and lost data after a crash, are not vulnerabilities. The details follow.
 
 ## What is in scope
 
