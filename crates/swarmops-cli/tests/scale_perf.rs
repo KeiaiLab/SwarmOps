@@ -123,7 +123,7 @@ fn a_scale_case_without_the_variable_says_not_run() {
 /// A51: an id lookup, a snapshot and a lookup, and a file read at a revision, p50 and p99, in
 /// the small store and in the large one.
 #[test]
-#[ignore = "slow, ~0 s: builds the 1,000,000-changeset store once, then 3 reads of 1,000 samples"]
+#[ignore = "slow, ~2 s on a built store (20k trial; 1M not run): 3 reads of 1,000 samples on two stores; building the 1M store is hours"]
 fn lookup_snapshot_read_at_1m() {
     const CASE: &str = "lookup_snapshot_read_at_1m";
     if !runs(CASE) {
@@ -189,7 +189,7 @@ fn walked(
 /// A9: the first page of the history of a path that 10 changesets touched, 1,000 changesets
 /// against 1,000,000, and the answer equal to the walk of every changeset.
 #[test]
-#[ignore = "slow, ~0 s: builds the 1,000,000-changeset store once, then walks it whole"]
+#[ignore = "slow, ~1 s on a built store (20k trial; 1M not run): the first page, then the walk of every changeset; building the 1M store is hours"]
 fn path_history_first_page_1k_vs_1m() {
     const CASE: &str = "path_history_first_page_1k_vs_1m";
     if !runs(CASE) {
@@ -268,7 +268,7 @@ fn upgradable(from: &Path, to: &Path) {
 /// A53: the peak memory of `verify --deep`, `gc`, `git export` and `upgrade`, on 100,000
 /// changesets and on 1,000,000. Recorded; a ratio over 1.5 is unexpected (the M21 design D8).
 #[test]
-#[ignore = "slow, ~0 s: builds both stores, then runs 4 commands on each"]
+#[ignore = "slow, hours: git export of the 1M store dominates (20k: over 30 min at load 380, not finished)"]
 fn peak_rss_100k_vs_1m() {
     const CASE: &str = "peak_rss_100k_vs_1m";
     if !runs(CASE) {
@@ -317,7 +317,7 @@ fn peak_rss_100k_vs_1m() {
 
 /// A4: what a text-heavy store's files hold against the text itself.
 #[test]
-#[ignore = "slow, ~0 s: builds a 1,000-changeset store with zstd object files"]
+#[ignore = "slow, ~10 s: builds a 1,000-changeset store with zstd object files"]
 fn text_fixture_bytes_on_disk() {
     const CASE: &str = "text_fixture_bytes_on_disk";
     if !runs(CASE) {
@@ -358,7 +358,7 @@ fn text_fixture_bytes_on_disk() {
 /// P4: adds parts to the large store for up to [`PART_BUDGET`], and says how far it is and what a
 /// part cost. Run it again to go on; the cases that read the store finish it themselves.
 #[test]
-#[ignore = "slow, ~0 s: builds parts of the 1,000,000-changeset store for up to 20 minutes"]
+#[ignore = "slow, ~20 min: builds parts of the 1M store for up to 20 minutes (20k trial: 33 s a part at load 380)"]
 fn fixture_next_part() {
     const CASE: &str = "fixture_next_part";
     if !runs(CASE) {
