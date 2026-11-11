@@ -99,6 +99,20 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "manifest3"
+path = "fuzz_targets/manifest3.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "run3"
+path = "fuzz_targets/run3.rs"
+test = false
+doc = false
+bench = false
+
 # Own workspace: `just fuzz` builds and runs it with nightly; `just check` (and
 # scripts/check.sh) formats and lints it with stable.
 [workspace]
