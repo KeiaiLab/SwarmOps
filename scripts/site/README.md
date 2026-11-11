@@ -51,4 +51,7 @@ or the README; change them together.
 `swarmops.cc` as its custom domain (the domain is on Cloudflare; its mail records stay as they
 are); [`web/README.md`](../../web/README.md#deploy) describes it. Every `*.pages.dev` address
 answers with `X-Robots-Tag: noindex`, so only `swarmops.cc` is indexed. Set the repository's
-social preview to `docs/assets/social-card.png` and its website to `https://swarmops.cc`.
+social preview to `docs/assets/social-card.png` and its website to `https://swarmops.cc`. The
+social preview upload has no API: it is set in the repository's settings page. The website and
+the rest of the About box come from [`.github/repo-settings.json`](../../.github/repo-settings.json),
+applied by `python3 -I scripts/repo-settings.py apply`.
