@@ -445,13 +445,15 @@ impl FactKind {
         Self::ALL.into_iter().find(|kind| kind.code() == code)
     }
 
-    /// The id of the entity a fact of this kind creates as record `index` of the frame whose
-    /// nonce is `nonce`: `blake3("swarmops:entity:v1\0" ‖ u8 kind ‖ u64le nonce ‖ u16le index)`
-    /// (the FORMAT 3 design §2.8), unique because every frame's nonce is its own.
-    pub fn entity_id(self, nonce: u64, index: u16) -> [u8; 32] {
+    /// The id of the entity a fact of this kind creates as record `index` of the frame of seq
+    /// `seq` and nonce `nonce`: `blake3("swarmops:entity:v1\0" ‖ u8 kind ‖ u64le seq ‖ u64le
+    /// nonce ‖ u16le index)` (the FORMAT 3 design §2.8, its amendment of 2026-11-11, G4). The
+    /// open frame's seq is fixed when a fact is queued; its nonce is the frame's own.
+    pub fn entity_id(self, seq: u64, nonce: u64, index: u16) -> [u8; 32] {
         let mut hasher = blake3::Hasher::new();
         hasher.update(ENTITY_DOMAIN);
         hasher.update(&[self.code()]);
+        hasher.update(&seq.to_le_bytes());
         hasher.update(&nonce.to_le_bytes());
         hasher.update(&index.to_le_bytes());
         *hasher.finalize().as_bytes()

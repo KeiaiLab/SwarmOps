@@ -26,6 +26,9 @@ use swarmops_store::{
 /// The nonce of the nonce frame and the entity id.
 const NONCE: u64 = 0x1122_3344_5566_7788;
 
+/// The seq of the nonce frame and the entity id's frame.
+const SEQ: u64 = 3;
+
 /// The goldens whose codecs later slices write: built from the design's tables here, and checked
 /// byte for byte, but not yet decoded (so not in the flipped-byte check).
 const DECODED_LATER: [&str; 4] = ["manifest", "run_c", "run_f", "facts_col"];
@@ -363,19 +366,37 @@ fn entity_id_matches_its_golden() {
     let lines = read_golden("entity_id");
     assert_eq!(lines, [entity_id_bytes()]);
 
-    // The recipe: blake3("swarmops:entity:v1\0" ‖ u8 kind ‖ u64le nonce ‖ u16le index).
+    // The recipe: blake3("swarmops:entity:v1\0" ‖ u8 kind ‖ u64le seq ‖ u64le nonce ‖
+    // u16le index).
     let mut input = b"swarmops:entity:v1\0".to_vec();
     input.push(3);
+    input.extend_from_slice(&SEQ.to_le_bytes());
     input.extend_from_slice(&NONCE.to_le_bytes());
     input.extend_from_slice(&2u16.to_le_bytes());
     assert_eq!(lines[0], blake3::hash(&input).as_bytes());
     assert_ne!(
-        FactKind::Review.entity_id(NONCE, 2),
-        FactKind::Queue.entity_id(NONCE, 2)
+        FactKind::Review.entity_id(SEQ, NONCE, 2),
+        FactKind::Queue.entity_id(SEQ, NONCE, 2)
     );
     assert_ne!(
-        FactKind::Review.entity_id(NONCE, 2),
-        FactKind::Review.entity_id(NONCE + 1, 2)
+        FactKind::Review.entity_id(SEQ, NONCE, 2),
+        FactKind::Review.entity_id(SEQ, NONCE + 1, 2)
+    );
+}
+
+/// Two frames that end in the same nonce at different seqs give their facts different ids,
+/// and so does one record number past another: the frame's seq is in the recipe.
+#[test]
+fn entity_ids_take_the_frame_seq() {
+    let review = |seq, index| FactKind::Review.entity_id(seq, NONCE, index);
+    assert_ne!(review(SEQ, 2), review(SEQ + 1, 2));
+    assert_ne!(review(SEQ, 2), review(SEQ, 3));
+    assert_eq!(review(SEQ, 2), review(SEQ, 2));
+
+    // The seq is its own field: seq and nonce swapped name another entity.
+    assert_ne!(
+        FactKind::Review.entity_id(SEQ, NONCE, 2),
+        FactKind::Review.entity_id(NONCE, SEQ, 2)
     );
 }
 
@@ -676,9 +697,10 @@ fn nonce_frame() -> (Vec<Record>, Vec<u8>) {
     (records, frame)
 }
 
-/// The entity id of the third record (index 2) of a review fact in the frame of [`NONCE`].
+/// The entity id of the third record (index 2) of a review fact in the frame of seq [`SEQ`]
+/// and nonce [`NONCE`].
 fn entity_id_bytes() -> Vec<u8> {
-    FactKind::Review.entity_id(NONCE, 2).to_vec()
+    FactKind::Review.entity_id(SEQ, NONCE, 2).to_vec()
 }
 
 /// The checkpoint, feature list, manifest, two runs and two fact rows, by the design's tables
