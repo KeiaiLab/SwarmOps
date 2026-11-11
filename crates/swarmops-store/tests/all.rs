@@ -6,6 +6,7 @@
 mod batch;
 mod check;
 mod contention;
+mod counters;
 mod derived;
 mod external_ids;
 mod features;

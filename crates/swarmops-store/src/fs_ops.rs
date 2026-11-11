@@ -36,8 +36,9 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
 #[cfg(feature = "test-hooks")]
@@ -47,6 +48,10 @@ use std::sync::{Mutex, PoisonError};
 use tempfile::NamedTempFile;
 
 use crate::error::{FileOp, IoFailure};
+
+pub mod counters;
+
+use counters::Counters;
 
 /// Opens `path` read-only if it is a regular file, a symlink to one included; anything else
 /// is refused before it is opened ([`not_a_regular_file`]). No store file is a FIFO, a device
@@ -496,11 +501,36 @@ fn parent_dir(path: &Path) -> &Path {
     }
 }
 
+/// The directory of the object files, under a store's root ([`crate::Layout::objects_dir`]).
+const OBJECTS_DIR: &str = "objects";
+
+/// The temp directory under [`OBJECTS_DIR`] ([`crate::Layout::objects_tmp`]).
+const OBJECTS_TMP: &str = "tmp";
+
+/// The metadata directory, under a store's root ([`crate::Layout::meta_dir`]).
+const META_DIR: &str = "meta";
+
+/// The journal's files in [`META_DIR`], of every format ([`crate::Layout::journal_log`],
+/// [`crate::Layout::journal_off`]).
+const JOURNAL_FILES: [&str; 4] = ["journal.log", "journal.off", "journal2.log", "journal2.off"];
+
+/// What a path is to the [`Counters`]: an object file, a journal file, or neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Class {
+    /// `objects/<2 hex>/<62 hex>`.
+    Object,
+    /// One of [`JOURNAL_FILES`].
+    Journal,
+    /// Anything else.
+    Other,
+}
+
 /// The store's view of an [`FsOps`]: each call forwarded exactly once and as it is (so the call
 /// counts, the injected failures and the order checker see what they saw before), its error
 /// located as an [`IoFailure`] that names the method and the path relative to the store's root:
 /// `link_noclobber` and `rename_durable` name their target, `write_durable_temp` its directory.
-/// Nothing is computed on success. [`StoreFs::locate`] does the same for the calls the store
+/// On success it only counts the call for the process's [`Counters`], by the path's class.
+/// [`StoreFs::locate`] does the same for the calls the store
 /// makes on its own handles and paths, off the seam (storage spec §8).
 ///
 /// A store makes one on its real root, and its handles keep clones of it (two reference counts
@@ -543,6 +573,34 @@ impl StoreFs {
         self.locate(FileOp::Fs(method), path, source)
     }
 
+    /// What `path` is to the counters, from its text below the root: no system call.
+    fn class(&self, path: &Path) -> Class {
+        let Ok(below) = path.strip_prefix(self.root.as_std_path()) else {
+            return Class::Other;
+        };
+        let mut parts = below.components().map(Component::as_os_str);
+        match [parts.next(), parts.next(), parts.next(), parts.next()] {
+            [Some(top), Some(fanout), Some(_), None]
+                if top == OBJECTS_DIR && fanout != OBJECTS_TMP =>
+            {
+                Class::Object
+            }
+            [Some(top), Some(name), None, None]
+                if top == META_DIR && JOURNAL_FILES.iter().any(|file| name == *file) =>
+            {
+                Class::Journal
+            }
+            _ => Class::Other,
+        }
+    }
+
+    /// A sync of `path` begun at `began`, counted if it is a journal file's.
+    fn count_sync(&self, path: &Path, began: Instant) {
+        if self.class(path) == Class::Journal {
+            Counters::process().journal_sync(began);
+        }
+    }
+
     /// [`FsOps::create_dir_all`].
     pub fn create_dir_all(&self, p: impl AsRef<Path>) -> Result<(), IoFailure> {
         let p = p.as_ref();
@@ -567,8 +625,12 @@ impl StoreFs {
         to: impl AsRef<Path>,
     ) -> Result<LinkOutcome, IoFailure> {
         let to = to.as_ref();
-        (self.fs.link_noclobber(from.as_ref(), to))
-            .map_err(|e| self.failed(FsMethod::LinkNoclobber, to, e))
+        let linked = (self.fs.link_noclobber(from.as_ref(), to))
+            .map_err(|e| self.failed(FsMethod::LinkNoclobber, to, e))?;
+        if linked == LinkOutcome::Placed && self.class(to) == Class::Object {
+            Counters::process().object_write();
+        }
+        Ok(linked)
     }
 
     /// [`FsOps::fsync_dir`].
@@ -580,7 +642,11 @@ impl StoreFs {
     /// [`FsOps::read`].
     pub fn read(&self, p: impl AsRef<Path>) -> Result<Option<Vec<u8>>, IoFailure> {
         let p = p.as_ref();
-        (self.fs.read(p)).map_err(|e| self.failed(FsMethod::Read, p, e))
+        let read = (self.fs.read(p)).map_err(|e| self.failed(FsMethod::Read, p, e))?;
+        if read.is_some() && self.class(p) == Class::Object {
+            Counters::process().object_read();
+        }
+        Ok(read)
     }
 
     /// [`FsOps::exists`].
@@ -598,8 +664,14 @@ impl StoreFs {
     /// [`FsOps::append_durable`].
     pub fn append_durable(&self, path: impl AsRef<Path>, bytes: &[u8]) -> Result<u64, IoFailure> {
         let path = path.as_ref();
-        (self.fs.append_durable(path, bytes))
-            .map_err(|e| self.failed(FsMethod::AppendDurable, path, e))
+        let began = Instant::now();
+        let at = (self.fs.append_durable(path, bytes))
+            .map_err(|e| self.failed(FsMethod::AppendDurable, path, e))?;
+        if self.class(path) == Class::Journal {
+            Counters::process().journal_write();
+            Counters::process().journal_sync(began);
+        }
+        Ok(at)
     }
 
     /// [`FsOps::file_len`].
@@ -611,7 +683,10 @@ impl StoreFs {
     /// [`FsOps::truncate`].
     pub fn truncate(&self, path: impl AsRef<Path>, len: u64) -> Result<(), IoFailure> {
         let path = path.as_ref();
-        (self.fs.truncate(path, len)).map_err(|e| self.failed(FsMethod::Truncate, path, e))
+        let began = Instant::now();
+        (self.fs.truncate(path, len)).map_err(|e| self.failed(FsMethod::Truncate, path, e))?;
+        self.count_sync(path, began);
+        Ok(())
     }
 
     /// [`FsOps::atomic_replace`].
@@ -624,13 +699,21 @@ impl StoreFs {
     /// [`FsOps::sync_data`].
     pub fn sync_data(&self, path: impl AsRef<Path>) -> Result<(), IoFailure> {
         let path = path.as_ref();
-        (self.fs.sync_data(path)).map_err(|e| self.failed(FsMethod::SyncData, path, e))
+        let began = Instant::now();
+        (self.fs.sync_data(path)).map_err(|e| self.failed(FsMethod::SyncData, path, e))?;
+        self.count_sync(path, began);
+        Ok(())
     }
 
     /// [`FsOps::append`].
     pub fn append(&self, path: impl AsRef<Path>, bytes: &[u8]) -> Result<u64, IoFailure> {
         let path = path.as_ref();
-        (self.fs.append(path, bytes)).map_err(|e| self.failed(FsMethod::Append, path, e))
+        let at =
+            (self.fs.append(path, bytes)).map_err(|e| self.failed(FsMethod::Append, path, e))?;
+        if self.class(path) == Class::Journal {
+            Counters::process().journal_write();
+        }
+        Ok(at)
     }
 
     /// [`FsOps::rename_durable`]; a failure names `to`.
