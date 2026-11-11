@@ -19,13 +19,16 @@
 //! - [`HttpServer`] ([`GitServer::http`]): git's smart HTTP on `127.0.0.1`, every request header
 //!   passed to `git http-backend` as the CGI metavariable `HTTP_<NAME>` (RFC 3875 §4.1.18), so
 //!   that git's gzipped fetch requests are inflated; [`HttpAuth::Basic`] asks for a password;
-//!   [`HttpServer::stop`] refuses connections, [`HttpServer::cut_after`] ends a response early
-//!   and [`HttpServer::flip_pack_trailer`] garbles the next pack's checksum;
+//!   [`HttpServer::stop`] refuses connections, [`HttpServer::cut_after`] ends a response early,
+//!   [`HttpServer::cut_request_after`] ends an upload early and
+//!   [`HttpServer::flip_pack_trailer`] garbles the next pack's checksum;
 //!   [`HttpServer::requests`] is what it was asked. The same request loop runs any CGI
 //!   program instead, `swarmops serve --cgi` among them ([`crate::serve::ServeSite::http`]);
 //!   a script with no header block is answered 500, one past [`CGI_TIMEOUT`] is killed.
 //! - [`GitServer::ssh_command`]: the ssh stand-in, a value for `GIT_SSH_COMMAND`, which serves
-//!   the root ([`SshMode::Serve`]) or fails as ssh does ([`SshMode::Deny`], [`SshMode::Down`]).
+//!   the root ([`SshMode::Serve`]) or fails as ssh does ([`SshMode::Deny`], [`SshMode::Down`]);
+//!   [`GitServer::ssh_command_with`] plays an [`SshFault`] on each connection it serves: a cut
+//!   either way, a stall, an end by a signal, a hold after the server ends.
 //! - [`GitServer::merge`] with a [`MergeMethod`]: the three ways a hosting service merges a
 //!   branch; [`GitServer::decline`]: a branch whose pushes a hook refuses.
 //!
@@ -141,6 +144,107 @@ pub enum SshMode {
     Deny,
     /// Prints a connection-refused line and exits 255, as ssh does for a host that is down.
     Down,
+}
+
+/// A failure the ssh stand-in plays on a connection while the server stays sound
+/// ([`GitServer::ssh_command_with`]). The stand-in keeps no end of a stream it hands on, so an
+/// end of file reaches the far side.
+///
+/// ```text
+///   client ──stdin──▶ stand-in ──▶ server        CutSend(n): n bytes, then end of file
+///   client ◀─stdout── stand-in ◀── server        CutReceive(n): n bytes, then end of file
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SshFault {
+    /// What the client sends is cut after this many bytes: the server reads an end of file
+    /// there and still answers; the client's further writes fail.
+    CutSend(usize),
+    /// What the server answers is cut after this many bytes: the client reads an end of file
+    /// there.
+    CutReceive(usize),
+    /// The server's advertisement reaches the client, then nothing does: what the client
+    /// sends is read and dropped until it goes away, so the server waits for it unanswered.
+    StallAfterAdvertisement,
+    /// The stand-in relays the server's first byte, then is killed by `SIGKILL`, as an ssh
+    /// ended by a signal.
+    EndBySignal,
+    /// The server runs to its end; the stand-in then stays this long before it exits with the
+    /// server's status, as an ssh slow to close: the client waits for it.
+    HoldAfterExit(Duration),
+}
+
+impl SshFault {
+    /// The stand-in's directory name for this fault: `ssh-cut-send-<n>`, `ssh-stall`, ….
+    fn dir_name(self) -> String {
+        match self {
+            SshFault::CutSend(bytes) => format!("ssh-cut-send-{bytes}"),
+            SshFault::CutReceive(bytes) => format!("ssh-cut-receive-{bytes}"),
+            SshFault::StallAfterAdvertisement => "ssh-stall".to_owned(),
+            SshFault::EndBySignal => "ssh-signal".to_owned(),
+            SshFault::HoldAfterExit(hold) => format!("ssh-hold-{}", hold.as_millis()),
+        }
+    }
+}
+
+/// The read size of [`cutter`]'s `dd`.
+const CUT_BLOCK: usize = 64 << 10;
+
+/// A filter that passes its first `bytes` bytes on and exits. `dd` writes each read at once;
+/// `head -c` holds them in stdio's buffer, and a peer waiting for them waits forever.
+fn cutter(bytes: usize) -> String {
+    format!("dd bs={CUT_BLOCK} count={bytes} iflag=count_bytes status=none")
+}
+
+/// The stand-in's tail that runs `service`, a shell command line that serves the connection
+/// on stdin and stdout, with `fault` played on it.
+pub(crate) fn faulted(service: &str, fault: SshFault) -> String {
+    match fault {
+        // The client's stream on fd 3 only, so that the shell closes its copy once the
+        // pipeline holds one: past `bytes` the client's writes find no reader.
+        SshFault::CutSend(bytes) => format!(
+            "exec 3<&0 </dev/null\n\
+             {cut} <&3 3<&- | {service} 3<&- &\n\
+             exec 3<&-\n\
+             wait $!\n",
+            cut = cutter(bytes),
+        ),
+
+        // The server writes into a FIFO the cutter reads, so that the shell waits for the
+        // cutter alone: a server waiting for the client must not keep the client's stdout open.
+        // The server's stdin is the client's through fd 3 (a background job's own is
+        // /dev/null).
+        SshFault::CutReceive(bytes) => format!(
+            "fifo=\"${{0%/*}}/answer-$$\"\n\
+             mkfifo \"$fifo\"\n\
+             exec 3<&0\n\
+             {service} <&3 >\"$fifo\" 3<&- &\n\
+             exec 3<&-\n\
+             {cut} <\"$fifo\"\n\
+             status=$?\n\
+             rm -f \"$fifo\"\n\
+             exit $status\n",
+            cut = cutter(bytes),
+        ),
+
+        // The server reads from a pipe nobody writes to until the client goes away.
+        SshFault::StallAfterAdvertisement => format!("cat >/dev/null | {service}\n"),
+
+        // `$$` is the stand-in's shell, in the pipeline's subshell too.
+        SshFault::EndBySignal => {
+            format!("{service} | {{ {cut}; kill -KILL $$; }}\n", cut = cutter(1))
+        }
+
+        // The server's status kept across the hold.
+        SshFault::HoldAfterExit(hold) => format!(
+            "{service}\n\
+             status=$?\n\
+             sleep {}.{:03}\n\
+             exit $status\n",
+            hold.as_secs(),
+            hold.subsec_millis(),
+        ),
+    }
 }
 
 /// How [`GitServer::merge`] merges a branch, as a hosting service's pull requests do.
@@ -505,7 +609,26 @@ impl GitServer {
         let program = dir.join("ssh");
         if !program.exists() {
             fs::create_dir_all(&dir).expect("create the stand-in's directory");
-            write_script(&program, &self.ssh_script(mode));
+            write_script(&program, &self.ssh_script(mode, None));
+        }
+        sh_quote(path_str(&program))
+    }
+
+    /// The ssh stand-in in `mode`, [`SshMode::Serve`] only, with `fault` played on each
+    /// connection: the value for `GIT_SSH_COMMAND`. It runs git's service unaccounted.
+    pub fn ssh_command_with(&self, mode: SshMode, fault: SshFault) -> String {
+        assert_eq!(
+            mode,
+            SshMode::Serve,
+            "a fault is played on a served connection"
+        );
+        let dir = self.root.path().join(fault.dir_name());
+
+        // Named ssh, as in `ssh_command`.
+        let program = dir.join("ssh");
+        if !program.exists() {
+            fs::create_dir_all(&dir).expect("create the stand-in's directory");
+            write_script(&program, &self.ssh_script(mode, Some(fault)));
         }
         sh_quote(path_str(&program))
     }
@@ -540,8 +663,9 @@ impl GitServer {
     }
 
     /// The stand-in's script: skip ssh's options, drop the host, map the path under the
-    /// repositories and run the service there; or fail as `mode` says.
-    fn ssh_script(&self, mode: SshMode) -> String {
+    /// repositories and run the service there, with `fault` played on it; or fail as `mode`
+    /// says.
+    fn ssh_script(&self, mode: SshMode, fault: Option<SshFault>) -> String {
         match mode {
             SshMode::Deny => {
                 "#!/bin/sh\necho 'git@remote.invalid: Permission denied (publickey).' >&2\nexit 255\n"
@@ -567,19 +691,22 @@ impl GitServer {
                  service=${{1#git-}}\n\
                  path=${{2#/}}\n\
                  {run}",
-                run = self.serve_run(),
+                run = self.serve_run(fault),
             ),
         }
     }
 
-    /// The tail of the [`SshMode::Serve`] stand-in: git's service on the mapped path, exec'd or
-    /// counted.
-    fn serve_run(&self) -> String {
+    /// The tail of the [`SshMode::Serve`] stand-in: git's service on the mapped path, exec'd,
+    /// counted, or with `fault` played on it.
+    fn serve_run(&self, fault: Option<SshFault>) -> String {
         let service = format!(
             "{git} \"$service\" {repos}/\"$path\"",
             git = sh_quote(path_str(&self.git)),
             repos = sh_quote(path_str(&self.repos())),
         );
+        if let Some(fault) = fault {
+            return faulted(&service, fault);
+        }
         #[cfg(feature = "cli")]
         if self.accounting == crate::accounting::Accounting::Cpu {
             return crate::accounting::counted(&self.ledger_dir(), &service);
@@ -845,6 +972,7 @@ impl HttpServer {
             passing,
             log: Mutex::new(Vec::new()),
             cut: Mutex::new(None),
+            cut_request: Mutex::new(None),
             flip: AtomicBool::new(false),
             stopped: AtomicBool::new(false),
         });
@@ -884,6 +1012,14 @@ impl HttpServer {
     /// it go whole; one cut, the server serves whole again.
     pub fn cut_after(&self, bytes: usize) {
         *lock(&self.shared.cut) = Some(bytes);
+    }
+
+    /// Closes the connection of the next request whose body is longer than `bytes` once its
+    /// first `bytes` body bytes are read, sized or chunked, unanswered: the client's upload
+    /// ends early and the backend never runs. Shorter requests before it go whole; one cut,
+    /// the server reads whole again.
+    pub fn cut_request_after(&self, bytes: usize) {
+        *lock(&self.shared.cut_request) = Some(bytes);
     }
 
     /// Garbles the next pack a `git-upload-pack` answer carries: the last byte of the last
@@ -927,6 +1063,8 @@ struct Shared {
     log: Mutex<Vec<Request>>,
     /// The armed cut, in bytes.
     cut: Mutex<Option<usize>>,
+    /// The armed request cut, in body bytes ([`HttpServer::cut_request_after`]).
+    cut_request: Mutex<Option<usize>>,
     /// Set by [`HttpServer::flip_pack_trailer`], cleared once a pack is garbled.
     flip: AtomicBool,
     /// Set by [`HttpServer::stop`].
@@ -1086,14 +1224,18 @@ fn serve(stream: TcpStream, shared: &Shared) -> io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = stream;
 
-    // 1. The request, its body bounded.
-    let Some(incoming) = read_request(&mut reader, &mut writer)? else {
-        return write_answer(
-            &mut writer,
-            shared,
-            &Answer::bare(413, "Payload Too Large"),
-            None,
-        );
+    // 1. The request, its body bounded; a cut one is closed unanswered.
+    let incoming = match read_request(&mut reader, &mut writer, &shared.cut_request)? {
+        Received::Whole(incoming) => incoming,
+        Received::Cut => return writer.shutdown(std::net::Shutdown::Both),
+        Received::TooLarge => {
+            return write_answer(
+                &mut writer,
+                shared,
+                &Answer::bare(413, "Payload Too Large"),
+                None,
+            );
+        }
     };
 
     // 2. The password, when asked for; then git http-backend.
@@ -1181,12 +1323,32 @@ fn write_answer(
     writer.shutdown(std::net::Shutdown::Both)
 }
 
-/// The request on `reader`: its line, headers and body (by `Content-Length` or chunked). `None`
-/// for a body over [`MAX_BODY`]. Answers `Expect: 100-continue` on `writer`.
+/// What reading a request or its body came to.
+enum Received<T> {
+    /// All of it.
+    Whole(T),
+    /// A body over [`MAX_BODY`].
+    TooLarge,
+    /// A body cut by [`HttpServer::cut_request_after`].
+    Cut,
+}
+
+/// The armed request cut, taken when a body of `len` bytes passes it: where to cut.
+fn take_cut(cut: &Mutex<Option<usize>>, len: usize) -> Option<usize> {
+    let mut armed = lock(cut);
+    match *armed {
+        Some(limit) if len > limit => armed.take(),
+        _ => None,
+    }
+}
+
+/// The request on `reader`: its line, headers and body (by `Content-Length` or chunked), the
+/// body cut where `cut` says. Answers `Expect: 100-continue` on `writer`.
 fn read_request(
     reader: &mut BufReader<TcpStream>,
     writer: &mut TcpStream,
-) -> io::Result<Option<Incoming>> {
+    cut: &Mutex<Option<usize>>,
+) -> io::Result<Received<Incoming>> {
     // 1. The request line: method, target, version.
     let line = read_line(reader)?;
     let mut parts = line.split(' ');
@@ -1225,33 +1387,48 @@ fn read_request(
         .header("Transfer-Encoding")
         .is_some_and(|value| value.eq_ignore_ascii_case("chunked"));
     let body = if chunked {
-        read_chunked(reader)?
+        read_chunked(reader, cut)?
     } else {
         let length = incoming
             .header("Content-Length")
             .map_or(Ok(0), str::parse::<usize>)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "a bad Content-Length"))?;
-        read_sized(reader, length)?
+        read_sized(reader, length, cut)?
     };
-    let Some(body) = body else {
-        return Ok(None);
-    };
-    incoming.body = body;
-    Ok(Some(incoming))
+    match body {
+        Received::Whole(body) => incoming.body = body,
+        Received::TooLarge => return Ok(Received::TooLarge),
+        Received::Cut => return Ok(Received::Cut),
+    }
+    Ok(Received::Whole(incoming))
 }
 
-/// `length` bytes, or `None` over [`MAX_BODY`].
-fn read_sized(reader: &mut BufReader<TcpStream>, length: usize) -> io::Result<Option<Vec<u8>>> {
+/// `length` bytes; over [`MAX_BODY`] none; past an armed cut its first bytes only.
+fn read_sized(
+    reader: &mut BufReader<TcpStream>,
+    length: usize,
+    cut: &Mutex<Option<usize>>,
+) -> io::Result<Received<Vec<u8>>> {
     if length > MAX_BODY {
-        return Ok(None);
+        return Ok(Received::TooLarge);
+    }
+
+    // A cut reads up to it and no further.
+    if let Some(limit) = take_cut(cut, length) {
+        let mut head = vec![0; limit];
+        reader.read_exact(&mut head)?;
+        return Ok(Received::Cut);
     }
     let mut body = vec![0; length];
     reader.read_exact(&mut body)?;
-    Ok(Some(body))
+    Ok(Received::Whole(body))
 }
 
-/// A chunked body, de-chunked, or `None` over [`MAX_BODY`].
-fn read_chunked(reader: &mut BufReader<TcpStream>) -> io::Result<Option<Vec<u8>>> {
+/// A chunked body, de-chunked; over [`MAX_BODY`] none; past an armed cut its first bytes only.
+fn read_chunked(
+    reader: &mut BufReader<TcpStream>,
+    cut: &Mutex<Option<usize>>,
+) -> io::Result<Received<Vec<u8>>> {
     let mut body = Vec::new();
     loop {
         // Each chunk: its size in hex (extensions after `;`), the bytes, CRLF.
@@ -1263,7 +1440,14 @@ fn read_chunked(reader: &mut BufReader<TcpStream>) -> io::Result<Option<Vec<u8>>
             break;
         }
         if body.len() + size > MAX_BODY {
-            return Ok(None);
+            return Ok(Received::TooLarge);
+        }
+
+        // A cut inside this chunk reads up to it and no further.
+        if let Some(limit) = take_cut(cut, body.len() + size) {
+            let mut head = vec![0; limit - body.len()];
+            reader.read_exact(&mut head)?;
+            return Ok(Received::Cut);
         }
         let start = body.len();
         body.resize(start + size, 0);
@@ -1273,7 +1457,7 @@ fn read_chunked(reader: &mut BufReader<TcpStream>) -> io::Result<Option<Vec<u8>>
 
     // The trailer, to the empty line.
     while !read_line(reader)?.is_empty() {}
-    Ok(Some(body))
+    Ok(Received::Whole(body))
 }
 
 /// One line, without its CRLF; an end of file is an error.
@@ -1629,14 +1813,42 @@ mod tests {
     use std::path::Path;
     use std::process::Output;
 
+    use std::os::unix::process::ExitStatusExt as _;
+    use std::path::PathBuf;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    use tempfile::TempDir;
+
     use super::{
-        GitServer, HeaderPassing, HttpAuth, MergeMethod, REMOTE_NAME, SquashMessage, SshMode,
-        base64, text, write_script,
+        GitServer, HeaderPassing, HttpAuth, MergeMethod, REMOTE_NAME, SSH_HOST, SquashMessage,
+        SshFault, SshMode, base64, text, write_script,
     };
-    use crate::child;
+    use crate::child::{self, CHILD_TIMEOUT};
 
     /// The repository every test serves.
     const REPO: &str = "repo";
+
+    /// The bytes of the incompressible file the cut tests send or fetch: well past the cuts.
+    const NOISE_BYTES: usize = 256 << 10;
+
+    /// Where the cut tests cut a stream: inside the pack, past the advertisement.
+    const CUT: usize = 16 << 10;
+
+    /// An `http.postBuffer` below the pushed pack: git sends it chunked.
+    const SMALL_POST_BUFFER: &str = "http.postBuffer=65536";
+
+    /// How long the stalled fetch must stay unanswered.
+    const STALL_WATCH: Duration = Duration::from_secs(2);
+
+    /// How long the held stand-in stays after its server.
+    const HOLD: Duration = Duration::from_secs(5);
+
+    /// How often the held push's test looks at the server's ref.
+    const HOLD_POLL: Duration = Duration::from_millis(20);
+
+    /// `SIGKILL`'s number.
+    const SIGKILL: i32 = 9;
 
     /// Threads that write and run scripts at once in the script race test.
     const SCRIPT_THREADS: usize = 16;
@@ -2231,6 +2443,246 @@ mod tests {
                 });
             }
         });
+    }
+
+    /// `len` printable bytes that zlib cannot shrink much (xorshift over a 64-letter
+    /// alphabet), the same each run.
+    fn noise(len: usize) -> String {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                char::from(ALPHABET[(state & 0x3f) as usize])
+            })
+            .collect()
+    }
+
+    /// A clone of `url` in a temp dir, kept while the returned dir lives.
+    fn cloned(server: &GitServer, url: &str, env: &[(&str, &str)]) -> (TempDir, PathBuf) {
+        let work = tempfile::tempdir().expect("a temp dir");
+        let dir = work.path().join("clone");
+        let dir_str = dir.to_str().expect("UTF-8");
+        ok(&client(
+            server,
+            None,
+            env,
+            &["clone", "--quiet", url, dir_str],
+        ));
+        (work, dir)
+    }
+
+    /// Commits a file of [`noise`] in the clone `dir`; its head.
+    fn commit_noise(server: &GitServer, dir: &Path) -> String {
+        std::fs::write(dir.join("noise.txt"), noise(NOISE_BYTES)).expect("write the noise");
+        ok(&client(server, Some(dir), &[], &["add", "noise.txt"]));
+        ok(&client(
+            server,
+            Some(dir),
+            &[],
+            &["commit", "--quiet", "-m", "noise"],
+        ));
+        ok(&client(server, Some(dir), &[], &["rev-parse", "HEAD"]))
+    }
+
+    /// The stand-in's program, out of its `GIT_SSH_COMMAND` value.
+    fn stand_in(ssh: &str) -> &str {
+        ssh.trim_matches('\'')
+    }
+
+    #[test]
+    fn a_cut_request_ends_the_upload() {
+        let server = served();
+        let http = server.http(HttpAuth::Anonymous);
+        let (_work, dir) = cloned(&server, &http.url(REPO), &[]);
+        let head = commit_noise(&server, &dir);
+        let before = server.rev_parse(REPO, "main");
+
+        // 1. Sized (under git's post buffer), then chunked (over it): each cut ends the push
+        //    and main stays.
+        for args in [
+            &["push", "--quiet", "origin", "main"][..],
+            &["-c", SMALL_POST_BUFFER, "push", "--quiet", "origin", "main"],
+        ] {
+            http.cut_request_after(CUT);
+            failed(&client(&server, Some(&dir), &[], args));
+            assert_eq!(server.rev_parse(REPO, "main"), before, "{args:?}");
+        }
+
+        // 2. One cut each: the same push then goes whole.
+        ok(&client(
+            &server,
+            Some(&dir),
+            &[],
+            &["push", "--quiet", "origin", "main"],
+        ));
+        assert_eq!(server.rev_parse(REPO, "main"), Some(head));
+    }
+
+    #[test]
+    fn a_cut_send_ends_the_upload_over_ssh() {
+        let server = served();
+        let serve = server.ssh_command(SshMode::Serve);
+        let url = server.ssh_url(REPO);
+        let (_work, dir) = cloned(&server, &url, &[("GIT_SSH_COMMAND", &serve)]);
+        let head = commit_noise(&server, &dir);
+        let before = server.rev_parse(REPO, "main");
+
+        // 1. Cut inside the pack: the push fails, main stays.
+        let cut = server.ssh_command_with(SshMode::Serve, SshFault::CutSend(CUT));
+        let push = ["push", "--quiet", "origin", "main"];
+        failed(&client(
+            &server,
+            Some(&dir),
+            &[("GIT_SSH_COMMAND", &cut)],
+            &push,
+        ));
+        assert_eq!(server.rev_parse(REPO, "main"), before);
+
+        // 2. Uncut, the same push goes whole.
+        ok(&client(
+            &server,
+            Some(&dir),
+            &[("GIT_SSH_COMMAND", &serve)],
+            &push,
+        ));
+        assert_eq!(server.rev_parse(REPO, "main"), Some(head));
+    }
+
+    #[test]
+    fn a_cut_receive_ends_the_download_over_ssh() {
+        let server = served();
+        server.commit_on(REPO, "main", "noise", &[("noise.txt", &noise(NOISE_BYTES))]);
+        let url = server.ssh_url(REPO);
+
+        // 1. Cut inside the pack: the clone fails, not hangs. git's words depend on where the
+        //    end of file meets it ("hung up", "early EOF", "expected flush").
+        let cut = server.ssh_command_with(SshMode::Serve, SshFault::CutReceive(CUT));
+        let work = tempfile::tempdir().expect("a temp dir");
+        let dir = work.path().join("cut");
+        let stderr = failed(&client(
+            &server,
+            None,
+            &[("GIT_SSH_COMMAND", &cut)],
+            &["clone", "--quiet", &url, dir.to_str().expect("UTF-8")],
+        ));
+        assert!(stderr.contains("fatal:"), "{stderr}");
+
+        // 2. Uncut, the same clone succeeds.
+        let serve = server.ssh_command(SshMode::Serve);
+        cloned(&server, &url, &[("GIT_SSH_COMMAND", &serve)]);
+    }
+
+    #[test]
+    fn a_stalled_stand_in_never_answers() {
+        let server = served();
+        let serve = server.ssh_command(SshMode::Serve);
+        let (_work, dir) = cloned(
+            &server,
+            &server.ssh_url(REPO),
+            &[("GIT_SSH_COMMAND", &serve)],
+        );
+        let fetched = ok(&client(
+            &server,
+            Some(&dir),
+            &[],
+            &["rev-parse", "origin/main"],
+        ));
+        server.commit_on(REPO, "main", "second", &[("b.txt", "b\n")]);
+
+        // 1. A fetch through the stalled stand-in is still waiting when it is killed.
+        let stall = server.ssh_command_with(SshMode::Serve, SshFault::StallAfterAdvertisement);
+        let mut fetch = server.command();
+        fetch
+            .arg("-C")
+            .arg(&dir)
+            .env("GIT_SSH_COMMAND", &stall)
+            .args(["fetch", "--quiet", "origin"]);
+        let (output, killed) = child::Child::spawn(&mut fetch).finish(Instant::now() + STALL_WATCH);
+        assert!(
+            killed,
+            "the fetch ended: {:?}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // 2. Nothing arrived.
+        let after = ok(&client(
+            &server,
+            Some(&dir),
+            &[],
+            &["rev-parse", "origin/main"],
+        ));
+        assert_eq!(after, fetched);
+    }
+
+    #[test]
+    fn a_killed_stand_in_exits_by_signal() {
+        let server = served();
+        let killed = server.ssh_command_with(SshMode::Serve, SshFault::EndBySignal);
+
+        // 1. Run as git runs ssh: the stand-in ends by SIGKILL.
+        let mut direct = Command::new(stand_in(&killed));
+        direct
+            .arg(format!("git@{SSH_HOST}"))
+            .arg(format!("git-upload-pack '/{REPO}.git'"));
+        let output = child::run(&mut direct);
+        assert_eq!(output.status.signal(), Some(SIGKILL), "{output:?}");
+
+        // 2. git's connection through it fails.
+        failed(&client(
+            &server,
+            None,
+            &[("GIT_SSH_COMMAND", &killed)],
+            &["ls-remote", &server.ssh_url(REPO)],
+        ));
+    }
+
+    #[test]
+    fn a_held_stand_in_outlives_its_server() {
+        let server = served();
+        let serve = server.ssh_command(SshMode::Serve);
+        let (_work, dir) = cloned(
+            &server,
+            &server.ssh_url(REPO),
+            &[("GIT_SSH_COMMAND", &serve)],
+        );
+        ok(&client(
+            &server,
+            Some(&dir),
+            &[],
+            &["commit", "--quiet", "--allow-empty", "-m", "held"],
+        ));
+        let head = ok(&client(&server, Some(&dir), &[], &["rev-parse", "HEAD"]));
+
+        // 1. The push through the held stand-in: the server takes it.
+        let ssh = server.ssh_command_with(SshMode::Serve, SshFault::HoldAfterExit(HOLD));
+        let started = Instant::now();
+        let mut push = server
+            .command()
+            .arg("-C")
+            .arg(&dir)
+            .env("GIT_SSH_COMMAND", &ssh)
+            .args(["push", "--quiet", "origin", "main"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn git push");
+        while server.rev_parse(REPO, "main").as_deref() != Some(head.as_str()) {
+            assert!(started.elapsed() < CHILD_TIMEOUT, "the push never landed");
+            std::thread::sleep(HOLD_POLL);
+        }
+
+        // 2. The client still waits on the stand-in, then ends well, the hold spent.
+        let waiting = push.try_wait().expect("look at the push");
+        let status = push.wait().expect("wait for the push");
+        assert_eq!(waiting, None, "the push ended with its server");
+        assert!(status.success(), "{status}");
+        assert!(started.elapsed() >= HOLD, "{:?}", started.elapsed());
     }
 
     /// The ledger names each child by its subcommand, past git's global options and their
