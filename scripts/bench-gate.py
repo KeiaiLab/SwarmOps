@@ -43,6 +43,7 @@ import sys
 import tempfile
 import time
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -94,6 +95,10 @@ class Report:
     findings: list[Finding]
     lines: list[str]
     estimates: int
+
+
+# Where `check` prints a line.
+Out = Callable[[str], None]
 
 
 def toml_key(key: str) -> str:
@@ -356,19 +361,24 @@ def selftest() -> int:
     return CLEAN
 
 
-def run_check(root: Path, thresholds: Path) -> int:
+def gate(root: Path, thresholds: Path, out: Out) -> int:
     """`check`: prints the comparison and the findings; exit 1 on any finding."""
     report = check(root, thresholds)
     for line in report.lines:
-        print(line)
+        out(line)
     for finding in report.findings:
-        print(f"{NAME}: {finding}")
+        out(f"{NAME}: {finding}")
     print(
         f"{NAME}: {report.estimates} estimates, {len(report.lines)} compared,"
         f" {len(report.findings)} findings",
         file=sys.stderr,
     )
     return FOUND if report.findings else CLEAN
+
+
+def run_check(root: Path, thresholds: Path) -> int:
+    """`check` on this machine, printing to stdout."""
+    return gate(root, thresholds, print)
 
 
 def run_baseline(first: Path, second: Path, measured: str, run: str) -> int:
