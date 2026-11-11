@@ -37,14 +37,10 @@ pub const MAX_SERVE_RECORDS_BYTES: u64 = 64 << 20;
 pub(crate) const SWARMOPS_SERVE_CONNECTION: &str = "SWARMOPS_SERVE_CONNECTION";
 
 /// The store's git directory, below its root.
-const GIT: &str = "git";
+const GIT: &str = records::SERVE_DIR;
 
 /// The records' file, the one older file and the lock of its rotation, in the git directory.
-const FILES: Files = Files {
-    current: "serve-records.jsonl",
-    older: "serve-records.1.jsonl",
-    lock: "serve-records.lock",
-};
+const FILES: Files = records::SERVE;
 
 /// The hooks' splits, one file per connection, in the git directory.
 const SPLIT_DIR: &str = "serve-split";

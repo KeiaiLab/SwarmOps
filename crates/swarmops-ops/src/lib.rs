@@ -33,6 +33,7 @@ pub mod content;
 mod error;
 mod gc;
 mod git;
+pub mod health;
 pub mod identity;
 mod local;
 mod phase;
