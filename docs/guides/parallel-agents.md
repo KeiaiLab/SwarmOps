@@ -40,13 +40,16 @@ commits.
 
 **git 2.43: one checkout, two agents**
 
-```text
+```sh
 # Agent A leaves a half-written edit in the shared tree.
-$ printf 'pub fn f() -> u32 {\n    todo!()\n}\n' > src/lib.rs
+printf 'pub fn f() -> u32 {\n    todo!()\n}\n' > src/lib.rs
 # Agent B finishes its README change and commits everything.
-$ printf '# acme\n\nA small crate.\n' > README.md
-$ git add -A && git commit -q -m "describe the crate"
-$ git show --stat --format=%s HEAD
+printf '# acme\n\nA small crate.\n' > README.md
+git add -A && git commit -q -m "describe the crate"
+git show --stat --format=%s HEAD
+```
+
+```text
 describe the crate
 
  README.md  | 2 ++
@@ -63,11 +66,14 @@ not wait; it fails. The slow pre-commit hook below only widens the window.
 
 **git 2.43: two commands, one index**
 
-```text
+```sh
 # Agent A commits a.txt; its pre-commit hook takes 4 s, so .git/index.lock stays held.
-$ git commit -m "A" a.txt &
+git commit -m "A" a.txt &
 # A second later, agent B stages its own file.
-$ git add b.txt
+git add b.txt
+```
+
+```text
 fatal: Unable to create '…/.git/index.lock': File exists.
 
 Another git process seems to be running in this repository, e.g.
@@ -114,13 +120,16 @@ its own. The work still has to get from three branches onto one trunk.
 
 **git 2.43: a worktree for each agent**
 
-```text
+```sh
 # Each agent gets a worktree and a branch of its own (output omitted).
-$ git worktree add ../agent-1 -b agent-1/f-returns-2
-$ git worktree add ../agent-2 -b agent-2/describe
-$ git worktree add ../agent-3 -b agent-3/f-returns-3
+git worktree add ../agent-1 -b agent-1/f-returns-2
+git worktree add ../agent-2 -b agent-2/describe
+git worktree add ../agent-3 -b agent-3/f-returns-3
 # A fourth worktree on main, which the main checkout already has:
-$ git worktree add ../agent-4 main
+git worktree add ../agent-4 main
+```
+
+```text
 Preparing worktree (checking out 'main')
 fatal: 'main' is already used by worktree at '…/acme'
 ```
@@ -133,17 +142,32 @@ Merged into `main` one at a time, agent 1's branch fast-forwards and agent 2's m
 
 **git 2.43: merging the three branches into main**
 
-```text
+```sh
 # Each agent commits in its own directory. In the main checkout, one branch at a time:
-$ git merge --no-edit agent-1/f-returns-2     # fast-forwards
-$ git merge --no-edit agent-2/describe        # merges cleanly
-$ git merge --no-edit agent-3/f-returns-3
+git merge --no-edit agent-1/f-returns-2     # fast-forwards
+git merge --no-edit agent-2/describe        # merges cleanly
+git merge --no-edit agent-3/f-returns-3
+```
+
+```text
 Auto-merging src/lib.rs
 CONFLICT (content): Merge conflict in src/lib.rs
 Automatic merge failed; fix conflicts and then commit the result.
-$ git status --short
+```
+
+```sh
+git status --short
+```
+
+```text
 UU src/lib.rs
-$ head -6 src/lib.rs
+```
+
+```sh
+head -6 src/lib.rs
+```
+
+```text
 pub fn f() -> u32 {
 <<<<<<< HEAD
     2
@@ -201,20 +225,41 @@ order the binary printed them, and `…` marks what was cut.
 
 **SwarmOps: three agents commit, two land**
 
-```text
+```sh
 # Three agents read main (1348…) and each commits a change on that parent. No ref moves.
-$ cat a.json
+cat a.json
+```
+
+```text
 [{"path": "src/lib.rs", "op": "put", "content": {"inline": "pub fn f() -> u32 {\n    2\n}\n"}}]
-$ so commit -m "f returns 2" --changes a.json --parent 1348… --as agent/worker-1
+```
+
+```sh
+so commit -m "f returns 2" --changes a.json --parent 1348… --as agent/worker-1
+```
+
+```text
 {"ok":true,"op":"commit",…,"result":{"changeset":"f1f3…","parent":"1348…",…},…}
-$ so commit -m "describe the crate" --changes b.json --parent 1348… --as agent/worker-2
-$ so commit -m "f returns 3" --changes c.json --parent 1348… --as agent/worker-3
+```
+
+```sh
+so commit -m "describe the crate" --changes b.json --parent 1348… --as agent/worker-2
+so commit -m "f returns 3" --changes c.json --parent 1348… --as agent/worker-3
 
 # Each agent then lands its changeset on main.
-$ so land f1f3… --key f-returns-2 --as agent/worker-1
+so land f1f3… --key f-returns-2 --as agent/worker-1
+```
+
+```text
 {"ok":true,"op":"land",…,
   "result":{"status":"landed","landed":"894b…","rebased_onto":"1348…",…,"attempts":1,…},…}
-$ so land e7ee… --key describe-the-crate --as agent/worker-2
+```
+
+```sh
+so land e7ee… --key describe-the-crate --as agent/worker-2
+```
+
+```text
 {"ok":true,"op":"land",…,
   "result":{"status":"landed","landed":"5f6a…","rebased_onto":"894b…",…,"attempts":1,…},…}
 ```
@@ -232,8 +277,11 @@ the path on `main`. In it, `ours` is the agent's change and `theirs` is what `ma
 
 **SwarmOps: a conflict, then its resolution**
 
+```sh
+so land cd32… --key f-returns-3 --as agent/worker-3
+```
+
 ```text
-$ so land cd32… --key f-returns-3 --as agent/worker-3
 {"ok":false,"op":"land",…,
   "error":{"code":"E_CONFLICT",…,"retryable":false,"exit":3,
     "details":{"report":{"base":"1348…",
@@ -244,11 +292,22 @@ $ so land cd32… --key f-returns-3 --as agent/worker-3
       …,"ours":"cd32…","theirs":"5f6a…",…}},
     "hint":"swarmops cat 5f6a…:src/lib.rs, then swarmops land cd32… --resolve <file> …"},
   …}
+```
 
+```sh
 # Nothing was recorded. The agent reads the other side, decides, and lands again.
-$ cat resolve.json
+cat resolve.json
+```
+
+```text
 {"against": "5f6a…", "files": {"src/lib.rs": {"take": "ours"}}}
-$ so land cd32… --key f-returns-3 --resolve resolve.json --as agent/worker-3
+```
+
+```sh
+so land cd32… --key f-returns-3 --resolve resolve.json --as agent/worker-3
+```
+
+```text
 {"ok":true,"op":"land",…,
   "result":{"status":"landed","landed":"dfd9…","rebased_onto":"5f6a…",…,"attempts":1,…},…}
 ```
@@ -266,8 +325,11 @@ target, says that nothing was recorded, and is marked retryable.
 
 **SwarmOps: a publish from a stale parent**
 
+```sh
+so commit -m "notes" --changes d.json --parent 1348… --advance main --as agent/worker-4
+```
+
 ```text
-$ so commit -m "notes" --changes d.json --parent 1348… --advance main --as agent/worker-4
 {"ok":false,"op":"commit",…,
   "error":{"code":"E_CAS_MISMATCH",…,"retryable":true,"exit":4,
     "details":{"actual":"dfd9…","committed":false,"name":"main"},

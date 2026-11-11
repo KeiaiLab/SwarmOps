@@ -352,8 +352,11 @@ email = "12345678+acme-agents@users.noreply.github.com"
 name = "acme-agents"
 ```
 
+```sh
+git log --format='%h %an <%ae>' -2 origin/main
+```
+
 ```text
-$ git log --format='%h %an <%ae>' -2 origin/main
 52aafd1 acme-agents <12345678+acme-agents@users.noreply.github.com>
 261af3d claude/worker-1 <worker-1@claude.swarmops.local>
 ```

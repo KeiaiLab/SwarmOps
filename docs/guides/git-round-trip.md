@@ -82,8 +82,11 @@ if it does not exist.
 
 **Import the stable branch into main**
 
+```sh
+so git import ~/src/acme.git --ref stable
+```
+
 ```text
-$ so git import ~/src/acme.git --ref stable
 {
   "ok": true,
   "op": "git_import",
@@ -135,20 +138,23 @@ publish a change, an agent commits it on the head it read, then lands it.
 
 **An agent's change**
 
-```text
-$ so resolve main                       # the full id main holds now
-$ cat > changes.json <<'EOF'
+```sh
+so resolve main                       # the full id main holds now
+cat > changes.json <<'EOF'
 [{"path": "src/lib.rs", "op": "put",
   "content": {"inline": "pub fn f() -> u32 { 2 }\n"}}]
 EOF
-$ so commit -m "return two" --changes changes.json --parent <that id>
-$ so land <that changeset> --key <a new uuid v7>
+so commit -m "return two" --changes changes.json --parent <that id>
+so land <that changeset> --key <a new uuid v7>
 ```
 
 **What they print**
 
+```sh
+so commit -m "return two" --changes changes.json --parent 8804…
+```
+
 ```text
-$ so commit -m "return two" --changes changes.json --parent 8804…
 {
   "ok": true,
   "op": "commit",
@@ -163,8 +169,13 @@ $ so commit -m "return two" --changes changes.json --parent 8804…
   },
   "meta": {…}
 }
+```
 
-$ so land ff6d… --key 01a1…
+```sh
+so land ff6d… --key 01a1…
+```
+
+```text
 {
   "ok": true,
   "op": "land",
@@ -209,8 +220,11 @@ every time.
 
 **Export main into the stable branch**
 
+```sh
+so git export ~/src/acme.git --branch stable
+```
+
 ```text
-$ so git export ~/src/acme.git --branch stable
 {
   "ok": true,
   "op": "git_export",
@@ -248,8 +262,11 @@ or a work tree, but a work tree's checked-out branch is refused, as `git push` r
 
 **The exported commit, in git**
 
+```sh
+git -C ~/src/acme.git log -1 --format=fuller
+```
+
 ```text
-$ git -C ~/src/acme.git log -1 --format=fuller
 commit a054…
 Author:     agent/worker-1 <worker-1@agent.swarmops.local>
 AuthorDate: …
@@ -282,8 +299,11 @@ store ref to a remote by itself: [GitHub as a remote](github-remote.md#push).)
 
 **Push the exported branch**
 
+```sh
+git -C ~/src/acme.git push origin stable
+```
+
 ```text
-$ git -C ~/src/acme.git push origin stable
 To <remote-url>
    f68652e..a054ffc  stable -> stable
 ```
@@ -308,8 +328,11 @@ again, `git export` writes only what the branch's last export does not reach.
 
 **The same export again**
 
+```sh
+so git export ~/src/acme.git --branch stable
+```
+
 ```text
-$ so git export ~/src/acme.git --branch stable
 {
   "ok": true,
   "op": "git_export",
@@ -372,12 +395,20 @@ The hint names the import that brings it in, and the export after it finds the b
 
 **A change merged in git, brought into the store**
 
+```sh
+git -C ~/src/acme.git fetch origin stable:stable
+```
+
 ```text
-$ git -C ~/src/acme.git fetch origin stable:stable
 From <remote-url>
    a054ffc..b925315  stable     -> stable
+```
 
-$ so git export ~/src/acme.git --branch stable
+```sh
+so git export ~/src/acme.git --branch stable
+```
+
+```text
 {
   "ok": false,
   "op": "git_export",
@@ -399,8 +430,13 @@ $ so git export ~/src/acme.git --branch stable
   "meta": {…}
 }
 # exit 3
+```
 
-$ so git import ~/src/acme.git --ref refs/heads/stable --into main
+```sh
+so git import ~/src/acme.git --ref refs/heads/stable --into main
+```
+
+```text
 {
   "ok": true,
   "op": "git_import",
@@ -453,8 +489,11 @@ does not move.
 
 **A submodule in the history**
 
+```sh
+so git import ~/src/app.git --ref stable
+```
+
 ```text
-$ so git import ~/src/app.git --ref stable
 {
   "ok": false,
   "op": "git_import",

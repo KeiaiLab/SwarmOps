@@ -12,8 +12,7 @@ or `SWARMOPS_REPO`.
 SwarmOps is fully embedded: one program, no external database, no daemon. Each command or
 MCP (Model Context Protocol) call opens the store, does its work and closes it.
 
-Explained in: [README, The store on disk](../README.md#the-store-on-disk) ·
-[architecture, The store on disk](architecture.md#the-store-on-disk) ·
+Explained in: [architecture, The store on disk](architecture.md#the-store-on-disk) ·
 [operations, Create a store](operations.md#create-a-store).
 
 ## Object
@@ -65,8 +64,7 @@ deleted the ref is `E_REV_NOT_FOUND`. Both forms take `~N` after them (`main@{1}
 `resolve REV` gives the full id of the changeset a revision names, and an envelope's
 `meta.resolved` says what each revision named.
 
-Explained in: [README, Revisions and change lists](../README.md#revisions-and-change-lists) ·
-[README, Commands](../README.md#commands).
+Explained in: [CLI reference](reference/cli.md).
 
 ## Change list
 
@@ -79,7 +77,7 @@ default), `exec` or `symlink`.
 A commit's contents hold at most 1 GiB together (a blob named by id counts nothing) and a change
 list's text at most 64 MiB (`E_TOO_LARGE` past either), and a file's content at most 512 MiB.
 
-Explained in: [README, Revisions and change lists](../README.md#revisions-and-change-lists) ·
+Explained in: [Revision](#revision) ·
 [architecture, Data model](architecture.md#data-model).
 
 ## Ref
@@ -93,7 +91,7 @@ moves are the reflog.
 
 `ref list` lists the refs, and `ref set` and `ref delete` move one.
 
-Explained in: [README, Commands](../README.md#commands) ·
+Explained in: [CLI reference](reference/cli.md) ·
 [architecture, Writing](architecture.md#writing).
 
 ## Compare-and-swap
@@ -105,7 +103,7 @@ and the caller gets `E_CAS_MISMATCH` (exit 4) with the ref's actual target in `d
 `ref set --expect` or `--create`, `ref delete --expect`, `commit --advance`, `land` and `op undo`
 all move refs this way. When several agents expect the same target, exactly one wins each round.
 
-Explained in: [README, Revisions and change lists](../README.md#revisions-and-change-lists) ·
+Explained in: [Revision](#revision) ·
 [architecture, Concurrency](architecture.md#concurrency).
 
 ## Land
@@ -118,8 +116,8 @@ A change that conflicts with what the ref gained fails with `E_CONFLICT` (exit 3
 report in `details.report`, recording nothing; `land --resolve` then resolves it without a checkout,
 path by path. Landing is built, but not yet measured under a swarm's load.
 
-Explained in: [README, First commands](../README.md#first-commands) · [README,
-Commands](../README.md#commands) · [architecture, Concurrency](architecture.md#concurrency).
+Explained in: [Quick start](guides/quick-start.md) · [CLI
+reference](reference/cli.md) · [architecture, Concurrency](architecture.md#concurrency).
 
 ## Envelope
 
@@ -134,7 +132,7 @@ envelope a line, `--help`, `--version` and the `help` subcommand print plain tex
 MCP on stdout instead; a run that meets one of the store's four documented aborts prints no
 envelope.
 
-Explained in: [README, Output and exit codes](../README.md#output-and-exit-codes) ·
+Explained in: [CLI scripting, The envelope](develop/cli-scripting.md#the-envelope) ·
 [architecture, The contract](architecture.md#the-contract).
 
 ## Identity
@@ -148,7 +146,7 @@ with `E_IDENTITY_REQUIRED` (exit 5) without it; `init`, reads, `git export` and 
 The changeset records the identity, and its run as `run_id` metadata; the journal records who moved
 each ref. SwarmOps records identities without verifying them (`meta.auth` is `"trust"`).
 
-Explained in: [README, Store, identity and lifetime](../README.md#store-identity-and-lifetime) ·
+Explained in: [MCP integration, Identity](develop/mcp.md#identity-one-per-agent-process) ·
 [operations, Identities](operations.md#identities).
 
 ## Op log and undo
@@ -164,7 +162,7 @@ none, by compare-and-swap; if another operation has moved one of them since, it 
 back. `main` moves only forward: an undo or a `ref set` that would take it off its first-parent
 history refuses with `E_REF_PROTECTED`, and the way back is a land of a change that reverts it.
 
-Explained in: [README, First commands](../README.md#first-commands) ·
+Explained in: [Quick start](guides/quick-start.md) ·
 [architecture, Concurrency](architecture.md#concurrency).
 
 ## Journal and frame
@@ -178,8 +176,7 @@ A write commits when its journal frame is durable, at the frame's `fdatasync`, t
 the next write repairs whatever a crash cut short. The index and the ref files are projections of
 the journal.
 
-Explained in: [README, The store on disk](../README.md#the-store-on-disk) ·
-[architecture, The store on disk](architecture.md#the-store-on-disk) ·
+Explained in: [architecture, The store on disk](architecture.md#the-store-on-disk) ·
 [architecture, Writing](architecture.md#writing).
 
 ## Derived value
@@ -194,7 +191,7 @@ power loss that takes one back, or leaves its file torn, costs a recomputation a
 derived by the first reader that asks for it. `verify --deep` checks the derived values against the
 objects.
 
-Explained in: [README, Commands](../README.md#commands) ·
+Explained in: [CLI reference](reference/cli.md) ·
 [architecture, Writing](architecture.md#writing).
 
 ## External id
@@ -205,7 +202,7 @@ id, written by `git import` and `git export`. It is a cache outside the journal.
 
 An imported changeset also keeps its commit's id in its `git.oid` metadata.
 
-Explained in: [README, The store on disk](../README.md#the-store-on-disk) ·
+Explained in: [architecture, The store on disk](architecture.md#the-store-on-disk) ·
 [architecture, Git import](architecture.md#git-import) ·
 [architecture, Git export](architecture.md#git-export).
 
@@ -227,7 +224,7 @@ such content with `E_GIT_IMPORT_LOSSY`, naming the commit, the path and the clas
 A changeset imported with a loss names the class in its `git.lossy` metadata, and a history imported
 with a loss exports as new commits. `--gitlinks drop` is `--lossy gitlinks`.
 
-Explained in: [README, Bring a git repository in](../README.md#bring-a-git-repository-in) ·
+Explained in: [Git round trip, Import a git repository](guides/git-round-trip.md#import-a-git-repository) ·
 [operations, Limits](operations.md#limits).
 
 ## FORMAT

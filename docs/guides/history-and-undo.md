@@ -10,8 +10,8 @@ Every command below was run with the binary built from this repository, against 
 store, and every output is copied from those runs. In the outputs, each 64-digit id is cut to its
 first 12 hex digits and `…`; the commands print them whole, and the commands shown here take
 them whole where they need a full id. The examples run `so`, the short name; `swarmops` is the
-same program. `so <command> --help` is the authority on flags, and the README's
-[Commands](../../README.md#commands) table lists them all.
+same program. `so <command> --help` is the authority on flags, and the
+[CLI reference](../reference/cli.md) lists them all.
 
 ## Set up a store to follow along
 
@@ -1450,5 +1450,6 @@ The exit code is the envelope's `error.exit`, and 0 on success.
 | 5 | An identity or policy requirement refused it. | `E_IDENTITY_REQUIRED` |
 | 6 | Something it names does not exist. | `E_REV_NOT_FOUND`, `E_PATH_NOT_FOUND`, `E_OP_NOT_FOUND`, `E_NOT_A_REPO` |
 
-`so schema` gives every request and response type, and the README's
-[Output and exit codes](../../README.md#output-and-exit-codes) lists the codes of every command.
+`so schema` gives every request and response type, and
+[CLI scripting](../develop/cli-scripting.md#the-envelope) explains the envelope; the
+[error reference](../reference/errors.md) lists the codes of every command.

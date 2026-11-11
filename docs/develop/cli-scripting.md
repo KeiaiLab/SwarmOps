@@ -189,26 +189,65 @@ A usage error is an envelope too, on stdout, with `op` naming the command as far
 Each recipe runs against the store the [example below](#a-complete-example-commit-and-land-in-a-loop)
 builds. The JSON is compact when piped, one envelope a line, which `jq` reads as it is.
 
+```sh
+swarmops resolve main | jq -r '.result.id'
+```
+
 ```text
-$ swarmops resolve main | jq -r '.result.id'
 d51a93cdecb749beafb0e6073b9197bb37c015b22fe1f9c032a8e9c38e8bea3d
-$ swarmops ref list | jq -r '.result.refs[] | "\(.name) \(.target)"'
+```
+
+```sh
+swarmops ref list | jq -r '.result.refs[] | "\(.name) \(.target)"'
+```
+
+```text
 main d51a93cdecb749beafb0e6073b9197bb37c015b22fe1f9c032a8e9c38e8bea3d
-$ swarmops ls main --depth 3 | jq -r '.result.entries[] | select(.kind == "file") | .path'
+```
+
+```sh
+swarmops ls main --depth 3 | jq -r '.result.entries[] | select(.kind == "file") | .path'
+```
+
+```text
 TODO.md
 docs/notes.md
 src/lib.rs
-$ swarmops show main | jq -c '.result.changes[] | {path, op}'
+```
+
+```sh
+swarmops show main | jq -c '.result.changes[] | {path, op}'
+```
+
+```text
 {"path":"TODO.md","op":"put"}
-$ swarmops diff f9fac3d60106 main --format stat | jq -r '.result.files[] | "\(.status) \(.path) +\(.insertions) -\(.deletions)"'
+```
+
+```sh
+swarmops diff f9fac3d60106 main --format stat | jq -r '.result.files[] | "\(.status) \(.path) +\(.insertions) -\(.deletions)"'
+```
+
+```text
 added TODO.md +1 -0
 added docs/notes.md +3 -0
 modified src/lib.rs +1 -1
-$ swarmops op log -n 3 | jq -c '.result.ops[] | {op, id, kind}'
+```
+
+```sh
+swarmops op log -n 3 | jq -c '.result.ops[] | {op, id, kind}'
+```
+
+```text
 {"op":7,"id":"7:5e0b93a1","kind":"publish"}
 {"op":6,"id":"6:c41d07f8","kind":"land"}
 {"op":5,"id":"5:2a9f6e3d","kind":"commit"}
-$ swarmops cat main:nope.rs | jq -r 'if .ok then .result.content else "\(.error.code) retryable=\(.error.retryable) exit=\(.error.exit)" end'
+```
+
+```sh
+swarmops cat main:nope.rs | jq -r 'if .ok then .result.content else "\(.error.code) retryable=\(.error.retryable) exit=\(.error.exit)" end'
+```
+
+```text
 E_PATH_NOT_FOUND retryable=false exit=6
 ```
 
@@ -285,16 +324,37 @@ one from another head is `E_INVALID_ARG`. A key not found there is looked for on
 `details.target` names the ref. Without a key, the same land run again finds its change on the ref
 already: `E_NOTHING_TO_LAND`.
 
+```sh
+BASE=$(swarmops resolve main | jq -r .result.id)
+C=$(swarmops commit -m "extend the todo" --changes todo2.json --parent "$BASE" | jq -r .result.changeset)
+LAND=$(uuidgen); echo "$LAND"
+```
+
 ```text
-$ BASE=$(swarmops resolve main | jq -r .result.id)
-$ C=$(swarmops commit -m "extend the todo" --changes todo2.json --parent "$BASE" | jq -r .result.changeset)
-$ LAND=$(uuidgen); echo "$LAND"
 51ea69e6-f3d9-4246-af47-11c9e6ea53b6
-$ swarmops land "$C" --key "$LAND" | jq -c ".result | {status, landed, attempts}"
+```
+
+```sh
+swarmops land "$C" --key "$LAND" | jq -c ".result | {status, landed, attempts}"
+```
+
+```text
 {"status":"landed","landed":"fc263ee351d1e964a4c56254ac1de084418cda83459a9af6bb5cca1a5558a969","attempts":1}
-$ swarmops land "$C" --key "$LAND" | jq -c ".result | {status, landed, attempts}"
+```
+
+```sh
+swarmops land "$C" --key "$LAND" | jq -c ".result | {status, landed, attempts}"
+```
+
+```text
 {"status":"replayed","landed":"fc263ee351d1e964a4c56254ac1de084418cda83459a9af6bb5cca1a5558a969","attempts":1}
-$ swarmops land "$C" | jq -c ".error | {code, details}"
+```
+
+```sh
+swarmops land "$C" | jq -c ".error | {code, details}"
+```
+
+```text
 {"code":"E_NOTHING_TO_LAND","details":{"reason":"no_changes"}}
 ```
 
@@ -310,12 +370,27 @@ as the full id you read; without it a retry after `main` moved commits again, on
 `uuidgen` from util-linux 2.39.3, the one this page ran with, makes no v7, so the example uses the
 `uuid7` function of the [script below](#a-complete-example-commit-and-land-in-a-loop):
 
+```sh
+BASE=$(swarmops resolve main | jq -r .result.id); ID=$(uuid7); echo "$ID"
+```
+
 ```text
-$ BASE=$(swarmops resolve main | jq -r .result.id); ID=$(uuid7); echo "$ID"
 01a160e9-3ce0-70f7-a583-35646a0e57e2
-$ swarmops commit -m "ship it" --changes todo3.json --parent "$BASE" --advance main --key "$ID" | jq -c ".result | {changeset, replayed}"
+```
+
+```sh
+swarmops commit -m "ship it" --changes todo3.json --parent "$BASE" --advance main --key "$ID" | jq -c ".result | {changeset, replayed}"
+```
+
+```text
 {"changeset":"3ab2b4ed1e248252ebff91589762ecef07f9bb02f5ea623cadcc3d57ea7efdb9","replayed":false}
-$ swarmops commit -m "ship it" --changes todo3.json --parent "$BASE" --advance main --key "$ID" | jq -c ".result | {changeset, replayed}"
+```
+
+```sh
+swarmops commit -m "ship it" --changes todo3.json --parent "$BASE" --advance main --key "$ID" | jq -c ".result | {changeset, replayed}"
+```
+
+```text
 {"changeset":"3ab2b4ed1e248252ebff91589762ecef07f9bb02f5ea623cadcc3d57ea7efdb9","replayed":true}
 ```
 
@@ -447,34 +522,73 @@ script stops. Run again with `RESOLVE=ours`, it lands worker-1's line. Last, `ag
 publishes on the current head, and the fast path succeeds. The script's messages go to stderr,
 merged here:
 
+```sh
+swarmops init "$SWARMOPS_REPO" --name demo >/dev/null
+swarmops --as operator/ada commit -m "first" --changes base.json --advance main | jq -c ".result.advanced"
+```
+
 ```text
-$ swarmops init "$SWARMOPS_REPO" --name demo >/dev/null
-$ swarmops --as operator/ada commit -m "first" --changes base.json --advance main | jq -c ".result.advanced"
 {"name":"main","new":"f9fac3d601067622febebde455958b93c359164812a9defb957fa3cd62f26d41","already_applied":false}
-$ BASE=$(swarmops resolve main | jq -r ".result.id")
-$ swarmops --as agent/worker-2 commit -m "greet the swarm" --changes rival.json --parent "$BASE" --advance main | jq -c ".result.advanced"
+```
+
+```sh
+BASE=$(swarmops resolve main | jq -r ".result.id")
+swarmops --as agent/worker-2 commit -m "greet the swarm" --changes rival.json --parent "$BASE" --advance main | jq -c ".result.advanced"
+```
+
+```text
 {"name":"main","old":"f9fac3d601067622febebde455958b93c359164812a9defb957fa3cd62f26d41","new":"5cc2a136cfe06ab61e00b3d322a20a8c80bc80913cee1e92e9dfe2f9848692a7","already_applied":false}
-$ SWARMOPS_AGENT=agent/worker-1 ./publish.sh "$BASE" notes.json greet.json; echo "exit=$?"
+```
+
+```sh
+SWARMOPS_AGENT=agent/worker-1 ./publish.sh "$BASE" notes.json greet.json; echo "exit=$?"
+```
+
+```text
 main moved to 5cc2a136cfe06ab61e00b3d322a20a8c80bc80913cee1e92e9dfe2f9848692a7: landing instead
 notes.json: {"op":"landed","main":"aacf0e0212fb5a34121a8dd9a80296fc62d9a0e207e51aaf6c79ebcdb7450009"}
 main moved to aacf0e0212fb5a34121a8dd9a80296fc62d9a0e207e51aaf6c79ebcdb7450009: landing instead
 {"code":"E_CONFLICT","message":"1 path(s) of the change conflict with the target's head aacf0e0212fb5a34121a8dd9a80296fc62d9a0e207e51aaf6c79ebcdb7450009: nothing was recorded","hint":"swarmops cat aacf0e0212fb5a34121a8dd9a80296fc62d9a0e207e51aaf6c79ebcdb7450009:src/lib.rs, then swarmops land 84ebff1a072e50457bd50ac606a289a51b61d4d4fa5249fe4455599d80a4356e --resolve <file> (resolutions over MCP) with each path's resolution and against = aacf0e0212fb5a34121a8dd9a80296fc62d9a0e207e51aaf6c79ebcdb7450009"}
 exit=3
-$ SWARMOPS_AGENT=agent/worker-1 RESOLVE=ours ./publish.sh "$BASE" greet.json; echo "exit=$?"
+```
+
+```sh
+SWARMOPS_AGENT=agent/worker-1 RESOLVE=ours ./publish.sh "$BASE" greet.json; echo "exit=$?"
+```
+
+```text
 main moved to aacf0e0212fb5a34121a8dd9a80296fc62d9a0e207e51aaf6c79ebcdb7450009: landing instead
 conflict in src/lib.rs: taking ours
 greet.json: {"op":"landed","main":"71074a1597873f72fd51143a29cdfdab9a10b60cc91ec8df6f00bc203a9a68c9"}
 exit=0
-$ SWARMOPS_AGENT=agent/worker-3 ./publish.sh "$(swarmops resolve main | jq -r ".result.id")" todo.json; echo "exit=$?"
+```
+
+```sh
+SWARMOPS_AGENT=agent/worker-3 ./publish.sh "$(swarmops resolve main | jq -r ".result.id")" todo.json; echo "exit=$?"
+```
+
+```text
 todo.json: {"op":"advanced","main":"d51a93cdecb749beafb0e6073b9197bb37c015b22fe1f9c032a8e9c38e8bea3d"}
 exit=0
-$ swarmops log | jq -r ".result.entries[] | \"\(.id[:12]) \(.author_agent) \(.title)\""
+```
+
+```sh
+swarmops log | jq -r ".result.entries[] | \"\(.id[:12]) \(.author_agent) \(.title)\""
+```
+
+```text
 d51a93cdecb7 agent/worker-3 apply todo.json
 71074a159787 agent/worker-1 apply greet.json
 aacf0e0212fb agent/worker-1 apply notes.json
 5cc2a136cfe0 agent/worker-2 greet the swarm
 f9fac3d60106 operator/ada first
-$ swarmops cat main:src/lib.rs | jq -r ".result.content"
+```
+
+```sh
+swarmops cat main:src/lib.rs | jq -r ".result.content"
+```
+
+```text
 pub fn greet() -> &'static str {
     "hi"
 }

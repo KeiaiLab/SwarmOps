@@ -97,8 +97,11 @@ can write ([Backup and restore](backup-and-restore.md) says what the key is).
 `git gc --auto` packs later ([known limitations](../known-limitations.md#git-import-and-export)).
 Prepare a large store before people clone it, as the serving account:
 
-```console
-$ swarmops --repo /srv/so/acme serve --prepare --seed-from /srv/import/acme.git
+```sh
+swarmops --repo /srv/so/acme serve --prepare --seed-from /srv/import/acme.git
+```
+
+```text
 {"ok":true,"op":"serve_prepare","api":1,"result":{"refreshed":{"moved":1,"removed":0,"objects":0},"rounds":1,"seeded":1,"skipped":null,"warnings":[]},...}
 ```
 
@@ -295,8 +298,11 @@ check, to another push or a land conflict, is refused alone: `! [remote rejected
 from the store on: a clone, a fetch, a push, or a refusal after the store was found. Each line is a
 `ServeRecord` (`swarmops schema ServeRecord`):
 
-```console
-$ tail -n 1 /srv/so/acme/git/serve-records.jsonl
+```sh
+tail -n 1 /srv/so/acme/git/serve-records.jsonl
+```
+
+```text
 {"at":1794048398609,"identity":"person/ada","service":"clone","prepare_ms":50,"send_ms":6335,"bytes":6293595,"exit":0}
 ```
 

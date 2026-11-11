@@ -505,7 +505,7 @@ is `read_file`, `ls` is `read_tree` and `info` is `repo_info`.
 
 ## Go further
 
-- The README's [MCP section](../../README.md#mcp) has the full text.
+- The README's [MCP section](../develop/mcp.md) has the full text.
 - [Known limitations](../known-limitations.md) lists what is still open, and which milestone takes
   each item.
 - [Parallel coding agents on one repository](parallel-agents.md) sets SwarmOps beside git worktrees.

@@ -54,7 +54,7 @@ imported; its tags are fetched and never imported. Content a changeset cannot ho
 (a submodule, a name that is not UTF-8, a mode or a tree order git does not write, an empty
 directory, a commit whose bytes its fields cannot give back) is refused with
 `E_GIT_IMPORT_LOSSY`, naming the commit, the path and the class, until you allow that class with
-`--lossy` ([README](../../README.md#bring-a-git-repository-in)). SHA-256 repositories are refused.
+`--lossy` ([Git round trip](../guides/git-round-trip.md#import-a-git-repository)). SHA-256 repositories are refused.
 A clone that stops half-way continues when run again with the same URL into the same directory.
 
 ## 1. Take in what git gained
@@ -227,7 +227,7 @@ ops[0].ref_moves[0].actor: agent/worker-2
 `op log` lists every write transaction with its id; `swarmops op undo <id>` moves the refs one of
 them moved back, by compare-and-swap, all or none, and `main` only forward: the undo of this land
 is refused (`E_REF_PROTECTED`), and a change that reverts it is landed instead
-([README](../../README.md#first-commands)).
+([Quick start](../guides/quick-start.md)).
 
 ## 4. Send it to git for review
 

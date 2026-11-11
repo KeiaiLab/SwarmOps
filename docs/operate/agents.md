@@ -49,8 +49,8 @@ Claude Code expands into the server's environment:
 ```
 
 Claude Code asks once, in each project, to approve the servers a `.mcp.json` names; until then
-`claude mcp list` shows the server as `⏸ Pending approval`. The README's [MCP](../../README.md#mcp)
-section says why the entry runs `swarmops` rather than `so`, and why the empty default (`:-`)
+`claude mcp list` shows the server as `⏸ Pending approval`. [MCP integration](../develop/mcp.md)
+says why the entry runs `swarmops` rather than `so`, and why the empty default (`:-`)
 matters. Give the store's path absolute, as above.
 
 ## The tools agents get
@@ -77,8 +77,8 @@ only, and run git with the server's environment: its ssh agent and token variabl
 - Claude Code starts one server for a session, and the session's subagents share it and its
   identity. An agent that needs an identity of its own runs as its own Claude Code process.
 - The server opens the store for each call, so it sees what other agents commit meanwhile. It
-  exits on any of the store's four documented aborts (storage spec §2; the README's
-  [MCP](../../README.md#store-identity-and-lifetime) section lists them), such as a failed journal
+  exits on any of the store's four documented aborts (storage spec §2;
+  [The server exits](../develop/mcp.md#the-server-exits) lists them), such as a failed journal
   write whose cut-back fails too: the client sees the server exit, and has to start it again.
 - The server tells the model how to use it, in its MCP `instructions` and its tools'
   descriptions: a full 64-hex changeset id wherever a compare-and-swap needs one, `land` to

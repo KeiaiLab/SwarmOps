@@ -32,7 +32,7 @@ swarmops schema OpError    # the error object's schema
 swarmops verify            # is the store itself sound?
 ```
 
-The README's [Output and exit codes](../README.md#output-and-exit-codes) says more about the
+[CLI scripting](develop/cli-scripting.md#the-envelope) says more about the
 envelope. A run that meets one of the store's four documented aborts prints no envelope at all:
 the process aborts, and says why on stderr ([The server exits](#the-server-exits-during-a-session)).
 
@@ -138,7 +138,7 @@ Each message below is one the script prints; `X`, `V` and `DIR` stand for what i
 | `Unknown option 'X'; see --help.` (exit 2) | A misspelt option. | `… \| bash -s -- --version 0.1.0` |
 | `X needs a value; see --help.` (exit 2) | `--version` or `--dir` last on the line. | Give the value: `--dir ~/bin`. |
 | `SwarmOps runs on Linux today; macOS and Windows are next.` then `This system is X.` | Not Linux. | No release build runs there yet. |
-| `No release build runs on X, only on x86_64 and aarch64.` | Another CPU architecture. | Build from source (the README's [Install](../README.md#install)). |
+| `No release build runs on X, only on x86_64 and aarch64.` | Another CPU architecture. | Build from source ([Install](guides/install.md#how-do-i-build-from-source)). |
 | `This system's C library is musl; …` | Alpine and other musl systems. | Build from source. |
 | `This system has glibc V; the release binaries need 2.34 or newer.` | An older distribution. | Build from source, or a newer host. |
 | `Cannot tell this system's glibc version …` | Neither `ldd --version` nor `getconf GNU_LIBC_VERSION` gave one. | Build from source. |
@@ -275,8 +275,8 @@ Location: …/proj/.mcp.json
  └ [Warning] [swarmops] mcpServers.swarmops: Missing environment variables: SWARMOPS_AGENT
 ```
 
-Claude Code then passes the text `${SWARMOPS_AGENT}` on to the server as it is (the README's
-[Register the server](../README.md#register-the-server) says so). A server started with that value
+Claude Code then passes the text `${SWARMOPS_AGENT}` on to the server as it is ([Register the server](develop/mcp.md#register-the-server-with-claude-code)
+says so). A server started with that value
 serves reads as usual, but every write fails, because that text is no agent name (the text of a
 `commit` tool result):
 
@@ -284,7 +284,8 @@ serves reads as usual, but every write fails, because that text is no agent name
 {"ok":false,"op":"commit","api":1,"error":{"code":"E_INVALID_ARG","message":"SWARMOPS_AGENT: invalid agent name \"${SWARMOPS_AGENT}\": expected <family>/<instance> of at most 255 bytes","retryable":false,"exit":2,"details":{"source":"SWARMOPS_AGENT"},"hint":"agent names look like agent/worker-17: family [a-z0-9-]+, instance [A-Za-z0-9._-]+ not starting with '.'"},"meta":{"repo":"…/acme","elapsed_ms":0,"resolved":{},"auth":"trust"}}
 ```
 
-Write the entry with an empty default, `"${SWARMOPS_AGENT:-}"`, as the README does: the warning
+Write the entry with an empty default, `"${SWARMOPS_AGENT:-}"`, as
+[MCP integration](develop/mcp.md#register-the-server-with-claude-code) does: the warning
 goes, and an agent
 started without an identity gets the clearer `E_IDENTITY_REQUIRED` on a write instead. Then give
 each agent session its own `SWARMOPS_AGENT`, such as `agent/worker-1`, before it starts `claude`.
@@ -328,16 +329,16 @@ message says what to send instead:
 A message the server cannot serve as a request gets a JSON-RPC error instead of a tool result:
 `-32700` parse error, `-32600` invalid request, `-32601` method not found, `-32602` invalid params,
 `-32603` internal error (a bug), `-32022` unsupported protocol version. The module documentation
-of `crates/swarmops-cli/src/mcp.rs` says when each is sent, and the README's
-[MCP](../README.md#mcp) section gives the protocol versions the server speaks.
+of `crates/swarmops-cli/src/mcp.rs` says when each is sent, and
+[Protocol versions](develop/mcp.md#protocol-versions) gives the protocol versions the server speaks.
 
 ### The server exits during a session
 
 The server exits 0 when the client closes its stdin and 1 when reading stdin or writing stdout
 fails. It also ends, by `SIGABRT`, on any of the store's four documented aborts: a failed journal
 write or sync whose cut-back fails too, frames that repair writes afresh landing anywhere but
-where they were and not cut back, or an `init` that cannot take its `FORMAT` back (the README's
-[Store, identity and lifetime](../README.md#store-identity-and-lifetime) lists them). The reason is
+where they were and not cut back, or an `init` that cannot take its `FORMAT` back ([The server exits](develop/mcp.md#the-server-exits)
+lists them). The reason is
 on the server's stderr. The client sees the server exit and has to start it again; start a new
 session, run `swarmops verify`, and look at the filesystem's free space and health before you go
 on.

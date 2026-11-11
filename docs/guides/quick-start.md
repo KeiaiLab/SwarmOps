@@ -144,7 +144,7 @@ so cat main:src/lib.rs
 
 `op` names the operation (`cat` is `read_file`), and `meta.resolved` what each revision named. A
 failure has `"ok":false` and an `error` with a stable `E_*` code, its exit code and a `hint`, often
-the next command to run; [Output and exit codes](../../README.md#output-and-exit-codes) lists the
+the next command to run; [Output and exit codes](../develop/cli-scripting.md#the-envelope) lists the
 exit codes. Scripts read the JSON; this page reads ids out of it with a small helper:
 
 ```sh
@@ -329,13 +329,13 @@ findings: []
 
 Give the store to your agents, or connect it to a git repository; these pages say how.
 
-- [MCP (Model Context Protocol)](../../README.md#mcp): `swarmops mcp` serves the store to an agent
+- [MCP (Model Context Protocol)](../develop/mcp.md): `swarmops mcp` serves the store to an agent
   harness such as Claude Code.
-- The git round trip: [Bring a git repository in](../../README.md#bring-a-git-repository-in), then
-  [Send the work back to git](../../README.md#send-the-work-back-to-git).
+- The git round trip: [Bring a git repository in](git-round-trip.md#import-a-git-repository), then
+  [Send the work back to git](git-round-trip.md#export-back-to-git).
 - [Concepts](../concepts.md): the store, changesets, revisions, refs, landing and the envelope, one
   definition each.
-- [Commands](../../README.md#commands): every command, its revisions and change lists, and its
+- [Commands](../reference/cli.md): every command, its revisions and change lists, and its
   output.
 - [Operating SwarmOps](../operations.md): a store for a swarm of coding agents on one host, from day
   to day.
@@ -345,6 +345,6 @@ Give the store to your agents, or connect it to a git repository; these pages sa
 ## Sources
 
 The commands and their output come from a run of SwarmOps 0.1.0. The command descriptions come from
-the README's [Commands](../../README.md#commands) table, the envelope from
-[Output and exit codes](../../README.md#output-and-exit-codes), and the conflict resolution from
+the README's [Commands](../reference/cli.md) table, the envelope from
+[Output and exit codes](../develop/cli-scripting.md#the-envelope), and the conflict resolution from
 [Operating SwarmOps, Agents commit and land](../operations.md#2-agents-commit-and-land).

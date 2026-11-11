@@ -70,7 +70,7 @@ features, each with an example.
 | [Known limitations](known-limitations.md) | See what is still open, and which milestone takes each item. |
 | [Performance](perf.md) | See every measurement, and the decisions taken on them. |
 | [Metadata store comparison](../bench/compare/README.md) | See how the native metadata store is measured against embedded databases. |
-| [SwarmOps and git](../README.md#swarmops-and-git) | Compare SwarmOps with git, dimension by dimension. |
+| [SwarmOps and git](https://swarmops.cc/product/vs-git) | Compare SwarmOps with git, dimension by dimension. |
 | [Roadmap](../README.md#roadmap) | See the milestones, built and planned. |
 
 The design documents are the authority: the umbrella spec and the storage, operations and review

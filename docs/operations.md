@@ -33,7 +33,7 @@ Each task has a page of its own under [operate/](operate/).
 Every command on these pages was run with the binary built from this repository, and every output
 is copied from those runs, cut down where it is long: `…` marks a cut, and the store's path in
 `meta.repo`, which echoes the path the caller gave, is left out. `swarmops <command> --help` is
-the authority on flags, and the README's [Commands](../README.md#commands) table lists them all.
+the authority on flags, and the [CLI reference](reference/cli.md) lists them all.
 The examples run the long name, `swarmops`; `so` is the same program.
 
 ## Before you start

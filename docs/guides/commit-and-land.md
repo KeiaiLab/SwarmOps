@@ -6,8 +6,8 @@ conflicts, retries, refs and identities, each with a run you can repeat.
 
 Agents do the same through the MCP tools `commit`, `land`, `ref_set` and `ref_delete`, which take
 the fields the flags below set (`parent`, `advance`, `idempotency_key`, `allow_empty`,
-`resolutions` and so on; `swarmops schema` gives each one). The README's
-[MCP](../../README.md#mcp) section registers the server.
+`resolutions` and so on; `swarmops schema` gives each one). [MCP integration](../develop/mcp.md)
+registers the server.
 
 Every command below was run with `swarmops` 0.1.0, built from this repository, against a fresh
 store. Every output is copied from that run. In JSON envelopes, `"repo":"…"` and the `…` after it
@@ -36,7 +36,7 @@ change list, and lands.
 
 ## Before you start
 
-You need the `swarmops` binary ([Install](../../README.md#install)) and a store. A store is one
+You need the `swarmops` binary ([Install](install.md)) and a store. A store is one
 directory; every command finds it by `--repo` or `SWARMOPS_REPO`.
 
 ```sh
@@ -1194,5 +1194,5 @@ your old puts would undo the winner's edits to every file you both changed.
 | `E_CAS_RETRY_EXHAUSTED` | 4 | The target moved before every one of a land's attempts. | Run the land again, or raise `--max-attempts`. |
 | `E_BUSY` | 4 | Another writer held the store's lock for the whole wait. | Run it again. |
 
-`swarmops schema` gives every request and response type, and the README's
-[Output and exit codes](../../README.md#output-and-exit-codes) explains the envelope.
+`swarmops schema` gives every request and response type, and
+[CLI scripting](../develop/cli-scripting.md#the-envelope) explains the envelope.
