@@ -32,6 +32,7 @@ mod queue;
 mod realfs_syncs;
 mod refs2;
 mod runs;
+mod sources;
 // Every test of it builds its store with the sweeps' harness, which needs the hooks.
 #[cfg(feature = "test-hooks")]
 mod upgrade;
