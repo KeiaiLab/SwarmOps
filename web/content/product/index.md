@@ -55,20 +55,17 @@ and a way back to git so that existing CI and deployments keep running.
 
 ## What it is not
 
-- **Not a general-purpose git replacement.** Git parity is not a v1 goal: no tags, free-form
-  branch names, symbolic refs, user hooks, signing, submodules or LFS. Refs are `main` and
-  `release/<name>`.
+- **Not a general-purpose git replacement.** Parity with git is not a v1 goal: no user hooks,
+  signing, submodules or LFS.
+- **Not a cluster.** SwarmOps is one program with no daemon and no external database. It does
+  not scale horizontally.
 - **Not multi-host yet.** Every agent and command runs on the host that holds the store. Between
   hosts, git carries the history, one writing host at a time; offline-first sync is M11.
 - **Not a review tool yet.** SwarmOps does not hold a landing for a person's approval; review stays
   in git until M7.
-- **No workspaces yet.** Agents read and write through the commands and tools, a whole file per
-  change; building and testing a change on disk before it lands comes with M5, and the
-  [operations guide](/docs/operations/#building-and-testing-a-change) gives the stopgap.
 - **Linux only.** macOS and Windows are M12.
 - **Not faster than git at raw throughput.** Writers take turns: each commit holds one store-wide
-  lock across two journal syncs, about 21 ms for an uncontended commit through the binary on the
-  maintainers' host.
+  lock across two journal syncs.
 
 ## Lineage
 
@@ -81,7 +78,7 @@ and contains no Scion code, which is not public.
 
 ## Read on
 
-- [Features](/product/features/): every v0.1.0 command, with a real example.
+- [Features](/product/features/): the core features, each with a real example.
 - [How it works](/product/how-it-works/): the crates, the store on disk, writes, reads, durability.
 - [SwarmOps and git](/product/vs-git/): where it is ahead, at parity and behind.
-- [Roadmap](/roadmap/): what is delivered, what comes next, and when it is usable for what.
+- [Roadmap](/roadmap/): the three topologies, and where the detailed roadmap keeps each step.

@@ -5,7 +5,7 @@ description: "The crates, the store on disk, the write and read paths, landing, 
 
 # How SwarmOps works
 
-An overview of how SwarmOps is built, as of v0.1.0. The
+An overview of how SwarmOps is built. The
 [architecture document](/docs/architecture/) gives every detail; this page is the short form.
 
 ## The layers
