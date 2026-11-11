@@ -29,7 +29,7 @@ use swarmops_git::{
     DivergedReason, ExportError, ExportReport, ExportRequest, GitOid, GixSink, GixSource,
     ImportError, ImportRequest, LossySet, SinkError, limits,
 };
-use swarmops_store::{Recovered, SYSTEM_GIT, TailRepair};
+use swarmops_store::{Recovered, RefKind, SYSTEM_GIT, TailRepair};
 
 use crate::error::{self, Phase};
 use crate::local::{LocalOps, Recording, Resolved};
@@ -109,7 +109,8 @@ impl Recording<'_> {
         } = req;
         let name = remote.name.as_str();
 
-        // 1. The store ref (a ref name, and there), the URL and the branch; no git yet.
+        // 1. The store ref (a branch, a ref name, and there), the URL and the branch; no git yet.
+        check_source_kind(&source_ref)?;
         self.source_head(&source_ref)?;
         let url = RemoteUrl::parse(&remote.url).map_err(error::url_refused)?;
         let branch = branch.unwrap_or_else(|| default_branch(remote, &source_ref));
@@ -333,6 +334,33 @@ fn default_branch(remote: &RemoteInfo, source_ref: &str) -> String {
         return remote.branch.clone();
     }
     source_ref.to_owned()
+}
+
+/// Refuses a store ref that is no branch, by the store's own ref grammar: `main`, `release/<x>`
+/// and a FORMAT 2 branch are sent; a tag (`tags/v1`), a remote-tracking ref (`remote/o/main`)
+/// or a kind this build does not know is `E_INVALID_ARG` `source_kind`. A name no format takes
+/// passes, for [`Recording::source_head`] to refuse.
+fn check_source_kind(source_ref: &str) -> Result<(), OpError> {
+    let Some(kind) = swarmops_store::ref_kind(source_ref) else {
+        return Ok(());
+    };
+    let message = match kind {
+        RefKind::Main | RefKind::Release | RefKind::Branch => return Ok(()),
+        RefKind::Tag => {
+            format!("{source_ref} is a tag: push sends branches; tags are not published yet")
+        }
+        RefKind::RemoteTracking => {
+            format!("{source_ref} is a remote-tracking ref, the remote's own: push sends branches")
+        }
+        _ => format!("{source_ref} is no branch: push sends branches"),
+    };
+    Err(error::error(ErrorCode::InvalidArg, message)
+        .with_details(error::details([
+            ("reason", "source_kind".into()),
+            ("ref", source_ref.into()),
+            ("kind", kind.as_str().into()),
+        ]))
+        .with_hint("swarmops ref list"))
 }
 
 /// The store's mirror made or rebuilt under `lock`, its stale git lock files removed; with the

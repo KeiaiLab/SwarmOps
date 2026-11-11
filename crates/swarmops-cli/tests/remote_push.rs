@@ -13,6 +13,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
+#[cfg(unix)]
+use swarmops_testkit::remote::{GitChild, GitLedger};
 use swarmops_testkit::remote::{GitServer, HttpAuth, HttpServer};
 use tempfile::TempDir;
 
@@ -439,6 +441,64 @@ fn push_bad_branch_name_starts_no_git() {
     let error = failed.err("E_INVALID_ARG");
     assert_eq!(error["details"]["reason"], "branch_name", "{failed}");
     assert_eq!(runs(&count), 0);
+}
+
+/// The mirror's staging refs a push left, one per line; empty when none.
+fn staging_refs(remote: &Remote, store: &Store) -> String {
+    let format = "--format=%(refname)";
+    git_out(
+        &remote.server,
+        &mirror(store),
+        &["for-each-ref", format, "refs/heads/push/"],
+    )
+}
+
+/// `push <args…>` on `store` with a git that keeps a ledger: the run and the children it
+/// started.
+#[cfg(unix)]
+fn push_counted(remote: &Remote, store: &Store, args: &[&str]) -> (Run, Vec<GitChild>) {
+    let ledger = GitLedger::new(&remote.server);
+    let program = path_text(&ledger.program());
+    let pushed = push_with(remote, store, args, &[("SWARMOPS_GIT", &program)]);
+    (pushed, ledger.children())
+}
+
+/// A tag of the store is not sent as a branch: `E_INVALID_ARG` `source_kind`, saying tags are
+/// not published yet, before any git.
+#[cfg(unix)]
+#[test]
+fn push_of_a_tag_is_refused_before_git() {
+    let remote = Remote::new();
+    let store = remote.cloned();
+    let head = main_at(&store).expect("main");
+    let line = ["ref", "set", "tags/v0.2.0", head.as_str(), "--create"];
+    store.run_as(AGENT, &line, &[]).ok();
+
+    let (failed, children) = push_counted(&remote, &store, &["tags/v0.2.0"]);
+    let error = failed.err("E_INVALID_ARG");
+    assert_eq!(error["details"]["reason"], "source_kind", "{failed}");
+    assert_eq!(error["details"]["kind"], "tag", "{failed}");
+    let message = error["message"].as_str().unwrap_or_default();
+    assert!(message.contains("not published yet"), "{failed}");
+    assert_eq!(children, []);
+    assert_eq!(staging_refs(&remote, &store), "");
+    assert_eq!(remote.head("tags/v0.2.0"), None);
+}
+
+/// A remote-tracking ref is the remote's own, never sent back: `E_INVALID_ARG` `source_kind`,
+/// before any git.
+#[cfg(unix)]
+#[test]
+fn push_of_a_remote_tracking_ref_is_refused_before_git() {
+    let remote = Remote::new();
+    let store = remote.cloned();
+
+    let (failed, children) = push_counted(&remote, &store, &["remote/origin/main"]);
+    let error = failed.err("E_INVALID_ARG");
+    assert_eq!(error["details"]["reason"], "source_kind", "{failed}");
+    assert_eq!(error["details"]["kind"], "remote_tracking", "{failed}");
+    assert_eq!(children, []);
+    assert_eq!(staging_refs(&remote, &store), "");
 }
 
 /// A store ref that is no ref name, and one that does not exist, are refused before anything
