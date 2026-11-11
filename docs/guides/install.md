@@ -1,7 +1,10 @@
 # Install SwarmOps on Linux
 
-SwarmOps is one program with two names, `swarmops` and `so`. One command installs both; this guide
-also covers pinning, updates, uninstalling and building from source.
+After this page, `swarmops` and `so`, one program with two names, run on your Linux host, and you
+can pin, update, uninstall or build them from source.
+
+**You need:** SwarmOps 0.2.0 or newer for the installer, 0.8.0 for the packages; Linux x86_64 or
+aarch64, glibc 2.34 or newer (`ldd --version`); `curl` or `wget` (`command -v curl wget`).
 
 ## How do I install SwarmOps?
 
@@ -17,10 +20,10 @@ root. It needs no sudo for its default directory. A first run on an x86_64 host 
 `~/.local/bin` prints this (`/home/me` stands for your home directory):
 
 ```text
-swarmops-install: Installing SwarmOps 0.1.0 (x86_64-unknown-linux-gnu) into /home/me/.local/bin.
-swarmops-install: Downloading https://github.com/KeiaiLab/SwarmOps/releases/download/v0.1.0/swarmops-0.1.0-x86_64-unknown-linux-gnu.tar.gz
-swarmops-install: swarmops-0.1.0-x86_64-unknown-linux-gnu.tar.gz matches SHA256SUMS.
-swarmops 0.1.0
+swarmops-install: Installing SwarmOps 0.11.0 (x86_64-unknown-linux-gnu) into /home/me/.local/bin.
+swarmops-install: Downloading https://github.com/KeiaiLab/SwarmOps/releases/download/v0.11.0/swarmops-0.11.0-x86_64-unknown-linux-gnu.tar.gz
+swarmops-install: swarmops-0.11.0-x86_64-unknown-linux-gnu.tar.gz matches SHA256SUMS.
+swarmops 0.11.0
 Installed swarmops and so (its short form) in /home/me/.local/bin.
 /home/me/.local/bin is not on PATH. Add this line to your shell startup file (~/.profile, ~/.bashrc or ~/.zshrc):
   export PATH="/home/me/.local/bin:$PATH"
@@ -37,7 +40,7 @@ so --version
 ```
 
 ```text
-swarmops 0.1.0
+swarmops 0.11.0
 ```
 
 Under fish the hint is `fish_add_path "<dir>"`, for `~/.config/fish/config.fish`. When the
@@ -66,10 +69,10 @@ as `| bash`. `bash install.sh --help` lists every option.
 Options go after `bash -s --`. `--version` installs one release instead of the latest:
 
 ```sh
-curl -fsSL https://get.swarmops.cc/install.sh | bash -s -- --version 0.1.0
+curl -fsSL https://get.swarmops.cc/install.sh | bash -s -- --version 0.11.0
 ```
 
-A leading `v` is dropped, so `v0.1.0` works too. `SWARMOPS_VERSION=0.1.0` does the same when no
+A leading `v` is dropped, so `v0.11.0` works too. `SWARMOPS_VERSION=0.11.0` does the same when no
 `--version` is given. A version that has no release fails at the download, and installs nothing.
 
 ## How do I choose the directory?
@@ -103,12 +106,12 @@ your provisioning instead of piping it from the network each time:
 ```sh
 curl -fsSL -o install.sh https://get.swarmops.cc/install.sh
 bash install.sh --help                     # read it, then commit install.sh with your provisioning
-SWARMOPS_VERSION=0.1.0 sh install.sh       # on each host
+SWARMOPS_VERSION=0.11.0 sh install.sh      # on each host
 ```
 
 The script is the repository's `scripts/install.sh`. get.swarmops.cc serves its copy
-`web/public/install.sh`, and `just check` fails when the two differ. Each host still checks its download
-against the release's `SHA256SUMS`.
+`web/public/install.sh`, and `just check` fails when the two differ. Each host still checks its
+download against the release's `SHA256SUMS`.
 
 ## How do I install the .deb or .rpm package?
 
@@ -118,7 +121,7 @@ with `LICENSE`, `THIRD-PARTY-LICENSES`, `README.md` and `CHANGELOG.md` in `/usr/
 Download the one for your host and `SHA256SUMS`, and check it:
 
 ```sh
-v=0.8.0                                   # the release's version
+v=0.11.0                                  # the release's version
 u=https://github.com/KeiaiLab/SwarmOps/releases/download/v$v
 curl -fsSL -O "$u/swarmops_${v}_amd64.deb" -O "$u/SHA256SUMS"   # arm64 on aarch64
 sha256sum --check --ignore-missing SHA256SUMS
@@ -127,14 +130,14 @@ so --version
 ```
 
 ```text
-swarmops_0.8.0_amd64.deb: OK
+swarmops_0.11.0_amd64.deb: OK
 …
-swarmops 0.8.0
+swarmops 0.11.0
 ```
 
 On RHEL 9, its rebuilds such as AlmaLinux and Rocky Linux, and Fedora, the package is
-`swarmops-0.8.0-1.x86_64.rpm` (`aarch64` on aarch64), installed with
-`sudo dnf install ./swarmops-0.8.0-1.x86_64.rpm`. Either package manager installs what the
+`swarmops-0.11.0-1.x86_64.rpm` (`aarch64` on aarch64), installed with
+`sudo dnf install ./swarmops-0.11.0-1.x86_64.rpm`. Either package manager installs what the
 package needs, glibc 2.34 or newer and libgcc, which every supported host has.
 
 The packages come from no repository, so `apt upgrade` and `dnf upgrade` do not update them:
@@ -149,21 +152,21 @@ and removes it again before it publishes anything
 Run the same command again. It replaces both binaries in place and names the version it replaced:
 
 ```text
-swarmops 0.1.0
-Replaced swarmops 0.1.0.
+swarmops 0.11.0
+Replaced swarmops 0.11.0.
 Installed swarmops and so (its short form) in /home/me/.local/bin.
 ```
 
 Before you update, read the new version's section of [CHANGELOG.md](../../CHANGELOG.md), which is
-also the release's notes on the releases page. After it, check each store:
+also the release's notes on the releases page. After it, check each [store](../concepts.md#store):
 
 ```sh
 so verify --deep
 ```
 
 `verify --deep` re-hashes every object and checks the derived values against the objects; a clean
-store's envelope has an empty `problems` list. Running MCP (Model Context Protocol) servers keep the
-binary they started with until their sessions end.
+store's [envelope](../concepts.md#envelope) has an empty `problems` list. Running MCP (Model Context
+Protocol) servers keep the binary they started with until their sessions end.
 
 ### What can a new release break?
 
@@ -207,8 +210,9 @@ name alone. A build from source is removed with `cargo uninstall swarmops-cli`, 
 configuration file and runs no daemon, so nothing else of it is installed.
 
 Your stores stay. A store is one directory, and no command removes one: delete it yourself
-(`rm -r <store>`) once nothing needs its history, which goes with it. To keep the history of a ref,
-export it to git first ([Send the work back to git](../../README.md#send-the-work-back-to-git)).
+(`rm -r <store>`) once nothing needs its history, which goes with it. To keep the history of a
+[ref](../concepts.md#ref), export it to git first
+([Send the work back to git](git-round-trip.md#export-back-to-git)).
 
 If you registered the server with Claude Code, remove it:
 
@@ -237,7 +241,7 @@ two binaries yourself. Each release holds:
 | `SHA256SUMS` | The SHA-256 of each archive and package. |
 
 ```sh
-v=0.1.0                        # the release's version
+v=0.11.0                       # the release's version
 t=x86_64-unknown-linux-gnu     # or aarch64-unknown-linux-gnu
 u=https://github.com/KeiaiLab/SwarmOps/releases/download/v$v
 curl -fsSL -O "$u/swarmops-$v-$t.tar.gz" -O "$u/SHA256SUMS"
@@ -248,8 +252,8 @@ install -D -t ~/.local/bin "swarmops-$v-$t/swarmops" "swarmops-$v-$t/so"
 ```
 
 ```text
-swarmops-0.1.0-x86_64-unknown-linux-gnu.tar.gz: OK
-swarmops 0.1.0
+swarmops-0.11.0-x86_64-unknown-linux-gnu.tar.gz: OK
+swarmops 0.11.0
 ```
 
 `--ignore-missing` skips the archive you did not download. With `gh`, the download step is:
@@ -272,17 +276,17 @@ With Rust 1.99 or newer, the workspace's `rust-version`, one command builds a ta
 names into `~/.cargo/bin`:
 
 ```sh
-cargo install --git https://github.com/KeiaiLab/SwarmOps --tag v0.1.0 --locked swarmops-cli
+cargo install --git https://github.com/KeiaiLab/SwarmOps --tag v0.11.0 --locked swarmops-cli
 ```
 
 Its last lines, the build's cut (`…`):
 
 ```text
-  Installing swarmops-cli v0.1.0 (https://github.com/KeiaiLab/SwarmOps?tag=v0.1.0#12617736)
+  Installing swarmops-cli v0.11.0 (https://github.com/KeiaiLab/SwarmOps?tag=v0.11.0#a747f7e1)
 …
   Installing /home/me/.cargo/bin/so
   Installing /home/me/.cargo/bin/swarmops
-   Installed package `swarmops-cli v0.1.0 (https://github.com/KeiaiLab/SwarmOps?tag=v0.1.0#12617736)` (executables `so`, `swarmops`)
+   Installed package `swarmops-cli v0.11.0 (https://github.com/KeiaiLab/SwarmOps?tag=v0.11.0#a747f7e1)` (executables `so`, `swarmops`)
 ```
 
 The zstd and BLAKE3 crates compile C, so the host also needs a C compiler. Add `--bin swarmops` to
@@ -338,11 +342,60 @@ meant for one user under a directory of mode `0700`, made before the first `swar
 install -d -m 0700 ~/.local/state/swarmops/repos
 ```
 
-## What do the installer's errors mean?
+## When the install does not work
 
 The installer's own lines start with `swarmops-install:`; a line from `curl` or `mktemp` may come
 before one. A usage error exits with status 2, every other error with status 1. The checks before
-the download install nothing, and neither does a failed download or checksum.
+the download install nothing, and neither does a failed download or checksum. In the messages
+below, `$dir`, `$machine` and `$archive` stand for the values the installer prints.
+
+### The command is not found
+
+The install succeeded, but the shell cannot find the new command:
+
+```text
+bash: so: command not found
+```
+
+The install directory is not on the shell's `PATH` yet; the installer said so in its report (the
+next case). Add the line it printed and open a new shell; until then `~/.local/bin/so --version`
+runs it by its full path.
+
+### The install directory is not on PATH
+
+The report holds this line, followed by the line to add:
+
+```text
+$dir is not on PATH. Add this line to your shell startup file (~/.profile, ~/.bashrc or ~/.zshrc):
+```
+
+Add the `export PATH=…` line it prints to that file (under fish, the `fish_add_path` line to
+`~/.config/fish/config.fish`), open a new shell, and run `so --version`. The installer edits no
+shell startup file itself.
+
+### No build for this platform
+
+```text
+swarmops-install: No release build runs on $machine, only on x86_64 and aarch64. To build from source: https://github.com/KeiaiLab/SwarmOps#install
+```
+
+The CPU is neither x86_64 nor aarch64; nothing was installed.
+[Build from source](#how-do-i-build-from-source). On a host that is not Linux the installer prints
+`SwarmOps runs on Linux today; macOS and Windows are next.`, and no release build runs there yet;
+on musl or a glibc older than 2.34 it names the C library, and building from source is the way.
+
+### The checksum does not match
+
+```text
+swarmops-install: $archive does not match its line in SHA256SUMS: nothing was installed.
+```
+
+The download is not the published archive, and nothing was installed. Run the installer again; if
+it repeats, report it ([SECURITY.md](../../SECURITY.md)). The line
+`SHA256SUMS of v$version has no line for $archive: nothing was installed.` means the release
+lists no such archive.
+
+### Every other message
 
 | The installer prints | Why | What to do |
 | --- | --- | --- |
@@ -356,25 +409,28 @@ the download install nothing, and neither does a failed download or checksum.
 | `curl: (22) The requested URL returned error: 404` then `Cannot download …: is 9.9.9 a release? …` | No release has that version. | Pick one from the [releases page](https://github.com/KeiaiLab/SwarmOps/releases). |
 | `'latest' is not a release version: X.Y.Z or X.Y.Z-pre, such as 0.1.0.` | `--version` takes a version number only. | Leave `--version` out for the latest. |
 | `Neither sha256sum nor shasum is installed, so the download cannot be checked.` | No checksum tool. | Install `sha256sum` (coreutils) or `shasum`. |
-| `swarmops-0.1.0-x86_64-unknown-linux-gnu.tar.gz does not match its line in SHA256SUMS: nothing was installed.` | The download is not the published archive. | Run it again; if it repeats, report it ([SECURITY.md](../../SECURITY.md)). |
+| `swarmops-0.11.0-x86_64-unknown-linux-gnu.tar.gz does not match its line in SHA256SUMS: nothing was installed.` | The download is not the published archive. | Run it again; if it repeats, report it ([SECURITY.md](../../SECURITY.md)). |
 | `Cannot write in /usr/local/bin.` | The directory is not writable by you. | Use `sudo`, or another `--dir`. |
 | `/home/me/.local/bin holds no SwarmOps binary: nothing was removed.` | `--uninstall` found nothing to remove there. | Give the `--dir` you installed into. |
 | `Unknown option '--frobnicate'; see --help.` or `--dir needs a value; see --help.` | A usage error (status 2). | `bash install.sh --help`. |
 
-## What next?
-
-The [quick start](quick-start.md) creates a store, lands work from several agents and reads the
-operation log, and [Concepts](../concepts.md) defines the nouns these guides use.
-
 ## Sources
 
-This guide draws on these documents, on the installer and on the v0.1.0 release:
+This guide draws on these documents, on the installer and on the v0.11.0 release:
 
 - [scripts/install.sh](../../scripts/install.sh): the installer, its options and its messages.
-- [README.md, Install](../../README.md#install): the archives, glibc and the store's filesystems.
 - [Operating SwarmOps](../operations.md#install): Install, Before you start and Upgrades.
 - [Toolchain, MSRV and platforms](../policies/msrv-and-platforms.md): Rust 1.99.0 and the platforms.
 - [Versioning and stability](../policies/versioning-and-stability.md): what a release may break.
 - [Releasing SwarmOps](../../RELEASE.md): how a release is built, checked and published.
-- [v0.1.0 on the releases page](https://github.com/KeiaiLab/SwarmOps/releases/tag/v0.1.0): its two
-  archives and `SHA256SUMS`.
+- [v0.11.0 on the releases page](https://github.com/KeiaiLab/SwarmOps/releases/tag/v0.11.0): its
+  archives, packages and `SHA256SUMS`.
+
+## Next
+
+**Next:** [Quick start](quick-start.md): it makes a store, [lands](../concepts.md#land) work from
+several agents and reads the operation log.
+
+- [Concepts](../concepts.md): one definition for each noun these guides use.
+- [Install and upgrade](../operate/install-and-upgrade.md): the same install for an operator who
+  runs a host for a swarm.

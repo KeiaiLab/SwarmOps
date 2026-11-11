@@ -1,8 +1,11 @@
 # Quick start: a store and a first commit
 
-This walk-through installs SwarmOps, creates a store, publishes a first commit, lands work from
-three agents, resolves a conflict, reads the operation log and checks the store, in about ten
-minutes.
+After this page you have a [store](../concepts.md#store) with a first commit, work
+[landed](../concepts.md#land) from three agents, a resolved conflict and an undone operation, in
+about ten minutes; [known limitations](../known-limitations.md) lists what is still open.
+
+**You need:** SwarmOps 0.1.0 or newer on Linux (`swarmops --version`); [Install](install.md); an
+empty directory on a native Linux filesystem (`df -T .`).
 
 ## What do I need first?
 
@@ -15,27 +18,21 @@ The blocks below are POSIX sh: run them in bash, one after another, in one shell
 directory. The shown output is from a real run. Your ids differ, because a changeset's id covers
 its time; here ids are cut to 8 digits (`…`), and `/home/me` stands for your home directory.
 
-## 1. How do I install it?
+## 1. Which version do I have?
 
-One command installs both names from the latest release, checked against its `SHA256SUMS`:
-
-```sh
-curl -fsSL https://get.swarmops.cc/install.sh | bash
-```
-
-That puts `swarmops` and `so` in `~/.local/bin` (`/usr/local/bin` as root) and prints the `PATH`
-line to add if that directory is not on your `PATH` ([Install SwarmOps on Linux](install.md) has
-the options). Then:
+Check that SwarmOps is installed, and which release it is:
 
 ```sh
-so --version
+swarmops --version
 ```
 
 ```text
-swarmops 0.1.0
+swarmops 0.11.0
 ```
 
-`so` is the short form of `swarmops`; every command runs the same by either name.
+If the shell says `command not found`, [Install SwarmOps on Linux](install.md) installs it with one
+command, checked against the release's `SHA256SUMS`. `so` is the short form of `swarmops`; every
+command runs the same by either name.
 
 ## 2. How do I create a store?
 
@@ -67,8 +64,8 @@ auth: trust
 
 ## 3. How do I make a first commit?
 
-A commit takes a change list, a JSON array of puts and deletes. `--advance main` publishes it on
-`main` in the same transaction:
+A commit takes a [change list](../concepts.md#change-list), a JSON array of puts and deletes.
+`--advance main` publishes it on `main` in the same transaction:
 
 ```sh
 printf '#!/bin/sh\necho hello\n' > run.sh                 # the client file the second change reads
@@ -93,8 +90,8 @@ here, only if `main` does not exist yet. Otherwise the commit records nothing an
 
 ## 4. How do I read it back?
 
-`REV:PATH` names a path at a revision; `main` is a revision, and so is a changeset id or a unique
-prefix of 12 or more of its digits.
+`REV:PATH` names a path at a [revision](../concepts.md#revision); `main` is a revision, and so is a
+changeset id or a unique prefix of 12 or more of its digits.
 
 ```sh
 so --human cat main:src/lib.rs
@@ -131,8 +128,8 @@ signatures.
 
 ## 5. What does a command print?
 
-Without `--human`, each command prints one JSON envelope on stdout: pretty on a terminal, compact
-otherwise. The same `cat`, compact:
+Without `--human`, each command prints one JSON [envelope](../concepts.md#envelope) on stdout:
+pretty on a terminal, compact otherwise. The same `cat`, compact:
 
 ```sh
 so cat main:src/lib.rs
@@ -153,8 +150,8 @@ field() { python3 -I -c 'import functools, json, sys; print(functools.reduce(lam
 
 ## 6. How do several agents publish at once?
 
-Each agent commits on the `main` it read, without moving any ref, then lands its changeset. Two
-agents, `worker-1` and `worker-2`, start from the same `main`:
+Each agent commits on the `main` it read, without moving any [ref](../concepts.md#ref), then lands
+its changeset. Two agents, `worker-1` and `worker-2`, start from the same `main`:
 
 ```sh
 BASE=$(so resolve main | field result.id)
@@ -325,26 +322,17 @@ findings: []
 | `so op undo ID` | Move every ref the operation `op log` lists as `ID` moved back, all or none; `main` only forward. |
 | `so verify --deep` | Re-hash every object and check the derived values against the objects. |
 
-## What next?
-
-Give the store to your agents, or connect it to a git repository; these pages say how.
-
-- [MCP (Model Context Protocol)](../develop/mcp.md): `swarmops mcp` serves the store to an agent
-  harness such as Claude Code.
-- The git round trip: [Bring a git repository in](git-round-trip.md#import-a-git-repository), then
-  [Send the work back to git](git-round-trip.md#export-back-to-git).
-- [Concepts](../concepts.md): the store, changesets, revisions, refs, landing and the envelope, one
-  definition each.
-- [Commands](../reference/cli.md): every command, its revisions and change lists, and its
-  output.
-- [Operating SwarmOps](../operations.md): a store for a swarm of coding agents on one host, from day
-  to day.
-- [Install SwarmOps on Linux](install.md): pinning, updates, uninstalling and where a store may
-  live.
-
 ## Sources
 
-The commands and their output come from a run of SwarmOps 0.1.0. The command descriptions come from
-the README's [Commands](../reference/cli.md) table, the envelope from
-[Output and exit codes](../develop/cli-scripting.md#the-envelope), and the conflict resolution from
+The commands and their output come from a run of SwarmOps 0.1.0, the version check from 0.11.0.
+The command descriptions come from the [CLI reference](../reference/cli.md), the envelope from
+[CLI scripting](../develop/cli-scripting.md#the-envelope), and the conflict resolution from
 [Operating SwarmOps, Agents commit and land](../operations.md#2-agents-commit-and-land).
+
+## Next
+
+**Next:** [Commit and land](commit-and-land.md): conflicts, retries, refs and identities, each
+with a run you can repeat.
+
+- [Use SwarmOps from Claude Code](claude-code.md): give the store to your agents over MCP.
+- [Git round trip](git-round-trip.md): bring a git repository in, and send the work back to git.
