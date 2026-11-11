@@ -1793,3 +1793,66 @@ mod legacy_zstd {
         assert_eq!(stored, Some((ObjectKind::Blob, PAYLOAD.to_vec())));
     }
 }
+
+/// The uncompressed-write seam (`test-hooks` only): the fixtures of the scale cases write raw
+/// object files to skip zstd, and every id must be the one a default store gives.
+#[cfg(feature = "test-hooks")]
+mod raw_seam {
+    use super::*;
+
+    /// Compressible text, an incompressible blob, a short one and a tree-sized one.
+    fn items() -> Vec<(ObjectKind, Vec<u8>)> {
+        let text = "the quick brown fox jumps over the lazy dog\n".repeat(40);
+        vec![
+            (ObjectKind::Blob, text.into_bytes()),
+            (ObjectKind::Blob, random_bytes(4096)),
+            (ObjectKind::Blob, b"short".to_vec()),
+            (ObjectKind::Tree, vec![0; 2048]),
+        ]
+    }
+
+    /// The encoding byte of every object file, in id order.
+    fn encodings(layout: &Layout) -> Vec<u8> {
+        let mut files = object_files(layout);
+        files.sort();
+        files
+            .iter()
+            .map(|file| fs::read(file).expect("read an object file")[5])
+            .collect()
+    }
+
+    #[test]
+    fn ids_match_across_raw_and_zstd_stores() {
+        let (_zstd_root, zstd_layout) = new_root();
+        let (_raw_root, raw_layout) = new_root();
+        let zstd = real_store(&zstd_layout);
+        let mut raw = real_store(&raw_layout);
+        raw.set_raw_writes(true);
+
+        let zstd_ids = zstd.put_batch(items()).unwrap();
+        let raw_ids = raw.put_batch(items()).unwrap();
+        zstd.flush().unwrap();
+        raw.flush().unwrap();
+
+        // 1. Every id is equal, and each store lists the same ones.
+        assert_eq!(raw_ids, zstd_ids, "the ids of the same payloads");
+        assert_eq!(raw.list().unwrap(), zstd.list().unwrap());
+
+        // 2. The raw store holds only raw files, the other compresses the text and the zeros.
+        assert!(
+            encodings(&raw_layout).iter().all(|enc| *enc == ENC_RAW),
+            "a raw store writes only raw files"
+        );
+        assert!(
+            encodings(&zstd_layout).contains(&ENC_ZSTD),
+            "the default store compresses what shrinks"
+        );
+
+        // 3. Every object of both reads back verified against its id, and equal.
+        for id in &raw_ids {
+            let from_raw = raw.get(*id).unwrap().expect("the raw store holds it");
+            let from_zstd = zstd.get(*id).unwrap().expect("the zstd store holds it");
+            assert_eq!(from_raw, from_zstd);
+        }
+    }
+}

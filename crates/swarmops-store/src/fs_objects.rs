@@ -39,6 +39,24 @@ const ENC_ZSTD: u8 = 1;
 /// Shorter payloads are stored raw without trying zstd.
 const MIN_COMPRESS_LEN: usize = 128;
 const ZSTD_LEVEL: i32 = 3;
+
+/// `SWARMOPS_TEST_RAW_OBJECTS=1` makes a store opened by a build with the `test-hooks` feature
+/// write every object file raw, skipping zstd, so that a test fixture of millions of objects is
+/// built faster. Ids are the hash of the payload, so none changes ([`FsObjectStore::set_raw_writes`]).
+/// A build without the feature ignores it.
+#[cfg(feature = "test-hooks")]
+pub const RAW_OBJECTS_ENV: &str = "SWARMOPS_TEST_RAW_OBJECTS";
+
+/// What stores opened from now on in this process do, besides [`RAW_OBJECTS_ENV`].
+#[cfg(feature = "test-hooks")]
+static RAW_BY_DEFAULT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Makes the stores this process opens from now on write raw object files (or not), as
+/// [`RAW_OBJECTS_ENV`] does for a whole process. Test hooks only.
+#[cfg(feature = "test-hooks")]
+pub fn raw_writes_by_default(on: bool) {
+    RAW_BY_DEFAULT.store(on, std::sync::atomic::Ordering::SeqCst);
+}
 /// The largest zstd payload decoded in one pass, into a buffer of the size its file records. A
 /// larger one is decoded as a stream, its buffer growing only as the output arrives, so that a
 /// file whose recorded size is false costs at most this much memory before it is found out
@@ -219,6 +237,9 @@ pub struct FsObjectStore {
     /// The pool of `put_batch`, `put_hashed_batch` and `flush`'s fsyncs once
     /// [`FsObjectStore::set_parallelism`] is called; until then, rayon's global pool.
     pool: Option<ThreadPool>,
+    /// Whether every object file is written raw, whatever its size (test hooks only).
+    #[cfg(feature = "test-hooks")]
+    raw_writes: bool,
 }
 
 impl FsObjectStore {
@@ -238,7 +259,17 @@ impl FsObjectStore {
             touched: Mutex::new(BTreeSet::new()),
             flush_lock: Mutex::new(()),
             pool: None,
+            #[cfg(feature = "test-hooks")]
+            raw_writes: RAW_BY_DEFAULT.load(std::sync::atomic::Ordering::SeqCst)
+                || std::env::var_os(RAW_OBJECTS_ENV).is_some_and(|value| value == "1"),
         }
+    }
+
+    /// Writes every object file of this store raw, skipping zstd, or as usual again. Reads are
+    /// unchanged. Test hooks only: a release build has no such seam.
+    #[cfg(feature = "test-hooks")]
+    pub fn set_raw_writes(&mut self, on: bool) {
+        self.raw_writes = on;
     }
 
     /// [`FsObjectStore::open`] on the real filesystem, or on what the test hooks ask for
@@ -297,7 +328,16 @@ impl FsObjectStore {
         fanout: &Utf8Path,
         tmp_dir: &TmpOnce,
     ) -> Result<bool, StoreError> {
-        let file = encode(kind, payload).map_err(|e| self.fs.locate(FileOp::Compress, path, e))?;
+        // The test seam writes raw files; a build without it always compresses what shrinks.
+        #[cfg(feature = "test-hooks")]
+        let file = if self.raw_writes {
+            Ok(raw_file(kind, payload))
+        } else {
+            encode(kind, payload)
+        };
+        #[cfg(not(feature = "test-hooks"))]
+        let file = encode(kind, payload);
+        let file = file.map_err(|e| self.fs.locate(FileOp::Compress, path, e))?;
         tmp_dir.make(self)?;
         self.ensure_fanout(fanout)?;
         // `AlreadyExists` counts as success, but not as this call's write: a racing writer placed
@@ -616,6 +656,19 @@ fn header_fields(header: &[u8; HEADER_LEN]) -> Option<(ObjectKind, u8, u64)> {
     let kind = ObjectKind::from_tag(header[4])?;
     let ulen = u64::from_le_bytes(header[8..].try_into().expect("8 bytes"));
     Some((kind, enc, ulen))
+}
+
+/// The object file for `payload`, always raw.
+#[cfg(feature = "test-hooks")]
+fn raw_file(kind: ObjectKind, payload: &[u8]) -> Vec<u8> {
+    let mut file = Vec::with_capacity(HEADER_LEN + payload.len());
+    file.extend_from_slice(&MAGIC);
+    file.push(kind.tag());
+    file.push(ENC_RAW);
+    file.extend_from_slice(&0u16.to_le_bytes());
+    file.extend_from_slice(&bytes::to_u64(payload.len()).to_le_bytes());
+    file.extend_from_slice(payload);
+    file
 }
 
 /// The object file for `payload`: zstd when the payload has at least 128 bytes and

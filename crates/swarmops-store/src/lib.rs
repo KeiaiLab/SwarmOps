@@ -38,6 +38,8 @@ pub use format::{
 };
 pub use fs_kind::check_supported_fs;
 pub use fs_objects::{FsObjectStore, MAX_OBJECT_LEN, ObjectStat, ObjectStore, PutOutcome};
+#[cfg(feature = "test-hooks")]
+pub use fs_objects::{RAW_OBJECTS_ENV, raw_writes_by_default};
 pub use fs_ops::{
     CRASH_AT_ENV, FAIL_AT_ENV, FS_CALLS_ENV, FsMethod, FsOps, HookedFs, LEAD_WAIT_ENV, LinkOutcome,
     ORDER_CHECK_ENV, RealFs, StoreFs,

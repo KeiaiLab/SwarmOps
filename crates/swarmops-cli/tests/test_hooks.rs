@@ -86,6 +86,48 @@ fn a_build_without_the_feature_ignores_the_test_hooks() {
     }
 }
 
+/// `SWARMOPS_TEST_RAW_OBJECTS=1`, the scale fixtures' uncompressed-write seam: a build with the
+/// test hooks writes every object file raw; this build compresses a compressible blob as it
+/// would without the variable (storage spec §2, M21 plan task M21-2).
+#[test]
+fn the_release_build_has_no_raw_seam() {
+    use std::fs;
+
+    /// The encoding byte of an object file: 1 is zstd.
+    const ZSTD: u8 = 1;
+
+    for bin in [BIN, SO] {
+        let store = Store::empty();
+        let init = run_bin(bin, &["init", store.path()], &[], "");
+        init.ok();
+
+        // A blob of repeated text, which zstd shrinks.
+        let text = "the quick brown fox jumps over the lazy dog\n".repeat(64);
+        let changes = store.changes("raw", "raw.txt", &text);
+        let commit = ["commit", "-m", "raw", "--changes", &changes];
+        let env = [("SWARMOPS_TEST_RAW_OBJECTS", "1")];
+        let done = run_bin(bin, &store.args(&agent(0), &commit), &env, "");
+        done.ok();
+
+        let objects = std::path::Path::new(store.path()).join("objects");
+        let mut compressed = 0;
+        for fanout in fs::read_dir(objects).unwrap() {
+            let fanout = fanout.unwrap().path();
+            if !fanout.is_dir() {
+                continue;
+            }
+            for file in fs::read_dir(fanout).unwrap() {
+                let bytes = fs::read(file.unwrap().path()).unwrap();
+                compressed += usize::from(bytes[5] == ZSTD);
+            }
+        }
+        assert!(
+            compressed > 0,
+            "{bin}: the raw-objects hook is ignored: the blob is zstd"
+        );
+    }
+}
+
 /// GitHub's warning limit, 50 MiB, and one byte: a file a push to GitHub sends with a warning.
 const OVER_WARNED: u64 = 50 * 1024 * 1024 + 1;
 
