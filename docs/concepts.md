@@ -1,7 +1,10 @@
 # Concepts
 
-This page defines the nouns SwarmOps uses, from the store and its objects to refs, landing and the
-envelope, and links each to the documents that explain it.
+After this page you can name each part of SwarmOps, from the store and its objects to refs,
+landing, the envelope and workspaces, and find the page that explains each one.
+
+**You need:** nothing installed to read it; to try the terms, SwarmOps 0.1.0 or newer on Linux,
+0.3.0 for workspaces (`swarmops --version`), from [Install](guides/install.md).
 
 ## Store
 
@@ -149,6 +152,17 @@ each ref. SwarmOps records identities without verifying them (`meta.auth` is `"t
 Explained in: [MCP integration, Identity](develop/mcp.md#identity-one-per-agent-process) ·
 [operations, Identities](operations.md#identities).
 
+## Workspace
+
+A workspace is a directory on disk that holds a changeset's tree, or the paths under `--prefix`,
+for an agent to edit, build and test in. `ws create` writes it; `ws land --check` commits the
+edits, rebases them onto the target's head, runs the check in the workspace and publishes only if
+the target has not moved since, so the landed tree is the one the check ran on. A command run
+inside a workspace finds its store. Workspaces came with SwarmOps 0.3.0 (M5).
+
+Explained in: [Build and test a change](operate/build-and-test.md) ·
+[CLI reference](reference/cli.md).
+
 ## Op log and undo
 
 The store's operations are its write transactions: every commit, publish and ref move is one,
@@ -241,3 +255,11 @@ it. The hash contract does not change with it: a changeset's id is the same unde
 
 Explained in: [operations, Upgrades](operations.md#upgrades) ·
 [versioning policy, Public surfaces](policies/versioning-and-stability.md#public-surfaces).
+
+## Next
+
+**Next:** [Quick start](guides/quick-start.md): it puts these terms to work on a real store.
+
+- [Architecture](architecture.md): the design behind each term, from the crates to the store on
+  disk.
+- [CLI reference](reference/cli.md): every command that reads or writes these objects.

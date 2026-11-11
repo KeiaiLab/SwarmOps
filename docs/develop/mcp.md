@@ -1,10 +1,14 @@
 # MCP integration
 
+After this page you can connect any MCP (Model Context Protocol) client to a store: register
+`swarmops mcp`, give each agent process its identity, call every tool and handle what goes wrong.
+
+**You need:** SwarmOps 0.1.0 or newer on Linux, 0.11.0 for all 46 tools (`swarmops --version`);
+[Concepts](../concepts.md); a store (`swarmops info`); an MCP client on the same host.
+
 `swarmops mcp` serves a store's operations to an agent as an MCP server on stdin and stdout. An
 agent harness that speaks the Model Context Protocol, such as Claude Code, then calls each
-operation as a tool, and gets back the same JSON envelope the CLI prints. This page covers
-registering the server, the protocol exchange a client has with it, how identity works, every
-tool with its matching command, result sizes and what goes wrong.
+operation as a tool, and gets back the same JSON envelope the CLI prints.
 
 Every exchange below is from a real run of `swarmops` 0.1.0 against a scratch store at
 `/tmp/dev-guide/acme`. Where a line is long, the command pipes it through `jq` to keep the part
@@ -17,6 +21,7 @@ that matters, and the filter is shown; `…` marks text cut by hand.
 - [The tools](#the-tools)
 - [Landing through MCP](#landing-through-mcp)
 - [Result size limits](#result-size-limits)
+- [Rules for agents](#rules-for-agents)
 - [Failure modes](#failure-modes)
 
 ## Register the server with Claude Code
@@ -271,8 +276,9 @@ Give every agent process its own instance name, and yourself one of your own, su
 
 ## The tools
 
-One tool per operation, named as the envelope's `op` is, in `tools/list`'s order. Its arguments are
-the CLI command's request; `swarmops schema <Request>` prints the type.
+46 tools, one per operation (34 store operations and 12 workspace operations), each named as the
+envelope's `op` is, in `tools/list`'s order. Its arguments are the CLI command's request;
+`swarmops schema <Request>` prints the type.
 
 | Tool | CLI command | Request type | Changes the store |
 | --- | --- | --- | --- |
@@ -447,6 +453,11 @@ A file made of control characters reads back far larger than its size, since JSO
 them in six bytes each; [known limitations](../known-limitations.md#reads-and-response-sizes) has
 the numbers.
 
+## Rules for agents
+
+An agent keeps two rules: full changeset ids for every compare-and-swap, and small result pages
+([The tools](#the-tools), [Result size limits](#result-size-limits)).
+
 ## Failure modes
 
 Three layers fail differently: the server can refuse to start, a message can be a protocol error,
@@ -556,3 +567,12 @@ fails. The four aborts, the first three of which any commit or ref move can meet
 The server keeps none of its answers. `swarmops op log` lists the writes that succeeded; for the
 calls themselves, read the client's transcript, or copy the server's answers to a file with the
 wrapper in [Operations: where the envelopes are](../operations.md#where-the-envelopes-are).
+
+## Next
+
+**Next:** [Use SwarmOps from Claude Code](../guides/claude-code.md): the same server in one
+client, with workspaces for its worktree sessions.
+
+- [MCP tool reference](../reference/mcp-tools/README.md): a page per tool, with its input schema
+  and an example call.
+- [CLI scripting](cli-scripting.md): the same envelope for scripts that do not speak MCP.

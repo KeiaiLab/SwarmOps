@@ -1,5 +1,14 @@
 # Scripting the CLI
 
+After this page you can drive SwarmOps from a script or a CI job: read the exit code and the JSON
+envelope, retry what may be retried, and make a retry safe with a key.
+
+**You need:** SwarmOps 0.1.0 or newer on Linux (`swarmops --version`); [Concepts](../concepts.md);
+a store (`swarmops info`); `jq` for the recipes (`jq --version`).
+
+A program tests `error.code`, the exit code and `error.retryable`, never `error.message`, whose
+wording may change in any release ([versioning policy](../policies/versioning-and-stability.md#internal-surfaces)).
+
 Scripts, CI jobs and agents that do not speak MCP drive SwarmOps through the `swarmops` command
 (or `so`, the same program by a shorter name). Every command prints one JSON envelope on stdout
 and exits with a code that says what kind of failure it was, so a script needs no text parsing:
@@ -609,3 +618,10 @@ What to know before adapting it:
   the key it was given, so only a retry of the same call reuses one.
 - **No envelope is a failure too.** On one of the store's four aborts the process prints nothing on
   stdout; the script's `jq` then reads an empty file, and its exit code is the abort's, not 0.
+
+## Next
+
+**Next:** [MCP integration](mcp.md): agents that speak MCP get the same envelope as a tool result.
+
+- [Error reference](../reference/errors.md): each `E_*` code, its exit code and whether to retry.
+- [For agents and programs](../agents.md): where the pages are, as Markdown, for a program.
