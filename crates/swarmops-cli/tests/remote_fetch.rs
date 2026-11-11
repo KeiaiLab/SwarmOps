@@ -323,6 +323,51 @@ fn a_secret_in_a_url_reaches_no_file_and_no_output() {
     add(&store, ORIGIN, &url, &["--branch", "main"]).ok();
 }
 
+/// A remote stored before tokens as a URL's user were refused: `fetch`, `push` and `sync` end
+/// `credential_in_url` and print no secret; `remote remove` drops it and the secret with it,
+/// and the remote added again without the token fetches.
+#[test]
+fn a_stored_token_url_is_refused_and_removable() {
+    let remote = Remote::new();
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let into = path_text(&dir.path().join("store"));
+    let plain = remote.url();
+    let rest = plain.strip_prefix("http://").expect("an http URL");
+    let named = format!("http://user@{rest}");
+    let on = |args: &[&str]| {
+        let line = [&["--repo", into.as_str(), "--as", AGENT][..], args].concat();
+        remote.run(&line, &[])
+    };
+
+    // 1. A clone, its remote's user then made a token as an earlier version stored it.
+    on(&["clone", &named, "--into", &into]).ok();
+    let file = Path::new(&into).join(REMOTES_TOML);
+    let text = fs::read_to_string(&file).expect("remotes.toml");
+    let tokened = text.replace("http://user@", &format!("http://{SECRET}@"));
+    assert_ne!(tokened, text, "{text}");
+    fs::write(&file, tokened).expect("write remotes.toml");
+
+    // 2. Each command that reaches the remote is refused for the credential, the secret unsaid.
+    for args in [
+        &["fetch", ORIGIN][..],
+        &["push", ORIGIN, "main"],
+        &["sync", ORIGIN],
+    ] {
+        let refused = on(args);
+        let error = refused.err("E_INVALID_ARG");
+        assert_eq!(error["details"]["reason"], "credential_in_url", "{refused}");
+        assert!(!refused.stdout.contains(SECRET), "{refused}");
+        assert!(!refused.stderr.contains(SECRET), "{refused}");
+    }
+
+    // 3. Removed, the secret leaves the file; added again without it, the remote fetches.
+    on(&["remote", "remove", ORIGIN]).ok();
+    let left = fs::read_to_string(&file).unwrap_or_default();
+    assert!(!left.contains(SECRET), "{left}");
+    on(&["remote", "add", ORIGIN, &named, "--branch", "main"]).ok();
+    on(&["fetch", ORIGIN]).ok();
+}
+
 /// `remote remove` drops the remote's line and its mirror refs (tracking refs and tags), and
 /// writes no changeset and moves no store ref; another remote's refs stay. A name the store
 /// does not have is `E_REMOTE_NOT_FOUND`.

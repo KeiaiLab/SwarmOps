@@ -31,6 +31,9 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 - `remote add` and `clone` refuse an `http://` or `https://` URL whose user is a token, as they
   refused a password, with `E_INVALID_ARG` and `details.reason` `credential_in_url`.
+- A remote an earlier version stored with a token as its URL's user is refused the same way by
+  `fetch`, `push` and `sync`; `remote remove` still drops it: remove it, add it again without the
+  token and pass the token with `--token-env`.
 - The reference pages of the command and the MCP tool `ancestry` give the release it first shipped
   in, `since: "0.9.0"`, where they said 0.1.0.
 - The gate's doc runs start from an empty doc directory (CI doc step from about 14 minutes to seconds).
