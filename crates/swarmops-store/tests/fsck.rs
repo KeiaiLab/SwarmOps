@@ -455,6 +455,80 @@ fn a_sound_index_rebuilds_like_a_fresh_replay() {
     }
 }
 
+/// The base seq and the counts of `layout`'s `journal3.ckpt`: base seq, records, fact rows.
+fn ckpt3_counts(layout: &Layout) -> [u64; 3] {
+    let bytes = bytes(layout.journal_ckpt());
+    let at = |i: usize| u64::from_le_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap());
+    [at(2), at(3), at(4)]
+}
+
+/// The generation and run count of `layout`'s manifest.
+fn manifest_of(layout: &Layout) -> (u64, u32) {
+    let bytes = bytes(layout.views_dir().join("MANIFEST"));
+    let generation = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+    (
+        generation,
+        u32::from_le_bytes(bytes[16..20].try_into().unwrap()),
+    )
+}
+
+/// A FORMAT 3 index rebuild, of a store upgraded with three frames (its base seq 3) and runs
+/// built since: under `views.lock` and `meta/lock` the checkpoint goes to 0 with its base kept
+/// and the manifest is replaced by one of no run, so that every record and fact row is held
+/// against the journal again; the replay then moves the checkpoint back. The next step builds
+/// the runs again.
+#[test]
+fn rebuild_index_v3_writes_an_empty_manifest_and_keeps_base() {
+    // 1. A FORMAT 2 store of three frames, turned FORMAT 3 by hand as an upgrade does.
+    let (_dir, layout) = build(StoreFormat::V2, 3);
+    let layout = Layout::with_format(layout.root(), StoreFormat::V3);
+    let (_fresh_dir, fresh) = root(StoreFormat::V3);
+    MetaStore::create_in(fresh.clone(), real()).unwrap();
+    let mut ckpt: Vec<u8> = [0u64, 0, 3, 0, 0]
+        .iter()
+        .flat_map(|f| f.to_le_bytes())
+        .collect();
+    ckpt.extend(crc32fast::hash(&ckpt).to_le_bytes());
+    fs::write(layout.journal_ckpt(), ckpt).unwrap();
+    fs::create_dir_all(layout.views_dir()).unwrap();
+    fs::copy(
+        fresh.views_dir().join("MANIFEST"),
+        layout.views_dir().join("MANIFEST"),
+    )
+    .unwrap();
+    fs::write(layout.facts_col(), b"").unwrap();
+
+    // 2. Past RUN_MIN changesets in FORMAT 3 frames, flushed, and their run built.
+    let mut store = MetaStore::open_in(layout.clone(), real()).unwrap();
+    store.set_parallelism(1);
+    for first in (3..1_203).step_by(400) {
+        let mut write = store.write().unwrap();
+        write
+            .insert_changesets_batch((first..first + 400).map(cs).collect())
+            .unwrap();
+        advance(&mut write, "main", Some(id(first + 399)));
+        write.commit().unwrap();
+    }
+    store.flush().unwrap();
+    store.step_views().unwrap();
+    let (generation, runs) = manifest_of(&layout);
+    assert_eq!(runs, 1);
+    let before = shown(&layout, 1_203).unwrap();
+
+    // 3. A generation crafted before the checkpoint, then the rebuild.
+    col_at(&layout, "gen", 500, 8, &999u64.to_le_bytes());
+    let rebuilt = fsck::rebuild_index(&layout, real()).unwrap();
+    assert!(rebuilt.written > 0, "{rebuilt:?}");
+    assert_eq!(manifest_of(&layout), (generation + 1, 0));
+    assert_eq!(ckpt3_counts(&layout), [3, 1_203, 0]);
+    assert_eq!(shown(&layout, 1_203).unwrap(), before);
+
+    // 4. The next step builds the run again, and the check finds nothing.
+    store.step_views().unwrap();
+    assert_eq!(manifest_of(&layout).1, 1);
+    assert_eq!(store.check().unwrap().problems, Vec::<String>::new());
+}
+
 /// Every ref file under `layout`'s refs directory, by its path there.
 fn ref_files(layout: &Layout) -> Vec<(Utf8PathBuf, Vec<u8>)> {
     fn walk(
@@ -620,7 +694,9 @@ mod hooked {
         let k = std::env::var(CRASH_AT_ENV).unwrap().parse().unwrap();
         let format = match std::env::var(CRASH_FORMAT).unwrap().as_str() {
             "1" => StoreFormat::V1,
-            _ => StoreFormat::V2,
+            "2" => StoreFormat::V2,
+            "3" => StoreFormat::V3,
+            other => panic!("no store format {other}"),
         };
         let root = Utf8PathBuf::from_path_buf(root.into()).unwrap();
         let layout = Layout::with_format(root, format);

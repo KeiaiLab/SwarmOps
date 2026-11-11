@@ -2,24 +2,59 @@
 //! index read in blocks, the journal's frames and offsets, and FORMAT 2's seq, previous CRC
 //! and entry checksums. Damage is a finding of the report, not an error.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io;
+use std::ops::Range;
+use std::os::unix::fs::FileExt;
 
-use swarmops_core::{ChangesetId, bytes};
+use swarmops_core::{ChangesetId, ObjectId, bytes};
 
 use super::READ_WINDOW;
-use super::frame::{Frame, Record};
+use super::column::AppendOnlyColumn;
+use super::facts::{self, ROW_LEN, Row};
+use super::features;
+use super::frame::{Fact, Frame, Place, Record};
+use super::fsck::{self, Nonce};
 use super::index::{ChangesetMeta, Index};
 use super::journal::Journal;
 use super::lock::MetaLock;
 use super::refs::RefFile;
+use super::runs::{self, Domain};
 use super::sorted::SortedView;
 use super::store::MetaStore;
-use crate::error::StoreError;
+use crate::error::{FileOp, StoreError};
 use crate::format::StoreFormat;
+use crate::fs_ops;
 
 /// How many journal frames [`MetaStore::check`] reads with one call.
 const FRAME_BATCH: usize = 4_096;
+
+/// FORMAT 3's findings (the FORMAT 3 design §2.3, §2.5, §2.6, §2.7), each the name a
+/// [`MetaCheck::meta_corrupt`] line starts with: `journal3.ckpt` lost and a frame without a nonce
+/// where the base seq would be, a fact record whose feature `meta/features` does not list, a
+/// manifest whose runs do not split what the checkpoint passed (M1, M2), a run file failing its
+/// sections' CRC, and a frame past the base seq without its nonce.
+const BASE_SEQ_LOST: &str = "base_seq_lost";
+const FEATURE_UNLISTED: &str = "feature_unlisted";
+const BROKEN_PARTITION: &str = "broken_partition";
+const RUN_CRC: &str = "run_crc";
+const MISSING_NONCE: &str = "missing_nonce";
+
+/// What a manifest that reads whole but does not split its domains' records says, as its decode
+/// refuses it ([`runs::read_manifest`]).
+const UNSPLIT: [&str; 2] = [
+    "the manifest's runs leave a gap or overlap",
+    "the manifest's runs are out of domain order",
+];
+
+/// A run file's header and its trailing CRC (the FORMAT 3 design §2.4), and one entry of a
+/// section: the bytes the run CRC streams past and over.
+const RUN_HEADER_LEN: u64 = 44;
+const RUN_CRC_LEN: u64 = 4;
+const RUN_ENTRY_LEN: u64 = 40;
+
+/// The feature list's header line, before its names (the FORMAT 3 design §2.6).
+const FEATURES_HEADER: &str = "swarmops-features 1";
 
 /// What [`MetaStore::check`] found.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -50,9 +85,28 @@ pub struct MetaCheck {
     ref_problems: Vec<(String, bool)>,
     /// How many `read_at` calls the check made on the index's columns and sorted views.
     index_reads: u64,
+    /// The names of FORMAT 3's findings among `meta_corrupt`, each once.
+    findings: Vec<&'static str>,
+    /// Every blob a fact names, with the fact's subject.
+    fact_blobs: Vec<(ObjectId, [u8; 32])>,
 }
 
 impl MetaCheck {
+    /// The names of the FORMAT 3 findings among [`MetaCheck::meta_corrupt`], each once, in the
+    /// order found: `base_seq_lost`, `feature_unlisted`, `broken_partition`, `run_crc` and
+    /// `missing_nonce` (the FORMAT 3 design §2.3, §2.5, §2.6, §2.7). Each such line starts with its
+    /// name.
+    pub fn findings(&self) -> &[&'static str] {
+        &self.findings
+    }
+
+    /// Every blob the facts of a FORMAT 3 store name, with the subject of the fact, in journal
+    /// order: roots that verify looks for as it looks for the blobs trees name (the FORMAT 3
+    /// design §2.8). Empty in FORMAT 1 and 2.
+    pub fn fact_blobs(&self) -> &[(ObjectId, [u8; 32])] {
+        &self.fact_blobs
+    }
+
     /// The ref problems in ref-name order: `(name, true)` for a corrupt ref file, `(name, false)`
     /// for a dangling one.
     pub fn ref_problems(&self) -> &[(String, bool)] {
@@ -91,8 +145,10 @@ struct Run {
     targets_known: bool,
     index_reads: u64,
     /// The checkpoint's file, by its place in the store: `meta/journal.ckpt`, or in FORMAT 2
-    /// `meta/journal2.ckpt`.
+    /// `meta/journal2.ckpt`, in FORMAT 3 `meta/journal3.ckpt`.
     ckpt_file: String,
+    findings: Vec<&'static str>,
+    fact_blobs: Vec<(ObjectId, [u8; 32])>,
 }
 
 /// What a metadata mismatch found disagreeing, ordered as `VerifyProblem::IndexMismatch` orders
@@ -135,6 +191,7 @@ impl Run {
         self.ckpt_file = (ckpt.strip_prefix(layout.root()))
             .unwrap_or(&ckpt)
             .to_string();
+        let listed = self.feature_list(store)?;
         let (journal, journal_damage) = match open_journal(store)? {
             Ok(journal) => (Some(journal), None),
             Err(what) => (None, Some(what)),
@@ -162,6 +219,9 @@ impl Run {
             }
             None => (Vec::new(), false),
         };
+        if layout.format() == StoreFormat::V3 {
+            self.frames3(store, &frames, listed.as_deref())?;
+        }
         // Every snapshot and write transaction reads the frames past the checkpoint: a
         // checkpoint that is no frame boundary fails them all, so verify must say so.
         let ckpt = match (&journal, ckpt_state) {
@@ -189,26 +249,33 @@ impl Run {
         if let Some(index) = &index {
             let reads_before = index.column_reads();
             records = self.index_records(index)?;
-            let frames = if whole { Frames::Whole } else { Frames::Cut };
-            self.compare(&journaled, &records, ckpt, frames);
+            let read = if whole { Frames::Whole } else { Frames::Cut };
+            self.compare(&journaled, &records, ckpt, read);
             // A record past the journal's last changeset, which no frame holds, whether the index
             // counts it or not.
             if whole && held > bytes::to_u64(journaled.len()) {
                 self.mismatches
                     .insert((bytes::to_u64(journaled.len()), MetaMismatch::Journal));
             }
-            self.check_view(index.ids_view(), &records, |meta| meta.id.0.0, Keys::One)?;
-            self.check_view(
-                index.dh_view(),
-                &records,
-                |meta| meta.delta_hash,
-                Keys::Many,
-            )?;
-            self.index_reads = (index.column_reads() - reads_before)
-                + index.ids_view().probes()
-                + index.ids_view().rec_reads()
-                + index.dh_view().probes()
-                + index.dh_view().rec_reads();
+            if layout.format() == StoreFormat::V3 {
+                self.runs3(store, index, &records, &frames, whole)?;
+            } else {
+                self.check_view(index.ids_view(), &records, |meta| meta.id.0.0, Keys::One)?;
+                self.check_view(
+                    index.dh_view(),
+                    &records,
+                    |meta| meta.delta_hash,
+                    Keys::Many,
+                )?;
+                self.index_reads = (index.column_reads() - reads_before)
+                    + index.ids_view().probes()
+                    + index.ids_view().rec_reads()
+                    + index.dh_view().probes()
+                    + index.dh_view().rec_reads();
+            }
+        }
+        if layout.format() == StoreFormat::V3 {
+            self.manifest3(store, journal.as_ref())?;
         }
 
         let journaled_count = journaled.len();
@@ -288,7 +355,8 @@ impl Run {
             Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::InvalidData => {
                 let holds = match format {
                     StoreFormat::V1 => "a u64le offset",
-                    _ => "an offset, a seq and their CRC",
+                    StoreFormat::V2 => "an offset, a seq and their CRC",
+                    StoreFormat::V3 => "an offset, a seq, a base seq, two counts and their CRC",
                 };
                 self.meta_corrupt.push(format!(
                     "{} does not hold {holds}: the records the checkpoint passed are not checked \
@@ -438,6 +506,267 @@ impl Run {
         Ok(())
     }
 
+    /// Reports FORMAT 3's finding `name`: a line of `meta_corrupt` that starts with it, the name
+    /// listed once.
+    fn finding(&mut self, name: &'static str, what: &str) {
+        if !self.findings.contains(&name) {
+            self.findings.push(name);
+        }
+        self.meta_corrupt.push(format!("{name}: {what}"));
+    }
+
+    /// The names `meta/features` lists, in FORMAT 3; `None` in the others, and for a file that is
+    /// no feature list (reported). One that names a feature this build lacks, or of a later list
+    /// format, is [`StoreError::TooNew`]: a newer build's store, not damage (the FORMAT 3 design
+    /// §2.6).
+    fn feature_list(&mut self, store: &MetaStore) -> Result<Option<Vec<String>>, StoreError> {
+        if store.layout.format() != StoreFormat::V3 {
+            return Ok(None);
+        }
+        let list = match features::check(&store.layout, &store.fs) {
+            Ok(()) => features::read(&store.layout, &store.fs)?,
+            Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::InvalidData => {
+                self.meta_corrupt.push(
+                    "meta/features is no feature list: the features of the fact records are not \
+                     checked"
+                        .to_owned(),
+                );
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
+        };
+        let encoded = String::from_utf8_lossy(&list.encode()).into_owned();
+        let names = (encoded.lines())
+            .filter(|line| *line != FEATURES_HEADER)
+            .map(str::to_owned)
+            .collect();
+        Ok(Some(names))
+    }
+
+    /// FORMAT 3's checks of the journal's frames, `frames` the whole ones read: what stops the
+    /// journal, if a frame without a nonce does (`missing_nonce`, or `base_seq_lost` with
+    /// `journal3.ckpt` lost); every fact record's feature against `listed` (`feature_unlisted`);
+    /// and the blobs the facts name.
+    fn frames3(
+        &mut self,
+        store: &MetaStore,
+        frames: &[Frame],
+        listed: Option<&[String]>,
+    ) -> Result<(), StoreError> {
+        // 1. The frame that stops the journal: a feature listed since, of a newer build, or one
+        //    whose records end in no nonce.
+        if let Some(offset) = self.journal_corrupt {
+            features::check(&store.layout, &store.fs)?;
+            let place = Place {
+                seq: bytes::to_u64(frames.len()),
+                prev_crc: frames.last().map_or(0, |frame| frame.crc),
+            };
+            if fsck::nonce_at(&store.layout, &store.fs, offset, place)? == Some(Nonce::Without) {
+                self.nonce_missing(store, offset, place.seq)?;
+            }
+        }
+
+        // 2. Each fact's feature, the first frame of each that the list lacks; its blobs.
+        let mut unlisted: BTreeMap<&'static str, u64> = BTreeMap::new();
+        for frame in frames {
+            for record in &frame.records {
+                let Record::Fact(fact) = record else { continue };
+                let name = features::feature_of(fact.kind());
+                if listed.is_some_and(|listed| !listed.iter().any(|have| have == name)) {
+                    unlisted.entry(name).or_insert(frame.offset);
+                }
+                let subject = fact.subject();
+                (self.fact_blobs).extend(fact.blob_ids().into_iter().map(|id| (id, subject)));
+            }
+        }
+        for (name, offset) in unlisted {
+            self.finding(
+                FEATURE_UNLISTED,
+                &format!(
+                    "the frame at offset {offset} holds a fact of feature {name}, which \
+                     meta/features does not list: the record was written before its feature"
+                ),
+            );
+        }
+        Ok(())
+    }
+
+    /// Reports frame `seq` at `offset`, whole but without the nonce a frame from the base seq on
+    /// ends in: `base_seq_lost` if `journal3.ckpt` is missing or no checkpoint (repair finds the
+    /// base in the journal), else `missing_nonce`.
+    fn nonce_missing(
+        &mut self,
+        store: &MetaStore,
+        offset: u64,
+        seq: u64,
+    ) -> Result<(), StoreError> {
+        let path = store.layout.journal_ckpt();
+        let present =
+            std::fs::exists(&path).map_err(|e| store.fs.locate(FileOp::Stat, &path, e))?;
+        let lost = !present
+            || self
+                .meta_corrupt
+                .iter()
+                .any(|line| line.starts_with(&self.ckpt_file));
+        if lost {
+            self.finding(
+                BASE_SEQ_LOST,
+                &format!(
+                    "{} is lost, and frame {seq} at offset {offset} ends in no nonce: the frames \
+                     before the base seq are not told from damage; repair finds the base seq in \
+                     the journal",
+                    self.ckpt_file
+                ),
+            );
+            return Ok(());
+        }
+        self.finding(
+            MISSING_NONCE,
+            &format!(
+                "frame {seq} at offset {offset} ends in no nonce, past the base seq: no FORMAT 3 \
+                 writer wrote it"
+            ),
+        );
+        Ok(())
+    }
+
+    /// FORMAT 3's checks of the manifest and its run files, read without a lock: runs that do
+    /// not split each domain's records from 0 (M1) or cover more than `journal3.ckpt` passed (M2)
+    /// are `broken_partition`; a run whose sections fail its trailing CRC, streamed a window at a
+    /// time, is `run_crc`. A run gone meanwhile was replaced by a merge, and is passed over.
+    fn manifest3(
+        &mut self,
+        store: &MetaStore,
+        journal: Option<&Journal>,
+    ) -> Result<(), StoreError> {
+        // 1. The manifest, split or not.
+        let manifest = match runs::read_manifest(&store.layout, &store.fs) {
+            Ok((_, manifest)) => manifest,
+            Err(StoreError::IndexCorrupt { what }) if UNSPLIT.contains(&what) => {
+                self.finding(
+                    BROKEN_PARTITION,
+                    &format!("meta/sorted3/MANIFEST: {what}: rebuild the index"),
+                );
+                return Ok(());
+            }
+            // Reported as the index's damage: the index does not open on it.
+            Err(StoreError::IndexCorrupt { .. }) => return Ok(()),
+            Err(e) => return Err(e),
+        };
+
+        // 2. What the checkpoint passed, if it reads.
+        if let Some(ckpt) = journal.and_then(|journal| journal.ckpt3().ok()) {
+            let past = manifest.covered(Domain::Changesets) > ckpt.records
+                || manifest.covered(Domain::Facts) > ckpt.fact_rows;
+            if past {
+                self.finding(
+                    BROKEN_PARTITION,
+                    "meta/sorted3/MANIFEST's runs cover records the checkpoint has not passed: \
+                     rebuild the index",
+                );
+            }
+        }
+
+        // 3. Each run's sections against its trailing CRC.
+        for run in &manifest.runs {
+            let path = runs::run_path(&store.layout, run);
+            if crc_fails(store, &path)? {
+                self.finding(
+                    RUN_CRC,
+                    &format!(
+                        "meta/sorted3/{} fails the CRC of its sections: rebuild the index",
+                        run.name()
+                    ),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// FORMAT 3's checks of the runs against the index (the FORMAT 3 design §2.4, §2.8): each
+    /// changeset run's sections against the columns, as FORMAT 1's and 2's views are; the rows of
+    /// `facts.col` the index counts against the journal's facts; each fact run's sections against
+    /// those facts. Runs that do not open are the index's damage, reported with its open.
+    fn runs3(
+        &mut self,
+        store: &MetaStore,
+        index: &Index,
+        records: &[Option<ChangesetMeta>],
+        frames: &[Frame],
+        whole: bool,
+    ) -> Result<(), StoreError> {
+        let Ok((changesets, fact_views)) = runs::open_all(&store.layout, &store.fs) else {
+            return Ok(());
+        };
+
+        // 1. The changeset runs.
+        let record = |rec: u64| records.get(to_usize(rec)).and_then(Option::as_ref);
+        for pair in changesets.pairs() {
+            let range = run_range(&pair.ids);
+            let id = |rec| record(rec).map(|meta| meta.id.0.0);
+            let dh = |rec| record(rec).map(|meta| meta.delta_hash);
+            for (view, keys, key_of) in [
+                (
+                    &pair.ids,
+                    Keys::One,
+                    &id as &dyn Fn(u64) -> Option<[u8; 32]>,
+                ),
+                (&pair.dh, Keys::Many, &dh),
+            ] {
+                let bad = section_mismatches(view, range.clone(), keys, Need::All, key_of)?;
+                for rec in bad {
+                    self.mismatches.insert((rec, MetaMismatch::SortedView));
+                }
+                self.index_reads += view.probes() + view.rec_reads();
+            }
+        }
+
+        // 2. The fact rows the index counts, against the journal's facts.
+        let expected = facts::rows_of(frames)?;
+        let counted = index.fact_rows();
+        let column = AppendOnlyColumn::<ROW_LEN>::open(
+            &store.fs,
+            store.layout.facts_col(),
+            "meta/idx/facts.col is missing",
+        )?;
+        let mut wrong = None;
+        let mut start = 0;
+        while start < counted && wrong.is_none() {
+            let end = (start + READ_WINDOW).min(counted);
+            let block = column.entries(start, end)?;
+            for (rec, bytes) in (start..).zip(block.as_chunks::<ROW_LEN>().0) {
+                let row = Row::decode(bytes).ok();
+                let want = expected.get(to_usize(rec)).map(|(row, _)| *row);
+                let unvouched = want.is_none() && !whole;
+                if row != want && !unvouched {
+                    wrong = Some(rec);
+                    break;
+                }
+            }
+            start = end;
+        }
+
+        // 3. The fact runs: every row by its subject, and those with an other by it.
+        let fact = |rec: u64| expected.get(to_usize(rec)).map(|(_, fact)| *fact);
+        let subject = |rec| fact(rec).map(Fact::subject);
+        let other = |rec| fact(rec).map(Fact::other).filter(|other| *other != [0; 32]);
+        for pair in fact_views.pairs() {
+            let range = run_range(&pair.ids);
+            let by_subject =
+                section_mismatches(&pair.ids, range.clone(), Keys::Many, Need::All, &subject)?;
+            let by_other = section_mismatches(&pair.dh, range, Keys::Many, Need::Keyed, &other)?;
+            let first = by_subject.into_iter().chain(by_other).min();
+            wrong = [wrong, first].into_iter().flatten().min();
+        }
+        if let Some(rec) = wrong {
+            self.meta_corrupt.push(format!(
+                "meta/idx/facts.col row {rec}, or a fact run naming it, disagrees with the \
+                 journal: rebuild the index"
+            ));
+        }
+        Ok(())
+    }
+
     fn finish(self) -> MetaCheck {
         let mut problems = Vec::new();
         for what in &self.meta_corrupt {
@@ -489,8 +818,103 @@ impl Run {
             targets_known: self.targets_known,
             ref_problems: self.ref_problems,
             index_reads: self.index_reads,
+            findings: self.findings,
+            fact_blobs: self.fact_blobs,
         }
     }
+}
+
+/// Which records of its range a run's section must name: all of them, or those with a key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Need {
+    All,
+    Keyed,
+}
+
+/// The records a FORMAT 3 run's section `view` names wrongly, or does not name, read in blocks
+/// of `READ_WINDOW`: each entry's key must be `key_of` its record, a record of the run's `range`,
+/// the entries ascending (strictly by key for [`Keys::One`], by key and then record for
+/// [`Keys::Many`]), and each record of the range that `need` asks for named once.
+fn section_mismatches(
+    view: &SortedView<32>,
+    range: Range<u64>,
+    keys: Keys,
+    need: Need,
+    key_of: &dyn Fn(u64) -> Option<[u8; 32]>,
+) -> Result<BTreeSet<u64>, StoreError> {
+    let mut named = BTreeSet::new();
+    let mut bad = BTreeSet::new();
+    let mut previous: Option<([u8; 32], u64)> = None;
+
+    // 1. Each entry: in range, keyed as its record, in order.
+    let mut start = 0;
+    while start < view.len() {
+        let end = (start + READ_WINDOW).min(view.len());
+        let keys_block = view.keys(start..end)?;
+        let recs_block = view.recs(start..end)?;
+        for (key, rec) in keys_block.into_iter().zip(recs_block) {
+            let keyed = range.contains(&rec) && key_of(rec) == Some(key);
+            let ordered = previous.is_none_or(|before| match keys {
+                Keys::One => before.0 < key,
+                Keys::Many => before < (key, rec),
+            });
+            if !(keyed && ordered && named.insert(rec)) {
+                bad.insert(rec);
+            }
+            previous = Some((key, rec));
+        }
+        start = end;
+    }
+
+    // 2. Each record it must name, named.
+    for rec in range {
+        let wanted = need == Need::All || key_of(rec).is_some();
+        if wanted && !named.contains(&rec) {
+            bad.insert(rec);
+        }
+    }
+    Ok(bad)
+}
+
+/// The records a run covers, by its first section, which names each of them once.
+fn run_range(first: &SortedView<32>) -> Range<u64> {
+    let end = first.covers_end();
+    end.saturating_sub(first.len())..end
+}
+
+/// Whether the run file at `path` fails the CRC of its sections, which its last 4 bytes hold:
+/// streamed past its header a window of `READ_WINDOW` entries at a time. A file gone, or shorter
+/// than a header and a CRC, is not looked at: a merge replaced it, or the index's open reports it.
+fn crc_fails(store: &MetaStore, path: &camino::Utf8Path) -> Result<bool, StoreError> {
+    let failed = |op, e| StoreError::from(store.fs.locate(op, path, e));
+    let file = match fs_ops::open_regular(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(failed(FileOp::Open, e)),
+    };
+    let len = file.metadata().map_err(|e| failed(FileOp::Stat, e))?.len();
+    let Some(end) = len
+        .checked_sub(RUN_CRC_LEN)
+        .filter(|&end| end >= RUN_HEADER_LEN)
+    else {
+        return Ok(false);
+    };
+
+    // The sections, a window at a time, then the CRC they must have.
+    let mut hasher = crc32fast::Hasher::new();
+    let mut buf = vec![0; to_usize(READ_WINDOW * RUN_ENTRY_LEN)];
+    let mut at = RUN_HEADER_LEN;
+    while at < end {
+        let take = to_usize((end - at).min(bytes::to_u64(buf.len())));
+        file.read_exact_at(&mut buf[..take], at)
+            .map_err(|e| failed(FileOp::ReadAt, e))?;
+        hasher.update(&buf[..take]);
+        at += bytes::to_u64(take);
+    }
+    let mut crc = [0; 4];
+    file.read_exact_at(&mut crc, end)
+        .map_err(|e| failed(FileOp::ReadAt, e))?;
+    Ok(u32::from_le_bytes(crc) != hasher.finalize())
 }
 
 /// A handle on the journal, or what is wrong with it if one of its files is missing: the

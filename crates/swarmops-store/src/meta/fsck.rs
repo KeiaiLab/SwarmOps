@@ -20,10 +20,12 @@ use std::time::Duration;
 use swarmops_core::bytes;
 
 use super::READ_WINDOW;
-use super::frame::{self, BadHeader, MAX_PAYLOAD_LEN, Parsed, Place, Record};
-use super::journal::{ENTRY_LEN_V2, Journal};
-use super::lock::MetaLock;
+use super::features;
+use super::frame::{self, BadHeader, Base, MAX_PAYLOAD_LEN, Parsed, Place, Record};
+use super::journal::{Ckpt3, ENTRY_LEN_V2, Journal};
+use super::lock::{Create, MetaLock, open_flock_file};
 use super::refs::{self, RefState};
+use super::runs::{self, Manifest};
 use super::sorted::VIEW_FILES;
 use super::store::MetaStore;
 use crate::error::{FileOp, StoreError};
@@ -39,6 +41,17 @@ const ENTRY_LEN_V1: u64 = 8;
 
 /// How many frames [`rebuild_refs`] reads with one call as it walks the journal.
 const FRAME_BATCH: usize = 256;
+
+/// How long [`rebuild_index`] waits between two tries of FORMAT 3's `meta/views.lock`.
+const VIEWS_LOCK_POLL: Duration = Duration::from_millis(10);
+
+/// The kind byte of a FORMAT 3 frame's nonce record, and the record's length (the FORMAT 3
+/// design §2.7: `u8 11 | u64le nonce`).
+const KIND_NONCE: u8 = 11;
+const NONCE_LEN: usize = 9;
+
+/// How much of `journal3.ckpt` [`rebuild_offsets`] reads: one byte past a checkpoint's 44.
+const CKPT3_READ: u64 = 45;
 
 /// What a rebuild wrote.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -58,8 +71,16 @@ pub struct Rebuilt {
 /// frame where the walk stopped, and nothing is written: the journal is the truth, and a frame
 /// the rebuild cannot vouch for is never listed or listed away.
 ///
-/// Then it moves the checkpoint to 0 (FORMAT 2's names the seq the entries must agree with; the
-/// next write moves it again), empties `journal.off` with one `atomic_replace`, and lets the
+/// In FORMAT 3 the walk also holds each frame to the base seq (the FORMAT 3 design §2.3, §2.7):
+/// frames before it are FORMAT 2's, without a nonce, and those from it on end in one. A
+/// `journal3.ckpt` that is missing or no checkpoint has lost its base seq: the walk takes the
+/// first frame that ends in a nonce as the base (0 for a journal of none), and a frame without
+/// one after it is [`StoreError::JournalCorrupt`] at that frame (finding `base_seq_lost`),
+/// nothing written.
+///
+/// Then it moves the checkpoint to 0 (FORMAT 2's names the seq the entries must agree with,
+/// FORMAT 3's keeps the base seq; the next write moves it again), empties `journal.off` with one
+/// `atomic_replace`, and lets the
 /// journal's own tail check list every whole frame and cut the torn tail, as the next writer's
 /// would, its entries appended without a sync each and synced once at the end: one sync per
 /// frame would take hours on a large journal. A crash in between leaves a prefix of the entries
@@ -80,7 +101,10 @@ pub fn rebuild_offsets(layout: &Layout, fs: Arc<dyn FsOps>) -> Result<Rebuilt, S
 
     // 2. The checkpoint first: a crash after it leaves the old entries, and a store as damaged
     //    as before; one after the replace, entries the next tail check lists.
-    Journal::open_in(layout, store_fs.clone())?.set_ckpt(0)?;
+    match walk.base {
+        Some(base) => reset_ckpt3(layout, &store_fs, base)?,
+        None => Journal::open_in(layout, store_fs.clone())?.set_ckpt(0)?,
+    }
     store_fs.atomic_replace(layout.journal_off(), &[])?;
 
     // 3. Every whole frame listed by the journal itself, then the entries synced.
@@ -111,15 +135,33 @@ pub fn rebuild_offsets(layout: &Layout, fs: Arc<dyn FsOps>) -> Result<Rebuilt, S
 /// It holds the lock while it reads the whole journal into memory and replays it (the M6 plan's
 /// risk R-1): other writers meanwhile give up after their lock timeout with
 /// [`StoreError::Busy`].
+///
+/// In FORMAT 3 (the FORMAT 3 design §2.3, §2.5) it first takes `meta/views.lock`, waiting as long
+/// as for `meta/lock` (lock order: `views.lock`, then `meta/lock`), so that no step publishes a
+/// manifest meanwhile. Under both it moves the checkpoint to 0 with its base seq kept (one a
+/// missing or damaged `journal3.ckpt` lost is found again as [`rebuild_offsets`] finds it), then
+/// replaces the manifest by one of no run, the commit point: every record and fact row is held
+/// against the journal again. The replay leaves the runs to the next view step
+/// ([`MetaStore::step_views`]), which also removes the runs no manifest names.
 pub fn rebuild_index(layout: &Layout, fs: Arc<dyn FsOps>) -> Result<Rebuilt, StoreError> {
-    // 1. The checkpoint to 0, then the views emptied, ids.key last: the commit point.
+    // 1. The checkpoint to 0, then the views emptied, ids.key last (FORMAT 3: the manifest of
+    //    no run): the commit point.
     {
-        let _lock = MetaLock::acquire(layout, LOCK_TIMEOUT)?;
         let store_fs = StoreFs::new(Arc::clone(&fs), layout.root());
-        Journal::open_in(layout, store_fs.clone())?.set_ckpt(0)?;
-        let sorted = layout.meta_path("sorted");
-        for view in VIEW_FILES.iter().rev() {
-            store_fs.truncate(sorted.join(view), 0)?;
+        let _views = match layout.format() {
+            StoreFormat::V1 | StoreFormat::V2 => None,
+            StoreFormat::V3 => Some(views_lease(layout, &store_fs)?),
+        };
+        let _lock = MetaLock::acquire(layout, LOCK_TIMEOUT)?;
+        match layout.format() {
+            StoreFormat::V1 | StoreFormat::V2 => {
+                Journal::open_in(layout, store_fs.clone())?.set_ckpt(0)?;
+                let sorted = layout.meta_path("sorted");
+                for view in VIEW_FILES.iter().rev() {
+                    store_fs.truncate(sorted.join(view), 0)?;
+                }
+            }
+            StoreFormat::V3 => empty_views(layout, &store_fs)?,
         }
     }
 
@@ -155,16 +197,30 @@ struct Walk {
     frames: u64,
     /// Where they end: the end of the file, or the start of a torn tail.
     end: u64,
+    /// In FORMAT 3, the base seq the frames bear out: `journal3.ckpt`'s, or the one they show
+    /// when that is lost; `None` in FORMAT 1 and 2.
+    base: Option<u64>,
 }
 
 /// What lies at a frame boundary of `journal.log`, as [`rebuild_offsets`] judges it.
 enum Step {
-    /// A whole frame at its place, ending at `end`, its payload's CRC `crc`.
-    Whole { end: u64, crc: u32 },
+    /// A whole frame at its place, ending at `end`, its payload's CRC `crc`; in FORMAT 3, whether
+    /// it ends in a nonce.
+    Whole { end: u64, crc: u32, nonce: Nonce },
     /// What a torn write leaves at the tail, nothing after it that the walk can see.
     Torn,
     /// Damage.
     Corrupt,
+}
+
+/// Whether a FORMAT 3 frame ends in its nonce (the FORMAT 3 design §2.7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Nonce {
+    /// FORMAT 2's records, and no nonce: a frame before the base seq. (Every frame of FORMAT 1
+    /// and 2.)
+    Without,
+    /// Records, then exactly one nonce, last: a frame from the base seq on.
+    With,
 }
 
 /// Walks the frames of `journal.log` from 0 (see [`rebuild_offsets`]).
@@ -174,6 +230,15 @@ fn walk_log(layout: &Layout, fs: &StoreFs) -> Result<Walk, StoreError> {
     let log_len = (log.metadata())
         .map_err(|e| fs.locate(FileOp::Stat, &path, e))?
         .len();
+
+    // 1. FORMAT 3's base seq, unless journal3.ckpt lost it: the walk finds it then.
+    let mut base = match layout.format() {
+        StoreFormat::V1 | StoreFormat::V2 => None,
+        StoreFormat::V3 => ckpt3_of(layout, fs)?.map(|ckpt| ckpt.base_seq),
+    };
+    let known = base.is_some();
+
+    // 2. Frame by frame, each at its place, and in FORMAT 3 on its side of the base.
     let mut place = Place {
         seq: 0,
         prev_crc: 0,
@@ -183,7 +248,19 @@ fn walk_log(layout: &Layout, fs: &StoreFs) -> Result<Walk, StoreError> {
         let step = read_step(&log, layout.format(), at, log_len, place)
             .map_err(|e| fs.locate(FileOp::ReadAt, &path, e))?;
         match step {
-            Step::Whole { end, crc } => {
+            Step::Whole { end, crc, nonce } => {
+                if nonce == Nonce::With && base.is_none() {
+                    base = Some(place.seq);
+                }
+                let past_base = base.is_some_and(|base| place.seq >= base);
+                let wanted = if past_base {
+                    Nonce::With
+                } else {
+                    Nonce::Without
+                };
+                if layout.format() == StoreFormat::V3 && nonce != wanted {
+                    return Err(StoreError::JournalCorrupt { offset: at });
+                }
                 at = end;
                 place = Place {
                     seq: place.seq + 1,
@@ -194,9 +271,118 @@ fn walk_log(layout: &Layout, fs: &StoreFs) -> Result<Walk, StoreError> {
             Step::Corrupt => return Err(StoreError::JournalCorrupt { offset: at }),
         }
     }
+
+    // 3. A lost base that no frame shows: a journal of none starts at 0, any other is refused.
+    if layout.format() == StoreFormat::V3 && !known && base.is_none() {
+        if place.seq > 0 {
+            return Err(StoreError::JournalCorrupt { offset: 0 });
+        }
+        base = Some(0);
+    }
     Ok(Walk {
         frames: place.seq,
         end: at,
+        base,
+    })
+}
+
+/// `journal3.ckpt` of `layout`, read one byte past a checkpoint's length; `None` if it is
+/// missing or holds no checkpoint: its base seq is lost then (the FORMAT 3 design §2.3).
+fn ckpt3_of(layout: &Layout, fs: &StoreFs) -> Result<Option<Ckpt3>, StoreError> {
+    let path = layout.journal_ckpt();
+    let file = match fs_ops::open_regular(&path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(fs.locate(FileOp::Open, &path, e).into()),
+    };
+    let mut bytes = Vec::new();
+    io::Read::read_to_end(&mut io::Read::take(file, CKPT3_READ), &mut bytes)
+        .map_err(|e| fs.locate(FileOp::ReadAt, &path, e))?;
+    Ok(Ckpt3::decode(&bytes).ok())
+}
+
+/// Writes `journal3.ckpt` of `layout` at offset 0, no record or fact row passed, its base seq
+/// `base`: atomically and durably.
+fn reset_ckpt3(layout: &Layout, fs: &StoreFs, base: u64) -> Result<(), StoreError> {
+    let ckpt = Ckpt3 {
+        base_seq: base,
+        ..Ckpt3::default()
+    };
+    fs.atomic_replace(layout.journal_ckpt(), &ckpt.encode())?;
+    Ok(())
+}
+
+/// [`rebuild_index`]'s commit point in FORMAT 3, under `views.lock` and `meta/lock`: the
+/// checkpoint at 0 with its base seq (found again in the journal if `journal3.ckpt` lost it),
+/// then the manifest of no run, a generation past the one it replaces.
+fn empty_views(layout: &Layout, fs: &StoreFs) -> Result<(), StoreError> {
+    // 1. The checkpoint, its base kept.
+    let base = match ckpt3_of(layout, fs)? {
+        Some(ckpt) => ckpt.base_seq,
+        None => walk_log(layout, fs)?.base.unwrap_or(0),
+    };
+    reset_ckpt3(layout, fs, base)?;
+
+    // 2. The manifest of no run.
+    let generation = match runs::read_manifest(layout, fs) {
+        Ok((_, manifest)) => manifest.generation + 1,
+        Err(StoreError::IndexCorrupt { .. }) => 1,
+        Err(e) => return Err(e),
+    };
+    let empty = Manifest {
+        generation,
+        ..Manifest::empty()
+    };
+    let dir = layout.views_dir();
+    if !fs.exists(dir.as_std_path())? {
+        fs.create_dir_all(dir.as_std_path())?;
+        fs.fsync_dir(layout.meta_dir().as_std_path())?;
+    }
+    fs.atomic_replace(dir.join(runs::MANIFEST), &empty.encode())?;
+    Ok(())
+}
+
+/// `meta/views.lock` of `layout`, held: tried every [`VIEWS_LOCK_POLL`] for as long as a writer
+/// waits for `meta/lock`, then [`StoreError::Busy`].
+fn views_lease(layout: &Layout, fs: &StoreFs) -> Result<File, StoreError> {
+    let path = layout.views_lock();
+    let file = open_flock_file(path.as_std_path(), Create::IfMissing)
+        .map_err(|e| fs.locate(FileOp::Open, &path, e))?;
+    let deadline = std::time::Instant::now() + LOCK_TIMEOUT;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(VIEWS_LOCK_POLL);
+            }
+            Err(std::fs::TryLockError::WouldBlock) => return Err(StoreError::Busy),
+            Err(std::fs::TryLockError::Error(e)) => {
+                return Err(fs.locate(FileOp::Lock, &path, e).into());
+            }
+        }
+    }
+}
+
+/// What the FORMAT 3 frame at `offset` of `layout`'s `journal2.log`, which must sit at `place`,
+/// holds if it is whole and its payload checks: records and no nonce, or records and their
+/// nonce; `None` for anything else. What [`MetaStore::check`] names a frame the journal's reader
+/// refused by.
+pub(super) fn nonce_at(
+    layout: &Layout,
+    fs: &StoreFs,
+    offset: u64,
+    place: Place,
+) -> Result<Option<Nonce>, StoreError> {
+    let path = layout.journal_log();
+    let log = fs_ops::open_regular(&path).map_err(|e| fs.locate(FileOp::Open, &path, e))?;
+    let log_len = (log.metadata())
+        .map_err(|e| fs.locate(FileOp::Stat, &path, e))?
+        .len();
+    let step = read_step(&log, StoreFormat::V3, offset, log_len, place)
+        .map_err(|e| fs.locate(FileOp::ReadAt, &path, e))?;
+    Ok(match step {
+        Step::Whole { nonce, .. } => Some(nonce),
+        Step::Torn | Step::Corrupt => None,
     })
 }
 
@@ -247,13 +433,40 @@ fn read_step(
     }
     let mut payload = vec![0; len];
     log.read_exact_at(&mut payload, payload_at)?;
+    let whole = |crc, nonce| Step::Whole { end, crc, nonce };
     Ok(
         match frame::parse_payload(header_len, header.crc, &payload) {
-            Parsed::Whole { crc, .. } => Step::Whole { end, crc },
+            Parsed::Whole { crc, .. } => whole(crc, Nonce::Without),
             Parsed::BadCrc if end == log_len => Step::Torn,
+            // FORMAT 3 from the base on: the records, then the nonce.
+            Parsed::Invalid { .. } if format == StoreFormat::V3 && ends_in_nonce(&payload) => {
+                whole(header.crc, Nonce::With)
+            }
             _ => Step::Corrupt,
         },
     )
+}
+
+/// Whether `payload`, whose CRC checks, holds a FORMAT 3 frame's records past the base seq and
+/// then its nonce (the FORMAT 3 design §2.7): a count of 2 at least, that many records less one,
+/// each one this build decodes there, then `u8 11 | u64le nonce` and nothing after it.
+fn ends_in_nonce(payload: &[u8]) -> bool {
+    let Some((count, mut rest)) = payload.split_first_chunk::<2>() else {
+        return false;
+    };
+    let records = usize::from(u16::from_le_bytes(*count));
+    if records < 2 {
+        return false;
+    }
+    let known = features::known_kinds();
+    for _ in 1..records {
+        let decoded = Record::decode_in(StoreFormat::V3, Base::After, &known, rest);
+        let Some(next) = decoded.ok().and_then(|(_, used)| rest.get(used..)) else {
+            return false;
+        };
+        rest = next;
+    }
+    rest.len() == NONCE_LEN && rest[0] == KIND_NONCE
 }
 
 /// How many frames `journal.off` lists before the rebuild: its whole entries, less the zeroed
@@ -266,7 +479,7 @@ fn listed_before(layout: &Layout, fs: &StoreFs) -> Result<u64, StoreError> {
     let off = fs_ops::open_regular(&path).map_err(|e| failed(FileOp::Open, e))?;
     let entry_len = match layout.format() {
         StoreFormat::V1 => ENTRY_LEN_V1,
-        _ => ENTRY_LEN_V2,
+        StoreFormat::V2 | StoreFormat::V3 => ENTRY_LEN_V2,
     };
     let whole = (off.metadata()).map_err(|e| failed(FileOp::Stat, e))?.len() / entry_len;
     let mut end = whole;

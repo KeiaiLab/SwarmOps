@@ -343,3 +343,183 @@ fn meta_check_reports_format_2_seq_prev_crc_entry_crc_and_ckpt_damage() {
         );
     }
 }
+
+/// FORMAT 3's own checks (the FORMAT 3 design §2.3, §2.5, §2.6, §2.7): the manifest's partition,
+/// each run's trailing CRC, the nonce of every frame past the base, and the feature of every fact
+/// record. Each is a finding of its own name, reported as damaged metadata.
+mod format_3 {
+    use swarmops_store::{Record, Step};
+
+    use super::*;
+
+    /// A manifest of `runs`, each `(domain, from, to)`, at `generation`, its CRC right.
+    fn manifest(generation: u64, runs: &[(u8, u64, u64)]) -> Vec<u8> {
+        let mut bytes = b"SWMF\x01\0\0\0".to_vec();
+        bytes.extend(generation.to_le_bytes());
+        bytes.extend(u32::try_from(runs.len()).unwrap().to_le_bytes());
+        for &(domain, from, to) in runs {
+            bytes.push(domain);
+            bytes.extend([0; 7]);
+            bytes.extend(from.to_le_bytes());
+            bytes.extend(to.to_le_bytes());
+        }
+        bytes.extend(crc32fast::hash(&bytes).to_le_bytes());
+        bytes
+    }
+
+    /// The bytes of a FORMAT 2 frame header and payload of `records`, with no nonce, at seq `seq`
+    /// after a frame of payload CRC `prev_crc`.
+    fn frame_without_nonce(records: &[Record], seq: u64, prev_crc: u32) -> Vec<u8> {
+        let mut payload = u16::try_from(records.len()).unwrap().to_le_bytes().to_vec();
+        for record in records {
+            record.encode(&mut payload).unwrap();
+        }
+        let mut frame = u32::try_from(payload.len()).unwrap().to_le_bytes().to_vec();
+        frame.extend(crc32fast::hash(&payload).to_le_bytes());
+        frame.extend(seq.to_le_bytes());
+        frame.extend(prev_crc.to_le_bytes());
+        let hcrc = crc32fast::hash(&frame);
+        frame.extend(hcrc.to_le_bytes());
+        frame.extend(payload);
+        frame
+    }
+
+    /// A FORMAT 3 store of `n` changesets, inserted 550 to a transaction, flushed.
+    fn wide_store(n: u64) -> (TempDir, Layout, MetaStore) {
+        let (dir, layout, store) = store_of(StoreFormat::V3, 0);
+        for first in (0..n).step_by(550) {
+            let mut write = store.write().unwrap();
+            write
+                .insert_changesets_batch((first..n.min(first + 550)).map(changeset).collect())
+                .unwrap();
+            write.commit().unwrap();
+        }
+        store.flush().unwrap();
+        (dir, layout, store)
+    }
+
+    /// A manifest whose runs leave a gap, or cover records the checkpoint has not passed, is a
+    /// broken partition (M1, M2).
+    #[test]
+    fn check_reports_a_broken_partition() {
+        // 1. A gap between two runs: the index does not open either.
+        let (_dir, layout, store) = store_of(StoreFormat::V3, 3);
+        assert_eq!(store.check().unwrap().findings(), [""; 0]);
+        let views = layout.views_dir();
+        fs::write(views.join("MANIFEST"), manifest(1, &[(0, 0, 1), (0, 2, 3)])).unwrap();
+        let checked = store.check().unwrap();
+        assert_eq!(checked.findings(), ["broken_partition"]);
+        assert!(
+            (checked.problems.iter()).any(|line| line
+                .starts_with("damaged metadata: broken_partition: meta/sorted3/MANIFEST")),
+            "{:?}",
+            checked.problems
+        );
+
+        // 2. A run past what the checkpoint passed: none of the three is synced yet.
+        fs::write(views.join("MANIFEST"), manifest(1, &[(0, 0, 3)])).unwrap();
+        assert_eq!(store.check().unwrap().findings(), ["broken_partition"]);
+    }
+
+    /// Every run's sections are read, a window at a time, against its trailing CRC.
+    #[test]
+    fn check_streams_each_run_crc() {
+        let (_dir, layout, store) = wide_store(1_100);
+        assert_eq!(store.step_views().unwrap(), Step::Done);
+        let checked = store.check().unwrap();
+        assert_eq!(checked.problems, Vec::<String>::new());
+        assert_eq!(checked.changesets.len(), 1_100);
+
+        // The trailing CRC flipped: the sections are as the columns say, the file is not.
+        let run = layout
+            .views_dir()
+            .join(format!("c-{:016x}-{:016x}.run", 0, 1_100));
+        let mut bytes = fs::read(&run).unwrap();
+        *bytes.last_mut().unwrap() ^= 0x01;
+        fs::write(&run, bytes).unwrap();
+        let checked = store.check().unwrap();
+        assert_eq!(checked.findings(), ["run_crc"]);
+        assert_eq!(
+            checked.problems,
+            [format!(
+                "damaged metadata: run_crc: meta/sorted3/{} fails the CRC of its sections: \
+                 rebuild the index",
+                run.file_name().unwrap()
+            )]
+        );
+    }
+
+    /// A frame past the base without its nonce is the journal's damage, named.
+    #[test]
+    fn check_reports_a_missing_nonce_as_damage() {
+        let (_dir, layout, store) = store_of(StoreFormat::V3, 1);
+        let last = Journal::open(&layout, Arc::new(NoSyncFs))
+            .unwrap()
+            .frames_from(0, 100)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let at = fs::metadata(layout.journal_log()).unwrap().len();
+        let record = Record::Changeset {
+            id: changeset(1).id,
+            generation: 0,
+            delta_hash: [1; 32],
+            parents: Vec::new(),
+        };
+        let mut log = fs::read(layout.journal_log()).unwrap();
+        log.extend(frame_without_nonce(&[record], last.seq + 1, last.crc));
+        fs::write(layout.journal_log(), log).unwrap();
+
+        let checked = store.check().unwrap();
+        assert_eq!(checked.journal_corrupt, Some(at));
+        assert_eq!(checked.findings(), ["missing_nonce"]);
+        assert!(
+            (checked.problems.iter())
+                .any(|line| line.starts_with("damaged metadata: missing_nonce:")),
+            "{:?}",
+            checked.problems
+        );
+    }
+
+    /// A fact record whose feature `meta/features` does not list was written before its feature
+    /// (W10): a finding, not a failure to decode.
+    #[cfg(feature = "test-hooks")]
+    #[test]
+    fn check_reports_an_unlisted_feature_record() {
+        use swarmops_store::{CasResult, Expect, Fact, FactKind, StoreError, supported_for_tests};
+
+        let _guard = supported_for_tests(&["lineage"]);
+        let (_dir, layout, store) = store_of(StoreFormat::V3, 1);
+        let fact = Fact::new(
+            FactKind::Lineage,
+            1,
+            [7; 32],
+            [8; 32],
+            9,
+            "test/1".to_owned(),
+            vec![3; 32],
+        )
+        .unwrap();
+        let mut write = store.write().unwrap();
+        let applied = write.put_fact(fact, Expect::Any).unwrap();
+        assert_eq!(applied, CasResult::Applied { old: None });
+        write.commit().unwrap();
+        assert_eq!(store.check().unwrap().problems, Vec::<String>::new());
+
+        // The list emptied by hand: the record stays, its feature unlisted.
+        fs::write(layout.features_file(), b"swarmops-features 1\n").unwrap();
+        let checked = store.check().unwrap();
+        assert_eq!(checked.findings(), ["feature_unlisted"]);
+        assert!(
+            (checked.problems.iter()).any(|line| line
+                .starts_with("damaged metadata: feature_unlisted:")
+                && line.contains("lineage")),
+            "{:?}",
+            checked.problems
+        );
+
+        // A list naming a feature this build lacks is a newer build's store, not damage.
+        fs::write(layout.features_file(), b"swarmops-features 1\nzzz\n").unwrap();
+        assert!(matches!(store.check(), Err(StoreError::TooNew { .. })));
+    }
+}
