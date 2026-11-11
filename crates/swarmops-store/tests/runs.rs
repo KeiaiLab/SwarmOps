@@ -594,6 +594,66 @@ fn views_step_skips_when_the_lease_is_held() {
     assert_eq!(changeset_runs(&layout), [(0, 2_000)]);
 }
 
+/// Every file under `dir`, by its path relative to `dir`, with its bytes.
+fn files_under(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut files = Vec::new();
+    let mut dirs = vec![dir.to_path_buf()];
+    while let Some(at) = dirs.pop() {
+        for entry in fs::read_dir(&at).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+                continue;
+            }
+            let name = path
+                .strip_prefix(dir)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            files.push((name, fs::read(&path).unwrap()));
+        }
+    }
+    files.sort();
+    files
+}
+
+/// A step in a store that lists a feature this build does not know, listed after the store was
+/// opened, is `TooNew` and writes nothing under `meta/sorted3/` (the design's amendment of
+/// 2026-11-11, G13).
+#[test]
+fn step_views_refuses_an_unknown_feature() {
+    let (_dir, layout, store) = new_store();
+    insert_in_frames(&store, 3_000, 1_500);
+    fs::write(layout.features_file(), "swarmops-features 1\nnewer\n").unwrap();
+    let before = files_under(layout.views_dir().as_std_path());
+
+    let got = store.step_views();
+    assert!(
+        matches!(&got, Err(StoreError::TooNew { features, .. }) if features == &["newer"]),
+        "{got:?}"
+    );
+    assert_eq!(files_under(layout.views_dir().as_std_path()), before);
+}
+
+/// Below FORMAT 3 a step is `Step::Skipped` and touches no file of the store (G13).
+#[test]
+fn step_views_skips_formats_1_and_2() {
+    for format in [StoreFormat::V1, StoreFormat::V2] {
+        let (_dir, layout) = new_root();
+        let layout = Layout::with_format(layout.root(), format);
+        let store = MetaStore::create_in(layout.clone(), real_fs()).unwrap();
+        insert(&store, 0..2_000);
+        let before = files_under(layout.root().as_std_path());
+
+        assert_eq!(store.step_views().unwrap(), Step::Skipped, "{format:?}");
+        assert_eq!(
+            files_under(layout.root().as_std_path()),
+            before,
+            "{format:?}"
+        );
+    }
+}
+
 /// A manifest that names a run which is not there, read again unchanged, is damage:
 /// `IndexCorrupt` (the design §2.5 M3).
 #[test]

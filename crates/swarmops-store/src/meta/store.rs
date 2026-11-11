@@ -674,8 +674,9 @@ impl MetaStore {
     /// 2026-11-11, G6, G13): with more than [`crate::RUN_MIN`] changeset records past the runs that
     /// the checkpoint has passed, it builds their run, merges it at [`crate::RUN_FANOUT`] and
     /// publishes the new manifest, under `meta/views.lock` and never under [`MetaLock`].
-    /// [`Step::Skipped`] at once if another step holds `meta/views.lock`; [`Step::Done`]
-    /// otherwise, and below FORMAT 3, which has no runs.
+    /// [`Step::Skipped`] at once if another step holds `meta/views.lock`, and below FORMAT 3,
+    /// which has no runs; [`Step::Done`] otherwise. A feature this build does not support,
+    /// listed since the store was opened, is [`StoreError::TooNew`] before anything is written.
     ///
     /// A commit leaves this work to its caller, who calls it once it has answered (a CLI after
     /// it wrote its response, a server after it sent one), or to gc; only a commit that leaves

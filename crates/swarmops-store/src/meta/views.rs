@@ -21,6 +21,7 @@ use std::ops::ControlFlow;
 use swarmops_core::bytes;
 
 use super::column::AppendOnlyColumn;
+use super::features;
 use super::index::{DHS, IDS};
 use super::journal::Journal;
 use super::lock::{Create, open_flock_file};
@@ -35,17 +36,19 @@ use crate::layout::Layout;
 #[non_exhaustive]
 pub enum Step {
     /// It held `meta/views.lock`: the runs cover what the checkpoint passed, but a tail of at
-    /// most [`RUN_MIN`] records (and below FORMAT 3, where there are no runs, it did nothing).
+    /// most [`RUN_MIN`] records.
     Done,
-    /// Another step held `meta/views.lock`: it did nothing and did not wait. The next step
-    /// builds.
+    /// Another step held `meta/views.lock`, or the store is below FORMAT 3 and has no runs: it
+    /// did nothing and did not wait. The next step builds.
     Skipped,
 }
 
 /// One step of `layout`'s view work, `journal` giving what the checkpoint passed: see the
-/// module documentation. Nothing below FORMAT 3.
+/// module documentation. Below FORMAT 3, [`Step::Skipped`] and nothing touched.
 ///
-/// 1. `meta/views.lock` by `try_lock`; held elsewhere, [`Step::Skipped`] at once.
+/// 1. `meta/views.lock` by `try_lock`; held elsewhere, [`Step::Skipped`] at once. Then
+///    `meta/features` read again: a feature this build does not support, listed since the store
+///    was opened, is [`StoreError::TooNew`] before anything is written (G13).
 /// 2. The runs outside the manifest, and what `tmp/` holds, removed: a step or a merge that
 ///    stopped part way left them (rule 7).
 /// 3. With more than [`RUN_MIN`] changeset records past the runs, the run of them built in
@@ -56,7 +59,7 @@ pub enum Step {
 /// A manifest that covers more than the checkpoint passed is [`StoreError::IndexCorrupt`] (M2).
 pub(crate) fn step(layout: &Layout, fs: &StoreFs, journal: &Journal) -> Result<Step, StoreError> {
     match layout.format() {
-        StoreFormat::V1 | StoreFormat::V2 => return Ok(Step::Done),
+        StoreFormat::V1 | StoreFormat::V2 => return Ok(Step::Skipped),
         StoreFormat::V3 => {}
     }
 
@@ -64,6 +67,7 @@ pub(crate) fn step(layout: &Layout, fs: &StoreFs, journal: &Journal) -> Result<S
     let Some(_lease) = try_lease(layout, fs)? else {
         return Ok(Step::Skipped);
     };
+    features::check(layout, fs)?;
 
     // 2. What the checkpoint passed, the manifest, and what earlier steps left.
     let records = journal.ckpt3()?.records;
