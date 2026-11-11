@@ -1,0 +1,58 @@
+# The real entrances (the cloud plan's slice C-1, M28 criterion 1): stock git and `so` through
+# OpenSSH's sshd and nginx with fcgiwrap in front of `swarmops serve`, with git 2.43.0, in a
+# container started without a network (scripts/server-entrance.py, packaging/entrance/). On a
+# push that touches the entrances or serve, weekly, and on demand. `just check` keeps the
+# in-process stand-in; this is the one harness through real servers.
+#
+# Hardened as ci.yml is, and run where it runs: on the maintainers' own host, through the
+# self-hosted runners labelled `swarmops-local`, each building into its runner's persistent
+# CARGO_TARGET_DIR, with docker on the host. Only the image build reaches the network (Ubuntu's
+# archive, behind a base pinned by digest); it is skipped while the image of the same
+# packaging/entrance/ contents is local.
+name: Server
+
+on:
+  push:
+    branches: [stable, "feat/**"]
+    paths:
+      - "packaging/**"
+      - "scripts/server-*"
+      - "crates/swarmops-ops/src/serve/**"
+      - "crates/swarmops-cli/src/commands/serve.rs"
+      - ".github/workflows/server.yml"
+  schedule:
+    # Mondays at 04:47 UTC, after the Scheduled run's start, off the hour.
+    - cron: "47 4 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: server-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  entrances:
+    name: real entrances
+    runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update
+      - name: Build swarmops and so
+        run: cargo build --locked -p swarmops-cli
+      - name: Build the test image, unless it is local
+        run: python3 -I scripts/server-entrance.py build
+      - name: The tests through sshd and nginx, offline
+        run: python3 -I scripts/server-entrance.py run --bin-dir "${CARGO_TARGET_DIR:-target}/debug"
