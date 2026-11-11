@@ -40,6 +40,8 @@ collects the changes on `stable` that no release holds yet, until the next relea
 - A remote an earlier version stored with a token as its URL's user is refused the same way by
   `fetch`, `push` and `sync`; `remote remove` still drops it: remove it, add it again without the
   token and pass the token with `--token-env`.
+- `remote list` and its MCP tool show such a remote's URL with the credential replaced by `***`,
+  where they printed the token; `remotes.toml` keeps what was stored.
 - The reference pages of the command and the MCP tool `ancestry` give the release it first shipped
   in, `since: "0.9.0"`, where they said 0.1.0.
 - The gate's doc runs start from an empty doc directory (CI doc step from about 14 minutes to seconds).

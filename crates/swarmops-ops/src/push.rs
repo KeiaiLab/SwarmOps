@@ -19,9 +19,7 @@
 //!     refs/remotes/<remote>/<branch>      seen → E, by compare-and-swap; git gc --auto
 //! ```
 
-use swarmops_api::{
-    ErrorCode, LossyClass, OpError, PushReq, PushResp, PushStatus, RemoteInfo, RemoteListReq,
-};
+use swarmops_api::{ErrorCode, LossyClass, OpError, PushReq, PushResp, PushStatus, RemoteInfo};
 use swarmops_core::ChangesetId;
 use swarmops_git::mirror::{Mirror, MirrorError, MirrorLock, Rebuilt};
 use swarmops_git::transport::{
@@ -202,14 +200,10 @@ impl Recording<'_> {
         Ok(response(remote, &branch, status, seen, &report, warnings))
     }
 
-    /// The remote named `name`, as `remote list` reads it, or `E_REMOTE_NOT_FOUND`.
+    /// The remote named `name`, its URL as stored (`remote list` masks a credential), or
+    /// `E_REMOTE_NOT_FOUND`.
     fn named_remote(&self, name: &str) -> Result<RemoteInfo, OpError> {
-        let listed = self.remote_list(RemoteListReq::default())?;
-        let found = listed
-            .remotes
-            .into_iter()
-            .find(|remote| remote.name == name);
-        found.ok_or_else(|| error::remote_not_found(name))
+        self.remote(name)
     }
 
     /// Checks that `source_ref` is a ref name the store's format takes (`E_REF_NAME_INVALID`,

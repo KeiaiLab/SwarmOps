@@ -39,8 +39,8 @@
 use serde_json::Value;
 use swarmops_api::{
     DropReason, DroppedChange, ErrorCode, HeadMove, Identity, LogReq, MAX_LAND_ATTEMPTS, OpError,
-    PublishedChange, PushReq, RemoteHead, RemoteInfo, RemoteListReq, Rev, StoreOps as _, SyncMode,
-    SyncReq, SyncResp, SyncStatus, SyncStatusKind, SyncStatusReq,
+    PublishedChange, PushReq, RemoteHead, RemoteInfo, Rev, StoreOps as _, SyncMode, SyncReq,
+    SyncResp, SyncStatus, SyncStatusKind, SyncStatusReq,
 };
 use swarmops_core::{ChangesetId, Signature};
 use swarmops_git::mirror::{Mirror, MirrorLock};
@@ -185,14 +185,10 @@ impl Recording<'_> {
         Ok(out)
     }
 
-    /// The remote named `name`, as `remote list` reads it, or `E_REMOTE_NOT_FOUND`.
+    /// The remote named `name`, its URL as stored (`remote list` masks a credential), or
+    /// `E_REMOTE_NOT_FOUND`.
     fn sync_remote(&self, name: &str) -> Result<RemoteInfo, OpError> {
-        let listed = self.remote_list(RemoteListReq::default())?;
-        let found = listed
-            .remotes
-            .into_iter()
-            .find(|remote| remote.name == name);
-        found.ok_or_else(|| error::remote_not_found(name))
+        self.remote(name)
     }
 
     /// What the mirror's tracking ref of `remote`'s followed branch names: none before the

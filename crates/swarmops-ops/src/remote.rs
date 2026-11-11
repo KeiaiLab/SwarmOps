@@ -44,7 +44,7 @@ use swarmops_api::{
 };
 use swarmops_core::ChangesetId;
 use swarmops_git::mirror::{Mirror, MirrorLock, Rebuilt};
-use swarmops_git::transport::{Credential, GitCli, RefSpec, RemoteUrl, Transport};
+use swarmops_git::transport::{Credential, GitCli, RefSpec, RemoteUrl, Transport, UrlRefused};
 use swarmops_git::{GitOid, GixSource, ImportError, ImportReport, ImportRequest, LossySet};
 use swarmops_repo::RepoError;
 use swarmops_store::{IoFailure, SYSTEM_GIT, StoreError};
@@ -77,6 +77,9 @@ const SUBCOMMAND: &str = "status";
 
 /// The longest branch or variable name accepted, in bytes.
 const MAX_LEN: usize = 255;
+
+/// What `remote list` shows in place of a credential a stored URL holds.
+const CREDENTIAL_MARK: &str = "***";
 
 /// The suffix git keeps for its lock files, which no branch name may end with.
 const LOCK_SUFFIX: &str = ".lock";
@@ -118,6 +121,13 @@ impl Entry {
         );
         out.token_env.clone_from(&self.token_env);
         out.warnings = warnings;
+        out
+    }
+
+    /// The remote as `remote list` shows it: its URL [`masked`].
+    fn shown(&self) -> RemoteInfo {
+        let mut out = self.info(None);
+        out.url = masked(&self.url);
         out
     }
 
@@ -254,10 +264,11 @@ impl Recording<'_> {
         Ok(RemoteRemoveResp::new(name, removed_refs))
     }
 
-    /// `remote list`: the remotes `remotes.toml` records, read without the lock.
+    /// `remote list`: the remotes `remotes.toml` records, read without the lock, each URL's
+    /// credential masked.
     pub fn remote_list(&self, _req: RemoteListReq) -> Result<RemoteList, OpError> {
         let file = self.read_remotes()?;
-        let remotes = file.remotes.iter().map(|entry| entry.info(None)).collect();
+        let remotes = file.remotes.iter().map(Entry::shown).collect();
         Ok(RemoteList::new(remotes))
     }
 
@@ -468,8 +479,8 @@ impl Recording<'_> {
         Mirror::open(self.ops.store_path()).map_err(error::mirror_error)
     }
 
-    /// The remote named `name`, or `E_REMOTE_NOT_FOUND`.
-    fn remote(&self, name: &str) -> Result<RemoteInfo, OpError> {
+    /// The remote named `name`, its URL as stored, or `E_REMOTE_NOT_FOUND`.
+    pub(crate) fn remote(&self, name: &str) -> Result<RemoteInfo, OpError> {
         let found = self.find(name)?;
         found
             .map(|entry| entry.info(None))
@@ -649,6 +660,26 @@ fn created(at: &Utf8Path, mut e: OpError) -> OpError {
     );
     e.hint = Some(e.hint.take().unwrap_or(again));
     e
+}
+
+/// `url` with the credential an earlier version stored in it (a password, or a token as an
+/// HTTP(S) user) replaced by [`CREDENTIAL_MARK`]: `http://tok0a1…@host/r` gives
+/// `http://***@host/r`. Any other URL as it is.
+fn masked(url: &str) -> String {
+    // 1. Only a URL refused for its credential holds one.
+    if !matches!(RemoteUrl::parse(url), Err(UrlRefused::CredentialInUrl)) {
+        return url.to_owned();
+    }
+
+    // 2. The user part of `<scheme>://<user>@<host>…` masked; any other form whole.
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return CREDENTIAL_MARK.to_owned();
+    };
+    let authority = rest.split('/').next().unwrap_or_default();
+    let Some(at) = authority.rfind('@') else {
+        return CREDENTIAL_MARK.to_owned();
+    };
+    format!("{scheme}://{CREDENTIAL_MARK}{}", &rest[at..])
 }
 
 /// The repository's name in `url`: its last path component, without `.git`.
@@ -836,7 +867,35 @@ fn lossy_set(classes: &[LossyClass]) -> LossySet {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_branch, check_name, repo_name};
+    use super::{check_branch, check_name, masked, repo_name};
+
+    /// A stored URL's credential is masked, its user part whole; a URL without one is as it is.
+    #[test]
+    fn credential_is_masked() {
+        let token = "tok0a1b2c3d4e5f6a7b8c9d0e";
+        let urls = [
+            (
+                format!("http://{token}@127.0.0.1:9/r.git"),
+                "http://***@127.0.0.1:9/r.git",
+            ),
+            (
+                format!("https://u:{token}@h.example/r"),
+                "https://***@h.example/r",
+            ),
+            (
+                format!("ssh://git:{token}@h.example/r"),
+                "ssh://***@h.example/r",
+            ),
+            (
+                "https://user@h.example/a@b".to_owned(),
+                "https://user@h.example/a@b",
+            ),
+            ("git@h.example:r.git".to_owned(), "git@h.example:r.git"),
+        ];
+        for (url, shown) in urls {
+            assert_eq!(masked(&url), shown, "{url}");
+        }
+    }
 
     /// The repository's name is the URL's last path component, without `.git`, in each of the
     /// URL forms a remote may have.

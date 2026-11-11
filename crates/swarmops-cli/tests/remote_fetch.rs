@@ -368,6 +368,71 @@ fn a_stored_token_url_is_refused_and_removable() {
     on(&["fetch", ORIGIN]).ok();
 }
 
+/// A remote stored with a token as its URL's user is read back with the user masked: `remote
+/// list` and the MCP `remote_list` tool print no secret, and `remotes.toml` keeps it.
+#[test]
+fn a_stored_token_url_is_masked_where_read() {
+    let remote = Remote::new();
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let into = path_text(&dir.path().join("store"));
+    let rest = remote.url();
+    let rest = rest.strip_prefix("http://").expect("an http URL");
+    let repo = ["--repo", into.as_str(), "--as", AGENT];
+
+    // 1. A clone, its remote's user then made a token as an earlier version stored it.
+    let named = format!("http://user@{rest}");
+    let clone = [&repo[..], &["clone", &named, "--into", &into]].concat();
+    remote.run(&clone, &[]).ok();
+    let file = Path::new(&into).join(REMOTES_TOML);
+    let text = fs::read_to_string(&file).expect("remotes.toml");
+    fs::write(
+        &file,
+        text.replace("http://user@", &format!("http://{SECRET}@")),
+    )
+    .expect("write remotes.toml");
+    let masked = format!("http://***@{rest}");
+
+    // 2. `remote list`: the URL masked, the secret in neither stream.
+    let listed = remote.run(&[&repo[..], &["remote", "list"]].concat(), &[]);
+    assert!(!listed.stdout.contains(SECRET), "{listed}");
+    assert!(!listed.stderr.contains(SECRET), "{listed}");
+    assert_eq!(
+        listed.ok()["remotes"][0]["url"],
+        masked.as_str(),
+        "{listed}"
+    );
+
+    // 3. The MCP tool, one session: the same.
+    let session = [
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-11-25", "capabilities": {},
+            "clientInfo": {"name": "remote-fetch", "version": "0"}}}),
+        json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "remote_list", "arguments": {}}}),
+    ];
+    let mcp = [&["mcp"][..], &repo[..]].concat();
+    let mut child = swarmops(&mcp, &remote.vars(&[]))
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("spawn the MCP server");
+    let mut stdin = child.stdin.take().expect("its stdin");
+    for message in session {
+        writeln!(stdin, "{message}").expect("write a request");
+    }
+    drop(stdin);
+    let out = child.wait_with_output().expect("the server's output");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stdout.contains(SECRET), "{stdout}");
+    assert!(!stderr.contains(SECRET), "{stderr}");
+    assert!(stdout.contains(&masked), "{stdout}");
+
+    // 4. The file still holds what was stored.
+    let kept = fs::read_to_string(&file).expect("remotes.toml");
+    assert!(kept.contains(SECRET), "{kept}");
+}
+
 /// `remote remove` drops the remote's line and its mirror refs (tracking refs and tags), and
 /// writes no changeset and moves no store ref; another remote's refs stay. A name the store
 /// does not have is `E_REMOTE_NOT_FOUND`.
