@@ -116,6 +116,49 @@ fn an_unknown_feature_refuses_open_read_and_write() {
     assert_eq!(files(&layout), before, "nothing written");
 }
 
+/// Whether `result` is a failed read of a malformed file (`InvalidData`).
+fn invalid_data<T>(result: &Result<T, StoreError>) -> bool {
+    matches!(result, Err(StoreError::Io(e)) if e.kind() == std::io::ErrorKind::InvalidData)
+}
+
+/// A list whose header names a later list format (`swarmops-features 2`) is a newer build's,
+/// refused with `TooNew` naming no feature, nothing written (the FORMAT 3 design's amendment of
+/// 2026-11-11, G5); a header of another shape stays `InvalidData`.
+#[test]
+fn a_features_header_past_1_is_too_new() {
+    let (_dir, layout, store) = v3_store();
+
+    // 1. A later list format, whatever follows its header: TooNew, nothing written.
+    for later in [
+        "swarmops-features 2\n",
+        "swarmops-features 10\nnewer\n",
+        "swarmops-features 99999999999999999999999\n",
+    ] {
+        fs::write(layout.features_file(), later).unwrap();
+        let before = files(&layout);
+        let opened = MetaStore::open_in(layout.clone(), real_fs()).map(drop);
+        assert!(too_new(&opened, &[]), "{later:?} open: {opened:?}");
+        let read = store.read().map(drop);
+        assert!(too_new(&read, &[]), "{later:?} read: {read:?}");
+        let write = store.write().map(drop);
+        assert!(too_new(&write, &[]), "{later:?} write: {write:?}");
+        assert_eq!(files(&layout), before, "{later:?}: nothing written");
+    }
+
+    // 2. Any other header: InvalidData, as before.
+    for other in [
+        "swarmops-features x\n",
+        "swarmops-features 0\n",
+        "swarmops-features 2",
+        "swarmops-features 02\n",
+        "swarmops-features -2\n",
+    ] {
+        fs::write(layout.features_file(), other).unwrap();
+        let read = store.read().map(drop);
+        assert!(invalid_data(&read), "{other:?}: {read:?}");
+    }
+}
+
 /// A write queue's lead checks the list too, where every write begins (the M20 plan's A3): its
 /// turn is refused, nothing written, and the next turn is refused the same way.
 #[test]

@@ -1,8 +1,8 @@
 //! FORMAT 3 feature lists never panic when read, and whatever reads is canonical (the FORMAT 3
 //! design §2.6, §6): the input, as a FORMAT 3 store's `meta/features`, opens the store, is
-//! refused as no list (`InvalidData`), or names features this build lacks (`TooNew`, all of
-//! them: the release build supports none), and then the list of exactly those names in order is
-//! the input's bytes.
+//! refused as no list (`InvalidData`), is of a later list format (`TooNew` naming no feature),
+//! or names features this build lacks (`TooNew`, all of them: the release build supports none),
+//! and then the list of exactly those names in order is the input's bytes.
 #![no_main]
 
 use std::sync::{Arc, OnceLock};
@@ -37,6 +37,16 @@ fuzz_target!(|data: &[u8]| {
         Ok(_) => Vec::new(),
         Err(StoreError::TooNew { format, features }) => {
             assert_eq!(format, 3, "a feature's refusal names FORMAT 3");
+
+            // A later list format's header names no feature (the FORMAT 3 design's amendment
+            // of 2026-11-11, G5).
+            if features.is_empty() {
+                assert!(
+                    !data.starts_with(HEADER),
+                    "a list of format 1 names its features"
+                );
+                return;
+            }
             features
         }
         Err(StoreError::Io(e)) => {

@@ -42,6 +42,9 @@ const MAX_FILE_LEN: usize = 1_141;
 /// What `meta/features` starts with.
 const HEADER: &[u8] = b"swarmops-features 1\n";
 
+/// What the header of every list format starts with, its decimal version and a newline after.
+const HEADER_STEM: &[u8] = b"swarmops-features ";
+
 /// The longest feature name, in bytes.
 const MAX_NAME_LEN: usize = 32;
 
@@ -129,7 +132,8 @@ fn is_name(name: &str) -> bool {
 }
 
 /// The feature list of the store of `layout`: empty if `meta/features` is missing (as it is in
-/// every store but FORMAT 3's). One that is no list, or longer than any, is `InvalidData`, a failed
+/// every store but FORMAT 3's). One of a later list format is [`StoreError::TooNew`] naming no
+/// feature. One that is no list, or longer than any, is `InvalidData`, a failed
 /// read of `meta/features` (named by its place in the store, never by the root). Read by path, at
 /// most 1,142 bytes: no lock, no [`crate::FsOps`] call.
 pub(crate) fn read(layout: &Layout, fs: &StoreFs) -> Result<Features, StoreError> {
@@ -147,11 +151,35 @@ pub(crate) fn read(layout: &Layout, fs: &StoreFs) -> Result<Features, StoreError
         Err(e) => return Err(failed(e).into()),
     }
 
-    // 2. The list they hold.
+    // 2. A later list format is a newer build's (the FORMAT 3 design's amendment of
+    // 2026-11-11, G5): refused as too new, not as damage.
+    if is_later_format(&bytes) {
+        return Err(StoreError::TooNew {
+            format: FORMAT_3,
+            features: Vec::new(),
+        });
+    }
+
+    // 3. The list they hold.
     Features::decode(&bytes).map_err(|why| {
         let why = format!("meta/features {why}");
         failed(io::Error::new(io::ErrorKind::InvalidData, why)).into()
     })
+}
+
+/// Whether `bytes` start with the header of a list format after 1: `swarmops-features <n>\n`,
+/// `n` decimal without a leading zero and above 1 (e.g. `swarmops-features 2\n`).
+fn is_later_format(bytes: &[u8]) -> bool {
+    let Some(rest) = bytes.strip_prefix(HEADER_STEM) else {
+        return false;
+    };
+    let Some(end) = rest.iter().position(|&b| b == b'\n') else {
+        return false;
+    };
+    let version = &rest[..end];
+    let decimal =
+        version.first().is_some_and(|&b| b != b'0') && version.iter().all(u8::is_ascii_digit);
+    decimal && version != b"1"
 }
 
 /// Refuses the store of `layout`, if it is FORMAT 3 and lists a feature this build does not
