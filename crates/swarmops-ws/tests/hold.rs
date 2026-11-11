@@ -13,6 +13,7 @@ use swarmops_api::{
     WsListReq, WsMaterializeReq, WsRebaseAction, WsRebaseReq, WsResolveReq, WsSnapshotReq,
     WsStatusReq,
 };
+use swarmops_store::FsMethod;
 use swarmops_ws::hostfs::HostMeta;
 use swarmops_ws::registry::Registry;
 use swarmops_ws::state;
@@ -368,4 +369,37 @@ fn an_older_build_lists_past_the_hold_directory() {
         .map(|entry| entry.name)
         .collect();
     assert_eq!(names, ["v", "w"]);
+}
+
+/// No call of the durable files' layer that writes or syncs names the hold record or its
+/// directory: the record is read through `FsOps`, and only read.
+#[test]
+fn no_write_or_sync_names_the_hold() {
+    // 1. A create, a commit and a snapshot, each renewing the record, over a recorder.
+    let f = Fixture::new();
+    let base = f.commit(None, &[Put::File("src/a.txt", "a\n")]);
+    let (recorder, calls) = swarmops_testkit::fs::RecordingFs::new();
+    let tmp = f.root.parent().unwrap().to_owned();
+    let recorder = recorder.naming_paths_in(tmp.into_std_path_buf());
+    let ctx = f.ctx_with(Arc::new(RealHost::default()), Arc::new(recorder));
+    f.create_in(&ctx, "w", &base, &[]).unwrap();
+    write(&f.beside("w"), "src/a.txt", "mine\n");
+    let mut req = WsCommitReq::new("w".to_owned(), "mine".to_owned());
+    req.status_after = StatusAfter::None;
+    swarmops_ws::commit(&ctx, req).unwrap();
+    write(&f.beside("w"), "src/a.txt", "later\n");
+    swarmops_ws::snapshot(&ctx, WsSnapshotReq::new("w")).unwrap();
+    assert_eq!(hold(&f, "w")["last_op"], "snapshot");
+
+    // 2. The calls naming the hold: reads only, and at least one.
+    let named: Vec<String> = (calls().into_iter())
+        .filter(|call| call.contains("workspaces/hold"))
+        .collect();
+    assert!(!named.is_empty(), "the record is read through FsOps");
+    for call in &named {
+        let method = call.split(' ').next().unwrap_or_default();
+        let found = FsMethod::ALL.iter().find(|m| m.as_str() == method);
+        let method = found.unwrap_or_else(|| panic!("unknown method in {call:?}"));
+        assert!(!method.is_mutating(), "{call:?} writes or syncs the hold");
+    }
 }
