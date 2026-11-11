@@ -1,52 +1,58 @@
 name: Bug report
 description: SwarmOps did something wrong, or failed in a way it should not.
-labels: ["bug"]
+labels: ["kind: bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for the report. A security vulnerability does not belong here: [SECURITY.md](https://github.com/KeiaiLab/SwarmOps/blob/stable/SECURITY.md) says how to report one privately. Check [docs/known-limitations.md](https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/known-limitations.md) too: the problem may be known already.
+        A security vulnerability does not belong here: [SECURITY.md](https://github.com/KeiaiLab/SwarmOps/blob/stable/SECURITY.md) says how to report one privately. Check [docs/known-limitations.md](https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/known-limitations.md) first: the problem may be known already.
   - type: textarea
     id: what-happened
     attributes:
       label: What happened
-      description: What you did, and what SwarmOps did.
+      description: The commands you ran and the JSON envelope each printed (`error.code`, `details` and `hint` matter most). Remove paths or content you cannot share.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: What `swarmops --version` prints.
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: What `uname -srm` prints.
     validations:
       required: true
   - type: textarea
     id: expected
     attributes:
       label: What you expected
-    validations:
-      required: true
-  - type: textarea
-    id: commands
-    attributes:
-      label: Commands and envelopes
-      description: The commands you ran and the JSON envelope each printed (`error.code`, `details` and `hint` matter most). Remove paths or content you cannot share.
-      render: shell
-    validations:
-      required: true
   - type: textarea
     id: verify
     attributes:
       label: "`swarmops verify --deep`"
-      description: Its envelope on the affected store, if a store is involved.
+      description: What `swarmops verify --deep` prints on the affected store, if a store is involved.
       render: json
   - type: dropdown
     id: area
     attributes:
       label: Area
+      description: The part of SwarmOps it concerns. Leave it empty if you are not sure.
       options:
-        - Store (objects, journal, index, refs, recovery)
-        - Commands, the envelope or error codes
-        - API schema or the MCP server
-        - Performance
-        - Docs or specs
-        - Build, tests or CI
-        - Other, or not sure
-    validations:
-      required: true
+        - store
+        - cli
+        - mcp
+        - git
+        - remote
+        - workspace
+        - install
+        - docs
+        - site
   - type: dropdown
     id: crash
     attributes:
@@ -57,19 +63,13 @@ body:
         - Power loss, or a VM or WSL reset
         - The disk was full, or reported I/O errors
         - Not sure
-    validations:
-      required: true
   - type: input
     id: commit
     attributes:
       label: SwarmOps commit
-      description: The commit the binary was built from (`git rev-parse --short HEAD`).
-    validations:
-      required: true
+      description: For a binary built from source, what `git rev-parse --short HEAD` prints in that checkout.
   - type: textarea
     id: environment
     attributes:
       label: Environment
-      description: Kernel (`uname -r`), the store's filesystem (`stat -f -c %T <store>`), and how many processes or agents shared the store.
-    validations:
-      required: true
+      description: The store's filesystem, as `stat -f -c %T <store>` prints it, and how many processes or agents shared the store.

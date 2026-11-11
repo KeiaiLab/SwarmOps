@@ -1,11 +1,11 @@
 name: Feature request
 description: Something SwarmOps should do, or do differently.
-labels: ["enhancement"]
+labels: ["kind: feature"]
 body:
   - type: markdown
     attributes:
       value: |
-        The design specs are the authority, and the umbrella spec's milestone table (§13) may already plan what you need: [docs/architecture.md](https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/architecture.md) is an English overview.
+        [docs/roadmap.md](https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/roadmap.md) may already plan what you need, and [docs/known-limitations.md](https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/known-limitations.md) lists what is still open.
   - type: textarea
     id: problem
     attributes:
@@ -24,22 +24,6 @@ body:
     id: alternatives
     attributes:
       label: Alternatives you considered
-  - type: dropdown
-    id: milestone
-    attributes:
-      label: Milestone it belongs to, if you know
-      options:
-        - "M2: diff, history, derived data"
-        - "M3: git import"
-        - "M4: merge and landing"
-        - "M8: git export"
-        - "M5: workspaces"
-        - "M6: verify, crash safety, fuzzing"
-        - "M7: blame and review"
-        - "M9: simulation and a benchmark gate"
-        - "M11: remote sync, offline-first"
-        - "After v1 (umbrella spec §17)"
-        - Not sure
   - type: checkboxes
     id: surfaces
     attributes:

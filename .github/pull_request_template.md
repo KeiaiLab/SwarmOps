@@ -1,22 +1,16 @@
 ## Summary
 
-<!-- What this changes and why. Link the plan task or the issue. -->
-
-## Spec
-
-<!-- The spec paragraph this follows, or the one it changes in this pull request. -->
+<!-- What this changes and why. Link the issue it closes. -->
 
 ## Tests
 
-<!-- New tests by name; `just check`; `just check-slow` for the store's write, recovery or locking paths. -->
+<!-- The tests that cover the change, by name. -->
 
 ## Checklist
 
-- [ ] `just check` passes, and `tests-pass` is green on this branch.
-- [ ] A behaviour change updates its spec paragraph in this pull request.
-- [ ] A new public module, type or trait method in core, store or repo is in storage spec §8 (or §8 says where it is described).
-- [ ] The hash contract and the golden vectors are untouched; a new layout has a new kind/version header or a `FORMAT` bump.
-- [ ] Every snapshot change (the schema, the MCP tools, CLI output) and every pinned filesystem-call sequence that changed is intended and named above.
+- [ ] `just check` passes.
+- [ ] Tests cover the change.
 - [ ] `CHANGELOG.md` has an **Unreleased** entry for a user-visible change.
-- [ ] `docs/known-limitations.md` loses the entries this closes, or gains the ones it opens.
-- [ ] Commit messages say what and why, with no tool or generator attribution.
+- [ ] The documentation is updated.
+- [ ] `docs/known-limitations.md` gains what this opens, or loses what it closes.
+- [ ] Commit messages follow [CONTRIBUTING.md](../CONTRIBUTING.md).

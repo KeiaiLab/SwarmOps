@@ -1,0 +1,46 @@
+{
+  "repository": "KeiaiLab/SwarmOps",
+  "description": "Version control for swarms of coding agents: many writers, one repository, JSON output, git sync.",
+  "homepage": "https://swarmops.cc",
+  "topics": [
+    "version-control",
+    "coding-agents",
+    "multi-agent",
+    "cli",
+    "mcp",
+    "rust",
+    "git",
+    "github",
+    "claude-code",
+    "developer-tools"
+  ],
+  "features": {
+    "issues": true,
+    "discussions": false,
+    "wiki": false,
+    "projects": false,
+    "private_vulnerability_reporting": true
+  },
+  "social_preview": "docs/assets/social-card.png",
+  "labels": [
+    {"name": "kind: bug", "color": "d73a4a", "description": "SwarmOps did something wrong, or failed in a way it should not."},
+    {"name": "kind: feature", "color": "a2eeef", "description": "Something SwarmOps should do, or do differently."},
+    {"name": "kind: question", "color": "d876e3", "description": "A question about using or running SwarmOps."},
+    {"name": "kind: docs", "color": "0075ca", "description": "A page that is wrong, unclear or missing."},
+    {"name": "area: store", "color": "7c5cff", "description": "Objects, journal, index, refs, recovery, verify."},
+    {"name": "area: cli", "color": "7c5cff", "description": "Commands, the JSON envelope, error codes."},
+    {"name": "area: mcp", "color": "7c5cff", "description": "The MCP server, its tools and the API schema."},
+    {"name": "area: git", "color": "7c5cff", "description": "Git import and export."},
+    {"name": "area: remote", "color": "7c5cff", "description": "Clone, fetch, push, sync and the server."},
+    {"name": "area: workspace", "color": "7c5cff", "description": "Workspaces and the agent hooks."},
+    {"name": "area: install", "color": "7c5cff", "description": "The install script, archives and packages."},
+    {"name": "area: docs", "color": "7c5cff", "description": "The documentation in the repository."},
+    {"name": "area: site", "color": "7c5cff", "description": "The website at swarmops.cc."},
+    {"name": "triage: needs-info", "color": "fbca04", "description": "Waits on the reporter for a command, an envelope or a version."},
+    {"name": "triage: confirmed", "color": "0e8a16", "description": "Reproduced, or accepted as worth doing."},
+    {"name": "triage: wontfix", "color": "ffffff", "description": "Will not be changed; the issue says why."},
+    {"name": "triage: duplicate", "color": "cfd3d7", "description": "Another issue or pull request covers this."},
+    {"name": "invite: good first issue", "color": "f59e0b", "description": "Small and self-contained; a first contribution fits."},
+    {"name": "invite: help wanted", "color": "f59e0b", "description": "Open to a contributor who takes it."}
+  ]
+}
