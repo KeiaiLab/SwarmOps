@@ -14,8 +14,7 @@ import type { ComponentProps } from 'react';
 import type { TOCItemType } from 'fumadocs-core/toc';
 import type { MDXComponents, MDXContent } from 'mdx/types';
 import { cn } from '@/lib/cn';
-import { LATEST_RELEASE } from '@/lib/release';
-import { CHANGELOG_URL } from '@/lib/site';
+import { LATEST_RELEASE, releaseUrl } from '@/lib/release';
 import { productSource, roadmapPage } from '@/lib/source';
 
 interface Props {
@@ -40,10 +39,10 @@ const RAIL_DEPTH = 2;
 // The label strip's own type is caps (global.css); the hint beside it reads as a sentence.
 const SELECT_HINT = 'One click selects it';
 
-const CAP = 'text-[13px]/5 font-semibold uppercase tracking-[0.08em] text-muted-foreground';
+const CAP = 'caption font-semibold text-muted-foreground';
 const LINK =
-  'text-primary underline decoration-1 underline-offset-[0.22em] decoration-[color-mix(in_srgb,var(--primary)_55%,transparent)] hover:decoration-2 hover:decoration-primary';
-const CODE = 'rounded-[4px] bg-muted px-[0.32em] py-[0.1em] font-mono text-[calc(1em-2px)] text-foreground';
+  'text-primary underline decoration-1 underline-offset-4 decoration-primary/55 hover:decoration-2 hover:decoration-primary';
+const CODE = 'rounded-sm bg-muted px-1 font-mono text-foreground';
 
 /** Where a page lives and its sections: the product page or the roadmap of that title. */
 interface PageInfo {
@@ -76,13 +75,13 @@ export function SelectFigure({ label, className, children, ...props }: Component
     <figure className="code-block not-prose">
       <figcaption className="flex min-h-9 items-center justify-between gap-4 border-b border-border px-4 max-sm:min-h-11">
         <span>{label}</span>
-        <span className="text-[14px]/5 font-normal normal-case tracking-normal">{SELECT_HINT}</span>
+        <span className="text-sm font-normal normal-case tracking-normal">{SELECT_HINT}</span>
       </figcaption>
       <pre
         {...props}
         className={cn(
           className,
-          'm-0 overflow-x-auto px-[18px] pt-3.5 pb-4 font-mono text-[14px]/6 text-[var(--text)] [user-select:all]',
+          'm-0 overflow-x-auto px-4 pt-3 pb-4 font-mono text-sm text-(--text) [user-select:all]',
         )}
       >
         {children}
@@ -105,7 +104,7 @@ function SelectableBlock({ className, children, title, ...props }: ComponentProp
   }
 
   return (
-    <SelectFigure label={label} className={cn(classes.filter((name) => name !== 'code-block'))} {...props}>
+    <SelectFigure label={label} className={cn(classes.filter((name) => name !== 'code-block'))} tabIndex={0} {...props}>
       {children}
     </SelectFigure>
   );
@@ -125,8 +124,8 @@ const BODY_COMPONENTS: MDXComponents = {
   pre: SelectableBlock,
 };
 
-/** The facts beside the home page's hero and every product page, with the Pre-1.0 note. */
-export function AtAGlance({ className }: { className?: string }) {
+/** The facts beside every product page, with the Pre-1.0 note. */
+function AtAGlance({ className }: { className?: string }) {
   const { version, date, preRelease } = LATEST_RELEASE;
   const facts = [
     { term: 'Runs on', detail: <>Linux, x86_64 or aarch64, glibc 2.34 or newer (Ubuntu 22.04, Debian 12, RHEL 9)</> },
@@ -144,10 +143,10 @@ export function AtAGlance({ className }: { className?: string }) {
       term: 'Latest release',
       detail: (
         <>
-          v{version}, {date} ·{' '}
-          <a className={LINK} href={CHANGELOG_URL}>
-            Changelog
+          <a className={LINK} href={releaseUrl(LATEST_RELEASE)}>
+            v{version}
           </a>
+          , {date}
         </>
       ),
     },
@@ -155,21 +154,21 @@ export function AtAGlance({ className }: { className?: string }) {
   ];
 
   return (
-    <aside aria-label="At a glance" className={cn('self-start border-t-2 border-foreground pt-3.5', className)}>
+    <aside aria-label="At a glance" className={cn('self-start border-t-2 border-rule-strong pt-4', className)}>
       {/* 1. The facts, one row each. */}
       <p className={CAP}>At a glance</p>
       <dl className="mt-2">
         {facts.map((fact) => (
           <div key={fact.term} className="border-b border-border py-3">
-            <dt className="text-[14px]/5 font-semibold text-muted-foreground">{fact.term}</dt>
-            <dd className="mt-0.5 text-[16px]/[26px] text-[var(--text)]">{fact.detail}</dd>
+            <dt className="text-sm font-semibold text-muted-foreground">{fact.term}</dt>
+            <dd className="mt-1 text-base text-(--text)">{fact.detail}</dd>
           </div>
         ))}
       </dl>
 
       {/* 2. Below 1.0 a minor release may still break the contract; the reader is told so. */}
       {preRelease && (
-        <p className="mt-4 rounded-r-lg border-l-2 border-ring bg-card px-4 py-3 text-[15px]/6 text-[var(--text)]">
+        <p className="mt-4 rounded-r-lg border-l-2 border-ring bg-card px-4 py-3 text-sm text-(--text)">
           <strong className="block font-semibold text-foreground">Pre-1.0</strong>A minor release may still break a
           command or its output (
           <a className={LINK} href={VERSIONING_URL}>
@@ -185,14 +184,14 @@ export function AtAGlance({ className }: { className?: string }) {
 function ProductTabs({ current }: { current: string }) {
   return (
     <nav aria-label="Product" className="border-b border-border">
-      <div className="mx-auto w-full max-w-[1104px] px-8 max-sm:px-5">
+      <div className="page">
         <ul className="flex gap-2 max-sm:grid max-sm:grid-cols-2 max-sm:gap-0">
           {PRODUCT_TABS.map((tab) => (
             <li key={tab.url} className="sm:first:[&>a]:pl-0">
               <a
                 href={tab.url}
                 aria-current={tab.url === current ? 'page' : undefined}
-                className="relative -mb-px inline-flex min-h-12 items-center px-3 text-[15px] text-[var(--text)] no-underline max-sm:flex"
+                className="relative -mb-px inline-flex min-h-12 items-center px-3 text-sm text-(--text) no-underline max-sm:flex"
               >
                 {tab.text}
               </a>
@@ -211,14 +210,14 @@ function OnThisPage({ toc }: { toc: TOCItemType[] }) {
   }
 
   return (
-    <nav aria-label="On this page" className="mt-10 pt-1.5">
+    <nav aria-label="On this page" className="mt-10 pt-2">
       <p className={cn(CAP, 'mb-2.5')}>On this page</p>
       <ol className="list-none p-0">
         {sections.map((item) => (
           <li key={item.url}>
             <a
               href={item.url}
-              className="block border-l border-border py-1 pl-3.5 text-[14px]/[22px] text-muted-foreground no-underline hover:text-foreground"
+              className="block border-l border-border py-1 pl-4 text-sm text-muted-foreground no-underline hover:text-foreground"
             >
               {item.title}
             </a>
@@ -239,14 +238,14 @@ export function MarkdownPage({ title, description, body: Body }: Props) {
 
       <main
         id="main"
-        className="mx-auto grid w-full max-w-[1104px] grid-cols-1 px-8 pt-14 pb-24 max-sm:px-5 max-sm:pt-8 max-sm:pb-16 lg:grid-cols-[minmax(0,1fr)_300px] lg:gap-x-20"
+        className="page grid grid-cols-1 pt-14 pb-24 max-sm:pt-8 max-sm:pb-16 lg:grid-cols-[minmax(0,1fr)_minmax(0,18rem)] lg:gap-x-20"
       >
         {/* 2. The page's one h1 and its description, across both columns. */}
         <div className="mb-10 lg:col-span-2">
-          <h1 className="mb-4 font-serif text-[42px]/[50px] font-normal tracking-[-0.01em] text-foreground max-sm:text-[32px]/[40px]">
+          <h1 className="mb-4 font-serif text-3xl font-normal tracking-tight text-foreground">
             {title}
           </h1>
-          <p className="max-w-[60ch] text-[20px]/8 text-muted-foreground max-sm:text-[18px]/[30px]">{description}</p>
+          <p className="max-w-(--measure) text-lg text-muted-foreground">{description}</p>
         </div>
 
         {/* 3. The Markdown. */}
