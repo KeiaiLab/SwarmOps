@@ -1,8 +1,28 @@
 # Contributing to SwarmOps
 
-SwarmOps is pre-release: 0.1.0 is its first release. This page is how changes get made, for
-people and agents alike. [The rules](#the-rules) are the short version; everything else here
-expands on them.
+SwarmOps is pre-release. This page is how changes get made, for people and agents alike.
+[The rules](#the-rules) are the short version; everything else here expands on them.
+
+## Start here
+
+1. Install the tools. Rust 1.99.0 comes from `rust-toolchain.toml` through rustup. CI installs
+   `just` 1.58.0, `cargo-nextest` 0.9.146 and `cargo-deny` 0.20.2
+   (`.github/workflows/ci.yml`). The last check step needs Python 3.11 or newer as `python3`;
+   [Setup](#setup) lists the rest.
+2. Run the gate from a fresh clone:
+
+   ```sh
+   git clone https://github.com/KeiaiLab/SwarmOps.git
+   cd SwarmOps
+   just check
+   ```
+
+   No time for `just check` is recorded: [docs/perf.md](docs/perf.md) has no figure for it.
+3. Ask before you start: open the Question form at
+   <https://github.com/KeiaiLab/SwarmOps/issues/new/choose>. No review time is promised.
+4. Commit messages follow [Commits](#commits): what and why, no tool or generator attribution.
+5. A first task: open issues labelled
+   [`invite: good first issue`](https://github.com/KeiaiLab/SwarmOps/issues?q=is%3Aissue%20is%3Aopen%20label%3A%22invite%3A%20good%20first%20issue%22).
 
 ## The rules
 
@@ -155,14 +175,22 @@ and binary code, and the page lists what review reads for and the recorded devia
 - **Test-only code stays out of release builds.** Test doubles live in test code or behind the
   `test-hooks` cargo feature (the store's `CrashAtFs`, `FailAtFs` and `OrderCheckFs`, which no
   build without the feature can name), and a release build honours no test hook. The hooks are
-  nine environment variables named `SWARMOPS_TEST_*` (`SWARMOPS_TEST_CRASH_AT`,
-  `SWARMOPS_TEST_FS_CALLS`, `SWARMOPS_TEST_FAIL_AT`, `SWARMOPS_TEST_ORDER_CHECK`,
-  `SWARMOPS_TEST_NOW`, `SWARMOPS_TEST_GITHUB_HOSTS`, which makes a push count other hosts as
-  GitHub's for its limits, `SWARMOPS_TEST_SERVE_CACHE`, which bounds `serve`'s pack cache
-  or skips its reachability check, `SWARMOPS_TEST_LEAD_WAIT`, which makes a writer that
-  leads the write queue wait for other requests and plan them, and `SWARMOPS_TEST_PHASE_LOG`,
-  which makes a sync and a push append each phase's time to a file), read only under
-  `#[cfg(feature = "test-hooks")]`. A test that needs them is marked
+  nine environment variables named `SWARMOPS_TEST_*` (`SWARMOPS_TEST_CRASH_AT=<k>`, which
+  aborts the process at its k-th store filesystem call, `SWARMOPS_TEST_FS_CALLS=<file>`, which
+  makes it write how many calls it made,
+  `SWARMOPS_TEST_FAIL_AT=<k>[:once|persistent[:eio|enospc]]`, which fails its k-th call with an
+  injected I/O error (and with `persistent` every mutating call after it),
+  `SWARMOPS_TEST_ORDER_CHECK=1`, which checks every write against the store's write-ordering
+  rules and panics at one that breaks a rule, `SWARMOPS_TEST_NOW=<unix seconds>`, which fixes
+  the time it signs changesets at, `SWARMOPS_TEST_GITHUB_HOSTS=<host[:port],…>`, which makes a
+  push count other hosts as GitHub's for its limits, `SWARMOPS_TEST_SERVE_CACHE`, which bounds
+  `serve`'s pack cache or skips its reachability check, `SWARMOPS_TEST_LEAD_WAIT`, which makes a
+  writer that leads the write queue wait for other requests and plan them, and
+  `SWARMOPS_TEST_PHASE_LOG`, which makes a sync and a push append each phase's time to a file),
+  read only under `#[cfg(feature = "test-hooks")]`. The feature exists on `swarmops-store`,
+  `swarmops-repo`, `swarmops-git`, `swarmops-ws`, `swarmops-ops`, `swarmops-cli` and
+  `swarmops-testkit`;
+  `swarmops-cli/test-hooks` turns on all of them. A test that needs them is marked
   `#[cfg(feature = "test-hooks")]`, or, for a whole file, its `mod` line in `tests/all.rs`
   is (the CLI's `crash` and `faults` modules), so that a plain `cargo test` skips it; the
   gates (`just check`, `scripts/check.sh`, `just check-slow`) build the tests with
