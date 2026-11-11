@@ -25,6 +25,7 @@
 //!   racers behind a barrier, a store with the commands the tests run on it, and the crash and
 //!   error sweeps' template ([`cli::sweep`]).
 //! - [`measure`]: what the store's benches and measurement tests share.
+//! - [`openmetrics`]: a reader of the OpenMetrics text format, for the text `health` prints.
 //! - [`git`]: the git fixtures: repositories real git made from the scripts in
 //!   `git-fixtures/scripts/`, committed as archives with their manifests, extracted for a test
 //!   ([`git::fixture`]) and rebuilt only on purpose (`just git-fixtures`).
@@ -77,6 +78,7 @@ pub mod git;
 #[cfg(feature = "repo")]
 pub mod landing;
 pub mod measure;
+pub mod openmetrics;
 pub mod power;
 pub mod remote;
 #[cfg(feature = "repo")]
