@@ -1031,6 +1031,60 @@ fn answered(ran: &BatchRun) -> usize {
     ran.left.iter().filter(|name| is_kind(name, "ans")).count()
 }
 
+/// A cut of the D2 design §5.1 table that the batch sweep must reach.
+#[derive(Debug, PartialEq, Eq)]
+enum Cut {
+    /// Claims under way: the manifest, some seeds `.com`, the rest `.req`, none answered.
+    C2,
+    /// Answers written, the manifest left: every seed `.ans`.
+    C8,
+}
+
+/// The cut a crashed leader left, read from its queue's file names `left`; `seeds` are the
+/// seeds' request ids. `None` for any other state.
+fn cut_of(left: &[String], seeds: &[&str]) -> Option<Cut> {
+    let has = |rid: &str, ext: &str| left.iter().any(|name| *name == format!("{rid}.{ext}"));
+    let manifest = left.iter().any(|name| is_kind(name, "batch"));
+    if !manifest {
+        return None;
+    }
+
+    // 1. C8: every seed answered.
+    if seeds.iter().all(|rid| has(rid, "ans")) {
+        return Some(Cut::C8);
+    }
+
+    // 2. C2: none answered, some claimed, some still requests.
+    let none_answered = !seeds.iter().any(|rid| has(rid, "ans"));
+    let some_claimed = seeds.iter().any(|rid| has(rid, "com"));
+    let some_queued = seeds.iter().any(|rid| has(rid, "req"));
+    (none_answered && some_claimed && some_queued).then_some(Cut::C2)
+}
+
+/// The batch sweep's cut check tells C2 and C8 from the states beside them (issue #28): what
+/// a crash leaves with no manifest, every claim made, or some answers written is neither.
+#[test]
+fn crash_sweep_asserts_c2_and_c8() {
+    let seeds = ["r1", "r2"];
+    let cut = |names: &[&str]| {
+        let left: Vec<String> = names.iter().map(|name| (*name).to_owned()).collect();
+        cut_of(&left, &seeds)
+    };
+
+    // 1. The two cuts.
+    assert_eq!(cut(&["h.batch", "r1.com", "r2.req"]), Some(Cut::C2));
+    let c8 = ["h.batch", "r1.com", "r2.com", "r1.ans", "r2.ans"];
+    assert_eq!(cut(&c8), Some(Cut::C8));
+
+    // 2. The states beside them: no manifest (C1, or settled), every claim made (C3 to C6),
+    // some answers (C7), a temp manifest (C2').
+    assert_eq!(cut(&["r1.com", "r2.req"]), None);
+    assert_eq!(cut(&["r1.com", "r2.com", "r1.ans", "r2.ans"]), None);
+    assert_eq!(cut(&["h.batch", "r1.com", "r2.com"]), None);
+    assert_eq!(cut(&["h.batch", "r1.com", "r2.com", "r1.ans"]), None);
+    assert_eq!(cut(&[".tmp-h.batch", "r1.req", "r2.req"]), None);
+}
+
 per_format! {
 /// A batch led through the binary lands each member once whatever call crashes it (the M18 D2
 /// design §5.1): the leader's `land --key`, `SWARMOPS_TEST_LEAD_WAIT=2`, leads the requests of
@@ -1042,7 +1096,8 @@ per_format! {
 /// then the seeds' oldest first), the store clean, and the queue empty after the next write.
 /// The dry run answered both seeds (their answers stay: no waiter reads them); the sweep
 /// crashes up to about N, finishes at its end, and reaches a crash that left claimed requests
-/// (`.com`) and one that left an answer (`.ans`).
+/// (`.com`) and one that left an answer (`.ans`), among them the design's cuts C2 (claims under
+/// way) and C8 (every answer written, the manifest left), read by [`cut_of`].
 fn a_batch_led_through_the_binary_crashing_at_any_call_lands_each_once(format) {
     let seeded = seeded_template(format);
 
@@ -1074,6 +1129,17 @@ fn a_batch_led_through_the_binary_crashing_at_any_call_lands_each_once(format) {
     };
     assert!(left_a("com"), "no crash left a claimed request");
     assert!(left_a("ans"), "no crash left an answer");
+
+    // 3. The D2 design §5.1 cuts C2 and C8 among them.
+    let seeds: Vec<&str> = (seeded.requests.iter())
+        .map(|(name, _)| name.strip_suffix(".req").expect("a request"))
+        .collect();
+    let cuts: Vec<Cut> = (runs.iter())
+        .filter(|(_, ran)| !ran.finished)
+        .filter_map(|(_, ran)| cut_of(&ran.left, &seeds))
+        .collect();
+    assert!(cuts.contains(&Cut::C2), "no crash left claims under way (C2)");
+    assert!(cuts.contains(&Cut::C8), "no crash left every answer and the manifest (C8)");
     println!("batch sweep {format:?}: {calls} calls, the first finished at {first_finished:?}");
 }
 }
