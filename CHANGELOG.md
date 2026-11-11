@@ -63,6 +63,8 @@ collects the changes on `stable` that no release holds yet, until the next relea
   tag's first line.
 - `ws rebase` run again after an update cut short snapshots the edits made since and carries them,
   where it refused them with `E_WS_DIRTY` until they were discarded (the M19 design §4.4).
+- `serve` records a push its hooks refuse with the refusal's code and exit, not exit 0, keeps the
+  split of a second pack on one connection, and removes splits a dead `serve` left behind.
 
 ## [0.11.0] - 2026-11-09
 
