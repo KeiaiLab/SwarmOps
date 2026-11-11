@@ -15,8 +15,9 @@
 //!    ([`StoreError::Limit`]), none listed twice ([`StoreError::DuplicateParent`]), no metadata
 //!    key that ends in `:b64` ([`RepoError::ReservedMetadataKey`], [`check_metadata`]), the keys
 //!    strictly ascending ([`CodecError::UnsortedMetadata`]), and a root the store holds as a tree
-//!    ([`RepoError::MissingObject`]). A batch holds at most [`MAX_RAW_BATCH`] changesets, what
-//!    one journal frame holds ([`StoreError::Limit`], [`LimitKind::Records`]).
+//!    ([`RepoError::MissingObject`]). A batch holds at most [`max_raw_batch`] changesets, what
+//!    one journal frame of the store's format holds ([`StoreError::Limit`],
+//!    [`LimitKind::Records`]): refused before any object is written.
 //! 2. Then, in order, each raw's parents must be in the store or earlier in the batch
 //!    ([`RepoError::UnknownParent`]), and its delta is diffed from the trees the store holds: a
 //!    parent earlier in the batch gives its root from the batch, one in the store from its
@@ -50,7 +51,7 @@ use swarmops_core::{
 use swarmops_merge::tree_diff::{self, PathFilter, TreeRead};
 use swarmops_store::{
     ChangesetMeta, InsertOutcome, LimitKind, MetaRead, ObjectStat, ObjectStore, Recovered,
-    StoreError,
+    StoreError, StoreFormat,
 };
 
 use crate::commit;
@@ -61,6 +62,16 @@ use crate::repo::{self, Repo};
 /// The most changesets a raw batch holds: the records of one journal frame (65,535), which holds
 /// nothing else.
 pub const MAX_RAW_BATCH: usize = 65_535;
+
+/// The most changesets a raw batch holds in a store of `format`: [`MAX_RAW_BATCH`], but in
+/// FORMAT 3 one less, where each frame's nonce takes one of its 65,535 places (the FORMAT 3
+/// design §2.7).
+pub fn max_raw_batch(format: StoreFormat) -> usize {
+    match format {
+        StoreFormat::V1 | StoreFormat::V2 => MAX_RAW_BATCH,
+        _ => MAX_RAW_BATCH - 1,
+    }
+}
 
 /// A changeset to record with the fields its caller gives ([`Repo::commit_raw_batch`]); the
 /// delta is the one field it does not give, as the module documentation says.
@@ -180,8 +191,9 @@ impl<O: ObjectStore> Repo<O> {
     /// (an I/O error, [`StoreError::Busy`], [`StoreError::NotCommitted`]) records nothing and
     /// leaves them, unreferenced, for GC, as [`Repo::commit`] does.
     pub fn commit_raw_batch(&self, raws: Vec<RawChangeset>) -> Result<RawBatchOutcome, RepoError> {
-        if raws.len() > MAX_RAW_BATCH {
-            return Err(too_many(raws.len()));
+        let most = max_raw_batch(self.format());
+        if raws.len() > most {
+            return Err(too_many(raws.len(), most));
         }
         for raw in &raws {
             self.check_raw(raw)?;
@@ -235,11 +247,12 @@ impl<O: ObjectStore> Repo<O> {
 impl<O: ObjectStore> RawBatch<'_, O> {
     /// Checks `raw` and makes its changeset as [`Repo::commit_raw_batch`] does (steps 1 and 2 of
     /// [the module documentation](self)), adds it to the batch, and returns its id. Nothing is
-    /// written. A raw refused leaves the batch as it was; one past [`MAX_RAW_BATCH`] is
-    /// [`StoreError::Limit`] ([`LimitKind::Records`]).
+    /// written. A raw refused leaves the batch as it was; one past [`max_raw_batch`] of the
+    /// store's format is [`StoreError::Limit`] ([`LimitKind::Records`]).
     pub fn push(&mut self, raw: RawChangeset) -> Result<ChangesetId, RepoError> {
-        if self.len() == MAX_RAW_BATCH {
-            return Err(too_many(MAX_RAW_BATCH + 1));
+        let most = max_raw_batch(self.repo.format());
+        if self.len() == most {
+            return Err(too_many(most + 1, most));
         }
         self.repo.check_raw(&raw)?;
         self.make(raw)
@@ -410,11 +423,11 @@ impl<O: ObjectStore> TreeRead for StoredTrees<'_, O> {
     }
 }
 
-/// The refusal of a batch of `got` changesets, more than one frame holds.
-fn too_many(got: usize) -> RepoError {
+/// The refusal of a batch of `got` changesets, more than the `most` one frame holds.
+fn too_many(got: usize, most: usize) -> RepoError {
     StoreError::Limit {
         what: LimitKind::Records,
-        max: bytes::to_u64(MAX_RAW_BATCH),
+        max: bytes::to_u64(most),
         got: bytes::to_u64(got),
     }
     .into()

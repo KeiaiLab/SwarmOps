@@ -341,7 +341,7 @@ Not part of the contract: these tune the implementation, or bound the store's la
 | Import first frame | 64 changesets | `swarmops_git::import::IMPORT_FIRST_FRAME` | How many changesets the first journal frame of `git import` holds: the frames after it are sized by the step budget. |
 | Import object batch | 67,108,864 bytes (64 MiB) | `swarmops_git::import::DEFAULT_OBJECT_BATCH_BYTES` | How many bytes of new trees and blobs `git import` gathers before it stores them. |
 | Import busy retries | 3 retries | `swarmops_git::import::BUSY_RETRIES` | How many times `git import` makes a store call again that found the writer lock held for its whole wait. |
-| Raw batch | 65,535 changesets | `swarmops_repo::MAX_RAW_BATCH` | The most changesets one journal frame of `git import` holds, whatever its frame size asks. |
+| Raw batch | 65,535 changesets | `swarmops_repo::MAX_RAW_BATCH` | The most changesets one journal frame of `git import` holds, whatever its frame size asks; one less in a FORMAT 3 store, whose frames end in a nonce. |
 | Export branch walk | 1,000 commits | `swarmops_git::export::BRANCH_WALK` | How many first parents of the branch's commit `git export` reads, looking for the export of the head or of an ancestor of it, before it says the branch moved. |
 | Export branch lock | 100 ms | `swarmops_git::gix_sink::LOCK_TIMEOUT` | How long `git export` tries a branch's lock, git's `core.filesRefLockTimeout` default, so that two exports racing to one branch take turns. |
 | Git file read whole | 16,777,216 bytes (16 MiB) | `swarmops_git::gix_source::MAX_WHOLE_LEN` | The longest file of the git directory (`HEAD` and other ref files, `config`, `objects/info/alternates`) that `git import` reads into memory whole; a longer one is refused unread. |
@@ -349,7 +349,9 @@ Not part of the contract: these tune the implementation, or bound the store's la
 | MCP line buffer | 65,536 bytes (64 KiB) | `swarmops_cli::mcp::LINE_KEEP` | The most bytes `mcp`'s line buffer keeps between messages. |
 | Parents | 255 parents | `swarmops_store::meta::parents::MAX_PARENTS` | The most parents a changeset's record holds (`details.store_limit` `parents`): a commit has one parent. |
 | Actor | 255 bytes | `swarmops_store::meta::store::MAX_ACTOR_LEN` | The most bytes a ref move's actor takes (`details.store_limit` `actor_bytes`): the agent name's limit keeps a request within it. |
-| Records | 65,535 records | `swarmops_store::meta::frame::MAX_RECORDS` | The most records one journal frame holds (`details.store_limit` `records`). |
+| Records | 65,535 records | `swarmops_store::meta::frame::MAX_RECORDS` | The most records one journal frame holds (`details.store_limit` `records`); in a FORMAT 3 store each frame's nonce takes one of them, leaving 65,534 to the caller. |
+| Features | 32 features | `swarmops_store::MAX_FEATURES` | The most features a FORMAT 3 store's `meta/features` lists: the optional record kinds it holds. |
+| Fact body | 4,096 bytes (4 KiB) | `swarmops_store::MAX_FACT_BODY` | The longest body of a fact, a FORMAT 3 journal record: its free text lives in a blob it names. |
 | Temp file grace | 86,400 s | `swarmops_store::GC_TEMP_GRACE` | How old a temp file in `objects/tmp/` or `meta/derived/tmp/` must be before `gc` removes it: a write in progress holds a younger one. |
 | Read window | 4,096 entries | `swarmops_store::meta::READ_WINDOW` | How many entries of `journal.off`, an index column or a sorted view one read of the store takes, so that no read allocates by a file's length. |
 | Lookup hits | 4,096 changesets | `swarmops_store::meta::MAX_LOOKUP_HITS` | The most changesets a lookup by id prefix or by delta hash gathers before it says its answer was cut. |

@@ -808,7 +808,7 @@ static DEFAULTS: [DefaultRow; 15] = [
 
 /// Values that tune the implementation, or bound the store's layout where no request reaches:
 /// no option sets them, and they are not part of the contract.
-static INTERNAL: [Limit; 27] = [
+static INTERNAL: [Limit; 29] = [
     internal_value(
         "Writer lock wait",
         declared(
@@ -907,7 +907,7 @@ static INTERNAL: [Limit; 27] = [
         ),
         Unit::Count("changesets"),
         "The most changesets one journal frame of `git import` holds, whatever its frame \
-             size asks.",
+             size asks; one less in a FORMAT 3 store, whose frames end in a nonce.",
     ),
     internal_value(
         "Export branch walk",
@@ -1002,7 +1002,32 @@ static INTERNAL: [Limit; 27] = [
             || 65_535,
         ),
         Unit::Count("records"),
-        "The most records one journal frame holds (`details.store_limit` `records`).",
+        "The most records one journal frame holds (`details.store_limit` `records`); in a \
+             FORMAT 3 store each frame's nonce takes one of them, leaving 65,534 to the caller.",
+    ),
+    internal_value(
+        "Features",
+        code(
+            "swarmops_store::MAX_FEATURES",
+            "crates/swarmops-store/src/meta/features.rs",
+            "pub const MAX_FEATURES: usize = 32;",
+            || bytes::to_u64(swarmops_store::MAX_FEATURES),
+        ),
+        Unit::Count("features"),
+        "The most features a FORMAT 3 store's `meta/features` lists: the optional record \
+             kinds it holds.",
+    ),
+    internal_value(
+        "Fact body",
+        code(
+            "swarmops_store::MAX_FACT_BODY",
+            "crates/swarmops-store/src/meta/frame.rs",
+            "pub const MAX_FACT_BODY: usize = 4_096;",
+            || bytes::to_u64(swarmops_store::MAX_FACT_BODY),
+        ),
+        Unit::Bytes,
+        "The longest body of a fact, a FORMAT 3 journal record: its free text lives in a blob \
+             it names.",
     ),
     internal_value(
         "Temp file grace",

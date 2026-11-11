@@ -101,7 +101,7 @@ use swarmops_core::{
     BlobId, ChangesetId, EntryTarget, LeafKind, ObjectKind, RepoPath, TreeEntry, TreeId,
 };
 use swarmops_repo::{
-    CasResult, LocalRepo, MAX_RAW_BATCH, RawChangeset, RepoError, RepoRead, StoreError,
+    CasResult, LocalRepo, RawChangeset, RepoError, RepoRead, StoreError, max_raw_batch,
 };
 use swarmops_store::{ExternalEntry, FsObjectStore, Recovered, SYSTEM_GIT};
 
@@ -150,8 +150,8 @@ pub struct ImportRequest {
     pub lossy: LossySet,
     /// Who moves the target ref, as the reflog records it.
     pub actor: String,
-    /// How many changesets a journal frame holds at most: 1 to 65,535
-    /// ([`swarmops_repo::MAX_RAW_BATCH`]), a number outside taken as the nearer bound.
+    /// How many changesets a journal frame holds at most: 1 to 65,535, 65,534 in FORMAT 3
+    /// ([`swarmops_repo::max_raw_batch`]), a number outside taken as the nearer bound.
     pub frame_changesets: usize,
     /// How long one frame's commit may hold the writer lock: the frames after the first are
     /// sized from the last one's cost to take about this long. [`Duration::ZERO`] gives frames
@@ -554,7 +554,7 @@ pub fn import(
 
     // The frames, each sized from the cost of the last one's commit; the phase log's
     // conversion (the test hooks only), counted in commits.
-    let ceiling = req.frame_changesets.clamp(1, MAX_RAW_BATCH);
+    let ceiling = req.frame_changesets.clamp(1, max_raw_batch(repo.format()));
     let mut rest = walk.unknown.as_slice();
     let mut size = first_frame(ceiling);
     let span = Span::start(Phase::ImportConvert);

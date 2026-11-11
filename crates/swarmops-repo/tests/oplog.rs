@@ -21,13 +21,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, ObjectKind, hash_object};
 use swarmops_repo::{
-    Advance, CasResult, Depth, LocalRepo, OpId, OpNotFoundReason, OpRecord, Operation, RepoError,
-    UndoOutcome,
+    Advance, CasResult, Depth, LocalRepo, OpId, OpNotFoundReason, OpRecord, Operation,
+    RawChangeset, RepoError, UndoOutcome, max_raw_batch,
 };
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, ORDER_CHECK_ENV};
 use swarmops_store::{
-    ChangesetMeta, Journal, MetaStore, RealFs, Recovered, StoreError, StoreFormat,
+    ChangesetMeta, Frame, Journal, Layout, LimitKind, MetaStore, RealFs, Record, Recovered,
+    StoreError, StoreFormat,
 };
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::child::{SIGABRT, run, this_test};
@@ -35,7 +36,7 @@ use swarmops_testkit::faults::checked;
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::fs::copy_dir;
 use swarmops_testkit::fs::{FailingFs, HoldThenFail};
-use swarmops_testkit::repo::{commit, new_repo, new_repo_as, put, request};
+use swarmops_testkit::repo::{commit, new_repo, new_repo_as, put, request, signature};
 use swarmops_testkit::store::layout_of;
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::test_name;
@@ -113,9 +114,37 @@ fn id_of(repo: &LocalRepo, op: u64) -> OpId {
 /// frame not listed, or not synced yet, too.
 #[track_caller]
 fn id_at(root: &Utf8Path, op: u64) -> OpId {
-    let meta = MetaStore::open_with_fs(root, checked(RealFs::new())).unwrap();
+    OpId::new(op, frame_at(root, op).crc)
+}
+
+/// The frame numbered `op` in the store at `root`, read as [`id_at`] reads it.
+#[track_caller]
+fn frame_at(root: &Utf8Path, op: u64) -> Frame {
+    let meta = MetaStore::open_in(layout_of(root), checked(RealFs::new())).unwrap();
     let frame = meta.read().unwrap().frame(op).unwrap();
-    OpId::new(op, frame.expect("the frame is in journal.log").crc)
+    frame.expect("the frame is in journal.log")
+}
+
+/// A fresh repository on a FORMAT 3 store, which no `init` makes yet: a FORMAT 2 one, its
+/// `meta/` made again as FORMAT 3's ([`MetaStore::create_in`]) and its `FORMAT` naming 3.
+fn new_repo_v3() -> (tempfile::TempDir, Utf8PathBuf, LocalRepo) {
+    let (dir, root, repo) = new_repo_as(StoreFormat::V2);
+    drop(repo);
+    let layout = Layout::with_format(root.clone(), StoreFormat::V3);
+    std::fs::remove_dir_all(layout.meta_dir()).unwrap();
+    MetaStore::create_in(layout.clone(), Arc::new(RealFs::new())).unwrap();
+    std::fs::write(layout.format_file(), StoreFormat::V3.marker()).unwrap();
+    let repo = LocalRepo::open(&root).unwrap();
+    assert_eq!(repo.format(), StoreFormat::V3);
+    (dir, root, repo)
+}
+
+/// A fresh repository of `format`, FORMAT 3's made as [`new_repo_v3`] makes it.
+fn repo_of(format: StoreFormat) -> (tempfile::TempDir, Utf8PathBuf, LocalRepo) {
+    match format {
+        StoreFormat::V3 => new_repo_v3(),
+        other => new_repo_as(other),
+    }
 }
 
 /// Undoes operation `op` as [`UNDOER`], by the id the operation log lists: what the undo did,
@@ -432,13 +461,18 @@ fn undo_never_acts_on_a_frame_its_writer_cuts() {
 /// back by its failed sync; returns the id a lock-free read gave its frame, numbered `op`, before
 /// the cut.
 fn taken_back(root: &Utf8Path, op: u64, from: ChangesetId, cut: ChangesetId) -> OpId {
+    OpId::new(op, taken_back_frame(root, op, from, cut).crc)
+}
+
+/// [`taken_back`], returning the frame a lock-free read gave before the cut.
+fn taken_back_frame(root: &Utf8Path, op: u64, from: ChangesetId, cut: ChangesetId) -> Frame {
     let (fs, held) = HoldThenFail::new(layout_of(root).journal_log(), RealFs::new());
     let writer = LocalRepo::open_with_fs(root, checked(fs)).unwrap();
     thread::scope(|scope| {
         // 1. A's frame is whole in journal.log, not synced: a read without the lock sees it.
         let writing = scope.spawn(|| writer.cas_ref("release/r", Some(from), Some(cut), ACTOR));
         held.wait();
-        let id = id_at(root, op);
+        let id = frame_at(root, op);
 
         // 2. Let go: the sync fails, and A cuts its frame.
         held.release();
@@ -525,53 +559,177 @@ fn checksum_comes_before_cas() {
 /// How many take-backs [`take_backs_never_reuse_an_id`] makes.
 const TAKE_BACKS: u64 = 1_000;
 
-/// [`undo_of_a_taken_back_id_is_not_found`] [`TAKE_BACKS`] times on one store: each round's
-/// writer A moves `release/r` and cuts its frame, writer B takes its number with another move,
-/// and the undo by A's id is not found (`checksum`) and leaves B's move. The op log then lists
-/// every number once, and no id that was taken back.
-#[test]
-#[ignore = "slow, ~130 s: 1,000 take-backs; ~25 s idle, 128 s loaded"]
-fn take_backs_never_reuse_an_id() {
-    let (_dir, root, repo) = new_repo();
-    let chain = chain(&repo);
-    cas(&repo, "release/r", None, Some(chain[0])); // op 3
-    let mut at = 0;
-    let mut cut_ids = Vec::new();
-    for round in 0..TAKE_BACKS {
-        // 1. A moves release/r to the next changeset and cuts the frame; B moves it to the one
-        // after, so their payloads differ.
-        let op = round + 4;
-        let (cut, kept) = ((at + 1) % 3, (at + 2) % 3);
-        let id = taken_back(&root, op, chain[at], chain[cut]);
-        cas(&repo, "release/r", Some(chain[at]), Some(chain[kept]));
-        at = kept;
+/// [`undo_of_a_taken_back_id_is_not_found`] [`TAKE_BACKS`] times on one store of each format:
+/// each round's writer A moves `release/r` and cuts its frame, writer B takes its number with
+/// another move, and the undo by A's id is not found (`checksum`) and leaves B's move. The op log
+/// then lists every number once, and no id that was taken back. FORMAT 3's store is made by
+/// [`new_repo_v3`] until `init` makes one.
+mod take_backs_never_reuse_an_id {
+    use super::*;
 
-        // 2. The undo by A's id is not found, and B's move stays.
-        match repo.undo(id, UNDOER) {
-            Err(RepoError::OpNotFound {
-                op: missing,
-                reason: OpNotFoundReason::Checksum,
-                ..
-            }) => assert_eq!(missing, op, "round {round}"),
-            other => panic!("round {round}: expected OpNotFound, got {other:?}"),
+    fn run(format: StoreFormat) {
+        let (_dir, root, repo) = repo_of(format);
+        let chain = chain(&repo);
+        cas(&repo, "release/r", None, Some(chain[0])); // op 3
+        let mut at = 0;
+        let mut cut_ids = Vec::new();
+        for round in 0..TAKE_BACKS {
+            // 1. A moves release/r to the next changeset and cuts the frame; B moves it to the one
+            // after, so their payloads differ.
+            let op = round + 4;
+            let (cut, kept) = ((at + 1) % 3, (at + 2) % 3);
+            let id = taken_back(&root, op, chain[at], chain[cut]);
+            cas(&repo, "release/r", Some(chain[at]), Some(chain[kept]));
+            at = kept;
+
+            // 2. The undo by A's id is not found, and B's move stays.
+            match repo.undo(id, UNDOER) {
+                Err(RepoError::OpNotFound {
+                    op: missing,
+                    reason: OpNotFoundReason::Checksum,
+                    ..
+                }) => assert_eq!(missing, op, "round {round}"),
+                other => panic!("round {round}: expected OpNotFound, got {other:?}"),
+            }
+            assert_eq!(
+                target(&repo, "release/r"),
+                Some(chain[kept]),
+                "round {round}"
+            );
+            cut_ids.push(id);
         }
-        assert_eq!(
-            target(&repo, "release/r"),
-            Some(chain[kept]),
-            "round {round}"
-        );
-        cut_ids.push(id);
+
+        // 3. Every number listed once, newest first; no taken-back id among them.
+        let total = TAKE_BACKS + 4;
+        let (ops, older) = repo.op_log(None, usize::try_from(total).unwrap()).unwrap();
+        assert!(!older, "op 0 is on the page");
+        let numbers: Vec<u64> = (0..total).rev().collect();
+        assert!(seqs(&ops) == numbers, "every number once, none skipped");
+        let ids: HashSet<OpId> = ops.iter().map(|op| OpId::new(op.seq, op.crc)).collect();
+        let reused: Vec<&OpId> = cut_ids.iter().filter(|id| ids.contains(id)).collect();
+        assert_eq!(reused, Vec::<&OpId>::new(), "no taken-back id listed");
     }
 
-    // 3. Every number listed once, newest first; no taken-back id among them.
-    let total = TAKE_BACKS + 4;
-    let (ops, older) = repo.op_log(None, usize::try_from(total).unwrap()).unwrap();
-    assert!(!older, "op 0 is on the page");
-    let numbers: Vec<u64> = (0..total).rev().collect();
-    assert!(seqs(&ops) == numbers, "every number once, none skipped");
-    let ids: HashSet<OpId> = ops.iter().map(|op| OpId::new(op.seq, op.crc)).collect();
-    let reused: Vec<&OpId> = cut_ids.iter().filter(|id| ids.contains(id)).collect();
-    assert_eq!(reused, Vec::<&OpId>::new(), "no taken-back id listed");
+    #[test]
+    #[ignore = "slow, ~130 s: 1,000 take-backs; ~25 s idle, 128 s loaded"]
+    fn format_1() {
+        run(StoreFormat::V1);
+    }
+
+    #[test]
+    #[ignore = "slow, ~130 s: 1,000 take-backs; ~25 s idle, 128 s loaded"]
+    fn format_2() {
+        run(StoreFormat::V2);
+    }
+
+    #[test]
+    #[ignore = "slow, ~130 s: 1,000 take-backs; ~25 s idle, 128 s loaded"]
+    fn format_3() {
+        run(StoreFormat::V3);
+    }
+}
+
+/// How many fresh stores [`identical_moves`] tries for two moves in one second.
+const SAME_SECOND_TRIES: u32 = 5;
+
+/// A fresh repository of `format` where writer A's move of `release/r` from `c1` to `c2` (op 4)
+/// was cut back, and B then made the same move, by the same actor, in the same second: their
+/// records are byte-identical (a store is tried afresh when a second boundary fell between them).
+/// Returns the repository, A's frame as a reader saw it before the cut, and B's.
+fn identical_moves(format: StoreFormat) -> (tempfile::TempDir, LocalRepo, Frame, Frame) {
+    for _ in 0..SAME_SECOND_TRIES {
+        let (dir, root, repo) = repo_of(format);
+        let [c1, c2, _] = chain(&repo);
+        cas(&repo, "release/r", None, Some(c1)); // op 3
+        let a = taken_back_frame(&root, 4, c1, c2);
+        cas(&repo, "release/r", Some(c1), Some(c2)); // op 4, B's
+        let b = frame_at(&root, 4);
+        if a.records == b.records {
+            return (dir, repo, a, b);
+        }
+    }
+    panic!("no two moves in one second in {SAME_SECOND_TRIES} tries");
+}
+
+/// Byte-identical operations get distinct ids in FORMAT 3 (B9; the FORMAT 3 design §2.7): the
+/// same move, by the same actor in the same second, taken back and made again, ends in another
+/// nonce, so its payload and CRC differ; the undo by the old id is not found (`checksum`) and
+/// leaves the new move.
+#[test]
+fn byte_identical_moves_get_distinct_op_ids() {
+    let (_dir, repo, a, b) = identical_moves(StoreFormat::V3);
+    assert!(a.nonce.is_some() && b.nonce.is_some() && a.nonce != b.nonce);
+    assert_ne!(a.crc, b.crc, "another id");
+    let c2 = match &b.records[..] {
+        [Record::RefMove { new, .. }] => *new,
+        other => panic!("one move, got {other:?}"),
+    };
+    match repo.undo(OpId::new(4, a.crc), UNDOER) {
+        Err(RepoError::OpNotFound {
+            op: 4,
+            reason: OpNotFoundReason::Checksum,
+            ..
+        }) => {}
+        other => panic!("expected OpNotFound, got {other:?}"),
+    }
+    assert_eq!(target(&repo, "release/r"), c2, "B's move stays");
+}
+
+/// The self-check of [`byte_identical_moves_get_distinct_op_ids`]: below FORMAT 3 the same two
+/// moves share an id, the case the nonce closes; so the test above meets the case it is for.
+#[test]
+fn byte_identical_moves_share_an_id_below_format_3() {
+    let (_dir, _repo, a, b) = identical_moves(StoreFormat::V2);
+    assert_eq!((a.nonce, b.nonce), (None, None));
+    assert_eq!(a.crc, b.crc, "the same id");
+}
+
+/// A raw batch of 65,535 changesets fills a FORMAT 1 or 2 frame, but a FORMAT 3 frame holds one
+/// less, its nonce taking the last place: refused before any object is written.
+#[test]
+fn a_v3_raw_batch_of_65535_is_refused_before_objects() {
+    assert_eq!(max_raw_batch(StoreFormat::V2), 65_535);
+    assert_eq!(max_raw_batch(StoreFormat::V3), 65_534);
+    let (_dir, root, repo) = new_repo_v3();
+    let objects =
+        || walkdir_count(&Layout::with_format(root.clone(), StoreFormat::V3).objects_dir());
+    let before = objects();
+    let raw = RawChangeset::new(
+        Vec::new(),
+        swarmops_core::TreeId::new(hash_object(ObjectKind::Tree, b"no such tree")),
+        signature(),
+        signature(),
+        b"m".to_vec(),
+        Vec::new(),
+        Vec::new(),
+    );
+    let refused = repo.commit_raw_batch(vec![raw; 65_535]);
+    match refused {
+        Err(RepoError::Store(StoreError::Limit {
+            what: LimitKind::Records,
+            max: 65_534,
+            got: 65_535,
+        })) => {}
+        other => panic!("expected Limit, got {:?}", other.map(drop)),
+    }
+    assert_eq!(objects(), before, "no object written");
+}
+
+/// How many files the directory at `dir` holds, at any depth.
+fn walkdir_count(dir: &Utf8Path) -> usize {
+    let mut count = 0;
+    let mut dirs = vec![dir.as_std_path().to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else {
+                count += 1;
+            }
+        }
+    }
+    count
 }
 
 /// `undo` of a move restores the ref to what it named before the move, in one new frame of one
