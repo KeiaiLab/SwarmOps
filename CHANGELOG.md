@@ -19,6 +19,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 ## [Unreleased]
 
+### Added
+
+- Each workspace mutation that succeeds records its holder in `workspaces/hold/<name>.json`
+  beside the registry: who changed the workspace last, when, the lease and the commits not landed
+  yet; unsynced, a failed write is a warning, and `ws delete` removes it.
+
 ### Fixed
 
 - `remote add` and `clone` refuse an `http://` or `https://` URL whose user is a token, as they

@@ -966,6 +966,14 @@ left).
   `.swarmws/checks/<attempt>.log` by full path, as the other `.swarmws` records are written: a
   `.swarmws` swapped for a link is written through. The tree's files are not. *Unscheduled (the
   M16 design §1). Found: M16 Task S1.*
+- **A hold record records; it guards nothing.** Since M21 each workspace mutation that succeeds
+  writes `workspaces/hold/<name>.json` beside the registry: the identity that made it, when, and
+  the commits not landed yet. It is not synced, and a failed write is a warning: after a power cut
+  or a full disk it can be missing or torn, which reads as unknown until the next mutation writes
+  it again. Two identities can still work in one workspace, and the record names the last; a
+  second holder is not refused and an expired one is not reclaimed. Only a mutation renews it: an
+  agent that only runs `ws status` and `ws diff` keeps the time of its last change. *Unscheduled
+  (decision D21 of the M21 design, §10). Found: the M21 design §10.4.*
 
 ## Platforms
 
