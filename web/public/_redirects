@@ -7,3 +7,14 @@
 /guides/claude-code.html       /docs/guides/claude-code      308
 /guides/git-round-trip         /docs/guides/git-round-trip   308
 /guides/git-round-trip.html    /docs/guides/git-round-trip   308
+# The other guides under the same pattern, so every /guides/<name> address reaches its page.
+/guides/install                /docs/guides/install            308
+/guides/install.html           /docs/guides/install            308
+/guides/quick-start            /docs/guides/quick-start        308
+/guides/quick-start.html       /docs/guides/quick-start        308
+/guides/commit-and-land        /docs/guides/commit-and-land    308
+/guides/commit-and-land.html   /docs/guides/commit-and-land    308
+/guides/history-and-undo       /docs/guides/history-and-undo   308
+/guides/history-and-undo.html  /docs/guides/history-and-undo   308
+/guides/github-remote          /docs/guides/github-remote      308
+/guides/github-remote.html     /docs/guides/github-remote      308
