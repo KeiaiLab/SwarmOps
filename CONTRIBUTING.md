@@ -56,8 +56,7 @@ SwarmOps is pre-release. This page is how changes get made, for people and agent
   with its tasks and acceptance tests, and cites the spec sections it implements. Small fixes
   need no plan.
 - **Check what is already known.** [docs/known-limitations.md](docs/known-limitations.md) lists
-  what M1, M1.5, M1.6, M2, M3, M4 and M8 leave open and the milestone that is meant to close
-  each item.
+  what is still open and the milestone that is meant to close each item.
 
 ## Setup
 
@@ -175,7 +174,7 @@ and binary code, and the page lists what review reads for and the recorded devia
 - **Test-only code stays out of release builds.** Test doubles live in test code or behind the
   `test-hooks` cargo feature (the store's `CrashAtFs`, `FailAtFs` and `OrderCheckFs`, which no
   build without the feature can name), and a release build honours no test hook. The hooks are
-  nine environment variables named `SWARMOPS_TEST_*` (`SWARMOPS_TEST_CRASH_AT=<k>`, which
+  ten environment variables named `SWARMOPS_TEST_*` (`SWARMOPS_TEST_CRASH_AT=<k>`, which
   aborts the process at its k-th store filesystem call, `SWARMOPS_TEST_FS_CALLS=<file>`, which
   makes it write how many calls it made,
   `SWARMOPS_TEST_FAIL_AT=<k>[:once|persistent[:eio|enospc]]`, which fails its k-th call with an
@@ -186,8 +185,9 @@ and binary code, and the page lists what review reads for and the recorded devia
   push count other hosts as GitHub's for its limits, `SWARMOPS_TEST_SERVE_CACHE`, which bounds
   `serve`'s pack cache or skips its reachability check, `SWARMOPS_TEST_LEAD_WAIT`, which makes a
   writer that leads the write queue wait for other requests and plan them, and
-  `SWARMOPS_TEST_PHASE_LOG`, which makes a sync and a push append each phase's time to a file),
-  read only under `#[cfg(feature = "test-hooks")]`. The feature exists on `swarmops-store`,
+  `SWARMOPS_TEST_PHASE_LOG`, which makes a sync and a push append each phase's time to a file,
+  and `SWARMOPS_TEST_RAW_OBJECTS=1`, which makes a store write object files without zstd, so that
+  a large fixture builds faster), read only under `#[cfg(feature = "test-hooks")]`. The feature exists on `swarmops-store`,
   `swarmops-repo`, `swarmops-git`, `swarmops-ws`, `swarmops-ops`, `swarmops-cli` and
   `swarmops-testkit`;
   `swarmops-cli/test-hooks` turns on all of them. A test that needs them is marked
