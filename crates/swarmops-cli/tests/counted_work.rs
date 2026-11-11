@@ -4,8 +4,9 @@
 //! as a count that differs, with no clock noise.
 //!
 //! ```text
-//!   built(1,000) ──┐
-//!   built(50,000) ─┴─▶ clone_of ─▶ prepare ─▶ Counts::since
+//!   the small pair (just check)            the A1 pair (a1_*, SWARMOPS_SCALE=1)
+//!   built(1,000) ──┐                       bulk::build_small ─┐
+//!   built(50,000) ─┴─▶ clone_of ─▶ prepare ─▶ Counts::since ◀─┴─ bulk::open(Large)
 //!                      (hard links)  (unmeasured)  around the one operation
 //! ```
 //!
@@ -21,6 +22,10 @@
 //! operations of both stores record one changeset each, more than a page of the op log, so that
 //! an operation that reads a page (`ws create` does) sees the same page on both.
 //!
+//! The A1 twins (`a1_*`) run the same gates on `bulk`'s two stores, each cloned, only with
+//! `SWARMOPS_SCALE=1` ([`bulk::gate`]); without it each prints `scale-perf: <case> not run`, and
+//! while the large store misses a part, `scale-perf: <case> not run (fixture k of n)`.
+//!
 //! The stores are FORMAT 2 ([`swarmops_store::DEFAULT_INIT_FORMAT`]), which has no view steps; a
 //! FORMAT 3 store past `RUN_BACKLOG_MAX` would step its views after a commit on one side only.
 
@@ -30,8 +35,8 @@ use std::sync::Arc;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_api::{
-    ChangeInput, ChangeOp, CommitReq, ContentInput, Identity, LandReq, ModeInput, ReadTreeReq,
-    RebaseReq, StoreOps, WsCreateReq, WsStatusReq,
+    ChangeInput, ChangeOp, CommitReq, ContentInput, Identity, InfoReq, LandReq, ModeInput,
+    ReadTreeReq, RebaseReq, StoreOps, WsCreateReq, WsStatusReq,
 };
 use swarmops_core::{
     BlobId, ChangesetId, LeafKind, ObjectKind, Signature, Tree, TreeEntry, TreeId, hash_object,
@@ -41,6 +46,7 @@ use swarmops_ops::serve::access::{Access, Action};
 use swarmops_repo::{LocalRepo, RawChangeset};
 use swarmops_store::fs_ops::counters::{Counters, Counts};
 use swarmops_store::{DEFAULT_INIT_FORMAT, RealFs};
+use swarmops_testkit::bulk::{self, Scale, Size};
 use swarmops_testkit::measure::base_dir;
 use swarmops_ws::{Ctx, RealHost};
 use tempfile::TempDir;
@@ -103,7 +109,7 @@ struct Store {
     dir: TempDir,
     root: Utf8PathBuf,
     ops: LocalOps,
-    /// A directory three levels down: `data/d000`.
+    /// A directory three levels down: `data/d000` or `bulk`'s `g000/d000`.
     deep: &'static str,
 }
 
@@ -150,6 +156,12 @@ fn put(path: &str, text: &str) -> ChangeInput {
 }
 
 impl Store {
+    /// How many changesets the store holds.
+    fn size(&self) -> u64 {
+        let info = self.ops.repo_info(InfoReq::default());
+        info.expect("repo info").changesets
+    }
+
     /// The workspace operations' context on this store.
     fn ctx(&self) -> Ctx<'_> {
         Ctx::new(
@@ -346,6 +358,147 @@ fn a_planted_whole_tree_read_is_caught() {
         differ.iter().any(|d| d.starts_with("object_reads ")),
         "a whole-tree read must differ: {differ:?}"
     );
+}
+
+/// The A1 twins, by name: each ends on `scale-perf: <name> not run` without the gate.
+const A1_CASES: [&str; 6] = [
+    "a1_one_file_commit_counts_the_same",
+    "a1_one_land_attempt_counts_the_same",
+    "a1_sparse_create_of_100_files_counts_the_same",
+    "a1_status_of_an_untouched_workspace_reads_no_object",
+    "a1_rebase_onto_other_paths_reads_no_blob",
+    "a1_read_grant_check_counts_the_same",
+];
+
+/// `bulk`'s directory three levels down, in both of its stores.
+const BULK_DEEP: &str = "g000/d000";
+
+/// The gate on A1's pair, `bulk`'s two stores, each cloned: `work` counts the same on both.
+/// `None`, its `not run` line out, while the gate is shut or the large store not whole.
+fn same_on_a1_pair(case: &str, work: Work) -> Option<(Counts, Counts)> {
+    // 1. The gate, then the large store, never built here.
+    if bulk::gate(case) == Scale::NotRun {
+        return None;
+    }
+    let Some(large) = bulk::open(Size::Large) else {
+        let (k, n) = bulk::parts(Size::Large);
+        println!("scale-perf: {case} not run (fixture {k} of {n})");
+        return None;
+    };
+    let small = bulk::build_small();
+
+    // 2. Both cloned, and a page of the op log made alike: `bulk` records a part a frame.
+    let small = clone_of(&small.store, BULK_DEEP);
+    let large = clone_of(&large.store, BULK_DEEP);
+    for store in [&small, &large] {
+        for k in 0..TAIL_OPS {
+            store.commit(vec![put("tail.txt", &format!("{k}\n"))], Advance::Main);
+        }
+    }
+
+    // 3. The counts, side by side, then the gate.
+    let (small_counts, large_counts) = (count(&small, work), count(&large, work));
+    let sizes = format!("{} vs {} changesets", small.size(), large.size());
+    let pairs = work_counts(&small_counts)
+        .into_iter()
+        .zip(work_counts(&large_counts));
+    for ((name, a), (_, b)) in pairs {
+        bulk::say(case, &format!("{name} {a} vs {b} ({sizes})"));
+    }
+    let differ = differences(&small_counts, &large_counts);
+    assert!(
+        differ.is_empty(),
+        "{case}: counts differ, {sizes}: {differ:?}"
+    );
+    Some((small_counts, large_counts))
+}
+
+#[test]
+#[ignore = "slow, ~48 s at 20,480 changesets (release, load 1,000): clones bulk's large store by hard links"]
+fn a1_one_file_commit_counts_the_same() {
+    same_on_a1_pair(A1_CASES[0], Work::Commit);
+}
+
+#[test]
+#[ignore = "slow, ~24 s at 20,480 changesets (release, load 1,000): clones bulk's large store by hard links"]
+fn a1_one_land_attempt_counts_the_same() {
+    same_on_a1_pair(A1_CASES[1], Work::Land);
+}
+
+#[test]
+#[ignore = "slow, ~28 s at 20,480 changesets (release, load 1,000): clones bulk's large store by hard links"]
+fn a1_sparse_create_of_100_files_counts_the_same() {
+    same_on_a1_pair(A1_CASES[2], Work::Sparse);
+}
+
+#[test]
+#[ignore = "slow, ~21 s at 20,480 changesets (release, load 1,000): clones bulk's large store and writes all its files"]
+fn a1_status_of_an_untouched_workspace_reads_no_object() {
+    let Some((small, large)) = same_on_a1_pair(A1_CASES[3], Work::Status) else {
+        return;
+    };
+    assert_eq!(small.object_reads, 0, "the small store: no object read");
+    assert_eq!(large.object_reads, 0, "the large store: no object read");
+}
+
+#[test]
+#[ignore = "slow, ~30 s at 20,480 changesets (release, load 1,000): clones bulk's large store by hard links"]
+fn a1_rebase_onto_other_paths_reads_no_blob() {
+    same_on_a1_pair(A1_CASES[4], Work::Rebase);
+}
+
+#[test]
+#[ignore = "slow, ~28 s at 20,480 changesets (release, load 1,000): clones bulk's large store by hard links"]
+fn a1_read_grant_check_counts_the_same() {
+    same_on_a1_pair(A1_CASES[5], Work::Grant);
+}
+
+/// The A1 twins' gate: without `SWARMOPS_SCALE` each says `not run` and makes nothing; with it
+/// and no large store whole, each says how far the store is and builds none.
+#[test]
+fn an_a1_twin_without_its_store_says_not_run() {
+    let bench = tempfile::tempdir().unwrap();
+    for case in A1_CASES {
+        // 1. The gate shut: exactly the `not run` line.
+        let shut = scale_lines(case, bench.path(), Scale::NotRun);
+        assert_eq!(shut, [format!("scale-perf: {case} not run")], "{case}");
+
+        // 2. The gate open, no part of the large store: how far it is.
+        let open = scale_lines(case, bench.path(), Scale::Run);
+        let far = format!("scale-perf: {case} not run (fixture 0 of {LARGE_PARTS})");
+        assert_eq!(open, [far], "{case}");
+    }
+
+    // Nothing was built.
+    let left: Vec<_> = fs::read_dir(bench.path()).unwrap().collect();
+    assert!(
+        left.is_empty(),
+        "an A1 twin without its store made {left:?}"
+    );
+}
+
+/// The parts of the large store [`an_a1_twin_without_its_store_says_not_run`] names.
+const LARGE_PARTS: usize = 4;
+
+/// The `scale-perf: ` lines of A1 twin `case`, run alone, its gate `scale`, under `bench`, the
+/// large store [`LARGE_PARTS`] parts long.
+fn scale_lines(case: &str, bench: &Path, scale: Scale) -> Vec<String> {
+    let test = swarmops_testkit::test_name!(case);
+    let mut command = swarmops_testkit::child::this_test(&test);
+    command
+        .env(bulk::LARGE_ENV, (LARGE_PARTS * bulk::PART).to_string())
+        .env("SWARMOPS_BENCH_DIR", bench);
+    match scale {
+        Scale::Run => command.env(bulk::SCALE_ENV, "1"),
+        Scale::NotRun => command.env_remove(bulk::SCALE_ENV),
+    };
+    let output = swarmops_testkit::child::run(&mut command);
+    assert!(output.status.success(), "{case}: {output:?}");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.starts_with("scale-perf: "))
+        .map(str::to_owned)
+        .collect()
 }
 
 /// What the generator writes, versioned: a change to the stores' shape changes this, and every
