@@ -31,6 +31,7 @@ mod blob_get;
 mod conflict;
 pub mod content;
 mod error;
+pub mod expose;
 mod gc;
 mod git;
 pub mod health;
