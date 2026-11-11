@@ -67,6 +67,8 @@ const ROWS: [(&[&str], Verdict); 10] = [
             "returned error: 401",
             "returned error: 403",
             "invalid username or password",
+            // `swarmops serve`'s refusal, as git relays it.
+            "remote error: e_auth:",
         ],
         Verdict::Rejected(RejectReason::Auth),
     ),
@@ -76,6 +78,7 @@ const ROWS: [(&[&str], Verdict); 10] = [
             "returned error: 404",
             "does not appear to be a git repository",
             "' not found",
+            "remote error: e_not_a_repo:",
         ],
         Verdict::Rejected(RejectReason::NotFound),
     ),
@@ -504,6 +507,29 @@ fatal: Could not read from remote repository.";
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn serve_auth_is_auth() {
+        // Probe G→S 5.6 and 5.7: serve's JSON envelope before and after git's line.
+        let no_grant = r#"{"ok":false,"op":"serve","api":1,"error":{"code":"E_AUTH","message":"no grant of access.toml names person/mallory","retryable":false,"exit":5,"details":{"reason":"unknown_identity"},"hint":"the operator writes access.toml in the store's root: version = 1, then one [[grant]] per set of callers (who, read, push, force, land)"},"meta":{"elapsed_ms":25,"resolved":{},"auth":"trust"}}
+fatal: remote error: E_AUTH: no grant of access.toml names person/mallory
+"#;
+        let no_caller = r#"fatal: remote error: E_AUTH: serve names no caller: --as is not given, and SWARMOPS_AGENT does not name one for serve
+{"ok":false,"op":"serve","api":1,"error":{"code":"E_AUTH","message":"serve names no caller: --as is not given, and SWARMOPS_AGENT does not name one for serve","retryable":false,"exit":5,"details":{"reason":"no_identity"},"hint":"name the caller with --as <family>/<instance> on serve's command line: the command= of its authorized_keys line, or the web server's CGI entry"},"meta":{"elapsed_ms":1,"resolved":{},"auth":"trust"}}
+"#;
+        for stderr in [no_grant, no_caller] {
+            assert_eq!(reason(failure, stderr), RejectReason::Auth, "{stderr:?}");
+        }
+    }
+
+    #[test]
+    fn serve_not_a_repo_is_not_found() {
+        // Probe G→S 5.8: no store of that name is served.
+        let stderr = r#"{"ok":false,"op":"serve","api":1,"error":{"code":"E_NOT_A_REPO","message":"no store named nope is served","retryable":false,"exit":6,"details":{},"hint":"ask the server's operator for the store's name"},"meta":{"elapsed_ms":0,"resolved":{},"auth":"trust"}}
+fatal: remote error: E_NOT_A_REPO: no store named nope is served
+"#;
+        assert_eq!(reason(failure, stderr), RejectReason::NotFound);
     }
 
     #[test]
