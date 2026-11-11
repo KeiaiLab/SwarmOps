@@ -36,17 +36,18 @@
 //! instant. An abandoned helper parks until the holder lets go; a holder that never does (a
 //! hung process) leaves one parked thread per abandoned wait in each waiting process.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SendError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::error::{FileOp, IoFailure, StoreError};
 use crate::fs_ops;
+use crate::fs_ops::counters::Counters;
 use crate::layout::Layout;
 
 /// The exclusive lock on `meta/lock`, held until dropped.
@@ -58,6 +59,10 @@ use crate::layout::Layout;
 #[non_exhaustive]
 pub struct MetaLock {
     file: File,
+    /// When it was given to its caller: its hold is counted from then
+    /// ([`Counters`]). `None` for a helper's guard not handed over yet: an abandoned
+    /// one is no caller's hold.
+    given: Option<Instant>,
 }
 
 impl MetaLock {
@@ -68,26 +73,63 @@ impl MetaLock {
     /// root, and what failed: its open, or the lock. A `meta/lock` that is not a regular file
     /// fails its open at once, as damage (kind `InvalidData`; see the module documentation).
     pub fn acquire(layout: &Layout, timeout: Duration) -> Result<MetaLock, StoreError> {
-        match Self::start(layout)? {
-            Started::Held(lock) => Ok(lock),
-            Started::Waiting(wait) => wait.wait(timeout).unwrap_or(Err(StoreError::Busy)),
-        }
+        let wait = match Self::start(layout)? {
+            Started::Held(lock) => return Ok(lock),
+            Started::Waiting(wait) => wait,
+        };
+
+        // A wait that gives up is a timeout of the counters; its time ends with the wait.
+        wait.wait(timeout).unwrap_or_else(|| {
+            Counters::process().lock_timeout();
+            Err(StoreError::Busy)
+        })
     }
 
     /// The first half of [`MetaLock::acquire`]: opens `meta/lock` and tries the lock without
     /// blocking. [`Started::Held`] if it was free; else [`Started::Waiting`], whose
     /// [`LockWait::wait`] waits for it in the kernel's queue. Spawns no thread.
+    ///
+    /// Every start is one wait of the process's [`Counters`], timed until the lock is given or
+    /// the [`LockWait`] is dropped: a lone writer's, a queue lead's and a queue member's alike.
     pub(crate) fn start(layout: &Layout) -> Result<Started, StoreError> {
+        let counters = Counters::process();
+        let began = Instant::now();
+        counters.lock_wait();
+
+        // 1. The open: a failure ends the wait.
         let lock = layout.meta_lock();
-        let file = open_lock_file(lock.as_std_path())
-            .map_err(|e| lock_failure(layout, FileOp::Open, e))?;
+        let file = match open_lock_file(lock.as_std_path()) {
+            Ok(file) => file,
+            Err(e) => {
+                counters.lock_waited(began);
+                return Err(lock_failure(layout, FileOp::Open, e).into());
+            }
+        };
+
+        // 2. The try: only a taken lock leaves the wait open.
         match file.try_lock() {
-            Ok(()) => Ok(Started::Held(Self { file })),
+            Ok(()) => {
+                counters.lock_waited(began);
+                Ok(Started::Held(Self::given(file)))
+            }
             Err(TryLockError::WouldBlock) => Ok(Started::Waiting(LockWait {
                 layout: layout.clone(),
                 state: RefCell::new(WaitState::Idle(file)),
+                began,
+                over: Cell::new(false),
             })),
-            Err(TryLockError::Error(e)) => Err(lock_failure(layout, FileOp::Lock, e).into()),
+            Err(TryLockError::Error(e)) => {
+                counters.lock_waited(began);
+                Err(lock_failure(layout, FileOp::Lock, e).into())
+            }
+        }
+    }
+
+    /// The lock on `file`, given to its caller now: its hold is counted from here.
+    fn given(file: File) -> MetaLock {
+        MetaLock {
+            file,
+            given: Some(Instant::now()),
         }
     }
 
@@ -150,6 +192,11 @@ impl Drop for MetaLock {
         // no forked child still shares the descriptor; unlocking releases it at once. An
         // error leaves the close to do it.
         let _ = self.file.unlock();
+
+        // The hold, if a caller had it.
+        if let Some(given) = self.given {
+            Counters::process().lock_held(given);
+        }
     }
 }
 
@@ -165,11 +212,16 @@ pub(crate) enum Started {
 /// A wait for `meta/lock`, from [`MetaLock::start`]: its first [`LockWait::wait`] with a limit
 /// above zero hands the open file to a helper thread blocked in `flock`, and each wait after it
 /// waits on that helper's hand-off. Dropping it abandons the helper, as a timed-out
-/// [`MetaLock::acquire`] does (see the module documentation).
+/// [`MetaLock::acquire`] does (see the module documentation). Its time is counted until it
+/// gives the lock or is dropped ([`Counters`]).
 #[derive(Debug)]
 pub(crate) struct LockWait {
     layout: Layout,
     state: RefCell<WaitState>,
+    /// When [`MetaLock::start`] began it.
+    began: Instant,
+    /// Whether its time is counted already: it gave the lock.
+    over: Cell<bool>,
 }
 
 /// Where a [`LockWait`] is.
@@ -210,7 +262,9 @@ impl LockWait {
         };
         let failed = |e| lock_failure(&self.layout, FileOp::Lock, e);
         let handed = match waiting.recv_timeout(limit) {
-            Ok(locked) => locked.map_err(|e| failed(e).into()),
+            Ok(locked) => locked
+                .map(|lock| self.give(lock))
+                .map_err(|e| failed(e).into()),
             Err(RecvTimeoutError::Timeout) => return None,
             Err(RecvTimeoutError::Disconnected) => Err(failed(io::Error::other(
                 "the thread waiting for it ended without it",
@@ -219,6 +273,24 @@ impl LockWait {
         };
         *state = WaitState::Over;
         Some(handed)
+    }
+
+    /// `lock`, handed over by the helper, given to the caller: the wait's time ends and the
+    /// hold's begins.
+    fn give(&self, mut lock: MetaLock) -> MetaLock {
+        Counters::process().lock_waited(self.began);
+        self.over.set(true);
+        lock.given = Some(Instant::now());
+        lock
+    }
+}
+
+impl Drop for LockWait {
+    fn drop(&mut self) {
+        // A wait that gave no lock ends here: given up, answered, or failed.
+        if !self.over.get() {
+            Counters::process().lock_waited(self.began);
+        }
     }
 }
 
@@ -229,7 +301,8 @@ fn spawn_helper(file: File) -> io::Result<Receiver<io::Result<MetaLock>>> {
     thread::Builder::new()
         .name("meta-lock-wait".to_owned())
         .spawn(move || {
-            let locked = lock_blocking(&file).map(|()| MetaLock { file });
+            // Not given yet: an abandoned guard is no caller's hold.
+            let locked = lock_blocking(&file).map(|()| MetaLock { file, given: None });
             if let Err(SendError(abandoned)) = handoff.send(locked) {
                 // The caller timed out and dropped its end: it has abandoned this wait.
                 // Dropping the guard unlocks the file.

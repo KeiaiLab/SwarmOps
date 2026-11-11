@@ -7,13 +7,20 @@
 //!   StoreFs::link_noclobber objects/<2>/<62>, placed ─▶ object_writes
 //!   StoreFs::append(_durable) meta/journal*.{log,off} ─▶ journal_writes (+ journal_syncs)
 //!   StoreFs::sync_data, truncate  the same files    ─▶ journal_syncs, journal_sync_us
+//!   MetaLock::start ─▶ lock_waits; until granted or the wait dropped ─▶ lock_wait_us
+//!   MetaLock dropped ─▶ lock_hold_us;  MetaLock::acquire's Busy ─▶ lock_timeouts
 //! ```
 //!
-//! Each count is one relaxed atomic addition; a clock is read only around a sync.
+//! Each count is one relaxed atomic addition; a clock is read only around a sync and the lock.
 //! The counters make no [`super::FsOps`] call, so the calls a store makes are what they were.
 //!
 //! An object read is a `get`'s read of its payload. [`crate::ObjectStore::stat`] is not counted:
-//! it looks at the file through `std::fs`, off the seam. The lock's figures stay 0 for now.
+//! it looks at the file through `std::fs`, off the seam. A wait and a hold are counted for every
+//! writer: one alone, a queue's lead and a queue's member, whose wait ends when it reads its
+//! answer. A member answered while the lead still holds the lock holds none; one that gets the
+//! lock first leads, finds its answer, and its hold counts. A helper's lock that no caller took
+//! (an abandoned wait's) is no hold. A queue's own timeout is no `lock_timeouts`: its caller
+//! reads it as `E_BUSY`.
 //!
 //! The scope is the process: the CLI runs one operation per process, the MCP server one request
 //! at a time and `serve` a process per connection.
@@ -115,6 +122,28 @@ impl Counters {
         self.journal_syncs.fetch_add(1, Ordering::Relaxed);
         self.journal_sync_us
             .fetch_add(micros_since(began), Ordering::Relaxed);
+    }
+
+    /// One wait for `meta/lock` started.
+    pub(crate) fn lock_wait(&self) {
+        self.lock_waits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A wait for `meta/lock`, begun at `began`, over.
+    pub(crate) fn lock_waited(&self, began: Instant) {
+        self.lock_wait_us
+            .fetch_add(micros_since(began), Ordering::Relaxed);
+    }
+
+    /// A hold of `meta/lock`, begun at `began`, over.
+    pub(crate) fn lock_held(&self, began: Instant) {
+        self.lock_hold_us
+            .fetch_add(micros_since(began), Ordering::Relaxed);
+    }
+
+    /// One acquire of `meta/lock` gave up.
+    pub(crate) fn lock_timeout(&self) {
+        self.lock_timeouts.fetch_add(1, Ordering::Relaxed);
     }
 }
 
