@@ -144,14 +144,15 @@ fn start(
         *made = u64::from(ws.file.head != head);
     }
 
-    // 4. The pending record, durable before the store calls (WS1); the snapshot first, if any.
+    // 4. The pending record, durable before the store calls (WS1); the snapshot first, if any:
+    //    edits made since a cut record's snapshot take a new one.
     let key = (cut.as_ref().map(|cut| cut.key.clone()))
         .or(landed_key)
         .unwrap_or_else(new_key);
     let mut record = record(PendingOp::Rebase, &key, None, ws, onto, STARTING);
     let snap = match (found, cut.as_ref().and_then(Snap::of)) {
-        (_, Some(snap)) => Some(snap),
         (Some(found), _) => Some(snapshot_first(ctx, ws, &mut record, found, cut.as_ref())?),
+        (None, Some(snap)) => Some(snap),
         (None, None) => {
             pending::write_pending(ctx.fs.as_ref(), &ws.dir, &record)?;
             None
@@ -210,7 +211,9 @@ struct Rebased {
 
 /// The edits an update of workspace `ws` without `message` snapshots: none with a message, on
 /// files of another changeset (see [`settle_edits`]), when the scan finds none, or when a cut
-/// record of this update names its snapshot already (it is taken from there).
+/// record of this update names its snapshot of these same edits (it is taken from there). Edits
+/// made since that snapshot are snapshotted again, so that the re-run carries them too (the M19
+/// design §4.4).
 fn to_snapshot(
     ctx: &Ctx<'_>,
     ws: &Workspace,
@@ -226,10 +229,11 @@ fn to_snapshot(
         return Ok(None);
     }
 
-    // 2. A cut record of this update that names its snapshot: taken from there.
+    // 2. A cut record of this update that names its snapshot of these edits: taken from there.
     let cut = pending::read_pending(ctx.fs.as_ref(), &ws.dir)?;
     let cut = cut.filter(|cut| cut.op == PendingOp::Rebase && cut.head == ws.file.head);
-    if cut.is_some_and(|cut| cut.state == STARTING && Snap::of(&cut).is_some()) {
+    let same = |cut: &Pending| cut.edits.as_deref() == Some(found.digest.as_str());
+    if cut.is_some_and(|cut| cut.state == STARTING && Snap::of(&cut).is_some() && same(&cut)) {
         return Ok(None);
     }
     Ok(Some(found))
@@ -997,4 +1001,165 @@ pub(crate) fn remove_record(ctx: &Ctx<'_>, ws: &Workspace, name: &str) -> Result
     let dir = ws.dir.join(SWARMWS_DIR);
     (ctx.fs.fsync_dir(dir.as_std_path()))
         .map_err(|e| io_error::io_failed(FsMethod::FsyncDir, &file, &e))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use camino::{Utf8Path, Utf8PathBuf};
+    use swarmops_api::{ChangeInput, ChangeOp, Identity, StatusAfter, StoreOps, WsCreateReq};
+    use swarmops_ops::LocalOps;
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::hostfs::RealHost;
+    use crate::materialize::Tree;
+    use crate::{RealFs, create};
+
+    /// A store whose workspace `w` was cut short in an update after the record named its
+    /// snapshot of `a.txt` edited: its directory, the store, the snapshot.
+    struct Cut {
+        /// Holds the store and the workspace.
+        _tmp: TempDir,
+        /// The store's root.
+        root: Utf8PathBuf,
+        /// The store.
+        ops: LocalOps,
+        /// The workspace's directory.
+        dir: Utf8PathBuf,
+        /// The snapshot the cut record names.
+        snapshot: String,
+    }
+
+    impl Cut {
+        /// What the workspace operations run with, as the test's agent.
+        fn ctx(&self) -> Ctx<'_> {
+            Ctx::new(
+                &self.ops,
+                self.root.clone(),
+                Some(Identity::parse("agent/tester").unwrap()),
+                Arc::new(RealFs::new()),
+                Arc::new(RealHost::default()),
+            )
+        }
+
+        /// The text changeset `id` holds at `path`.
+        fn text_at(&self, id: &str, path: &str) -> String {
+            let entry = Tree::new(&self.ops, id).entry(path).unwrap().unwrap();
+            let got = materialize::fetch(&self.ops, vec![entry.id.as_str()]).unwrap();
+            String::from_utf8(got[&entry.id].clone()).unwrap()
+        }
+
+        /// Writes `text` at `path` in the workspace.
+        fn write(&self, path: &str, text: &str) {
+            std::fs::write(self.dir.join(path), text).unwrap();
+        }
+
+        /// The text the workspace holds at `path`.
+        fn read(&self, path: &str) -> String {
+            std::fs::read_to_string(self.dir.join(path)).unwrap()
+        }
+    }
+
+    /// Commits `puts` on `parent` and moves `main` to it.
+    fn commit_main(ops: &LocalOps, parent: Option<&str>, puts: &[(&str, &str)]) -> String {
+        let changes = (puts.iter())
+            .map(|(path, text)| {
+                let mut out = ChangeInput::new((*path).to_owned(), ChangeOp::Put);
+                out.content = Some(ContentInput::Inline((*text).to_owned()));
+                out
+            })
+            .collect();
+        let mut req = CommitReq::new(changes, "test");
+        req.parent = parent.map(Into::into);
+        req.advance = Some("main".to_owned());
+        let who = Identity::parse("agent/tester").unwrap();
+        ops.commit(&who, req).unwrap().changeset
+    }
+
+    /// Workspace `w` of a base of `a.txt`, `b.txt` and `d.txt`, `main` then moved on `b.txt`;
+    /// `a.txt` edited, and an update cut right after its record named the snapshot of that edit
+    /// (the M19 design §4.4, "the record naming S").
+    fn cut_after_snapshot() -> Cut {
+        // 1. A store, a workspace on its base, `main` moved on.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(tmp.path()).unwrap().join("store");
+        let (ops, _) = LocalOps::init(&root, "acme").unwrap();
+        let base = commit_main(
+            &ops,
+            None,
+            &[("a.txt", "a\n"), ("b.txt", "1\n2\n3\n"), ("d.txt", "d\n")],
+        );
+        let dir = root.parent().unwrap().join("w");
+        let mut cut = Cut {
+            _tmp: tmp,
+            root,
+            ops,
+            dir,
+            snapshot: String::new(),
+        };
+        let mut req = WsCreateReq::new("w".to_owned());
+        req.path = Some(cut.dir.to_string());
+        req.base = base.as_str().into();
+        req.all = true;
+        req.status_after = StatusAfter::None;
+        create(&cut.ctx(), req).unwrap();
+        commit_main(&cut.ops, Some(&base), &[("b.txt", "1\n2\nthree\n")]);
+
+        // 2. The edit, snapshotted behind the update's record, which then names it: the cut.
+        cut.write("a.txt", "mine\n");
+        let ctx = cut.ctx();
+        let ws = Workspace::open(&ctx, Locate::Name("w".to_owned())).unwrap();
+        let found = snapshot::scan(&ctx, &ws).unwrap();
+        let mut record = record(PendingOp::Rebase, &new_key(), None, &ws, "main", STARTING);
+        let snap = snapshot_first(&ctx, &ws, &mut record, found, None).unwrap();
+        cut.snapshot = snap.snapshot;
+        cut
+    }
+
+    /// The update of workspace `w` onto `main`, started.
+    fn update(ctx: &Ctx<'_>) -> Result<WsRebaseResp, OpError> {
+        let mut req = WsRebaseReq::new("w".to_owned());
+        req.action = WsRebaseAction::Start;
+        req.status_after = StatusAfter::None;
+        rebase(ctx, req)
+    }
+
+    /// An edit after the cut at a path the new head changed: the re-run snapshots it too and
+    /// carries it (the M19 design §4.4, "Concurrent edits"), where every re-run used to refuse
+    /// it as `E_WS_DIRTY` until it was discarded.
+    #[test]
+    fn rerun_after_snapshot_takes_the_new_edit() {
+        // 1. The cut, then an edit of another line of the file `main` changed.
+        let cut = cut_after_snapshot();
+        cut.write("b.txt", "one\n2\n3\n");
+
+        // 2. The re-run: a new snapshot holding it, merged onto the new head.
+        let done = update(&cut.ctx()).unwrap();
+        let snapshot = done.snapshot.expect("a snapshot");
+        assert_ne!(snapshot, cut.snapshot);
+        assert_eq!(cut.text_at(&snapshot, "b.txt"), "one\n2\n3\n");
+        assert_eq!(cut.read("b.txt"), "one\n2\nthree\n");
+        assert_eq!(cut.read("a.txt"), "mine\n");
+    }
+
+    /// Edits after the cut, of the snapshotted path and of another: the re-run's snapshot holds
+    /// both as they are now, and the files keep them.
+    #[test]
+    fn rerun_loses_no_edit() {
+        // 1. The cut, then the snapshotted path edited again and another path edited.
+        let cut = cut_after_snapshot();
+        cut.write("a.txt", "mine again\n");
+        cut.write("d.txt", "d2\n");
+
+        // 2. The re-run's snapshot holds both edits as they are now; the files too.
+        let done = update(&cut.ctx()).unwrap();
+        let snapshot = done.snapshot.expect("a snapshot");
+        assert_eq!(cut.text_at(&snapshot, "a.txt"), "mine again\n");
+        assert_eq!(cut.text_at(&snapshot, "d.txt"), "d2\n");
+        assert_eq!(cut.read("a.txt"), "mine again\n");
+        assert_eq!(cut.read("d.txt"), "d2\n");
+        assert_eq!(cut.read("b.txt"), "1\n2\nthree\n");
+    }
 }
