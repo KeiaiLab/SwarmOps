@@ -535,6 +535,14 @@ impl<O: ObjectStore> Repo<O> {
         Ok(self.meta.flush()?)
     }
 
+    /// One step of the metadata's view work ([`MetaStore::step_views`]): in a FORMAT 3 store, the
+    /// run of the records a commit left past the runs, built and merged outside the writer lock.
+    /// A caller calls it once it has answered (the FORMAT 3 design's amendment of 2026-11-11,
+    /// G6, G13); its error is the step's own, never the answered operation's.
+    pub fn step_views(&self) -> Result<swarmops_store::Step, RepoError> {
+        Ok(self.meta.step_views()?)
+    }
+
     /// Refuses a ref name this store's format does not take: [`RepoError::RefName`] for one no
     /// format takes, [`StoreError::FormatRequired`] for one only a later format takes. A caller
     /// that must refuse a bad name before it writes anything else, as a commit that advances a

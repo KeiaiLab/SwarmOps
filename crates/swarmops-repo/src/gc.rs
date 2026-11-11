@@ -57,6 +57,8 @@ impl<O: ObjectStore> Repo<O> {
     /// them, then counts the object files no indexed changeset reaches. Takes the maintenance
     /// lease first ([`swarmops_store::StoreError::MaintenanceBusy`] at once if it is held), and
     /// `meta/lock` after it while it lists and removes; it holds only the lease while it counts.
+    /// Unless dry, it then steps the view work a FORMAT 3 store's commits left (`step_views`),
+    /// under the lease alone (lock order: the lease, `meta/views.lock`, `meta/lock`).
     pub fn gc(&self, req: GcRequest) -> Result<GcReport, RepoError> {
         // 1. The lease, then meta/lock (the M6 design §3).
         let lease = MaintLease::try_acquire(&self.layout)?;
@@ -72,6 +74,9 @@ impl<O: ObjectStore> Repo<O> {
             }
         }
         drop(meta_lock);
+        if !req.dry_run {
+            self.meta.step_views()?;
+        }
 
         // 3. The report: counts by kind, in kind order (the listing's), and the orphans.
         let mut removed: Vec<(LeftoverKind, u64)> = Vec::new();

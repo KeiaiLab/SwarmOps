@@ -611,6 +611,13 @@ impl LocalOps {
         Self::with_repo(repo, path)
     }
 
+    /// One step of the store's view work ([`swarmops_repo::Repo::step_views`]): what a caller
+    /// runs once it has answered, its error logged and never the answered operation's (the
+    /// FORMAT 3 design's amendment of 2026-11-11, G6, G13).
+    pub fn step_views(&self) -> Result<swarmops_store::Step, OpError> {
+        self.repo.step_views().map_err(error::op)
+    }
+
     /// The store's path, as given to [`LocalOps::init`] or [`LocalOps::open`].
     pub fn store_path(&self) -> &Utf8Path {
         &self.store_path

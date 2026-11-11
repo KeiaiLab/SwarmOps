@@ -253,3 +253,44 @@ fn the_range_detector_catches_a_gc_that_removes_an_object() {
         "{caught:?}"
     );
 }
+
+/// gc steps the view work a FORMAT 3 store's commits left below the backlog bound: once it ran,
+/// the runs cover what the checkpoint passed (the FORMAT 3 design's amendment of 2026-11-11,
+/// G6). `init` makes no FORMAT 3 store yet, so a FORMAT 2 repository's metadata is swapped for
+/// a FORMAT 3 one; a dry run steps nothing.
+#[test]
+fn gc_catches_up_an_unstepped_tail() {
+    use std::sync::Arc;
+
+    use swarmops_core::{ChangesetId, hash_object};
+    use swarmops_store::{ChangesetMeta, Layout, MetaStore, RealFs};
+
+    // 1. The FORMAT 3 metadata, and 3,000 changesets in two frames: no step below the bound.
+    let (_dir, root, repo) = new_repo_as(StoreFormat::V2);
+    drop(repo);
+    fs::remove_dir_all(root.join("meta")).unwrap();
+    let layout = Layout::with_format(&root, StoreFormat::V3);
+    let meta = MetaStore::create_in(layout.clone(), Arc::new(RealFs::new())).unwrap();
+    fs::write(layout.format_file(), StoreFormat::V3.marker()).unwrap();
+    for range in [0..1_500, 1_500..3_000] {
+        let mut write = meta.write().unwrap();
+        let changesets = range.map(|n: u64| {
+            let id = ChangesetId::new(hash_object(ObjectKind::Changeset, &n.to_le_bytes()));
+            let delta = hash_object(ObjectKind::Blob, &n.to_le_bytes()).0;
+            ChangesetMeta::new(id, 0, 0, delta, Vec::new())
+        });
+        write.insert_changesets_batch(changesets.collect()).unwrap();
+        write.commit().unwrap();
+    }
+    let run = layout
+        .views_dir()
+        .join("c-0000000000000000-0000000000000bb8.run");
+    assert!(!fs::exists(&run).unwrap(), "no run before gc");
+
+    // 2. A dry run builds nothing; a gc builds the run of all 3,000.
+    let repo = LocalRepo::open(&root).unwrap();
+    repo.gc(GcRequest::new(true)).unwrap();
+    assert!(!fs::exists(&run).unwrap(), "a dry run writes nothing");
+    repo.gc(GcRequest::new(false)).unwrap();
+    assert!(fs::exists(&run).unwrap(), "gc built the run");
+}
