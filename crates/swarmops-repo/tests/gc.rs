@@ -1,7 +1,9 @@
 //! Tests of `Repo::gc` (the M6 design §8): what it removes, counted by kind, and that it
 //! removes nothing else, which a range detector measures on the store's tree before and after;
 //! a dry run that removes nothing and reports the same; a second run that finds nothing; the
-//! objects no changeset reaches counted and kept; a held maintenance lease refused at once.
+//! objects no changeset or fact reaches counted and kept; a held maintenance lease refused at
+//! once; in FORMAT 3, the view work stepped once `meta/lock` is released (the FORMAT 3 design
+//! §2.5 rule 1, §3.3).
 //!
 //! Every test owns a fresh store (`tempfile::tempdir()`).
 
@@ -55,8 +57,9 @@ fn tree(root: &Utf8Path) -> BTreeSet<Utf8PathBuf> {
     paths
 }
 
-/// Whether `rel` lies in a class of leftover of the M6 design §8.2, in a store of `format`
-/// (1 or 2): restated here from the design, not from the code under test.
+/// Whether `rel` lies in a class of leftover of the M6 design §8.2 and the FORMAT 3 design §3.3,
+/// in a store of `format` (1, 2 or 3): restated here from the designs, not from the code under
+/// test.
 fn in_a_class(rel: &Utf8Path, format: u32) -> bool {
     let parts: Vec<&str> = rel.iter().collect();
     let residue_of = |stem: &str, refs: &str| {
@@ -66,6 +69,13 @@ fn in_a_class(rel: &Utf8Path, format: u32) -> bool {
                     .iter()
                     .any(|ext| parts[1] == format!("{stem}{ext}")))
     };
+    // FORMAT 3's own files, in a store an upgrade did not take to FORMAT 3.
+    let format_3_files = matches!(
+        parts.as_slice(),
+        ["meta", "sorted3", ..]
+            | ["meta", "journal3.ckpt" | "features" | "views.lock"]
+            | ["meta", "idx", "facts.col"]
+    );
     match parts.as_slice() {
         ["objects", "tmp", _] | ["meta", "derived", "tmp", _] | ["meta.tmp", ..] => true,
         // Below the built-ins' version, 1.
@@ -76,8 +86,13 @@ fn in_a_class(rel: &Utf8Path, format: u32) -> bool {
             version,
             ..,
         ] => version.parse::<u32>().is_ok_and(|version| version < 1),
-        _ if format == 2 => residue_of("journal", "refs"),
-        _ => residue_of("journal2", "refs2"),
+        // FORMAT 3: FORMAT 1's files, FORMAT 2's views, and the runs a view step replaces or
+        // left, never FORMAT 2's journal, its poison or its ref files.
+        ["meta", "sorted", ..] | ["meta", "sorted3", "tmp", ..] if format == 3 => true,
+        ["meta", "sorted3", run] if format == 3 => Utf8Path::new(run).extension() == Some("run"),
+        _ if format == 3 => residue_of("journal", "refs"),
+        _ if format == 2 => residue_of("journal", "refs") || format_3_files,
+        _ => residue_of("journal2", "refs2") || format_3_files,
     }
 }
 
@@ -293,4 +308,141 @@ fn gc_catches_up_an_unstepped_tail() {
     assert!(!fs::exists(&run).unwrap(), "a dry run writes nothing");
     repo.gc(GcRequest::new(false)).unwrap();
     assert!(fs::exists(&run).unwrap(), "gc built the run");
+}
+
+/// A FORMAT 3 repository: one of FORMAT 2 with a changeset, upgraded (no `init` makes FORMAT 3
+/// yet).
+fn new_v3_repo() -> (tempfile::TempDir, Utf8PathBuf, LocalRepo) {
+    let (dir, root, repo) = new_repo_as(StoreFormat::V2);
+    commit(&repo, &[], vec![put("a.txt", b"a")]);
+    assert!(repo.upgrade().unwrap().upgraded);
+    let repo = LocalRepo::open(&root).unwrap();
+    assert_eq!(repo.format(), StoreFormat::V3);
+    (dir, root, repo)
+}
+
+/// In a FORMAT 3 store, gc removes FORMAT 2's views and nothing out of the classes; the detector
+/// flags a fake gc that removes `journal2.log`, which FORMAT 3 shares with FORMAT 2, or the poison
+/// `journal2.ckpt`.
+#[test]
+fn gc_scope_detector_flags_a_fake_gc_removing_journal2_log() {
+    let (_dir, root, repo) = new_v3_repo();
+    let before = tree(&root);
+
+    // 1. The real gc: FORMAT 2's views, and only what lies in a class.
+    let report = repo.gc(GcRequest::new(false)).unwrap();
+    assert_eq!(counts(&report), [(LeftoverKind::UpgradeResidue, 1)]);
+    let after = tree(&root);
+    assert_eq!(out_of_range(&before, &after, 3), Vec::<Utf8PathBuf>::new());
+    assert!(!after.contains(Utf8Path::new("meta/sorted")));
+
+    // 2. Fakes: each removal is flagged.
+    for rel in [
+        "meta/journal2.log",
+        "meta/journal2.ckpt",
+        "meta/journal3.ckpt",
+    ] {
+        fs::remove_file(root.join(rel)).unwrap();
+        let caught = out_of_range(&after, &tree(&root), 3);
+        assert!(
+            caught.contains(&Utf8PathBuf::from(rel)),
+            "{rel}: {caught:?}"
+        );
+    }
+}
+
+/// gc steps the view work only once it released `meta/lock`: when the step writes its run, the
+/// lock is free (the FORMAT 3 design §2.5 rule 1, lock order rule 8).
+#[test]
+fn gc_steps_the_views_outside_the_lock() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    use swarmops_store::{ChangesetMeta, MetaLock, MetaStore};
+    use swarmops_testkit::fs::{RecordingFs, When};
+
+    /// What the probe saw of `meta/lock` as the step wrote its run.
+    const UNSEEN: u8 = 0;
+    const FREE: u8 = 1;
+    const HELD: u8 = 2;
+
+    // 1. A FORMAT 3 store with more than a run's worth of changesets past its runs.
+    let (_dir, root, repo) = new_v3_repo();
+    drop(repo);
+    let meta = MetaStore::open(&root).unwrap();
+    let mut write = meta.write().unwrap();
+    let changesets = (1..=2_000_u64).map(|n| {
+        let id = swarmops_core::ChangesetId::new(swarmops_core::hash_object(
+            ObjectKind::Changeset,
+            &n.to_le_bytes(),
+        ));
+        let delta = swarmops_core::hash_object(ObjectKind::Blob, &n.to_le_bytes()).0;
+        ChangesetMeta::new(id, 0, 0, delta, Vec::new())
+    });
+    write.insert_changesets_batch(changesets.collect()).unwrap();
+    write.commit().unwrap();
+    meta.flush().unwrap();
+
+    // 2. A gc whose filesystem, as the step writes its run, tries meta/lock: FREE if it was.
+    let seen = Arc::new(AtomicU8::new(UNSEEN));
+    let layout = layout_of(&root);
+    let run = "append meta/sorted3/tmp/c-0000000000000000-00000000000007d1.run";
+    let probe = {
+        let seen = Arc::clone(&seen);
+        let layout = layout.clone();
+        Box::new(move || {
+            let free = MetaLock::acquire(&layout, Duration::ZERO).is_ok();
+            seen.store(if free { FREE } else { HELD }, Ordering::SeqCst);
+        })
+    };
+    let (recording, _calls) = RecordingFs::new();
+    let recording = recording
+        .naming_paths_in(root.clone().into_std_path_buf())
+        .with_hook((run.to_owned(), When::Before, probe));
+    let repo = LocalRepo::open_with_fs(&root, Arc::new(recording)).unwrap();
+    repo.gc(GcRequest::new(false)).unwrap();
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        FREE,
+        "the step ran under meta/lock or not at all"
+    );
+}
+
+/// A blob that only a fact names is a root of gc's count: it is no orphan (the FORMAT 3 design
+/// §2.8); a blob nothing names is one.
+#[cfg(feature = "test-hooks")]
+#[test]
+fn a_fact_named_blob_is_not_an_orphan() {
+    use swarmops_store::{Expect, Fact, FactKind, MetaStore, supported_for_tests};
+
+    let _features = supported_for_tests(&["review"]);
+    let (_dir, root, repo) = new_v3_repo();
+    let named = repo
+        .put_objects(vec![
+            (ObjectKind::Blob, b"why the change".to_vec()),
+            (ObjectKind::Blob, b"its title".to_vec()),
+        ])
+        .unwrap();
+    assert_eq!(repo.gc(GcRequest::new(false)).unwrap().orphan_objects, 2);
+
+    // A Review Open naming both: its intent and its title.
+    let (intent, title) = (named[0].0, named[1].0);
+    let body = [&[0; 12][..], &[4], b"main", &[1; 32], &intent, &title].concat();
+    let open = Fact::new(
+        FactKind::Review,
+        0,
+        [7; 32],
+        [6; 32],
+        1,
+        "test/1".to_owned(),
+        body,
+    );
+    let meta = MetaStore::open(&root).unwrap();
+    let mut write = meta.write().unwrap();
+    write.put_fact(open.unwrap(), Expect::Any).unwrap();
+    write.commit().unwrap();
+
+    let report = repo.gc(GcRequest::new(false)).unwrap();
+    assert_eq!(report.orphan_objects, 0);
+    assert!(repo.contains_object(named[0]).unwrap());
 }

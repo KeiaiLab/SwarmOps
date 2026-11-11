@@ -1,5 +1,5 @@
 //! `gc` (the M6 design §8): removes a store's leftovers, under its maintenance lease, and
-//! counts the objects no changeset reaches. It removes no object and no changeset.
+//! counts the objects no changeset or fact reaches. It removes no object and no changeset.
 
 use std::collections::HashSet;
 use std::time::{Duration, SystemTime};
@@ -48,7 +48,7 @@ pub struct GcReport {
     pub removed: Vec<(LeftoverKind, u64)>,
     /// The bytes of their files.
     pub bytes: u64,
-    /// How many object files no indexed changeset reaches: counted, never removed.
+    /// How many object files no indexed changeset, nor fact, reaches: counted, never removed.
     pub orphan_objects: u64,
 }
 
@@ -96,12 +96,14 @@ impl<O: ObjectStore> Repo<O> {
     }
 
     /// How many object files no changeset of the journal reaches through its object, its trees
-    /// and their blobs. A changeset or a tree whose object is missing or does not decode reaches
-    /// nothing further: verify reports it; gc only counts.
+    /// and their blobs, and no fact names (the FORMAT 3 design §2.8). A changeset or a tree whose
+    /// object is missing or does not decode reaches nothing further: verify reports it; gc only
+    /// counts.
     fn orphan_objects(&self) -> Result<u64, RepoError> {
-        // 1. The changesets, newest frame first.
+        // 1. The changesets and the blobs facts name, newest frame first.
         let read = self.meta.read()?;
         let mut changesets = Vec::new();
+        let mut reached: HashSet<ObjectId> = HashSet::new();
         let mut before = None;
         loop {
             let frames = read.frames_before(before, FRAME_BATCH)?;
@@ -110,14 +112,15 @@ impl<O: ObjectStore> Repo<O> {
             };
             before = Some(oldest.seq);
             for record in frames.iter().flat_map(|frame| &frame.records) {
-                if let Record::Changeset { id, .. } = record {
-                    changesets.push(*id);
+                match record {
+                    Record::Changeset { id, .. } => changesets.push(*id),
+                    Record::Fact(fact) => reached.extend(gc::fact_roots(fact)),
+                    _ => {}
                 }
             }
         }
 
-        // 2. What they reach.
-        let mut reached: HashSet<ObjectId> = HashSet::new();
+        // 2. What the changesets reach.
         let mut trees = Vec::new();
         for id in changesets {
             reached.insert(id.0);

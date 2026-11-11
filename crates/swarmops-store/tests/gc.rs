@@ -1,7 +1,7 @@
-//! Tests of gc of leftovers (the M6 design §8): each class of leftover listed and removed, and
-//! what is not one kept; the poisoned checkpoint of an upgrade removed last, so that a gc cut
-//! short finishes on the next run; the maintenance lease, never waited for, taken before
-//! `meta/lock`.
+//! Tests of gc of leftovers (the M6 design §8, the FORMAT 3 design §3.3): each class of leftover
+//! listed and removed, and what is not one kept; the poisoned checkpoint of an upgrade removed
+//! last, so that a gc cut short finishes on the next run, but FORMAT 2's poison in a FORMAT 3
+//! store kept; the maintenance lease, never waited for, taken before `meta/lock`.
 //!
 //! Every test owns a fresh store root (`tempfile::tempdir()`).
 
@@ -11,10 +11,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use camino::Utf8Path;
+use swarmops_core::{ChangesetId, ObjectKind, hash_object};
 use swarmops_store::gc::{self, LeftoverKind};
+use swarmops_store::meta::upgrade;
 use swarmops_store::{
-    FsOps, GC_TEMP_GRACE, Layout, Leftover, MaintLease, MetaStore, RealFs, StoreError, StoreFormat,
-    StoreFs, UPGRADE_POISON,
+    ChangesetMeta, FsOps, GC_TEMP_GRACE, Layout, Leftover, MaintLease, MetaStore, RealFs,
+    StoreError, StoreFormat, StoreFs, UPGRADE_POISON, UPGRADE_POISON_V3,
 };
 use swarmops_testkit::store::new_root;
 use tempfile::TempDir;
@@ -365,4 +367,125 @@ fn the_lease_comes_before_meta_lock() {
     drop(meta);
     let lease = MaintLease::try_acquire(&layout).expect("in order again");
     drop(lease.meta_lock(&layout, Duration::ZERO).unwrap());
+}
+
+/// A store of `format` with `meta/` made and `FORMAT` written, a changeset committed: FORMAT 3
+/// by the upgrade of a FORMAT 2 one, which no `init` makes yet.
+fn store_of(format: StoreFormat) -> (TempDir, Layout) {
+    let made = match format {
+        StoreFormat::V3 => StoreFormat::V2,
+        other => other,
+    };
+    let (dir, root) = new_root();
+    let layout = Layout::with_format(root.root(), made);
+    let store = MetaStore::create_in(layout.clone(), Arc::new(RealFs::new())).unwrap();
+    fs::write(layout.format_file(), made.marker()).unwrap();
+    let id = ChangesetId::new(hash_object(ObjectKind::Changeset, b"gc"));
+    let delta = hash_object(ObjectKind::Blob, b"gc").0;
+    let mut write = store.write().unwrap();
+    write
+        .insert_changeset(ChangesetMeta::new(id, 0, 0, delta, Vec::new()))
+        .unwrap();
+    write.commit().unwrap();
+    store.flush().unwrap();
+    if format == StoreFormat::V3 {
+        upgrade::upgrade(&layout, Arc::new(RealFs::new())).unwrap();
+    }
+    (dir, Layout::with_format(layout.root(), format))
+}
+
+/// In a FORMAT 3 store an upgrade made, FORMAT 2's sorted views are its residue; FORMAT 2's poison
+/// (`journal2.ckpt`) and the journal and ref files FORMAT 3 shares with FORMAT 2 are kept: a handle
+/// still open on FORMAT 2 reads the poison, never a missing checkpoint, and fails closed.
+#[test]
+fn gc_keeps_the_v3_poison_and_the_live_journal() {
+    let (_dir, layout) = store_of(StoreFormat::V3);
+    let root = layout.root();
+
+    let found = listed(&layout, &[]);
+    assert_eq!(
+        names(&found),
+        [(LeftoverKind::UpgradeResidue, "meta/sorted".to_owned())]
+    );
+    remove_all(&layout, &found);
+    assert_eq!(
+        fs::read(root.join("meta/journal2.ckpt")).unwrap(),
+        UPGRADE_POISON_V3
+    );
+    for kept in [
+        "journal2.log",
+        "journal2.off",
+        "refs2",
+        "journal3.ckpt",
+        "sorted3",
+    ] {
+        assert!(exists(root, &format!("meta/{kept}")), "{kept}");
+    }
+    assert_eq!(names(&listed(&layout, &[])), []);
+    let store = MetaStore::open(root).unwrap();
+    assert_eq!(store.read().unwrap().count_changesets().unwrap(), 1);
+}
+
+/// In a FORMAT 2 store, what an upgrade to FORMAT 3 that stopped before its poison wrote is
+/// residue, whole directories at once; once the poison is written (the next open finishes the
+/// upgrade) the same files are the store's next ones, and kept.
+#[test]
+fn gc_removes_a_broken_upgrades_v3_files() {
+    let (_dir, layout) = store_of(StoreFormat::V2);
+    let root = layout.root();
+    for rel in [
+        "sorted3/MANIFEST",
+        "sorted3/tmp/c-0000000000000000-0000000000000001.run",
+        "journal3.ckpt",
+        "idx/facts.col",
+        "features",
+        "views.lock",
+    ] {
+        write(root, &format!("meta/{rel}"), b"x");
+    }
+
+    let ckpt = fs::read(layout.journal_ckpt()).unwrap();
+    fs::write(layout.journal_ckpt(), UPGRADE_POISON_V3).unwrap();
+    assert_eq!(names(&listed(&layout, &[])), []);
+    fs::write(layout.journal_ckpt(), ckpt).unwrap();
+
+    let found = listed(&layout, &[]);
+    let residue = |rel: &str| (LeftoverKind::UpgradeResidue, rel.to_owned());
+    assert_eq!(
+        names(&found),
+        [
+            residue("meta/features"),
+            residue("meta/idx/facts.col"),
+            residue("meta/journal3.ckpt"),
+            residue("meta/sorted3"),
+            residue("meta/views.lock"),
+        ]
+    );
+    remove_all(&layout, &found);
+    assert_eq!(names(&listed(&layout, &[])), []);
+    let store = MetaStore::open(root).unwrap();
+    assert_eq!(store.format(), StoreFormat::V2);
+    assert_eq!(store.read().unwrap().count_changesets().unwrap(), 1);
+}
+
+/// The write queue's directory, `meta/queue/`, is no leftover in any format (the M20 plan's A6).
+#[test]
+fn gc_keeps_the_queue_dir() {
+    for format in [StoreFormat::V1, StoreFormat::V2, StoreFormat::V3] {
+        let (_dir, layout) = store_of(format);
+        let root = layout.root();
+        write(root, "meta/queue/request", b"x");
+        age(root, "meta/queue/request", GC_TEMP_GRACE + STALE);
+
+        let found = listed(&layout, &[]);
+        assert!(
+            found
+                .iter()
+                .all(|leftover| !leftover.rel.starts_with("meta/queue")),
+            "{format:?}: {:?}",
+            names(&found)
+        );
+        remove_all(&layout, &found);
+        assert!(exists(root, "meta/queue/request"), "{format:?}");
+    }
 }

@@ -34,7 +34,9 @@ collects the changes on `stable` that no release holds yet, until the next relea
   and finds a lost base seq in the journal again. No release makes a FORMAT 3 store yet.
 - `upgrade` takes a FORMAT 2 store to FORMAT 3, and a FORMAT 1 store through FORMAT 2 to FORMAT 3
   in the same call, keeping every operation id (the FORMAT 3 design §3). Irreversible: v0.11.x and
-  older do not open the store afterwards.
+  older do not open the store afterwards. `gc` removes what an upgrade to FORMAT 3 that stopped
+  before its commit point left and FORMAT 2's sorted views of an upgraded store, and counts no blob
+  a fact names as an orphan.
 
 ### Fixed
 

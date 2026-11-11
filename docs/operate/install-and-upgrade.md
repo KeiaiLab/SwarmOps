@@ -222,8 +222,10 @@ A binary opens only a store whose `FORMAT` it knows, and refuses any other as `E
 A new `FORMAT` comes with the release that needs it, and [CHANGELOG.md](../../CHANGELOG.md)
 says so. `FORMAT 2` (M6) adds a header with a sequence number and checksums to every journal
 frame, a checksum to every `journal.off` entry, and ref names beyond `main` and
-`release/<name>`. An older binary refuses the new store rather than misread it. A FORMAT 1 store
-stays FORMAT 1 under the new binary, which reads and writes it as before, until it is upgraded:
+`release/<name>`. `FORMAT 3` (M20) keeps FORMAT 2's journal and adds a nonce to every frame,
+sorted views built outside the writer lock, and a column of facts. An older binary refuses the new
+store rather than misread it. A store stays in its format under the new binary, which reads and
+writes it as before, until it is upgraded:
 
 1. Install the new binary, and end the sessions that run the old one, as for the same `FORMAT`.
 2. Run `verify --deep` ([Verify and repair](verify-and-repair.md)), then upgrade:
@@ -234,15 +236,17 @@ stays FORMAT 1 under the new binary, which reads and writes it as before, until 
    ```
 
    ```text
-   {"ok":true,"op":"upgrade","api":1,"result":{"from":1,"to":2,"upgraded":true},…}
-   {"ok":true,"op":"gc","api":1,"result":{"removed":[{"kind":"upgrade_residue","count":4}],"bytes":229,"orphan_objects":0},…}
+   {"ok":true,"op":"upgrade","api":1,"result":{"from":2,"to":3,"upgraded":true},…}
+   {"ok":true,"op":"gc","api":1,"result":{"removed":[{"kind":"upgrade_residue","count":1}],"bytes":0,"orphan_objects":0},…}
    ```
 
-`upgrade` cannot be undone: from then on no older release opens the store, and a process that
-had it open as FORMAT 1, of an older release or of this one, fails its next read or write with
-`E_STORE_CORRUPT`, and opens it again as FORMAT 2. An upgrade cut short is finished by the next
-command that opens the store. `gc` then removes the FORMAT 1 files the upgrade left. On a FORMAT 2
-store, `upgrade` does nothing (`"upgraded":false`). A `FORMAT` that `upgrade` does not reach
+`upgrade` takes a FORMAT 1 store through FORMAT 2 to FORMAT 3 in one call, and keeps every
+operation id. It cannot be undone: from then on no older release opens the store, and a process
+that had it open in the format before, of an older release or of this one, fails its next read or
+write with `E_STORE_CORRUPT`, and opens it again as FORMAT 3. An upgrade cut short is finished by
+the next command that opens the store, or by the next `upgrade`. `gc` then removes the files of the
+format before that the upgrade left. On a FORMAT 3 store, `upgrade` does nothing
+(`"upgraded":false`). A `FORMAT` that `upgrade` does not reach
 means creating the store again ([versioning policy](../policies/versioning-and-stability.md)).
 
 ### Create a store again

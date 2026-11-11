@@ -1,7 +1,20 @@
-//! What gc removes (the M6 design §8.2): leftovers, and nothing else. Temp files past their
-//! grace, the staging of a crashed create, derived values of superseded versions and what an
-//! upgrade leaves of the format before. No object, changeset, journal, index, view or ref
-//! file of the store's format, external id, mirror, workspace or quarantined file is ever one.
+//! What gc removes (the M6 design §8.2, the FORMAT 3 design §3.3): leftovers, and nothing else.
+//! Temp files past their grace, the staging of a crashed create, derived values of superseded
+//! versions and what an upgrade leaves of the format before, or of the one it did not reach. No
+//! object, changeset, journal, index, view or ref file of the store's format, external id,
+//! mirror, workspace or quarantined file is ever one; nor is FORMAT 2's poisoned checkpoint in a
+//! FORMAT 3 store, which a FORMAT 2 handle still open reads to fail closed.
+//!
+//! ```text
+//! FORMAT 1, no poison          FORMAT 2's and 3's files (an upgrade stopped before its poison)
+//! FORMAT 2, FORMAT 1 poisoned  FORMAT 1's journal and ref files, its checkpoint last
+//! FORMAT 2, not poisoned       FORMAT 3's files (an upgrade to 3 stopped before its poison)
+//! FORMAT 3                     FORMAT 1's (if poisoned) and FORMAT 2's sorted views, `meta/sorted`
+//! ```
+//!
+//! The runs outside FORMAT 3's manifest and what `meta/sorted3/tmp/` holds are the view step's
+//! to remove, under `meta/views.lock`: gc steps after it released `meta/lock` (the FORMAT 3
+//! design §2.5 rules 1 and 7).
 
 use std::fs::{self, Metadata};
 use std::io;
@@ -12,12 +25,16 @@ use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::bytes;
 
 use crate::error::{FileOp, StoreError};
-use crate::format::{self, StoreFormat, UPGRADE_POISON};
+use crate::format::{self, StoreFormat, UPGRADE_POISON, UPGRADE_POISON_V3};
 use crate::fs_ops::{FsMethod, RealFs, StoreFs};
 use crate::layout::Layout;
+use crate::meta::frame::Fact;
 
 /// The directory of the store root in which a create stages `meta/` (storage spec §3).
 const STAGING: &str = "meta.tmp";
+
+/// FORMAT 1's and 2's sorted views in `meta/`, which FORMAT 3 does not read.
+const SORTED_V2: &str = "sorted";
 
 /// How old a temp file must be before gc removes it: one a write in progress still holds is
 /// younger.
@@ -37,7 +54,8 @@ pub enum LeftoverKind {
     /// version.
     DerivedVersion,
     /// A file of the format before an upgrade (`meta/journal.*`, `meta/refs/` in a FORMAT 2
-    /// store), or of an upgrade that stopped before its commit point.
+    /// store, `meta/sorted/` in a FORMAT 3 one), or of an upgrade that stopped before its commit
+    /// point.
     UpgradeResidue,
 }
 
@@ -137,6 +155,12 @@ pub fn remove(fs: &StoreFs, leftover: &Leftover) -> Result<(), StoreError> {
     remove_at(fs, &leftover.rel)
 }
 
+/// The blob ids `fact` names: roots of gc's count of orphan objects, as a changeset's tree is
+/// (the FORMAT 3 design §2.8). A blob only a fact names is no orphan.
+pub fn fact_roots(fact: &Fact) -> Vec<swarmops_core::ObjectId> {
+    fact.blob_ids()
+}
+
 /// [`remove`] of what is at `rel`, relative to `fs`'s root: an upgrade clears what an earlier
 /// one left with it too.
 pub(crate) fn remove_at(fs: &StoreFs, rel: &Utf8Path) -> Result<(), StoreError> {
@@ -213,30 +237,50 @@ impl Lister<'_> {
         Ok(())
     }
 
-    /// Pushes an upgrade's residue: in a FORMAT 2 store whose FORMAT 1 checkpoint is the
-    /// poison, FORMAT 1's journal and ref files; in a FORMAT 1 store without it, FORMAT 2's.
-    /// The format is the one `FORMAT` names (`layout`'s if there is none), not the one the
-    /// store was opened in: a concurrent open may have finished an upgrade since.
+    /// Pushes an upgrade's residue (the module documentation's table): the files of the format
+    /// before one whose poison is written, and those of the format after one that stopped
+    /// before it. The format is the one `FORMAT` names (`layout`'s if there is none), not the one
+    /// the store was opened in: a concurrent open may have finished an upgrade since.
     fn residue(&self, layout: &Layout, found: &mut Vec<Leftover>) -> Result<(), StoreError> {
         let format = if lstat(&self.fs, &layout.format_file())?.is_some() {
             format::read_format(layout, &self.fs)?
         } else {
             layout.format()
         };
-        let v1 = Layout::with_format(self.root, StoreFormat::V1);
-        let poisoned = self.is_poison(&v1.journal_ckpt())?;
+        let [v1, v2, v3] = [StoreFormat::V1, StoreFormat::V2, StoreFormat::V3]
+            .map(|format| Layout::with_format(self.root, format));
+        let v1_poisoned = self.is_poison(&v1.journal_ckpt(), UPGRADE_POISON)?;
+        let v2_poisoned = self.is_poison(&v2.journal_ckpt(), UPGRADE_POISON_V3)?;
+        let mut paths = Vec::new();
+
+        // 1. The journal and ref files of the format before, or of FORMAT 2 not reached.
         let older = match format {
-            StoreFormat::V2 if poisoned => v1,
-            StoreFormat::V1 if !poisoned => Layout::with_format(self.root, StoreFormat::V2),
-            _ => return Ok(()),
+            StoreFormat::V2 | StoreFormat::V3 if v1_poisoned => Some(&v1),
+            StoreFormat::V1 if !v1_poisoned => Some(&v2),
+            _ => None,
         };
-        let files = [
-            older.journal_ckpt(),
-            older.journal_log(),
-            older.journal_off(),
-            older.refs_dir(),
-        ];
-        for path in files {
+        if let Some(older) = older {
+            paths.extend([
+                older.journal_ckpt(),
+                older.journal_log(),
+                older.journal_off(),
+                older.refs_dir(),
+            ]);
+        }
+
+        // 2. FORMAT 3's files, until its poison is written; FORMAT 2's views after.
+        match format {
+            StoreFormat::V1 | StoreFormat::V2 if !v2_poisoned => paths.extend([
+                v3.journal_ckpt(),
+                v3.views_dir(),
+                v3.views_lock(),
+                v3.features_file(),
+                v3.facts_col(),
+            ]),
+            StoreFormat::V3 => paths.push(v3.meta_path(SORTED_V2)),
+            _ => {}
+        }
+        for path in paths {
             if lstat(&self.fs, &path)?.is_some() {
                 found.push(self.leftover(LeftoverKind::UpgradeResidue, &path)?);
             }
@@ -244,17 +288,17 @@ impl Lister<'_> {
         Ok(())
     }
 
-    /// Whether the file at `path` is a regular file holding [`UPGRADE_POISON`], measured before
-    /// it is read.
-    fn is_poison(&self, path: &Utf8Path) -> Result<bool, StoreError> {
+    /// Whether the file at `path` is a regular file holding `poison`, measured before it is
+    /// read.
+    fn is_poison(&self, path: &Utf8Path, poison: &[u8]) -> Result<bool, StoreError> {
         let Some(meta) = lstat(&self.fs, path)? else {
             return Ok(false);
         };
-        if !meta.is_file() || meta.len() != bytes::to_u64(UPGRADE_POISON.len()) {
+        if !meta.is_file() || meta.len() != bytes::to_u64(poison.len()) {
             return Ok(false);
         }
         let held = fs::read(path).map_err(|e| self.fs.locate(FileOp::ReadAt, path, e))?;
-        Ok(held == UPGRADE_POISON)
+        Ok(held == poison)
     }
 
     /// Whether `path` is a directory (not a symlink to one).
