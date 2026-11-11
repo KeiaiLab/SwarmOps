@@ -10,6 +10,7 @@ mod support;
 
 mod cli;
 mod contention;
+mod counted_work;
 #[cfg(feature = "test-hooks")]
 mod crash;
 mod damaged_index;
