@@ -9,6 +9,7 @@
 
 pub mod envelope;
 pub mod error;
+pub mod health;
 pub mod identity;
 pub mod ops;
 pub mod remote;
