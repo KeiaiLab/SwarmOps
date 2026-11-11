@@ -209,13 +209,19 @@ impl Connection {
             record.code = split.code;
         }
 
-        // 2. How it ended: git's exit, or the refusal's.
+        // 2. How it ended: git's exit, or the refusal's. receive-pack exits 0 though a hook
+        //    refused, so a refusal its split names gives its code's exit.
         match outcome {
             Ok(served) => record.exit = served.exit,
             Err(e) => {
                 record.exit = e.exit;
                 record.code = code_of(&e.code);
             }
+        }
+        if record.exit == 0
+            && let Some(code) = record.code
+        {
+            record.exit = code.exit();
         }
         record
     }

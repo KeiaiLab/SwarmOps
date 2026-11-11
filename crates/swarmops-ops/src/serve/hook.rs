@@ -15,7 +15,8 @@
 //!   pre-receive:  all accepted ─▶ exit 0 · any refused ─▶ a line per command, exit 1: git
 //!                 drops the quarantine, every ref "pre-receive hook declined"
 //!   proc-receive: refs/land/<target> ─▶ land::apply · any other ─▶ push::apply
-//! 5 proc-receive: one report each (ok | ng <CODE>: <message>), host paths masked
+//! 5 proc-receive: one report each (ok | ng <CODE>: <message>), host paths masked; a refusal's
+//!   code added to the connection's split
 //! ```
 //!
 //! receive-pack runs the hooks in the bare `serve.git` and hands them a relative `GIT_DIR`
@@ -66,6 +67,17 @@ const PRE_RECEIVE_REFUSED: i32 = 1;
 
 /// The line `pre-receive` gives a command it accepted, in a push it refuses.
 const REFUSED_WITH_PUSH: &str = "accepted alone; refused with the push";
+
+/// The refusals whose reason begins with no `<CODE>`, for the client's sake, by the reason's
+/// head (before its first `:`), and the code each stands for in the connection's record.
+const UNCODED: [(&str, ErrorCode); 3] = [
+    // push.rs: a move of main off its first parents.
+    ("non-fast-forward", ErrorCode::RefProtected),
+    // push.rs: the old value is not the ref's export now.
+    ("stale", ErrorCode::CasMismatch),
+    // land.rs: the land conflicts; its report is on stderr.
+    ("conflict", ErrorCode::Conflict),
+];
 
 /// Where a hook reads a push's objects.
 #[derive(Debug, Clone, Copy)]
@@ -192,7 +204,7 @@ pub fn pre_receive(invocation: &ServeInvocation, who: &Identity) -> Result<Serve
     let received = quarantine.as_deref().map_or(0, received_bytes);
     let code = verdicts
         .iter()
-        .find_map(|(_, verdict)| refusal_code(verdict));
+        .find_map(|(_, verdict)| verdict.as_ref().err().and_then(refusal_code));
     let split = Split::pushed(start_us, received, code);
     records::write_split(Path::new(&store), &split);
     if verdicts.iter().all(|(_, verdict)| verdict.is_ok()) {
@@ -216,6 +228,7 @@ pub fn pre_receive(invocation: &ServeInvocation, who: &Identity) -> Result<Serve
 /// stdout.
 pub fn run(invocation: &ServeInvocation, who: &Identity) -> Result<Served, OpError> {
     // 1. Run by git, inside a push serve started.
+    let start_us = records::now_us();
     let store = served_store(invocation)?;
     let redactor = Redactor::new(&[Path::new(&store)]);
 
@@ -224,6 +237,14 @@ pub fn run(invocation: &ServeInvocation, who: &Identity) -> Result<Served, OpErr
     let mut output = io::stdout().lock();
     let commands = handshake(&mut input, &mut output)?;
     let reports = decide_all(invocation, &store, who, &commands);
+
+    // 3. A refusal's code added to the connection's split: receive-pack exits 0 all the same.
+    if let Some(code) = reports.iter().find_map(refusal_code) {
+        let split = Split::pushed(start_us, 0, Some(code));
+        records::write_split(Path::new(&store), &split);
+    }
+
+    // 4. The reports, masked.
     let reports: Vec<Report> = reports
         .into_iter()
         .map(|report| redact(&redactor, report))
@@ -333,13 +354,17 @@ fn received_bytes(quarantine: &Path) -> u64 {
     packs + loose
 }
 
-/// The code of `verdict` when it refused: the `<CODE>` its report begins with.
-fn refusal_code(verdict: &Result<Judged, Report>) -> Option<ErrorCode> {
-    let Err(Report::Ng { reason, .. }) = verdict else {
+/// The code of `report` when it refuses: the `<CODE>` its reason begins with, else the one
+/// [`UNCODED`] gives its head.
+fn refusal_code(report: &Report) -> Option<ErrorCode> {
+    let Report::Ng { reason, .. } = report else {
         return None;
     };
-    let (code, _) = reason.split_once(':')?;
-    records::code_of(code)
+    let head = reason
+        .split_once(':')
+        .map_or(reason.as_str(), |(head, _)| head);
+    let uncoded = UNCODED.iter().find(|(known, _)| *known == head);
+    records::code_of(head).or(uncoded.map(|(_, code)| *code))
 }
 
 /// The refusal of a hook run that did not come from git, `why`.

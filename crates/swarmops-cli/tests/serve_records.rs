@@ -12,6 +12,7 @@ use std::process::Output;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
+use swarmops_api::ErrorCode;
 use swarmops_testkit::git::fixture;
 use swarmops_testkit::serve::ServeSite;
 use tempfile::TempDir;
@@ -30,12 +31,14 @@ const WRITER: &str = "agent/worker-1";
 /// The store every site serves.
 const STORE: &str = "acme";
 
-/// The served store's access file: [`AGENT`] pushes `main`, [`STRANGER`] is granted nothing.
+/// The served store's access file: [`AGENT`] pushes and lands onto `main`, [`STRANGER`] is
+/// granted nothing.
 const ACCESS: &str = r#"version = 1
 
 [[grant]]
 who = ["person/ada"]
 push = ["main"]
+land = ["main"]
 
 [[grant]]
 who = ["person/bob"]
@@ -265,6 +268,14 @@ impl Site {
         self.git_as(AGENT, dir, &["commit", "--quiet", "-m", path]);
     }
 
+    /// git with `args` in `dir` as [`AGENT`], which the server must refuse.
+    fn refused(&self, dir: &Path, args: &[&str]) {
+        let output = self.git_via(&self.served.ssh_command(AGENT), dir, args);
+        let stderr = text(&output.stderr);
+        assert!(!output.status.success(), "git {args:?}: {stderr}");
+        assert!(stderr.contains("remote"), "git {args:?}: {stderr}");
+    }
+
     /// A split file `name` in the store, last written `age` ago.
     fn plant_split(&self, name: &str, age: Duration) -> PathBuf {
         let dir = self.store().join(SPLIT_DIR);
@@ -442,6 +453,48 @@ fn every_record_field_is_in_the_schema() {
         );
     }
     assert_eq!(records[1]["service"], "push", "{}", records[1]);
+}
+
+/// A push the hooks refuse records its code and the code's exit, though git's receive-pack
+/// exits 0: `pre-receive`'s refusal of a move of `main` off its first parents, whose reason
+/// names no code, and `proc-receive`'s refusal of a land that conflicts.
+#[test]
+fn refused_push_records_its_code_and_exit() {
+    // 1. Two clones; the second moves main's shared file.
+    let site = Site::linear(&[]);
+    let ours = site.clone("ours");
+    let theirs = site.clone("theirs");
+    site.commit(&theirs, "shared.txt", "theirs\n");
+    site.git_as(AGENT, &theirs, &["push", "--quiet", "origin", "main"]);
+
+    // 2. The first changes the same file: forced onto main, then landed onto it.
+    site.commit(&ours, "shared.txt", "ours\n");
+    site.refused(&ours, &["push", "--force", "origin", "main"]);
+    site.refused(&ours, &["push", "origin", "HEAD:refs/land/main"]);
+
+    // 3. The accepted push has no code; each refusal its own, with the code's exit.
+    let records = site.records(5);
+    let pushes: Vec<(&str, Option<&str>, i64)> = (records[2..].iter())
+        .map(|record| {
+            let service = record["service"].as_str().unwrap();
+            let exit = record["exit"].as_i64().unwrap();
+            (service, record["code"].as_str(), exit)
+        })
+        .collect();
+    let exit = |code: ErrorCode| i64::from(code.exit());
+    assert_eq!(
+        pushes,
+        [
+            ("push", None, 0),
+            (
+                "push",
+                Some("E_REF_PROTECTED"),
+                exit(ErrorCode::RefProtected)
+            ),
+            ("push", Some("E_CONFLICT"), exit(ErrorCode::Conflict)),
+        ],
+        "{records:#?}"
+    );
 }
 
 /// A split a dead `serve` left behind is removed by the next connection's `serve`; a recent
