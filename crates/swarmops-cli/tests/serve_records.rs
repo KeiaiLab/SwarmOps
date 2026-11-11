@@ -63,6 +63,12 @@ const SEND_PERCENT: u64 = 90;
 /// How long a record may take to appear after its client returned.
 const RECORD_WAIT: Duration = Duration::from_secs(10);
 
+/// The hooks' splits, below the store's root.
+const SPLIT_DIR: &str = "git/serve-split";
+
+/// The age of a split a dead `serve` left: past any bound `serve` sweeps at.
+const DEAD_SPLIT_AGE: Duration = Duration::from_hours(7 * 24);
+
 /// A served root with the store [`STORE`] under [`ACCESS`], and a directory for clients.
 struct Site {
     /// The root, its stand-ins and the client git.
@@ -248,10 +254,26 @@ impl Site {
 
     /// A commit of `path` in the clone `dir`, pushed to `main` as [`AGENT`].
     fn push(&self, dir: &Path, path: &str) {
-        fs::write(dir.join(path), format!("{path}\n")).unwrap();
+        self.commit(dir, path, &format!("{path}\n"));
+        self.git_as(AGENT, dir, &["push", "--quiet", "origin", "main"]);
+    }
+
+    /// A commit of `path` holding `content` in the clone `dir`, as [`AGENT`].
+    fn commit(&self, dir: &Path, path: &str, content: &str) {
+        fs::write(dir.join(path), content).unwrap();
         self.git_as(AGENT, dir, &["add", path]);
         self.git_as(AGENT, dir, &["commit", "--quiet", "-m", path]);
-        self.git_as(AGENT, dir, &["push", "--quiet", "origin", "main"]);
+    }
+
+    /// A split file `name` in the store, last written `age` ago.
+    fn plant_split(&self, name: &str, age: Duration) -> PathBuf {
+        let dir = self.store().join(SPLIT_DIR);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        fs::write(&path, "{}\n").unwrap();
+        let file = fs::File::options().write(true).open(&path).unwrap();
+        file.set_modified(SystemTime::now() - age).unwrap();
+        path
     }
 }
 
@@ -420,4 +442,17 @@ fn every_record_field_is_in_the_schema() {
         );
     }
     assert_eq!(records[1]["service"], "push", "{}", records[1]);
+}
+
+/// A split a dead `serve` left behind is removed by the next connection's `serve`; a recent
+/// one, which a live connection may still read, stays.
+#[test]
+fn a_stale_split_is_removed_at_the_next_serve() {
+    let site = Site::linear(&[]);
+    let stale = site.plant_split("00000000000000aa", DEAD_SPLIT_AGE);
+    let recent = site.plant_split("00000000000000bb", Duration::ZERO);
+    site.clone("one");
+    site.records(1);
+    assert!(!stale.exists(), "the stale split stayed");
+    assert!(recent.exists(), "the recent split was removed");
 }

@@ -2,13 +2,14 @@
 //!
 //! ```text
 //! parent serve: 1 start (unix µs), its connection id ─▶ SWARMOPS_SERVE_CONNECTION in git's env
-//!               2 git runs ─┬─ pack-objects hook: git/serve-split/<id>
+//!               2 git runs ─┬─ pack-objects hook, each run: a line in git/serve-split/<id>
 //!                           │    (its first byte's µs, the bytes it sent, clone or fetch)
-//!                           └─ pre-receive hook: git/serve-split/<id>
+//!                           └─ pre-receive hook: a line in git/serve-split/<id>
 //!                                (its start's µs, the quarantine's bytes, a refusal's code)
-//!               3 git exits: the split read and removed, one ServeRecord line appended to
-//!                 git/serve-records.jsonl; past MAX_SERVE_RECORDS_BYTES, the writer that takes
-//!                 git/serve-records.lock renames it serve-records.1.jsonl
+//!               3 git exits: the split's lines read as one and removed, one ServeRecord line
+//!                 appended to git/serve-records.jsonl; past MAX_SERVE_RECORDS_BYTES, the writer
+//!                 that takes git/serve-records.lock renames it serve-records.1.jsonl; a split
+//!                 older than STALE_SPLIT, which a dead serve left, removed
 //! ```
 //!
 //! Diagnostics, not acknowledged state: nothing is synced and nothing reads them for
@@ -19,7 +20,7 @@
 use std::fs::{self, File};
 use std::io::{self, Write as _};
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use camino::Utf8Path;
 use serde::{Deserialize, Serialize};
@@ -45,6 +46,10 @@ const FILES: Files = records::SERVE;
 /// The hooks' splits, one file per connection, in the git directory.
 const SPLIT_DIR: &str = "serve-split";
 
+/// The age past which a split is one a dead `serve` left: a live connection's parent reads its
+/// split as soon as git exits, well within it.
+const STALE_SPLIT: Duration = Duration::from_hours(24);
+
 /// The hex digits of a connection id.
 const ID_HEX: usize = 16;
 
@@ -61,7 +66,7 @@ pub(crate) enum Side {
 }
 
 /// What a hook says of its part of a connection, in `git/serve-split/<id>`.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Split {
     /// The unix µs of the mark: a pack's first byte, or a push check's start.
     mark_us: u64,
@@ -94,6 +99,17 @@ impl Split {
             bytes,
             service: ServeService::Push,
             code,
+        }
+    }
+
+    /// This split and `later`, a second hook run's on the same connection, as one: the first
+    /// mark, the bytes of both, the first service and the first refusal's code.
+    fn and(self, later: Split) -> Split {
+        Split {
+            mark_us: self.mark_us.min(later.mark_us),
+            bytes: self.bytes.saturating_add(later.bytes),
+            service: self.service,
+            code: self.code.or(later.code),
         }
     }
 }
@@ -144,10 +160,12 @@ impl Connection {
             return;
         }
 
-        // 2. The split its hook left, then the record.
+        // 2. The split its hooks left, then the record; the splits dead connections left
+        //    removed.
         let end_us = now_us();
         let split = take_split(&git, &self.id);
         let record = self.record(who, side, split, end_us, outcome);
+        sweep_splits(&git);
 
         // 3. Appended: a failure warns and the request stands.
         if let Err(e) = records::append(&git, &FILES, &record, MAX_SERVE_RECORDS_BYTES) {
@@ -210,7 +228,13 @@ pub(crate) fn write_split(store: &Path, split: &Split) {
     let Some(id) = connection_id() else {
         return;
     };
-    let dir = store.join(GIT).join(SPLIT_DIR);
+    append_split(&store.join(GIT), &id, split);
+}
+
+/// Appends `split` for connection `id` in the git directory `git`, one line in one write
+/// beside an earlier hook run's; a failure is passed over.
+fn append_split(git: &Path, id: &str, split: &Split) {
+    let dir = git.join(SPLIT_DIR);
     if let Err(e) = fs::create_dir(&dir)
         && e.kind() != io::ErrorKind::AlreadyExists
     {
@@ -220,10 +244,7 @@ pub(crate) fn write_split(store: &Path, split: &Split) {
         return;
     };
     line.push(b'\n');
-    let file = File::options()
-        .write(true)
-        .create_new(true)
-        .open(dir.join(id));
+    let file = File::options().append(true).create(true).open(dir.join(id));
     if let Ok(mut file) = file {
         let _ = file.write_all(&line);
     }
@@ -247,13 +268,33 @@ fn connection_id() -> Option<String> {
     (id.len() == ID_HEX && hex).then_some(id)
 }
 
-/// The split of connection `id` in the git directory `git`, removed: none when its hook left
-/// none or one that does not read.
+/// The split of connection `id` in the git directory `git`, its hooks' lines as one, removed:
+/// none when its hooks left none or none that reads.
 fn take_split(git: &Path, id: &str) -> Option<Split> {
     let path = git.join(SPLIT_DIR).join(id);
     let text = fs::read(&path).ok()?;
     let _ = fs::remove_file(&path);
-    serde_json::from_slice(&text).ok()
+    (text.split(|&b| b == b'\n'))
+        .filter_map(|line| serde_json::from_slice::<Split>(line).ok())
+        .reduce(Split::and)
+}
+
+/// Removes the splits in the git directory `git` last written more than [`STALE_SPLIT`] ago:
+/// a `serve` that died before reading its split left them. Advice: a failure is passed over.
+fn sweep_splits(git: &Path) {
+    let Ok(entries) = fs::read_dir(git.join(SPLIT_DIR)) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let age = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok());
+        if age.is_some_and(|age| age > STALE_SPLIT) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// `us` in whole milliseconds.
@@ -267,7 +308,7 @@ mod tests {
 
     use swarmops_api::{ErrorCode, Identity, OpError, ServeRecord, ServeService};
 
-    use super::{Connection, FILES, Side, Split};
+    use super::{Connection, FILES, Side, Split, append_split, take_split};
     use crate::serve::Served;
 
     /// Appends `record` to the serve records of `git`, past `bound` rotated.
@@ -324,6 +365,30 @@ mod tests {
         expected.exit = ErrorCode::Auth.exit();
         expected.code = Some(ErrorCode::Auth);
         assert_eq!(record, expected);
+    }
+
+    /// A second pack on one connection adds its bytes to the split; the first's first byte
+    /// stays the mark.
+    #[test]
+    fn a_second_pack_keeps_its_split() {
+        let git = tempfile::tempdir().unwrap();
+        let id = "0123456789abcdef";
+        append_split(
+            git.path(),
+            id,
+            &Split::sent(1_200_000, 77, ServeService::Fetch),
+        );
+        append_split(
+            git.path(),
+            id,
+            &Split::sent(1_400_000, 23, ServeService::Fetch),
+        );
+        let split = take_split(git.path(), id);
+        assert_eq!(
+            split,
+            Some(Split::sent(1_200_000, 100, ServeService::Fetch))
+        );
+        assert!(take_split(git.path(), id).is_none(), "the split stayed");
     }
 
     /// Past the bound the records move to the one older file, which the next rotation
