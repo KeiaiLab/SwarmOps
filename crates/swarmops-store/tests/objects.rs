@@ -1371,7 +1371,7 @@ mod hashed {
 /// An object's kind and length from its file's header alone ([`ObjectStore::stat`]), and an
 /// object a caller relies on without writing it ([`ObjectStore::retain`]).
 mod stat {
-    use swarmops_store::{FileOp, ObjectStat};
+    use swarmops_store::{FileOp, MAX_OBJECT_LEN, ObjectStat};
     use swarmops_testkit::fs::RecordingFs;
 
     use super::*;
@@ -1439,8 +1439,9 @@ mod stat {
             "no FsOps call: the header is read through std::fs"
         );
 
-        // A header this store does not write is `BadHeader`, as `get` finds it.
-        let cases: [Damage; 6] = [
+        // A header this store does not write is `BadHeader`, as `get` finds it: a length past
+        // the longest payload an object holds among them.
+        let cases: [Damage; 8] = [
             ("bad magic", raw, |file| file[0] = b'X'),
             ("unknown kind", raw, |file| file[4] = 3),
             ("unknown encoding", raw, |file| file[5] = 2),
@@ -1449,6 +1450,12 @@ mod stat {
                 file.truncate(HEADER_LEN - 1);
             }),
             ("an empty file", raw, Vec::clear),
+            ("a length past MAX_OBJECT_LEN", raw, |file| {
+                file[8..16].copy_from_slice(&(MAX_OBJECT_LEN + 1).to_le_bytes());
+            }),
+            ("a length no payload has", raw, |file| {
+                file[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
+            }),
         ];
         for (what, id, damage) in cases {
             let got = stat_damaged(&store, &layout, id, damage);
@@ -1457,8 +1464,8 @@ mod stat {
                 "{what}: {got:?}"
             );
         }
-        // Nothing past the header is read: the payload's damage is `get`'s to find, and the
-        // length is the header's own, however large, since nothing is allocated by it.
+        // Nothing past the header is read: the payload's damage is `get`'s to find, and a
+        // length up to MAX_OBJECT_LEN is the header's own.
         let past_the_header: [PastTheHeader; 2] = [
             (
                 "raw payload cut short",
@@ -1468,9 +1475,9 @@ mod stat {
                 100,
             ),
             (
-                "a length no payload has",
-                |file| file[8..16].copy_from_slice(&u64::MAX.to_le_bytes()),
-                u64::MAX,
+                "a length of MAX_OBJECT_LEN",
+                |file| file[8..16].copy_from_slice(&MAX_OBJECT_LEN.to_le_bytes()),
+                MAX_OBJECT_LEN,
             ),
         ];
         for (what, damage, size) in past_the_header {

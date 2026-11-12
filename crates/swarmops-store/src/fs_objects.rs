@@ -72,7 +72,7 @@ const PIECE_LEN: usize = 64 << 10;
 /// hashed or written ([`StoreError::Limit`], [`LimitKind::ObjectBytes`]), and
 /// [`ObjectStore::get`] refuses as [`StoreError::BadHeader`] an object file whose header records
 /// more, before it allocates anything for the payload, and one longer than its 16-byte header and
-/// this many bytes, before it reads the file.
+/// this many bytes, before it reads the file; [`ObjectStore::stat`] refuses the same header.
 pub const MAX_OBJECT_LEN: u64 = 512 << 20;
 
 /// Content-addressed storage of blobs, trees and changesets (storage spec §8).
@@ -124,9 +124,9 @@ pub trait ObjectStore: Send + Sync {
     /// The kind and the payload length of object `id`, as its file's 16-byte header records
     /// them; `None` if it is not stored. Reads the header alone ([`FsObjectStore`]: through
     /// `std::fs`, with no [`FsOps`] call), so it neither reads the payload nor verifies it
-    /// ([`ObjectStore::get`] does): the length is the header's own, however large, since nothing
-    /// is allocated by it. A header this store does not write (its magic, kind, encoding or
-    /// reserved bytes), or a file shorter than one, is [`StoreError::BadHeader`].
+    /// ([`ObjectStore::get`] does): the length is the header's own. A header this store does not
+    /// write (its magic, kind, encoding or reserved bytes, or a length past [`MAX_OBJECT_LEN`],
+    /// as `get` refuses it), or a file shorter than one, is [`StoreError::BadHeader`].
     fn stat(&self, id: ObjectId) -> Result<Option<ObjectStat>, StoreError>;
 
     /// [`ObjectStore::stat`]; and when the object is stored, its fan-out directory joins the next
@@ -499,6 +499,11 @@ impl ObjectStore for FsObjectStore {
             });
         }
         let (kind, _, size) = header_fields(&header).ok_or(StoreError::BadHeader { id })?;
+
+        // No object holds more: `get` refuses the same header.
+        if size > MAX_OBJECT_LEN {
+            return Err(StoreError::BadHeader { id });
+        }
         Ok(Some(ObjectStat { kind, size }))
     }
 
