@@ -4,6 +4,11 @@
 # the archives from there. One file holds the build steps, so every caller builds the same way at
 # the same commit.
 #
+# Channel '' (the default) is that release build. Channel `edge` builds the calling commit as a
+# build that is not a release: the binaries are stamped with it (`SWARMOPS_BUILD_COMMIT`, so
+# `--version` prints `swarmops <version>+<commit>`) and the archives are named
+# `swarmops-edge-<short>-<target>.tar.gz`, `<short>` being the commit's first 8 hex digits.
+#
 # Hardened as release.yml is: every action is pinned to a full commit SHA, the token has no
 # permissions unless the job asks for one (`contents: read`, which the caller grants), the
 # checkout keeps no credentials, no cache is restored, and no secret is used. The container
@@ -15,6 +20,10 @@ on:
     inputs:
       version:
         description: The workspace version the binaries print and the archives are named for
+        type: string
+        default: ""
+      channel:
+        description: "'' for the release build; edge for a build that is not a release"
         type: string
         default: ""
 
@@ -54,6 +63,7 @@ jobs:
       CARGO_TERM_COLOR: always
       TARGET_TRIPLE: ${{ matrix.target }}
       VERSION: ${{ inputs.version }}
+      CHANNEL: ${{ inputs.channel }}
       RUN_WITH: ${{ matrix.run-with }}
       # How cargo and the cc crate build for aarch64; a build for x86_64 reads none of them.
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
@@ -113,12 +123,32 @@ jobs:
           "$gcc_ld/ld.lld" --version
           flags="-C link-arg=-fuse-ld=lld -C link-arg=-B$gcc_ld"
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS=$flags" >>"$GITHUB_ENV"
-      # SWARMOPS_BUILD_CHANNEL=release, read at compile time, is what makes a binary a release's:
-      # only these builds, of this workflow, set it (the `build-macos` job's too), and `so update`
-      # and automatic update act on no other build. It changes nothing `--version` prints.
+      # 1. No version, or a channel other than '' and edge, fails here, before the build.
+      # 2. Edge: the commit stamps the binaries and names the archive (ARCHIVE_STEM); an edge
+      #    build is a clone's, not a release's, so it sets no SWARMOPS_BUILD_CHANNEL: the two
+      #    cannot be set together (version.rs).
+      # 3. Release: SWARMOPS_BUILD_CHANNEL=release, read at compile time, is what makes a binary a
+      #    release's: only these builds, of this workflow, set it (the `build-macos` job's too),
+      #    and `so update` and automatic update act on no other build. It changes nothing
+      #    `--version` prints.
+      - name: Name the build for its channel
+        run: |
+          if [ -z "$VERSION" ]; then
+            echo "::error::build.yml was called without a version"
+            exit 1
+          fi
+          case "$CHANNEL" in
+            "") ;;
+            edge)
+              echo "SWARMOPS_BUILD_COMMIT=$GITHUB_SHA" >>"$GITHUB_ENV"
+              echo "ARCHIVE_STEM=swarmops-edge-${GITHUB_SHA:0:8}" >>"$GITHUB_ENV"
+              ;;
+            *)
+              echo "::error::channel '$CHANNEL' is neither '' nor edge"
+              exit 1
+              ;;
+          esac
       - name: Build swarmops and so
-        env:
-          SWARMOPS_BUILD_CHANNEL: release
         run: cargo build --release --locked -p swarmops-cli --bins --target "$TARGET_TRIPLE"
       # Each binary prints the tag's version and needs no glibc newer than GLIBC_FLOOR; then a
       # store is made, committed to, read and deep-verified, with every SWARMOPS_TEST_* hook set,
@@ -132,6 +162,7 @@ jobs:
           SWARMOPS_AUTO_UPDATE: "off"
         run: |
           read -ra run_with <<<"$RUN_WITH"
+          expected="swarmops $VERSION${SWARMOPS_BUILD_COMMIT:++$SWARMOPS_BUILD_COMMIT}"
           bin="$CARGO_TARGET_DIR/$TARGET_TRIPLE/release"
           file "$bin/swarmops" "$bin/so"
           for name in swarmops so; do
@@ -158,8 +189,8 @@ jobs:
               exit 1
             fi
             printed=$(SWARMOPS_TEST_VERSION=0.0.1 "${run_with[@]}" "$bin/$name" --version)
-            if [ "$printed" != "swarmops $VERSION" ]; then
-              echo "::error::$name --version printed '$printed', not 'swarmops $VERSION'"
+            if [ "$printed" != "$expected" ]; then
+              echo "::error::$name --version printed '$printed', not '$expected'"
               exit 1
             fi
             echo "$name: '$printed', glibc $glibc at most${weak:+, $weak for weak symbols only}"
@@ -207,7 +238,7 @@ jobs:
       - name: Pack the archive
         id: pack
         run: |
-          name="swarmops-$VERSION-$TARGET_TRIPLE"
+          name="${ARCHIVE_STEM:-swarmops-$VERSION}-$TARGET_TRIPLE"
           stage="$RUNNER_TEMP/stage"
           mkdir -p "$stage/$name" dist
           install -m 0755 "$CARGO_TARGET_DIR/$TARGET_TRIPLE/release/swarmops" \
