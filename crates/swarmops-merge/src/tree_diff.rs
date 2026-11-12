@@ -413,7 +413,8 @@ fn repo_path(path: String) -> RepoPath {
 /// leaf, a deletion deletes, in the order given, never a rename. The changes of a
 /// [`diff_trees`] give a canonical delta, sorted by path bytes, each path once:
 /// `delta_of(&diff_trees(read, parent_root, Some(root), &PathFilter::all())?)` is the delta of a
-/// changeset whose first parent's root is `parent_root`.
+/// changeset whose first parent's root is `parent_root`. One exception: a directory that names
+/// the empty tree holds no leaf, so no change names it and no delta makes or removes it.
 pub fn delta_of(changes: &[TreeChange]) -> Vec<DeltaEntry> {
     changes
         .iter()

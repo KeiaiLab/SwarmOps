@@ -102,7 +102,8 @@ pub enum ConflictKind {
         /// The kind theirs gave it.
         theirs: LeafKind,
     },
-    /// One side has a file where the other has a directory.
+    /// One side has a file where the other has a directory, or ours deleted a file where theirs
+    /// made a directory.
     TypeChange,
 }
 
