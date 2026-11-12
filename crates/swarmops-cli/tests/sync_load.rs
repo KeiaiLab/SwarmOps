@@ -17,6 +17,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::process::Output;
 use std::time::Duration;
 
 use camino::Utf8Path;
@@ -39,10 +40,6 @@ const ORIGIN: &str = "origin";
 
 /// The trailer every native changeset's commit carries first (the git crate's export).
 const CHANGESET_TRAILER: &str = "SwarmOps-Changeset";
-
-/// The start of the warning a push gives when it rewrote imported commits (the git crate's
-/// export; the sync passes the push's warnings on).
-const REWRITE_WARNING: &str = "of the commits exported were imported from git";
 
 /// How many entries one page of `log main` reads while the lag is looked for.
 const LOG_PAGE: &str = "1000";
@@ -81,6 +78,10 @@ impl Remote {
         let texts: Vec<(&str, &str)> = (files.iter())
             .map(|(path, bytes)| (path.as_str(), std::str::from_utf8(bytes).expect("text")))
             .collect();
+
+        // The remote's journal: every move of `main`, a push's too, in its reflog.
+        let logged = bare_git(&server, &["config", "core.logAllRefUpdates", "always"]);
+        assert!(logged.status.success(), "the reflog setting: {logged:?}");
         let base = server.commit_on(REPO, "main", "base", &texts);
         let http = server.http(HttpAuth::Anonymous);
         let home = tempfile::tempdir().expect("a temp HOME");
@@ -137,32 +138,65 @@ impl Remote {
         (!head.is_empty()).then(|| head.to_owned())
     }
 
+    /// The moves of `main` the remote's reflog holds, each read against `base`, the imported
+    /// commit: a move to a commit that does not descend from it is a push that rewrote it.
+    fn moves(&self, base: &str) -> Moves {
+        let listed = self.git(&["log", "--walk-reflogs", "--format=%H", "main"]);
+        let commits: Vec<&str> = listed.lines().collect();
+        let rewritten = (commits.iter())
+            .filter(|commit| !self.descends(commit, base))
+            .count();
+        Moves {
+            all: commits.len(),
+            rewritten,
+        }
+    }
+
+    /// Whether `commit` is `base` or has it among its ancestors.
+    fn descends(&self, commit: &str, base: &str) -> bool {
+        let output = bare_git(&self.server, &["merge-base", "--is-ancestor", base, commit]);
+        match output.status.code() {
+            Some(0) => true,
+            Some(1) => false,
+            _ => panic!("git merge-base --is-ancestor {base} {commit}: {output:?}"),
+        }
+    }
+
     /// What plain git with `args` prints on the bare repository; a failure fails the case.
     fn git(&self, args: &[&str]) -> String {
-        let output = (self.server.command())
-            .arg("--git-dir")
-            .arg(self.server.bare(REPO))
-            .args(args)
-            .output()
-            .expect("run git");
+        let output = bare_git(&self.server, args);
         assert!(output.status.success(), "git {args:?}: {output:?}");
         String::from_utf8(output.stdout).expect("UTF-8")
     }
 }
 
-/// One sync as the syncer runs it: a sync that met a held lock runs again; any other failure,
-/// or an answer that says the push rewrote an imported commit, fails the case.
+/// The moves of the remote's `main` its reflog holds ([`Remote::moves`]).
+struct Moves {
+    /// Every move, the base's own included.
+    all: usize,
+    /// The moves to a commit that does not descend from the imported base.
+    rewritten: usize,
+}
+
+/// Plain git with `args` on `server`'s bare repository: its output, whatever its status.
+fn bare_git(server: &GitServer, args: &[&str]) -> Output {
+    (server.command())
+        .arg("--git-dir")
+        .arg(server.bare(REPO))
+        .args(args)
+        .output()
+        .expect("run git")
+}
+
+/// One sync as the syncer runs it: a sync that met a held lock runs again; any other failure
+/// fails the case. Whether it rewrote an imported commit is read from the remote's reflog after
+/// the lane ([`Remote::moves`]).
 fn sync_once(store: &Store) {
     let line = ["sync", ORIGIN];
     let run = retry_busy(store.run_as(AGENT, &line, &[]), || {
         store.run_as(AGENT, &line, &[])
     });
-    let answer = run.ok();
-    let warnings = answer["warnings"].as_array().cloned().unwrap_or_default();
-    let rewrote = (warnings.iter())
-        .filter_map(serde_json::Value::as_str)
-        .any(|warning| warning.contains(REWRITE_WARNING));
-    assert!(!rewrote, "a sync rewrote an imported commit: {run}");
+    run.ok();
 }
 
 /// How many lands `main` holds above the changeset the remote's head carries (`base` while it
@@ -254,8 +288,11 @@ fn sync_keeps_pace_with_landing() {
         println!("{TAG}minute {minute} lag_mean {mean:.2}");
     }
 
-    // 4. The remote: every landed changeset once on its first parents, above the base it
-    //    started from, unrewritten.
+    // 4. The remote: no push rewrote the base (its reflog), every landed changeset once on its
+    //    first parents, above the base it started from.
+    let moves = remote.moves(&base_commit);
+    assert!(moves.all > 1, "no push reached the remote's reflog");
+    assert_eq!(moves.rewritten, 0, "a sync rewrote the imported base");
     let chain = remote.first_parents();
     let (root, above) = chain.split_last().expect("the base");
     assert_eq!(
@@ -298,6 +335,31 @@ fn sync_keeps_pace_with_landing() {
         panic!("{rule}");
     }
     store.assert_clean("after the lane");
+}
+
+/// The rewrite count's self-check: a move of `main` above the base reads kept, a push over HTTP
+/// of another root reads rewritten, so that the lane's zero is a reading of pushes.
+#[test]
+fn rewrites_are_read_from_the_remote_reflog() {
+    let (remote, base) = Remote::with_base(1);
+    remote
+        .server
+        .commit_on(REPO, "main", "above", &[("above", "1")]);
+
+    // A push of another root over `main`, as a rewrite of the base would land.
+    let root = remote
+        .server
+        .commit_on(REPO, "other", "another root", &[("root", "1")]);
+    let url = remote.http.url(REPO);
+    let refspec = format!("+{root}:refs/heads/main");
+    remote.git(&["push", url.as_str(), refspec.as_str()]);
+
+    let moves = remote.moves(&base);
+    assert_eq!(
+        (moves.all, moves.rewritten),
+        (3, 1),
+        "base, above, the other root"
+    );
 }
 
 /// The real git the server runs, as an absolute path: the product cleans its children's `PATH`.
