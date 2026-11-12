@@ -47,10 +47,10 @@ use swarmops_store::{FsMethod, MetaStore};
 use crate::fs::{Call, Watch};
 use crate::measure;
 
-/// The file the sharing workloads land lines of: [`REGISTRY_LINES`] lines, `line <l>\n`.
+/// The file the sharing workloads land lines of: [`registry_lines`] lines, `line <l>\n`.
 pub const REGISTRY: &str = "REGISTRY";
 
-/// How many lines [`REGISTRY`] holds.
+/// How many lines [`REGISTRY`] holds for up to 66 landers ([`registry_lines`]).
 pub const REGISTRY_LINES: usize = 200;
 
 /// How many files [`Workload::Large`]'s base holds under `big/`, each rewritten by lander 0's
@@ -142,10 +142,11 @@ impl Workload {
 }
 
 /// The files the store starts with for `landers` landers under `workload`, as (path, content):
-/// [`REGISTRY`], `agents/<n>/f0.txt` for each lander, and for [`Workload::Large`] the
-/// [`BIG_FILES`] files `big/<i>.txt` of [`BIG_FILE_BYTES`] each.
+/// [`REGISTRY`] of [`registry_lines`] lines, `agents/<n>/f0.txt` for each lander, and for
+/// [`Workload::Large`] the [`BIG_FILES`] files `big/<i>.txt` of [`BIG_FILE_BYTES`] each.
 pub fn base_files(landers: usize, workload: Workload) -> Vec<(String, Vec<u8>)> {
-    let registry: Vec<String> = (0..REGISTRY_LINES).map(|l| format!("line {l}\n")).collect();
+    let lines = registry_lines(landers);
+    let registry: Vec<String> = (0..lines).map(|l| format!("line {l}\n")).collect();
     let mut files = vec![(REGISTRY.to_owned(), registry.concat().into_bytes())];
     for lander in 0..landers {
         let content = format!("lander {lander} base\n").into_bytes();
@@ -208,10 +209,18 @@ pub fn change_for(seed: u64, lander: usize, land: usize, workload: Workload) -> 
 }
 
 /// The line of [`REGISTRY`] (from 0) that lander `lander` (from 0) replaces in the workloads that
-/// share the file: `3n + 1`. Two unchanged lines lie between any two landers' lines, so a
-/// three-way merge of their lands, which conflicts on changed lines that touch, keeps both.
+/// share the file: `3n + 1`, below [`registry_lines`] for any pool that holds the lander. Two
+/// unchanged lines lie between any two landers' lines, so a three-way merge of their lands, which
+/// conflicts on changed lines that touch, keeps both.
 pub fn own_line(lander: usize) -> usize {
-    (3 * lander + 1) % REGISTRY_LINES
+    3 * lander + 1
+}
+
+/// How many lines [`REGISTRY`] holds for `landers` landers: [`REGISTRY_LINES`], or three a
+/// lander past 66 of them, so that every lander's [`own_line`] is in the file. Up to 66 landers
+/// the file is the same 200 lines at every pool size.
+pub fn registry_lines(landers: usize) -> usize {
+    REGISTRY_LINES.max(3 * landers)
 }
 
 /// The [`REGISTRY`] line lander `lander`'s land `land` writes: `lander <n> land <i>`, without
@@ -2105,5 +2114,61 @@ mod tests {
     /// The windows of `records` that [`flagged`] flags.
     fn flagged_of(records: &[Vec<LandRecord>]) -> Vec<Window> {
         flagged(&Stats::per_window(records, TEN_S))
+    }
+
+    /// For pools below and past 67 landers, every two landers' lines of [`REGISTRY`] lie at
+    /// least 3 apart (two unchanged lines between them) and inside the file. With 200 lines,
+    /// 68 landers is the first pool where two touch (lander 67's line 2 and lander 0's line 1).
+    #[test]
+    fn no_two_landers_lines_touch() {
+        for landers in [50, 67, 68, 100, 200, 1_000] {
+            let mut lines: Vec<usize> = (0..landers).map(own_line).collect();
+            lines.sort_unstable();
+
+            // 1. Neighbours, in line order, leave two lines between them.
+            for pair in lines.windows(2) {
+                assert!(
+                    pair[1] - pair[0] >= 3,
+                    "{landers} landers: lines {pair:?} touch"
+                );
+            }
+
+            // 2. The last one is a line of the file.
+            let last = lines.last().copied().unwrap_or_default();
+            assert!(
+                last < registry_lines(landers),
+                "{landers} landers: line {last}"
+            );
+        }
+    }
+
+    /// [`REGISTRY`] is today's 200 `line <l>` lines up to 66 landers, and grows by three lines
+    /// a lander past them: 201 at 67, 3,000 at 1,000.
+    #[test]
+    fn the_base_of_66_landers_is_unchanged() {
+        let numbered = |lines: usize| {
+            (0..lines).fold(String::new(), |mut text, l| {
+                writeln!(text, "line {l}").expect("a String takes any write");
+                text
+            })
+        };
+        let today = numbered(REGISTRY_LINES);
+        let registry = |landers| {
+            let files = base_files(landers, Workload::Shared);
+            let (path, content) = files.into_iter().next().expect("a base file");
+            assert_eq!(path, REGISTRY);
+            String::from_utf8(content).expect("text")
+        };
+
+        // 1. Up to 66 landers: byte for byte today's file.
+        for landers in [1, 8, 50, 66] {
+            assert_eq!(registry(landers), today, "{landers} landers");
+        }
+
+        // 2. Past them: `line <l>` lines, three a lander.
+        for (landers, lines) in [(67, 201), (1_000, 3_000)] {
+            assert_eq!(registry(landers), numbered(lines), "{landers} landers");
+            assert_eq!(registry_lines(landers), lines);
+        }
     }
 }
