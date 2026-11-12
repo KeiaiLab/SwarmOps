@@ -1,5 +1,6 @@
 /
 /docs
+/docs/agents
 /docs/architecture
 /docs/changelog
 /docs/concepts
@@ -139,6 +140,7 @@
 /docs/troubleshooting
 /explainers/store
 /explainers/store-light
+/now
 /product
 /product/features
 /product/how-it-works
