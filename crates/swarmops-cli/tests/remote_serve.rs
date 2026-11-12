@@ -13,11 +13,21 @@
 //!                                                                    └── swarmops serve --root
 //!                                                                          └── the served store
 //! ```
+//!
+//! A race is forced by a wrapper of the stand-in that holds the first push it meets once the
+//! client has read the advertisement, until the test lets it go: the served `main` moves
+//! meanwhile, and the held push then finds it moved.
+//!
+//! ```text
+//!   store B ── push ── advertisement read ── (held) ──────────── update: main moved
+//!   another writer ── moves the served main ───────────────────┘
+//! ```
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use swarmops_testkit::child;
@@ -67,6 +77,16 @@ who = ["person/bob"]
 read = true
 push = ["feature/**"]
 "#;
+
+/// How long the test waits for a held push to reach the wrapper.
+const HOLD_WAIT: Duration = Duration::from_secs(60);
+
+/// How often the test looks for the held push.
+const HOLD_POLL: Duration = Duration::from_millis(20);
+
+/// How often the wrapper looks for its release, in milliseconds; it gives up after
+/// [`HOLD_WAIT`].
+const HOLD_TICK_MS: u128 = 50;
 
 /// How a client reaches the served store.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -355,6 +375,81 @@ fn published(synced: &Value) -> String {
         .last()
         .unwrap_or_else(|| panic!("nothing published: {synced}"));
     text_of(&last["sha"])
+}
+
+/// Asserts the served `main` linear, holding each of `paths` once, `base` commits plus one
+/// commit per path long.
+fn assert_each_once(site: &Site, base: usize, paths: &[&str], what: &str) {
+    let merges = site.served_git(&["rev-list", "--first-parent", "--merges", "main"]);
+    assert_eq!(merges, "", "{what}");
+    for path in paths {
+        let line = ["log", "--first-parent", "--format=%H", "main", "--", path];
+        assert_eq!(site.served_git(&line).lines().count(), 1, "{what}: {path}");
+    }
+    let chain = site.history();
+    assert_eq!(chain.len(), base + paths.len(), "{what}: {chain:?}");
+}
+
+/// A wrapper of a key's stand-in that holds the first push it meets, once the client has read
+/// the advertisement and sent its first byte, until the test lets it go; every other connection
+/// passes.
+#[cfg(unix)]
+struct Hold {
+    /// The wrapper (`ssh`) and its marks: `taken` (a push is held), `reached`, `released`.
+    dir: TempDir,
+}
+
+#[cfg(unix)]
+impl Hold {
+    /// The wrapper of the stand-in of `identity`.
+    fn on(site: &Site, identity: &str) -> Hold {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mark = |name: &str| path_text(&dir.path().join(name));
+
+        // 1. A fetch, and every push after the first, pass; the first push's first byte goes on,
+        //    the wrapper says so and waits, then hands on the rest.
+        let script = format!(
+            "#!/bin/sh\nPATH=/usr/bin:/bin:$PATH\n\
+             case \"$*\" in\n  *git-receive-pack*) ;;\n  *) exec {ssh} \"$@\" ;;\nesac\n\
+             mkdir '{taken}' 2>/dev/null || exec {ssh} \"$@\"\n\
+             {{\n  dd bs=1 count=1 status=none\n  : > '{reached}'\n  n=0\n  \
+             while [ ! -e '{released}' ] && [ $n -lt {rounds} ]; do\n    \
+             sleep 0.{HOLD_TICK_MS:03}; n=$((n+1))\n  done\n  exec cat\n}} | {ssh} \"$@\"\n",
+            ssh = site.served.ssh_command(identity),
+            rounds = HOLD_WAIT.as_millis() / HOLD_TICK_MS,
+            taken = mark("taken"),
+            reached = mark("reached"),
+            released = mark("released"),
+        );
+
+        // 2. Named ssh, so that git takes it for OpenSSH and does not probe it.
+        let program = dir.path().join("ssh");
+        fs::write(&program, script).expect("write the wrapper");
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).expect("make it runnable");
+        Hold { dir }
+    }
+
+    /// The wrapper, as git's ssh command.
+    fn ssh(&self) -> String {
+        format!("'{}'", path_text(&self.dir.path().join("ssh")))
+    }
+
+    /// Waits until a push is held; a push that never comes fails the test.
+    fn reached(&self) {
+        let reached = self.dir.path().join("reached");
+        let deadline = Instant::now() + HOLD_WAIT;
+        while !reached.exists() {
+            assert!(Instant::now() < deadline, "no push reached the wrapper");
+            std::thread::sleep(HOLD_POLL);
+        }
+    }
+
+    /// Lets the held push go on.
+    fn release(&self) {
+        fs::write(self.dir.path().join("released"), "").expect("release the hold");
+    }
 }
 
 /// An empty bare repository `name` under `dir`, with `store`'s `main` exported into it.
@@ -649,5 +744,52 @@ fn a_merge_on_a_served_branch_round_trips() {
     );
     assert_eq!(site.main_head(), main);
     store.assert_clean("after the merge's round trip");
+    site.assert_clean();
+}
+
+/// A race the served store calls stale reaches the store client as `remote_moved`, and its sync
+/// retries: B's push of two changes is held after its advertisement while A moves the served
+/// `main` to the first of them, which B had published on a branch. The served store finds B's
+/// tip forward of the new head and its old value stale; B's sync fetches, finds its first
+/// change on the remote and pushes the second on its second attempt.
+#[cfg(unix)]
+#[test]
+fn a_race_the_served_store_calls_stale_is_retried() {
+    let site = Site::new();
+    let base = site.history().len();
+    let b = site.ssh(CAROL).cloned();
+
+    // 1. B lands a change, publishes it as feature/w, and lands another on it.
+    let first = land(&b, "one.txt", "one\n");
+    on(&b, &["ref", "set", "feature/w", &first, "--create"]).ok();
+    let branch = b.read(&["push", ORIGIN, "feature/w"]).ok();
+    land(&b, "two.txt", "two\n");
+
+    // 2. A follows feature/w: its main is B's first change.
+    let (a, _) = site.ssh(ADA).cloned_with(&["--branch", "feature/w"]);
+    let gate = Hold::on(&site, CAROL);
+    let held = gate.ssh();
+
+    // 3. B's sync, its push held; A's push moves the served main to the first change meanwhile.
+    let line = ["sync", ORIGIN];
+    let (synced, won) = std::thread::scope(|scope| {
+        let pushing = scope.spawn(|| b.run_as(AGENT, &line, &[(SSH_VAR, &held)]));
+        gate.reached();
+        let won = a.read(&["push", ORIGIN, "main:main"]).ok();
+        gate.release();
+        (pushing.join().expect("B's sync"), won)
+    });
+    assert_eq!(won["status"], "pushed", "{won}");
+    assert_eq!(won["new"], branch["new"], "{won}");
+
+    // 4. B's sync retried once and published its second change on the first.
+    let synced = synced.ok();
+    assert_eq!(synced["status"], "pushed", "{synced}");
+    assert_eq!(synced["attempts"], 2, "{synced}");
+    let chain = site.history();
+    assert_eq!(chain[0], published(&synced));
+    assert_eq!(chain[1], won["new"].as_str().expect("new"));
+    assert_each_once(&site, base, &["one.txt", "two.txt"], "a stale race");
+    b.assert_clean("after the race");
     site.assert_clean();
 }
