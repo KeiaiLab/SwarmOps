@@ -4,7 +4,7 @@
 
 Make a store from a git remote: a new store in --into, the remote recorded as --remote (origin), fetched, and its followed branch (--branch, else the remote's default branch) imported into main.
 
-The URL is an https or ssh URL, or the scp form user@host:path; a plain http URL only to a loopback address. A URL holding a password is refused, and so is an http or https URL whose user has a token's shape: 20 characters or more with a letter and a digit, so a user name of that shape is refused too (leave the token to git's credential helper, or name its variable with --token-env). Git 2.39 or later runs the transfer, with the user's own credentials, proxies and ssh configuration. It needs an identity, as git import does: it moves main. Run again into the same directory with the same URL, it continues an interrupted clone.
+The URL is an https or ssh URL, or the scp form user@host:path; a plain http URL only to a loopback address. A URL holding a password is refused, and so is an http or https URL with a user part, whatever the user is: a token there cannot be told from a name (leave the token to git's credential helper, or name its variable with --token-env). An ssh URL keeps its user. Git 2.39 or later runs the transfer, with the user's own credentials, proxies and ssh configuration. It needs an identity, as git import does: it moves main. Run again into the same directory with the same URL, it continues an interrupted clone.
 
 ```yaml
 title: "swarmops clone"
