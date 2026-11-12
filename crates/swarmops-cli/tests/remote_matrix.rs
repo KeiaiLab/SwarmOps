@@ -1,7 +1,7 @@
 //! The interop matrix's store → GitHub cells (the 2026-11-12 interop design, section 2, column
 //! S→H) that no earlier suite holds: a clone that follows another branch, a FORMAT 2 branch
-//! pushed, two stores writing one remote at once, a read-only token
-//! and a signed remote commit.
+//! pushed, two stores writing one remote at once, a push cut mid-send, a read-only token, a
+//! signed remote commit, and the ids every store exports after concurrent work.
 //!
 //! Each test serves bare repositories with the test kit's [`GitServer`] (git's own smart HTTP on
 //! `127.0.0.1`, or the ssh stand-in) and runs the binary with a git environment of its own: the
@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use swarmops_store::StoreFormat;
-use swarmops_testkit::remote::{GitServer, HttpAuth, HttpServer, SshMode};
+use swarmops_testkit::remote::{GitServer, HttpAuth, HttpServer, SshFault, SshMode};
 use tempfile::TempDir;
 
 use crate::support::{Racers, Run, Store, run};
@@ -44,6 +44,17 @@ const SSH_VAR: &str = "GIT_SSH_COMMAND";
 
 /// The commits [`Remote::new`] writes on `main`.
 const BASE_COMMITS: usize = 2;
+
+/// The size of the file a cut push sends: a pack of about 780 KiB, well past [`CUT`].
+const NOISE_BYTES: usize = 1 << 20;
+
+/// Where a cut push's upload ends: inside the pack, as the probe's 300 KB cut did. The ssh
+/// stand-in's `dd` counts a short read as a whole 64 KiB block: it passes 5 reads here, the
+/// command list and then pack data; a cut below 64 KiB passes the command list alone.
+const CUT: usize = 300 << 10;
+
+/// How many stores sync one remote at once in the export test.
+const STORES: usize = 4;
 
 /// How long the test waits for a held push to reach the hook.
 const HOLD_WAIT: Duration = Duration::from_secs(60);
@@ -275,6 +286,26 @@ fn published(synced: &Value) -> String {
 /// `--repo <store> --as <AGENT> <args…>`, for a racer.
 fn racer_args(store: &Store, args: &[&str]) -> Vec<String> {
     store.args(AGENT, args)
+}
+
+/// Whether an agent runs `run` again: a lost race or a retryable failure.
+fn again(run: &Run) -> bool {
+    let envelope: Value = serde_json::from_str(&run.stdout).unwrap_or_default();
+    let error = &envelope["error"];
+    error["retryable"] == true
+        || error["code"] == "E_CAS_RETRY_EXHAUSTED"
+        || error["code"] == "E_REMOTE_DIVERGED"
+}
+
+/// `sync` on `store`, run again while it ends as [`again`] says; the run that did not.
+fn synced(store: &Store) -> Run {
+    loop {
+        let done = on(store, &["sync", ORIGIN]);
+        if !again(&done) {
+            return done;
+        }
+        std::thread::sleep(HOLD_POLL);
+    }
 }
 
 /// A `pre-receive` hook on the remote that holds the first push it meets until the test lets
@@ -548,6 +579,121 @@ fn two_stores_sync_a_forced_loss() {
         assert_eq!(chain[1], won["new"].as_str().expect("new"), "{transport:?}");
         remote.assert_each_once(&["one.txt", "two.txt"], &format!("{transport:?}"));
     }
+}
+
+/// [`STORES`] stores each land a change and sync at once, then sync again until done: every
+/// store's export of `main` is the remote's history, commit by commit and tree by tree, sound
+/// for `git fsck --strict`, and every store passes `verify --deep`. Changeset ids are each
+/// store's own and are not compared.
+#[test]
+fn stores_export_the_same_ids_after_concurrent_work() {
+    for transport in TRANSPORTS {
+        let remote = Remote::new(transport);
+        let stores: Vec<Store> = (0..STORES).map(|_| remote.cloned()).collect();
+        let paths: Vec<String> = (0..STORES).map(|n| format!("stores/{n}.txt")).collect();
+        for (store, path) in stores.iter().zip(&paths) {
+            land(store, path, "mine\n");
+        }
+
+        // 1. Every sync at once; a loser syncs again.
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut racers = Racers::new(dir.path());
+        for store in &stores {
+            racers.spawn(&racer_args(store, &["sync", ORIGIN]), &remote.vars(&[]));
+        }
+        for (store, done) in stores.iter().zip(racers.race()) {
+            if again(&done) {
+                synced(store).ok();
+                continue;
+            }
+            done.ok();
+        }
+
+        // 2. Each store takes what the others published.
+        for store in &stores {
+            synced(store).ok();
+        }
+        let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
+        remote.assert_each_once(&paths, &format!("{transport:?}"));
+
+        // 3. Each export of main is the remote's history, by commit and tree.
+        let history = "--format=%H %T";
+        let expected = remote.git(&["log", history, "main"]);
+        for (n, store) in stores.iter().enumerate() {
+            let bare = dir.path().join(format!("export-{n}.git"));
+            let init = remote
+                .server
+                .command()
+                .args(["init", "--quiet", "--bare"])
+                .arg(&bare)
+                .output();
+            assert!(init.expect("git init").status.success(), "{transport:?}");
+            store.read(&["git", "export", &path_text(&bare)]).ok();
+            let exported = git_out(&remote.server, &bare, &["log", history, "main"]);
+            assert_eq!(exported, expected, "{transport:?}: store {n}");
+            git_out(
+                &remote.server,
+                &bare,
+                &["fsck", "--strict", "--no-dangling"],
+            );
+            assert_eq!(
+                store.problems(),
+                Vec::<String>::new(),
+                "{transport:?}: store {n}"
+            );
+        }
+    }
+}
+
+/// A push cut mid-send, the server sound, is `E_REMOTE_UNREACHABLE`, retryable, and moves
+/// nothing; the same push run again goes whole. Over HTTP the request's body is cut; over ssh
+/// the stand-in passes on [`CUT`] bytes of what the client sends.
+#[test]
+fn a_cut_push_is_retryable() {
+    for transport in TRANSPORTS {
+        let remote = Remote::new(transport);
+        let store = remote.cloned();
+        let before = remote.head("main");
+        land(&store, "noise.txt", &noise(NOISE_BYTES));
+
+        // 1. The cut armed for this transport.
+        let cut_ssh = remote
+            .server
+            .ssh_command_with(SshMode::Serve, SshFault::CutSend(CUT));
+        let mut env = Vec::new();
+        match transport {
+            Transport::Http => remote.http.cut_request_after(CUT),
+            Transport::Ssh => env.push((SSH_VAR, cut_ssh.as_str())),
+        }
+
+        // 2. The cut push: unreachable, retryable; the remote unmoved.
+        let line = ["--repo", store.path(), "push", ORIGIN];
+        let failed = run(&line, &remote.vars(&env));
+        let error = failed.err("E_REMOTE_UNREACHABLE");
+        assert_eq!(failed.exit(), 4, "{transport:?}: {failed}");
+        assert_eq!(error["retryable"], true, "{transport:?}: {failed}");
+        assert_eq!(remote.head("main"), before, "{transport:?}");
+
+        // 3. Run again, uncut: pushed.
+        let pushed = store.read(&["push", ORIGIN]).ok();
+        assert_eq!(pushed["status"], "pushed", "{transport:?}: {pushed}");
+        assert_eq!(remote.head("main").as_deref(), pushed["new"].as_str());
+    }
+}
+
+/// `len` bytes of text that compress poorly, the same every run: a pack past [`CUT`].
+fn noise(len: usize) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+    (0..len)
+        .map(|_| {
+            // xorshift64: one 6-bit digit per byte.
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            char::from(ALPHABET[(state & 0x3f) as usize])
+        })
+        .collect()
 }
 
 /// A token the remote lets read and not write: `fetch` with it works, and `push` is
