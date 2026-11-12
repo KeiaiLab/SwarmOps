@@ -14,10 +14,9 @@ SwarmOps is version control for swarms of coding agents: many agent processes co
 [Roadmap](#roadmap) · [Contributing](CONTRIBUTING.md)
 
 SwarmOps is pre-release, at v0.11.0 (2026-11-09). It is designed for large pools of coding agents
-that commit, land and sync with git. It is measured today at 50 concurrent writing processes on one
-host: 506.8 commits/s, nothing lost; 50 agents landing: 25.0 lands/s, nothing lost
-([perf.md](docs/perf.md#d2-8-gated-runs--2026-11-09)). The [roadmap](docs/roadmap.md) says what
-comes next.
+that commit, land and sync with git. It is measured today at 50 agents landing on one host: 25.0
+lands/s, nothing lost ([perf.md](docs/perf.md#d2-8-gated-runs--2026-11-09)). The
+[roadmap](docs/roadmap.md) says what comes next.
 
 Linux x86_64 (tested) and aarch64 (smoke-tested under emulation), glibc 2.34 or newer; no macOS or Windows build yet.
 
