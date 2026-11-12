@@ -808,7 +808,7 @@ static DEFAULTS: [DefaultRow; 15] = [
 
 /// Values that tune the implementation, or bound the store's layout where no request reaches:
 /// no option sets them, and they are not part of the contract.
-static INTERNAL: [Limit; 33] = [
+static INTERNAL: [Limit; 38] = [
     internal_value(
         "Writer lock wait",
         declared(
@@ -1209,6 +1209,68 @@ static INTERNAL: [Limit; 33] = [
         ),
         Unit::Millis,
         "How often a write waiting in the queue looks for its answer.",
+    ),
+    internal_value(
+        "Wire protocol",
+        code(
+            "swarmops_api::WIRE_PROTOCOL",
+            "crates/swarmops-api/src/wire.rs",
+            "pub const WIRE_PROTOCOL: u32 = 1;",
+            || u64::from(swarmops_api::WIRE_PROTOCOL),
+        ),
+        Unit::Count("version"),
+        "The protocol of the native wire between two stores that this build speaks: a \
+             request names its protocol, and a peer refuses one it does not take before it \
+             reads the request.",
+    ),
+    internal_value(
+        "Wire line",
+        code(
+            "swarmops_api::MAX_WIRE_LINE",
+            "crates/swarmops-api/src/wire.rs",
+            "pub const MAX_WIRE_LINE: usize = 1024 * 1024;",
+            || bytes::to_u64(swarmops_api::MAX_WIRE_LINE),
+        ),
+        Unit::Bytes,
+        "The longest request or answer line of the native wire: a longer request is refused \
+             before a byte is sent, and a longer answer ends the session.",
+    ),
+    internal_value(
+        "Wire ids",
+        code(
+            "swarmops_api::MAX_WIRE_IDS",
+            "crates/swarmops-api/src/wire.rs",
+            "pub const MAX_WIRE_IDS: usize = 10_000;",
+            || bytes::to_u64(swarmops_api::MAX_WIRE_IDS),
+        ),
+        Unit::Count("ids"),
+        "The most ids one list of a native wire request or result carries; longer lists \
+             page.",
+    ),
+    internal_value(
+        "Wire chunk",
+        code(
+            "swarmops_api::MAX_CHUNK_BYTES",
+            "crates/swarmops-api/src/wire.rs",
+            "pub const MAX_CHUNK_BYTES: u64 = 64 * 1024 * 1024;",
+            || swarmops_api::MAX_CHUNK_BYTES,
+        ),
+        Unit::Bytes,
+        "The most record bytes one chunk of objects on the native wire holds; one object \
+             alone may be longer, up to the store's object bound. A longer chunk is refused \
+             before its records are read.",
+    ),
+    internal_value(
+        "Wire stall",
+        code(
+            "swarmops_api::WIRE_STALL_SECS",
+            "crates/swarmops-api/src/wire.rs",
+            "pub const WIRE_STALL_SECS: u64 = 300;",
+            || swarmops_api::WIRE_STALL_SECS,
+        ),
+        Unit::Seconds,
+        "How long a native wire session waits for a byte from its peer: past it, the session \
+             ends with `E_REMOTE_UNREACHABLE`, `details.cause` `timeout`, retryable.",
     ),
 ];
 

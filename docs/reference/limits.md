@@ -367,6 +367,11 @@ Not part of the contract: these tune the implementation, or bound the store's la
 | Queue request | 65,536 bytes (64 KiB) | `swarmops_store::meta::queue::REQUEST_MAX` | The longest request a write leaves in `meta/queue/` while it waits for the lock; a longer one waits for the lock alone. |
 | Queue answer | 1,048,576 bytes (1 MiB) | `swarmops_store::meta::queue::ANSWER_MAX` | The longest answer the lock's holder writes to a write it committed for it; a write whose answer would be longer is declined, and runs alone. |
 | Answer poll | 1 ms | `swarmops_store::meta::queue::ANSWER_POLL` | How often a write waiting in the queue looks for its answer. |
+| Wire protocol | 1 version | `swarmops_api::WIRE_PROTOCOL` | The protocol of the native wire between two stores that this build speaks: a request names its protocol, and a peer refuses one it does not take before it reads the request. |
+| Wire line | 1,048,576 bytes (1 MiB) | `swarmops_api::MAX_WIRE_LINE` | The longest request or answer line of the native wire: a longer request is refused before a byte is sent, and a longer answer ends the session. |
+| Wire ids | 10,000 ids | `swarmops_api::MAX_WIRE_IDS` | The most ids one list of a native wire request or result carries; longer lists page. |
+| Wire chunk | 67,108,864 bytes (64 MiB) | `swarmops_api::MAX_CHUNK_BYTES` | The most record bytes one chunk of objects on the native wire holds; one object alone may be longer, up to the store's object bound. A longer chunk is refused before its records are read. |
+| Wire stall | 300 s | `swarmops_api::WIRE_STALL_SECS` | How long a native wire session waits for a byte from its peer: past it, the session ends with `E_REMOTE_UNREACHABLE`, `details.cause` `timeout`, retryable. |
 
 ## Details
 
