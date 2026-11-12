@@ -669,6 +669,10 @@ fn an_object_file_longer_than_any_the_store_writes_is_bad_header_before_it_is_re
 /// its last byte arrives. A payload of 64 MiB it decodes in one pass, into a buffer of the size
 /// the file records. So the two sizes pin the cap (with a cap of 1 GiB, both would be read in
 /// one pass), and the stream round-trips a real object. About 0.4 s and 140 MB at most.
+///
+/// The pin reads `Vec::capacity`, which std does not promise: that `read_to_end` grows a buffer
+/// past its last byte, and that `with_capacity` sizes one exactly, hold on the toolchain
+/// `rust-toolchain.toml` pins, and a new one may need this pin redone.
 #[test]
 fn a_zstd_object_past_the_cap_round_trips_through_the_store() {
     let (_root, layout) = new_root();
@@ -1365,6 +1369,80 @@ mod hashed {
             .put_hashed_batch(hashed(ObjectKind::Blob, &second))
             .unwrap();
         assert_eq!(made(calls()), 1, "once a batch, not once a store");
+    }
+
+    /// What makes the real filesystem fail a batch's first `create_dir_all` of `objects/tmp`,
+    /// once both puts are past their `exists` check, so that each makes it in turn.
+    struct TmpFailsOnce {
+        /// The files of the batch's two objects.
+        objects: [PathBuf; 2],
+        /// `objects/tmp`.
+        tmp: PathBuf,
+        /// Holds each object's `exists` until both are in flight.
+        both: Rendezvous,
+        /// The `create_dir_all` calls of `objects/tmp`.
+        made: AtomicUsize,
+    }
+
+    impl Watch for TmpFailsOnce {
+        fn before(&self, call: &Call<'_>) -> io::Result<()> {
+            let path = call.path();
+            if call.method == "exists" && self.objects.iter().any(|p| p == path) {
+                self.both.arrive();
+            }
+            if call.method == "create_dir_all" && path == self.tmp {
+                let first = self.made.fetch_add(1, Ordering::SeqCst) == 0;
+                if first {
+                    return Err(io::Error::other("injected: create_dir_all objects/tmp"));
+                }
+            }
+            Ok(())
+        }
+
+        fn after(&self, call: &Call<'_>) {
+            let path = call.path();
+            if call.method == "exists" && self.objects.iter().any(|p| p == path) {
+                self.both.depart();
+            }
+        }
+    }
+
+    /// A failed `create_dir_all` of `objects/tmp` fails its put alone: the batch's next put
+    /// that writes tries again, and places its object.
+    #[test]
+    fn a_failed_objects_tmp_is_made_again_by_the_next_put() {
+        let (_root, layout) = new_root();
+        let items = hashed(ObjectKind::Blob, &[b"one", b"two"]);
+        let object = |i: usize| layout.object_path(items[i].id()).into_std_path_buf();
+        let watch = Arc::new(TmpFailsOnce {
+            objects: [object(0), object(1)],
+            tmp: layout.objects_tmp().into_std_path_buf(),
+            both: Rendezvous::default(),
+            made: AtomicUsize::new(0),
+        });
+        watch.both.arm(2);
+        let fs = Watched(Arc::clone(&watch), RealFs::new());
+        let mut store = FsObjectStore::open(layout.clone(), Box::new(fs));
+        store.set_parallelism(2);
+
+        // 1. The batch fails with the injected error; the other put made the directory.
+        let got = store.put_hashed_batch(items);
+        assert!(matches!(got, Err(StoreError::Io(_))), "{got:?}");
+        assert_eq!(watch.both.most(), 2, "both puts were in flight at once");
+        assert_eq!(
+            watch.made.load(Ordering::SeqCst),
+            2,
+            "made again after the failure"
+        );
+        assert!(layout.objects_tmp().is_dir());
+
+        // 2. Exactly one object is placed: the one whose put made the directory.
+        assert_eq!(
+            object_files(&layout).len(),
+            1,
+            "{:?}",
+            object_files(&layout)
+        );
     }
 }
 
