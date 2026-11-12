@@ -1,8 +1,25 @@
-# The website (web/): builds the static export and checks it on every push that can change it,
-# then deploys web/out to Cloudflare Pages, project `swarmops`. A push to stable is production
-# (swarmops.cc), a push to a feat/** branch a preview on its pages.dev address; a pull request
-# builds and checks only. Without the CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID secrets the
-# deploy job leaves a notice and deploys nothing, so the run stays green.
+# The website (web/): builds the static export, checks it, then deploys web/out to Cloudflare
+# Pages, project `swarmops`. Every page states the commit it was built from, so every push to
+# stable is built and is production (swarmops.cc), whatever it changes. The `scope` job decides
+# for the other triggers (scripts/freshness.py, the freshness design, section 2.1):
+#
+#   push to stable, workflow_dispatch   build
+#   push of a v* tag                    build stable's head as production: the pages name the release
+#   push to feat/lq-<n>-<n>             nothing, no runner: the stable push that follows builds that tree
+#   push to another feat/** branch      build when a changed file is a site path; a preview on pages.dev
+#   pull request                        the same; built and checked, never deployed
+#
+# The site paths are `site_paths` in .github/freshness.json. A diff that cannot be made builds.
+#
+# Cost on the four self-hosted runners: a site run took 1 min 39 s to 5 min 53 s (the eight runs
+# before 2026-11-11), about 3.5 runner-hours on a day of 53 stable pushes; a branch push that
+# touches no site path costs the `scope` job alone. Stable and tag runs share one queue: one runs,
+# the newest waits, and an older waiting run is replaced (shown as cancelled on its commit), so
+# the newest push always deploys. Runs of any other ref cancel the one before.
+#
+# Without the CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID secrets the deploy job leaves a
+# notice and deploys nothing, so the run stays green. After a production deploy the `live` job
+# reads the stamp swarmops.cc serves and fails unless it names the commit built.
 #
 # Hardening as in ci.yml: every action pinned to a full commit SHA (its version in the trailing
 # comment), no token permission a job does not need (the deploy job alone may write deployments,
@@ -16,59 +33,94 @@ name: Site
 on:
   push:
     branches: [stable, "feat/**"]
-    paths:
-      - "web/**"
-      - "docs/**"
-      - "CHANGELOG.md"
-      - "scripts/install.sh"
-      - "justfile"
-      - ".github/workflows/site.yml"
+    tags: ["v*"]
   pull_request:
     branches: [stable]
-    paths:
-      - "web/**"
-      - "docs/**"
-      - "CHANGELOG.md"
-      - "scripts/install.sh"
-      - "justfile"
-      - ".github/workflows/site.yml"
   workflow_dispatch:
 
 permissions: {}
 
+# A tag run builds stable's head, so it queues with the stable runs. That queue never cancels a
+# run in progress: under a burst of pushes faster than one build, cancelling would deploy none.
 concurrency:
-  group: site-${{ github.ref }}
-  cancel-in-progress: true
+  group: site-${{ github.ref_type == 'tag' && 'refs/heads/stable' || github.ref }}
+  cancel-in-progress: ${{ !(github.ref == 'refs/heads/stable' || github.ref_type == 'tag') }}
 
 defaults:
   run:
     shell: bash
 
 jobs:
+  scope:
+    name: decide whether the site is built
+    # A land-queue candidate takes no runner: the queue reads ci.yml alone, and the stable push
+    # that follows its fast-forward builds the same tree.
+    if: ${{ !(startsWith(github.ref_name, 'feat/lq-')) }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "swarmops-local"]') || 'ubuntu-24.04' }} # zizmor: ignore[self-hosted-runner]
+    permissions:
+      contents: read # checkout
+    timeout-minutes: 5
+    outputs:
+      build: ${{ steps.scope.outputs.build }}
+      # The commit built and the branch it deploys as: this push's, or stable's head for a tag.
+      sha: ${{ steps.scope.outputs.sha }}
+      branch: ${{ steps.scope.outputs.branch }}
+    steps:
+      # Full history: the diff needs the commit before the push, a tag run stable's head.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - run: python3 -I scripts/freshness.py selftest
+
+      # The event's values reach the shell through the environment, never through the script text.
+      - id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: python3 -I scripts/freshness.py scope --event "$EVENT" --ref "$REF" --before "$BEFORE" --sha "$SHA" --base "$BASE"
+
   site:
     name: build and check the site
+    needs: scope
+    if: needs.scope.outputs.build == 'true'
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "swarmops-local"]') || 'ubuntu-24.04' }} # zizmor: ignore[self-hosted-runner]
     permissions:
       contents: read # checkout
     timeout-minutes: 15
     env:
       NEXT_TELEMETRY_DISABLED: 1
+      SCOPE_SHA: ${{ needs.scope.outputs.sha }}
+      SCOPE_BRANCH: ${{ needs.scope.outputs.branch }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The scope's commit: this push's, or stable's head for a tag push.
+          ref: ${{ needs.scope.outputs.sha }}
           persist-credentials: false
           fetch-depth: 0
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22.15.0
+          # No cache: a tag run builds production, and nothing restored may reach that build.
+          package-manager-cache: false
       - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
           tool: just@1.58.0
           # Only the action's checksummed release binaries, never a cargo-binstall fallback.
           fallback: none
       - run: just web-install
-      - run: just web-build
+      # The pages name the ref built: for a tag run that is stable, not the tag.
+      - run: GITHUB_REF_NAME="$SCOPE_BRANCH" just web-build
       - run: just web-check
+
+      # The stamp gate: the pages name the commit checked out, and what git says of it.
+      - run: node web/scripts/check-stamp.mjs --selftest
+      - run: node web/scripts/check-stamp.mjs --sha "$SCOPE_SHA" --ref "$SCOPE_BRANCH"
+      - run: node --experimental-strip-types --test 'web/test/*.test.ts'
 
       # The checked export, for the deploy job. Hidden files included: .well-known/security.txt.
       - if: github.event_name != 'pull_request'
@@ -82,18 +134,21 @@ jobs:
 
   deploy:
     name: deploy to Cloudflare Pages
-    needs: site
-    if: github.event_name != 'pull_request'
+    needs: [scope, site]
+    if: needs.scope.outputs.build == 'true' && github.event_name != 'pull_request'
     runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
-    # The secrets are read in an environment of their own: production for stable, preview for
-    # every other branch. Neither has protection rules; the URL is the deploy's address.
+    # The secrets are read in an environment of their own: production for stable (a tag run
+    # builds stable's head), preview for every other branch. Neither has protection rules; the
+    # URL is the deploy's address.
     environment:
-      name: ${{ github.ref_name == 'stable' && 'production' || 'preview' }}
+      name: ${{ needs.scope.outputs.branch == 'stable' && 'production' || 'preview' }}
       url: ${{ steps.deploy.outputs.deployment-url }}
     permissions:
       contents: read # read-only, as in every job here; no checkout, the artifact is this run's
       deployments: write # wrangler-action records each deploy, with its URL, as a GitHub deployment
     timeout-minutes: 10
+    outputs:
+      deployed: ${{ steps.secrets.outputs.ready }}
     steps:
       # 1. No secrets, no deploy: a notice, and the job still succeeds.
       - id: secrets
@@ -134,4 +189,36 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           gitHubToken: ${{ github.token }}
           wranglerVersion: 4.151.3
-          command: pages deploy web/out --project-name=swarmops --branch=${{ github.ref_name }} --commit-hash=${{ github.sha }}
+          command: pages deploy web/out --project-name=swarmops --branch=${{ needs.scope.outputs.branch }} --commit-hash=${{ needs.scope.outputs.sha }}
+
+  live:
+    name: swarmops.cc serves the commit built
+    needs: [scope, deploy]
+    # Production deploys only: a preview has its own address, and without secrets nothing moved.
+    if: needs.scope.outputs.branch == 'stable' && needs.deploy.outputs.deployed == 'true'
+    runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
+    permissions: {}
+    timeout-minutes: 10
+    env:
+      STAMP_URL: https://swarmops.cc/now.json
+      SCOPE_SHA: ${{ needs.scope.outputs.sha }}
+      ATTEMPTS: 10
+      PAUSE_SECONDS: 30
+    steps:
+      # The stamp's commit, read until it is the one deployed. No checkout: curl and python3 only.
+      - run: |
+          live=""
+          for attempt in $(seq 1 "$ATTEMPTS"); do
+            live="$(curl --fail --silent --show-error --max-time 20 "$STAMP_URL" \
+              | python3 -I -c 'import json, sys; print(json.load(sys.stdin)["commit"])')" || live=""
+            if [[ "$live" == "$SCOPE_SHA" ]]; then
+              echo "swarmops.cc serves $SCOPE_SHA (attempt $attempt)"
+              exit 0
+            fi
+            echo "attempt $attempt of $ATTEMPTS: live commit '${live:-unreadable}', expected $SCOPE_SHA"
+            if (( attempt < ATTEMPTS )); then
+              sleep "$PAUSE_SECONDS"
+            fi
+          done
+          echo "::error title=Site not live::$STAMP_URL names '${live:-nothing readable}', not $SCOPE_SHA"
+          exit 1
