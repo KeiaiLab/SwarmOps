@@ -6,7 +6,7 @@
 //! writes a changeset) and its message followed by SwarmOps' trailers ([`export_message`]). An
 //! imported changeset keeps its message, its headers and its signatures as git had them.
 //! [`render_commit`] gives a changeset's commit bytes, which [`ExportOid`](crate::ExportOid)
-//! hashes.
+//! hashes. [`render_tag`] gives the bytes of a tag SwarmOps makes, signed as its commits are.
 //!
 //! The rendering is fixed as the hash contract is: a change to it (the trailers, their order, how
 //! they join the message) is a new version of `git_oid`, which every branch exported before it
@@ -15,7 +15,7 @@
 use swarmops_core::{Changeset, ChangesetId};
 
 use crate::render;
-use crate::{GIT_OID, GitOid};
+use crate::{GIT_OID, GitOid, RawIdent};
 
 /// The metadata keys whose values a native changeset's commit carries as trailers, each with its
 /// trailer's token, in the order the trailers follow `SwarmOps-Changeset`: the land's key (M4),
@@ -81,6 +81,30 @@ pub fn render_commit(id: ChangesetId, cs: &Changeset, parents: &[GitOid], tree: 
         &cs.extra_headers,
         &export_message(id, cs),
     )
+}
+
+/// The bytes of the annotated tag `name` of the commit `target`, without git's `tag <len>\0`
+/// header, as `git mktag` takes them: `object <target>`, `type commit`, `tag <name>`,
+/// `tagger <tagger>`, a blank line, and `message`, which gains a line break if it lacks one.
+///
+/// ```text
+/// object 1111111111111111111111111111111111111111
+/// type commit
+/// tag v1
+/// tagger agent <inst@fam.swarmops.local> 1700000000 +0000
+///
+/// release
+/// ```
+pub fn render_tag(name: &str, target: GitOid, tagger: &RawIdent, message: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(128 + name.len() + message.len());
+    out.extend_from_slice(format!("object {target}\ntype commit\ntag {name}\ntagger ").as_bytes());
+    out.extend_from_slice(&tagger.render());
+    out.extend_from_slice(b"\n\n");
+    out.extend_from_slice(message);
+    if !message.is_empty() && !message.ends_with(b"\n") {
+        out.push(b'\n');
+    }
+    out
 }
 
 /// The value of `cs`'s metadata key `key`, if it has one.

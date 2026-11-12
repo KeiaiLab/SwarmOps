@@ -1,14 +1,18 @@
 //! git's commit and tree bytes, parsed and rendered: every object of the fixtures renders back to
 //! its own bytes, a commit written otherwise than git writes it parses but renders otherwise, and
-//! what the fields cannot hold at all is malformed. A tag's head is parsed and its signature
-//! named.
+//! what the fields cannot hold at all is malformed. A tag's head is parsed, its signature named,
+//! and a native tag is one `git mktag` takes.
+
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::time::Instant;
 
 use proptest::prelude::*;
 use swarmops_git::{
     GitOid, RawCommit, RawError, RawIdent, RawKind, RawTag, RawTree, RawTreeEntry, SignatureKind,
-    git_hash,
+    git_hash, render_tag,
 };
-use swarmops_testkit::git;
+use swarmops_testkit::{child, git};
 
 /// The fixtures whose commits git's own bytes do not reproduce, on purpose: their scripts craft
 /// commits that the parse can hold only approximately (an ident with two spaces before its `<`,
@@ -619,4 +623,79 @@ fn a_malformed_tag_is_refused() {
             RawTag::parse(&raw)
         );
     }
+}
+
+#[test]
+fn a_native_tag_is_what_git_mktag_takes() {
+    let repo = git::empty_repository();
+    let commit = loose(
+        &repo.dir,
+        RawKind::Commit,
+        &commit(
+            &[
+                &tree_line(),
+                b"author A <a@x> 1 +0000",
+                b"committer C <c@x> 1 +0000",
+            ],
+            b"m\n",
+        ),
+    );
+    let tagger = RawIdent::new(
+        b"agent".to_vec(),
+        b"inst@fam.swarmops.local".to_vec(),
+        1_700_000_000,
+        0,
+        false,
+    );
+    for message in [&b"release one"[..], b"release\n\nbody\n", b""] {
+        let bytes = render_tag("v1", commit, &tagger, message);
+        let parsed = RawTag::parse(&bytes).unwrap();
+        assert_eq!(parsed.object(), commit);
+        assert_eq!(parsed.name(), b"v1");
+        assert_eq!(parsed.tagger(), Some(&tagger));
+        let printed = mktag(&repo.dir, &bytes);
+        assert_eq!(
+            printed,
+            git_hash(RawKind::Tag, &bytes).to_string(),
+            "{}",
+            shown(&bytes)
+        );
+    }
+}
+
+/// Writes `content` into the git directory `repo` as a loose object of `kind`: its id.
+fn loose(repo: &Path, kind: RawKind, content: &[u8]) -> GitOid {
+    let id = git_hash(kind, content);
+    let mut bytes = format!("{kind} {}\0", content.len()).into_bytes();
+    bytes.extend_from_slice(content);
+    git::write_loose_object(repo, &id.to_string(), &bytes);
+    id
+}
+
+/// What `git mktag` prints, trimmed, for the tag `bytes` in the git directory `repo`, by the git
+/// `SWARMOPS_GIT` names (else `git` on `PATH`), without any configuration.
+fn mktag(repo: &Path, bytes: &[u8]) -> String {
+    let input = repo.join("mktag-input");
+    std::fs::write(&input, bytes).unwrap();
+    let program = std::env::var_os(git::GIT_ENV).unwrap_or_else(|| "git".into());
+    let child = Command::new(program)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("LC_ALL", "C")
+        .arg("--git-dir")
+        .arg(repo)
+        .arg("mktag")
+        .stdin(std::fs::File::open(&input).unwrap())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn git mktag");
+    let output = child::Child::adopt(child).wait(Instant::now() + child::CHILD_TIMEOUT);
+    assert!(output.status.success(), "git mktag: {output:?}");
+    String::from_utf8(output.stdout)
+        .expect("UTF-8")
+        .trim()
+        .to_owned()
 }

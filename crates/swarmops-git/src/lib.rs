@@ -16,7 +16,8 @@
 //!   and sets of them ([`LossySet`]).
 //! - [`render`]: the git objects a changeset renders to, [`tree_bytes`] and [`commit_bytes`].
 //! - [`native`]: the commit a native changeset exports to: its own signatures, and its message
-//!   followed by SwarmOps' trailers ([`TRAILERS`], [`export_message`], [`render_commit`]).
+//!   followed by SwarmOps' trailers ([`TRAILERS`], [`export_message`], [`render_commit`]), and
+//!   the bytes of a tag SwarmOps makes ([`render_tag`]).
 //! - [`export_oid`]: [`ExportOid`], the derivation of the git commit each changeset exports to
 //!   ([`ExportedOid`]), and the git oids of its trees and blobs, memoized per object
 //!   ([`tree_oid`], [`blob_oid`]).
@@ -92,7 +93,7 @@ pub use import::{
 };
 pub use lossy::{LossyClass, LossySet};
 pub use memo_key::{MEMO_KEY_LEN, MemoKey};
-pub use native::{TRAILERS, export_message, render_commit};
+pub use native::{TRAILERS, export_message, render_commit, render_tag};
 pub use oid::{GitOid, ObjectFormat, ParseGitOidError, RawKind, git_hash};
 /// The phase log's git totals written (the test hooks only, the M18 design §2.2).
 #[cfg(feature = "test-hooks")]
