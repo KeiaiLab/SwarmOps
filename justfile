@@ -44,7 +44,8 @@ default: check
 # Then scripts/test-install.py runs the one-line installer against a fake release on 127.0.0.1,
 # offline, and checks that web/public/install.sh is the same file; scripts/test-packages.py packs
 # fake release archives with scripts/packages.py and reads the .deb and .rpm back, offline.
-# Last, scripts/bench-gate.py's selftest shows that the benchmark gate still finds what it is for.
+# Then scripts/bench-gate.py's selftest shows that the benchmark gate still finds what it is for,
+# and scripts/repo-settings.py's that each rule over .github/repo-settings.json does, offline.
 # The definition of done for every session: fmt, clippy, tests, hook proof, stamped build, docs, cargo-deny, license notices, installer, packages, Markdown, bench gate.
 check:
     cargo fmt --all --check
@@ -70,6 +71,7 @@ check:
     python3 -I scripts/check-docs.py selftest
     python3 -I scripts/check-docs.py
     python3 -I scripts/bench-gate.py selftest
+    python3 -I scripts/repo-settings.py selftest
 
 # The test hooks are on (`--all-features`), as in `just check`. The ignored switches that rewrite
 # or rebuild fixtures on purpose (`regenerate_golden`, `regenerate_git_fixtures`,
@@ -315,6 +317,17 @@ perf:
 bench-compare *args:
     cargo deny --locked --manifest-path bench/compare/Cargo.toml --config bench/compare/deny.toml check
     cargo run --release --locked --manifest-path bench/compare/Cargo.toml -- {{args}}
+
+# bench/compare against the store's current API: `just check` resolves its lockfile but builds
+# nothing of it, so an API change it no longer compiles against (a `non_exhaustive` type, say)
+# would wait for the weekly run. Its lockfile under its own policy first, as `bench-compare` does,
+# then every target compiled, run nothing; CI runs it after `just check`. The first build is
+# about 100 crates, SQLite's C sources included; later ones are incremental.
+# Checks that bench/compare still compiles, its lockfile under its own cargo-deny policy.
+check-compare:
+    cargo deny --locked --manifest-path bench/compare/Cargo.toml --config bench/compare/deny.toml \
+        check
+    cargo check --locked --manifest-path bench/compare/Cargo.toml --all-targets
 
 # cargo-fuzz takes no `--locked`; `just check` lints the fuzz workspace with it, so a
 # fuzz/Cargo.lock that has gone stale fails the gate before a fuzz build could rewrite it.

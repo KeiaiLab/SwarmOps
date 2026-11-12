@@ -64,6 +64,7 @@ jobs:
           workspaces: |
             . -> target
             fuzz -> target
+            bench/compare -> target
           # The tools come from install-action, not from a cache.
           cache-bin: false
           # A pull request's cache could serve only that pull request again.
@@ -71,6 +72,9 @@ jobs:
           # The dependencies a failing run built are as good as a passing run's.
           cache-on-failure: true
       - run: just check
+      # bench/compare, a workspace of its own that `just check` does not build, still compiles
+      # against the store's API.
+      - run: just check-compare
       # A self-hosted runner builds into its own CARGO_TARGET_DIR: bring the report to target/.
       - name: Collect the JUnit report
         if: ${{ !cancelled() && runner.environment == 'self-hosted' }}
