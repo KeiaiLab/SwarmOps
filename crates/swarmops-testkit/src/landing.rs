@@ -443,17 +443,23 @@ thread_local! {
     static STARTED: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
 }
 
+/// The journal's files under `meta/`: FORMAT 1's, then FORMAT 2's and 3's.
+const JOURNAL_FILES: [&str; 4] = ["journal.log", "journal.off", "journal2.log", "journal2.off"];
+
+/// The ref files' directories under `meta/`: FORMAT 1's, then FORMAT 2's and 3's.
+const REF_DIRS: [&str; 2] = ["refs", "refs2"];
+
 /// A watcher ([`crate::fs::Watched`]) that sums the time a store spends in the syncs a write
-/// transaction makes under the lock: the journal's (`append_durable` to `meta/journal.log` or
-/// `meta/journal.off`, and a `sync_data` of `journal.log`), and the ref files' (the
-/// `atomic_replace`, `remove` and `fsync_dir` of `meta/refs/` and below), for the M4 plan's
-/// Decision 14. Calls are timed on the thread that makes them, so several threads may share it.
+/// transaction makes under the lock: the journal's (`append_durable` to `JOURNAL_FILES` in
+/// `meta/`, and a `sync_data` of one), and the ref files' (the `atomic_replace`, `remove` and
+/// `fsync_dir` of `REF_DIRS` in `meta/` and below), for the M4 plan's Decision 14. Calls are
+/// timed on the thread that makes them, so several threads may share it.
 #[derive(Debug)]
 pub struct SyncTimer {
     /// The store's `meta/`.
     meta: PathBuf,
-    /// The store's `meta/refs`.
-    refs: PathBuf,
+    /// The store's ref directories, `REF_DIRS` in `meta/`.
+    refs: [PathBuf; 2],
     /// Nanoseconds in the journal's syncs.
     journal_ns: AtomicU64,
     /// Nanoseconds in the ref files' syncs.
@@ -472,7 +478,7 @@ impl SyncTimer {
     pub fn new(store: &Utf8Path) -> SyncTimer {
         let meta = store.as_std_path().join("meta");
         SyncTimer {
-            refs: meta.join("refs"),
+            refs: REF_DIRS.map(|dir| meta.join(dir)),
             meta,
             journal_ns: AtomicU64::new(0),
             ref_ns: AtomicU64::new(0),
@@ -495,11 +501,11 @@ impl SyncTimer {
         let journal = path.parent() == Some(self.meta.as_path())
             && path
                 .file_name()
-                .is_some_and(|name| name == "journal.log" || name == "journal.off");
+                .is_some_and(|name| JOURNAL_FILES.iter().any(|file| name == *file));
         match call.method {
             FsMethod::AppendDurable | FsMethod::SyncData if journal => Some(Synced::Journal),
             FsMethod::AtomicReplace | FsMethod::Remove | FsMethod::FsyncDir
-                if path.starts_with(&self.refs) =>
+                if self.refs.iter().any(|refs| path.starts_with(refs)) =>
             {
                 Some(Synced::Ref)
             }
@@ -2103,6 +2109,37 @@ mod tests {
     #[test]
     fn a_window_of_zero_gives_none() {
         assert_eq!(Stats::per_window(&run(), Duration::ZERO), []);
+    }
+
+    /// A [`SyncTimer`] times the syncs of the journal and the ref files a FORMAT 2 or 3 store
+    /// writes (`journal2.*`, `refs2/`), as it did FORMAT 1's, and no other file's.
+    #[test]
+    fn the_sync_timer_knows_format_2_names() {
+        let timer = SyncTimer::new(Utf8Path::new("/s"));
+        let synced = |method, path: &str| {
+            let path = Path::new(path);
+            timer.synced(&Call {
+                method,
+                paths: &[path],
+            })
+        };
+
+        // 1. The journal's appends and syncs, under either FORMAT's name.
+        for name in ["journal.log", "journal.off", "journal2.log", "journal2.off"] {
+            let path = format!("/s/meta/{name}");
+            let journal = synced(FsMethod::AppendDurable, &path);
+            assert!(matches!(journal, Some(Synced::Journal)), "{name}");
+        }
+
+        // 2. The ref files' replaces and directory syncs, under either FORMAT's directory.
+        for path in ["/s/meta/refs/heads/main", "/s/meta/refs2/0a1b"] {
+            let reference = synced(FsMethod::AtomicReplace, path);
+            assert!(matches!(reference, Some(Synced::Ref)), "{path}");
+        }
+
+        // 3. Neither: the checkpoint, and a file outside `meta/`.
+        assert!(synced(FsMethod::AppendDurable, "/s/meta/journal2.ckpt").is_none());
+        assert!(synced(FsMethod::AtomicReplace, "/s/objects/refs2").is_none());
     }
 
     /// The window an attempt that ended neither landed nor retryable began in is flagged, and
