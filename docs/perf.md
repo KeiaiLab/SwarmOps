@@ -2711,3 +2711,33 @@ start and end times:
 
 The jobs after the slow one started within 3.5 minutes of its end, four at once on the four
 runners and the rest as runners came free, and took 0.2 to 10.1 minutes each.
+
+## The 20-land touches case's run time — 2026-11-13
+
+`land::touches_stop_at_their_bound` (`swarmops-ops`, default gate; twenty lands on `main` that
+touch one file, then the conflict report's bound) took 4.254 s, 4.050 s and 4.080 s in three
+debug runs at `92448bba`, one after another under the gate's lock, at a 1-minute load of 229 to
+134. The 1.8 s that `db75cc7e`'s message gives for it is not reproduced; the M18 review timed it
+at 5 to 15 s.
+
+## A cold export by step (not reproduced) — 2026-11-13
+
+`export::by_step::export_of_12000_by_step` (`swarmops-git`, ignored) times the export's nine steps
+for a cold export of 12,000 imported commits into an empty bare repository, without and with a
+memo key. Its only run is the one `0d7a7fe7`'s message quotes, a debug build at a 1-minute load of
+100 to 147, 429.2 s in all, with no log kept:
+
+| Export | Wall | Derive | Commits | Write | Sync | Record | Move (ms) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| no key | 28,046.7 ms | 945.3 | 789.3 | 14,336.0 | 11,945.8 | 14.2 | 12.9 |
+| memo key | 42,381.3 ms | 2,501.6 | 1,445.8 | 25,232.3 | 13,161.2 | 16.6 | 18.1 |
+
+So the split (writing the objects first, then their syncs) is one unrepeated reading, not a
+baseline. A rerun was queued for 2026-11-13 under the heavy lock and withdrawn unstarted, the host
+at a 1-minute load near 900. It is owed to the next quiet window, its `--no-capture` output kept
+whole:
+
+```sh
+cargo nextest run --locked -p swarmops-git --all-features --run-ignored ignored-only \
+  -E 'test(=export::by_step::export_of_12000_by_step)' --no-capture
+```
