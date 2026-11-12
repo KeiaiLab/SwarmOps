@@ -40,6 +40,7 @@ mod remote_perf;
 mod remote_push;
 mod remote_serve;
 mod remote_sync;
+mod repo_path;
 mod revert_limits;
 mod scale_perf;
 mod seeded;
