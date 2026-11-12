@@ -146,7 +146,7 @@ installs the same tool versions as `ci.yml`'s: move them together.
    one line. The first release also brings up to
    date what says nothing is released yet: README's status badge, status line, maturity row and
    install section, the README's documentation table, `docs/operations.md`'s install section,
-   SECURITY.md's supported versions, CHANGELOG.md's introduction, the
+   SECURITY.md's "Which versions get fixes?" section, CHANGELOG.md's introduction, the
    versioning policy's first paragraph, this file's first line, the Maturity row of `web/content/product/vs-git.md`
    and the issue template's contact text (`.github/ISSUE_TEMPLATE/config.yml`).
 5. **Bump the version** in `[workspace.package]` of `Cargo.toml` and in the
