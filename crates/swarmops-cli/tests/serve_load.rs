@@ -24,11 +24,13 @@
 //! p99 (G21's 2× git's), the first clone's ratio (G20's 2×). `serve-load: ` lines; docs/perf.md
 //! records the verdicts.
 
+use std::fmt::Write as _;
 use std::fs;
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Barrier;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Barrier, Mutex, PoisonError, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -39,7 +41,7 @@ use swarmops_ops::LocalOps;
 use swarmops_ops::serve::refresh::{Freshness, freshness};
 use swarmops_testkit::landing::{
     Change, CliLander, LandRecord, Stats, Workload, base_files, check_invariants, flagged, load1,
-    slot,
+    open_loop_lands, slot,
 };
 use swarmops_testkit::remote::{GitServer, SshMode};
 use swarmops_testkit::serve::ServeSite;
@@ -114,6 +116,20 @@ const SERVE_STATE: &str = "git/serve.state";
 
 /// How many clones `git fsck` checks at a time.
 const FSCK_AT_ONCE: usize = 8;
+
+/// How many times their duration the clients may run, from their start, before the case fails
+/// naming each one still running: a client's last step can end past the duration, a stuck one
+/// never does, and the agents beside it would land without end (the slow suite's 7.5 h run).
+const DEADLINE_FACTOR: u32 = 2;
+
+/// The case's exit when a client missed the deadline: its threads cannot be joined.
+const MISSED_DEADLINE_EXIT: i32 = 101;
+
+/// The file `serve.lock` is, under a store's root.
+const SERVE_LOCK: &str = "git/serve.lock";
+
+/// The kernel's table of held file locks: who holds `serve.lock`.
+const PROC_LOCKS: &str = "/proc/locks";
 
 /// The case's shape, from the variables.
 #[derive(Debug, Clone, Copy)]
@@ -283,15 +299,22 @@ fn change(lander: usize, land: usize) -> Change {
     }
 }
 
-/// Agent `lander`'s lands from `go`, one at each of its slots, until `stop` is set.
+/// How long the clients may run before the case fails ([`DEADLINE_FACTOR`]).
+fn deadline(shape: &Shape) -> Duration {
+    shape.duration * DEADLINE_FACTOR
+}
+
+/// Agent `lander`'s lands from `go`, one at each of its slots, until `stop` is set, and no more
+/// than its slots in the lead and the clients' deadline: the store never grows without end.
 fn land_until(
     cli: &CliLander<'_, support::Swarmops>,
-    lander: usize,
+    (lander, shape): (usize, &Shape),
     go: Instant,
     stop: &AtomicBool,
 ) -> Vec<LandRecord> {
+    let cap = open_loop_lands(SEED, lander, INTERVAL, LEAD + deadline(shape));
     let mut records = Vec::new();
-    for land in 0.. {
+    for land in 0..cap {
         let due = go + slot(SEED, lander, land, INTERVAL);
         thread::sleep(due.saturating_duration_since(Instant::now()));
         if stop.load(Ordering::Relaxed) {
@@ -340,26 +363,132 @@ fn wait_prepared(root: &Utf8Path) {
     }
 }
 
-/// Each client's open loop from one go, all at once; their traffic and the run's wall time.
-fn drive(clients: &mut [GitClient<'_>], shape: &Shape) -> (Vec<Traffic>, Duration) {
+/// Where a client is in its open loop: the step it runs and since when; `None` before its
+/// first and once it returned.
+type Progress = Mutex<Option<(usize, Instant)>>;
+
+/// Each client's open loop from one go, all at once; their traffic and the run's wall time. A
+/// client still running at the [`deadline`] fails the case, naming it, its step and who holds
+/// `serve.lock` under `root` (serve's side).
+fn drive(
+    clients: &mut [GitClient<'_>],
+    shape: &Shape,
+    root: Option<&Utf8Path>,
+) -> (Vec<Traffic>, Duration) {
     let start = Barrier::new(clients.len() + 1);
+    let progress: Vec<Progress> = clients.iter().map(|_| Mutex::new(None)).collect();
+    let (done, finished) = mpsc::channel::<()>();
     thread::scope(|scope| {
-        let runs: Vec<_> = (clients.iter_mut().enumerate())
-            .map(|(n, client)| {
+        // 1. The clients, each publishing its step.
+        let runs: Vec<_> = (clients.iter_mut().zip(&progress).enumerate())
+            .map(|(n, (client, at))| {
                 let start = &start;
                 scope.spawn(move || {
                     start.wait();
-                    client.run(Instant::now(), (SEED, n), INTERVAL, shape.duration)
+                    run_client(client, (n, at), shape.duration)
                 })
             })
             .collect();
         start.wait();
         let go = Instant::now();
+
+        // 2. The watch: the clients done, or the case fails at the deadline.
+        let watched = &progress;
+        scope.spawn(move || watch(&finished, go + deadline(shape), watched, root));
         let traffic = (runs.into_iter())
             .map(|run| run.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
             .collect();
+        let _ = done.send(());
         (traffic, go.elapsed())
     })
+}
+
+/// `client`'s open loop (`GitClient::run`'s), client `n`'s, its step published in `at`.
+fn run_client(
+    client: &mut GitClient<'_>,
+    (n, at): (usize, &Progress),
+    duration: Duration,
+) -> Traffic {
+    let go = Instant::now();
+    let steps = open_loop_lands(SEED, n, INTERVAL, duration);
+    let mut traffic = Traffic::default();
+    for step in 0..steps {
+        let due = go + slot(SEED, n, step, INTERVAL);
+        thread::sleep(due.saturating_duration_since(Instant::now()));
+        *at.lock().unwrap_or_else(PoisonError::into_inner) = Some((step, Instant::now()));
+        let started = u64::try_from(go.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let (mut push, mut fetch) = client.step(step);
+        push.at_us = started;
+        fetch.at_us = started;
+        traffic.pushes.push(push);
+        traffic.fetches.push(fetch);
+    }
+    *at.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    traffic
+}
+
+/// Waits for `finished` until `deadline`; past it, prints each client of `progress` still
+/// running, its step and `serve.lock`'s holder under `root`, and ends the process: a stuck
+/// client's thread cannot be joined, and the agents beside it would land on.
+fn watch(
+    finished: &mpsc::Receiver<()>,
+    deadline: Instant,
+    progress: &[Progress],
+    root: Option<&Utf8Path>,
+) {
+    let left = deadline.saturating_duration_since(Instant::now());
+    if !matches!(
+        finished.recv_timeout(left),
+        Err(mpsc::RecvTimeoutError::Timeout)
+    ) {
+        return;
+    }
+    let holder = root.map_or_else(|| "none (git's side)".to_owned(), lock_holder);
+    let mut message = format!("{TAG}clients still running at the deadline; serve.lock: {holder}");
+    for (n, at) in progress.iter().enumerate() {
+        let Some((step, since)) = *at.lock().unwrap_or_else(PoisonError::into_inner) else {
+            continue;
+        };
+        let running = since.elapsed().as_secs_f64();
+        let _ = write!(
+            message,
+            "\n  client {n}: step {step} (commit, push, fetch), running {running:.1} s"
+        );
+    }
+    eprintln!("{message}");
+    println!("{message}");
+    std::process::exit(MISSED_DEADLINE_EXIT);
+}
+
+/// Who holds `serve.lock` of the store at `root`: each process `/proc/locks` names on its file,
+/// with its command line; `free` when none.
+fn lock_holder(root: &Utf8Path) -> String {
+    let Ok(meta) = fs::metadata(root.join(SERVE_LOCK)) else {
+        return "no lock file".to_owned();
+    };
+    let inode = format!(":{}", meta.ino());
+    let table = fs::read_to_string(PROC_LOCKS).unwrap_or_default();
+
+    // A held lock's line: `<n>: FLOCK ADVISORY WRITE <pid> <maj>:<min>:<inode> 0 EOF`; a
+    // waiter's has `->` after its number.
+    let holders: Vec<String> = (table.lines())
+        .map(|line| line.split_whitespace().collect::<Vec<_>>())
+        .filter(|fields| fields.get(1) != Some(&"->"))
+        .filter(|fields| fields.get(5).is_some_and(|file| file.ends_with(&inode)))
+        .filter_map(|fields| fields.get(4).map(|pid| (*pid).to_owned()))
+        .map(|pid| {
+            let cmdline = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+            let words: Vec<String> = (cmdline.split(|b| *b == 0))
+                .filter(|word| !word.is_empty())
+                .map(|word| String::from_utf8_lossy(word).into_owned())
+                .collect();
+            format!("pid {pid} `{}`", words.join(" "))
+        })
+        .collect();
+    if holders.is_empty() {
+        return "free".to_owned();
+    }
+    holders.join(", ")
 }
 
 /// Prints `side`'s lines for its clients' `traffic` (one per [`Step`], then its windows) and
@@ -594,7 +723,7 @@ fn served_traffic_under_load() {
                 scope.spawn(move || {
                     let cli = CliLander::new(store, lander, "main");
                     start.wait();
-                    land_until(&cli, lander, Instant::now(), stop)
+                    land_until(&cli, (lander, &shape), Instant::now(), stop)
                 })
             })
             .collect();
@@ -605,7 +734,7 @@ fn served_traffic_under_load() {
         // 1a. G20 beside the agents, then the clients on copies of serve's clone.
         let first = served.first_clones(&shape, work.path());
         let mut clients = served.clients(&shape, &first, work.path());
-        let (traffic, _) = drive(&mut clients, &shape);
+        let (traffic, _) = drive(&mut clients, &shape, Some(&served.root));
 
         // 1b. The agents stop.
         stop.store(true, Ordering::Relaxed);
@@ -659,7 +788,7 @@ fn git_traffic_under_load() {
 
     // 2. The run, its lines and windows.
     let load_start = load1();
-    let (traffic, _) = drive(&mut clients, &shape);
+    let (traffic, _) = drive(&mut clients, &shape, None);
     report(Side::Git, &shape, &traffic, (load_start, load1()));
 
     // 3. Every acknowledged push there, every clone whole.
