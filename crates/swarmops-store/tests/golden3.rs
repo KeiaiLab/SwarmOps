@@ -209,8 +209,17 @@ fn a_flipped_byte_in_any_golden_is_refused() {
         CONFIRMED_COUNT + CELLS.len(),
         "the design §6 table, with 37 fact cells, and the envelope"
     );
+    // The cells of a supported feature are confirmed: tag_object's, kind 12's two.
     let provisional = names.iter().filter(|name| is_provisional(name)).count();
-    assert_eq!(provisional, CELLS.len(), "every fact cell provisional");
+    let released = CELLS
+        .iter()
+        .filter(|(kind, _)| *kind == FactKind::Tag)
+        .count();
+    assert_eq!(
+        provisional,
+        CELLS.len() - released,
+        "35 of 37 fact cells provisional"
+    );
     for name in &names {
         let lines = read_golden(name);
         for (index, line) in lines.iter().enumerate() {

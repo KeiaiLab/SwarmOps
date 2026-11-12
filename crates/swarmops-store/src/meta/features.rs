@@ -27,10 +27,10 @@ use crate::format::StoreFormat;
 use crate::fs_ops::{self, FsMethod, StoreFs};
 use crate::layout::Layout;
 
-/// The features this build supports: the fact kinds whose meaning it implements. Empty: the
-/// fact kinds decode, but no milestone has given one its meaning yet, so this build enables none
-/// and opens no store that lists one.
-pub const SUPPORTED_FEATURES: &[&str] = &[];
+/// The features this build supports: the fact kinds whose meaning it implements. `tag_object`
+/// alone: the repository holds git's tag objects (the annotated tags design, slice T-3); a store
+/// that lists any other feature is refused as too new.
+pub const SUPPORTED_FEATURES: &[&str] = &["tag_object"];
 
 /// The most names `meta/features` holds.
 pub const MAX_FEATURES: usize = 32;
@@ -494,7 +494,11 @@ mod tests {
     fn an_enabled_feature_has_no_provisional_golden() {
         let offenders = provisional_offenders(SUPPORTED_FEATURES, &provisional_files());
         assert_eq!(offenders, Vec::<String>::new());
-        assert_eq!(provisional_files().len(), 37, "the design §2.8's 37 cells");
+        assert_eq!(
+            provisional_files().len(),
+            35,
+            "the design §2.8's 37 cells, less tag_object's two"
+        );
     }
 
     /// The detector's self-check: a supported feature whose goldens are still provisional is

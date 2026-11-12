@@ -174,15 +174,16 @@ fn a_lead_checks_features_too() {
     assert_eq!(files(&layout), before, "nothing written, no request left");
 }
 
-/// The release build supports no feature, so it opens no store that lists one: the seams that
-/// widen the set and fix the nonces exist only in a build with the test hooks (a release build
-/// that named them would not compile; the CLI's release proof builds this crate without them).
+/// The release build supports `tag_object` alone, so it opens no store that lists another
+/// feature: the seams that widen the set and fix the nonces exist only in a build with the test
+/// hooks (a release build that named them would not compile; the CLI's release proof builds this
+/// crate without them).
 #[test]
 fn release_build_has_no_feature_or_nonce_seam() {
-    assert_eq!(SUPPORTED_FEATURES, [] as [&str; 0]);
+    assert_eq!(SUPPORTED_FEATURES, ["tag_object"]);
     assert_eq!(MAX_FEATURES, 32);
 
-    // With no seam held, every fact kind's feature is unknown here.
+    // With no seam held, every fact kind's feature but tag_object is unknown here.
     let (_dir, layout, store) = v3_store();
     for name in [
         "review",
