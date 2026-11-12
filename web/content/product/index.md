@@ -7,10 +7,10 @@ description: "The problem SwarmOps solves for agent swarms on git, its goal, who
 
 SwarmOps is source control designed for large pools of coding agents: Claude Code or LangGraph
 processes working in one repository at once. It is measured today at 50 concurrent writing processes
-on one host: 25.0 lands/s, nothing lost ([perf](/docs/perf/#d2-8-gated-runs--2026-11-09)). It is
-written in Rust and fully embedded: one program, no external database, no daemon. Its main users
-are LLM agents, so every operation is a library function and the command line is a thin shell that
-prints JSON.
+on one host: 506.8 commits/s, nothing lost; 50 agents landing: 25.0 lands/s, nothing lost
+([perf](/docs/perf/#d2-8-gated-runs--2026-11-09)). It is written in Rust and fully embedded: one
+program, no external database, no daemon. Its main users are LLM agents, so every operation is a
+library function and the command line is a thin shell that prints JSON.
 
 ## The problem
 

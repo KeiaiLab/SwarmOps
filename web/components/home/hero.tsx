@@ -111,7 +111,7 @@ export function Hero() {
       <p className="mt-4 max-w-(--measure) text-lg text-(--text)">
         Designed for large pools of coding agents: their processes commit into one store at once; every command
         answers in one JSON envelope, and the work goes back to git. Measured today at 50 concurrent writing
-        processes on one host: 25.0 lands/s, nothing lost (
+        processes on one host: 506.8 commits/s, nothing lost; 50 agents landing: 25.0 lands/s, nothing lost (
         <a className={LINK} href={MEASURED_URL}>
           perf
         </a>
