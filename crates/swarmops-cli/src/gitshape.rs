@@ -26,6 +26,8 @@ pub(crate) fn text(op: &str, result: &Value) -> Option<String> {
         "ws_status" => status(result),
         "log" => log(result),
         "diff" | "ws_diff" => diff(result),
+        "ws_commit" => commit(result),
+        "clone_repo" => clone(result),
         _ => None,
     }
 }
@@ -199,6 +201,37 @@ fn numstat(out: &mut String, file: &Value, path: &str) -> Option<()> {
     let deletions = file.get("deletions")?.as_u64()?;
     let _ = writeln!(out, "{insertions}\t{deletions}\t{path}");
     Some(())
+}
+
+/// `ws commit` as git's summary: `[<changeset12>] <n> files changed`, ` (replayed)` when the
+/// key had recorded it already.
+fn commit(result: &Value) -> Option<String> {
+    let changeset = string(result, "changeset")?;
+    let files = result.get("files_changed")?.as_u64()?;
+    let replayed = result.get("replayed")?.as_bool()?;
+
+    let noun = if files == 1 { "file" } else { "files" };
+    let tail = if replayed { " (replayed)" } else { "" };
+    Some(format!(
+        "[{}] {files} {noun} changed{tail}\n",
+        short(changeset)
+    ))
+}
+
+/// `clone` as what it made and the step a git user expects it to have taken: a store holds no
+/// working tree, `ws create` makes one.
+fn clone(result: &Value) -> Option<String> {
+    let url = string(result.get("remote")?, "url")?;
+    let imported = result.get("imported")?.as_u64()?;
+    let main = match string(result, "main") {
+        Some(main) => format!("main at {}", short(main)),
+        None => "no main".to_owned(),
+    };
+    Some(format!(
+        "Cloned {} into a store: {imported} changesets, {main}\n\
+         No working tree yet: so ws create NAME\n",
+        printable(url)
+    ))
 }
 
 /// git's letter for a change `kind` (a workspace change or a diff's file status): `?` for a kind
@@ -481,5 +514,72 @@ mod tests {
         let names = NAMES.replace(r#""path":"x""#, r#""path":"x\ty""#);
         let text = shaped("ws_diff", &names).expect("a listing");
         assert!(text.contains("?\tx\\ty\n"), "{text}");
+    }
+
+    /// `ws commit` of three files, as 0.11.0 printed it.
+    const COMMIT: &str = r#"{"changeset":"276122aa5a2ef9295264357876cdd8e598461bb7844a4632695fcb97e5601fd0",
+        "parent":"325a37e6f8f1da4761dba516623953f45b3b235ef349854ed3b4f47cb2c46083",
+        "files_changed":3,"blobs_written":3,"replayed":false,
+        "status_after":{"name":"w",
+            "base":"325a37e6f8f1da4761dba516623953f45b3b235ef349854ed3b4f47cb2c46083",
+            "head":"276122aa5a2ef9295264357876cdd8e598461bb7844a4632695fcb97e5601fd0",
+            "main":"325a37e6f8f1da4761dba516623953f45b3b235ef349854ed3b4f47cb2c46083",
+            "behind_by":0,"state":"clean","changes":[],"truncated":false}}"#;
+
+    /// A clone of a remote with two changesets on its default branch.
+    const CLONE: &str = r#"{"repo":{"repo_id":"0f3c1d","name":"c",
+            "main":"8fea89701cbc90c8b4713d8c83c47c370c290ba9c0d6b46640278a77135a6746",
+            "store_version":1,"changesets":2,"refs":2},
+        "remote":{"name":"origin","url":"https://example.com/team/app.git","branch":"main",
+            "lossy":[]},
+        "fetch":{"remote":"origin","branch":"main","imported":2,"branches":[],
+            "branches_truncated":false,"tags_fetched":0},
+        "imported":2,
+        "main":"8fea89701cbc90c8b4713d8c83c47c370c290ba9c0d6b46640278a77135a6746"}"#;
+
+    #[test]
+    fn a_commit_is_one_line() {
+        assert_eq!(
+            shaped("ws_commit", COMMIT).as_deref(),
+            Some("[276122aa5a2e] 3 files changed\n")
+        );
+        let replayed = COMMIT
+            .replace(r#""files_changed":3"#, r#""files_changed":1"#)
+            .replace(r#""replayed":false"#, r#""replayed":true"#);
+        assert_eq!(
+            shaped("ws_commit", &replayed).as_deref(),
+            Some("[276122aa5a2e] 1 file changed (replayed)\n")
+        );
+        assert_eq!(
+            shaped("ws_commit", &COMMIT.replace("changeset", "id")),
+            None
+        );
+    }
+
+    #[test]
+    fn a_clone_names_the_next_step() {
+        assert_eq!(
+            shaped("clone_repo", CLONE).as_deref(),
+            Some(
+                "Cloned https://example.com/team/app.git into a store: 2 changesets, \
+                 main at 8fea89701cbc\n\
+                 No working tree yet: so ws create NAME\n"
+            )
+        );
+        // An empty remote: nothing imported, no `main`.
+        let mut empty: Value = serde_json::from_str(CLONE).expect("a test result is JSON");
+        empty["imported"] = 0.into();
+        empty.as_object_mut().expect("an object").remove("main");
+        assert_eq!(
+            text("clone_repo", &empty).as_deref(),
+            Some(
+                "Cloned https://example.com/team/app.git into a store: 0 changesets, no main\n\
+                 No working tree yet: so ws create NAME\n"
+            )
+        );
+        assert_eq!(
+            shaped("clone_repo", &CLONE.replace(r#""url""#, r#""uri""#)),
+            None
+        );
     }
 }
