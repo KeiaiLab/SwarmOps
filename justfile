@@ -1,5 +1,50 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
+# The ignored switches that rewrite or rebuild fixtures on purpose: every suite leaves them out.
+fixture_switches := 'not test(regenerate_golden) and not test(regenerate_git_fixtures) ' + \
+    'and not test(check_git_fixtures)'
+
+# The measurement cases on 12,000 or 13,000 commits or 12,000 changesets: `remote_perf`'s six,
+# `serve_perf`'s six, `intake_perf`'s three (`commits_beside_an_import`, its control lane
+# `committers_alone` and `import_memory`), `serve_load`'s two and the workspace's checked land;
+# and G4's landing lanes (`landing::perf::landing_under_load`, four lanes of 2 minutes, about 9 to
+# 11 minutes in all), and the continuous-sync lane (`sync_load::sync_keeps_pace_with_landing`, 50
+# agents for 10 minutes beside a syncer), past half the ci-slow kill; and the M19 design §8.4's
+# four large workspace cases (the sparse workspace of a 1,000,000-file tree, the status of 500,000
+# files, 50 creates at once, the update across 1,000 lands), each sized under half the ci-perf kill.
+# `check-ci-slow` leaves them out, `check-ci-perf` runs them, `check-slow` runs them optimized.
+# swarmops-core's `supply_chain` tests fail a case `check-ci-slow` leaves out that no scheduled
+# job runs optimized and one at a time.
+ci_perf_cases := \
+    'test(=remote_perf::clone_cost_on_12000_commits) | ' + \
+    'test(=remote_perf::fetch_and_push_scale_with_history) | ' + \
+    'test(=remote_perf::fetch_phases_scale_with_history) | ' + \
+    'test(=remote_perf::sync_of_one_land_on_12000_commits) | ' + \
+    'test(=remote_perf::sync_phases_scale_with_history) | ' + \
+    'test(=remote_perf::first_sync_phases) | ' + \
+    'test(/^serve_perf::/) | ' + \
+    'test(/^intake_perf::/) | ' + \
+    'test(/^serve_load::/) | ' + \
+    'test(=landing::perf::landing_under_load) | ' + \
+    'test(=sync_load::sync_keeps_pace_with_landing) | ' + \
+    'test(=ws_processes::perf::perf_checked_land_overhead_on_12000_changesets) | ' + \
+    'test(=ws_processes::perf::perf_sparse_workspace_of_1000000_files) | ' + \
+    'test(=ws_processes::perf::perf_status_of_500000_files) | ' + \
+    'test(=ws_processes::perf::perf_fifty_creates_at_once) | ' + \
+    'test(=ws_processes::perf::perf_update_across_1000_lands) | ' + \
+    'test(=format3_perf::commits_1m_next_decile) | ' + \
+    'test(=scale_perf::fixture_next_part)'
+
+# The cases only `perf` runs, excluded from `check-slow` and `check-ci-slow` (and not in
+# `ci_perf_cases`): `format3_perf::a5_verdict` reads the ten deciles of
+# `commits_1m_next_decile`, which `perf` calls ten times in a row and the weekly run once, so
+# that anywhere else it fails on fewer than ten lines (the M20 plan, A7).
+# `commits_1m_next_decile` itself asserts only what it ran and stays runnable everywhere.
+perf_recipe_only := 'test(=format3_perf::a5_verdict)'
+
+# What `check-slow` and `check-ci-slow` leave out of their unoptimized run.
+perf_skips := '(' + ci_perf_cases + ') | ' + perf_recipe_only
+
 # A bare `just` runs `check`, the definition of done.
 default: check
 
@@ -46,23 +91,27 @@ default: check
 # fake release archives with scripts/packages.py and reads the .deb and .rpm back, offline.
 # Then scripts/bench-gate.py's selftest shows that the benchmark gate still finds what it is for,
 # and scripts/repo-settings.py's that each rule over .github/repo-settings.json does, offline.
-# The definition of done for every session: fmt, clippy, tests, hook proof, stamped build, docs, cargo-deny, license notices, installer, packages, Markdown, bench gate.
+# The definition of done: fmt, clippy, tests, hook proof, docs, deny, notices, script checks.
 check:
     cargo fmt --all --check
     cargo fmt --manifest-path fuzz/Cargo.toml --check
     cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-    cargo clippy --locked --workspace --lib --bins --all-features -- -D warnings -D clippy::unwrap_used -D clippy::missing_assert_message -D clippy::mod_module_files -D clippy::rc_buffer
+    cargo clippy --locked --workspace --lib --bins --all-features -- -D warnings \
+        -D clippy::unwrap_used -D clippy::missing_assert_message -D clippy::mod_module_files \
+        -D clippy::rc_buffer
     cargo clippy --locked -p swarmops-cli --test test_hooks -- -D warnings
     cargo check --locked --workspace --all-targets
     cargo clippy --locked --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
     cargo metadata --locked --format-version 1 --manifest-path bench/compare/Cargo.toml >/dev/null
     cargo nextest run --locked --workspace --all-features --no-tests=warn
-    cargo nextest run --locked --profile default --release -p swarmops-cli --test test_hooks --no-tests=fail
+    cargo nextest run --locked --profile default --release -p swarmops-cli --test test_hooks \
+        --no-tests=fail
     python3 -I scripts/check-stamped.py
     python3 -I scripts/test-doc-clean.py
     target="$(cargo metadata --locked --format-version 1 --no-deps | python3 -I -c 'import json, os, sys; t = json.load(sys.stdin)["target_directory"]; n = os.path.normpath(t); print(n if os.path.isabs(t) and n.strip("/") else "")')"; case "$target" in /?*) rm -rf "$target/doc" ;; *) echo "check: cargo metadata gave no absolute target directory below /; doc not removed" >&2; exit 1 ;; esac
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items
-    RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items --all-features
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items \
+        --all-features
     cargo deny --locked check
     cargo deny --locked --manifest-path fuzz/Cargo.toml --config deny.toml check
     python3 -I scripts/third-party-licenses.py --check
@@ -85,8 +134,11 @@ check-slow:
     #!/usr/bin/env bash
     set -uo pipefail
     status=0
-    PROPTEST_CASES=2000 cargo nextest run --locked --workspace --all-features --run-ignored all -E 'not test(regenerate_golden) and not test(regenerate_git_fixtures) and not test(check_git_fixtures) and not ({{ ci_perf_cases }}) and not ({{ perf_recipe_only }})' || status=1
-    PROPTEST_CASES=2000 cargo nextest run --locked --release --workspace --all-features --run-ignored all --no-tests=fail -E '({{ ci_perf_cases }}) and not test(regenerate_golden) and not test(regenerate_git_fixtures) and not test(check_git_fixtures)' || status=1
+    PROPTEST_CASES=2000 cargo nextest run --locked --workspace --all-features --run-ignored all \
+        -E '{{ fixture_switches }} and not ({{ perf_skips }})' || status=1
+    PROPTEST_CASES=2000 cargo nextest run --locked --release --workspace --all-features \
+        --run-ignored all --no-tests=fail -E '({{ ci_perf_cases }}) and {{ fixture_switches }}' \
+        || status=1
     exit "$status"
 
 # `check-slow` without the two 32-process contention measurements (`thirty_two_processes_*`),
@@ -94,33 +146,14 @@ check-slow:
 # (no `Busy`) assume a disk at most about a third slower than its own, far too heavy a load for a
 # 2-vCPU hosted runner. Nor the measurement cases on 12,000 or 13,000 commits or 12,000
 # changesets and the load lanes (`ci_perf_cases`), which need a longer kill than the `ci-slow`
-# profile's 20 minutes: in the Scheduled run of 2026-10-28 on `c7baf861` four ran into it and the other five took 775
-# to 912 s, and three take over 20 minutes even optimized; `check-ci-perf` runs them under a
-# profile of their own. The crash sweeps and the other ignored tests stay. CI runs it with
-# `NEXTEST_PROFILE=ci-slow` (.config/nextest.toml).
+# profile's 20 minutes: in the Scheduled run of 2026-10-28 on `c7baf861` four ran into it and the
+# other five took 775 to 912 s, and three take over 20 minutes even optimized; `check-ci-perf`
+# runs them under a profile of their own. The crash sweeps and the other ignored tests stay. CI
+# runs it with `NEXTEST_PROFILE=ci-slow` (.config/nextest.toml).
 # The weekly CI slow suite (scheduled.yml): check-slow less the 32-process and large-history cases.
 check-ci-slow:
-    PROPTEST_CASES=2000 cargo nextest run --locked --workspace --all-features --run-ignored all -E 'not test(regenerate_golden) and not test(regenerate_git_fixtures) and not test(check_git_fixtures) and not test(thirty_two_processes) and not ({{ ci_perf_cases }}) and not ({{ perf_recipe_only }})'
-
-# The measurement cases on 12,000 or 13,000 commits or 12,000 changesets: `remote_perf`'s six,
-# `serve_perf`'s six, `intake_perf`'s three (`commits_beside_an_import`, its control lane
-# `committers_alone` and `import_memory`), `serve_load`'s two and the workspace's checked land;
-# and G4's landing lanes (`landing::perf::landing_under_load`, four lanes of 2 minutes, about 9 to
-# 11 minutes in all), and the continuous-sync lane (`sync_load::sync_keeps_pace_with_landing`, 50
-# agents for 10 minutes beside a syncer), past half the ci-slow kill; and the M19 design §8.4's
-# four large workspace cases (the sparse workspace of a 1,000,000-file tree, the status of 500,000
-# files, 50 creates at once, the update across 1,000 lands), each sized under half the ci-perf kill.
-# `check-ci-slow` leaves them out, `check-ci-perf` runs them, `check-slow` runs them optimized.
-# swarmops-core's `supply_chain` tests fail a case `check-ci-slow` leaves out that no scheduled
-# job runs optimized and one at a time.
-ci_perf_cases := 'test(=remote_perf::clone_cost_on_12000_commits) | test(=remote_perf::fetch_and_push_scale_with_history) | test(=remote_perf::fetch_phases_scale_with_history) | test(=remote_perf::sync_of_one_land_on_12000_commits) | test(=remote_perf::sync_phases_scale_with_history) | test(=remote_perf::first_sync_phases) | test(/^serve_perf::/) | test(/^intake_perf::/) | test(/^serve_load::/) | test(=landing::perf::landing_under_load) | test(=sync_load::sync_keeps_pace_with_landing) | test(=ws_processes::perf::perf_checked_land_overhead_on_12000_changesets) | test(=ws_processes::perf::perf_sparse_workspace_of_1000000_files) | test(=ws_processes::perf::perf_status_of_500000_files) | test(=ws_processes::perf::perf_fifty_creates_at_once) | test(=ws_processes::perf::perf_update_across_1000_lands) | test(=format3_perf::commits_1m_next_decile) | test(=scale_perf::fixture_next_part)'
-
-# The cases only `perf` runs, excluded from `check-slow` and `check-ci-slow` (and not in `ci_perf_cases`):
-# `format3_perf::a5_verdict` reads the ten deciles of `commits_1m_next_decile`, which `perf` calls ten
-# times in a row and the weekly run once, so that anywhere else it fails on fewer than ten lines
-# (the M20 plan, A7). `commits_1m_next_decile` itself asserts only what it ran and stays runnable
-# everywhere.
-perf_recipe_only := 'test(=format3_perf::a5_verdict)'
+    PROPTEST_CASES=2000 cargo nextest run --locked --workspace --all-features --run-ignored all \
+        -E '{{ fixture_switches }} and not test(thirty_two_processes) and not ({{ perf_skips }})'
 
 # `ci_perf_cases` optimized and one at a time (`--no-capture`), as `perf` runs them, printing their
 # `remote-perf: `, `serve-perf: `, `intake-perf: `, `serve-load: `, `landing-perf: `, `sync-load: `
@@ -132,7 +165,8 @@ perf_recipe_only := 'test(=format3_perf::a5_verdict)'
 # scheduled.yml runs it weekly under the heavy lock, with `NEXTEST_PROFILE=ci-perf`.
 # The weekly CI measurement cases (scheduled.yml): what check-ci-slow leaves out, optimized.
 check-ci-perf:
-    SWARMOPS_SCALE=1 cargo nextest run --locked --release --workspace --all-features --run-ignored all --no-tests=fail -E '{{ ci_perf_cases }}' --no-capture
+    SWARMOPS_SCALE=1 cargo nextest run --locked --release --workspace --all-features \
+        --run-ignored all --no-tests=fail -E '{{ ci_perf_cases }}' --no-capture
 
 # The git fixtures (crates/swarmops-testkit/git-fixtures/): every script run again by the git
 # that git-fixtures/GIT_VERSION declares (`SWARMOPS_GIT` names the binary; any other version is
@@ -140,7 +174,8 @@ check-ci-perf:
 # byte for byte the same when nothing changed. Review the diff, and commit it with the scripts.
 # Rebuilds the git fixtures' archives from their scripts, with the declared git.
 git-fixtures:
-    SWARMOPS_REGEN_GIT_FIXTURES=1 cargo nextest run --locked -p swarmops-testkit --run-ignored ignored-only -E 'test(regenerate_git_fixtures)' --no-capture
+    SWARMOPS_REGEN_GIT_FIXTURES=1 cargo nextest run --locked -p swarmops-testkit \
+        --run-ignored ignored-only -E 'test(regenerate_git_fixtures)' --no-capture
 
 # The criterion benches, with cargo's full output (`perf` prints only their summary lines).
 bench-run:
@@ -152,7 +187,8 @@ bench-run:
 # gate never reads a bench this run did not measure. Run it in a quiet window, under the heavy lock.
 # The benchmark gate: a fresh `bench-run`, its medians against bench/thresholds.toml.
 bench: _bench-fresh bench-run
-    python3 -I scripts/bench-gate.py check "${CARGO_TARGET_DIR:-target}/criterion" bench/thresholds.toml
+    python3 -I scripts/bench-gate.py check "${CARGO_TARGET_DIR:-target}/criterion" \
+        bench/thresholds.toml
 
 # Removes the criterion results of earlier runs (`bench`'s first step).
 _bench-fresh:
@@ -248,8 +284,8 @@ perf:
     load before
     cargo nextest run --locked --release -p swarmops-store --run-ignored ignored-only --test all \
         -E 'test(/^contention::/)' --no-capture 2>&1 | tee target/perf/store-contention.log \
-        | grep --line-buffered -E \
-        '^[0-9]+ processes x |^  (wall |transaction:|lock wait |child total time:|journal:|uncontended )'
+        | grep --line-buffered -E -e '^[0-9]+ processes x ' \
+        -e '^  (wall |transaction:|lock wait |child total time:|journal:|uncontended )'
     [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
     load between
     for n in ${SWARMOPS_PERF_PROCESSES:-32 50}; do
@@ -263,8 +299,8 @@ perf:
     bench_dir="${SWARMOPS_BENCH_DIR:-$HOME/.local/state/swarmops-bench}"
     mkdir -p "$bench_dir"
     for n in ${SWARMOPS_PERF_PROCESSES:-32 50}; do
-        TMPDIR="$bench_dir" SWARMOPS_TEST_CLI_LANDING_LANDERS="$n" cargo nextest run --locked --release \
-            -p swarmops-cli --run-ignored ignored-only --test all \
+        TMPDIR="$bench_dir" SWARMOPS_TEST_CLI_LANDING_LANDERS="$n" cargo nextest run --locked \
+            --release -p swarmops-cli --run-ignored ignored-only --test all \
             -E 'test(=landing::perf::landing_under_load)' --no-capture 2>&1 \
             | tee "target/perf/landing-$n.log" | grep --line-buffered '^landing-perf: '
         [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
@@ -321,19 +357,30 @@ perf:
         esac
         parts="${line##* of }"
         calls=$((calls + 1))
-        [ "$calls" -lt "${parts%%,*}" ] || { echo "perf: the fixture is not whole after $calls calls" >&2; status=1; break; }
+        [ "$calls" -lt "${parts%%,*}" ] || {
+            echo "perf: the fixture is not whole after $calls calls" >&2
+            status=1
+            break
+        }
     done
     load between
+    format3_cases='test(=format3_perf::lock_hold_at_1m_records_stays_under_100ms)'
+    format3_cases+=' | test(=format3_perf::commit_cost_on_1m_against_1k)'
+    format3_cases+=' | test(=format3_perf::upgrade_200k_measured)'
     SWARMOPS_SCALE=1 cargo nextest run --locked --release -j 1 -p swarmops-cli --all-features \
-        --run-ignored ignored-only -E 'test(=format3_perf::lock_hold_at_1m_records_stays_under_100ms) | test(=format3_perf::commit_cost_on_1m_against_1k) | test(=format3_perf::upgrade_200k_measured)' \
-        --no-capture 2>&1 | tee target/perf/format3.log | grep --line-buffered '^format3-perf: '
+        --run-ignored ignored-only -E "$format3_cases" --no-capture 2>&1 \
+        | tee target/perf/format3.log | grep --line-buffered '^format3-perf: '
     [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
-    ! grep -q 'not run' target/perf/format3.log || { echo "perf: a format3 case did not run" >&2; status=1; }
+    ! grep -q 'not run' target/perf/format3.log || {
+        echo "perf: a format3 case did not run" >&2
+        status=1
+    }
     load between
     : > target/perf/format3-deciles.log
     for _ in 1 2 3 4 5 6 7 8 9 10; do
         cargo nextest run --locked --release -p swarmops-cli --all-features \
-            --run-ignored ignored-only -E 'test(=format3_perf::commits_1m_next_decile)' --no-capture 2>&1 \
+            --run-ignored ignored-only -E 'test(=format3_perf::commits_1m_next_decile)' \
+            --no-capture 2>&1 \
             | tee -a target/perf/format3-deciles.log | grep --line-buffered '^format3-perf: '
         [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
     done
@@ -370,7 +417,8 @@ perf:
 # network.
 # The native metadata store against SQLite, redb, fjall and sled; `--quick` is a smoke run.
 bench-compare *args:
-    cargo deny --locked --manifest-path bench/compare/Cargo.toml --config bench/compare/deny.toml check
+    cargo deny --locked --manifest-path bench/compare/Cargo.toml --config bench/compare/deny.toml \
+        check
     cargo run --release --locked --manifest-path bench/compare/Cargo.toml -- {{args}}
 
 # bench/compare against the store's current API: `just check` resolves its lockfile but builds
@@ -393,14 +441,17 @@ check-compare:
 # `cargo fuzz cmin`, as CONTRIBUTING.md says.
 # `-timeout=30`: an input that runs for more than 30 s fails the run, and libFuzzer saves it
 # under fuzz/artifacts/<target>/ (by default it would run for 20 minutes first).
-# Needs a nightly toolchain: `rustup toolchain install nightly`. Targets: codec_roundtrip, tree_decode, frame_decode, journal_recovery.
+# Needs a nightly toolchain: `rustup toolchain install nightly`. The targets are the files of
+# fuzz/fuzz_targets/, which `cargo +nightly fuzz list` (from fuzz/) names.
 fuzz target="codec_roundtrip":
     mkdir -p fuzz/corpus-new/{{target}}
-    cd fuzz && cargo +nightly fuzz run {{target}} corpus-new/{{target}} corpus/{{target}} -- -max_total_time=60 -timeout=30
+    cd fuzz && cargo +nightly fuzz run {{target}} corpus-new/{{target}} corpus/{{target}} -- \
+        -max_total_time=60 -timeout=30
 
 # The website, web/: a Next.js static export (Fumadocs for /docs) that renders docs/**/*.md and
 # CHANGELOG.md, written to web/out/. `npm ci` needs the npm registry, so these recipes stay out of
-# `just check`; the build itself is offline once installed. .github/workflows/site.yml runs all three.
+# `just check`; the build itself is offline once installed. .github/workflows/site.yml runs all
+# three.
 # Installs the website's dependencies, exactly as web/package-lock.json pins them.
 web-install:
     cd web && npm ci --no-audit --no-fund
