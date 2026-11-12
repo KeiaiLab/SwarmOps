@@ -22,11 +22,12 @@ use swarmops_ops::serve::refresh::{Freshness, SERVE_REFRESH_ATTEMPTS, freshness}
 use swarmops_store::MetaLock;
 use swarmops_testkit::cli::retry_busy;
 use swarmops_testkit::git::{GitFixture, fixture};
+use swarmops_testkit::remote::{GitServer, HttpAuth};
 use swarmops_testkit::serve::ServeSite;
 use swarmops_testkit::store::layout_of;
 use tempfile::TempDir;
 
-use crate::support::{self, Run, Swarmops};
+use crate::support::{self, Run, Store, Swarmops};
 
 /// The agent that fetches over ssh.
 const AGENT: &str = "person/ada";
@@ -74,6 +75,10 @@ const SERVE_DIRTY: &str = "git/serve.dirty";
 
 /// The warning of a preparation whose seed could not be fetched.
 const SEED_FAILED: &str = "seed_failed";
+
+/// The repository the remote serves, and its name in the store.
+const REMOTE_REPO: &str = "repo";
+const ORIGIN: &str = "origin";
 
 /// How long a connection started during a preparation's first round waits for `serve.lock`:
 /// past that round's end on a loaded host, short of the writer lock wait a round that kept the
@@ -306,6 +311,15 @@ impl Site {
             .to_owned()
     }
 
+    /// The changeset the store's `main` names.
+    fn main(&self) -> String {
+        let refs = self.so(&["ref", "list"]);
+        let listed = refs["refs"].as_array().expect("refs");
+        let main = listed.iter().find(|entry| entry["name"] == "main");
+        let main = main.unwrap_or_else(|| panic!("no main: {refs}"));
+        main["target"].as_str().expect("a target").to_owned()
+    }
+
     /// The commit `serve.git`'s `main` names.
     fn served_main(&self) -> String {
         let output = self
@@ -391,6 +405,36 @@ impl Site {
         self.land(path).ok();
         self.wait_dirty();
         drop(held);
+    }
+
+    /// Tool `name` called with `arguments` through the MCP server as [`WRITER`], in a session
+    /// of its own, which must succeed.
+    fn mcp(&self, name: &str, arguments: &Value) {
+        let messages = [
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": MCP_REVISION,
+                "capabilities": {},
+                "clientInfo": {"name": "prepare-test", "version": "1"},
+            }}),
+            json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+                "name": name,
+                "arguments": arguments,
+            }}),
+        ];
+        let lines: Vec<String> = messages.iter().map(Value::to_string).collect();
+        let input = lines.join("\n") + "\n";
+        let store = self.store();
+        let line = ["mcp", "--repo", &store, "--as", WRITER];
+        let run = support::run_bin(support::BIN, &line, &[], &input);
+        assert_eq!(run.exit(), 0, "{run}");
+        let called: Value = run
+            .stdout
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .find(|reply| reply["id"] == 2)
+            .unwrap_or_else(|| panic!("a tools/call reply: {run}"));
+        assert_eq!(called["result"]["isError"], false, "{run}");
     }
 
     /// `serve --prepare` with `stand` as its git: the result.
@@ -482,32 +526,9 @@ fn an_mcp_land_is_prepared() {
 
     // 1. One land with its changes, in a session of its own.
     let changes = json!([{"path": "mcp.txt", "op": "put", "content": {"inline": "mcp\n"}}]);
-    let messages = [
-        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
-            "protocolVersion": MCP_REVISION,
-            "capabilities": {},
-            "clientInfo": {"name": "prepare-test", "version": "1"},
-        }}),
-        json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
-        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
-            "name": "land",
-            "arguments": {"head": "main", "base": "main", "target": "main",
-                          "message": "mcp", "changes": changes},
-        }}),
-    ];
-    let lines: Vec<String> = messages.iter().map(Value::to_string).collect();
-    let input = lines.join("\n") + "\n";
-    let store = site.store();
-    let line = ["mcp", "--repo", &store, "--as", WRITER];
-    let run = support::run_bin(support::BIN, &line, &[], &input);
-    assert_eq!(run.exit(), 0, "{run}");
-    let landed: Value = run
-        .stdout
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).unwrap())
-        .find(|reply| reply["id"] == 2)
-        .unwrap_or_else(|| panic!("a tools/call reply: {run}"));
-    assert_eq!(landed["result"]["isError"], false, "{run}");
+    let arguments = json!({"head": "main", "base": "main", "target": "main",
+                           "message": "mcp", "changes": changes});
+    site.mcp("land", &arguments);
 
     // 2. Prepared: the next fetch takes no writer lock.
     site.wait_current();
@@ -726,4 +747,127 @@ fn a_failed_seed_still_refreshes() {
     assert!(warnings.contains(SEED_FAILED), "{prepared}");
     assert!(!warnings.contains(&seed), "{prepared}");
     assert!(site.current(), "{prepared}");
+}
+
+/// Every way a ref moves starts a preparation (seen as the mark it leaves while the test holds
+/// `serve.lock`): a commit with `--advance` through the command line and the MCP server, a
+/// revert, and a `ws land` run inside its workspace.
+#[test]
+fn every_ref_move_starts_a_preparation() {
+    let site = Site::new();
+    site.clone("moves");
+    site.wait_current();
+    let held = site.hold_serve_lock();
+    let dirty = site.served.store(STORE).join(SERVE_DIRTY);
+    let marked = |what: &str| take_mark(&dirty, what);
+
+    // 1. A commit that advances main, through the command line, then the MCP server.
+    let changes = site.changes("advanced.txt");
+    let line = [
+        "commit",
+        "-m",
+        "advanced",
+        "--changes",
+        &changes,
+        "--advance",
+        "main",
+    ];
+    site.so(&line);
+    marked("commit --advance");
+    let changes = json!([{"path": "mcp.txt", "op": "put", "content": {"inline": "mcp\n"}}]);
+    let parent = site.main();
+    let arguments = json!({"message": "mcp", "parent": parent, "advance": "main",
+                           "changes": changes});
+    site.mcp("commit", &arguments);
+    marked("an MCP commit with advance");
+
+    // 2. A land, then its revert.
+    let landed = site.land("reverted.txt").ok()["landed"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    marked("land");
+    site.so(&["revert", &landed, "--reason", "not yet"]);
+    marked("revert");
+
+    // 3. A workspace's land, from inside it.
+    let dir = site.work.path().join("ws");
+    let path = dir.to_str().unwrap();
+    site.so(&["ws", "create", "w1", "--path", path, "--all"]);
+    fs::write(dir.join("ws.txt"), "ws\n").unwrap();
+    let output = support::swarmops(&["--as", WRITER, "ws", "land", "-m", "ws"], &[])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "ws land: {}", text(&output.stdout));
+    marked("ws land");
+    drop(held);
+}
+
+/// A fetch and a sync of a remote start a preparation too.
+#[test]
+fn a_fetch_and_a_sync_start_a_preparation() {
+    // 1. A remote of one commit, and a served store that follows it.
+    let server = GitServer::new();
+    server.create(REMOTE_REPO);
+    server.commit_on(REMOTE_REPO, "main", "first", &[("a.txt", "a\n")]);
+    let http = server.http(HttpAuth::Anonymous);
+    let home = TempDir::new().unwrap();
+    let git = server_git(&server);
+    let env = [
+        ("SWARMOPS_GIT", git.to_str().unwrap()),
+        ("HOME", home.path().to_str().unwrap()),
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+    ];
+    let store = Store::init().with_env(&env);
+    let url = http.url(REMOTE_REPO);
+    store
+        .read(&["remote", "add", ORIGIN, &url, "--branch", "main"])
+        .ok();
+    let root = Path::new(store.path());
+    fs::write(root.join("access.toml"), ACCESS).unwrap();
+    let repo = ServeRepo::open(&Utf8PathBuf::from(store.path())).expect("open serve.git");
+    let held = repo.lock(SERVE_LOCK_WAIT).expect("take serve.lock");
+    let dirty = root.join(SERVE_DIRTY);
+    let marked = |what: &str| take_mark(&dirty, what);
+
+    // 2. The fetch, main set on what it brought, and a sync with nothing to do.
+    let fetched = store.read(&["fetch", ORIGIN]).ok();
+    marked("fetch");
+    let tip = fetched["head"]["changeset"].as_str().unwrap();
+    store
+        .run_as(WRITER, &["ref", "set", "main", tip, "--create"], &[])
+        .ok();
+    marked("ref set");
+    let synced = store.run_as(WRITER, &["sync", ORIGIN], &[]).ok();
+    assert_eq!(synced["status"], "up_to_date", "{synced}");
+    marked("sync");
+    drop(held);
+}
+
+/// Waits, at most [`PREPARED_WITHIN`], for the mark `dirty` that `what` left, and removes it.
+fn take_mark(dirty: &Path, what: &str) {
+    let deadline = Instant::now() + PREPARED_WITHIN;
+    while !dirty.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "{what}: no preparation marked serve.git"
+        );
+        thread::sleep(POLL);
+    }
+    fs::remove_file(dirty).unwrap();
+}
+
+/// The real git the remote's server runs, as a path.
+fn server_git(server: &GitServer) -> PathBuf {
+    let program = server.git_program();
+    if program.is_absolute() {
+        return program.to_path_buf();
+    }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(program))
+        .find(|candidate| candidate.is_file())
+        .expect("git on PATH")
 }
