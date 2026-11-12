@@ -46,6 +46,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
   in `error.hint` naming what to type. A line that parsed before runs as before; below a
   workspace's root a line that names paths is refused, since paths are read from the root.
 
+### Changed
+
+- `git import` and `git export` refuse an empty `git_path` with `E_INVALID_ARG`
+  (`details.reason` `git_path_empty`), before any repository is opened. It was read as the
+  working directory: at a work tree's root the commands read or wrote that repository.
+
 ### Fixed
 
 - `remote add` and `clone` refuse an `http://` or `https://` URL whose user is a token, as they
