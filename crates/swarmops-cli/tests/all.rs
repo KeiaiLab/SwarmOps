@@ -17,6 +17,7 @@ mod damaged_index;
 #[cfg(feature = "test-hooks")]
 mod faults;
 mod format2;
+mod format3_perf;
 mod git;
 mod git_text;
 mod github_live;
