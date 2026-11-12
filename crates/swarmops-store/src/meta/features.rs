@@ -52,7 +52,7 @@ const MAX_NAME_LEN: usize = 32;
 const FORMAT_3: u32 = 3;
 
 /// Each fact kind's feature name.
-const KIND_FEATURES: [(FactKind, &str); 7] = [
+const KIND_FEATURES: [(FactKind, &str); 8] = [
     (FactKind::Review, "review"),
     (FactKind::Annotation, "annotation"),
     (FactKind::Check, "check"),
@@ -60,6 +60,7 @@ const KIND_FEATURES: [(FactKind, &str); 7] = [
     (FactKind::Withdrawal, "withdrawal"),
     (FactKind::Lineage, "lineage"),
     (FactKind::Provenance, "provenance"),
+    (FactKind::Tag, "tag_object"),
 ];
 
 /// A feature list: its names, in ascending byte order, each once.
@@ -493,7 +494,7 @@ mod tests {
     fn an_enabled_feature_has_no_provisional_golden() {
         let offenders = provisional_offenders(SUPPORTED_FEATURES, &provisional_files());
         assert_eq!(offenders, Vec::<String>::new());
-        assert_eq!(provisional_files().len(), 35, "the design §2.8's 35 cells");
+        assert_eq!(provisional_files().len(), 37, "the design §2.8's 37 cells");
     }
 
     /// The detector's self-check: a supported feature whose goldens are still provisional is

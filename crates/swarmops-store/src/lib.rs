@@ -52,7 +52,7 @@ pub use maint::MaintLease;
 #[cfg(feature = "test-hooks")]
 pub use meta::features::{Guard, seed_nonces, supported_for_tests};
 pub use meta::features::{MAX_FEATURES, SUPPORTED_FEATURES};
-pub use meta::frame::{Base, Fact, FactKind, MAX_FACT_BODY};
+pub use meta::frame::{Base, Fact, FactKind, MAX_FACT_BODY, ref_name_key};
 pub use meta::queue::{ANSWER_MAX, ANSWER_POLL, MAX_BATCH, PLAN_BUDGET, REQUEST_MAX, WARNING_MAX};
 pub use meta::refs::{
     RefKind, check_move, check_ref_name, check_ref_name_in, check_remote_segment, ref_kind,

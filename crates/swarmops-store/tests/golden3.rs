@@ -35,9 +35,9 @@ const PROVISIONAL: &str = "provisional";
 /// The confirmed goldens: the design §6 table less the fact cells, plus the envelope.
 const CONFIRMED_COUNT: usize = 10;
 
-/// Every (kind, type) cell of the design §2.8 table: 35.
-const CELLS: [(FactKind, u8); 35] = {
-    use FactKind::{Annotation, Check, Lineage, Provenance, Queue, Review, Withdrawal};
+/// Every (kind, type) cell of the design §2.8 table, with its amendment of 2026-11-12: 37.
+const CELLS: [(FactKind, u8); 37] = {
+    use FactKind::{Annotation, Check, Lineage, Provenance, Queue, Review, Tag, Withdrawal};
     [
         (Review, 0),
         (Review, 1),
@@ -74,6 +74,8 @@ const CELLS: [(FactKind, u8); 35] = {
         (Lineage, 6),
         (Provenance, 0),
         (Provenance, 1),
+        (Tag, 0),
+        (Tag, 1),
     ]
 };
 
@@ -205,7 +207,7 @@ fn a_flipped_byte_in_any_golden_is_refused() {
     assert_eq!(
         names.len(),
         CONFIRMED_COUNT + CELLS.len(),
-        "the design §6 table, with 35 fact cells, and the envelope"
+        "the design §6 table, with 37 fact cells, and the envelope"
     );
     let provisional = names.iter().filter(|name| is_provisional(name)).count();
     assert_eq!(provisional, CELLS.len(), "every fact cell provisional");
@@ -411,7 +413,7 @@ fn id(byte: u8) -> [u8; 32] {
 
 /// A cell's fact: its body by the design §2.8 table, built here field by field.
 fn fact(kind: FactKind, ty: u8, fill: Fill) -> Fact {
-    use FactKind::{Annotation, Check, Lineage, Provenance, Queue, Review, Withdrawal};
+    use FactKind::{Annotation, Check, Lineage, Provenance, Queue, Review, Tag, Withdrawal};
     let filled = matches!(fill, Fill::Full);
     let some = |byte: u8| if filled { id(byte) } else { [0; 32] };
     let text = |s: &'static str| if filled { s } else { "" };
@@ -464,12 +466,18 @@ fn fact(kind: FactKind, ty: u8, fill: Fill) -> Fact {
             .u64(300)
             .str(text("model"))
             .id(some(1)),
-        (Provenance, 1) => b.u8(1),
+        (Provenance | Tag, 1) => b.u8(1),
+        (Tag, 0) => b.u8(1).id(id(1)),
         other => panic!("no cell {other:?}"),
     };
 
-    // The envelope: a withdrawal names no other; an empty fact names none either.
-    let other = if kind == Withdrawal { [0; 32] } else { some(9) };
+    // The envelope: a withdrawal names no other; an empty fact names none either, but a tag
+    // always names its changeset.
+    let other = match kind {
+        Withdrawal => [0; 32],
+        Tag => id(9),
+        _ => some(9),
+    };
     let actor = text("agent/one").to_owned();
     Fact::new(kind, ty, id(8), other, TS, actor, b.0).unwrap()
 }

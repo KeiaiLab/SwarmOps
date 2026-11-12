@@ -10,7 +10,7 @@
 //!             | u8 actor_len | actor | i64le ts
 //! Compacted = u8 4 | u64le sorted_count
 //! Fact      = u8 kind | u8 type | u16le body_len | subject[32] | other[32] | i64le ts
-//!             | u8 actor_len | actor | body                     (FORMAT 3: kinds 3, 5 to 10)
+//!             | u8 actor_len | actor | body               (FORMAT 3: kinds 3, 5 to 10, 12)
 //! Nonce     = u8 11 | u64le nonce                     (FORMAT 3: every frame's last record)
 //! ```
 //!
@@ -62,6 +62,10 @@ pub const MAX_FACT_BODY: usize = 4_096;
 
 /// What an entity id's hash starts with (the FORMAT 3 design §2.8).
 const ENTITY_DOMAIN: &[u8] = b"swarmops:entity:v1\0";
+
+/// What a ref name key's hash starts with: the domain FORMAT 2's ref file names already use (the
+/// M6 design §2.5).
+const REF_NAME_DOMAIN: &[u8] = b"swarmops:refname:v1\0";
 
 /// One change to the metadata, as the journal records it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,6 +123,8 @@ pub enum FactKind {
     Lineage,
     /// Kind 10: where a changeset came from.
     Provenance,
+    /// Kind 12: which object a tag ref carries, annotated or lightweight.
+    Tag,
 }
 
 /// Where a FORMAT 3 frame lies against the journal's base seq: before it, a FORMAT 2 writer
@@ -345,7 +351,7 @@ enum Field {
     Zero64,
     /// An id that is all zero: a blob a type names none of.
     ZeroId,
-    /// A `u8` that is 1: the provenance schema.
+    /// A `u8` that is 1: a body's schema (Provenance, Tag).
     Schema,
     /// A `u8` below the number: one of an enumeration's values.
     Enum(u8),
@@ -419,9 +425,13 @@ const PROVENANCE: &[&[Field]] = {
     &[&[Schema, U64, U64, U64, STR, Blob], &[Schema]]
 };
 
+/// A Tag's bodies (the FORMAT 3 design's amendment of 2026-11-12): Annotated names the blob
+/// that holds git's tag object, Lightweight names none.
+const TAG: &[&[Field]] = &[&[Field::Schema, Field::Blob], &[Field::Schema]];
+
 impl FactKind {
     /// Every kind, in kind number order.
-    pub const ALL: [FactKind; 7] = [
+    pub const ALL: [FactKind; 8] = [
         Self::Review,
         Self::Annotation,
         Self::Check,
@@ -429,9 +439,10 @@ impl FactKind {
         Self::Withdrawal,
         Self::Lineage,
         Self::Provenance,
+        Self::Tag,
     ];
 
-    /// Its kind number in the journal: 3, or 5 to 10.
+    /// Its kind number in the journal: 3, 5 to 10, or 12.
     pub fn code(self) -> u8 {
         match self {
             Self::Review => 3,
@@ -441,6 +452,7 @@ impl FactKind {
             Self::Withdrawal => 8,
             Self::Lineage => 9,
             Self::Provenance => 10,
+            Self::Tag => 12,
         }
     }
 
@@ -473,6 +485,7 @@ impl FactKind {
             Self::Withdrawal => WITHDRAWAL,
             Self::Lineage => LINEAGE,
             Self::Provenance => PROVENANCE,
+            Self::Tag => TAG,
         };
         bodies.get(usize::from(ty)).copied()
     }
@@ -485,7 +498,8 @@ impl Fact {
     /// The fact of `kind` and type `ty` about `subject` (and `other`, all zero for none), made
     /// at `ts` by `actor`, with `body`. Refuses an actor longer than 255 bytes with
     /// [`StoreError::Limit`]; a type the kind does not have, a body its type's layout does not
-    /// read as exactly, or a withdrawal naming an `other`, with [`StoreError::BadCall`].
+    /// read as exactly, a withdrawal naming an `other` or a tag naming none, with
+    /// [`StoreError::BadCall`].
     pub fn new(
         kind: FactKind,
         ty: u8,
@@ -500,7 +514,7 @@ impl Fact {
             |why: &str| StoreError::BadCall(format!("a {kind:?} fact of type {ty} {why}"));
         let fields = kind.body(ty).ok_or_else(|| refused("is no fact"))?;
         if !other_fits(kind, &other) {
-            return Err(refused("names no other"));
+            return Err(refused("names an other its kind refuses"));
         }
         if body.len() > MAX_FACT_BODY || check_body(fields, &body).is_err() {
             return Err(refused("has another body"));
@@ -690,9 +704,24 @@ impl<'a> Envelope<'a> {
     }
 }
 
-/// Whether `other` is one a fact of `kind` may name: a withdrawal names none.
+/// Whether `other` is one a fact of `kind` may name: a withdrawal names none, a tag names the
+/// changeset it peels to.
 fn other_fits(kind: FactKind, other: &[u8; 32]) -> bool {
-    kind != FactKind::Withdrawal || other.iter().all(|&b| b == 0)
+    let none = other.iter().all(|&b| b == 0);
+    match kind {
+        FactKind::Withdrawal => none,
+        FactKind::Tag => !none,
+        _ => true,
+    }
+}
+
+/// The key of ref `name`: `blake3(b"swarmops:refname:v1\0" ‖ name)`. A Tag fact's subject; its
+/// first 16 bytes name the ref's FORMAT 2 file.
+pub fn ref_name_key(name: &str) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(REF_NAME_DOMAIN);
+    hasher.update(name.as_bytes());
+    *hasher.finalize().as_bytes()
 }
 
 /// Whether `body` is exactly `fields`; [`BadRecord`] at the field in it that is not.
@@ -1550,6 +1579,50 @@ mod tests {
         assert_eq!(blobs(FactKind::Review, 2, no_note), Vec::<u8>::new());
         assert_eq!(blobs(FactKind::Lineage, 0, id(31)), Vec::<u8>::new());
     }
+
+    /// A Tag fact names the changeset its tag peels to: an all-zero `other` is refused, built or
+    /// decoded.
+    #[test]
+    fn a_tag_fact_without_a_target_is_refused() {
+        let tag = |other| Fact::new(FactKind::Tag, 1, [1; 32], other, 0, String::new(), vec![1]);
+        assert!(tag([2; 32]).is_ok());
+        assert!(matches!(tag([0; 32]), Err(StoreError::BadCall(_))));
+
+        // Decoded: the same bytes with `other` zeroed are no record.
+        let mut bytes = Vec::new();
+        tag([2; 32]).unwrap().encode(&mut bytes);
+        assert!(Fact::decode(&bytes).is_ok());
+        bytes[OTHER_AT..OTHER_AT + 32].fill(0);
+        assert_eq!(Fact::decode(&bytes).err(), Some(bad_record(OTHER_AT)));
+    }
+
+    /// An annotated Tag fact names its tag object's blob; a lightweight one names none.
+    #[test]
+    fn an_annotated_tag_fact_names_its_blob() {
+        let tag = |ty, body: Vec<u8>| {
+            Fact::new(FactKind::Tag, ty, [1; 32], [2; 32], 0, String::new(), body).unwrap()
+        };
+        let annotated = tag(0, [&[1][..], &[7; 32]].concat());
+        assert_eq!(annotated.blob_ids(), [ObjectId::new([7; 32])]);
+        assert_eq!(tag(1, vec![1]).blob_ids(), Vec::<ObjectId>::new());
+    }
+
+    /// The ref name key: `blake3(b"swarmops:refname:v1\0" ‖ name)`, whose first 16 bytes name a
+    /// FORMAT 2 ref file.
+    #[test]
+    fn ref_name_key_matches_its_golden() {
+        let hex = |name| blake3::Hash::from_bytes(ref_name_key(name)).to_hex();
+        assert_eq!(hex("tags/v1").as_str(), PINNED_TAGS_V1_KEY);
+        assert_eq!(&hex("main")[..32], PINNED_MAIN_STEM);
+        assert_ne!(ref_name_key("tags/v1"), ref_name_key("tags/v2"));
+    }
+
+    /// `blake3(b"swarmops:refname:v1\0" ‖ b"tags/v1")`, in lowercase hex.
+    const PINNED_TAGS_V1_KEY: &str =
+        "afc8121e384e6611ae3f5a3c5ef0b3e352b51c5e839f74bc96b3ff496b844abb";
+
+    /// The FORMAT 2 file name of `main`, as the ref store's own test pins it.
+    const PINNED_MAIN_STEM: &str = "72e8984deb3122ae48ce1eb128fae1d6";
 
     /// A header that checks but announces 0 or more than the bound is refused from the header.
     #[test]
