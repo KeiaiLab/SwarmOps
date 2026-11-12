@@ -83,6 +83,8 @@ pub mod git;
 pub mod landing;
 pub mod measure;
 pub mod openmetrics;
+#[cfg(feature = "repo")]
+pub mod pool;
 pub mod power;
 pub mod remote;
 #[cfg(feature = "repo")]
