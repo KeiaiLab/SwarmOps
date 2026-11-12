@@ -69,16 +69,8 @@ swarmops --human ws status
 ```
 
 ```text
-name: worker-1
-base: a9f3ff05…
-head: a9f3ff05…
-main: a9f3ff05…
-behind_by: 0
-state: clean
-changes[0].path: src/lib.rs
-changes[0].kind: modified
-changes[0].size: 53
-truncated: false
+## worker-1 a9f3ff05…
+M  src/lib.rs
 ```
 
 `ws diff` shows the edits as `swarmops diff` shows a diff, and `ws discard [<path>…]` restores
@@ -121,11 +113,7 @@ swarmops --human ws land --check --status-after none
 ```
 
 ```text
-changeset: 1ef0ae45…
-parent: 43accfef…
-files_changed: 1
-blobs_written: 1
-replayed: false
+[1ef0ae45…] 1 file changed
 land.status: landed
 land.landed: ae3d9647…
 land.rebased_onto: a9f3ff05…

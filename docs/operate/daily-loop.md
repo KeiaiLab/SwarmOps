@@ -204,20 +204,9 @@ swarmops op log -n 2 --human
 ```
 
 ```text
-entries[0].id: 8dc0ca37d8a4a5b29d0e95892066be702aee4b4f99cc699115cb2e8ef12293c6
-entries[0].parents[0]: 91073fdd7c734576c4aa0e08f0c39800aa26d2b957eab71b5c24b0e1fdf30b0e
-entries[0].author_agent: agent/worker-2
-entries[0].created_at: 1792671661000
-entries[0].title: a shorter greeting
+8dc0ca37d8a4 a shorter greeting
 …
-from: c51b1735c428042e4ab5920448064b62a15b1310fc14ce2b7ea7d8eb38ef2767
-to: 8dc0ca37d8a4a5b29d0e95892066be702aee4b4f99cc699115cb2e8ef12293c6
-files[0].path: README.md
-files[0].status: modified
-files[0].binary: false
-files[0].insertions: 1
-files[0].deletions: 1
-files[1].path: src/lib.rs
+1	1	README.md
 …
 ops[0].op: 5
 ops[0].kind: land

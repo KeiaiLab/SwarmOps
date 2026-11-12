@@ -143,12 +143,7 @@ refs: 1
     "auth": "trust"
   }
 }
-entries[0].id: bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118
-entries[0].parents: []
-entries[0].author_agent: operator/ada
-entries[0].created_at: 1792626751000
-entries[0].title: first
-truncated: false
+bae3bcec1c5a first
 error: E_PATH_NOT_FOUND: nothing is at "nope.rs" in main
 details.path: nope.rs
 details.rev: main

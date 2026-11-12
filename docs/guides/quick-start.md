@@ -115,12 +115,7 @@ entries[1].name: src
 entries[1].kind: dir
 entries[1].id: b3df0b759177d000a36c5c20217f3e62a8f9c9dbe9a2d119aa3558912838c011
 truncated: false
-entries[0].id: ecca9a10…
-entries[0].parents: []
-entries[0].author_agent: agent/worker-1
-entries[0].created_at: 1792626497000
-entries[0].title: first
-truncated: false
+ecca9a100bf3 first
 ```
 
 `so show main` prints the whole changeset: parents, author, message, changes and git-style

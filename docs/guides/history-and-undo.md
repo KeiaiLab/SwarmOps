@@ -429,29 +429,17 @@ signatures.committer.offset_secs: 0
 ## Walk the history
 
 `so log` lists history along first parents, newest first, from `main` by default. Each entry
-gives the id, the parents, the agent, the time and the message's first line:
+gives the id, the parents, the agent, the time and the message's first line; `--human` prints the
+id cut to 12 digits and that line, as `git log --oneline`, and the JSON form holds the rest:
 
 ```sh
 so log --human
 ```
 
 ```text
-entries[0].id: 48b8a4cf3ca9…
-entries[0].parents[0]: ce8c4ae35795…
-entries[0].author_agent: agent/worker-1
-entries[0].created_at: 1792626460000
-entries[0].title: add a guide
-entries[1].id: ce8c4ae35795…
-entries[1].parents[0]: 3ba35c44081b…
-entries[1].author_agent: agent/worker-1
-entries[1].created_at: 1792626460000
-entries[1].title: add g
-entries[2].id: 3ba35c44081b…
-entries[2].parents: []
-entries[2].author_agent: agent/worker-1
-entries[2].created_at: 1792626460000
-entries[2].title: first
-truncated: false
+48b8a4cf3ca9 add a guide
+ce8c4ae35795 add g
+3ba35c44081b first
 ```
 
 ### Start somewhere else
@@ -463,35 +451,22 @@ so log main~1 --human
 ```
 
 ```text
-entries[0].id: ce8c4ae35795…
-entries[0].parents[0]: 3ba35c44081b…
-entries[0].author_agent: agent/worker-1
-entries[0].created_at: 1792626460000
-entries[0].title: add g
-entries[1].id: 3ba35c44081b…
-entries[1].parents: []
-entries[1].author_agent: agent/worker-1
-entries[1].created_at: 1792626460000
-entries[1].title: first
-truncated: false
+ce8c4ae35795 add g
+3ba35c44081b first
 ```
 
 ### Read it a page at a time
 
-`-n N` (50 by default) cuts the page. A cut page gives a `cursor`: the last id it listed.
+`-n N` (50 by default) cuts the page. A cut page gives a `cursor`: the last id it listed, in
+`result.cursor` of the JSON form; `--human` ends the page with `(truncated)`.
 
 ```sh
 so log -n 1 --human
 ```
 
 ```text
-entries[0].id: 48b8a4cf3ca9…
-entries[0].parents[0]: ce8c4ae35795…
-entries[0].author_agent: agent/worker-1
-entries[0].created_at: 1792626460000
-entries[0].title: add a guide
-truncated: true
-cursor: 48b8a4cf3ca9…
+48b8a4cf3ca9 add a guide
+(truncated)
 ```
 
 ```sh
@@ -499,13 +474,8 @@ so log -n 1 --cursor 48b8a4cf3ca95a01caec61568a22e7f4f0ad89ef71b7d1c9ac85e57544b
 ```
 
 ```text
-entries[0].id: ce8c4ae35795…
-entries[0].parents[0]: 3ba35c44081b…
-entries[0].author_agent: agent/worker-1
-entries[0].created_at: 1792626460000
-entries[0].title: add g
-truncated: true
-cursor: ce8c4ae35795…
+ce8c4ae35795 add g
+(truncated)
 ```
 
 A cursor is a full changeset id; anything else is `E_INVALID_ARG` (exit 2).
@@ -520,17 +490,8 @@ so log --path src --human
 ```
 
 ```text
-entries[0].id: ce8c4ae35795…
-entries[0].parents[0]: 3ba35c44081b…
-entries[0].author_agent: agent/worker-1
-entries[0].created_at: 1792626460000
-entries[0].title: add g
-entries[1].id: 3ba35c44081b…
-entries[1].parents: []
-entries[1].author_agent: agent/worker-1
-entries[1].created_at: 1792626460000
-entries[1].title: first
-truncated: false
+ce8c4ae35795 add g
+3ba35c44081b first
 ```
 
 ```sh
@@ -538,17 +499,8 @@ so log --path docs --path README.md --human
 ```
 
 ```text
-entries[0].id: 48b8a4cf3ca9…
-entries[0].parents[0]: ce8c4ae35795…
-entries[0].author_agent: agent/worker-1
-entries[0].created_at: 1792626460000
-entries[0].title: add a guide
-entries[1].id: 3ba35c44081b…
-entries[1].parents: []
-entries[1].author_agent: agent/worker-1
-entries[1].created_at: 1792626460000
-entries[1].title: first
-truncated: false
+48b8a4cf3ca9 add a guide
+3ba35c44081b first
 ```
 
 ## Follow one path
@@ -647,52 +599,32 @@ hint: swarmops ls main
 
 `so diff FROM TO` lists the files that differ between two revisions, in path order. Each has a
 `status`: `added`, `deleted`, `modified` or `type_changed` (a symlink on one side, a file on the
-other).
+other). `--human` prints it as git's `--name-status`: `A`, `D`, `M` or `T`, a tab, the path.
 
 ```sh
 so diff main~2 main --human
 ```
 
 ```text
-from: 3ba35c44081b…
-to: 48b8a4cf3ca9…
-files[0].path: README.md
-files[0].status: modified
-files[1].path: docs/guide.md
-files[1].status: added
-files[2].path: src/lib.rs
-files[2].status: modified
-truncated: false
+M	README.md
+A	docs/guide.md
+M	src/lib.rs
 ```
 
 ### Say more of each file
 
 `--format` picks how much: `names` (the default), `stat`, which adds whether each file is binary
 and its inserted and deleted lines, and `unified`, which adds its kinds, its blobs and its hunks.
+`--human` prints `stat` as git's `--numstat` and `unified` as a patch.
 
 ```sh
 so diff main~2 main --format stat --human
 ```
 
 ```text
-from: 3ba35c44081b…
-to: 48b8a4cf3ca9…
-files[0].path: README.md
-files[0].status: modified
-files[0].binary: false
-files[0].insertions: 2
-files[0].deletions: 0
-files[1].path: docs/guide.md
-files[1].status: added
-files[1].binary: false
-files[1].insertions: 1
-files[1].deletions: 0
-files[2].path: src/lib.rs
-files[2].status: modified
-files[2].binary: false
-files[2].insertions: 4
-files[2].deletions: 0
-truncated: false
+2	0	README.md
+1	0	docs/guide.md
+4	0	src/lib.rs
 ```
 
 `--path P` keeps the files at or below `P`; give it again for more. `--context N` sets the
@@ -703,31 +635,12 @@ so diff main~1 main --format unified --path README.md --human
 ```
 
 ```text
-from: ce8c4ae35795…
-to: 48b8a4cf3ca9…
-files[0].path: README.md
-files[0].status: modified
-files[0].old_kind: file
-files[0].new_kind: file
-files[0].old_blob: 745ffc98a5d4…
-files[0].new_blob: a7a064662799…
-files[0].binary: false
-files[0].insertions: 2
-files[0].deletions: 0
-files[0].hunks[0].old_start: 1
-files[0].hunks[0].old_lines: 1
-files[0].hunks[0].new_start: 1
-files[0].hunks[0].new_lines: 3
-files[0].hunks[0].lines[0].op: context
-files[0].hunks[0].lines[0].text: |
-  # acme
-files[0].hunks[0].lines[1].op: add
-files[0].hunks[0].lines[1].text: |
-  
-files[0].hunks[0].lines[2].op: add
-files[0].hunks[0].lines[2].text: |
-  See docs/guide.md.
-truncated: false
+--- a/README.md
++++ b/README.md
+@@ -1,1 +1,3 @@
+ # acme
++
++See docs/guide.md.
 ```
 
 A unified page holds at most `--max-bytes` of JSON (32 KiB by default); the first file comes
@@ -735,19 +648,16 @@ all the same, its hunks cut to fit.
 
 ### Page through a large diff
 
-`--limit N` (500 by default) cuts the page, and `--cursor` reads on:
+`--limit N` (500 by default) cuts the page, and `--cursor` reads on from `result.cursor` of the
+JSON form, the last path listed; `--human` ends the page with `(truncated)`:
 
 ```sh
 so diff main~2 main --limit 1 --human
 ```
 
 ```text
-from: 3ba35c44081b…
-to: 48b8a4cf3ca9…
-files[0].path: README.md
-files[0].status: modified
-truncated: true
-cursor: README.md
+M	README.md
+(truncated)
 ```
 
 ```sh
@@ -755,12 +665,8 @@ so diff main~2 main --limit 1 --cursor README.md --human
 ```
 
 ```text
-from: 3ba35c44081b…
-to: 48b8a4cf3ca9…
-files[0].path: docs/guide.md
-files[0].status: added
-truncated: true
-cursor: docs/guide.md
+A	docs/guide.md
+(truncated)
 ```
 
 ### See what one changeset changed
@@ -772,11 +678,7 @@ so diff e8974b4bb892~1 e8974b4bb892 --human
 ```
 
 ```text
-from: 48b8a4cf3ca9…
-to: e8974b4bb892…
-files[0].path: README.md
-files[0].status: deleted
-truncated: false
+D	README.md
 ```
 
 The first changeset of a history has no parent to diff against; `so show` lists its changes.

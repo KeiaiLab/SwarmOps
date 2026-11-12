@@ -215,17 +215,8 @@ swarmops log -n 2 --human
 
 ```text
 {"ok":true,"op":"land","api":1,"result":{"status":"landed","landed":"26cee040899b510d7fd08f93a2f0f4662921e09f85e5fa4a6242610bcc2d5d9d","rebased_onto":"999a7002bcfb45005a5f61863c96995426908136f0c8333b09061a2d93c041d3","target":"main","base":"999a7002bcfb45005a5f61863c96995426908136f0c8333b09061a2d93c041d3","attempts":1,"relocated":false,"files_changed":1,"squashed_from":["dd71fe85abe461c94dab72e126f580827a0796582a2075f6e00d3817cd6ce450"]},"meta":{"repo":"…",…}}
-entries[0].id: 26cee040899b510d7fd08f93a2f0f4662921e09f85e5fa4a6242610bcc2d5d9d
-entries[0].parents[0]: 999a7002bcfb45005a5f61863c96995426908136f0c8333b09061a2d93c041d3
-entries[0].author_agent: agent/worker-1
-entries[0].created_at: 1792626925000
-entries[0].title: describe acme
-entries[1].id: 999a7002bcfb45005a5f61863c96995426908136f0c8333b09061a2d93c041d3
-entries[1].parents: []
-entries[1].author_agent: agent/worker-1
-entries[1].created_at: 1792626924000
-entries[1].title: start acme
-truncated: false
+26cee040899b describe acme
+999a7002bcfb start acme
 ```
 
 `land` published a new changeset, `landed`, whose parent is the head it merged onto,
@@ -738,7 +729,7 @@ swarmops --as agent/worker-1 land "$A" --key "$(uuid7)" > a.json &
 swarmops --as agent/worker-2 land "$B" --key "$(uuid7)" > b.json &
 wait
 field result < a.json; field result < b.json
-swarmops log -n 3 --human | grep -E "title|author"
+swarmops log -n 3 --human
 ```
 
 ```text
@@ -768,12 +759,9 @@ swarmops log -n 3 --human | grep -E "title|author"
     "e2f0875e6356f9e8b2c0d4d81022701fa133a7f6a10086113b0f552a3cec3f68"
   ]
 }
-entries[0].author_agent: agent/worker-2
-entries[0].title: add wave
-entries[1].author_agent: agent/worker-1
-entries[1].title: add clock
-entries[2].author_agent: agent/worker-1
-entries[2].title: add d
+3994c02dbe4e add wave
+d0d7f1726ce2 add clock
+bda64dbd665e add d
 ```
 
 The second land found `main` moved by the first, merged again onto the new head, and published
