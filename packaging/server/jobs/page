@@ -1,0 +1,5 @@
+#!/bin/sh
+# The root page job: host key fingerprints and the release, written again every hour. The
+# page timer and `so-kit run timers` both start this file.
+# period: 1h
+exec /usr/sbin/so-kit page

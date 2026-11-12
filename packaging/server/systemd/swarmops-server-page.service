@@ -4,7 +4,7 @@ After=sshd.service ssh.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/sbin/so-kit page
+ExecStart=/usr/lib/swarmops-server/jobs/page
 User=so
 Group=so
 NoNewPrivileges=yes

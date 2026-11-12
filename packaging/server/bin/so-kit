@@ -8,6 +8,12 @@
 #   so-kit create-store <name> <family>/<instance>              a store and its access.toml
 #   so-kit page                                                 write the root page
 #   so-kit setup                                                let the web server reach CGI
+#   so-kit check                                                read the settings, nothing else
+#   so-kit digests                       print `<sha256>  <path>` of both packages' files
+#   so-kit deploy-key-line <public key file | ->                the deploy key's line: digests
+#   so-kit run <role>                    a container role: setup, sshd, web, cgi, timers,
+#                                        rehearse, accept <smoke | full>, all
+#   so-kit ready <role>                  exit 0 when the role's listener answers, else 1
 #
 # Settings: SO_KIT_CONF, else the kit's settings file. Exit 0 done, 2 refused, with one
 # `so-kit: <reason>` line on stderr and nothing written.
@@ -31,6 +37,19 @@ web_user=www-data
 terms=
 privacy=
 acceptable_use=
+ssh_port=2222
+https_port=8443
+run_dir=/run/swarmops-server
+jobs=/usr/lib/swarmops-server/jobs
+rehearse=/usr/lib/swarmops-server/backup/rehearse
+accept=/usr/lib/swarmops-server/accept/accept
+stores=
+
+# The kit's own path, which the deploy key's line runs; seconds between two looks at the
+# certificate, so that a renewed one is served within a minute.
+SO_KIT=/usr/sbin/so-kit
+CERT_CHECK=30
+TLS=/etc/swarmops-server/tls
 
 conf=${SO_KIT_CONF:-/etc/swarmops-server/kit.conf}
 [ -r "$conf" ] || fail "cannot read the settings file"
@@ -43,7 +62,8 @@ while IFS= read -r line || [ -n "$line" ]; do
     key=${line%%=*}
     value=${line#*=}
     case $key in
-    root | swarmops | host_keys | web_root | authorized_keys | terms | privacy | acceptable_use)
+    root | swarmops | host_keys | web_root | authorized_keys | terms | privacy | acceptable_use | \
+        run_dir | jobs | rehearse | accept)
         case $value in
         '') ;;
         /*[!A-Za-z0-9._/-]* | [!/]*) fail "settings: $key is no plain absolute path" ;;
@@ -53,6 +73,18 @@ while IFS= read -r line || [ -n "$line" ]; do
         case $value in
         '' | [!a-z_]* | *[!a-z0-9_-]*) fail "settings: web_user is no account name" ;;
         esac
+        ;;
+    ssh_port | https_port)
+        case $value in
+        '' | 0* | *[!0-9]*) fail "settings: $key is no port" ;;
+        esac
+        [ "$value" -le 65535 ] || fail "settings: $key is no port"
+        ;;
+    store)
+        # Repeated: one store a line, checked once the checks below exist.
+        stores="$stores$value
+"
+        continue
         ;;
     *) fail "settings: unknown key $key" ;;
     esac
@@ -74,6 +106,17 @@ check_identity() {
     case $instance in
     .* | *[!A-Za-z0-9._-]*) fail "identity instance is not [A-Za-z0-9._-], or starts with a dot: $1" ;;
     esac
+}
+
+check_name() {
+    case $1 in
+    [a-z0-9]*) ;;
+    *) fail "a store name starts with [a-z0-9]: $1" ;;
+    esac
+    case $1 in
+    *[!a-z0-9._-]*) fail "a store name is [a-z0-9._-]: $1" ;;
+    esac
+    [ ${#1} -le 63 ] || fail "a store name has at most 63 characters"
 }
 
 # One public key, without options: sets key_type and key_blob.
@@ -122,6 +165,16 @@ text_section() {
     printf '</pre>\n'
 }
 
+# Each `store=<name> <family>/<instance>` line of the settings, before any step runs.
+while read -r name identity rest; do
+    [ -n "$name" ] || continue
+    [ -n "$identity" ] && [ -z "$rest" ] || fail "settings: store is not <name> <family>/<instance>"
+    check_name "$name"
+    check_identity "$identity"
+done <<EOF
+$stores
+EOF
+
 # 3. The steps.
 cmd_key_line() {
     [ $# -eq 2 ] || fail "usage: so-kit key-line <family>/<instance> <public key file | ->"
@@ -147,14 +200,7 @@ cmd_create_store() {
     [ $# -eq 2 ] || fail "usage: so-kit create-store <name> <family>/<instance>"
     name=$1
     check_identity "$2"
-    case $name in
-    [a-z0-9]*) ;;
-    *) fail "a store name starts with [a-z0-9]: $name" ;;
-    esac
-    case $name in
-    *[!a-z0-9._-]*) fail "a store name is [a-z0-9._-]: $name" ;;
-    esac
-    [ ${#name} -le 63 ] || fail "a store name has at most 63 characters"
+    check_name "$name"
 
     # The stores' owner runs every serve; a store made by another account is unreadable to it.
     [ "$(stat -c %u "$root")" = "$(id -u)" ] || fail "run as the owner of the stores' directory"
@@ -229,7 +275,357 @@ cmd_setup() {
     /usr/sbin/usermod -a -G swarmops-web "$web_user"
 }
 
-[ $# -ge 1 ] || fail "usage: so-kit key-line | add-key | create-store | page | setup"
+cmd_digests() {
+    [ $# -eq 0 ] || fail "usage: so-kit digests"
+
+    # 1. Both packages' paths and configuration files from the database the host has.
+    missing="the package database lacks swarmops or swarmops-server"
+    if command -v dpkg-query >/dev/null 2>&1; then
+        listing=$(dpkg-query -L swarmops swarmops-server 2>/dev/null) || fail "$missing"
+        settings=$(dpkg-query -W -f '${Conffiles}\n' swarmops swarmops-server 2>/dev/null) ||
+            fail "$missing"
+    elif command -v rpm >/dev/null 2>&1; then
+        listing=$(rpm -ql swarmops swarmops-server 2>/dev/null) || fail "$missing"
+        settings=$(rpm -qc swarmops swarmops-server 2>/dev/null) || fail "$missing"
+    else
+        fail "no package database"
+    fi
+    settings=$(printf '%s\n' "$settings" | awk '{ print $1 }')
+
+    # 2. Regular files only: configuration files are the operator's, links and directories
+    # hold no bytes of their own. A listed file that is gone fails the report.
+    files=
+    while IFS= read -r path; do
+        case $path in
+        /*) ;;
+        *) continue ;;
+        esac
+        printf '%s\n' "$settings" | grep -q -x -F -e "$path" && continue
+        [ -e "$path" ] || [ -L "$path" ] || fail "an installed file is gone: $path"
+        [ -f "$path" ] && [ ! -L "$path" ] || continue
+        files="$files$path
+"
+    done <<EOF
+$listing
+EOF
+
+    # 3. The report, printed whole once every digest is known.
+    report=
+    while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        digest=$(sha256sum <"$path") || fail "cannot read an installed file: $path"
+        report="$report${digest%% *}  $path
+"
+    done <<EOF
+$(printf '%s' "$files" | sort -u)
+EOF
+    printf '%s' "$report"
+}
+
+cmd_deploy_line() {
+    [ $# -eq 1 ] || fail "usage: so-kit deploy-key-line <public key file | ->"
+    read_key "$1"
+    printf 'command="%s digests",restrict %s %s deploy\n' "$SO_KIT" "$key_type" "$key_blob"
+}
+
+# A file of `run_dir` written whole from stdin, then renamed into place.
+write_run() {
+    [ -d "$run_dir" ] && [ -w "$run_dir" ] || fail "cannot write the run directory"
+    cat >"$run_dir/.$1.$$"
+    mv "$run_dir/.$1.$$" "$run_dir/$1"
+}
+
+# The certificate's bytes, summed: a change is a renewal.
+tls_sum() {
+    cat "$TLS/fullchain.pem" "$TLS/privkey.pem" 2>/dev/null | cksum
+}
+
+# A job's period line (`# period: 1h`, systemd's units) in seconds.
+job_period() {
+    span=$(sed -n 's/^# period: //p' "$1" | head -n 1)
+    count=${span%%[!0-9]*}
+    case ${span#"$count"} in
+    s) unit=1 ;;
+    min) unit=60 ;;
+    h) unit=3600 ;;
+    d) unit=86400 ;;
+    w) unit=604800 ;;
+    *) fail "job $1 has no period line" ;;
+    esac
+    case $count in
+    '' | 0*) fail "job $1 has no period line" ;;
+    esac
+    echo $((count * unit))
+}
+
+# Whether a TCP port of this network has a listener.
+listening() {
+    hex=$(printf ':%04X' "$1")
+    for table in /proc/net/tcp /proc/net/tcp6; do
+        [ -r "$table" ] || continue
+        awk -v port="$hex" '$4 == "0A" && substr($2, length($2) - 4) == port { found = 1 }
+            END { exit !found }' "$table" && return 0
+    done
+    return 1
+}
+
+# Container roles. A pod's containers each run one; a plain container host runs `all`.
+role_setup() {
+    [ $# -eq 0 ] || fail "usage: so-kit run setup"
+
+    # The stores' directory on a fresh volume, then each named store not yet there; an
+    # existing store and its access.toml are the operator's and stay as they are.
+    [ -d "$root" ] || mkdir -m 0700 "$root" || fail "cannot make the stores' directory"
+    while read -r name identity; do
+        [ -n "$name" ] && [ ! -e "$root/$name" ] || continue
+        cmd_create_store "$name" "$identity" </dev/null
+    done <<EOF
+$stores
+EOF
+}
+
+role_sshd() {
+    [ $# -eq 0 ] || fail "usage: so-kit run sshd"
+    sshd=$(command -v sshd) || fail "no sshd"
+
+    # 1. The host keys the settings name; sshd refuses to start without one.
+    keys=
+    for key in "$host_keys"/ssh_host_*_key; do
+        [ -r "$key" ] || continue
+        keys="${keys}HostKey $key
+"
+    done
+    [ -n "$keys" ] || fail "no host key to serve"
+
+    # 2. The serving account alone, on the setting's port, as the package's drop-in sets it.
+    write_run sshd_config <<EOF
+# Written by so-kit run sshd from the kit's settings.
+Port $ssh_port
+${keys}PidFile $run_dir/sshd.pid
+AllowUsers so
+PermitRootLogin no
+Match User so
+    AuthenticationMethods publickey
+    PasswordAuthentication no
+    KbdInteractiveAuthentication no
+    AuthorizedKeysFile $authorized_keys
+    AcceptEnv GIT_PROTOCOL
+    DisableForwarding yes
+    PermitTTY no
+    PermitTunnel no
+    PermitUserRC no
+Match all
+EOF
+    exec "$sshd" -D -e -f "$run_dir/sshd_config"
+}
+
+role_web() {
+    [ $# -eq 0 ] || fail "usage: so-kit run web"
+    command -v nginx >/dev/null 2>&1 || fail "no nginx"
+
+    # 1. The container site: TLS on one port, no plain HTTP, temporary files in run_dir.
+    for temporary in body fastcgi proxy scgi uwsgi; do
+        mkdir -p "$run_dir/nginx/$temporary"
+    done
+    write_run nginx.conf <<EOF
+# Written by so-kit run web from the kit's settings: the container site.
+daemon off;
+pid $run_dir/nginx.pid;
+error_log stderr;
+
+events {
+}
+
+http {
+    access_log /dev/stdout;
+    client_body_temp_path $run_dir/nginx/body;
+    fastcgi_temp_path $run_dir/nginx/fastcgi;
+    proxy_temp_path $run_dir/nginx/proxy;
+    scgi_temp_path $run_dir/nginx/scgi;
+    uwsgi_temp_path $run_dir/nginx/uwsgi;
+    types {
+        text/html html;
+    }
+
+    server {
+        listen $https_port ssl default_server;
+        listen [::]:$https_port ssl default_server;
+        server_name _;
+
+        ssl_certificate $TLS/fullchain.pem;
+        ssl_certificate_key $TLS/privkey.pem;
+        ssl_protocols TLSv1.2 TLSv1.3;
+
+        root $web_root;
+
+        location = / {
+            try_files /index.html =404;
+        }
+
+        location ~ "^(/[a-z0-9][a-z0-9._-]{0,62}/(?:info/refs|git-upload-pack|git-receive-pack))\$" {
+            auth_basic "SwarmOps";
+            auth_basic_user_file /etc/swarmops-server/web.htpasswd;
+            client_max_body_size 0;
+            include /etc/nginx/fastcgi_params;
+            fastcgi_param SCRIPT_FILENAME /usr/lib/swarmops-server/swarmops-serve.cgi;
+            fastcgi_param PATH_INFO \$1;
+            fastcgi_param REMOTE_USER \$remote_user;
+            fastcgi_pass unix:$run_dir/fcgiwrap.socket;
+        }
+
+        location / {
+            return 404;
+        }
+    }
+}
+EOF
+
+    # 2. nginx, told to reload when the certificate changes; a stop ends it gracefully.
+    nginx -e stderr -c "$run_dir/nginx.conf" &
+    server=$!
+    trap 'kill -QUIT "$server" 2>/dev/null || true' TERM INT
+    sum=$(tls_sum)
+    tick=0
+    while kill -0 "$server" 2>/dev/null; do
+        sleep 1 &
+        wait $! || true
+        tick=$((tick + 1))
+        [ "$tick" -ge "$CERT_CHECK" ] || continue
+        tick=0
+        renewed=$(tls_sum)
+        [ "$renewed" != "$sum" ] || continue
+        sum=$renewed
+        kill -HUP "$server" 2>/dev/null || true
+    done
+    status=0
+    wait "$server" || status=$?
+    exit "$status"
+}
+
+role_cgi() {
+    [ $# -eq 0 ] || fail "usage: so-kit run cgi"
+    command -v fcgiwrap >/dev/null 2>&1 || fail "no fcgiwrap"
+    rm -f "$run_dir/fcgiwrap.socket"
+    exec fcgiwrap -s "unix:$run_dir/fcgiwrap.socket"
+}
+
+role_timers() {
+    [ $# -eq 0 ] || fail "usage: so-kit run timers"
+    [ -d "$jobs" ] || fail "no jobs directory"
+
+    # 1. Every job file with its period, each due at once: `<next> <period> <job>` lines.
+    now=$(date +%s)
+    plan=
+    for job in "$jobs"/*; do
+        [ -f "$job" ] && [ -x "$job" ] || continue
+        plan="$plan$now $(job_period "$job") $job
+"
+    done
+    SO_KIT_CONF=$conf
+    export SO_KIT_CONF
+    printf '%s\n' "$$" | write_run timers.pid
+    nap=
+    trap 'kill "$nap" 2>/dev/null || true; exit 0' TERM INT
+
+    # 2. Start what is due, one job after another, then sleep until the next is.
+    while :; do
+        now=$(date +%s)
+        wake=$((now + 3600))
+        next_plan=
+        while read -r next period job; do
+            [ -n "$next" ] || continue
+            if [ "$now" -ge "$next" ]; then
+                "$job" </dev/null || printf 'so-kit: job %s failed\n' "${job##*/}" >&2
+                next=$(($(date +%s) + period))
+            fi
+            [ "$next" -ge "$wake" ] || wake=$next
+            next_plan="$next_plan$next $period $job
+"
+        done <<EOF
+$plan
+EOF
+        plan=$next_plan
+        delay=$((wake - $(date +%s)))
+        [ "$delay" -gt 0 ] || continue
+        sleep "$delay" &
+        nap=$!
+        wait "$nap" || true
+    done
+}
+
+role_all() {
+    [ $# -eq 0 ] || fail "usage: so-kit run all"
+    role_setup
+
+    # Every serving role beside the others; one ending ends the rest.
+    SO_KIT_CONF=$conf
+    export SO_KIT_CONF
+    children=
+    for role in sshd web cgi timers; do
+        sh "$0" run "$role" &
+        children="$children $!"
+    done
+    trap 'kill $children 2>/dev/null || true; wait || true; exit 0' TERM INT
+    while :; do
+        for child in $children; do
+            kill -0 "$child" 2>/dev/null && continue
+            printf 'so-kit: a serving role ended\n' >&2
+            kill $children 2>/dev/null || true
+            wait || true
+            exit 1
+        done
+        sleep 1 &
+        wait $! || true
+    done
+}
+
+cmd_run() {
+    [ $# -ge 1 ] ||
+        fail "usage: so-kit run setup | sshd | web | cgi | timers | rehearse | accept <level> | all"
+    role=$1
+    shift
+    case $role in
+    setup) role_setup "$@" ;;
+    sshd) role_sshd "$@" ;;
+    web) role_web "$@" ;;
+    cgi) role_cgi "$@" ;;
+    timers) role_timers "$@" ;;
+    all) role_all "$@" ;;
+    rehearse)
+        [ -x "$rehearse" ] || fail "no rehearsal program"
+        exec "$rehearse" "$@"
+        ;;
+    accept)
+        [ $# -eq 1 ] || fail "usage: so-kit run accept smoke | full"
+        case $1 in
+        smoke | full) ;;
+        *) fail "no acceptance level $1" ;;
+        esac
+        [ -x "$accept" ] || fail "no acceptance program"
+        exec "$accept" "$1"
+        ;;
+    *) fail "unknown role $role" ;;
+    esac
+}
+
+cmd_ready() {
+    [ $# -eq 1 ] || fail "usage: so-kit ready sshd | web | cgi | timers | all"
+    case $1 in
+    sshd) listening "$ssh_port" ;;
+    web) listening "$https_port" ;;
+    cgi) [ -S "$run_dir/fcgiwrap.socket" ] ;;
+    timers) [ -r "$run_dir/timers.pid" ] && kill -0 "$(cat "$run_dir/timers.pid")" 2>/dev/null ;;
+    all)
+        for role in sshd web cgi timers; do
+            sh "$0" ready "$role" || exit 1
+        done
+        ;;
+    *) fail "role $1 has no listener" ;;
+    esac
+}
+
+[ $# -ge 1 ] || fail "usage: so-kit key-line | add-key | create-store | page | setup | check |" \
+    "digests | deploy-key-line | run | ready"
 step=$1
 shift
 case $step in
@@ -238,5 +634,10 @@ add-key) cmd_add_key "$@" ;;
 create-store) cmd_create_store "$@" ;;
 page) cmd_page "$@" ;;
 setup) cmd_setup "$@" ;;
+check) [ $# -eq 0 ] || fail "usage: so-kit check" ;;
+digests) cmd_digests "$@" ;;
+deploy-key-line) cmd_deploy_line "$@" ;;
+run) cmd_run "$@" ;;
+ready) cmd_ready "$@" ;;
 *) fail "unknown step $step" ;;
 esac

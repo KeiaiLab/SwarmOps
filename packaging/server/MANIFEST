@@ -3,6 +3,7 @@
 # keep manifests of their own in the same format.
 install kit.conf /etc/swarmops-server/kit.conf 0644
 install bin/so-kit /usr/sbin/so-kit 0755
+install jobs/page /usr/lib/swarmops-server/jobs/page 0755
 install cgi/swarmops-serve.cgi /usr/lib/swarmops-server/swarmops-serve.cgi 0755
 install sshd/swarmops-server.conf /etc/ssh/sshd_config.d/50-swarmops-server.conf 0644
 install nginx/swarmops-server.conf /etc/nginx/conf.d/swarmops-server.conf 0644
@@ -19,3 +20,11 @@ uses /bin/sh
 uses /etc/ssh
 uses /run/swarmops-server
 uses /dev/null
+uses /dev/stdout
+uses /proc/net/tcp
+uses /proc/net/tcp6
+uses /etc/nginx/fastcgi_params
+uses /usr/lib/swarmops-server/jobs
+# The rehearsal and acceptance programs `so-kit run` starts; backup/ and accept/ install them.
+uses /usr/lib/swarmops-server/backup/rehearse
+uses /usr/lib/swarmops-server/accept/accept

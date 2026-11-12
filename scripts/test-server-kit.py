@@ -72,6 +72,8 @@ SYSTEMD_UNITS = "/usr/lib/systemd/system/"
 KIT_DEADLINE = 30
 # The roles `so-kit run all` starts beside each other.
 SERVING_ROLES = ("sshd", "web", "cgi", "timers")
+# A time no run of the kit writes: 2001-09-09.
+PAST_NS = 1_000_000_000 * 10**9
 # A digest report line: `sha256sum`'s `<hex>  <path>`.
 DIGEST_LINE = re.compile(r"[0-9a-f]{64}  /\S+")
 
@@ -621,6 +623,9 @@ def setup_twice_changes_nothing(scratch: Path) -> None:
         assert f'who = ["{identity}"]' in access, f"{name}: {access}"
     edited = root / "acme" / "access.toml"
     edited.write_text(edited.read_text() + "# the operator's edit\n")
+    # Times set in the past, so that a rewrite within the clock's tick still shows.
+    for path in (root, *root.rglob("*")):
+        os.utime(path, ns=(PAST_NS, PAST_NS), follow_symlinks=False)
     before = snapshot(root)
     done = run_kit(scratch, "run", "setup", lines=stores)
     assert done.returncode == 0, f"setup again: {done.stderr}"
@@ -718,7 +723,7 @@ def timer_and_runner_start_the_same_jobs(scratch: Path) -> None:
 
 def digest_report_prints_only_digests(scratch: Path) -> None:
     """`so-kit digests` prints `<sha256>  <path>` for each installed regular file of both
-    packages, settings under /etc, directories, links and the database's other lines left out;
+    packages, configuration files, directories, links and the database's other lines left out;
     a missing file or an unknown package prints nothing; `deploy-key-line` binds a key to it."""
     tree = scratch / "tree"
     (tree / "bin").mkdir(parents=True)
@@ -729,14 +734,23 @@ def digest_report_prints_only_digests(scratch: Path) -> None:
     listing = ["/.", str(tree), str(tree / "bin"), str(binary), str(tree / "bin" / "link"),
                "/etc/swarmops-server/kit.conf", "package diverts others to: /usr/bin/x",
                str(kit)]
+    setting = tree / "kit.conf"
+    setting.write_text("root=/srv/so\n")
+    listing.append(str(setting))
     stubs, calls = scratch / "stubs", scratch / "calls"
-    stub(stubs, "dpkg-query", f'echo "$*" >> "{calls}"\n'
+    stub(stubs, "dpkg-query", f'printf "%s\\n" "$*" >> "{calls}"\n'
+                              'if [ "$1" = -W ]; then\n'
+                              f'    echo " {setting} 0123456789abcdef"\n'
+                              '    echo " /etc/swarmops-server/kit.conf 0123456789abcdef"\n'
+                              '    exit 0\nfi\n'
                               f'printf "%s\\n" {" ".join(repr(line) for line in listing)}\n')
 
     # 1. Only digests, of the regular files, each right.
     done = run_kit(scratch, "digests", stubs=stubs)
     assert done.returncode == 0 and done.stderr == "", f"digests: {done}"
-    assert calls.read_text() == "-L swarmops swarmops-server\n", calls.read_text()
+    assert calls.read_text().splitlines() == [
+        "-L swarmops swarmops-server", "-W -f ${Conffiles}\\n swarmops swarmops-server"
+    ], calls.read_text()
     lines = done.stdout.splitlines()
     assert all(DIGEST_LINE.fullmatch(line) for line in lines), f"not only digests: {lines}"
     expected = {str(path): subprocess.run(["sha256sum", str(path)], capture_output=True,
@@ -745,10 +759,10 @@ def digest_report_prints_only_digests(scratch: Path) -> None:
     assert {line.split("  ", 1)[1]: line.split()[0] for line in lines} == expected, lines
 
     # 2. A listed file that is gone, or a package the database lacks, prints nothing.
-    stub(stubs, "dpkg-query", f'echo "{binary}"; echo "{tree / "gone"}"\n')
+    stub(stubs, "dpkg-query", f'[ "$1" = -W ] && exit 0\necho "{binary}"; echo "{tree / "gone"}"\n')
     done = run_kit(scratch, "digests", stubs=stubs)
     assert done.returncode == 2 and done.stdout == "", f"a gone file: {done}"
-    stub(stubs, "dpkg-query", f'echo "{binary}"; exit 1\n')
+    stub(stubs, "dpkg-query", f'[ "$1" = -W ] && exit 0\necho "{binary}"; exit 1\n')
     done = run_kit(scratch, "digests", stubs=stubs)
     assert done.returncode == 2 and done.stdout == "", f"a missing package: {done}"
 
