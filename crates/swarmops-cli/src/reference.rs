@@ -9,6 +9,7 @@
 //! golden steps ───┼─▶ commands/<name>.md     one page per command (command_page)
 //! notes/commands ─┘
 //! error table ─────▶ errors.md
+//! gitlike::ROWS ───▶ coming-from-git.md     git's verbs (git_page)
 //! ```
 //!
 //! `reference_pages_match` fails when a committed page is not its rendering;
@@ -21,6 +22,7 @@
 
 mod cli_page;
 mod command_page;
+mod git_page;
 mod limits;
 mod pages;
 mod schema_types;

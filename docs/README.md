@@ -104,6 +104,7 @@ item.
 | [Limits](reference/limits.md) | Look up a limit, its value, constant, commands and error. |
 | [Schema types](reference/schema-types.md) | Look up a request, response or value type and its fields. |
 | [MCP tool reference](reference/mcp-tools/README.md) | Look up an MCP tool, its input schema, annotations, an example call and its CLI command. |
+| [Coming from git](reference/coming-from-git.md) | Look up a git command, what to type instead and the hint a refusal carries. |
 
 ### Project
 

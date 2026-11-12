@@ -57,6 +57,11 @@ collects the changes on `stable` that no release holds yet, until the next relea
 - After an operation that committed, the CLI, the MCP server and `serve` step the view work the
   commit left once the response is out; a step's error goes to stderr and never changes the
   operation's result (the FORMAT 3 design, amendment G6, G12).
+- The reference page "Coming from git" (`docs/reference/coming-from-git.md`): each of 49 git
+  commands with what to type instead, the operation its example runs or the hint its refusal
+  carries, and what is not done on purpose. It is generated from the table the binary reads
+  git's verbs from, and a test runs every row's example through `so` (the git-familiar command
+  design, §6).
 
 ### Changed
 

@@ -9,6 +9,7 @@
 mod support;
 
 mod cli;
+mod coming_from_git;
 mod contention;
 mod counted_work;
 #[cfg(feature = "test-hooks")]
