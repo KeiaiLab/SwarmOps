@@ -440,7 +440,7 @@ const MIRROR: &str = "git/mirror.git";
 
 /// The configuration the product's git children run with (the git crate's `CONFIG`), so that
 /// git alone does the same durable work.
-const GIT_CONFIG: [&str; 8] = [
+const GIT_CONFIG: [&str; 9] = [
     "core.fsync=all",
     "core.fsyncMethod=fsync",
     "gc.autoDetach=false",
@@ -449,7 +449,75 @@ const GIT_CONFIG: [&str; 8] = [
     "transfer.credentialsInUrl=die",
     "fetch.fsckObjects=true",
     "transfer.fsckObjects=true",
+    "fetch.writeCommitGraph=true",
 ];
+
+/// Keys of the product's configuration that name the mirror or the remote, which the baseline
+/// sets apart (`--git-dir`, the URL), or not at all.
+const PLACE_KEYS: [&str; 2] = ["core.hooksPath", "http."];
+
+/// [`GIT_CONFIG`] is the configuration of the product's `git fetch`, past [`PLACE_KEYS`]: a
+/// stand-in git keeps the fetch child's `GIT_CONFIG_*` variables, then runs the real git.
+#[cfg(unix)]
+#[test]
+fn git_config_is_the_products() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let remote = Remote::with_history(1);
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let dump = dir.path().join("config");
+
+    // 1. The stand-in: the fetch child's configuration variables kept, then the real git.
+    let vars = remote.vars();
+    let real = vars.iter().find(|(key, _)| *key == "SWARMOPS_GIT");
+    let real = real.expect("SWARMOPS_GIT").1;
+    let script = format!(
+        "#!/bin/sh\ncase \" $* \" in *\" fetch \"*) env | grep '^GIT_CONFIG_' > '{}' ;; esac\n\
+         exec '{real}' \"$@\"\n",
+        text(&dump)
+    );
+    let standin = dir.path().join("git");
+    std::fs::write(&standin, script).expect("write the stand-in");
+    let mode = std::fs::Permissions::from_mode(0o755);
+    std::fs::set_permissions(&standin, mode).expect("make the stand-in runnable");
+
+    // 2. A store's first fetch, through the stand-in.
+    let store = remote.store();
+    let url = remote.url();
+    let line = ["remote", "add", ORIGIN, url.as_str(), "--branch", "main"];
+    store.read(&line).ok();
+    let standin = text(&standin);
+    let mut env = remote.vars();
+    env.push(("SWARMOPS_GIT", standin.as_str()));
+    let line = ["--repo", store.path(), "--as", AGENT, "fetch", ORIGIN];
+    run_within(&line, &env, SLOW_RUN).ok();
+
+    // 3. The child's pairs (`GIT_CONFIG_KEY_<n>`, `GIT_CONFIG_VALUE_<n>`), past the places.
+    let kept = std::fs::read_to_string(&dump).expect("the fetch child's configuration");
+    let value = |name: String| {
+        let line = kept
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{name}=")));
+        line.unwrap_or_else(|| panic!("{name} in {kept}"))
+            .to_owned()
+    };
+    let count: usize = value("GIT_CONFIG_COUNT".to_owned())
+        .parse()
+        .expect("a count");
+    let mut product: Vec<String> = (0..count)
+        .map(|n| {
+            let key = value(format!("GIT_CONFIG_KEY_{n}"));
+            format!("{key}={}", value(format!("GIT_CONFIG_VALUE_{n}")))
+        })
+        .filter(|pair| !PLACE_KEYS.iter().any(|place| pair.starts_with(place)))
+        .collect();
+
+    // 4. The same entries as the baseline's.
+    let mut baseline = GIT_CONFIG.map(str::to_owned).to_vec();
+    product.sort_unstable();
+    baseline.sort_unstable();
+    assert_eq!(baseline, product);
+}
 
 /// The product's `git fetch` options up to the URL (the git crate's `FETCH_FLAGS`).
 const FETCH_FLAGS: [&str; 8] = [
