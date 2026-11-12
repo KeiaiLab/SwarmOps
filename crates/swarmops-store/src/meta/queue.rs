@@ -3016,29 +3016,50 @@ mod tests {
         assert_eq!(led.requests, 1);
     }
 
+    /// A declined waiter's rerun keeps the deadline of its first wait, on the queue's own clock:
+    /// the test moves that clock to the deadline, then declines, and the rerun is busy at once,
+    /// the lock still held. A rerun with a deadline of its own would wait the whole timeout
+    /// again, an hour here: it is read as a waiter that has not ended within [`PATIENCE`], not
+    /// as a margin on the real clock, which a loaded host overran.
     #[test]
     fn a_declined_rerun_keeps_the_first_deadline() {
         let (_dir, root) = new_store();
-        let timeout = Duration::from_millis(400);
+        let timeout = Duration::from_secs(3_600);
         let holder = open(&root);
         let lock = hold(&holder);
+        let (added, clock) = fake_clock();
+        let seams = Seams {
+            clock,
+            ..Seams::real()
+        };
         thread::scope(|s| {
-            let started = Instant::now();
             let root = &root;
             let waiter = s.spawn(move || {
                 let store = open(root).with_lock_timeout(timeout);
-                let got = turn(&store, Ask::Frame(1));
-                (got, started.elapsed())
+                turn_with(&store, Ask::Frame(1), seams)
             });
             let rid = wait_files(root, Kind::Req, 1).remove(0);
             let dir = queue(root);
             fs::rename(Kind::Req.path(&dir, &rid), Kind::Com.path(&dir, &rid)).unwrap();
-            thread::sleep(Duration::from_millis(300));
+
+            // 1. The first deadline reached, then the answer.
+            added.store(
+                u64::try_from(timeout.as_millis()).unwrap(),
+                Ordering::SeqCst,
+            );
             seed_answer(root, &rid, &Answer::new(Outcome::Declined, Vec::new()));
-            let (got, spent) = waiter.join().unwrap();
-            assert!(matches!(got, Err(StoreError::Busy)), "{got:?}");
-            assert!(spent < timeout + Duration::from_millis(250), "{spent:?}");
+
+            // 2. Busy while the lock is held; a rerun that still waits is let through after,
+            //    so that the test ends.
+            let patience = Instant::now() + PATIENCE;
+            while !waiter.is_finished() && Instant::now() < patience {
+                thread::sleep(Duration::from_millis(1));
+            }
+            let ended = waiter.is_finished();
             drop(lock);
+            let got = waiter.join().unwrap();
+            assert!(ended, "the rerun waited past its first deadline: {got:?}");
+            assert!(matches!(got, Err(StoreError::Busy)), "{got:?}");
         });
     }
 
