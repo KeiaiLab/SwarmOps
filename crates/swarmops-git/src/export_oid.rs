@@ -79,6 +79,9 @@ const BLOB_MEMO: &str = "git_blob_oid";
 /// The version of both memos: a slot with no key, holding the oid's 20 bytes.
 const MEMO_VERSION: u32 = 1;
 
+/// The length of a git oid, what a `git_tree_oid` or `git_blob_oid` memo holds.
+const OID_LEN: usize = 20;
+
 /// The length of a `git_oid` memo, an [`ExportedOid`] as postcard writes it: the oid's 20 bytes,
 /// then one for `kept`.
 const EXPORT_MEMO_LEN: usize = 21;
@@ -633,8 +636,9 @@ fn memoize_mac(memo: &DerivedStore, name: &str, key: &MemoKey, subject: ObjectId
 /// Checks the git oid the derived store memoized for `subject` under `name` against `real`, the oid
 /// the store's own bytes give: a memo that is another oid is [`RepoError::DerivedCorrupt`] (the git
 /// export's memo of `about`), so whoever can place a store file cannot make a reader take one
-/// object's content for another's; `verify --deep` names every such memo. A memo that agrees, or
-/// none (then `real` is written, as [`memoize`]), is no error.
+/// object's content for another's; `verify --deep` names every such memo. So is a memo of another
+/// length than an oid's 20 bytes, a file no export wrote. A memo that agrees, or none (then `real`
+/// is written, as [`memoize`]), is no error.
 fn check_memo(
     memo: &DerivedStore,
     name: &str,
@@ -642,16 +646,21 @@ fn check_memo(
     real: GitOid,
     about: ChangesetId,
 ) -> Result<(), RepoError> {
-    match memoized(memo, name, subject)? {
-        Some(stored) if stored != real => Err(RepoError::DerivedCorrupt {
-            name: name.to_owned(),
-            changeset: about,
-            why: format!(
-                "the git oid memoized for object {subject} is {stored}, but the store's bytes \
-                 render to {real}"
-            ),
-        }),
-        Some(_) => Ok(()),
+    let wrong = |why: String| RepoError::DerivedCorrupt {
+        name: name.to_owned(),
+        changeset: about,
+        why,
+    };
+
+    match stored_oid(memo, name, subject)? {
+        Some(Err(len)) => Err(wrong(format!(
+            "the memo of object {subject} has {len} bytes, where a git oid has {OID_LEN}"
+        ))),
+        Some(Ok(stored)) if stored != real => Err(wrong(format!(
+            "the git oid memoized for object {subject} is {stored}, but the store's bytes render \
+             to {real}"
+        ))),
+        Some(Ok(_)) => Ok(()),
         None => {
             memoize(memo, name, subject, real);
             Ok(())
@@ -717,22 +726,37 @@ fn slot(name: &str, subject: ObjectId) -> DerivedSlot<'_> {
 
 /// The git oid memoized for `subject` under `name`, if the derived store holds one. A value of
 /// another length than an oid's 20 bytes is [`RepoError::Derived`], as a derived value that does
-/// not decode is.
+/// not decode is: [`tree_oid`] and [`blob_oid`] have no changeset to name. The export, which has
+/// one, reads through [`check_memo`].
 fn memoized(
     memo: &DerivedStore,
     name: &str,
     subject: ObjectId,
 ) -> Result<Option<GitOid>, RepoError> {
+    match stored_oid(memo, name, subject)? {
+        None => Ok(None),
+        Some(Ok(oid)) => Ok(Some(oid)),
+        Some(Err(len)) => Err(RepoError::Derived {
+            name: name.to_owned(),
+            why: format!("a memo of {len} bytes, where a git oid has {OID_LEN}"),
+        }),
+    }
+}
+
+/// What the derived store holds as `subject`'s memo `name`, if anything: the git oid, or the
+/// length of a value that is no oid's.
+fn stored_oid(
+    memo: &DerivedStore,
+    name: &str,
+    subject: ObjectId,
+) -> Result<Option<Result<GitOid, usize>>, StoreError> {
     let Some(value) = memo_get(memo, &slot(name, subject))? else {
         return Ok(None);
     };
-    match <[u8; 20]>::try_from(value.as_slice()) {
-        Ok(oid) => Ok(Some(GitOid(oid))),
-        Err(_) => Err(RepoError::Derived {
-            name: name.to_owned(),
-            why: format!("a memo of {} bytes, where a git oid has 20", value.len()),
-        }),
-    }
+    let oid = <[u8; OID_LEN]>::try_from(value.as_slice())
+        .map(GitOid)
+        .map_err(|_| value.len());
+    Ok(Some(oid))
 }
 
 /// Memoizes `oid` for `subject` under `name`. A put that fails is dropped: the oid is the same,
@@ -1683,5 +1707,56 @@ mod tests {
         refused(repo.derived::<ExportOid>(id, &()), TREE_MEMO);
         assert_eq!(memo(&repo, TREE_MEMO, cs.root.0, &[]), None);
         assert_eq!(memo(&repo, ExportOid::NAME, id.0, &[]), None);
+    }
+
+    /// A `git_tree_oid` or `git_blob_oid` memo of another length than an oid's is a stored value
+    /// that is wrong, [`RepoError::DerivedCorrupt`] naming the changeset (ops reports it as
+    /// `E_STORE_CORRUPT`), not [`RepoError::Derived`], a bug of the derivation (`E_INTERNAL`):
+    /// someone placed the file, and `repair` drops it. Checked with a key and without.
+    #[test]
+    fn wrong_length_memo_is_store_corrupt_not_internal() {
+        let key = MemoKey::from_bytes([1; 32]);
+        for (name, planted) in [
+            (TREE_MEMO, [0; 21].as_slice()),
+            (BLOB_MEMO, [0; 19].as_slice()),
+        ] {
+            // 1. A store of one file, and the memo of its tree or of its blob planted.
+            let (_dir, _, repo) = new_repo();
+            let id = repo
+                .commit(request(&[], vec![put("f", b"f\n")], "f\n"))
+                .unwrap()
+                .id;
+            let read = repo.snapshot().unwrap();
+            let reader = ExportReader::new(&read, repo.derived_store());
+            let root = read.changeset(id).unwrap().unwrap().changeset.root;
+            let subject = if name == TREE_MEMO {
+                root.0
+            } else {
+                blob(b"f\n").0
+            };
+            let slot = DerivedSlot::new(name, MEMO_VERSION, subject, &[]);
+            assert!(repo.derived_store().put(&slot, planted).unwrap(), "{name}");
+
+            // 2. The export's check of the tree refuses it as the changeset's stored value.
+            for key in [None, Some(&key)] {
+                let got = keyed_tree_oid(&reader, &OidCache::new(), (id, key), root);
+                match got {
+                    Err(RepoError::DerivedCorrupt {
+                        name: of,
+                        changeset,
+                        why,
+                    }) => {
+                        assert_eq!((of.as_str(), changeset), (name, id), "{why}");
+                        let len = format!("{} bytes", planted.len());
+                        assert!(why.contains(&len), "{why}");
+                        assert!(why.contains(&subject.to_string()), "{why}");
+                    }
+                    other => panic!("a {name} memo of {} bytes: {other:?}", planted.len()),
+                }
+            }
+
+            // 3. The memo is as planted: the refusal wrote nothing over it.
+            assert_eq!(memo(&repo, name, subject, &[]).as_deref(), Some(planted));
+        }
     }
 }
