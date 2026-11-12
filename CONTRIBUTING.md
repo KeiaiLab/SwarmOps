@@ -87,6 +87,8 @@ or newer as `python3`.
   on `stable` after a final review.
 - Merge commits say what they bring and from where: `merge: <what> (<branch>)`. Delete a branch
   once it has landed (`git branch -d`).
+- A slice that lands work of a milestone adds `docs/status/<milestone>/<slice-id>.txt` with one
+  sentence. The site lists it under "On stable since" on /roadmap, dated by the commit that added it.
 
 ## The definition of done: `just check`
 
