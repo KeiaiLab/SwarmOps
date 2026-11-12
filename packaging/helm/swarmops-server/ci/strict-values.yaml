@@ -1,0 +1,33 @@
+# A strict value set with every wiring key given, as a cluster's copy sets it; the chart's test
+# renders it. Addresses are documentation ranges.
+installation:
+  hostName: hub.example.invalid
+  texts:
+    terms: "Example terms of use."
+wiring:
+  strict: true
+  storageClassName: example-storage
+  storageSize: 50Gi
+  service:
+    type: LoadBalancer
+    loadBalancerIP: 192.0.2.22
+    externalTrafficPolicy: Local
+  route:
+    kind: none
+  resources:
+    limits:
+      cpu: "4"
+      memory: 8Gi
+    requests:
+      cpu: "1"
+      memory: 2Gi
+  imagePullSecrets: ["example-pull"]
+  networkPolicy:
+    enabled: true
+    egress:
+      - cidr: 192.0.2.80/32
+        port: 443
+      - cidr: 198.51.100.0/24
+        port: 587
+acceptance:
+  level: full

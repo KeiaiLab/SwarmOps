@@ -1,0 +1,75 @@
+# The chart's values in six groups. values.schema.json types every key and refuses unknown ones;
+# there is no replica count: one installation is one pod.
+
+# serve: the installation. rehearsal: the restore drill, a second release in its own namespace.
+mode: serve
+
+image:
+  # A pull-through mirror may replace the registry; the bytes stay those of the digest.
+  repository: ghcr.io/keiailab/swarmops-server
+  # Stamped by the release with the published image's digest; a tag is not accepted.
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+
+# What the kit's settings file and the pod take from the operator.
+installation:
+  # The public name; routes and the test pod use it. Empty: no route host.
+  hostName: ""
+  # Seconds a push at the push bound takes; the stop grace period may not be shorter.
+  pushBoundSeconds: 540
+  # Seconds a stopping pod has to finish open pushes.
+  stopGraceSeconds: 600
+  # When the rehearsal runs (mode rehearsal), in cron syntax.
+  rehearsalSchedule: "17 3 * * 0"
+  # The operator's texts the root page shows; empty shows none.
+  texts:
+    terms: ""
+    privacy: ""
+    acceptableUse: ""
+
+# The cluster's own values. Under strict, an empty one fails the render and names the key.
+wiring:
+  strict: false
+  # Empty: the cluster's default storage class.
+  storageClassName: ""
+  storageSize: 50Gi
+  service:
+    type: LoadBalancer
+    annotations: {}
+    loadBalancerIP: ""
+    # Local keeps the client's address in the serve records.
+    externalTrafficPolicy: Local
+  # An optional route in passthrough form: none, gateway (TLSRoute and TCPRoute) or ingress.
+  route:
+    kind: none
+    className: ""
+    annotations: {}
+    parentRefs: []
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  imagePullSecrets: []
+  networkPolicy:
+    enabled: true
+    # The destinations the pod may reach besides the cluster's DNS: {cidr, port} pairs.
+    egress: []
+
+# Names of Secrets that exist in the release's namespace; the chart never creates one.
+secrets:
+  # ssh_host_<type>_key and ssh_host_<type>_key.pub files.
+  hostKeys: swarmops-host-keys
+  # A kubernetes.io/tls Secret: tls.crt and tls.key.
+  tls: swarmops-tls
+  # authorized_keys (the key lines) and web.htpasswd (the HTTPS logins).
+  access: swarmops-access
+  backup: swarmops-backup
+  alerts: swarmops-alerts
+  acceptance: swarmops-acceptance
+  # Mode rehearsal only; the serving pod never names them.
+  rehearsalKey: swarmops-rehearsal-key
+  rehearsalBucket: swarmops-rehearsal-bucket
+
+# The `helm test` pod: smoke on every install and upgrade, full in a scratch release.
+acceptance:
+  level: smoke
+  # Where the test reaches the installation; empty: the release's Service.
+  publicAddress: ""

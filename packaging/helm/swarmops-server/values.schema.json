@@ -1,0 +1,398 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "swarmops-server values",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "mode": {
+      "enum": [
+        "serve",
+        "rehearsal"
+      ]
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository": {
+          "type": "string",
+          "pattern": "^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+$"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "digest",
+        "repository"
+      ]
+    },
+    "installation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hostName": {
+          "type": "string",
+          "pattern": "^$|^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$"
+        },
+        "pushBoundSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "stopGraceSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "rehearsalSchedule": {
+          "type": "string",
+          "minLength": 1
+        },
+        "texts": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "terms": {
+              "type": "string"
+            },
+            "privacy": {
+              "type": "string"
+            },
+            "acceptableUse": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "acceptableUse",
+            "privacy",
+            "terms"
+          ]
+        }
+      },
+      "required": [
+        "hostName",
+        "pushBoundSeconds",
+        "rehearsalSchedule",
+        "stopGraceSeconds",
+        "texts"
+      ]
+    },
+    "wiring": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "strict": {
+          "type": "boolean"
+        },
+        "storageClassName": {
+          "type": "string"
+        },
+        "storageSize": {
+          "type": "string"
+        },
+        "service": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "type": {
+              "enum": [
+                "",
+                "ClusterIP",
+                "LoadBalancer",
+                "NodePort"
+              ]
+            },
+            "annotations": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "loadBalancerIP": {
+              "type": "string"
+            },
+            "externalTrafficPolicy": {
+              "enum": [
+                "",
+                "Local",
+                "Cluster"
+              ]
+            }
+          },
+          "required": [
+            "annotations",
+            "externalTrafficPolicy",
+            "loadBalancerIP",
+            "type"
+          ]
+        },
+        "route": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": [
+                "none",
+                "gateway",
+                "ingress"
+              ]
+            },
+            "className": {
+              "type": "string"
+            },
+            "annotations": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "parentRefs": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "namespace": {
+                    "type": "string"
+                  },
+                  "sectionName": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name"
+                ]
+              }
+            }
+          },
+          "required": [
+            "annotations",
+            "className",
+            "kind",
+            "parentRefs"
+          ]
+        },
+        "resources": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "limits": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "cpu": {
+                  "type": [
+                    "string",
+                    "integer",
+                    "number"
+                  ]
+                },
+                "memory": {
+                  "type": [
+                    "string",
+                    "integer",
+                    "number"
+                  ]
+                }
+              },
+              "required": []
+            },
+            "requests": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "cpu": {
+                  "type": [
+                    "string",
+                    "integer",
+                    "number"
+                  ]
+                },
+                "memory": {
+                  "type": [
+                    "string",
+                    "integer",
+                    "number"
+                  ]
+                }
+              },
+              "required": []
+            }
+          },
+          "required": []
+        },
+        "nodeSelector": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "tolerations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "key": {
+                "type": "string"
+              },
+              "operator": {
+                "enum": [
+                  "Exists",
+                  "Equal"
+                ]
+              },
+              "value": {
+                "type": "string"
+              },
+              "effect": {
+                "enum": [
+                  "",
+                  "NoSchedule",
+                  "PreferNoSchedule",
+                  "NoExecute"
+                ]
+              },
+              "tolerationSeconds": {
+                "type": "integer"
+              }
+            },
+            "required": []
+          }
+        },
+        "imagePullSecrets": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "networkPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "egress": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "cidr": {
+                    "type": "string",
+                    "pattern": "^([0-9]{1,3}\\.){3}[0-9]{1,3}/[0-9]{1,2}$|^[0-9a-fA-F:]+/[0-9]{1,3}$"
+                  },
+                  "port": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 65535
+                  }
+                },
+                "required": [
+                  "cidr",
+                  "port"
+                ]
+              }
+            }
+          },
+          "required": [
+            "egress",
+            "enabled"
+          ]
+        }
+      },
+      "required": [
+        "imagePullSecrets",
+        "networkPolicy",
+        "nodeSelector",
+        "resources",
+        "route",
+        "service",
+        "storageClassName",
+        "storageSize",
+        "strict",
+        "tolerations"
+      ]
+    },
+    "secrets": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hostKeys": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$"
+        },
+        "tls": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$"
+        },
+        "access": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$"
+        },
+        "backup": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$"
+        },
+        "alerts": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$"
+        },
+        "acceptance": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$"
+        },
+        "rehearsalKey": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$"
+        },
+        "rehearsalBucket": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$"
+        }
+      },
+      "required": [
+        "acceptance",
+        "access",
+        "alerts",
+        "backup",
+        "hostKeys",
+        "rehearsalBucket",
+        "rehearsalKey",
+        "tls"
+      ]
+    },
+    "acceptance": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "enum": [
+            "smoke",
+            "full"
+          ]
+        },
+        "publicAddress": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "level",
+        "publicAddress"
+      ]
+    }
+  },
+  "required": [
+    "acceptance",
+    "image",
+    "installation",
+    "mode",
+    "secrets",
+    "wiring"
+  ]
+}

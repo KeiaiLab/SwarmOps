@@ -1,0 +1,46 @@
+{{- if .Values.wiring.networkPolicy.enabled }}
+{{- $component := ternary "server" "rehearsal" (eq .Values.mode "serve") }}
+# The pod reaches the cluster's DNS and the listed (CIDR, port) pairs, nothing else; the
+# serving pod takes ssh and HTTPS from anywhere.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "so.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "so.selector" (dict "root" . "component" $component) | nindent 6 }}
+  policyTypes: ["Ingress", "Egress"]
+  {{- if eq .Values.mode "serve" }}
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 2222
+        - protocol: TCP
+          port: 8443
+  {{- end }}
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- range .Values.wiring.networkPolicy.egress }}
+    - to:
+        - ipBlock:
+            cidr: {{ .cidr }}
+      ports:
+        - protocol: TCP
+          port: {{ .port }}
+    {{- end }}
+{{- end }}

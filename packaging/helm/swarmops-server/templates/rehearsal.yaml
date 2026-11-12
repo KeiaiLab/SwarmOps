@@ -1,0 +1,63 @@
+{{- if eq .Values.mode "rehearsal" }}
+{{- $etc := include "so.etc" . }}
+# The restore drill: a weekly run of the `rehearse` role on a volume made for the run and
+# removed after it, so every run restores onto an empty disk. It holds the rehearsal key and
+# never a serving secret.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "so.labels" . | nindent 4 }}
+    app.kubernetes.io/component: rehearsal
+spec:
+  schedule: {{ .Values.installation.rehearsalSchedule | quote }}
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        metadata:
+          labels:
+            {{- include "so.selector" (dict "root" . "component" "rehearsal") | nindent 12 }}
+          annotations:
+            checksum/settings: {{ include (print $.Template.BasePath "/settings.yaml") . | sha256sum }}
+        spec:
+          {{- include "so.podSecurity" . | nindent 10 }}
+          {{- include "so.placement" . | nindent 10 }}
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          restartPolicy: Never
+          containers:
+            - name: rehearse
+              image: {{ include "so.image" . }}
+              command: ["/usr/sbin/so-kit", "run", "rehearse"]
+              {{- include "so.containerSecurity" . | nindent 14 }}
+              {{- with .Values.wiring.resources }}
+              resources:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              volumeMounts:
+                {{- include "so.commonMounts" . | nindent 16 }}
+                {{- include "so.dataMounts" . | nindent 16 }}
+                - name: rehearsal-key
+                  mountPath: {{ $etc }}/rehearsal-key
+                  readOnly: true
+                - name: rehearsal-bucket
+                  mountPath: {{ $etc }}/rehearsal-bucket
+                  readOnly: true
+                - name: alerts
+                  mountPath: {{ $etc }}/alerts
+                  readOnly: true
+          volumes:
+            {{- include "so.commonVolumes" . | nindent 12 }}
+            {{- include "so.secretVolume" (dict "name" "rehearsal-key" "secret" .Values.secrets.rehearsalKey) | nindent 12 }}
+            {{- include "so.secretVolume" (dict "name" "rehearsal-bucket" "secret" .Values.secrets.rehearsalBucket) | nindent 12 }}
+            {{- include "so.secretVolume" (dict "name" "alerts" "secret" .Values.secrets.alerts) | nindent 12 }}
+            - name: data
+              ephemeral:
+                volumeClaimTemplate:
+                  spec:
+                    {{- include "so.claimSpec" . | nindent 20 }}
+{{- end }}

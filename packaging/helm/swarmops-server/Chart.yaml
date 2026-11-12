@@ -1,0 +1,8 @@
+# The SwarmOps server as one pod with one volume: the package host's sshd, web server, CGI and
+# timers, each a container of the release's image. Version = the workspace version.
+apiVersion: v2
+name: swarmops-server
+description: A SwarmOps server installation; one installation is one pod with one volume.
+type: application
+version: 0.11.0
+appVersion: "0.11.0"

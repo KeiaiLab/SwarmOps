@@ -1,0 +1,92 @@
+{{- if eq .Values.mode "serve" }}
+{{- $etc := include "so.etc" . }}
+{{- $name := printf "%s-accept" .Release.Name }}
+# `helm test`: the image's `accept` role at the chosen level. Its grants stay in the release's
+# namespace: smoke reads pods (the running image digest); full may also delete the release's
+# own pod (the kill sweep and the replacement).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "so.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-weight: "-1"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "so.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-weight: "-1"
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  {{- if eq .Values.acceptance.level "full" }}
+  - apiGroups: [""]
+    resources: ["pods"]
+    resourceNames: [{{ printf "%s-0" .Release.Name | quote }}]
+    verbs: ["delete"]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "so.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-weight: "-1"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "so.labels" . | nindent 4 }}
+    app.kubernetes.io/component: accept
+  annotations:
+    helm.sh/hook: test
+spec:
+  {{- include "so.podSecurity" . | nindent 2 }}
+  {{- include "so.placement" . | nindent 2 }}
+  serviceAccountName: {{ $name }}
+  enableServiceLinks: false
+  restartPolicy: Never
+  containers:
+    - name: accept
+      image: {{ include "so.image" . }}
+      command: ["/usr/sbin/so-kit", "run", "accept", {{ .Values.acceptance.level | quote }}]
+      env:
+        - name: SO_ACCEPT_ADDRESS
+          value: {{ .Values.acceptance.publicAddress | default (printf "%s.%s.svc" .Release.Name .Release.Namespace) | quote }}
+        - name: SO_ACCEPT_POD
+          value: {{ printf "%s-0" .Release.Name | quote }}
+      {{- include "so.containerSecurity" . | nindent 6 }}
+      volumeMounts:
+        {{- include "so.commonMounts" . | nindent 8 }}
+        - name: acceptance
+          mountPath: {{ $etc }}/acceptance
+          readOnly: true
+  volumes:
+    {{- include "so.commonVolumes" . | nindent 4 }}
+    {{- include "so.secretVolume" (dict "name" "acceptance" "secret" .Values.secrets.acceptance) | nindent 4 }}
+{{- end }}

@@ -1,0 +1,80 @@
+{{- $route := .Values.wiring.route }}
+{{- if and (eq .Values.mode "serve") (ne $route.kind "none") }}
+{{- if not .Values.installation.hostName }}
+{{- fail "installation.hostName is empty and wiring.route.kind is not none" }}
+{{- end }}
+{{- if eq $route.kind "gateway" }}
+# Passthrough: the Gateway forwards TLS by server name and ssh as TCP; TLS ends in the pod.
+apiVersion: gateway.networking.k8s.io/v1alpha2
+kind: TLSRoute
+metadata:
+  name: {{ .Release.Name }}-https
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "so.labels" . | nindent 4 }}
+  {{- with $route.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with $route.parentRefs }}
+  parentRefs:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  hostnames: [{{ .Values.installation.hostName | quote }}]
+  rules:
+    - backendRefs:
+        - name: {{ .Release.Name }}
+          port: 443
+---
+apiVersion: gateway.networking.k8s.io/v1alpha2
+kind: TCPRoute
+metadata:
+  name: {{ .Release.Name }}-ssh
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "so.labels" . | nindent 4 }}
+  {{- with $route.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with $route.parentRefs }}
+  parentRefs:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - backendRefs:
+        - name: {{ .Release.Name }}
+          port: 22
+{{- else }}
+# The ingress controller passes TLS through by server name (its annotations, set in the wiring);
+# ssh needs the controller's own TCP forwarding.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "so.labels" . | nindent 4 }}
+  {{- with $route.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with $route.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.installation.hostName | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Release.Name }}
+                port:
+                  number: 443
+{{- end }}
+{{- end }}

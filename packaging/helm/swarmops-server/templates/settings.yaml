@@ -1,0 +1,28 @@
+{{- include "so.checks" . }}
+{{- $etc := include "so.etc" . }}
+# The kit's settings file (`key=value`, keys so-kit knows) and the operator's texts.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-settings
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "so.labels" . | nindent 4 }}
+data:
+  kit.conf: |
+    # Rendered by the swarmops-server chart from its `installation` values.
+    root=/srv/so
+    swarmops=/usr/bin/swarmops
+    host_keys={{ $etc }}/host-keys
+    web_root=/run/swarmops-server/www
+    authorized_keys={{ $etc }}/access/authorized_keys
+    {{- with .Values.installation.texts }}
+    terms={{ if .terms }}{{ $etc }}/texts/terms{{ end }}
+    privacy={{ if .privacy }}{{ $etc }}/texts/privacy{{ end }}
+    acceptable_use={{ if .acceptableUse }}{{ $etc }}/texts/acceptableUse{{ end }}
+    {{- end }}
+  {{- range $name, $text := .Values.installation.texts }}
+  {{- if $text }}
+  {{ $name }}: {{ $text | quote }}
+  {{- end }}
+  {{- end }}

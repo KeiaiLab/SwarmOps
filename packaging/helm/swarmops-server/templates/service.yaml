@@ -1,0 +1,32 @@
+{{- if eq .Values.mode "serve" }}
+{{- $service := .Values.wiring.service }}
+# ssh on 22 and HTTPS on 443, to the pod's 2222 and 8443. TLS ends in the pod's web server.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "so.labels" . | nindent 4 }}
+  {{- with $service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ $service.type | default "ClusterIP" }}
+  {{- if and (ne ($service.type | default "ClusterIP") "ClusterIP") $service.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ $service.externalTrafficPolicy }}
+  {{- end }}
+  {{- with $service.loadBalancerIP }}
+  loadBalancerIP: {{ . }}
+  {{- end }}
+  selector:
+    {{- include "so.selector" (dict "root" . "component" "server") | nindent 4 }}
+  ports:
+    - name: ssh
+      port: 22
+      targetPort: 2222
+    - name: https
+      port: 443
+      targetPort: 8443
+{{- end }}

@@ -128,7 +128,8 @@ class Run:
         (reader / "templates" / "values.yaml").write_text("{{ toJson .Values }}\n")
         done = self.render(*arguments, chart=reader)
         assert done.returncode == 0, f"values unreadable: {done.stderr.strip()}"
-        body = [line for line in done.stdout.splitlines() if line and not line.startswith(("#", "---"))]
+        body = [line for line in done.stdout.splitlines()
+                if line and not line.startswith(("#", "---"))]
         return json.loads("\n".join(body))
 
 

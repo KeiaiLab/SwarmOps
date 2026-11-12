@@ -1,0 +1,129 @@
+{{- if eq .Values.mode "serve" }}
+{{- $etc := include "so.etc" . }}
+# The installation: one pod, one volume. The replica count is no value; a StatefulSet keeps two
+# pods of one installation from existing at once, also during an upgrade.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "so.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  replicas: 1
+  serviceName: {{ .Release.Name }}
+  selector:
+    matchLabels:
+      {{- include "so.selector" (dict "root" . "component" "server") | nindent 6 }}
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  template:
+    metadata:
+      labels:
+        {{- include "so.selector" (dict "root" . "component" "server") | nindent 8 }}
+      annotations:
+        # A changed settings file reaches the pod by its replacement.
+        checksum/settings: {{ include (print $.Template.BasePath "/settings.yaml") . | sha256sum }}
+    spec:
+      {{- include "so.podSecurity" . | nindent 6 }}
+      {{- include "so.placement" . | nindent 6 }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: {{ .Values.installation.stopGraceSeconds }}
+      initContainers:
+        # 1. Apply the settings: missing stores, access files, key lines. Idempotent.
+        - name: setup
+          image: {{ include "so.image" . }}
+          command: ["/usr/sbin/so-kit", "run", "setup"]
+          {{- include "so.containerSecurity" . | nindent 10 }}
+          volumeMounts:
+            {{- include "so.commonMounts" . | nindent 12 }}
+            {{- include "so.dataMounts" . | nindent 12 }}
+            - name: access
+              mountPath: {{ $etc }}/access
+              readOnly: true
+      containers:
+        # 2. The serving roles, one container each, from the one image.
+        - name: sshd
+          image: {{ include "so.image" . }}
+          command: ["/usr/sbin/so-kit", "run", "sshd"]
+          ports:
+            - name: ssh
+              containerPort: 2222
+          readinessProbe:
+            exec:
+              command: ["/usr/sbin/so-kit", "ready", "sshd"]
+          {{- include "so.containerSecurity" . | nindent 10 }}
+          {{- with .Values.wiring.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            {{- include "so.commonMounts" . | nindent 12 }}
+            {{- include "so.dataMounts" . | nindent 12 }}
+            - name: host-keys
+              mountPath: {{ $etc }}/host-keys
+              readOnly: true
+            - name: access
+              mountPath: {{ $etc }}/access
+              readOnly: true
+        - name: web
+          image: {{ include "so.image" . }}
+          command: ["/usr/sbin/so-kit", "run", "web"]
+          ports:
+            - name: https
+              containerPort: 8443
+          readinessProbe:
+            exec:
+              command: ["/usr/sbin/so-kit", "ready", "web"]
+          {{- include "so.containerSecurity" . | nindent 10 }}
+          volumeMounts:
+            {{- include "so.commonMounts" . | nindent 12 }}
+            - name: tls
+              mountPath: {{ $etc }}/tls
+              readOnly: true
+            - name: access
+              mountPath: {{ $etc }}/web.htpasswd
+              subPath: web.htpasswd
+              readOnly: true
+        - name: cgi
+          image: {{ include "so.image" . }}
+          command: ["/usr/sbin/so-kit", "run", "cgi"]
+          readinessProbe:
+            exec:
+              command: ["/usr/sbin/so-kit", "ready", "cgi"]
+          {{- include "so.containerSecurity" . | nindent 10 }}
+          volumeMounts:
+            {{- include "so.commonMounts" . | nindent 12 }}
+            {{- include "so.dataMounts" . | nindent 12 }}
+        - name: timers
+          image: {{ include "so.image" . }}
+          command: ["/usr/sbin/so-kit", "run", "timers"]
+          {{- include "so.containerSecurity" . | nindent 10 }}
+          volumeMounts:
+            {{- include "so.commonMounts" . | nindent 12 }}
+            {{- include "so.dataMounts" . | nindent 12 }}
+            - name: host-keys
+              mountPath: {{ $etc }}/host-keys
+              readOnly: true
+            - name: backup
+              mountPath: {{ $etc }}/backup
+              readOnly: true
+            - name: alerts
+              mountPath: {{ $etc }}/alerts
+              readOnly: true
+      volumes:
+        {{- include "so.commonVolumes" . | nindent 8 }}
+        {{- include "so.secretVolume" (dict "name" "host-keys" "secret" .Values.secrets.hostKeys) | nindent 8 }}
+        {{- include "so.secretVolume" (dict "name" "access" "secret" .Values.secrets.access) | nindent 8 }}
+        {{- include "so.secretVolume" (dict "name" "tls" "secret" .Values.secrets.tls "items" (dict "tls.crt" "fullchain.pem" "tls.key" "privkey.pem")) | nindent 8 }}
+        {{- include "so.secretVolume" (dict "name" "backup" "secret" .Values.secrets.backup) | nindent 8 }}
+        {{- include "so.secretVolume" (dict "name" "alerts" "secret" .Values.secrets.alerts) | nindent 8 }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        {{- include "so.claimSpec" . | nindent 8 }}
+{{- end }}
