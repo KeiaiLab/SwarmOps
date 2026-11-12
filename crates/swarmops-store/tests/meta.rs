@@ -2005,7 +2005,7 @@ fn a_fifo_where_a_store_file_should_be_is_refused_not_opened() {
     let (tx, rx) = std::sync::mpsc::channel();
     let opened_root = root.clone();
     thread::spawn(move || {
-        let _ = tx.send(MetaStore::open(&opened_root).map(drop));
+        let _ = tx.send(open_checked(&opened_root).map(drop));
     });
     match rx.recv_timeout(Duration::from_secs(5)) {
         Ok(Err(StoreError::Io(e))) => {
@@ -2035,7 +2035,7 @@ fn a_fifo_at_meta_lock_fails_a_write_at_once_instead_of_blocking() {
         let (tx, rx) = mpsc::channel();
         let opened_root = root.clone();
         thread::spawn(move || {
-            let store = MetaStore::open(&opened_root).unwrap();
+            let store = open_checked(&opened_root).unwrap();
             let _ = tx.send(if committed {
                 store.read_committed().map(drop)
             } else {
@@ -2056,7 +2056,7 @@ fn a_fifo_at_meta_lock_fails_a_write_at_once_instead_of_blocking() {
             Err(timeout) => panic!("{what} blocked on the FIFO at meta/lock: {timeout}"),
         }
     }
-    let store = MetaStore::open(&root).unwrap();
+    let store = open_checked(&root).unwrap();
     assert_eq!(store.read().unwrap().count_changesets().unwrap(), 1);
 }
 
@@ -3665,12 +3665,12 @@ fn a_direct_read_that_fails_names_its_file() {
         (dir, root)
     };
     let read: fn(&Utf8Path) -> Result<(), StoreError> =
-        |root| MetaStore::open(root).and_then(|store| store.read().map(drop));
+        |root| open_checked(root).and_then(|store| store.read().map(drop));
     let cases = [
         DirectRead {
             what: "journal.off gone",
             damage: |meta| fs::remove_file(meta.join("journal.off")).unwrap(),
-            run: |root| MetaStore::open(root).map(drop),
+            run: |root| open_checked(root).map(drop),
             op: FileOp::Open,
             file: "meta/journal.off",
             kind: io::ErrorKind::NotFound,
@@ -3702,7 +3702,7 @@ fn a_direct_read_that_fails_names_its_file() {
         DirectRead {
             what: "meta/lock a directory",
             damage: |meta| a_directory_for(meta, "lock"),
-            run: |root| MetaStore::open(root).and_then(|store| store.write().map(drop)),
+            run: |root| open_checked(root).and_then(|store| store.write().map(drop)),
             op: FileOp::Open,
             file: "meta/lock",
             kind: io::ErrorKind::InvalidData,
@@ -3774,7 +3774,7 @@ fn a_listing_or_an_open_that_fails_names_its_file() {
                 }
                 fs::write(release, b"not a directory").unwrap();
             },
-            run: |root| MetaStore::open(root).and_then(|store| store.read().map(drop)),
+            run: |root| open_checked(root).and_then(|store| store.read().map(drop)),
             op: FileOp::ReadDir,
             file: "meta/refs/release",
             kind: io::ErrorKind::NotADirectory,
@@ -3782,7 +3782,7 @@ fn a_listing_or_an_open_that_fails_names_its_file() {
         DirectRead {
             what: "journal.log a directory",
             damage: |meta| a_directory_for(meta, "journal.log"),
-            run: |root| MetaStore::open(root).map(drop),
+            run: |root| open_checked(root).map(drop),
             op: FileOp::Open,
             file: "meta/journal.log",
             kind: io::ErrorKind::InvalidData,
