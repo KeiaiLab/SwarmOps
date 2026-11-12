@@ -225,9 +225,10 @@ fn leaf() -> impl Strategy<Value = Leaf> {
 }
 
 /// A path of one to three components from a few names, among them names that sort between a
-/// directory and its leaves by bytes (`a-c` and `a.d` between `a` and `a/…`).
+/// directory and its leaves by bytes (`a-c` and `a.d` between `a` and `a/…`), and names that
+/// are string prefixes of another (`a` and `a-c` of `a-cd`).
 fn repo_path() -> impl Strategy<Value = RepoPath> {
-    let name = prop::sample::select(vec!["a", "b", "a-c", "a.d"]);
+    let name = prop::sample::select(vec!["a", "b", "a-c", "a.d", "a-cd"]);
     prop::collection::vec(name, 1..4).prop_map(|names| path(&names.join("/")))
 }
 
@@ -523,31 +524,35 @@ fn a_filter_reads_only_what_it_reaches() {
 
 #[test]
 fn a_prefix_that_starts_a_directory_name_matches_nothing_in_it() {
-    // `test` is a string prefix of `tests` and `tests-e2e`, yet no path below either lies below
-    // it; it sorts before `tests-e2e/a`, which the filter must still reach.
+    // `te` and `test` are string prefixes of `tests` and `tests-e2e`, yet no path below either
+    // lies below them; they sort before `tests-e2e/a`, which the filter must still reach.
     let from = files(&[
+        ("te", file(1)),
         ("test", file(1)),
         ("tests/x", file(1)),
         ("tests-e2e/a", file(1)),
         ("tests-e2e/b", file(1)),
     ]);
     let to = files(&[
+        ("te", file(2)),
         ("test", file(2)),
         ("tests/x", file(2)),
         ("tests-e2e/a", file(2)),
         ("tests-e2e/b", file(2)),
     ]);
     let mut trees = Trees::default();
-    let filter = PathFilter::under(vec![path("test"), path("tests-e2e/a")]);
+    let filter = PathFilter::under(vec![path("te"), path("test"), path("tests-e2e/a")]);
 
     assert_eq!(
         diff(&mut trees, &from, &to, &filter),
         [
+            modified("te", file(1), file(2)),
             modified("test", file(1), file(2)),
             modified("tests-e2e/a", file(1), file(2)),
         ]
     );
     for (p, matched) in [
+        ("te", true),
         ("test", true),
         ("tests/x", false),
         ("tests-e2e/a", true),
