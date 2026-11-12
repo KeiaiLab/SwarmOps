@@ -1010,6 +1010,40 @@ left).
   agent that only runs `ws status` and `ws diff` keeps the time of its last change. *Unscheduled
   (decision D21 of the M21 design, §10). Found: the M21 design §10.4.*
 
+## Git's verbs on the command line
+
+- **A git verb's help and usage errors are the target command's.** `so status` is read as
+  `so ws status` before it is parsed, so `so status --help` prints `ws status`'s help, a usage
+  error names `ws status` and the envelope's `op` is `ws_status`; the same holds for every git
+  verb that runs ([Coming from git](reference/coming-from-git.md)). No git verb is a command of
+  its own in `--help` or in the CLI reference. *Documented (the git-familiar command design, §1
+  and §9 D-2). Found: that design.*
+- **`so clone` makes no working tree.** `so clone URL DIR` makes a store, as `git clone --bare`
+  does; the files come with `so ws create NAME`. A working tree in the same step would be a new
+  flag (`--ws NAME`), never a new meaning of `so clone URL DIR`, and `so clone URL` without a
+  directory is refused with a hint. *Unscheduled (the git-familiar command design, §9 D-3 and
+  D-6). Found: that design.*
+- **No `HEAD`, `^`, `A..B`.** A revision is `main`, a ref name, an id prefix, `~N` or `NAME@{N}`.
+  git's `HEAD`, `^`, `A..B`, `A...B` and `@{upstream}` are not read: a store has no HEAD of its
+  own, and history follows first parents. A range is `so ancestry FROM TO`. *Documented (the
+  git-familiar command design, §8). Found: that design.*
+- **`so restore` deletes a file never committed.** `so restore PATH...` is `so ws discard
+  PATH...`, which drops the named paths' edits, new files included; `git restore` leaves an
+  untracked file where it is. The file is not kept anywhere: copy it first, or record it with
+  `so ws snapshot`. *Documented (the git-familiar command design, §2). Found: that design's
+  review.*
+- **`so log` and `so push` start from `main`, not the workspace.** Inside a workspace `so log`
+  lists `main`'s history and `so push` sends `main`, where git reads the checked-out branch. A
+  workspace's own commits are `so log ID` with the head `so ws info` gives, and they reach `main`
+  by `so ws land`. *Documented (the git-familiar command design, §2). Found: that design's
+  review.*
+- **Paths are read from the workspace's root.** `so status PATH`, `so restore PATH...`,
+  `so commit -m MSG PATH...` and `so diff --path PATH` read a path from the workspace's root; git
+  reads it from the working directory. Below the root such a line is refused, exit 2, with the
+  root-relative form in the hint, and no file changes; a line without a path runs anywhere in the
+  workspace. Reading paths from the working directory is a candidate for later. *Unscheduled (the
+  git-familiar command design, §3). Found: that design's review.*
+
 ## Platforms
 
 - **Directory fsync failures are assumed fail-stop.** On ext4 with a journal, XFS and btrfs a
