@@ -417,46 +417,63 @@ fn crash_compaction_at(template: &Store, k: u64, dry: &DryRun) -> CompactCut {
     }
 }
 
-per_format! {
 /// A commit whose record takes the index's tail past [`Index::COMPACT_THRESHOLD`], crashed at
 /// each of its filesystem calls in turn (issue #16 item 1): the sweep crashes the index sync,
 /// the sorted views written and renamed into place, the `Compacted` frame and the checkpoint.
 /// After each crash the store verifies clean and the next commit lands. The sweep reaches a
 /// crash before the commit point, one before the views are in place (committed, no views), one
 /// between their renames and the `Compacted` frame, and one after that frame (not finished).
-fn crash_sweep_crosses_the_compaction_threshold(format) {
-    let template = compaction_template(format);
+///
+/// FORMAT 1 and 2 only: a FORMAT 3 index never compacts and its writer writes no `Compacted`
+/// frame (the FORMAT 3 design §2.5); its view steps are swept in the store's `views_sweep`.
+mod crash_sweep_crosses_the_compaction_threshold {
+    use super::*;
 
-    // 1. The dry run: its calls counted; it appends its frame and a `Compacted` one.
-    let store = Store::copy_of(&template);
-    let file = calls_file(&store);
-    let frames = compaction(&store).frames;
-    let result = swept_commit(&store, &[(FS_CALLS_ENV, file.to_str().unwrap())]).ok();
-    let compacted = Compaction {
-        frames: frames + 2,
-        marked: 1,
-        sorted: COMPACT_TEMPLATE + 1,
-    };
-    assert_eq!(compaction(&store), compacted, "the dry run compacts");
-    let dry = DryRun {
-        calls: reported_calls(&file),
-        changeset: result["changeset"].as_str().unwrap().to_owned(),
-    };
-
-    // 2. A crash at each call, and one past the last.
-    let crashes = sweep(1..=dry.calls + 1, |k| crash_compaction_at(&template, k, &dry));
-    let cuts = [
-        CompactCut::Uncommitted,
-        CompactCut::Unsorted,
-        CompactCut::Unmarked,
-        CompactCut::Marked,
-        CompactCut::Finished,
-    ];
-    for cut in cuts {
-        assert!(crashes.contains(&cut), "no run ended {cut:?}: {crashes:?}");
+    #[test]
+    fn format_1() {
+        run(StoreFormat::V1);
     }
-    println!("compaction sweep {format:?}: {} calls", dry.calls);
-}
+
+    #[test]
+    fn format_2() {
+        run(StoreFormat::V2);
+    }
+
+    fn run(format: StoreFormat) {
+        let template = compaction_template(format);
+
+        // 1. The dry run: its calls counted; it appends its frame and a `Compacted` one.
+        let store = Store::copy_of(&template);
+        let file = calls_file(&store);
+        let frames = compaction(&store).frames;
+        let result = swept_commit(&store, &[(FS_CALLS_ENV, file.to_str().unwrap())]).ok();
+        let compacted = Compaction {
+            frames: frames + 2,
+            marked: 1,
+            sorted: COMPACT_TEMPLATE + 1,
+        };
+        assert_eq!(compaction(&store), compacted, "the dry run compacts");
+        let dry = DryRun {
+            calls: reported_calls(&file),
+            changeset: result["changeset"].as_str().unwrap().to_owned(),
+        };
+
+        // 2. A crash at each call, and one past the last.
+        let crashes = sweep(1..=dry.calls + 1, |k| {
+            crash_compaction_at(&template, k, &dry)
+        });
+        let cuts = [
+            CompactCut::Uncommitted,
+            CompactCut::Unsorted,
+            CompactCut::Unmarked,
+            CompactCut::Marked,
+            CompactCut::Finished,
+        ];
+        for cut in cuts {
+            assert!(crashes.contains(&cut), "no run ended {cut:?}: {crashes:?}");
+        }
+        println!("compaction sweep {format:?}: {} calls", dry.calls);
+    }
 }
 
 /// Runs `args(store)` as `agent(1)` on a copy of `template` without a crash, counting its
