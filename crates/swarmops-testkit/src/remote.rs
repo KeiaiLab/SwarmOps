@@ -192,8 +192,20 @@ const CUT_BLOCK: usize = 64 << 10;
 
 /// A filter that passes its first `bytes` bytes on and exits. `dd` writes each read at once;
 /// `head -c` holds them in stdio's buffer, and a peer waiting for them waits forever.
+///
+/// Two `dd` runs in a group, in the operands POSIX gives it, which GNU's and BSD's both take:
+/// a read for each whole block of `bytes`, then one read of the rest. A short read counts as
+/// its block, so the filter may end before `bytes`, never after: what GNU's
+/// `count=<bytes> iflag=count_bytes` does in one run, which BSD's `dd` does not know.
 fn cutter(bytes: usize) -> String {
-    format!("dd bs={CUT_BLOCK} count={bytes} iflag=count_bytes status=none")
+    let whole = |blocks: usize| format!("dd bs={CUT_BLOCK} count={blocks} 2>/dev/null");
+    let last = |rest: usize| format!("dd bs={rest} count=1 2>/dev/null");
+    match (bytes / CUT_BLOCK, bytes % CUT_BLOCK) {
+        (0, 0) => ":".to_owned(),
+        (0, rest) => last(rest),
+        (blocks, 0) => whole(blocks),
+        (blocks, rest) => format!("{{ {}; {}; }}", whole(blocks), last(rest)),
+    }
 }
 
 /// The stand-in's tail that runs `service`, a shell command line that serves the connection

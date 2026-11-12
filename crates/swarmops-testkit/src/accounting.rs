@@ -17,6 +17,10 @@
 //!
 //! [`LockHolders`] attributes the holds of a store's `meta/lock` to the processes that held it,
 //! read off `/proc/locks`, without taking the lock (the M17 closure design §3.1).
+//!
+//! The CPU time is the shell's own count and is read on every host. The memory figures and the
+//! lock's holders are read off `/proc`, which only Linux has: elsewhere a connection's peak is
+//! 0 with no name, [`PeakWatch`] reads 0 and [`LockHolders`] sees no holder.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -494,24 +498,42 @@ mod holders {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
     use std::fmt::Write as _;
+    #[cfg(target_os = "linux")]
     use std::fs;
+    use std::path::Path;
     use std::process::Command;
+    #[cfg(target_os = "linux")]
     use std::thread;
+    #[cfg(target_os = "linux")]
     use std::time::{Duration, Instant};
 
-    use super::{Accounting, LockHolders, Peak, Spent, ledger_dir, spent_since};
+    #[cfg(target_os = "linux")]
+    use super::LockHolders;
+    use super::{Accounting, Peak, Spent, ledger_dir, spent_since};
     use crate::child;
     use crate::remote::write_script;
     use crate::serve::ServeSite;
 
-    /// What a server that burns CPU runs: a child (forked shell) loops until its own user and
-    /// system time reach 25 clock ticks (250 ms at 100 Hz), however loaded the host is.
-    const BURN: &str = "( while :; do\n\
-         \x20 read -r _ _ _ _ _ _ _ _ _ _ _ _ _ user system _ < /proc/self/stat\n\
-         \x20 [ $((user + system)) -ge 25 ] && break\n\
-         done )\n\
-         exit 3\n";
+    /// What a server that burns CPU runs: a child (forked shell) loops until its own user or
+    /// system time reaches 200 ms, however loaded the host is. It reads them off the first line
+    /// of its own `times` (`0m0.210s 0m0.040s`, which every shell prints with minutes first),
+    /// written to a file in `scratch`: a command substitution would fork, and print the times
+    /// of the fork.
+    fn burn(scratch: &Path) -> String {
+        let spent = scratch.join("burn-times");
+        let spent = crate::remote::sh_quote(crate::remote::path_str(&spent));
+        format!(
+            "( while :; do\n\
+             \x20 times > {spent}\n\
+             \x20 read -r user system < {spent}\n\
+             \x20 case \"$user\" in 0m0.[01]*) ;; *) break ;; esac\n\
+             \x20 case \"$system\" in 0m0.[01]*) ;; *) break ;; esac\n\
+             done )\n\
+             exit 3\n"
+        )
+    }
 
     #[test]
     fn parses_both_shells_formats() {
@@ -553,6 +575,8 @@ mod tests {
 
     /// I12: the per-name record names the process that peaked. A server that runs
     /// `sort -S 100M` over 64 MiB of lines: `sort` is the peak, with `RssAnon` of 48 MiB or more.
+    /// The record is read off `/proc`, which only Linux has, so this test runs on Linux alone.
+    #[cfg(target_os = "linux")]
     #[test]
     fn accounting_names_the_peaking_process() {
         /// 64 MiB of lines of 16 bytes.
@@ -597,7 +621,9 @@ mod tests {
     }
 
     /// I11: the holder sampler attributes a known hold. With no holder nothing is attributed; a
-    /// child holding the lock 300 ms is seen with its pid for 250 ms or more.
+    /// child holding the lock 300 ms is seen with its pid for 250 ms or more. The holder is read
+    /// off `/proc/locks`, which only Linux has, so this test runs on Linux alone.
+    #[cfg(target_os = "linux")]
     #[test]
     fn the_lock_sampler_names_the_holder() {
         let work = tempfile::tempdir().expect("a temp dir");
@@ -642,7 +668,7 @@ mod tests {
     fn accounting_counts_a_known_burn() {
         let work = tempfile::tempdir().expect("a temp dir");
         let program = work.path().join("swarmops");
-        write_script(&program, &format!("#!/bin/sh\n{BURN}"));
+        write_script(&program, &format!("#!/bin/sh\n{}", burn(work.path())));
         let site = ServeSite::with_program(program).with_accounting(Accounting::Cpu);
         let ssh = site.ssh_command("person/ada");
 
@@ -663,7 +689,7 @@ mod tests {
     fn accounting_off_writes_no_file() {
         let work = tempfile::tempdir().expect("a temp dir");
         let program = work.path().join("swarmops");
-        write_script(&program, &format!("#!/bin/sh\n{BURN}"));
+        write_script(&program, &format!("#!/bin/sh\n{}", burn(work.path())));
         let site = ServeSite::with_program(program);
         let ssh = site.ssh_command("person/ada");
         let script = std::fs::read_to_string(ssh_path(&ssh)).expect("the stand-in");

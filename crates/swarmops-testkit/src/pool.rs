@@ -8,11 +8,14 @@
 //! - [`Wave`] and [`waves`]: a herd's lands cut by the mark they were due at, each wave's drain.
 //! - [`Tally`] and [`tally`]: the identities whose every scheduled land is recorded and landed.
 //! - [`children_of`] and [`mem_available_mib`]: a process's live children and the host's
-//!   available memory, read off `/proc`.
+//!   available memory, read off `/proc` on Linux; elsewhere the children are read off `ps` and
+//!   the memory is not known.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
+#[cfg(not(target_os = "linux"))]
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -238,6 +241,7 @@ pub fn tally(records: &[Vec<LandRecord>], expected: impl Fn(usize) -> usize) -> 
 
 /// The live children of process `pid`, in pid order: the processes whose `/proc/<n>/stat` names
 /// it as parent. A process that ends while it is read is not listed.
+#[cfg(target_os = "linux")]
 pub fn children_of(pid: u32) -> io::Result<Vec<u32>> {
     let mut children = Vec::new();
     for entry in fs::read_dir("/proc")? {
@@ -264,15 +268,49 @@ pub fn children_of(pid: u32) -> io::Result<Vec<u32>> {
     Ok(children)
 }
 
+/// The live children of process `pid`, in pid order: the processes `ps` lists with it as
+/// parent, where there is no `/proc` to read. The `ps` that lists them is a child of this
+/// process itself, and is not listed.
+#[cfg(not(target_os = "linux"))]
+pub fn children_of(pid: u32) -> io::Result<Vec<u32>> {
+    // 1. Every process of the host, each as its pid and its parent's.
+    let ps = Command::new("ps")
+        .args(["-A", "-o", "pid=", "-o", "ppid="])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let own = ps.id();
+    let listed = ps.wait_with_output()?;
+    if !listed.status.success() {
+        return Err(io::Error::other(format!("ps: {}", listed.status)));
+    }
+
+    // 2. Those whose parent is `pid`, but for the `ps` itself.
+    let mut children: Vec<u32> = String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let child: u32 = words.next()?.parse().ok()?;
+            let parent: u32 = words.next()?.parse().ok()?;
+            (parent == pid && child != own).then_some(child)
+        })
+        .collect();
+    children.sort_unstable();
+    Ok(children)
+}
+
 /// The parent pid in a `/proc/<n>/stat` line, the field after the state that follows the
 /// command's closing parenthesis (the command may hold spaces and parentheses itself):
 /// `42 (sleep) S 7 …` gives 7.
+#[cfg(target_os = "linux")]
 fn parent(stat: &str) -> Option<u32> {
     let (_, after_command) = stat.rsplit_once(')')?;
     after_command.split_whitespace().nth(1)?.parse().ok()
 }
 
-/// The host's `MemAvailable` in MiB; `None` where `/proc/meminfo` gives none.
+/// The host's `MemAvailable` in MiB; `None` where `/proc/meminfo` gives none, as on every host
+/// but a Linux one.
 pub fn mem_available_mib() -> Option<u64> {
     let meminfo = fs::read_to_string("/proc/meminfo").ok()?;
     let line = meminfo
@@ -486,12 +524,15 @@ mod tests {
         assert_eq!(children_of(me).unwrap(), Vec::<u32>::new());
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_command_with_parentheses_keeps_its_parent() {
         assert_eq!(parent("42 (a) b) S 7 42 42 0"), Some(7));
         assert_eq!(parent("42 (sleep) S"), None);
     }
 
+    /// Read off `/proc/meminfo`, which only Linux has, so this test runs on Linux alone.
+    #[cfg(target_os = "linux")]
     #[test]
     fn the_host_has_memory_available() {
         assert!(mem_available_mib().is_some_and(|mib| mib > 0));
