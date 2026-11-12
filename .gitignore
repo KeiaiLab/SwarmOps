@@ -76,7 +76,7 @@ __pycache__/
 *.py[cod]
 .venv/
 node_modules/
-# lint and property-test caches of the scripts/ tests
+# local caches of ad hoc tools (ruff, Hypothesis); no recipe runs them
 .ruff_cache/
 .hypothesis/
 
