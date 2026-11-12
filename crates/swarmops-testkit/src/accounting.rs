@@ -43,6 +43,7 @@ pub use holders::LockHolders;
 /// largest over every process of that name and every sample (so they may come from different
 /// samples).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Peak {
     /// `VmHWM`, in KiB.
     pub hwm_kib: u64,
@@ -66,6 +67,7 @@ impl Peak {
 
 /// What one connection cost.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Spent {
     /// User CPU time of the server and the processes it waited for.
     pub user: Duration,

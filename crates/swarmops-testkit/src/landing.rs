@@ -1,6 +1,6 @@
 //! What the landing tests and measurements share: M4 Task 1's measurement of the four landing
-//! models (`swarmops-repo`'s `tests/landing_models.rs`) and M4 Task 11's landing through the
-//! binary (`swarmops-cli`'s `tests/landing.rs`).
+//! models (its harness is retired; `docs/perf.md` keeps its numbers) and M4 Task 11's landing
+//! through the binary (`swarmops-cli`'s `tests/landing.rs`).
 //!
 //! - [`Workload`], [`base_files`] and [`change_for`]: what the store starts with and what each
 //!   lander lands, drawn from a seed with [`mix`](measure::mix), so that every run of a cell
