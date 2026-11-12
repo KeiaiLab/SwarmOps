@@ -80,7 +80,7 @@ pub mod transport;
 
 pub use cat_file_source::{CAT_FILE_MAPPED, CAT_FILE_WINDOW, CatFileSource};
 pub use convert::{ConvertError, Converted, Converter, GIT_LOSSY, GIT_OID};
-pub use export::{DivergedReason, ExportError, ExportReport, ExportRequest, export};
+pub use export::{DivergedReason, ExportError, ExportReport, ExportRequest, GitTarget, export};
 pub use export_oid::{
     ExportObjects, ExportOid, ExportReader, ExportedOid, GitMemoMismatch, OidCache, blob_oid,
     real_blob_oid, real_tree_oid, register, tree_oid, verify_export_oids, verify_export_oids_with,
