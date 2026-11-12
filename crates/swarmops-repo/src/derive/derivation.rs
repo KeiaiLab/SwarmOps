@@ -7,7 +7,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use swarmops_core::{BlobId, Changeset, ChangesetId, ObjectId, ObjectKind, Tree, TreeId};
-use swarmops_store::{DerivedSlot, DerivedStore, Journal, JournalEntry, ObjectStore, StoreError};
+use swarmops_store::{DerivedSlot, DerivedStore, JournalEntry, ObjectStore, StoreError};
 use thiserror::Error;
 
 use super::engine::{self, Memo, Node};
@@ -427,8 +427,8 @@ pub struct DeriveRun {
     /// How many of the values it was asked for the store held already, which it left as they are.
     pub cached: u64,
     /// The frame to pass as `after` to go on: the last frame the call read; `None` if it read
-    /// none, as no frame follows `after`. With a `limit` of 0, the journal's last frame, and
-    /// `None` while the journal holds none.
+    /// none, as no frame follows `after`. With a `limit` of 0, the journal's last committed
+    /// frame, and `None` while the journal holds none.
     pub last_frame: Option<u64>,
 }
 
@@ -444,8 +444,12 @@ impl<O: ObjectStore> Repo<O> {
     /// read and passed over.
     ///
     /// With a `limit` of 0 it reads no frame and derives nothing: [`DeriveRun::last_frame`] is
-    /// then the journal's last frame, from where a follower derives only what is recorded later
-    /// (`swarmops derive --follow`, unless `--from-start`).
+    /// then the journal's last committed frame, from where a follower derives only what is
+    /// recorded later (`swarmops derive --follow`, unless `--from-start`). It is read in a
+    /// committed snapshot ([`Repo::snapshot_committed`]), so the call waits for the writers' lock
+    /// as a commit does ([`StoreError::Busy`] if the wait runs out) and fails where a writer's
+    /// tail check fails: a frame a failed sync's cut can still take back is never the end it
+    /// gives, and every later call holds the frame it gives.
     ///
     /// An `after` past the journal's last frame is [`RepoError::PastJournalEnd`], whatever the
     /// `limit`, before anything is derived: no call read it, and reading nothing after it would
@@ -466,9 +470,11 @@ impl<O: ObjectStore> Repo<O> {
             None => None,
         };
         if limit == 0 {
-            // What readers count as listed: the seq the next frame takes.
-            let journal = Journal::open(&self.layout, Arc::clone(&self.fs))?;
-            let last_frame = journal.frame_count()?.checked_sub(1);
+            // The committed end, read under the writers' lock: `journal.off` alone counts an
+            // entry its writer is about to cut, whose frame a later tail check may cut too.
+            drop(read);
+            let (committed, _repair) = self.snapshot_committed()?;
+            let last_frame = committed.next_seq().checked_sub(1);
             return Ok(DeriveRun {
                 last_frame,
                 ..DeriveRun::default()

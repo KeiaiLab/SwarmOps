@@ -1309,8 +1309,15 @@ mod skip_list {
 mod eager {
     use swarmops_repo::derive::DeriveRun;
     use swarmops_repo::{CasResult, FirstParentSkipList};
+    use swarmops_store::RealFs;
+    use swarmops_testkit::fs::HoldThenFail;
+    use swarmops_testkit::store::layout_of;
 
     use super::*;
+
+    /// How long a test leaves a writer held between a write and its sync, for a call started
+    /// meanwhile to return if it does not wait for the writer's lock.
+    const WRITER_HELD: Duration = Duration::from_millis(300);
 
     /// A changeset's first-parent depth, as [`Depth`] makes it, but eager: `swarmops derive`
     /// derives it for each new changeset. Its derives are counted.
@@ -1445,6 +1452,109 @@ mod eager {
         assert_eq!(repo.derive_eager(Some(0), 0).unwrap(), run(0, 0, Some(2)));
         assert_eq!(repo.derive_eager(Some(2), 0).unwrap(), run(0, 0, Some(2)));
         assert_eq!(lists(&root), BTreeSet::new(), "nothing derived");
+    }
+
+    /// A `limit` of 0 ends at the last committed frame, read under the writers' lock after the
+    /// tail check (storage spec §2 rule 3). A frame whose listing in `journal.off` failed is
+    /// committed and counts, though `journal.off` does not list it yet: frame 3, after c0 to c2.
+    /// A frame its writer holds between its write and its sync does not: the call waits for the
+    /// lock, the sync fails, the writer cuts frame 4, and the call still ends at frame 3.
+    #[test]
+    fn limit_zero_ends_at_the_last_committed_frame() {
+        let (_dir, root, repo) = new_repo();
+        let c = chain(&repo, 3);
+        let layout = layout_of(&root);
+
+        // 1. c3's frame is durable, and its listing fails: committed, not listed.
+        let off = layout.journal_off().into_std_path_buf();
+        let unlisting = FailingFs::new(move |method, path: &Path| {
+            method == FsMethod::AppendDurable && path == off
+        });
+        let unlisting = LocalRepo::open_with_fs(&root, Arc::new(unlisting)).unwrap();
+        let c3 = commit_on(&unlisting, c[2], "3");
+        drop(unlisting);
+        assert_eq!(repo.derive_eager(None, 0).unwrap(), run(0, 0, Some(3)));
+
+        // 2. c4's frame is whole in journal.log, not synced: the call waits for its writer.
+        let (fs, held) = HoldThenFail::new(layout.journal_log(), RealFs::new());
+        let writer = LocalRepo::open_with_fs(&root, Arc::new(fs)).unwrap();
+        thread::scope(|scope| {
+            let req = request(&[c3], vec![put("f", b"4")], "4");
+            let writing = scope.spawn(|| writer.commit(req));
+            held.wait();
+            let ending = scope.spawn(|| repo.derive_eager(None, 0));
+            thread::sleep(WRITER_HELD);
+            assert!(
+                !ending.is_finished(),
+                "a limit of 0 returned while the writer held the lock"
+            );
+
+            // 3. Let go: the sync fails, the writer cuts frame 4, and the end is frame 3.
+            held.release();
+            match writing.join().unwrap() {
+                Err(RepoError::Store(StoreError::NotCommitted { .. })) => {}
+                other => panic!("expected NotCommitted, got {other:?}"),
+            }
+            assert_eq!(ending.join().unwrap().unwrap(), run(0, 0, Some(3)));
+        });
+        assert_eq!(lists(&root), BTreeSet::new(), "nothing derived");
+    }
+
+    /// A follower that starts at the journal's end survives a frame cut after it started: the
+    /// `after` a `limit` of 0 gives is accepted by the next call. c3's writer is held between
+    /// its entry's write to `journal.off` and the entry's sync, where `journal.off` shows frame
+    /// 3 listed; the follower starts there. The sync fails and the entry is cut; the next
+    /// writer's tail check fails to sync frame 3, then to write it afresh, and cuts it off the
+    /// journal. A follower that had counted the entry would go on after a frame no snapshot
+    /// holds, [`RepoError::PastJournalEnd`]; this one waited for c3's writer, listed frame 3
+    /// itself, and goes on after it.
+    #[test]
+    fn follow_survives_a_cut_frame() {
+        let (_dir, root, repo) = new_repo();
+        let c = chain(&repo, 3);
+        let layout = layout_of(&root);
+
+        // 1. The follower starts while frame 3's entry is in journal.off, not synced.
+        let (fs, held) = HoldThenFail::new(layout.journal_off(), RealFs::new());
+        let writer = LocalRepo::open_with_fs(&root, Arc::new(fs)).unwrap();
+        let start = thread::scope(|scope| {
+            let writing = scope.spawn(|| commit_on(&writer, c[2], "3"));
+            held.wait();
+            let starting = scope.spawn(|| repo.derive_eager(None, 0));
+            thread::sleep(WRITER_HELD);
+
+            // 2. Let go: the entry's sync fails, and the writer cuts the entry.
+            held.release();
+            writing.join().unwrap();
+            starting.join().unwrap().unwrap()
+        });
+        drop(writer);
+
+        // 3. A writer whose tail check can neither sync the frames it finds unlisted nor write
+        //    them afresh cuts them off the journal: none here, as the follower listed frame 3.
+        let log = layout.journal_log().into_std_path_buf();
+        let cutting = FailingFs::new(move |method, path: &Path| {
+            let fails = method == FsMethod::SyncData || method == FsMethod::AppendDurable;
+            fails && path == log
+        });
+        let cutting = LocalRepo::open_with_fs(&root, Arc::new(cutting)).unwrap();
+        match cutting.commit(request(&[c[2]], vec![put("f", b"x")], "x")) {
+            Err(RepoError::Store(StoreError::NotCommitted { .. })) => {}
+            other => panic!("expected NotCommitted, got {other:?}"),
+        }
+        drop(cutting);
+
+        // 4. The follower goes on from where it started, and derives what is recorded later.
+        assert_eq!(start, run(0, 0, Some(3)));
+        assert_eq!(
+            repo.derive_eager(start.last_frame, 1000).unwrap(),
+            run(0, 0, None)
+        );
+        commit_on(&repo, c[2], "4");
+        assert_eq!(
+            repo.derive_eager(start.last_frame, 1000).unwrap(),
+            run(1, 0, Some(4))
+        );
     }
 
     /// An `after` past the journal's last frame is refused, whatever the `limit`, and nothing is

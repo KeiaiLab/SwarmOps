@@ -98,6 +98,8 @@ collects the changes on `stable` that no release holds yet, until the next relea
   longer walk every loose commit of `main` while they hold `serve.lock` (1,001 changesets loaded
   on a 1,000-changeset store, 10,001 on 10,000; now 2): their exports stop at `serve.git`'s
   `main`. `git gc --auto` runs after a refresh lets the lock go.
+- `derive --follow` starts at the journal's last committed frame, read under the writers' lock,
+  where a frame cut after it started could end it with `E_INVALID_ARG` and `details.after`.
 
 ### Security
 
