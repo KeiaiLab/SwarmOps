@@ -453,9 +453,10 @@ const MAX_LAND_KEY: usize = 64;
 ///   - to a `ref_delete`: re-check before deleting;
 ///   - to a move of a ref that is gone: that it is gone;
 /// - `E_TOO_LARGE` `{index, path, size, limit, scope}` (and the client `file` for file content) for
-///   a put over 512 MiB (`scope` `put`, measured as each content is converted, in list order) or a
-///   commit's contents over 1 GiB together (`commit`, whose `size` is theirs up to and with the
-///   change's), the second measured by the sizes the contents declare, before any is read;
+///   a put over 512 MiB (`scope` `put`) or a commit's contents over 1 GiB together (`commit`,
+///   whose `size` is theirs up to and with the change's), both measured by the sizes the contents
+///   declare (a client file's length) before any is read, and again as each content is
+///   converted, in list order, for a file that grows meanwhile;
 /// - `E_INVALID_ARG` for limits, cursors and requests that break their own rules.
 ///
 /// `git_import`'s failures map as follows, the source repository named by the path the request
@@ -492,7 +493,11 @@ const MAX_LAND_KEY: usize = 64;
 /// - `E_CAS_MISMATCH` (retryable) `{name, actual}`: the target moved during the import, with
 ///   every commit recorded; the same import run again moves it if what it names leads to the
 ///   tip. The hint only reads, as for a ref move.
-/// - `E_REF_NAME_INVALID` `{name}`: a target that is no ref name.
+/// - `E_REF_NAME_INVALID` `{name}`: a target that is no ref name; `{name, reason}` with `reason`
+///   `reserved` for a remote-tracking ref, which only a fetch moves.
+/// - `E_FORMAT_REQUIRED` `{name, needs, store}`: a target the store's format does not take but
+///   format `needs` does (a FORMAT 2 name, `feature/x` or `tags/v1`, in a FORMAT 1 store), before
+///   the repository is opened; the hint is `swarmops upgrade`.
 /// - A store failure is the code its repository error has above (`E_BUSY` after three retries,
 ///   `E_IO_TRANSIENT`, `E_IO`, `E_STORE_CORRUPT`, …), and a frame that committed but failed
 ///   after its commit point is `E_IO` `{committed: true, warnings}`; either way the import
@@ -507,7 +512,10 @@ const MAX_LAND_KEY: usize = 64;
 /// its files relative to its git directory and its objects by their git ids:
 ///
 /// - `E_REF_NAME_INVALID` `{name}`: a source ref that is no ref name, before the repository is
-///   opened; or a branch name git does not take, whose hint is `git check-ref-format --branch`.
+///   opened, `{name, reason}` with `reason` `reserved` for a remote-tracking one; or a branch name
+///   git does not take, whose hint is `git check-ref-format --branch`.
+/// - `E_FORMAT_REQUIRED` `{name, needs, store}`: a source ref the store's format does not take
+///   but format `needs` does, as for `git_import`'s target.
 /// - `E_GIT_NOT_A_REPO` `{git_path}`: no git repository gix can open at that path; the hint makes
 ///   one (`git init --bare <path>`).
 /// - `E_GIT_UNSUPPORTED` `{reason, …}`: a repository the export does not write as it is, as the
@@ -2015,6 +2023,9 @@ impl StoreOps for Recording<'_> {
             .as_deref()
             .map(CommitKey::parse)
             .transpose()?;
+        // The snapshot stays held while `commit_request` reads the contents (up to 1 GiB of
+        // client files, `content::changes`), so the parent is checked in the view it was
+        // resolved in, however long the reads take.
         let read = self.snapshot()?;
         let parent = match (&parent, &advance) {
             (Some(rev), _) => Some(self.resolve(&read, rev)?),
@@ -4034,9 +4045,10 @@ mod tests {
     /// program reads what is damaged without parsing the line. No two problems share a kind but
     /// `IndexMismatch`'s causes, which `cause` tells apart, and `DerivedMismatch`'s derivations,
     /// which `derivation` does (with a key in lowercase hex where the value has one). The finding
-    /// each problem should be comes from an exhaustive match, as `finding` does its own: a new
-    /// problem, or a new cause, does not compile here until it is given its kind and keys, and
-    /// with them a case.
+    /// each problem should be comes from a match, as `finding`'s does; `VerifyProblem` and
+    /// `MismatchCause` are `#[non_exhaustive]`, so neither match is exhaustive and nothing makes
+    /// a new problem or cause compile only with an arm and a case: each is added here by hand,
+    /// and the count of kinds below changes with it.
     #[test]
     fn every_verify_problem_is_a_finding_with_its_keys() {
         let (object, child, parent) = ("ab".repeat(32), "cd".repeat(32), "ef".repeat(32));
@@ -4202,9 +4214,9 @@ mod tests {
     /// meets again, for want of permission (`EACCES`) or as a read-only filesystem (`EROFS`), in
     /// each of the store's three ways to `NotCommitted` (storage spec §2 rule 3 (a)-(c)): the
     /// non-retryable `E_IO`, `committed: false`, naming the append, with a hint that says what to
-    /// fix; nothing of the request was committed, and once the cause is gone it commits (ruling
-    /// M16-R8). Any other failure there is the retryable `E_IO_TRANSIENT`, as the tests beside
-    /// this module show.
+    /// fix; nothing of the request was committed, and once the cause is gone it commits. Not
+    /// retryable, as retryable means that running the same command again can succeed. Any other
+    /// failure there is the retryable `E_IO_TRANSIENT`, as the tests beside this module show.
     mod refused_for_good {
         use std::io;
 
