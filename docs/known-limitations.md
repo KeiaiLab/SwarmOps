@@ -175,11 +175,12 @@ left).
   final review, question 10.*
 - **A read can give up under sustained commits.** A snapshot reads the refs and the frames again
   until they hold still, in at most 32 rounds; when a commit lands during every round, it fails
-  with the retryable `E_BUSY` rather than wait. The bound does not make such a reader progress: each
-  round reads every ref file and every frame past the checkpoint again. Reading again only the
-  refs the new frames move, or starting over from a fresh checkpoint, is the next step if a
-  measurement shows readers giving up; bench-compare's W6 ([perf.md](perf.md)) measured a
-  snapshot and lookup beside a writer's 64 commits/s at 87.3 µs p50 and 5.0 ms at worst.
+  with the retryable `E_BUSY` rather than wait. The bound does not help such a reader make
+  progress: each round reads every ref file and every frame past the checkpoint again. Reading
+  again only the refs the new frames move, or starting over from a fresh checkpoint, is the next
+  step if a measurement shows readers giving up; bench-compare's W6 ([perf.md](perf.md))
+  measured a snapshot and lookup beside a writer's 64 commits/s at 87.3 µs p50 and 5.0 ms at
+  worst.
   *Unscheduled. Found: M1 Task 2c; the 2026-10-16 code review (Q9).*
 - **Readers may return state that is not durable yet.** A local reader (the CLI, the MCP server)
   sees a frame before its `fdatasync` completes, so a power loss, or a failed sync of that frame
@@ -907,10 +908,6 @@ left).
   snapshot and, when edits carry, a second changeset on the new head; neither is on a ref, and
   `gc` never removes a changeset, as with `ws commit`. *Documented (the M19 design, risk R6).
   Found: M19 design.*
-- **An update cut after its snapshot refuses an edit made since.** Run again, it takes the
-  snapshot its record names instead of scanning again, so an edit made after the cut is in the
-  way of the update (`E_WS_DIRTY`) on each re-run until it is committed or discarded. Nothing is
-  written before the refusal. *Unscheduled. Found: M19-3 review.*
 - **Snapshots are taken on demand and by an update only.** `ws snapshot` and `ws rebase` record a
   workspace's edits by id; `ws status` and `ws diff` take none. A snapshot has no revision name
   (`ws info` gives the latest id), and there is no list of earlier snapshots and no restore from
@@ -1012,10 +1009,10 @@ left).
   makes) and every 13.75 ms through the binary; the difference appears only with the commits'
   own object writes on the same filesystem. *Target: M1.6's quiet-window runs (docs/perf.md),
   then M2's journal-sync decision, both deferred until after the pilot. Found: M1 Task 7b.*
-- **Commit-path costs.** Every
-  commit's materialization scans the index tail; and the reflog walks frames past the snapshot
-  only to drop them. *Target: M2's measured decision on them (its plan's Task 3), deferred until
-  after the pilot. Found: M1 Tasks 2c and 3; deferred again by Task 8.*
+- **Commit-path costs.** Every commit's materialization scans the index tail; and the reflog
+  walks frames past the snapshot only to drop them. *Target: M2's measured decision on them (its
+  plan's Task 3), deferred until after the pilot. Found: M1 Tasks 2c and 3; deferred again by
+  Task 8.*
 - **Compaction rewrites both sorted views under the writer lock.** When the index's unsorted
   tail passes 1,024 records, the writer that holds the lock merges it into the sorted views and
   writes them anew before it lets go, so the writers queued behind it wait for a rewrite that
@@ -1033,8 +1030,9 @@ left).
   moves of it, read back from the end; there is no per-ref index, so a valid name the journal
   records no move of (`E_REF_NOT_FOUND`), or a page below a ref's first move, is answered only
   after every frame is read. Reading back is the `history` bench's reflog case: `main`'s last 100
-  moves, 100 frames, take 30.9 ms on a 200,000-changeset chain and 154 ms on a 1,000,000-changeset
-  one (criterion median, [perf.md](perf.md)); the bench has no case of 1,000,000 frames, and no
+  moves, read back from the end of a journal whose every frame moves `main`, on a snapshot 31 frames
+  past the checkpoint (`reflog100_tail31`), take 30.9 ms on a 200,000-changeset chain and 154 ms on
+  a 1,000,000-changeset one (criterion median, [perf.md](perf.md)); the bench has no case of 1,000,000 frames, and no
   case of a name that never moved. *Target: a per-ref index, which needs a layout (M20, FORMAT 3;
   the M18 design §3.2). Found: the M18 design.*
 - **Small object-store costs.** A put that creates a fan-out directory checks for it under the
