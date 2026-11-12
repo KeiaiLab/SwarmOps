@@ -48,6 +48,7 @@ mod serve_interop;
 mod serve_land;
 mod serve_load;
 mod serve_perf;
+mod serve_pins;
 mod serve_prepare;
 mod serve_push;
 mod serve_records;
