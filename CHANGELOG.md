@@ -84,6 +84,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
   makes now is unreadable by v0.11.x and older, which refuse it as no store; `upgrade` takes an
   older store to FORMAT 3. An `init` that resumes a crashed `init` of another format sets that
   one's metadata aside, FORMAT 2's and FORMAT 3's told apart by their checkpoints.
+- `remote add` and `clone` refuse an `http://` or `https://` URL with any user part
+  (`https://user@host/repo.git`), with `E_INVALID_ARG` and `details.reason` `credential_in_url`,
+  where they took a user that did not look like a token. A remote stored as `https://user@host`
+  is refused by `fetch`, `push` and `sync` until it is removed and added again without the user,
+  and `remote list` shows its user as `***`. An ssh URL keeps its user; a token goes by
+  `--token-env` or git's credential helper.
 
 ### Fixed
 
@@ -115,6 +121,11 @@ collects the changes on `stable` that no release holds yet, until the next relea
 
 - `ws create` refuses a `.swarmws` that is a link (`E_WS_DIRTY`) before its volume probe writes or
   removes a file through it; the probe wrote `probe-a` and `probe-l` at the link's target.
+- A token given as the user of an `http://` or `https://` URL was stored in `remotes.toml` and
+  printed by `remote list` when it was shorter than 20 characters or held no letter or no digit:
+  the check took it for a user name (0.2.0 to 0.11.0). No user part is taken now, so no shape of
+  token passes. A token stored this way stays in `remotes.toml` until the remote is removed:
+  remove the remote, add it again without the user, and revoke the token.
 
 ## [0.11.0] - 2026-11-09
 
