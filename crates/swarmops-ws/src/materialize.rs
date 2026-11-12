@@ -1535,3 +1535,61 @@ pub(crate) fn host_failed(path: &str, e: &io::Error) -> OpError {
 fn to_u64(n: usize) -> u64 {
     u64::try_from(n).unwrap_or(u64::MAX)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `path` detail of `error`.
+    #[cfg(unix)]
+    fn path_of(error: &OpError) -> Option<&str> {
+        error.details.get("path")?.as_str()
+    }
+
+    /// An `E_IO` names the directory that would not open when the failure is one, and the
+    /// path the caller gave when it is any other.
+    #[test]
+    #[cfg(unix)]
+    fn unopened_dir_falls_back_to_the_path() {
+        use crate::hostfs::RealHost;
+
+        // 1. A root holding `a`, and nothing below it.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(tmp.path()).unwrap();
+        std::fs::create_dir(root.join("a")).unwrap();
+
+        // 2. A removal through the missing `a/b`: the directory that would not open.
+        let e = RealHost.remove_file(root, "a/b/c").unwrap_err();
+        let failed = host_failed("a/b/c", &e);
+        assert_eq!(failed.code, ErrorCode::Io.as_str());
+        assert_eq!(path_of(&failed), Some("a/b"));
+        assert!(failed.message.starts_with("a/b: "), "{}", failed.message);
+
+        // 3. A removal of the missing `a/c`, every directory opened: the path itself.
+        let e = RealHost.remove_file(root, "a/c").unwrap_err();
+        let failed = host_failed("a/c", &e);
+        assert_eq!(failed.code, ErrorCode::Io.as_str());
+        assert_eq!(path_of(&failed), Some("a/c"));
+        assert!(failed.message.starts_with("a/c: "), "{}", failed.message);
+    }
+
+    /// A read of a path gone since its metadata was read holds no blob: an edit, not a
+    /// failure. Any other failure stays one.
+    #[test]
+    fn same_blob_not_found_is_false() {
+        let blob = blob_id(b"held");
+
+        // 1. Gone: not the blob.
+        let gone = Err::<Vec<u8>, _>(io::Error::from(io::ErrorKind::NotFound));
+        assert!(!same_blob(gone, &blob).unwrap());
+
+        // 2. Another failure: passed on.
+        let denied = Err::<Vec<u8>, _>(io::Error::from(io::ErrorKind::PermissionDenied));
+        let e = same_blob(denied, &blob).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
+
+        // 3. Read: the blob's bytes or others.
+        assert!(same_blob(Ok(b"held"), &blob).unwrap());
+        assert!(!same_blob(Ok(b"edit"), &blob).unwrap());
+    }
+}
