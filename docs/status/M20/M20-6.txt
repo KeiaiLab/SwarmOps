@@ -1,0 +1,1 @@
+A new store is FORMAT 3 by default, and every crash, power-loss, SIGKILL and write-order sweep runs on FORMAT 3.
