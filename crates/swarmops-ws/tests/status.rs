@@ -633,6 +633,47 @@ fn behind_by_caps_the_base_walk() {
     );
 }
 
+/// The made-up operations above the store's in [`the_stale_check_stops_at_the_recorded_op`]:
+/// two `op_log` pages of them.
+const OPS_ABOVE: u64 = 200;
+
+/// Where among [`OPS_ABOVE`] the record of that test stands: inside the newest page.
+const RECORDED_ABOVE: u64 = 150;
+
+/// The stale check reads the journal down to the operation `workspace.json` records as the
+/// base's and no further: a move of the target to its head older than that record is not looked
+/// for. With 200 operations above the store's (a double), the record among the newest 100:
+/// one `op_log` page, and the refusal names no `moved_op`.
+#[test]
+fn the_stale_check_stops_at_the_recorded_op() {
+    // 1. A workspace of `src` on `b`; the target moved back to `p`, under the record's
+    //    operation.
+    let f = Fixture::new();
+    let p = f.commit(None, &[Put::File("src/a.txt", "a\n")]);
+    move_target(&f, None, &p);
+    let b = commit_aside(&f, &p, "b\n");
+    move_target(&f, Some(&p), &b);
+    f.create("w", TARGET, &["src"]);
+    move_target(&f, Some(&b), &p);
+
+    // 2. 200 made-up operations above the store's; `workspace.json` records one of the newest
+    //    page as the base's.
+    let mut watched = Watched::new(&f.ops);
+    watched.fake_ops = Some(OPS_ABOVE);
+    let recorded = f.last_op() + 1 + RECORDED_ABOVE;
+    let dir = f.beside("w");
+    let mut file = state::read(&RealFs::new(), &dir).unwrap();
+    file.base_op = Some(recorded);
+    state::replace(&RealFs::new(), &dir, &file).unwrap();
+
+    // 3. Stale, from one page: the record's operation, no move to the head.
+    let refused = swarmops_ws::status(&f.ctx_over(&watched), page_of("w")).unwrap_err();
+    assert_eq!(refused.code, "E_WS_STALE", "{refused:?}");
+    assert_eq!(refused.details["base_op"], recorded);
+    assert!(refused.details["moved_op"].is_null(), "{refused:?}");
+    assert_eq!(watched.count("op_log"), 1);
+}
+
 /// The most paths an `E_WS_OUTSIDE_PREFIXES` names.
 const REFUSAL_PATHS: usize = 20;
 
