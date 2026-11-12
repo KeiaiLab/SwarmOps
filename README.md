@@ -110,10 +110,10 @@ Code's worktree hooks a workspace ([Build and test a change](docs/operate/build-
 
 ## When not to use it
 
-- You need macOS or Windows: SwarmOps builds for Linux only today (M12, planned).
+- You need macOS or Windows: SwarmOps builds for Linux only today (both are planned).
 - You need git parity: hooks, signing, submodules and LFS are a non-goal.
 - Several hosts must write into one store at once: today one host writes and the others sync
-  through a git remote (M11, planned).
+  through a git remote (several writers are planned).
 - The store would sit on NFS, SMB, FUSE or under `/mnt/`: not supported
   ([where a store can live](docs/guides/install.md#where-can-a-store-live)).
 
