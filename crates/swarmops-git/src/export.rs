@@ -96,6 +96,41 @@ pub fn step_times() -> [Duration; STEPS] {
     std::array::from_fn(|i| Duration::from_nanos(STEP_NANOS[i].load(Ordering::Relaxed)))
 }
 
+/// How many kinds of work [`work_counts`] counts.
+#[cfg(feature = "test-hooks")]
+const WORKS: usize = 3;
+
+/// The work every export did in this process (test hooks), in [`work_counts`]'s order.
+#[cfg(feature = "test-hooks")]
+static WORK: [AtomicU64; WORKS] = [const { AtomicU64::new(0) }; WORKS];
+
+/// What the export counts of its own work (test hooks).
+#[derive(Clone, Copy)]
+enum Work {
+    /// An export run: [`export()`] or [`export_in`] past its checks.
+    Export,
+    /// A changeset's export oid asked for ([`Run::export_of`]).
+    ExportOf,
+    /// A changeset's record and object read into a run ([`Run::load`]).
+    Node,
+}
+
+/// Adds one to `work` (test hooks); nothing without them.
+fn count(work: Work) {
+    #[cfg(feature = "test-hooks")]
+    WORK[work as usize].fetch_add(1, Ordering::Relaxed);
+    #[cfg(not(feature = "test-hooks"))]
+    let _ = work;
+}
+
+/// The work every export did in this process, by any export: runs, export oids asked for, and
+/// changesets loaded, in that order. A test compares two readings around the work it counts:
+/// counts, not times. The test hooks alone keep them.
+#[cfg(feature = "test-hooks")]
+pub fn work_counts() -> [u64; WORKS] {
+    std::array::from_fn(|i| WORK[i].load(Ordering::Relaxed))
+}
+
 /// The steps of the module documentation, as the step clock counts them.
 #[derive(Clone, Copy)]
 enum Step {
@@ -491,6 +526,7 @@ fn export_on(
     };
     let head = state.target;
     let old = target_at(sink, req)?;
+    count(Work::Export);
     let mut run = Run::new(repo, read, sink, (head, req.memo_key.as_ref()));
     let head_oid = run.export_of(head)?.git_oid();
     clock.lap(Step::Derive);
@@ -783,6 +819,7 @@ impl<'a, 'r> Run<'a, 'r> {
     /// that disagrees is [`RepoError::DerivedCorrupt`], which `verify --deep` names, and one that
     /// is not there is written.
     fn export_of(&mut self, id: ChangesetId) -> Result<ExportedOid, ExportError> {
+        count(Work::ExportOf);
         let reader = ExportReader {
             read: self.read,
             store: self.repo.derived_store(),
@@ -799,6 +836,7 @@ impl<'a, 'r> Run<'a, 'r> {
         let Some(stored) = self.read.changeset(id)? else {
             return Ok(false);
         };
+        count(Work::Node);
         let imported = native::metadata(&stored.changeset, GIT_OID).is_some();
         let Changeset { parents, root, .. } = stored.changeset;
         let node = Node {
