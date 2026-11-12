@@ -1,0 +1,9 @@
+[Unit]
+Description=SwarmOps rehearsal check, every day
+
+[Timer]
+OnBootSec=30min
+OnUnitActiveSec=1d
+
+[Install]
+WantedBy=timers.target

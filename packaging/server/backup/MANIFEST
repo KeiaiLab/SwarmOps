@@ -1,0 +1,22 @@
+# The backup and the restore drill, owned apart from the rest of the kit; the same format as
+# the kit's MANIFEST. `install <file> <destination> <mode>`; `uses <path>`. The backup and the
+# record check run on the serving host; the rehearsal runs where the rehearsal key is.
+install bin/so-backup /usr/sbin/so-backup 0755
+install policy/serving.json /usr/share/swarmops-server/backup/serving.json 0644
+install policy/rehearsal.json /usr/share/swarmops-server/backup/rehearsal.json 0644
+install systemd/swarmops-server-backup.service /usr/lib/systemd/system/swarmops-server-backup.service 0644
+install systemd/swarmops-server-backup.timer /usr/lib/systemd/system/swarmops-server-backup.timer 0644
+install systemd/swarmops-server-rehearsal-check.service /usr/lib/systemd/system/swarmops-server-rehearsal-check.service 0644
+install systemd/swarmops-server-rehearsal-check.timer /usr/lib/systemd/system/swarmops-server-rehearsal-check.timer 0644
+install systemd/swarmops-server-rehearse.service /usr/lib/systemd/system/swarmops-server-rehearse.service 0644
+install systemd/swarmops-server-rehearse.timer /usr/lib/systemd/system/swarmops-server-rehearse.timer 0644
+uses /etc/swarmops-server/kit.conf
+uses /srv/so
+uses /usr/bin/swarmops
+uses /usr/bin/openssl
+uses /usr/bin/curl
+uses /usr/bin/flock
+uses /usr/bin/tar
+uses /usr/bin/awk
+uses /bin/sh
+uses /tmp

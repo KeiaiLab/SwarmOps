@@ -1,0 +1,433 @@
+#!/bin/sh
+# so-backup: the server kit's backup and restore drill until the product's backup command.
+# POSIX sh, like so-kit: it runs on every host and image the package installs on.
+#
+#   so-backup backup                 copy every store under its lock, check each copy, encrypt
+#                                    the copies, the settings and the secrets to two recipients,
+#                                    and ship them to the bucket; prints the object's key
+#   so-backup rehearse <empty dir>   restore the newest backup there, check it against its
+#                                    manifest, send the test alert, write the rehearsal record
+#   so-backup check                  alert when no rehearsal record is newer than the period
+#
+# The bucket is any S3-compatible endpoint, addressed by path, signed by curl. One backup is
+# one object, `backups/<time>-<pid>.cms`: CMS, AES-256-GCM, one recipient for the recovery key
+# (its private half offline) and one for the rehearsal key (only where the drill runs). Inside,
+# a tar archive:
+#
+#   manifest                 swarmops-backup 1 / release / time / part lines / refs lines
+#   parts/stores/<name>.tar  a store as copied under meta/lock, its caches left out
+#   parts/settings.tar       the settings file, as kit.conf
+#   parts/secrets.tar        the files backup_secrets names
+#
+# Settings: the kit's settings file (SO_KIT_CONF, else /etc/swarmops-server/kit.conf). The
+# backup_* keys are this program's and an unknown one is refused; root and swarmops are read as
+# so-kit reads them; every other key is so-kit's to check. Exit 0 done; 1 failed, after the
+# alert; 2 refused, nothing done. Either prints one `so-backup: <reason>` line on stderr.
+set -eu
+LC_ALL=C
+export LC_ALL
+umask 077
+
+FORMAT_HEADER='swarmops-backup 1'
+STAMP=%Y%m%dT%H%M%SZ
+CONNECT_SECONDS=30
+EMPTY_SHA256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+BACKUPS=backups/
+RECORDS=rehearsal/records/
+
+refuse() {
+    printf 'so-backup: %s\n' "$*" >&2
+    exit 2
+}
+
+alert() {
+    [ -n "$backup_alert" ] || return 0
+    "$backup_alert" "$1" "$2" || printf 'so-backup: the alert command failed\n' >&2
+}
+
+# A run that could not do its job: say so, alert, exit 1.
+failed() {
+    printf 'so-backup: %s\n' "$*" >&2
+    alert fail "so-backup: $*"
+    exit 1
+}
+
+plain_path() {
+    case $2 in
+    '') ;;
+    /*[!A-Za-z0-9._/-]* | [!/]*) refuse "settings: $1 is no plain absolute path" ;;
+    esac
+}
+
+# 1. Settings: the defaults, then the lines of the settings file.
+root=/srv/so
+swarmops=/usr/bin/swarmops
+backup_endpoint=
+backup_region=auto
+backup_bucket=
+backup_credential=
+backup_recovery_recipient=
+backup_rehearsal_recipient=
+backup_rehearsal_key=
+backup_secrets=
+# A weekly rehearsal and one day's grace.
+backup_rehearsal_period=691200
+backup_alert=
+
+conf=${SO_KIT_CONF:-/etc/swarmops-server/kit.conf}
+[ -r "$conf" ] || refuse "cannot read the settings file"
+while IFS= read -r line || [ -n "$line" ]; do
+    case $line in
+    '' | '#'*) continue ;;
+    *=*) ;;
+    *) refuse "settings: not key=value: $line" ;;
+    esac
+    key=${line%%=*}
+    value=${line#*=}
+    case $key in
+    root | swarmops | backup_credential | backup_recovery_recipient | backup_rehearsal_recipient | \
+        backup_rehearsal_key | backup_alert)
+        plain_path "$key" "$value"
+        ;;
+    backup_secrets)
+        rest=$value
+        while [ -n "$rest" ]; do
+            piece=${rest%%:*}
+            case $rest in
+            *:*) rest=${rest#*:} ;;
+            *) rest= ;;
+            esac
+            [ -n "$piece" ] || refuse "settings: backup_secrets holds an empty path"
+            plain_path backup_secrets "$piece"
+        done
+        ;;
+    backup_endpoint)
+        # https, or plain http to this host's loopback address alone.
+        case $value in
+        '' | https://* | http://127.0.0.1 | http://127.0.0.1:* | http://localhost | http://localhost:*) ;;
+        *) refuse "settings: backup_endpoint is no https:// address" ;;
+        esac
+        case ${value#*://} in
+        *[!A-Za-z0-9.:-]*) refuse "settings: backup_endpoint is a scheme, a host and a port only" ;;
+        esac
+        ;;
+    backup_region)
+        case $value in
+        '' | *[!a-z0-9-]*) refuse "settings: backup_region is no region name" ;;
+        esac
+        ;;
+    backup_bucket)
+        case $value in
+        *[!a-z0-9.-]*) refuse "settings: backup_bucket is no bucket name" ;;
+        esac
+        ;;
+    backup_rehearsal_period)
+        case $value in
+        '' | *[!0-9]*) refuse "settings: backup_rehearsal_period is no number of seconds" ;;
+        esac
+        ;;
+    backup_*) refuse "settings: unknown key $key" ;;
+    *) continue ;;
+    esac
+    eval "$key=\$value"
+done <"$conf"
+
+# 2. Helpers: settings a step needs, the bucket, times, stores.
+need() {
+    for key in "$@"; do
+        eval "value=\$$key"
+        [ -n "$value" ] || failed "the settings name no $key"
+    done
+}
+
+readable() {
+    for key in "$@"; do
+        eval "value=\$$key"
+        [ -n "$value" ] && [ -r "$value" ] || failed "cannot read the file $key names"
+    done
+}
+
+# The bucket credential: `access_key_id=` and `secret_access_key=` lines.
+read_credential() {
+    readable backup_credential
+    key_id=
+    secret=
+    while IFS= read -r line || [ -n "$line" ]; do
+        case $line in
+        access_key_id=*) key_id=${line#*=} ;;
+        secret_access_key=*) secret=${line#*=} ;;
+        esac
+    done <"$backup_credential"
+    for value in "$key_id" "$secret"; do
+        case $value in
+        '' | *[!A-Za-z0-9+/=._-]*) failed "the bucket credential is no access_key_id and secret_access_key lines" ;;
+        esac
+    done
+}
+
+# One signed request: s3 PUT /<key> <file> | s3 GET /<key> <file> | s3 GET ?<query> -.
+# The credential reaches curl on its standard input, never in its arguments.
+s3() {
+    url="$backup_endpoint/$backup_bucket$2"
+    hash=$EMPTY_SHA256
+    if [ "$1" = PUT ]; then
+        hash=$(sha256sum <"$3")
+        hash=${hash%% *}
+        set -- -T "$3"
+    else
+        set -- -o "$3"
+    fi
+    printf 'user = "%s:%s"\n' "$key_id" "$secret" |
+        curl -K - -sS --fail --proto =https,http --connect-timeout "$CONNECT_SECONDS" \
+            --aws-sigv4 "aws:amz:$backup_region:s3" -H "x-amz-content-sha256: $hash" \
+            "$@" "$url"
+}
+
+# Percent-encoding of a query value: every byte but the unreserved ones.
+encode() {
+    printf '%s\n' "$1" | awk '
+        BEGIN { for (i = 1; i < 256; i++) code[sprintf("%c", i)] = i }
+        {
+            out = ""
+            for (i = 1; i <= length($0); i++) {
+                c = substr($0, i, 1)
+                if (c ~ /[A-Za-z0-9_.~-]/) out = out c
+                else out = out sprintf("%%%02X", code[c])
+            }
+            print out
+        }'
+}
+
+# Every key under a prefix, one a line, across the listing's pages.
+s3_list() {
+    token=
+    while :; do
+        query="list-type=2&prefix=$(encode "$1")"
+        [ -z "$token" ] || query="continuation-token=$(encode "$token")&$query"
+        page=$(s3 GET "?$query" -) || return 1
+        printf '%s\n' "$page" | tr '<' '\n' | sed -n 's/^Key>//p'
+        case $page in
+        *'<IsTruncated>true</IsTruncated>'*) ;;
+        *) return 0 ;;
+        esac
+        token=$(printf '%s\n' "$page" | tr '<' '\n' | sed -n 's/^NextContinuationToken>//p')
+        [ -n "$token" ] || return 1
+    done
+}
+
+# The newest key under a prefix (keys start with their time), or nothing.
+newest() {
+    keys=$(s3_list "$1") || failed "cannot list $1 in the bucket"
+    printf '%s\n' "$keys" | sed '/^$/d' | sort | tail -n 1
+}
+
+# Seconds since the epoch of a time written as $STAMP.
+epoch() {
+    case $1 in
+    [0-9][0-9][0-9][0-9][01][0-9][0-3][0-9]T[0-2][0-9][0-5][0-9][0-6][0-9]Z) ;;
+    *) return 1 ;;
+    esac
+    moment=$(printf '%s\n' "$1" |
+        sed 's/^\(....\)\(..\)\(..\)T\(..\)\(..\)\(..\)Z$/\1-\2-\3 \4:\5:\6/')
+    date -u -d "$moment" +%s
+}
+
+size_and_digest() {
+    size=$(wc -c <"$1")
+    digest=$(sha256sum <"$1")
+    printf '%s %s\n' "$((size))" "${digest%% *}"
+}
+
+# A store's refs: the `result` of `ref list`, which names no path and no time.
+refs_of() {
+    out=$("$swarmops" --repo "$1" ref list 2>/dev/null) || return 1
+    case $out in
+    '{"ok":true,'*'"result":'*',"meta":'*) ;;
+    *) return 1 ;;
+    esac
+    out=${out#*'"result":'}
+    printf '%s\n' "${out%%',"meta":'*}"
+}
+
+verified() {
+    out=$("$swarmops" --repo "$1" verify --deep 2>/dev/null) || return 1
+    case $out in
+    '{"ok":true,'*'"problems":[],'*) return 0 ;;
+    esac
+    return 1
+}
+
+work=
+cleanup() {
+    [ -z "$work" ] || rm -rf "$work"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+# 3. The steps.
+cmd_backup() {
+    [ $# -eq 0 ] || refuse "usage: so-backup backup"
+    need backup_endpoint backup_bucket
+    [ -n "$backup_recovery_recipient" ] && [ -n "$backup_rehearsal_recipient" ] ||
+        failed "a backup needs two recipients: the recovery key and the rehearsal key"
+    readable backup_recovery_recipient backup_rehearsal_recipient
+    read_credential
+    work=$(mktemp -d)
+    mkdir -p "$work/parts/stores" "$work/check" "$work/settings" "$work/secrets"
+    stamp=$(date -u +"$STAMP")
+    release=$("$swarmops" --version 2>/dev/null | head -n 1) || failed "swarmops --version failed"
+
+    # 1. Each store, copied under the lock its writers take, its caches left out; the copy is
+    #    unpacked once and checked with verify --deep, and its refs go to the manifest.
+    : >"$work/refs"
+    for store in "$root"/*/; do
+        store=${store%/}
+        [ -f "$store/meta/lock" ] || continue
+        name=${store##*/}
+        part="$work/parts/stores/$name.tar"
+        flock "$store/meta/lock" tar -c -f "$part" -C "$store" \
+            --exclude=./objects/tmp --exclude=./git/serve.git --exclude=./git/serve-cache \
+            --exclude=./git/mirror.git . || failed "cannot copy the store $name"
+        mkdir "$work/check/$name"
+        tar -x -f "$part" -C "$work/check/$name" || failed "cannot unpack the copy of $name"
+        verified "$work/check/$name" || failed "the copy of $name fails verify --deep"
+        refs=$(refs_of "$work/check/$name") || failed "cannot list the refs of $name"
+        printf 'refs %s %s\n' "$name" "$refs" >>"$work/refs"
+        rm -rf "${work:?}/check/$name"
+    done
+
+    # 2. The settings, and the secrets as a part of their own.
+    cp "$conf" "$work/settings/kit.conf"
+    tar -c -f "$work/parts/settings.tar" -C "$work/settings" kit.conf
+    rest=$backup_secrets
+    while [ -n "$rest" ]; do
+        piece=${rest%%:*}
+        case $rest in
+        *:*) rest=${rest#*:} ;;
+        *) rest= ;;
+        esac
+        [ -r "$piece" ] || failed "cannot read the secret $piece"
+        mkdir -p "$work/secrets${piece%/*}"
+        cp -R "$piece" "$work/secrets$piece"
+    done
+    tar -c -f "$work/parts/secrets.tar" -C "$work/secrets" .
+
+    # 3. The manifest, the archive, its encryption to both recipients, the upload.
+    {
+        printf '%s\n' "$FORMAT_HEADER"
+        printf 'release %s\n' "$release"
+        printf 'time %s\n' "$stamp"
+        for part in "$work"/parts/stores/*.tar "$work/parts/settings.tar" "$work/parts/secrets.tar"; do
+            [ -f "$part" ] || continue
+            printf 'part %s %s\n' "${part#"$work"/}" "$(size_and_digest "$part")"
+        done
+        cat "$work/refs"
+    } >"$work/manifest"
+    tar -c -f "$work/archive.tar" -C "$work" manifest parts
+    openssl cms -encrypt -binary -aes-256-gcm -outform DER -in "$work/archive.tar" \
+        -out "$work/sealed.cms" "$backup_recovery_recipient" "$backup_rehearsal_recipient" ||
+        failed "cannot encrypt the backup"
+    key="${BACKUPS}$stamp-$$.cms"
+    s3 PUT "/$key" "$work/sealed.cms" || failed "cannot ship the backup to the bucket"
+    printf '%s\n' "$key"
+}
+
+cmd_rehearse() {
+    [ $# -eq 1 ] || refuse "usage: so-backup rehearse <empty directory>"
+    target=$1
+    [ -d "$target" ] || refuse "no directory $target"
+    [ -z "$(ls -A "$target")" ] || refuse "the directory is not empty: $target"
+    need backup_endpoint backup_bucket backup_alert
+    [ -n "$backup_rehearsal_key" ] && [ -r "$backup_rehearsal_key" ] ||
+        failed "rehearsal: cannot read the rehearsal key"
+    readable backup_rehearsal_recipient
+    read_credential
+    work=$(mktemp -d)
+    started=$(date -u +%s)
+
+    # 1. The newest backup, fetched, decrypted with the rehearsal key and unpacked. GCM's tag
+    #    refuses a changed byte.
+    key=$(newest "$BACKUPS")
+    [ -n "$key" ] || failed "rehearsal: no backup in the bucket"
+    s3 GET "/$key" "$work/sealed.cms" || failed "rehearsal: cannot fetch $key"
+    openssl cms -decrypt -binary -inform DER -in "$work/sealed.cms" -out "$work/archive.tar" \
+        -recip "$backup_rehearsal_recipient" -inkey "$backup_rehearsal_key" 2>/dev/null ||
+        failed "rehearsal: $key does not decrypt: damaged, or not to the rehearsal key"
+    mkdir "$work/open"
+    tar -x -f "$work/archive.tar" -C "$work/open" || failed "rehearsal: $key does not unpack"
+
+    # 2. The manifest: its header, then every part named once with its size and digest, and
+    #    nothing unnamed.
+    [ "$(head -n 1 "$work/open/manifest")" = "$FORMAT_HEADER" ] ||
+        failed "rehearsal: $key has no manifest this program reads"
+    : >"$work/named"
+    while read -r kind name size digest; do
+        [ "$kind" = part ] || continue
+        [ -f "$work/open/$name" ] || failed "rehearsal: $key lacks the part $name"
+        [ "$(size_and_digest "$work/open/$name")" = "$size $digest" ] ||
+            failed "rehearsal: the part $name differs from the manifest"
+        printf '%s\n' "$name" >>"$work/named"
+    done <"$work/open/manifest"
+    (cd "$work/open" && find parts -type f) | sort >"$work/found"
+    sort "$work/named" | cmp -s - "$work/found" ||
+        failed "rehearsal: $key holds parts the manifest does not name, or names one twice"
+    time=$(sed -n 's/^time //p' "$work/open/manifest")
+    release=$(sed -n 's/^release //p' "$work/open/manifest")
+    taken=$(epoch "$time") || failed "rehearsal: the manifest's time is no time"
+
+    # 3. Each store onto the empty directory: verify --deep, every ref as the manifest has it.
+    mkdir "$target/stores" "$target/settings" "$target/secrets"
+    stores=0
+    for part in "$work"/open/parts/stores/*.tar; do
+        [ -f "$part" ] || continue
+        name=${part##*/}
+        name=${name%.tar}
+        mkdir "$target/stores/$name"
+        tar -x -f "$part" -C "$target/stores/$name" || failed "rehearsal: cannot restore $name"
+        verified "$target/stores/$name" || failed "rehearsal: $name fails verify --deep"
+        refs=$(refs_of "$target/stores/$name") || failed "rehearsal: cannot list the refs of $name"
+        grep -q -x -F -e "refs $name $refs" "$work/open/manifest" ||
+            failed "rehearsal: the refs of $name differ from the manifest"
+        stores=$((stores + 1))
+    done
+    [ "$stores" -eq "$(grep -c '^refs ' "$work/open/manifest")" ] ||
+        failed "rehearsal: the manifest names a store the backup lacks"
+    tar -x -f "$work/open/parts/settings.tar" -C "$target/settings" ||
+        failed "rehearsal: cannot restore the settings"
+    tar -x -f "$work/open/parts/secrets.tar" -C "$target/secrets" ||
+        failed "rehearsal: cannot restore the secrets"
+
+    # 4. The two recovery numbers, the test alert, then the record.
+    finished=$(date -u +%s)
+    restore=$((finished - started))
+    age=$((started - taken))
+    "$backup_alert" test "so-backup: rehearsal of $key passed: $stores stores, restored in $restore s, work at risk $age s" ||
+        failed "rehearsal: the test alert failed"
+    printf '{"backup":"%s","release":"%s","time":"%s","result":"pass","stores":%s,"restore_seconds":%s,"backup_age_seconds":%s}\n' \
+        "$key" "$release" "$(date -u +"$STAMP")" "$stores" "$restore" "$age" >"$work/record.json"
+    s3 PUT "/${RECORDS}$(date -u +"$STAMP").json" "$work/record.json" ||
+        failed "rehearsal: cannot write the rehearsal record"
+}
+
+cmd_check() {
+    [ $# -eq 0 ] || refuse "usage: so-backup check"
+    need backup_endpoint backup_bucket backup_alert
+    read_credential
+    key=$(newest "$RECORDS")
+    [ -n "$key" ] || failed "no rehearsal record: the restore drill has not passed"
+    stamp=${key#"$RECORDS"}
+    taken=$(epoch "${stamp%.json}") || failed "a rehearsal record's name is no time: $key"
+    age=$(($(date -u +%s) - taken))
+    [ "$age" -le "$backup_rehearsal_period" ] ||
+        failed "the newest rehearsal record is $age s old, older than the period of $backup_rehearsal_period s"
+}
+
+[ $# -ge 1 ] || refuse "usage: so-backup backup | rehearse <empty directory> | check"
+step=$1
+shift
+case $step in
+backup) cmd_backup "$@" ;;
+rehearse) cmd_rehearse "$@" ;;
+check) cmd_check "$@" ;;
+*) refuse "unknown step $step" ;;
+esac

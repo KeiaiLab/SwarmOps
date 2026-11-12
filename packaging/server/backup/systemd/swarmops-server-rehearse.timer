@@ -1,0 +1,9 @@
+[Unit]
+Description=SwarmOps restore drill, every week, on the machine that holds the rehearsal key
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+
+[Install]
+WantedBy=timers.target

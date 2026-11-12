@@ -1,0 +1,24 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ShipBackups",
+      "Effect": "Allow",
+      "Action": ["s3:PutObject"],
+      "Resource": ["arn:aws:s3:::<bucket>/backups/*"]
+    },
+    {
+      "Sid": "ListRehearsalRecords",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket"],
+      "Resource": ["arn:aws:s3:::<bucket>"],
+      "Condition": {"StringLike": {"s3:prefix": ["rehearsal/records/*"]}}
+    },
+    {
+      "Sid": "ReadRehearsalRecords",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject"],
+      "Resource": ["arn:aws:s3:::<bucket>/rehearsal/records/*"]
+    }
+  ]
+}
