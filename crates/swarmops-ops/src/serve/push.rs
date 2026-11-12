@@ -70,6 +70,61 @@ const NEW_OID: &str = "new-oid";
 /// A store ref's head and the commit it exports to.
 type Head = (ChangesetId, GitOid);
 
+/// The phase log's line before what a push did under `serve.lock` (test hooks).
+#[cfg(feature = "test-hooks")]
+const HELD_MARK: &str = "serve.push.held 0 0\n";
+
+/// The phase log's names of the export's counts ([`swarmops_git::export::work_counts`]).
+#[cfg(feature = "test-hooks")]
+const WORK_NAMES: [&str; 3] = [
+    "serve.push.exports",
+    "serve.push.export_of",
+    "serve.push.nodes",
+];
+
+/// What a push does while it holds `serve.lock`, counted for the phase log (test hooks): the
+/// git crate's totals before it are written when the lock is taken, then a mark; the held
+/// span's totals and the export's counts when it ends. Nothing without the hooks.
+///
+/// ```text
+///   <judge's totals>  serve.push.held 0 0  <held totals>  serve.push.{exports,export_of,nodes}
+/// ```
+struct Held {
+    #[cfg(feature = "test-hooks")]
+    start: [u64; 3],
+}
+
+impl Held {
+    /// The held span, from now.
+    fn start() -> Held {
+        #[cfg(feature = "test-hooks")]
+        {
+            crate::phase::write_git();
+            super::refresh::append(HELD_MARK);
+            Held {
+                start: swarmops_git::export::work_counts(),
+            }
+        }
+        #[cfg(not(feature = "test-hooks"))]
+        Held {}
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+impl Drop for Held {
+    fn drop(&mut self) {
+        use std::fmt::Write as _;
+
+        crate::phase::write_git();
+        let now = swarmops_git::export::work_counts();
+        let mut lines = String::new();
+        for (name, (now, start)) in WORK_NAMES.iter().zip(now.iter().zip(self.start)) {
+            let _ = writeln!(lines, "{name} 0 {}", now - start);
+        }
+        super::refresh::append(&lines);
+    }
+}
+
 /// The judge's steps 1 to 3c of [the module documentation](self) on `command`, its objects
 /// read through `objects`: what to apply, or the report that refuses it.
 pub(crate) fn judge(
@@ -185,6 +240,7 @@ fn push(
 
     // 4. Under serve.lock: the head now, as its export.
     let lock = ctx.repo.lock(SERVE_LOCK_WAIT).map_err(serve_error)?;
+    let _held = Held::start();
     let head = export_ref(ctx, &command.refname, store, kind)?;
     record(ctx, &lock, &command.refname, head);
 
@@ -336,6 +392,13 @@ fn export_ref(
         attempt += 1;
         let mut sink = GixSink::open(ctx.repo.git_dir().as_std_path())
             .map_err(|e| serve_error(swarmops_git::serve::repo::ServeError::Sink(e)))?;
+
+        // serve.git's main holds its history: a branch new there stops at its fork, not at the
+        // first packed commit (a walk as long as the loose history, under serve.lock).
+        let main = sink
+            .branch(MAIN)
+            .map_err(|e| serve_error(ServeError::Sink(e)))?;
+        req.held = main.into_iter().collect();
         match export(&ctx.ops.repo, &mut sink, &req) {
             Ok(report) => return Ok(Some((report.head, report.head_oid))),
             Err(ExportError::SourceRef(_)) => return Ok(None),

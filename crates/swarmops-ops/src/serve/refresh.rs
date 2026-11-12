@@ -15,8 +15,8 @@
 //!   git locks swept; Current? done        each served ref: export_in(force) into serve.git on
 //! c serve.lock let go; one committed      that snapshot, again on a concurrent move, 8 times
 //!   snapshot (the writer lock's wait);    at most; git/serve.state last, covered = next_seq
-//!   serve.lock again in what is left;     git gc --auto once objects were written
-//!   serve.git or its state written
+//!   serve.lock again in what is left;     then git gc --auto, serve.lock let go,
+//!   serve.git or its state written        once objects were written
 //!   meanwhile? c again, 8 rounds at most,
 //!   then E_BUSY
 //! ```
@@ -49,8 +49,8 @@ use swarmops_git::serve::refmap::to_git;
 use swarmops_git::serve::repo::{ServeError, ServeLock, ServeRepo};
 use swarmops_git::transport::{GitCli, Transport as _};
 use swarmops_git::{
-    BranchUpdate, DivergedReason, ExportError, ExportReport, ExportRequest, GitOid, GixSink,
-    SinkError,
+    BranchUpdate, DivergedReason, ExportError, ExportReport, ExportRequest, GitOid, GitSink as _,
+    GixSink, SinkError,
 };
 use swarmops_repo::RepoRead;
 use swarmops_store::{FsObjectStore, RefKind, TailRepair, ref_kind};
@@ -58,6 +58,9 @@ use swarmops_store::{FsObjectStore, RefKind, TailRepair, ref_kind};
 use super::not_built;
 use crate::LocalOps;
 use crate::error;
+
+/// The branch `serve.git` holds with its history, which a ref new there forks from.
+const MAIN: &str = "main";
 
 /// How many times a refresh reads a ref again after its compare-and-swap in `serve.git` failed,
 /// and how many rounds it takes its committed snapshot in while exports move `serve.git`.
@@ -256,12 +259,17 @@ fn refresh_with(
 
     // 2. serve.lock, then the refresh with it.
     let lock = repo.lock(SERVE_LOCK_WAIT).map_err(serve_error)?;
-    let (_lock, refreshed) = refresh_held(ops, repo, lock, scope, (seq, deadline), between)?;
+    let (lock, mut refreshed) = refresh_held(ops, repo, lock, scope, (seq, deadline), between)?;
+
+    // 3. git's housekeeping, serve.lock let go.
+    drop(lock);
+    housekeep(repo, &mut refreshed);
     Ok(refreshed)
 }
 
 /// [`refresh`] with `lock`, which the caller holds and gets back, held: a preparation's round.
-/// It is let go around the committed snapshot, and taken again within [`SERVE_LOCK_WAIT`].
+/// It is let go around the committed snapshot and around git's housekeeping, and taken again
+/// each time within [`SERVE_LOCK_WAIT`].
 pub(crate) fn refresh_locked(
     ops: &LocalOps,
     repo: &ServeRepo,
@@ -270,7 +278,32 @@ pub(crate) fn refresh_locked(
 ) -> Result<(ServeLock, Refreshed), OpError> {
     let deadline = Instant::now() + SERVE_LOCK_WAIT;
     let seq = ops.repo.snapshot().map_err(error::op)?.next_seq();
-    refresh_held(ops, repo, lock, scope, (seq, deadline), || {})
+    let (lock, mut refreshed) = refresh_held(ops, repo, lock, scope, (seq, deadline), || {})?;
+    if refreshed.objects == 0 {
+        return Ok((lock, refreshed));
+    }
+
+    // git's housekeeping with serve.lock let go, then the lock again for the caller's round.
+    drop(lock);
+    housekeep(repo, &mut refreshed);
+    let lock = repo.lock(SERVE_LOCK_WAIT).map_err(serve_error)?;
+    Ok((lock, refreshed))
+}
+
+/// git's own housekeeping in `repo` (`git gc --auto`), once the exports of `refreshed` wrote
+/// objects, by a caller that holds no `serve.lock`: its repack grows with the history git holds,
+/// and no push or connection waits for it. A failure is a warning in `refreshed`.
+fn housekeep(repo: &ServeRepo, refreshed: &mut Refreshed) {
+    if refreshed.objects == 0 {
+        return;
+    }
+    let gc = GitCli::find().and_then(|git| git.gc_auto(repo.git_dir().as_std_path()));
+    if let Err(e) = gc {
+        let failed = error::transport_error(e, SERVE_GIT, error::Phase::Push);
+        refreshed
+            .warnings
+            .push(format!("gc_auto_failed: {}", failed.message));
+    }
 }
 
 /// Steps (b) to (d) of a refresh under `lock`: `seq` is the store's seq read before it, and
@@ -351,6 +384,70 @@ fn written(repo: &ServeRepo) -> Written {
     (state, repo.refs().ok())
 }
 
+/// The variable that names the phase log (test hooks).
+#[cfg(feature = "test-hooks")]
+const PHASE_LOG_ENV: &str = "SWARMOPS_TEST_PHASE_LOG";
+
+/// The phase log's names of a refresh's exports under `serve.lock` (test hooks): the mark, then
+/// the counts of [`swarmops_git::export::work_counts`].
+#[cfg(feature = "test-hooks")]
+const REFRESH_WORK: [&str; 4] = [
+    "serve.refresh.held",
+    "serve.refresh.exports",
+    "serve.refresh.export_of",
+    "serve.refresh.nodes",
+];
+
+/// What a refresh's exports do under `serve.lock`, counted for the phase log (test hooks), in
+/// one write when it ends: a detached preparation's lines never split a connection's. Nothing
+/// without the hooks.
+///
+/// ```text
+///   serve.refresh.held 0 0  serve.refresh.{exports,export_of,nodes} 0 <n>
+/// ```
+struct Counted {
+    #[cfg(feature = "test-hooks")]
+    start: [u64; 3],
+}
+
+impl Counted {
+    /// The counted span, from now.
+    fn start() -> Counted {
+        Counted {
+            #[cfg(feature = "test-hooks")]
+            start: swarmops_git::export::work_counts(),
+        }
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+impl Drop for Counted {
+    fn drop(&mut self) {
+        use std::fmt::Write as _;
+
+        let now = swarmops_git::export::work_counts();
+        let [mark, names @ ..] = REFRESH_WORK;
+        let mut lines = format!("{mark} 0 0\n");
+        for (name, (now, start)) in names.iter().zip(now.iter().zip(self.start)) {
+            let _ = writeln!(lines, "{name} 0 {}", now - start);
+        }
+        append(&lines);
+    }
+}
+
+/// Appends `text` to the phase log, in one write; nothing without it. A log that cannot be
+/// written is passed over: a test hook does not fail the work it watches.
+#[cfg(feature = "test-hooks")]
+pub(super) fn append(text: &str) {
+    let Some(path) = std::env::var_os(PHASE_LOG_ENV) else {
+        return;
+    };
+    let file = fs::OpenOptions::new().create(true).append(true).open(path);
+    if let Ok(mut file) = file {
+        let _ = file.write_all(text.as_bytes());
+    }
+}
+
 /// Exports `scope`'s refs into `repo` from the committed snapshot `read`, under `lock`; with
 /// [`Scope::All`], nothing when `serve.git` already serves one at least as new: an older
 /// snapshot never moves it back.
@@ -394,6 +491,7 @@ fn export_from(
 
     // 4. Each served ref exported on that snapshot; one the store deleted meanwhile is deleted
     //    in git too.
+    let _counted = Counted::start();
     let snapshot = (read, recovered);
     for (full, (store, kind)) in &wanted {
         let Some(report) = export_one(ops, repo, snapshot, full, (store, *kind))? else {
@@ -421,17 +519,6 @@ fn export_from(
         refreshed
             .warnings
             .push(format!("state_not_written: {}", e.message));
-    }
-
-    // 6. git's own housekeeping, once objects were written: a failure is a warning.
-    if refreshed.objects > 0 {
-        let gc = GitCli::find().and_then(|git| git.gc_auto(repo.git_dir().as_std_path()));
-        if let Err(e) = gc {
-            let failed = error::transport_error(e, SERVE_GIT, error::Phase::Push);
-            refreshed
-                .warnings
-                .push(format!("gc_auto_failed: {}", failed.message));
-        }
     }
     Ok(())
 }
@@ -529,6 +616,13 @@ fn export_one(
         attempt += 1;
         let mut sink = GixSink::open(repo.git_dir().as_std_path())
             .map_err(|e| serve_error(ServeError::Sink(e)))?;
+
+        // serve.git's main holds its history: a ref new there stops at its fork, not at the
+        // first packed commit (a walk as long as the loose history, under serve.lock).
+        let main = sink
+            .branch(MAIN)
+            .map_err(|e| serve_error(ServeError::Sink(e)))?;
+        req.held = main.into_iter().collect();
         let exported = if attempt == 1 {
             export_in(&ops.repo, read, recovered, &mut sink, &req)
         } else {

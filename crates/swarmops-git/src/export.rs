@@ -28,9 +28,11 @@
 //!    repository), and nothing is written; a request that forces the move goes on from the base
 //!    the divergence found, if any.
 //! 5. The commits to write: from the head over every parent, highest generation first, the base
-//!    and its ancestors marked out (their exports are what the branch reaches); a commit the
-//!    repository holds in a pack is trusted, as git trusts it, with everything it reaches. They
-//!    come out parents first.
+//!    and its ancestors marked out (their exports are what the branch reaches), and so are the
+//!    changesets whose exports the request says the repository holds with their history
+//!    ([`ExportRequest::held`]: a branch new there stops at its fork, not at the first packed
+//!    commit); a commit the repository holds in a pack is trusted, as git trusts it, with
+//!    everything it reaches. They come out parents first.
 //! 6. For each, parents first: the trees and blobs its root reaches that its first parent's root
 //!    does not hold at the same path (a root changeset's all of them), each once, then the commit
 //!    itself. An object the repository lacks is written (a commit rendered over its parents'
@@ -200,6 +202,12 @@ pub struct ExportRequest {
     /// checks stops the export's walk of the history below it, and every value derived is
     /// memoized under it; without, every export oid is derived from the history below it.
     pub memo_key: Option<MemoKey>,
+    /// Commits the repository holds with their whole history, each named by a ref of it (its
+    /// `main`, say): step 5 leaves out the changeset each is the export of, with its ancestors,
+    /// as it leaves out the base's, so that a branch new to the repository writes what its
+    /// history adds, and never walks every commit the repository holds loose. One the external id
+    /// index names as the export of no changeset the snapshot holds is passed over.
+    pub held: Vec<GitOid>,
 }
 
 impl ExportRequest {
@@ -212,6 +220,7 @@ impl ExportRequest {
             target: GitTarget::Branch,
             force: false,
             memo_key: None,
+            held: Vec::new(),
         }
     }
 
@@ -574,7 +583,8 @@ fn export_on(
         };
     }
     clock.lap(Step::Base);
-    let commits = run.commits(report.base)?;
+    let kept_out = run.held(&req.held)?;
+    let commits = run.commits(report.base, &kept_out)?;
     clock.lap(Step::Commits);
     run.write(&commits)?;
     clock.lap(Step::Write);
@@ -988,14 +998,34 @@ impl<'a, 'r> Run<'a, 'r> {
         Ok(parsed.and_then(|parsed| parsed.parents.first().copied()))
     }
 
+    /// The changesets the commits `oids` are the exports of, which the repository holds with
+    /// their history ([`ExportRequest::held`]): one the index names no such changeset for is
+    /// passed over.
+    fn held(&mut self, oids: &[GitOid]) -> Result<Vec<ChangesetId>, ExportError> {
+        let mut held = Vec::new();
+        for &oid in oids {
+            if let Some((changeset, exported)) = self.indexed(oid)?
+                && exported.git_oid() == oid
+            {
+                held.push(changeset);
+            }
+        }
+        Ok(held)
+    }
+
     /// Step 5: the commits to write, parents first: from the head over every parent, highest
-    /// generation first, `base` and its ancestors left out; a commit the repository holds in a
-    /// pack is trusted with everything it reaches, and its parents are not walked from it.
-    fn commits(&mut self, base: Option<ChangesetId>) -> Result<Vec<Commit>, ExportError> {
+    /// generation first, `base` and `held` with their ancestors left out; a commit the
+    /// repository holds in a pack is trusted with everything it reaches, and its parents are not
+    /// walked from it.
+    fn commits(
+        &mut self,
+        base: Option<ChangesetId>,
+        held: &[ChangesetId],
+    ) -> Result<Vec<Commit>, ExportError> {
         let mut walk = Walk::default();
         self.mark(&mut walk, self.head, Mark::In)?;
-        if let Some(base) = base {
-            self.mark(&mut walk, base, Mark::Out)?;
+        for out in base.iter().chain(held) {
+            self.mark(&mut walk, *out, Mark::Out)?;
         }
         let mut commits = Vec::new();
         // Every changeset is taken after its children, as a parent's generation is lower than

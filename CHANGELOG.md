@@ -87,6 +87,10 @@ collects the changes on `stable` that no release holds yet, until the next relea
   where it refused them with `E_WS_DIRTY` until they were discarded (the M19 design §4.4).
 - `serve` records a push its hooks refuse with the refusal's code and exit, not exit 0, keeps the
   split of a second pack on one connection, and removes splits a dead `serve` left behind.
+- A push of a branch new to `serve.git`, and a connection's refresh of a store ref new there, no
+  longer walk every loose commit of `main` while they hold `serve.lock` (1,001 changesets loaded
+  on a 1,000-changeset store, 10,001 on 10,000; now 2): their exports stop at `serve.git`'s
+  `main`. `git gc --auto` runs after a refresh lets the lock go.
 
 ### Security
 
