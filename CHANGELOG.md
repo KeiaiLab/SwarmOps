@@ -72,6 +72,11 @@ collects the changes on `stable` that no release holds yet, until the next relea
 - `serve` records a push its hooks refuse with the refusal's code and exit, not exit 0, keeps the
   split of a second pack on one connection, and removes splits a dead `serve` left behind.
 
+### Security
+
+- `ws create` refuses a `.swarmws` that is a link (`E_WS_DIRTY`) before its volume probe writes or
+  removes a file through it; the probe wrote `probe-a` and `probe-l` at the link's target.
+
 ## [0.11.0] - 2026-11-09
 
 Taking back, landing together and safer workspaces. The 0.11.0 release holds M18's and M19's
