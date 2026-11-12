@@ -8,6 +8,7 @@ SwarmOps is version control for swarms of coding agents: many agent processes co
 
 [![CI](https://github.com/KeiaiLab/SwarmOps/actions/workflows/ci.yml/badge.svg?branch=stable)](https://github.com/KeiaiLab/SwarmOps/actions/workflows/ci.yml?query=branch%3Astable)
 [![Latest release](https://img.shields.io/github/v/release/KeiaiLab/SwarmOps)](https://github.com/KeiaiLab/SwarmOps/releases)
+[![Commits on stable since the latest release](https://img.shields.io/github/commits-since/KeiaiLab/SwarmOps/latest/stable)](https://swarmops.cc/now)
 [![Licence](https://img.shields.io/github/license/KeiaiLab/SwarmOps)](LICENSE)
 
 [Documentation](https://swarmops.cc/docs) · [Install](#install) · [Quick start](#quick-start) ·
