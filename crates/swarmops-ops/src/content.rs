@@ -721,6 +721,45 @@ mod tests {
         assert_eq!(error.details["index"], 1, "{error:?}");
     }
 
+    /// A land's resolutions count what they converted too: after 2 inline bytes, a device that
+    /// never ends is read no further than one byte past the 2 the total of 4 leaves it, under a
+    /// put's limit of 3, and the refusal is the total's, its `size` the 2 with the 3 read, at
+    /// that resolution's path. Were the earlier bytes not counted, it would read 4 and break the
+    /// put's limit instead.
+    #[test]
+    fn resolutions_within_counts_a_running_total() {
+        let resolutions = vec![
+            (RepoPath::new("a").unwrap(), inline("ab")),
+            (RepoPath::new("z").unwrap(), file("/dev/zero")),
+        ];
+        let error = resolutions_within(resolutions, 3, 4).expect_err("over the total");
+        assert_eq!(error.code, ErrorCode::TooLarge.as_str(), "{error:?}");
+        assert_eq!(
+            (
+                &error.details["size"],
+                &error.details["limit"],
+                &error.details["scope"],
+                &error.details["path"],
+            ),
+            (
+                &Value::from(5),
+                &Value::from(4),
+                &Value::from("commit"),
+                &Value::from("z")
+            ),
+            "{error:?}"
+        );
+
+        // At the total, the two resolutions are taken, in order.
+        let at_the_total = vec![
+            (RepoPath::new("a").unwrap(), inline("ab")),
+            (RepoPath::new("b").unwrap(), inline("de")),
+        ];
+        let taken = resolutions_within(at_the_total, 3, 4).unwrap();
+        let bytes: Vec<&[u8]> = taken.iter().map(|(_, bytes)| &bytes[..]).collect();
+        assert_eq!(bytes, [b"ab", b"de"]);
+    }
+
     /// A client file is counted by its `stat`ed length, not by a read: a file of 5 bytes that
     /// cannot be opened is refused for a total of 4 by its length, named, rather than for its
     /// read. Needs a user that file modes bind (not root): the open is checked to fail.

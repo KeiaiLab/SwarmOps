@@ -535,6 +535,66 @@ mod tests {
         assert!(cut.truncated);
     }
 
+    /// The entry that spans a file's hunks past its first 128 says `truncated`, with each side's
+    /// lines from the 129th hunk's start to the last one's end and no text; and so does the one a
+    /// report ends its first file with once the entries' budget is spent, though every text
+    /// would fit: the hunks before it carry theirs and are not `truncated`, and the report is.
+    #[test]
+    fn spanning_says_truncated_past_128_hunks() {
+        const HUNKS: u32 = 1_000;
+        let hunk = |i: u32| {
+            ConflictHunk::new(
+                2 * i..2 * i + 1,
+                2 * i..2 * i + 1,
+                2 * i..2 * i + 1,
+                format!("l{i}\n").into_bytes(),
+                format!("o{i}\n").into_bytes(),
+                format!("t{i}\n").into_bytes(),
+            )
+        };
+        let hunks: Vec<ConflictHunk> = (0..HUNKS).map(hunk).collect();
+        let lines = |first, last| LinesOut::new(first, last);
+        let to = 2 * u64::from(HUNKS - 1) + 1;
+
+        // 1. The hunks past the first 128, as one entry.
+        let rest = spanning(&hunks[128..], 128).expect("hunks to span");
+        assert_eq!(rest.id, 128);
+        assert!(rest.truncated, "{rest:?}");
+        let from = 2 * 128 + 1;
+        assert_eq!(
+            (&rest.base, &rest.ours, &rest.theirs),
+            (&lines(from, to), &lines(from, to), &lines(from, to))
+        );
+        assert!(spanning(&[], 0).is_none(), "no hunks, no entry");
+
+        // 2. A report with room for every text: its last hunk spans the rest of the file.
+        let content = ConflictKind::Content { hunks };
+        let conflicts = MergeConflicts::new(
+            id(1),
+            id(2),
+            id(3),
+            vec![conflict("a", content)],
+            Vec::new(),
+            BTreeMap::new(),
+            Vec::new(),
+        );
+        let report = report(&conflicts, u64::MAX).unwrap();
+        let [as_made @ .., spanned] = &report.files[0].hunks[..] else {
+            panic!("hunks: {report:?}");
+        };
+        assert!(!as_made.is_empty() && as_made.len() < HUNKS as usize);
+        for hunk in as_made {
+            assert!(!hunk.truncated && hunk.ours.text.is_some(), "{hunk:?}");
+        }
+        let from = 2 * u64::from(spanned.id) + 1;
+        assert_eq!(
+            (&spanned.base, &spanned.ours, &spanned.theirs),
+            (&lines(from, to), &lines(from, to), &lines(from, to))
+        );
+        assert!(spanned.truncated, "{spanned:?}");
+        assert!(report.truncated);
+    }
+
     /// A report of conflicts holding a hundred thousand hunks in a file and ten thousand files
     /// after it stays within the operations spec's 64 KiB target for a response (§9) with no
     /// texts, made in well under a second: the first file and its first hunk, with their
