@@ -750,3 +750,45 @@ reason = "new in M18 (task M18-11): no two quiet baseline runs yet; the host was
 
 [skip."merge_base/200k"]
 reason = "new in M18 (task M18-11): no two quiet baseline runs yet; the host was never quiet when the bench was written"
+
+[skip."compaction/runs_step/100k"]
+reason = "new in M20 (task M20-7): no two quiet baseline runs yet; the host was under load 700 to 850 when the bench was written"
+
+[skip."compaction/runs_step/1M"]
+reason = "new in M20 (task M20-7): no two quiet baseline runs yet; the host was under load 700 to 850 when the bench was written"
+
+[skip."history/200k_v3/walk_changeset_100"]
+reason = "new in M20 (task M20-7): no two quiet baseline runs yet; the host was under load 700 to 850 when the bench was written"
+
+[skip."history/200k_v3/walk_first_parent_100"]
+reason = "new in M20 (task M20-7): no two quiet baseline runs yet; the host was under load 700 to 850 when the bench was written"
+
+[skip."history/200k_v3/lookup_hit"]
+reason = "new in M20 (task M20-7): no two quiet baseline runs yet; the host was under load 700 to 850 when the bench was written"
+
+[skip."history/200k_v3/lookup_miss"]
+reason = "new in M20 (task M20-7): no two quiet baseline runs yet; the host was under load 700 to 850 when the bench was written"
+
+[skip."history/200k_v3/insert_tail0"]
+reason = "new in M20 (task M20-7): no two quiet baseline runs yet; the host was under load 700 to 850 when the bench was written"
+
+[skip."history/200k_v3/insert_tail1024"]
+reason = "new in M20 (task M20-7): no two quiet baseline runs yet; the host was under load 700 to 850 when the bench was written"
+
+[skip."history/1M_v3/walk_changeset_100"]
+reason = "new in M20 (task M20-7): no two quiet baseline runs yet; the host was under load 700 to 850 when the bench was written"
+
+[skip."history/1M_v3/walk_first_parent_100"]
+reason = "new in M20 (task M20-7): no two quiet baseline runs yet; the host was under load 700 to 850 when the bench was written"
+
+[skip."history/1M_v3/lookup_hit"]
+reason = "new in M20 (task M20-7): no two quiet baseline runs yet; the host was under load 700 to 850 when the bench was written"
+
+[skip."history/1M_v3/lookup_miss"]
+reason = "new in M20 (task M20-7): no two quiet baseline runs yet; the host was under load 700 to 850 when the bench was written"
+
+[skip."history/1M_v3/insert_tail0"]
+reason = "new in M20 (task M20-7): no two quiet baseline runs yet; the host was under load 700 to 850 when the bench was written"
+
+[skip."history/1M_v3/insert_tail1024"]
+reason = "new in M20 (task M20-7): no two quiet baseline runs yet; the host was under load 700 to 850 when the bench was written"

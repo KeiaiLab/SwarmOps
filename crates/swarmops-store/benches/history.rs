@@ -28,6 +28,11 @@
 //!   holds 31 frames past the checkpoint, the most the batched checkpoint leaves, every frame a
 //!   move of `main`.
 //!
+//! FORMAT 3 has its own variants beside these, a chain of the same length under the name
+//! `<size>_v3` (the M20 plan's M20-7): the same walks, `lookup_hit` and `lookup_miss` (a
+//! changeset by id through the runs, [`MetaRead::changeset`]) and the two inserts, on a store
+//! whose runs a view step built. The V2 variants keep their names.
+//!
 //! Besides criterion's estimate, each variant prints the nearest-rank percentiles of every call
 //! it timed, warm-up included (`percentiles history/<size>/<variant>: …`, a line `just perf`
 //! shows). `SWARMOPS_BENCH_HISTORY_CHANGESETS=<n>[,<n>…]` measures other chain lengths (each of
@@ -43,7 +48,7 @@ use criterion::{BenchmarkGroup, Criterion, criterion_group, criterion_main};
 use swarmops_core::{ChangesetId, ObjectKind, hash_object};
 use swarmops_store::{
     CasResult, ChangesetMeta, Index, InsertOutcome, Journal, Layout, MetaRead, MetaStore,
-    MetaWrite, RealFs, SortedView,
+    MetaWrite, RealFs, SortedView, Step, StoreFormat,
 };
 use swarmops_testkit::fs::NoSyncFs;
 use swarmops_testkit::measure::{base_dir, mix};
@@ -318,6 +323,25 @@ impl Chain<'_> {
         }
     }
 
+    /// FORMAT 3's lookups by id: [`MetaRead::changeset`] of an id the runs hold and of one they do
+    /// not, on one snapshot.
+    fn bench_lookups(&self, group: &mut BenchmarkGroup<'_, WallTime>) {
+        let read = self.store.read().expect("a snapshot");
+        let hits: Vec<ChangesetId> = scattered(0, self.len).into_iter().map(id).collect();
+        let misses: Vec<ChangesetId> = (0..TARGETS)
+            .map(|i| id(NEW_IDS - 1 - u64::try_from(i).expect("fits")))
+            .collect();
+        for (&hit, &miss) in hits.iter().zip(&misses) {
+            assert!(read.changeset(hit).expect("a lookup").is_some());
+            assert_eq!(read.changeset(miss).expect("a lookup"), None);
+        }
+        for (variant, ids) in [("hit", &hits), ("miss", &misses)] {
+            timed(group, &format!("{}/lookup_{variant}", self.name), |i| {
+                clock(|| black_box(read.changeset(ids[i]).expect("a lookup"))).1
+            });
+        }
+    }
+
     /// An insert of a new child of `main`'s head, the index's tail holding `tail` records.
     fn bench_insert(&self, group: &mut BenchmarkGroup<'_, WallTime>, tail: u64) {
         let head = id(self.len - 1);
@@ -406,8 +430,39 @@ fn history(c: &mut Criterion) {
         chain.grow_one_by_one(chain.len + PAST_CHECKPOINT);
         assert_eq!(chain.past_checkpoint(), PAST_CHECKPOINT);
         chain.bench_reflog(&mut group);
+        drop(chain);
+        bench_v3(&mut group, &base, changesets);
     }
     group.finish();
+}
+
+/// FORMAT 3's chain of `changesets` changesets: built without syncs, its runs built by a view
+/// step, then timed through a handle on the real filesystem.
+fn bench_v3(group: &mut BenchmarkGroup<'_, WallTime>, base: &std::path::Path, changesets: u64) {
+    let dir = tempfile::tempdir_in(base).expect("a store dir");
+    let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("a UTF-8 dir");
+    let layout = Layout::with_format(&root, StoreFormat::V3);
+    let builder = MetaStore::create_in(layout.clone(), Arc::new(NoSyncFs)).expect("create");
+    for from in (0..changesets).step_by(usize::try_from(PER_TRANSACTION).expect("fits")) {
+        extend(&builder, from, changesets.min(from + PER_TRANSACTION));
+    }
+    builder.flush().expect("flush");
+    assert_eq!(builder.step_views().expect("a step"), Step::Done);
+    let mut chain = Chain {
+        name: format!("{}_v3", size_name(changesets)),
+        root: &root,
+        builder,
+        store: MetaStore::open_in(layout, Arc::new(RealFs::new())).expect("open the store"),
+        len: changesets,
+    };
+    chain.bench_walks(group);
+    chain.bench_lookups(group);
+    chain.bench_insert(group, 0);
+
+    // One transaction of TAIL changesets: no step, the tail holds them all.
+    extend(&chain.builder, changesets, changesets + TAIL);
+    chain.len += TAIL;
+    chain.bench_insert(group, TAIL);
 }
 
 criterion_group!(benches, history);
