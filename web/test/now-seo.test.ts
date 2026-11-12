@@ -2,7 +2,8 @@
 //
 //   node --experimental-strip-types --test 'web/test/*.test.ts'
 //
-// /now has a unique title, a description, canonical /now and Open Graph like the other pages.
+// /now has a unique title, a description, canonical /now, Open Graph like the other pages, and a
+// sitemap entry whose lastmod is the commit built (data-stable-commit's date, never typed).
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
@@ -13,6 +14,7 @@ const SITE_URL = 'https://swarmops.cc';
 const NOW_TITLE = 'Now on stable: SwarmOps';
 
 const nowHtml = readFileSync(path.join(OUT, 'now.html'), 'utf8');
+const sitemap = readFileSync(path.join(OUT, 'sitemap.xml'), 'utf8');
 
 /** The content of `<meta {attr}="{key}" content="...">`, or undefined. */
 function meta(html: string, attr: string, key: string): string | undefined {
@@ -47,4 +49,11 @@ test('now_canonical_and_open_graph', () => {
   assert.equal(meta(nowHtml, 'property', 'og:site_name'), 'SwarmOps');
   assert.equal(meta(nowHtml, 'property', 'og:image'), `${SITE_URL}/og-image.png`);
   assert.ok(meta(nowHtml, 'property', 'og:description'), 'now.html: no og:description');
+});
+
+test('now_in_sitemap_with_lastmod', () => {
+  // lastmod is a UTC day; the page states the same day as the commit's date.
+  const entry = new RegExp(`<loc>${SITE_URL}/now</loc>\\s*<lastmod>(\\d{4}-\\d{2}-\\d{2})[^<]*</lastmod>`).exec(sitemap);
+  assert.ok(entry, 'sitemap.xml: no /now entry with a lastmod');
+  assert.ok(nowHtml.includes(entry[1]), `now.html does not state the lastmod day ${entry[1]}`);
 });
