@@ -36,7 +36,8 @@
 //! not check is [`RepoError::DerivedCorrupt`], never derived again in silence. Every value a run
 //! with a key derives, from objects or from memos that check, is written under the key too, so
 //! that a value the key authenticates comes from the store's objects by induction. Without a key
-//! no `_mac` memo is read or written.
+//! no `_mac` memo is read or written. A memo that holds [`GitOid::NULL`], the oid of no object,
+//! is passed over with a key or without: the oid is derived again, as where there is no memo.
 //!
 //! Given a key, the import leaves these memos too (the M18 design §2.3): each commit, tree and
 //! blob it converts without loss gets its `_mac` memo once the frame that holds it is durable, its
@@ -594,6 +595,7 @@ fn mac_slot<'a>(name: &'a str, subject: ObjectId, id: &'a [u8]) -> DerivedSlot<'
 /// The git oid the tree or blob memo `name` of `subject` holds under `key`, if the derived store
 /// holds one; one whose length or MAC does not check is [`RepoError::DerivedCorrupt`] (the
 /// export's or the import's memo of `about`), so that no memo the key did not make is taken.
+/// `None` too for one that holds [`GitOid::NULL`] ([`no_object`]).
 fn trusted_oid(
     memo: &DerivedStore,
     name: &str,
@@ -609,7 +611,15 @@ fn trusted_oid(
         return Err(mac_refused(name, about, subject, value.len()));
     }
     let oid = <[u8; 20]>::try_from(&value[..20]).expect("20 bytes of 52");
-    Ok(Some(GitOid(oid)))
+    Ok(Some(GitOid(oid)).filter(|&oid| !no_object(oid)))
+}
+
+/// Whether `oid`, read from a memo, is [`GitOid::NULL`], git's "no object": the oid of no tree,
+/// blob or commit. A store written before flagged content was refused ([`hashed`]) may hold such
+/// a memo, under a key too; each read that takes a memo's word passes over it and derives the
+/// oid again, as where there is no memo.
+fn no_object(oid: GitOid) -> bool {
+    oid == GitOid::NULL
 }
 
 /// The refusal of memo `name` of `subject` under the key, of `len` bytes, whose MAC does not
@@ -727,7 +737,8 @@ fn slot(name: &str, subject: ObjectId) -> DerivedSlot<'_> {
 /// The git oid memoized for `subject` under `name`, if the derived store holds one. A value of
 /// another length than an oid's 20 bytes is [`RepoError::Derived`], as a derived value that does
 /// not decode is: [`tree_oid`] and [`blob_oid`] have no changeset to name. The export, which has
-/// one, reads through [`check_memo`].
+/// one, reads through [`check_memo`]. `None` too for a memo that holds [`GitOid::NULL`]
+/// ([`no_object`]).
 fn memoized(
     memo: &DerivedStore,
     name: &str,
@@ -735,7 +746,7 @@ fn memoized(
 ) -> Result<Option<GitOid>, RepoError> {
     match stored_oid(memo, name, subject)? {
         None => Ok(None),
-        Some(Ok(oid)) => Ok(Some(oid)),
+        Some(Ok(oid)) => Ok(Some(oid).filter(|&oid| !no_object(oid))),
         Some(Err(len)) => Err(RepoError::Derived {
             name: name.to_owned(),
             why: format!("a memo of {len} bytes, where a git oid has {OID_LEN}"),
@@ -1333,8 +1344,9 @@ impl ExportOids {
     }
 
     /// Changeset `id`'s value from its `git_oid_mac` memo under the key, where the MAC checks;
-    /// `None` without a key or without such a memo. One whose length, bytes or MAC does not check
-    /// is [`RepoError::DerivedCorrupt`].
+    /// `None` without a key or without such a memo, or for one that holds [`GitOid::NULL`]
+    /// ([`no_object`]). One whose length, bytes or MAC does not check is
+    /// [`RepoError::DerivedCorrupt`].
     fn trusted(&self, memo: &DerivedStore, id: ChangesetId) -> Result<Option<Known>, RepoError> {
         let OnMemo::Trusted(key) = &self.on_memo else {
             return Ok(None);
@@ -1348,7 +1360,7 @@ impl ExportOids {
             key.checks(EXPORT_MAC_MEMO, id.0, value, mac)
         });
         match decoded {
-            Some(known) => Ok(Some(known)),
+            Some(known) => Ok(Some(known).filter(|known| !no_object(known.value.git_oid()))),
             None => Err(mac_refused(EXPORT_MAC_MEMO, id, id.0, bytes.len())),
         }
     }
@@ -1499,7 +1511,8 @@ impl ImportMemos {
     }
 
     /// Whether changeset `id` holds a memo under the key, its MAC checking, that says it was
-    /// imported and exports to its own commit. A read that fails is no such memo.
+    /// imported and exports to its own commit. A read that fails is no such memo, nor is one that
+    /// holds [`GitOid::NULL`] ([`no_object`]).
     fn held(&self, memo: &DerivedStore, id: ChangesetId) -> bool {
         let key_id = self.key.id();
         let slot = mac_slot(EXPORT_MAC_MEMO, id.0, &key_id);
@@ -1509,6 +1522,10 @@ impl ImportMemos {
         let Some(known) = decode_export_mac(&bytes) else {
             return false;
         };
+        if no_object(known.value.git_oid()) {
+            return false;
+        }
+
         let (value, mac) = bytes.split_at(EXPORT_MAC_VALUE_LEN);
         known.imported && known.value.kept && self.key.checks(EXPORT_MAC_MEMO, id.0, value, mac)
     }
@@ -1707,6 +1724,78 @@ mod tests {
         refused(repo.derived::<ExportOid>(id, &()), TREE_MEMO);
         assert_eq!(memo(&repo, TREE_MEMO, cs.root.0, &[]), None);
         assert_eq!(memo(&repo, ExportOid::NAME, id.0, &[]), None);
+    }
+
+    /// A store with [`ExportOid`] registered, holding one changeset that puts `f\n` at `f`: the
+    /// store and the changeset.
+    fn one_file_store() -> (TempDir, LocalRepo, ChangesetId) {
+        let (dir, _, mut repo) = new_repo();
+        register(&mut repo).unwrap();
+        let id = repo
+            .commit(request(&[], vec![put("f", b"f\n")], "f\n"))
+            .unwrap()
+            .id;
+        (dir, repo, id)
+    }
+
+    /// A memo that holds [`GitOid::NULL`], git's "no object", is no oid of a tree, a blob or a
+    /// commit: a store written before flagged content was refused may hold one, under a key too,
+    /// its MAC checking. Each read that takes a memo's word derives the oid again, as it does
+    /// where there is no memo.
+    #[test]
+    fn a_null_oid_memo_is_not_trusted() {
+        let key = MemoKey::from_bytes([1; 32]);
+        let null_export = Known {
+            value: ExportedOid::new(GitOid::NULL.0, true),
+            imported: true,
+        };
+
+        // 1. What the store's own bytes give, no memo read or written.
+        let (_dir, repo, id) = one_file_store();
+        let read = repo.snapshot().unwrap();
+        let reader = ExportReader::new(&read, repo.derived_store());
+        let (file, root) = (
+            blob(b"f\n"),
+            read.changeset(id).unwrap().unwrap().changeset.root,
+        );
+        let real_blob = oid::git_hash(RawKind::Blob, b"f\n");
+        let real_tree = rendered_tree_oid(&reader, &OidCache::new(), root).unwrap();
+        let real_commit = ExportOids::new(OnMemo::Skip)
+            .of(&read, &reader, &OidCache::new(), id)
+            .unwrap();
+        for real in [real_blob, real_tree, real_commit.git_oid()] {
+            assert_ne!(real, GitOid::NULL);
+        }
+
+        // 2. Null memos under the key, each MAC checking: none is taken.
+        let store = repo.derived_store();
+        memoize_mac(store, BLOB_MAC_MEMO, &key, file.0, &GitOid::NULL.0);
+        memoize_mac(store, TREE_MAC_MEMO, &key, root.0, &GitOid::NULL.0);
+        let value = export_mac_value(null_export);
+        memoize_mac(store, EXPORT_MAC_MEMO, &key, id.0, &value);
+
+        let keyed = (id, Some(&key));
+        let got = keyed_blob_oid(&reader, &OidCache::new(), keyed, file).unwrap();
+        assert_eq!(got, real_blob, "git_blob_oid_mac");
+        let got = keyed_tree_oid(&reader, &OidCache::new(), keyed, root).unwrap();
+        assert_eq!(got, real_tree, "git_tree_oid_mac");
+        let mut exports = ExportOids::new(OnMemo::Trusted(key.clone()));
+        let got = exports.of(&read, &reader, &OidCache::new(), id).unwrap();
+        assert_eq!(got, real_commit, "git_oid_mac");
+        assert!(
+            !ImportMemos::new(key.clone()).held(store, id),
+            "the import takes a null git_oid_mac memo as an import that exports to itself"
+        );
+
+        // 3. Null memos without a key, a store of its own: the memoized oids are derived too.
+        let (_dir, repo, _) = one_file_store();
+        let read = repo.snapshot().unwrap();
+        let reader = ExportReader::new(&read, repo.derived_store());
+        for (name, subject) in [(BLOB_MEMO, file.0), (TREE_MEMO, root.0)] {
+            memoize(repo.derived_store(), name, subject, GitOid::NULL);
+        }
+        assert_eq!(blob_oid(&reader, file).unwrap(), real_blob, "git_blob_oid");
+        assert_eq!(tree_oid(&reader, root).unwrap(), real_tree, "git_tree_oid");
     }
 
     /// A `git_tree_oid` or `git_blob_oid` memo of another length than an oid's is a stored value
