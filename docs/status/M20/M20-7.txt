@@ -1,0 +1,1 @@
+Measurement cases and benches for FORMAT 3 at 1,000,000 records are in the perf recipe and the weekly run.
