@@ -21,6 +21,7 @@ mod land_order;
 mod merge;
 mod oplog;
 mod path_history;
+mod protected;
 mod raw;
 mod read;
 mod rebase;
