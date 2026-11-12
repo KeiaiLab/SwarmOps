@@ -1283,6 +1283,49 @@ fn frames_before_reads_newest_first_across_the_checkpoint() {
     assert_eq!(seqs_before(&store.read().unwrap(), None, 1), [40]);
 }
 
+/// `MetaRead::frames_before` reads the frames before the checkpoint 256 at a time: over 300
+/// frames it lists every one newest first, and pages across the batch seam, with frames past
+/// the checkpoint and with none.
+#[test]
+fn frames_before_reads_across_its_256_frame_batches() {
+    const FRAMES: u64 = 300;
+
+    let (_dir, root) = new_root();
+    // Durability is not the subject: 300 commits on a filesystem that never syncs.
+    let store = MetaStore::create_with_fs(&root, checked(NoSyncFs)).unwrap();
+    for n in 0..FRAMES {
+        insert(&store, &[cs(n, &[])]);
+    }
+    let checkpoint = ckpt(&root);
+    let journal = frames(&root);
+    let past = journal
+        .iter()
+        .filter(|frame| frame.offset >= checkpoint)
+        .count();
+    assert_eq!(past, 12, "frames 288 to 299 lie past the checkpoint");
+
+    // 1. Frames past the checkpoint: the first batch ends at 288, so its seam is at 32.
+    let read = store.read().unwrap();
+    assert_eq!(seqs_before(&read, None, usize::MAX), down(FRAMES - 1, 0));
+    assert_eq!(
+        seqs_before(&read, Some(34), 5),
+        down(33, 29),
+        "across the seam"
+    );
+    drop(read);
+
+    // 2. None past it: the first batch ends at 300, so its seam is at 44.
+    store.flush().unwrap();
+    let read = store.read().unwrap();
+    let newest_first: Vec<Frame> = journal.iter().rev().cloned().collect();
+    assert_eq!(read.frames_before(None, usize::MAX).unwrap(), newest_first);
+    assert_eq!(
+        seqs_before(&read, Some(46), 5),
+        down(45, 41),
+        "across the seam"
+    );
+}
+
 /// `MetaRead::frame` reads one frame of a snapshot by its seq, past the checkpoint or before
 /// it, and none past the snapshot's newest frame, also once later frames are committed.
 #[test]
@@ -4081,6 +4124,26 @@ fn insert_changeset_refuses_more_than_255_parents() {
     );
 }
 
+/// The limit's other side: a changeset with exactly 255 parents is inserted, committed in a
+/// frame of its own and read back whole, one generation past its parents.
+#[test]
+fn insert_changeset_accepts_255_parents() {
+    let (_dir, root, store) = new_store();
+    insert(&store, &roots(0, 255));
+    let parents: Vec<u64> = (0..255).collect();
+
+    // 1. Queued as any changeset is, at the seq after its parents'.
+    let mut write = store.write().unwrap();
+    let outcome = write.insert_changeset(cs(1000, &parents)).unwrap();
+    assert_eq!(outcome, InsertOutcome::Inserted { seq: 255 });
+    write.commit().unwrap();
+
+    // 2. Committed and read back with every parent.
+    assert_eq!(frames(&root).len(), 2, "a frame for the roots, one for it");
+    let got = store.read().unwrap().changeset(id(1000)).unwrap();
+    assert_eq!(got, Some(stored(1000, &parents, 255, 2)));
+}
+
 #[test]
 fn replay_checks_ref_names_before_appending_to_the_index() {
     let (_dir, root, store) = new_store();
@@ -4527,6 +4590,11 @@ fn snapshots_stay_consistent_while_a_writer_commits() {
     });
 }
 
+/// How long a write or a committed read with a timeout of a few hundred milliseconds may wait
+/// before it gives up: well under the store's 10 s default, so that a store that waits the
+/// default instead of the timeout it was given fails.
+const BUSY_BOUND: Duration = Duration::from_secs(5);
+
 #[test]
 fn write_times_out_as_busy() {
     let (_dir, root, store) = new_store();
@@ -4538,7 +4606,7 @@ fn write_times_out_as_busy() {
     assert!(matches!(impatient.write(), Err(StoreError::Busy)));
     let waited = started.elapsed();
     assert!(
-        waited >= Duration::from_millis(100),
+        (Duration::from_millis(100)..BUSY_BOUND).contains(&waited),
         "gave up after {waited:?}"
     );
     drop(held);
@@ -4795,7 +4863,7 @@ fn read_committed_times_out_busy_behind_a_held_lock() {
     }
     let waited = started.elapsed();
     assert!(
-        waited >= Duration::from_millis(200),
+        (Duration::from_millis(200)..BUSY_BOUND).contains(&waited),
         "gave up after {waited:?}"
     );
     drop(held);
@@ -4825,6 +4893,8 @@ fn read_committed_on_a_clean_tail_writes_nothing() {
     assert_eq!(read.get_ref("main").unwrap(), Some(ref_state(1, 1)));
     drop(read);
     let made = calls();
+    // Self-check: an empty recording would pass the check below whatever the read did.
+    assert!(!made.is_empty(), "the committed read was not recorded");
     let method = |call: &String| {
         let name = call.split(' ').next();
         (FsMethod::ALL.into_iter())
@@ -4840,7 +4910,7 @@ fn read_committed_on_a_clean_tail_writes_nothing() {
 /// A committed snapshot is taken under the lock, and not only its tail check: every [`FsOps`]
 /// call it makes, the snapshot's read of main's ref file among them, meets `meta/lock` held, so
 /// that no writer lands or cuts a frame while the snapshot reads (one round, as `read` takes it
-/// with no writer running).
+/// with no writer running). The probe reports a lock-free snapshot's read as made without it.
 #[test]
 fn read_committed_takes_its_snapshot_under_the_lock() {
     /// Records each call by name, with whether `meta/lock` was held when it was made: whether a
@@ -4880,6 +4950,16 @@ fn read_committed_takes_its_snapshot_under_the_lock() {
     );
     let unlocked: Vec<&(String, bool)> = calls.iter().filter(|(_, held)| !held).collect();
     assert!(unlocked.is_empty(), "made without the lock: {unlocked:?}");
+
+    // Negative control: a lock-free snapshot's read of main is reported as made without it.
+    let read = reader.read().unwrap();
+    assert_eq!(read.get_ref("main").unwrap(), Some(ref_state(0, 1)));
+    drop(read);
+    let calls = std::mem::take(&mut *probe.calls.lock().unwrap());
+    assert!(
+        calls.contains(&("read main".to_owned(), false)),
+        "a lock-free read of main reported held: {calls:?}"
+    );
 }
 
 #[test]
@@ -5553,17 +5633,21 @@ fn reflog_page_equals_reflog_when_unpaged() {
         );
     }
 
-    // 3. Pages of 7 by `before` concatenate to the whole log.
+    // 3. Pages of 7 by `before` concatenate to the whole log. At most a page per move and an
+    // empty last one: paging that does not move on fails here instead of looping forever.
     let mut paged = Vec::new();
     let mut before = None;
-    loop {
+    let mut ended = false;
+    for _ in 0..=all.len() {
         let page = read.reflog_page("main", before, 7).unwrap();
         let Some(last) = page.last() else {
+            ended = true;
             break;
         };
         before = Some(last.seq);
         paged.extend(page);
     }
+    assert!(ended, "paging did not end in {} pages", all.len() + 1);
     assert_eq!(paged, all);
 
     // 4. A `before` at or under the first move lists nothing; a bad name is refused.
