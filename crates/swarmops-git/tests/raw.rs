@@ -9,8 +9,8 @@ use std::time::Instant;
 
 use proptest::prelude::*;
 use swarmops_git::{
-    GitOid, RawCommit, RawError, RawIdent, RawKind, RawTag, RawTree, RawTreeEntry, SignatureKind,
-    git_hash, render_tag,
+    GitOid, GitSource, GixSource, RawCommit, RawError, RawIdent, RawKind, RawTag, RawTree,
+    RawTreeEntry, SignatureKind, SourceError, git_hash, render_tag,
 };
 use swarmops_testkit::{child, git};
 
@@ -623,6 +623,36 @@ fn a_malformed_tag_is_refused() {
             RawTag::parse(&raw)
         );
     }
+
+    // The peel refuses such a tag: its first line names a commit, but it has no `tag` line.
+    let repo = git::empty_repository();
+    let commit = loose(
+        &repo.dir,
+        RawKind::Commit,
+        &commit(
+            &[
+                &tree_line(),
+                b"author A <a@x> 1 +0000",
+                b"committer C <c@x> 1 +0000",
+            ],
+            b"m\n",
+        ),
+    );
+    let bad = loose(
+        &repo.dir,
+        RawKind::Tag,
+        format!("object {commit}\n{kind}\nm\n").as_bytes(),
+    );
+    std::fs::write(repo.dir.join("refs/tags/bad"), format!("{bad}\n")).unwrap();
+    let source = GixSource::open(&repo.dir).unwrap();
+    assert!(
+        matches!(
+            source.resolve("refs/tags/bad"),
+            Err(SourceError::Corrupt { oid, .. }) if oid == bad
+        ),
+        "{:?}",
+        source.resolve("refs/tags/bad")
+    );
 }
 
 #[test]

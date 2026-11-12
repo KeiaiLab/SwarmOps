@@ -11,7 +11,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::source;
-use crate::{GitOid, GitSource, ObjectFormat, RawKind, SourceError, Unsupported};
+use crate::{GitOid, GitSource, ObjectFormat, RawKind, RawTag, SourceError, Unsupported};
 
 /// A [`GitSource`] over a git repository on disk, read through gix (`=0.90.0`, its `sha1`
 /// feature alone).
@@ -94,9 +94,10 @@ impl GixSource {
     }
 
     /// The commit `oid` peels to, through annotated tags: each tag read once its header lets it
-    /// through the size gate ([`read_bounded`]), its hash checked, and the object of its first
-    /// line followed. The walk ends: a tag's id hashes the bytes that name the next object, so
-    /// tags cannot name each other in a cycle.
+    /// through the size gate ([`read_bounded`]), its hash checked, its head parsed
+    /// ([`RawTag::parse`]: a malformed one is [`SourceError::Corrupt`]), and its object followed.
+    /// The walk ends: a tag's id hashes the bytes that name the next object, so tags cannot name
+    /// each other in a cycle.
     ///
     /// [`read_bounded`]: source::read_bounded
     fn peel(&self, name: &str, mut oid: GitOid) -> Result<GitOid, SourceError> {
@@ -105,10 +106,11 @@ impl GixSource {
                 RawKind::Commit => return Ok(oid),
                 RawKind::Tag => {
                     let (_, tag) = source::read_bounded(self, oid)?;
-                    oid = tag_target(&tag).ok_or_else(|| SourceError::Corrupt {
+                    let head = RawTag::parse(&tag).map_err(|error| SourceError::Corrupt {
                         oid,
-                        reason: "an annotated tag whose first line names no object".to_owned(),
+                        reason: error.to_string(),
                     })?;
+                    oid = head.object();
                 }
                 kind => {
                     return Err(SourceError::NotACommit {
@@ -570,12 +572,6 @@ fn refuse_extensions(config: &gix::config::File) -> Result<(), SourceError> {
         return Err(SourceError::Unsupported(Unsupported::RefStorage(storage)));
     }
     Ok(())
-}
-
-/// The object an annotated tag's bytes name on their first line, `object <id>`.
-fn tag_target(tag: &[u8]) -> Option<GitOid> {
-    let first_line = tag.split(|&byte| byte == b'\n').next()?;
-    GitOid::from_hex(first_line.strip_prefix(b"object ")?)
 }
 
 fn not_found(name: &str) -> SourceError {
