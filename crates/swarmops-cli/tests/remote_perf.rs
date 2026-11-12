@@ -251,6 +251,40 @@ fn land(store: &Store, path: &str, content: &str) {
     store.run_as(AGENT, &line, &[]).ok();
 }
 
+/// `args` on the remote's repository: git's output, trimmed; a failure fails the case.
+fn remote_git(remote: &Remote, args: &[&str]) -> String {
+    let mut command = remote.server.command();
+    command
+        .arg("--git-dir")
+        .arg(remote.server.bare(REPO))
+        .args(args);
+    let output = command.output().expect("run git");
+    assert!(output.status.success(), "{command:?}: {output:?}");
+    let out = String::from_utf8(output.stdout).expect("UTF-8 output");
+    out.trim_end().to_owned()
+}
+
+/// `synced`, a sync of one land (`local.txt`) onto a remote of `commits` commits that gained
+/// one (`new0.txt`), lost nothing: pushed, the land published once as the remote's head and
+/// named by `main`, the remote's history `commits` + 2 long, both sides' files in its tree.
+fn assert_synced(remote: &Remote, store: &Store, synced: &Run, commits: usize) {
+    // 1. The answer: one land, published as the remote's head, `main` at it.
+    let answer = synced.ok();
+    assert_eq!(answer["status"], "pushed", "{answer}");
+    let published = answer["published"].as_array().expect("published");
+    assert_eq!(published.len(), 1, "{answer}");
+    let head = remote_git(remote, &["rev-parse", "main"]);
+    assert_eq!(published[0]["sha"], head.as_str(), "{answer}");
+    let main = main_at(store);
+    assert_eq!(published[0]["landed_as"], main.as_str(), "{answer}");
+
+    // 2. The remote: every commit kept, each side's file whole.
+    let count = remote_git(remote, &["rev-list", "--count", "main"]);
+    assert_eq!(count, (commits + 2).to_string());
+    assert_eq!(remote_git(remote, &["show", "main:new0.txt"]), "new 0");
+    assert_eq!(remote_git(remote, &["show", "main:local.txt"]), "local");
+}
+
 /// Times `work`.
 fn timed(work: impl FnOnce()) -> Duration {
     let start = Instant::now();
@@ -402,10 +436,10 @@ fn sync_of_one_land_on_12000_commits() {
     remote.commit(0);
     land(&store, "local.txt", "local\n");
 
-    // 2. The sync, timed by the client.
+    // 2. The sync, timed by the client, and nothing lost.
     let mut synced = None;
     let took = timed(|| synced = Some(remote.on(&store, &["sync", ORIGIN])));
-    synced.expect("ran").ok();
+    assert_synced(&remote, &store, &synced.expect("ran"), LONG);
     println!(
         "remote-perf: sync of one land: {:.3} s on {LONG} commits (target under 1 s)",
         took.as_secs_f64()
@@ -424,10 +458,10 @@ fn sync_of_one_land_on_1000_commits() {
     remote.commit(0);
     land(&store, "local.txt", "local\n");
 
-    // 2. The sync, timed by the client.
+    // 2. The sync, timed by the client, and nothing lost.
     let mut synced = None;
     let took = timed(|| synced = Some(remote.on(&store, &["sync", ORIGIN])));
-    synced.expect("ran").ok();
+    assert_synced(&remote, &store, &synced.expect("ran"), SHORT);
     println!(
         "remote-perf: sync of one land: {:.3} s on {SHORT} commits (the {LONG}-commit sync at \
          most 1.5 times this)",
