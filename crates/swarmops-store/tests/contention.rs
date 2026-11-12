@@ -562,11 +562,7 @@ fn print_contention(
         usize::try_from(shape.total()).expect("fits")
     );
     // Paired sample by sample, before the sorts below.
-    let mut in_lock: Vec<Duration> = transactions
-        .iter()
-        .zip(&waits)
-        .map(|(transaction, wait)| transaction.saturating_sub(*wait))
-        .collect();
+    let mut in_lock = in_lock(&transactions, &waits);
     let [txn_p50, txn_p99, txn_max] = spread(&mut transactions);
     let [lock_p50, lock_p99, lock_max] = spread(&mut waits);
     let [held_p50, held_p99, held_max] = spread(&mut in_lock);
@@ -611,6 +607,17 @@ fn print_contention(
         println!("  {line}");
     }
     busy
+}
+
+/// Each transaction's time in the lock once `write` returned: the transaction minus its own lock
+/// wait, `transactions` and `waits` paired sample by sample (none below zero).
+fn in_lock(transactions: &[Duration], waits: &[Duration]) -> Vec<Duration> {
+    assert_eq!(transactions.len(), waits.len(), "a wait per transaction");
+    transactions
+        .iter()
+        .zip(waits)
+        .map(|(transaction, wait)| transaction.saturating_sub(*wait))
+        .collect()
 }
 
 /// The journal at the end: every frame, and how many lie past `journal.ckpt`.
@@ -752,7 +759,9 @@ fn thirty_two_processes_thousand_transactions_each() {
     let journal = JournalShape::read(&root);
     print_uncontended_write(&store);
     check_store(&store, MEASUREMENT, &journal.frames);
-    check_object_syncs(&root, MEASUREMENT, objects, &lines);
+    // Read again, so that the children's lines are checked against the knob, not against
+    // what the parent handed them.
+    check_object_syncs(&root, MEASUREMENT, object_syncs(), &lines);
     assert!(
         journal.past_ckpt < 32,
         "{} frames past the checkpoint",
@@ -887,6 +896,59 @@ fn object_syncs_prelude_writes_new_objects_and_flushes_them() {
         TRANSACTIONS,
         "a frame per transaction"
     );
+}
+
+/// Self-check of [`in_lock`]: each transaction loses its own wait, not the whole transaction
+/// and not a wait sorted apart from it, and a wait past its transaction counts as zero.
+#[test]
+fn in_lock_subtracts_each_transactions_own_wait() {
+    let ms = Duration::from_millis;
+    let transactions = [ms(30), ms(10), ms(20), ms(5)];
+    let waits = [ms(5), ms(8), ms(1), ms(9)];
+    assert_eq!(
+        in_lock(&transactions, &waits),
+        [ms(25), ms(2), ms(19), ms(0)]
+    );
+}
+
+/// Self-check of [`check_object_syncs`]: it passes a store that holds every object the lines
+/// say the children put, and fails one that holds none, and a line that says a child put no
+/// objects.
+#[test]
+fn check_object_syncs_fails_without_the_objects_or_with_a_wrong_line() {
+    use std::panic::catch_unwind;
+
+    const SHAPE: Shape = Shape {
+        test: "check_object_syncs_fails_without_the_objects_or_with_a_wrong_line",
+        children: 2,
+        per_child: 1,
+        deadline: Duration::ZERO,
+    };
+    const OBJECTS: u64 = 1;
+    let line =
+        |number: u64, objects: u64| format!("{SUMMARY}{number},\"object_syncs\":{objects}}}");
+    let good = [line(0, OBJECTS), line(1, OBJECTS)];
+    let (_dir, layout) = new_root();
+    let root = layout.root().to_owned();
+
+    // 1. An empty store: no child put its objects.
+    let empty = catch_unwind(|| check_object_syncs(&root, SHAPE, OBJECTS, &good));
+    assert!(empty.is_err(), "an empty store passed");
+
+    // 2. Every child's objects put: the good lines pass.
+    let prelude = Prelude {
+        objects: FsObjectStore::open(layout, Box::new(RealFs::new())),
+        blobs: OBJECTS,
+    };
+    for chain in 0..SHAPE.children {
+        prelude.run(chain, 0);
+    }
+    check_object_syncs(&root, SHAPE, OBJECTS, &good);
+
+    // 3. A line that says its child put no objects.
+    let wrong = [line(0, OBJECTS), line(1, 0)];
+    let refused = catch_unwind(|| check_object_syncs(&root, SHAPE, OBJECTS, &wrong));
+    assert!(refused.is_err(), "a line of 0 objects passed");
 }
 
 /// The method a call recorded as `"<method> <path>"` is of.
