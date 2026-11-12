@@ -186,13 +186,13 @@ and binary code, and the page lists what review reads for and the recorded devia
   the time it signs changesets at, `SWARMOPS_TEST_GITHUB_HOSTS=<host[:port],…>`, which makes a
   push count other hosts as GitHub's for its limits, `SWARMOPS_TEST_SERVE_CACHE`, which bounds
   `serve`'s pack cache or skips its reachability check, `SWARMOPS_TEST_LEAD_WAIT`, which makes a
-  writer that leads the write queue wait for other requests and plan them, and
+  writer that leads the write queue wait for other requests and plan them,
   `SWARMOPS_TEST_PHASE_LOG`, which makes a sync and a push append each phase's time to a file,
-  and `SWARMOPS_TEST_RAW_OBJECTS=1`, which makes a store write object files without zstd, so that
-  a large fixture builds faster), read only under `#[cfg(feature = "test-hooks")]`. The feature exists on `swarmops-store`,
-  `swarmops-repo`, `swarmops-git`, `swarmops-ws`, `swarmops-ops`, `swarmops-cli` and
-  `swarmops-testkit`;
-  `swarmops-cli/test-hooks` turns on all of them. A test that needs them is marked
+  and `SWARMOPS_TEST_RAW_OBJECTS=1`, which makes a store write object files without zstd, so
+  that a large fixture builds faster), read only under `#[cfg(feature = "test-hooks")]`. The
+  feature exists on `swarmops-store`, `swarmops-repo`, `swarmops-git`, `swarmops-ws`,
+  `swarmops-ops`, `swarmops-cli` and `swarmops-testkit`; `swarmops-cli/test-hooks` turns on all
+  of them. A test that needs them is marked
   `#[cfg(feature = "test-hooks")]`, or, for a whole file, its `mod` line in `tests/all.rs`
   is (the CLI's `crash` and `faults` modules), so that a plain `cargo test` skips it; the
   gates (`just check`, `scripts/check.sh`, `just check-slow`) build the tests with
