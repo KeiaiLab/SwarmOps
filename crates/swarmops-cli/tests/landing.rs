@@ -339,6 +339,24 @@ fn assert_every_change_on_main(store: &Store) {
 /// the mean queue, and the lane's `U`: lands/s times the median hold over `b` of a `land`'s hold
 /// (the M18 D2 design §8), beside the held share and the former `U` of a `land` process's median
 /// hold. Unset, the lanes run without it.
+///
+/// Every lane also accounts for its processes (the large-pool goals design, §2 and §4 L-3), on
+/// lines of their own:
+///
+/// ```text
+/// landing-perf: host cpus=<n> mem_available_mib=<n>                  the host before the race
+/// landing-perf: lane=<lane> inflight_max=<n> entered=<n> left=<n>    lands in flight at once
+/// landing-perf: lane=<lane> identities=<n> complete=<n> short=<n>    agents with every land landed
+/// landing-perf: lane=<lane> children_left=<n>                        the test's children after it
+/// ```
+///
+/// A land is in flight from its read of `main` to the end of its last `land`, one process of the
+/// binary at a time, so `inflight_max` is how many agents had a process alive at once
+/// ([`InFlight`]). An agent is complete when each land it was scheduled is recorded and landed
+/// ([`tally`]); `short_identities=` names the first of the others. The case asserts that every
+/// land that entered left, that every agent has a record for each scheduled land, and that the
+/// race left the test no child process ([`children_of`]): the last only under nextest, where the
+/// test has a process of its own, and the line is not printed otherwise.
 mod perf {
     use std::fs;
     use std::path::Path;
@@ -356,6 +374,7 @@ mod perf {
         CliLander, CliMover, LandRecord, Stats, check_invariants, check_moved, flagged, load1,
         open_loop_lands, slot,
     };
+    use swarmops_testkit::pool::{InFlight, Tally, children_of, mem_available_mib, tally};
 
     use super::{change, commit_base};
     use crate::support::{Store, Swarmops, agent};
@@ -412,6 +431,18 @@ mod perf {
 
     /// The store's write queue (the M18 D2 design §3.4).
     const QUEUE: &str = "meta/queue";
+
+    /// The variable nextest tells a test how it is run by.
+    const EXECUTION_VAR: &str = "NEXTEST_EXECUTION_MODE";
+
+    /// Its value when the test has a process of its own, so that every child is its own.
+    const PROCESS_PER_TEST: &str = "process-per-test";
+
+    /// How many times the process list is read before a failed reading fails the run.
+    const CHILD_READS: usize = 5;
+
+    /// How many short identities a lane's line names.
+    const SHORT_NAMED: usize = 20;
 
     /// `name`'s value as a number, or `default`.
     fn var(name: &str, default: u64) -> u64 {
@@ -553,6 +584,22 @@ mod perf {
         load_end: f64,
         /// What the lock sampler saw, if it ran.
         lock: Option<locks::Sampled>,
+        /// The agents' lands in flight: each from its read of `main` to its last `land`'s end.
+        inflight: InFlight,
+    }
+
+    /// What a lane ran, for the case's ratios and the tests.
+    struct Ran {
+        /// Its lands' numbers; empty in `movers`.
+        lands: Stats,
+        /// Its moves' numbers; empty in `landers` and `prepared`.
+        moves: Stats,
+        /// Its lands in flight.
+        inflight: InFlight,
+        /// Its agents' account: each one's scheduled lands against its records.
+        tally: Tally,
+        /// The test's child processes after the race ([`children_left`]).
+        children: Option<Vec<u32>>,
     }
 
     /// When the attempt beginning now began, in microseconds after `go`.
@@ -568,11 +615,7 @@ mod perf {
         go: Instant,
         mut step: impl FnMut(usize) -> LandRecord,
     ) -> Vec<LandRecord> {
-        let count = if shape.interval.is_zero() {
-            shape.closed
-        } else {
-            open_loop_lands(SEED, who, shape.interval, shape.duration)
-        };
+        let count = scheduled(shape, who);
         let mut records = Vec::with_capacity(count);
         for n in 0..count {
             if !shape.interval.is_zero() {
@@ -585,6 +628,35 @@ mod perf {
             records.push(record);
         }
         records
+    }
+
+    /// How many steps agent or mover `who` makes at `shape`'s pace: a closed loop's count, or
+    /// an open loop's slots before its duration.
+    fn scheduled(shape: &Shape, who: usize) -> usize {
+        if shape.interval.is_zero() {
+            return shape.closed;
+        }
+        open_loop_lands(SEED, who, shape.interval, shape.duration)
+    }
+
+    /// The test's live child processes, in pid order: after a race none, since every run of the
+    /// binary is waited for or killed and reaped. `None` when the test shares its process with
+    /// other tests (any harness but nextest's process per test), whose children it cannot tell
+    /// from its own.
+    fn children_left() -> Option<Vec<u32>> {
+        if std::env::var(EXECUTION_VAR).as_deref() != Ok(PROCESS_PER_TEST) {
+            return None;
+        }
+
+        // A process of the host that ends while it is read can fail a reading: read again.
+        let mut failed = None;
+        for _ in 0..CHILD_READS {
+            match children_of(std::process::id()) {
+                Ok(children) => return Some(children),
+                Err(e) => failed = Some(e),
+            }
+        }
+        panic!("the process list: {failed:?}");
     }
 
     #[test]
@@ -606,12 +678,12 @@ mod perf {
         let mut land_p99 = [0_u64; 2];
         let mut move_p99 = [0_u64; 2];
         for &lane in &chosen {
-            let (lands, moves) = run_lane(lane, &shape);
+            let ran = run_lane(lane, &shape);
             match lane {
-                Lane::Landers => land_p99[0] = lands.latency_p99_us,
-                Lane::Prepared => land_p99[1] = lands.latency_p99_us,
-                Lane::Movers => move_p99[0] = moves.latency_p99_us,
-                Lane::Beside => move_p99[1] = moves.latency_p99_us,
+                Lane::Landers => land_p99[0] = ran.lands.latency_p99_us,
+                Lane::Prepared => land_p99[1] = ran.lands.latency_p99_us,
+                Lane::Movers => move_p99[0] = ran.moves.latency_p99_us,
+                Lane::Beside => move_p99[1] = ran.moves.latency_p99_us,
             }
         }
 
@@ -641,8 +713,9 @@ mod perf {
     }
 
     /// Runs `lane` at `shape` on a fresh store, prints its lines and asserts what it ran: its
-    /// lands' and its moves' [`Stats`] (empty for the side that did not run).
-    fn run_lane(lane: Lane, shape: &Shape) -> (Stats, Stats) {
+    /// lands' and its moves' [`Stats`] (empty for the side that did not run), with its lands in
+    /// flight, its agents' account and the children it left.
+    fn run_lane(lane: Lane, shape: &Shape) -> Ran {
         // 1. The base, the movers' branches, and the access file when prepared.
         let store = Store::init();
         let base = commit_base(&store, shape.landers);
@@ -654,9 +727,13 @@ mod perf {
             fs::write(Path::new(store.path()).join("access.toml"), ACCESS).expect("access.toml");
         }
 
-        // 2. The race, then its numbers: per second over the open loop's duration, or the
-        //    closed loop's wall.
+        // 2. The host before the race, then the race and the processes it left, then its
+        //    numbers: per second over the open loop's duration, or the closed loop's wall.
+        let cpus = thread::available_parallelism().map_or(0, usize::from);
+        let mem = mem_available_mib().map_or_else(|| "unknown".to_owned(), |mib| mib.to_string());
+        println!("{TAG}host cpus={cpus} mem_available_mib={mem}");
         let measured = race(lane, shape, &store, &mut moving);
+        let children = children_left();
         let over = if shape.interval.is_zero() {
             measured.wall
         } else {
@@ -685,7 +762,9 @@ mod perf {
             }
         }
 
-        // 4. The windows, which must add up to the lane and hold no failure.
+        // 4. The agents' account and the processes the race left, then the windows, which
+        //    must add up to the lane and hold no failure.
+        let account = assert_account(lane, shape, &measured, children.as_deref());
         for (side, whole) in [(Side::Lands, &lands), (Side::Moves, &moves)] {
             let records = side.records(&measured);
             if records.is_empty() {
@@ -724,7 +803,71 @@ mod perf {
         //    recorded, not asserted.
         let left = fs::read_dir(root.join(QUEUE)).map_or(0, Iterator::count);
         println!("{TAG}lane={name} queue_left={left}");
-        (lands, moves)
+        Ran {
+            lands,
+            moves,
+            inflight: measured.inflight,
+            tally: account,
+            children,
+        }
+    }
+
+    /// Prints lane `lane`'s lands in flight and its agents' account, and asserts what holds
+    /// however the lands went: every land that entered the count left it, every agent has a
+    /// record for each land it was scheduled, and the race left no child process (`children`,
+    /// when they can be told: a detached preparation is its `land`'s child, never the test's).
+    /// The account.
+    fn assert_account(
+        lane: Lane,
+        shape: &Shape,
+        measured: &Measured,
+        children: Option<&[u32]>,
+    ) -> Tally {
+        let name = lane.name();
+
+        // 1. The lines, in the lanes whose agents land.
+        let account = tally(&measured.lands, |who| scheduled(shape, who));
+        if lane.lands() {
+            println!("{TAG}lane={name} {}", measured.inflight.line());
+            println!(
+                "{TAG}lane={name} identities={} complete={} short={}",
+                account.identities,
+                account.complete,
+                account.short.len()
+            );
+        }
+        if !account.short.is_empty() {
+            let named: Vec<String> = (account.short.iter())
+                .take(SHORT_NAMED)
+                .map(usize::to_string)
+                .collect();
+            println!("{TAG}lane={name} short_identities={}", named.join(","));
+        }
+
+        // 2. Nothing in flight, no land dropped.
+        assert_eq!(
+            measured.inflight.entered(),
+            measured.inflight.left(),
+            "lane {name}: a land entered and did not leave"
+        );
+        for (who, lands) in measured.lands.iter().enumerate() {
+            assert_eq!(
+                lands.len(),
+                scheduled(shape, who),
+                "lane {name}: agent {who}'s records against its scheduled lands"
+            );
+        }
+
+        // 3. No process left.
+        if let Some(children) = children {
+            println!("{TAG}lane={name} children_left={}", children.len());
+            assert_eq!(
+                children,
+                &[] as &[u32],
+                "lane {name}: the race left child processes"
+            );
+        }
+        account
     }
 
     /// Every agent and mover of `lane` at once on `store`, from one go; the lock sampled
@@ -739,9 +882,11 @@ mod perf {
         let start = Barrier::new(landers + moving.len() + 1);
         let load_start = load1();
         let stop = AtomicBool::new(false);
-        thread::scope(|scope| {
-            // 1. The sampler, the agents and the movers, each waiting for the go.
-            let (start, stop) = (&start, &stop);
+        let flight = InFlight::new();
+        let (lands, moves, wall, lock) = thread::scope(|scope| {
+            // 1. The sampler, the agents and the movers, each waiting for the go; an agent's
+            //    land is in flight from its read of `main` to the end of its last `land`.
+            let (start, stop, flight) = (&start, &stop, &flight);
             let sampler =
                 (shape.sample).map(|every| scope.spawn(move || locks::sample(store, every, stop)));
             let agents: Vec<_> = (0..landers)
@@ -750,7 +895,10 @@ mod perf {
                         let cli = CliLander::new(store, lander, "main");
                         start.wait();
                         let go = Instant::now();
-                        paced(shape, lander, go, |n| cli.land(n, &change(lander, n)))
+                        paced(shape, lander, go, |n| {
+                            let _in_flight = flight.enter();
+                            cli.land(n, &change(lander, n))
+                        })
                     })
                 })
                 .collect();
@@ -776,15 +924,56 @@ mod perf {
             let wall = go.elapsed();
             stop.store(true, Ordering::Relaxed);
             let lock = sampler.map(|t| t.join().unwrap_or_else(|e| std::panic::resume_unwind(e)));
-            Measured {
-                lands,
-                moves,
-                wall,
-                load_start,
-                load_end: load1(),
-                lock,
-            }
-        })
+            (lands, moves, wall, lock)
+        });
+        Measured {
+            lands,
+            moves,
+            wall,
+            load_start,
+            load_end: load1(),
+            lock,
+            inflight: flight,
+        }
+    }
+
+    /// An open loop on the `landers` lane alone, small enough for the regular suite: four agents,
+    /// one land a second each for three seconds. Every slot of the loop is a land that landed,
+    /// each agent's account is complete, every land that entered the count left it, and the
+    /// race left no child process.
+    #[test]
+    fn a_spread_run_lands_its_slots() {
+        const AGENTS: usize = 4;
+        let shape = Shape {
+            landers: AGENTS,
+            movers: 0,
+            interval: Duration::from_secs(1),
+            duration: Duration::from_secs(3),
+            closed: 0,
+            sample: None,
+        };
+
+        let ran = run_lane(Lane::Landers, &shape);
+
+        // 1. One land per slot, each landed.
+        let slots: usize = (0..AGENTS)
+            .map(|who| open_loop_lands(SEED, who, shape.interval, shape.duration))
+            .sum();
+        assert!(slots >= AGENTS, "every agent has a slot: {slots}");
+        assert_eq!(ran.lands.landed, u64::try_from(slots).expect("fits"));
+
+        // 2. The account, the count in flight and the processes left.
+        assert_eq!(
+            (ran.tally.identities, ran.tally.complete, &ran.tally.short),
+            (AGENTS, AGENTS, &Vec::new())
+        );
+        assert_eq!(
+            (ran.inflight.entered(), ran.inflight.left()),
+            (slots, slots)
+        );
+        assert!((1..=AGENTS).contains(&ran.inflight.peak()));
+        assert_eq!(ran.children.unwrap_or_default(), Vec::<u32>::new());
+        assert_eq!(ran.moves.landed, 0);
     }
 
     /// Prints lane `lane`'s line for `what` (`lands` or `moves`), its numbers `stats`; none for
