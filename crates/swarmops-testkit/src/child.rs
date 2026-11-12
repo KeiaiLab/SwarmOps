@@ -10,6 +10,7 @@
 
 use std::io::Read;
 use std::process::{self, Command, Output, Stdio};
+use std::sync::Once;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -21,6 +22,10 @@ pub const SIGABRT: i32 = 6;
 
 /// How often a wait looks whether a child has ended.
 const POLL: Duration = Duration::from_millis(1);
+
+/// The core limit [`no_core_dumps`] asks `prlimit` for: a soft limit of 1 byte, the hard limit
+/// as it is.
+const CORE_LIMIT: &str = "--core=1:";
 
 /// The name the test harness knows a test of the module this expands in by, given the test's
 /// own: the module's path past the test binary's crate name, then the test's name
@@ -63,6 +68,32 @@ pub fn run(command: &mut Command) -> Output {
     Child::spawn(command).wait(Instant::now() + CHILD_TIMEOUT)
 }
 
+/// Asks for no core dump of the children this process spawns from now on, once per process: a
+/// soft core limit of 1 byte on this process, which its children inherit. A crash sweep ends
+/// each child by `abort`, and a host whose `kernel.core_pattern` is a pipe hands every such core
+/// to its handler under a limit of 0 too; only a limit of 1 stops it (`core(5)`). With hundreds
+/// of aborts queued for one handler, a child's end took seconds instead of milliseconds. The
+/// child still ends by SIGABRT. The hard limit stays, so the soft one can be raised again.
+/// Linux only, and where there is no `prlimit` (util-linux) nothing changes.
+pub(crate) fn no_core_dumps() {
+    static ASKED: Once = Once::new();
+
+    ASKED.call_once(|| {
+        if !cfg!(target_os = "linux") {
+            return;
+        }
+
+        // A failure leaves the limit as it was: the children are slower to end, no less right.
+        let pid = process::id().to_string();
+        let _ = Command::new("prlimit")
+            .args(["--pid", &pid, CORE_LIMIT])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    });
+}
+
 /// The threads that read a child's stdout and stderr to their ends.
 type Readers = (JoinHandle<Vec<u8>>, JoinHandle<Vec<u8>>);
 
@@ -78,6 +109,8 @@ pub struct Child {
 impl Child {
     /// Spawns `command`, reading nothing from stdin, its stdout and stderr piped.
     pub fn spawn(command: &mut Command) -> Child {
+        no_core_dumps();
+
         let child = command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -162,4 +195,70 @@ fn drain(pipe: Option<impl Read + Send + 'static>) -> JoinHandle<Vec<u8>> {
         let _ = pipe.read_to_end(&mut bytes);
         bytes
     })
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use std::os::unix::process::ExitStatusExt;
+
+    use super::*;
+
+    /// This process's soft and hard core limits, as `/proc/self/limits` words them.
+    fn core_limits() -> (String, String) {
+        let limits = std::fs::read_to_string("/proc/self/limits").unwrap();
+        let line = limits
+            .lines()
+            .find_map(|line| line.strip_prefix("Max core file size"))
+            .expect("a core limit line");
+        let mut words = line.split_whitespace();
+        let soft = words.next().unwrap().to_owned();
+        let hard = words.next().unwrap().to_owned();
+        (soft, hard)
+    }
+
+    /// Whether [`no_core_dumps`] can change the limit here: there is a `prlimit`, and the hard
+    /// limit leaves room for a soft one of 1.
+    fn can_limit() -> bool {
+        let found = Command::new("prlimit")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success());
+        let (_soft, hard) = core_limits();
+        let can = found && hard != "0";
+        if !can {
+            eprintln!("skipped: no prlimit here, or a hard core limit of 0 ({hard})");
+        }
+        can
+    }
+
+    /// A child the kit runs dumps no core when it ends by SIGABRT, as a crash sweep's does. It
+    /// tells a kit that asks for the limit from one that does not only on a host that hands
+    /// cores to a pipe; where `kernel.core_pattern` names a file and the soft limit is 0, no
+    /// core is dumped either way.
+    #[test]
+    fn an_aborted_child_dumps_no_core() {
+        if !can_limit() {
+            return;
+        }
+
+        let child = run(Command::new("/bin/sh").args(["-c", "kill -ABRT $$"]));
+
+        assert_eq!(child.status.signal(), Some(SIGABRT), "{:?}", child.status);
+        assert!(!child.status.core_dumped(), "{:?}", child.status);
+    }
+
+    /// The limit asked for is the soft one, 1 byte; the hard limit is left as it was.
+    #[test]
+    fn the_core_limit_is_soft_and_1() {
+        if !can_limit() {
+            return;
+        }
+        let (_soft, hard_before) = core_limits();
+
+        no_core_dumps();
+
+        let (soft, hard) = core_limits();
+        assert_eq!(soft, "1");
+        assert_eq!(hard, hard_before);
+    }
 }

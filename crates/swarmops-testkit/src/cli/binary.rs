@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use swarmops_store::{Layout, ORDER_CHECK_ENV, StoreFormat};
 use tempfile::TempDir;
 
-use crate::child::{Child, SIGABRT};
+use crate::child::{Child, SIGABRT, no_core_dumps};
 
 /// The binary under test, as the CLI's tests bind it: Cargo gives its path to them alone
 /// (`env!("CARGO_BIN_EXE_swarmops")`), so they implement this for a type of their own and run
@@ -110,6 +110,8 @@ pub fn run_within<P: Program, S: AsRef<str>>(
     env: &[(&str, &str)],
     timeout: Duration,
 ) -> Run {
+    no_core_dumps();
+
     let child = swarmops::<P, S>(args, env).spawn().expect("run swarmops");
     Running::start(args, child).finish(Instant::now() + timeout)
 }
@@ -130,6 +132,8 @@ pub fn run_bin_within<S: AsRef<str>>(
     input: &str,
     timeout: Duration,
 ) -> Run {
+    no_core_dumps();
+
     let mut child = named(bin, args, env)
         .stdin(Stdio::piped())
         .spawn()
@@ -349,6 +353,8 @@ impl<P: Program> Racers<P> {
             .args(args.iter().map(AsRef::as_ref));
         with_env(&mut shell, env);
         shell.stdin(Stdio::piped());
+        no_core_dumps();
+
         let mut child = shell.spawn().expect("spawn a child");
         self.gates.push(child.stdin.take().expect("a piped stdin"));
         self.children.push(Running::start(args, child));
