@@ -320,9 +320,14 @@ a push, `send_ms` runs to the start of the push's check (receiving it and git's 
 no pack, or a push that never reached its check, is all `prepare_ms`. `bytes` counts the pack sent
 or received, `exit` is git's (`128 + signal` for a git a signal ended) or the refusal's, and
 `code` names a refusal's error code, a push's first refused ref among them.
+A push the hooks refuse records the refusal's code and that code's exit, though git exits 0:
+`E_REF_PROTECTED` for a move of `main` off its first parents, `E_CAS_MISMATCH` for a stale push,
+`E_CONFLICT` for a land that conflicts.
 
-The hooks pass their split to the parent `serve` in `git/serve-split/<connection>`, which it
-removes after reading. Lines are not synced: the records are diagnostics, a reader skips a torn
+The hooks pass their split to the parent `serve` in `git/serve-split/<connection>`, a line per
+hook run (a second pack on one connection adds its bytes), which it removes after reading; a
+split older than a day, which a `serve` that died left, is removed by the next connection.
+Lines are not synced: the records are diagnostics, a reader skips a torn
 last line, and nothing reads them for correctness. A record that cannot be written is a `warning:`
 line on stderr; the request stands. Records hold no path and nothing of the serving account's
 environment. Past 64 MiB the file is renamed `serve-records.1.jsonl`, replacing the one older
