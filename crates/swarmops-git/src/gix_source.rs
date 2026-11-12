@@ -602,7 +602,15 @@ fn io(error: &gix::Error) -> SourceError {
     }
 }
 
-/// gix's error and every error under it, joined by `: `, each message once.
+/// The most bytes of gix's messages a reason keeps: gix quotes a ref it cannot decode whole, and
+/// a ref file can be [`MAX_WHOLE_LEN`] long.
+const MAX_REASON_LEN: usize = 1024;
+
+/// What ends a reason cut at [`MAX_REASON_LEN`].
+const CUT: &str = "…";
+
+/// gix's error and every error under it, joined by `: `, each message once, cut past
+/// [`MAX_REASON_LEN`] bytes.
 pub(crate) fn reason(error: &gix::Error) -> String {
     let mut messages: Vec<String> = Vec::new();
     for error in error.iter_errors() {
@@ -611,7 +619,22 @@ pub(crate) fn reason(error: &gix::Error) -> String {
             messages.push(message);
         }
     }
-    messages.join(": ")
+    bounded(messages.join(": "))
+}
+
+/// `reason`, cut at a character boundary to [`MAX_REASON_LEN`] bytes and ended by [`CUT`] when
+/// longer.
+fn bounded(mut reason: String) -> String {
+    if reason.len() <= MAX_REASON_LEN {
+        return reason;
+    }
+    let end = (0..=MAX_REASON_LEN)
+        .rev()
+        .find(|&end| reason.is_char_boundary(end))
+        .unwrap_or(0);
+    reason.truncate(end);
+    reason.push_str(CUT);
+    reason
 }
 
 /// `oid` as gix names it.
@@ -641,6 +664,18 @@ pub(crate) fn raw_kind(kind: gix::objs::Kind) -> RawKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A reason past the bound is cut at a character boundary and marked; one within it is kept.
+    #[test]
+    fn a_long_reason_is_cut() {
+        let short = "x".repeat(MAX_REASON_LEN);
+        assert_eq!(bounded(short.clone()), short);
+
+        // `é` is two bytes: the bound falls inside the last one kept whole.
+        let long = format!("{}é{}", "x".repeat(MAX_REASON_LEN - 1), "y".repeat(10));
+        let cut = bounded(long);
+        assert_eq!(cut, format!("{}{CUT}", "x".repeat(MAX_REASON_LEN - 1)));
+    }
 
     #[test]
     fn bytes_that_do_not_hash_to_their_oid_are_corrupt() {

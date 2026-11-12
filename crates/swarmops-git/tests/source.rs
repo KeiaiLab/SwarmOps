@@ -535,6 +535,21 @@ fn resolve_hashes_the_tip_before_it_trusts_its_kind() {
     }
 }
 
+/// A ref gix cannot decode is refused without its content quoted whole: the reason is bounded.
+#[test]
+fn a_ref_gix_cannot_decode_is_refused_with_a_bounded_reason() {
+    const CONTENT: usize = 1 << 20;
+    let repository = git::empty_repository();
+    let junk = vec![b'z'; CONTENT];
+    fs::write(repository.dir.join("refs/heads/junk"), junk).unwrap();
+    let source = GixSource::open(&repository.dir).unwrap_or_else(|error| panic!("open: {error}"));
+    let got = source.resolve("junk");
+    let Err(SourceError::Io { reason }) = &got else {
+        panic!("{:.300}", format!("{got:?}"));
+    };
+    assert!(reason.len() < CONTENT / 64, "{} bytes", reason.len());
+}
+
 /// `fixture`'s repository moved into a work tree, as `<work>/.git`, its configuration made a
 /// work tree's; the work tree's path.
 fn work_tree(fixture: &GitFixture) -> std::path::PathBuf {
