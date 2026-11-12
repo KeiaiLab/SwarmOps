@@ -65,6 +65,7 @@
 //! deadline with a child told ([`HANG`]) to sleep past it.
 
 use std::fs::{self, File};
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
 use std::sync::Arc;
@@ -322,6 +323,66 @@ fn only_an_e_busy_of_the_lock_is_held_to_the_lock_timeout() {
     report.met(Busy::of(&lock), LOCK_TIMEOUT_MS);
     report.met(Busy::of(&lock), LOCK_TIMEOUT_MS - 1);
     assert_eq!(early_lock_busy([&report]), [LOCK_TIMEOUT_MS - 1]);
+
+    // The summary's count, which the measurement holds to 0, takes both causes.
+    assert_eq!(busy_total([&report]), 3);
+}
+
+/// A commit's run is filed by its envelope: a changeset on the parent given, or an `E_BUSY` by
+/// its cause and `meta.elapsed_ms`; read here without a spawn.
+#[test]
+fn a_commit_run_is_filed_by_its_envelope() {
+    let parent = "a".repeat(64);
+    let id = "b".repeat(64);
+
+    // 1. A commit made, on the parent given.
+    let made = json!({"api": 1, "ok": true, "result": {"parent": parent, "changeset": id},
+        "meta": {"elapsed_ms": 7}});
+    let Outcome::Committed {
+        id: got,
+        elapsed_ms,
+    } = outcome(&run_of(0, &made), Some(&parent), "made")
+    else {
+        panic!("a commit made is filed as made");
+    };
+    assert_eq!((got.as_str(), elapsed_ms), (id.as_str(), 7));
+
+    // 2. An E_BUSY of each cause, filed as that cause with its time.
+    let busy = |e: StoreError, ms: u64| {
+        let error = json!({"code": "E_BUSY", "message": e.to_string(), "exit": 4});
+        json!({"api": 1, "ok": false, "error": error, "meta": {"elapsed_ms": ms}})
+    };
+    let snapshot = StoreError::SnapshotContended {
+        rounds: MetaStore::SNAPSHOT_ROUNDS,
+    };
+    for (envelope, cause, ms) in [
+        (
+            busy(StoreError::Busy, LOCK_TIMEOUT_MS),
+            Busy::Lock,
+            LOCK_TIMEOUT_MS,
+        ),
+        (busy(snapshot, 5), Busy::Snapshot, 5),
+    ] {
+        let filed = outcome(&run_of(4, &envelope), Some(&parent), "busy");
+        let Outcome::Busy {
+            elapsed_ms,
+            cause: got,
+        } = filed
+        else {
+            panic!("an E_BUSY is filed as one: {envelope}");
+        };
+        assert_eq!((got, elapsed_ms), (cause, ms), "{envelope}");
+    }
+}
+
+/// A finished run of `commit` that exited with `code` and printed `envelope`, made up.
+fn run_of(code: i32, envelope: &Value) -> support::Run {
+    support::Run {
+        args: vec!["commit".to_owned()],
+        status: ExitStatus::from_raw(code << 8),
+        stdout: format!("{envelope}\n"),
+        stderr: String::new(),
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -380,6 +441,14 @@ fn early_lock_busy<'a>(reports: impl IntoIterator<Item = &'a Report>) -> Vec<u64
         .flat_map(|report| report.busy_ms.iter().copied())
         .filter(|&ms| ms < LOCK_TIMEOUT_MS)
         .collect()
+}
+
+/// How many `E_BUSY`s `reports` met, of either cause.
+fn busy_total<'a>(reports: impl IntoIterator<Item = &'a Report>) -> usize {
+    reports
+        .into_iter()
+        .map(|report| report.busy_ms.len() + report.snapshot_busy_ms.len())
+        .sum()
 }
 
 /// What a child runs with: its work directory, its number and the base changeset.
@@ -1116,7 +1185,7 @@ fn print_contention(
         );
     }
     let busy_at: Vec<String> = reports.iter().flat_map(|report| report.busy_at()).collect();
-    let busy = busy_at.len();
+    let busy = busy_total(reports.iter().copied());
     println!(
         "{SUMMARY}E_BUSY {busy}{}, children without a report {} (control: E_BUSY after \
          {control_ms} ms)",
