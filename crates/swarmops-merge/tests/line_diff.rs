@@ -438,6 +438,21 @@ fn unified_headers_match_git_without_context() {
 }
 
 #[test]
+fn unified_context_past_the_file_shows_it_whole() {
+    // `DiffReq.context` is any `u32`: past 2^31, `2 × context` overflows a `u32`, and a start
+    // less `context` or an end plus it leaves the file. Every line shows, in one hunk.
+    let before = numbered(20, &[]);
+    let after = numbered(20, &[2, 19]);
+    for context in [1 << 31, u32::MAX] {
+        assert_eq!(
+            unified_headers(&before, &after, context),
+            [(1, 20, 1, 20)],
+            "context {context}"
+        );
+    }
+}
+
+#[test]
 fn is_text_refuses_nul_and_invalid_utf8() {
     assert!(is_text(b""));
     assert!(is_text(b"plain\r\n"));

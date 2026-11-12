@@ -522,6 +522,92 @@ fn a_filter_reads_only_what_it_reaches() {
 }
 
 #[test]
+fn a_prefix_that_starts_a_directory_name_matches_nothing_in_it() {
+    // `test` is a string prefix of `tests` and `tests-e2e`, yet no path below either lies below
+    // it; it sorts before `tests-e2e/a`, which the filter must still reach.
+    let from = files(&[
+        ("test", file(1)),
+        ("tests/x", file(1)),
+        ("tests-e2e/a", file(1)),
+        ("tests-e2e/b", file(1)),
+    ]);
+    let to = files(&[
+        ("test", file(2)),
+        ("tests/x", file(2)),
+        ("tests-e2e/a", file(2)),
+        ("tests-e2e/b", file(2)),
+    ]);
+    let mut trees = Trees::default();
+    let filter = PathFilter::under(vec![path("test"), path("tests-e2e/a")]);
+
+    assert_eq!(
+        diff(&mut trees, &from, &to, &filter),
+        [
+            modified("test", file(1), file(2)),
+            modified("tests-e2e/a", file(1), file(2)),
+        ]
+    );
+    for (p, matched) in [
+        ("test", true),
+        ("tests/x", false),
+        ("tests-e2e/a", true),
+        ("tests-e2e/b", false),
+    ] {
+        assert_eq!(filter.matches(&path(p)), matched, "{p}");
+    }
+}
+
+#[test]
+fn the_filter_of_every_path_matches_every_path() {
+    let all = PathFilter::all();
+    for p in ["a", "a/b", "a-c/d.e/f"] {
+        assert!(all.matches(&path(p)), "{p}");
+    }
+}
+
+#[test]
+fn a_subtree_the_store_lacks_is_the_error() {
+    let base = files(&[("a/x", file(1)), ("b", file(1))]);
+    let mut changed = base.clone();
+    changed.insert(path("a/x"), file(2));
+    let mut trees = Trees::default();
+    let (b, c) = (trees.add(&base).unwrap(), trees.add(&changed).unwrap());
+
+    // `a` of the changed side is gone: the read of it fails, and that failure is the result.
+    let lost = trees.dir_at(c, "a");
+    trees.by_id.remove(&lost);
+    assert_eq!(
+        diff_trees(&trees, Some(b), Some(c), &PathFilter::all()),
+        Err(NoSuchTree(lost))
+    );
+    assert_eq!(
+        three_way(&trees, Some(b), Some(c), Some(b), &PathFilter::all()),
+        Err(NoSuchTree(lost))
+    );
+    assert_eq!(
+        three_way(&trees, Some(b), Some(b), Some(c), &PathFilter::all()),
+        Err(NoSuchTree(lost))
+    );
+}
+
+#[test]
+fn a_subtree_that_is_the_empty_tree_has_no_leaves() {
+    // A directory entry may name the empty tree; it holds no leaf, so no change and no delta
+    // entry names it: `delta_of` cannot make or remove it.
+    let mut trees = Trees::default();
+    let empty = Tree::empty_root();
+    let empty_id = empty.id();
+    trees.by_id.insert(empty_id, empty);
+    let root = Tree::new(vec![TreeEntry::dir("e", empty_id)]).unwrap();
+    let root_id = root.id();
+    trees.by_id.insert(root_id, root);
+
+    let changes = diff_trees(&trees, None, Some(root_id), &PathFilter::all()).unwrap();
+    assert_eq!(changes, Vec::new());
+    assert_eq!(delta_of(&changes), Vec::new());
+}
+
+#[test]
 fn paths_sort_by_bytes_not_by_tree_order() {
     // In tree order `a/b` comes first (the root's entry `a` sorts before `a-c` and `a.d`); by
     // bytes `-` (0x2d) and `.` (0x2e) sort before `/` (0x2f).
