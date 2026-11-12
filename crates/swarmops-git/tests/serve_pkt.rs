@@ -271,12 +271,34 @@ fn reports() {
             refname: "refs/heads/a".to_owned(),
             options: vec![("refname".to_owned(), "x\ny".to_owned())],
         },
+        Report::Ok {
+            refname: "refs/heads/a".to_owned(),
+            options: vec![("ref\nname".to_owned(), "x".to_owned())],
+        },
     ] {
         let mut out = Vec::new();
         let refused = proc_receive::write_reports(&mut out, &[report]).unwrap_err();
         assert_eq!(refused.kind(), io::ErrorKind::InvalidInput);
         assert_eq!(out, b"");
     }
+}
+
+/// A line too long for a pkt-line, after one that fits, is refused before any line is written.
+#[test]
+fn long_report() {
+    // 1. "ng refs/heads/a " and the newline leave 65,499 bytes of a 65,516-byte payload.
+    let fits = "x".repeat(65_499);
+    let mut out = Vec::new();
+    proc_receive::write_reports(&mut out, &[Report::ng("refs/heads/a", fits.as_str())]).unwrap();
+    assert_eq!(all(&out).unwrap().len(), 2);
+
+    // 2. One byte more cannot be framed: refused, the `ok` before it not written either.
+    let over = format!("{fits}x");
+    let reports = [Report::ok("refs/heads/x"), Report::ng("refs/heads/a", over)];
+    let mut out = Vec::new();
+    let refused = proc_receive::write_reports(&mut out, &reports).unwrap_err();
+    assert_eq!(refused.kind(), io::ErrorKind::InvalidInput);
+    assert_eq!(out, b"");
 }
 
 /// The transcripts git 2.43.0's `receive-pack` wrote decode: the handshake, then the commands

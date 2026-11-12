@@ -119,7 +119,8 @@ pub fn read_commands(input: &mut impl Read) -> io::Result<Vec<Command>> {
 
 /// Writes `reports`, then a flush: `ok <refname>` and an `option <key> <value>` line per option
 /// (`option <key>` for an empty value, as `forced-update`), or `ng <refname> <reason>`. A field
-/// holding a newline would forge a line: `InvalidInput`, nothing written.
+/// holding a newline would forge a line, and a line over a pkt-line's 65,516-byte payload cannot
+/// be framed: `InvalidInput`, nothing written.
 pub fn write_reports(output: &mut impl Write, reports: &[Report]) -> io::Result<()> {
     // 1. Every line formed first, so a refused field leaves `output` untouched.
     let mut lines = Vec::new();
@@ -141,11 +142,15 @@ pub fn write_reports(output: &mut impl Write, reports: &[Report]) -> io::Result<
         }
     }
 
-    // 2. One data line each, the flush.
+    // 2. Every line framed into a buffer, so a line too long to frame leaves `output` untouched.
+    let mut framed = Vec::new();
     for line in lines {
-        pkt::write_data(output, format!("{line}\n").as_bytes())?;
+        pkt::write_data(&mut framed, format!("{line}\n").as_bytes())?;
     }
-    pkt::write_flush(output)?;
+    pkt::write_flush(&mut framed)?;
+
+    // 3. The data lines and the flush, at once.
+    output.write_all(&framed)?;
     output.flush()
 }
 
