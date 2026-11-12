@@ -294,8 +294,9 @@ impl fmt::Display for LimitKind {
 pub enum FileOp {
     /// A method of the [`crate::FsOps`] seam, named as [`FsMethod::as_str`] names it.
     Fs(FsMethod),
-    /// The open of a file the store reads on its own handle: `journal.log`, `journal.off`, an
-    /// index file, `meta/lock`.
+    /// The open of a file the store reads on its own handle, outside the [`crate::FsOps`] seam:
+    /// `journal.log`, `journal.off`, an index file and `meta/lock` among them, and an object
+    /// file whose header [`crate::ObjectStore::stat`] reads.
     Open,
     /// A positioned read (`pread`) on such a handle.
     ReadAt,

@@ -243,8 +243,9 @@ pub struct FsObjectStore {
 }
 
 impl FsObjectStore {
-    /// The object store of `layout`, doing all filesystem access through `fs`. Opening
-    /// touches nothing; directories are created by the first write that needs them.
+    /// The object store of `layout`, writing and reading object files through `fs`; `stat`,
+    /// `list` and the length check before a read go through `std::fs`, with no [`FsOps`] call.
+    /// Opening touches nothing; directories are created by the first write that needs them.
     pub fn open(layout: Layout, fs: Box<dyn FsOps>) -> Self {
         Self::open_shared(layout, Arc::from(fs))
     }
