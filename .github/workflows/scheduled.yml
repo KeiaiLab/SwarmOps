@@ -504,6 +504,11 @@ jobs:
     # M19-8 added four (`ws_processes::perf`'s sparse workspace, 500,000-file status, 50 creates at
     # once and update across 1,000 lands), whose loaded sizing runs (docs/perf.md, "M19-8") are not
     # `just perf` times; the same run sums them.
+    # M20-7 added `format3_perf::commits_1m_next_decile` (one decile of 100,000 commits a run, the
+    # store kept under /data between runs) and `scale_perf::fixture_next_part` (one part a run),
+    # whose times `just perf` has not measured (docs/perf.md, "M20 — FORMAT 3 at 1,000,000
+    # records"): the same run sums them, and the value is recomputed by this rule from the new
+    # sum, never set by a guess and never lowered.
     timeout-minutes: 390
     env:
       CARGO_TERM_COLOR: always

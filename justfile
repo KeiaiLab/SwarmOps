@@ -83,7 +83,7 @@ check-slow:
     #!/usr/bin/env bash
     set -uo pipefail
     status=0
-    PROPTEST_CASES=2000 cargo nextest run --locked --workspace --all-features --run-ignored all -E 'not test(regenerate_golden) and not test(regenerate_git_fixtures) and not test(check_git_fixtures) and not ({{ ci_perf_cases }})' || status=1
+    PROPTEST_CASES=2000 cargo nextest run --locked --workspace --all-features --run-ignored all -E 'not test(regenerate_golden) and not test(regenerate_git_fixtures) and not test(check_git_fixtures) and not ({{ ci_perf_cases }}) and not ({{ perf_recipe_only }})' || status=1
     PROPTEST_CASES=2000 cargo nextest run --locked --release --workspace --all-features --run-ignored all --no-tests=fail -E '({{ ci_perf_cases }}) and not test(regenerate_golden) and not test(regenerate_git_fixtures) and not test(check_git_fixtures)' || status=1
     exit "$status"
 
@@ -98,7 +98,7 @@ check-slow:
 # `NEXTEST_PROFILE=ci-slow` (.config/nextest.toml).
 # The weekly CI slow suite (scheduled.yml): check-slow less the 32-process and large-history cases.
 check-ci-slow:
-    PROPTEST_CASES=2000 cargo nextest run --locked --workspace --all-features --run-ignored all -E 'not test(regenerate_golden) and not test(regenerate_git_fixtures) and not test(check_git_fixtures) and not test(thirty_two_processes) and not ({{ ci_perf_cases }})'
+    PROPTEST_CASES=2000 cargo nextest run --locked --workspace --all-features --run-ignored all -E 'not test(regenerate_golden) and not test(regenerate_git_fixtures) and not test(check_git_fixtures) and not test(thirty_two_processes) and not ({{ ci_perf_cases }}) and not ({{ perf_recipe_only }})'
 
 # The measurement cases on 12,000 or 13,000 commits or 12,000 changesets: `remote_perf`'s six,
 # `serve_perf`'s six, `intake_perf`'s three (`commits_beside_an_import`, its control lane
@@ -111,7 +111,14 @@ check-ci-slow:
 # `check-ci-slow` leaves them out, `check-ci-perf` runs them, `check-slow` runs them optimized.
 # swarmops-core's `supply_chain` tests fail a case `check-ci-slow` leaves out that no scheduled
 # job runs optimized and one at a time.
-ci_perf_cases := 'test(=remote_perf::clone_cost_on_12000_commits) | test(=remote_perf::fetch_and_push_scale_with_history) | test(=remote_perf::fetch_phases_scale_with_history) | test(=remote_perf::sync_of_one_land_on_12000_commits) | test(=remote_perf::sync_phases_scale_with_history) | test(=remote_perf::first_sync_phases) | test(/^serve_perf::/) | test(/^intake_perf::/) | test(/^serve_load::/) | test(=landing::perf::landing_under_load) | test(=sync_load::sync_keeps_pace_with_landing) | test(=ws_processes::perf::perf_checked_land_overhead_on_12000_changesets) | test(=ws_processes::perf::perf_sparse_workspace_of_1000000_files) | test(=ws_processes::perf::perf_status_of_500000_files) | test(=ws_processes::perf::perf_fifty_creates_at_once) | test(=ws_processes::perf::perf_update_across_1000_lands)'
+ci_perf_cases := 'test(=remote_perf::clone_cost_on_12000_commits) | test(=remote_perf::fetch_and_push_scale_with_history) | test(=remote_perf::fetch_phases_scale_with_history) | test(=remote_perf::sync_of_one_land_on_12000_commits) | test(=remote_perf::sync_phases_scale_with_history) | test(=remote_perf::first_sync_phases) | test(/^serve_perf::/) | test(/^intake_perf::/) | test(/^serve_load::/) | test(=landing::perf::landing_under_load) | test(=sync_load::sync_keeps_pace_with_landing) | test(=ws_processes::perf::perf_checked_land_overhead_on_12000_changesets) | test(=ws_processes::perf::perf_sparse_workspace_of_1000000_files) | test(=ws_processes::perf::perf_status_of_500000_files) | test(=ws_processes::perf::perf_fifty_creates_at_once) | test(=ws_processes::perf::perf_update_across_1000_lands) | test(=format3_perf::commits_1m_next_decile) | test(=scale_perf::fixture_next_part)'
+
+# The cases only `perf` runs, excluded from `check-slow` and `check-ci-slow` (and not in `ci_perf_cases`):
+# `format3_perf::a5_verdict` reads the ten deciles of `commits_1m_next_decile`, which `perf` calls ten
+# times in a row and the weekly run once, so that anywhere else it fails on fewer than ten lines
+# (the M20 plan, A7). `commits_1m_next_decile` itself asserts only what it ran and stays runnable
+# everywhere.
+perf_recipe_only := 'test(=format3_perf::a5_verdict)'
 
 # `ci_perf_cases` optimized and one at a time (`--no-capture`), as `perf` runs them, printing their
 # `remote-perf: `, `serve-perf: `, `intake-perf: `, `serve-load: `, `landing-perf: `, `sync-load: `
@@ -123,7 +130,7 @@ ci_perf_cases := 'test(=remote_perf::clone_cost_on_12000_commits) | test(=remote
 # scheduled.yml runs it weekly under the heavy lock, with `NEXTEST_PROFILE=ci-perf`.
 # The weekly CI measurement cases (scheduled.yml): what check-ci-slow leaves out, optimized.
 check-ci-perf:
-    cargo nextest run --locked --release --workspace --all-features --run-ignored all --no-tests=fail -E '{{ ci_perf_cases }}' --no-capture
+    SWARMOPS_SCALE=1 cargo nextest run --locked --release --workspace --all-features --run-ignored all --no-tests=fail -E '{{ ci_perf_cases }}' --no-capture
 
 # The git fixtures (crates/swarmops-testkit/git-fixtures/): every script run again by the git
 # that git-fixtures/GIT_VERSION declares (`SWARMOPS_GIT` names the binary; any other version is
@@ -234,6 +241,49 @@ perf:
     cargo nextest run --locked --release -p swarmops-cli --all-features --run-ignored ignored-only \
         -E 'test(/^ws_processes::perf::/)' --no-capture 2>&1 | tee target/perf/ws.log \
         | grep --line-buffered '^ws-perf: '
+    [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
+    load between
+    # M20's FORMAT 3 cases (`format3_perf::*`): the scale fixture's parts until its line says
+    # whole (at most n calls, n from the first line), G18's lock hold on 1,000,000 records, A1's
+    # commit cost, the 200,000-changeset upgrade, then A7's ten deciles and A5's verdict. A line
+    # `... not run` is a failure: a case that did not run is no measurement.
+    fixture_call() {
+        SWARMOPS_SCALE=1 cargo nextest run --locked --release -p swarmops-cli --all-features \
+            --run-ignored ignored-only -E 'test(=scale_perf::fixture_next_part)' --no-capture 2>&1
+    }
+    calls=0
+    : > target/perf/fixture.log
+    while :; do
+        fixture_call > target/perf/fixture-call.log || status=1
+        cat target/perf/fixture-call.log >> target/perf/fixture.log
+        line="$(grep '^scale-perf: fixture part' target/perf/fixture-call.log | tail -1)"
+        echo "$line"
+        case "$line" in
+            *', whole') break ;;
+            '') status=1; break ;;
+        esac
+        parts="${line##* of }"
+        calls=$((calls + 1))
+        [ "$calls" -lt "${parts%%,*}" ] || { echo "perf: the fixture is not whole after $calls calls" >&2; status=1; break; }
+    done
+    load between
+    SWARMOPS_SCALE=1 cargo nextest run --locked --release -j 1 -p swarmops-cli --all-features \
+        --run-ignored ignored-only -E 'test(=format3_perf::lock_hold_at_1m_records_stays_under_100ms) | test(=format3_perf::commit_cost_on_1m_against_1k) | test(=format3_perf::upgrade_200k_measured)' \
+        --no-capture 2>&1 | tee target/perf/format3.log | grep --line-buffered '^format3-perf: '
+    [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
+    ! grep -q 'not run' target/perf/format3.log || { echo "perf: a format3 case did not run" >&2; status=1; }
+    load between
+    : > target/perf/format3-deciles.log
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        cargo nextest run --locked --release -p swarmops-cli --all-features \
+            --run-ignored ignored-only -E 'test(=format3_perf::commits_1m_next_decile)' --no-capture 2>&1 \
+            | tee -a target/perf/format3-deciles.log | grep --line-buffered '^format3-perf: '
+        [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
+    done
+    load between
+    cargo nextest run --locked --release -p swarmops-cli --all-features \
+        --run-ignored ignored-only -E '{{ perf_recipe_only }}' --no-capture 2>&1 \
+        | tee target/perf/format3-a5.log | grep --line-buffered '^format3-perf: '
     [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
     load between
     cargo bench --locked -p swarmops-store --bench '*' -- --output-format bencher 2>&1 \
