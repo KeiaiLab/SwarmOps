@@ -17,10 +17,11 @@ test-group = 'contention'
 # it (its one-test release run asks for the default profile). Every test runs even after one
 # fails, none is retried, and the run's JUnit report is target/nextest/ci/junit.xml. A test
 # still running after 10 minutes is killed and reported as timed out, the JUnit report naming
-# it: the longest regular test takes about 10 s on this host and under 2 minutes even with the
-# host badly overloaded, so only a hang gets there, and the job's 30-minute timeout would leave
-# no report at all. The default profile's settings and overrides (the contention group above)
-# apply to it as well.
+# it: most regular tests take seconds on this host, and the longest, swarmops-git's import crash
+# sweep (`sweeps::import_crashing_at_any_call_resumes_to_the_same_state`), about 97 s a format at
+# load 430, so only a hang gets there, and the job's 30-minute timeout would leave no report at
+# all. The default profile's settings and overrides (the contention group above) apply to it as
+# well.
 [profile.ci]
 fail-fast = false
 retries = 0
@@ -31,7 +32,10 @@ path = "junit.xml"
 
 # `sigkill::sigkill_mid_commit_500_times` (both formats) took 577-599 s in a loaded check-slow on
 # this host, at the profile's 10-minute kill, before the M16 design §2 ran two reader processes
-# beside it: it gets 20 periods.
+# beside it: it gets 20 periods. The test is ignored, so this binds a run of the ignored tests
+# under this profile, such as `NEXTEST_PROFILE=ci just check-slow`; no CI job is one: `just
+# check` runs no ignored test, and the weekly `ci-slow` profile, which inherits this override,
+# kills at 20 periods already.
 [[profile.ci.overrides]]
 filter = 'test(sigkill_mid_commit_500_times)'
 slow-timeout = { period = "60s", terminate-after = 20 }
