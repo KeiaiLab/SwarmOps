@@ -3,6 +3,8 @@
 //! is resolved; a range of more than 256 changesets is `E_TOO_LARGE` with
 //! `details.max_changesets`; a changeset off the target is `E_INVALID_ARG` (`not_on_target`).
 //! Each is asserted through the operations layer and through the binary, on the same store.
+//! Beside them, what a revert leaves out (§4.1): a path the range's last changeset holds as the
+//! range's start does gets no change, and a range of such paths alone is `E_NOTHING_TO_LAND`.
 
 use std::sync::Arc;
 
@@ -10,7 +12,7 @@ use camino::Utf8Path;
 use serde_json::{Value, json};
 use swarmops_api::{ErrorCode, Identity, OpError, RevertReq, StoreOps};
 use swarmops_ops::LocalOps;
-use swarmops_repo::{Advance, LocalRepo, MAX_REVERT_CHANGESETS, MAX_REVERT_REASON_BYTES};
+use swarmops_repo::{Advance, Change, LocalRepo, MAX_REVERT_CHANGESETS, MAX_REVERT_REASON_BYTES};
 use swarmops_testkit::fs::NoSyncFs;
 use swarmops_testkit::repo::{put, request};
 
@@ -22,30 +24,52 @@ const AGENT: &str = "agent/revert-limits";
 /// The ref every revert lands on.
 const MAIN: &str = "main";
 
+/// The path a range changes and changes back.
+const SAME: &str = "same.txt";
+
+/// The path a range changes.
+const MOVED: &str = "moved.txt";
+
+/// What both paths hold before a range.
+const OLD: &[u8] = b"old\n";
+
+/// What a range puts at a path.
+const NEW: &[u8] = b"new\n";
+
+/// `details.reason` of a revert whose inverse holds no change.
+const NO_CHANGES: &str = "no_changes";
+
 /// A store whose `main` is a chain of changesets, beside one changeset off it, and the store's
 /// operations opened in this process.
 struct Fixture {
     store: Store,
     ops: LocalOps,
-    /// `main`'s first-parent chain, oldest first, each changeset a file of its own.
+    /// `main`'s first-parent chain, oldest first.
     main: Vec<String>,
     /// A changeset on `main`'s head that `main` does not name.
     off: String,
 }
 
 impl Fixture {
-    /// A fresh store with `n` changesets on `main`, written unsynced: the setup's flushes are
-    /// not what the tests read, and a long chain would pay for hundreds of them.
+    /// A fresh store with `n` changesets on `main`, each a file of its own.
     fn new(n: usize) -> Fixture {
+        let steps = (0..n).map(|i| vec![put(&format!("f{i}.txt"), b"x\n")]);
+        Fixture::chain(steps)
+    }
+
+    /// A fresh store whose `main` is one changeset per element of `steps`, written unsynced:
+    /// the setup's flushes are not what the tests read, and a long chain would pay for hundreds
+    /// of them.
+    fn chain(steps: impl IntoIterator<Item = Vec<Change>>) -> Fixture {
         let store = Store::init();
         let root = Utf8Path::new(store.path());
 
         // 1. The chain, then the changeset off it.
         let repo = LocalRepo::open_with_fs(root, Arc::new(NoSyncFs)).expect("open the store");
-        let mut chain = Vec::with_capacity(n);
-        for i in 0..n {
+        let mut chain = Vec::new();
+        for changes in steps {
             let parents: Vec<_> = chain.last().copied().into_iter().collect();
-            let mut req = request(&parents, vec![put(&format!("f{i}.txt"), b"x\n")], "f");
+            let mut req = request(&parents, changes, "f");
             req.advance = Some(Advance::new(MAIN, AGENT));
             chain.push(repo.commit(req).expect("commit").id);
         }
@@ -190,4 +214,57 @@ fn revert_maps_to_its_codes_in_ops_and_cli() {
     assert_eq!(exit, invalid.exit());
     assert_eq!(error["details"]["reason"], "not_on_target");
     assert_eq!(f.state(), before, "nothing written");
+}
+
+/// A path the range changed and changed back gets no change in the inverse (the M18 design
+/// §4.1: a leaf at the range's start is put "unless `X` holds the same"). Beside a path the
+/// range did change, the revert's commit names that path alone; alone in its range, the revert
+/// is `E_NOTHING_TO_LAND` (exit 0, `details.reason` `no_changes`) in both layers, and writes
+/// nothing.
+#[test]
+fn revert_skips_a_leaf_already_at_its_old_value() {
+    // `main`: `same.txt` and `moved.txt`; `same.txt` changed; `same.txt` back, `moved.txt`
+    // changed; `same.txt` changed; `same.txt` back.
+    let f = Fixture::chain([
+        vec![put(SAME, OLD), put(MOVED, OLD)],
+        vec![put(SAME, NEW)],
+        vec![put(SAME, OLD), put(MOVED, NEW)],
+        vec![put(SAME, NEW)],
+        vec![put(SAME, OLD)],
+    ]);
+    let (since, head) = (f.main[2].as_str(), f.head());
+
+    // 1. A range of the returned path alone: nothing to land, nothing written.
+    let before = f.state();
+    let nothing = ErrorCode::NothingToLand;
+    let mut req = RevertReq::new(head, "back already");
+    req.since = Some(since.into());
+    let refused = f.ops_refusal(req);
+    assert_eq!(refused.code, nothing.as_str(), "{refused:?}");
+    assert_eq!(refused.details["reason"], NO_CHANGES);
+
+    let args = [head, "--since", since, "--reason", "back already"];
+    let (exit, error) = f.cli_refusal(&args, nothing.as_str());
+    assert_eq!(exit, nothing.exit());
+    assert_eq!(error["details"]["reason"], NO_CHANGES);
+    assert_eq!(f.state(), before, "nothing written");
+
+    // 2. The range of both paths, to the changeset that returned the first: the inverse sets
+    //    back the path that moved, and does not name the one that returned.
+    let (since, to) = (f.main[0].as_str(), f.main[2].as_str());
+    let args = ["revert", to, "--since", since, "--reason", "moved"];
+    let landed = f.store.run_as(AGENT, &args, &[]).ok();
+    assert_eq!(
+        landed["reverted"],
+        json!([f.main[1], f.main[2]]),
+        "{landed}"
+    );
+    assert_eq!(landed["land"]["files_changed"], 1, "{landed}");
+
+    let inverse = landed["land"]["squashed_from"][0].as_str().expect("an id");
+    let shown = f.store.read(&["show", inverse]).ok();
+    let paths: Vec<&Value> = (shown["changes"].as_array().expect("its changes").iter())
+        .map(|entry| &entry["path"])
+        .collect();
+    assert_eq!(paths, [MOVED], "{shown}");
 }
