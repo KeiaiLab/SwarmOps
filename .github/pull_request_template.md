@@ -13,4 +13,4 @@
 - [ ] `CHANGELOG.md` has an **Unreleased** entry for a user-visible change.
 - [ ] The documentation is updated.
 - [ ] `docs/known-limitations.md` gains what this opens, or loses what it closes.
-- [ ] Commit messages follow [CONTRIBUTING.md](../CONTRIBUTING.md).
+- [ ] Commit messages follow [CONTRIBUTING.md](https://github.com/KeiaiLab/SwarmOps/blob/stable/CONTRIBUTING.md).
