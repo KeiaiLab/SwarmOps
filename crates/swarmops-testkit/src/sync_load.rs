@@ -71,8 +71,8 @@ fn mean<'s>(samples: impl Iterator<Item = &'s LagSample>) -> f64 {
     if count == 0 {
         return 0.0;
     }
-    #[allow(clippy::cast_precision_loss)] // A sum of lags far below 2^52.
-    let sum = sum as f64;
+    // A sum of lags far below u32::MAX, exact as f64; past it, saturated.
+    let sum = f64::from(u32::try_from(sum).unwrap_or(u32::MAX));
     sum / f64::from(count)
 }
 
