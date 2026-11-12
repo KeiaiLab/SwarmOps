@@ -32,6 +32,7 @@ mod pilot_ws;
 mod power_loss;
 mod remote_acceptance;
 mod remote_fetch;
+mod remote_matrix;
 mod remote_perf;
 mod remote_push;
 mod remote_sync;
