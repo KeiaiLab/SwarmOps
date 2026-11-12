@@ -37,6 +37,7 @@ mod git;
 pub mod health;
 pub mod identity;
 mod local;
+pub mod native;
 mod phase;
 mod push;
 mod rebase;

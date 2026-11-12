@@ -2219,6 +2219,7 @@ name = "swarmops-ops"
 version = "0.11.0"
 dependencies = [
  "base64",
+ "blake3",
  "camino",
  "schemars",
  "serde",

@@ -31,6 +31,8 @@ swarmops-git = { path = "../swarmops-git", version = "0.11.0" }
 swarmops-repo = { path = "../swarmops-repo", version = "0.11.0" }
 swarmops-store = { path = "../swarmops-store", version = "0.11.0" }
 base64.workspace = true
+# Native sync's land keys (`native::key`), hashed as `serve`'s are.
+blake3.workspace = true
 camino.workspace = true
 serde.workspace = true
 serde_json.workspace = true
