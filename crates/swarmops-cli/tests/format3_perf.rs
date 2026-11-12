@@ -443,14 +443,6 @@ fn percentile_of(holds: &[Duration], percent: usize) -> Duration {
     percentile(&sorted, percent)
 }
 
-/// The write transactions the process began, where the build counts them.
-fn write_calls() -> Option<u64> {
-    #[cfg(feature = "test-hooks")]
-    return Some(swarmops_store::MetaStore::write_calls());
-    #[cfg(not(feature = "test-hooks"))]
-    None
-}
-
 /// A copy of the large fixture, which a case may change, under the bench directory, opened; or
 /// `None` once the case's `not run (fixture k of n)` line is out.
 fn large_copy(case: &str) -> Option<(Utf8PathBuf, LocalRepo)> {
@@ -459,11 +451,11 @@ fn large_copy(case: &str) -> Option<(Utf8PathBuf, LocalRepo)> {
         println!("format3-perf: {case} not run (fixture {k} of {n})");
         return None;
     };
-    copy_of(fixture.store.as_std_path(), case)
+    Some(copy_of(fixture.store.as_std_path(), case))
 }
 
 /// A copy of the store at `from`, under the bench directory, named for `case`; opened.
-fn copy_of(from: &Path, case: &str) -> Option<(Utf8PathBuf, LocalRepo)> {
+fn copy_of(from: &Path, case: &str) -> (Utf8PathBuf, LocalRepo) {
     let to = base_dir().join(format!("m20-7-{case}"));
     copy_store(
         from.parent()
@@ -474,7 +466,7 @@ fn copy_of(from: &Path, case: &str) -> Option<(Utf8PathBuf, LocalRepo)> {
     );
     let store = Utf8PathBuf::from_path_buf(to).expect("a UTF-8 bench path");
     let repo = LocalRepo::open(&store).expect("open the copy");
-    Some((store, repo))
+    (store, repo)
 }
 
 /// G18 at 1,000,000 records: the longest hold of `meta/lock` by a commit, a land and a ref move
@@ -491,7 +483,8 @@ fn lock_hold_at_1m_records_stays_under_100ms() {
         return;
     };
     let mut head = head_of(&repo).expect("the fixture has a main");
-    let writes_before = write_calls();
+    #[cfg(feature = "test-hooks")]
+    let writes_before = swarmops_store::MetaStore::write_calls();
 
     // 1. Commits that move main.
     let mut commits = Vec::new();
@@ -548,11 +541,14 @@ fn lock_hold_at_1m_records_stays_under_100ms() {
         );
         println!("format3-perf: {CASE}: {}", hold_line(kind, holds));
     }
-    if let (Some(before), Some(after)) = (writes_before, write_calls()) {
+
+    // The build counts write transactions only with the test hooks.
+    #[cfg(feature = "test-hooks")]
+    {
+        let writes = swarmops_store::MetaStore::write_calls() - writes_before;
         assert!(
-            after - before >= u64::try_from(3 * HOLD_OPS).expect("fits"),
-            "every operation was a write transaction: {} of {}",
-            after - before,
+            writes >= u64::try_from(3 * HOLD_OPS).expect("fits"),
+            "every operation was a write transaction: {writes} of {}",
             3 * HOLD_OPS
         );
     }
@@ -591,8 +587,7 @@ fn commit_cost_on_1m_against_1k() {
     };
     let small_fixture = bulk::build_small();
     let (_small_store, small) =
-        copy_of(small_fixture.store.as_std_path(), &format!("{CASE}-small"))
-            .expect("a copy of the small store");
+        copy_of(small_fixture.store.as_std_path(), &format!("{CASE}-small"));
     let mut heads = [
         head_of(&big).expect("main on the large store"),
         head_of(&small).expect("main on the small store"),
