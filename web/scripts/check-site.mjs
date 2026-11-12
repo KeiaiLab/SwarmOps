@@ -63,8 +63,9 @@ const OUT = path.join(WEB, 'out');
 
 // Product pages: a ceiling on first-load JS, gzip. Measured 139.3 kB on /, /product and
 // /roadmap at the first build; an empty page of the pinned Next and React is 132.0 kB (README).
+// /now joined with 137.2 kB.
 const PRODUCT_JS_BUDGET_KB = 140;
-const PRODUCT_PAGES = /^(index|product(\/.*)?|roadmap)\.html$/;
+const PRODUCT_PAGES = /^(index|product(\/.*)?|roadmap|now)\.html$/;
 
 // The same exclusions as lib/docs-paths.ts, written again here so the check does not trust it.
 const EXCLUDED_DOCS = ['superpowers/', 'reference/notes/', 'examples/'];
@@ -342,7 +343,7 @@ function pagesOf(site) {
     .filter((f) => f.endsWith('.html') && !OWN_POLICY_DIRS.some((d) => f.startsWith(d)));
 }
 
-/** Product pages: Home, /product/** and /roadmap. */
+/** Product pages: Home, /product/**, /roadmap and /now. */
 function productPages(site) {
   return pagesOf(site).filter((f) => PRODUCT_PAGES.test(f));
 }
