@@ -128,9 +128,8 @@ class Rule(enum.Enum):
 # The rules a default run enforces. Two wait for the docs to change: spec-citations, until they
 # cite public anchors instead of the private design documents' sections; private-wording, until
 # no page describes the repository as private (RELEASE.md's note on the attestations v0.1.0
-# lacks still names the Free plan and the private repository of the time). Three layout rules
-# wait for page fixes: readme-dated-list (README.md names a milestone), guide-next (two guides
-# list four links under `## Next`) and install-failures (a case quotes no installer message).
+# lacks still names the Free plan and the private repository of the time). One layout rule
+# waits for page fixes: guide-next (two guides list four links under `## Next`).
 # perf-citations waits for docs/goals.md's G15 row: its 56 s live run cites no docs/perf.md
 # section.
 ENFORCED = frozenset({
@@ -142,10 +141,12 @@ ENFORCED = frozenset({
     Rule.README_OPENING,
     Rule.README_VERSION,
     Rule.ENTRY_VERSION,
+    Rule.README_DATED_LIST,
     Rule.PRAISE_WORDS,
     Rule.CLAIM,
     Rule.GUIDE_OPENING,
     Rule.DOCS_HOME,
+    Rule.INSTALL_FAILURES,
     Rule.FENCE_LABEL,
     Rule.NO_PROMPT,
     Rule.CALLOUTS,
