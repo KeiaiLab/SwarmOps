@@ -375,8 +375,17 @@ fn io_error(error: &dyn fmt::Display) -> SourceError {
 
 #[cfg(test)]
 mod tests {
-    use super::{Answer, answer};
-    use crate::{GitOid, RawKind, SourceError};
+    use std::ffi::OsStr;
+    use std::fs;
+    use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::path::{Path, PathBuf};
+    use std::process::Stdio;
+
+    use super::{Answer, CatFileSource, answer};
+    use crate::serve::repo::ServeRepo;
+    use crate::transport::GitCli;
+    use crate::{GitOid, GitSink as _, GitSource as _, GixSink, RawKind, SourceError};
 
     const OID: &str = "0123456789abcdef0123456789abcdef01234567";
 
@@ -400,5 +409,112 @@ mod tests {
         }
         let odd = answer(oid(), format!("{OID} note 3").as_bytes());
         assert!(matches!(odd, Err(SourceError::Corrupt { .. })));
+    }
+
+    /// The blob the damaged pack holds.
+    const CONTENT: &[u8] = b"a packed blob, whole\n";
+
+    /// How the reason starts when git ended on the request.
+    const GIT_ENDED: &str = "git cat-file gave";
+
+    /// The length of a zlib stream's check, the Adler-32 after its data.
+    const CHECK_LEN: usize = 4;
+
+    /// The Adler-32 (RFC 1950 §8.2) of `bytes`: what a zlib stream ends with.
+    fn adler32(bytes: &[u8]) -> u32 {
+        const MODULUS: u32 = 65_521;
+        let (mut low, mut high) = (1_u32, 0_u32);
+        for byte in bytes {
+            low = (low + u32::from(*byte)) % MODULUS;
+            high = (high + low) % MODULUS;
+        }
+        (high << 16) | low
+    }
+
+    /// Packs the object `id` of the repository `git_dir` uncompressed (deflate's stored
+    /// blocks, so that the pack holds its bytes as they are) and removes its loose file; the
+    /// pack's path, made writable.
+    fn pack_alone(git_dir: &Path, id: GitOid) -> PathBuf {
+        // 1. git pack-objects of the one id.
+        let git = GitCli::find().unwrap();
+        let level = [("pack.compression", OsStr::new("0"))];
+        let mut packer = git.serve_command(git_dir, &level);
+        packer
+            .args(["pack-objects", "-q", "objects/pack/pack"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null());
+        let mut packer = packer.spawn().unwrap();
+        let mut stdin = packer.stdin.take().unwrap();
+        stdin.write_all(format!("{id}\n").as_bytes()).unwrap();
+        drop(stdin);
+        assert!(packer.wait().unwrap().success(), "git pack-objects");
+
+        // 2. The loose file gone: the pack is the object's only place.
+        let hex = id.to_string();
+        let (fan, rest) = hex.split_at(2);
+        fs::remove_file(git_dir.join("objects").join(fan).join(rest)).unwrap();
+
+        // 3. The pack, which git writes read-only.
+        let pack = fs::read_dir(git_dir.join("objects/pack"))
+            .unwrap()
+            .map(|listed| listed.unwrap().path())
+            .find(|path| path.extension() == Some(OsStr::new("pack")))
+            .expect("git wrote a pack");
+        fs::set_permissions(&pack, fs::Permissions::from_mode(0o644)).unwrap();
+        pack
+    }
+
+    /// A packed object whose bytes are not the ones its id names is `Corrupt`, whether git
+    /// notices or not: git ends on a stream that fails zlib's check, and hands out, as if
+    /// whole, one whose check fits the changed bytes, which the id then refuses.
+    #[test]
+    fn cat_file_refuses_a_packed_damaged_object() {
+        // 1. A repository whose one blob is in a pack alone, and reads back.
+        let root = tempfile::tempdir().unwrap();
+        let repo = ServeRepo::open(camino::Utf8Path::from_path(root.path()).unwrap()).unwrap();
+        let git_dir = repo.git_dir().as_std_path();
+        let mut sink = GixSink::open(git_dir).unwrap();
+        let id = sink.write_object(RawKind::Blob, CONTENT).unwrap();
+        sink.sync(&[id]).unwrap();
+        drop(sink);
+        let pack = pack_alone(git_dir, id);
+        let whole = fs::read(&pack).unwrap();
+        let read = |bytes: &[u8]| {
+            fs::write(&pack, bytes).unwrap();
+            let source = CatFileSource::open(git_dir).unwrap();
+            let got = source.read(id);
+            (source, got)
+        };
+        assert_eq!(read(&whole).1, Ok((RawKind::Blob, CONTENT.to_vec())));
+
+        // 2. One byte of the blob changed: zlib's check fails, git ends, and so does the source.
+        let at = (whole.windows(CONTENT.len()))
+            .position(|window| window == CONTENT)
+            .expect("the pack holds the blob uncompressed");
+        let mut unchecked = whole.clone();
+        unchecked[at] ^= 1;
+        let (source, got) = read(&unchecked);
+        assert!(
+            matches!(&got, Err(SourceError::Corrupt { oid, reason })
+                if *oid == id && reason.starts_with(GIT_ENDED)),
+            "{got:?}"
+        );
+        let after = source.header(id);
+        assert!(matches!(after, Err(SourceError::Io { .. })), "{after:?}");
+
+        // 3. The check made to fit the changed bytes: git answers with them, the id does not
+        //    name them, and the source reads on.
+        let end = at + CONTENT.len();
+        let mut checked = unchecked.clone();
+        let check = adler32(&checked[at..end]).to_be_bytes();
+        checked[end..end + CHECK_LEN].copy_from_slice(&check);
+        let (source, got) = read(&checked);
+        assert!(
+            matches!(&got, Err(SourceError::Corrupt { oid, reason })
+                if *oid == id && !reason.starts_with(GIT_ENDED)),
+            "{got:?}"
+        );
+        let len = u64::try_from(CONTENT.len()).unwrap();
+        assert_eq!(source.header(id), Ok((RawKind::Blob, len)));
     }
 }
