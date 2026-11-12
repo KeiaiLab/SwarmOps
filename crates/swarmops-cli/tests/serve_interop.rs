@@ -3,7 +3,9 @@
 //! history shapes a team pushes, and push options.
 //! Each runs over ssh through the test kit's forced-command stand-in, so that no test needs the
 //! network or an sshd: a push is cut and a client held by the stand-in's faults ([`SshFault`]),
-//! an answer is cut at an exact byte by a wrapper of this file.
+//! an answer is cut at an exact byte by a wrapper of this file. One run alone,
+//! [`real_sshd_round_trip`], goes through a real OpenSSH sshd on loopback, only when
+//! `SWARMOPS_REAL_SSHD=1` (the Scheduled run).
 //!
 //! ```text
 //!   client git ──stdin──▶ stand-in ──▶ swarmops serve     SshFault::CutSend: the push cut
@@ -11,10 +13,11 @@
 //! ```
 
 use std::fs;
+use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{self, Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -773,5 +776,370 @@ fn push_options_are_refused_whole() {
     let fresh = site.clone("fresh");
     assert_eq!(site.rev(&fresh, "origin/main"), head);
     assert_eq!(site.rev(&fresh, "origin/feature/o"), head);
+    site.assert_clean();
+}
+
+/// The variable that turns the run over a real sshd on.
+const REAL_SSHD_VAR: &str = "SWARMOPS_REAL_SSHD";
+
+/// Where the OpenSSH programs are looked for after `PATH`: sshd is a system daemon, in an sbin
+/// directory a user's `PATH` often lacks.
+const SBIN_DIRS: [&str; 3] = ["/usr/sbin", "/usr/local/sbin", "/sbin"];
+
+/// The OpenSSH programs the run over a real sshd needs.
+#[derive(Debug, PartialEq, Eq)]
+struct OpenSsh {
+    /// The daemon.
+    sshd: PathBuf,
+    /// The client git runs.
+    ssh: PathBuf,
+    /// What makes the host's and the client's keys.
+    keygen: PathBuf,
+}
+
+/// Whether the run over a real sshd goes.
+#[derive(Debug, PartialEq, Eq)]
+enum SshdGate {
+    /// Not asked for; why.
+    Off(String),
+    /// Asked for, with the programs found.
+    On(OpenSsh),
+}
+
+/// The gate: off unless [`REAL_SSHD_VAR`] is `1`; on, each OpenSSH program is looked for in
+/// `dirs`, and one missing fails the run, so that a host asked to run it never skips it.
+fn sshd_gate(
+    lookup: &dyn Fn(&str) -> Option<String>,
+    dirs: &[PathBuf],
+) -> Result<SshdGate, String> {
+    if lookup(REAL_SSHD_VAR).as_deref() != Some("1") {
+        return Ok(SshdGate::Off(format!("{REAL_SSHD_VAR} is not 1")));
+    }
+    let find = |name: &str| {
+        dirs.iter()
+            .map(|dir| dir.join(name))
+            .find(|path| path.is_file())
+            .ok_or_else(|| format!("{REAL_SSHD_VAR}=1 and no {name} in {dirs:?}"))
+    };
+    Ok(SshdGate::On(OpenSsh {
+        sshd: find("sshd")?,
+        ssh: find("ssh")?,
+        keygen: find("ssh-keygen")?,
+    }))
+}
+
+/// The directories the OpenSSH programs are looked for in: `PATH`'s, then [`SBIN_DIRS`].
+fn program_dirs() -> Vec<PathBuf> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    std::env::split_paths(&path)
+        .chain(SBIN_DIRS.iter().map(PathBuf::from))
+        .collect()
+}
+
+/// With [`REAL_SSHD_VAR`] unset the run is off and says why; set, a missing sshd fails it,
+/// naming the program; with every program found it goes.
+#[test]
+fn a_missing_sshd_fails_the_real_run() {
+    let empty = TempDir::new().unwrap();
+    let dirs = [empty.path().to_owned()];
+
+    // 1. Unset: off, whatever is installed.
+    let off = sshd_gate(&|_| None, &dirs);
+    assert!(
+        matches!(&off, Ok(SshdGate::Off(reason)) if reason.contains(REAL_SSHD_VAR)),
+        "{off:?}"
+    );
+
+    // 2. Set, no sshd: the run fails.
+    let on = |name: &str| (name == REAL_SSHD_VAR).then(|| "1".to_owned());
+    let missing = sshd_gate(&on, &dirs);
+    assert!(
+        matches!(&missing, Err(wrong) if wrong.contains("no sshd")),
+        "{missing:?}"
+    );
+
+    // 3. Set, every program there: on.
+    for name in ["sshd", "ssh", "ssh-keygen"] {
+        fs::write(empty.path().join(name), "").unwrap();
+    }
+    assert!(matches!(sshd_gate(&on, &dirs), Ok(SshdGate::On(_))));
+}
+
+/// The address the real sshd listens on.
+const LOOPBACK: &str = "127.0.0.1";
+
+/// An OpenSSH sshd on loopback, run as the test's own user, that knows one client key: its
+/// `authorized_keys` line forces the test kit's stand-in for `swarmops serve` as [`AGENT`],
+/// which takes `SSH_ORIGINAL_COMMAND` as the stand-in's own command line would carry it.
+///
+/// ```text
+///   client git ── ssh -i <key> -p <port> ── sshd ── <user's shell> -c forced
+///       forced: exec <stand-in> sshd "$SSH_ORIGINAL_COMMAND"   (GIT_PROTOCOL kept: AcceptEnv)
+///         └── env -i … swarmops serve --root <root> --as person/ada
+/// ```
+struct RealSshd {
+    /// The keys, the configuration, the forced command and the daemon's log.
+    dir: TempDir,
+    /// The daemon, in the foreground; killed when dropped.
+    daemon: process::Child,
+    /// The `GIT_SSH_COMMAND` value of the client key.
+    ssh: String,
+    /// The account sshd runs the forced command as: the test's own.
+    user: String,
+    /// The port it listens on.
+    port: u16,
+}
+
+impl RealSshd {
+    /// Tries to listen at most this many times: a port free when picked may be taken before
+    /// sshd binds it.
+    const ATTEMPTS: usize = 3;
+
+    /// The daemon of `openssh`, its forced command `stand_in` (a `GIT_SSH_COMMAND` value of
+    /// [`ServeSite::ssh_command`]), listening once it accepts a connection.
+    fn start(openssh: &OpenSsh, stand_in: &str) -> RealSshd {
+        let dir = TempDir::new().unwrap();
+        let at = |name: &str| dir.path().join(name).to_str().unwrap().to_owned();
+
+        // 1. The host's key and the client's, with no passphrase.
+        for key in ["host_key", "client_key"] {
+            let made = child::run(Command::new(&openssh.keygen).args([
+                "-q",
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-C",
+                key,
+                "-f",
+                &at(key),
+            ]));
+            assert!(made.status.success(), "{}", text(&made.stderr));
+        }
+
+        // 2. The forced command: the stand-in drops its first word as the host.
+        let forced = at("forced");
+        fs::write(
+            &forced,
+            format!("#!/bin/sh\nexec {stand_in} sshd \"$SSH_ORIGINAL_COMMAND\"\n"),
+        )
+        .unwrap();
+        fs::set_permissions(&forced, fs::Permissions::from_mode(0o755)).unwrap();
+        let client = fs::read_to_string(at("client_key.pub")).unwrap();
+        let line = format!("command=\"{forced}\",restrict {client}");
+        fs::write(at("authorized_keys"), line).unwrap();
+
+        // 3. Listening on a free loopback port, again on another if that one was taken.
+        let (daemon, port) = (0..Self::ATTEMPTS)
+            .find_map(|_| Self::listen(openssh, &at))
+            .expect("sshd never listened");
+
+        // 4. The client: this host's key alone is known, the client key alone is offered.
+        let host = fs::read_to_string(at("host_key.pub")).unwrap();
+        fs::write(at("known_hosts"), format!("[{LOOPBACK}]:{port} {host}")).unwrap();
+        let ssh = format!(
+            "'{ssh}' -F /dev/null -i '{key}' -o IdentitiesOnly=yes \
+             -o UserKnownHostsFile='{known}' -o GlobalKnownHostsFile=/dev/null \
+             -o StrictHostKeyChecking=yes -o BatchMode=yes",
+            ssh = openssh.ssh.to_str().unwrap(),
+            key = at("client_key"),
+            known = at("known_hosts"),
+        );
+        let user = child::run(Command::new("id").arg("-un"));
+        assert!(user.status.success(), "{}", text(&user.stderr));
+        RealSshd {
+            dir,
+            daemon,
+            ssh,
+            user: text(&user.stdout).trim().to_owned(),
+            port,
+        }
+    }
+
+    /// sshd started on a port that was free; it and the port once it accepts a connection,
+    /// none when it ended because the port was taken. Fails the test on any other end.
+    fn listen(openssh: &OpenSsh, at: &dyn Fn(&str) -> String) -> Option<(process::Child, u16)> {
+        // 1. A port the kernel gave out a moment ago, and the configuration naming it.
+        let port = TcpListener::bind((LOOPBACK, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let config = format!(
+            "ListenAddress {LOOPBACK}\nPort {port}\nHostKey {host}\nPidFile {pid}\n\
+             AuthorizedKeysFile {keys}\nUsePAM no\nStrictModes no\nPasswordAuthentication no\n\
+             KbdInteractiveAuthentication no\nPubkeyAuthentication yes\nAcceptEnv GIT_PROTOCOL\n\
+             LogLevel VERBOSE\n",
+            host = at("host_key"),
+            pid = at("sshd.pid"),
+            keys = at("authorized_keys"),
+        );
+        fs::write(at("sshd_config"), config).unwrap();
+
+        // 2. The daemon in the foreground, its log in the directory.
+        let log = at("sshd.log");
+        let _ = fs::remove_file(&log);
+        let mut daemon = Command::new(&openssh.sshd)
+            .args(["-D", "-f", &at("sshd_config"), "-E", &log])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        // 3. Up once it accepts; ended, the port was taken or the test fails with its log.
+        let deadline = Instant::now() + CHILD_TIMEOUT;
+        loop {
+            if TcpStream::connect((LOOPBACK, port)).is_ok() {
+                return Some((daemon, port));
+            }
+            if let Some(status) = daemon.try_wait().unwrap() {
+                let log = fs::read_to_string(&log).unwrap_or_default();
+                assert!(
+                    log.contains("Address already in use"),
+                    "sshd {status}: {log}"
+                );
+                return None;
+            }
+            assert!(Instant::now() < deadline, "sshd never listened on {port}");
+            thread::sleep(POLL);
+        }
+    }
+
+    /// The ssh URL of store `name` on this daemon.
+    fn url(&self, name: &str) -> String {
+        format!("ssh://{}@{LOOPBACK}:{}/{name}.git", self.user, self.port)
+    }
+
+    /// The client key's ssh session running `command`, as a person at a terminal would.
+    fn shell(&self, command: &str) -> Output {
+        let line = format!(
+            "{} -p {} {}@{LOOPBACK} {command}",
+            self.ssh, self.port, self.user
+        );
+        child::run(
+            Command::new("sh")
+                .args(["-c", &line])
+                .env("HOME", self.dir.path()),
+        )
+    }
+
+    /// The daemon's log so far, for a failure's message.
+    fn log(&self) -> String {
+        fs::read_to_string(self.dir.path().join("sshd.log")).unwrap_or_default()
+    }
+}
+
+impl Drop for RealSshd {
+    fn drop(&mut self) {
+        let _ = self.daemon.kill();
+        let _ = self.daemon.wait();
+    }
+}
+
+/// The served store's `main`, as `serve.git` holds it.
+fn served_main(site: &Site) -> String {
+    let refs = site.served_refs();
+    let line = refs.lines().find(|line| line.ends_with(" refs/heads/main"));
+    let line = line.unwrap_or_else(|| panic!("no main in {refs}"));
+    line.split(' ').next().unwrap().to_owned()
+}
+
+/// The round trip of topology 1 over a real OpenSSH sshd on loopback, which the stand-in only
+/// plays: clones over both protocol versions, `GIT_PROTOCOL` crossing (`AcceptEnv`), a land and
+/// `pull --rebase`, a refused push, a shell command refused by `serve`, each id kept.
+#[test]
+#[ignore = "real sshd: an OpenSSH daemon on loopback, only with SWARMOPS_REAL_SSHD=1"]
+fn real_sshd_round_trip() {
+    let openssh = match sshd_gate(&|name| std::env::var(name).ok(), &program_dirs()) {
+        Ok(SshdGate::On(openssh)) => openssh,
+        Ok(SshdGate::Off(reason)) => {
+            eprintln!("skipped: {reason}");
+            return;
+        }
+        Err(wrong) => panic!("{wrong}"),
+    };
+    let site = Site::new();
+    let sshd = RealSshd::start(&openssh, &site.served.ssh_command(AGENT));
+    let url = sshd.url(STORE);
+    let git = |dir: &Path, args: &[&str]| {
+        let output = site.git_via(&sshd.ssh, dir, args);
+        let stderr = text(&output.stderr);
+        assert!(
+            output.status.success(),
+            "git {args:?}: {stderr}\n{}",
+            sshd.log()
+        );
+        text(&output.stdout)
+    };
+
+    // 1. Clones over protocol version 2 and 0 (the first makes serve.git): each holds the served
+    // main by id.
+    let mut clones = Vec::new();
+    for version in ["2", "0"] {
+        let protocol = format!("protocol.version={version}");
+        let into = format!("v{version}");
+        git(
+            site.work.path(),
+            &["-c", &protocol, "clone", "--quiet", &url, &into],
+        );
+        let clone = site.work.path().join(&into);
+        assert_eq!(site.rev(&clone, "origin/main"), served_main(&site));
+        clones.push(clone);
+    }
+    let work = &clones[0];
+    let served = served_main(&site);
+
+    // 2. Version 2 is spoken only if sshd passed GIT_PROTOCOL on.
+    let mut traced = site.git_command(
+        &sshd.ssh,
+        work,
+        &["-c", "protocol.version=2", "ls-remote", "origin", "main"],
+    );
+    let traced = child::run(traced.env("GIT_TRACE_PACKET", "1"));
+    let stderr = text(&traced.stderr);
+    assert!(traced.status.success(), "{stderr}");
+    assert!(stderr.contains("< version 2"), "{stderr}");
+    assert!(
+        text(&traced.stdout).starts_with(&served),
+        "{}",
+        text(&traced.stdout)
+    );
+
+    // 3. A land, then pull --rebase: the clone converges on the served main.
+    let moves = site.main_moves();
+    site.commit(work, "real.txt", b"over a real sshd\n");
+    let pushed = site.git_via(&sshd.ssh, work, &["push", "origin", LAND_MAIN]);
+    let stderr = text(&pushed.stderr);
+    assert!(pushed.status.success(), "{stderr}\n{}", sshd.log());
+    assert!(stderr.contains(LANDED), "{stderr}");
+    assert_eq!(site.main_moves(), moves + 1);
+    git(work, &["pull", "--quiet", "--rebase"]);
+    site.assert_converged(work);
+    assert_eq!(site.rev(work, "origin/main"), served_main(&site));
+
+    // 4. A push outside the grant: refused by the hook, nothing moved.
+    let before = site.refs();
+    let refused = site.git_via(
+        &sshd.ssh,
+        work,
+        &["push", "origin", "HEAD:refs/heads/other"],
+    );
+    let stderr = text(&refused.stderr);
+    assert!(!refused.status.success(), "{stderr}");
+    assert!(stderr.contains("E_POLICY_DENIED"), "{stderr}");
+    assert_eq!(site.refs(), before);
+
+    // 5. A shell command: the forced command runs serve, which refuses it.
+    let shell = sshd.shell("id");
+    assert!(!shell.status.success(), "{shell:?}");
+    let stderr = text(&shell.stderr);
+    assert!(stderr.contains("E_INVALID_ARG"), "{stderr}");
+    assert!(!text(&shell.stdout).contains("uid="), "{shell:?}");
+
+    // 6. Every clone and the store are clean.
+    for clone in &clones {
+        site.assert_fsck(clone);
+    }
     site.assert_clean();
 }
