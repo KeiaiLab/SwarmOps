@@ -1,5 +1,6 @@
 //! Stock git against `swarmops serve` (topology 1) where a team meets the wire's hard cases: a
-//! lease, a transfer cut either way, a land whose report is lost and a client killed mid-push.
+//! lease, a transfer cut either way, a land whose report is lost, a client killed mid-push, the
+//! history shapes a team pushes, and push options.
 //! Each runs over ssh through the test kit's forced-command stand-in, so that no test needs the
 //! network or an sshd: a push is cut and a client held by the stand-in's faults ([`SshFault`]),
 //! an answer is cut at an exact byte by a wrapper of this file.
@@ -252,6 +253,13 @@ impl Site {
         let ssh = self.served.ssh_command(AGENT);
         let body = format!("{ssh} \"$@\" | dd bs=1 count={bytes} status=none\n");
         self.wrapper(name, &body)
+    }
+
+    /// Asserts that the clone `dir` converged on the remote's `main`: `HEAD` is `origin/main`
+    /// and nothing is left uncommitted.
+    fn assert_converged(&self, dir: &Path) {
+        assert_eq!(self.rev(dir, "HEAD"), self.rev(dir, "origin/main"));
+        assert_eq!(self.git(dir, &["status", "--porcelain"]), "");
     }
 
     /// The push of `dir`'s `HEAD` to `refs/land/main` as [`AGENT`], which must succeed; its
@@ -522,5 +530,248 @@ fn a_client_killed_mid_push_leaves_a_clean_store() {
     let stderr = site.push_land(&work);
     assert!(stderr.contains("landed already onto main as "), "{stderr}");
     assert_eq!(site.main_moves(), moves + 2);
+    site.assert_clean();
+}
+
+/// A land of three commits lands once; `pull --rebase` then converges on the landed `main`,
+/// holding every commit's file.
+#[test]
+fn a_multi_commit_land_then_pull_rebase_converges() {
+    let site = Site::new();
+    let work = site.clone("work");
+    let moves = site.main_moves();
+
+    // 1. Three commits, landed by one push.
+    for name in ["one.txt", "two.txt", "three.txt"] {
+        site.commit(&work, name, name.as_bytes());
+    }
+    let stderr = site.push_land(&work);
+    assert!(stderr.contains(LANDED), "{stderr}");
+    assert_eq!(site.main_moves(), moves + 1);
+
+    // 2. pull --rebase: the clone is main, with the three files.
+    site.git(&work, &["pull", "--quiet", "--rebase"]);
+    site.assert_converged(&work);
+    for name in ["one.txt", "two.txt", "three.txt"] {
+        assert_eq!(fs::read(work.join(name)).unwrap(), name.as_bytes());
+    }
+    site.assert_fsck(&work);
+    site.assert_clean();
+}
+
+/// A land whose base `main` has moved since the clone's fetch is relocated onto the new `main`;
+/// `pull --rebase` then converges, holding both sides' files.
+#[test]
+fn a_land_that_relocates_then_pull_rebase_converges() {
+    let site = Site::new();
+    let work = site.clone("work");
+    let other = site.clone("other");
+
+    // 1. main moves under the first clone, by a fast-forward push of the second.
+    site.commit(&other, "theirs.txt", b"theirs\n");
+    site.git(&other, &["push", "--quiet", "origin", "main"]);
+    let moved = site.main_head();
+
+    // 2. The first clone lands on its stale base: relocated onto the moved main.
+    site.commit(&work, "ours.txt", b"ours\n");
+    let stderr = site.push_land(&work);
+    assert!(stderr.contains(LANDED), "{stderr}");
+    let shown = site.so(&["show", "main"]);
+    assert_eq!(shown["parents"][0], moved.as_str(), "{shown}");
+
+    // 3. pull --rebase: the clone is main, with both files.
+    site.git(&work, &["pull", "--quiet", "--rebase"]);
+    site.assert_converged(&work);
+    assert_eq!(fs::read(work.join("theirs.txt")).unwrap(), b"theirs\n");
+    assert_eq!(fs::read(work.join("ours.txt")).unwrap(), b"ours\n");
+    site.assert_fsck(&work);
+    site.assert_clean();
+}
+
+/// A merge commit pushed to a feature branch keeps its id and both parents: a fresh clone holds
+/// the same commit.
+#[test]
+fn a_merge_commit_round_trips_on_a_branch() {
+    let site = Site::new();
+    let work = site.clone("work");
+
+    // 1. Two branches off main, merged with a merge commit on feature/m.
+    site.git(&work, &["checkout", "--quiet", "-b", "feature/side"]);
+    let merged = site.commit(&work, "side.txt", b"side\n");
+    site.git(&work, &["checkout", "--quiet", "-b", "feature/m", "main"]);
+    let ours = site.commit(&work, "ours.txt", b"ours\n");
+    site.git(
+        &work,
+        &[
+            "merge",
+            "--quiet",
+            "--no-ff",
+            "-m",
+            "merge side",
+            "feature/side",
+        ],
+    );
+    let merge = site.rev(&work, "HEAD");
+
+    // 2. Pushed, then cloned afresh: the same merge, the same parents.
+    site.git(&work, &["push", "--quiet", "origin", "feature/m"]);
+    let fresh = site.clone("fresh");
+    assert_eq!(site.rev(&fresh, "origin/feature/m"), merge);
+    assert_eq!(site.rev(&fresh, "origin/feature/m^1"), ours);
+    assert_eq!(site.rev(&fresh, "origin/feature/m^2"), merged);
+    site.assert_fsck(&fresh);
+    site.assert_clean();
+}
+
+/// Commits git writes but rarely meets keep their ids through the store: a signature header, an
+/// encoding header, an empty commit, a mode change and a symlink.
+#[test]
+fn unusual_commits_round_trip_by_id() {
+    let site = Site::new();
+    let work = site.clone("work");
+    site.git(&work, &["checkout", "--quiet", "-b", "feature/odd"]);
+    let mut made = Vec::new();
+
+    // 1. An empty commit.
+    site.git(
+        &work,
+        &["commit", "--quiet", "--allow-empty", "-m", "empty"],
+    );
+    made.push(site.rev(&work, "HEAD"));
+
+    // 2. A file made executable.
+    made.push(site.commit(&work, "run.sh", b"#!/bin/sh\n"));
+    site.git(&work, &["update-index", "--chmod=+x", "run.sh"]);
+    site.git(&work, &["commit", "--quiet", "-m", "executable"]);
+    made.push(site.rev(&work, "HEAD"));
+
+    // 3. A symlink.
+    std::os::unix::fs::symlink("run.sh", work.join("link")).unwrap();
+    site.git(&work, &["add", "link"]);
+    site.git(&work, &["commit", "--quiet", "-m", "link"]);
+    made.push(site.rev(&work, "HEAD"));
+
+    // 4. A Latin-1 message under an encoding header.
+    let message = work.join("message.txt");
+    fs::write(&message, b"caf\xe9\n").unwrap();
+    let file = message.to_str().unwrap();
+    let encoding = "i18n.commitEncoding=ISO-8859-1";
+    site.git(
+        &work,
+        &[
+            "-c",
+            encoding,
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-F",
+            file,
+        ],
+    );
+    let encoded = site.rev(&work, "HEAD");
+    let raw = site.git(&work, &["cat-file", "commit", &encoded]);
+    assert!(raw.contains("\nencoding ISO-8859-1\n"), "{raw}");
+    made.push(encoded);
+
+    // 5. A signature header, written as git writes one: after the committer.
+    site.git(
+        &work,
+        &["commit", "--quiet", "--allow-empty", "-m", "signed"],
+    );
+    let raw = site.git(&work, &["cat-file", "commit", "HEAD"]);
+    let (head, body) = raw.split_once("\n\n").unwrap();
+    let signature = "gpgsig -----BEGIN PGP SIGNATURE-----\n \n iQEz\n -----END PGP SIGNATURE-----";
+    let signed = format!("{head}\n{signature}\n\n{body}");
+    let path = work.join("signed.commit");
+    fs::write(&path, signed).unwrap();
+    let path = path.to_str().unwrap();
+    let id = site.git(&work, &["hash-object", "-t", "commit", "-w", path]);
+    let id = id.trim().to_owned();
+    site.git(&work, &["update-ref", "HEAD", &id]);
+    made.push(id);
+
+    // 6. Pushed, then cloned afresh: every commit by its id.
+    site.git(&work, &["push", "--quiet", "origin", "feature/odd"]);
+    let fresh = site.clone("fresh");
+    let tip = made.last().unwrap();
+    assert_eq!(&site.rev(&fresh, "origin/feature/odd"), tip);
+    let listed = site.git(&fresh, &["rev-list", "main..origin/feature/odd"]);
+    let mut listed: Vec<&str> = listed.lines().collect();
+    listed.reverse();
+    assert_eq!(listed, made);
+    site.assert_fsck(&fresh);
+    site.assert_clean();
+}
+
+/// `git push --all` into an empty store creates every branch with its ids kept.
+#[test]
+fn push_all_into_an_empty_store() {
+    let site = Site::new();
+    let empty = "empty";
+    site.served.init(empty);
+    fs::write(site.served.store(empty).join("access.toml"), ACCESS).unwrap();
+    let work = site.clone("work");
+
+    // 1. Three branches: main and two made here.
+    for branch in ["feature/a", "release/1"] {
+        site.git(&work, &["checkout", "--quiet", "-b", branch, "main"]);
+        site.commit(&work, "branch.txt", branch.as_bytes());
+    }
+    let local = site.git(
+        &work,
+        &[
+            "for-each-ref",
+            "--format=%(objectname) %(refname)",
+            "refs/heads",
+        ],
+    );
+
+    // 2. Pushed whole into the empty store.
+    let url = site.served.ssh_url(empty);
+    site.git(&work, &["remote", "add", empty, &url]);
+    site.git(&work, &["push", "--quiet", "--all", empty]);
+
+    // 3. A fresh clone holds every branch at its id.
+    let fresh = site.clone_of(empty, "fresh");
+    let remote = site.git(&fresh, &["ls-remote", "--heads", "origin"]);
+    let remote: Vec<String> = remote.lines().map(|line| line.replace('\t', " ")).collect();
+    assert_eq!(remote, local.lines().collect::<Vec<_>>());
+    site.assert_fsck(&fresh);
+    let store = site.served.store(empty);
+    let verify = support::run(
+        &["--repo", store.to_str().unwrap(), "verify", "--deep"],
+        &[],
+    );
+    assert_eq!(verify.exit(), 0, "{verify}");
+}
+
+/// A push with push options is refused whole, before anything is sent: neither of its two refs
+/// moves; the same push without them moves both.
+#[test]
+fn push_options_are_refused_whole() {
+    let site = Site::new();
+    let work = site.clone("work");
+    let head = site.commit(&work, "options.txt", b"options\n");
+    let refs = ["origin", "main", "HEAD:refs/heads/feature/o"];
+
+    // 1. With an option: refused by the client, nothing moved.
+    let before = site.refs();
+    let line: Vec<&str> = ["push", "-o", "ci.skip"]
+        .iter()
+        .chain(&refs)
+        .copied()
+        .collect();
+    let refused = site.git_out(&work, &line);
+    let stderr = text(&refused.stderr);
+    assert!(!refused.status.success(), "{stderr}");
+    assert!(stderr.contains("push options"), "{stderr}");
+    assert_eq!(site.refs(), before);
+
+    // 2. Without: both move.
+    let line: Vec<&str> = ["push", "--quiet"].iter().chain(&refs).copied().collect();
+    site.git(&work, &line);
+    let fresh = site.clone("fresh");
+    assert_eq!(site.rev(&fresh, "origin/main"), head);
+    assert_eq!(site.rev(&fresh, "origin/feature/o"), head);
     site.assert_clean();
 }
