@@ -55,8 +55,9 @@ impl Recording<'_> {
     /// for `who`'s agent. A client-side operation, not a [`StoreOps`](swarmops_api::StoreOps)
     /// one: `git_path` is opened on this host, relative to the working directory. The target is
     /// checked first, then the repository opened, so a target that is no ref name is
-    /// `E_REF_NAME_INVALID` whatever the path holds; a path inside a store's `git/`, the mirror,
-    /// is then `E_INVALID_ARG` `store_mirror`. What the import's writes repaired before
+    /// `E_REF_NAME_INVALID` whatever the path holds; an empty path is then `E_INVALID_ARG`
+    /// `git_path_empty`, and a path inside a store's `git/`, the mirror, `E_INVALID_ARG`
+    /// `store_mirror`. What the import's writes repaired before
     /// their own work, of what earlier writers left, is recorded in the request's [`Resolved`]
     /// (`meta.recovered`), on success. [`LocalOps`]' documentation gives the errors.
     pub fn git_import(&self, who: &Identity, req: GitImportReq) -> Result<GitImportResp, OpError> {
@@ -71,6 +72,7 @@ impl Recording<'_> {
         check_git_ref(self.ops, &target_ref, |name| {
             failed(ImportError::RefName(name))
         })?;
+        refuse_empty(&git_path)?;
         refuse_mirror(&git_path)?;
         let source = GixSource::open(Path::new(&git_path)).map_err(|e| failed(e.into()))?;
         let mut request = ImportRequest::new(git_ref.as_str(), target_ref, who.agent());
@@ -89,8 +91,9 @@ impl Recording<'_> {
     /// (the M8 plan's decision 8): it writes the git repository and two caches of the store, the
     /// derived values and the external id entries, and no journal frame. The source ref is
     /// checked as a ref name first, then the repository opened, so a source that is no ref name is
-    /// `E_REF_NAME_INVALID` whatever the path holds; a path inside a store's `git/`, the mirror,
-    /// is then `E_INVALID_ARG` `store_mirror`. The head the source ref named, read in a
+    /// `E_REF_NAME_INVALID` whatever the path holds; an empty path is then `E_INVALID_ARG`
+    /// `git_path_empty`, and a path inside a store's `git/`, the mirror, `E_INVALID_ARG`
+    /// `store_mirror`. The head the source ref named, read in a
     /// committed snapshot, is recorded in the request's [`Resolved`] under the ref's name (on
     /// success, and on a divergence, which names it), and what the snapshot's tail check repaired
     /// as its `meta.recovered`, on success. [`LocalOps`]' documentation gives the errors.
@@ -106,6 +109,7 @@ impl Recording<'_> {
         check_git_ref(self.ops, &source_ref, |name| {
             failed(ExportError::RefName(name))
         })?;
+        refuse_empty(&git_path)?;
         refuse_mirror(&git_path)?;
         let mut sink = GixSink::open(Path::new(&git_path)).map_err(|e| failed(e.into()))?;
         let mut request = ExportRequest::new(&source_ref, &branch);
@@ -138,6 +142,18 @@ pub(crate) fn check_git_ref(
         Err(RepoError::RefName(name)) => Err(invalid(name)),
         Err(e) => Err(error::op(e)),
     }
+}
+
+/// Refuses an empty `git_path`, which would open the repository of the working directory:
+/// `E_INVALID_ARG` `reason: "git_path_empty"`, before anything is opened.
+fn refuse_empty(git_path: &str) -> Result<(), OpError> {
+    if !git_path.is_empty() {
+        return Ok(());
+    }
+    let refused = error::error(ErrorCode::InvalidArg, "the git repository's path is empty")
+        .with_details(error::details([("reason", "git_path_empty".into())]))
+        .with_hint("give the repository's directory; . is the working directory");
+    Err(refused)
 }
 
 /// Refuses a `git_path` inside a store's `git/`, the mirror only the remote commands write under
@@ -267,10 +283,77 @@ fn response(report: ImportReport) -> GitImportResp {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::PathBuf;
+
+    use camino::Utf8PathBuf;
+    use swarmops_api::{ChangeInput, ChangeOp, CommitReq, ContentInput, StoreOps};
     use swarmops_core::{ChangesetId, ObjectId};
     use swarmops_git::{GitOid, LossyCommit, LossySet};
+    use swarmops_testkit::git::empty_repository;
 
     use super::*;
+
+    /// Every file under `dir` with its bytes, by path.
+    fn files_under(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut files = BTreeMap::new();
+        let mut pending = vec![dir.to_owned()];
+        while let Some(next) = pending.pop() {
+            for entry in fs::read_dir(&next).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                let bytes = fs::read(&path).unwrap();
+                files.insert(path, bytes);
+            }
+        }
+        files
+    }
+
+    /// An empty `git_path` is `E_INVALID_ARG` `git_path_empty` for the import and the export, and
+    /// the repository of the working directory, which an empty path would open, is unwritten.
+    /// The test moves the process into a directory of its own: the suite runs each test in a
+    /// process of its own (nextest).
+    #[test]
+    fn an_empty_git_path_is_refused() {
+        // 1. A store with one changeset on `main`: what an export would write.
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+        let (ops, _) = LocalOps::init(&root, "test").unwrap();
+        let who = Identity::parse("test/1").unwrap();
+        let mut change = ChangeInput::new("hello.txt", ChangeOp::Put);
+        change.content = Some(ContentInput::Inline("hello\n".to_owned()));
+        let mut commit = CommitReq::new(vec![change], "initial");
+        commit.advance = Some("main".to_owned());
+        ops.commit(&who, commit).unwrap();
+
+        // 2. The working directory holds a repository, as a work tree's root does (`.git`).
+        let git = empty_repository();
+        let work = git.dir.parent().unwrap().to_owned();
+        let dot_git = work.join(".git");
+        fs::rename(&git.dir, &dot_git).unwrap();
+        std::env::set_current_dir(&work).unwrap();
+        let before = files_under(&dot_git);
+
+        // 3. Both operations refuse the empty path.
+        let mut export = GitExportReq::new("");
+        export.branch = "exported".to_owned();
+        let refusals = [
+            ops.git_import(&who, GitImportReq::new("")).map(drop),
+            ops.git_export(export).map(drop),
+        ];
+        for refusal in refusals {
+            let refused = refusal.expect_err("an empty git_path is refused");
+            assert_eq!(refused.code, ErrorCode::InvalidArg.as_str(), "{refused:?}");
+            assert_eq!(refused.details["reason"], "git_path_empty", "{refused:?}");
+        }
+
+        // 4. Nothing of the working directory's repository changed.
+        assert_eq!(files_under(&dot_git), before);
+    }
 
     /// The wire's classes and the conversion's are one list: the same names in the same order,
     /// each converting to the other and back, and the wire spells each class by that name.
