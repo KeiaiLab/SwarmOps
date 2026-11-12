@@ -103,6 +103,27 @@ fn a_killed_checked_land_lands_once() {
     sweep(&test, Scenario::LandChecked, 1);
 }
 
+/// The calls of the host layer and of the durable files' layer the uncut update, commit and
+/// rebase make, none with edits to carry: what their sweeps cut at.
+const CLEAN_CALLS: [(Scenario, u64, u64); 3] = [
+    (Scenario::Update, 20, 10),
+    (Scenario::Commit, 19, 11),
+    (Scenario::Rebase, 17, 17),
+];
+
+/// An update, a commit and a rebase with no edits to carry make the calls [`CLEAN_CALLS`] pins:
+/// the snapshot of edits taken before an update adds none when there is nothing to carry.
+#[test]
+fn a_clean_run_makes_the_pinned_calls() {
+    let made: Vec<(Scenario, u64, u64)> = (CLEAN_CALLS.iter())
+        .map(|&(scenario, ..)| {
+            let run = sweep::reference(scenario);
+            (scenario, run.host_calls, run.fs_calls)
+        })
+        .collect();
+    assert_eq!(made, CLEAN_CALLS);
+}
+
 /// The events of the uncut run of every scenario keep the write-order rules WS1 to WS3.
 #[test]
 fn the_operations_keep_the_write_order() {
