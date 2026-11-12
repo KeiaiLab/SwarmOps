@@ -10,14 +10,18 @@ Each case packs a fake release archive in the release workflow's layout, whose "
 minimal ELF files with the dynamic section and version needs a case gives them, runs
 `packages.py build` on it, and reads what it wrote with readers of its own: the .deb as an ar
 archive of tar.xz members, the .rpm as a lead, two headers and a cpio payload, every digest
-recomputed. The refusals check that nothing is written. Where `dpkg-deb` is installed, it reads
-the .deb too. Prints a summary; exit 1 on a failure.
+recomputed. The server kit's packages are read the same way, against the kit's own MANIFEST
+files (packaging/server/), read here apart from the script. The refusals check that nothing is
+written. Where `dpkg-deb` is installed, it reads the .deb too. Prints a summary; exit 1 on a
+failure.
 """
 
 import gzip
 import hashlib
 import io
 import lzma
+import os
+import shlex
 import shutil
 import struct
 import subprocess
@@ -29,6 +33,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "packages.py"
+KIT = ROOT / "packaging" / "server"
+SERVER = "swarmops-server"
 
 VERSION = "9.9.9"
 X86 = "x86_64-unknown-linux-gnu"
@@ -180,19 +186,39 @@ def gzip_bytes(data: bytes, level: int) -> bytes:
     return out.getvalue()
 
 
-def build(path: Path, out: Path) -> subprocess.CompletedProcess:
+def build(path: Path, out: Path, kit: Path = KIT) -> subprocess.CompletedProcess:
     """Runs `packages.py build`."""
-    return subprocess.run([sys.executable, "-I", str(SCRIPT), "build", str(path), str(out)],
-                          capture_output=True, text=True, check=False)
+    return subprocess.run([sys.executable, "-I", str(SCRIPT), "build", str(path), str(out),
+                           "--kit", str(kit)], capture_output=True, text=True, check=False)
+
+
+def written(path: Path, out: Path, kit: Path = KIT) -> dict[str, bytes]:
+    """The four packages `build` writes, the client's and the server's, by file name: the only
+    files in `out`."""
+    done = build(path, out, kit)
+    assert done.returncode == 0, f"build exited {done.returncode}: {done.stderr}"
+    found = {p.name: p.read_bytes() for p in out.iterdir()}
+    names = sorted(found)
+    assert len([n for n in names if n.endswith(".deb")]) == 2, f"build wrote {names}"
+    assert len([n for n in names if n.endswith(".rpm")]) == 2, f"build wrote {names}"
+    return found
 
 
 def built(path: Path, out: Path) -> tuple[bytes, bytes]:
-    """The .deb and .rpm `build` writes, which must be the only files in `out`."""
-    done = build(path, out)
-    assert done.returncode == 0, f"build exited {done.returncode}: {done.stderr}"
-    debs, rpms = sorted(out.glob("*.deb")), sorted(out.glob("*.rpm"))
-    assert len(debs) == 1 and len(rpms) == 1, f"build wrote {sorted(out.iterdir())}"
-    return debs[0].read_bytes(), rpms[0].read_bytes()
+    """The client's .deb and .rpm `build` writes."""
+    found = written(path, out)
+    deb = [d for n, d in found.items() if n.endswith(".deb") and not n.startswith(SERVER)]
+    rpm = [d for n, d in found.items() if n.endswith(".rpm") and not n.startswith(SERVER)]
+    return deb[0], rpm[0]
+
+
+def server_built(path: Path, out: Path, kit: Path = KIT) -> tuple[bytes, bytes]:
+    """The server kit's .deb and .rpm `build` writes."""
+    found = written(path, out, kit)
+    deb = [d for n, d in found.items() if n.endswith(".deb") and n.startswith(f"{SERVER}_")]
+    rpm = [d for n, d in found.items() if n.endswith(".rpm") and n.startswith(f"{SERVER}-")]
+    assert len(deb) == 1 and len(rpm) == 1, f"build wrote {sorted(found)}"
+    return deb[0], rpm[0]
 
 
 # Readers, written apart from the script's writers.
@@ -442,7 +468,8 @@ def aarch64(scratch: Path) -> None:
     assert value(header, 1014) == LICENSE_OF[ARM]
     assert f"{LOADER[ARM]}()(64bit)" in value(header, 1049)
     assert sorted(p.name for p in (scratch / "out").iterdir()) == [
-        f"swarmops-{VERSION}-1.aarch64.rpm", f"swarmops_{VERSION}_arm64.deb"]
+        f"swarmops-{VERSION}-1.aarch64.rpm", f"swarmops-server-{VERSION}-1.aarch64.rpm",
+        f"swarmops-server_{VERSION}_arm64.deb", f"swarmops_{VERSION}_arm64.deb"]
 
 
 def deterministic(scratch: Path) -> None:
@@ -462,7 +489,8 @@ def prerelease(scratch: Path) -> None:
     assert b"Version: 9.9.9~rc.1\n" in control, control
     assert value(read_rpm(rpm)["header"], 1001) == "9.9.9~rc.1"
     assert sorted(p.name for p in (scratch / "out").iterdir()) == [
-        f"swarmops-{version}-1.x86_64.rpm", f"swarmops_{version}_amd64.deb"]
+        f"swarmops-{version}-1.x86_64.rpm", f"swarmops-server-{version}-1.x86_64.rpm",
+        f"swarmops-server_{version}_amd64.deb", f"swarmops_{version}_amd64.deb"]
 
 
 def drop(name: str) -> Callable[[dict[str, bytes]], None]:
@@ -555,6 +583,209 @@ def dpkg_deb(scratch: Path) -> None:
     assert copyright.startswith(f"Format: {COPYRIGHT_FORMAT}\n"), "dpkg-deb -x: copyright"
 
 
+# The server kit's packages.
+
+# The client packages of the fake archive, as packages.py built them before it built the server
+# kit's: adding a package must not move a byte of these.
+CLIENT_DIGESTS = {
+    X86: ("c69f42154b92560d4df60de3143fc4d902915bd5987d080fdba53d2a91bc2d26",
+          "c49ce1dbbf48d19d739cd334175791065dd3c7510eb34a7391d31ad7a3545b4e"),
+    ARM: ("6e261d0bb8cae00815849da4f0b811393c7514b42f89d3717702d5b7973f793c",
+          "9870375c5bfb1a525f22e2b91428a1b43d9cdbf21dccc903df9f7451f6aaff8e"),
+}
+SERVER_DOC = "/usr/share/doc/swarmops-server"
+RPM_EQUAL = 1 << 3
+RPM_CONFIG_NOREPLACE = 1 | 1 << 4
+RPM_LICENSE = 1 << 7
+# The rpm scriptlets of an install other than the post-install one, and of a removal.
+RPM_PREIN, RPM_PREUN, RPM_POSTUN, RPM_POSTIN = 1023, 1025, 1026, 1024
+
+
+def manifest_installs(kit: Path) -> dict[str, tuple[int, bytes]]:
+    """Every `install <file> <destination> <mode>` line of every MANIFEST under the kit: the
+    destination's mode and bytes."""
+    installs = {}
+    for manifest in sorted(kit.rglob("MANIFEST")):
+        for line in manifest.read_text().splitlines():
+            words = line.split()
+            if words[:1] == ["install"]:
+                installs[words[2]] = (int(words[3], 8), (manifest.parent / words[1]).read_bytes())
+    return installs
+
+
+def deb_parts(deb: bytes) -> tuple[dict[str, bytes], dict[str, tuple[tarfile.TarInfo, bytes]]]:
+    """A .deb's control members by name and its data files by absolute path."""
+    members = read_ar(deb)
+    control = {i.name: d for i, d in read_tar_xz(members[1][2]) if d is not None}
+    data = {i.name[1:]: (i, d) for i, d in read_tar_xz(members[2][2]) if d is not None}
+    return control, data
+
+
+def deb_fields(control: dict[str, bytes]) -> dict[str, str]:
+    return dict(line.split(": ", 1) for line in control["./control"].decode().splitlines()
+                if not line.startswith(" "))
+
+
+def copy_kit(scratch: Path) -> Path:
+    """A copy of the kit to plant changes in."""
+    kit = scratch / "kit"
+    shutil.copytree(KIT, kit)
+    return kit
+
+
+def server_package_is_reproducible(scratch: Path) -> None:
+    """The same archive and kit give the same server packages, however the archive was gzip'd
+    and whatever the kit files' dates; every entry is dated at the archive."""
+    kit = copy_kit(scratch)
+    first = server_built(archive(scratch / "a"), scratch / "out-a")
+    for path in kit.rglob("*"):
+        os.utime(path, (MTIME + 12345, MTIME + 12345))
+    second = server_built(archive(scratch / "b", level=1), scratch / "out-b", kit)
+    assert first == second, "two builds of one archive and kit differ"
+    _, data = deb_parts(first[0])
+    assert {info.mtime for info, _ in data.values()} == {MTIME}, "entries not dated at the archive"
+    cpio = read_rpm(first[1])["cpio"]
+    assert {c[3] for c in cpio} == {MTIME}, "payload not dated at the archive"
+
+
+def server_package_depends_on_swarmops(scratch: Path) -> None:
+    """The server packages need the client of their version and target, and what the kit runs."""
+    deb, rpm = server_built(archive(scratch / "in"), scratch / "out")
+    fields = deb_fields(deb_parts(deb)[0])
+    assert (fields["Package"], fields["Architecture"]) == (SERVER, "amd64"), fields
+    assert fields["Depends"] == ("curl (>= 7.75), git, openssl (>= 3.0), swarmops (= 9.9.9)"), \
+        fields["Depends"]
+    header = read_rpm(rpm)["header"]
+    assert (value(header, 1000), value(header, 1022)) == (SERVER, "x86_64")
+    requires = list(zip(value(header, 1049), value(header, 1048), value(header, 1050)))
+    assert ("swarmops(x86-64)", RPM_EQUAL, f"{VERSION}-1") in requires, requires
+    names = [n for n, _, _ in requires]
+    assert {"curl", "openssl", "/usr/bin/git", "/bin/sh"} <= set(names), names
+
+    # A pre-release: the client's version as dpkg orders it.
+    pre, _ = server_built(archive(scratch / "pre", version="9.9.9-rc.1"), scratch / "out-pre")
+    assert "swarmops (= 9.9.9~rc.1)" in deb_fields(deb_parts(pre)[0])["Depends"]
+
+
+def server_package_holds_backup_and_status(scratch: Path) -> None:
+    """Every file each MANIFEST names, the backup's and the status page's among them, at its mode
+    with its bytes; /etc's files as configuration; a later subtree's MANIFEST read too."""
+    kit = copy_kit(scratch)
+    (kit / "accept").mkdir()
+    (kit / "accept" / "accept").write_bytes(b"#!/bin/sh\nexit 0\n")
+    (kit / "accept" / "MANIFEST").write_text(
+        "# planted\ninstall accept /usr/lib/swarmops-server/accept/accept 0755\n")
+    installs = manifest_installs(kit)
+    for path in ("/usr/sbin/so-kit", "/usr/sbin/so-backup", "/usr/bin/so-status",
+                 "/usr/lib/swarmops-server/accept/accept"):
+        assert path in installs, f"the test's MANIFEST reader misses {path}"
+    deb, rpm = server_built(archive(scratch / "in"), scratch / "out", kit)
+
+    # 1. The .deb: those files and the copyright file; /etc's are conffiles, not in md5sums.
+    control, data = deb_parts(deb)
+    assert set(data) == set(installs) | {f"{SERVER_DOC}/copyright"}, sorted(data)
+    for path, (mode, body) in installs.items():
+        info, found = data[path]
+        assert (info.mode, found) == (mode, body), f"{path}: {oct(info.mode)}, not the kit's bytes"
+    etc = sorted(p for p in installs if p.startswith("/etc/"))
+    assert control["./conffiles"].decode().splitlines() == etc, control["./conffiles"]
+    summed = {line.split("  ", 1)[1] for line in control["./md5sums"].decode().splitlines()}
+    assert summed == {p[1:] for p in data} - {p[1:] for p in etc}, sorted(summed)
+
+    # 2. The .rpm: those files, LICENSE, and the kit's own directories.
+    package = read_rpm(rpm)
+    header = package["header"]
+    files = {name[1:]: (mode, body) for name, mode, _, _, body in package["cpio"]
+             if mode & 0o170000 == 0o100000}
+    assert set(files) == set(installs) | {f"{SERVER_DOC}/LICENSE"}, sorted(files)
+    for path, (mode, body) in installs.items():
+        assert files[path] == (0o100000 | mode, body), f"{path}: not the kit's mode and bytes"
+    dirs = sorted(name[1:] for name, mode, _, _, _ in package["cpio"] if mode & 0o040000)
+    assert all("swarmops-server" in d for d in dirs) and "/usr/lib/swarmops-server" in dirs, dirs
+    paths = [value(header, 1118)[i] + b for i, b in zip(value(header, 1116), value(header, 1117))]
+    flags = dict(zip(paths, value(header, 1037)))
+    assert [p for p, f in flags.items() if f == RPM_CONFIG_NOREPLACE] == etc, flags
+    assert flags[f"{SERVER_DOC}/LICENSE"] == RPM_LICENSE, flags
+
+
+def client_package_bytes_unchanged(scratch: Path) -> None:
+    """The client's .deb and .rpm are the bytes they were before the server package existed."""
+    for target in (X86, ARM):
+        deb, rpm = built(archive(scratch / target, target=target), scratch / f"out-{target}")
+        found = (hashlib.sha256(deb).hexdigest(), hashlib.sha256(rpm).hexdigest())
+        assert found == CLIENT_DIGESTS[target], f"{target}: {found}"
+
+
+def remove_keeps_srv_so(scratch: Path) -> None:
+    """Nothing of the server packages is in /srv/so and no script runs on removal: removing it
+    leaves the stores. The post-install script makes /srv/so and deletes nothing."""
+    deb, rpm = server_built(archive(scratch / "in"), scratch / "out")
+    control, data = deb_parts(deb)
+    package = read_rpm(rpm)
+    header = package["header"]
+    payload = list(data) + [name[1:] for name, *_ in package["cpio"]]
+    assert not [p for p in payload if p == "/srv/so" or p.startswith("/srv/")], payload
+
+    # 1. One script, the post-install one, the same in both formats.
+    assert sorted(control) == ["./conffiles", "./control", "./md5sums", "./postinst"], control
+    assert not {RPM_PREIN, RPM_PREUN, RPM_POSTUN} & set(header), "an rpm scriptlet beside %post"
+    script = control["./postinst"].decode()
+    assert script == "#!/bin/sh\n" + value(header, RPM_POSTIN), "the formats' scripts differ"
+    assert data[f"{SERVER_DOC}/copyright"][0].mode == 0o644
+
+    # 2. It makes /srv/so for the account, and deletes nothing.
+    assert "install -d -m 0700 -o so -g so /srv/so" in script.splitlines(), script
+    words = {w for line in script.splitlines() if not line.startswith("#")
+             for w in shlex.split(line)}
+    assert not words & {"rm", "rmdir", "userdel", "groupdel", "systemctl"}, words
+    done = subprocess.run(["sh", "-n"], input=script, capture_output=True, text=True, check=False)
+    assert done.returncode == 0, f"sh -n: {done.stderr}"
+
+
+def append(name: str, line: str) -> Callable[[Path], None]:
+    """A line added to the kit file `name`."""
+    def edit(kit: Path) -> None:
+        with open(kit / name, "a") as out:
+            out.write(line + "\n")
+    return edit
+
+
+def stray(kit: Path) -> None:
+    (kit / "bin" / "stray").write_text("#!/bin/sh\n")
+
+
+# The kit's refusals: (label, the change to a copy of the kit, a line of the error).
+KIT_REFUSALS = (
+    ("a file no MANIFEST installs", stray, "no MANIFEST installs bin/stray"),
+    ("a missing file", append("MANIFEST", "install bin/gone /usr/sbin/gone 0755"),
+     "bin/gone is no regular file"),
+    ("a destination twice", append("MANIFEST", "install kit.conf /usr/sbin/so-kit 0644"),
+     "/usr/sbin/so-kit is installed twice"),
+    ("a set-id mode", append("status/MANIFEST", "install status.conf /etc/x.conf 4755"),
+     "mode 4755"),
+    ("a path out of the kit", append("MANIFEST", "install ../README.md /etc/x 0644"),
+     "is no regular file of the kit"),
+    ("an unknown line", append("backup/MANIFEST", "copy a b"), "nor `uses <path>`"),
+    ("a sysusers line it cannot read", append("sysusers.d/swarmops-server.conf", "m so web"),
+     "sysusers.d: m so web"),
+    ("a tmpfiles line it cannot read",
+     append("tmpfiles.d/swarmops-server.conf", "R /srv/so - - - -"), "tmpfiles.d: R /srv/so"),
+)
+
+
+def kit_refusals(scratch: Path) -> None:
+    """Each refusal of the kit exits 1 with its `::error::` line and writes nothing."""
+    for i, (label, edit, message) in enumerate(KIT_REFUSALS):
+        kit = scratch / f"kit-{i}"
+        shutil.copytree(KIT, kit)
+        edit(kit)
+        out = scratch / f"out-{i}"
+        done = build(archive(scratch / f"in-{i}"), out, kit)
+        assert done.returncode == 1, f"{label}: exited {done.returncode}: {done.stderr}"
+        assert "::error::" in done.stderr and message in done.stderr, f"{label}: {done.stderr}"
+        assert not out.exists() or not any(out.iterdir()), f"{label}: wrote {list(out.iterdir())}"
+
+
 CASES: tuple[tuple[str, Callable[[Path], None]], ...] = (
     ("the .deb's layout", deb_layout),
     ("the .rpm's layout and digests", rpm_layout),
@@ -562,6 +793,12 @@ CASES: tuple[tuple[str, Callable[[Path], None]], ...] = (
     ("byte for byte", deterministic),
     ("a pre-release", prerelease),
     (f"{len(REFUSALS)} refusals", refusals),
+    ("server_package_is_reproducible", server_package_is_reproducible),
+    ("server_package_depends_on_swarmops", server_package_depends_on_swarmops),
+    ("server_package_holds_backup_and_status", server_package_holds_backup_and_status),
+    ("client_package_bytes_unchanged", client_package_bytes_unchanged),
+    ("remove_keeps_srv_so", remove_keeps_srv_so),
+    (f"{len(KIT_REFUSALS)} kit refusals", kit_refusals),
 )
 
 

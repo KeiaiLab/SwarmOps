@@ -4,8 +4,8 @@
 # ///
 """Makes the .deb and .rpm packages of a SwarmOps release archive, and installs them in containers.
 
-    python3 -I scripts/packages.py build <archive> <out dir>
-    python3 -I scripts/packages.py smoke <version> <.deb> <.rpm>
+    python3 -I scripts/packages.py build <archive> <out dir> [--kit <dir>]
+    python3 -I scripts/packages.py smoke <version> <package>...
 
 `build` reads `swarmops-<version>-<target>.tar.gz`, as the release workflow packs it, and writes
 `swarmops_<version>_<arch>.deb` and `swarmops-<version>-1.<arch>.rpm` into the out directory from
@@ -18,20 +18,33 @@ library their ELF dynamic section needs, and for glibc the newest version they n
 weak. A library the script does not know, a binary of another machine, an entry the archive
 should not hold or a version the formats cannot carry fails the run before anything is written.
 
+Beside them it writes the server kit's packages, `swarmops-server_<version>_<arch>.deb` and
+`swarmops-server-<version>-1.<arch>.rpm`, dated and ordered alike: every file each `MANIFEST`
+of the kit directory (`packaging/server/`, its `backup/`, `status/` and any later subtree) names,
+at the mode it names, the files under /etc as configuration files, and a post-install script made
+from the kit's sysusers.d and tmpfiles.d files that makes the serving account and its directories
+and starts nothing. They depend on `swarmops` of the same version and target; removing them
+leaves /srv/so as it is. A kit file no MANIFEST names, or a line the script cannot read, fails
+the run before anything is written.
+
     archive                              .deb (dpkg)                .rpm (rpm 4)
     swarmops-X-<target>/so        -->    ar: debian-binary,         lead, signature header,
     swarmops-X-<target>/swarmops         control.tar.xz,            header, xz cpio payload
     swarmops-X-<target>/LICENSE ...      data.tar.xz
 
-`smoke` installs both packages of one target in containers pinned by digest: the .deb with dpkg
+`smoke` installs the packages of one target in containers pinned by digest: the .deb with dpkg
 in Debian 12, the .rpm with rpm in AlmaLinux 9 (glibc 2.34, the oldest the binaries run on). It
 checks what dpkg and rpm record, that `so --version` and `swarmops --version` print the version,
 that the packages verify, that `rpm --verify` sees a byte appended to an installed binary, and
 that removing them removes their files. A target this host does not run is installed for its own
 architecture and run under QEMU's user-mode emulator: the .deb in Debian with that architecture's
 C library (multiarch), the .rpm into an AlmaLinux root of that architecture, so that rpm checks
-its dependencies against that architecture's glibc. Needs docker; an emulated target downloads its
-packages from Debian's and AlmaLinux's mirrors. Exit 1 on a failure.
+its dependencies against that architecture's glibc. On a target this host runs, it then installs
+the server packages beside the client's with apt-get and dnf, which fetch their dependencies:
+the accounts, the directories and the units must exist, `so-kit check` must pass, and removing
+them must remove their files and keep a file in /srv/so. On an emulated target the server
+packages, which hold no binary, are not installed. Needs docker; an emulated target and the
+server packages download packages from Debian's and AlmaLinux's mirrors. Exit 1 on a failure.
 """
 
 import argparse
@@ -43,6 +56,7 @@ import math
 import platform
 import re
 import secrets
+import shlex
 import shutil
 import struct
 import subprocess
@@ -52,6 +66,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parent.parent
 PACKAGE = "swarmops"
 BINARIES = ("so", "swarmops")
 DOCS = ("CHANGELOG.md", "LICENSE", "README.md", "THIRD-PARTY-LICENSES")
@@ -344,6 +359,30 @@ def license_expression(notices: str, target: Target) -> str:
     return " AND ".join(sorted(licenses))
 
 
+Requirement = tuple[str, int, str]  # rpm's (name, RPMSENSE_* flags, version)
+
+
+@dataclass(frozen=True)
+class Spec:
+    """One package of a release: what both formats install and declare."""
+
+    name: str
+    summary: str
+    description: str
+    license: str  # the .rpm's License: an SPDX expression
+    files: tuple[File, ...]  # both formats'
+    deb_files: tuple[File, ...]  # the .deb's alone: its copyright file
+    rpm_files: tuple[File, ...]  # the .rpm's alone
+    deb_depends: str
+    deb_recommends: str  # "" for none
+    rpm_requires: tuple[Requirement, ...]  # sorted, rpm's features among them
+    rpm_recommends: tuple[Requirement, ...]
+    rpm_flags: dict[str, int]  # RPMFILE_* flags by path
+    rpm_dirs: tuple[str, ...]  # the directories the .rpm owns
+    conffiles: tuple[str, ...]  # configuration files: the operator's once installed
+    postinst: str  # the post-install script's body, "" for none
+
+
 def dependencies(release: Release) -> tuple[list[str], list[tuple[str, str]]]:
     """The libraries both binaries need, and their (library, version) needs not flagged weak."""
     needed = sorted({lib for elf in release.elves for lib in elf.needed})
@@ -403,21 +442,25 @@ def parents(paths: list[str]) -> list[str]:
     return sorted(found)
 
 
-def deb_control(release: Release, depends: str, size: int) -> bytes:
+def deb_control(release: Release, spec: Spec, size: int) -> bytes:
     """The control file: dpkg's fields, the description's lines indented by one space."""
     lines = [
-        f"Package: {PACKAGE}",
+        f"Package: {spec.name}",
         f"Version: {release.package_version}",
         f"Architecture: {release.target.deb}",
         f"Maintainer: {MAINTAINER}",
         f"Installed-Size: {size}",
-        f"Depends: {depends}",
+        f"Depends: {spec.deb_depends}",
+    ]
+    if spec.deb_recommends:
+        lines.append(f"Recommends: {spec.deb_recommends}")
+    lines += [
         "Section: vcs",
         "Priority: optional",
         f"Homepage: {HOMEPAGE}",
-        f"Description: {SUMMARY}",
+        f"Description: {spec.summary}",
     ]
-    for paragraph in DESCRIPTION.split("\n"):
+    for paragraph in spec.description.split("\n"):
         lines += [" " + line for line in wrap(paragraph)] + [" ."]
     return ("\n".join(lines[:-1]) + "\n").encode()
 
@@ -475,10 +518,9 @@ def deb_depends(release: Release) -> str:
     return ", ".join(f"{p} (>= {glibc})" if p == GLIBC_PACKAGE else p for p in packages)
 
 
-def build_deb(release: Release) -> bytes:
-    """The .deb of a release archive."""
-    files = release.files + (File(DEB_COPYRIGHT, MODE_DOC, deb_copyright(release)),)
-    files = tuple(sorted(files, key=lambda f: f.path))
+def build_deb(release: Release, spec: Spec) -> bytes:
+    """One package of a release archive, as a .deb."""
+    files = tuple(sorted(spec.files + spec.deb_files, key=lambda f: f.path))
     directories = parents([f.path for f in files])
 
     # 1. data.tar.xz: ./ and every directory, then the files, sorted by path.
@@ -488,15 +530,22 @@ def build_deb(release: Release) -> bytes:
     entries.sort(key=lambda e: e[0])
     data = tar_xz(entries, release.mtime)
 
-    # 2. control.tar.xz: control and md5sums. Installed-Size is in KiB, a directory counting 1.
+    # 2. control.tar.xz: control, md5sums (configuration files are dpkg's conffiles, summed at
+    # install) and, when the package has them, conffiles and postinst, sorted by name.
+    # Installed-Size is in KiB, a directory counting 1.
     size = sum(math.ceil(len(f.data) / 1024) for f in files) + len(directories)
-    control = deb_control(release, deb_depends(release), size)
-    md5sums = "".join(f"{hashlib.md5(f.data).hexdigest()}  {f.path[1:]}\n" for f in files)
-    control_tar = tar_xz(
-        [("./", MODE_DIR, None), ("./control", MODE_DOC, control),
-         ("./md5sums", MODE_DOC, md5sums.encode())],
-        release.mtime,
-    )
+    control = deb_control(release, spec, size)
+    md5sums = "".join(f"{hashlib.md5(f.data).hexdigest()}  {f.path[1:]}\n" for f in files
+                      if f.path not in spec.conffiles)
+    members = [("./", MODE_DIR, None), ("./control", MODE_DOC, control),
+               ("./md5sums", MODE_DOC, md5sums.encode())]
+    if spec.conffiles:
+        conffiles = "".join(f"{path}\n" for path in spec.conffiles)
+        members.append(("./conffiles", MODE_DOC, conffiles.encode()))
+    if spec.postinst:
+        members.append(("./postinst", MODE_BIN, f"{SHEBANG}\n{spec.postinst}".encode()))
+    members.sort(key=lambda m: m[0])
+    control_tar = tar_xz(members, release.mtime)
     return ar_archive(
         [("debian-binary", b"2.0\n"), ("control.tar.xz", control_tar), ("data.tar.xz", data)],
         release.mtime,
@@ -574,7 +623,12 @@ class Tag(enum.IntEnum):
     PAYLOADFORMAT = 1124
     PAYLOADCOMPRESSOR = 1125
     PAYLOADFLAGS = 1126
+    POSTIN = 1024
+    POSTINPROG = 1086
     FILEDIGESTALGO = 5011
+    RECOMMENDNAME = 5046
+    RECOMMENDVERSION = 5047
+    RECOMMENDFLAGS = 5048
     PAYLOADDIGEST = 5092
     PAYLOADDIGESTALGO = 5093
 
@@ -588,11 +642,16 @@ REGION_SIZE = 16
 SHA256_ALGO = 8  # PGPHASHALGO_SHA256, for the file and payload digests
 # RPMSENSE_* flags of a dependency.
 SENSE_LESS = 1 << 1
+SENSE_GREATER = 1 << 2
 SENSE_EQUAL = 1 << 3
+SENSE_INTERP = 1 << 8  # the interpreter of a scriptlet
+SENSE_SCRIPT_POST = 1 << 10  # needed by the post-install scriptlet
 SENSE_FIND_REQUIRES = 1 << 14  # generated from the binaries, as rpmbuild's ELF dependencies are
 SENSE_RPMLIB = 1 << 24
 # RPMFILE_* flags of a file.
+FILE_CONFIG = 1 << 0
 FILE_DOC = 1 << 1
+FILE_NOREPLACE = 1 << 4  # an edited configuration file stays; the package's goes beside it
 FILE_LICENSE = 1 << 7
 VERIFY_ALL = 0xFFFFFFFF  # rpm -V checks every attribute
 # The rpm features the package needs, with the rpm version that brought each (as rpmbuild adds).
@@ -649,16 +708,16 @@ def cpio_entry(name: str, mode: int, nlink: int, mtime: int, ino: int, data: byt
     return out + data + b"\0" * (-len(data) % 4)
 
 
-def build_rpm(release: Release) -> bytes:
-    """The .rpm of a release archive."""
+def build_rpm(release: Release, spec: Spec) -> bytes:
+    """One package of a release archive, as an .rpm."""
     target, version = release.target, release.package_version
     evr = f"{version}-{RPM_RELEASE}"
 
-    # 1. The files rpm owns: ours and our doc directory, not /usr/bin or /usr/share/doc.
-    owned = sorted([(f.path, S_IFREG | f.mode, f.data) for f in release.files]
-                   + [(DOC_DIR, S_IFDIR | MODE_DIR, None)])
+    # 1. The files rpm owns: the package's and its own directories, not /usr/bin or /usr/share/doc.
+    owned = sorted([(f.path, S_IFREG | f.mode, f.data) for f in spec.files + spec.rpm_files]
+                   + [(d, S_IFDIR | MODE_DIR, None) for d in spec.rpm_dirs])
     dirnames = sorted({path.rsplit("/", 1)[0] + "/" for path, _, _ in owned})
-    flags = {f"{DOC_DIR}/{name}": FILE_LICENSE if name in LICENSES else FILE_DOC for name in DOCS}
+    flags = spec.rpm_flags
 
     # 2. The payload: a cpio entry per file, in the header's order, then the trailer.
     archive = bytearray()
@@ -668,27 +727,23 @@ def build_rpm(release: Release) -> bytes:
     archive += cpio_entry(CPIO_TRAILER, 0, 1, 0, 0, b"")
     payload = lzma.compress(bytes(archive), format=lzma.FORMAT_XZ, preset=XZ_PRESET)
 
-    # 3. Requires: each library, each version need not flagged weak, and rpm's features.
-    needed, versions = dependencies(release)
-    requires = [(f"{lib}(){ELF64_MARK}", SENSE_FIND_REQUIRES, "") for lib in needed]
-    requires += [(f"{lib}({v}){ELF64_MARK}", SENSE_FIND_REQUIRES, "") for lib, v in versions]
-    requires += [(n, SENSE_RPMLIB | SENSE_LESS | SENSE_EQUAL, v) for n, v in RPMLIB_FEATURES]
-    requires.sort()
-    provides = [(PACKAGE, SENSE_EQUAL, evr), (f"{PACKAGE}({target.isa})", SENSE_EQUAL, evr)]
+    # 3. Requires as the spec gives them; it provides itself, and itself on the target.
+    requires = spec.rpm_requires
+    provides = [(spec.name, SENSE_EQUAL, evr), (f"{spec.name}({target.isa})", SENSE_EQUAL, evr)]
 
     # 4. The header.
     sizes = [len(data or b"") for _, _, data in owned]
     entries: dict[int, tuple[Kind, object]] = {
         Tag.HEADERI18NTABLE: (Kind.STRING_ARRAY, ["C"]),
-        Tag.NAME: (Kind.STRING, PACKAGE),
+        Tag.NAME: (Kind.STRING, spec.name),
         Tag.VERSION: (Kind.STRING, version),
         Tag.RELEASE: (Kind.STRING, RPM_RELEASE),
-        Tag.SUMMARY: (Kind.I18NSTRING, [SUMMARY]),
-        Tag.DESCRIPTION: (Kind.I18NSTRING, [DESCRIPTION]),
+        Tag.SUMMARY: (Kind.I18NSTRING, [spec.summary]),
+        Tag.DESCRIPTION: (Kind.I18NSTRING, [spec.description]),
         Tag.BUILDTIME: (Kind.INT32, [release.mtime]),
         Tag.BUILDHOST: (Kind.STRING, BUILD_HOST),
         Tag.SIZE: (Kind.INT32, [sum(sizes)]),
-        Tag.LICENSE: (Kind.STRING, release.license),
+        Tag.LICENSE: (Kind.STRING, spec.license),
         Tag.PACKAGER: (Kind.STRING, MAINTAINER),
         Tag.URL: (Kind.STRING, HOMEPAGE),
         Tag.OS: (Kind.STRING, "linux"),
@@ -727,6 +782,14 @@ def build_rpm(release: Release) -> bytes:
         Tag.PAYLOADDIGEST: (Kind.STRING_ARRAY, [hashlib.sha256(payload).hexdigest()]),
         Tag.PAYLOADDIGESTALGO: (Kind.INT32, [SHA256_ALGO]),
     }
+    if spec.postinst:
+        entries[Tag.POSTIN] = (Kind.STRING, spec.postinst)
+        entries[Tag.POSTINPROG] = (Kind.STRING, SHELL)
+    if spec.rpm_recommends:
+        entries[Tag.RECOMMENDNAME] = (Kind.STRING_ARRAY, [n for n, _, _ in spec.rpm_recommends])
+        entries[Tag.RECOMMENDFLAGS] = (Kind.INT32, [f for _, f, _ in spec.rpm_recommends])
+        entries[Tag.RECOMMENDVERSION] = (Kind.STRING_ARRAY,
+                                         [v for _, _, v in spec.rpm_recommends])
     header = rpm_header(Tag.HEADERIMMUTABLE, entries)
 
     # 5. The signature header: digests of the header, and of the header and payload.
@@ -740,30 +803,248 @@ def build_rpm(release: Release) -> bytes:
     signature += b"\0" * (-len(signature) % 8)
 
     # 6. The lead, which rpm 4 reads only for its magic and signature type.
-    name = f"{PACKAGE}-{evr}".encode()[:65]
+    name = f"{spec.name}-{evr}".encode()[:65]
     lead = struct.pack(">4sBBhh66shh16s", LEAD_MAGIC, 3, 0, LEAD_BINARY, target.lead, name,
                        LEAD_OS_LINUX, LEAD_HEADER_SIGNATURE, b"")
     return lead + signature + header + payload
 
 
-def package_names(version: str, target: Target) -> tuple[str, str]:
-    """The .deb's and the .rpm's file names. They keep the release's version: GitHub renames an
+# The packages: the client's from the archive alone, the server kit's from the kit and LICENSE.
+
+
+def client_spec(release: Release) -> Spec:
+    """`swarmops`: the archive's binaries and docs, their libraries as dependencies."""
+    needed, versions = dependencies(release)
+    requires = [(f"{lib}(){ELF64_MARK}", SENSE_FIND_REQUIRES, "") for lib in needed]
+    requires += [(f"{lib}({v}){ELF64_MARK}", SENSE_FIND_REQUIRES, "") for lib, v in versions]
+    requires += [(n, SENSE_RPMLIB | SENSE_LESS | SENSE_EQUAL, v) for n, v in RPMLIB_FEATURES]
+    flags = {f"{DOC_DIR}/{name}": FILE_LICENSE if name in LICENSES else FILE_DOC for name in DOCS}
+    return Spec(
+        name=PACKAGE, summary=SUMMARY, description=DESCRIPTION, license=release.license,
+        files=release.files,
+        deb_files=(File(DEB_COPYRIGHT, MODE_DOC, deb_copyright(release)),), rpm_files=(),
+        deb_depends=deb_depends(release), deb_recommends="",
+        rpm_requires=tuple(sorted(requires)), rpm_recommends=(),
+        rpm_flags=flags, rpm_dirs=(DOC_DIR,), conffiles=(), postinst="",
+    )
+
+
+SERVER = "swarmops-server"
+KIT = ROOT / "packaging" / "server"
+MANIFEST = "MANIFEST"
+SERVER_DOC_DIR = f"/usr/share/doc/{SERVER}"
+SERVER_SUMMARY = "The SwarmOps server kit: one host serving stores over ssh and HTTPS"
+SERVER_DESCRIPTION = (
+    "The server kit of SwarmOps: the serving account and its directories, an sshd drop-in, a "
+    "web site with the CGI entry, units and timers, so-kit for the host steps, the backup and "
+    "restore drill, and the status probe and page.\n"
+    "It starts nothing: the operator enables what the host runs."
+)
+# What the kit's programs run beyond a base system: so-backup (curl with --aws-sigv4, openssl's
+# CMS with AES-GCM) and so-status (git). The daemons the operator enables are recommended.
+SERVER_DEB_DEPENDS = ("curl (>= 7.75)", "git", "openssl (>= 3.0)")
+SERVER_DEB_RECOMMENDS = "fcgiwrap, nginx, openssh-server"
+SERVER_RPM_REQUIRES = (
+    ("curl", SENSE_GREATER | SENSE_EQUAL, "7.75"),
+    ("openssl", SENSE_GREATER | SENSE_EQUAL, "3.0"),
+    ("/usr/bin/git", 0, ""),
+)
+SERVER_RPM_RECOMMENDS = (("fcgiwrap", 0, ""), ("nginx", 0, ""), ("openssh-server", 0, ""))
+# The post-install script's interpreter and the programs it runs that a package provides.
+SHELL = "/bin/sh"
+SHEBANG = f"#!{SHELL}"
+POSTINST_PROGRAMS = ("/usr/sbin/groupadd", "/usr/sbin/useradd")
+CONFIG_DIR = "/etc/"
+SYSUSERS_DIR = "/usr/lib/sysusers.d/"
+TMPFILES_DIR = "/usr/lib/tmpfiles.d/"
+# A MANIFEST line's mode: permission bits only, no set-id or sticky bit.
+MODE_BITS = 0o777
+NO_AGE = "-"  # sysusers' automatic id, tmpfiles' no cleanup
+
+
+def kit_files(kit: Path) -> tuple[File, ...]:
+    """The files every MANIFEST under `kit` names: `install <file> <destination> <mode>`, the
+    file relative to its MANIFEST; `uses <path>` names a path the kit relies on and installs
+    nothing. Every other file under `kit` must be installed, each destination once."""
+    manifests = sorted(kit.rglob(MANIFEST))
+    if not manifests:
+        raise Failure(f"the kit directory holds no {MANIFEST}")
+    installed: dict[str, File] = {}
+    named: set[Path] = set()
+
+    # 1. Each MANIFEST's lines.
+    for manifest in manifests:
+        where = manifest.relative_to(kit).as_posix()
+        for number, line in enumerate(manifest.read_text().splitlines(), start=1):
+            words = line.split()
+            if not words or words[0].startswith("#"):
+                continue
+            if words[0] == "uses" and len(words) == 2 and words[1].startswith("/"):
+                continue
+            if words[0] != "install" or len(words) != 4:
+                raise Failure(f"{where}:{number}: neither `install <file> <destination> <mode>`"
+                              " nor `uses <path>`")
+            source, destination, mode = manifest.parent / words[1], words[2], words[3]
+            if ".." in Path(words[1]).parts or not source.is_file() or source.is_symlink():
+                raise Failure(f"{where}:{number}: {words[1]} is no regular file of the kit")
+            if Path(destination).as_posix() != destination or not destination.startswith("/") \
+                    or ".." in destination.split("/"):
+                raise Failure(f"{where}:{number}: {destination} is no plain absolute path")
+            if destination in installed:
+                raise Failure(f"{where}:{number}: {destination} is installed twice")
+            if not re.fullmatch(r"0[0-7]{3}", mode) or int(mode, 8) & ~MODE_BITS:
+                raise Failure(f"{where}:{number}: mode {mode} is not 0<three octal digits>")
+            installed[destination] = File(destination, int(mode, 8), source.read_bytes())
+            named.add(source.resolve())
+
+    # 2. Nothing left out.
+    files = {p.resolve() for p in kit.rglob("*") if p.is_file() and p.name != MANIFEST}
+    left = sorted(p.relative_to(kit.resolve()).as_posix() for p in files - named)
+    if left:
+        raise Failure(f"no {MANIFEST} installs {', '.join(left)}")
+    return tuple(sorted(installed.values(), key=lambda f: f.path))
+
+
+def config_lines(files: tuple[File, ...], directory: str) -> list[list[str]]:
+    """The words of each line of the files installed in `directory`, comments left out."""
+    lines = []
+    for f in files:
+        if not f.path.startswith(directory):
+            continue
+        try:
+            text = f.data.decode()
+        except UnicodeDecodeError as error:
+            raise Failure(f"{f.path} is not UTF-8: {error}") from error
+        for line in text.splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            try:
+                lines.append(shlex.split(line))
+            except ValueError as error:
+                raise Failure(f"{f.path}: {line!r}: {error}") from error
+    return lines
+
+
+def postinst(files: tuple[File, ...]) -> str:
+    """The post-install script, made from the kit's sysusers.d and tmpfiles.d files: the groups,
+    the accounts, then the directories and files with their modes. Idempotent; starts nothing;
+    removes nothing."""
+    groups, users, paths = [], [], []
+
+    # 1. sysusers.d: `g <group> -` and `u <account> - <comment> <home> <shell>`, each account
+    # with a group of its name.
+    for words in config_lines(files, SYSUSERS_DIR):
+        if words[:1] == ["g"] and len(words) == 3 and words[2] == NO_AGE:
+            groups.append(words[1])
+            continue
+        if words[:1] != ["u"] or len(words) != 6 or words[2] != NO_AGE:
+            raise Failure(f"sysusers.d: {shlex.join(words)} is not a `g` or `u` line this script"
+                          " reads")
+        _, name, _, comment, home, shell = words
+        groups.append(name)
+        users.append(f"getent passwd {name} >/dev/null || useradd --system --gid {name}"
+                     f" --home-dir {home} --no-create-home --shell {shell}"
+                     f" --comment {shlex.quote(comment)} {name}")
+
+    # 2. tmpfiles.d: `d` and `f` lines, `<path> <mode> <user> <group> -`.
+    for words in config_lines(files, TMPFILES_DIR):
+        if len(words) != 6 or words[0] not in ("d", "f") or words[5] != NO_AGE \
+                or not re.fullmatch(r"0[0-7]{3}", words[2]):
+            raise Failure(f"tmpfiles.d: {shlex.join(words)} is not a `d` or `f` line this script"
+                          " reads")
+        kind, path, mode, user, group, _ = words
+        if kind == "d":
+            paths.append(f"install -d -m {mode} -o {user} -g {group} {path}")
+            continue
+        paths.append(f"[ -e {path} ] || : >{path}")
+        paths += [f"chown {user}:{group} {path}", f"chmod {mode} {path}"]
+
+    lines = [
+        "# Made by packages.py from the package's sysusers.d and tmpfiles.d files.",
+        "set -e",
+    ]
+    lines += [f"getent group {g} >/dev/null || groupadd --system {g}" for g in groups]
+    return "\n".join(lines + users + paths) + "\n"
+
+
+def server_copyright(license_text: str) -> bytes:
+    """The server .deb's copyright file: SwarmOps' license for every file, the kit holding no
+    third party's code."""
+    holders = [line.strip() for line in license_text.splitlines() if line.startswith("Copyright")]
+    if not holders:
+        raise Failure("LICENSE has no Copyright line for the .deb's copyright file")
+    lines = [
+        f"Format: {COPYRIGHT_FORMAT}",
+        f"Upstream-Name: {SERVER}",
+        f"Upstream-Contact: {MAINTAINER}",
+        f"Source: {SOURCE}",
+        "",
+        "Files: *",
+        f"Copyright: {holders[0]}",
+    ]
+    lines += [f" {h}" for h in holders[1:]] + [f"License: {OWN_LICENSE}"] + folded(license_text)
+    return ("\n".join(lines) + "\n").encode()
+
+
+def server_spec(release: Release, kit: Path) -> Spec:
+    """`swarmops-server`: the kit, on `swarmops` of the same version and target."""
+    files = kit_files(kit)
+    license_data = next(f.data for f in release.files if f.path == f"{DOC_DIR}/LICENSE")
+    evr = f"{release.package_version}-{RPM_RELEASE}"
+
+    # 1. Requires: the client of this target and version, what the kit's programs run, what the
+    # post-install script runs, and rpm's features.
+    requires = [(f"{PACKAGE}({release.target.isa})", SENSE_EQUAL, evr), *SERVER_RPM_REQUIRES]
+    requires += [(SHELL, SENSE_INTERP | SENSE_SCRIPT_POST, "")]
+    requires += [(p, SENSE_SCRIPT_POST, "") for p in POSTINST_PROGRAMS]
+    requires += [(n, SENSE_RPMLIB | SENSE_LESS | SENSE_EQUAL, v) for n, v in RPMLIB_FEATURES]
+    depends = sorted([f"{PACKAGE} (= {release.package_version})", *SERVER_DEB_DEPENDS])
+
+    # 2. Configuration files: everything under /etc; the .rpm keeps an edited one.
+    conffiles = tuple(f.path for f in files if f.path.startswith(CONFIG_DIR))
+    flags = {path: FILE_CONFIG | FILE_NOREPLACE for path in conffiles}
+    flags[f"{SERVER_DOC_DIR}/LICENSE"] = FILE_LICENSE
+
+    # 3. The directories the .rpm owns: the kit's own, named after it.
+    license_file = File(f"{SERVER_DOC_DIR}/LICENSE", MODE_DOC, license_data)
+    own = [d for d in parents([f.path for f in files + (license_file,)])
+           if any(part.startswith(SERVER) for part in d.split("/"))]
+    try:
+        license_text = license_data.decode()
+    except UnicodeDecodeError as error:
+        raise Failure(f"LICENSE is not UTF-8: {error}") from error
+    return Spec(
+        name=SERVER, summary=SERVER_SUMMARY, description=SERVER_DESCRIPTION, license=OWN_LICENSE,
+        files=files,
+        deb_files=(File(f"{SERVER_DOC_DIR}/copyright", MODE_DOC, server_copyright(license_text)),),
+        rpm_files=(license_file,),
+        deb_depends=", ".join(depends), deb_recommends=SERVER_DEB_RECOMMENDS,
+        rpm_requires=tuple(sorted(requires)), rpm_recommends=SERVER_RPM_RECOMMENDS,
+        rpm_flags=flags, rpm_dirs=tuple(own), conffiles=conffiles, postinst=postinst(files),
+    )
+
+
+def package_names(version: str, target: Target, name: str = PACKAGE) -> tuple[str, str]:
+    """A package's .deb and .rpm file names. They keep the release's version: GitHub renames an
     asset whose name has a `~`."""
-    deb = f"{PACKAGE}_{version}_{target.deb}.deb"
-    rpm = f"{PACKAGE}-{version}-{RPM_RELEASE}.{target.rpm}.rpm"
+    deb = f"{name}_{version}_{target.deb}.deb"
+    rpm = f"{name}-{version}-{RPM_RELEASE}.{target.rpm}.rpm"
     return deb, rpm
 
 
-def build(archive: Path, out: Path) -> None:
-    """Writes the archive's .deb and .rpm into `out`, once both are made."""
+def build(archive: Path, out: Path, kit: Path) -> None:
+    """Writes the archive's packages, the client's and the server kit's, into `out` once all four
+    are made."""
     release = read_archive(archive)
-    deb, rpm = build_deb(release), build_rpm(release)
-    deb_name, rpm_name = package_names(release.version, release.target)
+    made = {}
+    for spec in (client_spec(release), server_spec(release, kit)):
+        deb_name, rpm_name = package_names(release.version, release.target, spec.name)
+        made[deb_name] = (build_deb(release, spec), f"Depends: {spec.deb_depends}")
+        made[rpm_name] = (build_rpm(release, spec), f"License: {spec.license}")
     out.mkdir(parents=True, exist_ok=True)
-    (out / deb_name).write_bytes(deb)
-    (out / rpm_name).write_bytes(rpm)
-    print(f"{deb_name}: {len(deb)} bytes, Depends: {deb_depends(release)}")
-    print(f"{rpm_name}: {len(rpm)} bytes, License: {release.license}")
+    for name, (data, what) in made.items():
+        (out / name).write_bytes(data)
+        print(f"{name}: {len(data)} bytes, {what}")
 
 
 # `smoke`: each package installed with its own tool, in a container pinned by digest.
@@ -928,18 +1209,147 @@ def smoke_rpm(rpm: Path, version: str, target: Target, emulator: Path) -> None:
         expect_removed(box, root)
 
 
-def smoke(version: str, deb: Path, rpm: Path) -> None:
-    """Installs one target's .deb, then its .rpm."""
+@dataclass(frozen=True)
+class KitState:
+    """What an installed server package leaves on the host, read from the kit."""
+
+    files: tuple[str, ...]  # every installed file
+    units: tuple[str, ...]  # the systemd units among them
+    accounts: tuple[tuple[str, str, str], ...]  # (account, home, shell)
+    groups: tuple[str, ...]
+    paths: tuple[tuple[str, str], ...]  # (path, `stat -c '%a %U %G'`) of tmpfiles.d's lines
+
+
+UNIT_DIR = "/usr/lib/systemd/system/"
+# A file the smoke writes in /srv/so before removing the server package, which must keep it.
+KEPT = "/srv/so/kept-by-removal"
+
+
+def kit_state(kit: Path) -> KitState:
+    """The kit's files, units, accounts, groups and tmpfiles.d paths."""
+    files = kit_files(kit)
+    postinst(files)  # refuses lines the state below would misread
+    users = config_lines(files, SYSUSERS_DIR)
+    entries = config_lines(files, TMPFILES_DIR)
+    return KitState(
+        files=tuple(f.path for f in files),
+        units=tuple(f.path for f in files if f.path.startswith(UNIT_DIR)),
+        accounts=tuple((w[1], w[4], w[5]) for w in users if w[0] == "u"),
+        groups=tuple(w[1] for w in users),
+        paths=tuple((w[1], f"{int(w[2], 8):o} {w[3]} {w[4]}") for w in entries),
+    )
+
+
+def expect_server(box: Container, state: KitState) -> None:
+    """The accounts, groups, directories, files and units exist; so-kit reads its settings."""
+    for name, home, shell in state.accounts:
+        entry = box.run("getent", "passwd", name).strip().split(":")
+        if entry[5:] != [home, shell]:
+            raise Failure(f"account {name}: home and shell {entry[5:]}, not {[home, shell]}")
+    for group in state.groups:
+        box.run("getent", "group", group)
+    for path, wanted in state.paths:
+        found = box.run("stat", "-c", "%a %U %G", path).strip()
+        if found != wanted:
+            raise Failure(f"{path}: mode and owners '{found}', not '{wanted}'")
+    for unit in state.units:
+        box.run("test", "-f", unit)
+    box.run("/usr/sbin/so-kit", "check")
+
+
+def expect_server_removed(box: Container, state: KitState) -> None:
+    """Removing the server package removed its files and kept /srv/so's."""
+    for path in state.files:
+        box.run("test", "-e", path, expect=1)
+    box.run("test", "-f", KEPT)
+
+
+def smoke_server_deb(client: Path, server: Path, version: str, target: Target,
+                     state: KitState) -> None:
+    """Installs the server .deb beside the client's with apt-get, which fetches its dependencies."""
+    with Container(DEBIAN_IMAGE, server.parent, Network.BRIDGE) as box:
+        box.run("apt-get", "update", "--quiet")
+        box.run("apt-get", "install", "--yes", "--quiet", "--no-install-recommends",
+                f"/packages/{client.name}", f"/packages/{server.name}")
+        status = box.run("dpkg-query", "--show", "--showformat",
+                         "${Version} ${Architecture} ${db:Status-Abbrev}", SERVER).strip()
+        recorded = f"{package_version(version)} {target.deb} ii"
+        if status != recorded:
+            raise Failure(f"dpkg records '{status}' for {SERVER}, not '{recorded}'")
+        expect_server(box, state)
+        listed = set(box.run("dpkg", "--listfiles", SERVER).splitlines())
+        missing = sorted(set(state.files) - listed)
+        if missing:
+            raise Failure(f"dpkg does not list {', '.join(missing)} as installed")
+        if box.run("dpkg", "--verify", SERVER).strip():
+            raise Failure(f"dpkg --verify reports a file of {SERVER} that differs")
+
+        # Purge: its files and configuration files go, /srv/so's stay.
+        box.run("sh", "-c", f": >{KEPT}")
+        box.run("dpkg", "--purge", SERVER)
+        expect_server_removed(box, state)
+
+
+def smoke_server_rpm(client: Path, server: Path, version: str, target: Target,
+                     state: KitState) -> None:
+    """Installs the server .rpm beside the client's with dnf, which fetches its dependencies."""
+    with Container(ALMALINUX_IMAGE, server.parent, Network.BRIDGE) as box:
+        checked = box.run("rpm", "--checksig", "--verbose", f"/packages/{server.name}")
+        if "Payload SHA256 digest: OK" not in checked:
+            raise Failure(f"rpm --checksig does not find {server.name}'s payload digest OK")
+        box.run("dnf", "--assumeyes", "--quiet", "--setopt=install_weak_deps=False", "install",
+                f"/packages/{client.name}", f"/packages/{server.name}")
+        recorded = box.run("rpm", "--query", "--queryformat", "%{VERSION}-%{RELEASE} %{ARCH}",
+                           SERVER).strip()
+        wanted = f"{package_version(version)}-{RPM_RELEASE} {target.rpm}"
+        if recorded != wanted:
+            raise Failure(f"rpm records '{recorded}' for {SERVER}, not '{wanted}'")
+        expect_server(box, state)
+        listed = set(box.run("rpm", "--query", "--list", SERVER).splitlines())
+        missing = sorted(set(state.files) - listed)
+        if missing:
+            raise Failure(f"rpm does not list {', '.join(missing)} as installed")
+        configs = set(box.run("rpm", "--query", "--configfiles", SERVER).splitlines())
+        if configs != {f for f in state.files if f.startswith(CONFIG_DIR)}:
+            raise Failure(f"rpm lists {sorted(configs)} as {SERVER}'s configuration files")
+        box.run("rpm", "--verify", SERVER)
+
+        # Erase: its files go, /srv/so's stay.
+        box.run("sh", "-c", f": >{KEPT}")
+        box.run("rpm", "--erase", SERVER)
+        expect_server_removed(box, state)
+
+
+def smoke(version: str, packages: list[Path], kit: Path) -> None:
+    """Installs one target's client .deb, then its .rpm; on a target this host runs, the server
+    packages after them."""
     if shutil.which("docker") is None:
         raise Failure("smoke needs docker")
-    found = [t for t in TARGETS.values() if package_names(version, t) == (deb.name, rpm.name)]
+    given = sorted(p.name for p in packages)
+    found = [t for t in TARGETS.values()
+             if given == sorted(package_names(version, t) + package_names(version, t, SERVER))]
     if not found:
-        raise Failure(f"{deb.name} and {rpm.name} are not one target's packages of {version}")
+        raise Failure(f"{', '.join(given)} are not one target's four packages of {version}")
+    target, by_name = found[0], {p.name: p.resolve() for p in packages}
+    deb, rpm = (by_name[n] for n in package_names(version, target))
+    server_deb, server_rpm = (by_name[n] for n in package_names(version, target, SERVER))
+    state = kit_state(kit)
+
+    # 1. The client, as before.
     with tempfile.TemporaryDirectory() as scratch:
         emulator = Path(scratch) / "qemu"
-        smoke_deb(deb.resolve(), version, found[0], emulator)
-        smoke_rpm(rpm.resolve(), version, found[0], emulator)
+        smoke_deb(deb, version, target, emulator)
+        smoke_rpm(rpm, version, target, emulator)
     print(f"{deb.name} and {rpm.name}: installed, ran, verified and removed")
+
+    # 2. The server kit: no binary of its own, so not installed under emulation.
+    if target.rpm != platform.machine():
+        print(f"{server_deb.name} and {server_rpm.name}: not installed, {target.triple} is"
+              " emulated here")
+        return
+    smoke_server_deb(deb, server_deb, version, target, state)
+    smoke_server_rpm(rpm, server_rpm, version, target, state)
+    print(f"{server_deb.name} and {server_rpm.name}: installed, set up, verified and removed")
 
 
 def main() -> int:
@@ -948,17 +1358,17 @@ def main() -> int:
     make = commands.add_parser("build", help="make the .deb and .rpm of a release archive")
     make.add_argument("archive", type=Path)
     make.add_argument("out", type=Path)
+    make.add_argument("--kit", type=Path, default=KIT, help="the server kit (packaging/server)")
     test = commands.add_parser("smoke", help="install one target's packages in containers")
     test.add_argument("version")
-    test.add_argument("deb", type=Path)
-    test.add_argument("rpm", type=Path)
+    test.add_argument("packages", type=Path, nargs="+")
     args = parser.parse_args()
 
     try:
         if args.command == "build":
-            build(args.archive, args.out)
+            build(args.archive, args.out, args.kit)
         else:
-            smoke(args.version, args.deb, args.rpm)
+            smoke(args.version, args.packages, args.kit)
     except (Failure, OSError, tarfile.TarError, subprocess.TimeoutExpired) as error:
         print(f"::error::{error}", file=sys.stderr)
         return 1
