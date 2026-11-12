@@ -808,7 +808,7 @@ static DEFAULTS: [DefaultRow; 15] = [
 
 /// Values that tune the implementation, or bound the store's layout where no request reaches:
 /// no option sets them, and they are not part of the contract.
-static INTERNAL: [Limit; 38] = [
+static INTERNAL: [Limit; 39] = [
     internal_value(
         "Writer lock wait",
         declared(
@@ -1271,6 +1271,18 @@ static INTERNAL: [Limit; 38] = [
         Unit::Seconds,
         "How long a native wire session waits for a byte from its peer: past it, the session \
              ends with `E_REMOTE_UNREACHABLE`, `details.cause` `timeout`, retryable.",
+    ),
+    internal_value(
+        "Tag batch",
+        code(
+            "swarmops_repo::TAG_BATCH",
+            "crates/swarmops-repo/src/tag.rs",
+            "pub const TAG_BATCH: usize = 64;",
+            || bytes::to_u64(swarmops_repo::TAG_BATCH),
+        ),
+        Unit::Count("tags"),
+        "The most tags one journal frame creates, as many as a `ref txn` moves: a batch of \
+             tags is a frame, and a write transaction, for each this many.",
     ),
 ];
 

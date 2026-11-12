@@ -372,6 +372,7 @@ Not part of the contract: these tune the implementation, or bound the store's la
 | Wire ids | 10,000 ids | `swarmops_api::MAX_WIRE_IDS` | The most ids one list of a native wire request or result carries; longer lists page. |
 | Wire chunk | 67,108,864 bytes (64 MiB) | `swarmops_api::MAX_CHUNK_BYTES` | The most record bytes one chunk of objects on the native wire holds; one object alone may be longer, up to the store's object bound. A longer chunk is refused before its records are read. |
 | Wire stall | 300 s | `swarmops_api::WIRE_STALL_SECS` | How long a native wire session waits for a byte from its peer: past it, the session ends with `E_REMOTE_UNREACHABLE`, `details.cause` `timeout`, retryable. |
+| Tag batch | 64 tags | `swarmops_repo::TAG_BATCH` | The most tags one journal frame creates, as many as a `ref txn` moves: a batch of tags is a frame, and a write transaction, for each this many. |
 
 ## Details
 
