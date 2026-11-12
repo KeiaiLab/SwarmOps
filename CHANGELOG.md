@@ -57,6 +57,11 @@ collects the changes on `stable` that no release holds yet, until the next relea
   diff's format, `[<id>] <n> files changed`. Ids are cut to 12 hex digits. git's shape flags
   (`so status -s`, `so log --oneline`, `so diff --stat`) print this text. The JSON envelope is
   unchanged; scripts that read `--human` text of these operations read the envelope instead.
+- `init` makes a FORMAT 3 store when no `--format` is given, and `init --format 3` names it (the
+  FORMAT 3 design §0, D3); `--format 1` and `--format 2` still make those formats. A store `init`
+  makes now is unreadable by v0.11.x and older, which refuse it as no store; `upgrade` takes an
+  older store to FORMAT 3. An `init` that resumes a crashed `init` of another format sets that
+  one's metadata aside, FORMAT 2's and FORMAT 3's told apart by their checkpoints.
 
 ### Fixed
 

@@ -695,11 +695,11 @@ fn create_open_and_info() {
     );
     assert_eq!(
         info,
-        RepoInfo::new(info.repo_id.clone(), "demo".to_owned(), 2, 0, 0, None)
+        RepoInfo::new(info.repo_id.clone(), "demo".to_owned(), 3, 0, 0, None)
     );
     assert_eq!(
         fs::read(root.join("FORMAT")).unwrap(),
-        b"swarmops-store 2\n"
+        b"swarmops-store 3\n"
     );
     for byte in 0..=255u8 {
         assert!(
@@ -1369,8 +1369,9 @@ fn create_crashing_at(k: u64, total: u64) {
 #[cfg(feature = "test-hooks")]
 fn create_resumes_after_a_crash_at_any_call() {
     if let Some(root) = std::env::var(CHILD_ROOT).ok().map(Utf8PathBuf::from) {
-        // SWARMOPS_TEST_CRASH_AT is set: create's k-th filesystem call aborts the process.
-        LocalRepo::create(&root, "demo").unwrap();
+        // SWARMOPS_TEST_CRASH_AT is set: create's k-th filesystem call aborts the process. The
+        // create of the format whose calls `create_calls` counts.
+        LocalRepo::create_as(&root, "demo", StoreFormat::V1).unwrap();
         return;
     }
     let calls = create_calls();

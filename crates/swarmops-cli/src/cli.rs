@@ -371,9 +371,9 @@ pub enum Command {
         /// The repository's name, at most 255 bytes (default: the directory's name).
         #[arg(long)]
         name: Option<String>,
-        /// The store format, 1 or 2 (default: this build's). Format 2 takes free-form branches
-        /// and tags; older releases open only format 1.
-        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=2))]
+        /// The store format, 1, 2 or 3 (default: this build's, 3). Formats 2 and 3 take
+        /// free-form branches and tags; v0.11.x and older open no format 3 store.
+        #[arg(long, value_name = "N", value_parser = clap::value_parser!(u32).range(1..=3))]
         format: Option<u32>,
     },
     /// Describe the store.

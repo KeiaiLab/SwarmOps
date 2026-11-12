@@ -705,12 +705,12 @@ fn an_init_failing_at_its_last_calls_reports_honestly(format) {
 }
 }
 
-/// How many FsOps reads `init`'s report of a fresh store of `format` makes: FORMAT 2 reads one
-/// file fewer.
+/// How many FsOps reads `init`'s report of a fresh store of `format` makes: FORMAT 2 and 3 read
+/// one file fewer.
 fn report_reads(format: StoreFormat) -> u64 {
     match format {
         StoreFormat::V1 => 5,
-        StoreFormat::V2 => 4,
+        StoreFormat::V2 | StoreFormat::V3 => 4,
         other => panic!("no read count for {other:?}"),
     }
 }

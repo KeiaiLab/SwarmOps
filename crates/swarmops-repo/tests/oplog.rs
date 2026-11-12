@@ -279,7 +279,8 @@ fn listing_fails(root: &Utf8Path) -> LocalRepo {
 /// below `before`, and says whether older ones follow.
 #[test]
 fn op_log_lists_each_transaction_newest_first() {
-    let (_dir, root, repo) = new_repo();
+    // FORMAT 2: its index compacts, and the compaction is an op (FORMAT 3's runs are none).
+    let (_dir, root, repo) = new_repo_as(StoreFormat::V2);
     let before = unix_now();
     let c1 = commit(&repo, &[], vec![put("a", b"1")]); // op 0
     cas(&repo, "main", None, Some(c1)); // op 1

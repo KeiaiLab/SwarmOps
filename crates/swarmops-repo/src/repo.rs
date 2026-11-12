@@ -418,6 +418,7 @@ impl LocalRepo {
         let layout = Layout::with_format(root.clone(), format);
         let identity = read_identity(&layout, &store_fs)?;
         // An upgrade that stopped between its poison and its commit point is finished first.
+        // FORMAT 3, the latest, has no upgrade to finish: it opens as it is.
         if matches!(format, StoreFormat::V1 | StoreFormat::V2)
             && swarmops_store::meta::upgrade::finish_if_poisoned(&layout, Arc::clone(&fs))?
         {
@@ -725,19 +726,27 @@ fn lock_repo(layout: &Layout, fs: &StoreFs) -> Result<File, RepoError> {
 }
 
 /// Whether the `meta/` of the store `layout` lays out, which a crashed create left without a
-/// `FORMAT`, holds the journal of another format this build creates and not one of `layout`'s:
-/// that create's, of the other format.
+/// `FORMAT`, holds the journal and checkpoint of another format this build creates and not
+/// `layout`'s ([`made_in`]): that create's, of the other format.
 fn of_another_format(layout: &Layout, fs: &StoreFs) -> Result<bool, IoFailure> {
-    if fs.exists(layout.journal_log().as_std_path())? {
+    if made_in(layout, fs)? {
         return Ok(false);
     }
     for &other in format::INIT_FORMATS {
-        let theirs = Layout::with_format(layout.root(), other).journal_log();
-        if other != layout.format() && fs.exists(theirs.as_std_path())? {
+        let theirs = Layout::with_format(layout.root(), other);
+        if other != layout.format() && made_in(&theirs, fs)? {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+/// Whether the whole `meta/` at `layout`'s root is of `layout`'s format: its journal and its
+/// checkpoint are there. FORMAT 2 and 3 share `journal2.log` and differ in their checkpoint,
+/// `journal2.ckpt` and `journal3.ckpt` (the FORMAT 3 design §2.1).
+fn made_in(layout: &Layout, fs: &StoreFs) -> Result<bool, IoFailure> {
+    Ok(fs.exists(layout.journal_log().as_std_path())?
+        && fs.exists(layout.journal_ckpt().as_std_path())?)
 }
 
 /// Sets the `meta/` of a crashed create of another format aside as `meta.tmp/` (renamed whole,

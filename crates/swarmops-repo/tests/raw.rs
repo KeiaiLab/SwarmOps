@@ -549,13 +549,14 @@ fn commit_raw_batch_refuses_the_whole_batch_before_writing() {
         matches!(err, RepoError::UnknownParent(p) if p == first_id),
         "{err:?}"
     );
+    // A FORMAT 3 frame, the default's, holds 65,534 records: its nonce takes the last count.
     let err = refused(&repo, &root_dir, vec![first; 65_536]);
     assert!(
         matches!(
             err,
             RepoError::Store(StoreError::Limit {
                 what: LimitKind::Records,
-                max: 65_535,
+                max: 65_534,
                 got: 65_536
             })
         ),

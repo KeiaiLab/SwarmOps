@@ -13,7 +13,7 @@ expression: s.transcript()
       "result": {
         "repo_id": "[id1]",
         "name": "store",
-        "store_version": 2,
+        "store_version": 3,
         "changesets": 0,
         "refs": 0
       },

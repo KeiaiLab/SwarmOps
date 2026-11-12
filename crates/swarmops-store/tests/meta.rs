@@ -3851,11 +3851,11 @@ fn fail_at_every_store_call_reports_honestly(format) {
         let calls = calls_of(&template, |store| {
             swept(store, n).unwrap();
         });
-        // FORMAT 2 keeps its ref files flat in refs2/: no ref directory to make and sync, two
-        // calls fewer than FORMAT 1's.
+        // FORMAT 2 and 3 keep their ref files flat in refs2/: no ref directory to make and sync,
+        // two calls fewer than FORMAT 1's.
         let floor = match format {
             StoreFormat::V1 => 20,
-            StoreFormat::V2 => 18,
+            StoreFormat::V2 | StoreFormat::V3 => 18,
             other => panic!("no call floor for {other:?}"),
         };
         assert!(calls > floor, "{calls}");

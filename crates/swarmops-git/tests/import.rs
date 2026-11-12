@@ -1133,7 +1133,8 @@ fn no_write_after_the_move_s_failed_listing() {
 
 /// A frame holds at most `frame_changesets` changesets, and the index compacts about once a
 /// frame: 3,300 commits with no step budget to stop the doubling are frames of 64, 128, 256,
-/// 512 and 1,024, then of 1,100, the most, and the 216 left, with at most four compactions.
+/// 512 and 1,024, then of 1,100, the most, and the 216 left, with at most four compactions in
+/// FORMAT 1 and 2, and none in FORMAT 3, whose runs are built outside the writes.
 #[test]
 fn frames_hold_at_most_their_size_and_compactions_stay_few() {
     let (source, chain) = counting(3_300);
@@ -1158,7 +1159,12 @@ fn frames_hold_at_most_their_size_and_compactions_stay_few() {
     let compactions = (frames.iter())
         .filter(|frame| matches!(frame.records[..], [Record::Compacted { .. }]))
         .count();
-    assert!((1..=4).contains(&compactions), "{compactions} compactions");
+    let version = repo.info().unwrap().store_version;
+    let allowed = if version == 3 { 0..=0 } else { 1..=4 };
+    assert!(
+        allowed.contains(&compactions),
+        "{compactions} compactions in FORMAT {version}"
+    );
 }
 
 /// A source of `commits` linear commits that each change one file: their ids, oldest first.

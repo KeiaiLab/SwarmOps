@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use camino::Utf8PathBuf;
 use swarmops_core::ObjectId;
-use swarmops_store::{Index, Layout, MetaLock, MetaStore, RealFs};
+use swarmops_store::{Index, Layout, MetaLock, MetaStore, RealFs, StoreFormat};
 
 use crate::support::Store;
 
@@ -23,7 +23,8 @@ const AGENT: &str = "agent/worker-17";
 /// so that the index answers every lookup on its own: the sorted views cover every record, and
 /// no frame lies past the checkpoint. Their ids, `c1` first.
 fn chain() -> (Store, [String; 5]) {
-    let store = Store::init();
+    // FORMAT 2: the sorted views these tests damage are FORMAT 1's and 2's (FORMAT 3's are runs).
+    let store = Store::init_as(StoreFormat::V2);
     let mut ids: Vec<String> = Vec::new();
     for n in 1..=5 {
         let parent = ids.last().map(String::as_str);

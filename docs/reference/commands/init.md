@@ -46,7 +46,7 @@ The repository's name, at most 255 bytes (default: the directory's name).
 
 Syntax: `--format <N>`.
 
-The store format, 1 or 2 (default: this build's). Format 2 takes free-form branches and tags; older releases open only format 1.
+The store format, 1, 2 or 3 (default: this build's, 3). Formats 2 and 3 take free-form branches and tags; v0.11.x and older open no format 3 store.
 
 ## Examples
 
@@ -64,7 +64,7 @@ swarmops init [tmp]/store
   "result": {
     "repo_id": "[repo_id]",
     "name": "store",
-    "store_version": 2,
+    "store_version": 3,
     "changesets": 0,
     "refs": 0
   },

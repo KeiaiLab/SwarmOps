@@ -48,7 +48,7 @@ swarmops --repo [tmp]/store info
   "result": {
     "repo_id": "[repo_id]",
     "name": "store",
-    "store_version": 2,
+    "store_version": 3,
     "changesets": 0,
     "refs": 0
   },

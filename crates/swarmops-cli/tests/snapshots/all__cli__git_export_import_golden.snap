@@ -13,7 +13,7 @@ expression: s.transcript()
       "result": {
         "repo_id": "[repo_id]",
         "name": "store",
-        "store_version": 2,
+        "store_version": 3,
         "changesets": 0,
         "refs": 0
       },
@@ -183,7 +183,7 @@ expression: s.transcript()
       "result": {
         "repo_id": "[repo_id:copy]",
         "name": "copy",
-        "store_version": 2,
+        "store_version": 3,
         "changesets": 0,
         "refs": 0
       },

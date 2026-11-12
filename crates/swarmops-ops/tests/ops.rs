@@ -235,7 +235,7 @@ fn init_then_info_roundtrip() {
     );
     assert_eq!(
         (info.main.as_deref(), info.store_version),
-        (None, 2),
+        (None, 3),
         "{info:?}"
     );
     assert_eq!((info.changesets, info.refs), (0, 0), "{info:?}");
@@ -5946,17 +5946,17 @@ mod formats {
     /// A format this build does not create is `E_INVALID_ARG`, naming the ones it does (1 and
     /// 2), and nothing is made; `init` without a format makes FORMAT 2.
     #[test]
-    fn init_makes_format_2_by_default_and_refuses_others() {
+    fn init_makes_format_3_by_default_and_refuses_others() {
         let dir = tempfile::tempdir().unwrap();
         let root = utf8(dir.path().join("store"));
-        for format in [3, 0] {
+        for format in [4, 0] {
             let err = expect_err(
                 LocalOps::init_as(&root, "acme", Some(format)),
                 ErrorCode::InvalidArg,
             );
             assert_eq!(
                 Value::Object(err.details.clone()),
-                json!({"format": format, "formats": [1, 2]}),
+                json!({"format": format, "formats": [1, 2, 3]}),
                 "{format}"
             );
             assert!(!fs::exists(&root).unwrap(), "{format}: nothing was made");
@@ -5964,10 +5964,10 @@ mod formats {
 
         // No format named: this build's default.
         let (ops, info) = LocalOps::init(&root, "acme").unwrap();
-        assert_eq!(info.store_version, 2);
-        assert_eq!(ops.repo_info(InfoReq::default()).unwrap().store_version, 2);
+        assert_eq!(info.store_version, 3);
+        assert_eq!(ops.repo_info(InfoReq::default()).unwrap().store_version, 3);
         let format = fs::read(root.join("FORMAT")).unwrap();
-        assert_eq!(format, b"swarmops-store 2\n");
+        assert_eq!(format, b"swarmops-store 3\n");
     }
 }
 

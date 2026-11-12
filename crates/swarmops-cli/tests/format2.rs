@@ -19,7 +19,7 @@ const TAG: &str = "tags/v1";
 /// The operations that take the maintenance lease.
 const MAINTENANCE: [&str; 3] = ["gc", "repair", "upgrade"];
 
-/// The design §10 acceptance, in its order: `init` makes FORMAT 2; a branch and a tag are
+/// The design §10 acceptance, in its order: `init --format 2` makes FORMAT 2; a branch and a tag are
 /// made and listed with their kinds; the tag's move is `E_TAG_IMMUTABLE`; on a FORMAT 1
 /// store the branch is `E_FORMAT_REQUIRED` until `upgrade`; a land on the branch lands and
 /// one on the tag is `E_REF_NAME_INVALID`; `gc --dry-run` and `repair --dry-run` are clean.
@@ -27,9 +27,9 @@ const MAINTENANCE: [&str; 3] = ["gc", "repair", "upgrade"];
 fn a_format_2_store_holds_a_branch_and_a_tag() {
     let me = agent(1);
 
-    // 1. init without --format: FORMAT 2.
+    // 1. init --format 2: FORMAT 2 (FORMAT 3 is the default since the FORMAT 3 design's D3).
     let store = Store::empty();
-    let made = run(&["init", store.path()], &[]).ok();
+    let made = run(&["init", "--format", "2", store.path()], &[]).ok();
     assert_eq!(made["store_version"], 2, "{made}");
 
     // 2. A branch and a tag on one changeset, listed with their kinds.

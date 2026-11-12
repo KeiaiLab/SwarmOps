@@ -701,9 +701,15 @@ fn land(
     (outcome.landed, outcome.rebased_onto)
 }
 
-/// [`Op::Compact`] on the store of `layout`, its calls through `shared`: the index compacted, the
-/// writer lock held.
+/// [`Op::Compact`] on the store of `layout`, its calls through `shared`: in FORMAT 1 and 2 the
+/// index compacted, the writer lock held; in FORMAT 3, whose index does not compact, a view
+/// step, which holds `meta/views.lock` and never the writer lock (the FORMAT 3 design §2.5).
 fn compact(layout: &Layout, shared: &Arc<dyn FsOps>) {
+    if layout.format() == StoreFormat::V3 {
+        let store = MetaStore::open_in(layout.clone(), Arc::clone(shared)).expect("open");
+        store.step_views().expect("step");
+        return;
+    }
     let _lock = MetaLock::acquire(layout, Duration::from_secs(10)).expect("lock");
     let mut index = Index::open(layout, Arc::clone(shared)).expect("open");
     index.compact().expect("compact");
@@ -957,7 +963,7 @@ impl Recorded {
     fn header_len(&self) -> u64 {
         match self.format {
             StoreFormat::V1 => 8,
-            StoreFormat::V2 => 24,
+            StoreFormat::V2 | StoreFormat::V3 => 24,
             other => panic!("no frame header for {other:?}"),
         }
     }
@@ -1820,14 +1826,26 @@ const PAD: Op = Op::Cas {
     actor: "test-power/worker-1",
 };
 
+/// [`PAD`] for FORMAT 3, whose frames end in a 9-byte nonce: a frame of 187 bytes (its 88-byte
+/// name), which [`torn_run`] puts before [`RUN`]'s fifteenth op there. The frame after it then
+/// starts one byte before a sector boundary, its payload over 255 bytes.
+const PAD_V3: Op = Op::Cas {
+    name: "release/a-pad-whose-name-moves-the-later-frames-across-sector-boundaries-as-needs-v3-pad",
+    expected: None,
+    new: Some(0),
+    actor: "test-power/worker-1",
+};
+
 /// The run of the torn-tail tests in `format`: [`RUN`], whose frames straddle a sector boundary
 /// in every shape those tests need in FORMAT 1; in FORMAT 2, whose frame headers are 16 bytes
 /// longer and so move every frame, [`RUN`] with [`PAD`] after its first commit, which moves the
-/// later frames back into those shapes.
+/// later frames back into those shapes; in FORMAT 3, whose frames are 9 bytes longer again,
+/// [`RUN`] with [`PAD_V3`] before its fifteenth op.
 fn torn_run(format: StoreFormat) -> Vec<Op> {
     match format {
         StoreFormat::V1 => RUN.to_vec(),
         StoreFormat::V2 => [&RUN[..1], &[PAD], &RUN[1..]].concat(),
+        StoreFormat::V3 => [&RUN[..14], &[PAD_V3], &RUN[14..]].concat(),
         other => panic!("no torn-tail run for {other:?}"),
     }
 }

@@ -56,7 +56,8 @@ fn object_count(root: &Utf8Path) -> u64 {
 }
 
 /// Compacts the index of the store at `root` under the writer lock, so that the sorted views
-/// cover every record; returns how many they cover.
+/// cover every record; returns how many they cover. FORMAT 1 and 2 only: the tests that call it
+/// make FORMAT 2 stores (FORMAT 3's runs do not compact).
 fn compact(root: &Utf8Path) -> u64 {
     let layout = layout_of(root);
     let _lock = MetaLock::acquire(&layout, Duration::from_secs(10)).unwrap();
@@ -154,7 +155,7 @@ fn assert_problems(repo: &LocalRepo, want: Vec<VerifyProblem>) -> VerifyReport {
 
 #[test]
 fn verify_clean_store_zero_problems() {
-    let (_dir, root, repo) = new_repo();
+    let (_dir, root, repo) = new_repo_as(StoreFormat::V2);
     for depth in [Depth::Deep, Depth::Shallow] {
         assert_eq!(
             repo.verify(depth).unwrap(),
@@ -670,7 +671,7 @@ fn verify_reads_journal_off_again_when_a_writer_cuts_an_entry_it_measured() {
 
 #[test]
 fn verify_checks_the_sorted_views_against_the_columns() {
-    let (_dir, root, repo) = new_repo();
+    let (_dir, root, repo) = new_repo_as(StoreFormat::V2);
     let c1 = commit(&repo, &[], vec![put("f", b"1")]);
     let c2 = commit(&repo, &[c1], vec![put("f", b"2")]);
     commit(&repo, &[c2], vec![put("f", b"3")]);
@@ -699,7 +700,7 @@ fn verify_checks_the_sorted_views_against_the_columns() {
 
 #[test]
 fn verify_checks_the_order_of_a_sorted_view() {
-    let (_dir, root, repo) = new_repo();
+    let (_dir, root, repo) = new_repo_as(StoreFormat::V2);
     let c1 = commit(&repo, &[], vec![put("f", b"1")]);
     let c2 = commit(&repo, &[c1], vec![put("f", b"2")]);
     commit(&repo, &[c2], vec![put("f", b"3")]);
@@ -715,7 +716,7 @@ fn verify_checks_the_order_of_a_sorted_view() {
 
 #[test]
 fn verify_checks_each_record_is_named_once_in_a_sorted_view() {
-    let (_dir, root, repo) = new_repo();
+    let (_dir, root, repo) = new_repo_as(StoreFormat::V2);
     let c1 = commit(&repo, &[], vec![put("f", b"1")]);
     let c2 = commit(&repo, &[c1], vec![put("f", b"2")]);
     commit(&repo, &[c2], vec![put("f", b"3")]);
@@ -1228,7 +1229,7 @@ fn verify_reports_external_ids_that_are_damaged_dangling_or_mismatched() {
     use swarmops_store::{ExternalEntry, SYSTEM_GIT};
     use swarmops_testkit::repo::request;
 
-    let (_dir, root, repo) = new_repo();
+    let (_dir, root, repo) = new_repo_as(StoreFormat::V2);
     let oid = |n: u8| vec![n; 20];
     let mut imported = request(&[], vec![put("f", b"1")], "imported from git");
     imported.metadata = vec![("git.oid".to_owned(), lower_hex(&oid(0xaa)).into_bytes())];
@@ -1695,7 +1696,7 @@ fn verify_capped_clean_store_is_not_truncated() {
 #[test]
 fn verify_reports_format_2_seq_prev_crc_and_entry_crc_damage() {
     for kind in ["seq", "prev_crc", "entry_crc"] {
-        let (_dir, root, repo) = new_repo();
+        let (_dir, root, repo) = new_repo_as(StoreFormat::V2);
         let c1 = commit(&repo, &[], vec![put("f", b"1")]);
         let c2 = commit(&repo, &[c1], vec![put("f", b"2")]);
         repo.cas_ref("main", None, Some(c2), "test/agent").unwrap();
