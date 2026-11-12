@@ -25,8 +25,8 @@ spec:
   ports:
     - name: ssh
       port: 22
-      targetPort: 2222
+      targetPort: {{ include "so.sshPort" . }}
     - name: https
       port: 443
-      targetPort: 8443
+      targetPort: {{ include "so.httpsPort" . }}
 {{- end }}

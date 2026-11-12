@@ -18,6 +18,9 @@ installation:
   pushBoundSeconds: 540
   # Seconds a stopping pod has to finish open pushes.
   stopGraceSeconds: 600
+  # The stores `so-kit run setup` makes when missing: {name, identity}, the identity reading and
+  # landing onto main. An existing store stays as it is.
+  stores: []
   # When the rehearsal runs (mode rehearsal), in cron syntax.
   rehearsalSchedule: "17 3 * * 0"
   # The operator's texts the root page shows; empty shows none.

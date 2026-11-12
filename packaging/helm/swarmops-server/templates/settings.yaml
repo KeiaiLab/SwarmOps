@@ -1,5 +1,6 @@
 {{- include "so.checks" . }}
 {{- $etc := include "so.etc" . }}
+{{- $run := include "so.run" . }}
 # The kit's settings file (`key=value`, keys so-kit knows) and the operator's texts.
 apiVersion: v1
 kind: ConfigMap
@@ -14,12 +15,18 @@ data:
     root=/srv/so
     swarmops=/usr/bin/swarmops
     host_keys={{ $etc }}/host-keys
-    web_root=/run/swarmops-server/www
+    web_root={{ $run }}/www
     authorized_keys={{ $etc }}/access/authorized_keys
     {{- with .Values.installation.texts }}
     terms={{ if .terms }}{{ $etc }}/texts/terms{{ end }}
     privacy={{ if .privacy }}{{ $etc }}/texts/privacy{{ end }}
     acceptable_use={{ if .acceptableUse }}{{ $etc }}/texts/acceptableUse{{ end }}
+    {{- end }}
+    ssh_port={{ include "so.sshPort" . }}
+    https_port={{ include "so.httpsPort" . }}
+    run_dir={{ $run }}
+    {{- range .Values.installation.stores }}
+    store={{ .name }} {{ .identity }}
     {{- end }}
   {{- range $name, $text := .Values.installation.texts }}
   {{- if $text }}

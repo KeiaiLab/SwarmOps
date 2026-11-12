@@ -2,6 +2,9 @@
 # renders it. Addresses are documentation ranges.
 installation:
   hostName: hub.example.invalid
+  stores:
+    - name: hub
+      identity: person/ada
   texts:
     terms: "Example terms of use."
 wiring:

@@ -16,9 +16,9 @@ in rendered objects and show that its rule finds it.
 
 `--values` runs every case on that value set instead of the chart's defaults (the hosted
 configuration's test passes its file); `--kit` names the `so-kit` that reads the settings file
-(default: the kit's own, packaging/server/bin/so-kit). A missing `helm`, `kubectl`, `sh` or
-`ssh-keygen` fails the run and names the tool; nothing is skipped. Prints a summary; exit 1 on a
-failure, 2 on a usage error.
+(default: the kit's own, packaging/server/bin/so-kit). A missing `helm`, `kubectl` or `sh` fails
+the run and names the tool; nothing is skipped. Prints a summary; exit 1 on a failure, 2 on a
+usage error.
 """
 
 import argparse
@@ -37,14 +37,16 @@ ROOT = Path(__file__).resolve().parent.parent
 CHART = ROOT / "packaging" / "helm" / "swarmops-server"
 STRICT_EXAMPLE = CHART / "ci" / "strict-values.yaml"
 KIT = ROOT / "packaging" / "server" / "bin" / "so-kit"
-TOOLS = ("helm", "kubectl", "sh", "ssh-keygen")
+TOOLS = ("helm", "kubectl", "sh")
 
 RELEASE = "so"
 NAMESPACE = "so-test"
 HOSTED_NAME = "swarmops.cc"
 
-# The two listeners inside the pod and the Service ports in front of them.
+# The two listeners inside the pod, the kit settings that place them, and the Service ports in
+# front of them.
 CONTAINER_PORTS = {2222, 8443}
+KIT_PORTS = {"sshd": "ssh_port", "web": "https_port"}
 SERVICE_PORTS = {22: 2222, 443: 8443}
 DNS_PORT = 53
 SECRET_MODE = 0o400
@@ -437,25 +439,36 @@ def secrets_mounted_0400_read_only(run: Run) -> None:
 
 
 def settings_equal_kit_format(run: Run) -> None:
-    """The ConfigMap's kit.conf passes the kit's own settings parser: `so-kit key-line` reads
-    the settings first and prints a key line naming the rendered root."""
+    """The ConfigMap's kit.conf passes the kit's own settings check (`so-kit check`); it names
+    the ports the sshd and web containers declare, and one `store=` line per listed store."""
     assert run.kit.is_file(), f"no so-kit at {run.kit}"
-    maps = [item for item in run.objects(*run.base()) if item.get("kind") == "ConfigMap"
+    objects = run.objects(*run.base())
+    maps = [item for item in objects if item.get("kind") == "ConfigMap"
             and "kit.conf" in item.get("data", {})]
     assert len(maps) == 1, f"{len(maps)} ConfigMaps hold kit.conf"
     settings = maps[0]["data"]["kit.conf"]
     conf = run.scratch / "kit.conf"
     conf.write_text(settings)
 
-    key = run.scratch / "key"
-    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)],
-                   check=True, capture_output=True)
-    done = subprocess.run(["sh", str(run.kit), "key-line", "person/ada", "-"],
-                          input=key.with_suffix(".pub").read_text(), capture_output=True,
-                          text=True, env={**run.env, "SO_KIT_CONF": str(conf)}, check=False)
+    # 1. The kit's own parser reads the file whole.
+    done = subprocess.run(["sh", str(run.kit), "check"], capture_output=True, text=True,
+                          env={**run.env, "SO_KIT_CONF": str(conf)}, check=False)
     assert done.returncode == 0, f"so-kit refuses the settings: {done.stderr.strip()}"
-    root = re.search(r"^root=(.*)$", settings, re.MULTILINE)
-    assert root and f"--root {root.group(1)} " in done.stdout, done.stdout
+
+    # 2. The kit listens where the pod declares: the settings name both ports.
+    lines = [line for line in settings.splitlines() if line and not line.startswith("#")]
+    setting = dict(line.split("=", 1) for line in lines)
+    declared = {container["name"]: {port["containerPort"] for port in container.get("ports", [])}
+                for _, pod in pod_specs(objects) for container in containers(pod)}
+    for role, key in KIT_PORTS.items():
+        assert key in setting, f"kit.conf names no {key}"
+        assert declared.get(role) == {int(setting[key])}, \
+            f"{key}={setting[key]}, container {role} declares {declared.get(role)}"
+
+    # 3. Each listed store is one `store=<name> <identity>` line, which `so-kit run setup` makes.
+    stores = run.values_of(*run.base())["installation"]["stores"]
+    expected = [f"store={store['name']} {store['identity']}" for store in stores]
+    assert [line for line in lines if line.startswith("store=")] == expected, settings
 
 
 def smoke_level_reads_pods_only(run: Run) -> None:

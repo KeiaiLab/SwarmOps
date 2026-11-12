@@ -44,6 +44,28 @@
           "type": "integer",
           "minimum": 1
         },
+        "stores": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "maxLength": 63,
+                "pattern": "^[a-z0-9][a-z0-9._-]*$"
+              },
+              "identity": {
+                "type": "string",
+                "pattern": "^[a-z0-9-]+/[A-Za-z0-9_-][A-Za-z0-9._-]*$"
+              }
+            },
+            "required": [
+              "identity",
+              "name"
+            ]
+          }
+        },
         "rehearsalSchedule": {
           "type": "string",
           "minLength": 1
@@ -74,6 +96,7 @@
         "pushBoundSeconds",
         "rehearsalSchedule",
         "stopGraceSeconds",
+        "stores",
         "texts"
       ]
     },

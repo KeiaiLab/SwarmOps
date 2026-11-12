@@ -9,6 +9,13 @@ random value, no generated key.
 {{/* Paths inside the pod; kit.conf names the ones the kit reads. */}}
 {{- define "so.etc" -}}/etc/swarmops-server{{- end -}}
 
+{{/* The listeners inside the pod: kit.conf places them, the containers and Service name them. */}}
+{{- define "so.sshPort" -}}2222{{- end -}}
+{{- define "so.httpsPort" -}}8443{{- end -}}
+
+{{/* The kit's run directory: rendered configurations, pid files, the CGI socket, the page. */}}
+{{- define "so.run" -}}/run/swarmops-server{{- end -}}
+
 {{- define "so.labels" -}}
 app.kubernetes.io/name: swarmops-server
 app.kubernetes.io/instance: {{ .Release.Name }}
@@ -113,7 +120,7 @@ imagePullSecrets:
   mountPath: {{ include "so.etc" . }}/texts
   readOnly: true
 - name: run
-  mountPath: /run/swarmops-server
+  mountPath: {{ include "so.run" . }}
 - name: tmp
   mountPath: /tmp
 {{- end -}}

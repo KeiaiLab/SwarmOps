@@ -51,7 +51,7 @@ spec:
           command: ["/usr/sbin/so-kit", "run", "sshd"]
           ports:
             - name: ssh
-              containerPort: 2222
+              containerPort: {{ include "so.sshPort" . }}
           readinessProbe:
             exec:
               command: ["/usr/sbin/so-kit", "ready", "sshd"]
@@ -74,7 +74,7 @@ spec:
           command: ["/usr/sbin/so-kit", "run", "web"]
           ports:
             - name: https
-              containerPort: 8443
+              containerPort: {{ include "so.httpsPort" . }}
           readinessProbe:
             exec:
               command: ["/usr/sbin/so-kit", "ready", "web"]
@@ -101,6 +101,9 @@ spec:
         - name: timers
           image: {{ include "so.image" . }}
           command: ["/usr/sbin/so-kit", "run", "timers"]
+          readinessProbe:
+            exec:
+              command: ["/usr/sbin/so-kit", "ready", "timers"]
           {{- include "so.containerSecurity" . | nindent 10 }}
           volumeMounts:
             {{- include "so.commonMounts" . | nindent 12 }}
