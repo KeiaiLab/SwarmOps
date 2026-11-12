@@ -423,13 +423,15 @@ bench-compare *args:
 
 # bench/compare against the store's current API: `just check` resolves its lockfile but builds
 # nothing of it, so an API change it no longer compiles against (a `non_exhaustive` type, say)
-# would wait for the weekly run. Its lockfile under its own policy first, as `bench-compare` does,
-# then every target compiled, run nothing; CI runs it after `just check`. The first build is
-# about 100 crates, SQLite's C sources included; later ones are incremental.
+# would wait for the weekly run. Its lockfile under its own policy first (bans, licenses and
+# sources: an advisory for a crate only bench/compare uses turns the weekly run and
+# `bench-compare` red, as CONTRIBUTING.md says, not every push), then every target compiled, run
+# nothing; CI runs it after `just check`. The first build is about 100 crates, SQLite's C
+# sources included; later ones are incremental.
 # Checks that bench/compare still compiles, its lockfile under its own cargo-deny policy.
 check-compare:
     cargo deny --locked --manifest-path bench/compare/Cargo.toml --config bench/compare/deny.toml \
-        check
+        check bans licenses sources
     cargo check --locked --manifest-path bench/compare/Cargo.toml --all-targets
 
 # cargo-fuzz takes no `--locked`; `just check` lints the fuzz workspace with it, so a
