@@ -238,6 +238,29 @@ fn git_import_diverged_exits_3() {
     assert_eq!(store.show("main")["id"], older["head_changeset"]);
 }
 
+/// The import moves its target as its caller: the reflog entry of each move names the
+/// `--as` agent, though the changesets it records are attributed to no agent.
+#[test]
+fn git_import_moves_the_target_as_its_caller() {
+    let store = Store::init();
+    let refs = Source::new("refs");
+    let older = import(&store, &refs.path, &["--ref", "older"]).ok();
+    let newer = import(&store, &refs.path, &["--ref", "newer"]).ok();
+    assert_eq!(newer["ref_moved"], true, "{newer}");
+
+    // Newest first: the move to newer's tip, then the one that created main.
+    let log = store.read(&["ref", "log", "main"]).ok();
+    let moves: Vec<(&Value, &Value)> = (log["moves"].as_array().expect("moves").iter())
+        .map(|entry| (&entry["new"], &entry["actor"]))
+        .collect();
+    let actor = json!(AGENT);
+    let want = [
+        (&newer["head_changeset"], &actor),
+        (&older["head_changeset"], &actor),
+    ];
+    assert_eq!(moves, want, "{log}");
+}
+
 /// A path where no git repository is, missing or a plain directory, is `E_GIT_NOT_A_REPO`, exit
 /// 6, naming the path as it was given.
 #[test]
