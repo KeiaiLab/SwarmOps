@@ -187,8 +187,7 @@ impl Served {
         let blob = files
             .lines()
             .filter_map(|line| line.split_once('\t'))
-            .filter_map(|(entry, _)| entry.strip_prefix("100644 blob "))
-            .next()
+            .find_map(|(entry, _)| entry.strip_prefix("100644 blob "))
             .expect("the linear fixture holds a file")
             .to_owned();
 
