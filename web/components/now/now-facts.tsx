@@ -18,8 +18,8 @@ import { InlineText } from './inline-text';
 
 const CHANGELOG_UNRELEASED_URL = '/docs/changelog#unreleased';
 
-// The roadmap's milestone lines; their `#on-stable` anchor arrives with the status lines slice.
-const ROADMAP_URL = '/roadmap';
+// The roadmap's status lines: the milestones on stable since the latest release.
+const ROADMAP_URL = '/roadmap#on-stable';
 
 /** The commit's page on GitHub. */
 export function commitUrl(commit: string): string {
