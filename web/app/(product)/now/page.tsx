@@ -6,8 +6,26 @@ import { STABLE } from '@/lib/stable';
 
 const TITLE = 'On stable now';
 
+// Search basics: a title no other page has, and a description stated from the build's facts, e.g.
+// "stable at 3a561c91, 2026-11-12: 81 commits and 9 changelog entries after the latest release,
+// v0.11.0 of 2026-11-09." Open Graph comes from the root layout, as on the other pages.
+const SEARCH_TITLE = 'Now on stable: SwarmOps';
+const UNRELEASED_COUNT = STABLE.unreleased.reduce((sum, group) => sum + group.entries.length, 0);
+
+/** `1 commit`, `81 commits`. */
+function counted(n: number, one: string, many: string): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
+const COMMITS = counted(STABLE.since, 'commit', 'commits');
+const ENTRIES = counted(UNRELEASED_COUNT, 'changelog entry', 'changelog entries');
+const DESCRIPTION =
+  `${STABLE.ref} at ${STABLE.short}, ${STABLE.date}: ${COMMITS} and ${ENTRIES} ` +
+  `after the latest release, ${STABLE.tag} of ${STABLE.tagDate}.`;
+
 export const metadata: Metadata = {
-  title: TITLE,
+  title: { absolute: SEARCH_TITLE },
+  description: DESCRIPTION,
   alternates: { canonical: '/now' },
 };
 
