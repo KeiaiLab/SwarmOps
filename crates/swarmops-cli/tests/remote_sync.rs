@@ -734,6 +734,159 @@ fn sync_without_a_published_ref_keeps_the_base_floor() {
     assert_eq!(remote.first_parents()[1], forced);
 }
 
+/// The store's git mirror, below the store's root.
+const MIRROR: &str = "git/mirror.git";
+
+/// The mirror ref that holds the floor of [`ORIGIN`]'s `branch`.
+fn floor_ref(branch: &str) -> String {
+    format!("refs/published/{ORIGIN}/{branch}")
+}
+
+/// The floors `store`'s mirror holds, by ref name, each with the commit it names.
+fn floors(remote: &Remote, store: &Store) -> Vec<(String, String)> {
+    let mirror = Path::new(store.path()).join(MIRROR);
+    let format = "--format=%(refname) %(objectname)";
+    let listed = git_out(
+        &remote.server,
+        &mirror,
+        &["for-each-ref", format, "refs/published"],
+    );
+    listed
+        .lines()
+        .map(|line| {
+            let (name, commit) = line.split_once(' ').expect("a ref and its commit");
+            (name.to_owned(), commit.to_owned())
+        })
+        .collect()
+}
+
+/// A sync that only fast-forwards `main` sets the floor too (the M16 design §3): the remote
+/// forced back below the head `main` was moved to is refused by the next sync, which would
+/// otherwise land the remote's own dropped commit onto the forced head and push it back.
+#[test]
+fn sync_after_a_fast_forward_meets_a_forced_remote() {
+    // 1. Only the remote moved: main fast-forwards, and the floor is the remote's head.
+    let remote = Remote::new();
+    let store = remote.cloned();
+    let before = remote.head();
+    let theirs = remote.commit("theirs", &[("c.txt", "c\n")]);
+    let synced = sync(&store, &[]).ok();
+    assert_eq!(synced["status"], "fast_forwarded", "{synced}");
+    let main = main_at(&store).expect("main");
+    assert_eq!(floors(&remote, &store), [(floor_ref("main"), theirs)]);
+
+    // 2. The remote forced back to the commit below it, then on to another.
+    let forced = forced_back(&remote, &before);
+    let target = changeset_of(&store);
+
+    // 3. Refused whole, naming main, the remote's head and the remote.
+    let failed = refused_whole(&remote, &store, &main, &forced);
+    let error = failed.err("E_REF_PROTECTED");
+    let details = json!({"name": "main", "changeset": main, "target": target, "remote": ORIGIN});
+    assert_eq!(error["details"], details, "{failed}");
+}
+
+/// A `push` of `main` to the followed branch sets the floor, whether it sends nothing or moves
+/// the remote, and moves a floor that is there: forced back to the older floor, which the forced
+/// head still holds, the remote is refused by the next sync.
+#[test]
+fn a_push_to_main_sets_the_floor() {
+    // 1. No floor after a clone; a push with nothing to send sets it.
+    let remote = Remote::new();
+    let store = remote.cloned();
+    let before = remote.head();
+    assert_eq!(floors(&remote, &store), Vec::new());
+    let pushed = store.read(&["push", ORIGIN, "main"]).ok();
+    assert_eq!(pushed["status"], "up_to_date", "{pushed}");
+    assert_eq!(
+        floors(&remote, &store),
+        [(floor_ref("main"), before.clone())]
+    );
+
+    // 2. A push that moves the remote moves the floor to the remote's new head.
+    let mine = land(&store, "mine.txt", "mine\n");
+    let pushed = store.read(&["push", ORIGIN, "main"]).ok();
+    assert_eq!(pushed["status"], "pushed", "{pushed}");
+    assert_eq!(
+        floors(&remote, &store),
+        [(floor_ref("main"), remote.head())]
+    );
+
+    // 3. Forced back to the older floor and on: refused, by the floor the push set.
+    let forced = forced_back(&remote, &before);
+    changeset_of(&store);
+    let failed = refused_whole(&remote, &store, &mine, &forced);
+    let error = failed.err("E_REF_PROTECTED");
+    assert_eq!(error["details"]["changeset"], mine.as_str(), "{failed}");
+}
+
+/// Only `main` pushed to the followed branch sets the floor. `main` pushed to another branch
+/// writes no floor for that branch and leaves the followed one's; another ref pushed to the
+/// followed branch leaves it too, so a remote forced back below that push is synced onto, as
+/// one whose head `main` was never matched to.
+#[test]
+fn a_push_to_another_branch_leaves_the_floor() {
+    // 1. The floor of an up-to-date sync.
+    let remote = Remote::new();
+    let store = remote.cloned();
+    let before = remote.head();
+    let synced = sync(&store, &[]).ok();
+    assert_eq!(synced["status"], "up_to_date", "{synced}");
+    let floor = [(floor_ref("main"), before.clone())];
+    assert_eq!(floors(&remote, &store), floor);
+
+    // 2. main to another branch: the remote's branch is made, and the floors are as they were.
+    let mine = land(&store, "mine.txt", "mine\n");
+    let pushed = store.read(&["push", ORIGIN, "main:feature"]).ok();
+    assert_eq!(pushed["status"], "created", "{pushed}");
+    assert!(
+        remote
+            .server
+            .rev_parse(REPO, "refs/heads/feature")
+            .is_some()
+    );
+    assert_eq!(floors(&remote, &store), floor);
+
+    // 3. Another ref to the followed branch: the remote moves, and the floors are as they were.
+    let line = ["ref", "set", "side", mine.as_str(), "--create"];
+    store.run_as(AGENT, &line, &[]).ok();
+    let pushed = store.read(&["push", ORIGIN, "side:main"]).ok();
+    assert_eq!(pushed["status"], "pushed", "{pushed}");
+    assert_ne!(remote.head(), before);
+    assert_eq!(floors(&remote, &store), floor);
+
+    // 4. Forced back below that push: the forced head holds the floor, and main lands onto it.
+    let forced = forced_back(&remote, &before);
+    let synced = sync(&store, &[]).ok();
+    assert_eq!(synced["status"], "pushed", "{synced}");
+    assert_eq!(remote.first_parents()[1], forced);
+}
+
+/// A floor that names a commit the store never imported (a mirror another tool wrote to) is no
+/// floor: the sync goes on from its base, and sets the floor to the remote's head.
+#[test]
+fn an_unknown_floor_is_no_refusal() {
+    // 1. A commit in the mirror alone, and the floor naming it.
+    let remote = Remote::new();
+    let store = remote.cloned();
+    let mirror = Path::new(store.path()).join(MIRROR);
+    let tracking = format!("refs/remotes/{ORIGIN}/main");
+    let tree = format!("{tracking}^{{tree}}");
+    let made = ["commit-tree", tree.as_str(), "-m", "unknown"];
+    let unknown = git_out(&remote.server, &mirror, &made);
+    let floor = floor_ref("main");
+    let set = ["update-ref", floor.as_str(), unknown.as_str()];
+    git_out(&remote.server, &mirror, &set);
+    assert_eq!(floors(&remote, &store), [(floor.clone(), unknown)]);
+
+    // 2. The remote moved: main fast-forwards, and the floor is the remote's head.
+    let theirs = remote.commit("theirs", &[("c.txt", "c\n")]);
+    let synced = sync(&store, &[]).ok();
+    assert_eq!(synced["status"], "fast_forwarded", "{synced}");
+    assert_eq!(main_at(&store), Some(changeset_of(&store)));
+    assert_eq!(floors(&remote, &store), [(floor, theirs)]);
+}
+
 /// With nothing unpublished, a remote head that holds the published `main` only as a merge's
 /// second parent is refused: a fast-forward there would take `main` off its first-parent history
 /// (the M16 design §3).
