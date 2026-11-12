@@ -42,8 +42,9 @@
 //!   object name linked, and every fan-out directory made, in this process is durable (its
 //!   directory fsynced since): the objects a changeset names are durable before its record.
 //! - **W6, durable renames.** [`FsOps::rename_durable`] moves only durable data: a file synced in
-//!   this process since it was last written, or a directory whose tree has no change waiting for
-//!   a directory fsync and no data waiting for a sync.
+//!   this process since it was last written (and, moved out of its directory, whose entry there
+//!   no fsync waits for: the rename syncs only the target's directory), or a directory whose tree
+//!   has no change waiting for a directory fsync and no data waiting for a sync.
 //! - **W7, `FORMAT`.** A store's `FORMAT` file, the mark that the store is complete, is linked
 //!   only from synced data, and only once the rest of the store is durable: no entry under the
 //!   store root (or the root's own) waits for its directory's fsync, `objects/tmp/` and the
@@ -991,16 +992,32 @@ impl State {
         names_it.then(|| "the durable manifest names it: a reader would miss its run".to_owned())
     }
 
-    /// W6 for a rename of `from`, a directory or else a file.
-    fn rename(&self, from: &Path, node: Node) -> Option<String> {
+    /// W6 for a rename of `from` to `to`, a directory or else a file.
+    fn rename(&self, from: &Path, to: &Path, node: Node) -> Option<String> {
         if node == Node::File {
-            return match self.files.get(from) {
+            // 1. Its data.
+            match self.files.get(from) {
                 Some(file) if file.lost_from.is_some() => {
-                    Some("a failed sync left some of its data not durable".to_owned())
+                    return Some("a failed sync left some of its data not durable".to_owned());
                 }
-                Some(file) if file.synced_whole(real_len(from)) => None,
-                _ => Some("its data is not synced since it was last written".to_owned()),
-            };
+                Some(file) if file.synced_whole(real_len(from)) => {}
+                _ => return Some("its data is not synced since it was last written".to_owned()),
+            }
+
+            // 2. Out of its directory, its own entry there: the rename syncs only the target's.
+            let source = from.parent();
+            if source == to.parent() {
+                return None;
+            }
+            let pending = source.and_then(|dir| self.dirs.get(dir));
+            let made = pending.is_some_and(|pending| {
+                (pending.iter()).any(|change| change.added && change.path == from)
+            });
+            return made.then(|| {
+                "its entry in its directory waits for an fsync, and the rename syncs only the \
+                 target's: a power loss could take the file back"
+                    .to_owned()
+            });
         }
         for (dir, pending) in &self.dirs {
             if dir.starts_with(from)
@@ -1614,7 +1631,7 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
             let run = (run_meta(to))
                 .and_then(|meta| state.run_bound(meta, from))
                 .map(|why| (Rule::W4, why));
-            match state.rename(from, node) {
+            match state.rename(from, to, node) {
                 Some(why) => Some((Rule::W6, why)),
                 None if run.is_some() => run,
                 None => view

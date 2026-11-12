@@ -580,11 +580,12 @@ fn write_run(v3: &Layout, fs: &StoreFs, run: &Run) -> Result<Vec<u8>, StoreError
         });
     }
 
-    // 2. Written in tmp/, synced, renamed.
+    // 2. Written in tmp/, synced, its entry there too (the rename syncs only sorted3/), renamed.
     let bytes = runs::encode_run(run, [&ids, &dh]);
     let tmp = runs::tmp_path(v3, &run.name());
     fs.append(tmp.as_std_path(), &bytes)?;
     fs.sync_data(tmp.as_std_path())?;
+    fs.fsync_dir(v3.views_dir().join(runs::TMP).as_std_path())?;
     let path = runs::run_path(v3, run);
     fs.rename_durable(tmp.as_std_path(), path.as_std_path())?;
     Ok(bytes)

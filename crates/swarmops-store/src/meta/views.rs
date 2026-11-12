@@ -179,7 +179,7 @@ fn build(layout: &Layout, fs: &StoreFs, run: &Run) -> Result<(), StoreError> {
         });
     }
 
-    // 2. Written in tmp/, synced, renamed.
+    // 2. Written in tmp/, synced, its entry there too (the rename syncs only sorted3/), renamed.
     let tmp_dir = layout.views_dir().join(runs::TMP);
     if !fs::exists(&tmp_dir).map_err(|e| fs.locate(FileOp::Stat, &tmp_dir, e))? {
         fs.create_dir_all(tmp_dir.as_std_path())?;
@@ -188,6 +188,7 @@ fn build(layout: &Layout, fs: &StoreFs, run: &Run) -> Result<(), StoreError> {
     remove(fs, &tmp)?;
     fs.append(tmp.as_std_path(), &runs::encode_run(run, [&ids, &dh]))?;
     fs.sync_data(tmp.as_std_path())?;
+    fs.fsync_dir(tmp_dir.as_std_path())?;
     fs.rename_durable(tmp.as_std_path(), runs::run_path(layout, run).as_std_path())?;
     Ok(())
 }

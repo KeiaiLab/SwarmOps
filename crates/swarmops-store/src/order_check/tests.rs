@@ -533,6 +533,30 @@ fn w6_a_directory_is_renamed_only_once_its_tree_is_durable() {
     fs.rename_durable(&staged, &to).unwrap();
 }
 
+/// A file renamed into another directory moves only once its own entry is durable: the rename
+/// syncs the target's directory alone, and a power loss may take back a new name in the source
+/// directory, and the file with it.
+#[test]
+fn w6_a_file_moved_out_of_its_directory_has_a_durable_entry() {
+    let (_dir, root) = root3();
+    let (tmp, views) = (root.join("meta/sorted3/tmp"), root.join("meta/sorted3"));
+    let fs = OrderCheckFs::new(RealFs);
+    let made = tmp.join("made");
+    fs.append(&made, b"data").unwrap();
+    fs.sync_data(&made).unwrap();
+    assert_breaks_by("W6", "rename_durable", || {
+        fs.rename_durable(&made, &views.join("moved")).unwrap();
+    });
+
+    // Its entry durable: it moves. Renamed within its directory, the target's sync covers it.
+    fs.fsync_dir(&tmp).unwrap();
+    fs.rename_durable(&made, &views.join("moved")).unwrap();
+    let again = views.join("again");
+    fs.append(&again, b"data").unwrap();
+    fs.sync_data(&again).unwrap();
+    fs.rename_durable(&again, &views.join("kept")).unwrap();
+}
+
 #[test]
 fn w7_format_is_linked_last() {
     let (_dir, root) = root();
@@ -761,11 +785,13 @@ fn run_bytes(from: u64, to: u64) -> (Run, Vec<u8>) {
     (run, bytes)
 }
 
-/// Writes `run`'s file in `sorted3/tmp/` through `fs` and syncs it; returns its path there.
+/// Writes `run`'s file in `sorted3/tmp/` through `fs` and makes it durable, its entry too;
+/// returns its path there.
 fn temp_run(fs: &OrderCheckFs<RealFs>, meta: &Path, run: &Run, bytes: &[u8]) -> PathBuf {
     let tmp = meta.join("sorted3/tmp").join(run.name());
     fs.append(&tmp, bytes).unwrap();
     fs.sync_data(&tmp).unwrap();
+    fs.fsync_dir(&meta.join("sorted3/tmp")).unwrap();
     tmp
 }
 
