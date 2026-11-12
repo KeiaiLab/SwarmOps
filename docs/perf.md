@@ -2602,3 +2602,53 @@ the next gated window, each under the heavy lock:
 So no G9 row takes a verdict from M19 yet. The update row keeps v0.6.0's miss (116.6 ms) until a
 gated single run says otherwise; the commit row stays missed until a change feed exists (the M19
 design, decision D1: no target changed). No gate, target, timeout or case parameter changed.
+
+## M20 — FORMAT 3 at 1,000,000 records — 2026-11-12 (not measured)
+
+The M20 plan's task M20-7 added the cases and recipe steps; none of them ran at full size. The 1-minute load was
+about 800 (5-minute 710, 15-minute 860) while they were written, a durable commit at the median took
+360 to 750 ms in the trial below where `docs/perf.md` "Task 7a" records 7.5 ms, and the heavy lock's windows were
+taken by other builds. A decile of 100,000 commits at that rate is days, not minutes. So no row below takes a verdict
+from M20-7, and no gate, target, timeout or case parameter changed.
+
+What the change adds:
+
+| Case or bench | What it measures | Where it runs |
+| --- | --- | --- |
+| `format3_perf::lock_hold_at_1m_records_stays_under_100ms` | G18: the longest `meta/lock` hold of 1,000 commits, 1,000 lands and 1,000 ref moves on a copy of the 1,000,000-changeset store, a view step after each reply | `just perf` |
+| `format3_perf::commits_1m_next_decile` | A7: the next 100,000 back-to-back commits in-process through `LocalRepo` (a view step after each, as the CLI makes it after its reply), appended to `results.txt` with the commit's p50, p99 and max, the step's, and the p99 of a lookup and of a snapshot; resumed from `results.txt` alone, ten lines then start over | `just perf` ten times, the weekly run once |
+| `format3_perf::a5_verdict` | A5: the last decile's commit p99 at most 1.5 times the first's, lookup and snapshot p99 under 1 ms in every decile; fewer than ten lines is a failure naming the missing deciles | `just perf` only (`perf_recipe_only`) |
+| `format3_perf::commit_cost_on_1m_against_1k` | A1: commits of 1, 10 and 100 files on the 1,000,000-changeset store against the 1,000-changeset one, at most 1.5 times and within 5 ms + 0.3 ms per file | `just perf` |
+| `format3_perf::upgrade_200k_measured` | the time and the lock hold of `upgrade` on a FORMAT 2 store of 200,000 changesets, the op-id list equal before and after (recorded, no target) | `just perf` |
+| `compaction/runs_step/<size>`, `history/<size>_v3/*` | the FORMAT 3 view step and the FORMAT 3 lookups, walks and inserts beside the FORMAT 2 benches, which keep their names | `just perf` (the bench step) |
+
+The three cases on the scale fixtures print `format3-perf: <case> not run` without `SWARMOPS_SCALE=1`; `just perf`
+exports it, builds the large fixture a part a call (`scale_perf::fixture_next_part`) until its line says whole, and
+fails on a `not run` line. The new benches are in `bench/thresholds.toml`'s `[skip]` table with the reason "no two
+quiet baseline runs yet": the bench gate reads them once two quiet runs give their medians.
+
+Trial, only to show that each case runs end to end: a debug build, the large store set to 20,000 changesets
+(`SWARMOPS_SCALE_LARGE=20000`), deciles of 300 commits (`SWARMOPS_PERF_COMMITS=300`), load about 800. These are not
+A1's, A5's or G18's figures and are no baseline.
+
+| Case | Trial figure (20,000 changesets, debug, load about 800) |
+| --- | --- |
+| lock hold, commit | p50 56.7 ms, p99 137.7 ms, max 250.4 ms |
+| lock hold, land | p50 26.3 ms, p99 95.1 ms, max 352.7 ms |
+| lock hold, ref move | p50 24.0 ms, p99 55.7 ms, max 512.0 ms |
+| A1, 1 file | large p50 82.3 ms, small p50 83.1 ms |
+| A1, 10 files | large p50 119.4 ms, small p50 115.6 ms |
+| A1, 100 files | large p50 230.6 ms, small p50 223.5 ms |
+| upgrade of 20,000 changesets (not 200,000) | 117.8 ms, lock hold 117.6 ms, 7 operations, op-id list equal |
+| decile 0 to 2 of 300 commits | commit p50 360, 748 and 632 ms; step p50 0.3 to 0.4 ms; lookup p99 0.16 to 0.25 ms; snapshot p99 0.10 to 0.69 ms |
+| `compaction/runs_step/20k`, criterion test mode (one run) | 202.4 ms (`compact` 287.4 ms, same run) |
+
+The holds in the trial are the load's, not the store's: at 20,000 changesets the commit's work is the same as at a
+million (the design §2.5), and the hold tracks the p50 of the commit, which the load multiplied by 30 to 100.
+
+Queued for the next quiet window, under the heavy lock (`flock /tmp/swarmops-heavy.lock just perf`, then the bench
+twice for the baselines): every row of the first table. The verdicts to record then: G18 at 1,000,000 records (at
+most 100 ms), A5 (at most 1.5 times, under 1 ms), A1 (at most 1.5 times, 5 ms + 0.3 ms per file), and the upgrade
+(recorded, no target). A miss is recorded and becomes a known-limitation line in M20-R, never a lowered target. The
+weekly `perf-cases` timeout (`.github/workflows/scheduled.yml`) is recomputed from that run's sums by its comment's
+rule; it stays 390 until then.
