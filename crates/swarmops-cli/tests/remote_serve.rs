@@ -22,6 +22,8 @@
 //!   store B ── push ── advertisement read ── (held) ──────────── update: main moved
 //!   another writer ── moves the served main ───────────────────┘
 //! ```
+//!
+//! A clone is cut and a killed push's client held by the stand-in's faults ([`SshFault`]).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -30,13 +32,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use swarmops_testkit::child;
+use swarmops_testkit::child::{self, CHILD_TIMEOUT, Child};
 use swarmops_testkit::git::fixture;
-use swarmops_testkit::remote::{GitServer, HttpAuth, HttpServer};
+use swarmops_testkit::remote::{GitLedger, GitServer, HttpAuth, HttpServer, SshFault};
 use swarmops_testkit::serve::{HttpIdentity, ServeSite};
 use tempfile::TempDir;
 
-use crate::support::{Run, Store, Swarmops, run};
+use crate::support::{Run, Store, Swarmops, run, swarmops};
 
 /// The agent a client store's commands run as: its own, which the served store never sees.
 const AGENT: &str = "agent/worker-17";
@@ -87,6 +89,28 @@ const HOLD_POLL: Duration = Duration::from_millis(20);
 /// How often the wrapper looks for its release, in milliseconds; it gives up after
 /// [`HOLD_WAIT`].
 const HOLD_TICK_MS: u128 = 50;
+
+/// The size of the file a cut clone fetches: a pack of about 6 MiB, at least 90 reads of the
+/// stand-in's cutter.
+const NOISE_BYTES: usize = 8 << 20;
+
+/// Where a cut clone's answer ends. The stand-in's cutter counts every read as one 64 KiB
+/// block, however short, so this passes 64 reads of each connection: the listing whole (its
+/// lines are a read each at most), and of the fetch its lines and then pack data, never the
+/// whole pack.
+const CUT: usize = 63 * (64 << 10);
+
+/// How long a held stand-in stays after its server ended: as long as the wait for the push to
+/// arrive, which starts before the server ends, so that the client is still waiting when it is
+/// killed.
+const HOLD: Duration = CHILD_TIMEOUT;
+
+/// `SIGKILL`'s number.
+#[cfg(unix)]
+const SIGKILL: i32 = 9;
+
+/// How many stores sync the served store in the export test.
+const STORES: usize = 3;
 
 /// How a client reaches the served store.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -148,6 +172,13 @@ struct Site {
 impl Site {
     /// The store, seeded and served.
     fn new() -> Site {
+        Site::holding(&[])
+    }
+
+    /// [`Site::new`], each `(path, content)` of `files` landed as one more native change before
+    /// the store is served: a change landed later is prepared for serving beside the test's
+    /// next connection, which gives up when a large one keeps `serve.lock` too long.
+    fn holding(files: &[(&str, &str)]) -> Site {
         let served = ServeSite::new::<Swarmops>();
         served.init(STORE);
         let site = Site {
@@ -164,6 +195,9 @@ impl Site {
         let line = ["git", "import", &source, "--ref", "HEAD", "--into", "main"];
         site.so(&line);
         site.land("seed.txt", "seed\n");
+        for (path, content) in files {
+            site.land(path, content);
+        }
 
         // 2. Written after the import, so that no preparation runs beside the test's connections.
         fs::write(site.served.store(STORE).join("access.toml"), ACCESS).expect("write access");
@@ -217,6 +251,21 @@ impl Site {
         let new = self.commit(path, content);
         self.so(&["ref", "set", "main", &new, "--expect", &old]);
         new
+    }
+
+    /// How many moves the served store's ref log holds for `main`.
+    fn main_moves(&self) -> usize {
+        let log = self.so(&["ref", "log", "main", "--limit", "1000"]);
+        assert_eq!(log["truncated"], false, "{log}");
+        log["moves"].as_array().expect("moves").len()
+    }
+
+    /// The newest of the served store's connection records.
+    fn newest_record(&self) -> Value {
+        let file = self.served.store(STORE).join("git/serve-records.jsonl");
+        let records = fs::read_to_string(file).expect("the served store's records");
+        let newest = records.lines().last().expect("a record");
+        serde_json::from_str(newest).expect("a record is JSON")
     }
 
     /// The newest ref move of the served store's op log.
@@ -791,5 +840,202 @@ fn a_race_the_served_store_calls_stale_is_retried() {
     assert_eq!(chain[1], won["new"].as_str().expect("new"));
     assert_each_once(&site, base, &["one.txt", "two.txt"], "a stale race");
     b.assert_clean("after the race");
+    site.assert_clean();
+}
+
+/// `len` bytes of text that compress poorly, the same every run: a pack past [`CUT`].
+fn noise(len: usize) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+    (0..len)
+        .map(|_| {
+            // xorshift64: one 6-bit digit per byte.
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            char::from(ALPHABET[(state & 0x3f) as usize])
+        })
+        .collect()
+}
+
+/// A clone whose answer is cut inside the pack is `E_REMOTE_UNREACHABLE`, retryable, and leaves
+/// a sound store that holds the remote and no changeset of the cut pack; the same clone run
+/// again into it imports the rest, and once more changes nothing.
+#[test]
+fn a_cut_clone_of_a_served_store_resumes() {
+    let site = Site::holding(&[("noise.txt", &noise(NOISE_BYTES))]);
+    let served = site.history();
+    let link = site.ssh(ADA);
+    let cut = site.served.ssh_command_with(ADA, SshFault::CutReceive(CUT));
+
+    // 1. The cut clone: unreachable in its fetch, retryable, the store made.
+    let store = Store::empty().with_env(&link.vars(&[]));
+    let args = ["--as", AGENT, "clone", &link.url, "--into", store.path()];
+    let failed = run(&args, &link.vars(&[(SSH_VAR, &cut)]));
+    let error = failed.err("E_REMOTE_UNREACHABLE");
+    assert_eq!(failed.exit(), 4, "{failed}");
+    assert_eq!(error["retryable"], true, "{failed}");
+    assert_eq!(error["details"]["created"], true, "{failed}");
+    assert_eq!(error["details"]["phase"], "fetch", "{failed}");
+
+    // 2. What the cut left: the remote recorded, no changeset, no main, nothing damaged.
+    let partial = store.info();
+    assert_eq!(partial["changesets"], 0, "{partial}");
+    assert_eq!(partial["refs"], 0, "{partial}");
+    let remotes = store.read(&["remote", "list"]).ok();
+    assert_eq!(remotes["remotes"][0]["name"], ORIGIN, "{remotes}");
+    store.assert_clean("after the cut clone");
+
+    // 3. The same clone again, uncut: the whole history, main at the served head.
+    let resumed = run(&args, &link.vars(&[])).ok();
+    assert_eq!(resumed["imported"], served.len(), "{resumed}");
+    assert_eq!(resumed["fetch"]["head"]["sha"], served[0].as_str());
+    assert_eq!(resumed["main"], resumed["fetch"]["head"]["changeset"]);
+    assert_eq!(store.info()["changesets"], served.len());
+
+    // 4. Once more: nothing new.
+    let again = run(&args, &link.vars(&[])).ok();
+    assert_eq!(again["imported"], 0, "{again}");
+    assert_eq!(again["main"], resumed["main"]);
+    store.assert_clean("after the resumed clone");
+    site.assert_clean();
+}
+
+/// A push whose client is killed after the served store applied it and before the answer came:
+/// the remote holds the change, moved once by the key's identity. The push run again finds the
+/// remote at its commit and sends nothing: `up_to_date`, with `old` the commit the client last
+/// knew and `new` the one the lost push made, its one `git push` sending no pack; run once more,
+/// `old` is `new`.
+#[cfg(unix)]
+#[test]
+fn a_killed_push_replays_on_a_served_store() {
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::process::ExitStatusExt as _;
+
+    let site = Site::new();
+    let link = site.ssh(ADA);
+    let store = link.cloned();
+    let before = site.main_head();
+    let known = site.history().remove(0);
+    let count = site.main_moves();
+    let change = land(&store, "killed.txt", "killed\n");
+
+    // 1. A stand-in that stays after a push's server ended, its stderr off the client's, so
+    //    that the client still waits and nobody holds the pipes the test reads once it is
+    //    killed; a fetch passes.
+    let dir = site.work.path().join("held");
+    fs::create_dir(&dir).expect("make the wrapper's directory");
+    let wrapper = dir.join("ssh");
+    let script = format!(
+        "#!/bin/sh\nexec 2>/dev/null\ncase \"$*\" in\n  \
+         *git-receive-pack*) exec {held} \"$@\" ;;\n  *) exec {plain} \"$@\" ;;\nesac\n",
+        held = site
+            .served
+            .ssh_command_with(ADA, SshFault::HoldAfterExit(HOLD)),
+        plain = site.served.ssh_command(ADA),
+    );
+    fs::write(&wrapper, script).expect("write the wrapper");
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).expect("make it runnable");
+    let ssh = format!("'{}'", path_text(&wrapper));
+
+    // 2. The push, killed once the served main moved.
+    let args = ["--repo", store.path(), "push", ORIGIN];
+    let mut push = Child::spawn(&mut swarmops(&args, &link.vars(&[(SSH_VAR, &ssh)])));
+    let deadline = Instant::now() + CHILD_TIMEOUT;
+    while site.main_head() == before {
+        assert!(Instant::now() < deadline, "the push never arrived");
+        std::thread::sleep(HOLD_POLL);
+    }
+    let kill = std::process::Command::new("kill")
+        .args(["-KILL", &push.id().to_string()])
+        .status()
+        .expect("run kill");
+    assert!(kill.success());
+    let (killed, _) = push.finish(Instant::now() + CHILD_TIMEOUT);
+    assert_eq!(killed.status.signal(), Some(SIGKILL), "{killed:?}");
+
+    // 3. Between the kill and the retry: the remote holds the change, moved once, by the key.
+    assert_eq!(site.main_moves(), count + 1);
+    let moved = site.newest_move();
+    assert_eq!(moved["old"], before.as_str(), "{moved}");
+    assert_eq!(moved["actor"], ADA, "{moved}");
+    let sent = site.oid(&moved["new"]);
+    assert_eq!(site.history()[..2], [text_of(&sent), known.clone()]);
+    site.assert_clean();
+
+    // 4. The push again: up to date from the commit it knew to the one the lost push made,
+    //    nothing written; its one git push brought the remote no pack.
+    let ledger = GitLedger::new(&site.git);
+    let counted = path_text(&ledger.program());
+    let again = run(&args, &link.vars(&[(GIT_VAR, &counted)])).ok();
+    assert_eq!(again["status"], "up_to_date", "{again}");
+    assert_eq!(again["old"], known.as_str(), "{again}");
+    assert_eq!(again["new"], sent, "{again}");
+    assert_eq!(again["head_changeset"], change.as_str(), "{again}");
+    assert_eq!(again["objects_written"], 0, "{again}");
+    let children = ledger.children();
+    let pushes = children.iter().filter(|child| child.subcommand == "push");
+    assert_eq!(pushes.count(), 1, "{children:?}");
+    let record = site.newest_record();
+    assert_eq!(record["service"], "push", "{record}");
+    assert_eq!(record["bytes"], 0, "{record}");
+    assert_eq!(record["exit"], 0, "{record}");
+
+    // 5. Nothing moved on the remote; once more, old is new.
+    assert_eq!(site.main_moves(), count + 1);
+    let settled = store.read(&["push", ORIGIN]).ok();
+    assert_eq!(settled["status"], "up_to_date", "{settled}");
+    assert_eq!(settled["old"], sent, "{settled}");
+    assert_eq!(settled["new"], sent, "{settled}");
+    store.assert_clean("after the replay");
+    site.assert_clean();
+}
+
+/// [`STORES`] stores and the served store's own agent each add changes, the stores syncing in
+/// turn: every store's export of `main` is then the served history, commit by commit and tree
+/// by tree, sound for `git fsck --strict`, and every store passes `verify --deep`. Changeset
+/// ids are each store's own and are not compared.
+#[test]
+fn every_store_exports_the_same_ids() {
+    let site = Site::new();
+    let base = site.history().len();
+    let keys = [ADA, CAROL];
+    let links: Vec<Link> = (0..STORES).map(|n| site.ssh(keys[n % 2])).collect();
+    let stores: Vec<Store> = links.iter().map(Link::cloned).collect();
+
+    // 1. Each store lands a change and syncs it, the served store landing its own between: a
+    //    later store's change is landed again onto what the others published.
+    let mut paths = Vec::new();
+    for (n, store) in stores.iter().enumerate() {
+        let (ours, theirs) = (format!("stores/{n}.txt"), format!("served/{n}.txt"));
+        land(store, &ours, "ours\n");
+        let synced = on(store, &["sync", ORIGIN]).ok();
+        assert_eq!(synced["status"], "pushed", "store {n}: {synced}");
+        site.land(&theirs, "theirs\n");
+        paths.extend([ours, theirs]);
+    }
+
+    // 2. Each store takes what the others published.
+    for (n, store) in stores.iter().enumerate() {
+        let synced = on(store, &["sync", ORIGIN]).ok();
+        assert_eq!(synced["status"], "fast_forwarded", "store {n}: {synced}");
+    }
+    let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
+    assert_each_once(&site, base, &paths, "every store synced");
+
+    // 3. Each export of main is the served history, by commit and tree.
+    let history = "--format=%H %T";
+    let expected = site.served_git(&["log", history, "main"]);
+    for (n, store) in stores.iter().enumerate() {
+        let export = exported(&site, store, site.work.path(), &format!("export-{n}.git"));
+        let ours = git_in(&site.served, &export, &["log", history, "main"]);
+        assert_eq!(ours, expected, "store {n}");
+        git_in(
+            &site.served,
+            &export,
+            &["fsck", "--strict", "--no-dangling"],
+        );
+        store.assert_clean(&format!("store {n}"));
+    }
     site.assert_clean();
 }
