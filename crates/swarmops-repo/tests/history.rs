@@ -631,7 +631,7 @@ fn p50(mut f: impl FnMut()) -> Duration {
 #[cfg(feature = "test-hooks")]
 mod crafted_skip_lists {
     use swarmops_repo::{RepoError, VerifyProblem};
-    use swarmops_store::DerivedSlot;
+    use swarmops_store::{DerivedSlot, StoreError};
 
     use super::*;
 
@@ -717,6 +717,109 @@ mod crafted_skip_lists {
             }
             other => panic!("{what}: expected DerivedCorrupt, got {other:?}"),
         }
+    }
+
+    /// Writes generation `now` over record `record`'s in `idx/gen.col`, after checking that it is
+    /// `was`: the records are in commit order, `c`'s then `s`'s. Only a record the checkpoint
+    /// covers is read from there (the store checkpoints every 32 frames): the first 32 of `c`.
+    fn set_generation(root: &Utf8Path, record: usize, was: u64, now: u64) {
+        let file = layout_of(root).meta_path("idx/gen.col");
+        let mut content = fs::read(&file).unwrap();
+        let place = 8 * record..8 * record + 8;
+        assert_eq!(
+            content[place.clone()],
+            was.to_le_bytes(),
+            "gen.col at {record}"
+        );
+        content[place].copy_from_slice(&now.to_le_bytes());
+        fs::write(&file, content).unwrap();
+    }
+
+    /// Asserts that `got` blames the index (`IndexCorrupt`), not a skip list.
+    #[track_caller]
+    fn index_corrupt<T: std::fmt::Debug>(got: Result<T, RepoError>, what: &str) {
+        match got {
+            Err(RepoError::Store(StoreError::IndexCorrupt { .. })) => {}
+            other => panic!("{what}: expected IndexCorrupt, got {other:?}"),
+        }
+    }
+
+    /// A generation of 0, below every root's 1, is refused where a merge base's walk starts, on
+    /// either side, stepping or lifting: by it the other side would walk down past its root and
+    /// the answer would be no merge base, where the two chains share `c[3]`.
+    #[test]
+    fn merge_base_refuses_a_zero_generation() {
+        let lists = Lists::derived();
+        let (c, s) = (&lists.c, &lists.s);
+        let read = lists.repo.snapshot().unwrap();
+        assert_eq!(read.merge_base(c[5], s[2]).unwrap(), Some(c[3]));
+
+        // c[5]'s generation (record 5) 6 to 0.
+        set_generation(&lists.root, 5, 6, 0);
+        let read = lists.repo.snapshot().unwrap();
+        index_corrupt(read.merge_base(c[5], s[2]), "a zero on the first side");
+        index_corrupt(read.merge_base(s[2], c[5]), "a zero on the second side");
+        let lifted = read.merge_base_with_skip_after(s[2], c[5], 0);
+        index_corrupt(lifted, "a zero the other side lifts toward");
+
+        // The true generation back: the walk agrees with the chains again.
+        set_generation(&lists.root, 5, 0, 6);
+        let read = lists.repo.snapshot().unwrap();
+        assert_eq!(read.merge_base(c[5], s[2]).unwrap(), Some(c[3]));
+    }
+
+    /// A true list with more entries than a lowered generation leaves room for blames the index,
+    /// not the list: `c[20]`'s five entries (the last 16 steps back) need a generation over 16,
+    /// and its record says 5, which its parent's 20 contradicts. The walk asks for fewer steps
+    /// than that 5, so that it reads the list rather than answer from the generation.
+    #[test]
+    fn checked_list_checks_the_room_path() {
+        let lists = Lists::derived();
+        let at = lists.c[20];
+
+        // c[20]'s generation (record 20) 21 to 5.
+        set_generation(&lists.root, 20, 21, 5);
+        let read = lists.repo.snapshot().unwrap();
+        let walked = read.ancestor_with_skip_after(at, 3, 0);
+        index_corrupt(walked, "a list too long for a wrong generation");
+
+        // With the true generation the same list has room.
+        set_generation(&lists.root, 20, 5, 21);
+        let read = lists.repo.snapshot().unwrap();
+        let walked = read.ancestor_with_skip_after(at, 3, 0).unwrap();
+        assert_eq!(walked, Some(lists.c[17]));
+    }
+
+    /// A jump that lands less than `2^level` generations down for a wrong generation blames the
+    /// index, not the list, whichever end of the jump is wrong: `c[20]`'s entry 4 names `c[4]`,
+    /// 16 generations down (21 to 5). Lowered to 18, `c[20]`'s generation leaves room for its
+    /// list but not for that jump; raised to 6, `c[4]`'s is too high for it, and `c[20]`'s own
+    /// checks out. Both an `ancestor` of 16 steps and a lift of `is_ancestor` make that jump first.
+    #[test]
+    fn lift_checks_the_lower_path() {
+        let lists = Lists::derived();
+        let c = &lists.c;
+
+        // (record, true generation, crafted one, which end of the jump it is)
+        let cases = [
+            (20, 21, 18, "where the jump starts"),
+            (4, 5, 6, "where the jump lands"),
+        ];
+        for (record, was, now, what) in cases {
+            set_generation(&lists.root, record, was, now);
+            let read = lists.repo.snapshot().unwrap();
+            let jumped = read.ancestor_with_skip_after(c[20], 16, 0);
+            index_corrupt(jumped, &format!("ancestor, {what}"));
+            let lifted = read.is_ancestor_with_skip_after(c[0], c[20], 0);
+            index_corrupt(lifted, &format!("a lift, {what}"));
+            set_generation(&lists.root, record, now, was);
+        }
+
+        // The true generations back: the same jumps pass.
+        let read = lists.repo.snapshot().unwrap();
+        let jumped = read.ancestor_with_skip_after(c[20], 16, 0).unwrap();
+        assert_eq!(jumped, Some(c[4]));
+        assert!(read.is_ancestor_with_skip_after(c[0], c[20], 0).unwrap());
     }
 
     /// A list placed for `c[40]` (or `c[2]`) that a walk's checks find wrong is `DerivedCorrupt`,
