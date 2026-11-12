@@ -10,7 +10,8 @@
 //! --locked --release -p swarmops-cli --run-ignored ignored-only --test all -E
 //! 'test(/^contention::/)' --no-capture`.
 //! [`COMMITS_VAR`] sets how many commits each child makes, for a quick check of the harness;
-//! [`CHILDREN_VAR`] how many children run (50 for G1's upper bound).
+//! [`CHILDREN_VAR`] how many children run (50 for G1's upper bound), a count other than the
+//! name's that the summary's first line then names.
 //! [`PUBLISH_VAR`] makes each child publish every commit on a ref of its own, in one transaction
 //! (`commit --advance`) or in two (`commit`, then `ref set`), and the summary then gives the
 //! journal frames, so the lock passes, each publish took (docs/perf.md, "M1.6 — publishes").
@@ -373,6 +374,18 @@ fn a_commit_run_is_filed_by_its_envelope() {
         };
         assert_eq!((got, elapsed_ms), (cause, ms), "{envelope}");
     }
+}
+
+/// The count the measurement runs by default is the one its name gives; another, set through
+/// [`CHILDREN_VAR`] (`just perf` also runs 50), is named on the summary's first line.
+#[test]
+fn a_count_other_than_the_tests_name_is_named() {
+    assert_eq!(CHILDREN, 32, "{TEST} runs the count its name gives");
+    assert_eq!(count_note(CHILDREN), "");
+
+    let other = count_note(50);
+    assert!(other.contains(&format!("{CHILDREN_VAR}=50")), "{other}");
+    assert!(other.contains(TEST), "{other}");
 }
 
 /// A finished run of `commit` that exited with `code` and printed `envelope`, made up.
@@ -1137,8 +1150,9 @@ fn print_contention(
     };
     println!(
         "{SUMMARY}{} children x {commits} commits of one small file each, each child on \
-         its own chain (--parent its previous changeset){how}",
-        child_count()
+         its own chain (--parent its previous changeset){how}{}",
+        child_count(),
+        count_note(child_count())
     );
     println!(
         "{SUMMARY}load (1-minute average): {before:.2} before, {low:.2}-{high:.2} during, \
@@ -1406,6 +1420,15 @@ fn base_dir() -> PathBuf {
     );
     fs::create_dir_all(&dir).expect("create the bench base dir");
     dir
+}
+
+/// What the summary adds when `count` children ran instead of the [`CHILDREN`] that [`TEST`]
+/// names, so that a log of `just perf`'s 50-process run does not read as 32.
+fn count_note(count: usize) -> String {
+    if count == CHILDREN {
+        return String::new();
+    }
+    format!(" ({CHILDREN_VAR}={count}; {TEST} runs {CHILDREN} by default)")
 }
 
 /// How many children commit at once: [`CHILDREN`], or what [`CHILDREN_VAR`] says.
