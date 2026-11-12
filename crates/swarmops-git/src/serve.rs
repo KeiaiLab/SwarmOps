@@ -1,7 +1,7 @@
-//! The git side of `swarmops serve` (M14 design §0): the serving repository `<store>/git/serve.git`
-//! that host git's `upload-pack`, `receive-pack` and `http-backend` run on, the map between store
-//! refs and git refs, git's pkt-line and `proc-receive` codecs, and the land key of a push to
-//! `refs/land/<target>`.
+//! The git side of `swarmops serve` (the M14 serve design's decision summary): the serving
+//! repository `<store>/git/serve.git` that host git's `upload-pack`, `receive-pack` and
+//! `http-backend` run on, the map between store refs and git refs, git's pkt-line and
+//! `proc-receive` codecs, and the land key of a push to `refs/land/<target>`.
 //!
 //! ```text
 //! swarmops-ops serve ──▶ repo (serve.git, its lock and hook) ──▶ child (host git, one builder)
@@ -11,9 +11,8 @@
 //!                    └─▶ pack_key (the pack cache's key and digest)
 //! ```
 //!
-//! The contracts are frozen here; each module's body comes with the M14 plan's task that owns it,
-//! and until then answers [`repo::ServeError::NotBuilt`] (or, where it returns no error, a value
-//! that serves nothing).
+//! Every module is built. [`repo::ServeError::NotBuilt`] stays in the contract, but no module
+//! returns it.
 
 pub mod child;
 pub mod land_key;

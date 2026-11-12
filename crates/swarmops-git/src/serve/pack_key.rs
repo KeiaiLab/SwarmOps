@@ -1,6 +1,7 @@
-//! The key and the digest of `serve`'s pack cache (the M17 design §5): a BLAKE3 hash of what
-//! `upload-pack` asked its `pack-objects` for, so that identical requests share one pack, and a
-//! BLAKE3 hash of an entry's pack, which its header carries.
+//! The key and the digest of `serve`'s pack cache (the M17 serve-load design, one pack per
+//! identical read): a BLAKE3 hash of what `upload-pack` asked its `pack-objects` for, so that
+//! identical requests share one pack, and a BLAKE3 hash of an entry's pack, which its header
+//! carries.
 //!
 //! ```text
 //! BLAKE3("swarmops:serve-pack:v2\0" ‖ part(git identity) ‖ count(args) ‖ part(arg)… ‖ part(stdin))
@@ -10,7 +11,7 @@
 //! A cache key outside the store's format, never its hash contract: the parts are framed by
 //! their lengths, so no two requests share a key, and a change of them is a new domain. Version
 //! 1's first part was `git --version`'s line; version 2's names the binary without running it
-//! (the M17 closure design §3.2), and version 1's entries leave by the cache's bound.
+//! (the M17 closure design's G19 decision), and version 1's entries leave by the cache's bound.
 
 use std::io::{self, Read};
 
