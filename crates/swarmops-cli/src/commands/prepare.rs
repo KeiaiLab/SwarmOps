@@ -11,24 +11,26 @@
 //!
 //! Before the spawn, `serve.lock` is tried once without waiting (the M17 closure design §3.4):
 //! held, `git/serve.dirty` is marked for its holder, which runs again, and nothing is spawned.
+//! Only the lock file is tried: `serve.git` is neither opened nor repaired here, which could
+//! wait for the lock.
 //!
 //! The run is its own process group, its stdin, stdout and stderr null, and nobody waits for it.
 //! A spawn that fails is ignored, and so is the run's own failure: the next connection refreshes
 //! as before. Neither changes the operation's envelope or exit code.
 
 use std::os::unix::process::CommandExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command as Process, Stdio};
 
 use camino::Utf8Path;
-use swarmops_ops::serve::prepare::{Claim, claim, serve_repo};
+use swarmops_ops::serve::prepare::{Claim, claim};
 
 use crate::cli::{Command, GitCommand};
 
 /// The operations after which `serve.git` is prepared, and when they move a ref. `fetch` counts
 /// on every success: its record names what it resolved, not what moved, and a preparation finds
 /// a store that did not move current at once.
-pub(crate) const PREPARE_AFTER: [(&str, Moves); 9] = [
+pub(crate) const PREPARE_AFTER: [(&str, Moves); 10] = [
     ("land", Moves::Always),
     ("commit", Moves::WithAdvance),
     ("ref_set", Moves::Always),
@@ -38,7 +40,11 @@ pub(crate) const PREPARE_AFTER: [(&str, Moves); 9] = [
     ("fetch", Moves::Always),
     ("git_import", Moves::Always),
     ("ws_land", Moves::Always),
+    ("revert", Moves::Always),
 ];
+
+/// The branch whose imported tip a seed fetches: a `git import` into another ref seeds nothing.
+const MAIN: &str = "main";
 
 /// The file in a store's root without which nobody is served (ops' `serve::access`): a store
 /// without it gets no preparation.
@@ -67,7 +73,7 @@ pub(crate) enum Advance {
 pub(crate) struct After {
     /// The store, as the user named it: the run starts in this process's directory.
     store: String,
-    /// The repository a `git import` read, the run's `--seed-from`.
+    /// The repository a `git import` into `main` read, the run's `--seed-from`.
     seed: Option<String>,
 }
 
@@ -95,10 +101,10 @@ pub(crate) fn advance_of(command: &Command) -> Advance {
     }
 }
 
-/// The repository `command` imports from, when it is a `git import`.
+/// The repository `command` imports from, when it is a `git import` into `main`.
 pub(crate) fn seed_of(command: &Command) -> Option<String> {
     match command {
-        Command::Git(GitCommand::Import { path, .. }) => Some(path.clone()),
+        Command::Git(GitCommand::Import { path, into, .. }) if into == MAIN => Some(path.clone()),
         _ => None,
     }
 }
@@ -114,21 +120,13 @@ pub(crate) fn spawn(after: &After) -> Option<Child> {
 
     // 1b. One run per free serve.lock: a held one is marked for its holder. Any other outcome
     //     spawns as before, since the run itself marks or prepares.
-    if let Ok(repo) = serve_repo(Utf8Path::new(&after.store))
-        && matches!(claim(&repo), Ok(Claim::Marked))
-    {
+    if matches!(claim(Utf8Path::new(&after.store)), Ok(Claim::Marked)) {
         return None;
     }
 
     // 2. This program, as `serve --prepare` that gives up at once when serve.lock is held.
     let program = std::env::current_exe().ok()?;
-    let mut prepare = Process::new(program);
-    prepare
-        .args(["--repo", &after.store])
-        .args(["serve", "--prepare", "--prepare-wait", "zero"]);
-    if let Some(seed) = &after.seed {
-        prepare.args(["--seed-from", seed]);
-    }
+    let mut prepare = command(after, program);
 
     // 3. Detached: a process group of its own, no stdio a reader could wait on.
     prepare
@@ -138,6 +136,22 @@ pub(crate) fn spawn(after: &After) -> Option<Child> {
         .stderr(Stdio::null())
         .spawn()
         .ok()
+}
+
+/// `program serve --prepare --prepare-wait zero` on `after`'s store, seeded as it says. Each
+/// path is one argument (`--repo=<store>`): one that starts with `-` is no option.
+fn command(after: &After, program: PathBuf) -> Process {
+    let mut prepare = Process::new(program);
+    prepare.arg(format!("--repo={}", after.store)).args([
+        "serve",
+        "--prepare",
+        "--prepare-wait",
+        "zero",
+    ]);
+    if let Some(seed) = &after.seed {
+        prepare.arg(format!("--seed-from={seed}"));
+    }
+    prepare
 }
 
 #[cfg(test)]
@@ -151,6 +165,10 @@ mod tests {
 
     /// The mark a preparation that found `serve.lock` held leaves, in the store's root.
     const SERVE_DIRTY: &str = "git/serve.dirty";
+
+    /// `serve.git`'s marker and `serve.lock`, in the store's root.
+    const SERVE_MARKER: &str = "git/SERVE";
+    const SERVE_LOCK: &str = "git/serve.lock";
 
     /// A held `serve.lock` spawns nothing and leaves the mark for its holder (closure design
     /// §3.4, I6); a free one spawns the run.
@@ -174,8 +192,81 @@ mod tests {
         child.wait().expect("reap the run");
     }
 
-    /// The direction design's list, with `git import` and `ws land` (the M17 design §10, D3);
-    /// a commit only with `--advance`, and no read.
+    /// A `serve.git` that is not sound, its `serve.lock` held: the mark at once, no wait for
+    /// the lock to repair it, and no run.
+    #[test]
+    fn an_unsound_repo_held_is_marked_at_once() {
+        // 1. A served store whose serve.git lost its marker, serve.lock held.
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let root = Utf8Path::from_path(dir.path()).expect("a UTF-8 temp dir");
+        fs::write(root.join(ACCESS_FILE), "").expect("write access.toml");
+        let repo = ServeRepo::open(root).expect("open serve.git");
+        fs::remove_file(root.join(SERVE_MARKER)).expect("remove the marker");
+        let held = repo.lock(Duration::ZERO).expect("take serve.lock");
+
+        // 2. No child, the mark there.
+        let after = After::new(root.to_string(), None);
+        assert!(
+            spawn(&after).is_none(),
+            "an unsound serve.git spawned a run"
+        );
+        assert!(root.join(SERVE_DIRTY).is_file(), "no serve.dirty left");
+        drop(held);
+    }
+
+    /// A `serve.lock` that cannot be tried spawns the run, which reports for itself.
+    #[test]
+    fn a_lock_that_fails_spawns() {
+        // 1. A served store whose serve.lock is a directory.
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let root = Utf8Path::from_path(dir.path()).expect("a UTF-8 temp dir");
+        fs::write(root.join(ACCESS_FILE), "").expect("write access.toml");
+        fs::create_dir_all(root.join(SERVE_LOCK)).expect("serve.lock as a directory");
+
+        // 2. A child, reaped here (the test harness rejects its arguments and ends).
+        let after = After::new(root.to_string(), None);
+        let mut child = spawn(&after).expect("a failed lock spawned no run");
+        child.wait().expect("reap the run");
+    }
+
+    /// The store and the seed each one argument, `--option=value`: a path that starts with `-`
+    /// is no option of the run.
+    #[test]
+    fn each_option_is_one_argument() {
+        let after = After::new("-store".to_owned(), Some("-source".to_owned()));
+        let prepare = command(&after, PathBuf::from("swarmops"));
+        let args: Vec<_> = prepare.get_args().collect();
+        let want = [
+            "--repo=-store",
+            "serve",
+            "--prepare",
+            "--prepare-wait",
+            "zero",
+            "--seed-from=-source",
+        ];
+        assert_eq!(args, want);
+    }
+
+    /// A `git import` seeds the preparation only when it moved `main`: the seed fetches
+    /// `main`'s imported tip.
+    #[test]
+    fn an_import_seeds_only_main() {
+        let import = |into: &str| {
+            Command::Git(GitCommand::Import {
+                path: "source".to_owned(),
+                git_ref: "HEAD".to_owned(),
+                into: into.to_owned(),
+                lossy: Vec::new(),
+                gitlinks: None,
+            })
+        };
+        assert_eq!(seed_of(&import("main")), Some("source".to_owned()));
+        assert_eq!(seed_of(&import("feature/x")), None);
+        assert_eq!(seed_of(&import("tags/v1")), None);
+    }
+
+    /// The direction design's list, with `git import`, `ws land` (the M17 design §10, D3) and
+    /// `revert`, which lands; a commit only with `--advance`, and no read.
     #[test]
     fn the_ref_moves_are_prepared_after() {
         for op in [
@@ -187,6 +278,7 @@ mod tests {
             "fetch",
             "git_import",
             "ws_land",
+            "revert",
         ] {
             assert!(wanted(op, Advance::Not), "{op}");
         }

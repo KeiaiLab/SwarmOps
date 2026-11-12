@@ -24,7 +24,7 @@
 //! connection one slow path, never a wrong advertisement: the connection's own freshness check
 //! decides what it advertises. Between rounds, connections and pushes take `serve.lock`.
 
-use std::fs::OpenOptions;
+use std::fs::{OpenOptions, TryLockError};
 use std::io;
 use std::time::Duration;
 
@@ -45,6 +45,10 @@ use crate::error;
 
 /// The mark a preparation that found `serve.lock` held leaves for its holder, in `git/`.
 const DIRTY_FILE: &str = "serve.dirty";
+
+/// The store's git directory, and the lock of its serving repository in it.
+const GIT_DIR: &str = "git";
+const LOCK_FILE: &str = "serve.lock";
 
 /// The warning of a seed whose objects could not be fetched.
 const SEED_FAILED: &str = "seed_failed";
@@ -109,19 +113,30 @@ pub enum Claim {
     Marked,
 }
 
-/// Tries `serve.lock` of `repo` once, without waiting: held, the mark is left for its holder
-/// ([`Claim::Marked`]); free, it is let go again ([`Claim::Free`]).
-pub fn claim(repo: &ServeRepo) -> Result<Claim, OpError> {
-    match repo.lock(Duration::ZERO) {
-        Ok(lock) => {
-            drop(lock);
-            Ok(Claim::Free)
-        }
-        Err(ServeError::Busy) => {
-            mark_dirty(repo).map_err(|e| io_error(DIRTY_FILE, &e))?;
+/// Tries `serve.lock` of the store at `root` once, without waiting, and without opening
+/// `serve.git` (which waits for the lock to make or repair it): held, the mark is left for its
+/// holder ([`Claim::Marked`]); free, or not made yet, it is let go again ([`Claim::Free`]).
+pub fn claim(root: &Utf8Path) -> Result<Claim, OpError> {
+    // 1. The lock file; none yet is a free lock, which the preparation makes.
+    let git = root.join(GIT_DIR);
+    let opened = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(git.join(LOCK_FILE).as_std_path());
+    let file = match opened {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Claim::Free),
+        Err(e) => return Err(io_error(LOCK_FILE, &e)),
+    };
+
+    // 2. Tried once: free, let go when the file closes; held, the mark.
+    match file.try_lock() {
+        Ok(()) => Ok(Claim::Free),
+        Err(TryLockError::WouldBlock) => {
+            mark(&git.join(DIRTY_FILE)).map_err(|e| io_error(DIRTY_FILE, &e))?;
             Ok(Claim::Marked)
         }
-        Err(e) => Err(serve_error(e)),
+        Err(TryLockError::Error(e)) => Err(io_error(LOCK_FILE, &e)),
     }
 }
 
@@ -296,10 +311,15 @@ fn dirty_file(repo: &ServeRepo) -> Utf8PathBuf {
 
 /// Leaves the mark, unsynced: one already there is enough.
 fn mark_dirty(repo: &ServeRepo) -> io::Result<()> {
+    mark(&dirty_file(repo))
+}
+
+/// Makes the mark `file`, unsynced: one already there is enough.
+fn mark(file: &Utf8Path) -> io::Result<()> {
     let made = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(dirty_file(repo).as_std_path());
+        .open(file.as_std_path());
     match made {
         Err(e) if e.kind() != io::ErrorKind::AlreadyExists => Err(e),
         _ => Ok(()),
@@ -339,21 +359,26 @@ mod tests {
     use crate::LocalOps;
 
     /// `claim` finds a free `serve.lock` free and leaves it so, with no mark; a held one it
-    /// marks for its holder.
+    /// marks for its holder. A store whose `serve.git` is not made yet is free, and stays
+    /// without one.
     #[test]
     fn claim_marks_a_held_lock() {
         let dir = tempfile::tempdir().expect("a temp dir");
         let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).expect("UTF-8");
         LocalOps::init_as(&root, "acme", Some(2)).expect("init");
+
+        // 1. Not made yet: free, and still not made.
+        assert_eq!(claim(&root).expect("claim"), Claim::Free);
+        assert!(!root.join("git/serve.git").exists());
         let repo = serve_repo(&root).expect("open serve.git");
 
-        // 1. Free: no mark, and the lock free again.
-        assert_eq!(claim(&repo).expect("claim"), Claim::Free);
+        // 2. Free: no mark, and the lock free again.
+        assert_eq!(claim(&root).expect("claim"), Claim::Free);
         assert!(!dirty(&repo));
         let held = repo.lock(Duration::ZERO).expect("serve.lock free again");
 
-        // 2. Held: the mark.
-        assert_eq!(claim(&repo).expect("claim"), Claim::Marked);
+        // 3. Held: the mark.
+        assert_eq!(claim(&root).expect("claim"), Claim::Marked);
         assert!(dirty(&repo));
         drop(held);
     }
