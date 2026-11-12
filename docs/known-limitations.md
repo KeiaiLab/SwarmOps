@@ -44,8 +44,8 @@ left).
   the library the binary calls, not the binary; the readers run on the writer's host, so they read
   frames the page cache holds before their fdatasync, which only a power loss can take back; no
   image covers a check result or an approval (neither exists yet); and the recorded run is
-  short (its journal ends at 2,016 B), so a cut at 4 KiB is in the model but never differs from
-  dropping there; only the slow variant's bulk frame (1,025 changeset records, about 76 KB) reaches
+  short (its journal ends at 2,460 B on FORMAT 1 and 2,732 B on FORMAT 2, 17 frames), so a cut
+  at 4 KiB is in the model but never differs from dropping there; only the slow variant's bulk frame (1,025 changeset records, about 76 KB) reaches
   past a 4 KiB boundary. *Unscheduled. Found: M1 Task 6; final review, question 11; narrowed by M1.5
   Task 3, M1.6 Task 4, M6 Task K1, M16 Task S2 and M18 (revert, group land).*
 - **A reader can get `E_IO` after such a cut.** A snapshot that counted the records a writer
