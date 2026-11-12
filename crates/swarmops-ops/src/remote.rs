@@ -888,7 +888,7 @@ mod tests {
             ),
             (
                 "https://user@h.example/a@b".to_owned(),
-                "https://user@h.example/a@b",
+                "https://***@h.example/a@b",
             ),
             ("git@h.example:r.git".to_owned(), "git@h.example:r.git"),
         ];
