@@ -3,32 +3,8 @@
 //   docs/guides/install.md   git log -1 --format=%cs -- docs/guides/install.md   -> 2026-11-07
 //   docs/new-page.md         not tracked yet                                      -> ''
 //
-// A shallow clone would date every page by its one commit, so it fails the build instead.
-import { execFileSync } from 'node:child_process';
-import * as path from 'node:path';
-
-// The build runs in web/; git runs from the repository root, where the paths are relative to.
-const REPO_ROOT = path.resolve('..');
-
-const SHALLOW_ERROR = 'docs-meta: full history needed (fetch-depth: 0)';
-
-/** git's output for `args`, trimmed; throws when git exits non-zero. */
-function git(args: string[]): string {
-  return execFileSync('git', args, { cwd: REPO_ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-}
-
-let historyChecked = false;
-
-/** Fails the build in a shallow clone, once per build. */
-function requireHistory(): void {
-  if (historyChecked) {
-    return;
-  }
-  if (git(['rev-parse', '--is-shallow-repository']) === 'true') {
-    throw new Error(SHALLOW_ERROR);
-  }
-  historyChecked = true;
-}
+// A shallow clone would date every page by its one commit, so it fails the build (lib/git.ts).
+import { git, requireHistory } from './git';
 
 /** Whether git tracks the file. */
 function tracked(repoPath: string): boolean {
