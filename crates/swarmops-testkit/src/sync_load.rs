@@ -224,4 +224,16 @@ mod tests {
         assert!(lag_ratio(&series(600, |s| u64::from(s > 300))).is_infinite());
         assert!((lag_ratio(&[]) - 1.0).abs() < 1e-9);
     }
+
+    /// The two windows are each a minute, never the whole run: a series flat but for its last
+    /// minute reads that minute over the flat lag (2.0, not 1.1), one flat but for its first
+    /// minute the converse (0.5, not 0.55).
+    #[test]
+    fn lag_ratio_reads_one_minute_at_each_end() {
+        let late = lag_ratio(&series(600, |s| if s >= 540 { 14 } else { 7 }));
+        assert!((late - 2.0).abs() < 1e-9, "a late rise read {late}");
+
+        let early = lag_ratio(&series(600, |s| if s < 60 { 14 } else { 7 }));
+        assert!((early - 0.5).abs() < 1e-9, "an early fall read {early}");
+    }
 }
