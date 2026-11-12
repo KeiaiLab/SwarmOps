@@ -1,0 +1,17 @@
+{
+  "site_url": "https://swarmops.cc",
+  "stamp_path": "/now.json",
+  "deploy_interval_minutes": 60,
+  "release_max_days": 7,
+  "release_max_commits": 200,
+  "site_paths": [
+    "web/**",
+    "docs/**",
+    "CHANGELOG.md",
+    "scripts/install.sh",
+    "justfile",
+    ".github/workflows/site.yml",
+    ".github/freshness.json",
+    "docs/status/**"
+  ]
+}

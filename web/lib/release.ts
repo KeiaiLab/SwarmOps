@@ -1,8 +1,16 @@
-// The latest release, read from CHANGELOG.md when the site is built, so the pages never carry a
-// version by hand. The top `## [x.y.z] - YYYY-MM-DD` section is the latest release; Unreleased
-// is skipped.
+// The latest release, computed when the site is built, so the pages never carry a version by
+// hand: the newest `v*` tag reachable from the commit built, dated by its CHANGELOG.md section.
+//
+//   git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD   -> v0.11.0
+//   ## [0.11.0] - 2026-11-09                                -> date 2026-11-09
+//
+// Between a release commit and its tag the top section is not released yet; it counts as
+// Unreleased (UNRELEASED) until the tag exists.
 import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
+
+import { parseUnreleased, releaseSection, type UnreleasedGroup } from './facts';
+import { git, requireHistory } from './git';
 
 /** A released version and its date, as the changelog heads its section. */
 export interface Release {
@@ -17,25 +25,43 @@ export interface Release {
 // The build runs in web/; the changelog is at the repository root.
 const CHANGELOG = path.resolve('..', 'CHANGELOG.md');
 
-// `## [0.7.0] - 2026-10-29`, Keep a Changelog's heading of a released section.
-const RELEASED_HEADING = /^## \[(\d+\.\d+\.\d+)\] - (\d{4}-\d{2}-\d{2})\s*$/m;
+// `v0.11.0`, the tags release.yml publishes.
+const RELEASE_TAG = /^v(\d+\.\d+\.\d+)$/;
+const TAG_GLOB = 'v[0-9]*';
 const PRE_1_0 = '0.';
 
-function readLatest(): Release {
-  // 1. The first released heading; none fails the build rather than show a stale version.
-  const text = readFileSync(CHANGELOG, 'utf8');
-  const match = RELEASED_HEADING.exec(text);
-  if (!match) {
-    throw new Error(`${CHANGELOG}: no released section (## [x.y.z] - YYYY-MM-DD)`);
-  }
+/** The version (`0.11.0`) of the newest release tag reachable from HEAD; none fails the build. */
+function latestTag(): string {
+  // 1. Tags need the full history; a shallow clone fails here rather than find none.
+  requireHistory();
 
-  // 2. Version and date as written.
-  const [, version, date] = match;
+  // 2. The newest reachable tag, which must be a plain release version.
+  let tag: string;
+  try {
+    tag = git(['describe', '--tags', '--abbrev=0', '--match', TAG_GLOB, 'HEAD']);
+  } catch {
+    throw new Error(`release: no tag matching ${TAG_GLOB} reachable from HEAD (fetch the tags)`);
+  }
+  const match = RELEASE_TAG.exec(tag);
+  if (!match) {
+    throw new Error(`release: newest tag ${tag} is not v<x.y.z>`);
+  }
+  return match[1];
+}
+
+const TEXT = readFileSync(CHANGELOG, 'utf8');
+
+function readLatest(): Release {
+  // The tag gives the version; its CHANGELOG section gives the date, or the build fails.
+  const { version, date } = releaseSection(TEXT, latestTag());
   return { version, date, preRelease: version.startsWith(PRE_1_0) };
 }
 
-/** The top released section of CHANGELOG.md. */
+/** The newest release tag reachable from the commit built, dated by its CHANGELOG section. */
 export const LATEST_RELEASE: Release = readLatest();
+
+/** What no release tag holds yet: Unreleased plus any section above the tag's, grouped. */
+export const UNRELEASED: UnreleasedGroup[] = parseUnreleased(TEXT, LATEST_RELEASE.version);
 
 // GitHub's heading slug: lower case, punctuation but `-` dropped, each space a `-`.
 // `[0.11.0] - 2026-11-09` -> `0110---2026-11-09`.
