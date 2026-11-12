@@ -5,7 +5,8 @@
 //! 0 no memo key, main's head native? skipped (the export would walk the whole history)
 //! 1 serve.lock: Zero ─ busy ─▶ git/serve.dirty marked, done (the holder runs again)
 //!               Bounded ─ SERVE_LOCK_WAIT, then E_BUSY
-//! 2 Seed::GitDir: the imported tip's objects fetched from it, kept as a pack, no ref written
+//! 2 Seed::GitDir: the imported tip's objects fetched from it, kept as a pack, no ref written;
+//!   a fetch that fails is a warning, and the refresh exports instead
 //! 3 the refresh (gc --auto in it), serve.lock let go around its committed snapshot
 //!   after a seed's first round: one full repack with a bitmap, and a commit-graph layer
 //!   serve.lock let go at the round's end
@@ -44,6 +45,9 @@ use crate::error;
 
 /// The mark a preparation that found `serve.lock` held leaves for its holder, in `git/`.
 const DIRTY_FILE: &str = "serve.dirty";
+
+/// The warning of a seed whose objects could not be fetched.
+const SEED_FAILED: &str = "seed_failed";
 
 /// The branch whose head decides whether a preparation without the memo key exports, and whose
 /// imported tip a seed fetches.
@@ -167,14 +171,20 @@ pub fn prepare(
     };
 
     // 2. The seed's objects in serve.git, as a pack: the export finds every lossless commit
-    //    packed and writes none.
+    //    packed and writes none. A fetch that failed leaves the export to write them.
     if let (Seed::GitDir(source), Some(head)) = (seed, main)
         && let Some(tip) = imported_tip(&read, head)?
     {
-        let git = GitCli::find().map_err(git_error)?;
-        git.fetch_objects(repo.git_dir().as_std_path(), source.as_std_path(), tip)
-            .map_err(git_error)?;
-        prepared.seeded = 1;
+        let fetched = GitCli::find().and_then(|git| {
+            git.fetch_objects(repo.git_dir().as_std_path(), source.as_std_path(), tip)
+        });
+        match fetched {
+            Ok(()) => prepared.seeded = 1,
+            Err(e) => {
+                let failed = format!("{SEED_FAILED}: {}", git_error(e).message);
+                prepared.refreshed.warnings.push(failed);
+            }
+        }
     }
     drop(read);
 

@@ -72,6 +72,9 @@ const WRITABLE: u32 = 0o755;
 /// The mark a preparation that found `serve.lock` held leaves for its holder.
 const SERVE_DIRTY: &str = "git/serve.dirty";
 
+/// The warning of a preparation whose seed could not be fetched.
+const SEED_FAILED: &str = "seed_failed";
+
 /// How long a connection started during a preparation's first round waits for `serve.lock`:
 /// past that round's end on a loaded host, short of the writer lock wait a round that kept the
 /// lock would hold it for.
@@ -702,4 +705,25 @@ fn the_graph_is_written_once_a_run() {
     assert!(stand.acted());
     assert_eq!(stand.count(GRAPH_WRITE), 1, "{prepared}");
     assert!(site.current());
+}
+
+/// A seed the preparation cannot fetch from costs the seed only: the run still refreshes, and
+/// says why it seeded nothing, naming no host path.
+#[test]
+fn a_failed_seed_still_refreshes() {
+    // 1. A store never prepared, seeded from a directory that holds no repository.
+    let site = Site::new();
+    let nowhere = site.work.path().join("no-repository");
+    fs::create_dir(&nowhere).unwrap();
+    let (store, seed) = (site.store(), nowhere.to_str().unwrap().to_owned());
+    let line = ["--repo", &store, "serve", "--prepare", "--seed-from", &seed];
+    let prepared = support::run(&line, &[]).ok();
+
+    // 2. Refreshed, the seed's failure a warning.
+    assert_eq!(prepared["seeded"], 0, "{prepared}");
+    assert!(prepared["rounds"].as_u64().unwrap() >= 1, "{prepared}");
+    let warnings = prepared["warnings"].to_string();
+    assert!(warnings.contains(SEED_FAILED), "{prepared}");
+    assert!(!warnings.contains(&seed), "{prepared}");
+    assert!(site.current(), "{prepared}");
 }
