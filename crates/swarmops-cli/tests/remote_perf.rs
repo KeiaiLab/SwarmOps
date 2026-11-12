@@ -618,7 +618,7 @@ enum Opener {
 impl Opener {
     /// The side that opens round `n`: the binary on even rounds, git on odd ones.
     fn of(n: usize) -> Opener {
-        if n % 2 == 0 {
+        if n.is_multiple_of(2) {
             return Opener::Binary;
         }
         Opener::Git
