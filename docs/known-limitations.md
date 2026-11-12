@@ -985,6 +985,13 @@ left).
   writes, and the writes after it refuse the link, so nothing outside the workspace changes; the
   check can count the outside files as edits and refuse. *Unscheduled (the M16 design §1). Found:
   the 2026-11-01 completeness report (F8).*
+- **A write refused at a swapped link blocks the workspace until it is moved aside.** When an
+  update's write finds a directory or file below the root swapped meanwhile, it refuses with
+  `E_WS_DIRTY` naming that path, and its materialisation record stays. Every command that opens
+  the workspace finishes that record first, `ws status` and `ws discard` included, so each
+  answers the same `E_WS_DIRTY` until the path is moved aside; then the next command finishes
+  the update ([troubleshooting](troubleshooting.md#e_ws_dirty)). *Documented. Found: the M16
+  review (issue #26).*
 - **Other targets than Unix write a workspace's tree by full path.** The writes that refuse a
   swapped link use the Unix calls that open from a directory without following links. On Windows
   and the other targets the tree is written by full path after the check, as before M16: a

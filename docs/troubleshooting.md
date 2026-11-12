@@ -1332,6 +1332,13 @@ The workspace holds edits the operation would overwrite or lose, listed in `deta
 `ws land`), restore them (`ws discard <path>`), or, for `ws delete`, take `--rescue`, which keeps
 them as a changeset, or `--force`.
 
+When the hint says to move a path aside because it changed while a write went through it, an
+update met a directory or file swapped below the root, and its record stays. Every command in
+the workspace, `ws status` and `ws discard` included, finishes that record first and answers the
+same `E_WS_DIRTY` until the path is gone: move it out of the workspace (`mv <path> <elsewhere>`),
+then run any workspace command, which finishes the update
+([known limitations](known-limitations.md#workspaces)).
+
 ### `E_PATH_NOT_EMPTY`
 
 `ws create` writes only into a directory that is missing or empty. Give another `--path`.
