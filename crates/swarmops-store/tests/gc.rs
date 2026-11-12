@@ -426,6 +426,174 @@ fn gc_keeps_the_v3_poison_and_the_live_journal() {
     assert_eq!(store.read().unwrap().count_changesets().unwrap(), 1);
 }
 
+/// Every file at or under `rel` of `root`, by its path relative to `root`, with its bytes.
+#[cfg(feature = "test-hooks")]
+fn files_under(root: &Utf8Path, rel: &str) -> Vec<(String, Vec<u8>)> {
+    let mut files = Vec::new();
+    let mut stack = vec![root.join(rel)];
+    while let Some(dir) = stack.pop() {
+        for entry in dir.read_dir_utf8().unwrap() {
+            let path = entry.unwrap().into_path();
+            if fs::symlink_metadata(&path).unwrap().is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let rel = path.strip_prefix(root).unwrap().to_string();
+            files.push((rel, fs::read(&path).unwrap()));
+        }
+    }
+    files.sort();
+    files
+}
+
+/// The name of the kind and the path of each leftover, in the order listed.
+fn kinds(leftovers: &[Leftover]) -> Vec<(&'static str, String)> {
+    leftovers
+        .iter()
+        .map(|leftover| (leftover.kind.as_str(), leftover.rel.to_string()))
+        .collect()
+}
+
+/// The run the upgrade of [`store_of`]'s one changeset builds, which the manifest names.
+const NAMED_RUN: &str = "meta/sorted3/c-0000000000000000-0000000000000001.run";
+
+/// A run file the manifest does not name, and a run a step left in `tmp/`.
+const STRAY_RUN: &str = "meta/sorted3/c-0000000000000001-0000000000000002.run";
+const STRAY_TMP: &str = "meta/sorted3/tmp/c-0000000000000001-0000000000000002.run";
+
+/// In a FORMAT 3 store a run file the manifest does not name and a file of `meta/sorted3/tmp/`,
+/// older than the grace, are leftovers (`stale_run`): listed, so counted and shown by a dry
+/// run, and removed. A younger one, which a step in progress may hold, is kept, as are the
+/// manifest and the run it names whatever their age, and every run under a manifest that does
+/// not read (the FORMAT 3 design §3.3).
+#[test]
+fn stale_runs_are_listed_past_the_grace() {
+    // 1. Old and young strays beside the run the manifest names, itself old.
+    let (_dir, layout) = store_of(StoreFormat::V3);
+    let root = layout.root();
+    let young = [
+        "meta/sorted3/c-0000000000000002-0000000000000003.run",
+        "meta/sorted3/tmp/c-0000000000000002-0000000000000003.run",
+    ];
+    for stray in [STRAY_RUN, STRAY_TMP].into_iter().chain(young) {
+        write(root, stray, b"stray");
+    }
+    write(root, "meta/sorted3/notes", b"no run name");
+    for old in [
+        STRAY_RUN,
+        STRAY_TMP,
+        NAMED_RUN,
+        "meta/sorted3/MANIFEST",
+        "meta/sorted3/notes",
+    ] {
+        age(root, old, GC_TEMP_GRACE + STALE);
+    }
+
+    // 2. A manifest that does not read vouches for no run: none is a leftover.
+    let manifest = fs::read(root.join("meta/sorted3/MANIFEST")).unwrap();
+    fs::write(root.join("meta/sorted3/MANIFEST"), b"no manifest").unwrap();
+    assert_eq!(
+        kinds(&listed(&layout, &[])),
+        [("upgrade_residue", "meta/sorted".to_owned())]
+    );
+    fs::write(root.join("meta/sorted3/MANIFEST"), manifest).unwrap();
+
+    // 3. The old strays listed, each with its bytes, and removed; the rest kept.
+    let found = listed(&layout, &[]);
+    assert_eq!(
+        kinds(&found),
+        [
+            ("stale_run", STRAY_RUN.to_owned()),
+            ("stale_run", STRAY_TMP.to_owned()),
+            ("upgrade_residue", "meta/sorted".to_owned()),
+        ]
+    );
+    assert_eq!((found[0].bytes, found[1].bytes), (5, 5));
+    remove_all(&layout, &found);
+    for gone in [STRAY_RUN, STRAY_TMP, "meta/sorted"] {
+        assert!(!exists(root, gone), "{gone}");
+    }
+    for kept in young
+        .into_iter()
+        .chain([NAMED_RUN, "meta/sorted3/MANIFEST", "meta/sorted3/notes"])
+    {
+        assert!(exists(root, kept), "{kept}");
+    }
+    assert_eq!(kinds(&listed(&layout, &[])), []);
+    let store = MetaStore::open(root).unwrap();
+    assert_eq!(store.read().unwrap().count_changesets().unwrap(), 1);
+}
+
+/// A gc of a FORMAT 3 store whose removal fails part way reports the file it failed on, by its
+/// place in the store, and the next gc lists what is left and finishes. The manifest and the
+/// run it names are as they were after each: a gc that removed a run the manifest names would
+/// fail here.
+#[cfg(feature = "test-hooks")]
+#[test]
+fn gc_reports_and_resumes_after_a_failed_removal() {
+    use swarmops_store::{FailAt, FailAtFs, FailMode, InjectedError};
+
+    // 1. An upgraded store: the manifest names one run; beside it, a run it does not name and
+    //    a file a step left in tmp/, all past the grace.
+    let (_dir, layout) = store_of(StoreFormat::V3);
+    let root = layout.root();
+    for stray in [STRAY_RUN, STRAY_TMP] {
+        write(root, stray, b"stray");
+    }
+    for old in [STRAY_RUN, STRAY_TMP, NAMED_RUN] {
+        age(root, old, GC_TEMP_GRACE + STALE);
+    }
+    let live = |root: &Utf8Path| {
+        let mut files = files_under(root, "meta/sorted3");
+        files.retain(|(rel, _)| rel != STRAY_RUN && rel != STRAY_TMP);
+        files
+    };
+    let views = live(root);
+    assert_eq!(views.len(), 2, "the manifest and its run: {views:?}");
+
+    // 2. A file's removal is two calls, the remove and its directory's fsync: call 3 is the
+    //    removal of the file in tmp/.
+    let found = listed(&layout, &[]);
+    assert_eq!(
+        kinds(&found),
+        [
+            ("stale_run", STRAY_RUN.to_owned()),
+            ("stale_run", STRAY_TMP.to_owned()),
+            ("upgrade_residue", "meta/sorted".to_owned()),
+        ]
+    );
+    let fail = FailAt::new(3, FailMode::Once, InjectedError::Eio);
+    let failing: Arc<dyn FsOps> = Arc::new(FailAtFs::new(RealFs::new(), fail));
+    let fs = StoreFs::new(failing, root);
+    let cut = found
+        .iter()
+        .try_for_each(|leftover| gc::remove(&fs, leftover));
+
+    // 3. The report: the file, relative to the store's root; what came before it gone.
+    let Err(StoreError::Io(failure)) = &cut else {
+        panic!("{cut:?}");
+    };
+    assert_eq!(failure.file.as_deref(), Some(Utf8Path::new(STRAY_TMP)));
+    assert!(!exists(root, STRAY_RUN));
+    assert!(exists(root, STRAY_TMP));
+    assert_eq!(live(root), views);
+
+    // 4. The next gc lists what is left and finishes it.
+    let rest = listed(&layout, &[]);
+    assert_eq!(
+        kinds(&rest),
+        [
+            ("stale_run", STRAY_TMP.to_owned()),
+            ("upgrade_residue", "meta/sorted".to_owned()),
+        ]
+    );
+    remove_all(&layout, &rest);
+    assert_eq!(kinds(&listed(&layout, &[])), []);
+    assert_eq!(files_under(root, "meta/sorted3"), views);
+    let store = MetaStore::open(root).unwrap();
+    assert_eq!(store.read().unwrap().count_changesets().unwrap(), 1);
+}
+
 /// In a FORMAT 2 store, what an upgrade to FORMAT 3 that stopped before its poison wrote is
 /// residue, whole directories at once; once the poison is written (the next open finishes the
 /// upgrade) the same files are the store's next ones, and kept.

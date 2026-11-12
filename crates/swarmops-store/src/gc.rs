@@ -12,9 +12,10 @@
 //! FORMAT 3                     FORMAT 1's (if poisoned) and FORMAT 2's sorted views, `meta/sorted`
 //! ```
 //!
-//! The runs outside FORMAT 3's manifest and what `meta/sorted3/tmp/` holds are the view step's
-//! to remove, under `meta/views.lock`: gc steps after it released `meta/lock` (the FORMAT 3
-//! design §2.5 rules 1 and 7).
+//! The runs outside FORMAT 3's manifest and what `meta/sorted3/tmp/` holds are leftovers too once
+//! older than the grace, as temp files are: a step in progress holds only younger ones, so gc
+//! removes them without `meta/views.lock`. The younger ones are the view step's to remove, under
+//! that lock: gc steps after it released `meta/lock` (the FORMAT 3 design §2.5 rules 1 and 7).
 
 use std::fs::{self, Metadata};
 use std::io;
@@ -29,6 +30,7 @@ use crate::format::{self, StoreFormat, UPGRADE_POISON, UPGRADE_POISON_V3};
 use crate::fs_ops::{FsMethod, RealFs, StoreFs};
 use crate::layout::Layout;
 use crate::meta::frame::Fact;
+use crate::meta::runs::{self, Run};
 
 /// The directory of the store root in which a create stages `meta/` (storage spec §3).
 const STAGING: &str = "meta.tmp";
@@ -53,6 +55,10 @@ pub enum LeftoverKind {
     /// `meta/derived/<name>/<version>/` of a derivation this build registers, below its
     /// version.
     DerivedVersion,
+    /// A run file in `meta/sorted3/` that the manifest does not name, or a file in
+    /// `meta/sorted3/tmp/`, older than [`GC_TEMP_GRACE`]: what a view step that stopped part way
+    /// left.
+    StaleRun,
     /// A file of the format before an upgrade (`meta/journal.*`, `meta/refs/` in a FORMAT 2
     /// store, `meta/sorted/` in a FORMAT 3 one), or of an upgrade that stopped before its commit
     /// point.
@@ -61,13 +67,14 @@ pub enum LeftoverKind {
 
 impl LeftoverKind {
     /// Its name in the API (`GcCount.kind`): `object_temp`, `derived_temp`, `meta_staging`,
-    /// `derived_version` or `upgrade_residue`.
+    /// `derived_version`, `stale_run` or `upgrade_residue`.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ObjectTemp => "object_temp",
             Self::DerivedTemp => "derived_temp",
             Self::MetaStaging => "meta_staging",
             Self::DerivedVersion => "derived_version",
+            Self::StaleRun => "stale_run",
             Self::UpgradeResidue => "upgrade_residue",
         }
     }
@@ -133,8 +140,9 @@ pub fn list_leftovers_of(
         lister.versions(&layout.derived_dir().join(name), version, &mut found)?;
     }
 
-    // 4. What an upgrade left of the format it moved from, or of the one it did not reach.
-    lister.residue(layout, &mut found)?;
+    // 4. What an upgrade left of the format it moved from, or of the one it did not reach;
+    //    in FORMAT 3, the runs a view step left.
+    lister.residue(layout, now, &mut found)?;
 
     found.sort_by_key(|leftover| {
         (
@@ -240,8 +248,14 @@ impl Lister<'_> {
     /// Pushes an upgrade's residue (the module documentation's table): the files of the format
     /// before one whose poison is written, and those of the format after one that stopped
     /// before it. The format is the one `FORMAT` names (`layout`'s if there is none), not the one
-    /// the store was opened in: a concurrent open may have finished an upgrade since.
-    fn residue(&self, layout: &Layout, found: &mut Vec<Leftover>) -> Result<(), StoreError> {
+    /// the store was opened in: a concurrent open may have finished an upgrade since. In FORMAT 3
+    /// the stale runs with it ([`Lister::stale_runs`]).
+    fn residue(
+        &self,
+        layout: &Layout,
+        now: SystemTime,
+        found: &mut Vec<Leftover>,
+    ) -> Result<(), StoreError> {
         let format = if lstat(&self.fs, &layout.format_file())?.is_some() {
             format::read_format(layout, &self.fs)?
         } else {
@@ -277,7 +291,10 @@ impl Lister<'_> {
                 v3.features_file(),
                 v3.facts_col(),
             ]),
-            StoreFormat::V3 => paths.push(v3.meta_path(SORTED_V2)),
+            StoreFormat::V3 => {
+                paths.push(v3.meta_path(SORTED_V2));
+                self.stale_runs(&v3, now, found)?;
+            }
             _ => {}
         }
         for path in paths {
@@ -286,6 +303,43 @@ impl Lister<'_> {
             }
         }
         Ok(())
+    }
+
+    /// Pushes, of the FORMAT 3 store of `v3`, the run files of `meta/sorted3/` that the manifest
+    /// does not name and the files of `meta/sorted3/tmp/`, those older than the grace
+    /// ([`Lister::temps`]). A manifest that is missing or does not read vouches for no run: none
+    /// is pushed, and repair rebuilds the index.
+    ///
+    /// ```text
+    /// meta/sorted3/MANIFEST               kept
+    /// meta/sorted3/c-..-...run  named     kept, whatever its age
+    /// meta/sorted3/c-..-...run  unnamed   a leftover past the grace
+    /// meta/sorted3/tmp/*                  a leftover past the grace
+    /// ```
+    fn stale_runs(
+        &self,
+        v3: &Layout,
+        now: SystemTime,
+        found: &mut Vec<Leftover>,
+    ) -> Result<(), StoreError> {
+        // 1. The runs the manifest names.
+        let manifest = match runs::read_manifest(v3, &self.fs) {
+            Ok((_, manifest)) => manifest,
+            Err(StoreError::IndexCorrupt { .. }) => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        let live: Vec<String> = manifest.runs.iter().map(Run::name).collect();
+
+        // 2. The old run files outside it, then the old files of tmp/.
+        let dir = v3.views_dir();
+        let mut old = Vec::new();
+        self.temps(&dir, LeftoverKind::StaleRun, now, &mut old)?;
+        old.retain(|leftover| {
+            let name = leftover.rel.file_name().unwrap_or_default();
+            runs::is_run_name(name) && !live.iter().any(|run| run == name)
+        });
+        found.append(&mut old);
+        self.temps(&dir.join(runs::TMP), LeftoverKind::StaleRun, now, found)
     }
 
     /// Whether the file at `path` is a regular file holding `poison`, measured before it is
