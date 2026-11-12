@@ -350,6 +350,12 @@ mod nofollow {
     /// The mode a new directory asks for, before the umask.
     const NEW_DIR_MODE: u32 = 0o777;
 
+    /// A mode's permission bits as the platform's `mode_t` holds them: 32 bits on Linux, 16 on
+    /// macOS. Bits above the permission bits are dropped, never wrapped into them.
+    fn mode_bits(mode: u32) -> Mode {
+        Mode::from_bits_truncate(rustix::fs::RawMode::try_from(mode & 0o7777).unwrap_or(0o7777))
+    }
+
     /// What a walk does with a directory that is missing.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub(super) enum Missing {
@@ -388,7 +394,7 @@ mod nofollow {
         }
 
         // 2. Missing: made (or made meanwhile by another write), then opened.
-        match rustix::fs::mkdirat(dir, name, Mode::from_raw_mode(NEW_DIR_MODE)) {
+        match rustix::fs::mkdirat(dir, name, mode_bits(NEW_DIR_MODE)) {
             Ok(()) | Err(Errno::EXIST) => {}
             Err(e) => return Err(unopened(shown, e.into())),
         }
@@ -442,7 +448,7 @@ mod nofollow {
 
         // 2. Made new (`O_EXCL`, `O_NOFOLLOW`), written, renamed over the path in the same
         //    directory. No sync: the store holds the bytes durably.
-        let fd = rustix::fs::openat(&dir, temp.as_str(), TEMP_FLAGS, Mode::from_raw_mode(mode))?;
+        let fd = rustix::fs::openat(&dir, temp.as_str(), TEMP_FLAGS, mode_bits(mode))?;
         let mut file = std::fs::File::from(fd);
         io::Write::write_all(&mut file, bytes)?;
         drop(file);
@@ -507,7 +513,7 @@ mod nofollow {
         if !regular || stat.st_nlink != 1 {
             return Err(swapped(rel));
         }
-        rustix::fs::fchmod(&fd, Mode::from_raw_mode(mode))?;
+        rustix::fs::fchmod(&fd, mode_bits(mode))?;
         Ok(())
     }
 }

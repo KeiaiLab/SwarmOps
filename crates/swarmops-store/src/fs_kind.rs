@@ -1,6 +1,7 @@
 //! Which filesystems a store may live on (the M6 design §9): on Linux, an allow-list of the
 //! local filesystems whose fsync the store's durability rules rely on, read with `statfs`.
-//! A filesystem not on the list (NFS, SMB, FUSE, 9p among them) is refused, fail-closed.
+//! A filesystem not on the list (NFS, SMB, FUSE, 9p among them) is refused, fail-closed. On
+//! macOS the list is APFS and journaled HFS+, by the volume's type name (M12).
 
 use camino::Utf8Path;
 
@@ -44,7 +45,6 @@ pub fn classify(f_type: i64) -> FsClass {
 /// does not support. `path` is the store's root on open, and the nearest existing ancestor of
 /// the directory a create makes (a path not yet there is measured at its nearest ancestor).
 ///
-/// Other platforms keep their own checks, and every path passes here.
 #[cfg(target_os = "linux")]
 pub fn check_supported_fs(path: &Utf8Path) -> Result<(), StoreError> {
     // 1. The nearest ancestor that exists carries the filesystem the path will be on.
@@ -71,8 +71,58 @@ pub fn check_supported_fs(path: &Utf8Path) -> Result<(), StoreError> {
     }
 }
 
+/// Classifies a macOS volume by its `statfs` type name and whether its journal is on: APFS, and
+/// HFS+ with its journal (`MNT_JOURNALED`), are [`FsClass::Supported`]. Every other volume (SMB,
+/// NFS, AFP, WebDAV, FAT, exFAT, FUSE, devfs among them) is refused, fail-closed: a store there
+/// would fail later, at its first `F_FULLFSYNC`, or keep no promise of durability.
+pub fn classify_macos(fstypename: &[u8], journaled: bool) -> FsClass {
+    match fstypename {
+        b"apfs" => FsClass::Supported,
+        b"hfs" if journaled => FsClass::Supported,
+        _ => FsClass::Unsupported,
+    }
+}
+
+/// Refuses, with [`StoreError::UnsupportedFs`], a store at `path` on a volume the store does
+/// not support: on macOS, any volume but APFS and journaled HFS+ ([`classify_macos`]). `path`
+/// is measured at its nearest existing ancestor, and nothing is made.
+#[cfg(target_os = "macos")]
+pub fn check_supported_fs(path: &Utf8Path) -> Result<(), StoreError> {
+    use rustix::io::Errno;
+
+    let refused = || StoreError::UnsupportedFs(path.to_path_buf());
+
+    // 1. The nearest ancestor that exists carries the volume the path will be on.
+    let mut probe = path;
+    let stat = loop {
+        match rustix::fs::statfs(probe.as_std_path()) {
+            Ok(stat) => break stat,
+            Err(Errno::NOENT | Errno::NOTDIR) => {}
+            // Unreadable: not provably supported, so refused.
+            Err(_) => return Err(refused()),
+        }
+
+        match probe.parent() {
+            Some(parent) if !parent.as_str().is_empty() => probe = parent,
+            _ => return Err(refused()),
+        }
+    };
+
+    // 2. `f_fstypename` is a NUL-padded C string, such as "apfs\0\0…".
+    let name: Vec<u8> = (stat.f_fstypename.iter())
+        .map(|c| c.to_ne_bytes()[0])
+        .take_while(|&b| b != 0)
+        .collect();
+    let journaled = stat.f_flags & libc::MNT_JOURNALED.cast_unsigned() != 0;
+
+    match classify_macos(&name, journaled) {
+        FsClass::Supported => Ok(()),
+        FsClass::Unsupported => Err(refused()),
+    }
+}
+
 /// Other platforms keep their own checks, and every path passes here.
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn check_supported_fs(path: &Utf8Path) -> Result<(), StoreError> {
     let _ = path;
     Ok(())

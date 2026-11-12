@@ -84,7 +84,8 @@ fn remove_if_there(host: &dyn HostFs, root: &Utf8Path, rel: &str) -> io::Result<
     }
 }
 
-#[cfg(test)]
+// Linux only: what another system's volume holds depends on how it was formatted.
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use crate::hostfs::RealHost;

@@ -226,8 +226,22 @@ struct Dump {
     /// Its environment, `KEY=value` lines.
     env: Vec<String>,
     /// What its stdin was: `/dev/null`, or `pipe:[…]`.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "only the Linux test of the children's stdin reads it"
+        )
+    )]
     stdin_kind: String,
     /// What its stdin held.
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "only the Linux test of the children's stdin reads it"
+        )
+    )]
     stdin: String,
 }
 

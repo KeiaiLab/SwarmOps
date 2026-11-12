@@ -2,7 +2,7 @@
 
 use camino::Utf8Path;
 use swarmops_store::check_supported_fs;
-use swarmops_store::fs_kind::{FsClass, classify};
+use swarmops_store::fs_kind::{FsClass, classify, classify_macos};
 
 const ALLOWED: [(&str, i64); 7] = [
     ("ext2/3/4", 0xEF53),
@@ -63,4 +63,38 @@ fn a_filesystem_off_the_list_is_refused() {
         matches!(err, swarmops_store::StoreError::UnsupportedFs(_)),
         "{err:?}"
     );
+}
+
+/// macOS's list: APFS, and HFS+ only with its journal on. The name is matched whole.
+#[test]
+fn macos_accepts_apfs_and_journaled_hfs_only() {
+    assert_eq!(classify_macos(b"apfs", true), FsClass::Supported);
+    assert_eq!(classify_macos(b"apfs", false), FsClass::Supported);
+    assert_eq!(classify_macos(b"hfs", true), FsClass::Supported);
+    assert_eq!(classify_macos(b"hfs", false), FsClass::Unsupported);
+    for name in [
+        "smbfs", "nfs", "afpfs", "webdav", "msdos", "exfat", "macfuse", "devfs", "autofs", "apfs2",
+        "",
+    ] {
+        assert_eq!(
+            classify_macos(name.as_bytes(), true),
+            FsClass::Unsupported,
+            "{name}"
+        );
+    }
+}
+
+/// devfs under `/dev` is on no list: a store there is refused at its nearest existing
+/// directory, before anything is made.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_macos_volume_off_the_list_is_refused() {
+    for path in ["/dev", "/dev/swarmops-store/repo"] {
+        let err = check_supported_fs(Utf8Path::new(path)).unwrap_err();
+        assert!(
+            matches!(err, swarmops_store::StoreError::UnsupportedFs(_)),
+            "{path}: {err:?}"
+        );
+    }
+    assert!(!Utf8Path::new("/dev/swarmops-store").exists());
 }

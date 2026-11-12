@@ -35,7 +35,7 @@ thiserror.workspace = true
 zstd.workspace = true
 
 # The filesystem check reads `statfs` through a safe API.
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 rustix.workspace = true
 
 [dev-dependencies]
