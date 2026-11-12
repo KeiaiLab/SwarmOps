@@ -572,15 +572,44 @@ fn timed_ms(command: &mut std::process::Command) -> u32 {
     u32::try_from(took.as_millis()).expect("a small time")
 }
 
+/// Which side opens a round of [`phases`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Opener {
+    /// The binary's `fetch`, then git's.
+    Binary,
+    /// git's `fetch` and `gc --auto`, then the binary's.
+    Git,
+}
+
+impl Opener {
+    /// The side that opens round `n`: the binary on even rounds, git on odd ones.
+    fn of(n: usize) -> Opener {
+        if n % 2 == 0 {
+            return Opener::Binary;
+        }
+        Opener::Git
+    }
+}
+
+/// The sides take turns opening a round: a cache warmed by the first favours neither.
+#[test]
+fn rounds_alternate_their_opener() {
+    let openers: Vec<Opener> = (0..4).map(Opener::of).collect();
+    assert_eq!(
+        openers,
+        [Opener::Binary, Opener::Git, Opener::Binary, Opener::Git]
+    );
+}
+
 /// [`ROUNDS`] one-commit fetches on `store`, the remote's commits numbered from `first`: each
 /// round copies the mirror (`cp -a`), then times the binary's `fetch`, and `git fetch` and
-/// `git gc --auto` alone on the copy.
+/// `git gc --auto` alone on the copy, the side that goes first by [`Opener::of`].
 fn phases(remote: &Remote, store: &Store, first: usize) -> Phases {
     let mirror = Path::new(store.path()).join(MIRROR);
     let url = remote.url();
     let (mut so, mut fetch, mut gc) = (Vec::new(), Vec::new(), Vec::new());
-    for n in first..first + ROUNDS {
-        remote.commit(n);
+    for round in 0..ROUNDS {
+        remote.commit(first + round);
 
         // 1. The copy holds what the mirror held before the binary's fetch.
         let dir = tempfile::tempdir().expect("a temp dir");
@@ -589,14 +618,25 @@ fn phases(remote: &Remote, store: &Store, first: usize) -> Phases {
         cp.arg("-a").arg(&mirror).arg(&copy);
         succeed(&mut cp);
 
-        // 2. The binary's fetch, then git's two phases of it alone.
-        so.push(elapsed_ms(&remote.on(store, &["fetch", ORIGIN])));
+        // 2. The binary's fetch, and git's two phases of it alone on the copy, in turn.
         let mut args = FETCH_FLAGS.to_vec();
         args.push(url.as_str());
         args.extend(REFSPECS);
-        fetch.push(timed_ms(&mut git_on(remote, &copy, &args)));
         let auto = ["gc", "--auto", "--quiet"];
-        gc.push(timed_ms(&mut git_on(remote, &copy, &auto)));
+        let mut git = || {
+            fetch.push(timed_ms(&mut git_on(remote, &copy, &args)));
+            gc.push(timed_ms(&mut git_on(remote, &copy, &auto)));
+        };
+        match Opener::of(round) {
+            Opener::Binary => {
+                so.push(elapsed_ms(&remote.on(store, &["fetch", ORIGIN])));
+                git();
+            }
+            Opener::Git => {
+                git();
+                so.push(elapsed_ms(&remote.on(store, &["fetch", ORIGIN])));
+            }
+        }
     }
     Phases {
         so: median(so),
