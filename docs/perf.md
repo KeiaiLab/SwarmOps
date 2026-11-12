@@ -846,6 +846,16 @@ SWARMOPS_TEST_CLI_CONTENTION_ADVANCE=1 cargo nextest run --locked --release -p s
 
 with `=1`, and again with `=0`.
 
+M1.6's final gate did not run its two 32-process measurements (CLI
+`contention::thirty_two_processes_thousand_commits_each`, store
+`contention::thirty_two_processes_thousand_transactions_each`), so their no-`E_BUSY` assertions
+were not part of it. Both ran later: in "v0.1.0 — `just perf` in a quiet window", `Busy` and
+`E_BUSY` 0 of 32,000 at both levels; in "v0.5.0", `E_BUSY` 0 at 32 and 50 processes. Of M1.6's
+quiet-window measurements, the compaction bench at 100k and 1M ran in v0.1.0's `just perf`; still
+owed are the store-level 32 × 1,000 runs at 0 and 4 object syncs a transaction
+(`SWARMOPS_TEST_CONTENTION_OBJECT_SYNCS`, with the `fdatasync` probe at both ends) and the publish
+pair above.
+
 ## M4 — a land's incremental re-merge (not measured yet)
 
 A land that loses its race re-merges incrementally (operations spec §3 (g)): what it merged
@@ -905,6 +915,17 @@ scans an empty and a full (1,024-record) unsorted tail, 100 first-parent steps b
 (`changeset`) and by parent entries (`first_parent`), and the reflog of `main`'s last 100 moves.
 `read_snapshot`'s third store holds 0, 16 or 256 `release/*` refs besides `main`; `show main`
 resolved `main` in one snapshot and read its changeset in a second, and makes both reads in one now.
+
+**Decision 18, applied to `history`.** The M2 plan's rule, on the numbers above:
+
+- The interpolation search stays: at 1M its `find` hit p50 is 2.58 µs against the bisection
+  copy's 7.23 µs, 64 % below (the rule asks 20 %); at 200k, 2.44 against 5.86 µs.
+- The index-tail scan stays on the commit path: a full 1,024-record tail adds 3.22 µs to an
+  insert at 200k and 3.85 µs at 1M, 0.05 % of the store-level in-lock p50 of 7.16 ms (the
+  rule's bound is 5 %).
+- The reflog walk is over its bound: `reflog(100)` takes 30.9 ms at 200k and 154 ms at 1M,
+  against 1 ms. The commit path is kept as it is, and the walk is recorded as a known limitation
+  ("Commit-path costs"), to be revisited with a `FORMAT 3`, whose per-ref index it needs.
 
 **The lock pass, store against CLI.** At store level the lock passes every 7.94 ms (254.2 s /
 32,000), 2.2 raw `fdatasync`s of the 3.56 ms probe; an uncontended transaction takes 7.01 ms and a
@@ -1008,7 +1029,8 @@ all in `just perf`). Same host as M0: WSL2 (kernel 5.15.153.1), AMD Ryzen 9 7950
 lives in a fresh temporary directory under `~/.local/state/swarmops-bench`, on the ext4 virtual
 disk of the earlier runs.
 
-**Method and host state.** A driver waited before each step for a 1-minute load under 6, no CI job
+**Method and host state.** A driver (`scripts/perf-window.py`, the soak timer its `--pause`)
+waited before each step for a 1-minute load under 6, no CI job
 on this host's runners and no pilot soak cycle, then ran the step alone. The pilot's soak timer was
 stopped for both windows (21:55–22:46 and 22:47–23:07, +09:00), so no soak cycle ran beside a
 measurement; three of its half-hourly cycles were skipped. Each step's start load is in the
@@ -1245,8 +1267,9 @@ shared file, so its retries sit at the 5 % line (4.67–5.58 %) and some lands e
 new record kind and no FORMAT change. Task 5 builds it into `Repo::publish`; the G4 measurement
 through the binary is taken again after it (the v0.6.0 release's measurements).
 
-Reproduce on the commit that recorded this section (about 1 h 40 min; the script takes the
-host's lock itself); the prototypes and the script were removed when v0.6.0 built metalog merge:
+Reproduce on `87179efb`, the commit that recorded this section (about 1 h 40 min; the script
+takes the host's lock itself). Neither the script nor the prototypes exist at later commits:
+`67860a70` removed them when v0.6.0 built metalog merge.
 
 ```sh
 scripts/landing-models.sh            # logs and decision.log in target/perf/landing-models/
@@ -1620,6 +1643,11 @@ every 50 ms (the M17 design §1). `times` counts in ticks of 10 ms, so 0.000 s i
 `serve.git` is seeded with the history's objects before the first connection, so that each case
 fits the profile's kill; the first refresh is `clone_against_git`'s, which cannot be split.
 
+Only `serve`'s side was accounted in these runs. From `295c89a7` on, a case that starts seeded
+(`Start::Seeded`) runs git's own server under the same `times` shell and 50 ms sampler, so a
+git-side figure measured before that commit, every one in the M17 sections, is not comparable
+with one measured after it.
+
 ### R-3, G19: 50 clones against one
 
 `serve_perf::fifty_clones_at_once_and_apart`: 12,000 commits, 50 clones at once and 50 clones 10 s
@@ -1634,6 +1662,11 @@ apart from `swarmops serve`, and 50 at once from git's `upload-pack`.
 | Clone time at once, git `upload-pack` median and longest | 1.682 s and 1.965 s | — |
 | Peak memory of the server tree, 50 at once | 9.7 MiB | recorded |
 | Host state | `4ccce313`; load not recorded | — |
+
+`295c89a7` added the asserts that git's side accounted every connection (as many lines as
+clones, alone and 50 at once). No run of the case has finished since: the Scheduled run of
+2026-11-09 on `9d220984` started it and was cancelled 23.6 minutes in, at the `perf-cases` job's
+390-minute timeout. So no run has shown that they hold.
 
 ### R-5, G20: a fetch k lands behind
 
@@ -1660,6 +1693,12 @@ behind on 1,000 commits and on 12,000, and on 12,000 for 1, 10, 100 and 1,000 la
 | Time, 1 GiB and 2 GiB push | 46.677 s and 82.230 s, 1.76× | the 2 GiB at most 2.2× the 1 GiB: met |
 | Refused push of 2,048 blobs: ref moved | none (56.443 s, peak 9.3 MiB) | none: met |
 | Host state | `4ccce313`; load not recorded | — |
+
+These times predate `5603d547`, after which a push's hooks read objects through one
+`git cat-file` child. Before each read it looks for a loose copy in each object directory, the
+quarantine and `serve.git`'s objects: two failed stats an object for a packed push, about 4,100
+for the 2 GiB push. A failed stat took 3.85 µs on this host (a Python loop of 100,000, so an upper
+bound, at a 1-minute load of 815), about 16 ms in all: 0.02 % of the 2 GiB push's 82.230 s.
 
 ### R-2, A39, G18: commits beside an import
 
@@ -1971,8 +2010,8 @@ A debug-build smoke run of the probe (8 agents, one land each every 100 ms for 1
 `landers` lane, probe at 1,000 µs, load 40 to 45) passed in 17 s: 800 lands, 0 % retries, 440
 holds with 570 answers, `b` 1 at the median and 5 at the p99, a hold of 28.0 ms at the median and
 164.1 ms at most, 9.6 ms over `b`; `U` 0.771 against a `u_process` of 0.088 (most lands are
-answered without holding the lock), the lock held 98.5 % of the samples, `queue_left=0`. It checks
-the probe, not the targets.
+answered without holding the lock), the lock held 98.5 % of the samples. The run predates the
+`queue_left=` line, so it gives no queue figure. It checks the probe, not the targets.
 
 ### D2-8 gated runs — 2026-11-09
 
@@ -2240,6 +2279,10 @@ lines, loaded, with no verdict:
 | `ws commit` of 1 / 10 / 100 changed files | 102.1 / 101.5 / 151.2 ms (`meta.elapsed_ms` 98 / 97 / 147) |
 | update after a land of 10 files | 240.0 ms |
 | update after a land of 10 files, median of 20 | 644.6 ms |
+
+No raw log of this run was kept: the lines above are its only record. The gated run keeps its
+`--no-capture` output whole beside the figures it gives (`scripts/perf-window.py` writes one log a
+step).
 
 The figures follow as a docs-only commit from the first gated window; the M19 fix slices measure
 against them.
@@ -2652,3 +2695,19 @@ most 100 ms), A5 (at most 1.5 times, under 1 ms), A1 (at most 1.5 times, 5 ms + 
 (recorded, no target). A miss is recorded and becomes a known-limitation line in M20-R, never a lowered target. The
 weekly `perf-cases` timeout (`.github/workflows/scheduled.yml`) is recomputed from that run's sums by its comment's
 rule; it stays 390 until then.
+
+## The Scheduled run's wall time — 2026-11-13
+
+`scheduled.yml` runs `just check-ci-slow` first; fuzz, `bench/compare`, the git matrix, the host
+repositories and the live run on GitHub each wait for it (`needs: slow`), the bench gate for them,
+and the measurement cases for the bench gate. So the whole run grows by the slow job's time, up to
+its 45-minute timeout, before any other job starts. The last two scheduled runs, from their jobs'
+start and end times:
+
+| Run | Slow job | Bench gate | Measurement cases | Whole run |
+| --- | --- | --- | --- | --- |
+| 2026-11-02, `7108c7b7` | 13.0 min | 17.4 min | 139.0 min | 3 h 2 min |
+| 2026-11-09, `9d220984` | 22.1 min (failed) | 20.3 min (failed) | 390.3 min (cancelled at its timeout) | 7 h 23 min |
+
+The jobs after the slow one started within 3.5 minutes of its end, four at once on the four
+runners and the rest as runners came free, and took 0.2 to 10.1 minutes each.
