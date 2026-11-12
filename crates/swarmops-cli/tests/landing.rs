@@ -42,7 +42,8 @@ fn own_file(lander: usize, land: usize) -> (String, Vec<u8>) {
 
 /// Lander `lander`'s land `land`: its own file ([`own_file`]), and in every other land (the
 /// even ones) its line of [`REGISTRY`], the file every lander shares ([`own_line`]). No two
-/// landers' lines touch, so every land merges cleanly whatever landed before it.
+/// landers' lines touch at any pool size, so every land merges cleanly whatever landed before
+/// it ([`landers_0_and_67_merge_cleanly`]).
 fn change(lander: usize, land: usize) -> Change {
     Change {
         puts: vec![own_file(lander, land)],
@@ -163,6 +164,53 @@ fn a_key_reused_on_its_target_names_it() {
     let run = store.run_as(&who, &["land", &two, "--key", KEY], &[]);
     let details = serde_json::json!({"key": KEY, "landed": landed, "target": "main"});
     assert_eq!(run.err("E_INVALID_ARG")["details"], details, "{run}");
+}
+
+/// Lander 67, the first whose line of [`REGISTRY`] would wrap past 200 lines onto lander 0's
+/// neighbour, and lander 0 each replace their own line in a land made on the same head of a
+/// 68-lander base: the second land merges over the first, and `main`'s [`REGISTRY`] holds both
+/// lines.
+#[test]
+fn landers_0_and_67_merge_cleanly() {
+    const LATE: usize = 67;
+    let store = Store::init();
+    let base = commit_base(&store, LATE + 1);
+    let mut files = base_files(LATE + 1, Workload::Shared);
+    let (path, registry) = files.swap_remove(0);
+    assert_eq!(path, REGISTRY);
+
+    // 1. Each lander lands its own line onto the base head, in its own `land` process.
+    let mut expected = registry.clone();
+    for lander in [LATE, 0] {
+        let text = registry_text(lander, 0);
+        let line = with_line(&registry, own_line(lander), &text);
+        expected = with_line(&expected, own_line(lander), &text);
+        let changes = store.changes_of(
+            &format!("lander-{lander}"),
+            &[(REGISTRY, std::str::from_utf8(&line).unwrap())],
+        );
+        let key = format!("lander-{lander}");
+        let args = [
+            "land",
+            &base,
+            "--changes",
+            &changes,
+            "--key",
+            &key,
+            "-m",
+            &key,
+        ];
+        store.run_as(&agent(lander), &args, &[]).ok();
+    }
+
+    // 2. `main` holds both lines.
+    let shared = store.read(&["cat", &format!("main:{REGISTRY}")]).ok();
+    assert_eq!(
+        shared["content"],
+        std::str::from_utf8(&expected).unwrap(),
+        "lander {LATE}'s line and lander 0's"
+    );
+    store.assert_clean("after the two lands");
 }
 
 /// Commits the base the landers start from ([`base_files`]: [`REGISTRY`] and a file under each
