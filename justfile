@@ -158,6 +158,61 @@ bench: _bench-fresh bench-run
 _bench-fresh:
     rm -rf -- "${CARGO_TARGET_DIR:-target}/criterion"
 
+# The window rule a measurement waits for, so that each gated run applies the same one: the
+# 1-minute load average under `load1` and the 5-minute under `load5`, both held for `hold`
+# seconds, and no CI job on the host (no `Runner.Worker` process), read from /proc every 10 s for
+# at most `wait` seconds. The defaults are the gate docs/perf.md's "M19 baselines" waited for
+# (the M19 design §2: under 6 held a minute, 30 minutes at most); "D2 baseline"'s is
+# `just quiet-window 2 6 300`. It prints each reading, then the end load; it exits 1 when the
+# window never came, so that in `just quiet-window && just perf` the measurement is skipped with
+# its load printed.
+# Waits for a quiet host (load and CI jobs) before a measurement; exits 1 if none came.
+quiet-window load1="6" load5="inf" hold="60" wait="1800":
+    #!/usr/bin/env -S python3 -I
+    import os
+    import sys
+    import time
+
+    LOAD1, LOAD5 = float("{{ load1 }}"), float("{{ load5 }}")
+    HOLD, WAIT = float("{{ hold }}"), float("{{ wait }}")
+    PERIOD = 10
+    RUNNER = "Runner.Worker"
+
+    def comm(pid):
+        """The process's name; "" once it has gone."""
+        try:
+            with open(f"/proc/{pid}/comm") as f:
+                return f.read().strip()
+        except OSError:
+            return ""
+
+    def reading():
+        """The 1-, 5- and 15-minute load averages and whether a CI job runs."""
+        with open("/proc/loadavg") as f:
+            loads = [float(x) for x in f.read().split()[:3]]
+        ci = any(comm(p) == RUNNER for p in os.listdir("/proc") if p.isdigit())
+        return loads, ci
+
+    # 1. Read until the rule has held for `hold` seconds, or `wait` has run out.
+    start = time.monotonic()
+    quiet_since = None
+    while True:
+        (one, five, fifteen), ci = reading()
+        now = time.monotonic()
+        quiet = one < LOAD1 and five < LOAD5 and not ci
+        quiet_since = (quiet_since if quiet_since is not None else now) if quiet else None
+        print(f"quiet-window: {now - start:.0f} s: load {one} {five} {fifteen}, CI job: "
+              f"{'yes' if ci else 'no'}", flush=True)
+        if quiet and now - quiet_since >= HOLD:
+            break
+        if now - start >= WAIT:
+            print(f"quiet-window: no window in {WAIT:.0f} s; measure nothing", file=sys.stderr)
+            sys.exit(1)
+        time.sleep(min(PERIOD, max(0.0, start + WAIT - now)))
+
+    # 2. The window came: the load the measurement starts at.
+    print(f"quiet-window: held {now - quiet_since:.0f} s; end load {one} {five} {fifteen}")
+
 # Optimized, for a quiet window: the 32-process store-level contention test, the 32-process
 # CLI contention test at the spec's 32 x 1,000 commits (SWARMOPS_TEST_CLI_CONTENTION_COMMITS
 # sets another count), the git remotes' cases (`remote_perf`, against a loopback remote), then
