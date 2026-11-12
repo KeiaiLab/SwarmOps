@@ -13,6 +13,8 @@
 //!       land ×2 ─ so push main:so-live/<run>-<method> ─ gh pr create ─ gh pr merge --<method>
 //!       ─ so sync origin --no-push ─ main at GitHub's head, the lands dropped as 6.3 says
 //!   land ─ so sync origin (pushes to the unprotected default branch)
+//!   a second clone; a land in each ─ both so push main:so-live/<run>-race at once
+//!       ─ one created, the other E_REMOTE_DIVERGED remote_moved
 //!   every so-live branch deleted, never the default branch
 //! ```
 
@@ -21,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use crate::support::Store;
+use crate::support::{Racers, Run, Store};
 
 /// The variable that turns the live run on, when it is `1`.
 const LIVE_VAR: &str = "SWARMOPS_GITHUB_LIVE";
@@ -58,6 +60,15 @@ const MERGE_PAUSE: Duration = Duration::from_secs(10);
 
 /// How many changes each pull request carries.
 const LANDS_PER_PULL: usize = 2;
+
+/// A push's status when it made the branch.
+const CREATED: &str = "created";
+
+/// The error of a push whose lease failed.
+const DIVERGED: &str = "E_REMOTE_DIVERGED";
+
+/// Its reason when the branch moved since the last fetch: a lost race.
+const REMOTE_MOVED: &str = "remote_moved";
 
 /// The live run's settings, read from the environment. No `Debug`: it holds the token.
 struct Live {
@@ -162,6 +173,70 @@ fn live_run_needs_its_repository_and_token() {
     assert_eq!(live.token, token);
 }
 
+/// The verdict of two pushes racing to create one branch, by their envelopes: the winner's
+/// index when one made the branch and the other lost the race (`E_REMOTE_DIVERGED`
+/// `remote_moved`). Else both envelopes: a refusal read otherwise holds the remote's wording,
+/// which becomes one more needle of the git crate's classifier.
+fn race_verdict(envelopes: &[Value]) -> Result<usize, String> {
+    let created = |envelope: &Value| envelope["result"]["status"] == CREATED;
+    let moved = |envelope: &Value| {
+        envelope["error"]["code"] == DIVERGED
+            && envelope["error"]["details"]["reason"] == REMOTE_MOVED
+    };
+
+    // 1. One winner, one loser, in either order.
+    match envelopes {
+        [won, lost] if created(won) && moved(lost) => return Ok(0),
+        [lost, won] if moved(lost) && created(won) => return Ok(1),
+        _ => {}
+    }
+
+    // 2. Anything else, printed whole.
+    let said: Vec<String> = envelopes.iter().map(Value::to_string).collect();
+    Err(format!(
+        "a lost race must be {DIVERGED} {REMOTE_MOVED}; the pushes said:\n{}",
+        said.join("\n")
+    ))
+}
+
+/// A push's envelope: `created`, as the winner's.
+fn created_envelope() -> Value {
+    serde_json::json!({"api": 1, "ok": true, "result": {"status": CREATED, "new": "a1"}})
+}
+
+/// A push's envelope: an error of `code` for `reason`, with git's `stderr_tail`.
+fn refused_envelope(code: &str, reason: &str, stderr_tail: &str) -> Value {
+    let details =
+        serde_json::json!({"remote": ORIGIN, "reason": reason, "stderr_tail": stderr_tail});
+    serde_json::json!({"api": 1, "ok": false, "error": {"code": code, "details": details}})
+}
+
+/// Offline: one push created the branch and the other lost the race as `remote_moved`; the
+/// winner is found in either order.
+#[test]
+fn a_lost_race_is_remote_moved() {
+    let moved = refused_envelope(DIVERGED, REMOTE_MOVED, "");
+    let first = [created_envelope(), moved.clone()];
+    assert_eq!(race_verdict(&first), Ok(0));
+    let second = [moved, created_envelope()];
+    assert_eq!(race_verdict(&second), Ok(1));
+}
+
+/// Offline: a loser read otherwise fails the run, and the failure prints what the remote said
+/// (GitHub's wording, the needle a fix of the classifier takes); two winners fail it too.
+#[test]
+fn another_refusal_prints_its_wording() {
+    let said = " ! [remote rejected] main -> so-live/1-race (cannot lock ref)";
+    let declined = refused_envelope("E_REMOTE_REJECTED", "declined", said);
+    let verdict = race_verdict(&[created_envelope(), declined]);
+    let printed = verdict.expect_err("declined is no lost race");
+    assert!(printed.contains(said), "{printed}");
+    assert!(printed.contains("E_REMOTE_REJECTED"), "{printed}");
+
+    let both = race_verdict(&[created_envelope(), created_envelope()]);
+    assert!(both.is_err(), "two winners: {both:?}");
+}
+
 /// The round trip with GitHub (roadmap Topology 2, criterion 4), on the scratch repository
 /// `SWARMOPS_GITHUB_REPO` names.
 #[test]
@@ -247,7 +322,55 @@ fn round_trip_with_github() {
     let pushed = synced["remote_head"]["new"].as_str().expect("a sha");
     assert_eq!(github.head(&default), pushed);
     assert_at_head(&store, &github, &default);
+
+    // 5. Two stores create one branch at once: one wins, the other lost the race.
+    race(&store, &env, &url, &settings, &mut cleanup, &run);
     store.assert_clean("after the live run");
+}
+
+/// A second store cloned from `url`; each of the two lands its own change, and both push
+/// `main:so-live/<run>-race` at once, each with a lease on no branch (neither fetched it). The
+/// loser must read `E_REMOTE_DIVERGED` `remote_moved`, whether git's lease saw the winner or
+/// GitHub refused the second update; GitHub's branch is the winner's commit.
+fn race(
+    store: &Store,
+    env: &[(&str, &str)],
+    url: &str,
+    settings: &Live,
+    cleanup: &mut Cleanup<'_>,
+    run: &str,
+) {
+    // 1. The second store, and a change on each.
+    let other = Store::empty().with_env(env);
+    let line = [
+        "clone",
+        url,
+        "--into",
+        other.path(),
+        "--token-env",
+        settings.token_env.as_str(),
+    ];
+    other.run_as(AGENT, &line, &[]).ok();
+    land(store, run, "race-a");
+    land(&other, run, "race-b");
+
+    // 2. Both pushes, let go together.
+    let branch = format!("{BRANCH_PREFIX}{run}-race");
+    cleanup.branches.push(branch.clone());
+    let target = format!("main:{branch}");
+    let mut racers = Racers::new(store.tmp());
+    for racer in [store, &other] {
+        let line = ["--repo", racer.path(), "push", ORIGIN, target.as_str()];
+        racers.spawn(&line, env);
+    }
+    let runs = racers.race();
+    let envelopes: Vec<Value> = runs.iter().map(Run::envelope).collect();
+
+    // 3. The verdict, and the winner's commit on GitHub.
+    let won = race_verdict(&envelopes).unwrap_or_else(|said| panic!("{said}"));
+    let new = envelopes[won]["result"]["new"].as_str().expect("a sha");
+    assert_eq!(cleanup.github.head(&branch), new);
+    other.assert_clean("after the race");
 }
 
 /// The run's id: the workflow's run, else this process's start.
