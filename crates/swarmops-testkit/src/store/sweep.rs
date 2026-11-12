@@ -4,7 +4,9 @@
 //! child ([`sweep_child`], [`run_sweep_child`]), what its outcome says of it ([`Said`]), and
 //! what the store must hold then ([`assert_recovers`]). The metadata store's error sweeps use it
 //! (`crates/swarmops-store/tests/meta.rs`). Its changesets are its own ([`changeset`], [`id`]).
+//! A sweep too long for one test runs as several, each over a part of its calls ([`part_of`]).
 
+use std::ops::RangeInclusive;
 use std::os::unix::process::ExitStatusExt;
 use std::process::Output;
 use std::sync::Arc;
@@ -172,6 +174,27 @@ pub fn copy_of(template: &Utf8Path) -> (TempDir, Utf8PathBuf) {
     (dir, root)
 }
 
+/// Part `part` (the first is 1) of the `parts` that `ks`, a sweep's crash points, are cut into,
+/// for a sweep that runs as `parts` tests side by side: the parts are contiguous and in order,
+/// no k is in two of them, and together they are `ks`. Their lengths differ by 1 at most.
+/// Refuses fewer ks than parts, and a part that is not one of them.
+///
+/// ```text
+/// ks = 1..=10, parts = 4:   1 2 | 3 4 5 | 6 7 | 8 9 10
+/// ```
+pub fn part_of(ks: RangeInclusive<u64>, part: u64, parts: u64) -> RangeInclusive<u64> {
+    let len = ks.end() + 1 - ks.start();
+    assert!(
+        len >= parts && (1..=parts).contains(&part),
+        "{len} ks in {parts} parts, part {part}"
+    );
+
+    // Part p starts where the first p - 1 of `parts` equal shares of `len` end, rounded down.
+    let from = ks.start() + len * (part - 1) / parts;
+    let to = ks.start() + len * part / parts - 1;
+    from..=to
+}
+
 /// How many filesystem calls `run` makes on a copy of the store at `template`, one index file
 /// synced at a time, no call failing.
 pub fn calls_of(template: &Utf8Path, run: impl FnOnce(&MetaStore)) -> u64 {
@@ -289,5 +312,51 @@ pub fn run_sweep_child(test: &str, root: &Utf8Path, plan: &str) -> Said {
         "Committed" => Said::Committed,
         "NotCommitted" => Said::NotCommitted,
         other => panic!("{plan}: {other:?}\n{stdout}\n{stderr}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::part_of;
+
+    /// The longest range and the most parts the test of [`part_of`] tries.
+    const MAX_LEN: u64 = 100;
+    const MAX_PARTS: u64 = 8;
+
+    /// Wherever a range starts, its parts are in order, each one starts right after the one
+    /// before it (so no k is in two, and none is left out), and they span the range: a sweep
+    /// in parts crashes at the calls the whole sweep did.
+    #[test]
+    fn the_parts_of_a_range_are_the_range() {
+        for start in [0, 1, 7] {
+            for len in 1..=MAX_LEN {
+                for parts in 1..=MAX_PARTS.min(len) {
+                    let ks = start..=start + len - 1;
+                    let what = format!("{ks:?} in {parts} parts");
+
+                    let mut next = start;
+                    for part in 1..=parts {
+                        let own = part_of(ks.clone(), part, parts);
+                        assert_eq!(*own.start(), next, "{what}, part {part}");
+                        assert!(own.start() <= own.end(), "{what}, part {part}");
+                        next = own.end() + 1;
+                    }
+
+                    assert_eq!(next, start + len, "{what}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "3 ks in 4 parts")]
+    fn fewer_ks_than_parts_are_refused() {
+        let _ = part_of(1..=3, 1, 4);
+    }
+
+    #[test]
+    #[should_panic(expected = "part 5")]
+    fn a_part_past_the_last_is_refused() {
+        let _ = part_of(1..=8, 5, 4);
     }
 }

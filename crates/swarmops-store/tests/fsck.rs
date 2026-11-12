@@ -759,14 +759,36 @@ mod hooked {
     /// then a rebuild run again makes like a fresh replay. From the rebuild's commit point on
     /// (the sorted views emptied, the checkpoint at 0) the one write rebuilds it: a crash never
     /// takes back a rebuild that reached it.
-    #[test]
-    fn a_crash_at_any_call_of_an_index_rebuild_recovers() {
-        if let Some(root) = std::env::var_os(CRASH_ROOT) {
-            crash_child(root);
-            return;
-        }
-        let test = "a_crash_at_any_call_of_an_index_rebuild_recovers";
-        for format in FORMATS {
+    ///
+    /// The sweep of a format is a chain of thousands of sync calls, each of which waits on the
+    /// host's disk; side by side they share the waits. So it runs as [`PARTS`] tests a format,
+    /// each over a contiguous part of the calls (here a rebuild of 75 calls, so k to 76):
+    ///
+    /// ```text
+    /// k        1 ........ 19 20 ....... 38 39 ....... 57 58 ....... 76
+    /// part 1   [ own       ]
+    /// part 2              [x| own        ]
+    /// part 3                            [x| own        ]
+    /// part 4                                          [x| own        ]  rebuilt by the last call
+    /// ```
+    ///
+    /// `x` is the k before a part's own, which it runs too: "never takes back" compares each k
+    /// with the one before it, and so every such pair is inside one part.
+    mod a_crash_at_any_call_of_an_index_rebuild_recovers {
+        use swarmops_testkit::store::sweep::part_of;
+
+        use super::*;
+
+        /// How many tests the sweep of one format runs as.
+        const PARTS: u64 = 4;
+
+        /// Part `part` of the sweep of `format`, as the test `test` of this module.
+        fn sweep(format: StoreFormat, part: u64, test: &str) {
+            if let Some(root) = std::env::var_os(CRASH_ROOT) {
+                crash_child(root);
+                return;
+            }
+
             let (_template_dir, template) = crash_template(format);
             let (_fresh_dir, fresh) = fresh_replay(&template);
             let calls = {
@@ -777,8 +799,17 @@ mod hooked {
                 counter.calls()
             };
             assert!(calls > 5, "{calls} calls");
+
+            // This part's ks, and before them the last k of the part before, where the two meet.
+            let own = part_of(1..=calls + 1, part, PARTS);
+            let first = if part == 1 {
+                *own.start()
+            } else {
+                own.start() - 1
+            };
+
             let mut rebuilt_from = None;
-            for k in 1..=calls + 1 {
+            for k in first..=*own.end() {
                 let (_dir, root) = copy_of(template.root());
                 let layout = Layout::with_format(root, format);
                 let child = run(this_test(&test_name!(test))
@@ -811,11 +842,34 @@ mod hooked {
                 fsck::rebuild_index(&layout, real()).unwrap();
                 assert_like_fresh(&layout, &fresh, &format!("{format:?} k={k}"));
             }
-            assert!(
-                rebuilt_from.is_some_and(|k| k <= calls),
-                "{format:?}: {rebuilt_from:?}"
-            );
+
+            // The rebuild's last call is past its commit point; only the last part runs it.
+            if part == PARTS {
+                assert!(
+                    rebuilt_from.is_some_and(|k| k <= calls),
+                    "{format:?}: {rebuilt_from:?}"
+                );
+            }
         }
+
+        /// The test `$name`: part `$part` of the sweep of `$format`.
+        macro_rules! part {
+            ($name:ident, $format:expr, $part:expr) => {
+                #[test]
+                fn $name() {
+                    sweep($format, $part, stringify!($name));
+                }
+            };
+        }
+
+        part!(format_1_part_1, StoreFormat::V1, 1);
+        part!(format_1_part_2, StoreFormat::V1, 2);
+        part!(format_1_part_3, StoreFormat::V1, 3);
+        part!(format_1_part_4, StoreFormat::V1, 4);
+        part!(format_2_part_1, StoreFormat::V2, 1);
+        part!(format_2_part_2, StoreFormat::V2, 2);
+        part!(format_2_part_3, StoreFormat::V2, 3);
+        part!(format_2_part_4, StoreFormat::V2, 4);
     }
 }
 
