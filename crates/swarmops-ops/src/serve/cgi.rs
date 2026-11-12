@@ -38,7 +38,7 @@ use super::records::{Connection, SWARMOPS_SERVE_CONNECTION, Side};
 use super::refresh::{Freshness, Refreshed, Scope, freshness, refresh, serve_error};
 use super::{
     Entry, SWARMOPS_SERVE_EXE, SWARMOPS_SERVE_IDENTITY, SWARMOPS_SERVE_STORE, ServeInvocation,
-    Served, refused,
+    Served, refused, reply_then_step, step_store,
 };
 use crate::LocalOps;
 use crate::error;
@@ -142,8 +142,20 @@ fn serve(
         SWARMOPS_SERVE_CONNECTION.to_owned(),
         OsString::from(connection.id()),
     );
-    let status = child::run(&git, Service::HttpBackend, &repo, &env)
-        .map_err(|e| redactor.redact_error(serve_error(e)))?;
+    //    Once git has sent its reply, a push's commits get their view work stepped; a fetch
+    //    committed nothing.
+    let side = side_of(request, vars);
+    let status = reply_then_step(
+        || child::run(&git, Service::HttpBackend, &repo, &env),
+        || {
+            if side == Side::Push {
+                return step_store(store);
+            }
+            Ok(())
+        },
+        &mut std::io::stderr(),
+    );
+    let status = status.map_err(|e| redactor.redact_error(serve_error(e)))?;
     Ok(Served::new(exit_code(status)))
 }
 

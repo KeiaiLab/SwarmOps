@@ -749,6 +749,9 @@ struct Server<'a> {
     max_line: u64,
     /// The preparation the last call asked for, started once its response line is out.
     pending: RefCell<Option<After>>,
+    /// The store whose view work the last call's commits left, stepped once its response line
+    /// is out.
+    stepping: RefCell<Option<String>>,
     /// The preparations started and not yet reaped.
     children: Vec<Child>,
 }
@@ -816,6 +819,7 @@ impl<'a> Server<'a> {
             session: None,
             max_line,
             pending: RefCell::new(None),
+            stepping: RefCell::new(None),
             children: Vec::new(),
         }
     }
@@ -824,11 +828,33 @@ impl<'a> Server<'a> {
     /// call moved a ref: its `envelope` is a success's, and `op` one of the CLI's
     /// `PREPARE_AFTER`.
     fn note_after<T>(&self, op: &str, arguments: &str, used: &Used, envelope: &Envelope<T>) {
-        if !envelope.ok || !prepare::wanted(op, advance_in(arguments)) {
+        if !envelope.ok {
+            return;
+        }
+
+        // 1. A committing tool's view work, to be stepped after its response line.
+        used.note_step(op);
+        if let Some(store) = used.take_step() {
+            self.stepping.replace(Some(store));
+        }
+
+        // 2. A ref move's preparation.
+        if !prepare::wanted(op, advance_in(arguments)) {
             return;
         }
         used.note_after(None);
         self.pending.replace(used.take_after());
+    }
+
+    /// Steps the view work the last call's commits left, once its response line is out: an
+    /// error is logged to stderr and changes nothing the client was told.
+    fn step_after(&self) {
+        let Some(store) = self.stepping.take() else {
+            return;
+        };
+        if let Err(why) = Used::step_views(&store) {
+            eprintln!("swarmops: view work not stepped: {why}");
+        }
     }
 
     /// Starts the preparation the last call asked for, and keeps the child to reap.
@@ -883,6 +909,7 @@ impl<'a> Server<'a> {
                 output.flush()?;
             }
             self.start_after();
+            self.step_after();
         }
     }
 

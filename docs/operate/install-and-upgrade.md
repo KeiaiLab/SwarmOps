@@ -241,9 +241,12 @@ writes it as before, until it is upgraded:
    ```
 
 `upgrade` takes a FORMAT 1 store through FORMAT 2 to FORMAT 3 in one call, and keeps every
-operation id. It cannot be undone: from then on no older release opens the store, and a process
-that had it open in the format before, of an older release or of this one, fails its next read or
-write with `E_STORE_CORRUPT`, and opens it again as FORMAT 3. An upgrade cut short is finished by
+operation id. It cannot be undone: from then on no older release opens the store, and the one way
+back is [creating the store again](#create-a-store-again) with the older binary from a git export.
+Once a release turns on a FORMAT 3 feature in a store, that way back loses the facts the feature
+recorded, since git holds no place for them. A process that had the store open in the format
+before, of an older release or of this one, fails its next read or write with `E_STORE_CORRUPT`,
+and opens it again as FORMAT 3. An upgrade cut short is finished by
 the next command that opens the store, or by the next `upgrade`. `gc` then removes the files of the
 format before that the upgrade left. On a FORMAT 3 store, `upgrade` does nothing
 (`"upgraded":false`). A `FORMAT` that `upgrade` does not reach

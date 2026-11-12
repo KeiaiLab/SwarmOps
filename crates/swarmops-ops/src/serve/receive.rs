@@ -34,6 +34,7 @@ use super::records::{Connection, SWARMOPS_SERVE_CONNECTION, Side};
 use super::refresh::{Freshness, Refreshed, Scope, freshness, refresh, serve_error};
 use super::{
     SWARMOPS_SERVE_EXE, SWARMOPS_SERVE_IDENTITY, SWARMOPS_SERVE_STORE, ServeInvocation, Served,
+    reply_then_step, step_store,
 };
 use crate::LocalOps;
 use crate::error;
@@ -114,8 +115,13 @@ fn serve(
         MAX_INPUT_SIZE.to_owned(),
         OsString::from(MAX_PUSH_BYTES.to_string()),
     ));
-    let status = child::run(&git, Service::ReceivePack, &repo, &env)
-        .map_err(|e| redactor.redact_error(serve_error(e)))?;
+    //    Once git has sent its reply, the view work the push's commits left is stepped.
+    let status = reply_then_step(
+        || child::run(&git, Service::ReceivePack, &repo, &env),
+        || step_store(store),
+        &mut std::io::stderr(),
+    );
+    let status = status.map_err(|e| redactor.redact_error(serve_error(e)))?;
     Ok(Served::new(exit_code(status)))
 }
 

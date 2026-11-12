@@ -188,6 +188,27 @@ pub fn run(invocation: &ServeInvocation) -> Result<Served, OpError> {
     }
 }
 
+/// Runs `reply`, which serves the connection's response to its end, and then `step`, the view
+/// work the connection's commits left (the FORMAT 3 design, amendment 2026-11-11 G6): the reply
+/// is never held for it. A step's error goes to `log` and nowhere else, so it changes neither
+/// what `reply` gave nor the connection's exit.
+pub(crate) fn reply_then_step<T>(
+    reply: impl FnOnce() -> T,
+    step: impl FnOnce() -> Result<(), OpError>,
+    log: &mut impl std::io::Write,
+) -> T {
+    let reply = reply();
+    if let Err(why) = step() {
+        let _ = writeln!(log, "warning: view work not stepped: {}", why.message);
+    }
+    reply
+}
+
+/// One step of the view work of the store at `store`, opened for it.
+pub(crate) fn step_store(store: &camino::Utf8Path) -> Result<(), OpError> {
+    crate::LocalOps::open(store)?.step_views().map(|_| ())
+}
+
 /// The error of a part of `serve` not built yet: `E_INVALID_ARG`, "`what`: not built".
 pub(crate) fn not_built(what: &str) -> OpError {
     OpError::new(ErrorCode::InvalidArg, format!("{what}: not built"))
@@ -206,4 +227,45 @@ pub fn write_refusal(output: &mut impl std::io::Write, error: &OpError) -> std::
     let message = format!("{}: {}", error.code, error.message);
     swarmops_git::serve::pkt::write_err(output, &message)?;
     output.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use super::*;
+
+    /// The reply is written before the step runs, and a step's error is logged, never the
+    /// connection's: `reply_then_step` hands back what the reply gave.
+    #[test]
+    fn the_reply_is_written_before_the_step() {
+        let order = RefCell::new(Vec::new());
+        let mut log = Vec::new();
+
+        // 1. A step that works: after the reply.
+        let served = reply_then_step(
+            || {
+                order.borrow_mut().push("reply");
+                Served::new(0)
+            },
+            || {
+                order.borrow_mut().push("step");
+                Ok(())
+            },
+            &mut log,
+        );
+        assert_eq!(*order.borrow(), ["reply", "step"]);
+        assert_eq!(served, Served::new(0));
+        assert_eq!(log, Vec::<u8>::new());
+
+        // 2. A step that fails: logged, and the reply stands.
+        let served = reply_then_step(
+            || Served::new(3),
+            || Err(OpError::new(ErrorCode::Busy, "the lock is held")),
+            &mut log,
+        );
+        assert_eq!(served, Served::new(3));
+        let logged = String::from_utf8(log).unwrap();
+        assert!(logged.contains("the lock is held"), "{logged}");
+    }
 }

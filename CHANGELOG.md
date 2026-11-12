@@ -54,6 +54,9 @@ collects the changes on `stable` that no release holds yet, until the next relea
   (`swarmops-store 4` and up), or lists a feature it lacks; `details` name the `format` and the
   `features` it lacks, and the hint says a newer swarmops reads the store. Nothing is written.
   Golden envelopes now pin 56 of the 56 error codes (the FORMAT 3 design §4).
+- After an operation that committed, the CLI, the MCP server and `serve` step the view work the
+  commit left once the response is out; a step's error goes to stderr and never changes the
+  operation's result (the FORMAT 3 design, amendment G6, G12).
 
 ### Changed
 

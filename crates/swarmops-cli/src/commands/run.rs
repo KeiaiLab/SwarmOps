@@ -107,7 +107,39 @@ pub struct Used {
     /// The preparation of `serve.git` to start once the envelope is out: noted after an
     /// operation of [`prepare::PREPARE_AFTER`] succeeded.
     after: RefCell<Option<After>>,
+    /// The store whose view work is to be stepped once the envelope is out: noted after an
+    /// operation of [`COMMITTING`] succeeded.
+    step: RefCell<Option<String>>,
 }
+
+/// The operations that can commit to the store, by the name their envelope gives: after one has
+/// succeeded and its envelope is out, the view work its commits left is stepped (the FORMAT 3
+/// design, amendment 2026-11-11 G6). A read-only operation is not listed; `gc` steps by itself.
+pub(crate) const COMMITTING: [&str; 14] = [
+    "commit",
+    "land",
+    "land_group",
+    "rebase",
+    "revert",
+    "blob_put",
+    "ref_set",
+    "ref_delete",
+    "ref_txn",
+    "undo",
+    "git_import",
+    "fetch",
+    "push",
+    "sync",
+];
+
+/// The variables of the test hooks that count or fail a process's filesystem calls
+/// (`swarmops_store`'s `CRASH_AT_ENV`, `FS_CALLS_ENV` and `FAIL_AT_ENV`, which a test compares).
+#[cfg(feature = "test-hooks")]
+const COUNTING_HOOKS: [&str; 3] = [
+    "SWARMOPS_TEST_CRASH_AT",
+    "SWARMOPS_TEST_FS_CALLS",
+    "SWARMOPS_TEST_FAIL_AT",
+];
 
 impl Used {
     /// `meta.repo`, `meta.resolved` and `meta.recovered` as far as the command got: the store
@@ -134,6 +166,38 @@ impl Used {
             .replace(store.map(|store| After::new(store, seed)));
     }
 
+    /// Notes that operation `op` committed to the store it named, when it is one of
+    /// [`COMMITTING`]: its view work is to be stepped. Nothing when no store was named.
+    pub(crate) fn note_step(&self, op: &str) {
+        if !COMMITTING.contains(&op) {
+            return;
+        }
+        let store = self.repo.borrow().clone();
+        self.step.replace(store);
+    }
+
+    /// The store to step ([`Used::note_step`]), taken.
+    pub(crate) fn take_step(&self) -> Option<String> {
+        self.step.take()
+    }
+
+    /// One step of `store`'s view work, as the user named the store: it is opened, and what its
+    /// commits left is built. The error's message when either fails.
+    pub(crate) fn step_views(store: &str) -> Result<(), String> {
+        // A test hook that counts or fails the process's filesystem calls counts one open of
+        // the store: a second one would restart the count the sweeps read.
+        #[cfg(feature = "test-hooks")]
+        if COUNTING_HOOKS
+            .iter()
+            .any(|var| std::env::var_os(var).is_some_and(|value| !value.is_empty()))
+        {
+            return Ok(());
+        }
+
+        let ops = LocalOps::open(Utf8Path::new(store)).map_err(|e| e.to_string())?;
+        ops.step_views().map(|_| ()).map_err(|e| e.to_string())
+    }
+
     /// The preparation noted ([`Used::note_after`]), taken.
     pub(crate) fn take_after(&self) -> Option<After> {
         self.after.take()
@@ -151,6 +215,11 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
     let printed = dispatch(ctx, op, command);
     if wanted && printed.exit == 0 {
         ctx.used.note_after(seed);
+    }
+
+    // 3. A committing operation's success: its view work is stepped after the envelope.
+    if printed.exit == 0 {
+        ctx.used.note_step(op);
     }
     printed
 }
@@ -1891,5 +1960,14 @@ mod tests {
         let mut listed = RecoveredOut::default();
         listed.frames_listed = 1;
         assert_eq!(envelope.meta.recovered, Some(listed));
+    }
+
+    /// [`COUNTING_HOOKS`] name the store's three counting hooks.
+    #[cfg(feature = "test-hooks")]
+    #[test]
+    fn the_counting_hooks_are_the_stores() {
+        use swarmops_store::{CRASH_AT_ENV, FAIL_AT_ENV, FS_CALLS_ENV};
+
+        assert_eq!(COUNTING_HOOKS, [CRASH_AT_ENV, FS_CALLS_ENV, FAIL_AT_ENV]);
     }
 }

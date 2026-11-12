@@ -1,10 +1,12 @@
 //! The program's entry ([`run`]): the command line read and answered, a panic turned into an
 //! `E_INTERNAL` envelope, and the envelope written to stdout with the exit code. After an
 //! operation that moved a ref, once the envelope is out, `serve.git` is prepared, detached
-//! (`commands::prepare`, the M17 design §4.3).
+//! (`commands::prepare`, the M17 design §4.3). After an operation that committed, once the
+//! envelope is out, the view work its commits left is stepped ([`finish`]).
 //!
 //! ```text
 //! run ─▶ guarded(respond) ─▶ gitlike::parse ─▶ answer ─▶ guarded(commands::run) ─▶ emit ─▶ spawn
+//!                                                                                      └──▶ step
 //! ```
 
 use std::ffi::OsString;
@@ -24,6 +26,15 @@ use crate::gitlike::{self, Place};
 use crate::output::{Format, Printed, Stdout};
 use crate::{cli, commands, context};
 
+/// What follows an envelope once it is out: neither changes the envelope or the exit code.
+#[derive(Default)]
+struct Followup {
+    /// The preparation of `serve.git`, after a ref move.
+    prepare: Option<After>,
+    /// The store whose view work an operation that committed left, as the user named it.
+    step: Option<String>,
+}
+
 /// Runs the command line the process was started with, and gives the code to exit with: the
 /// whole program, which `swarmops` and `so` both run.
 pub fn run() -> ExitCode {
@@ -35,7 +46,7 @@ pub fn run() -> ExitCode {
     };
     // 1. This guard catches a panic before the operation is known, while the line is read; the
     //    one in `respond` a panic while the operation runs, and names it.
-    let mut after = None;
+    let mut then = Followup::default();
     let printed = guarded(
         cli::NO_OP,
         Format::Json {
@@ -44,17 +55,36 @@ pub fn run() -> ExitCode {
         started,
         None,
         || {
-            let (printed, then) = respond(started, stdout);
-            after = then;
+            let (printed, next) = respond(started, stdout);
+            then = next;
             printed
         },
     );
-    let code = emit(&printed);
 
-    // 2. The preparation after a ref move, once the envelope is out: never waited for, and
-    //    what becomes of it changes neither the envelope nor the exit code.
-    if let Some(after) = after {
+    // 2. The envelope out, then what follows it.
+    finish(&printed, then, emit, Used::step_views, &mut io::stderr())
+}
+
+/// Writes `printed` with `write`, then runs what follows it: the preparation after a ref move,
+/// never waited for, and the step of the view work an operation that committed left. A step's
+/// error goes to `log` and nowhere else: what becomes of either changes neither the envelope
+/// nor the exit code.
+fn finish(
+    printed: &Printed,
+    then: Followup,
+    write: impl FnOnce(&Printed) -> ExitCode,
+    step: impl FnOnce(&str) -> Result<(), String>,
+    log: &mut impl io::Write,
+) -> ExitCode {
+    let code = write(printed);
+    if let Some(after) = then.prepare {
         let _ = prepare::spawn(&after);
+    }
+    let Some(store) = then.step else {
+        return code;
+    };
+    if let Err(why) = step(&store) {
+        let _ = writeln!(log, "swarmops: view work not stepped: {why}");
     }
     code
 }
@@ -62,7 +92,7 @@ pub fn run() -> ExitCode {
 /// What the command line asks for, done: the envelope to print, or nothing more for help or
 /// the version, which clap has printed, and the preparation to start once it is out. For a line
 /// that runs `mcp`, the envelope has gone to stderr ([`on_stderr`]).
-fn respond(started: Instant, stdout: Stdout) -> (Printed, Option<After>) {
+fn respond(started: Instant, stdout: Stdout) -> (Printed, Followup) {
     let args: Vec<OsString> = std::env::args_os().collect();
     let parsed = gitlike::parse(&args, &place);
     if parsed.runs_mcp() {
@@ -94,7 +124,7 @@ fn answer(
     args: &[OsString],
     started: Instant,
     stdout: Stdout,
-) -> (Printed, Option<After>) {
+) -> (Printed, Followup) {
     let env = |name: &str| std::env::var_os(name);
     match parsed {
         Parsed::Text(text) => {
@@ -104,7 +134,7 @@ fn answer(
                 stdout: String::new(),
                 exit: 0,
             };
-            (printed, None)
+            (printed, Followup::default())
         }
         Parsed::Usage {
             error,
@@ -117,7 +147,7 @@ fn answer(
             // git's line first, if the refused line is a git verb's.
             let first = gitlike::hint(&error, &path, bin.as_deref(), args, &place);
             let printed = commands::usage(&error, bin.as_deref(), &path, first, format, started);
-            (printed, None)
+            (printed, Followup::default())
         }
         Parsed::Run(cli, op) => match context::format(&cli.global, &env, stdout) {
             Ok(format) => {
@@ -132,11 +162,18 @@ fn answer(
                 let printed = guarded(op, format, started, Some(&ctx.used), || {
                     commands::run(&ctx, op, cli.command)
                 });
-                (printed, ctx.used.take_after())
+                let then = Followup {
+                    prepare: ctx.used.take_after(),
+                    step: ctx.used.take_step(),
+                };
+                (printed, then)
             }
             Err(error) => {
                 let format = context::json_format(&cli.global, stdout);
-                (commands::failed(op, error, format, started), None)
+                (
+                    commands::failed(op, error, format, started),
+                    Followup::default(),
+                )
             }
         },
     }
@@ -304,5 +341,62 @@ mod tests {
             printed.clone()
         });
         assert_eq!(passed, printed);
+    }
+
+    /// The envelope is written before the step runs, and a step's error goes to the log: the
+    /// exit code is the envelope's.
+    #[test]
+    fn the_reply_is_written_before_the_step() {
+        let order = std::cell::RefCell::new(Vec::new());
+        let printed = Printed {
+            stdout: "{}".to_owned(),
+            exit: 0,
+        };
+        let then = |store: &str| Followup {
+            prepare: None,
+            step: Some(store.to_owned()),
+        };
+
+        // 1. A step that works: after the write, on the store the operation named.
+        let mut log = Vec::new();
+        let code = finish(
+            &printed,
+            then("store"),
+            |_| {
+                order.borrow_mut().push("write".to_owned());
+                ExitCode::SUCCESS
+            },
+            |store| {
+                order.borrow_mut().push(format!("step {store}"));
+                Ok(())
+            },
+            &mut log,
+        );
+        assert_eq!(*order.borrow(), ["write", "step store"]);
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(log, Vec::<u8>::new());
+
+        // 2. A step that fails: logged, and the exit code stays the envelope's.
+        let code = finish(
+            &printed,
+            then("store"),
+            |_| ExitCode::SUCCESS,
+            |_| Err("the lock is held".to_owned()),
+            &mut log,
+        );
+        assert_eq!(code, ExitCode::SUCCESS);
+        let logged = String::from_utf8(log).unwrap();
+        assert!(logged.contains("the lock is held"), "{logged}");
+
+        // 3. No step noted, none run.
+        let mut log = Vec::new();
+        finish(
+            &printed,
+            Followup::default(),
+            |_| ExitCode::SUCCESS,
+            |_| panic!("a read-only operation steps nothing"),
+            &mut log,
+        );
+        assert_eq!(log, Vec::<u8>::new());
     }
 }
