@@ -5,10 +5,14 @@
 //! gives the first store's head. Every commit keeps its bytes: none is recorded with a loss, and
 //! the export of the head is the mirror's own commit.
 //!
+//! Each mirror is its own test, `mirror_<slot>`, the slot its place in the sorted names: a slow
+//! mirror then meets the test deadline alone, not the sum of all of them. A slot past the last
+//! mirror passes, and `slots_hold_every_mirror` fails when there are more mirrors than slots.
+//!
 //! Only with `SWARMOPS_HOST_REPOS=1` (the repository rules: tests that read real repositories on
-//! this host run only then); without it the test says so and passes. With it, a missing or empty
-//! directory fails the test. The weekly run's `host repositories` job refreshes the mirrors
-//! (`scripts/host-repos.py`) and runs it. No network: the mirrors are local directories, and the
+//! this host run only then); without it each test says so and passes. With it, a missing or empty
+//! directory fails the tests. The weekly run's `host repositories` job refreshes the mirrors
+//! (`scripts/host-repos.py`) and runs them. No network: the mirrors are local directories, and the
 //! export writes into a temporary one.
 
 use std::path::{Path, PathBuf};
@@ -37,6 +41,9 @@ const ACTOR: &str = "test/host-repos";
 
 /// The store ref, and the export's branch.
 const MAIN: &str = "main";
+
+/// How many mirrors the `mirror_<slot>` tests reach; the host lists five sources.
+const SLOTS: usize = 8;
 
 /// The mirrors `SWARMOPS_HOST_REPOS_DIR` holds, by name, sorted; `None` unless
 /// `SWARMOPS_HOST_REPOS=1`.
@@ -205,14 +212,59 @@ fn round_trip(name: &str, mirror: &Path) {
     );
 }
 
-/// Every mirror round-trips (the module's description); skipped unless `SWARMOPS_HOST_REPOS=1`.
-#[test]
-fn every_mirror_round_trips() {
+/// The mirror at `slot` round-trips (the module's description); skipped unless
+/// `SWARMOPS_HOST_REPOS=1`, and passed when no mirror holds that slot.
+fn slot(slot: usize) {
     let Some(mirrors) = mirrors() else {
-        println!("every_mirror_round_trips: skipped: set {ENABLE_ENV}=1 and {DIR_ENV}");
+        println!("mirror_{slot}: skipped: set {ENABLE_ENV}=1 and {DIR_ENV}");
         return;
     };
-    for (name, mirror) in &mirrors {
-        round_trip(name, mirror);
-    }
+    let Some((name, mirror)) = mirrors.get(slot) else {
+        println!("mirror_{slot}: skipped: {} mirrors", mirrors.len());
+        return;
+    };
+    round_trip(name, mirror);
+}
+
+/// One test per slot, so that each mirror runs in a process and under a deadline of its own.
+macro_rules! slots {
+    ($($test:ident = $slot:literal),+ $(,)?) => {
+        $(
+            #[test]
+            fn $test() {
+                slot($slot);
+            }
+        )+
+
+        /// The slots, counted, for the check that `SLOTS` names them all.
+        const DECLARED: usize = [$($slot),+].len();
+    };
+}
+
+slots!(
+    mirror_0 = 0,
+    mirror_1 = 1,
+    mirror_2 = 2,
+    mirror_3 = 3,
+    mirror_4 = 4,
+    mirror_5 = 5,
+    mirror_6 = 6,
+    mirror_7 = 7,
+);
+
+/// Every mirror has a slot: a mirror past the last one would go untested.
+#[test]
+fn slots_hold_every_mirror() {
+    assert_eq!(DECLARED, SLOTS, "the slots! list and SLOTS disagree");
+    let Some(mirrors) = mirrors() else {
+        println!("slots_hold_every_mirror: skipped: set {ENABLE_ENV}=1 and {DIR_ENV}");
+        return;
+    };
+    let names: Vec<&str> = mirrors.iter().map(|(name, _)| name.as_str()).collect();
+    assert!(
+        names.len() <= SLOTS,
+        "{} mirrors, {SLOTS} slots: add slots for {:?}",
+        names.len(),
+        &names[SLOTS..]
+    );
 }
