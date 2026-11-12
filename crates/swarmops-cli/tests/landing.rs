@@ -300,7 +300,8 @@ fn assert_every_change_on_main(store: &Store) {
 /// a thread running one process of the binary at a time as an agent does ([`CliLander`]), the
 /// lands of [`change`]. In an open loop (the default, the M4 plan's scored cell) each agent
 /// lands once every [`INTERVAL_VAR`] ms ± 20 % (2,000) until [`DURATION_VAR`] s (120) have
-/// passed ([`slot`]); with an interval of 0, a closed loop, [`LANDS_VAR`] lands each (10), each as
+/// passed ([`Arrival::Spread`]); with an interval of 0, a closed loop, [`LANDS_VAR`] lands each
+/// (10), each as
 /// soon as the last one ended. It prints one `landing-perf: ` line: the run's [`Stats`] (a land's
 /// latency from its read of `main` to the end of its last `land`), the lands that did not land,
 /// and the load before and after; then a second line with the gate's verdict ([`check_invariants`])
@@ -357,6 +358,23 @@ fn assert_every_change_on_main(store: &Store) {
 /// land that entered left, that every agent has a record for each scheduled land, and that the
 /// race left the test no child process ([`children_of`]): the last only under nextest, where the
 /// test has a process of its own, and the line is not printed otherwise.
+///
+/// [`ARRIVAL_VAR`] says how an open loop's lands (and moves) arrive ([`Arrival`]). Unset or
+/// `spread`, each agent lands at its own slots, as above. `herd` is the pool that wakes on one
+/// timer: every agent starts a land at each mark, `0, interval, 2·interval, …` before the
+/// duration, with no phase and no jitter, so a wave of [`LANDERS_VAR`] processes starts at once.
+/// With [`LANDERS_VAR`] at 1,000 and [`INTERVAL_VAR`] at 60,000 the two are the large-pool
+/// goals' pool that lands once a minute, spread and at the mark. Any other name fails the run;
+/// a closed loop has no arrival. A herd's pace reads `open interval_ms=<n> arrival=herd
+/// duration_s=<n>`, and its lands are also cut by the mark they began after ([`waves`]), the
+/// drain being the time from the mark to the end of the wave's last land:
+///
+/// ```text
+/// landing-wave: lane=<lane> n=<mark> lands=<n> landed=<n> drain_ms=<x>   one line per wave
+/// landing-perf: lane=<lane> waves=<n> drain_max_ms=<x>                   the longest drain
+/// ```
+///
+/// Nothing is asserted about a drain: the target is recorded in `docs/perf.md`.
 mod perf {
     use std::fs;
     use std::path::Path;
@@ -372,9 +390,11 @@ mod perf {
     use swarmops_ops::serve::refresh::{Freshness, freshness};
     use swarmops_testkit::landing::{
         CliLander, CliMover, LandRecord, Stats, check_invariants, check_moved, flagged, load1,
-        open_loop_lands, slot,
+        open_loop_lands,
     };
-    use swarmops_testkit::pool::{InFlight, Tally, children_of, mem_available_mib, tally};
+    use swarmops_testkit::pool::{
+        Arrival, InFlight, Tally, Wave, children_of, mem_available_mib, tally, waves,
+    };
 
     use super::{change, commit_base};
     use crate::support::{Store, Swarmops, agent};
@@ -400,11 +420,18 @@ mod perf {
     /// The lanes to run, by name, comma-separated ([`Lane::name`]); unset: all four.
     const LANES_VAR: &str = "SWARMOPS_TEST_CLI_LANDING_LANES";
 
+    /// How an open loop's lands arrive, by name ([`Arrival::name`]): `spread`, each agent at its
+    /// own slots, or `herd`, every agent at each interval's mark; unset: `spread`.
+    const ARRIVAL_VAR: &str = "SWARMOPS_TEST_CLI_LANDING_ARRIVAL";
+
     /// The seed of the open loop's slots.
     const SEED: u64 = 1;
 
     /// How the summary line starts.
     const TAG: &str = "landing-perf: ";
+
+    /// How a wave's line starts.
+    const WAVE_TAG: &str = "landing-wave: ";
 
     /// How a window's line starts.
     const WINDOW_TAG: &str = "landing-window: ";
@@ -541,6 +568,17 @@ mod perf {
         closed: usize,
         /// The lock sampler's interval, if asked.
         sample: Option<Duration>,
+        /// How an open loop's lands and moves arrive.
+        arrival: Arrival,
+    }
+
+    /// The arrival [`ARRIVAL_VAR`] names; [`Arrival::Spread`] if it is unset. A name that is no
+    /// arrival's fails the run.
+    fn arrival() -> Arrival {
+        let Ok(name) = std::env::var(ARRIVAL_VAR) else {
+            return Arrival::Spread;
+        };
+        Arrival::from_name(name.trim()).unwrap_or_else(|| panic!("no arrival {name:?}"))
     }
 
     /// Which records of a lane a line or a check is about.
@@ -598,6 +636,8 @@ mod perf {
         inflight: InFlight,
         /// Its agents' account: each one's scheduled lands against its records.
         tally: Tally,
+        /// Its lands by the mark they began after; empty unless a herd landed.
+        waves: Vec<Wave>,
         /// The test's child processes after the race ([`children_left`]).
         children: Option<Vec<u32>>,
     }
@@ -608,7 +648,8 @@ mod perf {
     }
 
     /// The `count` steps of one agent or mover `who` of an open loop at `shape`'s pace, each at
-    /// its slot after `go` (all at once in a closed loop), by `step`; each record's start set.
+    /// the time its arrival makes it due after `go` (all at once in a closed loop), by `step`;
+    /// each record's start set.
     fn paced(
         shape: &Shape,
         who: usize,
@@ -619,7 +660,7 @@ mod perf {
         let mut records = Vec::with_capacity(count);
         for n in 0..count {
             if !shape.interval.is_zero() {
-                let due = go + slot(SEED, who, n, shape.interval);
+                let due = go + shape.arrival.due(SEED, who, n, shape.interval);
                 thread::sleep(due.saturating_duration_since(Instant::now()));
             }
             let at = at_us(go);
@@ -631,12 +672,12 @@ mod perf {
     }
 
     /// How many steps agent or mover `who` makes at `shape`'s pace: a closed loop's count, or
-    /// an open loop's slots before its duration.
+    /// an open loop's due times before its duration, as its arrival gives them.
     fn scheduled(shape: &Shape, who: usize) -> usize {
         if shape.interval.is_zero() {
             return shape.closed;
         }
-        open_loop_lands(SEED, who, shape.interval, shape.duration)
+        (shape.arrival).count(SEED, who, shape.interval, shape.duration)
     }
 
     /// The test's live child processes, in pid order: after a race none, since every run of the
@@ -673,6 +714,7 @@ mod perf {
             sample: std::env::var(LOCK_SAMPLE_VAR)
                 .ok()
                 .map(|us| Duration::from_micros(us.parse().expect("a number"))),
+            arrival: arrival(),
         };
         let chosen = Lane::chosen();
         let mut land_p99 = [0_u64; 2];
@@ -762,9 +804,10 @@ mod perf {
             }
         }
 
-        // 4. The agents' account and the processes the race left, then the windows, which
-        //    must add up to the lane and hold no failure.
+        // 4. The agents' account and the processes the race left, a herd's waves, then the
+        //    windows, which must add up to the lane and hold no failure.
         let account = assert_account(lane, shape, &measured, children.as_deref());
+        let cut = print_waves(name, shape, &measured.lands);
         for (side, whole) in [(Side::Lands, &lands), (Side::Moves, &moves)] {
             let records = side.records(&measured);
             if records.is_empty() {
@@ -808,6 +851,7 @@ mod perf {
             moves,
             inflight: measured.inflight,
             tally: account,
+            waves: cut,
             children,
         }
     }
@@ -951,6 +995,7 @@ mod perf {
             duration: Duration::from_secs(3),
             closed: 0,
             sample: None,
+            arrival: Arrival::Spread,
         };
 
         let ran = run_lane(Lane::Landers, &shape);
@@ -974,6 +1019,48 @@ mod perf {
         assert!((1..=AGENTS).contains(&ran.inflight.peak()));
         assert_eq!(ran.children.unwrap_or_default(), Vec::<u32>::new());
         assert_eq!(ran.moves.landed, 0);
+    }
+
+    /// A herd on the `landers` lane alone, small enough for the regular suite: twelve agents all
+    /// land at each mark, every two seconds for four. Both waves hold every agent's land, all
+    /// landed; at least two lands were in flight at once and never more than the agents; every
+    /// land that entered the count left it, and the race left no child process.
+    #[test]
+    fn a_herd_lands_in_waves_and_leaves_no_child() {
+        const AGENTS: usize = 12;
+        const MARKS: usize = 2;
+        let shape = Shape {
+            landers: AGENTS,
+            movers: 0,
+            interval: Duration::from_secs(2),
+            duration: Duration::from_secs(4),
+            closed: 0,
+            sample: None,
+            arrival: Arrival::Herd,
+        };
+
+        let ran = run_lane(Lane::Landers, &shape);
+
+        // 1. Every agent landed at every mark.
+        let lands = AGENTS * MARKS;
+        assert_eq!(ran.lands.landed, u64::try_from(lands).expect("fits"));
+        let cut: Vec<(u64, usize, usize)> = (ran.waves.iter())
+            .map(|wave| (wave.n, wave.lands, wave.landed))
+            .collect();
+        assert_eq!(cut, [(0, AGENTS, AGENTS), (1, AGENTS, AGENTS)]);
+        assert_eq!(
+            (ran.tally.identities, ran.tally.complete, &ran.tally.short),
+            (AGENTS, AGENTS, &Vec::new())
+        );
+
+        // 2. A wave's lands are in flight together, and none is left.
+        let peak = ran.inflight.peak();
+        assert!((2..=AGENTS).contains(&peak), "in flight at once: {peak}");
+        assert_eq!(
+            (ran.inflight.entered(), ran.inflight.left()),
+            (lands, lands)
+        );
+        assert_eq!(ran.children.unwrap_or_default(), Vec::<u32>::new());
     }
 
     /// Prints lane `lane`'s line for `what` (`lands` or `moves`), its numbers `stats`; none for
@@ -1012,11 +1099,48 @@ mod perf {
         if shape.interval.is_zero() {
             return format!("closed lands={}", shape.closed);
         }
+
+        // A spread is the pace of every earlier run and is not named.
+        let arrival = match shape.arrival {
+            Arrival::Herd => format!(" arrival={}", shape.arrival.name()),
+            _ => String::new(),
+        };
         format!(
-            "open interval_ms={} duration_s={}",
+            "open interval_ms={}{arrival} duration_s={}",
             shape.interval.as_millis(),
             shape.duration.as_secs()
         )
+    }
+
+    /// Prints a herd's waves in lane `name` ([`waves`]: `records` cut by the mark each began
+    /// after), a line each and their count with the longest drain, and returns them; none, and
+    /// no line, unless `shape` is an open loop of a herd.
+    fn print_waves(name: &str, shape: &Shape, records: &[Vec<LandRecord>]) -> Vec<Wave> {
+        if shape.interval.is_zero() || shape.arrival != Arrival::Herd {
+            return Vec::new();
+        }
+        let ms = |us: u64| Duration::from_micros(us).as_secs_f64() * 1_000.0;
+
+        // 1. Each wave: its mark's number, its lands, and from the mark to its last land's end.
+        let cut = waves(records, shape.interval);
+        for wave in &cut {
+            println!(
+                "{WAVE_TAG}lane={name} n={} lands={} landed={} drain_ms={:.3}",
+                wave.n,
+                wave.lands,
+                wave.landed,
+                ms(wave.drain_us),
+            );
+        }
+
+        // 2. The lane's line.
+        let longest = cut.iter().map(|wave| wave.drain_us).max().unwrap_or(0);
+        println!(
+            "{TAG}lane={name} waves={} drain_max_ms={:.3}",
+            cut.len(),
+            ms(longest)
+        );
+        cut
     }
 
     /// Prints `records`' windows ([`WINDOW`]) as lane `name`'s `what`, and asserts that their
