@@ -1,0 +1,2 @@
+Verify and repair cover FORMAT 3 metadata and the blobs a store's facts name.
+commit 690d869cad882e8c6b1b067081d0672b5c655140

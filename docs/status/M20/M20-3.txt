@@ -1,0 +1,2 @@
+A FORMAT 3 store indexes its facts in a sixth index file and finds them by kind and type.
+commit a836acee6e8e033f2ff58ec8c924dff56152a97f

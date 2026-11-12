@@ -1,0 +1,2 @@
+The store counts object and journal file calls, and waits for and holds of meta/lock.
+commit 6e9dac27f0ad5098b91fd2156a7e826c9bc5676a

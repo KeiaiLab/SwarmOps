@@ -1,0 +1,2 @@
+A JSON Schema checker joins the test kit.
+commit dfe17fe1371781818ca404bbebd93d81aa17d435

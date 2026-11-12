@@ -1,0 +1,2 @@
+MCP results are checked against their schema and compared with the CLI's envelopes, also from outside any checkout.
+commit 4befe4eef0a4f8a3383925a77dd5747043d05bd0

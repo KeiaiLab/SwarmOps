@@ -1,0 +1,2 @@
+FORMAT 3 adds a journal checkpoint, per-frame nonces and a feature list; a store with a later feature list is refused as too new.
+commit fa073ce545bf838f8917784724771acff9861166

@@ -1,0 +1,2 @@
+Health compares a recent window of operation and serve records with the hour before it; its record and read types join the API.
+commit 14175188cd16cb741f8ab94918d81936ac386882

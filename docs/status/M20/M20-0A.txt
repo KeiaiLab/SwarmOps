@@ -1,0 +1,2 @@
+FORMAT 3 fact bodies hold no free text, and entity ids take the frame's sequence number.
+commit 50774033f8bf964c38c77b8fa69e3be94756b4ea

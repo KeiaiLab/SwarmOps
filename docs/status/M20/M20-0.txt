@@ -1,0 +1,2 @@
+The FORMAT 3 marker, paths and fact and frame codecs are frozen with golden vectors; FORMAT 1 and 2 frames refuse facts.
+commit 6b2d27889eeacd7fe6519a1fabdfabbe401966a4

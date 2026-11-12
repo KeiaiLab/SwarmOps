@@ -1,0 +1,2 @@
+Scale cases run on bulk fixtures of 1,000 and 1,000,000 changesets, the large one built a part at a time.
+commit 6a972abb590a5c4427fefa80ed337056d06908f7

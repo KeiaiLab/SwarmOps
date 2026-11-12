@@ -1,0 +1,2 @@
+Counted-work gates require the same file, journal and lock counts on a store of 1,000 changesets as on one of 50,000.
+commit 065d12e90aecb8ed48637ac22e1b53b26a43ad95

@@ -1,0 +1,2 @@
+FORMAT 3 sorted runs under a manifest are built outside the write lock and stepped by gc; a damaged run hides and never misleads.
+commit 88b02dbd1d875d8add67323075376399b7675744

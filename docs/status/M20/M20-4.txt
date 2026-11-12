@@ -1,0 +1,2 @@
+The upgrade command takes a FORMAT 2 store to FORMAT 3, and gc collects what the upgrade leaves behind.
+commit 3a561c916ac4dfd7ef60b607e221ec9bc2e960c2

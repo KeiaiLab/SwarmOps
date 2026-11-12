@@ -1,0 +1,2 @@
+Health renders as text and as OpenMetrics.
+commit ee575ec73f72a3629e6c51fea639c50f850e1900
