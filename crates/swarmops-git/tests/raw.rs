@@ -1,10 +1,12 @@
 //! git's commit and tree bytes, parsed and rendered: every object of the fixtures renders back to
 //! its own bytes, a commit written otherwise than git writes it parses but renders otherwise, and
-//! what the fields cannot hold at all is malformed.
+//! what the fields cannot hold at all is malformed. A tag's head is parsed and its signature
+//! named.
 
 use proptest::prelude::*;
 use swarmops_git::{
-    GitOid, RawCommit, RawError, RawIdent, RawKind, RawTree, RawTreeEntry, git_hash,
+    GitOid, RawCommit, RawError, RawIdent, RawKind, RawTag, RawTree, RawTreeEntry, SignatureKind,
+    git_hash,
 };
 use swarmops_testkit::git;
 
@@ -443,5 +445,178 @@ proptest! {
             prop_assert_eq!(tree.render(), bytes.clone());
         }
         let _ = RawCommit::parse(&bytes);
+    }
+}
+
+/// A tag of `object`'s `kind`, named `name`, by `tagger` (none when empty), its message `message`.
+fn tag(object: &str, kind: &str, name: &str, tagger: &str, message: &[u8]) -> Vec<u8> {
+    let mut raw = format!("object {object}\ntype {kind}\ntag {name}\n").into_bytes();
+    if !tagger.is_empty() {
+        raw.extend_from_slice(format!("tagger {tagger}\n").as_bytes());
+    }
+    raw.push(b'\n');
+    raw.extend_from_slice(message);
+    raw
+}
+
+/// The commit every inline tag names.
+const COMMIT: &str = "1111111111111111111111111111111111111111";
+
+/// The tagger of the inline tags.
+const TAGGER: &str = "T <t@x> 1700000000 +0100";
+
+/// A PGP signature block, as `git tag -s` appends it to the message.
+const PGP_BLOCK: &[u8] = b"-----BEGIN PGP SIGNATURE-----\n\niQEz\n-----END PGP SIGNATURE-----\n";
+
+/// An SSH signature block, as `git tag -s` with `gpg.format=ssh` appends it.
+const SSH_BLOCK: &[u8] = b"-----BEGIN SSH SIGNATURE-----\nU1NIU0lH\n-----END SSH SIGNATURE-----\n";
+
+#[test]
+fn a_tag_parses_its_head() {
+    let raw = tag(COMMIT, "commit", "v1", TAGGER, b"release\n");
+    let parsed = RawTag::parse(&raw).unwrap();
+    assert_eq!(parsed.object(), oid(COMMIT));
+    assert_eq!(parsed.kind(), RawKind::Commit);
+    assert_eq!(parsed.name(), b"v1");
+    assert_eq!(
+        parsed.tagger(),
+        Some(&RawIdent::new(
+            b"T".to_vec(),
+            b"t@x".to_vec(),
+            1_700_000_000,
+            3600,
+            false
+        ))
+    );
+    assert_eq!(RawTag::signature(&raw), None);
+}
+
+#[test]
+fn a_tag_without_a_tagger_parses() {
+    // git's oldest tags carry no tagger line.
+    let raw = tag(COMMIT, "commit", "v2.6.11", "", b"old\n");
+    let parsed = RawTag::parse(&raw).unwrap();
+    assert_eq!(parsed.name(), b"v2.6.11");
+    assert_eq!(parsed.tagger(), None);
+}
+
+#[test]
+fn a_tag_with_an_unknown_header_parses() {
+    // A header the parse does not know, multi-line or not, after the tagger or in its place.
+    let header: &[u8] = b"x-custom some value\nmergetag a\n b\n";
+    for tagger in [TAGGER, ""] {
+        let mut raw = tag(COMMIT, "commit", "v1", tagger, b"m\n");
+        let head_end = raw.windows(2).position(|pair| pair == b"\n\n").unwrap() + 1;
+        raw.splice(head_end..head_end, header.iter().copied());
+        let parsed = RawTag::parse(&raw).unwrap_or_else(|error| panic!("{tagger:?}: {error}"));
+        assert_eq!(parsed.object(), oid(COMMIT), "{tagger:?}");
+        assert_eq!(parsed.name(), b"v1", "{tagger:?}");
+        assert_eq!(parsed.tagger().is_some(), !tagger.is_empty(), "{tagger:?}");
+    }
+}
+
+#[test]
+fn a_signed_tag_names_its_signature() {
+    // A block in the message, as git appends it.
+    let pgp = tag(
+        COMMIT,
+        "commit",
+        "v1",
+        TAGGER,
+        &[b"m\n", PGP_BLOCK].concat(),
+    );
+    assert_eq!(RawTag::signature(&pgp), Some(SignatureKind::Pgp));
+    let ssh = tag(
+        COMMIT,
+        "commit",
+        "v1",
+        TAGGER,
+        &[b"m\n", SSH_BLOCK].concat(),
+    );
+    assert_eq!(RawTag::signature(&ssh), Some(SignatureKind::Ssh));
+    let x509 = tag(
+        COMMIT,
+        "commit",
+        "v1",
+        TAGGER,
+        b"m\n-----BEGIN SIGNED MESSAGE-----\nMIAG\n-----END SIGNED MESSAGE-----\n",
+    );
+    assert_eq!(RawTag::signature(&x509), Some(SignatureKind::X509));
+
+    // A `gpgsig-sha256` header, as literal bytes (`git mktag` 2.39.5 may refuse it).
+    let mut header = b"gpgsig-sha256 ".to_vec();
+    for (at, line) in PGP_BLOCK
+        .trim_ascii_end()
+        .split(|&byte| byte == b'\n')
+        .enumerate()
+    {
+        if at > 0 {
+            header.extend_from_slice(b"\n ");
+        }
+        header.extend_from_slice(line);
+    }
+    header.push(b'\n');
+    let mut raw = tag(COMMIT, "commit", "v1", TAGGER, b"m\n");
+    let head_end = raw.windows(2).position(|pair| pair == b"\n\n").unwrap() + 1;
+    raw.splice(head_end..head_end, header);
+    assert!(RawTag::parse(&raw).is_ok());
+    assert_eq!(RawTag::signature(&raw), Some(SignatureKind::Pgp));
+
+    // A marker inside a line is no signature.
+    let quoted = tag(
+        COMMIT,
+        "commit",
+        "v1",
+        TAGGER,
+        b"see > -----BEGIN PGP SIGNATURE-----\n",
+    );
+    assert_eq!(RawTag::signature(&quoted), None);
+}
+
+#[test]
+fn a_tag_of_a_tag_names_its_kind() {
+    for (name, kind) in [
+        ("commit", RawKind::Commit),
+        ("tag", RawKind::Tag),
+        ("tree", RawKind::Tree),
+        ("blob", RawKind::Blob),
+    ] {
+        let parsed = RawTag::parse(&tag(COMMIT, name, "v1", TAGGER, b"m\n")).unwrap();
+        assert_eq!(parsed.kind(), kind, "{name}");
+    }
+}
+
+#[test]
+fn a_malformed_tag_is_refused() {
+    let object = format!("object {COMMIT}\n");
+    let kind = "type commit\n";
+    let name = "tag v1\n";
+    let cases: [(&str, Vec<u8>); 7] = [
+        ("no object", format!("{kind}{name}\nm\n").into_bytes()),
+        (
+            "bad hex",
+            format!("object {}g\n{kind}{name}\nm\n", &COMMIT[..39]).into_bytes(),
+        ),
+        (
+            "a 39-digit object",
+            format!("object {}\n{kind}{name}\nm\n", &COMMIT[..39]).into_bytes(),
+        ),
+        (
+            "unknown type",
+            format!("{object}type branch\n{name}\nm\n").into_bytes(),
+        ),
+        ("no tag line", format!("{object}{kind}\nm\n").into_bytes()),
+        (
+            "no blank line",
+            format!("{object}{kind}{name}tagger {TAGGER}\n").into_bytes(),
+        ),
+        ("nothing", Vec::new()),
+    ];
+    for (case, raw) in cases {
+        assert!(
+            matches!(RawTag::parse(&raw), Err(RawError::Malformed { .. })),
+            "{case}: {:?}",
+            RawTag::parse(&raw)
+        );
     }
 }

@@ -1,10 +1,13 @@
-//! git's commit and tree bytes, parsed into their fields and rendered back.
+//! git's commit and tree bytes, parsed into their fields and rendered back, and the head of
+//! git's tag bytes, parsed.
 //!
 //! A commit is a line `tree <id>`, a line `parent <id>` for each parent, `author <ident>`,
 //! `committer <ident>`, any other header lines, a blank line, and the message to the end. A header
 //! whose value has more than one line goes on in continuation lines, each starting with one space.
 //! An ident is `name SP '<' email '>' SP secs SP (+|-)HHMM`. A tree is a run of entries, each
-//! `mode SP name NUL` followed by the 20 bytes of the entry's id.
+//! `mode SP name NUL` followed by the 20 bytes of the entry's id. A tag is a line `object <id>`,
+//! `type <kind>`, `tag <name>`, an optional `tagger <ident>`, any other header lines, a blank
+//! line, and the message, a signature block at its end included ([`RawTag`]).
 //!
 //! [`RawCommit::parse`] is lenient wherever the fields can still hold something, and
 //! [`RawCommit::render`] writes what the fields hold the one way git writes it: a commit git wrote
@@ -13,7 +16,7 @@
 //! [`RawError::Malformed`]. A tree is kept exactly as stored, the digits of its modes and the
 //! order of its entries included, so every tree that parses renders back to its bytes.
 
-use crate::GitOid;
+use crate::{GitOid, RawKind};
 
 /// A git commit's fields, as its bytes hold them.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,13 +83,15 @@ impl RawTreeEntry {
     }
 }
 
-/// Bytes that are no commit or tree the fields can hold.
+/// Bytes that are no commit, tree or tag the fields can hold.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum RawError {
     /// The bytes cannot be held at all: a commit whose first line is not its tree, an id that is
     /// not 40 hex digits, no author or committer after the parents, a `parent` after the author;
-    /// a tree entry without its mode's octal digits, its name's NUL or its id's 20 bytes.
+    /// a tree entry without its mode's octal digits, its name's NUL or its id's 20 bytes; a tag
+    /// whose first three lines are not its object, its type (one of git's four kinds) and its
+    /// name, or whose head no blank line ends.
     #[error("not a git object this crate can hold: {what}")]
     Malformed {
         /// What is wrong, in a few words.
@@ -346,6 +351,143 @@ fn parse_date(date: &[u8]) -> Option<(i64, i32, bool)> {
         if west { -offset } else { offset },
         west && offset == 0,
     ))
+}
+
+/// The head of a git tag: the object it names, that object's kind, the tag's name and its
+/// tagger. The bytes are never rendered back: a tag is kept as git wrote it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RawTag {
+    /// The object of the `object` line.
+    object: GitOid,
+    /// Its kind, as the `type` line names it.
+    kind: RawKind,
+    /// The `tag` line's name, which may differ from the ref's.
+    name: Vec<u8>,
+    /// The `tagger` line's ident, if the fourth line is one (git's oldest tags have none).
+    tagger: Option<RawIdent>,
+}
+
+/// The kind of signature a tag carries, by the first line of its block. Nothing verifies it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SignatureKind {
+    /// OpenPGP: `-----BEGIN PGP SIGNATURE-----` or `-----BEGIN PGP MESSAGE-----`.
+    Pgp,
+    /// SSH: `-----BEGIN SSH SIGNATURE-----`.
+    Ssh,
+    /// X.509 (gpgsm): `-----BEGIN SIGNED MESSAGE-----`.
+    X509,
+}
+
+/// The first line of each signature block git writes, and its kind (git's `gpg-interface.c`).
+const SIGNATURE_MARKERS: [(&[u8], SignatureKind); 4] = [
+    (b"-----BEGIN PGP SIGNATURE-----", SignatureKind::Pgp),
+    (b"-----BEGIN PGP MESSAGE-----", SignatureKind::Pgp),
+    (b"-----BEGIN SSH SIGNATURE-----", SignatureKind::Ssh),
+    (b"-----BEGIN SIGNED MESSAGE-----", SignatureKind::X509),
+];
+
+/// The header keys whose value is a signature over the rest of a tag.
+const SIGNATURE_HEADERS: [&[u8]; 2] = [b"gpgsig", b"gpgsig-sha256"];
+
+impl RawTag {
+    /// The head of the tag whose bytes, without git's `tag <len>\0` header, are `bytes`: lines
+    /// `object <40 hex digits>`, `type <commit|tree|blob|tag>` and `tag <name>`, in that order,
+    /// then an optional `tagger <ident>`, read as [`RawIdent::parse`] reads one. Header lines it
+    /// does not know (`gpgsig`, `gpgsig-sha256`, any other) are passed over, and the message is
+    /// not read. Anything else is [`RawError::Malformed`], a head no blank line ends included.
+    pub fn parse(bytes: &[u8]) -> Result<RawTag, RawError> {
+        // 1. The head must end in a blank line: the first empty line ends it.
+        if !bytes.starts_with(b"\n") && !bytes.windows(2).any(|pair| pair == b"\n\n") {
+            return Err(malformed("a tag whose head no blank line ends"));
+        }
+        let (headers, _) = split_headers(bytes);
+        let mut headers = headers.into_iter();
+
+        // 2. `object`, `type` and `tag`, in git's order.
+        let object = match headers.next() {
+            Some((key, value)) if key == b"object" => GitOid::from_hex(&value)
+                .ok_or(malformed("a tag's object id is not 40 hex digits"))?,
+            _ => return Err(malformed("a tag's first line is not its object")),
+        };
+        let kind = match headers.next() {
+            Some((key, value)) if key == b"type" => {
+                kind_named(&value).ok_or(malformed("a tag's type is no git object kind"))?
+            }
+            _ => return Err(malformed("a tag's second line is not its type")),
+        };
+        let name = match headers.next() {
+            Some((key, value)) if key == b"tag" => value,
+            _ => return Err(malformed("a tag's third line is not its name")),
+        };
+
+        // 3. The tagger, when the next line is one; other headers are kept in the bytes only.
+        let tagger = headers
+            .next()
+            .filter(|(key, _)| *key == b"tagger")
+            .map(|(_, value)| RawIdent::parse(&value));
+        Ok(RawTag {
+            object,
+            kind,
+            name,
+            tagger,
+        })
+    }
+
+    /// The object the tag names.
+    pub fn object(&self) -> GitOid {
+        self.object
+    }
+
+    /// The kind of the object it names, as its `type` line says.
+    pub fn kind(&self) -> RawKind {
+        self.kind
+    }
+
+    /// The name of its `tag` line.
+    pub fn name(&self) -> &[u8] {
+        &self.name
+    }
+
+    /// Its tagger, if it has one.
+    pub fn tagger(&self) -> Option<&RawIdent> {
+        self.tagger.as_ref()
+    }
+
+    /// The kind of signature the tag `bytes` carry, not verified: a `gpgsig` or `gpgsig-sha256`
+    /// header's, else the block that starts at the message's last line opening with one of git's
+    /// markers (`-----BEGIN PGP SIGNATURE-----`, …); `None` for an unsigned tag.
+    pub fn signature(bytes: &[u8]) -> Option<SignatureKind> {
+        let (headers, message) = split_headers(bytes);
+
+        // 1. A signature header names its kind by its first line.
+        let header = headers
+            .iter()
+            .find(|(key, _)| SIGNATURE_HEADERS.contains(key))
+            .and_then(|(_, value)| marked(value));
+        if header.is_some() {
+            return header;
+        }
+
+        // 2. Else the last line of the message that opens a block, as git finds it.
+        message.split(|&byte| byte == b'\n').rev().find_map(marked)
+    }
+}
+
+/// The signature kind whose marker `line` starts with.
+fn marked(line: &[u8]) -> Option<SignatureKind> {
+    SIGNATURE_MARKERS
+        .iter()
+        .find(|(marker, _)| line.starts_with(marker))
+        .map(|&(_, kind)| kind)
+}
+
+/// The object kind git's name `name` names: `commit`, `tree`, `blob` or `tag`.
+fn kind_named(name: &[u8]) -> Option<RawKind> {
+    [RawKind::Commit, RawKind::Tree, RawKind::Blob, RawKind::Tag]
+        .into_iter()
+        .find(|kind| kind.as_str().as_bytes() == name)
 }
 
 impl RawTree {

@@ -6,7 +6,7 @@
 //!   ([`ObjectFormat`]), and [`git_hash`], the id git gives an object's bytes.
 //! - [`raw`]: git's commit and tree bytes parsed into their fields ([`RawCommit`], [`RawIdent`],
 //!   [`RawTree`]) and rendered back: a commit git wrote renders to its own bytes, and one written
-//!   another way to other bytes.
+//!   another way to other bytes; a tag's head parsed ([`RawTag`], [`SignatureKind`]).
 //! - [`source`]: [`GitSource`], what the import reads from a repository: refs resolved to
 //!   commits, and objects' raw bytes, each checked against its id.
 //! - [`gix_source`]: [`GixSource`], the [`GitSource`] of a repository on disk.
@@ -97,7 +97,7 @@ pub use oid::{GitOid, ObjectFormat, ParseGitOidError, RawKind, git_hash};
 /// The phase log's git totals written (the test hooks only, the M18 design §2.2).
 #[cfg(feature = "test-hooks")]
 pub use phase::write_phases;
-pub use raw::{RawCommit, RawError, RawIdent, RawTree, RawTreeEntry};
+pub use raw::{RawCommit, RawError, RawIdent, RawTag, RawTree, RawTreeEntry, SignatureKind};
 pub use render::{commit_bytes, tree_bytes};
 pub use sink::{BranchUpdate, GitSink, SinkError, Stored};
 pub use source::{GitSource, SourceError, Unsupported};
