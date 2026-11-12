@@ -33,12 +33,14 @@ const FRAME_BATCH: usize = 4_096;
 /// [`MetaCheck::meta_corrupt`] line starts with: `journal3.ckpt` lost and a frame without a nonce
 /// where the base seq would be, a fact record whose feature `meta/features` does not list, a
 /// manifest whose runs do not split what the checkpoint passed (M1, M2), a run file failing its
-/// sections' CRC, and a frame past the base seq without its nonce.
+/// sections' CRC, a frame past the base seq without its nonce, and a fact row, or a fact run's
+/// entry, that disagrees with the journal's fact (§2.8).
 const BASE_SEQ_LOST: &str = "base_seq_lost";
 const FEATURE_UNLISTED: &str = "feature_unlisted";
 const BROKEN_PARTITION: &str = "broken_partition";
 const RUN_CRC: &str = "run_crc";
 const MISSING_NONCE: &str = "missing_nonce";
+const FACT_ROW: &str = "fact_row";
 
 /// What a manifest that reads whole but does not split its domains' records says, as its decode
 /// refuses it ([`runs::read_manifest`]).
@@ -93,9 +95,9 @@ pub struct MetaCheck {
 
 impl MetaCheck {
     /// The names of the FORMAT 3 findings among [`MetaCheck::meta_corrupt`], each once, in the
-    /// order found: `base_seq_lost`, `feature_unlisted`, `broken_partition`, `run_crc` and
-    /// `missing_nonce` (the FORMAT 3 design §2.3, §2.5, §2.6, §2.7). Each such line starts with its
-    /// name.
+    /// order found: `base_seq_lost`, `feature_unlisted`, `broken_partition`, `run_crc`,
+    /// `missing_nonce` and `fact_row` (the FORMAT 3 design §2.3, §2.5, §2.6, §2.7, §2.8). Each
+    /// such line starts with its name.
     pub fn findings(&self) -> &[&'static str] {
         &self.findings
     }
@@ -146,7 +148,7 @@ struct Run {
     index_reads: u64,
     /// The checkpoint's file, by its place in the store: `meta/journal.ckpt`, or in FORMAT 2
     /// `meta/journal2.ckpt`, in FORMAT 3 `meta/journal3.ckpt`.
-    ckpt_file: String,
+    ckpt_file: &'static str,
     findings: Vec<&'static str>,
     fact_blobs: Vec<(ObjectId, [u8; 32])>,
 }
@@ -187,10 +189,7 @@ impl Run {
     /// Reads and compares the metadata files.
     fn metadata(&mut self, store: &MetaStore) -> Result<(), StoreError> {
         let layout = &store.layout;
-        let ckpt = layout.journal_ckpt();
-        self.ckpt_file = (ckpt.strip_prefix(layout.root()))
-            .unwrap_or(&ckpt)
-            .to_string();
+        self.ckpt_file = ckpt_file(layout.format());
         let listed = self.feature_list(store)?;
         let (journal, journal_damage) = match open_journal(store)? {
             Ok(journal) => (Some(journal), None),
@@ -211,7 +210,9 @@ impl Run {
             None => 0,
         };
         let ref_files = store.ref_files()?;
+        let base_lost = journal.is_some() && self.base_lost(layout.format(), ckpt_state);
         let (frames, whole) = match &journal {
+            Some(_) if base_lost => (Vec::new(), false),
             Some(journal) => {
                 let (frames, corrupt) = read_frames(journal)?;
                 self.journal_corrupt = corrupt;
@@ -368,6 +369,24 @@ impl Run {
             Err(StoreError::JournalCorrupt { offset }) => Ok(CkptState::Disagreed(offset)),
             Err(e) => Err(e),
         }
+    }
+
+    /// Whether a store of `format`, its journal open, has lost the base seq its frames are read
+    /// by: FORMAT 3's, with a `journal3.ckpt` that holds no checkpoint. Reported as
+    /// `base_seq_lost`; the frames are not read by a base that is not there.
+    fn base_lost(&mut self, format: StoreFormat, ckpt: CkptState) -> bool {
+        if format != StoreFormat::V3 || !matches!(ckpt, CkptState::Malformed) {
+            return false;
+        }
+        self.finding(
+            BASE_SEQ_LOST,
+            &format!(
+                "{} is lost: the frames, which are read by its base seq, are not checked; \
+                 repair finds the base seq in the journal",
+                self.ckpt_file
+            ),
+        );
+        true
     }
 
     /// Whether the checkpoint is a frame boundary (0, a listed frame's start, or the end of the
@@ -554,9 +573,11 @@ impl Run {
         listed: Option<&[String]>,
     ) -> Result<(), StoreError> {
         // 1. The frame that stops the journal: a feature listed since, of a newer build, or one
-        //    whose records end in no nonce.
+        //    whose records end in no nonce. A list that is none is reported already.
         if let Some(offset) = self.journal_corrupt {
-            features::check(&store.layout, &store.fs)?;
+            if listed.is_some() {
+                features::check(&store.layout, &store.fs)?;
+            }
             let place = Place {
                 seq: bytes::to_u64(frames.len()),
                 prev_crc: frames.last().map_or(0, |frame| frame.crc),
@@ -607,7 +628,7 @@ impl Run {
             || self
                 .meta_corrupt
                 .iter()
-                .any(|line| line.starts_with(&self.ckpt_file));
+                .any(|line| line.starts_with(self.ckpt_file));
         if lost {
             self.finding(
                 BASE_SEQ_LOST,
@@ -759,10 +780,13 @@ impl Run {
             wrong = [wrong, first].into_iter().flatten().min();
         }
         if let Some(rec) = wrong {
-            self.meta_corrupt.push(format!(
-                "meta/idx/facts.col row {rec}, or a fact run naming it, disagrees with the \
-                 journal: rebuild the index"
-            ));
+            self.finding(
+                FACT_ROW,
+                &format!(
+                    "meta/idx/facts.col row {rec}, or a fact run naming it, disagrees with the \
+                     journal: rebuild the index"
+                ),
+            );
         }
         Ok(())
     }
@@ -915,6 +939,16 @@ fn crc_fails(store: &MetaStore, path: &camino::Utf8Path) -> Result<bool, StoreEr
     file.read_exact_at(&mut crc, end)
         .map_err(|e| failed(FileOp::ReadAt, e))?;
     Ok(u32::from_le_bytes(crc) != hasher.finalize())
+}
+
+/// The checkpoint's file by its place in a store of `format`, as a finding names it: never
+/// worked out from the store's root, a host path.
+fn ckpt_file(format: StoreFormat) -> &'static str {
+    match format {
+        StoreFormat::V1 => "meta/journal.ckpt",
+        StoreFormat::V2 => "meta/journal2.ckpt",
+        StoreFormat::V3 => "meta/journal3.ckpt",
+    }
 }
 
 /// A handle on the journal, or what is wrong with it if one of its files is missing: the

@@ -364,6 +364,11 @@ impl<O: ObjectStore> Repo<O> {
                 cause: MismatchCause::Journal | MismatchCause::SortedView,
                 ..
             } => true,
+            // A dry run that rebuilt the offsets in its stage: the checkpoint FORMAT 3's
+            // rebuild writes again is judged there, as the repair's verify judges it.
+            VerifyProblem::MetaCorrupt(what) if dry_meta.is_some() && is_v3_ckpt_lost(what) => {
+                false
+            }
             VerifyProblem::MetaCorrupt(what) => is_index_or_ckpt_corrupt(what),
             _ => false,
         });
@@ -747,7 +752,12 @@ fn stage_dry_run_offsets(layout: &Layout) -> Result<(TempStage, Layout), StoreEr
 }
 
 /// Restores `layout`'s original checkpoint into `staged` after a dry-run `rebuild_offsets`.
+/// Not FORMAT 3's when it holds no checkpoint: the rebuild wrote it again with the base seq
+/// it found, in the stage as it does in the store, and the rest is judged by that one.
 fn restore_staged_ckpt(layout: &Layout, staged: &Layout) -> Result<(), StoreError> {
+    if layout.format() == StoreFormat::V3 && holds_no_ckpt(layout) {
+        return Ok(());
+    }
     if layout.journal_ckpt().exists() {
         fs::copy(
             layout.journal_ckpt().as_std_path(),
@@ -764,15 +774,34 @@ fn restore_staged_ckpt(layout: &Layout, staged: &Layout) -> Result<(), StoreErro
     Ok(())
 }
 
+/// Whether FORMAT 3's checkpoint file of `layout` is there and holds no checkpoint: the
+/// journal's own read of it fails as `InvalidData`.
+fn holds_no_ckpt(layout: &Layout) -> bool {
+    let read = Journal::open(layout, Arc::new(RealFs::new())).and_then(|journal| journal.ckpt());
+    matches!(
+        read,
+        Err(StoreError::Io(e))
+            if e.kind() == io::ErrorKind::InvalidData
+                && e.file.as_deref() == Some(Utf8Path::new(V3_CKPT))
+    )
+}
+
+/// Whether a [`VerifyProblem::MetaCorrupt`] message says FORMAT 3's checkpoint holds none: the
+/// file [`fsck::rebuild_offsets`] writes again.
+fn is_v3_ckpt_lost(what: &str) -> bool {
+    what.strip_prefix(V3_CKPT)
+        .is_some_and(|rest| rest.starts_with(" does not hold "))
+}
+
 /// Whether a [`VerifyProblem::MetaCorrupt`] message names a damaged index or checkpoint: in
-/// FORMAT 3 also its fact rows, a manifest that does not split the records (`broken_partition`)
-/// and a run failing its CRC (`run_crc`).
+/// FORMAT 3 also its fact rows (`fact_row`), a manifest that does not split the records
+/// (`broken_partition`) and a run failing its CRC (`run_crc`).
 fn is_index_or_ckpt_corrupt(what: &str) -> bool {
     what.starts_with("the changeset index does not open")
         || what.starts_with("meta/journal.ckpt ")
         || what.starts_with("meta/journal2.ckpt ")
         || what.starts_with("meta/journal3.ckpt ")
-        || what.starts_with("meta/idx/facts.col ")
+        || what.starts_with("fact_row: ")
         || what.starts_with("broken_partition: ")
         || what.starts_with("run_crc: ")
 }

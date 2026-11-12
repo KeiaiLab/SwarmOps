@@ -529,6 +529,51 @@ fn rebuild_index_v3_writes_an_empty_manifest_and_keeps_base() {
     assert_eq!(store.check().unwrap().problems, Vec::<String>::new());
 }
 
+/// A FORMAT 3 store an upgrade made and no write followed holds only FORMAT 2's frames, none
+/// ending in a nonce. With `journal3.ckpt` lost its base seq is lost too, and no frame shows it:
+/// the check names the finding `base_seq_lost` (and, the counts lost with it, the upgrade's run
+/// as past the checkpoint), and the rebuild of the offsets is refused at 0, every file as it was
+/// (the FORMAT 3 design §2.3). The same journal with its checkpoint reads whole.
+#[test]
+fn nonce_less_journal_is_refused_with_its_finding() {
+    use swarmops_store::meta::upgrade;
+
+    // 1. Three FORMAT 2 frames, upgraded, nothing written since.
+    let (_dir, v2) = build(StoreFormat::V2, 3);
+    fs::write(v2.format_file(), StoreFormat::V2.marker()).unwrap();
+    upgrade::upgrade(&v2, real()).unwrap();
+    let layout = Layout::with_format(v2.root(), StoreFormat::V3);
+    let store = MetaStore::open_in(layout.clone(), real()).unwrap();
+    assert_eq!(store.check().unwrap().problems, Vec::<String>::new());
+    assert_eq!(ckpt3_counts(&layout), [3, 3, 0]);
+
+    // 2. The checkpoint lost: the finding, by its name.
+    fs::remove_file(layout.journal_ckpt()).unwrap();
+    let checked = store.check().unwrap();
+    assert_eq!(checked.findings(), ["base_seq_lost", "broken_partition"]);
+    assert_eq!(checked.journal_corrupt, Some(0));
+    drop(store);
+
+    // 3. The rebuild refused at 0, nothing written.
+    let files = |layout: &Layout| {
+        let mut files: Vec<(String, Vec<u8>)> = (layout.meta_dir().read_dir_utf8().unwrap())
+            .map(|entry| entry.unwrap().into_path())
+            .filter(|path| path.is_file() && path.file_name() != Some("lock"))
+            .map(|path| (path.file_name().unwrap().to_owned(), bytes(&path)))
+            .collect();
+        files.sort();
+        files
+    };
+    let before = files(&layout);
+    let refused = fsck::rebuild_offsets(&layout, real());
+    assert!(
+        matches!(refused, Err(StoreError::JournalCorrupt { offset: 0 })),
+        "{refused:?}"
+    );
+    assert_eq!(files(&layout), before);
+    assert!(!layout.journal_ckpt().exists());
+}
+
 /// Every ref file under `layout`'s refs directory, by its path there.
 fn ref_files(layout: &Layout) -> Vec<(Utf8PathBuf, Vec<u8>)> {
     fn walk(

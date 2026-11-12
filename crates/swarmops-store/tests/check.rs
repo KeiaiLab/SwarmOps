@@ -344,6 +344,41 @@ fn meta_check_reports_format_2_seq_prev_crc_entry_crc_and_ckpt_damage() {
     }
 }
 
+/// A finding names the checkpoint by its place in the store, `meta/<its file>`, in every format
+/// and for both kinds of damage: no line of the report holds the store's root, a host path.
+#[test]
+fn checkpoint_findings_name_no_host_path() {
+    for format in [StoreFormat::V1, StoreFormat::V2, StoreFormat::V3] {
+        let (_dir, layout, store) = store_of(format, 2);
+        let file = layout.journal_ckpt();
+        let named = format!("damaged metadata: meta/{} ", file.file_name().unwrap());
+        let sound = fs::read(&file).ok();
+        let offsets = frame_offsets(&layout);
+
+        // 1. No checkpoint at all, then one that is no frame boundary.
+        let mut crafted = (offsets[1] + 1).to_le_bytes().to_vec();
+        if format != StoreFormat::V1 {
+            crafted = sound.clone().expect("a checkpoint after two commits");
+            crafted[0] ^= 0x01;
+            let crc_at = crafted.len() - 4;
+            let crc = crc32fast::hash(&crafted[..crc_at]);
+            crafted[crc_at..].copy_from_slice(&crc.to_le_bytes());
+        }
+        for damaged in [b"bad".to_vec(), crafted] {
+            fs::write(&file, damaged).unwrap();
+            let checked = store.check().unwrap();
+            assert!(
+                checked.problems.iter().any(|line| line.starts_with(&named)),
+                "{format:?}: {:?}",
+                checked.problems
+            );
+            for line in &checked.problems {
+                assert!(!line.contains(layout.root().as_str()), "{format:?}: {line}");
+            }
+        }
+    }
+}
+
 /// FORMAT 3's own checks (the FORMAT 3 design §2.3, §2.5, §2.6, §2.7): the manifest's partition,
 /// each run's trailing CRC, the nonce of every frame past the base, and the feature of every fact
 /// record. Each is a finding of its own name, reported as damaged metadata.
@@ -521,5 +556,140 @@ mod format_3 {
         // A list naming a feature this build lacks is a newer build's store, not damage.
         fs::write(layout.features_file(), b"swarmops-features 1\nzzz\n").unwrap();
         assert!(matches!(store.check(), Err(StoreError::TooNew { .. })));
+    }
+
+    /// A `meta/features` that is no feature list is a finding, with the journal cut too: the
+    /// check of the frame that stops the journal does not read the list again and fail on it.
+    #[test]
+    fn features_check_reads_a_cut_journal() {
+        // 1. A frame past the base without its nonce: the journal stops there.
+        let (_dir, layout, store) = store_of(StoreFormat::V3, 1);
+        let last = Journal::open(&layout, Arc::new(NoSyncFs))
+            .unwrap()
+            .frames_from(0, 100)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let at = fs::metadata(layout.journal_log()).unwrap().len();
+        let record = Record::Changeset {
+            id: changeset(1).id,
+            generation: 0,
+            delta_hash: [1; 32],
+            parents: Vec::new(),
+        };
+        let mut log = fs::read(layout.journal_log()).unwrap();
+        log.extend(frame_without_nonce(&[record], last.seq + 1, last.crc));
+        fs::write(layout.journal_log(), log).unwrap();
+
+        // 2. And a feature list that is none.
+        fs::write(layout.features_file(), b"no list\n").unwrap();
+
+        // 3. Both reported, neither raised.
+        let checked = store.check().unwrap();
+        assert_eq!(checked.journal_corrupt, Some(at));
+        assert_eq!(checked.findings(), ["missing_nonce"]);
+        assert!(
+            (checked.problems.iter())
+                .any(|line| line.starts_with("damaged metadata: meta/features is no feature list")),
+            "{:?}",
+            checked.problems
+        );
+    }
+
+    /// A fact row that disagrees with the journal's fact is the finding `fact_row`, its line
+    /// starting with the name as every FORMAT 3 finding's does.
+    #[cfg(feature = "test-hooks")]
+    #[test]
+    fn fact_row_finding_name_is_frozen() {
+        use swarmops_store::{Expect, Fact, FactKind, supported_for_tests};
+
+        // 1. One fact, its row passed by the checkpoint.
+        let _guard = supported_for_tests(&["lineage"]);
+        let (_dir, layout, store) = store_of(StoreFormat::V3, 1);
+        let fact = Fact::new(
+            FactKind::Lineage,
+            1,
+            [7; 32],
+            [8; 32],
+            9,
+            "test/1".to_owned(),
+            vec![3; 32],
+        )
+        .unwrap();
+        let mut write = store.write().unwrap();
+        write.put_fact(fact, Expect::Any).unwrap();
+        write.commit().unwrap();
+        store.flush().unwrap();
+        assert_eq!(store.check().unwrap().problems, Vec::<String>::new());
+
+        // 2. The row's seq, its last 8 bytes, changed.
+        let mut rows = fs::read(layout.facts_col()).unwrap();
+        assert_eq!(rows.len(), 24);
+        rows[23] ^= 0x01;
+        fs::write(layout.facts_col(), rows).unwrap();
+
+        // 3. The finding, by its name.
+        let checked = store.check().unwrap();
+        assert_eq!(checked.findings(), ["fact_row"]);
+        assert_eq!(
+            checked.problems,
+            [
+                "damaged metadata: fact_row: meta/idx/facts.col row 0, or a fact run naming it, \
+              disagrees with the journal: rebuild the index"
+            ]
+        );
+    }
+
+    /// A `journal3.ckpt` that holds no checkpoint has lost the base seq the frames are read by:
+    /// reported with its file and as `base_seq_lost`, not raised. The fact rows it counted are
+    /// lost with it, so the index, whose fact run covers them, does not open: reported too, and
+    /// no fact row is held against frames that were not read.
+    #[cfg(feature = "test-hooks")]
+    #[test]
+    fn a_checkpoint_that_holds_none_is_reported() {
+        use swarmops_store::{Expect, Fact, FactKind, supported_for_tests};
+
+        // 1. Facts past RUN_MIN, flushed, their run built.
+        let _guard = supported_for_tests(&["lineage"]);
+        let (_dir, layout, store) = store_of(StoreFormat::V3, 1);
+        let mut write = store.write().unwrap();
+        for n in 0..1_100u32 {
+            let mut subject = [7; 32];
+            subject[..4].copy_from_slice(&n.to_le_bytes());
+            let fact = Fact::new(
+                FactKind::Lineage,
+                1,
+                subject,
+                [8; 32],
+                9,
+                "test/1".to_owned(),
+                vec![3; 32],
+            );
+            write.put_fact(fact.unwrap(), Expect::Any).unwrap();
+        }
+        write.commit().unwrap();
+        store.flush().unwrap();
+        assert_eq!(store.step_views().unwrap(), Step::Done);
+        assert_eq!(store.check().unwrap().problems, Vec::<String>::new());
+
+        // 2. The checkpoint, no checkpoint.
+        fs::write(layout.journal_ckpt(), b"bad").unwrap();
+        let checked = store.check().unwrap();
+        assert_eq!(checked.findings(), ["base_seq_lost"]);
+        assert_eq!(checked.journal_corrupt, None);
+        assert_eq!(
+            checked.problems,
+            [
+                "damaged metadata: meta/journal3.ckpt does not hold an offset, a seq, a base \
+                 seq, two counts and their CRC: the records the checkpoint passed are not \
+                 checked against the index",
+                "damaged metadata: base_seq_lost: meta/journal3.ckpt is lost: the frames, which \
+                 are read by its base seq, are not checked; repair finds the base seq in the \
+                 journal",
+                "damaged metadata: the changeset index does not open (a fact run covers rows \
+                 facts.col does not count): it is not checked; with the journal read only up to \
+                 its damage, neither the changesets past it nor the targets of refs are checked",
+            ]
+        );
     }
 }

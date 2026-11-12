@@ -672,6 +672,44 @@ mod format_3 {
         assert_eq!(repo.repair(RepairRequest::new(false)).unwrap().actions, []);
     }
 
+    /// A dry run of a FORMAT 3 store whose `journal3.ckpt` holds no checkpoint writes nothing
+    /// and lists what the repair then does, no action more: the checkpoint the rebuild of the
+    /// offsets writes again is the one the rest is judged by, in the stage as in the store.
+    #[test]
+    fn format_3_repair_dry_run_writes_nothing() {
+        // 1. Commits before and after the base, flushed; then the checkpoint damaged.
+        let (_dir, root, repo, _base, _guard) = v3_repo(3);
+        commit(&repo, &[], vec![put("c.txt", b"three\n")]);
+        repo.flush_metadata().unwrap();
+        let layout = Layout::with_format(&root, StoreFormat::V3);
+        assert_eq!(repo.verify(Depth::Deep).unwrap().problems, []);
+        fs::write(layout.journal_ckpt(), b"no checkpoint").unwrap();
+
+        // 2. The dry run: not a path or a byte changed.
+        let before_dry = tree_snapshot(&root);
+        let dry = repo.repair(RepairRequest::new(true)).unwrap();
+        assert_eq!(tree_snapshot(&root), before_dry, "dry_run wrote to store");
+        assert!(dry.actions.iter().all(|action| !action.done));
+        assert_no_host_path(&dry, &root);
+
+        // 3. The repair does what the dry run listed, and the store is whole.
+        let expected: Vec<RepairAction> = (dry.actions.iter())
+            .map(|action| RepairAction::new(action.kind, action.target.clone(), true))
+            .collect();
+        let report = repo.repair(RepairRequest::new(false)).unwrap();
+        assert_eq!(report.actions, expected);
+        assert_eq!(
+            report.actions,
+            [RepairAction::new(
+                RepairKind::RebuildOffsets,
+                "journal_offsets",
+                true
+            )]
+        );
+        assert_eq!(report.after.found, 0, "{:?}", report.after.problems);
+        assert_eq!(repo.repair(RepairRequest::new(false)).unwrap().actions, []);
+    }
+
     /// The bytes of a frame of `records` with no nonce, a FORMAT 2 frame, at seq `seq` after a
     /// frame of payload CRC `prev_crc`.
     fn frame_without_nonce(records: &[Record], seq: u64, prev_crc: u32) -> Vec<u8> {
