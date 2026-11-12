@@ -130,6 +130,10 @@ const MAX_READ: u64 = (HEADER_LEN_V2 + MAX_PAYLOAD_LEN) as u64;
 /// CRC streams by: its header has no CRC of its own to refuse the length with.
 const CRC_CHUNK: u64 = 1 << 20;
 
+/// How many frames [`Journal::set_ckpt`] reads at a time to count what a FORMAT 3 checkpoint
+/// has passed.
+const COUNT_BATCH: usize = 4096;
+
 /// A handle on one store's metadata journal.
 #[non_exhaustive]
 pub struct Journal {
@@ -1099,20 +1103,17 @@ impl Journal {
     /// frame `journal2.off` lists there. An offset that is no frame boundary it lists (where a
     /// listed frame starts, or where the last one ends) is [`StoreError::BadCall`].
     ///
-    /// FORMAT 3 keeps the base seq `journal3.ckpt` holds, and its two counts, but at 0, where
-    /// it sets them to 0 too (the FORMAT 3 design §2.3): a writer that knows what the index has
-    /// synced passes the counts itself. Counts kept as they were never
-    /// say more is synced than is: they only grow.
+    /// FORMAT 3 keeps the base seq `journal3.ckpt` holds, and stores the two counts of the
+    /// frames before `offset` (the FORMAT 3 design §2.3): the changeset records and the facts
+    /// they hold, 0 of each at 0. The caller vouches that the index holds them synced, as it
+    /// does for the offset in every format; a writer that has the counts at hand passes them
+    /// itself.
     pub fn set_ckpt(&self, offset: u64) -> Result<(), StoreError> {
         let bytes = match self.format {
             StoreFormat::V1 => offset.to_le_bytes().to_vec(),
             StoreFormat::V2 => ckpt_bytes(offset, self.seq_at(offset)?),
             StoreFormat::V3 => {
-                let old = self.read_ckpt3()?;
-                let (records, fact_rows) = match offset {
-                    0 => (0, 0),
-                    _ => (old.records, old.fact_rows),
-                };
+                let (records, fact_rows) = self.counts_at(offset)?;
                 return self.set_ckpt3(offset, records, fact_rows);
             }
         };
@@ -1140,6 +1141,57 @@ impl Journal {
         self.fs
             .atomic_replace(self.ckpt_path.as_std_path(), &ckpt.encode())?;
         Ok(())
+    }
+
+    /// How many changeset records and how many facts the frames before `offset` hold, `offset`
+    /// a frame boundary: the index records and the fact rows a FORMAT 3 checkpoint there has
+    /// passed. Counted from the checkpoint in place, over the frames between the two only.
+    ///
+    /// ```text
+    /// frames   0 .. old.seq .. seq      old + the frames [old.seq, seq)
+    /// frames   0 .. seq .. old.seq      old - the frames [seq, old.seq)
+    /// ```
+    fn counts_at(&self, offset: u64) -> Result<(u64, u64), StoreError> {
+        if offset == 0 {
+            return Ok((0, 0));
+        }
+
+        // 1. The checkpoint in place, and the frames between it and `offset`.
+        let old = self.ckpt3()?;
+        let seq = self.seq_at(offset)?;
+        let (mut next, end) = (old.seq.min(seq), old.seq.max(seq));
+        let (mut records, mut fact_rows) = (0u64, 0u64);
+        while next < end {
+            let limit = usize::try_from(end - next)
+                .unwrap_or(COUNT_BATCH)
+                .min(COUNT_BATCH);
+            let frames = self.frames_from(next, limit)?;
+            if frames.is_empty() {
+                return Err(StoreError::JournalCorrupt { offset });
+            }
+            for record in frames.iter().flat_map(|frame| &frame.records) {
+                match record {
+                    Record::Changeset { .. } => records += 1,
+                    Record::Fact(_) => fact_rows += 1,
+                    Record::RefMove { .. } | Record::Compacted { .. } => {}
+                }
+            }
+            next += bytes::to_u64(frames.len());
+        }
+
+        // 2. Added to its counts, or taken from them.
+        let moved = |held: u64, between: u64| {
+            if seq >= old.seq {
+                held.checked_add(between)
+            } else {
+                held.checked_sub(between)
+            }
+        };
+        match (moved(old.records, records), moved(old.fact_rows, fact_rows)) {
+            (Some(records), Some(fact_rows)) => Ok((records, fact_rows)),
+            // A checkpoint that counts fewer than the frames before it hold.
+            _ => Err(StoreError::JournalCorrupt { offset: old.offset }),
+        }
     }
 
     /// The seq of the frame at `offset`, a frame boundary: see [`Journal::set_ckpt`].
@@ -2089,6 +2141,74 @@ mod tests {
         }
         assert!(Ckpt3::decode(&bytes[1..]).is_err());
         assert!(Ckpt3::decode(&[bytes.as_slice(), &[0]].concat()).is_err());
+    }
+
+    /// [`Journal::set_ckpt`] of a FORMAT 3 journal stores, with the offset, the counts of the
+    /// frames before it, moved back or forward: counts of another offset would vouch for index
+    /// records and fact rows no frame before the checkpoint made, or for none of those that were.
+    #[cfg(feature = "test-hooks")]
+    #[test]
+    fn set_ckpt_v3_writes_the_new_counts() {
+        use camino::Utf8Path;
+        use swarmops_core::{ChangesetId, ObjectKind, hash_object};
+
+        use crate::{ChangesetMeta, Expect, Fact, MetaStore, RealFs, supported_for_tests};
+
+        // 1. Three frames: a changeset each, the second a fact too; all passed by a flush.
+        let _guard = supported_for_tests(&["lineage"]);
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(dir.path()).unwrap();
+        let layout = Layout::with_format(root, StoreFormat::V3);
+        let store = MetaStore::create_in(layout.clone(), Arc::new(RealFs)).unwrap();
+        for n in 1..=3u8 {
+            let id = ChangesetId::new(hash_object(ObjectKind::Changeset, &[n]));
+            let delta = hash_object(ObjectKind::Blob, &[n]).0;
+            let mut write = store.write().unwrap();
+            write
+                .insert_changeset(ChangesetMeta::new(id, 0, 0, delta, Vec::new()))
+                .unwrap();
+            if n == 2 {
+                let about = [n; 32];
+                let fact = Fact::new(
+                    FactKind::Lineage,
+                    0,
+                    about,
+                    [0; 32],
+                    0,
+                    "a".to_owned(),
+                    vec![1; 32],
+                );
+                write.put_fact(fact.unwrap(), Expect::Any).unwrap();
+            }
+            write.commit().unwrap();
+        }
+        store.flush().unwrap();
+        drop(store);
+
+        // 2. The frame boundaries, and the counts the flush stored at the end.
+        let journal = Journal::open(&layout, Arc::new(RealFs)).unwrap();
+        let frames = journal.frames_from(0, usize::MAX).unwrap();
+        let [_, second, third] = frames.as_slice() else {
+            panic!("three frames: {frames:?}");
+        };
+        let end = journal.len();
+        let counts = |journal: &Journal| {
+            let ckpt = journal.ckpt3().unwrap();
+            (ckpt.offset, ckpt.seq, ckpt.records, ckpt.fact_rows)
+        };
+        assert_eq!(counts(&journal), (end, 3, 3, 1));
+
+        // 3. Back to a boundary, forward to another, back to 0 and to the end.
+        journal.set_ckpt(third.offset).unwrap();
+        assert_eq!(counts(&journal), (third.offset, 2, 2, 1));
+        journal.set_ckpt(second.offset).unwrap();
+        assert_eq!(counts(&journal), (second.offset, 1, 1, 0));
+        journal.set_ckpt(third.offset).unwrap();
+        assert_eq!(counts(&journal), (third.offset, 2, 2, 1));
+        journal.set_ckpt(0).unwrap();
+        assert_eq!(counts(&journal), (0, 0, 0, 0));
+        journal.set_ckpt(end).unwrap();
+        assert_eq!(counts(&journal), (end, 3, 3, 1));
     }
 
     /// FORMAT 3's payload past the base: records then exactly one nonce, last.
