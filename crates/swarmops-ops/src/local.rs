@@ -39,7 +39,7 @@ use swarmops_core::{
     ChangesetId, DeltaEntry, DeltaOp, EntryKind, EntryTarget, LeafKind, ObjectId, RepoPath,
     Signature,
 };
-use swarmops_git::MemoKey;
+use swarmops_git::{GitOid, MemoKey};
 use swarmops_repo::LandRequest;
 use swarmops_repo::TxnResult;
 use swarmops_repo::land::{
@@ -3644,11 +3644,10 @@ fn git_memo_finding(mismatch: &swarmops_git::GitMemoMismatch) -> (String, Verify
     let subject = mismatch.subject.to_hex();
     let line = error::one_line(format!(
         "the derived value {memo} of {subject} is not the one the store's objects give \
-         (memoized {stored}, the objects give {real}); remove its file under \
-         meta/derived/{memo}/, or all of meta/derived/, to have it derived again",
+         ({held}); remove its file under meta/derived/{memo}/, or all of meta/derived/, to have \
+         it derived again",
         memo = mismatch.memo,
-        stored = mismatch.stored,
-        real = mismatch.real,
+        held = memo_held(mismatch.stored, mismatch.real),
     ));
     // `git_oid` ([`swarmops_git::ExportOid`]) and `git_oid_mac`, the same under a memo key, are a
     // changeset's export oid; the other memos are a tree's and a blob's. A memo under a key names
@@ -3660,6 +3659,24 @@ fn git_memo_finding(mismatch: &swarmops_git::GitMemoMismatch) -> (String, Verify
     found.key = (!mismatch.key.is_empty()).then(|| external_ids::lower_hex(&mismatch.key));
     found.derivation = Some(mismatch.memo.clone());
     (line, found)
+}
+
+/// What a wrong git memo holds, `stored`, beside what the objects give, `real`. A memo shorter
+/// than an oid reads as the null oid; one that holds `real` is wrong past its oid: its length, its
+/// `kept` or `imported` byte, or its MAC.
+fn memo_held(stored: GitOid, real: GitOid) -> String {
+    if stored == real {
+        return format!(
+            "memoized {real}, the oid the objects give, in a value whose length, flag byte or \
+             MAC is wrong"
+        );
+    }
+    if stored == GitOid::NULL {
+        return format!(
+            "memoized no oid (a value shorter than one, or zeros), the objects give {real}"
+        );
+    }
+    format!("memoized {stored}, the objects give {real}")
 }
 
 /// An external id entry of a native changeset that a deep verify found naming another commit than
@@ -4119,6 +4136,32 @@ mod tests {
                 "{kind}: {problems:?}"
             );
         }
+    }
+
+    /// A git memo's line says what it holds: another oid; no oid, for the null oid a memo
+    /// shorter than one reads as; or the right oid in a value wrong elsewhere, which a deep
+    /// verify reports as malformed.
+    #[test]
+    fn a_wrong_git_memo_says_what_it_holds() {
+        let real = GitOid::new([0xab; 20]);
+        let other = GitOid::new([0xcd; 20]);
+        assert_eq!(
+            memo_held(other, real),
+            format!("memoized {other}, the objects give {real}")
+        );
+        assert_eq!(
+            memo_held(GitOid::NULL, real),
+            format!(
+                "memoized no oid (a value shorter than one, or zeros), the objects give {real}"
+            )
+        );
+        assert_eq!(
+            memo_held(real, real),
+            format!(
+                "memoized {real}, the oid the objects give, in a value whose length, flag byte \
+                 or MAC is wrong"
+            )
+        );
     }
 
     #[test]
