@@ -658,9 +658,11 @@ impl RemoteUrl {
             return Err(UrlRefused::CredentialInUrl);
         }
 
-        // A token as the user of an HTTP(S) URL is a secret too; ssh never takes one there.
+        // Any user of an HTTP(S) URL may be a token, and no shape tells one from a name: none
+        // is taken (`https://ghp@host` is refused as `https://user@host` is). ssh never takes
+        // a token there.
         let web = matches!(protocol, Protocol::Https | Protocol::Http);
-        if web && user.is_some_and(is_token) {
+        if web && user.is_some() {
             return Err(UrlRefused::CredentialInUrl);
         }
         if host.is_empty() {
@@ -697,7 +699,8 @@ pub enum UrlRefused {
     CleartextHttp,
     /// `file://`, a local path, `ext::`, `fd::` or any other scheme: `url_scheme`.
     Scheme,
-    /// A URL with a password, or an HTTP(S) URL whose user is a token: `credential_in_url`.
+    /// A URL with a password, or an HTTP(S) URL with a user part, whatever the user is:
+    /// `credential_in_url`.
     CredentialInUrl,
     /// A URL or a host that starts with `-`: `url_option`.
     OptionLike,
@@ -916,10 +919,6 @@ const HEADS: &str = "refs/heads/";
 /// The user name a token goes with over HTTPS (GitHub's for an installation token; a personal
 /// token takes any).
 const TOKEN_USER: &str = "x-access-token";
-
-/// The shortest user name of an HTTP(S) URL taken for a token ([`is_token`]); shorter tokens
-/// are rare, and longer user names are refused only when they mix letters and digits.
-const TOKEN_MIN_LEN: usize = 20;
 
 /// A repository's object directory, in its git directory.
 const OBJECTS: &str = "objects";
@@ -1295,14 +1294,6 @@ fn scp_parts(url: &str) -> Option<(Option<&str>, &str)> {
         return None;
     }
     Some(split_user(before))
-}
-
-/// Whether `user` has a token's shape: [`TOKEN_MIN_LEN`] characters or more, with both a letter
-/// and a digit (`tok0a1b2c3d4e5f6a7b8c9d0e`, not `first-last-1990`).
-fn is_token(user: &str) -> bool {
-    let letter = user.chars().any(|c| c.is_ascii_alphabetic());
-    let digit = user.chars().any(|c| c.is_ascii_digit());
-    user.chars().count() >= TOKEN_MIN_LEN && letter && digit
 }
 
 /// Whether `host` is a literal loopback address: `127.0.0.0/8` or `::1`.

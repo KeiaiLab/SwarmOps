@@ -866,8 +866,6 @@ fn url_rules() {
     for (url, host) in [
         ("https://github.com/KeiaiLab/SwarmOps.git", "github.com"),
         ("https://github.com:443/a/b", "github.com"),
-        ("https://user@github.com/a/b.git", "github.com"),
-        ("https://first-last-1990@host.example/a.git", "host.example"),
         (
             "ssh://deploy0a1b2c3d4e5f6a7b8c9d@host.example/a.git",
             "host.example",
@@ -924,6 +922,20 @@ fn url_rules() {
             "https://tok_0a1b2c3d4e5f6a7b8c9d@host.example/a.git",
             UrlRefused::CredentialInUrl,
         ),
+        (
+            "https://user@github.com/a/b.git",
+            UrlRefused::CredentialInUrl,
+        ),
+        (
+            "https://first-last-1990@host.example/a.git",
+            UrlRefused::CredentialInUrl,
+        ),
+        (
+            "https://ghp@host.example/a.git",
+            UrlRefused::CredentialInUrl,
+        ),
+        ("https://@host.example/a.git", UrlRefused::CredentialInUrl),
+        ("http://user@127.0.0.1/a.git", UrlRefused::CredentialInUrl),
         (
             "http://0a1b2c3d4e5f60718293a4b5c6d7e8f901234567@127.0.0.1/a.git",
             UrlRefused::CredentialInUrl,

@@ -319,8 +319,7 @@ fn a_secret_in_a_url_reaches_no_file_and_no_output() {
     }
 
     // 3. The same URL without the secret is accepted.
-    let url = format!("http://user@{rest}");
-    add(&store, ORIGIN, &url, &["--branch", "main"]).ok();
+    add(&store, ORIGIN, &plain, &["--branch", "main"]).ok();
 }
 
 /// A remote stored before tokens as a URL's user were refused: `fetch`, `push` and `sync` end
@@ -333,17 +332,16 @@ fn a_stored_token_url_is_refused_and_removable() {
     let into = path_text(&dir.path().join("store"));
     let plain = remote.url();
     let rest = plain.strip_prefix("http://").expect("an http URL");
-    let named = format!("http://user@{rest}");
     let on = |args: &[&str]| {
         let line = [&["--repo", into.as_str(), "--as", AGENT][..], args].concat();
         remote.run(&line, &[])
     };
 
     // 1. A clone, its remote's user then made a token as an earlier version stored it.
-    on(&["clone", &named, "--into", &into]).ok();
+    on(&["clone", &plain, "--into", &into]).ok();
     let file = Path::new(&into).join(REMOTES_TOML);
     let text = fs::read_to_string(&file).expect("remotes.toml");
-    let tokened = text.replace("http://user@", &format!("http://{SECRET}@"));
+    let tokened = text.replace(&plain, &format!("http://{SECRET}@{rest}"));
     assert_ne!(tokened, text, "{text}");
     fs::write(&file, tokened).expect("write remotes.toml");
 
@@ -364,7 +362,7 @@ fn a_stored_token_url_is_refused_and_removable() {
     on(&["remote", "remove", ORIGIN]).ok();
     let left = fs::read_to_string(&file).unwrap_or_default();
     assert!(!left.contains(SECRET), "{left}");
-    on(&["remote", "add", ORIGIN, &named, "--branch", "main"]).ok();
+    on(&["remote", "add", ORIGIN, &plain, "--branch", "main"]).ok();
     on(&["fetch", ORIGIN]).ok();
 }
 
@@ -375,21 +373,18 @@ fn a_stored_token_url_is_masked_where_read() {
     let remote = Remote::new();
     let dir = tempfile::tempdir().expect("a temp dir");
     let into = path_text(&dir.path().join("store"));
-    let rest = remote.url();
-    let rest = rest.strip_prefix("http://").expect("an http URL");
+    let plain = remote.url();
+    let rest = plain.strip_prefix("http://").expect("an http URL");
     let repo = ["--repo", into.as_str(), "--as", AGENT];
 
     // 1. A clone, its remote's user then made a token as an earlier version stored it.
-    let named = format!("http://user@{rest}");
-    let clone = [&repo[..], &["clone", &named, "--into", &into]].concat();
+    let clone = [&repo[..], &["clone", &plain, "--into", &into]].concat();
     remote.run(&clone, &[]).ok();
     let file = Path::new(&into).join(REMOTES_TOML);
     let text = fs::read_to_string(&file).expect("remotes.toml");
-    fs::write(
-        &file,
-        text.replace("http://user@", &format!("http://{SECRET}@")),
-    )
-    .expect("write remotes.toml");
+    let tokened = text.replace(&plain, &format!("http://{SECRET}@{rest}"));
+    assert_ne!(tokened, text, "{text}");
+    fs::write(&file, tokened).expect("write remotes.toml");
     let masked = format!("http://***@{rest}");
 
     // 2. `remote list`: the URL masked, the secret in neither stream.
