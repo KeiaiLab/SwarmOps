@@ -4702,8 +4702,9 @@ mod tests {
         /// replay of the frames past the checkpoint, which the witness's frame is not among once
         /// the store is flushed after it). Exactly one, then, for `read_file` (a file, and
         /// nothing there), `read_tree` (a directory, and a file there), `show`, `log` (from a
-        /// revision, and after a cursor), `commit` with a parent, `commit` with `advance` and no
-        /// parent, and `ref_set` both moving and replaying; and none for opening the store.
+        /// revision, after a cursor, and a page of three), `commit` with a parent, `commit` with
+        /// `advance` and no parent, and `ref_set` both moving and replaying; and none for opening
+        /// the store.
         #[test]
         fn each_request_takes_one_snapshot() {
             let dir = tempfile::tempdir().unwrap();
@@ -4778,6 +4779,13 @@ mod tests {
             let (c2, c3) = (c2.changeset, c3.changeset);
             ops.log(log(None, Some(&c2))).unwrap();
             count("log after a cursor");
+
+            // A page of the whole chain, c2 to c1: one snapshot, not one per parent it walks.
+            let mut whole = log(Some(&c2), None);
+            whole.limit = 3;
+            let page = ops.log(whole).unwrap();
+            count("log of three");
+            assert_eq!(page.entries.len(), 3, "the page walked every parent");
             assert!(
                 !ops.ref_set(&who, set(&c2, Some(&c3)))
                     .unwrap()
