@@ -983,13 +983,14 @@ pub fn panicked(payload: &(dyn Any + Send)) -> OpError {
 
 /// The envelope of a command line clap refused: `E_INVALID_ARG` (exit 2) with clap's message
 /// in one line as `message`, and its tips and the usage of the subcommand `path` names as
-/// `hint`, a line each. The usage names the program `bin`, as the line invoked it, whether it
+/// `hint`, a line each, after `git_line` when given (a refused git verb's). The usage names the program `bin`, as the line invoked it, whether it
 /// is clap's or, where clap gives none, the CLI's. Control characters (from the line itself)
 /// are escaped in both.
 pub fn usage(
     error: &clap::Error,
     bin: Option<&str>,
     path: &[String],
+    git_line: Option<String>,
     format: Format,
     started: Instant,
 ) -> Printed {
@@ -1011,6 +1012,11 @@ pub fn usage(
             .position(|text| text.starts_with("For more information"))
             .unwrap_or(hint.len());
         hint.insert(at, output::printable(&cli::usage(bin, path)));
+    }
+
+    // A line of our own (a git verb's) goes before clap's.
+    if let Some(line) = git_line {
+        hint.insert(0, output::printable(&line));
     }
     let message = output::printable(&message.join(" "));
     let error = OpError::new(ErrorCode::InvalidArg, message).with_hint(hint.join("\n"));
@@ -1780,7 +1786,7 @@ mod tests {
         let format = Format::Json {
             layout: Layout::Compact,
         };
-        let printed = usage(&error, bin.as_deref(), &path, format, Instant::now());
+        let printed = usage(&error, bin.as_deref(), &path, None, format, Instant::now());
         let envelope: Value = serde_json::from_str(&printed.stdout).unwrap();
         let hint = envelope["error"]["hint"].as_str().unwrap();
         let line = r"Usage: s\ro log [OPTIONS] [REV]";
@@ -1817,7 +1823,7 @@ mod tests {
             let format = Format::Json {
                 layout: Layout::Compact,
             };
-            let printed = usage(&error, bin.as_deref(), &path, format, Instant::now());
+            let printed = usage(&error, bin.as_deref(), &path, None, format, Instant::now());
             let envelope: Value = serde_json::from_str(&printed.stdout).unwrap();
             let reply = &envelope["error"];
             assert!(

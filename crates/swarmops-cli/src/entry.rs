@@ -89,7 +89,7 @@ fn answer(parsed: Parsed, started: Instant, stdout: Stdout) -> (Printed, Option<
         } => {
             let format = context::format(&global, &env, stdout)
                 .unwrap_or_else(|_| context::json_format(&global, stdout));
-            let printed = commands::usage(&error, bin.as_deref(), &path, format, started);
+            let printed = commands::usage(&error, bin.as_deref(), &path, None, format, started);
             (printed, None)
         }
         Parsed::Run(cli, op) => match context::format(&cli.global, &env, stdout) {
