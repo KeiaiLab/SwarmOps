@@ -357,9 +357,9 @@ The install succeeded, but the shell cannot find the new command:
 bash: so: command not found
 ```
 
-The install directory is not on the shell's `PATH` yet; the installer said so in its report (the
-next case). Add the line it printed and open a new shell; until then `~/.local/bin/so --version`
-runs it by its full path.
+The install directory is not on the shell's `PATH` yet; the installer's report said so, in a line
+that starts `$dir is not on PATH. Add this line to …` (the next case). Add the line it printed and
+open a new shell; until then `~/.local/bin/so --version` runs it by its full path.
 
 ### The install directory is not on PATH
 
