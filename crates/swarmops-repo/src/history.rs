@@ -56,6 +56,7 @@ use swarmops_store::{ChangesetMeta, ObjectStore, RefKind, StoreError, ref_kind};
 
 use crate::derive::{Derivation, FirstParentSkipList, SkipList};
 use crate::error::RepoError;
+use crate::protect::MoveMode;
 use crate::read::RepoRead;
 
 /// The widest gap, in generations, that a walk crosses by narrow lookups, one first parent at a
@@ -160,25 +161,14 @@ impl<O: ObjectStore> RepoRead<'_, O> {
         old: Option<ChangesetId>,
         new: Option<ChangesetId>,
     ) -> Result<(), RepoError> {
-        // A move of main, both ends set and apart.
-        let (Some(head), Some(target)) = (old, new) else {
-            return Ok(());
-        };
-        if ref_kind(name) != Some(RefKind::Main) || head == target {
+        // Only main is judged here.
+        if ref_kind(name) != Some(RefKind::Main) {
             return Ok(());
         }
 
-        // Forward: the head on the target's first-parent chain.
-        if self.is_ancestor(head, target)? {
-            return Ok(());
-        }
-        Err(RepoError::HistoryProtected {
-            name: name.to_owned(),
-            head,
-            target,
-            op: None,
-            recovered: Box::default(),
-        })
+        // The judge of every ref's move, which never forces main.
+        self.check_ref_move(name, old, new, MoveMode::Advance)?;
+        Ok(())
     }
 
     /// The newest changeset on the first-parent chains of both changesets `a` and `b` (either one
