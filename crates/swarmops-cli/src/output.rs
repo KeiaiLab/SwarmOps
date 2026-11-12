@@ -18,6 +18,9 @@
 //! as `warnings[i]` lines; a revert prints its land's line after `reverted <n> changeset(s): `.
 //! An `E_CONFLICT` prints one `conflict: <kind> <path>` line for each
 //! conflicting file in place of its details, the report.
+//!
+//! `ws status`, `log`, `diff`, `ws diff`, `ws commit` and `clone` print their result in git's
+//! shape instead ([`gitshape`]), as long as it holds every field the shape reads.
 
 use std::fmt;
 use std::fmt::Write as _;
@@ -26,6 +29,8 @@ use serde::Serialize;
 use serde::de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Value};
 use swarmops_api::Envelope;
+
+use crate::gitshape;
 
 /// How a command prints its envelope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +117,12 @@ fn json<T: Serialize>(envelope: &Envelope<T>, layout: Layout) -> String {
 }
 
 fn human<T: Serialize>(envelope: &Envelope<T>) -> String {
+    // git's shape first, for the operations that have one; the lines below otherwise.
+    let shaped = (envelope.result.as_ref()).and_then(|result| git_shape(&envelope.op, result));
+    if let Some(text) = shaped {
+        return text;
+    }
+
     let mut out = String::new();
     if let Some(result) = &envelope.result {
         let result = Tree::of(result);
@@ -159,6 +170,13 @@ fn human<T: Serialize>(envelope: &Envelope<T>) -> String {
         }
     }
     out
+}
+
+/// `op`'s `result` in git's shape ([`gitshape`]); `None` for an operation without one, or a
+/// result that lacks a field the shape reads.
+fn git_shape<T: Serialize>(op: &str, result: &T) -> Option<String> {
+    let value = serde_json::to_value(result).ok()?;
+    gitshape::text(op, &value)
 }
 
 /// The one line a land's `result` prints as ([the module documentation](self)), for operation

@@ -38,7 +38,6 @@ mod commands;
 mod context;
 mod entry;
 mod gitlike;
-#[cfg(test)]
 mod gitshape;
 mod mcp;
 mod output;

@@ -51,6 +51,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
 - `git import` and `git export` refuse an empty `git_path` with `E_INVALID_ARG`
   (`details.reason` `git_path_empty`), before any repository is opened. It was read as the
   working directory: at a work tree's root the commands read or wrote that repository.
+- `--human` prints `ws status`, `log`, `diff`, `ws diff`, `ws commit` and `clone` in git's shape
+  (the git-familiar command design, §3 "Text shapes"): `## <name> <head>` and one `<letter>  <path>`
+  line a change, `<id> <title>` a changeset, a patch, `--numstat` or `--name-status` lines by the
+  diff's format, `[<id>] <n> files changed`. Ids are cut to 12 hex digits. git's shape flags
+  (`so status -s`, `so log --oneline`, `so diff --stat`) print this text. The JSON envelope is
+  unchanged; scripts that read `--human` text of these operations read the envelope instead.
 
 ### Fixed
 

@@ -18,6 +18,7 @@ mod damaged_index;
 mod faults;
 mod format2;
 mod git;
+mod git_text;
 mod github_live;
 mod gitlike;
 mod intake_perf;
