@@ -40,6 +40,7 @@ mod revert_limits;
 mod scale_perf;
 mod serve_differential;
 mod serve_fetch;
+mod serve_fetch_pins;
 mod serve_http;
 mod serve_interop;
 mod serve_land;
