@@ -1,0 +1,1 @@
+A store newer than the build is refused as E_STORE_TOO_NEW, and the CLI, MCP and serve step view work after a commit reply.
