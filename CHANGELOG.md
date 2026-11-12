@@ -37,6 +37,14 @@ collects the changes on `stable` that no release holds yet, until the next relea
   older do not open the store afterwards. `gc` removes what an upgrade to FORMAT 3 that stopped
   before its commit point left and FORMAT 2's sorted views of an upgraded store, and counts no blob
   a fact names as an orphan.
+- git's verbs on the command line (the git-familiar command design, §3 to §5): `so status`,
+  `so restore PATH...`, `so commit -m MSG` and bare `so diff`, `so rebase` in a workspace,
+  `so reflog NAME`, `so worktree list`, `so tag`, `so remote`, `so fetch`, `so push`,
+  `so clone URL DIR`, `so log --oneline`/`-<n>` and `so diff --stat`/`-p`/`-U<n>` run the
+  SwarmOps command of the same meaning, its envelope and `op` included. A git verb with no such
+  command (`add`, `branch`, `merge`, `stash`, …) is refused as before, exit 2, with one line first
+  in `error.hint` naming what to type. A line that parsed before runs as before; below a
+  workspace's root a line that names paths is refused, since paths are read from the root.
 
 ### Fixed
 

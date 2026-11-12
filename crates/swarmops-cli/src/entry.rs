@@ -4,7 +4,7 @@
 //! (`commands::prepare`, the M17 design §4.3).
 //!
 //! ```text
-//! run ─▶ guarded(respond) ─▶ cli::parse ─▶ answer ─▶ guarded(commands::run) ─▶ emit ─▶ spawn
+//! run ─▶ guarded(respond) ─▶ gitlike::parse ─▶ answer ─▶ guarded(commands::run) ─▶ emit ─▶ spawn
 //! ```
 
 use std::ffi::OsString;
@@ -13,9 +13,14 @@ use std::panic::{self, AssertUnwindSafe};
 use std::process::ExitCode;
 use std::time::Instant;
 
+use swarmops_api::ErrorCode;
+use swarmops_ws::RealFs;
+use swarmops_ws::workspace::{self, Locate};
+
 use crate::cli::Parsed;
 use crate::commands::prepare::{self, After};
 use crate::commands::{Ctx, Used};
+use crate::gitlike::{self, Place};
 use crate::output::{Format, Printed, Stdout};
 use crate::{cli, commands, context};
 
@@ -59,17 +64,37 @@ pub fn run() -> ExitCode {
 /// that runs `mcp`, the envelope has gone to stderr ([`on_stderr`]).
 fn respond(started: Instant, stdout: Stdout) -> (Printed, Option<After>) {
     let args: Vec<OsString> = std::env::args_os().collect();
-    let parsed = cli::parse(&args);
+    let parsed = gitlike::parse(&args, &place);
     if parsed.runs_mcp() {
-        let (printed, after) = answer(parsed, started, stdout);
+        let (printed, after) = answer(parsed, &args, started, stdout);
         (on_stderr(printed), after)
     } else {
-        answer(parsed, started, stdout)
+        answer(parsed, &args, started, stdout)
     }
 }
 
-/// What `parsed` asks for, done: [`respond`] before it says where the envelope goes.
-fn answer(parsed: Parsed, started: Instant, stdout: Stdout) -> (Printed, Option<After>) {
+/// Where the line was typed, for git's verbs (`gitlike`): asked only for a line clap refused.
+fn place() -> Place {
+    let Some(here) = context::here() else {
+        return Place::Elsewhere;
+    };
+    match workspace::find(&Locate::Cwd(here.clone()), None, &RealFs::new()) {
+        Ok(found) if found.dir == here => Place::Root,
+        Ok(_) => Place::Below,
+        Err(e) if e.code == ErrorCode::WsNotFound.as_str() => Place::Elsewhere,
+        // A `workspace.json` that cannot be read: the `ws` command reports it.
+        Err(_) => Place::Root,
+    }
+}
+
+/// What `parsed`, read from `args`, asks for, done: [`respond`] before it says where the
+/// envelope goes.
+fn answer(
+    parsed: Parsed,
+    args: &[OsString],
+    started: Instant,
+    stdout: Stdout,
+) -> (Printed, Option<After>) {
     let env = |name: &str| std::env::var_os(name);
     match parsed {
         Parsed::Text(text) => {
@@ -89,7 +114,9 @@ fn answer(parsed: Parsed, started: Instant, stdout: Stdout) -> (Printed, Option<
         } => {
             let format = context::format(&global, &env, stdout)
                 .unwrap_or_else(|_| context::json_format(&global, stdout));
-            let printed = commands::usage(&error, bin.as_deref(), &path, None, format, started);
+            // git's line first, if the refused line is a git verb's.
+            let first = gitlike::hint(&error, &path, bin.as_deref(), args, &place);
+            let printed = commands::usage(&error, bin.as_deref(), &path, first, format, started);
             (printed, None)
         }
         Parsed::Run(cli, op) => match context::format(&cli.global, &env, stdout) {

@@ -82,7 +82,7 @@ expression: s.transcript()
         "retryable": false,
         "exit": 2,
         "details": {},
-        "hint": "Usage: swarmops commit --message <MESSAGE> --changes <FILE>\nFor more information, try '--help'."
+        "hint": "swarmops commit -m MSG [PATH]... in a workspace commits its changes; swarmops ws create NAME makes one\nUsage: swarmops commit --message <MESSAGE> --changes <FILE>\nFor more information, try '--help'."
       },
       "meta": {
         "elapsed_ms": "[elapsed_ms]",

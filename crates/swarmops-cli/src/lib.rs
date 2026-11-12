@@ -29,7 +29,7 @@
 //! Each binary does nothing but call [`run`], so the two behave alike. clap names the program by
 //! the name it was invoked by in its usage lines (on the help screens, and in a usage error's
 //! `hint`, the line the CLI adds where clap gives none included) and in its message for a
-//! missing subcommand. Everything else names it `swarmops` whichever name ran it: `op`, the
+//! missing subcommand, and so do the git hints (a refused git verb's line). Everything else names it `swarmops` whichever name ran it: `op`, the
 //! hints and messages SwarmOps writes (commands, which run by either name), `--version` and the
 //! MCP server's name.
 
@@ -37,7 +37,6 @@ mod cli;
 mod commands;
 mod context;
 mod entry;
-#[cfg(test)]
 mod gitlike;
 #[cfg(test)]
 mod gitshape;
