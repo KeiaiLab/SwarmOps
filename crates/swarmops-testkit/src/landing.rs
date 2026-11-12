@@ -2142,6 +2142,47 @@ mod tests {
         assert!(synced(FsMethod::AtomicReplace, "/s/objects/refs2").is_none());
     }
 
+    /// [`Holds::of`]'s figures, [`Hold::per_member_us`] (`U`'s lock time per land, the M18 D2
+    /// design §8), [`Holds::u`] and the line's `per_land_p50_ms` on three holds.
+    #[test]
+    fn holds_give_u_from_the_hold_per_member() {
+        // 1. A hold of 12 ms over 3 members is 4 ms a member; 1 ms alone; 9 ms over 2.
+        let holds = [
+            Hold {
+                us: 12_000,
+                answers: 2,
+            },
+            Hold {
+                us: 1_000,
+                answers: 0,
+            },
+            Hold {
+                us: 9_000,
+                answers: 1,
+            },
+        ];
+        let per_member: Vec<u64> = holds.iter().map(Hold::per_member_us).collect();
+        assert_eq!(per_member, [4_000, 1_000, 4_500]);
+
+        // 2. The nearest-rank p50 of each figure, and the sums.
+        let summed = Holds::of(&holds).expect("three holds");
+        assert_eq!((summed.count, summed.answers), (3, 3));
+        assert_eq!((summed.b_p50, summed.b_p99), (2, 3));
+        assert_eq!((summed.hold_p50_us, summed.hold_p99_us), (9_000, 12_000));
+        assert_eq!(summed.hold_max_us, 12_000);
+        assert_eq!(summed.per_member_p50_us, 4_000);
+
+        // 3. U at 100 lands/s: 100 x 4 ms = 0.4 of the lock's time.
+        assert!((summed.u(100.0) - 0.4).abs() < 1e-9, "{}", summed.u(100.0));
+
+        // 4. The line gives the same p50 per land, in ms.
+        let line = summed.line();
+        assert!(line.ends_with(" per_land_p50_ms=4.0"), "{line}");
+
+        // 5. No hold, no figures.
+        assert_eq!(Holds::of(&[]), None);
+    }
+
     /// The window an attempt that ended neither landed nor retryable began in is flagged, and
     /// no other: retries and conflicts the lander resolved are not failures.
     #[test]
