@@ -1,0 +1,366 @@
+#!/bin/sh
+# so-status: the installation's probe and status page.
+# POSIX sh, as so-kit: it runs on any machine with git, the package's dependencies and nothing
+# else. The probe belongs on a machine other than the serving host, so that a stopped host
+# reads failing and a stopped probe reads stale.
+#
+#   so-status probe          one try through each entrance the settings name
+#   so-status loop <count>   <count> rounds of tries, one every `period` seconds
+#   so-status page           write the status page from the records
+#
+# A try clones the probe repository, commits one file, pushes it to refs/land/main and reads
+# main back. Each try appends one record to `records`, oldest first:
+#
+#   <unix time> <entrance> ok|fail <seconds> <step>     e.g. 1762905600 ssh ok 3 done
+#
+# where step is the last step reached: clone, commit, land, read, done. `backups` holds the
+# backup and rehearsal records, written by the backup job, oldest first:
+#
+#   <unix time> backup ok|fail
+#   <unix time> rehearsal ok <restore seconds> | <unix time> rehearsal fail
+#
+# Settings: SO_STATUS_CONF, else the package's settings file. Exit 0 done; 1 a probe try failed
+# (`probe` only: `loop` records failures and goes on); 2 refused, with one `so-status: <reason>`
+# line on stderr and nothing written.
+set -eu
+LC_ALL=C
+export LC_ALL
+umask 077
+
+fail() {
+    printf 'so-status: %s\n' "$*" >&2
+    exit 2
+}
+
+# 1. Settings: the defaults, then `key=value` lines of known keys; a later line wins.
+ssh_url=
+https_url=
+ssh_key=
+known_hosts=
+https_password=
+period=60
+try_limit=45
+keep=10080
+records=/var/lib/swarmops-status/records
+page=/var/lib/swarmops-status/www
+stale_after=900
+backups=
+backup_period=3600
+copies=1
+
+conf=${SO_STATUS_CONF:-/etc/swarmops-server/status.conf}
+[ -r "$conf" ] || fail "cannot read the settings file"
+while IFS= read -r line || [ -n "$line" ]; do
+    case $line in
+    '' | '#'*) continue ;;
+    *=*) ;;
+    *) fail "settings: not key=value: $line" ;;
+    esac
+    key=${line%%=*}
+    value=${line#*=}
+    case $key in
+    ssh_url | https_url)
+        case $value in
+        '') ;;
+        *[!A-Za-z0-9._~:/@%+-]*) fail "settings: $key is no plain address" ;;
+        ssh://* | https://*) ;;
+        *) fail "settings: $key is no ssh:// or https:// address" ;;
+        esac
+        ;;
+    ssh_key | known_hosts | https_password | records | page | backups)
+        case $value in
+        '') ;;
+        /*[!A-Za-z0-9._/-]* | [!/]*) fail "settings: $key is no plain absolute path" ;;
+        esac
+        ;;
+    period | try_limit | keep | stale_after | backup_period | copies)
+        case $value in
+        '' | *[!0-9]* | 0*) fail "settings: $key is no positive whole number" ;;
+        esac
+        ;;
+    *) fail "settings: unknown key $key" ;;
+    esac
+    eval "$key=\$value"
+done <"$conf"
+
+# 2. The probe.
+
+# git as the probe: no prompt, no system or user settings, the settings' credentials.
+probe_git() {
+    if [ -n "$helper" ]; then
+        set -- -c "credential.helper=$helper" "$@"
+    fi
+    timeout "$try_limit" git -c credential.helper= \
+        -c user.name=so-status -c user.email=so-status@probe.invalid "$@"
+}
+
+# One try through entrance $1 at address $2; appends its record; returns 1 when it failed.
+try_entrance() {
+    name=$1
+    url=$2
+    start=$(date +%s)
+    work=$(mktemp -d "${TMPDIR:-/tmp}/so-status.XXXXXX")
+    step=clone
+    result=fail
+
+    # 1. clone, 2. one commit, 3. land it, 4. main reads the landed commit.
+    if probe_git clone --quiet --depth 1 "$url" "$work/repo" >/dev/null 2>&1; then
+        step=commit
+        # The work directory's random name makes each try's file differ from the last.
+        printf '%s %s %s\n' "$name" "$start" "${work##*.}" >"$work/repo/probe-$name"
+        if probe_git -C "$work/repo" add "probe-$name" >/dev/null 2>&1 &&
+            probe_git -C "$work/repo" commit --quiet -m "probe $name $start" >/dev/null 2>&1; then
+            step=land
+            told=$(probe_git -C "$work/repo" push origin HEAD:refs/land/main 2>&1) || told=
+            landed=$(printf '%s\n' "$told" |
+                sed -n 's/^remote: landed onto main as \([0-9a-f][0-9a-f]*\).*/\1/p' | head -n 1)
+            if [ -n "$landed" ]; then
+                step=read
+                head=$(probe_git ls-remote "$url" refs/heads/main 2>/dev/null) || head=
+                if [ "${head%%[[:space:]]*}" = "$landed" ]; then
+                    step=done
+                    result=ok
+                fi
+            fi
+        fi
+    fi
+    rm -rf "$work"
+
+    printf '%s %s %s %s %s\n' "$start" "$name" "$result" "$(($(date +%s) - start))" "$step" \
+        >>"$records"
+    [ "$result" = ok ]
+}
+
+# One round: a try per entrance the settings name, then the records cut to the newest `keep`.
+round() {
+    failed=0
+    if [ -n "$ssh_url" ]; then
+        try_entrance ssh "$ssh_url" || failed=1
+    fi
+    if [ -n "$https_url" ]; then
+        try_entrance https "$https_url" || failed=1
+    fi
+    tail -n "$keep" "$records" >"$records.$$"
+    mv "$records.$$" "$records"
+    return "$failed"
+}
+
+prepare_probe() {
+    [ -n "$ssh_url$https_url" ] || fail "the settings name no entrance to probe"
+    [ -d "$(dirname "$records")" ] || fail "the records' directory does not exist"
+    if [ -n "$ssh_key" ]; then
+        [ -r "$ssh_key" ] && [ -r "$known_hosts" ] || fail "cannot read ssh_key or known_hosts"
+        GIT_SSH_COMMAND="ssh -i $ssh_key -o IdentitiesOnly=yes -o BatchMode=yes"
+        GIT_SSH_COMMAND="$GIT_SSH_COMMAND -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts"
+        export GIT_SSH_COMMAND
+    fi
+    helper=
+    if [ -n "$https_password" ]; then
+        [ -r "$https_password" ] || fail "cannot read https_password"
+        helper="!f() { test \"\$1\" = get && printf 'password=%s\\n' \"\$(cat $https_password)\"; }; f"
+    fi
+    GIT_TERMINAL_PROMPT=0
+    GIT_CONFIG_NOSYSTEM=1
+    GIT_CONFIG_GLOBAL=/dev/null
+    export GIT_TERMINAL_PROMPT GIT_CONFIG_NOSYSTEM GIT_CONFIG_GLOBAL
+}
+
+cmd_probe() {
+    [ $# -eq 0 ] || fail "usage: so-status probe"
+    prepare_probe
+    round
+}
+
+cmd_loop() {
+    [ $# -eq 1 ] || fail "usage: so-status loop <count>"
+    case $1 in
+    '' | *[!0-9]* | 0*) fail "the count is no positive whole number" ;;
+    esac
+    prepare_probe
+    first=$(date +%s)
+    n=0
+    while [ "$n" -lt "$1" ]; do
+        # Round n starts `period` seconds after round n-1 started, not after it ended.
+        wait=$((first + n * period - $(date +%s)))
+        [ "$wait" -le 0 ] || sleep "$wait"
+        round || true
+        n=$((n + 1))
+    done
+}
+
+# 3. The page.
+
+# Seconds as `N h M min`, `M min` or `S s`.
+span() {
+    if [ "$1" -ge 3600 ]; then
+        printf '%s h %s min' $(($1 / 3600)) $(($1 % 3600 / 60))
+    elif [ "$1" -ge 60 ]; then
+        printf '%s min' $(($1 / 60))
+    else
+        printf '%s s' "$1"
+    fi
+}
+
+utc() {
+    date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ
+}
+
+# The records summed up as `key value` lines: newest time, each entrance's last try, the time
+# the run of good tries began (a gap over `stale_after` ends a run). Refuses a malformed line.
+summary() {
+    [ -r "$records" ] || return 0
+    awk -v stale="$stale_after" '
+        !/^[0-9]+ (ssh|https) (ok|fail) [0-9]+ (clone|commit|land|read|done)$/ {
+            print "malformed " NR
+            exit
+        }
+        {
+            if (newest != "" && $1 - newest > stale) { since = "" }
+            if ($3 != "ok") { since = "" } else if (since == "") { since = $1 }
+            newest = $1
+            last[$2] = $1 " " $3 " " $4 " " $5
+        }
+        END {
+            if (newest != "") { print "newest " newest }
+            if (since != "") { print "since " since }
+            for (e in last) { print "last_" e " " last[e] }
+        }
+    ' "$records"
+}
+
+# The backup records summed up: newest good backup, last good rehearsal's restore time.
+backup_summary() {
+    [ -n "$backups" ] || return 0
+    [ -r "$backups" ] || fail "cannot read the backup records"
+    awk '
+        /^[0-9]+ backup (ok|fail)$/ {
+            if ($3 == "ok") { backup = $1 }
+            next
+        }
+        /^[0-9]+ rehearsal (ok [0-9]+|fail)$/ {
+            if ($3 == "ok") { restore = $4 }
+            next
+        }
+        {
+            print "malformed " NR
+            exit
+        }
+        END {
+            if (backup != "") { print "backup " backup }
+            if (restore != "") { print "restore " restore }
+        }
+    ' "$backups"
+}
+
+# A table row of one entrance's last try, and whether it was good.
+entrance_row() {
+    if [ -z "$2" ]; then
+        printf '<tr><th>%s</th><td>no try recorded</td></tr>\n' "$1"
+        return 1
+    fi
+    set -- "$1" $2
+    printf '<tr><th>%s</th><td>%s at %s, %s s, last step %s</td></tr>\n' \
+        "$1" "$3" "$(utc "$2")" "$4" "$5"
+    [ "$3" = ok ]
+}
+
+cmd_page() {
+    [ $# -eq 0 ] || fail "usage: so-status page"
+    [ -d "$page" ] || fail "the page's directory does not exist"
+    now=$(date +%s)
+
+    # 1. What the records say.
+    newest=
+    since=
+    last_ssh=
+    last_https=
+    backup=
+    restore=
+    sums=$(summary)
+    sums="$sums
+$(backup_summary)"
+    while read -r key value; do
+        case $key in
+        malformed) fail "a probe or backup record of another shape, line $value" ;;
+        newest | since | last_ssh | last_https | backup | restore) eval "$key=\$value" ;;
+        esac
+    done <<EOF
+$sums
+EOF
+
+    # 2. The state: failing when an entrance's last try failed or none was made, stale when
+    # the newest try is older than `stale_after`, else operational.
+    rows=
+    good=yes
+    if [ -n "$ssh_url" ]; then
+        rows="$rows$(entrance_row ssh "$last_ssh")
+" || good=no
+    fi
+    if [ -n "$https_url" ]; then
+        rows="$rows$(entrance_row https "$last_https")
+" || good=no
+    fi
+    if [ -z "$newest" ] || [ "$good" = no ]; then
+        state=failing
+        colour=red
+    elif [ $((now - newest)) -gt "$stale_after" ]; then
+        state=stale
+        colour=grey
+    else
+        state=operational
+        colour=green
+    fi
+    run="none"
+    [ -z "$since" ] || [ "$state" != operational ] || run="$(span $((now - since)))"
+    newest_backup="none"
+    [ -z "$backup" ] || newest_backup="$(span $((now - backup))) ago"
+    restore_time="no rehearsal yet"
+    [ -z "$restore" ] || restore_time="$(span "$restore")"
+
+    # 3. The page and the records it was made from, renamed into place.
+    temporary="$page/.index.html.$$"
+    {
+        printf '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
+        printf '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        printf '<meta http-equiv="refresh" content="60">\n'
+        printf '<title>SwarmOps status</title>\n'
+        printf '<style>.green{color:#060}.red{color:#a00}.grey{color:#666}</style>\n'
+        printf '</head>\n<body>\n<h1>SwarmOps status</h1>\n'
+        printf '<p id="state" class="%s" data-generated="%s" data-stale-after="%s">%s</p>\n' \
+            "$colour" "$now" "$stale_after" "$state"
+        printf '<p>Made at %s from the probe'\''s tries: clone, push to refs/land/main, ' "$(utc "$now")"
+        printf 'read main back, every %s s.</p>\n' "$period"
+        printf '<table>\n%s\n<tr><th>Good for</th><td>%s</td></tr>\n</table>\n' "$rows" "$run"
+        printf '<h2>Recovery</h2>\n<table>\n'
+        printf '<tr><th>Copies</th><td>%s</td></tr>\n' "$copies"
+        printf '<tr><th>Work at risk</th><td>%s</td></tr>\n' "$(span "$backup_period")"
+        printf '<tr><th>Newest good backup</th><td>%s</td></tr>\n' "$newest_backup"
+        printf '<tr><th>Restore time</th><td>%s</td></tr>\n' "$restore_time"
+        printf '</table>\n'
+        # A page no probe replaced reads stale in the browser too.
+        printf '<script>var s=document.getElementById("state");'
+        printf 'if(Date.now()/1000-s.dataset.generated>s.dataset.staleAfter)'
+        printf '{s.className="grey";s.textContent="stale";}</script>\n'
+        printf '</body>\n</html>\n'
+    } >"$temporary" || {
+        rm -f "$temporary"
+        exit 2
+    }
+    chmod 0644 "$temporary"
+    if [ -r "$records" ]; then
+        cp "$records" "$page/.records.$$"
+        chmod 0644 "$page/.records.$$"
+        mv "$page/.records.$$" "$page/records"
+    fi
+    mv "$temporary" "$page/index.html"
+}
+
+[ $# -ge 1 ] || fail "usage: so-status probe | loop <count> | page"
+command=$1
+shift
+case $command in
+probe) cmd_probe "$@" ;;
+loop) cmd_loop "$@" ;;
+page) cmd_page "$@" ;;
+*) fail "unknown command $command" ;;
+esac

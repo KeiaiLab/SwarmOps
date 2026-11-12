@@ -1,0 +1,16 @@
+[Unit]
+Description=SwarmOps status probe: one try per entrance, then the status page
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=-/usr/bin/so-status probe
+ExecStartPost=/usr/bin/so-status page
+DynamicUser=yes
+StateDirectory=swarmops-status
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes

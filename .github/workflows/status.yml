@@ -1,0 +1,127 @@
+# The hosted copy's status page (status.swarmops.cc): the package's probe, so-status
+# (packaging/server/status/), run with the hosted settings in deploy/swarmops.cc/config/, five
+# rounds a run, one a minute, then the page it makes deployed to Cloudflare Pages, project
+# `swarmops-status`. The records of earlier runs are read back from the published page, so the
+# page counts across runs; a page no run replaced reads stale by its own time. This workflow
+# runs no other repository script.
+#
+# Until the hosted settings file and every secret below exist (in the environment `hosted`), a
+# run leaves a notice, probes nothing and stays green.
+#
+# Hardening as in ci.yml: actions pinned to a full commit SHA, no token permission a job does
+# not need, `actions/checkout` keeps no credentials. Runs on the maintainers' own host, through
+# the self-hosted runners labelled `swarmops-local`.
+name: Status
+
+on:
+  push:
+    branches: [stable]
+    paths:
+      - "packaging/server/status/**"
+      - ".github/workflows/status.yml"
+  schedule:
+    # Every 5 minutes; with `so-status loop 5` that is one round a minute.
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+# One probe at a time; a run that is late is not cancelled, the next one waits.
+concurrency:
+  group: status
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  probe:
+    name: probe and status page
+    runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
+    environment:
+      name: hosted
+    permissions:
+      contents: read # checkout
+      deployments: write # wrangler-action records each deploy as a GitHub deployment
+    timeout-minutes: 10
+    env:
+      SETTINGS: deploy/swarmops.cc/config/status.conf
+      STATUS_URL: https://status.swarmops.cc
+      STATUS_PROJECT: swarmops-status
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # 1. No hosted settings or no secrets: a notice, and the job still succeeds.
+      - id: ready
+        env:
+          PROBE_SSH_KEY: ${{ secrets.PROBE_SSH_KEY }}
+          PROBE_KNOWN_HOSTS: ${{ secrets.PROBE_KNOWN_HOSTS }}
+          PROBE_HTTPS_PASSWORD: ${{ secrets.PROBE_HTTPS_PASSWORD }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          missing=()
+          [[ -f "$SETTINGS" ]] || missing+=("$SETTINGS")
+          for name in PROBE_SSH_KEY PROBE_KNOWN_HOSTS PROBE_HTTPS_PASSWORD CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID; do
+            [[ -n "${!name}" ]] || missing+=("$name")
+          done
+          if (( ${#missing[@]} == 0 )); then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "::notice title=Status not probed::missing: ${missing[*]}; nothing was probed or deployed."
+          echo "ready=false" >> "$GITHUB_OUTPUT"
+
+      # 2. The settings: the hosted file, then the credentials and this run's paths.
+      - if: steps.ready.outputs.ready == 'true'
+        env:
+          PROBE_SSH_KEY: ${{ secrets.PROBE_SSH_KEY }}
+          PROBE_KNOWN_HOSTS: ${{ secrets.PROBE_KNOWN_HOSTS }}
+          PROBE_HTTPS_PASSWORD: ${{ secrets.PROBE_HTTPS_PASSWORD }}
+        run: |
+          umask 077
+          dir="$RUNNER_TEMP/status"
+          rm -rf "$dir"
+          mkdir -p "$dir/www"
+          printf '%s\n' "$PROBE_SSH_KEY" > "$dir/ssh_key"
+          printf '%s\n' "$PROBE_KNOWN_HOSTS" > "$dir/known_hosts"
+          printf '%s\n' "$PROBE_HTTPS_PASSWORD" > "$dir/https_password"
+          {
+            cat "$SETTINGS"
+            printf 'ssh_key=%s\nknown_hosts=%s\nhttps_password=%s\n' \
+              "$dir/ssh_key" "$dir/known_hosts" "$dir/https_password"
+            printf 'records=%s\npage=%s\n' "$dir/records" "$dir/www"
+          } > "$dir/status.conf"
+          # The records so far, from the published page; none on the first run.
+          curl -fsS --max-time 20 "$STATUS_URL/records" -o "$dir/records" || rm -f "$dir/records"
+
+      # 3. Five rounds, one a minute; a failed try is a record, not a failed step.
+      - if: steps.ready.outputs.ready == 'true'
+        run: |
+          export SO_STATUS_CONF="$RUNNER_TEMP/status/status.conf"
+          sh packaging/server/status/bin/so-status loop 5
+          sh packaging/server/status/bin/so-status page
+
+      # 4. Node for wrangler, as in site.yml.
+      - if: steps.ready.outputs.ready == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.15.0
+          package-manager-cache: false
+
+      # 5. The page and its records, deployed as the project's production branch.
+      - if: steps.ready.outputs.ready == 'true'
+        uses: cloudflare/wrangler-action@953926a2e2182532811c01a25e53647d93bf07c0 # v4.1.3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          gitHubToken: ${{ github.token }}
+          wranglerVersion: 4.151.3
+          command: pages deploy ${{ runner.temp }}/status/www --project-name=${{ env.STATUS_PROJECT }} --branch=stable --commit-hash=${{ github.sha }}
+
+      # 6. No key or password stays on the runner.
+      - if: always()
+        run: rm -rf "$RUNNER_TEMP/status"

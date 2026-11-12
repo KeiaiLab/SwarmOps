@@ -1,0 +1,9 @@
+# The status probe and page: the files the swarmops-server package installs for them, in the
+# kit's MANIFEST format. Enable the timer on a machine other than the serving host.
+install bin/so-status /usr/bin/so-status 0755
+install status.conf /etc/swarmops-server/status.conf 0644
+install systemd/swarmops-status.service /usr/lib/systemd/system/swarmops-status.service 0644
+install systemd/swarmops-status.timer /usr/lib/systemd/system/swarmops-status.timer 0644
+uses /usr/bin/git
+uses /usr/bin/timeout
+uses /var/lib/swarmops-status
