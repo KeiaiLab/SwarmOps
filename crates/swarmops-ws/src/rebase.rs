@@ -1008,7 +1008,10 @@ mod tests {
     use std::sync::Arc;
 
     use camino::{Utf8Path, Utf8PathBuf};
-    use swarmops_api::{ChangeInput, ChangeOp, Identity, StatusAfter, StoreOps, WsCreateReq};
+    use swarmops_api::{
+        ChangeInput, ChangeOp, Identity, StatusAfter, StoreOps, WsCommitReq, WsCreateReq,
+        WsResolveReq,
+    };
     use swarmops_ops::LocalOps;
     use tempfile::TempDir;
 
@@ -1017,8 +1020,8 @@ mod tests {
     use crate::materialize::Tree;
     use crate::{RealFs, create};
 
-    /// A store whose workspace `w` was cut short in an update after the record named its
-    /// snapshot of `a.txt` edited: its directory, the store, the snapshot.
+    /// A store whose workspace `w` an update left with a record naming its snapshot, cut short
+    /// or stopped by a conflict: its directory, the store, the snapshot.
     struct Cut {
         /// Holds the store and the workspace.
         _tmp: TempDir,
@@ -1028,7 +1031,7 @@ mod tests {
         ops: LocalOps,
         /// The workspace's directory.
         dir: Utf8PathBuf,
-        /// The snapshot the cut record names.
+        /// The snapshot the update's record names.
         snapshot: String,
     }
 
@@ -1082,7 +1085,24 @@ mod tests {
     /// `a.txt` edited, and an update cut right after its record named the snapshot of that edit
     /// (the M19 design §4.4, "the record naming S").
     fn cut_after_snapshot() -> Cut {
-        // 1. A store, a workspace on its base, `main` moved on.
+        // 1. A workspace on its base, `main` moved on.
+        let (mut cut, base) = on_base();
+        commit_main(&cut.ops, Some(&base), &[("b.txt", "1\n2\nthree\n")]);
+
+        // 2. The edit, snapshotted behind the update's record, which then names it: the cut.
+        cut.write("a.txt", "mine\n");
+        let ctx = cut.ctx();
+        let ws = Workspace::open(&ctx, Locate::Name("w".to_owned())).unwrap();
+        let found = snapshot::scan(&ctx, &ws).unwrap();
+        let mut record = record(PendingOp::Rebase, &new_key(), None, &ws, "main", STARTING);
+        let snap = snapshot_first(&ctx, &ws, &mut record, found, None).unwrap();
+        cut.snapshot = snap.snapshot;
+        cut
+    }
+
+    /// A store and its workspace `w` of a base of `a.txt`, `b.txt` and `d.txt`, no snapshot
+    /// named yet; the base.
+    fn on_base() -> (Cut, String) {
         let tmp = tempfile::tempdir().unwrap();
         let root = Utf8Path::from_path(tmp.path()).unwrap().join("store");
         let (ops, _) = LocalOps::init(&root, "acme").unwrap();
@@ -1092,7 +1112,7 @@ mod tests {
             &[("a.txt", "a\n"), ("b.txt", "1\n2\n3\n"), ("d.txt", "d\n")],
         );
         let dir = root.parent().unwrap().join("w");
-        let mut cut = Cut {
+        let cut = Cut {
             _tmp: tmp,
             root,
             ops,
@@ -1105,16 +1125,28 @@ mod tests {
         req.all = true;
         req.status_after = StatusAfter::None;
         create(&cut.ctx(), req).unwrap();
-        commit_main(&cut.ops, Some(&base), &[("b.txt", "1\n2\nthree\n")]);
+        (cut, base)
+    }
 
-        // 2. The edit, snapshotted behind the update's record, which then names it: the cut.
+    /// Workspace `w` with line 2 of `b.txt` committed one way and `main` moved on it another;
+    /// `a.txt` and line 1 of `b.txt` edited, and an update stopped by the conflict on `b.txt`,
+    /// its record naming the snapshot of both edits.
+    fn conflict_after_snapshot() -> Cut {
+        // 1. The workspace's commit and `main`'s, of the same line.
+        let (mut cut, base) = on_base();
+        cut.write("b.txt", "1\nmine\n3\n");
+        let mut req = WsCommitReq::new("w".to_owned(), "mine".to_owned());
+        req.status_after = StatusAfter::None;
+        commit::commit(&cut.ctx(), req).unwrap();
+        commit_main(&cut.ops, Some(&base), &[("b.txt", "1\ntheirs\n3\n")]);
+
+        // 2. The edits, then the update: a conflict, the record kept with its snapshot.
         cut.write("a.txt", "mine\n");
-        let ctx = cut.ctx();
-        let ws = Workspace::open(&ctx, Locate::Name("w".to_owned())).unwrap();
-        let found = snapshot::scan(&ctx, &ws).unwrap();
-        let mut record = record(PendingOp::Rebase, &new_key(), None, &ws, "main", STARTING);
-        let snap = snapshot_first(&ctx, &ws, &mut record, found, None).unwrap();
-        cut.snapshot = snap.snapshot;
+        cut.write("b.txt", "one\nmine\n3\n");
+        let refused = update(&cut.ctx()).unwrap_err();
+        assert_eq!(refused.code, ErrorCode::Conflict.as_str(), "{refused:?}");
+        let record = pending::read_pending(&RealFs::new(), &cut.dir).unwrap();
+        cut.snapshot = record.and_then(|record| record.snapshot).unwrap();
         cut
     }
 
@@ -1161,5 +1193,34 @@ mod tests {
         assert_eq!(cut.read("a.txt"), "mine again\n");
         assert_eq!(cut.read("d.txt"), "d2\n");
         assert_eq!(cut.read("b.txt"), "1\n2\nthree\n");
+    }
+
+    /// A continue names what its resolutions replaced (the M19 design §4.4): the snapshot's edit
+    /// of a path the continue resolved is in `dropped`, the snapshot is `kept` and holds that
+    /// edit, the file holds the resolution, and the edit of another path is carried.
+    #[test]
+    fn continue_reports_resolved_paths() {
+        // 1. The conflict, resolved by hand.
+        let cut = conflict_after_snapshot();
+        let ctx = cut.ctx();
+        cut.write("b.txt", "1\nboth\n3\n");
+        let mut req = WsResolveReq::new("w".to_owned());
+        req.paths = vec!["b.txt".to_owned()];
+        req.status_after = StatusAfter::None;
+        resolve::resolve(&ctx, req).unwrap();
+
+        // 2. Continued: the resolved path dropped, its edit kept by the snapshot.
+        let mut req = WsRebaseReq::new("w".to_owned());
+        req.action = WsRebaseAction::Continue;
+        req.status_after = StatusAfter::None;
+        let done = rebase(&ctx, req).unwrap();
+        assert_eq!(done.snapshot.as_deref(), Some(&*cut.snapshot));
+        assert_eq!(done.kept.as_deref(), Some(&*cut.snapshot));
+        assert_eq!(done.dropped, ["b.txt"]);
+        assert_eq!(cut.text_at(&cut.snapshot, "b.txt"), "one\nmine\n3\n");
+
+        // 3. The files: the resolution at the dropped path, the other edit carried.
+        assert_eq!(cut.read("b.txt"), "1\nboth\n3\n");
+        assert_eq!(cut.read("a.txt"), "mine\n");
     }
 }
