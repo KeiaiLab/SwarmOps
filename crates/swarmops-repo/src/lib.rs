@@ -66,6 +66,7 @@ pub mod revert;
     reason = "the batched lands (the D2 design, slice D2-4) use it"
 )]
 mod staged;
+pub mod tag;
 mod transfer;
 mod tree_edit;
 pub mod upgrade;
@@ -98,6 +99,7 @@ pub use repair::{RepairAction, RepairKind, RepairReport, RepairRequest};
 pub use repo::{CasOutcome, LocalRepo, Repo, RepoInfo};
 pub use revert::{MAX_REVERT_CHANGESETS, MAX_REVERT_REASON_BYTES, RevertRequest};
 pub use swarmops_store::{CasResult, InsertOutcome, RefKind, RefState, StoreError, StoreFormat};
+pub use tag::{Applied, TAG_BATCH, TagKind, TagMade, TagObject, TagRead, TagWant};
 pub use transfer::AdoptOutcome;
 pub use upgrade::UpgradeReport;
 pub use verify::{Depth, MismatchCause, VerifyProblem, VerifyReport};

@@ -45,6 +45,11 @@ collects the changes on `stable` that no release holds yet, until the next relea
   command (`add`, `branch`, `merge`, `stash`, …) is refused as before, exit 2, with one line first
   in `error.hint` naming what to type. A line that parsed before runs as before; below a
   workspace's root a line that names paths is refused, since paths are read from the root.
+- A FORMAT 3 store holds git's annotated tag objects (the annotated tags design §2): the object's
+  bytes as a blob, named by a Tag fact under the feature `tag_object`, created with its tag ref in
+  one frame, at most 64 tags a frame. No command writes one yet. A tag never moves; FORMAT 2 keeps
+  lightweight tags only. A build released before this one does not open a store that holds an
+  annotated tag.
 
 ### Changed
 

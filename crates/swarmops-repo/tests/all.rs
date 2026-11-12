@@ -28,6 +28,7 @@ mod rebase;
 mod repair;
 mod revert;
 mod store_fs;
+mod tag;
 mod transfer;
 // Its template, crash and failure tests share the fault doubles, which need the hooks.
 #[cfg(feature = "test-hooks")]
