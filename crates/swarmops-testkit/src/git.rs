@@ -1541,6 +1541,28 @@ mod tests {
         }
     }
 
+    /// The claims are no tautology: none holds for `linear`, a plain history made to hold none
+    /// of them. A check that panics on it, looking up a ref `linear` lacks, holds nothing.
+    #[test]
+    fn the_claims_do_not_hold_for_a_plain_fixture() {
+        let fixture = fixture("linear");
+        let manifest = fixture.manifest.as_ref().expect("linear has a manifest");
+        let repo = fixture.repo.as_ref().expect("linear has a repository");
+        let holds = |check: &dyn Fn() -> bool| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(check)).unwrap_or(false)
+        };
+        let mut held: Vec<String> = (CLAIMS.iter())
+            .filter(|(_, _, claim)| holds(&|| claim(manifest)))
+            .map(|(name, claim, _)| format!("{name}: {claim}"))
+            .collect();
+        held.extend(
+            (LAYOUTS.iter())
+                .filter(|(_, _, layout)| holds(&|| layout(repo)))
+                .map(|(name, claim, _)| format!("{name}: {claim}")),
+        );
+        assert!(held.is_empty(), "holds for linear:\n{}", held.join("\n"));
+    }
+
     /// An entry of a tree, as git stores it.
     struct StoredEntry {
         /// Its mode's octal digits, as stored.

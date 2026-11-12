@@ -367,6 +367,146 @@ fn a_directory_left_empty_by_a_drop_is_dropped() {
     );
 }
 
+/// A directory's entry whose name no path holds is `paths`, as a file's is: refused naming it,
+/// or dropped with all it holds.
+#[test]
+fn a_directory_whose_name_no_path_holds_is_paths() {
+    let mut source = MemSource::default();
+    let blob = source.blob(b"x\n");
+    let inner = source.tree(&[("100644", b"x.txt", blob)]);
+    let root = source.tree(&[("40000", b"caf\xe9", inner), ("40000", b"dir", inner)]);
+    let commit = source.commit(root, &[], "a directory named in Latin-1\n");
+
+    // 1. Refused, naming the directory.
+    let refused = Converter::new(&source, LossySet::empty()).commit(commit, &mut Vec::new());
+    assert!(
+        matches!(&refused, Err(ConvertError::Lossy { class: LossyClass::Paths, path, .. })
+            if path == b"caf\xe9"),
+        "{refused:?}"
+    );
+
+    // 2. Allowed: dropped, the other directory kept.
+    let mut out = Vec::new();
+    let got = (Converter::new(&source, LossySet::all()).commit(commit, &mut out)).unwrap();
+    assert_eq!(got.lossy, set(&[LossyClass::Paths]));
+    let mut objects = Objects::default();
+    objects.take(&mut out);
+    let names: Vec<String> = objects.files(got.root).into_keys().collect();
+    assert_eq!(names, ["dir/x.txt"]);
+}
+
+/// An entry dropped counts under the class it is dropped for alone (the conversion's mapping):
+/// with every class allowed, a name no path holds is `paths` alone whatever its mode or what it
+/// names, and a directory its drops leave empty is their classes alone whatever its mode.
+#[test]
+fn a_dropped_entry_counts_under_its_class_alone() {
+    let mut source = MemSource::default();
+    let kept = source.blob(b"kept\n");
+    let link = source.tree(&[("160000", b"module", GitOid::new([0x22; 20]))]);
+    let cases = [
+        ("100664", &b".."[..], kept, LossyClass::Paths),
+        ("040000", b"..", link, LossyClass::Paths),
+        ("040000", b"odd", link, LossyClass::Gitlinks),
+        ("40000", b"only", link, LossyClass::Gitlinks),
+        (
+            "160000",
+            b"..",
+            GitOid::new([0x22; 20]),
+            LossyClass::Gitlinks,
+        ),
+    ];
+    for (mode, name, named, class) in cases {
+        let root = source.tree(&[(mode, name, named), ("100644", b"z.txt", kept)]);
+        let commit = source.commit(root, &[], "one entry dropped\n");
+        let mut out = Vec::new();
+        let got = Converter::new(&source, LossySet::all()).commit(commit, &mut out);
+        let case = format!("{mode} {}", name.escape_ascii());
+        let got = got.unwrap_or_else(|error| panic!("{case}: {error}"));
+        assert_eq!(got.lossy, set(&[class]), "{case}");
+        let mut objects = Objects::default();
+        objects.take(&mut out);
+        let names: Vec<String> = objects.files(got.root).into_keys().collect();
+        assert_eq!(names, ["z.txt"], "{case}");
+    }
+}
+
+/// The fidelity check runs both ways: a commit that lost something and yet renders back to its
+/// own id is a bug too. A source that reads a tree written `100644` as one written `100664`
+/// makes one: `modes` is lost, and the rendering is the tree's own.
+#[test]
+fn a_lossy_commit_that_renders_back_is_a_bug() {
+    let mut source = MemSource::default();
+    let blob = source.blob(b"x\n");
+    let named = source.tree(&[("100644", b"a.txt", blob)]);
+    let odd = source.tree(&[("100664", b"a.txt", blob)]);
+    let (_, bytes) = source.read(odd).unwrap();
+    source.forge(named, RawKind::Tree, bytes);
+    let commit = source.commit(named, &[], "an odd mode under a faithful id\n");
+    let mut out = Vec::new();
+    let got = Converter::new(&source, LossySet::all()).commit(commit, &mut out);
+    assert_eq!(got, Err(ConvertError::Bug { commit }));
+    assert!(out.is_empty(), "a refused commit appends nothing");
+}
+
+/// A tree remembered ([`Converter::remember_tree`]) is never appended, and one remembered as the
+/// empty root keeps nothing: a commit of it has the empty root, and a directory naming it is
+/// dropped as an empty tree.
+#[test]
+fn a_remembered_tree_is_never_appended_and_an_empty_one_keeps_nothing() {
+    let mut source = MemSource::default();
+    let empty = source.tree(&[]);
+    let blob = source.blob(b"x\n");
+    let dir = source.tree(&[("100644", b"x.txt", blob)]);
+    let bare = source.commit(empty, &[], "the empty tree\n");
+    let root = source.tree(&[("40000", b"dir", dir), ("40000", b"e", empty)]);
+    let named = source.commit(root, &[], "an empty directory\n");
+    let blob_id = BlobId::new(hash_object(ObjectKind::Blob, b"x\n"));
+    let dir_id = Tree::new(vec![TreeEntry::leaf("x.txt", LeafKind::File, blob_id)])
+        .unwrap()
+        .id();
+    let seeded = |allowed| {
+        let mut converter = Converter::new(&source, allowed);
+        converter.remember_tree(empty, Tree::empty_root().id());
+        converter.remember_tree(dir, dir_id);
+        converter
+    };
+
+    // 1. The empty tree's commit: the empty root, not appended.
+    let mut out = Vec::new();
+    let got = seeded(LossySet::empty()).commit(bare, &mut out).unwrap();
+    assert_eq!(got.root, Tree::empty_root().id());
+    assert!(out.is_empty(), "the remembered empty root was appended");
+
+    // 2. A directory naming it: an empty tree, refused, or dropped once allowed; `dir` kept
+    //    unread and unappended, so that only the new root is.
+    let refused = seeded(LossySet::empty()).commit(named, &mut out);
+    assert!(
+        matches!(&refused, Err(ConvertError::Lossy { class: LossyClass::EmptyTrees, path, .. })
+            if path == b"e"),
+        "{refused:?}"
+    );
+    let got = seeded(set(&[LossyClass::EmptyTrees])).commit(named, &mut out);
+    assert_eq!(got.unwrap().lossy, set(&[LossyClass::EmptyTrees]));
+    assert_eq!(out.len(), 1, "the new root alone");
+}
+
+/// A commit whose tree was converted before takes it as converted then, unread: here a tree the
+/// source lacks, remembered.
+#[test]
+fn a_root_converted_before_is_not_read_again() {
+    let mut source = MemSource::default();
+    let lacked = GitOid::new([0x55; 20]);
+    let commit = source.commit(lacked, &[], "a remembered root\n");
+    let blob_id = BlobId::new(hash_object(ObjectKind::Blob, b"x\n"));
+    let tree = Tree::new(vec![TreeEntry::leaf("x.txt", LeafKind::File, blob_id)]).unwrap();
+    let mut converter = Converter::new(&source, LossySet::empty());
+    converter.remember_tree(lacked, tree.id());
+    let mut out = Vec::new();
+    let got = converter.commit(commit, &mut out).unwrap();
+    assert_eq!(got.root, tree.id());
+    assert!(out.is_empty(), "{out:?}");
+}
+
 #[test]
 fn more_than_255_parents_is_refused_naming_the_commit() {
     let fixture = git::fixture("many_parents");
@@ -662,21 +802,24 @@ fn an_object_of_another_kind_than_named_is_malformed() {
         (source.tree(&[("100644", b"file", tree)]), tree),
         (source.tree(&[("40000", b"dir", blob)]), blob),
     ];
-    for (root, named) in cases {
+    let whats = [
+        "named as a file's or a symlink's content, but it is no blob",
+        "named as a tree, but it is no tree",
+    ];
+    for ((root, oid), what) in cases.into_iter().zip(whats) {
         let commit = source.commit(root, &[], "an entry of the wrong kind\n");
         let got = Converter::new(&source, LossySet::all()).commit(commit, &mut Vec::new());
-        assert!(
-            matches!(&got, Err(ConvertError::Malformed { oid, .. }) if *oid == named),
-            "{got:?}"
-        );
+        assert_eq!(got, Err(ConvertError::Malformed { oid, what }));
     }
-    // A commit's id naming a tree, and bytes that are no commit.
-    for named in [tree, unparsed] {
-        let got = Converter::new(&source, LossySet::all()).commit(named, &mut Vec::new());
-        assert!(
-            matches!(&got, Err(ConvertError::Malformed { oid, .. }) if *oid == named),
-            "{got:?}"
-        );
+    // A commit's id naming a tree, refused by its kind before its bytes are parsed, and bytes
+    // that are no commit.
+    let cases = [
+        (tree, "named as a commit, but it is no commit"),
+        (unparsed, "the first line is not the tree"),
+    ];
+    for (oid, what) in cases {
+        let got = Converter::new(&source, LossySet::all()).commit(oid, &mut Vec::new());
+        assert_eq!(got, Err(ConvertError::Malformed { oid, what }));
     }
 }
 

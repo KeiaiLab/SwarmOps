@@ -167,8 +167,9 @@ fn bare_cases() -> Vec<Case> {
 }
 
 /// The cases laid out otherwise: a work tree whose `.git` is the git directory, one whose `.git`
-/// file names it, and an alternate object directory elsewhere whose own alternates file is a
-/// FIFO (gix reads the chain as the repository opens; the refusal names it by its path).
+/// file names it, a linked work tree, and an alternate object directory elsewhere whose own
+/// alternates file is a FIFO (gix reads the chain as the repository opens; the refusal names it
+/// by its path).
 fn laid_out_cases() -> Vec<Case> {
     let mut cases = Vec::new();
 
@@ -196,6 +197,35 @@ fn laid_out_cases() -> Vec<Case> {
         open: work,
         resolve: "HEAD",
         file: "HEAD".to_owned(),
+        _fixtures: vec![fixture],
+    });
+
+    // A linked work tree: its `.git` file names its git directory, whose `commondir` names the
+    // common one, where a FIFO among the refs is found.
+    let fixture = linear();
+    let admin = repo(&fixture).join("worktrees/linked");
+    let linked = fixture.dir.join("linked");
+    fs::create_dir_all(&admin).unwrap();
+    let head = &fixture.manifest.as_ref().expect("a manifest").commits[0].oid;
+    fs::write(admin.join("HEAD"), format!("{head}\n")).unwrap();
+    fs::write(admin.join("commondir"), "../..\n").unwrap();
+    fs::write(
+        admin.join("gitdir"),
+        format!("{}\n", linked.join(".git").display()),
+    )
+    .unwrap();
+    fs::create_dir(&linked).unwrap();
+    fs::write(
+        linked.join(".git"),
+        format!("gitdir: {}\n", admin.display()),
+    )
+    .unwrap();
+    fifo(&repo(&fixture).join("refs/heads/fifo"));
+    cases.push(Case {
+        what: "a FIFO among the refs of a linked work tree's common directory",
+        open: linked,
+        resolve: "HEAD",
+        file: "refs/heads/fifo".to_owned(),
         _fixtures: vec![fixture],
     });
 

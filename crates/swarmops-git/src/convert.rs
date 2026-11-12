@@ -1106,4 +1106,26 @@ mod tests {
             assert!(out.is_empty(), "{kind}");
         }
     }
+
+    /// A tree whose entries are all dropped renders back as git's empty tree: where git's
+    /// collision detection flags that rendering, the commit is refused naming the tree.
+    #[test]
+    fn an_emptied_tree_the_collision_detection_flags_is_refused() {
+        let mut source = Held::default();
+        let link = [b"160000 sub\0".as_slice(), &[0x22; 20]].concat();
+        let tree = source.hold(RawKind::Tree, link);
+        let raw = format!("tree {tree}\nauthor A <a> 1 +0000\ncommitter C <c> 1 +0000\n\nm\n");
+        let commit = source.hold(RawKind::Commit, raw.into_bytes());
+        let mut gitlinks = LossySet::empty();
+        gitlinks.insert(LossyClass::Gitlinks);
+
+        oid::flagged::flag(RawKind::Tree, &[]);
+        let mut out = Vec::new();
+        let got = Converter::new(&source, gitlinks).commit(commit, &mut out);
+        assert!(
+            matches!(got, Err(ConvertError::Malformed { oid, .. }) if oid == tree),
+            "{got:?}"
+        );
+        assert!(out.is_empty(), "a refused commit appends nothing");
+    }
 }

@@ -11,6 +11,8 @@ use swarmops_git::{
 };
 use swarmops_testkit::git::{self, GitFixture, Manifest};
 
+use crate::support::MemSource;
+
 fn oid(hex: &str) -> GitOid {
     hex.parse().unwrap_or_else(|error| panic!("{hex}: {error}"))
 }
@@ -379,8 +381,8 @@ fn readable(manifest: &Manifest, repo: &Path) -> bool {
 }
 
 /// Every object of every fixture both sources read reads the same through `git cat-file` as
-/// through gix: its header and its bytes, or the same refusal (`corrupt_object`'s); `HEAD` resolves alike; an absent id is missing from
-/// both, and no blob a partial clone lacks is read.
+/// through gix: its header and its bytes, or the same refusal (`corrupt_object`'s); `HEAD`
+/// resolves alike; an absent id is missing from both, and no blob a partial clone lacks is read.
 #[test]
 fn cat_file_source_reads_what_gix_reads() {
     let (mut read, mut lacked) = (0, 0);
@@ -513,4 +515,100 @@ fn a_damaged_object_is_corrupt() {
         matches!(got, Err(SourceError::Corrupt { oid, .. }) if oid == id),
         "{id}: {got:?}"
     );
+}
+
+/// `fixture`'s repository moved into a work tree, as `<work>/.git`, its configuration made a
+/// work tree's; the work tree's path.
+fn work_tree(fixture: &GitFixture) -> std::path::PathBuf {
+    let work = fixture.dir.join("work");
+    fs::create_dir(&work).unwrap();
+    let git_dir = work.join(".git");
+    fs::rename(repo(fixture), &git_dir).unwrap();
+    let config = fs::read_to_string(git_dir.join("config")).unwrap();
+    fs::write(
+        git_dir.join("config"),
+        config.replace("bare = true", "bare = false"),
+    )
+    .unwrap();
+    work
+}
+
+/// A work tree opens at its `.git`, and a linked work tree through its `.git` file and the
+/// `commondir` of the git directory it names: its own `HEAD`, the common refs.
+#[test]
+fn gix_source_opens_a_work_tree_and_a_linked_one() {
+    let fixture = git::fixture("linear");
+    let commits = &manifest(&fixture).commits;
+    let (first, main) = (
+        oid(&commits[0].oid),
+        oid(&manifest(&fixture).refs["refs/heads/main"]),
+    );
+    let work = work_tree(&fixture);
+    let opened = GixSource::open(&work).unwrap_or_else(|error| panic!("open: {error}"));
+    assert_eq!(opened.resolve("HEAD"), Ok(main));
+
+    // 1. The linked work tree's git directory, under the common one's `worktrees/`.
+    let linked = fixture.dir.join("linked");
+    let admin = work.join(".git/worktrees/linked");
+    fs::create_dir_all(&admin).unwrap();
+    fs::write(admin.join("HEAD"), format!("{first}\n")).unwrap();
+    fs::write(admin.join("commondir"), "../..\n").unwrap();
+    fs::write(
+        admin.join("gitdir"),
+        format!("{}\n", linked.join(".git").display()),
+    )
+    .unwrap();
+    fs::create_dir(&linked).unwrap();
+    fs::write(
+        linked.join(".git"),
+        format!("gitdir: {}\n", admin.display()),
+    )
+    .unwrap();
+
+    // 2. Its `HEAD` is its own; `main` the common directory's.
+    let opened = GixSource::open(&linked).unwrap_or_else(|error| panic!("open: {error}"));
+    assert_eq!(opened.resolve("HEAD"), Ok(first));
+    assert_eq!(opened.resolve("main"), Ok(main));
+}
+
+/// A repository named by a path relative to the working directory opens as by its absolute one.
+#[test]
+fn gix_source_opens_a_relative_path() {
+    let fixture = git::fixture("linear");
+    let absolute = fs::canonicalize(repo(&fixture)).unwrap();
+    let cwd = fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+    // `../` up to the root, then the absolute path without its `/`.
+    let mut relative = std::path::PathBuf::new();
+    for _ in cwd.components().skip(1) {
+        relative.push("..");
+    }
+    relative.push(absolute.strip_prefix("/").unwrap());
+    assert!(relative.is_relative());
+    let main = oid(&manifest(&fixture).refs["refs/heads/main"]);
+    let opened = GixSource::open(&relative).unwrap_or_else(|error| panic!("open: {error}"));
+    assert_eq!(opened.resolve("HEAD"), Ok(main));
+}
+
+/// [`MemSource`], the tests' source in memory, reads what gix reads: every object of a fixture
+/// put into it reads back with the header and the bytes gix gives, and a commit resolves by its
+/// id as through gix.
+#[test]
+fn mem_source_reads_what_gix_reads() {
+    let fixture = git::fixture("merges");
+    let (gix, held) = (open(&fixture), manifest(&fixture));
+    let mut mem = MemSource::default();
+    let commits = held.commits.iter().map(|commit| oid(&commit.oid));
+    let trees = held.trees.keys().map(|hex| oid(hex));
+    let blobs = held.blobs.keys().map(|hex| oid(hex));
+    let ids: Vec<GitOid> = commits.chain(trees).chain(blobs).collect();
+    for &id in &ids {
+        let (kind, bytes) = gix.read(id).unwrap_or_else(|error| panic!("{id}: {error}"));
+        assert_eq!(mem.put(kind, bytes), id);
+    }
+    for &id in &ids {
+        assert_eq!(mem.header(id), gix.header(id), "{id}");
+        assert!(mem.read(id) == gix.read(id), "{id}");
+    }
+    let first = &held.commits[0].oid;
+    assert_eq!(mem.resolve(first), gix.resolve(first));
 }

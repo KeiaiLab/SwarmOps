@@ -189,7 +189,7 @@ fn negative_zero_and_a_negative_time_round_trip() {
 #[test]
 fn an_ident_it_cannot_reproduce_parses_but_renders_otherwise() {
     // (the author line, the ident it parses to, the author line it renders)
-    let cases: [(&[u8], RawIdent, &[u8]); 4] = [
+    let cases: [(&[u8], RawIdent, &[u8]); 5] = [
         (
             b"author A  <a@x> 1 +0000",
             ident(b"A", b"a@x", 1, 0),
@@ -209,6 +209,12 @@ fn an_ident_it_cannot_reproduce_parses_but_renders_otherwise() {
             b"author nobody",
             ident(b"nobody", b"", 0, 0),
             b"author nobody <> 0 +0000",
+        ),
+        // No `>`: the e-mail runs to the end of the line.
+        (
+            b"author A <a@x 1 +0000",
+            ident(b"A", b"a@x 1 +0000", 0, 0),
+            b"author A <a@x 1 +0000> 0 +0000",
         ),
     ];
     for (line, expected, rendered_line) in cases {
@@ -263,19 +269,25 @@ fn a_header_without_a_space_and_a_missing_blank_line_parse_but_render_otherwise(
     assert_eq!(parsed.render(), raw);
 }
 
+/// Each refusal names its rule (`what`), so that a rule removed is seen even where a later one
+/// would refuse the same bytes.
 #[test]
 fn a_commit_it_cannot_hold_is_malformed() {
     let parent = format!("parent {TREE}");
     let author: &[u8] = b"author A <a@x> 1 +0000";
     let committer: &[u8] = b"committer C <c@x> 1 +0000";
-    let cases: [(&str, Vec<u8>); 9] = [
-        ("no tree", commit(&[author, committer], b"m\n")),
+    let not_first = "the first line is not the tree";
+    let after_author = "a parent after the author";
+    let tree_hex = "a tree id is not 40 hex digits";
+    let cases: [(&str, Vec<u8>, &str); 10] = [
+        ("no tree", commit(&[author, committer], b"m\n"), not_first),
         (
             "the tree not first",
             commit(
                 &[parent.as_bytes(), &tree_line(), author, committer],
                 b"m\n",
             ),
+            not_first,
         ),
         (
             "a parent after the author",
@@ -283,6 +295,7 @@ fn a_commit_it_cannot_hold_is_malformed() {
                 &[&tree_line(), author, parent.as_bytes(), committer],
                 b"m\n",
             ),
+            after_author,
         ),
         (
             "a parent after the committer",
@@ -290,10 +303,12 @@ fn a_commit_it_cannot_hold_is_malformed() {
                 &[&tree_line(), author, committer, parent.as_bytes()],
                 b"m\n",
             ),
+            after_author,
         ),
         (
             "a 39-digit tree id",
             commit(&[&tree_line()[..44], author, committer], b"m\n"),
+            tree_hex,
         ),
         (
             "a tree id that is not hex",
@@ -305,16 +320,38 @@ fn a_commit_it_cannot_hold_is_malformed() {
                 ],
                 b"m\n",
             ),
+            tree_hex,
         ),
-        ("no author", commit(&[&tree_line(), committer], b"m\n")),
-        ("no committer", commit(&[&tree_line(), author], b"m\n")),
-        ("nothing", Vec::new()),
+        (
+            "a parent id that is not hex",
+            commit(
+                &[
+                    &tree_line(),
+                    b"parent 4b825dc642cb6eb9a060e54bf8d69288fbee490g",
+                    author,
+                    committer,
+                ],
+                b"m\n",
+            ),
+            "a parent id is not 40 hex digits",
+        ),
+        (
+            "no author",
+            commit(&[&tree_line(), committer], b"m\n"),
+            "no author after the tree and the parents",
+        ),
+        (
+            "no committer",
+            commit(&[&tree_line(), author], b"m\n"),
+            "no committer after the author",
+        ),
+        ("nothing", Vec::new(), not_first),
     ];
-    for (case, raw) in cases {
-        assert!(
-            matches!(RawCommit::parse(&raw), Err(RawError::Malformed { .. })),
-            "{case}: {:?}",
-            RawCommit::parse(&raw)
+    for (case, raw, what) in cases {
+        assert_eq!(
+            RawCommit::parse(&raw),
+            Err(RawError::Malformed { what }),
+            "{case}"
         );
     }
 }
