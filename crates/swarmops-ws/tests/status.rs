@@ -633,9 +633,13 @@ fn behind_by_caps_the_base_walk() {
     );
 }
 
+/// The most paths an `E_WS_OUTSIDE_PREFIXES` names.
+const REFUSAL_PATHS: usize = 20;
+
 /// A sparse workspace's status lists the edits off its prefixes that `ws commit` refuses, the
 /// same paths as the refusal's `details.paths`; the edit inside stays a change. At most the
-/// first 1,000 are listed, `outside_truncated` past them.
+/// first 1,000 are listed, `outside_truncated` past them; past 20, the refusal names the first
+/// 20 of that list.
 #[test]
 fn status_lists_an_outside_edit_that_commit_refuses() {
     // 1. A workspace of `src`: an edit inside, a directory and a file outside.
@@ -678,7 +682,16 @@ fn status_lists_an_outside_edit_that_commit_refuses() {
     assert_eq!(page.outside, all[..1_000]);
     assert!(page.outside_truncated);
 
-    // 5. Exactly 1,000: listed whole.
+    // 5. The commit refuses the first 20 of them: a prefix of the status's list.
+    let req = WsCommitReq::new("w".to_owned(), "outside".to_owned());
+    let refused = swarmops_ws::commit(&f.ctx(), req).unwrap_err();
+    assert_eq!(refused.code, "E_WS_OUTSIDE_PREFIXES", "{refused:?}");
+    let paths: Vec<&str> = (refused.details["paths"].as_array().unwrap().iter())
+        .map(|path| path.as_str().unwrap())
+        .collect();
+    assert_eq!(page.outside[..REFUSAL_PATHS], paths);
+
+    // 6. Exactly 1,000: listed whole.
     std::fs::remove_file(dir.join("README")).unwrap();
     let page = swarmops_ws::status(&f.ctx(), page_of("w")).unwrap();
     assert_eq!(page.outside.len(), 1_000);
