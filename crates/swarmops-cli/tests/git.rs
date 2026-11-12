@@ -261,6 +261,148 @@ fn git_import_moves_the_target_as_its_caller() {
     assert_eq!(moves, want, "{log}");
 }
 
+/// A target another writer moved while the import ran: the import records every commit, and its
+/// compare-and-swap fails with `E_CAS_MISMATCH` (exit 4), naming the target and what it names,
+/// its message saying that the same import run again moves the ref or is diverged. Run again,
+/// it is `E_GIT_IMPORT_DIVERGED`: the other writer's changeset does not lead to the tip.
+///
+/// The import reads its base without the writer lock, writes the new commits' objects, then
+/// waits for the lock to write its first frame. This test holds the lock until the import waits
+/// there (`/proc/locks`, the objects written), letting an earlier wait through; then it stops
+/// the import (SIGSTOP), lets the lock go, moves `main` by a commit, and lets the import go on.
+#[test]
+#[cfg(target_os = "linux")]
+fn git_import_whose_target_moved_meanwhile_is_e_cas_mismatch() {
+    use std::process::Command;
+
+    use swarmops_store::MetaLock;
+
+    use crate::support::Racers;
+
+    let store = Store::init();
+    let refs = Source::new("refs");
+    import(&store, &refs.path, &["--ref", "older"]).ok();
+    let objects = store.object_files();
+    let layout = store.layout();
+    let lock_file = layout.meta_lock();
+    let hold = || MetaLock::acquire(&layout, LOCK_PATIENCE).expect("take meta/lock");
+
+    // 1. The import, past its base read, waiting for the lock this test holds.
+    let mut lock = hold();
+    let mut racers = Racers::new(store.tmp());
+    racers.spawn(
+        &store.args(AGENT, &["git", "import", &refs.path, "--ref", "newer"]),
+        &[],
+    );
+    let pid = racers.pids()[0];
+    let importing = std::thread::spawn(move || racers.race());
+    let waits = || waits_for(lock_file.as_std_path(), pid);
+    loop {
+        wait_until("the import waits for the lock", waits);
+        if store.object_files() > objects {
+            break;
+        }
+        drop(lock);
+        wait_until("the import takes the lock", || !waits());
+        lock = hold();
+    }
+
+    // 2. The import stopped, the lock let go, main moved, the import let go.
+    let signal = |name: &str| {
+        let sent = Command::new("kill").args([name, &pid.to_string()]).status();
+        assert!(sent.expect("run kill").success(), "kill {name} {pid}");
+    };
+    signal("-STOP");
+    wait_until("the import stops", || stopped(pid));
+    drop(lock);
+    let changes = store.changes("other", "other.txt", "other\n");
+    let commit = [
+        "commit",
+        "-m",
+        "other",
+        "--changes",
+        &changes,
+        "--advance",
+        "main",
+    ];
+    let committed = store.run_as("agent/other", &commit, &[]).ok();
+    let moved = committed["changeset"].as_str().expect("an id").to_owned();
+    signal("-CONT");
+    let failed = importing.join().expect("the import's thread").remove(0);
+
+    // 3. The swap lost, every commit recorded.
+    assert_eq!(failed.exit(), 4, "{failed}");
+    let error = failed.err("E_CAS_MISMATCH");
+    let details = json!({"name": "main", "actual": moved});
+    assert_eq!(error["details"], details, "{failed}");
+    let message = error["message"].as_str().expect("a message");
+    let extension = "every commit is recorded, and the same git import run again moves the ref \
+                     if what it names leads to the tip, or fails with E_GIT_IMPORT_DIVERGED";
+    assert!(message.ends_with(extension), "{failed}");
+    assert_eq!(store.show("main")["id"], moved.as_str());
+    store.assert_clean("after a lost swap");
+
+    // 4. The same import again: diverged, as the message says.
+    let again = import(&store, &refs.path, &["--ref", "newer"]);
+    assert_eq!(again.exit(), 3, "{again}");
+    again.err("E_GIT_IMPORT_DIVERGED");
+}
+
+/// How long a test waits for a child to reach a state it waits for.
+#[cfg(target_os = "linux")]
+const LOCK_PATIENCE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Polls `done` until it holds; `what` it waits for names the failure after [`LOCK_PATIENCE`].
+#[cfg(target_os = "linux")]
+fn wait_until(what: &str, done: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + LOCK_PATIENCE;
+    while !done() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "never happened: {what}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+/// Whether process `pid` waits for an flock on `file`: a `->` line of `/proc/locks` on the file's
+/// inode.
+#[cfg(target_os = "linux")]
+fn waits_for(file: &std::path::Path, pid: u32) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let inode = std::fs::metadata(file)
+        .expect("the lock file")
+        .ino()
+        .to_string();
+    let pid = pid.to_string();
+    let locks = std::fs::read_to_string("/proc/locks").expect("read /proc/locks");
+
+    // A waiter's line: `1: -> FLOCK  ADVISORY  WRITE <pid> <major>:<minor>:<inode> 0 EOF`.
+    locks.lines().any(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let on_file = (fields.get(6)).is_some_and(|f| f.rsplit(':').next() == Some(&inode));
+        fields.get(1) == Some(&"->") && fields.get(5) == Some(&pid.as_str()) && on_file
+    })
+}
+
+/// Whether every thread of process `pid` is stopped (state `T`): one that a lock's release wakes
+/// before it stops would take the lock.
+#[cfg(target_os = "linux")]
+fn stopped(pid: u32) -> bool {
+    let tasks = std::fs::read_dir(format!("/proc/{pid}/task")).expect("its threads");
+
+    // A thread's state follows its name: `<tid> (<name>) <state> …`.
+    let is_stopped = |stat: std::path::PathBuf| {
+        let stat = std::fs::read_to_string(stat).unwrap_or_default();
+        let state = stat.rsplit_once(')').map(|(_, rest)| rest.trim_start());
+        state.is_some_and(|rest| rest.starts_with('T'))
+    };
+    tasks
+        .map(|task| task.expect("a thread").path().join("stat"))
+        .all(is_stopped)
+}
+
 /// A path where no git repository is, missing or a plain directory, is `E_GIT_NOT_A_REPO`, exit
 /// 6, naming the path as it was given.
 #[test]
