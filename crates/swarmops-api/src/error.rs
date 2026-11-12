@@ -280,6 +280,11 @@ error_codes! {
     /// (`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its
     /// output, `log`, `changeset`). Nothing was landed.
     CheckFailed => "E_CHECK_FAILED", EXIT_ERROR, false;
+    // FORMAT 3 (M20): a store this build cannot read.
+    /// The store is of a later format than this build reads, or lists a feature it lacks
+    /// (`details.format`, and `details.features`, the features it lacks, none for a later
+    /// format). Nothing was written; a newer swarmops reads the store.
+    StoreTooNew => "E_STORE_TOO_NEW", EXIT_ERROR, false;
 }
 
 impl ErrorCode {

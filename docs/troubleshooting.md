@@ -74,6 +74,7 @@ retry advice; this is that table, all 55 codes, each raised by some command.
 | `E_REF_PROTECTED` | 1 | no | `main` would be deleted or moved back. | [Landing and undo](#e_ref_protected) |
 | `E_BUSY` | 4 | yes | Another writer held the store's lock for the whole 10 s wait. | [A busy store](#e_busy) |
 | `E_STORE_CORRUPT` | 1 | no | Stored data failed verification. | [A damaged store](#e_store_corrupt) |
+| `E_STORE_TOO_NEW` | 1 | no | The store is of a later format than this build reads, or lists a feature it lacks. | [Where a store may live](#e_store_too_new) |
 | `E_IO` | 1 | no | The filesystem refused an operation. | [A damaged store](#e_io) |
 | `E_IO_TRANSIENT` | 4 | yes | A journal append failed and was cut back; nothing committed. | [A damaged store](#e_io_transient) |
 | `E_INTERNAL` | 1 | no | A bug in SwarmOps. | [A damaged store](#e_internal) |
@@ -402,6 +403,19 @@ env -u SWARMOPS_REPO swarmops info
 - No store named: set `SWARMOPS_REPO`, or pass `--repo`. There is no default location.
 - `FORMAT names a store layout this build does not read`: the store was made by another release.
   [operations.md](operations.md#upgrades) says what an upgrade across a `FORMAT` takes.
+
+### `E_STORE_TOO_NEW`
+
+Exit 1, not retryable. The store's `FORMAT` is later than any this build reads, or a FORMAT 3
+store lists a feature (`meta/features`) this build lacks. Nothing was written, and the store is
+not damaged:
+
+```text
+{"ok":false,"op":"ref_list","api":1,"error":{"code":"E_STORE_TOO_NEW","message":"the store is format 4, features []: a newer swarmops reads it","retryable":false,"exit":1,"details":{"features":[],"format":4},"hint":"a newer swarmops reads this store"},"meta":{"repo":"acme","elapsed_ms":0,"resolved":{},"auth":"trust"}}
+```
+
+`details.format` is the format the store names and `details.features` the features it has that
+this build lacks (none for a later format). Install the release that reads it; do not run `repair`.
 
 ### `E_EXISTS`
 

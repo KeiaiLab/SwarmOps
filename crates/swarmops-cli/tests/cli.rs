@@ -1674,6 +1674,10 @@ const NOT_RAISED: &[(&str, &str)] = &[
         "E_REMOTE_NOT_FOUND",
         "needs remotes.toml: remote_acceptance::remote_error_codes_golden pins it",
     ),
+    (
+        "E_STORE_TOO_NEW",
+        "needs a store of a later format: too_new_maps_to_its_code_and_hint pins it",
+    ),
 ];
 
 /// Every error code M1 can raise reaches the CLI with its exit code (operations spec §8: each
@@ -1794,10 +1798,116 @@ fn error_codes_reach_the_cli() {
     insta::assert_json_snapshot!(s.transcript());
 }
 
+/// The table grows by exactly one code, `E_STORE_TOO_NEW`: exit 1, not retryable.
+#[test]
+fn error_codes_count_grows_by_one() {
+    assert_eq!(
+        ErrorCode::ALL.len(),
+        CODE_COUNT,
+        "55 codes before FORMAT 3, and one more"
+    );
+    let code = ErrorCode::ALL
+        .iter()
+        .find(|code| code.as_str() == "E_STORE_TOO_NEW");
+    let code = code.expect("E_STORE_TOO_NEW is a code");
+    assert_eq!((code.exit(), code.retryable()), (1, false));
+}
+
+/// A store of a later format, and a FORMAT 3 store that lists a feature this build lacks, are
+/// `E_STORE_TOO_NEW` (exit 1, not retryable): `details` name the format and the features, the
+/// hint says a newer swarmops reads the store, and nothing in the store changes (the FORMAT 3
+/// design §4).
+#[test]
+fn too_new_maps_to_its_code_and_hint() {
+    let mut s = Session::new();
+    let store = s.store();
+    s.run(&["init", &store]);
+    let layout = layout_of(&store);
+
+    // 1. A marker past this build's formats: `swarmops-store 4`.
+    fs::write(layout.format_file(), b"swarmops-store 4\n").unwrap();
+    let later = s.run(&["--repo", &store, "ref", "list"]);
+    assert_eq!(later.exit, 1, "{}", later.json);
+    assert_eq!(later.code(), "E_STORE_TOO_NEW", "{}", later.json);
+    assert_eq!(later.json["error"]["retryable"], false);
+    assert_eq!(
+        later.json["error"]["details"],
+        json!({"format": 4, "features": []})
+    );
+    assert_eq!(
+        later.json["error"]["hint"],
+        "a newer swarmops reads this store"
+    );
+
+    // 2. A FORMAT 3 store that lists a feature this build lacks.
+    fs::write(layout.format_file(), b"swarmops-store 3\n").unwrap();
+    fs::write(
+        layout.features_file(),
+        b"swarmops-features 1\nfrom_the_future\n",
+    )
+    .unwrap();
+    let listed = s.run(&["--repo", &store, "ref", "list"]);
+    assert_eq!(listed.exit, 1, "{}", listed.json);
+    assert_eq!(listed.code(), "E_STORE_TOO_NEW", "{}", listed.json);
+    assert_eq!(listed.json["error"]["retryable"], false);
+    assert_eq!(
+        listed.json["error"]["details"],
+        json!({"format": 3, "features": ["from_the_future"]})
+    );
+    assert_eq!(
+        listed.json["error"]["hint"],
+        "a newer swarmops reads this store"
+    );
+    assert_eq!(
+        fs::read(layout.features_file()).unwrap(),
+        b"swarmops-features 1\nfrom_the_future\n",
+        "nothing is written"
+    );
+}
+
+/// `init` with no `--format` makes FORMAT 3, and `--format 3` names it.
+#[test]
+fn init_defaults_to_format_3() {
+    let mut s = Session::new();
+    let plain = format!("{}/plain", s.tmp());
+    let named = format!("{}/named", s.tmp());
+    assert_eq!(s.run(&["init", &plain])["result"]["store_version"], 3);
+    assert_eq!(
+        s.run(&["init", "--format", "3", &named])["result"]["store_version"],
+        3
+    );
+    for root in [&plain, &named] {
+        assert_eq!(
+            fs::read(layout_of(root).format_file()).unwrap(),
+            b"swarmops-store 3\n"
+        );
+    }
+}
+
+/// `init --format 1` and `--format 2` still make their layouts: the marker, and the journal
+/// files each names.
+#[test]
+fn init_format_1_and_2_still_create_their_layouts() {
+    let mut s = Session::new();
+    for (format, marker) in [("1", "swarmops-store 1\n"), ("2", "swarmops-store 2\n")] {
+        let root = format!("{}/format-{format}", s.tmp());
+        let made = s.run(&["init", "--format", format, &root]);
+        assert_eq!(
+            made["result"]["store_version"],
+            format.parse::<u32>().unwrap()
+        );
+        let layout = layout_of(&root);
+        assert_eq!(fs::read(layout.format_file()).unwrap(), marker.as_bytes());
+        assert!(layout.journal_log().exists(), "format {format}");
+        assert!(!layout.views_dir().exists(), "format {format} has no views");
+        assert!(!layout.features_file().exists(), "format {format}");
+    }
+}
+
 /// How many error codes there are, and how many goldens pin: the counts the known limitations,
 /// the changelog and the goals state, which [`check_doc_counts`] reads.
-const CODE_COUNT: usize = 55;
-const PINNED_COUNT: usize = 55;
+const CODE_COUNT: usize = 56;
+const PINNED_COUNT: usize = 56;
 
 /// The documents that state [`CODE_COUNT`] and [`PINNED_COUNT`], from the repository's root.
 const KNOWN_LIMITATIONS: &str = "docs/known-limitations.md";

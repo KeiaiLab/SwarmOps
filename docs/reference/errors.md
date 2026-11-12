@@ -9,7 +9,7 @@ A failed command prints an envelope whose `error` names a stable `E_*` code, the
 | Exit | Meaning | Codes |
 | --- | --- | --- |
 | 0 | Success. |  |
-| 1 | The operation failed. | [`E_EXISTS`](#e_exists), [`E_AMBIGUOUS_ID`](#e_ambiguous_id), [`E_IS_DIR`](#e_is_dir), [`E_TOO_LARGE`](#e_too_large), [`E_EMPTY_COMMIT`](#e_empty_commit), [`E_TYPE_CONFLICT`](#e_type_conflict), [`E_REF_NAME_INVALID`](#e_ref_name_invalid), [`E_STORE_CORRUPT`](#e_store_corrupt), [`E_UNSUPPORTED_FS`](#e_unsupported_fs), [`E_IO`](#e_io), [`E_INTERNAL`](#e_internal), [`E_NOTHING_TO_LAND`](#e_nothing_to_land), [`E_NOTHING_TO_UNDO`](#e_nothing_to_undo), [`E_FORMAT_REQUIRED`](#e_format_required), [`E_TAG_IMMUTABLE`](#e_tag_immutable), [`E_REF_PROTECTED`](#e_ref_protected), [`E_GIT_IMPORT_LOSSY`](#e_git_import_lossy), [`E_GIT_UNSUPPORTED`](#e_git_unsupported), [`E_GIT_READ`](#e_git_read), [`E_GIT_WRITE`](#e_git_write), [`E_WS_EXISTS`](#e_ws_exists), [`E_WS_DIRTY`](#e_ws_dirty), [`E_PATH_NOT_EMPTY`](#e_path_not_empty), [`E_UNRESOLVED_CONFLICTS`](#e_unresolved_conflicts), [`E_MARKERS_PRESENT`](#e_markers_present), [`E_WS_UNPORTABLE`](#e_ws_unportable), [`E_WS_OUTSIDE_PREFIXES`](#e_ws_outside_prefixes), [`E_WS_STALE`](#e_ws_stale), [`E_CHECK_FAILED`](#e_check_failed) |
+| 1 | The operation failed. | [`E_EXISTS`](#e_exists), [`E_AMBIGUOUS_ID`](#e_ambiguous_id), [`E_IS_DIR`](#e_is_dir), [`E_TOO_LARGE`](#e_too_large), [`E_EMPTY_COMMIT`](#e_empty_commit), [`E_TYPE_CONFLICT`](#e_type_conflict), [`E_REF_NAME_INVALID`](#e_ref_name_invalid), [`E_STORE_CORRUPT`](#e_store_corrupt), [`E_UNSUPPORTED_FS`](#e_unsupported_fs), [`E_IO`](#e_io), [`E_INTERNAL`](#e_internal), [`E_NOTHING_TO_LAND`](#e_nothing_to_land), [`E_NOTHING_TO_UNDO`](#e_nothing_to_undo), [`E_FORMAT_REQUIRED`](#e_format_required), [`E_TAG_IMMUTABLE`](#e_tag_immutable), [`E_REF_PROTECTED`](#e_ref_protected), [`E_GIT_IMPORT_LOSSY`](#e_git_import_lossy), [`E_GIT_UNSUPPORTED`](#e_git_unsupported), [`E_GIT_READ`](#e_git_read), [`E_GIT_WRITE`](#e_git_write), [`E_WS_EXISTS`](#e_ws_exists), [`E_WS_DIRTY`](#e_ws_dirty), [`E_PATH_NOT_EMPTY`](#e_path_not_empty), [`E_UNRESOLVED_CONFLICTS`](#e_unresolved_conflicts), [`E_MARKERS_PRESENT`](#e_markers_present), [`E_WS_UNPORTABLE`](#e_ws_unportable), [`E_WS_OUTSIDE_PREFIXES`](#e_ws_outside_prefixes), [`E_WS_STALE`](#e_ws_stale), [`E_CHECK_FAILED`](#e_check_failed), [`E_STORE_TOO_NEW`](#e_store_too_new) |
 | 2 | The request or the command line is malformed. | [`E_INVALID_ARG`](#e_invalid_arg) |
 | 3 | The change conflicts with what it lands on: resolve it, then run the operation again. | [`E_CONFLICT`](#e_conflict), [`E_GIT_IMPORT_DIVERGED`](#e_git_import_diverged), [`E_GIT_EXPORT_DIVERGED`](#e_git_export_diverged), [`E_REMOTE_DIVERGED`](#e_remote_diverged) |
 | 4 | The operation can succeed when it is run again. | [`E_CAS_MISMATCH`](#e_cas_mismatch), [`E_IO_TRANSIENT`](#e_io_transient), [`E_BUSY`](#e_busy), [`E_CAS_RETRY_EXHAUSTED`](#e_cas_retry_exhausted), [`E_MAINTENANCE_BUSY`](#e_maintenance_busy), [`E_REMOTE_UNREACHABLE`](#e_remote_unreachable), [`E_WS_LOCKED`](#e_ws_locked) |
@@ -75,6 +75,7 @@ A failed command prints an envelope whose `error` names a stable `E_*` code, the
 | [`E_WS_OUTSIDE_PREFIXES`](#e_ws_outside_prefixes) | 1 | no | A sparse workspace's `ws commit` or `ws land` met edits outside its prefixes (`details.paths`, sorted, the first 20). |
 | [`E_WS_STALE`](#e_ws_stale) | 1 | no | `ws status`, `ws diff`, `ws commit`, `ws materialize`, `ws land` (onto any target) or `ws rebase --continue` found the workspace's base gone from its target's history (`details.target`, `base`, `head`; `base_op`, the operation that moved the target to the base; `moved_op`, the latest that moved it to `head`, or null when not found). |
 | [`E_CHECK_FAILED`](#e_check_failed) | 1 | no | A workspace's check or bootstrap command failed or ran past its time (`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its output, `log`, `changeset`). |
+| [`E_STORE_TOO_NEW`](#e_store_too_new) | 1 | no | The store is of a later format than this build reads, or lists a feature it lacks (`details.format`, and `details.features`, the features it lacks, none for a later format). |
 
 ## E_EXISTS
 
@@ -405,3 +406,9 @@ Exit 1. Retryable: no.
 Exit 1. Retryable: no.
 
 A workspace's check or bootstrap command failed or ran past its time (`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its output, `log`, `changeset`). Nothing was landed.
+
+## E_STORE_TOO_NEW
+
+Exit 1. Retryable: no.
+
+The store is of a later format than this build reads, or lists a feature it lacks (`details.format`, and `details.features`, the features it lacks, none for a later format). Nothing was written; a newer swarmops reads the store.

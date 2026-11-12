@@ -410,6 +410,12 @@ impl LocalRepo {
             }
         };
         let Some(format) = format else {
+            // A marker of a later format is a newer build's store, not an unreadable one.
+            if let Err(too_new @ StoreError::TooNew { .. }) =
+                swarmops_store::read_format(&unread, &store_fs)
+            {
+                return Err(too_new.into());
+            }
             return Err(StoreError::Format(format!(
                 "{root}/FORMAT names a store layout this build does not read"
             ))

@@ -50,6 +50,10 @@ collects the changes on `stable` that no release holds yet, until the next relea
   one frame, at most 64 tags a frame. No command writes one yet. A tag never moves; FORMAT 2 keeps
   lightweight tags only. A build released before this one does not open a store that holds an
   annotated tag.
+- `E_STORE_TOO_NEW` (exit 1, not retryable): the store is of a format later than this build reads
+  (`swarmops-store 4` and up), or lists a feature it lacks; `details` name the `format` and the
+  `features` it lacks, and the hint says a newer swarmops reads the store. Nothing is written.
+  Golden envelopes now pin 56 of the 56 error codes (the FORMAT 3 design §4).
 
 ### Changed
 

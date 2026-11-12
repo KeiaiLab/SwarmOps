@@ -382,6 +382,12 @@ fn store_error(e: StoreError, message: String, during: During<'_>) -> OpError {
                     .with_hint("run the same command again: nothing of this one was committed"),
             }
         }
+        StoreError::TooNew { format, features } => error(ErrorCode::StoreTooNew, message)
+            .with_details(details([
+                ("format", format.into()),
+                ("features", features.into()),
+            ]))
+            .with_hint("a newer swarmops reads this store"),
         StoreError::Internal(_) => error(ErrorCode::Internal, message),
         _ => unmapped(message),
     }

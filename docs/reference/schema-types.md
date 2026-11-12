@@ -765,6 +765,7 @@ Kind: enumeration. `swarmops schema ErrorCode` prints its JSON Schema.
 | `"E_WS_OUTSIDE_PREFIXES"` | A sparse workspace's `ws commit` or `ws land` met edits outside its prefixes (`details.paths`, sorted, the first 20). Nothing changed; the hint names `swarmops ws materialize <path>`, which widens the prefixes. |
 | `"E_WS_STALE"` | `ws status`, `ws diff`, `ws commit`, `ws materialize`, `ws land` (onto any target) or `ws rebase --continue` found the workspace's base gone from its target's history (`details.target`, `base`, `head`; `base_op`, the operation that moved the target to the base; `moved_op`, the latest that moved it to `head`, or null when not found). Nothing changed; the hint names `swarmops ws rebase` (after a continue, `swarmops ws rebase --abort` first). |
 | `"E_CHECK_FAILED"` | A workspace's check or bootstrap command failed or ran past its time (`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its output, `log`, `changeset`). Nothing was landed. |
+| `"E_STORE_TOO_NEW"` | The store is of a later format than this build reads, or lists a feature it lacks (`details.format`, and `details.features`, the features it lacks, none for a later format). Nothing was written; a newer swarmops reads the store. |
 
 ## FetchReq
 

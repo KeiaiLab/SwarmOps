@@ -744,10 +744,11 @@ fn create_open_and_info() {
             ),
         }
     }
+    // A later format's marker is a newer build's store.
     fs::write(root.join("FORMAT"), b"swarmops-store 4\n").unwrap();
     match LocalRepo::open(&root) {
-        Err(RepoError::Store(StoreError::Format(_))) => {}
-        other => panic!("expected Format, got {:?}", other.map(|r| r.info())),
+        Err(RepoError::Store(StoreError::TooNew { format: 4, .. })) => {}
+        other => panic!("expected TooNew, got {:?}", other.map(|r| r.info())),
     }
 }
 
@@ -844,10 +845,18 @@ fn a_format_file_one_byte_too_long_is_refused_by_its_length() {
         Err(RepoError::Store(StoreError::Format(said))) => assert_eq!(said, what),
         other => panic!("{what}: expected Format, got {:?}", other.map(|r| r.info())),
     };
-    fs::write(&format, b"swarmops-store 4\n").unwrap();
+    fs::write(&format, b"swarmops-store x\n").unwrap();
     refused(format!(
         "{root}/FORMAT names a store layout this build does not read"
     ));
+    // A later format's marker is a newer build's store: `TooNew`, not a layout it cannot read.
+    fs::write(&format, b"swarmops-store 4\n").unwrap();
+    match LocalRepo::open(&root) {
+        Err(RepoError::Store(StoreError::TooNew { format, features })) => {
+            assert_eq!((format, features), (4, Vec::new()));
+        }
+        other => panic!("expected TooNew, got {:?}", other.map(|r| r.info())),
+    }
     fs::write(&format, b"swarmops-store 1\n\n").unwrap();
     refused(format!(
         "{root}/FORMAT is 18 bytes long, not a store layout this build reads"

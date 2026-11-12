@@ -3304,6 +3304,11 @@ expression: s.redact(&all)
           "const": "E_CHECK_FAILED",
           "description": "A workspace's check or bootstrap command failed or ran past its time\n(`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its\noutput, `log`, `changeset`). Nothing was landed.",
           "type": "string"
+        },
+        {
+          "const": "E_STORE_TOO_NEW",
+          "description": "The store is of a later format than this build reads, or lists a feature it lacks\n(`details.format`, and `details.features`, the features it lacks, none for a later\nformat). Nothing was written; a newer swarmops reads the store.",
+          "type": "string"
         }
       ],
       "title": "ErrorCode"
@@ -11174,6 +11179,11 @@ expression: s.redact(&all)
             {
               "const": "E_CHECK_FAILED",
               "description": "A workspace's check or bootstrap command failed or ran past its time\n(`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its\noutput, `log`, `changeset`). Nothing was landed.",
+              "type": "string"
+            },
+            {
+              "const": "E_STORE_TOO_NEW",
+              "description": "The store is of a later format than this build reads, or lists a feature it lacks\n(`details.format`, and `details.features`, the features it lacks, none for a later\nformat). Nothing was written; a newer swarmops reads the store.",
               "type": "string"
             }
           ]
