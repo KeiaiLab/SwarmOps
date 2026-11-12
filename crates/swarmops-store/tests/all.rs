@@ -36,6 +36,9 @@ mod sources;
 // Every test of it builds its store with the sweeps' harness, which needs the hooks.
 #[cfg(feature = "test-hooks")]
 mod upgrade;
+// Its sweeps fail calls and check the order of the rest, which needs the hooks.
+#[cfg(feature = "test-hooks")]
+mod views_sweep;
 
 /// Every test file is a module here: with `autotests = false` Cargo builds no target from a file
 /// of `tests/` that no `mod` line names, and its tests would never run (jj's
