@@ -86,7 +86,11 @@ filesystem permissions are the access boundary. Within that model, these are vul
   line of `swarmops mcp`'s input) holds at most 64 MiB. A commit's contents hold at most 1 GiB
   together and a put's content at most 512 MiB, both measured by the sizes they declare (a client
   file's length) before a byte of them is read, and again as each content is converted, in list
-  order, for a file that grows meanwhile.
+  order, for a file that grows meanwhile. One case is known and tracked
+  ([docs/known-limitations.md](docs/known-limitations.md), "A request takes the memory its type
+  holds"): a request type's own fields are built in full before the operation checks them, so a
+  long list of short strings or a map of small entries takes up to about 15 times its text, near
+  1 GiB for a line at the 64 MiB cap.
 - **Test hooks in a release build.** The `SWARMOPS_TEST_*` variables make a process crash or
   fail at a chosen filesystem call, count its calls, pin its clock, or hold the writer lock
   while it waits for other writers' requests. A build without the
