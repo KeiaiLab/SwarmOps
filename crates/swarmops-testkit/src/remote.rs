@@ -147,8 +147,8 @@ pub enum SshMode {
 }
 
 /// A failure the ssh stand-in plays on a connection while the server stays sound
-/// ([`GitServer::ssh_command_with`]). The stand-in keeps no end of a stream it hands on, so an
-/// end of file reaches the far side.
+/// ([`GitServer::ssh_command_with`], [`crate::serve::ServeSite::ssh_command_with`]). The
+/// stand-in keeps no end of a stream it hands on, so an end of file reaches the far side.
 ///
 /// ```text
 ///   client ──stdin──▶ stand-in ──▶ server        CutSend(n): n bytes, then end of file

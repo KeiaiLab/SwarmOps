@@ -17,6 +17,8 @@
 //! empty `HOME`, `TMPDIR` and [`GIT_ENV`] when set, `LC_ALL=C`, `TZ=UTC`, the test runs'
 //! variables of [`crate::cli`] (the order check, the memo keys' directory), and what
 //! [`ServeSite::with_env`] adds. No `SWARMOPS_AGENT` of the developer's reaches it.
+//! [`ServeSite::ssh_command_with`] plays a [`SshFault`] on each connection, as
+//! [`GitServer::ssh_command_with`] does.
 
 use std::ffi::OsString;
 use std::fs;
@@ -29,7 +31,8 @@ use tempfile::TempDir;
 use crate::accounting::{self, Accounting};
 use crate::cli::{Program, run_bin, swarmops};
 use crate::remote::{
-    Backend, GIT_ENV, GitServer, HttpAuth, HttpServer, SSH_HOST, path_str, sh_quote, write_script,
+    Backend, GIT_ENV, GitServer, HttpAuth, HttpServer, SSH_HOST, SshFault, faulted, path_str,
+    sh_quote, write_script,
 };
 
 /// Who `swarmops serve --cgi` names the caller as.
@@ -200,13 +203,24 @@ impl ServeSite {
     /// `command="swarmops serve --root <root> --as <identity>"`. Its URLs are
     /// [`ServeSite::ssh_url`]'s.
     pub fn ssh_command(&self, identity: &str) -> String {
+        self.stand_in(identity, None)
+    }
+
+    /// [`ServeSite::ssh_command`] with `fault` played on each connection
+    /// ([`crate::remote::SshFault`]). It runs `serve` unaccounted.
+    pub fn ssh_command_with(&self, identity: &str, fault: SshFault) -> String {
+        self.stand_in(identity, Some(fault))
+    }
+
+    /// Writes a stand-in for `identity`, with `fault` when given; its `GIT_SSH_COMMAND` value.
+    fn stand_in(&self, identity: &str, fault: Option<SshFault>) -> String {
         let at = self.stand_ins.fetch_add(1, Ordering::Relaxed);
         let dir = self.dir.path().join(format!("ssh-{at}"));
         fs::create_dir(&dir).expect("create the stand-in's directory");
 
         // The file is named ssh, so that git takes it for OpenSSH and does not probe it.
         let program = dir.join("ssh");
-        write_script(&program, &self.ssh_script(identity));
+        write_script(&program, &self.ssh_script(identity, fault));
         sh_quote(path_str(&program))
     }
 
@@ -255,8 +269,9 @@ impl ServeSite {
     }
 
     /// The stand-in's script: skip ssh's options as [`crate::remote::SshMode::Serve`] does,
-    /// drop the host, and exec the forced command with the rest as `SSH_ORIGINAL_COMMAND`.
-    fn ssh_script(&self, identity: &str) -> String {
+    /// drop the host, and exec the forced command with the rest as `SSH_ORIGINAL_COMMAND`, or
+    /// run it with `fault` played on it.
+    fn ssh_script(&self, identity: &str, fault: Option<SshFault>) -> String {
         let mut env = String::new();
         for (name, value) in self.child_env() {
             let name = name.to_str().expect("an ASCII variable name");
@@ -273,9 +288,10 @@ impl ServeSite {
             root = sh_quote(path_str(&self.root())),
             identity = sh_quote(identity),
         );
-        let run = match self.accounting {
-            Accounting::Off => format!("exec {serve}\n"),
-            Accounting::Cpu => accounting::counted(&accounting::ledger_dir(self), &serve),
+        let run = match (fault, self.accounting) {
+            (Some(fault), _) => faulted(&serve, fault),
+            (None, Accounting::Off) => format!("exec {serve}\n"),
+            (None, Accounting::Cpu) => accounting::counted(&accounting::ledger_dir(self), &serve),
         };
         format!(
             "#!/bin/sh\n\
@@ -324,7 +340,7 @@ mod tests {
 
     use super::{HttpIdentity, ServeSite};
     use crate::child::{self, CHILD_TIMEOUT};
-    use crate::remote::{HttpAuth, HttpServer, base64, write_script};
+    use crate::remote::{HttpAuth, HttpServer, SSH_HOST, SshFault, base64, write_script};
 
     /// The store every test names.
     const STORE: &str = "acme";
@@ -428,6 +444,25 @@ mod tests {
         );
         assert!(!env.contains_key("SWARMOPS_AGENT"), "{record}");
         assert!(!env.contains_key("GIT_SSH_COMMAND"), "{record}");
+    }
+
+    #[test]
+    fn a_fault_reaches_the_forced_command() {
+        let work = tempfile::tempdir().expect("a temp dir");
+        let site = scripted(work.path(), "printf 0123456789\n");
+        let cut = site.ssh_command_with("person/ada", SshFault::CutReceive(4));
+
+        // Run as git runs ssh: the forced command's answer arrives cut.
+        let mut direct = std::process::Command::new(cut.trim_matches('\''));
+        direct
+            .arg(format!("git@{SSH_HOST}"))
+            .arg(format!("git-upload-pack '/{STORE}.git'"));
+        let output = child::run(&mut direct);
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "0123",
+            "{output:?}"
+        );
     }
 
     #[test]
