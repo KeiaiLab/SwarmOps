@@ -1,19 +1,31 @@
 //! The interop matrix's store → GitHub cells (the 2026-11-12 interop design, section 2, column
 //! S→H) that no earlier suite holds: a clone that follows another branch, a FORMAT 2 branch
-//! pushed, a read-only token and a signed remote commit.
+//! pushed, two stores writing one remote at once, a read-only token
+//! and a signed remote commit.
 //!
 //! Each test serves bare repositories with the test kit's [`GitServer`] (git's own smart HTTP on
 //! `127.0.0.1`, or the ssh stand-in) and runs the binary with a git environment of its own: the
 //! server's git in `SWARMOPS_GIT`, an empty `HOME`, no system or global configuration.
+//!
+//! A race is forced by a `pre-receive` hook on the remote that holds the first push it meets
+//! until the test lets it go: the held push passed its advertisement and its lease, and another
+//! store's push lands before its update, which then finds the ref moved.
+//!
+//! ```text
+//!   store B ── push ── receive-pack ── pre-receive (held) ─────────── update: main moved
+//!   store A ── push ── receive-pack ── pre-receive (passes) ─ update ─┘
+//! ```
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
+use serde_json::Value;
 use swarmops_store::StoreFormat;
 use swarmops_testkit::remote::{GitServer, HttpAuth, HttpServer, SshMode};
 use tempfile::TempDir;
 
-use crate::support::{Run, Store, run};
+use crate::support::{Racers, Run, Store, run};
 
 /// The agent the commands that need an identity run as.
 const AGENT: &str = "agent/worker-17";
@@ -32,6 +44,15 @@ const SSH_VAR: &str = "GIT_SSH_COMMAND";
 
 /// The commits [`Remote::new`] writes on `main`.
 const BASE_COMMITS: usize = 2;
+
+/// How long the test waits for a held push to reach the hook.
+const HOLD_WAIT: Duration = Duration::from_secs(60);
+
+/// How often the test looks for the held push.
+const HOLD_POLL: Duration = Duration::from_millis(20);
+
+/// How often the hook looks for its release, in milliseconds; it gives up after [`HOLD_WAIT`].
+const HOOK_TICK_MS: u128 = 50;
 
 /// How a test reaches the server.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -153,6 +174,29 @@ impl Remote {
         let listed = self.git(&["rev-list", "--first-parent", "main"]);
         listed.lines().map(str::to_owned).collect()
     }
+
+    /// How many commits of the remote `main`'s first-parent chain change `path`.
+    fn changed(&self, path: &str) -> usize {
+        let listed = self.git(&["log", "--first-parent", "--format=%H", "main", "--", path]);
+        listed.lines().count()
+    }
+
+    /// The merge commits on the remote `main`'s first-parent chain.
+    fn merges(&self) -> usize {
+        let listed = self.git(&["rev-list", "--first-parent", "--merges", "main"]);
+        listed.lines().count()
+    }
+
+    /// Asserts the remote's `main` linear, holding each of `paths` once, [`BASE_COMMITS`] plus
+    /// one commit per path long.
+    fn assert_each_once(&self, paths: &[&str], what: &str) {
+        assert_eq!(self.merges(), 0, "{what}");
+        for path in paths {
+            assert_eq!(self.changed(path), 1, "{what}: {path}");
+        }
+        let chain = self.first_parents();
+        assert_eq!(chain.len(), BASE_COMMITS + paths.len(), "{what}: {chain:?}");
+    }
 }
 
 /// The real git the server runs, as an absolute path.
@@ -209,6 +253,82 @@ fn land(store: &Store, path: &str, content: &str) -> String {
 /// `args` on `store` as [`AGENT`].
 fn on(store: &Store, args: &[&str]) -> Run {
     store.run_as(AGENT, args, &[])
+}
+
+/// The error a push that lost a race must give: `E_REMOTE_DIVERGED`
+/// `remote_moved`, exit 3, not retryable (the caller syncs).
+fn assert_moved(failed: &Run) {
+    let error = failed.err("E_REMOTE_DIVERGED");
+    assert_eq!(failed.exit(), 3, "{failed}");
+    assert_eq!(error["details"]["reason"], "remote_moved", "{failed}");
+}
+
+/// The commit a sync published last: its `published` list's last `sha`.
+fn published(synced: &Value) -> String {
+    let changes = synced["published"].as_array().expect("published");
+    let last = changes
+        .last()
+        .unwrap_or_else(|| panic!("nothing published: {synced}"));
+    last["sha"].as_str().expect("a sha").to_owned()
+}
+
+/// `--repo <store> --as <AGENT> <args…>`, for a racer.
+fn racer_args(store: &Store, args: &[&str]) -> Vec<String> {
+    store.args(AGENT, args)
+}
+
+/// A `pre-receive` hook on the remote that holds the first push it meets until the test lets
+/// it go; every later push passes.
+#[cfg(unix)]
+struct Hold {
+    /// Its marks: `taken` (a push is held), `reached`, `released`.
+    dir: TempDir,
+}
+
+#[cfg(unix)]
+impl Hold {
+    /// The hook, installed on `remote`'s [`REPO`].
+    fn on(remote: &Remote) -> Hold {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mark = |name: &str| path_text(&dir.path().join(name));
+
+        // 1. The first push takes the hold, says so and waits; the rest pass.
+        let script = format!(
+            "#!/bin/sh\nPATH=/usr/bin:/bin\ncat >/dev/null\n\
+             if mkdir '{taken}' 2>/dev/null; then\n  : > '{reached}'\n  n=0\n  \
+             while [ ! -e '{released}' ] && [ $n -lt {rounds} ]; do\n    \
+             sleep 0.{HOOK_TICK_MS:03}; n=$((n+1))\n  done\nfi\nexit 0\n",
+            rounds = HOLD_WAIT.as_millis() / HOOK_TICK_MS,
+            taken = mark("taken"),
+            reached = mark("reached"),
+            released = mark("released"),
+        );
+
+        // 2. Installed as the remote's hook.
+        let hook = remote.server.bare(REPO).join("hooks").join("pre-receive");
+        fs::write(&hook, script).expect("write the hook");
+        let mut mode = fs::metadata(&hook).expect("the hook").permissions();
+        mode.set_mode(0o755);
+        fs::set_permissions(&hook, mode).expect("make the hook runnable");
+        Hold { dir }
+    }
+
+    /// Waits until a push is held; a push that never comes fails the test.
+    fn reached(&self) {
+        let reached = self.dir.path().join("reached");
+        let deadline = Instant::now() + HOLD_WAIT;
+        while !reached.exists() {
+            assert!(Instant::now() < deadline, "no push reached the hook");
+            std::thread::sleep(HOLD_POLL);
+        }
+    }
+
+    /// Lets the held push go on to its update.
+    fn release(&self) {
+        fs::write(self.dir.path().join("released"), "").expect("release the hold");
+    }
 }
 
 /// `clone --branch dev` follows `dev`: the store's `main` is `dev`'s head, and a later commit on
@@ -276,6 +396,157 @@ fn push_of_a_format_2_branch_creates_it() {
 
         // 3. main as it was.
         assert_eq!(remote.head("main"), main, "{transport:?}");
+    }
+}
+
+/// Two stores push their own change to one remote at once. In every interleaving one is
+/// `pushed` and the other loses as `remote_moved`, which its sync then publishes on top: each
+/// change on the remote once, linear, the winner's commit kept.
+#[test]
+fn two_stores_push_one_remote_at_once() {
+    for transport in TRANSPORTS {
+        let remote = Remote::new(transport);
+        let stores = [remote.cloned(), remote.cloned()];
+        let paths = ["one.txt", "two.txt"];
+        for (store, path) in stores.iter().zip(paths) {
+            land(store, path, "mine\n");
+        }
+
+        // 1. Both pushes at once.
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut racers = Racers::new(dir.path());
+        for store in &stores {
+            racers.spawn(&racer_args(store, &["push", ORIGIN]), &remote.vars(&[]));
+        }
+        let runs = racers.race();
+
+        // 2. One won; the other lost as remote_moved.
+        let won: Vec<usize> = (0..2).filter(|&n| runs[n].exit() == 0).collect();
+        assert_eq!(won.len(), 1, "{transport:?}: {} / {}", runs[0], runs[1]);
+        let (winner, loser) = (won[0], 1 - won[0]);
+        let pushed = runs[winner].ok();
+        assert_eq!(pushed["status"], "pushed", "{pushed}");
+        assert_moved(&runs[loser]);
+
+        // 3. The loser's sync publishes its change on the winner's commit.
+        let synced = on(&stores[loser], &["sync", ORIGIN]).ok();
+        let chain = remote.first_parents();
+        assert_eq!(chain[0], published(&synced), "{transport:?}");
+        assert_eq!(
+            chain[1],
+            pushed["new"].as_str().expect("new"),
+            "{transport:?}"
+        );
+        remote.assert_each_once(&paths, &format!("{transport:?}"));
+    }
+}
+
+/// [`two_stores_push_one_remote_at_once`] with the loss forced: B's push is held after its
+/// advertisement, A's lands, and B's update finds `main` moved: `remote_moved`, never a
+/// `declined` refusal.
+#[cfg(unix)]
+#[test]
+fn two_stores_push_a_forced_loss() {
+    for transport in TRANSPORTS {
+        let remote = Remote::new(transport);
+        let (a, b) = (remote.cloned(), remote.cloned());
+        land(&a, "one.txt", "a\n");
+        land(&b, "two.txt", "b\n");
+        let gate = Hold::on(&remote);
+
+        // 1. B's push, held; A's lands meanwhile; then B's goes on.
+        let (lost, won) = std::thread::scope(|scope| {
+            let pushing = scope.spawn(|| b.read(&["push", ORIGIN]));
+            gate.reached();
+            let won = a.read(&["push", ORIGIN]).ok();
+            gate.release();
+            (pushing.join().expect("B's push"), won)
+        });
+
+        // 2. B lost as remote_moved; the remote holds A's commit.
+        assert_moved(&lost);
+        assert_eq!(won["status"], "pushed", "{transport:?}: {won}");
+        let a_commit = won["new"].as_str().expect("new").to_owned();
+        assert_eq!(remote.head("main"), Some(a_commit.clone()), "{transport:?}");
+
+        // 3. B's sync publishes on A's commit.
+        let synced = on(&b, &["sync", ORIGIN]).ok();
+        let chain = remote.first_parents();
+        assert_eq!(chain[0], published(&synced), "{transport:?}");
+        assert_eq!(chain[1], a_commit, "{transport:?}");
+        remote.assert_each_once(&["one.txt", "two.txt"], &format!("{transport:?}"));
+    }
+}
+
+/// Two stores sync their own change to one remote at once. In every interleaving both end
+/// `pushed`: each change on the remote once, linear, the first published commit kept below the
+/// second.
+#[test]
+fn two_stores_sync_one_remote_at_once() {
+    for transport in TRANSPORTS {
+        let remote = Remote::new(transport);
+        let stores = [remote.cloned(), remote.cloned()];
+        let paths = ["one.txt", "two.txt"];
+        for (store, path) in stores.iter().zip(paths) {
+            land(store, path, "mine\n");
+        }
+
+        // 1. Both syncs at once.
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut racers = Racers::new(dir.path());
+        for store in &stores {
+            racers.spawn(&racer_args(store, &["sync", ORIGIN]), &remote.vars(&[]));
+        }
+        let runs = racers.race();
+
+        // 2. Both published, one on the other.
+        let shas: Vec<String> = runs.iter().map(|done| published(&done.ok())).collect();
+        let chain = remote.first_parents();
+        assert!(
+            shas.contains(&chain[0]),
+            "{transport:?}: {chain:?} {shas:?}"
+        );
+        assert!(
+            shas.contains(&chain[1]),
+            "{transport:?}: {chain:?} {shas:?}"
+        );
+        for done in &runs {
+            assert_eq!(done.ok()["status"], "pushed", "{transport:?}: {done}");
+        }
+        remote.assert_each_once(&paths, &format!("{transport:?}"));
+    }
+}
+
+/// [`two_stores_sync_one_remote_at_once`] with the loss forced: B's sync's push is held after
+/// its advertisement and A's push lands; B's sync takes the loss as `remote_moved`, lands
+/// again on A's commit and pushes on its second attempt.
+#[cfg(unix)]
+#[test]
+fn two_stores_sync_a_forced_loss() {
+    for transport in TRANSPORTS {
+        let remote = Remote::new(transport);
+        let (a, b) = (remote.cloned(), remote.cloned());
+        land(&a, "one.txt", "a\n");
+        land(&b, "two.txt", "b\n");
+        let gate = Hold::on(&remote);
+
+        // 1. B's sync, its push held; A's push lands meanwhile.
+        let (synced, won) = std::thread::scope(|scope| {
+            let pushing = scope.spawn(|| on(&b, &["sync", ORIGIN]));
+            gate.reached();
+            let won = a.read(&["push", ORIGIN]).ok();
+            gate.release();
+            (pushing.join().expect("B's sync"), won)
+        });
+
+        // 2. B's sync retried once and published on A's commit.
+        let synced = synced.ok();
+        assert_eq!(synced["status"], "pushed", "{transport:?}: {synced}");
+        assert_eq!(synced["attempts"], 2, "{transport:?}: {synced}");
+        let chain = remote.first_parents();
+        assert_eq!(chain[0], published(&synced), "{transport:?}");
+        assert_eq!(chain[1], won["new"].as_str().expect("new"), "{transport:?}");
+        remote.assert_each_once(&["one.txt", "two.txt"], &format!("{transport:?}"));
     }
 }
 
