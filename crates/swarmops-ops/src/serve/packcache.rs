@@ -599,13 +599,33 @@ fn cache_failed(e: &io::Error) -> OpError {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
+    use std::ffi::{OsStr, OsString};
     use std::fs;
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::path::Path;
+
+    use swarmops_api::ErrorCode;
+    use swarmops_git::serve::pack_key::pack_key;
+    use swarmops_git::serve::repo::ServeRepo;
+    use swarmops_git::transport::GitCli;
 
     use super::{
-        Found, HEADER_LEN, PackDigest, evict, header, look_up, pack_line, parse_header, service_of,
+        Found, HEADER_LEN, Keep, PACK_OBJECTS, PackDigest, SHALLOW_FILE, evict, git_identity,
+        header, keep_entry, look_up, pack_line, parse_header, produce, request_key, service_of,
         wants,
     };
+
+    /// The variable that names the git binary a [`GitCli`] runs.
+    const GIT_ENV: &str = "SWARMOPS_GIT";
+
+    /// A stand-in for git at `dir/git`, a shell script of `body`; the [`GitCli`] that runs it.
+    fn stand_in(dir: &Path, body: &str) -> GitCli {
+        let program = dir.join("git");
+        fs::write(&program, format!("#!/bin/sh\n{body}\n")).unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
+        let env = [(OsString::from(GIT_ENV), program.into_os_string())];
+        GitCli::find_with_env(env).unwrap()
+    }
 
     /// The line `upload-pack` appends is taken, with or without the shallow file; anything else
     /// is refused `not_from_git`.
@@ -739,5 +759,116 @@ mod tests {
                 "{stdin:?}"
             );
         }
+    }
+
+    /// A `pack-objects` that fails after it sent bytes leaves nothing to keep: the client got
+    /// what was sent, the request fails, and the temporary entry is gone. One that succeeds
+    /// leaves a sound entry, so the failure is what keeps nothing.
+    #[test]
+    fn a_failed_pack_objects_after_streaming_caches_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = ServeRepo::open(camino::Utf8Path::from_path(root.path()).unwrap()).unwrap();
+        let line = [OsString::from(PACK_OBJECTS), OsString::from("--stdout")];
+        let sent = b"PACK, then git's exit";
+        let run = |exit: &str, temp: &Path| {
+            let bin = tempfile::tempdir().unwrap();
+            let git = stand_in(
+                bin.path(),
+                &format!("printf \"PACK, then git's exit\"\n{exit}"),
+            );
+            let mut out = Vec::new();
+            let produced = produce(&git, &repo, &line, b"", &mut out, Keep::Cached, temp);
+            assert_eq!(out, sent, "{exit}");
+            produced
+        };
+
+        // 1. The control: git content, the temporary entry whole under its header.
+        let kept = root.path().join("kept.tmp-1");
+        run("exit 0", &kept).unwrap();
+        let mut out = Vec::new();
+        assert_eq!(look_up(&kept, &mut out).unwrap(), Found::Sent);
+        assert_eq!(out, sent);
+
+        // 2. git fails after the same bytes: an error, and no temporary entry.
+        let dropped = root.path().join("dropped.tmp-1");
+        let failed = run("exit 1", &dropped).unwrap_err();
+        assert_eq!(failed.code, ErrorCode::GitRead.as_str(), "{failed:?}");
+        assert!(!dropped.exists(), "a failed pack was kept");
+    }
+
+    /// A pack larger than the bound is sent and not kept: its temporary entry is removed, and
+    /// no entry takes its place. One of exactly the bound is kept.
+    #[test]
+    fn a_pack_over_the_bound_is_not_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let (temp, entry) = (dir.path().join("k.tmp-1"), dir.path().join("k.pack"));
+        let pack = [0; 10];
+
+        fs::write(&temp, pack).unwrap();
+        keep_entry(&temp, &entry, 9).unwrap();
+        assert!(!temp.exists() && !entry.exists(), "kept past the bound");
+
+        fs::write(&temp, pack).unwrap();
+        keep_entry(&temp, &entry, 10).unwrap();
+        assert!(!temp.exists());
+        assert_eq!(fs::read(&entry).unwrap(), pack);
+    }
+
+    /// The key of a request holds the bytes of the shallow file, not its path, and the
+    /// identity of the git binary, which stands where its version did: two requests that
+    /// differ in either never share a pack, and a shallow file read again elsewhere does.
+    #[test]
+    fn the_key_holds_the_shallow_file_and_the_git_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = |name: &str, bytes: &str| {
+            let path = dir.path().join(name);
+            fs::write(&path, bytes).unwrap();
+            path
+        };
+        let line = |shallow: &Path| -> Vec<OsString> {
+            [
+                OsStr::new(SHALLOW_FILE),
+                shallow.as_os_str(),
+                OsStr::new(PACK_OBJECTS),
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect()
+        };
+        let key =
+            |identity: &str, shallow: &Path| request_key(identity, &line(shallow), b"w\n").unwrap();
+        let parts = |shallow: &'static [u8]| -> [&[u8]; 3] {
+            [SHALLOW_FILE.as_bytes(), shallow, PACK_OBJECTS.as_bytes()]
+        };
+
+        // 1. The shallow file: its bytes, whatever its path; none for a client that is not
+        //    shallow; one that cannot be read fails the request.
+        let (one, same, other) = (
+            file("one", "a\n"),
+            file("same", "a\n"),
+            file("other", "b\n"),
+        );
+        assert_eq!(key("git", &one), key("git", &same));
+        assert_ne!(key("git", &one), key("git", &other));
+        assert_eq!(key("git", &one), pack_key("git", &parts(b"a\n"), b"w\n"));
+        assert_eq!(
+            key("git", Path::new("")),
+            pack_key("git", &parts(b""), b"w\n")
+        );
+        let unread = request_key("git", &line(&dir.path().join("gone")), b"w\n").unwrap_err();
+        assert_eq!(unread.code, ErrorCode::Io.as_str(), "{unread:?}");
+
+        // 2. The git binary: another identity, another key.
+        assert_ne!(key("git", &one), key("another git", &one));
+
+        // 3. Its identity: another for a binary elsewhere, and for one replaced where it was.
+        let (first, second) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let git = stand_in(first.path(), "exit 0");
+        let before = git_identity(&git).unwrap();
+        assert_eq!(before, git_identity(&git).unwrap());
+        let elsewhere = stand_in(second.path(), "exit 0");
+        assert_ne!(before, git_identity(&elsewhere).unwrap());
+        let replaced = stand_in(first.path(), "exit 0 # replaced");
+        assert_ne!(before, git_identity(&replaced).unwrap());
     }
 }
