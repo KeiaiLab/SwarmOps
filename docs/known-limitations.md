@@ -334,13 +334,25 @@ left).
   floor is the sync base B (the M15 level), so a remote forced below published work then has that
   work landed again on top of it. A `git import --into main` moves `main` only forward over every
   parent: an ancestor tip moves nothing, and a tip off the head's history is
-  `E_GIT_IMPORT_DIVERGED`. *Documented (the M16 design §3). Found: the M15 design §4; narrowed by
-  M16 Task S3.*
+  `E_GIT_IMPORT_DIVERGED`. A sync records the floor, and so does a push whose source is `main` by
+  that name, sent to the branch the remote follows: a push of another ref that names the same
+  changeset leaves the floor where it was, so the next sync checks the older floor, or B. A remote
+  forced to a history that shares no changeset with `main` within 10,000 is refused before the
+  floor is checked, as `E_REMOTE_DIVERGED` (`details.reason: no_common_base`), not
+  `E_REF_PROTECTED`; nothing moves either way. *Documented (the M16 design §3). Found: the M15
+  design §4; narrowed by M16 Task S3; the push's floor and the unrelated remote, the M16 review
+  (issue #26).*
 - **A commit holds its contents in memory.** All of them, up to the 1 GiB they may hold
   together, and up to about two to three times that while their objects are encoded in
   parallel, besides the request's text (at most 64 MiB). `blob put` (`blob_put`) and
   `{"blob": "<id>"}` take large contents out of the commit request. *Documented (bounded by the
   limits since M2). Found: the 2026-10-16 code review, issue 10.*
+- **A commit resolves its parent before it reads its contents.** A commit takes its snapshot and
+  resolves its parent (`--parent`, else the head of `main` or of the ref `--advance` names), then
+  reads its contents, up to 1 GiB of client files. A commit whose reads take long builds on the
+  head as it was when it started: without `--advance` it records a changeset there, and with
+  `--advance` a ref that moved meanwhile makes it `E_CAS_MISMATCH`. *Documented. Found: M2's area
+  A review (issue #1 item 6).*
 - **Branches and tags stay in the store.** `git export`, `git import`, `push` and `sync` take
   `main` and `release/<name>` only: mapping a FORMAT 2 branch or tag to a git ref is M14's work.
   Names that differ only in case (`Feature` and `feature`) are two refs here, and would collide in
@@ -352,10 +364,15 @@ left).
 - **Derived values about objects nothing names stay.** `gc` removes the values of a built-in
   derivation's older versions, and `repair` the damaged ones, but values of the current version
   stay, whatever they are about, and so do the versions of a derivation a caller registered,
-  whose name `gc` does not know. *Unscheduled. Found: M2 Task 5; narrowed by M6 Task G1.*
+  whose name `gc` does not know. The git export's keyed memos (`git_oid_mac` and its kin) made
+  under a memo key the store no longer uses (its key file lost, so the CLI made another) stay too:
+  no export reads them, and `verify --deep` cannot check their MAC. *Unscheduled. Found: M2 Task
+  5; narrowed by M6 Task G1; the keyed memos, the v0.6 review (issue #21).*
 - **`gc` collects no object.** Objects no changeset reaches (those of a commit that died before
-  its frame) are counted, as `orphan_objects`, and stay: collecting them needs a freshness rule on
-  the put path. *Unscheduled (the M6 design, decision D5). Found: the M6 design, section 8.*
+  its frame, and those `blob put` stored that no commit has named yet) are counted, as
+  `orphan_objects`, and stay: collecting them needs a freshness rule on the put path.
+  *Unscheduled (the M6 design, decision D5). Found: the M6 design, section 8; `blob put`, M2's
+  area A review (issue #1 item 4).*
 - **`verify` holds every object id in memory.** Since M6 its metadata checks read the index and
   the sorted views in blocks of 4,096 entries, but its object phase holds the set of object ids,
   and a deep check of a store with derived values also holds the first-parent forest (a few words
@@ -557,6 +574,11 @@ left).
   `ws land`, a store with an access file starts a detached preparation that makes `serve.git`
   current; `revert`, `land-group` and `ref txn` (M18) start none, so the next connection exports
   what they moved before it advertises. *Unscheduled. Found: the M18 slices' reviews.*
+- **The hooks' thread bound differs by transport.** A push's hooks compress the store's objects
+  on at most 4 threads (`RAYON_NUM_THREADS`), over ssh and HTTP alike. Over HTTP every request's
+  git runs with that bound, so a fetch's pack-objects hook does too; over ssh a fetch's hook runs
+  without it, with rayon's default of a thread per core. *Unscheduled. Found: the M17 closure
+  review (issue #29).*
 - **A request takes the memory its type holds.** The MCP server reads of a message line, at
   most 64 MiB, only the members it serves, and a tool's arguments only as their request type,
   so what else a line holds costs it nothing beyond the line's bytes (operations spec §0). A
@@ -595,6 +617,13 @@ left).
   commits alone held the lock 0.067 s at most;
   [perf.md](perf.md#m17-baselines--2026-11-07)). *Target: compaction out of the write (M20).
   Found: the M17 design §3.1.*
+- **An import's last step is bounded in transactions, not in flushes.** The step that moves the
+  target takes as many write transactions after 12,000 commits as after 1 (the M17 closure
+  design §3.1), but only no more flushes: its first transaction, the metadata flush, flushes
+  nothing when the last frame's commit compacted the index, which depends on the history's length
+  (9 flushes after 12,000 commits against 15 after 1, 3 transactions each). The test asserts no
+  more, not as many.
+  *Documented. Found: the M17 closure review (issue #29).*
 - **A git import or export reports what it repaired only when it succeeds.** An import's
   `meta.recovered` adds up what its frames' and its ref move's write transactions repaired of what
   earlier writers left. An import that fails reports none of it (the import's error carries no such
@@ -707,7 +736,9 @@ left).
   on calls it scans the changes it has not seen made durable, and a derived value never is, so
   its cost grows with the memos a process writes. With it off the same sync takes 1.018 s
   and 0.257 s (3.96 times), and the clone's import of 3,000 commits 4.6 s with the memos and
-  4.3 s without, against 62 to 78 s and 18 s with it on. A second sync takes 0.213 s
+  4.3 s without, against 62 to 78 s and 18 s with it on. The memos cost the import: in a release
+  build without the checker an import of 4,000 commits took 6.281 s with them and 5.649 s
+  without, about 11 % more, which the push and the sync after it save. A second sync takes 0.213 s
   ([perf.md](perf.md#m18-first-sync-after-a-clone--2026-11-08)). A 10-minute sync beside 20
   lands/s kept pace, its lag over the last minute 0.520 times its lag over the first, but on a
   host at a 1-minute load of 263 to 118, with bursts of hundreds of lands where the load stalled
@@ -1001,6 +1032,12 @@ left).
   stdout envelopes and the MCP protocol are unaffected, and on glibc 2.39 nothing is printed.
   *Unscheduled: a build against an older glibc, or a static build, would remove it. Found: the
   2026-10-20 review of the aarch64 release build.*
+- **Packages are unsigned and come from no repository.** Each release's `.deb` and `.rpm` carry
+  no signature of their own (`SHA256SUMS` checks them), and no apt or dnf repository serves
+  them, so `apt upgrade` and `dnf upgrade` do not see a new release: install the next release's
+  package ([install and upgrade](operate/install-and-upgrade.md#install-from-a-deb-or-rpm-package)).
+  *Unscheduled: signing needs a key the maintainers hold. Found: the 2026-10-29 ops wave's review
+  (issue #24).*
 
 ## Performance
 
@@ -1018,11 +1055,14 @@ left).
   writes them anew before it lets go, so the writers queued behind it wait for a rewrite that
   grows with the store; one that waits past the 10 s `lock_timeout` fails with the retryable
   `E_BUSY`, and nothing is lost. The rewrite takes 50 ms at 100,000 records and 173 ms at
-  1,000,000 (p50; 179 ms at most, [perf.md](perf.md#v060--2026-10-28)). *Target: the sorted views as
+  1,000,000 (p50; 179 ms at most, [perf.md](perf.md#v060--2026-10-28)). It also holds the unsorted
+  tail in memory: the tail's ids read in one piece and its (id, record) pairs sorted, 72 bytes a
+  record, for a tail of a little past 1,024 records, or more after one transaction that adds
+  many (an import's frame). *Target: the sorted views as
   immutable runs under a manifest, in a `FORMAT 3`, so that the lock holds only the manifest's
   swap (the M6 design, decision D2), or M3's merge outside the lock (its plan's Task 15) if the bench shows a
   stall of 100 ms or more at 100,000 records first. Found: M1.6 Task 7 (the compaction design);
-  the 2026-10-20 plan triage.*
+  the 2026-10-20 plan triage; the tail in memory, the M6 resolve round (issue #20).*
 - **A blob is stored whole.** Each version of a file is one object (zstd-compressed past a
   small size), with no chunks or deltas, so a small edit to a large file stores it again.
   *Unscheduled (content-defined chunking). Found: the 2026-10-27 completeness report.*
