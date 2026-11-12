@@ -93,20 +93,21 @@ impl GixSource {
         }
     }
 
-    /// The commit `oid` peels to, through annotated tags: each tag read once its header lets it
-    /// through the size gate ([`read_bounded`]), its hash checked, its head parsed
-    /// ([`RawTag::parse`]: a malformed one is [`SourceError::Corrupt`]), and its object followed.
-    /// The walk ends: a tag's id hashes the bytes that name the next object, so tags cannot name
-    /// each other in a cycle.
+    /// The commit `oid` peels to, through annotated tags: each object read once its header lets
+    /// it through the size gate ([`read_bounded`]) and its hash checked before its kind is
+    /// trusted (a loose file can hold another kind than its id names: [`SourceError::Corrupt`]),
+    /// each tag's head parsed ([`RawTag::parse`]: a malformed one is [`SourceError::Corrupt`]),
+    /// and its object followed. The walk ends: a tag's id hashes the bytes that name the next
+    /// object, so tags cannot name each other in a cycle.
     ///
     /// [`read_bounded`]: source::read_bounded
     fn peel(&self, name: &str, mut oid: GitOid) -> Result<GitOid, SourceError> {
         loop {
-            match self.header(oid)?.0 {
+            let (kind, bytes) = source::read_bounded(self, oid)?;
+            match kind {
                 RawKind::Commit => return Ok(oid),
                 RawKind::Tag => {
-                    let (_, tag) = source::read_bounded(self, oid)?;
-                    let head = RawTag::parse(&tag).map_err(|error| SourceError::Corrupt {
+                    let head = RawTag::parse(&bytes).map_err(|error| SourceError::Corrupt {
                         oid,
                         reason: error.to_string(),
                     })?;

@@ -517,6 +517,24 @@ fn a_damaged_object_is_corrupt() {
     );
 }
 
+/// A ref whose loose file names an object stored as another kind is `Corrupt`, not that kind:
+/// the tip is read and hashed before its kind is trusted.
+#[test]
+fn resolve_hashes_the_tip_before_it_trusts_its_kind() {
+    let repository = git::empty_repository();
+    let tip = "ab".repeat(20);
+    git::write_loose_object(&repository.dir, &tip, b"blob 3\0abc");
+    fs::write(repository.dir.join("refs/heads/main"), format!("{tip}\n")).unwrap();
+    let source = GixSource::open(&repository.dir).unwrap_or_else(|error| panic!("open: {error}"));
+    for name in ["main", tip.as_str()] {
+        let got = source.resolve(name);
+        assert!(
+            matches!(&got, Err(SourceError::Corrupt { oid: named, .. }) if *named == oid(&tip)),
+            "{name}: {got:?}"
+        );
+    }
+}
+
 /// `fixture`'s repository moved into a work tree, as `<work>/.git`, its configuration made a
 /// work tree's; the work tree's path.
 fn work_tree(fixture: &GitFixture) -> std::path::PathBuf {

@@ -693,9 +693,8 @@ impl OneFile {
 /// blob garbled or another's, or the tip commit's file another object's (which the check then
 /// takes for that object), passes that check, which finds missing objects and checks no object
 /// against its id (git 2.43); the fetch's import of the promoted tracking ref then refuses it and
-/// records nothing. Its reader checks each object it reads against its id, so a blob is
-/// `Corrupt`, naming it; the tip's header, read before its bytes, says it is a blob, so the tip
-/// is no commit.
+/// records nothing. Its reader checks each object it reads against its id, the tip's before it
+/// trusts its kind, so either is `Corrupt`, naming it.
 #[test]
 fn a_damaged_object_is_refused_by_the_fetch_s_import() {
     let cases = [
@@ -747,8 +746,8 @@ fn a_damaged_object_is_refused_by_the_fetch_s_import() {
             ImportError::Convert(ConvertError::Source(SourceError::Corrupt { oid, .. })) => {
                 what == "blob" && *oid == damaged
             }
-            ImportError::Source(SourceError::NotACommit { kind, .. }) => {
-                what == "commit" && *kind == RawKind::Blob
+            ImportError::Source(SourceError::Corrupt { oid, .. }) => {
+                what == "commit" && *oid == damaged
             }
             _ => false,
         };
