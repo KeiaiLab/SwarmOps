@@ -1,6 +1,7 @@
 // The home page, top to bottom (anchors in brackets):
 //
 //   [top]        status line, h1, benefit sentence, install line, facts, Quick start
+//                the line on stable: its commit, date and unreleased changes, linking /now
 //   [first-run]  swarmops --version, init, and the MCP registration command
 //   [sample]     eight agents commit into one store at once
 //   [features]   the eight core features, one guide each
@@ -16,6 +17,7 @@ import { Features } from '@/components/home/features';
 import { FirstRun } from '@/components/home/first-run';
 import { Fit } from '@/components/home/fit';
 import { Hero } from '@/components/home/hero';
+import { Now } from '@/components/home/now';
 import { Sample } from '@/components/home/sample';
 import { Start } from '@/components/home/start';
 
@@ -25,6 +27,7 @@ export default function HomePage() {
   return (
     <main id="main" className="text-base text-(--text)">
       <Hero />
+      <Now />
       <FirstRun />
       <Sample />
       <Features />
