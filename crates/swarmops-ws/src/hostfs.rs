@@ -907,3 +907,177 @@ impl<H: HostFs> HostFs for CrashAtHost<H> {
         self.inner.set_mode(root, rel, mode)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    // Named here: the parent imports it under `test-hooks` only.
+    use camino::Utf8PathBuf;
+
+    use super::*;
+
+    /// A fresh directory to root writes at; the guard removes it.
+    fn root() -> (tempfile::TempDir, Utf8PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(tmp.path()).unwrap().to_owned();
+        (tmp, root)
+    }
+
+    /// A FIFO at `name` below `root`: a file that is not a regular one, whose plain open for
+    /// reading blocks until a writer comes.
+    #[cfg(target_os = "linux")]
+    fn fifo(root: &Utf8Path, name: &str) -> Utf8PathBuf {
+        use rustix::fs::{CWD, FileType, Mode};
+
+        let path = root.join(name);
+        let mode = Mode::from_raw_mode(PRIVATE_MODE);
+        rustix::fs::mknodat(CWD, path.as_std_path(), FileType::Fifo, mode, 0).unwrap();
+        path
+    }
+
+    /// The permission bits of `path`, a link never followed.
+    #[cfg(unix)]
+    fn mode_of(path: &Utf8Path) -> u32 {
+        RealHost.symlink_metadata(path).unwrap().unwrap().mode
+    }
+
+    /// No write below the root goes through an empty name, `.` or `..`: `split` refuses each
+    /// wherever it stands, and a write naming one leaves the root's parent as it was.
+    #[test]
+    fn split_refuses_empty_dot_and_dotdot() {
+        // 1. Refused: an empty path, an empty part at either end or inside, `.` and `..`.
+        for rel in [
+            "", "/", "/a", "a/", "a//b", ".", "./a", "a/.", "a/./b", "..", "../a", "a/..", "a/../b",
+        ] {
+            let e = split(rel).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{rel:?}");
+        }
+
+        // 2. Passed: plain names, a dot inside a name.
+        assert_eq!(split("a").unwrap(), (vec![], "a"));
+        assert_eq!(split("a/..b/c.").unwrap(), (vec!["a", "..b"], "c."));
+
+        // 3. A write through `..` reaches nothing above the root.
+        let (_tmp, outer) = root();
+        let inner = outer.join("root");
+        std::fs::create_dir(&inner).unwrap();
+        let e = RealHost.write_file(&inner, "../escaped", b"x").unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(RealHost.read_dir(&outer).unwrap(), ["root"]);
+    }
+
+    /// A file or a link where the directory was is a swap naming the path, not a plain failure
+    /// and not "still holds something"; neither is removed.
+    #[test]
+    #[cfg(unix)]
+    fn remove_dir_if_empty_passes_notdir() {
+        // 1. A file, and a link to an empty directory, where a directory is removed.
+        let (_tmp, root) = root();
+        std::fs::write(root.join("file"), b"x").unwrap();
+        std::fs::create_dir(root.join("target")).unwrap();
+        std::os::unix::fs::symlink("target", root.join("link")).unwrap();
+
+        // 2. Each is a swap of that path, left where it was; the link's target too.
+        for rel in ["file", "link"] {
+            let e = RealHost.remove_dir_if_empty(&root, rel).unwrap_err();
+            assert_eq!(swapped_path(&e), Some(rel), "{e}");
+        }
+        let mut names = RealHost.read_dir(&root).unwrap();
+        names.sort();
+        assert_eq!(names, ["file", "link", "target"]);
+    }
+
+    /// A FIFO is refused as swapped and keeps its mode: only a regular file gets one. The test
+    /// holds the FIFO open, so the refusal does not rest on how `set_mode` opens it.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn set_mode_refuses_a_non_regular_file() {
+        // 1. A FIFO with a reader and a writer: no open of it blocks.
+        let (_tmp, root) = root();
+        let path = fifo(&root, "pipe");
+        let _held = (std::fs::OpenOptions::new())
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+
+        // 2. Refused, its mode as it was.
+        let e = RealHost.set_mode(&root, "pipe", 0o755).unwrap_err();
+        assert_eq!(swapped_path(&e), Some("pipe"), "{e}");
+        assert_eq!(mode_of(&path), PRIVATE_MODE);
+    }
+
+    /// How long `set_mode` may take on a FIFO before it counts as blocked: an open and a stat.
+    #[cfg(target_os = "linux")]
+    const FIFO_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+    /// A FIFO no one writes to does not block `set_mode`: a plain open for reading would wait
+    /// for a writer for ever, and an update with it.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn set_mode_opens_nonblocking() {
+        // 1. A FIFO no one holds, its mode set on another thread.
+        let (_tmp, root) = root();
+        let path = fifo(&root, "pipe");
+        let (done, result) = std::sync::mpsc::channel();
+        let walked = root.clone();
+        std::thread::spawn(move || done.send(RealHost.set_mode(&walked, "pipe", 0o755)));
+
+        // 2. Its answer; a writer then frees an open that blocked, so no thread outlives this.
+        let answer = result.recv_timeout(FIFO_WAIT);
+        let _writer = (std::fs::OpenOptions::new())
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+
+        // 3. It came, and refuses the FIFO.
+        let e = answer.expect("set_mode blocked on a FIFO").unwrap_err();
+        assert_eq!(swapped_path(&e), Some("pipe"), "{e}");
+    }
+
+    /// The writers that make one missing path at once.
+    #[cfg(unix)]
+    const RACERS: usize = 8;
+
+    /// How many missing paths the writers race on.
+    #[cfg(unix)]
+    const RACES: usize = 16;
+
+    /// A directory another write made between this one's open and its `mkdirat` is opened, not
+    /// reported: every writer of one missing path succeeds.
+    #[test]
+    #[cfg(unix)]
+    fn missing_make_guards_mkdirat_eexist() {
+        let (_tmp, root) = root();
+        for race in 0..RACES {
+            // 1. One missing path, four directories deep, for every writer.
+            let rel = format!("r{race}/a/b/c");
+            let start = std::sync::Barrier::new(RACERS);
+
+            // 2. All make it at once.
+            let made: Vec<io::Result<()>> = std::thread::scope(|scope| {
+                let writers: Vec<_> = (0..RACERS)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            start.wait();
+                            RealHost.create_dir_all(&root, &rel)
+                        })
+                    })
+                    .collect();
+                (writers.into_iter())
+                    .map(|writer| writer.join().unwrap())
+                    .collect()
+            });
+
+            // 3. None failed, and the path is a directory.
+            for result in made {
+                result.unwrap_or_else(|e| panic!("race {race}: {e}"));
+            }
+            let meta = RealHost
+                .symlink_metadata(&root.join(&rel))
+                .unwrap()
+                .unwrap();
+            assert_eq!(meta.kind, HostKind::Dir);
+        }
+    }
+}
