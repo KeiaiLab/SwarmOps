@@ -3235,7 +3235,9 @@ mod tests {
         }
     }
 
-    /// How many lock-wait helper threads (`meta-lock-wait`) this process runs.
+    /// How many lock-wait helper threads (`meta-lock-wait`) this process runs, by the names
+    /// `/proc/self/task` lists: a directory only Linux has.
+    #[cfg(target_os = "linux")]
     fn helpers() -> usize {
         fs::read_dir("/proc/self/task")
             .unwrap()
@@ -3249,6 +3251,10 @@ mod tests {
     /// A declined rerun waits on its first wait's helper and starts no second one: a second
     /// would leave the first parked in `flock`, to take the lock for an instant after the call
     /// returned. Checked for 100 ms after the answer is read, while the holder keeps the lock.
+    /// The count of helpers is the whole of this test, and only Linux lists a process's threads
+    /// by name, so it runs on Linux alone; `a_declined_rerun_waits_on_its_first_wait` runs the
+    /// same rerun everywhere.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_declined_rerun_starts_no_second_helper() {
         let (_dir, root) = new_store();

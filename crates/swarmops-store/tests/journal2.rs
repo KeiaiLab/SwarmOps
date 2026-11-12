@@ -192,7 +192,8 @@ fn assert_all_corrupt_at(layout: &Layout, offset: u64, what: &str, recovery: Rec
 
 /// What `call` returns, with the number of `read` system calls this thread made during it and
 /// the bytes they returned (`syscr`, `rchar` of `/proc/thread-self/io`), less the read of that
-/// file itself.
+/// file itself. Only Linux has that file: what counts with it counts on Linux alone.
+#[cfg(target_os = "linux")]
 fn reading<T>(call: impl FnOnce() -> T) -> (T, u64, u64) {
     fn io_counts() -> (u64, u64, u64) {
         let text = fs::read_to_string("/proc/thread-self/io").unwrap();
@@ -278,7 +279,7 @@ fn frames_carry_their_seq_and_the_crc_of_the_frame_before() {
 
 /// A header whose CRC matches but whose length is 0, or past the largest payload this build
 /// decodes, is damage wherever it lies: never a torn tail, and refused from its header, with
-/// none of the bytes after it read.
+/// none of the bytes after it read (counted on Linux alone, which has the count).
 #[test]
 fn a_header_announcing_no_frame_a_writer_writes_is_corrupt_and_its_payload_unread() {
     for len in [0, MAX_PAYLOAD + 1, u32::MAX] {
@@ -290,11 +291,19 @@ fn a_header_announcing_no_frame_a_writer_writes_is_corrupt_and_its_payload_unrea
         append_bytes(layout.journal_log(), &vec![0xa5; 1 << 20]);
 
         let journal = reopen(&layout);
+        #[cfg(target_os = "linux")]
         let (got, _calls, bytes) = reading(|| journal.tail_frames_from(0));
+        #[cfg(not(target_os = "linux"))]
+        let got = journal.tail_frames_from(0);
         assert_corrupt_at(got, COMPACTED_FRAME, &format!("len {len}"));
+        #[cfg(target_os = "linux")]
         assert!(bytes < 4096, "len {len}: the read took {bytes} bytes");
+        #[cfg(target_os = "linux")]
         let (got, _calls, bytes) = reading(|| journal.repair_tail());
+        #[cfg(not(target_os = "linux"))]
+        let got = journal.repair_tail();
         assert_corrupt_at(got, COMPACTED_FRAME, &format!("len {len}: recovery"));
+        #[cfg(target_os = "linux")]
         assert!(bytes < 4096, "len {len}: recovery took {bytes} bytes");
         assert_eq!(
             file_len(layout.journal_log()),
@@ -555,8 +564,9 @@ fn entry_checksums_catch_crafted_and_misplaced_entries() {
 }
 
 /// Recovery checks the listed frames from the checkpoint's seq on, not from frame 0: each entry
-/// carries its own checksum. Counted by this thread's `read` calls against a journal of 3,000
-/// frames, ten past the checkpoint, the last of them unlisted.
+/// carries its own checksum. Counted by this thread's `read` calls (on Linux alone, which has
+/// the count) against a journal of 3,000 frames, ten past the checkpoint, the last of them
+/// unlisted.
 #[test]
 fn recovery_reads_only_the_entries_from_the_checkpoints_seq() {
     let (_dir, layout) = v2_root();
@@ -569,8 +579,12 @@ fn recovery_reads_only_the_entries_from_the_checkpoints_seq() {
     set_len(layout.journal_off(), 2999 * ENTRY as u64);
 
     let journal = reopen(&layout);
+    #[cfg(target_os = "linux")]
     let (repair, calls, _bytes) = reading(|| journal.repair_tail().unwrap());
+    #[cfg(not(target_os = "linux"))]
+    let repair = journal.repair_tail().unwrap();
     assert_eq!(repair.frames_listed, 1);
+    #[cfg(target_os = "linux")]
     assert!(calls < 100, "recovery made {calls} reads");
     assert_eq!(journal.frame_count().unwrap(), 3000);
     assert_eq!(journal.frames_from(2995, 9).unwrap().len(), 5);

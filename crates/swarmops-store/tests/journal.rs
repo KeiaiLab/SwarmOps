@@ -2974,17 +2974,21 @@ const PADDED: u64 = 2 << 30;
 
 /// The most bytes a bounded read of a padded file may return in all: a few frames and windows
 /// of `journal.off` entries (4,096 entries, 64 KiB in FORMAT 2), never the padding.
+#[cfg(target_os = "linux")]
 const MAX_READ_BYTES: u64 = 1 << 20;
 
 /// The most the peak resident memory may grow while a padded file is read: far less than the
 /// padding, which one read sized by the file's length would hold.
+#[cfg(target_os = "linux")]
 const MAX_GROWTH_KIB: u64 = 256 << 10;
 
 /// The largest payload a FORMAT 1 frame holds: a count, then 65,535 changesets of 255 parents.
 const MAX_PAYLOAD: u32 = 539_615_192;
 
 /// What `call` returns, with the bytes this thread's `read` system calls returned during it
-/// (`rchar` of `/proc/thread-self/io`), less the read of that file itself.
+/// (`rchar` of `/proc/thread-self/io`), less the read of that file itself. Only Linux has that
+/// file: what counts with it counts on Linux alone.
+#[cfg(target_os = "linux")]
 fn bytes_read<T>(call: impl FnOnce() -> T) -> (T, u64) {
     fn rchar() -> (u64, u64) {
         let text = fs::read_to_string("/proc/thread-self/io").unwrap();
@@ -3001,7 +3005,9 @@ fn bytes_read<T>(call: impl FnOnce() -> T) -> (T, u64) {
 }
 
 /// The process's peak resident memory, in KiB: `VmHWM` of `/proc/self/status` (nextest runs
-/// each test in a process of its own).
+/// each test in a process of its own). Only Linux has that file: what asks for it runs on Linux
+/// alone.
+#[cfg(target_os = "linux")]
 fn peak_resident_kib() -> u64 {
     let status = fs::read_to_string("/proc/self/status").unwrap();
     (status.lines())
@@ -3010,12 +3016,21 @@ fn peak_resident_kib() -> u64 {
         .unwrap()
 }
 
-/// What `call` returns, once it has read no more than [`MAX_READ_BYTES`].
+/// What `call` returns, once it has read no more than [`MAX_READ_BYTES`]: a bound checked on
+/// Linux alone, which counts a thread's reads; elsewhere this is the call.
 #[track_caller]
 fn bounded<T>(what: &str, call: impl FnOnce() -> T) -> T {
-    let (value, read) = bytes_read(call);
-    assert!(read <= MAX_READ_BYTES, "{what}: read {read} bytes");
-    value
+    #[cfg(target_os = "linux")]
+    {
+        let (value, read) = bytes_read(call);
+        assert!(read <= MAX_READ_BYTES, "{what}: read {read} bytes");
+        value
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = what;
+        call()
+    }
 }
 
 /// A fresh store root in `format`, holding a journal of three frames whose tail is checked.
@@ -3044,13 +3059,15 @@ fn entry_in(format: StoreFormat, seq: u64, offset: u64, crc: u32) -> Vec<u8> {
 
 /// A `journal.log` padded with zeros to 2 GiB, sparse, past three frames: readers read the frames
 /// one at a time and stop at the zeros, a torn tail, and recovery cuts it, none of them reading
-/// the padding or holding it, in either format (the M6 design §5).
+/// the padding or holding it, in either format (the M6 design §5). What is read and held is
+/// measured on Linux alone, off `/proc`; the results are checked everywhere.
 #[test]
 fn a_journal_log_padded_to_2_gib_reads_a_frame_at_a_time() {
     for format in [StoreFormat::V1, StoreFormat::V2] {
         let what = |call: &str| format!("{format:?} {call}");
         let (_dir, layout, end) = three_frames_in(format);
         set_len(layout.journal_log(), PADDED);
+        #[cfg(target_os = "linux")]
         let before = peak_resident_kib();
 
         let reader = reopen(&layout);
@@ -3070,15 +3087,19 @@ fn a_journal_log_padded_to_2_gib_reads_a_frame_at_a_time() {
             "{format:?}"
         );
         assert_eq!(file_len(layout.journal_log()), end, "{format:?}");
-        let growth = peak_resident_kib().saturating_sub(before);
-        assert!(growth < MAX_GROWTH_KIB, "{format:?}: grew by {growth} KiB");
+        #[cfg(target_os = "linux")]
+        {
+            let growth = peak_resident_kib().saturating_sub(before);
+            assert!(growth < MAX_GROWTH_KIB, "{format:?}: grew by {growth} KiB");
+        }
     }
 }
 
 /// A `journal.off` padded with zeros to 2 GiB, sparse, past three entries, and ending in an
 /// entry that is not zero, so that the zeros are no tail a power loss left: readers read it a
 /// window at a time and stop at the first zeroed entry, which lists no frame, and recovery
-/// refuses the last entry; none reads the padding or holds it, in either format.
+/// refuses the last entry; none reads the padding or holds it, in either format. What is read
+/// and held is measured on Linux alone, off `/proc`; the results are checked everywhere.
 #[test]
 fn a_journal_off_padded_to_2_gib_reads_in_windows() {
     const FAR: u64 = 1 << 40;
@@ -3089,6 +3110,7 @@ fn a_journal_off_padded_to_2_gib_reads_in_windows() {
         let last = PADDED / entry_len - 1;
         set_len(layout.journal_off(), last * entry_len);
         append_bytes(layout.journal_off(), &entry_in(format, last, FAR, 0));
+        #[cfg(target_os = "linux")]
         let before = peak_resident_kib();
 
         let reader = reopen(&layout);
@@ -3101,15 +3123,19 @@ fn a_journal_off_padded_to_2_gib_reads_in_windows() {
         let repair = bounded(&what("repair_tail"), || reopen(&layout).repair_tail());
         assert_corrupt_at(repair, FAR, &what("repair_tail"));
         assert_eq!(file_len(layout.journal_off()), PADDED, "{format:?}");
-        let growth = peak_resident_kib().saturating_sub(before);
-        assert!(growth < MAX_GROWTH_KIB, "{format:?}: grew by {growth} KiB");
+        #[cfg(target_os = "linux")]
+        {
+            let growth = peak_resident_kib().saturating_sub(before);
+            assert!(growth < MAX_GROWTH_KIB, "{format:?}: grew by {growth} KiB");
+        }
     }
 }
 
 /// A FORMAT 1 header holds no CRC of its own, so an unlisted frame announcing a payload past the
 /// largest one a writer writes is still sorted by its payload's CRC, computed as it streams by:
 /// matching, it is a frame no writer of this build wrote that does not decode, damage; failing,
-/// it is a torn tail, cut. Neither holds the payload (515 MiB, sparse zeros).
+/// it is a torn tail, cut. Neither holds the payload (515 MiB, sparse zeros), which is measured
+/// on Linux alone, off `/proc`; the results are checked everywhere.
 #[test]
 fn a_v1_frame_past_the_bound_is_sorted_by_a_streaming_crc() {
     const LEN: u32 = MAX_PAYLOAD + 1;
@@ -3130,6 +3156,7 @@ fn a_v1_frame_past_the_bound_is_sorted_by_a_streaming_crc() {
         append_bytes(layout.journal_log(), &header);
         let log_len = end + 8 + u64::from(LEN);
         set_len(layout.journal_log(), log_len);
+        #[cfg(target_os = "linux")]
         let before = peak_resident_kib();
 
         let tail = reopen(&layout).tail_frames_from(0);
@@ -3142,10 +3169,13 @@ fn a_v1_frame_past_the_bound_is_sorted_by_a_streaming_crc() {
             assert_eq!(tail.unwrap().len(), 3);
             assert_eq!(repair.unwrap().cut, Some(LogCut::new(end, log_len - end)));
         }
-        let growth = peak_resident_kib().saturating_sub(before);
-        assert!(
-            growth < MAX_GROWTH_KIB,
-            "damage {damage}: grew by {growth} KiB"
-        );
+        #[cfg(target_os = "linux")]
+        {
+            let growth = peak_resident_kib().saturating_sub(before);
+            assert!(
+                growth < MAX_GROWTH_KIB,
+                "damage {damage}: grew by {growth} KiB"
+            );
+        }
     }
 }
