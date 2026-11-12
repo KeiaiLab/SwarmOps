@@ -5,6 +5,8 @@
 //   [GUIDE]
 //   # Commit and land
 //   Describes v0.11.0 · Last changed 2026-11-07 · View as Markdown · Copy Markdown
+//   (a file changed after the tag: Describes stable at 3a561c91, 2026-11-12; latest release
+//   v0.11.0 · what changed · ...)
 //   ...page...
 //   Edit on GitHub · Report a problem with this page
 //   < Previous                                   Next >
@@ -26,6 +28,7 @@ import { nodeText } from '@/lib/node-text';
 import { pageKind } from '@/lib/reference/pages';
 import { LATEST_RELEASE } from '@/lib/release';
 import { repoPath, source } from '@/lib/source';
+import { fileAhead } from '@/lib/stable';
 
 // The page title is the Markdown's own `# ` heading; the TOC lists the sections below it, and
 // only on a page with enough of them to need one.
@@ -52,12 +55,19 @@ export default async function Page({ params }: Props) {
     notFound();
   }
 
-  // 1. The page's facts: file, kind, release line, contents.
+  // 1. The page's facts: file, kind, what it describes (release, or stable when changed since), contents.
   const file = repoPath(page.data);
   const MDX = page.data.body;
   const kind = pageKind(file);
   const meta = (
-    <PageMeta key="page-meta" url={page.url} source={file} sourceUrl={githubUrl(file)} lastChanged={lastChanged(file)} />
+    <PageMeta
+      key="page-meta"
+      url={page.url}
+      source={file}
+      sourceUrl={githubUrl(file)}
+      lastChanged={lastChanged(file)}
+      describes={fileAhead(file)}
+    />
   );
   const toc = page.data.toc
     .filter((item) => item.depth >= TOC_MIN_DEPTH)
