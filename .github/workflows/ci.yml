@@ -11,8 +11,9 @@
 # Hardening: every action is pinned to a full commit SHA (its version in the trailing comment;
 # Dependabot updates both), the token has no permissions unless a job asks for one,
 # `actions/checkout` keeps no credentials, and no workflow uses `pull_request_target`. The
-# `zizmor` job audits all of that on every run. Jobs run on ubuntu-24.04, not ubuntu-latest,
-# which moves to a new Ubuntu in November 2026: changing the image is a commit, not a surprise.
+# `zizmor` job audits all of that on every run, and runs actionlint over every workflow's keys,
+# expressions and types. Jobs run on ubuntu-24.04, not ubuntu-latest, which moves to a new Ubuntu
+# in November 2026: changing the image is a commit, not a surprise.
 name: CI
 
 on:
@@ -113,6 +114,27 @@ jobs:
         with:
           advanced-security: false
           persona: auditor
+      # actionlint checks what zizmor does not: each workflow's keys, expressions, types and
+      # `needs:`. Its release binary runs, checked against the SHA-256 the release lists.
+      # Dependabot cannot move it: bump the version and the digest together in a `ci:` commit, to
+      # a release at least 7 days old. The runners' own label is declared to it; its shellcheck
+      # and pyflakes passes are off, so that what a runner has installed does not change the
+      # verdict.
+      - name: actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          dir="$RUNNER_TEMP/actionlint"
+          mkdir -p "$dir"
+          archive="$dir/actionlint.tar.gz"
+          base="https://github.com/rhysd/actionlint/releases/download/v$ACTIONLINT_VERSION"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$archive" \
+            "$base/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "$ACTIONLINT_SHA256  $archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$dir" actionlint
+          printf 'self-hosted-runner:\n  labels: [swarmops-local]\n' > "$dir/config.yaml"
+          "$dir/actionlint" -config-file "$dir/config.yaml" -shellcheck= -pyflakes=
       # gitoxide's `check-blocking`: a job added to this workflow must be one that `tests-pass`
       # needs, or it would never block anything.
       - name: tests-pass needs every other job
