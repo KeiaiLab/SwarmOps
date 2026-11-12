@@ -402,6 +402,10 @@ jobs:
   # installed for aarch64 (Debian's multiarch, an AlmaLinux root of that architecture, whose glibc
   # rpm checks the dependencies against) and run under QEMU; those two containers download from
   # the distributions' mirrors.
+  # Beside them, the server kit's .deb and .rpm (`swarmops-server`, from packaging/server/ at the
+  # tagged commit, dated alike). On x86_64 they are installed beside the client's with apt-get and
+  # dnf, which download their dependencies: the account, directories and units must exist and
+  # removing them must keep /srv/so. They hold no binary, so the aarch64 job does not install them.
   # On the runner itself, which starts the containers with docker: the containers write nothing
   # back, as they mount the packages read-only.
   packages:
@@ -425,7 +429,7 @@ jobs:
         with:
           name: swarmops-${{ needs.version.outputs.version }}-${{ matrix.target }}
           path: archive
-      - name: Make the .deb and the .rpm from the archive
+      - name: Make the client's and the server kit's .deb and .rpm
         run: |
           archive="swarmops-$VERSION-$TARGET_TRIPLE.tar.gz"
           (cd archive && sha256sum --check --strict -- "$archive.sha256")
