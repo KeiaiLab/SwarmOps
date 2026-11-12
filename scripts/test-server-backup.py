@@ -39,6 +39,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 BACKUP = ROOT / "packaging" / "server" / "backup"
 SO_BACKUP = BACKUP / "bin" / "so-backup"
+REHEARSE = BACKUP / "bin" / "rehearse"
+SO_KIT = ROOT / "packaging" / "server" / "bin" / "so-kit"
+# Where the package installs so-backup, the periodic jobs and the rehearsal program.
+INSTALLED_SO_BACKUP = "/usr/sbin/so-backup"
+JOBS = "/usr/lib/swarmops-server/jobs/"
+INSTALLED_REHEARSE = "/usr/lib/swarmops-server/backup/rehearse"
 POLICIES = BACKUP / "policy"
 
 TOOLS = ("openssl", "curl", "flock", "tar", "sha256sum")
@@ -313,7 +319,8 @@ class World:
                               check=False)
 
     def settings(self, side: str, **changes: str) -> Path:
-        """A settings file for the serving side or the rehearsal side; `changes` override."""
+        """The settings for the serving side or the rehearsal side, `changes` overriding: a
+        directory holding the kit's kit.conf and this program's backup.conf."""
         values = {
             "root": str(self.root),
             "swarmops": str(self.swarmops),
@@ -331,16 +338,22 @@ class World:
         if side == "rehearsal":
             values["backup_rehearsal_key"] = str(self.keys / "rehearsal.key")
         values.update(changes)
-        conf = self.scratch / f"{side}.conf"
-        conf.write_text("# settings\n" + "".join(f"{key}={value}\n"
-                                                 for key, value in values.items()))
-        return conf
+        settings = self.scratch / f"{side}-settings"
+        settings.mkdir(exist_ok=True)
+        for name, ours in (("kit.conf", False), ("backup.conf", True)):
+            lines = "".join(f"{key}={value}\n" for key, value in values.items()
+                            if key.startswith("backup_") == ours)
+            (settings / name).write_text("# settings\n" + lines)
+        return settings
 
-    def run(self, conf: Path, *arguments: str) -> subprocess.CompletedProcess:
-        environment = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "SO_KIT_CONF": str(conf),
-                       "TMPDIR": str(self.scratch)}
+    def environment(self, settings: Path) -> dict[str, str]:
+        return {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "SO_KIT_CONF": str(settings / "kit.conf"),
+                "SO_BACKUP_CONF": str(settings / "backup.conf"), "TMPDIR": str(self.scratch)}
+
+    def run(self, settings: Path, *arguments: str) -> subprocess.CompletedProcess:
         return subprocess.run(["sh", str(SO_BACKUP), *arguments], text=True, capture_output=True,
-                              env=environment, check=False)
+                              env=self.environment(settings), check=False)
 
     def backup(self) -> str:
         done = self.run(self.settings("serving"), "backup")
@@ -523,7 +536,8 @@ def secrets_are_a_separate_part(world: World) -> None:
         if name == "parts/secrets.tar":
             continue
         assert b"SECRET-" not in data, f"a secret in {name}"
-    assert "kit.conf" in tar_names(members["parts/settings.tar"]), "settings part"
+    settings = tar_names(members["parts/settings.tar"])
+    assert "kit.conf" in settings and "backup.conf" in settings, f"settings part: {settings}"
 
 
 def backup_has_two_recipients(world: World) -> None:
@@ -609,6 +623,7 @@ def rehearse_on_empty_directory_restores_equal(world: World) -> None:
     assert done.returncode == 0, f"rehearse: {done}"
     assert ref_targets(world, target / "stores" / "one") == ref_targets(world, store)
     assert (target / "settings" / "kit.conf").is_file(), "settings not restored"
+    assert (target / "settings" / "backup.conf").is_file(), "backup settings not restored"
     assert (target / "secrets").is_dir(), "secrets not restored"
     records = world.records()
     assert len(records) == 1, f"records: {records}"
@@ -654,10 +669,25 @@ def backup_takes_the_store_lock(world: World) -> None:
         "the copy did not wait for the lock"
 
 
+def backup_leaves_out_the_derived_cache(world: World) -> None:
+    """`meta/derived/` is a cache readers write without the store's lock: the copy leaves it
+    out, so a reader's write during the copy cannot fail the backup."""
+    store = world.store("one")
+    assert world.commit(store, "main", "first", None).returncode == 0
+    cache = store / "meta" / "derived" / "planted" / "1"
+    cache.mkdir(parents=True)
+    (cache / "value").write_text("cached")
+    names = tar_names(opened(world, world.backup())["parts/stores/one.tar"])
+    assert not [name for name in names if name.startswith("./meta/derived")], \
+        f"the derived cache is in the copy: {names}"
+    assert "./access.toml" in names, "self-check: the copy holds the store"
+
+
 def files_are_installed_and_units_confined(_: World) -> None:
     """The subtree's MANIFEST installs every file of it and nothing it lacks; each service runs
-    so-backup as the serving account with the system read-only; each timer is wanted by
-    timers.target."""
+    a job file of the kit's jobs directory, which runs so-backup, as the serving account with
+    the system read-only; each timer is wanted by timers.target; the rehearsal program is where
+    `so-kit run rehearse` starts it."""
     installs = {}
     for line in (BACKUP / "MANIFEST").read_text().splitlines():
         words = line.split("#", 1)[0].split()
@@ -666,7 +696,10 @@ def files_are_installed_and_units_confined(_: World) -> None:
     files = sorted(str(path.relative_to(BACKUP)) for path in BACKUP.rglob("*")
                    if path.is_file() and path.name != "MANIFEST")
     assert sorted(installs) == files, f"installed {sorted(installs)}, present {files}"
-    assert installs["bin/so-backup"] == ["/usr/sbin/so-backup", "0755"], "so-backup"
+    assert installs["bin/so-backup"] == [INSTALLED_SO_BACKUP, "0755"], "so-backup"
+    assert installs["bin/rehearse"] == [INSTALLED_REHEARSE, "0755"], "rehearse"
+    jobs = {destination: name for name, (destination, _mode) in installs.items()
+            if destination.startswith(JOBS)}
     for name in files:
         if not name.startswith("systemd/"):
             continue
@@ -677,7 +710,10 @@ def files_are_installed_and_units_confined(_: World) -> None:
             assert unit.get("Install", "WantedBy") == "timers.target", f"{name}: WantedBy"
             continue
         service = unit["Service"]
-        assert "/usr/sbin/so-backup " in service["ExecStart"], f"{name}: ExecStart"
+        job = service["ExecStart"]
+        assert job in jobs, f"{name}: ExecStart is no job file"
+        assert f"exec {INSTALLED_SO_BACKUP} " in (BACKUP / jobs[job]).read_text(), \
+            f"{jobs[job]}: runs no so-backup step"
         for key, value in (("User", "so"), ("NoNewPrivileges", "yes"),
                            ("ProtectSystem", "strict"), ("ProtectHome", "yes"),
                            ("PrivateTmp", "yes")):
@@ -688,6 +724,44 @@ def settings_refuse_unknown_keys(world: World) -> None:
     """A misspelt backup key is refused, naming it; a key of so-kit's is left to so-kit."""
     done = world.run(world.settings("serving", backup_bukket="x"), "check")
     assert done.returncode == 2 and "backup_bukket" in done.stderr, f"misspelt: {done}"
+    done = world.run(world.settings("serving", web_root="/var/www"), "check")
+    assert "web_root" not in done.stderr, f"so-kit's key refused: {done}"
+
+
+def kit_settings_pass_so_kit(world: World) -> None:
+    """The kit's settings file, as the backup reads it, passes so-kit, which refuses a key it
+    does not know: the backup's keys live in a file of their own."""
+    settings = world.settings("serving")
+    done = subprocess.run(["sh", str(SO_KIT), "check"], text=True, capture_output=True,
+                          env=world.environment(settings), check=False)
+    assert done.returncode == 0, f"so-kit check: {done}"
+
+    # 1. Self-check: a backup key in kit.conf is refused by so-kit.
+    with (settings / "kit.conf").open("a") as kit:
+        kit.write(f"backup_bucket={BUCKET}\n")
+    done = subprocess.run(["sh", str(SO_KIT), "check"], text=True, capture_output=True,
+                          env=world.environment(settings), check=False)
+    assert done.returncode == 2, f"self-check: so-kit took a backup key: {done}"
+
+
+def rehearse_role_runs_the_drill(world: World) -> None:
+    """`so-kit run rehearse` with no directory restores the newest backup onto a new empty
+    directory and writes one record: the rehearsal CronJob's one command."""
+    store = world.store("one")
+    assert world.commit(store, "main", "first", None).returncode == 0
+    world.backup()
+
+    # 1. The rehearsal program, pointed at this tree's so-backup, and so-kit pointed at it.
+    program = world.scratch / "rehearse"
+    program.write_text(REHEARSE.read_text().replace(INSTALLED_SO_BACKUP, str(SO_BACKUP), 1))
+    program.chmod(0o755)
+    settings = world.settings("rehearsal", rehearse=str(program))
+    done = subprocess.run(["sh", str(SO_KIT), "run", "rehearse"], text=True,
+                          capture_output=True, env=world.environment(settings), check=False)
+    assert done.returncode == 0, f"so-kit run rehearse: {done}"
+    records = world.records()
+    assert len(records) == 1, f"records: {records}"
+    assert json.loads(world.bucket.objects[records[0]])["stores"] == 1, "record"
 
 
 CASES: tuple[tuple[str, Callable[[World], None]], ...] = (
@@ -702,8 +776,11 @@ CASES: tuple[tuple[str, Callable[[World], None]], ...] = (
     ("rehearse on an empty directory restores equal", rehearse_on_empty_directory_restores_equal),
     ("a record older than a period alerts", record_older_than_a_period_alerts),
     ("the backup takes the store's lock", backup_takes_the_store_lock),
+    ("the backup leaves out the derived cache", backup_leaves_out_the_derived_cache),
     ("files are installed and units confined", files_are_installed_and_units_confined),
     ("settings refuse unknown keys", settings_refuse_unknown_keys),
+    ("the kit's settings pass so-kit", kit_settings_pass_so_kit),
+    ("the rehearse role runs the drill", rehearse_role_runs_the_drill),
 )
 
 

@@ -1,0 +1,5 @@
+#!/bin/sh
+# The rehearsal check job: an alert when no restore drill passed within the period, every day.
+# The rehearsal check timer and `so-kit run timers` both start this file.
+# period: 1d
+exec /usr/sbin/so-backup check

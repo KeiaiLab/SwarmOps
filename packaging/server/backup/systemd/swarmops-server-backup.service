@@ -5,7 +5,7 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/sbin/so-backup backup
+ExecStart=/usr/lib/swarmops-server/jobs/backup
 User=so
 Group=so
 NoNewPrivileges=yes

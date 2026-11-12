@@ -1,0 +1,14 @@
+#!/bin/sh
+# The restore drill `so-kit run rehearse` starts: so-backup's rehearsal onto the empty directory
+# given, else onto a new one under TMPDIR (the run's own volume), so every run restores onto an
+# empty disk.
+set -eu
+
+if [ $# -gt 1 ]; then
+    printf 'rehearse: usage: rehearse [empty directory]\n' >&2
+    exit 2
+fi
+if [ $# -eq 0 ]; then
+    set -- "$(mktemp -d)"
+fi
+exec /usr/sbin/so-backup rehearse "$1"

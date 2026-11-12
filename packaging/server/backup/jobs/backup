@@ -1,0 +1,5 @@
+#!/bin/sh
+# The backup job: every store, the settings and the secrets, encrypted and shipped every hour.
+# The backup timer and `so-kit run timers` both start this file.
+# period: 1h
+exec /usr/sbin/so-backup backup

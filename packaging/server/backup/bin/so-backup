@@ -16,13 +16,14 @@
 #
 #   manifest                 swarmops-backup 1 / release / time / part lines / refs lines
 #   parts/stores/<name>.tar  a store as copied under meta/lock, its caches left out
-#   parts/settings.tar       the settings file, as kit.conf
+#   parts/settings.tar       the settings files, as kit.conf and backup.conf
 #   parts/secrets.tar        the files backup_secrets names
 #
-# Settings: the kit's settings file (SO_KIT_CONF, else /etc/swarmops-server/kit.conf). The
-# backup_* keys are this program's and an unknown one is refused; root and swarmops are read as
-# so-kit reads them; every other key is so-kit's to check. Exit 0 done; 1 failed, after the
-# alert; 2 refused, nothing done. Either prints one `so-backup: <reason>` line on stderr.
+# Settings: this program's file (SO_BACKUP_CONF, else /etc/swarmops-server/backup.conf) holds
+# the backup_* keys and an unknown key there is refused; the kit's file (SO_KIT_CONF, else
+# /etc/swarmops-server/kit.conf), which so-kit checks and which refuses keys so-kit does not
+# know, gives root and swarmops. Exit 0 done; 1 failed, after the alert; 2 refused, nothing
+# done. Either prints one `so-backup: <reason>` line on stderr.
 set -eu
 LC_ALL=C
 export LC_ALL
@@ -59,7 +60,7 @@ plain_path() {
     esac
 }
 
-# 1. Settings: the defaults, then the lines of the settings file.
+# 1. Settings: the defaults, then root and swarmops from the kit's file, then this program's.
 root=/srv/so
 swarmops=/usr/bin/swarmops
 backup_endpoint=
@@ -74,8 +75,20 @@ backup_secrets=
 backup_rehearsal_period=691200
 backup_alert=
 
-conf=${SO_KIT_CONF:-/etc/swarmops-server/kit.conf}
+kit_conf=${SO_KIT_CONF:-/etc/swarmops-server/kit.conf}
+conf=${SO_BACKUP_CONF:-/etc/swarmops-server/backup.conf}
+[ -r "$kit_conf" ] || refuse "cannot read the kit's settings file"
 [ -r "$conf" ] || refuse "cannot read the settings file"
+while IFS= read -r line || [ -n "$line" ]; do
+    case $line in
+    root=* | swarmops=*) ;;
+    *) continue ;;
+    esac
+    key=${line%%=*}
+    value=${line#*=}
+    plain_path "$key" "$value"
+    eval "$key=\$value"
+done <"$kit_conf"
 while IFS= read -r line || [ -n "$line" ]; do
     case $line in
     '' | '#'*) continue ;;
@@ -85,7 +98,7 @@ while IFS= read -r line || [ -n "$line" ]; do
     key=${line%%=*}
     value=${line#*=}
     case $key in
-    root | swarmops | backup_credential | backup_recovery_recipient | backup_rehearsal_recipient | \
+    backup_credential | backup_recovery_recipient | backup_rehearsal_recipient | \
         backup_rehearsal_key | backup_alert)
         plain_path "$key" "$value"
         ;;
@@ -126,8 +139,7 @@ while IFS= read -r line || [ -n "$line" ]; do
         '' | *[!0-9]*) refuse "settings: backup_rehearsal_period is no number of seconds" ;;
         esac
         ;;
-    backup_*) refuse "settings: unknown key $key" ;;
-    *) continue ;;
+    *) refuse "settings: unknown key $key" ;;
     esac
     eval "$key=\$value"
 done <"$conf"
@@ -278,16 +290,22 @@ cmd_backup() {
     release=$("$swarmops" --version 2>/dev/null | head -n 1) || failed "swarmops --version failed"
 
     # 1. Each store, copied under the lock its writers take, its caches left out; the copy is
-    #    unpacked once and checked with verify --deep, and its refs go to the manifest.
+    #    unpacked once and checked with verify --deep, and its refs go to the manifest. The
+    #    copy holds the files listed under the lock: objects and the derived cache are written
+    #    without it, so a directory may gain entries while tar reads it.
     : >"$work/refs"
     for store in "$root"/*/; do
         store=${store%/}
         [ -f "$store/meta/lock" ] || continue
         name=${store##*/}
         part="$work/parts/stores/$name.tar"
-        flock "$store/meta/lock" tar -c -f "$part" -C "$store" \
-            --exclude=./objects/tmp --exclude=./git/serve.git --exclude=./git/serve-cache \
-            --exclude=./git/mirror.git . || failed "cannot copy the store $name"
+        flock "$store/meta/lock" sh -c '
+            cd "$1" &&
+                find . \( -path ./objects/tmp -o -path ./meta/derived -o -path ./git/serve.git \
+                    -o -path ./git/serve-cache -o -path ./git/mirror.git \) -prune \
+                    -o -type f -print >"$3" &&
+                tar -c -f "$2" --no-recursion -T "$3"' copy "$store" "$part" "$work/listed" ||
+            failed "cannot copy the store $name"
         mkdir "$work/check/$name"
         tar -x -f "$part" -C "$work/check/$name" || failed "cannot unpack the copy of $name"
         verified "$work/check/$name" || failed "the copy of $name fails verify --deep"
@@ -297,8 +315,9 @@ cmd_backup() {
     done
 
     # 2. The settings, and the secrets as a part of their own.
-    cp "$conf" "$work/settings/kit.conf"
-    tar -c -f "$work/parts/settings.tar" -C "$work/settings" kit.conf
+    cp "$kit_conf" "$work/settings/kit.conf"
+    cp "$conf" "$work/settings/backup.conf"
+    tar -c -f "$work/parts/settings.tar" -C "$work/settings" kit.conf backup.conf
     rest=$backup_secrets
     while [ -n "$rest" ]; do
         piece=${rest%%:*}
