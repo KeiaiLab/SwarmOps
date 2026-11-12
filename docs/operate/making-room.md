@@ -17,10 +17,14 @@ gives for each, and no more:
 - **Leftovers**, which `swarmops gc` removes (the M6 design, section 8): files in `objects/tmp/`
   and `meta/derived/tmp/` older than a day (`object_temp`, `derived_temp`), where a write that died
   on the way left the file it was staging; a crashed `init`'s `meta.tmp/` (`meta_staging`); the
-  values of a built-in derivation's older versions (`derived_version`); and the old files an
-  upgrade left (`upgrade_residue`). No frame names an object before it is linked and durable (§2,
-  rules 1 and 2), so a staging file is never the only name of an object that a changeset needs,
-  and a day keeps the files of writes still in flight.
+  values of a built-in derivation's older versions (`derived_version`); in a `FORMAT 3` store, the
+  run files of `meta/sorted3/` that its manifest does not name and the files of
+  `meta/sorted3/tmp/`, older than a day (`stale_run`), where a step of the index's sorted runs
+  that stopped part way left them; and the old files an upgrade left (`upgrade_residue`). No frame
+  names an object before it is linked and durable (§2, rules 1 and 2), so a staging file is never
+  the only name of an object that a changeset needs, and a day keeps the files of writes still in
+  flight. The manifest and the runs it names stay, whatever their age, and under a manifest that
+  is missing or does not read `gc` removes none of them.
 - **The derived values**, `meta/derived/`, which may go whole. They are a cache that neither the
   journal nor any other file names (§3), and removing a value's file, or `meta/derived/`, makes the
   value derived again (§5).
