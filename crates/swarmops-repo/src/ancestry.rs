@@ -3,7 +3,9 @@
 //! common ancestors no other common ancestor reaches), and the changesets `to` reaches and
 //! `from` does not (`from..to`), a page at a time. Every parent is followed, a merge's other
 //! parents too; first-parent reads (log, history, land, rebase, the forward-only check) are
-//! [`history`](crate::history)'s and do not change.
+//! [`history`](crate::history)'s and do not change. The same walk from several `from`s gives the
+//! changesets a store lacks of another's history ([`RepoRead::missing`], the native sync design
+//! §2.4).
 //!
 //! One walk gives the three answers. It pops changesets from a queue ordered by generation,
 //! highest first, ties by id, so that every child of a changeset is popped before it and each
@@ -28,7 +30,7 @@
 //! [`StoreError::IndexCorrupt`]: swarmops_store::StoreError::IndexCorrupt
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use swarmops_core::ChangesetId;
 use swarmops_store::{ChangesetMeta, ObjectStore};
@@ -67,6 +69,24 @@ impl Ancestry {
             entries: Vec::new(),
             more: false,
         }
+    }
+}
+
+/// A page of the changesets a `want` reaches and no `have` does ([`RepoRead::missing`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Missing {
+    /// The page, generation descending, then id ascending.
+    pub changesets: Vec<ChangesetId>,
+    /// The page's last changeset, its generation and its id, when more follow: the next
+    /// page's `after`.
+    pub next: Option<(u64, ChangesetId)>,
+}
+
+impl Missing {
+    /// Takes every field.
+    pub fn new(changesets: Vec<ChangesetId>, next: Option<(u64, ChangesetId)>) -> Missing {
+        Missing { changesets, next }
     }
 }
 
@@ -137,15 +157,56 @@ impl<O: ObjectStore> RepoRead<'_, O> {
     ) -> Result<Ancestry, RepoError> {
         let start = self.walk_start(from)?;
         let end = self.walk_start(to)?;
+        self.walk(&[start], &end, limit, after)
+    }
 
-        // 1. Both ends queued with their marks.
+    /// The changesets `want` reaches and no changeset of `have` reaches: the entries of the
+    /// [`RepoRead::ancestry`] walk with every `have` marked FROM, up to `limit` of them after
+    /// `after` (as there). A `have` the snapshot does not hold is passed over; a `want` it does
+    /// not hold is [`RepoError::NotFound`]. The errors of a damaged index are `ancestry`'s.
+    pub fn missing(
+        &self,
+        have: &[ChangesetId],
+        want: ChangesetId,
+        limit: usize,
+        after: Option<(u64, ChangesetId)>,
+    ) -> Result<Missing, RepoError> {
+        let end = self.walk_start(want)?;
+        let mut starts = Vec::with_capacity(have.len());
+        for &id in have {
+            if let Some(record) = self.meta.changeset(id)? {
+                starts.push(record);
+            }
+        }
+        let found = self.walk(&starts, &end, limit, after)?;
+        let last = found
+            .entries
+            .last()
+            .map(|entry| (entry.generation, entry.id));
+        let changesets = found.entries.into_iter().map(|entry| entry.id).collect();
+        Ok(Missing::new(changesets, last.filter(|_| found.more)))
+    }
+
+    /// The walk of the module documentation from the changesets `froms` and `to`; `ancestry`'s
+    /// answers, `is_ancestor` for any of `froms`.
+    fn walk(
+        &self,
+        froms: &[ChangesetMeta],
+        end: &ChangesetMeta,
+        limit: usize,
+        after: Option<(u64, ChangesetId)>,
+    ) -> Result<Ancestry, RepoError> {
+        // 1. Every end queued with its marks.
         let mut walk = Walk {
             queue: BinaryHeap::new(),
             marks: HashMap::new(),
             live: 0,
         };
-        walk.mark(start.id, start.generation, Marks::FROM);
+        for start in froms {
+            walk.mark(start.id, start.generation, Marks::FROM);
+        }
         walk.mark(end.id, end.generation, Marks::TO);
+        let from: HashSet<ChangesetId> = froms.iter().map(|start| start.id).collect();
 
         let mut found = Ancestry::new(false, Vec::new());
         let mut bases = 0_usize;
@@ -164,8 +225,8 @@ impl<O: ObjectStore> RepoRead<'_, O> {
             // 3. What the changeset is: a merge base, an entry, or neither.
             let mut down = marks.0 & (Marks::FROM | Marks::TO | Marks::STALE);
             let common = marks.has(Marks::FROM | Marks::TO) && !marks.has(Marks::STALE);
-            if id == from {
-                found.is_ancestor = marks.has(Marks::TO);
+            if from.contains(&id) {
+                found.is_ancestor |= marks.has(Marks::TO);
             }
             if common {
                 bases += 1;

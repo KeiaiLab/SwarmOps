@@ -29,6 +29,10 @@
 //! module). A revert lands the inverse of a range of a ref's history as a land with changes
 //! ([`Repo::revert`]; the [`revert`] module).
 //!
+//! Another store's objects are taken as they are: blobs ([`Repo::put_blobs`]) and changesets,
+//! with their ids and no ref moved, their trees rebuilt and checked ([`Repo::adopt`]); what a
+//! store lacks of another's history is listed by [`RepoRead::missing`].
+//!
 //! [`LocalRepo`] is the repository on the local filesystem: the loose object files and the
 //! native metadata store of `swarmops-store`, which own durability. The operations take and
 //! return plain values with no filesystem paths in them, so that they can move behind an RPC
@@ -61,6 +65,7 @@ pub mod revert;
     reason = "the batched lands (the D2 design, slice D2-4) use it"
 )]
 mod staged;
+mod transfer;
 mod tree_edit;
 pub mod upgrade;
 pub mod verify;
@@ -91,5 +96,6 @@ pub use repair::{RepairAction, RepairKind, RepairReport, RepairRequest};
 pub use repo::{CasOutcome, LocalRepo, Repo, RepoInfo};
 pub use revert::{MAX_REVERT_CHANGESETS, MAX_REVERT_REASON_BYTES, RevertRequest};
 pub use swarmops_store::{CasResult, InsertOutcome, RefKind, RefState, StoreError, StoreFormat};
+pub use transfer::AdoptOutcome;
 pub use upgrade::UpgradeReport;
 pub use verify::{Depth, MismatchCause, VerifyProblem, VerifyReport};
