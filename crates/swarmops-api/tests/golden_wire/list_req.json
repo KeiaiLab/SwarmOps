@@ -1,0 +1,1 @@
+{"op":"wire_list","api":1,"protocol":1,"req":{"want":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","have":["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],"after":{"generation":7,"id":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},"limit":3}}

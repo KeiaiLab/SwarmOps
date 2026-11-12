@@ -16,6 +16,7 @@ pub mod remote;
 pub mod rev;
 mod schema;
 pub mod serve;
+pub mod wire;
 
 pub use envelope::{API_VERSION, Envelope, LogCutOut, Meta, RecoveredOut};
 pub use error::{ErrorCode, OpError};
@@ -73,3 +74,9 @@ pub use remote::{
 pub use rev::Rev;
 pub use schema::schema_for_all;
 pub use serve::{ServeRecord, ServeService};
+pub use wire::{
+    MAX_CHUNK_BYTES, MAX_WIRE_IDS, MAX_WIRE_LINE, WIRE_PROTOCOL, WIRE_STALL_SECS, WireBlobWant,
+    WireChunks, WireCursor, WireGetReq, WireHas, WireHasReq, WireHello, WireHelloReq, WireLandReq,
+    WireList, WireListReq, WireMove, WireMoveMode, WireMoveReq, WirePut, WirePutReq, WireRef,
+    WireRefs, WireRefsReq, WireRequest,
+};

@@ -1,0 +1,1 @@
+{"op":"wire_hello","api":1,"protocol":1,"req":{"protocol_min":1,"protocol_max":2,"object_kinds":["blob","changeset"],"features":["lineage"]}}

@@ -1,0 +1,1 @@
+{"op":"wire_land","api":1,"protocol":1,"req":{"target":"main","base":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","max_attempts":3,"max_conflict_bytes":1024}}
