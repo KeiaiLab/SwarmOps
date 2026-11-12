@@ -518,12 +518,17 @@ fn history(changesets: usize) -> Store {
 /// The store of `changesets` changesets and files under `SWARMOPS_BENCH_DIR`, built once and
 /// reused while its record matches: the build puts every object durably, minutes at 50,000, so
 /// each test works on a clone ([`clone_of`]). Two tests that need it build it one after the
-/// other, under a lock beside it.
+/// other, under a lock beside it. Its directory names the format: a checkout whose `init` makes
+/// another format builds its own, and does not remove this one under a clone being made.
 fn built(changesets: usize) -> Utf8PathBuf {
     let base = base_dir();
-    let dir = base.join(format!("counted-{changesets}"));
-    let lock = fs::File::create(base.join(format!("counted-{changesets}.lock")))
-        .expect("create the store's lock file");
+    let name = format!(
+        "counted-{changesets}-format-{}",
+        DEFAULT_INIT_FORMAT.version()
+    );
+    let dir = base.join(&name);
+    let lock =
+        fs::File::create(base.join(format!("{name}.lock"))).expect("create the store's lock file");
     lock.lock().expect("lock the store");
     let store = Utf8PathBuf::from_path_buf(dir.join("store")).expect("a UTF-8 bench path");
 
