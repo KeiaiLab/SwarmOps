@@ -632,7 +632,7 @@ push = ["main"]
 "#;
 
 /// The commits of the history `serve --prepare` seeds from.
-const SEEDED_COMMITS: usize = 200;
+const SEEDED_COMMITS: usize = crate::seeded::COMMITS;
 
 impl Site {
     /// The store's writer lock, held by the test until dropped.
@@ -776,12 +776,14 @@ fn loose(objects: &Path) -> Vec<PathBuf> {
 /// clone has the source's `main`.
 #[test]
 fn prepare_after_import_writes_no_object_at_first_clone() {
-    // 1. The source, imported.
+    // 1. The source, and a copy of the store that imported the same history once
+    //    (`seeded`), under the access file again.
     let server = GitServer::new();
     let source = server.create("source");
     crate::serve_perf::fast_import(&server, &source, SEEDED_COMMITS);
     let site = Site::new();
-    site.import(&source, "main", "main");
+    crate::seeded::put(&site.served.store(STORE));
+    site.grant(ACCESS);
 
     // 2. The preparation, seeded from the source.
     let store = site.store();

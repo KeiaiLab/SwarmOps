@@ -8,7 +8,8 @@
 //! clones, fetches behind by 1 to 1,000 lands, pushes of 1 and 2 GiB. Each case asserts only
 //! what it ran (the commands succeed, both sides serve the same commits), never the target: a
 //! missed target is recorded in `docs/perf.md`, not a failing test, as `remote_perf`'s are. All
-//! but the seeding check are ignored in `just check`; `just perf` runs them in a release build.
+//! but the seeding checks are ignored in `just check`; `just perf` runs them in a release build.
+//! Two of the seeding checks start from a copy of one imported store (`seeded`), not an import.
 //!
 //! ```text
 //!   GitServer: fast-import ──▶ repo.git ◀── git upload-pack (ssh stand-in)  ◀── client git
@@ -36,6 +37,7 @@ use swarmops_testkit::remote::{GitServer, SshMode};
 use swarmops_testkit::serve::ServeSite;
 use tempfile::TempDir;
 
+use crate::seeded;
 use crate::support::{self, Swarmops};
 
 /// The identity the forced command names.
@@ -145,6 +147,16 @@ enum Start {
     Seeded,
 }
 
+/// Where a bench's store has the history from.
+#[derive(Clone, Copy)]
+enum History {
+    /// One `git import` of the bare repository, timed: the measured cases.
+    Imported,
+    /// A copy of the store that imported the same [`seeded::COMMITS`] commits once
+    /// ([`seeded::put`]): no import, so none to time, and none to start a preparation.
+    Copied,
+}
+
 /// The history served by `swarmops serve` and by git's `upload-pack`, and a directory for
 /// clients.
 struct Bench {
@@ -154,7 +166,7 @@ struct Bench {
     site: ServeSite,
     /// The clients' directories.
     work: TempDir,
-    /// How long the import into the store took.
+    /// How long the import into the store took; zero for a copied store.
     imported: Duration,
 }
 
@@ -167,6 +179,18 @@ impl Bench {
     /// `commits` commits on `main` of a bare repository, imported into the store [`REPO`]; the
     /// server's `serve.git` starts as `start` says.
     fn build(commits: usize, start: Start) -> Bench {
+        Bench::make(commits, start, History::Imported)
+    }
+
+    /// [`seeded::COMMITS`] commits on `main` of a bare repository, and the store [`REPO`] a
+    /// copy of the one that imported them; the server's `serve.git` starts as `start` says.
+    fn copied(start: Start) -> Bench {
+        Bench::make(seeded::COMMITS, start, History::Copied)
+    }
+
+    /// `commits` commits on `main` of a bare repository, and the store [`REPO`] holding them as
+    /// `history` says; the server's `serve.git` starts as `start` says.
+    fn make(commits: usize, start: Start, history: History) -> Bench {
         // 1. git's side: the history, written by fast-import; seeded, accounted as serve's is.
         let server = match start {
             Start::Cold => GitServer::new(),
@@ -181,34 +205,29 @@ impl Bench {
             Start::Cold => site,
             Start::Seeded => site.with_accounting(Accounting::Cpu),
         };
-        let store = site.init(REPO);
+        let store = match history {
+            History::Imported => site.init(REPO),
+            History::Copied => {
+                seeded::put(&site.store(REPO));
+                site.store(REPO)
+            }
+        };
         let access = store.join("access.toml");
         if matches!(start, Start::Seeded) {
             fs::write(&access, ACCESS).expect("write the access file");
         }
 
-        // 3. A seeded serve.git exists before the store holds a ref, and takes the objects.
-        if matches!(start, Start::Seeded) {
+        // 3. A seeded serve.git exists before the store holds a ref, and takes the objects. A
+        //    copied store holds `main` already: the preparation of step 5 makes its serve.git.
+        if matches!((start, history), (Start::Seeded, History::Imported)) {
             site.open_serve_git(REPO, AGENT);
         }
 
         // 4. The same history imported, timed.
-        let line = [
-            "--repo",
-            path_str(&store),
-            "--as",
-            WRITER,
-            "git",
-            "import",
-            path_str(&bare),
-            "--ref",
-            "main",
-            "--into",
-            "main",
-        ];
-        let started = Instant::now();
-        support::run_within(&line, &[], SLOW_RUN).ok();
-        let imported = started.elapsed();
+        let imported = match history {
+            History::Imported => import(&store, &bare),
+            History::Copied => Duration::ZERO,
+        };
 
         // 5. Seeded: the import's detached preparation ended first, so that no seed fetch runs
         //    beside its repack and no case connects behind its serve.lock.
@@ -283,6 +302,27 @@ impl Bench {
     fn dir(&self, name: &str) -> PathBuf {
         self.work.path().join(name)
     }
+}
+
+/// The `git import` of `bare`'s `main` into `main` of the store at `store`, as [`WRITER`]; how
+/// long it took.
+fn import(store: &Path, bare: &Path) -> Duration {
+    let line = [
+        "--repo",
+        path_str(store),
+        "--as",
+        WRITER,
+        "git",
+        "import",
+        path_str(bare),
+        "--ref",
+        "main",
+        "--into",
+        "main",
+    ];
+    let started = Instant::now();
+    support::run_within(&line, &[], SLOW_RUN).ok();
+    started.elapsed()
 }
 
 /// `main` of `bare` made of `commits` commits, one file changed in each, by `git fast-import`:
@@ -1072,7 +1112,7 @@ fn loose_objects(git_dir: &Path) -> usize {
 /// `times` line is not on the transport).
 #[test]
 fn seeded_serve_git_exports_nothing() {
-    let bench = Bench::build(200, Start::Seeded);
+    let bench = Bench::copied(Start::Seeded);
     let serve = bench.serve();
     let git_dir = bench.store().join("git/serve.git");
     assert_eq!(loose_objects(&git_dir), 0, "the seed left loose objects");
@@ -1091,17 +1131,22 @@ fn seeded_serve_git_exports_nothing() {
     assert_eq!(loose_objects(&git_dir), 0, "the refresh wrote objects");
     assert!(!bench.spent(0).is_empty(), "no connection was accounted");
     println!(
-        "serve-perf: first clone on 200 seeded commits: {:.3} s",
+        "serve-perf: first clone on {} seeded commits: {:.3} s",
+        seeded::COMMITS,
         first.as_secs_f64()
     );
 }
 
 /// A seeded bench hands its cases a `serve.git` no preparation is still at: the detached one the
 /// import started has ended, so the first connection never waits for `serve.lock` behind it (a
-/// 12,000-commit preparation outlasts the 10 s wait: `E_BUSY`).
+/// 12,000-commit preparation outlasts the 10 s wait: `E_BUSY`). The one test of `just check`
+/// that imports the history itself, as the measured cases do: on its turn ([`seeded::turn`]), so
+/// that the import runs beside no other.
 #[test]
 fn seeded_bench_waits_for_its_preparation() {
-    let bench = Bench::build(200, Start::Seeded);
+    let turn = seeded::turn();
+    let bench = Bench::build(seeded::COMMITS, Start::Seeded);
+    drop(turn);
     let root = bench.store();
     let root = Utf8Path::from_path(&root).expect("a UTF-8 store path");
     assert!(
@@ -1118,15 +1163,20 @@ fn seeded_bench_waits_for_its_preparation() {
 
 /// A cold bench hands its cases a store no preparation has touched: the import ran before the
 /// access file existed, so it started no detached `serve --prepare` that a first clone would
-/// race for `serve.lock` (`E_BUSY`) or find done.
+/// race for `serve.lock` (`E_BUSY`) or find done. Read off the store the import ran on
+/// ([`seeded::imported`]), where such a preparation would write, and off the bench's copy of it.
 #[test]
 fn cold_bench_starts_no_preparation() {
-    let bench = Bench::build(200, Start::Cold);
-    let root = bench.store();
+    let bench = Bench::copied(Start::Cold);
+    let roots = [seeded::imported(), bench.store()];
     let deadline = Instant::now() + QUIET_FOR;
     while Instant::now() < deadline {
-        for path in [SERVE_GIT, SERVE_STATE, SERVE_DIRTY] {
-            assert!(!root.join(path).exists(), "a preparation wrote {path}");
+        for (root, path) in roots
+            .iter()
+            .flat_map(|root| [SERVE_GIT, SERVE_STATE, SERVE_DIRTY].map(|path| (root, path)))
+        {
+            let written = root.join(path);
+            assert!(!written.exists(), "a preparation wrote {written:?}");
         }
         thread::sleep(POLL);
     }

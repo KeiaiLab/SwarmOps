@@ -41,6 +41,7 @@ mod remote_serve;
 mod remote_sync;
 mod revert_limits;
 mod scale_perf;
+mod seeded;
 mod serve_differential;
 mod serve_fetch;
 mod serve_fetch_pins;
