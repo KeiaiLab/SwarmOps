@@ -10,8 +10,7 @@ body:
     id: what-happened
     attributes:
       label: What happened
-      description: The commands you ran and the JSON envelope each printed (`error.code`, `details` and `hint` matter most). Remove paths or content you cannot share.
-      render: shell
+      description: The commands you ran and the JSON envelope each printed (`error.code`, `details` and `hint` matter most). Put commands and their output between ``` lines. Remove paths or content you cannot share.
     validations:
       required: true
   - type: input
