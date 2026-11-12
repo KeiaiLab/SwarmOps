@@ -839,11 +839,14 @@ impl Stats {
     ///  a  b     c       d      a, b in [0, 10 s); c in [10, 20 s); d in [20, 30 s)
     /// ```
     pub fn per_window(records: &[Vec<LandRecord>], window: Duration) -> Vec<(Window, Stats)> {
-        // 1. How many windows: up to the last record's.
-        let width = window.as_micros();
-        let index = |record: &LandRecord| u128::from(record.at_us) / width;
-        let last = records.iter().flatten().map(index).max();
-        let (Some(last), false) = (last, window.is_zero()) else {
+        // 1. How many windows: up to the last record's. A window of 0 has none, before any
+        //    division by its width.
+        if window.is_zero() {
+            return Vec::new();
+        }
+        let width = window.as_nanos();
+        let index = |record: &LandRecord| u128::from(record.at_us) * 1_000 / width;
+        let Some(last) = records.iter().flatten().map(index).max() else {
             return Vec::new();
         };
 
@@ -2094,6 +2097,12 @@ mod tests {
 
         // 4. No record, no window.
         assert_eq!(Stats::per_window(&[Vec::new()], TEN_S), []);
+    }
+
+    /// A window of 0 cuts a run into no windows, as its doc says, rather than dividing by 0.
+    #[test]
+    fn a_window_of_zero_gives_none() {
+        assert_eq!(Stats::per_window(&run(), Duration::ZERO), []);
     }
 
     /// The window an attempt that ended neither landed nor retryable began in is flagged, and
