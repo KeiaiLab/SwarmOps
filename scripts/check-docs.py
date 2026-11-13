@@ -2533,9 +2533,14 @@ SwarmOps is a git replacement for nobody; the best.
 | G2 | every 2 s |
 | G3 | 9 lands/s ("Perf", the page title) |
 | G4 | 3 ms ("M0 fsync") |
+| G5 | 6 ms ("M0 fsync lat") |
+| G6 | 7 ms ([perf.md](perf.md#nowhere)) |
 
 It lands in
 3.5 ms. A cited 4 ms ("M0 fsync").
+
+A sentence joined to a cited row by 8 ms
+| G7 | 9 ms ("M0 fsync") |
 """,
     PERF: "# Perf\n\n## M0 fsync latency\n",
     "docs/pages.md": SELFTEST_PAGE,
@@ -2608,6 +2613,12 @@ SELFTEST_NEEDLES = (
     (GOALS, "every 2 s", Rule.PERF_CITATIONS),
     (GOALS, "page title", Rule.PERF_CITATIONS),
     (GOALS, "3.5 ms", Rule.PERF_CITATIONS),
+    # A quote that stops inside a title's word, a perf.md anchor that does not exist, and a
+    # sentence the next line's cited row would join if rows were not blanked first.
+    (GOALS, "fsync lat", Rule.PERF_CITATIONS),
+    (GOALS, "#nowhere", Rule.PERF_CITATIONS),
+    (GOALS, "#nowhere", Rule.LINKS),
+    (GOALS, "by 8 ms", Rule.PERF_CITATIONS),
 )
 
 # The empty tree: every input a layout rule needs is missing, which is a finding.
