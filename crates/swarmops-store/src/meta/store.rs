@@ -391,10 +391,10 @@ impl MetaStore {
     /// its own (so the journal and the index lay out their files there as they would in
     /// `meta/`), made durable, and renamed to `meta/` last, which syncs the store root. A crash
     /// before the rename leaves no `meta/`: [`MetaStore::open`] refuses the store with
-    /// [`StoreError::Format`], and the next create removes what is left of `meta.tmp/` and
-    /// starts over. That removal, and the one of the emptied `meta.tmp/` after the rename, go
-    /// through `std::fs`: [`FsOps`] removes no directories. Two creates of one store at once
-    /// are not supported.
+    /// [`StoreError::Format`], and the next create removes what is left of `meta.tmp/`
+    /// ([`FsOps::remove_dir_all`], so that the fault doubles reach it) and starts over. The look
+    /// for it, and the removal of the emptied `meta.tmp/` after the rename, which is best effort,
+    /// go through `std::fs`. Two creates of one store at once are not supported.
     pub fn create_with_fs(dir: &Utf8Path, fs: Arc<dyn FsOps>) -> Result<MetaStore, StoreError> {
         Self::create_in(Layout::new(dir), fs)
     }
@@ -411,8 +411,7 @@ impl MetaStore {
         let staging = dir.join(STAGING);
         if std::fs::exists(&staging).map_err(|e| fs.locate(FileOp::Stat, &staging, e))? {
             // What a create that crashed left behind: no part of a store yet.
-            std::fs::remove_dir_all(&staging)
-                .map_err(|e| fs.locate(FileOp::RemoveDirAll, &staging, e))?;
+            fs.remove_dir_all(staging.as_std_path())?;
         }
         let staged = Layout::with_format(staging.as_path(), layout.format());
         Journal::create_in(&staged, &fs)?.set_ckpt(0)?;
@@ -1895,4 +1894,52 @@ fn unix_now() -> i64 {
 /// `n`, or `usize::MAX` if it does not fit (a limit that large means no limit).
 fn to_usize(n: u64) -> usize {
     usize::try_from(n).unwrap_or(usize::MAX)
+}
+
+#[cfg(all(test, feature = "test-hooks"))]
+mod tests {
+    use std::fs;
+
+    use super::*;
+    use crate::fs_ops::{FailAt, FailAtFs, FailMode, FsMethod, InjectedError};
+
+    /// A create removes what a crashed create left in `meta.tmp/` through the seam, its first
+    /// call there: a failure injected into call 1 is that removal's (`remove_dir_all meta.tmp`),
+    /// which leaves the staging as it was and makes no `meta/`. The create after it removes the
+    /// staging and makes the store.
+    #[test]
+    fn a_create_removes_old_staging_through_the_seam() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(dir.path()).unwrap();
+        let staging = root.join(STAGING);
+        let left = staging.join("meta/left");
+        fs::create_dir_all(left.parent().unwrap()).unwrap();
+        fs::write(&left, b"a crashed create's").unwrap();
+
+        // 1. The removal fails: the create fails with it, before it makes anything.
+        let fail = FailAt::new(1, FailMode::Once, InjectedError::Enospc);
+        let failing = Arc::new(FailAtFs::new(RealFs, fail));
+        let fs_ops = Arc::clone(&failing) as Arc<dyn FsOps>;
+        let Err(StoreError::Io(failure)) = MetaStore::create_with_fs(root, fs_ops) else {
+            panic!("the create's first call fails");
+        };
+        assert_eq!(
+            (failure.op, failure.file.as_deref(), failure.raw_os_error()),
+            (FileOp::RemoveDirAll, Some(Utf8Path::new(STAGING)), Some(28))
+        );
+        assert_eq!(
+            failing.failed_calls(),
+            [(FsMethod::Remove, staging.clone().into_std_path_buf())]
+        );
+        assert!(
+            left.exists(),
+            "the staging is as the crashed create left it"
+        );
+        assert!(!root.join("meta").exists(), "no meta/ was made");
+
+        // 2. The next create removes it and makes the store.
+        MetaStore::create_with_fs(root, failing).unwrap();
+        assert!(!left.exists(), "the crashed create's file is gone");
+        assert!(root.join("meta/lock").exists(), "the store is made");
+    }
 }

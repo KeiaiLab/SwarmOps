@@ -10,7 +10,8 @@
 //! - [`HoldThenFail`]: the real filesystem, holding one `append_durable` between its write and
 //!   its flush until the test lets it go ([`hold`]: [`Hold`] and [`Held`]), then failing it.
 //!
-//! Each names a call's method with [`FsMethod`], the store's one list of the 14. The store's
+//! Each names a call's method with [`FsMethod`], the store's one list of the 14 (a directory's
+//! `remove_dir_all` is a `remove` there). The store's
 //! tests and benches use them, and so do the repository's, the operations' and the CLI's tests
 //! and the journal's fuzz target.
 
@@ -159,6 +160,10 @@ impl<W: Watch, F: FsOps> FsOps for Watched<W, F> {
 
     fn remove(&self, p: &Path) -> io::Result<()> {
         self.around(FsMethod::Remove, &[p], || self.1.remove(p))
+    }
+
+    fn remove_dir_all(&self, p: &Path) -> io::Result<()> {
+        self.around(FsMethod::Remove, &[p], || self.1.remove_dir_all(p))
     }
 
     fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
@@ -439,6 +444,10 @@ impl FsOps for NoSyncFs {
         RealFs::new().remove(p)
     }
 
+    fn remove_dir_all(&self, p: &Path) -> io::Result<()> {
+        RealFs::new().remove_dir_all(p)
+    }
+
     fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
         RealFs::new().append(path, bytes)
     }
@@ -666,6 +675,10 @@ impl<F: FsOps> FsOps for HoldThenFail<F> {
 
     fn remove(&self, p: &Path) -> io::Result<()> {
         self.fs.remove(p)
+    }
+
+    fn remove_dir_all(&self, p: &Path) -> io::Result<()> {
+        self.fs.remove_dir_all(p)
     }
 
     fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
@@ -918,6 +931,58 @@ mod tests {
         assert_eq!(reached, *called.lock().unwrap());
         let methods: std::collections::BTreeSet<FsMethod> = reached.into_iter().collect();
         assert_eq!(methods.len(), FsMethod::ALL.len(), "{methods:?}");
+    }
+
+    /// A directory with a file and a directory in it, under `dir`.
+    fn staged(dir: &Path) -> PathBuf {
+        let staging = dir.join("meta.tmp");
+        fs::create_dir_all(staging.join("meta/idx")).unwrap();
+        fs::write(staging.join("meta/journal.log"), b"a frame").unwrap();
+        staging
+    }
+
+    /// Every double removes a directory and all it holds as `RealFs` does, and fails on a
+    /// missing one as it does (`NotFound`). A watched filesystem shows the call to its watcher
+    /// as a `remove` of the directory, so that a watcher that fails it fails it before anything
+    /// goes.
+    #[test]
+    fn every_double_removes_a_directory_as_real_fs_does() {
+        let (held, _test) = HoldThenFail::new("no-such-file", RealFs::new());
+        let doubles: [(&str, Box<dyn FsOps>); 6] = [
+            ("RealFs", Box::new(RealFs::new())),
+            ("NoSyncFs", Box::new(NoSyncFs)),
+            ("Watched", Box::new(Watched(Methods::default(), NoSyncFs))),
+            ("HoldThenFail", Box::new(held)),
+            ("FsyncModelFs", Box::new(crate::faults::FsyncModelFs::new())),
+            (
+                "ImageRecordingFs",
+                Box::new(crate::power::ImageRecordingFs::new()),
+            ),
+        ];
+        for (name, fs) in &doubles {
+            let dir = tempfile::tempdir().unwrap();
+            let staging = staged(dir.path());
+            fs.remove_dir_all(&staging).unwrap();
+            assert!(!staging.exists(), "{name}: the tree is gone");
+            let missing = fs.remove_dir_all(&staging).unwrap_err();
+            assert_eq!(missing.kind(), io::ErrorKind::NotFound, "{name}: {missing}");
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let staging = staged(dir.path());
+        let watched = Watched(Methods::default(), RealFs::new());
+        watched.remove_dir_all(&staging).unwrap();
+        assert_eq!(*watched.0.0.lock().unwrap(), [FsMethod::Remove]);
+
+        let staging = staged(dir.path());
+        let failing =
+            FailingFs::new(|method, path| method == "remove" && path.ends_with("meta.tmp"));
+        let failed = failing.remove_dir_all(&staging).unwrap_err();
+        assert_eq!(
+            failed.to_string(),
+            format!("injected failure: remove {}", staging.display())
+        );
+        assert!(staging.join("meta/journal.log").exists(), "nothing went");
     }
 
     /// The double opens the directory that `RealFs` syncs after a replace or a rename into it,

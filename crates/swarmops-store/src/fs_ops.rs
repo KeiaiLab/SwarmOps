@@ -143,7 +143,8 @@ macro_rules! fs_methods {
         /// One method of [`FsOps`], by name: the seam's vocabulary, which every double classifies
         /// calls with ([`FsMethod::is_mutating`], [`FsMethod::flushes`]) so that one list names
         /// the 14 methods. It compares equal to the method's name ([`FsMethod::as_str`]), so a
-        /// test's `call.method == "append"` reads as before.
+        /// test's `call.method == "append"` reads as before. [`FsOps::remove_dir_all`] has no
+        /// name of its own here: the doubles count and fail it as a `remove` of its directory.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
         #[non_exhaustive]
         pub enum FsMethod {
@@ -177,7 +178,7 @@ fs_methods! {
     Read = "read",
     /// [`FsOps::exists`].
     Exists = "exists",
-    /// [`FsOps::remove`].
+    /// [`FsOps::remove`], and [`FsOps::remove_dir_all`] of a directory.
     Remove = "remove",
     /// [`FsOps::append_durable`].
     AppendDurable = "append_durable",
@@ -327,6 +328,16 @@ pub trait FsOps: Send + Sync {
     /// Removes file `p`.
     fn remove(&self, p: &Path) -> io::Result<()>;
 
+    /// Removes directory `p` and all it holds, flushing nothing; `NotFound` if `p` is missing.
+    /// A crash on the way leaves part of it. The doubles count and fail it as a `remove` of `p`
+    /// ([`FsMethod::Remove`]); a failure is named `remove_dir_all` ([`FileOp::RemoveDirAll`]).
+    ///
+    /// The default removes it on the real filesystem, as the store did before the seam had this
+    /// method; every wrapper of this crate and of the test kit forwards it.
+    fn remove_dir_all(&self, p: &Path) -> io::Result<()> {
+        fs::remove_dir_all(p)
+    }
+
     /// Appends `bytes` to file `path` (created if missing) and flushes the file's data to
     /// stable storage (`sync_data`). Returns the file's length before the append: the
     /// offset at which `bytes` now start, provided nobody else appends at the same time.
@@ -428,6 +439,10 @@ impl FsOps for RealFs {
 
     fn remove(&self, p: &Path) -> io::Result<()> {
         fs::remove_file(p)
+    }
+
+    fn remove_dir_all(&self, p: &Path) -> io::Result<()> {
+        fs::remove_dir_all(p)
     }
 
     fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
@@ -785,6 +800,12 @@ impl StoreFs {
         (self.fs.remove(p)).map_err(|e| self.failed(FsMethod::Remove, p, e))
     }
 
+    /// [`FsOps::remove_dir_all`]; a failure is a [`FileOp::RemoveDirAll`].
+    pub fn remove_dir_all(&self, p: impl AsRef<Path>) -> Result<(), IoFailure> {
+        let p = p.as_ref();
+        (self.fs.remove_dir_all(p)).map_err(|e| self.locate(FileOp::RemoveDirAll, p, e))
+    }
+
     /// [`FsOps::append_durable`].
     pub fn append_durable(&self, path: impl AsRef<Path>, bytes: &[u8]) -> Result<u64, IoFailure> {
         let path = path.as_ref();
@@ -912,6 +933,10 @@ impl<F: FsOps + ?Sized> FsOps for Arc<F> {
         (**self).remove(p)
     }
 
+    fn remove_dir_all(&self, p: &Path) -> io::Result<()> {
+        (**self).remove_dir_all(p)
+    }
+
     fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
         (**self).append_durable(path, bytes)
     }
@@ -977,6 +1002,10 @@ impl<F: FsOps + ?Sized> FsOps for Box<F> {
 
     fn remove(&self, p: &Path) -> io::Result<()> {
         (**self).remove(p)
+    }
+
+    fn remove_dir_all(&self, p: &Path) -> io::Result<()> {
+        (**self).remove_dir_all(p)
     }
 
     fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
@@ -1208,6 +1237,11 @@ impl<F: FsOps> FsOps for CrashAtFs<F> {
     fn remove(&self, p: &Path) -> io::Result<()> {
         self.tick();
         self.inner.remove(p)
+    }
+
+    fn remove_dir_all(&self, p: &Path) -> io::Result<()> {
+        self.tick();
+        self.inner.remove_dir_all(p)
     }
 
     fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
@@ -1482,6 +1516,10 @@ impl<F: FsOps> FsOps for FailAtFs<F> {
         self.call(FsMethod::Remove, p, || self.inner.remove(p))
     }
 
+    fn remove_dir_all(&self, p: &Path) -> io::Result<()> {
+        self.call(FsMethod::Remove, p, || self.inner.remove_dir_all(p))
+    }
+
     fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
         self.call(FsMethod::AppendDurable, path, || {
             self.inner.append_durable(path, bytes)
@@ -1747,6 +1785,57 @@ mod tests {
         );
         assert_eq!(counter.calls(), 7, "locating makes no call");
         assert_eq!(store_fs.root(), root);
+    }
+
+    /// `StoreFs::remove_dir_all` forwards one call, which the doubles count and fail as a
+    /// `remove` of the directory, before anything goes, whatever the injected errno; its failure
+    /// is named `remove_dir_all`, on the directory relative to the store's root. Not failed, it
+    /// removes the directory and all it holds, and a missing one is `NotFound`.
+    #[test]
+    fn store_fs_removes_a_directory_through_the_seam() {
+        use crate::error::FileOp;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(dir.path()).unwrap();
+        let staging = root.join("meta.tmp");
+        let held = staging.join("meta/idx/ids.col");
+        fs::create_dir_all(held.parent().unwrap()).unwrap();
+        fs::write(&held, b"x").unwrap();
+
+        // 1. Failed: one call, a `remove` to the doubles, and nothing removed.
+        for (error, errno) in [(InjectedError::Eio, 5), (InjectedError::Enospc, 28)] {
+            let fail = FailAt::new(1, FailMode::Once, error);
+            let failing = Arc::new(FailAtFs::new(RealFs, fail));
+            let counter = Arc::new(CrashAtFs::new(Arc::clone(&failing), 0));
+            let store_fs = StoreFs::new(Arc::clone(&counter) as Arc<dyn FsOps>, root);
+            let failure = store_fs.remove_dir_all(&staging).unwrap_err();
+            assert_eq!(
+                (failure.op, failure.file.as_deref(), failure.raw_os_error()),
+                (
+                    FileOp::RemoveDirAll,
+                    Some(Utf8Path::new("meta.tmp")),
+                    Some(errno)
+                )
+            );
+            assert_eq!(
+                failing.failed_calls(),
+                [(FsMethod::Remove, staging.clone().into_std_path_buf())]
+            );
+            assert_eq!(counter.calls(), 1, "one call");
+            assert!(held.exists(), "it failed before it removed anything");
+        }
+
+        // 2. Not failed: the tree goes, in one call; then there is none to remove.
+        let counter = Arc::new(CrashAtFs::new(RealFs, 0));
+        let store_fs = StoreFs::new(Arc::clone(&counter) as Arc<dyn FsOps>, root);
+        store_fs.remove_dir_all(&staging).unwrap();
+        assert!(!staging.exists(), "the directory and all it held are gone");
+        assert_eq!(counter.calls(), 1, "one call");
+        let missing = store_fs.remove_dir_all(&staging).unwrap_err();
+        assert_eq!(
+            (missing.op, missing.raw_os_error()),
+            (FileOp::RemoveDirAll, Some(2))
+        );
     }
 
     /// `StoreFs::exists`, which the test above runs only where it succeeds, names its failure as

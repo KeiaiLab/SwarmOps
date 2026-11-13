@@ -374,6 +374,14 @@ impl<F: FsOps> FsOps for FsyncModelFs<F> {
         Ok(())
     }
 
+    fn remove_dir_all(&self, p: &Path) -> io::Result<()> {
+        let result = self.inner.remove_dir_all(p);
+
+        // The model forgets the files that went, also those a failed removal took.
+        (self.state().files).retain(|file, _| !file.starts_with(p) || file.exists());
+        result
+    }
+
     fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
         self.flush(FsMethod::AppendDurable, path, Some(path), || {
             self.inner.append_durable(path, bytes)

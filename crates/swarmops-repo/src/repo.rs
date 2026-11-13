@@ -758,12 +758,12 @@ fn made_in(layout: &Layout, fs: &StoreFs) -> Result<bool, IoFailure> {
 /// Sets the `meta/` of a crashed create of another format aside as `meta.tmp/` (renamed whole,
 /// the root synced), which [`MetaStore::create_in`] removes as the staging a crashed create
 /// leaves: without `FORMAT` it is no part of a store. A `meta.tmp/` there already, an older
-/// create's staging, goes first. A crash on the way leaves a `meta/` that is whole, or none.
+/// create's staging, goes first, through the seam (`FsOps::remove_dir_all`), so that the fault
+/// doubles reach its removal. A crash on the way leaves a `meta/` that is whole, or none.
 fn set_aside(layout: &Layout, fs: &StoreFs) -> Result<(), IoFailure> {
     let staging = layout.root().join(META_STAGING);
     if std::fs::exists(&staging).map_err(|e| fs.locate(FileOp::Stat, &staging, e))? {
-        std::fs::remove_dir_all(&staging)
-            .map_err(|e| fs.locate(FileOp::RemoveDirAll, &staging, e))?;
+        fs.remove_dir_all(staging.as_std_path())?;
     }
     fs.rename_durable(layout.meta_dir().as_std_path(), staging.as_std_path())
 }
@@ -998,4 +998,74 @@ fn new_repo_id() -> String {
     let high = RandomState::new().hash_one((nanos, pid, 0_u8));
     let low = RandomState::new().hash_one((nanos, pid, 1_u8));
     format!("{high:016x}{low:016x}")
+}
+
+#[cfg(all(test, feature = "test-hooks"))]
+mod tests {
+    use swarmops_store::{FailAt, FailAtFs, FailMode, FsMethod, InjectedError, RealFs};
+
+    use super::*;
+
+    /// How many calls a create is given to reach its removal of the older staging: the 257
+    /// directories of `objects/` come first.
+    const CALLS: u64 = 400;
+
+    /// A create that finds the `meta/` of a crashed create of another format, and an older
+    /// `meta.tmp/` beside it, removes that staging through the seam before it sets `meta/` aside
+    /// there: failing each call of the create in turn, one of them is that removal, a `remove`
+    /// of `meta.tmp` to the fault double, which fails the create as `remove_dir_all meta.tmp`
+    /// and leaves the staging and the other format's `meta/` as they were.
+    #[test]
+    fn set_aside_removes_old_staging_through_the_seam() {
+        // 1. A FORMAT 2 create that crashed before FORMAT, and an older create's staging.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Utf8Path::from_path(dir.path()).unwrap().join("store");
+        LocalRepo::create_as(&store, "r", StoreFormat::V2).unwrap();
+        let root = store.canonicalize_utf8().unwrap();
+        let theirs = Layout::with_format(root.clone(), StoreFormat::V2);
+        std::fs::remove_file(theirs.format_file()).unwrap();
+        let staging = root.join(META_STAGING);
+        let left = staging.join("meta/left");
+        std::fs::create_dir_all(left.parent().unwrap()).unwrap();
+        std::fs::write(&left, b"an older create's").unwrap();
+
+        // 2. A FORMAT 1 create, each call failed in turn, until the failed call is the removal.
+        let mut removal = None;
+        for at in 1..=CALLS {
+            let fail = FailAt::new(at, FailMode::Once, InjectedError::Enospc);
+            let failing = Arc::new(FailAtFs::new(RealFs::new(), fail));
+            let fs = Arc::clone(&failing) as Arc<dyn FsOps>;
+            let failed = LocalRepo::create_with_fs_as(&store, "r", StoreFormat::V1, fs);
+            let wanted = (FsMethod::Remove, staging.clone().into_std_path_buf());
+            if failing.failed_calls() == [wanted] {
+                removal = Some(failed.err().expect("its removal failed"));
+                break;
+            }
+            assert!(failed.is_err(), "call {at} failed, and the create with it");
+        }
+
+        // 3. That create failed as the removal did, and changed neither directory.
+        let failed = removal.expect("no call of the create removes the older staging");
+        let RepoError::Store(StoreError::Io(failure)) = failed else {
+            panic!("an I/O failure: {failed}");
+        };
+        assert_eq!(
+            (failure.op, failure.file.as_deref(), failure.raw_os_error()),
+            (
+                FileOp::RemoveDirAll,
+                Some(Utf8Path::new(META_STAGING)),
+                Some(28)
+            )
+        );
+        assert!(left.exists(), "the older staging is as it was");
+        assert!(
+            theirs.journal_log().exists(),
+            "the other format's meta/ too"
+        );
+
+        // 4. Not failed, the create sets the other format's meta/ aside and makes its own.
+        LocalRepo::create_as(&store, "r", StoreFormat::V1).unwrap();
+        assert!(!left.exists(), "the older staging is gone");
+        assert!(!theirs.journal_log().exists(), "FORMAT 2's journal is gone");
+    }
 }

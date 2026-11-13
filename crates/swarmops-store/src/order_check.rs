@@ -1493,6 +1493,23 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
         result
     }
 
+    fn remove_dir_all(&self, p: &Path) -> io::Result<()> {
+        let result = self.inner.remove_dir_all(p);
+
+        // Whatever it removed is gone from what the checker follows; a failure may leave part.
+        let mut state = self.state();
+        state
+            .files
+            .retain(|file, _| !file.starts_with(p) || file.exists());
+        state
+            .dirs
+            .retain(|dir, _| !dir.starts_with(p) || dir.exists());
+        if !p.exists() {
+            state.pend(p, Entry::Removed);
+        }
+        result
+    }
+
     fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
         let violation = {
             let mut state = self.state();

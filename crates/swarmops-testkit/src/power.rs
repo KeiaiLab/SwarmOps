@@ -17,7 +17,8 @@
 //!   `append_durable`, `truncate`, `write_durable_temp` and `atomic_replace`); and of the bytes
 //!   written since, as a [`Chooser`] picks ([`Keep`]): none, a prefix up to a 512 B or 4 KiB
 //!   boundary, all, the length but zeros, or all but the first 512 B sector, zeros there.
-//! - Directory entries (a name created, linked, renamed or removed): the changes a later
+//! - Directory entries (a name created, linked, renamed or removed, a `remove_dir_all` removing
+//!   one name a step): the changes a later
 //!   `fsync_dir` of their directory covered, and a prefix of the rest in the order they were
 //!   made, as the chooser picks: each directory's changes reach the disk in order, and
 //!   directories are independent. A rename is a change of its target's directory, all or nothing.
@@ -72,6 +73,9 @@ pub enum RecordedCall {
     FsyncDir(PathBuf),
     /// `remove` of the file.
     Remove(PathBuf),
+    /// `remove_dir_all`: every path it removed, in the order it removed them, a directory after
+    /// all it held, the directory it was asked to remove last.
+    RemoveDirAll(Vec<PathBuf>),
     /// `append_durable`: the bytes it appended (then synced).
     AppendDurable {
         /// The file it appended to, made if missing.
@@ -122,7 +126,7 @@ impl RecordedCall {
             RecordedCall::WriteDurableTemp { .. } => FsMethod::WriteDurableTemp,
             RecordedCall::LinkNoclobber { .. } => FsMethod::LinkNoclobber,
             RecordedCall::FsyncDir(_) => FsMethod::FsyncDir,
-            RecordedCall::Remove(_) => FsMethod::Remove,
+            RecordedCall::Remove(_) | RecordedCall::RemoveDirAll(_) => FsMethod::Remove,
             RecordedCall::AppendDurable { .. } => FsMethod::AppendDurable,
             RecordedCall::Truncate { .. } => FsMethod::Truncate,
             RecordedCall::AtomicReplace { .. } => FsMethod::AtomicReplace,
@@ -266,6 +270,14 @@ impl FsOps for ImageRecordingFs {
         })
     }
 
+    fn remove_dir_all(&self, p: &Path) -> io::Result<()> {
+        self.run(FsMethod::Remove, || {
+            let mut removed = Vec::new();
+            remove_tree(p, &mut removed)?;
+            Ok(((), Some(RecordedCall::RemoveDirAll(removed))))
+        })
+    }
+
     fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
         self.run(FsMethod::AppendDurable, || {
             let offset = append_to(path, bytes)?;
@@ -339,6 +351,28 @@ impl FsOps for ImageRecordingFs {
         let n = self.lead_wait.load(Ordering::SeqCst);
         (n > 0).then_some(n)
     }
+}
+
+/// Removes directory `dir` and all it holds, in name order, a directory after all it held, and
+/// adds each path to `removed` as it goes.
+fn remove_tree(dir: &Path, removed: &mut Vec<PathBuf>) -> io::Result<()> {
+    let mut entries = fs::read_dir(dir)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<io::Result<Vec<PathBuf>>>()?;
+    entries.sort();
+
+    for path in entries {
+        if fs::symlink_metadata(&path)?.is_dir() {
+            remove_tree(&path, removed)?;
+            continue;
+        }
+        fs::remove_file(&path)?;
+        removed.push(path);
+    }
+
+    fs::remove_dir(dir)?;
+    removed.push(dir.to_owned());
+    Ok(())
 }
 
 /// Appends `bytes` to `path` (created if missing), no flush; the length before.
@@ -714,6 +748,13 @@ impl Builder<'_> {
             RecordedCall::Remove(path) => {
                 let remove = self.remove(path);
                 self.step(format!("{method} {}", self.rel(path)), vec![remove]);
+            }
+            RecordedCall::RemoveDirAll(removed) => {
+                // One step a path: the power may fail with part of the tree gone.
+                for path in removed {
+                    let remove = self.remove(path);
+                    self.step(format!("remove_dir_all {}", self.rel(path)), vec![remove]);
+                }
             }
             RecordedCall::AppendDurable { path, bytes } => {
                 let inode = self.append(path, bytes, method);
@@ -1172,4 +1213,101 @@ impl Image {
 /// `n`, a length in memory, which fits.
 fn to_usize(n: u64) -> usize {
     usize::try_from(n).expect("a length in memory fits in usize")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use camino::Utf8Path;
+    use swarmops_store::{MetaStore, StoreError};
+
+    use super::*;
+    use crate::fs::NoSyncFs;
+
+    /// The steps a `remove_dir_all` of the staging makes, by their labels.
+    const REMOVALS: [&str; 4] = [
+        "remove_dir_all store/meta.tmp/meta/idx/ids.col",
+        "remove_dir_all store/meta.tmp/meta/idx",
+        "remove_dir_all store/meta.tmp/meta",
+        "remove_dir_all store/meta.tmp",
+    ];
+
+    /// A create that removes a crashed create's staging is recorded with that removal, one step
+    /// a path, a directory after all it held: the power may fail with part of the staging gone.
+    /// An image that keeps every change (what a process crash leaves) lacks the paths removed so
+    /// far, and one that loses every change no fsync covered still holds them all. On every
+    /// image, of three seeds at every cut, the store opens if `meta/` is there and a create
+    /// makes it if not: the removal leaves nothing a create cannot start over from.
+    #[test]
+    fn the_images_reach_the_removal_of_old_staging() {
+        // 1. A crashed create's staging, made durable, then a create over it, all recorded.
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        let root = base.join("store");
+        let recorder = Arc::new(ImageRecordingFs::new());
+        let staged = root.join("meta.tmp/meta/idx");
+        recorder.create_dir_all(&staged).unwrap();
+        recorder
+            .append_durable(&staged.join("ids.col"), b"left")
+            .unwrap();
+        let made = [
+            staged.clone(),
+            root.join("meta.tmp/meta"),
+            root.join("meta.tmp"),
+            root.clone(),
+            base.to_owned(),
+        ];
+        for synced in &made {
+            recorder.fsync_dir(synced).unwrap();
+        }
+        recorder.mark("crashed");
+        let store = Utf8Path::from_path(&root).unwrap();
+        MetaStore::create_with_fs(store, Arc::clone(&recorder) as Arc<dyn FsOps>).unwrap();
+
+        // 2. The removal's steps follow the mark, in this order.
+        let timeline = Timeline::new(base, &recorder.calls());
+        let first = timeline.mark("crashed");
+        let labels: Vec<&str> = (first..first + REMOVALS.len())
+            .map(|step| timeline.step(step).label.as_str())
+            .collect();
+        assert_eq!(labels, REMOVALS);
+
+        // 3. Part-way: everything kept, the paths removed so far are gone; everything not
+        //    covered lost, none is.
+        let holds = |image: &Image, path: &str| {
+            let path = Path::new(path);
+            image.file(path).is_some() || image.dirs.iter().any(|dir| dir == path)
+        };
+        for gone in 0..=REMOVALS.len() {
+            let cut = first + gone;
+            let most = timeline.image(cut, &mut Seeded::new(1, cut));
+            let least = timeline.image(cut, &mut Seeded::new(0, cut));
+            for (n, label) in REMOVALS.iter().enumerate() {
+                let path = label.trim_start_matches("remove_dir_all ");
+                assert_eq!(holds(&most, path), n >= gone, "cut {cut}: {path}");
+                assert!(holds(&least, path), "cut {cut}: {path} was durable");
+            }
+        }
+
+        // 4. Every image is one a create starts over from, or holds the store.
+        for cut in 0..=timeline.steps() {
+            for seed in [0, 1, 7] {
+                let image = timeline.image(cut, &mut Seeded::new(seed, cut));
+                let after = tempfile::tempdir().unwrap();
+                image.materialize(after.path()).unwrap();
+                let root = after.path().join("store");
+                let store = Utf8Path::from_path(&root).unwrap();
+                let what = format!("cut {cut}, seed {seed}:\n{}", image.describe());
+                let made: Result<MetaStore, StoreError> = if root.join("meta").exists() {
+                    MetaStore::open_with_fs(store, Arc::new(NoSyncFs))
+                } else {
+                    MetaStore::create_with_fs(store, Arc::new(NoSyncFs))
+                };
+                if let Err(e) = made {
+                    panic!("{what}: {e}");
+                }
+            }
+        }
+    }
 }
