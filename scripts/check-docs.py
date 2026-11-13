@@ -1095,7 +1095,7 @@ FIGURE = re.compile(rf"(?<![\w.,])[0-9][0-9,]*(?:\.[0-9]+)?\s?(?:{TIME_UNIT}|{RA
 PERF_LINK = re.compile(r"perf\.md#([^\s)>\"']+)")
 QUOTED = re.compile(r'"([^"]+)"|\u201c([^\u201d]+)\u201d')
 
-# The changelog's release sections and their compare links (RELEASE.md, step 6).
+# The changelog's release sections and their compare links (RELEASE.md, step 4).
 CHANGELOG = "CHANGELOG.md"
 CHANGELOG_REPO = "https://github.com/KeiaiLab/SwarmOps"
 UNRELEASED = "Unreleased"
