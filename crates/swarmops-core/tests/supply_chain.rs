@@ -628,7 +628,10 @@ fn pins(text: &str) -> BTreeSet<(String, String)> {
 /// Whether `name` reads as an image's `name:tag`, not as a pattern or a placeholder that
 /// mentions the digest marker (`(?P<image>\S+@sha256:...`).
 fn is_image_name(name: &str) -> bool {
-    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || ":./_-".contains(c))
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || ":./_-".contains(c))
 }
 
 /// Whether `digest` is a SHA-256 in hex: 64 lowercase hex digits.
@@ -769,7 +772,8 @@ fn dependabot_moves_every_image_digest() {
 fn the_image_check_finds_each_gap() {
     let a = "a".repeat(64);
     let b = "b".repeat(64);
-    let source = format!("FROM debian:12{DIGEST}{a} AS install-deb\nFROM ubuntu:24.04{DIGEST}{b}\n");
+    let source =
+        format!("FROM debian:12{DIGEST}{a} AS install-deb\nFROM ubuntu:24.04{DIGEST}{b}\n");
     let file = |text: String| vec![("x.yml".to_string(), text)];
 
     // 1. Files that agree, read through quotes and from a comment.
@@ -778,7 +782,10 @@ fn the_image_check_finds_each_gap() {
          # debian:12{DIGEST}{a}\nLINE = r\"FROM (?P<image>\\S+{DIGEST}[0-9a-f]{{64}}) AS\"\n\
          # 'FROM <image>{DIGEST}<digest> AS'\n"
     );
-    assert_eq!(image_problems(&source, &file(agreeing)), Vec::<String>::new());
+    assert_eq!(
+        image_problems(&source, &file(agreeing)),
+        Vec::<String>::new()
+    );
 
     // A script's `image: str` is a type annotation, not a job's image.
     let script = vec![("x.py".to_string(), "    image: str = \"\"\n".to_string())];
@@ -787,10 +794,16 @@ fn the_image_check_finds_each_gap() {
     // 2. Each gap is found.
     let gaps = [
         (source.clone(), "      image: ubuntu:24.04\n".to_string()),
-        (source.clone(), format!("      image: ubuntu:24.04{DIGEST}{a}\n")),
+        (
+            source.clone(),
+            format!("      image: ubuntu:24.04{DIGEST}{a}\n"),
+        ),
         (source.clone(), format!("# ubuntu:24.04{DIGEST}{a}\n")),
         (source.clone(), format!("X = 'almalinux:9{DIGEST}{a}'\n")),
-        (format!("{source}FROM debian:12{DIGEST}{b} AS other\n"), String::new()),
+        (
+            format!("{source}FROM debian:12{DIGEST}{b} AS other\n"),
+            String::new(),
+        ),
         (format!("{source}FROM python:3.12\n"), String::new()),
     ];
     for (source, text) in gaps {
@@ -851,15 +864,22 @@ fn release_problems(workflow: &str) -> Vec<String> {
     // 1. The jobs that write.
     let mut writers = 0;
     for (id, lines) in jobs(workflow) {
-        let writes = shell_lines(&lines)
-            .iter()
-            .any(|line| line.split('#').next().unwrap_or_default().trim_end().ends_with(": write"));
+        let writes = shell_lines(&lines).iter().any(|line| {
+            line.split('#')
+                .next()
+                .unwrap_or_default()
+                .trim_end()
+                .ends_with(": write")
+        });
         if !writes {
             continue;
         }
         writers += 1;
         if !lines.lines().any(|line| line == TAG_PUSH_ONLY) {
-            problems.push(format!("job `{id}` writes without `{}`", TAG_PUSH_ONLY.trim()));
+            problems.push(format!(
+                "job `{id}` writes without `{}`",
+                TAG_PUSH_ONLY.trim()
+            ));
         }
     }
     if writers == 0 {
@@ -931,7 +951,10 @@ fn the_release_check_finds_each_gap() {
         workflow.replace(&format!("    {condition}\n"), ""),
         workflow.replace(condition, "if: github.event_name == 'push'"),
         workflow.replace("permissions: {}", "permissions:\n  contents: write"),
-        workflow.replace("    tags: [\"v*\"]", "    tags: [\"v*\"]\n    branches: [stable]"),
+        workflow.replace(
+            "    tags: [\"v*\"]",
+            "    tags: [\"v*\"]\n    branches: [stable]",
+        ),
         workflow.replace("${{ github.event_name }}-", ""),
         workflow.replace("contents: write # why", "contents: read"),
     ];
