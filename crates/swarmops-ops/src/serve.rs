@@ -191,15 +191,18 @@ pub fn run(invocation: &ServeInvocation) -> Result<Served, OpError> {
 /// Runs `reply`, which serves the connection's response to its end, and then `step`, the view
 /// work the connection's commits left (the FORMAT 3 design, amendment 2026-11-11 G6): the reply
 /// is never held for it. A step's error goes to `log` and nowhere else, so it changes neither
-/// what `reply` gave nor the connection's exit.
+/// what `reply` gave nor the connection's exit; `redactor` masks it, since over ssh the log is
+/// the client's stderr.
 pub(crate) fn reply_then_step<T>(
     reply: impl FnOnce() -> T,
     step: impl FnOnce() -> Result<(), OpError>,
+    redactor: &guard::Redactor,
     log: &mut impl std::io::Write,
 ) -> T {
     let reply = reply();
     if let Err(why) = step() {
-        let _ = writeln!(log, "warning: view work not stepped: {}", why.message);
+        let why = redactor.redact(&why.message);
+        let _ = writeln!(log, "warning: view work not stepped: {why}");
     }
     reply
 }
@@ -252,6 +255,7 @@ mod tests {
                 order.borrow_mut().push("step");
                 Ok(())
             },
+            &guard::Redactor::new(&[]),
             &mut log,
         );
         assert_eq!(*order.borrow(), ["reply", "step"]);
@@ -262,10 +266,34 @@ mod tests {
         let served = reply_then_step(
             || Served::new(3),
             || Err(OpError::new(ErrorCode::Busy, "the lock is held")),
+            &guard::Redactor::new(&[]),
             &mut log,
         );
         assert_eq!(served, Served::new(3));
         let logged = String::from_utf8(log).unwrap();
         assert!(logged.contains("the lock is held"), "{logged}");
+    }
+    /// A step that fails on a store that no longer opens names the store in its error; the
+    /// line logged holds the store's name and never the root's host path.
+    #[test]
+    fn a_failed_step_logs_no_host_path() {
+        // 1. A root whose `acme` is not a store.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("srv");
+        let store = camino::Utf8PathBuf::try_from(root.join("acme")).unwrap();
+        std::fs::create_dir_all(&store).unwrap();
+
+        // 2. Its step fails, and the error names the store's path.
+        let why = step_store(&store).unwrap_err();
+        assert!(why.message.contains(root.to_str().unwrap()), "{why:?}");
+
+        // 3. The line logged masks the root.
+        let redactor = guard::Redactor::new(&[root.as_path()]);
+        let mut log = Vec::new();
+        reply_then_step(|| (), || step_store(&store), &redactor, &mut log);
+        let logged = String::from_utf8(log).unwrap();
+        assert!(logged.contains("view work not stepped"), "{logged}");
+        assert!(logged.contains("<path>/acme"), "{logged}");
+        assert!(!logged.contains(dir.path().to_str().unwrap()), "{logged}");
     }
 }

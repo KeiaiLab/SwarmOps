@@ -153,6 +153,7 @@ fn serve(
             }
             Ok(())
         },
+        redactor,
         &mut std::io::stderr(),
     );
     let status = status.map_err(|e| redactor.redact_error(serve_error(e)))?;

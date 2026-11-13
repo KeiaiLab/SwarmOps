@@ -119,6 +119,7 @@ fn serve(
     let status = reply_then_step(
         || child::run(&git, Service::ReceivePack, &repo, &env),
         || step_store(store),
+        redactor,
         &mut std::io::stderr(),
     );
     let status = status.map_err(|e| redactor.redact_error(serve_error(e)))?;
