@@ -11,6 +11,7 @@ use std::ffi::OsString;
 use std::fmt::Debug;
 use std::fs;
 use std::os::unix::ffi::OsStringExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -765,6 +766,8 @@ fn puts_over_512_mib_are_refused_before_their_content_is_read() {
 /// any is read: three sparse client files of 512 MiB each, each within a put's limit, are
 /// refused at the third (`E_TOO_LARGE`, scope `commit`, its `size` theirs together with it),
 /// and nothing is written. The hint stores large contents first, to name them by id.
+/// No file is opened, let alone read: each is mode 000, so that a read would fail the commit
+/// with another error.
 #[test]
 fn a_commit_s_contents_past_1_gib_together_are_refused_before_any_is_read() {
     let (dir, _root, ops) = new_store();
@@ -773,6 +776,11 @@ fn a_commit_s_contents_past_1_gib_together_are_refused_before_any_is_read() {
         .map(|n| {
             let file = utf8(dir.path().join(format!("{n}.bin")));
             fs::File::create(&file).unwrap().set_len(limit).unwrap();
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+            assert!(
+                fs::File::open(&file).is_err(),
+                "a mode-000 file opens: run this test as a user that file modes bind, not root"
+            );
             file
         })
         .collect();
@@ -3438,6 +3446,31 @@ fn read_errors_map_to_codes() {
     }
 }
 
+/// `ls` stats every leaf it lists, for its size: a page that holds a leaf whose blob is gone
+/// from the store is `E_STORE_CORRUPT` naming the object, with `verify` as the hint; a page
+/// that does not hold that leaf still comes.
+#[test]
+fn read_tree_of_a_leaf_whose_blob_is_gone_is_corrupt() {
+    let (_dir, root, ops) = new_store();
+    let c = commit(&ops, None, vec![text("a", "kept"), text("b", "content")]);
+    let gone = hash_object(ObjectKind::Blob, b"content");
+    fs::remove_file(Layout::new(root.clone()).object_path(gone)).unwrap();
+
+    let err = expect_err(ops.read_tree(ls(&c, None)), ErrorCode::StoreCorrupt);
+    assert_eq!(
+        Value::Object(err.details.clone()),
+        json!({"object": gone.to_hex()}),
+        "{err:?}"
+    );
+    assert_eq!(err.hint.as_deref(), Some("swarmops verify"));
+
+    let mut first = ls(&c, None);
+    first.limit = 1;
+    let page = ops.read_tree(first).unwrap();
+    let names: Vec<&str> = page.entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!((names, page.truncated), (vec!["a"], true));
+}
+
 #[test]
 fn listings_page_with_cursors() {
     let (_dir, _root, ops) = new_store();
@@ -5376,6 +5409,139 @@ mod diff {
         assert_eq!(kept(2 + len(&two) - 1), all_hunks[..1]);
     }
 
+    /// A `unified` page counts the comma before each file after the first: three files that
+    /// fill it to the byte all come, and with a byte less the third waits for the next page.
+    #[test]
+    fn a_unified_page_of_three_files_counts_both_commas() {
+        let (_dir, _root, ops) = new_store();
+        let c1 = commit(&ops, None, vec![text("keep", "kept\n")]);
+        let xs = ["x1", "x2", "x3"];
+        let changes = vec![
+            text("x1", &four_kib(1)),
+            text("x2", &four_kib(2)),
+            text("x3", "small\n"),
+        ];
+        let c2 = commit(&ops, Some(&c1), changes);
+        let page = |max_bytes: usize| {
+            let mut req = diff_req(&c1, &c2, DiffFormat::Unified);
+            req.max_bytes = u64::try_from(max_bytes).unwrap();
+            ops.diff(req).unwrap()
+        };
+
+        // 1. The page's exact length: `[`, the three files, a comma between each two, `]`.
+        let whole = page(usize::MAX);
+        assert_eq!(paths_of(&whole), xs);
+        let exact = json_len(&whole.files);
+        let own: usize = (whole.files.iter())
+            .map(|file| json_len(std::slice::from_ref(file)) - 2)
+            .sum();
+        assert_eq!(exact, 2 + own + 2, "two commas");
+
+        // 2. At that length all three come; a byte short, the third does not.
+        let full = page(exact);
+        assert_eq!(
+            (paths_of(&full), full.truncated),
+            (xs.map(String::from).to_vec(), false)
+        );
+        let short = page(exact - 1);
+        assert_eq!(paths_of(&short), ["x1", "x2"]);
+        assert_eq!(
+            (short.truncated, short.cursor.as_deref()),
+            (true, Some("x2"))
+        );
+    }
+
+    /// A first file cut to fit keeps a prefix of its hunks: it stops at the first hunk that does
+    /// not fit, even where a later, smaller one would, so that no hunk is passed over.
+    #[test]
+    fn a_cut_file_keeps_a_prefix_of_its_hunks() {
+        let (_dir, _root, ops) = new_store();
+        // Three changed lines, ten unchanged ones between each two: three hunks, the second
+        // of 4 KiB and the others of a few bytes.
+        let file = |changed: [&str; 3]| {
+            let mut text = String::new();
+            for (n, line) in changed.iter().enumerate() {
+                writeln!(text, "{line}").unwrap();
+                for k in 0..10 {
+                    writeln!(text, "keep {n}.{k}").unwrap();
+                }
+            }
+            text
+        };
+        let long = "y".repeat(4_096);
+        let c1 = commit(&ops, None, vec![text("f", &file(["a", "b", "c"]))]);
+        let c2 = commit(&ops, Some(&c1), vec![text("f", &file(["A", &long, "C"]))]);
+        let page = |max_bytes: usize| {
+            let mut req = diff_req(&c1, &c2, DiffFormat::Unified);
+            req.max_bytes = u64::try_from(max_bytes).unwrap();
+            ops.diff(req).unwrap().files.remove(0)
+        };
+        let whole = page(usize::MAX);
+        let all_hunks = whole.hunks.clone().unwrap();
+        assert_eq!((all_hunks.len(), whole.hunks_truncated), (3, None));
+
+        // Room for the first hunk and the third, to the byte, and so not for the second.
+        let mut first_and_third = whole.clone();
+        first_and_third.hunks = Some(vec![all_hunks[0].clone(), all_hunks[2].clone()]);
+        first_and_third.hunks_truncated = Some(true);
+        let room = json_len(std::slice::from_ref(&first_and_third));
+        assert!(room < json_len(std::slice::from_ref(&whole)));
+
+        let cut = page(room);
+        assert_eq!(cut.hunks.as_deref(), Some(&all_hunks[..1]));
+        assert_eq!(cut.hunks_truncated, Some(true));
+    }
+
+    /// A page's first file that has no hunks to cut comes as it is, whatever the room, and is
+    /// not marked cut: a binary file (no `hunks` at all) and a file whose exec bit alone
+    /// changed (none, in a list).
+    #[test]
+    fn a_first_file_without_hunks_is_not_marked_cut() {
+        let (_dir, _root, ops) = new_store();
+        let bytes = |path: &str, content: &[u8]| {
+            put(path, ContentInput::Base64(STANDARD.encode(content)), None)
+        };
+        let script = "#!/bin/sh\n";
+        let c1 = commit(
+            &ops,
+            None,
+            vec![bytes("a.bin", b"\0one"), text("run.sh", script)],
+        );
+        let now_exec = put(
+            "run.sh",
+            ContentInput::Inline(script.to_owned()),
+            Some(ModeInput::Exec),
+        );
+        let c2 = commit(&ops, Some(&c1), vec![bytes("a.bin", b"\0two"), now_exec]);
+        let page = |paths: &[&str], max_bytes: u64| {
+            let mut req = diff_req(&c1, &c2, DiffFormat::Unified);
+            req.paths = paths.iter().map(|path| (*path).to_owned()).collect();
+            req.max_bytes = max_bytes;
+            ops.diff(req).unwrap()
+        };
+
+        for (path, hunks) in [("a.bin", None), ("run.sh", Some(Vec::new()))] {
+            let whole = page(&[path], u64::MAX);
+            assert_eq!(
+                (whole.files[0].hunks.clone(), whole.files[0].hunks_truncated),
+                (hunks, None),
+                "{path}"
+            );
+            let tiny = page(&[path], 1);
+            assert_eq!(tiny.files, whole.files, "{path}: as it is");
+            assert!(!tiny.truncated, "{path}");
+        }
+
+        // With a file after it, the page ends at the first, which still is not cut.
+        let both = page(&[], 1);
+        assert_eq!(paths_of(&both), ["a.bin"]);
+        assert_eq!(both.files[0].hunks_truncated, None);
+        assert_eq!(
+            (both.truncated, both.cursor.as_deref()),
+            (true, Some("a.bin"))
+        );
+    }
+
     /// Binary files get no line counts and no hunks (`binary: true`), in `stat` and in
     /// `unified`, which still gives their kinds and blobs: a NUL in the first 8,000 bytes, or
     /// bytes that are not UTF-8 (Latin-1 text among them), on either side (text that becomes
@@ -5588,6 +5754,18 @@ mod diff {
         for format in [DiffFormat::Names, DiffFormat::Stat, DiffFormat::Unified] {
             let page = ops.diff(diff_req(&c1, &c2, format)).unwrap();
             assert!(page.truncated, "{format:?}");
+
+            // The converse: the defaults are what hold the page. Twice the default page of
+            // files, in as many bytes as they take, passes the target.
+            let mut twice = diff_req(&c1, &c2, format);
+            twice.limit = 2 * DEFAULT_DIFF_LIMIT;
+            twice.max_bytes = u64::MAX;
+            let larger = ops.diff(twice).unwrap();
+            assert!(
+                json_len(&larger.files) > 65_536,
+                "{format:?}: {} bytes, so this store's pages fit whatever the defaults",
+                json_len(&larger.files)
+            );
             let mut meta = Meta::new(
                 1_000,
                 BTreeMap::from([(c1.clone(), c1.clone()), (c2.clone(), c2.clone())]),
