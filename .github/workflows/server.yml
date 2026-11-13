@@ -17,6 +17,7 @@ on:
     paths:
       - "packaging/**"
       - "scripts/server-*"
+      - "scripts/packages.py"
       - "crates/swarmops-ops/src/serve/**"
       - "crates/swarmops-cli/src/commands/serve.rs"
       - ".github/workflows/server.yml"
@@ -56,3 +57,30 @@ jobs:
         run: python3 -I scripts/server-entrance.py build
       - name: The tests through sshd and nginx, offline
         run: python3 -I scripts/server-entrance.py run --bin-dir "${CARGO_TARGET_DIR:-target}/debug"
+
+  # The installation acceptance (slice C-5, M28 criterion 2): this build's packages installed on
+  # an empty Debian 12 and an empty AlmaLinux 9 on an internal network, through the guide's setup,
+  # the package's acceptance level and the cases beyond it. Only `fetch` reaches the network,
+  # and only for what its cache, under the runner's CARGO_TARGET_DIR, lacks.
+  acceptance:
+    name: installation acceptance
+    runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
+    permissions:
+      contents: read
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update
+      - name: Build swarmops and so
+        run: cargo build --locked -p swarmops-cli
+      - name: The offline checks of the harness and the acceptance program
+        run: python3 -I scripts/server-acceptance.py selftest
+      - name: Fetch the dependency packages and the previous release, unless cached
+        run: python3 -I scripts/server-acceptance.py fetch
+      - name: Install and accept on Debian 12 and AlmaLinux 9, offline
+        run: python3 -I scripts/server-acceptance.py run --method deb --method rpm --bin-dir "${CARGO_TARGET_DIR:-target}/debug"
