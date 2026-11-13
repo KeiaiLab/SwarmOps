@@ -10,7 +10,7 @@
 //! or `=no-reach-check`, which bounds `serve`'s pack cache or skips its reachability check, and
 //! `SWARMOPS_TEST_LEAD_WAIT=<n>`, which makes a writer that leads the write queue wait for n other
 //! requests (and panics on a value that is no number), and `SWARMOPS_TEST_PHASE_LOG=<file>`, which
-//! makes an import, a sync and a push append their phases' times to the file.
+//! makes a sync and a push append their phases' times to the file (an import appends none).
 //!
 //! The test exists only in a build without the feature, as `cargo build --release` is. `just
 //! check` and `scripts/check.sh` run it in a release build and require it to run
@@ -134,8 +134,9 @@ const OVER_WARNED: u64 = 50 * 1024 * 1024 + 1;
 /// `SWARMOPS_TEST_GITHUB_HOSTS` naming the loopback server: a build with the test hooks pushes a
 /// file over 50 MiB there with a warning (`remote_acceptance::limits_warn_from_50_mib`); this
 /// build pushes it with none, as to any host but GitHub's. And `SWARMOPS_TEST_PHASE_LOG` on the
-/// import and the push: a build with the hooks writes their phases
-/// (`remote_sync::a_phase_log_names_every_phase`); this build writes no file.
+/// import and the push: a build with the hooks writes the push's phases
+/// (`remote_sync::a_phase_log_names_every_phase`; an import appends none); this build writes no
+/// file.
 #[test]
 fn a_build_without_the_feature_ignores_the_github_hosts_hook() {
     use std::fs;
