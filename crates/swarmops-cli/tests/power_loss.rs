@@ -117,6 +117,8 @@ enum Op {
     /// put and flushed first (between the marks `bulk objects` and `bulk objects flushed`): its
     /// frame takes the index's tail past [`Index::COMPACT_THRESHOLD`], so its writer syncs the
     /// index, compacts, appends a `Compacted` frame (no transaction's) and moves the checkpoint.
+    /// In FORMAT 3, whose index never compacts, it appends no `Compacted` frame (the FORMAT 3
+    /// design §2.5).
     Bulk,
     /// A commit of `puts` on commit number `parent` that advances ref `name` from it (a commit
     /// with `advance`): its frame holds its changeset and the ref's move to it, together.
@@ -469,11 +471,12 @@ fn record_ops(format: StoreFormat, ops: &[Op]) -> Recorded {
         .journal_log()
         .into_std_path_buf();
     // Each frame's transaction, in order; `None` for the `Compacted` frame that follows a bulk
-    // transaction, which is no transaction's.
+    // transaction in FORMAT 1 and 2, which is no transaction's.
     let mut undos = undos.into_iter();
     let mut whats = ops.iter().flat_map(|op| match *op {
         Op::Commit { .. } | Op::CommitBlob { .. } => vec![Some(Txn::Commit)],
         Op::Cas { name, new, .. } => vec![Some(Txn::Cas { name, new })],
+        Op::Bulk if format == StoreFormat::V3 => vec![Some(Txn::Bulk)],
         Op::Bulk => vec![Some(Txn::Bulk), None],
         Op::CommitAdvance { name, .. } => vec![Some(Txn::CommitAdvance { name })],
         Op::Batch { .. } => vec![Some(Txn::Batch)],
@@ -1765,28 +1768,26 @@ per_format! {
 /// seeds: nothing kept, everything kept, and eight at random; on [`RUN`] and then
 /// [`Op::Bulk`], so that the images hold the compaction a writer makes past
 /// [`Index::COMPACT_THRESHOLD`] records: the index synced, the views written and renamed into
-/// place, the `Compacted` frame and the checkpoint after it, every cut of it checked. Two long
-/// runs of the bulk transaction repeat, call after call, what [`RUN`]'s cuts check at every step:
-/// its objects' writes (two calls for each of its 1,026 objects, as for every commit's objects)
-/// and the materialization of its records past the checkpoint (an unsynced append to each of
-/// the five index files, for each record, as every commit's materialization makes). Of their
-/// cuts it checks the first and last eight and every 64th.
+/// place, the `Compacted` frame and the checkpoint after it, every cut of it checked (FORMAT 1
+/// and 2; a FORMAT 3 index never compacts, and its images hold the bulk frame and what its
+/// writer does after it). One long run of the bulk transaction repeats, call after call, what
+/// [`RUN`]'s cuts check at every step: its objects' writes (two calls for each of its 1,026
+/// objects, as for every commit's objects, then a sync of each fan-out directory). Of that run's
+/// cuts it checks the first and last eight and every 64th. The materialization of the frame's
+/// records past the checkpoint is one unsynced append to each index file for the frame, not
+/// one for each record: a few steps, every cut of them checked.
+///
+/// The cost in the ignore reason is the measured one; the weekly run's kill bound that must
+/// hold it is the `ci-slow` profile's in `.config/nextest.toml`, whose comment names this test:
+/// the two figures and the job's `timeout-minutes` change together.
 #[ignore = "slow, ~280 s: images of 830 cuts x 10 seeds through the binary; just check-slow runs it"]
 fn power_loss_images_recover_a_prefix_with_every_acknowledged_commit_at_every_cut(format) {
     let ops: Vec<Op> = RUN.iter().copied().chain([Op::Bulk]).collect();
     let rec = record_ops(format, &ops);
     let objects = rec.timeline.mark("bulk objects")..rec.timeline.mark("bulk objects flushed");
-    // From the bulk frame's listing (its write and sync, then its entry's) to the index sync
-    // that starts the compaction.
-    let listed = rec.frames.last().expect("the bulk frame").write + 4;
-    let synced = (listed..rec.timeline.steps())
-        .find(|&step| rec.timeline.step(step).label.starts_with("sync_data"))
-        .expect("the bulk transaction syncs the index");
     let sampled = |cut: usize| {
-        [&objects, &(listed..synced)].into_iter().all(|run| {
-            !(run.start + 8..run.end.saturating_sub(8)).contains(&cut)
-                || (cut - run.start).is_multiple_of(64)
-        })
+        !(objects.start + 8..objects.end.saturating_sub(8)).contains(&cut)
+            || (cut - objects.start).is_multiple_of(64)
     };
     let cuts: Vec<usize> = (0..=rec.timeline.steps())
         .filter(|&cut| sampled(cut))
