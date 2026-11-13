@@ -16,8 +16,9 @@ read the exit code, then the envelope's fields.
 
 This page covers the envelope, the output flags, the exit codes, `jq` recipes for common tasks,
 which errors to retry and how, idempotency keys, and a complete script that commits and lands in a
-loop. Every command and output below is from a real run of `swarmops` 0.1.0 against scratch stores
-under `/tmp/dev-guide/`, with `jq` 1.7.1. `…` marks text cut by hand.
+loop. Every command and output below is from a real run of `swarmops` against scratch stores
+under `/tmp/dev-guide/`, with `jq` 1.7.1: 0.11.0 for the store `acme`, 0.1.0 for the others. `…`
+marks text cut by hand.
 
 - [The envelope](#the-envelope)
 - [Output flags](#output-flags)
@@ -50,7 +51,7 @@ swarmops info
 ```
 
 ```json
-{"ok":true,"op":"repo_info","api":1,"result":{"repo_id":"94b6b112787a77d96c23be442f233f0d","name":"acme","main":"bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118","store_version":2,"changesets":2,"refs":1},"meta":{"repo":"/tmp/dev-guide/acme","elapsed_ms":0,"resolved":{},"auth":"trust"}}
+{"ok":true,"op":"repo_info","api":1,"result":{"repo_id":"b51930405f2d687a9d43110898f81cd5","name":"acme","main":"bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118","store_version":3,"changesets":2,"refs":1},"meta":{"repo":"/tmp/dev-guide/acme","elapsed_ms":3,"resolved":{},"auth":"trust"}}
 ```
 
 | Field | What it holds |
@@ -69,11 +70,11 @@ swarmops info
 A failure's `error`:
 
 ```sh
-swarmops --as agent/worker-1 ref set main 0e5171a021aabc37bf6b92efa555514c389d582c32542f16ae88cd43873f60c0 --expect 0e5171a021aa
+swarmops --as agent/worker-1 ref set main e5510a2bfbdf8325772ce71345c4feada3f103d70e24ee15c1d129be3982e4e7 --expect e5510a2bfbdf
 ```
 
 ```json
-{"ok":false,"op":"ref_set","api":1,"error":{"code":"E_CAS_MISMATCH","message":"ref main moved to bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118: commit your change on top of it (--parent bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118), then retry with --expect bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118; re-apply your edits to the content at bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118 rather than re-sending your old files","retryable":true,"exit":4,"details":{"actual":"bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118","name":"main"},"hint":"swarmops show bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118"},"meta":{"repo":"/tmp/dev-guide/acme","elapsed_ms":0,"resolved":{"0e5171a021aa":"0e5171a021aabc37bf6b92efa555514c389d582c32542f16ae88cd43873f60c0","0e5171a021aabc37bf6b92efa555514c389d582c32542f16ae88cd43873f60c0":"0e5171a021aabc37bf6b92efa555514c389d582c32542f16ae88cd43873f60c0"},"auth":"trust"}}
+{"ok":false,"op":"ref_set","api":1,"error":{"code":"E_CAS_MISMATCH","message":"ref main moved to bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118: commit your change on top of it (--parent bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118), then retry with --expect bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118; re-apply your edits to the content at bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118 rather than re-sending your old files","retryable":true,"exit":4,"details":{"actual":"bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118","name":"main"},"hint":"swarmops show bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118"},"meta":{"repo":"/tmp/dev-guide/acme","elapsed_ms":4,"resolved":{"e5510a2bfbdf":"e5510a2bfbdf8325772ce71345c4feada3f103d70e24ee15c1d129be3982e4e7","e5510a2bfbdf8325772ce71345c4feada3f103d70e24ee15c1d129be3982e4e7":"e5510a2bfbdf8325772ce71345c4feada3f103d70e24ee15c1d129be3982e4e7"},"auth":"trust"}}
 ```
 
 | Field | What it holds |
@@ -118,10 +119,10 @@ swarmops cat main:nope.rs --human; echo "exit=$?"
 ```
 
 ```text
-repo_id: 94b6b112787a77d96c23be442f233f0d
+repo_id: b51930405f2d687a9d43110898f81cd5
 name: acme
 main: bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118
-store_version: 1
+store_version: 3
 changesets: 2
 refs: 1
 {
@@ -129,16 +130,16 @@ refs: 1
   "op": "repo_info",
   "api": 1,
   "result": {
-    "repo_id": "94b6b112787a77d96c23be442f233f0d",
+    "repo_id": "b51930405f2d687a9d43110898f81cd5",
     "name": "acme",
     "main": "bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118",
-    "store_version": 1,
+    "store_version": 3,
     "changesets": 2,
     "refs": 1
   },
   "meta": {
     "repo": "/tmp/dev-guide/acme",
-    "elapsed_ms": 0,
+    "elapsed_ms": 2,
     "resolved": {},
     "auth": "trust"
   }
@@ -178,11 +179,11 @@ swarmops --frob info; echo "exit=$?"
 ```
 
 ```text
-{"ok":false,"op":"read_file","api":1,"error":{"code":"E_PATH_NOT_FOUND","message":"nothing is at \"nope.rs\" in main","retryable":false,"exit":6,"details":{"path":"nope.rs","rev":"main"},"hint":"swarmops ls main"},"meta":{"repo":"/tmp/dev-guide/acme","elapsed_ms":0,"resolved":{"main":"bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118"},"auth":"trust"}}
+{"ok":false,"op":"read_file","api":1,"error":{"code":"E_PATH_NOT_FOUND","message":"nothing is at \"nope.rs\" in main","retryable":false,"exit":6,"details":{"path":"nope.rs","rev":"main"},"hint":"swarmops ls main"},"meta":{"repo":"/tmp/dev-guide/acme","elapsed_ms":3,"resolved":{"main":"bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118"},"auth":"trust"}}
 exit=6
-{"ok":false,"op":"commit","api":1,"error":{"code":"E_IDENTITY_REQUIRED","message":"this operation changes the store, so it needs the caller's identity","retryable":false,"exit":5,"details":{},"hint":"pass --as <family>/<instance> or set SWARMOPS_AGENT, e.g. --as agent/worker-1"},"meta":{"repo":"/tmp/dev-guide/acme","elapsed_ms":0,"resolved":{},"auth":"trust"}}
+{"ok":false,"op":"commit","api":1,"error":{"code":"E_IDENTITY_REQUIRED","message":"this operation changes the store, so it needs the caller's identity","retryable":false,"exit":5,"details":{},"hint":"pass --as <family>/<instance> or set SWARMOPS_AGENT, e.g. --as agent/worker-1"},"meta":{"repo":"/tmp/dev-guide/acme","elapsed_ms":2,"resolved":{},"auth":"trust"}}
 exit=5
-{"ok":false,"op":"swarmops","api":1,"error":{"code":"E_INVALID_ARG","message":"unexpected argument '--frob' found","retryable":false,"exit":2,"details":{},"hint":"Usage: swarmops [OPTIONS] <COMMAND>\nFor more information, try '--help'."},"meta":{"elapsed_ms":0,"resolved":{},"auth":"trust"}}
+{"ok":false,"op":"swarmops","api":1,"error":{"code":"E_INVALID_ARG","message":"unexpected argument '--frob' found","retryable":false,"exit":2,"details":{},"hint":"Usage: swarmops [OPTIONS] <COMMAND>\nFor more information, try '--help'."},"meta":{"elapsed_ms":10,"resolved":{},"auth":"trust"}}
 exit=2
 ```
 

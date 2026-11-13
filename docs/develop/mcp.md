@@ -10,7 +10,7 @@ After this page you can connect any MCP (Model Context Protocol) client to a sto
 agent harness that speaks the Model Context Protocol, such as Claude Code, then calls each
 operation as a tool, and gets back the same JSON envelope the CLI prints.
 
-Every exchange below is from a real run of `swarmops` 0.1.0 against a scratch store at
+Every exchange below is from a real run of `swarmops` 0.11.0 against a scratch store at
 `/tmp/dev-guide/acme`. Where a line is long, the command pipes it through `jq` to keep the part
 that matters, and the filter is shown; `…` marks text cut by hand.
 
@@ -128,7 +128,7 @@ Four answers, one per request; the notification gets none.
 ids for compare-and-swap, `land` to publish, small pages):
 
 ```text
-{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"swarmops","title":"SwarmOps","version":"0.2.0"},"instructions":"SwarmOps is source control for coding-agent swarms: many agents commit to one store at once. …"}}
+{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"swarmops","title":"SwarmOps","version":"0.11.0"},"instructions":"SwarmOps is source control for coding-agent swarms: many agents commit to one store at once. …"}}
 ```
 
 **`tools/list`.** One page of 46 tools. Each entry holds `name`, `title`, `description`,
@@ -145,6 +145,7 @@ sed -n 2p answers.jsonl | jq -c '.result.tools[] | {name, title, annotations} + 
 {"name":"read_tree","title":"List a directory","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
 {"name":"show","title":"Show a changeset","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
 {"name":"log","title":"List history","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
+{"name":"ancestry","title":"Compare two revisions' ancestry","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
 {"name":"path_history","title":"List a path's history","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
 {"name":"diff","title":"Diff two revisions","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
 {"name":"merge_base","title":"Find a merge base","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
@@ -160,14 +161,30 @@ sed -n 2p answers.jsonl | jq -c '.result.tools[] | {name, title, annotations} + 
 {"name":"revert","title":"Revert a change","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":false}}
 {"name":"land_check","title":"Check a land","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
 {"name":"land_group","title":"Land a group","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":false}}
+{"name":"rebase","title":"Rebase a change","annotations":{"destructiveHint":false,"idempotentHint":false,"openWorldHint":false,"readOnlyHint":false}}
 {"name":"blob_put","title":"Store a blob","annotations":{"destructiveHint":false,"idempotentHint":false,"openWorldHint":false,"readOnlyHint":false}}
 {"name":"blob_has","title":"Find stored blobs","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
 {"name":"verify","title":"Verify the store","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
+{"name":"gc","title":"Remove leftovers","annotations":{"destructiveHint":true,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":false}}
+{"name":"repair","title":"Repair the store","annotations":{"destructiveHint":true,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":false}}
+{"name":"upgrade","title":"Upgrade the store format","annotations":{"destructiveHint":true,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":false}}
 {"name":"remote_list","title":"List git remotes","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
 {"name":"fetch","title":"Fetch a git remote","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":true,"readOnlyHint":false}}
 {"name":"push","title":"Push to a git remote","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":true,"readOnlyHint":false}}
 {"name":"sync","title":"Sync with a git remote","annotations":{"destructiveHint":false,"idempotentHint":false,"openWorldHint":true,"readOnlyHint":false}}
 {"name":"sync_status","title":"Show sync status","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
+{"name":"ws_create","title":"Create a workspace","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":false}}
+{"name":"ws_status","title":"Show a workspace's status","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
+{"name":"ws_diff","title":"Diff a workspace","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
+{"name":"ws_commit","title":"Commit a workspace's edits","annotations":{"destructiveHint":false,"idempotentHint":false,"openWorldHint":false,"readOnlyHint":false}}
+{"name":"ws_rebase","title":"Rebase a workspace","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":false}}
+{"name":"ws_resolve","title":"Resolve a workspace's conflicts","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":false}}
+{"name":"ws_land","title":"Land a workspace","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":false}}
+{"name":"ws_materialize","title":"Materialise more of a workspace","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":false}}
+{"name":"ws_discard","title":"Discard a workspace's edits","annotations":{"destructiveHint":true,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":false}}
+{"name":"ws_snapshot","title":"Snapshot a workspace's edits","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":false}}
+{"name":"ws_list","title":"List workspaces","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
+{"name":"ws_info","title":"Describe a workspace","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
 ```
 
 A tool's `inputSchema` is its request type's JSON Schema, as `swarmops schema <Type>` prints it,
@@ -204,7 +221,7 @@ sed -n 4p answers.jsonl | jq -c '.result.structuredContent.result'
 ```
 
 ```text
-{"changeset":"0e5171a021aabc37bf6b92efa555514c389d582c32542f16ae88cd43873f60c0","parent":"bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118","root":"00842161e3ab9a26a8a0d593193afaf10915f9fcf570b04c7a088c1b3cd7209d","files_changed":1,"blobs_written":1,"replayed":false}
+{"changeset":"e5510a2bfbdf8325772ce71345c4feada3f103d70e24ee15c1d129be3982e4e7","parent":"bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118","root":"00842161e3ab9a26a8a0d593193afaf10915f9fcf570b04c7a088c1b3cd7209d","files_changed":1,"blobs_written":1,"replayed":false}
 ```
 
 ### Methods
@@ -246,8 +263,8 @@ SWARMOPS_AGENT=agent/worker-1 swarmops mcp --repo /tmp/dev-guide/acme < s3.jsonl
 {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}},"name":"resolve_rev","arguments":{"rev":"main"}}}
 {"jsonrpc":"2.0","id":3,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2027-01-01","io.modelcontextprotocol/clientCapabilities":{}}}}
 {"jsonrpc":"2.0","id":4,"method":"tools/list"}
-{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28","2025-11-25","2025-06-18"],"capabilities":{"tools":{}},"instructions":"…","ttlMs":3600000,"cacheScope":"public","_meta":{"io.modelcontextprotocol/serverInfo":{"name":"swarmops","title":"SwarmOps","version":"0.2.0"}}}}
-{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","content":"…","structuredContent":{"ok":true,"op":"resolve_rev","api":1,"result":{"id":"bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118","kind":"ref"},"meta":{"repo":"/tmp/dev-guide/acme","elapsed_ms":0,"resolved":{"main":"bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118"},"auth":"trust"}},"isError":false,"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"swarmops","title":"SwarmOps","version":"0.1.0"}}}}
+{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28","2025-11-25","2025-06-18"],"capabilities":{"tools":{}},"instructions":"…","ttlMs":3600000,"cacheScope":"public","_meta":{"io.modelcontextprotocol/serverInfo":{"name":"swarmops","title":"SwarmOps","version":"0.11.0"}}}}
+{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","content":"…","structuredContent":{"ok":true,"op":"resolve_rev","api":1,"result":{"id":"bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118","kind":"ref"},"meta":{"repo":"/tmp/dev-guide/acme","elapsed_ms":1,"resolved":{"main":"bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118"},"auth":"trust"}},"isError":false,"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"swarmops","title":"SwarmOps","version":"0.11.0"}}}}
 {"jsonrpc":"2.0","id":3,"error":{"code":-32022,"message":"Unsupported protocol version: 2027-01-01; this server serves 2026-07-28 in params._meta, and 2025-11-25 and 2025-06-18 through initialize","data":{"requested":"2027-01-01","supported":["2026-07-28","2025-11-25","2025-06-18"]}}}
 {"jsonrpc":"2.0","id":4,"error":{"code":-32602,"message":"Invalid params: tools/list names no protocol version in params._meta (io.modelcontextprotocol/protocolVersion), and no initialize has opened a session"}}
 ```
@@ -288,6 +305,7 @@ envelope's `op` is, in `tools/list`'s order. Its arguments are the CLI command's
 | `read_tree` | `swarmops ls REV[:PATH]` | `ReadTreeReq` | no |
 | `show` | `swarmops show REV` | `ShowReq` | no |
 | `log` | `swarmops log [REV]` | `LogReq` | no |
+| `ancestry` | `swarmops ancestry FROM TO` | `AncestryReq` | no |
 | `path_history` | `swarmops history REV:PATH` | `PathHistoryReq` | no |
 | `diff` | `swarmops diff FROM TO` | `DiffReq` | no |
 | `merge_base` | `swarmops merge-base REV ONTO` | `MergeBaseReq` | no |
@@ -307,6 +325,9 @@ envelope's `op` is, in `tools/list`'s order. Its arguments are the CLI command's
 | `blob_put` | `swarmops blob put` | `BlobPutReq` | adds a blob |
 | `blob_has` | `swarmops blob has` | `BlobHasReq` | no |
 | `verify` | `swarmops verify` | `VerifyReq` | no |
+| `gc` | `swarmops gc` | `GcReq` | removes leftovers, never an object or a changeset |
+| `repair` | `swarmops repair` | `RepairReq` | rebuilds what the journal can rebuild, quarantines damaged objects |
+| `upgrade` | `swarmops upgrade` | `UpgradeReq` | moves the store to the latest format |
 | `remote_list` | `swarmops remote list` | `RemoteListReq` | no |
 | `fetch` | `swarmops fetch REMOTE` | `FetchReq` | adds what the remote holds |
 | `push` | `swarmops push REMOTE` | `PushReq` | no; moves the remote's branch |
@@ -321,14 +342,15 @@ envelope's `op` is, in `tools/list`'s order. Its arguments are the CLI command's
 | `ws_land` | `swarmops ws land` | `WsLandReq` | adds changesets and moves the target |
 | `ws_materialize` | `swarmops ws materialize PATH` | `WsMaterializeReq` | the workspace only |
 | `ws_discard` | `swarmops ws discard` | `WsDiscardReq` | the workspace only |
+| `ws_snapshot` | `swarmops ws snapshot` | `WsSnapshotReq` | adds a changeset, moving no ref |
 | `ws_list` | `swarmops ws list` | `WsListReq` | no |
 | `ws_info` | `swarmops ws info` | `WsInfoReq` | no |
 
-`init`, `whoami`, `schema`, `blob get`, `ws delete`, `ws hook`, `git import`, `git export`,
-`clone`, `remote add|remove`, `derive` and `mcp` have no tool: an operator or a script runs them as
+`init`, `whoami`, `schema`, `blob get`, `ws delete`, `ws hook`, `git import`, `git export`, `clone`,
+`remote add|remove`, `derive`, `mcp` and `serve` have no tool: an operator or a script runs them as
 commands. A workspace tool names its workspace by its name in the store's registry, and works on
-that directory on the server's host. A `verify` that finds problems is `E_STORE_CORRUPT`,
-as `swarmops verify` is.
+that directory on the server's host. A `verify` that finds problems is `E_STORE_CORRUPT`, as
+`swarmops verify` is.
 
 Rules the server adds to the request types, each refused with `E_INVALID_ARG`:
 
@@ -346,7 +368,7 @@ Rules the server adds to the request types, each refused with `E_INVALID_ARG`:
 ## Landing through MCP
 
 To publish, an agent commits on the head it read, then lands. Here `agent/worker-2` moved `main`
-after `agent/worker-1` read it, changing the same line as worker-1's commit `0e5171a0…` from the
+after `agent/worker-1` read it, changing the same line as worker-1's commit `e5510a2b…` from the
 session above:
 
 ```sh
@@ -354,7 +376,7 @@ swarmops --as agent/worker-2 commit -m "greet the swarm" --changes rival.json --
 ```
 
 ```text
-{"name":"main","old":"bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118","new":"3acdfd7888b83ed5af6f578f84928953e979de8fa0438e19e565fc6469f48c82","already_applied":false}
+{"name":"main","old":"bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118","new":"a521abb261bf8b7f657f3f065c470431f0b57b8e98b6de386ae1d3a2d3545da8","already_applied":false}
 ```
 
 Worker-1 lands its commit with an `idempotency_key`. The land meets the conflict, records nothing,
@@ -369,10 +391,10 @@ jq '.result.structuredContent.error.details.report | {theirs, files: [.files[] |
 
 ```text
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"example","version":"0.0.1"}}}
-{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"land","arguments":{"head":"0e5171a021aabc37bf6b92efa555514c389d582c32542f16ae88cd43873f60c0","idempotency_key":"land-shout-1"}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"land","arguments":{"head":"e5510a2bfbdf8325772ce71345c4feada3f103d70e24ee15c1d129be3982e4e7","idempotency_key":"land-shout-1"}}}
 {"isError":true,"error":{"code":"E_CONFLICT","retryable":false,"exit":3}}
 {
-  "theirs": "3acdfd7888b83ed5af6f578f84928953e979de8fa0438e19e565fc6469f48c82",
+  "theirs": "a521abb261bf8b7f657f3f065c470431f0b57b8e98b6de386ae1d3a2d3545da8",
   "files": [
     {
       "path": "src/lib.rs",
@@ -412,10 +434,10 @@ SWARMOPS_AGENT=agent/worker-1 swarmops mcp --repo /tmp/dev-guide/acme < resolve.
 
 ```text
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"example","version":"0.0.1"}}}
-{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"land","arguments":{"head":"0e5171a021aabc37bf6b92efa555514c389d582c32542f16ae88cd43873f60c0","idempotency_key":"land-shout-2","resolutions":{"against":"3acdfd7888b83ed5af6f578f84928953e979de8fa0438e19e565fc6469f48c82","files":{"src/lib.rs":{"content":{"inline":"pub fn greet() -> &'static str {\n    \"HELLO, SWARM\"\n}\n"}}}}}}}
-{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"land","arguments":{"head":"0e5171a021aabc37bf6b92efa555514c389d582c32542f16ae88cd43873f60c0","idempotency_key":"land-shout-2","resolutions":{"against":"3acdfd7888b83ed5af6f578f84928953e979de8fa0438e19e565fc6469f48c82","files":{"src/lib.rs":{"content":{"inline":"pub fn greet() -> &'static str {\n    \"HELLO, SWARM\"\n}\n"}}}}}}}
-{"id":2,"isError":false,"result":{"status":"landed","landed":"e7046994727e92138a6f40edbb9f67b65c7ab8c38d4a0b4076ac9273b834c844","rebased_onto":"3acdfd7888b83ed5af6f578f84928953e979de8fa0438e19e565fc6469f48c82","attempts":1}}
-{"id":3,"isError":false,"result":{"status":"replayed","landed":"e7046994727e92138a6f40edbb9f67b65c7ab8c38d4a0b4076ac9273b834c844","rebased_onto":"3acdfd7888b83ed5af6f578f84928953e979de8fa0438e19e565fc6469f48c82","attempts":1}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"land","arguments":{"head":"e5510a2bfbdf8325772ce71345c4feada3f103d70e24ee15c1d129be3982e4e7","idempotency_key":"land-shout-2","resolutions":{"against":"a521abb261bf8b7f657f3f065c470431f0b57b8e98b6de386ae1d3a2d3545da8","files":{"src/lib.rs":{"content":{"inline":"pub fn greet() -> &'static str {\n    \"HELLO, SWARM\"\n}\n"}}}}}}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"land","arguments":{"head":"e5510a2bfbdf8325772ce71345c4feada3f103d70e24ee15c1d129be3982e4e7","idempotency_key":"land-shout-2","resolutions":{"against":"a521abb261bf8b7f657f3f065c470431f0b57b8e98b6de386ae1d3a2d3545da8","files":{"src/lib.rs":{"content":{"inline":"pub fn greet() -> &'static str {\n    \"HELLO, SWARM\"\n}\n"}}}}}}}
+{"id":2,"isError":false,"result":{"status":"landed","landed":"62e043b721134473536f9663f50a11bc43c6eff5561b3dbf5155093c840ab54b","rebased_onto":"a521abb261bf8b7f657f3f065c470431f0b57b8e98b6de386ae1d3a2d3545da8","attempts":1}}
+{"id":3,"isError":false,"result":{"status":"replayed","landed":"62e043b721134473536f9663f50a11bc43c6eff5561b3dbf5155093c840ab54b","rebased_onto":"a521abb261bf8b7f657f3f065c470431f0b57b8e98b6de386ae1d3a2d3545da8","attempts":1}}
 ```
 
 A resolution is `{"take": "ours"}`, `{"take": "theirs"}`, `{"content": CONTENT}` (with an optional
@@ -477,7 +499,7 @@ cat err.txt
 ```text
 exit=2
 0
-{"ok":false,"op":"mcp","api":1,"error":{"code":"E_INVALID_ARG","message":"unexpected argument '--frob' found","retryable":false,"exit":2,"details":{},"hint":"Usage: swarmops mcp [OPTIONS]\nFor more information, try '--help'."},"meta":{"elapsed_ms":1,"resolved":{},"auth":"trust"}}
+{"ok":false,"op":"mcp","api":1,"error":{"code":"E_INVALID_ARG","message":"unexpected argument '--frob' found","retryable":false,"exit":2,"details":{},"hint":"Usage: swarmops mcp [OPTIONS]\nFor more information, try '--help'."},"meta":{"elapsed_ms":7,"resolved":{},"auth":"trust"}}
 ```
 
 A usage error before the word `mcp` (`swarmops --frob mcp`) is an ordinary command error, printed
@@ -519,8 +541,8 @@ env -u SWARMOPS_AGENT swarmops mcp --repo /tmp/dev-guide/acme < s2.jsonl | sed 1
 
 ```text
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"example","version":"0.0.1"}}}
-{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ref_set","arguments":{"name":"main","new":"0e5171a021aabc37bf6b92efa555514c389d582c32542f16ae88cd43873f60c0","expected_old":"main"}}}
-{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ref_set","arguments":{"name":"main","new":"0e5171a021aabc37bf6b92efa555514c389d582c32542f16ae88cd43873f60c0","expected_old":"bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118"}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ref_set","arguments":{"name":"main","new":"e5510a2bfbdf8325772ce71345c4feada3f103d70e24ee15c1d129be3982e4e7","expected_old":"main"}}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ref_set","arguments":{"name":"main","new":"e5510a2bfbdf8325772ce71345c4feada3f103d70e24ee15c1d129be3982e4e7","expected_old":"bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118"}}}
 {"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"git_import","arguments":{}}}
 {"jsonrpc":"2.0","id":5,"method":"ping"}
 {"id":2,"structuredContent":{"ok":false,"op":"ref_set","api":1,"error":{"code":"E_INVALID_ARG","message":"expected_old \"main\" is not a full changeset id, which a compare-and-swap needs: a ref name or a relative revision is read when the call runs instead of pinning the id you read (main itself always matches, so the compare-and-swap would protect nothing, and main~1 never matches), and an id prefix stops resolving once another changeset shares it; pass the 64-hex id the ref held when you read it, from ref_list, show, log or a commit's result","retryable":false,"exit":2,"details":{"expected_old":"main","name":"main"},"hint":"swarmops ref list"},"meta":{"repo":"/tmp/dev-guide/acme","elapsed_ms":0,"resolved":{},"auth":"trust"}},"isError":true}
