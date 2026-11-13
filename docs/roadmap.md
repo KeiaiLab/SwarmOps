@@ -83,9 +83,10 @@ is a compare-and-swap against what the last fetch saw, never forced; after a mer
 or a rebase on GitHub, `so sync` recognises the changes GitHub holds and drops them, so the squash
 merge that `git import` met with `E_GIT_IMPORT_DIVERGED` is now a state sync resolves; commits made
 in the store can carry an address GitHub links to an account (`authors.toml`). What is missing:
-signatures, so a branch that requires signed commits refuses the store's commits; pull requests
-opened from SwarmOps; and three of the four performance targets
-([Topology 2](#topology-2-local-swarmops-remote-github)). The round trip through a bare clone, with
+pull requests opened from SwarmOps, and three of the four performance targets
+([Topology 2](#topology-2-local-swarmops-remote-github)). Signing is a
+[non-goal](goals.md#non-goals), so a branch that requires signed commits refuses the store's
+commits. The round trip through a bare clone, with
 `git import`, `git export` and a hand-run `git push`, still works
 ([Git round trip](guides/git-round-trip.md)).
 
@@ -139,6 +140,7 @@ The releases that get there:
 | v0.9.0 | Safety and load | M16: condition 5's remaining core rows closed in scope; G4 re-measured with one lock pass per land: p99 under 500 ms at 50 processes in one of two runs, so condition 2 is not met robustly ([perf.md](perf.md#m16--2026-11-07)) |
 | v0.10.0 | Serve under load | M17: served reads off the writer lock, preparation, one pack per identical read; the prepared first clone 0.72× git's own server; G18's commit wait, G19's CPU, G20's land p99 at 50 processes and G22's memory missed, G21 not measured yet ([perf.md](perf.md#m17-baselines--2026-11-07)) |
 | v0.11.0 | Take back, workspaces | M18's and M19's slices: `revert`, `ref log` (55 of 55 codes pinned), `land-check`, `land-group`, `ref txn`, `merge-base`; stale workspaces refused everywhere, edits snapshotted before an update; G4 at 50 processes on v0.10.0's batching met in two gated runs (p99 157.3 ms and 154.5 ms), its 32-process runs not recorded; the first sync after a clone missed (13.081 s against 1 s); G9's rows not measured again ([perf.md](perf.md#d2-8-gated-runs--2026-11-09), [perf.md](perf.md#m19-fan-in--2026-11-09-not-measured)) |
+| v0.12.0 | `FORMAT 3`, health, soft findings | M20 and M21 to their exit criteria below; the open soft findings triaged, each one that touches data safety or the contract fixed or recorded in [known limitations](known-limitations.md) with its target (condition 5) |
 
 SwarmOps is declared usable at the first release where all seven conditions hold; condition 6
 counts from the last release that shipped a data-safety fix.
@@ -190,7 +192,7 @@ Deferred past usable, with what stands in until then:
 | M11, native sync (topology 3) | No condition needs it, and it needs M14, M9 and M24 first | Sync through a git remote, one writing host at a time ([Topology 3 today](#topology-3-today-local-swarmops-remote-swarmops)) |
 | M12, macOS and Windows | The pilot and CI run on Linux | The Linux releases; M12 is developed separately |
 | M20, `FORMAT 3` | One layout decision serves M7's records, the queue, withdrawal, lineage and the manifest that takes compaction out of the write; its design comes first | `FORMAT 2`; compaction inside the write |
-| M21, health, drift and housekeeping | It reads the records M17 adds | `info`'s exit status; the counts in [docs/perf.md](perf.md) |
+| M21, health, drift and housekeeping | It reads the records M17 adds | `info`'s exit status; the envelope counts of [Monitoring](operate/monitoring.md#summarise-the-envelopes) |
 | M22, the landing queue | Its checks are the gate M7 builds, on `FORMAT 3` | `ws land --check` in each process; the lock's own queue |
 | M23, withdrawal and erasure | Its records need `FORMAT 3` | None: unreachable objects are counted, not removed |
 | M24, rewriting with lineage | Its lineage id needs `FORMAT 3` | `rebase` and `op undo` |
@@ -564,8 +566,6 @@ run, on a loaded host, is in [perf.md](perf.md#git-remotes-m13-the-three-topolog
 - A per-identity author address changes what a new changeset records, not how an old one exports;
   whether it needs a new version of the export's rendering is decided in M13's plan, under the
   versioning policy.
-- Signed commits: SwarmOps has no signing, so a branch that requires signatures refuses its
-  commits. Open, after M13.
 - Opening pull requests from SwarmOps, through GitHub's documented REST API: open, after M13.
 
 ### Non-goals in M13
@@ -653,7 +653,7 @@ Several upstreams merging with each other, partial replicas and a caching tier.
 ## Milestones
 
 Milestone ids are never renumbered. M13 (topology 2) and M14 (topology 1) were added for the
-GitHub goal, M15 to M25 by the plan of 2026-11-05; M11 (topology 3) takes `so clone`,
+GitHub goal, M15 to M26 by the plan of 2026-11-05; M11 (topology 3) takes `so clone`,
 `so remote` and `so sync`.
 
 **Settled:** M0 to M4 and M8 are delivered, in v0.1.0, M13 in v0.2.0, M5 in v0.3.0, M6 in
@@ -684,12 +684,12 @@ needs   M13  ← M3, M4, M8                 packs, the mirror, the sync engine
 | ✅ M6 | 1, 3 | Verify, crash safety, fuzzing, gc, and FORMAT 2 with the ref names M11 and M14 need (remote-tracking refs, branches, tags); gc keeps what the mirror's refs reach; v0.4.0 | | As the README states it, plus a FORMAT 2 store holding a free-form branch and a tag (delivered: [CHANGELOG](../CHANGELOG.md)) |
 | ✅ M14 | 1 | `swarmops serve` over ssh and CGI; upload-pack and receive-pack; `refs/land/`; the access file; v0.7.0 | M13, M6 | Topology 1's acceptance criteria 1 to 5 pass (delivered: [CHANGELOG](../CHANGELOG.md)) |
 | ✅ M15 | — | Safety and contract: codes pinned, op ids, fetch integrity, `main` forward only, workspace refusals, land keys; v0.8.0 | M14 | Its twelve rows' acceptance in scope |
-| ✅ M16 | — | Safety and load: no-follow workspace writes, kill tests for readers and ref moves, sync and import forward only, one lock pass per land, `ancestry`, the land key under the lock, refusal inside the quarantine; v0.9.0 | M15 | The M16 plan's acceptance; G4 re-measured ([perf.md](perf.md#m16--2026-11-07)) |
+| ✅ M16 | — | Safety and load: no-follow workspace writes, kill tests for readers and ref moves, sync and import forward only, one lock pass per land, `ancestry`, the land key under the lock, refusal inside the quarantine; v0.9.0 | M15 | The M16 plan's acceptance, with two exceptions: `ancestry`'s p99s are not measured yet ([known limitations](known-limitations.md#commits-refs-and-history)), and five slow cases passed only when run alone ([perf.md](perf.md#m16--2026-11-07), "The slow suite"); G4 re-measured ([perf.md](perf.md#m16--2026-11-07)) |
 | 📋 M17 | 1 | Serve under load: reads off the writer lock, history prepared at land and import, one pack per identical read, pushes in bounded memory, records per request, a differential suite against git's own server; its slices in v0.10.0, its closure slices in v0.11.0, not measured again | M16 | G18–G23 measured, G19, G20, G22 met. So far G18's commit wait beside an import, G19's CPU, G20's land p99 at 50 processes and G22's memory miss, and G21 has not run ([perf.md](perf.md#m17-baselines--2026-11-07)) |
 | 📋 M18 | — | Take back and stay current: revert, `ref log`, the first sync after a clone, conflict attribution, group commit if needed | M16 | 55 of 55 codes pinned; first sync < 1 s on 12,000 commits. Built, in v0.11.0: `revert`, `ref log` (55 of 55 codes pinned), revisions by move and by instant, conflict reports that list every touch, `land-check`, `land-group`, `ref txn`, `merge-base`, the landing-order and undo-per-kind proofs; group commit, D2-1 to D2-7, in v0.10.0. Missed so far: the first sync after a clone, 13.081 s on 12,000 commits and 18.8× on 1,000, against 1 s and 1.5×. G4 on batching met at 50 processes in two gated runs; its 32-process runs, its slow sweeps and the quiet-host run of the sync lag (0.520×, met on a loaded host) not recorded yet ([perf.md](perf.md#d2-8-g4-on-batched-lands--2026-11-08-not-measured-the-host-was-never-quiet)) |
 | 📋 M19 | — | Workspaces, second round: stale workspaces everywhere, edit snapshots, the update's latency | M16 | G9's misses met. Built, in v0.11.0: `E_WS_STALE` from every command that reads or writes a workspace, along every parent; an update that snapshots edits first and carries them; `ws snapshot`; update obstacles refused before the store; `ws status` listing what a sparse commit refuses; one scan walk on 8 threads; unreadable directories and kind changes named; a kill sweep of `ws land -m` (10 kills per format in `just check`); the OpenCode adapter; the large-tree and many-workspace cases. Not met yet: the update after a land and `ws commit` not measured again since v0.6.0's 116.6 ms and 89.0 ms (the host was never quiet), and the commit row stays missed until a change feed exists (the M19 design, decision D1); the 500-kill sweep and the new cases not recorded yet ([perf.md](perf.md#m19-fan-in--2026-11-09-not-measured)) |
 | 📋 M20 | — | `FORMAT 3`: the sorted views under a manifest, the new record kinds, `upgrade` | its design | G18 at 1,000,000 records. Built, for v0.12.0: FORMAT 3 the default of `init`, its journal frames with a nonce (byte-identical operations get distinct ids), the fact records and their index behind named features, the sorted views as runs built after the lock is released, `upgrade` 2 → 3 keeping every op id, verify and repair on it, every crash, power-loss and kill sweep on all three formats, `E_STORE_TOO_NEW`, the release cut's golden check. Not measured yet: G18 at 1,000,000 records, A5's 1,000,000 commits, A1's commit cost and the 200,000-changeset upgrade ran only as a 20,000-changeset trial under load ([perf.md](perf.md#m20--format-3-at-1000000-records--2026-11-12-not-measured)) |
-| 📋 M21 | — | Health, drift and housekeeping | M17 | G24 |
+| 📋 M21 | — | Health, drift and housekeeping | M17 | G24: a land p99 that climbs from 50 to 120 ms is marked as drift, and a steady run is not; G24 joins [docs/goals.md](goals.md) with its first measurement |
 | 📋 M7 | — | Blame and review | M20 (`FORMAT 3`) | As the README states it |
 | 📋 M22 | — | The landing queue | M7, M20 | Queue durable; checks never under the lock |
 | 📋 M23 | — | Withdrawal and erasure | M20 | Every id kept |
@@ -715,8 +715,11 @@ was found.
 (v0.6.0's landing model), since M16 a land takes the lock once, and with M18's group commit (D2)
 its p99 at 50 processes is under 500 ms in both gated runs; its 32-process runs are not recorded
 yet. Part of each lock pass
-through the binary is unexplained (M1.6's quiet-window runs, then M2's decision). Commit-path costs
-(index tail scans, the reflog walk) wait for M2's measured decision. Compaction rewrites both
+through the binary is unexplained (M1.6's quiet-window runs, then M2's decision). M2's measured
+decision keeps the commit path as it is: the index-tail scan is within its bound, and the reflog
+walk, `reflog(100)` at 30.9 ms on 200,000 changesets and 154 ms on 1,000,000 against 1 ms, stays a
+limitation until a `FORMAT 3` (M20) gives it a per-ref index
+([perf.md](perf.md#v010--just-perf-in-a-quiet-window-2026-10-21)). Compaction rewrites both
 sorted views under the writer lock (50 ms at 100,000 records, 173 ms at 1M; M3's merge outside the lock if
 the stall reaches 100 ms at 100,000 records, else a `FORMAT 3`'s manifest). No test reads a real repository yet (M3's and M8's tests of
 this host's repositories).
@@ -757,7 +760,13 @@ neither.
 
 **Unscheduled**, among others: `undo` does not take back a land that later lands built on; history
 follows first parents only; a page cursor does not pin the revisions it pages; a read can give up
-under sustained commits.
+under sustained commits; derived values crafted to agree with each other are read as valid until
+`verify --deep` reports them (an authenticated cache needs a new layout version); a request takes
+up to about 15 times its text in memory before an operation refuses it; `verify --deep` derives the
+export oids of native changesets twice.
+
+**Not planned** ([non-goals](goals.md#non-goals)): signed commits, so a GitHub branch that requires
+signatures refuses the store's commits.
 
 ## How progress is reported
 
