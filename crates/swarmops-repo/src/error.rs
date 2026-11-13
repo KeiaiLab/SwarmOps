@@ -75,9 +75,13 @@ pub enum RepoError {
     /// A commit with `advance` found its ref naming something other than the changeset's first
     /// parent, or, for a root changeset, found the ref there: another move came first. Nothing
     /// was recorded, neither the changeset nor the move; only the objects the commit flushed
-    /// remain, unreferenced, for GC. Re-read the ref before committing on what it names.
+    /// remain, unreferenced, for GC. Re-read the ref before committing on what it names. The
+    /// error does not say which of the three cases it is (a ref that names another changeset, a
+    /// ref that is gone, a root changeset whose ref exists): it carries what the ref names, not
+    /// what the commit expected.
     #[error(
-        "ref {name} does not name the commit's first parent (it names {}): nothing was recorded",
+        "ref {name} does not name the commit's first parent, or exists where the commit has no \
+         parent (it names {}): nothing was recorded",
         .actual.map_or_else(|| "nothing".to_owned(), |id| id.to_string())
     )]
     RefMoved {

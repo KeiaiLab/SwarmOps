@@ -390,7 +390,7 @@ expression: s.transcript()
       "api": 1,
       "error": {
         "code": "E_CAS_MISMATCH",
-        "message": "ref main moved to [c1], so this commit recorded nothing: commit your change on top of it (--parent [c1] --advance main), re-applying your edits to the content at [c1] rather than re-sending your old files",
+        "message": "ref main names [c1], which is not this commit's first parent (the ref moved, or the commit has no parent and the ref exists), so this commit recorded nothing: commit your change on top of it (--parent [c1] --advance main), re-applying your edits to the content at [c1] rather than re-sending your old files",
         "retryable": true,
         "exit": 4,
         "details": {
@@ -796,7 +796,7 @@ expression: s.transcript()
           "commit": "[id5]",
           "path": "lib/sub"
         },
-        "hint": "run it again with --lossy gitlinks to drop or normalize it and mark the changeset (git.lossy)"
+        "hint": "run it again with --lossy gitlinks (--gitlinks drop in place of --gitlinks refuse) to drop or normalize it and mark the changeset (git.lossy)"
       },
       "meta": {
         "repo": "[tmp]/store",
@@ -847,7 +847,7 @@ expression: s.transcript()
           "object": "[id7]",
           "reason": "missing"
         },
-        "hint": "git -C [partial_clone]/repo.git fsck"
+        "hint": "git -C [partial_clone]/repo.git fsck; in a partial clone, which fsck passes, git -C [partial_clone]/repo.git fetch --refetch --no-filter <remote> gets the objects left out"
       },
       "meta": {
         "repo": "[tmp]/store",

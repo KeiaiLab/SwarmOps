@@ -18,8 +18,8 @@ use swarmops_git::mirror::MirrorError;
 use swarmops_git::sync::SyncError;
 use swarmops_git::transport::{RejectReason, TransportError, UrlRefused};
 use swarmops_git::{
-    ConvertError, DivergedReason, ExportError, GitOid, ImportError, SinkError, SourceError,
-    Unsupported,
+    ConvertError, DivergedReason, ExportError, GitOid, ImportError, LossyClass, SinkError,
+    SourceError, Unsupported,
 };
 use swarmops_repo::{MergeConflicts, OpId, OpNotFoundReason, RepoError, StoreError};
 use swarmops_store::{IoFailure, Layout, LimitKind, MAX_OBJECT_LEN, RefKind, RefMismatch};
@@ -396,8 +396,8 @@ fn store_error(e: StoreError, message: String, during: During<'_>) -> OpError {
 /// What to fix first when the filesystem refused a journal append in a way that running the
 /// same command again meets again: for want of permission (`EACCES`, `EPERM`), or as a
 /// read-only filesystem (`EROFS`). The store's `NotCommitted` is then the non-retryable
-/// `E_IO`, `committed: false` all the same (ruling M16-R8: retryable means that running the
-/// operation again can succeed). `None` for any other failure, which a run again can get past.
+/// `E_IO`, `committed: false` all the same (retryable means that running the same operation
+/// again can succeed). `None` for any other failure, which a run again can get past.
 fn lasting_refusal(failure: &IoFailure) -> Option<&'static str> {
     match failure.kind() {
         io::ErrorKind::PermissionDenied => Some("make the store's files writable for this user"),
@@ -514,10 +514,12 @@ fn not_a_repo(at: &Utf8Path, what: String) -> OpError {
 /// as for a ref move ([`crate::local::cas_mismatch`]).
 fn ref_moved(name: &str, actual: Option<ChangesetId>) -> OpError {
     let message = match actual {
+        // The error does not say what the commit expected, so one text holds both causes.
         Some(actual) => format!(
-            "ref {name} moved to {actual}, so this commit recorded nothing: commit your change on \
-             top of it (--parent {actual} --advance {name}), re-applying your edits to the \
-             content at {actual} rather than re-sending your old files"
+            "ref {name} names {actual}, which is not this commit's first parent (the ref moved, \
+             or the commit has no parent and the ref exists), so this commit recorded nothing: \
+             commit your change on top of it (--parent {actual} --advance {name}), re-applying \
+             your edits to the content at {actual} rather than re-sending your old files"
         ),
         None => format!(
             "ref {name} does not exist, so it does not name this commit's parent, and this commit \
@@ -765,8 +767,8 @@ pub(crate) fn git_import_error(e: ImportError, git_path: &str, git_ref: &str) ->
             imported,
             last,
         } => {
-            // A journal append the filesystem refused for good (ruling M16-R8) is mended by its
-            // fix, which the hint names before the run again that resumes.
+            // A journal append the filesystem refused for good, which running the import again
+            // meets again, is mended by its fix: the hint names it before the run that resumes.
             let fix = match &*source {
                 RepoError::Store(StoreError::NotCommitted { source }) => lasting_refusal(source),
                 _ => None,
@@ -809,7 +811,7 @@ fn source_error(e: SourceError, message: String, git_path: &str, git_ref: &str) 
             ]))
             .with_hint(refs()),
         SourceError::Unsupported(why) => unsupported(why, message, git_path),
-        SourceError::Missing { oid } => unreadable(message, Some(oid), "missing", git_path),
+        SourceError::Missing { oid } => unreadable(message, Some(oid), MISSING, git_path),
         SourceError::Corrupt { oid, .. } => unreadable(message, Some(oid), "corrupt", git_path),
         SourceError::TooLarge { oid, kind, size } => {
             let found = details([
@@ -878,11 +880,19 @@ fn convert_error(e: ConvertError, message: String, git_path: &str, git_ref: &str
             let mut found = commit_of(commit);
             found.insert("class".to_owned(), class.as_str().into());
             put_path(&mut found, &path);
+
+            // `--gitlinks refuse` decides its class whatever `--lossy` says: naming `--lossy
+            // gitlinks` alone would send that caller round again.
+            let flag = if class == LossyClass::Gitlinks {
+                " (--gitlinks drop in place of --gitlinks refuse)"
+            } else {
+                ""
+            };
             error(ErrorCode::GitImportLossy, message)
                 .with_details(found)
                 .with_hint(hint(format!(
-                    "run it again with --lossy {class} to drop or normalize it and mark the \
-                     changeset (git.lossy)"
+                    "run it again with --lossy {class}{flag} to drop or normalize it and mark \
+                     the changeset (git.lossy)"
                 )))
         }
         ConvertError::Parents { commit, parents } => {
@@ -914,18 +924,32 @@ fn convert_error(e: ConvertError, message: String, git_path: &str, git_ref: &str
     }
 }
 
+/// The `reason` of an `E_GIT_READ` for an object the repository lacks.
+const MISSING: &str = "missing";
+
 /// `E_GIT_READ`: the source could not give an object, `object` when there is one, for `reason`
-/// (`missing`, `corrupt`, `malformed` or `io`); the hint checks the repository, but after an
-/// `io` failure, which names no object.
+/// ([`MISSING`], `corrupt`, `malformed` or `io`); the hint checks the repository, but after an
+/// `io` failure, which names no object. For a missing object it also names the fetch that gets
+/// what a partial clone left out, where `fsck` finds nothing wrong.
 fn unreadable(message: String, object: Option<GitOid>, reason: &str, git_path: &str) -> OpError {
     let mut found = details([("reason", reason.into())]);
     let Some(object) = object else {
         return error(ErrorCode::GitRead, message).with_details(found);
     };
     found.insert("object".to_owned(), object.to_string().into());
+
+    let path = shell_word(git_path);
+    let check = if reason == MISSING {
+        format!(
+            "git -C {path} fsck; in a partial clone, which fsck passes, git -C {path} fetch \
+             --refetch --no-filter <remote> gets the objects left out"
+        )
+    } else {
+        format!("git -C {path} fsck")
+    };
     error(ErrorCode::GitRead, message)
         .with_details(found)
-        .with_hint(hint(format!("git -C {} fsck", shell_word(git_path))))
+        .with_hint(hint(check))
 }
 
 /// The operations-spec error for a `git export` of `source_ref` into the branch `branch` of the
@@ -994,7 +1018,8 @@ impl Diverged<'_> {
     /// `E_GIT_EXPORT_DIVERGED` (exit 3), the branch being one of the repository at `git_path` and
     /// the head `source_ref`'s: `details` name the reason, the branch, the commit it names (null
     /// for a branch deleted while the export wrote), the head and, when the branch holds the
-    /// export of a changeset, that changeset; the hint is the next step the reason calls for.
+    /// export of a changeset, that changeset; the hint is the next step the reason calls for. A
+    /// tag that names another commit is no divergence: `E_EXISTS` ([`tag_exists`]).
     fn error(self, message: String, git_path: &str, source_ref: &str) -> OpError {
         let Diverged {
             branch,
@@ -1013,6 +1038,7 @@ impl Diverged<'_> {
         ]);
         let mut message = message;
         let next = match reason {
+            DivergedReason::TagExists => return tag_exists(branch, git_head, head, &path),
             DivergedReason::BranchAhead { exported } => {
                 found.insert("exported_changeset".to_owned(), exported.to_string().into());
                 format!(
@@ -1061,6 +1087,31 @@ impl Diverged<'_> {
     }
 }
 
+/// `E_EXISTS` for an export that is not forced to the tag `tag` of the repository at `path` (a
+/// shell word), which names `git_head`, another commit than the export of `head`: a tag is
+/// created, and moved only by force. `details` name the `reason` (`tag_exists`), the tag as git
+/// names it (`ref`), the commit it names and the head; nothing was written.
+fn tag_exists(tag: &str, git_head: GitOid, head: ChangesetId, path: &str) -> OpError {
+    let full = format!("refs/tags/{tag}");
+    let found = details([
+        ("reason", DivergedReason::TagExists.as_str().into()),
+        ("ref", full.as_str().into()),
+        ("git_head", git_head.to_string().into()),
+        ("head_changeset", head.to_string().into()),
+    ]);
+    let message = format!(
+        "the tag {tag} exists and names {git_head}, not the export of {head}: a tag is not moved \
+         unless forced, so nothing was written"
+    );
+    let next = format!(
+        "git -C {path} show-ref {} shows what the tag names; --force moves it to the export",
+        shell_word(&full)
+    );
+    error(ErrorCode::ExistsAlready, message)
+        .with_details(found)
+        .with_hint(hint(next))
+}
+
 /// [`git_export_error`] for the repository's failure `e`, whose message is `message`: the
 /// repository at `git_path`, whose branch `branch` the export writes.
 fn sink_error(e: SinkError, message: String, git_path: &str, branch: &str) -> OpError {
@@ -1103,7 +1154,7 @@ fn sink_error(e: SinkError, message: String, git_path: &str, branch: &str) -> Op
                 "git -C {path} for-each-ref lists the refs in the way; export to another branch \
                  (--branch <name>)"
             ))),
-        SinkError::Missing { oid } => unreadable(message, Some(oid), "missing", git_path),
+        SinkError::Missing { oid } => unreadable(message, Some(oid), MISSING, git_path),
         SinkError::Corrupt { oid, .. } => unreadable(message, Some(oid), "corrupt", git_path),
         SinkError::Read { .. } => unreadable(message, None, "io", git_path),
         SinkError::Write { what, .. } => error(ErrorCode::GitWrite, message)
@@ -1349,7 +1400,8 @@ fn rejected(reason: RejectReason, said: Said, remote: &str) -> OpError {
         }
         RejectReason::Unclassified => "details.stderr_tail gives what git said",
         RejectReason::BadObjects => {
-            "the remote sent objects git refuses; nothing was moved; fix the remote's history"
+            "the remote sent objects git refuses, or the store's mirror holds a corrupt one \
+             (details.stderr_tail says which); nothing was moved"
         }
         _ => {
             let message = format!("the remote {remote:?} refused ({})", reason.as_str());
@@ -2164,8 +2216,9 @@ mod tests {
     /// meets again, for want of permission (`EACCES`, `EPERM`) or as a read-only filesystem
     /// (`EROFS`), and that the store cut back, committed nothing all the same: `E_IO`, exit 1,
     /// not retryable, `committed: false`, naming the append, with a hint that says what to fix
-    /// before running it again (ruling M16-R8). Any other failure there, `EIO` or `ENOSPC`, stays
-    /// the retryable `E_IO_TRANSIENT`.
+    /// before running it again (retryable means that running the same command again can
+    /// succeed). Any other failure there, such as `EIO` or `ENOSPC`, stays the retryable
+    /// `E_IO_TRANSIENT`.
     #[test]
     fn a_journal_append_refused_for_good_is_e_io_and_not_committed() {
         let not_committed = |errno| {
@@ -2206,7 +2259,8 @@ mod tests {
                 "errno {errno}: {hint}"
             );
         }
-        for errno in [5, 28] {
+        // EIO, ENOSPC, ENOENT, ETIMEDOUT, EINTR, EPIPE, EAGAIN: a wider lasting set fails here.
+        for errno in [5, 28, 2, 110, 4, 32, 11] {
             let error = not_committed(errno);
             assert_eq!(
                 (error.code.as_str(), error.exit, error.retryable),
@@ -2387,11 +2441,25 @@ mod tests {
         assert_eq!(rev_hint("main~3"), "swarmops log main");
     }
 
+    /// What [`RESUME_HINT`] says, spelled out: comparing the constant with itself pins nothing.
+    const RESUMES: &str =
+        "run the same git import again: it continues after the last committed frame";
+
     /// The source repository and git ids the `git import` mapping tests name.
     const GIT_PATH: &str = "/nonexistent/swarmops-test/repo.git";
     const GIT_REF: &str = "stable";
     const COMMIT: GitOid = GitOid::new([0x11; 20]);
     const OBJECT: GitOid = GitOid::new([0x22; 20]);
+
+    /// The hint of an object of [`GIT_PATH`] that does not hash to its id or does not parse.
+    const FSCK_HINT: &str = "git -C /nonexistent/swarmops-test/repo.git fsck";
+
+    /// The hint of an object [`GIT_PATH`] lacks: `fsck`, which reports nothing in a partial
+    /// clone, then the fetch that gets what the clone left out.
+    const MISSING_HINT: &str = "git -C /nonexistent/swarmops-test/repo.git fsck; in a partial \
+                                clone, which fsck passes, git -C \
+                                /nonexistent/swarmops-test/repo.git fetch --refetch --no-filter \
+                                <remote> gets the objects left out";
 
     /// `e`, a `git import` of [`GIT_REF`] from [`GIT_PATH`] that failed, maps to `code`: its
     /// string, exit code and retry advice, and `details` as `want`; the error.
@@ -2468,14 +2536,14 @@ mod tests {
             let missing = read(SourceError::Missing { oid: OBJECT });
             let want = json!({"reason": "missing", "object": object});
             let error = git_maps(missing, ErrorCode::GitRead, &want);
-            let fsck = "git -C /nonexistent/swarmops-test/repo.git fsck";
-            assert_eq!(error.hint.as_deref(), Some(fsck));
+            assert_eq!(error.hint.as_deref(), Some(MISSING_HINT));
             let corrupt = read(SourceError::Corrupt {
                 oid: OBJECT,
                 reason: "its bytes hash to another id".into(),
             });
             let want = json!({"reason": "corrupt", "object": object});
-            git_maps(corrupt, ErrorCode::GitRead, &want);
+            let error = git_maps(corrupt, ErrorCode::GitRead, &want);
+            assert_eq!(error.hint.as_deref(), Some(FSCK_HINT));
             let failed = read(SourceError::Io {
                 reason: "Input/output error".into(),
             });
@@ -2637,9 +2705,8 @@ mod tests {
     /// A store failure stops an import with the code the operations give it, saying how far the
     /// import got (`imported`, `last_commit`, null when no frame committed) beside its own
     /// details, and hinting to run it again, but where it found the store damaged, and only after
-    /// what to fix where the filesystem refused a journal append for good (ruling M16-R8); a frame
-    /// that committed and failed after its commit point is `E_IO` with `committed: true` and its
-    /// warnings.
+    /// what to fix where the filesystem refused a journal append for good; a frame that committed
+    /// and failed after its commit point is `E_IO` with `committed: true` and its warnings.
     #[test]
     fn git_import_store_failures_say_how_far_it_got() {
         use serde_json::json;
@@ -2654,7 +2721,7 @@ mod tests {
         let busy = stopped(StoreError::Busy, 2, Some(COMMIT));
         let error = git_maps(busy, ErrorCode::Busy, &want);
         assert!(error.message.contains("after 2 commits"), "{error:?}");
-        assert_eq!(error.hint.as_deref(), Some(RESUME_HINT));
+        assert_eq!(error.hint.as_deref(), Some(RESUMES));
         let cut = StoreError::NotCommitted {
             source: IoFailure::new(
                 FileOp::Fs(FsMethod::AppendDurable),
@@ -2670,7 +2737,7 @@ mod tests {
             "last_commit": null,
         });
         let error = git_maps(stopped(cut, 0, None), ErrorCode::IoTransient, &want);
-        assert_eq!(error.hint.as_deref(), Some(RESUME_HINT));
+        assert_eq!(error.hint.as_deref(), Some(RESUMES));
         let refused = StoreError::NotCommitted {
             source: IoFailure::new(
                 FileOp::Fs(FsMethod::AppendDurable),
@@ -2679,8 +2746,7 @@ mod tests {
             ),
         };
         let error = git_maps(stopped(refused, 0, None), ErrorCode::Io, &want);
-        let fix_first =
-            format!("make the store's files writable for this user, then {RESUME_HINT}");
+        let fix_first = format!("make the store's files writable for this user, then {RESUMES}");
         assert_eq!(error.hint.as_deref(), Some(fix_first.as_str()));
         let damaged = StoreError::Corrupt {
             id: ObjectId::new([9; 32]),
@@ -2705,7 +2771,7 @@ mod tests {
             "last_commit": commit,
         });
         let error = git_maps(post, ErrorCode::Io, &want);
-        assert_eq!(error.hint.as_deref(), Some(RESUME_HINT));
+        assert_eq!(error.hint.as_deref(), Some(RESUMES));
     }
 
     /// `e`, a `git export` of `main` into the branch `main` of [`GIT_PATH`] that failed, maps to
@@ -2904,8 +2970,7 @@ mod tests {
         let missing = sink(SinkError::Missing { oid: OBJECT });
         let want = json!({"reason": "missing", "object": object});
         let error = export_maps(missing, ErrorCode::GitRead, &want);
-        let fsck = "git -C /nonexistent/swarmops-test/repo.git fsck";
-        assert_eq!(error.hint.as_deref(), Some(fsck));
+        assert_eq!(error.hint.as_deref(), Some(MISSING_HINT));
         let corrupt = sink(SinkError::Corrupt {
             oid: OBJECT,
             reason: "it is empty".into(),
@@ -2917,6 +2982,118 @@ mod tests {
             reason: "Input/output error".into(),
         });
         export_maps(unread, ErrorCode::GitRead, &json!({"reason": "io"}));
+    }
+
+    /// A gitlink refused is not mended by `--lossy gitlinks` where `--gitlinks refuse` is given,
+    /// which decides the class whatever `--lossy` says: the hint names `--gitlinks drop` too. No
+    /// other class's hint names that flag.
+    #[test]
+    fn a_refused_gitlink_hint_names_the_flag_that_decides() {
+        use swarmops_git::LossyClass;
+
+        let hint_of = |class| {
+            let lossy = ConvertError::Lossy {
+                commit: COMMIT,
+                class,
+                path: b"lib/sub".to_vec(),
+                detail: "what is wrong".into(),
+            };
+            let error = git_import_error(ImportError::Convert(lossy), GIT_PATH, GIT_REF);
+            error.hint.unwrap_or_default()
+        };
+
+        let gitlinks = hint_of(LossyClass::Gitlinks);
+        assert_eq!(
+            gitlinks,
+            "run it again with --lossy gitlinks (--gitlinks drop in place of --gitlinks refuse) \
+             to drop or normalize it and mark the changeset (git.lossy)"
+        );
+        let paths = hint_of(LossyClass::Paths);
+        assert_eq!(
+            paths,
+            "run it again with --lossy paths to drop or normalize it and mark the changeset \
+             (git.lossy)"
+        );
+    }
+
+    /// A commit without a parent whose `advance` ref exists is not told that the ref moved: the
+    /// message says what the ref names and gives both causes, a ref that moved and a commit that
+    /// has no parent.
+    #[test]
+    fn a_ref_that_exists_under_a_root_commit_is_not_said_to_have_moved() {
+        let e = RepoError::RefMoved {
+            name: "main".into(),
+            actual: Some(id()),
+            recovered: Box::default(),
+        };
+        let error = repo_error(e, During::Op);
+        let said = format!(
+            "ref main names {}, which is not this commit's first parent (the ref moved, or the \
+             commit has no parent and the ref exists), so this commit recorded nothing: ",
+            id()
+        );
+        assert!(error.message.starts_with(&said), "{error:?}");
+        assert!(!error.message.contains("moved to"), "{error:?}");
+    }
+
+    /// A tag that names another commit is not moved by an export that is not forced:
+    /// `E_EXISTS`, exit 1 and not retryable, naming the tag as git does (`details.ref`), the
+    /// commit it names and the source's head, with a message that names no branch.
+    #[test]
+    fn a_tag_that_names_another_commit_is_e_exists() {
+        use serde_json::json;
+
+        let head = ChangesetId::new(ObjectId::new([7; 32]));
+        let exists = ExportError::Diverged {
+            branch: "v1".into(),
+            git_head: COMMIT,
+            head,
+            reason: DivergedReason::TagExists,
+        };
+        let shown = format!("{exists:?}");
+        let error = git_export_error(exists, GIT_PATH, "tags/v1", "v1");
+        assert_eq!(
+            (error.code.as_str(), error.exit, error.retryable),
+            ("E_EXISTS", 1, false),
+            "{shown}"
+        );
+        let want = json!({
+            "reason": "tag_exists",
+            "ref": "refs/tags/v1",
+            "git_head": COMMIT.to_string(),
+            "head_changeset": head.to_string(),
+        });
+        assert_eq!(Value::Object(error.details), want, "{shown}");
+        let said = format!("the tag v1 exists and names {COMMIT}, not the export of {head}");
+        assert!(error.message.starts_with(&said), "{}", error.message);
+        assert!(!error.message.contains("branch"), "{}", error.message);
+        let hint = error.hint.unwrap_or_default();
+        assert!(
+            hint.contains("refs/tags/v1") && hint.contains("--force"),
+            "{hint}"
+        );
+    }
+
+    /// `bad_objects` is also what a corrupt object the store's mirror already holds gives: the
+    /// hint names the mirror beside the remote, and where git said which.
+    #[test]
+    fn a_bad_objects_hint_names_the_mirror_too() {
+        let refused = TransportError::Rejected {
+            reason: RejectReason::BadObjects,
+            refs: Vec::new(),
+            remote_messages: Vec::new(),
+            git_exit: None,
+            stderr_tail: String::new(),
+            token_env_unset: false,
+        };
+        let refused = transport_error(refused, "origin", Phase::Fetch);
+        assert_eq!(
+            refused.hint.as_deref(),
+            Some(
+                "the remote sent objects git refuses, or the store's mirror holds a corrupt one \
+                 (details.stderr_tail says which); nothing was moved"
+            )
+        );
     }
 
     // ---- The git remotes (M13) ----
