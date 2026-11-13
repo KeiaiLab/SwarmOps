@@ -238,9 +238,9 @@ fn table_row(row: &Row) -> String {
         code(&format!("git {}", row.git)),
         classes.join(", "),
         or_empty(lines.join(BETWEEN)),
-        or_empty(row.op.map(code).unwrap_or_default()),
+        or_empty(row.op.map_or_default(code)),
         code(&example),
-        or_empty(hint(row).map(|hint| code(&hint)).unwrap_or_default()),
+        or_empty(hint(row).map_or_default(|hint| code(&hint))),
     ];
     format!("| {} |", cells.join(" | "))
 }
