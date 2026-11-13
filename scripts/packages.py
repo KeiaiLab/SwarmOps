@@ -4,7 +4,7 @@
 # ///
 """Makes the .deb and .rpm packages of a SwarmOps release archive, and installs them in containers.
 
-    python3 -I scripts/packages.py build <archive> <out dir> [--kit <dir>]
+    python3 -I scripts/packages.py build [--in-image] <archive> <out dir> [--kit <dir>]
     python3 -I scripts/packages.py smoke <version> <package>... [--kit <dir>]
 
 `build` reads `swarmops-<version>-<target>.tar.gz`, as the release workflow packs it, and writes
@@ -17,6 +17,9 @@ date (the tagged commit's), with fixed modes. The dependencies are the binaries'
 library their ELF dynamic section needs, and for glibc the newest version they need that is not
 weak. A library the script does not know, a binary of another machine, an entry the archive
 should not hold or a version the formats cannot carry fails the run before anything is written.
+With `--in-image` the same build runs inside the `package-build` image
+packaging/entrance/Dockerfile names (docker, no network), so that the xz bytes come from that
+image's Python and liblzma and not from the host's.
 
 Beside them it writes the server kit's packages, `swarmops-server_<version>_<arch>.deb` and
 `swarmops-server-<version>-1.<arch>.rpm`, dated and ordered alike: every file each `MANIFEST`
@@ -54,6 +57,7 @@ import hashlib
 import io
 import lzma
 import math
+import os
 import platform
 import re
 import secrets
@@ -1062,6 +1066,37 @@ def build(archive: Path, out: Path, kit: Path) -> None:
         print(f"{name}: {len(data)} bytes, {what}")
 
 
+class Where(enum.Enum):
+    """Where `build` runs."""
+
+    HOST = "host"  # this Python, this liblzma
+    IMAGE = "image"  # the `package-build` image's, pinned by digest
+
+
+def build_in_image(archive: Path, out: Path, kit: Path) -> None:
+    """Runs `build` in the `package-build` image: the checkout read-only, the archive's directory
+    read-only, `out` writable and owned by the caller, no network."""
+    archive, out, kit = archive.resolve(), out.resolve(), kit.resolve()
+    if not kit.is_relative_to(ROOT):
+        raise Failure(f"--in-image reads the kit from the checkout: {kit} is outside it")
+    out.mkdir(parents=True, exist_ok=True)
+
+    # 1. The mounts: /src the checkout, /archive the archive's directory, /out the packages.
+    argv = ["docker", "run", "--rm", "--network", Network.NONE.value,
+            "--user", f"{os.getuid()}:{os.getgid()}",
+            "--volume", f"{ROOT}:/src:ro", "--volume", f"{archive.parent}:/archive:ro",
+            "--volume", f"{out}:/out", image(Stage.BUILD),
+            "python3", "-I", "/src/scripts/packages.py", "build", f"/archive/{archive.name}",
+            "/out", "--kit", f"/src/{kit.relative_to(ROOT)}"]
+
+    # 2. The run: its output is the build's, its exit status too.
+    print(f"[{image(Stage.BUILD).split('@')[0]}] $ {shlex.join(argv[argv.index('python3'):])}",
+          flush=True)
+    done = subprocess.run(argv, timeout=COMMAND_TIMEOUT, check=False)
+    if done.returncode != 0:
+        raise Failure(f"the build in {image(Stage.BUILD)} exited {done.returncode}")
+
+
 def image(stage: Stage) -> str:
     """The image `IMAGES` names for `stage`, which must be pinned by digest."""
     lines = (IMAGE_LINE.fullmatch(line.strip()) for line in IMAGES.read_text().splitlines())
@@ -1384,6 +1419,9 @@ def main() -> int:
     make.add_argument("archive", type=Path)
     make.add_argument("out", type=Path)
     make.add_argument("--kit", type=Path, default=KIT, help="the server kit (packaging/server)")
+    make.add_argument("--in-image", dest="where", action="store_const", const=Where.IMAGE,
+                      default=Where.HOST,
+                      help="build in the package-build image packaging/entrance/Dockerfile names")
     test = commands.add_parser("smoke", help="install one target's packages in containers")
     test.add_argument("version")
     test.add_argument("packages", type=Path, nargs="+")
@@ -1391,7 +1429,9 @@ def main() -> int:
     args = parser.parse_args()
 
     try:
-        if args.command == "build":
+        if args.command == "build" and args.where is Where.IMAGE:
+            build_in_image(args.archive, args.out, args.kit)
+        elif args.command == "build":
             build(args.archive, args.out, args.kit)
         else:
             smoke(args.version, args.packages, args.kit)

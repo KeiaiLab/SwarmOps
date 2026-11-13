@@ -939,3 +939,39 @@ fn the_release_check_finds_each_gap() {
         assert_eq!(release_problems(gap).len(), 1, "{gap}");
     }
 }
+
+/// How a workflow makes the packages: `scripts/packages.py build`, run inside the
+/// `package-build` image `IMAGES` names, so that the bytes depend on that image's Python and
+/// liblzma and not on the runner's.
+const PACKAGE_BUILD: &str = "scripts/packages.py build";
+
+/// The flag of `PACKAGE_BUILD` that runs it in the pinned image.
+const IN_IMAGE: &str = "--in-image";
+
+/// The shell lines of `workflow` that make packages without `IN_IMAGE`, one line each.
+fn unpinned_builds(workflow: &str) -> Vec<String> {
+    shell_lines(workflow)
+        .into_iter()
+        .filter(|line| line.contains(PACKAGE_BUILD))
+        .filter(|line| !line.contains(&format!("{PACKAGE_BUILD} {IN_IMAGE} ")))
+        .map(|line| line.trim().to_string())
+        .collect()
+}
+
+/// release.yml makes its packages in the pinned image, never with the runner's Python.
+#[test]
+fn the_packages_are_built_in_the_pinned_image() {
+    let release = read(".github/workflows/release.yml");
+    let builds = shell_lines(&release)
+        .into_iter()
+        .filter(|line| line.contains(PACKAGE_BUILD))
+        .count();
+    assert!(builds > 0, "release.yml runs no `{PACKAGE_BUILD}`");
+    assert_eq!(unpinned_builds(&release), Vec::<String>::new());
+
+    // The check itself: a build on the runner is found, one in the image is not.
+    let runner = "          python3 -I scripts/packages.py build \"archive/$a\" dist\n";
+    let image = "          python3 -I scripts/packages.py build --in-image \"archive/$a\" dist\n";
+    assert_eq!(unpinned_builds(runner).len(), 1, "{runner}");
+    assert_eq!(unpinned_builds(image), Vec::<String>::new());
+}

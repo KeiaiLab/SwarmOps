@@ -64,7 +64,9 @@ the macOS build waits, and nothing is published without it.
 4. **Makes and installs the packages** (job `packages <target>`, one per Linux target):
    [`scripts/packages.py`](scripts/packages.py) makes `swarmops_X.Y.Z_<arch>.deb` and
    `swarmops-X.Y.Z-1.<arch>.rpm` (`amd64` and `x86_64`, `arm64` and `aarch64`) from the target's
-   archive alone, checked against its SHA-256 first: the archive's binaries, byte for byte, in
+   archive alone, checked against its SHA-256 first, inside the `package-build` image pinned by
+   digest (Python 3.12 and Debian 12's liblzma, not the runner's) without a network: the
+   archive's binaries, byte for byte, in
    `/usr/bin`, and its `LICENSE`, `THIRD-PARTY-LICENSES`, `README.md` and `CHANGELOG.md` in
    `/usr/share/doc/swarmops`, where the `.deb` adds `copyright`, both license files in Debian's
    machine-readable copyright format, which images without `/usr/share/doc` keep; entries sorted,

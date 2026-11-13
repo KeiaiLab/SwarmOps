@@ -27,9 +27,9 @@
 # release.yml calls) run inside an ubuntu:24.04 container pinned by digest, the image whose glibc
 # README's install section is measured against; they install the cross compiler, QEMU and the pinned
 # toolchain there and build into the container's own filesystem, which goes with the container. The
-# packages jobs run on the runner, which starts their install containers. Every image digest has
-# one source, packaging/entrance/Dockerfile, which Dependabot moves; `just check` fails while a
-# workflow names another. The rustup-init release is build.yml's, moved by hand with
+# packages jobs run on the runner, which starts their build and install containers. Every image
+# digest has one source, packaging/entrance/Dockerfile, which Dependabot moves; `just check` fails
+# while a workflow names another. The rustup-init release is build.yml's, moved by hand with
 # scheduled.yml's.
 #
 # The macOS build alone runs elsewhere: on the maintainers' own Mac, through a self-hosted runner
@@ -477,10 +477,12 @@ jobs:
             "$RUNNER_TEMP/smoke" "$RUNNER_TEMP/unpacked" dist
 
   # One target's .deb and .rpm, made by scripts/packages.py from that target's archive alone (its
-  # binaries and files, byte for byte, dated at the tagged commit), then each installed with dpkg
-  # or rpm in a container pinned by digest (packaging/entrance/Dockerfile's): Debian 12, and
-  # AlmaLinux 9, whose glibc 2.34 is README's floor. Both binaries must print the version, the
-  # packages verify (rpm's seeing a tampered binary) and remove cleanly. The aarch64 packages are
+  # binaries and files, byte for byte, dated at the tagged commit) inside the package-build image
+  # pinned by digest, without a network, so that its Python and liblzma, not the runner's, write
+  # the xz bytes; then each installed with dpkg or rpm in a container pinned by digest
+  # (packaging/entrance/Dockerfile's): Debian 12, and AlmaLinux 9, whose glibc 2.34 is README's
+  # floor. Both binaries must print the version, the packages verify (rpm's seeing a tampered
+  # binary) and remove cleanly. The aarch64 packages are
   # installed for aarch64 (Debian's multiarch, an AlmaLinux root of that architecture, whose glibc
   # rpm checks the dependencies against) and run under QEMU; those two containers download from
   # the distributions' mirrors.
@@ -515,7 +517,7 @@ jobs:
         run: |
           archive="swarmops-$VERSION-$TARGET_TRIPLE.tar.gz"
           (cd archive && sha256sum --check --strict -- "$archive.sha256")
-          python3 -I scripts/packages.py build "archive/$archive" dist
+          python3 -I scripts/packages.py build --in-image "archive/$archive" dist
           cd dist
           for package in *.deb *.rpm; do
             sha256sum -- "$package" >"$package.sha256"
