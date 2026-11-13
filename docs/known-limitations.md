@@ -1109,9 +1109,14 @@ left).
   own object writes on the same filesystem. *Target: M1.6's quiet-window runs (docs/perf.md),
   then M2's journal-sync decision, both deferred until after the pilot. Found: M1 Task 7b.*
 - **Commit-path costs.** Every commit's materialization scans the index tail; and the reflog
-  walks frames past the snapshot only to drop them. *Target: M2's measured decision on them (its
-  plan's Task 3), deferred until after the pilot. Found: M1 Tasks 2c and 3; deferred again by
-  Task 8.*
+  walks frames past the snapshot only to drop them. M2's decision 18, on the `history` bench, keeps
+  the commit path as it is: the interpolation search's `find` hit is 64 % below a bisection's at
+  1,000,000 changesets (2.58 against 7.23 µs), and a full 1,024-record tail adds 0.05 % to the
+  in-lock p50 (the bound is 5 %). The reflog walk is over its 1 ms bound: `reflog(100)` takes
+  30.9 ms at 200,000 changesets and 154 ms at 1,000,000
+  ([perf.md](perf.md#v010--just-perf-in-a-quiet-window-2026-10-21)). *Target: revisited with
+  FORMAT 3, whose per-ref index the walk needs (M20). Found: M1 Tasks 2c and 3; decided by M2's
+  decision 18.*
 - **Compaction rewrites both sorted views under the writer lock, on FORMAT 1 and 2.** When the
   index's unsorted tail passes 1,024 records, the writer that holds the lock merges it into the sorted views and
   writes them anew before it lets go, so the writers queued behind it wait for a rewrite that
