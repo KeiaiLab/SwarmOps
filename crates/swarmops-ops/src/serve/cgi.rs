@@ -188,7 +188,7 @@ fn parse_path(path_info: &str) -> Result<CgiRequest, OpError> {
     })
 }
 
-/// [`parse_path`] for the fuzz targets: the store's name and its smart request, or the refusal.
+/// `parse_path` for the fuzz targets: the store's name and its smart request, or the refusal.
 #[cfg(feature = "fuzzing")]
 pub fn fuzz_parse_path(path_info: &str) -> Result<(String, &'static str), OpError> {
     parse_path(path_info).map(|request| (request.store, request.rest))

@@ -458,7 +458,7 @@ fn read_updates(input: &mut impl BufRead) -> Result<Vec<Command>, OpError> {
     Ok(commands)
 }
 
-/// [`read_updates`] for the fuzz targets: the commands of `pre-receive`'s `input`.
+/// `read_updates` for the fuzz targets: the commands of `pre-receive`'s `input`.
 #[cfg(feature = "fuzzing")]
 pub fn fuzz_read_updates(input: &mut impl BufRead) -> Result<Vec<Command>, OpError> {
     read_updates(input)
