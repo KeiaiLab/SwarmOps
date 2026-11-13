@@ -1552,7 +1552,7 @@ fn binary(value: u64) -> Option<String> {
     units
         .iter()
         .find(|(_, size)| value >= *size && value.is_multiple_of(*size))
-        .map(|(name, size)| format!("{} {name}", value / size))
+        .map(|(name, size)| format!("{} {name}", grouped(value / size)))
 }
 
 /// A number with a comma between each three digits: `65,535`.
@@ -1765,6 +1765,10 @@ fn words_are_sound() {
     assert_eq!(grouped(999), "999");
     assert_eq!(amount(64 << 20, Unit::Bytes), "67,108,864 bytes (64 MiB)");
     assert_eq!(amount(255, Unit::Bytes), "255 bytes");
+    assert_eq!(
+        amount(31_746 * KIB, Unit::Bytes),
+        "32,507,904 bytes (31,746 KiB)"
+    );
     assert_eq!(evaluate("const A: u64 = 24 * 1024;"), Some(24_576));
     assert_eq!(evaluate("const A: u64 = 16 << 20;"), Some(16 << 20));
     assert_eq!(
