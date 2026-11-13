@@ -5,12 +5,15 @@
 import type { Metadata, Viewport } from 'next';
 import type { ReactNode } from 'react';
 import { SiteScript } from '@/components/site-script';
-import { SITE_NAME, SITE_TAGLINE, SITE_URL } from '@/lib/site';
+import { SITE_NAME, SITE_TAGLINE, SITE_TITLE, SITE_URL } from '@/lib/site';
 import './global.css';
+
+// The claim after the name, in running case: `SwarmOps: version control for swarms of coding agents`.
+const DEFAULT_TITLE = `${SITE_NAME}: ${SITE_TITLE.charAt(0).toLowerCase()}${SITE_TITLE.slice(1)}`;
 
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),
-  title: { default: `${SITE_NAME}: version control for swarms of coding agents`, template: `%s | ${SITE_NAME}` },
+  title: { default: DEFAULT_TITLE, template: `%s | ${SITE_NAME}` },
   description: SITE_TAGLINE,
   icons: {
     icon: [

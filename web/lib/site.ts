@@ -6,8 +6,7 @@ export const SITE_URL = 'https://swarmops.cc';
 
 // The claim, once (site design, section 0).
 export const SITE_TITLE = 'Version control for swarms of coding agents';
-export const SITE_TAGLINE =
-  'Version control for swarms of coding agents: many writers, one store, one JSON envelope per command.';
+export const SITE_TAGLINE = `${SITE_TITLE}: many writers, one store, one JSON envelope per command.`;
 
 // Install: the installer line and the platforms it serves (scripts/install.sh).
 export const INSTALL_LINE = 'curl -fsSL https://get.swarmops.cc/install.sh | bash';
