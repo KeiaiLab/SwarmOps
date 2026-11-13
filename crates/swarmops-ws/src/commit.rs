@@ -66,8 +66,8 @@ enum OffPrefixes {
 enum Sent {
     /// Put alone before the commit; whether that wrote it.
     Put(bool),
-    /// Carried in the commit request.
-    Inline(ContentInput),
+    /// Carried in the commit request: the content, and how many entries have yet to take it.
+    Inline(ContentInput, u64),
 }
 
 /// One path the commit writes or removes.
@@ -137,9 +137,9 @@ impl Edits {
         ctx: &Ctx<'_>,
         ws: &Workspace,
     ) -> Result<Vec<ChangeInput>, OpError> {
-        let sent = upload(ctx, ws, &self.entries, INLINE_BYTES)?;
+        let mut sent = upload(ctx, ws, &self.entries, INLINE_BYTES)?;
         (self.entries.iter())
-            .map(|entry| change_input(entry, &sent))
+            .map(|entry| change_input(entry, &mut sent))
             .collect()
     }
 
@@ -281,14 +281,14 @@ fn send(
     key: String,
 ) -> Result<(CommitResp, u64), OpError> {
     // 1. The blobs the store lacks: inline under the budget, put alone past it.
-    let sent = upload(ctx, ws, entries, INLINE_BYTES)?;
+    let mut sent = upload(ctx, ws, entries, INLINE_BYTES)?;
     let puts = (sent.values())
         .filter(|sent| matches!(sent, Sent::Put(true)))
         .count();
 
     // 2. The commit, by blob id or inline, on the head's full id.
     let changes = (entries.iter())
-        .map(|entry| change_input(entry, &sent))
+        .map(|entry| change_input(entry, &mut sent))
         .collect::<Result<_, _>>()?;
     let mut req = CommitReq::new(changes, message);
     req.parent = Some(ws.file.head.as_str().into());
@@ -599,7 +599,7 @@ fn upload(
         let cost = u64::try_from(len).unwrap_or(u64::MAX).saturating_mul(held);
         if cost <= left {
             left -= cost;
-            sent.insert(id, Sent::Inline(content));
+            sent.insert(id, Sent::Inline(content, held));
             continue;
         }
         let put = ctx.store.blob_put(&ws.who, BlobPutReq::new(content))?;
@@ -609,9 +609,9 @@ fn upload(
 }
 
 /// The change list's line of `entry`: a put in its kind, of the content `sent` carries inline
-/// for its blob or else by blob id, or a delete. `E_INTERNAL` for a kind this build does not
-/// know.
-fn change_input(entry: &Entry, sent: &HashMap<String, Sent>) -> Result<ChangeInput, OpError> {
+/// for its blob (taken from `sent`) or else by blob id, or a delete. `E_INTERNAL` for a kind
+/// this build does not know.
+fn change_input(entry: &Entry, sent: &mut HashMap<String, Sent>) -> Result<ChangeInput, OpError> {
     let Some((kind, blob)) = entry.put else {
         return Ok(ChangeInput::new(entry.path.clone(), ChangeOp::Delete));
     };
@@ -622,14 +622,36 @@ fn change_input(entry: &Entry, sent: &HashMap<String, Sent>) -> Result<ChangeInp
         _ => return Err(unknown_variant("FileKind")),
     };
     let id = ObjectId::new(blob).to_hex();
-    let content = match sent.get(&id) {
-        Some(Sent::Inline(content)) if entry.host.is_some() => content.clone(),
-        _ => ContentInput::Blob(id),
+    let inline = if entry.host.is_some() {
+        take_inline(sent, &id)
+    } else {
+        None
     };
+    let content = inline.unwrap_or(ContentInput::Blob(id));
     let mut out = ChangeInput::new(entry.path.clone(), ChangeOp::Put);
     out.content = Some(content);
     out.mode = Some(mode);
     Ok(out)
+}
+
+/// The content `sent` carries inline for blob `id`, for one of the entries holding it: moved
+/// out for the last of them, so that a request holds each text once per entry and `sent` keeps
+/// no second copy. None when the blob is not inline.
+fn take_inline(sent: &mut HashMap<String, Sent>, id: &str) -> Option<ContentInput> {
+    // 1. An entry before the last: a copy, which the budget counted.
+    let Some(Sent::Inline(content, left)) = sent.get_mut(id) else {
+        return None;
+    };
+    if *left > 1 {
+        *left -= 1;
+        return Some(content.clone());
+    }
+
+    // 2. The last: the text itself.
+    match sent.remove(id) {
+        Some(Sent::Inline(content, _)) => Some(content),
+        _ => None,
+    }
 }
 
 /// The index's rows after the commit of `entries`: a removal's row gone, a put's row its kind
@@ -758,7 +780,7 @@ mod tests {
         for text in ["one\n", "two\n"] {
             assert!(matches!(
                 sent[&id_of(text)],
-                Sent::Inline(ContentInput::Inline(_))
+                Sent::Inline(ContentInput::Inline(_), 1)
             ));
         }
 
@@ -766,6 +788,59 @@ mod tests {
         let ids = vec![id_of(&big), id_of("one\n"), id_of("two\n")];
         let present = ops.blob_has(BlobHasReq::new(ids)).unwrap().present;
         assert_eq!(present, [id_of(&big)]);
+    }
+
+    /// Content carried inline moves into the change list: the last entry holding a blob takes
+    /// the text that was read, so the request is the only copy; an entry before it takes a
+    /// copy, which the budget counted.
+    #[test]
+    fn inline_content_moves_into_the_changes() {
+        // 1. `a` and `b` hold one blob, `c` another; all three read from the host.
+        let meta = crate::hostfs::HostMeta {
+            kind: crate::hostfs::HostKind::File,
+            size: 7,
+            mtime_ns: 15,
+            inode: 7,
+            mode: 0o644,
+        };
+        let entry = |path: &str, fill| Entry {
+            path: path.to_owned(),
+            put: Some((FileKind::File, [fill; 32])),
+            host: Some(HostFile {
+                kind: FileKind::File,
+                meta,
+                blob: None,
+            }),
+        };
+        let entries = [entry("a", 1), entry("b", 1), entry("c", 2)];
+
+        // 2. Both blobs inline, as an upload leaves them; where their text is.
+        let shared = "shared\n".to_owned();
+        let alone = "alone\n".to_owned();
+        let read = [shared.as_ptr(), alone.as_ptr()];
+        let id_of = |fill| ObjectId::new([fill; 32]).to_hex();
+        let mut sent = HashMap::from([
+            (id_of(1), Sent::Inline(ContentInput::Inline(shared), 2)),
+            (id_of(2), Sent::Inline(ContentInput::Inline(alone), 1)),
+        ]);
+
+        // 3. The change list: every entry inline.
+        let changes: Vec<ChangeInput> = (entries.iter())
+            .map(|entry| change_input(entry, &mut sent).unwrap())
+            .collect();
+        let text_of = |change: &ChangeInput| match &change.content {
+            Some(ContentInput::Inline(text)) => (text.clone(), text.as_ptr()),
+            other => panic!("{} is not inline: {other:?}", change.path),
+        };
+        let texts: Vec<(String, *const u8)> = changes.iter().map(text_of).collect();
+        let held: Vec<&str> = texts.iter().map(|(text, _)| text.as_str()).collect();
+        assert_eq!(held, ["shared\n", "shared\n", "alone\n"]);
+
+        // 4. The last holder of each blob has the text that was read; nothing is left behind.
+        assert_ne!(texts[0].1, read[0], "the first holder takes a copy");
+        assert_eq!(texts[1].1, read[0], "the last holder takes the text read");
+        assert_eq!(texts[2].1, read[1], "the only holder takes the text read");
+        assert!(sent.is_empty(), "no inline content is left behind");
     }
 
     /// A put's row takes the scan's stat of its file; a removal's row goes; a mode-only put
