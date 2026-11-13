@@ -259,6 +259,34 @@ impl Access {
         error.details.insert("ref".to_owned(), name.into());
         Err(error)
     }
+
+    /// Whether `who` may upload objects over the native wire: a grant that names `who` gives
+    /// `push` or `land` on some ref (the native sync design §1 N8). `E_AUTH` if no grant names
+    /// `who`; `E_POLICY_DENIED` `{identity, action}` if none of them does.
+    pub(crate) fn check_upload(&self, who: &Identity) -> Result<(), OpError> {
+        let agent = who.agent();
+        let mine = (self.grants.iter()).filter(|grant| grant.who.iter().any(|p| p.matches(agent)));
+        let mut named = false;
+        for grant in mine {
+            if !grant.push.is_empty() || !grant.land.is_empty() {
+                return Ok(());
+            }
+            named = true;
+        }
+
+        // No grant uploads: unnamed, as `check` says it, or named and not granted.
+        if !named {
+            return self.check(who, Action::Push, MAIN);
+        }
+        let mut error = refused(
+            ErrorCode::PolicyDenied,
+            "not_granted",
+            format!("{agent} may not upload: no grant gives push or land"),
+        );
+        error.details.insert("identity".to_owned(), agent.into());
+        error.details.insert("action".to_owned(), "upload".into());
+        Err(error)
+    }
 }
 
 /// The grant `file` gives, its patterns checked against `text`'s lines.

@@ -54,6 +54,7 @@ mod serve_land;
 mod serve_load;
 #[cfg(feature = "test-hooks")]
 mod serve_lock;
+mod serve_native;
 mod serve_perf;
 mod serve_pins;
 mod serve_prepare;

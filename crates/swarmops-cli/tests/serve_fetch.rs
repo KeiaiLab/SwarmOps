@@ -106,22 +106,38 @@ fn serve_requires_root() {
     }
 }
 
-/// `swarmops serve --stdio`, the store-to-store sync, is M11's: refused `not_served`, asked for
-/// through the forced command or on the line.
+/// `swarmops serve --stdio '<store>'`, asked for through the forced command, answers native
+/// sync's wire, one envelope line per request; `--stdio` on serve's own line is refused
+/// `not_served`, since an ssh client asks for it.
 #[test]
-fn serve_refuses_stdio_until_m11() {
+fn serve_stdio_answers_the_wire() {
+    // 1. A store the agent may read.
     let root = TempDir::new().unwrap();
+    let store = root.path().join(STORE);
+    support::run(&["init", store.to_str().unwrap()], &[]).ok();
+    fs::write(store.join("access.toml"), ACCESS).unwrap();
     let root = root.path().to_str().unwrap();
     let line = ["serve", "--root", root, "--as", AGENT];
-    let asked = support::run(&line, &[(SSH_ORIGINAL_COMMAND, "swarmops serve --stdio")]);
+
+    // 2. Through the forced command: the hello's answer.
+    let hello = json!({"op": "wire_hello", "api": 1, "protocol": 1, "req": {
+        "protocol_min": 1, "protocol_max": 1, "object_kinds": [], "features": []}});
+    let command = format!("swarmops serve --stdio '{STORE}'");
+    let env = [(SSH_ORIGINAL_COMMAND, command.as_str())];
+    let asked = support::run_bin(support::BIN, &line, &env, &format!("{hello}\n"));
+    assert_eq!(asked.exit(), 0, "{asked}");
+    let answer: Value = serde_json::from_str(asked.stdout.trim_end()).unwrap();
+    assert_eq!(answer["ok"], true, "{asked}");
+    assert_eq!(answer["result"]["identity"], AGENT, "{asked}");
+
+    // 3. On the line: refused.
     let flagged = support::run(&[&line[..], &["--stdio"]].concat(), &[]);
-    for run in [asked, flagged] {
-        assert_eq!(run.exit(), 2, "{run}");
-        let (text, error) = refusal(&run);
-        assert!(text.starts_with("E_INVALID_ARG: "), "{run}");
-        assert_eq!(error["details"]["reason"], "not_served", "{run}");
-        assert!(!text.contains(root), "no host path: {run}");
-    }
+    assert_eq!(flagged.exit(), 2, "{flagged}");
+    let (text, error) = refusal(&flagged);
+    assert!(text.starts_with("E_INVALID_ARG: "), "{flagged}");
+    assert!(text.contains("forced command"), "{flagged}");
+    assert_eq!(error["details"]["reason"], "not_served", "{flagged}");
+    assert!(!text.contains(root), "no host path: {flagged}");
 }
 
 /// The serving account's `SWARMOPS_AGENT` names no caller: without `--as`, a connection is

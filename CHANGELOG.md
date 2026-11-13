@@ -67,6 +67,12 @@ collects the changes on `stable` that no release holds yet, until the next relea
   keeps the object (the annotated tags design §2.3, §2.4). A tag of a tag, of a tree or blob, or
   of a commit that would export as another is refused; FORMAT 2 peels the tag as before, with
   the warning `annotated_tag_peeled`.
+- `swarmops serve` answers native sync's wire when the ssh client asks for
+  `swarmops serve --stdio '<store>'` through the key's forced command (the native sync design
+  §2): `wire_hello`, `wire_refs`, `wire_list`, `wire_get`, `wire_has`, `wire_put`, `wire_land`
+  and `wire_move`, one envelope line per request. Only objects a listed ref reaches are sent; a
+  land is keyed by its target and head (`ss1-`); a move follows `ref set`'s rules, `main` never
+  forced or deleted. No host connects to it yet.
 
 ### Changed
 

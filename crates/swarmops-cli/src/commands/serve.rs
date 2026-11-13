@@ -128,12 +128,13 @@ fn invocation(
     env: Env<'_>,
     args: ServeArgs,
 ) -> Result<ServeInvocation, OpError> {
-    // 1. --stdio is M11's.
+    // 1. --stdio is what an ssh client asks for, never serve's own line.
     if args.stdio {
         return Err(reason(
             ErrorCode::InvalidArg,
             "not_served",
-            "serve --stdio, the store-to-store sync, is not served yet",
+            "serve --stdio is what an ssh client asks for: serve runs it as the key's forced \
+             command",
         ));
     }
 

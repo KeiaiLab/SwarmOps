@@ -3,7 +3,7 @@
 //! as the `pre-receive` and `proc-receive` hooks git runs inside a push.
 //!
 //! ```text
-//! ServeInvocation ─▶ run: 1 identity ─▶ 2 request ─▶ upload | receive (ssh) · cgi · hook
+//! ServeInvocation ─▶ run: 1 identity ─▶ 2 request ─▶ upload | receive | native (ssh) · cgi · hook
 //!                                                       3 store ─▶ 4 access ─▶ 5 git ─▶ 6 refresh
 //! ```
 //!
@@ -24,6 +24,7 @@ pub mod entry;
 pub mod guard;
 pub mod hook;
 pub mod land;
+pub mod native;
 mod packcache;
 pub mod prepare;
 pub mod push;
@@ -173,14 +174,14 @@ pub fn run(invocation: &ServeInvocation) -> Result<Served, OpError> {
 
     // 2. The request, then the service's steps: store, access, git, refresh.
     match &invocation.entry {
-        Entry::Ssh { original_command } => {
-            let request = entry::parse_ssh(original_command)?;
-            match request.service {
+        Entry::Ssh { original_command } => match entry::parse_command(original_command)? {
+            entry::SshCommand::Native { store } => native::run(invocation, &who, &store),
+            entry::SshCommand::Git(request) => match request.service {
                 Service::UploadPack => upload::run(invocation, &who, &request),
                 Service::ReceivePack => receive::run(invocation, &who, &request),
                 _ => Err(not_built("this git service over ssh")),
-            }
-        }
+            },
+        },
         Entry::Cgi { .. } => cgi::run(invocation, &who),
         Entry::Hook => hook::run(invocation, &who),
         Entry::PreReceive => hook::pre_receive(invocation, &who),
