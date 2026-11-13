@@ -192,7 +192,9 @@ pub enum FrameUse {
     Frame(usize),
     /// No frame: its answer records nothing (a move refused, a changeset already present).
     NoFrame,
-    /// Declined: its waiter runs it again alone ([`Serve::OwnOnly`]).
+    /// Declined: its waiter runs it again alone ([`Serve::OwnOnly`]). For a member its lead
+    /// could not plan in this batch, never for one whose error a run alone would meet again:
+    /// that one is [`FrameUse::NoFrame`], the error in its answer's body.
     Declined,
 }
 
