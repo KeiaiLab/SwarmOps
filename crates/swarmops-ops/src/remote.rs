@@ -27,6 +27,11 @@
 //!     init (or open, to resume) ──▶ lock ──▶ remote add ──▶ fetch ──▶ import into main
 //! ```
 //!
+//! A `so://` remote is native sync's (the native sync design §2): it has no mirror and follows
+//! `main` unless told otherwise; its fetch adopts the upstream's changesets with their ids and
+//! moves the tracking refs `remote/<remote>/<ref>` (`crate::native`'s fetch), and its clone makes
+//! `main` at the followed branch's head.
+//!
 //! `remotes.toml` is read and written whole, through the store's own filesystem seam
 //! ([`swarmops_repo::Repo::store_fs`]), and only under the mirror's lock when written, so two
 //! writers never lose each other's line. A key this build does not know is kept when read and
@@ -51,6 +56,7 @@ use swarmops_store::{IoFailure, SYSTEM_GIT, StoreError};
 
 use crate::error::{self, Phase};
 use crate::local::{LocalOps, Recording, Resolved};
+use crate::native;
 
 /// The store's file of remotes, in its root; the `store_file` its errors name.
 const REMOTES_TOML: &str = "remotes.toml";
@@ -180,7 +186,7 @@ impl LocalOps {
         let at = Utf8Path::new(&path);
 
         // 1. Every argument checked before anything is made.
-        RemoteUrl::parse(&url).map_err(error::url_refused)?;
+        check_url(&url)?;
         check_name(&remote)?;
         check_token_env(token_env.as_deref())?;
         if let Some(branch) = &branch {
@@ -254,9 +260,12 @@ impl Recording<'_> {
         };
 
         // 2. Its mirror refs first: a crash before the file's write leaves the remote, which
-        // the next fetch fills again.
-        let (mirror, _) = ready(mirror, &lock)?;
-        let removed_refs = mirror.remove_remote(&name).map_err(error::mirror_error)?;
+        // the next fetch fills again. A native remote has no mirror.
+        let mut removed_refs = 0;
+        if !native::url::is_native(&file.remotes[at].url) {
+            let (mirror, _) = ready(mirror, &lock)?;
+            removed_refs = mirror.remove_remote(&name).map_err(error::mirror_error)?;
+        }
 
         // 3. Its line.
         file.remotes.remove(at);
@@ -274,7 +283,8 @@ impl Recording<'_> {
 
     /// `fetch`: the remote's branches and tags into the mirror, and its followed branch's
     /// commits into the store, under the mirror's lock, which it takes. It needs no identity:
-    /// it moves no ref and records no agent.
+    /// it moves no ref and records no agent. A native remote's fetch moves its tracking refs and
+    /// makes its tags, recorded as moved by `remote/<remote>`.
     pub fn fetch(&self, req: FetchReq) -> Result<FetchResp, OpError> {
         let FetchReq { remote, .. } = req;
         let remote = self.remote(&remote)?;
@@ -300,7 +310,7 @@ impl Recording<'_> {
 
         // 1. The arguments, then the name's uniqueness.
         check_name(&name)?;
-        let parsed = RemoteUrl::parse(&url).map_err(error::url_refused)?;
+        let native = check_url(&url)?;
         check_token_env(token_env.as_deref())?;
         if let Some(branch) = &branch {
             check_branch(branch)?;
@@ -311,16 +321,12 @@ impl Recording<'_> {
         }
 
         // 2. The mirror, made first; then the followed branch, the remote's default when none
-        // is given (a network call).
-        let (_, mut warnings) = ready(self.mirror()?, lock)?;
-        let branch = if let Some(branch) = branch {
-            branch
-        } else {
-            let mut cred = Credential::default();
-            cred.token_env.clone_from(&token_env);
-            let (branch, unknown) = default_branch(&parsed, &cred, &name)?;
-            warnings.extend(unknown);
-            branch
+        // is given (a network call). A native remote has no mirror, and follows main.
+        let (branch, warnings) = match native {
+            Wire::Native => (branch.unwrap_or_else(|| MAIN.to_owned()), Vec::new()),
+            Wire::Git(parsed) => {
+                self.git_branch(lock, &parsed, branch, &name, token_env.as_deref())?
+            }
         };
 
         // 3. Recorded.
@@ -332,12 +338,38 @@ impl Recording<'_> {
         Ok(info)
     }
 
+    /// A git remote's mirror, made, and its followed branch: `branch`, else the remote's
+    /// default (a network call); with the warnings of both.
+    fn git_branch(
+        &self,
+        lock: &MirrorLock,
+        parsed: &RemoteUrl,
+        branch: Option<String>,
+        name: &str,
+        token_env: Option<&str>,
+    ) -> Result<(String, Vec<String>), OpError> {
+        let (_, mut warnings) = ready(self.mirror()?, lock)?;
+        let branch = if let Some(branch) = branch {
+            branch
+        } else {
+            let mut cred = Credential::default();
+            cred.token_env = token_env.map(str::to_owned);
+            let (branch, unknown) = default_branch(parsed, &cred, name)?;
+            warnings.extend(unknown);
+            branch
+        };
+        Ok((branch, warnings))
+    }
+
     /// `fetch` of `remote` under the mirror's `lock`, which the caller holds.
     pub(crate) fn fetch_locked(
         &self,
         lock: &MirrorLock,
         remote: &RemoteInfo,
     ) -> Result<FetchResp, OpError> {
+        if native::url::is_native(&remote.url) {
+            return self.fetch_native(remote);
+        }
         let name = remote.name.as_str();
         let failed = |e| error::transport_error(e, name, Phase::Fetch);
 
@@ -432,7 +464,15 @@ impl Recording<'_> {
         // no main.
         let mut imported = fetched.imported;
         let mut main = None;
-        if fetched.head.is_some() {
+        let native_head = (fetched.head.as_ref()).filter(|_| native::url::is_native(&remote.url));
+        if let Some(head) = native_head {
+            let head = head
+                .changeset
+                .parse()
+                .map_err(|_| error::error(ErrorCode::Internal, "the fetch gave no changeset id"))?;
+            self.clone_main(ChangesetId::new(head), who)?;
+            main = Some(head.to_string());
+        } else if fetched.head.is_some() {
             let git_ref = tracking_ref(&remote.name, &remote.branch);
             let request = ImportRequest::new(git_ref.as_str(), MAIN, who.agent());
             let report = self.import_from(&mirror, request, &remote.lossy, &git_ref)?;
@@ -538,6 +578,25 @@ impl Recording<'_> {
         fs.atomic_replace(fs.root().join(REMOTES_TOML), text.as_bytes())
             .map_err(io)
     }
+}
+
+/// Which wire a remote's URL is reached by.
+enum Wire {
+    /// Native sync (`so://`).
+    Native,
+    /// git's, at the URL as parsed.
+    Git(RemoteUrl),
+}
+
+/// Refuses a remote URL neither wire takes; else the wire that takes it.
+fn check_url(url: &str) -> Result<Wire, OpError> {
+    if native::url::is_native(url) {
+        native::url::NativeUrl::parse(url)?;
+        return Ok(Wire::Native);
+    }
+    RemoteUrl::parse(url)
+        .map(Wire::Git)
+        .map_err(error::url_refused)
 }
 
 /// `mirror` made or rebuilt under `lock`, its stale git lock files removed; with the warnings

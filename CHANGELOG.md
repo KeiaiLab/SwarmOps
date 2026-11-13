@@ -73,6 +73,15 @@ collects the changes on `stable` that no release holds yet, until the next relea
   and `wire_move`, one envelope line per request. Only objects a listed ref reaches are sent; a
   land is keyed by its target and head (`ss1-`); a move follows `ref set`'s rules, `main` never
   forced or deleted. No host connects to it yet.
+- `so://[user@]host[:port]/<store>` remotes (the native sync design §2.1, §2.4): `remote add`,
+  `clone` and `fetch` reach the store `swarmops serve --stdio` serves over ssh
+  (`$GIT_SSH_COMMAND`, else `ssh`), with no git mirror. A fetch adopts the upstream's changesets
+  under their own ids and moves the tracking refs `remote/<remote>/<ref>` (`main` and `release/*`
+  forward only, `E_REF_PROTECTED` otherwise, nothing moved); an upstream tag becomes the host tag
+  of its name when absent, and one that differs is kept and named in `tag_differs`. A cut fetch run
+  again asks for no object it stored. Git ids in the answer are the commits the changesets export
+  to. A server without native sync is `E_REMOTE_REJECTED` `not_native`, with no fallback;
+  `push` and `sync` of a `so://` remote come later.
 
 ### Changed
 

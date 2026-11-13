@@ -11,10 +11,14 @@
 //! - [`link`]: the [`Link`](link::Link) a host calls the upstream through.
 //! - `chunk`: the chunk layout that carries blobs and changesets.
 //! - `key`: the land key the upstream lands a change under.
+//! - `url`, `ssh`, `fetch`: a host's `so://` remote, its ssh session, and its fetch.
 
 pub(crate) mod chunk;
+pub(crate) mod fetch;
 pub(crate) mod key;
 pub mod link;
+pub(crate) mod ssh;
+pub(crate) mod url;
 
 use swarmops_api::{ErrorCode, OpError};
 
