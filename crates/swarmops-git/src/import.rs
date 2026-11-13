@@ -77,8 +77,9 @@
 //! [`ImportError::PostCommit`]), saying how far it got. It never writes again after such a
 //! failure: storage spec §2 rule 5's fail-stop assumption goes unchecked until M6. The same
 //! import run again continues after the frames that committed. A commit the conversion refuses
-//! ([`ImportError::Convert`]) ends the import before the frame that would hold it; the frames
-//! before it stay recorded, but the refusal does not say how many commits they hold.
+//! ends the import before the frame that would hold it; the frames before it stay recorded, and
+//! the refusal says how many commits they hold ([`ImportError::Refused`]), or that none did
+//! ([`ImportError::Convert`]).
 //!
 //! The export oids of steps 1 to 3 are derived from the store's own objects, as the export
 //! derives them: the import asks for one only where the target's head is native, or holds a git
@@ -321,25 +322,36 @@ impl LossyCommit {
     }
 }
 
-/// Why an import failed. A store failure and a failure after a frame's commit point say how far
-/// it got ([`ImportError::Store`], [`ImportError::PostCommit`]); a refusal of the conversion does
-/// not ([`ImportError::Convert`]), though frames may be recorded before it.
+/// Why an import failed. A store failure, a failure after a frame's commit point and a refusal
+/// of the conversion after a frame committed say how far it got ([`ImportError::Store`],
+/// [`ImportError::PostCommit`], [`ImportError::Refused`]); a refusal before any frame committed
+/// recorded nothing ([`ImportError::Convert`]).
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ImportError {
     /// The source could not open, resolve or read what the import needs: the ref names nothing,
     /// the repository is one the import does not read, an object is missing or damaged. Raised
     /// before any frame: no changeset was recorded. A read the conversion makes fails as
-    /// [`ImportError::Convert`] ([`ConvertError::Source`]).
+    /// [`ImportError::Convert`] or [`ImportError::Refused`] ([`ConvertError::Source`]).
     #[error(transparent)]
     Source(#[from] SourceError),
     /// The conversion refused a commit: content of a class the request does not allow, content
-    /// no class covers, or an object it could not read. The frames before the one that would hold
-    /// it are recorded, with their external ids, but the refusal does not say how many commits
-    /// they hold; the same import run again, once the refusal is dealt with, continues after
-    /// them.
+    /// no class covers, or an object it could not read. No frame of this run committed: nothing
+    /// was recorded. A refusal after one did is [`ImportError::Refused`].
     #[error(transparent)]
     Convert(#[from] ConvertError),
+    /// The conversion refused a commit, as [`ImportError::Convert`], after frames of this run
+    /// had committed: they stay recorded, with their external ids, and the same import run
+    /// again, once the refusal is dealt with, continues after them.
+    #[error("{source}; {imported} commits were recorded before it, the last {last}")]
+    Refused {
+        /// The refusal, boxed: it would make every result of the import larger.
+        source: Box<ConvertError>,
+        /// How many commits the frames that committed recorded.
+        imported: u64,
+        /// The last commit of the last frame that committed.
+        last: GitOid,
+    },
     /// The target is no ref name the store takes, or a remote-tracking one, which only a fetch
     /// moves. A name only a later format takes is [`ImportError::Store`]
     /// ([`StoreError::FormatRequired`]), with nothing recorded. Nothing was read or written.
@@ -620,7 +632,10 @@ fn import_tip(
     let span = Span::start(Phase::ImportConvert);
     while !rest.is_empty() {
         let (commits, after) = rest.split_at(size.min(rest.len()));
-        let took = run.frame(commits)?;
+        let took = match run.frame(commits) {
+            Ok(took) => took,
+            Err(e) => return Err(run.counted(e)),
+        };
         size = next_frame(req.step_budget, commits.len(), took, ceiling);
         rest = after;
     }
@@ -1275,6 +1290,19 @@ impl<'a, 's> Run<'a, 's> {
     /// The import's failure `source`, which stops it after the frames that committed.
     fn stopped(&self, source: RepoError) -> ImportError {
         stopped(source, self.imported, self.last)
+    }
+
+    /// `e`, a frame's failure, saying how far the run got: a refusal after a frame committed
+    /// counts the frames ([`ImportError::Refused`]); before one, nothing was recorded.
+    fn counted(&self, e: ImportError) -> ImportError {
+        match (e, self.last) {
+            (ImportError::Convert(source), Some(last)) => ImportError::Refused {
+                source: Box::new(source),
+                imported: self.imported,
+                last,
+            },
+            (e, _) => e,
+        }
     }
 
     /// One frame: `commits` converted, their objects stored, their changesets recorded in one

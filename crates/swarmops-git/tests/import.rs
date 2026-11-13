@@ -1745,6 +1745,54 @@ fn a_lossy_base_seeds_no_import() {
     assert_eq!(blobs, BTreeSet::from([readme, two]));
 }
 
+/// A commit refused after frames of the run committed says how far the run got: the frames'
+/// commits stay recorded, the refusal counts them and names the last, and the same import run
+/// again once the refusal is dealt with takes only the refused commit.
+#[test]
+fn a_refusal_after_a_frame_says_how_far_it_got() {
+    let mut source = MemSource::default();
+
+    // 1. Two plain commits, then one holding a gitlink, one commit a frame.
+    let one = source.blob(b"one\n");
+    let first_tree = source.tree(&[("100644", b"a.txt", one)]);
+    let first = source.commit(first_tree, &[], "first\n");
+    let two = source.blob(b"two\n");
+    let second_tree = source.tree(&[("100644", b"a.txt", two)]);
+    let second = source.commit(second_tree, &[first], "second\n");
+    let linked_tree = source.tree(&[("100644", b"a.txt", two), ("160000", b"sub", one)]);
+    let linked = source.commit(linked_tree, &[second], "linked\n");
+    let (_dir, _root, repo) = new_repo();
+    let mut req = request(&linked.to_string());
+    req.frame_changesets = 1;
+    req.step_budget = Duration::MAX;
+
+    // 2. Refused, with the two frames before it counted.
+    let error = import(&repo, &source, &req).unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            ImportError::Refused { source, imported: 2, last }
+                if *last == second
+                    && matches!(
+                        **source,
+                        ConvertError::Lossy { class: LossyClass::Gitlinks, .. }
+                    )
+        ),
+        "{error:?}"
+    );
+    assert!(
+        error.to_string().contains("2 commits were recorded"),
+        "{error}"
+    );
+    assert_eq!(repo.info().expect("info").changesets, 2);
+
+    // 3. Run again with the class allowed: the walk stops at the second, known; the third is
+    // taken.
+    req.lossy = [LossyClass::Gitlinks].into_iter().collect();
+    let report = import(&repo, &source, &req).expect("import");
+    assert_eq!((report.imported, report.skipped), (1, 1), "{report:?}");
+}
+
 /// Without `gitlinks` allowed, the commit that holds one is refused by name, and nothing of the
 /// frame that would hold it is written.
 #[test]
