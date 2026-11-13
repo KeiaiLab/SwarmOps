@@ -2090,6 +2090,42 @@ mod tests {
         assert_eq!(path, ["git", "import"]);
     }
 
+    /// Every `--lossy` value but `all` maps to the class of its own name, and every class has
+    /// one: a swapped arm (`paths` to modes) or a class no value names fails here.
+    #[test]
+    fn every_lossy_value_maps_to_its_class() {
+        let mut named = Vec::new();
+        for &arg in LossyArg::value_variants() {
+            let value = arg.to_possible_value().expect("every value is shown");
+            let name = value.get_name();
+
+            // `all` names no class of its own.
+            let Some(class) = arg.class() else {
+                assert_eq!(name, "all", "only all maps to no class");
+                continue;
+            };
+            assert_eq!(class.as_str(), name, "--lossy {name}");
+            named.push(class);
+        }
+        assert_eq!(named, LossyClass::ALL, "one value per class, in order");
+    }
+
+    /// `cat --lines` takes two decimal line numbers, A-B: a sign, a missing number or a third
+    /// is a usage error of `cat`.
+    #[test]
+    fn a_line_range_is_two_decimal_numbers() {
+        assert_eq!(line_range("10-20"), Ok(LineRange::new(10, 20)));
+        for refused in ["+5-6", "5-+6", "3", "-3", "3-", "a-b", "5-6-7", " 5-6"] {
+            assert!(line_range(refused).is_err(), "{refused:?} is refused");
+        }
+        let line = args(&["cat", "main:a", "--lines", "+5-6"]);
+        let Parsed::Usage { error, path, .. } = parse(&line) else {
+            panic!("--lines +5-6: a usage error");
+        };
+        assert_eq!(error.kind(), ErrorKind::ValueValidation);
+        assert_eq!(path, ["cat"]);
+    }
+
     /// A `git export` line: its defaults (`main` into `main`, not forced), and `--ref`, `--branch`
     /// and `--force` given.
     #[test]
