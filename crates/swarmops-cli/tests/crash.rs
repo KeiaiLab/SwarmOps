@@ -882,10 +882,6 @@ fn queue_names(store: &Store) -> Vec<String> {
     names
 }
 
-/// How many calls past its dry run's count the batch sweep crashes the leader at: a run's count
-/// varies by one or so.
-const CALLS_SLACK: u64 = 3;
-
 /// Whether queue file `name` has extension `ext`: `req`, `com` or `ans`.
 fn is_kind(name: &str, ext: &str) -> bool {
     !name.starts_with('.') && Path::new(name).extension().is_some_and(|e| e == ext)
@@ -964,7 +960,8 @@ struct BatchRun {
 
 /// One run of the batch sweep on a copy of the template: the seeds' requests in its queue,
 /// flocked by this test as their live waiters would, the leader's land run with `hooks` (the
-/// lead-wait hook asking for the two). Then the seeds' flocks go, and each land runs again:
+/// lead-wait hook asking for the two) at the sweep's fixed time, so that it makes the same
+/// filesystem calls in every run. Then the seeds' flocks go, and each land runs again:
 /// the store verifies clean after the crash and after, `main` holds each key once, in the
 /// batch's order, and the next write's janitor empties the queue.
 fn batch_run(seeded: &Seeded, what: &str, hooks: &[(&str, &str)]) -> BatchRun {
@@ -983,9 +980,10 @@ fn batch_run(seeded: &Seeded, what: &str, hooks: &[(&str, &str)]) -> BatchRun {
         })
         .collect();
 
-    // 2. The leader.
-    let seeds = SEEDS.to_string();
-    let mut env = vec![(LEAD_WAIT_ENV, seeds.as_str())];
+    // 2. The leader, signing at the sweep's fixed time: the ids of the changesets it makes,
+    // so the fan-out directories it syncs, are the same in every run.
+    let (seeds, now) = (SEEDS.to_string(), NOW.to_string());
+    let mut env = vec![(LEAD_WAIT_ENV, seeds.as_str()), (NOW_ENV, now.as_str())];
     env.extend_from_slice(hooks);
     let land = batch_land(&store, seeded, 0);
     let land: Vec<&str> = land.iter().map(String::as_str).collect();
@@ -1106,15 +1104,17 @@ per_format! {
 /// A batch led through the binary lands each member once whatever call crashes it (the M18 D2
 /// design §5.1): the leader's `land --key`, `SWARMOPS_TEST_LEAD_WAIT=2`, leads the requests of
 /// two waiting `land --key` runs (seeded, [`seeded_template`]) and crashes at each call k of
-/// the N its dry run makes, and of [`CALLS_SLACK`] more. The leader's count of calls is not
-/// the same in every run: on a loaded host one run made one call fewer than another (92 and
-/// 93), so a run may finish a little before N or crash a little past it. After each, every
-/// land run again leaves the three keys on `main` once, in the batch's order (the leader's,
-/// then the seeds' oldest first), the store clean, and the queue empty after the next write.
-/// The dry run answered both seeds (their answers stay: no waiter reads them); the sweep
-/// crashes up to about N, finishes at its end, and reaches a crash that left claimed requests
-/// (`.com`) and one that left an answer (`.ans`), among them the design's cuts C2 (claims under
-/// way) and C8 (every answer written, the manifest left), read by [`cut_of`].
+/// the N its dry run makes, and at one past them, which no run reaches. The leader makes the
+/// same N calls in every run because it signs at a fixed time ([`batch_run`]). Signing at the
+/// clock's, it made changesets whose ids changed from run to run, and a run in which two of the
+/// objects it wrote fell in one fan-out directory synced one directory fewer: 92 calls where
+/// another run made 93. After each, every land run again leaves the three keys on `main` once,
+/// in the batch's order (the leader's, then the seeds' oldest first), the store clean, and the
+/// queue empty after the next write. The dry run answered both seeds (their answers stay: no
+/// waiter reads them); the sweep crashes at each of the N calls, finishes past them, and
+/// reaches a crash that left claimed requests (`.com`) and one that left an answer (`.ans`),
+/// among them the design's cuts C2 (claims under way) and C8 (every answer written, the
+/// manifest left), read by [`cut_of`].
 fn a_batch_led_through_the_binary_crashing_at_any_call_lands_each_once(format) {
     let seeded = seeded_template(format);
 
@@ -1127,18 +1127,18 @@ fn a_batch_led_through_the_binary_crashing_at_any_call_lands_each_once(format) {
     let calls = reported_calls(Path::new(&file));
     assert!(calls > 40, "a batch of three lands makes many calls: {calls}");
 
-    // 2. A crash at each call, and a few past the dry run's count.
-    let runs = sweep(1..=calls + CALLS_SLACK, |k| {
+    // 2. A crash at each call, and one past the dry run's count.
+    let runs = sweep(1..=calls + 1, |k| {
         let crash_at = k.to_string();
         let ran = batch_run(&seeded, &format!("k={k} of {calls}"), &[(CRASH_AT_ENV, &crash_at)]);
         (k, ran)
     });
     let first_finished = runs.iter().find(|(_, ran)| ran.finished).map(|&(k, _)| k);
-    assert!(
-        first_finished.is_some_and(|k| k + CALLS_SLACK > calls),
-        "the first run to finish crashed at k={first_finished:?} of {calls}"
+    assert_eq!(
+        first_finished,
+        Some(calls + 1),
+        "every run makes the dry run's {calls} calls: none finishes before a crash past them"
     );
-    assert!(runs.last().is_some_and(|(_, ran)| ran.finished), "a crash after the end");
     let left_a = |suffix: &str| {
         (runs.iter())
             .filter(|(_, ran)| !ran.finished)
