@@ -3,7 +3,8 @@
 //!
 //! ```text
 //! PATH_INFO /acme.git/git-upload-pack ─▶ 1 store `acme`, request `git-upload-pack`
-//! 2 store under --root ─▶ 3 memo key ─▶ 4 access.toml: read ─▶ 5 serve.git refreshed
+//! 2 store under --root ─▶ 3 access.toml: read ─▶ 4 git found ─▶ 5 memo key, serve.git
+//!      refreshed (steps 2 to 5: the ssh fetch side's `prepare`)
 //! 6 git http-backend: GIT_PROJECT_ROOT=<store>/git, PATH_INFO=/serve.git/git-upload-pack
 //!      ── receive-pack ──▶ proc-receive hook (SWARMOPS_SERVE_EXE · _STORE · _IDENTITY)
 //! 7 its record, from step 2 on: git/serve-records.jsonl
@@ -19,29 +20,23 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::io::Write as _;
-use std::os::unix::process::ExitStatusExt as _;
-use std::process::ExitStatus;
 
 use camino::Utf8Path;
 
 use swarmops_api::{ErrorCode, Identity, OpError};
 use swarmops_git::serve::child::{self, ChildEnv, Service};
 use swarmops_git::serve::repo::ServeRepo;
-use swarmops_git::transport::GitCli;
 
-use super::access::{Access, Action};
 use super::entry::store_under;
 use super::guard::Redactor;
 use super::receive::{MAX_PUSH_BYTES, RAYON_NUM_THREADS, SERVE_HOOK_THREADS};
 use super::records::{Connection, SWARMOPS_SERVE_CONNECTION, Side};
-use super::refresh::{Freshness, Refreshed, Scope, freshness, refresh, serve_error};
+use super::refresh::serve_error;
+use super::upload::{SERVE_GIT, exit_code, prepare};
 use super::{
     Entry, SWARMOPS_SERVE_EXE, SWARMOPS_SERVE_IDENTITY, SWARMOPS_SERVE_STORE, ServeInvocation,
     Served, refused, reply_then_step, step_store,
 };
-use crate::LocalOps;
-use crate::error;
 
 /// The CGI metavariable of the request's path below the script.
 const PATH_INFO: &str = "PATH_INFO";
@@ -71,12 +66,6 @@ const GIT_SUFFIX: &str = ".git";
 
 /// git's setting that bounds what a push sends.
 const MAX_INPUT_SIZE: &str = "receive.maxInputSize";
-
-/// The name the texts give the serving repository: never its host path.
-const SERVE_GIT: &str = "serve.git";
-
-/// The exit of a git killed by a signal: the shell's `128 + signal`.
-const SIGNAL_EXIT: i32 = 128;
 
 /// What `serve` says of a path it does not take.
 const PATH_HINT: &str = "clone, fetch or push https://<host>/<prefix>/<name>.git with git";
@@ -130,13 +119,12 @@ fn serve(
     connection: &Connection,
     redactor: &Redactor,
 ) -> Result<Served, OpError> {
-    // 3-5. The memo key, the read, serve.git refreshed.
-    let repo = prepare(invocation, who, request, store, redactor);
-    let repo = repo.map_err(|e| redactor.redact_error(e))?;
+    // 3-5. The read, git, the memo key, serve.git refreshed.
+    let prepared = prepare(invocation, who, &request.store, store, redactor);
+    let (repo, git) = prepared.map_err(|e| redactor.redact_error(e))?;
 
     // 6. git http-backend on stdin and stdout: the request's variables but its paths, then
     //    serve.git as the one repository, and for a push the hook's variables.
-    let git = GitCli::find().map_err(|e| git_error(e, redactor))?;
     let mut env = child_env(invocation, who, vars, &repo, request, store);
     env.vars.insert(
         SWARMOPS_SERVE_CONNECTION.to_owned(),
@@ -211,44 +199,6 @@ fn not_smart_http() -> OpError {
     .with_hint(PATH_HINT)
 }
 
-/// Steps 2 to 5: the store at `store`, which `request` names, opened with its memo key, `who`'s
-/// read checked, and its `serve.git` refreshed (its hook made or replaced on the way); what the
-/// refresh warns of goes to stderr, the web server's log, masked by `redactor`. The serving
-/// repository; the store is closed again before git starts.
-fn prepare(
-    invocation: &ServeInvocation,
-    who: &Identity,
-    request: &CgiRequest,
-    store: &Utf8Path,
-    redactor: &Redactor,
-) -> Result<ServeRepo, OpError> {
-    // 2. The store, which the request named under the root.
-    let ops = LocalOps::open(store)?;
-
-    // 3. Its memo key, kept by the serving account outside the store.
-    let repo_id = ops.repo.info().map_err(error::op)?.repo_id;
-    let ops = match (invocation.memo_keys)(&repo_id)? {
-        Some(key) => ops.with_memo_key(key),
-        None => ops,
-    };
-
-    // 4. The caller may read it: what it may push is the hook's to decide, ref by ref.
-    Access::load(&ops)?.check(who, Action::Read, &request.store)?;
-
-    // 5. Its serving repository, refreshed from the committed snapshot,
-    //    unless nothing moved since its last export (no lock taken then).
-    let repo = ServeRepo::open(store).map_err(serve_error)?;
-    let refreshed = match freshness(&ops, &repo)? {
-        Freshness::Current => Refreshed::default(),
-        Freshness::Stale => refresh(&ops, &repo, &Scope::All)?,
-    };
-    let mut stderr = std::io::stderr().lock();
-    for warning in refreshed.warnings {
-        let _ = writeln!(stderr, "warning: {}", redactor.redact(&warning));
-    }
-    Ok(repo)
-}
-
 /// What `http-backend` gets: the request's metavariables but its paths, `serve.git` as the
 /// project root's one repository, the hook's variables, the push bound and the hooks' threads.
 fn child_env(
@@ -299,19 +249,6 @@ fn child_env(
         OsString::from(SERVE_HOOK_THREADS.to_string()),
     );
     env
-}
-
-/// The error of finding no git to run, masked.
-fn git_error(e: swarmops_git::transport::TransportError, redactor: &Redactor) -> OpError {
-    redactor.redact_error(error::transport_error(e, SERVE_GIT, error::Phase::Fetch))
-}
-
-/// The code a request exits with: git's, or `128 + signal` for a git a signal ended.
-fn exit_code(status: ExitStatus) -> i32 {
-    status
-        .code()
-        .or_else(|| status.signal().map(|signal| SIGNAL_EXIT + signal))
-        .unwrap_or(SIGNAL_EXIT)
 }
 
 #[cfg(test)]

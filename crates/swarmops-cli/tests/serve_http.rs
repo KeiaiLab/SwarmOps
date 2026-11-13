@@ -814,3 +814,27 @@ fn http_hook_program_gone_is_masked() {
     site.push(&work, &["HEAD:refs/heads/feature/x"]);
     assert!(site.ref_names().contains(&"feature/x".to_owned()));
 }
+
+/// The check order before git starts (M14 design §2.3): the access file, then git, then the
+/// refresh. With no git to run, a caller without a read is still refused by the access file,
+/// a caller with one is told there is no git, and neither request makes or refreshes
+/// `serve.git`.
+#[test]
+fn http_checks_git_before_the_refresh() {
+    let work = TempDir::new().unwrap();
+    let no_git = work.path().join("no-git");
+    let served = ServeSite::new::<Swarmops>()
+        .with_env(&[(swarmops_testkit::remote::GIT_ENV, no_git.to_str().unwrap())]);
+    let site = Site::on(served).with_linear();
+    let refs = format!("/{STORE}.git/info/refs?service=git-upload-pack");
+    let serve_git = site.served.store(STORE).join("git/serve.git");
+
+    for (who, code) in [(NOBODY, "E_POLICY_DENIED"), (AGENT, "E_GIT_UNSUPPORTED")] {
+        site.url(who);
+        let servers = site.servers.borrow();
+        let (_, body) = get(&servers[who], &refs);
+        assert!(body.starts_with(&format!("{code}: ")), "{who}: {body}");
+        assert!(!body.contains(&site.root()), "{who}: a host path: {body}");
+        assert!(!serve_git.exists(), "{who}: serve.git was made before git");
+    }
+}

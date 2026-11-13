@@ -2,12 +2,13 @@
 //! refreshed and its hooks in place, then git's `receive-pack` on it, which runs the hooks.
 //!
 //! ```text
-//! 1 store under --root ─▶ 2 memo key ─▶ 3 access.toml: read ─▶ 4 serve.git refreshed
-//! 5 git receive-pack ── quarantine, fsck, connectivity ──▶ pre-receive hook (serve --hook)
+//! 1 store under --root ─▶ 2 access.toml: read ─▶ 3 git found ─▶ 4 memo key
+//!      ─▶ 5 serve.git refreshed (steps 1 to 5: the fetch side's `prepare`)
+//! 6 git receive-pack ── quarantine, fsck, connectivity ──▶ pre-receive hook (serve --hook)
 //!      ── the quarantine moved into serve.git ──▶ proc-receive hook (serve --hook)
 //!      SWARMOPS_SERVE_EXE · SWARMOPS_SERVE_STORE · SWARMOPS_SERVE_IDENTITY · _CONNECTION
 //!      RAYON_NUM_THREADS = SERVE_HOOK_THREADS (4): the hooks' compression threads
-//! 6 its record, from step 1 on: git/serve-records.jsonl
+//! 7 its record, from step 1 on: git/serve-records.jsonl
 //! ```
 //!
 //! receive-pack moves no ref itself: `pre-receive` refuses the whole push while its objects are
@@ -16,28 +17,21 @@
 //! read the store is refused before git starts; what it may push is decided per ref.
 
 use std::ffi::OsString;
-use std::io::Write as _;
-use std::os::unix::process::ExitStatusExt as _;
-use std::process::ExitStatus;
 
 use camino::Utf8Path;
 
 use swarmops_api::{Identity, OpError};
 use swarmops_git::serve::child::{self, ChildEnv, Service};
-use swarmops_git::serve::repo::ServeRepo;
-use swarmops_git::transport::GitCli;
 
-use super::access::{Access, Action};
 use super::entry::{SshRequest, store_under};
 use super::guard::Redactor;
 use super::records::{Connection, SWARMOPS_SERVE_CONNECTION, Side};
-use super::refresh::{Freshness, Refreshed, Scope, freshness, refresh, serve_error};
+use super::refresh::serve_error;
+use super::upload::{exit_code, prepare};
 use super::{
     SWARMOPS_SERVE_EXE, SWARMOPS_SERVE_IDENTITY, SWARMOPS_SERVE_STORE, ServeInvocation, Served,
     reply_then_step, step_store,
 };
-use crate::LocalOps;
-use crate::error;
 
 /// The most bytes a push may send: git's `receive.maxInputSize`.
 pub const MAX_PUSH_BYTES: u64 = 2 << 30;
@@ -51,12 +45,6 @@ pub(crate) const RAYON_NUM_THREADS: &str = "RAYON_NUM_THREADS";
 
 /// git's setting that bounds what a push sends.
 const MAX_INPUT_SIZE: &str = "receive.maxInputSize";
-
-/// The name the texts give the serving repository: never its host path.
-const SERVE_GIT: &str = "serve.git";
-
-/// The exit of a git killed by a signal: the shell's `128 + signal`.
-const SIGNAL_EXIT: i32 = 128;
 
 /// Serves `request`, a `receive-pack`, to `who`.
 pub fn run(
@@ -83,12 +71,12 @@ fn serve(
     connection: &Connection,
     redactor: &Redactor,
 ) -> Result<Served, OpError> {
-    let repo = prepare(invocation, who, request, store, redactor);
-    let repo = repo.map_err(|e| redactor.redact_error(e))?;
+    // 1-5. The read, git, the memo key, serve.git refreshed.
+    let prepared = prepare(invocation, who, &request.store, store, redactor);
+    let (repo, git) = prepared.map_err(|e| redactor.redact_error(e))?;
 
-    // 5. git receive-pack, on the connection's stdin and stdout; the hook it runs learns the
+    // 6. git receive-pack, on the connection's stdin and stdout; the hook it runs learns the
     //    binary, the store and the caller from its parent.
-    let git = GitCli::find().map_err(|e| git_error(e, redactor))?;
     let mut env = ChildEnv::new();
     env.git_protocol = invocation.git_protocol.clone().map(Into::into);
     if let Some(exe) = &invocation.exe {
@@ -124,55 +112,4 @@ fn serve(
     );
     let status = status.map_err(|e| redactor.redact_error(serve_error(e)))?;
     Ok(Served::new(exit_code(status)))
-}
-
-/// Steps 1 to 4: the store at `store`, which `request` names, opened with its memo key, `who`'s
-/// read checked, and its `serve.git` refreshed (its hook made or replaced on the way); what the
-/// refresh warns of goes to stderr, masked by `redactor`. The serving repository; the store is
-/// closed again before git starts.
-fn prepare(
-    invocation: &ServeInvocation,
-    who: &Identity,
-    request: &SshRequest,
-    store: &Utf8Path,
-    redactor: &Redactor,
-) -> Result<ServeRepo, OpError> {
-    // 1. The store, which the request named under the root.
-    let ops = LocalOps::open(store)?;
-
-    // 2. Its memo key, kept by the serving account outside the store.
-    let repo_id = ops.repo.info().map_err(error::op)?.repo_id;
-    let ops = match (invocation.memo_keys)(&repo_id)? {
-        Some(key) => ops.with_memo_key(key),
-        None => ops,
-    };
-
-    // 3. The caller may read it: what it may push is the hook's to decide, ref by ref.
-    Access::load(&ops)?.check(who, Action::Read, &request.store)?;
-
-    // 4. Its serving repository, refreshed: the old values a push names are these exports,
-    //    unless nothing moved since its last export (no lock taken then).
-    let repo = ServeRepo::open(store).map_err(serve_error)?;
-    let refreshed = match freshness(&ops, &repo)? {
-        Freshness::Current => Refreshed::default(),
-        Freshness::Stale => refresh(&ops, &repo, &Scope::All)?,
-    };
-    let mut stderr = std::io::stderr().lock();
-    for warning in refreshed.warnings {
-        let _ = writeln!(stderr, "warning: {}", redactor.redact(&warning));
-    }
-    Ok(repo)
-}
-
-/// The error of finding no git to run, masked.
-fn git_error(e: swarmops_git::transport::TransportError, redactor: &Redactor) -> OpError {
-    redactor.redact_error(error::transport_error(e, SERVE_GIT, error::Phase::Push))
-}
-
-/// The code a connection exits with: git's, or `128 + signal` for a git a signal ended.
-fn exit_code(status: ExitStatus) -> i32 {
-    status
-        .code()
-        .or_else(|| status.signal().map(|signal| SIGNAL_EXIT + signal))
-        .unwrap_or(SIGNAL_EXIT)
 }
