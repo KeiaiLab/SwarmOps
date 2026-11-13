@@ -1394,6 +1394,7 @@ const ENFORCED = new Set([
   'lookup',
   'literal-size',
   'literal-space',
+  'home-primary',
   'footer-map',
   'release-links',
   'home-order',

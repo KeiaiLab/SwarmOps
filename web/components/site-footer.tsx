@@ -14,11 +14,11 @@ export function SiteFooter() {
   return (
     <footer className="mt-auto border-t border-rule-strong bg-card">
       <div className="page flex flex-col gap-10 py-12">
-        {/* 1. The site map: four columns, two under 640 px. */}
+        {/* 1. The site map: four columns, two under 640 px; groups, not sections of the page. */}
         <div className="grid grid-cols-2 gap-x-6 gap-y-8 md:grid-cols-4">
           {FOOTER_COLUMNS.map((column) => (
-            <section key={column.title} aria-labelledby={`footer-${column.title}`}>
-              <h2 id={`footer-${column.title}`} className="caption text-muted-foreground">
+            <div key={column.title}>
+              <h2 className="caption text-muted-foreground">
                 {column.title}
               </h2>
               <ul className="mt-3 flex flex-col gap-1 text-sm">
@@ -36,7 +36,7 @@ export function SiteFooter() {
                   </li>
                 ))}
               </ul>
-            </section>
+            </div>
           ))}
         </div>
 

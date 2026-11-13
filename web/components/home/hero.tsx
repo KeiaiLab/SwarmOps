@@ -1,6 +1,6 @@
 // The first screen: status line, the one h1, the benefit sentence, the install line with its
-// facts, and the action row. At 390 px the order is h1, sentence, install line, primary action;
-// the facts follow.
+// facts, and the action row; the page's opening, not one of the sections that follow it. At
+// 390 px the order is h1, sentence, install line, primary action; the facts follow.
 //
 //   Pre-release · v0.11.0 · 2026-11-09 · Linux ... · MIT
 //   # Version control for swarms of coding agents
@@ -99,7 +99,7 @@ function InstallFacts() {
 
 export function Hero() {
   return (
-    <section id="top" aria-labelledby="top-title" className="page pt-16 pb-20 max-sm:pt-8 max-sm:pb-14">
+    <div id="top" className="page pt-16 pb-20 max-sm:pt-8 max-sm:pb-14">
       {/* 1. Status, title and the sentence that says what it does. */}
       <StatusLine />
       <h1
@@ -134,6 +134,6 @@ export function Hero() {
         </div>
         <InstallFacts />
       </div>
-    </section>
+    </div>
   );
 }
