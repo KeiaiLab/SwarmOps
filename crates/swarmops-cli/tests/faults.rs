@@ -33,10 +33,12 @@
 
 use std::io;
 use std::os::unix::process::ExitStatusExt;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::process::ExitStatus;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use swarmops_store::{FAIL_AT_ENV, StoreFormat};
 use swarmops_testkit::child::SIGABRT;
 use swarmops_testkit::per_format;
@@ -62,7 +64,44 @@ const INIT_FAILURES: [&str; 3] = ["once:eio", "once:enospc", "persistent:eio"];
 
 /// What the documented aborts say on stderr: a failed journal append whose cut failed too; a
 /// failed sync of the store root after `init` linked `FORMAT`, whose taking back failed too.
+/// The first is what each of the journal's three aborts says ([`ABORT_SITES`]).
 const ABORTS: [&str; 2] = ["could not be cut back off it", "could not be taken back"];
+
+/// How many double faults abort the process: the count the architecture page and the module
+/// documentation of `swarmops mcp` give ([`ABORTS_DOCUMENTED`]).
+const ABORT_COUNT: usize = 4;
+
+/// Where the aborts are, and how many each source holds: the journal's failed frame whose cut
+/// fails too, its cut that fails while unlisted frames are written afresh and its frames written
+/// afresh that land elsewhere and cannot be cut back; and the `init` that cannot take its
+/// `FORMAT` back. Each with what it says on stderr, one of [`ABORTS`].
+const ABORT_SITES: [(&str, &str, usize); 2] = [
+    (
+        include_str!("../../swarmops-store/src/meta/journal.rs"),
+        ABORTS[0],
+        3,
+    ),
+    (
+        include_str!("../../swarmops-repo/src/repo.rs"),
+        ABORTS[1],
+        1,
+    ),
+];
+
+/// The sentences that count the aborts, each in the text that holds it.
+const ABORTS_DOCUMENTED: [(&str, &str); 2] = [
+    (
+        include_str!("../../../docs/architecture.md"),
+        "Four double faults abort the process",
+    ),
+    (include_str!("../src/mcp.rs"), "four documented aborts"),
+];
+
+/// The call that ends the process in an abort.
+const ABORT_CALL: &str = "std::process::abort();";
+
+/// How each abort's reason starts on stderr.
+const FATAL: &str = "swarmops: fatal:";
 
 /// How a run with an injected failure ended.
 #[derive(Debug)]
@@ -139,6 +178,181 @@ fn ended(run: &Run, store: &str) -> Ended {
 /// alone passes it.
 fn holds_store_path(text: &str, store: &str) -> bool {
     text.contains(store.trim_start_matches('/'))
+}
+
+/// A run made up for the oracles' own checks: one that printed `envelope` and `stderr`, and
+/// ended as `status` says (a wait status: an exit code in its second byte, or a signal).
+fn made_up(status: i32, envelope: &Value, stderr: &str) -> Run {
+    Run {
+        args: vec!["made-up".to_owned()],
+        status: ExitStatus::from_raw(status),
+        stdout: format!("{envelope}\n"),
+        stderr: stderr.to_owned(),
+    }
+}
+
+/// [`made_up`]: a run that failed with `error` (exit 1).
+fn made_up_failure(mut error: Value) -> Run {
+    error["exit"] = 1.into();
+    made_up(1 << 8, &json!({"api": 1, "ok": false, "error": error}), "")
+}
+
+/// [`made_up`]: a run that succeeded with `result`.
+fn made_up_success(result: &Value) -> Run {
+    made_up(0, &json!({"api": 1, "ok": true, "result": result}), "")
+}
+
+/// [`made_up`]: a run that aborted, saying `stderr`.
+fn made_up_abort(stderr: &str) -> Run {
+    made_up(SIGABRT, &Value::Null, stderr)
+}
+
+/// [`ended`]'s own check, on runs made up for it ([`made_up`]): it takes a success, a failure
+/// that names its file relative to the store's root, the failure of an `init` that made the
+/// store and names the path the client gave, and a documented abort; and it refuses each thing
+/// it exists to refuse, one at a time: an abort not documented, a panic, a transient failure
+/// that committed or is not retryable, a filesystem failure without its operation or with a file
+/// outside the store's root, and the store's path in an error or in a warning, with its leading
+/// `/` or without it ([`holds_store_path`]). A sweep whose oracle lost one of these checks would
+/// stay green; this test does not.
+#[test]
+fn the_fault_oracle_refuses_each_thing_it_checks() {
+    const STORE: &str = "/tmp/sweep/store";
+    let op = swarmops_store::FileOp::ALL[0].as_str();
+    let failing = |code: &str, details: Value| {
+        let retryable = code == "E_IO_TRANSIENT";
+        json!({"code": code, "retryable": retryable, "message": "no", "details": details})
+    };
+    let transient = |details: Value| failing("E_IO_TRANSIENT", details);
+    let io = |details: Value| failing("E_IO", details);
+    let made = |read: &str| {
+        let message = format!("the store at {STORE} is made, but reading it back failed: {read}");
+        let details = json!({"created": true, "fs_op": op});
+        json!({"code": "E_IO", "message": message, "hint": STORE, "details": details})
+    };
+    let not_retryable = json!({"committed": false, "fs_op": op});
+    let not_retryable =
+        json!({"code": "E_IO_TRANSIENT", "retryable": false, "details": not_retryable});
+
+    // 1. What it takes.
+    let success = made_up_success(&json!({"changeset": "c", "warnings": ["meta/journal.off"]}));
+    assert!(matches!(ended(&success, STORE), Ended::Succeeded(_)));
+    for error in [
+        transient(json!({"committed": false, "fs_op": op, "store_file": "meta/journal.log"})),
+        io(json!({"fs_op": op})),
+        made("a read failed"),
+    ] {
+        let failure = made_up_failure(error);
+        assert!(
+            matches!(ended(&failure, STORE), Ended::Failed(_)),
+            "{failure}"
+        );
+    }
+    for abort in ABORTS {
+        let aborted = made_up_abort(&format!("{FATAL} the frame {abort}: aborting"));
+        assert!(
+            matches!(ended(&aborted, STORE), Ended::Aborted),
+            "{aborted}"
+        );
+    }
+
+    // 2. What it refuses.
+    let refused = [
+        (
+            "an abort that is not documented",
+            made_up_abort("it gave up"),
+        ),
+        (
+            "a panic",
+            made_up_failure(json!({"code": "E_INTERNAL", "message": "a panic"})),
+        ),
+        (
+            "a transient failure that committed",
+            made_up_failure(transient(json!({"committed": true, "fs_op": op}))),
+        ),
+        (
+            "a transient failure that is not retryable",
+            made_up_failure(not_retryable),
+        ),
+        (
+            "a filesystem failure without its operation",
+            made_up_failure(io(json!({}))),
+        ),
+        (
+            "a filesystem failure of no operation of the store's",
+            made_up_failure(io(json!({"fs_op": "no_such_operation"}))),
+        ),
+        (
+            "an absolute store file",
+            made_up_failure(io(json!({"fs_op": op, "store_file": "/meta/journal.log"}))),
+        ),
+        (
+            "a store file above the store's root",
+            made_up_failure(io(json!({"fs_op": op, "store_file": "../store/FORMAT"}))),
+        ),
+        (
+            "the store's path in a message",
+            made_up_failure(json!({"code": "E_EXISTS", "message": format!("{STORE} is there")})),
+        ),
+        (
+            "the store's path without its leading slash, as a store file",
+            made_up_failure(io(
+                json!({"fs_op": op, "store_file": "tmp/sweep/store/FORMAT"}),
+            )),
+        ),
+        (
+            "the store's path in a warning",
+            made_up_success(&json!({"warnings": [format!("{STORE}/meta/journal.off failed")]})),
+        ),
+        (
+            "the store's path in what an init that made the store read back",
+            made_up_failure(made(&format!("{STORE}/FORMAT"))),
+        ),
+    ];
+    for (what, run) in refused {
+        let judged = catch_unwind(AssertUnwindSafe(|| ended(&run, STORE)));
+        assert!(judged.is_err(), "{what} was taken: {run}");
+    }
+
+    // 3. The path check itself, with the leading `/` and without it.
+    assert!(holds_store_path("open /tmp/sweep/store/FORMAT", STORE));
+    assert!(holds_store_path("tmp/sweep/store/FORMAT", STORE));
+    assert!(!holds_store_path("meta/journal.log", STORE));
+}
+
+/// `source` as its messages are printed: its words a space apart, without the `\\` that ends a
+/// line inside a string literal to continue it on the next.
+fn as_printed(source: &str) -> String {
+    let words: Vec<&str> = (source.split_whitespace())
+        .filter(|word| *word != "\\")
+        .collect();
+    words.join(" ")
+}
+
+/// The documented aborts are four ([`ABORT_COUNT`]): the sources hold that many abort calls and
+/// as many reasons written to stderr, each saying what the sweeps know it by ([`ABORTS`]), and
+/// the texts that count the aborts say four ([`ABORTS_DOCUMENTED`]). An abort added or removed
+/// fails here until the count, the texts and the sweeps' list are changed with it.
+#[test]
+fn the_documented_aborts_are_four() {
+    let mut aborts = 0;
+    for (source, says, count) in ABORT_SITES {
+        let source = as_printed(source);
+        let found = (
+            source.matches(ABORT_CALL).count(),
+            source.matches(FATAL).count(),
+            source.matches(says).count(),
+        );
+        assert_eq!(found, (count, count, count), "aborts that say {says:?}");
+        aborts += count;
+    }
+    assert_eq!(aborts, ABORT_COUNT);
+    for (text, sentence) in ABORTS_DOCUMENTED {
+        assert!(
+            as_printed(text).contains(sentence),
+            "no text says {sentence:?}"
+        );
+    }
 }
 
 /// One run of the commit sweep: the swept commit on a copy of `template`, failing as `failure`
@@ -368,11 +582,8 @@ mod advance {
     }
 
     /// One run of the advancing sweep: [`swept_advance`] on a copy of `template`, failing as
-    /// `failure` says from call `k`. Then, the fault cleared: the store verifies clean, and holds
-    /// the commit's changeset (`changeset`, the dry run's) exactly when main names it, main at
-    /// `base` otherwise; both when the run succeeded, a warning or not, and neither when it
-    /// failed (either, after the documented abort); and the same publish made again ends with
-    /// both. Returns how the run ended.
+    /// `failure` says from call `k`. Then, the fault cleared, the store holds both or neither
+    /// ([`both_or_neither`]). Returns how the run ended.
     fn advance_failing_at(
         template: &Store,
         k: u64,
@@ -392,25 +603,69 @@ mod advance {
                 "{what}: {run}"
             );
         }
-        store.assert_clean(&format!("{what}: after the failed run"));
+        both_or_neither(&store, &ended, dry, &format!("{what}: {run}"));
+        ended
+    }
+
+    /// What the advancing sweep holds `store` to after a run that ended as `ended`, the fault
+    /// cleared; `what` names the run. The store verifies clean, and holds the commit's changeset
+    /// (the dry run's, `dry`) exactly when main names it, main at its base otherwise; both when
+    /// the run succeeded, a warning or not, and neither when it failed (either, after the
+    /// documented abort); and the same publish made again ends with both.
+    fn both_or_neither(store: &Store, ended: &Ended, dry: &(DryRun, String), what: &str) {
+        let (DryRun { changeset, .. }, base) = dry;
+        store.assert_clean(&format!("after the failed run: {what}"));
         let present = store.read(&["show", changeset]).exit() == 0;
         let expected = if present { changeset } else { base };
         assert_eq!(
-            main_of(&store).as_ref(),
+            main_of(store).as_ref(),
             Some(expected),
-            "{what}: the changeset is there exactly when main names it: {run}"
+            "the changeset is there exactly when main names it: {what}"
         );
         match ended {
-            Ended::Succeeded(_) => assert!(present, "{what}: a success records both: {run}"),
-            Ended::Failed(_) => assert!(!present, "{what}: a failure records neither: {run}"),
+            Ended::Succeeded(_) => assert!(present, "a success records both: {what}"),
+            Ended::Failed(_) => assert!(!present, "a failure records neither: {what}"),
             Ended::Aborted => {}
         }
-        let again = swept_advance(&store, base, &[]).ok();
+        let again = swept_advance(store, base, &[]).ok();
         assert_eq!(again["advanced"]["new"], changeset.as_str(), "{what}");
         assert_eq!(again["advanced"]["already_applied"], present, "{what}");
-        assert_eq!(main_of(&store).as_ref(), Some(changeset), "{what}");
-        store.assert_clean(&format!("{what}: after the same publish again"));
-        ended
+        assert_eq!(main_of(store).as_ref(), Some(changeset), "{what}");
+        store.assert_clean(&format!("after the same publish again: {what}"));
+    }
+
+    /// [`both_or_neither`]'s own check, on stores made to break it: the swept commit made
+    /// without its `--advance` leaves the changeset without main's move, which the oracle
+    /// refuses however the run ended; it refuses a success that left neither and a failure that
+    /// left both; and it takes a failure with neither and a success with both.
+    #[test]
+    fn the_advance_oracle_refuses_a_changeset_without_its_move() {
+        let template = commit_template(swarmops_store::DEFAULT_INIT_FORMAT);
+        let dry = dry_advance(&template);
+        let succeeded = || Ended::Succeeded(Value::Null);
+        let failed = || Ended::Failed(Value::Null);
+        let refuses = |store: &Store, ended: Ended| {
+            let judge = || both_or_neither(store, &ended, &dry, "a made-up run");
+            catch_unwind(AssertUnwindSafe(judge)).is_err()
+        };
+
+        // 1. The changeset without the move: refused behind a success and behind a failure.
+        let half = Store::copy_of(&template);
+        let committed = swept_commit(&half, &[]).ok();
+        assert_eq!(committed["changeset"], dry.0.changeset.as_str());
+        assert!(refuses(&half, succeeded()), "half a publish, a success");
+        assert!(refuses(&half, failed()), "half a publish, a failure");
+
+        // 2. Neither behind a success, both behind a failure: refused.
+        let neither = Store::copy_of(&template);
+        assert!(refuses(&neither, succeeded()), "a success with neither");
+        let both = Store::copy_of(&template);
+        swept_advance(&both, &dry.1, &[]).ok();
+        assert!(refuses(&both, failed()), "a failure with both");
+
+        // 3. Neither behind a failure, both behind a success: taken.
+        both_or_neither(&neither, &failed(), &dry, "a failure with neither");
+        both_or_neither(&both, &succeeded(), &dry, "a success with both");
     }
 
     per_format! {
