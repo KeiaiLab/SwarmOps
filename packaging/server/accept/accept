@@ -172,7 +172,8 @@ url_of() {
         printf 'ssh://so@%s:%s/%s.git\n' "$host" "$accept_ssh_port" "$accept_store"
         return
     fi
-    printf 'https://%s@%s/%s.git\n' "$login" "$https" "$accept_store"
+    # No user part: so refuses one in an HTTP(S) URL; the stored web login answers git.
+    printf 'https://%s/%s.git\n' "$https" "$accept_store"
 }
 
 # What `git ls-remote` reads for main at a URL.
