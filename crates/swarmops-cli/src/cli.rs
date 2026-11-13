@@ -142,7 +142,10 @@ repository (git init --bare makes one), or a work tree, which holds .git and who
 branch is refused (E_INVALID_ARG). A changeset imported from git exports to the commit it came from, byte for byte; \
 one made in the store exports to a commit with its own signatures and SwarmOps-* trailers, the \
 same commit every time. Run again, it writes only what the branch does not reach, and nothing \
-when the branch is at the export of --ref's head. It needs no identity.
+when the branch is at the export of --ref's head. It needs no identity. A new branch in a \
+repository that holds its commits loose reads each object back before it trusts it \
+(objects_checked), which can take seconds and write nothing; a packed repository (git gc) skips \
+that.
 
 A branch at a commit that is no export of --ref's head or of an ancestor of it fails with \
 E_GIT_EXPORT_DIVERGED (exit 3), details.reason saying why, and nothing is written; --force moves \

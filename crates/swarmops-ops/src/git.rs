@@ -191,8 +191,9 @@ fn recovered(repair: TailRepair) -> Recovered {
     out
 }
 
-/// The response that gives what `report` says: ids as hex, `exported` the commits written, and
-/// `incremental` whether the export went on from an export the branch held (the base).
+/// The response that gives what `report` says: ids as hex, `exported` the commits written,
+/// `objects_checked` the loose objects read back, and `incremental` whether the export went on
+/// from an export the branch held (the base).
 fn export_response(report: ExportReport) -> GitExportResp {
     let ExportReport {
         head,
@@ -203,7 +204,7 @@ fn export_response(report: ExportReport) -> GitExportResp {
         branch_moved,
         commits_written,
         objects_written,
-        objects_checked: _,
+        objects_checked,
         rewritten,
         recovered: _,
         warnings,
@@ -220,6 +221,7 @@ fn export_response(report: ExportReport) -> GitExportResp {
         rewritten,
     );
     out.old_sha = old.map(|oid| oid.to_string());
+    out.objects_checked = objects_checked;
     out.warnings = warnings;
     out
 }
@@ -420,8 +422,9 @@ mod tests {
     }
 
     /// An export's report becomes the response field by field: ids in hex, `exported` the commits
-    /// written, `old_sha` the commit the branch named, and `incremental` whether the export went on
-    /// from an export the branch held; a branch the export created has neither.
+    /// written, `objects_checked` the loose objects read back, `old_sha` the commit the branch
+    /// named, and `incremental` whether the export went on from an export the branch held; a
+    /// branch the export created has neither.
     #[test]
     fn an_export_report_becomes_its_response() {
         let (head, base) = (
@@ -453,6 +456,7 @@ mod tests {
             1,
         );
         expected.old_sha = Some("ab".repeat(20));
+        expected.objects_checked = 4;
         expected.warnings = vec!["a warning".to_owned()];
         assert_eq!(export_response(report.clone()), expected);
         let mut export_report = report;

@@ -4185,6 +4185,12 @@ expression: s.redact(&all)
           "description": "Whether the branch held an earlier export that this one continued, so that only the\ncommits after it were written; `false` for a branch the export created, or one that\n`force` moved from a history that was no export of this one.",
           "type": "boolean"
         },
+        "objects_checked": {
+          "description": "How many loose objects the repository held already that this export read back before it\ntrusted them: what an export cut short left, or the history of a branch new there whose\ncommits the repository holds loose. Each costs a read and a sync, so a first export into\nsuch a repository can take seconds and write nothing; a packed one (`git gc`) is trusted\nunread. Omitted when 0.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
         "objects_written": {
           "description": "How many git objects (commits, trees and blobs) this export wrote to the repository.",
           "format": "uint64",

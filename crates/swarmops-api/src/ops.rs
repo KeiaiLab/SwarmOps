@@ -2522,6 +2522,13 @@ pub struct GitExportResp {
     pub exported: u64,
     /// How many git objects (commits, trees and blobs) this export wrote to the repository.
     pub objects_written: u64,
+    /// How many loose objects the repository held already that this export read back before it
+    /// trusted them: what an export cut short left, or the history of a branch new there whose
+    /// commits the repository holds loose. Each costs a read and a sync, so a first export into
+    /// such a repository can take seconds and write nothing; a packed one (`git gc`) is trusted
+    /// unread. Omitted when 0.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub objects_checked: u64,
     /// The changeset at `source_ref`'s head, which `head_sha` is the export of.
     pub head_changeset: String,
     /// The commit the branch names now, the export of `head_changeset`: its git id, 40 lowercase
@@ -2569,6 +2576,7 @@ impl GitExportResp {
         Self {
             exported,
             objects_written,
+            objects_checked: 0,
             head_changeset: head_changeset.into(),
             head_sha: head_sha.into(),
             branch: branch.into(),
@@ -2579,6 +2587,15 @@ impl GitExportResp {
             warnings: Vec::new(),
         }
     }
+}
+
+/// Whether `count` is 0: a count a response omits then.
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if passes the field by reference"
+)]
+fn is_zero(count: &u64) -> bool {
+    *count == 0
 }
 
 /// `derive`: derive ahead of any reader the eager derived values (storage spec §5: each
