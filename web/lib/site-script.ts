@@ -4,7 +4,8 @@
 //   1. theme   before paint: `dark` on <html> from localStorage.theme (system, light, dark; the
 //              key the docs' provider uses) and the system preference
 //   2. control clicks and arrow keys on the [data-theme-set] radios store the choice;
-//              aria-checked marks it, also after a client-side page change (a mutation observer)
+//              aria-checked marks it, once the page is parsed and after a client-side change of
+//              frame (a mutation observer on <body>'s own children, not on every node)
 //   3. copy    clicks on button[data-copy] copy its text and say `Copied` in the live region
 //   4. search  `/` (outside a field) or Ctrl/Cmd+K follows the [data-search] link
 //
@@ -48,10 +49,15 @@ export const SITE_SCRIPT = `(function () {
       apply('system');
     }
   });
-  // The control renders after this script, and again on a client-side page change: mark it then.
+  // The control is parsed after this script: mark it then. A client-side page change between the
+  // docs and the product frames replaces <body>'s children, so only those are watched; a change
+  // inside a frame keeps its header and needs nothing.
+  doc.addEventListener('DOMContentLoaded', function () {
+    mark(stored());
+  });
   new MutationObserver(function () {
     mark(stored());
-  }).observe(root, { childList: true, subtree: true });
+  }).observe(doc.body, { childList: true });
 
   // Arrow keys move the checked theme along the radios, Home and End to the first and last.
   var STEP = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 };
