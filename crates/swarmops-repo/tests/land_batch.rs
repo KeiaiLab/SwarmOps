@@ -36,7 +36,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::ObjectId;
 use swarmops_core::{ChangesetId, Signature};
 use swarmops_repo::land::{LandOutcome, LandRequest, LandStatus};
-use swarmops_repo::{Advance, Change, CommitRequest, Depth, LocalRepo, RepoError};
+use swarmops_repo::{Advance, Change, CommitRequest, Depth, LocalRepo, OpId, RepoError};
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, LEAD_WAIT_ENV, ORDER_CHECK_ENV};
 use swarmops_store::{FsMethod, Journal, MetaStore, RealFs};
@@ -253,13 +253,13 @@ impl Gate {
 }
 
 /// What a lander's filesystem does around each call: the leader's gate, an injected failure of
-/// the leader's first object read once let go, and the log.
+/// the leader's first call of one method under one path once let go, and the log.
 struct Probe {
     who: usize,
     log: Arc<Log>,
     gate: Option<Arc<Gate>>,
-    /// The objects directory, and whether its first read failed already.
-    fail_read: Option<(PathBuf, Arc<AtomicBool>)>,
+    /// The method and the path of the call to fail, and whether it failed already.
+    fail: Option<(FsMethod, PathBuf, Arc<AtomicBool>)>,
 }
 
 impl Watch for Probe {
@@ -269,15 +269,15 @@ impl Watch for Probe {
             gate.pass();
         }
 
-        // 2. The leader's first object read once let go, failed.
+        // 2. The leader's first such call once let go, failed.
         let gone = self.gate.as_ref().is_some_and(|g| g.phase() == Phase::Gone);
-        if let Some((objects, failed)) = &self.fail_read
+        if let Some((method, under, failed)) = &self.fail
             && gone
-            && call.method == FsMethod::Read
-            && call.path().starts_with(objects)
+            && call.method == *method
+            && call.path().starts_with(under)
             && !failed.swap(true, Ordering::SeqCst)
         {
-            return Err(io::Error::other("injected: the leader's read of an object"));
+            return Err(io::Error::other("injected: a call of the leader"));
         }
 
         // 3. The log.
@@ -292,13 +292,15 @@ impl Watch for Probe {
     }
 }
 
-/// How [`run_batch`]'s leader reads the other members' objects.
+/// Which of [`run_batch`]'s leader's calls fails once the batch starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reads {
-    /// As the store has them.
+    /// None.
     Plain,
-    /// Its first object read once the batch starts fails.
+    /// Its first object read.
     FailFirst,
+    /// Its first append to `journal.off`: the commit's listing, after the commit point.
+    FailListing,
 }
 
 /// What [`run_batch`] gives: each land's end, in the order given, and the calls made while the
@@ -306,7 +308,7 @@ enum Reads {
 struct Ran {
     ends: Vec<Result<LandOutcome, RepoError>>,
     calls: Vec<Made>,
-    /// Whether the leader's read failed as [`Reads::FailFirst`] asked.
+    /// Whether the leader's call failed as [`Reads`] asked.
     read_failed: bool,
 }
 
@@ -318,15 +320,24 @@ fn run_batch(root: &Utf8Path, lands: Vec<LandRequest>, reads: Reads) -> Ran {
     let log = Arc::new(Log::default());
     let gate = Arc::new(Gate::new());
     let failed = Arc::new(AtomicBool::new(false));
-    let objects = root.join("objects").into_std_path_buf();
+    let fail = match reads {
+        Reads::Plain => None,
+        Reads::FailFirst => Some((FsMethod::Read, root.join("objects"))),
+        Reads::FailListing => Some((FsMethod::AppendDurable, layout_of(root).journal_off())),
+    };
     let fs_of = |who: usize| {
         let leads = who == 0;
         let probe = Probe {
             who,
             log: Arc::clone(&log),
             gate: leads.then(|| Arc::clone(&gate)),
-            fail_read: (leads && reads == Reads::FailFirst)
-                .then(|| (objects.clone(), Arc::clone(&failed))),
+            fail: (fail.as_ref()).filter(|_| leads).map(|(method, under)| {
+                (
+                    *method,
+                    under.clone().into_std_path_buf(),
+                    Arc::clone(&failed),
+                )
+            }),
         };
         checked(Watched(probe, RealFs::new()))
     };
@@ -603,6 +614,37 @@ fn a_key_on_two_targets_in_one_batch_lands_once() {
     assert_eq!(repo.get_ref("release/1").unwrap().unwrap().target, t0);
     assert_eq!(frame_count(&root), frames + 1, "one frame of the key");
     assert_eq!(ran.log_syncs(&root), 1, "one batch");
+}
+
+/// A batch whose commit fails to list its frames in `journal.off` is committed: each member's
+/// warning names its operation by seq and CRC, as `op log` prints it, though no entry lists the
+/// frame yet, since a snapshot reads the whole frames past the checkpoint from `journal.log`.
+#[test]
+fn a_members_post_commit_warning_names_its_crc() {
+    let (_dir, root, repo) = new_store();
+    let (_, heads) = changes(&repo, 2);
+
+    let ran = run_batch(
+        &root,
+        vec![keyed(heads[0], "key-0"), keyed(heads[1], "key-1")],
+        Reads::FailListing,
+    );
+
+    assert!(ran.read_failed, "the leader's listing failed");
+    let member = ran.landed(1);
+    let [warning] = &member.warnings[..] else {
+        panic!("one warning: {:?}", member.warnings);
+    };
+    let op = (warning.split_once("(operation "))
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .map_or("", |(op, _)| op);
+    let op: OpId = op
+        .parse()
+        .unwrap_or_else(|_| panic!("no operation id in {warning:?}"));
+    let listed = MetaStore::open(&root).unwrap();
+    let (read, _) = listed.read_committed().unwrap();
+    let frame = read.frame(op.seq).unwrap().expect("the member's frame");
+    assert_eq!(op, OpId::new(frame.seq, frame.crc));
 }
 
 /// A member that lands with changes records its commit `C` and its land `L` in its frame of the

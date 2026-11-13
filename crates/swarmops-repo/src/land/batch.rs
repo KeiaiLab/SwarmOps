@@ -406,17 +406,17 @@ impl<O: ObjectStore> Repo<O> {
     }
 
     /// The warning of a member's land (`what`) committed in frame `seq`, whose step after the
-    /// commit point failed as `source` says: [`repo::post_commit_warning`]'s words, the
-    /// operation's CRC read from a snapshot (none if the frame is not listed yet).
+    /// commit point failed as `source` says: [`repo::post_commit_warning`]'s, the operation's
+    /// CRC read from a snapshot, which holds the frame even where its listing failed (the seq
+    /// alone if the snapshot cannot be read).
     fn member_warning(&self, what: &str, seq: u64, source: &str) -> String {
         let crc = (self.meta.read().ok())
             .and_then(|read| read.frame(seq).ok().flatten())
             .map(|frame| frame.crc);
-        let op = crc.map_or_else(|| seq.to_string(), |crc| OpId::new(seq, crc).to_string());
-        format!(
-            "{what} is committed (operation {op}), but a step after the commit point failed: \
-             {source}; the next write to the store repairs it"
-        )
+        match crc {
+            Some(crc) => repo::post_commit_warning(what, OpId::new(seq, crc), source),
+            None => repo::post_commit_warning(what, seq, source),
+        }
     }
 }
 

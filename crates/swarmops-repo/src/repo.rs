@@ -62,6 +62,7 @@
 //! picks up where the crashed one stopped. Of two creates of one store at once, one makes it and
 //! the other fails with [`RepoError::Exists`], having replaced nothing.
 
+use std::fmt::Display;
 use std::fs::File;
 use std::hash::{BuildHasher, RandomState};
 use std::io::{self, Write};
@@ -686,8 +687,9 @@ impl<O: ObjectStore> Repo<O> {
 }
 
 /// The warning for a transaction (`what`) committed as operation `id` whose step after the
-/// commit point failed with `source`.
-pub(crate) fn post_commit_warning(what: &str, id: OpId, source: &StoreError) -> String {
+/// commit point failed with `source`: `id` an [`OpId`], or its seq alone where its frame's CRC
+/// cannot be read.
+pub(crate) fn post_commit_warning(what: &str, id: impl Display, source: impl Display) -> String {
     format!(
         "{what} is committed (operation {id}), but a step after the commit point failed: \
          {source}; the next write to the store repairs it"
