@@ -266,7 +266,8 @@ impl GitCli {
 
     /// Fetches the objects `tip` reaches from the repository `source` into the bare repository
     /// `git_dir`, checked by git's fsck, over protocol v2; no ref is written, and nothing but the
-    /// local `file` transport is allowed. `serve --prepare`'s seed (the M17 design §4.3).
+    /// local `file` transport is allowed. `serve --prepare`'s seed (the M17 serve-load design,
+    /// preparation).
     pub fn fetch_objects(
         &self,
         git_dir: &Path,

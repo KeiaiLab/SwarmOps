@@ -1,6 +1,6 @@
 //! [`CatFileSource`], a [`GitSource`] whose objects come from one long-lived
 //! `git cat-file --batch-command` child, with git's pack maps bounded: what a push's hooks read
-//! the push's objects through (the M17 closure design §3.5).
+//! the push's objects through (the M17 closure design's G22 decision).
 //!
 //! ```text
 //!   CatFileSource

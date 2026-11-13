@@ -1,6 +1,6 @@
-//! Host git as the server's child (M14 design §0.1): `upload-pack`, `receive-pack` or
-//! `http-backend` on `serve.git`, built by [`GitCli`]'s one builder, its configuration in the
-//! environment.
+//! Host git as the server's child (the M14 serve design's first decision): `upload-pack`,
+//! `receive-pack` or `http-backend` on `serve.git`, built by [`GitCli`]'s one builder, its
+//! configuration in the environment.
 //!
 //! ```text
 //! client ══ stdin/stdout ══▶ git <service> (GIT_DIR = serve.git, config in GIT_CONFIG_*)
@@ -24,16 +24,23 @@ use crate::sink::SinkError;
 use crate::source::GitSource as _;
 use crate::transport::{GitCli, TransportError};
 
-/// What `upload-pack` serves: no partial clone filter (M14 design §1), and no object that no
-/// served ref reaches, so that a refused push's objects are never fetched.
+/// What `upload-pack` serves: no partial clone filter (the M14 serve design's scope), and, to
+/// a client of protocol v0 or v1, no object by an id that no served ref advertises.
+///
+/// Protocol v2 knows no such refusal: there `upload-pack` (git 2.43.0) takes the id of any
+/// object the repository holds, whatever `uploadpack.allowAnySHA1InWant` says. What keeps a
+/// refused push's objects from being fetched is the check of the wants in the
+/// [`PACK_OBJECTS_HOOK`], [`check_tips`] then [`check_wants`], which every protocol's pack
+/// passes through.
 const UPLOAD_CONFIG: [(&str, &str); 2] = [
     ("uploadpack.allowFilter", "false"),
     ("uploadpack.allowAnySHA1InWant", "false"),
 ];
 
-/// What `receive-pack` takes (M14 design §6): every command handed to the `proc-receive` hook,
-/// after the `pre-receive` hook, which git always runs, accepted the push (M16 design §7), every
-/// object checked, and no atomic push, push options or shallow update advertised.
+/// What `receive-pack` takes (the M14 serve design, push): every command handed to the
+/// `proc-receive` hook, after the `pre-receive` hook, which git always runs, accepted the push
+/// (the M16 safety design, a push refused inside the quarantine), every object checked, and no
+/// atomic push, push options or shallow update advertised.
 const RECEIVE_CONFIG: [(&str, &str); 5] = [
     ("receive.procReceiveRefs", "refs/"),
     ("receive.fsckObjects", "true"),
@@ -43,7 +50,7 @@ const RECEIVE_CONFIG: [(&str, &str); 5] = [
 ];
 
 /// What `http-backend` adds to both: a push without `REMOTE_USER` reaches the hook, where the
-/// access file alone decides (M14 design D3).
+/// access file alone decides (the M14 serve design, the CGI entry).
 const HTTP_CONFIG: [(&str, &str); 1] = [("http.receivepack", "true")];
 
 /// The setting that points git at the serving hooks.
@@ -179,10 +186,10 @@ pub enum Wants {
     Unknown,
 }
 
-/// Whether each of `wants` is a tip of `repo` on a commit (the M17 closure design §3.2), read in
-/// process: `serve.git`'s refs, then each want's object header. [`Wants::Served`] when it is,
-/// else [`Wants::Unknown`], for [`check_wants`] to decide: none, a want no ref names, one on
-/// another type, an object that cannot be read.
+/// Whether each of `wants` is a tip of `repo` on a commit (the M17 closure design's G19
+/// decision), read in process: `serve.git`'s refs, then each want's object header.
+/// [`Wants::Served`] when it is, else [`Wants::Unknown`], for [`check_wants`] to decide: none,
+/// a want no ref names, one on another type, an object that cannot be read.
 pub fn check_tips(repo: &ServeRepo, wants: &[GitOid]) -> Result<Wants, ServeError> {
     // 1. Each a tip: none is no tip.
     let tips: BTreeSet<GitOid> = repo.refs()?.into_values().collect();
@@ -203,10 +210,10 @@ pub fn check_tips(repo: &ServeRepo, wants: &[GitOid]) -> Result<Wants, ServeErro
     Ok(Wants::Served)
 }
 
-/// Whether each of `wants` is a commit a ref of `repo` is or reaches (the M17 design §5 step
-/// 2): their types from one `cat-file --batch-check`, then one `rev-list --count`, from the
-/// wants and not from any ref, that must count none. A git that fails says
-/// [`Wants::NotServed`].
+/// Whether each of `wants` is a commit a ref of `repo` is or reaches (the M17 serve-load
+/// design, one pack per identical read): their types from one `cat-file --batch-check`, then
+/// one `rev-list --count`, from the wants and not from any ref, that must count none. A git
+/// that fails says [`Wants::NotServed`].
 pub fn check_wants(git: &GitCli, repo: &ServeRepo, wants: &[GitOid]) -> Result<Wants, ServeError> {
     if wants.is_empty() {
         return Ok(Wants::NotServed);
