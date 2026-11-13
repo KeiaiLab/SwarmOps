@@ -38,25 +38,86 @@ use crate::sink::{BranchUpdate, SinkError};
 /// The bytes of `<store>/git/SERVE`, the serving repository's layout and its version.
 pub const SERVE_MARKER: &[u8] = b"swarmops-git-serve 1\n";
 
+/// What a push's hook file says to the client when its program cannot start.
+macro_rules! push_hook_gone {
+    () => {
+        "swarmops serve: the hook program cannot start; the push is refused"
+    };
+}
+
+/// What a fetch's `pack-objects` hook says to the client when its program cannot start.
+macro_rules! fetch_hook_gone {
+    () => {
+        "swarmops serve: the hook program cannot start; the fetch is refused"
+    };
+}
+
+/// The test a hook makes before it hands over: the serving binary is a file it may run.
+macro_rules! program_there {
+    () => {
+        "[ -f \"$SWARMOPS_SERVE_EXE\" ] && [ -x \"$SWARMOPS_SERVE_EXE\" ]"
+    };
+}
+
+/// The line of a push's hook file whose program cannot start ([`HOOK_SCRIPT`]).
+pub const PUSH_HOOK_GONE: &str = push_hook_gone!();
+
+/// The line of a fetch's hook whose program cannot start ([`PACK_OBJECTS_HOOK`]).
+pub const FETCH_HOOK_GONE: &str = fetch_hook_gone!();
+
 /// The hook file `<store>/git/serve-hooks/proc-receive`. git runs a hook as a file, so this
 /// one is POSIX `sh`: it hands the hook to the binary that serves, which the parent named.
-pub const HOOK_SCRIPT: &str = "#!/bin/sh
-# git runs hooks as files: this one hands proc-receive to the swarmops that serves.
-exec \"$SWARMOPS_SERVE_EXE\" serve --hook proc-receive
-";
+///
+/// git sends what a hook writes on stderr to the client. When the binary is gone (replaced
+/// while it served), is no file or is not executable, `sh`'s own error would name this file
+/// under the store and the binary, so the script looks first, says [`PUSH_HOOK_GONE`], which
+/// names no path, and exits 1: git refuses the push.
+pub const HOOK_SCRIPT: &str = concat!(
+    "#!/bin/sh\n",
+    "# git runs hooks as files: this one hands proc-receive to the swarmops that serves.\n",
+    "if ",
+    program_there!(),
+    "; then\n",
+    "  exec \"$SWARMOPS_SERVE_EXE\" serve --hook proc-receive\n",
+    "fi\n",
+    "# No program to run: serve's own line, since sh's would name host paths to the client.\n",
+    "echo '",
+    push_hook_gone!(),
+    "' >&2\n",
+    "exit 1\n",
+);
 
 /// The hook file `<store>/git/serve-hooks/pre-receive`, as [`HOOK_SCRIPT`]: git runs it while
 /// the push's objects are still in its quarantine, so that a refusal keeps them out.
-pub const PRE_RECEIVE_SCRIPT: &str = "#!/bin/sh
-# git runs hooks as files: this one hands pre-receive to the swarmops that serves.
-exec \"$SWARMOPS_SERVE_EXE\" serve --hook pre-receive
-";
+pub const PRE_RECEIVE_SCRIPT: &str = concat!(
+    "#!/bin/sh\n",
+    "# git runs hooks as files: this one hands pre-receive to the swarmops that serves.\n",
+    "if ",
+    program_there!(),
+    "; then\n",
+    "  exec \"$SWARMOPS_SERVE_EXE\" serve --hook pre-receive\n",
+    "fi\n",
+    "# No program to run: serve's own line, since sh's would name host paths to the client.\n",
+    "echo '",
+    push_hook_gone!(),
+    "' >&2\n",
+    "exit 1\n",
+);
 
 /// The command git runs instead of `pack-objects` when it answers a fetch (its
 /// `uploadpack.packObjectsHook`, set in the child's environment, which git counts as protected
-/// configuration): git appends the `git pack-objects …` line it would run, and the binary that
-/// serves answers from its pack cache (the M17 design §5).
-pub const PACK_OBJECTS_HOOK: &str = "\"$SWARMOPS_SERVE_EXE\" serve --hook pack-objects";
+/// configuration): git runs it through `sh` and appends the `git pack-objects …` line it would
+/// run as the shell's arguments, and the binary that serves answers from its pack cache (the
+/// M17 design §5). It is a shell function, one line, so that it can look for the binary first
+/// as [`HOOK_SCRIPT`] does: git sends this command's stderr to the client too, and it says
+/// [`FETCH_HOOK_GONE`] and exits 1 instead of `sh`'s error, which would name the binary.
+pub const PACK_OBJECTS_HOOK: &str = concat!(
+    "swarmops_pack_objects() { if ",
+    program_there!(),
+    "; then exec \"$SWARMOPS_SERVE_EXE\" serve --hook pack-objects \"$@\"; fi; echo '",
+    fetch_hook_gone!(),
+    "' >&2; exit 1; }; swarmops_pack_objects",
+);
 
 /// The store's git directory, which the mirror shares: `<store>/git`.
 const GIT: &str = "git";

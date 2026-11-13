@@ -484,8 +484,13 @@ fn serve_push_refuses_a_gitlink() {
     assert!(!fetched.status.success(), "{}", text(&fetched.stderr));
 }
 
+/// What a push's hook says when its program cannot start.
+const HOOK_PROGRAM_GONE: &str =
+    "swarmops serve: the hook program cannot start; the push is refused";
+
 /// receive-pack moves no ref itself: with the hooks' program gone, a push is rejected (by
-/// `pre-receive`, the first to run), and neither `serve.git` nor the store changes.
+/// `pre-receive`, the first to run) with a line of `serve`'s own, which names no path of the
+/// host, and neither `serve.git` nor the store changes.
 #[test]
 fn hook_unrunnable_moves_nothing() {
     let site = Site::new();
@@ -509,8 +514,7 @@ fn hook_unrunnable_moves_nothing() {
     fs::write(&pre_push, remove).unwrap();
     fs::set_permissions(&pre_push, fs::Permissions::from_mode(0o755)).unwrap();
 
-    // 2. The push: rejected, the hook not run. sh names the hook file in its error, so this
-    //    run's stderr is not checked for the store's path.
+    // 2. The push: rejected, the hook not run, and said so by the hook file itself.
     let stand_in = stand_in.to_str().unwrap();
     let pushed = site.git_via(stand_in, &work, &["push", "origin", "main"]);
     let stderr = text(&pushed.stderr);
@@ -518,6 +522,14 @@ fn hook_unrunnable_moves_nothing() {
     assert!(!copy.exists(), "the pre-push hook ran");
     assert!(stderr.contains("[remote rejected]"), "{stderr}");
     assert!(stderr.contains("pre-receive"), "{stderr}");
+    assert!(stderr.contains(HOOK_PROGRAM_GONE), "{stderr}");
+
+    //    No line names the store, where the hook file is, or the program's directory.
+    let root = site.served.root();
+    for host_path in [root.as_path(), dir.path()] {
+        let host_path = host_path.to_str().unwrap();
+        assert!(!stderr.contains(host_path), "a host path: {stderr}");
+    }
 
     // 3. Nothing moved.
     let after = (site.newest_op()["op"].clone(), site.served_refs());

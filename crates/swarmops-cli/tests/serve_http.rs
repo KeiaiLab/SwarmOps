@@ -22,6 +22,7 @@ use std::process::Output;
 
 use serde_json::{Value, json};
 use swarmops_testkit::child::CHILD_TIMEOUT;
+use swarmops_testkit::cli::Program;
 use swarmops_testkit::git::fixture;
 use swarmops_testkit::remote::{HttpAuth, HttpServer};
 use swarmops_testkit::serve::{HttpIdentity, ServeSite};
@@ -120,7 +121,11 @@ struct Site {
 impl Site {
     /// An empty store, served.
     fn new() -> Site {
-        let served = ServeSite::new::<Swarmops>();
+        Site::on(ServeSite::new::<Swarmops>())
+    }
+
+    /// An empty store, served by `served`.
+    fn on(served: ServeSite) -> Site {
         served.init(STORE);
         fs::write(served.store(STORE).join("access.toml"), ACCESS).unwrap();
         Site {
@@ -721,4 +726,91 @@ fn http_refuses_before_git() {
     let (status, body) = get(http, &refs);
     assert_eq!(status, 200, "{body}");
     assert!(body.contains("git-upload-pack"), "{body}");
+}
+
+/// The variable that names [`Vanishing`]'s switch: while the file it names is there, every run
+/// loses its binary.
+const VANISH: &str = "SERVE_HTTP_VANISH";
+
+/// What a hook says when its program cannot start: a push's, and a fetch's.
+const PUSH_HOOK_GONE: &str = "swarmops serve: the hook program cannot start; the push is refused";
+const FETCH_HOOK_GONE: &str = "swarmops serve: the hook program cannot start; the fetch is refused";
+
+/// A stand-in for the binary that is replaced while it serves: [`Vanishing::install`] writes it.
+enum Vanishing {}
+
+impl Program for Vanishing {
+    const BIN: &'static str = concat!(env!("CARGO_TARGET_TMPDIR"), "/serve-http-vanishing");
+    const NOW_ENV: &'static str = <Swarmops as Program>::NOW_ENV;
+}
+
+impl Vanishing {
+    /// Writes the stand-in, whole: it runs the binary, and while [`VANISH`]'s file is there
+    /// runs it from a link of its own that it removes once the run has started, so that the
+    /// run names its hooks a program that is gone.
+    fn install() {
+        let script = format!(
+            "#!/bin/sh\n\
+             if [ ! -e \"${VANISH}\" ]; then\n\
+             \x20 exec '{bin}' \"$@\"\n\
+             fi\n\
+             link=\"${VANISH}.$$\"\n\
+             ln '{bin}' \"$link\" 2>/dev/null || cp '{bin}' \"$link\" || exit 70\n\
+             # A background command's stdin is /dev/null unless it is handed over.\n\
+             exec 3<&0\n\
+             \"$link\" \"$@\" <&3 3<&- &\n\
+             run=$!\n\
+             exec 3<&-\n\
+             until [ \"$(readlink \"/proc/$run/exe\" 2>/dev/null)\" = \"$link\" ]; do\n\
+             \x20 kill -0 \"$run\" 2>/dev/null || break\n\
+             \x20 sleep 0.01\n\
+             done\n\
+             rm -f \"$link\"\n\
+             wait \"$run\"\n",
+            bin = support::BIN,
+        );
+        let temp = format!("{}.{}", Vanishing::BIN, std::process::id());
+        fs::write(&temp, script).unwrap();
+        fs::set_permissions(&temp, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::rename(&temp, Vanishing::BIN).unwrap();
+    }
+}
+
+/// A hook whose program is gone, because the serving binary was replaced while it served,
+/// refuses with a line of `serve`'s own over HTTP: a fetch's `pack-objects` hook and a push's
+/// `pre-receive`. No line the client prints names the served root or the program's directory,
+/// nothing moves, and the same push goes through once the program is there again.
+#[test]
+fn http_hook_program_gone_is_masked() {
+    // 1. A site whose binary vanishes while the switch is there, and a clone behind the store.
+    Vanishing::install();
+    let switch_dir = TempDir::new().unwrap();
+    let switch = switch_dir.path().join("vanish");
+    let served = ServeSite::new::<Vanishing>().with_env(&[(VANISH, switch.to_str().unwrap())]);
+    let site = Site::on(served).with_linear();
+    let work = site.clone("work", Protocol::V2, &[]);
+    site.land("landed.txt");
+    let masked = |output: &Output, line: &str| {
+        let stderr = text(&output.stderr);
+        assert!(!output.status.success(), "{stderr}");
+        assert!(stderr.contains(line), "no {line:?} in: {stderr}");
+        let program_dir = switch_dir.path().to_str().unwrap();
+        assert!(!stderr.contains(program_dir), "a host path: {stderr}");
+    };
+
+    // 2. The program gone: the fetch gets no pack, the push is rejected by pre-receive.
+    fs::write(&switch, "").unwrap();
+    let fetched = site.git_out(&work, Protocol::V2, &["fetch", "origin"]);
+    masked(&fetched, FETCH_HOOK_GONE);
+    let before = site.refs();
+    site.commit(&work, "pushed.txt");
+    let pushed = site.push_as(AGENT, &work, &["HEAD:refs/heads/feature/x"]);
+    masked(&pushed, PUSH_HOOK_GONE);
+    assert_rejected(&pushed, &["pre-receive hook declined"]);
+    assert_eq!(site.refs(), before);
+
+    // 3. The program back: the same push moves the branch.
+    fs::remove_file(&switch).unwrap();
+    site.push(&work, &["HEAD:refs/heads/feature/x"]);
+    assert!(site.ref_names().contains(&"feature/x".to_owned()));
 }

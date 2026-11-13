@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 
 use camino::Utf8Path;
 use swarmops_git::serve::repo::{
-    HOOK_SCRIPT, PRE_RECEIVE_SCRIPT, SERVE_MARKER, ServeError, ServeRepo,
+    FETCH_HOOK_GONE, HOOK_SCRIPT, PACK_OBJECTS_HOOK, PRE_RECEIVE_SCRIPT, PUSH_HOOK_GONE,
+    SERVE_MARKER, ServeError, ServeRepo,
 };
 use swarmops_git::{BranchUpdate, GitSink, GixSink, GixSource, RawKind, Stored};
 use tempfile::TempDir;
@@ -344,7 +345,14 @@ fn the_pre_receive_hook_is_pinned() {
     let pinned = "#!/bin/sh\n\
                   # git runs hooks as files: this one hands pre-receive to the swarmops that \
                   serves.\n\
-                  exec \"$SWARMOPS_SERVE_EXE\" serve --hook pre-receive\n";
+                  if [ -f \"$SWARMOPS_SERVE_EXE\" ] && [ -x \"$SWARMOPS_SERVE_EXE\" ]; then\n\
+                  \x20 exec \"$SWARMOPS_SERVE_EXE\" serve --hook pre-receive\n\
+                  fi\n\
+                  # No program to run: serve's own line, since sh's would name host paths to \
+                  the client.\n\
+                  echo 'swarmops serve: the hook program cannot start; the push is refused' \
+                  >&2\n\
+                  exit 1\n";
     assert_eq!(PRE_RECEIVE_SCRIPT, pinned);
     assert_eq!(
         fs::read(root.pre_receive()).expect("read"),
@@ -372,4 +380,102 @@ fn the_pre_receive_hook_is_pinned() {
     );
     let after = fs::metadata(root.hook()).expect("proc-receive").ino();
     assert_eq!(after, before, "proc-receive was rewritten");
+}
+
+/// The variable that names the serving binary to the hooks.
+const SERVE_EXE: &str = "SWARMOPS_SERVE_EXE";
+
+/// What a hook of a push, and the hook of a fetch, say when their program cannot start: the
+/// texts a client reads, pinned.
+const PUSH_REFUSED: &str = "swarmops serve: the hook program cannot start; the push is refused\n";
+const FETCH_REFUSED: &str = "swarmops serve: the hook program cannot start; the fetch is refused\n";
+
+/// The `proc-receive` hook file and the pack-objects hook, pinned as `pre-receive` is: each
+/// looks for the serving binary before it hands over, and the lines they say without it are
+/// the constants the crate gives.
+#[test]
+fn the_other_hooks_are_pinned() {
+    let proc_receive = PRE_RECEIVE_SCRIPT.replace("pre-receive", "proc-receive");
+    assert_eq!(HOOK_SCRIPT, proc_receive);
+    let pack_objects = "swarmops_pack_objects() { \
+                        if [ -f \"$SWARMOPS_SERVE_EXE\" ] && [ -x \"$SWARMOPS_SERVE_EXE\" ]; \
+                        then exec \"$SWARMOPS_SERVE_EXE\" serve --hook pack-objects \"$@\"; fi; \
+                        echo 'swarmops serve: the hook program cannot start; the fetch is \
+                        refused' >&2; exit 1; }; swarmops_pack_objects";
+    assert_eq!(PACK_OBJECTS_HOOK, pack_objects);
+    assert_eq!(format!("{PUSH_HOOK_GONE}\n"), PUSH_REFUSED);
+    assert_eq!(format!("{FETCH_HOOK_GONE}\n"), FETCH_REFUSED);
+}
+
+/// `command` run with `exe` as the serving binary and no other variable but `PATH`; its exit
+/// code and its stderr.
+fn hooked(command: &mut Command, exe: &std::path::Path) -> (Option<i32>, String) {
+    command
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env(SERVE_EXE, exe);
+    let output = swarmops_testkit::child::run(command);
+    let stderr = String::from_utf8(output.stderr).expect("UTF-8");
+    (output.status.code(), stderr)
+}
+
+/// The pack-objects hook as git runs it: through `sh`, its own arguments after it.
+fn pack_objects_hook() -> Command {
+    let mut command = Command::new("sh");
+    let line = format!("{PACK_OBJECTS_HOOK} \"$@\"");
+    command.args(["-c", &line, PACK_OBJECTS_HOOK, "git", "pack-objects"]);
+    command
+}
+
+/// A hook whose program is gone, is a directory or is not executable exits 1 with a line of
+/// its own: never `sh`'s, which names the hook file under the store and the program.
+#[test]
+fn a_hook_without_its_program_says_so() {
+    let root = Root::new();
+    root.open();
+    let plain = root.dir.path().join("plain");
+    fs::write(&plain, "#!/bin/sh\nexit 0\n").expect("write a file");
+    let programs = [root.dir.path().join("gone"), root.git(), plain];
+
+    for program in &programs {
+        // 1. The hooks of a push.
+        for hook in [root.pre_receive(), root.hook()] {
+            let (code, stderr) = hooked(&mut Command::new(&hook), program);
+            assert_eq!(stderr, PUSH_REFUSED, "{hook:?} with {program:?}");
+            assert_eq!(code, Some(1), "{hook:?} with {program:?}");
+        }
+
+        // 2. The hook of a fetch.
+        let (code, stderr) = hooked(&mut pack_objects_hook(), program);
+        assert_eq!(stderr, FETCH_REFUSED, "pack-objects with {program:?}");
+        assert_eq!(code, Some(1), "pack-objects with {program:?}");
+    }
+}
+
+/// A hook whose program is there hands it the hook's name, and the pack-objects hook git's
+/// command after it; the program's exit is the hook's.
+#[test]
+fn a_hook_runs_its_program() {
+    let root = Root::new();
+    root.open();
+    let program = root.dir.path().join("program");
+    fs::write(&program, "#!/bin/sh\necho \"$*\" >&2\nexit 7\n").expect("write the program");
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let cases = [
+        (
+            Command::new(root.pre_receive()),
+            "serve --hook pre-receive\n",
+        ),
+        (Command::new(root.hook()), "serve --hook proc-receive\n"),
+        (
+            pack_objects_hook(),
+            "serve --hook pack-objects git pack-objects\n",
+        ),
+    ];
+    for (mut command, said) in cases {
+        let (code, stderr) = hooked(&mut command, &program);
+        assert_eq!(stderr, said);
+        assert_eq!(code, Some(7), "{said}");
+    }
 }
