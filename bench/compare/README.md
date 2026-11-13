@@ -20,21 +20,21 @@ The harness has tests of its own, which `just check` does not run: after a chang
 | name | engine | durability of a commit |
 |---|---|---|
 | `native` | `swarmops-store` (path dependency, this tree), its defaults | `journal.log` frame and `journal.off` entry, each `fdatasync`'d; a moved ref's file replaced atomically (`fsync` of a temp file, rename, directory `fsync`); index columns synced every 32 frames |
-| `sqlite` | `rusqlite` 0.40.2, bundled SQLite 3.53.2 | WAL, `synchronous=FULL` (the WAL is `fsync`'d at every commit), `BEGIN IMMEDIATE`, `busy_timeout` 10 s, prepared statements |
+| `sqlite` | `rusqlite` 0.41.1, bundled SQLite 3.54.1 | WAL, `synchronous=FULL` (the WAL is `fsync`'d at every commit), `BEGIN IMMEDIATE`, `busy_timeout` 10 s, prepared statements |
 | `sqlite-normal` | the same, `synchronous=NORMAL` | **not power-loss durable**: syncs only at checkpoints. A reference line, never a contender |
 | `redb` | `redb` 4.3.0 | `Durability::Immediate` (the default), 1-phase commit with checksums: one `fdatasync` |
 | `fjall` | `fjall` 3.1.12 (`lsm-tree` 3.1.10) | single-writer transaction, `durability(Some(PersistMode::SyncAll))`, the strongest it offers: the journal `fsync`'d. A seeded store is settled by flushing every keyspace's memtable into table files (below) |
 | `fjall-unflushed` | the same | the same commits; a seeded store is settled with a journal sync alone, its data left in the journals. Measured in W3–W5 only, for the record |
 | `sled` | `sled` 0.34.7, the last stable release (2021-09-12); unmaintained since, its 1.0 rewrite still in alpha | `Db::flush()` after each transaction: `pwrite` + `sync_file_range`, which writes no metadata and does not flush the device cache — weaker than the others |
 
-Versions are pinned exactly, each released at least 7 days before the harness was written, as are the transitive dependencies in `Cargo.lock`, except `zstd` 0.14.2 (5.7 days), `zstd-safe` 8.1.0 and `zstd-sys` 2.1.1 (6.6 days), which `swarmops-store`'s own `zstd` brings in. Every engine runs with its defaults apart from durability; no engine gets a tuning the others do not.
+Versions are pinned exactly, each released at least 7 days before the harness was written, as are the transitive dependencies in `Cargo.lock`, except the ones an advisory has moved since: `zstd` 0.14.3, `zstd-safe` 8.2.0 and `zstd-sys` 2.1.2, which `swarmops-store`'s own `zstd` brings in, `rustix` 1.1.6, and `rusqlite` 0.41.1 with `libsqlite3-sys` 0.39.1. Every engine runs with its defaults apart from durability; no engine gets a tuning the others do not.
 
 Nothing in the repository bumps these versions: `.github/dependabot.yml` has no entry for this
 workspace. `cargo deny` checks this lockfile with `bench/compare/deny.toml`: every line of the
 workspace's policy, two licenses allowed for one crate each (`varint-rs`, 0BSD; `xxhash-rust`,
 BSL-1.0), and two advisories ignored with their reasons, for `fxhash` and `instant`, unmaintained
-crates that `sled` pulls in and that no upgrade fixes. The pins change only by hand, and the
-table above and `docs/perf.md` record the versions measured.
+crates that `sled` pulls in and that no upgrade fixes. The pins change only by hand: the table
+above gives the current ones, `docs/perf.md` the versions each run measured.
 
 **fjall's settled state.** fjall writes a memtable to a table file only once it holds 64 MiB, and deletes a journal only when every keyspace has flushed past it. The small keyspaces (`meta`, `refs`, `reflog`) never fill a memtable, so after a bulk load every journal stays until 512 MiB of them force a flush: left that way, W5 would count the journals beside the tables. So `fjall` settles as the others do, by moving its log into its main structure, as SQLite's checkpoint does: it syncs the journal, then flushes every keyspace's memtable (`rotate_memtable_and_wait`, public but doc-hidden; fjall's own tests use it), and fjall deletes the journals no keyspace needs. One cost stays, and it is fjall's own: the active journal is rotated only when it passes 64 MB at a flush, and an open replays it whole, flushed or not. So the flush shrinks a large store (W5); at open it saves only the first open after the load, which on an unflushed store replays every journal, flushes what the load left in memtables and deletes the sealed journals (2.9 s against 0.55 s at 1M, provisional), while every later open replays the same active journal. A small store keeps its whole journal beside the new tables. `fjall-unflushed` shows the store as the load left it in W5, in its first open after the load (timed at seeding) and in W4's opens, each of a fresh copy of the store taken at seeding; W3 and W4's recovery see it after that first open has settled it.
 

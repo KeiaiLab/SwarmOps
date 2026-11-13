@@ -6,11 +6,11 @@ edition = "2024"
 license = "MIT"
 description = "Measures SwarmOps' native metadata store against embedded databases; SwarmOps depends on none of them"
 
-# Every version is pinned exactly; each, and each one in Cargo.lock, was released at least 7
-# days before the harness was written, except zstd 0.14.2 (5.7 days), zstd-safe 8.1.0 and
-# zstd-sys 2.1.1 (6.6 days), which swarmops-store's own zstd brings in (since raised to 0.14.3,
-# 8.2.0 and 2.1.2 for RUSTSEC-2026-0391, -0398, -0403 and -0410). rusqlite was raised from 0.40.2
-# to 0.41.1 (15 days old then), which brings libsqlite3-sys 0.39.1, for RUSTSEC-2026-0459.
+# Every version is pinned exactly. Each, and each one in Cargo.lock, was released at least 7
+# days before the harness was written, except the ones an advisory has moved since: zstd 0.14.3,
+# zstd-safe 8.2.0 and zstd-sys 2.1.2, which swarmops-store's own zstd brings in
+# (RUSTSEC-2026-0391, -0398, -0403 and -0410); rustix 1.1.6 (RUSTSEC-2026-0486); rusqlite 0.41.1
+# with libsqlite3-sys 0.39.1 (RUSTSEC-2026-0459).
 [dependencies]
 # The two from this tree, at the workspace's version (RELEASE.md bumps it here too): cargo deny
 # refuses a dependency without a version requirement, a path one included.
