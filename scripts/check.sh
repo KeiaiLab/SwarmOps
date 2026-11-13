@@ -33,14 +33,17 @@ fi
 # `--version` in a build stamped with SWARMOPS_BUILD_COMMIT, each pin required to run, and a
 # malformed one refused; target/debug's binaries are linked again unstamped after.
 python3 -I scripts/check-stamped.py
-# Both doc runs start from an empty doc directory, as in `just check`; the removal refuses a
-# target directory that is empty, not absolute or the root however written, such as `//`,
-# which scripts/test-doc-clean.py shows.
+# Both doc runs write to a fresh directory below the target directory, removed on exit, as in
+# `just check`; the step refuses a target directory that is empty, not absolute or the root
+# however written, such as `//`, which scripts/test-doc-clean.py shows. Twice: the second run,
+# with every feature on, also renders and link-checks the test-hooks code.
 python3 -I scripts/test-doc-clean.py
-target="$(cargo metadata --locked --format-version 1 --no-deps | python3 -I -c 'import json, os, sys; t = json.load(sys.stdin)["target_directory"]; n = os.path.normpath(t); print(n if os.path.isabs(t) and n.strip("/") else "")')"; case "$target" in /?*) rm -rf "$target/doc" ;; *) echo "check: cargo metadata gave no absolute target directory below /; doc not removed" >&2; exit 1 ;; esac
-# Twice: the second run, with every feature on, also renders and link-checks the test-hooks code.
-RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items
-RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items --all-features
+(target="$(cargo metadata --locked --format-version 1 --no-deps | python3 -I -c 'import json, os, sys; t = json.load(sys.stdin)["target_directory"]; n = os.path.normpath(t); print(n if os.path.isabs(t) and n.strip("/") else "")')"; case "$target" in /?*) ;; *) echo "check: cargo metadata gave no absolute target directory below /; no doc run" >&2; exit 1 ;; esac; \
+  doc="$(mktemp -d "$target/doc-run.XXXXXX")" || exit 1; trap 'rm -rf "$doc"' EXIT; \
+  export CARGO_TARGET_DIR="$doc" CARGO_BUILD_BUILD_DIR="$target"; \
+  RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items && \
+  RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items \
+  --all-features)
 cargo deny --locked check
 # The fuzz crate's lockfile too, which the fuzz clippy step builds; its one license exception is
 # in fuzz/deny.exceptions.toml.
