@@ -26,6 +26,10 @@
 //! never deleted, a tag never moved) are the store's `check_move`, called, not restated: a tag
 //! skips step 6 so that its move reaches the store's refusal (`E_TAG_IMMUTABLE`). An annotated
 //! tag is no changeset, so its push is refused before the import (`annotated_tag`).
+//!
+//! Once step 7 has deleted a store ref, the deletion stands: `serve.git`'s ref naming another
+//! commit than step 4 exported (moved by something that holds no `serve.lock`) is left as it
+//! is, the report is `ok`, and the next refresh removes the ref the store no longer has.
 
 use swarmops_api::{ErrorCode, OpError, RefDeleteReq, RefSetReq, Rev, StoreOps as _};
 use swarmops_core::ChangesetId;
@@ -35,7 +39,7 @@ use swarmops_git::serve::repo::{ServeError, ServeLock};
 use swarmops_git::transport::{GitCli, Transport as _};
 use swarmops_git::{
     BranchUpdate, DivergedReason, ExportError, ExportRequest, GitOid, GitSink as _, GitSource as _,
-    GixSink, ImportError, ImportRequest, RawKind, SinkError, export, import,
+    GixSink, ImportError, ImportRequest, RawKind, export, import,
 };
 use swarmops_repo::RepoError;
 use swarmops_store::{RefKind, check_move};
@@ -322,19 +326,13 @@ fn record(ctx: &HookCtx<'_>, lock: &ServeLock, full: &str, head: Option<Head>) {
     let _ = write_state(ctx.repo, lock, &updates);
 }
 
-/// Deletes `full` from `serve.git`, where it names `oid`, under `lock`.
+/// Deletes `full` from `serve.git`, where it names `oid`, under `lock`, after the store ref it
+/// is served for was deleted. A ref that names another commit, or none, is left as it is: the
+/// store's deletion stands, and the next refresh removes what the store no longer has.
 fn unset(ctx: &HookCtx<'_>, lock: &ServeLock, full: &str, oid: GitOid) -> Result<(), OpError> {
     let update = ctx.repo.set_ref(lock, full, Some(oid), None);
     match update.map_err(serve_error)? {
-        BranchUpdate::Applied => Ok(()),
-        BranchUpdate::Mismatch { actual } => {
-            let found = actual.map_or_else(|| "nothing".to_owned(), |oid| oid.to_string());
-            let reason = format!("{full} names {found}, not {oid}: moved under serve.lock");
-            Err(serve_error(ServeError::Sink(SinkError::Write {
-                what: full.to_owned(),
-                reason,
-            })))
-        }
+        BranchUpdate::Applied | BranchUpdate::Mismatch { .. } => Ok(()),
         _ => Err(error::unknown_variant("BranchUpdate")),
     }
 }
@@ -454,4 +452,62 @@ fn refused(git_ref: &str, refusal: Refusal) -> OpError {
 fn stale(command: &Command) -> Report {
     let reason = format!("stale: {} moved; fetch first", command.refname);
     Report::ng(command.refname.clone(), reason)
+}
+
+#[cfg(test)]
+mod tests {
+    use camino::Utf8PathBuf;
+    use swarmops_api::{ChangeInput, ChangeOp, CommitReq, ContentInput, Identity, StoreOps as _};
+    use swarmops_git::GitOid;
+    use swarmops_git::serve::repo::ServeRepo;
+
+    use super::unset;
+    use crate::LocalOps;
+    use crate::serve::access::Access;
+    use crate::serve::hook::HookCtx;
+    use crate::serve::refresh::{SERVE_LOCK_WAIT, Scope, refresh};
+
+    /// Who pushes.
+    const PUSHER: &str = "person/ada";
+
+    /// The pusher's grants: the deletion is the store's by the time `unset` runs.
+    const GRANTED: &str = "version = 1\n[[grant]]\nwho = [\"person/ada\"]\npush = [\"*\"]\n";
+
+    /// The branch whose deletion the test ends, in git.
+    const MAIN_REF: &str = "refs/heads/main";
+
+    /// A commit `serve.git`'s branch does not name.
+    const ELSEWHERE: &[u8] = b"00000000000000000000000000000000000000aa";
+
+    /// A deletion the store has made is not undone by `serve.git`'s ref naming another commit
+    /// than the one exported under `serve.lock` (something else moved it): the push's deletion
+    /// stands, the ref is left to the next refresh, and no error makes the push an `ng`.
+    #[test]
+    fn a_ref_moved_under_the_lock_leaves_the_deletion_done() {
+        // 1. A store with main, served.
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+        let (ops, _) = LocalOps::init(&root, "acme").unwrap();
+        let who = Identity::parse(PUSHER).unwrap();
+        let mut change = ChangeInput::new("a".to_owned(), ChangeOp::Put);
+        change.content = Some(ContentInput::Inline("a".to_owned()));
+        let mut req = CommitReq::new(vec![change], "a".to_owned());
+        req.advance = Some("main".to_owned());
+        ops.commit(&who, req).unwrap();
+        std::fs::write(root.join("access.toml"), GRANTED).unwrap();
+        let repo = ServeRepo::open(&root).unwrap();
+        refresh(&ops, &repo, &Scope::All).unwrap();
+        let served = repo.refs().unwrap()[MAIN_REF];
+
+        // 2. The last step of a deletion that exported another commit than the ref names now.
+        let access = Access::load(&ops).unwrap();
+        let ctx = HookCtx::new(&ops, &repo, &who, &access);
+        let lock = repo.lock(SERVE_LOCK_WAIT).unwrap();
+        let elsewhere = GitOid::from_hex(ELSEWHERE).unwrap();
+        let done = unset(&ctx, &lock, MAIN_REF, elsewhere);
+        assert!(done.is_ok(), "{done:?}");
+
+        // 3. The ref as it was: the next refresh's to remove.
+        assert_eq!(repo.refs().unwrap()[MAIN_REF], served);
+    }
 }
