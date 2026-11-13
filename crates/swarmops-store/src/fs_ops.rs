@@ -333,7 +333,9 @@ pub trait FsOps: Send + Sync {
     /// ([`FsMethod::Remove`]); a failure is named `remove_dir_all` ([`FileOp::RemoveDirAll`]).
     ///
     /// The default removes it on the real filesystem, as the store did before the seam had this
-    /// method; every wrapper of this crate and of the test kit forwards it.
+    /// method. `Arc`, `Box`, `CrashAtFs`, `FailAtFs`, the order checker and the test kit's
+    /// doubles forward it to the `FsOps` they wrap; any other implementation that does not
+    /// define it takes the default, past what it wraps.
     fn remove_dir_all(&self, p: &Path) -> io::Result<()> {
         fs::remove_dir_all(p)
     }
