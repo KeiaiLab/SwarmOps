@@ -1,11 +1,12 @@
 //! FORMAT 2 through the binary (the M6 design §10, acceptance): a FORMAT 2 store holds a
 //! free-form branch and a tag, a tag never moves, a FORMAT 1 store asks for the upgrade a
 //! FORMAT 2 name needs, a land targets a branch and never a tag, and gc and repair find
-//! nothing on a clean store. Golden snapshots pin the envelopes of the three codes M6 raises
+//! nothing on a clean store, the upgraded one too once gc removed what the upgrade left. Golden
+//! snapshots pin the envelopes of the three codes M6 raises
 //! first: `E_FORMAT_REQUIRED`, `E_TAG_IMMUTABLE`, `E_MAINTENANCE_BUSY`, without their `meta`
 //! (the temp dir, times and resolved ids change from run to run).
 
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 use swarmops_store::MaintLease;
 
 use crate::support::{Run, Store, agent, run};
@@ -22,7 +23,9 @@ const MAINTENANCE: [&str; 3] = ["gc", "repair", "upgrade"];
 /// The design §10 acceptance, in its order: `init --format 2` makes FORMAT 2; a branch and a tag are
 /// made and listed with their kinds; the tag's move is `E_TAG_IMMUTABLE`; on a FORMAT 1
 /// store the branch is `E_FORMAT_REQUIRED` until `upgrade`; a land on the branch lands and
-/// one on the tag is `E_REF_NAME_INVALID`; `gc --dry-run` and `repair --dry-run` are clean.
+/// one on the tag is `E_REF_NAME_INVALID`; `gc --dry-run` and `repair --dry-run` are clean. Then
+/// the upgraded store: `gc` finds the files of the old format that the upgrade left (the design
+/// §8.2), removes them, and `gc --dry-run` and `repair --dry-run` are clean there too.
 #[test]
 fn a_format_2_store_holds_a_branch_and_a_tag() {
     let me = agent(1);
@@ -80,13 +83,31 @@ fn a_format_2_store_holds_a_branch_and_a_tag() {
     assert_eq!(on_tag.err("E_REF_NAME_INVALID")["details"]["reason"], "tag");
 
     // 6. gc and repair find nothing to do on the clean store.
-    let gc = store.run_as(&me, &["gc", "--dry-run"], &[]).ok();
+    assert_nothing_to_do(&store, &me);
+    store.assert_clean("after the acceptance");
+
+    // 7. The upgraded store: gc finds the upgrade's residue, the same with and without
+    // `--dry-run`, removes it, and then gc and repair find nothing to do there either.
+    let residue = json!([{"kind": "upgrade_residue", "count": UPGRADE_RESIDUE}]);
+    for args in [&["gc", "--dry-run"][..], &["gc"]] {
+        let gc = old.run_as(&me, args, &[]).ok();
+        assert_eq!(gc["removed"], residue, "{args:?}: {gc}");
+    }
+    assert_nothing_to_do(&old, &me);
+    old.assert_clean("after gc on the upgraded store");
+}
+
+/// How many files of FORMAT 1 an upgrade of the acceptance's store leaves for gc.
+const UPGRADE_RESIDUE: u64 = 5;
+
+/// `gc --dry-run` and `repair --dry-run` as `me` find nothing to do on `store`.
+fn assert_nothing_to_do(store: &Store, me: &str) {
+    let gc = store.run_as(me, &["gc", "--dry-run"], &[]).ok();
     assert_eq!(gc["removed"], Value::Array(vec![]), "{gc}");
     assert_eq!(gc["orphan_objects"], 0, "{gc}");
-    let repair = store.run_as(&me, &["repair", "--dry-run"], &[]).ok();
+    let repair = store.run_as(me, &["repair", "--dry-run"], &[]).ok();
     assert_eq!(repair["actions"], Value::Array(vec![]), "{repair}");
     assert_eq!(repair["after"]["found"], 0, "{repair}");
-    store.assert_clean("after the acceptance");
 }
 
 /// While another process holds the maintenance lease, gc, repair and upgrade each fail at once
