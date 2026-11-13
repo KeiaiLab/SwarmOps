@@ -505,7 +505,8 @@ pack per identical read, per-request serve records and landing lanes.
   `E_WS_DIRTY` naming the swapped path, and nothing outside changes; its hint says to move the
   path aside. Until then every command on the workspace answers the same, and the first one after
   finishes the interrupted update. A directory that cannot be opened is `E_IO` whose
-  `details.path` names the directory, no longer the file below it. Windows and the other targets
+  `details.path` names the directory, no longer the file below it. A file gone between the read
+  of its metadata and of its bytes counts as an edit. Windows and the other targets
   still write by full path ([Known limitations](docs/known-limitations.md)).
 - `git import --into <ref>` of a commit whose changeset the target's head already descends from,
   over every parent, moves nothing and writes nothing: an older tip imported again after native
@@ -1172,8 +1173,9 @@ fixes the measurements and the pilot asked for.
   path checks of checkout, index, merge and tree editing). SwarmOps runs none of those through
   gix, so it was not exposed.
 - zstd 0.14.2 -> 0.14.3, zstd-safe 8.1.0 -> 8.2.0, zstd-sys 2.1.1 -> 2.1.2 (RUSTSEC-2026-0391,
-  -0398, -0403, -0410). The store uses none of the affected paths (reused stream contexts, the
-  seekable format, legacy frames, wasm32), so it was not exposed.
+  -0398, -0403, -0410). The store uses none of the affected paths (reused stream contexts: it
+  makes a stream decoder per call; the seekable format, legacy frames, wasm32), so it was not
+  exposed.
 
 ## [0.3.0] - 2026-10-22
 
@@ -1741,7 +1743,8 @@ fixes the measurements and the pilot asked for.
   is, and one with other bytes is reported as a conflict. The index is a cache outside the
   journal, so `FORMAT` stays 1. A new write-order rule, W8 (storage spec §2 rule 4), links an
   entry only once every byte its process wrote to `journal.log` is durable, so that no entry
-  names a changeset a power loss can take back; the order checker enforces it.
+  names a changeset a power loss can take back; the order checker enforces it. (0.7.0 states W8
+  as a durable frame of `journal.log` that records the entry's changeset.)
 - `verify` checks the external id index, once the changesets are: an entry whose file is not one
   (`external_id_corrupt`), one that names a changeset the store does not hold
   (`external_id_dangling`), and one of system `git` whose changeset's `git.oid` is another oid
@@ -2280,7 +2283,8 @@ fixes the measurements and the pilot asked for.
   `journal.log` again to the length the rewrite left; and a rewrite that does not land where the
   frames were (another writer's bytes in between) is cut back and refused as damage
   (`JournalCorrupt` at the frames' offset, `E_STORE_CORRUPT`) before anything is listed, where it
-  used to list entries that pointed into other bytes.
+  used to list entries that pointed into other bytes. A cut back that fails there aborts the
+  process, saying why on stderr: the fourth documented double fault, beside M1.5's three.
 - A `FORMAT` or `REPO` that is not a regular file, such as a directory, is refused by its read
   as not a regular file (`E_STORE_CORRUPT`, `read REPO: REPO is not a regular file`, with
   `details.fs_op` and `details.store_file`), no longer as one too long by the size a directory
