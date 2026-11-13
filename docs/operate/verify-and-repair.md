@@ -76,7 +76,7 @@ A store with damage fails with
 store's maintenance lease (another `gc`, `repair` or `upgrade` fails at once with the retryable
 `E_MAINTENANCE_BUSY`), then, in this order:
 
-1. writes `journal.off` again from `journal.log` if it is missing or out of step;
+1. writes `journal.off` again from `journal.log` if one of its entries is damaged;
 2. runs `verify --deep`;
 3. rebuilds the ref files, then the changeset index and its sorted views, from the journal;
 4. moves each damaged object file to `quarantine/objects/<id>`;
@@ -115,6 +115,24 @@ swarmops verify --deep
 
 Where nothing holds the content, restore the store from a backup. `quarantine/` is kept: neither
 `repair` nor `gc` deletes it.
+
+`journal.off` (FORMAT 2 and 3: `journal2.off`) lists where each frame of the journal starts.
+A damaged entry other than the last fails `verify` with `E_STORE_CORRUPT`; `repair` writes the
+file again from the journal. This is a FORMAT 1 store of three commits whose middle entry was
+zeroed, recorded by the CLI tests ([`swarmops repair`](../reference/commands/repair.md)):
+
+```sh
+swarmops repair
+swarmops repair --dry-run
+```
+
+```text
+{"ok":true,"op":"repair","api":1,"result":{"actions":[{"kind":"rebuild_offsets","target":"journal_offsets","done":true}],"after":{"objects_checked":9,"changesets_checked":3,"found":0}},…}
+{"ok":true,"op":"repair","api":1,"result":{"actions":[],"after":{"objects_checked":9,"changesets_checked":3,"found":0}},…}
+```
+
+A missing `journal.off` is not mended: every command, `repair` too, fails to open the store
+with `E_IO` (`details.store_file` `meta/journal.off`); restore the store from a backup.
 
 ## When to run it
 
