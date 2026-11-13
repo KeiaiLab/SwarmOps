@@ -59,11 +59,11 @@ use crate::error::RepoError;
 use crate::protect::MoveMode;
 use crate::read::RepoRead;
 
-/// The widest gap, in generations, that a walk crosses by narrow lookups, one first parent at a
-/// time; a wider one lifts along the first-parent skip list ([`FirstParentSkipList`]), whose
-/// first derivation writes a value file for each changeset of the chain below, so that a short
-/// walk never derives a chain (M2 Decision 7). [`RepoRead::ancestor`] counts first-parent steps
-/// instead of generations.
+/// The widest gap, in generations, that a walk crosses one first parent at a time, one object
+/// read per step; a wider one lifts along the first-parent skip list
+/// ([`FirstParentSkipList`]), whose first derivation writes a value file for each changeset of
+/// the chain below, so that a short walk never derives a chain (M2 Decision 7).
+/// [`RepoRead::ancestor`] counts first-parent steps instead of generations.
 pub const SKIP_AFTER: u64 = 1024;
 
 /// A walk from a changeset back through its first parents to a root, the changeset first, in one
@@ -125,8 +125,8 @@ impl<O: ObjectStore> RepoRead<'_, O> {
     }
 
     /// The changeset `n` first-parent steps back from changeset `cs` (`cs` itself for 0), or
-    /// `None` if a root comes first. Up to [`SKIP_AFTER`] steps it walks by narrow lookups;
-    /// further, it lifts along the first-parent skip list, a jump per bit of `n`. A `cs` of
+    /// `None` if a root comes first. Up to [`SKIP_AFTER`] steps it walks one object read per
+    /// step; further, it lifts along the first-parent skip list, a jump per bit of `n`. A `cs` of
     /// generation `g` has at most `g - 1` first-parent steps above a root, so an `n` past
     /// [`SKIP_AFTER`] and of `g` or more is `None` from `cs`'s record, its generation checked
     /// against its parents'; a shorter walk stops at the root it reaches.
@@ -140,8 +140,8 @@ impl<O: ObjectStore> RepoRead<'_, O> {
 
     /// Whether changeset `ancestor` is on the first-parent chain of changeset `of`, `of` included:
     /// a changeset is its own ancestor, and a merge's second parent is not one. Across at most
-    /// [`SKIP_AFTER`] generations it walks from `of` by narrow lookups, at most one step per
-    /// generation; across more, it lifts along the first-parent skip list to the furthest of
+    /// [`SKIP_AFTER`] generations it walks from `of` one object read per step, at most one step
+    /// per generation; across more, it lifts along the first-parent skip list to the furthest of
     /// `of`'s first-parent ancestors at `ancestor`'s generation or above, which is `ancestor` if
     /// anything is. [`RepoError::NotFound`] if the snapshot does not hold either;
     /// [`RepoError::DerivedCorrupt`] for a skip list that fails a lift's checks.

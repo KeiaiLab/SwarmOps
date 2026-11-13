@@ -397,7 +397,8 @@ fn add_add_conflicts_unless_identical() {
     assert_eq!(outcome.auto_merged, [path("both")]);
 }
 
-/// What a merge holds of the conflict hunks of the files it cannot merge (storage spec §4): the
+/// What a merge holds of the conflict hunks of the files it cannot merge (operations spec §3,
+/// which states the hold of 128 hunks; storage spec §4 has the merge and says nothing of it): the
 /// first ones as the content merger made them, and a file's hunks past those as one hunk that
 /// spans them, each side's lines from the first one's to the last one's with their bytes. So what
 /// it holds of a file whose sides' edits meet at very many places stays small, and each of those
