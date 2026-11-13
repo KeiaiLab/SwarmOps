@@ -207,9 +207,11 @@ it; `git export`'s existing code writes it; what leaves for a git remote is read
 import and export keep their contracts: a commit imported from git exports back as itself, byte
 for byte, and the same store gives the same commits every time
 ([architecture, Git export](architecture.md#git-export)). The mirror holds nothing the store and
-the remotes cannot give again: deleted, it is rebuilt by the next fetch and export. Its refs record
-each remote's last known state (`refs/remotes/<remote>/<branch>`), so topology 2 needs no new ref
-name or journal record, and waits for no new store `FORMAT`. Built in M13 (`git/mirror.git`): it
+the remotes cannot give again, but one hint: deleted, it is rebuilt by the next fetch and export.
+Its refs record each remote's last known state (`refs/remotes/<remote>/<branch>`) and, since M16,
+the remote commit `main` was last matched to (`refs/published/<remote>/<branch>`), the floor a
+sync keeps the remote's head above; a rebuilt mirror lowers that floor to the sync's base. So
+topology 2 needs no new ref name or journal record, and waits for no new store `FORMAT`. Built in M13 (`git/mirror.git`): it
 takes no `FORMAT` step, but a marker of its own, `git/MIRROR`.
 
 **Remotes (M13, built).** `so remote add <name> <url>` records a remote in the store's

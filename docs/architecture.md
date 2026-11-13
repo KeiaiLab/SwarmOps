@@ -647,6 +647,7 @@ store and its remotes, and move packs with the user's own git:
                   with the user's credentials   refs/remote-tags/<remote>/*
                                                 refs/heads/push/<remote>/*
                                                 refs/incoming/<remote>/*
+                                                refs/published/<remote>/*
 ```
 
 **The transport.** `GitCli` runs `git` (2.39 or later: `SWARMOPS_GIT`, else `PATH`) as a child
@@ -668,7 +669,10 @@ disk side.
 **The mirror.** `git/mirror.git` is a cache that SwarmOps alone writes: fetched packs land in it,
 the import reads it (`GixSource`), and a push's export is written into it (`GixSink`). A remote's
 state is the mirror's `refs/remotes/<remote>/<branch>`, so the remotes need no new store ref and
-no new `FORMAT`. A mirror that is missing, has a marker this build does not know, or that gix
+no new `FORMAT`. One ref is more than a cache: `refs/published/<remote>/<branch>`, the remote
+commit `main` was last matched to, which a sync and a push of `main` move and a fetch never does,
+is the floor below which a sync refuses a remote's head (M16); lost with the mirror, it lowers
+the floor to the sync's base. A mirror that is missing, has a marker this build does not know, or that gix
 cannot open is moved aside as `git/mirror.git.broken-<unix ms>` and made again; one held by a dead
 process's git lock files has those removed once they are older than ten minutes. `git/lock`
 serializes the commands that write the mirror; a held lock is `E_BUSY` at once. `meta/lock`, the
