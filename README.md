@@ -114,7 +114,8 @@ Code's worktree hooks a workspace ([Build and test a change](docs/operate/build-
 - You need git parity: hooks, signing, submodules and LFS are a non-goal.
 - Several hosts must write into one store at once: today one host writes and the others sync
   through a git remote (several writers are planned).
-- The store would sit on NFS, SMB, FUSE or under `/mnt/`: not supported
+- The store would sit under `/mnt/`, which is refused with `E_UNSUPPORTED_FS`, or on NFS, SMB or
+  FUSE, which are not detected yet and not supported
   ([where a store can live](docs/guides/install.md#where-can-a-store-live)).
 
 [Non-goals](docs/goals.md#non-goals) and [known limitations](docs/known-limitations.md) list the
