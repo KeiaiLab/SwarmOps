@@ -67,6 +67,11 @@ pub const WARNING_MAX: usize = 4 * 1024;
 /// How often a waiter looks for its answer.
 pub const ANSWER_POLL: Duration = Duration::from_millis(1);
 
+/// How long past its deadline a claimed request waits for its answer. A leader answers within
+/// its one log sync; one that is stopped, or stuck, after its claim holds the lock and answers
+/// nothing, and its waiter then ends with [`StoreError::Busy`] ([`MetaStore::take_turn`]).
+pub const CLAIMED_WAIT: Duration = Duration::from_secs(60);
+
 /// The bytes of an answer record that are not its warning or its body: magic, version, outcome,
 /// frame seq, the two lengths and the CRC.
 pub const ANSWER_FIXED: usize = MAGIC_LEN + 1 + 1 + 8 + 4 + 4 + CRC_LEN;
@@ -768,9 +773,12 @@ impl MetaStore {
     ///
     /// [`StoreError::Busy`] when the request is still unclaimed at the deadline
     /// ([`MetaStore::with_lock_timeout`]): nothing of it was recorded. A claimed request waits
-    /// past the deadline for its answer. A declined request runs again alone, waiting only for
-    /// what is left of the first deadline. An answer that cannot be read is [`StoreError::Io`]
-    /// naming its file, and the request is never run again.
+    /// past the deadline for its answer, [`CLAIMED_WAIT`] at most: a leader that is stopped, or
+    /// stuck, after its claim answers nothing, and the request is then [`StoreError::Busy`] too.
+    /// That one says nothing of the request: its leader, once it runs again, commits what it
+    /// claimed, as it does for a waiter that died after its claim. A declined request runs again
+    /// alone, waiting only for what is left of the first deadline. An answer that cannot be read
+    /// is [`StoreError::Io`] naming its file, and the request is never run again.
     pub fn take_turn(&self, body: &[u8], serve: Serve) -> Result<Turn<'_>, StoreError> {
         self.take_turn_with(body, serve, Seams::real())
     }
@@ -902,7 +910,8 @@ impl MetaStore {
         }
     }
 
-    /// Waits for the lock or for the answer to request `own` (steps 5, 15–17 of §3.1).
+    /// Waits for the lock or for the answer to request `own` (steps 5, 15–17 of §3.1), a
+    /// claimed one no longer than [`CLAIMED_WAIT`] past `deadline`.
     fn await_answer(
         &self,
         wait: LockWait,
@@ -927,11 +936,20 @@ impl MetaStore {
             }
 
             // 3. The deadline: withdrawn while unclaimed, or claimed and waited for.
-            if seams.now() >= deadline {
-                crash_point(self);
-                if seams.ops.remove(&Kind::Req.path(dir, &own)).is_ok() {
-                    return Err(StoreError::Busy);
-                }
+            let now = seams.now();
+            if now < deadline {
+                continue;
+            }
+            crash_point(self);
+            if seams.ops.remove(&Kind::Req.path(dir, &own)).is_ok() {
+                return Err(StoreError::Busy);
+            }
+
+            // 4. The bound of a claimed wait: given up as a waiter that died after its claim
+            //    is, its request file removed and closed. Its leader may still commit it.
+            if now.saturating_duration_since(deadline) >= CLAIMED_WAIT {
+                self.withdraw(&own, &seams);
+                return Err(StoreError::Busy);
             }
         }
     }
@@ -2274,6 +2292,118 @@ mod tests {
             assert!(matches!(got, Ok(Ended::Answered(_))), "{got:?}");
             drop(lock);
         });
+    }
+
+    /// The fake clock's reading of `time`, in the milliseconds it counts.
+    fn clock_ms(time: Duration) -> u64 {
+        u64::try_from(time.as_millis()).unwrap()
+    }
+
+    /// A claimed request whose leader answers nothing (stopped, or stuck, after its claim) waits
+    /// [`CLAIMED_WAIT`] past its deadline and no longer: then it is busy, and its request file is
+    /// gone, as a dead waiter's is, so that no later leader plans it.
+    #[test]
+    fn a_claimed_request_past_its_bound_is_busy() {
+        const TIMEOUT: Duration = Duration::from_millis(50);
+        let (_dir, root) = new_store();
+        let holder = open(&root);
+        let lock = hold(&holder);
+        let (added, clock) = fake_clock();
+        let seams = Seams {
+            clock,
+            ..Seams::real()
+        };
+        let (tx, rx) = mpsc::channel();
+        thread::scope(|s| {
+            s.spawn(|| {
+                let store = open(&root).with_lock_timeout(TIMEOUT);
+                tx.send(turn_with(&store, Ask::Frame(1), seams)).unwrap();
+            });
+
+            // 1. Claimed, by a leader that never answers.
+            let rid = wait_files(&root, Kind::Req, 1).remove(0);
+            let dir = queue(&root);
+            fs::rename(Kind::Req.path(&dir, &rid), Kind::Com.path(&dir, &rid)).unwrap();
+
+            // 2. One millisecond short of the bound: it still waits.
+            let bound = clock_ms(TIMEOUT + CLAIMED_WAIT);
+            added.store(bound - 1, Ordering::SeqCst);
+            thread::sleep(Duration::from_millis(100));
+            assert!(rx.try_recv().is_err(), "it waits out its bound");
+
+            // 3. At the bound: busy. A waiter still there is answered, so that the test ends.
+            added.store(bound, Ordering::SeqCst);
+            let got = rx.recv_timeout(PATIENCE);
+            if got.is_err() {
+                seed_answer(&root, &rid, &Answer::new(Outcome::NoFrame, Vec::new()));
+            }
+            let got = got.expect("a claimed request ends at its bound");
+            assert!(matches!(got, Err(StoreError::Busy)), "{got:?}");
+            assert!(
+                files(&root, Kind::Com).is_empty(),
+                "its request file removed"
+            );
+            assert!(files(&root, Kind::Req).is_empty(), "nor requeued");
+            drop(lock);
+        });
+
+        // 4. No later leader plans it.
+        let store = open(&root);
+        let led = lead_all(lead_on(&store, hold(&store), Ask::NoFrame, Seams::real()));
+        assert_eq!(led.requests, 1, "{led:?}");
+        assert_eq!(landed(&store, 1), 0);
+    }
+
+    /// Busy at the bound says nothing of the request: its leader, once it runs again, commits
+    /// what it claimed, as it commits the request of a waiter that died after its claim. The
+    /// answer nobody reads is removed by the next leader.
+    #[test]
+    fn a_request_busy_at_its_bound_may_still_commit() {
+        const TIMEOUT: Duration = Duration::from_millis(50);
+        let (_dir, root) = new_store();
+        let holder = open(&root);
+        let lock = hold(&holder);
+        let (added, clock) = fake_clock();
+        let seams = Seams {
+            clock,
+            ..Seams::real()
+        };
+        let (tx, rx) = mpsc::channel();
+        thread::scope(|s| {
+            s.spawn(|| {
+                let store = open(&root).with_lock_timeout(TIMEOUT);
+                tx.send(turn_with(&store, Ask::Frame(2), seams)).unwrap();
+            });
+
+            // 1. The leader claims the waiter's request, then stops.
+            let rid = wait_files(&root, Kind::Req, 1).remove(0);
+            let mut lead = lead_on(&holder, lock, Ask::Frame(1), Seams::real());
+            let mut next = 0;
+            let mut plans = vec![plan(&mut lead, 0, &mut next)];
+            assert!(lead.may_plan());
+            plans.push(plan(&mut lead, 1, &mut next));
+            assert_eq!(lead.claim(plans).unwrap(), 2);
+
+            // 2. The waiter ends at its bound. One still there is answered by the commit below.
+            added.store(clock_ms(TIMEOUT + CLAIMED_WAIT), Ordering::SeqCst);
+            let got = rx.recv_timeout(PATIENCE);
+            let stopped = got.is_ok();
+
+            // 3. The leader runs again: both committed.
+            lead.commit().unwrap();
+            let got = got.or_else(|_| rx.recv_timeout(PATIENCE));
+            assert!(stopped, "a claimed request ends at its bound: {got:?}");
+            assert!(matches!(got, Ok(Err(StoreError::Busy))), "{got:?}");
+            assert_eq!(files(&root, Kind::Ans), std::slice::from_ref(&rid));
+        });
+        let store = open(&root);
+        assert_eq!((landed(&store, 1), landed(&store, 2)), (1, 1));
+
+        // 4. The next leader removes the answer, and plans nothing of it.
+        let again = lead_all(lead_on(&store, hold(&store), Ask::NoFrame, Seams::real()));
+        assert_eq!(again.requests, 1, "{again:?}");
+        assert!(files(&root, Kind::Ans).is_empty() && files(&root, Kind::Com).is_empty());
+        assert_eq!(landed(&store, 2), 1);
     }
 
     #[test]
