@@ -896,6 +896,9 @@ fn is_valid_derived_name(name: &str) -> bool {
 }
 
 /// Whether the decoded `(key, value)` of a whole derived file is valid for known derivations.
+/// Each of the git export's memos that fails here for its value is one a deep verify of the git
+/// memos reports, whatever oid it starts with (storage spec §5), so that what `repair` drops for
+/// its shape, `verify --deep` named first.
 fn derived_payload_valid(name: &str, version: u32, key: &[u8], value: &[u8]) -> bool {
     match (name, version) {
         (FirstParentSkipList::NAME, FirstParentSkipList::VERSION) => {
@@ -984,4 +987,43 @@ fn remove_file_durable(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::derived_payload_valid;
+
+    /// A git oid's bytes.
+    const OID: [u8; 20] = [0xab; 20];
+
+    /// The git export's memos without a key are valid in one shape each, no slot key and a value
+    /// of the memo's length, a `git_oid`'s `kept` byte 0 or 1: any other is dropped.
+    #[test]
+    fn a_malformed_git_memo_is_invalid() {
+        let export = |kept: u8| [OID.as_slice(), &[kept]].concat();
+
+        // 1. The shapes an export writes.
+        for name in ["git_tree_oid", "git_blob_oid"] {
+            assert!(derived_payload_valid(name, 1, &[], &OID), "{name}");
+        }
+        for kept in [0, 1] {
+            let valid = derived_payload_valid("git_oid", 1, &[], &export(kept));
+            assert!(valid, "git_oid, kept {kept}");
+        }
+
+        // 2. Another length, a `kept` byte past 1, or a slot key.
+        let invalid: [(&str, &[u8], Vec<u8>); 7] = [
+            ("git_tree_oid", &[], OID[..19].to_vec()),
+            ("git_blob_oid", &[], export(0)),
+            ("git_blob_oid", &[1], OID.to_vec()),
+            ("git_oid", &[], OID.to_vec()),
+            ("git_oid", &[], [export(1), vec![0]].concat()),
+            ("git_oid", &[], export(2)),
+            ("git_oid", &[1], export(1)),
+        ];
+        for (name, key, value) in invalid {
+            let valid = derived_payload_valid(name, 1, key, &value);
+            assert!(!valid, "{name}, key {key:?}, {} bytes", value.len());
+        }
+    }
 }
