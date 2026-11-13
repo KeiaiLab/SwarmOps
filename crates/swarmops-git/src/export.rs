@@ -55,6 +55,13 @@
 //! and in step 4 a tag at any other commit is [`DivergedReason::TagExists`] unless the request
 //! forces it, as `git push` moves no tag.
 //!
+//! A store tag that carries git's tag object (FORMAT 3, the annotated tags design §2.4) exports
+//! as that object: read from the same snapshot as the head, its `object` line checked against
+//! the head's export oid (a mismatch is [`RepoError::DerivedCorrupt`] for derivation
+//! `tag_object`, and nothing is written), the object written with the commits, and the tag moved
+//! to its id. Run again, a tag that names that object is up to date; any other object under the
+//! name is [`DivergedReason::TagExists`] unless forced.
+//!
 //! The export writes no journal frame. Its store-side writes are the derived store's values
 //! (export oids, and the memoized git oids of trees and blobs) and the external id entries. Its
 //! reads go by the committed snapshot: the head, the changesets' records and objects, the trees
@@ -71,13 +78,13 @@ use std::time::{Duration, Instant};
 
 use swarmops_core::bytes;
 use swarmops_core::{BlobId, Changeset, ChangesetId, EntryTarget, Tree, TreeEntry, TreeId};
-use swarmops_repo::{LocalRepo, RepoError, RepoRead, StoreError};
+use swarmops_repo::{LocalRepo, RepoError, RepoRead, StoreError, StoreFormat, TagKind};
 use swarmops_store::{ExternalEntry, FsObjectStore, RefKind, SYSTEM_GIT, TailRepair};
 
 use crate::export_oid::{ExportOids, OnMemo};
 use crate::{
     BranchUpdate, ExportReader, ExportedOid, GIT_OID, GitOid, GitSink, MemoKey, ObjectFormat,
-    OidCache, RawCommit, RawKind, SinkError, Stored, Unsupported,
+    OidCache, RawCommit, RawKind, RawTag, SinkError, Stored, Unsupported,
 };
 use crate::{ancestry, export_oid, native, oid, render};
 
@@ -255,6 +262,10 @@ pub struct ExportReport {
     /// The commit the head exports to ([`ExportOid`](crate::ExportOid)), which the branch names
     /// now.
     pub head_oid: GitOid,
+    /// The tag object the tag names now, when the source is a store tag that carries one (the
+    /// annotated tags design §2.4): git's own bytes, under their own id. `None` for a branch and
+    /// a lightweight tag, which name [`ExportReport::head_oid`].
+    pub tag_oid: Option<GitOid>,
     /// The branch, by its short name.
     pub branch: String,
     /// The commit the branch named when the export read it; `None` when there was no such
@@ -313,6 +324,7 @@ impl ExportReport {
         ExportReport {
             head,
             head_oid,
+            tag_oid: None,
             branch,
             old,
             base,
@@ -538,10 +550,15 @@ fn export_on(
     count(Work::Export);
     let mut run = Run::new(repo, read, sink, (head, req.memo_key.as_ref()));
     let head_oid = run.export_of(head)?.git_oid();
+    let object = tag_object(repo, read, req, (head, head_oid))?;
+    let tag_oid = object.as_ref().map(|object| object.oid);
+    // What the branch or tag names once exported: the tag object, else the head's commit.
+    let wanted = tag_oid.unwrap_or(head_oid);
     clock.lap(Step::Derive);
     let mut report = ExportReport {
         head,
         head_oid,
+        tag_oid,
         branch: req.branch.clone(),
         old,
         base: None,
@@ -553,7 +570,7 @@ fn export_on(
         recovered,
         warnings: Vec::new(),
     };
-    let up_to_date = old == Some(head_oid);
+    let up_to_date = old == Some(wanted);
     clock.lap(Step::UpToDate);
     if up_to_date {
         report.base = Some(head);
@@ -587,6 +604,7 @@ fn export_on(
     let commits = run.commits(report.base, &kept_out)?;
     clock.lap(Step::Commits);
     run.write(&commits)?;
+    run.tag(object.as_ref())?;
     clock.lap(Step::Write);
     if !run.pending.is_empty() {
         let pending = std::mem::take(&mut run.pending);
@@ -607,10 +625,10 @@ fn export_on(
         ));
     }
     clock.lap(Step::Record);
-    report.branch_moved = match move_target(run.sink, req, old, head_oid)? {
+    report.branch_moved = match move_target(run.sink, req, old, wanted)? {
         BranchUpdate::Applied => true,
         // Another export of the same head moved it first.
-        BranchUpdate::Mismatch { actual } if actual == Some(head_oid) => false,
+        BranchUpdate::Mismatch { actual } if actual == Some(wanted) => false,
         BranchUpdate::Mismatch { actual } => {
             return Err(ExportError::Diverged {
                 branch: req.branch.clone(),
@@ -626,6 +644,84 @@ fn export_on(
     report.objects_checked = run.objects_checked;
     report.warnings = run.warnings;
     Ok(report)
+}
+
+/// git's tag object a store tag carries, as the export writes it: its bytes and its id.
+struct TagObject {
+    oid: GitOid,
+    bytes: Vec<u8>,
+}
+
+/// The tag object the source tag of `req` carries in `read`, when `req` writes a tag of a
+/// FORMAT 3 store; `None` for a lightweight tag and every other request. Its `object` line must
+/// name `head_oid`, the commit the tag's target `head` exports to, and its `type` a commit:
+/// otherwise [`RepoError::DerivedCorrupt`] for derivation `tag_object`, which `verify --deep`
+/// names, before anything is written.
+fn tag_object(
+    repo: &LocalRepo,
+    read: &RepoRead<'_, FsObjectStore>,
+    req: &ExportRequest,
+    (head, head_oid): (ChangesetId, GitOid),
+) -> Result<Option<TagObject>, ExportError> {
+    // 1. Only a tag of a store that holds tag objects carries one.
+    let is_tag = swarmops_store::ref_kind(&req.source_ref) == Some(RefKind::Tag);
+    if req.target != GitTarget::Tag || !is_tag || repo.format() != StoreFormat::V3 {
+        return Ok(None);
+    }
+    let Some(tag) = read.tag(&req.source_ref)? else {
+        return Ok(None);
+    };
+    let blob = match tag.kind {
+        TagKind::Annotated { blob } => blob,
+        TagKind::Lightweight => return Ok(None),
+        _ => return Err(unknown_variant("TagKind")),
+    };
+
+    // 2. Its head must name the commit the target exports to: no other could be written back.
+    let bytes = read.blob(blob)?;
+    let why = match RawTag::parse(&bytes) {
+        Err(error) => Some(format!("the tag object is malformed: {error}")),
+        Ok(parsed) if parsed.kind() != RawKind::Commit => {
+            Some(format!("the tag object names a {}", parsed.kind()))
+        }
+        Ok(parsed) if parsed.object() != head_oid => Some(format!(
+            "the tag object names commit {}, and its target exports to {head_oid}",
+            parsed.object()
+        )),
+        Ok(_) => None,
+    };
+    if let Some(why) = why {
+        return Err(RepoError::DerivedCorrupt {
+            name: TAG_DERIVATION.to_owned(),
+            changeset: head,
+            why,
+        }
+        .into());
+    }
+    let oid = oid::git_hash(RawKind::Tag, &bytes);
+    Ok(Some(TagObject { oid, bytes }))
+}
+
+/// The derivation a tag object that names another commit than its target's export is reported
+/// against (`details.derivation`).
+const TAG_DERIVATION: &str = "tag_object";
+
+/// The commit changeset `id` exports to, derived from `read`'s objects as [`export()`] derives
+/// its head's (the memos under `key` taken, every other memo checked): the one derivation the
+/// export and the tag intake compare a tag's `object` line with.
+pub(crate) fn derived_oid(
+    repo: &LocalRepo,
+    read: &RepoRead<'_, FsObjectStore>,
+    key: Option<&MemoKey>,
+    id: ChangesetId,
+) -> Result<GitOid, RepoError> {
+    let on_memo = key.map_or(OnMemo::Check, |key| OnMemo::Trusted(key.clone()));
+    let reader = ExportReader {
+        read,
+        store: repo.derived_store(),
+    };
+    let exported = ExportOids::new(on_memo).of(read, &reader, &OidCache::new(), id)?;
+    Ok(exported.git_oid())
 }
 
 /// Refuses `name` as a store ref an export reads or an import moves: [`RepoError::RefName`] for a
@@ -1178,6 +1274,26 @@ impl<'a, 'r> Run<'a, 'r> {
                 let bytes = self.read.blob(blob)?;
                 self.put(RawKind::Blob, &bytes, oid)?;
             }
+        }
+        Ok(())
+    }
+
+    /// The tag object `object`, once its commits are written: packed, trusted; absent, written;
+    /// loose, read back. No object (a lightweight tag or a branch): nothing.
+    fn tag(&mut self, object: Option<&TagObject>) -> Result<(), ExportError> {
+        let Some(object) = object else {
+            return Ok(());
+        };
+        if !self.seen.insert(object.oid) {
+            return Ok(());
+        }
+        match self.sink.stored(object.oid)? {
+            Stored::Packed => {}
+            Stored::Loose => {
+                let bytes = object.bytes.clone();
+                self.check(RawKind::Tag, object.oid, |_| Ok(bytes))?;
+            }
+            Stored::Absent => self.put(RawKind::Tag, &object.bytes, object.oid)?,
         }
         Ok(())
     }

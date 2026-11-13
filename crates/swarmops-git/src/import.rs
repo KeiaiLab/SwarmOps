@@ -60,6 +60,12 @@
 //!    else is [`ImportError::CasMismatch`]. A move is then flushed too, so that its frame does
 //!    not stay past the checkpoint either; that flush failing is a warning.
 //!
+//! A `tags/` target whose source names an annotated tag by its id (40 hex digits) takes the tag
+//! object in a FORMAT 3 store: the tag intake ([`take_tag`](crate::take_tag)) imports its commit
+//! objects-only and creates the tag carrying the object, or refuses it
+//! ([`ImportError::Tag`]). A FORMAT 2 store holds no tag object: the import peels the tag as
+//! before, creates a lightweight tag, and says so (warning `annotated_tag_peeled`).
+//!
 //! An objects-only import ([`ImportRequest::objects_only`], a fetch's) has no target: step 1
 //! reads no ref, so the walk knows a commit by its external id alone, step 3 is skipped and so is
 //! step 4's seed, and step 6 flushes the metadata but moves no ref. Its report's `ref_moved` is
@@ -101,7 +107,8 @@ use swarmops_core::{
     BlobId, ChangesetId, EntryTarget, LeafKind, ObjectKind, RepoPath, TreeEntry, TreeId,
 };
 use swarmops_repo::{
-    CasResult, LocalRepo, RawChangeset, RepoError, RepoRead, StoreError, max_raw_batch,
+    CasResult, LocalRepo, RawChangeset, RefKind, RepoError, RepoRead, StoreError, StoreFormat,
+    max_raw_batch,
 };
 use swarmops_store::{ExternalEntry, FsObjectStore, Recovered, SYSTEM_GIT};
 
@@ -110,9 +117,9 @@ use crate::phase::{Phase, Span};
 use crate::{
     ConvertError, Converted, Converter, ExportReader, GIT_LOSSY, GIT_OID, GitOid, GitSource,
     LossySet, MemoKey, ObjectFormat, OidCache, RawCommit, RawError, RawKind, RawTree, SourceError,
-    Unsupported,
+    TagRefusal, Unsupported,
 };
-use crate::{ancestry, export, export_oid, source};
+use crate::{ancestry, export, export_oid, source, tags};
 
 /// How many changesets a frame of the import holds unless asked otherwise: issue 6 Stage 1's
 /// N, past the index's compaction threshold, so that a compaction runs once a frame at most.
@@ -367,6 +374,16 @@ pub enum ImportError {
         /// that it does not make every result of the import larger.
         external_id: Option<Box<ExternalIdMismatch>>,
     },
+    /// The source names an annotated tag the `tags/` target cannot hold as git has it (the
+    /// annotated tags design §2.3): a tag of a tag, of a tree or a blob, of a lossy commit, or a
+    /// malformed one. The tag's commit may be recorded; the target is not written.
+    #[error("{target_ref}: {refusal}")]
+    Tag {
+        /// The target ref.
+        target_ref: String,
+        /// Why the tag is refused.
+        refusal: TagRefusal,
+    },
     /// The target moved while the import ran: the compare-and-swap found it naming another
     /// changeset. Every changeset and external id is recorded; the same import run again moves
     /// the target if the move leaves it a descendant.
@@ -496,6 +513,49 @@ pub fn import(
         let format = Unsupported::ObjectFormat(format.as_str().to_owned());
         return Err(SourceError::Unsupported(format).into());
     }
+
+    // An annotated tag into a `tags/` target: its object in FORMAT 3, peeled with a warning in
+    // FORMAT 2 (the annotated tags design §2.5, decision 7).
+    let annotated = annotated_source(source, req);
+    if let Some(tag) = annotated
+        && repo.format() == StoreFormat::V3
+    {
+        return tags::import_tag(repo, source, req, tag);
+    }
+    let mut report = import_tip(repo, source, req)?;
+    if annotated.is_some() {
+        report.warnings.push(format!(
+            "{PEELED}: {} is an annotated tag, and a FORMAT 2 store holds no tag object: {} \
+             names its commit (swarmops upgrade, then import again, keeps the object)",
+            req.git_ref, req.target_ref
+        ));
+    }
+    Ok(report)
+}
+
+/// The word of the warning that a FORMAT 2 import peeled an annotated tag.
+const PEELED: &str = "annotated_tag_peeled";
+
+/// The annotated tag `req.git_ref` names by its id, when `req` moves a `tags/` target; `None`
+/// otherwise, and for an id the source lacks, which [`GitSource::resolve`] refuses after.
+fn annotated_source(source: &dyn GitSource, req: &ImportRequest) -> Option<GitOid> {
+    let into_tag = swarmops_store::ref_kind(&req.target_ref) == Some(RefKind::Tag);
+    if !req.moves_ref() || !into_tag {
+        return None;
+    }
+    let oid = GitOid::from_hex(req.git_ref.as_bytes())?;
+    match source.header(oid) {
+        Ok((RawKind::Tag, _)) => Some(oid),
+        _ => None,
+    }
+}
+
+/// [`import()`] once its checks pass: the commit `req.git_ref` resolves to, imported.
+fn import_tip(
+    repo: &LocalRepo,
+    source: &dyn GitSource,
+    req: &ImportRequest,
+) -> Result<ImportReport, ImportError> {
     let tip = source.resolve(&req.git_ref)?;
     let mut oids = Oids::new(repo, req.memo_key.as_ref())?;
     let mut base = Base::of(&mut oids, req)?;

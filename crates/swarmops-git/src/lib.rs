@@ -39,6 +39,8 @@
 //!   first, makes it durable and records its native commits' oids, then moves the branch by
 //!   compare-and-swap ([`ExportRequest`], [`ExportReport`]); run again, it writes only what is
 //!   new, and it refuses a branch that diverged ([`ExportError`], [`DivergedReason`]).
+//! - [`tags`](mod@tags): the tag intake, [`take_tag`] and [`take_tags`], which takes git tags into
+//!   store tags, an annotated one with its object, or refuses each alone ([`TagRefusal`]).
 //! - [`transport`]: the git remotes' transport (M13), the user's git spawned against a store's
 //!   mirror ([`transport::Transport`], [`transport::GitCli`]).
 //! - [`mirror`]: a store's git mirror and its lock ([`mirror::Mirror`], [`mirror::MirrorLock`]).
@@ -76,6 +78,7 @@ pub mod serve;
 pub mod sink;
 pub mod source;
 pub mod sync;
+pub mod tags;
 pub mod transport;
 
 pub use cat_file_source::{CAT_FILE_MAPPED, CAT_FILE_WINDOW, CatFileSource};
@@ -102,6 +105,7 @@ pub use raw::{RawCommit, RawError, RawIdent, RawTag, RawTree, RawTreeEntry, Sign
 pub use render::{commit_bytes, tree_bytes};
 pub use sink::{BranchUpdate, GitSink, SinkError, Stored};
 pub use source::{GitSource, SourceError, Unsupported};
+pub use tags::{TagError, TagRefusal, TagTaken, take_tag, take_tags};
 
 /// What the wildcard arm of a `match` on another crate's enum says: a variant newer than this
 /// build, which it refuses rather than guesses at.

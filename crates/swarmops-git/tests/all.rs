@@ -25,6 +25,7 @@ mod support;
 #[cfg(feature = "test-hooks")]
 mod sweeps;
 mod sync;
+mod tags;
 mod transport;
 
 /// Every test file is a module here: with `autotests = false` Cargo builds no target from a file

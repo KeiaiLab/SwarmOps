@@ -62,6 +62,11 @@ collects the changes on `stable` that no release holds yet, until the next relea
   carries, and what is not done on purpose. It is generated from the table the binary reads
   git's verbs from, and a test runs every row's example through `so` (the git-familiar command
   design, §6).
+- `git export` of a store tag that carries git's tag object writes that object byte for byte
+  under its own id, and `git import` of an annotated tag by its id into a FORMAT 3 `tags/` target
+  keeps the object (the annotated tags design §2.3, §2.4). A tag of a tag, of a tree or blob, or
+  of a commit that would export as another is refused; FORMAT 2 peels the tag as before, with
+  the warning `annotated_tag_peeled`.
 
 ### Changed
 
