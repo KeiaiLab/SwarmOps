@@ -1418,7 +1418,7 @@ fn the_final_move_costs_the_same_for_1_and_2000() {
 /// the last. The figures print.
 #[cfg(feature = "test-hooks")]
 #[test]
-#[ignore = "slow, ~45 s (15.3 s and 43.5 s at load 116 and 141, idle not measured): imports 12,000 commits in process"]
+#[ignore = "slow, ~45 s loaded (15.3 s and 43.5 s at load 116 and 141; no idle run yet, owed to a quiet host): imports 12,000 commits in process"]
 fn the_final_move_costs_the_same_for_1_and_12000() {
     let (one_frames, one_writes, one_flushes) = final_move_cost(1);
     let (many_frames, many_writes, many_flushes) = final_move_cost(12_000);
