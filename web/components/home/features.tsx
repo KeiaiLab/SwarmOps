@@ -8,8 +8,8 @@ const FEATURES: { title: string; text: ReactNode; guide: string; url: string }[]
     title: 'Land',
     text: (
       <>
-        <C>land</C> merges a change three-way onto a ref&apos;s head without a checkout, and moves the ref to the
-        result in one transaction.
+        <C>land</C> merges a change three-way onto a ref&apos;s head without a checkout, and moves the ref in one
+        transaction.
       </>
     ),
     guide: 'Commit and land',
@@ -41,8 +41,8 @@ const FEATURES: { title: string; text: ReactNode; guide: string; url: string }[]
     title: 'An MCP server',
     text: (
       <>
-        <C>swarmops mcp</C> serves the store to an agent on stdin and stdout: 46 tools, one per operation, each
-        returning the envelope the CLI prints.
+        <C>swarmops mcp</C> serves the store to an agent over stdio: 46 tools, one per operation, each returning the
+        CLI&apos;s envelope.
       </>
     ),
     guide: 'Claude Code over MCP',
@@ -52,8 +52,7 @@ const FEATURES: { title: string; text: ReactNode; guide: string; url: string }[]
     title: 'Op log and undo',
     text: (
       <>
-        <C>so op undo &lt;op&gt;</C> moves every ref that operation moved back to what it named before, by
-        compare-and-swap.
+        <C>so op undo &lt;op&gt;</C> moves every ref that operation moved back, by compare-and-swap.
       </>
     ),
     guide: 'History and undo',
@@ -63,8 +62,7 @@ const FEATURES: { title: string; text: ReactNode; guide: string; url: string }[]
     title: 'Git import and export',
     text: (
       <>
-        <C>git import</C> brings a git repository&apos;s history into a store, and <C>git export</C> writes it into a
-        git branch.
+        <C>git import</C> brings a git history into a store; <C>git export</C> writes it to a git branch.
       </>
     ),
     guide: 'Git round trip',
@@ -74,8 +72,8 @@ const FEATURES: { title: string; text: ReactNode; guide: string; url: string }[]
     title: 'GitHub as a remote',
     text: (
       <>
-        <C>push</C> sends a store ref to a branch by compare-and-swap, never by force, and <C>sync</C> lands the
-        store&apos;s unpublished changes on top of the remote&apos;s head.
+        <C>push</C> moves a branch by compare-and-swap, never by force; <C>sync</C> lands the store&apos;s
+        unpublished changes on the remote&apos;s head.
       </>
     ),
     guide: 'GitHub as a remote',
@@ -85,8 +83,8 @@ const FEATURES: { title: string; text: ReactNode; guide: string; url: string }[]
     title: 'Crash safety and verify',
     text: (
       <>
-        Durability is full fsync, with no fast mode. <C>verify --deep</C> re-hashes every object and checks the derived
-        values against the objects.
+        Full fsync, no fast mode. <C>verify --deep</C> re-hashes every object and checks the derived values against
+        them.
       </>
     ),
     guide: 'Verify and repair',

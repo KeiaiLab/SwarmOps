@@ -68,8 +68,7 @@ export function Sample() {
         Many agents commit into one store at once
       </h2>
       <p className={PARA + ' mt-4'}>
-        Each agent process writes the store directly. Here eight agents each commit a note and land it on <C>main</C>,
-        all at once:
+        Here eight agent processes each commit a note and land it on <C>main</C>, all at once:
       </p>
 
       {/* 1. The command and what it printed, one figure; the listing folds after its first 8 lines. */}
@@ -108,12 +107,12 @@ export function Sample() {
 
       {/* 2. What the output says. */}
       <p className={PARA + ' mt-6'}>
-        All eight landed. <C>attempt</C> is the try that succeeded: a land whose <C>main</C> moved under it merged again
-        and retried by itself.{' '}
+        All eight landed. <C>attempt</C> counts the tries: a land whose <C>main</C> moved under it merged again and
+        retried.{' '}
         <a className={LINK} href="/docs/guides/parallel-agents">
           Parallel agents
         </a>{' '}
-        compares this with agents in git worktrees.
+        compares this with git worktrees.
       </p>
     </Section>
   );

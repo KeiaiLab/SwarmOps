@@ -8,11 +8,11 @@ const COLUMNS: { title: string; items: ReactNode[] }[] = [
     title: 'Use it when',
     items: [
       <>
-        Many agents on one host commit into one repository at once and need machine-readable answers and a land that
-        merges and retries by itself.
+        Many agents on one host commit into one repository at once and need JSON answers and a land that retries by
+        itself.
       </>,
       <>
-        You keep git for review, CI and deployment: the store imports from git and exports to it.
+        You keep git for review, CI and deployment; the store imports from and exports to git.
       </>,
     ],
   },
@@ -22,7 +22,7 @@ const COLUMNS: { title: string; items: ReactNode[] }[] = [
       <>You need git parity: user hooks, signing, submodules or LFS.</>,
       <>You need macOS or Windows: Linux only, for now.</>,
       <>
-        Several hosts write into one store at once: today one host writes at a time.
+        Several hosts write into one store: one host writes at a time today.
       </>,
       <>
         The store would sit on NFS, SMB, FUSE or under <C>/mnt/</C>.
@@ -33,7 +33,7 @@ const COLUMNS: { title: string; items: ReactNode[] }[] = [
     title: 'What it costs',
     items: [
       <>Throughput: writers take turns under one lock with full fsync.</>,
-      <>Disk: objects are stored one file each, with no packs.</>,
+      <>Disk: one file per object, no packs.</>,
     ],
   },
 ];

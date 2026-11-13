@@ -22,7 +22,7 @@ export function FirstRun() {
         A store in two commands
       </h2>
       <p className={PARA + ' mt-4'}>
-        Ids are cut to eight hex digits and <C>meta</C> to <C>{'{…}'}</C>; no line is left out.
+        Ids cut to eight hex digits, <C>meta</C> to <C>{'{…}'}</C>; no line left out.
       </p>
 
       {/* 1. The two commands and what they printed. */}
@@ -46,8 +46,8 @@ export function FirstRun() {
         </SelectFigure>
       </div>
       <p className={PARA + ' mt-4'}>
-        That is Claude Code&apos;s <C>local</C> scope: one entry in its <C>.claude.json</C>, private to you, in the
-        directory you ran it in; <C>claude mcp remove swarmops -s local</C> takes it out again.{' '}
+        That is Claude Code&apos;s <C>local</C> scope, private to you; <C>claude mcp remove swarmops -s local</C>{' '}
+        takes it out.{' '}
         <a className={LINK} href={MCP_GUIDE_URL}>
           MCP integration
         </a>{' '}
