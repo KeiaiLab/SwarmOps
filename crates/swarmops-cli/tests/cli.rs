@@ -1350,6 +1350,80 @@ fn commit_advance_help_says_what_a_lost_race_recorded() {
     }
 }
 
+/// `line`'s help screen (`-h` or `--help` last), its words joined by one space.
+fn help_of(line: &[&str]) -> String {
+    let output = swarmops().args(line).output().unwrap();
+    assert_eq!(output.status.code(), Some(0), "{line:?}");
+    let text = String::from_utf8(output.stdout).unwrap();
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// `git import --help` says what the result's `skipped` counts: the held commits the walk
+/// stopped at, not the history the store holds.
+#[test]
+fn git_import_help_says_what_skipped_counts() {
+    let long = help_of(&["git", "import", "--help"]);
+    for fact in [
+        "skipped counts the commits the store held already that the walk stopped at",
+        "not every commit the store holds",
+    ] {
+        assert!(long.contains(fact), "{fact:?} not in: {long}");
+    }
+}
+
+/// `push`'s `<ref>` help names a FORMAT 2 branch as a ref it sends, and its default remote
+/// branch for any ref but main.
+#[test]
+fn push_help_takes_a_branch() {
+    for flag in ["-h", "--help"] {
+        let help = help_of(&["push", flag]);
+        for fact in [
+            "in a FORMAT 2 store a branch (feature/x)",
+            "the same name for any other ref",
+        ] {
+            assert!(help.contains(fact), "push {flag}: {fact:?} not in: {help}");
+        }
+    }
+}
+
+/// `mcp --help` names every tool `tools/list` gives, `rebase` among them.
+#[test]
+fn mcp_help_names_every_tool() {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    // 1. The tools the server lists.
+    let store = support::Store::init();
+    let list = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {"_meta": {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {},
+        "io.modelcontextprotocol/clientInfo": {"name": "swarmops-tests", "version": "0"},
+    }}});
+    let mut child = support::swarmops(&["--repo", store.path(), "--as", AGENT, "mcp"], &[])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(stdin, "{list}").unwrap();
+    drop(stdin);
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(0), "mcp");
+    let reply: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let tools = reply["result"]["tools"].as_array().expect("tools");
+
+    // 2. Each by its name in the long help, as a word of the list.
+    let help = help_of(&["mcp", "--help"]);
+    let words: Vec<&str> = help
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .collect();
+    assert!(tools.iter().any(|tool| tool["name"] == "rebase"), "{reply}");
+    for tool in tools {
+        let name = tool["name"].as_str().expect("a name");
+        assert!(words.contains(&name), "{name} not in: {help}");
+    }
+}
+
 #[test]
 fn schema_snapshot() {
     let mut s = Session::new();
@@ -5599,6 +5673,44 @@ mod derive {
         let rounds = rounds(&mut child, &store);
         assert_eq!(rounds.first(), Some(&3), "{rounds:?}");
         assert!(rounds.iter().sum::<u64>() <= 4, "{rounds:?}");
+    }
+
+    /// A follower says nothing for a round that derived nothing (the M2 follow-up decision
+    /// D-4): from the start of a store whose values are all stored, it prints no line until a
+    /// commit gives it one to derive, and that commit's round is its first line. Its help says
+    /// so.
+    #[test]
+    fn derive_follow_is_silent_once_caught_up() {
+        let store = Store::init();
+        let c0 = store.commit(WRITER, "f", "0", None);
+        let c1 = store.commit(WRITER, "f", "1", Some(&c0));
+        assert_eq!(store.read(&["derive"]).ok()["derived"], 2, "all stored");
+        let mut child = follower(&store, &["--from-start", "--interval-ms", "20"]);
+
+        // 1. Rounds of nothing to derive, then one commit.
+        thread::sleep(Duration::from_secs(1));
+        let c2 = store.commit(WRITER, "f", "2", Some(&c1));
+        let by = Instant::now() + Duration::from_secs(60);
+        assert!(listed_by(&store, &c2, by), "the new commit's list");
+
+        // 2. One line: the commit's round, none for the empty ones before it.
+        let (output, killed) = child.finish(Instant::now());
+        assert!(killed, "it follows until killed: {:?}", output.status);
+        let stdout = String::from_utf8(output.stdout).expect("UTF-8 stdout");
+        let lines: Vec<Value> = (stdout.lines())
+            .map(|line| serde_json::from_str(line).expect("one envelope a line"))
+            .collect();
+        let [only] = &lines[..] else {
+            panic!("one line, the commit's: {stdout}");
+        };
+        assert_eq!(only["result"]["derived"], 1, "{only}");
+
+        // 3. The help says what silence is.
+        let help = support::run(&["derive", "--help"], &[]);
+        let help = help.stdout.split_whitespace().collect::<Vec<_>>().join(" ");
+        let fact = "and nothing for a run that derived nothing, so a follower that has caught up \
+                    prints nothing";
+        assert!(help.contains(fact), "{fact:?} not in: {help}");
     }
 }
 

@@ -31,9 +31,10 @@ pub(super) fn render() -> String {
         out,
         "Every command but `mcp`, `serve` and `derive --follow` prints one JSON envelope on \
          stdout: `mcp` speaks MCP there, `serve` git's protocol, and `derive --follow` prints \
-         one envelope a line for each run that derived something. An envelope's `op` names the \
-         operation the command runs (`cat` runs `read_file`). [Errors](errors.md) lists every \
-         error code an envelope can carry, with its exit code.\n"
+         one envelope a line for each run that derived something, and nothing for a run that \
+         derived nothing. An envelope's `op` names the operation the command runs (`cat` runs \
+         `read_file`). [Errors](errors.md) lists every error code an envelope can carry, with \
+         its exit code.\n"
     );
     let _ = writeln!(
         out,

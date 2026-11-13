@@ -4,7 +4,7 @@
 
 Bring a git repository's history in: every commit --ref reaches that the store does not hold becomes a changeset, parents first, and --into moves to the changeset of --ref's commit, created if it does not exist.
 
-The repository is read on this host, at PATH, relative to the working directory: a work tree, which holds .git, or a bare repository. Each changeset keeps its git commit's id in its git.oid metadata, and its author and committer in its signatures; it records no agent. Run again, it takes only the commits after the one --into's head holds, and writes nothing when that is --ref's commit. A head that holds no git commit, or one --ref does not reach, fails with E\_GIT\_IMPORT\_DIVERGED (exit 3), and nothing is written.
+The repository is read on this host, at PATH, relative to the working directory: a work tree, which holds .git, or a bare repository. Each changeset keeps its git commit's id in its git.oid metadata, and its author and committer in its signatures; it records no agent. Run again, it takes only the commits after the one --into's head holds, and writes nothing when that is --ref's commit. A head that holds no git commit, or one --ref does not reach, fails with E\_GIT\_IMPORT\_DIVERGED (exit 3), and nothing is written. In the result, imported counts the commits that became changesets, and skipped counts the commits the store held already that the walk stopped at (1 for an import run again), not every commit the store holds.
 
 Content a changeset cannot hold as git has it is refused by class (E\_GIT\_IMPORT\_LOSSY, naming the commit, the path and the class) unless --lossy allows that class: then it is dropped or normalized, and the changeset names the class in its git.lossy metadata. A commit the store holds already is reused as it is, even one an earlier import took with --lossy.
 
@@ -289,7 +289,7 @@ so agents commit and land between its frames. The target moves last:
 | [`E_GIT_NOT_A_REPO`](../errors.md#e_git_not_a_repo) | 6 | No git repository at the path. |
 | [`E_GIT_UNSUPPORTED`](../errors.md#e_git_unsupported) | 1 | A repository or commit the import does not read; `details.reason` says which. A `shallow` clone's hint deepens it (`git -C <path> fetch --unshallow`). |
 | [`E_GIT_REF_NOT_FOUND`](../errors.md#e_git_ref_not_found) | 6 | `--ref` names nothing, or no commit. |
-| [`E_GIT_READ`](../errors.md#e_git_read) | 1 | An object is missing, damaged or unparsable, with the hint `git -C <path> fsck`; or a read failed (`io`). |
+| [`E_GIT_READ`](../errors.md#e_git_read) | 1 | An object is missing, damaged or unparsable, with the hint `git -C <path> fsck` (for a missing one, in a partial clone, which fsck passes, `git -C <path> fetch --refetch --no-filter <remote>`); or a read failed (`io`). |
 | [`E_TOO_LARGE`](../errors.md#e_too_large) | 1 | An object longer than a store object holds, refused by its header before it is read. |
 | [`E_GIT_IMPORT_LOSSY`](../errors.md#e_git_import_lossy) | 1 | Content of a class the line does not allow. |
 | [`E_GIT_IMPORT_DIVERGED`](../errors.md#e_git_import_diverged) | 3 | The target's head is not the import of the tip or of an ancestor of it. Nothing is written. |
@@ -328,7 +328,7 @@ gives both costs. The [performance ledger](../../perf.md) has no measurement of 
 | `lossy_total` | `integer` | yes | How many commits this import took lossily, the ones past the first 100 included. |
 | `old_head` | `string or null` | no | What `target_ref` named when the import started; omitted when it did not exist, and the import created it. |
 | `ref_moved` | `boolean` | yes | Whether this import moved `target_ref`, or created it; `false` when the ref named `head_changeset` already, after an earlier import of the same commit or a concurrent one, or descends from `git_ref`'s commit (`tip_changeset`). |
-| `skipped` | `integer` | yes | How many commits the import found in the store already, where its walk stopped: the commit of the target's head, or commits an earlier import made. Importing the commit the target names already imports 0 and skips 1. |
+| `skipped` | `integer` | yes | How many commits the import found in the store already, where its walk stopped: the commit of the target's head, or commits an earlier import made. It counts the commits the walk stopped at, not every commit the store holds: importing the commit the target names already imports 0 and skips 1, however long its history. |
 | `target_ref` | `string` | yes | The ref the import moved, or found at `head_changeset` already. |
 | `tip_changeset` | `string or null` | no | The changeset of `git_ref`'s commit when `target_ref`'s head descends from it already, over every parent: the import wrote nothing and moved nothing, and `head_changeset` is the target's head. Omitted otherwise. |
 | `warnings` | `array of string` | no | Problems the import met that did not stop it, such as failed housekeeping after the target's move became durable; the import itself succeeded. Omitted when empty. |

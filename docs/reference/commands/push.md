@@ -42,7 +42,7 @@ The command also takes the [global options](../cli.md#global-options).
 
 Syntax: `<REF[:BRANCH]>`.
 
-What to send, as &lt;ref&gt;\[:&lt;branch&gt;\]: the store ref (main, the default, or release/&lt;name&gt;) and the remote branch (by default the remote's followed branch for main, the same name for release/&lt;name&gt;).
+What to send, as &lt;ref&gt;\[:&lt;branch&gt;\]: the store ref (main, the default, release/&lt;name&gt;, or in a FORMAT 2 store a branch (feature/x), not a tag) and the remote branch (by default the remote's followed branch for main, the same name for any other ref).
 
 ## Examples
 

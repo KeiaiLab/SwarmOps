@@ -2363,8 +2363,9 @@ pub struct GitImportResp {
     /// How many commits became changesets in this import.
     pub imported: u64,
     /// How many commits the import found in the store already, where its walk stopped: the
-    /// commit of the target's head, or commits an earlier import made. Importing the commit the
-    /// target names already imports 0 and skips 1.
+    /// commit of the target's head, or commits an earlier import made. It counts the commits the
+    /// walk stopped at, not every commit the store holds: importing the commit the target names
+    /// already imports 0 and skips 1, however long its history.
     pub skipped: u64,
     /// The changeset `target_ref` names now: that of `git_ref`'s commit, or the target's head
     /// when it descends from that commit's changeset already (`tip_changeset`).

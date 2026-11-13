@@ -20,7 +20,8 @@
 //! - `serve` prints no envelope on stdout either: it carries git's protocol there (with `--cgi`,
 //!   the HTTP response), and a refusal before git starts is one `ERR` pkt-line (with `--cgi`, a
 //!   `Status:` header and the same text), its envelope on stderr.
-//! - `derive --follow` prints one envelope a line for each run that derived something, until it
+//! - `derive --follow` prints one envelope a line for each run that derived something, and
+//!   nothing for a run that derived nothing (a follower that has caught up is silent), until it
 //!   is killed or a run fails, whose envelope is the last.
 //!
 //! The envelope's `op` is the operation's library name (`cat` is `read_file`), or `swarmops`
@@ -29,9 +30,9 @@
 //! Each binary does nothing but call [`run`], so the two behave alike. clap names the program by
 //! the name it was invoked by in its usage lines (on the help screens, and in a usage error's
 //! `hint`, the line the CLI adds where clap gives none included) and in its message for a
-//! missing subcommand, and so do the git hints (a refused git verb's line). Everything else names it `swarmops` whichever name ran it: `op`, the
-//! hints and messages SwarmOps writes (commands, which run by either name), `--version` and the
-//! MCP server's name.
+//! missing subcommand, and so do the git hints (a refused git verb's line). Everything else
+//! names it `swarmops` whichever name ran it: `op`, the hints and messages SwarmOps writes
+//! (commands, which run by either name), `--version` and the MCP server's name.
 
 mod cli;
 mod commands;

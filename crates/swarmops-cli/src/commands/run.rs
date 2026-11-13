@@ -77,7 +77,8 @@ const REQUEST_HINT: &str = "send large contents as {\"file\": path} content, or 
 
 /// The hint of a failed deep `verify`, which leaves nothing to re-check.
 const RESTORE_HINT: &str = "details.findings names each damaged object, record or ref by kind and \
-                            id: restore them from a backup of the store";
+                            id: swarmops repair rebuilds what the journal can and quarantines \
+                            damaged objects; restore the rest from a backup of the store";
 
 /// What every command runs with besides its own arguments.
 pub struct Ctx<'a> {
@@ -661,7 +662,8 @@ fn run_derive(ctx: &Ctx<'_>, op: &'static str, command: &Command) -> Printed {
 /// the journal's end, from its first frame with `from_start`, or after frame `after`. A run that
 /// read frames is followed by the next at once, one that read none after a wait of `interval`.
 /// Each run that derived something prints its envelope at once, so that a reader of the output
-/// has it as it comes. A run that fails, or a store that does not open, ends the command with its
+/// has it as it comes; one that derived nothing prints nothing, so a follower that has caught up
+/// is silent. A run that fails, or a store that does not open, ends the command with its
 /// envelope, which [`crate::run`] prints last, and its exit code; output that cannot be written
 /// ends it with exit code 1, said on stderr.
 fn follow_journal(
@@ -1052,9 +1054,9 @@ pub fn panicked(payload: &(dyn Any + Send)) -> OpError {
 
 /// The envelope of a command line clap refused: `E_INVALID_ARG` (exit 2) with clap's message
 /// in one line as `message`, and its tips and the usage of the subcommand `path` names as
-/// `hint`, a line each, after `git_line` when given (a refused git verb's). The usage names the program `bin`, as the line invoked it, whether it
-/// is clap's or, where clap gives none, the CLI's. Control characters (from the line itself)
-/// are escaped in both.
+/// `hint`, a line each, after `git_line` when given (a refused git verb's). The usage names the
+/// program `bin`, as the line invoked it, whether it is clap's or, where clap gives none, the
+/// CLI's. Control characters (from the line itself) are escaped in both.
 pub fn usage(
     error: &clap::Error,
     bin: Option<&str>,
@@ -1839,6 +1841,9 @@ mod tests {
         let two = clean(report(&["a", "b"]), Depth::Deep).unwrap_err();
         assert_eq!(two.message, "verify found 2 problems, the first: a");
         assert_eq!(two.hint.as_deref(), Some(RESTORE_HINT));
+
+        // After a deep verify, the hint names the repair before the backup.
+        assert!(RESTORE_HINT.contains("swarmops repair"), "{RESTORE_HINT}");
     }
 
     #[test]

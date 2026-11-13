@@ -159,7 +159,7 @@ expression: s.transcript()
           ],
           "truncated": false
         },
-        "hint": "details.findings names each damaged object, record or ref by kind and id: restore them from a backup of the store"
+        "hint": "details.findings names each damaged object, record or ref by kind and id: swarmops repair rebuilds what the journal can and quarantines damaged objects; restore the rest from a backup of the store"
       },
       "meta": {
         "repo": "[tmp]/store",

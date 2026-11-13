@@ -4,7 +4,7 @@
 
 Derive the eager derived values of new changesets, ahead of any reader.
 
-Once, it derives the values of the changesets the journal records in up to 1,000 frames, from its first frame or after --after N, and gives the last frame it read as next: run it with --after next to go on. With --follow it runs until it is killed: from the journal's end (from its first frame with --from-start, or after --after N) it derives the changesets as they are recorded, looking again every --interval-ms once it has caught up, and prints one envelope a line for each run that derived something. A run that fails ends it with that run's envelope and exit code. Commits derive nothing.
+Once, it derives the values of the changesets the journal records in up to 1,000 frames, from its first frame or after --after N, and gives the last frame it read as next: run it with --after next to go on. With --follow it runs until it is killed: from the journal's end (from its first frame with --from-start, or after --after N) it derives the changesets as they are recorded, looking again every --interval-ms once it has caught up, and prints one envelope a line for each run that derived something, and nothing for a run that derived nothing, so a follower that has caught up prints nothing. A run that fails ends it with that run's envelope and exit code. Commits derive nothing.
 
 ```yaml
 title: "swarmops derive"

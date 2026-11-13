@@ -98,7 +98,9 @@ which holds .git, or a bare repository. Each changeset keeps its git commit's id
 metadata, and its author and committer in its signatures; it records no agent. Run again, it takes \
 only the commits after the one --into's head holds, and writes nothing when that is --ref's \
 commit. A head that holds no git commit, or one --ref does not reach, fails with \
-E_GIT_IMPORT_DIVERGED (exit 3), and nothing is written.
+E_GIT_IMPORT_DIVERGED (exit 3), and nothing is written. In the result, imported counts the \
+commits that became changesets, and skipped counts the commits the store held already that the \
+walk stopped at (1 for an import run again), not every commit the store holds.
 
 Content a changeset cannot hold as git has it is refused by class (E_GIT_IMPORT_LOSSY, naming \
 the commit, the path and the class) unless --lossy allows that class: then it is dropped or \
@@ -255,8 +257,8 @@ same directory with the same URL, it continues an interrupted clone.";
 
 /// `push`'s target's help.
 const PUSH_TARGET_HELP: &str = "What to send, as <ref>[:<branch>]: the store ref (main, the \
-default, or release/<name>) and the remote branch (by default the remote's followed branch for \
-main, the same name for release/<name>)";
+default, release/<name>, or in a FORMAT 2 store a branch (feature/x), not a tag) and the remote \
+branch (by default the remote's followed branch for main, the same name for any other ref)";
 
 /// `push`'s long help.
 const PUSH_LONG_HELP: &str = "Send a store ref to a remote branch by compare-and-swap, never by \
@@ -787,11 +789,14 @@ pub enum Command {
     /// Serve the store's operations to an agent as an MCP server on stdin and stdout.
     ///
     /// One tool per operation (repo_info, resolve_rev, read_file, read_tree, show, log, ancestry,
-    /// path_history, diff, merge_base, op_log, ref_list, ref_set, ref_delete, ref_log, undo, commit, land,
-    /// revert, land_check, land_group, blob_put, blob_has, verify, the maintenance's gc, repair and upgrade, and the git
-    /// remotes' remote_list, fetch, push, sync and sync_status), each taking the operation's
-    /// request as its arguments and returning the envelope the other commands print. The store and the
-    /// identity are the server's, --repo and --as or their variables, never a call's. Speaks MCP 2026-07-28, and 2025-11-25 and
+    /// path_history, diff, merge_base, op_log, ref_list, ref_set, ref_delete, ref_log, ref_txn,
+    /// undo, commit, land, revert, land_check, land_group, rebase, blob_put, blob_has, verify,
+    /// the maintenance's gc, repair and upgrade, the git remotes' remote_list, fetch, push, sync
+    /// and sync_status, and the workspaces' ws_create, ws_status, ws_diff, ws_commit, ws_rebase,
+    /// ws_resolve, ws_land, ws_materialize, ws_discard, ws_snapshot, ws_list and ws_info), each
+    /// taking the operation's request as its arguments and returning the envelope the other
+    /// commands print. The store and the identity are the server's, --repo and --as or their
+    /// variables, never a call's. Speaks MCP 2026-07-28, and 2025-11-25 and
     /// 2025-06-18 to clients that open with initialize. Prints no envelope: stdout carries the
     /// protocol until stdin ends, and a command line it refuses has its envelope on stderr. The
     /// derive command has no tool: it only fills ahead of time a cache that each read fills
@@ -807,8 +812,9 @@ pub enum Command {
     /// with --after next to go on. With --follow it runs until it is killed: from the journal's
     /// end (from its first frame with --from-start, or after --after N) it derives the changesets
     /// as they are recorded, looking again every --interval-ms once it has caught up, and prints
-    /// one envelope a line for each run that derived something. A run that fails ends it with
-    /// that run's envelope and exit code. Commits derive nothing.
+    /// one envelope a line for each run that derived something, and nothing for a run that
+    /// derived nothing, so a follower that has caught up prints nothing. A run that fails ends
+    /// it with that run's envelope and exit code. Commits derive nothing.
     Derive {
         /// Go on after journal frame N, a previous run's next (default: the first frame; with
         /// --follow, the journal's end). A frame past the journal's last is E_INVALID_ARG.

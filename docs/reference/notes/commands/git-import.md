@@ -183,7 +183,7 @@ so agents commit and land between its frames. The target moves last:
 | [`E_GIT_NOT_A_REPO`](../../errors.md#e_git_not_a_repo) | 6 | No git repository at the path. |
 | [`E_GIT_UNSUPPORTED`](../../errors.md#e_git_unsupported) | 1 | A repository or commit the import does not read; `details.reason` says which. A `shallow` clone's hint deepens it (`git -C <path> fetch --unshallow`). |
 | [`E_GIT_REF_NOT_FOUND`](../../errors.md#e_git_ref_not_found) | 6 | `--ref` names nothing, or no commit. |
-| [`E_GIT_READ`](../../errors.md#e_git_read) | 1 | An object is missing, damaged or unparsable, with the hint `git -C <path> fsck`; or a read failed (`io`). |
+| [`E_GIT_READ`](../../errors.md#e_git_read) | 1 | An object is missing, damaged or unparsable, with the hint `git -C <path> fsck` (for a missing one, in a partial clone, which fsck passes, `git -C <path> fetch --refetch --no-filter <remote>`); or a read failed (`io`). |
 | [`E_TOO_LARGE`](../../errors.md#e_too_large) | 1 | An object longer than a store object holds, refused by its header before it is read. |
 | [`E_GIT_IMPORT_LOSSY`](../../errors.md#e_git_import_lossy) | 1 | Content of a class the line does not allow. |
 | [`E_GIT_IMPORT_DIVERGED`](../../errors.md#e_git_import_diverged) | 3 | The target's head is not the import of the tip or of an ancestor of it. Nothing is written. |

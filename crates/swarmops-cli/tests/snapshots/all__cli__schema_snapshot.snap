@@ -4401,7 +4401,7 @@ expression: s.redact(&all)
           "type": "boolean"
         },
         "skipped": {
-          "description": "How many commits the import found in the store already, where its walk stopped: the\ncommit of the target's head, or commits an earlier import made. Importing the commit the\ntarget names already imports 0 and skips 1.",
+          "description": "How many commits the import found in the store already, where its walk stopped: the\ncommit of the target's head, or commits an earlier import made. It counts the commits the\nwalk stopped at, not every commit the store holds: importing the commit the target names\nalready imports 0 and skips 1, however long its history.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
