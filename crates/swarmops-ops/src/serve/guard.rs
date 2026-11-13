@@ -31,7 +31,8 @@ use swarmops_api::{RevertReq, RevertResp};
 
 use super::refused;
 
-/// What a masked path reads as, until each path gets its own name.
+/// What a masked path reads as: the one text for every host path `serve` hides, the same as
+/// git's stderr carries once the serving child masks it (`swarmops-git`'s `serve::child`).
 const MASK: &str = "<path>";
 
 /// The shortest path text masked: `/` alone, or `.`, would mask every separator.
@@ -324,6 +325,9 @@ mod tests {
     const ROOT: &str = "/srv/so";
 
     /// A store that records each call by name and fails it with an error naming a host path.
+    /// It stays in this test module, as CONTRIBUTING's rule for test doubles allows: the test
+    /// kit depends on no crate of the API, and no other test needs a store whose every call
+    /// fails naming a path.
     #[derive(Debug, Default)]
     struct Recording {
         calls: RefCell<Vec<&'static str>>,
@@ -513,6 +517,16 @@ mod tests {
     fn redactor_masks_the_longest_path_first() {
         let redactor = Redactor::new(&[Path::new("/srv"), Path::new("/data/srv")]);
         assert_eq!(redactor.redact("/data/srv/acme"), "<path>/acme");
+    }
+
+    /// A path reads `<path>`, the text git's stderr carries too: a client sees one mask, not
+    /// one per sender.
+    #[test]
+    fn redactor_masks_as_git_s_stderr_does() {
+        let redactor = Redactor::new(&[Path::new(ROOT)]);
+        let line = format!("fatal: {ROOT}/acme/git/serve.git: broken");
+        let masked = redactor.redact(&line);
+        assert_eq!(masked, "fatal: <path>/acme/git/serve.git: broken");
     }
 
     /// `/` and an empty path mask nothing: they would mask every separator.
