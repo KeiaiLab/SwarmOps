@@ -887,6 +887,110 @@ fn an_unknown_floor_is_no_refusal() {
     assert_eq!(floors(&remote, &store), [(floor, theirs)]);
 }
 
+/// A floor the store knows but `main` does not hold on its first-parent chain (`main` was never
+/// moved to that fetched commit) is no floor (the M16 design §3): a remote forced below it is
+/// synced onto from the base, and the floor is then the pushed head.
+#[test]
+fn a_floor_off_main_s_chain_is_no_refusal() {
+    // 1. The remote's next commit fetched, main left below it, and the floor naming it.
+    let remote = Remote::new();
+    let store = remote.cloned();
+    let before = remote.head();
+    let theirs = remote.commit("theirs", &[("c.txt", "c\n")]);
+    changeset_of(&store);
+    let mirror = Path::new(store.path()).join(MIRROR);
+    let floor = floor_ref("main");
+    let set = ["update-ref", floor.as_str(), theirs.as_str()];
+    git_out(&remote.server, &mirror, &set);
+    assert_eq!(floors(&remote, &store), [(floor.clone(), theirs)]);
+
+    // 2. The remote forced back below that commit: main's change lands onto the forced head.
+    let forced = forced_back(&remote, &before);
+    land(&store, "mine.txt", "mine\n");
+    let synced = sync(&store, &[]).ok();
+    assert_eq!(synced["status"], "pushed", "{synced}");
+    assert_eq!(remote.first_parents()[1], forced);
+    assert_eq!(floors(&remote, &store), [(floor, remote.head())]);
+}
+
+/// A sync that makes `main` (a store with none yet) sets the floor to the remote's head, and a
+/// remote forced back below it is refused by the next sync (the M16 design §3).
+#[test]
+fn a_sync_that_makes_main_sets_the_floor() {
+    // 1. No main: the sync makes it at the remote's head, which is the floor.
+    let remote = Remote::new();
+    let store = remote.added();
+    let head = remote.head();
+    let below = remote.first_parents()[1].clone();
+    let synced = sync(&store, &[]).ok();
+    assert_eq!(synced["status"], "fast_forwarded", "{synced}");
+    let main = main_at(&store).expect("main");
+    assert_eq!(floors(&remote, &store), [(floor_ref("main"), head)]);
+
+    // 2. Forced back below it and on: refused, naming main.
+    let forced = forced_back(&remote, &below);
+    changeset_of(&store);
+    let failed = refused_whole(&remote, &store, &main, &forced);
+    let error = failed.err("E_REF_PROTECTED");
+    assert_eq!(error["details"]["changeset"], main.as_str(), "{failed}");
+}
+
+/// A `sync --no-push` that lands `main`'s change onto the remote's head sets the floor to that
+/// head, the remote commit `main` now holds as its first parent (the M16 design §3): forced back
+/// below it, the remote is refused by the next sync, which names that commit's changeset.
+#[test]
+fn a_sync_landed_locally_meets_a_forced_remote() {
+    // 1. Both sides moved; landed without a push, the floor is the remote's head.
+    let remote = Remote::new();
+    let store = remote.cloned();
+    let before = remote.head();
+    land(&store, "mine.txt", "mine\n");
+    let theirs = remote.commit("theirs", &[("theirs.txt", "theirs\n")]);
+    let synced = sync(&store, &["--no-push"]).ok();
+    assert_eq!(synced["status"], "landed_locally", "{synced}");
+    let main = main_at(&store).expect("main");
+    let held = parents(&store, &main)[0].clone();
+    assert_eq!(floors(&remote, &store), [(floor_ref("main"), theirs)]);
+
+    // 2. Forced back below that head and on: refused whole, by the floor.
+    let forced = forced_back(&remote, &before);
+    let target = changeset_of(&store);
+    let failed = refused_whole(&remote, &store, &main, &forced);
+    let error = failed.err("E_REF_PROTECTED");
+    let details = json!({"name": "main", "changeset": held, "target": target, "remote": ORIGIN});
+    assert_eq!(error["details"], details, "{failed}");
+}
+
+/// A sync whose every change the remote holds already (a pull request merged by rebase) ends as
+/// a fast-forward after its lands are dropped, and sets the floor to the remote's head as the
+/// other endings do (the M16 design §3): forced back below it, the remote is refused.
+#[test]
+fn a_sync_that_drops_every_change_sets_the_floor() {
+    // 1. main's change pushed to a feature branch, which the remote rebases onto its main.
+    let remote = Remote::new();
+    let store = remote.cloned();
+    let before = remote.head();
+    land(&store, "mine.txt", "mine\n");
+    store.read(&["push", ORIGIN, "main:feature"]).ok();
+    (remote.server).commit_on(REPO, "main", "theirs", &[("theirs.txt", "theirs\n")]);
+    let rebased = (remote.server).merge(REPO, MergeMethod::Rebase, "feature", "main");
+
+    // 2. Nothing left to land: main fast-forwards, and the floor is the remote's head.
+    let synced = sync(&store, &[]).ok();
+    assert_eq!(synced["status"], "fast_forwarded", "{synced}");
+    assert_eq!(synced["dropped"].as_array().map(Vec::len), Some(1));
+    assert_eq!(synced["published"], json!([]), "{synced}");
+    let main = main_at(&store).expect("main");
+    assert_eq!(floors(&remote, &store), [(floor_ref("main"), rebased)]);
+
+    // 3. Forced back below it and on: refused, naming main.
+    let forced = forced_back(&remote, &before);
+    changeset_of(&store);
+    let failed = refused_whole(&remote, &store, &main, &forced);
+    let error = failed.err("E_REF_PROTECTED");
+    assert_eq!(error["details"]["changeset"], main.as_str(), "{failed}");
+}
+
 /// With nothing unpublished, a remote head that holds the published `main` only as a merge's
 /// second parent is refused: a fast-forward there would take `main` off its first-parent history
 /// (the M16 design §3).
