@@ -1143,7 +1143,8 @@ left).
   after every frame is read. Reading back is the `history` bench's reflog case: `main`'s last 100
   moves, read back from the end of a journal whose every frame moves `main`, on a snapshot 31 frames
   past the checkpoint (`reflog100_tail31`), take 30.9 ms on a 200,000-changeset chain and 154 ms on
-  a 1,000,000-changeset one (criterion median, [perf.md](perf.md)); the bench has no case of 1,000,000 frames, and no
+  a 1,000,000-changeset one (criterion median, [perf.md](perf.md)), against decision 18's 1 ms
+  bound; the bench has no case of 1,000,000 frames, and no
   case of a name that never moved. *Target: a per-ref index, which needs a layout (M20, FORMAT 3;
   the M18 design §3.2). Found: the M18 design.*
 - **Small object-store costs.** A put that creates a fan-out directory checks for it under the
