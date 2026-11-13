@@ -808,7 +808,7 @@ static DEFAULTS: [DefaultRow; 15] = [
 
 /// Values that tune the implementation, or bound the store's layout where no request reaches:
 /// no option sets them, and they are not part of the contract.
-static INTERNAL: [Limit; 39] = [
+static INTERNAL: [Limit; 44] = [
     internal_value(
         "Writer lock wait",
         declared(
@@ -821,7 +821,20 @@ static INTERNAL: [Limit; 39] = [
         "How long a write waits for the store's lock; a write that waits it out with its \
              request still unclaimed in the write queue fails with `E_BUSY`, and nothing of it \
              is recorded. A write that the lock's holder claimed into its batch waits past it \
-             for its answer.",
+             for its answer, up to the claimed write wait.",
+    ),
+    internal_value(
+        "Claimed write wait",
+        code(
+            "swarmops_store::meta::queue::CLAIMED_WAIT",
+            "crates/swarmops-store/src/meta/queue.rs",
+            "pub const CLAIMED_WAIT: Duration = Duration::from_secs(60);",
+            || swarmops_store::meta::queue::CLAIMED_WAIT.as_secs(),
+        ),
+        Unit::Seconds,
+        "How long past the writer lock wait a write that the lock's holder claimed into its \
+             batch waits for its answer: a holder stopped, or stuck, after its claim answers \
+             nothing, and the write then fails with `E_BUSY`.",
     ),
     internal_value(
         "Index sync threads",
@@ -958,6 +971,19 @@ static INTERNAL: [Limit; 39] = [
         Unit::Count("hunks"),
         "The most conflict hunks a merge holds over all its files; past them, each \
              file's hunks are held as one that spans them.",
+    ),
+    internal_value(
+        "Commit inline content",
+        declared(
+            "swarmops_ws::commit::INLINE_BYTES",
+            "crates/swarmops-ws/src/commit.rs",
+            "const INLINE_BYTES: u64 = 64 << 20;",
+            || 64 * KIB * KIB,
+        ),
+        Unit::Bytes,
+        "The most content bytes, as sent (inline or base64 text), that one commit request of \
+             a workspace carries; a missing blob past what is left is stored with `blob_put` \
+             first. \"A commit's contents\" still binds the whole commit.",
     ),
     internal_value(
         "MCP line buffer",
@@ -1152,6 +1178,31 @@ static INTERNAL: [Limit; 39] = [
              the one older file.",
     ),
     internal_value(
+        "Serve lock wait",
+        declared(
+            "swarmops_ops::serve::refresh::SERVE_LOCK_WAIT",
+            "crates/swarmops-ops/src/serve/refresh.rs",
+            "pub(crate) const SERVE_LOCK_WAIT: Duration = Duration::from_secs(10);",
+            || 10,
+        ),
+        Unit::Seconds,
+        "How long a refresh of `serve.git`, a push's or a land's export, and a preparation \
+             wait for `git/serve.lock`, as long as the writer lock wait: past it the request \
+             fails with `E_BUSY`.",
+    ),
+    internal_value(
+        "Serve repair lock wait",
+        declared(
+            "swarmops_git::serve::repo::REPAIR_WAIT",
+            "crates/swarmops-git/src/serve/repo.rs",
+            "const REPAIR_WAIT: Duration = Duration::from_secs(10);",
+            || 10,
+        ),
+        Unit::Seconds,
+        "How long `serve` waits for `git/serve.lock` to make or repair `serve.git` when it \
+             opens it, as long as the writer lock wait.",
+    ),
+    internal_value(
         "Batch members",
         code(
             "swarmops_store::meta::queue::MAX_BATCH",
@@ -1209,6 +1260,19 @@ static INTERNAL: [Limit; 39] = [
         ),
         Unit::Millis,
         "How often a write waiting in the queue looks for its answer.",
+    ),
+    internal_value(
+        "Queue manifest",
+        code(
+            "swarmops_store::meta::queue::MANIFEST_MAX",
+            "crates/swarmops-store/src/meta/queue.rs",
+            "pub const MANIFEST_MAX: usize = (MAX_BATCH - 1) * (ANSWER_MAX + 64) + 64;",
+            || bytes::to_u64(swarmops_store::meta::queue::MANIFEST_MAX),
+        ),
+        Unit::Bytes,
+        "The longest manifest the lock's holder leaves in `meta/queue/` before it claims the \
+             other members of its batch: per member at most an answer and 64 bytes. The next \
+             holder settles a dead one's batch from it, and reads no more of it.",
     ),
     internal_value(
         "Wire protocol",
@@ -1756,6 +1820,26 @@ fn identity_commands_match() {
     want.sort();
     got.sort();
     assert_eq!(got, want);
+}
+
+/// The bounds a write or a serve request can wait on, or hold in memory, have rows: the claimed
+/// write's wait, the queue's manifest, `serve.lock`'s waits and a commit's inline content.
+#[test]
+fn waits_and_buffers_are_listed() {
+    let listed: Vec<&str> = constants()
+        .into_iter()
+        .map(|(_, constant)| constant.path)
+        .collect();
+    let want = [
+        "swarmops_store::meta::queue::CLAIMED_WAIT",
+        "swarmops_store::meta::queue::MANIFEST_MAX",
+        "swarmops_ops::serve::refresh::SERVE_LOCK_WAIT",
+        "swarmops_git::serve::repo::REPAIR_WAIT",
+        "swarmops_ws::commit::INLINE_BYTES",
+    ];
+    for path in want {
+        assert!(listed.contains(&path), "{path}: no row");
+    }
 }
 
 /// Numbers and declarations read as the page needs.
