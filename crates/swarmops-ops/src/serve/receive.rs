@@ -38,6 +38,8 @@ pub const MAX_PUSH_BYTES: u64 = 2 << 30;
 
 /// The threads a push's hook compresses the store's objects on: rayon's global pool, which
 /// the hooks' object store uses, is otherwise one thread per core, each with its buffers.
+/// Over ssh only `receive-pack` gets it; behind a web server every request does, a fetch's
+/// `pack-objects` hook among them, since one `http-backend` answers both sides.
 pub(crate) const SERVE_HOOK_THREADS: usize = 4;
 
 /// The variable that sizes rayon's global pool in the hooks receive-pack runs.

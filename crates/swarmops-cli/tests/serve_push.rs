@@ -1304,7 +1304,9 @@ land = ["main"]
 /// A land of one commit of 512 incompressible 1 MiB blobs: the land lands, and no `swarmops`
 /// process of the connection, the hooks among them, keeps more than [`HOOK_FILE_KIB`] of file
 /// pages resident, though the hooks read every blob of the push's pack (the M17 closure design
-/// §3.5, I7).
+/// §3.5, I7). Their anonymous memory, which the goal of a push in bounded memory is about (a
+/// process's high-water mark counts the pack's mapped pages too), is printed and not bounded
+/// here: no figure of it is on record yet.
 #[test]
 #[ignore = "slow, ~160 s at load 100 (debug): pushes and lands 512 MiB of random blobs"]
 fn a_large_push_maps_a_bounded_pack() {
@@ -1354,6 +1356,12 @@ fn a_large_push_maps_a_bounded_pack() {
         .max()
         .expect("no swarmops process was sampled");
     println!("serve-push: large push, swarmops RssFile peak {file_kib} KiB");
+    let anon_kib = (spent.iter())
+        .filter_map(|one| one.by_name.get(SWARMOPS_NAME))
+        .map(|peak| peak.anon_kib)
+        .max()
+        .unwrap_or_default();
+    println!("serve-push: large push, swarmops RssAnon peak {anon_kib} KiB");
     assert!(
         file_kib < HOOK_FILE_KIB,
         "a swarmops process kept {file_kib} KiB of file pages resident"
@@ -1368,7 +1376,9 @@ const THREADED_PUSH_BLOBS: usize = 64;
 const HOOK_POOL_THREADS: u64 = 4;
 
 /// The hook's threads beside its pool: the main thread, the `cat-file` reader's stderr drain,
-/// a writer-lock wait's helper and the index's five syncs of a commit.
+/// a writer-lock wait's helper and the index's five syncs of a commit. An inventory of the
+/// code, not a measured figure: the run on record peaked at 11 of the 12 threads allowed, at
+/// load ~200, so a thread added to the hook fails this test before any change of its pool does.
 const HOOK_FIXED_THREADS: u64 = 8;
 
 /// A push of 64 incompressible 1 MiB blobs to `main`: no `swarmops` process of the connection,

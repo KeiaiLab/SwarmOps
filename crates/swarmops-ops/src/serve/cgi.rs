@@ -239,7 +239,8 @@ fn child_env(
             .insert(SWARMOPS_SERVE_EXE.to_owned(), exe.clone().into_os_string());
     }
 
-    // 3. The push bound and the hooks' threads, as over ssh.
+    // 3. The push bound and the hooks' threads, as over ssh. A request's side is not asked:
+    //    a fetch's pack-objects hook runs on the same threads, where over ssh it gets no bound.
     env.config.push((
         MAX_INPUT_SIZE.to_owned(),
         OsString::from(MAX_PUSH_BYTES.to_string()),
@@ -253,9 +254,18 @@ fn child_env(
 
 #[cfg(test)]
 mod tests {
-    use swarmops_api::OpError;
+    use std::collections::BTreeMap;
+    use std::ffi::OsString;
 
-    use super::{CgiRequest, parse_path};
+    use camino::Utf8Path;
+    use swarmops_api::{Identity, OpError};
+    use swarmops_git::serve::repo::ServeRepo;
+
+    use super::{
+        CgiRequest, MAX_INPUT_SIZE, MAX_PUSH_BYTES, PATH_INFO, PATH_TRANSLATED, RAYON_NUM_THREADS,
+        SERVE_HOOK_THREADS, child_env, parse_path,
+    };
+    use crate::serve::{Entry, IdentitySource, ServeInvocation};
 
     /// The reason an error gives in its details.
     fn reason(error: &OpError) -> &str {
@@ -311,6 +321,54 @@ mod tests {
             let error = parse_path(path).unwrap_err();
             assert_eq!(error.code.as_str(), "E_NOT_A_REPO", "{path:?}");
             assert_eq!(reason(&error), "not_smart_http", "{path:?}");
+        }
+    }
+
+    /// What `http-backend` gets for a push and for a fetch alike: the hooks' threads and the
+    /// push bound, as over ssh, `serve.git` as its path, and no host path of the web server's.
+    #[test]
+    fn child_env_bounds_hooks_and_push() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Utf8Path::from_path(dir.path()).unwrap();
+        let repo = ServeRepo::open(store).unwrap();
+        let who = Identity::parse("person/ada").unwrap();
+        let vars = BTreeMap::from([
+            (PATH_INFO.to_owned(), "/acme.git/x".to_owned()),
+            (PATH_TRANSLATED.to_owned(), "/srv/www/acme.git/x".to_owned()),
+            ("REQUEST_METHOD".to_owned(), "POST".to_owned()),
+        ]);
+        let entry = Entry::Cgi { vars: vars.clone() };
+        let no_keys = Box::new(|_: &str| Ok(None));
+        let invocation =
+            ServeInvocation::new(store.to_owned(), entry, IdentitySource::Absent, no_keys);
+
+        for (rest, path) in [
+            ("git-receive-pack", "/serve.git/git-receive-pack"),
+            ("git-upload-pack", "/serve.git/git-upload-pack"),
+        ] {
+            let request = parse_path(&format!("/acme.git/{rest}")).unwrap();
+            let env = child_env(&invocation, &who, &vars, &repo, &request, store);
+
+            // 1. The hooks' threads and the push bound.
+            let threads = OsString::from(SERVE_HOOK_THREADS.to_string());
+            assert_eq!(env.vars.get(RAYON_NUM_THREADS), Some(&threads), "{rest}");
+            let bound = (
+                MAX_INPUT_SIZE.to_owned(),
+                OsString::from(MAX_PUSH_BYTES.to_string()),
+            );
+            assert!(env.config.contains(&bound), "{rest}: {:?}", env.config);
+
+            // 2. The request's own variables, but its paths.
+            assert_eq!(
+                env.vars.get(PATH_INFO),
+                Some(&OsString::from(path)),
+                "{rest}"
+            );
+            assert_eq!(env.vars.get(PATH_TRANSLATED), None, "{rest}");
+            assert_eq!(
+                env.vars.get("REQUEST_METHOD"),
+                Some(&OsString::from("POST"))
+            );
         }
     }
 }
