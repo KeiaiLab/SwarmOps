@@ -781,6 +781,17 @@ collision-flagged git object, a malformed memo and a damaged generation index ar
 reported, `read_file` refuses a `max_bytes` of 0, `op undo`'s refusals report their repairs, and
 the schema, the help and the references say what the code does.
 
+### Changed (breaking)
+
+- `read_file` (`cat`) refuses a `max_bytes` of 0 with `E_INVALID_ARG` (`details.max_bytes`), as
+  `diff` does, and its schema says the minimum is 1: it returned nothing, truncated, with a
+  `next_offset` where it started, so a read on while truncated never ended (issue #4 item 2).
+  What to do: send a `max_bytes` of 1 or more, or none.
+- A store path that leads through a name that is not UTF-8 (a symlink's target, the working
+  directory) is `E_IO` (`fs_op: "resolve"`) whose message names no host path, where it was
+  `E_STORE_CORRUPT` with the path in its message (issue #9 item C1). What to do: read this case
+  as `E_IO`, and name the store by a UTF-8 path.
+
 ### Added
 
 - Two probes for v0.6.0's misses, no fix: `just perf` times a sync of one land on 1,000 and
@@ -873,9 +884,6 @@ the schema, the help and the references say what the code does.
   20-minute kill (three take longer even optimized) and failed the weekly run; the new
   `just check-ci-perf` runs them optimized, one at a time, in the weekly run's last job, under
   the heavy lock and the `ci-perf` nextest profile (55-minute kill). `just check-slow` keeps them.
-- `read_file` (`cat`) refuses a `max_bytes` of 0 with `E_INVALID_ARG` (`details.max_bytes`), as
-  `diff` does, and its schema says the minimum is 1: it returned nothing, truncated, with a
-  `next_offset` where it started, so a read on while truncated never ended (issue #4 item 2).
 - The MCP tool descriptions of `read_file`, `read_tree` and `diff`, and the request types, say to
   page at the full ids the first page resolved, since a cursor or `next_offset` pins no revision,
   and that `next_offset` reads on to the file's end, past a `lines` range (issue #4 items 3 and
@@ -935,9 +943,6 @@ the schema, the help and the references say what the code does.
 - A commit or a land's resolutions refuse a content past 512 MiB (`E_TOO_LARGE`, scope `put`) by
   the size it declares, before any file is read; the check used to wait until the contents
   before it were read.
-- A store path that leads through a name that is not UTF-8 (a symlink's target, the working
-  directory) is `E_IO` (`fs_op: "resolve"`) whose message names no host path, where it was
-  `E_STORE_CORRUPT` with the path in its message (issue #9 item C1).
 - `swarmops --help`, the CLI reference and the versioning policy name `serve` and
   `derive --follow` beside `mcp` as the runs that print other than one envelope on stdout, and
   `schema Meta` lists every operation that reports `meta.recovered`, and on which errors, where it
