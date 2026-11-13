@@ -830,7 +830,7 @@ fn unknown_variant(ty: &str) -> RepoError {
 /// one of them under a memo key: `git_tree_oid_mac`, `git_blob_oid_mac`, `git_oid_mac`) that is
 /// not the one the store's own objects give, as a deep verify re-derives it
 /// ([`verify_export_oids`]), or, given the key, a memo under it whose MAC does not check
-/// ([`verify_export_oids_with`]), or a memo the export refuses as malformed
+/// ([`verify_export_oids_with`]), or a malformed memo, one the export refuses or `repair` drops
 /// ([`verify_export_oids`]): a file someone placed in the store, or a cache a faulty build wrote.
 /// Removing the file, or all of `meta/derived/`, has it derived again.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -860,10 +860,12 @@ pub struct GitMemoMismatch {
 /// reads no `meta/derived/` memo as the truth and writes none (unlike an export, it reports every
 /// mismatch rather than refusing at the first). A memo the export refuses as malformed is
 /// reported too: a tree's or a blob's of another length than an oid's, and one under a key, any
-/// key, of another length or whose `kept` or `imported` byte is neither 0 nor 1. A memo about an
+/// key, of another length or whose `kept` or `imported` byte is neither 0 nor 1. So is a
+/// `git_oid` memo of another length than its 21 bytes or whose `kept` byte is neither 0 nor 1,
+/// which the export does not refuse (it passes over the first and reads the second as kept) and
+/// `repair` drops: each memo `repair` drops for its shape is one this reports. A memo about an
 /// object the store lacks is passed over (the deep verify reports the missing or corrupt object
-/// on its own), as is a `git_oid` memo of another length, which the export passes over too.
-/// [`RepoError`] only where a read cannot go on.
+/// on its own). [`RepoError`] only where a read cannot go on.
 pub fn verify_export_oids<O: ObjectStore>(
     repo: &Repo<O>,
 ) -> Result<Vec<GitMemoMismatch>, RepoError> {
@@ -914,21 +916,23 @@ pub fn verify_export_oids_with<O: ObjectStore>(
         }
     }
 
-    // Each changeset's memoized export oid, against the one it renders to over real oids.
+    // Each changeset's memoized export oid, against the one it renders to over real oids. A
+    // malformed memo (`None`) is reported whatever oid it starts with: `repair` drops it.
     let mut expected = ExportOids::new(OnMemo::Skip);
     for listed in store.list(ExportOid::NAME, ExportOid::VERSION)? {
         let id = ChangesetId::new(listed.subject);
-        let Some(stored) = stored_export_oid(store, id)? else {
+        let Some(value) = memo_get(store, &export_slot(id))? else {
             continue;
         };
+        let stored = decode_export_memo(&value);
         if let Ok(got) = expected.of(&snapshot, &reader, &cache, id)
-            && (got.oid != stored.oid || got.kept != stored.kept)
+            && stored != Some(got)
         {
             found.push(GitMemoMismatch {
                 memo: ExportOid::NAME.to_owned(),
                 subject: id.0,
                 key: Vec::new(),
-                stored: stored.git_oid(),
+                stored: held_oid(&value),
                 real: got.git_oid(),
             });
         }
@@ -1124,6 +1128,19 @@ fn stored_export_oid(
 /// `()`, of no bytes.
 fn export_slot(id: ChangesetId) -> DerivedSlot<'static> {
     DerivedSlot::new(ExportOid::NAME, ExportOid::VERSION, id.0, &[])
+}
+
+/// The [`ExportedOid`] the bytes of a `git_oid` memo hold, as a deep verify reads one: `None` for
+/// a malformed value, of another length than the memo's 21 bytes or whose `kept` byte is neither
+/// 0 nor 1, the values `repair` drops.
+fn decode_export_memo(bytes: &[u8]) -> Option<ExportedOid> {
+    let (oid, kept) = bytes.split_first_chunk::<20>()?;
+    let kept = match kept {
+        [0] => false,
+        [1] => true,
+        _ => return None,
+    };
+    Some(ExportedOid { oid: *oid, kept })
 }
 
 /// An [`ExportedOid`] as its `git_oid` memo holds it, as postcard writes one: the oid's 20 bytes,
@@ -1846,6 +1863,64 @@ mod tests {
 
             // 3. The memo is as planted: the refusal wrote nothing over it.
             assert_eq!(memo(&repo, name, subject, &[]).as_deref(), Some(planted));
+        }
+    }
+
+    /// A `git_oid` memo that is no export oid's, of another length than its 21 bytes or with a
+    /// `kept` byte that is neither 0 nor 1, is one `repair` drops: a deep verify reports it
+    /// whatever oid it starts with, and a whole one that agrees is not reported.
+    #[test]
+    fn a_malformed_git_oid_memo_is_reported() {
+        /// What a case plants as the memo of a changeset that exports to `real`, and the oid the
+        /// verify reports it holds, `None` for a memo it does not report.
+        type Case = fn(ExportedOid) -> (Vec<u8>, Option<GitOid>);
+        let cases: [(&str, Case); 5] = [
+            ("the memo an export writes", |real| {
+                (export_memo(real).to_vec(), None)
+            }),
+            ("a kept byte of 2", |real| {
+                let mut memo = export_memo(real);
+                memo[20] = 2;
+                (memo.to_vec(), Some(real.git_oid()))
+            }),
+            ("the oid alone, 20 bytes", |real| {
+                (real.oid.to_vec(), Some(real.git_oid()))
+            }),
+            ("a byte past the memo, 22 bytes", |real| {
+                let memo = [export_memo(real).as_slice(), &[0]].concat();
+                (memo, Some(real.git_oid()))
+            }),
+            ("less than an oid, 5 bytes", |_| {
+                (vec![0xab; 5], Some(GitOid::NULL))
+            }),
+        ];
+
+        for (what, case) in cases {
+            // 1. A store of one changeset, and the oid it exports to, no memo read or written.
+            let (_dir, repo, id) = one_file_store();
+            let real = {
+                let read = repo.snapshot().unwrap();
+                let reader = ExportReader::new(&read, repo.derived_store());
+                ExportOids::new(OnMemo::Skip)
+                    .of(&read, &reader, &OidCache::new(), id)
+                    .unwrap()
+            };
+
+            // 2. The case's memo, planted.
+            let (planted, held) = case(real);
+            let put = repo.derived_store().put(&export_slot(id), &planted);
+            assert!(put.unwrap(), "{what}");
+
+            // 3. The verify reports it, with the oid it starts with and the one the objects give.
+            let reported = held.map(|stored| GitMemoMismatch {
+                memo: ExportOid::NAME.to_owned(),
+                subject: id.0,
+                key: Vec::new(),
+                stored,
+                real: real.git_oid(),
+            });
+            let found = verify_export_oids(&repo).unwrap();
+            assert_eq!(found, Vec::from_iter(reported), "{what}");
         }
     }
 }
