@@ -390,13 +390,14 @@ mod tests {
 
         // 3. No step noted, none run.
         let mut log = Vec::new();
-        finish(
+        let code = finish(
             &printed,
             Followup::default(),
             |_| ExitCode::SUCCESS,
             |_| panic!("a read-only operation steps nothing"),
             &mut log,
         );
+        assert_eq!(code, ExitCode::SUCCESS);
         assert_eq!(log, Vec::<u8>::new());
     }
 }
