@@ -671,13 +671,13 @@ def server_package_holds_backup_and_status(scratch: Path) -> None:
     """Every file each MANIFEST names, the backup's and the status page's among them, at its mode
     with its bytes; /etc's files as configuration; a later subtree's MANIFEST read too."""
     kit = copy_kit(scratch)
-    (kit / "accept").mkdir()
-    (kit / "accept" / "accept").write_bytes(b"#!/bin/sh\nexit 0\n")
-    (kit / "accept" / "MANIFEST").write_text(
-        "# planted\ninstall accept /usr/lib/swarmops-server/accept/accept 0755\n")
+    (kit / "later").mkdir()
+    (kit / "later" / "later").write_bytes(b"#!/bin/sh\nexit 0\n")
+    (kit / "later" / "MANIFEST").write_text(
+        "# planted\ninstall later /usr/lib/swarmops-server/later/later 0755\n")
     installs = manifest_installs(kit)
     for path in ("/usr/sbin/so-kit", "/usr/sbin/so-backup", "/usr/bin/so-status",
-                 "/usr/lib/swarmops-server/accept/accept"):
+                 "/usr/lib/swarmops-server/later/later"):
         assert path in installs, f"the test's MANIFEST reader misses {path}"
     deb, rpm = server_built(archive(scratch / "in"), scratch / "out", kit)
 

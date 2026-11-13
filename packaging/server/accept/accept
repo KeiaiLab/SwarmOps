@@ -1,0 +1,429 @@
+#!/bin/sh
+# accept: the installation's acceptance cases, as a client reaches it through its entrances.
+# POSIX sh, like so-kit: it runs on every host and image the package installs on.
+#
+#   accept smoke   the cases every install and upgrade passes
+#   accept full    smoke, then the cases of the data filesystem
+#
+#   case                         holds when
+#   page_shows_the_host_keys     the root page's fingerprints equal the keys sshd presents
+#   git_over_ssh, git_over_https git clones, pushes main, lands through refs/land/main and
+#                                fetches the land
+#   so_over_ssh, so_over_https   `so clone`, `push`, `fetch` and `sync` against the same store
+#   binary_paths_are_read_only   the swarmops and so binaries cannot be opened for writing
+#   data_filesystem_is_supported (full) the stores lie on ext4, XFS or btrfs, mounted with exec
+#
+# Two strict expected failures, each failing the run the day it passes or fails another way:
+# so_sync_lost_race_retries (a `so sync` that loses its push race inside serve fetches and
+# retries; flips on the interop design's D1 fix) and so_push_names_its_identity (a pushed
+# changeset names the key's identity as its agent; flips on M29-18). The second reads the
+# store, so the program runs as the account that owns the stores.
+#
+# Settings: SO_ACCEPT_CONF, else the package's accept.conf; root and swarmops from the kit's
+# (SO_KIT_CONF, else kit.conf). One `ok`, `xfail` or `FAILED` line per case on stdout. Exit 0
+# when every case holds, 1 when one does not, 2 refused with one `accept: <reason>` line on
+# stderr and nothing run.
+set -eu
+LC_ALL=C
+export LC_ALL
+umask 077
+
+refuse() {
+    printf 'accept: %s\n' "$*" >&2
+    exit 2
+}
+
+# A case's failure: its reason, on stderr, ends the case's subshell.
+die() {
+    printf '%s\n' "$*" >&2
+    exit 1
+}
+
+plain_path() {
+    case $2 in
+    '') ;;
+    /*[!A-Za-z0-9._/-]* | [!/]*) refuse "settings: $1 is no plain absolute path" ;;
+    esac
+}
+
+[ $# -eq 1 ] || refuse "usage: accept smoke | full"
+level=$1
+case $level in
+smoke | full) ;;
+*) refuse "no acceptance level $level" ;;
+esac
+
+# 1. Settings: the defaults, root and swarmops from the kit's file, then this program's.
+root=/srv/so
+swarmops=/usr/bin/swarmops
+accept_host=localhost
+accept_ssh_port=22
+accept_https_port=443
+accept_store=accept
+accept_identity=person/accept
+accept_key=
+accept_password=
+accept_ca=
+accept_work=/tmp
+
+kit_conf=${SO_KIT_CONF:-/etc/swarmops-server/kit.conf}
+conf=${SO_ACCEPT_CONF:-/etc/swarmops-server/accept.conf}
+[ -r "$kit_conf" ] || refuse "cannot read the kit's settings file"
+[ -r "$conf" ] || refuse "cannot read the settings file"
+while IFS= read -r line || [ -n "$line" ]; do
+    case $line in
+    root=* | swarmops=*) ;;
+    *) continue ;;
+    esac
+    key=${line%%=*}
+    value=${line#*=}
+    plain_path "$key" "$value"
+    eval "$key=\$value"
+done <"$kit_conf"
+while IFS= read -r line || [ -n "$line" ]; do
+    case $line in
+    '' | '#'*) continue ;;
+    *=*) ;;
+    *) refuse "settings: not key=value: $line" ;;
+    esac
+    key=${line%%=*}
+    value=${line#*=}
+    case $key in
+    accept_key | accept_password | accept_ca | accept_work) plain_path "$key" "$value" ;;
+    accept_host)
+        case $value in
+        '' | -* | *[!A-Za-z0-9.-]*) refuse "settings: accept_host is no host name" ;;
+        esac
+        ;;
+    accept_ssh_port | accept_https_port)
+        case $value in
+        '' | 0* | *[!0-9]*) refuse "settings: $key is no port" ;;
+        esac
+        [ "$value" -le 65535 ] || refuse "settings: $key is no port"
+        ;;
+    accept_store)
+        case $value in
+        [a-z0-9]*) ;;
+        *) refuse "settings: accept_store is no store name" ;;
+        esac
+        case $value in
+        *[!a-z0-9._-]*) refuse "settings: accept_store is no store name" ;;
+        esac
+        ;;
+    accept_identity)
+        case $value in
+        person/*/* | person/ | person/.* | person/*[!A-Za-z0-9._-]*)
+            refuse "settings: accept_identity is no person/<login>"
+            ;;
+        person/*) ;;
+        *) refuse "settings: accept_identity is no person/<login>" ;;
+        esac
+        ;;
+    *) refuse "settings: unknown key $key" ;;
+    esac
+    eval "$key=\$value"
+done <"$conf"
+
+[ -n "$accept_key" ] && [ -r "$accept_key" ] || refuse "cannot read the key accept_key names"
+[ -n "$accept_password" ] && [ -r "$accept_password" ] ||
+    refuse "cannot read the password file accept_password names"
+[ -z "$accept_ca" ] || [ -r "$accept_ca" ] || refuse "cannot read the certificate accept_ca names"
+password=$(cat "$accept_password")
+case $password in
+'' | *[!A-Za-z0-9]*) refuse "the web password is not letters and digits" ;;
+esac
+for tool in git so ssh ssh-keyscan ssh-keygen curl findmnt; do
+    command -v "$tool" >/dev/null 2>&1 || refuse "no $tool"
+done
+[ -x "$swarmops" ] || refuse "no swarmops at the path the kit's settings name"
+
+# 2. The run's scratch: the client's home, git's settings, its stored web login, ssh.
+work=$(mktemp -d "$accept_work/accept.XXXXXX") || refuse "cannot make a scratch directory"
+trap 'rm -rf "$work"' EXIT
+trap 'exit 1' HUP INT TERM
+HOME=$work/home
+GIT_CONFIG_GLOBAL=$work/gitconfig
+GIT_CONFIG_NOSYSTEM=1
+GIT_TERMINAL_PROMPT=0
+export HOME GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM GIT_TERMINAL_PROMPT
+mkdir "$HOME"
+login=${accept_identity#person/}
+host=$accept_host
+https="$host:$accept_https_port"
+git config --global user.name Acceptance
+git config --global user.email "acceptance@$host.invalid"
+git config --global init.defaultBranch main
+git config --global credential.helper "store --file=$work/credentials"
+printf 'https://%s:%s@%s\n' "$login" "$password" "$https" >"$work/credentials"
+if [ -n "$accept_ca" ]; then
+    git config --global http.sslCAInfo "$accept_ca"
+fi
+known="$work/known_hosts"
+ssh_plain="ssh -F /dev/null -i $accept_key -o IdentitiesOnly=yes -o BatchMode=yes"
+ssh_plain="$ssh_plain -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known"
+GIT_SSH_COMMAND=$ssh_plain
+export GIT_SSH_COMMAND
+
+# Each run's files and refs are its own: the acceptance repository outlives the run.
+run="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+
+url_of() {
+    if [ "$1" = ssh ]; then
+        printf 'ssh://so@%s:%s/%s.git\n' "$host" "$accept_ssh_port" "$accept_store"
+        return
+    fi
+    printf 'https://%s@%s/%s.git\n' "$login" "$https" "$accept_store"
+}
+
+# What `git ls-remote` reads for main at a URL.
+remote_main() {
+    git ls-remote "$1" refs/heads/main 2>/dev/null | cut -f 1
+}
+
+# A commit of one new file in a clone; its id.
+commit_file() {
+    printf '%s\n' "$3" >"$1/$2" || die "cannot write $2"
+    git -C "$1" add "$2" && git -C "$1" commit -q -m "$2" || die "git commit of $2 failed"
+    git -C "$1" rev-parse HEAD
+}
+
+# `so` as the client: its envelope on stdout; stops the case unless ok.
+so_ok() {
+    out=$(cd "$work" && so "$@" 2>"$work/so.err") || die "so $*: $out $(cat "$work/so.err")"
+    case $out in
+    '{"ok":true'*) printf '%s\n' "$out" ;;
+    *) die "so $*: $out $(cat "$work/so.err")" ;;
+    esac
+}
+
+# A JSON string field's first value in an envelope.
+field() {
+    printf '%s\n' "$1" | grep -o "\"$2\":\"[^\"]*\"" | head -n 1 | sed 's/^[^:]*:"//; s/"$//'
+}
+
+# A native changeset by agent/accept in a local store, moving its main.
+so_commit() {
+    changes=$(printf '[{"path":"%s","op":"put","content":{"inline":"%s"}}]' "$2" "$run")
+    out=$(cd "$work" && printf '%s' "$changes" |
+        so --repo "$1" --as agent/accept commit -m "$2" --changes - --advance main 2>&1 >/dev/null) ||
+        die "so commit: $out"
+}
+
+# 3. The cases.
+case_page_shows_the_host_keys() {
+    ca=
+    [ -z "$accept_ca" ] || ca="--cacert $accept_ca"
+    # shellcheck disable=SC2086
+    page=$(curl -sS --fail $ca "https://$https/" 2>&1) || die "the root page: $page"
+    shown=$(printf '%s\n' "$page" | grep -o '<code>SHA256:[^<]*</code>' |
+        sed 's/<code>//; s/<\/code>//' | sort)
+    scanned=$(ssh-keyscan -p "$accept_ssh_port" "$host" 2>/dev/null) || die "ssh-keyscan failed"
+    presented=$(printf '%s\n' "$scanned" | ssh-keygen -l -E sha256 -f - 2>/dev/null |
+        awk '{ print $2 }' | sort)
+    [ -n "$presented" ] || die "sshd presents no key"
+    [ "$shown" = "$presented" ] || die "the page shows [$shown], sshd presents [$presented]"
+}
+
+git_over() {
+    url=$(url_of "$1")
+    clone="$work/git-$1"
+    out=$(git clone -q "$url" "$clone" 2>&1) || die "git clone over $1: $out"
+    [ "$(git -C "$clone" rev-parse origin/main)" = "$(remote_main "$url")" ] ||
+        die "the clone's main is not the served main"
+
+    # 1. A push of main, served as pushed.
+    pushed=$(commit_file "$clone" "accept-$run-$1-push.txt" push) || exit 1
+    out=$(git -C "$clone" push -q origin HEAD:main 2>&1) || die "git push over $1: $out"
+    [ "$(remote_main "$url")" = "$pushed" ] || die "the push over $1 is not served"
+
+    # 2. A land through refs/land/main, told on a remote: line, then fetched.
+    commit_file "$clone" "accept-$run-$1-land.txt" land >/dev/null
+    out=$(git -C "$clone" push origin HEAD:refs/land/main 2>&1) || die "the land over $1: $out"
+    landed=$(remote_main "$url")
+    case $out in
+    *"remote: landed onto main as $landed"*) ;;
+    *) die "the land over $1 was not told: $out" ;;
+    esac
+    out=$(git -C "$clone" fetch -q origin 2>&1) || die "git fetch over $1: $out"
+    [ "$(git -C "$clone" rev-parse origin/main)" = "$landed" ] || die "the fetch missed the land"
+}
+
+case_git_over_ssh() {
+    git_over ssh
+}
+
+case_git_over_https() {
+    git_over https
+}
+
+so_over() {
+    url=$(url_of "$1")
+    local="so-$1"
+
+    # 1. The clone imports the served main.
+    served=$(remote_main "$url")
+    out=$(so_ok --as "$accept_identity" clone "$url" --into "$local") || exit 1
+    printf '%s\n' "$out" | grep -q "\"sha\":\"$served\"" || die "so clone over $1: $out"
+
+    # 2. A native changeset pushed: the remote serves it.
+    so_commit "$local" "accept-$run-$1-so.txt"
+    out=$(so_ok --repo "$local" push origin) || exit 1
+    [ "$(field "$out" status)" = pushed ] || die "so push over $1: $out"
+    [ "$(remote_main "$url")" = "$(field "$out" new)" ] || die "the so push over $1 is not served"
+
+    # 3. A git client lands; fetch imports it; sync fast-forwards main.
+    clone="$work/so-git-$1"
+    out=$(git clone -q "$url" "$clone" 2>&1) || die "git clone over $1: $out"
+    commit_file "$clone" "accept-$run-$1-git.txt" git >/dev/null
+    out=$(git -C "$clone" push -q origin HEAD:refs/land/main 2>&1) || die "the land over $1: $out"
+    landed=$(remote_main "$url")
+    out=$(so_ok --repo "$local" fetch origin) || exit 1
+    printf '%s\n' "$out" | grep -q "\"sha\":\"$landed\"" || die "so fetch over $1: $out"
+    out=$(so_ok --as "$accept_identity" --repo "$local" sync origin) || exit 1
+    [ "$(field "$out" status)" = fast_forwarded ] || die "so sync over $1: $out"
+}
+
+case_so_over_ssh() {
+    so_over ssh
+}
+
+case_so_over_https() {
+    so_over https
+}
+
+case_binary_paths_are_read_only() {
+    for binary in "$swarmops" "$(command -v so)"; do
+        if (: >>"$binary") 2>/dev/null; then
+            die "$binary opens for writing"
+        fi
+    done
+}
+
+case_data_filesystem_is_supported() {
+    kind=$(stat -f -c %T "$root") || die "cannot read the filesystem of $root"
+    case $kind in
+    ext2/ext3 | xfs | btrfs) ;;
+    *) die "the stores lie on $kind, not ext4, XFS or btrfs" ;;
+    esac
+    options=$(findmnt -n -o OPTIONS -T "$root") || die "cannot read the mount of $root"
+    case ",$options," in
+    *,noexec,*) die "the stores' filesystem is mounted noexec" ;;
+    esac
+}
+
+# ssh that loses its first push's race: once the server's advertisement is through and the
+# client sends its commands, it first runs RACE_COMMAND to its end, writes its exit status into
+# RACE_MARKER, then relays the rest. Every other connection is plain ssh.
+race_ssh() {
+    cat >"$work/race-ssh" <<EOF
+#!/bin/sh
+case "\$*" in
+*git-receive-pack*) ;;
+*) exec $ssh_plain "\$@" ;;
+esac
+[ ! -e "\$RACE_MARKER" ] || exec $ssh_plain "\$@"
+: >"\$RACE_MARKER"
+mkfifo "\$RACE_MARKER.fifo"
+$ssh_plain "\$@" <"\$RACE_MARKER.fifo" &
+child=\$!
+exec 3>"\$RACE_MARKER.fifo"
+dd bs=65536 count=1 of="\$RACE_MARKER.first" 2>/dev/null
+status=0
+GIT_SSH_COMMAND="$ssh_plain" sh -c "\$RACE_COMMAND" </dev/null >&2 || status=\$?
+printf '%s\n' "\$status" >"\$RACE_MARKER"
+cat "\$RACE_MARKER.first" >&3
+cat >&3
+exec 3>&-
+wait "\$child"
+EOF
+    chmod 0700 "$work/race-ssh"
+}
+
+case_so_sync_lost_race_retries() {
+    url=$(url_of ssh)
+    for side in r1 r2; do
+        so_ok --as "$accept_identity" clone "$url" --into "$side" >/dev/null
+        so_commit "$side" "accept-$run-$side.txt"
+    done
+    race_ssh
+    marker="$work/race.marker"
+    out=$(cd "$work" && RACE_MARKER=$marker GIT_SSH_COMMAND="$work/race-ssh" GIT_SSH_VARIANT=ssh \
+        RACE_COMMAND="so --as $accept_identity --repo $work/r2 sync origin" \
+        so --as "$accept_identity" --repo r1 sync origin 2>"$work/so.err") || true
+    raced=$(cat "$marker" 2>/dev/null || true)
+    [ "$raced" = 0 ] || die "the race did not run to its end: [$raced] $out"
+    attempts=$(printf '%s\n' "$out" | grep -o '"attempts":[0-9]*' | head -n 1 | cut -d: -f2)
+    case $out in
+    '{"ok":true'*) ;;
+    *) die "lost race not retried: $out" ;;
+    esac
+    [ "$(field "$out" status)" = pushed ] && [ "${attempts:-0}" -ge 2 ] ||
+        die "lost race not retried: $out"
+}
+
+case_so_push_names_its_identity() {
+    so_ok --as "$accept_identity" clone "$(url_of ssh)" --into id >/dev/null
+    so_commit id "accept-$run-id.txt"
+    so_ok --repo id push origin >/dev/null
+    shown=$("$swarmops" --repo "$root/$accept_store" show main 2>&1) ||
+        die "cannot read the store's main: $shown"
+    agent=$(field "$shown" agent)
+    [ "$agent" = "$accept_identity" ] || die "the pushed changeset's agent is $agent"
+}
+
+# 4. The run: the host keys checked against the page first, since every ssh case trusts them.
+failed=0
+
+run_case() {
+    started=$(date +%s)
+    if out=$("case_$1" 2>&1); then
+        printf 'ok      %s (%s s)\n' "$1" "$(($(date +%s) - started))"
+        return
+    fi
+    printf 'FAILED  %s: %s\n' "$1" "$(printf '%s\n' "$out" | tail -n 1)"
+    failed=$((failed + 1))
+}
+
+# A strict expected failure: it fails with its known words, or the run fails.
+expect_failure() {
+    if out=$("case_$1" 2>&1); then
+        printf 'FAILED  %s: passes now (%s?): make it a case\n' "$1" "$3"
+        failed=$((failed + 1))
+        return
+    fi
+    reason=$(printf '%s\n' "$out" | tail -n 1)
+    case $reason in
+    *"$2"*) printf 'xfail   %s: until %s: %s\n' "$1" "$3" "$reason" ;;
+    *)
+        printf 'FAILED  %s: not its known failure (%s): %s\n' "$1" "$2" "$reason"
+        failed=$((failed + 1))
+        ;;
+    esac
+}
+
+run_case page_shows_the_host_keys
+ssh-keyscan -p "$accept_ssh_port" "$host" >"$known" 2>/dev/null || true
+
+# A new acceptance repository is empty: its first commit, pushed to main, before any case.
+url=$(url_of ssh)
+if [ -z "$(remote_main "$url")" ]; then
+    git init -q "$work/seed" &&
+        printf 'accept\n' >"$work/seed/accept.txt" &&
+        git -C "$work/seed" add accept.txt &&
+        git -C "$work/seed" commit -q -m accept &&
+        git -C "$work/seed" push -q "$url" HEAD:refs/heads/main 2>"$work/seed.err" || {
+        printf 'FAILED  the first push to an empty %s: %s\n' "$accept_store" "$(cat "$work/seed.err")"
+        exit 1
+    }
+fi
+for name in git_over_ssh git_over_https so_over_ssh so_over_https binary_paths_are_read_only; do
+    run_case "$name"
+done
+if [ "$level" = full ]; then
+    run_case data_filesystem_is_supported
+fi
+expect_failure so_sync_lost_race_retries 'refused (declined)' 'interop D1'
+expect_failure so_push_names_its_identity 'unknown/unknown' 'M29-18'
+
+printf 'accept %s: %s failed\n' "$level" "$failed"
+[ "$failed" -eq 0 ] || exit 1

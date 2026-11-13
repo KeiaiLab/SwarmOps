@@ -1,0 +1,16 @@
+# The installation acceptance: the cases an installation passes after its install and each
+# upgrade, run by `so-kit run accept <smoke | full>`; the kit's MANIFEST format.
+install accept /usr/lib/swarmops-server/accept/accept 0755
+install accept.conf /etc/swarmops-server/accept.conf 0644
+uses /etc/swarmops-server/kit.conf
+uses /usr/bin/swarmops
+uses /usr/bin/so
+uses /usr/bin/git
+uses /usr/bin/curl
+uses /usr/bin/ssh
+uses /usr/bin/ssh-keyscan
+uses /usr/bin/ssh-keygen
+uses /usr/bin/findmnt
+uses /bin/sh
+uses /dev/null
+uses /tmp
