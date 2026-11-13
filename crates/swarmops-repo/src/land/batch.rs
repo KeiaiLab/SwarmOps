@@ -9,10 +9,14 @@
 //!   request 1 (by id) ──▶ frame 1, on what frame 0 queued (its moves, its key)
 //!   request 2 (by id) ──▶ frame 2, on what frames 0 and 1 queued
 //!   claim ──▶ the staged objects, one put and one flush ──▶ one append of every frame
-//!   answers: Landed or an insert that queued (a frame); Moved, Replayed, or an insert that
-//!   queued nothing (none); a member the leader cannot plan is declined, and its writer makes
-//!   it again alone
+//!   answers: Landed or an insert that queued (a frame); Moved, Replayed, an insert that
+//!   queued nothing, or a final error (none); a member the leader cannot plan otherwise is
+//!   declined, and its writer makes it again alone
 //! ```
+//!
+//! A final error is one a run of the member alone would meet again, on what the batch commits
+//! (a key reused, a target or a parent missing, a ref moved): its answer carries it, so that its
+//! writer does not wait for the lock to meet it ([`Refusal`]).
 //!
 //! An insert's request is its changeset's index record and the ref it advances: the changeset's
 //! objects are durable since its committer flushed them before it asked (I1).
@@ -46,8 +50,10 @@ use super::publish::{
     self, GroupPublication, Publication, PublishPlan, Published, Queued, Relocate,
 };
 
-/// The version of the bodies this build encodes and decodes.
-const VERSION: u8 = 1;
+/// The version of the bodies this build encodes and decodes: 2 since an answer carries a final
+/// error ([`Refusal`]). A leader declines a request of another version, and a waiter fails
+/// closed on such an answer, so builds of two versions on one store each run alone.
+const VERSION: u8 = 2;
 
 /// A changeset id on the wire.
 type Id = [u8; 32];
@@ -140,6 +146,79 @@ enum PublishAnswer {
         files_changed: u64,
     },
 }
+
+/// A member's planning error that a run of it alone would meet again, on what the batch
+/// commits: its answer's body, so that its writer does not wait for the lock to meet it. Any
+/// other error declines its member.
+#[derive(Serialize, Deserialize)]
+enum Refusal {
+    /// [`RepoError::KeyReused`].
+    KeyReused {
+        key: String,
+        landed: Id,
+        target: String,
+    },
+    /// [`RepoError::NotFound`].
+    NotFound(String),
+    /// [`RepoError::UnknownParent`].
+    UnknownParent(Id),
+    /// [`RepoError::RefName`].
+    RefName(String),
+    /// [`RepoError::RefMoved`], without the leader's recovery.
+    RefMoved { name: String, actual: Option<Id> },
+}
+
+impl Refusal {
+    /// `e` as a refusal, if it is final.
+    fn of(e: &RepoError) -> Option<Refusal> {
+        let refusal = match e {
+            RepoError::KeyReused {
+                key,
+                landed,
+                target,
+            } => Refusal::KeyReused {
+                key: key.clone(),
+                landed: bytes(*landed),
+                target: target.clone(),
+            },
+            RepoError::NotFound(what) => Refusal::NotFound(what.clone()),
+            RepoError::UnknownParent(id) => Refusal::UnknownParent(bytes(*id)),
+            RepoError::RefName(name) => Refusal::RefName(name.clone()),
+            RepoError::RefMoved { name, actual, .. } => Refusal::RefMoved {
+                name: name.clone(),
+                actual: actual.map(bytes),
+            },
+            _ => return None,
+        };
+        Some(refusal)
+    }
+
+    /// The error it carries; a waiter's recovery is none.
+    fn error(self) -> RepoError {
+        match self {
+            Refusal::KeyReused {
+                key,
+                landed,
+                target,
+            } => RepoError::KeyReused {
+                key,
+                landed: id_of(landed),
+                target,
+            },
+            Refusal::NotFound(what) => RepoError::NotFound(what),
+            Refusal::UnknownParent(id) => RepoError::UnknownParent(id_of(id)),
+            Refusal::RefName(name) => RepoError::RefName(name),
+            Refusal::RefMoved { name, actual } => RepoError::RefMoved {
+                name,
+                actual: actual.map(id_of),
+                recovered: Box::default(),
+            },
+        }
+    }
+}
+
+/// An answer body: what the member did, or the final error its planning met.
+type Reply<T> = Result<T, Refusal>;
 
 /// How a member's planning ended.
 enum Member {
@@ -283,11 +362,15 @@ impl<O: ObjectStore> Repo<O> {
             let has_frame = member.framed();
             let body = match member {
                 Member::Queued(queued) => {
-                    Some(encode_answer(&wire_of(&queued.landed(Vec::new())))?)
+                    Some(encode_answer(&Ok(wire_of(&queued.landed(Vec::new()))))?)
                 }
-                Member::Done(published) => Some(encode_answer(&wire_of(&published))?),
-                Member::Inserted(plan) => Some(encode(&insert_answer(&plan)?)?),
-                Member::Failed(_) => None,
+                Member::Done(published) => Some(encode_answer(&Ok(wire_of(&published)))?),
+                Member::Inserted(plan) => Some(encode(&Reply::Ok(insert_answer(&plan)?))?),
+                // A final error answers its member, frameless; any other declines it.
+                Member::Failed(e) => match Refusal::of(&e) {
+                    Some(refusal) => Some(encode(&Reply::<()>::Err(refusal))?),
+                    None => None,
+                },
             };
             let (frame, body) = match body {
                 Some(body) if has_frame => {
@@ -352,7 +435,11 @@ impl<O: ObjectStore> Repo<O> {
         answer: &Answer,
         target: &str,
     ) -> Result<(Published, Option<u64>), RepoError> {
-        let wire = decode_answer(&answer.body)?;
+        let wire = match (decode_answer(&answer.body)?, &answer.outcome) {
+            (Ok(wire), _) => wire,
+            (Err(refusal), Outcome::NoFrame) => return Err(refusal.error()),
+            (Err(_), _) => return Err(mismatched("a publish")),
+        };
         match (&answer.outcome, wire) {
             (Outcome::Committed { frame_seq }, landed @ PublishAnswer::Landed { .. }) => {
                 Ok((published(landed, Vec::new())?, Some(*frame_seq)))
@@ -366,26 +453,25 @@ impl<O: ObjectStore> Repo<O> {
                 Outcome::NoFrame,
                 done @ (PublishAnswer::Moved { .. } | PublishAnswer::Replayed { .. }),
             ) => Ok((published(done, Vec::new())?, None)),
-            _ => Err(RepoError::Internal(
-                "a publish's answer whose outcome does not match its body".to_owned(),
-            )),
+            _ => Err(mismatched("a publish")),
         }
     }
 
     /// What `answer`, a leader's answer to a commit's insert, says the insert did; the recovery
     /// is the leader's to report, none here.
     pub(crate) fn answered_insert(&self, answer: &Answer) -> Result<Recorded, RepoError> {
-        let plan = plan_of(decode(&answer.body, "answer")?);
+        let wire = match (decode(&answer.body, "answer")?, &answer.outcome) {
+            (Reply::Ok(wire), _) => wire,
+            (Reply::Err(refusal), Outcome::NoFrame) => return Err(refusal.error()),
+            (Reply::Err(_), _) => return Err(mismatched("an insert")),
+        };
+        let plan = plan_of(wire);
         let warnings = match (&answer.outcome, plan.queued()) {
             (Outcome::Committed { .. }, true) | (Outcome::NoFrame, false) => Vec::new(),
             (Outcome::PostCommit { frame_seq, warning }, true) => {
                 vec![self.member_warning(&plan.what(), *frame_seq, warning)]
             }
-            _ => {
-                return Err(RepoError::Internal(
-                    "an insert's answer whose outcome does not match its body".to_owned(),
-                ));
-            }
+            _ => return Err(mismatched("an insert")),
         };
         Ok((plan.insert, plan.advanced, warnings, Recovered::default()))
     }
@@ -751,14 +837,21 @@ fn answer_id(wire: &PublishAnswer) -> ChangesetId {
     }
 }
 
-/// `wire`'s answer body: its version, then its fields.
-fn encode_answer(wire: &PublishAnswer) -> Result<Vec<u8>, RepoError> {
-    encode(wire)
+/// `reply`'s answer body: its version, then its fields.
+fn encode_answer(reply: &Reply<PublishAnswer>) -> Result<Vec<u8>, RepoError> {
+    encode(reply)
 }
 
 /// The answer `body` encodes, of this version.
-fn decode_answer(body: &[u8]) -> Result<PublishAnswer, RepoError> {
+fn decode_answer(body: &[u8]) -> Result<Reply<PublishAnswer>, RepoError> {
     decode(body, "answer")
+}
+
+/// The error of an answer to `what` whose outcome does not match its body.
+fn mismatched(what: &str) -> RepoError {
+    RepoError::Internal(format!(
+        "{what}'s answer whose outcome does not match its body"
+    ))
 }
 
 /// [`VERSION`], then `value`'s postcard bytes.
@@ -899,10 +992,31 @@ mod tests {
             files_changed: 2,
             warnings: Vec::new(),
         };
-        let body = encode_answer(&wire_of(&landed)).unwrap();
-        assert_eq!(
-            published(decode_answer(&body).unwrap(), Vec::new()).unwrap(),
-            landed
-        );
+        let body = encode_answer(&Ok(wire_of(&landed))).unwrap();
+        let Ok(wire) = decode_answer(&body).unwrap() else {
+            panic!("a refusal");
+        };
+        assert_eq!(published(wire, Vec::new()).unwrap(), landed);
+    }
+
+    /// A refusal carries its error whole, to every answer's type: a publish's and an insert's
+    /// decode the same bytes.
+    #[test]
+    fn a_refusal_round_trips() {
+        let reused = RepoError::KeyReused {
+            key: "key-1".to_owned(),
+            landed: id_of([5; 32]),
+            target: "release/1".to_owned(),
+        };
+        let body = encode(&Reply::<()>::Err(Refusal::of(&reused).unwrap())).unwrap();
+        let Err(refusal) = decode_answer(&body).unwrap() else {
+            panic!("not a refusal");
+        };
+        assert_eq!(refusal.error().to_string(), reused.to_string());
+        let insert: Reply<InsertAnswer> = decode(&body, "answer").unwrap();
+        assert!(insert.is_err());
+
+        // Any other error is no refusal: it declines its member.
+        assert!(Refusal::of(&RepoError::Internal("io".to_owned())).is_none());
     }
 }

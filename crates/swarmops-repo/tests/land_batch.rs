@@ -393,6 +393,15 @@ impl Ran {
         }
     }
 
+    /// How many objects lander `who` read.
+    fn object_reads(&self, root: &Utf8Path, who: usize) -> usize {
+        let objects = root.join("objects");
+        (self.calls.iter())
+            .filter(|made| made.who == who && made.method == FsMethod::Read)
+            .filter(|made| made.path.starts_with(objects.as_std_path()))
+            .count()
+    }
+
     /// How many calls of `method` on `path` the landers made.
     fn count(&self, method: FsMethod, path: &Utf8Path) -> usize {
         (self.calls.iter())
@@ -614,6 +623,13 @@ fn a_key_on_two_targets_in_one_batch_lands_once() {
     assert_eq!(repo.get_ref("release/1").unwrap().unwrap().target, t0);
     assert_eq!(frame_count(&root), frames + 1, "one frame of the key");
     assert_eq!(ran.log_syncs(&root), 1, "one batch");
+
+    // The refusal came in the member's answer: it did not plan its land again alone. A loaded
+    // host's leader can run out of its planning budget before the member, which then lands
+    // alone; the leader reads the member's objects only when it planned it.
+    if ran.object_reads(&root, 0) > 0 {
+        assert_eq!(ran.object_reads(&root, 1), 0, "the member planned again");
+    }
 }
 
 /// A batch whose commit fails to list its frames in `journal.off` is committed: each member's
