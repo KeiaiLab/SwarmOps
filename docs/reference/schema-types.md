@@ -2043,7 +2043,7 @@ Kind: object. `swarmops schema RevertResp` prints its JSON Schema.
 
 One served request: when it started, its caller and service, and how its time split.
 
-For a fetch, `prepare_ms` runs from the connection's start to the pack's first byte and `send_ms` from there to its end. For a push, `send_ms` runs from the start to the push's check (receiving and git's checks) and `prepare_ms` from there to the end (judging, importing, landing, exporting). A request that sent no pack or reached no check is all `prepare_ms`.
+For a fetch, `prepare_ms` runs from the connection's start to the pack's first byte and `send_ms` from there to its end. For a push, `send_ms` runs from the start to the push's check (receiving and git's checks) and `prepare_ms` from there to the end (judging, importing, landing, exporting). A request that sent no pack or reached no check is all `prepare_ms`. The two add up to the connection's length on the server's monotonic clock; where one ends and the other starts is read from its wall clock.
 
 Kind: object. `swarmops schema ServeRecord` prints its JSON Schema.
 
@@ -2052,7 +2052,7 @@ Kind: object. `swarmops schema ServeRecord` prints its JSON Schema.
 | `at` | `integer` (uint64) | yes | When the connection started, in Unix milliseconds. |
 | `bytes` | `integer` (uint64) | no | The pack's bytes: sent by a fetch, received by a push. Default: `0`. |
 | `code` | [`ErrorCode`](#errorcode) or `null` | no | The code of a SwarmOps refusal; absent when there was none. |
-| `exit` | `integer` (int32) | no | The connection's exit code: git's, `128 + signal` for a git a signal ended, or a refusal's. Default: `0`. |
+| `exit` | `integer` (int32) or `null` | no | The connection's exit code: git's, `128 + signal` for a git a signal ended, or a refusal's. `serve` writes it in every record; absent, it is unknown, never 0. |
 | `identity` | `string` | yes | The caller `serve` resolved. |
 | `prepare_ms` | `integer` (uint64) | no | The milliseconds spent preparing. Default: `0`. |
 | `send_ms` | `integer` (uint64) | no | The milliseconds spent sending a fetch's pack, or receiving a push's. Default: `0`. |

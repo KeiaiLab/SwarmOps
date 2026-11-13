@@ -27,7 +27,8 @@ pub enum ServeService {
 /// `send_ms` from there to its end. For a push, `send_ms` runs from the start to the push's
 /// check (receiving and git's checks) and `prepare_ms` from there to the end (judging,
 /// importing, landing, exporting). A request that sent no pack or reached no check is all
-/// `prepare_ms`.
+/// `prepare_ms`. The two add up to the connection's length on the server's monotonic clock;
+/// where one ends and the other starts is read from its wall clock.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ServeRecord {
@@ -47,9 +48,9 @@ pub struct ServeRecord {
     #[serde(default)]
     pub bytes: u64,
     /// The connection's exit code: git's, `128 + signal` for a git a signal ended, or a
-    /// refusal's.
-    #[serde(default)]
-    pub exit: i32,
+    /// refusal's. `serve` writes it in every record; absent, it is unknown, never 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit: Option<i32>,
     /// The code of a SwarmOps refusal; absent when there was none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<ErrorCode>,
@@ -66,7 +67,7 @@ impl ServeRecord {
             prepare_ms: 0,
             send_ms: 0,
             bytes: 0,
-            exit: 0,
+            exit: None,
             code: None,
         }
     }

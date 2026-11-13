@@ -11210,7 +11210,7 @@ expression: s.redact(&all)
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "One served request: when it started, its caller and service, and how its time split.\n\nFor a fetch, `prepare_ms` runs from the connection's start to the pack's first byte and\n`send_ms` from there to its end. For a push, `send_ms` runs from the start to the push's\ncheck (receiving and git's checks) and `prepare_ms` from there to the end (judging,\nimporting, landing, exporting). A request that sent no pack or reached no check is all\n`prepare_ms`.",
+      "description": "One served request: when it started, its caller and service, and how its time split.\n\nFor a fetch, `prepare_ms` runs from the connection's start to the pack's first byte and\n`send_ms` from there to its end. For a push, `send_ms` runs from the start to the push's\ncheck (receiving and git's checks) and `prepare_ms` from there to the end (judging,\nimporting, landing, exporting). A request that sent no pack or reached no check is all\n`prepare_ms`. The two add up to the connection's length on the server's monotonic clock;\nwhere one ends and the other starts is read from its wall clock.",
       "properties": {
         "at": {
           "description": "When the connection started, in Unix milliseconds.",
@@ -11237,10 +11237,12 @@ expression: s.redact(&all)
           "description": "The code of a SwarmOps refusal; absent when there was none."
         },
         "exit": {
-          "default": 0,
-          "description": "The connection's exit code: git's, `128 + signal` for a git a signal ended, or a\nrefusal's.",
+          "description": "The connection's exit code: git's, `128 + signal` for a git a signal ended, or a\nrefusal's. `serve` writes it in every record; absent, it is unknown, never 0.",
           "format": "int32",
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "identity": {
           "description": "The caller `serve` resolved.",

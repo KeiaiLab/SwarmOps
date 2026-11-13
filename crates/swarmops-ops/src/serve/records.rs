@@ -1,12 +1,15 @@
 //! The record of each request `serve` served (the M17 design §6): where its time went.
 //!
 //! ```text
-//! parent serve: 1 start (unix µs), its connection id ─▶ SWARMOPS_SERVE_CONNECTION in git's env
+//! parent serve: 1 start (unix µs, and its monotonic clock), its connection id
+//!                 ─▶ SWARMOPS_SERVE_CONNECTION in git's env
 //!               2 git runs ─┬─ pack-objects hook, each run: a line in git/serve-split/<id>
 //!                           │    (its first byte's µs, the bytes it sent, clone or fetch)
 //!                           └─ pre-receive hook: a line in git/serve-split/<id>
 //!                                (its start's µs, the quarantine's bytes, a refusal's code)
-//!               3 git exits: the split's lines read as one and removed, one ServeRecord line
+//!               3 git exits: the connection's length, by the monotonic clock; the split's
+//!                 lines read as one and removed, its mark held within the length; one
+//!                 ServeRecord line
 //!                 appended to git/serve-records.jsonl; past MAX_SERVE_RECORDS_BYTES, the writer
 //!                 that takes git/serve-records.lock renames it serve-records.1.jsonl; a split
 //!                 older than STALE_SPLIT, which a dead serve left, removed
@@ -20,7 +23,7 @@
 use std::fs::{self, File};
 use std::io::{self, Write as _};
 use std::path::Path;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use camino::Utf8Path;
 use serde::{Deserialize, Serialize};
@@ -121,6 +124,8 @@ pub(crate) struct Connection {
     id: String,
     /// Its start, in unix µs.
     start_us: u64,
+    /// Its start on the monotonic clock, which its length is measured from.
+    started: Instant,
 }
 
 impl Connection {
@@ -135,7 +140,11 @@ impl Connection {
             |_| format!("{start_us:0ID_HEX$x}"),
             |(hex, _)| hex[..ID_HEX].to_owned(),
         );
-        Connection { id, start_us }
+        Connection {
+            id,
+            start_us,
+            started: Instant::now(),
+        }
     }
 
     /// Its id, for [`SWARMOPS_SERVE_CONNECTION`].
@@ -162,9 +171,9 @@ impl Connection {
 
         // 2. The split its hooks left, then the record; the splits dead connections left
         //    removed.
-        let end_us = now_us();
+        let whole_us = u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX);
         let split = take_split(&git, &self.id);
-        let record = self.record(who, side, split, end_us, outcome);
+        let record = self.record(who, side, split, whole_us, outcome);
         sweep_splits(&git);
 
         // 3. Appended: a failure warns and the request stands.
@@ -175,29 +184,31 @@ impl Connection {
         }
     }
 
-    /// The record of this connection ended at `end_us` with `outcome`, its time split by
-    /// `split` (the M17 design §6).
+    /// The record of this connection, `whole_us` long by the monotonic clock and ended with
+    /// `outcome`, its time split by `split` (the M17 design §6).
     fn record(
         &self,
         who: &Identity,
         side: Side,
         split: Option<Split>,
-        end_us: u64,
+        whole_us: u64,
         outcome: &Result<Served, OpError>,
     ) -> ServeRecord {
         // 1. The service and the split: a fetch's mark is its pack's first byte, a push's
-        //    its check's start; without one, the whole connection prepared.
+        //    its check's start; without one, the whole connection prepared. The mark is a
+        //    hook's wall clock against the start's, so it is held within the length: a clock
+        //    stepped in between moves the split, and the two times still add up.
         let at = self.start_us / US_PER_MS;
         let fallback = match side {
             Side::Fetch => ServeService::Fetch,
             Side::Push => ServeService::Push,
         };
         let mut record = ServeRecord::new(at, who.agent(), fallback);
-        let whole = ms(end_us.saturating_sub(self.start_us));
-        record.prepare_ms = whole;
+        record.prepare_ms = ms(whole_us);
         if let Some(split) = split {
-            let before = ms(split.mark_us.saturating_sub(self.start_us));
-            let after = ms(end_us.saturating_sub(split.mark_us));
+            let before_us = split.mark_us.saturating_sub(self.start_us).min(whole_us);
+            let before = ms(before_us);
+            let after = ms(whole_us - before_us);
             let (prepare, send) = match split.service {
                 ServeService::Push => (after, before),
                 _ => (before, after),
@@ -212,16 +223,16 @@ impl Connection {
         // 2. How it ended: git's exit, or the refusal's. receive-pack exits 0 though a hook
         //    refused, so a refusal its split names gives its code's exit.
         match outcome {
-            Ok(served) => record.exit = served.exit,
+            Ok(served) => record.exit = Some(served.exit),
             Err(e) => {
-                record.exit = e.exit;
+                record.exit = Some(e.exit);
                 record.code = code_of(&e.code);
             }
         }
-        if record.exit == 0
+        if record.exit == Some(0)
             && let Some(code) = record.code
         {
-            record.exit = code.exit();
+            record.exit = Some(code.exit());
         }
         record
     }
@@ -311,6 +322,7 @@ fn ms(us: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::time::Instant;
 
     use swarmops_api::{ErrorCode, Identity, OpError, ServeRecord, ServeService};
 
@@ -332,6 +344,7 @@ mod tests {
         Connection {
             id: "0123456789abcdef".to_owned(),
             start_us: 1_000_000,
+            started: Instant::now(),
         }
     }
 
@@ -342,7 +355,7 @@ mod tests {
         let connection = at_one_second();
         let served = Ok(Served::new(0));
         let sent = Split::sent(1_200_000, 77, ServeService::Clone);
-        let fetch = connection.record(&ada(), Side::Fetch, Some(sent), 1_500_000, &served);
+        let fetch = connection.record(&ada(), Side::Fetch, Some(sent), 500_000, &served);
         assert_eq!(
             (
                 fetch.at,
@@ -354,7 +367,7 @@ mod tests {
             (1_000, ServeService::Clone, 200, 300, 77)
         );
         let pushed = Split::pushed(1_200_000, 9, None);
-        let push = connection.record(&ada(), Side::Push, Some(pushed), 1_500_000, &served);
+        let push = connection.record(&ada(), Side::Push, Some(pushed), 500_000, &served);
         assert_eq!(
             (push.service, push.prepare_ms, push.send_ms, push.bytes),
             (ServeService::Push, 300, 200, 9)
@@ -365,12 +378,49 @@ mod tests {
     #[test]
     fn an_unsplit_refusal_is_all_prepare() {
         let refused = Err(OpError::new(ErrorCode::Auth, "no"));
-        let record = at_one_second().record(&ada(), Side::Fetch, None, 1_250_000, &refused);
+        let record = at_one_second().record(&ada(), Side::Fetch, None, 250_000, &refused);
         let mut expected = ServeRecord::new(1_000, "person/ada", ServeService::Fetch);
         expected.prepare_ms = 250;
-        expected.exit = ErrorCode::Auth.exit();
+        expected.exit = Some(ErrorCode::Auth.exit());
         expected.code = Some(ErrorCode::Auth);
         assert_eq!(record, expected);
+    }
+
+    /// A wall clock stepped between the parent's start and a hook's mark moves the split, never
+    /// the whole: the two times add up to the 500 ms the parent's monotonic clock measured,
+    /// whether the mark reads before the start or past the end.
+    #[test]
+    fn a_stepped_clock_keeps_the_whole() {
+        let connection = at_one_second();
+        let served = Ok(Served::new(0));
+        for (mark_us, prepare, send) in [(400_000, 0, 500), (9_000_000, 500, 0)] {
+            let sent = Split::sent(mark_us, 77, ServeService::Clone);
+            let record = connection.record(&ada(), Side::Fetch, Some(sent), 500_000, &served);
+            assert_eq!(
+                (record.prepare_ms, record.send_ms),
+                (prepare, send),
+                "a mark at {mark_us} µs"
+            );
+        }
+    }
+
+    /// A line without `exit`, which no `serve` writes, reads as an unknown exit, never as 0,
+    /// a success; a written record names its exit.
+    #[test]
+    fn an_absent_exit_is_unknown() {
+        let line = r#"{"at":1,"identity":"person/ada","service":"fetch"}"#;
+        let read: ServeRecord = serde_json::from_str(line).unwrap();
+        let exit = serde_json::to_value(read.exit).unwrap();
+        assert_eq!(
+            exit,
+            serde_json::Value::Null,
+            "an absent exit read as {exit}"
+        );
+
+        let served = Ok(Served::new(0));
+        let record = at_one_second().record(&ada(), Side::Fetch, None, 250_000, &served);
+        let written = serde_json::to_value(&record).unwrap();
+        assert_eq!(written["exit"], 0, "{written}");
     }
 
     /// A second pack on one connection adds its bytes to the split; the first's first byte
@@ -429,7 +479,7 @@ mod tests {
         record.prepare_ms = 12;
         record.send_ms = 34;
         record.bytes = 56;
-        record.exit = 1;
+        record.exit = Some(1);
         record.code = Some(ErrorCode::Auth);
 
         // 2. Appended twice: two whole lines, the same bytes as before the move.
